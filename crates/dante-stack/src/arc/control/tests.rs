@@ -459,6 +459,15 @@ fn an_rx_flow_page_reads_the_slot_rate_latency_and_channels() {
             assert!(p.items.is_empty(), "cut at {end}: {p:?}");
         }
     }
+    // The second item is read at its own place: the first points past the
+    // body, the second at the flow.
+    let mut two = ONE_FLOW_PAGE.to_vec();
+    two[1] = 2;
+    two[2..4].copy_from_slice(&0xfff0u16.to_be_bytes());
+    two[4..6].copy_from_slice(&0x0054u16.to_be_bytes());
+    let page = rx_flow_page(STATUS_OK, &two).expect("a page");
+    assert_eq!((page.count, page.items.len()), (2, 1));
+    assert_eq!(page.items[0].slot, 1);
     // A channel bit in the second word is channel 17 up.
     let mut high = ONE_FLOW_PAGE.to_vec();
     high[68 - 10 + 2..68 - 10 + 4].copy_from_slice(&0x8001u16.to_be_bytes());
