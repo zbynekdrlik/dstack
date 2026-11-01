@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 iemmixer contributors.
 
-//! The device binary's command line (`--help`: [`super::usage`]), Linux
-//! only, as a library function: Cargo never builds a dependency's binaries,
+//! The device binary's command line (`--help`: [`super::usage`]), on
+//! Linux and Windows (Windows has no control socket, so `ctl` refuses
+//! there), as a library function: Cargo never builds a dependency's binaries,
 //! so each application keeps a thin binary that calls [`main`] with its own
 //! [`Build`] (dstack's `dante-stack-dev`, iemmixer's `iem-dante-dev`).
 //!
@@ -15,7 +16,10 @@
 //! interface without a usable MAC. `clock` and `ctl` are
 //! described in [`super::usage`].
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::Write;
+#[cfg(unix)]
+use std::io::{BufRead, BufReader};
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::process::ExitCode;
@@ -30,6 +34,7 @@ use tracing::error;
 use tracing_subscriber::EnvFilter;
 
 /// How long `ctl` waits for the device's answer.
+#[cfg(unix)]
 const CTL_WAIT: Duration = Duration::from_secs(5);
 
 pub fn main(build: Build) -> ExitCode {
@@ -189,8 +194,17 @@ fn card(name: &str, args: &[String]) -> ExitCode {
     }
 }
 
+/// `ctl` on Windows: no control socket there (dasio's tray reads the
+/// device's shared memory), exit 1.
+#[cfg(windows)]
+fn ctl_request(name: &str, _path: &Path, _request: &str) -> ExitCode {
+    eprintln!("{name} ctl: Windows has no control socket");
+    ExitCode::from(1)
+}
+
 /// `ctl`: one request line to the control socket at `path`, its answer
 /// line on stdout (exit 0 for `ok` or the status, 1 otherwise).
+#[cfg(unix)]
 fn ctl_request(name: &str, path: &Path, request: &str) -> ExitCode {
     let exchange = || -> std::io::Result<String> {
         let mut stream = UnixStream::connect(path)?;

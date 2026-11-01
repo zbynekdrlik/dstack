@@ -2,6 +2,7 @@
 
 ## 0.4.34 (2026-11-02)
 
+- `dante-stack-dev` runs on Windows too: `clock`, `card` and the device. `ctl` refuses there, because Windows has no control socket. v0.4.33's Windows release binary was a stub that printed "runs on Linux only"; `daemon::cli` now builds on Linux and Windows.
 - `CLAUDE.md`: all Dante PTP code is dsync's, one maintainer (owner, 2.11.2026). The stack writes no PTP of its own; its media clock comes from the dantesync service today, and from dsync's embeddable library (dsync#136) in the app's own process when that exists. No code change.
 
 ## 0.4.33 (2026-11-02)
