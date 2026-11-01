@@ -104,6 +104,17 @@ impl Directory {
         &self.channels
     }
 
+    /// The device's encoding: the bits per sample every channel shares
+    /// (Dante sets it per device). `None` without a channel, or when two
+    /// channels differ.
+    pub fn encoding(&self) -> Option<u32> {
+        let first = self.channels.first()?.bits;
+        self.channels
+            .iter()
+            .all(|c| c.bits == first)
+            .then_some(first)
+    }
+
     /// The channels with a name of their own.
     pub fn named(&self) -> usize {
         self.channels.iter().filter(|c| c.name.is_some()).count()

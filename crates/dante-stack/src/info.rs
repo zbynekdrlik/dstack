@@ -104,6 +104,7 @@ use crate::media::tx::TxShared;
 use crate::subscribe::Manager;
 use limit::Limit;
 
+pub mod client;
 pub mod limit;
 
 /// The info request port (UDP), at the device's address.
@@ -292,7 +293,9 @@ pub fn board_info_body(id: &Identity) -> [u8; BOARD_INFO_LEN] {
 }
 
 /// The product info: the manufacturer (8 bytes at 0, 16 at 0x2c), the
-/// board name (8 at 8), the version at 0x1c, the model name (16 at 0xac).
+/// board name (8 at 8), the version at 0x1c (inferno's: the manufacturer
+/// firmware version) and at 0x12c (the product version netaudio and
+/// Dante Controller show, [`client`]), the model name (16 at 0xac).
 pub fn product_info_body(id: &Identity) -> [u8; PRODUCT_INFO_LEN] {
     let mut c = [0u8; PRODUCT_INFO_LEN];
     put_str(&mut c, 0x00, 8, &id.manufacturer);
@@ -300,6 +303,7 @@ pub fn product_info_body(id: &Identity) -> [u8; PRODUCT_INFO_LEN] {
     c[0x1c..0x20].copy_from_slice(&id.version);
     put_str(&mut c, 0x2c, 16, &id.manufacturer);
     put_str(&mut c, 0xac, 16, &id.model);
+    c[0x12c..0x130].copy_from_slice(&id.version);
     c
 }
 

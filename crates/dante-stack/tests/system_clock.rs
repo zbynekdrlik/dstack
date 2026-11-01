@@ -505,6 +505,58 @@ fn control_subscribes_our_running_device_and_ends_it() {
     assert!(matches!(stopped, host::Stopped::Done), "{stopped:?}");
 }
 
+/// The 8700 client over the real info group against our own running
+/// device: its product and board info, by its device id; and its
+/// encoding from its TX channels (dstack#16 step 4).
+#[test]
+fn the_info_client_reads_our_running_device_s_model_and_versions() {
+    use dante_stack::arc::client::{REPLY_TIMEOUT, Udp, read_directory};
+    use dante_stack::info::client::{board_info, product_info};
+    use std::net::SocketAddrV4;
+    use std::sync::atomic::AtomicU16;
+
+    let _one = ONE_DEVICE.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = tempfile::tempdir().unwrap();
+    let ip = routed_ipv4();
+    let opts = Options {
+        config: config_in(dir.path(), true),
+        place: Place::Ip(ip),
+        control: dir.path().join("control.sock"),
+    };
+    let prepared = host::prepare_with(&opts, &[], ClockSource::System).expect("the device set up");
+    let cfg = prepared.config().clone();
+    let id = dante_stack::cmc::device_id(ip, cfg.process_id);
+    let stop = Arc::new(AtomicBool::new(false));
+    let host = prepared
+        .start(Signals::Report(Arc::clone(&stop)))
+        .expect("the device started");
+    let product = product_info(ip, ip, Some(id), Duration::from_secs(5));
+    let board = board_info(ip, ip, Some(id), Duration::from_secs(5));
+    let other = product_info(ip, ip, Some([0xee; 8]), Duration::from_millis(500));
+    let seq = AtomicU16::new(1);
+    let requests = dante_stack::ctl::Requests::default();
+    let halt = AtomicBool::new(false);
+    let to = SocketAddrV4::new(ip, dante_stack::arc::PORT);
+    let mut udp = Udp::open(ip, to, &seq, REPLY_TIMEOUT, &requests, &halt).expect("a socket");
+    let directory = read_directory(&mut udp);
+    let stopped = host.stop(Duration::from_secs(5));
+    let product = product.expect("the product info");
+    assert_eq!(product.manufacturer, cfg.manufacturer);
+    assert_eq!(product.model, cfg.model);
+    let version = env!("CARGO_PKG_VERSION");
+    assert_eq!(product.version.unwrap().to_string(), version);
+    let board = board.expect("the board info");
+    assert_eq!(board.model, cfg.model);
+    assert!(board.software.is_some(), "{board:?}");
+    assert!(
+        other.is_err(),
+        "another device id answers nothing: {other:?}"
+    );
+    let directory = directory.expect("the TX channels read");
+    assert_eq!(directory.encoding(), Some(u32::from(cfg.encoding)));
+    assert!(matches!(stopped, host::Stopped::Done), "{stopped:?}");
+}
+
 #[test]
 fn a_direct_instance_query_reads_our_running_device_s_channel_record() {
     use dante_stack::subscribe::instance::Instances;
