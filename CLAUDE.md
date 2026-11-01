@@ -13,6 +13,10 @@ Start from `docs/HANDOVER.md`, then `docs/design/2026-10-30-shared-dante-stack.m
 - Public repo: no site data. Addresses and real device or channel names live only in `~/.config/dstack/`.
 - dantesync is the only clock owner on a PC; the stack never opens UDP 319/320.
 - dsync (dantesync, repo zbynekdrlik/dsync) is its own project, and its only peer is dstack. Every request to dsync from another project comes through dstack, and dstack decides it. Audio stability outranks video (owner 1.11.2026, airuleset#1280).
+- The connection model (owner 1.11.2026), one for every consumer:
+  - Every application carries its own Dante connector in process and appears on the Dante network as a device of its own, under its own name. Several devices on one PC is normal. It receives, and sends when needed. This covers SongPlayer, OBS, the intercom and whatever comes next, on the `normal` timing profile, where about 10 ms is fine. No shared memory, no central device feeding several apps, no relaying between apps.
+  - Exception for ASIO hosts (Ableton): dasio, also several instances on one PC.
+  - Exception for iemmixer: the lowest-latency tier (gen3, the `low_latency` profile, the kernel fast path).
 - Never change another device's subscriptions without the owner's approval. Tests subscribe our own device to itself.
 - Every message to the owner in Slovak; code, commits and docs in English.
 
