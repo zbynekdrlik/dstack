@@ -17,7 +17,9 @@
 //! our own device [`crate::arc::MAX_FLOWS`] (both records since v0.4.20). No device sends a histogram:
 //! Dante Controller bins the per-second peaks against each flow's latency
 //! (ARC 0x3200, [`crate::arc::control::rx_flows`]), slot `n` at index
-//! `n - 1`. [`listen`] gathers one device's records for a while;
+//! `n - 1`. [`listen`] gathers the records of the devices at one address
+//! for a while, apart by the header's device id (bytes 8-15: several of
+//! our devices share an address on their own ports, dasio 1.11);
 //! [`histogram`] bins the peaks.
 
 use std::collections::BTreeMap;
@@ -35,6 +37,8 @@ pub const LATE: u16 = 0x8004;
 /// One heartbeat's latency records.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Beat {
+    /// The sender's device id (header bytes 8-15).
+    pub device_id: [u8; 8],
     /// 0x8003: the rate and each slot's largest lateness that second,
     /// samples.
     pub lateness: Option<(u32, Vec<u32>)>,
@@ -73,7 +77,10 @@ pub fn parse(datagram: &[u8]) -> Option<Beat> {
     if u16_at(head, 0)? != START_HEARTBEAT || head[24..32] != op::HEARTBEAT {
         return None;
     }
-    let mut beat = Beat::default();
+    let mut beat = Beat {
+        device_id: head[8..16].try_into().ok()?,
+        ..Beat::default()
+    };
     let mut at = HEADER_LEN;
     while let (Some(len), Some(kind)) = (u16_at(datagram, at), u16_at(datagram, at + 2)) {
         let len = usize::from(len);
@@ -107,6 +114,8 @@ pub struct SlotLatency {
 /// What a listen heard from one device.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Latency {
+    /// The device's id (its heartbeats' header bytes 8-15).
+    pub device_id: [u8; 8],
     /// Heartbeats heard.
     pub beats: u32,
     /// The rate the last lateness record gave.
@@ -118,6 +127,7 @@ pub struct Latency {
 /// Gathers one device's heartbeats.
 #[derive(Debug, Default)]
 pub struct Gather {
+    device_id: [u8; 8],
     beats: u32,
     rate: u32,
     peaks: BTreeMap<u16, Vec<u32>>,
@@ -127,6 +137,7 @@ pub struct Gather {
 impl Gather {
     /// Adds one heartbeat's records.
     pub fn add(&mut self, beat: &Beat) {
+        self.device_id = beat.device_id;
         self.beats += 1;
         if let Some((rate, lateness)) = &beat.lateness {
             self.rate = *rate;
@@ -156,6 +167,7 @@ impl Gather {
         slots.sort_unstable();
         slots.dedup();
         Latency {
+            device_id: self.device_id,
             beats: self.beats,
             rate: self.rate,
             slots: slots
@@ -174,6 +186,24 @@ impl Gather {
     }
 }
 
+/// Gathers the heartbeats of several devices, apart by device id.
+#[derive(Debug, Default)]
+pub struct Heard {
+    devices: BTreeMap<[u8; 8], Gather>,
+}
+
+impl Heard {
+    /// Adds one heartbeat to its device's gather.
+    pub fn add(&mut self, beat: &Beat) {
+        self.devices.entry(beat.device_id).or_default().add(beat);
+    }
+
+    /// Each device's gather, by device id.
+    pub fn result(&self) -> Vec<Latency> {
+        self.devices.values().map(Gather::result).collect()
+    }
+}
+
 /// The peaks `peaks_us` binned by `edges_us` (ascending): bin `k` counts
 /// the peaks at most `edges_us[k]` and over the edge before it; the last
 /// bin, the peaks over the last edge.
@@ -185,12 +215,13 @@ pub fn histogram(peaks_us: &[u32], edges_us: &[u32]) -> Vec<u64> {
     bins
 }
 
-/// Listens on `our` address's network for `window` to the heartbeats of
-/// the device at `device`, gathering its latency records. The socket
-/// shares the heartbeat port with any other listener on the host (our own
-/// device sends there, it does not listen). An error only when the socket
-/// cannot be made or joined; a device that sends nothing gives 0 beats.
-pub fn listen(our: Ipv4Addr, device: Ipv4Addr, window: Duration) -> io::Result<Latency> {
+/// Listens on `our` address's network for `window` to the heartbeats from
+/// the address `device`, gathering each device's latency records there
+/// (one entry per device id, in id order). The socket shares the heartbeat
+/// port with any other listener on the host (our own device sends there,
+/// it does not listen). An error only when the socket cannot be made or
+/// joined; an address that sends nothing gives no entry.
+pub fn listen(our: Ipv4Addr, device: Ipv4Addr, window: Duration) -> io::Result<Vec<Latency>> {
     let sock = socket2::Socket::new(
         socket2::Domain::IPV4,
         socket2::Type::DGRAM,
@@ -202,7 +233,7 @@ pub fn listen(our: Ipv4Addr, device: Ipv4Addr, window: Duration) -> io::Result<L
     sock.bind(&SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, HEARTBEAT_PORT).into())?;
     sock.join_multicast_v4(&HEARTBEAT_GROUP, &our)?;
     let sock: UdpSocket = sock.into();
-    let mut gather = Gather::default();
+    let mut heard = Heard::default();
     let end = Instant::now() + window;
     let mut buf = [0u8; 2048];
     while let Some(left) = end
@@ -213,7 +244,7 @@ pub fn listen(our: Ipv4Addr, device: Ipv4Addr, window: Duration) -> io::Result<L
         match sock.recv_from(&mut buf) {
             Ok((n, SocketAddr::V4(from))) if *from.ip() == device => {
                 if let Some(beat) = parse(&buf[..n]) {
-                    gather.add(&beat);
+                    heard.add(&beat);
                 }
             }
             Ok(_) => {}
@@ -228,7 +259,7 @@ pub fn listen(our: Ipv4Addr, device: Ipv4Addr, window: Duration) -> io::Result<L
             Err(e) => return Err(e),
         }
     }
-    Ok(gather.result())
+    Ok(heard.result())
 }
 
 #[cfg(test)]

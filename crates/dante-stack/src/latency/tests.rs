@@ -3,6 +3,11 @@ use crate::info::{Records, heartbeat_body};
 
 /// A heartbeat datagram with `body`, from device id 1.
 fn datagram(body: &[u8]) -> Vec<u8> {
+    datagram_from([0, 0, 0, 0, 0, 0, 0, 1], body)
+}
+
+/// A heartbeat datagram with `body`, from device id `id`.
+fn datagram_from(id: [u8; 8], body: &[u8]) -> Vec<u8> {
     let mut d = Vec::new();
     d.extend_from_slice(&START_HEARTBEAT.to_be_bytes());
     d.extend_from_slice(
@@ -10,7 +15,8 @@ fn datagram(body: &[u8]) -> Vec<u8> {
             .unwrap()
             .to_be_bytes(),
     );
-    d.extend_from_slice(&[0, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+    d.extend_from_slice(&[0, 7, 0, 0]);
+    d.extend_from_slice(&id);
     d.extend_from_slice(b"Audinate");
     d.extend_from_slice(&op::HEARTBEAT);
     d.extend_from_slice(body);
@@ -80,6 +86,11 @@ fn our_own_heartbeat_reads_back() {
 
 #[test]
 fn only_a_heartbeat_parses_and_a_bad_record_is_left_out() {
+    // A heartbeat without a record that reads: its sender, nothing else.
+    let empty = Beat {
+        device_id: [0, 0, 0, 0, 0, 0, 0, 1],
+        ..Beat::default()
+    };
     let good = datagram(&hardware_records(&[1], &[2]));
     assert!(parse(&good).is_some());
     assert_eq!(
@@ -93,7 +104,7 @@ fn only_a_heartbeat_parses_and_a_bad_record_is_left_out() {
     let mut other = good.clone();
     other[31] = 1;
     assert_eq!(parse(&other), None, "another opcode");
-    assert_eq!(parse(&datagram(&[])), Some(Beat::default()), "no records");
+    assert_eq!(parse(&datagram(&[])), Some(empty.clone()), "no records");
     // A record whose values pass it: left out, the next one still read.
     let mut records = hardware_records(&[1], &[2]);
     records[12..14].copy_from_slice(&0x7fu16.to_be_bytes());
@@ -103,11 +114,11 @@ fn only_a_heartbeat_parses_and_a_bad_record_is_left_out() {
     // A record longer than the datagram ends the walk.
     let mut long = hardware_records(&[1], &[2]);
     long[0..2].copy_from_slice(&0x7fffu16.to_be_bytes());
-    assert_eq!(parse(&datagram(&long)), Some(Beat::default()));
+    assert_eq!(parse(&datagram(&long)), Some(empty.clone()));
     // A length under 4 ends it too.
     let mut tiny = hardware_records(&[1], &[2]);
     tiny[0..2].copy_from_slice(&3u16.to_be_bytes());
-    assert_eq!(parse(&datagram(&tiny)), Some(Beat::default()));
+    assert_eq!(parse(&datagram(&tiny)), Some(empty.clone()));
     // A record of only its 4-byte length and type is stepped over.
     let mut bare = vec![0x00, 0x04, 0x80, 0x07];
     bare.extend(hardware_records(&[6], &[8]));
@@ -126,6 +137,7 @@ fn a_gather_turns_samples_into_us_and_counts_late_packets_in_the_window() {
     let beat = |lateness: Vec<u32>, late: Vec<u32>| Beat {
         lateness: Some((96_000, lateness)),
         late: Some(late),
+        ..Beat::default()
     };
     g.add(&beat(vec![96, 24], vec![1_000, 5]));
     g.add(&beat(vec![960, 0], vec![1_024, 5]));
@@ -155,6 +167,7 @@ fn a_gather_turns_samples_into_us_and_counts_late_packets_in_the_window() {
     g.add(&Beat {
         lateness: None,
         late: Some(vec![7, 0, 1]),
+        ..Beat::default()
     });
     let got = g.result();
     assert_eq!((got.beats, got.rate, got.slots.len()), (1, 0, 3));
@@ -169,6 +182,7 @@ fn a_gather_turns_samples_into_us_and_counts_late_packets_in_the_window() {
     g.add(&Beat {
         lateness: Some((0, vec![5])),
         late: None,
+        ..Beat::default()
     });
     assert_eq!(g.result().slots[0].peaks_us, [5_000_000]);
 }
@@ -182,4 +196,27 @@ fn a_histogram_bins_each_peak_once() {
         [2, 2, 2, 2]
     );
     assert_eq!(histogram(&[3, 9], &[]), [2]);
+}
+
+/// dasio (1.11): two of our devices on one address (own ports, own device
+/// ids). Their heartbeats came from the same IP and mixed in one gather.
+#[test]
+fn two_devices_on_one_address_are_heard_apart_by_their_device_id() {
+    let one = [0, 0, 10, 77, 7, 114, 0, 0];
+    let two = [0, 0, 10, 77, 7, 114, 0, 1];
+    let mut heard = Heard::default();
+    for (id, peak, late) in [(one, 13, 0), (two, 960, 5), (one, 12, 0), (two, 96, 9)] {
+        let beat = parse(&datagram_from(id, &hardware_records(&[peak], &[late]))).unwrap();
+        assert_eq!(beat.device_id, id);
+        heard.add(&beat);
+    }
+    let got = heard.result();
+    assert_eq!(got.len(), 2, "{got:?}");
+    assert_eq!((got[0].device_id, got[0].beats), (one, 2));
+    assert_eq!(got[0].slots[0].peaks_us, [135, 125]);
+    assert_eq!((got[0].slots[0].late, got[0].slots[0].late_total), (0, 0));
+    assert_eq!((got[1].device_id, got[1].beats), (two, 2));
+    assert_eq!(got[1].slots[0].peaks_us, [10_000, 1_000]);
+    assert_eq!((got[1].slots[0].late, got[1].slots[0].late_total), (4, 9));
+    assert_eq!(Heard::default().result(), []);
 }
