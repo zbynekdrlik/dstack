@@ -34,7 +34,7 @@ exclude_re = [
   # The 8700 client's group socket and its wrappers: tests/system_clock.rs
   # reads our running device through the real info group with them; the
   # request, the reply match, the parses and `ask` are unit tested.
-  "info/client.rs.*(group_socket|on_group|product_info|board_info|clock_status|network_info)",
+  "info/client.rs.*(replace|in) (group_socket|on_group|product_info|board_info|clock_status|network_info|sample_rate|set_sample_rate|set_encoding)\\b",
   "ask_realtime",
   # Log-only: the qdisc verdict is tested in qdisc::check.
   "qdisc.rs.*report",
