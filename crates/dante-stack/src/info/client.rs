@@ -52,6 +52,7 @@
 use std::fmt;
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::{Duration, Instant};
 
 use super::{HEADER_LEN, INFO_GROUP, INFO_PORT, REQUEST_PORT, START_INFO, VENDOR};
@@ -61,6 +62,11 @@ const RECV_BUFFER: usize = 2048;
 /// Brooklyn card drops a board-info request asked right after another
 /// (netaudio sends it three times; dcontroller found it on the site).
 pub const RESEND: Duration = Duration::from_millis(250);
+/// The requests' sequence, a new one for every request sent (a resend
+/// too), as Dante Controller numbers its own: a Brooklyn card drops a
+/// request whose sequence it has just answered (dcontroller and netaudio's
+/// trace, 1.11.2026).
+static SEQ: AtomicU16 = AtomicU16::new(1);
 
 /// Where a name ends: its field's end or its first zero.
 const PRODUCT_MANUFACTURER: (usize, usize) = (0x2c, 0xac);
@@ -353,7 +359,8 @@ pub fn parse_clock(body: &[u8]) -> Option<ClockStatus> {
 }
 
 /// Sends the request for `ask` from `sock` to `device` (a device's
-/// [`REQUEST_PORT`]), and again every [`RESEND`] until its reply comes,
+/// [`REQUEST_PORT`]), and again every [`RESEND`] until its reply comes
+/// (each with a sequence of its own),
 /// for up to `wait` in all: its reply from that address, any port (and the
 /// device id `id`, when given); the reply's body. Other datagrams on
 /// `sock` are skipped.
@@ -378,7 +385,9 @@ pub fn ask(
             return Err(InfoError::Timeout { ask });
         }
         if now >= next {
-            sock.send_to(&request(1, [0; 8], ask), device).map_err(io)?;
+            let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+            sock.send_to(&request(seq, [0; 8], ask), device)
+                .map_err(io)?;
             next = now + RESEND;
         }
         sock.set_read_timeout(Some(deadline.min(next) - now))
