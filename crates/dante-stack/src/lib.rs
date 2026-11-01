@@ -95,6 +95,7 @@ pub mod ctl;
 pub mod daemon;
 pub mod device;
 pub mod discover;
+pub mod embed;
 pub mod flows;
 pub mod health;
 #[cfg(any(target_os = "linux", windows))]

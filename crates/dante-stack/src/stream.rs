@@ -130,6 +130,18 @@ pub struct Timing {
 }
 
 impl Timing {
+    /// The pump's timing for the device `cfg`: its `block`, its latency in
+    /// whole samples ([`crate::clock::latency_samples`], as the RX reads
+    /// its playout point), its `work_margin`. One place, so a host's pump
+    /// cannot read a sample off the RX's playout point.
+    pub fn of(cfg: &crate::device::DeviceConfig) -> Timing {
+        Timing {
+            block: cfg.block,
+            playout: crate::clock::latency_samples(cfg.latency_ns, cfg.sample_rate),
+            margin: cfg.work_margin,
+        }
+    }
+
     /// D = B + P + W: an output stamped T is the input stamped T − D.
     pub fn offset(&self) -> u64 {
         self.block + self.playout + self.margin
