@@ -211,10 +211,16 @@ pub struct RxChannel {
 }
 
 impl RxChannel {
-    /// The status, when its code is one the stack knows (inferno's codes,
-    /// which our own server sends).
+    /// The subscription status: the word's low 16 bits, when Dante's table
+    /// holds them (`None` when not subscribed).
     pub fn sub_status(&self) -> Option<SubStatus> {
         SubStatus::from_code(self.status)
+    }
+
+    /// The receiver detail: the word's high 16 bits (`0x0101` connected;
+    /// real devices also give `0x0301` while receiving, meaning unknown).
+    pub fn receiver_detail(&self) -> u16 {
+        crate::subscribe::sub_status::receiver_detail(self.status)
     }
 }
 

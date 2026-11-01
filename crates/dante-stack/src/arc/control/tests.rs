@@ -295,6 +295,28 @@ fn an_rx_page_reads_the_status_s_two_halves_and_names_by_offset() {
 }
 
 #[test]
+fn an_rx_channel_names_a_hardware_transmitter_s_receiving_word() {
+    // dstack #44: the word real transmitters give a receiving channel.
+    let ch = RxChannel {
+        channel: 1,
+        label: "In 1".to_string(),
+        tx_channel: Some("Out 1".to_string()),
+        tx_device: Some("other".to_string()),
+        status: 0x0301_0009,
+    };
+    assert_eq!(
+        ch.sub_status(),
+        Some(crate::subscribe::SubStatus::Receiving)
+    );
+    assert_eq!(ch.receiver_detail(), 0x0301);
+    let own = RxChannel {
+        status: 0x0101_0009,
+        ..ch.clone()
+    };
+    assert_eq!(own.receiver_detail(), 0x0101);
+}
+
+#[test]
 fn an_rx_page_counts_a_channel_0_and_does_not_list_it() {
     // [slots 2, count 2]: channel 0, then channel 1, both with a name.
     let names = 2 + 2 * RX_ITEM;

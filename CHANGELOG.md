@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.18 (2026-11-01)
+
+- `SubStatus` names every subscription status Dante Controller shows: netaudio 0.4.2's table of 47, plus inferno's `1` (unresolved). Each status has a label as Dante Controller words it (`label`), Dante's name (`dante_name`) and a state for a controller (`SubState`: idle, pending, connected, error).
+- The RX channel's status word has two halves. The low 16 bits are the subscription status (`SubStatus::from_code`), the high 16 bits a receiver detail (`RxChannel::receiver_detail`).
+- On the site network, dcontroller saw `0x03010009` on 42 channels from hardware transmitters. It is status 9 ("Subscribed (unicast)", audio flowing) with receiver detail `0x0301`, so it now reads as `Receiving`.
+- `0x4` reads as `SubscribedSelf` ("Subscribed (self)").
+- The words our own server lists do not change (dstack #44).
+
 ## 0.4.17 (2026-11-01)
 
 - Fix: a new device name in the config takes effect at start. Before, the state file's name won silently, so a rename through the config needed a restart to discover it (iemmixer, 1.11). The state now records the config's name it was made with (`config_name`). A config whose name changed since then renames the device, and our own subscriptions to our own TX follow, as with a Dante Controller rename. The state is saved at once, with one info line. A Dante Controller rename under an unchanged config stays across restarts, with one info line at start naming both names. A state file written before the record keeps its name and warns at start when it is not the config's (dstack #1).
