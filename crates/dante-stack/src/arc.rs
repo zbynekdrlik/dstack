@@ -21,7 +21,7 @@
 //! |        | announced, our own subscriptions to it renamed |
 //! | 0x1002 | the device name |
 //! | 0x1003 | the device names: current, factory, board, revision |
-//! | 0x1100 | with start code 0x2809 (netaudio's keyed read, [`control::settings`]): each key asked, in its order, that we hold ([`settings_body`]); any other start code (Dante Controller's 0x27ff): zeros, as inferno |
+//! | 0x1100 | with start code 0x2809 (netaudio's keyed read, [`control::settings`]): each key asked, in its order, that we hold (`settings_body`); any other start code (Dante Controller's 0x27ff): zeros, as inferno |
 //! | 0x1102 | zeros, as inferno answers Dante Controller |
 //! | 0x2000 | TX channels with their default names, paged |
 //! | 0x2010 | TX channels' current names, paged |
@@ -69,7 +69,7 @@
 //! `0x8112`, once an item has brought it to [`SOFT_LIMIT`] bytes: that
 //! item's descriptor is written but not counted (inferno), so the next page
 //! starts with it. Every page fits one datagram
-//! ([`MAX_DATAGRAM`](crate::wire::MAX_DATAGRAM)): no item is longer than
+//! ([`MAX_DATAGRAM`]): no item is longer than
 //! 600 bytes (a TX flow's names are cut to [`MAX_REMOTE_NAME`], ours are 31
 //! at most). Logs name opcodes, sequences and channel numbers, never a
 //! name.
