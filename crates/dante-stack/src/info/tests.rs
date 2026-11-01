@@ -184,7 +184,7 @@ fn the_requests_inferno_answers_are_known_by_their_opcode() {
         ([0x07, 0x3e, 1, 0x61, 0, 0, 0, 0], Kind::Unknown),
         ([0x08, 0x3e, 0, 0x61, 0, 0, 0, 0], Kind::Unknown),
         ([0x07, 0x2a, 0, 0x60, 0, 0, 0, 0], Kind::Unknown),
-        ([0x07, 0x2a, 0, 0x81, 0, 0, 0, 0x64], Kind::Unknown),
+        ([0x07, 0x2a, 0, 0x99, 0, 0, 0, 0x64], Kind::Unknown),
         ([0; 8], Kind::Unknown),
     ];
     for (opcode, kind) in cases {
@@ -386,7 +386,7 @@ fn clock_stats_and_unknown_requests_get_no_reply_and_use_no_sequence() {
         None
     );
     assert_eq!(
-        mc.answer(&asking([0x07, 0x38, 0x00, 0x81, 0, 0, 0, 0x64])),
+        mc.answer(&asking([0x07, 0x38, 0x00, 0x99, 0, 0, 0, 0x64])),
         None
     );
     assert_eq!(mc.answer(&captured()[..31]), None);
@@ -513,7 +513,7 @@ async fn the_server_says_who_it_is_answers_to_the_info_group_and_beats() {
     // An unknown request and a short datagram get nothing; the captured
     // request gets the board info, on the info group, not to its sender.
     let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    let unknown = asking([0x07, 0x38, 0x00, 0x81, 0, 0, 0, 0x64]);
+    let unknown = asking([0x07, 0x38, 0x00, 0x99, 0, 0, 0, 0x64]);
     for datagram in [&unknown[..], &captured()[..20], &captured()[..]] {
         peer.send_to(datagram, at).await.unwrap();
     }
@@ -536,7 +536,7 @@ async fn the_server_says_who_it_is_answers_to_the_info_group_and_beats() {
         [
             (REQUEST_PORT, 1, 0x0000, 1),
             (REQUEST_PORT, 1, 0x0061, 1),
-            (REQUEST_PORT, 1, 0x0081, 1)
+            (REQUEST_PORT, 1, 0x0099, 1)
         ]
     );
     assert!(!task.is_finished());
@@ -1201,4 +1201,34 @@ async fn a_member_outlives_a_dead_manager_and_takes_the_port_when_it_frees() {
         .unwrap()
         .expect("the member served on");
     assert_eq!(own.local_addr().unwrap(), std::net::SocketAddr::V4(held));
+}
+
+#[test]
+fn a_sample_rate_read_or_write_gets_our_rate_in_the_hardware_s_layout() {
+    let mut mc = Multicaster::new(identity());
+    let rate = identity().sample_rate;
+    let mut want = vec![0x00, 0x18, 0x00, 0x01];
+    want.extend_from_slice(&rate.to_be_bytes());
+    want.extend_from_slice(&[0, 0, 0, 0, 0x00, 0x02, 0x00, 0x00]);
+    want.extend_from_slice(&rate.to_be_bytes());
+    assert_eq!(sample_rate_body(rate).to_vec(), want);
+    // netaudio's read (zero body) and its write (`1, 48000`): the same
+    // answer, our rate unchanged.
+    let read = asking([0x07, 0x3a, 0x00, 0x81, 0, 0, 0, 0x64]);
+    assert_eq!(parse_request(&read).unwrap().kind, Kind::SampleRate);
+    assert_eq!(
+        mc.answer(&read),
+        Some(packet(0xffff, 1, op::SAMPLE_RATE, &want))
+    );
+    let mut write = asking([0x07, 0x27, 0x00, 0x81, 0, 0, 0, 0x64]);
+    write.extend_from_slice(&[0, 0, 0, 1, 0, 0, 0xbb, 0x80]);
+    assert_eq!(
+        mc.answer(&write),
+        Some(packet(0xffff, 2, op::SAMPLE_RATE, &want))
+    );
+    let parsed = client::parse_sample_rate(&want).unwrap();
+    assert_eq!(
+        (parsed.current, parsed.pending, parsed.supported),
+        (rate, None, vec![rate])
+    );
 }

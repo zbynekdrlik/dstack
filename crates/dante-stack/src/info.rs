@@ -36,6 +36,7 @@
 //! | `07 xx 00 c1 00 00 00 00` | `07 2a 00 c0 00 00 00 00` | product info, 336 bytes ([`product_info_body`]) |
 //! | `07 xx 00 13 00 00 00 xx` | `07 2a 00 11 00 00 00 00` | network info, 64 bytes ([`network_info_body`]) |
 //! | `07 xx 00 77 00 00 00 xx` | `07 2a 00 78 00 00 00 00` | `00 00 00 03 00 00 00 00` |
+//! | `07 xx 00 81 00 00 00 xx` | `07 2a 00 80 00 00 00 00` | our sample rate, 20 bytes ([`sample_rate_body`]); a write gets the same answer, unchanged |
 //! | `07 xx 00 21 00 00 00 xx` | none | clock stats: inferno sends them only with a clock's frequency offset, and phase A has no clock |
 //!
 //! Any other opcode gets no reply and is logged by its opcode; a datagram
@@ -132,6 +133,7 @@ pub mod op {
     pub const BOARD_INFO: [u8; 8] = [0x07, 0x2a, 0x00, 0x60, 0x00, 0x00, 0x00, 0x00];
     pub const PRODUCT_INFO: [u8; 8] = [0x07, 0x2a, 0x00, 0xc0, 0x00, 0x00, 0x00, 0x00];
     pub const NETWORK_INFO: [u8; 8] = [0x07, 0x2a, 0x00, 0x11, 0x00, 0x00, 0x00, 0x00];
+    pub const SAMPLE_RATE: [u8; 8] = [0x07, 0x2a, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00];
     /// The answer to 0x77, whose meaning inferno does not name.
     pub const ANSWER_0077: [u8; 8] = [0x07, 0x2a, 0x00, 0x78, 0x00, 0x00, 0x00, 0x00];
     /// RX channels changed (sent unasked).
@@ -150,6 +152,7 @@ pub mod record {
 pub const BOARD_INFO_LEN: usize = 200;
 pub const PRODUCT_INFO_LEN: usize = 336;
 pub const NETWORK_INFO_LEN: usize = 64;
+pub const SAMPLE_RATE_LEN: usize = 20;
 /// inferno's answer to 0x77.
 const ANSWER_0077_BODY: [u8; 8] = [0, 0, 0, 3, 0, 0, 0, 0];
 /// The board info's firmware, hardware and boot versions (inferno's).
@@ -195,6 +198,8 @@ pub struct Identity {
     pub net: NetInfo,
     /// The process id (the config's; several devices on one address).
     pub process: u16,
+    /// The config's sample rate: the one rate we run and take.
+    pub sample_rate: u32,
 }
 
 impl Identity {
@@ -205,6 +210,7 @@ impl Identity {
             manufacturer: cfg.manufacturer.clone(),
             model: cfg.model.clone(),
             version: product_version(),
+            sample_rate: cfg.sample_rate,
             net,
         }
     }
@@ -232,6 +238,9 @@ pub enum Kind {
     NetworkInfo,
     /// 0x77: answered with [`op::ANSWER_0077`].
     Op0077,
+    /// 0x81: the sample rate, read or written; answered with our rate
+    /// ([`sample_rate_body`]): we run the config's and take no other.
+    SampleRate,
     /// 0x21: clock stats, which a device without a PTP daemon of its own
     /// does not send.
     ClockStats,
@@ -262,6 +271,7 @@ pub fn parse_request(datagram: &[u8]) -> Option<Request> {
         [0x07, _, 0x00, 0x21, 0, 0, 0, _] => Kind::ClockStats,
         [0x07, _, 0x00, 0x13, 0, 0, 0, _] => Kind::NetworkInfo,
         [0x07, _, 0x00, 0x77, 0, 0, 0, _] => Kind::Op0077,
+        [0x07, _, 0x00, 0x81, 0, 0, 0, _] => Kind::SampleRate,
         _ => Kind::Unknown,
     };
     Some(Request { seq, opcode, kind })
@@ -304,6 +314,20 @@ pub fn product_info_body(id: &Identity) -> [u8; PRODUCT_INFO_LEN] {
     put_str(&mut c, 0x2c, 16, &id.manufacturer);
     put_str(&mut c, 0xac, 16, &id.model);
     c[0x12c..0x130].copy_from_slice(&id.version);
+    c
+}
+
+/// The sample rate as the hardware answers a 0x81 read (a Brooklyn
+/// card's layout, [`client::parse_sample_rate`]): `00 18`, the count of
+/// rates (1), our rate in effect, none pending (0), `00 02 00 00`, then the
+/// rates: ours alone.
+pub fn sample_rate_body(rate: u32) -> [u8; SAMPLE_RATE_LEN] {
+    let mut c = [0u8; SAMPLE_RATE_LEN];
+    c[0x00..0x02].copy_from_slice(&0x0018u16.to_be_bytes());
+    c[0x02..0x04].copy_from_slice(&1u16.to_be_bytes());
+    c[0x04..0x08].copy_from_slice(&rate.to_be_bytes());
+    c[0x0c..0x0e].copy_from_slice(&2u16.to_be_bytes());
+    c[0x10..0x14].copy_from_slice(&rate.to_be_bytes());
     c
 }
 
@@ -616,6 +640,10 @@ impl Multicaster {
                 Some(self.packet(START_INFO, op::NETWORK_INFO, &body))
             }
             Kind::Op0077 => Some(self.packet(START_INFO, op::ANSWER_0077, &ANSWER_0077_BODY)),
+            Kind::SampleRate => {
+                let body = sample_rate_body(self.id.sample_rate);
+                Some(self.packet(START_INFO, op::SAMPLE_RATE, &body))
+            }
             Kind::ClockStats => {
                 debug!(op = %opcode, seq = req.seq, "clock stats asked: no PTP daemon of ours, no reply");
                 None

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.32 (2026-11-02)
+
+- New: our device answers the 8700 sample-rate read (0x81) with the hardware's reply (0x80) in a Brooklyn card's layout: our rate in effect, none pending, our rate as the only one supported (`info::sample_rate_body`). A write gets the same answer, unchanged: we run the config's rate. dcontroller's own-device E2E reads it. `info::Identity` gains `sample_rate`. The reply is bounded like the other info replies (`limit::BOUNDED` gains it).
+
 ## 0.4.31 (2026-11-02)
 
 - New (dstack #16 step 6): `meter`, any device's meters over CMC (port 8800).
