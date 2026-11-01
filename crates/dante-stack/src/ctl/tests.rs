@@ -1,5 +1,12 @@
 use super::*;
 
+/// The status's `socket_drops` field: Linux only (`/proc/net/udp`).
+const DROPS: &str = if cfg!(target_os = "linux") {
+    "\"socket_drops\":0,"
+} else {
+    ""
+};
+
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 
@@ -636,6 +643,9 @@ const WORDS: &[&str] = &[
     "refused",
     "stray",
     "out_of_order",
+    "gaps",
+    "gap_frames",
+    "socket_drops",
     "late",
     "unplaced",
     "lateness",
@@ -831,7 +841,8 @@ fn the_status_shows_the_packets_judge_in_ns_numbers_only() {
     );
     let mut receiver = Receiver::new(Arc::clone(&media.rx)).unwrap();
     let sender = std::net::UdpSocket::bind((lo, 0)).unwrap();
-    // Two packets of flow 4, 40 and 25 samples late.
+    // Two packets of flow 4, 40 and 25 samples late: one frame each, so
+    // 14 frames between them never came (a gap).
     for pos in [96_000_000 - 40, 96_000_000 - 25] {
         let mut buf = [0u8; 64];
         let (secs, sub) = crate::clock::stamp(pos, 96_000);
@@ -863,13 +874,13 @@ fn the_status_shows_the_packets_judge_in_ns_numbers_only() {
     // The least: 25 samples, 260 416 ns (the stamp at 999 999 739 584 ns,
     // rounded up); the largest 40 samples.
     assert!(
-        s.contains(
-            "\"rx\":[{\"flow\":4,\"granted\":0,\"fpp\":0,\"channels\":0,\"latency\":0,\
+        s.contains(&format!(
+            "\"rx\":[{{\"flow\":4,\"granted\":0,\"fpp\":0,\"channels\":0,\"latency\":0,\
              \"playout\":0,\"delay\":0,\"late_after\":0,\"advertised\":0,\
-             \"below_advertised\":0,\"packets\":2,\"refused\":0,\"stray\":0,\"out_of_order\":0,\"late\":0,\
+             \"below_advertised\":0,\"packets\":2,\"refused\":0,\"stray\":0,\"out_of_order\":0,\"gaps\":1,\"gap_frames\":14,{DROPS}\"late\":0,\
              \"unplaced\":0,\"lateness\":40,\"lateness_min_ns\":260416,\"keepalives\":0,\
-             \"keepalive_errors\":0,\"recv_errors\":0}],"
-        ),
+             \"keepalive_errors\":0,\"recv_errors\":0}}],"
+        )),
         "{s}"
     );
     // The status takes nothing: read again, the same second.
@@ -931,13 +942,13 @@ fn the_status_lists_the_flows_of_both_sides() {
         "{s}"
     );
     assert!(
-        s.contains(
-            "\"rx\":[{\"flow\":1,\"granted\":1,\"fpp\":32,\"channels\":2,\"latency\":96,\
+        s.contains(&format!(
+            "\"rx\":[{{\"flow\":1,\"granted\":1,\"fpp\":32,\"channels\":2,\"latency\":96,\
              \"playout\":96,\"delay\":0,\"late_after\":128,\"advertised\":96,\
-             \"below_advertised\":0,\"packets\":0,\"refused\":0,\"stray\":0,\"out_of_order\":0,\"late\":0,\
+             \"below_advertised\":0,\"packets\":0,\"refused\":0,\"stray\":0,\"out_of_order\":0,\"gaps\":0,\"gap_frames\":0,{DROPS}\"late\":0,\
              \"unplaced\":0,\"lateness\":0,\"keepalives\":0,\"keepalive_errors\":0,\
-             \"recv_errors\":0}],\"rx_poll_errors\":0,"
-        ),
+             \"recv_errors\":0}}],\"rx_poll_errors\":0,"
+        )),
         "{s}"
     );
     // RX 1 is InProgress: granted, nothing heard yet.

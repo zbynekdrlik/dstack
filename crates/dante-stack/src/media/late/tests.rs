@@ -118,3 +118,48 @@ fn a_count_that_starts_again_is_no_rise() {
         }]
     );
 }
+
+#[test]
+fn the_loss_watch_reports_a_rise_in_gaps_or_drops_once_a_second() {
+    let counts = RefCell::new([(0u64, 0u64, 0u64); MAX_FLOWS]);
+    let mut w = RxWatch::new();
+    let look = |w: &mut RxWatch, now| w.look(now, |s| counts.borrow()[s]);
+    // Losses from before the watch started: learnt, not reported.
+    counts.borrow_mut()[4] = (3, 96, 1);
+    assert_eq!(look(&mut w, 0), []);
+    // A gap of one packet on slot 4, drops on slot 9 only.
+    counts.borrow_mut()[4] = (4, 128, 1);
+    counts.borrow_mut()[9] = (0, 0, 2);
+    assert_eq!(look(&mut w, S / 2), [], "inside the second");
+    assert_eq!(
+        look(&mut w, S),
+        [
+            Loss {
+                slot: 4,
+                gaps: 1,
+                frames: 32,
+                drops: 0
+            },
+            Loss {
+                slot: 9,
+                gaps: 0,
+                frames: 0,
+                drops: 2
+            },
+        ]
+    );
+    // Nothing new: quiet. A count read back lower is no loss.
+    assert_eq!(look(&mut w, 2 * S), []);
+    counts.borrow_mut()[4] = (0, 0, 0);
+    assert_eq!(look(&mut w, 3 * S), []);
+    counts.borrow_mut()[4] = (1, 8, 0);
+    assert_eq!(
+        look(&mut w, 4 * S),
+        [Loss {
+            slot: 4,
+            gaps: 1,
+            frames: 8,
+            drops: 0
+        }]
+    );
+}

@@ -23,6 +23,9 @@ exclude_re = [
   # The UDP exchange's start code: tests/system_clock.rs reads our running
   # device's settings through it.
   "client.rs.*call_as",
+  # The kernel's socket table read: a test socket never drops, so only the
+  # all-zero answer is observable; its parse is tested (media::rx::udp_drops).
+  "rx.rs.*socket_drops",
   "ask_realtime",
   # Log-only: the qdisc verdict is tested in qdisc::check.
   "qdisc.rs.*report",

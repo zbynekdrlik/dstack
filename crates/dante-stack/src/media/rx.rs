@@ -208,6 +208,8 @@ struct RxStats {
     refused: AtomicU64,
     stray: AtomicU64,
     out_of_order: AtomicU64,
+    gaps: AtomicU64,
+    gap_frames: AtomicU64,
     late: AtomicU64,
     unplaced: AtomicU64,
     keepalives: AtomicU64,
@@ -245,6 +247,11 @@ pub struct RxCounts {
     pub stray: u64,
     /// Packets that began before the end of an earlier one.
     pub out_of_order: u64,
+    /// Packets that began past the end of the one before: frames that never
+    /// came (Dante packets have no sequence number; the stamps are it).
+    pub gaps: u64,
+    /// The frames those gaps skipped.
+    pub gap_frames: u64,
     /// Packets later than the flow's latency.
     pub late: u64,
     /// Packets read before our clock was ready.
@@ -252,6 +259,19 @@ pub struct RxCounts {
     pub keepalives: u64,
     pub keepalive_errors: u64,
     pub recv_errors: u64,
+}
+
+/// The drops of the UDP socket bound to `ip`:`port` in a `/proc/net/udp`
+/// table: its last column. The local address is the address's bytes in
+/// the host's order as hex, then the port as hex (`0100007F:1F90` for
+/// 127.0.0.1:8080 on a little-endian host). `None` for no such socket.
+pub fn udp_drops(table: &str, ip: Ipv4Addr, port: u16) -> Option<u64> {
+    let want = format!("{:08X}:{port:04X}", u32::from_ne_bytes(ip.octets()));
+    table.lines().skip(1).find_map(|line| {
+        let mut cols = line.split_whitespace();
+        let local = cols.nth(1)?;
+        (local == want).then(|| line.split_whitespace().last()?.parse().ok())?
+    })
 }
 
 /// What the control side and the RX thread share.
@@ -415,12 +435,34 @@ impl RxShared {
             refused: get(&l.refused),
             stray: get(&l.stray),
             out_of_order: get(&l.out_of_order),
+            gaps: get(&l.gaps),
+            gap_frames: get(&l.gap_frames),
             late: get(&l.late),
             unplaced: get(&l.unplaced),
             keepalives: get(&l.keepalives),
             keepalive_errors: get(&l.keepalive_errors),
             recv_errors: get(&l.recv_errors),
         }
+    }
+
+    /// Each flow slot's datagrams the kernel dropped at its socket (a full
+    /// receive buffer), from `/proc/net/udp` (Linux; `None` elsewhere or
+    /// when the table cannot be read).
+    pub fn socket_drops(&self) -> Option<[u64; MAX_FLOWS]> {
+        #[cfg(target_os = "linux")]
+        {
+            let table = std::fs::read_to_string("/proc/net/udp").ok()?;
+            let ports = self.ports().ok()?;
+            let ip = match self.sockets.first()?.local_addr().ok()? {
+                SocketAddr::V4(a) => *a.ip(),
+                SocketAddr::V6(_) => return None,
+            };
+            Some(std::array::from_fn(|slot| {
+                udp_drops(&table, ip, ports[slot]).unwrap_or(0)
+            }))
+        }
+        #[cfg(not(target_os = "linux"))]
+        None
     }
 
     /// Every flow slot's packets (the manager's [`crate::subscribe::Manager::tick`]).
@@ -753,6 +795,11 @@ impl Receiver {
                 Some(e) if pos < e => {
                     count(&stats.out_of_order);
                     lane.end = Some(e.max(end));
+                }
+                Some(e) if pos > e => {
+                    count(&stats.gaps);
+                    stats.gap_frames.fetch_add(pos - e, Ordering::Relaxed);
+                    lane.end = Some(end);
                 }
                 _ => lane.end = Some(end),
             }

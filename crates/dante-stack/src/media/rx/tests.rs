@@ -973,3 +973,142 @@ fn a_port_base_puts_each_slot_on_its_own_port_and_a_taken_one_is_named() {
     let distinct: std::collections::BTreeSet<_> = free.iter().collect();
     assert_eq!(distinct.len(), MAX_FLOWS);
 }
+
+/// iemmixer (1.11): a single packet now and then missing from a flow. The
+/// stamps are the sequence: a packet that begins past the end of the one
+/// before is a gap, and its skipped frames are counted.
+#[test]
+fn a_packet_that_begins_past_the_last_end_is_a_gap_of_the_frames_skipped() {
+    let s = shared(1);
+    let mut rx = Receiver::new(Arc::clone(&s)).unwrap();
+    publish(
+        &s,
+        &[(0, plan(LOOPBACK, 1, true, 1))],
+        &[(0, RxRoute { flow: 0, slot: 0 })],
+    );
+    let t = transmitter(LOOPBACK);
+    let p0 = 1_000_000_000u64;
+    let now = ns_of(p0 + 1_000, RATE);
+    // Packets of 32 frames: 0, 1, then 3 (2 missing), then 4.
+    for k in [0, 1, 3, 4] {
+        t.send_to(&packet_at(p0 + 32 * k, 1, 32), slot_addr(&s, 0))
+            .unwrap();
+    }
+    pump(&mut rx, 0, 4, Some(now), 0);
+    let c = s.lane(0);
+    assert_eq!(
+        (c.packets, c.gaps, c.gap_frames, c.out_of_order),
+        (4, 1, 32, 0),
+        "{c:?}"
+    );
+    // Packet 2 comes after all: out of order, no second gap.
+    t.send_to(&packet_at(p0 + 64, 1, 32), slot_addr(&s, 0))
+        .unwrap();
+    pump(&mut rx, 0, 5, Some(now), 0);
+    let c = s.lane(0);
+    assert_eq!((c.gaps, c.gap_frames, c.out_of_order), (1, 32, 1), "{c:?}");
+    // One frame short of contiguous, and a gap of one frame.
+    t.send_to(&packet_at(p0 + 32 * 5 + 1, 1, 32), slot_addr(&s, 0))
+        .unwrap();
+    pump(&mut rx, 0, 6, Some(now), 0);
+    assert_eq!((s.lane(0).gaps, s.lane(0).gap_frames), (2, 33));
+}
+
+#[test]
+fn a_socket_s_drops_are_read_from_the_kernel_s_table() {
+    // Two lines of /proc/net/udp on a little-endian host: 127.0.0.1:8080
+    // with 7 drops, 10.77.7.112:50000 with 0.
+    let table = "\
+   sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode ref pointer drops
+  737: 0100007F:1F90 00000000:0000 07 00000000:00000000 00:00000000 00000000  1005        0 35824025 2 0000000000000000 7
+ 1658: 70074D0A:C350 00000000:0000 07 00000000:00000000 00:00000000 00000000  1005        0 9422 2 0000000000000000 0
+";
+    if cfg!(target_endian = "little") {
+        assert_eq!(udp_drops(table, Ipv4Addr::LOCALHOST, 8080), Some(7));
+        assert_eq!(
+            udp_drops(table, Ipv4Addr::new(10, 77, 7, 112), 50_000),
+            Some(0)
+        );
+    }
+    assert_eq!(
+        udp_drops(table, Ipv4Addr::LOCALHOST, 8081),
+        None,
+        "no such port"
+    );
+    assert_eq!(udp_drops(table, Ipv4Addr::new(127, 0, 0, 2), 8080), None);
+    assert_eq!(udp_drops("", Ipv4Addr::LOCALHOST, 8080), None);
+    // The header line is no socket, even if it parsed.
+    let header_only = "  1: 0100007F:1F90 0 0 0 0 0 0 0 0 0 0 0 5\n";
+    assert_eq!(udp_drops(header_only, Ipv4Addr::LOCALHOST, 8080), None);
+}
+
+/// Linux: our own slots' sockets are in the kernel's table, with no drops.
+#[cfg(target_os = "linux")]
+#[test]
+fn our_slots_drops_read_zero_on_linux() {
+    let s = shared(1);
+    assert_eq!(s.socket_drops(), Some([0; MAX_FLOWS]));
+}
+
+/// The loss watch logs a flow's gap with its slot, count and frames.
+#[test]
+fn the_loss_watch_logs_a_gap_on_a_real_flow() {
+    use crate::media::late::{EVERY_NS, RxWatch};
+    let s = shared(1);
+    let mut rx = Receiver::new(Arc::clone(&s)).unwrap();
+    publish(
+        &s,
+        &[(0, plan(LOOPBACK, 1, true, 1))],
+        &[(0, RxRoute { flow: 0, slot: 0 })],
+    );
+    let t = transmitter(LOOPBACK);
+    let p0 = 1_000_000_000u64;
+    let now = ns_of(p0 + 1_000, RATE);
+    let mut watch = RxWatch::new();
+    assert_eq!(logged_warnings(|| watch.watch(0, &s)), "");
+    for k in [0, 2] {
+        t.send_to(&packet_at(p0 + 32 * k, 1, 32), slot_addr(&s, 0))
+            .unwrap();
+    }
+    pump(&mut rx, 0, 2, Some(now), 0);
+    assert_eq!(
+        logged_warnings(|| watch.watch(EVERY_NS - 1, &s)),
+        "",
+        "inside the second"
+    );
+    let log = logged_warnings(|| watch.watch(EVERY_NS, &s));
+    assert_eq!(log.lines().count(), 1, "{log}");
+    assert!(log.contains(" WARN "), "{log}");
+    assert!(
+        log.contains("slot=0 gaps=1 frames=32 socket_drops=0"),
+        "{log}"
+    );
+    assert!(log.contains("never reached our socket"), "{log}");
+    assert_eq!(logged_warnings(|| watch.watch(2 * EVERY_NS, &s)), "");
+}
+
+/// What `f` logs at WARN or above on this thread, as text.
+fn logged_warnings(f: impl FnOnce()) -> String {
+    let buf = Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let sink = Arc::clone(&buf);
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(move || LogSink(Arc::clone(&sink)))
+        .with_ansi(false)
+        .with_max_level(tracing::Level::WARN)
+        .finish();
+    crate::test_log::undecided();
+    tracing::subscriber::with_default(subscriber, f);
+    String::from_utf8(buf.lock().unwrap().clone()).unwrap()
+}
+
+struct LogSink(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogSink {
+    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(b);
+        Ok(b.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}

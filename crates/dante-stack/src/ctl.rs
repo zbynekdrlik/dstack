@@ -601,7 +601,10 @@ impl Json {
 ///   the longest single send since the device started: maxima).
 /// - `rx`: each RX flow slot that has or had a flow: `flow`, `granted`,
 ///   `fpp`, `channels`, `latency` (samples), `packets`, `refused`, `stray`,
-///   `out_of_order`, `late`, `unplaced`, `lateness` (the largest in the
+///   `out_of_order`, `gaps` and `gap_frames` (packets that began past the
+///   end of the one before, and the frames skipped: packets that never
+///   came), `socket_drops` (Linux: the kernel's drops at the slot's
+///   socket), `late`, `unplaced`, `lateness` (the largest in the
 ///   heartbeat's last second, samples; the status takes nothing),
 ///   `lateness_min_ns` (the packets' judge, phase D: the least lateness of
 ///   that second in ns, our clock's now less the packets' own stamps; absent
@@ -779,6 +782,7 @@ fn rx_part(j: &mut Json, media: &Media) {
             (0..rings.len()).map(|rx| m.status(rx)).collect(),
         )
     };
+    let drops = media.rx.socket_drops();
     j.open(Some("rx"), '[');
     for (slot, flow) in flows.into_iter().enumerate() {
         let lane = media.rx.lane(slot);
@@ -801,6 +805,11 @@ fn rx_part(j: &mut Json, media: &Media) {
         j.num("refused", lane.refused);
         j.num("stray", lane.stray);
         j.num("out_of_order", lane.out_of_order);
+        j.num("gaps", lane.gaps);
+        j.num("gap_frames", lane.gap_frames);
+        if let Some(drops) = drops {
+            j.num("socket_drops", drops[slot]);
+        }
         j.num("late", lane.late);
         j.num("unplaced", lane.unplaced);
         j.num("lateness", media.rx.last_lateness(slot));
