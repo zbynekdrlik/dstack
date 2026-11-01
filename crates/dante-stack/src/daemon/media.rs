@@ -277,6 +277,8 @@ pub struct Driver {
     stops: JoinSet<()>,
     /// Our TX flows' late packets, logged once a second.
     late: crate::media::late::LateWatch,
+    /// Our RX flows' missing packets, logged once a second.
+    loss: crate::media::late::RxWatch,
 }
 
 impl Driver {
@@ -294,13 +296,14 @@ impl Driver {
                 requests: JoinSet::new(),
                 stops: JoinSet::new(),
                 late: crate::media::late::LateWatch::new(),
+                loss: crate::media::late::RxWatch::new(),
             },
             back,
         )
     }
 
     /// One round of the manager now, with the channel records `resolver`
-    /// knows; then the checks' round and the late watch.
+    /// knows; then the checks' round and the late and loss watches.
     pub fn tick(&mut self, resolver: &dyn Resolver) {
         let now = self.media.rx.now_ns();
         let packets = self.media.rx.packets();
@@ -308,6 +311,7 @@ impl Driver {
         self.act(actions);
         self.media.step_checks();
         self.late.watch(now, &self.media.tx);
+        self.loss.watch(now, &self.media.rx);
     }
 
     /// The answer to the request of `flow`.

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.25 (2026-11-01)
+
+- RX loss check (iemmixer: a single packet now and then missing from a flow, with no late packets):
+  - Each RX flow slot in the status gains `gaps` and `gap_frames`. A packet that began past the end of the one before is a gap, and its skipped frames are counted. Dante packets carry no sequence number; their stamps serve as one.
+  - On Linux, `socket_drops` shows the kernel's drops at the slot's socket, from `/proc/net/udp`.
+  - Once a second, a flow whose gaps or drops rose logs one warning with the slot, the gaps, the frames and the socket drops.
+  - A gap with no socket drops means the packet never reached our socket: the sender, the switch or the NIC (dstack #1).
+
 ## 0.4.24 (2026-11-01)
 
 - Fix (Windows): a device that is a member of the address's info manager no longer stops when the managing device stops. Its sends to the stopped manager drew ICMP port-unreachable, which Windows reported on the next receive as WSAECONNRESET (10054). The member's info server ended, its device exited, and the service restarted it with an audio gap. Found by dasio with two instances on one PC. The member's socket, the info port it takes over, and the manager's loopback share socket now turn that report off (`SIO_UDP_CONNRESET`), as the device's other sockets already did. The member keeps serving and takes the port when it frees (dstack #1).
