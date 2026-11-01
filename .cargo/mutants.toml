@@ -17,6 +17,9 @@ exclude_globs = ["crates/dante-stack/src/clock/sys_windows.rs"]
 exclude_re = [
   # Host glue only the whole-host tests run (they cannot run per mutant).
   "replace serve_device -> Result",
+  # The heartbeat listen's socket loop: tests/system_clock.rs reads our
+  # running device with it; its parse and gather are unit tested.
+  "latency.rs.*listen",
   "ask_realtime",
   # Log-only: the qdisc verdict is tested in qdisc::check.
   "qdisc.rs.*report",

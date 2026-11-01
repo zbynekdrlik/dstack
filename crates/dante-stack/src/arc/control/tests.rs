@@ -409,3 +409,95 @@ fn a_refused_subscription_or_end_is_a_refusal() {
     );
     assert_eq!(unsubscribe(&mut Fixed(STATUS_OK, Vec::new()), 1), Ok(()));
 }
+
+/// Our server's 0x3200 page for one granted flow (arc::tests'
+/// `an_rx_flow_list_states_each_slot_s_channels`): TX 3 feeds RX 1 and 2,
+/// TX 4 feeds RX 3, latency 2 ms at 96 kHz.
+#[rustfmt::skip]
+const ONE_FLOW_PAGE: [u8; 104] = [
+    0x10, 0x01,                         // 16 slots, 1 flow
+    0x00, 0x54,                         // flow 1's descriptor at 84
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0,
+    0x80, 0x02, 0xc3, 0x50, 10, 0, 0, 10,
+    0x00, 0x09, 0x00, 0x01, 0x08, 0x00, 0x00, 0x00,
+    0x00, 0x1e, 0x84, 0x80, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x03, 0x00, 0x00,
+    0x00, 0x04, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00,
+    0x00, 0x01, 0x00, 0x01, 0x00, 0x01, 0x77, 0x00, 0x00, 0x00, 0x00, 0x18,
+    0x00, 0x01, 0x00, 0x04, 0x00, 0x02, 0x00, 0x2c,
+    0x00, 0x44, 0x00, 0x48, 0x00, 0x4c, 0x00, 0x50,
+    0x00, 0x34,
+];
+
+#[test]
+fn an_rx_flow_page_reads_the_slot_rate_latency_and_channels() {
+    let page = rx_flow_page(STATUS_OK, &ONE_FLOW_PAGE).expect("a page");
+    assert!(!page.more);
+    assert_eq!((page.slots, page.count), (16, 1));
+    assert_eq!(
+        page.items,
+        [RxFlow {
+            slot: 1,
+            rate: 96_000,
+            latency_ns: 2_000_000,
+            channels: vec![1, 2, 3],
+        }]
+    );
+    // A flow whose descriptor points past the body is counted, not listed.
+    let mut cut = ONE_FLOW_PAGE.to_vec();
+    cut[3] = 0xf0;
+    let page = rx_flow_page(STATUS_MORE, &cut).expect("a page");
+    assert!(page.more);
+    assert_eq!((page.count, page.items.len()), (1, 0));
+    // Each part of the descriptor checked: cut anywhere, nothing listed.
+    for end in 2..ONE_FLOW_PAGE.len() - 1 {
+        let short = &ONE_FLOW_PAGE[..end];
+        if let Some(p) = rx_flow_page(STATUS_OK, short) {
+            assert!(p.items.is_empty(), "cut at {end}: {p:?}");
+        }
+    }
+    // The second item is read at its own place: the first points past the
+    // body, the second at the flow.
+    let mut two = ONE_FLOW_PAGE.to_vec();
+    two[1] = 2;
+    two[2..4].copy_from_slice(&0xfff0u16.to_be_bytes());
+    two[4..6].copy_from_slice(&0x0054u16.to_be_bytes());
+    let page = rx_flow_page(STATUS_OK, &two).expect("a page");
+    assert_eq!((page.count, page.items.len()), (2, 1));
+    assert_eq!(page.items[0].slot, 1);
+    // A channel bit in the second word is channel 17 up (the last slot's
+    // mask, at packet offset 80, so no other mask's words reach it).
+    let mut high = ONE_FLOW_PAGE.to_vec();
+    high[80 - 10 + 2..80 - 10 + 4].copy_from_slice(&0x8001u16.to_be_bytes());
+    let flow = &rx_flow_page(STATUS_OK, &high).unwrap().items[0];
+    assert_eq!(flow.channels, [1, 2, 3, 17, 32]);
+    // Two sockets: the masks' offsets follow both.
+    let mut two_sockets = ONE_FLOW_PAGE.to_vec();
+    two_sockets[86..88].copy_from_slice(&2u16.to_be_bytes());
+    two_sockets.splice(94..94, [0x00, 0x2c]);
+    let flow = &rx_flow_page(STATUS_OK, &two_sockets).unwrap().items[0];
+    assert_eq!(
+        (flow.channels.as_slice(), flow.latency_ns),
+        (&[1, 2, 3][..], 2_000_000)
+    );
+}
+
+#[test]
+fn rx_flows_of_our_own_device_lists_none_before_a_grant() {
+    let mut own = Own::new();
+    assert_eq!(rx_flows(&mut own), Ok(Vec::new()));
+    assert_eq!(
+        rx_flows(&mut Fixed(0x0022, Vec::new())),
+        Err(ReadError::Refused {
+            op: op::RX_FLOWS,
+            status: 0x0022
+        })
+    );
+    assert_eq!(
+        rx_flows(&mut Fixed(STATUS_OK, vec![1])),
+        Err(ReadError::Malformed { op: op::RX_FLOWS })
+    );
+}

@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.20 (2026-11-01)
+
+- New `latency` module: what Dante Controller's Latency tab shows, for any receiver, read-only (dstack #47).
+  - Every receiver sends this data in its heartbeat once a second (224.0.0.233:8708): record 0x8003 is each RX flow slot's largest lateness that second, record 0x8004 its cumulative late packets.
+  - `latency::listen(our, device, window)` gathers one device's records. Per slot it gives the per-second peaks (µs), the late packets in the window and the total.
+  - `latency::histogram` bins the peaks. No device sends a histogram: on the site, 8 devices send records 0x8000 to 0x8005 and 0x8008, and none of them is one.
+- `arc::control::rx_flows` reads a device's RX flows (ARC 0x3200): slot, rate, latency in ns, and the RX channels fed. This is what the lateness is measured against.
+- Our device's heartbeat now also sends 0x8004, each RX flow slot's late packets since start, as the hardware receivers do. Dante Controller can then show our RX's late packets.
+
 ## 0.4.19 (2026-11-01)
 
 - The late watch: once a second, each TX flow whose packets left later than the advertised latency since the last look logs one warning line. The line gives the slot, the count and the oldest packet's age (`age_peak_us`). A receiver at that latency counts each such packet late.

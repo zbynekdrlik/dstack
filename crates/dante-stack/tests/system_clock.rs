@@ -195,7 +195,32 @@ fn our_tx_reaches_our_rx_clean_on_the_system_clock() {
     let warm = wait_checked(&media, &host, 9_600);
     let base = Counts::of(&warm);
     let last = wait_checked(&media, &host, base.checked + 96_000);
+    // dstack #47: the Latency tab's data, read from our running device as
+    // from any receiver: its RX flows over ARC and its heartbeats.
+    let flows = {
+        use dante_stack::arc::client::{REPLY_TIMEOUT, Udp};
+        let seq = std::sync::atomic::AtomicU16::new(1);
+        let requests = dante_stack::ctl::Requests::default();
+        let halt = AtomicBool::new(false);
+        let to = std::net::SocketAddrV4::new(ip, dante_stack::arc::PORT);
+        let mut udp = Udp::open(ip, to, &seq, REPLY_TIMEOUT, &requests, &halt).expect("a socket");
+        dante_stack::arc::control::rx_flows(&mut udp)
+    };
+    let heard = dante_stack::latency::listen(ip, ip, Duration::from_millis(2_500));
     let stopped = host.stop(Duration::from_secs(5));
+    let flows = flows.expect("our RX flows");
+    assert_eq!(flows.len(), 1, "{flows:?}");
+    assert_eq!(
+        (flows[0].rate, flows[0].channels.as_slice()),
+        (96_000, &[1u16][..])
+    );
+    assert!(flows[0].latency_ns > 0, "{flows:?}");
+    let heard = heard.expect("the heartbeat group joined");
+    assert!(heard.beats >= 2, "{heard:?}");
+    assert_eq!(heard.rate, 96_000, "{heard:?}");
+    assert_eq!(heard.slots.len(), 32, "{heard:?}");
+    let slot = &heard.slots[usize::from(flows[0].slot) - 1];
+    assert_eq!(slot.peaks_us.len(), heard.beats as usize, "{heard:?}");
     let end = Counts::of(&last);
     assert!(
         end.checked >= base.checked + 96_000,
