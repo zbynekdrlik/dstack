@@ -1253,21 +1253,37 @@ pub(crate) fn ask_realtime(priority: i32) -> bool {
     }
 }
 
-/// On Windows: the thread at THREAD_PRIORITY_TIME_CRITICAL, whatever
-/// `priority`: 31 in a REALTIME_PRIORITY_CLASS process (dasio's device
-/// process sets it; its threads have their own cores), above MMCSS's audio
-/// threads, which left the pump short of time on the FOH PC (missed blocks
-/// and TX holes at W 0.33 ms). `false` when Windows refuses it.
+/// Windows' thread priority for a media thread asking `priority` (the
+/// Linux `SCHED_FIFO` number): THREAD_PRIORITY_TIME_CRITICAL (15; 31 in a
+/// REALTIME_PRIORITY_CLASS process) for the TX thread ([`TX_PRIORITY`] and
+/// above), THREAD_PRIORITY_HIGHEST (2; 26 there) for the RX thread and the
+/// engine's pump, so TX goes first as on Linux (TX 47 > RX 44 > pump 40;
+/// dasio, the owner's gen3 list for Windows, 1.11.2026). Both stay above
+/// MMCSS's audio threads, which left the pump short of time on the FOH PC
+/// (missed blocks and TX holes at W 0.33 ms).
+pub fn windows_thread_priority(priority: i32) -> i32 {
+    if priority >= TX_PRIORITY {
+        WINDOWS_TIME_CRITICAL
+    } else {
+        WINDOWS_HIGHEST
+    }
+}
+
+/// THREAD_PRIORITY_TIME_CRITICAL.
+pub const WINDOWS_TIME_CRITICAL: i32 = 15;
+/// THREAD_PRIORITY_HIGHEST.
+pub const WINDOWS_HIGHEST: i32 = 2;
+
+/// On Windows: the thread at [`windows_thread_priority`]`(priority)`;
+/// `false` when Windows refuses it.
 #[cfg(windows)]
-pub(crate) fn ask_realtime(_priority: i32) -> bool {
+pub(crate) fn ask_realtime(priority: i32) -> bool {
     if !crate::clock::realtime_for(crate::clock::profile()) {
         return false;
     }
-    use windows_sys::Win32::System::Threading::{
-        GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_TIME_CRITICAL,
-    };
+    use windows_sys::Win32::System::Threading::{GetCurrentThread, SetThreadPriority};
     // SAFETY: the calling thread's pseudo handle.
-    unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL) != 0 }
+    unsafe { SetThreadPriority(GetCurrentThread(), windows_thread_priority(priority)) != 0 }
 }
 
 #[cfg(not(any(target_os = "linux", windows)))]

@@ -1327,11 +1327,46 @@ fn place_pins_a_thread_to_the_configured_cpu_and_leaves_it_without_one() {
     .unwrap();
 }
 
+#[test]
+fn on_windows_tx_runs_above_rx_and_the_pump() {
+    assert_eq!(windows_thread_priority(TX_PRIORITY), WINDOWS_TIME_CRITICAL);
+    assert_eq!(
+        windows_thread_priority(TX_PRIORITY + 1),
+        WINDOWS_TIME_CRITICAL
+    );
+    assert_eq!(
+        windows_thread_priority(crate::media::rx::RX_PRIORITY),
+        WINDOWS_HIGHEST
+    );
+    assert_eq!(
+        windows_thread_priority(crate::stream::ENGINE_PRIORITY),
+        WINDOWS_HIGHEST
+    );
+    assert_eq!(windows_thread_priority(TX_PRIORITY - 1), WINDOWS_HIGHEST);
+    // Windows' own values for the two levels.
+    assert_eq!((WINDOWS_TIME_CRITICAL, WINDOWS_HIGHEST), (15, 2));
+}
+
 #[cfg(windows)]
 #[test]
-fn a_windows_media_thread_gets_time_critical_and_its_cpu() {
+fn a_windows_media_thread_gets_its_priority_and_its_cpu() {
+    use windows_sys::Win32::System::Threading::{GetCurrentThread, GetThreadPriority};
     std::thread::spawn(|| {
-        assert!(ask_realtime(45), "Windows gives the thread TIME_CRITICAL");
+        assert!(ask_realtime(TX_PRIORITY), "Windows gives TX TIME_CRITICAL");
+        // SAFETY: the calling thread's pseudo handle.
+        assert_eq!(
+            unsafe { GetThreadPriority(GetCurrentThread()) },
+            WINDOWS_TIME_CRITICAL
+        );
+        assert!(
+            ask_realtime(crate::media::rx::RX_PRIORITY),
+            "and RX HIGHEST"
+        );
+        // SAFETY: as above.
+        assert_eq!(
+            unsafe { GetThreadPriority(GetCurrentThread()) },
+            WINDOWS_HIGHEST
+        );
         assert!(pin_to_cpu(0), "CPU 0 exists on every runner");
         assert!(!pin_to_cpu(64), "past the first processor group");
     })

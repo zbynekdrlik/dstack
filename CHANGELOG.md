@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.31 (2026-11-02)
+
+- New (dstack #16 step 6): `meter`, any device's meters over CMC (port 8800).
+  - `Meter::start(iface, device, name, mac)` subscribes as the controller `name`, keeps the latest frame and sends every frame on a channel. `Meter::stop()` sends the stop.
+  - `start_request` / `stop_request` are byte for byte Dante Controller's captured subscription (netaudio's fixture). The one difference: a zero pad byte where Dante Controller leaves garbage.
+  - `parse_frame` gives the device id, the TX levels and the RX levels.
+  - `level` / `dbfs` read netaudio's scale: 0 clipping, 1-253 = -(raw-1)/2 dBFS, 254 muted, 255 marker.
+- Windows: the TX thread runs above the RX thread and the engine's pump, as on Linux (TX 47 > RX 44 > pump 40). TX keeps THREAD_PRIORITY_TIME_CRITICAL; RX and the pump take THREAD_PRIORITY_HIGHEST (`media::tx::windows_thread_priority`). Before, all three were TIME_CRITICAL. dasio asked for it after the owner's gen3 list. `rx_cpu` already puts RX on a CPU of its own apart from TX's `io_cpu`.
+- Docs: `docs/windows-box.md` now names the NIC queue tuning (Large Send Offload off, Transmit Buffers at the minimum) for other traffic on the Dante NIC, with the other apps left as they are.
+
 ## 0.4.30 (2026-11-02)
 
 - New (dstack #16 step 5, the writes; dcontroller calls each one only after the owner confirms it). The requests are byte for byte netaudio 0.4.2's, built offline with its own encoder; nothing was written to any device to learn them.
