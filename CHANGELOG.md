@@ -8,6 +8,7 @@
   - `parse_frame` gives the device id, the TX levels and the RX levels.
   - `level` / `dbfs` read netaudio's scale: 0 clipping, 1-253 = -(raw-1)/2 dBFS, 254 muted, 255 marker.
 - Windows: the TX thread runs above the RX thread and the engine's pump, as on Linux (TX 47 > RX 44 > pump 40). TX keeps THREAD_PRIORITY_TIME_CRITICAL; RX and the pump take THREAD_PRIORITY_HIGHEST (`media::tx::windows_thread_priority`). Before, all three were TIME_CRITICAL. dasio asked for it after the owner's gen3 list. `rx_cpu` already puts RX on a CPU of its own apart from TX's `io_cpu`.
+- Fix: `SampleRate::pending` is `None` when the device's word equals the running rate. Both Ultimo devices (DT_20, planet 22) carry their running rate there while nothing is pending; the Brooklyn cards send 0 (dcontroller on the site).
 - Docs: `docs/windows-box.md` now names the NIC queue tuning (Large Send Offload off, Transmit Buffers at the minimum) for other traffic on the Dante NIC, with the other apps left as they are.
 
 ## 0.4.30 (2026-11-02)
