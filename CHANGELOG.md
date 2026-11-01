@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.33 (2026-11-02)
+
+- CI: every tag gets a GitHub release with prebuilt `dante-stack-dev` binaries for Linux (x86_64) and Windows (x86_64), each with a `.sha256` file (`.github/workflows/release.yml`). dsync's stability gate pins an exact tag and checks the sha256 (dsync#98). Its part 1 runs `dante-stack-dev clock --seconds N` against the local dantesync.
+
 ## 0.4.32 (2026-11-02)
 
 - Fix: `meter::Meter` renews its subscription every 3 s (`meter::RENEW`) until `stop()`. A device drops a meter subscription that is not renewed (netaudio's daemon renews every 3 s); v0.4.31 sent the start once, so frames stopped (dcontroller asked).

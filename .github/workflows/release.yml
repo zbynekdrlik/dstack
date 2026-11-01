@@ -1,0 +1,62 @@
+name: Release
+
+# A tag v* gets a GitHub release with prebuilt `dante-stack-dev` binaries
+# for Linux and Windows and their sha256 files. dsync's stability gate pins
+# an exact tag and checks the sha256 (dsync#98), so a dstack change never
+# moves the gate by itself.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Create the release for the tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
+            || gh release create "$TAG" -R "$GITHUB_REPOSITORY" --verify-tag \
+                 --title "$TAG" --notes "dstack $TAG. CHANGELOG.md has the changes. Prebuilt dante-stack-dev binaries with their sha256 below."
+
+  binaries:
+    needs: release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            suffix: linux-x86_64
+            exe: ""
+          - os: windows-2025
+            suffix: windows-x86_64
+            exe: ".exe"
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: cargo build --release --locked -p dante-stack --bin dante-stack-dev
+      - name: Name, hash and upload the binary
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          name="dante-stack-dev-${TAG}-${{ matrix.suffix }}${{ matrix.exe }}"
+          cp "target/release/dante-stack-dev${{ matrix.exe }}" "$name"
+          sha256sum "$name" > "$name.sha256"
+          cat "$name.sha256"
+          gh release upload "$TAG" "$name" "$name.sha256" -R "$GITHUB_REPOSITORY" --clobber
