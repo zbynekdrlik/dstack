@@ -72,7 +72,10 @@
 //!   of full scale, 0 to 255: [`peak_byte`]), TX channels then RX channels,
 //!   padded to 4 bytes;
 //! - 0x8003: our rate and each RX flow slot's largest lateness since the
-//!   last beat, samples (0 for a slot without a granted flow).
+//!   last beat, samples (0 for a slot without a granted flow);
+//! - 0x8004: each RX flow slot's late packets since the device started
+//!   (`n, 0, 20, 0`, then the counts), as the hardware receivers send it:
+//!   Dante Controller's Latency tab shows it ([`crate::latency`]).
 //!
 //! Clock stats (`07 xx 00 21`) stay unanswered: inferno sends them only
 //! with a grandmaster identity read from its PTP daemon's files, and our
@@ -140,6 +143,7 @@ pub mod record {
     pub const FREQUENCY: u16 = 0x8001;
     pub const PEAKS: u16 = 0x8002;
     pub const RX_LATENESS: u16 = 0x8003;
+    pub const RX_LATE: u16 = 0x8004;
 }
 
 pub const BOARD_INFO_LEN: usize = 200;
@@ -355,6 +359,9 @@ pub struct Records {
     pub rate: u32,
     /// Each RX flow slot's largest lateness since the last beat, samples.
     pub lateness: [u32; MAX_FLOWS],
+    /// Each RX flow slot's late packets since the device started (the low
+    /// 32 bits).
+    pub late: [u32; MAX_FLOWS],
 }
 
 /// A record's head: its length, its type, 4, its content's length, the
@@ -398,6 +405,13 @@ pub fn heartbeat_body(seq: u16, r: &Records) -> Vec<u8> {
     out.extend_from_slice(&r.rate.to_be_bytes());
     for lateness in r.lateness {
         out.extend_from_slice(&lateness.to_be_bytes());
+    }
+    record_head(&mut out, 20 + 4 * MAX_FLOWS, record::RX_LATE, seq);
+    for field in [MAX_FLOWS as u16, 0, 20, 0] {
+        out.extend_from_slice(&field.to_be_bytes());
+    }
+    for late in r.late {
+        out.extend_from_slice(&late.to_be_bytes());
     }
     out
 }
@@ -455,6 +469,10 @@ impl Beat for Sources {
                 } else {
                     0
                 }
+            }),
+            late: std::array::from_fn(|slot| {
+                let [.., a, b, c, d] = self.rx.lane(slot).late.to_be_bytes();
+                u32::from_be_bytes([a, b, c, d])
             }),
         })
     }

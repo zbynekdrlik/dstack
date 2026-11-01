@@ -608,12 +608,16 @@ fn records() -> Records {
     let mut lateness = [0u32; crate::media::rx::MAX_FLOWS];
     lateness[0] = 7;
     lateness[31] = 0x7fff_ffff;
+    let mut late = [0u32; crate::media::rx::MAX_FLOWS];
+    late[0] = 0x5e;
+    late[31] = 0x0102_0304;
     Records {
         freq_ppb: -1234,
         tx_peaks: vec![0, 255],
         rx_peaks: vec![40, 84, 255],
         rate: 96_000,
         lateness,
+        late,
     }
 }
 
@@ -639,13 +643,23 @@ fn the_heartbeat_with_a_clock_holds_inferno_s_three_records() {
     ];
     body.extend([0; 30 * 4]);
     body.extend([0x7f, 0xff, 0xff, 0xff]);
-    assert_eq!(body.len(), 200);
+    // 0x8004: 20 + 128 bytes, 4, 8 + 128, the sequence, 0; 32 flow slots,
+    // 0, 20, 0; each slot's late packets.
+    #[rustfmt::skip]
+    body.extend([
+        0x00, 0x94, 0x80, 0x04, 0x00, 0x04, 0x00, 0x88, 0x00, 0x01, 0x00, 0x00,
+        0x00, 0x20, 0x00, 0x00, 0x00, 0x14, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x5e,
+    ]);
+    body.extend([0; 30 * 4]);
+    body.extend([0x01, 0x02, 0x03, 0x04]);
+    assert_eq!(body.len(), 348);
     assert_eq!(beat, packet(0xfffe, 1, HEARTBEAT, &body));
     // Each record carries its own packet's sequence; without a clock the
     // heartbeat is the header alone.
     mc.seq = 0x1234;
     let beat = mc.heartbeat(Some(&records()));
-    for at in [32 + 8, 32 + 16 + 8, 32 + 48 + 8] {
+    for at in [32 + 8, 32 + 16 + 8, 32 + 48 + 8, 32 + 200 + 8] {
         assert_eq!(beat[at..at + 2], [0x12, 0x34], "{at}");
     }
     assert_eq!(mc.heartbeat(None), packet(0xfffe, 0x1235, HEARTBEAT, &[]));
@@ -656,7 +670,7 @@ fn the_heartbeat_with_a_clock_holds_inferno_s_three_records() {
         ..records()
     };
     let body = heartbeat_body(1, &quiet);
-    assert_eq!(body.len(), 16 + 152);
+    assert_eq!(body.len(), 16 + 152 + 148);
     assert_eq!(body[16..20], [0x00, 0x98, 0x80, 0x03]);
     // One peak pads by three.
     let one = Records {
@@ -832,7 +846,7 @@ async fn the_server_beats_with_its_records_and_notifies_changes() {
     recv(&info_rx).await;
     recv(&info_rx).await;
     let beat = recv(&beat_rx).await;
-    assert_eq!(beat.len(), 232);
+    assert_eq!(beat.len(), 32 + 348);
     assert_eq!(beat[32..34], [0x00, 0x10]);
     // RX 2 and RX 10 changed: one notification on the info group.
     changes.add([1, 9]);
@@ -996,6 +1010,11 @@ fn the_records_come_once_the_clock_is_ready_and_each_beat_takes_its_own_second()
     let mut late = [0u32; 32];
     late[0] = 300;
     assert_eq!(r.lateness, late);
+    // Each slot's late packets since the start, granted or not: 300
+    // samples is past the plan's 192.
+    let mut counts = [0u32; 32];
+    counts[..2].copy_from_slice(&[1, 1]);
+    assert_eq!(r.late, counts);
     // Every slot's second was taken, the second slot's too (no grant): the
     // largest in samples and the packets' least in ns (300 samples,
     // 3 125 000 ns).

@@ -27,6 +27,15 @@
 //!   00`.
 //! - 0x3010 and 0x3014, a subscription and its end ([`subscribe_request`],
 //!   [`unsubscribe_request`]), as netaudio sends them.
+//! - 0x3200, the RX flows ([`rx_flows`]), paged: `[slots, count]`, then
+//!   each flow's descriptor offset. A descriptor: flow (the slot, 1 up),
+//!   type, rate (`u32`), 0, encoding, sockets, channel slots, words a mask,
+//!   the sockets' offsets, each channel slot's mask offset (a bit per RX
+//!   channel, 16 a word), descriptor 2's offset; descriptor 2 holds the
+//!   flow's latency in ns at byte 8 (inferno's `query_rx_flows`; the
+//!   hardware receivers on the site answer the same). The flows' latencies
+//!   are what a receiver's lateness (the heartbeat, [`crate::latency`]) is
+//!   measured against.
 //!
 //! Nothing here changes anything but what the caller names, on the one
 //! device it talks to; whether a device may be changed at all is the
@@ -48,6 +57,11 @@ pub const GET_NAME: u16 = op::DEVICE_NAME;
 pub const SET_NAME: u16 = 0x1001;
 /// A 0x3000 descriptor's size.
 const RX_ITEM: usize = 20;
+/// A 0x3200 page item's size: the flow descriptor's offset.
+const FLOW_ITEM: usize = 2;
+/// The most RX flows a list is read for: the hardware receivers on the site
+/// have 64 slots.
+const MAX_RX_FLOWS: usize = 256;
 
 /// A channel's direction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -333,6 +347,78 @@ pub fn unsubscribe(c: &mut impl Call, rx: u16) -> Result<(), ReadError> {
         op::RX_UNSUBSCRIBE,
     )
     .map(|_| ())
+}
+
+/// One RX flow a device lists (0x3200).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RxFlow {
+    /// The flow's slot, 1 up: the heartbeat's lateness and late counts
+    /// list slot `n` at index `n - 1`.
+    pub slot: u16,
+    /// The flow's sample rate.
+    pub rate: u32,
+    /// The flow's latency, ns: a packet older than this plays late.
+    pub latency_ns: u32,
+    /// The RX channels it feeds, 1 up, in order.
+    pub channels: Vec<u16>,
+}
+
+/// A big-endian `u32` at `at` of `body`.
+fn read_u32(body: &[u8], at: usize) -> Option<u32> {
+    let bytes = body.get(at..at.checked_add(4)?)?;
+    Some(u32::from_be_bytes(bytes.try_into().ok()?))
+}
+
+/// The flow whose descriptor is at packet offset `main` of `body`; `None`
+/// when any part of it lies outside the body.
+fn rx_flow_at(body: &[u8], main: u16) -> Option<RxFlow> {
+    let at = usize::from(main).checked_sub(HEADER_LEN)?;
+    let slot = read_u16(body, at)?;
+    let rate = read_u32(body, at + 4)?;
+    let sockets = usize::from(read_u16(body, at + 12)?);
+    let slots = usize::from(read_u16(body, at + 14)?);
+    let words = usize::from(read_u16(body, at + 16)?);
+    let masks = at + 18 + 2 * sockets;
+    let mut fed = std::collections::BTreeSet::new();
+    for k in 0..slots {
+        let mask = usize::from(read_u16(body, masks + 2 * k)?).checked_sub(HEADER_LEN)?;
+        for w in 0..words {
+            let bits = read_u16(body, mask + 2 * w)?;
+            for b in 0..16u16 {
+                if bits & (1 << b) != 0 {
+                    fed.insert(u16::try_from(w).ok()?.checked_mul(16)? + b + 1);
+                }
+            }
+        }
+    }
+    let descriptor2 = usize::from(read_u16(body, masks + 2 * slots)?).checked_sub(HEADER_LEN)?;
+    Some(RxFlow {
+        slot,
+        rate,
+        latency_ns: read_u32(body, descriptor2 + 8)?,
+        channels: fed.into_iter().collect(),
+    })
+}
+
+/// A page of 0x3200 (the RX flows) with status `status`: each flow that
+/// reads (one that does not is counted, not listed).
+fn rx_flow_page(status: u16, body: &[u8]) -> Option<Page<RxFlow>> {
+    let (slots, count) = table(body, FLOW_ITEM)?;
+    let items = (0..count)
+        .filter_map(|i| rx_flow_at(body, read_u16(body, 2 + i * FLOW_ITEM)?))
+        .collect();
+    Some(Page {
+        more: status == STATUS_MORE,
+        slots,
+        count,
+        items,
+    })
+}
+
+/// Every RX flow the device lists (0x3200, page by page): what its
+/// receivers' lateness is measured against.
+pub fn rx_flows(c: &mut impl Call) -> Result<Vec<RxFlow>, ReadError> {
+    read_list(&mut Pages(c), op::RX_FLOWS, MAX_RX_FLOWS, rx_flow_page)
 }
 
 #[cfg(test)]
