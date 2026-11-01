@@ -27,6 +27,13 @@
 //!   00`.
 //! - 0x3010 and 0x3014, a subscription and its end ([`subscribe_request`],
 //!   [`unsubscribe_request`]), as netaudio sends them.
+//! - 0x1100, the settings ([`settings`]), asked with start code 0x2809 and
+//!   the wanted keys (`n`, then `n` keys, as netaudio 0.4.2 asks), as every
+//!   hardware device on the site answers (with 0x27ff and no body, only
+//!   some list their table): `[n, m]`, then `n` pairs `key, value`; with
+//!   the key's top bit set the value is the packet offset of a `u32`; a
+//!   pair `0, k` says the device has no key `k`.
+//!   Confirmed against netaudio's readings on six devices (dstack #16).
 //! - 0x3200, the RX flows ([`rx_flows`]), paged: `[slots, count]`, then
 //!   each flow's descriptor offset. A descriptor: flow (the slot, 1 up),
 //!   type, rate (`u32`), 0, encoding, sockets, channel slots, words a mask,
@@ -73,6 +80,14 @@ pub enum Dir {
 /// One exchange of a whole request body: the reply's status and body.
 pub trait Call {
     fn call(&mut self, op1: u16, body: &[u8]) -> Result<(u16, Vec<u8>), ReadError>;
+
+    /// [`Call::call`] with the start code `start` in the header instead of
+    /// the usual 0x27ff (the settings read asks with 0x2809). An exchange
+    /// that cannot send another start code sends its usual one.
+    fn call_as(&mut self, start: u16, op1: u16, body: &[u8]) -> Result<(u16, Vec<u8>), ReadError> {
+        let _ = start;
+        self.call(op1, body)
+    }
 }
 
 /// A [`Call`] read page by page, as the directory reader asks.
@@ -347,6 +362,114 @@ pub fn unsubscribe(c: &mut impl Call, rx: u16) -> Result<(), ReadError> {
         op::RX_UNSUBSCRIBE,
     )
     .map(|_| ())
+}
+
+/// The start code the settings read asks with.
+pub const SETTINGS_START: u16 = 0x2809;
+
+/// The settings' keys (0x1100) the stack names.
+pub mod key {
+    pub const SAMPLE_RATE: u16 = 0x8020;
+    pub const PULLUP: u16 = 0x8021;
+    pub const LATENCY_DEFAULT: u16 = 0x8204;
+    pub const LATENCY_CONFIGURED: u16 = 0x8205;
+    pub const LATENCY_ACTIVE: u16 = 0x8301;
+    pub const LATENCY_MAX: u16 = 0x8302;
+    pub const LATENCY_MIN: u16 = 0x8306;
+}
+
+/// The keys the settings read asks for: those [`key`] names. Every
+/// hardware device on the site answers each (1.11: two Yamaha cards, a
+/// Tascam, a wireless receiver, an ESI interface, DVS).
+pub const SETTING_KEYS: [u16; 7] = [
+    key::SAMPLE_RATE,
+    key::PULLUP,
+    key::LATENCY_DEFAULT,
+    key::LATENCY_CONFIGURED,
+    key::LATENCY_ACTIVE,
+    key::LATENCY_MAX,
+    key::LATENCY_MIN,
+];
+
+/// A device's settings (0x1100): what it answered, each named key read.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Settings {
+    pub sample_rate: Option<u32>,
+    pub pullup: Option<u32>,
+    /// The device's latency, ns: as configured, in effect, its default,
+    /// and the range it allows.
+    pub latency_configured_ns: Option<u32>,
+    pub latency_active_ns: Option<u32>,
+    pub latency_default_ns: Option<u32>,
+    pub latency_min_ns: Option<u32>,
+    pub latency_max_ns: Option<u32>,
+    /// Every key answered, with its value (the `u32` it points at for a
+    /// key with the top bit set).
+    pub all: BTreeMap<u16, u32>,
+}
+
+/// The settings request's body: the count, then the keys.
+pub fn settings_request_body(keys: &[u16]) -> Vec<u8> {
+    let mut out = u16::try_from(keys.len())
+        .unwrap_or(u16::MAX)
+        .to_be_bytes()
+        .to_vec();
+    for k in keys {
+        out.extend_from_slice(&k.to_be_bytes());
+    }
+    out
+}
+
+/// A 0x1100 reply body: each pair that reads (a pointed value past the
+/// body is left out, and so is key 0, which marks a key asked for that the
+/// device does not have); `None` when the pairs pass the body.
+pub fn parse_settings(body: &[u8]) -> Option<Settings> {
+    let n = usize::from(*body.first()?);
+    let mut all = BTreeMap::new();
+    for k in 0..n {
+        let at = 2 + 4 * k;
+        let (key, value) = (read_u16(body, at)?, read_u16(body, at + 2)?);
+        if key == 0 {
+            continue;
+        }
+        let value = if key & 0x8000 != 0 {
+            match usize::from(value)
+                .checked_sub(HEADER_LEN)
+                .and_then(|o| read_u32(body, o))
+            {
+                Some(v) => v,
+                None => continue,
+            }
+        } else {
+            u32::from(value)
+        };
+        all.insert(key, value);
+    }
+    let get = |k: u16| all.get(&k).copied();
+    Some(Settings {
+        sample_rate: get(key::SAMPLE_RATE),
+        pullup: get(key::PULLUP),
+        latency_configured_ns: get(key::LATENCY_CONFIGURED),
+        latency_active_ns: get(key::LATENCY_ACTIVE),
+        latency_default_ns: get(key::LATENCY_DEFAULT),
+        latency_min_ns: get(key::LATENCY_MIN),
+        latency_max_ns: get(key::LATENCY_MAX),
+        all,
+    })
+}
+
+/// The device's settings (0x1100 with [`SETTINGS_START`] and
+/// [`SETTING_KEYS`]). A device that keeps none answers an empty table.
+pub fn settings(c: &mut impl Call) -> Result<Settings, ReadError> {
+    let (_, body) = ok(
+        c.call_as(
+            SETTINGS_START,
+            op::ZEROS_1100,
+            &settings_request_body(&SETTING_KEYS),
+        )?,
+        op::ZEROS_1100,
+    )?;
+    parse_settings(&body).ok_or(ReadError::Malformed { op: op::ZEROS_1100 })
 }
 
 /// One RX flow a device lists (0x3200).

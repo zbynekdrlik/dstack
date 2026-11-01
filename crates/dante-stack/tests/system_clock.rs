@@ -204,6 +204,12 @@ fn our_tx_reaches_our_rx_clean_on_the_system_clock() {
         let halt = AtomicBool::new(false);
         let to = std::net::SocketAddrV4::new(ip, dante_stack::arc::PORT);
         let mut udp = Udp::open(ip, to, &seq, REPLY_TIMEOUT, &requests, &halt).expect("a socket");
+        let settings = dante_stack::arc::control::settings(&mut udp);
+        assert_eq!(
+            settings.ok(),
+            Some(Default::default()),
+            "no table of ours yet"
+        );
         dante_stack::arc::control::rx_flows(&mut udp)
     };
     let heard = dante_stack::latency::listen(ip, ip, Duration::from_millis(2_500));

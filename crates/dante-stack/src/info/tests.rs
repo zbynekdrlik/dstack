@@ -1153,3 +1153,49 @@ async fn a_send_from_an_unregistered_sender_is_dropped() {
     assert!(got.is_err(), "nothing sent for a stranger");
     manager.abort();
 }
+
+/// dasio (1.11, Windows): the manager device stopped while the address's
+/// info port stayed held a moment; the member's sends to the dead manager
+/// came back as ICMP port-unreachable, Windows reported it on the next
+/// receive as WSAECONNRESET (10054), and the member's info server stopped,
+/// taking its device down. The member must survive and take over.
+#[tokio::test]
+async fn a_member_outlives_a_dead_manager_and_takes_the_port_when_it_frees() {
+    let (_at, _info_rx, _beat_rx, to, holder) = loopback(Duration::from_millis(50)).await;
+    let held = v4(holder.local_addr().unwrap());
+    let manager = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let manager_at = manager.local_addr().unwrap();
+    let member_sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let member = tokio::spawn(serve_member(
+        member_sock,
+        manager_at,
+        held,
+        Multicaster::new(identity()),
+        to,
+        Arc::new(NoClock),
+        Arc::new(Changes::default()),
+        Arc::new(Requests::default()),
+    ));
+    // The member registers, then the manager is gone; the port stays held.
+    let mut buf = [0u8; 2048];
+    tokio::time::timeout(BOUND, manager.recv_from(&mut buf))
+        .await
+        .expect("the member registered")
+        .unwrap();
+    drop(manager);
+    // Heartbeats every 50 ms and leases go to the dead port for 1.5 s.
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    assert!(
+        !member.is_finished(),
+        "the member stopped: {:?}",
+        member.await
+    );
+    // The port frees: the member takes it.
+    drop(holder);
+    let (own, _) = tokio::time::timeout(Duration::from_secs(5), member)
+        .await
+        .expect("the member took over")
+        .unwrap()
+        .expect("the member served on");
+    assert_eq!(own.local_addr().unwrap(), std::net::SocketAddr::V4(held));
+}
