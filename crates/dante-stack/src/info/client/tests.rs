@@ -489,3 +489,38 @@ fn a_short_clock_status_does_not_read() {
     assert_eq!(c.word_clock, None);
     assert_eq!(c.max_drift_ppb, 200_000);
 }
+
+#[test]
+fn a_device_that_drops_the_first_request_answers_the_resend() {
+    // dcontroller on the site (1.11.2026): Brooklyn cards left a board-info
+    // request asked right after the product info unanswered; netaudio sent
+    // it three times, and the reply came after the third.
+    let client = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let dev = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let port = dev.local_addr().unwrap().port();
+    let to = client.local_addr().unwrap();
+    let t = std::thread::spawn(move || {
+        dev.set_read_timeout(Some(WAIT)).unwrap();
+        let mut buf = [0u8; 128];
+        let mut asked = 0;
+        while let Ok((n, _)) = dev.recv_from(&mut buf) {
+            assert_eq!(&buf[24..32], &request(1, [0; 8], Ask::Board)[24..32]);
+            asked += 1;
+            if asked == 2 {
+                dev.send_to(&reply(0x60, [0; 8], &[5]), to).unwrap();
+                return (asked, n);
+            }
+        }
+        (asked, 0)
+    });
+    let got = ask(
+        &client,
+        SocketAddrV4::new(Ipv4Addr::LOCALHOST, port),
+        None,
+        Ask::Board,
+        Duration::from_secs(1),
+    );
+    let (asked, n) = t.join().unwrap();
+    assert_eq!(got, Ok(vec![5]));
+    assert_eq!((asked, n), (2, 32));
+}
