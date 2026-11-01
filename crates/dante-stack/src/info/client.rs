@@ -14,6 +14,14 @@
 //! is given (several devices answer on one address) and the reply's
 //! opcode (`.. 00 c0` / `.. 00 60`).
 //!
+//! The clock status (`07 31 00 21 00 00 00 64` and 60 zeros, netaudio's
+//! clock-stats request; reply `.. 00 20`) is parsed by [`parse_clock`]:
+//! the clock and servo states, the stratum, the frequency offset, the
+//! device's, master's and grandmaster's ids, each PTP port's state, the
+//! capabilities, the maximum drift and the word clock, as netaudio decodes
+//! them on three devices (a leader and two followers). Our own device
+//! answers no clock stats (it has no PTP of its own).
+//!
 //! Every version is `major u8, minor u8, patch u16`, big-endian.
 //!
 //! | product info (0xc0) | |
@@ -49,18 +57,30 @@ use std::time::{Duration, Instant};
 use super::{HEADER_LEN, INFO_GROUP, INFO_PORT, REQUEST_PORT, START_INFO, VENDOR};
 
 const RECV_BUFFER: usize = 2048;
+/// How long an ask waits for a reply before it sends its request again: a
+/// Brooklyn card drops a board-info request asked right after another
+/// (netaudio sends it three times; dcontroller found it on the site).
+pub const RESEND: Duration = Duration::from_millis(250);
 
 /// Where a name ends: its field's end or its first zero.
 const PRODUCT_MANUFACTURER: (usize, usize) = (0x2c, 0xac);
 const PRODUCT_NAME: (usize, usize) = (0xac, 0x12c);
 const BOARD_SHORT_NAME: (usize, usize) = (0x0c, 0x14);
 const BOARD_MODEL_NAME: (usize, usize) = (0x38, 0xb8);
+/// The zeros netaudio's clock-stats request carries.
+const CLOCK_REQUEST_BODY: usize = 60;
+/// The clock status's ports start here, 4 bytes each.
+const CLOCK_PORTS: usize = 0x28;
+/// Where the word clock state sits past the clock status's extension.
+const CLOCK_WORD_CLOCK: usize = 0x17;
 
 /// What to ask for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Ask {
     Product,
     Board,
+    /// The clock status (Dante's clock stats).
+    Clock,
 }
 
 impl Ask {
@@ -69,6 +89,16 @@ impl Ask {
         match self {
             Ask::Product => 0xc1,
             Ask::Board => 0x61,
+            Ask::Clock => 0x21,
+        }
+    }
+
+    /// The request opcode's tail byte and the request body's length:
+    /// netaudio's clock-stats request ends `.. 64` and carries 60 zeros.
+    fn request_tail(self) -> (u8, usize) {
+        match self {
+            Ask::Product | Ask::Board => (0, 0),
+            Ask::Clock => (0x64, CLOCK_REQUEST_BODY),
         }
     }
 
@@ -77,6 +107,7 @@ impl Ask {
         match self {
             Ask::Product => 0xc0,
             Ask::Board => 0x60,
+            Ask::Clock => 0x20,
         }
     }
 }
@@ -125,6 +156,71 @@ pub struct Board {
     pub boot: Option<Version>,
 }
 
+/// A device's clock status (the clock-stats reply). Codes are kept as the
+/// device sends them; [`ClockStatus::clock_state_name`] and the others
+/// name only the codes seen in captures.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClockStatus {
+    /// 2 undisciplined (a leader), 3 disciplined.
+    pub clock_state: u16,
+    /// 3 synchronized, 6 none (a leader).
+    pub servo_state: u16,
+    /// The stratum (the byte at 0x07; the byte before it is 1 at the
+    /// leader, 0 at a follower, its meaning unknown).
+    pub stratum: u8,
+    /// The clock's frequency offset, ppb.
+    pub frequency_ppb: i32,
+    /// The clock ids (PTPv1 UUIDs, a MAC each): the device's, its
+    /// master's and the grandmaster's.
+    pub device: [u8; 6],
+    pub master: [u8; 6],
+    pub grandmaster: [u8; 6],
+    /// Each PTP port's state (IEEE 1588: 3 disabled, 6 master, 9 slave).
+    pub ports: Vec<u16>,
+    pub capabilities: u16,
+    pub max_drift_ppb: u32,
+    /// The word clock: 0 unknown, 1 none, 3 valid; `None` past the reply.
+    pub word_clock: Option<u8>,
+}
+
+impl ClockStatus {
+    /// Some port leads (state 6, master).
+    pub fn is_leader(&self) -> bool {
+        self.ports.contains(&6)
+    }
+
+    /// The device is the grandmaster.
+    pub fn is_grandmaster(&self) -> bool {
+        self.device == self.grandmaster
+    }
+
+    pub fn clock_state_name(&self) -> Option<&'static str> {
+        match self.clock_state {
+            2 => Some("undisciplined"),
+            3 => Some("disciplined"),
+            _ => None,
+        }
+    }
+
+    pub fn servo_state_name(&self) -> Option<&'static str> {
+        match self.servo_state {
+            3 => Some("synchronized"),
+            6 => Some("none"),
+            _ => None,
+        }
+    }
+}
+
+/// An IEEE 1588 port state's name, for the states seen in captures.
+pub fn port_state_name(state: u16) -> Option<&'static str> {
+    match state {
+        3 => Some("disabled"),
+        6 => Some("leader"),
+        9 => Some("follower"),
+        _ => None,
+    }
+}
+
 /// Why an ask ended without a reply that reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum InfoError {
@@ -138,14 +234,16 @@ pub enum InfoError {
 
 /// The request for `ask`: sequence `seq`, from the device id `from`.
 pub fn request(seq: u16, from: [u8; 8], ask: Ask) -> Vec<u8> {
-    let mut out = Vec::with_capacity(HEADER_LEN);
+    let (tail, body) = ask.request_tail();
+    let mut out = Vec::new();
     out.extend_from_slice(&START_INFO.to_be_bytes());
-    out.extend_from_slice(&(HEADER_LEN as u16).to_be_bytes());
+    out.extend_from_slice(&((HEADER_LEN + body) as u16).to_be_bytes());
     out.extend_from_slice(&seq.to_be_bytes());
     out.extend_from_slice(&0u16.to_be_bytes());
     out.extend_from_slice(&from);
     out.extend_from_slice(&VENDOR);
-    out.extend_from_slice(&[0x07, 0x31, 0x00, ask.request_op(), 0, 0, 0, 0]);
+    out.extend_from_slice(&[0x07, 0x31, 0x00, ask.request_op(), 0, 0, 0, tail]);
+    out.resize(HEADER_LEN + body, 0);
     out
 }
 
@@ -218,10 +316,47 @@ pub fn parse_board(body: &[u8]) -> Option<Board> {
     })
 }
 
+fn u16_at(body: &[u8], at: usize) -> Option<u16> {
+    Some(u16::from_be_bytes(body.get(at..at + 2)?.try_into().ok()?))
+}
+
+fn u32_at(body: &[u8], at: usize) -> Option<u32> {
+    Some(u32::from_be_bytes(body.get(at..at + 4)?.try_into().ok()?))
+}
+
+fn mac_at(body: &[u8], at: usize) -> Option<[u8; 6]> {
+    body.get(at..at + 6)?.try_into().ok()
+}
+
+/// A clock-stats reply body; `None` when it is shorter than its ports and
+/// the fields after them.
+pub fn parse_clock(body: &[u8]) -> Option<ClockStatus> {
+    let n = usize::from(u16_at(body, 0x24)?);
+    let extension = usize::from(u16_at(body, 0x26)?);
+    let ports = (0..n)
+        .map(|p| u16_at(body, CLOCK_PORTS + 4 * p))
+        .collect::<Option<Vec<_>>>()?;
+    let after = CLOCK_PORTS + 4 * n;
+    Some(ClockStatus {
+        clock_state: u16_at(body, 0x00)?,
+        servo_state: u16_at(body, 0x02)?,
+        stratum: *body.get(0x07)?,
+        frequency_ppb: i32::from_be_bytes(body.get(0x08..0x0c)?.try_into().ok()?),
+        device: mac_at(body, 0x0c)?,
+        master: mac_at(body, 0x14)?,
+        grandmaster: mac_at(body, 0x1c)?,
+        ports,
+        capabilities: u16_at(body, after)?,
+        max_drift_ppb: u32_at(body, after + 4)?,
+        word_clock: body.get(extension + CLOCK_WORD_CLOCK).copied(),
+    })
+}
+
 /// Sends the request for `ask` from `sock` to `device` (a device's
-/// [`REQUEST_PORT`]), then waits up to `wait` on `sock` for its reply from
-/// that address, any port (and the device id `id`, when given); the
-/// reply's body. Other datagrams on `sock` are skipped.
+/// [`REQUEST_PORT`]), and again every [`RESEND`] until its reply comes,
+/// for up to `wait` in all: its reply from that address, any port (and the
+/// device id `id`, when given); the reply's body. Other datagrams on
+/// `sock` are skipped.
 pub fn ask(
     sock: &UdpSocket,
     device: SocketAddrV4,
@@ -233,15 +368,21 @@ pub fn ask(
         ask,
         kind: e.kind(),
     };
-    sock.send_to(&request(1, [0; 8], ask), device).map_err(io)?;
-    let deadline = Instant::now() + wait;
+    let start = Instant::now();
+    let deadline = start + wait;
+    let mut next = start;
     let mut buf = [0u8; RECV_BUFFER];
     loop {
-        let left = deadline.saturating_duration_since(Instant::now());
-        if left.is_zero() {
+        let now = Instant::now();
+        if now >= deadline {
             return Err(InfoError::Timeout { ask });
         }
-        sock.set_read_timeout(Some(left)).map_err(io)?;
+        if now >= next {
+            sock.send_to(&request(1, [0; 8], ask), device).map_err(io)?;
+            next = now + RESEND;
+        }
+        sock.set_read_timeout(Some(deadline.min(next) - now))
+            .map_err(io)?;
         match sock.recv_from(&mut buf) {
             Ok((n, SocketAddr::V4(from))) if from.ip() == device.ip() => {
                 if let Some(body) = reply_body(&buf[..n], ask, id) {
@@ -249,7 +390,10 @@ pub fn ask(
                 }
             }
             Ok(_) => {}
-            Err(e) => return Err(recv_error(ask, &e)),
+            Err(e) => match recv_error(ask, &e) {
+                InfoError::Timeout { .. } => {}
+                other => return Err(other),
+            },
         }
     }
 }
@@ -326,6 +470,25 @@ pub fn board_info(
         wait,
     )?;
     parse_board(&body).ok_or(InfoError::Malformed { ask: Ask::Board })
+}
+
+/// The clock status of the device at `device` (with the device id `id`,
+/// when given), asked from our interface at `iface`.
+pub fn clock_status(
+    iface: Ipv4Addr,
+    device: Ipv4Addr,
+    id: Option<[u8; 8]>,
+    wait: Duration,
+) -> Result<ClockStatus, InfoError> {
+    let sock = on_group(iface, Ask::Clock)?;
+    let body = ask(
+        &sock,
+        SocketAddrV4::new(device, REQUEST_PORT),
+        id,
+        Ask::Clock,
+        wait,
+    )?;
+    parse_clock(&body).ok_or(InfoError::Malformed { ask: Ask::Clock })
 }
 
 #[cfg(test)]

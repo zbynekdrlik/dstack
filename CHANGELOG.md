@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.4.27 (2026-11-01)
+
+- New: `info::client::clock_status(iface, device, id, wait)` reads any device's clock status over UDP 8700 (Dante's clock stats, netaudio's request), read-only (dstack #16, for dcontroller's clock column). `ClockStatus`:
+  - the clock state (2 undisciplined, 3 disciplined) and the servo state (3 synchronized, 6 none);
+  - the stratum and the frequency offset (ppb);
+  - the device's, master's and grandmaster's clock ids;
+  - each PTP port's state (`port_state_name`: 3 disabled, 6 leader, 9 follower);
+  - the capabilities, the maximum drift and the word clock state;
+  - `is_leader()` and `is_grandmaster()`.
+  - Codes are kept raw; only codes seen in captures have names. The layout matched netaudio's decode on three devices: the leader card and two followers.
+- Our own device answers no clock stats (it has no PTP of its own), as before.
+- Fix: the 8700 client sends its request again every 250 ms (`info::client::RESEND`) until the reply comes or the wait ends. dcontroller found the Brooklyn cards (two Yamaha AIC128-D, a Tascam ML-32D) leaving a board-info request asked right after the product info unanswered within 1 s; netaudio sends it three times, and the reply came after the third.
+
 ## 0.4.26 (2026-11-01)
 
 - Fix: a latency set in ns now reads as its nearest whole samples, not cut down. dasio's RX latency of 333 333 ns at 96 kHz read as 31 samples, so a 1 ms source needed a delay of 65 and two blocks of 64: a round trip of 351 samples where 32 gives 288 (dstack #1). New `clock::latency_samples`. It applies to our device's latency, a flow's latency and advertised latency (the playout point, the block delay, `below_advertised`), the TX lag bound, the 0x3200 stated latency, and the ctl status's `latency` and `advertised` samples. `clock::to_samples` (time to a sample index) still rounds down. A latency that was a whole number of samples reads as before.
