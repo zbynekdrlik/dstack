@@ -1453,3 +1453,49 @@ fn a_rename_moves_only_our_own_subscriptions() {
     assert_eq!(state.subscription(5), Some(&sub("TX 2", "new-name")));
     assert_eq!(state.config_name, "test-device", "a rename is no config's");
 }
+
+/// The test config with `extra` lines added before `state_file`.
+fn config_plus(extra: &str) -> String {
+    config_with(
+        "state_file =",
+        &format!("{extra}\nstate_file = \"state.toml\""),
+    )
+}
+
+#[test]
+fn the_rx_port_base_is_read_and_bounded() {
+    assert_eq!(config().rx_port_base, None, "the OS chooses when left out");
+    let cfg = DeviceConfig::from_toml(&config_plus("rx_port_base = 47000")).unwrap();
+    assert_eq!(cfg.rx_port_base, Some(47_000));
+    // The edges: 1024, and the last base whose 32 ports end at 65535.
+    for ok in [1024, 65_504] {
+        let text = config_plus(&format!("rx_port_base = {ok}"));
+        assert_eq!(
+            DeviceConfig::from_toml(&text).unwrap().rx_port_base,
+            Some(ok)
+        );
+    }
+    for bad in [
+        "rx_port_base = 1023".to_string(),
+        "rx_port_base = 65505".to_string(),
+        // The range would hold the ARC port (4440), the CMC port (8800) or
+        // the flow-control port (4455), each at a range edge.
+        "rx_port_base = 4409".to_string(),
+        "rx_port_base = 4440".to_string(),
+        "rx_port_base = 8769".to_string(),
+        "rx_port_base = 4455".to_string(),
+        "rx_port_base = 47000\narc_port = 47031".to_string(),
+    ] {
+        let got = problems(&config_plus(&bad));
+        assert!(
+            got.iter()
+                .any(|p| p.starts_with("rx_port_base: 1024 to 65504")),
+            "{bad}: {got:?}"
+        );
+    }
+    // Just clear of the ARC port on both sides.
+    for ok in [4408, 4441 + 32] {
+        let text = config_plus(&format!("rx_port_base = {ok}"));
+        assert!(DeviceConfig::from_toml(&text).is_ok(), "{ok}");
+    }
+}

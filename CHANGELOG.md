@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.23 (2026-11-01)
+
+- New config key `rx_port_base`: the RX flow sockets take fixed ports, slot `n` on `rx_port_base + n` (32 ports), so a firewall can name them. camera-box needs this for its nft table on the editing PCs (dstack #20).
+  - Left out, the OS chooses the ports, as before.
+  - The config refuses a base under 1024, a range past 65535, and a range holding the ARC, CMC or flow-control port.
+  - A port already taken at start is an error naming it (`RxShared::new_at`).
+
 ## 0.4.22 (2026-11-01)
 
 - Discovery also browses `_netaudio-cmc` and gives each device its device id (`discover::Device::device_id`), read from the record's `id`. It is the id its heartbeat carries, so a controller can match `latency::listen`'s entries to devices when several share an address. On the site, ten devices' CMC ids were checked, ours and the hardware alike. `discover::parse_device_id` reads the 16 hex digits (dcontroller, dstack #16).
