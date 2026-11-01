@@ -50,7 +50,8 @@
 //! whose subscription changes leaves its flow; phase B sends no update
 //! (0x0102): a flow keeps the slots it was asked with.
 //!
-//! **Statuses** ([`SubStatus`], inferno's codes): a subscribed channel is
+//! **Statuses** ([`SubStatus`], Dante's codes; our server lists inferno's
+//! few): a subscribed channel is
 //! Unresolved without a flow (or TX fail / too many TX flows after its last
 //! request failed), InProgress while its flow is asked for or quiet, and
 //! Receiving while its flow's audio arrives. No multicast in phase B.
@@ -62,11 +63,14 @@
 pub mod directory;
 pub mod instance;
 pub mod resolve;
+pub mod sub_status;
 
 use std::collections::BTreeMap;
 use std::net::{Ipv4Addr, SocketAddrV4};
 
 use tracing::{info, warn};
+
+pub use sub_status::{SubState, SubStatus};
 
 use crate::clock::to_samples;
 use crate::device::{DeviceConfig, Subscription};
@@ -109,43 +113,6 @@ pub const YOUNG_NS: u64 = 6_000_000_000;
 /// failures in a row: 9 s for none or one, then doubling to 72 s.
 pub fn retry_after(failures: u32) -> u64 {
     (RETRY_NS << failures.saturating_sub(1).min(3)).min(RETRY_MAX_NS)
-}
-
-/// A subscribed channel's state, with inferno's codes (ARC 0x3000).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SubStatus {
-    Unresolved,
-    InProgress,
-    TooManyTxFlows,
-    TxFail,
-    /// Receiving unicast.
-    Receiving,
-}
-
-impl SubStatus {
-    /// The code Dante Controller reads.
-    pub fn code(self) -> u32 {
-        match self {
-            SubStatus::Unresolved => 1,
-            SubStatus::InProgress => 8,
-            SubStatus::TooManyTxFlows => 0x14,
-            SubStatus::TxFail => 0x15,
-            SubStatus::Receiving => 0x0101_0009,
-        }
-    }
-
-    /// The status of `code`, when it is one of [`SubStatus::code`]'s.
-    pub fn from_code(code: u32) -> Option<SubStatus> {
-        [
-            SubStatus::Unresolved,
-            SubStatus::InProgress,
-            SubStatus::TooManyTxFlows,
-            SubStatus::TxFail,
-            SubStatus::Receiving,
-        ]
-        .into_iter()
-        .find(|s| s.code() == code)
-    }
 }
 
 /// One flow: its slot and which of the slot's flows it is.

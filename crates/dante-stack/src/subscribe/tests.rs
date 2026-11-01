@@ -964,7 +964,9 @@ fn a_status_code_reads_back_as_its_status_and_others_as_none() {
         assert_eq!(SubStatus::from_code(s.code()), Some(s));
     }
     assert_eq!(SubStatus::from_code(0), None);
-    assert_eq!(SubStatus::from_code(9), None);
+    // The low half decides, whatever the receiver detail (dstack #44).
+    assert_eq!(SubStatus::from_code(9), Some(SubStatus::Receiving));
+    assert_eq!(SubStatus::from_code(6), None);
 }
 
 /// A wireless mic as the ARC directory offers it: 2 slots, fpp 4 only.
