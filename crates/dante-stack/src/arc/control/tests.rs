@@ -622,7 +622,8 @@ fn settings_asks_with_0x2809_and_types_its_errors() {
     // Our own device keeps no settings table yet: an empty one.
     let mut own = Own::new();
     assert_eq!(settings(&mut own), Ok(Settings::default()));
-    // An exchange without call_as sends its usual start code.
-    let mut fixed = Fixed(STATUS_OK, vec![0, 0]);
-    assert_eq!(settings(&mut fixed), Ok(Settings::default()));
+    // An exchange without call_as sends its usual start code; the reply
+    // still reads.
+    let mut fixed = Fixed(STATUS_OK, unhex(CARD_SETTINGS)[HEADER_LEN..].to_vec());
+    assert_eq!(settings(&mut fixed).unwrap().latency_min_ns, Some(150_000));
 }
