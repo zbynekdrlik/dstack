@@ -1216,3 +1216,24 @@ fn a_delayed_flow_s_channel_is_read_its_delay_later_and_the_others_are_not() {
         "TX 5 is RX 4 undelayed"
     );
 }
+
+#[test]
+fn the_pump_s_timing_comes_from_the_config_with_the_latency_in_nearest_samples() {
+    let mut cfg = DeviceConfig::from_toml(TEST_DEVICE).expect("config/test-dante-device.toml");
+    cfg.block = 64;
+    cfg.work_margin = 128;
+    cfg.sample_rate = 96_000;
+    // dasio's 333 333 ns: 32 samples, as the RX reads its playout point.
+    cfg.latency_ns = 333_333;
+    assert_eq!(
+        Timing::of(&cfg),
+        Timing {
+            block: 64,
+            playout: 32,
+            margin: 128
+        }
+    );
+    cfg.sample_rate = 48_000;
+    cfg.latency_ns = 2_000_000;
+    assert_eq!(Timing::of(&cfg).playout, 96);
+}

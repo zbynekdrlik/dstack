@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.4.28 (2026-11-01)
+
+- New: `embed::Embedded`, a Dante device inside an app's own process (the owner's connection model: every app carries its own connector and appears as its own device; dstack #20, for the intercom and strih-obs).
+  - `Embedded::start(cfg, place, map, processor)` takes a config built in code. It sets up the device with no control socket, serves it, and runs the app's `dante_audio_io::Process` every block on the RX channels in `map.rx`, writing into the TX channels in `map.tx`. Those TX channels are set to send the app's output (`Source::Engine`), so the app does not set sources itself.
+  - `Embedded::stop(within)` ends the pump, then the device and its goodbyes. Start and stop can repeat in one process.
+  - `Embedded::media()` gives the status; `ended()` says why serving ended by itself.
+- New: `host::Signals::Host` registers no signal handler; the app owns its signals. `Signals::Stop` and `Signals::Report` still register SIGTERM/SIGINT through tokio, and that handler stays for the process's life, which an app that embeds a device must avoid (inside OBS, SIGTERM would stop ending OBS).
+- New: `host::prepare_config(cfg, place, control, engine_tx, source)`, the setup from a config value with the control socket optional. `prepare_with` reads the file and calls it.
+- New: `stream::Timing::of(&cfg)`, the pump's timing (block, the latency in nearest samples, the work margin) in one place. A host that built `Timing` itself should move to it, so its playout point matches the RX's since 0.4.26.
+- Embedded apps run on the `low_latency` profile; `timing = "normal"` stays refused, as withdrawn on 31.10.
+
 ## 0.4.27 (2026-11-01)
 
 - New: `info::client::clock_status(iface, device, id, wait)` reads any device's clock status over UDP 8700 (Dante's clock stats, netaudio's request), read-only (dstack #16, for dcontroller's clock column). `ClockStatus`:

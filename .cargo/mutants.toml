@@ -17,6 +17,11 @@ exclude_globs = ["crates/dante-stack/src/clock/sys_windows.rs"]
 exclude_re = [
   # Host glue only the whole-host tests run (they cannot run per mutant).
   "replace serve_device -> Result",
+  # The embedding glue and its host paths (no socket, no signal handler):
+  # tests/embed.rs runs a whole device with them (not per mutant);
+  # Timing::of, their one computation, is unit tested.
+  "embed.rs",
+  "host.rs.*(prepare_config|Watch::new|Watch::stop)",
   # The heartbeat listen's socket loop: tests/system_clock.rs reads our
   # running device with it; its parse and gather are unit tested.
   "latency.rs.*listen",

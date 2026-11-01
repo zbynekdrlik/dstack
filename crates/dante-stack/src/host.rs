@@ -61,7 +61,7 @@ use crate::clock::{ClockStats, MonoClock, monotonic_ns, poll_dantesync, realtime
 #[cfg(unix)]
 use crate::ctl;
 use crate::daemon::media::{Clock, Media};
-use crate::daemon::{self, BUILD, IfAddr, Options, ServeError, Sockets, VERSION};
+use crate::daemon::{self, BUILD, IfAddr, Options, Place, ServeError, Sockets, VERSION};
 use crate::device::{Device, DeviceConfig, DeviceState};
 use crate::info::{self, Multicast, NetInfo};
 
@@ -119,6 +119,11 @@ pub enum Signals {
     /// Only set the flag: the host (the engine) decides when to stop,
     /// through [`Host::stop`].
     Report(Arc<AtomicBool>),
+    /// No handler at all: an app that hosts the device in its own process
+    /// (an OBS plugin) owns its signals and stops the device through
+    /// [`Host::stop`]. A registered handler would outlive the device and
+    /// keep SIGTERM from ending the app ([`crate::embed`]).
+    Host,
 }
 
 /// The device's config read from `path`: a file that cannot be read or a
@@ -336,7 +341,7 @@ pub struct Prepared {
     source: ClockSource,
     media: Arc<Media>,
     #[cfg(unix)]
-    listener: UnixListener,
+    listener: Option<UnixListener>,
 }
 
 /// [`prepare_with`] on dantesync's clock: the production device.
@@ -359,7 +364,26 @@ pub fn prepare_with(
     engine_tx: &[usize],
     source: ClockSource,
 ) -> Result<Prepared, HostError> {
-    let device = load_device(read_config(&opts.config)?)?;
+    prepare_config(
+        read_config(&opts.config)?,
+        &opts.place,
+        Some(&opts.control),
+        engine_tx,
+        source,
+    )
+}
+
+/// [`prepare_with`] for a config the caller built (an app hosting the
+/// device: [`crate::embed`]): the control socket at `control`, none with
+/// `None` (Windows has none either way).
+pub fn prepare_config(
+    cfg: DeviceConfig,
+    place: &Place,
+    control: Option<&Path>,
+    engine_tx: &[usize],
+    source: ClockSource,
+) -> Result<Prepared, HostError> {
+    let device = load_device(cfg)?;
     // Withdrawn (31.10.2026): on Windows its timer-only waits made the TX
     // and the pump late (a receiver's Latency tab: peak 32.1 ms, 2562 late
     // packets, pops on the PA). Refused until fixed and proven on a
@@ -389,8 +413,8 @@ pub fn prepare_with(
     }
     // An address not there may come (an interface still coming up at
     // boot): exit 1, which the unit retries.
-    let ifa = daemon::pick_interface(&opts.place, &interfaces().map_err(run_failed)?)
-        .map_err(run_failed)?;
+    let ifa =
+        daemon::pick_interface(place, &interfaces().map_err(run_failed)?).map_err(run_failed)?;
     let net = interface_info(&ifa)?;
     info!(
         version = VERSION,
@@ -448,15 +472,20 @@ pub fn prepare_with(
     let media = Media::new(&device, net.ip, clock, seed(), engine_tx)
         .map_err(|e| run_failed(format!("the flow sockets: {e}")))?;
     #[cfg(unix)]
-    let listener = {
-        let _in_rt = rt.enter();
-        ctl::bind_control(&opts.control).map_err(|e| {
-            run_failed(format!(
-                "the control socket {}: {e} (the unit's RuntimeDirectory makes its folder)",
-                opts.control.display()
-            ))
-        })?
+    let listener = match control {
+        Some(path) => {
+            let _in_rt = rt.enter();
+            Some(ctl::bind_control(path).map_err(|e| {
+                run_failed(format!(
+                    "the control socket {}: {e} (the unit's RuntimeDirectory makes its folder)",
+                    path.display()
+                ))
+            })?)
+        }
+        None => None,
     };
+    #[cfg(windows)]
+    let _ = control;
     Ok(Prepared {
         device,
         net,
@@ -585,7 +614,7 @@ struct Served {
     source: ClockSource,
     media: Arc<Media>,
     #[cfg(unix)]
-    listener: UnixListener,
+    listener: Option<UnixListener>,
 }
 
 /// The signals as registered (in the device's runtime).
@@ -600,17 +629,30 @@ enum Watch {
         int: Signal,
         flag: Arc<AtomicBool>,
     },
+    /// No handler: only the host's stop.
+    Host,
 }
 
 #[cfg(unix)]
 impl Watch {
-    /// Registers SIGTERM and SIGINT (inside the runtime).
+    /// Registers SIGTERM and SIGINT (inside the runtime), except for
+    /// [`Signals::Host`], which registers nothing.
     fn new(signals: Signals) -> Result<Watch, HostError> {
-        let term = signal(SignalKind::terminate()).map_err(run_failed)?;
-        let int = signal(SignalKind::interrupt()).map_err(run_failed)?;
+        let both = || -> Result<(Signal, Signal), HostError> {
+            let term = signal(SignalKind::terminate()).map_err(run_failed)?;
+            let int = signal(SignalKind::interrupt()).map_err(run_failed)?;
+            Ok((term, int))
+        };
         Ok(match signals {
-            Signals::Stop => Watch::Stop { term, int },
-            Signals::Report(flag) => Watch::Report { term, int, flag },
+            Signals::Stop => {
+                let (term, int) = both()?;
+                Watch::Stop { term, int }
+            }
+            Signals::Report(flag) => {
+                let (term, int) = both()?;
+                Watch::Report { term, int, flag }
+            }
+            Signals::Host => Watch::Host,
         })
     }
 
@@ -628,6 +670,10 @@ impl Watch {
             }
             Watch::Report { term, int, flag } => {
                 tokio::spawn(report(term, int, flag));
+                control.stop.notified().await;
+                info!("the device's stop was asked");
+            }
+            Watch::Host => {
                 control.stop.notified().await;
                 info!("the device's stop was asked");
             }
@@ -658,6 +704,7 @@ async fn report(mut term: Signal, mut int: Signal, flag: Arc<AtomicBool>) {
 enum Watch {
     Stop,
     Report(Arc<AtomicBool>),
+    Host,
 }
 
 #[cfg(windows)]
@@ -666,6 +713,7 @@ impl Watch {
         Ok(match signals {
             Signals::Stop => Watch::Stop,
             Signals::Report(flag) => Watch::Report(flag),
+            Signals::Host => Watch::Host,
         })
     }
 
@@ -686,6 +734,10 @@ impl Watch {
                         flag.store(true, Ordering::Release);
                     }
                 });
+                control.stop.notified().await;
+                info!("the device's stop was asked");
+            }
+            Watch::Host => {
                 control.stop.notified().await;
                 info!("the device's stop was asked");
             }
@@ -725,7 +777,15 @@ async fn serve_device(
         ));
     }
     #[cfg(unix)]
-    let ctl_server = ctl::serve_control(s.listener, Arc::clone(&s.media));
+    let ctl_server = {
+        let media = Arc::clone(&s.media);
+        async move {
+            match s.listener {
+                Some(listener) => ctl::serve_control(listener, media).await,
+                None => std::future::pending().await,
+            }
+        }
+    };
     // No control socket on Windows (dante-asio's tray reads the shared memory).
     #[cfg(windows)]
     let ctl_server = std::future::pending::<std::io::Result<()>>();
