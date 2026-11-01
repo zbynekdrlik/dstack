@@ -1505,3 +1505,86 @@ fn every_tx_flow_socket_marks_its_packets_ef() {
         assert_eq!(r.priority().unwrap(), SOCKET_PRIORITY);
     }
 }
+
+// ---- past the qdisc ----
+
+#[test]
+fn a_slot_takes_its_neighbour_s_mac_from_the_arp_table() {
+    let shared = shared_with(Vec::new());
+    let (slot, _) = add(&shared, &req(peer(4000)));
+    let (other, _) = add(&shared, &req(peer(4001)));
+    let mac = [0, 0x1d, 0xc1, 0xaa, 0xbb, 0xcc];
+    let table = format!(
+        "IP address HW type Flags HW address Mask Device\n\
+         {PEER_IP} 0x1 0x2 00:1d:c1:aa:bb:cc * dante0\n"
+    );
+    assert_eq!(shared.slot_mac(slot), None, "none before the tick");
+    let c = shared.lock();
+    shared.set_macs(&c, &table, "dante0");
+    assert_eq!(shared.slot_mac(slot), Some(mac));
+    assert_eq!(shared.slot_mac(other), Some(mac), "the same receiver");
+    assert_eq!(shared.slot_mac(other + 1), None, "a free slot");
+    assert_eq!(shared.slot_mac(MAX_FLOWS), None, "no such slot");
+    // No socket past the qdisc (the tests have no CAP_NET_RAW): nothing
+    // goes direct, whatever the MAC.
+    if shared.direct.is_none() {
+        assert!(shared.direct_mac(slot).is_none());
+    }
+    // An entry on another interface, or gone: back through the UDP socket.
+    let version = shared.macs[slot].version();
+    shared.set_macs(&c, &table, "eth9");
+    assert_eq!(shared.slot_mac(slot), None);
+    shared.set_macs(&c, "", "dante0");
+    assert_eq!(shared.slot_mac(slot), None);
+    assert_eq!(
+        shared.macs[slot].version(),
+        version.wrapping_add(2),
+        "an unchanged MAC is not written again"
+    );
+}
+
+#[test]
+fn a_direct_packet_leaves_from_its_slot_s_port() {
+    let shared = shared_with(Vec::new());
+    for slot in [0, 7, MAX_FLOWS - 1] {
+        assert_eq!(
+            shared.ports[slot],
+            shared.local_addr(slot).unwrap().port(),
+            "slot {slot}"
+        );
+    }
+    assert_eq!(shared.ip, Ipv4Addr::LOCALHOST);
+}
+
+#[test]
+fn a_send_counts_a_packet_a_direct_one_or_an_error() {
+    let stats = LaneStats::default();
+    count_send(&stats, &Ok(false));
+    count_send(&stats, &Ok(true));
+    count_send(&stats, &Ok(true));
+    count_send(&stats, &Err(io::Error::from(io::ErrorKind::WouldBlock)));
+    assert_eq!(stats.packets.load(Ordering::Relaxed), 3);
+    assert_eq!(stats.direct.load(Ordering::Relaxed), 2);
+    assert_eq!(stats.send_errors.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn the_udp_path_sends_the_packet_after_the_headroom() {
+    let shared = shared_with(Vec::new());
+    let rx = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let SocketAddr::V4(dest) = rx.local_addr().unwrap() else {
+        unreachable!()
+    };
+    let mut buf = [0u8; HEADROOM + 4];
+    buf[HEADROOM..].copy_from_slice(&[1, 2, 3, 4]);
+    let mut id = 9;
+    let src = SocketAddrV4::new(Ipv4Addr::LOCALHOST, shared.ports[0]);
+    let sent = send_one(None, &shared.sockets[0], &mut buf, src, dest, &mut id, 4);
+    assert!(matches!(sent, Ok(false)), "{sent:?}");
+    assert_eq!(id, 9, "no IPv4 ID taken");
+    rx.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+    let mut got = [0u8; 16];
+    let (n, from) = rx.recv_from(&mut got).unwrap();
+    assert_eq!(&got[..n], [1, 2, 3, 4]);
+    assert_eq!(from.port(), shared.ports[0]);
+}

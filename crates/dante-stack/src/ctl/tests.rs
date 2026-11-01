@@ -624,6 +624,7 @@ const WORDS: &[&str] = &[
     "send_max_us",
     "age_max_us",
     "over_latency",
+    "direct",
     "rx",
     "granted",
     "latency",
@@ -925,7 +926,7 @@ fn the_status_lists_the_flows_of_both_sides() {
             "\"tx\":[{\"flow\":1,\"live\":1,\"fpp\":32,\"channels\":3,\"packets\":0,\
              \"send_errors\":0,\"keepalives\":0,\"rebootstraps\":0,\"holes\":0,\
              \"late_bins\":[0,0,0,0,0,0],\"late_max_us\":0,\"send_max_us\":0,\
-             \"age_max_us\":0,\"over_latency\":0}]"
+             \"age_max_us\":0,\"over_latency\":0,\"direct\":0}]"
         ),
         "{s}"
     );
@@ -1274,6 +1275,7 @@ fn a_lane_s_times_show_in_whole_microseconds() {
         send_max_ns: 56_001,
         age_max_ns: 416_700,
         over_latency: 80,
+        direct: 5,
         ..LaneCounts::default()
     };
     let mut j = Json::new();
@@ -1284,6 +1286,6 @@ fn a_lane_s_times_show_in_whole_microseconds() {
         j.out,
         "{\"packets\":7,\"send_errors\":0,\"keepalives\":0,\"rebootstraps\":0,\
          \"holes\":0,\"late_bins\":[0,0,0,0,0,0],\"late_max_us\":204,\"send_max_us\":56,\
-         \"age_max_us\":416,\"over_latency\":80}"
+         \"age_max_us\":416,\"over_latency\":80,\"direct\":5}"
     );
 }

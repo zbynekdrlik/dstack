@@ -64,6 +64,7 @@ use std::time::Instant;
 
 use tracing::{info, warn};
 
+use super::bypass::{self, Direct, HEADROOM};
 use super::packet::{self, MEDIA_HEADER};
 use super::ring::Ring;
 use super::source::Source;
@@ -521,6 +522,7 @@ pub struct LaneStats {
     send_max_ns: AtomicU64,
     age_max_ns: AtomicU64,
     over_latency: AtomicU64,
+    direct: AtomicU64,
 }
 
 /// One slot's counts since the device started (every flow it carried).
@@ -554,6 +556,9 @@ pub struct LaneCounts {
     /// a receiver at that latency counts each one late (Dante Controller's
     /// Latency tab), whatever bin it fell in.
     pub over_latency: u64,
+    /// Packets sent past the qdisc ([`bypass`]); the rest of `packets`
+    /// went through the UDP socket.
+    pub direct: u64,
 }
 
 /// The control side's half of [`TxShared`]: the table, and the keepalive
@@ -572,6 +577,16 @@ pub struct TxShared {
     plans: [Cell<4>; MAX_FLOWS],
     sources: Box<[Cell<3>]>,
     sockets: Box<[UdpSocket]>,
+    /// Each slot's socket's port: a direct packet's source port.
+    ports: [u16; MAX_FLOWS],
+    /// The device's address: a direct packet's source.
+    ip: Ipv4Addr,
+    /// The socket past the qdisc and its interface; `None`: every flow
+    /// goes through its UDP socket ([`bypass`]).
+    direct: Option<(Direct, String)>,
+    /// Each slot's destination MAC for a direct send ([`bypass::mac_word`];
+    /// 0: through the UDP socket), from the control tick.
+    macs: [Cell<1>; MAX_FLOWS],
     rings: Arc<[Ring]>,
     /// Each TX channel's engine ring (phase C): the engine's pump writes
     /// it, [`Source::Engine`] sends it; `None` for a channel the engine
@@ -617,7 +632,15 @@ impl TxShared {
                 Ok(s)
             })
             .collect::<io::Result<Box<[UdpSocket]>>>()?;
+        let mut ports = [0; MAX_FLOWS];
+        for (port, s) in ports.iter_mut().zip(&sockets) {
+            *port = s.local_addr()?.port();
+        }
         Ok(TxShared {
+            ports,
+            ip,
+            direct: bypass::open_for(ip),
+            macs: std::array::from_fn(|_| Cell::new()),
             sources: (0..cfg.tx.len()).map(|_| Cell::new()).collect(),
             peaks: (0..cfg.tx.len()).map(|_| AtomicU32::new(0)).collect(),
             engine: (0..cfg.tx.len())
@@ -673,7 +696,35 @@ impl TxShared {
         }
         let expired = c.table.expire(now);
         self.publish(&c);
+        if let Some((_, nic)) = &self.direct {
+            let table = std::fs::read_to_string("/proc/net/arp").unwrap_or_default();
+            self.set_macs(&c, &table, nic);
+        }
         expired
+    }
+
+    /// Each slot's direct MAC from the neighbour `table` (the text of
+    /// `/proc/net/arp`) on `nic` ([`bypass::mac_words`]); a cell is written
+    /// only when its MAC changed.
+    fn set_macs(&self, c: &Control, table: &str, nic: &str) {
+        let dests = (0..MAX_FLOWS).map(|slot| c.table.plan(slot).dest);
+        for (cell, w) in self.macs.iter().zip(bypass::mac_words(table, nic, dests)) {
+            if cell.peek()[0] != w {
+                cell.write([w]);
+            }
+        }
+    }
+
+    /// Slot `slot`'s destination MAC for a direct send, as the control
+    /// tick last set it.
+    fn slot_mac(&self, slot: usize) -> Option<[u8; 6]> {
+        bypass::word_mac(self.macs.get(slot)?.read()?.1[0])
+    }
+
+    /// Slot `slot`'s direct socket and MAC, when it goes past the qdisc.
+    fn direct_mac(&self, slot: usize) -> Option<(&Direct, [u8; 6])> {
+        let (d, _) = self.direct.as_ref()?;
+        Some((d, self.slot_mac(slot)?))
     }
 
     /// Sets TX channel `tx`'s source (from 0); `false` when there is no
@@ -727,6 +778,7 @@ impl TxShared {
             send_max_ns: l.send_max_ns.load(Ordering::Relaxed),
             age_max_ns: l.age_max_ns.load(Ordering::Relaxed),
             over_latency: l.over_latency.load(Ordering::Relaxed),
+            direct: l.direct.load(Ordering::Relaxed),
         }
     }
 
@@ -873,7 +925,10 @@ pub struct Transmitter {
     sources_seen: Vec<Option<u32>>,
     /// One packet's samples, slot by slot.
     frames: Box<[[i32; FPP_MAX as usize]; MAX_CHANNELS]>,
-    packet: Box<[u8; MAX_DATAGRAM]>,
+    /// One packet after [`HEADROOM`] bytes for a direct send's headers.
+    packet: Box<[u8; HEADROOM + MAX_DATAGRAM]>,
+    /// The IPv4 ID of the next direct packet.
+    ip_id: u16,
     /// The clock's epoch at the last pass.
     epoch: Option<u32>,
     /// When the next read of the plans, sources and keepalives is due.
@@ -897,7 +952,8 @@ impl Transmitter {
             sources: vec![Source::Silence; channels],
             sources_seen: vec![None; channels],
             frames: Box::new([[0; FPP_MAX as usize]; MAX_CHANNELS]),
-            packet: Box::new([0; MAX_DATAGRAM]),
+            packet: Box::new([0; HEADROOM + MAX_DATAGRAM]),
+            ip_id: 0,
             epoch: None,
             next_events: None,
             rate,
@@ -1014,6 +1070,7 @@ impl Transmitter {
             max_lag,
             margin_ns,
             latency_ns,
+            ip_id,
             ..
         } = self;
         let rings: &[Ring] = &shared.rings;
@@ -1024,6 +1081,8 @@ impl Transmitter {
             let plan = lane.plan;
             let stats = &shared.lanes[slot];
             let socket = &shared.sockets[slot];
+            let direct = shared.direct_mac(slot);
+            let src = SocketAddrV4::new(shared.ip, shared.ports[slot]);
             let schedule = lane
                 .schedule
                 .get_or_insert_with(|| Schedule::bootstrap(now, plan.fpp, *max_lag));
@@ -1049,7 +1108,7 @@ impl Transmitter {
                 // The plan is sendable (TxTable::plan), so the packet is
                 // whole and fits the buffer.
                 let n = packet::write(
-                    &mut packet[..],
+                    &mut packet[HEADROOM..],
                     secs,
                     sub,
                     nch,
@@ -1057,14 +1116,8 @@ impl Transmitter {
                     fpp,
                     |f, s| frames[s][f],
                 );
-                // A datagram socket sends the datagram whole or not at all
-                // (the packet fits one: `wire::MAX_DATAGRAM`), so the byte
-                // count says nothing more than `Ok`.
                 let sent_at = Instant::now();
-                let counter = match socket.send_to(&packet[..n], dest) {
-                    Ok(_) => &stats.packets,
-                    Err(_) => &stats.send_errors,
-                };
+                let sent = send_one(direct, socket, &mut packet[..], src, dest, ip_id, n);
                 // How late it left: the pass's PTP time plus the time since,
                 // after the send (a thread not scheduled, or a send that
                 // blocked, both make it late).
@@ -1083,12 +1136,58 @@ impl Transmitter {
                 stats.late[late_bin(late)].fetch_add(1, Ordering::Relaxed);
                 stats.late_max_ns.fetch_max(late, Ordering::Relaxed);
                 stats.send_max_ns.fetch_max(took, Ordering::Relaxed);
-                counter.fetch_add(1, Ordering::Relaxed);
+                count_send(stats, &sent);
             }
             stats.holes.fetch_add(holes as u64, Ordering::Relaxed);
             stats
                 .rebootstraps
                 .fetch_add(schedule.take_rebootstraps(), Ordering::Relaxed);
+        }
+    }
+}
+
+/// Sends the media packet of `n` bytes at `buf[HEADROOM..]` from `src` to
+/// `dest`: past the qdisc when `direct` holds the socket and the MAC (the
+/// headers written in front, the IPv4 ID taken from `ip_id`), else through
+/// the slot's UDP `socket`. `Ok(true)`: it went direct. Thin glue: the
+/// direct socket needs `CAP_NET_RAW`, which no test has; the headers are
+/// [`bypass::write_headers`]'s, tested.
+fn send_one(
+    direct: Option<(&Direct, [u8; 6])>,
+    socket: &UdpSocket,
+    buf: &mut [u8],
+    src: SocketAddrV4,
+    dest: SocketAddrV4,
+    ip_id: &mut u16,
+    n: usize,
+) -> io::Result<bool> {
+    match direct {
+        Some((d, mac)) => {
+            let len = bypass::write_headers(buf, src, dest, DSCP_EF << 2, *ip_id, n);
+            *ip_id = ip_id.wrapping_add(1);
+            d.send(&buf[..len], mac).map(|()| true)
+        }
+        // A datagram socket sends the datagram whole or not at all (the
+        // packet fits one: `wire::MAX_DATAGRAM`), so the byte count says
+        // nothing more than `Ok`.
+        None => socket
+            .send_to(&buf[HEADROOM..HEADROOM + n], dest)
+            .map(|_| false),
+    }
+}
+
+/// Counts one send's outcome in `stats`: a packet (and a direct one when
+/// it went past the qdisc), or a send error.
+fn count_send(stats: &LaneStats, sent: &io::Result<bool>) {
+    match sent {
+        Ok(direct) => {
+            stats.packets.fetch_add(1, Ordering::Relaxed);
+            if *direct {
+                stats.direct.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        Err(_) => {
+            stats.send_errors.fetch_add(1, Ordering::Relaxed);
         }
     }
 }
