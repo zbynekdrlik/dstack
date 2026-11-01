@@ -21,7 +21,8 @@
 //! |        | announced, our own subscriptions to it renamed |
 //! | 0x1002 | the device name |
 //! | 0x1003 | the device names: current, factory, board, revision |
-//! | 0x1100, 0x1102 | zeros, as inferno answers Dante Controller |
+//! | 0x1100 | with start code 0x2809 (netaudio's keyed read, [`control::settings`]): each key asked, in its order, that we hold (`settings_body`); any other start code (Dante Controller's 0x27ff): zeros, as inferno |
+//! | 0x1102 | zeros, as inferno answers Dante Controller |
 //! | 0x2000 | TX channels with their default names, paged |
 //! | 0x2010 | TX channels' current names, paged |
 //! | 0x2013 | TX rename |
@@ -68,7 +69,7 @@
 //! `0x8112`, once an item has brought it to [`SOFT_LIMIT`] bytes: that
 //! item's descriptor is written but not counted (inferno), so the next page
 //! starts with it. Every page fits one datagram
-//! ([`MAX_DATAGRAM`](crate::wire::MAX_DATAGRAM)): no item is longer than
+//! ([`MAX_DATAGRAM`]): no item is longer than
 //! 600 bytes (a TX flow's names are cut to [`MAX_REMOTE_NAME`], ours are 31
 //! at most). Logs name opcodes, sequences and channel numbers, never a
 //! name.
@@ -95,8 +96,8 @@ use crate::info::Changes;
 use crate::media::tx::{TxShared, TxTable};
 use crate::subscribe::{Manager, SubStatus};
 use crate::wire::{
-    Body, HEADER_LEN, Header, STATUS_ERROR, STATUS_MORE, STATUS_OK, WireError, read_u16, reply,
-    string_at,
+    Body, HEADER_LEN, Header, MAX_DATAGRAM, STATUS_ERROR, STATUS_MORE, STATUS_OK, WireError,
+    read_u16, reply, string_at,
 };
 use gaps::{Gap, Gaps};
 
@@ -348,6 +349,10 @@ pub fn handle(
         }
         op::DEVICE_NAMES => ok(&device_names(state, cfg)),
         op::DEVICE_RENAME => device_rename(&h, body, state),
+        op::ZEROS_1100 if h.start == control::SETTINGS_START => match settings_body(body, cfg) {
+            Some(out) => ok(&out),
+            None => unanswered(&h, "a settings request that does not read"),
+        },
         op::ZEROS_1100 => ok(&[0; 110]),
         op::ZEROS_1102 => ok(&[0; 94]),
         op::TX_CHANNELS => tx_channels(&h, body, cfg),
@@ -603,9 +608,64 @@ fn tx_flows(h: &Header, req: &[u8], cfg: &DeviceConfig, tx: &TxTable) -> ArcOutc
 /// samples at `rate`, then back in ns (inferno keeps it in samples), at
 /// most `u32::MAX`.
 fn stated_latency_ns(latency_ns: u64, rate: u32) -> u32 {
-    let samples = crate::clock::to_samples(latency_ns, rate);
+    let samples = crate::clock::latency_samples(latency_ns, rate);
     let ns = u128::from(samples) * 1_000_000_000 / u128::from(rate.max(1));
     u32::try_from(ns).unwrap_or(u32::MAX)
+}
+
+/// The most keys one settings reply holds: each takes a pair and a value
+/// (8 bytes), and the count is one byte.
+const SETTINGS_MAX_KEYS: usize = 128;
+const _: () = assert!(HEADER_LEN + 2 + 8 * SETTINGS_MAX_KEYS <= MAX_DATAGRAM);
+
+/// Our value for a settings key (0x1100): the sample rate, no pull-up,
+/// and our latency as configured and in effect. The default and the
+/// range we do not keep, so they are not answered.
+fn setting(key: u16, cfg: &DeviceConfig) -> Option<u32> {
+    use control::key;
+    let latency = u32::try_from(cfg.latency_ns).unwrap_or(u32::MAX);
+    match key {
+        key::SAMPLE_RATE => Some(cfg.sample_rate),
+        key::PULLUP => Some(0),
+        key::LATENCY_CONFIGURED | key::LATENCY_ACTIVE => Some(latency),
+        _ => None,
+    }
+}
+
+/// The 0x1100 reply to a keyed request (`body`: a `u16` count, then the
+/// keys), as the hardware answers it: the count twice (a byte each), then
+/// a pair per key in the asked order, `key, offset` for a key we hold (the
+/// offset, from the packet's start, of its `u32` after the pairs) and
+/// `0, key` for one we do not, then the values. `None` when the count
+/// passes the body or [`SETTINGS_MAX_KEYS`].
+fn settings_body(body: &[u8], cfg: &DeviceConfig) -> Option<Vec<u8>> {
+    let n = usize::from(read_u16(body, 0)?);
+    if n > SETTINGS_MAX_KEYS {
+        return None;
+    }
+    let keys: Vec<u16> = (0..n)
+        .map(|k| read_u16(body, 2 + 2 * k))
+        .collect::<Option<_>>()?;
+    let mut pairs = Vec::new();
+    let mut values = Vec::new();
+    pairs.extend_from_slice(&[n as u8, n as u8]);
+    let values_at = HEADER_LEN + 2 + 4 * n;
+    for k in keys {
+        match setting(k, cfg) {
+            Some(v) => {
+                let at = (values_at + values.len()) as u16;
+                pairs.extend_from_slice(&k.to_be_bytes());
+                pairs.extend_from_slice(&at.to_be_bytes());
+                values.extend_from_slice(&v.to_be_bytes());
+            }
+            None => {
+                pairs.extend_from_slice(&[0, 0]);
+                pairs.extend_from_slice(&k.to_be_bytes());
+            }
+        }
+    }
+    pairs.extend_from_slice(&values);
+    Some(pairs)
 }
 
 /// 0x3200: our RX flows a transmitter granted, by slot (inferno lists a

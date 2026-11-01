@@ -586,6 +586,27 @@ fn a_directory_keeps_the_first_of_an_id_and_its_first_name() {
 }
 
 #[test]
+fn the_encoding_is_the_bits_every_channel_shares() {
+    let c = |id: u16, bits: u32| TxChannel {
+        id,
+        rate: 96_000,
+        bits,
+        default: format!("{id:02}"),
+        name: None,
+    };
+    assert_eq!(Directory::default().encoding(), None);
+    assert_eq!(Directory::new(vec![c(1, 24)], &[]).encoding(), Some(24));
+    assert_eq!(
+        Directory::new(vec![c(1, 32), c(2, 32), c(3, 32)], &[]).encoding(),
+        Some(32)
+    );
+    assert_eq!(
+        Directory::new(vec![c(1, 24), c(2, 24), c(3, 16)], &[]).encoding(),
+        None
+    );
+}
+
+#[test]
 fn the_request_is_netaudio_s_page_read_and_only_its_reply_is_taken() {
     assert_eq!(
         page_request(0x5105, op::TX_CHANNELS, 33),

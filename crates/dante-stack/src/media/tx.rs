@@ -966,7 +966,7 @@ impl Transmitter {
             epoch: None,
             next_events: None,
             rate,
-            max_lag: clock::to_samples(shared.cfg.advertised_latency_ns(), rate),
+            max_lag: clock::latency_samples(shared.cfg.advertised_latency_ns(), rate),
             margin_ns: shared.cfg.tx_margin_ns,
             latency_ns: shared.cfg.advertised_latency_ns(),
             shared,

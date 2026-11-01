@@ -26,6 +26,10 @@ exclude_re = [
   # The kernel's socket table read: a test socket never drops, so only the
   # all-zero answer is observable; its parse is tested (media::rx::udp_drops).
   "rx.rs.*socket_drops",
+  # The 8700 client's group socket and its wrappers: tests/system_clock.rs
+  # reads our running device through the real info group with them; the
+  # request, the reply match, the parses and `ask` are unit tested.
+  "info/client.rs.*(group_socket|on_group|product_info|board_info)",
   "ask_realtime",
   # Log-only: the qdisc verdict is tested in qdisc::check.
   "qdisc.rs.*report",

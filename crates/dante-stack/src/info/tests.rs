@@ -237,6 +237,8 @@ fn the_product_info_is_inferno_s_bytes() {
             (0x1c, &version),
             (0x2c, b"iemmixer"),
             (0xac, b"iem-dante"),
+            // Not inferno's: the product version netaudio reads.
+            (0x12c, &version),
         ],
     );
     assert_eq!(mc.product_info(), packet(0xffff, 1, PRODUCT_INFO, &body));
@@ -253,6 +255,7 @@ fn the_product_info_is_inferno_s_bytes() {
             (0x1c, &version),
             (0x2c, b"ABCDEFGHIJKLMNOP"),
             (0xac, b"abcdefghijklmnop"),
+            (0x12c, &version),
         ],
     );
     assert_eq!(mc.product_info(), packet(0xffff, 1, PRODUCT_INFO, &body));

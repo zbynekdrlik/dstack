@@ -317,6 +317,13 @@ pub fn to_samples(ptp_ns: u64, rate: u32) -> u64 {
     (u128::from(ptp_ns) * u128::from(rate.max(1)) / 1_000_000_000) as u64
 }
 
+/// A latency of `ns` at `rate` in whole samples, the nearest (a latency
+/// is set in ns and stands for whole samples: 333 333 ns is 32 at 96 kHz,
+/// where [`to_samples`] gives 31). A rate of 0 reads as 1.
+pub fn latency_samples(ns: u64, rate: u32) -> u64 {
+    ((u128::from(ns) * u128::from(rate.max(1)) + 500_000_000) / 1_000_000_000) as u64
+}
+
 /// A packet's stamp for sample index `samples`: its seconds (mod 2³²) and
 /// the samples into that second. A rate of 0 reads as 1.
 pub fn stamp(samples: u64, rate: u32) -> (u32, u32) {
