@@ -1380,3 +1380,76 @@ fn an_older_state_file_keeps_its_name_until_the_config_changes() {
         "third-name"
     );
 }
+
+#[test]
+fn the_device_name_at_start_is_logged_only_when_it_is_not_the_configs() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = config_in(dir.path());
+    // A state under the config's name logs nothing.
+    let mut state = DeviceState::from_config(&cfg);
+    assert!(state.set_subscription(&cfg, 31, Some(sub("TX 16", "test-device"))));
+    state.save(&cfg.state_file).unwrap();
+    let log = logged(|| assert_eq!(DeviceState::load_or_default(&cfg).unwrap(), state));
+    assert_eq!(log, "");
+    // A config rename: one info line with the names and the moved count.
+    let renamed = renamed_config(dir.path(), "new-name");
+    let log = logged(|| {
+        DeviceState::load_or_default(&renamed).unwrap();
+    });
+    assert_eq!(log.lines().count(), 1, "{log}");
+    assert!(log.contains(" INFO "), "{log}");
+    assert!(log.contains("the config renamed the device"), "{log}");
+    assert!(
+        log.contains("old=test-device name=new-name own_subscriptions=1"),
+        "{log}"
+    );
+    // Dante Controller's rename under that config: one info line a start.
+    let mut state = DeviceState::load_or_default(&renamed).unwrap();
+    state.rename("dc-name");
+    state.save(&renamed.state_file).unwrap();
+    for _ in 0..2 {
+        let log = logged(|| {
+            DeviceState::load_or_default(&renamed).unwrap();
+        });
+        assert_eq!(log.lines().count(), 1, "{log}");
+        assert!(log.contains(" INFO "), "{log}");
+        assert!(log.contains("name=dc-name config_name=new-name"), "{log}");
+        assert!(log.contains("Dante Controller gave it"), "{log}");
+    }
+    // An older file under the config's name: nothing logged, the config's
+    // name recorded.
+    fs::write(&cfg.state_file, phase_a_state()).unwrap();
+    let log = logged(|| {
+        DeviceState::load_or_default(&cfg).unwrap();
+    });
+    assert_eq!(log, "");
+    let text = fs::read_to_string(&cfg.state_file).unwrap();
+    assert!(text.contains("config_name = \"test-device\""), "{text}");
+    // An older file under another config name: a warning naming both.
+    fs::write(&cfg.state_file, phase_a_state()).unwrap();
+    let log = logged(|| {
+        DeviceState::load_or_default(&renamed).unwrap();
+    });
+    assert_eq!(log.lines().count(), 1, "{log}");
+    assert!(log.contains(" WARN "), "{log}");
+    assert!(
+        log.contains("name=test-device config_name=new-name"),
+        "{log}"
+    );
+    assert!(log.contains("keeps the state file's name"), "{log}");
+}
+
+#[test]
+fn a_rename_moves_only_our_own_subscriptions() {
+    let cfg = config();
+    let mut state = DeviceState::from_config(&cfg);
+    assert!(state.set_subscription(&cfg, 0, Some(sub("TX 1", "TEST-device"))));
+    assert!(state.set_subscription(&cfg, 1, Some(sub("TX 1", "peer-device"))));
+    assert!(state.set_subscription(&cfg, 5, Some(sub("TX 2", "test-device"))));
+    assert_eq!(state.rename("new-name"), [0, 5]);
+    assert_eq!(state.name, "new-name");
+    assert_eq!(state.subscription(0), Some(&sub("TX 1", "new-name")));
+    assert_eq!(state.subscription(1), Some(&sub("TX 1", "peer-device")));
+    assert_eq!(state.subscription(5), Some(&sub("TX 2", "new-name")));
+    assert_eq!(state.config_name, "test-device", "a rename is no config's");
+}

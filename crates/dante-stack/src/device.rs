@@ -16,8 +16,12 @@
 //!   mDNS record marked `default`); the state's are their current names
 //!   (ARC 0x2010, and a second mDNS record while they differ). RX names
 //!   exist only as the state's (ARC 0x3000).
-//! - The state's `name` is the device name it lists. Phase A has no device
-//!   rename, so it is the config's name unless a state file says otherwise.
+//! - The state's `name` is the device name it lists: the config's, until
+//!   Dante Controller renames the device (ARC 0x1001). The state records
+//!   the config's name it was made with (`config_name`): a config whose
+//!   name changed since is a deliberate act and wins, as a change of
+//!   channel counts does; a Controller rename under an unchanged config
+//!   stays ([`DeviceState::follow_config_name`]).
 //! - The state's RX subscriptions (phase B): which TX channel of which
 //!   device each RX channel receives, set on our own device only (ARC
 //!   0x3010), kept so a restart subscribes again. The file lists the
@@ -38,7 +42,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::announce::{FPP_MAX, FPP_MIN};
 use crate::media::tx::{TX_MARGIN_NS, ns_of};
@@ -496,6 +500,11 @@ impl Subscription {
 #[serde(deny_unknown_fields)]
 pub struct DeviceState {
     pub name: String,
+    /// The config's device name this state was made with or last followed:
+    /// a config naming the device otherwise renamed it. Empty in a file
+    /// written before the state recorded it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub config_name: String,
     pub rx: Vec<String>,
     pub tx: Vec<String>,
     /// RX channel `n`'s subscription at index `n − 1`: empty while none was
@@ -518,10 +527,73 @@ impl DeviceState {
     pub fn from_config(cfg: &DeviceConfig) -> Self {
         Self {
             name: cfg.name.clone(),
+            config_name: cfg.name.clone(),
             rx: cfg.rx.clone(),
             tx: cfg.tx.clone(),
             subscriptions: Vec::new(),
         }
+    }
+
+    /// Renames the device to `name`; our own RX subscribed to our own TX
+    /// follow the name (a foreign receiver's subscription to the old name
+    /// is its owner's: a renamed Dante device loses those everywhere).
+    /// Returns the RX channels (from 0) whose subscription moved.
+    pub fn rename(&mut self, name: &str) -> Vec<usize> {
+        let mut moved = Vec::new();
+        for (rx, sub) in self.subscriptions.iter_mut().enumerate() {
+            if let Some(sub) = sub
+                && sub.tx_device.eq_ignore_ascii_case(&self.name)
+            {
+                sub.tx_device = name.to_string();
+                moved.push(rx);
+            }
+        }
+        self.name = name.to_string();
+        moved
+    }
+
+    /// Follows `cfg`'s device name at start; `true` when the state changed
+    /// and must be saved. A config whose name differs from the one the
+    /// state recorded renamed the device: it wins over the state's name
+    /// (iemmixer, 1.11: the state's name won silently, and a rename by
+    /// config took a restart to find). Under the recorded config name, a
+    /// different state name is Dante Controller's rename and stays. A file
+    /// written before the record keeps its name, with a warning when it is
+    /// not the config's, and records the config's name.
+    pub fn follow_config_name(&mut self, cfg: &DeviceConfig) -> bool {
+        if self.config_name == cfg.name {
+            if self.name != cfg.name {
+                info!(
+                    name = %self.name,
+                    config_name = %cfg.name,
+                    "the device keeps the name Dante Controller gave it; \
+                     a new name in the config wins over it"
+                );
+            }
+            return false;
+        }
+        if self.config_name.is_empty() {
+            if self.name != cfg.name {
+                warn!(
+                    name = %self.name,
+                    config_name = %cfg.name,
+                    "the device keeps the state file's name, not the config's: \
+                     the state does not record which config named it; rename it \
+                     in Dante Controller, or change the config's name once more"
+                );
+            }
+        } else {
+            let old = self.name.clone();
+            let moved = self.rename(&cfg.name);
+            info!(
+                old = %old,
+                name = %cfg.name,
+                own_subscriptions = moved.len(),
+                "the config renamed the device (saved)"
+            );
+        }
+        self.config_name = cfg.name.clone();
+        true
     }
 
     /// RX channel `rx`'s subscription (from 0).
@@ -551,7 +623,8 @@ impl DeviceState {
     /// (nothing written then). A file with other channel counts than the
     /// config's is fitted to them ([`DeviceState::fit`]) and, once it holds,
     /// saved over the file at once, so the next start reads a matching one
-    /// (one info line, the counts only). A file that cannot be read, cannot
+    /// (one info line, the counts only). So is one whose device name follows
+    /// the config's ([`DeviceState::follow_config_name`]). A file that cannot be read, cannot
     /// be fitted or does not hold is an error naming the file, the file
     /// left as it was; so is a fitted state that cannot be saved.
     pub fn load_or_default(cfg: &DeviceConfig) -> io::Result<Self> {
@@ -578,12 +651,15 @@ impl DeviceState {
         let refit = state
             .fit(cfg)
             .map_err(|problems| invalid(problems.join("; ")))?;
+        let renamed = state.follow_config_name(cfg);
         let problems = state.problems(cfg);
         if !problems.is_empty() {
             return Err(invalid(problems.join("; ")));
         }
-        if let Some(refit) = refit {
+        if renamed || refit.is_some() {
             state.save(path)?;
+        }
+        if let Some(refit) = refit {
             info!(
                 rx_before = refit.rx.0,
                 rx_after = refit.rx.1,
