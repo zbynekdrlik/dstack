@@ -18,6 +18,7 @@
 //! one `<< 16`), as inferno keeps them: full scale is 2³¹ whatever the
 //! flow's encoding, so phase C scales by 2⁻³¹.
 
+pub mod bypass;
 pub mod check;
 pub mod packet;
 pub mod qos;

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.15 (2026-11-01)
+
+- Linux: audio TX bypasses the qdisc. An `AF_PACKET` socket with `PACKET_QDISC_BYPASS` hands each packet to the driver; we write the IPv4 header (DSCP EF, DF) and the UDP header in front of the media packet, and the kernel writes the Ethernet header. Only unicast flows to a neighbour with a complete ARP entry go direct. The control tick reads `/proc/net/arp` every 100 ms. Multicast and unresolved destinations keep the UDP socket. The socket needs `CAP_NET_RAW`; without it, the device warns at start and nothing changes. Each TX flow in the status gains `direct`, the packets sent past the qdisc. Cause, found by iemmixer on the gen3 box (one TX queue, PREEMPT_RT, TSO/GSO off): a TCP burst or an ssh login on the box held our packets in the qdisc behind a preempted sender. The IEM card read peaks of 250 to 1800 µs and late packets at 250 µs, while every send returned within 116 µs of its stamp (dstack #1).
+- `docs/linux-box.md`: TSO and GSO off on the Dante NIC (peak 750 to 198-260 µs in an hour on the gen3 box), and `CAP_NET_RAW` for the direct path.
+
 ## 0.4.14 (2026-10-31)
 
 - Fix (Linux): every TX flow socket marks its packets DSCP EF (46), as Dante hardware marks its audio, and takes `SO_PRIORITY` 6 (pfifo_fast's first band). Windows ignores a program's `IP_TOS`; there DSCP comes from a QoS policy on the box. Before, our audio went out unmarked: below marked traffic on a switch with QoS, and in the kernel's default band behind bulk data (gen3 box, dstack #1).

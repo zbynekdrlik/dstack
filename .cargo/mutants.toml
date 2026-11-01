@@ -22,4 +22,9 @@ exclude_re = [
   "qdisc.rs.*report",
   "replace set_profile -> bool",
   "replace profile -> TimingProfile",
+  # The direct socket needs CAP_NET_RAW, which neither CI nor the gate has;
+  # the headers, the ARP lookup and the counting are tested (media::bypass).
+  "bypass.rs.*Direct::",
+  "bypass.rs.*open_for",
+  "tx.rs.*send_one",
 ]
