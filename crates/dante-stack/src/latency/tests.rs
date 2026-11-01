@@ -3,6 +3,11 @@ use crate::info::{Records, heartbeat_body};
 
 /// A heartbeat datagram with `body`, from device id 1.
 fn datagram(body: &[u8]) -> Vec<u8> {
+    datagram_from([0, 0, 0, 0, 0, 0, 0, 1], body)
+}
+
+/// A heartbeat datagram with `body`, from device id `id`.
+fn datagram_from(id: [u8; 8], body: &[u8]) -> Vec<u8> {
     let mut d = Vec::new();
     d.extend_from_slice(&START_HEARTBEAT.to_be_bytes());
     d.extend_from_slice(
@@ -10,7 +15,8 @@ fn datagram(body: &[u8]) -> Vec<u8> {
             .unwrap()
             .to_be_bytes(),
     );
-    d.extend_from_slice(&[0, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+    d.extend_from_slice(&[0, 7, 0, 0]);
+    d.extend_from_slice(&id);
     d.extend_from_slice(b"Audinate");
     d.extend_from_slice(&op::HEARTBEAT);
     d.extend_from_slice(body);
