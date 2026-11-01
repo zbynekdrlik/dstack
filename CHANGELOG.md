@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.21 (2026-11-01)
+
+- Fix: `latency::listen` now returns one `Latency` per device heard at the address, told apart by the heartbeat header's device id (`Latency::device_id`, `Beat::device_id`). Before, it filtered by source IP only, so two devices on one address on their own ports (dasio's two instances on iem-snv) mixed into one result. `latency::Heard` gathers several devices (dstack #47).
+- `CLAUDE.md`: dsync, formerly dantesync, is its own project, and its only peer is dstack. Every request to dsync from another project comes through dstack (airuleset#1280).
+
 ## 0.4.20 (2026-11-01)
 
 - New `latency` module: what Dante Controller's Latency tab shows, for any receiver, read-only (dstack #47).

@@ -216,6 +216,8 @@ fn our_tx_reaches_our_rx_clean_on_the_system_clock() {
     );
     assert!(flows[0].latency_ns > 0, "{flows:?}");
     let heard = heard.expect("the heartbeat group joined");
+    assert_eq!(heard.len(), 1, "one device at our address: {heard:?}");
+    let heard = &heard[0];
     assert!(heard.beats >= 2, "{heard:?}");
     assert_eq!(heard.rate, 96_000, "{heard:?}");
     assert_eq!(heard.slots.len(), 32, "{heard:?}");

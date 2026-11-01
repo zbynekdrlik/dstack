@@ -86,6 +86,11 @@ fn our_own_heartbeat_reads_back() {
 
 #[test]
 fn only_a_heartbeat_parses_and_a_bad_record_is_left_out() {
+    // A heartbeat without a record that reads: its sender, nothing else.
+    let empty = Beat {
+        device_id: [0, 0, 0, 0, 0, 0, 0, 1],
+        ..Beat::default()
+    };
     let good = datagram(&hardware_records(&[1], &[2]));
     assert!(parse(&good).is_some());
     assert_eq!(
@@ -99,7 +104,7 @@ fn only_a_heartbeat_parses_and_a_bad_record_is_left_out() {
     let mut other = good.clone();
     other[31] = 1;
     assert_eq!(parse(&other), None, "another opcode");
-    assert_eq!(parse(&datagram(&[])), Some(Beat::default()), "no records");
+    assert_eq!(parse(&datagram(&[])), Some(empty.clone()), "no records");
     // A record whose values pass it: left out, the next one still read.
     let mut records = hardware_records(&[1], &[2]);
     records[12..14].copy_from_slice(&0x7fu16.to_be_bytes());
@@ -109,11 +114,11 @@ fn only_a_heartbeat_parses_and_a_bad_record_is_left_out() {
     // A record longer than the datagram ends the walk.
     let mut long = hardware_records(&[1], &[2]);
     long[0..2].copy_from_slice(&0x7fffu16.to_be_bytes());
-    assert_eq!(parse(&datagram(&long)), Some(Beat::default()));
+    assert_eq!(parse(&datagram(&long)), Some(empty.clone()));
     // A length under 4 ends it too.
     let mut tiny = hardware_records(&[1], &[2]);
     tiny[0..2].copy_from_slice(&3u16.to_be_bytes());
-    assert_eq!(parse(&datagram(&tiny)), Some(Beat::default()));
+    assert_eq!(parse(&datagram(&tiny)), Some(empty.clone()));
     // A record of only its 4-byte length and type is stepped over.
     let mut bare = vec![0x00, 0x04, 0x80, 0x07];
     bare.extend(hardware_records(&[6], &[8]));
@@ -132,6 +137,7 @@ fn a_gather_turns_samples_into_us_and_counts_late_packets_in_the_window() {
     let beat = |lateness: Vec<u32>, late: Vec<u32>| Beat {
         lateness: Some((96_000, lateness)),
         late: Some(late),
+        ..Beat::default()
     };
     g.add(&beat(vec![96, 24], vec![1_000, 5]));
     g.add(&beat(vec![960, 0], vec![1_024, 5]));
@@ -161,6 +167,7 @@ fn a_gather_turns_samples_into_us_and_counts_late_packets_in_the_window() {
     g.add(&Beat {
         lateness: None,
         late: Some(vec![7, 0, 1]),
+        ..Beat::default()
     });
     let got = g.result();
     assert_eq!((got.beats, got.rate, got.slots.len()), (1, 0, 3));
@@ -175,6 +182,7 @@ fn a_gather_turns_samples_into_us_and_counts_late_packets_in_the_window() {
     g.add(&Beat {
         lateness: Some((0, vec![5])),
         late: None,
+        ..Beat::default()
     });
     assert_eq!(g.result().slots[0].peaks_us, [5_000_000]);
 }
