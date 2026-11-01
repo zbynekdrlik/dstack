@@ -57,6 +57,10 @@ use std::time::{Duration, Instant};
 use super::{HEADER_LEN, INFO_GROUP, INFO_PORT, REQUEST_PORT, START_INFO, VENDOR};
 
 const RECV_BUFFER: usize = 2048;
+/// How long an ask waits for a reply before it sends its request again: a
+/// Brooklyn card drops a board-info request asked right after another
+/// (netaudio sends it three times; dcontroller found it on the site).
+pub const RESEND: Duration = Duration::from_millis(250);
 
 /// Where a name ends: its field's end or its first zero.
 const PRODUCT_MANUFACTURER: (usize, usize) = (0x2c, 0xac);
@@ -349,9 +353,10 @@ pub fn parse_clock(body: &[u8]) -> Option<ClockStatus> {
 }
 
 /// Sends the request for `ask` from `sock` to `device` (a device's
-/// [`REQUEST_PORT`]), then waits up to `wait` on `sock` for its reply from
-/// that address, any port (and the device id `id`, when given); the
-/// reply's body. Other datagrams on `sock` are skipped.
+/// [`REQUEST_PORT`]), and again every [`RESEND`] until its reply comes,
+/// for up to `wait` in all: its reply from that address, any port (and the
+/// device id `id`, when given); the reply's body. Other datagrams on
+/// `sock` are skipped.
 pub fn ask(
     sock: &UdpSocket,
     device: SocketAddrV4,
@@ -363,15 +368,21 @@ pub fn ask(
         ask,
         kind: e.kind(),
     };
-    sock.send_to(&request(1, [0; 8], ask), device).map_err(io)?;
-    let deadline = Instant::now() + wait;
+    let start = Instant::now();
+    let deadline = start + wait;
+    let mut next = start;
     let mut buf = [0u8; RECV_BUFFER];
     loop {
-        let left = deadline.saturating_duration_since(Instant::now());
-        if left.is_zero() {
+        let now = Instant::now();
+        if now >= deadline {
             return Err(InfoError::Timeout { ask });
         }
-        sock.set_read_timeout(Some(left)).map_err(io)?;
+        if now >= next {
+            sock.send_to(&request(1, [0; 8], ask), device).map_err(io)?;
+            next = now + RESEND;
+        }
+        sock.set_read_timeout(Some(deadline.min(next) - now))
+            .map_err(io)?;
         match sock.recv_from(&mut buf) {
             Ok((n, SocketAddr::V4(from))) if from.ip() == device.ip() => {
                 if let Some(body) = reply_body(&buf[..n], ask, id) {
@@ -379,7 +390,10 @@ pub fn ask(
                 }
             }
             Ok(_) => {}
-            Err(e) => return Err(recv_error(ask, &e)),
+            Err(e) => match recv_error(ask, &e) {
+                InfoError::Timeout { .. } => {}
+                other => return Err(other),
+            },
         }
     }
 }

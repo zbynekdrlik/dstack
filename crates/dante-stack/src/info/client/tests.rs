@@ -524,3 +524,27 @@ fn a_device_that_drops_the_first_request_answers_the_resend() {
     assert_eq!(got, Ok(vec![5]));
     assert_eq!((asked, n), (2, 32));
 }
+
+#[test]
+fn a_silent_device_is_asked_once_every_resend() {
+    let client = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let dev = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let port = dev.local_addr().unwrap().port();
+    // 600 ms: the request at 0, 250 and 500 ms, never more.
+    let got = ask(
+        &client,
+        SocketAddrV4::new(Ipv4Addr::LOCALHOST, port),
+        None,
+        Ask::Product,
+        Duration::from_millis(600),
+    );
+    assert_eq!(got, Err(InfoError::Timeout { ask: Ask::Product }));
+    dev.set_nonblocking(true).unwrap();
+    let mut buf = [0u8; 64];
+    let mut asked = 0;
+    while dev.recv_from(&mut buf).is_ok() {
+        asked += 1;
+    }
+    assert_eq!(asked, 3);
+    assert_eq!(RESEND, Duration::from_millis(250));
+}

@@ -11,6 +11,7 @@
   - `is_leader()` and `is_grandmaster()`.
   - Codes are kept raw; only codes seen in captures have names. The layout matched netaudio's decode on three devices: the leader card and two followers.
 - Our own device answers no clock stats (it has no PTP of its own), as before.
+- Fix: the 8700 client sends its request again every 250 ms (`info::client::RESEND`) until the reply comes or the wait ends. dcontroller found the Brooklyn cards (two Yamaha AIC128-D, a Tascam ML-32D) leaving a board-info request asked right after the product info unanswered within 1 s; netaudio sends it three times, and the reply came after the third.
 
 ## 0.4.26 (2026-11-01)
 
