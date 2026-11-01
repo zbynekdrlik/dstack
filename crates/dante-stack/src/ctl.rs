@@ -41,7 +41,7 @@ use std::sync::{Mutex, PoisonError};
 
 use tracing::{debug, info};
 
-use crate::clock::to_samples;
+use crate::clock::latency_samples;
 use crate::daemon::media::Media;
 use crate::media::check::{CounterCheck, CounterStats, SineCheck, SineStats};
 use crate::media::ring::{Counters, Ring, SLOTS};
@@ -769,11 +769,11 @@ fn rx_part(j: &mut Json, media: &Media) {
                             granted: f.handle.is_some(),
                             fpp: f.fpp,
                             channels: f.channels.len(),
-                            latency: to_samples(f.latency_ns, media.tx.cfg.sample_rate),
+                            latency: latency_samples(f.latency_ns, media.tx.cfg.sample_rate),
                             playout: plan.latency,
                             delay: plan.delay,
                             late_after: u64::from(plan.latency) + u64::from(plan.block),
-                            advertised: to_samples(f.advertised_ns, media.tx.cfg.sample_rate),
+                            advertised: latency_samples(f.advertised_ns, media.tx.cfg.sample_rate),
                             below_advertised: f.below_advertised,
                         }
                     })

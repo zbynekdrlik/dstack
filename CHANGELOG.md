@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.4.26 (2026-11-01)
+
+- Fix: a latency set in ns now reads as its nearest whole samples, not cut down. dasio's RX latency of 333 333 ns at 96 kHz read as 31 samples, so a 1 ms source needed a delay of 65 and two blocks of 64: a round trip of 351 samples where 32 gives 288 (dstack #1). New `clock::latency_samples`. It applies to our device's latency, a flow's latency and advertised latency (the playout point, the block delay, `below_advertised`), the TX lag bound, the 0x3200 stated latency, and the ctl status's `latency` and `advertised` samples. `clock::to_samples` (time to a sample index) still rounds down. A latency that was a whole number of samples reads as before.
+- New: `info::client` reads any device's product and board info over UDP 8700, read-only (dstack #16 step 4, for dcontroller):
+  - `product_info(iface, device, id, wait)`: manufacturer, model, product version, manufacturer software and firmware versions, manufacturer and product ids.
+  - `board_info(iface, device, id, wait)`: board name, platform model, platform software and hardware versions with their builds, API and ROM boot versions.
+  - The reply comes to the info group (224.0.0.231:8702), not to the asking socket. The client joins the group on the interface and takes the reply matching the device's address, its device id (several devices answer on one address) and the opcode. Errors are typed (`InfoError`: socket, timeout, malformed).
+  - The offsets come from captures of four makes. Each value matched `netaudio device show`.
+- New: `arc::client::Directory::encoding()`, the bits per sample all of a device's TX channels share (from `read_directory`).
+- Our product info also carries our version at 0x12c, where netaudio and Dante Controller read the product version (0 before).
+
 ## 0.4.25 (2026-11-01)
 
 - RX loss check (iemmixer: a single packet now and then missing from a flow, with no late packets):

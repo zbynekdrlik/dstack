@@ -603,7 +603,7 @@ fn tx_flows(h: &Header, req: &[u8], cfg: &DeviceConfig, tx: &TxTable) -> ArcOutc
 /// samples at `rate`, then back in ns (inferno keeps it in samples), at
 /// most `u32::MAX`.
 fn stated_latency_ns(latency_ns: u64, rate: u32) -> u32 {
-    let samples = crate::clock::to_samples(latency_ns, rate);
+    let samples = crate::clock::latency_samples(latency_ns, rate);
     let ns = u128::from(samples) * 1_000_000_000 / u128::from(rate.max(1));
     u32::try_from(ns).unwrap_or(u32::MAX)
 }

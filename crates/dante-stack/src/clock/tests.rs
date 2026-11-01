@@ -316,6 +316,18 @@ fn media_time_survives_years_of_uptime() {
     assert_eq!(from_stamp(secs, sub, 96_000, n + 96_000 * 3_600), n);
     // A rate of 0 reads as 1 and never divides by zero.
     assert_eq!(to_samples(3_000_000_000, 0), 3);
+}
+
+#[test]
+fn a_latency_is_its_nearest_whole_samples() {
+    assert_eq!(latency_samples(333_333, 96_000), 32);
+    assert_eq!(latency_samples(250_000, 96_000), 24);
+    assert_eq!(latency_samples(10_666_667, 96_000), 1024);
+    // Half a sample (5 208.33 ns at 96 kHz) is the edge.
+    assert_eq!(latency_samples(5_208, 96_000), 0);
+    assert_eq!(latency_samples(5_209, 96_000), 1);
+    assert_eq!(latency_samples(3_000_000_000, 0), 3);
+    assert_eq!(latency_samples(u64::from(u32::MAX), 192_000), 824_634);
     assert_eq!(stamp(7, 0), (7, 0));
     assert_eq!(from_stamp(7, 0, 0, 9), 7);
 }

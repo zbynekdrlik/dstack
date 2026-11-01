@@ -72,7 +72,7 @@ use tracing::{info, warn};
 
 pub use sub_status::{SubState, SubStatus};
 
-use crate::clock::to_samples;
+use crate::clock::latency_samples;
 use crate::device::{DeviceConfig, Subscription};
 use crate::flows::client::ClientError;
 use crate::flows::control::{FlowRequest, Handle, status};
@@ -492,8 +492,8 @@ impl Manager {
         match self.playout_override.get(&f.device) {
             Some(&o) => u64::from(o)
                 .max(fpp)
-                .max(to_samples(self.latency_ns, self.rate)),
-            None => to_samples(f.latency_ns, self.rate).max(fpp),
+                .max(latency_samples(self.latency_ns, self.rate)),
+            None => latency_samples(f.latency_ns, self.rate).max(fpp),
         }
     }
 
@@ -503,7 +503,7 @@ impl Manager {
     /// 31.10.2026: a delay of 8 at a block of 16 played as 0, with holes;
     /// 16 played clean). So the delay is rounded up to whole blocks.
     fn read_at(&self, f: &Flow) -> (u64, u64) {
-        let device = to_samples(self.latency_ns, self.rate);
+        let device = latency_samples(self.latency_ns, self.rate);
         let block = self.block.max(1);
         let delay = self
             .playout(f)
@@ -545,7 +545,7 @@ impl Manager {
             fpp: f.fpp,
             latency_ns: f.latency_ns,
             advertised_ns: f.advertised_ns,
-            below_advertised: self.read_at(f).0 < to_samples(f.advertised_ns, self.rate),
+            below_advertised: self.read_at(f).0 < latency_samples(f.advertised_ns, self.rate),
         })
     }
 
