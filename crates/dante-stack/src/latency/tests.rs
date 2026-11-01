@@ -183,3 +183,26 @@ fn a_histogram_bins_each_peak_once() {
     );
     assert_eq!(histogram(&[3, 9], &[]), [2]);
 }
+
+/// dasio (1.11): two of our devices on one address (own ports, own device
+/// ids). Their heartbeats came from the same IP and mixed in one gather.
+#[test]
+fn two_devices_on_one_address_are_heard_apart_by_their_device_id() {
+    let one = [0, 0, 10, 77, 7, 114, 0, 0];
+    let two = [0, 0, 10, 77, 7, 114, 0, 1];
+    let mut heard = Heard::default();
+    for (id, peak, late) in [(one, 13, 0), (two, 960, 5), (one, 12, 0), (two, 96, 9)] {
+        let beat = parse(&datagram_from(id, &hardware_records(&[peak], &[late]))).unwrap();
+        assert_eq!(beat.device_id, id);
+        heard.add(&beat);
+    }
+    let got = heard.result();
+    assert_eq!(got.len(), 2, "{got:?}");
+    assert_eq!((got[0].device_id, got[0].beats), (one, 2));
+    assert_eq!(got[0].slots[0].peaks_us, [135, 125]);
+    assert_eq!((got[0].slots[0].late, got[0].slots[0].late_total), (0, 0));
+    assert_eq!((got[1].device_id, got[1].beats), (two, 2));
+    assert_eq!(got[1].slots[0].peaks_us, [10_000, 1_000]);
+    assert_eq!((got[1].slots[0].late, got[1].slots[0].late_total), (4, 9));
+    assert_eq!(Heard::default().result(), []);
+}
