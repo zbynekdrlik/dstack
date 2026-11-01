@@ -1488,10 +1488,24 @@ fn a_packet_older_than_the_latency_since_its_stamp_counts_as_over_latency() {
     rig.tx.step(Some(due + 50_000), 0);
     let took = nanos(began.elapsed());
     let lane = rig.shared.lane(slot);
-    assert_eq!(
-        lane.late_bins[0], lane.packets,
-        "the bins call it on time: {lane:?}"
+    // The bins measure from the due time: 50 µs plus the step's own time
+    // (a shared Windows runner once took 256 µs to send, 2.11.2026), in
+    // the first bin whenever the step is quick, never more than that late.
+    assert!(
+        (50_000..50_000 + took + 1_000).contains(&lane.late_max_ns),
+        "{lane:?}, step took {took} ns"
     );
+    let bin = LATE_EDGES_NS
+        .iter()
+        .position(|&edge| lane.late_max_ns < edge)
+        .unwrap_or(LATE_EDGES_NS.len());
+    assert_eq!(lane.late_bins[bin], lane.packets, "{lane:?}");
+    if took < LATE_EDGES_NS[0] - 50_000 {
+        assert_eq!(
+            lane.late_bins[0], lane.packets,
+            "the bins call it on time: {lane:?}"
+        );
+    }
     assert!(lane.over_latency >= 1, "{lane:?}");
     let age = ns_of(FPP, RATE) + TX_MARGIN_NS + 50_000;
     assert!(
