@@ -9,10 +9,12 @@
 //!   is listed once its `_netaudio-arc` record is resolved: its name (as it
 //!   announces it), the record's lowest IPv4 address and port, the TXT
 //!   strings of that record (`mf`, `model`, `router_info`, ...), and the
-//!   `_netaudio-dbc` record's address when there is one. [`Devices::apply`]
-//!   says what an event changed ([`Change`]).
+//!   `_netaudio-dbc` record's address when there is one, and the device id
+//!   its `_netaudio-cmc` record's `id` gives (16 hex digits: the id its
+//!   heartbeat carries, [`crate::latency`]; several devices may share an
+//!   address). [`Devices::apply`] says what an event changed ([`Change`]).
 //! - [`Discovery`]: an mDNS daemon of its own on the interface with the
-//!   address `ip` only (as the host sets its own up), the two browses, one
+//!   address `ip` only (as the host sets its own up), the three browses, one
 //!   thread each keeping their events, [`Discovery::devices`] for the list
 //!   now and a channel of every [`Change`] for a live list.
 //!   [`Discovery::stop`] shuts the daemon down and waits for the threads.
@@ -30,7 +32,7 @@ use std::time::{Duration, Instant};
 use mdns_sd::{IfKind, ServiceDaemon, ServiceEvent};
 use tracing::{debug, info, warn};
 
-use crate::announce::ARC_SERVICE;
+use crate::announce::{ARC_SERVICE, CMC_SERVICE};
 use crate::subscribe::directory::DBC_SERVICE;
 use crate::subscribe::resolve::{Browse, BrowseError, lowest_ipv4};
 
@@ -51,6 +53,9 @@ pub struct Device {
     pub arc: SocketAddrV4,
     /// Its flow control (`_netaudio-dbc`), when it publishes it.
     pub dbc: Option<SocketAddrV4>,
+    /// Its device id, from its `_netaudio-cmc` record's `id`: the id in its
+    /// heartbeat's header ([`crate::latency::Latency::device_id`]).
+    pub device_id: Option<[u8; 8]>,
     /// The `_netaudio-arc` record's TXT strings, key to value (`mf`,
     /// `model`, `router_info`, `arcp_vers`, ...).
     pub txt: BTreeMap<String, String>,
@@ -74,6 +79,8 @@ struct Entry {
     arc: Option<SocketAddrV4>,
     txt: BTreeMap<String, String>,
     dbc: Option<SocketAddrV4>,
+    /// The `_netaudio-cmc` record is resolved, and its id when it reads.
+    cmc: Option<Option<[u8; 8]>>,
 }
 
 impl Entry {
@@ -82,16 +89,30 @@ impl Entry {
             name: self.name.clone(),
             arc: self.arc?,
             dbc: self.dbc,
+            device_id: self.cmc.flatten(),
             txt: self.txt.clone(),
         })
     }
 }
 
-/// Which of the two services a record is.
+/// Which of the three services a record is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Service {
     Arc,
     Dbc,
+    Cmc,
+}
+
+/// A device id as a CMC record's `id` writes it: 16 hex digits.
+pub fn parse_device_id(s: &str) -> Option<[u8; 8]> {
+    if s.len() != 16 || !s.is_ascii() {
+        return None;
+    }
+    let mut out = [0u8; 8];
+    for (i, b) in out.iter_mut().enumerate() {
+        *b = u8::from_str_radix(&s[2 * i..2 * i + 2], 16).ok()?;
+    }
+    Some(out)
 }
 
 /// The service of type `ty`, and the device's name in `fullname` (its case
@@ -101,6 +122,8 @@ fn record_of(ty: &str, fullname: &str) -> Option<(Service, String)> {
         Service::Arc
     } else if ty.eq_ignore_ascii_case(DBC_SERVICE) {
         Service::Dbc
+    } else if ty.eq_ignore_ascii_case(CMC_SERVICE) {
+        Service::Cmc
     } else {
         return None;
     };
@@ -145,6 +168,13 @@ impl Devices {
                             .collect();
                     }
                     Service::Dbc => entry.dbc = Some(at),
+                    Service::Cmc => {
+                        entry.cmc = Some(
+                            r.get_properties()
+                                .get_property_val_str("id")
+                                .and_then(parse_device_id),
+                        );
+                    }
                 }
                 let after = entry.device();
                 match (before, after) {
@@ -161,9 +191,10 @@ impl Devices {
                 match service {
                     Service::Arc => entry.arc = None,
                     Service::Dbc => entry.dbc = None,
+                    Service::Cmc => entry.cmc = None,
                 }
                 let after = entry.device();
-                if entry.arc.is_none() && entry.dbc.is_none() {
+                if entry.arc.is_none() && entry.dbc.is_none() && entry.cmc.is_none() {
                     self.entries.remove(&key);
                 }
                 match (before, after) {
@@ -244,6 +275,10 @@ impl Discovery {
             (
                 "dante-discover-dbc",
                 daemon.browse(DBC_SERVICE).map_err(BrowseError::from)?,
+            ),
+            (
+                "dante-discover-cmc",
+                daemon.browse(CMC_SERVICE).map_err(BrowseError::from)?,
             ),
         ];
         let mut threads = Vec::new();
