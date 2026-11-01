@@ -9,6 +9,7 @@
   - The reply comes to the info group (224.0.0.231:8702), not to the asking socket. The client joins the group on the interface and takes the reply matching the device's address, its device id (several devices answer on one address) and the opcode. Errors are typed (`InfoError`: socket, timeout, malformed).
   - The offsets come from captures of four makes. Each value matched `netaudio device show`.
 - New: `arc::client::Directory::encoding()`, the bits per sample all of a device's TX channels share (from `read_directory`).
+- New: our device answers the keyed settings read (ARC 0x1100 with start code 0x2809, netaudio's `config latency` and `arc::control::settings`) with its own values, in the hardware's layout: the sample rate, pull-up 0, the latency as configured and in effect (`latency_ns`). It keeps no default latency and no latency range, so those keys are answered as absent. Before, the table was empty. Dante Controller's full-table read (start code 0x27ff) and 0x1102 stay zeros, as inferno answers them, until a Dante Controller check.
 - Our product info also carries our version at 0x12c, where netaudio and Dante Controller read the product version (0 before).
 
 ## 0.4.25 (2026-11-01)

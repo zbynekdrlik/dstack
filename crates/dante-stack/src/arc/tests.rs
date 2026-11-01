@@ -1272,6 +1272,88 @@ fn the_clock_reply_is_the_fixed_one() {
     assert!(answer.body.iter().all(|&b| b == 0));
 }
 
+/// netaudio 0.4.2's keyed settings request (`config latency`), captured:
+/// 23 keys.
+const NETAUDIO_SETTINGS: [u8; 48] = [
+    0x00, 0x17, 0x02, 0x01, 0x82, 0x04, 0x82, 0x05, 0x02, 0x10, 0x02, 0x11, 0x82, 0x18, 0x82, 0x19,
+    0x83, 0x01, 0x83, 0x02, 0x83, 0x06, 0x03, 0x10, 0x03, 0x11, 0x03, 0x03, 0x80, 0x21, 0x00, 0xf0,
+    0x80, 0x60, 0x00, 0x22, 0x00, 0x63, 0x00, 0x64, 0x00, 0x65, 0x02, 0x22, 0x02, 0x12, 0x83, 0x21,
+];
+
+#[test]
+fn a_keyed_settings_read_gets_our_values_in_the_hardware_s_layout() {
+    use super::control::{
+        SETTING_KEYS, SETTINGS_START, key, parse_settings, settings_request_body,
+    };
+    let mut cfg = config();
+    cfg.sample_rate = 48_000;
+    cfg.latency_ns = 250_000;
+    let mut dev = Dev::new(cfg);
+    let mut ask =
+        |seq: u16, body: &[u8]| dev.send(&request(SETTINGS_START, seq, op::ZEROS_1100, 0, body));
+    // Three keys: the pairs in the asked order, an absent key as `0, key`,
+    // the values after the pairs (offsets from the packet's start).
+    let r = decode(ask(
+        1,
+        &settings_request_body(&[key::LATENCY_ACTIVE, key::LATENCY_MAX, key::SAMPLE_RATE]),
+    ));
+    assert_eq!((r.header.start, r.header.op2), (SETTINGS_START, STATUS_OK));
+    assert_eq!(
+        r.body,
+        [
+            3, 3, // the count, twice
+            0x83, 0x01, 0, 24, // active latency at 24
+            0, 0, 0x83, 0x02, // no maximum
+            0x80, 0x20, 0, 28, // the rate at 28
+            0, 3, 0xd0, 0x90, // 250 000
+            0, 0, 0xbb, 0x80, // 48 000
+        ]
+    );
+    // netaudio's captured request: what we hold, read back as netaudio does.
+    let s = parse_settings(&decode(ask(2, &NETAUDIO_SETTINGS)).body).unwrap();
+    assert_eq!(
+        s.all.into_iter().collect::<Vec<_>>(),
+        [
+            (key::PULLUP, 0),
+            (key::LATENCY_CONFIGURED, 250_000),
+            (key::LATENCY_ACTIVE, 250_000)
+        ]
+    );
+    // The stack's own read.
+    let s = parse_settings(&decode(ask(3, &settings_request_body(&SETTING_KEYS))).body).unwrap();
+    assert_eq!(
+        (
+            s.sample_rate,
+            s.pullup,
+            s.latency_configured_ns,
+            s.latency_active_ns
+        ),
+        (Some(48_000), Some(0), Some(250_000), Some(250_000))
+    );
+    assert_eq!(
+        (s.latency_default_ns, s.latency_min_ns, s.latency_max_ns),
+        (None, None, None)
+    );
+    // No key: an empty table.
+    assert_eq!(decode(ask(4, &[0, 0])).body, [0, 0]);
+}
+
+#[test]
+fn a_settings_request_that_does_not_read_is_not_answered() {
+    use super::control::{SETTINGS_START, key, settings_request_body};
+    let mut dev = Dev::new(config());
+    let mut ask = |body: &[u8]| dev.send(&request(SETTINGS_START, 1, op::ZEROS_1100, 0, body));
+    // A count past the keys, a body without a count, more keys than fit.
+    let mut short = settings_request_body(&[key::SAMPLE_RATE, key::PULLUP]);
+    short.truncate(5);
+    assert!(matches!(ask(&short), ArcOutcome::Unanswered { .. }));
+    assert!(matches!(ask(&[0]), ArcOutcome::Unanswered { .. }));
+    let most = settings_request_body(&[key::SAMPLE_RATE; 128]);
+    assert!(matches!(ask(&most), ArcOutcome::Reply(_)));
+    let over = settings_request_body(&[key::SAMPLE_RATE; 129]);
+    assert!(matches!(ask(&over), ArcOutcome::Unanswered { .. }));
+}
+
 #[test]
 fn the_flow_lists_are_inferno_s_empty_page() {
     // No flows: 16 slots (inferno's 32 flows, at most 16 a page), none used,

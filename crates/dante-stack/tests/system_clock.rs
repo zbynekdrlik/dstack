@@ -177,6 +177,10 @@ fn our_tx_reaches_our_rx_clean_on_the_system_clock() {
         control: dir.path().join("control.sock"),
     };
     let prepared = host::prepare_with(&opts, &[], ClockSource::System).expect("the device set up");
+    let (rate, latency) = (
+        prepared.config().sample_rate,
+        u32::try_from(prepared.config().latency_ns).unwrap(),
+    );
     let media = prepared.media();
     // Ready at once: no dantesync.
     let status = ctl::answer("status", &media);
@@ -204,11 +208,17 @@ fn our_tx_reaches_our_rx_clean_on_the_system_clock() {
         let halt = AtomicBool::new(false);
         let to = std::net::SocketAddrV4::new(ip, dante_stack::arc::PORT);
         let mut udp = Udp::open(ip, to, &seq, REPLY_TIMEOUT, &requests, &halt).expect("a socket");
-        let settings = dante_stack::arc::control::settings(&mut udp);
+        // dstack #16: our settings, read as from any device.
+        let settings = dante_stack::arc::control::settings(&mut udp).expect("our settings");
         assert_eq!(
-            settings.ok(),
-            Some(Default::default()),
-            "no table of ours yet"
+            (
+                settings.sample_rate,
+                settings.pullup,
+                settings.latency_configured_ns,
+                settings.latency_active_ns,
+                settings.latency_default_ns,
+            ),
+            (Some(rate), Some(0), Some(latency), Some(latency), None)
         );
         dante_stack::arc::control::rx_flows(&mut udp)
     };
