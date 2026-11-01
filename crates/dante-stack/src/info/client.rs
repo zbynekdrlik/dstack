@@ -249,16 +249,18 @@ pub fn ask(
                 }
             }
             Ok(_) => {}
-            Err(e)
-                if matches!(
-                    e.kind(),
-                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-                ) =>
-            {
-                return Err(InfoError::Timeout { ask });
-            }
-            Err(e) => return Err(io(e)),
+            Err(e) => return Err(recv_error(ask, &e)),
         }
+    }
+}
+
+/// What a receive error ends an ask with: the read timeout's end (a
+/// would-block or a timed-out read, by platform) is a timeout, anything
+/// else a socket error.
+fn recv_error(ask: Ask, e: &io::Error) -> InfoError {
+    match e.kind() {
+        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut => InfoError::Timeout { ask },
+        kind => InfoError::Io { ask, kind },
     }
 }
 

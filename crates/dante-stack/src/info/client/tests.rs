@@ -336,3 +336,21 @@ fn a_reply_from_another_address_is_skipped() {
     t.join().unwrap();
     assert_eq!(got, Ok(vec![2]));
 }
+
+#[test]
+fn a_read_timeout_s_end_is_a_timeout_and_any_other_error_a_socket_error() {
+    use std::io::{Error, ErrorKind};
+    for kind in [ErrorKind::WouldBlock, ErrorKind::TimedOut] {
+        assert_eq!(
+            recv_error(Ask::Product, &Error::from(kind)),
+            InfoError::Timeout { ask: Ask::Product }
+        );
+    }
+    assert_eq!(
+        recv_error(Ask::Board, &Error::from(ErrorKind::ConnectionReset)),
+        InfoError::Io {
+            ask: Ask::Board,
+            kind: ErrorKind::ConnectionReset
+        }
+    );
+}
