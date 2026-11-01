@@ -75,11 +75,17 @@ pub struct Steer {
     model: Option<Model>,
     /// The date steps so far: the clock follows the wall less this.
     offset: i64,
+    /// The last update's QPC time and wall less the offset.
+    last: (i64, i64),
 }
 
 impl Steer {
-    pub fn new() -> Self {
-        Self::default()
+    pub const fn new() -> Self {
+        Steer {
+            model: None,
+            offset: 0,
+            last: (0, 0),
+        }
     }
 
     /// The model in use; `None` before the first update.
@@ -95,13 +101,47 @@ impl Steer {
     /// One pair from the poller: QPC time `q` and the wall `wall`, read
     /// back to back.
     pub fn update(&mut self, q: i64, wall: i64) -> Update {
-        // Today's Windows clock: the system time itself.
+        let Some(model) = self.model else {
+            self.model = Some(Model {
+                base_q: q,
+                base_m: wall,
+                ppb: 0,
+            });
+            self.last = (q, wall);
+            return Update::First;
+        };
+        let (q0, a0) = self.last;
+        let dq = q.saturating_sub(q0).max(1);
+        let m = model.at(q);
+        let error = wall - self.offset - m;
+        let allowed =
+            i128::from(STEP_MIN_NS) + i128::from(dq) * i128::from(DRIFT_PPB) / 1_000_000_000;
+        let (ppb, update) = if i128::from(error.unsigned_abs()) > allowed {
+            // A date step: the wall less the offset meets the clock again.
+            self.offset += error;
+            (model.ppb, Update::Step { jump_ns: error })
+        } else {
+            // The wall's rate since the last update, plus the error taken
+            // out over the next poll.
+            let a = wall - self.offset;
+            let rate = i128::from(a - a0 - dq) * 1_000_000_000 / i128::from(dq);
+            let pull = i128::from(error) * 1_000_000_000 / i128::from(SLEW_NS);
+            let ppb = (rate + pull).clamp(-i128::from(MAX_PPB), i128::from(MAX_PPB)) as i64;
+            (
+                ppb,
+                Update::Slew {
+                    error_ns: error,
+                    ppb,
+                },
+            )
+        };
         self.model = Some(Model {
             base_q: q,
-            base_m: wall,
-            ppb: 0,
+            base_m: m,
+            ppb,
         });
-        Update::First
+        self.last = (q, wall - self.offset);
+        update
     }
 }
 

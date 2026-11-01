@@ -1,14 +1,20 @@
 //! The media clock's OS clocks on Windows. dantesync steers the system
-//! time's rate (`SetSystemTimeAdjustmentPrecise`) and steps it only at a
-//! date step (`NtSetSystemTime`); QPC is the raw counter and is not steered.
-//! So both the wall and the "monotonic" clock read the precise system time
-//! (`GetSystemTimePreciseAsFileTime`): k = (wall − D) − wall = −D, steady
-//! between date steps; a date step changes k, which the tracker takes as a
-//! re-anchor after its confirmations (dantesync's daily step, 02:00 UTC).
+//! time's rate (`SetSystemTimeAdjustmentPrecise`) and steps it at a date
+//! step (`NtSetSystemTime`); QPC is the raw counter and is not steered. The
+//! wall is the precise system time (`GetSystemTimePreciseAsFileTime`). The
+//! "monotonic" clock is QPC scaled by [`super::steer::Model`], which the
+//! clock poller updates from each poll's (QPC, wall) pair ([`observe`]): it
+//! runs at the wall's steered rate and a date step does not move it, as
+//! Linux's `CLOCK_MONOTONIC` (dstack #1: before, a date step moved PTP time
+//! for 4 s, the TX schedule and the engine pump started again).
 
-use std::sync::OnceLock;
+use std::sync::{LazyLock, Mutex, OnceLock, PoisonError};
+
+use super::steer::{Model, Steer, Update};
+use crate::media::tx::Cell;
 
 use windows_sys::Win32::Foundation::{CloseHandle, FILETIME, HANDLE};
+use windows_sys::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
 use windows_sys::Win32::System::SystemInformation::GetSystemTimePreciseAsFileTime;
 use windows_sys::Win32::System::Threading::{
     CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, CreateWaitableTimerExW, INFINITE, SetWaitableTimer,
@@ -36,9 +42,61 @@ pub fn realtime_ns() -> i64 {
     (t - UNIX_EPOCH_FT) * 100
 }
 
-/// The clock k is taken against: the precise system time too (see the module).
+/// QPC's frequency, ticks a second (fixed at boot).
+fn qpc_frequency() -> i64 {
+    static FREQ: OnceLock<i64> = OnceLock::new();
+    *FREQ.get_or_init(|| {
+        let mut f = 0i64;
+        // SAFETY: a valid, writable i64.
+        unsafe { QueryPerformanceFrequency(&mut f) };
+        f.max(1)
+    })
+}
+
+/// QPC as ns since boot.
+fn qpc_ns() -> i64 {
+    let mut t = 0i64;
+    // SAFETY: a valid, writable i64.
+    unsafe { QueryPerformanceCounter(&mut t) };
+    (i128::from(t) * 1_000_000_000 / i128::from(qpc_frequency())) as i64
+}
+
+/// The steered clock's model: written by [`observe`] (under [`STEER`]),
+/// read by every thread without a lock.
+static MODEL: LazyLock<Cell<3>> = LazyLock::new(Cell::new);
+/// The model's learning: one writer at a time (a poller per process, but
+/// the tests run several).
+static STEER: Mutex<Steer> = Mutex::new(Steer::new());
+
+/// The steered clock, ns: QPC through the model; the wall until the first
+/// poll.
 pub fn monotonic_ns() -> i64 {
-    realtime_ns()
+    if MODEL.version() == 0 {
+        return realtime_ns();
+    }
+    let w = MODEL.read().map_or_else(|| MODEL.peek(), |(_, w)| w);
+    Model::from_words(w).at(qpc_ns())
+}
+
+/// A poll's wall reading `wall`, taken just before: updates the steered
+/// clock's model and returns the clock now. A date step is logged; the
+/// clock does not move.
+pub fn observe(wall: i64) -> i64 {
+    let q = qpc_ns();
+    let mut st = STEER.lock().unwrap_or_else(PoisonError::into_inner);
+    let update = st.update(q, wall);
+    let Some(model) = st.model() else {
+        return wall;
+    };
+    MODEL.write(model.words());
+    if let Update::Step { jump_ns } = update {
+        tracing::info!(
+            jump_ns,
+            offset_ns = st.offset(),
+            "the system time stepped (a date step): the media clock does not move"
+        );
+    }
+    model.at(q)
 }
 
 /// This thread's high-resolution waitable timer (made once per thread).

@@ -136,3 +136,26 @@ fn a_model_survives_its_words_and_scales_both_ways() {
     assert_eq!(m.at(9 * S), 99 * S - 1_000);
     assert_eq!(m.at(10 * S), 100 * S);
 }
+
+#[test]
+fn a_jump_at_the_threshold_is_a_slew_and_just_over_is_a_step() {
+    let at_bound = STEP_MIN_NS + DRIFT_PPB;
+    for (jump, step) in [
+        (at_bound, false),
+        (-at_bound, false),
+        (at_bound + 1, true),
+        (-at_bound - 1, true),
+    ] {
+        let mut st = Steer::new();
+        poll(&mut st, 0, 3, 0, 0);
+        let ups = poll(&mut st, 3, 4, 0, jump);
+        assert_eq!(
+            matches!(ups[0], Update::Step { .. }),
+            step,
+            "{jump}: {ups:?}"
+        );
+        if let Update::Slew { ppb, .. } = ups[0] {
+            assert_eq!(ppb, MAX_PPB * jump.signum(), "{jump}: clamped both ways");
+        }
+    }
+}

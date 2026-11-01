@@ -399,6 +399,27 @@ mod os {
         ts.tv_sec * 1_000_000_000 + ts.tv_nsec
     }
 
+    /// Windows: the steered clock follows the wall after a poll's pair and
+    /// never runs back (QPC through the model).
+    #[cfg(windows)]
+    #[test]
+    fn the_windows_steered_clock_follows_the_wall() {
+        for _ in 0..3 {
+            let m = super::super::sys::observe(realtime_ns());
+            assert!((m - realtime_ns()).abs() < 5_000_000, "{m}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let mut last = monotonic_ns();
+        for _ in 0..100_000 {
+            let m = monotonic_ns();
+            // A model update between a read of the model and of QPC may
+            // put a read nanoseconds back; never more.
+            assert!(m >= last - 1_000, "{last} {m}");
+            last = m;
+        }
+        assert!((monotonic_ns() - realtime_ns()).abs() < 5_000_000);
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn the_box_clocks_read_the_kernel_s() {
