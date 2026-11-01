@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.17 (2026-11-01)
+
+- Fix: a new device name in the config takes effect at start. Before, the state file's name won silently, so a rename through the config needed a restart to discover it (iemmixer, 1.11). The state now records the config's name it was made with (`config_name`). A config whose name changed since then renames the device, and our own subscriptions to our own TX follow, as with a Dante Controller rename. The state is saved at once, with one info line. A Dante Controller rename under an unchanged config stays across restarts, with one info line at start naming both names. A state file written before the record keeps its name and warns at start when it is not the config's (dstack #1).
+
 ## 0.4.16 (2026-11-01)
 
 - Fix (Windows): dantesync's nightly date step no longer moves PTP time. The "monotonic" clock was the system time, which dantesync steps. At 02:00:11Z on the SongPlayer PC the wall stepped +1.6 s; the TX schedule started again at once (lag 153609 samples), the engine pump skipped 1200 blocks, and PTP time ran 1.6 s ahead until the re-anchor 4.2 s later. Now it is QPC steered to the system time's rate by a model the clock poller updates every second (`clock::steer`). A wall jump over 1 ms plus 100 ppm of the time since the last poll is a date step and goes into an offset; smaller differences are slewed out within 1000 ppm. Linux's `CLOCK_MONOTONIC` already behaved this way (dstack #1).
