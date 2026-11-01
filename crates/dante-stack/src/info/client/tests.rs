@@ -548,3 +548,136 @@ fn a_silent_device_is_asked_once_every_resend() {
     assert_eq!(asked, 3);
     assert_eq!(RESEND, Duration::from_millis(250));
 }
+
+#[test]
+fn every_request_carries_a_new_sequence_so_a_card_answers_the_next_ask() {
+    // dcontroller on the site (1.11.2026), with the resend in place: the
+    // Brooklyn cards still left the board info unanswered after the product
+    // info. netaudio's trace: all its requests carried one sequence, and the
+    // card's two replies were consecutive packets, the board info only after
+    // the third request: a card drops a request whose sequence it has just
+    // answered. Here the stand-in answers only a sequence it has not seen.
+    let client = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let dev = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let port = dev.local_addr().unwrap().port();
+    let to = client.local_addr().unwrap();
+    let t = std::thread::spawn(move || {
+        dev.set_read_timeout(Some(Duration::from_millis(1500)))
+            .unwrap();
+        let mut seen = Vec::new();
+        let mut buf = [0u8; 128];
+        let mut answered = 0;
+        while let Ok((_, _)) = dev.recv_from(&mut buf) {
+            let seq = u16::from_be_bytes([buf[4], buf[5]]);
+            if seen.contains(&seq) {
+                continue;
+            }
+            seen.push(seq);
+            let op = if buf[27] == 0xc1 { 0xc0 } else { 0x60 };
+            dev.send_to(&reply(op, [0; 8], &[op]), to).unwrap();
+            answered += 1;
+            if answered == 2 {
+                return;
+            }
+        }
+    });
+    let at = SocketAddrV4::new(Ipv4Addr::LOCALHOST, port);
+    let wait = Duration::from_millis(600);
+    let product = ask(&client, at, None, Ask::Product, wait);
+    let board = ask(&client, at, None, Ask::Board, wait);
+    t.join().unwrap();
+    assert_eq!(product, Ok(vec![0xc0]));
+    assert_eq!(board, Ok(vec![0x60]));
+}
+
+/// A two-port card's network info in the captured layout, with synthetic
+/// MACs and addresses: the primary at 1000 Mbit/s (flags 1), the secondary
+/// at 1000 Mbit/s (flags 3) with no gateway, then the trailing blocks.
+fn two_port_network() -> Vec<u8> {
+    sparse(
+        0x70,
+        &[
+            (0x00, &[0, 2]),
+            (0x06, &[0x03, 0xe8, 0x00, 0x01]),
+            (0x0a, &[2, 0, 0, 0, 0, 1]),
+            (
+                0x10,
+                &[192, 0, 2, 10, 255, 255, 255, 0, 192, 0, 2, 1, 192, 0, 2, 1],
+            ),
+            (0x22, &[0x03, 0xe8, 0x00, 0x03]),
+            (0x26, &[2, 0, 0, 0, 0, 2]),
+            (0x2c, &[198, 51, 100, 10, 255, 255, 254, 0]),
+            (0x3c, &[0x00, 0x18, 0x00, 0x4c]),
+        ],
+    )
+}
+
+#[test]
+fn the_network_request_is_netaudio_s_and_our_server_knows_it() {
+    let r = request(9, [0; 8], Ask::Network);
+    assert_eq!(r.len(), 40);
+    assert_eq!(r[24..32], [0x07, 0x31, 0x00, 0x13, 0, 0, 0, 0x64]);
+    assert!(r[32..].iter().all(|&b| b == 0));
+    let parsed = crate::info::parse_request(&r).unwrap();
+    assert_eq!(parsed.kind, crate::info::Kind::NetworkInfo);
+    assert_eq!(
+        reply_body(&reply(0x11, [0; 8], &[1]), Ask::Network, None),
+        Some(&[1u8][..])
+    );
+}
+
+#[test]
+fn a_two_port_card_s_network_info_reads_as_netaudio_decodes_it() {
+    let n = parse_network(&two_port_network()).unwrap();
+    assert_eq!(
+        n,
+        [
+            NetInterface {
+                link_mbit: 1000,
+                flags: 1,
+                mac: [2, 0, 0, 0, 0, 1],
+                ip: Ipv4Addr::new(192, 0, 2, 10),
+                netmask: Ipv4Addr::new(255, 255, 255, 0),
+                gateway: Ipv4Addr::new(192, 0, 2, 1),
+                dns: Ipv4Addr::new(192, 0, 2, 1),
+            },
+            NetInterface {
+                link_mbit: 1000,
+                flags: 3,
+                mac: [2, 0, 0, 0, 0, 2],
+                ip: Ipv4Addr::new(198, 51, 100, 10),
+                netmask: Ipv4Addr::new(255, 255, 254, 0),
+                gateway: Ipv4Addr::UNSPECIFIED,
+                dns: Ipv4Addr::UNSPECIFIED,
+            },
+        ]
+    );
+    // The count passing the body, and a short body.
+    let mut more = two_port_network();
+    more[1] = 5;
+    assert_eq!(parse_network(&more), None);
+    assert_eq!(parse_network(&two_port_network()[..0x3c]).unwrap().len(), 2);
+    assert_eq!(parse_network(&two_port_network()[..0x3b]), None);
+    assert_eq!(parse_network(&[0, 0]), Some(vec![]));
+}
+
+#[test]
+fn our_own_server_s_network_info_reads_back() {
+    let client = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let (rt, at) = our_server(&client);
+    let port = at.port();
+    let _keep = std::thread::spawn(move || rt.block_on(std::future::pending::<()>()));
+    let n = parse_network(&ask_at(&client, port, Ask::Network)).unwrap();
+    assert_eq!(
+        n,
+        [NetInterface {
+            link_mbit: 1000,
+            flags: 1,
+            mac: [2, 0, 0, 0, 0, 1],
+            ip: Ipv4Addr::LOCALHOST,
+            netmask: Ipv4Addr::new(255, 0, 0, 0),
+            gateway: Ipv4Addr::UNSPECIFIED,
+            dns: Ipv4Addr::UNSPECIFIED,
+        }]
+    );
+}

@@ -22,6 +22,13 @@
 //! them on three devices (a leader and two followers). Our own device
 //! answers no clock stats (it has no PTP of its own).
 //!
+//! The network info (`07 31 00 13 00 00 00 64` and 8 zeros; reply
+//! `.. 00 11`) is parsed by [`parse_network`]: a `u16` count at 0, then a
+//! 28-byte record per interface from 0x04 (a `u16`, the link speed in
+//! Mbit/s, flags, the MAC, the address, the netmask, the gateway, the DNS
+//! server), as netaudio decodes it on three devices (one of them with a
+//! secondary interface, one with a secondary without a link).
+//!
 //! Every version is `major u8, minor u8, patch u16`, big-endian.
 //!
 //! | product info (0xc0) | |
@@ -52,6 +59,7 @@
 use std::fmt;
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::{Duration, Instant};
 
 use super::{HEADER_LEN, INFO_GROUP, INFO_PORT, REQUEST_PORT, START_INFO, VENDOR};
@@ -61,6 +69,11 @@ const RECV_BUFFER: usize = 2048;
 /// Brooklyn card drops a board-info request asked right after another
 /// (netaudio sends it three times; dcontroller found it on the site).
 pub const RESEND: Duration = Duration::from_millis(250);
+/// The requests' sequence, a new one for every request sent (a resend
+/// too), as Dante Controller numbers its own: a Brooklyn card drops a
+/// request whose sequence it has just answered (dcontroller and netaudio's
+/// trace, 1.11.2026).
+static SEQ: AtomicU16 = AtomicU16::new(1);
 
 /// Where a name ends: its field's end or its first zero.
 const PRODUCT_MANUFACTURER: (usize, usize) = (0x2c, 0xac);
@@ -69,6 +82,12 @@ const BOARD_SHORT_NAME: (usize, usize) = (0x0c, 0x14);
 const BOARD_MODEL_NAME: (usize, usize) = (0x38, 0xb8);
 /// The zeros netaudio's clock-stats request carries.
 const CLOCK_REQUEST_BODY: usize = 60;
+/// The zeros netaudio's network-info request carries.
+const NETWORK_REQUEST_BODY: usize = 8;
+/// The network info's interfaces start here, one record each.
+const NETWORK_INTERFACES: usize = 0x04;
+/// One interface's record in the network info.
+const NETWORK_INTERFACE_LEN: usize = 28;
 /// The clock status's ports start here, 4 bytes each.
 const CLOCK_PORTS: usize = 0x28;
 /// Where the word clock state sits past the clock status's extension.
@@ -81,6 +100,8 @@ pub enum Ask {
     Board,
     /// The clock status (Dante's clock stats).
     Clock,
+    /// The network interfaces: link speed, MAC and addresses.
+    Network,
 }
 
 impl Ask {
@@ -90,6 +111,7 @@ impl Ask {
             Ask::Product => 0xc1,
             Ask::Board => 0x61,
             Ask::Clock => 0x21,
+            Ask::Network => 0x13,
         }
     }
 
@@ -99,6 +121,7 @@ impl Ask {
         match self {
             Ask::Product | Ask::Board => (0, 0),
             Ask::Clock => (0x64, CLOCK_REQUEST_BODY),
+            Ask::Network => (0x64, NETWORK_REQUEST_BODY),
         }
     }
 
@@ -108,6 +131,7 @@ impl Ask {
             Ask::Product => 0xc0,
             Ask::Board => 0x60,
             Ask::Clock => 0x20,
+            Ask::Network => 0x11,
         }
     }
 }
@@ -209,6 +233,42 @@ impl ClockStatus {
             _ => None,
         }
     }
+}
+
+/// One network interface of a device, as its network info gives it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NetInterface {
+    /// The link's speed, Mbit/s (0: no link).
+    pub link_mbit: u16,
+    /// The interface's flags as the device sends them (1 on a primary
+    /// with a link, 3 on a secondary with one, 0 without a link: seen).
+    pub flags: u16,
+    pub mac: [u8; 6],
+    pub ip: Ipv4Addr,
+    pub netmask: Ipv4Addr,
+    pub gateway: Ipv4Addr,
+    pub dns: Ipv4Addr,
+}
+
+/// A network-info reply body: each interface (primary first); `None`
+/// when the count passes the body.
+pub fn parse_network(body: &[u8]) -> Option<Vec<NetInterface>> {
+    let n = usize::from(u16_at(body, 0x00)?);
+    (0..n)
+        .map(|i| {
+            let at = NETWORK_INTERFACES + NETWORK_INTERFACE_LEN * i;
+            let ip = |o: usize| u32_at(body, at + o).map(Ipv4Addr::from);
+            Some(NetInterface {
+                link_mbit: u16_at(body, at + 2)?,
+                flags: u16_at(body, at + 4)?,
+                mac: mac_at(body, at + 6)?,
+                ip: ip(12)?,
+                netmask: ip(16)?,
+                gateway: ip(20)?,
+                dns: ip(24)?,
+            })
+        })
+        .collect()
 }
 
 /// An IEEE 1588 port state's name, for the states seen in captures.
@@ -353,7 +413,8 @@ pub fn parse_clock(body: &[u8]) -> Option<ClockStatus> {
 }
 
 /// Sends the request for `ask` from `sock` to `device` (a device's
-/// [`REQUEST_PORT`]), and again every [`RESEND`] until its reply comes,
+/// [`REQUEST_PORT`]), and again every [`RESEND`] until its reply comes
+/// (each with a sequence of its own),
 /// for up to `wait` in all: its reply from that address, any port (and the
 /// device id `id`, when given); the reply's body. Other datagrams on
 /// `sock` are skipped.
@@ -378,7 +439,9 @@ pub fn ask(
             return Err(InfoError::Timeout { ask });
         }
         if now >= next {
-            sock.send_to(&request(1, [0; 8], ask), device).map_err(io)?;
+            let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+            sock.send_to(&request(seq, [0; 8], ask), device)
+                .map_err(io)?;
             next = now + RESEND;
         }
         sock.set_read_timeout(Some(deadline.min(next) - now))
@@ -489,6 +552,25 @@ pub fn clock_status(
         wait,
     )?;
     parse_clock(&body).ok_or(InfoError::Malformed { ask: Ask::Clock })
+}
+
+/// The network interfaces of the device at `device` (with the device id
+/// `id`, when given), asked from our interface at `iface`.
+pub fn network_info(
+    iface: Ipv4Addr,
+    device: Ipv4Addr,
+    id: Option<[u8; 8]>,
+    wait: Duration,
+) -> Result<Vec<NetInterface>, InfoError> {
+    let sock = on_group(iface, Ask::Network)?;
+    let body = ask(
+        &sock,
+        SocketAddrV4::new(device, REQUEST_PORT),
+        id,
+        Ask::Network,
+        wait,
+    )?;
+    parse_network(&body).ok_or(InfoError::Malformed { ask: Ask::Network })
 }
 
 #[cfg(test)]

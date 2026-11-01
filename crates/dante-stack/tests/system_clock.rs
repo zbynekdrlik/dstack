@@ -521,7 +521,7 @@ fn control_subscribes_our_running_device_and_ends_it() {
 #[test]
 fn the_info_client_reads_our_running_device_s_model_and_versions() {
     use dante_stack::arc::client::{REPLY_TIMEOUT, Udp, read_directory};
-    use dante_stack::info::client::{board_info, product_info};
+    use dante_stack::info::client::{board_info, network_info, product_info};
     use std::net::SocketAddrV4;
     use std::sync::atomic::AtomicU16;
 
@@ -542,6 +542,7 @@ fn the_info_client_reads_our_running_device_s_model_and_versions() {
         .expect("the device started");
     let product = product_info(ip, ip, Some(id), Duration::from_secs(5));
     let board = board_info(ip, ip, Some(id), Duration::from_secs(5));
+    let net = network_info(ip, ip, Some(id), Duration::from_secs(5));
     let other = product_info(ip, ip, Some([0xee; 8]), Duration::from_millis(500));
     let seq = AtomicU16::new(1);
     let requests = dante_stack::ctl::Requests::default();
@@ -558,6 +559,9 @@ fn the_info_client_reads_our_running_device_s_model_and_versions() {
     let board = board.expect("the board info");
     assert_eq!(board.model, cfg.model);
     assert!(board.software.is_some(), "{board:?}");
+    let net = net.expect("the network info");
+    assert_eq!(net.len(), 1, "{net:?}");
+    assert_eq!(net[0].ip, ip);
     assert!(
         other.is_err(),
         "another device id answers nothing: {other:?}"

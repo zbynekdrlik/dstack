@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.29 (2026-11-01)
+
+- Fix: every 8700 info request now carries a sequence of its own, resends included (it was always 1). With the 0.4.27 resend in place, dcontroller still found the Brooklyn cards (two Yamaha AIC128-D, a Tascam ML-32D) leaving the board info unanswered after the product info, and the Tascam its clock status. netaudio's trace shows one sequence on all its requests and the card's two replies as consecutive packets, the board info only after the third request: a card drops a request whose sequence it has just answered.
+- New: `info::client::network_info(iface, device, id, wait) -> Vec<NetInterface>`: each interface's link speed (Mbit/s), flags, MAC, address, netmask, gateway and DNS server (8700 network info). The layout matched netaudio's decode on three devices, including a two-port card and a secondary without a link. dcontroller's per-device network status.
+- Docs: `docs/windows-box.md`, what a Windows PC needs for low latency, from the FOH PC (dstack #1):
+  - the device's spinning threads on their own cores, apart from the NIC's RSS CPUs and dantesync;
+  - a NIC for Dante only;
+  - DSCP needs a QoS policy on Windows.
+
 ## 0.4.28 (2026-11-01)
 
 - New: `embed::Embedded`, a Dante device inside an app's own process (the owner's connection model: every app carries its own connector and appears as its own device; dstack #20, for the intercom and strih-obs).
