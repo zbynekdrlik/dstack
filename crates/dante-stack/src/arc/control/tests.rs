@@ -501,3 +501,128 @@ fn rx_flows_of_our_own_device_lists_none_before_a_grant() {
         Err(ReadError::Malformed { op: op::RX_FLOWS })
     );
 }
+
+/// A hex string's bytes.
+fn unhex(s: &str) -> Vec<u8> {
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+        .collect()
+}
+
+/// Settings replies captured on the site (1.11), asked for SETTING_KEYS
+/// and 0x0201: a wireless receiver, then a Yamaha card.
+const WIRELESS_SETTINGS: &str = "2809005400091100000108088020002c802100308204004082050044830100488302004c83060050020100010001770000000000000000000000000000000000000f4240000f4240000f4240009af8da000f4240";
+const CARD_SETTINGS: &str = "2809005400091100000108088020002c802100308204004082050044830100488302004c83060050020100010001770000000000000000000000000000000000000f42400003d0900003d09000a2c2ab000249f0";
+
+#[test]
+fn settings_read_as_netaudio_reads_them_on_real_devices() {
+    let body = |hex: &str| unhex(hex)[HEADER_LEN..].to_vec();
+    // netaudio 0.4.2 read: 96 kHz, latency 1 ms (default 1, min 1, max
+    // 10.15625 ms) on the wireless receiver; 0.25 ms (default 1, min 0.15,
+    // max 10.666667 ms) on the card.
+    let w = parse_settings(&body(WIRELESS_SETTINGS)).unwrap();
+    assert_eq!(
+        (
+            w.sample_rate,
+            w.pullup,
+            w.latency_configured_ns,
+            w.latency_active_ns
+        ),
+        (Some(96_000), Some(0), Some(1_000_000), Some(1_000_000))
+    );
+    assert_eq!(
+        (w.latency_default_ns, w.latency_min_ns, w.latency_max_ns),
+        (Some(1_000_000), Some(1_000_000), Some(10_156_250))
+    );
+    assert_eq!(w.all.get(&0x0201), Some(&1), "a plain value");
+    assert_eq!(w.all.len(), 8);
+    let c = parse_settings(&body(CARD_SETTINGS)).unwrap();
+    assert_eq!(
+        (
+            c.latency_configured_ns,
+            c.latency_active_ns,
+            c.latency_default_ns
+        ),
+        (Some(250_000), Some(250_000), Some(1_000_000))
+    );
+    assert_eq!(
+        (c.latency_min_ns, c.latency_max_ns),
+        (Some(150_000), Some(10_666_667))
+    );
+}
+
+#[test]
+fn a_settings_reply_skips_absent_keys_and_pointers_past_it() {
+    // [n 3, m 3]: key 0 (0x8218 absent), 0x8020 pointing past the body,
+    // 0x0210 = 16.
+    let body = [
+        3, 3, 0x00, 0x00, 0x82, 0x18, 0x80, 0x20, 0x00, 0xff, 0x02, 0x10, 0x00, 0x10,
+    ];
+    let s = parse_settings(&body).unwrap();
+    assert_eq!(s.all, BTreeMap::from([(0x0210, 16)]));
+    assert_eq!(s.sample_rate, None);
+    // A pointer into the header is past too.
+    let body = [1, 1, 0x80, 0x20, 0x00, 0x04];
+    assert!(parse_settings(&body).unwrap().all.is_empty());
+    // The pairs pass the body; an empty body; an empty table.
+    assert_eq!(parse_settings(&[2, 2, 0x02, 0x10, 0x00, 0x10]), None);
+    assert_eq!(parse_settings(&[]), None);
+    assert_eq!(parse_settings(&[0, 0]), Some(Settings::default()));
+}
+
+#[test]
+fn the_settings_request_is_the_count_then_the_keys() {
+    assert_eq!(
+        settings_request_body(&[0x8020, 0x0201]),
+        [0, 2, 0x80, 0x20, 0x02, 0x01]
+    );
+    assert_eq!(settings_request_body(&[]), [0, 0]);
+    let full = settings_request_body(&SETTING_KEYS);
+    assert_eq!(full.len(), 2 + 2 * SETTING_KEYS.len());
+    assert_eq!(full[..4], [0, 7, 0x80, 0x20]);
+}
+
+/// Records each call's start code and op, answering with a fixed reply.
+struct Asked(Vec<(u16, u16, Vec<u8>)>, u16, Vec<u8>);
+
+impl Call for Asked {
+    fn call(&mut self, op1: u16, body: &[u8]) -> Result<(u16, Vec<u8>), ReadError> {
+        self.call_as(crate::arc::client::START, op1, body)
+    }
+    fn call_as(&mut self, start: u16, op1: u16, body: &[u8]) -> Result<(u16, Vec<u8>), ReadError> {
+        self.0.push((start, op1, body.to_vec()));
+        Ok((self.1, self.2.clone()))
+    }
+}
+
+#[test]
+fn settings_asks_with_0x2809_and_types_its_errors() {
+    let mut c = Asked(
+        Vec::new(),
+        STATUS_OK,
+        unhex(CARD_SETTINGS)[HEADER_LEN..].to_vec(),
+    );
+    let s = settings(&mut c).unwrap();
+    assert_eq!(s.latency_active_ns, Some(250_000));
+    assert_eq!(
+        c.0,
+        [(SETTINGS_START, 0x1100, settings_request_body(&SETTING_KEYS))]
+    );
+    let mut refused = Asked(Vec::new(), 0x0022, Vec::new());
+    assert_eq!(
+        settings(&mut refused),
+        Err(ReadError::Refused {
+            op: 0x1100,
+            status: 0x0022
+        })
+    );
+    let mut cut = Asked(Vec::new(), STATUS_OK, vec![4, 4, 0x02]);
+    assert_eq!(settings(&mut cut), Err(ReadError::Malformed { op: 0x1100 }));
+    // Our own device keeps no settings table yet: an empty one.
+    let mut own = Own::new();
+    assert_eq!(settings(&mut own), Ok(Settings::default()));
+    // An exchange without call_as sends its usual start code.
+    let mut fixed = Fixed(STATUS_OK, vec![0, 0]);
+    assert_eq!(settings(&mut fixed), Ok(Settings::default()));
+}

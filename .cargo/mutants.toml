@@ -20,6 +20,9 @@ exclude_re = [
   # The heartbeat listen's socket loop: tests/system_clock.rs reads our
   # running device with it; its parse and gather are unit tested.
   "latency.rs.*listen",
+  # The UDP exchange's start code: tests/system_clock.rs reads our running
+  # device's settings through it.
+  "client.rs.*call_as",
   "ask_realtime",
   # Log-only: the qdisc verdict is tested in qdisc::check.
   "qdisc.rs.*report",

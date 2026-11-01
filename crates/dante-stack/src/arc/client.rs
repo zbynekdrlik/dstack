@@ -407,6 +407,10 @@ impl super::control::Call for Udp<'_> {
     fn call(&mut self, op1: u16, body: &[u8]) -> Result<(u16, Vec<u8>), ReadError> {
         self.exchange(op1, |seq| request(START, seq, op1, 0, body))
     }
+
+    fn call_as(&mut self, start: u16, op1: u16, body: &[u8]) -> Result<(u16, Vec<u8>), ReadError> {
+        self.exchange(op1, |seq| request(start, seq, op1, 0, body))
+    }
 }
 
 #[cfg(test)]

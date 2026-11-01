@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.24 (2026-11-01)
+
+- New: `arc::control::settings(c)` reads any device's settings, read-only (dstack #16 step 4, asked for by dcontroller). It returns the sample rate, the pull-up, and the latency (configured, active, default, minimum, maximum), with every key answered in `Settings::all`.
+  - It asks ARC 0x1100 with start code 0x2809 and the wanted keys, as netaudio 0.4.2 does, and every hardware device on the site answers.
+  - The key meanings were confirmed against netaudio's own readings on six devices: two Yamaha cards, a Tascam, a wireless receiver, an ESI interface and DVS.
+  - `Call::call_as` sends another start code.
+- Still to come: encoding, model and firmware.
+- Our own device still answers 0x1100 with an empty table.
+- `CLAUDE.md`: the connection model (one embedded device per app; dasio for ASIO hosts; iemmixer the lowest-latency tier).
+
 ## 0.4.23 (2026-11-01)
 
 - New config key `rx_port_base`: the RX flow sockets take fixed ports, slot `n` on `rx_port_base + n` (32 ports), so a firewall can name them. camera-box needs this for its nft table on the editing PCs (dstack #20).
