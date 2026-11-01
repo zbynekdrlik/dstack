@@ -1588,3 +1588,74 @@ fn the_udp_path_sends_the_packet_after_the_headroom() {
     assert_eq!(&got[..n], [1, 2, 3, 4]);
     assert_eq!(from.port(), shared.ports[0]);
 }
+
+/// What `f` logs at WARN or above on this thread, as text.
+fn warned(f: impl FnOnce()) -> String {
+    let buf = Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let sink = Arc::clone(&buf);
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(move || Writer(Arc::clone(&sink)))
+        .with_ansi(false)
+        .with_max_level(tracing::Level::WARN)
+        .finish();
+    crate::test_log::undecided();
+    tracing::subscriber::with_default(subscriber, f);
+    String::from_utf8(buf.lock().unwrap().clone()).unwrap()
+}
+
+struct Writer(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for Writer {
+    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(b);
+        Ok(b.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// dstack #1: SongPlayer's flow read 24 late at the FOH card on 1.11 with
+/// no line on our side. The late watch logs our late packets each second.
+#[test]
+fn the_late_watch_logs_a_flow_s_late_packets_with_their_peak() {
+    let mut cfg = cfg();
+    cfg.tx_latency_ns = Some(500_000);
+    let shared =
+        Arc::new(TxShared::new(cfg, Ipv4Addr::LOCALHOST, Vec::new().into(), 1, &[]).unwrap());
+    let mut rig = Rig::with(shared);
+    let (slot, _) = rig.flow(vec![Some(1), Some(2)]);
+    let mut watch = crate::media::late::LateWatch::new();
+    let quiet = warned(|| watch.watch(0, &rig.shared));
+    assert_eq!(quiet, "", "the first look learns");
+    rig.tx.step(Some(T), 0);
+    rig.tx.step(Some(first_due_ns(T) + 50_000), 0);
+    let lane = rig.shared.lane(slot);
+    assert!(lane.over_latency >= 1, "{lane:?}");
+    // Inside the second: nothing yet, the peak kept.
+    assert_eq!(
+        warned(|| watch.watch(crate::media::late::EVERY_NS - 1, &rig.shared)),
+        ""
+    );
+    let log = warned(|| watch.watch(crate::media::late::EVERY_NS, &rig.shared));
+    assert_eq!(log.lines().count(), 1, "{log}");
+    assert!(log.contains(" WARN "), "{log}");
+    assert!(
+        log.contains(&format!(
+            "slot={slot} packets={} age_peak_us={}",
+            lane.over_latency,
+            lane.age_max_ns / 1_000
+        )),
+        "{log}"
+    );
+    assert!(log.contains("receivers count them late"), "{log}");
+    // The peak went with the look; the lane's maximum stays.
+    assert_eq!(rig.shared.take_age_peak(slot), 0);
+    assert_eq!(rig.shared.lane(slot).age_max_ns, lane.age_max_ns);
+    assert_eq!(rig.shared.take_age_peak(MAX_FLOWS), 0, "no such slot");
+    // The next second, no new late packet: quiet.
+    assert_eq!(
+        warned(|| watch.watch(2 * crate::media::late::EVERY_NS, &rig.shared)),
+        ""
+    );
+}

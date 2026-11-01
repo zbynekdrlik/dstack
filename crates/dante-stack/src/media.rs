@@ -20,6 +20,7 @@
 
 pub mod bypass;
 pub mod check;
+pub mod late;
 pub mod packet;
 pub mod qos;
 pub mod ring;
