@@ -24,9 +24,12 @@ use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::process::ExitCode;
 use std::sync::atomic::AtomicI32;
+#[cfg(unix)]
 use std::time::Duration;
 
-use super::{Build, ClockLines, Command, ctl_succeeded, parse_args, usage};
+#[cfg(unix)]
+use super::ctl_succeeded;
+use super::{Build, ClockLines, Command, parse_args, usage};
 use crate::clock::{DANTESYNC, MonoClock, POLL, Poller};
 use crate::host::{self, Host, Signals};
 use tokio::time::MissedTickBehavior;
@@ -233,3 +236,6 @@ fn ctl_request(name: &str, path: &Path, request: &str) -> ExitCode {
         ExitCode::from(1)
     }
 }
+
+#[cfg(test)]
+mod tests;
