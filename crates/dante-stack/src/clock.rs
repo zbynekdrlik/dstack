@@ -36,6 +36,7 @@
 //! judge, [`crate::media::rx::RxShared::last_min_lateness_ns`]).
 
 pub mod dsyx;
+pub mod steer;
 
 use crate::device::TimingProfile;
 
