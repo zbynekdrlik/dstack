@@ -1198,6 +1198,23 @@ fn a_flow_needing_a_later_playout_delays_only_its_own_channels() {
     assert_eq!((rack_plan.latency, rack_plan.delay), (24, 0));
 }
 
+#[test]
+fn a_latency_in_ns_is_its_nearest_whole_samples() {
+    // dasio, 1.11.2026: P = 333 333 ns is 31.99997 samples at 96 kHz.
+    // Cut down to 31, the 1 ms source (96) needs a delay of 65, two
+    // blocks of 64: a round trip of 351 samples where 32 gives 288.
+    let mut cfg = cfg();
+    cfg.latency_ns = 333_333;
+    cfg.block = 64;
+    let net = Fake::default();
+    net.add("Mics-01", "Vox", advertised_mic());
+    let mut m = Manager::new(&cfg, "test-device", OUR_IP, ports());
+    m.set(0, Some(sub("Vox", "Mics-01")));
+    run_with_mic(&mut m, &net, 1, |_| Answer::Granted([0, 0, 0, 9, 0, 9]));
+    let slot = m.rx_route(0).expect("routed").flow;
+    assert_eq!((m.rx_plan(slot).latency, m.rx_plan(slot).delay), (96, 64));
+}
+
 /// The mic as its channel record advertises it: 1 ms, fpp 32 only.
 fn advertised_mic() -> Advertised {
     Advertised {
