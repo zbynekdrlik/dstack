@@ -940,3 +940,36 @@ fn a_pass_rests_until_its_period_from_the_start_and_never_past_it() {
     assert_eq!(rest_ns(1_000_000, 1_000_000 + PASS_NS + 1), 0);
     assert_eq!(rest_ns(u64::MAX, 0), u64::MAX, "saturates");
 }
+
+/// camera-box (dstack #20): a firewall names the RX flow ports, so slot `n`
+/// receives on `rx_port_base + n`.
+#[test]
+fn a_port_base_puts_each_slot_on_its_own_port_and_a_taken_one_is_named() {
+    let rings = || -> Arc<[Ring]> { vec![Ring::new()].into() };
+    // A base whose 32 ports are free on loopback: tried until one is.
+    let (shared, base) = (40_000u16..60_000)
+        .step_by(97)
+        .find_map(|b| Some((RxShared::new_at(RATE, LOOPBACK, rings(), Some(b)).ok()?, b)))
+        .expect("32 free ports in a row on loopback");
+    let ports = shared.ports().unwrap();
+    for (slot, port) in ports.iter().enumerate() {
+        assert_eq!(usize::from(*port), usize::from(base) + slot);
+    }
+    // While they are held, the same base fails, naming the first port.
+    let err = RxShared::new_at(RATE, LOOPBACK, rings(), Some(base)).unwrap_err();
+    assert!(
+        err.to_string().contains(&format!("RX flow port {base}")),
+        "{err}"
+    );
+    // A base too high for 32 ports.
+    let err = RxShared::new_at(RATE, LOOPBACK, rings(), Some(65_530)).unwrap_err();
+    assert!(err.to_string().contains("past port 65535"), "{err}");
+    drop(shared);
+    // Without a base the OS chooses: 32 distinct ports.
+    let free = RxShared::new_at(RATE, LOOPBACK, rings(), None)
+        .unwrap()
+        .ports()
+        .unwrap();
+    let distinct: std::collections::BTreeSet<_> = free.iter().collect();
+    assert_eq!(distinct.len(), MAX_FLOWS);
+}

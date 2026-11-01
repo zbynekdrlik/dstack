@@ -168,6 +168,12 @@ pub struct DeviceConfig {
     /// distinct ones. `cmc::PROCESS_ID` (0) when left out.
     #[serde(default)]
     pub process_id: u16,
+    /// The first of the RX flow ports (UDP): slot `n` (from 0) receives on
+    /// `rx_port_base + n`, [`crate::media::rx::MAX_FLOWS`] ports, so a
+    /// firewall can name them (camera-box's nft table, dstack #20). Ports
+    /// the OS chooses when left out.
+    #[serde(default)]
+    pub rx_port_base: Option<u16>,
     /// Where the state ([`DeviceState`]) is kept.
     pub state_file: PathBuf,
 }
@@ -315,6 +321,22 @@ impl DeviceConfig {
                     "playout_override: a valid Dante device name and 1 to 65535 samples"
                         .to_string(),
                 );
+            }
+        }
+        if let Some(base) = self.rx_port_base {
+            let last = u32::from(base) + crate::media::rx::MAX_FLOWS as u32 - 1;
+            let ours = [self.arc_port, self.cmc_port, self.flows_port];
+            if base < 1024
+                || last > u32::from(u16::MAX)
+                || ours
+                    .iter()
+                    .any(|&p| (u32::from(base)..=last).contains(&u32::from(p)))
+            {
+                out.push(format!(
+                    "rx_port_base: 1024 to {}, its {} ports clear of the ARC, CMC and flow-control ports",
+                    u16::MAX as usize + 1 - crate::media::rx::MAX_FLOWS,
+                    crate::media::rx::MAX_FLOWS
+                ));
             }
         }
         if self.state_file.as_os_str().is_empty() {

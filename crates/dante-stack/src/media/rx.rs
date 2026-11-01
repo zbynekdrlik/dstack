@@ -281,10 +281,28 @@ impl RxShared {
     /// bound to `ip`, and the RX channels' `rings` (one per RX channel,
     /// shared with the TX side's echo).
     pub fn new(rate: u32, ip: Ipv4Addr, rings: Arc<[Ring]>) -> io::Result<Self> {
+        Self::new_at(rate, ip, rings, None)
+    }
+
+    /// [`RxShared::new`] with slot `n`'s socket on port `base + n` when
+    /// `base` is given ([`crate::device::DeviceConfig::rx_port_base`]); a
+    /// port taken is an error naming it.
+    pub fn new_at(
+        rate: u32,
+        ip: Ipv4Addr,
+        rings: Arc<[Ring]>,
+        base: Option<u16>,
+    ) -> io::Result<Self> {
         let mut recv_buffer = 0;
         let sockets = (0..MAX_FLOWS)
-            .map(|_| {
-                let s = UdpSocket::bind(SocketAddrV4::new(ip, 0))?;
+            .map(|slot| {
+                let port = match base {
+                    Some(b) => u16::try_from(usize::from(b) + slot)
+                        .map_err(|_| io::Error::other("rx_port_base: past port 65535"))?,
+                    None => 0,
+                };
+                let s = UdpSocket::bind(SocketAddrV4::new(ip, port))
+                    .map_err(|e| io::Error::new(e.kind(), format!("RX flow port {port}: {e}")))?;
                 s.set_nonblocking(true)?;
                 crate::winsock::no_connreset(&s)?;
                 recv_buffer = set_recv_buffer(&s, RECV_BUFFER_BYTES);
