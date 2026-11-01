@@ -521,6 +521,8 @@ pub struct LaneStats {
     late_max_ns: AtomicU64,
     send_max_ns: AtomicU64,
     age_max_ns: AtomicU64,
+    /// The oldest packet since the late watch last took it ([`late`]).
+    age_peak_ns: AtomicU64,
     over_latency: AtomicU64,
     direct: AtomicU64,
 }
@@ -760,6 +762,13 @@ impl TxShared {
         self.peaks
             .get(tx)
             .map_or(0, |p| p.swap(0, Ordering::Relaxed))
+    }
+
+    /// Slot `slot`'s oldest packet since the last call, ns (0: none sent).
+    pub fn take_age_peak(&self, slot: usize) -> u64 {
+        self.lanes
+            .get(slot)
+            .map_or(0, |l| l.age_peak_ns.swap(0, Ordering::Relaxed))
     }
 
     /// Slot `slot`'s counts.
@@ -1130,6 +1139,7 @@ impl Transmitter {
                 // A receiver's lateness: the arrival past the stamp.
                 let age = left.saturating_sub(ns_of(stamp, *rate));
                 stats.age_max_ns.fetch_max(age, Ordering::Relaxed);
+                stats.age_peak_ns.fetch_max(age, Ordering::Relaxed);
                 if over_latency(age, *latency_ns) {
                     stats.over_latency.fetch_add(1, Ordering::Relaxed);
                 }

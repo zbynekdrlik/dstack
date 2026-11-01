@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.19 (2026-11-01)
+
+- The late watch: once a second, each TX flow whose packets left later than the advertised latency since the last look logs one warning line. The line gives the slot, the count and the oldest packet's age (`age_peak_us`). A receiver at that latency counts each such packet late.
+- So the log now says when our side was late. A receiver that counts late packets while the log stays quiet points past our send: the OS send path or the network.
+- Before, only the status's cumulative `over_latency` held this; it had no time and was lost at a restart. SongPlayer's flow read 24 late at the FOH card at 12:08:53 on 1.11, and nothing on our side could say whose they were (dstack #1).
+
 ## 0.4.18 (2026-11-01)
 
 - `SubStatus` names every subscription status Dante Controller shows: netaudio 0.4.2's table of 47, plus inferno's `1` (unresolved). Each status has a label as Dante Controller words it (`label`), Dante's name (`dante_name`) and a state for a controller (`SubState`: idle, pending, connected, error).
