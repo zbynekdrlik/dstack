@@ -468,11 +468,21 @@ fn an_rx_flow_page_reads_the_slot_rate_latency_and_channels() {
     let page = rx_flow_page(STATUS_OK, &two).expect("a page");
     assert_eq!((page.count, page.items.len()), (2, 1));
     assert_eq!(page.items[0].slot, 1);
-    // A channel bit in the second word is channel 17 up.
+    // A channel bit in the second word is channel 17 up (the last slot's
+    // mask, at packet offset 80, so no other mask's words reach it).
     let mut high = ONE_FLOW_PAGE.to_vec();
-    high[68 - 10 + 2..68 - 10 + 4].copy_from_slice(&0x8001u16.to_be_bytes());
+    high[80 - 10 + 2..80 - 10 + 4].copy_from_slice(&0x8001u16.to_be_bytes());
     let flow = &rx_flow_page(STATUS_OK, &high).unwrap().items[0];
     assert_eq!(flow.channels, [1, 2, 3, 17, 32]);
+    // Two sockets: the masks' offsets follow both.
+    let mut two_sockets = ONE_FLOW_PAGE.to_vec();
+    two_sockets[86..88].copy_from_slice(&2u16.to_be_bytes());
+    two_sockets.splice(94..94, [0x00, 0x2c]);
+    let flow = &rx_flow_page(STATUS_OK, &two_sockets).unwrap().items[0];
+    assert_eq!(
+        (flow.channels.as_slice(), flow.latency_ns),
+        (&[1, 2, 3][..], 2_000_000)
+    );
 }
 
 #[test]

@@ -108,6 +108,11 @@ fn only_a_heartbeat_parses_and_a_bad_record_is_left_out() {
     let mut tiny = hardware_records(&[1], &[2]);
     tiny[0..2].copy_from_slice(&3u16.to_be_bytes());
     assert_eq!(parse(&datagram(&tiny)), Some(Beat::default()));
+    // A record of only its 4-byte length and type is stepped over.
+    let mut bare = vec![0x00, 0x04, 0x80, 0x07];
+    bare.extend(hardware_records(&[6], &[8]));
+    let beat = parse(&datagram(&bare)).unwrap();
+    assert_eq!(beat.lateness.unwrap().1[0], 6);
     // An unknown record is stepped over.
     let mut skip = vec![0x00, 0x08, 0x80, 0x01, 0, 0, 0, 0];
     skip.extend(hardware_records(&[3], &[4]));
