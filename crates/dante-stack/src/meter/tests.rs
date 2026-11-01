@@ -134,3 +134,31 @@ fn a_meter_subscribes_keeps_the_frames_and_stops() {
     assert_eq!(&buf[n - 16..n], &[0; 16], "the stop clears the destination");
     assert_eq!(&buf[6..8], &[0x30, 0x10]);
 }
+
+#[test]
+fn a_meter_renews_its_subscription_until_it_stops() {
+    // netaudio's daemon renews every 3 s (its KEEPALIVE) and a device
+    // drops a subscription that is not renewed: v0.4.31 sent the start
+    // once.
+    let dev = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let device = match dev.local_addr().unwrap() {
+        SocketAddr::V4(a) => a,
+        _ => unreachable!(),
+    };
+    let (meter, _frames) = Meter::start(Ipv4Addr::LOCALHOST, device, "ctl", DC_MAC).unwrap();
+    dev.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let mut buf = [0u8; 256];
+    let (n, _) = dev.recv_from(&mut buf).unwrap();
+    let first = buf[..n].to_vec();
+    let started = std::time::Instant::now();
+    let (n, _) = dev.recv_from(&mut buf).expect("a renewal within 5 s");
+    let again = buf[..n].to_vec();
+    let after = started.elapsed();
+    assert!(
+        after >= Duration::from_millis(2500),
+        "renewed after {after:?}"
+    );
+    assert_ne!(again[4..6], first[4..6], "a new transaction");
+    assert_eq!(again[6..], first[6..], "the same start otherwise");
+    meter.stop().unwrap();
+}
