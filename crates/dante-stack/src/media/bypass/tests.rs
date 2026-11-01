@@ -80,6 +80,7 @@ const ARP: &str = "\
 IP address       HW type     Flags       HW address            Mask     Device
 10.77.7.110      0x1         0x2         00:1d:c1:aa:bb:cc     *        enp2s0
 10.77.7.104      0x1         0x0         00:00:00:00:00:00     *        enp2s0
+10.77.7.109      0x1         0x0         00:1d:c1:00:00:09     *        enp2s0
 10.77.7.105      0x1         0x2         00:1d:c1:00:00:05     *        wlan0
 10.77.7.106      0x1         0x6         00:1d:c1:00:00:06     *        enp2s0
 10.77.7.107      0x1         0x2         00:00:00:00:00:00     *        enp2s0
@@ -94,6 +95,11 @@ fn only_a_complete_entry_on_the_nic_gives_a_mac() {
         Some([0, 0x1d, 0xc1, 0xaa, 0xbb, 0xcc])
     );
     assert_eq!(arp_mac(ARP, ip(104), "enp2s0"), None, "incomplete");
+    assert_eq!(
+        arp_mac(ARP, ip(109), "enp2s0"),
+        None,
+        "incomplete with a MAC left over"
+    );
     assert_eq!(arp_mac(ARP, ip(105), "enp2s0"), None, "another interface");
     assert_eq!(
         arp_mac(ARP, ip(106), "enp2s0"),
