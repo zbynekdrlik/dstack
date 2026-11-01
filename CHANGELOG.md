@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.16 (2026-11-01)
+
+- Fix (Windows): dantesync's nightly date step no longer moves PTP time. The "monotonic" clock was the system time, which dantesync steps. At 02:00:11Z on the SongPlayer PC the wall stepped +1.6 s; the TX schedule started again at once (lag 153609 samples), the engine pump skipped 1200 blocks, and PTP time ran 1.6 s ahead until the re-anchor 4.2 s later. Now it is QPC steered to the system time's rate by a model the clock poller updates every second (`clock::steer`). A wall jump over 1 ms plus 100 ppm of the time since the last poll is a date step and goes into an offset; smaller differences are slewed out within 1000 ppm. Linux's `CLOCK_MONOTONIC` already behaved this way (dstack #1).
+- Linux: the qdisc warning comes only when audio TX cannot bypass the qdisc (no `CAP_NET_RAW`); it now names that remedy first. With the bypass, the qdisc carries only other traffic and shaping it (prio + tbf) is right (iemmixer, dstack #1).
+
 ## 0.4.15 (2026-11-01)
 
 - Linux: audio TX bypasses the qdisc. An `AF_PACKET` socket with `PACKET_QDISC_BYPASS` hands each packet to the driver; we write the IPv4 header (DSCP EF, DF) and the UDP header in front of the media packet, and the kernel writes the Ethernet header. Only unicast flows to a neighbour with a complete ARP entry go direct. The control tick reads `/proc/net/arp` every 100 ms. Multicast and unresolved destinations keep the UDP socket. The socket needs `CAP_NET_RAW`; without it, the device warns at start and nothing changes. Each TX flow in the status gains `direct`, the packets sent past the qdisc. Cause, found by iemmixer on the gen3 box (one TX queue, PREEMPT_RT, TSO/GSO off): a TCP burst or an ssh login on the box held our packets in the qdisc behind a preempted sender. The IEM card read peaks of 250 to 1800 µs and late packets at 250 µs, while every send returned within 116 µs of its stamp (dstack #1).

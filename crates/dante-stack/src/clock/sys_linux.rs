@@ -17,6 +17,12 @@ pub fn monotonic_ns() -> i64 {
     read(libc::CLOCK_MONOTONIC)
 }
 
+/// A poll's wall reading: Linux's monotonic clock needs no model (the
+/// kernel steers it and no step moves it), so this is the clock now.
+pub fn observe(_wall: i64) -> i64 {
+    monotonic_ns()
+}
+
 /// The box's `CLOCK_REALTIME`, ns since 1970.
 pub fn realtime_ns() -> i64 {
     read(libc::CLOCK_REALTIME)

@@ -36,6 +36,7 @@
 //! judge, [`crate::media::rx::RxShared::last_min_lateness_ns`]).
 
 pub mod dsyx;
+pub mod steer;
 
 use crate::device::TimingProfile;
 
@@ -411,8 +412,8 @@ mod sys;
 
 /// The poller and the clock on the OS's wall and monotonic clocks
 /// ([`sys`]): Linux's `CLOCK_REALTIME` and `CLOCK_MONOTONIC`; on Windows
-/// the precise system time for both (dantesync steers its rate; QPC is not
-/// steered), so a date step there moves k (a re-anchor), see `sys_windows`.
+/// the precise system time and QPC steered to its rate ([`steer`]), so a
+/// date step moves neither k nor PTP time on either, see `sys_windows`.
 #[cfg(any(target_os = "linux", windows))]
 mod os {
     use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
@@ -612,7 +613,7 @@ mod os {
                 Err(_) => return None,
             };
             let wall = realtime_ns();
-            let mono = monotonic_ns();
+            let mono = super::sys::observe(wall);
             match dsyx::parse(&buf[..n], id) {
                 Ok(r) => return Some((r, wall, mono)),
                 Err(e) => debug!(error = %e, "media clock: a datagram skipped"),

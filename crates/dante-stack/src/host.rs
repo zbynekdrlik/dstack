@@ -392,8 +392,6 @@ pub fn prepare_with(
     let ifa = daemon::pick_interface(&opts.place, &interfaces().map_err(run_failed)?)
         .map_err(run_failed)?;
     let net = interface_info(&ifa)?;
-    #[cfg(target_os = "linux")]
-    crate::qdisc::report(&ifa.name);
     info!(
         version = VERSION,
         build = BUILD,
