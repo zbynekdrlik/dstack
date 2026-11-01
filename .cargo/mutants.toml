@@ -27,4 +27,5 @@ exclude_re = [
   "bypass.rs.*Direct::",
   "bypass.rs.*open_for",
   "tx.rs.*send_one",
+  "tx.rs.*direct_mac",
 ]

@@ -35,6 +35,7 @@ const UDP: u8 = 17;
 const ARP_COMPLETE: u32 = 0x2;
 /// The bit that marks a MAC present in a [`mac_word`].
 const MAC_PRESENT: u64 = 1 << 48;
+const _: () = assert!(MAC_PRESENT == u64::from_be_bytes([0, 1, 0, 0, 0, 0, 0, 0]));
 
 /// Writes the IPv4 header (DSCP `tos`, don't fragment, `id`) and the UDP
 /// header from `src` to `dst` into `buf[..HEADROOM]`, for the payload of
@@ -148,9 +149,10 @@ pub fn mac_words<'a>(
 /// `mac` as one word for a seqlock cell: 0 for none.
 pub fn mac_word(mac: Option<[u8; 6]>) -> u64 {
     mac.map_or(0, |m| {
-        let mut w = [0u8; 8];
+        // The present bit (48) is byte 1; the MAC the low six bytes.
+        let mut w = [0, 1, 0, 0, 0, 0, 0, 0];
         w[2..].copy_from_slice(&m);
-        MAC_PRESENT | u64::from_be_bytes(w)
+        u64::from_be_bytes(w)
     })
 }
 
