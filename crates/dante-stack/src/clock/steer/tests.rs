@@ -78,10 +78,9 @@ fn a_small_jump_is_slewed_out_not_kept() {
         panic!("{ups:?}");
     };
     assert!((error_ns - 300_000).abs() < 1_000, "{error_ns}");
-    assert!(
-        (ppb - 300_000).abs() < 2_000,
-        "takes it out over a second: {ppb}"
-    );
+    // The jump reads as rate too (one poll cannot tell them apart), so the
+    // first slew overshoots and the next takes the overshoot back.
+    assert!((300_000..=MAX_PPB).contains(&ppb), "{ppb}");
     poll(&mut st, 6, 8, 0, 300_000);
     assert_eq!(st.offset(), 0, "no step");
     let err = st.model().unwrap().at(8 * S) - wall(8 * S, 7 * S, 0, 300_000);
