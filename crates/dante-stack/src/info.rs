@@ -800,6 +800,9 @@ pub async fn serve_member(
     changes: Arc<Changes>,
     requests: Arc<Requests>,
 ) -> io::Result<(UdpSocket, Multicaster)> {
+    // The manager may end while this device sends to it: off Windows' report
+    // of the closed port, or the next receive fails (dasio 1.11).
+    crate::winsock::no_connreset(&sock)?;
     let id = share::Msg::Register(mc.id.device_id).encode();
     let hand = |dest, packet: Vec<u8>| share::Msg::Send(dest, packet).encode();
     sock.send_to(&id, manager).await?;
@@ -829,6 +832,7 @@ pub async fn serve_member(
             }
             _ = lease.tick() => {
                 if let Ok(own) = UdpSocket::bind(own_at).await {
+                    crate::winsock::no_connreset(&own)?;
                     info!("the info port is free: this device is the address's manager now");
                     return Ok((own, mc));
                 }
@@ -895,7 +899,8 @@ pub async fn serve_shared(
         warn!(error = %e, "the info port's multicast interface not named");
     }
     let share = match UdpSocket::bind((Ipv4Addr::LOCALHOST, port)).await {
-        Ok(s) => Some(s),
+        // A member may end while the manager sends to it.
+        Ok(s) => crate::winsock::no_connreset(&s).map(|()| Some(s))?,
         Err(e) => {
             warn!(error = %e, port, "the info manager's loopback port: no members can join");
             None

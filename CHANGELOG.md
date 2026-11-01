@@ -2,6 +2,7 @@
 
 ## 0.4.24 (2026-11-01)
 
+- Fix (Windows): a device that is a member of the address's info manager no longer stops when the managing device stops. Its sends to the stopped manager drew ICMP port-unreachable, which Windows reported on the next receive as WSAECONNRESET (10054). The member's info server ended, its device exited, and the service restarted it with an audio gap. Found by dasio with two instances on one PC. The member's socket, the info port it takes over, and the manager's loopback share socket now turn that report off (`SIO_UDP_CONNRESET`), as the device's other sockets already did. The member keeps serving and takes the port when it frees (dstack #1).
 - New: `arc::control::settings(c)` reads any device's settings, read-only (dstack #16 step 4, asked for by dcontroller). It returns the sample rate, the pull-up, and the latency (configured, active, default, minimum, maximum), with every key answered in `Settings::all`.
   - It asks ARC 0x1100 with start code 0x2809 and the wanted keys, as netaudio 0.4.2 does, and every hardware device on the site answers.
   - The key meanings were confirmed against netaudio's own readings on six devices: two Yamaha cards, a Tascam, a wireless receiver, an ESI interface and DVS.
