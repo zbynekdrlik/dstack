@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.32 (2026-11-02)
+
+- Fix: `meter::Meter` renews its subscription every 3 s (`meter::RENEW`) until `stop()`. A device drops a meter subscription that is not renewed (netaudio's daemon renews every 3 s); v0.4.31 sent the start once, so frames stopped (dcontroller asked).
+- New: `meter::Meter::start_at(bind, device, name, mac)` binds the meter's socket where the caller says (a fixed port for a firewall). The devices send their frames from another source port than 8800, so a guard that admits only established flows dropped them on dcontroller's box. `start` is `start_at` on port 0.
+- New: our device answers the 8700 sample-rate read (0x81) with the hardware's reply (0x80) in a Brooklyn card's layout: our rate in effect, none pending, our rate as the only one supported (`info::sample_rate_body`). A write gets the same answer, unchanged: we run the config's rate. dcontroller's own-device E2E reads it. `info::Identity` gains `sample_rate`. The reply is bounded like the other info replies (`limit::BOUNDED` gains it).
+
 ## 0.4.31 (2026-11-02)
 
 - New (dstack #16 step 6): `meter`, any device's meters over CMC (port 8800).

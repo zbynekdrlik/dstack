@@ -6,7 +6,9 @@
 //! Any device's meters (dstack #16 step 6): a subscription on the
 //! device's CMC port ([`crate::cmc::PORT`], 8800) that makes it send its
 //! channels' levels to our UDP port, about as often as Dante Controller's
-//! meters move, until we stop it.
+//! meters move. The subscription is renewed every [`RENEW`] (3 s, as
+//! netaudio's daemon does; a device drops one that is not renewed) until we
+//! stop it.
 //!
 //! **The start** (Dante Controller's own, captured; the controller's
 //! address is 192.0.2.10 there):
@@ -41,7 +43,7 @@ use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tracing::{info, warn};
 
@@ -56,8 +58,13 @@ pub const FRAME_VERSION: u8 = 2;
 const FRAME_HEADER: usize = 27;
 /// The destination at the start's end.
 const DESTINATION_LEN: usize = 16;
-/// How long the listener waits on its socket before it looks at its stop.
+/// How long the listener waits on its socket before it looks at its stop
+/// and its renewal.
 const POLL: Duration = Duration::from_millis(200);
+/// How often a subscription is renewed (the start sent again with a new
+/// transaction): netaudio's daemon renews every 3 s, and a device drops a
+/// subscription that is not renewed.
+pub const RENEW: Duration = Duration::from_secs(3);
 
 /// A channel's level as a meter byte says it.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -181,18 +188,31 @@ pub struct Meter {
 }
 
 impl Meter {
-    /// Subscribes to the meters of the device at `device` (its CMC port),
-    /// as the controller `name` with `mac`, from our address `iface` (any
-    /// port): the start sent, a thread keeping the latest frame from that
-    /// address and sending every frame on the returned channel (dropped
-    /// when nobody reads it).
+    /// [`Meter::start_at`] on our address `iface`, a port the OS chooses.
     pub fn start(
         iface: Ipv4Addr,
         device: SocketAddrV4,
         name: &str,
         mac: [u8; 6],
     ) -> io::Result<(Meter, Receiver<Frame>)> {
-        let sock = UdpSocket::bind(SocketAddrV4::new(iface, 0))?;
+        Self::start_at(SocketAddrV4::new(iface, 0), device, name, mac)
+    }
+
+    /// Subscribes to the meters of the device at `device` (its CMC port),
+    /// as the controller `name` with `mac`, from our socket bound at `bind`
+    /// (a port of 0: the OS chooses): the start sent, a thread keeping the
+    /// latest frame from that address (any source port: devices send the
+    /// frames from another port than 8800) and sending every frame on the
+    /// returned channel (dropped when nobody reads it). A fixed port lets a
+    /// firewall that admits only established flows name it (dcontroller's
+    /// box: the frames are a new flow to conntrack).
+    pub fn start_at(
+        bind: SocketAddrV4,
+        device: SocketAddrV4,
+        name: &str,
+        mac: [u8; 6],
+    ) -> io::Result<(Meter, Receiver<Frame>)> {
+        let sock = UdpSocket::bind(bind)?;
         crate::winsock::no_connreset(&sock)?;
         sock.set_read_timeout(Some(POLL))?;
         let to = match sock.local_addr()? {
@@ -210,10 +230,14 @@ impl Meter {
             let sock = sock.try_clone()?;
             let latest = Arc::clone(&latest);
             let stop = Arc::clone(&stop);
-            let from = *device.ip();
+            let name = name.to_string();
             std::thread::Builder::new()
                 .name("dante-meter".to_string())
-                .spawn(move || listen(&sock, from, &latest, &stop, &frames))?
+                .spawn(move || {
+                    let renew =
+                        || start_request(SEQ.fetch_add(1, Ordering::Relaxed), &name, mac, to);
+                    listen(&sock, device, &latest, &stop, &frames, renew);
+                })?
         };
         Ok((
             Meter {
@@ -259,26 +283,37 @@ impl Meter {
     }
 }
 
-/// The listener: frames from `from` kept in `latest` and sent on `frames`
-/// until `stop`.
+/// The listener: frames from the device kept in `latest` and sent on
+/// `frames`, the subscription renewed every [`RENEW`] (`renew` builds the
+/// start), until `stop`.
 fn listen(
     sock: &UdpSocket,
-    from: Ipv4Addr,
+    device: SocketAddrV4,
     latest: &Mutex<Option<Frame>>,
     stop: &AtomicBool,
     frames: &mpsc::SyncSender<Frame>,
+    renew: impl Fn() -> Option<Vec<u8>>,
 ) {
     let mut buf = [0u8; 2048];
+    let mut next = Instant::now() + RENEW;
     while !stop.load(Ordering::Acquire) {
+        if Instant::now() >= next {
+            if let Some(start) = renew()
+                && let Err(e) = sock.send_to(&start, device)
+            {
+                warn!(error = %e, "meter subscription not renewed");
+            }
+            next += RENEW;
+        }
         match sock.recv_from(&mut buf) {
-            Ok((n, SocketAddr::V4(a))) if *a.ip() == from => {
+            Ok((n, SocketAddr::V4(a))) if a.ip() == device.ip() => {
                 if let Some(f) = parse_frame(&buf[..n]) {
                     *latest.lock().unwrap_or_else(PoisonError::into_inner) = Some(f.clone());
                     let _full_or_gone = frames.try_send(f);
                 }
             }
-            // Another sender, or the read timeout's end (the stop is looked
-            // at every POLL): nothing to keep.
+            // Another sender, or the read timeout's end (the stop and the
+            // renewal are looked at every POLL): nothing to keep.
             Ok(_) | Err(_) => {}
         }
     }
