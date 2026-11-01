@@ -292,6 +292,9 @@ pub fn open_for(ip: Ipv4Addr) -> Option<(Direct, String)> {
         Err(e) => {
             tracing::warn!(nic = %nic, error = %e, kind = ?e.kind(),
                 "audio TX goes through the qdisc: the direct socket was refused (it needs CAP_NET_RAW)");
+            // Only then does the qdisc matter for audio.
+            #[cfg(target_os = "linux")]
+            crate::qdisc::report(&nic);
             None
         }
     }

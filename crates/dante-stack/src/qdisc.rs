@@ -5,9 +5,12 @@
 //! late packets at 250 µs while our own counters were clean. With
 //! `noqueue`, peak 229 µs and none late in 300 s.
 //!
-//! The host reads the root qdisc with `tc -j qdisc show dev <nic>` (Linux)
-//! and warns when it is one that queues behind a lock. No root needed; a
-//! missing `tc` leaves it unknown.
+//! When audio TX cannot bypass the qdisc (no `CAP_NET_RAW`,
+//! [`crate::media::bypass`]), the device reads the root qdisc with
+//! `tc -j qdisc show dev <nic>` (Linux) and warns when it is one that queues
+//! behind a lock. With the bypass the qdisc carries only other traffic, and
+//! shaping it (prio + tbf) is right. No root needed; a missing `tc` leaves it
+//! unknown.
 
 use std::process::Command;
 
@@ -66,7 +69,7 @@ pub fn report(name: &str) {
         Verdict::Direct(kind) => info!(qdisc = %kind, "the Dante NIC sends without a queue"),
         Verdict::Queues(kind) => warn!(
             qdisc = %kind,
-            "the Dante NIC's qdisc can hold our packets behind another sender (late packets at a receiver); set noqueue: tc qdisc replace dev <nic> root noqueue"
+            "the Dante NIC's qdisc can hold our packets behind another sender (late packets at a receiver): give the service CAP_NET_RAW so audio bypasses it, or set noqueue: tc qdisc replace dev <nic> root noqueue"
         ),
         Verdict::Unknown => info!("the Dante NIC's qdisc was not read (no tc)"),
     }

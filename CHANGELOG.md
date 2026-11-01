@@ -3,6 +3,7 @@
 ## 0.4.16 (2026-11-01)
 
 - Fix (Windows): dantesync's nightly date step no longer moves PTP time. The "monotonic" clock was the system time, which dantesync steps. At 02:00:11Z on the SongPlayer PC the wall stepped +1.6 s; the TX schedule started again at once (lag 153609 samples), the engine pump skipped 1200 blocks, and PTP time ran 1.6 s ahead until the re-anchor 4.2 s later. Now it is QPC steered to the system time's rate by a model the clock poller updates every second (`clock::steer`). A wall jump over 1 ms plus 100 ppm of the time since the last poll is a date step and goes into an offset; smaller differences are slewed out within 1000 ppm. Linux's `CLOCK_MONOTONIC` already behaved this way (dstack #1).
+- Linux: the qdisc warning comes only when audio TX cannot bypass the qdisc (no `CAP_NET_RAW`); it now names that remedy first. With the bypass, the qdisc carries only other traffic and shaping it (prio + tbf) is right (iemmixer, dstack #1).
 
 ## 0.4.15 (2026-11-01)
 
