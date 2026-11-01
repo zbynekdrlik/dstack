@@ -122,6 +122,10 @@ pub mod op {
     pub const ZEROS_1100: u16 = 0x1100;
     /// Asked by Dante Controller; inferno answers 94 zero bytes.
     pub const ZEROS_1102: u16 = 0x1102;
+    /// A settings write (netaudio's latency set). Our device leaves it
+    /// unanswered, as inferno: its latency is the config's, and a refusal
+    /// once made Dante Controller ask again thousands of times a second.
+    pub const SETTINGS_SET: u16 = 0x1101;
     pub const TX_CHANNELS: u16 = 0x2000;
     pub const TX_NAMES: u16 = 0x2010;
     pub const TX_RENAME: u16 = 0x2013;

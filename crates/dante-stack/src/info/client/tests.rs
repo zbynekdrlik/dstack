@@ -681,3 +681,130 @@ fn our_own_server_s_network_info_reads_back() {
         }]
     );
 }
+
+/// A Brooklyn card's sample-rate reply, captured: 96 kHz in effect, none
+/// pending, four rates.
+const CARD_RATE: [u8; 32] = [
+    0x00, 0x18, 0x00, 0x04, 0x00, 0x01, 0x77, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00,
+    0x00, 0x00, 0xac, 0x44, 0x00, 0x00, 0xbb, 0x80, 0x00, 0x01, 0x58, 0x88, 0x00, 0x01, 0x77, 0x00,
+];
+
+/// An Ultimo's, captured: 96 kHz in effect and pending, two rates.
+const ULTIMO_RATE: [u8; 24] = [
+    0x00, 0x18, 0x00, 0x02, 0x00, 0x01, 0x77, 0x00, 0x00, 0x01, 0x77, 0x00, 0x00, 0x02, 0x00, 0x00,
+    0x00, 0x00, 0xbb, 0x80, 0x00, 0x01, 0x77, 0x00,
+];
+
+#[test]
+fn the_rate_and_encoding_requests_carry_netaudio_s_bodies() {
+    // netaudio 0.4.2's encoder, offline: set_sample_rate 48000 ends
+    // `07 27 00 81 00 00 00 64 | 00000001 0000bb80`, set_encoding 24
+    // `.. 00 83 .. 64 | 00000001 00000018`, the probe `.. 00 81 .. 64` and
+    // eight zeros (byte 1 of the opcode is any).
+    let w = request(3, [0; 8], Ask::SetSampleRate(48_000));
+    assert_eq!(w.len(), 40);
+    assert_eq!(w[2..4], [0, 40]);
+    assert_eq!(w[24..32], [0x07, 0x31, 0x00, 0x81, 0, 0, 0, 0x64]);
+    assert_eq!(w[32..40], [0, 0, 0, 1, 0, 0, 0xbb, 0x80]);
+    let e = request(3, [0; 8], Ask::SetEncoding(24));
+    assert_eq!(e[24..32], [0x07, 0x31, 0x00, 0x83, 0, 0, 0, 0x64]);
+    assert_eq!(e[32..40], [0, 0, 0, 1, 0, 0, 0, 24]);
+    let r = request(3, [0; 8], Ask::SampleRate);
+    assert_eq!(r[24..32], [0x07, 0x31, 0x00, 0x81, 0, 0, 0, 0x64]);
+    assert_eq!(r.len(), 40);
+    assert!(r[32..].iter().all(|&b| b == 0));
+    // The rate's reply is 0x80; an encoding write has none to match.
+    let rate = reply(0x80, [0; 8], &[1]);
+    assert_eq!(reply_body(&rate, Ask::SampleRate, None), Some(&[1u8][..]));
+    assert_eq!(
+        reply_body(&rate, Ask::SetSampleRate(48_000), None),
+        Some(&[1u8][..])
+    );
+    assert_eq!(
+        reply_body(&reply(0x00, [0; 8], &[]), Ask::SetEncoding(24), None),
+        None
+    );
+}
+
+#[test]
+fn the_captured_rate_replies_read() {
+    assert_eq!(
+        parse_sample_rate(&CARD_RATE),
+        Some(SampleRate {
+            current: 96_000,
+            pending: None,
+            supported: vec![44_100, 48_000, 88_200, 96_000],
+        })
+    );
+    assert_eq!(
+        parse_sample_rate(&ULTIMO_RATE),
+        Some(SampleRate {
+            current: 96_000,
+            pending: Some(96_000),
+            supported: vec![48_000, 96_000],
+        })
+    );
+    assert_eq!(parse_sample_rate(&CARD_RATE[..31]), None);
+    assert_eq!(
+        parse_sample_rate(&CARD_RATE[..0x0c]).map(|s| s.current),
+        None
+    );
+}
+
+/// A stand-in device on loopback answering rate reads with its rate and
+/// taking a rate write when `takes`; its address.
+fn rate_device(takes: bool) -> (SocketAddrV4, std::thread::JoinHandle<u32>) {
+    let dev = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let at = match dev.local_addr().unwrap() {
+        std::net::SocketAddr::V4(a) => a,
+        _ => unreachable!(),
+    };
+    let t = std::thread::spawn(move || {
+        dev.set_read_timeout(Some(Duration::from_millis(1500)))
+            .unwrap();
+        let mut rate = 96_000u32;
+        let mut buf = [0u8; 128];
+        while let Ok((n, from)) = dev.recv_from(&mut buf) {
+            assert_eq!(n, 40);
+            let mode = u32::from_be_bytes(buf[32..36].try_into().unwrap());
+            if mode == 1 {
+                if takes {
+                    rate = u32::from_be_bytes(buf[36..40].try_into().unwrap());
+                }
+                continue;
+            }
+            let mut body = CARD_RATE;
+            body[4..8].copy_from_slice(&rate.to_be_bytes());
+            dev.send_to(&reply(0x80, [0; 8], &body), from).unwrap();
+        }
+        rate
+    });
+    (at, t)
+}
+
+#[test]
+fn a_rate_write_is_confirmed_by_reading_it_back() {
+    let client = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let (at, t) = rate_device(true);
+    send_write(&client, at, Ask::SetSampleRate(48_000)).unwrap();
+    let got = confirm_rate(&client, at, None, 48_000, Duration::from_secs(1));
+    assert_eq!(got.map(|s| s.current), Ok(48_000));
+    assert_eq!(t.join().unwrap(), 48_000);
+}
+
+#[test]
+fn a_rate_write_the_device_ignores_is_not_confirmed() {
+    let client = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let (at, t) = rate_device(false);
+    send_write(&client, at, Ask::SetSampleRate(48_000)).unwrap();
+    let started = std::time::Instant::now();
+    let got = confirm_rate(&client, at, None, 48_000, Duration::from_millis(600));
+    assert_eq!(
+        got,
+        Err(InfoError::NotConfirmed {
+            ask: Ask::SetSampleRate(48_000)
+        })
+    );
+    assert!(started.elapsed() >= Duration::from_millis(600));
+    assert_eq!(t.join().unwrap(), 96_000);
+}

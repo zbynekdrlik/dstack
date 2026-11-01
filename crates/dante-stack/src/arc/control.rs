@@ -461,15 +461,94 @@ pub fn parse_settings(body: &[u8]) -> Option<Settings> {
 /// The device's settings (0x1100 with [`SETTINGS_START`] and
 /// [`SETTING_KEYS`]). A device that keeps none answers an empty table.
 pub fn settings(c: &mut impl Call) -> Result<Settings, ReadError> {
+    settings_of(c, &SETTING_KEYS)
+}
+
+/// netaudio 0.4.2's whole settings read (its `config latency`, captured):
+/// the keys a latency write is checked against, before and after.
+pub const WATCHED_KEYS: [u16; 23] = [
+    0x0201, 0x8204, 0x8205, 0x0210, 0x0211, 0x8218, 0x8219, 0x8301, 0x8302, 0x8306, 0x0310, 0x0311,
+    0x0303, 0x8021, 0x00f0, 0x8060, 0x0022, 0x0063, 0x0064, 0x0065, 0x0222, 0x0212, 0x8321,
+];
+
+/// The latency write's body before its two values: netaudio 0.4.2's own
+/// bytes (its `LATENCY_SET_PREAMBLE`, built offline with its encoder). The
+/// pairs' meaning is not known; [`set_latency`] checks that nothing but the
+/// latency changed.
+const LATENCY_SET: [u8; 22] = [
+    0x05, 0x04, 0x82, 0x05, 0x00, 0x20, 0x02, 0x11, 0x00, 0x04, 0x83, 0x01, 0x00, 0x24, 0x03, 0x10,
+    0x00, 0x04, 0x83, 0x02, 0x83, 0x06,
+];
+
+/// The latency write's body for `ns` (0x1101, start code 0x27ff): byte for
+/// byte netaudio's `set_latency`.
+pub fn latency_request_body(ns: u32) -> Vec<u8> {
+    let mut out = LATENCY_SET.to_vec();
+    out.extend_from_slice(&ns.to_be_bytes());
+    out.extend_from_slice(&ns.to_be_bytes());
+    out
+}
+
+/// Why a latency write was not confirmed.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum WriteError {
+    #[error(transparent)]
+    Read(#[from] ReadError),
+    /// The device answered, but its configured latency reads otherwise.
+    #[error("the configured latency reads {read:?} ns, not {asked} ns")]
+    NotConfirmed { asked: u32, read: Option<u32> },
+    /// Other settings changed with it: each key, before and after.
+    #[error("other settings changed with the latency: {0:?}")]
+    OthersChanged(Vec<(u16, Option<u32>, Option<u32>)>),
+}
+
+/// The settings `keys` (0x1100 with [`SETTINGS_START`]).
+fn settings_of(c: &mut impl Call, keys: &[u16]) -> Result<Settings, ReadError> {
     let (_, body) = ok(
-        c.call_as(
-            SETTINGS_START,
-            op::ZEROS_1100,
-            &settings_request_body(&SETTING_KEYS),
-        )?,
+        c.call_as(SETTINGS_START, op::ZEROS_1100, &settings_request_body(keys))?,
         op::ZEROS_1100,
     )?;
     parse_settings(&body).ok_or(ReadError::Malformed { op: op::ZEROS_1100 })
+}
+
+/// The keys whose values differ between `before` and `after`, but for the
+/// latency as configured and in effect.
+pub fn changed_besides_latency(
+    before: &Settings,
+    after: &Settings,
+) -> Vec<(u16, Option<u32>, Option<u32>)> {
+    let keys: std::collections::BTreeSet<u16> =
+        before.all.keys().chain(after.all.keys()).copied().collect();
+    keys.into_iter()
+        .filter(|k| ![key::LATENCY_CONFIGURED, key::LATENCY_ACTIVE].contains(k))
+        .map(|k| (k, before.all.get(&k).copied(), after.all.get(&k).copied()))
+        .filter(|(_, b, a)| b != a)
+        .collect()
+}
+
+/// Sets the device's latency to `ns` (0x1101, netaudio's write) and
+/// confirms it: [`WATCHED_KEYS`] read before and after; `Ok` with the
+/// settings after only when the configured latency reads `ns` and no other
+/// watched key changed. One call, one write: the caller (dcontroller,
+/// after the owner's confirmation) logs it.
+pub fn set_latency(c: &mut impl Call, ns: u32) -> Result<Settings, WriteError> {
+    let before = settings_of(c, &WATCHED_KEYS)?;
+    ok(
+        c.call(op::SETTINGS_SET, &latency_request_body(ns))?,
+        op::SETTINGS_SET,
+    )?;
+    let after = settings_of(c, &WATCHED_KEYS)?;
+    let others = changed_besides_latency(&before, &after);
+    if !others.is_empty() {
+        return Err(WriteError::OthersChanged(others));
+    }
+    if after.latency_configured_ns != Some(ns) {
+        return Err(WriteError::NotConfirmed {
+            asked: ns,
+            read: after.latency_configured_ns,
+        });
+    }
+    Ok(after)
 }
 
 /// One RX flow a device lists (0x3200).

@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.30 (2026-11-02)
+
+- New (dstack #16 step 5, the writes; dcontroller calls each one only after the owner confirms it). The requests are byte for byte netaudio 0.4.2's, built offline with its own encoder; nothing was written to any device to learn them.
+  - `arc::control::set_latency(c, ns) -> Result<Settings, WriteError>` sends ARC 0x1101. It reads netaudio's 23 settings keys (`WATCHED_KEYS`) before and after, and returns `Ok` only when the configured latency reads `ns` and no other key changed. The write carries pairs whose meaning is not known (0x0211, 0x0310), so a changed key comes back as `WriteError::OthersChanged` with its values. `latency_request_body`, `changed_besides_latency`.
+  - `info::client::sample_rate(iface, device, id, wait) -> SampleRate` reads the current rate, a pending one, and the supported rates.
+  - `info::client::set_sample_rate(..., rate, wait)` writes once, then reads back until the rate shows in effect or pending, else `InfoError::NotConfirmed`.
+  - `info::client::set_encoding(iface, device, bits)` sends the write. No reply to it is known, so confirm with `arc::client::read_directory(..).encoding()`.
+- Our own device leaves a latency write unanswered, as before and as inferno (its latency is the config's): `set_latency` to it ends in `ReadError::Timeout`. A refusal is not sent, because a refused opcode once made Dante Controller ask again thousands of times a second.
+
 ## 0.4.29 (2026-11-01)
 
 - Fix: every 8700 info request now carries a sequence of its own, resends included (it was always 1). With the 0.4.27 resend in place, dcontroller still found the Brooklyn cards (two Yamaha AIC128-D, a Tascam ML-32D) leaving the board info unanswered after the product info, and the Tascam its clock status. netaudio's trace shows one sequence on all its requests and the card's two replies as consecutive packets, the board info only after the third request: a card drops a request whose sequence it has just answered.

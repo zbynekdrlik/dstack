@@ -627,3 +627,167 @@ fn settings_asks_with_0x2809_and_types_its_errors() {
     let mut fixed = Fixed(STATUS_OK, unhex(CARD_SETTINGS)[HEADER_LEN..].to_vec());
     assert_eq!(settings(&mut fixed).unwrap().latency_min_ns, Some(150_000));
 }
+
+/// A card's settings for the latency-write tests: answers the keyed read
+/// (0x1100, start 0x2809) from its map in the hardware's layout, and a
+/// write (0x1101) with `write`'s status after `write` changed the map.
+struct Card {
+    values: BTreeMap<u16, u32>,
+    write: fn(&mut BTreeMap<u16, u32>, u32) -> u16,
+    asked: Vec<(u16, u16, Vec<u8>)>,
+}
+
+impl Card {
+    fn new(write: fn(&mut BTreeMap<u16, u32>, u32) -> u16) -> Self {
+        let values = [
+            (key::LATENCY_CONFIGURED, 1_000_000),
+            (key::LATENCY_ACTIVE, 1_000_000),
+            (0x0211, 32),
+            (0x0210, 32),
+        ]
+        .into_iter()
+        .collect();
+        Card {
+            values,
+            write,
+            asked: Vec::new(),
+        }
+    }
+
+    fn table(&self, body: &[u8]) -> Vec<u8> {
+        let n = usize::from(read_u16(body, 0).unwrap());
+        let keys: Vec<u16> = (0..n).map(|k| read_u16(body, 2 + 2 * k).unwrap()).collect();
+        let mut out = vec![n as u8, n as u8];
+        let mut values = Vec::new();
+        for k in keys {
+            match self.values.get(&k) {
+                Some(&v) if k & 0x8000 != 0 => {
+                    let at = (HEADER_LEN + 2 + 4 * n + values.len()) as u16;
+                    out.extend_from_slice(&k.to_be_bytes());
+                    out.extend_from_slice(&at.to_be_bytes());
+                    values.extend_from_slice(&v.to_be_bytes());
+                }
+                Some(&v) => {
+                    out.extend_from_slice(&k.to_be_bytes());
+                    out.extend_from_slice(&(v as u16).to_be_bytes());
+                }
+                None => {
+                    out.extend_from_slice(&[0, 0]);
+                    out.extend_from_slice(&k.to_be_bytes());
+                }
+            }
+        }
+        out.extend_from_slice(&values);
+        out
+    }
+}
+
+impl Call for Card {
+    fn call(&mut self, op1: u16, body: &[u8]) -> Result<(u16, Vec<u8>), ReadError> {
+        self.call_as(crate::arc::client::START, op1, body)
+    }
+    fn call_as(&mut self, start: u16, op1: u16, body: &[u8]) -> Result<(u16, Vec<u8>), ReadError> {
+        self.asked.push((start, op1, body.to_vec()));
+        match op1 {
+            0x1100 => Ok((STATUS_OK, self.table(body))),
+            0x1101 => {
+                let ns = u32::from_be_bytes(body[22..26].try_into().unwrap());
+                Ok(((self.write)(&mut self.values, ns), Vec::new()))
+            }
+            _ => Err(ReadError::Timeout { op: op1 }),
+        }
+    }
+}
+
+#[test]
+fn a_latency_write_is_netaudio_s_request() {
+    // netaudio 0.4.2's encoder (`build_command`, offline, nothing sent):
+    // 1 ms and 0.25 ms, the body after the 10-byte header.
+    assert_eq!(
+        hex(&latency_request_body(1_000_000)),
+        "05048205002002110004830100240310000483028306000f4240000f4240"
+    );
+    assert_eq!(
+        hex(&latency_request_body(250_000)),
+        "050482050020021100048301002403100004830283060003d0900003d090"
+    );
+}
+
+#[test]
+fn a_latency_write_is_confirmed_by_the_reads_before_and_after() {
+    let mut card = Card::new(|v, ns| {
+        v.insert(key::LATENCY_CONFIGURED, ns);
+        v.insert(key::LATENCY_ACTIVE, ns);
+        STATUS_OK
+    });
+    let after = set_latency(&mut card, 250_000).unwrap();
+    assert_eq!(after.latency_configured_ns, Some(250_000));
+    assert_eq!(after.all[&0x0211], 32);
+    let watched = settings_request_body(&WATCHED_KEYS);
+    assert_eq!(
+        card.asked,
+        [
+            (SETTINGS_START, 0x1100, watched.clone()),
+            (
+                crate::arc::client::START,
+                0x1101,
+                latency_request_body(250_000)
+            ),
+            (SETTINGS_START, 0x1100, watched),
+        ]
+    );
+}
+
+#[test]
+fn a_latency_write_that_changes_another_setting_is_reported() {
+    let mut card = Card::new(|v, ns| {
+        v.insert(key::LATENCY_CONFIGURED, ns);
+        v.insert(0x0211, 4);
+        STATUS_OK
+    });
+    assert_eq!(
+        set_latency(&mut card, 250_000),
+        Err(WriteError::OthersChanged(vec![(0x0211, Some(32), Some(4))]))
+    );
+}
+
+#[test]
+fn a_latency_write_the_device_ignores_or_refuses_is_not_confirmed() {
+    let mut ignored = Card::new(|_, _| STATUS_OK);
+    assert_eq!(
+        set_latency(&mut ignored, 250_000),
+        Err(WriteError::NotConfirmed {
+            asked: 250_000,
+            read: Some(1_000_000)
+        })
+    );
+    let mut refused = Card::new(|_, _| 0x0022);
+    assert_eq!(
+        set_latency(&mut refused, 250_000),
+        Err(WriteError::Read(ReadError::Refused {
+            op: 0x1101,
+            status: 0x0022
+        }))
+    );
+    // A key that appears after the write counts as a change too.
+    let before = Settings::default();
+    let mut after = Settings::default();
+    after.all.insert(0x0310, 4);
+    after.all.insert(key::LATENCY_ACTIVE, 1);
+    assert_eq!(
+        changed_besides_latency(&before, &after),
+        [(0x0310, None, Some(4))]
+    );
+}
+
+#[test]
+fn a_latency_write_to_our_own_device_is_not_answered() {
+    // Our latency is the config's; 0x1101 stays unanswered, as inferno
+    // leaves it (a refusal once made Dante Controller ask again thousands
+    // of times a second): the write is an error, never a silent success.
+    let mut own = Own::new();
+    assert_eq!(
+        set_latency(&mut own, 250_000),
+        Err(WriteError::Read(ReadError::Timeout { op: 0x1101 }))
+    );
+}

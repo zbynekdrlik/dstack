@@ -29,6 +29,12 @@
 //! server), as netaudio decodes it on three devices (one of them with a
 //! secondary interface, one with a secondary without a link).
 //!
+//! The sample rate (`.. 00 81 .. 64` with a zero body; reply `.. 00 80`):
+//! [`parse_sample_rate`]. Writes, byte for byte netaudio's (its encoder,
+//! run offline): the sample rate (`.. 00 81 .. 64`, body `1, rate`),
+//! confirmed by reading it back, and the encoding (`.. 00 83 .. 64`, body
+//! `1, bits`), whose reply is not known.
+//!
 //! Every version is `major u8, minor u8, patch u16`, big-endian.
 //!
 //! | product info (0xc0) | |
@@ -102,6 +108,12 @@ pub enum Ask {
     Clock,
     /// The network interfaces: link speed, MAC and addresses.
     Network,
+    /// The sample rate: current, pending, supported.
+    SampleRate,
+    /// A sample-rate write (netaudio's `set_sample_rate`).
+    SetSampleRate(u32),
+    /// An encoding write, bits (netaudio's `set_encoding`).
+    SetEncoding(u32),
 }
 
 impl Ask {
@@ -112,6 +124,8 @@ impl Ask {
             Ask::Board => 0x61,
             Ask::Clock => 0x21,
             Ask::Network => 0x13,
+            Ask::SampleRate | Ask::SetSampleRate(_) => 0x81,
+            Ask::SetEncoding(_) => 0x83,
         }
     }
 
@@ -121,17 +135,31 @@ impl Ask {
         match self {
             Ask::Product | Ask::Board => (0, 0),
             Ask::Clock => (0x64, CLOCK_REQUEST_BODY),
-            Ask::Network => (0x64, NETWORK_REQUEST_BODY),
+            Ask::Network | Ask::SampleRate | Ask::SetSampleRate(_) | Ask::SetEncoding(_) => {
+                (0x64, NETWORK_REQUEST_BODY)
+            }
         }
     }
 
-    /// The reply opcode's last byte.
-    fn reply_op(self) -> u8 {
+    /// The request body's words: a write's mode 1 and its value (a read's
+    /// body is zeros).
+    fn request_words(self) -> Option<[u32; 2]> {
         match self {
-            Ask::Product => 0xc0,
-            Ask::Board => 0x60,
-            Ask::Clock => 0x20,
-            Ask::Network => 0x11,
+            Ask::SetSampleRate(v) | Ask::SetEncoding(v) => Some([1, v]),
+            _ => None,
+        }
+    }
+
+    /// The reply opcode's last byte; `None` for an encoding write, to
+    /// which no reply is known.
+    fn reply_op(self) -> Option<u8> {
+        match self {
+            Ask::Product => Some(0xc0),
+            Ask::Board => Some(0x60),
+            Ask::Clock => Some(0x20),
+            Ask::Network => Some(0x11),
+            Ask::SampleRate | Ask::SetSampleRate(_) => Some(0x80),
+            Ask::SetEncoding(_) => None,
         }
     }
 }
@@ -235,6 +263,33 @@ impl ClockStatus {
     }
 }
 
+/// A device's sample rate, as its sample-rate reply (0x80) gives it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SampleRate {
+    /// The rate in effect, Hz.
+    pub current: u32,
+    /// A rate set but not yet in effect (a device that applies it at its
+    /// next start); `None` when the word is 0.
+    pub pending: Option<u32>,
+    /// The rates the device takes.
+    pub supported: Vec<u32>,
+}
+
+/// A sample-rate reply body: the count of rates at 0x02, the current rate
+/// at 0x04, a pending one at 0x08 (0 for none), the rates from 0x10, as
+/// four devices answered it; `None` when the count passes the body.
+pub fn parse_sample_rate(body: &[u8]) -> Option<SampleRate> {
+    let n = usize::from(u16_at(body, 0x02)?);
+    let supported = (0..n)
+        .map(|i| u32_at(body, 0x10 + 4 * i))
+        .collect::<Option<Vec<_>>>()?;
+    Some(SampleRate {
+        current: u32_at(body, 0x04)?,
+        pending: Some(u32_at(body, 0x08)?).filter(|&p| p != 0),
+        supported,
+    })
+}
+
 /// One network interface of a device, as its network info gives it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NetInterface {
@@ -290,6 +345,9 @@ pub enum InfoError {
     Timeout { ask: Ask },
     #[error("info {ask:?}: a reply that does not read")]
     Malformed { ask: Ask },
+    /// A write the device's state does not show within the wait.
+    #[error("info {ask:?}: the device's state does not show the write")]
+    NotConfirmed { ask: Ask },
 }
 
 /// The request for `ask`: sequence `seq`, from the device id `from`.
@@ -303,6 +361,11 @@ pub fn request(seq: u16, from: [u8; 8], ask: Ask) -> Vec<u8> {
     out.extend_from_slice(&from);
     out.extend_from_slice(&VENDOR);
     out.extend_from_slice(&[0x07, 0x31, 0x00, ask.request_op(), 0, 0, 0, tail]);
+    if let Some(words) = ask.request_words() {
+        for w in words {
+            out.extend_from_slice(&w.to_be_bytes());
+        }
+    }
     out.resize(HEADER_LEN + body, 0);
     out
 }
@@ -315,7 +378,7 @@ pub fn reply_body(datagram: &[u8], ask: Ask, id: Option<[u8; 8]>) -> Option<&[u8
     let ours = head[0..2] == START_INFO.to_be_bytes()
         && opcode[0] == 0x07
         && opcode[2] == 0x00
-        && opcode[3] == ask.reply_op()
+        && ask.reply_op() == Some(opcode[3])
         && opcode[4..8] == [0, 0, 0, 0]
         && id.is_none_or(|id| head[8..16] == id);
     ours.then_some(body)
@@ -571,6 +634,94 @@ pub fn network_info(
         wait,
     )?;
     parse_network(&body).ok_or(InfoError::Malformed { ask: Ask::Network })
+}
+
+/// The sample rate of the device at `device` (with the device id `id`,
+/// when given), asked from our interface at `iface`.
+pub fn sample_rate(
+    iface: Ipv4Addr,
+    device: Ipv4Addr,
+    id: Option<[u8; 8]>,
+    wait: Duration,
+) -> Result<SampleRate, InfoError> {
+    let sock = on_group(iface, Ask::SampleRate)?;
+    read_sample_rate(&sock, SocketAddrV4::new(device, REQUEST_PORT), id, wait)
+}
+
+fn read_sample_rate(
+    sock: &UdpSocket,
+    device: SocketAddrV4,
+    id: Option<[u8; 8]>,
+    wait: Duration,
+) -> Result<SampleRate, InfoError> {
+    let body = ask(sock, device, id, Ask::SampleRate, wait)?;
+    parse_sample_rate(&body).ok_or(InfoError::Malformed {
+        ask: Ask::SampleRate,
+    })
+}
+
+/// Sends `write` once to `device` from `sock`, with a new sequence.
+fn send_write(sock: &UdpSocket, device: SocketAddrV4, write: Ask) -> Result<(), InfoError> {
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    sock.send_to(&request(seq, [0; 8], write), device)
+        .map(|_| ())
+        .map_err(|e| InfoError::Io {
+            ask: write,
+            kind: e.kind(),
+        })
+}
+
+/// Sets the sample rate of the device at `device` to `rate` (netaudio's
+/// write, sent once), then reads it back every [`RESEND`] until it shows
+/// `rate` in effect or pending: that state, or
+/// [`InfoError::NotConfirmed`] once `wait` has passed. One call, one
+/// write: the caller (dcontroller, after the owner's confirmation) logs it.
+pub fn set_sample_rate(
+    iface: Ipv4Addr,
+    device: Ipv4Addr,
+    id: Option<[u8; 8]>,
+    rate: u32,
+    wait: Duration,
+) -> Result<SampleRate, InfoError> {
+    let write = Ask::SetSampleRate(rate);
+    let sock = on_group(iface, write)?;
+    let at = SocketAddrV4::new(device, REQUEST_PORT);
+    send_write(&sock, at, write)?;
+    confirm_rate(&sock, at, id, rate, wait)
+}
+
+/// Reads the rate at `device` until it shows `rate` (in effect or pending)
+/// or `wait` has passed.
+fn confirm_rate(
+    sock: &UdpSocket,
+    device: SocketAddrV4,
+    id: Option<[u8; 8]>,
+    rate: u32,
+    wait: Duration,
+) -> Result<SampleRate, InfoError> {
+    let deadline = Instant::now() + wait;
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(InfoError::NotConfirmed {
+                ask: Ask::SetSampleRate(rate),
+            });
+        }
+        match read_sample_rate(sock, device, id, left) {
+            Ok(s) if s.current == rate || s.pending == Some(rate) => return Ok(s),
+            Ok(_) | Err(InfoError::Timeout { .. }) => std::thread::sleep(RESEND.min(left)),
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// Sets the encoding of the device at `device` to `bits` (netaudio's
+/// write, sent once). No reply to it is known: confirm with the device's
+/// TX channels ([`crate::arc::client::Directory::encoding`]).
+pub fn set_encoding(iface: Ipv4Addr, device: Ipv4Addr, bits: u32) -> Result<(), InfoError> {
+    let write = Ask::SetEncoding(bits);
+    let sock = on_group(iface, write)?;
+    send_write(&sock, SocketAddrV4::new(device, REQUEST_PORT), write)
 }
 
 #[cfg(test)]
