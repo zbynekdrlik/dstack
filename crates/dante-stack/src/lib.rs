@@ -103,6 +103,7 @@ pub mod host;
 pub mod info;
 pub mod latency;
 pub mod media;
+pub mod meter;
 pub mod qdisc;
 pub mod stream;
 pub mod subscribe;

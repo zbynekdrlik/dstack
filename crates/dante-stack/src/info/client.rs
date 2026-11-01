@@ -269,7 +269,8 @@ pub struct SampleRate {
     /// The rate in effect, Hz.
     pub current: u32,
     /// A rate set but not yet in effect (a device that applies it at its
-    /// next start); `None` when the word is 0.
+    /// next start); `None` when the word is 0 (Brooklyn) or the current
+    /// rate (an Ultimo carries its running rate there).
     pub pending: Option<u32>,
     /// The rates the device takes.
     pub supported: Vec<u32>,
@@ -277,15 +278,17 @@ pub struct SampleRate {
 
 /// A sample-rate reply body: the count of rates at 0x02, the current rate
 /// at 0x04, a pending one at 0x08 (0 for none), the rates from 0x10, as
-/// four devices answered it; `None` when the count passes the body.
+/// four devices answered it (a word of 0 or the current rate is nothing
+/// pending); `None` when the count passes the body.
 pub fn parse_sample_rate(body: &[u8]) -> Option<SampleRate> {
     let n = usize::from(u16_at(body, 0x02)?);
     let supported = (0..n)
         .map(|i| u32_at(body, 0x10 + 4 * i))
         .collect::<Option<Vec<_>>>()?;
+    let current = u32_at(body, 0x04)?;
     Some(SampleRate {
-        current: u32_at(body, 0x04)?,
-        pending: Some(u32_at(body, 0x08)?).filter(|&p| p != 0),
+        current,
+        pending: Some(u32_at(body, 0x08)?).filter(|&p| p != 0 && p != current),
         supported,
     })
 }

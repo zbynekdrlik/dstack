@@ -689,7 +689,7 @@ const CARD_RATE: [u8; 32] = [
     0x00, 0x00, 0xac, 0x44, 0x00, 0x00, 0xbb, 0x80, 0x00, 0x01, 0x58, 0x88, 0x00, 0x01, 0x77, 0x00,
 ];
 
-/// An Ultimo's, captured: 96 kHz in effect and pending, two rates.
+/// An Ultimo's, captured: 96 kHz in effect (and at 0x08), two rates.
 const ULTIMO_RATE: [u8; 24] = [
     0x00, 0x18, 0x00, 0x02, 0x00, 0x01, 0x77, 0x00, 0x00, 0x01, 0x77, 0x00, 0x00, 0x02, 0x00, 0x00,
     0x00, 0x00, 0xbb, 0x80, 0x00, 0x01, 0x77, 0x00,
@@ -736,14 +736,21 @@ fn the_captured_rate_replies_read() {
             supported: vec![44_100, 48_000, 88_200, 96_000],
         })
     );
+    // dcontroller on the site (1.11.2026): both Ultimo devices carry
+    // their running rate at 0x08 too while nothing is pending; the
+    // Brooklyn cards carry 0. So a word equal to the current rate is not
+    // pending.
     assert_eq!(
         parse_sample_rate(&ULTIMO_RATE),
         Some(SampleRate {
             current: 96_000,
-            pending: Some(96_000),
+            pending: None,
             supported: vec![48_000, 96_000],
         })
     );
+    let mut changing = ULTIMO_RATE;
+    changing[8..12].copy_from_slice(&48_000u32.to_be_bytes());
+    assert_eq!(parse_sample_rate(&changing).unwrap().pending, Some(48_000));
     assert_eq!(parse_sample_rate(&CARD_RATE[..31]), None);
     assert_eq!(
         parse_sample_rate(&CARD_RATE[..0x0c]).map(|s| s.current),
