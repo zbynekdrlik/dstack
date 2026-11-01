@@ -160,5 +160,12 @@ fn a_meter_renews_its_subscription_until_it_stops() {
     );
     assert_ne!(again[4..6], first[4..6], "a new transaction");
     assert_eq!(again[6..], first[6..], "the same start otherwise");
+    // And again a period later, not at every look.
+    let (_, _) = dev.recv_from(&mut buf).expect("a second renewal");
+    let gap = started.elapsed() - after;
+    assert!(
+        gap >= Duration::from_millis(2500),
+        "renewed again after {gap:?}"
+    );
     meter.stop().unwrap();
 }
