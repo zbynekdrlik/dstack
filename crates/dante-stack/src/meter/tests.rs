@@ -169,3 +169,34 @@ fn a_meter_renews_its_subscription_until_it_stops() {
     );
     meter.stop().unwrap();
 }
+
+#[test]
+fn a_meter_binds_the_port_the_caller_names() {
+    let dev = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let device = match dev.local_addr().unwrap() {
+        SocketAddr::V4(a) => a,
+        _ => unreachable!(),
+    };
+    // A free port, named before the meter binds it.
+    let port = UdpSocket::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let at = SocketAddrV4::new(Ipv4Addr::LOCALHOST, port);
+    let (meter, frames) = Meter::start_at(at, device, "ctl", DC_MAC).unwrap();
+    dev.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let mut buf = [0u8; 256];
+    let (n, from) = dev.recv_from(&mut buf).unwrap();
+    assert_eq!(from, SocketAddr::V4(at), "sent from the named port");
+    assert_eq!(
+        &buf[n - 12..n - 10],
+        &port.to_be_bytes(),
+        "and named as the destination"
+    );
+    // A frame from another source port of the device is kept.
+    let other_port = UdpSocket::bind("127.0.0.1:0").unwrap();
+    other_port.send_to(&frame(), at).unwrap();
+    assert!(frames.recv_timeout(Duration::from_secs(5)).is_ok());
+    meter.stop().unwrap();
+}

@@ -188,18 +188,31 @@ pub struct Meter {
 }
 
 impl Meter {
-    /// Subscribes to the meters of the device at `device` (its CMC port),
-    /// as the controller `name` with `mac`, from our address `iface` (any
-    /// port): the start sent, a thread keeping the latest frame from that
-    /// address and sending every frame on the returned channel (dropped
-    /// when nobody reads it).
+    /// [`Meter::start_at`] on our address `iface`, a port the OS chooses.
     pub fn start(
         iface: Ipv4Addr,
         device: SocketAddrV4,
         name: &str,
         mac: [u8; 6],
     ) -> io::Result<(Meter, Receiver<Frame>)> {
-        let sock = UdpSocket::bind(SocketAddrV4::new(iface, 0))?;
+        Self::start_at(SocketAddrV4::new(iface, 0), device, name, mac)
+    }
+
+    /// Subscribes to the meters of the device at `device` (its CMC port),
+    /// as the controller `name` with `mac`, from our socket bound at `bind`
+    /// (a port of 0: the OS chooses): the start sent, a thread keeping the
+    /// latest frame from that address (any source port: devices send the
+    /// frames from another port than 8800) and sending every frame on the
+    /// returned channel (dropped when nobody reads it). A fixed port lets a
+    /// firewall that admits only established flows name it (dcontroller's
+    /// box: the frames are a new flow to conntrack).
+    pub fn start_at(
+        bind: SocketAddrV4,
+        device: SocketAddrV4,
+        name: &str,
+        mac: [u8; 6],
+    ) -> io::Result<(Meter, Receiver<Frame>)> {
+        let sock = UdpSocket::bind(bind)?;
         crate::winsock::no_connreset(&sock)?;
         sock.set_read_timeout(Some(POLL))?;
         let to = match sock.local_addr()? {
