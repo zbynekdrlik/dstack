@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.22 (2026-11-01)
+
+- Discovery also browses `_netaudio-cmc` and gives each device its device id (`discover::Device::device_id`), read from the record's `id`. It is the id its heartbeat carries, so a controller can match `latency::listen`'s entries to devices when several share an address. On the site, ten devices' CMC ids were checked, ours and the hardware alike. `discover::parse_device_id` reads the 16 hex digits (dcontroller, dstack #16).
+
 ## 0.4.21 (2026-11-01)
 
 - Fix: `latency::listen` now returns one `Latency` per device heard at the address, told apart by the heartbeat header's device id (`Latency::device_id`, `Beat::device_id`). Before, it filtered by source IP only, so two devices on one address on their own ports (dasio's two instances on iem-snv) mixed into one result. `latency::Heard` gathers several devices (dstack #47).

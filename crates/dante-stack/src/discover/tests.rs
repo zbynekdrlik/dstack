@@ -26,6 +26,10 @@ fn dbc(name: &str, ip: &str) -> ServiceEvent {
     record(DBC_SERVICE, name, ip, 4455, &[])
 }
 
+fn cmc(name: &str, ip: &str, id: &str) -> ServiceEvent {
+    record(CMC_SERVICE, name, ip, 8800, &[("id", id), ("process", "0")])
+}
+
 fn gone(service: &str, name: &str) -> ServiceEvent {
     ServiceEvent::ServiceRemoved(service.to_string(), format!("{name}.{service}"))
 }
@@ -46,6 +50,7 @@ fn a_device_is_listed_with_its_arc_record_name_address_and_txt() {
         name: "Stage-Card".to_string(),
         arc: at([10, 0, 0, 11], 4440),
         dbc: None,
+        device_id: None,
         txt: [("mf", "Acme"), ("model", "X1")]
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
@@ -194,13 +199,26 @@ struct FakeDaemon(RefCell<HashMap<String, mpsc::Receiver<ServiceEvent>>>);
 
 impl FakeDaemon {
     fn new() -> (Self, mpsc::Sender<ServiceEvent>, mpsc::Sender<ServiceEvent>) {
+        let (daemon, arc_tx, dbc_tx, _cmc_tx) = Self::with_cmc();
+        (daemon, arc_tx, dbc_tx)
+    }
+
+    /// The three browses' senders (a dropped one ends its browse).
+    fn with_cmc() -> (
+        Self,
+        mpsc::Sender<ServiceEvent>,
+        mpsc::Sender<ServiceEvent>,
+        mpsc::Sender<ServiceEvent>,
+    ) {
         let (arc_tx, arc_rx) = mpsc::channel();
         let (dbc_tx, dbc_rx) = mpsc::channel();
+        let (cmc_tx, cmc_rx) = mpsc::channel();
         let map = HashMap::from([
             (ARC_SERVICE.to_string(), arc_rx),
             (DBC_SERVICE.to_string(), dbc_rx),
+            (CMC_SERVICE.to_string(), cmc_rx),
         ]);
-        (FakeDaemon(RefCell::new(map)), arc_tx, dbc_tx)
+        (FakeDaemon(RefCell::new(map)), arc_tx, dbc_tx, cmc_tx)
     }
 }
 
@@ -303,4 +321,84 @@ fn dropping_discovery_shuts_its_daemon_down() {
         assert!(Instant::now() < deadline, "the daemon still runs");
         std::thread::sleep(Duration::from_millis(5));
     }
+}
+
+/// dcontroller (1.11): a controller maps a device to its heartbeats by the
+/// device id, which the CMC record's `id` gives (two of our devices share
+/// an address on the site).
+#[test]
+fn the_cmc_record_gives_the_device_id_its_heartbeat_carries() {
+    let mut d = Devices::default();
+    assert_eq!(d.apply(&cmc("card", "10.0.0.11", "00000a4d07720001")), None);
+    let Some(Change::Added(dev)) = d.apply(&arc("card", "10.0.0.11", &[])) else {
+        panic!("listed");
+    };
+    assert_eq!(dev.device_id, Some([0, 0, 10, 77, 7, 114, 0, 1]));
+    // A hardware id, upper case: read the same.
+    let Some(Change::Changed(dev)) = d.apply(&cmc("CARD", "10.0.0.11", "001DC10821C40000")) else {
+        panic!("changed");
+    };
+    assert_eq!(dev.device_id, Some([0, 0x1d, 0xc1, 0x08, 0x21, 0xc4, 0, 0]));
+    // An id that does not read: none, the device still listed.
+    let Some(Change::Changed(dev)) = d.apply(&cmc("card", "10.0.0.11", "xyz")) else {
+        panic!("changed");
+    };
+    assert_eq!(dev.device_id, None);
+    d.apply(&cmc("card", "10.0.0.11", "c8a362fffe2e958a"));
+    // The CMC record withdrawn: the id goes, the device stays.
+    let Some(Change::Changed(dev)) = d.apply(&gone(CMC_SERVICE, "card")) else {
+        panic!("changed");
+    };
+    assert_eq!(dev.device_id, None);
+    // Withdrawn last, a CMC record alone keeps no entry.
+    d.apply(&cmc("solo", "10.0.0.12", "0000000000000001"));
+    assert_eq!(d.apply(&gone(CMC_SERVICE, "solo")), None);
+    assert_eq!(d.entries.len(), 1, "only card");
+    // The ARC record goes while the CMC record stays: removed from the list,
+    // kept until the CMC record goes too.
+    d.apply(&cmc("card", "10.0.0.11", "0000000000000002"));
+    assert_eq!(
+        d.apply(&gone(ARC_SERVICE, "card")),
+        Some(Change::Removed("card".to_string()))
+    );
+    assert_eq!(d.entries.len(), 1);
+    d.apply(&gone(CMC_SERVICE, "card"));
+    assert!(d.entries.is_empty());
+}
+
+#[test]
+fn a_device_id_is_16_hex_digits() {
+    assert_eq!(
+        parse_device_id("0123456789abcdef"),
+        Some([0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef])
+    );
+    for bad in [
+        "",
+        "0123456789abcde",
+        "0123456789abcdef0",
+        "0123456789abcdeg",
+        "01234567é9abcde",
+    ] {
+        assert_eq!(parse_device_id(bad), None, "{bad:?}");
+    }
+}
+
+#[test]
+fn live_discovery_reads_the_cmc_record_too() {
+    let (daemon, arc_tx, dbc_tx, cmc_tx) = FakeDaemon::with_cmc();
+    let (discovery, changes) = Discovery::start_with(&daemon).unwrap();
+    arc_tx.send(arc("card", "10.0.0.11", &[])).unwrap();
+    assert!(matches!(
+        changes.recv_timeout(BOUND).unwrap(),
+        Change::Added(_)
+    ));
+    cmc_tx
+        .send(cmc("card", "10.0.0.11", "00000a4d070b0000"))
+        .unwrap();
+    let Change::Changed(dev) = changes.recv_timeout(BOUND).unwrap() else {
+        panic!("a change");
+    };
+    assert_eq!(dev.device_id, Some([0, 0, 10, 77, 7, 11, 0, 0]));
+    drop((arc_tx, dbc_tx, cmc_tx));
+    discovery.stop().unwrap();
 }
