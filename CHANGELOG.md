@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.39 (2026-11-02)
+
+- Internal: `info.rs` is split into the pure packet builder (`info`) and the socket loops and record source (`info/server.rs`). Every public path stays: `info::{Sources, Levels, Multicast, serve_info, serve_info_with, serve_member, serve_shared}` are re-exported from `info`. No behavior change; nothing for a consumer to port.
+- Fix: an `rx_port_base` too high for the 32 RX flow ports is refused before any port is bound, with `rx_port_base: past port 65535`. Before, the ports were bound in order and a held or reserved port below 65535 (Windows' excluded ranges) gave `RX flow port N` instead.
+
 ## 0.4.38 (2026-11-02)
 
 - New: `dante_audio_io::Block::start()`, the media sample time of the block's first input sample (`None` when the engine runs without a media clock). The embedded pump sets it on every block (`Block::at`), and its outputs go out at `start + D` (`PumpView::offset`). Consecutive blocks are `frames` apart. A re-bootstrap's skipped blocks, an epoch change or a latency retime show as a jump in it, so an app can number its blocks by media time across a skip (dasio asked: its DAW timeline lost the blocks of a 49.7 ms VM stall). Free pacing gives `None`. `Block::new` is unchanged.

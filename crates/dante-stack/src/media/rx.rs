@@ -300,6 +300,11 @@ pub struct RxShared {
     recv_buffer: usize,
 }
 
+/// The last of the [`MAX_FLOWS`] ports from `base`, `None` past 65535.
+fn last_port(base: u16) -> Option<u16> {
+    base.checked_add(MAX_FLOWS as u16 - 1)
+}
+
 impl RxShared {
     /// The flow slots of a device at `ip` running at `rate`: one socket each
     /// bound to `ip`, and the RX channels' `rings` (one per RX channel,
@@ -317,14 +322,14 @@ impl RxShared {
         rings: Arc<[Ring]>,
         base: Option<u16>,
     ) -> io::Result<Self> {
+        if base.is_some_and(|b| last_port(b).is_none()) {
+            return Err(io::Error::other("rx_port_base: past port 65535"));
+        }
         let mut recv_buffer = 0;
         let sockets = (0..MAX_FLOWS)
             .map(|slot| {
-                let port = match base {
-                    Some(b) => u16::try_from(usize::from(b) + slot)
-                        .map_err(|_| io::Error::other("rx_port_base: past port 65535"))?,
-                    None => 0,
-                };
+                // In range: checked above, before any port is bound.
+                let port = base.map_or(0, |b| b + slot as u16);
                 let s = UdpSocket::bind(SocketAddrV4::new(ip, port))
                     .map_err(|e| io::Error::new(e.kind(), format!("RX flow port {port}: {e}")))?;
                 s.set_nonblocking(true)?;
