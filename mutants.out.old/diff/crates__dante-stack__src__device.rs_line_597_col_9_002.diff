@@ -1,5 +1,5 @@
 --- crates/dante-stack/src/device.rs
-+++ replace DeviceState::latency_for -> (u64, bool) with (1, false)
++++ replace DeviceState::latency_for -> (u64, bool) with (0, true)
 @@ -589,25 +589,17 @@
              config_latency_ns: None,
          }
@@ -18,7 +18,7 @@
 -                (cfg.latency_ns, true)
 -            }
 -        }
-+        (1, false) /* ~ changed by cargo-mutants ~ */
++        (0, true) /* ~ changed by cargo-mutants ~ */
      }
  
      /// Dante Controller set the latency to `ns`; `config_ns` is the

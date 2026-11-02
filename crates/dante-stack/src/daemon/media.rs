@@ -191,6 +191,7 @@ impl Media {
     /// Hands `m`'s plans and routes to the RX thread.
     fn publish(&self, m: &Manager) {
         self.rx.publish(|slot| m.rx_plan(slot), |rx| m.rx_route(rx));
+        self.rx.set_device_latency(m.latency_ns());
     }
 
     /// One round of the checks at the media clock's now (none while the

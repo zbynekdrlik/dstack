@@ -1237,3 +1237,40 @@ fn the_pump_s_timing_comes_from_the_config_with_the_latency_in_nearest_samples()
     cfg.latency_ns = 2_000_000;
     assert_eq!(Timing::of(&cfg).playout, 96);
 }
+
+#[test]
+fn a_device_latency_set_live_moves_the_pump_s_playout_with_one_rebootstrap() {
+    // Dante Controller sets the device latency: the manager plans the RX
+    // delays against it and publishes it with them; the pump plays at it
+    // from its next step (D moves with P), re-bootstrapped once with a
+    // discontinuity, as at a new epoch.
+    let mut r = rig(
+        Map {
+            rx: vec![0],
+            tx: vec![0],
+        },
+        &[0],
+        &[0],
+    );
+    fill(&r, 0, T - 1_000, 30_000, counter);
+    let mut now = T;
+    for _ in 0..3 {
+        now = r.pump.media(now, 7);
+    }
+    assert_eq!(r.pump.processor.log, "dppp");
+    // The same latency published: no change.
+    r.rx.set_device_latency(1_000_000);
+    now = r.pump.media(now, 7);
+    assert_eq!(r.pump.processor.log, "dpppp");
+    // 2 ms: P = 192 at 96 kHz.
+    r.rx.set_device_latency(2_000_000);
+    r.pump.media(now, 7);
+    let v = r.stats.view();
+    assert_eq!((v.playout, v.offset), (192, B + 192 + WORK_MARGIN), "{v:?}");
+    assert_eq!(v.rebootstraps, 1, "{v:?}");
+    assert!(
+        r.pump.processor.log.starts_with("dppppd"),
+        "{}",
+        r.pump.processor.log
+    );
+}

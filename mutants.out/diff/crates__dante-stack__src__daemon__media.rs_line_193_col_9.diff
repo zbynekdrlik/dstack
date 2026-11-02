@@ -1,0 +1,22 @@
+--- crates/dante-stack/src/daemon/media.rs
++++ replace Media::publish with ()
+@@ -185,18 +185,17 @@
+             rx: Arc::clone(&self.rx),
+             manager: Arc::clone(&self.manager),
+             levels: Arc::clone(&self.levels),
+         }
+     }
+ 
+     /// Hands `m`'s plans and routes to the RX thread.
+     fn publish(&self, m: &Manager) {
+-        self.rx.publish(|slot| m.rx_plan(slot), |rx| m.rx_route(rx));
+-        self.rx.set_device_latency(m.latency_ns());
++        () /* ~ changed by cargo-mutants ~ */
+     }
+ 
+     /// One round of the checks at the media clock's now (none while the
+     /// clock is not ready): each checked RX channel whose flow was granted
+     /// reads its ring up to its playout point.
+     pub fn step_checks(&self) {
+         let Some(now_ns) = self.clock.now_ns() else {
+             return;

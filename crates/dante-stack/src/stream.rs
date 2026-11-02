@@ -230,8 +230,10 @@ impl Blocks {
 /// thread and the device's control socket.
 pub struct PumpStats {
     frames: u32,
-    offset: u64,
-    playout: u64,
+    /// D and P, samples: the pump's timing, moved when the device latency
+    /// changes ([`PumpStats::retimed`]).
+    offset: AtomicU64,
+    playout: AtomicU64,
     /// One block's period, ns: a block longer than this is an overrun.
     period_ns: u64,
     /// The last step was on the media clock (not free pacing).
@@ -278,8 +280,8 @@ impl PumpStats {
         let period = period_ns(frames, f64::from(rate.max(1)));
         PumpStats {
             frames,
-            offset: timing.offset(),
-            playout: timing.playout,
+            offset: AtomicU64::new(timing.offset()),
+            playout: AtomicU64::new(timing.playout),
             period_ns: period,
             media: AtomicBool::new(false),
             running: AtomicBool::new(false),
@@ -308,6 +310,12 @@ impl PumpStats {
     }
 
     /// A re-bootstrap that skipped `skipped` blocks.
+    /// The pump plays at `timing` now.
+    fn retimed(&self, timing: Timing) {
+        self.offset.store(timing.offset(), Ordering::Relaxed);
+        self.playout.store(timing.playout, Ordering::Relaxed);
+    }
+
     fn rebootstrapped(&self, skipped: u64) {
         self.rebootstraps.fetch_add(1, Ordering::Relaxed);
         self.missed.fetch_add(skipped, Ordering::Relaxed);
@@ -358,8 +366,8 @@ impl PumpStats {
     pub fn view(&self) -> PumpView {
         PumpView {
             media: self.media.load(Ordering::Relaxed),
-            offset: self.offset,
-            playout: self.playout,
+            offset: self.offset.load(Ordering::Relaxed),
+            playout: self.playout.load(Ordering::Relaxed),
             blocks: self.blocks.load(Ordering::Relaxed),
             late: self.late.load(Ordering::Relaxed),
             missed: self.missed.load(Ordering::Relaxed),
@@ -444,6 +452,17 @@ impl<P: Process> Pump<P> {
     /// `discontinuity` once before the next block.
     pub fn media(&mut self, now: u64, epoch: u32) -> u64 {
         self.stats.media.store(true, Ordering::Relaxed);
+        // The device latency the RX delays are planned against moved (Dante
+        // Controller set it): play at it, the schedule started again.
+        if let Some(playout) = self.rx.playout()
+            && playout != self.timing.playout
+        {
+            self.timing.playout = playout;
+            self.stats.retimed(self.timing);
+            if self.blocks.take().is_some() {
+                self.stats.rebootstrapped(0);
+            }
+        }
         let mut blocks = match self.blocks {
             Some(mut b) if self.epoch != Some(epoch) => {
                 self.stats.rebootstrapped(b.rebootstrap(now));

@@ -1,0 +1,24 @@
+--- crates/dante-stack/src/media/rx.rs
++++ replace RxShared::set_device_latency with ()
+@@ -391,20 +391,17 @@
+         if changed {
+             self.routes_version.fetch_add(1, Ordering::Release);
+         }
+     }
+ 
+     /// The device latency is `ns`: the pump's playout point is its whole
+     /// samples ([`crate::clock::latency_samples`], as [`crate::stream::Timing::of`]).
+     pub fn set_device_latency(&self, ns: u64) {
+-        self.playout.store(
+-            crate::clock::latency_samples(ns, self.rate),
+-            Ordering::Relaxed,
+-        );
++        () /* ~ changed by cargo-mutants ~ */
+     }
+ 
+     /// The device latency the published delays are planned against,
+     /// samples; `None` before the first publish.
+     pub fn playout(&self) -> Option<u64> {
+         Some(self.playout.load(Ordering::Relaxed)).filter(|&p| p > 0)
+     }
+ 

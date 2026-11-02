@@ -33,7 +33,7 @@
 
 
 *** /opt/rust/rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo nextest run --no-run --cargo-profile=mutants --verbose --package=dante-stack@0.4.36
-   Compiling dante-stack v0.4.36 (/tmp/cargo-mutants-dstack-VrO3Wn.tmp/crates/dante-stack)
+   Compiling dante-stack v0.4.36 (/tmp/cargo-mutants-dstack-zV0Svv.tmp/crates/dante-stack)
 error[E0277]: the trait bound `DeviceConfig: Default` is not satisfied
    --> crates/dante-stack/src/device.rs:219:12
     |

@@ -1,5 +1,5 @@
 --- crates/dante-stack/src/media/tx.rs
-+++ replace TxShared::advertised_latency_ns -> u64 with 0
++++ replace TxShared::advertised_latency_ns -> u64 with 1
 @@ -740,17 +740,17 @@
      pub fn set_device_latency(&self, ns: u64) {
          if self.cfg.tx_latency_ns.is_none() {
@@ -10,7 +10,7 @@
      /// The latency our TX channels advertise now, ns.
      pub fn advertised_latency_ns(&self) -> u64 {
 -        self.advertised_ns.load(Ordering::Relaxed)
-+        0 /* ~ changed by cargo-mutants ~ */
++        1 /* ~ changed by cargo-mutants ~ */
      }
  
      /// Sets TX channel `tx`'s source (from 0); `false` when there is no

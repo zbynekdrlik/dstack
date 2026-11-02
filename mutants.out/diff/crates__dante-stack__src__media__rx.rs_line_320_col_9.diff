@@ -1,0 +1,52 @@
+--- crates/dante-stack/src/media/rx.rs
++++ replace RxShared::new_at -> io::Result<Self> with Ok(Default::default())
+@@ -312,48 +312,17 @@
+     /// `base` is given ([`crate::device::DeviceConfig::rx_port_base`]); a
+     /// port taken is an error naming it.
+     pub fn new_at(
+         rate: u32,
+         ip: Ipv4Addr,
+         rings: Arc<[Ring]>,
+         base: Option<u16>,
+     ) -> io::Result<Self> {
+-        let mut recv_buffer = 0;
+-        let sockets = (0..MAX_FLOWS)
+-            .map(|slot| {
+-                let port = match base {
+-                    Some(b) => u16::try_from(usize::from(b) + slot)
+-                        .map_err(|_| io::Error::other("rx_port_base: past port 65535"))?,
+-                    None => 0,
+-                };
+-                let s = UdpSocket::bind(SocketAddrV4::new(ip, port))
+-                    .map_err(|e| io::Error::new(e.kind(), format!("RX flow port {port}: {e}")))?;
+-                s.set_nonblocking(true)?;
+-                crate::winsock::no_connreset(&s)?;
+-                recv_buffer = set_recv_buffer(&s, RECV_BUFFER_BYTES);
+-                Ok(s)
+-            })
+-            .collect::<io::Result<Box<[UdpSocket]>>>()?;
+-        Ok(RxShared {
+-            rate,
+-            plans: std::array::from_fn(|_| Cell::new()),
+-            routes: (0..rings.len()).map(|_| AtomicU64::new(0)).collect(),
+-            delays: (0..rings.len()).map(|_| AtomicU32::new(0)).collect(),
+-            routes_version: AtomicU32::new(0),
+-            sockets,
+-            rings,
+-            lanes: std::array::from_fn(|_| RxStats::default()),
+-            writer: Mutex::new(()),
+-            poll_errors: AtomicU64::new(0),
+-            stop: AtomicBool::new(false),
+-            base: Instant::now(),
+-            recv_buffer,
+-            playout: AtomicU64::new(0),
+-        })
++        Ok(Default::default()) /* ~ changed by cargo-mutants ~ */
+     }
+ 
+     /// Hands the flow slots' plans and the RX channels' routes to the RX
+     /// thread (what changed). Routes that leave a flow go first and routes
+     /// that join one last, so no channel ever reads another flow's samples.
+     pub fn publish(
+         &self,
+         plan: impl Fn(usize) -> RxPlan,

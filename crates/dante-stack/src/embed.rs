@@ -16,7 +16,8 @@
 //!   app's [`Process`] every block: its inputs are the RX channels the
 //!   [`Map`] names, its outputs the TX channels' engine rings, which those
 //!   channels send ([`Source::Engine`], set here; a channel is silent at
-//!   start). Its timing is [`Timing::of`] the config.
+//!   start). Its timing is [`Timing::of`] the device as it runs (a
+//!   latency Dante Controller set included, followed live).
 //!
 //! [`Embedded::stop`] ends the pump, then the device (its mDNS goodbyes),
 //! within a bound. Start and stop may repeat in one process (an OBS source
@@ -80,10 +81,12 @@ impl Embedded {
                 cfg.rx.len()
             )));
         }
-        let timing = Timing::of(&cfg);
-        let bits = cfg.encoding;
-        let rate = cfg.sample_rate;
         let prepared = host::prepare_config(cfg, place, None, &map.tx, source)?;
+        // The device as it runs: a latency Dante Controller set holds over
+        // the config's, and the RX plays at it.
+        let timing = Timing::of(prepared.config());
+        let bits = prepared.config().encoding;
+        let rate = prepared.config().sample_rate;
         let media = prepared.media();
         // Every TX channel is silent at start: the app's outputs go out as
         // their channels' engine rings (each has one: `prepare_config`
