@@ -270,6 +270,36 @@ pub fn listen(our: Ipv4Addr, device: Ipv4Addr, window: Duration) -> io::Result<V
     Ok(heard.result())
 }
 
+/// Hands on one read of the listener's socket from the datagrams in
+/// `buf`: a heartbeat goes to `tx` with its sender's address, anything
+/// else is left out. False when the thread must end: the receiver is gone,
+/// or the socket failed (logged); a read that only timed out goes on.
+fn hand_on(
+    read: io::Result<(usize, SocketAddr)>,
+    buf: &[u8],
+    tx: &std::sync::mpsc::Sender<(Ipv4Addr, Beat)>,
+) -> bool {
+    match read {
+        Ok((n, SocketAddr::V4(from))) => {
+            let sent = buf
+                .get(..n)
+                .and_then(parse)
+                .map(|beat| tx.send((*from.ip(), beat)));
+            if matches!(sent, Some(Err(_))) {
+                tracing::info!("latency listener: the receiver is gone, stopping");
+                return false;
+            }
+            true
+        }
+        Ok(_) => true,
+        Err(e) if timed_out(&e) => true,
+        Err(e) => {
+            tracing::warn!(error = %e, "latency listener: the socket failed, stopping");
+            false
+        }
+    }
+}
+
 /// How often the listener's thread looks whether it was stopped.
 const STOP_POLL: Duration = Duration::from_millis(200);
 
@@ -304,22 +334,8 @@ impl Listener {
                 tracing::info!(%our, "latency listener: heartbeats on the group");
                 let mut buf = [0u8; 2048];
                 while !halt.load(Ordering::Relaxed) {
-                    match sock.recv_from(&mut buf) {
-                        Ok((n, SocketAddr::V4(from))) => {
-                            let Some(beat) = parse(&buf[..n]) else {
-                                continue;
-                            };
-                            if tx.send((*from.ip(), beat)).is_err() {
-                                tracing::info!("latency listener: the receiver is gone, stopping");
-                                return;
-                            }
-                        }
-                        Ok(_) => {}
-                        Err(e) if timed_out(&e) => {}
-                        Err(e) => {
-                            tracing::warn!(error = %e, "latency listener: the socket failed, stopping");
-                            return;
-                        }
+                    if !hand_on(sock.recv_from(&mut buf), &buf, &tx) {
+                        return;
                     }
                 }
                 tracing::info!("latency listener stopped");
