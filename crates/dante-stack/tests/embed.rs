@@ -169,3 +169,36 @@ fn an_app_map_past_the_device_s_channels_is_refused() {
         Ok(_) => panic!("started with an RX channel past the device's"),
     }
 }
+
+/// A latency Dante Controller set (kept in the state file) holds after a
+/// restart for the app's pump too: it plays at the device's latency, not
+/// the config's, or it reads the RX rings off their playout point.
+#[test]
+fn an_embedded_pump_plays_at_the_latency_dante_controller_set() {
+    let dir = tempfile::tempdir().unwrap();
+    let ip = routed_ipv4();
+    let cfg = config_in(dir.path());
+    let state = dir.path().join("state.toml");
+    let mut saved = DeviceState::load_or_default(&cfg).unwrap();
+    saved.set_latency(20_000_000, cfg.latency_ns);
+    saved.save(&state).unwrap();
+    let device = Embedded::start_with(
+        cfg.clone(),
+        &Place::Ip(ip),
+        Map {
+            rx: vec![0],
+            tx: vec![0],
+        },
+        Echo {
+            heard: Arc::new(AtomicU64::new(0)),
+        },
+        ClockSource::System,
+    )
+    .expect("the embedded device started");
+    let pump = device.media().engine().expect("the pump attached");
+    let stopped = device.stop(Duration::from_secs(5));
+    // 20 ms at the test device's rate.
+    let want = 20_000_000 * u64::from(cfg.sample_rate) / 1_000_000_000;
+    assert_eq!(pump.playout, want, "{pump:?}");
+    assert!(matches!(stopped, Stopped::Done), "{stopped:?}");
+}

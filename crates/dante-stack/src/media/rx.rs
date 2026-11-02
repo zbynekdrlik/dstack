@@ -283,6 +283,10 @@ pub struct RxShared {
     /// Each RX channel's read delay ([`RxPlan::delay`] of its flow), for
     /// the engine's pump.
     delays: Box<[AtomicU32]>,
+    /// The device latency the delays are planned against, samples, as the
+    /// manager last published it (0: none yet): the engine's pump plays at
+    /// it ([`RxShared::playout`]).
+    playout: AtomicU64,
     routes_version: AtomicU32,
     sockets: Box<[UdpSocket]>,
     rings: Arc<[Ring]>,
@@ -343,6 +347,7 @@ impl RxShared {
             stop: AtomicBool::new(false),
             base: Instant::now(),
             recv_buffer,
+            playout: AtomicU64::new(0),
         })
     }
 
@@ -386,6 +391,21 @@ impl RxShared {
         if changed {
             self.routes_version.fetch_add(1, Ordering::Release);
         }
+    }
+
+    /// The device latency is `ns`: the pump's playout point is its whole
+    /// samples ([`crate::clock::latency_samples`], as [`crate::stream::Timing::of`]).
+    pub fn set_device_latency(&self, ns: u64) {
+        self.playout.store(
+            crate::clock::latency_samples(ns, self.rate),
+            Ordering::Relaxed,
+        );
+    }
+
+    /// The device latency the published delays are planned against,
+    /// samples; `None` before the first publish.
+    pub fn playout(&self) -> Option<u64> {
+        Some(self.playout.load(Ordering::Relaxed)).filter(|&p| p > 0)
     }
 
     /// How much later than the device latency the engine's pump reads RX
