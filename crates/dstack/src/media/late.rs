@@ -88,6 +88,77 @@ impl LateWatch {
     }
 }
 
+/// One TX flow's failed sends since the last look (dasio 2.11.2026: send
+/// errors on both FOH flows, about 100 every ~96 s, no reason known).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SendErrors {
+    /// The TX flow's slot.
+    pub slot: usize,
+    /// Sends that failed since the last look.
+    pub errors: u64,
+    /// The last one's OS error (raw errno or WSA code; -1 without one).
+    pub os_error: i32,
+}
+
+/// The TX side's send-error watch: once a second, each flow whose failed
+/// sends rose gets one warning line with the count and the OS error code
+/// (a failed packet is not sent again: the receiver sees a hole).
+#[derive(Debug, Default)]
+pub struct SendWatch {
+    seen: [u64; MAX_FLOWS],
+    next_ns: Option<u64>,
+}
+
+impl SendWatch {
+    pub const fn new() -> Self {
+        SendWatch {
+            seen: [0; MAX_FLOWS],
+            next_ns: None,
+        }
+    }
+
+    /// At `now_ns`, a look once [`EVERY_NS`] has passed (the first only
+    /// learns): each slot's cumulative `(errors, last OS error)` from
+    /// `counts`. The slots whose errors rose; empty between looks.
+    pub fn look(&mut self, now_ns: u64, counts: impl Fn(usize) -> (u64, i32)) -> Vec<SendErrors> {
+        if self.next_ns.is_some_and(|next| now_ns < next) {
+            return Vec::new();
+        }
+        let first = self.next_ns.is_none();
+        self.next_ns = Some(now_ns.saturating_add(EVERY_NS));
+        let mut out = Vec::new();
+        for (slot, seen) in self.seen.iter_mut().enumerate() {
+            let (now, os_error) = counts(slot);
+            let rose = now.saturating_sub(*seen);
+            *seen = now;
+            if rose > 0 && !first {
+                out.push(SendErrors {
+                    slot,
+                    errors: rose,
+                    os_error,
+                });
+            }
+        }
+        out
+    }
+
+    /// [`SendWatch::look`] on `tx`'s flows, each report logged as a warning.
+    pub fn watch(&mut self, now_ns: u64, tx: &TxShared) {
+        let counts = |s| {
+            let l = tx.lane(s);
+            (l.send_errors, l.last_os_error)
+        };
+        for e in self.look(now_ns, counts) {
+            warn!(
+                slot = e.slot,
+                errors = e.errors,
+                os_error = e.os_error,
+                "TX sends failed (the packets were not sent: receivers see holes)"
+            );
+        }
+    }
+}
+
 /// One RX flow's losses since the last look.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Loss {

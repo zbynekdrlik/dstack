@@ -1621,6 +1621,11 @@ fn a_send_counts_a_packet_a_direct_one_or_an_error() {
     assert_eq!(stats.bytes.load(Ordering::Relaxed), 600 + 3 * 42);
     assert_eq!(stats.direct.load(Ordering::Relaxed), 2);
     assert_eq!(stats.send_errors.load(Ordering::Relaxed), 1);
+    // A refusal without an OS code reads -1; one with a code keeps it.
+    assert_eq!(stats.last_os_error.load(Ordering::Relaxed), -1);
+    count_send(&stats, &Err(io::Error::from_raw_os_error(10055)), 50);
+    assert_eq!(stats.last_os_error.load(Ordering::Relaxed), 10055);
+    assert_eq!(stats.send_errors.load(Ordering::Relaxed), 2);
 }
 
 #[test]
@@ -1769,4 +1774,36 @@ fn the_bytes_sent_are_every_slot_s_wire_bytes() {
     count_send(&shared.lanes[0], &Ok(false), 100);
     count_send(&shared.lanes[3], &Ok(false), 58);
     assert_eq!(shared.bytes_sent(), 100 + 58 + 2 * WIRE_OVERHEAD);
+}
+
+/// dasio#1: a flow's failed sends are logged once a second with the OS
+/// error, from the lanes' own counts.
+#[test]
+fn the_send_watch_logs_a_flow_s_failed_sends_with_the_os_error() {
+    let shared = shared_with(Vec::new());
+    let mut watch = crate::media::late::SendWatch::new();
+    assert_eq!(
+        warned(|| watch.watch(0, &shared)),
+        "",
+        "the first look learns"
+    );
+    count_send(
+        &shared.lanes[2],
+        &Err(io::Error::from_raw_os_error(10055)),
+        50,
+    );
+    count_send(
+        &shared.lanes[2],
+        &Err(io::Error::from_raw_os_error(10055)),
+        50,
+    );
+    let log = warned(|| watch.watch(crate::media::late::EVERY_NS, &shared));
+    assert_eq!(log.lines().count(), 1, "{log}");
+    assert!(log.contains(" WARN "), "{log}");
+    assert!(log.contains("slot=2 errors=2 os_error=10055"), "{log}");
+    assert_eq!(
+        warned(|| watch.watch(2 * crate::media::late::EVERY_NS, &shared)),
+        "",
+        "quiet second"
+    );
 }
