@@ -34,7 +34,7 @@
 //! names are the ops repository's (P6).
 
 pub mod card;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 pub mod cli;
 pub mod media;
 

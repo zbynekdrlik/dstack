@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 iemmixer contributors.
 
-//! The device binary's command line (`--help`: [`super::usage`]), Linux
-//! only, as a library function: Cargo never builds a dependency's binaries,
+//! The device binary's command line (`--help`: [`super::usage`]), on
+//! Linux and Windows (Windows has no control socket, so `ctl` refuses
+//! there), as a library function: Cargo never builds a dependency's binaries,
 //! so each application keeps a thin binary that calls [`main`] with its own
 //! [`Build`] (dstack's `dante-stack-dev`, iemmixer's `iem-dante-dev`).
 //!
@@ -15,21 +16,31 @@
 //! interface without a usable MAC. `clock` and `ctl` are
 //! described in [`super::usage`].
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::Write;
+#[cfg(unix)]
+use std::io::{BufRead, BufReader};
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
+#[cfg(unix)]
 use std::path::Path;
 use std::process::ExitCode;
 use std::sync::atomic::AtomicI32;
+#[cfg(unix)]
 use std::time::Duration;
 
-use super::{Build, ClockLines, Command, ctl_succeeded, parse_args, usage};
+#[cfg(unix)]
+use super::ctl_succeeded;
+use super::{Build, ClockLines, Command, parse_args, usage};
 use crate::clock::{DANTESYNC, MonoClock, POLL, Poller};
 use crate::host::{self, Host, Signals};
 use tokio::time::MissedTickBehavior;
 use tracing::error;
 use tracing_subscriber::EnvFilter;
+#[cfg(windows)]
+use windows::ctl_request;
 
 /// How long `ctl` waits for the device's answer.
+#[cfg(unix)]
 const CTL_WAIT: Duration = Duration::from_secs(5);
 
 pub fn main(build: Build) -> ExitCode {
@@ -191,6 +202,7 @@ fn card(name: &str, args: &[String]) -> ExitCode {
 
 /// `ctl`: one request line to the control socket at `path`, its answer
 /// line on stdout (exit 0 for `ok` or the status, 1 otherwise).
+#[cfg(unix)]
 fn ctl_request(name: &str, path: &Path, request: &str) -> ExitCode {
     let exchange = || -> std::io::Result<String> {
         let mut stream = UnixStream::connect(path)?;
@@ -219,3 +231,11 @@ fn ctl_request(name: &str, path: &Path, request: &str) -> ExitCode {
         ExitCode::from(1)
     }
 }
+
+// Windows-only glue in a file of its own, which the mutation gate (on
+// Linux) leaves out: it can never compile it there.
+#[cfg(windows)]
+mod windows;
+
+#[cfg(test)]
+mod tests;

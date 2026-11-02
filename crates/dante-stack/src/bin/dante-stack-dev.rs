@@ -5,13 +5,13 @@
 //! real-hardware gate. Glue only: [`dante_stack::daemon::cli::main`] does
 //! the work, as it does for every application's binary.
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 fn main() -> std::process::ExitCode {
     dante_stack::daemon::cli::main(dante_stack::daemon::Build::OWN)
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", windows)))]
 fn main() -> std::process::ExitCode {
-    eprintln!("dante-stack-dev runs on Linux only");
+    eprintln!("dante-stack-dev runs on Linux and Windows only");
     std::process::ExitCode::from(2)
 }
