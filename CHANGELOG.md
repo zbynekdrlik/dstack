@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.5.12 (2026-11-02)
+
+- Fix (intercom's report on 0.5.11): declared RX subscriptions are kept out of the state file.
+  - In 0.5.11, the first save after any other change (a Dante Controller subscription, a latency drop) wrote them too. From then on, they beat a later config edit.
+  - Now `DeviceState::declared` (never serialized) marks the channels the config filled, and `save` leaves them out. A Dante Controller change of that channel, or a rename that moves it, clears the mark.
+  - New public field: `DeviceState::declared`. Code that builds `DeviceState` without `..` must set it.
+- New (dsync 1.26, dsync#150): the clock stats name dsync's master. This is the source of the Sync it follows: the grandmaster unless a boundary clock relays it.
+  - It goes in byte 0x14; the grandmaster stays in 0x1c.
+  - `clock::Reading::master` reads DSYX bytes 112–117 (all zeros from an older dsync). `ClockStats::{set_master, master}`, `info::Follower::master`.
+  - `info::server::follower_of` takes the master; the grandmaster stands in when dsync names none.
+- Changed: dsync-ptp v1.26.0 (was v1.24.0). It fixes a seqlock read that could go back in time.
+
 ## 0.5.11 (2026-11-02)
 
 - New (#20, intercom#5): an app declares its RX subscriptions.
