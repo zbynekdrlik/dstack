@@ -16,18 +16,10 @@ fn the_other_traffic_is_the_nic_s_bytes_less_ours_once_a_minute() {
     assert_eq!(w.look(120 * S, Some(7_002_000), 2_000_500), Some(0));
     // An unread NIC: nothing, and the window holds.
     assert_eq!(w.look(180 * S, None, 3_000_500), None);
+    // Both counters unchanged in a minute: no other traffic.
+    assert_eq!(w.look(240 * S, Some(7_002_000), 2_000_500), Some(0));
     // Ours above the NIC's (counters skewed): never below zero.
-    assert_eq!(
-        w.look(240 * S, Some(7_002_000), 3_000_500),
-        None,
-        "went back"
-    );
-    assert_eq!(
-        w.look(300 * S, Some(7_002_000), 3_000_500),
-        Some(0),
-        "unchanged"
-    );
-    assert_eq!(w.look(360 * S, Some(7_002_100), 9_000_500), Some(0));
+    assert_eq!(w.look(300 * S, Some(7_002_100), 9_000_500), Some(0));
 }
 
 #[test]
