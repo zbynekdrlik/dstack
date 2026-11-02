@@ -14,6 +14,7 @@ exclude_globs = [
   "crates/dstack/src/daemon/cli/windows.rs",
   "crates/dstack/src/host/windows.rs",
   "crates/dstack/src/lso/windows.rs",
+  "crates/dstack/src/media/dscp/windows.rs",
   "crates/dstack/src/traffic/windows.rs",
   # Third-party code (mdns-sd, one dstack change; tests/mdns_ipv4_only.rs).
   "vendor/**",

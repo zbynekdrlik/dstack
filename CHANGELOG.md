@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.18 (2026-11-03)
+
+- Fix (dstack #1, dasio#1): on Windows our TX audio now leaves marked DSCP 46 (EF), as Dante hardware marks it.
+  - Windows ignores `IP_TOS` from a program, so without a QoS policy on the PC our audio went out with DSCP 0. dasio's NDIS filter on the FOH PC deferred such a flow behind TCP: peaks of 4–7.5 ms and ~350 late packets/s at the receiver, while the card's EF flow into the same receiver was clean.
+  - The control side adds each TX flow socket to a QoS2 flow per destination and sets its DSCP (qwave.dll). Windows allows this only for an administrator process (a service is one). Another process gets one warning naming the QoS policy recipe (`docs/windows-box.md`). Linux is unchanged (`IP_TOS` when the socket opens).
+  - New: `media::dscp::{Marks, changes, verdict, Verdict}`.
+
 ## 0.5.17 (2026-11-03)
 
 - New (dstack #16, dcontroller): `latency::Listener::start(our) -> io::Result<(Listener, mpsc::Receiver<(Ipv4Addr, Beat)>)>`.
