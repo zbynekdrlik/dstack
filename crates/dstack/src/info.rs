@@ -37,6 +37,8 @@
 //! | `07 xx 00 13 00 00 00 xx` | `07 2a 00 11 00 00 00 00` | network info, 64 bytes ([`network_info_body`]) |
 //! | `07 xx 00 77 00 00 00 xx` | `07 2a 00 78 00 00 00 00` | `00 00 00 03 00 00 00 00` |
 //! | `07 xx 00 81 00 00 00 xx` | `07 2a 00 80 00 00 00 00` | our sample rate, 20 bytes ([`sample_rate_body`]); a write gets the same answer, unchanged |
+//! | `07 xx 00 83 00 00 00 xx` | `07 2a 00 82 00 00 00 00` | our encoding as the one option, 20 bytes ([`encoding_body`]); a write gets the same answer |
+//! | `07 xx 00 85 00 00 00 xx` | `07 2a 00 84 00 00 00 00` | pull-up none as the one option, 44 bytes ([`PULLUP_BODY`]) |
 //! | `07 xx 00 21 00 00 00 xx` | `07 2a 00 20 00 00 00 00` | clock stats as a follower, 188 bytes ([`clock_stats_body`]): only once the media clock is ready and dsync names a grandmaster (DSYX bytes 42–47) |
 //!
 //! Any other opcode gets no reply and is logged by its opcode; a datagram
@@ -144,6 +146,11 @@ pub mod op {
     pub const HEARTBEAT: [u8; 8] = [0x00, 0x08, 0x00, 0x01, 0x10, 0x00, 0x00, 0x00];
     /// The clock stats (a follower's, [`super::clock_stats_body`]).
     pub const CLOCK_STATS: [u8; 8] = [0x07, 0x2a, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00];
+    /// The encoding options ([`super::encoding_body`]), the answer to 0x83.
+    pub const ENCODING: [u8; 8] = [0x07, 0x2a, 0x00, 0x82, 0x00, 0x00, 0x00, 0x00];
+    /// The sample-rate pull-up options ([`super::PULLUP_BODY`]), the
+    /// answer to 0x85.
+    pub const PULLUP: [u8; 8] = [0x07, 0x2a, 0x00, 0x84, 0x00, 0x00, 0x00, 0x00];
 }
 
 /// The heartbeat records' types.
@@ -158,14 +165,34 @@ pub const BOARD_INFO_LEN: usize = 200;
 pub const PRODUCT_INFO_LEN: usize = 336;
 pub const NETWORK_INFO_LEN: usize = 64;
 pub const SAMPLE_RATE_LEN: usize = 20;
+pub const ENCODING_LEN: usize = 20;
+/// The pull-up answer: 0x28 bytes before its one option.
+pub const PULLUP_LEN: usize = 44;
+/// The sample-rate pull-up options, as a Tascam answers 0x85 (captured on
+/// mbc, 2.11.2026) but with one option: `00 30` (the options at 0x28),
+/// the count (1), none in effect (0), none pending, `00 02 00 00`, 1, then
+/// zeros up to the options: none (0) alone.
+pub const PULLUP_BODY: [u8; PULLUP_LEN] = {
+    let mut c = [0u8; PULLUP_LEN];
+    c[1] = 0x30;
+    c[3] = 1;
+    c[0x0d] = 2;
+    c[0x13] = 1;
+    c
+};
 /// inferno's answer to 0x77.
 const ANSWER_0077_BODY: [u8; 8] = [0, 0, 0, 3, 0, 0, 0, 0];
 /// The board info's firmware, hardware and boot versions (inferno's).
 const FIRMWARE_VERSION: [u8; 4] = [4, 1, 0, 6];
 const HARDWARE_VERSION: [u8; 4] = [4, 1, 0, 3];
 const BOOT_VERSION: [u8; 4] = [1, 0, 0, 0];
-/// The board info's feature flag byte 0x16: it has a manufacturer name.
-const FEATURE_MANUFACTURER: u8 = 0x10;
+/// The board info's feature flags, bytes 0x14-0x17 (decoded against Dante
+/// Controller on mbc, 2.11.2026): in byte 0x16, 0x10 a manufacturer name
+/// and 0x02 the pull-up; in byte 0x17, 0x10 the encoding and 0x08 the
+/// sample rate. With them Dante Controller asks and shows each (0x85,
+/// 0x83, 0x81). Left out: 0x17's 0x02 (reboot and factory reset), byte
+/// 0x15 (clear config) and byte 0x14 (RTP, AES67).
+const FEATURE_FLAGS: [u8; 4] = [0x00, 0x00, 0x10 | 0x02, 0x10 | 0x08];
 /// The board info's byte 0xbb (inferno: "if 0, device is flooded with info
 /// multicast requests around 1 per second").
 const BYTE_BB: u8 = 0x1f;
@@ -205,6 +232,8 @@ pub struct Identity {
     pub process: u16,
     /// The config's sample rate: the one rate we run and take.
     pub sample_rate: u32,
+    /// The config's encoding (bits per sample), the one we run.
+    pub encoding: u8,
 }
 
 impl Identity {
@@ -216,6 +245,7 @@ impl Identity {
             model: cfg.model.clone(),
             version: product_version(),
             sample_rate: cfg.sample_rate,
+            encoding: cfg.encoding,
             net,
         }
     }
@@ -249,6 +279,13 @@ pub enum Kind {
     /// 0x21: clock stats, which a device without a PTP daemon of its own
     /// does not send.
     ClockStats,
+    /// 0x83: the encoding options, read or written; answered with our
+    /// encoding alone ([`encoding_body`]). Dante Controller asks it of a
+    /// device whose board info claims the encoding ([`board_info_body`]).
+    Encoding,
+    /// 0x85: the sample-rate pull-up options; answered with none alone
+    /// ([`PULLUP_BODY`]).
+    Pullup,
     /// Anything else: no reply.
     Unknown,
     /// No request: the channel-change notification, sent unasked and
@@ -277,6 +314,8 @@ pub fn parse_request(datagram: &[u8]) -> Option<Request> {
         [0x07, _, 0x00, 0x13, 0, 0, 0, _] => Kind::NetworkInfo,
         [0x07, _, 0x00, 0x77, 0, 0, 0, _] => Kind::Op0077,
         [0x07, _, 0x00, 0x81, 0, 0, 0, _] => Kind::SampleRate,
+        [0x07, _, 0x00, 0x83, 0, 0, 0, _] => Kind::Encoding,
+        [0x07, _, 0x00, 0x85, 0, 0, 0, _] => Kind::Pullup,
         _ => Kind::Unknown,
     };
     Some(Request { seq, opcode, kind })
@@ -296,9 +335,7 @@ pub fn board_info_body(id: &Identity) -> [u8; BOARD_INFO_LEN] {
     c[0x00..0x04].copy_from_slice(&FIRMWARE_VERSION);
     c[0x04..0x08].copy_from_slice(&HARDWARE_VERSION);
     put_str(&mut c, 0x0c, 8, &id.model);
-    // Feature flags 0x14-0x17: only "has a manufacturer name" (no AES67,
-    // no lock, no static addressing, no identify, rate, reboot or reset).
-    c[0x16] = FEATURE_MANUFACTURER;
+    c[0x14..0x18].copy_from_slice(&FEATURE_FLAGS);
     c[0x23] = 2;
     c[0x27] = 1;
     c[0x28..0x2c].copy_from_slice(&BOOT_VERSION);
@@ -333,6 +370,20 @@ pub fn sample_rate_body(rate: u32) -> [u8; SAMPLE_RATE_LEN] {
     c[0x04..0x08].copy_from_slice(&rate.to_be_bytes());
     c[0x0c..0x0e].copy_from_slice(&2u16.to_be_bytes());
     c[0x10..0x14].copy_from_slice(&rate.to_be_bytes());
+    c
+}
+
+/// The encoding options as a Tascam answers 0x83 (captured on mbc,
+/// 2.11.2026) but with one option: `00 18` (the options at 0x10), the
+/// count (1), our encoding in effect, none pending (0), `00 02 00 00`,
+/// then the options: ours alone, so Dante Controller offers no change.
+pub fn encoding_body(bits: u8) -> [u8; ENCODING_LEN] {
+    let mut c = [0u8; ENCODING_LEN];
+    c[0x00..0x02].copy_from_slice(&0x0018u16.to_be_bytes());
+    c[0x02..0x04].copy_from_slice(&1u16.to_be_bytes());
+    c[0x04..0x08].copy_from_slice(&u32::from(bits).to_be_bytes());
+    c[0x0c..0x0e].copy_from_slice(&2u16.to_be_bytes());
+    c[0x10..0x14].copy_from_slice(&u32::from(bits).to_be_bytes());
     c
 }
 
@@ -655,6 +706,11 @@ impl Multicaster {
                 let body = sample_rate_body(self.id.sample_rate);
                 Some(self.packet(START_INFO, op::SAMPLE_RATE, &body))
             }
+            Kind::Encoding => {
+                let body = encoding_body(self.id.encoding);
+                Some(self.packet(START_INFO, op::ENCODING, &body))
+            }
+            Kind::Pullup => Some(self.packet(START_INFO, op::PULLUP, &PULLUP_BODY)),
             Kind::ClockStats => match self.clock {
                 Some(f) => {
                     let body = clock_stats_body(self.id.net.mac, &f);
