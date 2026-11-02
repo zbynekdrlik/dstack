@@ -200,3 +200,64 @@ fn a_meter_binds_the_port_the_caller_names() {
     assert!(frames.recv_timeout(Duration::from_secs(5)).is_ok());
     meter.stop().unwrap();
 }
+
+#[test]
+fn a_device_s_frame_reads_back_and_a_peak_becomes_a_level() {
+    let f = super::frame(7, [1, 2, 3, 4, 5, 6, 0, 0], &[1, 41], &[253]).unwrap();
+    assert_eq!(f.len(), 27 + 3 + 1);
+    assert_eq!(&f[2..4], &(31u16).to_be_bytes());
+    assert_eq!(&f[4..6], &7u16.to_be_bytes());
+    assert_eq!(
+        parse_frame(&f),
+        Some(Frame {
+            device_id: [1, 2, 3, 4, 5, 6, 0, 0],
+            tx: vec![1, 41],
+            rx: vec![253],
+        })
+    );
+    assert_eq!(super::frame(1, [0; 8], &[0; 256], &[]), None);
+    // A heartbeat peak byte is -2 dBFS a step: 0 (full scale) reads 0
+    // dBFS, 40 reads -20, the floor stays 253.
+    assert_eq!(
+        [0, 40, 251, 252, 255].map(level_of_peak),
+        [1, 41, 252, 253, 253]
+    );
+    assert_eq!(dbfs(level_of_peak(40)), Some(-20.0));
+}
+
+#[test]
+fn a_subscription_names_its_destination_and_a_stop_names_none() {
+    let start = start_request(1, "ctl", DC_MAC, dc_to()).unwrap();
+    assert_eq!(destination(&start), Some(Some(dc_to())));
+    let stop = stop_request(2, "ctl", DC_MAC, dc_to()).unwrap();
+    assert_eq!(destination(&stop), Some(None));
+    // Not a subscription: another start code, opcode, a wrong length, too
+    // short.
+    for (at, v) in [(0, 0x27), (6, 0x10), (3, 0x41)] {
+        let mut r = start.clone();
+        r[at] = v;
+        assert_eq!(destination(&r), None, "byte {at}");
+    }
+    assert_eq!(destination(&start[..20]), None);
+    // A zero port alone is a stop too.
+    let mut no_port = start.clone();
+    let n = no_port.len();
+    no_port[n - 12..n - 10].fill(0);
+    assert_eq!(destination(&no_port), Some(None));
+}
+
+#[test]
+fn the_shortest_subscription_reads_and_a_shorter_one_does_not() {
+    // 26 bytes: the header, the opcode word, then only the destination.
+    let mut r = vec![0x12, 0x00, 0x00, 26, 0x00, 0x01, 0x30, 0x10, 0x00, 0x00];
+    r.extend_from_slice(&[192, 0, 2, 10, 0x22, 0x2f]);
+    r.extend_from_slice(&[0; 10]);
+    assert_eq!(r.len(), 26);
+    assert_eq!(destination(&r), Some(Some(dc_to())));
+    // 12 bytes whose header says 12 and names the opcode: too short for a
+    // destination, refused (never read past its start).
+    let short = [
+        0x12, 0x00, 0x00, 12, 0x00, 0x01, 0x30, 0x10, 0x00, 0x00, 0, 0,
+    ];
+    assert_eq!(destination(&short), None);
+}

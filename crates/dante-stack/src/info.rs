@@ -466,10 +466,43 @@ pub struct Sources {
     pub tx: Arc<TxShared>,
     pub rx: Arc<RxShared>,
     pub manager: Arc<Mutex<Manager>>,
+    /// Where each beat leaves its channels' levels for the meter frames
+    /// ([`crate::cmc`]): the peaks are taken once, here.
+    pub levels: Arc<Levels>,
+}
+
+/// The channels' levels as meter bytes ([`crate::meter::level_of_peak`]),
+/// the last beat's: what a meter frame sends.
+#[derive(Debug, Default)]
+pub struct Levels(Mutex<(Vec<u8>, Vec<u8>)>);
+
+impl Levels {
+    /// Keeps the TX and RX peak bytes of a beat as meter bytes.
+    pub fn set(&self, tx_peaks: &[u8], rx_peaks: &[u8]) {
+        let meter = |p: &[u8]| p.iter().map(|&b| crate::meter::level_of_peak(b)).collect();
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = (meter(tx_peaks), meter(rx_peaks));
+    }
+
+    /// The TX and RX levels; empty before the first beat with records.
+    pub fn get(&self) -> (Vec<u8>, Vec<u8>) {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
 }
 
 impl Beat for Sources {
     fn records(&self) -> Option<Records> {
+        let records = self.take_records()?;
+        self.levels.set(&records.tx_peaks, &records.rx_peaks);
+        Some(records)
+    }
+}
+
+impl Sources {
+    /// The beat's records, the peaks and lateness taken.
+    fn take_records(&self) -> Option<Records> {
         self.clock.now_ns()?;
         let granted: [bool; MAX_FLOWS] = {
             let m = self.manager.lock().unwrap_or_else(PoisonError::into_inner);

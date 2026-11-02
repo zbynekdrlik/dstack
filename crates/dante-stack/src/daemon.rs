@@ -658,7 +658,13 @@ pub async fn serve<R: Registry + Browse>(
         Arc::clone(&rx_changes),
         Arc::clone(&requests),
     );
-    let cmc = cmc::serve_cmc(sockets.cmc, ip, identity.process, Arc::clone(&requests));
+    let cmc = cmc::serve_cmc(
+        sockets.cmc,
+        ip,
+        identity.process,
+        Arc::clone(&requests),
+        Arc::clone(&media.levels),
+    );
     let info = info::serve_shared(
         ip,
         sockets.info,

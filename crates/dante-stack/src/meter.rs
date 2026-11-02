@@ -172,6 +172,51 @@ pub fn parse_frame(datagram: &[u8]) -> Option<Frame> {
     })
 }
 
+/// A meter frame (a device's side): sequence `seq`, the device's id, its
+/// TX then its RX level bytes. `None` past 255 channels a side.
+pub fn frame(seq: u16, device_id: [u8; 8], tx: &[u8], rx: &[u8]) -> Option<Vec<u8>> {
+    let (ntx, nrx) = (u8::try_from(tx.len()).ok()?, u8::try_from(rx.len()).ok()?);
+    let len = u16::try_from(FRAME_HEADER + tx.len() + rx.len() + 1).ok()?;
+    let mut out = Vec::with_capacity(usize::from(len));
+    out.extend_from_slice(&[0xff, 0xff]);
+    out.extend_from_slice(&len.to_be_bytes());
+    out.extend_from_slice(&seq.to_be_bytes());
+    out.extend_from_slice(&[0, 0]);
+    out.extend_from_slice(&device_id);
+    out.extend_from_slice(b"Audinate");
+    out.extend_from_slice(&[FRAME_VERSION, ntx, nrx]);
+    out.extend_from_slice(tx);
+    out.extend_from_slice(rx);
+    out.push(0);
+    Some(out)
+}
+
+/// The meter byte for a heartbeat peak byte ([`crate::info::peak_byte`],
+/// −40·log10 of the peak's part of full scale, so −2·dBFS): 1 + 2·(−dBFS)
+/// is 1 + that byte, at most 253 (the floor; 254 is muted).
+pub fn level_of_peak(peak_byte: u8) -> u8 {
+    peak_byte.saturating_add(1).min(253)
+}
+
+/// The destination a meter subscription names (its last 16 bytes: IPv4,
+/// port, ...): `Some(Some(to))` for a start, `Some(None)` for a stop (a
+/// zero destination); `None` when `req` is not a meter subscription (start
+/// code, length, opcode).
+pub fn destination(req: &[u8]) -> Option<Option<SocketAddrV4>> {
+    let n = req.len();
+    if n < 10 + DESTINATION_LEN
+        || req[0..2] != CMC_START.to_be_bytes()
+        || usize::from(u16::from_be_bytes([req[2], req[3]])) != n
+        || req[6..8] != OP_METERING.to_be_bytes()
+    {
+        return None;
+    }
+    let d = &req[n - DESTINATION_LEN..];
+    let ip = Ipv4Addr::new(d[0], d[1], d[2], d[3]);
+    let port = u16::from_be_bytes([d[4], d[5]]);
+    Some((!ip.is_unspecified() && port != 0).then(|| SocketAddrV4::new(ip, port)))
+}
+
 /// The transactions of this process's requests.
 static SEQ: AtomicU16 = AtomicU16::new(1);
 
