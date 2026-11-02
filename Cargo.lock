@@ -71,6 +71,7 @@ dependencies = [
  "dstack-audio-io",
  "tempfile",
  "toml",
+ "tracing",
 ]
 
 [[package]]
