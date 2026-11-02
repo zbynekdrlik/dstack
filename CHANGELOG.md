@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.14 (2026-11-02)
+
+- New (dstack #1, dasio#1): `flow_slots` in the device config (1–32, default 32). Only that many TX and RX flow sockets are opened, and at most that many flows go each way.
+  - Before, every device opened 32 TX and 32 RX sockets at start, most of them idle.
+  - On a Windows 10 PC they are suspected of lengthening a WFP receive DPC that stalls the NIC's sends. This is the knob for the A/B on the FOH PC.
+  - dlink: `Config::flow_slots(n)`.
+  - New: `RxShared::with_slots`, `TxTable::with_slots`, `DeviceConfig::flow_slots`. A config that builds `DeviceConfig` without `..` must set it.
+
 ## 0.5.13 (2026-11-02)
 
 - Fix (dasio#1, the FOH PC's send failures every ~96 s): each TX flow socket asks for a 1 MiB send buffer (`media::tx::SEND_BUFFER_BYTES`). Before, it kept the OS default.

@@ -322,11 +322,23 @@ impl RxShared {
         rings: Arc<[Ring]>,
         base: Option<u16>,
     ) -> io::Result<Self> {
+        Self::with_slots(rate, ip, rings, base, MAX_FLOWS)
+    }
+
+    /// [`RxShared::new_at`] with sockets for slots 0 to `slots` only (the
+    /// device's `flow_slots`, at most [`MAX_FLOWS`]).
+    pub fn with_slots(
+        rate: u32,
+        ip: Ipv4Addr,
+        rings: Arc<[Ring]>,
+        base: Option<u16>,
+        slots: usize,
+    ) -> io::Result<Self> {
         if base.is_some_and(|b| last_port(b).is_none()) {
             return Err(io::Error::other("rx_port_base: past port 65535"));
         }
         let mut recv_buffer = 0;
-        let sockets = (0..MAX_FLOWS)
+        let sockets = (0..slots.min(MAX_FLOWS))
             .map(|slot| {
                 // In range: checked above, before any port is bound.
                 let port = base.map_or(0, |b| b + slot as u16);

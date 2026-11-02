@@ -123,11 +123,12 @@ impl Media {
             seed,
             engine_tx,
         )?);
-        let rx = Arc::new(RxShared::new_at(
+        let rx = Arc::new(RxShared::with_slots(
             cfg.sample_rate,
             ip,
             rings,
             cfg.rx_port_base,
+            cfg.flow_slots,
         )?);
         let mut manager = Manager::new(cfg, &device.state.name, ip, rx.ports()?);
         manager.load(&device.state.subscriptions);

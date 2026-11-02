@@ -1835,3 +1835,21 @@ fn the_send_buffer_is_raised_as_far_as_the_kernel_allows() {
 fn the_send_buffer_is_what_was_asked_on_windows() {
     assert_eq!(shared_with(Vec::new()).send_buffer(), SEND_BUFFER_BYTES);
 }
+
+/// `flow_slots` (dstack #1): a table of 2 slots grants two receivers and
+/// refuses a third; the device opens only that many TX sockets.
+#[test]
+fn the_table_and_the_sockets_hold_only_the_device_s_flow_slots() {
+    let mut t = TxTable::with_slots(7, 2);
+    let (a, _) = t.add(&req(peer(4301)), 0).unwrap();
+    let (b, _) = t.add(&req(peer(4302)), 0).unwrap();
+    assert!(a < 2 && b < 2 && a != b, "{a} {b}");
+    assert_eq!(t.add(&req(peer(4303)), 0), Err(status::TOO_MANY_TX_FLOWS));
+    let mut few = cfg();
+    few.flow_slots = 3;
+    let s = TxShared::new(few, Ipv4Addr::LOCALHOST, Vec::new().into(), 1, &[]).unwrap();
+    assert_eq!(s.sockets.len(), 3);
+    assert!(s.ports[..3].iter().all(|&p| p != 0));
+    assert!(s.ports[3..].iter().all(|&p| p == 0));
+    assert_eq!(shared_with(Vec::new()).sockets.len(), MAX_FLOWS);
+}

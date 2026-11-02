@@ -1701,3 +1701,17 @@ fn a_save_keeps_declared_subscriptions_out_of_the_file() {
     let back = DeviceState::load_or_default(&edited).unwrap();
     assert_eq!(back.subscription(0), Some(&sub("TX 4", "other-device")));
 }
+
+#[test]
+fn flow_slots_default_to_every_slot_and_are_checked() {
+    assert_eq!(config().flow_slots, crate::media::rx::MAX_FLOWS);
+    let four = DeviceConfig::from_toml(&format!("flow_slots = 4\n{TEST_DEVICE}")).unwrap();
+    assert_eq!(four.flow_slots, 4);
+    for n in [0, crate::media::rx::MAX_FLOWS + 1] {
+        let cfg = DeviceConfig {
+            flow_slots: n,
+            ..config()
+        };
+        assert_eq!(cfg.problems(), ["flow_slots: 1 to 32"]);
+    }
+}

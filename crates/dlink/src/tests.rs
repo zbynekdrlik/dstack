@@ -144,3 +144,13 @@ fn declared_subscriptions_reach_the_device_config_in_order() {
         .unwrap_err();
     assert_eq!(problems, ["subscribe: rx 3 is not an RX channel (1 to 2)"]);
 }
+
+#[test]
+fn the_flow_slots_are_taken_and_checked() {
+    assert_eq!(config().device().unwrap().flow_slots, 32);
+    assert_eq!(config().flow_slots(2).device().unwrap().flow_slots, 2);
+    assert_eq!(
+        config().flow_slots(0).device().unwrap_err(),
+        ["flow_slots: 1 to 32"]
+    );
+}

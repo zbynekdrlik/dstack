@@ -1403,3 +1403,26 @@ fn a_latency_set_live_moves_every_flow_s_playout() {
     m.set_latency(2_000_000);
     assert_eq!((m.rx_plan(slot).latency, m.rx_plan(slot).delay), (192, 0));
 }
+
+/// `flow_slots` (dstack #1): with one slot, a second transmitter waits for
+/// it; no flow ever takes a slot past the device's sockets.
+#[test]
+fn flows_take_only_the_device_s_flow_slots() {
+    let net = peer_network();
+    let other = std::net::Ipv4Addr::new(10, 0, 0, 12);
+    net.add("other-device", "TX 1", adv(other, 1));
+    let mut one = cfg();
+    one.flow_slots = 1;
+    let mut m = Manager::new(&one, "test-device", OUR_IP, ports());
+    m.set(0, Some(sub("TX 1", "peer-device")));
+    m.set(1, Some(sub("TX 1", "other-device")));
+    let r = requests(&m.tick(0, &NONE, &net));
+    assert_eq!(r.len(), 1, "{r:?}");
+    assert_eq!(r[0].0.slot, 0);
+    assert!((1..MAX_FLOWS).all(|s| m.flow(s).is_none()));
+    // The default opens every slot: both transmitters at once.
+    let mut m = Manager::new(&cfg(), "test-device", OUR_IP, ports());
+    m.set(0, Some(sub("TX 1", "peer-device")));
+    m.set(1, Some(sub("TX 1", "other-device")));
+    assert_eq!(requests(&m.tick(0, &NONE, &net)).len(), 2);
+}
