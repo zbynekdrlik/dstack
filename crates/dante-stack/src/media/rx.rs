@@ -317,14 +317,16 @@ impl RxShared {
         rings: Arc<[Ring]>,
         base: Option<u16>,
     ) -> io::Result<Self> {
+        if let Some(b) = base
+            && usize::from(b) + MAX_FLOWS - 1 > usize::from(u16::MAX)
+        {
+            return Err(io::Error::other("rx_port_base: past port 65535"));
+        }
         let mut recv_buffer = 0;
         let sockets = (0..MAX_FLOWS)
             .map(|slot| {
-                let port = match base {
-                    Some(b) => u16::try_from(usize::from(b) + slot)
-                        .map_err(|_| io::Error::other("rx_port_base: past port 65535"))?,
-                    None => 0,
-                };
+                // In range: checked above, before any port is bound.
+                let port = base.map_or(0, |b| b + slot as u16);
                 let s = UdpSocket::bind(SocketAddrV4::new(ip, port))
                     .map_err(|e| io::Error::new(e.kind(), format!("RX flow port {port}: {e}")))?;
                 s.set_nonblocking(true)?;
