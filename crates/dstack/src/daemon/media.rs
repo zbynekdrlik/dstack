@@ -285,6 +285,8 @@ pub struct Driver {
     late: crate::media::late::LateWatch,
     /// Our RX flows' missing packets, logged once a second.
     loss: crate::media::late::RxWatch,
+    /// Our TX flows' failed sends, logged once a second with the OS error.
+    sends: crate::media::late::SendWatch,
     /// Other traffic on our NIC, logged once a minute.
     traffic: crate::traffic::TrafficWatch,
 }
@@ -305,6 +307,7 @@ impl Driver {
                 stops: JoinSet::new(),
                 late: crate::media::late::LateWatch::new(),
                 loss: crate::media::late::RxWatch::new(),
+                sends: crate::media::late::SendWatch::new(),
                 traffic: crate::traffic::TrafficWatch::new(),
             },
             back,
@@ -322,6 +325,7 @@ impl Driver {
         self.media.step_checks();
         self.late.watch(now, &self.media.tx);
         self.loss.watch(now, &self.media.rx);
+        self.sends.watch(now, &self.media.tx);
         self.traffic.watch(now, self.media.ip, &self.media.tx);
     }
 

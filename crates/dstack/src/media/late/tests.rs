@@ -163,3 +163,40 @@ fn the_loss_watch_reports_a_rise_in_gaps_or_drops_once_a_second() {
         }]
     );
 }
+
+/// dasio (2.11.2026): failed sends are named once a second with their
+/// count and the last OS error; quiet seconds say nothing.
+#[test]
+fn the_send_watch_names_each_flow_s_new_failed_sends_with_the_os_error() {
+    let mut w = SendWatch::new();
+    let counts = |errors: [u64; 2], code: i32| {
+        move |s: usize| match s {
+            0 => (errors[0], code),
+            1 => (errors[1], code),
+            _ => (0, 0),
+        }
+    };
+    // The first look only learns.
+    assert!(w.look(0, counts([5, 9], 0)).is_empty());
+    // Within the second: nothing.
+    assert!(w.look(EVERY_NS - 1, counts([50, 9], 10055)).is_empty());
+    // A second on: slot 0 rose by 95.
+    assert_eq!(
+        w.look(EVERY_NS, counts([100, 9], 10055)),
+        vec![SendErrors {
+            slot: 0,
+            errors: 95,
+            os_error: 10055
+        }]
+    );
+    // Both rise: one line each.
+    let both = w.look(2 * EVERY_NS, counts([101, 12], 10035));
+    assert_eq!(
+        both.iter()
+            .map(|e| (e.slot, e.errors, e.os_error))
+            .collect::<Vec<_>>(),
+        [(0, 1, 10035), (1, 3, 10035)]
+    );
+    // Quiet: nothing.
+    assert!(w.look(3 * EVERY_NS, counts([101, 12], 10035)).is_empty());
+}

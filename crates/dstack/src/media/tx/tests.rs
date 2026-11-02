@@ -1621,6 +1621,11 @@ fn a_send_counts_a_packet_a_direct_one_or_an_error() {
     assert_eq!(stats.bytes.load(Ordering::Relaxed), 600 + 3 * 42);
     assert_eq!(stats.direct.load(Ordering::Relaxed), 2);
     assert_eq!(stats.send_errors.load(Ordering::Relaxed), 1);
+    // A refusal without an OS code reads -1; one with a code keeps it.
+    assert_eq!(stats.last_os_error.load(Ordering::Relaxed), -1);
+    count_send(&stats, &Err(io::Error::from_raw_os_error(10055)), 50);
+    assert_eq!(stats.last_os_error.load(Ordering::Relaxed), 10055);
+    assert_eq!(stats.send_errors.load(Ordering::Relaxed), 2);
 }
 
 #[test]

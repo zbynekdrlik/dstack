@@ -513,6 +513,8 @@ impl<const N: usize> Cell<N> {
 #[derive(Debug, Default)]
 pub struct LaneStats {
     packets: AtomicU64,
+    /// The OS error of the last failed send (its raw code; 0 for none).
+    last_os_error: std::sync::atomic::AtomicI32,
     bytes: AtomicU64,
     send_errors: AtomicU64,
     keepalives: AtomicU64,
@@ -538,6 +540,9 @@ pub struct LaneCounts {
     pub bytes: u64,
     /// Packets the socket refused or cut.
     pub send_errors: u64,
+    /// The OS error of the last failed send: its raw code (errno, WSA), 0
+    /// for none, -1 for an error without one.
+    pub last_os_error: i32,
     /// Datagrams from the flow's receiver.
     pub keepalives: u64,
     /// Schedules started again: a lag past the latency, a jump, a
@@ -803,6 +808,7 @@ impl TxShared {
             packets: l.packets.load(Ordering::Relaxed),
             bytes: l.bytes.load(Ordering::Relaxed),
             send_errors: l.send_errors.load(Ordering::Relaxed),
+            last_os_error: l.last_os_error.load(Ordering::Relaxed),
             keepalives: l.keepalives.load(Ordering::Relaxed),
             rebootstraps: l.rebootstraps.load(Ordering::Relaxed),
             holes: l.holes.load(Ordering::Relaxed),
@@ -1242,7 +1248,10 @@ fn count_send(stats: &LaneStats, sent: &io::Result<bool>, len: usize) {
                 stats.direct.fetch_add(1, Ordering::Relaxed);
             }
         }
-        Err(_) => {
+        Err(e) => {
+            stats
+                .last_os_error
+                .store(e.raw_os_error().unwrap_or(-1), Ordering::Relaxed);
             stats.send_errors.fetch_add(1, Ordering::Relaxed);
         }
     }

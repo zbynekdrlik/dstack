@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.9 (2026-11-02)
+
+- New (dasio#1, FOH send errors every ~96 s): a failed media send keeps its OS error.
+  - `LaneCounts::last_os_error` (the raw errno or WSA code, -1 without one) is in the status too.
+  - Once a second, a TX flow whose failed sends rose gets one warning line, "TX sends failed", with `slot`, `errors` and `os_error` (`media::late::SendWatch`).
+  - A failed packet is never sent again; it is a hole at the receiver.
+
 ## 0.5.8 (2026-11-02)
 
 - New: our devices answer clock stats (8700 op 0x21) as a PTP follower of dsync's grandmaster.
