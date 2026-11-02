@@ -23,6 +23,13 @@ fn a_refusal_for_access_reads_as_not_admin() {
 }
 
 #[test]
+fn only_not_found_reads_as_a_local_destination() {
+    assert!(local_destination(ERROR_NOT_FOUND));
+    assert!(!local_destination(ERROR_ACCESS_DENIED));
+    assert!(!local_destination(0));
+}
+
+#[test]
 fn the_marks_follow_the_destinations() {
     let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let sockets = [socket];
