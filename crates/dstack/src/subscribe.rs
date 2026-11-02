@@ -686,8 +686,19 @@ impl Manager {
                 continue;
             };
             if a.rate != self.rate {
-                // It would refuse (0x0301): never asked.
-                self.failed[rx] = Some(SubStatus::TxFail);
+                // It would refuse (0x0301): never asked. Dante Controller
+                // names it a format mismatch; said once per subscription.
+                if self.failed[rx] != Some(SubStatus::ChannelFormat) {
+                    warn!(
+                        rx = rx + 1,
+                        tx_channel = %sub.tx_channel,
+                        tx_device = %sub.tx_device,
+                        tx_rate = a.rate,
+                        our_rate = self.rate,
+                        "RX channel not received: its transmitter runs at another sample rate (a Dante flow needs one rate at both ends)"
+                    );
+                }
+                self.failed[rx] = Some(SubStatus::ChannelFormat);
                 continue;
             }
             match self.carrying(&a) {
