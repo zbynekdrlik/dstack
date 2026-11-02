@@ -185,7 +185,7 @@ pub fn interface_info(ifa: &IfAddr) -> Result<NetInfo, HostError> {
 }
 
 #[cfg(windows)]
-mod windows;
+pub(crate) mod windows;
 #[cfg(windows)]
 pub use windows::interface_info;
 #[cfg(all(windows, test))]

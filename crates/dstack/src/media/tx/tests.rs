@@ -1608,11 +1608,17 @@ fn a_direct_packet_leaves_from_its_slot_s_port() {
 #[test]
 fn a_send_counts_a_packet_a_direct_one_or_an_error() {
     let stats = LaneStats::default();
-    count_send(&stats, &Ok(false));
-    count_send(&stats, &Ok(true));
-    count_send(&stats, &Ok(true));
-    count_send(&stats, &Err(io::Error::from(io::ErrorKind::WouldBlock)));
+    count_send(&stats, &Ok(false), 100);
+    count_send(&stats, &Ok(true), 200);
+    count_send(&stats, &Ok(true), 300);
+    count_send(
+        &stats,
+        &Err(io::Error::from(io::ErrorKind::WouldBlock)),
+        400,
+    );
     assert_eq!(stats.packets.load(Ordering::Relaxed), 3);
+    // The sent packets' wire bytes only: datagrams plus 42 header bytes each.
+    assert_eq!(stats.bytes.load(Ordering::Relaxed), 600 + 3 * 42);
     assert_eq!(stats.direct.load(Ordering::Relaxed), 2);
     assert_eq!(stats.send_errors.load(Ordering::Relaxed), 1);
 }
