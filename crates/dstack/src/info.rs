@@ -518,9 +518,12 @@ pub trait Beat: Send + Sync {
 /// follows dsync's; we send no PTP of our own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Follower {
-    /// The grandmaster's PTPv1 UUID (dsync's DSYX bytes 42–47); our master
-    /// too, in a flat Dante network.
+    /// The grandmaster's PTPv1 UUID (dsync's DSYX bytes 42–47).
     pub grandmaster: [u8; 6],
+    /// The master's PTPv1 UUID, the clock whose Sync dsync follows (DSYX
+    /// bytes 112–117, dsync 1.26 on); the grandmaster when dsync names
+    /// none.
+    pub master: [u8; 6],
     /// dsync's frequency adjustment, ppb.
     pub freq_ppb: i32,
 }
@@ -551,7 +554,7 @@ pub fn clock_stats_body(own: [u8; 6], f: &Follower) -> Vec<u8> {
     let mut c = CLOCK_TEMPLATE.to_vec();
     c[0x08..0x0c].copy_from_slice(&f.freq_ppb.to_be_bytes());
     c[0x0c..0x12].copy_from_slice(&own);
-    c[0x14..0x1a].copy_from_slice(&f.grandmaster);
+    c[0x14..0x1a].copy_from_slice(&f.master);
     c[0x1c..0x22].copy_from_slice(&f.grandmaster);
     c
 }

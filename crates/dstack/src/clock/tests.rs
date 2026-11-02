@@ -14,6 +14,7 @@ fn reading(date: Option<DateState>) -> Reading {
         mode: 3,
         freq_ppb: -750,
         grandmaster: [0; 6],
+        master: [0; 6],
         date,
     }
 }
@@ -607,7 +608,9 @@ mod os {
                 let wall = realtime_ns();
                 let stale = locked_reply(id.wrapping_sub(1), wall, d, wall - d - HOUR, 1);
                 server.send_to(&stale, from).await.unwrap();
-                let reply = locked_reply(id, wall, d, wall - d - HOUR, -750);
+                // dsync 1.26's 120 bytes: the master after the extension.
+                let mut reply = locked_reply(id, wall, d, wall - d - HOUR, -750);
+                reply.extend_from_slice(&[0x00, 0x1d, 0xc1, 0x0d, 0x0e, 0x0f, 0, 0]);
                 server.send_to(&reply, from).await.unwrap();
             }
         });
@@ -636,6 +639,12 @@ mod os {
             (0, 0, false)
         );
         assert_eq!(freq.load(Ordering::Relaxed), -750);
+        // The clock stats' ids: the grandmaster and dsync's master.
+        assert_eq!(
+            stats.grandmaster(),
+            Some([0x00, 0x1d, 0xc1, 0x0a, 0x0b, 0x0c])
+        );
+        assert_eq!(stats.master(), Some([0x00, 0x1d, 0xc1, 0x0d, 0x0e, 0x0f]));
         // PTP now = the box's wall less D, within the loop's few ms.
         let ptp = clock.now_ns().unwrap() as i64;
         let expect = realtime_ns() - d;

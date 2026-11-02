@@ -154,6 +154,8 @@ fn the_dsyx_reply_reads_as_dsync_writes_it() {
             mode: 3,
             freq_ppb: -750,
             grandmaster: [0x00, 0x1d, 0xc1, 0x0a, 0x0b, 0x0c],
+            // A 112-byte reply (dsync before 1.26): no master.
+            master: [0; 6],
             date: Some(DateState {
                 d_ns: D,
                 step_at_ptp_ns: Some(STEP_AT),
@@ -335,4 +337,36 @@ fn random_replies_never_panic() {
             let _ = crate::clock::sample(&r, rng.next() as i64, rng.next() as i64);
         }
     }
+}
+
+/// dsync 1.26 (dsync#150): always 120 bytes, the master's UUID at
+/// 112–117; an extension of zeros (version 0) is no date state.
+#[test]
+fn a_dsync_1_26_reply_names_the_master_after_the_extension() {
+    let master = [0x00, 0x1d, 0xc1, 0x0d, 0x0e, 0x0f];
+    let mut bytes = Reply::locked(7).bytes();
+    bytes.extend_from_slice(&master);
+    bytes.extend_from_slice(&[0, 0]);
+    assert_eq!(bytes.len(), 120);
+    let got = parse(&bytes, 7).unwrap();
+    assert_eq!(got.master, master);
+    assert_eq!(got.grandmaster, [0x00, 0x1d, 0xc1, 0x0a, 0x0b, 0x0c]);
+    assert!(got.date.is_some());
+
+    // No date state: the extension is zeros, the master still there.
+    let mut bare = Reply {
+        ext: None,
+        ..Reply::locked(8)
+    }
+    .bytes();
+    bare.resize(MASTER_AT, 0);
+    bare.extend_from_slice(&master);
+    bare.extend_from_slice(&[0, 0]);
+    let got = parse(&bare, 8).unwrap();
+    assert_eq!((got.master, got.date), (master, None));
+
+    // Exactly the master's end is enough; one byte short is no master.
+    assert_eq!(parse(&bytes[..MASTER_END], 7).unwrap().master, master);
+    assert_eq!(parse(&bytes[..MASTER_END - 1], 7).unwrap().master, [0; 6]);
+    assert!(REPLY_MAX >= 120);
 }

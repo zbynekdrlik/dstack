@@ -187,6 +187,8 @@ pub struct ClockStats {
     /// The grandmaster's UUID as dsync's last reply named it (big-endian
     /// in the low 48 bits; 0 for none).
     grandmaster: AtomicU64,
+    /// The master's UUID, as `grandmaster` (dsync 1.26 on).
+    master: AtomicU64,
 }
 
 /// [`ClockStats`] read at one moment.
@@ -214,17 +216,22 @@ impl ClockStats {
 
     /// The grandmaster dsync's last reply named (all zeros: none).
     pub fn set_grandmaster(&self, uuid: [u8; 6]) {
-        let mut w = [0u8; 8];
-        w[2..].copy_from_slice(&uuid);
-        self.grandmaster
-            .store(u64::from_be_bytes(w), Ordering::Relaxed);
+        self.grandmaster.store(uuid_word(uuid), Ordering::Relaxed);
     }
 
     /// The grandmaster's UUID; `None` before one was named.
     pub fn grandmaster(&self) -> Option<[u8; 6]> {
-        let w = self.grandmaster.load(Ordering::Relaxed).to_be_bytes();
-        let uuid: [u8; 6] = w[2..].try_into().unwrap_or([0; 6]);
-        (uuid != [0; 6]).then_some(uuid)
+        word_uuid(self.grandmaster.load(Ordering::Relaxed))
+    }
+
+    /// The master dsync's last reply named (all zeros: none; dsync 1.26).
+    pub fn set_master(&self, uuid: [u8; 6]) {
+        self.master.store(uuid_word(uuid), Ordering::Relaxed);
+    }
+
+    /// The master's UUID; `None` before one was named.
+    pub fn master(&self) -> Option<[u8; 6]> {
+        word_uuid(self.master.load(Ordering::Relaxed))
     }
 
     /// The clock is the TEST system clock: nothing polls dsync.
@@ -327,6 +334,19 @@ impl PtpClock for ManualClock {
     fn epoch(&self) -> u32 {
         self.epoch.load(Ordering::SeqCst)
     }
+}
+
+/// A 6-byte UUID as the low bytes of a `u64` (big-endian).
+fn uuid_word(uuid: [u8; 6]) -> u64 {
+    let mut w = [0u8; 8];
+    w[2..].copy_from_slice(&uuid);
+    u64::from_be_bytes(w)
+}
+
+/// [`uuid_word`] back; `None` for all zeros (none named).
+fn word_uuid(w: u64) -> Option<[u8; 6]> {
+    let uuid: [u8; 6] = w.to_be_bytes()[2..].try_into().unwrap_or([0; 6]);
+    (uuid != [0; 6]).then_some(uuid)
 }
 
 /// Samples at `rate` in `ptp_ns` (rounded down; `u128`, so years of a
@@ -560,6 +580,7 @@ mod os {
             stats.record(p.event);
             if let Some(r) = &p.reading {
                 stats.set_grandmaster(r.grandmaster);
+                stats.set_master(r.master);
             }
             log_event(p.event, last, p.sample, &mut waiting, clock.epoch());
             last = p.event;

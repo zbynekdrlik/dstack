@@ -51,7 +51,11 @@
 //! | 76–83 | the PTP instant it takes effect; a slew's start |
 //! | 96–103 | the replier's PTP "now": its wall less the `D` in effect |
 //! | 104–111 | a slew's starting `D` (version 2 on) |
+//! | 112–117 | the master's PTPv1 UUID: the source of the Sync dsync follows (dsync 1.26 on; all zeros: none followed yet) |
 //!
+//! From dsync 1.26 the reply is always 120 bytes, the extension zeros
+//! (version 0) without a date state; a reply of [`MASTER_END`] bytes or
+//! more carries the master.
 //! The `D` in effect is the base's wall less the extension's PTP "now"
 //! (two clock reads of dsync's, microseconds apart). A step announce
 //! names its instant, a past one the last step: [`DateState::step_at_ptp_ns`].
@@ -73,7 +77,11 @@ pub const BASE_LEN: usize = 64;
 pub const EXT_LEN: usize = 40;
 /// The extension from version 2 (the slew's starting `D`).
 pub const EXT_LEN_V2: usize = 48;
-/// A buffer every reply fits (dsync writes 112 bytes).
+/// Where the master's UUID starts (dsync 1.26 on).
+pub const MASTER_AT: usize = 112;
+/// A reply this long or longer carries the master.
+pub const MASTER_END: usize = MASTER_AT + 6;
+/// A buffer every reply fits (dsync writes 120 bytes).
 pub const REPLY_MAX: usize = 256;
 
 const REQUEST_MAGIC: [u8; 4] = *b"DSYX";
@@ -101,6 +109,11 @@ pub struct Reading {
     /// The grandmaster's PTPv1 clock UUID (bytes 42–47, dsync 1.17 on);
     /// all zeros before one was heard.
     pub grandmaster: [u8; 6],
+    /// The master's PTPv1 clock UUID, the source of the Sync dsync follows
+    /// (bytes 112–117, dsync 1.26 on): the grandmaster unless a boundary
+    /// clock relays it. All zeros before one was followed, or from an
+    /// older dsync.
+    pub master: [u8; 6],
     /// The date offset; `None` before dsync holds one (or from a
     /// dsync without the extension).
     pub date: Option<DateState>,
@@ -158,6 +171,10 @@ pub fn parse(reply: &[u8], id: u32) -> Result<Reading, DsyxError> {
         mode: base[40],
         freq_ppb: i32::from_be_bytes([base[36], base[37], base[38], base[39]]),
         grandmaster: base[42..48].try_into().unwrap_or([0; 6]),
+        master: reply
+            .get(MASTER_AT..MASTER_END)
+            .and_then(|m| m.try_into().ok())
+            .unwrap_or([0; 6]),
         date: date_state(&reply[BASE_LEN..], wall_ns),
     })
 }
