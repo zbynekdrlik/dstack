@@ -1,0 +1,848 @@
+use super::*;
+
+use std::net::Ipv4Addr;
+
+use crate::arc::{ArcOutcome, Live, handle};
+use crate::device::{DeviceConfig, DeviceState};
+use crate::media::tx::TxTable;
+use crate::subscribe::{MAX_FLOWS, Manager};
+use crate::wire::Header;
+
+const TEST_DEVICE: &str = include_str!("../../../../../config/test-device.toml");
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+// ---- the requests, byte for byte as netaudio v0.0.10 sends them ----
+
+#[test]
+fn an_rx_label_is_netaudio_s_request() {
+    // netaudio: "27ff 00{len} {seq} 3001 0000 0201 00{ch} 0014 00000000
+    // {name} 00", len = name + 21.
+    let want = [
+        "27ff", "0018", "0000", "3001", "0000", "0201", "0005", "0014", "00000000", "566f78", "00",
+    ];
+    assert_eq!(
+        hex(&rename_request(0, Dir::Rx, 5, Some("Vox"))),
+        want.concat()
+    );
+    let reset = [
+        "27ff", "0015", "0000", "3001", "0000", "0201", "0005", "0014", "00000000", "00",
+    ];
+    assert_eq!(hex(&rename_request(0, Dir::Rx, 5, None)), reset.concat());
+}
+
+#[test]
+fn a_tx_label_is_netaudio_s_request() {
+    // netaudio: "... 2013 0000 0201 0000 00{ch} 0018 000000000000 {name}
+    // 00", len = name + 25.
+    let want = [
+        "27ff",
+        "001e",
+        "0000",
+        "2013",
+        "0000",
+        "0201",
+        "0000",
+        "0007",
+        "0018",
+        "000000000000",
+        "436c69636b",
+        "00",
+    ];
+    assert_eq!(
+        hex(&rename_request(0, Dir::Tx, 7, Some("Click"))),
+        want.concat()
+    );
+    let reset = [
+        "27ff",
+        "0019",
+        "0000",
+        "2013",
+        "0000",
+        "0201",
+        "0000",
+        "0007",
+        "0018",
+        "000000000000",
+        "00",
+    ];
+    assert_eq!(hex(&rename_request(0, Dir::Tx, 7, None)), reset.concat());
+}
+
+#[test]
+fn a_device_name_is_netaudio_s_request() {
+    // netaudio: "27ff 00{len} {seq} 1001 0000 {name} 00", len = name + 11.
+    let want = [
+        "27ff",
+        "0013",
+        "0000",
+        "1001",
+        "0000",
+        &hex(b"iem-card"),
+        "00",
+    ];
+    assert_eq!(hex(&device_rename_request(0, "iem-card")), want.concat());
+}
+
+// ---- against our own server ----
+
+/// Our own device answering in process: its config, state and flows.
+pub(crate) struct Own {
+    pub(crate) cfg: DeviceConfig,
+    pub(crate) state: DeviceState,
+    tx: TxTable,
+    rx: Manager,
+    seq: u16,
+}
+
+impl Own {
+    pub(crate) fn new() -> Self {
+        let cfg = DeviceConfig::from_toml(TEST_DEVICE).expect("the test device");
+        let rx = Manager::new(&cfg, &cfg.name, Ipv4Addr::new(10, 0, 0, 10), [0; MAX_FLOWS]);
+        Own {
+            state: DeviceState::from_config(&cfg),
+            tx: TxTable::new(7),
+            rx,
+            cfg,
+            seq: 0,
+        }
+    }
+}
+
+impl Call for Own {
+    fn call(&mut self, op1: u16, body: &[u8]) -> Result<(u16, Vec<u8>), ReadError> {
+        self.seq = self.seq.wrapping_add(1);
+        let req = request(START, self.seq, op1, 0, body);
+        let live = Live {
+            tx: &self.tx,
+            rx: &self.rx,
+        };
+        let bytes = match handle(&mut self.state, &self.cfg, &live, &req) {
+            ArcOutcome::Reply(b) | ArcOutcome::Changed(b, _) => b,
+            // No reply: as a device that does not answer.
+            _ => return Err(ReadError::Timeout { op: op1 }),
+        };
+        let (h, body) = Header::parse(&bytes).expect("a reply parses");
+        assert_eq!((h.seq, h.op1), (self.seq, op1), "the reply to our request");
+        Ok((h.op2, body.to_vec()))
+    }
+}
+
+#[test]
+fn our_device_s_name_and_labels_read_back() {
+    let mut own = Own::new();
+    assert_eq!(device_name(&mut own).unwrap(), own.cfg.name);
+    let got = labels(&mut own).unwrap();
+    assert_eq!(
+        (got.tx_count, got.rx_count),
+        (own.cfg.tx.len(), own.cfg.rx.len())
+    );
+    assert!(got.complete(), "{got:?}");
+    for (i, name) in own.cfg.tx.iter().enumerate() {
+        assert_eq!(got.get(Dir::Tx, i as u16 + 1), Some(name.as_str()));
+    }
+    for (i, name) in own.cfg.rx.iter().enumerate() {
+        assert_eq!(got.get(Dir::Rx, i as u16 + 1), Some(name.as_str()));
+    }
+}
+
+#[test]
+fn a_label_set_and_reset_reads_back() {
+    let mut own = Own::new();
+    rename_channel(&mut own, Dir::Rx, 2, Some("Vox L")).unwrap();
+    rename_channel(&mut own, Dir::Tx, 3, Some("Click")).unwrap();
+    assert_eq!(own.state.rx[1], "Vox L");
+    assert_eq!(own.state.tx[2], "Click");
+    let got = labels(&mut own).unwrap();
+    assert_eq!(got.get(Dir::Rx, 2), Some("Vox L"));
+    assert_eq!(got.get(Dir::Tx, 3), Some("Click"));
+    // Reset: the default comes back.
+    rename_channel(&mut own, Dir::Rx, 2, None).unwrap();
+    rename_channel(&mut own, Dir::Tx, 3, None).unwrap();
+    let got = labels(&mut own).unwrap();
+    assert_eq!(got.get(Dir::Rx, 2), Some(own.cfg.rx[1].as_str()));
+    assert_eq!(got.get(Dir::Tx, 3), Some(own.cfg.tx[2].as_str()));
+}
+
+#[test]
+fn a_refused_label_is_a_refusal() {
+    let mut own = Own::new();
+    let past = own.cfg.rx.len() as u16 + 1;
+    assert!(matches!(
+        rename_channel(&mut own, Dir::Rx, past, Some("X")),
+        Err(ReadError::Refused {
+            op: op::RX_RENAME,
+            ..
+        })
+    ));
+    assert!(matches!(
+        rename_channel(&mut own, Dir::Tx, 1, Some("no.dots")),
+        Err(ReadError::Refused {
+            op: op::TX_RENAME,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn our_device_takes_a_device_rename() {
+    let mut own = Own::new();
+    rename_device(&mut own, "other-name").unwrap();
+    assert_eq!(device_name(&mut own).unwrap(), "other-name");
+    assert_eq!(own.state.name, "other-name");
+}
+
+/// A device whose name reply is empty, or that refuses.
+struct Fixed(u16, Vec<u8>);
+
+impl Call for Fixed {
+    fn call(&mut self, _: u16, _: &[u8]) -> Result<(u16, Vec<u8>), ReadError> {
+        Ok((self.0, self.1.clone()))
+    }
+}
+
+#[test]
+fn an_empty_or_refused_name_does_not_read() {
+    assert_eq!(
+        device_name(&mut Fixed(STATUS_OK, vec![0])),
+        Err(ReadError::Malformed { op: GET_NAME })
+    );
+    assert_eq!(
+        device_name(&mut Fixed(0x0022, Vec::new())),
+        Err(ReadError::Refused {
+            op: GET_NAME,
+            status: 0x0022
+        })
+    );
+}
+
+#[test]
+fn rx_channels_read_back_labels_and_subscriptions() {
+    use crate::device::Subscription;
+    use crate::subscribe::SubStatus;
+
+    let mut own = Own::new();
+    let sub = Subscription {
+        tx_channel: "Click".to_string(),
+        tx_device: "other-device".to_string(),
+    };
+    assert!(own.state.set_subscription(&own.cfg, 1, Some(sub)));
+    let got = rx_channels(&mut own).unwrap();
+    assert_eq!(got.len(), own.cfg.rx.len());
+    for (i, ch) in got.iter().enumerate() {
+        assert_eq!(ch.channel, i as u16 + 1);
+        assert_eq!(ch.label, own.cfg.rx[i]);
+    }
+    let first = &got[0];
+    assert_eq!(
+        (first.tx_channel.as_deref(), first.tx_device.as_deref()),
+        (None, None)
+    );
+    assert_eq!((first.status, first.sub_status()), (0, None));
+    let second = &got[1];
+    assert_eq!(second.tx_channel.as_deref(), Some("Click"));
+    assert_eq!(second.tx_device.as_deref(), Some("other-device"));
+    // The manager does not run it: the server lists it unresolved.
+    assert_eq!(second.status, SubStatus::Unresolved.code());
+    assert_eq!(second.sub_status(), Some(SubStatus::Unresolved));
+}
+
+#[test]
+fn rx_channels_of_a_device_that_refuses_its_counts_is_a_refusal() {
+    assert_eq!(
+        rx_channels(&mut Fixed(0x0022, Vec::new())),
+        Err(ReadError::Refused {
+            op: op::COUNTS,
+            status: 0x0022
+        })
+    );
+    assert_eq!(
+        rx_channels(&mut Fixed(STATUS_OK, vec![0, 0, 0])),
+        Err(ReadError::Malformed { op: op::COUNTS })
+    );
+}
+
+#[test]
+fn an_rx_page_reads_the_status_s_two_halves_and_names_by_offset() {
+    // [slots 1, count 1], one descriptor, then the names. Offsets count from
+    // the datagram's first byte (the header's 10 bytes before the body).
+    let names = 2 + RX_ITEM;
+    let off = |k: usize| (HEADER_LEN + names + k) as u16;
+    let mut body = vec![1, 1];
+    for f in [3u16, 6, 0, off(0), off(6), off(13), 0x0101, 0x0009, 0, 0] {
+        body.extend_from_slice(&f.to_be_bytes());
+    }
+    body.extend_from_slice(b"Click\0other\0\0Vox L\0");
+    let page = rx_page(STATUS_MORE, &body).expect("a page");
+    assert!(page.more);
+    assert_eq!((page.slots, page.count), (1, 1));
+    assert_eq!(
+        page.items,
+        vec![RxChannel {
+            channel: 3,
+            label: "Vox L".to_string(),
+            tx_channel: Some("Click".to_string()),
+            tx_device: Some("other".to_string()),
+            status: 0x0101_0009,
+        }]
+    );
+    assert_eq!(
+        page.items[0].sub_status(),
+        Some(crate::subscribe::SubStatus::Receiving)
+    );
+}
+
+#[test]
+fn an_rx_channel_names_a_hardware_transmitter_s_receiving_word() {
+    // dstack #44: the word real transmitters give a receiving channel.
+    let ch = RxChannel {
+        channel: 1,
+        label: "In 1".to_string(),
+        tx_channel: Some("Out 1".to_string()),
+        tx_device: Some("other".to_string()),
+        status: 0x0301_0009,
+    };
+    assert_eq!(
+        ch.sub_status(),
+        Some(crate::subscribe::SubStatus::Receiving)
+    );
+    assert_eq!(ch.receiver_detail(), 0x0301);
+    let own = RxChannel {
+        status: 0x0101_0009,
+        ..ch.clone()
+    };
+    assert_eq!(own.receiver_detail(), 0x0101);
+}
+
+#[test]
+fn an_rx_page_counts_a_channel_0_and_does_not_list_it() {
+    // [slots 2, count 2]: channel 0, then channel 1, both with a name.
+    let names = 2 + 2 * RX_ITEM;
+    let off = |k: usize| (HEADER_LEN + names + k) as u16;
+    let mut body = vec![2, 2];
+    for id in [0u16, 1] {
+        for f in [id, 6, 0, 0, 0, off(0), 0, 0, 0, 0] {
+            body.extend_from_slice(&f.to_be_bytes());
+        }
+    }
+    body.extend_from_slice(b"Vox\0");
+    let page = rx_page(STATUS_OK, &body).expect("a page");
+    assert!(!page.more);
+    assert_eq!((page.slots, page.count), (2, 2));
+    let listed: Vec<u16> = page.items.iter().map(|c| c.channel).collect();
+    assert_eq!(listed, vec![1]);
+}
+
+#[test]
+fn a_subscription_is_netaudio_s_request() {
+    // netaudio: "27ff 00{len} {seq} 3010 0000 0201 00{rx} 0034 00{device
+    // offset} " + 34 zero bytes + "{tx channel} 00 {tx device} 00".
+    let want = [
+        "27ff",
+        "0043",
+        "0000",
+        "3010",
+        "0000",
+        "0201",
+        "0003",
+        "0034",
+        "003a",
+        &"00".repeat(34),
+        &hex(b"Click"),
+        "00",
+        &hex(b"stage-pc"),
+        "00",
+    ];
+    assert_eq!(
+        hex(&subscribe_request(0, 3, "Click", "stage-pc")),
+        want.concat()
+    );
+}
+
+#[test]
+fn an_unsubscription_is_netaudio_s_request() {
+    // netaudio: "27ff 0010 {seq} 3014 0000 0001 0000 00{rx}".
+    let want = [
+        "27ff", "0010", "0000", "3014", "0000", "0001", "0000", "0004",
+    ];
+    assert_eq!(hex(&unsubscribe_request(0, 4)), want.concat());
+}
+
+#[test]
+fn our_device_takes_a_subscription_and_its_end() {
+    let mut own = Own::new();
+    subscribe(&mut own, 2, "Click", "stage-pc").unwrap();
+    let got = rx_channels(&mut own).unwrap();
+    assert_eq!(got[1].tx_channel.as_deref(), Some("Click"));
+    assert_eq!(got[1].tx_device.as_deref(), Some("stage-pc"));
+    assert_eq!(
+        own.state.subscription(1).map(|s| s.tx_device.as_str()),
+        Some("stage-pc")
+    );
+    unsubscribe(&mut own, 2).unwrap();
+    let got = rx_channels(&mut own).unwrap();
+    assert_eq!((got[1].tx_channel.as_deref(), got[1].status), (None, 0));
+    assert!(own.state.subscription(1).is_none());
+}
+
+#[test]
+fn a_refused_subscription_or_end_is_a_refusal() {
+    assert_eq!(
+        subscribe(&mut Fixed(0x0022, Vec::new()), 1, "a", "b"),
+        Err(ReadError::Refused {
+            op: op::RX_SUBSCRIBE,
+            status: 0x0022
+        })
+    );
+    assert_eq!(
+        unsubscribe(&mut Fixed(0x0022, Vec::new()), 1),
+        Err(ReadError::Refused {
+            op: op::RX_UNSUBSCRIBE,
+            status: 0x0022
+        })
+    );
+    assert_eq!(
+        subscribe(&mut Fixed(STATUS_OK, Vec::new()), 1, "a", "b"),
+        Ok(())
+    );
+    assert_eq!(unsubscribe(&mut Fixed(STATUS_OK, Vec::new()), 1), Ok(()));
+}
+
+/// Our server's 0x3200 page for one granted flow (arc::tests'
+/// `an_rx_flow_list_states_each_slot_s_channels`): TX 3 feeds RX 1 and 2,
+/// TX 4 feeds RX 3, latency 2 ms at 96 kHz.
+#[rustfmt::skip]
+const ONE_FLOW_PAGE: [u8; 104] = [
+    0x10, 0x01,                         // 16 slots, 1 flow
+    0x00, 0x54,                         // flow 1's descriptor at 84
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0,
+    0x80, 0x02, 0xc3, 0x50, 10, 0, 0, 10,
+    0x00, 0x09, 0x00, 0x01, 0x08, 0x00, 0x00, 0x00,
+    0x00, 0x1e, 0x84, 0x80, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x03, 0x00, 0x00,
+    0x00, 0x04, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00,
+    0x00, 0x01, 0x00, 0x01, 0x00, 0x01, 0x77, 0x00, 0x00, 0x00, 0x00, 0x18,
+    0x00, 0x01, 0x00, 0x04, 0x00, 0x02, 0x00, 0x2c,
+    0x00, 0x44, 0x00, 0x48, 0x00, 0x4c, 0x00, 0x50,
+    0x00, 0x34,
+];
+
+#[test]
+fn an_rx_flow_page_reads_the_slot_rate_latency_and_channels() {
+    let page = rx_flow_page(STATUS_OK, &ONE_FLOW_PAGE).expect("a page");
+    assert!(!page.more);
+    assert_eq!((page.slots, page.count), (16, 1));
+    assert_eq!(
+        page.items,
+        [RxFlow {
+            slot: 1,
+            rate: 96_000,
+            latency_ns: 2_000_000,
+            channels: vec![1, 2, 3],
+        }]
+    );
+    // A flow whose descriptor points past the body is counted, not listed.
+    let mut cut = ONE_FLOW_PAGE.to_vec();
+    cut[3] = 0xf0;
+    let page = rx_flow_page(STATUS_MORE, &cut).expect("a page");
+    assert!(page.more);
+    assert_eq!((page.count, page.items.len()), (1, 0));
+    // Each part of the descriptor checked: cut anywhere, nothing listed.
+    for end in 2..ONE_FLOW_PAGE.len() - 1 {
+        let short = &ONE_FLOW_PAGE[..end];
+        if let Some(p) = rx_flow_page(STATUS_OK, short) {
+            assert!(p.items.is_empty(), "cut at {end}: {p:?}");
+        }
+    }
+    // The second item is read at its own place: the first points past the
+    // body, the second at the flow.
+    let mut two = ONE_FLOW_PAGE.to_vec();
+    two[1] = 2;
+    two[2..4].copy_from_slice(&0xfff0u16.to_be_bytes());
+    two[4..6].copy_from_slice(&0x0054u16.to_be_bytes());
+    let page = rx_flow_page(STATUS_OK, &two).expect("a page");
+    assert_eq!((page.count, page.items.len()), (2, 1));
+    assert_eq!(page.items[0].slot, 1);
+    // A channel bit in the second word is channel 17 up (the last slot's
+    // mask, at packet offset 80, so no other mask's words reach it).
+    let mut high = ONE_FLOW_PAGE.to_vec();
+    high[80 - 10 + 2..80 - 10 + 4].copy_from_slice(&0x8001u16.to_be_bytes());
+    let flow = &rx_flow_page(STATUS_OK, &high).unwrap().items[0];
+    assert_eq!(flow.channels, [1, 2, 3, 17, 32]);
+    // Two sockets: the masks' offsets follow both.
+    let mut two_sockets = ONE_FLOW_PAGE.to_vec();
+    two_sockets[86..88].copy_from_slice(&2u16.to_be_bytes());
+    two_sockets.splice(94..94, [0x00, 0x2c]);
+    let flow = &rx_flow_page(STATUS_OK, &two_sockets).unwrap().items[0];
+    assert_eq!(
+        (flow.channels.as_slice(), flow.latency_ns),
+        (&[1, 2, 3][..], 2_000_000)
+    );
+}
+
+#[test]
+fn rx_flows_of_our_own_device_lists_none_before_a_grant() {
+    let mut own = Own::new();
+    assert_eq!(rx_flows(&mut own), Ok(Vec::new()));
+    assert_eq!(
+        rx_flows(&mut Fixed(0x0022, Vec::new())),
+        Err(ReadError::Refused {
+            op: op::RX_FLOWS,
+            status: 0x0022
+        })
+    );
+    assert_eq!(
+        rx_flows(&mut Fixed(STATUS_OK, vec![1])),
+        Err(ReadError::Malformed { op: op::RX_FLOWS })
+    );
+}
+
+/// A hex string's bytes.
+fn unhex(s: &str) -> Vec<u8> {
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+        .collect()
+}
+
+/// Settings replies captured on the site (1.11), asked for SETTING_KEYS
+/// and 0x0201: a wireless receiver, then a Yamaha card.
+const WIRELESS_SETTINGS: &str = "2809005400091100000108088020002c802100308204004082050044830100488302004c83060050020100010001770000000000000000000000000000000000000f4240000f4240000f4240009af8da000f4240";
+const CARD_SETTINGS: &str = "2809005400091100000108088020002c802100308204004082050044830100488302004c83060050020100010001770000000000000000000000000000000000000f42400003d0900003d09000a2c2ab000249f0";
+
+#[test]
+fn settings_read_as_netaudio_reads_them_on_real_devices() {
+    let body = |hex: &str| unhex(hex)[HEADER_LEN..].to_vec();
+    // netaudio 0.4.2 read: 96 kHz, latency 1 ms (default 1, min 1, max
+    // 10.15625 ms) on the wireless receiver; 0.25 ms (default 1, min 0.15,
+    // max 10.666667 ms) on the card.
+    let w = parse_settings(&body(WIRELESS_SETTINGS)).unwrap();
+    assert_eq!(
+        (
+            w.sample_rate,
+            w.pullup,
+            w.latency_configured_ns,
+            w.latency_active_ns
+        ),
+        (Some(96_000), Some(0), Some(1_000_000), Some(1_000_000))
+    );
+    assert_eq!(
+        (w.latency_default_ns, w.latency_min_ns, w.latency_max_ns),
+        (Some(1_000_000), Some(1_000_000), Some(10_156_250))
+    );
+    assert_eq!(w.all.get(&0x0201), Some(&1), "a plain value");
+    assert_eq!(w.all.len(), 8);
+    let c = parse_settings(&body(CARD_SETTINGS)).unwrap();
+    assert_eq!(
+        (
+            c.latency_configured_ns,
+            c.latency_active_ns,
+            c.latency_default_ns
+        ),
+        (Some(250_000), Some(250_000), Some(1_000_000))
+    );
+    assert_eq!(
+        (c.latency_min_ns, c.latency_max_ns),
+        (Some(150_000), Some(10_666_667))
+    );
+}
+
+#[test]
+fn a_settings_reply_skips_absent_keys_and_pointers_past_it() {
+    // [n 3, m 3]: key 0 (0x8218 absent), 0x8020 pointing past the body,
+    // 0x0210 = 16.
+    let body = [
+        3, 3, 0x00, 0x00, 0x82, 0x18, 0x80, 0x20, 0x00, 0xff, 0x02, 0x10, 0x00, 0x10,
+    ];
+    let s = parse_settings(&body).unwrap();
+    assert_eq!(s.all, BTreeMap::from([(0x0210, 16)]));
+    assert_eq!(s.sample_rate, None);
+    // A pointer into the header is past too.
+    let body = [1, 1, 0x80, 0x20, 0x00, 0x04];
+    assert!(parse_settings(&body).unwrap().all.is_empty());
+    // The pairs pass the body; an empty body; an empty table.
+    assert_eq!(parse_settings(&[2, 2, 0x02, 0x10, 0x00, 0x10]), None);
+    assert_eq!(parse_settings(&[]), None);
+    assert_eq!(parse_settings(&[0, 0]), Some(Settings::default()));
+}
+
+#[test]
+fn the_settings_request_is_the_count_then_the_keys() {
+    assert_eq!(
+        settings_request_body(&[0x8020, 0x0201]),
+        [0, 2, 0x80, 0x20, 0x02, 0x01]
+    );
+    assert_eq!(settings_request_body(&[]), [0, 0]);
+    let full = settings_request_body(&SETTING_KEYS);
+    assert_eq!(full.len(), 2 + 2 * SETTING_KEYS.len());
+    assert_eq!(full[..4], [0, 7, 0x80, 0x20]);
+}
+
+/// Records each call's start code and op, answering with a fixed reply.
+struct Asked(Vec<(u16, u16, Vec<u8>)>, u16, Vec<u8>);
+
+impl Call for Asked {
+    fn call(&mut self, op1: u16, body: &[u8]) -> Result<(u16, Vec<u8>), ReadError> {
+        self.call_as(crate::arc::client::START, op1, body)
+    }
+    fn call_as(&mut self, start: u16, op1: u16, body: &[u8]) -> Result<(u16, Vec<u8>), ReadError> {
+        self.0.push((start, op1, body.to_vec()));
+        Ok((self.1, self.2.clone()))
+    }
+}
+
+#[test]
+fn settings_asks_with_0x2809_and_types_its_errors() {
+    let mut c = Asked(
+        Vec::new(),
+        STATUS_OK,
+        unhex(CARD_SETTINGS)[HEADER_LEN..].to_vec(),
+    );
+    let s = settings(&mut c).unwrap();
+    assert_eq!(s.latency_active_ns, Some(250_000));
+    assert_eq!(
+        c.0,
+        [(SETTINGS_START, 0x1100, settings_request_body(&SETTING_KEYS))]
+    );
+    let mut refused = Asked(Vec::new(), 0x0022, Vec::new());
+    assert_eq!(
+        settings(&mut refused),
+        Err(ReadError::Refused {
+            op: 0x1100,
+            status: 0x0022
+        })
+    );
+    let mut cut = Asked(Vec::new(), STATUS_OK, vec![4, 4, 0x02]);
+    assert_eq!(settings(&mut cut), Err(ReadError::Malformed { op: 0x1100 }));
+    // Our own device keeps no settings table yet: an empty one.
+    let mut own = Own::new();
+    assert_eq!(settings(&mut own), Ok(Settings::default()));
+    // An exchange without call_as sends its usual start code; the reply
+    // still reads.
+    let mut fixed = Fixed(STATUS_OK, unhex(CARD_SETTINGS)[HEADER_LEN..].to_vec());
+    assert_eq!(settings(&mut fixed).unwrap().latency_min_ns, Some(150_000));
+}
+
+/// A card's settings for the latency-write tests: answers the keyed read
+/// (0x1100, start 0x2809) from its map in the hardware's layout, and a
+/// write (0x1101) with `write`'s status after `write` changed the map.
+struct Card {
+    values: BTreeMap<u16, u32>,
+    write: fn(&mut BTreeMap<u16, u32>, u32) -> u16,
+    asked: Vec<(u16, u16, Vec<u8>)>,
+}
+
+impl Card {
+    fn new(write: fn(&mut BTreeMap<u16, u32>, u32) -> u16) -> Self {
+        let values = [
+            (key::LATENCY_CONFIGURED, 1_000_000),
+            (key::LATENCY_ACTIVE, 1_000_000),
+            (0x0211, 32),
+            (0x0210, 32),
+        ]
+        .into_iter()
+        .collect();
+        Card {
+            values,
+            write,
+            asked: Vec::new(),
+        }
+    }
+
+    fn table(&self, body: &[u8]) -> Vec<u8> {
+        let n = usize::from(read_u16(body, 0).unwrap());
+        let keys: Vec<u16> = (0..n).map(|k| read_u16(body, 2 + 2 * k).unwrap()).collect();
+        let mut out = vec![n as u8, n as u8];
+        let mut values = Vec::new();
+        for k in keys {
+            match self.values.get(&k) {
+                Some(&v) if k & 0x8000 != 0 => {
+                    let at = (HEADER_LEN + 2 + 4 * n + values.len()) as u16;
+                    out.extend_from_slice(&k.to_be_bytes());
+                    out.extend_from_slice(&at.to_be_bytes());
+                    values.extend_from_slice(&v.to_be_bytes());
+                }
+                Some(&v) => {
+                    out.extend_from_slice(&k.to_be_bytes());
+                    out.extend_from_slice(&(v as u16).to_be_bytes());
+                }
+                None => {
+                    out.extend_from_slice(&[0, 0]);
+                    out.extend_from_slice(&k.to_be_bytes());
+                }
+            }
+        }
+        out.extend_from_slice(&values);
+        out
+    }
+}
+
+impl Call for Card {
+    fn call(&mut self, op1: u16, body: &[u8]) -> Result<(u16, Vec<u8>), ReadError> {
+        self.call_as(crate::arc::client::START, op1, body)
+    }
+    fn call_as(&mut self, start: u16, op1: u16, body: &[u8]) -> Result<(u16, Vec<u8>), ReadError> {
+        self.asked.push((start, op1, body.to_vec()));
+        match op1 {
+            0x1100 => Ok((STATUS_OK, self.table(body))),
+            0x1101 => {
+                let ns = u32::from_be_bytes(body[22..26].try_into().unwrap());
+                Ok(((self.write)(&mut self.values, ns), Vec::new()))
+            }
+            _ => Err(ReadError::Timeout { op: op1 }),
+        }
+    }
+}
+
+#[test]
+fn a_latency_write_is_netaudio_s_request() {
+    // netaudio 0.4.2's encoder (`build_command`, offline, nothing sent):
+    // 1 ms and 0.25 ms, the body after the 10-byte header.
+    assert_eq!(
+        hex(&latency_request_body(1_000_000)),
+        "05048205002002110004830100240310000483028306000f4240000f4240"
+    );
+    assert_eq!(
+        hex(&latency_request_body(250_000)),
+        "050482050020021100048301002403100004830283060003d0900003d090"
+    );
+}
+
+#[test]
+fn a_latency_write_is_confirmed_by_the_reads_before_and_after() {
+    let mut card = Card::new(|v, ns| {
+        v.insert(key::LATENCY_CONFIGURED, ns);
+        v.insert(key::LATENCY_ACTIVE, ns);
+        STATUS_OK
+    });
+    let after = set_latency(&mut card, 250_000).unwrap();
+    assert_eq!(after.latency_configured_ns, Some(250_000));
+    assert_eq!(after.all[&0x0211], 32);
+    let watched = settings_request_body(&WATCHED_KEYS);
+    assert_eq!(
+        card.asked,
+        [
+            (SETTINGS_START, 0x1100, watched.clone()),
+            (
+                crate::arc::client::START,
+                0x1101,
+                latency_request_body(250_000)
+            ),
+            (SETTINGS_START, 0x1100, watched),
+        ]
+    );
+}
+
+#[test]
+fn a_latency_write_that_changes_another_setting_is_reported() {
+    let mut card = Card::new(|v, ns| {
+        v.insert(key::LATENCY_CONFIGURED, ns);
+        v.insert(0x0211, 4);
+        STATUS_OK
+    });
+    assert_eq!(
+        set_latency(&mut card, 250_000),
+        Err(WriteError::OthersChanged(vec![(0x0211, Some(32), Some(4))]))
+    );
+}
+
+#[test]
+fn a_latency_write_the_device_ignores_or_refuses_is_not_confirmed() {
+    let mut ignored = Card::new(|_, _| STATUS_OK);
+    assert_eq!(
+        set_latency(&mut ignored, 250_000),
+        Err(WriteError::NotConfirmed {
+            asked: 250_000,
+            read: Some(1_000_000)
+        })
+    );
+    let mut refused = Card::new(|_, _| 0x0022);
+    assert_eq!(
+        set_latency(&mut refused, 250_000),
+        Err(WriteError::Read(ReadError::Refused {
+            op: 0x1101,
+            status: 0x0022
+        }))
+    );
+    // A key that appears after the write counts as a change too.
+    let before = Settings::default();
+    let mut after = Settings::default();
+    after.all.insert(0x0310, 4);
+    after.all.insert(key::LATENCY_ACTIVE, 1);
+    assert_eq!(
+        changed_besides_latency(&before, &after),
+        [(0x0310, None, Some(4))]
+    );
+}
+
+/// Our device as `respond` answers it (the ARC server's own path, the
+/// latency write included), its state file in a folder of its own.
+struct OwnDevice {
+    device: crate::device::Device,
+    tx: TxTable,
+    rx: Manager,
+    seq: u16,
+    _dir: tempfile::TempDir,
+}
+
+impl OwnDevice {
+    fn new() -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = DeviceConfig::from_toml(TEST_DEVICE).expect("the test device");
+        cfg.state_file = dir.path().join("state.toml");
+        let rx = Manager::new(&cfg, &cfg.name, Ipv4Addr::new(10, 0, 0, 10), [0; MAX_FLOWS]);
+        OwnDevice {
+            device: crate::device::Device::load(cfg).unwrap(),
+            tx: TxTable::new(7),
+            rx,
+            seq: 0,
+            _dir: dir,
+        }
+    }
+}
+
+impl Call for OwnDevice {
+    fn call(&mut self, op1: u16, body: &[u8]) -> Result<(u16, Vec<u8>), ReadError> {
+        self.call_as(START, op1, body)
+    }
+    fn call_as(&mut self, start: u16, op1: u16, body: &[u8]) -> Result<(u16, Vec<u8>), ReadError> {
+        self.seq = self.seq.wrapping_add(1);
+        let req = request(start, self.seq, op1, 0, body);
+        let live = Live {
+            tx: &self.tx,
+            rx: &self.rx,
+        };
+        let bytes = match crate::arc::respond(&mut self.device, &live, &req) {
+            ArcOutcome::Reply(b) | ArcOutcome::Changed(b, _) => b,
+            _ => return Err(ReadError::Timeout { op: op1 }),
+        };
+        let (h, body) = Header::parse(&bytes).expect("a reply parses");
+        Ok((h.op2, body.to_vec()))
+    }
+}
+
+#[test]
+fn a_latency_write_to_our_own_device_is_confirmed_end_to_end() {
+    // dasio #2 (owner, 30.10): what Dante Controller sets is settable
+    // on ours. Our device takes netaudio's write, and the reads before and
+    // after show only the latency changed.
+    let mut own = OwnDevice::new();
+    let after = set_latency(&mut own, 2_000_000).unwrap();
+    assert_eq!(after.latency_configured_ns, Some(2_000_000));
+    assert_eq!(after.latency_active_ns, Some(2_000_000));
+    assert_eq!(own.device.cfg.latency_ns, 2_000_000);
+    // One the config's rules refuse: refused, nothing changed.
+    assert_eq!(
+        set_latency(&mut own, 1_000),
+        Err(WriteError::Read(ReadError::Refused {
+            op: 0x1101,
+            status: crate::wire::STATUS_ERROR
+        }))
+    );
+    assert_eq!(own.device.cfg.latency_ns, 2_000_000);
+}

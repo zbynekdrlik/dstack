@@ -9,9 +9,9 @@ fuzz_target!(|data: &[u8]| {
     let Some((id, reply)) = data.split_first_chunk::<4>() else {
         return;
     };
-    let _ = dante_stack::clock::dsyx::parse(reply, u32::from_be_bytes(*id));
+    let _ = dstack::clock::dsyx::parse(reply, u32::from_be_bytes(*id));
     if let Some(own) = reply.get(4..8) {
         let own = u32::from_be_bytes([own[0], own[1], own[2], own[3]]);
-        let _ = dante_stack::clock::dsyx::parse(reply, own);
+        let _ = dstack::clock::dsyx::parse(reply, own);
     }
 });

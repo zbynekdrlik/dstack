@@ -1,6 +1,6 @@
 ---
 paths:
-  - "crates/dante-stack/tests/**"
+  - "crates/dstack/tests/**"
   - "crates/**/tests.rs"
   - "crates/**/tests/**"
   - ".config/nextest.toml"
@@ -10,7 +10,7 @@ paths:
 # Tests in dstack
 
 - **Whole-device tests** (`tests/system_clock.rs`): the host refuses loopback (no MAC, unreachable for Dante), so run the device on the box's routed IPv4 (`UdpSocket::connect` to 192.0.2.1:9, then `local_addr`; sends nothing). Each test binds the Dante ports on that address: take the file's `ONE_DEVICE` lock.
-- **Shared dev box:** dcontroller (another account on dev1) runs `dante-stack-dev` in its own E2E on the same routed address and Dante ports. A whole-device test that fails at once on its start (bind) while one of theirs runs is that collision. Rerun it alone and check `ps -eo user,args | grep dante-stack-dev` before calling it ours (1.11.2026: `tests/embed.rs` failed once in 0.01 s, passed 7 times after).
+- **Shared dev box:** dcontroller (another account on dev1) runs `dstack-dev` in its own E2E on the same routed address and Dante ports. A whole-device test that fails at once on its start (bind) while one of theirs runs is that collision. Rerun it alone and check `ps -eo user,args | grep dstack-dev` before calling it ours (1.11.2026: `tests/embed.rs` failed once in 0.01 s, passed 7 times after).
 - **Timing on CI and dev boxes:** a normal-priority TX thread wakes over 1 ms late now and then; at the test config's 1 ms latency that restarts the TX schedule (a 2 to 5 ms RX dropout). Whole-path tests use a 10 ms latency, take their counts after the start (0.1 s of RX read), and require no restart and every packet within the latency; real-time lateness is the hardware gate's, never a shared runner's.
 - **Check the Windows build before a push:** `cargo clippy --target x86_64-pc-windows-gnu --workspace --all-targets --locked -- -D warnings` (the target is on dev1 since 2.11.2026). An unused import under `cfg(unix)` costs a 20-minute CI round otherwise (0.4.34 took three).
 - **Windows CI runs every test:** paths must be absolute on Windows too (`std::env::temp_dir()`), not `/run/...`.

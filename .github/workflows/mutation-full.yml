@@ -39,7 +39,7 @@ jobs:
           set -uo pipefail
           cargo mutants --baseline=skip --timeout 60 --jobs 2 \
             --shard "${{ matrix.shard }}/${{ strategy.job-total }}" \
-            --package dante-stack --package dante-audio-io
+            --package dstack --package dstack-audio-io
           code=$?
           case "$code" in
             0|2|3) echo "cargo-mutants finished (exit $code)" ;;

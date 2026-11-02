@@ -1,5 +1,5 @@
 [package]
-name = "dante-stack-fuzz"
+name = "dstack-fuzz"
 version = "0.0.0"
 edition = "2024"
 license = "GPL-3.0-or-later"
@@ -15,7 +15,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-dante-stack = { path = "../crates/dante-stack" }
+dstack = { path = "../crates/dstack" }
 
 [[bin]]
 name = "arc_server"

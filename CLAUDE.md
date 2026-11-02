@@ -2,9 +2,12 @@
 
 The one Dante expert project. All Dante code lives here: discovery, ARC, CMC, flows, media TX/RX, clock client, health. Applications depend on a tagged release by Cargo git tag; nobody keeps a copy or a local patch.
 
-Repo `zbynekdrlik/dstack` (renamed from dante-stack on 31.10.2026). The crates keep their names (`dante-stack`, `dante-audio-io`, binary `dante-stack-dev`): consumers write `git = "https://github.com/zbynekdrlik/dstack"`.
+Repo `zbynekdrlik/dstack` (renamed from dante-stack on 31.10.2026). Crates (v0.5.0, #68): `dstack` (the stack), `dstack-audio-io` (the engine-agnostic audio API), binary `dstack-dev`; consumers write `git = "https://github.com/zbynekdrlik/dstack"`. `dlink` is the part an application embeds (#68).
 
-Start from `docs/HANDOVER.md`, then `docs/design/2026-10-30-shared-dante-stack.md`.
+- Names (owner 2.11.2026, #68): no "dante" in our project, crate, binary or thread names (dstack, dasio, dlink). The protocol stays "Dante" in docs and comments.
+- dlink needs no low latency (owner 2.11.2026): about 10 ms is fine, and it never asks an application for real-time setup (rtprio, SCHED_FIFO, special timers). Very low latency is only iemmixer (`low_latency`, gen3) and dasio (ASIO).
+
+Start from `docs/HANDOVER.md`, then `docs/design/2026-10-30-shared-dstack.md`.
 
 - Your job: own every Dante problem and make the stack robust, so no project solves a Dante problem twice.
 - A Dante bug reported by a consumer is fixed here, with a catalog test, and released; the consumer only moves the version.
