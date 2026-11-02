@@ -139,6 +139,52 @@ fn not_locked_is_not_ready() {
     assert_eq!(t.k(), Some(K));
 }
 
+/// Catalog (dstack #1, iem-mixer to FOH, 1.11.2026 22:44 and 2.11 01:32
+/// CET: thousands of late packets, peak 479 µs): dantesync v1.20 reported
+/// [41] locked at a phase error of about −720 µs after a gen3 reboot, and the
+/// stack, which goes ready on [41] alone, stamped its TX off by that until
+/// the slew ended. dsync v1.23.0 (dsync#146) holds [41] at 0 until |e| ≤
+/// 50 µs for 1.5 s; byte 62's `settled` comes earlier and says nothing about
+/// phase. Replayed as iemmixer measured v1.23.0's cold start (2.11 08:34
+/// CET: engaged at 101 s with e −720 µs, [41] = 1 at 155 s, FOH late 0):
+/// 155 polls settled but unlocked, then locked. The clock is ready only at
+/// the lock, on that poll's k, and later polls on the same time hold it.
+#[test]
+fn a_boot_with_a_large_phase_error_is_ready_only_at_the_lock() {
+    let mut t = Tracker::new();
+    let stats = ClockStats::default();
+    for poll in 0..155 {
+        let mut r = reading(steady(D));
+        r.locked = false;
+        // Settled (the servo's first accepted Sync) long before the phase.
+        r.settled = poll >= 30;
+        r.mode = 1;
+        let ev = t.feed(sample(&r, D + PTP, MONO));
+        stats.record(ev);
+        assert_eq!(ev, Event::NotReady, "poll {poll}");
+    }
+    assert_eq!(t.k(), None);
+    // The lock: ready once, on this poll's k.
+    let ev = t.feed(sample(&reading(steady(D)), D + PTP, MONO));
+    stats.record(ev);
+    assert_eq!(ev, Event::Ready { k_ns: K });
+    // A minute on the same time: held, never re-anchored.
+    for s in 1..=60i64 {
+        let ev = t.feed(sample(
+            &reading(steady(D)),
+            D + PTP + s * 1_000_000_000,
+            MONO + s * 1_000_000_000,
+        ));
+        stats.record(ev);
+        assert_eq!(ev, Event::Held, "second {s}");
+    }
+    let counts = stats.counts();
+    assert_eq!(
+        (counts.polls, counts.re_anchors, counts.holdovers),
+        (216, 0, 0)
+    );
+}
+
 #[test]
 fn one_odd_poll_is_held_three_re_anchor() {
     let mut t = Tracker::new();
