@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.13 (2026-11-02)
+
+- Fix (dasio#1, the FOH PC's send failures every ~96 s): each TX flow socket asks for a 1 MiB send buffer (`media::tx::SEND_BUFFER_BYTES`). Before, it kept the OS default.
+  - The cause on that PC: a 16–32 ms NIC receive DPC holds the send completions. The default buffer filled within it, and every send failed with WSAENOBUFS.
+  - A packet held through the stall goes out late. Within the receiver's latency it still plays.
+  - The TX start logs "TX flow sockets' send buffer" with what the OS gave. `TxShared::send_buffer` is new.
+
 ## 0.5.12 (2026-11-02)
 
 - Fix (intercom's report on 0.5.11): declared RX subscriptions are kept out of the state file.
