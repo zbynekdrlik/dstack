@@ -277,9 +277,9 @@ const STOP_POLL: Duration = Duration::from_millis(200);
 /// latency history, dstack #16): one socket on the heartbeat group, and
 /// each parsed heartbeat with its sender's address on a channel, so a
 /// recorder keeps one listener per network instead of a socket per device
-/// and window. [`Listener::stop`] (or dropping it) ends the thread; the
-/// channel then closes. The thread also ends when the receiver is dropped,
-/// or on a socket error, which it logs.
+/// and window. Dropping it stops the thread (within about 0.2 s) and
+/// waits for it; the channel then closes. The thread also ends when the
+/// receiver is dropped, or on a socket error, which it logs.
 #[derive(Debug)]
 pub struct Listener {
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -332,23 +332,14 @@ impl Listener {
             rx,
         ))
     }
-
-    /// Stops the thread and waits for it (at most about 0.2 s).
-    pub fn stop(mut self) {
-        self.halt();
-    }
-
-    fn halt(&mut self) {
-        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
-        if let Some(t) = self.thread.take() {
-            let _ = t.join();
-        }
-    }
 }
 
 impl Drop for Listener {
     fn drop(&mut self) {
-        self.halt();
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
     }
 }
 

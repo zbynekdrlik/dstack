@@ -36,6 +36,9 @@ exclude_re = [
   # The heartbeat listen's socket loop: tests/system_clock.rs reads our
   # running device with it; its parse and gather are unit tested.
   "latency.rs.*listen",
+  # The always-on listener's socket-error arm: no test can make a joined
+  # UDP socket fail; `timed_out`, which picks the arm, is unit tested.
+  "latency.rs.*match guard timed_out\\(&e\\) with true in Listener::start",
   # The UDP exchange's start code: tests/system_clock.rs reads our running
   # device's settings through it.
   "client.rs.*call_as",

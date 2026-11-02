@@ -309,8 +309,9 @@ fn the_listener_hands_on_every_heartbeat_with_its_sender_until_stopped() {
     let mut junk = late_beat(id, 0);
     junk[0] = 0;
     tx.send_to(&junk, group).expect("sent");
-    // A read times out between the beats (the thread polls its stop every
-    // 0.2 s); the listener keeps going on the same socket.
+    // A read may time out between the beats (the thread polls its stop
+    // every 0.2 s; other devices' heartbeats can fill the gap); the
+    // listener keeps going on the same socket.
     tx.send_to(&late_beat(id, 5), group).expect("sent");
     let (from, beat) = next_from(&rx, id, Duration::from_secs(5));
     assert_eq!(
@@ -322,7 +323,7 @@ fn the_listener_hands_on_every_heartbeat_with_its_sender_until_stopped() {
     let (from, beat) = next_from(&rx, id, Duration::from_secs(5));
     assert_eq!((from, beat.late), (ip, Some(vec![9, 10])));
     let t = Instant::now();
-    listener.stop();
+    drop(listener);
     assert!(
         t.elapsed() < Duration::from_secs(1),
         "the stop took {:?}",
@@ -332,10 +333,11 @@ fn the_listener_hands_on_every_heartbeat_with_its_sender_until_stopped() {
 }
 
 #[test]
-fn dropping_the_listener_closes_its_channel() {
-    let (listener, rx) = Listener::start(routed_ipv4()).expect("the heartbeat group joined");
-    drop(listener);
-    closes(&rx);
+fn only_a_read_that_timed_out_is_a_timeout() {
+    use std::io::{Error, ErrorKind};
+    assert!(timed_out(&Error::from(ErrorKind::WouldBlock)));
+    assert!(timed_out(&Error::from(ErrorKind::TimedOut)));
+    assert!(!timed_out(&Error::from(ErrorKind::ConnectionReset)));
 }
 
 #[test]
@@ -355,5 +357,4 @@ fn the_listener_stops_when_its_receiver_is_gone() {
         tx.send_to(&late_beat(unique_id(), 1), group).expect("sent");
         std::thread::sleep(Duration::from_millis(20));
     }
-    listener.stop();
 }
