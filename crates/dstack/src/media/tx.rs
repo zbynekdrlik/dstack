@@ -123,6 +123,14 @@ pub const DSCP_EF: u8 = 46;
 /// the highest a socket takes without `CAP_NET_ADMIN`.
 pub const SOCKET_PRIORITY: u32 = 6;
 
+/// The send buffer asked for each TX flow socket (Linux gives at most its
+/// `wmem_max`). It rides out a stall of the NIC's send completions: on the
+/// FOH PC a 16–32 ms receive DPC holds them every ~96 s, and with the
+/// default buffer every send failed meanwhile (WSAENOBUFS, dasio#1). A
+/// packet held through the stall goes out late, which the receiver plays
+/// if it is still within its latency, instead of failing here.
+pub const SEND_BUFFER_BYTES: usize = 1 << 20;
+
 /// Marks a TX flow socket: DSCP EF and `SO_PRIORITY` [`SOCKET_PRIORITY`]
 /// on Linux. Windows sets a packet's DSCP only through a QoS policy
 /// (`IP_TOS` from a program is ignored by default), so there it is the
@@ -138,6 +146,15 @@ fn mark(s: &UdpSocket) -> io::Result<()> {
 #[cfg(not(target_os = "linux"))]
 fn mark(_: &UdpSocket) -> io::Result<()> {
     Ok(())
+}
+
+/// Asks for a send buffer of `bytes` on `s`; returns what the OS gave
+/// (Linux doubles what it grants, up to its `wmem_max`; 0 when it cannot
+/// say). A refusal leaves the default.
+fn set_send_buffer(s: &UdpSocket, bytes: usize) -> usize {
+    let sock = socket2::SockRef::from(s);
+    let _refused = sock.set_send_buffer_size(bytes);
+    sock.send_buffer_size().unwrap_or(0)
 }
 
 /// The tries of a seqlocked read before it keeps the last copy.
@@ -588,6 +605,8 @@ pub struct TxShared {
     plans: [Cell<4>; MAX_FLOWS],
     sources: Box<[Cell<3>]>,
     sockets: Box<[UdpSocket]>,
+    /// The send buffer the OS gave the flow sockets, bytes (0: unknown).
+    send_buffer: usize,
     /// Each slot's socket's port: a direct packet's source port.
     ports: [u16; MAX_FLOWS],
     /// The device's address: a direct packet's source.
@@ -638,12 +657,14 @@ impl TxShared {
                 ),
             ));
         }
+        let mut send_buffer = 0;
         let sockets = (0..MAX_FLOWS)
             .map(|_| {
                 let s = UdpSocket::bind(SocketAddrV4::new(ip, 0))?;
                 s.set_nonblocking(true)?;
                 crate::winsock::no_connreset(&s)?;
                 mark(&s)?;
+                send_buffer = set_send_buffer(&s, SEND_BUFFER_BYTES);
                 Ok(s)
             })
             .collect::<io::Result<Box<[UdpSocket]>>>()?;
@@ -652,6 +673,7 @@ impl TxShared {
             *port = s.local_addr()?.port();
         }
         Ok(TxShared {
+            send_buffer,
             ports,
             ip,
             direct: bypass::open_for(ip),
@@ -846,6 +868,11 @@ impl TxShared {
     /// [`EVENTS_EVERY_NS`]).
     pub fn stop(&self) {
         self.stop.store(true, Ordering::Release);
+    }
+
+    /// The send buffer the OS gave the flow sockets, bytes (0: unknown).
+    pub fn send_buffer(&self) -> usize {
+        self.send_buffer
     }
 
     pub fn stopping(&self) -> bool {
@@ -1308,6 +1335,11 @@ pub(crate) fn take_priority(thread: &str, priority: i32) {
 fn run(clock: &dyn PtpClock, shared: Arc<TxShared>) {
     take_priority("TX thread", TX_PRIORITY);
     place("TX thread", shared.cfg.io_cpu);
+    info!(
+        bytes = shared.send_buffer(),
+        asked = SEND_BUFFER_BYTES,
+        "TX flow sockets' send buffer"
+    );
     // Held while the thread runs: deep idle states delay every packet
     // after its send (`super::qos`).
     #[cfg(target_os = "linux")]

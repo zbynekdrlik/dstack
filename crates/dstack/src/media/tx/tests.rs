@@ -1807,3 +1807,31 @@ fn the_send_watch_logs_a_flow_s_failed_sends_with_the_os_error() {
         "quiet second"
     );
 }
+
+/// dasio#1: a 16–32 ms stall of the NIC's send completions filled the
+/// default send buffers and every send failed. Each flow socket asks for
+/// [`SEND_BUFFER_BYTES`]; the kernel grants as far as `wmem_max`.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_send_buffer_is_raised_as_far_as_the_kernel_allows() {
+    let max: usize = std::fs::read_to_string("/proc/sys/net/core/wmem_max")
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    // The kernel doubles what it grants (its bookkeeping), up to wmem_max.
+    assert_eq!(
+        shared_with(Vec::new()).send_buffer(),
+        2 * SEND_BUFFER_BYTES.min(max)
+    );
+    // It covers more than a 50 ms stall of the widest flow: 8 channels of
+    // 32 bits at 192 kHz.
+    const _: () = assert!(SEND_BUFFER_BYTES > 192_000 * 8 * 4 / 20);
+}
+
+/// Windows (the FOH PC of dasio#1) takes the size as asked.
+#[cfg(windows)]
+#[test]
+fn the_send_buffer_is_what_was_asked_on_windows() {
+    assert_eq!(shared_with(Vec::new()).send_buffer(), SEND_BUFFER_BYTES);
+}
