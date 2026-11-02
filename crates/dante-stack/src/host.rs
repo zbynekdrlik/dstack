@@ -531,7 +531,9 @@ impl Prepared {
         Arc::clone(&self.media)
     }
 
-    /// The device's config (the engine maps its channels against it).
+    /// The device's config as it runs (the engine maps its channels
+    /// against it): the state file's values that hold over the config's
+    /// applied, such as a latency Dante Controller set.
     pub fn config(&self) -> &DeviceConfig {
         &self.device.cfg
     }

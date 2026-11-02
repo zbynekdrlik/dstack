@@ -1,5 +1,5 @@
-crates/dante-stack/src/device.rs:515:9: replace Device::load -> io::Result<Self> with Ok(Default::default())
 crates/dante-stack/src/device.rs:219:9: replace DeviceConfig::with_latency -> Result<DeviceConfig, Vec<String>> with Ok(Default::default())
 crates/dante-stack/src/arc.rs:397:5: replace respond -> ArcOutcome with Default::default()
 crates/dante-stack/src/device.rs:582:9: replace DeviceState::from_config -> Self with Default::default()
+crates/dante-stack/src/device.rs:515:9: replace Device::load -> io::Result<Self> with Ok(Default::default())
 crates/dante-stack/src/arc.rs:428:5: replace set_latency -> ArcOutcome with Default::default()

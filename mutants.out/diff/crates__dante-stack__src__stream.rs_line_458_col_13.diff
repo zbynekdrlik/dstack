@@ -1,0 +1,21 @@
+--- crates/dante-stack/src/stream.rs
++++ replace && with || in Pump<P>::media
+@@ -450,17 +450,17 @@
+     /// step (and the first after free pacing) bootstraps, a new epoch
+     /// re-bootstraps (counted); either calls the processor's
+     /// `discontinuity` once before the next block.
+     pub fn media(&mut self, now: u64, epoch: u32) -> u64 {
+         self.stats.media.store(true, Ordering::Relaxed);
+         // The device latency the RX delays are planned against moved (Dante
+         // Controller set it): play at it, the schedule started again.
+         if let Some(playout) = self.rx.playout()
+-            && playout != self.timing.playout
++            || /* ~ changed by cargo-mutants ~ */ playout != self.timing.playout
+         {
+             self.timing.playout = playout;
+             self.stats.retimed(self.timing);
+             if self.blocks.take().is_some() {
+                 self.stats.rebootstrapped(0);
+             }
+         }
+         let mut blocks = match self.blocks {

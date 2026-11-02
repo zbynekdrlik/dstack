@@ -1,10 +1,15 @@
 # Changelog
 
+## 0.4.37 (2026-11-02)
+
+- Fix: an embedded app's pump plays at the device latency Dante Controller set. In v0.4.36 it kept the config's latency, both after a restart (its `Timing` was taken before the state file was read) and live, so its playout sat off the RX's and it read the RX rings at the wrong point. The pump now takes its timing from the device as it runs (`host::Prepared::config`) and follows a live change: the manager publishes the device latency with the RX delays (`RxShared::playout`), and the pump re-bootstraps once at the new playout, with a discontinuity, as at a new epoch.
+- `stream::PumpView` shows the pump's current D and P after such a change.
+- Tests: the two device tests in `tests/embed.rs` take one lock, because they bind the same ports.
+
 ## 0.4.36 (2026-11-02)
 
 - New: our device takes a latency write from Dante Controller or netaudio (ARC 0x1101, `arc::control::set_latency`'s form), as hardware does (dante-asio #2, owner requirement). A latency the config's own rules allow (`DeviceConfig::with_latency`) is answered OK, saved in the state file and taken live. The manager plans every RX flow with it, our TX channels advertise it (unless the config sets `tx_latency_ns`) and the TX thread's lag bound and late count follow it. The mDNS records are announced again with it, and the settings read shows it configured and in effect. A latency the rules refuse is refused; a 0x1101 in another form stays unanswered, as before.
 - The Controller's latency survives a restart while the config keeps the latency it was set against; a config that says another latency since wins and the state file drops the Controller's value (`DeviceState::latency_for`), as a Controller rename does.
-- Not yet live: an embedded app's pump keeps the `stream::Timing` it started with until it restarts.
 - Port: `arc::Change` gains `latency`, `DeviceState` gains `latency_ns` and `config_latency_ns` (struct literals need them), `arc::Flows` gains `set_latency`. New: `subscribe::Manager::set_latency`/`latency_ns`, `TxShared::set_device_latency`/`advertised_latency_ns`, `arc::control::parse_latency_body`, `DeviceState::set_latency`.
 
 ## 0.4.35 (2026-11-02)

@@ -1,0 +1,31 @@
+--- crates/dante-stack/src/stream.rs
++++ replace PumpStats::view -> PumpView with Default::default()
+@@ -359,27 +359,17 @@
+     /// The stream histograms since the start: the interval between two
+     /// blocks' starts and each block's own time.
+     pub fn histograms(&self) -> HistSnapshot {
+         self.hists.snapshot()
+     }
+ 
+     /// The numbers the device's control socket shows.
+     pub fn view(&self) -> PumpView {
+-        PumpView {
+-            media: self.media.load(Ordering::Relaxed),
+-            offset: self.offset.load(Ordering::Relaxed),
+-            playout: self.playout.load(Ordering::Relaxed),
+-            blocks: self.blocks.load(Ordering::Relaxed),
+-            late: self.late.load(Ordering::Relaxed),
+-            missed: self.missed.load(Ordering::Relaxed),
+-            overruns: self.overruns.load(Ordering::Relaxed),
+-            rebootstraps: self.rebootstraps.load(Ordering::Relaxed),
+-            max_process_us: self.max_process_ns.load(Ordering::Relaxed) / 1_000,
+-        }
++        Default::default() /* ~ changed by cargo-mutants ~ */
+     }
+ }
+ 
+ /// A duration in ns, saturating.
+ fn nanos(d: Duration) -> u64 {
+     u64::try_from(d.as_nanos()).unwrap_or(u64::MAX)
+ }
+ 

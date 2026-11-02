@@ -1,0 +1,805 @@
+
+*** crates/dante-stack/src/stream.rs:454:9: replace Pump<P>::media -> u64 with 1
+
+*** mutation diff:
+--- crates/dante-stack/src/stream.rs
++++ replace Pump<P>::media -> u64 with 1
+@@ -446,58 +446,17 @@
+     }
+ 
+     /// Every block due at media sample time `now` with the clock at
+     /// `epoch`; returns the media sample time to wake at. The first media
+     /// step (and the first after free pacing) bootstraps, a new epoch
+     /// re-bootstraps (counted); either calls the processor's
+     /// `discontinuity` once before the next block.
+     pub fn media(&mut self, now: u64, epoch: u32) -> u64 {
+-        self.stats.media.store(true, Ordering::Relaxed);
+-        // The device latency the RX delays are planned against moved (Dante
+-        // Controller set it): play at it, the schedule started again.
+-        if let Some(playout) = self.rx.playout()
+-            && playout != self.timing.playout
+-        {
+-            self.timing.playout = playout;
+-            self.stats.retimed(self.timing);
+-            if self.blocks.take().is_some() {
+-                self.stats.rebootstrapped(0);
+-            }
+-        }
+-        let mut blocks = match self.blocks {
+-            Some(mut b) if self.epoch != Some(epoch) => {
+-                self.stats.rebootstrapped(b.rebootstrap(now));
+-                self.discontinuity = true;
+-                b
+-            }
+-            Some(b) => b,
+-            None => {
+-                self.discontinuity = true;
+-                Blocks::bootstrap(now, self.timing)
+-            }
+-        };
+-        self.epoch = Some(epoch);
+-        let wake = loop {
+-            match blocks.next(now) {
+-                Due::Run { start, late } => {
+-                    if late {
+-                        self.stats.late.fetch_add(1, Ordering::Relaxed);
+-                    }
+-                    self.block(start);
+-                }
+-                Due::Wait { until } => break until,
+-                Due::Rebootstrap { skipped } => {
+-                    self.stats.rebootstrapped(skipped);
+-                    self.discontinuity = true;
+-                }
+-            }
+-        };
+-        self.blocks = Some(blocks);
+-        wake
++        1 /* ~ changed by cargo-mutants ~ */
+     }
+ 
+     /// One block while the clock is not ready: silent inputs, the RX rings
+     /// not read, the outputs dropped (nothing reaches the engine rings);
+     /// the next media step bootstraps.
+     pub fn free(&mut self) {
+         self.stats.media.store(false, Ordering::Relaxed);
+         self.blocks = None;
+
+
+*** /opt/rust/rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo nextest run --no-run --cargo-profile=mutants --verbose --package=dante-stack@0.4.36
+   Compiling dante-stack v0.4.36 (/tmp/cargo-mutants-dstack-3UBQwi.tmp/crates/dante-stack)
+warning: unused variable: `now`
+   --> crates/dante-stack/src/stream.rs:453:29
+    |
+453 |     pub fn media(&mut self, now: u64, epoch: u32) -> u64 {
+    |                             ^^^ help: if this is intentional, prefix it with an underscore: `_now`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `epoch`
+   --> crates/dante-stack/src/stream.rs:453:39
+    |
+453 |     pub fn media(&mut self, now: u64, epoch: u32) -> u64 {
+    |                                       ^^^^^ help: if this is intentional, prefix it with an underscore: `_epoch`
+
+warning: methods `retimed` and `rebootstrapped` are never used
+   --> crates/dante-stack/src/stream.rs:314:8
+    |
+275 | impl PumpStats {
+    | -------------- methods in this implementation
+...
+314 |     fn retimed(&self, timing: Timing) {
+    |        ^^^^^^^
+...
+319 |     fn rebootstrapped(&self, skipped: u64) {
+    |        ^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `epoch` is never read
+   --> crates/dante-stack/src/stream.rs:405:5
+    |
+388 | pub struct Pump<P: Process> {
+    |            ---- field in this struct
+...
+405 |     epoch: Option<u32>,
+    |     ^^^^^
+
+warning: `dante-stack` (lib) generated 4 warnings (run `cargo fix --lib -p dante-stack` to apply 2 suggestions)
+warning: method `retimed` is never used
+   --> crates/dante-stack/src/stream.rs:314:8
+    |
+275 | impl PumpStats {
+    | -------------- method in this implementation
+...
+314 |     fn retimed(&self, timing: Timing) {
+    |        ^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `dante-stack` (lib test) generated 4 warnings (3 duplicates)
+    Finished `mutants` profile [unoptimized] target(s) in 2.91s
+
+*** result: Success
+
+*** /opt/rust/rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo nextest run --cargo-profile=mutants --verbose --package=dante-stack@0.4.36 --lib --test hot_path
+warning: unused variable: `now`
+   --> crates/dante-stack/src/stream.rs:453:29
+    |
+453 |     pub fn media(&mut self, now: u64, epoch: u32) -> u64 {
+    |                             ^^^ help: if this is intentional, prefix it with an underscore: `_now`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `epoch`
+   --> crates/dante-stack/src/stream.rs:453:39
+    |
+453 |     pub fn media(&mut self, now: u64, epoch: u32) -> u64 {
+    |                                       ^^^^^ help: if this is intentional, prefix it with an underscore: `_epoch`
+
+warning: methods `retimed` and `rebootstrapped` are never used
+   --> crates/dante-stack/src/stream.rs:314:8
+    |
+275 | impl PumpStats {
+    | -------------- methods in this implementation
+...
+314 |     fn retimed(&self, timing: Timing) {
+    |        ^^^^^^^
+...
+319 |     fn rebootstrapped(&self, skipped: u64) {
+    |        ^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `epoch` is never read
+   --> crates/dante-stack/src/stream.rs:405:5
+    |
+388 | pub struct Pump<P: Process> {
+    |            ---- field in this struct
+...
+405 |     epoch: Option<u32>,
+    |     ^^^^^
+
+warning: method `retimed` is never used
+   --> crates/dante-stack/src/stream.rs:314:8
+    |
+275 | impl PumpStats {
+    | -------------- method in this implementation
+...
+314 |     fn retimed(&self, timing: Timing) {
+    |        ^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `dante-stack` (lib) generated 4 warnings (run `cargo fix --lib -p dante-stack` to apply 2 suggestions)
+warning: `dante-stack` (lib test) generated 4 warnings (3 duplicates)
+    Finished `mutants` profile [unoptimized] target(s) in 0.04s
+────────────
+ Nextest run ID fcf5051a-38e5-4f75-8af4-3259e6c4f0ae with nextest profile: default
+    Starting 757 tests across 2 binaries
+       START [         ] (  1/757) dante-stack announce::responder::tests::an_instance_and_a_host_query_get_exactly_what_they_ask
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact announce::responder::tests::an_instance_and_a_host_query_get_exactly_what_they_ask --nocapture
+       START [         ] (  1/757) dante-stack announce::responder::tests::a_query_for_nothing_of_ours_or_a_response_gets_no_reply
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact announce::responder::tests::a_query_for_nothing_of_ours_or_a_response_gets_no_reply --nocapture
+       START [         ] (  1/757) dante-stack announce::responder::tests::a_query_from_5353_is_answered_to_the_group_a_legacy_one_to_its_sender
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact announce::responder::tests::a_query_from_5353_is_answered_to_the_group_a_legacy_one_to_its_sender --nocapture
+       START [         ] (  1/757) dante-stack announce::responder::tests::a_service_type_query_gets_its_ptr_with_srv_txt_and_a_along
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact announce::responder::tests::a_service_type_query_gets_its_ptr_with_srv_txt_and_a_along --nocapture
+       START [         ] (  1/757) dante-stack announce::tests::a_failed_announcement_is_tried_again_and_a_bad_record_sends_nothing
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact announce::tests::a_failed_announcement_is_tried_again_and_a_bad_record_sends_nothing --nocapture
+       START [         ] (  1/757) dante-stack announce::responder::tests::the_responder_answers_from_the_published_records_and_stops_when_dropped
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact announce::responder::tests::the_responder_answers_from_the_published_records_and_stops_when_dropped --nocapture
+       START [         ] (  1/757) dante-stack announce::tests::a_queue_that_stays_full_ends_the_announcement_after_its_tries
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact announce::tests::a_queue_that_stays_full_ends_the_announcement_after_its_tries --nocapture
+       START [         ] (  1/757) dante-stack announce::tests::a_full_daemon_queue_delays_the_announcement_and_never_ends_it
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact announce::tests::a_full_daemon_queue_delays_the_announcement_and_never_ends_it --nocapture
+       START [         ] (  1/757) dante-stack announce::tests::a_record_becomes_the_service_info_mdns_sd_sends
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact announce::tests::a_record_becomes_the_service_info_mdns_sd_sends --nocapture
+       START [         ] (  1/757) dante-stack announce::tests::a_real_daemon_takes_more_records_than_its_queue_holds
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact announce::tests::a_real_daemon_takes_more_records_than_its_queue_holds --nocapture
+       START [         ] (  1/757) dante-stack announce::tests::an_announcer_withdraws_the_old_records_first_and_repeats_nothing
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact announce::tests::an_announcer_withdraws_the_old_records_first_and_repeats_nothing --nocapture
+       START [         ] (  1/757) dante-stack announce::tests::a_rename_changes_the_chan_records
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact announce::tests::a_rename_changes_the_chan_records --nocapture
+       START [         ] (  1/757) dante-stack announce::tests::hex_is_lower_case_two_digits_a_byte
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact announce::tests::hex_is_lower_case_two_digits_a_byte --nocapture
+       START [         ] (  1/757) dante-stack announce::tests::the_announcer_publishes_the_set_it_registered
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact announce::tests::the_announcer_publishes_the_set_it_registered --nocapture
+       START [         ] (  1/757) dante-stack announce::tests::every_wait_for_a_full_queue_is_counted
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact announce::tests::every_wait_for_a_full_queue_is_counted --nocapture
+       START [         ] (  1/757) dante-stack announce::tests::one_chan_record_per_tx_channel_named_channel_at_device
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact announce::tests::one_chan_record_per_tx_channel_named_channel_at_device --nocapture
+        PASS [   0.005s] (  1/757) dante-stack announce::responder::tests::a_service_type_query_gets_its_ptr_with_srv_txt_and_a_along
+       START [         ] (  2/757) dante-stack announce::tests::the_records_carry_the_config_s_ports_and_process_id
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact announce::tests::the_records_carry_the_config_s_ports_and_process_id --nocapture
+        PASS [   0.005s] (  2/757) dante-stack announce::responder::tests::a_query_from_5353_is_answered_to_the_group_a_legacy_one_to_its_sender
+       START [         ] (  3/757) dante-stack announce::tests::the_txt_records_carry_the_rate_encoding_and_latency
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact announce::tests::the_txt_records_carry_the_rate_encoding_and_latency --nocapture
+        PASS [   0.006s] (  3/757) dante-stack announce::responder::tests::a_query_for_nothing_of_ours_or_a_response_gets_no_reply
+       START [         ] (  4/757) dante-stack arc::client::tests::a_channel_whose_descriptor_does_not_read_is_counted_not_listed
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::client::tests::a_channel_whose_descriptor_does_not_read_is_counted_not_listed --nocapture
+        PASS [   0.006s] (  4/757) dante-stack announce::responder::tests::an_instance_and_a_host_query_get_exactly_what_they_ask
+       START [         ] (  5/757) dante-stack arc::client::tests::a_closed_port_is_a_socket_error_at_once
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::client::tests::a_closed_port_is_a_socket_error_at_once --nocapture
+        PASS [   0.008s] (  5/757) dante-stack announce::tests::a_failed_announcement_is_tried_again_and_a_bad_record_sends_nothing
+       START [         ] (  6/757) dante-stack arc::client::tests::a_device_without_tx_channels_is_read_in_one_request
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::client::tests::a_device_without_tx_channels_is_read_in_one_request --nocapture
+        PASS [   0.008s] (  6/757) dante-stack announce::tests::a_record_becomes_the_service_info_mdns_sd_sends
+       START [         ] (  7/757) dante-stack arc::client::tests::a_directory_keeps_the_first_of_an_id_and_its_first_name
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::client::tests::a_directory_keeps_the_first_of_an_id_and_its_first_name --nocapture
+        PASS [   0.006s] (  7/757) dante-stack announce::tests::the_records_carry_the_config_s_ports_and_process_id
+        PASS [   0.006s] (  8/757) dante-stack arc::client::tests::a_channel_whose_descriptor_does_not_read_is_counted_not_listed
+       START [         ] (  9/757) dante-stack arc::client::tests::a_page_of_none_or_a_list_past_max_pages_ends_it
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::client::tests::a_page_of_none_or_a_list_past_max_pages_ends_it --nocapture
+       START [         ] (  9/757) dante-stack arc::client::tests::a_full_page_that_says_done_asks_for_the_next_while_channels_are_missing
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::client::tests::a_full_page_that_says_done_asks_for_the_next_while_channels_are_missing --nocapture
+        PASS [   0.007s] (  9/757) dante-stack announce::tests::the_txt_records_carry_the_rate_encoding_and_latency
+       START [         ] ( 10/757) dante-stack arc::client::tests::a_read_over_udp_takes_only_its_replies_and_counts_every_request
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::client::tests::a_read_over_udp_takes_only_its_replies_and_counts_every_request --nocapture
+        PASS [   0.013s] ( 10/757) dante-stack announce::tests::a_queue_that_stays_full_ends_the_announcement_after_its_tries
+       START [         ] ( 11/757) dante-stack arc::client::tests::a_refusal_no_reply_or_a_page_that_does_not_read_ends_the_read
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::client::tests::a_refusal_no_reply_or_a_page_that_does_not_read_ends_the_read --nocapture
+        PASS [   0.007s] ( 11/757) dante-stack arc::client::tests::a_closed_port_is_a_socket_error_at_once
+       START [         ] ( 12/757) dante-stack arc::client::tests::a_silent_device_ends_the_request_at_its_wait_and_a_stopped_read_sends_nothing
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::client::tests::a_silent_device_ends_the_request_at_its_wait_and_a_stopped_read_sends_nothing --nocapture
+        PASS [   0.005s] ( 12/757) dante-stack arc::client::tests::a_device_without_tx_channels_is_read_in_one_request
+       START [         ] ( 13/757) dante-stack arc::client::tests::more_follow_from_the_item_after_the_page_s_count_until_a_page_says_done
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::client::tests::more_follow_from_the_item_after_the_page_s_count_until_a_page_says_done --nocapture
+        PASS [   0.006s] ( 13/757) dante-stack arc::client::tests::a_directory_keeps_the_first_of_an_id_and_its_first_name
+       START [         ] ( 14/757) dante-stack arc::client::tests::our_own_server_s_pages_read_back_as_its_channels
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::client::tests::our_own_server_s_pages_read_back_as_its_channels --nocapture
+        PASS [   0.014s] ( 14/757) dante-stack announce::tests::hex_is_lower_case_two_digits_a_byte
+       START [         ] ( 15/757) dante-stack arc::client::tests::the_card_s_first_page_says_more_and_counts_32_of_its_33_strings
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::client::tests::the_card_s_first_page_says_more_and_counts_32_of_its_33_strings --nocapture
+        PASS [   0.015s] ( 15/757) dante-stack announce::tests::a_rename_changes_the_chan_records
+       START [         ] ( 16/757) dante-stack arc::client::tests::the_card_s_pages_read_as_its_128_channels_in_6_requests
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::client::tests::the_card_s_pages_read_as_its_128_channels_in_6_requests --nocapture
+        PASS [   0.017s] ( 16/757) dante-stack announce::tests::one_chan_record_per_tx_channel_named_channel_at_device
+       START [         ] ( 17/757) dante-stack arc::client::tests::the_encoding_is_the_bits_every_channel_shares
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::client::tests::the_encoding_is_the_bits_every_channel_shares --nocapture
+        PASS [   0.017s] ( 17/757) dante-stack announce::tests::an_announcer_withdraws_the_old_records_first_and_repeats_nothing
+       START [         ] ( 18/757) dante-stack arc::client::tests::the_request_is_netaudio_s_page_read_and_only_its_reply_is_taken
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::client::tests::the_request_is_netaudio_s_page_read_and_only_its_reply_is_taken --nocapture
+        PASS [   0.007s] ( 18/757) dante-stack arc::client::tests::a_page_of_none_or_a_list_past_max_pages_ends_it
+       START [         ] ( 19/757) dante-stack arc::control::tests::a_device_name_is_netaudio_s_request
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::control::tests::a_device_name_is_netaudio_s_request --nocapture
+        PASS [   0.005s] ( 19/757) dante-stack arc::client::tests::more_follow_from_the_item_after_the_page_s_count_until_a_page_says_done
+       START [         ] ( 20/757) dante-stack arc::control::tests::a_label_set_and_reset_reads_back
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::control::tests::a_label_set_and_reset_reads_back --nocapture
+        PASS [   0.006s] ( 20/757) dante-stack arc::client::tests::a_refusal_no_reply_or_a_page_that_does_not_read_ends_the_read
+       START [         ] ( 21/757) dante-stack arc::control::tests::a_latency_write_is_confirmed_by_the_reads_before_and_after
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::control::tests::a_latency_write_is_confirmed_by_the_reads_before_and_after --nocapture
+        PASS [   0.007s] ( 21/757) dante-stack arc::client::tests::a_read_over_udp_takes_only_its_replies_and_counts_every_request
+       START [         ] ( 22/757) dante-stack arc::control::tests::a_latency_write_is_netaudio_s_request
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::control::tests::a_latency_write_is_netaudio_s_request --nocapture
+        PASS [   0.008s] ( 22/757) dante-stack arc::client::tests::a_full_page_that_says_done_asks_for_the_next_while_channels_are_missing
+       START [         ] ( 23/757) dante-stack arc::control::tests::a_latency_write_that_changes_another_setting_is_reported
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::control::tests::a_latency_write_that_changes_another_setting_is_reported --nocapture
+        PASS [   0.020s] ( 23/757) dante-stack announce::tests::the_announcer_publishes_the_set_it_registered
+       START [         ] ( 24/757) dante-stack arc::control::tests::a_latency_write_the_device_ignores_or_refuses_is_not_confirmed
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::control::tests::a_latency_write_the_device_ignores_or_refuses_is_not_confirmed --nocapture
+        PASS [   0.007s] ( 24/757) dante-stack arc::client::tests::our_own_server_s_pages_read_back_as_its_channels
+       START [         ] ( 25/757) dante-stack arc::control::tests::a_latency_write_to_our_own_device_is_confirmed_end_to_end
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::control::tests::a_latency_write_to_our_own_device_is_confirmed_end_to_end --nocapture
+        PASS [   0.006s] ( 25/757) dante-stack arc::client::tests::the_card_s_first_page_says_more_and_counts_32_of_its_33_strings
+       START [         ] ( 26/757) dante-stack arc::control::tests::a_refused_label_is_a_refusal
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::control::tests::a_refused_label_is_a_refusal --nocapture
+        PASS [   0.007s] ( 26/757) dante-stack arc::client::tests::the_card_s_pages_read_as_its_128_channels_in_6_requests
+       START [         ] ( 27/757) dante-stack arc::control::tests::a_refused_subscription_or_end_is_a_refusal
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::control::tests::a_refused_subscription_or_end_is_a_refusal --nocapture
+        PASS [   0.006s] ( 27/757) dante-stack arc::client::tests::the_request_is_netaudio_s_page_read_and_only_its_reply_is_taken
+       START [         ] ( 28/757) dante-stack arc::control::tests::a_settings_reply_skips_absent_keys_and_pointers_past_it
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::control::tests::a_settings_reply_skips_absent_keys_and_pointers_past_it --nocapture
+        PASS [   0.006s] ( 28/757) dante-stack arc::client::tests::the_encoding_is_the_bits_every_channel_shares
+       START [         ] ( 29/757) dante-stack arc::control::tests::a_subscription_is_netaudio_s_request
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::control::tests::a_subscription_is_netaudio_s_request --nocapture
+        PASS [   0.006s] ( 29/757) dante-stack arc::control::tests::a_device_name_is_netaudio_s_request
+       START [         ] ( 30/757) dante-stack arc::control::tests::a_tx_label_is_netaudio_s_request
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::control::tests::a_tx_label_is_netaudio_s_request --nocapture
+        PASS [   0.005s] ( 30/757) dante-stack arc::control::tests::a_latency_write_is_netaudio_s_request
+       START [         ] ( 31/757) dante-stack arc::control::tests::an_empty_or_refused_name_does_not_read
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::control::tests::an_empty_or_refused_name_does_not_read --nocapture
+        PASS [   0.006s] ( 31/757) dante-stack arc::control::tests::a_latency_write_is_confirmed_by_the_reads_before_and_after
+       START [         ] ( 32/757) dante-stack arc::control::tests::an_rx_channel_names_a_hardware_transmitter_s_receiving_word
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::control::tests::an_rx_channel_names_a_hardware_transmitter_s_receiving_word --nocapture
+        PASS [   0.007s] ( 32/757) dante-stack arc::control::tests::a_latency_write_that_changes_another_setting_is_reported
+       START [         ] ( 33/757) dante-stack arc::control::tests::an_rx_flow_page_reads_the_slot_rate_latency_and_channels
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::control::tests::an_rx_flow_page_reads_the_slot_rate_latency_and_channels --nocapture
+        PASS [   0.007s] ( 33/757) dante-stack arc::control::tests::a_latency_write_the_device_ignores_or_refuses_is_not_confirmed
+        PASS [   0.008s] ( 34/757) dante-stack arc::control::tests::a_label_set_and_reset_reads_back
+       START [         ] ( 35/757) dante-stack arc::control::tests::an_rx_page_counts_a_channel_0_and_does_not_list_it
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::control::tests::an_rx_page_counts_a_channel_0_and_does_not_list_it --nocapture
+       START [         ] ( 35/757) dante-stack arc::control::tests::an_rx_label_is_netaudio_s_request
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::control::tests::an_rx_label_is_netaudio_s_request --nocapture
+        PASS [   0.027s] ( 35/757) dante-stack announce::tests::every_wait_for_a_full_queue_is_counted
+       START [         ] ( 36/757) dante-stack arc::control::tests::an_rx_page_reads_the_status_s_two_halves_and_names_by_offset
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::control::tests::an_rx_page_reads_the_status_s_two_halves_and_names_by_offset --nocapture
+        PASS [   0.006s] ( 36/757) dante-stack arc::control::tests::a_refused_label_is_a_refusal
+       START [         ] ( 37/757) dante-stack arc::control::tests::an_unsubscription_is_netaudio_s_request
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::control::tests::an_unsubscription_is_netaudio_s_request --nocapture
+        PASS [   0.006s] ( 37/757) dante-stack arc::control::tests::a_refused_subscription_or_end_is_a_refusal
+       START [         ] ( 38/757) dante-stack arc::control::tests::our_device_s_name_and_labels_read_back
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::control::tests::our_device_s_name_and_labels_read_back --nocapture
+        PASS [   0.006s] ( 38/757) dante-stack arc::control::tests::a_settings_reply_skips_absent_keys_and_pointers_past_it
+       START [         ] ( 39/757) dante-stack arc::control::tests::our_device_takes_a_device_rename
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::control::tests::our_device_takes_a_device_rename --nocapture
+        PASS [   0.005s] ( 39/757) dante-stack arc::control::tests::an_empty_or_refused_name_does_not_read
+        PASS [   0.006s] ( 40/757) dante-stack arc::control::tests::a_subscription_is_netaudio_s_request
+       START [         ] ( 41/757) dante-stack arc::control::tests::rx_channels_of_a_device_that_refuses_its_counts_is_a_refusal
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::control::tests::rx_channels_of_a_device_that_refuses_its_counts_is_a_refusal --nocapture
+       START [         ] ( 41/757) dante-stack arc::control::tests::our_device_takes_a_subscription_and_its_end
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::control::tests::our_device_takes_a_subscription_and_its_end --nocapture
+        PASS [   0.030s] ( 41/757) dante-stack announce::tests::a_full_daemon_queue_delays_the_announcement_and_never_ends_it
+       START [         ] ( 42/757) dante-stack arc::control::tests::rx_channels_read_back_labels_and_subscriptions
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::control::tests::rx_channels_read_back_labels_and_subscriptions --nocapture
+        PASS [   0.006s] ( 42/757) dante-stack arc::control::tests::an_rx_channel_names_a_hardware_transmitter_s_receiving_word
+       START [         ] ( 43/757) dante-stack arc::control::tests::rx_flows_of_our_own_device_lists_none_before_a_grant
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::control::tests::rx_flows_of_our_own_device_lists_none_before_a_grant --nocapture
+        PASS [   0.007s] ( 43/757) dante-stack arc::control::tests::a_tx_label_is_netaudio_s_request
+       START [         ] ( 44/757) dante-stack arc::control::tests::settings_asks_with_0x2809_and_types_its_errors
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::control::tests::settings_asks_with_0x2809_and_types_its_errors --nocapture
+        PASS [   0.006s] ( 44/757) dante-stack arc::control::tests::an_rx_page_reads_the_status_s_two_halves_and_names_by_offset
+       START [         ] ( 45/757) dante-stack arc::control::tests::settings_read_as_netaudio_reads_them_on_real_devices
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::control::tests::settings_read_as_netaudio_reads_them_on_real_devices --nocapture
+        PASS [   0.033s] ( 45/757) dante-stack announce::tests::a_real_daemon_takes_more_records_than_its_queue_holds
+       START [         ] ( 46/757) dante-stack arc::control::tests::the_settings_request_is_the_count_then_the_keys
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::control::tests::the_settings_request_is_the_count_then_the_keys --nocapture
+        PASS [   0.006s] ( 46/757) dante-stack arc::control::tests::an_rx_flow_page_reads_the_slot_rate_latency_and_channels
+        PASS [   0.006s] ( 47/757) dante-stack arc::control::tests::an_rx_label_is_netaudio_s_request
+        PASS [   0.006s] ( 48/757) dante-stack arc::control::tests::an_rx_page_counts_a_channel_0_and_does_not_list_it
+       START [         ] ( 49/757) dante-stack arc::gaps::tests::a_report_reads_as_ids_opcodes_and_counts
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::gaps::tests::a_report_reads_as_ids_opcodes_and_counts --nocapture
+       START [         ] ( 49/757) dante-stack arc::gaps::tests::a_quiet_spell_starts_the_next_window_at_its_first_request
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::gaps::tests::a_quiet_spell_starts_the_next_window_at_its_first_request --nocapture
+       START [         ] ( 49/757) dante-stack arc::gaps::tests::a_flood_is_one_report_a_minute_with_every_request_counted
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::gaps::tests::a_flood_is_one_report_a_minute_with_every_request_counted --nocapture
+        PASS [   0.006s] ( 49/757) dante-stack arc::control::tests::an_unsubscription_is_netaudio_s_request
+       START [         ] ( 50/757) dante-stack arc::gaps::tests::a_request_after_the_window_reports_it_and_opens_the_next
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::gaps::tests::a_request_after_the_window_reports_it_and_opens_the_next --nocapture
+        PASS [   0.006s] ( 50/757) dante-stack arc::control::tests::our_device_takes_a_device_rename
+       START [         ] ( 51/757) dante-stack arc::gaps::tests::a_window_reports_once_it_has_run_its_length
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::gaps::tests::a_window_reports_once_it_has_run_its_length --nocapture
+        PASS [   0.007s] ( 51/757) dante-stack arc::control::tests::our_device_s_name_and_labels_read_back
+       START [         ] ( 52/757) dante-stack arc::gaps::tests::every_gap_reads_as_its_word
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::gaps::tests::every_gap_reads_as_its_word --nocapture
+        PASS [   0.006s] ( 52/757) dante-stack arc::control::tests::rx_channels_read_back_labels_and_subscriptions
+       START [         ] ( 53/757) dante-stack arc::gaps::tests::nothing_counted_reports_nothing
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::gaps::tests::nothing_counted_reports_nothing --nocapture
+        PASS [   0.007s] ( 53/757) dante-stack arc::control::tests::rx_channels_of_a_device_that_refuses_its_counts_is_a_refusal
+       START [         ] ( 54/757) dante-stack arc::gaps::tests::past_the_entry_limit_requests_are_only_summed
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::gaps::tests::past_the_entry_limit_requests_are_only_summed --nocapture
+        PASS [   0.006s] ( 54/757) dante-stack arc::control::tests::settings_read_as_netaudio_reads_them_on_real_devices
+       START [         ] ( 55/757) dante-stack arc::gaps::tests::past_the_peer_limit_every_new_peer_is_peer_0
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::gaps::tests::past_the_peer_limit_every_new_peer_is_peer_0 --nocapture
+        PASS [   0.008s] ( 55/757) dante-stack arc::control::tests::our_device_takes_a_subscription_and_its_end
+       START [         ] ( 56/757) dante-stack arc::gaps::tests::peers_are_named_by_ids_in_the_order_first_seen
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::gaps::tests::peers_are_named_by_ids_in_the_order_first_seen --nocapture
+        PASS [   0.005s] ( 56/757) dante-stack arc::control::tests::the_settings_request_is_the_count_then_the_keys
+       START [         ] ( 57/757) dante-stack arc::tests::a_datagram_whose_length_field_disagrees_is_counted_never_answered
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::tests::a_datagram_whose_length_field_disagrees_is_counted_never_answered --nocapture
+        PASS [   0.007s] ( 57/757) dante-stack arc::control::tests::settings_asks_with_0x2809_and_types_its_errors
+       START [         ] ( 58/757) dante-stack arc::tests::a_device_rename_body_reads_up_to_its_nul
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::tests::a_device_rename_body_reads_up_to_its_nul --nocapture
+        PASS [   0.006s] ( 58/757) dante-stack arc::gaps::tests::a_report_reads_as_ids_opcodes_and_counts
+       START [         ] ( 59/757) dante-stack arc::tests::a_device_rename_carries_its_change
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::tests::a_device_rename_carries_its_change --nocapture
+        PASS [   0.006s] ( 59/757) dante-stack arc::gaps::tests::a_quiet_spell_starts_the_next_window_at_its_first_request
+        PASS [   0.008s] ( 60/757) dante-stack arc::control::tests::rx_flows_of_our_own_device_lists_none_before_a_grant
+       START [         ] ( 61/757) dante-stack arc::tests::a_device_rename_moves_our_own_subscriptions_to_the_new_name
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::tests::a_device_rename_moves_our_own_subscriptions_to_the_new_name --nocapture
+       START [         ] ( 61/757) dante-stack arc::tests::a_failed_save_refuses_and_undoes
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::tests::a_failed_save_refuses_and_undoes --nocapture
+        PASS [   0.006s] ( 61/757) dante-stack arc::gaps::tests::a_request_after_the_window_reports_it_and_opens_the_next
+       START [         ] ( 62/757) dante-stack arc::tests::a_flow_page_passes_over_empty_slots_and_counts_only_flows
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::tests::a_flow_page_passes_over_empty_slots_and_counts_only_flows --nocapture
+        PASS [   0.018s] ( 62/757) dante-stack arc::control::tests::a_latency_write_to_our_own_device_is_confirmed_end_to_end
+       START [         ] ( 63/757) dante-stack arc::tests::a_keyed_settings_read_gets_our_values_in_the_hardware_s_layout
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::tests::a_keyed_settings_read_gets_our_values_in_the_hardware_s_layout --nocapture
+        PASS [   0.006s] ( 63/757) dante-stack arc::gaps::tests::a_window_reports_once_it_has_run_its_length
+       START [         ] ( 64/757) dante-stack arc::tests::a_latency_set_on_the_running_flows_reaches_the_manager_and_the_tx_side
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::tests::a_latency_set_on_the_running_flows_reaches_the_manager_and_the_tx_side --nocapture
+        PASS [   0.006s] ( 64/757) dante-stack arc::gaps::tests::every_gap_reads_as_its_word
+       START [         ] ( 65/757) dante-stack arc::tests::a_latency_the_config_refuses_is_refused_and_another_form_unanswered
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::tests::a_latency_the_config_refuses_is_refused_and_another_form_unanswered --nocapture
+        PASS [   0.006s] ( 65/757) dante-stack arc::gaps::tests::nothing_counted_reports_nothing
+       START [         ] ( 66/757) dante-stack arc::tests::a_latency_write_is_taken_kept_and_survives_a_restart
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::tests::a_latency_write_is_taken_kept_and_survives_a_restart --nocapture
+        PASS [   0.006s] ( 66/757) dante-stack arc::gaps::tests::past_the_entry_limit_requests_are_only_summed
+       START [         ] ( 67/757) dante-stack arc::tests::a_misframed_gap_reads_as_misframed
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::tests::a_misframed_gap_reads_as_misframed --nocapture
+        PASS [   0.006s] ( 67/757) dante-stack arc::gaps::tests::peers_are_named_by_ids_in_the_order_first_seen
+       START [         ] ( 68/757) dante-stack arc::tests::a_multicast_flow_is_neither_created_nor_deleted
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::tests::a_multicast_flow_is_neither_created_nor_deleted --nocapture
+        PASS [   0.006s] ( 68/757) dante-stack arc::gaps::tests::past_the_peer_limit_every_new_peer_is_peer_0
+       START [         ] ( 69/757) dante-stack arc::tests::a_name_dante_does_not_hold_is_refused
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::tests::a_name_dante_does_not_hold_is_refused --nocapture
+        PASS [   0.006s] ( 69/757) dante-stack arc::tests::a_datagram_whose_length_field_disagrees_is_counted_never_answered
+       START [         ] ( 70/757) dante-stack arc::tests::a_page_ends_after_the_item_that_reaches_800_bytes_as_inferno
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::tests::a_page_ends_after_the_item_that_reaches_800_bytes_as_inferno --nocapture
+        PASS [   0.006s] ( 70/757) dante-stack arc::tests::a_device_rename_carries_its_change
+       START [         ] ( 71/757) dante-stack arc::tests::a_page_request_without_a_first_channel_is_refused
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::tests::a_page_request_without_a_first_channel_is_refused --nocapture
+        PASS [   0.006s] ( 71/757) dante-stack arc::tests::a_device_rename_moves_our_own_subscriptions_to_the_new_name
+       START [         ] ( 72/757) dante-stack arc::tests::a_page_says_more_while_an_item_is_left_after_its_slots_fill
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::tests::a_page_says_more_while_an_item_is_left_after_its_slots_fill --nocapture
+        PASS [   0.007s] ( 72/757) dante-stack arc::tests::a_device_rename_body_reads_up_to_its_nul
+       START [         ] ( 73/757) dante-stack arc::tests::a_refused_rename_is_counted_never_a_warning_of_its_own
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::tests::a_refused_rename_is_counted_never_a_warning_of_its_own --nocapture
+        PASS [   0.006s] ( 73/757) dante-stack arc::tests::a_flow_page_passes_over_empty_slots_and_counts_only_flows
+       START [         ] ( 74/757) dante-stack arc::tests::a_rename_that_cannot_be_saved_is_refused_and_undone
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::tests::a_rename_that_cannot_be_saved_is_refused_and_undone --nocapture
+        PASS [   0.008s] ( 74/757) dante-stack arc::tests::a_failed_save_refuses_and_undoes
+       START [         ] ( 75/757) dante-stack arc::tests::a_request_inferno_cannot_read_gets_no_reply
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::tests::a_request_inferno_cannot_read_gets_no_reply --nocapture
+        PASS [   0.008s] ( 75/757) dante-stack arc::tests::a_keyed_settings_read_gets_our_values_in_the_hardware_s_layout
+       START [         ] ( 76/757) dante-stack arc::tests::a_restart_comes_back_with_the_renamed_names
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::tests::a_restart_comes_back_with_the_renamed_names --nocapture
+        PASS [   0.007s] ( 76/757) dante-stack arc::tests::a_latency_the_config_refuses_is_refused_and_another_form_unanswered
+       START [         ] ( 77/757) dante-stack arc::tests::a_settings_request_that_does_not_read_is_not_answered
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::tests::a_settings_request_that_does_not_read_is_not_answered --nocapture
+        PASS [   0.006s] ( 77/757) dante-stack arc::tests::a_misframed_gap_reads_as_misframed
+       START [         ] ( 78/757) dante-stack arc::tests::a_subscribe_is_unresolved_at_once_and_saved_first
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::tests::a_subscribe_is_unresolved_at_once_and_saved_first --nocapture
+        PASS [   0.006s] ( 78/757) dante-stack arc::tests::a_page_says_more_while_an_item_is_left_after_its_slots_fill
+        PASS [   0.006s] ( 79/757) dante-stack arc::tests::a_page_request_without_a_first_channel_is_refused
+       START [         ] ( 80/757) dante-stack arc::tests::a_subscription_inferno_passes_over_changes_nothing
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::tests::a_subscription_inferno_passes_over_changes_nothing --nocapture
+        PASS [   0.007s] ( 80/757) dante-stack arc::tests::a_multicast_flow_is_neither_created_nor_deleted
+       START [         ] ( 81/757) dante-stack arc::tests::a_tx_flow_s_names_are_cut_to_63_bytes_at_a_character
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::tests::a_tx_flow_s_names_are_cut_to_63_bytes_at_a_character --nocapture
+       START [         ] ( 81/757) dante-stack arc::tests::a_subscription_is_made_and_answered_as_inferno_answers_it
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::tests::a_subscription_is_made_and_answered_as_inferno_answers_it --nocapture
+        PASS [   0.006s] ( 81/757) dante-stack arc::tests::a_rename_that_cannot_be_saved_is_refused_and_undone
+       START [         ] ( 82/757) dante-stack arc::tests::a_tx_name_may_not_be_another_channels_default
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::tests::a_tx_name_may_not_be_another_channels_default --nocapture
+        PASS [   0.007s] ( 82/757) dante-stack arc::tests::a_page_ends_after_the_item_that_reaches_800_bytes_as_inferno
+       START [         ] ( 83/757) dante-stack arc::tests::a_tx_rename_changes_the_state_and_says_so
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::tests::a_tx_rename_changes_the_state_and_says_so --nocapture
+        PASS [   0.008s] ( 83/757) dante-stack arc::tests::a_name_dante_does_not_hold_is_refused
+       START [         ] ( 84/757) dante-stack arc::tests::an_invalid_rename_keeps_the_name
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::tests::an_invalid_rename_keeps_the_name --nocapture
+        PASS [   0.006s] ( 84/757) dante-stack arc::tests::a_request_inferno_cannot_read_gets_no_reply
+        PASS [   0.006s] ( 85/757) dante-stack arc::tests::a_settings_request_that_does_not_read_is_not_answered
+       START [         ] ( 86/757) dante-stack arc::tests::an_invalid_rename_leaves_the_state_file_as_it_was
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::tests::an_invalid_rename_leaves_the_state_file_as_it_was --nocapture
+       START [         ] ( 86/757) dante-stack arc::tests::an_opcode_inferno_does_not_answer_gets_no_reply
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::tests::an_opcode_inferno_does_not_answer_gets_no_reply --nocapture
+        PASS [   0.005s] ( 86/757) dante-stack arc::tests::a_tx_name_may_not_be_another_channels_default
+        PASS [   0.005s] ( 87/757) dante-stack arc::tests::a_subscription_is_made_and_answered_as_inferno_answers_it
+       START [         ] ( 88/757) dante-stack arc::tests::an_rx_flow_is_listed_from_its_grant
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::tests::an_rx_flow_is_listed_from_its_grant --nocapture
+       START [         ] ( 88/757) dante-stack arc::tests::an_outcome_is_a_gap_when_refused_or_unanswered
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::tests::an_outcome_is_a_gap_when_refused_or_unanswered --nocapture
+        PASS [   0.006s] ( 88/757) dante-stack arc::tests::a_subscription_inferno_passes_over_changes_nothing
+       START [         ] ( 89/757) dante-stack arc::tests::an_rx_flow_s_bitmask_is_inferno_s_bit_vector
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::tests::an_rx_flow_s_bitmask_is_inferno_s_bit_vector --nocapture
+        PASS [   0.006s] ( 89/757) dante-stack arc::tests::a_tx_rename_changes_the_state_and_says_so
+       START [         ] ( 90/757) dante-stack arc::tests::an_rx_rename_changes_the_state_and_says_so
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::tests::an_rx_rename_changes_the_state_and_says_so --nocapture
+        PASS [   0.008s] ( 90/757) dante-stack arc::tests::a_tx_flow_s_names_are_cut_to_63_bytes_at_a_character
+       START [         ] ( 91/757) dante-stack arc::tests::counts_name_32_rx_and_16_tx
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::tests::counts_name_32_rx_and_16_tx --nocapture
+        PASS [   0.006s] ( 91/757) dante-stack arc::tests::an_opcode_inferno_does_not_answer_gets_no_reply
+       START [         ] ( 92/757) dante-stack arc::tests::dante_controller_renames_the_device
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::tests::dante_controller_renames_the_device --nocapture
+        PASS [   0.005s] ( 92/757) dante-stack arc::tests::an_rx_flow_is_listed_from_its_grant
+       START [         ] ( 93/757) dante-stack arc::tests::dante_controller_s_0x2204_is_answered_as_the_iem_card_answers_it
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::tests::dante_controller_s_0x2204_is_answered_as_the_iem_card_answers_it --nocapture
+        PASS [   0.005s] ( 93/757) dante-stack arc::tests::an_rx_flow_s_bitmask_is_inferno_s_bit_vector
+       START [         ] ( 94/757) dante-stack arc::tests::every_opcode_inferno_answers_is_answered_as_inferno_answers_it
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::tests::every_opcode_inferno_answers_is_answered_as_inferno_answers_it --nocapture
+        PASS [   0.005s] ( 94/757) dante-stack arc::tests::an_outcome_is_a_gap_when_refused_or_unanswered
+       START [         ] ( 95/757) dante-stack arc::tests::every_opcode_is_answered_as_inferno_answers_it_with_two_flows_each_way
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::tests::every_opcode_is_answered_as_inferno_answers_it_with_two_flows_each_way --nocapture
+        PASS [   0.015s] ( 95/757) dante-stack arc::tests::a_subscribe_is_unresolved_at_once_and_saved_first
+       START [         ] ( 96/757) dante-stack arc::tests::netaudio_reads_the_test_devices_tx_list_in_one_page
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::tests::netaudio_reads_the_test_devices_tx_list_in_one_page --nocapture
+        PASS [   0.007s] ( 96/757) dante-stack arc::tests::an_rx_rename_changes_the_state_and_says_so
+       START [         ] ( 97/757) dante-stack arc::tests::no_flows_keeps_the_saved_subscriptions_unresolved
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::tests::no_flows_keeps_the_saved_subscriptions_unresolved --nocapture
+        PASS [   0.005s] ( 97/757) dante-stack arc::tests::counts_name_32_rx_and_16_tx
+       START [         ] ( 98/757) dante-stack arc::tests::op_2320_is_answered_with_status_0x30
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::tests::op_2320_is_answered_with_status_0x30 --nocapture
+        PASS [   0.005s] ( 98/757) dante-stack arc::tests::dante_controller_renames_the_device
+       START [         ] ( 99/757) dante-stack arc::tests::pages_with_the_longest_names_fit_and_list_everything_once
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::tests::pages_with_the_longest_names_fit_and_list_everything_once --nocapture
+        PASS [   0.014s] ( 99/757) dante-stack arc::tests::an_invalid_rename_keeps_the_name
+       START [         ] (100/757) dante-stack arc::tests::random_requests_never_panic_and_keep_the_names_valid
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::tests::random_requests_never_panic_and_keep_the_names_valid --nocapture
+        PASS [   0.005s] (100/757) dante-stack arc::tests::dante_controller_s_0x2204_is_answered_as_the_iem_card_answers_it
+       START [         ] (101/757) dante-stack arc::tests::running_flows_read_the_tx_table_and_the_manager
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::tests::running_flows_read_the_tx_table_and_the_manager --nocapture
+        PASS [   0.013s] (101/757) dante-stack arc::tests::an_invalid_rename_leaves_the_state_file_as_it_was
+       START [         ] (102/757) dante-stack arc::tests::several_items_subscribe_several_channels_in_one_request
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::tests::several_items_subscribe_several_channels_in_one_request --nocapture
+        PASS [   0.006s] (102/757) dante-stack arc::tests::every_opcode_inferno_answers_is_answered_as_inferno_answers_it
+       START [         ] (103/757) dante-stack arc::tests::the_clock_reply_is_the_fixed_one
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::tests::the_clock_reply_is_the_fixed_one --nocapture
+        PASS [   0.006s] (103/757) dante-stack arc::tests::every_opcode_is_answered_as_inferno_answers_it_with_two_flows_each_way
+       START [         ] (104/757) dante-stack arc::tests::the_device_names_are_the_states_and_the_configs
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::tests::the_device_names_are_the_states_and_the_configs --nocapture
+        PASS [   0.006s] (104/757) dante-stack arc::tests::netaudio_reads_the_test_devices_tx_list_in_one_page
+       START [         ] (105/757) dante-stack arc::tests::the_flow_lists_are_inferno_s_empty_page
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::tests::the_flow_lists_are_inferno_s_empty_page --nocapture
+        PASS [   0.023s] (105/757) dante-stack arc::tests::a_restart_comes_back_with_the_renamed_names
+       START [         ] (106/757) dante-stack arc::tests::the_longest_names_still_fit_one_datagram_per_page
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::tests::the_longest_names_still_fit_one_datagram_per_page --nocapture
+        PASS [   0.005s] (106/757) dante-stack arc::tests::op_2320_is_answered_with_status_0x30
+       START [         ] (107/757) dante-stack arc::tests::the_manager_asks_under_its_new_host
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::tests::the_manager_asks_under_its_new_host --nocapture
+        PASS [   0.006s] (107/757) dante-stack arc::tests::no_flows_keeps_the_saved_subscriptions_unresolved
+       START [         ] (108/757) dante-stack arc::tests::the_rx_flow_list_is_inferno_s_query_rx_flows
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::tests::the_rx_flow_list_is_inferno_s_query_rx_flows --nocapture
+        PASS [   0.028s] (108/757) dante-stack arc::tests::a_latency_write_is_taken_kept_and_survives_a_restart
+       START [         ] (109/757) dante-stack arc::tests::the_rx_list_pages_by_16_and_names_every_channel_once
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::tests::the_rx_list_pages_by_16_and_names_every_channel_once --nocapture
+        PASS [   0.006s] (109/757) dante-stack arc::tests::several_items_subscribe_several_channels_in_one_request
+       START [         ] (110/757) dante-stack arc::tests::the_server_answers_two_peers_with_their_own_sequences
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::tests::the_server_answers_two_peers_with_their_own_sequences --nocapture
+        PASS [   0.005s] (110/757) dante-stack arc::tests::the_device_names_are_the_states_and_the_configs
+       START [         ] (111/757) dante-stack arc::tests::the_server_hands_a_subscription_to_the_manager_and_names_the_channels
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::tests::the_server_hands_a_subscription_to_the_manager_and_names_the_channels --nocapture
+        PASS [   0.006s] (111/757) dante-stack arc::tests::the_clock_reply_is_the_fixed_one
+       START [         ] (112/757) dante-stack arc::tests::the_server_saves_a_rename_and_signals_it
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::tests::the_server_saves_a_rename_and_signals_it --nocapture
+        PASS [   0.006s] (112/757) dante-stack arc::tests::the_flow_lists_are_inferno_s_empty_page
+       START [         ] (113/757) dante-stack arc::tests::the_server_sends_nothing_for_an_opcode_inferno_does_not_answer
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::tests::the_server_sends_nothing_for_an_opcode_inferno_does_not_answer --nocapture
+        PASS [   0.006s] (113/757) dante-stack arc::tests::the_longest_names_still_fit_one_datagram_per_page
+       START [         ] (114/757) dante-stack arc::tests::the_tx_flow_list_is_inferno_s_query_tx_flows
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::tests::the_tx_flow_list_is_inferno_s_query_tx_flows --nocapture
+        PASS [   0.006s] (114/757) dante-stack arc::tests::the_rx_flow_list_is_inferno_s_query_rx_flows
+       START [         ] (115/757) dante-stack arc::tests::the_tx_list_pages_and_names_every_channel_once
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::tests::the_tx_list_pages_and_names_every_channel_once --nocapture
+        PASS [   0.012s] (115/757) dante-stack arc::tests::pages_with_the_longest_names_fit_and_list_everything_once
+       START [         ] (116/757) dante-stack arc::tests::two_interleaved_requests_get_their_own_sequence
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::tests::two_interleaved_requests_get_their_own_sequence --nocapture
+        PASS [   0.007s] (116/757) dante-stack arc::tests::the_manager_asks_under_its_new_host
+       START [         ] (117/757) dante-stack clock::dsyx::tests::a_64_byte_reply_has_no_date_state
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact clock::dsyx::tests::a_64_byte_reply_has_no_date_state --nocapture
+        PASS [   0.006s] (117/757) dante-stack arc::tests::the_rx_list_pages_by_16_and_names_every_channel_once
+       START [         ] (118/757) dante-stack clock::dsyx::tests::a_slew_runs_from_two_seconds_before_its_start_to_two_seconds_after_its_end
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact clock::dsyx::tests::a_slew_runs_from_two_seconds_before_its_start_to_two_seconds_after_its_end --nocapture
+        PASS [   0.008s] (118/757) dante-stack arc::tests::the_server_answers_two_peers_with_their_own_sequences
+       START [         ] (119/757) dante-stack clock::dsyx::tests::a_wrong_magic_or_request_id_is_refused
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact clock::dsyx::tests::a_wrong_magic_or_request_id_is_refused --nocapture
+        PASS [   0.006s] (119/757) dante-stack arc::tests::the_tx_flow_list_is_inferno_s_query_tx_flows
+       START [         ] (120/757) dante-stack clock::dsyx::tests::only_a_backward_slew_of_version_2_on_is_a_slew
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact clock::dsyx::tests::only_a_backward_slew_of_version_2_on_is_a_slew --nocapture
+        PASS [   0.005s] (120/757) dante-stack clock::dsyx::tests::a_64_byte_reply_has_no_date_state
+       START [         ] (121/757) dante-stack clock::dsyx::tests::random_replies_never_panic
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact clock::dsyx::tests::random_replies_never_panic --nocapture
+        PASS [   0.005s] (121/757) dante-stack clock::dsyx::tests::a_slew_runs_from_two_seconds_before_its_start_to_two_seconds_after_its_end
+       START [         ] (122/757) dante-stack clock::dsyx::tests::the_dsyx_reply_reads_as_dantesync_writes_it
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact clock::dsyx::tests::the_dsyx_reply_reads_as_dantesync_writes_it --nocapture
+        PASS [   0.006s] (122/757) dante-stack arc::tests::two_interleaved_requests_get_their_own_sequence
+       START [         ] (123/757) dante-stack clock::steer::tests::a_date_step_does_not_move_the_clock
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact clock::steer::tests::a_date_step_does_not_move_the_clock --nocapture
+        PASS [   0.006s] (123/757) dante-stack arc::tests::the_tx_list_pages_and_names_every_channel_once
+       START [         ] (124/757) dante-stack clock::steer::tests::a_jump_at_the_threshold_is_a_slew_and_just_over_is_a_step
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact clock::steer::tests::a_jump_at_the_threshold_is_a_slew_and_just_over_is_a_step --nocapture
+        PASS [   0.005s] (124/757) dante-stack clock::dsyx::tests::only_a_backward_slew_of_version_2_on_is_a_slew
+       START [         ] (125/757) dante-stack clock::steer::tests::a_long_gap_allows_more_drift_before_a_step
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact clock::steer::tests::a_long_gap_allows_more_drift_before_a_step --nocapture
+        PASS [   0.006s] (125/757) dante-stack clock::dsyx::tests::a_wrong_magic_or_request_id_is_refused
+       START [         ] (126/757) dante-stack clock::steer::tests::a_model_survives_its_words_and_scales_both_ways
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact clock::steer::tests::a_model_survives_its_words_and_scales_both_ways --nocapture
+        PASS [   0.004s] (126/757) dante-stack clock::steer::tests::a_jump_at_the_threshold_is_a_slew_and_just_over_is_a_step
+       START [         ] (127/757) dante-stack clock::steer::tests::a_slew_is_never_steeper_than_the_bound
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact clock::steer::tests::a_slew_is_never_steeper_than_the_bound --nocapture
+        PASS [   0.005s] (127/757) dante-stack clock::dsyx::tests::the_dsyx_reply_reads_as_dantesync_writes_it
+       START [         ] (128/757) dante-stack clock::steer::tests::a_small_jump_is_slewed_out_not_kept
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact clock::steer::tests::a_small_jump_is_slewed_out_not_kept --nocapture
+        PASS [   0.005s] (128/757) dante-stack clock::steer::tests::a_date_step_does_not_move_the_clock
+       START [         ] (129/757) dante-stack clock::steer::tests::the_clock_follows_a_steered_wall_within_a_microsecond
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact clock::steer::tests::the_clock_follows_a_steered_wall_within_a_microsecond --nocapture
+        PASS [   0.004s] (129/757) dante-stack clock::steer::tests::a_long_gap_allows_more_drift_before_a_step
+       START [         ] (130/757) dante-stack clock::tests::a_date_step_moves_wall_and_d_together_and_k_stays
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact clock::tests::a_date_step_moves_wall_and_d_together_and_k_stays --nocapture
+        PASS [   0.005s] (130/757) dante-stack clock::steer::tests::a_model_survives_its_words_and_scales_both_ways
+       START [         ] (131/757) dante-stack clock::tests::a_k_just_past_the_tolerance_is_odd_and_odd_polls_must_agree
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact clock::tests::a_k_just_past_the_tolerance_is_odd_and_odd_polls_must_agree --nocapture
+        PASS [   0.005s] (131/757) dante-stack clock::steer::tests::a_small_jump_is_slewed_out_not_kept
+        PASS [   0.005s] (132/757) dante-stack clock::steer::tests::a_slew_is_never_steeper_than_the_bound
+       START [         ] (133/757) dante-stack clock::tests::a_latency_is_its_nearest_whole_samples
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact clock::tests::a_latency_is_its_nearest_whole_samples --nocapture
+       START [         ] (133/757) dante-stack clock::tests::a_profile_cell_keeps_the_first_profile_and_refuses_another
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact clock::tests::a_profile_cell_keeps_the_first_profile_and_refuses_another --nocapture
+        PASS [   0.005s] (133/757) dante-stack clock::steer::tests::the_clock_follows_a_steered_wall_within_a_microsecond
+       START [         ] (134/757) dante-stack clock::tests::an_unlock_after_ready_is_holdover_and_keeps_k
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact clock::tests::an_unlock_after_ready_is_holdover_and_keeps_k --nocapture
+        PASS [   0.004s] (134/757) dante-stack clock::tests::a_date_step_moves_wall_and_d_together_and_k_stays
+       START [         ] (135/757) dante-stack clock::tests::k_is_wall_minus_d_minus_mono
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact clock::tests::k_is_wall_minus_d_minus_mono --nocapture
+        PASS [   0.055s] (135/757) dante-stack arc::tests::a_latency_set_on_the_running_flows_reaches_the_manager_and_the_tx_side
+       START [         ] (136/757) dante-stack clock::tests::media_time_survives_years_of_uptime
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact clock::tests::media_time_survives_years_of_uptime --nocapture
+        PASS [   0.005s] (136/757) dante-stack clock::tests::a_k_just_past_the_tolerance_is_odd_and_odd_polls_must_agree
+       START [         ] (137/757) dante-stack clock::tests::no_anchor_within_two_seconds_of_a_scheduled_step
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact clock::tests::no_anchor_within_two_seconds_of_a_scheduled_step --nocapture
+        PASS [   0.004s] (137/757) dante-stack clock::tests::a_profile_cell_keeps_the_first_profile_and_refuses_another
+       START [         ] (138/757) dante-stack clock::tests::none_while_a_slew_runs
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact clock::tests::none_while_a_slew_runs --nocapture
+        PASS [   0.005s] (138/757) dante-stack clock::tests::a_latency_is_its_nearest_whole_samples
+       START [         ] (139/757) dante-stack clock::tests::not_locked_is_not_ready
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact clock::tests::not_locked_is_not_ready --nocapture
+        PASS [   0.005s] (139/757) dante-stack clock::tests::an_unlock_after_ready_is_holdover_and_keeps_k
+       START [         ] (140/757) dante-stack clock::tests::one_odd_poll_is_held_three_re_anchor
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact clock::tests::one_odd_poll_is_held_three_re_anchor --nocapture
+        PASS [   0.026s] (140/757) dante-stack arc::tests::the_server_hands_a_subscription_to_the_manager_and_names_the_channels
+        PASS [   0.004s] (141/757) dante-stack clock::tests::k_is_wall_minus_d_minus_mono
+       START [         ] (142/757) dante-stack clock::tests::only_the_low_latency_profile_asks_for_real_time_priority
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact clock::tests::only_the_low_latency_profile_asks_for_real_time_priority --nocapture
+       START [         ] (142/757) dante-stack clock::tests::os::a_poll_reports_its_reply_sample_event_and_k
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact clock::tests::os::a_poll_reports_its_reply_sample_event_and_k --nocapture
+        PASS [   0.005s] (142/757) dante-stack clock::tests::media_time_survives_years_of_uptime
+       START [         ] (143/757) dante-stack clock::tests::os::the_box_clocks_read_the_kernel_s
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact clock::tests::os::the_box_clocks_read_the_kernel_s --nocapture
+        PASS [   0.004s] (143/757) dante-stack clock::tests::none_while_a_slew_runs
+       START [         ] (144/757) dante-stack clock::tests::os::the_mono_clock_is_monotonic_plus_k_and_counts_re_anchors
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact clock::tests::os::the_mono_clock_is_monotonic_plus_k_and_counts_re_anchors --nocapture
+        PASS [   0.005s] (144/757) dante-stack clock::tests::no_anchor_within_two_seconds_of_a_scheduled_step
+       START [         ] (145/757) dante-stack clock::tests::os::the_mono_clock_sleeps_until_a_ptp_time
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact clock::tests::os::the_mono_clock_sleeps_until_a_ptp_time --nocapture
+        PASS [   0.005s] (145/757) dante-stack clock::tests::not_locked_is_not_ready
+       START [         ] (146/757) dante-stack clock::tests::os::the_poller_anchors_the_clock_from_dantesync_s_reply
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact clock::tests::os::the_poller_anchors_the_clock_from_dantesync_s_reply --nocapture
+        PASS [   0.005s] (146/757) dante-stack clock::tests::one_odd_poll_is_held_three_re_anchor
+       START [         ] (147/757) dante-stack clock::tests::os::the_poller_waits_for_a_silent_dantesync
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact clock::tests::os::the_poller_waits_for_a_silent_dantesync --nocapture
+        PASS [   0.006s] (147/757) dante-stack clock::tests::only_the_low_latency_profile_asks_for_real_time_priority
+       START [         ] (148/757) dante-stack clock::tests::stamps_split_and_join_across_the_seconds_wrap
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact clock::tests::stamps_split_and_join_across_the_seconds_wrap --nocapture
+        PASS [   0.023s] (148/757) dante-stack clock::dsyx::tests::random_replies_never_panic
+       START [         ] (149/757) dante-stack clock::tests::the_manual_clock_moves_only_when_asked
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact clock::tests::the_manual_clock_moves_only_when_asked --nocapture
+        PASS [   0.005s] (149/757) dante-stack clock::tests::os::the_box_clocks_read_the_kernel_s
+       START [         ] (150/757) dante-stack clock::tests::the_normal_profile_waits_on_the_timer_and_low_latency_spins
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact clock::tests::the_normal_profile_waits_on_the_timer_and_low_latency_spins --nocapture
+        PASS [   0.005s] (150/757) dante-stack clock::tests::os::the_mono_clock_is_monotonic_plus_k_and_counts_re_anchors
+       START [         ] (151/757) dante-stack clock::tests::the_status_counts_polls_re_anchors_and_holdover_runs
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact clock::tests::the_status_counts_polls_re_anchors_and_holdover_runs --nocapture
+        PASS [   0.005s] (151/757) dante-stack clock::tests::the_normal_profile_waits_on_the_timer_and_low_latency_spins
+       START [         ] (152/757) dante-stack cmc::tests::a_meter_lease_is_renewed_kept_to_its_end_and_stopped
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact cmc::tests::a_meter_lease_is_renewed_kept_to_its_end_and_stopped --nocapture
+        PASS [   0.005s] (152/757) dante-stack clock::tests::the_manual_clock_moves_only_when_asked
+       START [         ] (153/757) dante-stack cmc::tests::anything_but_the_advertisement_request_gets_no_answer
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact cmc::tests::anything_but_the_advertisement_request_gets_no_answer --nocapture
+        PASS [   0.005s] (153/757) dante-stack clock::tests::stamps_split_and_join_across_the_seconds_wrap
+       START [         ] (154/757) dante-stack cmc::tests::our_server_sends_meter_frames_with_the_beat_s_levels_until_the_stop
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact cmc::tests::our_server_sends_meter_frames_with_the_beat_s_levels_until_the_stop --nocapture
+        PASS [   0.004s] (154/757) dante-stack clock::tests::the_status_counts_polls_re_anchors_and_holdover_runs
+       START [         ] (155/757) dante-stack cmc::tests::the_advertisement_and_the_id_carry_the_process_id
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact cmc::tests::the_advertisement_and_the_id_carry_the_process_id --nocapture
+        PASS [   0.080s] (155/757) dante-stack arc::gaps::tests::a_flood_is_one_report_a_minute_with_every_request_counted
+       START [         ] (156/757) dante-stack cmc::tests::the_advertisement_names_the_device_by_its_address
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact cmc::tests::the_advertisement_names_the_device_by_its_address --nocapture
+        PASS [   0.004s] (156/757) dante-stack cmc::tests::a_meter_lease_is_renewed_kept_to_its_end_and_stopped
+       START [         ] (157/757) dante-stack cmc::tests::the_cmc_server_answers_the_advertisement_request
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact cmc::tests::the_cmc_server_answers_the_advertisement_request --nocapture
+        PASS [   0.005s] (157/757) dante-stack cmc::tests::anything_but_the_advertisement_request_gets_no_answer
+       START [         ] (158/757) dante-stack cmc::tests::the_device_id_is_the_address_between_zeros
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact cmc::tests::the_device_id_is_the_address_between_zeros --nocapture
+        PASS [   0.004s] (158/757) dante-stack cmc::tests::the_advertisement_and_the_id_carry_the_process_id
+       START [         ] (159/757) dante-stack ctl::tests::a_bad_request_is_a_fixed_reason_never_its_own_words
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact ctl::tests::a_bad_request_is_a_fixed_reason_never_its_own_words --nocapture
+        PASS [   0.049s] (159/757) dante-stack arc::tests::running_flows_read_the_tx_table_and_the_manager
+       START [         ] (160/757) dante-stack ctl::tests::a_channel_counts_from_1_to_the_device_s_channels
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact ctl::tests::a_channel_counts_from_1_to_the_device_s_channels --nocapture
+        PASS [   0.004s] (160/757) dante-stack cmc::tests::the_advertisement_names_the_device_by_its_address
+       START [         ] (161/757) dante-stack ctl::tests::a_check_reads_its_ring_from_where_it_left_off_to_the_playout_point
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact ctl::tests::a_check_reads_its_ring_from_where_it_left_off_to_the_playout_point --nocapture
+        PASS [   0.004s] (161/757) dante-stack cmc::tests::the_device_id_is_the_address_between_zeros
+       START [         ] (162/757) dante-stack ctl::tests::a_check_too_far_behind_skips_ahead_and_a_clock_gone_back_is_waited_for
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact ctl::tests::a_check_too_far_behind_skips_ahead_and_a_clock_gone_back_is_waited_for --nocapture
+        PASS [   0.005s] (162/757) dante-stack cmc::tests::the_cmc_server_answers_the_advertisement_request
+       START [         ] (163/757) dante-stack ctl::tests::a_check_without_a_playing_flow_waits_and_starts_again_at_the_playout_point
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact ctl::tests::a_check_without_a_playing_flow_waits_and_starts_again_at_the_playout_point --nocapture
+        PASS [   0.016s] (163/757) dante-stack clock::tests::os::the_poller_anchors_the_clock_from_dantesync_s_reply
+       START [         ] (164/757) dante-stack ctl::tests::a_fresh_device_s_status_is_numbers_only
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact ctl::tests::a_fresh_device_s_status_is_numbers_only --nocapture
+        PASS [   0.005s] (164/757) dante-stack ctl::tests::a_bad_request_is_a_fixed_reason_never_its_own_words
+       START [         ] (165/757) dante-stack ctl::tests::a_lane_s_times_show_in_whole_microseconds
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact ctl::tests::a_lane_s_times_show_in_whole_microseconds --nocapture
+        PASS [   0.005s] (165/757) dante-stack ctl::tests::a_channel_counts_from_1_to_the_device_s_channels
+       START [         ] (166/757) dante-stack ctl::tests::a_sine_check_judges_by_its_flow_s_bits
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact ctl::tests::a_sine_check_judges_by_its_flow_s_bits --nocapture
+        PASS [   0.007s] (166/757) dante-stack ctl::tests::a_check_reads_its_ring_from_where_it_left_off_to_the_playout_point
+       START [         ] (167/757) dante-stack ctl::tests::answers_set_sources_and_checks_and_refuse_with_a_reason
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact ctl::tests::answers_set_sources_and_checks_and_refuse_with_a_reason --nocapture
+        PASS [   0.004s] (167/757) dante-stack ctl::tests::a_lane_s_times_show_in_whole_microseconds
+       START [         ] (168/757) dante-stack ctl::tests::each_request_parses
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact ctl::tests::each_request_parses --nocapture
+        PASS [   0.006s] (168/757) dante-stack ctl::tests::a_check_too_far_behind_skips_ahead_and_a_clock_gone_back_is_waited_for
+       START [         ] (169/757) dante-stack ctl::tests::requests_are_counted_by_port_peer_and_opcode_peers_shared_with_what_we_send
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact ctl::tests::requests_are_counted_by_port_peer_and_opcode_peers_shared_with_what_we_send --nocapture
+        PASS [   0.082s] (169/757) dante-stack arc::tests::a_refused_rename_is_counted_never_a_warning_of_its_own
+       START [         ] (170/757) dante-stack ctl::tests::socket::a_client_gone_before_its_answer_ends_the_session_at_once
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact ctl::tests::socket::a_client_gone_before_its_answer_ends_the_session_at_once --nocapture
+        PASS [   0.009s] (170/757) dante-stack ctl::tests::a_check_without_a_playing_flow_waits_and_starts_again_at_the_playout_point
+       START [         ] (171/757) dante-stack ctl::tests::socket::a_long_a_silent_or_a_garbled_request_is_an_error_line
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact ctl::tests::socket::a_long_a_silent_or_a_garbled_request_is_an_error_line --nocapture
+        PASS [   0.004s] (171/757) dante-stack ctl::tests::requests_are_counted_by_port_peer_and_opcode_peers_shared_with_what_we_send
+       START [         ] (172/757) dante-stack ctl::tests::socket::a_session_answers_one_line_and_closes
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact ctl::tests::socket::a_session_answers_one_line_and_closes --nocapture
+        PASS [   0.005s] (172/757) dante-stack ctl::tests::each_request_parses
+       START [         ] (173/757) dante-stack ctl::tests::socket::the_control_socket_is_0660
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact ctl::tests::socket::the_control_socket_is_0660 --nocapture
+        PASS [   0.011s] (173/757) dante-stack ctl::tests::a_sine_check_judges_by_its_flow_s_bits
+       START [         ] (174/757) dante-stack ctl::tests::socket::the_control_socket_serves_and_replaces_a_stale_one
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact ctl::tests::socket::the_control_socket_serves_and_replaces_a_stale_one --nocapture
+        PASS [   0.005s] (174/757) dante-stack ctl::tests::socket::the_control_socket_is_0660
+       START [         ] (175/757) dante-stack ctl::tests::source_engine_on_a_channel_without_an_engine_ring_is_refused
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact ctl::tests::source_engine_on_a_channel_without_an_engine_ring_is_refused --nocapture
+        PASS [   0.042s] (175/757) dante-stack ctl::tests::a_fresh_device_s_status_is_numbers_only
+       START [         ] (176/757) dante-stack ctl::tests::source_engine_parses
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact ctl::tests::source_engine_parses --nocapture
+        PASS [   0.004s] (176/757) dante-stack ctl::tests::source_engine_parses
+       START [         ] (177/757) dante-stack ctl::tests::the_counter_check_says_no_return_after_10_s_without_a_lock
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact ctl::tests::the_counter_check_says_no_return_after_10_s_without_a_lock --nocapture
+        PASS [   0.042s] (177/757) dante-stack ctl::tests::socket::a_client_gone_before_its_answer_ends_the_session_at_once
+       START [         ] (178/757) dante-stack ctl::tests::the_engine_status_is_numbers_only
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact ctl::tests::the_engine_status_is_numbers_only --nocapture
+        PASS [   0.005s] (178/757) dante-stack ctl::tests::the_counter_check_says_no_return_after_10_s_without_a_lock
+       START [         ] (179/757) dante-stack ctl::tests::the_opcodes_counted_are_the_header_s_and_the_info_request_s
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact ctl::tests::the_opcodes_counted_are_the_header_s_and_the_info_request_s --nocapture
+        PASS [   0.042s] (179/757) dante-stack ctl::tests::socket::a_session_answers_one_line_and_closes
+       START [         ] (180/757) dante-stack ctl::tests::the_status_has_no_engine_until_one_is_attached
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact ctl::tests::the_status_has_no_engine_until_one_is_attached --nocapture
+        PASS [   0.042s] (180/757) dante-stack ctl::tests::socket::the_control_socket_serves_and_replaces_a_stale_one
+       START [         ] (181/757) dante-stack ctl::tests::the_status_lists_the_flows_of_both_sides
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact ctl::tests::the_status_lists_the_flows_of_both_sides --nocapture
+        PASS [   0.004s] (181/757) dante-stack ctl::tests::the_opcodes_counted_are_the_header_s_and_the_info_request_s
+       START [         ] (182/757) dante-stack ctl::tests::the_status_names_the_clock_requests_channels_sources_and_checks
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact ctl::tests::the_status_names_the_clock_requests_channels_sources_and_checks --nocapture
+        PASS [   0.076s] (182/757) dante-stack clock::tests::os::the_mono_clock_sleeps_until_a_ptp_time
+       START [         ] (183/757) dante-stack ctl::tests::the_status_shows_the_packets_judge_in_ns_numbers_only
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact ctl::tests::the_status_shows_the_packets_judge_in_ns_numbers_only --nocapture
+        PASS [   0.060s] (183/757) dante-stack ctl::tests::answers_set_sources_and_checks_and_refuse_with_a_reason
+       START [         ] (184/757) dante-stack ctl::tests::the_status_takes_none_of_what_the_heartbeat_takes
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact ctl::tests::the_status_takes_none_of_what_the_heartbeat_takes --nocapture
+        PASS [   0.088s] (184/757) dante-stack ctl::tests::source_engine_on_a_channel_without_an_engine_ring_is_refused
+       START [         ] (185/757) dante-stack ctl::tests::the_tables_are_bounded_peers_past_64_are_0_and_entries_past_256_summed
+             command: /tmp/cargo-mutants-dstack-3UBQwi.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact ctl::tests::the_tables_are_bounded_peers_past_64_are_0_and_entries_past_256_summed --nocapture
+        FAIL [   0.056s] (185/757) dante-stack ctl::tests::the_engine_status_is_numbers_only
+  stdout ───
+
+    running 1 test
+    test ctl::tests::the_engine_status_is_numbers_only ... FAILED
+
+    failures:
+
+    failures:
+        ctl::tests::the_engine_status_is_numbers_only
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 751 filtered out; finished in 0.05s
+
+  stderr ───
+
+    thread 'ctl::tests::the_engine_status_is_numbers_only' (2400131) panicked at crates/dante-stack/src/ctl/tests.rs:1084:5:
+    PumpView { media: false, offset: 224, playout: 96, blocks: 0, late: 0, missed: 0, overruns: 0, rebootstraps: 0, max_process_us: 0 }
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  Cancelling due to test failure: 15 tests still running
+        PASS [   0.215s] (186/757) dante-stack arc::client::tests::a_silent_device_ends_the_request_at_its_wait_and_a_stopped_read_sends_nothing
+        PASS [   0.005s] (187/757) dante-stack ctl::tests::the_tables_are_bounded_peers_past_64_are_0_and_entries_past_256_summed
+        PASS [   0.059s] (188/757) dante-stack ctl::tests::the_status_has_no_engine_until_one_is_attached
+        PASS [   0.058s] (189/757) dante-stack ctl::tests::the_status_lists_the_flows_of_both_sides
+        PASS [   0.059s] (190/757) dante-stack ctl::tests::the_status_names_the_clock_requests_channels_sources_and_checks
+        PASS [   0.116s] (191/757) dante-stack ctl::tests::socket::a_long_a_silent_or_a_garbled_request_is_an_error_line
+        PASS [   0.070s] (192/757) dante-stack ctl::tests::the_status_shows_the_packets_judge_in_ns_numbers_only
+        PASS [   0.064s] (193/757) dante-stack ctl::tests::the_status_takes_none_of_what_the_heartbeat_takes
+        PASS [   0.207s] (194/757) dante-stack arc::tests::the_server_sends_nothing_for_an_opcode_inferno_does_not_answer
+        PASS [   0.213s] (195/757) dante-stack arc::tests::the_server_saves_a_rename_and_signals_it
+        PASS [   0.207s] (196/757) dante-stack clock::tests::os::a_poll_reports_its_reply_sample_event_and_k
+        PASS [   0.762s] (197/757) dante-stack announce::responder::tests::the_responder_answers_from_the_published_records_and_stops_when_dropped
+        PASS [   0.761s] (198/757) dante-stack arc::tests::random_requests_never_panic_and_keep_the_names_valid
+        PASS [   1.007s] (199/757) dante-stack clock::tests::os::the_poller_waits_for_a_silent_dantesync
+        PASS [   3.835s] (200/757) dante-stack cmc::tests::our_server_sends_meter_frames_with_the_beat_s_levels_until_the_stop
+────────────
+     Summary [   3.947s] 200/757 tests run: 199 passed, 1 failed, 0 skipped
+        FAIL [   0.056s] (185/757) dante-stack ctl::tests::the_engine_status_is_numbers_only
+warning: 557/757 tests were not run due to test failure (run with --no-fail-fast to run all tests, or run with --max-fail)
+error: test run failed
+
+*** result: Failure(100)

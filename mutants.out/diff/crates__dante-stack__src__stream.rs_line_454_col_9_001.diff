@@ -1,0 +1,62 @@
+--- crates/dante-stack/src/stream.rs
++++ replace Pump<P>::media -> u64 with 0
+@@ -446,58 +446,17 @@
+     }
+ 
+     /// Every block due at media sample time `now` with the clock at
+     /// `epoch`; returns the media sample time to wake at. The first media
+     /// step (and the first after free pacing) bootstraps, a new epoch
+     /// re-bootstraps (counted); either calls the processor's
+     /// `discontinuity` once before the next block.
+     pub fn media(&mut self, now: u64, epoch: u32) -> u64 {
+-        self.stats.media.store(true, Ordering::Relaxed);
+-        // The device latency the RX delays are planned against moved (Dante
+-        // Controller set it): play at it, the schedule started again.
+-        if let Some(playout) = self.rx.playout()
+-            && playout != self.timing.playout
+-        {
+-            self.timing.playout = playout;
+-            self.stats.retimed(self.timing);
+-            if self.blocks.take().is_some() {
+-                self.stats.rebootstrapped(0);
+-            }
+-        }
+-        let mut blocks = match self.blocks {
+-            Some(mut b) if self.epoch != Some(epoch) => {
+-                self.stats.rebootstrapped(b.rebootstrap(now));
+-                self.discontinuity = true;
+-                b
+-            }
+-            Some(b) => b,
+-            None => {
+-                self.discontinuity = true;
+-                Blocks::bootstrap(now, self.timing)
+-            }
+-        };
+-        self.epoch = Some(epoch);
+-        let wake = loop {
+-            match blocks.next(now) {
+-                Due::Run { start, late } => {
+-                    if late {
+-                        self.stats.late.fetch_add(1, Ordering::Relaxed);
+-                    }
+-                    self.block(start);
+-                }
+-                Due::Wait { until } => break until,
+-                Due::Rebootstrap { skipped } => {
+-                    self.stats.rebootstrapped(skipped);
+-                    self.discontinuity = true;
+-                }
+-            }
+-        };
+-        self.blocks = Some(blocks);
+-        wake
++        0 /* ~ changed by cargo-mutants ~ */
+     }
+ 
+     /// One block while the clock is not ready: silent inputs, the RX rings
+     /// not read, the outputs dropped (nothing reaches the engine rings);
+     /// the next media step bootstraps.
+     pub fn free(&mut self) {
+         self.stats.media.store(false, Ordering::Relaxed);
+         self.blocks = None;

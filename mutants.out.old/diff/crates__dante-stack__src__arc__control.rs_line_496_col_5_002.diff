@@ -1,5 +1,5 @@
 --- crates/dante-stack/src/arc/control.rs
-+++ replace parse_latency_body -> Option<u32> with Some(1)
++++ replace parse_latency_body -> Option<u32> with None
 @@ -488,22 +488,17 @@
      out.extend_from_slice(&ns.to_be_bytes());
      out
@@ -15,7 +15,7 @@
 -        values.get(4..8)?.try_into().ok()?,
 -    ];
 -    (head == LATENCY_SET && values.len() == 8 && a == b).then(|| u32::from_be_bytes(a))
-+    Some(1) /* ~ changed by cargo-mutants ~ */
++    None /* ~ changed by cargo-mutants ~ */
  }
  
  /// Why a latency write was not confirmed.

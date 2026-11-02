@@ -13,9 +13,9 @@
 +        () /* ~ changed by cargo-mutants ~ */
      }
  
+     /// The device latency the flows are planned with, ns.
+     pub fn latency_ns(&self) -> u64 {
+         self.latency_ns
+     }
+ 
      /// The manager of the device `cfg` named `host` at `ip`, whose flow
-     /// slots receive on `ports`; no subscription yet.
-     pub fn new(cfg: &DeviceConfig, host: &str, ip: Ipv4Addr, ports: [u16; MAX_FLOWS]) -> Self {
-         let n = cfg.rx.len();
-         Manager {
-             host: host.to_string(),

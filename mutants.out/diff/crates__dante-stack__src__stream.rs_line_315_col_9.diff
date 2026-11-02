@@ -1,0 +1,22 @@
+--- crates/dante-stack/src/stream.rs
++++ replace PumpStats::retimed with ()
+@@ -307,18 +307,17 @@
+         if took_ns > self.period_ns {
+             self.overruns.fetch_add(1, Ordering::Relaxed);
+         }
+     }
+ 
+     /// A re-bootstrap that skipped `skipped` blocks.
+     /// The pump plays at `timing` now.
+     fn retimed(&self, timing: Timing) {
+-        self.offset.store(timing.offset(), Ordering::Relaxed);
+-        self.playout.store(timing.playout, Ordering::Relaxed);
++        () /* ~ changed by cargo-mutants ~ */
+     }
+ 
+     fn rebootstrapped(&self, skipped: u64) {
+         self.rebootstraps.fetch_add(1, Ordering::Relaxed);
+         self.missed.fetch_add(skipped, Ordering::Relaxed);
+     }
+ 
+     /// The processor panicked in a block of `took_ns`: its message and its
