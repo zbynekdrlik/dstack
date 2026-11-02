@@ -35,6 +35,8 @@ use crate::host::{self, Host, Signals};
 use tokio::time::MissedTickBehavior;
 use tracing::error;
 use tracing_subscriber::EnvFilter;
+#[cfg(windows)]
+use windows::ctl_request;
 
 /// How long `ctl` waits for the device's answer.
 #[cfg(unix)]
@@ -197,14 +199,6 @@ fn card(name: &str, args: &[String]) -> ExitCode {
     }
 }
 
-/// `ctl` on Windows: no control socket there (dasio's tray reads the
-/// device's shared memory), exit 1.
-#[cfg(windows)]
-fn ctl_request(name: &str, _path: &Path, _request: &str) -> ExitCode {
-    eprintln!("{name} ctl: Windows has no control socket");
-    ExitCode::from(1)
-}
-
 /// `ctl`: one request line to the control socket at `path`, its answer
 /// line on stdout (exit 0 for `ok` or the status, 1 otherwise).
 #[cfg(unix)]
@@ -236,6 +230,11 @@ fn ctl_request(name: &str, path: &Path, request: &str) -> ExitCode {
         ExitCode::from(1)
     }
 }
+
+// Windows-only glue in a file of its own, which the mutation gate (on
+// Linux) leaves out: it can never compile it there.
+#[cfg(windows)]
+mod windows;
 
 #[cfg(test)]
 mod tests;
