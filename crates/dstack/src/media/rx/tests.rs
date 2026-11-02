@@ -1135,3 +1135,16 @@ impl std::io::Write for LogSink {
         Ok(())
     }
 }
+
+/// `flow_slots` (dstack #1): only that many RX sockets; the rest of the
+/// slots have no port.
+#[test]
+fn only_the_device_s_flow_slots_get_rx_sockets() {
+    let rings: Arc<[Ring]> = Vec::new().into();
+    let s = RxShared::with_slots(96_000, Ipv4Addr::LOCALHOST, rings, None, 3).unwrap();
+    let ports = s.ports().unwrap();
+    assert!(ports[..3].iter().all(|&p| p != 0));
+    assert!(ports[3..].iter().all(|&p| p == 0));
+    assert!(s.local_addr(2).is_ok());
+    assert!(s.local_addr(3).is_err());
+}

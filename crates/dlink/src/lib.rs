@@ -81,6 +81,7 @@ pub struct Config {
     process_id: Option<u16>,
     rx_port_base: Option<u16>,
     subscribe: Vec<(usize, String, String)>,
+    flow_slots: Option<usize>,
 }
 
 /// A device's own control ports, for a second device on one address (the
@@ -110,6 +111,7 @@ impl Config {
             process_id: None,
             rx_port_base: None,
             subscribe: Vec::new(),
+            flow_slots: None,
         }
     }
 
@@ -181,6 +183,14 @@ impl Config {
         self
     }
 
+    /// At most `n` TX flows and `n` RX flows at once (1 to 32; 32 unless
+    /// set): the device opens a socket for each, so an app that needs one
+    /// or two flows holds few sockets.
+    pub fn flow_slots(mut self, n: usize) -> Self {
+        self.flow_slots = Some(n);
+        self
+    }
+
     /// The device config dstack runs: the normal timing profile, the pump
     /// margin half the latency, 24-bit. Every problem is listed, as a
     /// config file's would be.
@@ -208,6 +218,12 @@ impl Config {
         }
         if let Some(id) = self.process_id {
             t.insert("process_id".into(), i64::from(id).into());
+        }
+        if let Some(n) = self.flow_slots {
+            t.insert(
+                "flow_slots".into(),
+                to_int(u64::try_from(n).unwrap_or(u64::MAX)).into(),
+            );
         }
         if let Some(base) = self.rx_port_base {
             t.insert("rx_port_base".into(), i64::from(base).into());

@@ -182,6 +182,13 @@ pub struct DeviceConfig {
     /// channel number (from 1) at most once, the names Dante's.
     #[serde(default)]
     pub subscribe: Vec<Declared>,
+    /// How many flow slots each direction opens a socket for, 1 to
+    /// [`crate::media::rx::MAX_FLOWS`] (32 when left out): at most this
+    /// many TX flows and this many RX flows at once. Fewer sockets for a
+    /// device that needs few flows: on a Windows 10 PC the idle ones were
+    /// suspected of lengthening a WFP receive DPC (dstack #1, dasio#1).
+    #[serde(default = "default_flow_slots")]
+    pub flow_slots: usize,
     /// Where the state ([`DeviceState`]) is kept.
     pub state_file: PathBuf,
 }
@@ -383,6 +390,9 @@ impl DeviceConfig {
                 ));
             }
         }
+        if !(1..=crate::media::rx::MAX_FLOWS).contains(&self.flow_slots) {
+            out.push(format!("flow_slots: 1 to {}", crate::media::rx::MAX_FLOWS));
+        }
         let mut seen = Vec::new();
         for d in &self.subscribe {
             let sub = Subscription {
@@ -447,6 +457,10 @@ fn default_cmc_port() -> u16 {
 
 fn default_flows_port() -> u16 {
     crate::flows::control::PORT
+}
+
+fn default_flow_slots() -> usize {
+    crate::media::rx::MAX_FLOWS
 }
 
 fn default_block() -> u64 {

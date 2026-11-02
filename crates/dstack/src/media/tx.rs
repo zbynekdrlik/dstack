@@ -199,7 +199,9 @@ pub struct TxFlow {
 #[derive(Debug)]
 pub struct TxTable {
     flows: Vec<Option<TxFlow>>,
-    /// The next slot to try, mod [`MAX_FLOWS`] (inferno's `flow_seq_id`).
+    /// The slots it fills: 0 to this (the device's `flow_slots`).
+    slots: usize,
+    /// The next slot to try, mod `slots` (inferno's `flow_seq_id`).
     seq: u32,
     /// The cookies' generator state.
     rng: u64,
@@ -209,8 +211,15 @@ impl TxTable {
     /// An empty table; `seed` starts the cookies (the daemon gives it the
     /// time, tests a constant).
     pub fn new(seed: u64) -> Self {
+        Self::with_slots(seed, MAX_FLOWS)
+    }
+
+    /// An empty table that fills only slots 0 to `slots` (at most
+    /// [`MAX_FLOWS`]).
+    pub fn with_slots(seed: u64, slots: usize) -> Self {
         TxTable {
             flows: vec![None; MAX_FLOWS],
+            slots: slots.min(MAX_FLOWS),
             seq: 0,
             rng: seed,
         }
@@ -236,8 +245,8 @@ impl TxTable {
             return Ok((slot, control::handle(slot as u32, flow.cookie)));
         }
         self.free_expired();
-        for _ in 0..MAX_FLOWS {
-            let slot = (self.seq % MAX_FLOWS as u32) as usize;
+        for _ in 0..self.slots {
+            let slot = self.seq as usize % self.slots;
             self.seq = self.seq.wrapping_add(1);
             if self.flows[slot].is_none() {
                 let cookie = self.cookie();
@@ -657,8 +666,9 @@ impl TxShared {
                 ),
             ));
         }
+        let slots = cfg.flow_slots;
         let mut send_buffer = 0;
-        let sockets = (0..MAX_FLOWS)
+        let sockets = (0..slots.min(MAX_FLOWS))
             .map(|_| {
                 let s = UdpSocket::bind(SocketAddrV4::new(ip, 0))?;
                 s.set_nonblocking(true)?;
@@ -686,7 +696,7 @@ impl TxShared {
                 .collect(),
             cfg,
             control: Mutex::new(Control {
-                table: TxTable::new(seed),
+                table: TxTable::with_slots(seed, slots),
                 seen: [0; MAX_FLOWS],
             }),
             plans: std::array::from_fn(|_| Cell::new()),

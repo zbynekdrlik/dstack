@@ -251,6 +251,9 @@ pub struct Manager {
     /// longest ago (a transmitter still sending to an old flow's port finds
     /// no new flow there).
     freed: [Option<u64>; MAX_FLOWS],
+    /// The slots it fills: 0 to this (the device's `flow_slots`, the RX
+    /// thread's sockets).
+    slots: usize,
     generation: u32,
     peers: BTreeMap<Ipv4Addr, Peer>,
     /// The least fpp each transmitter is asked for, after it refused a
@@ -304,6 +307,7 @@ impl Manager {
             routes: vec![None; n],
             failed: vec![None; n],
             flows: vec![None; MAX_FLOWS],
+            slots: cfg.flow_slots.min(MAX_FLOWS),
             freed: [None; MAX_FLOWS],
             generation: 0,
             peers: BTreeMap::new(),
@@ -817,7 +821,7 @@ impl Manager {
     /// The free flow slot freed longest ago (never used first, then the
     /// lowest).
     fn free_slot(&self) -> Option<usize> {
-        (0..MAX_FLOWS)
+        (0..self.slots)
             .filter(|&s| self.flows[s].is_none())
             .min_by_key(|&s| (self.freed[s], s))
     }
