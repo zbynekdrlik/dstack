@@ -16,6 +16,7 @@ fn clock_polls_once_and_ends_on_every_platform() {
 #[cfg(windows)]
 #[test]
 fn ctl_refuses_on_windows() {
+    use std::path::Path;
     assert_eq!(
         code(ctl_request("test", Path::new("control.sock"), "status")),
         code(ExitCode::from(1))

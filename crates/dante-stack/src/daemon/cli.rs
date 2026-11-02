@@ -21,6 +21,7 @@ use std::io::Write;
 use std::io::{BufRead, BufReader};
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
+#[cfg(unix)]
 use std::path::Path;
 use std::process::ExitCode;
 use std::sync::atomic::AtomicI32;
