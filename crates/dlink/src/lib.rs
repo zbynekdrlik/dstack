@@ -5,6 +5,13 @@
 //! carry it in their own process and appear on the Dante network as a
 //! device of their own, under their own name.
 //!
+//! Its media clock is dsync's in-process follower (dsync-ptp) when it is
+//! locked, and the PC's dsync service otherwise: it works whether the
+//! service runs or not, and is never worse than it (owner, 2.11.2026). On
+//! Linux the follower needs port 319 (CAP_NET_BIND_SERVICE); without it
+//! the device logs why and runs on the service. On Windows the follower
+//! comes with dsync's run-time Npcap load.
+//!
 //! It needs no low latency: the device latency is 10 ms unless the app
 //! asks for another (4 ms at the least), and it asks the app for no
 //! real-time setup. Its media threads run at normal priority, unpinned,
@@ -209,15 +216,17 @@ pub struct Link {
 impl Link {
     /// Starts the device of `config` on `place`, running `processor` every
     /// block on the RX channels `map.rx` into the TX channels `map.tx`.
-    /// Its media clock is the PC's dsync. Call it outside any tokio
-    /// runtime: the device runs its own.
+    /// Its media clock is dsync's in-process follower when it is locked
+    /// and the PC's dsync service otherwise (the owner's rule, dstack #68:
+    /// a clock with or without the service, never worse than it). Call it
+    /// outside any tokio runtime: the device runs its own.
     pub fn start<P: Process + 'static>(
         config: &Config,
         place: &Place,
         map: Map,
         processor: P,
     ) -> Result<Link, HostError> {
-        Self::start_on(config, place, map, processor, ClockSource::Dantesync)
+        Self::start_on(config, place, map, processor, ClockSource::Linked)
     }
 
     /// [`Link::start`] on the clock `source` (`ClockSource::System` is for

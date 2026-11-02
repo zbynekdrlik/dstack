@@ -344,6 +344,8 @@ pub fn from_stamp(secs: u32, sub: u32, rate: u32, near: u64) -> u64 {
 }
 
 #[cfg(any(target_os = "linux", windows))]
+pub mod linked;
+#[cfg(any(target_os = "linux", windows))]
 pub use os::{DANTESYNC, MonoClock, POLL, Poller, monotonic_ns, poll_dantesync, realtime_ns};
 
 /// How a media thread's wait ends on Windows (dstack #1 problem A).
