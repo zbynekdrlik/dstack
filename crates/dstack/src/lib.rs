@@ -102,6 +102,7 @@ pub mod health;
 pub mod host;
 pub mod info;
 pub mod latency;
+pub mod lso;
 pub mod media;
 pub mod meter;
 pub mod qdisc;

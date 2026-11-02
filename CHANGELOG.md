@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.3 (2026-11-02)
+
+- New on Windows (#1): the start line checks the Dante NIC's large send offload (the adapter's `*LsoV2IPv4` / `*LsoV1IPv4` settings, read by its GUID) and warns when it is on. With LSO on, another sender's large sends delay our packets. The device never changes the NIC; turning LSO off is the PC owner's step. `lso::verdict` is the decision.
+
 ## 0.5.2 (2026-11-02)
 
 - New in dlink (intercom#5: the intercom hub and OBS as two dlink devices on one PC):
