@@ -976,10 +976,20 @@ fn the_records_come_once_the_clock_is_ready_and_each_beat_takes_its_own_second()
         levels: Arc::default(),
         stats: Arc::default(),
     };
-    // Not ready: no records, nothing taken.
+    // Not ready: no records, nothing taken, no clock stats.
     rings[2].write_at(5, &[i32::MAX / 10]);
     assert_eq!(sources.records(), None);
+    sources.stats.set_grandmaster([0x02, 0, 0, 0, 0, 5]);
+    assert_eq!(sources.clock(), None);
     clock.set_ready(true);
+    // Ready with a grandmaster: a follower at dsync's adjustment.
+    assert_eq!(
+        sources.clock(),
+        Some(Follower {
+            grandmaster: [0x02, 0, 0, 0, 0, 5],
+            freq_ppb: -1234
+        })
+    );
     // Slots 1 and 2 each receive a packet 300 samples late.
     let mut receiver = Receiver::new(Arc::clone(&rx)).unwrap();
     let plan = RxPlan {
