@@ -88,3 +88,37 @@ fn a_config_the_device_refuses_is_a_setup_error_before_anything_runs() {
         other => panic!("{other:?}"),
     }
 }
+
+#[test]
+fn a_second_device_s_ports_process_id_and_rx_port_base_are_taken() {
+    let cfg = config()
+        .ports(Ports {
+            arc: 4441,
+            cmc: 8801,
+            flows: 4456,
+        })
+        .process_id(1)
+        .rx_port_base(40_000)
+        .device()
+        .unwrap();
+    assert_eq!(
+        (cfg.arc_port, cfg.cmc_port, cfg.flows_port),
+        (4441, 8801, 4456)
+    );
+    assert_eq!(cfg.process_id, 1);
+    assert_eq!(cfg.rx_port_base, Some(40_000));
+    // Unset, they are Dante's defaults and the OS's RX ports.
+    let plain = config().device().unwrap();
+    assert_eq!(
+        (plain.arc_port, plain.cmc_port, plain.flows_port),
+        (4440, 8800, 4455)
+    );
+    assert_eq!(plain.process_id, 0);
+    assert_eq!(plain.rx_port_base, None);
+    // A base whose 32 ports collide with our own control ports is refused.
+    let clash = config().rx_port_base(4440).device().unwrap_err();
+    assert!(
+        clash.iter().any(|p| p.starts_with("rx_port_base")),
+        "{clash:?}"
+    );
+}

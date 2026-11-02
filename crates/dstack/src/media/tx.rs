@@ -1236,16 +1236,48 @@ pub fn spawn(clock: Arc<dyn PtpClock>, shared: Arc<TxShared>) -> io::Result<Join
         .spawn(move || run(clock.as_ref(), shared))
 }
 
+/// What a media thread got of the priority its profile asks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Priority {
+    /// Real-time priority, as asked.
+    Granted,
+    /// Normal priority, as the normal profile asks (dlink).
+    Normal,
+    /// Real-time priority asked and refused.
+    Refused,
+}
+
+/// The outcome for a thread whose profile asks real-time priority
+/// (`asked`) and whose ask succeeded (`granted`).
+pub(crate) fn priority_outcome(asked: bool, granted: bool) -> Priority {
+    match (asked, granted) {
+        (false, _) => Priority::Normal,
+        (true, true) => Priority::Granted,
+        (true, false) => Priority::Refused,
+    }
+}
+
+/// Asks the priority for the calling media thread named `thread` (the
+/// profile's, [`ask_realtime`]) and logs what it got: info when it is what
+/// the profile asks, a warning when real-time priority was refused.
+pub(crate) fn take_priority(thread: &str, priority: i32) {
+    let asked = crate::clock::realtime_for(crate::clock::profile());
+    match priority_outcome(asked, ask_realtime(priority)) {
+        Priority::Granted => info!(thread, priority, "runs SCHED_FIFO"),
+        Priority::Normal => info!(
+            thread,
+            "runs at normal priority (the normal timing profile)"
+        ),
+        Priority::Refused => warn!(
+            thread,
+            priority, "real-time priority refused: runs at normal priority"
+        ),
+    }
+}
+
 /// The TX thread's loop (glue: every decision is [`Transmitter`]'s).
 fn run(clock: &dyn PtpClock, shared: Arc<TxShared>) {
-    if ask_realtime(TX_PRIORITY) {
-        info!(priority = TX_PRIORITY, "TX thread runs SCHED_FIFO");
-    } else {
-        warn!(
-            priority = TX_PRIORITY,
-            "TX thread runs at normal priority: the normal timing profile, or real-time priority refused"
-        );
-    }
+    take_priority("TX thread", TX_PRIORITY);
     place("TX thread", shared.cfg.io_cpu);
     // Held while the thread runs: deep idle states delay every packet
     // after its send (`super::qos`).

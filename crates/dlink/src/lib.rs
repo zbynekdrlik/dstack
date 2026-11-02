@@ -70,6 +70,18 @@ pub struct Config {
     latency_ns: u64,
     manufacturer: String,
     model: String,
+    ports: Option<Ports>,
+    process_id: Option<u16>,
+    rx_port_base: Option<u16>,
+}
+
+/// A device's own control ports, for a second device on one address (the
+/// first keeps Dante's defaults: ARC 4440, CMC 8800, flows 4455).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Ports {
+    pub arc: u16,
+    pub cmc: u16,
+    pub flows: u16,
 }
 
 impl Config {
@@ -86,6 +98,9 @@ impl Config {
             latency_ns: LATENCY_NS,
             manufacturer: "dlink".to_string(),
             model: "dlink".to_string(),
+            ports: None,
+            process_id: None,
+            rx_port_base: None,
         }
     }
 
@@ -121,6 +136,27 @@ impl Config {
         self
     }
 
+    /// The control ports, when another device on the same address holds
+    /// Dante's defaults (several apps on one PC, intercom#5).
+    pub fn ports(mut self, ports: Ports) -> Self {
+        self.ports = Some(ports);
+        self
+    }
+
+    /// The process id that tells this device apart from the others on the
+    /// same address (0 unless set; each device on an address needs its own).
+    pub fn process_id(mut self, id: u16) -> Self {
+        self.process_id = Some(id);
+        self
+    }
+
+    /// The RX flows' ports from `base` (`base` to `base + 31`), for a
+    /// firewall that names them; the OS picks free ones unless set.
+    pub fn rx_port_base(mut self, base: u16) -> Self {
+        self.rx_port_base = Some(base);
+        self
+    }
+
     /// The device config dstack runs: the normal timing profile, the pump
     /// margin half the latency, 24-bit. Every problem is listed, as a
     /// config file's would be.
@@ -141,6 +177,17 @@ impl Config {
             "state_file".into(),
             self.state_file.to_string_lossy().into_owned().into(),
         );
+        if let Some(p) = self.ports {
+            t.insert("arc_port".into(), i64::from(p.arc).into());
+            t.insert("cmc_port".into(), i64::from(p.cmc).into());
+            t.insert("flows_port".into(), i64::from(p.flows).into());
+        }
+        if let Some(id) = self.process_id {
+            t.insert("process_id".into(), i64::from(id).into());
+        }
+        if let Some(base) = self.rx_port_base {
+            t.insert("rx_port_base".into(), i64::from(base).into());
+        }
         t.insert("rx".into(), self.rx.clone().into());
         t.insert("tx".into(), self.tx.clone().into());
         let text = toml::to_string(&t).map_err(|e| vec![e.to_string()])?;

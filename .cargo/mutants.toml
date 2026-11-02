@@ -45,6 +45,9 @@ exclude_re = [
   # Windows-only (cfg(windows)) power-throttling call: not compiled on the
   # gate's Linux, so its mutants build and cannot fail; CI runs it on Windows.
   "tx.rs.*unthrottle",
+  # The OS priority call and its log line; the decision is priority_outcome
+  # (tested), the call is ask_realtime (excluded above).
+  "tx.rs.*take_priority",
   # Log-only: the qdisc verdict is tested in qdisc::check.
   "qdisc.rs.*report",
   "replace set_profile -> bool",

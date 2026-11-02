@@ -59,11 +59,11 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use mio::{Events, Interest, Poll, Token};
-use tracing::{info, warn};
+use tracing::info;
 
 use super::packet::{self, MEDIA_HEADER};
 use super::ring::Ring;
-use super::tx::{Cell, MAX_CHANNELS, ask_realtime, ns_of, place};
+use super::tx::{Cell, MAX_CHANNELS, ns_of, place, take_priority};
 use crate::clock::{self, PtpClock};
 use crate::wire::MAX_DATAGRAM;
 
@@ -899,14 +899,7 @@ fn failed_wait(shared: &RxShared, e: &io::Error) -> bool {
 /// The RX thread's loop (glue: every decision is [`Receiver`]'s and
 /// [`failed_wait`]'s).
 fn run(clock: &dyn PtpClock, shared: &RxShared, mut rx: Receiver, cpu: Option<usize>) {
-    if ask_realtime(RX_PRIORITY) {
-        info!(priority = RX_PRIORITY, "RX thread runs SCHED_FIFO");
-    } else {
-        warn!(
-            priority = RX_PRIORITY,
-            "RX thread runs at normal priority: the normal timing profile, or real-time priority refused"
-        );
-    }
+    take_priority("RX thread", RX_PRIORITY);
     place("RX thread", cpu);
     info!(
         bytes = shared.recv_buffer(),

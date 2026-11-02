@@ -62,12 +62,11 @@ use std::time::{Duration, Instant};
 use dstack_audio_io::hist::{HistSnapshot, StreamHists};
 use dstack_audio_io::telemetry::period_ns;
 use dstack_audio_io::{Block, Process, StreamStats, panic_message};
-use tracing::{info, warn};
 
 use crate::clock::{PtpClock, to_samples};
 use crate::media::ring::Ring;
 use crate::media::rx::RxShared;
-use crate::media::tx::{DISCONTINUITY, TxShared, ask_realtime, ns_of, place};
+use crate::media::tx::{DISCONTINUITY, TxShared, ns_of, place, take_priority};
 
 /// The engine's default block, frames: the B = 32 of the RT contract, what
 /// the device's `block` is when the config leaves it out.
@@ -632,14 +631,7 @@ pub fn spawn<P: Process + 'static>(
 /// and [`free_deadline`]'s): on the media clock while it is ready, paced on
 /// `Instant` deadlines a block apart while it is not.
 fn run<P: Process>(clock: &dyn PtpClock, mut pump: Pump<P>, stop: &AtomicBool) {
-    if ask_realtime(ENGINE_PRIORITY) {
-        info!(priority = ENGINE_PRIORITY, "engine pump runs SCHED_FIFO");
-    } else {
-        warn!(
-            priority = ENGINE_PRIORITY,
-            "engine pump runs at normal priority: the normal timing profile, or real-time priority refused"
-        );
-    }
+    take_priority("engine pump", ENGINE_PRIORITY);
     place("engine pump", pump.tx.cfg.pump_cpu);
     let rate = pump.tx.cfg.sample_rate;
     let period = Duration::from_nanos(pump.stats.period_ns);

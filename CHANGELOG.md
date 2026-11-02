@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.2 (2026-11-02)
+
+- New in dlink (intercom#5: the intercom hub and OBS as two dlink devices on one PC):
+  - `Config::ports(Ports { arc, cmc, flows })` sets a second device's control ports.
+  - `Config::process_id(id)` gives each device on an address its own id.
+  - `Config::rx_port_base(base)` fixes the RX flow ports for a firewall.
+  - Unset, they keep Dante's defaults and OS-picked RX ports.
+- Fix: under the normal profile (dlink) a media thread at normal priority logs at info ("runs at normal priority (the normal timing profile)"). A warning now means only that real-time priority was asked and refused. The lines name the thread in a `thread` field.
+
 ## 0.5.1 (2026-11-02)
 
 - New: the `dlink` crate (#68, owner 2.11.2026), the Dante device an application embeds (OBS, SongPlayer, the intercom).
