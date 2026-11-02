@@ -68,6 +68,13 @@ impl Flows for NoFlows {
             .unwrap_or_else(PoisonError::into_inner)
             .set_host(name);
     }
+
+    fn set_latency(&self, ns: u64) {
+        self.rx
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .set_latency(ns);
+    }
 }
 
 /// netaudio's start code; Dante Controller's is 0x2729.
@@ -281,6 +288,7 @@ fn subs_changed(rx: &[usize]) -> Change {
         renamed_rx: Vec::new(),
         subscriptions: rx.to_vec(),
         device_renamed: false,
+        latency: None,
     }
 }
 
@@ -2220,6 +2228,23 @@ fn running_flows_read_the_tx_table_and_the_manager() {
 }
 
 #[test]
+fn a_latency_set_on_the_running_flows_reaches_the_manager_and_the_tx_side() {
+    let cfg = config();
+    assert_eq!((cfg.latency_ns, cfg.tx_latency_ns), (1_000_000, None));
+    let rings: Arc<[crate::media::ring::Ring]> = (0..cfg.rx.len())
+        .map(|_| crate::media::ring::Ring::new())
+        .collect::<Vec<_>>()
+        .into();
+    let running = Running {
+        tx: Arc::new(TxShared::new(cfg.clone(), Ipv4Addr::LOCALHOST, rings, 3, &[]).unwrap()),
+        rx: Arc::new(Mutex::new(manager_of(&cfg))),
+    };
+    running.set_latency(4_000_000);
+    assert_eq!(running.rx.lock().unwrap().latency_ns(), 4_000_000);
+    assert_eq!(running.tx.advertised_latency_ns(), 4_000_000);
+}
+
+#[test]
 fn a_request_inferno_cannot_read_gets_no_reply() {
     // inferno fails reading these bodies before it answers.
     let mut dev = Dev::new(config());
@@ -2712,6 +2737,7 @@ fn a_device_rename_carries_its_change() {
                 renamed_rx: Vec::new(),
                 subscriptions: Vec::new(),
                 device_renamed: true,
+                latency: None,
             }
         ),
         other => panic!("{other:?}"),
@@ -2799,4 +2825,107 @@ fn the_manager_asks_under_its_new_host() {
         panic!("{actions:?}");
     };
     assert_eq!(req.rx_host, "stage-left");
+}
+
+#[test]
+fn a_latency_write_is_taken_kept_and_survives_a_restart() {
+    use super::control::{
+        SETTING_KEYS, SETTINGS_START, latency_request_body, parse_settings, settings_request_body,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let mut device = Device::load(config_in(dir.path())).unwrap();
+    assert_eq!(device.cfg.latency_ns, 1_000_000);
+    let write = request(
+        NETAUDIO,
+        1,
+        op::SETTINGS_SET,
+        0,
+        &latency_request_body(2_000_000),
+    );
+    match respond_idle(&mut device, &write) {
+        ArcOutcome::Changed(bytes, change) => {
+            let (h, body) = Header::parse(&bytes).unwrap();
+            assert_eq!((h.op1, h.op2, body.len()), (op::SETTINGS_SET, STATUS_OK, 0));
+            assert_eq!(change.latency, Some(2_000_000));
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(device.cfg.latency_ns, 2_000_000);
+    assert_eq!(
+        (device.state.latency_ns, device.state.config_latency_ns),
+        (Some(2_000_000), Some(1_000_000))
+    );
+    // The settings read shows it, configured and in effect.
+    let read = request(
+        SETTINGS_START,
+        2,
+        op::ZEROS_1100,
+        0,
+        &settings_request_body(&SETTING_KEYS),
+    );
+    let s = parse_settings(&decode(respond_idle(&mut device, &read)).body).unwrap();
+    assert_eq!(
+        (s.latency_configured_ns, s.latency_active_ns),
+        (Some(2_000_000), Some(2_000_000))
+    );
+    // A second write keeps the config's value it was set against.
+    let again = request(
+        NETAUDIO,
+        3,
+        op::SETTINGS_SET,
+        0,
+        &latency_request_body(3_000_000),
+    );
+    assert!(decode(respond_idle(&mut device, &again)).changed);
+    assert_eq!(device.state.config_latency_ns, Some(1_000_000));
+    // A restart: the same config, the Controller's latency kept.
+    let back = Device::load(config_in(dir.path())).unwrap();
+    assert_eq!(back.cfg.latency_ns, 3_000_000);
+    // A config that says another latency since: the config wins, and the
+    // state file drops the Controller's value.
+    let mut changed = config_in(dir.path());
+    changed.latency_ns = 5_000_000;
+    let after = Device::load(changed.clone()).unwrap();
+    assert_eq!(after.cfg.latency_ns, 5_000_000);
+    assert_eq!(
+        (after.state.latency_ns, after.state.config_latency_ns),
+        (None, None)
+    );
+    assert_eq!(
+        Device::load(changed).unwrap().state,
+        after.state,
+        "saved so"
+    );
+}
+
+#[test]
+fn a_latency_the_config_refuses_is_refused_and_another_form_unanswered() {
+    use super::control::latency_request_body;
+    let dir = tempfile::tempdir().unwrap();
+    let mut device = Device::load(config_in(dir.path())).unwrap();
+    let before = device.clone();
+    // 1 us: below tx_fpp_max frames + the margin, which our TX needs.
+    let tiny = request(
+        NETAUDIO,
+        1,
+        op::SETTINGS_SET,
+        0,
+        &latency_request_body(1_000),
+    );
+    let answer = decode(respond_idle(&mut device, &tiny));
+    assert_eq!((answer.header.op2, answer.changed), (STATUS_ERROR, false));
+    assert_eq!(device, before);
+    // Two different values, or a short body: not the latency write.
+    let mut odd = latency_request_body(2_000_000);
+    odd[29] = 1;
+    for body in [odd, latency_request_body(2_000_000)[..29].to_vec()] {
+        let req = request(NETAUDIO, 2, op::SETTINGS_SET, 0, &body);
+        assert_eq!(
+            respond_idle(&mut device, &req),
+            ArcOutcome::Unanswered {
+                op1: op::SETTINGS_SET
+            }
+        );
+    }
+    assert_eq!(device, before);
 }

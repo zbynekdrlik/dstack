@@ -489,6 +489,18 @@ pub fn latency_request_body(ns: u32) -> Vec<u8> {
     out
 }
 
+/// The latency a write's body sets (0x1101), when the body is netaudio's
+/// own form ([`latency_request_body`]) with the same value twice; `None`
+/// for any other body.
+pub fn parse_latency_body(body: &[u8]) -> Option<u32> {
+    let (head, values) = body.split_at_checked(LATENCY_SET.len())?;
+    let [a, b]: [[u8; 4]; 2] = [
+        values.get(0..4)?.try_into().ok()?,
+        values.get(4..8)?.try_into().ok()?,
+    ];
+    (head == LATENCY_SET && values.len() == 8 && a == b).then(|| u32::from_be_bytes(a))
+}
+
 /// Why a latency write was not confirmed.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum WriteError {

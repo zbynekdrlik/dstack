@@ -1,0 +1,27 @@
+--- crates/dante-stack/src/device.rs
++++ replace Device::load -> io::Result<Self> with Ok(Default::default())
+@@ -507,23 +507,17 @@
+ impl Device {
+     /// The device as it starts: `cfg`, with the names of its state file
+     /// (the config's when there is none; one with other channel counts
+     /// fitted to `cfg` and saved; [`DeviceState::load_or_default`]).
+     /// A latency Dante Controller set holds over the config's
+     /// ([`DeviceState::latency_for`]); a config that changed its own since
+     /// drops it, and the state is saved without it.
+     pub fn load(mut cfg: DeviceConfig) -> io::Result<Self> {
+-        let mut state = DeviceState::load_or_default(&cfg)?;
+-        let (latency, dropped) = state.latency_for(&cfg);
+-        if dropped {
+-            state.save(&cfg.state_file)?;
+-        }
+-        cfg.latency_ns = latency;
+-        Ok(Self { cfg, state })
++        Ok(Default::default()) /* ~ changed by cargo-mutants ~ */
+     }
+ }
+ 
+ /// An RX channel's subscription: the TX channel and the device it comes
+ /// from, by their Dante names (as Dante Controller sets them, ARC 0x3010).
+ #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+ #[serde(deny_unknown_fields)]
+ pub struct Subscription {

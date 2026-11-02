@@ -780,14 +780,69 @@ fn a_latency_write_the_device_ignores_or_refuses_is_not_confirmed() {
     );
 }
 
+/// Our device as `respond` answers it (the ARC server's own path, the
+/// latency write included), its state file in a folder of its own.
+struct OwnDevice {
+    device: crate::device::Device,
+    tx: TxTable,
+    rx: Manager,
+    seq: u16,
+    _dir: tempfile::TempDir,
+}
+
+impl OwnDevice {
+    fn new() -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = DeviceConfig::from_toml(TEST_DEVICE).expect("the test device");
+        cfg.state_file = dir.path().join("state.toml");
+        let rx = Manager::new(&cfg, &cfg.name, Ipv4Addr::new(10, 0, 0, 10), [0; MAX_FLOWS]);
+        OwnDevice {
+            device: crate::device::Device::load(cfg).unwrap(),
+            tx: TxTable::new(7),
+            rx,
+            seq: 0,
+            _dir: dir,
+        }
+    }
+}
+
+impl Call for OwnDevice {
+    fn call(&mut self, op1: u16, body: &[u8]) -> Result<(u16, Vec<u8>), ReadError> {
+        self.call_as(START, op1, body)
+    }
+    fn call_as(&mut self, start: u16, op1: u16, body: &[u8]) -> Result<(u16, Vec<u8>), ReadError> {
+        self.seq = self.seq.wrapping_add(1);
+        let req = request(start, self.seq, op1, 0, body);
+        let live = Live {
+            tx: &self.tx,
+            rx: &self.rx,
+        };
+        let bytes = match crate::arc::respond(&mut self.device, &live, &req) {
+            ArcOutcome::Reply(b) | ArcOutcome::Changed(b, _) => b,
+            _ => return Err(ReadError::Timeout { op: op1 }),
+        };
+        let (h, body) = Header::parse(&bytes).expect("a reply parses");
+        Ok((h.op2, body.to_vec()))
+    }
+}
+
 #[test]
-fn a_latency_write_to_our_own_device_is_not_answered() {
-    // Our latency is the config's; 0x1101 stays unanswered, as inferno
-    // leaves it (a refusal once made Dante Controller ask again thousands
-    // of times a second): the write is an error, never a silent success.
-    let mut own = Own::new();
+fn a_latency_write_to_our_own_device_is_confirmed_end_to_end() {
+    // dante-asio #2 (owner, 30.10): what Dante Controller sets is settable
+    // on ours. Our device takes netaudio's write, and the reads before and
+    // after show only the latency changed.
+    let mut own = OwnDevice::new();
+    let after = set_latency(&mut own, 2_000_000).unwrap();
+    assert_eq!(after.latency_configured_ns, Some(2_000_000));
+    assert_eq!(after.latency_active_ns, Some(2_000_000));
+    assert_eq!(own.device.cfg.latency_ns, 2_000_000);
+    // One the config's rules refuse: refused, nothing changed.
     assert_eq!(
-        set_latency(&mut own, 250_000),
-        Err(WriteError::Read(ReadError::Timeout { op: 0x1101 }))
+        set_latency(&mut own, 1_000),
+        Err(WriteError::Read(ReadError::Refused {
+            op: 0x1101,
+            status: crate::wire::STATUS_ERROR
+        }))
     );
+    assert_eq!(own.device.cfg.latency_ns, 2_000_000);
 }

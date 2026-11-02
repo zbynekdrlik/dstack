@@ -204,6 +204,10 @@ pub struct Change {
     /// The device's own name changed: the records are announced under it
     /// and our flow requests carry it ([`Flows::renamed`]).
     pub device_renamed: bool,
+    /// Dante Controller set the device latency to this, ns: the manager and
+    /// the TX side take it live ([`Flows::set_latency`]) and the records
+    /// are announced with it.
+    pub latency: Option<u64>,
 }
 
 /// What a request comes to.
@@ -263,6 +267,8 @@ pub trait Flows: Send + Sync + 'static {
     fn subscribe(&self, subs: &[Option<Subscription>]) -> Vec<usize>;
     /// The device was renamed to `name`.
     fn renamed(&self, name: &str);
+    /// The device latency is `ns` now (a Dante Controller write).
+    fn set_latency(&self, ns: u64);
 }
 
 /// The daemon's flows (plan Task 7): the TX side's table and the manager.
@@ -293,6 +299,14 @@ impl Flows for Running {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .set_host(name);
+    }
+
+    fn set_latency(&self, ns: u64) {
+        self.rx
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .set_latency(ns);
+        self.tx.set_device_latency(ns);
     }
 }
 
@@ -381,12 +395,18 @@ pub fn handle(
 /// refused, so a restart never loses a change the device confirmed.
 pub fn respond(device: &mut Device, live: &Live<'_>, req: &[u8]) -> ArcOutcome {
     let before = device.state.clone();
-    match handle(&mut device.state, &device.cfg, live, req) {
+    let latency_before = device.cfg.latency_ns;
+    let outcome = match Header::parse(req) {
+        Ok((h, body)) if h.op1 == op::SETTINGS_SET && h.op2 == 0 => set_latency(&h, body, device),
+        _ => handle(&mut device.state, &device.cfg, live, req),
+    };
+    match outcome {
         ArcOutcome::Changed(bytes, change) => match device.state.save(&device.cfg.state_file) {
             Ok(()) => ArcOutcome::Changed(bytes, change),
             Err(e) => {
                 error!(error = %e, "a change could not be saved: refused and undone");
                 device.state = before;
+                device.cfg.latency_ns = latency_before;
                 match Header::parse(req) {
                     Ok((h, _)) => ArcOutcome::Reply(reply(&h, STATUS_ERROR, &[])),
                     Err(_) => ArcOutcome::Ignored,
@@ -395,6 +415,37 @@ pub fn respond(device: &mut Device, live: &Live<'_>, req: &[u8]) -> ArcOutcome {
         },
         other => other,
     }
+}
+
+/// 0x1101, a settings write (dante-asio #2): netaudio's latency write
+/// ([`control::parse_latency_body`]) sets the device latency when the
+/// config's rules hold for it ([`DeviceConfig::with_latency`]): kept in
+/// the state ([`DeviceState::set_latency`]), taken live, answered OK; a
+/// latency they refuse is refused ([`STATUS_ERROR`]). Any other body stays
+/// unanswered, as inferno leaves 0x1101 (a refusal once made Dante
+/// Controller ask again thousands of times a second).
+fn set_latency(h: &Header, body: &[u8], device: &mut Device) -> ArcOutcome {
+    let Some(ns) = control::parse_latency_body(body).map(u64::from) else {
+        return unanswered(h, "a settings write in another form than the latency write");
+    };
+    if let Err(problems) = device.cfg.with_latency(ns) {
+        warn!(latency_ns = ns, problems = %problems.join("; "), "a latency write refused");
+        return ArcOutcome::Reply(reply(h, STATUS_ERROR, &[]));
+    }
+    let config_ns = device
+        .state
+        .config_latency_ns
+        .unwrap_or(device.cfg.latency_ns);
+    device.state.set_latency(ns, config_ns);
+    device.cfg.latency_ns = ns;
+    info!(latency_ns = ns, "device latency set (Dante Controller)");
+    ArcOutcome::Changed(
+        reply(h, STATUS_OK, &[]),
+        Change {
+            latency: Some(ns),
+            ..Change::default()
+        },
+    )
 }
 
 /// The ARC server: answers every datagram on `sock` from the shared device
@@ -431,6 +482,9 @@ pub async fn serve<F: Flows>(
                         && c.device_renamed
                     {
                         flows.renamed(&device.state.name);
+                    }
+                    if let ArcOutcome::Changed(_, Change { latency: Some(ns), .. }) = &outcome {
+                        flows.set_latency(*ns);
                     }
                     let moved = match &outcome {
                         ArcOutcome::Changed(_, c) if !c.subscriptions.is_empty() => {

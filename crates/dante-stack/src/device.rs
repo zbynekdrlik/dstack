@@ -212,6 +212,20 @@ impl DeviceConfig {
         }
     }
 
+    /// This config with the device latency `ns`, when it holds (the
+    /// config's own rules, as at the start), else its problems: what a
+    /// latency Dante Controller sets must pass.
+    pub fn with_latency(&self, ns: u64) -> Result<DeviceConfig, Vec<String>> {
+        let mut c = self.clone();
+        c.latency_ns = ns;
+        let problems = c.problems();
+        if problems.is_empty() {
+            Ok(c)
+        } else {
+            Err(problems)
+        }
+    }
+
     /// The latency our TX channels advertise: `tx_latency_ns`, else
     /// `latency_ns`.
     pub fn advertised_latency_ns(&self) -> u64 {
@@ -494,8 +508,16 @@ impl Device {
     /// The device as it starts: `cfg`, with the names of its state file
     /// (the config's when there is none; one with other channel counts
     /// fitted to `cfg` and saved; [`DeviceState::load_or_default`]).
-    pub fn load(cfg: DeviceConfig) -> io::Result<Self> {
-        let state = DeviceState::load_or_default(&cfg)?;
+    /// A latency Dante Controller set holds over the config's
+    /// ([`DeviceState::latency_for`]); a config that changed its own since
+    /// drops it, and the state is saved without it.
+    pub fn load(mut cfg: DeviceConfig) -> io::Result<Self> {
+        let mut state = DeviceState::load_or_default(&cfg)?;
+        let (latency, dropped) = state.latency_for(&cfg);
+        if dropped {
+            state.save(&cfg.state_file)?;
+        }
+        cfg.latency_ns = latency;
         Ok(Self { cfg, state })
     }
 }
@@ -534,6 +556,16 @@ pub struct DeviceState {
     /// The file lists only the subscribed channels, by number.
     #[serde(default, with = "saved", skip_serializing_if = "saved::none")]
     pub subscriptions: Vec<Option<Subscription>>,
+    /// The device latency Dante Controller set (ARC 0x1101), ns: it holds
+    /// over the config's while the config keeps the value it was set
+    /// against (`config_latency_ns`), as a Controller's rename does
+    /// (dante-asio #2: what Dante Controller sets is kept).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency_ns: Option<u64>,
+    /// The config's latency when `latency_ns` was set: a config that says
+    /// another latency since wins, and the Controller's value goes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_latency_ns: Option<u64>,
 }
 
 /// What [`DeviceState::fit`] changed: each direction's channel count
@@ -553,7 +585,31 @@ impl DeviceState {
             rx: cfg.rx.clone(),
             tx: cfg.tx.clone(),
             subscriptions: Vec::new(),
+            latency_ns: None,
+            config_latency_ns: None,
         }
+    }
+
+    /// The latency the device runs with: the Controller's while the config
+    /// still says what it said when that was set, else the config's (the
+    /// Controller's value is dropped then; `true` when it was).
+    pub fn latency_for(&mut self, cfg: &DeviceConfig) -> (u64, bool) {
+        match (self.latency_ns, self.config_latency_ns) {
+            (Some(set), Some(was)) if was == cfg.latency_ns => (set, false),
+            (None, None) => (cfg.latency_ns, false),
+            _ => {
+                self.latency_ns = None;
+                self.config_latency_ns = None;
+                (cfg.latency_ns, true)
+            }
+        }
+    }
+
+    /// Dante Controller set the latency to `ns`; `config_ns` is the
+    /// config's (kept from the first such write).
+    pub fn set_latency(&mut self, ns: u64, config_ns: u64) {
+        self.config_latency_ns.get_or_insert(config_ns);
+        self.latency_ns = Some(ns);
     }
 
     /// Renames the device to `name`; our own RX subscribed to our own TX

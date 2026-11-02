@@ -1708,3 +1708,39 @@ fn the_late_watch_logs_a_flow_s_late_packets_with_their_peak() {
         ""
     );
 }
+
+#[test]
+fn a_device_latency_set_live_moves_the_advertised_latency_and_the_late_count() {
+    // No tx_latency_ns: our TX advertises the device latency, so a latency
+    // Dante Controller sets moves it, and the TX thread counts lateness
+    // against the new one from its next events pass.
+    let mut follows = cfg();
+    follows.tx_latency_ns = None;
+    follows.latency_ns = 2_000_000;
+    let shared =
+        Arc::new(TxShared::new(follows, Ipv4Addr::LOCALHOST, Vec::new().into(), 1, &[]).unwrap());
+    assert_eq!(shared.advertised_latency_ns(), 2_000_000);
+    let mut rig = Rig::with(Arc::clone(&shared));
+    let (slot, _) = rig.flow(vec![Some(1), Some(2)]);
+    // Set after the TX thread's state was made with 2 ms: its next events
+    // pass takes it.
+    shared.set_device_latency(500_000);
+    assert_eq!(shared.advertised_latency_ns(), 500_000);
+    rig.tx.step(Some(T), 0);
+    // 50 us past due: 333 us + 250 us margin + 50 us since the stamp, past
+    // the new 500 us (under the old 2 ms).
+    rig.tx.step(Some(first_due_ns(T) + 50_000), 0);
+    assert!(
+        rig.shared.lane(slot).over_latency >= 1,
+        "{:?}",
+        rig.shared.lane(slot)
+    );
+    // A config's own tx_latency_ns holds: the device latency does not move
+    // it.
+    let mut fixed = cfg();
+    fixed.tx_latency_ns = Some(700_000);
+    let shared =
+        Arc::new(TxShared::new(fixed, Ipv4Addr::LOCALHOST, Vec::new().into(), 1, &[]).unwrap());
+    shared.set_device_latency(5_000_000);
+    assert_eq!(shared.advertised_latency_ns(), 700_000);
+}

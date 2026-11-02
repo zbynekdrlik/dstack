@@ -1,0 +1,69 @@
+--- crates/dante-stack/src/media/tx.rs
++++ replace Transmitter::events with ()
+@@ -1035,65 +1035,17 @@
+             .iter()
+             .filter_map(|l| l.schedule.map(|s| s.wake_ns(self.rate, self.margin_ns)))
+             .fold(self.next_events.unwrap_or(0), u64::min)
+     }
+ 
+     /// The plans and sources that changed, and the keepalives of every
+     /// flow that sends.
+     fn events(&mut self) {
+-        let shared = &*self.shared;
+-        // The advertised latency, which Dante Controller may have set: the
+-        // lag bound and the over-latency count follow it.
+-        let advertised = shared.advertised_latency_ns();
+-        if advertised != self.latency_ns {
+-            self.latency_ns = advertised;
+-            self.max_lag = clock::latency_samples(advertised, self.rate);
+-        }
+-        for (slot, lane) in self.lanes.iter_mut().enumerate() {
+-            let cell = &shared.plans[slot];
+-            if lane.seen != Some(cell.version())
+-                && let Some((version, w)) = cell.read()
+-            {
+-                let plan = Plan::from_words(w);
+-                if plan.restarts(&lane.plan) {
+-                    lane.schedule = None;
+-                }
+-                lane.plan = plan;
+-                lane.seen = Some(version);
+-            }
+-            let Some(dest) = lane.plan.dest else {
+-                continue;
+-            };
+-            let mut heard = 0;
+-            for _ in 0..KEEPALIVE_DRAIN {
+-                match shared.sockets[slot].recv_from(&mut self.packet[..]) {
+-                    Ok((_, SocketAddr::V4(from))) if from == dest => heard += 1,
+-                    Ok(_) => {}
+-                    Err(_) => break,
+-                }
+-            }
+-            shared.lanes[slot]
+-                .keepalives
+-                .fetch_add(heard, Ordering::Relaxed);
+-        }
+-        for (tx, (source, seen)) in self
+-            .sources
+-            .iter_mut()
+-            .zip(self.sources_seen.iter_mut())
+-            .enumerate()
+-        {
+-            let cell = &shared.sources[tx];
+-            if *seen != Some(cell.version())
+-                && let Some((version, w)) = cell.read()
+-            {
+-                *source = source_from(w);
+-                *seen = Some(version);
+-            }
+-        }
++        () /* ~ changed by cargo-mutants ~ */
+     }
+ 
+     /// Every packet due at media time `now` (PTP `now_ns`, read at `pass`),
+     /// each flow in turn (the hot path: no allocation, no lock, no log; the
+     /// send is its one system call).
+     fn send_due(&mut self, now: u64, now_ns: u64, pass: Instant) {
+         let Transmitter {
+             shared,

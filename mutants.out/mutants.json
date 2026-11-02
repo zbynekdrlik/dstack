@@ -1,0 +1,1142 @@
+[
+  {
+    "package": "dante-stack",
+    "file": "crates/dante-stack/src/media/tx.rs",
+    "function": {
+      "function_name": "TxShared::advertised_latency_ns",
+      "return_type": "-> u64",
+      "span": {
+        "start": {
+          "line": 746,
+          "column": 5
+        },
+        "end": {
+          "line": 749,
+          "column": 6
+        }
+      }
+    },
+    "span": {
+      "start": {
+        "line": 748,
+        "column": 9
+      },
+      "end": {
+        "line": 748,
+        "column": 51
+      }
+    },
+    "replacement": "0",
+    "genre": "FnValue"
+  },
+  {
+    "package": "dante-stack",
+    "file": "crates/dante-stack/src/device.rs",
+    "function": {
+      "function_name": "DeviceState::latency_for",
+      "return_type": "-> (u64, bool)",
+      "span": {
+        "start": {
+          "line": 593,
+          "column": 5
+        },
+        "end": {
+          "line": 606,
+          "column": 6
+        }
+      }
+    },
+    "span": {
+      "start": {
+        "line": 598,
+        "column": 39
+      },
+      "end": {
+        "line": 598,
+        "column": 60
+      }
+    },
+    "replacement": "false",
+    "genre": "MatchArmGuard"
+  },
+  {
+    "package": "dante-stack",
+    "file": "crates/dante-stack/src/arc/control.rs",
+    "function": {
+      "function_name": "parse_latency_body",
+      "return_type": "-> Option<u32>",
+      "span": {
+        "start": {
+          "line": 492,
+          "column": 1
+        },
+        "end": {
+          "line": 502,
+          "column": 2
+        }
+      }
+    },
+    "span": {
+      "start": {
+        "line": 501,
+        "column": 42
+      },
+      "end": {
+        "line": 501,
+        "column": 44
+      }
+    },
+    "replacement": "!=",
+    "genre": "BinaryOperator"
+  },
+  {
+    "package": "dante-stack",
+    "file": "crates/dante-stack/src/arc.rs",
+    "function": {
+      "function_name": "<impl Flows for Running>::set_latency",
+      "return_type": "",
+      "span": {
+        "start": {
+          "line": 304,
+          "column": 5
+        },
+        "end": {
+          "line": 310,
+          "column": 6
+        }
+      }
+    },
+    "span": {
+      "start": {
+        "line": 305,
+        "column": 9
+      },
+      "end": {
+        "line": 309,
+        "column": 40
+      }
+    },
+    "replacement": "()",
+    "genre": "FnValue"
+  },
+  {
+    "package": "dante-stack",
+    "file": "crates/dante-stack/src/subscribe.rs",
+    "function": {
+      "function_name": "Manager::latency_ns",
+      "return_type": "-> u64",
+      "span": {
+        "start": {
+          "line": 281,
+          "column": 5
+        },
+        "end": {
+          "line": 284,
+          "column": 6
+        }
+      }
+    },
+    "span": {
+      "start": {
+        "line": 283,
+        "column": 9
+      },
+      "end": {
+        "line": 283,
+        "column": 24
+      }
+    },
+    "replacement": "1",
+    "genre": "FnValue"
+  },
+  {
+    "package": "dante-stack",
+    "file": "crates/dante-stack/src/arc.rs",
+    "function": {
+      "function_name": "respond",
+      "return_type": "-> ArcOutcome",
+      "span": {
+        "start": {
+          "line": 393,
+          "column": 1
+        },
+        "end": {
+          "line": 418,
+          "column": 2
+        }
+      }
+    },
+    "span": {
+      "start": {
+        "line": 400,
+        "column": 26
+      },
+      "end": {
+        "line": 400,
+        "column": 65
+      }
+    },
+    "replacement": "false",
+    "genre": "MatchArmGuard"
+  },
+  {
+    "package": "dante-stack",
+    "file": "crates/dante-stack/src/arc/control.rs",
+    "function": {
+      "function_name": "parse_latency_body",
+      "return_type": "-> Option<u32>",
+      "span": {
+        "start": {
+          "line": 492,
+          "column": 1
+        },
+        "end": {
+          "line": 502,
+          "column": 2
+        }
+      }
+    },
+    "span": {
+      "start": {
+        "line": 501,
+        "column": 52
+      },
+      "end": {
+        "line": 501,
+        "column": 54
+      }
+    },
+    "replacement": "!=",
+    "genre": "BinaryOperator"
+  },
+  {
+    "package": "dante-stack",
+    "file": "crates/dante-stack/src/device.rs",
+    "function": {
+      "function_name": "DeviceState::latency_for",
+      "return_type": "-> (u64, bool)",
+      "span": {
+        "start": {
+          "line": 593,
+          "column": 5
+        },
+        "end": {
+          "line": 606,
+          "column": 6
+        }
+      }
+    },
+    "span": {
+      "start": {
+        "line": 598,
+        "column": 39
+      },
+      "end": {
+        "line": 598,
+        "column": 60
+      }
+    },
+    "replacement": "true",
+    "genre": "MatchArmGuard"
+  },
+  {
+    "package": "dante-stack",
+    "file": "crates/dante-stack/src/arc.rs",
+    "function": {
+      "function_name": "respond",
+      "return_type": "-> ArcOutcome",
+      "span": {
+        "start": {
+          "line": 393,
+          "column": 1
+        },
+        "end": {
+          "line": 418,
+          "column": 2
+        }
+      }
+    },
+    "span": {
+      "start": {
+        "line": 400,
+        "column": 61
+      },
+      "end": {
+        "line": 400,
+        "column": 63
+      }
+    },
+    "replacement": "!=",
+    "genre": "BinaryOperator"
+  },
+  {
+    "package": "dante-stack",
+    "file": "crates/dante-stack/src/arc.rs",
+    "function": {
+      "function_name": "serve",
+      "return_type": "-> io::Result<()>",
+      "span": {
+        "start": {
+          "line": 451,
+          "column": 1
+        },
+        "end": {
+          "line": 536,
+          "column": 2
+        }
+      }
+    },
+    "span": {
+      "start": {
+        "line": 469,
+        "column": 5
+      },
+      "end": {
+        "line": 535,
+        "column": 6
+      }
+    },
+    "replacement": "Ok(())",
+    "genre": "FnValue"
+  },
+  {
+    "package": "dante-stack",
+    "file": "crates/dante-stack/src/daemon.rs",
+    "function": {
+      "function_name": "serve",
+      "return_type": "-> Result<(), ServeError>",
+      "span": {
+        "start": {
+          "line": 601,
+          "column": 1
+        },
+        "end": {
+          "line": 764,
+          "column": 2
+        }
+      }
+    },
+    "span": {
+      "start": {
+        "line": 633,
+        "column": 5
+      },
+      "end": {
+        "line": 763,
+        "column": 10
+      }
+    },
+    "replacement": "Ok(())",
+    "genre": "FnValue"
+  },
+  {
+    "package": "dante-stack",
+    "file": "crates/dante-stack/src/device.rs",
+    "function": {
+      "function_name": "DeviceState::set_latency",
+      "return_type": "",
+      "span": {
+        "start": {
+          "line": 608,
+          "column": 5
+        },
+        "end": {
+          "line": 613,
+          "column": 6
+        }
+      }
+    },
+    "span": {
+      "start": {
+        "line": 611,
+        "column": 9
+      },
+      "end": {
+        "line": 612,
+        "column": 36
+      }
+    },
+    "replacement": "()",
+    "genre": "FnValue"
+  },
+  {
+    "package": "dante-stack",
+    "file": "crates/dante-stack/src/arc.rs",
+    "function": {
+      "function_name": "respond",
+      "return_type": "-> ArcOutcome",
+      "span": {
+        "start": {
+          "line": 393,
+          "column": 1
+        },
+        "end": {
+          "line": 418,
+          "column": 2
+        }
+      }
+    },
+    "span": {
+      "start": {
+        "line": 400,
+        "column": 26
+      },
+      "end": {
+        "line": 400,
+        "column": 65
+      }
+    },
+    "replacement": "true",
+    "genre": "MatchArmGuard"
+  },
+  {
+    "package": "dante-stack",
+    "file": "crates/dante-stack/src/arc/control.rs",
+    "function": {
+      "function_name": "parse_latency_body",
+      "return_type": "-> Option<u32>",
+      "span": {
+        "start": {
+          "line": 492,
+          "column": 1
+        },
+        "end": {
+          "line": 502,
+          "column": 2
+        }
+      }
+    },
+    "span": {
+      "start": {
+        "line": 501,
+        "column": 47
+      },
+      "end": {
+        "line": 501,
+        "column": 49
+      }
+    },
+    "replacement": "||",
+    "genre": "BinaryOperator"
+  },
+  {
+    "package": "dante-stack",
+    "file": "crates/dante-stack/src/device.rs",
+    "function": {
+      "function_name": "DeviceState::latency_for",
+      "return_type": "-> (u64, bool)",
+      "span": {
+        "start": {
+          "line": 593,
+          "column": 5
+        },
+        "end": {
+          "line": 606,
+          "column": 6
+        }
+      }
+    },
+    "span": {
+      "start": {
+        "line": 599,
+        "column": 13
+      },
+      "end": {
+        "line": 599,
+        "column": 53
+      }
+    },
+    "replacement": "",
+    "genre": "MatchArm"
+  },
+  {
+    "package": "dante-stack",
+    "file": "crates/dante-stack/src/device.rs",
+    "function": {
+      "function_name": "DeviceState::latency_for",
+      "return_type": "-> (u64, bool)",
+      "span": {
+        "start": {
+          "line": 593,
+          "column": 5
+        },
+        "end": {
+          "line": 606,
+          "column": 6
+        }
+      }
+    },
+    "span": {
+      "start": {
+        "line": 597,
+        "column": 9
+      },
+      "end": {
+        "line": 605,
+        "column": 10
+      }
+    },
+    "replacement": "(0, false)",
+    "genre": "FnValue"
+  },
+  {
+    "package": "dante-stack",
+    "file": "crates/dante-stack/src/arc.rs",
+    "function": {
+      "function_name": "respond",
+      "return_type": "-> ArcOutcome",
+      "span": {
+        "start": {
+          "line": 393,
+          "column": 1
+        },
+        "end": {
+          "line": 418,
+          "column": 2
+        }
+      }
+    },
+    "span": {
+      "start": {
+        "line": 400,
+        "column": 52
+      },
+      "end": {
+        "line": 400,
+        "column": 54
+      }
+    },
+    "replacement": "||",
+    "genre": "BinaryOperator"
+  },
+  {
+    "package": "dante-stack",
+    "file": "crates/dante-stack/src/device.rs",
+    "function": {
+      "function_name": "DeviceConfig::with_latency",
+      "return_type": "-> Result<DeviceConfig, Vec<String>>",
+      "span": {
+        "start": {
+          "line": 215,
+          "column": 5
+        },
+        "end": {
+          "line": 227,
+          "column": 6
+        }
+      }
+    },
+    "span": {
+      "start": {
+        "line": 219,
+        "column": 9
+      },
+      "end": {
+        "line": 226,
+        "column": 10
+      }
+    },
+    "replacement": "Ok(Default::default())",
+    "genre": "FnValue"
+  },
+  {
+    "package": "dante-stack",
+    "file": "crates/dante-stack/src/subscribe.rs",
+    "function": {
+      "function_name": "Manager::latency_ns",
+      "return_type": "-> u64",
+      "span": {
+        "start": {
+          "line": 281,
+          "column": 5
+        },
+        "end": {
+          "line": 284,
+          "column": 6
+        }
+      }
+    },
+    "span": {
+      "start": {
+        "line": 283,
+        "column": 9
+      },
+      "end": {
+        "line": 283,
+        "column": 24
+      }
+    },
+    "replacement": "0",
+    "genre": "FnValue"
+  },
+  {
+    "package": "dante-stack",
+    "file": "crates/dante-stack/src/arc.rs",
+    "function": {
+      "function_name": "respond",
+      "return_type": "-> ArcOutcome",
+      "span": {
+        "start": {
+          "line": 393,
+          "column": 1
+        },
+        "end": {
+          "line": 418,
+          "column": 2
+        }
+      }
+    },
+    "span": {
+      "start": {
+        "line": 400,
+        "column": 32
+      },
+      "end": {
+        "line": 400,
+        "column": 34
+      }
+    },
+    "replacement": "!=",
+    "genre": "BinaryOperator"
+  },
+  {
+    "package": "dante-stack",
+    "file": "crates/dante-stack/src/arc/control.rs",
+    "function": {
+      "function_name": "parse_latency_body",
+      "return_type": "-> Option<u32>",
+      "span": {
+        "start": {
+          "line": 492,
+          "column": 1
+        },
+        "end": {
+          "line": 502,
+          "column": 2
+        }
+      }
+    },
+    "span": {
+      "start": {
+        "line": 496,
+        "column": 5
+      },
+      "end": {
+        "line": 501,
+        "column": 88
+      }
+    },
+    "replacement": "Some(0)",
+    "genre": "FnValue"
+  },
+  {
+    "package": "dante-stack",
+    "file": "crates/dante-stack/src/subscribe.rs",
+    "function": {
+      "function_name": "Manager::set_latency",
+      "return_type": "",
+      "span": {
+        "start": {
+          "line": 274,
+          "column": 5
+        },
+        "end": {
+          "line": 279,
+          "column": 6
+        }
+      }
+    },
+    "span": {
+      "start": {
+        "line": 278,
+        "column": 9
+      },
+      "end": {
+        "line": 278,
+        "column": 30
+      }
+    },
+    "replacement": "()",
+    "genre": "FnValue"
+  },
+  {
+    "package": "dante-stack",
+    "file": "crates/dante-stack/src/arc.rs",
+    "function": {
+      "function_name": "respond",
+      "return_type": "-> ArcOutcome",
+      "span": {
+        "start": {
+          "line": 393,
+          "column": 1
+        },
+        "end": {
+          "line": 418,
+          "column": 2
+        }
+      }
+    },
+    "span": {
+      "start": {
+        "line": 397,
+        "column": 5
+      },
+      "end": {
+        "line": 417,
+        "column": 6
+      }
+    },
+    "replacement": "Default::default()",
+    "genre": "FnValue"
+  },
+  {
+    "package": "dante-stack",
+    "file": "crates/dante-stack/src/device.rs",
+    "function": {
+      "function_name": "DeviceState::latency_for",
+      "return_type": "-> (u64, bool)",
+      "span": {
+        "start": {
+          "line": 593,
+          "column": 5
+        },
+        "end": {
+          "line": 606,
+          "column": 6
+        }
+      }
+    },
+    "span": {
+      "start": {
+        "line": 597,
+        "column": 9
+      },
+      "end": {
+        "line": 605,
+        "column": 10
+      }
+    },
+    "replacement": "(1, false)",
+    "genre": "FnValue"
+  },
+  {
+    "package": "dante-stack",
+    "file": "crates/dante-stack/src/media/tx.rs",
+    "function": {
+      "function_name": "Transmitter::events",
+      "return_type": "",
+      "span": {
+        "start": {
+          "line": 1040,
+          "column": 5
+        },
+        "end": {
+          "line": 1092,
+          "column": 6
+        }
+      }
+    },
+    "span": {
+      "start": {
+        "line": 1043,
+        "column": 9
+      },
+      "end": {
+        "line": 1091,
+        "column": 10
+      }
+    },
+    "replacement": "()",
+    "genre": "FnValue"
+  },
+  {
+    "package": "dante-stack",
+    "file": "crates/dante-stack/src/device.rs",
+    "function": {
+      "function_name": "DeviceState::latency_for",
+      "return_type": "-> (u64, bool)",
+      "span": {
+        "start": {
+          "line": 593,
+          "column": 5
+        },
+        "end": {
+          "line": 606,
+          "column": 6
+        }
+      }
+    },
+    "span": {
+      "start": {
+        "line": 597,
+        "column": 9
+      },
+      "end": {
+        "line": 605,
+        "column": 10
+      }
+    },
+    "replacement": "(0, true)",
+    "genre": "FnValue"
+  },
+  {
+    "package": "dante-stack",
+    "file": "crates/dante-stack/src/arc/control.rs",
+    "function": {
+      "function_name": "parse_latency_body",
+      "return_type": "-> Option<u32>",
+      "span": {
+        "start": {
+          "line": 492,
+          "column": 1
+        },
+        "end": {
+          "line": 502,
+          "column": 2
+        }
+      }
+    },
+    "span": {
+      "start": {
+        "line": 496,
+        "column": 5
+      },
+      "end": {
+        "line": 501,
+        "column": 88
+      }
+    },
+    "replacement": "Some(1)",
+    "genre": "FnValue"
+  },
+  {
+    "package": "dante-stack",
+    "file": "crates/dante-stack/src/device.rs",
+    "function": {
+      "function_name": "DeviceState::from_config",
+      "return_type": "-> Self",
+      "span": {
+        "start": {
+          "line": 580,
+          "column": 5
+        },
+        "end": {
+          "line": 591,
+          "column": 6
+        }
+      }
+    },
+    "span": {
+      "start": {
+        "line": 582,
+        "column": 9
+      },
+      "end": {
+        "line": 590,
+        "column": 10
+      }
+    },
+    "replacement": "Default::default()",
+    "genre": "FnValue"
+  },
+  {
+    "package": "dante-stack",
+    "file": "crates/dante-stack/src/arc/control.rs",
+    "function": {
+      "function_name": "parse_latency_body",
+      "return_type": "-> Option<u32>",
+      "span": {
+        "start": {
+          "line": 492,
+          "column": 1
+        },
+        "end": {
+          "line": 502,
+          "column": 2
+        }
+      }
+    },
+    "span": {
+      "start": {
+        "line": 501,
+        "column": 26
+      },
+      "end": {
+        "line": 501,
+        "column": 28
+      }
+    },
+    "replacement": "||",
+    "genre": "BinaryOperator"
+  },
+  {
+    "package": "dante-stack",
+    "file": "crates/dante-stack/src/arc/control.rs",
+    "function": {
+      "function_name": "parse_latency_body",
+      "return_type": "-> Option<u32>",
+      "span": {
+        "start": {
+          "line": 492,
+          "column": 1
+        },
+        "end": {
+          "line": 502,
+          "column": 2
+        }
+      }
+    },
+    "span": {
+      "start": {
+        "line": 496,
+        "column": 5
+      },
+      "end": {
+        "line": 501,
+        "column": 88
+      }
+    },
+    "replacement": "None",
+    "genre": "FnValue"
+  },
+  {
+    "package": "dante-stack",
+    "file": "crates/dante-stack/src/device.rs",
+    "function": {
+      "function_name": "Device::load",
+      "return_type": "-> io::Result<Self>",
+      "span": {
+        "start": {
+          "line": 508,
+          "column": 5
+        },
+        "end": {
+          "line": 522,
+          "column": 6
+        }
+      }
+    },
+    "span": {
+      "start": {
+        "line": 515,
+        "column": 9
+      },
+      "end": {
+        "line": 521,
+        "column": 32
+      }
+    },
+    "replacement": "Ok(Default::default())",
+    "genre": "FnValue"
+  },
+  {
+    "package": "dante-stack",
+    "file": "crates/dante-stack/src/media/tx.rs",
+    "function": {
+      "function_name": "TxShared::set_device_latency",
+      "return_type": "",
+      "span": {
+        "start": {
+          "line": 737,
+          "column": 5
+        },
+        "end": {
+          "line": 744,
+          "column": 6
+        }
+      }
+    },
+    "span": {
+      "start": {
+        "line": 741,
+        "column": 9
+      },
+      "end": {
+        "line": 743,
+        "column": 10
+      }
+    },
+    "replacement": "()",
+    "genre": "FnValue"
+  },
+  {
+    "package": "dante-stack",
+    "file": "crates/dante-stack/src/arc.rs",
+    "function": {
+      "function_name": "set_latency",
+      "return_type": "-> ArcOutcome",
+      "span": {
+        "start": {
+          "line": 420,
+          "column": 1
+        },
+        "end": {
+          "line": 449,
+          "column": 2
+        }
+      }
+    },
+    "span": {
+      "start": {
+        "line": 428,
+        "column": 5
+      },
+      "end": {
+        "line": 448,
+        "column": 6
+      }
+    },
+    "replacement": "Default::default()",
+    "genre": "FnValue"
+  },
+  {
+    "package": "dante-stack",
+    "file": "crates/dante-stack/src/device.rs",
+    "function": {
+      "function_name": "DeviceState::latency_for",
+      "return_type": "-> (u64, bool)",
+      "span": {
+        "start": {
+          "line": 593,
+          "column": 5
+        },
+        "end": {
+          "line": 606,
+          "column": 6
+        }
+      }
+    },
+    "span": {
+      "start": {
+        "line": 597,
+        "column": 9
+      },
+      "end": {
+        "line": 605,
+        "column": 10
+      }
+    },
+    "replacement": "(1, true)",
+    "genre": "FnValue"
+  },
+  {
+    "package": "dante-stack",
+    "file": "crates/dante-stack/src/device.rs",
+    "function": {
+      "function_name": "DeviceState::latency_for",
+      "return_type": "-> (u64, bool)",
+      "span": {
+        "start": {
+          "line": 593,
+          "column": 5
+        },
+        "end": {
+          "line": 606,
+          "column": 6
+        }
+      }
+    },
+    "span": {
+      "start": {
+        "line": 598,
+        "column": 43
+      },
+      "end": {
+        "line": 598,
+        "column": 45
+      }
+    },
+    "replacement": "!=",
+    "genre": "BinaryOperator"
+  },
+  {
+    "package": "dante-stack",
+    "file": "crates/dante-stack/src/media/tx.rs",
+    "function": {
+      "function_name": "Transmitter::events",
+      "return_type": "",
+      "span": {
+        "start": {
+          "line": 1040,
+          "column": 5
+        },
+        "end": {
+          "line": 1092,
+          "column": 6
+        }
+      }
+    },
+    "span": {
+      "start": {
+        "line": 1047,
+        "column": 23
+      },
+      "end": {
+        "line": 1047,
+        "column": 25
+      }
+    },
+    "replacement": "==",
+    "genre": "BinaryOperator"
+  },
+  {
+    "package": "dante-stack",
+    "file": "crates/dante-stack/src/arc/control.rs",
+    "function": {
+      "function_name": "parse_latency_body",
+      "return_type": "-> Option<u32>",
+      "span": {
+        "start": {
+          "line": 492,
+          "column": 1
+        },
+        "end": {
+          "line": 502,
+          "column": 2
+        }
+      }
+    },
+    "span": {
+      "start": {
+        "line": 501,
+        "column": 11
+      },
+      "end": {
+        "line": 501,
+        "column": 13
+      }
+    },
+    "replacement": "!=",
+    "genre": "BinaryOperator"
+  },
+  {
+    "package": "dante-stack",
+    "file": "crates/dante-stack/src/media/tx.rs",
+    "function": {
+      "function_name": "TxShared::advertised_latency_ns",
+      "return_type": "-> u64",
+      "span": {
+        "start": {
+          "line": 746,
+          "column": 5
+        },
+        "end": {
+          "line": 749,
+          "column": 6
+        }
+      }
+    },
+    "span": {
+      "start": {
+        "line": 748,
+        "column": 9
+      },
+      "end": {
+        "line": 748,
+        "column": 51
+      }
+    },
+    "replacement": "1",
+    "genre": "FnValue"
+  }
+]

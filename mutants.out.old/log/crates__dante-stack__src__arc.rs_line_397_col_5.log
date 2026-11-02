@@ -1,0 +1,91 @@
+
+*** crates/dante-stack/src/arc.rs:397:5: replace respond -> ArcOutcome with Default::default()
+
+*** mutation diff:
+--- crates/dante-stack/src/arc.rs
++++ replace respond -> ArcOutcome with Default::default()
+@@ -389,37 +389,17 @@
+         _ => unanswered(&h, "an opcode inferno does not answer"),
+     }
+ }
+ 
+ /// [`handle`], and a change saved to the state file before it is
+ /// answered: a rename or a subscription that cannot be saved is undone and
+ /// refused, so a restart never loses a change the device confirmed.
+ pub fn respond(device: &mut Device, live: &Live<'_>, req: &[u8]) -> ArcOutcome {
+-    let before = device.state.clone();
+-    let latency_before = device.cfg.latency_ns;
+-    let outcome = match Header::parse(req) {
+-        Ok((h, body)) if h.op1 == op::SETTINGS_SET && h.op2 == 0 => set_latency(&h, body, device),
+-        _ => handle(&mut device.state, &device.cfg, live, req),
+-    };
+-    match outcome {
+-        ArcOutcome::Changed(bytes, change) => match device.state.save(&device.cfg.state_file) {
+-            Ok(()) => ArcOutcome::Changed(bytes, change),
+-            Err(e) => {
+-                error!(error = %e, "a change could not be saved: refused and undone");
+-                device.state = before;
+-                device.cfg.latency_ns = latency_before;
+-                match Header::parse(req) {
+-                    Ok((h, _)) => ArcOutcome::Reply(reply(&h, STATUS_ERROR, &[])),
+-                    Err(_) => ArcOutcome::Ignored,
+-                }
+-            }
+-        },
+-        other => other,
+-    }
++    Default::default() /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ /// 0x1101, a settings write (dante-asio #2): netaudio's latency write
+ /// ([`control::parse_latency_body`]) sets the device latency when the
+ /// config's rules hold for it ([`DeviceConfig::with_latency`]): kept in
+ /// the state ([`DeviceState::set_latency`]), taken live, answered OK; a
+ /// latency they refuse is refused ([`STATUS_ERROR`]). Any other body stays
+ /// unanswered, as inferno leaves 0x1101 (a refusal once made Dante
+
+
+*** /opt/rust/rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo nextest run --no-run --cargo-profile=mutants --verbose --package=dante-stack@0.4.36
+    Blocking waiting for file lock on package cache
+   Compiling dante-stack v0.4.36 (/tmp/cargo-mutants-dstack-ZeZigM.tmp/crates/dante-stack)
+warning: unused import: `error`
+  --> crates/dante-stack/src/arc.rs:88:22
+   |
+88 | use tracing::{debug, error, info, warn};
+   |                      ^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+error[E0277]: the trait bound `ArcOutcome: Default` is not satisfied
+   --> crates/dante-stack/src/arc.rs:397:5
+    |
+397 |     Default::default() /* ~ changed by cargo-mutants ~ */
+    |     ^^^^^^^^^^^^^^^^^^ the trait `Default` is not implemented for `ArcOutcome`
+    |
+help: consider annotating `ArcOutcome` with `#[derive(Default)]`
+    |
+215 + #[derive(Default)]
+216 | pub enum ArcOutcome {
+    |
+
+For more information about this error, try `rustc --explain E0277`.
+warning: `dante-stack` (lib) generated 1 warning
+error: could not compile `dante-stack` (lib) due to 1 previous error; 1 warning emitted
+warning: build failed, waiting for other jobs to finish...
+error[E0277]: the trait bound `arc::ArcOutcome: Default` is not satisfied
+   --> crates/dante-stack/src/arc.rs:397:5
+    |
+397 |     Default::default() /* ~ changed by cargo-mutants ~ */
+    |     ^^^^^^^^^^^^^^^^^^ the trait `Default` is not implemented for `arc::ArcOutcome`
+    |
+help: consider annotating `arc::ArcOutcome` with `#[derive(Default)]`
+    |
+215 + #[derive(Default)]
+216 | pub enum ArcOutcome {
+    |
+
+warning: `dante-stack` (lib test) generated 1 warning (1 duplicate)
+error: could not compile `dante-stack` (lib test) due to 1 previous error; 1 warning emitted
+error: command `/opt/rust/rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo '--color=auto' test --no-run '--message-format=json-render-diagnostics' '--package=dante-stack@0.4.36' '--profile=mutants'` exited with code 101
+
+*** result: Failure(101)

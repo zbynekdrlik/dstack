@@ -1,0 +1,21 @@
+--- crates/dante-stack/src/device.rs
++++ replace == with != in DeviceState::latency_for
+@@ -590,17 +590,17 @@
+         }
+     }
+ 
+     /// The latency the device runs with: the Controller's while the config
+     /// still says what it said when that was set, else the config's (the
+     /// Controller's value is dropped then; `true` when it was).
+     pub fn latency_for(&mut self, cfg: &DeviceConfig) -> (u64, bool) {
+         match (self.latency_ns, self.config_latency_ns) {
+-            (Some(set), Some(was)) if was == cfg.latency_ns => (set, false),
++            (Some(set), Some(was)) if was != /* ~ changed by cargo-mutants ~ */ cfg.latency_ns => (set, false),
+             (None, None) => (cfg.latency_ns, false),
+             _ => {
+                 self.latency_ns = None;
+                 self.config_latency_ns = None;
+                 (cfg.latency_ns, true)
+             }
+         }
+     }

@@ -1,0 +1,28 @@
+--- crates/dante-stack/src/device.rs
++++ replace DeviceConfig::with_latency -> Result<DeviceConfig, Vec<String>> with Ok(Default::default())
+@@ -211,24 +211,17 @@
+             Err(ConfigError { problems })
+         }
+     }
+ 
+     /// This config with the device latency `ns`, when it holds (the
+     /// config's own rules, as at the start), else its problems: what a
+     /// latency Dante Controller sets must pass.
+     pub fn with_latency(&self, ns: u64) -> Result<DeviceConfig, Vec<String>> {
+-        let mut c = self.clone();
+-        c.latency_ns = ns;
+-        let problems = c.problems();
+-        if problems.is_empty() {
+-            Ok(c)
+-        } else {
+-            Err(problems)
+-        }
++        Ok(Default::default()) /* ~ changed by cargo-mutants ~ */
+     }
+ 
+     /// The latency our TX channels advertise: `tx_latency_ns`, else
+     /// `latency_ns`.
+     pub fn advertised_latency_ns(&self) -> u64 {
+         self.tx_latency_ns.unwrap_or(self.latency_ns)
+     }
+ 

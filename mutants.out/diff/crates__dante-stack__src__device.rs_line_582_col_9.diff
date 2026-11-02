@@ -1,0 +1,29 @@
+--- crates/dante-stack/src/device.rs
++++ replace DeviceState::from_config -> Self with Default::default()
+@@ -574,25 +574,17 @@
+ pub struct Refit {
+     pub rx: (usize, usize),
+     pub tx: (usize, usize),
+ }
+ 
+ impl DeviceState {
+     /// The config's names, no subscription.
+     pub fn from_config(cfg: &DeviceConfig) -> Self {
+-        Self {
+-            name: cfg.name.clone(),
+-            config_name: cfg.name.clone(),
+-            rx: cfg.rx.clone(),
+-            tx: cfg.tx.clone(),
+-            subscriptions: Vec::new(),
+-            latency_ns: None,
+-            config_latency_ns: None,
+-        }
++        Default::default() /* ~ changed by cargo-mutants ~ */
+     }
+ 
+     /// The latency the device runs with: the Controller's while the config
+     /// still says what it said when that was set, else the config's (the
+     /// Controller's value is dropped then; `true` when it was).
+     pub fn latency_for(&mut self, cfg: &DeviceConfig) -> (u64, bool) {
+         match (self.latency_ns, self.config_latency_ns) {
+             (Some(set), Some(was)) if was == cfg.latency_ns => (set, false),
