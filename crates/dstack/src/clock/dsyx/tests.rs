@@ -153,6 +153,7 @@ fn the_dsyx_reply_reads_as_dsync_writes_it() {
             settled: true,
             mode: 3,
             freq_ppb: -750,
+            grandmaster: [0x00, 0x1d, 0xc1, 0x0a, 0x0b, 0x0c],
             date: Some(DateState {
                 d_ns: D,
                 step_at_ptp_ns: Some(STEP_AT),

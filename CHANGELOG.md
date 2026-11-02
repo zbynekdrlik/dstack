@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.8 (2026-11-02)
+
+- New: our devices answer clock stats (8700 op 0x21) as a PTP follower of dsync's grandmaster.
+  - The reply uses a hardware follower's layout: clock and servo state 3, one port following, our MAC as our clock id, the grandmaster's UUID from DSYX bytes 42–47 as master and grandmaster (dsync 1.17 on; dsync 1.26 will add the master's own), and dsync's frequency adjustment.
+  - No reply while the media clock is not ready or no grandmaster is known.
+  - Before this, Dante Controller kept the device's config half-loaded ("Retrieving model information"); now it loads the clocking section.
+- New: `clock::Reading::grandmaster`, `ClockStats::{set_grandmaster, grandmaster}`, `info::{Follower, clock_stats_body, follower_of}`, `Beat::clock`, `Multicaster::set_clock`.
+
 ## 0.5.7 (2026-11-02)
 
 - Fix: Dante Controller shows our device's latency. Its settings read (ARC 0x1100 with start code 0x27ff and 19 keys) got zeros, so Device Config showed 0.0 ms, greyed out (seen on mbc). It now gets the keyed answer the hardware gives, as netaudio's read already did.

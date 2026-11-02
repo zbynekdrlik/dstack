@@ -42,6 +42,7 @@
 //! | 36–39 | the frequency adjustment, ppm × 1000 (ppb) |
 //! | 40 | the mode: 0 init, 1 acquiring, 2 production, 3 lock, 4 nano, 5 NTP only |
 //! | 41 | locked: 0 or 1 |
+//! | 42–47 | the grandmaster's PTPv1 UUID (all zeros: none heard) |
 //! | 62 | flags: bit 1 settled |
 //! | 64 | the extension's version (0: none) |
 //! | 65 | flags: bit 1 the announce is a slew (version 2 on) |
@@ -97,6 +98,9 @@ pub struct Reading {
     pub mode: u8,
     /// Its frequency adjustment, ppb: the heartbeat's clock record later.
     pub freq_ppb: i32,
+    /// The grandmaster's PTPv1 clock UUID (bytes 42–47, dsync 1.17 on);
+    /// all zeros before one was heard.
+    pub grandmaster: [u8; 6],
     /// The date offset; `None` before dsync holds one (or from a
     /// dsync without the extension).
     pub date: Option<DateState>,
@@ -153,6 +157,7 @@ pub fn parse(reply: &[u8], id: u32) -> Result<Reading, DsyxError> {
         settled: base[62] & FLAG_SETTLED != 0,
         mode: base[40],
         freq_ppb: i32::from_be_bytes([base[36], base[37], base[38], base[39]]),
+        grandmaster: base[42..48].try_into().unwrap_or([0; 6]),
         date: date_state(&reply[BASE_LEN..], wall_ns),
     })
 }

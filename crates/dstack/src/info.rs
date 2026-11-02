@@ -37,7 +37,7 @@
 //! | `07 xx 00 13 00 00 00 xx` | `07 2a 00 11 00 00 00 00` | network info, 64 bytes ([`network_info_body`]) |
 //! | `07 xx 00 77 00 00 00 xx` | `07 2a 00 78 00 00 00 00` | `00 00 00 03 00 00 00 00` |
 //! | `07 xx 00 81 00 00 00 xx` | `07 2a 00 80 00 00 00 00` | our sample rate, 20 bytes ([`sample_rate_body`]); a write gets the same answer, unchanged |
-//! | `07 xx 00 21 00 00 00 xx` | none | clock stats: inferno sends them only with a clock's frequency offset, and phase A has no clock |
+//! | `07 xx 00 21 00 00 00 xx` | `07 2a 00 20 00 00 00 00` | clock stats as a follower, 188 bytes ([`clock_stats_body`]): only once the media clock is ready and dsync names a grandmaster (DSYX bytes 42–47) |
 //!
 //! Any other opcode gets no reply and is logged by its opcode; a datagram
 //! shorter than the header is dropped. As inferno, neither the start code
@@ -78,9 +78,9 @@
 //!   (`n, 0, 20, 0`, then the counts), as the hardware receivers send it:
 //!   Dante Controller's Latency tab shows it ([`crate::latency`]).
 //!
-//! Clock stats (`07 xx 00 21`) stay unanswered: inferno sends them only
-//! with a grandmaster identity read from its PTP daemon's files, and our
-//! device has none of its own (the box's dsync is the PTP follower).
+//! Clock stats (`07 xx 00 21`) are answered as a follower of dsync's
+//! grandmaster ([`Beat::clock`]); before that, no reply. Dante Controller
+//! keeps a device's config half-loaded until they come.
 //!
 //! Logs name opcodes, sequences and ports, never an address or a MAC.
 //!
@@ -107,7 +107,8 @@ mod server;
 pub mod share;
 
 pub use server::{
-    Levels, Multicast, Sources, serve_info, serve_info_with, serve_member, serve_shared,
+    Levels, Multicast, Sources, follower_of, serve_info, serve_info_with, serve_member,
+    serve_shared,
 };
 
 /// The info request port (UDP), at the device's address.
@@ -141,6 +142,8 @@ pub mod op {
     /// RX channels changed (sent unasked).
     pub const CHANNEL_CHANGE: [u8; 8] = [0x07, 0x2a, 0x01, 0x02, 0x00, 0x00, 0x00, 0x00];
     pub const HEARTBEAT: [u8; 8] = [0x00, 0x08, 0x00, 0x01, 0x10, 0x00, 0x00, 0x00];
+    /// The clock stats (a follower's, [`super::clock_stats_body`]).
+    pub const CLOCK_STATS: [u8; 8] = [0x07, 0x2a, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00];
 }
 
 /// The heartbeat records' types.
@@ -451,6 +454,55 @@ pub trait Beat: Send + Sync {
     /// The records now; `None` while the media clock is not ready (the
     /// heartbeat is the header alone then, as inferno's without a clock).
     fn records(&self) -> Option<Records>;
+
+    /// What the clock stats state now: `None` (no reply) while the media
+    /// clock is not ready or no grandmaster is known.
+    fn clock(&self) -> Option<Follower> {
+        None
+    }
+}
+
+/// Our clock as a PTP follower states it (the clock-stats reply): the
+/// grandmaster dsync follows and dsync's frequency adjustment. Our clock
+/// follows dsync's; we send no PTP of our own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Follower {
+    /// The grandmaster's PTPv1 UUID (dsync's DSYX bytes 42–47); our master
+    /// too, in a flat Dante network.
+    pub grandmaster: [u8; 6],
+    /// dsync's frequency adjustment, ppb.
+    pub freq_ppb: i32,
+}
+
+/// A Brooklyn II follower's clock stats, captured (its ids synthetic): the
+/// layout [`clock_stats_body`] fills.
+const CLOCK_TEMPLATE: [u8; 188] = [
+    0x00, 0x03, 0x00, 0x03, 0x00, 0x00, 0x00, 0x9f, 0xff, 0xff, 0xf6, 0x75, 0x02, 0x00, 0x00, 0x00,
+    0x00, 0x02, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00,
+    0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x34, 0x00, 0x09, 0x00, 0x00, 0x02, 0x94, 0x00, 0x00,
+    0x00, 0x03, 0x0d, 0x40, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x60, 0x0c, 0x00,
+    0x00, 0x00, 0x00, 0x0c, 0x00, 0x98, 0x00, 0x20, 0x00, 0x03, 0x00, 0x00, 0x00, 0x68, 0x10, 0x00,
+    0x00, 0x00, 0x00, 0x01, 0x01, 0x02, 0x01, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x09, 0x00, 0x07,
+    0x00, 0x01, 0x00, 0x02, 0x02, 0x02, 0x02, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x03, 0x00, 0x03,
+    0x00, 0x01, 0x00, 0x03, 0x02, 0x02, 0x01, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x03, 0x00, 0x07,
+    0x00, 0x03, 0x00, 0x07, 0x00, 0xb8, 0x00, 0x04, 0x02, 0x00, 0x00, 0xff, 0xfe, 0x00, 0x00, 0x02,
+    0x02, 0x00, 0x00, 0xff, 0xfe, 0x00, 0x00, 0x01, 0x02, 0x00, 0x00, 0xff, 0xfe, 0x00, 0x00, 0x01,
+    0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
+];
+
+/// The clock stats of a follower with the clock UUID `own` (our MAC) that
+/// follows `f`: disciplined, synchronized, one port following (state 9),
+/// as a hardware follower answers them; the ids and the frequency ours.
+/// Dante Controller keeps a device's config half-loaded until this reply
+/// comes ("Retrieving model information", mbc 2.11.2026).
+pub fn clock_stats_body(own: [u8; 6], f: &Follower) -> Vec<u8> {
+    let mut c = CLOCK_TEMPLATE.to_vec();
+    c[0x08..0x0c].copy_from_slice(&f.freq_ppb.to_be_bytes());
+    c[0x0c..0x12].copy_from_slice(&own);
+    c[0x14..0x1a].copy_from_slice(&f.grandmaster);
+    c[0x1c..0x22].copy_from_slice(&f.grandmaster);
+    c
 }
 
 /// RX channels whose name, subscription or status changed, waiting for
@@ -503,12 +555,24 @@ impl Changes {
 pub struct Multicaster {
     id: Identity,
     seq: u16,
+    /// What the clock stats state ([`Multicaster::set_clock`]).
+    clock: Option<Follower>,
 }
 
 impl Multicaster {
     /// The first packet carries sequence 1, as inferno's.
     pub fn new(id: Identity) -> Self {
-        Self { id, seq: 1 }
+        Self {
+            id,
+            seq: 1,
+            clock: None,
+        }
+    }
+
+    /// What the next clock-stats reply states (the server sets it from
+    /// [`Beat::clock`] before each request); none: no reply.
+    pub fn set_clock(&mut self, clock: Option<Follower>) {
+        self.clock = clock;
     }
 
     /// The next packet: the header, then `body`; the sequence moves on.
@@ -591,10 +655,16 @@ impl Multicaster {
                 let body = sample_rate_body(self.id.sample_rate);
                 Some(self.packet(START_INFO, op::SAMPLE_RATE, &body))
             }
-            Kind::ClockStats => {
-                debug!(op = %opcode, seq = req.seq, "clock stats asked: no PTP daemon of ours, no reply");
-                None
-            }
+            Kind::ClockStats => match self.clock {
+                Some(f) => {
+                    let body = clock_stats_body(self.id.net.mac, &f);
+                    Some(self.packet(START_INFO, op::CLOCK_STATS, &body))
+                }
+                None => {
+                    debug!(op = %opcode, seq = req.seq, "clock stats asked: the clock is not ready, no reply");
+                    None
+                }
+            },
             Kind::Unknown | Kind::ChannelChange => {
                 info!(op = %opcode, seq = req.seq, "info request not answered");
                 None

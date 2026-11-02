@@ -974,6 +974,7 @@ fn the_records_come_once_the_clock_is_ready_and_each_beat_takes_its_own_second()
         rx: Arc::clone(&rx),
         manager: Arc::new(Mutex::new(m)),
         levels: Arc::default(),
+        stats: Arc::default(),
     };
     // Not ready: no records, nothing taken.
     rings[2].write_at(5, &[i32::MAX / 10]);
@@ -1241,4 +1242,57 @@ fn a_sample_rate_read_or_write_gets_our_rate_in_the_hardware_s_layout() {
         (parsed.current, parsed.pending, parsed.supported),
         (rate, None, vec![rate])
     );
+}
+
+/// Dante Controller keeps our config half-loaded until clock stats come
+/// (mbc, 2.11.2026): with a grandmaster known, we answer as a follower of
+/// it, in a hardware follower's layout, our MAC as our clock id.
+#[test]
+fn clock_stats_are_answered_as_a_follower_once_a_grandmaster_is_known() {
+    use crate::info::client::parse_clock;
+    let mut mc = Multicaster::new(identity());
+    let ask = asking([0x07, 0x38, 0x00, 0x21, 0, 0, 0, 0x64]);
+    // No grandmaster yet: no reply, no sequence used.
+    assert_eq!(mc.answer(&ask), None);
+    assert_eq!(mc.seq, 1);
+    let gm = [0x02, 0x00, 0x00, 0x00, 0x00, 0x07];
+    mc.set_clock(Some(Follower {
+        grandmaster: gm,
+        freq_ppb: -2_443,
+    }));
+    let reply = mc.answer(&ask).expect("clock stats");
+    assert_eq!(&reply[24..32], &op::CLOCK_STATS);
+    assert_eq!(&reply[8..16], &identity().device_id);
+    let c = parse_clock(&reply[HEADER_LEN..]).expect("a follower's clock stats");
+    assert_eq!((c.clock_state, c.servo_state), (3, 3));
+    assert_eq!(c.device, MAC);
+    assert_eq!((c.master, c.grandmaster), (gm, gm));
+    assert_eq!(c.frequency_ppb, -2_443);
+    assert_eq!(c.ports, [9]);
+    assert!(!c.is_leader() && !c.is_grandmaster());
+    // Cleared again: no reply.
+    mc.set_clock(None);
+    assert_eq!(mc.answer(&ask), None);
+}
+
+#[test]
+fn the_running_device_states_a_follower_only_when_ready_with_a_grandmaster() {
+    use crate::info::server::follower_of;
+    let gm = [0x02, 0, 0, 0, 0, 9];
+    assert_eq!(follower_of(false, Some(gm), -750), None, "not ready");
+    assert_eq!(follower_of(true, None, -750), None, "no grandmaster");
+    assert_eq!(
+        follower_of(true, Some(gm), -750),
+        Some(Follower {
+            grandmaster: gm,
+            freq_ppb: -750
+        })
+    );
+    // dsync's all-zeros grandmaster reads as none.
+    let stats = crate::clock::ClockStats::default();
+    assert_eq!(stats.grandmaster(), None);
+    stats.set_grandmaster([0; 6]);
+    assert_eq!(stats.grandmaster(), None);
+    stats.set_grandmaster(gm);
+    assert_eq!(stats.grandmaster(), Some(gm));
 }
