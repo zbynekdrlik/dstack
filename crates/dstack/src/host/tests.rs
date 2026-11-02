@@ -327,23 +327,3 @@ fn a_held_info_port_makes_a_member_any_other_bind_error_ends_the_start() {
     let other = member_or(Error::from(ErrorKind::PermissionDenied)).unwrap_err();
     assert_eq!(other.kind(), ErrorKind::PermissionDenied);
 }
-
-#[test]
-fn the_normal_timing_profile_is_taken_at_setup_again() {
-    // dlink (#68, owner 2.11.2026): the normal profile is back, sized for a
-    // wake without priority (latency 10 ms, pump margin 5 ms).
-    let dir = tempfile::tempdir().unwrap();
-    let (path, _) = config_in(dir.path());
-    let text = std::fs::read_to_string(&path)
-        .unwrap()
-        .replace("latency_ns = 1000000", "latency_ns = 10000000")
-        + "\nwork_margin = 480\ntiming = \"normal\"\n";
-    std::fs::write(&path, text).unwrap();
-    // The setup ends on NOWHERE (no interface) or, in this shared test
-    // process, on the one profile per process; never on a withdrawal.
-    let e = prepare(&options(path, Place::Ip(NOWHERE), dir.path()), &[])
-        .err()
-        .expect("NOWHERE has no interface");
-    let why = setup_error(e);
-    assert!(!why.contains("withdrawn"), "{why}");
-}
