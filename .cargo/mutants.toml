@@ -15,6 +15,8 @@ exclude_globs = [
   "crates/dstack/src/host/windows.rs",
   "crates/dstack/src/lso/windows.rs",
   "crates/dstack/src/traffic/windows.rs",
+  # Third-party code (mdns-sd, one dstack change; tests/mdns_ipv4_only.rs).
+  "vendor/**",
 ]
 # Thin glue no unit test can observe without changing the process: the OS
 # priority calls (their decision is `clock::realtime_for`, tested) and the
