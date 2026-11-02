@@ -995,6 +995,7 @@ fn the_records_come_once_the_clock_is_ready_and_each_beat_takes_its_own_second()
         sources.clock(),
         Some(Follower {
             grandmaster: [0x02, 0, 0, 0, 0, 5],
+            master: [0x02, 0, 0, 0, 0, 5],
             freq_ppb: -1234
         })
     );
@@ -1334,8 +1335,10 @@ fn clock_stats_are_answered_as_a_follower_once_a_grandmaster_is_known() {
     assert_eq!(mc.answer(&ask), None);
     assert_eq!(mc.seq, 1);
     let gm = [0x02, 0x00, 0x00, 0x00, 0x00, 0x07];
+    let master = [0x02, 0x00, 0x00, 0x00, 0x00, 0x08];
     mc.set_clock(Some(Follower {
         grandmaster: gm,
+        master,
         freq_ppb: -2_443,
     }));
     let reply = mc.answer(&ask).expect("clock stats");
@@ -1344,7 +1347,9 @@ fn clock_stats_are_answered_as_a_follower_once_a_grandmaster_is_known() {
     let c = parse_clock(&reply[HEADER_LEN..]).expect("a follower's clock stats");
     assert_eq!((c.clock_state, c.servo_state), (3, 3));
     assert_eq!(c.device, MAC);
-    assert_eq!((c.master, c.grandmaster), (gm, gm));
+    // A boundary clock between: dsync's master at 0x14, the grandmaster at
+    // 0x1c, as a hardware follower's stats name them.
+    assert_eq!((c.master, c.grandmaster), (master, gm));
     assert_eq!(c.frequency_ppb, -2_443);
     assert_eq!(c.ports, [9]);
     assert!(!c.is_leader() && !c.is_grandmaster());
@@ -1357,12 +1362,32 @@ fn clock_stats_are_answered_as_a_follower_once_a_grandmaster_is_known() {
 fn the_running_device_states_a_follower_only_when_ready_with_a_grandmaster() {
     use crate::info::server::follower_of;
     let gm = [0x02, 0, 0, 0, 0, 9];
-    assert_eq!(follower_of(false, Some(gm), -750), None, "not ready");
-    assert_eq!(follower_of(true, None, -750), None, "no grandmaster");
+    let master = [0x02, 0, 0, 0, 0, 10];
     assert_eq!(
-        follower_of(true, Some(gm), -750),
+        follower_of(false, Some(gm), Some(master), -750),
+        None,
+        "not ready"
+    );
+    assert_eq!(
+        follower_of(true, None, Some(master), -750),
+        None,
+        "no grandmaster"
+    );
+    assert_eq!(
+        follower_of(true, Some(gm), Some(master), -750),
         Some(Follower {
             grandmaster: gm,
+            master,
+            freq_ppb: -750
+        })
+    );
+    // No master named (dsync before 1.26, or none followed yet): the
+    // grandmaster, as in a flat network.
+    assert_eq!(
+        follower_of(true, Some(gm), None, -750),
+        Some(Follower {
+            grandmaster: gm,
+            master: gm,
             freq_ppb: -750
         })
     );
@@ -1373,4 +1398,13 @@ fn the_running_device_states_a_follower_only_when_ready_with_a_grandmaster() {
     assert_eq!(stats.grandmaster(), None);
     stats.set_grandmaster(gm);
     assert_eq!(stats.grandmaster(), Some(gm));
+    // The master likewise, kept apart from the grandmaster.
+    assert_eq!(stats.master(), None);
+    stats.set_master([0; 6]);
+    assert_eq!(stats.master(), None);
+    stats.set_master(master);
+    assert_eq!(
+        (stats.master(), stats.grandmaster()),
+        (Some(master), Some(gm))
+    );
 }

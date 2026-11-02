@@ -1666,3 +1666,38 @@ fn declare_skips_a_channel_the_state_does_not_have() {
     assert_eq!(state.declare(&cfg), Vec::<usize>::new());
     assert!(state.subscriptions.iter().all(Option::is_none));
 }
+
+/// intercom's report (v0.5.11): a save after any other change wrote the
+/// declared subscriptions into the file, so a later edit of the config's
+/// declaration never reached the channel. A declared subscription stays
+/// out of the file until Dante Controller changes that channel.
+#[test]
+fn a_save_keeps_declared_subscriptions_out_of_the_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = DeviceConfig {
+        subscribe: vec![declared(1, "Master", "peer-device")],
+        ..config_in(dir.path())
+    };
+    let mut state = DeviceState::load_or_default(&cfg).unwrap();
+    assert_eq!(state.subscription(0), Some(&sub("Master", "peer-device")));
+    // Dante Controller subscribes RX 2; the state is saved.
+    assert!(state.set_subscription(&cfg, 1, Some(sub("TX 3", "other-device"))));
+    state.save(&cfg.state_file).unwrap();
+    let text = fs::read_to_string(&cfg.state_file).unwrap();
+    assert_eq!(text.matches("[[subscriptions]]").count(), 1, "{text}");
+    assert!(!text.contains("Master"), "{text}");
+    // The config now declares another source for RX 1: it reaches it.
+    let edited = DeviceConfig {
+        subscribe: vec![declared(1, "Click", "peer-device")],
+        ..cfg.clone()
+    };
+    let back = DeviceState::load_or_default(&edited).unwrap();
+    assert_eq!(back.subscription(0), Some(&sub("Click", "peer-device")));
+    assert_eq!(back.subscription(1), Some(&sub("TX 3", "other-device")));
+    // Dante Controller changes RX 1 itself: now it is saved and wins.
+    let mut state = back;
+    assert!(state.set_subscription(&edited, 0, Some(sub("TX 4", "other-device"))));
+    state.save(&cfg.state_file).unwrap();
+    let back = DeviceState::load_or_default(&edited).unwrap();
+    assert_eq!(back.subscription(0), Some(&sub("TX 4", "other-device")));
+}

@@ -86,16 +86,25 @@ impl Beat for Sources {
         follower_of(
             self.clock.now_ns().is_some(),
             self.stats.grandmaster(),
+            self.stats.master(),
             self.freq.load(Ordering::Relaxed),
         )
     }
 }
 
-/// What the clock stats state: a follower of `grandmaster` at `freq_ppb`,
-/// only while the media clock is `ready` and a grandmaster is known.
-pub fn follower_of(ready: bool, grandmaster: Option<[u8; 6]>, freq_ppb: i32) -> Option<Follower> {
+/// What the clock stats state: a follower of `master` (the grandmaster
+/// when dsync names none) under `grandmaster` at `freq_ppb`, only while
+/// the media clock is `ready` and a grandmaster is known.
+pub fn follower_of(
+    ready: bool,
+    grandmaster: Option<[u8; 6]>,
+    master: Option<[u8; 6]>,
+    freq_ppb: i32,
+) -> Option<Follower> {
+    let grandmaster = grandmaster.filter(|_| ready)?;
     Some(Follower {
-        grandmaster: grandmaster.filter(|_| ready)?,
+        grandmaster,
+        master: master.unwrap_or(grandmaster),
         freq_ppb,
     })
 }

@@ -36,7 +36,7 @@
 //! - Problems name a field and a channel number, never a name: the channel
 //!   names may be the band's labels (P6), and no log may hold one.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -663,6 +663,12 @@ pub struct DeviceState {
     /// another latency since wins, and the Controller's value goes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_latency_ns: Option<u64>,
+    /// The RX channels (from 0) whose subscription is the config's
+    /// declared one ([`DeviceState::declare`]), never changed since: a
+    /// save leaves them out of the file, so the config keeps declaring
+    /// them (intercom's report on v0.5.11).
+    #[serde(skip)]
+    pub declared: BTreeSet<usize>,
 }
 
 /// What [`DeviceState::fit`] changed: each direction's channel count
@@ -684,6 +690,7 @@ impl DeviceState {
             subscriptions: Vec::new(),
             latency_ns: None,
             config_latency_ns: None,
+            declared: BTreeSet::new(),
         }
     }
 
@@ -704,6 +711,7 @@ impl DeviceState {
                     tx_channel: d.tx_channel.clone(),
                     tx_device: d.tx_device.clone(),
                 });
+                self.declared.insert(rx);
                 set.push(rx);
             }
         }
@@ -749,6 +757,7 @@ impl DeviceState {
                 && sub.tx_device.eq_ignore_ascii_case(&self.name)
             {
                 sub.tx_device = name.to_string();
+                self.declared.remove(&rx);
                 moved.push(rx);
             }
         }
@@ -820,6 +829,7 @@ impl DeviceState {
         }
         self.subscriptions.resize(cfg.rx.len(), None);
         self.subscriptions[rx] = sub;
+        self.declared.remove(&rx);
         true
     }
 
@@ -1011,7 +1021,18 @@ impl DeviceState {
     pub fn save(&self, path: &Path) -> io::Result<()> {
         let named = |e: io::Error| io::Error::new(e.kind(), format!("{}: {e}", path.display()));
         let tmp = temporary(path).map_err(named)?;
-        let text = toml::to_string(self).map_err(io::Error::other)?;
+        let text = if self.declared.is_empty() {
+            toml::to_string(self)
+        } else {
+            let mut kept = self.clone();
+            for &rx in &self.declared {
+                if let Some(sub) = kept.subscriptions.get_mut(rx) {
+                    *sub = None;
+                }
+            }
+            toml::to_string(&kept)
+        }
+        .map_err(io::Error::other)?;
         let written = write_synced(&tmp, text.as_bytes())
             .and_then(|()| fs::rename(&tmp, path))
             .and_then(|()| sync_dir(path));
