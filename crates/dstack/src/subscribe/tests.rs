@@ -634,7 +634,8 @@ fn a_transmitter_we_cannot_receive_is_never_asked() {
     m.set(2, Some(sub("TX 2", "other-device")));
     m.set(3, Some(sub("TX 1", "third-device")));
     assert_eq!(run(&mut m, &net, 0, 60 * S, None), []);
-    assert_eq!(m.status(0), Some(SubStatus::TxFail));
+    // Another rate is a format mismatch, as Dante Controller names it.
+    assert_eq!(m.status(0), Some(SubStatus::ChannelFormat));
     assert_eq!(m.status(1), Some(SubStatus::Unresolved));
     assert_eq!(m.status(2), Some(SubStatus::Unresolved));
     assert_eq!(m.status(3), Some(SubStatus::TxFail));
@@ -1425,4 +1426,55 @@ fn flows_take_only_the_device_s_flow_slots() {
     m.set(0, Some(sub("TX 1", "peer-device")));
     m.set(1, Some(sub("TX 1", "other-device")));
     assert_eq!(requests(&m.tick(0, &NONE, &net)).len(), 2);
+}
+
+/// Collects the WARN lines `f` logs on this thread.
+fn warnings(f: impl FnOnce()) -> String {
+    #[derive(Clone)]
+    struct Sink(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for Sink {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let sink = Sink(Default::default());
+    let out = sink.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(move || out.clone())
+        .with_ansi(false)
+        .with_max_level(tracing::Level::WARN)
+        .finish();
+    crate::test_log::undecided();
+    tracing::subscriber::with_default(subscriber, f);
+    String::from_utf8(sink.0.lock().unwrap().clone()).unwrap()
+}
+
+/// dstack #20: the intercom's 48 kHz device subscribed to a 96 kHz card
+/// showed TX_FAIL and logged nothing. A transmitter at another rate is a
+/// format mismatch, said once, with both rates.
+#[test]
+fn a_transmitter_at_another_rate_is_a_format_mismatch_said_once() {
+    let net = Fake::default();
+    net.add(
+        "peer-device",
+        "TX 1",
+        Advertised {
+            rate: 48_000,
+            ..adv(PEER_IP, 1)
+        },
+    );
+    let mut m = manager();
+    m.set(0, Some(sub("TX 1", "peer-device")));
+    let log = warnings(|| {
+        assert_eq!(run(&mut m, &net, 0, 60 * S, None), []);
+    });
+    assert_eq!(m.status(0), Some(SubStatus::ChannelFormat));
+    assert_eq!(log.lines().count(), 1, "{log}");
+    for part in ["rx=1", "TX 1", "peer-device", "48000", "96000"] {
+        assert!(log.contains(part), "{part} missing: {log}");
+    }
 }
