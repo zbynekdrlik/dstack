@@ -614,7 +614,7 @@ async fn the_server_bounds_its_replies_to_the_info_group() {
     task.abort();
 }
 
-/// Records for 2 TX and 3 RX channels: dantesync's -1234 ppb, peaks, RX
+/// Records for 2 TX and 3 RX channels: dsync's -1234 ppb, peaks, RX
 /// flow slot 1 seven samples late and slot 32 past `i32::MAX`.
 fn records() -> Records {
     let mut lateness = [0u32; crate::media::rx::MAX_FLOWS];

@@ -33,7 +33,7 @@ use crate::media::tx::TxShared;
 use crate::subscribe::Manager;
 
 /// The running device's records ([`crate::daemon::media::Media::beat`]):
-/// the media clock, dantesync's frequency adjustment as the clock's poller
+/// the media clock, dsync's frequency adjustment as the clock's poller
 /// keeps it, the TX side (its channels' peaks), the RX side (its rings'
 /// peaks, its slots' lateness) and the manager (which slots hold a granted
 /// flow). Each beat takes the peaks and every slot's lateness (the largest

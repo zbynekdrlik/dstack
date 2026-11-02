@@ -1,5 +1,5 @@
 //! A whole device on the test-only system clock (dasio's CI E2E: a
-//! GitHub-hosted runner has no dantesync and no PTP network). The real
+//! GitHub-hosted runner has no dsync and no PTP network). The real
 //! host is prepared on the box's IPv4 address on its default route (the
 //! production checks stay: no loopback, a real MAC) with
 //! `ClockSource::System` and a state
@@ -178,7 +178,7 @@ fn our_tx_reaches_our_rx_clean_on_the_system_clock() {
         u32::try_from(prepared.config().latency_ns).unwrap(),
     );
     let media = prepared.media();
-    // Ready at once: no dantesync.
+    // Ready at once: no dsync.
     let status = ctl::answer("status", &media);
     assert_eq!(field(&status, "\"clock\":", "ready"), Some(1), "{status}");
     assert!(status.contains("\"source\":\"system\"}"), "{status}");

@@ -46,7 +46,7 @@
 //! - [`announce`]: the mDNS records Dante Controller browses for, and their
 //!   announcer.
 //! - [`clock`]: the media clock: PTP time as `CLOCK_MONOTONIC` + k, k from
-//!   dantesync's time server on the box (the box's one PTP owner), and the
+//!   dsync's time server on the box (the box's one PTP owner), and the
 //!   packets' stamps.
 //! - [`flows`]: flow control on UDP 4455: a receiver's request for a flow
 //!   of our TX channels, answered as inferno answers it, its stop and its

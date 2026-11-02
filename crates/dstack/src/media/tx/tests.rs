@@ -1525,17 +1525,17 @@ fn a_packet_at_the_latency_still_plays_and_one_ns_more_is_late() {
 /// threads share the io core; the box received 7 stage flows (168 k
 /// packets/s at fpp 4). At one SCHED_FIFO priority the TX thread waits
 /// until the RX thread yields: age_max 239/247 µs at 250 µs, card peaks
-/// over 400 µs. TX must preempt RX, and both stay below dantesync's 50.
+/// over 400 µs. TX must preempt RX, and both stay below dsync's 50.
 #[test]
-fn the_tx_thread_preempts_the_rx_thread_and_both_stay_below_dantesync() {
-    const DANTESYNC_PRIORITY: i32 = 50;
+fn the_tx_thread_preempts_the_rx_thread_and_both_stay_below_dsync() {
+    const DSYNC_PRIORITY: i32 = 50;
     let (tx, rx, engine) = (
         TX_PRIORITY,
         crate::media::rx::RX_PRIORITY,
         crate::stream::ENGINE_PRIORITY,
     );
     assert!(tx > rx, "TX {tx} must be above RX {rx}");
-    assert!(tx < DANTESYNC_PRIORITY, "TX {tx} below dantesync");
+    assert!(tx < DSYNC_PRIORITY, "TX {tx} below dsync");
     assert!(rx > engine, "RX {rx} above the engine pump {engine}");
 }
 

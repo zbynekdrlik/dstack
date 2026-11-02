@@ -62,7 +62,7 @@ impl Embedded {
         map: Map,
         processor: P,
     ) -> Result<Embedded, HostError> {
-        Self::start_with(cfg, place, map, processor, ClockSource::Dantesync)
+        Self::start_with(cfg, place, map, processor, ClockSource::Dsync)
     }
 
     /// [`Embedded::start`] on the clock `source` ([`ClockSource::System`]

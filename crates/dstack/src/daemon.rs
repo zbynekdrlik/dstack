@@ -8,7 +8,7 @@
 //!   <IPv4>`; `--version` ([`Build::line`]: the binary's name, its version and the
 //!   build's commit, CI's `GITHUB_SHA`, "local" otherwise); `clock
 //!   --seconds <n>` (phase B, plan Task 2): the media clock's polls of
-//!   dantesync, one JSON line each ([`ClockLines`]), serving nothing. (An
+//!   dsync, one JSON line each ([`ClockLines`]), serving nothing. (An
 //!   application's box health is its own, built on [`crate::health`].)
 //! - [`pick_interface`]: the interface and its one IPv4 address the device
 //!   serves on, from the box's interface list: ARC, CMC and the info
@@ -113,7 +113,7 @@ pub fn usage(name: &str) -> String {
 /// The `--help` text, naming [`NAME`]; [`usage`] names another binary.
 pub const USAGE: &str = "\
 usage: dstack-dev --config <path> (--iface <name> | --ip <IPv4 address>)
-                     [--control <socket path>] [--clock dantesync|system]
+                     [--control <socket path>] [--clock dsync|system]
        dstack-dev ctl [--socket <path>] <request>
        dstack-dev clock --seconds <n>
        dstack-dev card read <ip> <expected-name>
@@ -127,12 +127,12 @@ IPv4 address (info replies to 224.0.0.231:8702, a heartbeat every second to
 224.0.0.233:8708), its mDNS records on that interface only, renames and RX
 subscriptions saved to the config's state file. It sends the TX flows
 receivers ask for and asks transmitters for its subscribed RX channels, on
-PTP time read from dantesync (127.0.0.1:31900); it never sends PTP. Its
-control socket (default /run/iem-dante/control.sock) takes one request
+PTP time read from dsync (127.0.0.1:31900); it never sends PTP. Its
+control socket (default /run/dstack/control.sock) takes one request
 line a connection. SIGTERM or SIGINT stops every RX flow at its
 transmitter, ends the media threads and withdraws the records (mDNS
 goodbyes), then it exits 0. --clock system (TEST ONLY) takes PTP time from
-this machine's own clock instead of dantesync, ready at once: for a box with
+this machine's own clock instead of dsync, ready at once: for a box with
 no PTP network; its flows play in sync with no other device.
 
 card: another device's channel labels and name, by its IP on the ARC port
@@ -151,16 +151,16 @@ ctl: sends one request to the control socket and prints the answer line:
                             which checker reads RX channel rx (from 1)
 Exit 0 for ok or the status, 1 for an error answer or no socket.
 
-clock: polls dantesync's time server on the box (127.0.0.1:31900) n times,
+clock: polls dsync's time server on the box (127.0.0.1:31900) n times,
 a second apart, as the device's media clock does, and prints one JSON line
 a poll, numbers only: t_s (seconds from the first poll), ready (1 once the
 clock has a k), k_ns (this poll's k, null when the poll gave none), dk_ns
 (its change since the line before), off_ns (this poll's k less the
 anchored one), re_anchors (so far), re_anchor_ns (this poll's re-anchor,
 else null), holdover (1 when this poll kept k without a usable reading),
-sample (0 usable, 1 dantesync not locked, 2 no date offset, 3 a date step
+sample (0 usable, 1 dsync not locked, 2 no date offset, 3 a date step
 within 2 s, 4 a date slew, 5 no reply), locked, mode and freq_ppb
-(dantesync's, null without a reply). It serves nothing and never opens
+(dsync's, null without a reply). It serves nothing and never opens
 UDP 319 or 320.";
 
 /// Where the device serves.
@@ -188,7 +188,7 @@ pub enum Command {
     /// TEST ONLY (`--clock system`): the device on this machine's own clock
     /// (`host::ClockSource::System`), for a box with no PTP network (CI).
     RunOnSystemClock(Options),
-    /// `clock --seconds <n>`: n polls of dantesync, a line each.
+    /// `clock --seconds <n>`: n polls of dsync, a line each.
     Clock {
         seconds: u32,
     },
@@ -259,9 +259,9 @@ pub fn parse_args(args: &[String]) -> Result<Command, String> {
         control,
     };
     match clock.as_deref() {
-        None | Some("dantesync") => Ok(Command::Run(opts)),
+        None | Some("dsync") => Ok(Command::Run(opts)),
         Some("system") => Ok(Command::RunOnSystemClock(opts)),
-        Some(_) => Err("--clock is dantesync or system".into()),
+        Some(_) => Err("--clock is dsync or system".into()),
     }
 }
 

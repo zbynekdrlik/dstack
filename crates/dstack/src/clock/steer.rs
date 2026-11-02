@@ -1,8 +1,8 @@
 //! A steered clock that never steps, for Windows (dstack #1, songplayer,
 //! 1.11.2026). Linux has one in `CLOCK_MONOTONIC`: it runs at the rate
-//! dantesync steers and no date step moves it. Windows has no such clock:
+//! dsync steers and no date step moves it. Windows has no such clock:
 //! QPC is not steered, and the system time is steered but steps. Until
-//! now, our "monotonic" clock there was the system time, so dantesync's
+//! now, our "monotonic" clock there was the system time, so dsync's
 //! nightly date step moved PTP time with it. At 02:00:11Z the wall stepped
 //! +1.6 s; the TX schedule started again at once (lag 153609 samples), the
 //! engine pump skipped 1200 blocks, and the clock re-anchored back only

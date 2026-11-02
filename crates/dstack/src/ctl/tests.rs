@@ -607,7 +607,7 @@ const WORDS: &[&str] = &[
     "holdovers",
     "holdover",
     "freq_ppb",
-    "dantesync",
+    "dsync",
     "system",
     "requests",
     "port",
@@ -702,7 +702,7 @@ fn a_fresh_device_s_status_is_numbers_only() {
     assert_eq!(
         s,
         "{\"clock\":{\"ready\":0,\"epoch\":0,\"polls\":0,\"re_anchors\":0,\"holdovers\":0,\
-         \"holdover\":0,\"freq_ppb\":-750,\"source\":\"dantesync\"},\"requests\":[],\"sent\":[],\"uncounted\":0,\
+         \"holdover\":0,\"freq_ppb\":-750,\"source\":\"dsync\"},\"requests\":[],\"sent\":[],\"uncounted\":0,\
          \"tx\":[],\"rx\":[],\"rx_poll_errors\":0,\"channels\":[],\"sources\":[],\"checks\":[]}"
     );
 }
@@ -768,7 +768,7 @@ fn the_status_names_the_clock_requests_channels_sources_and_checks() {
     assert!(
         s.starts_with(
             "{\"clock\":{\"ready\":1,\"epoch\":1,\"polls\":3,\"re_anchors\":1,\"holdovers\":1,\
-             \"holdover\":0,\"freq_ppb\":-750,\"source\":\"dantesync\"},\
+             \"holdover\":0,\"freq_ppb\":-750,\"source\":\"dsync\"},\
              \"requests\":[{\"port\":4440,\"peer\":1,\"op\":8704,\"n\":1}],\
              \"sent\":[{\"peer\":1,\"op\":256,\"n\":1}],\"uncounted\":0,\"tx\":[],\"rx\":[],"
         ),

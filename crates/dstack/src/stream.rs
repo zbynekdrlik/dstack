@@ -83,7 +83,7 @@ pub const WORK_MARGIN: u64 = 96;
 /// 96 kHz): far beyond any useful margin, well inside the rings.
 pub const MAX_WORK_MARGIN: u64 = 4096;
 /// The pump thread's `SCHED_FIFO` priority when `RLIMIT_RTPRIO` allows it:
-/// below the TX and RX threads' 45 and dantesync's 50.
+/// below the TX and RX threads' 45 and dsync's 50.
 pub const ENGINE_PRIORITY: i32 = 40;
 /// Free pacing more than this many blocks behind resynchronises instead
 /// of bursting (NullRt's rule).

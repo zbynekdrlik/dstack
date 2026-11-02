@@ -64,6 +64,13 @@ exclude_re = [
   # `name_of`) is tested, the counters' read by a lib test on the real NIC.
   "traffic.rs.*TrafficWatch::watch",
   "traffic.rs.*nic_sent_bytes",
+  # The poller's log lines (log only) and its wrapper aimed at dsync's port
+  # (its body `poll` runs against a stand-in server in the tests).
+  "clock.rs.*os::log_event",
+  "clock.rs.*replace os::poll_dsync with",
+  # The CLI's entry points: they run as the binary only (a whole-process
+  # path, like src/bin's main); their parse is tested (daemon::parse).
+  "daemon/cli.rs.*replace (main|clock) -> ExitCode",
   # Log-only: the qdisc verdict is tested in qdisc::check.
   "qdisc.rs.*report",
   "replace set_profile -> bool",

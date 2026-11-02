@@ -4,14 +4,14 @@ Owner's goal: a single, robust, CI-tested Dante stack, so no project solves a Da
 
 ## Today
 
-`iem-dante` lives in iemmixer (about 27 000 lines) and as a copy here, 19 commits apart. dantesync owns the clock. Every further Dante application would be another copy.
+`iem-dante` lives in iemmixer (about 27 000 lines) and as a copy here, 19 commits apart. dsync owns the clock. Every further Dante application would be another copy.
 
 ## Shape
 
 - One repository, `dstack`, is the only place Dante code lives: discovery, ARC, CMC, flows, media TX/RX, clock client, health. Public, because iemmixer is public and its CI must fetch it; no site data, same hygiene as iemmixer.
 - Applications depend on a tagged release by Cargo git tag. No copies, no local patches. Each application's CI fails on Dante protocol code outside the dependency.
 - One owner: the Dante session owns dstack and dasio. Other projects file tickets there; they do not fix Dante locally.
-- dantesync stays its own project; the stack uses it through the DSYX contract, tested in the stack's CI.
+- dsync stays its own project; the stack uses it through the DSYX contract, tested in the stack's CI.
 
 ## What makes it robust
 

@@ -4,7 +4,7 @@
 //! The running device's audio side (Gen 3 phase B, plan Task 7): what the
 //! daemon builds once and every server shares.
 //!
-//! - [`Media`]: the media clock (PTP time from dantesync's poller), the RX
+//! - [`Media`]: the media clock (PTP time from dsync's poller), the RX
 //!   channels' rings, the TX side ([`TxShared`], the flow-control server's
 //!   table and the TX thread's plans and sources), the RX side
 //!   ([`RxShared`], our flow sockets and the RX thread's plans and routes),
@@ -69,7 +69,7 @@ pub const THREADS_WAIT: Duration = Duration::from_secs(1);
 #[derive(Clone)]
 pub struct Clock {
     pub ptp: Arc<dyn PtpClock>,
-    /// dantesync's frequency adjustment, ppb (the heartbeat's 0x8001).
+    /// dsync's frequency adjustment, ppb (the heartbeat's 0x8001).
     pub freq: Arc<AtomicI32>,
     pub stats: Arc<ClockStats>,
 }

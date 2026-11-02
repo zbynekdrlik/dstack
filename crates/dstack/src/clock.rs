@@ -2,20 +2,20 @@
 // Copyright (C) 2026 iemmixer contributors.
 
 //! The media clock (Gen 3 phase B, plan Task 1; design §5.2, §5.5): PTP
-//! time on the box, read from dantesync, the box's one PTP owner (a
+//! time on the box, read from dsync, the box's one PTP owner (a
 //! follower). The device never opens UDP 319/320 and never sends PTP.
 //!
-//! dantesync does not keep `CLOCK_REALTIME` at PTP time: it holds
+//! dsync does not keep `CLOCK_REALTIME` at PTP time: it holds
 //! `wall = PTP + D`, `D` a fleet date offset that steps (whole 200 ms a
 //! night, or a step or slew every ~20 s in its micro mode). So:
 //!
 //! - PTP ns = `CLOCK_MONOTONIC` + k. `CLOCK_MONOTONIC` runs at the rate
-//!   dantesync's frequency word gives the kernel clock (the grandmaster's)
+//!   dsync's frequency word gives the kernel clock (the grandmaster's)
 //!   and no step moves it.
 //! - k = (`CLOCK_REALTIME` − D) − `CLOCK_MONOTONIC` ([`sample`]), with D
-//!   from dantesync's time server ([`dsyx`]) once a second. A D step moves
+//!   from dsync's time server ([`dsyx`]) once a second. A D step moves
 //!   the wall and D together, so k stays.
-//! - A reading counts only while dantesync is locked, no step is due within
+//! - A reading counts only while dsync is locked, no step is due within
 //!   [`STEP_GUARD_NS`] and no slew runs (a slew moves the frequency word,
 //!   so `CLOCK_MONOTONIC` leaves PTP time while it runs).
 //! - [`Tracker`]: the first usable k anchors the clock; a k off by more than
@@ -28,9 +28,9 @@
 //!   packet's stamp is its seconds (mod 2³²) and the samples into that
 //!   second ([`stamp`], [`from_stamp`]).
 //!
-//! dantesync measures no path delay, so this clock trails the grandmaster
+//! dsync measures no path delay, so this clock trails the grandmaster
 //! by the one-way delay (0.1–0.5 ms): the safe side for TX, and it shows in
-//! the RX lateness. dantesync stays the box's one PTP owner (the owner's
+//! the RX lateness. dsync stays the box's one PTP owner (the owner's
 //! decision of 2026-10-26, #72); phase D measures this clock against the
 //! grandmaster's from the received packets' own stamps (the packets'
 //! judge, [`crate::media::rx::RxShared::last_min_lateness_ns`]).
@@ -49,13 +49,13 @@ use std::sync::atomic::{AtomicI32, AtomicI64};
 pub use dsyx::{DateState, Reading};
 
 /// Two readings whose k differ by at most this agree (20 µs: far above
-/// dantesync's reply jitter, two clock reads microseconds apart, and below
+/// dsync's reply jitter, two clock reads microseconds apart, and below
 /// anything a receiver's latency notices).
 pub const TOLERANCE_NS: i64 = 20_000;
 /// The polls in a row a different k must hold to replace the anchored one.
 pub const CONFIRM: u32 = 3;
 /// No reading counts within this of a date step's instant, before or after
-/// (dantesync applies a step in its next loop, and our reads of the wall
+/// (dsync applies a step in its next loop, and our reads of the wall
 /// and of D may fall on either side of it).
 pub const STEP_GUARD_NS: i64 = 2_000_000_000;
 
@@ -64,15 +64,15 @@ pub const STEP_GUARD_NS: i64 = 2_000_000_000;
 pub enum Sample {
     /// A k the tracker may use.
     Usable { k_ns: i64 },
-    /// dantesync is not locked.
+    /// dsync is not locked.
     NotLocked,
-    /// dantesync holds no date offset (the reply has no extension).
+    /// dsync holds no date offset (the reply has no extension).
     NoDateState,
     /// A date step's instant is within [`STEP_GUARD_NS`].
     StepNear,
     /// A date slew runs.
     Slewing,
-    /// dantesync did not answer the poll in time.
+    /// dsync did not answer the poll in time.
     NoReply,
 }
 
@@ -209,7 +209,7 @@ impl ClockStats {
         }
     }
 
-    /// The clock is the TEST system clock: nothing polls dantesync.
+    /// The clock is the TEST system clock: nothing polls dsync.
     pub fn mark_system(&self) {
         self.system.store(true, Ordering::Relaxed);
     }
@@ -229,11 +229,11 @@ impl ClockStats {
     }
 }
 
-/// One poll of dantesync and what it did (the poller's step; the
+/// One poll of dsync and what it did (the poller's step; the
 /// `iem-dante-dev clock` lines are made of these).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Polled {
-    /// dantesync's reply; `None` when it did not answer in time.
+    /// dsync's reply; `None` when it did not answer in time.
     pub reading: Option<Reading>,
     /// What the reply gave the tracker.
     pub sample: Sample,
@@ -346,7 +346,7 @@ pub fn from_stamp(secs: u32, sub: u32, rate: u32, near: u64) -> u64 {
 #[cfg(any(target_os = "linux", windows))]
 pub mod linked;
 #[cfg(any(target_os = "linux", windows))]
-pub use os::{DANTESYNC, MonoClock, POLL, Poller, monotonic_ns, poll_dantesync, realtime_ns};
+pub use os::{DSYNC, MonoClock, POLL, Poller, monotonic_ns, poll_dsync, realtime_ns};
 
 /// How a media thread's wait ends on Windows (dstack #1 problem A).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -434,10 +434,10 @@ mod os {
 
     use super::*;
 
-    /// How often dantesync is asked.
+    /// How often dsync is asked.
     pub const POLL: Duration = Duration::from_secs(1);
-    /// dantesync's time server on the box.
-    pub const DANTESYNC: SocketAddr =
+    /// dsync's time server on the box.
+    pub const DSYNC: SocketAddr =
         SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, dsyx::PORT));
     /// How long one poll waits for its reply.
     pub const REPLY_TIMEOUT: Duration = Duration::from_millis(200);
@@ -503,15 +503,11 @@ mod os {
         }
     }
 
-    /// Polls dantesync on the box (127.0.0.1, [`dsyx::PORT`]) once a second
-    /// and keeps `clock`'s k, `freq` (dantesync's frequency adjustment,
+    /// Polls dsync on the box (127.0.0.1, [`dsyx::PORT`]) once a second
+    /// and keeps `clock`'s k, `freq` (dsync's frequency adjustment,
     /// ppb) and `stats` up to date; runs until the task ends.
-    pub async fn poll_dantesync(
-        clock: Arc<MonoClock>,
-        freq: Arc<AtomicI32>,
-        stats: Arc<ClockStats>,
-    ) {
-        poll(DANTESYNC, clock, freq, stats).await
+    pub async fn poll_dsync(clock: Arc<MonoClock>, freq: Arc<AtomicI32>, stats: Arc<ClockStats>) {
+        poll(DSYNC, clock, freq, stats).await
     }
 
     /// The poller, aimed at `target` (a stand-in server in the tests).
@@ -527,14 +523,14 @@ mod os {
             match Poller::connect(target).await {
                 Ok(p) => break p,
                 Err(e) => {
-                    warn!(error = %e, "media clock: no socket to dantesync, trying again");
+                    warn!(error = %e, "media clock: no socket to dsync, trying again");
                     tokio::time::sleep(POLL).await;
                 }
             }
         };
         info!(
             port = target.port(),
-            "media clock: polling dantesync's time server once a second"
+            "media clock: polling dsync's time server once a second"
         );
         let mut tick = tokio::time::interval(POLL);
         tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -549,9 +545,9 @@ mod os {
         }
     }
 
-    /// One poll at a time of dantesync's time server at a target: the
+    /// One poll at a time of dsync's time server at a target: the
     /// socket, the request ids and the [`Tracker`]. The service's poller
-    /// ([`poll_dantesync`]) and `iem-dante-dev clock` both step it once a
+    /// ([`poll_dsync`]) and `iem-dante-dev clock` both step it once a
     /// second.
     #[derive(Debug)]
     pub struct Poller {
@@ -562,7 +558,7 @@ mod os {
     }
 
     impl Poller {
-        /// A socket on loopback, connected to `target` ([`DANTESYNC`] on
+        /// A socket on loopback, connected to `target` ([`DSYNC`] on
         /// the box): only the target's datagrams reach it.
         pub async fn connect(target: SocketAddr) -> std::io::Result<Self> {
             let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await?;
@@ -608,7 +604,7 @@ mod os {
     /// an earlier request is skipped.
     async fn ask(socket: &UdpSocket, id: u32, buf: &mut [u8]) -> Option<(Reading, i64, i64)> {
         if let Err(e) = socket.send(&dsyx::request(id)).await {
-            debug!(error = %e, "media clock: the request to dantesync was not sent");
+            debug!(error = %e, "media clock: the request to dsync was not sent");
             return None;
         }
         let deadline = Instant::now() + REPLY_TIMEOUT;
@@ -616,7 +612,7 @@ mod os {
             let n = match tokio::time::timeout_at(deadline, socket.recv(buf)).await {
                 Ok(Ok(n)) => n,
                 Ok(Err(e)) => {
-                    debug!(error = %e, "media clock: no reply from dantesync");
+                    debug!(error = %e, "media clock: no reply from dsync");
                     return None;
                 }
                 Err(_) => return None,
@@ -633,18 +629,18 @@ mod os {
     /// One line per change of the clock's state.
     fn log_event(ev: Event, last: Event, s: Sample, waiting: &mut Option<Sample>, epoch: u32) {
         match ev {
-            Event::Ready { k_ns } => info!(k_ns, "media clock ready: PTP time from dantesync"),
+            Event::Ready { k_ns } => info!(k_ns, "media clock ready: PTP time from dsync"),
             Event::ReAnchored { delta_ns } => warn!(
                 delta_ns,
                 epoch, "media clock re-anchored: a different k held for 3 polls"
             ),
             Event::Holdover if last != Event::Holdover => warn!(
                 reason = ?s,
-                "media clock in holdover: dantesync gives no usable time, k kept"
+                "media clock in holdover: dsync gives no usable time, k kept"
             ),
             Event::Held if last == Event::Holdover => info!("media clock out of holdover"),
             Event::NotReady if *waiting != Some(s) => {
-                info!(reason = ?s, "media clock not ready: waiting for dantesync");
+                info!(reason = ?s, "media clock not ready: waiting for dsync");
                 *waiting = Some(s);
             }
             _ => {}

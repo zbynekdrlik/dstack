@@ -19,12 +19,12 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Clock {
     pub ready: u8,
-    /// The last poll of dantesync was in holdover.
+    /// The last poll of dsync was in holdover.
     pub holdover: u8,
     /// Runs of polls in holdover, since the device started.
     pub holdovers: u32,
     pub re_anchors: u32,
-    /// dantesync's frequency adjustment.
+    /// dsync's frequency adjustment.
     pub freq_ppb: i32,
 }
 
@@ -64,7 +64,7 @@ pub enum DeviceReason {
     NoStatus,
     /// The clock is not ready at the second read.
     ClockNotReady,
-    /// dantesync was in holdover at either read, or went into it between
+    /// dsync was in holdover at either read, or went into it between
     /// them.
     Holdover,
     /// The clock is ready and the engine's pump paces itself.

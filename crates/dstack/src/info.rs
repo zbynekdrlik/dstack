@@ -67,7 +67,7 @@
 //! holds inferno's records ([`heartbeat_body`]), each `length, type, 4,
 //! content length, the packet's sequence, 0`, then:
 //!
-//! - 0x8001: dantesync's frequency adjustment, ppb (`i32`): what our clock
+//! - 0x8001: dsync's frequency adjustment, ppb (`i32`): what our clock
 //!   follows, never a lock of our own;
 //! - 0x8002: the peaks, one byte a channel (`−40·log10` of the peak's part
 //!   of full scale, 0 to 255: [`peak_byte`]), TX channels then RX channels,
@@ -80,7 +80,7 @@
 //!
 //! Clock stats (`07 xx 00 21`) stay unanswered: inferno sends them only
 //! with a grandmaster identity read from its PTP daemon's files, and our
-//! device has none of its own (the box's dantesync is the PTP follower).
+//! device has none of its own (the box's dsync is the PTP follower).
 //!
 //! Logs name opcodes, sequences and ports, never an address or a MAC.
 //!
@@ -379,7 +379,7 @@ pub fn peak_byte(peak: u32) -> u8 {
 /// What the heartbeat reports once the media clock is ready.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Records {
-    /// dantesync's frequency adjustment, ppb.
+    /// dsync's frequency adjustment, ppb.
     pub freq_ppb: i32,
     /// Each TX channel's peak byte ([`peak_byte`]).
     pub tx_peaks: Vec<u8>,

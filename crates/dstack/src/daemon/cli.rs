@@ -31,7 +31,7 @@ use std::time::Duration;
 #[cfg(unix)]
 use super::ctl_succeeded;
 use super::{Build, ClockLines, Command, parse_args, usage};
-use crate::clock::{DANTESYNC, MonoClock, POLL, Poller};
+use crate::clock::{DSYNC, MonoClock, POLL, Poller};
 use crate::host::{self, Host, Signals};
 use tokio::time::MissedTickBehavior;
 use tracing::error;
@@ -57,7 +57,7 @@ pub fn main(build: Build) -> ExitCode {
         Ok(Command::Clock { seconds }) => return clock(build.name, seconds),
         Ok(Command::Ctl { socket, request }) => return ctl_request(build.name, &socket, &request),
         Ok(Command::Card(args)) => return card(build.name, &args),
-        Ok(Command::Run(opts)) => (opts, host::ClockSource::Dantesync),
+        Ok(Command::Run(opts)) => (opts, host::ClockSource::Dsync),
         Ok(Command::RunOnSystemClock(opts)) => (opts, host::ClockSource::System),
         Err(msg) => {
             eprintln!("{}: {msg}\n\n{}", build.name, usage(build.name));
@@ -84,7 +84,7 @@ pub fn main(build: Build) -> ExitCode {
     }
 }
 
-/// `clock --seconds <n>`: n polls of dantesync's time server, a second
+/// `clock --seconds <n>`: n polls of dsync's time server, a second
 /// apart (the first at once), each one line on stdout; no log.
 fn clock(name: &str, seconds: u32) -> ExitCode {
     let rt = match tokio::runtime::Builder::new_current_thread()
@@ -98,10 +98,10 @@ fn clock(name: &str, seconds: u32) -> ExitCode {
         }
     };
     rt.block_on(async {
-        let mut poller = match Poller::connect(DANTESYNC).await {
+        let mut poller = match Poller::connect(DSYNC).await {
             Ok(p) => p,
             Err(e) => {
-                eprintln!("{name} clock: no socket to dantesync's time server: {e}");
+                eprintln!("{name} clock: no socket to dsync's time server: {e}");
                 return ExitCode::from(1);
             }
         };

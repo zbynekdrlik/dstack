@@ -35,7 +35,7 @@ fn run(config: &str, place: Place) -> Command {
     Command::Run(Options {
         config: PathBuf::from(config),
         place,
-        control: PathBuf::from("/run/iem-dante/control.sock"),
+        control: PathBuf::from("/run/dstack/control.sock"),
     })
 }
 
@@ -75,18 +75,18 @@ fn a_run_takes_the_system_clock_only_when_asked() {
     let opts = || Options {
         config: PathBuf::from("c"),
         place: Place::Iface("eth9".into()),
-        control: PathBuf::from("/run/iem-dante/control.sock"),
+        control: PathBuf::from("/run/dstack/control.sock"),
     };
     assert_eq!(with(&[]), Ok(Command::Run(opts())));
-    assert_eq!(with(&["--clock", "dantesync"]), Ok(Command::Run(opts())));
+    assert_eq!(with(&["--clock", "dsync"]), Ok(Command::Run(opts())));
     assert_eq!(
         with(&["--clock", "system"]),
         Ok(Command::RunOnSystemClock(opts()))
     );
     for (extra, want) in [
         (&["--clock"][..], "--clock needs a value"),
-        (&["--clock", "ptp"][..], "--clock is dantesync or system"),
-        (&["--clock", ""][..], "--clock is dantesync or system"),
+        (&["--clock", "ptp"][..], "--clock is dsync or system"),
+        (&["--clock", ""][..], "--clock is dsync or system"),
         (
             &["--clock", "system", "--clock", "system"][..],
             "--clock given twice",
@@ -149,7 +149,7 @@ fn ctl_takes_a_socket_and_the_request_s_words() {
         socket: PathBuf::from(socket),
         request: request.into(),
     };
-    let default = "/run/iem-dante/control.sock";
+    let default = "/run/dstack/control.sock";
     for (a, want) in [
         (&["ctl", "status"][..], ctl(default, "status")),
         (
@@ -408,7 +408,7 @@ fn polled(
     }
 }
 
-/// A run from a silent dantesync to a re-anchor and a holdover, line by
+/// A run from a silent dsync to a re-anchor and a holdover, line by
 /// line: every field pinned.
 #[test]
 fn the_clock_lines_follow_the_clock_from_waiting_to_a_re_anchor() {
