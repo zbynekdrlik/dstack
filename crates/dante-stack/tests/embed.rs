@@ -21,6 +21,10 @@ use dante_stack::stream::Map;
 
 const TEST_DEVICE: &str = include_str!("../../../config/test-dante-device.toml");
 
+/// Held by each test that runs the device: they bind the same Dante ports
+/// on the routed address, and the test harness runs a file's tests at once.
+static ONE_DEVICE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// The test device's config, 10 ms latency (a test proves the path, not
 /// real-time timing), its state in `dir` with RX 1 subscribed to our own
 /// TX 1.
@@ -99,6 +103,9 @@ fn an_embedded_device_runs_the_app_s_processor_and_starts_again() {
         sigterm_is_default(),
         "the test process starts with a handler"
     );
+    let _one = ONE_DEVICE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = tempfile::tempdir().unwrap();
     let ip = routed_ipv4();
     let cfg = config_in(dir.path());
@@ -175,6 +182,9 @@ fn an_app_map_past_the_device_s_channels_is_refused() {
 /// the config's, or it reads the RX rings off their playout point.
 #[test]
 fn an_embedded_pump_plays_at_the_latency_dante_controller_set() {
+    let _one = ONE_DEVICE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = tempfile::tempdir().unwrap();
     let ip = routed_ipv4();
     let cfg = config_in(dir.path());
