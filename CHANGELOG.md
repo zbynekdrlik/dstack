@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.7 (2026-11-02)
+
+- Fix: Dante Controller shows our device's latency. Its settings read (ARC 0x1100 with start code 0x27ff and 19 keys) got zeros, so Device Config showed 0.0 ms, greyed out (seen on mbc). It now gets the keyed answer the hardware gives, as netaudio's read already did.
+- The settings now also state the latency default (Dante's 1 ms, fixed: it never moves with a write) and the range Dante Controller may set: min `0x8306` (250 µs, or 4 ms under the normal profile) and max `0x8302` (half the rings, 296 ms at 96 kHz). `DeviceConfig::latency_range`.
+- Changed: a latency write outside that range is refused (`DeviceConfig::with_latency`).
+
 ## 0.5.6 (2026-11-02)
 
 - Breaking, names (#68, owner: no "dante" in our names; dsync is dantesync's new name, dsync#147):
