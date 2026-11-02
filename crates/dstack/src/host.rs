@@ -182,13 +182,16 @@ pub fn interface_info(ifa: &IfAddr) -> Result<NetInfo, HostError> {
 /// the address (`GetAdaptersAddresses`); the gateway is left out (zero).
 #[cfg(windows)]
 pub fn interface_info(ifa: &IfAddr) -> Result<NetInfo, HostError> {
-    let (mac, mbit) = win_nic::of(ifa.ip).map_err(run_failed)?;
+    let (mac, mbit, adapter) = win_nic::of(ifa.ip).map_err(run_failed)?;
+    // The start line's NIC check (dstack #1): large send offload delays
+    // our packets behind other traffic.
+    crate::lso::report(&adapter);
     let speed = mbit.map(|m| m.to_string());
     daemon::net_info(ifa, &mac, speed.as_deref(), None).map_err(setup)
 }
 
 #[cfg(windows)]
-mod win_nic {
+pub(crate) mod win_nic {
     use std::net::Ipv4Addr;
 
     use windows_sys::Win32::Foundation::{ERROR_BUFFER_OVERFLOW, NO_ERROR};
@@ -198,9 +201,9 @@ mod win_nic {
     };
     use windows_sys::Win32::Networking::WinSock::{AF_INET, SOCKADDR_IN};
 
-    /// The MAC (`aa:bb:..`) and the receive speed in Mbit/s of the adapter
-    /// that holds `ip`.
-    pub fn of(ip: Ipv4Addr) -> Result<(String, Option<u64>), String> {
+    /// The MAC (`aa:bb:..`), the receive speed in Mbit/s and the GUID
+    /// (`{...}`, its registry name) of the adapter that holds `ip`.
+    pub fn of(ip: Ipv4Addr) -> Result<(String, Option<u64>, String), String> {
         let flags = GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER;
         let mut len: u32 = 16 * 1024;
         let mut buf: Vec<u64> = Vec::new();
@@ -247,7 +250,15 @@ mod win_nic {
                             .join(":");
                         let speed = (ad.ReceiveLinkSpeed != 0 && ad.ReceiveLinkSpeed != u64::MAX)
                             .then_some(ad.ReceiveLinkSpeed / 1_000_000);
-                        return Ok((mac, speed));
+                        // SAFETY: the adapter's NUL-terminated ANSI name.
+                        let guid = if ad.AdapterName.is_null() {
+                            String::new()
+                        } else {
+                            unsafe { std::ffi::CStr::from_ptr(ad.AdapterName.cast()) }
+                                .to_string_lossy()
+                                .into_owned()
+                        };
+                        return Ok((mac, speed, guid));
                     }
                 }
                 u = ua.Next;
