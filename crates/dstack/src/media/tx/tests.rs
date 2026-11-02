@@ -1744,3 +1744,14 @@ fn a_device_latency_set_live_moves_the_advertised_latency_and_the_late_count() {
     shared.set_device_latency(5_000_000);
     assert_eq!(shared.advertised_latency_ns(), 700_000);
 }
+
+/// dlink (#68): under the normal profile a thread at normal priority is
+/// what was asked, said at info; a warning only when real-time priority
+/// was asked and refused.
+#[test]
+fn a_thread_s_priority_is_granted_normal_by_profile_or_refused() {
+    assert_eq!(priority_outcome(true, true), Priority::Granted);
+    assert_eq!(priority_outcome(true, false), Priority::Refused);
+    assert_eq!(priority_outcome(false, false), Priority::Normal);
+    assert_eq!(priority_outcome(false, true), Priority::Normal);
+}
