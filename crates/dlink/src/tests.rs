@@ -122,3 +122,25 @@ fn a_second_device_s_ports_process_id_and_rx_port_base_are_taken() {
         "{clash:?}"
     );
 }
+
+#[test]
+fn declared_subscriptions_reach_the_device_config_in_order() {
+    let cfg = config()
+        .subscribe(2, "Master", "foh-mix")
+        .subscribe(1, "Click", "foh-mix")
+        .device()
+        .unwrap();
+    let got: Vec<(usize, &str, &str)> = cfg
+        .subscribe
+        .iter()
+        .map(|d| (d.rx, d.tx_channel.as_str(), d.tx_device.as_str()))
+        .collect();
+    assert_eq!(got, [(2, "Master", "foh-mix"), (1, "Click", "foh-mix")]);
+    assert!(config().device().unwrap().subscribe.is_empty());
+    // Checked as a config file's would be.
+    let problems = config()
+        .subscribe(3, "Master", "foh-mix")
+        .device()
+        .unwrap_err();
+    assert_eq!(problems, ["subscribe: rx 3 is not an RX channel (1 to 2)"]);
+}

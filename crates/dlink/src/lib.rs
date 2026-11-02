@@ -80,6 +80,7 @@ pub struct Config {
     ports: Option<Ports>,
     process_id: Option<u16>,
     rx_port_base: Option<u16>,
+    subscribe: Vec<(usize, String, String)>,
 }
 
 /// A device's own control ports, for a second device on one address (the
@@ -108,6 +109,7 @@ impl Config {
             ports: None,
             process_id: None,
             rx_port_base: None,
+            subscribe: Vec::new(),
         }
     }
 
@@ -164,6 +166,21 @@ impl Config {
         self
     }
 
+    /// RX channel `rx` (from 1) receives `tx_channel` of `tx_device`, by
+    /// their Dante names (intercom#5). It holds from the first start and
+    /// whenever the state file holds no subscription for that channel; one
+    /// Dante Controller sets is saved there and wins.
+    pub fn subscribe(
+        mut self,
+        rx: usize,
+        tx_channel: impl Into<String>,
+        tx_device: impl Into<String>,
+    ) -> Self {
+        self.subscribe
+            .push((rx, tx_channel.into(), tx_device.into()));
+        self
+    }
+
     /// The device config dstack runs: the normal timing profile, the pump
     /// margin half the latency, 24-bit. Every problem is listed, as a
     /// config file's would be.
@@ -194,6 +211,23 @@ impl Config {
         }
         if let Some(base) = self.rx_port_base {
             t.insert("rx_port_base".into(), i64::from(base).into());
+        }
+        if !self.subscribe.is_empty() {
+            let subs: Vec<toml::Value> = self
+                .subscribe
+                .iter()
+                .map(|(rx, ch, dev)| {
+                    let mut s = toml::Table::new();
+                    s.insert(
+                        "rx".into(),
+                        to_int(u64::try_from(*rx).unwrap_or(u64::MAX)).into(),
+                    );
+                    s.insert("tx_channel".into(), ch.clone().into());
+                    s.insert("tx_device".into(), dev.clone().into());
+                    s.into()
+                })
+                .collect();
+            t.insert("subscribe".into(), subs.into());
         }
         t.insert("rx".into(), self.rx.clone().into());
         t.insert("tx".into(), self.tx.clone().into());

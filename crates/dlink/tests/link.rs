@@ -101,6 +101,46 @@ fn a_dlink_device_runs_the_app_s_processor_at_its_defaults() {
     );
 }
 
+/// A subscription the app declares (intercom#5) holds from the first start,
+/// with no state file: our RX 1 hears our own TX 1.
+#[test]
+fn a_declared_subscription_subscribes_a_fresh_device() {
+    let _one = ONE_DEVICE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("dlink.toml");
+    let config = Config::new("dlink-declared", &state)
+        .rx(["In 1"])
+        .tx(["Out 1"])
+        .subscribe(1, "Out 1", "dlink-declared");
+    let heard = Arc::new(AtomicU64::new(0f64.to_bits()));
+    let link = Link::start_on(
+        &config,
+        &Place::Ip(routed_ipv4()),
+        Map {
+            rx: vec![0],
+            tx: vec![0],
+        },
+        Echo {
+            heard: Arc::clone(&heard),
+        },
+        Clock::System,
+    )
+    .expect("the dlink device started");
+    let end = Instant::now() + Duration::from_secs(10);
+    while f64::from_bits(heard.load(Ordering::Relaxed)) < 0.49 && Instant::now() < end {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(link.ended(), None);
+    assert!(matches!(link.stop(), Stopped::Done));
+    let got = f64::from_bits(heard.load(Ordering::Relaxed));
+    assert!(
+        (got - 0.5).abs() < 1e-3,
+        "our TX 1 came back on RX 1 as {got}"
+    );
+}
+
 /// dlink's default clock (#68): dsync's follower, else the service. On a
 /// runner the follower cannot bind port 319 (no capability) and no dsync
 /// service runs: the device still starts, serves and stops; it just has no
