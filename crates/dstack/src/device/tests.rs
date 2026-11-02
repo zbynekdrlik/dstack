@@ -1647,3 +1647,22 @@ fn a_declared_subscription_is_checked_with_the_config() {
     };
     assert!(ok.problems().is_empty());
 }
+
+/// A config built past its checks (a channel beyond the state's) sets
+/// nothing and does not panic.
+#[test]
+fn declare_skips_a_channel_the_state_does_not_have() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = config_in(dir.path());
+    let last = base.rx.len();
+    let cfg = DeviceConfig {
+        subscribe: vec![
+            declared(last + 1, "Master", "peer-device"),
+            declared(0, "Click", "peer-device"),
+        ],
+        ..base
+    };
+    let mut state = DeviceState::from_config(&cfg);
+    assert_eq!(state.declare(&cfg), Vec::<usize>::new());
+    assert!(state.subscriptions.iter().all(Option::is_none));
+}

@@ -697,9 +697,8 @@ impl DeviceState {
             let Some(rx) = d.rx.checked_sub(1).filter(|&rx| rx < self.rx.len()) else {
                 continue;
             };
-            if self.subscriptions.len() < self.rx.len() {
-                self.subscriptions.resize(self.rx.len(), None);
-            }
+            let len = self.rx.len().max(self.subscriptions.len());
+            self.subscriptions.resize(len, None);
             if self.subscriptions[rx].is_none() {
                 self.subscriptions[rx] = Some(Subscription {
                     tx_channel: d.tx_channel.clone(),

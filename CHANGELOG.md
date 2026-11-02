@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.11 (2026-11-02)
+
+- New (#20, intercom#5): an app declares its RX subscriptions.
+  - dlink: `Config::subscribe(rx, tx_channel, tx_device)`, where `rx` is the RX channel number from 1.
+  - Device config TOML: `[[subscribe]]` with `rx`, `tx_channel`, `tx_device`, checked with the rest of the config (a channel that exists, each `rx` once, Dante names).
+  - At start, an RX channel the state file holds no subscription for takes its declared one. One Dante Controller set is saved in the state file and wins. Declared ones are not written into the file. To drop a declared one, remove it from the config.
+  - New public items: `device::Declared`, `DeviceConfig::subscribe`, `DeviceState::declare`. A config that builds `DeviceConfig` without `..` must set `subscribe`.
+
 ## 0.5.10 (2026-11-02)
 
 - New (#1): our board info claims the pull-up, the encoding and the sample rate (feature flags `00 00 12 18`, was `00 00 10 00`). Dante Controller now shows 96k / NONE / PCM 24 in Device Config, each marked as not configurable. Reboot and factory reset stay off.
