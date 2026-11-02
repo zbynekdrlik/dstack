@@ -619,9 +619,11 @@ fn settings_asks_with_0x2809_and_types_its_errors() {
     );
     let mut cut = Asked(Vec::new(), STATUS_OK, vec![4, 4, 0x02]);
     assert_eq!(settings(&mut cut), Err(ReadError::Malformed { op: 0x1100 }));
-    // Our own device keeps no settings table yet: an empty one.
+    // Our own device answers its table, as Dante Controller reads it.
     let mut own = Own::new();
-    assert_eq!(settings(&mut own), Ok(Settings::default()));
+    let s = settings(&mut own).unwrap();
+    assert_eq!(s.latency_active_ns, Some(1_000_000));
+    assert_eq!(s.latency_min_ns, Some(250_000));
     // An exchange without call_as sends its usual start code; the reply
     // still reads.
     let mut fixed = Fixed(STATUS_OK, unhex(CARD_SETTINGS)[HEADER_LEN..].to_vec());

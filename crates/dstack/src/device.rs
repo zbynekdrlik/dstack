@@ -220,6 +220,10 @@ impl DeviceConfig {
     /// config's own rules, as at the start), else its problems: what a
     /// latency Dante Controller sets must pass.
     pub fn with_latency(&self, ns: u64) -> Result<DeviceConfig, Vec<String>> {
+        let (min, max) = self.latency_range();
+        if !(min..=max).contains(&ns) {
+            return Err(vec![format!("latency_ns: {min} to {max}")]);
+        }
         let mut c = self.clone();
         c.latency_ns = ns;
         let problems = c.problems();
@@ -228,6 +232,22 @@ impl DeviceConfig {
         } else {
             Err(problems)
         }
+    }
+
+    /// The device latencies Dante Controller may set, ns (what the
+    /// settings read states as min and max, 0x8306 and 0x8302): from
+    /// [`LOW_MIN_LATENCY_NS`] ([`NORMAL_MIN_LATENCY_NS`] under the normal
+    /// profile) to what the rings hold with the largest pump margin, half
+    /// of them ([`MAX_LATENCY_SAMPLES`] at the rate); always including the
+    /// configured latency.
+    pub fn latency_range(&self) -> (u64, u64) {
+        let min = match self.timing {
+            TimingProfile::Normal => NORMAL_MIN_LATENCY_NS,
+            TimingProfile::LowLatency => LOW_MIN_LATENCY_NS,
+        };
+        let rate = u64::from(self.sample_rate.max(1));
+        let max = MAX_LATENCY_SAMPLES * 1_000_000_000 / rate;
+        (min.min(self.latency_ns), max.max(self.latency_ns))
     }
 
     /// The latency our TX channels advertise: `tx_latency_ns`, else
@@ -415,6 +435,13 @@ pub const MAX_TX_MARGIN_NS: u64 = 1_000_000;
 /// realtime box (p99.9 50 µs, #72 phase F): the advertised latency must
 /// cover `tx_fpp_max` frames + `tx_margin_ns` + this.
 pub const TX_SEND_SLACK_NS: u64 = 50_000;
+/// The least device latency Dante Controller may set under the
+/// low-latency profile: gen3's 250 µs.
+pub const LOW_MIN_LATENCY_NS: u64 = 250_000;
+/// The most device latency, samples: half the rings, less the largest
+/// pump margin and block, so a playout point never laps a ring.
+pub const MAX_LATENCY_SAMPLES: u64 = (crate::media::ring::SLOTS as u64) / 2 - MAX_WORK_MARGIN - 256;
+
 /// The least device latency of the normal profile (dlink, #68): its
 /// threads wake without priority, so the receivers need room.
 pub const NORMAL_MIN_LATENCY_NS: u64 = 4_000_000;

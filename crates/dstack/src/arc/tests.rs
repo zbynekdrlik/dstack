@@ -1280,6 +1280,35 @@ fn the_clock_reply_is_the_fixed_one() {
     assert!(answer.body.iter().all(|&b| b == 0));
 }
 
+/// Dante Controller's settings read (captured, 0x1100 with start code
+/// 0x27ff and its 19 keys) gets our values in the hardware's layout, as
+/// the Tascam, the IEM card and DVS answer it (2.11.2026, mbc): with zeros
+/// Dante Controller showed our latency as 0.0 ms and greyed its control.
+/// The default and the range are answered too.
+#[test]
+fn dante_controller_s_settings_read_gets_our_latency_and_its_range() {
+    use super::control::{key, parse_settings};
+    let mut cfg = config();
+    cfg.sample_rate = 96_000;
+    cfg.latency_ns = 10_000_000;
+    let mut dev = Dev::new(cfg);
+    let answer = dev.ask(1, op::ZEROS_1100, &DC_1100);
+    assert_eq!(answer.header.op2, STATUS_OK);
+    let s = parse_settings(&answer.body).expect("our settings");
+    assert_eq!(s.latency_configured_ns, Some(10_000_000));
+    assert_eq!(s.latency_active_ns, Some(10_000_000));
+    // A fixed default (Dante's 1 ms): it never moves with a write.
+    assert_eq!(s.latency_default_ns, Some(1_000_000));
+    assert_eq!(s.latency_min_ns, Some(250_000));
+    // Half the 65 536-slot rings less the largest margin and a block, at
+    // 96 kHz: 28 416 samples, 296 ms.
+    assert_eq!(s.latency_max_ns, Some(296_000_000));
+    assert_eq!(s.pullup, Some(0));
+    // Every key asked is in the reply, in its order: held or `0, key`.
+    assert_eq!(answer.body[0], 0x13);
+    assert!(s.all.contains_key(&key::LATENCY_CONFIGURED));
+}
+
 /// netaudio 0.4.2's keyed settings request (`config latency`), captured:
 /// 23 keys.
 const NETAUDIO_SETTINGS: [u8; 48] = [
@@ -1299,8 +1328,8 @@ fn a_keyed_settings_read_gets_our_values_in_the_hardware_s_layout() {
     let mut dev = Dev::new(cfg);
     let mut ask =
         |seq: u16, body: &[u8]| dev.send(&request(SETTINGS_START, seq, op::ZEROS_1100, 0, body));
-    // Three keys: the pairs in the asked order, an absent key as `0, key`,
-    // the values after the pairs (offsets from the packet's start).
+    // Three keys: the pairs in the asked order, the values after the
+    // pairs (offsets from the packet's start).
     let r = decode(ask(
         1,
         &settings_request_body(&[key::LATENCY_ACTIVE, key::LATENCY_MAX, key::SAMPLE_RATE]),
@@ -1311,9 +1340,10 @@ fn a_keyed_settings_read_gets_our_values_in_the_hardware_s_layout() {
         [
             3, 3, // the count, twice
             0x83, 0x01, 0, 24, // active latency at 24
-            0, 0, 0x83, 0x02, // no maximum
-            0x80, 0x20, 0, 28, // the rate at 28
+            0x83, 0x02, 0, 28, // the maximum at 28
+            0x80, 0x20, 0, 32, // the rate at 32
             0, 3, 0xd0, 0x90, // 250 000
+            0x23, 0x49, 0x34, 0x00, // 592 000 000: 28 416 samples at 48 kHz
             0, 0, 0xbb, 0x80, // 48 000
         ]
     );
@@ -1323,8 +1353,11 @@ fn a_keyed_settings_read_gets_our_values_in_the_hardware_s_layout() {
         s.all.into_iter().collect::<Vec<_>>(),
         [
             (key::PULLUP, 0),
+            (key::LATENCY_DEFAULT, 1_000_000),
             (key::LATENCY_CONFIGURED, 250_000),
-            (key::LATENCY_ACTIVE, 250_000)
+            (key::LATENCY_ACTIVE, 250_000),
+            (key::LATENCY_MAX, 592_000_000),
+            (key::LATENCY_MIN, 250_000),
         ]
     );
     // The stack's own read.
@@ -1340,7 +1373,7 @@ fn a_keyed_settings_read_gets_our_values_in_the_hardware_s_layout() {
     );
     assert_eq!(
         (s.latency_default_ns, s.latency_min_ns, s.latency_max_ns),
-        (None, None, None)
+        (Some(1_000_000), Some(250_000), Some(592_000_000))
     );
     // No key: an empty table.
     assert_eq!(decode(ask(4, &[0, 0])).body, [0, 0]);

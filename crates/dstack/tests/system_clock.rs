@@ -214,7 +214,14 @@ fn our_tx_reaches_our_rx_clean_on_the_system_clock() {
                 settings.latency_active_ns,
                 settings.latency_default_ns,
             ),
-            (Some(rate), Some(0), Some(latency), Some(latency), None)
+            // The default is Dante's fixed 1 ms (v0.5.7).
+            (
+                Some(rate),
+                Some(0),
+                Some(latency),
+                Some(latency),
+                Some(1_000_000)
+            )
         );
         dstack::arc::control::rx_flows(&mut udp)
     };
