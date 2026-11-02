@@ -1,13 +1,6 @@
-crates/dante-stack/src/media/rx.rs:408:66: replace > with == in RxShared::playout
-crates/dante-stack/src/stream.rs:315:9: replace PumpStats::retimed with ()
-crates/dante-stack/src/stream.rs:458:24: replace != with == in Pump<P>::media
-crates/dante-stack/src/media/rx.rs:408:9: replace RxShared::playout -> Option<u64> with Some(1)
-crates/dante-stack/src/media/rx.rs:408:9: replace RxShared::playout -> Option<u64> with Some(0)
-crates/dante-stack/src/media/rx.rs:408:66: replace > with < in RxShared::playout
-crates/dante-stack/src/media/rx.rs:399:9: replace RxShared::set_device_latency with ()
-crates/dante-stack/src/stream.rs:454:9: replace Pump<P>::media -> u64 with 1
-crates/dante-stack/src/stream.rs:454:9: replace Pump<P>::media -> u64 with 0
-crates/dante-stack/src/stream.rs:367:9: replace PumpStats::view -> PumpView with Default::default()
-crates/dante-stack/src/media/rx.rs:408:66: replace > with >= in RxShared::playout
-crates/dante-stack/src/daemon/media.rs:193:9: replace Media::publish with ()
-crates/dante-stack/src/media/rx.rs:408:9: replace RxShared::playout -> Option<u64> with None
+crates/dante-stack/src/stream.rs:572:9: replace Pump<P>::run_processor -> Option<Box<dyn Any +Send>> with None
+crates/dante-audio-io/src/lib.rs:57:9: replace Block<'a>::start -> Option<u64> with None
+crates/dante-audio-io/src/lib.rs:57:9: replace Block<'a>::start -> Option<u64> with Some(0)
+crates/dante-audio-io/src/lib.rs:57:9: replace Block<'a>::start -> Option<u64> with Some(1)
+crates/dante-stack/src/stream.rs:516:9: replace Pump<P>::block with ()
+crates/dante-stack/src/stream.rs:502:9: replace Pump<P>::free with ()

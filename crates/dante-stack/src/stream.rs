@@ -503,7 +503,7 @@ impl<P: Process> Pump<P> {
         self.blocks = None;
         let entry = self.enter();
         self.input.fill(0.0);
-        let fault = self.run_processor();
+        let fault = self.run_processor(None);
         self.leave(entry, fault);
     }
 
@@ -528,7 +528,7 @@ impl<P: Process> Pump<P> {
                 None => chan.fill(0.0),
             }
         }
-        let fault = self.run_processor();
+        let fault = self.run_processor(Some(start));
         let at = start + self.timing.offset();
         for (chan, &tx) in self.output.chunks_exact(self.frames).zip(&self.map.tx) {
             if let Some(ring) = self.tx.engine_ring(tx) {
@@ -566,7 +566,9 @@ impl<P: Process> Pump<P> {
     /// pending discontinuity before it) inside `catch_unwind`. A panic
     /// zeroes the outputs and is returned; from then on the processor is
     /// never called again and the outputs stay zero.
-    fn run_processor(&mut self) -> Option<Box<dyn Any + Send>> {
+    /// The block carries its media `start` ([`Block::start`]; `None` while
+    /// free pacing).
+    fn run_processor(&mut self, start: Option<u64>) -> Option<Box<dyn Any + Send>> {
         self.output.fill(0.0);
         if self.faulted {
             return None;
@@ -583,7 +585,11 @@ impl<P: Process> Pump<P> {
             if discontinuity {
                 processor.discontinuity();
             }
-            processor.process(&mut Block::new(*frames, input, output));
+            let block = Block::new(*frames, input, output);
+            processor.process(&mut match start {
+                Some(at) => block.at(at),
+                None => block,
+            });
         }));
         let payload = caught.err()?;
         self.output.fill(0.0);

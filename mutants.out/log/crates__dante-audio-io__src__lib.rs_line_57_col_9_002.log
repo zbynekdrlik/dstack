@@ -1,0 +1,54 @@
+
+*** crates/dante-audio-io/src/lib.rs:57:9: replace Block<'a>::start -> Option<u64> with Some(1)
+
+*** mutation diff:
+--- crates/dante-audio-io/src/lib.rs
++++ replace Block<'a>::start -> Option<u64> with Some(1)
+@@ -49,17 +49,17 @@
+     }
+ 
+     /// The media sample time of the block's first input sample, when the
+     /// engine runs on a media clock: consecutive blocks are `frames`
+     /// apart, and a jump is blocks the engine skipped (or a schedule it
+     /// started again). `None` for a block with no media time (an engine
+     /// pacing itself while no clock is ready).
+     pub fn start(&self) -> Option<u64> {
+-        self.start
++        Some(1) /* ~ changed by cargo-mutants ~ */
+     }
+ 
+     pub fn frames(&self) -> usize {
+         self.frames
+     }
+ 
+     pub fn inputs(&self) -> usize {
+         self.input.len().checked_div(self.frames).unwrap_or(0)
+
+
+*** /opt/rust/rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo nextest run --no-run --cargo-profile=mutants --verbose --package=dante-audio-io@0.4.38
+   Compiling dante-audio-io v0.4.38 (/tmp/cargo-mutants-dstack-u4kebM.tmp/crates/dante-audio-io)
+warning: field `start` is never read
+  --> crates/dante-audio-io/src/lib.rs:28:5
+   |
+24 | pub struct Block<'a> {
+   |            ----- field in this struct
+...
+28 |     start: Option<u64>,
+   |     ^^^^^
+   |
+   = note: `Block` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `dante-audio-io` (lib) generated 1 warning
+warning: `dante-audio-io` (lib test) generated 1 warning (1 duplicate)
+    Finished `mutants` profile [unoptimized] target(s) in 0.95s
+
+*** result: Success
+
+*** /opt/rust/rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo nextest run --cargo-profile=mutants --verbose --package=dante-audio-io@0.4.38 --lib --test hot_path
+error: no test target named `hot_path` in `dante-audio-io@0.4.38` package
+help: available test in `dante-stack` package:
+    hot_path
+error: command `/opt/rust/rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo '--color=auto' test --no-run '--message-format=json-render-diagnostics' '--package=dante-audio-io@0.4.38' --lib '--test=hot_path' '--profile=mutants'` exited with code 101
+
+*** result: Failure(101)

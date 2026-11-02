@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.38 (2026-11-02)
+
+- New: `dante_audio_io::Block::start()`, the media sample time of the block's first input sample (`None` when the engine runs without a media clock). The embedded pump sets it on every block (`Block::at`), and its outputs go out at `start + D` (`PumpView::offset`). Consecutive blocks are `frames` apart. A re-bootstrap's skipped blocks, an epoch change or a latency retime show as a jump in it, so an app can number its blocks by media time across a skip (dasio asked: its DAW timeline lost the blocks of a 49.7 ms VM stall). Free pacing gives `None`. `Block::new` is unchanged.
+
 ## 0.4.37 (2026-11-02)
 
 - Fix: an embedded app's pump plays at the device latency Dante Controller set. In v0.4.36 it kept the config's latency, both after a restart (its `Timing` was taken before the state file was read) and live, so its playout sat off the RX's and it read the RX rings at the wrong point. The pump now takes its timing from the device as it runs (`host::Prepared::config`) and follows a live change: the manager publishes the device latency with the RX delays (`RxShared::playout`), and the pump re-bootstraps once at the new playout, with a discontinuity, as at a new epoch.

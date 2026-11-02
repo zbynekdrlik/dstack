@@ -8,7 +8,7 @@
       "phase_results": [
         {
           "phase": "Build",
-          "duration": 12.928520781,
+          "duration": 13.970911598,
           "process_status": "Success",
           "argv": [
             "/opt/rust/rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo",
@@ -17,12 +17,13 @@
             "--no-run",
             "--cargo-profile=mutants",
             "--verbose",
-            "--package=dante-stack@0.4.36"
+            "--package=dante-audio-io@0.4.38",
+            "--package=dante-stack@0.4.38"
           ]
         },
         {
           "phase": "Test",
-          "duration": 7.712326339,
+          "duration": 8.362368804,
           "process_status": "Success",
           "argv": [
             "/opt/rust/rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo",
@@ -30,78 +31,8 @@
             "run",
             "--cargo-profile=mutants",
             "--verbose",
-            "--package=dante-stack@0.4.36",
-            "--lib",
-            "--test",
-            "hot_path"
-          ]
-        }
-      ]
-    },
-    {
-      "scenario": {
-        "Mutant": {
-          "package": "dante-stack",
-          "file": "crates/dante-stack/src/media/rx.rs",
-          "function": {
-            "function_name": "RxShared::playout",
-            "return_type": "-> Option<u64>",
-            "span": {
-              "start": {
-                "line": 405,
-                "column": 5
-              },
-              "end": {
-                "line": 409,
-                "column": 6
-              }
-            }
-          },
-          "span": {
-            "start": {
-              "line": 408,
-              "column": 66
-            },
-            "end": {
-              "line": 408,
-              "column": 67
-            }
-          },
-          "replacement": "==",
-          "genre": "BinaryOperator"
-        }
-      },
-      "summary": "CaughtMutant",
-      "log_path": "log/crates__dante-stack__src__media__rx.rs_line_408_col_66.log",
-      "diff_path": "diff/crates__dante-stack__src__media__rx.rs_line_408_col_66.diff",
-      "phase_results": [
-        {
-          "phase": "Build",
-          "duration": 2.554650882,
-          "process_status": "Success",
-          "argv": [
-            "/opt/rust/rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo",
-            "nextest",
-            "run",
-            "--no-run",
-            "--cargo-profile=mutants",
-            "--verbose",
-            "--package=dante-stack@0.4.36"
-          ]
-        },
-        {
-          "phase": "Test",
-          "duration": 4.156969822,
-          "process_status": {
-            "Failure": 100
-          },
-          "argv": [
-            "/opt/rust/rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo",
-            "nextest",
-            "run",
-            "--cargo-profile=mutants",
-            "--verbose",
-            "--package=dante-stack@0.4.36",
+            "--package=dante-audio-io@0.4.38",
+            "--package=dante-stack@0.4.38",
             "--lib",
             "--test",
             "hot_path"
@@ -115,918 +46,27 @@
           "package": "dante-stack",
           "file": "crates/dante-stack/src/stream.rs",
           "function": {
-            "function_name": "PumpStats::retimed",
-            "return_type": "",
+            "function_name": "Pump<P>::run_processor",
+            "return_type": "-> Option<Box<dyn Any +Send>>",
             "span": {
               "start": {
-                "line": 312,
+                "line": 565,
                 "column": 5
               },
               "end": {
-                "line": 317,
+                "line": 598,
                 "column": 6
               }
             }
           },
           "span": {
             "start": {
-              "line": 315,
+              "line": 572,
               "column": 9
             },
             "end": {
-              "line": 316,
-              "column": 63
-            }
-          },
-          "replacement": "()",
-          "genre": "FnValue"
-        }
-      },
-      "summary": "CaughtMutant",
-      "log_path": "log/crates__dante-stack__src__stream.rs_line_315_col_9.log",
-      "diff_path": "diff/crates__dante-stack__src__stream.rs_line_315_col_9.diff",
-      "phase_results": [
-        {
-          "phase": "Build",
-          "duration": 6.775725423,
-          "process_status": "Success",
-          "argv": [
-            "/opt/rust/rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo",
-            "nextest",
-            "run",
-            "--no-run",
-            "--cargo-profile=mutants",
-            "--verbose",
-            "--package=dante-stack@0.4.36"
-          ]
-        },
-        {
-          "phase": "Test",
-          "duration": 8.819630394,
-          "process_status": {
-            "Failure": 100
-          },
-          "argv": [
-            "/opt/rust/rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo",
-            "nextest",
-            "run",
-            "--cargo-profile=mutants",
-            "--verbose",
-            "--package=dante-stack@0.4.36",
-            "--lib",
-            "--test",
-            "hot_path"
-          ]
-        }
-      ]
-    },
-    {
-      "scenario": {
-        "Mutant": {
-          "package": "dante-stack",
-          "file": "crates/dante-stack/src/media/rx.rs",
-          "function": {
-            "function_name": "RxShared::new_at",
-            "return_type": "-> io::Result<Self>",
-            "span": {
-              "start": {
-                "line": 311,
-                "column": 5
-              },
-              "end": {
-                "line": 352,
-                "column": 6
-              }
-            }
-          },
-          "span": {
-            "start": {
-              "line": 320,
-              "column": 9
-            },
-            "end": {
-              "line": 351,
-              "column": 11
-            }
-          },
-          "replacement": "Ok(Default::default())",
-          "genre": "FnValue"
-        }
-      },
-      "summary": "Unviable",
-      "log_path": "log/crates__dante-stack__src__media__rx.rs_line_320_col_9.log",
-      "diff_path": "diff/crates__dante-stack__src__media__rx.rs_line_320_col_9.diff",
-      "phase_results": [
-        {
-          "phase": "Build",
-          "duration": 5.472083606,
-          "process_status": {
-            "Failure": 101
-          },
-          "argv": [
-            "/opt/rust/rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo",
-            "nextest",
-            "run",
-            "--no-run",
-            "--cargo-profile=mutants",
-            "--verbose",
-            "--package=dante-stack@0.4.36"
-          ]
-        }
-      ]
-    },
-    {
-      "scenario": {
-        "Mutant": {
-          "package": "dante-stack",
-          "file": "crates/dante-stack/src/stream.rs",
-          "function": {
-            "function_name": "Pump<P>::media",
-            "return_type": "-> u64",
-            "span": {
-              "start": {
-                "line": 448,
-                "column": 5
-              },
-              "end": {
-                "line": 496,
-                "column": 6
-              }
-            }
-          },
-          "span": {
-            "start": {
-              "line": 458,
-              "column": 24
-            },
-            "end": {
-              "line": 458,
-              "column": 26
-            }
-          },
-          "replacement": "==",
-          "genre": "BinaryOperator"
-        }
-      },
-      "summary": "CaughtMutant",
-      "log_path": "log/crates__dante-stack__src__stream.rs_line_458_col_24.log",
-      "diff_path": "diff/crates__dante-stack__src__stream.rs_line_458_col_24.diff",
-      "phase_results": [
-        {
-          "phase": "Build",
-          "duration": 6.846207672,
-          "process_status": "Success",
-          "argv": [
-            "/opt/rust/rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo",
-            "nextest",
-            "run",
-            "--no-run",
-            "--cargo-profile=mutants",
-            "--verbose",
-            "--package=dante-stack@0.4.36"
-          ]
-        },
-        {
-          "phase": "Test",
-          "duration": 7.939348122,
-          "process_status": {
-            "Failure": 100
-          },
-          "argv": [
-            "/opt/rust/rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo",
-            "nextest",
-            "run",
-            "--cargo-profile=mutants",
-            "--verbose",
-            "--package=dante-stack@0.4.36",
-            "--lib",
-            "--test",
-            "hot_path"
-          ]
-        }
-      ]
-    },
-    {
-      "scenario": {
-        "Mutant": {
-          "package": "dante-stack",
-          "file": "crates/dante-stack/src/stream.rs",
-          "function": {
-            "function_name": "Pump<P>::media",
-            "return_type": "-> u64",
-            "span": {
-              "start": {
-                "line": 448,
-                "column": 5
-              },
-              "end": {
-                "line": 496,
-                "column": 6
-              }
-            }
-          },
-          "span": {
-            "start": {
-              "line": 458,
-              "column": 13
-            },
-            "end": {
-              "line": 458,
-              "column": 15
-            }
-          },
-          "replacement": "||",
-          "genre": "BinaryOperator"
-        }
-      },
-      "summary": "Unviable",
-      "log_path": "log/crates__dante-stack__src__stream.rs_line_458_col_13.log",
-      "diff_path": "diff/crates__dante-stack__src__stream.rs_line_458_col_13.diff",
-      "phase_results": [
-        {
-          "phase": "Build",
-          "duration": 1.355167225,
-          "process_status": {
-            "Failure": 101
-          },
-          "argv": [
-            "/opt/rust/rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo",
-            "nextest",
-            "run",
-            "--no-run",
-            "--cargo-profile=mutants",
-            "--verbose",
-            "--package=dante-stack@0.4.36"
-          ]
-        }
-      ]
-    },
-    {
-      "scenario": {
-        "Mutant": {
-          "package": "dante-stack",
-          "file": "crates/dante-stack/src/media/rx.rs",
-          "function": {
-            "function_name": "RxShared::playout",
-            "return_type": "-> Option<u64>",
-            "span": {
-              "start": {
-                "line": 405,
-                "column": 5
-              },
-              "end": {
-                "line": 409,
-                "column": 6
-              }
-            }
-          },
-          "span": {
-            "start": {
-              "line": 408,
-              "column": 9
-            },
-            "end": {
-              "line": 408,
-              "column": 70
-            }
-          },
-          "replacement": "Some(1)",
-          "genre": "FnValue"
-        }
-      },
-      "summary": "CaughtMutant",
-      "log_path": "log/crates__dante-stack__src__media__rx.rs_line_408_col_9.log",
-      "diff_path": "diff/crates__dante-stack__src__media__rx.rs_line_408_col_9.diff",
-      "phase_results": [
-        {
-          "phase": "Build",
-          "duration": 22.459659354,
-          "process_status": "Success",
-          "argv": [
-            "/opt/rust/rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo",
-            "nextest",
-            "run",
-            "--no-run",
-            "--cargo-profile=mutants",
-            "--verbose",
-            "--package=dante-stack@0.4.36"
-          ]
-        },
-        {
-          "phase": "Test",
-          "duration": 4.272323638,
-          "process_status": {
-            "Failure": 100
-          },
-          "argv": [
-            "/opt/rust/rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo",
-            "nextest",
-            "run",
-            "--cargo-profile=mutants",
-            "--verbose",
-            "--package=dante-stack@0.4.36",
-            "--lib",
-            "--test",
-            "hot_path"
-          ]
-        }
-      ]
-    },
-    {
-      "scenario": {
-        "Mutant": {
-          "package": "dante-stack",
-          "file": "crates/dante-stack/src/media/rx.rs",
-          "function": {
-            "function_name": "RxShared::playout",
-            "return_type": "-> Option<u64>",
-            "span": {
-              "start": {
-                "line": 405,
-                "column": 5
-              },
-              "end": {
-                "line": 409,
-                "column": 6
-              }
-            }
-          },
-          "span": {
-            "start": {
-              "line": 408,
-              "column": 9
-            },
-            "end": {
-              "line": 408,
-              "column": 70
-            }
-          },
-          "replacement": "Some(0)",
-          "genre": "FnValue"
-        }
-      },
-      "summary": "CaughtMutant",
-      "log_path": "log/crates__dante-stack__src__media__rx.rs_line_408_col_9_001.log",
-      "diff_path": "diff/crates__dante-stack__src__media__rx.rs_line_408_col_9_001.diff",
-      "phase_results": [
-        {
-          "phase": "Build",
-          "duration": 3.7659123450000003,
-          "process_status": "Success",
-          "argv": [
-            "/opt/rust/rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo",
-            "nextest",
-            "run",
-            "--no-run",
-            "--cargo-profile=mutants",
-            "--verbose",
-            "--package=dante-stack@0.4.36"
-          ]
-        },
-        {
-          "phase": "Test",
-          "duration": 4.214803907,
-          "process_status": {
-            "Failure": 100
-          },
-          "argv": [
-            "/opt/rust/rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo",
-            "nextest",
-            "run",
-            "--cargo-profile=mutants",
-            "--verbose",
-            "--package=dante-stack@0.4.36",
-            "--lib",
-            "--test",
-            "hot_path"
-          ]
-        }
-      ]
-    },
-    {
-      "scenario": {
-        "Mutant": {
-          "package": "dante-stack",
-          "file": "crates/dante-stack/src/media/rx.rs",
-          "function": {
-            "function_name": "RxShared::playout",
-            "return_type": "-> Option<u64>",
-            "span": {
-              "start": {
-                "line": 405,
-                "column": 5
-              },
-              "end": {
-                "line": 409,
-                "column": 6
-              }
-            }
-          },
-          "span": {
-            "start": {
-              "line": 408,
-              "column": 66
-            },
-            "end": {
-              "line": 408,
-              "column": 67
-            }
-          },
-          "replacement": "<",
-          "genre": "BinaryOperator"
-        }
-      },
-      "summary": "CaughtMutant",
-      "log_path": "log/crates__dante-stack__src__media__rx.rs_line_408_col_66_001.log",
-      "diff_path": "diff/crates__dante-stack__src__media__rx.rs_line_408_col_66_001.diff",
-      "phase_results": [
-        {
-          "phase": "Build",
-          "duration": 22.028870621,
-          "process_status": "Success",
-          "argv": [
-            "/opt/rust/rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo",
-            "nextest",
-            "run",
-            "--no-run",
-            "--cargo-profile=mutants",
-            "--verbose",
-            "--package=dante-stack@0.4.36"
-          ]
-        },
-        {
-          "phase": "Test",
-          "duration": 8.175476248,
-          "process_status": {
-            "Failure": 100
-          },
-          "argv": [
-            "/opt/rust/rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo",
-            "nextest",
-            "run",
-            "--cargo-profile=mutants",
-            "--verbose",
-            "--package=dante-stack@0.4.36",
-            "--lib",
-            "--test",
-            "hot_path"
-          ]
-        }
-      ]
-    },
-    {
-      "scenario": {
-        "Mutant": {
-          "package": "dante-stack",
-          "file": "crates/dante-stack/src/media/rx.rs",
-          "function": {
-            "function_name": "RxShared::set_device_latency",
-            "return_type": "",
-            "span": {
-              "start": {
-                "line": 396,
-                "column": 5
-              },
-              "end": {
-                "line": 403,
-                "column": 6
-              }
-            }
-          },
-          "span": {
-            "start": {
-              "line": 399,
-              "column": 9
-            },
-            "end": {
-              "line": 402,
-              "column": 11
-            }
-          },
-          "replacement": "()",
-          "genre": "FnValue"
-        }
-      },
-      "summary": "CaughtMutant",
-      "log_path": "log/crates__dante-stack__src__media__rx.rs_line_399_col_9.log",
-      "diff_path": "diff/crates__dante-stack__src__media__rx.rs_line_399_col_9.diff",
-      "phase_results": [
-        {
-          "phase": "Build",
-          "duration": 23.263246948,
-          "process_status": "Success",
-          "argv": [
-            "/opt/rust/rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo",
-            "nextest",
-            "run",
-            "--no-run",
-            "--cargo-profile=mutants",
-            "--verbose",
-            "--package=dante-stack@0.4.36"
-          ]
-        },
-        {
-          "phase": "Test",
-          "duration": 7.870155963,
-          "process_status": {
-            "Failure": 100
-          },
-          "argv": [
-            "/opt/rust/rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo",
-            "nextest",
-            "run",
-            "--cargo-profile=mutants",
-            "--verbose",
-            "--package=dante-stack@0.4.36",
-            "--lib",
-            "--test",
-            "hot_path"
-          ]
-        }
-      ]
-    },
-    {
-      "scenario": {
-        "Mutant": {
-          "package": "dante-stack",
-          "file": "crates/dante-stack/src/stream.rs",
-          "function": {
-            "function_name": "Pump<P>::media",
-            "return_type": "-> u64",
-            "span": {
-              "start": {
-                "line": 448,
-                "column": 5
-              },
-              "end": {
-                "line": 496,
-                "column": 6
-              }
-            }
-          },
-          "span": {
-            "start": {
-              "line": 454,
-              "column": 9
-            },
-            "end": {
-              "line": 495,
-              "column": 13
-            }
-          },
-          "replacement": "1",
-          "genre": "FnValue"
-        }
-      },
-      "summary": "CaughtMutant",
-      "log_path": "log/crates__dante-stack__src__stream.rs_line_454_col_9.log",
-      "diff_path": "diff/crates__dante-stack__src__stream.rs_line_454_col_9.diff",
-      "phase_results": [
-        {
-          "phase": "Build",
-          "duration": 3.056649251,
-          "process_status": "Success",
-          "argv": [
-            "/opt/rust/rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo",
-            "nextest",
-            "run",
-            "--no-run",
-            "--cargo-profile=mutants",
-            "--verbose",
-            "--package=dante-stack@0.4.36"
-          ]
-        },
-        {
-          "phase": "Test",
-          "duration": 4.110341649,
-          "process_status": {
-            "Failure": 100
-          },
-          "argv": [
-            "/opt/rust/rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo",
-            "nextest",
-            "run",
-            "--cargo-profile=mutants",
-            "--verbose",
-            "--package=dante-stack@0.4.36",
-            "--lib",
-            "--test",
-            "hot_path"
-          ]
-        }
-      ]
-    },
-    {
-      "scenario": {
-        "Mutant": {
-          "package": "dante-stack",
-          "file": "crates/dante-stack/src/stream.rs",
-          "function": {
-            "function_name": "Pump<P>::media",
-            "return_type": "-> u64",
-            "span": {
-              "start": {
-                "line": 448,
-                "column": 5
-              },
-              "end": {
-                "line": 496,
-                "column": 6
-              }
-            }
-          },
-          "span": {
-            "start": {
-              "line": 454,
-              "column": 9
-            },
-            "end": {
-              "line": 495,
-              "column": 13
-            }
-          },
-          "replacement": "0",
-          "genre": "FnValue"
-        }
-      },
-      "summary": "CaughtMutant",
-      "log_path": "log/crates__dante-stack__src__stream.rs_line_454_col_9_001.log",
-      "diff_path": "diff/crates__dante-stack__src__stream.rs_line_454_col_9_001.diff",
-      "phase_results": [
-        {
-          "phase": "Build",
-          "duration": 3.157478464,
-          "process_status": "Success",
-          "argv": [
-            "/opt/rust/rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo",
-            "nextest",
-            "run",
-            "--no-run",
-            "--cargo-profile=mutants",
-            "--verbose",
-            "--package=dante-stack@0.4.36"
-          ]
-        },
-        {
-          "phase": "Test",
-          "duration": 4.267693325,
-          "process_status": {
-            "Failure": 100
-          },
-          "argv": [
-            "/opt/rust/rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo",
-            "nextest",
-            "run",
-            "--cargo-profile=mutants",
-            "--verbose",
-            "--package=dante-stack@0.4.36",
-            "--lib",
-            "--test",
-            "hot_path"
-          ]
-        }
-      ]
-    },
-    {
-      "scenario": {
-        "Mutant": {
-          "package": "dante-stack",
-          "file": "crates/dante-stack/src/stream.rs",
-          "function": {
-            "function_name": "PumpStats::view",
-            "return_type": "-> PumpView",
-            "span": {
-              "start": {
-                "line": 365,
-                "column": 5
-              },
-              "end": {
-                "line": 378,
-                "column": 6
-              }
-            }
-          },
-          "span": {
-            "start": {
-              "line": 367,
-              "column": 9
-            },
-            "end": {
-              "line": 377,
-              "column": 10
-            }
-          },
-          "replacement": "Default::default()",
-          "genre": "FnValue"
-        }
-      },
-      "summary": "CaughtMutant",
-      "log_path": "log/crates__dante-stack__src__stream.rs_line_367_col_9.log",
-      "diff_path": "diff/crates__dante-stack__src__stream.rs_line_367_col_9.diff",
-      "phase_results": [
-        {
-          "phase": "Build",
-          "duration": 3.062645426,
-          "process_status": "Success",
-          "argv": [
-            "/opt/rust/rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo",
-            "nextest",
-            "run",
-            "--no-run",
-            "--cargo-profile=mutants",
-            "--verbose",
-            "--package=dante-stack@0.4.36"
-          ]
-        },
-        {
-          "phase": "Test",
-          "duration": 4.157771573,
-          "process_status": {
-            "Failure": 100
-          },
-          "argv": [
-            "/opt/rust/rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo",
-            "nextest",
-            "run",
-            "--cargo-profile=mutants",
-            "--verbose",
-            "--package=dante-stack@0.4.36",
-            "--lib",
-            "--test",
-            "hot_path"
-          ]
-        }
-      ]
-    },
-    {
-      "scenario": {
-        "Mutant": {
-          "package": "dante-stack",
-          "file": "crates/dante-stack/src/media/rx.rs",
-          "function": {
-            "function_name": "RxShared::playout",
-            "return_type": "-> Option<u64>",
-            "span": {
-              "start": {
-                "line": 405,
-                "column": 5
-              },
-              "end": {
-                "line": 409,
-                "column": 6
-              }
-            }
-          },
-          "span": {
-            "start": {
-              "line": 408,
-              "column": 66
-            },
-            "end": {
-              "line": 408,
-              "column": 67
-            }
-          },
-          "replacement": ">=",
-          "genre": "BinaryOperator"
-        }
-      },
-      "summary": "CaughtMutant",
-      "log_path": "log/crates__dante-stack__src__media__rx.rs_line_408_col_66_002.log",
-      "diff_path": "diff/crates__dante-stack__src__media__rx.rs_line_408_col_66_002.diff",
-      "phase_results": [
-        {
-          "phase": "Build",
-          "duration": 3.309745945,
-          "process_status": "Success",
-          "argv": [
-            "/opt/rust/rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo",
-            "nextest",
-            "run",
-            "--no-run",
-            "--cargo-profile=mutants",
-            "--verbose",
-            "--package=dante-stack@0.4.36"
-          ]
-        },
-        {
-          "phase": "Test",
-          "duration": 4.107662538,
-          "process_status": {
-            "Failure": 100
-          },
-          "argv": [
-            "/opt/rust/rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo",
-            "nextest",
-            "run",
-            "--cargo-profile=mutants",
-            "--verbose",
-            "--package=dante-stack@0.4.36",
-            "--lib",
-            "--test",
-            "hot_path"
-          ]
-        }
-      ]
-    },
-    {
-      "scenario": {
-        "Mutant": {
-          "package": "dante-stack",
-          "file": "crates/dante-stack/src/daemon/media.rs",
-          "function": {
-            "function_name": "Media::publish",
-            "return_type": "",
-            "span": {
-              "start": {
-                "line": 191,
-                "column": 5
-              },
-              "end": {
-                "line": 195,
-                "column": 6
-              }
-            }
-          },
-          "span": {
-            "start": {
-              "line": 193,
-              "column": 9
-            },
-            "end": {
-              "line": 194,
-              "column": 52
-            }
-          },
-          "replacement": "()",
-          "genre": "FnValue"
-        }
-      },
-      "summary": "CaughtMutant",
-      "log_path": "log/crates__dante-stack__src__daemon__media.rs_line_193_col_9.log",
-      "diff_path": "diff/crates__dante-stack__src__daemon__media.rs_line_193_col_9.diff",
-      "phase_results": [
-        {
-          "phase": "Build",
-          "duration": 3.158211085,
-          "process_status": "Success",
-          "argv": [
-            "/opt/rust/rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo",
-            "nextest",
-            "run",
-            "--no-run",
-            "--cargo-profile=mutants",
-            "--verbose",
-            "--package=dante-stack@0.4.36"
-          ]
-        },
-        {
-          "phase": "Test",
-          "duration": 7.814005314,
-          "process_status": {
-            "Failure": 100
-          },
-          "argv": [
-            "/opt/rust/rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo",
-            "nextest",
-            "run",
-            "--cargo-profile=mutants",
-            "--verbose",
-            "--package=dante-stack@0.4.36",
-            "--lib",
-            "--test",
-            "hot_path"
-          ]
-        }
-      ]
-    },
-    {
-      "scenario": {
-        "Mutant": {
-          "package": "dante-stack",
-          "file": "crates/dante-stack/src/media/rx.rs",
-          "function": {
-            "function_name": "RxShared::playout",
-            "return_type": "-> Option<u64>",
-            "span": {
-              "start": {
-                "line": 405,
-                "column": 5
-              },
-              "end": {
-                "line": 409,
-                "column": 6
-              }
-            }
-          },
-          "span": {
-            "start": {
-              "line": 408,
-              "column": 9
-            },
-            "end": {
-              "line": 408,
-              "column": 70
+              "line": 597,
+              "column": 22
             }
           },
           "replacement": "None",
@@ -1034,12 +74,12 @@
         }
       },
       "summary": "CaughtMutant",
-      "log_path": "log/crates__dante-stack__src__media__rx.rs_line_408_col_9_002.log",
-      "diff_path": "diff/crates__dante-stack__src__media__rx.rs_line_408_col_9_002.diff",
+      "log_path": "log/crates__dante-stack__src__stream.rs_line_572_col_9.log",
+      "diff_path": "diff/crates__dante-stack__src__stream.rs_line_572_col_9.diff",
       "phase_results": [
         {
           "phase": "Build",
-          "duration": 3.007170179,
+          "duration": 5.608830448,
           "process_status": "Success",
           "argv": [
             "/opt/rust/rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo",
@@ -1048,12 +88,12 @@
             "--no-run",
             "--cargo-profile=mutants",
             "--verbose",
-            "--package=dante-stack@0.4.36"
+            "--package=dante-stack@0.4.38"
           ]
         },
         {
           "phase": "Test",
-          "duration": 7.713033317,
+          "duration": 8.31436725,
           "process_status": {
             "Failure": 100
           },
@@ -1063,7 +103,472 @@
             "run",
             "--cargo-profile=mutants",
             "--verbose",
-            "--package=dante-stack@0.4.36",
+            "--package=dante-stack@0.4.38",
+            "--lib",
+            "--test",
+            "hot_path"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "package": "dante-audio-io",
+          "file": "crates/dante-audio-io/src/lib.rs",
+          "function": {
+            "function_name": "Block<'a>::at",
+            "return_type": "-> Self",
+            "span": {
+              "start": {
+                "line": 43,
+                "column": 5
+              },
+              "end": {
+                "line": 49,
+                "column": 6
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 45,
+              "column": 9
+            },
+            "end": {
+              "line": 48,
+              "column": 10
+            }
+          },
+          "replacement": "Default::default()",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "Unviable",
+      "log_path": "log/crates__dante-audio-io__src__lib.rs_line_45_col_9.log",
+      "diff_path": "diff/crates__dante-audio-io__src__lib.rs_line_45_col_9.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.705372933,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/opt/rust/rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "nextest",
+            "run",
+            "--no-run",
+            "--cargo-profile=mutants",
+            "--verbose",
+            "--package=dante-audio-io@0.4.38"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "package": "dante-audio-io",
+          "file": "crates/dante-audio-io/src/lib.rs",
+          "function": {
+            "function_name": "Block<'a>::start",
+            "return_type": "-> Option<u64>",
+            "span": {
+              "start": {
+                "line": 51,
+                "column": 5
+              },
+              "end": {
+                "line": 58,
+                "column": 6
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 57,
+              "column": 9
+            },
+            "end": {
+              "line": 57,
+              "column": 19
+            }
+          },
+          "replacement": "None",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__dante-audio-io__src__lib.rs_line_57_col_9.log",
+      "diff_path": "diff/crates__dante-audio-io__src__lib.rs_line_57_col_9.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.507533649,
+          "process_status": "Success",
+          "argv": [
+            "/opt/rust/rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "nextest",
+            "run",
+            "--no-run",
+            "--cargo-profile=mutants",
+            "--verbose",
+            "--package=dante-audio-io@0.4.38"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.360610616,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/opt/rust/rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "nextest",
+            "run",
+            "--cargo-profile=mutants",
+            "--verbose",
+            "--package=dante-audio-io@0.4.38",
+            "--lib",
+            "--test",
+            "hot_path"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "package": "dante-audio-io",
+          "file": "crates/dante-audio-io/src/lib.rs",
+          "function": {
+            "function_name": "Block<'a>::start",
+            "return_type": "-> Option<u64>",
+            "span": {
+              "start": {
+                "line": 51,
+                "column": 5
+              },
+              "end": {
+                "line": 58,
+                "column": 6
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 57,
+              "column": 9
+            },
+            "end": {
+              "line": 57,
+              "column": 19
+            }
+          },
+          "replacement": "Some(0)",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__dante-audio-io__src__lib.rs_line_57_col_9_001.log",
+      "diff_path": "diff/crates__dante-audio-io__src__lib.rs_line_57_col_9_001.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.826037903,
+          "process_status": "Success",
+          "argv": [
+            "/opt/rust/rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "nextest",
+            "run",
+            "--no-run",
+            "--cargo-profile=mutants",
+            "--verbose",
+            "--package=dante-audio-io@0.4.38"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.304667072,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/opt/rust/rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "nextest",
+            "run",
+            "--cargo-profile=mutants",
+            "--verbose",
+            "--package=dante-audio-io@0.4.38",
+            "--lib",
+            "--test",
+            "hot_path"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "package": "dante-audio-io",
+          "file": "crates/dante-audio-io/src/lib.rs",
+          "function": {
+            "function_name": "Block<'a>::start",
+            "return_type": "-> Option<u64>",
+            "span": {
+              "start": {
+                "line": 51,
+                "column": 5
+              },
+              "end": {
+                "line": 58,
+                "column": 6
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 57,
+              "column": 9
+            },
+            "end": {
+              "line": 57,
+              "column": 19
+            }
+          },
+          "replacement": "Some(1)",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__dante-audio-io__src__lib.rs_line_57_col_9_002.log",
+      "diff_path": "diff/crates__dante-audio-io__src__lib.rs_line_57_col_9_002.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.258742656,
+          "process_status": "Success",
+          "argv": [
+            "/opt/rust/rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "nextest",
+            "run",
+            "--no-run",
+            "--cargo-profile=mutants",
+            "--verbose",
+            "--package=dante-audio-io@0.4.38"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.354348159,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/opt/rust/rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "nextest",
+            "run",
+            "--cargo-profile=mutants",
+            "--verbose",
+            "--package=dante-audio-io@0.4.38",
+            "--lib",
+            "--test",
+            "hot_path"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "package": "dante-stack",
+          "file": "crates/dante-stack/src/stream.rs",
+          "function": {
+            "function_name": "Pump<P>::run_processor",
+            "return_type": "-> Option<Box<dyn Any +Send>>",
+            "span": {
+              "start": {
+                "line": 565,
+                "column": 5
+              },
+              "end": {
+                "line": 598,
+                "column": 6
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 572,
+              "column": 9
+            },
+            "end": {
+              "line": 597,
+              "column": 22
+            }
+          },
+          "replacement": "Some(Box::new(Default::default()))",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "Unviable",
+      "log_path": "log/crates__dante-stack__src__stream.rs_line_572_col_9_001.log",
+      "diff_path": "diff/crates__dante-stack__src__stream.rs_line_572_col_9_001.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 15.398177704,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/opt/rust/rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "nextest",
+            "run",
+            "--no-run",
+            "--cargo-profile=mutants",
+            "--verbose",
+            "--package=dante-stack@0.4.38"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "package": "dante-stack",
+          "file": "crates/dante-stack/src/stream.rs",
+          "function": {
+            "function_name": "Pump<P>::block",
+            "return_type": "",
+            "span": {
+              "start": {
+                "line": 510,
+                "column": 5
+              },
+              "end": {
+                "line": 542,
+                "column": 6
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 516,
+              "column": 9
+            },
+            "end": {
+              "line": 541,
+              "column": 34
+            }
+          },
+          "replacement": "()",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__dante-stack__src__stream.rs_line_516_col_9.log",
+      "diff_path": "diff/crates__dante-stack__src__stream.rs_line_516_col_9.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 18.936136136000002,
+          "process_status": "Success",
+          "argv": [
+            "/opt/rust/rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "nextest",
+            "run",
+            "--no-run",
+            "--cargo-profile=mutants",
+            "--verbose",
+            "--package=dante-stack@0.4.38"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 4.209771045,
+          "process_status": {
+            "Failure": 100
+          },
+          "argv": [
+            "/opt/rust/rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "nextest",
+            "run",
+            "--cargo-profile=mutants",
+            "--verbose",
+            "--package=dante-stack@0.4.38",
+            "--lib",
+            "--test",
+            "hot_path"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "package": "dante-stack",
+          "file": "crates/dante-stack/src/stream.rs",
+          "function": {
+            "function_name": "Pump<P>::free",
+            "return_type": "",
+            "span": {
+              "start": {
+                "line": 498,
+                "column": 5
+              },
+              "end": {
+                "line": 508,
+                "column": 6
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 502,
+              "column": 9
+            },
+            "end": {
+              "line": 507,
+              "column": 34
+            }
+          },
+          "replacement": "()",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__dante-stack__src__stream.rs_line_502_col_9.log",
+      "diff_path": "diff/crates__dante-stack__src__stream.rs_line_502_col_9.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 18.484568955,
+          "process_status": "Success",
+          "argv": [
+            "/opt/rust/rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "nextest",
+            "run",
+            "--no-run",
+            "--cargo-profile=mutants",
+            "--verbose",
+            "--package=dante-stack@0.4.38"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 4.15740601,
+          "process_status": {
+            "Failure": 100
+          },
+          "argv": [
+            "/opt/rust/rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "nextest",
+            "run",
+            "--cargo-profile=mutants",
+            "--verbose",
+            "--package=dante-stack@0.4.38",
             "--lib",
             "--test",
             "hot_path"
@@ -1072,9 +577,9 @@
       ]
     }
   ],
-  "total_mutants": 15,
+  "total_mutants": 8,
   "missed": 0,
-  "caught": 13,
+  "caught": 6,
   "timeout": 0,
   "unviable": 2,
   "success": 0

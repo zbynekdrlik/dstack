@@ -1,2 +1,2 @@
-crates/dante-stack/src/media/rx.rs:320:9: replace RxShared::new_at -> io::Result<Self> with Ok(Default::default())
-crates/dante-stack/src/stream.rs:458:13: replace && with || in Pump<P>::media
+crates/dante-audio-io/src/lib.rs:45:9: replace Block<'a>::at -> Self with Default::default()
+crates/dante-stack/src/stream.rs:572:9: replace Pump<P>::run_processor -> Option<Box<dyn Any +Send>> with Some(Box::new(Default::default()))
