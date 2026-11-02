@@ -4,7 +4,7 @@
 
 use tracing::{info, warn};
 
-use super::{Verdict, verdict};
+use super::{Driver, REALTEK_GOOD, Verdict, driver, verdict};
 
 /// The verdict for the adapter whose GUID is `adapter` (`{...}`).
 pub fn check(adapter: &str) -> Verdict {
@@ -14,9 +14,36 @@ pub fn check(adapter: &str) -> Verdict {
     }
 }
 
-/// [`check`] of `adapter`, logged: the start line's companion (log-only
-/// glue, left out of the mutation gate).
+/// The driver verdict for the adapter whose GUID is `adapter`, with its
+/// version string.
+pub fn check_driver(adapter: &str) -> (Driver, Option<String>) {
+    match sys::adapter_values(adapter, &["ProviderName", "DriverVersion"]) {
+        Some(v) => (driver(v[0].as_deref(), v[1].as_deref()), v[1].clone()),
+        None => (Driver::Other, None),
+    }
+}
+
+/// [`check`] and [`check_driver`] of `adapter`, logged: the start line's
+/// companions (log-only glue, left out of the mutation gate).
 pub fn report(adapter: &str) {
+    let good = REALTEK_GOOD.join(", ");
+    match check_driver(adapter) {
+        (Driver::KnownBad, v) => warn!(
+            version = v.as_deref().unwrap_or(""),
+            good = %good,
+            "the Dante NIC's Realtek driver was measured with a 20-30 ms receive DPC every ~100 s: late packets at receivers and failed sends; install a measured-good driver (docs/windows-box.md)"
+        ),
+        (Driver::KnownGood, v) => info!(
+            version = v.as_deref().unwrap_or(""),
+            "the Dante NIC's Realtek driver is a measured-good one"
+        ),
+        (Driver::Unverified, v) => info!(
+            version = v.as_deref().unwrap_or(""),
+            good = %good,
+            "the Dante NIC's Realtek driver was never measured (docs/windows-box.md)"
+        ),
+        (Driver::Other, _) => {}
+    }
     match check(adapter) {
         Verdict::Off => info!("the Dante NIC's large send offload is off"),
         Verdict::On => warn!(
@@ -69,11 +96,18 @@ pub(crate) mod sys {
     /// The `*LsoV2IPv4` and `*LsoV1IPv4` values of the adapter whose
     /// `NetCfgInstanceId` is `adapter`; `None` when no class subkey has it.
     pub fn lso_values(adapter: &str) -> Option<(Option<String>, Option<String>)> {
+        let v = adapter_values(adapter, &["*LsoV2IPv4", "*LsoV1IPv4"])?;
+        Some((v[0].clone(), v[1].clone()))
+    }
+
+    /// The string values `names` of the adapter whose `NetCfgInstanceId`
+    /// is `adapter`, in order; `None` when no class subkey has it.
+    pub fn adapter_values(adapter: &str, names: &[&str]) -> Option<Vec<Option<String>>> {
         (0..1000).find_map(|i| {
             let key = format!(r"{CLASS}\{i:04}");
             let id = read(&key, "NetCfgInstanceId")?;
             id.eq_ignore_ascii_case(adapter)
-                .then(|| (read(&key, "*LsoV2IPv4"), read(&key, "*LsoV1IPv4")))
+                .then(|| names.iter().map(|n| read(&key, n)).collect())
         })
     }
 }
