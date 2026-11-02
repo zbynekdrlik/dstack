@@ -1,33 +1,13 @@
-crates/dante-stack/src/media/tx.rs:748:9: replace TxShared::advertised_latency_ns -> u64 with 0
-crates/dante-stack/src/device.rs:598:39: replace match guard was == cfg.latency_ns with false in DeviceState::latency_for
-crates/dante-stack/src/arc/control.rs:501:42: replace == with != in parse_latency_body
-crates/dante-stack/src/arc.rs:305:9: replace <impl Flows for Running>::set_latency with ()
-crates/dante-stack/src/device.rs:598:39: replace match guard was == cfg.latency_ns with true in DeviceState::latency_for
-crates/dante-stack/src/arc.rs:400:61: replace == with != in respond
-crates/dante-stack/src/arc.rs:400:26: replace match guard h.op1 == op::SETTINGS_SET && h.op2 == 0 with false in respond
-crates/dante-stack/src/arc/control.rs:501:52: replace == with != in parse_latency_body
-crates/dante-stack/src/subscribe.rs:283:9: replace Manager::latency_ns -> u64 with 1
-crates/dante-stack/src/device.rs:611:9: replace DeviceState::set_latency with ()
-crates/dante-stack/src/arc.rs:400:26: replace match guard h.op1 == op::SETTINGS_SET && h.op2 == 0 with true in respond
-crates/dante-stack/src/arc.rs:469:5: replace serve -> io::Result<()> with Ok(())
-crates/dante-stack/src/device.rs:599:13: delete match arm (None, None) in DeviceState::latency_for
-crates/dante-stack/src/arc/control.rs:501:47: replace && with || in parse_latency_body
-crates/dante-stack/src/daemon.rs:633:5: replace serve -> Result<(), ServeError> with Ok(())
-crates/dante-stack/src/device.rs:597:9: replace DeviceState::latency_for -> (u64, bool) with (0, false)
-crates/dante-stack/src/arc.rs:400:52: replace && with || in respond
-crates/dante-stack/src/arc.rs:400:32: replace == with != in respond
-crates/dante-stack/src/subscribe.rs:283:9: replace Manager::latency_ns -> u64 with 0
-crates/dante-stack/src/arc/control.rs:496:5: replace parse_latency_body -> Option<u32> with Some(0)
-crates/dante-stack/src/subscribe.rs:278:9: replace Manager::set_latency with ()
-crates/dante-stack/src/device.rs:597:9: replace DeviceState::latency_for -> (u64, bool) with (1, false)
-crates/dante-stack/src/device.rs:597:9: replace DeviceState::latency_for -> (u64, bool) with (0, true)
-crates/dante-stack/src/arc/control.rs:496:5: replace parse_latency_body -> Option<u32> with Some(1)
-crates/dante-stack/src/media/tx.rs:1043:9: replace Transmitter::events with ()
-crates/dante-stack/src/arc/control.rs:501:26: replace && with || in parse_latency_body
-crates/dante-stack/src/arc/control.rs:496:5: replace parse_latency_body -> Option<u32> with None
-crates/dante-stack/src/device.rs:597:9: replace DeviceState::latency_for -> (u64, bool) with (1, true)
-crates/dante-stack/src/media/tx.rs:741:9: replace TxShared::set_device_latency with ()
-crates/dante-stack/src/device.rs:598:43: replace == with != in DeviceState::latency_for
-crates/dante-stack/src/arc/control.rs:501:11: replace == with != in parse_latency_body
-crates/dante-stack/src/media/tx.rs:748:9: replace TxShared::advertised_latency_ns -> u64 with 1
-crates/dante-stack/src/media/tx.rs:1047:23: replace != with == in Transmitter::events
+crates/dante-stack/src/media/rx.rs:408:66: replace > with == in RxShared::playout
+crates/dante-stack/src/stream.rs:315:9: replace PumpStats::retimed with ()
+crates/dante-stack/src/stream.rs:458:24: replace != with == in Pump<P>::media
+crates/dante-stack/src/media/rx.rs:408:9: replace RxShared::playout -> Option<u64> with Some(1)
+crates/dante-stack/src/media/rx.rs:408:9: replace RxShared::playout -> Option<u64> with Some(0)
+crates/dante-stack/src/media/rx.rs:408:66: replace > with < in RxShared::playout
+crates/dante-stack/src/media/rx.rs:399:9: replace RxShared::set_device_latency with ()
+crates/dante-stack/src/stream.rs:454:9: replace Pump<P>::media -> u64 with 1
+crates/dante-stack/src/stream.rs:454:9: replace Pump<P>::media -> u64 with 0
+crates/dante-stack/src/stream.rs:367:9: replace PumpStats::view -> PumpView with Default::default()
+crates/dante-stack/src/media/rx.rs:408:66: replace > with >= in RxShared::playout
+crates/dante-stack/src/daemon/media.rs:193:9: replace Media::publish with ()
+crates/dante-stack/src/media/rx.rs:408:9: replace RxShared::playout -> Option<u64> with None

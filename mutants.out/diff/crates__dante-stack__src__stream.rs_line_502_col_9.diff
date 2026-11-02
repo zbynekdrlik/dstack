@@ -1,0 +1,26 @@
+--- crates/dante-stack/src/stream.rs
++++ replace Pump<P>::free with ()
+@@ -494,22 +494,17 @@
+         self.blocks = Some(blocks);
+         wake
+     }
+ 
+     /// One block while the clock is not ready: silent inputs, the RX rings
+     /// not read, the outputs dropped (nothing reaches the engine rings);
+     /// the next media step bootstraps.
+     pub fn free(&mut self) {
+-        self.stats.media.store(false, Ordering::Relaxed);
+-        self.blocks = None;
+-        let entry = self.enter();
+-        self.input.fill(0.0);
+-        let fault = self.run_processor(None);
+-        self.leave(entry, fault);
++        () /* ~ changed by cargo-mutants ~ */
+     }
+ 
+     /// The block whose inputs are stamped `start`…`start + B − 1` (the
+     /// real-time part): each routed RX channel's ring read there (an
+     /// unrouted one is silence and reads nothing), the processor, and each
+     /// output quantized into its TX channel's engine ring at `start + D`.
+     #[cfg_attr(iem_rtsan, sanitize(realtime = "nonblocking"))]
+     pub fn block(&mut self, start: u64) {

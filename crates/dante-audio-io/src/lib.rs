@@ -25,16 +25,36 @@ pub struct Block<'a> {
     frames: usize,
     input: &'a [f64],
     output: &'a mut [f64],
+    start: Option<u64>,
 }
 
 impl<'a> Block<'a> {
     /// `input` and `output` hold whole channels of `frames` samples each.
+    /// No media time ([`Block::start`] is `None`).
     pub fn new(frames: usize, input: &'a [f64], output: &'a mut [f64]) -> Self {
         Self {
             frames,
             input,
             output,
+            start: None,
         }
+    }
+
+    /// This block with its media `start` ([`Block::start`]).
+    pub fn at(self, start: u64) -> Self {
+        Self {
+            start: Some(start),
+            ..self
+        }
+    }
+
+    /// The media sample time of the block's first input sample, when the
+    /// engine runs on a media clock: consecutive blocks are `frames`
+    /// apart, and a jump is blocks the engine skipped (or a schedule it
+    /// started again). `None` for a block with no media time (an engine
+    /// pacing itself while no clock is ready).
+    pub fn start(&self) -> Option<u64> {
+        self.start
     }
 
     pub fn frames(&self) -> usize {
@@ -178,6 +198,14 @@ pub fn panic_message(payload: &(dyn Any + Send)) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_block_has_a_media_start_only_when_given_one() {
+        let mut out = [0.0; 2];
+        assert_eq!(Block::new(2, &[1.0, 2.0], &mut out).start(), None);
+        let b = Block::new(2, &[1.0, 2.0], &mut out).at(4_800);
+        assert_eq!((b.start(), b.frames(), b.inputs()), (Some(4_800), 2, 1));
+    }
 
     #[test]
     fn block_accessors_never_panic() {

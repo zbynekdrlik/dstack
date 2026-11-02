@@ -347,12 +347,15 @@ struct Copy {
     panic_at: Option<u64>,
     /// The largest input magnitude seen.
     loudest: f64,
+    /// Each block's media start ([`Block::start`]).
+    starts: Vec<Option<u64>>,
 }
 
 impl Process for Copy {
     fn process(&mut self, block: &mut Block<'_>) {
         self.calls += 1;
         self.log.push('p');
+        self.starts.push(block.start());
         for ch in 0..block.inputs().min(block.outputs()) {
             let input = block.input(ch).to_vec();
             self.loudest = input.iter().fold(self.loudest, |m, x| m.max(x.abs()));
@@ -1273,4 +1276,37 @@ fn a_device_latency_set_live_moves_the_pump_s_playout_with_one_rebootstrap() {
         "{}",
         r.pump.processor.log
     );
+}
+
+#[test]
+fn each_block_carries_its_media_start_across_a_skip() {
+    // dasio numbers the blocks it hands the DAW by media time: consecutive
+    // blocks are B apart, and a re-bootstrap's skip shows as the jump.
+    let mut r = rig(
+        Map {
+            rx: vec![0],
+            tx: vec![0],
+        },
+        &[0],
+        &[0],
+    );
+    let mut now = T;
+    for _ in 0..3 {
+        now = r.pump.media(now, 7);
+    }
+    let s = r.pump.processor.starts.clone();
+    assert_eq!(s.len(), 3, "{s:?}");
+    let first = s[0].expect("a media block has a start");
+    assert_eq!(s, [Some(first), Some(first + B), Some(first + 2 * B)]);
+    // Far behind: re-bootstrapped at the new now; the next block's start
+    // is past the skipped ones.
+    let late = now + 50 * B;
+    r.pump.media(late, 7);
+    let v = r.stats.view();
+    let next = r.pump.processor.starts[3].expect("a start");
+    assert_eq!(next, first + 3 * B + v.missed * B, "{v:?}");
+    assert!(v.missed > 0, "{v:?}");
+    // Free pacing: no media time.
+    r.pump.free();
+    assert_eq!(r.pump.processor.starts.last(), Some(&None));
 }

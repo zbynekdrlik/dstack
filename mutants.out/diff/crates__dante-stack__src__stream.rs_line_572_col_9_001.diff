@@ -1,0 +1,46 @@
+--- crates/dante-stack/src/stream.rs
++++ replace Pump<P>::run_processor -> Option<Box<dyn Any +Send>> with Some(Box::new(Default::default()))
+@@ -564,42 +564,17 @@
+ 
+     /// The processor on the block's buffers (the outputs zeroed first, a
+     /// pending discontinuity before it) inside `catch_unwind`. A panic
+     /// zeroes the outputs and is returned; from then on the processor is
+     /// never called again and the outputs stay zero.
+     /// The block carries its media `start` ([`Block::start`]; `None` while
+     /// free pacing).
+     fn run_processor(&mut self, start: Option<u64>) -> Option<Box<dyn Any + Send>> {
+-        self.output.fill(0.0);
+-        if self.faulted {
+-            return None;
+-        }
+-        let discontinuity = std::mem::take(&mut self.discontinuity);
+-        let Pump {
+-            processor,
+-            input,
+-            output,
+-            frames,
+-            ..
+-        } = self;
+-        let caught = catch_unwind(AssertUnwindSafe(|| {
+-            if discontinuity {
+-                processor.discontinuity();
+-            }
+-            let block = Block::new(*frames, input, output);
+-            processor.process(&mut match start {
+-                Some(at) => block.at(at),
+-                None => block,
+-            });
+-        }));
+-        let payload = caught.err()?;
+-        self.output.fill(0.0);
+-        self.faulted = true;
+-        Some(payload)
++        Some(Box::new(Default::default())) /* ~ changed by cargo-mutants ~ */
+     }
+ }
+ 
+ /// The deadline of the free block after one due at `deadline`, at `now`: a
+ /// period later; more than [`FREE_RESYNC_BLOCKS`] periods behind it, `now`
+ /// (no burst; NullRt's rule).
+ pub fn free_deadline(deadline: Instant, now: Instant, period: Duration) -> Instant {
+     let next = deadline + period;

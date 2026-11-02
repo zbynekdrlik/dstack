@@ -1,269 +1,179 @@
 [
   {
     "package": "dante-stack",
-    "file": "crates/dante-stack/src/media/rx.rs",
+    "file": "crates/dante-stack/src/stream.rs",
     "function": {
-      "function_name": "RxShared::playout",
-      "return_type": "-> Option<u64>",
+      "function_name": "Pump<P>::run_processor",
+      "return_type": "-> Option<Box<dyn Any +Send>>",
       "span": {
         "start": {
-          "line": 405,
+          "line": 565,
           "column": 5
         },
         "end": {
-          "line": 409,
+          "line": 598,
           "column": 6
         }
       }
     },
     "span": {
       "start": {
-        "line": 408,
-        "column": 66
+        "line": 572,
+        "column": 9
       },
       "end": {
-        "line": 408,
-        "column": 67
+        "line": 597,
+        "column": 22
       }
     },
-    "replacement": "==",
-    "genre": "BinaryOperator"
+    "replacement": "None",
+    "genre": "FnValue"
   },
   {
     "package": "dante-stack",
     "file": "crates/dante-stack/src/stream.rs",
     "function": {
-      "function_name": "PumpStats::retimed",
+      "function_name": "Pump<P>::block",
       "return_type": "",
       "span": {
         "start": {
-          "line": 312,
+          "line": 510,
           "column": 5
         },
         "end": {
-          "line": 317,
+          "line": 542,
           "column": 6
         }
       }
     },
     "span": {
       "start": {
-        "line": 315,
+        "line": 516,
         "column": 9
       },
       "end": {
-        "line": 316,
-        "column": 63
+        "line": 541,
+        "column": 34
       }
     },
     "replacement": "()",
     "genre": "FnValue"
   },
   {
-    "package": "dante-stack",
-    "file": "crates/dante-stack/src/media/rx.rs",
+    "package": "dante-audio-io",
+    "file": "crates/dante-audio-io/src/lib.rs",
     "function": {
-      "function_name": "RxShared::new_at",
-      "return_type": "-> io::Result<Self>",
-      "span": {
-        "start": {
-          "line": 311,
-          "column": 5
-        },
-        "end": {
-          "line": 352,
-          "column": 6
-        }
-      }
-    },
-    "span": {
-      "start": {
-        "line": 320,
-        "column": 9
-      },
-      "end": {
-        "line": 351,
-        "column": 11
-      }
-    },
-    "replacement": "Ok(Default::default())",
-    "genre": "FnValue"
-  },
-  {
-    "package": "dante-stack",
-    "file": "crates/dante-stack/src/media/rx.rs",
-    "function": {
-      "function_name": "RxShared::playout",
+      "function_name": "Block<'a>::start",
       "return_type": "-> Option<u64>",
       "span": {
         "start": {
-          "line": 405,
+          "line": 51,
           "column": 5
         },
         "end": {
-          "line": 409,
+          "line": 58,
           "column": 6
         }
       }
     },
     "span": {
       "start": {
-        "line": 408,
-        "column": 66
-      },
-      "end": {
-        "line": 408,
-        "column": 67
-      }
-    },
-    "replacement": "<",
-    "genre": "BinaryOperator"
-  },
-  {
-    "package": "dante-stack",
-    "file": "crates/dante-stack/src/media/rx.rs",
-    "function": {
-      "function_name": "RxShared::set_device_latency",
-      "return_type": "",
-      "span": {
-        "start": {
-          "line": 396,
-          "column": 5
-        },
-        "end": {
-          "line": 403,
-          "column": 6
-        }
-      }
-    },
-    "span": {
-      "start": {
-        "line": 399,
+        "line": 57,
         "column": 9
       },
       "end": {
-        "line": 402,
-        "column": 11
+        "line": 57,
+        "column": 19
       }
     },
-    "replacement": "()",
-    "genre": "FnValue"
-  },
-  {
-    "package": "dante-stack",
-    "file": "crates/dante-stack/src/media/rx.rs",
-    "function": {
-      "function_name": "RxShared::playout",
-      "return_type": "-> Option<u64>",
-      "span": {
-        "start": {
-          "line": 405,
-          "column": 5
-        },
-        "end": {
-          "line": 409,
-          "column": 6
-        }
-      }
-    },
-    "span": {
-      "start": {
-        "line": 408,
-        "column": 9
-      },
-      "end": {
-        "line": 408,
-        "column": 70
-      }
-    },
-    "replacement": "Some(1)",
+    "replacement": "None",
     "genre": "FnValue"
   },
   {
     "package": "dante-stack",
     "file": "crates/dante-stack/src/stream.rs",
     "function": {
-      "function_name": "Pump<P>::media",
-      "return_type": "-> u64",
+      "function_name": "Pump<P>::run_processor",
+      "return_type": "-> Option<Box<dyn Any +Send>>",
       "span": {
         "start": {
-          "line": 448,
+          "line": 565,
           "column": 5
         },
         "end": {
-          "line": 496,
+          "line": 598,
           "column": 6
         }
       }
     },
     "span": {
       "start": {
-        "line": 458,
-        "column": 24
-      },
-      "end": {
-        "line": 458,
-        "column": 26
-      }
-    },
-    "replacement": "==",
-    "genre": "BinaryOperator"
-  },
-  {
-    "package": "dante-stack",
-    "file": "crates/dante-stack/src/stream.rs",
-    "function": {
-      "function_name": "Pump<P>::media",
-      "return_type": "-> u64",
-      "span": {
-        "start": {
-          "line": 448,
-          "column": 5
-        },
-        "end": {
-          "line": 496,
-          "column": 6
-        }
-      }
-    },
-    "span": {
-      "start": {
-        "line": 458,
-        "column": 13
-      },
-      "end": {
-        "line": 458,
-        "column": 15
-      }
-    },
-    "replacement": "||",
-    "genre": "BinaryOperator"
-  },
-  {
-    "package": "dante-stack",
-    "file": "crates/dante-stack/src/media/rx.rs",
-    "function": {
-      "function_name": "RxShared::playout",
-      "return_type": "-> Option<u64>",
-      "span": {
-        "start": {
-          "line": 405,
-          "column": 5
-        },
-        "end": {
-          "line": 409,
-          "column": 6
-        }
-      }
-    },
-    "span": {
-      "start": {
-        "line": 408,
+        "line": 572,
         "column": 9
       },
       "end": {
-        "line": 408,
-        "column": 70
+        "line": 597,
+        "column": 22
+      }
+    },
+    "replacement": "Some(Box::new(Default::default()))",
+    "genre": "FnValue"
+  },
+  {
+    "package": "dante-audio-io",
+    "file": "crates/dante-audio-io/src/lib.rs",
+    "function": {
+      "function_name": "Block<'a>::at",
+      "return_type": "-> Self",
+      "span": {
+        "start": {
+          "line": 43,
+          "column": 5
+        },
+        "end": {
+          "line": 49,
+          "column": 6
+        }
+      }
+    },
+    "span": {
+      "start": {
+        "line": 45,
+        "column": 9
+      },
+      "end": {
+        "line": 48,
+        "column": 10
+      }
+    },
+    "replacement": "Default::default()",
+    "genre": "FnValue"
+  },
+  {
+    "package": "dante-audio-io",
+    "file": "crates/dante-audio-io/src/lib.rs",
+    "function": {
+      "function_name": "Block<'a>::start",
+      "return_type": "-> Option<u64>",
+      "span": {
+        "start": {
+          "line": 51,
+          "column": 5
+        },
+        "end": {
+          "line": 58,
+          "column": 6
+        }
+      }
+    },
+    "span": {
+      "start": {
+        "line": 57,
+        "column": 9
+      },
+      "end": {
+        "line": 57,
+        "column": 19
       }
     },
     "replacement": "Some(0)",
@@ -273,180 +183,60 @@
     "package": "dante-stack",
     "file": "crates/dante-stack/src/stream.rs",
     "function": {
-      "function_name": "Pump<P>::media",
-      "return_type": "-> u64",
-      "span": {
-        "start": {
-          "line": 448,
-          "column": 5
-        },
-        "end": {
-          "line": 496,
-          "column": 6
-        }
-      }
-    },
-    "span": {
-      "start": {
-        "line": 454,
-        "column": 9
-      },
-      "end": {
-        "line": 495,
-        "column": 13
-      }
-    },
-    "replacement": "1",
-    "genre": "FnValue"
-  },
-  {
-    "package": "dante-stack",
-    "file": "crates/dante-stack/src/stream.rs",
-    "function": {
-      "function_name": "Pump<P>::media",
-      "return_type": "-> u64",
-      "span": {
-        "start": {
-          "line": 448,
-          "column": 5
-        },
-        "end": {
-          "line": 496,
-          "column": 6
-        }
-      }
-    },
-    "span": {
-      "start": {
-        "line": 454,
-        "column": 9
-      },
-      "end": {
-        "line": 495,
-        "column": 13
-      }
-    },
-    "replacement": "0",
-    "genre": "FnValue"
-  },
-  {
-    "package": "dante-stack",
-    "file": "crates/dante-stack/src/stream.rs",
-    "function": {
-      "function_name": "PumpStats::view",
-      "return_type": "-> PumpView",
-      "span": {
-        "start": {
-          "line": 365,
-          "column": 5
-        },
-        "end": {
-          "line": 378,
-          "column": 6
-        }
-      }
-    },
-    "span": {
-      "start": {
-        "line": 367,
-        "column": 9
-      },
-      "end": {
-        "line": 377,
-        "column": 10
-      }
-    },
-    "replacement": "Default::default()",
-    "genre": "FnValue"
-  },
-  {
-    "package": "dante-stack",
-    "file": "crates/dante-stack/src/daemon/media.rs",
-    "function": {
-      "function_name": "Media::publish",
+      "function_name": "Pump<P>::free",
       "return_type": "",
       "span": {
         "start": {
-          "line": 191,
+          "line": 498,
           "column": 5
         },
         "end": {
-          "line": 195,
+          "line": 508,
           "column": 6
         }
       }
     },
     "span": {
       "start": {
-        "line": 193,
+        "line": 502,
         "column": 9
       },
       "end": {
-        "line": 194,
-        "column": 52
+        "line": 507,
+        "column": 34
       }
     },
     "replacement": "()",
     "genre": "FnValue"
   },
   {
-    "package": "dante-stack",
-    "file": "crates/dante-stack/src/media/rx.rs",
+    "package": "dante-audio-io",
+    "file": "crates/dante-audio-io/src/lib.rs",
     "function": {
-      "function_name": "RxShared::playout",
+      "function_name": "Block<'a>::start",
       "return_type": "-> Option<u64>",
       "span": {
         "start": {
-          "line": 405,
+          "line": 51,
           "column": 5
         },
         "end": {
-          "line": 409,
+          "line": 58,
           "column": 6
         }
       }
     },
     "span": {
       "start": {
-        "line": 408,
-        "column": 66
-      },
-      "end": {
-        "line": 408,
-        "column": 67
-      }
-    },
-    "replacement": ">=",
-    "genre": "BinaryOperator"
-  },
-  {
-    "package": "dante-stack",
-    "file": "crates/dante-stack/src/media/rx.rs",
-    "function": {
-      "function_name": "RxShared::playout",
-      "return_type": "-> Option<u64>",
-      "span": {
-        "start": {
-          "line": 405,
-          "column": 5
-        },
-        "end": {
-          "line": 409,
-          "column": 6
-        }
-      }
-    },
-    "span": {
-      "start": {
-        "line": 408,
+        "line": 57,
         "column": 9
       },
       "end": {
-        "line": 408,
-        "column": 70
+        "line": 57,
+        "column": 19
       }
     },
-    "replacement": "None",
+    "replacement": "Some(1)",
     "genre": "FnValue"
   }
 ]
