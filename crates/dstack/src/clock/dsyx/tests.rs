@@ -368,5 +368,4 @@ fn a_dsync_1_26_reply_names_the_master_after_the_extension() {
     // Exactly the master's end is enough; one byte short is no master.
     assert_eq!(parse(&bytes[..MASTER_END], 7).unwrap().master, master);
     assert_eq!(parse(&bytes[..MASTER_END - 1], 7).unwrap().master, [0; 6]);
-    assert!(REPLY_MAX >= 120);
 }

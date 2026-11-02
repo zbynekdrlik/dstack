@@ -83,6 +83,7 @@ pub const MASTER_AT: usize = 112;
 pub const MASTER_END: usize = MASTER_AT + 6;
 /// A buffer every reply fits (dsync writes 120 bytes).
 pub const REPLY_MAX: usize = 256;
+const _: () = assert!(REPLY_MAX >= MASTER_END + 2);
 
 const REQUEST_MAGIC: [u8; 4] = *b"DSYX";
 const REPLY_MAGIC: [u8; 4] = *b"DSYR";
