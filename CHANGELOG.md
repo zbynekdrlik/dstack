@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.16 (2026-11-02)
+
+- New (dstack #1, dasio#1): the NIC check at start (Windows) reads the Dante NIC's driver.
+  - On the FOH PC, the Realtek drivers `10.79.20.1003` and `10.72.524.2024` bring a 20–30 ms receive DPC about every 100 s: late packets at receivers, failed sends. `10.39.212.2020` is clean.
+  - A measured-bad Realtek driver gets a warning naming the good one. Another Realtek version gets an info line saying it was never measured (two points, no range is called bad). Other vendors get no line.
+  - New: `lso::{driver, Driver, REALTEK_BAD, REALTEK_GOOD}`, `lso::check_driver` (Windows).
+- Docs: `docs/windows-box.md` lists the driver.
+
 ## 0.5.15 (2026-11-02)
 
 - Fix (dstack #1, dasio#1): our mDNS daemon opens no IPv6 socket.

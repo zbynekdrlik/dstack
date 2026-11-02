@@ -9,6 +9,10 @@
 //! the network class key, by the adapter's GUID) and warns when either is
 //! on. It never changes the NIC: that is the PC owner's step (the link
 //! resets when applied).
+//!
+//! It also reads the adapter's driver (`ProviderName`, `DriverVersion`)
+//! and warns on a Realtek driver measured with a long receive DPC
+//! ([`REALTEK_BAD`]); one never measured gets an info line ([`driver`]).
 
 /// What the start line says about the NIC's large send offload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,12 +36,45 @@ pub fn verdict(v2: Option<&str>, v1: Option<&str>) -> Verdict {
     }
 }
 
+/// Realtek driver versions (as `Get-NetAdapter` and the registry's
+/// `DriverVersion` show them) measured with a 20 to 30 ms receive DPC that
+/// held every send completion about every 96 to 130 s: late packets at a
+/// receiver and failed sends (dasio#1, the FOH PC, 2.11.2026; RTL8125).
+pub const REALTEK_BAD: [&str; 2] = ["10.79.20.1003", "10.72.524.2024"];
+/// Realtek driver versions measured clean on the same PCs.
+pub const REALTEK_GOOD: [&str; 1] = ["10.39.212.2020"];
+
+/// What the start line says about the NIC's driver.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Driver {
+    /// A Realtek driver in [`REALTEK_BAD`].
+    KnownBad,
+    /// A Realtek driver in [`REALTEK_GOOD`].
+    KnownGood,
+    /// Another Realtek driver: never measured, neither good nor bad.
+    Unverified,
+    /// Not a Realtek driver, or not read.
+    Other,
+}
+
+/// The verdict on an adapter's driver from its `ProviderName` and
+/// `DriverVersion` (the network class key's values).
+pub fn driver(provider: Option<&str>, version: Option<&str>) -> Driver {
+    let realtek = provider.is_some_and(|p| p.to_ascii_lowercase().contains("realtek"));
+    match version.map(str::trim) {
+        Some(v) if realtek && REALTEK_BAD.contains(&v) => Driver::KnownBad,
+        Some(v) if realtek && REALTEK_GOOD.contains(&v) => Driver::KnownGood,
+        Some(_) if realtek => Driver::Unverified,
+        _ => Driver::Other,
+    }
+}
+
 #[cfg(windows)]
 mod windows;
 #[cfg(all(windows, test))]
 use windows::sys;
 #[cfg(windows)]
-pub use windows::{check, report};
+pub use windows::{check, check_driver, report};
 
 #[cfg(test)]
 mod tests;
