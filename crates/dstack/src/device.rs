@@ -175,8 +175,25 @@ pub struct DeviceConfig {
     /// the OS chooses when left out.
     #[serde(default)]
     pub rx_port_base: Option<u16>,
+    /// RX subscriptions the app declares (`[[subscribe]]`, intercom#5):
+    /// at start, an RX channel the state file holds no subscription for
+    /// takes its declared one ([`DeviceState::declare`]). One Dante
+    /// Controller set is saved in the state file and wins. Each `rx` a
+    /// channel number (from 1) at most once, the names Dante's.
+    #[serde(default)]
+    pub subscribe: Vec<Declared>,
     /// Where the state ([`DeviceState`]) is kept.
     pub state_file: PathBuf,
+}
+
+/// A declared RX subscription ([`DeviceConfig::subscribe`]): RX channel
+/// `rx` (from 1) receives `tx_channel` of `tx_device`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Declared {
+    pub rx: usize,
+    pub tx_channel: String,
+    pub tx_device: String,
 }
 
 /// A device's timing profile ([`DeviceConfig::timing`]).
@@ -365,6 +382,29 @@ impl DeviceConfig {
                     "work_margin: at least {least} samples (2 ms) under timing = \"normal\""
                 ));
             }
+        }
+        let mut seen = Vec::new();
+        for d in &self.subscribe {
+            let sub = Subscription {
+                tx_channel: d.tx_channel.clone(),
+                tx_device: d.tx_device.clone(),
+            };
+            if d.rx == 0 || d.rx > self.rx.len() {
+                out.push(format!(
+                    "subscribe: rx {} is not an RX channel (1 to {})",
+                    d.rx,
+                    self.rx.len()
+                ));
+            } else if seen.contains(&d.rx) {
+                out.push(format!("subscribe: rx {} twice", d.rx));
+            }
+            if !sub.is_valid() {
+                out.push(format!(
+                    "subscribe: rx {}: a valid Dante channel and device name",
+                    d.rx
+                ));
+            }
+            seen.push(d.rx);
         }
         for (device, &samples) in &self.playout_override {
             if !valid_device_name(device) || !(1..=u32::from(u16::MAX)).contains(&samples) {
@@ -647,6 +687,36 @@ impl DeviceState {
         }
     }
 
+    /// Gives each RX channel `cfg` declares a subscription for
+    /// ([`DeviceConfig::subscribe`]) that one, unless it holds one already
+    /// (Dante Controller's, from the state file). Not saved: the config
+    /// keeps declaring it. Returns the RX channels (from 0) it set.
+    pub fn declare(&mut self, cfg: &DeviceConfig) -> Vec<usize> {
+        let mut set = Vec::new();
+        for d in &cfg.subscribe {
+            let Some(rx) = d.rx.checked_sub(1).filter(|&rx| rx < self.rx.len()) else {
+                continue;
+            };
+            if self.subscriptions.len() < self.rx.len() {
+                self.subscriptions.resize(self.rx.len(), None);
+            }
+            if self.subscriptions[rx].is_none() {
+                self.subscriptions[rx] = Some(Subscription {
+                    tx_channel: d.tx_channel.clone(),
+                    tx_device: d.tx_device.clone(),
+                });
+                set.push(rx);
+            }
+        }
+        if !set.is_empty() {
+            info!(
+                channels = set.len(),
+                "RX subscriptions taken from the config"
+            );
+        }
+        set
+    }
+
     /// The latency the device runs with: the Controller's while the config
     /// still says what it said when that was set, else the config's (the
     /// Controller's value is dropped then; `true` when it was).
@@ -766,7 +836,11 @@ impl DeviceState {
         let path = &cfg.state_file;
         let text = match fs::read_to_string(path) {
             Ok(text) => text,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Self::from_config(cfg)),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                let mut state = Self::from_config(cfg);
+                state.declare(cfg);
+                return Ok(state);
+            }
             Err(e) => return Err(io::Error::new(e.kind(), format!("{}: {e}", path.display()))),
         };
         let invalid = |why: String| {
@@ -794,6 +868,7 @@ impl DeviceState {
         if renamed || refit.is_some() {
             state.save(path)?;
         }
+        state.declare(cfg);
         if let Some(refit) = refit {
             info!(
                 rx_before = refit.rx.0,

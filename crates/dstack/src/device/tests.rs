@@ -1538,3 +1538,112 @@ fn the_rx_port_base_is_read_and_bounded() {
         assert!(DeviceConfig::from_toml(&text).is_ok(), "{ok}");
     }
 }
+
+fn declared(rx: usize, tx_channel: &str, tx_device: &str) -> Declared {
+    Declared {
+        rx,
+        tx_channel: tx_channel.to_string(),
+        tx_device: tx_device.to_string(),
+    }
+}
+
+/// An app declares its RX subscriptions (intercom#5): a fresh state takes
+/// them, a channel with a saved subscription (Dante Controller's) keeps
+/// it, and the declared ones are not written into the file.
+#[test]
+fn declared_subscriptions_fill_only_channels_the_state_does_not_hold() {
+    let text = format!(
+        "{TEST_DEVICE}\n[[subscribe]]\nrx = 1\ntx_channel = \"Master\"\ntx_device = \"peer-device\"\n\
+         [[subscribe]]\nrx = 3\ntx_channel = \"Click\"\ntx_device = \"peer-device\"\n"
+    );
+    let parsed = DeviceConfig::from_toml(&text).unwrap();
+    assert_eq!(
+        parsed.subscribe,
+        [
+            declared(1, "Master", "peer-device"),
+            declared(3, "Click", "peer-device")
+        ]
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = DeviceConfig {
+        state_file: dir.path().join("state.toml"),
+        ..parsed
+    };
+    // No state file: both declared, nothing written.
+    let fresh = DeviceState::load_or_default(&cfg).unwrap();
+    assert_eq!(fresh.subscription(0), Some(&sub("Master", "peer-device")));
+    assert_eq!(fresh.subscription(2), Some(&sub("Click", "peer-device")));
+    assert_eq!(fresh.subscription(1), None);
+    assert_eq!(fresh.subscriptions.len(), cfg.rx.len());
+    assert!(!cfg.state_file.exists());
+    // Dante Controller moved RX 1 elsewhere; the file holds only that.
+    let mut saved = DeviceState::from_config(&cfg);
+    assert!(saved.set_subscription(&cfg, 0, Some(sub("TX 9", "other-device"))));
+    saved.save(&cfg.state_file).unwrap();
+    let before = fs::read_to_string(&cfg.state_file).unwrap();
+    let back = DeviceState::load_or_default(&cfg).unwrap();
+    assert_eq!(back.subscription(0), Some(&sub("TX 9", "other-device")));
+    assert_eq!(back.subscription(2), Some(&sub("Click", "peer-device")));
+    assert_eq!(fs::read_to_string(&cfg.state_file).unwrap(), before);
+    // The device starts with them.
+    let device = Device::load(cfg.clone()).unwrap();
+    assert_eq!(device.state, back);
+}
+
+#[test]
+fn declare_reports_the_channels_it_set_and_sets_nothing_held() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = DeviceConfig {
+        subscribe: vec![declared(2, "Master", "peer-device")],
+        ..config_in(dir.path())
+    };
+    let mut state = DeviceState::from_config(&cfg);
+    assert_eq!(state.declare(&cfg), [1]);
+    assert_eq!(state.declare(&cfg), Vec::<usize>::new());
+    assert_eq!(state.subscription(1), Some(&sub("Master", "peer-device")));
+}
+
+#[test]
+fn a_declared_subscription_is_checked_with_the_config() {
+    let base = config();
+    let last = base.rx.len();
+    for (subs, want) in [
+        (
+            vec![declared(0, "Master", "peer-device")],
+            format!("subscribe: rx 0 is not an RX channel (1 to {last})"),
+        ),
+        (
+            vec![declared(last + 1, "Master", "peer-device")],
+            format!(
+                "subscribe: rx {} is not an RX channel (1 to {last})",
+                last + 1
+            ),
+        ),
+        (
+            vec![
+                declared(2, "Master", "peer-device"),
+                declared(2, "Click", "peer-device"),
+            ],
+            "subscribe: rx 2 twice".to_string(),
+        ),
+        (
+            vec![declared(2, "Mas=ter", "peer-device")],
+            "subscribe: rx 2: a valid Dante channel and device name".to_string(),
+        ),
+        (
+            vec![declared(2, "Master", "-bad")],
+            "subscribe: rx 2: a valid Dante channel and device name".to_string(),
+        ),
+    ] {
+        let cfg = DeviceConfig {
+            subscribe: subs,
+            ..base.clone()
+        };
+        assert_eq!(cfg.problems(), [want]);
+    }
+    let ok = DeviceConfig {
+        subscribe: vec![declared(last, "Master", "peer-device")],
+        ..base
+    };
+    assert!(ok.problems().is_empty());
+}
