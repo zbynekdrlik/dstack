@@ -13,6 +13,7 @@ fn reading(date: Option<DateState>) -> Reading {
         settled: true,
         mode: 3,
         freq_ppb: -750,
+        grandmaster: [0; 6],
         date,
     }
 }

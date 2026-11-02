@@ -184,6 +184,9 @@ pub struct ClockStats {
     in_holdover: AtomicBool,
     /// The TEST system clock, no poller (`host::ClockSource::System`).
     system: AtomicBool,
+    /// The grandmaster's UUID as dsync's last reply named it (big-endian
+    /// in the low 48 bits; 0 for none).
+    grandmaster: AtomicU64,
 }
 
 /// [`ClockStats`] read at one moment.
@@ -207,6 +210,21 @@ impl ClockStats {
         if let Event::ReAnchored { .. } = ev {
             self.re_anchors.fetch_add(1, Ordering::Relaxed);
         }
+    }
+
+    /// The grandmaster dsync's last reply named (all zeros: none).
+    pub fn set_grandmaster(&self, uuid: [u8; 6]) {
+        let mut w = [0u8; 8];
+        w[2..].copy_from_slice(&uuid);
+        self.grandmaster
+            .store(u64::from_be_bytes(w), Ordering::Relaxed);
+    }
+
+    /// The grandmaster's UUID; `None` before one was named.
+    pub fn grandmaster(&self) -> Option<[u8; 6]> {
+        let w = self.grandmaster.load(Ordering::Relaxed).to_be_bytes();
+        let uuid: [u8; 6] = w[2..].try_into().unwrap_or([0; 6]);
+        (uuid != [0; 6]).then_some(uuid)
     }
 
     /// The clock is the TEST system clock: nothing polls dsync.
@@ -540,6 +558,9 @@ mod os {
             tick.tick().await;
             let p = poller.once(&clock, &freq).await;
             stats.record(p.event);
+            if let Some(r) = &p.reading {
+                stats.set_grandmaster(r.grandmaster);
+            }
             log_event(p.event, last, p.sample, &mut waiting, clock.epoch());
             last = p.event;
         }

@@ -185,6 +185,7 @@ impl Media {
             rx: Arc::clone(&self.rx),
             manager: Arc::clone(&self.manager),
             levels: Arc::clone(&self.levels),
+            stats: Arc::clone(&self.clock_stats),
         }
     }
 

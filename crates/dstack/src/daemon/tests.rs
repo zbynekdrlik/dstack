@@ -390,6 +390,7 @@ fn reading(locked: bool, mode: u8, freq_ppb: i32) -> crate::clock::Reading {
         settled: true,
         mode,
         freq_ppb,
+        grandmaster: [0; 6],
         date: None,
     }
 }

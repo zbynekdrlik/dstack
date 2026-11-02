@@ -23,10 +23,10 @@ use tracing::{debug, info, warn};
 
 use super::limit::{self, Limit};
 use super::{
-    Beat, Changes, HEARTBEAT_EVERY, HEARTBEAT_GROUP, HEARTBEAT_PORT, INFO_GROUP, INFO_PORT,
-    Multicaster, RECV_BUFFER, REQUEST_PORT, Records, peak_byte, share,
+    Beat, Changes, Follower, HEARTBEAT_EVERY, HEARTBEAT_GROUP, HEARTBEAT_PORT, INFO_GROUP,
+    INFO_PORT, Multicaster, RECV_BUFFER, REQUEST_PORT, Records, peak_byte, share,
 };
-use crate::clock::PtpClock;
+use crate::clock::{ClockStats, PtpClock};
 use crate::ctl::{Requests, info_op};
 use crate::media::rx::{MAX_FLOWS, RxShared};
 use crate::media::tx::TxShared;
@@ -50,6 +50,8 @@ pub struct Sources {
     /// Where each beat leaves its channels' levels for the meter frames
     /// ([`crate::cmc`]): the peaks are taken once, here.
     pub levels: Arc<Levels>,
+    /// The poller's counts and the grandmaster dsync named.
+    pub stats: Arc<ClockStats>,
 }
 
 /// The channels' levels as meter bytes ([`crate::meter::level_of_peak`]),
@@ -79,6 +81,23 @@ impl Beat for Sources {
         self.levels.set(&records.tx_peaks, &records.rx_peaks);
         Some(records)
     }
+
+    fn clock(&self) -> Option<Follower> {
+        follower_of(
+            self.clock.now_ns().is_some(),
+            self.stats.grandmaster(),
+            self.freq.load(Ordering::Relaxed),
+        )
+    }
+}
+
+/// What the clock stats state: a follower of `grandmaster` at `freq_ppb`,
+/// only while the media clock is `ready` and a grandmaster is known.
+pub fn follower_of(ready: bool, grandmaster: Option<[u8; 6]>, freq_ppb: i32) -> Option<Follower> {
+    Some(Follower {
+        grandmaster: grandmaster.filter(|_| ready)?,
+        freq_ppb,
+    })
 }
 
 impl Sources {
@@ -195,6 +214,7 @@ pub async fn serve_info_with(
             got = sock.recv_from(&mut buf) => {
                 let (n, peer) = got?;
                 requests.received(REQUEST_PORT, peer.ip(), info_op(&buf[..n]));
+                mc.set_clock(beat.clock());
                 if let Some(packet) = mc.answer_within(&mut bound, Instant::now(), &buf[..n]) {
                     send(&sock, &packet, to.info).await;
                 }
@@ -304,6 +324,7 @@ pub async fn serve_member(
                 match share::Msg::decode(&buf[..n]) {
                     Some(share::Msg::Request(d)) if from == manager => {
                         requests.received(REQUEST_PORT, from.ip(), info_op(&d));
+                        mc.set_clock(beat.clock());
                         mc.answer_within(&mut bound, Instant::now(), &d).map(|p| hand(share::Dest::Info, p))
                     }
                     _ => None,
