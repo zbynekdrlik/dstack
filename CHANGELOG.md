@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.5.0 (2026-11-02)
+
+- **Breaking, the rename (#68, owner 2.11.2026: no "dante" in our names).** Port it by search and replace; nothing else changes.
+  - In `Cargo.toml`: `dante-stack = { git = "https://github.com/zbynekdrlik/dstack", tag = "v0.5.0" }` becomes `dstack = { git = …, tag = "v0.5.0" }`, and `dante-audio-io` becomes `dstack-audio-io`.
+  - In Rust: `dante_stack::` becomes `dstack::`, and `dante_audio_io::` becomes `dstack_audio_io::`.
+  - The binary `dante-stack-dev` is `dstack-dev`. The release assets are `dstack-dev-<tag>-<suffix>`. `daemon::NAME` and the version line say `dstack-dev`.
+  - The rtsan probe's environment variable `DANTE_RTSAN_PROBE` is `DSTACK_RTSAN_PROBE`.
+  - Thread names: `dante-tx`, `dante-rx`, `dante-engine`, `dante-meter`, `dante-device`, `dante-arc-read`, `dante-discover-*` and `dante-mdns-*` are now `dstack-…`. Anything that pins or watches a thread by name moves with them.
+  - The test config is `config/test-device.toml`.
+  - Unchanged in this release: the control socket's default `/run/iem-dante/control.sock`, the state path a config names, and every protocol field (`dante_name` in the status is the Dante channel name).
+
 ## 0.4.39 (2026-11-02)
 
 - Internal: `info.rs` is split into the pure packet builder (`info`) and the socket loops and record source (`info/server.rs`). Every public path stays: `info::{Sources, Levels, Multicast, serve_info, serve_info_with, serve_member, serve_shared}` are re-exported from `info`. No behavior change; nothing for a consumer to port.

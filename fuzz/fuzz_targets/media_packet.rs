@@ -3,7 +3,7 @@
 //! refusals) and once mapped onto what a flow can carry (the frame loop).
 #![no_main]
 
-use dante_stack::media::packet;
+use dstack::media::packet;
 use libfuzzer_sys::fuzz_target;
 
 /// The sample widths a flow carries, bytes.

@@ -5,12 +5,12 @@
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::sync::LazyLock;
 
-use dante_stack::device::DeviceConfig;
-use dante_stack::flows::server;
-use dante_stack::media::tx::TxTable;
+use dstack::device::DeviceConfig;
+use dstack::flows::server;
+use dstack::media::tx::TxTable;
 use libfuzzer_sys::fuzz_target;
 
-const DEVICE: &str = include_str!("../../config/test-dante-device.toml");
+const DEVICE: &str = include_str!("../../config/test-device.toml");
 
 /// Parsed once; the state each input changes is built fresh for it.
 static CFG: LazyLock<DeviceConfig> =

@@ -4,11 +4,11 @@
 use std::net::Ipv4Addr;
 use std::sync::LazyLock;
 
-use dante_stack::device::DeviceConfig;
-use dante_stack::info::{Identity, Multicaster, NetInfo};
+use dstack::device::DeviceConfig;
+use dstack::info::{Identity, Multicaster, NetInfo};
 use libfuzzer_sys::fuzz_target;
 
-const DEVICE: &str = include_str!("../../config/test-dante-device.toml");
+const DEVICE: &str = include_str!("../../config/test-device.toml");
 
 /// Parsed once; the state each input changes is built fresh for it.
 static CFG: LazyLock<DeviceConfig> =

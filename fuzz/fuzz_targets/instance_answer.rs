@@ -3,7 +3,7 @@
 //! a wanted instance.
 #![no_main]
 
-use dante_stack::subscribe::instance::{Table, read};
+use dstack::subscribe::instance::{Table, read};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {

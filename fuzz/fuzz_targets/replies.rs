@@ -14,14 +14,14 @@ fuzz_target!(|data: &[u8]| {
     let seq = u16::from_be_bytes([head[0], head[1]]);
     let op1 = u16::from_be_bytes([head[2], head[3]]);
     let offset = u16::from_be_bytes([head[4], head[5]]);
-    let _ = dante_stack::arc::client::reply_to(d, seq, op1);
-    let _ = dante_stack::flows::client::reply_of(d, seq, op1);
-    let _ = dante_stack::flows::control::reply_handle(d);
-    let _ = dante_stack::wire::string_at(d, offset);
+    let _ = dstack::arc::client::reply_to(d, seq, op1);
+    let _ = dstack::flows::client::reply_of(d, seq, op1);
+    let _ = dstack::flows::control::reply_handle(d);
+    let _ = dstack::wire::string_at(d, offset);
     if let Some(own) = d.get(4..8) {
         let seq = u16::from_be_bytes([own[0], own[1]]);
         let op1 = u16::from_be_bytes([own[2], own[3]]);
-        let _ = dante_stack::arc::client::reply_to(d, seq, op1);
-        let _ = dante_stack::flows::client::reply_of(d, seq, op1);
+        let _ = dstack::arc::client::reply_to(d, seq, op1);
+        let _ = dstack::flows::client::reply_of(d, seq, op1);
     }
 });
