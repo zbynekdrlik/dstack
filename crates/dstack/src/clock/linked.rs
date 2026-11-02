@@ -70,7 +70,9 @@ pub fn choose(internal: Option<View>, service_ready: bool, was_locked: bool) -> 
 /// The epoch the media threads see: a change of source always changes the
 /// high half; the chosen clock's own re-anchors the low half.
 pub fn epoch_of(switches: u32, component: u32) -> u32 {
-    (switches << 16) | (component & 0xffff)
+    // `wrapping_add` of disjoint halves: an `|` would leave its `^` mutant
+    // equal (.claude/rules/tests.md).
+    (switches << 16).wrapping_add(component & 0xffff)
 }
 
 /// A started follower's clock and the value that keeps it running (both

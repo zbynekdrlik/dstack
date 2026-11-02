@@ -155,3 +155,19 @@ fn the_follower_starts_with_its_keeper_or_not_at_all() {
     let (internal, keep) = start_internal("lo");
     assert_eq!(internal.is_some(), keep.is_some());
 }
+
+/// Only a lock counts for the holdover rule: an alive follower that is
+/// anchored but never locked is not taken when the service goes away.
+#[test]
+fn a_follower_never_locked_is_not_taken_in_holdover() {
+    let fake = Arc::new(Fake(Mutex::new((Some(7), HOLDOVER))));
+    let service = Arc::new(MonoClock::new());
+    let linked = Linked::new(Some(Box::new(Arc::clone(&fake))), service, None);
+    assert_eq!(linked.tick(), Source::None);
+    assert_eq!(linked.now_ns(), None);
+    // Locked once, then in holdover: taken.
+    set(&fake, Some(7), ALIVE_LOCKED);
+    assert_eq!(linked.tick(), Source::Internal);
+    set(&fake, Some(7), HOLDOVER);
+    assert_eq!(linked.tick(), Source::Internal);
+}
