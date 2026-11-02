@@ -1761,3 +1761,12 @@ fn a_thread_s_priority_is_granted_normal_by_profile_or_refused() {
     assert_eq!(priority_outcome(false, false), Priority::Normal);
     assert_eq!(priority_outcome(false, true), Priority::Normal);
 }
+
+#[test]
+fn the_bytes_sent_are_every_slot_s_wire_bytes() {
+    let shared = shared_with(Vec::new());
+    assert_eq!(shared.bytes_sent(), 0);
+    count_send(&shared.lanes[0], &Ok(false), 100);
+    count_send(&shared.lanes[3], &Ok(false), 58);
+    assert_eq!(shared.bytes_sent(), 100 + 58 + 2 * WIRE_OVERHEAD);
+}

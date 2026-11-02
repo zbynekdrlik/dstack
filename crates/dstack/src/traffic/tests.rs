@@ -17,7 +17,17 @@ fn the_other_traffic_is_the_nic_s_bytes_less_ours_once_a_minute() {
     // An unread NIC: nothing, and the window holds.
     assert_eq!(w.look(180 * S, None, 3_000_500), None);
     // Ours above the NIC's (counters skewed): never below zero.
-    assert_eq!(w.look(180 * S, Some(7_002_100), 9_000_500), Some(0));
+    assert_eq!(
+        w.look(240 * S, Some(7_002_000), 3_000_500),
+        None,
+        "went back"
+    );
+    assert_eq!(
+        w.look(300 * S, Some(7_002_000), 3_000_500),
+        Some(0),
+        "unchanged"
+    );
+    assert_eq!(w.look(360 * S, Some(7_002_100), 9_000_500), Some(0));
 }
 
 #[test]
@@ -49,4 +59,28 @@ fn the_routed_nic_s_sent_bytes_are_read_and_grow() {
         after = nic_sent_bytes(*local.ip()).unwrap();
     }
     assert!(after >= before + 10_000, "{before} -> {after}");
+}
+
+#[test]
+fn over_100_kb_a_second_of_other_traffic_is_too_much() {
+    assert!(!too_much(0));
+    assert!(!too_much(OTHER_BYTES_PER_S));
+    assert!(too_much(OTHER_BYTES_PER_S + 1));
+}
+
+#[test]
+fn the_nic_is_the_interface_holding_the_address() {
+    let ifaces = vec![
+        ("lo".to_string(), std::net::IpAddr::V4(Ipv4Addr::LOCALHOST)),
+        (
+            "eth0".to_string(),
+            std::net::IpAddr::V4(Ipv4Addr::new(10, 0, 0, 10)),
+        ),
+    ];
+    assert_eq!(
+        name_of(Ipv4Addr::new(10, 0, 0, 10), &ifaces).as_deref(),
+        Some("eth0")
+    );
+    assert_eq!(name_of(Ipv4Addr::LOCALHOST, &ifaces).as_deref(), Some("lo"));
+    assert_eq!(name_of(Ipv4Addr::new(10, 0, 0, 11), &ifaces), None);
 }

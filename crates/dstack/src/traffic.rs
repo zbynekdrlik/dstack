@@ -60,7 +60,7 @@ impl TrafficWatch {
     /// rate over [`OTHER_BYTES_PER_S`] logged as a warning.
     pub fn watch(&mut self, now_ns: u64, ip: Ipv4Addr, tx: &TxShared) {
         if let Some(rate) = self.look(now_ns, nic_sent_bytes(ip), tx.bytes_sent())
-            && rate > OTHER_BYTES_PER_S
+            && too_much(rate)
         {
             warn!(
                 other_bytes_per_s = rate,
@@ -70,15 +70,29 @@ impl TrafficWatch {
     }
 }
 
+/// Whether other traffic at `rate` bytes per second is warned about.
+pub fn too_much(rate: u64) -> bool {
+    rate > OTHER_BYTES_PER_S
+}
+
+/// The name of the interface holding `ip` among `ifaces` (name, address).
+pub fn name_of(ip: Ipv4Addr, ifaces: &[(String, std::net::IpAddr)]) -> Option<String> {
+    ifaces
+        .iter()
+        .find(|(_, a)| *a == std::net::IpAddr::V4(ip))
+        .map(|(n, _)| n.clone())
+}
+
 /// The bytes the NIC holding `ip` has sent, its own counter; `None` when
 /// no interface holds `ip` or the counter cannot be read.
 #[cfg(target_os = "linux")]
 pub fn nic_sent_bytes(ip: Ipv4Addr) -> Option<u64> {
-    let name = if_addrs::get_if_addrs()
+    let ifaces: Vec<_> = if_addrs::get_if_addrs()
         .ok()?
         .into_iter()
-        .find(|i| i.ip() == std::net::IpAddr::V4(ip))?
-        .name;
+        .map(|i| (i.name.clone(), i.ip()))
+        .collect();
+    let name = name_of(ip, &ifaces)?;
     std::fs::read_to_string(format!("/sys/class/net/{name}/statistics/tx_bytes"))
         .ok()?
         .trim()
