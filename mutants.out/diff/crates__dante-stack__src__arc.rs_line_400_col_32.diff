@@ -1,0 +1,21 @@
+--- crates/dante-stack/src/arc.rs
++++ replace == with != in respond
+@@ -392,17 +392,17 @@
+ 
+ /// [`handle`], and a change saved to the state file before it is
+ /// answered: a rename or a subscription that cannot be saved is undone and
+ /// refused, so a restart never loses a change the device confirmed.
+ pub fn respond(device: &mut Device, live: &Live<'_>, req: &[u8]) -> ArcOutcome {
+     let before = device.state.clone();
+     let latency_before = device.cfg.latency_ns;
+     let outcome = match Header::parse(req) {
+-        Ok((h, body)) if h.op1 == op::SETTINGS_SET && h.op2 == 0 => set_latency(&h, body, device),
++        Ok((h, body)) if h.op1 != /* ~ changed by cargo-mutants ~ */ op::SETTINGS_SET && h.op2 == 0 => set_latency(&h, body, device),
+         _ => handle(&mut device.state, &device.cfg, live, req),
+     };
+     match outcome {
+         ArcOutcome::Changed(bytes, change) => match device.state.save(&device.cfg.state_file) {
+             Ok(()) => ArcOutcome::Changed(bytes, change),
+             Err(e) => {
+                 error!(error = %e, "a change could not be saved: refused and undone");
+                 device.state = before;

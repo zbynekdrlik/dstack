@@ -1,0 +1,238 @@
+
+*** crates/dante-stack/src/arc.rs:400:32: replace == with != in respond
+
+*** mutation diff:
+--- crates/dante-stack/src/arc.rs
++++ replace == with != in respond
+@@ -392,17 +392,17 @@
+ 
+ /// [`handle`], and a change saved to the state file before it is
+ /// answered: a rename or a subscription that cannot be saved is undone and
+ /// refused, so a restart never loses a change the device confirmed.
+ pub fn respond(device: &mut Device, live: &Live<'_>, req: &[u8]) -> ArcOutcome {
+     let before = device.state.clone();
+     let latency_before = device.cfg.latency_ns;
+     let outcome = match Header::parse(req) {
+-        Ok((h, body)) if h.op1 == op::SETTINGS_SET && h.op2 == 0 => set_latency(&h, body, device),
++        Ok((h, body)) if h.op1 != /* ~ changed by cargo-mutants ~ */ op::SETTINGS_SET && h.op2 == 0 => set_latency(&h, body, device),
+         _ => handle(&mut device.state, &device.cfg, live, req),
+     };
+     match outcome {
+         ArcOutcome::Changed(bytes, change) => match device.state.save(&device.cfg.state_file) {
+             Ok(()) => ArcOutcome::Changed(bytes, change),
+             Err(e) => {
+                 error!(error = %e, "a change could not be saved: refused and undone");
+                 device.state = before;
+
+
+*** /opt/rust/rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo nextest run --no-run --cargo-profile=mutants --verbose --package=dante-stack@0.4.36
+   Compiling dante-stack v0.4.36 (/tmp/cargo-mutants-dstack-ZeZigM.tmp/crates/dante-stack)
+    Finished `mutants` profile [unoptimized] target(s) in 2.66s
+
+*** result: Success
+
+*** /opt/rust/rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo nextest run --cargo-profile=mutants --verbose --package=dante-stack@0.4.36 --lib --test hot_path
+    Finished `mutants` profile [unoptimized] target(s) in 0.04s
+────────────
+ Nextest run ID c104e70b-7576-4c16-a2a5-3318fc4f08f4 with nextest profile: default
+    Starting 755 tests across 2 binaries
+       START [         ] (  1/755) dante-stack announce::responder::tests::a_query_for_nothing_of_ours_or_a_response_gets_no_reply
+             command: /tmp/cargo-mutants-dstack-ZeZigM.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact announce::responder::tests::a_query_for_nothing_of_ours_or_a_response_gets_no_reply --nocapture
+       START [         ] (  1/755) dante-stack announce::responder::tests::an_instance_and_a_host_query_get_exactly_what_they_ask
+             command: /tmp/cargo-mutants-dstack-ZeZigM.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact announce::responder::tests::an_instance_and_a_host_query_get_exactly_what_they_ask --nocapture
+       START [         ] (  1/755) dante-stack announce::responder::tests::a_service_type_query_gets_its_ptr_with_srv_txt_and_a_along
+             command: /tmp/cargo-mutants-dstack-ZeZigM.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact announce::responder::tests::a_service_type_query_gets_its_ptr_with_srv_txt_and_a_along --nocapture
+       START [         ] (  1/755) dante-stack announce::tests::a_failed_announcement_is_tried_again_and_a_bad_record_sends_nothing
+             command: /tmp/cargo-mutants-dstack-ZeZigM.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact announce::tests::a_failed_announcement_is_tried_again_and_a_bad_record_sends_nothing --nocapture
+       START [         ] (  1/755) dante-stack announce::tests::a_queue_that_stays_full_ends_the_announcement_after_its_tries
+             command: /tmp/cargo-mutants-dstack-ZeZigM.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact announce::tests::a_queue_that_stays_full_ends_the_announcement_after_its_tries --nocapture
+       START [         ] (  1/755) dante-stack announce::responder::tests::a_query_from_5353_is_answered_to_the_group_a_legacy_one_to_its_sender
+             command: /tmp/cargo-mutants-dstack-ZeZigM.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact announce::responder::tests::a_query_from_5353_is_answered_to_the_group_a_legacy_one_to_its_sender --nocapture
+       START [         ] (  1/755) dante-stack announce::tests::a_full_daemon_queue_delays_the_announcement_and_never_ends_it
+             command: /tmp/cargo-mutants-dstack-ZeZigM.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact announce::tests::a_full_daemon_queue_delays_the_announcement_and_never_ends_it --nocapture
+       START [         ] (  1/755) dante-stack announce::responder::tests::the_responder_answers_from_the_published_records_and_stops_when_dropped
+             command: /tmp/cargo-mutants-dstack-ZeZigM.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact announce::responder::tests::the_responder_answers_from_the_published_records_and_stops_when_dropped --nocapture
+       START [         ] (  1/755) dante-stack announce::tests::a_record_becomes_the_service_info_mdns_sd_sends
+             command: /tmp/cargo-mutants-dstack-ZeZigM.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact announce::tests::a_record_becomes_the_service_info_mdns_sd_sends --nocapture
+       START [         ] (  1/755) dante-stack announce::tests::a_real_daemon_takes_more_records_than_its_queue_holds
+             command: /tmp/cargo-mutants-dstack-ZeZigM.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact announce::tests::a_real_daemon_takes_more_records_than_its_queue_holds --nocapture
+       START [         ] (  1/755) dante-stack announce::tests::an_announcer_withdraws_the_old_records_first_and_repeats_nothing
+             command: /tmp/cargo-mutants-dstack-ZeZigM.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact announce::tests::an_announcer_withdraws_the_old_records_first_and_repeats_nothing --nocapture
+       START [         ] (  1/755) dante-stack announce::tests::a_rename_changes_the_chan_records
+             command: /tmp/cargo-mutants-dstack-ZeZigM.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact announce::tests::a_rename_changes_the_chan_records --nocapture
+       START [         ] (  1/755) dante-stack announce::tests::hex_is_lower_case_two_digits_a_byte
+             command: /tmp/cargo-mutants-dstack-ZeZigM.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact announce::tests::hex_is_lower_case_two_digits_a_byte --nocapture
+       START [         ] (  1/755) dante-stack announce::tests::every_wait_for_a_full_queue_is_counted
+             command: /tmp/cargo-mutants-dstack-ZeZigM.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact announce::tests::every_wait_for_a_full_queue_is_counted --nocapture
+       START [         ] (  1/755) dante-stack announce::tests::the_announcer_publishes_the_set_it_registered
+             command: /tmp/cargo-mutants-dstack-ZeZigM.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact announce::tests::the_announcer_publishes_the_set_it_registered --nocapture
+       START [         ] (  1/755) dante-stack announce::tests::one_chan_record_per_tx_channel_named_channel_at_device
+             command: /tmp/cargo-mutants-dstack-ZeZigM.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact announce::tests::one_chan_record_per_tx_channel_named_channel_at_device --nocapture
+        PASS [   0.007s] (  1/755) dante-stack announce::responder::tests::a_query_for_nothing_of_ours_or_a_response_gets_no_reply
+       START [         ] (  2/755) dante-stack announce::tests::the_records_carry_the_config_s_ports_and_process_id
+             command: /tmp/cargo-mutants-dstack-ZeZigM.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact announce::tests::the_records_carry_the_config_s_ports_and_process_id --nocapture
+        PASS [   0.007s] (  2/755) dante-stack announce::responder::tests::an_instance_and_a_host_query_get_exactly_what_they_ask
+       START [         ] (  3/755) dante-stack announce::tests::the_txt_records_carry_the_rate_encoding_and_latency
+             command: /tmp/cargo-mutants-dstack-ZeZigM.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact announce::tests::the_txt_records_carry_the_rate_encoding_and_latency --nocapture
+        PASS [   0.007s] (  3/755) dante-stack announce::responder::tests::a_service_type_query_gets_its_ptr_with_srv_txt_and_a_along
+       START [         ] (  4/755) dante-stack arc::client::tests::a_channel_whose_descriptor_does_not_read_is_counted_not_listed
+             command: /tmp/cargo-mutants-dstack-ZeZigM.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::client::tests::a_channel_whose_descriptor_does_not_read_is_counted_not_listed --nocapture
+        PASS [   0.007s] (  4/755) dante-stack announce::tests::one_chan_record_per_tx_channel_named_channel_at_device
+       START [         ] (  5/755) dante-stack arc::client::tests::a_closed_port_is_a_socket_error_at_once
+             command: /tmp/cargo-mutants-dstack-ZeZigM.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::client::tests::a_closed_port_is_a_socket_error_at_once --nocapture
+        PASS [   0.008s] (  5/755) dante-stack announce::tests::a_record_becomes_the_service_info_mdns_sd_sends
+       START [         ] (  6/755) dante-stack arc::client::tests::a_device_without_tx_channels_is_read_in_one_request
+             command: /tmp/cargo-mutants-dstack-ZeZigM.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::client::tests::a_device_without_tx_channels_is_read_in_one_request --nocapture
+        PASS [   0.008s] (  6/755) dante-stack announce::tests::a_failed_announcement_is_tried_again_and_a_bad_record_sends_nothing
+       START [         ] (  7/755) dante-stack arc::client::tests::a_directory_keeps_the_first_of_an_id_and_its_first_name
+             command: /tmp/cargo-mutants-dstack-ZeZigM.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::client::tests::a_directory_keeps_the_first_of_an_id_and_its_first_name --nocapture
+        PASS [   0.013s] (  7/755) dante-stack announce::responder::tests::a_query_from_5353_is_answered_to_the_group_a_legacy_one_to_its_sender
+       START [         ] (  8/755) dante-stack arc::client::tests::a_full_page_that_says_done_asks_for_the_next_while_channels_are_missing
+             command: /tmp/cargo-mutants-dstack-ZeZigM.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::client::tests::a_full_page_that_says_done_asks_for_the_next_while_channels_are_missing --nocapture
+        PASS [   0.007s] (  8/755) dante-stack announce::tests::the_records_carry_the_config_s_ports_and_process_id
+        PASS [   0.006s] (  9/755) dante-stack arc::client::tests::a_channel_whose_descriptor_does_not_read_is_counted_not_listed
+       START [         ] ( 10/755) dante-stack arc::client::tests::a_read_over_udp_takes_only_its_replies_and_counts_every_request
+             command: /tmp/cargo-mutants-dstack-ZeZigM.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::client::tests::a_read_over_udp_takes_only_its_replies_and_counts_every_request --nocapture
+       START [         ] ( 10/755) dante-stack arc::client::tests::a_page_of_none_or_a_list_past_max_pages_ends_it
+             command: /tmp/cargo-mutants-dstack-ZeZigM.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::client::tests::a_page_of_none_or_a_list_past_max_pages_ends_it --nocapture
+        PASS [   0.006s] ( 10/755) dante-stack arc::client::tests::a_closed_port_is_a_socket_error_at_once
+       START [         ] ( 11/755) dante-stack arc::client::tests::a_refusal_no_reply_or_a_page_that_does_not_read_ends_the_read
+             command: /tmp/cargo-mutants-dstack-ZeZigM.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::client::tests::a_refusal_no_reply_or_a_page_that_does_not_read_ends_the_read --nocapture
+        PASS [   0.014s] ( 11/755) dante-stack announce::tests::a_queue_that_stays_full_ends_the_announcement_after_its_tries
+        PASS [   0.006s] ( 12/755) dante-stack arc::client::tests::a_device_without_tx_channels_is_read_in_one_request
+       START [         ] ( 13/755) dante-stack arc::client::tests::more_follow_from_the_item_after_the_page_s_count_until_a_page_says_done
+             command: /tmp/cargo-mutants-dstack-ZeZigM.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::client::tests::more_follow_from_the_item_after_the_page_s_count_until_a_page_says_done --nocapture
+       START [         ] ( 13/755) dante-stack arc::client::tests::a_silent_device_ends_the_request_at_its_wait_and_a_stopped_read_sends_nothing
+             command: /tmp/cargo-mutants-dstack-ZeZigM.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::client::tests::a_silent_device_ends_the_request_at_its_wait_and_a_stopped_read_sends_nothing --nocapture
+        PASS [   0.006s] ( 13/755) dante-stack arc::client::tests::a_directory_keeps_the_first_of_an_id_and_its_first_name
+       START [         ] ( 14/755) dante-stack arc::client::tests::our_own_server_s_pages_read_back_as_its_channels
+             command: /tmp/cargo-mutants-dstack-ZeZigM.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::client::tests::our_own_server_s_pages_read_back_as_its_channels --nocapture
+        PASS [   0.019s] ( 14/755) dante-stack announce::tests::a_rename_changes_the_chan_records
+        PASS [   0.012s] ( 15/755) dante-stack announce::tests::the_txt_records_carry_the_rate_encoding_and_latency
+       START [         ] ( 16/755) dante-stack arc::client::tests::the_card_s_pages_read_as_its_128_channels_in_6_requests
+             command: /tmp/cargo-mutants-dstack-ZeZigM.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::client::tests::the_card_s_pages_read_as_its_128_channels_in_6_requests --nocapture
+       START [         ] ( 16/755) dante-stack arc::client::tests::the_card_s_first_page_says_more_and_counts_32_of_its_33_strings
+             command: /tmp/cargo-mutants-dstack-ZeZigM.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::client::tests::the_card_s_first_page_says_more_and_counts_32_of_its_33_strings --nocapture
+        PASS [   0.006s] ( 16/755) dante-stack arc::client::tests::a_refusal_no_reply_or_a_page_that_does_not_read_ends_the_read
+       START [         ] ( 17/755) dante-stack arc::client::tests::the_encoding_is_the_bits_every_channel_shares
+             command: /tmp/cargo-mutants-dstack-ZeZigM.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::client::tests::the_encoding_is_the_bits_every_channel_shares --nocapture
+        PASS [   0.007s] ( 17/755) dante-stack arc::client::tests::a_page_of_none_or_a_list_past_max_pages_ends_it
+       START [         ] ( 18/755) dante-stack arc::client::tests::the_request_is_netaudio_s_page_read_and_only_its_reply_is_taken
+             command: /tmp/cargo-mutants-dstack-ZeZigM.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::client::tests::the_request_is_netaudio_s_page_read_and_only_its_reply_is_taken --nocapture
+        PASS [   0.006s] ( 18/755) dante-stack arc::client::tests::more_follow_from_the_item_after_the_page_s_count_until_a_page_says_done
+       START [         ] ( 19/755) dante-stack arc::control::tests::a_device_name_is_netaudio_s_request
+             command: /tmp/cargo-mutants-dstack-ZeZigM.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::control::tests::a_device_name_is_netaudio_s_request --nocapture
+        PASS [   0.021s] ( 19/755) dante-stack announce::tests::hex_is_lower_case_two_digits_a_byte
+       START [         ] ( 20/755) dante-stack arc::control::tests::a_label_set_and_reset_reads_back
+             command: /tmp/cargo-mutants-dstack-ZeZigM.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::control::tests::a_label_set_and_reset_reads_back --nocapture
+        PASS [   0.022s] ( 20/755) dante-stack announce::tests::the_announcer_publishes_the_set_it_registered
+       START [         ] ( 21/755) dante-stack arc::control::tests::a_latency_write_is_confirmed_by_the_reads_before_and_after
+             command: /tmp/cargo-mutants-dstack-ZeZigM.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::control::tests::a_latency_write_is_confirmed_by_the_reads_before_and_after --nocapture
+        PASS [   0.009s] ( 21/755) dante-stack arc::client::tests::a_full_page_that_says_done_asks_for_the_next_while_channels_are_missing
+       START [         ] ( 22/755) dante-stack arc::control::tests::a_latency_write_is_netaudio_s_request
+             command: /tmp/cargo-mutants-dstack-ZeZigM.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::control::tests::a_latency_write_is_netaudio_s_request --nocapture
+        PASS [   0.010s] ( 22/755) dante-stack arc::client::tests::our_own_server_s_pages_read_back_as_its_channels
+        PASS [   0.024s] ( 23/755) dante-stack announce::tests::an_announcer_withdraws_the_old_records_first_and_repeats_nothing
+       START [         ] ( 24/755) dante-stack arc::control::tests::a_latency_write_the_device_ignores_or_refuses_is_not_confirmed
+             command: /tmp/cargo-mutants-dstack-ZeZigM.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::control::tests::a_latency_write_the_device_ignores_or_refuses_is_not_confirmed --nocapture
+       START [         ] ( 24/755) dante-stack arc::control::tests::a_latency_write_that_changes_another_setting_is_reported
+             command: /tmp/cargo-mutants-dstack-ZeZigM.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::control::tests::a_latency_write_that_changes_another_setting_is_reported --nocapture
+        PASS [   0.007s] ( 24/755) dante-stack arc::client::tests::the_card_s_pages_read_as_its_128_channels_in_6_requests
+       START [         ] ( 25/755) dante-stack arc::control::tests::a_latency_write_to_our_own_device_is_confirmed_end_to_end
+             command: /tmp/cargo-mutants-dstack-ZeZigM.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::control::tests::a_latency_write_to_our_own_device_is_confirmed_end_to_end --nocapture
+        PASS [   0.006s] ( 25/755) dante-stack arc::client::tests::the_encoding_is_the_bits_every_channel_shares
+       START [         ] ( 26/755) dante-stack arc::control::tests::a_refused_label_is_a_refusal
+             command: /tmp/cargo-mutants-dstack-ZeZigM.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::control::tests::a_refused_label_is_a_refusal --nocapture
+        PASS [   0.012s] ( 26/755) dante-stack arc::client::tests::a_read_over_udp_takes_only_its_replies_and_counts_every_request
+        PASS [   0.026s] ( 27/755) dante-stack announce::tests::every_wait_for_a_full_queue_is_counted
+       START [         ] ( 28/755) dante-stack arc::control::tests::a_settings_reply_skips_absent_keys_and_pointers_past_it
+             command: /tmp/cargo-mutants-dstack-ZeZigM.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::control::tests::a_settings_reply_skips_absent_keys_and_pointers_past_it --nocapture
+       START [         ] ( 28/755) dante-stack arc::control::tests::a_refused_subscription_or_end_is_a_refusal
+             command: /tmp/cargo-mutants-dstack-ZeZigM.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::control::tests::a_refused_subscription_or_end_is_a_refusal --nocapture
+        PASS [   0.005s] ( 28/755) dante-stack arc::client::tests::the_request_is_netaudio_s_page_read_and_only_its_reply_is_taken
+       START [         ] ( 29/755) dante-stack arc::control::tests::a_subscription_is_netaudio_s_request
+             command: /tmp/cargo-mutants-dstack-ZeZigM.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::control::tests::a_subscription_is_netaudio_s_request --nocapture
+        PASS [   0.028s] ( 29/755) dante-stack announce::tests::a_full_daemon_queue_delays_the_announcement_and_never_ends_it
+       START [         ] ( 30/755) dante-stack arc::control::tests::a_tx_label_is_netaudio_s_request
+             command: /tmp/cargo-mutants-dstack-ZeZigM.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::control::tests::a_tx_label_is_netaudio_s_request --nocapture
+        PASS [   0.006s] ( 30/755) dante-stack arc::control::tests::a_latency_write_is_netaudio_s_request
+        PASS [   0.008s] ( 31/755) dante-stack arc::control::tests::a_device_name_is_netaudio_s_request
+       START [         ] ( 32/755) dante-stack arc::control::tests::an_rx_channel_names_a_hardware_transmitter_s_receiving_word
+             command: /tmp/cargo-mutants-dstack-ZeZigM.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::control::tests::an_rx_channel_names_a_hardware_transmitter_s_receiving_word --nocapture
+       START [         ] ( 32/755) dante-stack arc::control::tests::an_empty_or_refused_name_does_not_read
+             command: /tmp/cargo-mutants-dstack-ZeZigM.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::control::tests::an_empty_or_refused_name_does_not_read --nocapture
+        PASS [   0.012s] ( 32/755) dante-stack arc::client::tests::the_card_s_first_page_says_more_and_counts_32_of_its_33_strings
+       START [         ] ( 33/755) dante-stack arc::control::tests::an_rx_flow_page_reads_the_slot_rate_latency_and_channels
+             command: /tmp/cargo-mutants-dstack-ZeZigM.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::control::tests::an_rx_flow_page_reads_the_slot_rate_latency_and_channels --nocapture
+        PASS [   0.008s] ( 33/755) dante-stack arc::control::tests::a_subscription_is_netaudio_s_request
+       START [         ] ( 34/755) dante-stack arc::control::tests::an_rx_label_is_netaudio_s_request
+             command: /tmp/cargo-mutants-dstack-ZeZigM.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::control::tests::an_rx_label_is_netaudio_s_request --nocapture
+        PASS [   0.009s] ( 34/755) dante-stack arc::control::tests::a_settings_reply_skips_absent_keys_and_pointers_past_it
+       START [         ] ( 35/755) dante-stack arc::control::tests::an_rx_page_counts_a_channel_0_and_does_not_list_it
+             command: /tmp/cargo-mutants-dstack-ZeZigM.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::control::tests::an_rx_page_counts_a_channel_0_and_does_not_list_it --nocapture
+        PASS [   0.014s] ( 35/755) dante-stack arc::control::tests::a_label_set_and_reset_reads_back
+        PASS [   0.009s] ( 36/755) dante-stack arc::control::tests::a_refused_subscription_or_end_is_a_refusal
+       START [         ] ( 37/755) dante-stack arc::control::tests::an_rx_page_reads_the_status_s_two_halves_and_names_by_offset
+             command: /tmp/cargo-mutants-dstack-ZeZigM.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::control::tests::an_rx_page_reads_the_status_s_two_halves_and_names_by_offset --nocapture
+        PASS [   0.007s] ( 37/755) dante-stack arc::control::tests::an_empty_or_refused_name_does_not_read
+       START [         ] ( 38/755) dante-stack arc::control::tests::our_device_s_name_and_labels_read_back
+             command: /tmp/cargo-mutants-dstack-ZeZigM.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::control::tests::our_device_s_name_and_labels_read_back --nocapture
+       START [         ] ( 38/755) dante-stack arc::control::tests::an_unsubscription_is_netaudio_s_request
+             command: /tmp/cargo-mutants-dstack-ZeZigM.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::control::tests::an_unsubscription_is_netaudio_s_request --nocapture
+        PASS [   0.035s] ( 38/755) dante-stack announce::tests::a_real_daemon_takes_more_records_than_its_queue_holds
+       START [         ] ( 39/755) dante-stack arc::control::tests::our_device_takes_a_device_rename
+             command: /tmp/cargo-mutants-dstack-ZeZigM.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::control::tests::our_device_takes_a_device_rename --nocapture
+        PASS [   0.010s] ( 39/755) dante-stack arc::control::tests::a_latency_write_the_device_ignores_or_refuses_is_not_confirmed
+       START [         ] ( 40/755) dante-stack arc::control::tests::our_device_takes_a_subscription_and_its_end
+             command: /tmp/cargo-mutants-dstack-ZeZigM.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::control::tests::our_device_takes_a_subscription_and_its_end --nocapture
+        PASS [   0.011s] ( 40/755) dante-stack arc::control::tests::a_latency_write_that_changes_another_setting_is_reported
+       START [         ] ( 41/755) dante-stack arc::control::tests::rx_channels_of_a_device_that_refuses_its_counts_is_a_refusal
+             command: /tmp/cargo-mutants-dstack-ZeZigM.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::control::tests::rx_channels_of_a_device_that_refuses_its_counts_is_a_refusal --nocapture
+        PASS [   0.010s] ( 41/755) dante-stack arc::control::tests::a_refused_label_is_a_refusal
+       START [         ] ( 42/755) dante-stack arc::control::tests::rx_channels_read_back_labels_and_subscriptions
+             command: /tmp/cargo-mutants-dstack-ZeZigM.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::control::tests::rx_channels_read_back_labels_and_subscriptions --nocapture
+        PASS [   0.015s] ( 42/755) dante-stack arc::control::tests::a_latency_write_is_confirmed_by_the_reads_before_and_after
+       START [         ] ( 43/755) dante-stack arc::control::tests::rx_flows_of_our_own_device_lists_none_before_a_grant
+             command: /tmp/cargo-mutants-dstack-ZeZigM.tmp/target/mutants/deps/dante_stack-6bd711c77b4e7f39 --exact arc::control::tests::rx_flows_of_our_own_device_lists_none_before_a_grant --nocapture
+        FAIL [   0.011s] ( 43/755) dante-stack arc::control::tests::a_latency_write_to_our_own_device_is_confirmed_end_to_end
+  stdout ───
+
+    running 1 test
+    test arc::control::tests::a_latency_write_to_our_own_device_is_confirmed_end_to_end ... FAILED
+
+    failures:
+
+    failures:
+        arc::control::tests::a_latency_write_to_our_own_device_is_confirmed_end_to_end
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 749 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'arc::control::tests::a_latency_write_to_our_own_device_is_confirmed_end_to_end' (1841521) panicked at crates/dante-stack/src/arc/control/tests.rs:835:50:
+    called `Result::unwrap()` on an `Err` value: Read(Timeout { op: 4352 })
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  Cancelling due to test failure: 15 tests still running
+        PASS [   0.007s] ( 44/755) dante-stack arc::control::tests::an_rx_flow_page_reads_the_slot_rate_latency_and_channels
+        PASS [   0.007s] ( 45/755) dante-stack arc::control::tests::an_rx_label_is_netaudio_s_request
+        PASS [   0.013s] ( 46/755) dante-stack arc::control::tests::an_rx_channel_names_a_hardware_transmitter_s_receiving_word
+        PASS [   0.013s] ( 47/755) dante-stack arc::control::tests::a_tx_label_is_netaudio_s_request
+        PASS [   0.006s] ( 48/755) dante-stack arc::control::tests::an_rx_page_reads_the_status_s_two_halves_and_names_by_offset
+        PASS [   0.006s] ( 49/755) dante-stack arc::control::tests::our_device_takes_a_subscription_and_its_end
+        PASS [   0.006s] ( 50/755) dante-stack arc::control::tests::our_device_takes_a_device_rename
+        PASS [   0.008s] ( 51/755) dante-stack arc::control::tests::an_unsubscription_is_netaudio_s_request
+        PASS [   0.008s] ( 52/755) dante-stack arc::control::tests::rx_channels_read_back_labels_and_subscriptions
+        PASS [   0.011s] ( 53/755) dante-stack arc::control::tests::our_device_s_name_and_labels_read_back
+        PASS [   0.011s] ( 54/755) dante-stack arc::control::tests::rx_channels_of_a_device_that_refuses_its_counts_is_a_refusal
+        PASS [   0.009s] ( 55/755) dante-stack arc::control::tests::rx_flows_of_our_own_device_lists_none_before_a_grant
+        PASS [   0.012s] ( 56/755) dante-stack arc::control::tests::an_rx_page_counts_a_channel_0_and_does_not_list_it
+        PASS [   0.214s] ( 57/755) dante-stack arc::client::tests::a_silent_device_ends_the_request_at_its_wait_and_a_stopped_read_sends_nothing
+        PASS [   0.770s] ( 58/755) dante-stack announce::responder::tests::the_responder_answers_from_the_published_records_and_stops_when_dropped
+────────────
+     Summary [   0.770s] 58/755 tests run: 57 passed, 1 failed, 0 skipped
+        FAIL [   0.011s] ( 43/755) dante-stack arc::control::tests::a_latency_write_to_our_own_device_is_confirmed_end_to_end
+warning: 697/755 tests were not run due to test failure (run with --no-fail-fast to run all tests, or run with --max-fail)
+error: test run failed
+
+*** result: Failure(100)

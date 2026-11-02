@@ -271,6 +271,18 @@ impl Manager {
         self.host = host.to_string();
     }
 
+    /// The device latency is `ns` now (Dante Controller set it): every
+    /// flow's playout and delay follow from the next plan read
+    /// ([`Manager::rx_plan`]).
+    pub fn set_latency(&mut self, ns: u64) {
+        self.latency_ns = ns;
+    }
+
+    /// The device latency the flows are planned with, ns.
+    pub fn latency_ns(&self) -> u64 {
+        self.latency_ns
+    }
+
     /// The manager of the device `cfg` named `host` at `ip`, whose flow
     /// slots receive on `ports`; no subscription yet.
     pub fn new(cfg: &DeviceConfig, host: &str, ip: Ipv4Addr, ports: [u16; MAX_FLOWS]) -> Self {

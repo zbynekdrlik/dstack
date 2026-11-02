@@ -1,0 +1,151 @@
+--- crates/dante-stack/src/daemon.rs
++++ replace serve -> Result<(), ServeError> with Ok(())
+@@ -625,147 +625,17 @@
+     shared: Arc<Mutex<Device>>,
+     announcer: &mut Announcer<R>,
+     net: NetInfo,
+     multicast: Multicast,
+     media: Arc<Media>,
+     control: impl Future<Output = io::Result<()>>,
+     stop: impl Future<Output = ()>,
+ ) -> Result<(), ServeError> {
+-    let ip = net.ip;
+-    let changed = Arc::new(Notify::new());
+-    let n = announce_device(&shared, announcer, ip)?;
+-    info!(
+-        records = n,
+-        queue_waits = announcer.waited(),
+-        "mDNS records announced"
+-    );
+-    let (identity, network) = {
+-        let device = shared.lock().unwrap_or_else(PoisonError::into_inner);
+-        (Identity::new(&device.cfg, net), network_of(&device.cfg))
+-    };
+-    let threads = media.spawn_threads().map_err(ServeError::Threads)?;
+-    let rx_changes = Arc::new(Changes::default());
+-    let requests = Arc::clone(&media.requests);
+-    let (mut driver, mut answers) = Driver::new(
+-        Arc::clone(&media),
+-        Client::new(media.ip),
+-        Arc::clone(&rx_changes),
+-    );
+-    let arc = arc::serve(
+-        sockets.arc,
+-        Arc::clone(&shared),
+-        Arc::new(media.flows()),
+-        Arc::clone(&changed),
+-        Arc::clone(&rx_changes),
+-        Arc::clone(&requests),
+-    );
+-    let cmc = cmc::serve_cmc(
+-        sockets.cmc,
+-        ip,
+-        identity.process,
+-        Arc::clone(&requests),
+-        Arc::clone(&media.levels),
+-    );
+-    let info = info::serve_shared(
+-        ip,
+-        sockets.info,
+-        Multicaster::new(identity),
+-        multicast,
+-        Arc::new(media.beat()),
+-        rx_changes,
+-        Arc::clone(&requests),
+-    );
+-    let flows = flows::server::serve(sockets.flows, Arc::clone(&media.tx), requests);
+-    // Our own channels resolve from our records (built again after a
+-    // rename), the network's as `network_of` builds it.
+-    let mut resolver = (Own::default(), network);
+-    let mut own_stale = true;
+-    let mut tick = tokio::time::interval(TICK);
+-    tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+-    tokio::pin!(arc, cmc, info, flows, control, stop);
+-    let ended = loop {
+-        tokio::select! {
+-            biased;
+-            () = &mut stop => break Ok(()),
+-            ended = &mut arc => break Err(ServeError::Arc(ended_error(ended))),
+-            ended = &mut cmc => break Err(ServeError::Cmc(ended_error(ended))),
+-            ended = &mut info => break Err(ServeError::Info(ended_error(ended))),
+-            ended = &mut flows => break Err(ServeError::Flows(ended_error(ended))),
+-            ended = &mut control => break Err(ServeError::Control(ended_error(ended))),
+-            () = changed.notified() => {
+-                own_stale = true;
+-                match announce_device(&shared, announcer, ip) {
+-                    Ok(n) => info!(
+-                        records = n,
+-                        queue_waits = announcer.waited(),
+-                        "mDNS records announced again after a change (a rename or the latency)"
+-                    ),
+-                    Err(e) => break Err(e.into()),
+-                }
+-            }
+-            Some((flow, answer)) = answers.recv() => driver.answered(flow, answer),
+-            _ = tick.tick() => {
+-                if own_stale {
+-                    let device = shared.lock().unwrap_or_else(PoisonError::into_inner);
+-                    resolver.0 = Own::new(&device.state, &device.cfg, ip);
+-                    own_stale = false;
+-                }
+-                let subscribed = media
+-                    .manager
+-                    .lock()
+-                    .unwrap_or_else(PoisonError::into_inner)
+-                    .subscribed();
+-                if subscribed && !resolver.1.chan.started() {
+-                    if let Err(e) = resolver.1.chan.start(announcer.registry()) {
+-                        break Err(e.into());
+-                    }
+-                    info!("mDNS browse of the channel records started");
+-                }
+-                let instances = &mut resolver.1.instances;
+-                if instances.asked() && !instances.tried() {
+-                    match instances.start(ip) {
+-                        Ok(_) => info!("direct instance queries of channel records started"),
+-                        Err(e) => warn!(%e, "direct instance queries not started: records and ARC only"),
+-                    }
+-                }
+-                let arc = &mut resolver.1.arc;
+-                if arc.asked() && !arc.started() {
+-                    if let Err(e) = arc.start(announcer.registry(), ip, Arc::clone(&media.requests)) {
+-                        break Err(e.into());
+-                    }
+-                    info!("mDNS browses of the ARC and flow-control records and the ARC reader started");
+-                }
+-                driver.tick(&resolver);
+-            }
+-        }
+-    };
+-    // Whatever ended serving: our RX flows end at their transmitters, the
+-    // media threads end. Our own flow-control server is served until the
+-    // stops are done (unless it is what ended, or it ends meanwhile): a
+-    // flow from our own TX (a self-loop) is stopped there and answered.
+-    let mut flows_served = !matches!(ended, Err(ServeError::Flows(_)));
+-    let stopped = driver.stop();
+-    tokio::pin!(stopped);
+-    loop {
+-        tokio::select! {
+-            biased;
+-            () = &mut stopped => break,
+-            gone = &mut flows, if flows_served => {
+-                flows_served = false;
+-                warn!(
+-                    error = %ended_error(gone),
+-                    "the flow-control server stopped during the stop"
+-                );
+-            }
+-        }
+-    }
+-    // One still running is left to end, with a warning.
+-    let _ended = threads.stop(&media, THREADS_WAIT).await;
+-    ended
++    Ok(()) /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ /// A server's end as an error: they end only with one.
+ fn ended_error(ended: io::Result<()>) -> io::Error {
+     ended
+         .err()
+         .unwrap_or_else(|| io::Error::other("ended without an error"))
+ }

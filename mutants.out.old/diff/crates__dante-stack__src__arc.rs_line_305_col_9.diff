@@ -1,0 +1,25 @@
+--- crates/dante-stack/src/arc.rs
++++ replace <impl Flows for Running>::set_latency with ()
+@@ -297,21 +297,17 @@
+     fn renamed(&self, name: &str) {
+         self.rx
+             .lock()
+             .unwrap_or_else(PoisonError::into_inner)
+             .set_host(name);
+     }
+ 
+     fn set_latency(&self, ns: u64) {
+-        self.rx
+-            .lock()
+-            .unwrap_or_else(PoisonError::into_inner)
+-            .set_latency(ns);
+-        self.tx.set_device_latency(ns);
++        () /* ~ changed by cargo-mutants ~ */
+     }
+ }
+ 
+ #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+ enum Dir {
+     Rx,
+     Tx,
+ }

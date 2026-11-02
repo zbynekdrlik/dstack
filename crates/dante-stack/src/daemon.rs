@@ -697,7 +697,7 @@ pub async fn serve<R: Registry + Browse>(
                     Ok(n) => info!(
                         records = n,
                         queue_waits = announcer.waited(),
-                        "mDNS records announced again after a rename"
+                        "mDNS records announced again after a change (a rename or the latency)"
                     ),
                     Err(e) => break Err(e.into()),
                 }

@@ -598,6 +598,10 @@ pub struct TxShared {
     /// Each TX channel's largest magnitude sent since the last take (the
     /// heartbeat's peaks).
     peaks: Box<[AtomicU32]>,
+    /// The latency our TX channels advertise now, ns: the config's, and the
+    /// device latency Dante Controller sets when the config gives no
+    /// `tx_latency_ns` ([`TxShared::set_device_latency`]).
+    advertised_ns: AtomicU64,
     stop: AtomicBool,
     base: Instant,
 }
@@ -645,6 +649,7 @@ impl TxShared {
             macs: std::array::from_fn(|_| Cell::new()),
             sources: (0..cfg.tx.len()).map(|_| Cell::new()).collect(),
             peaks: (0..cfg.tx.len()).map(|_| AtomicU32::new(0)).collect(),
+            advertised_ns: AtomicU64::new(cfg.advertised_latency_ns()),
             engine: (0..cfg.tx.len())
                 .map(|tx| engine.contains(&tx).then(Ring::new))
                 .collect(),
@@ -727,6 +732,20 @@ impl TxShared {
     fn direct_mac(&self, slot: usize) -> Option<(&Direct, [u8; 6])> {
         let (d, _) = self.direct.as_ref()?;
         Some((d, self.slot_mac(slot)?))
+    }
+
+    /// The device latency is `ns` now (Dante Controller set it): our TX
+    /// channels advertise it unless the config sets `tx_latency_ns`. The
+    /// TX thread takes it at its next events pass.
+    pub fn set_device_latency(&self, ns: u64) {
+        if self.cfg.tx_latency_ns.is_none() {
+            self.advertised_ns.store(ns, Ordering::Relaxed);
+        }
+    }
+
+    /// The latency our TX channels advertise now, ns.
+    pub fn advertised_latency_ns(&self) -> u64 {
+        self.advertised_ns.load(Ordering::Relaxed)
     }
 
     /// Sets TX channel `tx`'s source (from 0); `false` when there is no
@@ -966,9 +985,9 @@ impl Transmitter {
             epoch: None,
             next_events: None,
             rate,
-            max_lag: clock::latency_samples(shared.cfg.advertised_latency_ns(), rate),
+            max_lag: clock::latency_samples(shared.advertised_latency_ns(), rate),
             margin_ns: shared.cfg.tx_margin_ns,
-            latency_ns: shared.cfg.advertised_latency_ns(),
+            latency_ns: shared.advertised_latency_ns(),
             shared,
         }
     }
@@ -1022,6 +1041,13 @@ impl Transmitter {
     /// flow that sends.
     fn events(&mut self) {
         let shared = &*self.shared;
+        // The advertised latency, which Dante Controller may have set: the
+        // lag bound and the over-latency count follow it.
+        let advertised = shared.advertised_latency_ns();
+        if advertised != self.latency_ns {
+            self.latency_ns = advertised;
+            self.max_lag = clock::latency_samples(advertised, self.rate);
+        }
         for (slot, lane) in self.lanes.iter_mut().enumerate() {
             let cell = &shared.plans[slot];
             if lane.seen != Some(cell.version())

@@ -1383,3 +1383,23 @@ fn our_flow_names_carry_our_process_id() {
     let r = requests(&m.tick(0, &NONE, &net));
     assert_eq!(r[0].2.rx_flow_name, "1_3");
 }
+
+#[test]
+fn a_latency_set_live_moves_every_flow_s_playout() {
+    // Dante Controller sets the device latency while a flow runs: the next
+    // plan reads it. Our 250 us (24) under the mic's 1 ms (96): 104 with
+    // the block delay of 80; at our new 2 ms (192), the mic's flow plays
+    // at ours with no delay.
+    let mut cfg = cfg();
+    cfg.latency_ns = 250_000;
+    cfg.block = 16;
+    let net = Fake::default();
+    net.add("Mics-01", "Vox", advertised_mic());
+    let mut m = Manager::new(&cfg, "test-device", OUR_IP, ports());
+    m.set(0, Some(sub("Vox", "Mics-01")));
+    run_with_mic(&mut m, &net, 1, |_| Answer::Granted([0, 0, 0, 9, 0, 9]));
+    let slot = m.rx_route(0).expect("routed").flow;
+    assert_eq!((m.rx_plan(slot).latency, m.rx_plan(slot).delay), (104, 80));
+    m.set_latency(2_000_000);
+    assert_eq!((m.rx_plan(slot).latency, m.rx_plan(slot).delay), (192, 0));
+}
