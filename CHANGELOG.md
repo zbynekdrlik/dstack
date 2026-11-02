@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.17 (2026-11-03)
+
+- New (dstack #16, dcontroller): `latency::Listener::start(our) -> io::Result<(Listener, mpsc::Receiver<(Ipv4Addr, Beat)>)>`.
+  - It keeps one socket on the heartbeat group and hands on every parsed heartbeat with its sender's address, for as long as it runs. A recorder of every receiver's latency keeps one listener per network instead of a `listen` per device and window, which left gaps.
+  - Dropping the `Listener` stops its thread (within about 0.2 s) and closes the channel. The thread also ends when the receiver is dropped, or on a socket error (logged).
+  - `latency::listen` is unchanged.
+
 ## 0.5.16 (2026-11-02)
 
 - New (dstack #1, dasio#1): the NIC check at start (Windows) reads the Dante NIC's driver.
