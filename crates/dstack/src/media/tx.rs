@@ -604,6 +604,8 @@ pub struct LaneCounts {
 pub struct Control {
     pub table: TxTable,
     seen: [u64; MAX_FLOWS],
+    /// The flow sockets' DSCP marks (Windows), following the table.
+    marks: super::dscp::Marks,
 }
 
 /// What the control side and the TX thread share.
@@ -698,6 +700,7 @@ impl TxShared {
             control: Mutex::new(Control {
                 table: TxTable::with_slots(seed, slots),
                 seen: [0; MAX_FLOWS],
+                marks: super::dscp::Marks::new(),
             }),
             plans: std::array::from_fn(|_| Cell::new()),
             sockets,
@@ -744,6 +747,9 @@ impl TxShared {
         }
         let expired = c.table.expire(now);
         self.publish(&c);
+        let dests: [Option<SocketAddrV4>; MAX_FLOWS] =
+            std::array::from_fn(|slot| c.table.plan(slot).dest);
+        c.marks.follow(&self.sockets, &dests);
         if let Some((_, nic)) = &self.direct {
             let table = std::fs::read_to_string("/proc/net/arp").unwrap_or_default();
             self.set_macs(&c, &table, nic);
