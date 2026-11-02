@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.10 (2026-11-02)
+
+- New (#1): our board info claims the pull-up, the encoding and the sample rate (feature flags `00 00 12 18`, was `00 00 10 00`). Dante Controller now shows 96k / NONE / PCM 24 in Device Config, each marked as not configurable. Reboot and factory reset stay off.
+  - Info 0x83 (encoding) and 0x85 (pull-up) are answered in a Tascam's layout, with our one value as the only option (`info::encoding_body`, `info::PULLUP_BODY`, `op::ENCODING`, `op::PULLUP`, `Kind::Encoding`, `Kind::Pullup`). A write gets the same answer, unchanged.
+  - Both replies count in the reply bound (`limit::BOUNDED` has 8 kinds).
+- Changed: `info::Identity` has a new field `encoding` (from the config). Code that builds an `Identity` literally must set it; `Identity::new` sets it.
+
 ## 0.5.9 (2026-11-02)
 
 - New (dasio#1, FOH send errors every ~96 s): a failed media send keeps its OS error.

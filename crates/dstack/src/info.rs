@@ -192,7 +192,7 @@ const BOOT_VERSION: [u8; 4] = [1, 0, 0, 0];
 /// sample rate. With them Dante Controller asks and shows each (0x85,
 /// 0x83, 0x81). Left out: 0x17's 0x02 (reboot and factory reset), byte
 /// 0x15 (clear config) and byte 0x14 (RTP, AES67).
-const FEATURE_FLAGS: [u8; 4] = [0x00, 0x00, 0x10 | 0x02, 0x10 | 0x08];
+const FEATURE_FLAGS: [u8; 4] = [0x00, 0x00, 0x12, 0x18];
 /// The board info's byte 0xbb (inferno: "if 0, device is flooded with info
 /// multicast requests around 1 per second").
 const BYTE_BB: u8 = 0x1f;
