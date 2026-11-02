@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.15 (2026-11-02)
+
+- Fix (dstack #1, dasio#1): our mDNS daemon opens no IPv6 socket.
+  - mdns-sd always bound `[::]:5353`, which received every interface's mDNS. On the FOH PC (Windows 10) it is the next suspect for the 16–32 ms WFP receive DPC behind dasio's late packets. `flow_slots` ruled out the idle slot sockets.
+  - dstack now uses a vendored mdns-sd 0.21.6 (`vendor/mdns-sd`, Apache-2.0 OR MIT) with that one change (see `vendor/mdns-sd/DSTACK.md`). It is a path dependency inside the repo, so consumers get it through the tag and need no change.
+  - Test: `tests/mdns_ipv4_only.rs` (Linux).
+
 ## 0.5.14 (2026-11-02)
 
 - New (dstack #1, dasio#1): `flow_slots` in the device config (1–32, default 32). Only that many TX and RX flow sockets are opened, and at most that many flows go each way.
