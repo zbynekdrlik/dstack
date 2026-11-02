@@ -1,6 +1,0 @@
-crates/dante-stack/src/stream.rs:572:9: replace Pump<P>::run_processor -> Option<Box<dyn Any +Send>> with None
-crates/dante-audio-io/src/lib.rs:57:9: replace Block<'a>::start -> Option<u64> with None
-crates/dante-audio-io/src/lib.rs:57:9: replace Block<'a>::start -> Option<u64> with Some(0)
-crates/dante-audio-io/src/lib.rs:57:9: replace Block<'a>::start -> Option<u64> with Some(1)
-crates/dante-stack/src/stream.rs:516:9: replace Pump<P>::block with ()
-crates/dante-stack/src/stream.rs:502:9: replace Pump<P>::free with ()
