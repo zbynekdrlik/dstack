@@ -112,8 +112,10 @@ const HEARTBEAT: [u8; 8] = [0x00, 0x08, 0x00, 0x01, 0x10, 0x00, 0x00, 0x00];
 
 /// inferno's board info for the test device: firmware 4.1.0.6, hardware
 /// 4.1.0.3, the model (the board name) cut to 8 bytes at 0x0c and to 16 at
-/// 0x38, feature flags 0x10 (a manufacturer name), boot 1.0.0.0, and 0x1f
-/// at 0xbb.
+/// 0x38, boot 1.0.0.0 and 0x1f at 0xbb (inferno's), and our feature
+/// flags: a manufacturer name and the pull-up (0x16: 0x10, 0x02), the
+/// encoding and the sample rate (0x17: 0x10, 0x08), as decoded against
+/// Dante Controller (mbc, 2.11.2026); never 0x17's 0x02 (reboot).
 fn board_info_body(model: &[u8]) -> Vec<u8> {
     sparse(
         200,
@@ -121,7 +123,7 @@ fn board_info_body(model: &[u8]) -> Vec<u8> {
             (0x00, &[4, 1, 0, 6]),
             (0x04, &[4, 1, 0, 3]),
             (0x0c, &model[..model.len().min(8)]),
-            (0x16, &[0x10]),
+            (0x16, &[0x12, 0x18]),
             (0x23, &[2]),
             (0x27, &[1]),
             (0x28, &[1, 0, 0, 0]),
@@ -183,6 +185,12 @@ fn the_requests_inferno_answers_are_known_by_their_opcode() {
         ([0x07, 0x2a, 0, 0x13, 0, 0, 0, 0], Kind::NetworkInfo),
         ([0x07, 0x2a, 0, 0x77, 0, 0, 0, 0x01], Kind::Op0077),
         ([0x07, 0x2a, 0, 0x77, 0, 0, 0, 0], Kind::Op0077),
+        ([0x07, 0x3e, 0, 0x83, 0, 0, 0, 0x64], Kind::Encoding),
+        ([0x07, 0x3e, 0, 0x85, 0, 0, 0, 0], Kind::Pullup),
+        ([0x07, 0x3e, 0x10, 0x83, 0, 0, 0, 0], Kind::Unknown),
+        ([0x07, 0x3e, 0, 0x06, 0, 0, 0, 0], Kind::Unknown),
+        ([0x07, 0x3e, 0x10, 0x08, 0, 0, 0, 0x64], Kind::Unknown),
+        ([0x07, 0x3e, 0, 0x85, 1, 0, 0, 0], Kind::Unknown),
         // Not one of them.
         ([0x07, 0x3e, 0, 0x61, 0, 0, 0, 0x64], Kind::Unknown),
         ([0x07, 0x3e, 0, 0xc1, 0, 0, 0, 0x01], Kind::Unknown),
@@ -1251,6 +1259,66 @@ fn a_sample_rate_read_or_write_gets_our_rate_in_the_hardware_s_layout() {
     assert_eq!(
         (parsed.current, parsed.pending, parsed.supported),
         (rate, None, vec![rate])
+    );
+}
+
+/// The Tascam's answers to Dante Controller's device-config reads
+/// (captured on mbc, 2.11.2026, the bodies after the 32-byte header).
+const TASCAM_ENCODING: &str = "00180003000000180000000000020000000000180000001000000020";
+const TASCAM_PULLUP: &str = "003000050000000000000000000200000000000100000000000000000000000000000000000000000000000000000001000000020000000300000004";
+
+fn unhex(h: &str) -> Vec<u8> {
+    (0..h.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&h[i..i + 2], 16).unwrap())
+        .collect()
+}
+
+/// A Tascam answer cut to one option, its first: the count set to 1 and
+/// the list (at the first u16 minus 8) cut after one entry.
+fn one_option(tascam: &[u8]) -> Vec<u8> {
+    let list = usize::from(u16::from_be_bytes([tascam[0], tascam[1]])) - 8;
+    let mut b = tascam[..list + 4].to_vec();
+    b[2..4].copy_from_slice(&1u16.to_be_bytes());
+    b
+}
+
+/// Dante Controller asks the encoding and pull-up options of a device whose
+/// board info claims them (mbc, 2.11.2026); unanswered, its device config
+/// shows "Retrieving options … please wait" for good. We answer in the
+/// Tascam's layout, with our one encoding and no pull-up as the only
+/// options, so it shows them and offers no change.
+#[test]
+fn dante_controller_s_option_reads_get_the_hardware_s_layout_with_our_one_option() {
+    let tascam_encoding = unhex(TASCAM_ENCODING);
+    // The Tascam runs 24 bits, first in its list, as the test device does.
+    assert_eq!(identity().encoding, 24);
+    assert_eq!(encoding_body(24).to_vec(), one_option(&tascam_encoding));
+    assert_eq!(encoding_body(16)[0x04..0x08], [0, 0, 0, 16]);
+    assert_eq!(encoding_body(32)[0x10..0x14], [0, 0, 0, 32]);
+    // The Tascam's pull-up is none (0), first in its list.
+    assert_eq!(PULLUP_BODY.to_vec(), one_option(&unhex(TASCAM_PULLUP)));
+
+    let mut mc = Multicaster::new(identity());
+    // The opcodes as Dante Controller sent them (byte 1 0x3e, last 0x64).
+    let encoding = asking([0x07, 0x3e, 0x00, 0x83, 0, 0, 0, 0x64]);
+    assert_eq!(parse_request(&encoding).unwrap().kind, Kind::Encoding);
+    assert_eq!(
+        mc.answer(&encoding),
+        Some(packet(0xffff, 1, op::ENCODING, &encoding_body(24)))
+    );
+    let pullup = asking([0x07, 0x3e, 0x00, 0x85, 0, 0, 0, 0x64]);
+    assert_eq!(parse_request(&pullup).unwrap().kind, Kind::Pullup);
+    assert_eq!(
+        mc.answer(&pullup),
+        Some(packet(0xffff, 2, op::PULLUP, &PULLUP_BODY))
+    );
+    // An encoding write (netaudio's `1, 16`) gets the same answer: ours.
+    let mut write = asking([0x07, 0x27, 0x00, 0x83, 0, 0, 0, 0x64]);
+    write.extend_from_slice(&[0, 0, 0, 1, 0, 0, 0, 16]);
+    assert_eq!(
+        mc.answer(&write),
+        Some(packet(0xffff, 3, op::ENCODING, &encoding_body(24)))
     );
 }
 

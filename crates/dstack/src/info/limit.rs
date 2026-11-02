@@ -34,12 +34,14 @@ pub const REPORT_EVERY: Duration = Duration::from_secs(60);
 pub const CHECK: Duration = Duration::from_secs(1);
 
 /// The kinds the server sends, in their report order.
-pub const BOUNDED: [Kind; 6] = [
+pub const BOUNDED: [Kind; 8] = [
     Kind::BoardInfo,
     Kind::ProductInfo,
     Kind::NetworkInfo,
     Kind::Op0077,
     Kind::SampleRate,
+    Kind::Encoding,
+    Kind::Pullup,
     Kind::ChannelChange,
 ];
 
@@ -65,6 +67,8 @@ fn label(kind: Kind) -> &'static str {
         Kind::NetworkInfo => "0x13 network info",
         Kind::Op0077 => "0x77",
         Kind::SampleRate => "0x81 sample rate",
+        Kind::Encoding => "0x83 encoding",
+        Kind::Pullup => "0x85 pull-up",
         Kind::ChannelChange => "channel change",
         // Never bounded, so never in a report.
         Kind::ClockStats | Kind::Unknown => "no reply",
