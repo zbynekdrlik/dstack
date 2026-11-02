@@ -20,6 +20,7 @@
 //! `n - 1`. [`listen`] gathers the records of the devices at one address
 //! for a while, apart by the header's device id (bytes 8-15: several of
 //! our devices share an address on their own ports, dasio 1.11);
+//! [`Listener`] hands on every heartbeat for as long as it runs;
 //! [`histogram`] bins the peaks.
 
 use std::collections::BTreeMap;
@@ -215,13 +216,10 @@ pub fn histogram(peaks_us: &[u32], edges_us: &[u32]) -> Vec<u64> {
     bins
 }
 
-/// Listens on `our` address's network for `window` to the heartbeats from
-/// the address `device`, gathering each device's latency records there
-/// (one entry per device id, in id order). The socket shares the heartbeat
-/// port with any other listener on the host (our own device sends there,
-/// it does not listen). An error only when the socket cannot be made or
-/// joined; an address that sends nothing gives no entry.
-pub fn listen(our: Ipv4Addr, device: Ipv4Addr, window: Duration) -> io::Result<Vec<Latency>> {
+/// A socket on the heartbeat group, joined on `our` address's network. It
+/// shares the heartbeat port with any other listener on the host (our own
+/// device sends there, it does not listen).
+fn heartbeat_socket(our: Ipv4Addr) -> io::Result<UdpSocket> {
     let sock = socket2::Socket::new(
         socket2::Domain::IPV4,
         socket2::Type::DGRAM,
@@ -232,7 +230,24 @@ pub fn listen(our: Ipv4Addr, device: Ipv4Addr, window: Duration) -> io::Result<V
     sock.set_reuse_port(true)?;
     sock.bind(&SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, HEARTBEAT_PORT).into())?;
     sock.join_multicast_v4(&HEARTBEAT_GROUP, &our)?;
-    let sock: UdpSocket = sock.into();
+    Ok(sock.into())
+}
+
+/// A read that only timed out.
+fn timed_out(e: &io::Error) -> bool {
+    matches!(
+        e.kind(),
+        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+    )
+}
+
+/// Listens on `our` address's network for `window` to the heartbeats from
+/// the address `device`, gathering each device's latency records there
+/// (one entry per device id, in id order). An error only when the socket
+/// cannot be made or joined; an address that sends nothing gives no entry.
+/// For a record that never stops, see [`Listener`].
+pub fn listen(our: Ipv4Addr, device: Ipv4Addr, window: Duration) -> io::Result<Vec<Latency>> {
+    let sock = heartbeat_socket(our)?;
     let mut heard = Heard::default();
     let end = Instant::now() + window;
     let mut buf = [0u8; 2048];
@@ -248,18 +263,93 @@ pub fn listen(our: Ipv4Addr, device: Ipv4Addr, window: Duration) -> io::Result<V
                 }
             }
             Ok(_) => {}
-            Err(e)
-                if matches!(
-                    e.kind(),
-                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-                ) =>
-            {
-                break;
-            }
+            Err(e) if timed_out(&e) => break,
             Err(e) => return Err(e),
         }
     }
     Ok(heard.result())
+}
+
+/// How often the listener's thread looks whether it was stopped.
+const STOP_POLL: Duration = Duration::from_millis(200);
+
+/// Every heartbeat on the network, for as long as it runs (dcontroller's
+/// latency history, dstack #16): one socket on the heartbeat group, and
+/// each parsed heartbeat with its sender's address on a channel, so a
+/// recorder keeps one listener per network instead of a socket per device
+/// and window. [`Listener::stop`] (or dropping it) ends the thread; the
+/// channel then closes. The thread also ends when the receiver is dropped,
+/// or on a socket error, which it logs.
+#[derive(Debug)]
+pub struct Listener {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Listener {
+    /// Starts listening on `our` address's network. An error only when the
+    /// socket cannot be made or joined.
+    pub fn start(
+        our: Ipv4Addr,
+    ) -> io::Result<(Listener, std::sync::mpsc::Receiver<(Ipv4Addr, Beat)>)> {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let sock = heartbeat_socket(our)?;
+        sock.set_read_timeout(Some(STOP_POLL))?;
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let halt = std::sync::Arc::clone(&stop);
+        let thread = std::thread::Builder::new()
+            .name("latency-listener".into())
+            .spawn(move || {
+                tracing::info!(%our, "latency listener: heartbeats on the group");
+                let mut buf = [0u8; 2048];
+                while !halt.load(Ordering::Relaxed) {
+                    match sock.recv_from(&mut buf) {
+                        Ok((n, SocketAddr::V4(from))) => {
+                            let Some(beat) = parse(&buf[..n]) else {
+                                continue;
+                            };
+                            if tx.send((*from.ip(), beat)).is_err() {
+                                tracing::info!("latency listener: the receiver is gone, stopping");
+                                return;
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(e) if timed_out(&e) => {}
+                        Err(e) => {
+                            tracing::warn!(error = %e, "latency listener: the socket failed, stopping");
+                            return;
+                        }
+                    }
+                }
+                tracing::info!("latency listener stopped");
+            })?;
+        Ok((
+            Listener {
+                stop,
+                thread: Some(thread),
+            },
+            rx,
+        ))
+    }
+
+    /// Stops the thread and waits for it (at most about 0.2 s).
+    pub fn stop(mut self) {
+        self.halt();
+    }
+
+    fn halt(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+    }
+}
+
+impl Drop for Listener {
+    fn drop(&mut self) {
+        self.halt();
+    }
 }
 
 #[cfg(test)]
