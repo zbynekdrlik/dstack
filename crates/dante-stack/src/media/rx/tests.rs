@@ -990,6 +990,13 @@ fn a_base_past_the_last_port_is_refused_before_any_bind() {
     drop(held);
 }
 
+#[test]
+fn the_last_flow_port_is_the_base_plus_31_and_none_past_65535() {
+    assert_eq!(last_port(40_000), Some(40_031));
+    assert_eq!(last_port(65_504), Some(65_535));
+    assert_eq!(last_port(65_505), None);
+}
+
 /// iemmixer (1.11): a single packet now and then missing from a flow. The
 /// stamps are the sequence: a packet that begins past the end of the one
 /// before is a gap, and its skipped frames are counted.
