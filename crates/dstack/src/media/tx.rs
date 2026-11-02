@@ -1302,14 +1302,50 @@ pub const WINDOWS_HIGHEST: i32 = 2;
 
 /// On Windows: the thread at [`windows_thread_priority`]`(priority)`;
 /// `false` when Windows refuses it.
+/// Under the normal profile (dlink, #68) the thread asks no priority; it
+/// only opts out of Windows' power throttling (EcoQoS), which would end
+/// its timer waits on the coarse system tick (SongPlayer 31.10: peaks of
+/// two 15.6 ms ticks). Our thread only, nothing process-wide.
 #[cfg(windows)]
 pub(crate) fn ask_realtime(priority: i32) -> bool {
     if !crate::clock::realtime_for(crate::clock::profile()) {
+        if !unthrottle() {
+            warn!(
+                error = %std::io::Error::last_os_error(),
+                "a media thread could not opt out of power throttling: its waits may end late"
+            );
+        }
         return false;
     }
     use windows_sys::Win32::System::Threading::{GetCurrentThread, SetThreadPriority};
     // SAFETY: the calling thread's pseudo handle.
     unsafe { SetThreadPriority(GetCurrentThread(), windows_thread_priority(priority)) != 0 }
+}
+
+/// Takes the calling thread out of Windows' execution-speed throttling;
+/// `false` when Windows refuses (before Windows 10 1709).
+#[cfg(windows)]
+pub(crate) fn unthrottle() -> bool {
+    use windows_sys::Win32::System::Threading::{
+        GetCurrentThread, SetThreadInformation, THREAD_POWER_THROTTLING_CURRENT_VERSION,
+        THREAD_POWER_THROTTLING_EXECUTION_SPEED, THREAD_POWER_THROTTLING_STATE,
+        ThreadPowerThrottling,
+    };
+    let state = THREAD_POWER_THROTTLING_STATE {
+        Version: THREAD_POWER_THROTTLING_CURRENT_VERSION,
+        ControlMask: THREAD_POWER_THROTTLING_EXECUTION_SPEED,
+        StateMask: 0,
+    };
+    // SAFETY: the calling thread's pseudo handle; `state` is a valid
+    // THREAD_POWER_THROTTLING_STATE of the size given, only read.
+    unsafe {
+        SetThreadInformation(
+            GetCurrentThread(),
+            ThreadPowerThrottling,
+            (&raw const state).cast(),
+            std::mem::size_of::<THREAD_POWER_THROTTLING_STATE>() as u32,
+        ) != 0
+    }
 }
 
 #[cfg(not(any(target_os = "linux", windows)))]

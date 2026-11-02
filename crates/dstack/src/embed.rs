@@ -25,7 +25,7 @@
 //! the others ([`crate::clock::set_profile`]).
 //!
 //! Call [`Embedded::start`] outside any tokio runtime: the device runs its
-//! own on its `dante-device` thread.
+//! own on its `dstack-device` thread.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};

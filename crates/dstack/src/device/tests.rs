@@ -1268,7 +1268,7 @@ fn the_timing_profile_is_read_low_latency_by_default() {
     );
     let normal = DeviceConfig::from_toml(&config_with(
         "latency_ns =",
-        "latency_ns = 1000000\ntiming = \"normal\"",
+        "latency_ns = 10000000\nwork_margin = 480\ntiming = \"normal\"",
     ))
     .unwrap();
     assert_eq!(normal.timing, TimingProfile::Normal);
@@ -1279,6 +1279,45 @@ fn the_timing_profile_is_read_low_latency_by_default() {
         ))
         .is_err()
     );
+}
+
+/// dlink (#68): the normal profile wakes without priority, so it needs a
+/// latency of 4 ms or more and a pump margin of 2 ms or more.
+#[test]
+fn the_normal_profile_needs_4_ms_of_latency_and_2_ms_of_pump_margin() {
+    let with = |latency: u64, margin: u64| {
+        DeviceConfig::from_toml(&config_with(
+            "latency_ns =",
+            &format!("latency_ns = {latency}\nwork_margin = {margin}\ntiming = \"normal\""),
+        ))
+    };
+    // 96 kHz: 2 ms is 192 samples.
+    assert!(with(4_000_000, 192).is_ok());
+    let e = with(3_999_999, 192).unwrap_err();
+    assert_eq!(
+        e.problems,
+        vec!["latency_ns: at least 4000000 under timing = \"normal\"".to_string()]
+    );
+    let e = with(10_000_000, 191).unwrap_err();
+    assert_eq!(
+        e.problems,
+        vec!["work_margin: at least 192 samples (2 ms) under timing = \"normal\"".to_string()]
+    );
+    // The low-latency profile keeps its own bounds.
+    assert!(
+        DeviceConfig::from_toml(&config_with(
+            "latency_ns =",
+            "latency_ns = 1000000\nwork_margin = 96"
+        ))
+        .is_ok()
+    );
+}
+
+#[test]
+fn the_normal_work_margin_is_half_the_latency_within_the_most() {
+    assert_eq!(normal_work_margin(10_000_000, 96_000), 480);
+    assert_eq!(normal_work_margin(10_000_000, 48_000), 240);
+    assert_eq!(normal_work_margin(1_000_000_000, 96_000), MAX_WORK_MARGIN);
 }
 
 #[test]

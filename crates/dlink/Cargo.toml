@@ -1,0 +1,19 @@
+[package]
+name = "dlink"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+repository.workspace = true
+authors.workspace = true
+description = "The Dante device an application embeds (OBS, SongPlayer, the intercom): about 10 ms of latency, no real-time setup asked of the app"
+
+[dependencies]
+dstack = { path = "../dstack" }
+dstack-audio-io = { path = "../dstack-audio-io" }
+# The device config is built as the TOML a config file holds, so dstack's
+# own checks and defaults apply (already in the lockfile through dstack).
+toml = "0.9"
+
+[dev-dependencies]
+tempfile = "3"

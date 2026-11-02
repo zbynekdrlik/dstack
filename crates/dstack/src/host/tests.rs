@@ -329,17 +329,21 @@ fn a_held_info_port_makes_a_member_any_other_bind_error_ends_the_start() {
 }
 
 #[test]
-fn the_withdrawn_normal_timing_profile_is_refused_at_setup() {
-    // songplayer on the Resolume PC, 31.10.2026 (v0.4.2, timing = normal):
-    // the receiver's Latency tab showed peak 32.1 ms and 2562 late packets,
-    // the PA popped. The profile is refused until it is fixed and proven.
+fn the_normal_timing_profile_is_taken_at_setup_again() {
+    // dlink (#68, owner 2.11.2026): the normal profile is back, sized for a
+    // wake without priority (latency 10 ms, pump margin 5 ms).
     let dir = tempfile::tempdir().unwrap();
     let (path, _) = config_in(dir.path());
-    let text = std::fs::read_to_string(&path).unwrap() + "\ntiming = \"normal\"\n";
+    let text = std::fs::read_to_string(&path)
+        .unwrap()
+        .replace("latency_ns = 1000000", "latency_ns = 10000000")
+        + "\nwork_margin = 480\ntiming = \"normal\"\n";
     std::fs::write(&path, text).unwrap();
+    // The setup ends on NOWHERE (no interface) or, in this shared test
+    // process, on the one profile per process; never on a withdrawal.
     let e = prepare(&options(path, Place::Ip(NOWHERE), dir.path()), &[])
         .err()
-        .expect("refused");
+        .expect("NOWHERE has no interface");
     let why = setup_error(e);
-    assert!(why.contains("timing = \"normal\" is withdrawn"), "{why}");
+    assert!(!why.contains("withdrawn"), "{why}");
 }

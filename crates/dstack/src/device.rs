@@ -147,8 +147,9 @@ pub struct DeviceConfig {
     pub playout_override: BTreeMap<String, u32>,
     /// The timing profile (owner, 31.10.2026): `low_latency`, the tight
     /// timing iemmixer and dasio need (the default), or `normal`, for an
-    /// application that needs no lowest latency (SongPlayer): no spinning
-    /// core on Windows and no real-time priority for the media threads.
+    /// application that needs no lowest latency (dlink: SongPlayer, OBS,
+    /// the intercom, owner 2.11.2026): no spinning core on Windows and no
+    /// real-time priority for the media threads.
     #[serde(default)]
     pub timing: TimingProfile,
     /// The ARC port (UDP), advertised in the `_netaudio-arc` SRV:
@@ -186,8 +187,11 @@ pub enum TimingProfile {
     /// Windows, a spin through the last 50 ms of a wait.
     #[default]
     LowLatency,
-    /// Stability and little CPU: normal priority and, on Windows, the
-    /// waitable timer for the whole wait.
+    /// Stability and little CPU (dlink, #68): normal priority, no pinning,
+    /// the high-resolution timer for the whole wait (on Windows our
+    /// threads opt out of power throttling). Needs a latency of
+    /// [`NORMAL_MIN_LATENCY_NS`] or more and a pump margin of
+    /// [`NORMAL_MIN_WORK_MARGIN_NS`] or more ([`normal_work_margin`]).
     Normal,
 }
 
@@ -329,6 +333,19 @@ impl DeviceConfig {
         if !(least..=MAX_WORK_MARGIN).contains(&self.work_margin) {
             out.push(format!("work_margin: {least} to {MAX_WORK_MARGIN} samples"));
         }
+        if self.timing == TimingProfile::Normal {
+            if self.latency_ns < NORMAL_MIN_LATENCY_NS {
+                out.push(format!(
+                    "latency_ns: at least {NORMAL_MIN_LATENCY_NS} under timing = \"normal\""
+                ));
+            }
+            let least = crate::clock::latency_samples(NORMAL_MIN_WORK_MARGIN_NS, self.sample_rate);
+            if self.work_margin < least {
+                out.push(format!(
+                    "work_margin: at least {least} samples (2 ms) under timing = \"normal\""
+                ));
+            }
+        }
         for (device, &samples) in &self.playout_override {
             if !valid_device_name(device) || !(1..=u32::from(u16::MAX)).contains(&samples) {
                 out.push(
@@ -398,6 +415,19 @@ pub const MAX_TX_MARGIN_NS: u64 = 1_000_000;
 /// realtime box (p99.9 50 µs, #72 phase F): the advertised latency must
 /// cover `tx_fpp_max` frames + `tx_margin_ns` + this.
 pub const TX_SEND_SLACK_NS: u64 = 50_000;
+/// The least device latency of the normal profile (dlink, #68): its
+/// threads wake without priority, so the receivers need room.
+pub const NORMAL_MIN_LATENCY_NS: u64 = 4_000_000;
+/// The least pump work margin of the normal profile: a wake up to this
+/// late still makes its block.
+pub const NORMAL_MIN_WORK_MARGIN_NS: u64 = 2_000_000;
+
+/// The normal profile's pump work margin for a device latency: half of it
+/// (a wake that late still makes its block), within
+/// [`MAX_WORK_MARGIN`].
+pub fn normal_work_margin(latency_ns: u64, rate: u32) -> u64 {
+    crate::clock::latency_samples(latency_ns / 2, rate).min(MAX_WORK_MARGIN)
+}
 /// The CPUs a `pump_cpu` or `io_cpu` may name: Linux's `CPU_SETSIZE`.
 pub const MAX_CPU: usize = 1024;
 

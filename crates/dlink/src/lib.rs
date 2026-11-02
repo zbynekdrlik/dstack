@@ -1,0 +1,211 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+//! dlink: the Dante device an application embeds (owner, 2.11.2026,
+//! dstack #68). OBS, SongPlayer, the intercom and whatever comes next
+//! carry it in their own process and appear on the Dante network as a
+//! device of their own, under their own name.
+//!
+//! It needs no low latency: the device latency is 10 ms unless the app
+//! asks for another (4 ms at the least), and it asks the app for no
+//! real-time setup. Its media threads run at normal priority, unpinned,
+//! wait on the high-resolution timer without spinning a core, and on
+//! Windows opt out of power throttling (our threads only). The pump's
+//! work margin is half the latency, so a late wake still makes its block.
+//! Very low latency is a different situation, for iemmixer and dasio,
+//! which use `dstack` directly with its `low_latency` profile.
+//!
+//! ```no_run
+//! use dlink::{Block, Config, Link, Map, Place, Process};
+//!
+//! struct Gain;
+//! impl Process for Gain {
+//!     fn process(&mut self, block: &mut Block<'_>) {
+//!         let input = block.input(0).to_vec();
+//!         for (out, x) in block.output(0).iter_mut().zip(input) {
+//!             *out = x * 0.5;
+//!         }
+//!     }
+//! }
+//!
+//! let config = Config::new("songplayer", "/var/lib/songplayer/dlink.toml")
+//!     .rx(["In L", "In R"])
+//!     .tx(["Out L", "Out R"]);
+//! let map = Map { rx: vec![0, 1], tx: vec![0, 1] };
+//! let link = Link::start(&config, &Place::Iface("eth1".into()), map, Gain).unwrap();
+//! // ... the app runs ...
+//! link.stop();
+//! ```
+
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
+
+pub use dstack::daemon::Place;
+pub use dstack::daemon::media::Media;
+pub use dstack::device::DeviceConfig;
+pub use dstack::host::{HostError, Stopped};
+pub use dstack::stream::Map;
+pub use dstack_audio_io::{Block, Process};
+
+use dstack::device::{TimingProfile, normal_work_margin};
+use dstack::embed::Embedded;
+use dstack::host::ClockSource;
+
+/// dlink's device latency unless the app sets one: 10 ms (owner,
+/// 2.11.2026: "kľudne základ môže byť aj 10 ms").
+pub const LATENCY_NS: u64 = 10_000_000;
+/// The sample rate unless the app sets one.
+pub const SAMPLE_RATE: u32 = 48_000;
+/// How long [`Link::stop`] waits for the device's goodbyes.
+pub const STOP_WAIT: Duration = Duration::from_secs(5);
+
+/// What an app says about its device. Everything else is dlink's default.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Config {
+    name: String,
+    state_file: PathBuf,
+    rx: Vec<String>,
+    tx: Vec<String>,
+    sample_rate: u32,
+    latency_ns: u64,
+    manufacturer: String,
+    model: String,
+}
+
+impl Config {
+    /// A device named `name` (the name Dante Controller lists: 1 to 31 of
+    /// A-Z a-z 0-9 and '-'), keeping what Dante Controller sets (names,
+    /// subscriptions, latency) in `state_file`. No channels yet.
+    pub fn new(name: impl Into<String>, state_file: impl Into<PathBuf>) -> Self {
+        Self {
+            name: name.into(),
+            state_file: state_file.into(),
+            rx: Vec::new(),
+            tx: Vec::new(),
+            sample_rate: SAMPLE_RATE,
+            latency_ns: LATENCY_NS,
+            manufacturer: "dlink".to_string(),
+            model: "dlink".to_string(),
+        }
+    }
+
+    /// The RX channels' names, in channel order.
+    pub fn rx<S: Into<String>>(mut self, names: impl IntoIterator<Item = S>) -> Self {
+        self.rx = names.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// The TX channels' names, in channel order.
+    pub fn tx<S: Into<String>>(mut self, names: impl IntoIterator<Item = S>) -> Self {
+        self.tx = names.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// The sample rate, Hz.
+    pub fn sample_rate(mut self, hz: u32) -> Self {
+        self.sample_rate = hz;
+        self
+    }
+
+    /// The device latency, ns (4 ms at the least).
+    pub fn latency_ns(mut self, ns: u64) -> Self {
+        self.latency_ns = ns;
+        self
+    }
+
+    /// The manufacturer and model Dante Controller shows (both `dlink`
+    /// unless set).
+    pub fn product(mut self, manufacturer: impl Into<String>, model: impl Into<String>) -> Self {
+        self.manufacturer = manufacturer.into();
+        self.model = model.into();
+        self
+    }
+
+    /// The device config dstack runs: the normal timing profile, the pump
+    /// margin half the latency, 24-bit. Every problem is listed, as a
+    /// config file's would be.
+    pub fn device(&self) -> Result<DeviceConfig, Vec<String>> {
+        let mut t = toml::Table::new();
+        t.insert("name".into(), self.name.clone().into());
+        t.insert("manufacturer".into(), self.manufacturer.clone().into());
+        t.insert("model".into(), self.model.clone().into());
+        t.insert("sample_rate".into(), i64::from(self.sample_rate).into());
+        t.insert("encoding".into(), 24.into());
+        t.insert("latency_ns".into(), to_int(self.latency_ns).into());
+        t.insert(
+            "work_margin".into(),
+            to_int(normal_work_margin(self.latency_ns, self.sample_rate)).into(),
+        );
+        t.insert("timing".into(), "normal".into());
+        t.insert(
+            "state_file".into(),
+            self.state_file.to_string_lossy().into_owned().into(),
+        );
+        t.insert("rx".into(), self.rx.clone().into());
+        t.insert("tx".into(), self.tx.clone().into());
+        let text = toml::to_string(&t).map_err(|e| vec![e.to_string()])?;
+        let cfg = DeviceConfig::from_toml(&text).map_err(|e| e.problems)?;
+        debug_assert_eq!(cfg.timing, TimingProfile::Normal);
+        Ok(cfg)
+    }
+}
+
+fn to_int(v: u64) -> i64 {
+    i64::try_from(v).unwrap_or(i64::MAX)
+}
+
+/// The device running inside the app.
+pub struct Link {
+    device: Embedded,
+}
+
+impl Link {
+    /// Starts the device of `config` on `place`, running `processor` every
+    /// block on the RX channels `map.rx` into the TX channels `map.tx`.
+    /// Its media clock is the PC's dsync. Call it outside any tokio
+    /// runtime: the device runs its own.
+    pub fn start<P: Process + 'static>(
+        config: &Config,
+        place: &Place,
+        map: Map,
+        processor: P,
+    ) -> Result<Link, HostError> {
+        Self::start_on(config, place, map, processor, ClockSource::Dantesync)
+    }
+
+    /// [`Link::start`] on the clock `source` (`ClockSource::System` is for
+    /// tests only).
+    pub fn start_on<P: Process + 'static>(
+        config: &Config,
+        place: &Place,
+        map: Map,
+        processor: P,
+        source: ClockSource,
+    ) -> Result<Link, HostError> {
+        let cfg = config.device().map_err(|problems| {
+            HostError::Setup(format!("dlink config: {}", problems.join("; ")))
+        })?;
+        let device = Embedded::start_with(cfg, place, map, processor, source)?;
+        Ok(Link { device })
+    }
+
+    /// The device's media side: the pump's and the flows' counts.
+    pub fn media(&self) -> &Arc<Media> {
+        self.device.media()
+    }
+
+    /// Why the device ended by itself, if it did.
+    pub fn ended(&self) -> Option<String> {
+        self.device.ended()
+    }
+
+    /// Stops the pump, then the device, its goodbyes sent ([`STOP_WAIT`]).
+    pub fn stop(self) -> Stopped {
+        self.device.stop(STOP_WAIT)
+    }
+}
+
+pub use dstack::host::ClockSource as Clock;
+
+#[cfg(test)]
+mod tests;
