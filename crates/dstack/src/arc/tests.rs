@@ -1280,6 +1280,34 @@ fn the_clock_reply_is_the_fixed_one() {
     assert!(answer.body.iter().all(|&b| b == 0));
 }
 
+/// Dante Controller's settings read (captured, 0x1100 with start code
+/// 0x27ff and its 19 keys) gets our values in the hardware's layout, as
+/// the Tascam, the IEM card and DVS answer it (2.11.2026, mbc): with zeros
+/// Dante Controller showed our latency as 0.0 ms and greyed its control.
+/// The default and the range are answered too.
+#[test]
+fn dante_controller_s_settings_read_gets_our_latency_and_its_range() {
+    use super::control::{key, parse_settings};
+    let mut cfg = config();
+    cfg.sample_rate = 96_000;
+    cfg.latency_ns = 10_000_000;
+    let mut dev = Dev::new(cfg);
+    let answer = dev.ask(1, op::ZEROS_1100, &DC_1100);
+    assert_eq!(answer.header.op2, STATUS_OK);
+    let s = parse_settings(&answer.body).expect("our settings");
+    assert_eq!(s.latency_configured_ns, Some(10_000_000));
+    assert_eq!(s.latency_active_ns, Some(10_000_000));
+    assert_eq!(s.latency_default_ns, Some(10_000_000));
+    assert_eq!(s.latency_min_ns, Some(250_000));
+    // Half the 65 536-slot rings less the largest margin and a block, at
+    // 96 kHz: 28 416 samples, 296 ms.
+    assert_eq!(s.latency_max_ns, Some(296_000_000));
+    assert_eq!(s.pullup, Some(0));
+    // Every key asked is in the reply, in its order: held or `0, key`.
+    assert_eq!(answer.body[0], 0x13);
+    assert!(s.all.contains_key(&key::LATENCY_CONFIGURED));
+}
+
 /// netaudio 0.4.2's keyed settings request (`config latency`), captured:
 /// 23 keys.
 const NETAUDIO_SETTINGS: [u8; 48] = [
