@@ -17,7 +17,7 @@
 //!   socket bound. [`Prepared::media`] and [`Prepared::config`] are what the
 //!   engine builds its pump from.
 //! - [`Prepared::start`]: the mDNS daemon on the interface only, the
-//!   signals ([`Signals`]), and the `dante-device` thread: a current-thread
+//!   signals ([`Signals`]), and the `dstack-device` thread: a current-thread
 //!   tokio runtime running the media clock's poller and
 //!   [`daemon::serve`] until it is stopped, then the mDNS goodbyes.
 //! - [`Host`]: the running device: [`Host::ended`] (serving ended by
@@ -384,17 +384,6 @@ pub fn prepare_config(
     source: ClockSource,
 ) -> Result<Prepared, HostError> {
     let device = load_device(cfg)?;
-    // Withdrawn (31.10.2026): on Windows its timer-only waits made the TX
-    // and the pump late (a receiver's Latency tab: peak 32.1 ms, 2562 late
-    // packets, pops on the PA). Refused until fixed and proven on a
-    // receiver's latency records.
-    if device.cfg.timing == crate::device::TimingProfile::Normal {
-        return Err(setup(
-            "timing = \"normal\" is withdrawn: it made the TX late on Windows; \
-             use low_latency (the default)"
-                .to_string(),
-        ));
-    }
     // One timing profile per process: the media threads' waits and
     // priorities read it.
     if !crate::clock::set_profile(device.cfg.timing) {
@@ -539,7 +528,7 @@ impl Prepared {
     }
 
     /// Starts serving: the signals as `signals` says, the mDNS daemon on
-    /// the address's interface only, and the `dante-device` thread (see
+    /// the address's interface only, and the `dstack-device` thread (see
     /// the module). Glue: the mDNS daemon, the signals and the thread.
     pub fn start(self, signals: Signals) -> Result<Host, HostError> {
         let Prepared {
@@ -747,7 +736,7 @@ impl Watch {
     }
 }
 
-/// The `dante-device` thread: serving in the runtime until stopped, then
+/// The `dstack-device` thread: serving in the runtime until stopped, then
 /// the goodbyes whatever ended serving (no record outlives the device).
 /// Glue: the runtime and the mDNS daemon.
 fn device_thread(

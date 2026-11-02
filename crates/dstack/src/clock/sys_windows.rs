@@ -124,6 +124,20 @@ fn timer() -> HANDLE {
 
 struct Timer(HANDLE);
 
+/// Once per thread: without the high-resolution timer a wait ends on the
+/// system tick (about 15.6 ms), which a receiver sees as late packets.
+fn no_timer_warning() {
+    thread_local! {
+        static WARNED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+    if !WARNED.replace(true) {
+        tracing::warn!(
+            error = %std::io::Error::last_os_error(),
+            "no high-resolution waitable timer for this media thread: its waits end on the system tick"
+        );
+    }
+}
+
 impl Drop for Timer {
     fn drop(&mut self) {
         if !self.0.is_null() {
@@ -136,10 +150,15 @@ impl Drop for Timer {
 /// Sleeps until [`monotonic_ns`] reaches `target`: the timer for all but
 /// the last [`SPIN_NS`], then a spin.
 pub fn sleep_until_monotonic(target: i64) {
+    sleep_until_in(target, super::wait_mode());
+}
+
+/// [`sleep_until_monotonic`] in the wait `mode`.
+fn sleep_until_in(target: i64, mode: super::WaitMode) {
     let left = target - monotonic_ns();
     // The timer mode (problem A's measurement): the whole wait on the
     // timer, no core spun.
-    let spin = match super::wait_mode() {
+    let spin = match mode {
         super::WaitMode::Spin => SPIN_NS,
         super::WaitMode::Timer => 0,
     };
@@ -155,6 +174,7 @@ pub fn sleep_until_monotonic(target: i64) {
                 unsafe { WaitForSingleObject(h, INFINITE) };
             }
         } else {
+            no_timer_warning();
             std::thread::sleep(std::time::Duration::from_nanos((left - spin) as u64));
         }
     }
@@ -166,5 +186,32 @@ pub fn sleep_until_monotonic(target: i64) {
     }
     while monotonic_ns() < target {
         std::thread::yield_now();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// dlink (#68): the normal profile's waits end on the high-resolution
+    /// timer, not on the 15.6 ms system tick (SongPlayer 31.10: peaks of two
+    /// ticks). The median of 200 waits of 1 ms oversleeps under 1 ms.
+    #[test]
+    fn a_timer_wait_of_1_ms_ends_within_1_ms_at_the_median() {
+        let mut late: Vec<i64> = (0..200)
+            .map(|_| {
+                let target = monotonic_ns() + 1_000_000;
+                sleep_until_in(target, super::super::WaitMode::Timer);
+                monotonic_ns() - target
+            })
+            .collect();
+        late.sort_unstable();
+        let median = late[late.len() / 2];
+        assert!(
+            (0..1_000_000).contains(&median),
+            "median oversleep {median} ns; p90 {} ns, max {} ns",
+            late[late.len() * 9 / 10],
+            late[late.len() - 1]
+        );
     }
 }

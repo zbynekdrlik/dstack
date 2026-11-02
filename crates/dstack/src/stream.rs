@@ -43,7 +43,7 @@
 //! - [`PumpStats`]: what the engine's status and the control socket read,
 //!   as [`StreamStats`], the stream histograms ([`HistSnapshot`]) and a
 //!   [`PumpView`].
-//! - [`spawn`]: the `dante-engine` thread (`SCHED_FIFO` [`ENGINE_PRIORITY`]
+//! - [`spawn`]: the `dstack-engine` thread (`SCHED_FIFO` [`ENGINE_PRIORITY`]
 //!   when allowed): on the media clock while it is ready, paced on its own
 //!   ([`free_deadline`], NullRt's rule) while it is not.
 //!
@@ -610,7 +610,7 @@ pub fn free_deadline(deadline: Instant, now: Instant, period: Duration) -> Insta
     }
 }
 
-/// Starts the `dante-engine` thread: `pump` on `clock` until `stop` is set
+/// Starts the `dstack-engine` thread: `pump` on `clock` until `stop` is set
 /// (within one block, or one free period, of it).
 pub fn spawn<P: Process + 'static>(
     clock: Arc<dyn PtpClock>,

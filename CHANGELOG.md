@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.5.1 (2026-11-02)
+
+- New: the `dlink` crate (#68, owner 2.11.2026), the Dante device an application embeds (OBS, SongPlayer, the intercom).
+  - `dlink::Config::new(name, state_file).rx([...]).tx([...])`, then `dlink::Link::start(&config, &place, map, processor)` and `link.stop()`.
+  - Its defaults: 10 ms device latency, 48 kHz, 24-bit, the `normal` timing profile, and a pump margin of half the latency.
+  - It asks the app for no real-time setup: no SCHED_FIFO request, no CPU pinning, no spinning core.
+  - It re-exports `Block`, `Process`, `Map` and `Place`.
+- Changed: the `normal` timing profile is taken again (it was withdrawn on 31.10).
+  - It now needs `latency_ns` of 4 ms or more and `work_margin` of 2 ms or more; the config refuses less. `device::normal_work_margin` gives half the latency.
+  - On Windows its media threads opt out of power throttling (our threads only).
+  - A thread without the high-resolution waitable timer logs a warning once instead of silently waiting on the 15.6 ms system tick.
+  - Before an app uses it in production, a run judged on a real receiver's latency records is required (#68).
+
 ## 0.5.0 (2026-11-02)
 
 - **Breaking, the rename (#68, owner 2.11.2026: no "dante" in our names).** Port it by search and replace; nothing else changes.

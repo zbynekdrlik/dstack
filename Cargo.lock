@@ -36,8 +36,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
+name = "dlink"
+version = "0.5.1"
+dependencies = [
+ "dstack",
+ "dstack-audio-io",
+ "tempfile",
+ "toml",
+]
+
+[[package]]
 name = "dstack"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "assert_no_alloc",
  "dstack-audio-io",
@@ -60,7 +70,7 @@ dependencies = [
 
 [[package]]
 name = "dstack-audio-io"
-version = "0.5.0"
+version = "0.5.1"
 
 [[package]]
 name = "equivalent"

@@ -150,7 +150,7 @@ jobs:
           status=0
           cargo mutants --in-diff "$RUNNER_TEMP/pr.diff" --baseline=skip --timeout 60 --jobs 2 \
             --shard "${{ matrix.shard }}/${{ strategy.job-total }}" \
-            --package dstack --package dstack-audio-io || status=$?
+            --package dstack --package dstack-audio-io --package dlink || status=$?
           if [ -s mutants.out/missed.txt ]; then
             echo "::group::missed mutants"; cat mutants.out/missed.txt; echo "::endgroup::"
           fi
