@@ -1,4 +1,4 @@
-//! dantesync's time server reply (DSYX), read for the request id in the
+//! dsync's time server reply (DSYX), read for the request id in the
 //! first four bytes, and for the id the reply itself carries at the place
 //! a reply's id sits, so the fuzzer reaches past the id check.
 #![no_main]

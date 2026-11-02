@@ -1,5 +1,5 @@
 //! The media clock's OS clocks on Linux: `CLOCK_REALTIME`, `CLOCK_MONOTONIC`
-//! (dantesync steers its rate; no step moves it) and an absolute sleep on it.
+//! (dsync steers its rate; no step moves it) and an absolute sleep on it.
 
 fn read(clock: libc::clockid_t) -> i64 {
     let mut ts = libc::timespec {

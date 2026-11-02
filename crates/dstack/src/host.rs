@@ -58,7 +58,7 @@ use tracing::{info, warn};
 
 use crate::announce::Announcer;
 use crate::clock::linked::Linked;
-use crate::clock::{ClockStats, MonoClock, monotonic_ns, poll_dantesync, realtime_ns};
+use crate::clock::{ClockStats, MonoClock, monotonic_ns, poll_dsync, realtime_ns};
 #[cfg(unix)]
 use crate::ctl;
 use crate::daemon::media::{Clock, Media};
@@ -102,9 +102,9 @@ fn run_failed(e: impl Display) -> HostError {
 /// Where the media clock's PTP time comes from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClockSource {
-    /// dantesync on the box, polled once a second: the network's PTP time
+    /// dsync on the box, polled once a second: the network's PTP time
     /// (production; [`prepare`] always uses it).
-    Dantesync,
+    Dsync,
     /// dlink's default (dstack #68, owner 2.11.2026): dsync's in-process
     /// follower (dsync-ptp) on the device's interface when it is locked,
     /// the dsync service otherwise ([`crate::clock::linked`]): a clock with
@@ -279,9 +279,9 @@ pub struct Prepared {
     listener: Option<UnixListener>,
 }
 
-/// [`prepare_with`] on dantesync's clock: the production device.
+/// [`prepare_with`] on dsync's clock: the production device.
 pub fn prepare(opts: &Options, engine_tx: &[usize]) -> Result<Prepared, HostError> {
-    prepare_with(opts, engine_tx, ClockSource::Dantesync)
+    prepare_with(opts, engine_tx, ClockSource::Dsync)
 }
 
 /// The device of `opts` set up, nothing served yet: the config, its state
@@ -352,7 +352,7 @@ pub fn prepare_config(
         link_mbit_s = net.link_speed,
         gateway = !net.gateway.is_unspecified(),
         clock = match source {
-            ClockSource::Dantesync => "dantesync",
+            ClockSource::Dsync => "dsync",
             ClockSource::Linked => "linked (dsync's follower, else the service)",
             ClockSource::System => "system (test only)",
         },
@@ -376,7 +376,7 @@ pub fn prepare_config(
         heartbeat_port = info::HEARTBEAT_PORT,
         "listening on the interface's address"
     );
-    // The media clock: PTP time from dantesync on the box, polled once a
+    // The media clock: PTP time from dsync on the box, polled once a
     // second for the device's life (from the start).
     let mono = Arc::new(MonoClock::new());
     // dlink's: dsync's follower when locked, the service otherwise.
@@ -719,8 +719,8 @@ async fn serve_device(
     control: &Control,
     watch: Watch,
 ) -> Result<(), ServeError> {
-    if matches!(s.source, ClockSource::Dantesync | ClockSource::Linked) {
-        tokio::spawn(poll_dantesync(
+    if matches!(s.source, ClockSource::Dsync | ClockSource::Linked) {
+        tokio::spawn(poll_dsync(
             s.mono,
             Arc::clone(&s.media.freq),
             Arc::clone(&s.media.clock_stats),

@@ -52,7 +52,7 @@ use crate::subscribe::SubStatus;
 use crate::wire::read_u16;
 
 /// Where the device listens.
-pub const SOCKET: &str = "/run/iem-dante/control.sock";
+pub const SOCKET: &str = "/run/dstack/control.sock";
 /// The longest request line read, bytes.
 pub const MAX_LINE: usize = 256;
 /// The status's peers with an id of their own; any further peer is 0.
@@ -584,8 +584,8 @@ impl Json {
 ///
 /// - `clock`: `ready` (0/1), `epoch` (re-anchors the media threads saw),
 ///   `polls`, `re_anchors`, `holdovers` (runs of polls in holdover),
-///   `holdover` (the last poll was), `freq_ppb` (dantesync's), `source`
-///   (`dantesync`, or `system`: the TEST clock, `host::ClockSource::System`).
+///   `holdover` (the last poll was), `freq_ppb` (dsync's), `source`
+///   (`dsync`, or `system`: the TEST clock, `host::ClockSource::System`).
 /// - `requests`: `[{port, peer, op, n}]`, every datagram the device
 ///   received (ARC 4440, flow control 4455, info 8700, CMC 8800; `op` as
 ///   [`header_op`] and [`info_op`] read it); `sent`: `[{peer, op, n}]`, our
@@ -658,7 +658,7 @@ fn clock_part(j: &mut Json, media: &Media) {
         if media.clock_stats.is_system() {
             "system"
         } else {
-            "dantesync"
+            "dsync"
         },
     );
     j.close('}');

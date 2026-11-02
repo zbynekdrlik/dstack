@@ -1,4 +1,4 @@
-//! The media clock's OS clocks on Windows. dantesync steers the system
+//! The media clock's OS clocks on Windows. dsync steers the system
 //! time's rate (`SetSystemTimeAdjustmentPrecise`) and steps it at a date
 //! step (`NtSetSystemTime`); QPC is the raw counter and is not steered. The
 //! wall is the precise system time (`GetSystemTimePreciseAsFileTime`). The

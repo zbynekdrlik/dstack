@@ -7,7 +7,7 @@ fn code(c: ExitCode) -> String {
 
 #[test]
 fn clock_polls_once_and_ends_on_every_platform() {
-    // One poll of the local dantesync's time server: a line on stdout
+    // One poll of the local dsync's time server: a line on stdout
     // whether it answers (dev boxes run one) or not (CI), exit 0. The
     // Windows CI job runs this, so the Windows binary is no stub.
     assert_eq!(code(clock("test", 1)), code(ExitCode::SUCCESS));

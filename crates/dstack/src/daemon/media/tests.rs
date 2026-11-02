@@ -54,7 +54,7 @@ pub(crate) fn device_at(dir: &Path) -> Device {
     Device::load(cfg).unwrap()
 }
 
-/// `device`'s audio side on loopback, on the clock `ptp` (dantesync's
+/// `device`'s audio side on loopback, on the clock `ptp` (dsync's
 /// frequency adjustment −750 ppb).
 pub(crate) fn media_on(device: &Device, ptp: Arc<dyn PtpClock>) -> Arc<Media> {
     media_with_engine(device, ptp, &[])

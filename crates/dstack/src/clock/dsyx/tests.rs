@@ -1,13 +1,13 @@
 use super::*;
 use crate::wire::tests::Rng;
 
-/// dantesync's test values (`src/time_server/tests.rs`, `master_status`
+/// dsync's test values (`src/time_server/tests.rs`, `master_status`
 /// and the pending-step and slew tests).
 const D: i64 = 1_790_000_000_000_000_000;
 const WALL: i64 = 1_790_000_100_000_000_000;
 const STEP_AT: i64 = 12_350_000_000_000;
 
-/// A reply laid out as dantesync's `build_response` and `encode_extension`
+/// A reply laid out as dsync's `build_response` and `encode_extension`
 /// write it (offsets from `src/time_server.rs` and
 /// `src/date_offset/wire.rs`).
 struct Reply {
@@ -27,7 +27,7 @@ struct Ext {
     now_ptp: i64,
     /// A slew: its starting `D` and its rate.
     slew: Option<(i64, u16)>,
-    /// The extension's length (dantesync writes 48).
+    /// The extension's length (dsync writes 48).
     len: usize,
 }
 
@@ -52,7 +52,7 @@ impl Reply {
         // [8-15] the wall clock, u64 ns since 1970.
         b[8..16].copy_from_slice(&(self.wall as u64).to_be_bytes());
         // [16-23] the monotonic counter, [24-31] the PTP offset (-12345 in
-        // dantesync's test), [32-35] the drift rate (1.5 ppm × 1000).
+        // dsync's test), [32-35] the drift rate (1.5 ppm × 1000).
         b[16..24].copy_from_slice(&123_456_789u64.to_be_bytes());
         b[24..32].copy_from_slice(&(-12_345i64).to_be_bytes());
         b[32..36].copy_from_slice(&1_500i32.to_be_bytes());
@@ -115,7 +115,7 @@ impl Ext {
     }
 }
 
-/// A locked dantesync's reply to `id` with `wall`, `d` in effect, its last
+/// A locked dsync's reply to `id` with `wall`, `d` in effect, its last
 /// step at PTP `step_at` and `adj_ppb` (the clock's poller tests).
 pub(crate) fn locked_reply(id: u32, wall: i64, d: i64, step_at: i64, adj_ppb: i32) -> Vec<u8> {
     Reply {
@@ -132,7 +132,7 @@ fn date(r: &Reply) -> Option<DateState> {
 }
 
 #[test]
-fn the_dsyx_reply_reads_as_dantesync_writes_it() {
+fn the_dsyx_reply_reads_as_dsync_writes_it() {
     // The request: "DSYX", the id, zero padding to the base's size.
     let req = request(0xdead_beef);
     assert_eq!(req.len(), 64);
@@ -140,11 +140,11 @@ fn the_dsyx_reply_reads_as_dantesync_writes_it() {
     assert_eq!(&req[4..8], &0xdead_beefu32.to_be_bytes());
     assert!(req[8..].iter().all(|&b| b == 0));
 
-    // A locked master with a pending step of -51 ms (dantesync's
+    // A locked master with a pending step of -51 ms (dsync's
     // `a_pending_step_is_published_as_the_offset_it_will_take_88`).
     let reply = Reply::locked(42);
     let bytes = reply.bytes();
-    assert_eq!(bytes.len(), 112, "dantesync's extended reply");
+    assert_eq!(bytes.len(), 112, "dsync's extended reply");
     assert_eq!(
         parse(&bytes, 42),
         Ok(Reading {
@@ -161,7 +161,7 @@ fn the_dsyx_reply_reads_as_dantesync_writes_it() {
         })
     );
 
-    // A slewing master, D in effect part-way down (dantesync's
+    // A slewing master, D in effect part-way down (dsync's
     // `a_slew_is_published_as_the_slew_never_as_a_backward_step_119`):
     // 51 ms at 100 ppm run 510 s from the start.
     let in_effect = D - 10_000_000;
@@ -259,7 +259,7 @@ fn a_slew_runs_from_two_seconds_before_its_start_to_two_seconds_after_its_end() 
     assert!(at(end + STEP_GUARD_NS - 1, 100, to).slewing);
     assert!(!at(end + STEP_GUARD_NS, 100, to).slewing);
     assert_eq!(at(end, 100, to).step_at_ptp_ns, None);
-    // dantesync's rate rules: 0 is its default 100 ppm, the rest clamped to
+    // dsync's rate rules: 0 is its default 100 ppm, the rest clamped to
     // 10..=500, the duration rounded up to the ns.
     assert!(at(end + STEP_GUARD_NS - 1, 0, to).slewing);
     assert!(!at(end + STEP_GUARD_NS, 0, to).slewing);
@@ -293,7 +293,7 @@ fn only_a_backward_slew_of_version_2_on_is_a_slew() {
         })
     };
     assert!(with(slew(D, D - 1)).unwrap().slewing);
-    // Forward, or no change at all: a step at its instant (dantesync's
+    // Forward, or no change at all: a step at its instant (dsync's
     // `as_slew`).
     assert_eq!(with(slew(D, D + 51_000_000)), step);
     assert_eq!(with(slew(D, D)), step);

@@ -30,7 +30,7 @@ fn steady(d: i64) -> Option<DateState> {
 fn k_is_wall_minus_d_minus_mono() {
     let r = reading(steady(D));
     assert_eq!(sample(&r, D + PTP, MONO), Sample::Usable { k_ns: K });
-    // The box's wall is read, never dantesync's: 3 ms later both clocks
+    // The box's wall is read, never dsync's: 3 ms later both clocks
     // moved on and k is the same.
     assert_eq!(
         sample(&r, D + PTP + 3_000_000, MONO + 3_000_000),
@@ -140,7 +140,7 @@ fn not_locked_is_not_ready() {
 }
 
 /// Catalog (dstack #1, iem-mixer to FOH, 1.11.2026 22:44 and 2.11 01:32
-/// CET: thousands of late packets, peak 479 µs): dantesync v1.20 reported
+/// CET: thousands of late packets, peak 479 µs): dsync v1.20 reported
 /// [41] locked at a phase error of about −720 µs after a gen3 reboot, and the
 /// stack, which goes ready on [41] alone, stamped its TX off by that until
 /// the slew ended. dsync v1.23.0 (dsync#146) holds [41] at 0 until |e| ≤
@@ -586,10 +586,10 @@ mod os {
         assert!(slept < Duration::from_secs(2), "{slept:?}");
     }
 
-    /// The poller against a stand-in for dantesync's time server on
+    /// The poller against a stand-in for dsync's time server on
     /// loopback: a locked reply with D, the last step long ago.
     #[tokio::test]
-    async fn the_poller_anchors_the_clock_from_dantesync_s_reply() {
+    async fn the_poller_anchors_the_clock_from_dsync_s_reply() {
         let server = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let addr = server.local_addr().unwrap();
         let d: i64 = 1_790_000_000_000_000_000;
@@ -752,7 +752,7 @@ mod os {
 
     /// No answer: the clock stays not ready and the poller keeps polling.
     #[tokio::test]
-    async fn the_poller_waits_for_a_silent_dantesync() {
+    async fn the_poller_waits_for_a_silent_dsync() {
         let server = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let addr = server.local_addr().unwrap();
         let clock = Arc::new(MonoClock::new());

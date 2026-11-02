@@ -26,13 +26,13 @@
 //
 // Changes Copyright (C) 2026 iemmixer contributors, GPL-3.0-or-later.
 
-//! dantesync's time server on the box (UDP 31900): one `"DSYX"` request a
+//! dsync's time server on the box (UDP 31900): one `"DSYX"` request a
 //! second and its reply, read for the media clock (plan Task 1).
 //!
 //! The request is the magic `"DSYX"` and a request id, zero-padded to
-//! [`REQUEST_LEN`] (dantesync answers no shorter `DSYX`: no amplification).
+//! [`REQUEST_LEN`] (dsync answers no shorter `DSYX`: no amplification).
 //! The reply (big-endian) is a 64-byte base, then the date-offset extension
-//! once dantesync holds a date state:
+//! once dsync holds a date state:
 //!
 //! | bytes | field |
 //! |---|---|
@@ -52,18 +52,18 @@
 //! | 104–111 | a slew's starting `D` (version 2 on) |
 //!
 //! The `D` in effect is the base's wall less the extension's PTP "now"
-//! (two clock reads of dantesync's, microseconds apart). A step announce
+//! (two clock reads of dsync's, microseconds apart). A step announce
 //! names its instant, a past one the last step: [`DateState::step_at_ptp_ns`].
-//! A backward slew (dantesync's `as_slew`; a forward one is a step) runs
+//! A backward slew (dsync's `as_slew`; a forward one is a step) runs
 //! from its start for `ceil(|from − to| · 10⁶ / ppm)` ns of PTP time:
 //! [`DateState::slewing`] while the reply's PTP "now" lies within it, or
 //! within [`STEP_GUARD_NS`] of either end. Parsing never panics.
 
 use super::STEP_GUARD_NS;
 
-/// dantesync's time server port.
+/// dsync's time server port.
 pub const PORT: u16 = 31_900;
-/// The request's length: dantesync answers a `DSYX` only at the base's size.
+/// The request's length: dsync answers a `DSYX` only at the base's size.
 pub const REQUEST_LEN: usize = 64;
 /// The reply's base.
 pub const BASE_LEN: usize = 64;
@@ -72,14 +72,14 @@ pub const BASE_LEN: usize = 64;
 pub const EXT_LEN: usize = 40;
 /// The extension from version 2 (the slew's starting `D`).
 pub const EXT_LEN_V2: usize = 48;
-/// A buffer every reply fits (dantesync writes 112 bytes).
+/// A buffer every reply fits (dsync writes 112 bytes).
 pub const REPLY_MAX: usize = 256;
 
 const REQUEST_MAGIC: [u8; 4] = *b"DSYX";
 const REPLY_MAGIC: [u8; 4] = *b"DSYR";
 const FLAG_SETTLED: u8 = 0x02;
 const EXT_FLAG_SLEW: u8 = 0x02;
-/// dantesync's slew rate for a rate of 0, and its bounds.
+/// dsync's slew rate for a rate of 0, and its bounds.
 const DEFAULT_SLEW_PPM: u32 = 100;
 const MIN_SLEW_PPM: u32 = 10;
 const MAX_SLEW_PPM: u32 = 500;
@@ -87,7 +87,7 @@ const MAX_SLEW_PPM: u32 = 500;
 /// What one reply says.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Reading {
-    /// dantesync's wall clock when it built the reply, ns since 1970.
+    /// dsync's wall clock when it built the reply, ns since 1970.
     pub wall_ns: i64,
     /// Its PTP lock.
     pub locked: bool,
@@ -97,8 +97,8 @@ pub struct Reading {
     pub mode: u8,
     /// Its frequency adjustment, ppb: the heartbeat's clock record later.
     pub freq_ppb: i32,
-    /// The date offset; `None` before dantesync holds one (or from a
-    /// dantesync without the extension).
+    /// The date offset; `None` before dsync holds one (or from a
+    /// dsync without the extension).
     pub date: Option<DateState>,
 }
 
@@ -189,7 +189,7 @@ fn date_state(ext: &[u8], wall_ns: i64) -> Option<DateState> {
     })
 }
 
-/// How long a slew of `amount` ns at `ppm` runs, PTP ns (dantesync's
+/// How long a slew of `amount` ns at `ppm` runs, PTP ns (dsync's
 /// `DateSlew::duration_ns`: rounded up, the rate as it clamps it).
 fn slew_duration_ns(amount: u64, ppm: u32) -> i64 {
     let rate = if ppm == 0 {

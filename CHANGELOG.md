@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.5.6 (2026-11-02)
+
+- Breaking, names (#68, owner: no "dante" in our names; dsync is dantesync's new name, dsync#147):
+  - `--clock dantesync` is now `--clock dsync` (left out, it is the default, as before).
+  - `host::ClockSource::Dantesync` is `ClockSource::Dsync`.
+  - `clock::poll_dantesync` is `poll_dsync`, and `clock::DANTESYNC` is `DSYNC`.
+  - The control socket's status says clock source `"dsync"` where it said `"dantesync"`.
+  - Docs and logs say dsync. The DSYX protocol on UDP 31900 is unchanged.
+- Breaking, the control socket's default path is `/run/dstack/control.sock` (was `/run/iem-dante/control.sock`). iemmixer passes its own path and is not affected.
+- Catalog test: a dsync boot with a large phase error is ready only at the lock (the iem-mixer to FOH episodes of 1.11).
+
 ## 0.5.5 (2026-11-02)
 
 - New (#1): once a minute the device compares its NIC's own sent-bytes counter with its audio's wire bytes. It warns ("the Dante NIC carries other traffic") when the rest averages over 100 kB/s, because our audio waits behind it in the NIC's queue. Linux reads `/sys/class/net/<nic>/statistics/tx_bytes`; Windows reads `GetIfEntry2`'s `OutOctets`.

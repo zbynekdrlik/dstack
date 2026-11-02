@@ -13,7 +13,7 @@ Consumers today: dasio (MVP passed the owner's listening test on 2026-10-30, pro
 
 ## What else acts on the machines
 
-- dantesync runs on every PC as the only clock owner. Clients follow it through the DSYX contract.
+- dsync runs on every PC as the only clock owner. Clients follow it through the DSYX contract.
 - On the FOH PC: Ableton (master and band), VB-Matrix, the console's Yamaha card, and the dasio device (scheduled task `dante-asio-1`, instance 1).
 - Windows updates or a replugged USB NIC can leave DVS stamping 61 ms late while PTP looks locked: restart `dvs.manager` and check latency after every DVS start.
 - fohmixer runs on the same FOH PC. iemmixer owns the IEM PC and the Gen 3 box.
@@ -35,7 +35,7 @@ Needed: one self-hosted runner on the Dante network, for the real-hardware gate 
 Owner-requested:
 - One stack for all Dante applications, with no project solving a problem twice (2026-10-30).
 - Design order 1-5 in `docs/design/2026-10-30-shared-dstack.md`, approved by the owner.
-- Improve dantesync only for a measured need, "nie len tak pre dobry pocit" (2026-10-26).
+- Improve dsync only for a measured need, "nie len tak pre dobry pocit" (2026-10-26).
 
 Proposed by a session, not yet asked for by the owner: nothing.
 
@@ -43,4 +43,4 @@ Proposed by a session, not yet asked for by the owner: nothing.
 
 - dasio: `docs/HANDOFF.md`, `docs/design/`, issue #1 (TX stalls, DVS refusal, RX hands).
 - iemmixer: `.claude/rules/gen3.md`, `gen3-new-box.md`, `dante-labels.md`, `asio-spike.md`, and its memory notes on Dante. Ask the iemmixer session over the peer channel, then copy what you need here.
-- dantesync: its own repository; the iemmixer session has maintained it so far.
+- dsync: its own repository; the iemmixer session has maintained it so far.

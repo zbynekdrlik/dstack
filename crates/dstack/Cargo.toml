@@ -9,7 +9,7 @@ authors.workspace = true
 # the engine binary is already GPL).
 license = "GPL-3.0-or-later"
 repository.workspace = true
-description = "The one Dante stack for our applications: discovery, ARC, CMC, flows, media TX/RX, the clock client of dantesync, health, and the engine's pump"
+description = "The one Dante stack for our applications: discovery, ARC, CMC, flows, media TX/RX, the clock client of dsync, health, and the engine's pump"
 
 [lib]
 name = "dstack"
