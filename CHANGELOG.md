@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.4 (2026-11-02)
+
+- New: dlink's media clock is dsync's in-process PTP follower (dsync-ptp, dsync v1.24.0) by default (#68, owner 2.11.2026).
+  - `host::ClockSource::Linked` and `clock::linked::Linked`: the follower when it is locked, the dsync service (DSYX) otherwise, the follower's holdover after a lock when neither.
+  - A selector picks the source once a second and logs every change; a change moves the epoch, so the media re-aligns.
+  - The device has a clock whether the dsync service runs or not, and is never worse than the service: when the follower cannot start, it runs on the service as before.
+  - Linux only for now: the follower needs port 319 (CAP_NET_BIND_SERVICE or root); without it the start logs why. Windows follows when dsync loads wpcap.dll at run time.
+  - `dlink::Link::start` uses it; the daemon and `embed::Embedded` keep the service (`Dantesync`) unless asked.
+- Dependencies: `dsync-ptp` (git tag v1.24.0, Linux only). `cc` is pinned to 1.6.0 and `find-msvc-tools` to 0.1.14 (versions under two weeks old are refused).
+
 ## 0.5.3 (2026-11-02)
 
 - New on Windows (#1): the start line checks the Dante NIC's large send offload (the adapter's `*LsoV2IPv4` / `*LsoV1IPv4` settings, read by its GUID) and warns when it is on. With LSO on, another sender's large sends delay our packets. The device never changes the NIC; turning LSO off is the PC owner's step. `lso::verdict` is the decision.

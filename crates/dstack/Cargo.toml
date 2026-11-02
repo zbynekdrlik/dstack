@@ -70,6 +70,10 @@ windows-sys = { version = "0.61", features = [
 ] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+# dsync's in-process PTP follower (dstack #68): a dlink device's internal
+# clock. Linux only until dsync loads wpcap.dll at run time (dsync#136).
+# MIT, our own project.
+dsync-ptp = { git = "https://github.com/zbynekdrlik/dsync", tag = "v1.24.0" }
 # The media clock (phase B): clock_gettime(CLOCK_MONOTONIC / CLOCK_REALTIME)
 # and clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME). MIT OR Apache-2.0,
 # already in the lockfile (through tokio and others).

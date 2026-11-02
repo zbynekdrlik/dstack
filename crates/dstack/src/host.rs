@@ -57,6 +57,7 @@ use tokio::sync::Notify;
 use tracing::{info, warn};
 
 use crate::announce::Announcer;
+use crate::clock::linked::Linked;
 use crate::clock::{ClockStats, MonoClock, monotonic_ns, poll_dantesync, realtime_ns};
 #[cfg(unix)]
 use crate::ctl;
@@ -104,6 +105,11 @@ pub enum ClockSource {
     /// dantesync on the box, polled once a second: the network's PTP time
     /// (production; [`prepare`] always uses it).
     Dantesync,
+    /// dlink's default (dstack #68, owner 2.11.2026): dsync's in-process
+    /// follower (dsync-ptp) on the device's interface when it is locked,
+    /// the dsync service otherwise ([`crate::clock::linked`]): a clock with
+    /// or without the service, never worse than it.
+    Linked,
     /// TEST ONLY: this machine's own clock (realtime, read once, then
     /// monotonic), ready at once, never re-anchored. For a device with no
     /// PTP network (CI): its flows are on no network's time, so another
@@ -265,6 +271,8 @@ pub struct Prepared {
     sockets: Sockets,
     /// The media clock the poller keeps (the media side reads it).
     mono: Arc<MonoClock>,
+    /// The linked clock's selector side ([`ClockSource::Linked`]).
+    linked: Option<Arc<Linked>>,
     source: ClockSource,
     media: Arc<Media>,
     #[cfg(unix)]
@@ -345,6 +353,7 @@ pub fn prepare_config(
         gateway = !net.gateway.is_unspecified(),
         clock = match source {
             ClockSource::Dantesync => "dantesync",
+            ClockSource::Linked => "linked (dsync's follower, else the service)",
             ClockSource::System => "system (test only)",
         },
         timing = ?device.cfg.timing,
@@ -370,8 +379,17 @@ pub fn prepare_config(
     // The media clock: PTP time from dantesync on the box, polled once a
     // second for the device's life (from the start).
     let mono = Arc::new(MonoClock::new());
+    // dlink's: dsync's follower when locked, the service otherwise.
+    let linked = (source == ClockSource::Linked).then(|| {
+        let (internal, keep) = crate::clock::linked::start_internal(&ifa.name);
+        Arc::new(Linked::new(internal, Arc::clone(&mono), keep))
+    });
+    let ptp: Arc<dyn crate::clock::PtpClock> = match &linked {
+        Some(l) => l.clone(),
+        None => mono.clone(),
+    };
     let clock = Clock {
-        ptp: mono.clone(),
+        ptp,
         freq: Arc::new(AtomicI32::new(0)),
         stats: Arc::new(ClockStats::default()),
     };
@@ -408,6 +426,7 @@ pub fn prepare_config(
         rt,
         sockets,
         mono,
+        linked,
         source,
         media: Arc::new(media),
         #[cfg(unix)]
@@ -464,6 +483,7 @@ impl Prepared {
             rt,
             sockets,
             mono,
+            linked,
             source,
             media,
             #[cfg(unix)]
@@ -491,6 +511,7 @@ impl Prepared {
             net,
             sockets,
             mono,
+            linked,
             source,
             media,
             #[cfg(unix)]
@@ -529,6 +550,8 @@ struct Served {
     net: NetInfo,
     sockets: Sockets,
     mono: Arc<MonoClock>,
+    /// The linked clock's selector side ([`ClockSource::Linked`]).
+    linked: Option<Arc<Linked>>,
     source: ClockSource,
     media: Arc<Media>,
     #[cfg(unix)]
@@ -680,6 +703,15 @@ fn device_thread(
     goodbye
 }
 
+/// The linked clock's selector: once a second, for the device's life.
+async fn select_source(linked: Arc<Linked>) {
+    let mut every = tokio::time::interval(Duration::from_secs(1));
+    loop {
+        every.tick().await;
+        linked.tick();
+    }
+}
+
 /// The media clock's poller, then [`daemon::serve`] until `watch`'s stop.
 async fn serve_device(
     s: Served,
@@ -687,12 +719,15 @@ async fn serve_device(
     control: &Control,
     watch: Watch,
 ) -> Result<(), ServeError> {
-    if s.source == ClockSource::Dantesync {
+    if matches!(s.source, ClockSource::Dantesync | ClockSource::Linked) {
         tokio::spawn(poll_dantesync(
             s.mono,
             Arc::clone(&s.media.freq),
             Arc::clone(&s.media.clock_stats),
         ));
+    }
+    if let Some(linked) = s.linked {
+        tokio::spawn(select_source(linked));
     }
     #[cfg(unix)]
     let ctl_server = {

@@ -25,6 +25,10 @@ fn routed_ipv4() -> std::net::Ipv4Addr {
     }
 }
 
+/// Held by each test that runs a device: they bind the same Dante ports on
+/// the routed address, and the harness runs a file's tests at once.
+static ONE_DEVICE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// A constant on output 0, and the largest input 0 heard (as `f64` bits).
 struct Echo {
     heard: Arc<AtomicU64>,
@@ -42,6 +46,9 @@ impl Process for Echo {
 
 #[test]
 fn a_dlink_device_runs_the_app_s_processor_at_its_defaults() {
+    let _one = ONE_DEVICE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = tempfile::tempdir().unwrap();
     let state = dir.path().join("dlink.toml");
     let config = Config::new("dlink-test", &state)
@@ -92,4 +99,33 @@ fn a_dlink_device_runs_the_app_s_processor_at_its_defaults() {
         dstack::clock::profile(),
         dstack::device::TimingProfile::Normal
     );
+}
+
+/// dlink's default clock (#68): dsync's follower, else the service. On a
+/// runner the follower cannot bind port 319 (no capability) and no dsync
+/// service runs: the device still starts, serves and stops; it just has no
+/// media time until a source is ready.
+#[test]
+fn a_dlink_device_on_the_linked_clock_starts_and_stops_without_a_source() {
+    let _one = ONE_DEVICE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let dir = tempfile::tempdir().unwrap();
+    let config = Config::new("dlink-linked", dir.path().join("dlink.toml")).tx(["Out 1"]);
+    let link = Link::start_on(
+        &config,
+        &Place::Ip(routed_ipv4()),
+        Map {
+            rx: vec![],
+            tx: vec![0],
+        },
+        Echo {
+            heard: Arc::new(AtomicU64::new(0)),
+        },
+        Clock::Linked,
+    )
+    .expect("the dlink device started on the linked clock");
+    std::thread::sleep(Duration::from_millis(1500));
+    assert_eq!(link.ended(), None);
+    assert!(matches!(link.stop(), Stopped::Done));
 }
