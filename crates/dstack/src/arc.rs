@@ -21,7 +21,7 @@
 //! |        | announced, our own subscriptions to it renamed |
 //! | 0x1002 | the device name |
 //! | 0x1003 | the device names: current, factory, board, revision |
-//! | 0x1100 | with start code 0x2809 (netaudio's keyed read, [`control::settings`]): each key asked, in its order, that we hold (`settings_body`); any other start code (Dante Controller's 0x27ff): zeros, as inferno |
+//! | 0x1100 | keyed (a count and keys: netaudio's start code 0x2809, [`control::settings`], and Dante Controller's 0x27ff with its 19 keys): each key asked, in its order, that we hold (`settings_body`), the latency's default and range included; with no body: zeros, as inferno |
 //! | 0x1102 | zeros, as inferno answers Dante Controller |
 //! | 0x2000 | TX channels with their default names, paged |
 //! | 0x2010 | TX channels' current names, paged |
@@ -367,11 +367,17 @@ pub fn handle(
         }
         op::DEVICE_NAMES => ok(&device_names(state, cfg)),
         op::DEVICE_RENAME => device_rename(&h, body, state),
+        // Keyed, from netaudio (start 0x2809) or Dante Controller (0x27ff
+        // with its 19 keys): our values, as the hardware answers both.
         op::ZEROS_1100 if h.start == control::SETTINGS_START => match settings_body(body, cfg) {
             Some(out) => ok(&out),
             None => unanswered(&h, "a settings request that does not read"),
         },
-        op::ZEROS_1100 => ok(&[0; 110]),
+        // Dante Controller's (0x27ff with its 19 keys): our values too; a
+        // body that does not read, or none, gets zeros as inferno's.
+        op::ZEROS_1100 => ok(&settings_body(body, cfg)
+            .filter(|_| !body.is_empty())
+            .unwrap_or_else(|| vec![0; 110])),
         op::ZEROS_1102 => ok(&[0; 94]),
         op::TX_CHANNELS => tx_channels(&h, body, cfg),
         op::TX_NAMES => tx_names(&h, body, state),
@@ -671,21 +677,36 @@ fn stated_latency_ns(latency_ns: u64, rate: u32) -> u32 {
     u32::try_from(ns).unwrap_or(u32::MAX)
 }
 
+/// The latency default the settings read states: Dante's 1 ms, as the
+/// hardware states it.
+const LATENCY_DEFAULT_NS: u64 = 1_000_000;
+
 /// The most keys one settings reply holds: each takes a pair and a value
 /// (8 bytes), and the count is one byte.
 const SETTINGS_MAX_KEYS: usize = 128;
 const _: () = assert!(HEADER_LEN + 2 + 8 * SETTINGS_MAX_KEYS <= MAX_DATAGRAM);
 
 /// Our value for a settings key (0x1100): the sample rate, no pull-up,
-/// and our latency as configured and in effect. The default and the
-/// range we do not keep, so they are not answered.
+/// our latency as configured and in effect, a fixed default
+/// ([`LATENCY_DEFAULT_NS`]) and the range
+/// Dante Controller may set ([`DeviceConfig::latency_range`]). Dante
+/// Controller greys its latency control and shows 0.0 ms without the
+/// default and the range (mbc, 2.11.2026); every hardware device answers
+/// them.
 fn setting(key: u16, cfg: &DeviceConfig) -> Option<u32> {
     use control::key;
-    let latency = u32::try_from(cfg.latency_ns).unwrap_or(u32::MAX);
+    let ns = |v: u64| u32::try_from(v).unwrap_or(u32::MAX);
+    let (min, max) = cfg.latency_range();
     match key {
         key::SAMPLE_RATE => Some(cfg.sample_rate),
         key::PULLUP => Some(0),
-        key::LATENCY_CONFIGURED | key::LATENCY_ACTIVE => Some(latency),
+        key::LATENCY_CONFIGURED | key::LATENCY_ACTIVE => Some(ns(cfg.latency_ns)),
+        // A fixed default (Dante's 1 ms, within our range): it never moves
+        // with a write, which netaudio's write check would read as another
+        // setting changed.
+        key::LATENCY_DEFAULT => Some(ns(LATENCY_DEFAULT_NS.clamp(min, max))),
+        key::LATENCY_MIN => Some(ns(min)),
+        key::LATENCY_MAX => Some(ns(max)),
         _ => None,
     }
 }
