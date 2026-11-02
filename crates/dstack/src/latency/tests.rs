@@ -1,5 +1,6 @@
 use super::*;
 use crate::info::{Records, heartbeat_body};
+use std::net::{SocketAddr, SocketAddrV4, UdpSocket};
 
 /// A heartbeat datagram with `body`, from device id 1.
 fn datagram(body: &[u8]) -> Vec<u8> {
@@ -219,4 +220,173 @@ fn two_devices_on_one_address_are_heard_apart_by_their_device_id() {
     assert_eq!(got[1].slots[0].peaks_us, [10_000, 1_000]);
     assert_eq!((got[1].slots[0].late, got[1].slots[0].late_total), (4, 9));
     assert_eq!(Heard::default().result(), []);
+}
+
+/// The box's routed IPv4 (connecting a UDP socket picks the route and
+/// sends nothing).
+fn routed_ipv4() -> Ipv4Addr {
+    let probe = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).expect("a UDP socket");
+    probe
+        .connect((Ipv4Addr::new(192, 0, 2, 1), 9))
+        .expect("a default route on this box");
+    match probe.local_addr().expect("the routed address") {
+        SocketAddr::V4(a) if !a.ip().is_loopback() && !a.ip().is_unspecified() => *a.ip(),
+        other => panic!("no routed IPv4 address on this box: {other}"),
+    }
+}
+
+/// A device id no other sender on the box uses (dcontroller's E2E runs
+/// devices on the same address): the process id and the time.
+fn unique_id() -> [u8; 8] {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("after 1970")
+        .subsec_nanos();
+    let mut id = [0; 8];
+    id[..4].copy_from_slice(&std::process::id().to_be_bytes());
+    id[4..].copy_from_slice(&nanos.to_be_bytes());
+    id
+}
+
+/// A heartbeat from `id` with one 0x8004 record: `late` for slot 1 and
+/// `late + 1` for slot 2.
+fn late_beat(id: [u8; 8], late: u32) -> Vec<u8> {
+    let mut record = Vec::new();
+    record.extend_from_slice(&28u16.to_be_bytes());
+    record.extend_from_slice(&LATE.to_be_bytes());
+    record.extend_from_slice(&[0, 4, 0, 24, 0, 1, 0, 0]);
+    record.extend_from_slice(&[0, 2, 0, 0, 0, 20, 0, 0]);
+    record.extend_from_slice(&late.to_be_bytes());
+    record.extend_from_slice(&(late + 1).to_be_bytes());
+    datagram_from(id, &record)
+}
+
+/// A sender on `ip` to the heartbeat group, looped back to this host.
+fn group_sender(ip: Ipv4Addr) -> UdpSocket {
+    let s = UdpSocket::bind((ip, 0)).expect("a sending socket");
+    s.set_multicast_loop_v4(true).expect("multicast loop");
+    let s = socket2::Socket::from(s);
+    s.set_multicast_if_v4(&ip).expect("the multicast interface");
+    s.into()
+}
+
+/// The next beat from `id` within `within`, skipping other senders'.
+fn next_from(
+    rx: &std::sync::mpsc::Receiver<(Ipv4Addr, Beat)>,
+    id: [u8; 8],
+    within: Duration,
+) -> (Ipv4Addr, Beat) {
+    let end = Instant::now() + within;
+    loop {
+        match rx.recv_timeout(end.saturating_duration_since(Instant::now())) {
+            Ok((from, beat)) if beat.device_id == id => return (from, beat),
+            Ok(_) => {}
+            Err(e) => panic!("no heartbeat from our id within {within:?}: {e}"),
+        }
+    }
+}
+
+/// Reads `rx` until it closes; panics if it stays open for 2 s.
+fn closes(rx: &std::sync::mpsc::Receiver<(Ipv4Addr, Beat)>) {
+    use std::sync::mpsc::RecvTimeoutError;
+    loop {
+        match rx.recv_timeout(Duration::from_secs(2)) {
+            Ok(_) => {}
+            Err(RecvTimeoutError::Disconnected) => return,
+            Err(RecvTimeoutError::Timeout) => panic!("the channel stayed open"),
+        }
+    }
+}
+
+#[test]
+fn the_listener_hands_on_every_heartbeat_with_its_sender_until_stopped() {
+    let ip = routed_ipv4();
+    let id = unique_id();
+    let (listener, rx) = Listener::start(ip).expect("the heartbeat group joined");
+    let tx = group_sender(ip);
+    let group = SocketAddrV4::new(HEARTBEAT_GROUP, HEARTBEAT_PORT);
+    // Something that is not a heartbeat comes first: it is left out.
+    let mut junk = late_beat(id, 0);
+    junk[0] = 0;
+    tx.send_to(&junk, group).expect("sent");
+    // A read may time out between the beats (the thread polls its stop
+    // every 0.2 s; other devices' heartbeats can fill the gap); the
+    // listener keeps going on the same socket.
+    tx.send_to(&late_beat(id, 5), group).expect("sent");
+    let (from, beat) = next_from(&rx, id, Duration::from_secs(5));
+    assert_eq!(
+        (from, beat.late, beat.lateness),
+        (ip, Some(vec![5, 6]), None)
+    );
+    std::thread::sleep(STOP_POLL * 2);
+    tx.send_to(&late_beat(id, 9), group).expect("sent");
+    let (from, beat) = next_from(&rx, id, Duration::from_secs(5));
+    assert_eq!((from, beat.late), (ip, Some(vec![9, 10])));
+    let t = Instant::now();
+    drop(listener);
+    assert!(
+        t.elapsed() < Duration::from_secs(1),
+        "the stop took {:?}",
+        t.elapsed()
+    );
+    closes(&rx);
+}
+
+#[test]
+fn only_a_read_that_timed_out_is_a_timeout() {
+    use std::io::{Error, ErrorKind};
+    assert!(timed_out(&Error::from(ErrorKind::WouldBlock)));
+    assert!(timed_out(&Error::from(ErrorKind::TimedOut)));
+    assert!(!timed_out(&Error::from(ErrorKind::ConnectionReset)));
+}
+
+#[test]
+fn the_listener_stops_when_its_receiver_is_gone() {
+    let ip = routed_ipv4();
+    let (listener, rx) = Listener::start(ip).expect("the heartbeat group joined");
+    drop(rx);
+    // The next heartbeat finds no receiver: the thread ends on its own.
+    let tx = group_sender(ip);
+    let group = SocketAddrV4::new(HEARTBEAT_GROUP, HEARTBEAT_PORT);
+    let end = Instant::now() + Duration::from_secs(5);
+    while !listener.thread.as_ref().expect("running").is_finished() {
+        assert!(
+            Instant::now() < end,
+            "the thread kept running without a receiver"
+        );
+        tx.send_to(&late_beat(unique_id(), 1), group).expect("sent");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn one_read_hands_on_a_heartbeat_and_ends_only_on_a_failure_or_no_receiver() {
+    use std::io::{Error, ErrorKind};
+    let from = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 7), 8708));
+    let beat = late_beat([7; 8], 3);
+    let (tx, rx) = std::sync::mpsc::channel();
+    // A heartbeat goes on, with its sender.
+    assert!(hand_on(Ok((beat.len(), from)), &beat, &tx));
+    let (ip, got) = rx.try_recv().expect("handed on");
+    assert_eq!(
+        (ip, got.device_id, got.late),
+        (Ipv4Addr::new(10, 0, 0, 7), [7; 8], Some(vec![3, 4]))
+    );
+    // Not a heartbeat, a length past the buffer, an IPv6 sender: left out.
+    assert!(hand_on(Ok((4, from)), &beat, &tx));
+    assert!(hand_on(Ok((beat.len() + 1, from)), &beat, &tx));
+    let v6 = SocketAddr::new(std::net::Ipv6Addr::LOCALHOST.into(), 8708);
+    assert!(hand_on(Ok((beat.len(), v6)), &beat, &tx));
+    assert!(rx.try_recv().is_err());
+    // A timeout goes on; a failed socket ends the thread.
+    assert!(hand_on(Err(Error::from(ErrorKind::WouldBlock)), &beat, &tx));
+    assert!(!hand_on(
+        Err(Error::from(ErrorKind::ConnectionReset)),
+        &beat,
+        &tx
+    ));
+    // No receiver: a heartbeat ends the thread, anything else does not.
+    drop(rx);
+    assert!(hand_on(Ok((4, from)), &beat, &tx));
+    assert!(!hand_on(Ok((beat.len(), from)), &beat, &tx));
 }
