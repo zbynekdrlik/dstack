@@ -974,6 +974,22 @@ fn a_port_base_puts_each_slot_on_its_own_port_and_a_taken_one_is_named() {
     assert_eq!(distinct.len(), MAX_FLOWS);
 }
 
+/// A base too high for 32 ports is refused before any port is bound: the
+/// Windows runner refused 65531 (an excluded port range), and the error
+/// named that port instead of the base's range.
+#[test]
+fn a_base_past_the_last_port_is_refused_before_any_bind() {
+    let rings = || -> Arc<[Ring]> { vec![Ring::new()].into() };
+    // One of the ports the base would take is held: a bind in order would
+    // fail on it first.
+    let held = (65_530u16..=65_535)
+        .find_map(|p| std::net::UdpSocket::bind(SocketAddrV4::new(LOOPBACK, p)).ok())
+        .expect("a free loopback port in 65530..=65535");
+    let err = RxShared::new_at(RATE, LOOPBACK, rings(), Some(65_530)).unwrap_err();
+    assert!(err.to_string().contains("past port 65535"), "{err}");
+    drop(held);
+}
+
 /// iemmixer (1.11): a single packet now and then missing from a flow. The
 /// stamps are the sequence: a packet that begins past the end of the one
 /// before is a gap, and its skipped frames are counted.
