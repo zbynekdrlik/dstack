@@ -90,6 +90,8 @@ pub struct Media {
     /// The engine's pump once one is attached (phase C): the control
     /// socket's status shows it.
     engine: Mutex<Option<Arc<PumpStats>>>,
+    /// The channels' levels the heartbeat leaves for the meter frames.
+    pub levels: Arc<crate::info::Levels>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -141,6 +143,7 @@ impl Media {
             requests: Arc::default(),
             checks: Mutex::new(Checks::new(cfg.rx.len(), cfg.sample_rate)),
             engine: Mutex::new(None),
+            levels: Arc::default(),
         })
     }
 
@@ -181,6 +184,7 @@ impl Media {
             tx: Arc::clone(&self.tx),
             rx: Arc::clone(&self.rx),
             manager: Arc::clone(&self.manager),
+            levels: Arc::clone(&self.levels),
         }
     }
 

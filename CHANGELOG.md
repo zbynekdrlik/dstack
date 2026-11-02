@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.35 (2026-11-02)
+
+- New: our device answers a meter subscription (CMC 0x3010, Dante Controller's and `meter::Meter`'s). It replies with the request's own bytes and result OK. While renewed (`cmc::METER_LEASE`, 10 s after the last renewal) the destination gets a frame once a second (`cmc::METER_EVERY`) with each TX and RX channel's level, at most `cmc::METER_MAX` (16) destinations at once. A zero destination stops it. The levels are the heartbeat's own peaks (`info::Levels`, `meter::level_of_peak`: a heartbeat byte is -2 dBFS a step, so the meter byte is that byte + 1, the floor 253), so the heartbeat's 0x8002 peaks stay whole. dcontroller asked for it, for its own-device E2E.
+- New: `meter::frame` builds a meter frame, `meter::destination` reads a subscription's destination.
+- `info::Sources` gains `levels`; `cmc::serve_cmc` takes the levels; `daemon::media::Media` gains `levels`.
+
 ## 0.4.34 (2026-11-02)
 
 - `dante-stack-dev` runs on Windows too: `clock`, `card` and the device. `ctl` refuses there, because Windows has no control socket. v0.4.33's Windows release binary was a stub that printed "runs on Linux only"; `daemon::cli` now builds on Linux and Windows.
