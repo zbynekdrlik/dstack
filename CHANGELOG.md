@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.19 (2026-11-03)
+
+- Log (dstack #1, dasio#1): a TX flow to a destination on the same PC (another device of ours on the same address) is logged at info, "not marked", instead of a warning. QoS2 has no route to it (`QOSAddSocketToFlow` 1168, `ERROR_NOT_FOUND`), and its packets never leave the NIC. New: `media::dscp::{local_destination, ERROR_NOT_FOUND}`.
+
 ## 0.5.18 (2026-11-03)
 
 - Fix (dstack #1, dasio#1): on Windows our TX audio now leaves marked DSCP 46 (EF), as Dante hardware marks it.

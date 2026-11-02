@@ -54,6 +54,17 @@ pub enum Verdict {
 /// Windows' `ERROR_ACCESS_DENIED`.
 pub const ERROR_ACCESS_DENIED: u32 = 5;
 
+/// Windows' `ERROR_NOT_FOUND`: what `QOSAddSocketToFlow` returns for a
+/// destination on this PC (QoS2 has no route to it).
+pub const ERROR_NOT_FOUND: u32 = 1168;
+
+/// Whether a failed `QOSAddSocketToFlow` with `code` only means a
+/// destination on this PC (another device of ours on the same address):
+/// nothing leaves the NIC to mark, so it is no fault.
+pub fn local_destination(code: u32) -> bool {
+    code == ERROR_NOT_FOUND
+}
+
 /// The verdict of a `QOSSetFlow` that returned `error` (none: it worked).
 pub fn verdict(error: Option<u32>) -> Verdict {
     match error {

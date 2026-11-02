@@ -97,7 +97,11 @@ impl Qos {
         if !added {
             // SAFETY: no precondition.
             let code = unsafe { GetLastError() };
-            warn!(slot, %dest, code, "TX flow left unmarked: QOSAddSocketToFlow failed");
+            if super::local_destination(code) {
+                info!(slot, %dest, "TX flow to a destination on this PC: not marked (it never leaves the NIC)");
+            } else {
+                warn!(slot, %dest, code, "TX flow left unmarked: QOSAddSocketToFlow failed");
+            }
             self.last = Some(Verdict::Failed(code));
             return;
         }
