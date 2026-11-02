@@ -42,6 +42,9 @@ exclude_re = [
   # request, the reply match, the parses and `ask` are unit tested.
   "info/client.rs.*(replace|in) (group_socket|on_group|product_info|board_info|clock_status|network_info|sample_rate|set_sample_rate|set_encoding)\\b",
   "ask_realtime",
+  # Windows-only (cfg(windows)) power-throttling call: not compiled on the
+  # gate's Linux, so its mutants build and cannot fail; CI runs it on Windows.
+  "tx.rs.*unthrottle",
   # Log-only: the qdisc verdict is tested in qdisc::check.
   "qdisc.rs.*report",
   "replace set_profile -> bool",
