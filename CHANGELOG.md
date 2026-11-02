@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.5 (2026-11-02)
+
+- New (#1): once a minute the device compares its NIC's own sent-bytes counter with its audio's wire bytes. It warns ("the Dante NIC carries other traffic") when the rest averages over 100 kB/s, because our audio waits behind it in the NIC's queue. Linux reads `/sys/class/net/<nic>/statistics/tx_bytes`; Windows reads `GetIfEntry2`'s `OutOctets`.
+- New: `media::tx::LaneCounts::bytes` and `TxShared::bytes_sent` (wire bytes: the datagram plus 42 header bytes).
+
 ## 0.5.4 (2026-11-02)
 
 - New: dlink's media clock is dsync's in-process PTP follower (dsync-ptp, dsync v1.24.0) by default (#68, owner 2.11.2026).

@@ -513,6 +513,7 @@ impl<const N: usize> Cell<N> {
 #[derive(Debug, Default)]
 pub struct LaneStats {
     packets: AtomicU64,
+    bytes: AtomicU64,
     send_errors: AtomicU64,
     keepalives: AtomicU64,
     rebootstraps: AtomicU64,
@@ -532,6 +533,9 @@ pub struct LaneStats {
 pub struct LaneCounts {
     /// Packets sent whole.
     pub packets: u64,
+    /// Their bytes on the wire: the datagram plus [`WIRE_OVERHEAD`] (what
+    /// the NIC's own counter counts, [`crate::traffic`]).
+    pub bytes: u64,
     /// Packets the socket refused or cut.
     pub send_errors: u64,
     /// Datagrams from the flow's receiver.
@@ -797,6 +801,7 @@ impl TxShared {
         };
         LaneCounts {
             packets: l.packets.load(Ordering::Relaxed),
+            bytes: l.bytes.load(Ordering::Relaxed),
             send_errors: l.send_errors.load(Ordering::Relaxed),
             keepalives: l.keepalives.load(Ordering::Relaxed),
             rebootstraps: l.rebootstraps.load(Ordering::Relaxed),
@@ -808,6 +813,14 @@ impl TxShared {
             over_latency: l.over_latency.load(Ordering::Relaxed),
             direct: l.direct.load(Ordering::Relaxed),
         }
+    }
+
+    /// Every slot's bytes on the wire since the device started.
+    pub fn bytes_sent(&self) -> u64 {
+        self.lanes
+            .iter()
+            .map(|l| l.bytes.load(Ordering::Relaxed))
+            .sum()
     }
 
     /// Where slot `slot`'s audio comes from and its keepalives go.
@@ -1172,7 +1185,7 @@ impl Transmitter {
                 stats.late[late_bin(late)].fetch_add(1, Ordering::Relaxed);
                 stats.late_max_ns.fetch_max(late, Ordering::Relaxed);
                 stats.send_max_ns.fetch_max(took, Ordering::Relaxed);
-                count_send(stats, &sent);
+                count_send(stats, &sent, n);
             }
             stats.holes.fetch_add(holes as u64, Ordering::Relaxed);
             stats
@@ -1212,12 +1225,19 @@ fn send_one(
     }
 }
 
-/// Counts one send's outcome in `stats`: a packet (and a direct one when
-/// it went past the qdisc), or a send error.
-fn count_send(stats: &LaneStats, sent: &io::Result<bool>) {
+/// An audio packet's bytes on the wire past its datagram: the Ethernet,
+/// IPv4 and UDP headers (14 + 20 + 8), as the NIC's counter counts them.
+pub const WIRE_OVERHEAD: u64 = 42;
+
+/// Counts one send's outcome in `stats`: a packet of `len` datagram bytes
+/// (and a direct one when it went past the qdisc), or a send error.
+fn count_send(stats: &LaneStats, sent: &io::Result<bool>, len: usize) {
     match sent {
         Ok(direct) => {
             stats.packets.fetch_add(1, Ordering::Relaxed);
+            stats
+                .bytes
+                .fetch_add(len as u64 + WIRE_OVERHEAD, Ordering::Relaxed);
             if *direct {
                 stats.direct.fetch_add(1, Ordering::Relaxed);
             }

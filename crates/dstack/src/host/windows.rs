@@ -30,6 +30,11 @@ pub(crate) mod win_nic {
     /// The MAC (`aa:bb:..`), the receive speed in Mbit/s and the GUID
     /// (`{...}`, its registry name) of the adapter that holds `ip`.
     pub fn of(ip: Ipv4Addr) -> Result<(String, Option<u64>, String), String> {
+        of_with_index(ip).map(|(mac, speed, guid, _)| (mac, speed, guid))
+    }
+
+    /// [`of`] and the adapter's interface index.
+    pub fn of_with_index(ip: Ipv4Addr) -> Result<(String, Option<u64>, String, u32), String> {
         let flags = GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER;
         let mut len: u32 = 16 * 1024;
         let mut buf: Vec<u64> = Vec::new();
@@ -84,7 +89,9 @@ pub(crate) mod win_nic {
                                 .to_string_lossy()
                                 .into_owned()
                         };
-                        return Ok((mac, speed, guid));
+                        // SAFETY: the IPv4 index of the adapter's header union.
+                        let index = unsafe { ad.Anonymous1.Anonymous.IfIndex };
+                        return Ok((mac, speed, guid, index));
                     }
                 }
                 u = ua.Next;

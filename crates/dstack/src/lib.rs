@@ -108,7 +108,9 @@ pub mod meter;
 pub mod qdisc;
 pub mod stream;
 pub mod subscribe;
+
 #[cfg(test)]
 mod test_log;
+pub mod traffic;
 pub mod winsock;
 pub mod wire;

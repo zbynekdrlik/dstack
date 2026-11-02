@@ -284,6 +284,8 @@ pub struct Driver {
     late: crate::media::late::LateWatch,
     /// Our RX flows' missing packets, logged once a second.
     loss: crate::media::late::RxWatch,
+    /// Other traffic on our NIC, logged once a minute.
+    traffic: crate::traffic::TrafficWatch,
 }
 
 impl Driver {
@@ -302,13 +304,15 @@ impl Driver {
                 stops: JoinSet::new(),
                 late: crate::media::late::LateWatch::new(),
                 loss: crate::media::late::RxWatch::new(),
+                traffic: crate::traffic::TrafficWatch::new(),
             },
             back,
         )
     }
 
     /// One round of the manager now, with the channel records `resolver`
-    /// knows; then the checks' round and the late and loss watches.
+    /// knows; then the checks' round and the late, loss and traffic
+    /// watches.
     pub fn tick(&mut self, resolver: &dyn Resolver) {
         let now = self.media.rx.now_ns();
         let packets = self.media.rx.packets();
@@ -317,6 +321,7 @@ impl Driver {
         self.media.step_checks();
         self.late.watch(now, &self.media.tx);
         self.loss.watch(now, &self.media.rx);
+        self.traffic.watch(now, self.media.ip, &self.media.tx);
     }
 
     /// The answer to the request of `flow`.
