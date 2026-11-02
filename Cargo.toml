@@ -1,9 +1,11 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
+# Third-party code with a dstack patch: not linted as ours.
+exclude = ["vendor/mdns-sd"]
 
 [workspace.package]
-version = "0.5.14"
+version = "0.5.15"
 edition = "2024"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/zbynekdrlik/dstack"
