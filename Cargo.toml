@@ -1,6 +1,8 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
+# Third-party code with a dstack patch: not linted as ours.
+exclude = ["vendor/mdns-sd"]
 
 [workspace.package]
 version = "0.5.15"
