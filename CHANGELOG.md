@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.6 (2026-11-03)
+
+- New (dstack #1, dasio FOH data): `spin_tail_ns` in the device config (Windows, low-latency profile).
+  - It sets how long before each deadline the media threads stop sleeping on the high-resolution timer and spin. The range is 0 to 50 ms, and the default stays 50 ms, so nothing changes without it.
+  - On FOH two dasio devices at 1 ms spin 4–6 CPUs at 100 %. A tail of 100–300 µs frees them where the timer wakes on time; measure it first (`docs/windows-box.md`).
+  - New: `clock::{SPIN_TAIL_NS, SPIN_TAIL_MAX_NS, spin_tail_of, spin_tail_for, set_spin_tail_ns, spin_tail_ns_raw}`.
+  - New public field: `DeviceConfig::spin_tail_ns`. Struct literals without `..` must set it.
+
 ## 0.6.5 (2026-11-03)
 
 - New (dstack #68): dsync's in-process PTP follower runs on Windows too (dsync-ptp v1.27.1, which loads Npcap's `wpcap.dll` at run time).

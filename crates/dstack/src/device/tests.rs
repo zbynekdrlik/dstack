@@ -1715,3 +1715,22 @@ fn flow_slots_default_to_every_slot_and_are_checked() {
         assert_eq!(cfg.problems(), ["flow_slots: 1 to 32"]);
     }
 }
+
+#[test]
+fn the_spin_tail_is_taken_and_checked() {
+    let text = format!("{TEST_DEVICE}\nspin_tail_ns = 200000\n");
+    assert_eq!(
+        DeviceConfig::from_toml(&text).unwrap().spin_tail_ns,
+        Some(200_000)
+    );
+    assert_eq!(
+        DeviceConfig::from_toml(TEST_DEVICE).unwrap().spin_tail_ns,
+        None
+    );
+    let too_long = format!("{TEST_DEVICE}\nspin_tail_ns = 50000001\n");
+    let problems = DeviceConfig::from_toml(&too_long).unwrap_err().problems;
+    assert!(
+        problems.contains(&"spin_tail_ns: 0 to 50000000".to_string()),
+        "{problems:?}"
+    );
+}

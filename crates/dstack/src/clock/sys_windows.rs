@@ -23,12 +23,13 @@ use windows_sys::Win32::System::Threading::{
 
 /// 100 ns intervals from 1601-01-01 to 1970-01-01.
 const UNIX_EPOCH_FT: i64 = 116_444_736_000_000_000;
-/// Waits up to this long are spun (yielding), never slept: on the FOH PC
-/// the media threads, alone on their CPUs at priority 31, still woke past
-/// 2.7 ms now and then while the CPUs themselves were never held over
-/// 0.2 ms (`dasio jitter`): the waitable timer's late wakes. Longer
-/// waits (the clock not ready) sleep on the timer, the last 50 ms spun.
-const SPIN_NS: i64 = 50_000_000;
+// The spin tail (`super::spin_tail_ns`, the device's `spin_tail_ns`,
+// 50 ms unless set): waits up to it are spun (yielding), never slept. On
+// the FOH PC (October 2026) the media threads, alone on their CPUs at
+// priority 31, still woke past 2.7 ms now and then while the CPUs
+// themselves were never held over 0.2 ms (`dasio jitter`): the waitable
+// timer's late wakes, measured with the Realtek driver that had a 20-30 ms
+// DPC. A shorter tail is for a PC where the timer wakes on time.
 
 /// The precise system time, ns since 1970.
 pub fn realtime_ns() -> i64 {
@@ -148,7 +149,7 @@ impl Drop for Timer {
 }
 
 /// Sleeps until [`monotonic_ns`] reaches `target`: the timer for all but
-/// the last [`SPIN_NS`], then a spin.
+/// the last spin tail (`super::spin_tail_ns`), then a spin.
 pub fn sleep_until_monotonic(target: i64) {
     sleep_until_in(target, super::wait_mode());
 }
@@ -158,10 +159,9 @@ fn sleep_until_in(target: i64, mode: super::WaitMode) {
     let left = target - monotonic_ns();
     // The timer mode (problem A's measurement): the whole wait on the
     // timer, no core spun.
-    let spin = match mode {
-        super::WaitMode::Spin => SPIN_NS,
-        super::WaitMode::Timer => 0,
-    };
+    let tail =
+        i64::try_from(super::spin_tail_for(mode, super::spin_tail_ns_raw())).unwrap_or(i64::MAX);
+    let spin = tail;
     if left > spin {
         let h = timer();
         if !h.is_null() {
