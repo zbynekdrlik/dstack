@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! dstack #68: a dlink device in the app's process, on the box's routed
-//! address and its own system clock, at dlink's defaults (10 ms, the
-//! normal profile: no real-time priority, no pinning). A file of its own,
+//! address and its own system clock, at dlink's defaults (a 10 ms budget,
+//! the normal profile: no real-time priority, no pinning). A file of its own,
 //! so its process sets the normal profile (one per process). Our device
 //! hears itself (the tests' rule: our device only).
 
 use std::net::{SocketAddr, UdpSocket};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use dlink::{Block, Clock, Config, Link, Map, Place, Process, Stopped, SubState, SubStatus};
@@ -91,9 +91,10 @@ fn a_dlink_device_runs_the_app_s_processor_at_its_defaults() {
         "our TX 1 came back on RX 1 as {got}"
     );
     assert!(pump.media && pump.blocks > 0, "{pump:?}");
-    // The pump runs at dlink's timing (48 kHz): B 128 (dstack #90) + P 480
-    // (10 ms) + W 240 (5 ms).
-    assert_eq!((pump.playout, pump.offset), (480, 848), "{pump:?}");
+    // The pump runs at dlink's timing (48 kHz): B 128 (dstack #90) + P 352
+    // (7.33 ms, what the 10 ms budget leaves after B and W; dstack #68) + W
+    // 128 (the block, over 2 ms).
+    assert_eq!((pump.playout, pump.offset), (352, 608), "{pump:?}");
     assert!(matches!(stopped, Stopped::Done), "{stopped:?}");
     assert_eq!(
         dstack::clock::profile(),
@@ -179,10 +180,11 @@ fn a_48_khz_app_runs_a_96_khz_device_through_the_conversion() {
     // The device's block is 128 frames at 96 kHz (dstack #90): the app gets 64
     // at 48 kHz.
     assert_eq!(frames.load(Ordering::Relaxed), 64);
-    // The RX flow runs at 96 kHz: its 10 ms latency is 960 samples.
-    assert!(status.contains("\"latency\":960"), "{status}");
-    // The pump runs at the device's 96 kHz: P 960 (10 ms), W 480 (5 ms).
-    assert_eq!((pump.playout, pump.offset), (960, 1_568), "{pump:?}");
+    // The RX flow runs at 96 kHz: the split's 5.17 ms latency (10 ms less W
+    // 2 ms and the converter's 2.83 ms TX delay; dstack #68) is 496 samples.
+    assert!(status.contains("\"latency\":496"), "{status}");
+    // The pump runs at the device's 96 kHz: B 128 + P 496 + W 192 (2 ms).
+    assert_eq!((pump.playout, pump.offset), (496, 816), "{pump:?}");
     assert!(matches!(stopped, Stopped::Done), "{stopped:?}");
 }
 
@@ -280,4 +282,123 @@ fn a_dlink_device_on_the_linked_clock_starts_and_stops_without_a_source() {
     std::thread::sleep(Duration::from_millis(1500));
     assert_eq!(link.ended(), None);
     assert!(matches!(link.stop(), Stopped::Done));
+}
+
+/// The app's step out, and where it comes back in: once `go` is set, from
+/// its next block on (app frame `sent`) it sends 0.5 on output 0; the first
+/// input 0 frame at 0.25 or more after that is `back` (through a converter,
+/// the step's half way is its delay). Silence before.
+struct Loop {
+    go: Arc<AtomicBool>,
+    sent: Arc<AtomicU64>,
+    back: Arc<AtomicU64>,
+}
+
+/// Not yet (`sent`, `back`).
+const NONE: u64 = u64::MAX;
+
+impl Process for Loop {
+    fn process(&mut self, block: &mut Block<'_>) {
+        let Some(start) = block.start() else {
+            block.zero_outputs();
+            return;
+        };
+        let sent = self.sent.load(Ordering::Relaxed);
+        if sent != NONE
+            && self.back.load(Ordering::Relaxed) == NONE
+            && let Some(i) = block.input(0).iter().position(|&x| x >= 0.25)
+        {
+            self.back.store(start + i as u64, Ordering::Relaxed);
+        }
+        if sent == NONE && self.go.load(Ordering::Relaxed) {
+            self.sent.store(start, Ordering::Relaxed);
+        }
+        let level = if self.sent.load(Ordering::Relaxed) == NONE {
+            0.0
+        } else {
+            0.5
+        };
+        block.output(0).fill(level);
+    }
+}
+
+/// Runs `config` (RX 1 subscribed to its own TX 1); once the flow carries
+/// our silence, the app sends a step. The loop in ns at the app's rate.
+fn measured_loop(config: &Config, app_rate: u32) -> u64 {
+    let go = Arc::new(AtomicBool::new(false));
+    let sent = Arc::new(AtomicU64::new(NONE));
+    let back = Arc::new(AtomicU64::new(NONE));
+    let link = Link::start_on(
+        config,
+        &Place::Ip(routed_ipv4()),
+        Map {
+            rx: vec![0],
+            tx: vec![0],
+        },
+        Loop {
+            go: Arc::clone(&go),
+            sent: Arc::clone(&sent),
+            back: Arc::clone(&back),
+        },
+        Clock::System,
+    )
+    .expect("the dlink device started");
+    let end = Instant::now() + Duration::from_secs(10);
+    while link.rx_channels()[0].status != Some(SubStatus::Receiving) && Instant::now() < end {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // The flow writes our silence into RX 1 (and the filters settle).
+    std::thread::sleep(Duration::from_millis(300));
+    go.store(true, Ordering::Relaxed);
+    let end = Instant::now() + Duration::from_secs(5);
+    while back.load(Ordering::Relaxed) == NONE && Instant::now() < end {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(link.ended(), None);
+    let channel = link.rx_channels().remove(0);
+    assert!(matches!(link.stop(), Stopped::Done));
+    let (s, b) = (sent.load(Ordering::Relaxed), back.load(Ordering::Relaxed));
+    assert!(
+        s != NONE && b != NONE,
+        "the step never came back: {channel:?}"
+    );
+    (b - s) * 1_000_000_000 / u64::from(app_rate)
+}
+
+/// dstack #68: the split's numbers are the real path. Our TX 1 into our own
+/// RX 1 is the TX path (W + P) and the RX path (P + B) less the one P they
+/// share (the receiver's playout is our RX's), plus the converter's delays
+/// when it runs. The step the app sends comes back within a few frames of
+/// that (the design asks one block), measured on the device's own stamps
+/// through the real flow.
+#[test]
+fn the_loop_through_our_own_flow_takes_what_the_split_says() {
+    let _one = ONE_DEVICE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let dir = tempfile::tempdir().unwrap();
+    for (name, app, network) in [
+        ("dlink-loop", 48_000u32, 48_000u32),
+        ("dlink-loop-96", 48_000, 96_000),
+    ] {
+        let config = Config::new(name, dir.path().join(format!("{name}.toml")))
+            .rx(["In 1"])
+            .tx(["Out 1"])
+            .sample_rate(app)
+            .network_rate(network)
+            .subscribe(1, "Out 1", name);
+        let split = config.split().unwrap();
+        let want = split.tx_path_ns + split.rx_path_ns - split.latency_ns;
+        // Each path is within the 10 ms budget.
+        assert!(split.tx_path_ns <= dlink::BUDGET_NS && split.rx_path_ns <= dlink::BUDGET_NS);
+        let got = measured_loop(&config, app);
+        // The design allows one block; the stamps are exact, so a few app
+        // frames (the converter's half-way crossing) is the bound, and a
+        // margin or a delay off by a block fails.
+        let frames_ns = 8 * 1_000_000_000 / u64::from(app);
+        assert!(
+            got.abs_diff(want) <= frames_ns,
+            "{name}: the loop took {got} ns, the split says {want} ns ({split:?})"
+        );
+    }
 }
