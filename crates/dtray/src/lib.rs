@@ -29,6 +29,7 @@
 
 use std::path::Path;
 
+#[cfg(unix)]
 pub mod desktop;
 pub mod discover;
 pub mod expected;
