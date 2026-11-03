@@ -11,7 +11,8 @@
 //!
 //! - `status`: one JSON line, numbers only: keys and a few fixed words
 //!   (`counter`, `sine`, `echo`, `engine`), never a name or an address
-//!   ([`status`]); with the engine's pump once one is attached.
+//!   ([`status`]); with the engine's pump once one is attached, and the
+//!   app's own part once it sets one (`app`, the app's words).
 //! - `source <tx> silence|counter|sine <hz> <dbfs>|echo <rx> <samples>|engine`:
 //!   what TX channel `tx` (from 1) sends ([`crate::media::source::Source`]);
 //!   runtime only, every TX channel is silent at start. A sine is at most
@@ -629,6 +630,10 @@ impl Json {
 ///   `late`, `missed` (blocks skipped by re-bootstraps), `overruns` (blocks
 ///   longer than one period), `rebootstraps`, `max_process_us`
 ///   ([`crate::stream::PumpView`]).
+/// - `app` (dstack #104), only once the app set a hook
+///   ([`Media::set_app_status`]) and while it returns a JSON object: that
+///   object, compact. It is the app's: dtray reads its `line` and `state`;
+///   it is the one part that may carry names.
 pub fn status(media: &Media) -> String {
     let mut j = Json::new();
     j.open(None, '{');
@@ -639,8 +644,24 @@ pub fn status(media: &Media) -> String {
     sources_part(&mut j, media);
     checks_part(&mut j, media);
     engine_part(&mut j, media);
+    app_part(&mut j, media);
     j.close('}');
     j.out
+}
+
+/// `text` as one compact JSON object (on one line, whatever the app wrote),
+/// `None` when it is no JSON object.
+pub fn app_object(text: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(text).ok()?;
+    v.is_object().then(|| v.to_string())
+}
+
+fn app_part(j: &mut Json, media: &Media) {
+    let Some(part) = media.app_status() else {
+        return;
+    };
+    j.key("app");
+    j.out.push_str(&part);
 }
 
 fn clock_part(j: &mut Json, media: &Media) {

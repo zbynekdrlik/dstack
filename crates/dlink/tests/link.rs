@@ -155,6 +155,14 @@ fn a_48_khz_app_runs_a_96_khz_device_through_the_conversion() {
     let pump = link.media().engine().expect("the pump attached");
     let status = link.status();
     assert!(status.starts_with("{\"clock\":{\"ready\":1,"), "{status}");
+    // The app's own part (dstack #104): carried last, as one object.
+    assert!(!status.contains("\"app\""), "{status}");
+    link.set_app_status(|| r#"{"line": "48 kHz app", "state": "ok"}"#.to_string());
+    let with_app = link.status();
+    assert!(
+        with_app.ends_with(r#","app":{"line":"48 kHz app","state":"ok"}}"#),
+        "{with_app}"
+    );
     assert_eq!(link.ended(), None);
     let stopped = link.stop();
     let got = f64::from_bits(heard.load(Ordering::Relaxed));

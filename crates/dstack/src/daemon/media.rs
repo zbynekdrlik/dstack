@@ -29,12 +29,16 @@
 //! - The engine (phase C): [`Media::new`] builds an engine ring on each TX
 //!   channel the engine feeds; [`Media::attach_engine`] shows its pump on
 //!   the control socket's status ([`Media::engine`]).
+//! - The app's own part of the status (dstack #104):
+//!   [`Media::set_app_status`] sets a hook whose JSON object the status
+//!   carries as `app` ([`Media::app_status`]).
 //!
 //! Locks are taken in the device's order (the device, then the TX control,
-//! then the manager); the checks' lock and the engine's are taken alone.
+//! then the manager); the checks' lock, the engine's and the app hook's are
+//! taken alone (the app hook runs after its lock is released).
 
 use std::net::{IpAddr, Ipv4Addr};
-use std::sync::atomic::AtomicI32;
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -92,7 +96,14 @@ pub struct Media {
     engine: Mutex<Option<Arc<PumpStats>>>,
     /// The channels' levels the heartbeat leaves for the meter frames.
     pub levels: Arc<crate::info::Levels>,
+    /// The app's status hook, once one is set ([`Media::set_app_status`]).
+    app: Mutex<Option<AppStatus>>,
+    /// The hook gave text that is no JSON object, and that was warned.
+    app_refused: AtomicBool,
 }
+
+/// An app's status hook ([`Media::set_app_status`]).
+pub type AppStatus = Arc<dyn Fn() -> String + Send + Sync>;
 
 /// One RX channel's state ([`Media::rx_channels`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -163,6 +174,8 @@ impl Media {
             checks: Mutex::new(Checks::new(cfg.rx.len(), cfg.sample_rate)),
             engine: Mutex::new(None),
             levels: Arc::default(),
+            app: Mutex::new(None),
+            app_refused: AtomicBool::new(false),
         })
     }
 
@@ -194,6 +207,33 @@ impl Media {
                 }
             })
             .collect()
+    }
+
+    /// Sets the app's own part of the status (dstack #104): each status
+    /// request calls `f`, and the status carries what it returns as `app`
+    /// when that text is one JSON object ([`crate::ctl::app_object`]). A
+    /// later call replaces the hook. Keep `f` quick and non-blocking: it
+    /// runs on the status request's task.
+    ///
+    /// dtray reads two keys of it: `line`, a short text shown after the
+    /// device's own line, and `state`, `"ok"`, `"warn"` (orange) or
+    /// `"error"` (red). Every other key is the app's own; dtray shows it
+    /// only in Copy status. Unlike the rest of the status, the part may
+    /// carry names: it is the app's.
+    pub fn set_app_status(&self, f: impl Fn() -> String + Send + Sync + 'static) {
+        *lock(&self.app) = Some(Arc::new(f));
+    }
+
+    /// The app's part of the status as compact JSON, `None` without a hook
+    /// or when the hook's text is no JSON object (left out, and warned the
+    /// first time only).
+    pub fn app_status(&self) -> Option<String> {
+        let hook = lock(&self.app).clone()?;
+        let part = crate::ctl::app_object(&hook());
+        if part.is_none() && !self.app_refused.swap(true, Ordering::Relaxed) {
+            warn!("the app's status part is no JSON object; the status leaves it out (warned once)");
+        }
+        part
     }
 
     /// The attached engine's numbers, `None` before one is attached.

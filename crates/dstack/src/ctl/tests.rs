@@ -1112,6 +1112,85 @@ fn the_engine_status_is_numbers_only() {
     assert!(s.ends_with(&engine(paced)), "{s}");
 }
 
+#[test]
+fn the_app_object_is_one_compact_json_object_and_nothing_else() {
+    assert_eq!(
+        app_object("{\n  \"line\": \"ASIO 64\",\n  \"state\": \"ok\"\n}"),
+        Some(r#"{"line":"ASIO 64","state":"ok"}"#.to_string())
+    );
+    assert_eq!(app_object("{}"), Some("{}".to_string()));
+    for refused in ["", "[]", "\"ok\"", "1", "null", "{\"line\":", "{} {}"] {
+        assert_eq!(app_object(refused), None, "{refused:?}");
+    }
+}
+
+#[test]
+fn the_status_carries_the_app_s_object_last_and_a_later_hook_replaces_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let device = device_at(dir.path());
+    let media = media_on(&device, Arc::new(Unready));
+    let before = status(&media);
+    assert_eq!(media.app_status(), None);
+    assert!(!before.contains("app"), "{before}");
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = Arc::clone(&calls);
+    media.set_app_status(move || {
+        counted.fetch_add(1, Ordering::Relaxed);
+        "{\"line\": \"ASIO 64\",\n \"state\": \"warn\", \"n\": 2}".to_string()
+    });
+    let after = status(&media);
+    assert_eq!(
+        after,
+        format!(
+            "{},\"app\":{{\"line\":\"ASIO 64\",\"n\":2,\"state\":\"warn\"}}}}",
+            before.strip_suffix('}').unwrap()
+        )
+    );
+    assert_eq!(calls.load(Ordering::Relaxed), 1, "one call a status");
+    assert!(serde_json::from_str::<serde_json::Value>(&after).is_ok());
+    media.set_app_status(|| r#"{"state":"error"}"#.to_string());
+    assert!(status(&media).ends_with(",\"app\":{\"state\":\"error\"}}"));
+    assert_eq!(calls.load(Ordering::Relaxed), 1, "the first hook is gone");
+}
+
+#[test]
+fn an_app_part_that_is_no_object_is_left_out_and_warned_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let device = device_at(dir.path());
+    let media = media_on(&device, Arc::new(Unready));
+    let before = status(&media);
+    let good = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let flip = Arc::clone(&good);
+    media.set_app_status(move || {
+        if flip.load(Ordering::Relaxed) {
+            r#"{"state":"ok"}"#.to_string()
+        } else {
+            "[\"not an object\"]".to_string()
+        }
+    });
+    // A good object warns nothing.
+    let logs = crate::test_log::capture_warnings(|| {
+        assert!(status(&media).ends_with(",\"app\":{\"state\":\"ok\"}}"));
+    });
+    assert_eq!(logs, "");
+    good.store(false, Ordering::Relaxed);
+    let logs = crate::test_log::capture_warnings(|| {
+        assert_eq!(status(&media), before);
+        assert_eq!(status(&media), before);
+    });
+    assert_eq!(
+        logs.matches("the app's status part is no JSON object").count(),
+        1,
+        "{logs}"
+    );
+    // Good again: carried again, nothing more warned.
+    good.store(true, Ordering::Relaxed);
+    let logs = crate::test_log::capture_warnings(|| {
+        assert!(status(&media).ends_with(",\"app\":{\"state\":\"ok\"}}"));
+    });
+    assert_eq!(logs, "");
+}
+
 #[cfg(unix)]
 mod socket {
     use super::*;

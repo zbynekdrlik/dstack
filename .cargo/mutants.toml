@@ -54,6 +54,10 @@ exclude_re = [
   # The status line for apps: the same glue over `ctl::status` (tested);
   # crates/dlink/tests/link.rs reads it from a running device.
   "dlink/src/lib.rs.*Link::status",
+  # The app's status hook for apps: the same glue over
+  # `Media::set_app_status` (tested in ctl); crates/dlink/tests/link.rs sets
+  # it on a running device.
+  "dlink/src/lib.rs.*Link::set_app_status",
   # The heartbeat listen's socket loop: tests/system_clock.rs reads our
   # running device with it; its parse and gather are unit tested.
   "latency.rs.*listen",
