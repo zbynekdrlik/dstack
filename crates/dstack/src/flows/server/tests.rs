@@ -255,17 +255,17 @@ fn a_receiver_s_own_fpp_is_granted_while_our_latency_covers_it() {
         fpp: 60,
         ..req()
     });
-    for fpp in [9, 16, 32, 91] {
+    for fpp in [9, 16, 32, 67] {
         dev.flow(&FlowRequest {
             fpp,
             rx: SocketAddrV4::new(PEER_IP, 4_000 + fpp),
             ..req()
         });
     }
-    // Past our 1 ms with the send slack (91 frames at 96 kHz, 948 µs, plus
-    // 50 µs, the same rule as the config's check): our packets would
-    // reach it after it plays them.
-    for fpp in [92, 97, 256] {
+    // Past our 1 ms with the default 250 µs margin and the 50 µs send
+    // slack (67 frames at 96 kHz are 698 µs; the same rule as the config's
+    // check): our packets would reach it after it plays them.
+    for fpp in [68, 97, 256] {
         refused_with(&mut dev, &FlowRequest { fpp, ..req() }, status::BAD_REQUEST);
     }
     // A refusal the gap guard counts.
