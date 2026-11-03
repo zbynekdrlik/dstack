@@ -374,17 +374,18 @@ impl Link {
         dstack::ctl::status(self.device.media())
     }
 
-    /// Sets the app's own part of [`Link::status`] (dstack #104): each
-    /// status request calls `f`, and the status carries what it returns as
-    /// `app` when it is one JSON object of at most 4096 bytes
-    /// ([`Media::set_app_status`]). dtray shows its `line` (a short text)
-    /// after the device's line and turns orange on `"state":"warn"`, red on
-    /// `"state":"error"`. A later call replaces the hook.
+    /// Sets the app's own part of [`Link::status`] (dstack #104): the
+    /// status carries what `f` returns as `app` when it is one JSON object
+    /// of at most 4096 bytes ([`Media::set_app_status`]). dtray shows its
+    /// `line` (a short text) after the device's line and turns orange on
+    /// `"state":"warn"`, red on `"state":"error"`. A later call replaces the
+    /// hook.
     ///
-    /// `f` runs inside the device's control task: while it runs the device
-    /// answers no ARC or status request. Read values the app already holds
-    /// (atomics, a short lock); never I/O, a wait, or [`Link::status`]
-    /// (which calls `f` again).
+    /// `f` runs on a thread of its own, at most once a second and only
+    /// while the status is read; the status carries its last answer, with
+    /// `"stale":true` once that is over 3 s old (dtray: orange). A slow `f`
+    /// never delays the device. Never call [`Link::status`] from `f`: each
+    /// call counts as a read and keeps `f` called for good.
     pub fn set_app_status(&self, f: impl Fn() -> String + Send + Sync + 'static) {
         self.device.media().set_app_status(f);
     }

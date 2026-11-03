@@ -47,6 +47,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: GTK and AppIndicator headers (dtray's Linux tray)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libayatana-appindicator3-dev
       - run: cargo build --release --locked -p dstack --bin dstack-dev -p dtray --bin dtray
       - name: Name, hash and upload the binaries
         shell: bash

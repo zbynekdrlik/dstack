@@ -31,14 +31,15 @@
 //!   the control socket's status ([`Media::engine`]).
 //! - The app's own part of the status (dstack #104):
 //!   [`Media::set_app_status`] sets a hook whose JSON object the status
-//!   carries as `app` ([`Media::app_status`]).
+//!   carries as `app` ([`Media::app_status`]). The hook runs on a thread of
+//!   its own, never on the control task ([`app`], step 5).
 //!
 //! Locks are taken in the device's order (the device, then the TX control,
 //! then the manager); the checks' lock, the engine's and the app hook's are
-//! taken alone (the app hook runs after its lock is released).
+//! taken alone (the app hook runs on its own thread, outside its lock).
 
 use std::net::{IpAddr, Ipv4Addr};
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::atomic::AtomicI32;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -61,6 +62,10 @@ use crate::media::{rx, tx};
 use crate::stream::{PumpStats, PumpView};
 use crate::subscribe::resolve::Resolver;
 use crate::subscribe::{Action, Answer, FlowId, Manager};
+
+pub mod app;
+
+pub use app::AppStatus;
 
 /// How long the stop waits for the transmitters' answers to our stops:
 /// every stop has gone out by then.
@@ -96,14 +101,10 @@ pub struct Media {
     engine: Mutex<Option<Arc<PumpStats>>>,
     /// The channels' levels the heartbeat leaves for the meter frames.
     pub levels: Arc<crate::info::Levels>,
-    /// The app's status hook, once one is set ([`Media::set_app_status`]).
-    app: Mutex<Option<AppStatus>>,
-    /// The hook gave text that is no JSON object, and that was warned.
-    app_refused: AtomicBool,
+    /// The app's status hook, its thread and its cached part
+    /// ([`Media::set_app_status`]).
+    app: app::AppHook,
 }
-
-/// An app's status hook ([`Media::set_app_status`]).
-pub type AppStatus = Arc<dyn Fn() -> String + Send + Sync>;
 
 /// One RX channel's state ([`Media::rx_channels`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -174,8 +175,7 @@ impl Media {
             checks: Mutex::new(Checks::new(cfg.rx.len(), cfg.sample_rate)),
             engine: Mutex::new(None),
             levels: Arc::default(),
-            app: Mutex::new(None),
-            app_refused: AtomicBool::new(false),
+            app: app::AppHook::default(),
         })
     }
 
@@ -209,44 +209,45 @@ impl Media {
             .collect()
     }
 
-    /// Sets the app's own part of the status (dstack #104): each status
-    /// request calls `f`, and the status carries what it returns as `app`
-    /// when that text is one JSON object of at most
-    /// [`crate::ctl::APP_MAX`] bytes ([`crate::ctl::app_object`]). A later
-    /// call replaces the hook (and a refusal of the new one is warned
-    /// again).
+    /// Sets the app's own part of the status (dstack #104): the status
+    /// carries what `f` returns as `app` when that text is one JSON object
+    /// of at most [`crate::ctl::APP_MAX`] bytes ([`crate::ctl::app_object`]).
+    /// A later call replaces the hook (its old part dropped; a refusal of
+    /// the new one is warned again).
     ///
-    /// `f` runs on the device's control task, inside each status request:
-    /// while it runs, the device answers no ARC, CMC or status request.
-    /// Keep it to reading a few values the app already holds (atomics, a
-    /// short lock): never I/O, never a wait, and never a status request of
-    /// its own (`ctl::status`, `Link::status`), which would call `f` again
-    /// without end.
+    /// `f` runs on a thread of its own (`dstack-app-status`, started at the
+    /// first call, ended with the `Media`), never inside a status request:
+    /// at most once every [`app::REFRESH`], and only while the status is
+    /// read (a read within [`app::READ_WINDOW`]). The status carries the
+    /// last part `f` returned, so a slow `f` never delays the device's ARC,
+    /// CMC or status answers; a part older than [`app::STALE`] carries
+    /// `"stale":true` (dtray shows it orange), and a hook still running then
+    /// is warned once. The first status after the hook is set (or after a
+    /// pause in reading) has no part yet or a stale one; the thread calls
+    /// `f` at once for it. A panic in `f` keeps the last part (warned once;
+    /// `f` is called again at the next refresh). A hook replaced while its
+    /// call stalls holds the thread: the new one runs once that call
+    /// returns. `f` makes no status request of its own
+    /// ([`crate::ctl::status`], `Link::status`): each counts as a read and
+    /// would keep `f` called once a second for good.
     ///
-    /// dtray reads two keys of it: `line`, a short text shown after the
-    /// device's own line, and `state`, `"ok"`, `"warn"` (orange) or
-    /// `"error"` (red). Every other key is the app's own; dtray shows it
-    /// only in Copy status. Unlike the rest of the status, the part may
-    /// carry names: it is the app's.
+    /// dtray reads three keys of it: `line`, a short text shown after the
+    /// device's own line, `state`, `"ok"`, `"warn"` (orange) or `"error"`
+    /// (red), and `stale` (dstack's: set over the app's own). Every other
+    /// key is the app's own; dtray shows it only in Copy status. Unlike the
+    /// rest of the status, the part may carry names: it is the app's.
     pub fn set_app_status(&self, f: impl Fn() -> String + Send + Sync + 'static) {
-        *lock(&self.app) = Some(Arc::new(f));
-        self.app_refused.store(false, Ordering::Relaxed);
+        self.app.set(Arc::new(f));
     }
 
-    /// The app's part of the status as compact JSON, `None` without a hook
-    /// or when the hook's text is no JSON object of at most
-    /// [`crate::ctl::APP_MAX`] bytes (left out, and warned the first time
-    /// for each hook). The hook runs after the lock is released.
+    /// The app's part of the status as compact JSON (the cache the hook's
+    /// thread keeps, never a call of the hook): `None` without a hook,
+    /// before its first call returned, or when its text is no JSON object
+    /// of at most [`crate::ctl::APP_MAX`] bytes (left out, and warned the
+    /// first time for each hook); `"stale":true` set when the part is older
+    /// than [`app::STALE`].
     pub fn app_status(&self) -> Option<String> {
-        let hook = lock(&self.app).clone()?;
-        let part = crate::ctl::app_object(&hook());
-        if part.is_none() && !self.app_refused.swap(true, Ordering::Relaxed) {
-            warn!(
-                max_bytes = crate::ctl::APP_MAX,
-                "the app's status part is no JSON object within the size; the status leaves it out (warned once)"
-            );
-        }
-        part
+        self.app.read()
     }
 
     /// The attached engine's numbers, `None` before one is attached.
