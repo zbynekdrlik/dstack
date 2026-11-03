@@ -14,6 +14,7 @@ paths:
 - **Merge** a green, clean PR with `gh api -X PUT repos/zbynekdrlik/dstack/pulls/<N>/merge -f merge_method=merge`. `gh pr merge` once failed in GraphQL after the merge commit landed, leaving the PR open with merged=false.
 - **Tag** the merge commit on main, annotated: `git tag -a vX.Y.Z -m "..." origin/main`, push the tag, then fast-forward `dev` to main and push it. Watch the main and tag CI runs to green.
 - **CHANGELOG** names every change an application can notice, not only new API: `stream::BLOCKS` widening broke iemmixer's RT tests once without a changelog line. A removed or changed public item, a JSON field, a default: listed, with what a consumer ports.
+- **dlink latency:** a release notice states whether it moves a dlink app's latency (the budget, its split, the block or the converter's delay; v0.6.22, #68), with the numbers before and after. Say "no latency change" when it does not.
 - **Tell the consumers** over peer (iemmixer, dasio, songplayer as it applies) with the tag and what they must change.
 - **New dependencies** must be published at least two weeks ago (`curl https://crates.io/api/v1/crates/<c>/<v>` gives `created_at`); pin older with `cargo update -p <c> --precise <v>`. Seed a new lockfile (fuzz) from the main `Cargo.lock` so tested versions carry over.
 - **Public repo:** no site addresses or real device names in code, commits, issues or PR text; they live in `~/.config/dstack/`.
