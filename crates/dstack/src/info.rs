@@ -405,19 +405,20 @@ pub fn network_info_body(net: &NetInfo) -> [u8; NETWORK_INFO_LEN] {
 }
 
 /// The channel-change notification's body for the RX channels `rx` (from
-/// 0): the bitmask's length in bytes (at least 1), then the bitmask.
+/// 0): the bitmask's length in bytes (at least 1), then the bitmask, bit
+/// `ch % 8` of byte `ch / 8` for channel `ch`.
 pub fn channel_change_body(rx: &[usize]) -> Vec<u8> {
-    let mut c = vec![0u8; 3];
+    let len = rx.iter().map(|&ch| ch / 8 + 1).max().unwrap_or(1);
+    let mut mask = vec![0u8; len];
     for &ch in rx {
-        let byte = 2 + ch / 8;
-        if byte >= c.len() {
-            c.resize(byte + 1, 0);
-        }
-        c[byte] |= 1 << (ch % 8);
+        mask[ch / 8] |= 1 << (ch % 8);
     }
-    let mask = u16::try_from(c.len() - 2).unwrap_or(u16::MAX);
-    c[..2].copy_from_slice(&mask.to_be_bytes());
-    c
+    let mut out = u16::try_from(len)
+        .unwrap_or(u16::MAX)
+        .to_be_bytes()
+        .to_vec();
+    out.append(&mut mask);
+    out
 }
 
 /// A channel's peak as the heartbeat carries it (inferno's
@@ -448,55 +449,74 @@ pub struct Records {
     pub late: [u32; MAX_FLOWS],
 }
 
-/// A record's head: its length, its type, 4, its content's length, the
-/// packet's sequence `seq`, 0.
-fn record_head(out: &mut Vec<u8>, len: usize, kind: u16, seq: u16) {
-    for field in [
-        u16::try_from(len).unwrap_or(u16::MAX),
+/// Appends one heartbeat record of type `kind` with `payload`: a 12-byte
+/// head (the record's length, its type, 4, the payload's length, the
+/// packet's sequence `seq`, 0), the payload, then zeros up to a multiple
+/// of 4 (the head states the length without them).
+fn push_record(out: &mut Vec<u8>, seq: u16, kind: u16, payload: &[u8]) {
+    let word = |v: usize| u16::try_from(v).unwrap_or(u16::MAX);
+    let head = [
+        word(12 + payload.len()),
         kind,
         4,
-        u16::try_from(len - 12).unwrap_or(u16::MAX),
+        word(payload.len()),
         seq,
         0,
-    ] {
-        out.extend_from_slice(&field.to_be_bytes());
-    }
+    ];
+    out.extend(head.iter().flat_map(|f| f.to_be_bytes()));
+    out.extend_from_slice(payload);
+    out.resize(out.len().next_multiple_of(4), 0);
 }
 
-/// The heartbeat's body with `records` for the packet of sequence `seq`
-/// (inferno's `send_heartbeat`): 0x8001, then 0x8002 when there are peaks,
-/// then 0x8003.
+/// `u16` words big-endian, then `u32` words big-endian.
+fn words(short: &[u16], long: &[u32]) -> Vec<u8> {
+    short
+        .iter()
+        .flat_map(|w| w.to_be_bytes())
+        .chain(long.iter().flat_map(|w| w.to_be_bytes()))
+        .collect()
+}
+
+/// The heartbeat's body with `records` for the packet of sequence `seq`:
+/// the frequency (0x8001), the peaks (0x8002) when there are channels,
+/// then each RX flow slot's lateness (0x8003) and late count (0x8004).
 pub fn heartbeat_body(seq: u16, r: &Records) -> Vec<u8> {
+    let count = |n: usize| u16::try_from(n).unwrap_or(u16::MAX);
+    let slots = count(MAX_FLOWS);
     let mut out = Vec::new();
-    record_head(&mut out, 16, record::FREQUENCY, seq);
-    out.extend_from_slice(&r.freq_ppb.to_be_bytes());
-    let peaks = r.tx_peaks.len() + r.rx_peaks.len();
-    if peaks > 0 {
-        let end = out.len() + (24 + peaks).next_multiple_of(4);
-        record_head(&mut out, 24 + peaks, record::PEAKS, seq);
-        for count in [r.tx_peaks.len(), r.rx_peaks.len(), 24] {
-            out.extend_from_slice(&u16::try_from(count).unwrap_or(u16::MAX).to_be_bytes());
-            out.extend_from_slice(&[0, 0]);
-        }
-        out.extend_from_slice(&r.tx_peaks);
-        out.extend_from_slice(&r.rx_peaks);
-        out.resize(end, 0);
+    push_record(&mut out, seq, record::FREQUENCY, &r.freq_ppb.to_be_bytes());
+    if !(r.tx_peaks.is_empty() && r.rx_peaks.is_empty()) {
+        // The TX and RX counts, each with a zero word, then the peaks'
+        // offset in the record (24) and a zero word, then the peak bytes.
+        let mut peaks = words(
+            &[
+                count(r.tx_peaks.len()),
+                0,
+                count(r.rx_peaks.len()),
+                0,
+                24,
+                0,
+            ],
+            &[],
+        );
+        peaks.extend_from_slice(&r.tx_peaks);
+        peaks.extend_from_slice(&r.rx_peaks);
+        push_record(&mut out, seq, record::PEAKS, &peaks);
     }
-    record_head(&mut out, 24 + 4 * MAX_FLOWS, record::RX_LATENESS, seq);
-    for field in [MAX_FLOWS as u16, 0, 24, 0] {
-        out.extend_from_slice(&field.to_be_bytes());
-    }
-    out.extend_from_slice(&r.rate.to_be_bytes());
-    for lateness in r.lateness {
-        out.extend_from_slice(&lateness.to_be_bytes());
-    }
-    record_head(&mut out, 20 + 4 * MAX_FLOWS, record::RX_LATE, seq);
-    for field in [MAX_FLOWS as u16, 0, 20, 0] {
-        out.extend_from_slice(&field.to_be_bytes());
-    }
-    for late in r.late {
-        out.extend_from_slice(&late.to_be_bytes());
-    }
+    let mut lateness = vec![r.rate];
+    lateness.extend_from_slice(&r.lateness);
+    push_record(
+        &mut out,
+        seq,
+        record::RX_LATENESS,
+        &words(&[slots, 0, 24, 0], &lateness),
+    );
+    push_record(
+        &mut out,
+        seq,
+        record::RX_LATE,
+        &words(&[slots, 0, 20, 0], &r.late),
+    );
     out
 }
 
