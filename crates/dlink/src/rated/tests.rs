@@ -296,3 +296,31 @@ fn an_impulse_and_a_step_take_the_delay_each_way_says() {
         assert!((half - want).abs() <= 2.0, "{app}: tx {half} of {want}");
     }
 }
+
+/// dstack #68: `delay_ns` (what `dlink::split` budgets) is what a `Rated`
+/// for the same rates and block says, for every block and rate pair; one
+/// rate needs no `Rated` and delays nothing.
+#[test]
+fn the_delay_before_the_start_is_the_running_rated_s() {
+    for block in dstack::stream::BLOCKS {
+        let b = block as usize;
+        for (dev, app) in [
+            (96_000u32, 48_000u32),
+            (96_000, 44_100),
+            (48_000, 96_000),
+            (48_000, 44_100),
+        ] {
+            let r = Rated::new(Probe::new(0.5), dev, app, b, 2, 2).unwrap();
+            assert_eq!(
+                delay_ns(dev, app, b).unwrap(),
+                r.delay_ns(),
+                "{dev} {app} {b}"
+            );
+        }
+        assert_eq!(delay_ns(96_000, 96_000, b).unwrap(), (0, 0));
+    }
+    // 48 kHz on 96 kHz: RX 1.33 ms, TX 2.83 ms (the module's table).
+    let (rx, tx) = delay_ns(96_000, 48_000, 128).unwrap();
+    assert_eq!((rx / 10_000, tx / 10_000), (133, 283));
+    assert!(delay_ns(96_000, 0, 128).is_err());
+}
