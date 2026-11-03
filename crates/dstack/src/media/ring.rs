@@ -238,7 +238,7 @@ fn newer(w: u64, p: u64) -> bool {
 
 /// Position `p`'s slot after a read found it empty.
 fn read_empty(p: u64) -> u64 {
-    u64::from(lap(p) | READ_EMPTY) << 32
+    u64::from(lap(p) + READ_EMPTY) << 32
 }
 
 /// The lap a slot's word holds.

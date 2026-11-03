@@ -395,5 +395,5 @@ fn a_read_marks_only_a_slot_of_no_later_lap() {
     assert!(newer(word(last + one, 5), last));
     assert!(!newer(word(last, 5), last + one));
     assert_eq!(lap(last + one), 0);
-    assert_eq!(read_empty(p) >> 32, u64::from(lap(p) | READ_EMPTY));
+    assert_eq!(read_empty(p) >> 32, u64::from(lap(p) + READ_EMPTY));
 }
