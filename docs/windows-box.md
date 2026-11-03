@@ -24,3 +24,13 @@ packets arrive in bursts.
 The low-latency profile's media threads sleep on the high-resolution waitable timer and spin, yielding, for the last `spin_tail_ns` before each deadline. The default of 50 ms spins every wait at 1 ms: on the FOH PC in October 2026 the timer woke up to 2.7 ms late, measured with the Realtek driver that had a 20–30 ms DPC. Two dasio devices then held 4–6 CPUs at 100 %.
 
 Where the timer wakes on time (the good driver, nothing else on the NIC's DPC CPUs), a tail of 100–300 µs frees those CPUs. Measure before you keep it: TX-late warnings and a receiver's lateness (rxlat) against the default.
+
+Measured on the FOH PC (November 2026, dstack 0.6.6): one dasio device, block 256, 1 ms, its threads pinned on three cores of one CCD. The receiver was the hardware card, its per-second lateness on the device's five flow slots.
+
+| `spin_tail_ns` | Run | Receiver p99 | Max | Seconds over 1 ms | TX-late warnings | Process CPU |
+|---|---|---|---|---|---|---|
+| default (50 ms) | 60 min | 0.47–0.65 ms (p99.9 2.8 ms) | 3.9 ms | 12 | 30 | 2.74 |
+| 300 µs | 15 min | 0.42–0.60 ms | 3.0 ms | 6 | 0 | 1.20–1.45 |
+| 150 µs | 15 min | 0.36–0.48 ms | 2.4 ms | 1 | 0 | 1.43 |
+
+A short tail saves about 1.3 CPU per device and the timing gets better, not worse: the spin no longer takes the cores the device shares.

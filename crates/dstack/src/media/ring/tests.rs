@@ -265,10 +265,10 @@ fn a_wrapped_slot_never_reads_stale() {
     ring.write_at(T + lap, &packet(T + lap));
     assert_eq!(read(&ring, T, N), (vec![0; N], Read { holes: N }));
     assert_eq!(read(&ring, T + lap, N).0, packet(T + lap));
-    // Laps far apart too (the lap is the position's bits 16..48).
+    // Laps far apart too (the lap is the position's bits 16..47).
     let ring = Ring::new();
     ring.write_at(T, &packet(T));
-    for laps in [2, 255, 256, 65_536, 1 << 31] {
+    for laps in [2, 255, 256, 65_536, 1 << 30] {
         let (got, r) = read(&ring, T + laps * lap, N);
         assert_eq!((got, r.holes), (vec![0; N], N), "{laps}");
     }
@@ -313,4 +313,128 @@ fn put_at_stores_behind_and_far_ahead_of_the_reader() {
     // An empty put stores and counts nothing.
     ring.put_at(T + 999, &[]);
     assert_eq!(ring.counters().written, 4 * N as u64 + 2);
+}
+
+/// obs (camera-box#1485): the RX thread and the reader on one CPU. A
+/// write whose positions the reader passes while the write runs must
+/// count them late, not written: each position the writer gives is
+/// either read as its sample or counted late, and every hole the reader
+/// saw at a written position is such a late sample.
+#[test]
+fn a_write_the_reader_overtakes_counts_the_overtaken_samples_late() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicU64};
+    const BLOCK: usize = 4096;
+    const READ: usize = 16;
+    const BLOCKS: u64 = 256;
+    let end = T + BLOCKS * BLOCK as u64;
+    for _ in 0..8 {
+        let ring = Arc::new(Ring::new());
+        // The reader's end at T before the writer starts: with no read yet
+        // a write has no early check, and a reader thread a runner starts
+        // late would find samples a later lap overwrote (holes, neither
+        // late nor early). Those READ positions count as holes.
+        let primed = ring.read_at(T - READ as u64, &mut [0i32; READ]).holes as u64;
+        let started = Arc::new(AtomicU64::new(T));
+        let done = Arc::new(AtomicBool::new(false));
+        let reader = {
+            let (ring, started, done) = (ring.clone(), started.clone(), done.clone());
+            std::thread::spawn(move || {
+                let mut delivered = 0u64;
+                let mut pos = T;
+                let mut out = [0i32; READ];
+                while pos < end {
+                    // Read up to the end of the block being written, at
+                    // once: the writer is still storing it.
+                    if pos + READ as u64 <= started.load(Ordering::Acquire)
+                        || done.load(Ordering::Acquire)
+                    {
+                        let r = ring.read_at(pos, &mut out);
+                        delivered += (READ - r.holes) as u64;
+                        pos += READ as u64;
+                    } else {
+                        std::hint::spin_loop();
+                    }
+                }
+                delivered
+            })
+        };
+        let block: Vec<i32> = (0..BLOCK as i32).map(|i| (i | 1) << 8).collect();
+        for b in 0..BLOCKS {
+            let pos = T + b * BLOCK as u64;
+            started.store(pos + BLOCK as u64, Ordering::Release);
+            ring.write_at(pos, &block);
+        }
+        done.store(true, Ordering::Release);
+        let delivered = reader.join().unwrap();
+        let c = ring.counters();
+        let total = BLOCKS * BLOCK as u64;
+        // A writer a whole ring ahead of a slow reader (a runner's thread
+        // start) stores nothing: early, a hole too.
+        assert_eq!(c.written + c.late + c.early, total, "{c:?}");
+        assert_eq!(
+            c.holes - primed,
+            c.late + c.early,
+            "every hole is a late or early sample: {c:?}"
+        );
+        assert_eq!(delivered, c.written, "{c:?}");
+    }
+}
+
+/// A read leaves a later lap's sample alone and marks an earlier lap's,
+/// the empty slot or its own position's mark; the comparison is mod 2³¹.
+#[test]
+fn a_read_marks_only_a_slot_of_no_later_lap() {
+    let one = SLOTS as u64;
+    let p = T;
+    assert!(newer(word(p + one, 5), p));
+    assert!(
+        newer(word(p + (1 << 30) * one - one, 5), p),
+        "the last later lap"
+    );
+    assert!(
+        !newer(word(p + (1 << 30) * one, 5), p),
+        "2^30 laps on is earlier"
+    );
+    assert!(!newer(word(p, 5), p), "its own lap");
+    assert!(!newer(word(p - one, 5), p));
+    assert!(!newer(EMPTY, p));
+    assert!(!newer(read_empty(p), p));
+    assert!(newer(read_empty(p + one), p), "a later lap's mark");
+    // Across the lap's wrap: lap 2^31 - 1 is just before lap 0.
+    let last = ((1u64 << 31) - 1) * one;
+    assert!(newer(word(last + one, 5), last));
+    assert!(!newer(word(last, 5), last + one));
+    assert_eq!(lap(last + one), 0);
+    assert_eq!(read_empty(p) >> 32, u64::from(lap(p) + READ_EMPTY));
+}
+
+/// A slot no write has stored is never a later lap: a read in any lap marks
+/// it (laps 2^30 to 2^31 - 2 found it "newer" and left it unmarked, so the
+/// overtaken-write race came back for half of every 46-year cycle).
+#[test]
+fn an_unwritten_slot_is_never_a_later_lap() {
+    let one = SLOTS as u64;
+    for lap in [
+        0,
+        1,
+        (1u64 << 30) - 1,
+        1 << 30,
+        (1 << 30) + 5,
+        (1 << 31) - 2,
+        (1 << 31) - 1,
+    ] {
+        assert!(!newer(EMPTY, lap * one), "lap {lap}");
+    }
+}
+
+/// A read of a slot no write has stored is a hole in every lap, the last
+/// one (2^31 - 1) too: it read as a sample 0.
+#[test]
+fn an_unwritten_slot_reads_as_a_hole_in_the_last_lap() {
+    let ring = Ring::new();
+    let last = ((1u64 << 31) - 1) * SLOTS as u64;
+    let mut out = [7i32; 2];
+    assert_eq!(ring.read_at(last, &mut out).holes, 2);
+    assert_eq!(out, [0, 0]);
 }
