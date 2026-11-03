@@ -3,7 +3,25 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-use super::{LINUX_DIR, PROGRAM_DATA, dir_for, expected, names_in};
+use std::io::{Error, ErrorKind};
+
+use super::{LINUX_DIR, PROGRAM_DATA, dir_for, expected, names_in, unreadable};
+
+#[test]
+fn a_missing_folder_is_no_warning_any_other_error_is() {
+    assert_eq!(unreadable(&Error::from(ErrorKind::NotFound)), None);
+    for kind in [
+        ErrorKind::PermissionDenied,
+        ErrorKind::NotADirectory,
+        ErrorKind::Other,
+    ] {
+        assert_eq!(
+            unreadable(&Error::from(kind)),
+            Some("the expected devices' folder could not be read"),
+            "{kind:?}"
+        );
+    }
+}
 
 fn os(s: &str) -> Option<OsString> {
     Some(OsString::from(s))

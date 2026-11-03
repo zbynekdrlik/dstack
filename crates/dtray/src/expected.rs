@@ -76,15 +76,22 @@ pub fn names_in<I: IntoIterator<Item = OsString>>(files: I) -> Vec<String> {
     out
 }
 
+/// The warning for a registration folder that could not be read with
+/// `e`; `None` when there is none (nothing registered on this PC yet).
+pub fn unreadable(e: &std::io::Error) -> Option<&'static str> {
+    (e.kind() != ErrorKind::NotFound).then_some("the expected devices' folder could not be read")
+}
+
 /// The devices registered in `dir` ([`names_in`] of its files). No folder
 /// is no device (nothing registered yet); a folder that cannot be read is
 /// warned and counts as none.
 pub fn expected(dir: &Path) -> Vec<String> {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
-        Err(e) if e.kind() == ErrorKind::NotFound => return Vec::new(),
         Err(e) => {
-            warn!(error = %e, "dtray: the expected devices' folder could not be read");
+            if let Some(why) = unreadable(&e) {
+                warn!(error = %e, "dtray: {why}");
+            }
             return Vec::new();
         }
     };

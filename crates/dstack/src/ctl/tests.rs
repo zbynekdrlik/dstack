@@ -1175,8 +1175,9 @@ fn an_app_part_that_is_no_object_is_left_out_and_warned_once() {
     assert_eq!(logs, "");
     good.store(false, Ordering::Relaxed);
     let logs = crate::test_log::capture_warnings(|| {
-        assert_eq!(status(&media), before);
-        assert_eq!(status(&media), before);
+        for _ in 0..3 {
+            assert_eq!(status(&media), before);
+        }
     });
     assert_eq!(
         logs.matches("the app's status part is no JSON object")
