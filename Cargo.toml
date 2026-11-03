@@ -5,7 +5,7 @@ members = ["crates/*"]
 exclude = ["vendor/mdns-sd"]
 
 [workspace.package]
-version = "0.5.20"
+version = "0.6.0"
 edition = "2024"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/zbynekdrlik/dstack"
@@ -16,3 +16,12 @@ authors = ["zbynekdrlik"]
 [profile.mutants]
 inherits = "test"
 debug = "none"
+
+# The resampler's hot path is generic rubato code compiled where it is
+# named: optimize it in every profile, so tests and mutants time it as it
+# runs (dstack #90; SongPlayer measured the same need).
+[profile.dev.package.dstack-resample]
+opt-level = 3
+
+[profile.dev.package.rubato]
+opt-level = 3

@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.6.0 (2026-11-03)
+
+- Fix (dstack #1, FOH 3.11.2026): we refused Dante Virtual Soundcard's flow requests. DVS asks fpp 60 whatever we advertise, and our device advertised fpp 8,2 at 1 ms. Every request got 0x0302, and DVS showed status 21 on all its channels.
+  - A request is now granted while its packet, our `tx_margin_ns` and the 50 µs send slack fit our advertised latency. This is the config's own rule for `tx_fpp_max`, which stays what we advertise. At 1 ms, 96 kHz and the default margin, that is up to 67 frames.
+  - Each refusal is warned (`flow request refused`) with the request's fields and reason, once a minute per requester and reason. Before, it was logged at debug only.
+  - New public field: `TxTable::warned`.
+- New (dstack #90, owner 3.11.2026): the crate `dstack-resample`, one rate converter for our apps, with no Dante code in it.
+  - The core is rubato's band-limited sinc (MIT OR Apache-2.0) with SongPlayer's measured settings: 256 taps, a 256× table, BlackmanHarris², cubic interpolation, automatic cutoff.
+  - Equal rates are a plain copy. Tests hold THD+N above 120 dB at 96↔48 and 44.1↔48 kHz, and the folded band below −120 dBFS.
+  - New: `dstack_resample::{Converter, Fixed, ConvertError, PARAMS}`.
+  - The ASRC between two clocks follows in phase 2 (#90).
+- Changed (dstack #90): dlink converts any app rate (8 to 384 kHz) to the network's, so an app keeps its own rate.
+  - `Config::network_rate` sets the device's rate, and `Config::sample_rate` stays the app's.
+  - `dlink::Rated` replaces v0.5.20's 2:1 `Halve`. RX is converted from the device's block. The app gets about `block × ratio` frames, which varies by a frame for a ratio that does not divide the block (44.1 kHz). TX takes the app's frames through a small FIFO into exactly the device's block.
+  - Port: `Halve` and `Config::halved` are gone (use `Config::converts`). Apps at 48 kHz on 96 kHz keep working unchanged.
+
 ## 0.5.20 (2026-11-03)
 
 - New (dstack #20, intercom#5): dlink runs a 48 kHz app on a 96 kHz network. `Config::network_rate(hz)` sets the device's rate (the network's); `Config::sample_rate` stays the app's. With the network at twice the app's rate, a 2:1 step (`dlink::Halve`) sits between them. RX is low-passed and every second sample kept; TX is zero-stuffed and low-passed. One half-band FIR (63 taps, Kaiser) is flat to about 20 kHz, holds the band that would fold back down by at least 60 dB, and delays 0.16 ms each way. Same clock, so no drift. The app's blocks have half the frames and half the media time. Any other ratio is refused at start. New: `Config::{network_rate, device_rate, halved}`, `dlink::Halve`.

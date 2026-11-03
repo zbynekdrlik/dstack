@@ -24,7 +24,7 @@
 //! | 0x0100 | a channel id past our TX channels | 0x0302 (inferno: 0x0302, then goes on to a second answer) |
 //! | 0x0100 | another sample rate | 0x0301 |
 //! | 0x0100 | more than 256 frames a packet | 0x0302 |
-//! | 0x0100 | ours: more frames a packet than our channels offer (the config's `tx_fpp_max`, which its advertised latency covers) | 0x0302 (inferno would accept) |
+//! | 0x0100 | ours: more frames a packet than our advertised latency covers (a receiver may ask past the advertised `tx_fpp_max`: DVS does) | 0x0302, warned once a minute per requester and reason (inferno would accept) |
 //! | 0x0100 | ours: fpp 0, bits / 8 not 2–4, more than 8 slots, a packet past one datagram, audio to another address than the requester's, port 0 | 0x0302 (inferno would accept: then divide by zero, send malformed packets, index past its buffer or send to anyone) |
 //! | 0x0100 | no free slot once expired flows are freed | 0x0315 |
 //! | 0x0100 | otherwise | OK, the 6-byte handle (a destination already served keeps its handle) |
@@ -54,11 +54,11 @@ use tokio::net::UdpSocket;
 use tokio::time::MissedTickBehavior;
 use tracing::{debug, info, warn};
 
-use super::control::{self, Unread, op, status};
+use super::control::{self, FlowRequest, Unread, op, status};
 use crate::arc::gaps::{self, Gap, Gaps};
 use crate::ctl::{Requests, header_op};
-use crate::device::DeviceConfig;
-use crate::media::tx::{FPP_MAX, MAX_FLOWS, TxShared, TxTable, sendable};
+use crate::device::{DeviceConfig, TX_SEND_SLACK_NS};
+use crate::media::tx::{FPP_MAX, MAX_FLOWS, TxShared, TxTable, ns_of, sendable};
 use crate::wire::{Header, WireError, read_u16, reply};
 
 /// The most requests of one peer read in any [`SPAN`].
@@ -199,10 +199,10 @@ fn request(
         (status::SAMPLE_RATE_MISMATCH, "another sample rate")
     } else if r.fpp > FPP_MAX {
         (status::BAD_REQUEST, "more than 256 frames a packet")
-    } else if r.fpp > cfg.tx_fpp_max {
+    } else if !latency_covers(r.fpp, cfg) {
         (
             status::BAD_REQUEST,
-            "more frames a packet than our channels offer",
+            "more frames a packet than our latency covers",
         )
     } else if !sendable(r.channels.len(), (r.bits / 8) as usize, r.fpp) {
         (status::BAD_REQUEST, "a flow that cannot be sent")
@@ -231,7 +231,55 @@ fn request(
             Err(code) => refused(h, code, "no free TX flow"),
         };
     };
+    warn_refusal(table, from, &r, why, now);
     refused(h, code, why)
+}
+
+/// How often one requester's refusal for one reason is warned, ns.
+pub const REFUSAL_WARN_EVERY_NS: u64 = 60_000_000_000;
+
+/// Warns a refused request with its fields, once a minute per requester
+/// and reason (a receiver retries every few seconds).
+fn warn_refusal(
+    table: &mut TxTable,
+    from: SocketAddrV4,
+    r: &FlowRequest,
+    why: &'static str,
+    now: u64,
+) {
+    let key = (*from.ip(), why);
+    match table.warned.iter_mut().find(|(ip, w, _)| (*ip, *w) == key) {
+        Some((_, _, at)) if now.saturating_sub(*at) < REFUSAL_WARN_EVERY_NS => return,
+        Some((_, _, at)) => *at = now,
+        None => {
+            if table.warned.len() >= 64 {
+                table.warned.remove(0);
+            }
+            table.warned.push((key.0, key.1, now));
+        }
+    }
+    warn!(
+        %from,
+        rx_host = %r.rx_host,
+        rx = %r.rx,
+        rate = r.sample_rate,
+        bits = r.bits,
+        slots = r.channels.len(),
+        fpp = r.fpp,
+        why,
+        "flow request refused"
+    );
+}
+
+/// Whether a packet of `fpp` frames still reaches a receiver inside our
+/// advertised latency: it leaves `fpp` frames + `tx_margin_ns` + the send
+/// slack after its first sample, the rule the config checks for
+/// `tx_fpp_max`. A receiver may ask any fpp inside that (Dante Virtual
+/// Soundcard ignores the advertised range); past it, our packets would
+/// reach it after it plays them. `tx_fpp_max` is only what we advertise.
+fn latency_covers(fpp: u16, cfg: &DeviceConfig) -> bool {
+    ns_of(u64::from(fpp), cfg.sample_rate) + cfg.tx_margin_ns + TX_SEND_SLACK_NS
+        <= cfg.advertised_latency_ns()
 }
 
 /// A flow update: inferno's lookup, then our checks of the channels.

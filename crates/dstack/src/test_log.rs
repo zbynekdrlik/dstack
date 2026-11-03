@@ -57,3 +57,37 @@ fn a_scoped_subscriber_sees_an_event_with_the_global_one_set() {
     tracing::subscriber::with_default(subscriber.finish(), || tracing::info!("x"));
     assert!(seen.load(std::sync::atomic::Ordering::Relaxed));
 }
+
+/// The WARN lines `f` logs on this thread, as text.
+pub fn capture_warnings(f: impl FnOnce()) -> String {
+    use std::sync::{Arc, Mutex};
+    #[derive(Clone)]
+    struct Sink(Arc<Mutex<Vec<u8>>>);
+    impl std::io::Write for Sink {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let sink = Sink(Arc::default());
+    let out = sink.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(move || out.clone())
+        .with_ansi(false)
+        .with_max_level(tracing::Level::WARN)
+        .finish();
+    undecided();
+    tracing::subscriber::with_default(subscriber, f);
+    let bytes = sink
+        .0
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    String::from_utf8(bytes).unwrap_or_default()
+}

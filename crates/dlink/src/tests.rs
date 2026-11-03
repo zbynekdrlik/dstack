@@ -156,34 +156,47 @@ fn the_flow_slots_are_taken_and_checked() {
 }
 
 #[test]
-fn a_network_rate_twice_the_app_s_runs_the_device_at_it() {
+fn a_network_rate_runs_the_device_at_it_and_the_app_at_its_own() {
     let c = config().sample_rate(48_000).network_rate(96_000);
-    assert_eq!((c.device_rate(), c.halved()), (96_000, true));
+    assert_eq!((c.device_rate(), c.converts()), (96_000, true));
     let cfg = c.device().unwrap();
     assert_eq!(cfg.sample_rate, 96_000);
     // The pump's margin is half the latency at the device's rate.
     assert_eq!(cfg.work_margin, 480);
-    // The same rate is no step; unset is the app's rate.
+    // 44.1 kHz on a 96 kHz network converts too (any ratio).
+    let cd = config().sample_rate(44_100).network_rate(96_000);
+    assert_eq!((cd.device_rate(), cd.converts()), (96_000, true));
+    assert_eq!(cd.device().unwrap().sample_rate, 96_000);
+    // The same rate is no conversion; unset is the app's rate.
     let same = config().sample_rate(48_000).network_rate(48_000);
-    assert_eq!((same.device_rate(), same.halved()), (48_000, false));
+    assert_eq!((same.device_rate(), same.converts()), (48_000, false));
     assert_eq!(same.device().unwrap().sample_rate, 48_000);
     assert_eq!(config().device_rate(), SAMPLE_RATE);
-    assert!(!config().halved());
+    assert!(!config().converts());
 }
 
 #[test]
-fn a_network_rate_neither_the_app_s_nor_twice_it_is_refused() {
-    for net in [44_100, 192_000, 24_000] {
+fn an_app_rate_outside_the_range_is_refused() {
+    for app in [0, 7_999, 384_001] {
         let problems = config()
-            .sample_rate(48_000)
-            .network_rate(net)
+            .sample_rate(app)
+            .network_rate(96_000)
             .device()
             .unwrap_err();
         assert_eq!(
             problems,
             vec![format!(
-                "network_rate {net} must be the sample rate 48000 or twice it"
+                "sample_rate {app} must be between 8000 and 384000 Hz"
             )]
+        );
+    }
+    for app in [8_000, 384_000] {
+        assert!(
+            config()
+                .sample_rate(app)
+                .network_rate(96_000)
+                .device()
+                .is_ok()
         );
     }
 }
