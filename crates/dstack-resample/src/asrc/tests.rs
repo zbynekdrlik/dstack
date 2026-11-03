@@ -402,3 +402,37 @@ fn windows_of_outside_errors_alone_leave_the_rate_fit_as_it_was() {
     let rate = c.rate_ppm();
     assert!(rate.is_finite() && (rate - 30.0).abs() < 0.5, "{rate}");
 }
+
+#[test]
+fn advances_feed_the_rate_fit_as_sums() {
+    let mut c = Controller::new(0.5, 0.0, 0.25, Basis::Stamp);
+    // One-second stretches of our clock; the other covers 40 ppm more.
+    for _ in 0..30 {
+        assert_eq!(c.advance(2.0, 2.0 * (1.0 + 40e-6)), Offered::Inserted);
+    }
+    assert!(!c.locked(), "30 points over 58 s");
+    c.advance(2.0, 2.0 * (1.0 + 40e-6));
+    assert!(c.locked());
+    assert!((c.rate_ppm() - 40.0).abs() < 1e-6, "{}", c.rate_ppm());
+    // A 50 ms jump in the other's advance re-bases once.
+    assert_eq!(
+        c.advance(2.0, 2.0 * (1.0 + 40e-6) + 0.050),
+        Offered::Rebased
+    );
+    assert_eq!(c.rebases(), 1);
+    assert_eq!(c.advance(2.0, 2.0 * (1.0 + 40e-6)), Offered::Realigned);
+    assert!((c.rate_ppm() - 40.0).abs() < 0.1, "{}", c.rate_ppm());
+}
+
+#[test]
+fn saturation_is_the_correction_at_its_bound() {
+    let mut c = Controller::new(0.5, 0.0, 0.25, Basis::Arrival);
+    assert!(!c.saturated());
+    // 200 ms short for long: the correction climbs to +300 and stays.
+    for i in 0..10_000 {
+        let t = f64::from(i) * 0.1;
+        c.observe(t, 0.30, t);
+    }
+    assert_eq!(c.ppm(), MAX_PPM);
+    assert!(c.saturated());
+}
