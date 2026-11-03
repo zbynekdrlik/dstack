@@ -513,7 +513,7 @@ pub enum ThreadPriority {
 /// latency asks real-time priority ([`realtime_for`]); normal asks
 /// THREAD_PRIORITY_HIGHEST on Windows, where a busy video PC's threads
 /// otherwise preempt dlink's pump for several ms (dstack #90:
-/// songplayer's out-4 lost blocks), and normal priority elsewhere.
+/// songplayer's Dante output lost blocks), and normal priority elsewhere.
 pub fn thread_priority_for(profile: TimingProfile, os: Os) -> ThreadPriority {
     match (profile, os) {
         (TimingProfile::LowLatency, _) => ThreadPriority::Realtime,

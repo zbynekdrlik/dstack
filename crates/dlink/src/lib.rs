@@ -318,9 +318,15 @@ impl Config {
 
 /// The pump's margin W, samples: half the latency at `rate`, at least the
 /// pump's `block` (a margin under one block is refused by the device; 4 ms
-/// at 48 kHz is 96 samples, under block 128).
+/// at 48 kHz is 96 samples, under block 128). A block outside
+/// `stream::BLOCKS` is the block's problem alone: W stays half the latency.
 pub fn work_margin(latency_ns: u64, rate: u32, block: u64) -> u64 {
-    normal_work_margin(latency_ns, rate).max(block)
+    let half = normal_work_margin(latency_ns, rate);
+    if dstack::stream::BLOCKS.contains(&block) {
+        half.max(block)
+    } else {
+        half
+    }
 }
 
 fn to_int(v: u64) -> i64 {

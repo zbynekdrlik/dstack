@@ -217,9 +217,10 @@ pub enum TimingProfile {
     /// Windows, a spin through the last 50 ms of a wait.
     #[default]
     LowLatency,
-    /// Stability and little CPU (dlink, #68): normal priority, no pinning,
-    /// the high-resolution timer for the whole wait (on Windows our
-    /// threads opt out of power throttling). Needs a latency of
+    /// Stability and little CPU (dlink, #68): no real-time priority
+    /// (normal; THREAD_PRIORITY_HIGHEST within the normal class on Windows,
+    /// #90), no pinning, the high-resolution timer for the whole wait (on
+    /// Windows our threads opt out of power throttling). Needs a latency of
     /// [`NORMAL_MIN_LATENCY_NS`] or more and a pump margin of
     /// [`NORMAL_MIN_WORK_MARGIN_NS`] or more ([`normal_work_margin`]).
     Normal,
@@ -512,7 +513,7 @@ pub const LOW_MIN_LATENCY_NS: u64 = 250_000;
 pub const MAX_LATENCY_SAMPLES: u64 = (crate::media::ring::SLOTS as u64) / 2 - MAX_WORK_MARGIN - 256;
 
 /// The least device latency of the normal profile (dlink, #68): its
-/// threads wake without priority, so the receivers need room.
+/// threads wake without real-time priority, so the receivers need room.
 pub const NORMAL_MIN_LATENCY_NS: u64 = 4_000_000;
 /// The least pump work margin of the normal profile: a wake up to this
 /// late still makes its block.

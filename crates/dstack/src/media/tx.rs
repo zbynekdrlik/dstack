@@ -1328,7 +1328,8 @@ pub(crate) enum Priority {
     /// THREAD_PRIORITY_HIGHEST, as the normal profile asks on Windows
     /// (dstack #90).
     Highest,
-    /// Normal priority, as the normal profile asks elsewhere (dlink).
+    /// Normal priority, as the normal profile asks elsewhere (dlink on
+    /// Linux).
     Normal,
     /// A raised priority asked and refused: the thread runs at normal.
     Refused,

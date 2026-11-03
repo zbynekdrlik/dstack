@@ -15,10 +15,15 @@ fn the_block_is_128_unless_the_app_sets_another_of_the_stack_s_blocks() {
     for b in dstack::stream::BLOCKS {
         assert_eq!(config().block(b).device().unwrap().block, b);
     }
-    assert_eq!(
-        config().block(100).device().unwrap_err(),
-        ["block: 16, 32, 64, 128 or 256 frames"]
-    );
+    // One problem for the block, also past the largest margin (W stays half
+    // the latency).
+    for bad in [100, 5_000] {
+        assert_eq!(
+            config().block(bad).device().unwrap_err(),
+            ["block: 16, 32, 64, 128 or 256 frames"]
+        );
+        assert_eq!(work_margin(10_000_000, 48_000, bad), 240);
+    }
     // Listed with the others, as a config file's would be.
     let problems = config().block(0).flow_slots(0).device().unwrap_err();
     assert_eq!(

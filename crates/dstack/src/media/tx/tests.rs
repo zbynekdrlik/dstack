@@ -1404,6 +1404,12 @@ fn a_windows_media_thread_gets_its_priority_and_its_cpu() {
             !ask_priority(Asked::Normal, TX_PRIORITY),
             "normal asks nothing"
         );
+        // SAFETY: as above.
+        assert_eq!(
+            unsafe { GetThreadPriority(GetCurrentThread()) },
+            WINDOWS_HIGHEST,
+            "and leaves the level as it was"
+        );
         assert!(ask_priority(Asked::Realtime, TX_PRIORITY));
         assert!(
             ask_priority(Asked::Highest, TX_PRIORITY),
