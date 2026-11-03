@@ -5,36 +5,94 @@ use super::*;
 const ALIVE_LOCKED: View = View {
     alive: true,
     locked: true,
+    settled: true,
     anchored: true,
     epoch: 0,
 };
 const HOLDOVER: View = View {
     alive: true,
     locked: false,
+    settled: false,
     anchored: true,
     epoch: 0,
 };
+/// Locked, but its boot fit not done yet (dsync 1.27.3: 20-60 µs off for
+/// the first 30-70 s without a seed).
+const UNSETTLED: View = View {
+    settled: false,
+    ..ALIVE_LOCKED
+};
+
+/// The selector's rule from no internal choice yet (a fresh device).
+fn choose_from(internal: Option<View>, service_ready: bool, was_locked: bool) -> Source {
+    choose(internal, service_ready, was_locked, Source::None)
+}
+
+/// dstack #68 (dsync 1.27.3 on mbc): a fresh follower locks in 9 s but is
+/// 20-60 µs off until it settles; the service is better meanwhile. It takes
+/// over only once settled, unless the service is not ready; once it is the
+/// source, losing `settled` alone does not switch back (a switch costs a
+/// re-align).
+#[test]
+fn a_locked_follower_takes_over_from_a_ready_service_only_once_settled() {
+    assert_eq!(
+        choose(Some(UNSETTLED), true, true, Source::None),
+        Source::Service
+    );
+    assert_eq!(
+        choose(Some(UNSETTLED), true, true, Source::Service),
+        Source::Service
+    );
+    assert_eq!(
+        choose(Some(ALIVE_LOCKED), true, true, Source::Service),
+        Source::Internal
+    );
+    // No service: the locked follower, settled or not.
+    assert_eq!(
+        choose(Some(UNSETTLED), false, true, Source::None),
+        Source::Internal
+    );
+    // In use: it stays while locked, settled or not.
+    assert_eq!(
+        choose(Some(UNSETTLED), true, true, Source::Internal),
+        Source::Internal
+    );
+    // Unlocked in use: the service, as before.
+    assert_eq!(
+        choose(Some(HOLDOVER), true, true, Source::Internal),
+        Source::Service
+    );
+}
 
 #[test]
 fn the_follower_wins_when_locked_else_the_service_else_a_holdover_after_a_lock() {
-    assert_eq!(choose(Some(ALIVE_LOCKED), true, true), Source::Internal);
-    assert_eq!(choose(Some(ALIVE_LOCKED), false, false), Source::Internal);
+    assert_eq!(
+        choose_from(Some(ALIVE_LOCKED), true, true),
+        Source::Internal
+    );
+    assert_eq!(
+        choose_from(Some(ALIVE_LOCKED), false, false),
+        Source::Internal
+    );
     // Not locked: the service when it is ready.
-    assert_eq!(choose(Some(HOLDOVER), true, true), Source::Service);
-    assert_eq!(choose(None, true, false), Source::Service);
+    assert_eq!(choose_from(Some(HOLDOVER), true, true), Source::Service);
+    assert_eq!(choose_from(None, true, false), Source::Service);
     // Neither locked nor a service: the follower's holdover, only after a lock.
-    assert_eq!(choose(Some(HOLDOVER), false, true), Source::Internal);
-    assert_eq!(choose(Some(HOLDOVER), false, false), Source::None);
+    assert_eq!(choose_from(Some(HOLDOVER), false, true), Source::Internal);
+    assert_eq!(choose_from(Some(HOLDOVER), false, false), Source::None);
     // A dead follower is never chosen, locked or not.
     let dead = View {
         alive: false,
         ..ALIVE_LOCKED
     };
-    assert_eq!(choose(Some(dead), false, true), Source::None);
-    assert_eq!(choose(Some(dead), true, true), Source::Service);
-    assert_eq!(choose(None, false, true), Source::None);
+    assert_eq!(choose_from(Some(dead), false, true), Source::None);
+    assert_eq!(choose_from(Some(dead), true, true), Source::Service);
+    assert_eq!(choose_from(None, false, true), Source::None);
     // Unanchored and unlocked: nothing.
-    assert_eq!(choose(Some(View::default()), false, true), Source::None);
+    assert_eq!(
+        choose_from(Some(View::default()), false, true),
+        Source::None
+    );
 }
 
 #[test]
@@ -152,8 +210,60 @@ fn a_sleep_on_the_follower_s_time_returns_at_its_target() {
 /// neither (no capability for port 319, as on a runner): never one alone.
 #[test]
 fn the_follower_starts_with_its_keeper_or_not_at_all() {
-    let (internal, keep) = start_internal("lo");
+    let (internal, keep) = start_internal("lo", None);
     assert_eq!(internal.is_some(), keep.is_some());
+    let (internal, keep) = start_internal("lo", Some(-4_671));
+    assert_eq!(internal.is_some(), keep.is_some());
+}
+
+/// The linked clock keeps a ready service while the follower is locked but
+/// not settled, takes the follower once settled, and keeps it after.
+#[test]
+fn the_linked_clock_waits_for_a_settled_follower_while_the_service_is_ready() {
+    let fake = Arc::new(Fake(Mutex::new((None, View::default()))));
+    let service = Arc::new(MonoClock::new());
+    let linked = Linked::new(
+        Some(Box::new(Arc::clone(&fake))),
+        Arc::clone(&service),
+        None,
+    );
+    service.set_k(1_000_000_000_000);
+    set(&fake, Some(42_000_000_000), UNSETTLED);
+    assert_eq!(linked.tick(), Source::Service);
+    assert_eq!(linked.tick(), Source::Service);
+    set(&fake, Some(42_000_000_000), ALIVE_LOCKED);
+    assert_eq!(linked.tick(), Source::Internal);
+    set(&fake, Some(42_000_000_000), UNSETTLED);
+    assert_eq!(
+        linked.tick(),
+        Source::Internal,
+        "kept: a switch costs a re-align"
+    );
+}
+
+fn reading(locked: bool, settled: bool, freq_ppb: i32) -> crate::clock::dsyx::Reading {
+    crate::clock::dsyx::Reading {
+        wall_ns: 0,
+        locked,
+        settled,
+        mode: 0,
+        freq_ppb,
+        grandmaster: [0; 6],
+        master: [0; 6],
+        date: None,
+    }
+}
+
+/// dstack #68: the follower is seeded with the service's frequency word
+/// (DSYX bytes 36-39, ppb) only when the service is locked and settled; a
+/// word learned while it is still pulling in is no seed.
+#[test]
+fn the_seed_is_the_word_of_a_locked_settled_service() {
+    assert_eq!(seed_of(&reading(true, true, -4_671)), Some(-4_671));
+    assert_eq!(seed_of(&reading(true, true, 0)), Some(0));
+    assert_eq!(seed_of(&reading(true, false, -4_671)), None);
+    assert_eq!(seed_of(&reading(false, true, -4_671)), None);
+    assert_eq!(seed_of(&reading(false, false, -4_671)), None);
 }
 
 /// Only a lock counts for the holdover rule: an alive follower that is
