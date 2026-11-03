@@ -1,0 +1,15 @@
+[package]
+name = "dstack-resample"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+repository.workspace = true
+authors.workspace = true
+description = "Sample-rate conversion for our apps (dstack #90): equal rates, a fixed ratio on one clock, and (phase 2) an ASRC between two clocks, on one rubato sinc core. No Dante code."
+
+[dependencies]
+# The filter core: band-limited sinc with an adjustable ratio. MIT OR
+# Apache-2.0, published 2026-10-01; the `log` feature stays off (it
+# allocates in the hot path).
+rubato = { version = "=5.0.1", default-features = false }
