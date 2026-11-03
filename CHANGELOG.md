@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.6.20 (unreleased)
+## 0.6.20 (2026-11-03)
 
 - Change (dstack #90, the dlink pump on a busy Windows PC): dlink's default pump block is 128 frames (1.33 ms at 96 kHz, 2.67 ms at 48 kHz), no longer the stack's 32. `dlink::Config::device()` now writes `block`; the pump wakes a quarter as often and `Rated` converts four times the frames a call (it follows the device block). The path grows by 96 frames (+1 ms on a 96 kHz device, +2 ms on a 48 kHz one). What a consumer notices: an app's `process` gets 128 frames a block at the device's rate (64 at 48 kHz on a 96 kHz network through `Rated`), and the pump's offset is B + P + W with B 128. A test that pinned 32-frame blocks or their app frames sets `.block(32)` or moves its expectation.
 - New (dlink): `Config::block(n)` sets the pump's block, one of `stream::BLOCKS` (16, 32, 64, 128, 256); another is refused by `Config::device()` with the other problems ("block: 16, 32, 64, 128 or 256 frames"). `dlink::BLOCK` (128) is the default, `dlink::work_margin` the margin rule: W stays half the latency, now at least the block (4 ms at 48 kHz gives 128, no longer 96).
