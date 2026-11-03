@@ -278,3 +278,41 @@ fn the_smallest_device_block_converts_well_inside_its_own_time() {
         "{each:?} per 16-frame block"
     );
 }
+
+#[test]
+fn a_copy_refuses_too_little_input_or_room_and_takes_exact_room() {
+    let mut c = Converter::new(48_000, 48_000, 2, 16, Fixed::Input).unwrap();
+    let input = vec![0.5; 32];
+    let mut out = vec![0.0; 32];
+    // Exactly the room: taken.
+    assert_eq!(c.process(&input, 16, &mut out, 16).unwrap(), (16, 16));
+    // Input shorter than its two channels.
+    assert!(c.process(&input[..31], 16, &mut out, 16).is_err());
+    // Output shorter than its two channels of room.
+    assert!(c.process(&input, 16, &mut out[..31], 16).is_err());
+    // The second channel is placed at the room's stride.
+    let mut wide = vec![0.0; 40];
+    let mixed: Vec<f64> = (0..32).map(|i| if i < 16 { 1.0 } else { 2.0 }).collect();
+    c.process(&mixed, 16, &mut wide, 20).unwrap();
+    assert!(wide[..16].iter().all(|&v| v == 1.0));
+    assert!(wide[16..20].iter().all(|&v| v == 0.0));
+    assert!(wide[20..36].iter().all(|&v| v == 2.0));
+}
+
+#[test]
+fn a_converter_says_what_it_is() {
+    let c = Converter::new(96_000, 48_000, 2, 32, Fixed::Output).unwrap();
+    let text = format!("{c:?}");
+    for part in [
+        "from: 96000",
+        "to: 48000",
+        "channels: 2",
+        "block: 32",
+        "Output",
+        "copy: false",
+    ] {
+        assert!(text.contains(part), "{part} missing: {text}");
+    }
+    let copy = Converter::new(48_000, 48_000, 1, 16, Fixed::Input).unwrap();
+    assert!(format!("{copy:?}").contains("copy: true"));
+}

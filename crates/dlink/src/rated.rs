@@ -33,6 +33,17 @@ use dstack_resample::{ConvertError, Converter, Fixed};
 /// frame-to-frame variation of the RX side can ever take away.
 pub const PRIME: usize = 8;
 
+/// Fills `dst` from the front of `fifo`, and the rest with silence;
+/// returns the frames it had to fill with silence.
+fn drain_into(fifo: &mut VecDeque<f64>, dst: &mut [f64]) -> usize {
+    let have = fifo.len().min(dst.len());
+    for (d, v) in dst.iter_mut().zip(fifo.drain(..have)) {
+        *d = v;
+    }
+    dst[have..].fill(0.0);
+    dst.len() - have
+}
+
 /// The app's processor at its own rate, behind the two converters.
 pub struct Rated<P> {
     inner: P,
@@ -126,11 +137,8 @@ impl<P: Process> Process for Rated<P> {
         let n = self.block;
         // RX: the device's block in, about n * ratio app frames out.
         let room = self.rx.output_frames_max();
-        if self.inputs == 0 {
-            // No RX channels: the app's frames still follow the ratio,
-            // through one silent channel.
-            self.staged[..n].fill(0.0);
-        }
+        // No RX channels: the app's frames still follow the ratio, through
+        // one channel of `staged` that stays silent (never written).
         for c in 0..self.inputs {
             self.staged[c * n..(c + 1) * n].copy_from_slice(block.input(c));
         }
@@ -166,17 +174,8 @@ impl<P: Process> Process for Rated<P> {
         }
         let need = self.tx.input_frames_next();
         for (c, fifo) in self.fifo.iter_mut().enumerate() {
-            let have = fifo.len().min(need);
-            for (dst, v) in self.tx_in[c * need..c * need + have]
-                .iter_mut()
-                .zip(fifo.drain(..have))
-            {
-                *dst = v;
-            }
-            if have < need {
-                self.tx_in[c * need + have..(c + 1) * need].fill(0.0);
-                self.dry.fetch_add((need - have) as u64, Ordering::Relaxed);
-            }
+            let short = drain_into(fifo, &mut self.tx_in[c * need..(c + 1) * need]);
+            self.dry.fetch_add(short as u64, Ordering::Relaxed);
         }
         if self.outputs == 0 {
             return;

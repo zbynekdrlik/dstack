@@ -197,3 +197,65 @@ fn a_discontinuity_clears_the_filters_and_reaches_the_app() {
 fn a_rate_the_converter_refuses_is_an_error_at_the_start() {
     assert!(Rated::new(Probe::new(0.0), 96_000, 0, 32, 1, 1).is_err());
 }
+
+#[test]
+fn a_fifo_drain_takes_what_it_has_and_fills_the_rest_with_silence() {
+    let mut fifo: VecDeque<f64> = [1.0, 2.0, 3.0].into_iter().collect();
+    let mut dst = [9.0; 5];
+    assert_eq!(drain_into(&mut fifo, &mut dst), 2);
+    assert_eq!(dst, [1.0, 2.0, 3.0, 0.0, 0.0]);
+    assert!(fifo.is_empty());
+    let mut fifo: VecDeque<f64> = [1.0, 2.0, 3.0, 4.0, 5.0].into_iter().collect();
+    let mut dst = [9.0; 3];
+    assert_eq!(drain_into(&mut fifo, &mut dst), 0);
+    assert_eq!(dst, [1.0, 2.0, 3.0]);
+    assert_eq!(fifo.into_iter().collect::<Vec<_>>(), vec![4.0, 5.0]);
+}
+
+/// Sends `levels[c]` on output `c` and records input `c`'s last sample.
+struct Levels {
+    levels: Vec<f64>,
+    last_in: Vec<f64>,
+}
+
+impl Process for Levels {
+    fn process(&mut self, block: &mut Block<'_>) {
+        for (c, last) in self.last_in.iter_mut().enumerate() {
+            if let Some(&v) = block.input(c).last() {
+                *last = v;
+            }
+        }
+        for (c, &l) in self.levels.iter().enumerate() {
+            block.output(c).fill(l);
+        }
+    }
+}
+
+#[test]
+fn each_channel_keeps_its_own_level_both_ways_at_a_ratio_that_does_not_divide() {
+    for app in [44_100u32, 48_000] {
+        let probe = Levels {
+            levels: vec![0.25, 0.75, -0.5],
+            last_in: vec![0.0; 3],
+        };
+        let mut r = Rated::new(probe, 96_000, app, 32, 3, 3).unwrap();
+        let mut out = vec![0.0; 3 * 32];
+        // Input channel c carries 0.1 * (c + 1).
+        let input: Vec<f64> = (0..3)
+            .flat_map(|c| std::iter::repeat_n(0.1 * (c as f64 + 1.0), 32))
+            .collect();
+        for b in 0..2_000u64 {
+            r.process(&mut Block::new(32, &input, &mut out).at(b * 32));
+        }
+        for (c, want) in [0.25, 0.75, -0.5].into_iter().enumerate() {
+            for v in &out[c * 32..(c + 1) * 32] {
+                assert!((v - want).abs() < 1e-6, "{app}: out {c} = {v}");
+            }
+            let heard = r.inner.last_in[c];
+            assert!(
+                (heard - 0.1 * (c as f64 + 1.0)).abs() < 1e-6,
+                "{app}: in {c} = {heard}"
+            );
+        }
+    }
+}

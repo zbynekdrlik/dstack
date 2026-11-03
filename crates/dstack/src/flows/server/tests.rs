@@ -923,3 +923,20 @@ async fn the_server_answers_the_requester_and_hands_the_flow_to_the_tx_thread() 
     assert_eq!(n, 9 + 2 * 3 * 32);
     task.abort();
 }
+
+#[test]
+fn a_refusal_is_warned_again_only_after_a_minute() {
+    let mut dev = Dev::new();
+    let ask = |dev: &mut Dev, now: u64| {
+        dev.send(&build_request(1, &FlowRequest { fpp: 97, ..req() }), now);
+    };
+    let at = |dev: &mut Dev, now: u64| {
+        crate::test_log::capture_warnings(|| ask(dev, now))
+            .lines()
+            .count()
+    };
+    assert_eq!(at(&mut dev, T), 1);
+    assert_eq!(at(&mut dev, T + REFUSAL_WARN_EVERY_NS - 1), 0);
+    assert_eq!(at(&mut dev, T + REFUSAL_WARN_EVERY_NS), 1);
+    assert_eq!(at(&mut dev, T + REFUSAL_WARN_EVERY_NS + 1), 0);
+}
