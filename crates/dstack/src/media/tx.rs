@@ -982,6 +982,15 @@ fn nanos(d: std::time::Duration) -> u64 {
     u64::try_from(d.as_nanos()).unwrap_or(u64::MAX)
 }
 
+/// The latency a receiver of a flow of `fpp`-frame packets needs at least:
+/// our advertised `latency_ns`, or, for a packet longer than that (a
+/// receiver that asked past the advertised range), the packet's frames +
+/// `margin_ns` + the send slack, when it leaves.
+pub fn flow_latency_ns(latency_ns: u64, fpp: u16, rate: u32, margin_ns: u64) -> u64 {
+    let packet = ns_of(u64::from(fpp), rate) + margin_ns + crate::device::TX_SEND_SLACK_NS;
+    latency_ns.max(packet)
+}
+
 /// Whether a packet `age_ns` past its stamp is late at a receiver whose
 /// latency is `latency_ns`: at the latency itself it still plays.
 pub fn over_latency(age_ns: u64, latency_ns: u64) -> bool {
@@ -1226,7 +1235,10 @@ impl Transmitter {
                 let age = left.saturating_sub(ns_of(stamp, *rate));
                 stats.age_max_ns.fetch_max(age, Ordering::Relaxed);
                 stats.age_peak_ns.fetch_max(age, Ordering::Relaxed);
-                if over_latency(age, *latency_ns) {
+                if over_latency(
+                    age,
+                    flow_latency_ns(*latency_ns, plan.fpp, *rate, *margin_ns),
+                ) {
                     stats.over_latency.fetch_add(1, Ordering::Relaxed);
                 }
                 stats.late[late_bin(late)].fetch_add(1, Ordering::Relaxed);

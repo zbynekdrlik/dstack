@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.16 (unreleased)
+
+- Fix (dasio, FOH 3.11.2026): a flow request whose packet is longer than our TX latency is granted (up to one datagram). master-asio-dante at a 0.5 ms TX latency refused DVS's fpp 60 ("more frames a packet than our latency covers"), and DVS showed Transmitter setup failed, though DVS plays at its own 10 ms. A receiver that asks past the advertised `tx_fpp_max` holds the packet in its own latency; one that plays at ours never asks it. The "TX flow started" line logs `receiver_latency_from_us`.
+  - TX counts such a flow's packets as `over_latency` only past fpp + margin + the send slack (`media::tx::flow_latency_ns`), not against our advertised latency.
+
 ## 0.6.15 (2026-11-03)
 
 - Fix (dstack #90, songplayer's port onto v0.6.14: 11 of its own tests failed on three laws that differed from its asrc_servo.rs):
