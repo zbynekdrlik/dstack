@@ -31,10 +31,21 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # dstack's tests).
 tempfile = "3"
 
-[target.'cfg(windows)'.dependencies]
+[target.'cfg(any(windows, target_os = "linux"))'.dependencies]
 # The tray icon and its menu (tauri-apps, MIT OR Apache-2.0), as dasio-tray
-# uses it. 0.21.2 was published on 2025-10-20.
-tray-icon = "=0.21.2"
+# uses it. 0.21.2 was published on 2025-10-20. Without its default libxdo
+# (muda's predefined Copy/Paste items on Linux, which dtray does not use).
+tray-icon = { version = "=0.21.2", default-features = false }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# GTK's main loop, its 1 s timeout (glib) and the clipboard for the
+# Linux tray; the version tray-icon 0.21.2 uses (MIT, published
+# 2024-12-09). Builds against libgtk-3-dev; the icon needs
+# libayatana-appindicator3 at run time (CI installs both -dev packages).
+gtk = "=0.18.2"
+glib = "=0.18.5"
+
+[target.'cfg(windows)'.dependencies]
 # The message loop and its timer, the single-instance mutex, the clipboard
 # the error box, and the autostart's Run value (the version dstack uses).
 windows-sys = { version = "0.61", features = [

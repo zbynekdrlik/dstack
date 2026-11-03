@@ -26,6 +26,8 @@ jobs:
         with:
           persist-credentials: false
       - run: cargo fmt --all --check
+      - name: GTK and AppIndicator headers (dtray's Linux tray)
+        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libayatana-appindicator3-dev
       - name: Docs build without warnings (broken or private links)
         run: cargo doc --workspace --no-deps --locked
         env:
@@ -43,6 +45,9 @@ jobs:
         with:
           persist-credentials: false
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: GTK and AppIndicator headers (dtray's Linux tray)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libayatana-appindicator3-dev
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
 
@@ -57,6 +62,8 @@ jobs:
       - uses: taiki-e/install-action@7623a79cdfecb99d681017af368ca353d9f49bb5 # v2.87.19
         with:
           tool: cargo-llvm-cov@0.9.1
+      - name: GTK and AppIndicator headers (dtray's Linux tray)
+        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libayatana-appindicator3-dev
       - name: Line coverage against the floor (.github/coverage-floor)
         run: |
           set -euo pipefail
@@ -137,6 +144,8 @@ jobs:
       - uses: taiki-e/install-action@7623a79cdfecb99d681017af368ca353d9f49bb5 # v2.87.19
         with:
           tool: cargo-mutants@27.1.0,cargo-nextest@0.9.146
+      - name: GTK and AppIndicator headers (dtray's Linux tray)
+        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libayatana-appindicator3-dev
       - name: Mutants of the diff
         env:
           NEXTEST_PROFILE: mutants

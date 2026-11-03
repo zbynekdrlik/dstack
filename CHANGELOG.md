@@ -8,6 +8,11 @@
   - `f` must not make a status request of its own (`ctl::status`, `Link::status`): each counts as a read and keeps `f` called for good.
   - New: `daemon::media::app` (`AppHook`, `next`, `Next`, `is_stale`, `mark_stale`); `AppStatus` moved there (still re-exported from `daemon::media`).
 - dtray: a stale app part (`"stale":true`) turns the device orange, "app status stale" (after the app's own warning, before the counts); `model::App` has `stale`.
+- New (dtray, Linux, #104 step 5): the tray on Linux, the same icon and menu as on Windows (device submenus with the latency values, the expected devices, Copy status to the GTK clipboard, Exit), through `tray-icon`'s GTK backend (AppIndicator). `dtray` without `--print` starts it; one tray a user session (a lock on `$XDG_RUNTIME_DIR/dtray.lock`, a second start leaves at once). Without a desktop it exits 1 at once ("no desktop to show the tray on (GTK)"), no longer 2.
+  - `dtray --autostart on|off` on Linux writes or removes the XDG autostart entry `~/.config/autostart/dtray.desktop` (`$XDG_CONFIG_HOME` when set), no longer a usage error.
+  - dtray library: the `desktop` module (`lock_path`, `autostart_file`, `exec_arg`, `desktop_entry`); `menu` is the tray menu's decisions on both systems.
+  - Building dtray on Linux needs `libgtk-3-dev` and `libayatana-appindicator3-dev` (CI installs them); running the tray needs GTK 3 and libayatana-appindicator3.
+- Dependencies (dtray, Linux): `gtk` 0.18.2 and `glib` 0.18.5 (the versions tray-icon 0.21.2 uses; already in the lockfile); `tray-icon` now without its default `libxdo` feature on both systems (unused; `libxdo`, `libxdo-sys` and `x11` leave the lockfile).
 
 ## 0.6.18 (2026-11-03)
 

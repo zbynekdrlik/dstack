@@ -21,6 +21,11 @@ exclude_globs = [
   "crates/dstack/src/media/dscp/windows.rs",
   "crates/dstack/src/traffic/windows.rs",
   "crates/dtray/src/win.rs",
+  # dtray's tray glue (tray-icon, GTK): it needs a desktop session, which a
+  # unit test has not; its decisions are the library's (menu, model,
+  # desktop: each tested), and it is run by hand on a desktop.
+  "crates/dtray/src/linux.rs",
+  "crates/dtray/src/tray.rs",
   # Third-party code (mdns-sd, one dstack change; tests/mdns_ipv4_only.rs).
   "vendor/**",
 ]
