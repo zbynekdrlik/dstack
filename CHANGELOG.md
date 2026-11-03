@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.6.15 (unreleased)
+## 0.6.15 (2026-11-03)
 
 - Fix (dstack #90, songplayer's port onto v0.6.14: 11 of its own tests failed on three laws that differed from its asrc_servo.rs):
   - Priming: with `with_priming`, ANY first observation primes (`Step::Prime`, an insert under the target, a skip over it, 0 at it), and it is no part of the first window. It primed only under the target before.
