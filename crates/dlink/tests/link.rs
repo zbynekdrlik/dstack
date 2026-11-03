@@ -91,9 +91,9 @@ fn a_dlink_device_runs_the_app_s_processor_at_its_defaults() {
         "our TX 1 came back on RX 1 as {got}"
     );
     assert!(pump.media && pump.blocks > 0, "{pump:?}");
-    // The pump runs at dlink's timing (48 kHz): B 32 + P 480 (10 ms) + W 240
-    // (5 ms).
-    assert_eq!((pump.playout, pump.offset), (480, 752), "{pump:?}");
+    // The pump runs at dlink's timing (48 kHz): B 128 (dstack #90) + P 480
+    // (10 ms) + W 240 (5 ms).
+    assert_eq!((pump.playout, pump.offset), (480, 848), "{pump:?}");
     assert!(matches!(stopped, Stopped::Done), "{stopped:?}");
     assert_eq!(
         dstack::clock::profile(),
@@ -176,12 +176,13 @@ fn a_48_khz_app_runs_a_96_khz_device_through_the_conversion() {
         (got - 0.5).abs() < 1e-3,
         "our TX 1 came back on RX 1 as {got}"
     );
-    // The device's block is 32 frames at 96 kHz: the app gets 16 at 48 kHz.
-    assert_eq!(frames.load(Ordering::Relaxed), 16);
+    // The device's block is 128 frames at 96 kHz (dstack #90): the app gets 64
+    // at 48 kHz.
+    assert_eq!(frames.load(Ordering::Relaxed), 64);
     // The RX flow runs at 96 kHz: its 10 ms latency is 960 samples.
     assert!(status.contains("\"latency\":960"), "{status}");
     // The pump runs at the device's 96 kHz: P 960 (10 ms), W 480 (5 ms).
-    assert_eq!((pump.playout, pump.offset), (960, 1_472), "{pump:?}");
+    assert_eq!((pump.playout, pump.offset), (960, 1_568), "{pump:?}");
     assert!(matches!(stopped, Stopped::Done), "{stopped:?}");
 }
 

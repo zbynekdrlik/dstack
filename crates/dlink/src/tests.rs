@@ -6,6 +6,64 @@ fn config() -> Config {
         .tx(["Out 1", "Out 2"])
 }
 
+/// dstack #90: the pump runs block 128 unless the app sets another of
+/// `stream::BLOCKS`; any other is refused with the other problems.
+#[test]
+fn the_block_is_128_unless_the_app_sets_another_of_the_stack_s_blocks() {
+    assert_eq!(config().device().unwrap().block, BLOCK);
+    assert_eq!(BLOCK, 128);
+    for b in dstack::stream::BLOCKS {
+        assert_eq!(config().block(b).device().unwrap().block, b);
+    }
+    // One problem for the block, also past the largest margin (W stays half
+    // the latency).
+    for bad in [100, 5_000] {
+        assert_eq!(
+            config().block(bad).device().unwrap_err(),
+            ["block: 16, 32, 64, 128 or 256 frames"]
+        );
+        assert_eq!(work_margin(10_000_000, 48_000, bad), 240);
+    }
+    // Listed with the others, as a config file's would be.
+    let problems = config().block(0).flow_slots(0).device().unwrap_err();
+    assert_eq!(
+        problems,
+        [
+            "block: 16, 32, 64, 128 or 256 frames",
+            "flow_slots: 1 to 32"
+        ]
+    );
+}
+
+/// dstack #90: W is half the latency, and never under the pump's block
+/// (4 ms at 48 kHz is 96 samples, under block 128).
+#[test]
+fn the_pump_margin_is_half_the_latency_and_at_least_the_block() {
+    assert_eq!(work_margin(10_000_000, 48_000, 128), 240);
+    assert_eq!(work_margin(4_000_000, 48_000, 128), 128);
+    assert_eq!(work_margin(4_000_000, 48_000, 64), 96);
+    assert_eq!(work_margin(4_000_000, 96_000, 128), 192);
+    let low = config().latency_ns(4_000_000).device().unwrap();
+    assert_eq!((low.block, low.work_margin), (128, 128));
+    let small = config().latency_ns(4_000_000).block(32).device().unwrap();
+    assert_eq!((small.block, small.work_margin), (32, 96));
+    for b in dstack::stream::BLOCKS {
+        for (latency, rate) in [
+            (4_000_000, 44_100),
+            (4_000_000, 48_000),
+            (10_000_000, 96_000),
+        ] {
+            let cfg = config()
+                .latency_ns(latency)
+                .sample_rate(rate)
+                .block(b)
+                .device()
+                .unwrap();
+            assert!(cfg.work_margin >= cfg.block, "{b} {latency} {rate}");
+        }
+    }
+}
+
 #[test]
 fn the_defaults_are_10_ms_normal_timing_and_half_the_latency_as_pump_margin() {
     let cfg = config().device().unwrap();
