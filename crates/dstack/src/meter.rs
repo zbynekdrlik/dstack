@@ -53,6 +53,11 @@ pub const CMC_START: u16 = 0x1200;
 pub const OP_METERING: u16 = 0x3010;
 /// The meter frame's version byte.
 pub const FRAME_VERSION: u8 = 2;
+/// The version with 16-bit counts (128-channel cards).
+pub const FRAME_VERSION_3: u8 = 3;
+/// A version 3 frame's header, 30 bytes: as version 2's up to the
+/// version, then a 0 and the two counts as big-endian u16s.
+const FRAME_HEADER_3: usize = 30;
 /// The frame header, 27 bytes: start, length, sequence and 0 (2 each),
 /// the device id and the vendor (8 each), the version and the two counts.
 const FRAME_HEADER: usize = 27;
@@ -160,11 +165,25 @@ pub struct Frame {
 /// vendor, version) or its counts pass it.
 pub fn parse_frame(datagram: &[u8]) -> Option<Frame> {
     let head = datagram.get(..FRAME_HEADER)?;
-    if head[0..2] != [0xff, 0xff] || &head[16..24] != b"Audinate" || head[24] != FRAME_VERSION {
+    if head[0..2] != [0xff, 0xff] || &head[16..24] != b"Audinate" {
         return None;
     }
-    let (ntx, nrx) = (usize::from(head[25]), usize::from(head[26]));
-    let levels = datagram.get(FRAME_HEADER..FRAME_HEADER + ntx + nrx)?;
+    // Version 2: 1-byte counts at 25 and 26, levels from 27. Version 3
+    // (a 128-channel Yamaha card, dcontroller 3.11.2026): byte 25 is 0,
+    // u16 counts at 26 and 28, levels from 30.
+    let (ntx, nrx, from) = match head[24] {
+        FRAME_VERSION => (usize::from(head[25]), usize::from(head[26]), FRAME_HEADER),
+        FRAME_VERSION_3 => {
+            let wide = datagram.get(26..FRAME_HEADER_3)?;
+            (
+                usize::from(u16::from_be_bytes([wide[0], wide[1]])),
+                usize::from(u16::from_be_bytes([wide[2], wide[3]])),
+                FRAME_HEADER_3,
+            )
+        }
+        _ => return None,
+    };
+    let levels = datagram.get(from..from + ntx + nrx)?;
     Some(Frame {
         device_id: head[8..16].try_into().ok()?,
         tx: levels[..ntx].to_vec(),
