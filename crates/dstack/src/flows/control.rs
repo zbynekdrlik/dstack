@@ -44,8 +44,8 @@ use crate::wire::{self, Body, HEADER_LEN, read_u16};
 
 /// Flow control's UDP port.
 pub const PORT: u16 = 4455;
-/// The start code of flow control (inferno: "dbcp1"; its client always
-/// sends it, its server never checks it, a reply echoes the request's).
+/// The start code of flow control: the `dbcp1` value transmitters
+/// announce in their channel records (a reply echoes the request's).
 pub const START: u16 = 0x1102;
 
 /// The opcodes (op1).

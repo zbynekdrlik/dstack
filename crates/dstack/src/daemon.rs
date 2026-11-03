@@ -53,7 +53,7 @@ use crate::announce::{AnnounceError, Announcer, Registry, records};
 use crate::clock::{Event, Polled, Sample};
 use crate::device::{Device, DeviceConfig};
 use crate::flows::client::Client;
-use crate::info::{Changes, Identity, Multicast, Multicaster, NetInfo};
+use crate::info::{Changes, Identity, InfoBuilder, Multicast, NetInfo};
 use crate::subscribe::TICK;
 use crate::subscribe::directory::{self, ArcDirectory, Network};
 use crate::subscribe::instance::Instances;
@@ -668,7 +668,7 @@ pub async fn serve<R: Registry + Browse>(
     let info = info::serve_shared(
         ip,
         sockets.info,
-        Multicaster::new(identity),
+        InfoBuilder::new(identity),
         multicast,
         Arc::new(media.beat()),
         rx_changes,

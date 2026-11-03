@@ -9,7 +9,7 @@
 //! [`REQUEST_PORT`], send the replies, notifications and heartbeats
 //! ([`serve_info`], [`serve_shared`] with [`share`]), and the running
 //! device's heartbeat records ([`Sources`]). Every packet's bytes come from
-//! the pure builder in [`super`] ([`Multicaster`]).
+//! the pure builder in [`super`] ([`InfoBuilder`]).
 
 use std::io;
 use std::net::{Ipv4Addr, SocketAddrV4};
@@ -24,7 +24,7 @@ use tracing::{debug, info, warn};
 use super::limit::{self, Limit};
 use super::{
     Beat, Changes, Follower, HEARTBEAT_EVERY, HEARTBEAT_GROUP, HEARTBEAT_PORT, INFO_GROUP,
-    INFO_PORT, Multicaster, RECV_BUFFER, REQUEST_PORT, Records, peak_byte, share,
+    INFO_PORT, InfoBuilder, RECV_BUFFER, REQUEST_PORT, Records, peak_byte, share,
 };
 use crate::clock::{ClockStats, PtpClock};
 use crate::ctl::{Requests, info_op};
@@ -184,7 +184,7 @@ impl Multicast {
 /// goes on.
 pub async fn serve_info(
     sock: UdpSocket,
-    mc: Multicaster,
+    mc: InfoBuilder,
     to: Multicast,
     beat: Arc<dyn Beat>,
     changes: Arc<Changes>,
@@ -200,7 +200,7 @@ pub async fn serve_info(
 pub async fn serve_info_with(
     sock: UdpSocket,
     share: Option<UdpSocket>,
-    mut mc: Multicaster,
+    mut mc: InfoBuilder,
     to: Multicast,
     beat: Arc<dyn Beat>,
     changes: Arc<Changes>,
@@ -302,12 +302,12 @@ pub async fn serve_member(
     sock: UdpSocket,
     manager: std::net::SocketAddr,
     own_at: SocketAddrV4,
-    mut mc: Multicaster,
+    mut mc: InfoBuilder,
     to: Multicast,
     beat: Arc<dyn Beat>,
     changes: Arc<Changes>,
     requests: Arc<Requests>,
-) -> io::Result<(UdpSocket, Multicaster)> {
+) -> io::Result<(UdpSocket, InfoBuilder)> {
     // The manager may end while this device sends to it: off Windows' report
     // of the closed port, or the next receive fails (dasio 1.11).
     crate::winsock::no_connreset(&sock)?;
@@ -373,7 +373,7 @@ pub async fn serve_member(
 pub async fn serve_shared(
     ip: Ipv4Addr,
     own: Option<UdpSocket>,
-    mut mc: Multicaster,
+    mut mc: InfoBuilder,
     to: Multicast,
     beat: Arc<dyn Beat>,
     changes: Arc<Changes>,

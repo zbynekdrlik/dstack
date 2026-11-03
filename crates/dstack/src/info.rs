@@ -87,7 +87,7 @@
 //! Logs name opcodes, sequences and ports, never an address or a MAC.
 //!
 //! This module builds every packet's bytes and holds no socket
-//! ([`Multicaster`], per device, pure); the loops that receive and send
+//! ([`InfoBuilder`], per device, pure); the loops that receive and send
 //! them are in `server` ([`serve_info`], [`serve_shared`]).
 
 use std::collections::BTreeSet;
@@ -193,8 +193,8 @@ const BOOT_VERSION: [u8; 4] = [1, 0, 0, 0];
 /// 0x83, 0x81). Left out: 0x17's 0x02 (reboot and factory reset), byte
 /// 0x15 (clear config) and byte 0x14 (RTP, AES67).
 const FEATURE_FLAGS: [u8; 4] = [0x00, 0x00, 0x12, 0x18];
-/// The board info's byte 0xbb (inferno: "if 0, device is flooded with info
-/// multicast requests around 1 per second").
+/// The board info's byte 0xbb. At 0 the device receives info multicast
+/// requests about once a second, so it is never 0.
 const BYTE_BB: u8 = 0x1f;
 /// A datagram read from the socket (inferno's MTU-sized buffer); only its
 /// header is read.
@@ -623,17 +623,17 @@ impl Changes {
     }
 }
 
-/// The device's sender of info packets: its identity and the sequence its
-/// next packet carries (inferno's `Multicaster`).
+/// Builds the device's info packets: its identity and the sequence number
+/// its next packet carries.
 #[derive(Debug, Clone)]
-pub struct Multicaster {
+pub struct InfoBuilder {
     id: Identity,
     seq: u16,
-    /// What the clock stats state ([`Multicaster::set_clock`]).
+    /// What the clock stats state ([`InfoBuilder::set_clock`]).
     clock: Option<Follower>,
 }
 
-impl Multicaster {
+impl InfoBuilder {
     /// The first packet carries sequence 1, as inferno's.
     pub fn new(id: Identity) -> Self {
         Self {
@@ -752,7 +752,7 @@ impl Multicaster {
         .inspect(|_| debug!(op = %opcode, seq = req.seq, "info request answered"))
     }
 
-    /// [`Multicaster::answer`] within `limit` ([`limit`]): a reply over the
+    /// [`InfoBuilder::answer`] within `limit` ([`limit`]): a reply over the
     /// bound is dropped (counted there) and uses no sequence.
     pub fn answer_within(
         &mut self,

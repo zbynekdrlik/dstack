@@ -1735,7 +1735,7 @@ fn a_failed_save_refuses_and_undoes() {
 }
 
 #[test]
-fn the_tx_flow_list_is_inferno_s_query_tx_flows() {
+fn the_tx_flow_list_states_each_flow_by_offsets() {
     // One flow a receiver asked for: TX 1 and TX 2 to 10.0.0.11:50000.
     let mut dev = Dev::new(config());
     let rx_at = SocketAddrV4::new(PEER_IP, 50_000);
@@ -1746,24 +1746,26 @@ fn the_tx_flow_list_is_inferno_s_query_tx_flows() {
     let mut want = vec![
         0x27, 0x29, 0x00, 0x78, 0x12, 0x34, 0x22, 0x00, 0x00, 0x01,
         0x10, 0x01,                         // 16 slots, 1 flow
-        0x00, 0x60,                         // flow 1's descriptor at 96
+        0x00, 0x2c,                         // flow 1's descriptor at 44
     ];
     want.extend([0; 30]); // the other 15 slots
     #[rustfmt::skip]
     want.extend([
-        b'1', b'_', b'0', 0,                // 44: our flow name, <flow>_<process>
-        b'p', b'e', b'e', b'r', b'-', b'd', b'e', b'v', b'i', b'c', b'e', 0, // 48
-        b'd', b'c', b'-', b'f', b'l', b'o', b'w', 0, // 60: the receiver's flow name
-        // 68 (a multiple of 4): the socket descriptor, the receiver's address.
-        0x80, 0x02, 0xc3, 0x50, 10, 0, 0, 11,
-        // 76: the names descriptor.
-        0x0a, 0x00, 0x00, 0x01, 0x00, 0x30, 0x00, 0x3c, 0x00, 0x10, 0x00, 0x2c,
-        0, 0, 0, 0, 0, 0, 0, 0,
-        // 96: the flow: 1, unicast, 96 kHz, 0, 24 bits, 1, 2 slots, socket at 68.
+        // 44: the flow: 1, unicast, 96 kHz, 0, 24 bits, 1, 2 slots, the
+        // socket descriptor at 68, TX 1, TX 2, the names descriptor at 76.
         0x00, 0x01, 0x00, 0x11, 0x00, 0x01, 0x77, 0x00, 0x00, 0x00, 0x00, 0x18,
         0x00, 0x01, 0x00, 0x02, 0x00, 0x44,
-        0x00, 0x01, 0x00, 0x02,             // TX 1, TX 2
-        0x00, 0x4c,                         // the names descriptor at 76
+        0x00, 0x01, 0x00, 0x02,
+        0x00, 0x4c,
+        // 68 (a multiple of 4): the socket descriptor, the receiver's address.
+        0x80, 0x02, 0xc3, 0x50, 10, 0, 0, 11,
+        // 76: the names descriptor: the receiver's names at 100 and 112,
+        // ours at 96.
+        0x0a, 0x00, 0x00, 0x01, 0x00, 0x64, 0x00, 0x70, 0x00, 0x10, 0x00, 0x60,
+        0, 0, 0, 0, 0, 0, 0, 0,
+        b'1', b'_', b'0', 0,                // 96: our flow name, <flow>_<process>
+        b'p', b'e', b'e', b'r', b'-', b'd', b'e', b'v', b'i', b'c', b'e', 0, // 100
+        b'd', b'c', b'-', b'f', b'l', b'o', b'w', 0, // 112: the receiver's flow name
     ]);
     assert_eq!(reply_bytes(&mut dev, &packet), want);
     // An empty slot is 0, an expired flow is listed (inferno lists it until
@@ -1804,7 +1806,7 @@ fn a_tx_flow_s_names_are_cut_to_63_bytes_at_a_character() {
 }
 
 #[test]
-fn the_rx_flow_list_is_inferno_s_query_rx_flows() {
+fn the_rx_flow_list_states_each_flow_by_offsets() {
     // RX 1 and RX 2 receive TX 3 of a peer, RX 3 its TX 4: one flow of the
     // peer's 4 slots, granted, its latency the peer's 2 ms (ours is 1 ms).
     let mut dev = Dev::new(config());
@@ -1821,29 +1823,30 @@ fn the_rx_flow_list_is_inferno_s_query_rx_flows() {
     let packet = request(CONTROLLER, 0x1234, op::RX_FLOWS, 0, &DC_FIRST_PAGE);
     #[rustfmt::skip]
     let mut want = vec![
-        0x27, 0x29, 0x00, 0x72, 0x12, 0x34, 0x32, 0x00, 0x00, 0x01,
+        0x27, 0x29, 0x00, 0x74, 0x12, 0x34, 0x32, 0x00, 0x00, 0x01,
         0x10, 0x01,                         // 16 slots, 1 flow
-        0x00, 0x54,                         // flow 1's descriptor at 84
+        0x00, 0x2c,                         // flow 1's descriptor at 44
     ];
     want.extend([0; 30]);
     #[rustfmt::skip]
     want.extend([
-        // 44: the socket descriptor, our address and slot 1's port.
+        // 44: the flow: 1, 1, 96 kHz, 0, 24 bits, 1, 4 slots, 2 words, the
+        // socket descriptor at 76, the masks at 100, 104, 108, 112,
+        // descriptor 2 at 84; then 2 bytes up to a multiple of 4.
+        0x00, 0x01, 0x00, 0x01, 0x00, 0x01, 0x77, 0x00, 0x00, 0x00, 0x00, 0x18,
+        0x00, 0x01, 0x00, 0x04, 0x00, 0x02,
+        0x00, 0x4c, 0x00, 0x64, 0x00, 0x68, 0x00, 0x6c, 0x00, 0x70, 0x00, 0x54,
+        0x00, 0x00,
+        // 76: the socket descriptor, our address and slot 1's port.
         0x80, 0x02, 0xc3, 0x50, 10, 0, 0, 10,
-        // 52: descriptor 2, the latency 2 000 000 ns.
+        // 84: descriptor 2, the latency 2 000 000 ns.
         0x00, 0x09, 0x00, 0x01, 0x08, 0x00, 0x00, 0x00,
         0x00, 0x1e, 0x84, 0x80, 0x00, 0x00, 0x00, 0x00,
-        // 68: each slot's mask of our 32 RX channels, two words.
+        // 100: each slot's mask of our 32 RX channels, two words.
         0x00, 0x03, 0x00, 0x00,             // TX 3 feeds RX 1 and RX 2
         0x00, 0x04, 0x00, 0x00,             // TX 4 feeds RX 3
         0x00, 0x00, 0x00, 0x00,
         0x00, 0x00, 0x00, 0x00,
-        // 84: the flow: 1, 1, 96 kHz, 0, 24 bits, 1, 4 slots, 2 words,
-        // socket at 44, the masks at 68, 72, 76, 80, descriptor 2 at 52.
-        0x00, 0x01, 0x00, 0x01, 0x00, 0x01, 0x77, 0x00, 0x00, 0x00, 0x00, 0x18,
-        0x00, 0x01, 0x00, 0x04, 0x00, 0x02, 0x00, 0x2c,
-        0x00, 0x44, 0x00, 0x48, 0x00, 0x4c, 0x00, 0x50,
-        0x00, 0x34,
     ]);
     assert_eq!(reply_bytes(&mut dev, &packet), want);
     // The channels read Receiving with their TX names.
