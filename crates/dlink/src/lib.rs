@@ -48,10 +48,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 pub use dstack::daemon::Place;
-pub use dstack::daemon::media::Media;
+pub use dstack::daemon::media::{Media, RxChannel};
 pub use dstack::device::DeviceConfig;
 pub use dstack::host::{HostError, Stopped};
 pub use dstack::stream::Map;
+pub use dstack::subscribe::{SubState, SubStatus};
 pub use dstack_audio_io::{Block, Process};
 
 pub mod rated;
@@ -355,6 +356,14 @@ impl Link {
     /// The device's media side: the pump's and the flows' counts.
     pub fn media(&self) -> &Arc<Media> {
         self.device.media()
+    }
+
+    /// Each RX channel's subscription, status, flow and counts
+    /// ([`Media::rx_channels`]): poll it to tell a lost flow from a quiet
+    /// source (a `written` count that stops while the status reads
+    /// receiving).
+    pub fn rx_channels(&self) -> Vec<RxChannel> {
+        self.device.media().rx_channels()
     }
 
     /// Why the device ended by itself, if it did.

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.3 (2026-11-03)
+
+- New (dstack #20, intercom#5): an app reads each RX channel's state. `dlink::Link::rx_channels()` and `Media::rx_channels()` give each channel its subscription, status (`SubStatus`, with `label()` and `state()`), the flow it rides (from 1), that flow's packets and the channel's written samples. A `written` count that stops while the status reads receiving is a lost flow; a growing one with silence is a quiet source. The intercom had no way to tell the two apart. New: `daemon::media::RxChannel`; dlink re-exports `RxChannel`, `SubStatus` and `SubState`.
+
 ## 0.6.2 (2026-11-03)
 
 - Fix (dstack #20, FOH 3.11.2026): two Dante devices on one PC address (dasio's master-asio-dante on 4455, band-asio-dante on 4456) were one transmitter to our subscriber.
