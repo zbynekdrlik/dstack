@@ -343,9 +343,13 @@ fn a_drifting_converter_follows_its_correction_and_a_copy_has_none() {
     run(&mut c, &mut out, 10);
     let more = run(&mut c, &mut out, 10_000);
     assert!((more as i64 - 320_080).abs() <= 1, "{more}");
-    // Past the bound it is held at ±300.
+    // Past the room it is held at ±1000 (songplayer's outputs' room).
     c.set_ppm(10_000.0).unwrap();
     run(&mut c, &mut out, 10);
     let most = run(&mut c, &mut out, 10_000);
-    assert!((most as i64 - 320_096).abs() <= 1, "{most}");
+    assert!((most as i64 - 320_320).abs() <= 1, "{most}");
+    c.set_ppm(-10_000.0).unwrap();
+    run(&mut c, &mut out, 10);
+    let least = run(&mut c, &mut out, 10_000);
+    assert!((least as i64 - 319_680).abs() <= 1, "{least}");
 }
