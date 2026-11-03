@@ -1532,7 +1532,9 @@ fn two_transmitters_on_one_address_get_a_flow_each() {
     let ids = |ch: &[Option<u16>]| ch.iter().flatten().copied().collect::<Vec<_>>();
     assert_eq!(ids(&to_master.1), vec![1, 2]);
     assert_eq!(ids(&to_band.1), vec![7, 9]);
+    // Both granted: every channel waits for its flow's packets (no test
+    // packets are heard here), none failed.
     for rx in 0..4 {
-        assert_eq!(m.status(rx), Some(SubStatus::Receiving), "rx {rx}");
+        assert_eq!(m.status(rx), Some(SubStatus::InProgress), "rx {rx}");
     }
 }
