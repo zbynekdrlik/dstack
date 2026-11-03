@@ -233,3 +233,172 @@ fn the_slew_and_the_braking_follow_their_laws() {
     assert!((braking_ppm(10.0, 1.0) - 300.0).abs() < 1e-9);
     assert!((braking_ppm(-10.0, 1.0) + 300.0).abs() < 1e-9);
 }
+
+#[test]
+fn the_level_loop_gives_its_exact_p_and_i() {
+    let mut l = LevelLoop::default();
+    // alpha = 1 / (10 + 1); EMA 10/11 ms; P = 2 * 10/11; I = 0.0002 * 10 * 1.
+    let out = l.update(10.0, 1.0, 0.0);
+    let ema = 10.0 / 11.0;
+    assert!((l.ema_ms() - ema).abs() < 1e-12, "{}", l.ema_ms());
+    assert!(
+        (l.integral_ppm() - 0.002).abs() < 1e-15,
+        "{}",
+        l.integral_ppm()
+    );
+    assert!((out - (2.0 * ema + 0.002)).abs() < 1e-12, "{out}");
+    // A second window moves the EMA by alpha again.
+    let out = l.update(-10.0, 1.0, 0.0);
+    let ema2 = ema + (-10.0 - ema) / 11.0;
+    assert!((l.ema_ms() - ema2).abs() < 1e-12);
+    assert!(
+        (l.integral_ppm() - 0.0).abs() < 1e-15,
+        "{}",
+        l.integral_ppm()
+    );
+    assert!((out - 2.0 * ema2).abs() < 1e-12, "{out}");
+}
+
+#[test]
+fn the_integral_freezes_exactly_at_the_bound_and_moves_just_inside() {
+    let mut l = LevelLoop::default();
+    // P at its 50 ppm bound, I at its 3 ppm bound.
+    for _ in 0..200 {
+        l.update(10_000.0, 10.0, 0.0);
+    }
+    assert_eq!(l.integral_ppm(), LEVEL_INTEGRAL_MAX_PPM);
+    // base 247 + P 50 + I 3 = 300: saturated, the integral stays.
+    l.update(-1.0, 0.001, 247.0);
+    assert_eq!(l.integral_ppm(), LEVEL_INTEGRAL_MAX_PPM);
+    // base 246: inside, it moves down by 0.0002 * 1 * 0.001.
+    l.update(-1.0, 0.001, 246.0);
+    assert!(
+        (l.integral_ppm() - (3.0 - 2e-7)).abs() < 1e-12,
+        "{}",
+        l.integral_ppm()
+    );
+}
+
+#[test]
+fn the_rate_fit_reads_away_from_zero_and_keeps_its_boundaries() {
+    // x from 1000 s: a fit centred wrongly would read another slope.
+    let mut f = RateFit::default();
+    for i in 0..40 {
+        let x = 1_000.0 + f64::from(i) * 2.0;
+        f.offer(x, 0.25 + (x - 1_000.0) * 20e-6);
+    }
+    assert!(f.locked());
+    assert!((f.rate_ppm() - 20.0).abs() < 1e-6, "{}", f.rate_ppm());
+    // A residual of exactly the step bound is a point, not a step.
+    let mut g = RateFit::default();
+    for i in 0..30 {
+        g.offer(f64::from(i) * 3.0, 0.0);
+    }
+    assert_eq!(g.offer(90.0, STEP_RESIDUAL_S), Offered::Inserted);
+    // Before locking: equal non-zero values are no step; the bound itself
+    // is no step either.
+    let mut h = RateFit::default();
+    h.offer(0.0, 0.5);
+    assert_eq!(h.offer(1.0, 0.5), Offered::Inserted);
+    assert_eq!(h.offer(2.0, 0.5 + 0.0078125), Offered::Inserted);
+    let mut z = RateFit::default();
+    z.offer(0.0, 0.0);
+    assert_eq!(z.offer(1.0, STEP_RESIDUAL_S), Offered::Inserted);
+    // A point exactly the span old stays; one past it leaves.
+    let mut k = RateFit::default();
+    k.offer(0.0, 0.0);
+    k.offer(REGRESSION_SPAN_S, 0.0);
+    assert_eq!(k.points(), 2);
+    k.offer(REGRESSION_SPAN_S + 0.5, 0.0);
+    assert_eq!(k.points(), 2);
+    // Locking needs the span too: 30 points within 58 s are not locked
+    // (from 100 s, so the span is a difference, not a sum).
+    let mut m = RateFit::default();
+    for i in 0..30 {
+        m.offer(100.0 + f64::from(i) * 2.0, 0.0);
+    }
+    assert!(!m.locked());
+    m.offer(160.0, 0.0);
+    assert!(m.locked());
+}
+
+#[test]
+fn the_controller_counts_its_rebases_and_starts_unlocked() {
+    let mut c = Controller::new(0.5, 0.0, 0.25, Basis::Arrival);
+    assert!(!c.locked());
+    assert_eq!((c.rebases(), c.recentres()), (0, 0));
+    // One observation a second at the target; the other clock 10 ppm
+    // fast, with two 50 ms steps.
+    let mut step = 0.0;
+    for i in 0..200 {
+        let t = f64::from(i);
+        if i == 100 || i == 150 {
+            step += 0.050;
+        }
+        c.observe(t, 0.5, t * (1.0 + 10e-6) + step);
+    }
+    assert!(c.locked());
+    assert_eq!(c.rebases(), 2);
+    assert!((c.rate_ppm() - 10.0).abs() < 0.5, "{}", c.rate_ppm());
+}
+
+#[test]
+fn the_excess_bound_itself_is_held() {
+    let mut c = Controller::new(0.5, 0.0, 0.25, Basis::Arrival);
+    assert!(matches!(c.observe(0.0, 0.75, 0.0), Step::Hold(_)));
+    assert!(matches!(c.observe(0.1, 0.25, 0.1), Step::Hold(_)));
+    assert!(matches!(
+        c.observe(0.2, 0.75 + 1e-9, 0.2),
+        Step::Recentre { .. }
+    ));
+}
+
+#[test]
+fn a_window_closes_at_exactly_one_second_and_moves_by_its_own_time() {
+    let mut c = Controller::new(0.5, 0.0, 0.25, Basis::Arrival);
+    // 20 ms short of the target: the window's mean error is +20 ms. From
+    // 10 s, so a window's time is a difference, not a sum.
+    assert_eq!(c.observe(10.0, 0.48, 10.0), Step::Hold(0.0));
+    assert_eq!(c.observe(10.5, 0.48, 10.5), Step::Hold(0.0));
+    // At 11.0 s the window closes: the first move is bounded by 5 ppm/s
+    // over its 1 s.
+    let Step::Hold(first) = c.observe(11.0, 0.48, 11.0) else {
+        panic!("held");
+    };
+    assert_eq!(first, MAX_SLEW_PPM_PER_S);
+    // The next window opens at its first observation (11.5 s) and closes
+    // 1 s later; its move counts the 1.5 s since the last close.
+    c.observe(11.5, 0.48, 11.5);
+    assert_eq!(c.observe(12.0, 0.48, 12.0), Step::Hold(first));
+    let Step::Hold(second) = c.observe(12.5, 0.48, 12.5) else {
+        panic!("held");
+    };
+    assert_eq!(second, first + 1.5 * MAX_SLEW_PPM_PER_S);
+}
+
+#[test]
+fn outside_errors_alone_never_lock_the_rate_fit() {
+    let mut c = Controller::new(0.5, 0.0, 0.25, Basis::Stamp);
+    for i in 0..20_000 {
+        c.outside(f64::from(i) * 0.01, 0.0);
+    }
+    assert!(!c.locked());
+    assert_eq!(c.rate_ppm(), 0.0);
+}
+
+#[test]
+fn windows_of_outside_errors_alone_leave_the_rate_fit_as_it_was() {
+    // A timecode ASRC: depth observations bring rate points, outside
+    // errors do not; a window of only outside errors offers no point.
+    let mut c = Controller::new(0.5, 0.0, 0.25, Basis::Timecode);
+    for i in 0..120 {
+        let t = f64::from(i);
+        c.observe(t, 0.5, t * (1.0 + 30e-6));
+    }
+    assert!(c.locked());
+    for i in 0..6_000 {
+        c.outside(120.0 + f64::from(i) * 0.01, 0.0);
+    }
+    let rate = c.rate_ppm();
+    assert!(rate.is_finite() && (rate - 30.0).abs() < 0.5, "{rate}");
+}

@@ -41,8 +41,9 @@ pub const PARAMS: SincInterpolationParameters = SincInterpolationParameters {
 };
 
 /// How far an ASRC's ratio may leave its nominal value: twice the
-/// controller's bound, so a ramp never reaches the core's limit.
-const MAX_RELATIVE: f64 = 1.0 + 2.0 * asrc::MAX_PPM * 1e-6;
+/// controller's bound (600 ppm), so a ramp never reaches the core's limit.
+const MAX_RELATIVE: f64 = 1.000_6;
+const _: () = assert!(asrc::MAX_PPM == 300.0);
 
 /// Which side of a converter has a fixed block size.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
