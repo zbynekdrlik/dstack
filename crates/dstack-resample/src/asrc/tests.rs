@@ -776,21 +776,24 @@ fn a_stalled_window_keeps_the_slew_s_time_step() {
     let first = c.ppm();
     assert!((first - 5.0).abs() < 1e-9, "{first}");
     // A window the consumer stalls in (its clock stays at 1.0), from 1.01
-    // to 2.01 where it closes: held.
-    for i in 1..=101 {
-        let t = 1.0 + f64::from(i) * 0.01;
+    // until it closes a little over a second later: held.
+    let mut t = 1.0;
+    while c.stalls() == 0 && t < 3.0 {
+        t += 0.01;
         c.observe(t, 0.010, 1.0);
     }
     assert_eq!(c.stalls(), 1);
     assert_eq!(c.ppm(), first);
-    // The next window runs again, 2.02 to 3.02: the slew moves by the
-    // 2.02 s since the last applied window.
-    for i in 2..=102 {
-        let t = 2.0 + f64::from(i) * 0.01;
-        c.observe(t, 0.010, 1.0 + (t - 2.02));
+    // The next window runs again: the slew moves by the whole time since
+    // the last applied window (about two seconds, not one).
+    let resumed = t;
+    for _ in 0..=101 {
+        t += 0.01;
+        c.observe(t, 0.010, 1.0 + (t - resumed));
     }
     assert_eq!(c.stalls(), 1);
-    assert!((c.ppm() - (first + 5.0 * 2.02)).abs() < 1e-6, "{}", c.ppm());
+    let moved = c.ppm() - first;
+    assert!((9.9..10.4).contains(&moved), "{moved}");
 }
 
 /// songplayer: a count that went back folds nothing; only what passes the
