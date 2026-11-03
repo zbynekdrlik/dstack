@@ -408,3 +408,33 @@ fn a_read_marks_only_a_slot_of_no_later_lap() {
     assert_eq!(lap(last + one), 0);
     assert_eq!(read_empty(p) >> 32, u64::from(lap(p) + READ_EMPTY));
 }
+
+/// A slot no write has stored is never a later lap: a read in any lap marks
+/// it (laps 2^30 to 2^31 - 2 found it "newer" and left it unmarked, so the
+/// overtaken-write race came back for half of every 46-year cycle).
+#[test]
+fn an_unwritten_slot_is_never_a_later_lap() {
+    let one = SLOTS as u64;
+    for lap in [
+        0,
+        1,
+        (1u64 << 30) - 1,
+        1 << 30,
+        (1 << 30) + 5,
+        (1 << 31) - 2,
+        (1 << 31) - 1,
+    ] {
+        assert!(!newer(EMPTY, lap * one), "lap {lap}");
+    }
+}
+
+/// A read of a slot no write has stored is a hole in every lap, the last
+/// one (2^31 - 1) too: it read as a sample 0.
+#[test]
+fn an_unwritten_slot_reads_as_a_hole_in_the_last_lap() {
+    let ring = Ring::new();
+    let last = ((1u64 << 31) - 1) * SLOTS as u64;
+    let mut out = [7i32; 2];
+    assert_eq!(ring.read_at(last, &mut out).holes, 2);
+    assert_eq!(out, [0, 0]);
+}
