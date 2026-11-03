@@ -148,7 +148,7 @@ jobs:
             exit 0
           fi
           status=0
-          cargo mutants --in-diff "$RUNNER_TEMP/pr.diff" --baseline=skip --timeout 60 --jobs 2 \
+          cargo mutants --in-diff "$RUNNER_TEMP/pr.diff" --baseline=skip --timeout 60 --jobs 2 --test-workspace=true \
             --shard "${{ matrix.shard }}/${{ strategy.job-total }}" \
             --package dstack --package dstack-audio-io --package dlink --package dstack-resample || status=$?
           if [ -s mutants.out/missed.txt ]; then

@@ -255,11 +255,11 @@ pub struct Manager {
     /// thread's sockets).
     slots: usize,
     generation: u32,
-    peers: BTreeMap<Ipv4Addr, Peer>,
+    peers: BTreeMap<SocketAddrV4, Peer>,
     /// The least fpp each transmitter is asked for, after it refused a
     /// smaller one with [`status::FPP_REFUSED`] (at most [`MAX_FPP_FLOORS`]
     /// transmitters; kept while the manager lives).
-    fpp_floor: BTreeMap<Ipv4Addr, u16>,
+    fpp_floor: BTreeMap<SocketAddrV4, u16>,
     /// Requests given up on: a grant that comes after all is stopped.
     abandoned: Vec<(FlowId, SocketAddrV4)>,
     /// The statuses [`Manager::changed`] reported last.
@@ -381,8 +381,8 @@ impl Manager {
         self.reresolve(resolver);
         self.close(now, &mut out);
         let pending = self.resolve(resolver);
-        for (ip, waiting) in pending {
-            if self.may_request(ip, now)
+        for (to, waiting) in pending {
+            if self.may_request(to, now)
                 && let Some(action) = self.request(&waiting, now, packets)
             {
                 out.push(action);
@@ -574,7 +574,7 @@ impl Manager {
                 f.packets = packets[slot];
                 f.heard = Some(now);
                 if f.handle.is_some()
-                    && let Some(peer) = self.peers.get_mut(f.to.ip())
+                    && let Some(peer) = self.peers.get_mut(&f.to)
                 {
                     peer.failures = 0;
                 }
@@ -608,7 +608,7 @@ impl Manager {
             self.abandoned.remove(0);
         }
         self.abandoned.push((id, f.to));
-        if let Some(peer) = self.peers.get_mut(f.to.ip())
+        if let Some(peer) = self.peers.get_mut(&f.to)
             && peer.in_flight == Some(id)
         {
             peer.in_flight = None;
@@ -628,7 +628,7 @@ impl Manager {
                 continue;
             }
             out.push(Action::Stop { to: f.to, handle });
-            if used && let Some(peer) = self.peers.get_mut(f.to.ip()) {
+            if used && let Some(peer) = self.peers.get_mut(&f.to) {
                 peer.failures += 1;
             }
             self.free(slot, now);
@@ -676,8 +676,11 @@ impl Manager {
 
     /// The subscribed channels without a flow: each routed to a flow that
     /// carries its TX channel already, or listed under its transmitter.
-    fn resolve(&mut self, resolver: &dyn Resolver) -> BTreeMap<Ipv4Addr, Vec<(usize, Advertised)>> {
-        let mut pending: BTreeMap<Ipv4Addr, Vec<(usize, Advertised)>> = BTreeMap::new();
+    fn resolve(
+        &mut self,
+        resolver: &dyn Resolver,
+    ) -> BTreeMap<SocketAddrV4, Vec<(usize, Advertised)>> {
+        let mut pending: BTreeMap<SocketAddrV4, Vec<(usize, Advertised)>> = BTreeMap::new();
         for rx in 0..self.subs.len() {
             let Some(sub) = self.subs[rx].as_ref().filter(|_| self.routes[rx].is_none()) else {
                 continue;
@@ -703,7 +706,7 @@ impl Manager {
             }
             match self.carrying(&a) {
                 Some((flow, slot)) => self.route(rx, flow, slot),
-                None => pending.entry(*a.control.ip()).or_default().push((rx, a)),
+                None => pending.entry(a.control).or_default().push((rx, a)),
             }
         }
         pending
@@ -713,7 +716,7 @@ impl Manager {
     /// channel slot.
     fn carrying(&self, a: &Advertised) -> Option<(FlowId, usize)> {
         self.flows.iter().enumerate().find_map(|(slot, f)| {
-            let f = f.as_ref().filter(|f| f.to.ip() == a.control.ip())?;
+            let f = f.as_ref().filter(|f| f.to == a.control)?;
             let at = f.slots.iter().position(|&s| s == Some(a.tx_channel_id))?;
             Some((
                 FlowId {
@@ -734,8 +737,8 @@ impl Manager {
     }
 
     /// Whether the transmitter at `ip` may be asked now.
-    fn may_request(&self, ip: Ipv4Addr, now: u64) -> bool {
-        self.peers.get(&ip).is_none_or(|p| {
+    fn may_request(&self, to: SocketAddrV4, now: u64) -> bool {
+        self.peers.get(&to).is_none_or(|p| {
             p.in_flight.is_none()
                 && p.last_request
                     .is_none_or(|t| now >= t.saturating_add(retry_after(p.failures)))
@@ -770,7 +773,7 @@ impl Manager {
         // a step always fits a datagram (the `const` assertion at FPP_STEP_MAX).
         let fpp = self
             .fpp_floor
-            .get(first.control.ip())
+            .get(&first.control)
             .map_or(fpp, |&floor| floor.max(fpp));
         let slot = self.free_slot()?;
         // Each TX channel once, in RX order; the first n fill the slots, the
@@ -811,7 +814,7 @@ impl Manager {
                 self.route(*rx, id, at);
             }
         }
-        let peer = self.peers.entry(*first.control.ip()).or_default();
+        let peer = self.peers.entry(first.control).or_default();
         peer.in_flight = Some(id);
         peer.last_request = Some(now);
         Some(Action::Request {
@@ -844,9 +847,9 @@ impl Manager {
     /// failure as any refusal.
     fn fpp_refused(&mut self, slot: usize, now: u64) {
         let Some(f) = &self.flows[slot] else { return };
-        let (ip, fpp) = (*f.to.ip(), f.fpp);
+        let (to, fpp) = (f.to, f.fpp);
         let next = fpp.saturating_mul(2).min(FPP_STEP_MAX);
-        let known = self.fpp_floor.contains_key(&ip);
+        let known = self.fpp_floor.contains_key(&to);
         if next <= fpp || (!known && self.fpp_floor.len() >= MAX_FPP_FLOORS) {
             warn!(
                 fpp,
@@ -859,7 +862,7 @@ impl Manager {
             fpp,
             next, "RX flow refused (0x0314, its fpp): the next request asks a larger fpp"
         );
-        self.fpp_floor.insert(ip, next);
+        self.fpp_floor.insert(to, next);
         for (route, failed) in self.routes.iter_mut().zip(self.failed.iter_mut()) {
             if route.as_ref().is_some_and(|r| r.flow.slot == slot) {
                 *route = None;
@@ -873,14 +876,14 @@ impl Manager {
     /// leave it (and show `why`), its transmitter counts a failure.
     fn fail(&mut self, slot: usize, why: SubStatus, now: u64) {
         let Some(f) = &self.flows[slot] else { return };
-        let ip = *f.to.ip();
+        let to = f.to;
         for (route, failed) in self.routes.iter_mut().zip(self.failed.iter_mut()) {
             if route.as_ref().is_some_and(|r| r.flow.slot == slot) {
                 *route = None;
                 *failed = Some(why);
             }
         }
-        let peer = self.peers.entry(ip).or_default();
+        let peer = self.peers.entry(to).or_default();
         peer.failures += 1;
         self.free(slot, now);
     }
@@ -901,8 +904,8 @@ impl Manager {
     /// in flight is one), no failure, and their wait over.
     fn prune(&mut self, now: u64) {
         let flows = &self.flows;
-        self.peers.retain(|ip, p| {
-            flows.iter().flatten().any(|f| f.to.ip() == ip)
+        self.peers.retain(|to, p| {
+            flows.iter().flatten().any(|f| f.to == *to)
                 || p.failures > 0
                 || p.last_request
                     .is_some_and(|t| now < t.saturating_add(RETRY_NS))

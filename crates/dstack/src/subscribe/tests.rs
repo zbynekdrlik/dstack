@@ -853,13 +853,13 @@ fn transmitters_with_nothing_pending_are_forgotten_after_their_wait() {
     heard[0] = 2;
     assert_eq!(stops(&m.tick(2 * S, &heard, &net)).len(), 1);
     assert!(
-        m.peers.contains_key(&PEER_IP),
+        m.peers.contains_key(&SocketAddrV4::new(PEER_IP, 4455)),
         "kept until its wait is over"
     );
     m.tick(9 * S - 1, &heard, &net);
-    assert!(m.peers.contains_key(&PEER_IP));
+    assert!(m.peers.contains_key(&SocketAddrV4::new(PEER_IP, 4455)));
     m.tick(9 * S, &heard, &net);
-    assert!(!m.peers.contains_key(&PEER_IP));
+    assert!(!m.peers.contains_key(&SocketAddrV4::new(PEER_IP, 4455)));
     // A new subscription asks at once.
     m.set(0, Some(sub("TX 3", "peer-device")));
     assert_eq!(requests(&m.tick(9 * S + 1, &heard, &net)).len(), 1);
@@ -885,8 +885,8 @@ fn a_transmitter_is_kept_while_it_has_a_flow_or_failures() {
     }
     // A minute on: the peer for its flow, the other for its failure (its
     // wait grows if it is asked again).
-    assert!(m.peers.contains_key(&PEER_IP));
-    assert_eq!(m.peers[&OTHER_IP].failures, 1);
+    assert!(m.peers.contains_key(&SocketAddrV4::new(PEER_IP, 4455)));
+    assert_eq!(m.peers[&SocketAddrV4::new(OTHER_IP, 4455)].failures, 1);
     // Another transmitter's flow never keeps one that has nothing.
     let mut m = manager();
     m.set(0, Some(sub("TX 3", "peer-device")));
@@ -901,8 +901,8 @@ fn a_transmitter_is_kept_while_it_has_a_flow_or_failures() {
     assert_eq!(stops(&m.tick(2 * S, &heard, &net)).len(), 1);
     heard = [3; MAX_FLOWS];
     m.tick(10 * S, &heard, &net);
-    assert!(m.peers.contains_key(&PEER_IP));
-    assert!(!m.peers.contains_key(&OTHER_IP));
+    assert!(m.peers.contains_key(&SocketAddrV4::new(PEER_IP, 4455)));
+    assert!(!m.peers.contains_key(&SocketAddrV4::new(OTHER_IP, 4455)));
 }
 
 #[test]
@@ -1476,5 +1476,65 @@ fn a_transmitter_at_another_rate_is_a_format_mismatch_said_once() {
     assert_eq!(log.lines().count(), 1, "{log}");
     for part in ["rx=1", "TX 1", "peer-device", "48000", "96000"] {
         assert!(log.contains(part), "{part} missing: {log}");
+    }
+}
+
+/// FOH 3.11.2026: dasio runs two Dante devices on one PC address
+/// (master-asio-dante on flow control 4455, band-asio-dante on 4456). The
+/// intercom subscribed two channels of each; dstack keyed its transmitters
+/// by address, put all four channels into one request to one of them, and
+/// asked again every 250 ms for the other's channels ("its transmitter's
+/// record changed"). Each transmitter is its flow-control address.
+#[test]
+fn two_transmitters_on_one_address_get_a_flow_each() {
+    let net = Fake::default();
+    let shared = Ipv4Addr::new(10, 0, 0, 30);
+    let at = |port: u16, id: u16| Advertised {
+        control: SocketAddrV4::new(shared, port),
+        ..adv(shared, id)
+    };
+    net.add("master", "Repro L", at(4455, 1));
+    net.add("master", "Repro R", at(4455, 2));
+    net.add("band", "Click", at(4456, 7));
+    net.add("band", "Guide", at(4456, 9));
+    let mut m = manager();
+    m.set(0, Some(sub("Repro L", "master")));
+    m.set(1, Some(sub("Repro R", "master")));
+    m.set(2, Some(sub("Click", "band")));
+    m.set(3, Some(sub("Guide", "band")));
+    let all = run(
+        &mut m,
+        &net,
+        0,
+        3 * S,
+        Some(Answer::Granted([1, 2, 3, 4, 5, 6])),
+    );
+    let requests: Vec<(SocketAddrV4, Vec<Option<u16>>)> = all
+        .iter()
+        .filter_map(|(_, a)| match a {
+            Action::Request { to, req, .. } => Some((*to, req.channels.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        requests.len(),
+        2,
+        "one request each, never again: {requests:?}"
+    );
+    let to_master = requests
+        .iter()
+        .find(|(to, _)| to.port() == 4455)
+        .expect("master asked");
+    let to_band = requests
+        .iter()
+        .find(|(to, _)| to.port() == 4456)
+        .expect("band asked");
+    let ids = |ch: &[Option<u16>]| ch.iter().flatten().copied().collect::<Vec<_>>();
+    assert_eq!(ids(&to_master.1), vec![1, 2]);
+    assert_eq!(ids(&to_band.1), vec![7, 9]);
+    // Both granted: every channel waits for its flow's packets (no test
+    // packets are heard here), none failed.
+    for rx in 0..4 {
+        assert_eq!(m.status(rx), Some(SubStatus::InProgress), "rx {rx}");
     }
 }

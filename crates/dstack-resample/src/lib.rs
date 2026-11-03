@@ -18,9 +18,11 @@
 
 use rubato::audioadapter_buffers::direct::SequentialSlice;
 use rubato::{
-    Async, FixedAsync, Resampler, SincInterpolationParameters, SincInterpolationType,
+    Adjustable, Async, FixedAsync, Resampler, SincInterpolationParameters, SincInterpolationType,
     WindowFunction,
 };
+
+pub mod asrc;
 
 /// The sinc filter's length, taps.
 pub const TAPS: usize = 256;
@@ -37,6 +39,11 @@ pub const PARAMS: SincInterpolationParameters = SincInterpolationParameters {
     interpolation: SincInterpolationType::Cubic,
     window: WindowFunction::BlackmanHarris2,
 };
+
+/// How far an ASRC's ratio may leave its nominal value: twice the
+/// controller's bound (600 ppm), so a ramp never reaches the core's limit.
+const MAX_RELATIVE: f64 = 1.000_6;
+const _: () = assert!(asrc::MAX_PPM == 300.0);
 
 /// Which side of a converter has a fixed block size.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,12 +119,36 @@ impl Converter {
         block: usize,
         fixed: Fixed,
     ) -> Result<Converter, ConvertError> {
+        Self::build(from, to, channels, block, fixed, false)
+    }
+
+    /// A converter between two clocks (the ASRC): always the sinc stage,
+    /// equal rates too, its ratio adjustable by [`Converter::set_ppm`] up
+    /// to ±[`asrc::MAX_PPM`] (with headroom).
+    pub fn drifting(
+        from: u32,
+        to: u32,
+        channels: usize,
+        block: usize,
+        fixed: Fixed,
+    ) -> Result<Converter, ConvertError> {
+        Self::build(from, to, channels, block, fixed, true)
+    }
+
+    fn build(
+        from: u32,
+        to: u32,
+        channels: usize,
+        block: usize,
+        fixed: Fixed,
+        drifting: bool,
+    ) -> Result<Converter, ConvertError> {
         if from == 0 || to == 0 || channels == 0 || block == 0 {
             return Err(ConvertError::Invalid(format!(
                 "from {from} Hz, to {to} Hz, {channels} channels, block {block}"
             )));
         }
-        let engine = if from == to {
+        let engine = if from == to && !drifting {
             Engine::Copy
         } else {
             let side = match fixed {
@@ -125,7 +156,8 @@ impl Converter {
                 Fixed::Output => FixedAsync::Output,
             };
             let ratio = f64::from(to) / f64::from(from);
-            let stage = Async::<f64>::new_sinc(ratio, 1.0, &PARAMS, block, channels, side)
+            let room = if drifting { MAX_RELATIVE } else { 1.0 };
+            let stage = Async::<f64>::new_sinc(ratio, room, &PARAMS, block, channels, side)
                 .map_err(|e| ConvertError::Core(e.to_string()))?;
             Engine::Sinc(Box::new(stage))
         };
@@ -222,6 +254,21 @@ impl Converter {
                     .map_err(|e| core(&e))
             }
         }
+    }
+
+    /// Leaves the nominal ratio by `ppm` (positive: more output per input),
+    /// ramped over the next call, within ±[`asrc::MAX_PPM`]. An error for a
+    /// converter made by [`Converter::new`] (its ratio is fixed).
+    pub fn set_ppm(&mut self, ppm: f64) -> Result<(), ConvertError> {
+        let Engine::Sinc(stage) = &mut self.engine else {
+            return Err(ConvertError::Invalid(
+                "a copy has no ratio to adjust".into(),
+            ));
+        };
+        let ppm = ppm.clamp(-asrc::MAX_PPM, asrc::MAX_PPM);
+        stage
+            .set_resample_ratio_relative(1.0 + ppm * 1e-6, true)
+            .map_err(|e| ConvertError::Core(e.to_string()))
     }
 
     /// Forgets the filter's history (after a gap in the audio).

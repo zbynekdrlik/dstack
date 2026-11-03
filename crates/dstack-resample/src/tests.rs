@@ -316,3 +316,36 @@ fn a_converter_says_what_it_is() {
     let copy = Converter::new(48_000, 48_000, 1, 16, Fixed::Input).unwrap();
     assert!(format!("{copy:?}").contains("copy: true"));
 }
+
+#[test]
+fn a_drifting_converter_follows_its_correction_and_a_copy_has_none() {
+    let mut copy = Converter::new(48_000, 48_000, 1, 32, Fixed::Input).unwrap();
+    assert!(copy.set_ppm(10.0).is_err());
+    // Equal rates between two clocks: the sinc stage, not a copy.
+    let mut c = Converter::drifting(48_000, 48_000, 1, 32, Fixed::Input).unwrap();
+    assert!(!c.is_copy());
+    let room = c.output_frames_max();
+    let mut out = vec![0.0; room];
+    let input = [0.0; 32];
+    let run = |c: &mut Converter, out: &mut Vec<f64>, blocks: usize| -> usize {
+        (0..blocks)
+            .map(|_| c.process(&input, 32, out, room).unwrap().1)
+            .sum()
+    };
+    run(&mut c, &mut out, 500);
+    assert_eq!(
+        run(&mut c, &mut out, 10_000),
+        320_000,
+        "0 ppm: one out per in"
+    );
+    // +250 ppm: 80 frames more over 320 000 (a ramp at the start).
+    c.set_ppm(250.0).unwrap();
+    run(&mut c, &mut out, 10);
+    let more = run(&mut c, &mut out, 10_000);
+    assert!((more as i64 - 320_080).abs() <= 1, "{more}");
+    // Past the bound it is held at ±300.
+    c.set_ppm(10_000.0).unwrap();
+    run(&mut c, &mut out, 10);
+    let most = run(&mut c, &mut out, 10_000);
+    assert!((most as i64 - 320_096).abs() <= 1, "{most}");
+}
