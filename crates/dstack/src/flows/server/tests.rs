@@ -262,18 +262,43 @@ fn a_receiver_s_own_fpp_is_granted_while_our_latency_covers_it() {
             ..req()
         });
     }
-    // Past our 1 ms with the default 250 µs margin and the 50 µs send
-    // slack (67 frames at 96 kHz are 698 µs; the same rule as the config's
-    // check): our packets would reach it after it plays them.
+    // Past our 1 ms too (dasio, FOH 3.11.2026): a receiver that asks a
+    // packet longer than our latency plays at a latency of its own that
+    // holds it (DVS: 10 ms); one that plays at ours never asks past the
+    // advertised range. Only past one datagram's 256 frames is it refused.
     for fpp in [68, 97, 256] {
-        refused_with(&mut dev, &FlowRequest { fpp, ..req() }, status::BAD_REQUEST);
+        dev.flow(&FlowRequest {
+            fpp,
+            rx: SocketAddrV4::new(PEER_IP, 5_000 + fpp),
+            ..req()
+        });
     }
+    refused_with(&mut dev, &FlowRequest { fpp: 257, ..req() }, status::BAD_REQUEST);
     // A refusal the gap guard counts.
     assert_eq!(
-        dev.send(&build_request(1, &FlowRequest { fpp: 97, ..req() }), 0)
+        dev.send(&build_request(1, &FlowRequest { fpp: 257, ..req() }), 0)
             .gap(),
         Some((op::REQUEST, Gap::Refused))
     );
+}
+
+/// dasio (FOH, 3.11.2026): master-asio-dante at a TX latency of 0.5 ms (48
+/// samples at 96 kHz) refused DVS's fpp 60; DVS showed "Transmitter setup
+/// failed". DVS plays at its own 10 ms, so the 60-frame flow is granted.
+#[test]
+fn a_flow_longer_than_our_latency_is_granted_for_a_receiver_that_asks_it() {
+    let mut dev = Dev::with(DeviceConfig {
+        tx_fpp_max: 8,
+        tx_latency_ns: Some(500_000),
+        ..cfg()
+    });
+    dev.flow(&FlowRequest {
+        rx_host: "dvs".to_string(),
+        rx_flow_name: "4_0".to_string(),
+        channels: vec![Some(1), Some(2)],
+        fpp: 60,
+        ..req()
+    });
 }
 
 #[test]
@@ -283,7 +308,7 @@ fn a_refused_request_is_warned_with_its_fields_once_a_minute() {
         for _ in 0..5 {
             refused_with(
                 &mut dev,
-                &FlowRequest { fpp: 97, ..req() },
+                &FlowRequest { fpp: 257, ..req() },
                 status::BAD_REQUEST,
             );
         }
@@ -292,11 +317,11 @@ fn a_refused_request_is_warned_with_its_fields_once_a_minute() {
     for part in [
         "flow request refused",
         "peer-device",
-        "fpp=97",
+        "fpp=257",
         "bits=24",
         "slots=2",
         "rate=96000",
-        "more frames a packet than our latency covers",
+        "more than 256 frames a packet",
     ] {
         assert!(log.contains(part), "{part} missing: {log}");
     }
