@@ -1072,7 +1072,7 @@ async fn the_daemon_announces_answers_and_announces_a_rename_again_until_stopped
     // The stop ended the media threads.
     assert!(media.tx.stopping() && media.rx.stopping());
     let calls = log.calls();
-    assert_eq!(calls.len(), 2 + 16 + 1, "{calls:#?}");
+    assert_eq!(calls.len(), 3 + 16 + 1, "{calls:#?}");
     assert_eq!(
         calls[0],
         "+test-device._netaudio-arc._udp.local. -> test-device.local."
@@ -1085,6 +1085,10 @@ async fn the_daemon_announces_answers_and_announces_a_rename_again_until_stopped
     assert_eq!(calls[17], chan("TX 16"));
     assert_eq!(
         calls[18],
+        "+test-device._netaudio-dbc._udp.local. -> test-device.local."
+    );
+    assert_eq!(
+        calls[19],
         chan("Mix 3"),
         "only the new record is sent again"
     );
@@ -1145,7 +1149,8 @@ async fn a_stop_that_has_already_come_ends_the_daemon_after_its_announcement() {
     .await
     .expect("within the bound");
     served.unwrap();
-    assert_eq!(log.calls().len(), 2 + 16);
+    // arc, cmc, dbc and 16 chan records.
+    assert_eq!(log.calls().len(), 3 + 16);
     assert!(media.tx.stopping() && media.rx.stopping());
 }
 
@@ -1372,7 +1377,7 @@ async fn an_announcement_that_fails_after_a_rename_ends_the_daemon() {
     let dir = tempfile::tempdir().unwrap();
     let shared = device_in(dir.path());
     // The first set goes out; the rename's new record is refused.
-    let log = Log::new(2 + 16);
+    let log = Log::new(3 + 16);
     let mut announcer = Announcer::new(log.clone());
     let lo = loopback().await;
     let arc_at = lo.arc;
@@ -1409,7 +1414,8 @@ async fn an_announcement_that_fails_after_a_rename_ends_the_daemon() {
     // The rename was saved before it was answered: a restart announces it.
     let saved = std::fs::read_to_string(dir.path().join("state.toml")).unwrap();
     assert!(saved.contains("Mix 5"), "{saved}");
-    assert_eq!(log.calls().len(), 2 + 16);
+    // arc, cmc, dbc and 16 chan records.
+    assert_eq!(log.calls().len(), 3 + 16);
 }
 
 #[test]
@@ -1418,11 +1424,11 @@ fn announce_device_counts_the_records_it_made_the_announced_set() {
     let shared = device_in(dir.path());
     let log = Log::new(usize::MAX);
     let mut announcer = Announcer::new(log.clone());
-    assert_eq!(announce_device(&shared, &mut announcer, IP).unwrap(), 18);
-    shared.lock().unwrap().state.tx[0] = "Mix 1".into();
     assert_eq!(announce_device(&shared, &mut announcer, IP).unwrap(), 19);
+    shared.lock().unwrap().state.tx[0] = "Mix 1".into();
+    assert_eq!(announce_device(&shared, &mut announcer, IP).unwrap(), 20);
     assert_eq!(log.calls().last().unwrap(), &chan("Mix 1"));
-    assert_eq!(log.calls().len(), 19);
+    assert_eq!(log.calls().len(), 20);
 }
 
 #[test]
