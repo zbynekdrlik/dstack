@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.11 (unreleased)
+
+- License (owner 3.11.2026, dstack #90): `dstack-resample` is MIT OR Apache-2.0, as rubato, so every app can take it for its own outputs (SongPlayer's VBAN and ASIO). The rest of dstack stays GPL-3.0-or-later. The crate ships `LICENSE-MIT` and `LICENSE-APACHE`.
+
 ## 0.6.10 (2026-11-03)
 
 - New (dstack #68, dsync 1.27.3): the in-process follower starts from the dsync service's frequency word, and the linked clock keeps a ready service until the follower settles.

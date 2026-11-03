@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! The ASRC's controller (dstack #90, phase 2): how far the converter's
 //! ratio leaves its nominal value so a buffer between two clocks stays at

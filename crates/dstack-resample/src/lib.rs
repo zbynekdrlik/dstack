@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! Sample-rate conversion for our apps (dstack #90, the owner's concept of
 //! 3.11.2026): an app keeps its own rate, and the conversion is ours, done
