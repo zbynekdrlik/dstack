@@ -265,6 +265,9 @@ pub struct Controller {
     /// point, and the count.
     window: Option<Window>,
     last_apply_s: Option<f64>,
+    /// The sums of [`Controller::advance`]: our clock's time and the
+    /// other's, s.
+    advanced: (f64, f64),
     recentres: u64,
     rebases: u64,
 }
@@ -294,6 +297,7 @@ impl Controller {
             bias_ppm: 0.0,
             window: None,
             last_apply_s: None,
+            advanced: (0.0, 0.0),
             recentres: 0,
             rebases: 0,
         }
@@ -322,6 +326,27 @@ impl Controller {
     /// Steps the rate fit re-based on.
     pub fn rebases(&self) -> u64 {
         self.rebases
+    }
+
+    /// Whether the correction sits at its bound (±[`MAX_PPM`]): the drift is
+    /// more than the ASRC can follow (vstack's `asrc_saturated`).
+    pub fn saturated(&self) -> bool {
+        self.applied_ppm.abs() >= MAX_PPM
+    }
+
+    /// A rate point as two advances over the same stretch (vstack's
+    /// `audio_asrc_rate_point`): `ours_s` on our clock (the master's stamp
+    /// advance) and `other_s` on the other (the raw duration covered). The
+    /// sums give the point `(Σours, Σother − Σours)` of the rate fit.
+    pub fn advance(&mut self, ours_s: f64, other_s: f64) -> Offered {
+        self.advanced.0 += ours_s;
+        self.advanced.1 += other_s;
+        let (x, y) = self.advanced;
+        let offered = self.rate.offer(x, y - x);
+        if offered == Offered::Rebased {
+            self.rebases += 1;
+        }
+        offered
     }
 
     /// The outside bias, ppm, at most ±[`MAX_BIAS_PPM`].
