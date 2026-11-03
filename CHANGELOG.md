@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.1 (2026-11-03)
+
+- Fix (dstack #1): the device now announces `_netaudio-dbc._udp` on its flow-control port, with an empty TXT, as every Dante device on the site does. Without it, DVS sent its flow requests to 4455 whatever our chan records said. A second instance on one address (4456) was unreachable from DVS: the FOH gate's status 21 before the move to the default ports.
+- Fix (dstack #16, dcontroller): `meter::parse_frame` reads version 3 frames. A 128-channel Yamaha card (AIC128-D, Dante PCIe IF 4.0.13.3) sends them, and every one was dropped before. In version 3, byte 25 is 0, the counts are big-endian u16s at 26 and 28, and the levels start at 30. New: `meter::FRAME_VERSION_3`.
+
 ## 0.6.0 (2026-11-03)
 
 - Fix (dstack #1, FOH 3.11.2026): we refused Dante Virtual Soundcard's flow requests. DVS asks fpp 60 whatever we advertise, and our device advertised fpp 8,2 at 1 ms. Every request got 0x0302, and DVS showed status 21 on all its channels.
