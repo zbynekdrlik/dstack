@@ -1,6 +1,10 @@
 # Changelog
 
-## 0.6.10 (unreleased)
+## 0.6.11 (unreleased)
+
+- License (owner 3.11.2026: as permissive as possible): `dlink`, `dstack-audio-io` and `dstack-resample` are MIT OR Apache-2.0 (`LICENSE-MIT`, `LICENSE-APACHE`, `LICENSE.md`). `dstack` stays GPL-3.0-or-later for now: some of its files began from inferno (GPL-3.0-or-later), and those must become our own implementation first. Its GPL text is now in `crates/dstack/COPYING`.
+
+## 0.6.10 (2026-11-03)
 
 - New (dstack #68, dsync 1.27.3): the in-process follower starts from the dsync service's frequency word, and the linked clock keeps a ready service until the follower settles.
   - dsync-ptp moves to v1.27.3 (frequency seed, settled state, continuous boot re-seed).

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! The app at its own rate (dstack #90, the owner's concept of 3.11.2026):
 //! the device runs at the network's rate (96 kHz on the site, which every

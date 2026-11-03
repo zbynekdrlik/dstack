@@ -5,9 +5,9 @@ members = ["crates/*"]
 exclude = ["vendor/mdns-sd"]
 
 [workspace.package]
-version = "0.6.10"
+version = "0.6.11"
 edition = "2024"
-license = "GPL-3.0-or-later"
+license = "MIT OR Apache-2.0"
 repository = "https://github.com/zbynekdrlik/dstack"
 authors = ["zbynekdrlik"]
 

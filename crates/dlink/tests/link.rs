@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! dstack #68: a dlink device in the app's process, on the box's routed
 //! address and its own system clock, at dlink's defaults (10 ms, the
