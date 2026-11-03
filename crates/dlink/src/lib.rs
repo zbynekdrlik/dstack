@@ -306,6 +306,11 @@ impl Config {
     /// as a config file's would be (a budget the work leaves too little of
     /// first).
     pub fn device(&self) -> Result<DeviceConfig, Vec<String>> {
+        self.checked().map(|(cfg, _)| cfg)
+    }
+
+    /// [`Config::device`] and the [`split`] it runs, one computation.
+    fn checked(&self) -> Result<(DeviceConfig, Split), Vec<String>> {
         let mut t = toml::Table::new();
         t.insert("name".into(), self.name.clone().into());
         t.insert("manufacturer".into(), self.manufacturer.clone().into());
@@ -323,9 +328,10 @@ impl Config {
         t.insert("encoding".into(), 24.into());
         // A budget the work leaves too little of is listed first; the
         // device is checked at the floor meanwhile, for the other problems.
-        let (latency_ns, margin, budget) = match self.split() {
-            Ok(s) => (s.latency_ns, s.margin, None),
-            Err(p) => (MIN_LATENCY_NS, work_margin(rate, self.block), Some(p)),
+        let split = self.split();
+        let (latency_ns, margin) = match &split {
+            Ok(s) => (s.latency_ns, s.margin),
+            Err(_) => (MIN_LATENCY_NS, work_margin(rate, self.block)),
         };
         t.insert("latency_ns".into(), to_int(latency_ns).into());
         t.insert("block".into(), to_int(self.block).into());
@@ -372,14 +378,17 @@ impl Config {
         t.insert("rx".into(), self.rx.clone().into());
         t.insert("tx".into(), self.tx.clone().into());
         let text = toml::to_string(&t).map_err(|e| vec![e.to_string()])?;
-        match (budget, DeviceConfig::from_toml(&text)) {
-            (None, Ok(cfg)) => {
+        match (split, DeviceConfig::from_toml(&text)) {
+            (Ok(s), Ok(cfg)) => {
                 debug_assert_eq!(cfg.timing, TimingProfile::Normal);
-                Ok(cfg)
+                Ok((cfg, s))
             }
-            (None, Err(e)) => Err(e.problems),
-            (Some(p), Ok(_)) => Err(vec![p]),
-            (Some(p), Err(e)) => Err(std::iter::once(p).chain(e.problems).collect()),
+            (Ok(_), Err(e)) => Err(e.problems),
+            (Err(p), Ok(_)) => Err(vec![p]),
+            // A device rate of 0 is the device's own sample_rate problem:
+            // listed once, as the device words it.
+            (Err(_), Err(e)) if rate == 0 => Err(e.problems),
+            (Err(p), Err(e)) => Err(std::iter::once(p).chain(e.problems).collect()),
         }
     }
 }
@@ -500,20 +509,18 @@ impl Link {
         processor: P,
         source: ClockSource,
     ) -> Result<Link, HostError> {
-        let cfg = config.device().map_err(|problems| {
+        let (cfg, s) = config.checked().map_err(|problems| {
             HostError::Setup(format!("dlink config: {}", problems.join("; ")))
         })?;
-        if let Ok(s) = config.split() {
-            tracing::info!(
-                budget_ns = config.budget_ns,
-                latency_ns = s.latency_ns,
-                margin = s.margin,
-                block = cfg.block,
-                tx_path_ns = s.tx_path_ns,
-                rx_path_ns = s.rx_path_ns,
-                "dlink: the latency budget's split (the Dante latency is what the work leaves)"
-            );
-        }
+        tracing::info!(
+            budget_ns = config.budget_ns,
+            latency_ns = s.latency_ns,
+            margin = s.margin,
+            block = cfg.block,
+            tx_path_ns = s.tx_path_ns,
+            rx_path_ns = s.rx_path_ns,
+            "dlink: the latency budget's split (the Dante latency is what the work leaves)"
+        );
         let device = if config.converts() {
             tracing::info!(
                 device_rate = config.device_rate(),

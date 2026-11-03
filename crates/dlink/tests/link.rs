@@ -368,8 +368,9 @@ fn measured_loop(config: &Config, app_rate: u32) -> u64 {
 /// dstack #68: the split's numbers are the real path. Our TX 1 into our own
 /// RX 1 is the TX path (W + P) and the RX path (P + B) less the one P they
 /// share (the receiver's playout is our RX's), plus the converter's delays
-/// when it runs. The step the app sends comes back within one block of
-/// that, measured on the device's own stamps through the real flow.
+/// when it runs. The step the app sends comes back within a few frames of
+/// that (the design asks one block), measured on the device's own stamps
+/// through the real flow.
 #[test]
 fn the_loop_through_our_own_flow_takes_what_the_split_says() {
     let _one = ONE_DEVICE
@@ -391,9 +392,12 @@ fn the_loop_through_our_own_flow_takes_what_the_split_says() {
         // Each path is within the 10 ms budget.
         assert!(split.tx_path_ns <= dlink::BUDGET_NS && split.rx_path_ns <= dlink::BUDGET_NS);
         let got = measured_loop(&config, app);
-        let block_ns = dlink::BLOCK * 1_000_000_000 / u64::from(network);
+        // The design allows one block; the stamps are exact, so a few app
+        // frames (the converter's half-way crossing) is the bound, and a
+        // margin or a delay off by a block fails.
+        let frames_ns = 8 * 1_000_000_000 / u64::from(app);
         assert!(
-            got.abs_diff(want) <= block_ns,
+            got.abs_diff(want) <= frames_ns,
             "{name}: the loop took {got} ns, the split says {want} ns ({split:?})"
         );
     }

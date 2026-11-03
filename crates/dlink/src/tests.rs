@@ -390,3 +390,22 @@ fn the_config_s_split_is_what_its_device_runs() {
     let cfg = c.device().unwrap();
     assert_eq!((cfg.latency_ns, cfg.work_margin), (s.latency_ns, s.margin));
 }
+
+/// dstack #68 (review): a network rate of 0 is one problem, the device's
+/// own sample_rate one, not the split's too; with a bad name beside it,
+/// both are listed.
+#[test]
+fn a_network_rate_of_0_is_the_device_s_one_problem() {
+    let problems = config().network_rate(0).device().unwrap_err();
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert!(problems[0].starts_with("sample_rate"), "{problems:?}");
+    assert!(
+        !problems[0].contains("the device's rate is 0 Hz"),
+        "{problems:?}"
+    );
+    let two = Config::new("-bad", "/tmp/x.toml")
+        .network_rate(0)
+        .device()
+        .unwrap_err();
+    assert_eq!(two.len(), 2, "{two:?}");
+}
