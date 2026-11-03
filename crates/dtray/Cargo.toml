@@ -1,0 +1,42 @@
+[package]
+name = "dtray"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+repository.workspace = true
+authors.workspace = true
+description = "The PC's tray icon for its dstack devices (dlink apps, dasio, dstack-dev): clock, subscriptions and late counts, read-only"
+
+[lib]
+name = "dtray"
+
+[[bin]]
+name = "dtray"
+path = "src/main.rs"
+
+[dependencies]
+dstack = { path = "../dstack" }
+# The status line's JSON (already in the lockfile through dstack).
+serde_json = "1.0"
+# The probe's error (already in the lockfile through dstack).
+thiserror = "2.0"
+tracing = "0.1"
+# `dtray --print`'s log on stderr, RUST_LOG as the devices read it (already
+# in the lockfile through dstack).
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[target.'cfg(windows)'.dependencies]
+# The tray icon and its menu (tauri-apps, MIT OR Apache-2.0), as dasio-tray
+# uses it. 0.21.2 was published on 2025-10-20.
+tray-icon = "=0.21.2"
+# The message loop and its timer, the single-instance mutex, the clipboard
+# and the error box (the version dstack uses).
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_System_DataExchange",
+  "Win32_System_Memory",
+  "Win32_System_Ole",
+  "Win32_System_Threading",
+  "Win32_UI_WindowsAndMessaging",
+] }

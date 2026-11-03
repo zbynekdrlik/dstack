@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.6.15 (unreleased)
+
+- New (dstack #104 step 3): the `dtray` crate, the PC's tray icon for its dstack devices (dlink apps, dasio, dstack-dev). No app changes for it: it finds the devices by mDNS on the PC's own addresses (the ARC records that carry `dstack_ctl`) and reads each one's local status endpoint once a second.
+  - The icon is grey with no device, red when a status cannot be read or a clock is not ready, orange when a subscribed RX channel is not connected or a late, missed or overrun count grew since the last second, green otherwise. The tooltip names the worst device and why.
+  - The menu (Windows): a line per device (clock, RX subscriptions connected, the counts' growth), Copy status (every device's status JSON), Exit (the tray only).
+  - `dtray --print` on every platform: one 3 s discovery pass, the tooltip and the lines on stdout. On Linux the tray itself is not there yet (`dtray` alone exits 2).
+  - The library is pure and tested: `discover` (the filter, `Scanner`), `probe`, `model` (`Tracker`, `View`, `Colour`), `icon`.
+- Dependencies: `tray-icon` 0.21.2 (Windows only, dtray). Lockfile: `crc32fast` held at 1.5.2 (1.5.3 and 1.5.4 are under two weeks old).
+
 ## 0.6.14 (2026-11-03)
 
 - New (dstack #90 step 3, songplayer's servo rules): `asrc::Controller` takes SongPlayer's additions, all opt-in, so existing users (vstack) are unchanged:
