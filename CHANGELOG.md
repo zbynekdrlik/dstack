@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.5 (2026-11-03)
+
+- New (dstack #68): dsync's in-process PTP follower runs on Windows too (dsync-ptp v1.27.1, which loads Npcap's `wpcap.dll` at run time).
+  - A dlink device on Windows is now locked to PTP on its own when Npcap is installed, with or without the dsync service.
+  - Without Npcap, or if the start fails, it logs the reason in a word (`Npcap is not installed`, `port 319 needs CAP_NET_BIND_SERVICE or root`, `no such interface, or no IPv4 on it`) and runs on the service's clock, as before.
+  - dsync-ptp v1.27.1 also interpolates its wall-to-raw stamp conversion, so a read delay under host slew no longer skews stamps (dsync#136).
+  - New: `clock::linked::follower_failure`.
+
 ## 0.6.4 (2026-11-03)
 
 - New (dstack #90, vstack#8): two additions to `asrc::Controller` for vstack rig-core's genlock pairing.

@@ -9,8 +9,9 @@
 //! locked, and the PC's dsync service otherwise: it works whether the
 //! service runs or not, and is never worse than it (owner, 2.11.2026). On
 //! Linux the follower needs port 319 (CAP_NET_BIND_SERVICE); without it
-//! the device logs why and runs on the service. On Windows the follower
-//! comes with dsync's run-time Npcap load.
+//! the device logs why and runs on the service. On Windows it needs Npcap
+//! (loaded at run time, dsync v1.27); without it the device logs why and
+//! runs on the service.
 //!
 //! It needs no low latency: the device latency is 10 ms unless the app
 //! asks for another (4 ms at the least), and it asks the app for no
