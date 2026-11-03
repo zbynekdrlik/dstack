@@ -26,17 +26,23 @@ tracing = "0.1"
 # in the lockfile through dstack).
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+[dev-dependencies]
+# The expected devices' folder in tests (already in the lockfile through
+# dstack's tests).
+tempfile = "3"
+
 [target.'cfg(windows)'.dependencies]
 # The tray icon and its menu (tauri-apps, MIT OR Apache-2.0), as dasio-tray
 # uses it. 0.21.2 was published on 2025-10-20.
 tray-icon = "=0.21.2"
 # The message loop and its timer, the single-instance mutex, the clipboard
-# and the error box (the version dstack uses).
+# the error box, and the autostart's Run value (the version dstack uses).
 windows-sys = { version = "0.61", features = [
   "Win32_Foundation",
   "Win32_System_DataExchange",
   "Win32_System_Memory",
   "Win32_System_Ole",
+  "Win32_System_Registry",
   "Win32_System_Threading",
   "Win32_UI_WindowsAndMessaging",
 ] }

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-use super::{Mode, USAGE, mode_of};
+use std::path::Path;
+
+use super::{Mode, USAGE, mode_of, run_value};
 
 fn args(a: &[&str]) -> Vec<String> {
     a.iter().map(|s| s.to_string()).collect()
@@ -13,13 +15,50 @@ fn no_argument_is_the_tray_and_print_prints() {
 }
 
 #[test]
+fn autostart_takes_on_or_off() {
+    assert_eq!(
+        mode_of(args(&["--autostart", "on"])),
+        Ok(Mode::Autostart(true))
+    );
+    assert_eq!(
+        mode_of(args(&["--autostart", "off"])),
+        Ok(Mode::Autostart(false))
+    );
+}
+
+#[test]
 fn anything_else_is_the_usage() {
     for a in [
         &["--prin"][..],
         &["print"],
         &["--print", "--print"],
         &["-h"],
+        &["--autostart"],
+        &["--autostart", "yes"],
+        &["--autostart", "ON"],
+        &["--autostart", "on", "off"],
+        &["on"],
     ] {
         assert_eq!(mode_of(args(a)), Err(USAGE), "{a:?}");
     }
+}
+
+#[test]
+fn the_run_value_is_the_exe_path_quoted() {
+    assert_eq!(
+        run_value(Path::new(r"C:\Program Files\dstack\dtray.exe")).as_deref(),
+        Some(r#""C:\Program Files\dstack\dtray.exe""#)
+    );
+    assert_eq!(run_value(Path::new("dtray")).as_deref(), Some("\"dtray\""));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_path_that_is_no_unicode_has_no_run_value() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    assert_eq!(
+        run_value(Path::new(OsStr::from_bytes(b"/opt/\xff/dtray"))),
+        None
+    );
 }

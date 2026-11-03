@@ -4,14 +4,18 @@
 //! `dtray`: the PC's tray icon for its dstack devices (Windows), see the
 //! library. `dtray --print` runs one discovery pass of [`PRINT_WAIT`] and
 //! writes the tooltip and the lines to stdout (every platform: a check
-//! without a desktop). Exit codes: 0 done, 1 a failure, 2 a usage error or
-//! the tray on a platform without one.
+//! without a desktop), the expected devices ([`dtray::expected`]) included.
+//! `dtray --autostart on|off` sets or removes the tray's start at the
+//! user's logon (Windows; installers call it). Exit codes: 0 done, 1 a
+//! failure, 2 a usage error or the tray or autostart on a platform without
+//! one.
 
 use std::process::ExitCode;
 use std::time::Duration;
 
 use dtray::Mode;
 use dtray::discover::Scanner;
+use dtray::expected;
 use dtray::model::{self, Tracker};
 
 #[cfg(windows)]
@@ -31,6 +35,7 @@ fn main() -> ExitCode {
     match mode {
         Mode::Print => print(),
         Mode::Tray => tray(),
+        Mode::Autostart(on) => autostart(on),
     }
 }
 
@@ -46,7 +51,8 @@ fn print() -> ExitCode {
     let mut scanner = Scanner::new();
     let failed = scanner.refresh();
     std::thread::sleep(PRINT_WAIT);
-    let view = Tracker::default().update(&scanner.readings());
+    let expected = expected::expected(&expected::devices_dir());
+    let view = Tracker::default().update_with(&scanner.readings(), &expected);
     print!("{}", model::print_text(&view));
     for f in &failed {
         eprintln!("dtray: {f}");
@@ -72,5 +78,24 @@ fn tray() -> ExitCode {
 #[cfg(not(windows))]
 fn tray() -> ExitCode {
     eprintln!("the tray runs on Windows; use --print");
+    ExitCode::from(2)
+}
+
+/// Sets or removes the Run value; 1 when the registry refused (no box: an
+/// installer runs it without a desktop to answer one).
+#[cfg(windows)]
+fn autostart(on: bool) -> ExitCode {
+    match win::autostart(on) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("dtray: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn autostart(_on: bool) -> ExitCode {
+    eprintln!("--autostart is for Windows; {}", dtray::USAGE);
     ExitCode::from(2)
 }
