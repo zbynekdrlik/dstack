@@ -1146,7 +1146,7 @@ fn the_status_carries_the_app_s_object_last_and_a_later_hook_replaces_it() {
         counted.fetch_add(1, Ordering::Relaxed);
         "{\"line\": \"ASIO 64\",\n \"state\": \"warn\", \"n\": 2}".to_string()
     });
-    let after = status(&media);
+    let after = status_until(&media, |s| s.contains("\"app\""));
     assert_eq!(
         after,
         format!(
@@ -1154,15 +1154,41 @@ fn the_status_carries_the_app_s_object_last_and_a_later_hook_replaces_it() {
             before.strip_suffix('}').unwrap()
         )
     );
-    assert_eq!(calls.load(Ordering::Relaxed), 1, "one call a status");
+    assert!(calls.load(Ordering::Relaxed) >= 1);
     assert!(serde_json::from_str::<serde_json::Value>(&after).is_ok());
     media.set_app_status(|| r#"{"state":"error"}"#.to_string());
-    assert!(status(&media).ends_with(",\"app\":{\"state\":\"error\"}}"));
-    assert_eq!(calls.load(Ordering::Relaxed), 1, "the first hook is gone");
+    let error = |s: &str| s.ends_with(",\"app\":{\"state\":\"error\"}}");
+    status_until(&media, error);
+    let first = calls.load(Ordering::Relaxed);
+    let end = std::time::Instant::now() + std::time::Duration::from_millis(1300);
+    while std::time::Instant::now() < end {
+        assert!(error(&status(&media)));
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert_eq!(
+        calls.load(Ordering::Relaxed),
+        first,
+        "the first hook is gone"
+    );
+}
+
+/// Reads the status every 10 ms until `done` holds for it (the app hook's
+/// thread refreshes its part in the background), within a generous 10 s.
+fn status_until(media: &Media, done: impl Fn(&str) -> bool) -> String {
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let s = status(media);
+        if done(&s) {
+            return s;
+        }
+        assert!(std::time::Instant::now() < end, "never came: {s}");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
 }
 
 #[test]
 fn an_app_part_that_is_no_object_is_left_out_and_warned_once() {
+    crate::test_log::undecided();
     let dir = tempfile::tempdir().unwrap();
     let device = device_at(dir.path());
     let media = media_on(&device, Arc::new(Unready));
@@ -1176,13 +1202,15 @@ fn an_app_part_that_is_no_object_is_left_out_and_warned_once() {
             "[\"not an object\"]".to_string()
         }
     });
+    let ok = |s: &str| s.ends_with(",\"app\":{\"state\":\"ok\"}}");
     // A good object warns nothing.
     let logs = crate::test_log::capture_warnings(|| {
-        assert!(status(&media).ends_with(",\"app\":{\"state\":\"ok\"}}"));
+        status_until(&media, ok);
     });
     assert_eq!(logs, "");
     good.store(false, Ordering::Relaxed);
     let logs = crate::test_log::capture_warnings(|| {
+        status_until(&media, |s| s == before);
         for _ in 0..3 {
             assert_eq!(status(&media), before);
         }
@@ -1196,14 +1224,17 @@ fn an_app_part_that_is_no_object_is_left_out_and_warned_once() {
     // Good again: carried again, nothing more warned.
     good.store(true, Ordering::Relaxed);
     let logs = crate::test_log::capture_warnings(|| {
-        assert!(status(&media).ends_with(",\"app\":{\"state\":\"ok\"}}"));
+        status_until(&media, ok);
     });
     assert_eq!(logs, "");
-    // A new hook that is refused is warned again, once.
+    // A new hook that is refused is warned again, once: the status reads
+    // as without a hook for two refreshes (its first call comes at once).
     media.set_app_status(|| "not json".to_string());
     let logs = crate::test_log::capture_warnings(|| {
-        for _ in 0..3 {
+        let end = std::time::Instant::now() + 2 * crate::daemon::media::app::REFRESH;
+        while std::time::Instant::now() < end {
             assert_eq!(status(&media), before);
+            std::thread::sleep(std::time::Duration::from_millis(20));
         }
     });
     assert_eq!(

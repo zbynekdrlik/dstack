@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! The Windows menu's decisions (pure, every platform; `win.rs` only
-//! calls them):
+//! The tray menu's decisions (pure, every platform; the binary's `tray.rs`
+//! only calls them):
 //!
 //! - [`Known`]: each device's ARC settings, read again every
 //!   [`SETTINGS_EVERY`] ticks, at once for a new device. A failed read

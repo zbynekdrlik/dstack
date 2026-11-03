@@ -17,16 +17,20 @@
 //!   status (`app`: its `line` and `state`) and the expected devices not
 //!   running included.
 //! - [`latency`]: a device's latency menu from its ARC settings.
-//! - [`menu`]: the Windows menu's decisions (when to read settings, when
-//!   to build the menu again, whether a choice writes).
+//! - [`menu`]: the tray menu's decisions (when to read settings, when to
+//!   build the menu again, whether a choice writes).
 //! - [`icon`]: the icon's pixels in a colour.
+//! - [`desktop`]: the Linux desktop's files (the single-instance lock, the
+//!   autostart entry and its text).
 //!
-//! The binary shows them as a tray icon on Windows, prints them once with
-//! `dtray --print` on every platform, and sets or removes its own start at
-//! logon with `dtray --autostart on|off` (Windows).
+//! The binary shows them as a tray icon on Windows and Linux, prints them
+//! once with `dtray --print` on every platform, and sets or removes its own
+//! start at logon with `dtray --autostart on|off` (Windows and Linux).
 
 use std::path::Path;
 
+#[cfg(unix)]
+pub mod desktop;
 pub mod discover;
 pub mod expected;
 pub mod icon;
@@ -38,12 +42,12 @@ pub mod probe;
 /// What the command line asks for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
-    /// The tray icon (Windows).
+    /// The tray icon (Windows and Linux).
     Tray,
     /// One discovery pass, the view printed to stdout.
     Print,
     /// Start the tray at the user's logon (`true`) or not (`false`)
-    /// (Windows).
+    /// (Windows and Linux).
     Autostart(bool),
 }
 
