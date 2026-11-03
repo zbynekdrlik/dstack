@@ -154,3 +154,36 @@ fn the_flow_slots_are_taken_and_checked() {
         ["flow_slots: 1 to 32"]
     );
 }
+
+#[test]
+fn a_network_rate_twice_the_app_s_runs_the_device_at_it() {
+    let c = config().sample_rate(48_000).network_rate(96_000);
+    assert_eq!((c.device_rate(), c.halved()), (96_000, true));
+    let cfg = c.device().unwrap();
+    assert_eq!(cfg.sample_rate, 96_000);
+    // The pump's margin is half the latency at the device's rate.
+    assert_eq!(cfg.work_margin, 480);
+    // The same rate is no step; unset is the app's rate.
+    let same = config().sample_rate(48_000).network_rate(48_000);
+    assert_eq!((same.device_rate(), same.halved()), (48_000, false));
+    assert_eq!(same.device().unwrap().sample_rate, 48_000);
+    assert_eq!(config().device_rate(), SAMPLE_RATE);
+    assert!(!config().halved());
+}
+
+#[test]
+fn a_network_rate_neither_the_app_s_nor_twice_it_is_refused() {
+    for net in [44_100, 192_000, 24_000] {
+        let problems = config()
+            .sample_rate(48_000)
+            .network_rate(net)
+            .device()
+            .unwrap_err();
+        assert_eq!(
+            problems,
+            vec![format!(
+                "network_rate {net} must be the sample rate 48000 or twice it"
+            )]
+        );
+    }
+}

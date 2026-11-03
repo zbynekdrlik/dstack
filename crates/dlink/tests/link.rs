@@ -101,6 +101,75 @@ fn a_dlink_device_runs_the_app_s_processor_at_its_defaults() {
     );
 }
 
+/// An app at 48 kHz on a 96 kHz network (dstack #20): the device runs at
+/// 96 kHz, the app gets blocks of half its frames, and our TX 1 comes back
+/// on RX 1 through both 2:1 steps at the level the app sent (once the
+/// filters settle: the step from silence rings, so the last sample counts,
+/// not the peak).
+#[test]
+fn a_48_khz_app_runs_a_96_khz_device_through_the_2_to_1_step() {
+    let _one = ONE_DEVICE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("dlink.toml");
+    let config = Config::new("dlink-test", &state)
+        .rx(["In 1"])
+        .tx(["Out 1"])
+        .sample_rate(48_000)
+        .network_rate(96_000)
+        .subscribe(1, "Out 1", "dlink-test");
+    let heard = Arc::new(AtomicU64::new(0f64.to_bits()));
+    let frames = Arc::new(AtomicU64::new(0));
+    struct Sized {
+        last: Arc<AtomicU64>,
+        frames: Arc<AtomicU64>,
+    }
+    impl Process for Sized {
+        fn process(&mut self, block: &mut Block<'_>) {
+            self.frames.store(block.frames() as u64, Ordering::Relaxed);
+            let last = block.input(0).last().copied().unwrap_or(0.0);
+            self.last.store(last.to_bits(), Ordering::Relaxed);
+            block.output(0).fill(0.5);
+        }
+    }
+    let link = Link::start_on(
+        &config,
+        &Place::Ip(routed_ipv4()),
+        Map {
+            rx: vec![0],
+            tx: vec![0],
+        },
+        Sized {
+            last: Arc::clone(&heard),
+            frames: Arc::clone(&frames),
+        },
+        Clock::System,
+    )
+    .expect("the dlink device started");
+    let end = Instant::now() + Duration::from_secs(10);
+    let settled = || (f64::from_bits(heard.load(Ordering::Relaxed)) - 0.5).abs() < 1e-3;
+    while !settled() && Instant::now() < end {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let pump = link.media().engine().expect("the pump attached");
+    let status = dstack::ctl::answer("status", link.media());
+    assert_eq!(link.ended(), None);
+    let stopped = link.stop();
+    let got = f64::from_bits(heard.load(Ordering::Relaxed));
+    assert!(
+        (got - 0.5).abs() < 1e-3,
+        "our TX 1 came back on RX 1 as {got}"
+    );
+    // The device's block is 32 frames at 96 kHz: the app gets 16 at 48 kHz.
+    assert_eq!(frames.load(Ordering::Relaxed), 16);
+    // The RX flow runs at 96 kHz: its 10 ms latency is 960 samples.
+    assert!(status.contains("\"latency\":960"), "{status}");
+    // The pump runs at the device's 96 kHz: P 960 (10 ms), W 480 (5 ms).
+    assert_eq!((pump.playout, pump.offset), (960, 1_472), "{pump:?}");
+    assert!(matches!(stopped, Stopped::Done), "{stopped:?}");
+}
+
 /// A subscription the app declares (intercom#5) holds from the first start,
 /// with no state file: our RX 1 hears our own TX 1.
 #[test]

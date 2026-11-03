@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.20 (2026-11-03)
+
+- New (dstack #20, intercom#5): dlink runs a 48 kHz app on a 96 kHz network. `Config::network_rate(hz)` sets the device's rate (the network's); `Config::sample_rate` stays the app's. With the network at twice the app's rate, a 2:1 step (`dlink::Halve`) sits between them. RX is low-passed and every second sample kept; TX is zero-stuffed and low-passed. One half-band FIR (63 taps, Kaiser) is flat to about 20 kHz, holds the band that would fold back down by at least 60 dB, and delays 0.16 ms each way. Same clock, so no drift. The app's blocks have half the frames and half the media time. Any other ratio is refused at start. New: `Config::{network_rate, device_rate, halved}`, `dlink::Halve`.
+- Fix (dstack #20): an RX channel subscribed to a transmitter at another sample rate now reads CHANNEL_FORMAT (16), as Dante Controller names it, instead of TX_FAIL (21). The device logs one warning per subscription naming both rates. It never asks such a transmitter: a Dante flow needs one rate at both ends.
+
 ## 0.5.19 (2026-11-03)
 
 - Log (dstack #1, dasio#1): a TX flow to a destination on the same PC (another device of ours on the same address) is logged at info, "not marked", instead of a warning. QoS2 has no route to it (`QOSAddSocketToFlow` 1168, `ERROR_NOT_FOUND`), and its packets never leave the NIC. New: `media::dscp::{local_destination, ERROR_NOT_FOUND}`.

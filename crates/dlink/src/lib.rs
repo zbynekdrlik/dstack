@@ -54,6 +54,10 @@ pub use dstack::host::{HostError, Stopped};
 pub use dstack::stream::Map;
 pub use dstack_audio_io::{Block, Process};
 
+pub mod halve;
+
+pub use halve::Halve;
+
 use dstack::device::{TimingProfile, normal_work_margin};
 use dstack::embed::Embedded;
 use dstack::host::ClockSource;
@@ -74,6 +78,7 @@ pub struct Config {
     rx: Vec<String>,
     tx: Vec<String>,
     sample_rate: u32,
+    network_rate: Option<u32>,
     latency_ns: u64,
     manufacturer: String,
     model: String,
@@ -104,6 +109,7 @@ impl Config {
             rx: Vec::new(),
             tx: Vec::new(),
             sample_rate: SAMPLE_RATE,
+            network_rate: None,
             latency_ns: LATENCY_NS,
             manufacturer: "dlink".to_string(),
             model: "dlink".to_string(),
@@ -127,10 +133,30 @@ impl Config {
         self
     }
 
-    /// The sample rate, Hz.
+    /// The app's sample rate, Hz: its blocks come at this rate.
     pub fn sample_rate(mut self, hz: u32) -> Self {
         self.sample_rate = hz;
         self
+    }
+
+    /// The network's sample rate, Hz, when it differs from the app's: the
+    /// device runs at it (a Dante flow needs both ends at one rate), and a
+    /// 2:1 step ([`Halve`]) hands the app its own rate. It must be the
+    /// app's rate or twice it (dstack #20: 96 kHz on the site, 48 kHz in
+    /// the intercom's hub). Unset: the app's rate.
+    pub fn network_rate(mut self, hz: u32) -> Self {
+        self.network_rate = Some(hz);
+        self
+    }
+
+    /// The rate the device runs at: the network's, else the app's.
+    pub fn device_rate(&self) -> u32 {
+        self.network_rate.unwrap_or(self.sample_rate)
+    }
+
+    /// Whether the app runs at half the device's rate (the 2:1 step).
+    pub fn halved(&self) -> bool {
+        self.device_rate() == self.sample_rate.saturating_mul(2)
     }
 
     /// The device latency, ns (4 ms at the least).
@@ -199,12 +225,19 @@ impl Config {
         t.insert("name".into(), self.name.clone().into());
         t.insert("manufacturer".into(), self.manufacturer.clone().into());
         t.insert("model".into(), self.model.clone().into());
-        t.insert("sample_rate".into(), i64::from(self.sample_rate).into());
+        let rate = self.device_rate();
+        if rate != self.sample_rate && !self.halved() {
+            return Err(vec![format!(
+                "network_rate {rate} must be the sample rate {} or twice it",
+                self.sample_rate
+            )]);
+        }
+        t.insert("sample_rate".into(), i64::from(rate).into());
         t.insert("encoding".into(), 24.into());
         t.insert("latency_ns".into(), to_int(self.latency_ns).into());
         t.insert(
             "work_margin".into(),
-            to_int(normal_work_margin(self.latency_ns, self.sample_rate)).into(),
+            to_int(normal_work_margin(self.latency_ns, rate)).into(),
         );
         t.insert("timing".into(), "normal".into());
         t.insert(
@@ -291,7 +324,18 @@ impl Link {
         let cfg = config.device().map_err(|problems| {
             HostError::Setup(format!("dlink config: {}", problems.join("; ")))
         })?;
-        let device = Embedded::start_with(cfg, place, map, processor, source)?;
+        let device = if config.halved() {
+            tracing::info!(
+                device_rate = config.device_rate(),
+                app_rate = config.sample_rate,
+                "dlink: the device runs at the network's rate, the app at half of it (2:1 step)"
+            );
+            let (inputs, outputs) = (map.rx.len(), map.tx.len());
+            let halve = Halve::new(processor, inputs, outputs);
+            Embedded::start_with(cfg, place, map, halve, source)?
+        } else {
+            Embedded::start_with(cfg, place, map, processor, source)?
+        };
         Ok(Link { device })
     }
 
