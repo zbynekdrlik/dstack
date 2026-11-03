@@ -2,6 +2,10 @@
 
 ## 0.6.0 (2026-11-03)
 
+- Fix (dstack #1, FOH 3.11.2026): we refused Dante Virtual Soundcard's flow requests. DVS asks fpp 60 whatever we advertise, and our device advertised fpp 8,2 at 1 ms. Every request got 0x0302, and DVS showed status 21 on all its channels.
+  - A request is now granted while its packet, our `tx_margin_ns` and the 50 µs send slack fit our advertised latency. This is the config's own rule for `tx_fpp_max`, which stays what we advertise. At 1 ms, 96 kHz and the default margin, that is up to 67 frames.
+  - Each refusal is warned (`flow request refused`) with the request's fields and reason, once a minute per requester and reason. Before, it was logged at debug only.
+  - New public field: `TxTable::warned`.
 - New (dstack #90, owner 3.11.2026): the crate `dstack-resample`, one rate converter for our apps, with no Dante code in it.
   - The core is rubato's band-limited sinc (MIT OR Apache-2.0) with SongPlayer's measured settings: 256 taps, a 256× table, BlackmanHarris², cubic interpolation, automatic cutoff.
   - Equal rates are a plain copy. Tests hold THD+N above 120 dB at 96↔48 and 44.1↔48 kHz, and the folded band below −120 dBFS.

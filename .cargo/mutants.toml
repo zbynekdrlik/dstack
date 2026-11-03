@@ -7,6 +7,10 @@
 profile = "mutants"
 test_tool = "nextest"
 additional_cargo_test_args = ["--lib", "--test", "hot_path"]
+# Every mutant runs the tests of these packages, so `--test hot_path`
+# (dstack's) exists whichever package a diff touches (a diff in dlink or
+# dstack-resample alone failed the baseline without it).
+test_package = ["dstack", "dstack-audio-io", "dlink", "dstack-resample"]
 # Windows-only code: the gate runs on Linux, where it is not compiled, so
 # no test can catch its mutants (CI builds and tests it on Windows).
 exclude_globs = [
