@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use dlink::{Block, Clock, Config, Link, Map, Place, Process, Stopped};
+use dlink::{Block, Clock, Config, Link, Map, Place, Process, Stopped, SubState, SubStatus};
 use dstack::device::{DeviceState, Subscription};
 
 /// The box's IPv4 address on its default route (connecting a UDP socket
@@ -201,6 +201,33 @@ fn a_declared_subscription_subscribes_a_fresh_device() {
     while f64::from_bits(heard.load(Ordering::Relaxed)) < 0.49 && Instant::now() < end {
         std::thread::sleep(Duration::from_millis(50));
     }
+    // The app reads its channel's state (intercom#5): subscribed, receiving,
+    // on flow 1, its counts growing.
+    // The manager marks a granted flow receiving on its next round, once
+    // it has heard packets.
+    let end = Instant::now() + Duration::from_secs(5);
+    while link.rx_channels()[0].status != Some(SubStatus::Receiving) && Instant::now() < end {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let first = link.rx_channels();
+    std::thread::sleep(Duration::from_millis(200));
+    let later = link.rx_channels();
+    assert_eq!(first.len(), 1);
+    let ch = &later[0];
+    assert_eq!(ch.rx, 1);
+    assert_eq!(
+        ch.subscription
+            .as_ref()
+            .map(|s| (s.tx_channel.as_str(), s.tx_device.as_str())),
+        Some(("Out 1", "dlink-declared"))
+    );
+    assert_eq!(ch.status, Some(SubStatus::Receiving), "{ch:?}");
+    assert_eq!(ch.status.map(SubStatus::state), Some(SubState::Connected));
+    assert_eq!(ch.flow, Some(1));
+    assert!(
+        ch.packets > first[0].packets && ch.written > first[0].written,
+        "{first:?} {later:?}"
+    );
     assert_eq!(link.ended(), None);
     assert!(matches!(link.stop(), Stopped::Done));
     let got = f64::from_bits(heard.load(Ordering::Relaxed));

@@ -94,6 +94,24 @@ pub struct Media {
     pub levels: Arc<crate::info::Levels>,
 }
 
+/// One RX channel's state ([`Media::rx_channels`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RxChannel {
+    /// The channel, from 1.
+    pub rx: usize,
+    /// What it is subscribed to, if anything.
+    pub subscription: Option<crate::device::Subscription>,
+    /// Its subscription's status (Dante's word and state:
+    /// [`crate::subscribe::SubStatus::label`], `::state`).
+    pub status: Option<crate::subscribe::SubStatus>,
+    /// The RX flow it rides, from 1.
+    pub flow: Option<usize>,
+    /// That flow's packets so far.
+    pub packets: u64,
+    /// The samples written for this channel so far.
+    pub written: u64,
+}
+
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
 }
@@ -153,6 +171,29 @@ impl Media {
     /// built, a later attach replaces it).
     pub fn attach_engine(&self, stats: Arc<PumpStats>) {
         *lock(&self.engine) = Some(stats);
+    }
+
+    /// Each RX channel's state for an application (dstack #20, the
+    /// intercom: tell "the flow is lost" from "the source is quiet"): its
+    /// subscription and status, the flow it rides and that flow's packets,
+    /// and the samples written for it. A count that stops growing while
+    /// the status reads receiving is a flow that stopped.
+    pub fn rx_channels(&self) -> Vec<RxChannel> {
+        let rings = self.rx.rings();
+        let m = lock(&self.manager);
+        (0..rings.len())
+            .map(|rx| {
+                let route = m.rx_route(rx);
+                RxChannel {
+                    rx: rx + 1,
+                    subscription: m.subscription(rx).cloned(),
+                    status: m.status(rx),
+                    flow: route.map(|r| r.flow + 1),
+                    packets: route.map_or(0, |r| self.rx.lane(r.flow).packets),
+                    written: rings[rx].counters().written,
+                }
+            })
+            .collect()
     }
 
     /// The attached engine's numbers, `None` before one is attached.

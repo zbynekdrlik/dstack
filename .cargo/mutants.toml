@@ -38,6 +38,10 @@ exclude_re = [
   # Timing::of, their one computation, is unit tested.
   "embed.rs",
   "host.rs.*(prepare_config|Watch::new|Watch::stop)",
+  # The media side's per-RX-channel read for apps: glue over the manager
+  # and the rings (each tested); crates/dlink/tests/link.rs reads it from a
+  # running device (not per mutant).
+  "daemon/media.rs.*rx_channels",
   # The heartbeat listen's socket loop: tests/system_clock.rs reads our
   # running device with it; its parse and gather are unit tested.
   "latency.rs.*listen",
