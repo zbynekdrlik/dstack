@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.6.19 (unreleased)
+## 0.6.19 (2026-11-03)
 
 - Change (dstack #104 step 5): the app's status hook (`Media::set_app_status`, `dlink::Link::set_app_status`) runs on a thread of its own (`dstack-app-status`, started at the first call, ended with the `Media`), never inside a status request. A slow or stalled hook no longer delays the device's ARC, CMC or status answers.
   - The thread calls the hook at most once a second, and only while the status is read (a read within 5 s): nobody reading means no calls (`daemon::media::app::REFRESH`, `READ_WINDOW`).
