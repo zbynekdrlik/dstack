@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.6.21 (unreleased)
+## 0.6.21 (2026-11-03)
 
 - Fix (dstack #1, the FOH PC's WSAENOBUFS bursts): the TX thread sends again a packet the NIC refused for a moment, instead of losing it, when the refusal ends within the retry window (about 300 µs); a longer refusal still loses packets. The result on the FOH PC is still to be measured (dasio, after the owner's go-ahead). dasio's FOH logs (dstack 0.6.18) showed about 32 bursts a day of `TX sends failed` with os_error 10055 on both of the PC's devices at once, and their receivers saw holes of 16 to 112 frames then.
   - Retried: only a transient refusal, WSAENOBUFS (10055) and WSAEWOULDBLOCK (10035) on Windows, ENOBUFS (105), EAGAIN (11) and ENOMEM (12) on Linux; at most 3 times, 100 µs apart (a yielding spin on the TX thread); only while the packet's age after the wait stays 100 µs under its flow's latency floor (`flow_latency_ns`). Any other error, and a packet that would arrive late, fails at once as before.
