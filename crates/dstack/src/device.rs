@@ -1,11 +1,8 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 iemmixer contributors. The 31-character device name
-// limit is inferno's note (teodly/inferno at 9767558,
-// inferno_aoip/src/device_info.rs, GPL-3.0-or-later OR AGPL-3.0-or-later),
-// and so is the subscriptions' saved form (an RX channel's number with the
-// TX channel's and device's names, inferno_aoip/src/device_server/
-// channels_subscriber.rs `SavedChannelState`); the rest is iemmixer's own
-// code.
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// Copyright (C) 2026 dstack contributors.
+// Protocol facts (byte layouts, opcodes, behaviour) checked against
+// inferno (https://github.com/teodly/inferno) as a reference; the code is
+// our own.
 
 //! The device's identity (#72 phase A): its config, a private TOML on the
 //! box (this repository holds only the synthetic

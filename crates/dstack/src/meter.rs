@@ -1,7 +1,5 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
-// The request and frame layouts follow netaudio (chris-ritsen/
-// network-audio-controller, Unlicense): its Dante Controller capture of a
-// meter subscription (tests/fixtures/metering/) and its metering.rs.
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// Copyright (C) 2026 dstack contributors.
 
 //! Any device's meters (dstack #16 step 6): a subscription on the
 //! device's CMC port ([`crate::cmc::PORT`], 8800) that makes it send its

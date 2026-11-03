@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 iemmixer contributors.
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// Copyright (C) 2026 dstack contributors.
 
 //! The checkers of what comes back, in songplayer's loop-check vocabulary
 //! (its `asio_loop.rs`): a `mismatch`, a `dropout`, a `slip` of k samples

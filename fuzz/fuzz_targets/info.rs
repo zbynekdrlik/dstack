@@ -5,7 +5,7 @@ use std::net::Ipv4Addr;
 use std::sync::LazyLock;
 
 use dstack::device::DeviceConfig;
-use dstack::info::{Identity, Multicaster, NetInfo};
+use dstack::info::{Identity, InfoBuilder, NetInfo};
 use libfuzzer_sys::fuzz_target;
 
 const DEVICE: &str = include_str!("../../config/test-device.toml");
@@ -23,6 +23,6 @@ fuzz_target!(|data: &[u8]| {
         gateway: Ipv4Addr::UNSPECIFIED,
         link_speed: 1_000,
     };
-    let mut m = Multicaster::new(Identity::new(cfg, net));
+    let mut m = InfoBuilder::new(Identity::new(cfg, net));
     let _ = m.answer(data);
 });

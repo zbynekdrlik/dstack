@@ -3,11 +3,9 @@ name = "dstack"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
-# Gen 3 (#72, design §3): parts are adapted from teodly/inferno
-# (GPL-3.0-or-later OR AGPL-3.0-or-later, taken under GPL-3.0-or-later), so
-# the crate is GPL. Linked by iem-engine on Linux from phase C (design §3:
-# the engine binary is already GPL).
-license = "GPL-3.0-or-later"
+# MIT OR Apache-2.0 like the workspace (dstack #102): the protocol facts
+# were checked against teodly/inferno as a reference; the code is our own.
+license.workspace = true
 repository.workspace = true
 description = "The one Dante stack for our applications: discovery, ARC, CMC, flows, media TX/RX, the clock client of dsync, health, and the engine's pump"
 

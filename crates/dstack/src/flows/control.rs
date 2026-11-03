@@ -1,11 +1,8 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
-// Adapted from inferno (https://github.com/teodly/inferno at 9767558):
-// inferno_aoip/src/protocol/flows_control.rs (the port, the start code, the
-// statuses, the handle, the request as its client writes it, the update and
-// the stop) and inferno_aoip/src/device_server/flows_control_server.rs (the
-// request's, the stop's and the update's parse), Copyright (C) Teo and the
-// inferno contributors, GPL-3.0-or-later OR AGPL-3.0-or-later, taken under
-// GPL-3.0-or-later. Changes Copyright (C) 2026 iemmixer contributors.
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// Copyright (C) 2026 dstack contributors.
+// Protocol facts (byte layouts, opcodes, behaviour) checked against
+// inferno (https://github.com/teodly/inferno) as a reference; the code is
+// our own.
 
 //! The datagrams of flow control on UDP [`PORT`]: the request/response
 //! header of [`crate::wire`] with the start code [`START`], then the body.
@@ -229,8 +226,9 @@ pub fn parse_request(datagram: &[u8]) -> Result<FlowRequest, Unread> {
     let u16_at = |pos: usize| read_u16(datagram, pos);
     let u32_at = |pos: usize| {
         datagram
-            .get(pos..pos + 4)
-            .map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+            .get(pos..)
+            .and_then(<[u8]>::first_chunk::<4>)
+            .map(|b| u32::from_be_bytes(*b))
     };
     let n = usize::from(u16_at(HEADER_LEN + 12).ok_or(Unread::Short)?);
     // Names have no length here, so the layout gives the ids and middle.

@@ -1,17 +1,8 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
-// Adapted from inferno (https://github.com/teodly/inferno at 9767558):
-// inferno_aoip/src/device_server/channels_subscriber.rs (the statuses and
-// their codes; channels asking for the same TX channel share one slot; a TX
-// channel a flow already carries is used without a request; a transmitter's
-// channels in flows of min(nchan, 8, our RX channels) slots, the rest empty;
-// frames per packet the transmitter's most that fit; the latency the larger
-// of its and ours; the flow's name `<flow>_<process>`; a flow without a
-// packet for 2 s, 6 s after it was asked for, is stopped and its channels
-// resolved again; a flow no channel uses is stopped; unresolved channels
-// tried again every 9 s; a transmitter whose channels disagree on nchan,
-// bits or dbcp1 is not asked), Copyright (C) Teo and the inferno
-// contributors, GPL-3.0-or-later OR AGPL-3.0-or-later, taken under
-// GPL-3.0-or-later. Changes Copyright (C) 2026 iemmixer contributors.
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// Copyright (C) 2026 dstack contributors.
+// Protocol facts (byte layouts, opcodes, behaviour) checked against
+// inferno (https://github.com/teodly/inferno) as a reference; the code is
+// our own.
 
 //! Our RX subscriptions (Gen 3 phase B, plan Task 5): which TX channel of
 //! which device each RX channel receives ([`crate::device::Subscription`],

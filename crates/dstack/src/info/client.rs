@@ -1,4 +1,5 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// Copyright (C) 2026 dstack contributors.
 
 //! Asking any device for its product and board info over UDP
 //! [`REQUEST_PORT`] (8700): the manufacturer, the model and the versions

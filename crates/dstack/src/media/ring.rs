@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 iemmixer contributors.
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// Copyright (C) 2026 dstack contributors.
 
 //! The jitter ring of one RX channel: samples placed by their position (the
 //! sample index their packet's stamp names, [`crate::clock::from_stamp`])

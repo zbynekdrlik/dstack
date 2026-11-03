@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 iemmixer contributors.
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// Copyright (C) 2026 dstack contributors.
 
 //! A receiver's packet latency, as Dante Controller's Latency tab shows it
 //! (dstack #47). Every Dante receiver says it in its heartbeat, once a

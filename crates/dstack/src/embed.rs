@@ -1,4 +1,5 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// Copyright (C) 2026 dstack contributors.
 
 //! A Dante device inside an application's own process (the owner's
 //! connection model, 1.11.2026, dstack #20): every app carries its own

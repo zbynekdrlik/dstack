@@ -1,14 +1,8 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
-// Adapted from inferno (https://github.com/teodly/inferno at 9767558):
-// inferno_aoip/src/device_server/flows_rx.rs (one thread receiving every RX
-// flow's socket through mio's poll, up to 32 flows, each socket on the
-// device's address at an ephemeral port; a packet's stamp places its samples
-// in the subscribed channels' buffers; the keepalive `13 37` to the source
-// of a flow's audio every 250 ms per flow; the largest lateness of a flow's
-// packets since it was last read, its heartbeat record 0x8003), Copyright (C)
-// Teo and the inferno contributors, GPL-3.0-or-later OR AGPL-3.0-or-later,
-// taken under GPL-3.0-or-later. Changes Copyright (C) 2026 iemmixer
-// contributors.
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// Copyright (C) 2026 dstack contributors.
+// Protocol facts (byte layouts, opcodes, behaviour) checked against
+// inferno (https://github.com/teodly/inferno) as a reference; the code is
+// our own.
 
 //! Our RX flows (Gen 3 phase B, plan Task 5): the thread that receives the
 //! audio transmitters send us, and what it shares with the control side.

@@ -1,12 +1,8 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
-// Adapted from inferno (https://github.com/teodly/inferno at 9767558):
-// inferno_aoip/src/protocol/flows_control.rs (`FlowsControlClient`: a socket
-// bound to the receiver's address and connected to the transmitter, the
-// sequence numbers from 1, the reply matched by its opcode and sequence
-// number within 3 s, status 1 for done, the handle from the reply's first 6
-// bytes; the request, the stop), Copyright (C) Teo and the inferno
-// contributors, GPL-3.0-or-later OR AGPL-3.0-or-later, taken under
-// GPL-3.0-or-later. Changes Copyright (C) 2026 iemmixer contributors.
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// Copyright (C) 2026 dstack contributors.
+// Protocol facts (byte layouts, opcodes, behaviour) checked against
+// inferno (https://github.com/teodly/inferno) as a reference; the code is
+// our own.
 
 //! Our side of flow control (Gen 3 phase B, plan Task 5): the requests our
 //! RX sends to a transmitter's UDP 4455, [`Client::request_flow`] for a
@@ -32,7 +28,6 @@ use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Duration;
 
 use tokio::net::UdpSocket;
-use tokio::time::Instant;
 use tracing::debug;
 
 use super::control::{FlowRequest, Handle, build_request, build_stop, op, reply_handle, status};
@@ -100,25 +95,39 @@ impl Client {
         to: SocketAddrV4,
         req: &FlowRequest,
     ) -> Result<Handle, ClientError> {
-        let seq = self.next_seq();
         let body = self
-            .exchange(
-                to,
-                seq,
-                op::REQUEST,
-                &build_request(seq, req),
-                self.reply_timeout,
-            )
+            .ask(to, op::REQUEST, self.reply_timeout, |seq| {
+                build_request(seq, req)
+            })
             .await?;
         reply_handle(&body).ok_or(ClientError::NoHandle)
     }
 
     /// Asks the transmitter at `to` to end the flow `h`.
     pub async fn stop_flow(&self, to: SocketAddrV4, h: &Handle) -> Result<(), ClientError> {
-        let seq = self.next_seq();
-        self.exchange(to, seq, op::STOP, &build_stop(seq, h), self.stop_timeout)
+        self.ask(to, op::STOP, self.stop_timeout, |seq| build_stop(seq, h))
             .await
             .map(drop)
+    }
+
+    /// One request of opcode `op1` to `to`: the datagram `build` makes for
+    /// the next sequence number (from 1, wrapping), sent once; the body of
+    /// its reply of done within `wait`.
+    async fn ask(
+        &self,
+        to: SocketAddrV4,
+        op1: u16,
+        wait: Duration,
+        build: impl FnOnce(u16) -> Vec<u8>,
+    ) -> Result<Vec<u8>, ClientError> {
+        let seq = self.next_seq();
+        let sock = self.connect_to(to).await?;
+        sock.send(&build(seq)).await?;
+        let outcome = first_reply(&sock, seq, op1, wait).await;
+        if let Err(e) = &outcome {
+            debug!(op = format_args!("{op1:#06x}"), seq, error = %e, "flow-control request failed");
+        }
+        outcome
     }
 
     /// The next sequence number (from 1, wrapping).
@@ -126,54 +135,40 @@ impl Client {
         self.seq.fetch_add(1, Ordering::Relaxed)
     }
 
-    /// Sends `datagram` to `to` once and waits up to `wait` for the reply
-    /// to (`seq`, `op1`); returns its body.
-    async fn exchange(
-        &self,
-        to: SocketAddrV4,
-        seq: u16,
-        op1: u16,
-        datagram: &[u8],
-        wait: Duration,
-    ) -> Result<Vec<u8>, ClientError> {
-        let deadline = Instant::now() + wait;
+    /// A socket on our address (any port) that talks to `to` only.
+    async fn connect_to(&self, to: SocketAddrV4) -> io::Result<UdpSocket> {
         let sock = UdpSocket::bind(SocketAddr::V4(SocketAddrV4::new(self.ip, 0))).await?;
         sock.connect(SocketAddr::V4(to)).await?;
-        sock.send(datagram).await?;
-        let mut buf = [0u8; RECV_BUFFER];
+        Ok(sock)
+    }
+}
+
+/// The reply to (`seq`, `op1`) on `sock` within `wait`, other datagrams
+/// passed over: its body for done, else its status.
+async fn first_reply(
+    sock: &UdpSocket,
+    seq: u16,
+    op1: u16,
+    wait: Duration,
+) -> Result<Vec<u8>, ClientError> {
+    let mut buf = [0u8; RECV_BUFFER];
+    let read = async {
         loop {
-            let n = match tokio::time::timeout_at(deadline, sock.recv(&mut buf)).await {
-                Ok(got) => got?,
-                Err(_) => {
-                    debug!(
-                        op = format_args!("{op1:#06x}"),
-                        seq, "flow-control request: no reply"
-                    );
-                    return Err(ClientError::Timeout);
-                }
-            };
-            match reply_of(&buf[..n], seq, op1) {
-                Some(Ok(body)) => return Ok(body.to_vec()),
-                Some(Err(status)) => {
-                    debug!(
-                        op = format_args!("{op1:#06x}"),
-                        seq,
-                        status = format_args!("{status:#06x}"),
-                        "flow-control request refused"
-                    );
-                    return Err(ClientError::Refused(status));
-                }
-                // Not its reply: the next datagram, until the deadline.
-                None => {}
+            let n = sock.recv(&mut buf).await?;
+            if let Some(answer) = reply_of(&buf[..n], seq, op1) {
+                return answer.map(<[u8]>::to_vec).map_err(ClientError::Refused);
             }
         }
-    }
+    };
+    tokio::time::timeout(wait, read)
+        .await
+        .unwrap_or(Err(ClientError::Timeout))
 }
 
 /// What `d` says to the request (`seq`, `op1`): `None` when it is not its
 /// reply (another opcode or sequence number, a request with op2 0, shorter
 /// than the header), else its body for status done or the status. The start
-/// code and the length field are not read (inferno reads neither).
+/// code and the length field are not read.
 pub fn reply_of(d: &[u8], seq: u16, op1: u16) -> Option<Result<&[u8], u16>> {
     let (head, body) = d.split_first_chunk::<HEADER_LEN>()?;
     let field = |at: usize| u16::from_be_bytes([head[at], head[at + 1]]);

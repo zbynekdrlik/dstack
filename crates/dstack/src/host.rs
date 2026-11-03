@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 iemmixer contributors.
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// Copyright (C) 2026 dstack contributors.
 
 //! The device as a library (Gen 3 phase C, plan
 //! `docs/superpowers/plans/2026-10-26-gen3-phase-c-engine-on-linux.md`

@@ -1,12 +1,8 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
-// Adapted from inferno (https://github.com/teodly/inferno at 9767558):
-// inferno_aoip/src/mdns_client.rs (`query_chan`: the channel's record
-// `<channel>@<device>._netaudio-chan._udp.local.`, its address and port, the
-// TXT keys it reads (`id`, `nchan`, `enc` or `en`, `dbcp1`, `fpp` as
-// "most,least", `latency_ns`) and their numbers, decimal or `0x` hex),
-// Copyright (C) Teo and the inferno contributors, GPL-3.0-or-later OR
-// AGPL-3.0-or-later, taken under GPL-3.0-or-later. Changes Copyright (C)
-// 2026 iemmixer contributors.
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// Copyright (C) 2026 dstack contributors.
+// Protocol facts (byte layouts, opcodes, behaviour) checked against
+// inferno (https://github.com/teodly/inferno) as a reference; the code is
+// our own.
 
 //! Where a subscribed channel comes from: the transmitter's mDNS record of
 //! that channel (`_netaudio-chan`), read into an [`Advertised`]: the

@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 iemmixer contributors.
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// Copyright (C) 2026 dstack contributors.
 
 //! Our own records answered from the device's own address (dstack #1
 //! problem E). mdns-sd binds its sockets to 0.0.0.0:5353 and only names

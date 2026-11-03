@@ -1,4 +1,5 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// Copyright (C) 2026 dstack contributors.
 
 //! dstack #20: a device inside an app's own process ([`Embedded`]), on the
 //! box's routed address and its own system clock. A file of its own: its

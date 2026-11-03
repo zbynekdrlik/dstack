@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 iemmixer contributors.
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// Copyright (C) 2026 dstack contributors.
 
 //! A transmitter's channels read through its ARC (Gen 3 phase B, plan Task
 //! 9b), for a device that publishes no `_netaudio-chan` record: the band's

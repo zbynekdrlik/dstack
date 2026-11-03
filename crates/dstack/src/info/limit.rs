@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 iemmixer contributors.
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// Copyright (C) 2026 dstack contributors.
 
 //! The info server's bound on its replies (the review of PR #78, #72).
 //! Every reply goes multicast to [`INFO_GROUP`](super::INFO_GROUP), which
