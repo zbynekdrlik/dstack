@@ -47,6 +47,29 @@ fn a_frame_is_ethernet_then_the_ip_and_udp_headers_then_the_packet() {
 }
 
 #[test]
+fn a_batch_holds_two_frames_of_every_flow_each_a_whole_ethernet_frame() {
+    assert_eq!(BATCH_FRAMES, 64);
+    assert_eq!(FRAME_MAX, 14 + 20 + 8 + 1472);
+}
+
+#[test]
+fn the_host_path_and_its_batch_show_their_nic_not_the_sender() {
+    let shared = shared();
+    host(&shared, Take::All);
+    let path = shared.host.get().unwrap();
+    let text = format!("{path:?}");
+    assert!(
+        text.contains("HostPath") && text.contains("test0"),
+        "{text}"
+    );
+    let batch = format!("{:?}", Batch::new(path));
+    assert!(
+        batch.contains("Batch") && batch.contains("len: 0"),
+        "{batch}"
+    );
+}
+
+#[test]
 fn the_start_line_names_the_path_and_its_nic() {
     assert_eq!(
         path_line(TxPath::HostSender, "eth3"),
@@ -377,6 +400,21 @@ fn the_host_path_is_set_once_and_follows_the_neighbour_table() {
         version.wrapping_add(2),
         "an unchanged MAC is not written again"
     );
+}
+
+/// A sender set once the TX thread's state was built would never be used:
+/// it is refused, and the path stays as it was.
+#[test]
+fn a_sender_set_after_the_tx_thread_started_is_refused() {
+    let shared = shared();
+    let before = shared.tx_path();
+    let _tx = Transmitter::new(Arc::clone(&shared));
+    let rec = Arc::new(Recorder {
+        take: Take::All,
+        calls: Mutex::new(Vec::new()),
+    });
+    assert!(!shared.use_frame_sender(rec, nic()));
+    assert_eq!(shared.tx_path(), before);
 }
 
 #[test]

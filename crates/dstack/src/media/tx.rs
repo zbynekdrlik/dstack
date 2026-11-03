@@ -641,6 +641,9 @@ pub struct TxShared {
     /// (the send watch logs them, [`super::late::HostWatch`]).
     host_refused: AtomicU64,
     host_error: AtomicI32,
+    /// The TX thread's state was built (it read `host` then): a sender
+    /// set later is refused. Written under the control lock.
+    tx_built: AtomicBool,
     rings: Arc<[Ring]>,
     /// Each TX channel's engine ring (phase C): the engine's pump writes
     /// it, [`Source::Engine`] sends it; `None` for a channel the engine
@@ -706,6 +709,7 @@ impl TxShared {
             host: OnceLock::new(),
             host_refused: AtomicU64::new(0),
             host_error: AtomicI32::new(0),
+            tx_built: AtomicBool::new(false),
             sources: (0..cfg.tx.len()).map(|_| Cell::new()).collect(),
             peaks: (0..cfg.tx.len()).map(|_| AtomicU32::new(0)).collect(),
             advertised_ns: AtomicU64::new(cfg.advertised_latency_ns()),
@@ -1077,7 +1081,7 @@ impl Transmitter {
             frames: Box::new([[0; FPP_MAX as usize]; MAX_CHANNELS]),
             packet: Box::new([0; HEADROOM + MAX_DATAGRAM]),
             ip_id: 0,
-            batch: shared.host.get().map(host::Batch::new),
+            batch: shared.host_for_tx().map(host::Batch::new),
             epoch: None,
             next_events: None,
             rate,

@@ -106,3 +106,6 @@ pub(super) fn account(
     count_retried(stats, &sent.result, sent.retries);
     count_send(stats, &sent.result, n);
 }
+
+#[cfg(test)]
+mod tests;

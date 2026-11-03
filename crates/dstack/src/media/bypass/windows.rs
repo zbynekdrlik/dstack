@@ -26,9 +26,12 @@ pub(crate) fn neighbours() -> Vec<Neighbour> {
         return Vec::new();
     }
     // SAFETY: the call returned a valid table of `NumEntries` rows, laid
-    // out after its count; it stays valid until FreeMibTable.
+    // out after its count (the 1-row array is a C flexible array member, so
+    // the base pointer comes from the whole table, not the array); it stays
+    // valid until FreeMibTable.
     let rows: &[MIB_IPNET_ROW2] = unsafe {
-        std::slice::from_raw_parts((*table).Table.as_ptr(), (*table).NumEntries as usize)
+        let base = std::ptr::addr_of!((*table).Table).cast::<MIB_IPNET_ROW2>();
+        std::slice::from_raw_parts(base, (*table).NumEntries as usize)
     };
     let out = rows
         .iter()

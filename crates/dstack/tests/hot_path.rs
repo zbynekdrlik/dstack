@@ -310,10 +310,8 @@ fn the_tx_passes_through_a_host_sender_do_not_allocate() {
     assert!((295..=300).contains(&la.packets), "{la:?}");
     assert!((295..=300).contains(&lb.packets), "{lb:?}");
     assert_eq!(frames, la.packets + lb.packets, "both flows to the sender");
-    assert!(
-        sender.calls.load(Ordering::Relaxed) < frames,
-        "a call a pass"
-    );
+    let calls = sender.calls.load(Ordering::Relaxed);
+    assert!(calls > 0 && calls <= 400, "at most a call a pass: {calls}");
     let direct = la.direct + lb.direct;
     assert!(
         direct >= frames / 2 && direct < frames,

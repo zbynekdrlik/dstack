@@ -136,7 +136,18 @@ impl TxShared {
     /// `false`). `Media::set_frame_sender` finds the NIC on Windows; on its
     /// own this works on any OS, so tests drive the host path on Linux.
     pub fn use_frame_sender(&self, sender: Arc<dyn FrameSender>, nic: HostNic) -> bool {
-        self.host.set(HostPath { sender, nic }).is_ok()
+        // Under the lock the TX thread's state is built in: a sender is
+        // either seen by it or refused, never set unused.
+        let _built = self.lock();
+        !self.tx_built.load(Ordering::Relaxed) && self.host.set(HostPath { sender, nic }).is_ok()
+    }
+
+    /// The host path for the TX thread's state being built now; from then
+    /// on [`TxShared::use_frame_sender`] refuses a sender.
+    pub(super) fn host_for_tx(&self) -> Option<&HostPath> {
+        let _built = self.lock();
+        self.tx_built.store(true, Ordering::Relaxed);
+        self.host.get()
     }
 
     /// The path our TX takes: the host's sender, AF_PACKET, or the UDP
@@ -300,20 +311,27 @@ impl Batch {
                 .store(e.raw_os_error().unwrap_or(-1), Ordering::Relaxed);
             shared.host_refused.fetch_add(1, Ordering::Relaxed);
         }
-        for ((q, n), (frame, &taken)) in queued.iter().zip(frames.iter().zip(sent.iter())) {
-            let out = if taken {
-                Sent {
-                    result: Ok(true),
-                    retries: 0,
-                    took,
-                }
-            } else {
-                let datagram = &frame[FRAME_HEADROOM..FRAME_HEADROOM + n];
-                let socket = &shared.sockets[q.slot];
-                send_timed(clock, q.stamp, q.fpp, || {
-                    socket.send_to(datagram, q.dest).map(|_| false)
-                })
-            };
+        // The frames taken first: they left with the call, before any
+        // fallback send.
+        let taken = Sent {
+            result: Ok(true),
+            retries: 0,
+            took,
+        };
+        for ((q, n), _) in queued.iter().zip(sent.iter()).filter(|(_, s)| **s) {
+            account(&shared.lanes[q.slot], clock, q.stamp, q.fpp, &taken, *n);
+        }
+        for ((q, n), frame) in queued
+            .iter()
+            .zip(frames.iter())
+            .zip(sent.iter())
+            .filter_map(|(qf, s)| (!*s).then_some(qf))
+        {
+            let datagram = &frame[FRAME_HEADROOM..FRAME_HEADROOM + n];
+            let socket = &shared.sockets[q.slot];
+            let out = send_timed(clock, q.stamp, q.fpp, || {
+                socket.send_to(datagram, q.dest).map(|_| false)
+            });
             account(&shared.lanes[q.slot], clock, q.stamp, q.fpp, &out, *n);
         }
     }

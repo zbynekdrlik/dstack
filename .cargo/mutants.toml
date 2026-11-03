@@ -81,6 +81,10 @@ exclude_re = [
   # reads our running device through the real info group with them; the
   # request, the reply match, the parses and `ask` are unit tested.
   "info/client.rs.*(replace|in) (group_socket|on_group|product_info|board_info|clock_status|network_info|sample_rate|set_sample_rate|set_encoding)\\b",
+  # The host frame sender's setter: its Windows branch (the NIC lookup)
+  # compiles on Windows only, the rest is a constant false; the host path
+  # it sets is tested through TxShared::use_frame_sender.
+  "daemon/media.rs.*Media::set_frame_sender",
   "ask_priority",
   # Windows-only (cfg(windows)) power-throttling call: not compiled on the
   # gate's Linux, so its mutants build and cannot fail; CI runs it on Windows.
