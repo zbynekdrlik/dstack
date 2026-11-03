@@ -543,6 +543,7 @@ pub struct LaneStats {
     last_os_error: std::sync::atomic::AtomicI32,
     bytes: AtomicU64,
     send_errors: AtomicU64,
+    send_retries: AtomicU64,
     keepalives: AtomicU64,
     rebootstraps: AtomicU64,
     holes: AtomicU64,
@@ -564,8 +565,12 @@ pub struct LaneCounts {
     /// Their bytes on the wire: the datagram plus [`WIRE_OVERHEAD`] (what
     /// the NIC's own counter counts, [`crate::traffic`]).
     pub bytes: u64,
-    /// Packets the socket refused or cut.
+    /// Packets the socket refused or cut (after their retries, when the
+    /// refusal was transient: [`send_retry`]).
     pub send_errors: u64,
+    /// Packets the NIC refused for a moment that went out on a retry
+    /// ([`send_retry`], dstack #1): recovered, not lost.
+    pub send_retries: u64,
     /// The OS error of the last failed send: its raw code (errno, WSA), 0
     /// for none, -1 for an error without one.
     pub last_os_error: i32,
@@ -846,6 +851,7 @@ impl TxShared {
             packets: l.packets.load(Ordering::Relaxed),
             bytes: l.bytes.load(Ordering::Relaxed),
             send_errors: l.send_errors.load(Ordering::Relaxed),
+            send_retries: l.send_retries.load(Ordering::Relaxed),
             last_os_error: l.last_os_error.load(Ordering::Relaxed),
             keepalives: l.keepalives.load(Ordering::Relaxed),
             rebootstraps: l.rebootstraps.load(Ordering::Relaxed),
@@ -1222,30 +1228,47 @@ impl Transmitter {
                     fpp,
                     |f, s| frames[s][f],
                 );
-                let sent_at = Instant::now();
-                let sent = send_one(direct, socket, &mut packet[..], src, dest, ip_id, n);
+                let floor = flow_latency_ns(*latency_ns, plan.fpp, *rate, *margin_ns);
+                let stamp_ns = ns_of(stamp, *rate);
+                // The longest single send of its tries.
+                let mut took = 0;
+                // A send the NIC refused for a moment goes again while the
+                // packet still arrives in time (dstack #1).
+                let (sent, retries) = send_with_retries(
+                    crate::clock::Os::current(),
+                    floor,
+                    || {
+                        now_ns
+                            .saturating_add(nanos(pass.elapsed()))
+                            .saturating_sub(stamp_ns)
+                    },
+                    || {
+                        let sent_at = Instant::now();
+                        let sent = send_one(direct, socket, &mut packet[..], src, dest, ip_id, n);
+                        took = took.max(nanos(sent_at.elapsed()));
+                        sent
+                    },
+                    spin_for,
+                );
                 // How late it left: the pass's PTP time plus the time since,
-                // after the send (a thread not scheduled, or a send that
-                // blocked, both make it late).
+                // after the last send (a thread not scheduled, a send that
+                // blocked, or retries, all make it late).
                 let after = Instant::now();
-                let took = nanos(after - sent_at);
                 let left = now_ns.saturating_add(nanos(after - pass));
                 let due =
                     ns_of(stamp.saturating_add(plan.fpp.into()), *rate).saturating_add(*margin_ns);
                 let late = left.saturating_sub(due);
                 // A receiver's lateness: the arrival past the stamp.
-                let age = left.saturating_sub(ns_of(stamp, *rate));
+                let age = left.saturating_sub(stamp_ns);
                 stats.age_max_ns.fetch_max(age, Ordering::Relaxed);
                 stats.age_peak_ns.fetch_max(age, Ordering::Relaxed);
-                if over_latency(
-                    age,
-                    flow_latency_ns(*latency_ns, plan.fpp, *rate, *margin_ns),
-                ) {
+                if over_latency(age, floor) {
                     stats.over_latency.fetch_add(1, Ordering::Relaxed);
                 }
                 stats.late[late_bin(late)].fetch_add(1, Ordering::Relaxed);
                 stats.late_max_ns.fetch_max(late, Ordering::Relaxed);
                 stats.send_max_ns.fetch_max(took, Ordering::Relaxed);
+                count_retried(stats, &sent, retries);
                 count_send(stats, &sent, n);
             }
             stats.holes.fetch_add(holes as u64, Ordering::Relaxed);
@@ -1324,35 +1347,78 @@ pub const SEND_RETRY_WAIT_NS: u64 = 100_000;
 pub const SEND_RETRY_HEADROOM_NS: u64 = 100_000;
 
 /// Whether the raw OS error `code` of a failed send on `os` is a transient
-/// refusal (the NIC's transmit ring or the socket full for a moment).
-pub fn transient_refusal(_os: crate::clock::Os, _code: i32) -> bool {
-    false
+/// refusal (the NIC's transmit ring or the socket full for a moment):
+/// WSAENOBUFS (10055) and WSAEWOULDBLOCK (10035) on Windows; ENOBUFS (105),
+/// EAGAIN/EWOULDBLOCK (11) and ENOMEM (12) elsewhere (Linux's numbers).
+/// Every other error is lasting.
+pub fn transient_refusal(os: crate::clock::Os, code: i32) -> bool {
+    match os {
+        crate::clock::Os::Windows => matches!(code, 10055 | 10035),
+        crate::clock::Os::Other => matches!(code, 105 | 11 | 12),
+    }
 }
 
 /// The wait before sending again a packet whose send failed with the raw
-/// OS error `code`, after `attempt` retries, `age_ns` past its stamp now,
-/// on a flow whose latency floor is `floor_ns`; `None`: no retry.
+/// OS error `code` (`None`: the error has none), after `attempt` retries,
+/// `age_ns` past its stamp now, on a flow whose latency floor is
+/// `floor_ns` ([`flow_latency_ns`]); `None`: no retry. A transient refusal
+/// ([`transient_refusal`]) is retried [`SEND_RETRIES`] times at most,
+/// [`SEND_RETRY_WAIT_NS`] apart, and only while the packet's age after the
+/// wait stays [`SEND_RETRY_HEADROOM_NS`] under the floor: a packet that
+/// would arrive late anyway is not held (dstack #1).
 pub fn send_retry(
-    _os: crate::clock::Os,
-    _code: Option<i32>,
-    _attempt: u32,
-    _age_ns: u64,
-    _floor_ns: u64,
+    os: crate::clock::Os,
+    code: Option<i32>,
+    attempt: u32,
+    age_ns: u64,
+    floor_ns: u64,
 ) -> Option<std::time::Duration> {
-    None
+    let transient = code.is_some_and(|c| transient_refusal(os, c));
+    let in_time = age_ns.saturating_add(SEND_RETRY_WAIT_NS + SEND_RETRY_HEADROOM_NS) <= floor_ns;
+    (transient && attempt < SEND_RETRIES && in_time)
+        .then(|| std::time::Duration::from_nanos(SEND_RETRY_WAIT_NS))
 }
 
 /// One packet's send with its retries: `send` once, then again after each
-/// wait [`send_retry`] gives (`age` the packet's age now, `wait` the wait
-/// itself). The final outcome and the retries made.
+/// wait [`send_retry`] gives (`age` the packet's age now, read before each
+/// decision; `wait` the wait itself). The final outcome and the retries
+/// made. No allocation: the TX thread's hot path.
 pub(crate) fn send_with_retries(
-    _os: crate::clock::Os,
-    _floor_ns: u64,
-    _age: impl FnMut() -> u64,
+    os: crate::clock::Os,
+    floor_ns: u64,
+    mut age: impl FnMut() -> u64,
     mut send: impl FnMut() -> io::Result<bool>,
-    _wait: impl FnMut(std::time::Duration),
+    mut wait: impl FnMut(std::time::Duration),
 ) -> (io::Result<bool>, u32) {
-    (send(), 0)
+    let mut sent = send();
+    let mut retries = 0;
+    while let Err(e) = &sent
+        && let Some(d) = send_retry(os, e.raw_os_error(), retries, age(), floor_ns)
+    {
+        wait(d);
+        retries += 1;
+        sent = send();
+    }
+    (sent, retries)
+}
+
+/// Waits `d` on the calling thread, yielding while it spins (the TX
+/// thread's wait before a retry: far below a timer's resolution on
+/// Windows).
+pub(crate) fn spin_for(d: std::time::Duration) {
+    let start = Instant::now();
+    while !d.saturating_sub(start.elapsed()).is_zero() {
+        std::thread::yield_now();
+    }
+}
+
+/// Counts a packet sent after `retries` retries ([`send_with_retries`]):
+/// one in `send_retries` when it went out after any; a final refusal is
+/// [`count_send`]'s.
+fn count_retried(stats: &LaneStats, sent: &io::Result<bool>, retries: u32) {
+    if sent.is_ok() && retries > 0 {
+        stats.send_retries.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 /// Starts the TX thread: it sends `shared`'s flows on `clock` until

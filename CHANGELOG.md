@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.6.21 (unreleased)
+
+- Fix (dstack #1, the FOH PC's WSAENOBUFS bursts): the TX thread sends again a packet the NIC refused for a moment, instead of losing it. dasio's FOH logs (dstack 0.6.18) showed about 32 bursts a day of `TX sends failed` with os_error 10055 on both of the PC's devices at once, and their receivers saw holes of 16 to 112 frames then.
+  - Retried: only a transient refusal, WSAENOBUFS (10055) and WSAEWOULDBLOCK (10035) on Windows, ENOBUFS (105), EAGAIN (11) and ENOMEM (12) on Linux; at most 3 times, 100 µs apart (a yielding spin on the TX thread); only while the packet's age after the wait stays 100 µs under its flow's latency floor (`flow_latency_ns`). Any other error, and a packet that would arrive late, fails at once as before.
+  - What a consumer notices: a TX lane in the status has a new field `send_retries` after `send_errors` (packets that went out on a retry); `send_errors` now counts only the packets still refused after their retries. A test that pins a TX lane's exact JSON adds the field. A send the NIC refuses can hold the TX thread up to 300 µs (the other flows' sends would be refused meanwhile anyway); `send_max_us` stays the longest single try, and the lateness and age count the retries.
+  - New: `media::tx::send_retry`, `transient_refusal`, `SEND_RETRIES`, `SEND_RETRY_WAIT_NS`, `SEND_RETRY_HEADROOM_NS`; `LaneCounts::send_retries`.
+- dtray: refused sends that grew since the last update (`tx[].send_errors`, summed) turn the device orange, "send errors +N" (after the late counts), and its line ends with `; send errors +N`. Retries are not shown. `model::Counts` has `send_errors`.
+- Docs: `docs/windows-box.md` has the WSAENOBUFS bursts on a NIC that carries other traffic, the retry, and keeping bulk traffic off the Dante NIC as the box owner's call.
+
 ## 0.6.20 (2026-11-03)
 
 - Change (dstack #90, the dlink pump on a busy Windows PC): dlink's default pump block is 128 frames (1.33 ms at 96 kHz, 2.67 ms at 48 kHz), no longer the stack's 32. `dlink::Config::device()` now writes `block`; the pump wakes a quarter as often and `Rated` converts four times the frames a call (it follows the device block). The path grows by 96 frames (+1 ms on a 96 kHz device, +2 ms on a 48 kHz one). What a consumer notices: an app's `process` gets 128 frames a block at the device's rate (64 at 48 kHz on a 96 kHz network through `Rated`), and the pump's offset is B + P + W with B 128. A test that pinned 32-frame blocks or their app frames sets `.block(32)` or moves its expectation.

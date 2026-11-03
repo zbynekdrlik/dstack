@@ -623,6 +623,7 @@ const WORDS: &[&str] = &[
     "channels",
     "packets",
     "send_errors",
+    "send_retries",
     "keepalives",
     "rebootstraps",
     "holes",
@@ -935,8 +936,8 @@ fn the_status_lists_the_flows_of_both_sides() {
     assert!(
         s.contains(
             "\"tx\":[{\"flow\":1,\"live\":1,\"fpp\":32,\"channels\":3,\"packets\":0,\
-             \"send_errors\":0,\"keepalives\":0,\"rebootstraps\":0,\"holes\":0,\
-             \"late_bins\":[0,0,0,0,0,0],\"late_max_us\":0,\"send_max_us\":0,\
+             \"send_errors\":0,\"send_retries\":0,\"keepalives\":0,\"rebootstraps\":0,\
+             \"holes\":0,\"late_bins\":[0,0,0,0,0,0],\"late_max_us\":0,\"send_max_us\":0,\
              \"age_max_us\":0,\"over_latency\":0,\"direct\":0}]"
         ),
         "{s}"
@@ -1416,6 +1417,7 @@ mod socket {
 fn a_lane_s_times_show_in_whole_microseconds() {
     let lane = LaneCounts {
         packets: 7,
+        send_retries: 3,
         late_max_ns: 204_999,
         send_max_ns: 56_001,
         age_max_ns: 416_700,
@@ -1429,7 +1431,7 @@ fn a_lane_s_times_show_in_whole_microseconds() {
     j.close('}');
     assert_eq!(
         j.out,
-        "{\"packets\":7,\"send_errors\":0,\"keepalives\":0,\"rebootstraps\":0,\
+        "{\"packets\":7,\"send_errors\":0,\"send_retries\":3,\"keepalives\":0,\"rebootstraps\":0,\
          \"holes\":0,\"late_bins\":[0,0,0,0,0,0],\"late_max_us\":204,\"send_max_us\":56,\
          \"age_max_us\":416,\"over_latency\":80,\"direct\":5}"
     );

@@ -1711,7 +1711,10 @@ fn a_refused_send_is_retried_a_few_times_within_the_flows_latency() {
     let floor = MS;
     // 3 retries at most.
     for attempt in 0..SEND_RETRIES {
-        assert_eq!(send_retry(Os::Windows, Some(10055), attempt, 0, floor), wait);
+        assert_eq!(
+            send_retry(Os::Windows, Some(10055), attempt, 0, floor),
+            wait
+        );
     }
     assert_eq!(SEND_RETRIES, 3);
     assert_eq!(send_retry(Os::Windows, Some(10055), 3, 0, floor), None);
@@ -1733,7 +1736,12 @@ fn a_refused_send_is_retried_a_few_times_within_the_flows_latency() {
 
 /// A send that fails with each of `fails` (raw OS codes) in turn, then
 /// succeeds; the sends made so far.
-fn flaky(fails: &[i32]) -> (impl FnMut() -> io::Result<bool> + '_, std::rc::Rc<std::cell::Cell<usize>>) {
+fn flaky(
+    fails: &[i32],
+) -> (
+    impl FnMut() -> io::Result<bool> + '_,
+    std::rc::Rc<std::cell::Cell<usize>>,
+) {
     let calls = std::rc::Rc::new(std::cell::Cell::new(0));
     let seen = std::rc::Rc::clone(&calls);
     let send = move || {
@@ -1792,6 +1800,34 @@ fn the_tx_pass_does_not_retry_a_lasting_error_or_a_packet_near_its_latency() {
     assert!(sent.is_err());
     // 250 µs and 500 µs pass (+ 200 µs <= 700 µs), 750 µs does not.
     assert_eq!((retries, calls.get()), (2, 3));
+}
+
+#[test]
+fn a_packet_sent_on_a_retry_counts_once_and_a_lost_one_not() {
+    let stats = LaneStats::default();
+    count_retried(&stats, &Ok(false), 0);
+    count_retried(&stats, &Err(io::Error::from_raw_os_error(10055)), 3);
+    assert_eq!(stats.send_retries.load(Ordering::Relaxed), 0);
+    count_retried(&stats, &Ok(false), 1);
+    count_retried(&stats, &Ok(true), 3);
+    assert_eq!(stats.send_retries.load(Ordering::Relaxed), 2);
+}
+
+#[test]
+fn a_lanes_retries_reach_its_counts() {
+    let shared = shared_with(Vec::new());
+    shared.lanes[2].send_retries.fetch_add(5, Ordering::Relaxed);
+    assert_eq!(shared.lane(2).send_retries, 5);
+    assert_eq!(shared.lane(1).send_retries, 0);
+}
+
+#[test]
+fn the_wait_before_a_retry_spins_its_time() {
+    let start = Instant::now();
+    spin_for(Duration::from_micros(300));
+    assert!(start.elapsed() >= Duration::from_micros(300));
+    // None at all returns at once.
+    spin_for(Duration::ZERO);
 }
 
 #[test]

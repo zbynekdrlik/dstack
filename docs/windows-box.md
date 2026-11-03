@@ -43,3 +43,17 @@ dlink apps (SongPlayer, OBS, the intercom) run the normal timing profile: about 
 - **Block:** dlink's pump runs 128 frames a block (1.33 ms at 96 kHz) instead of the stack's 32 (333 µs): a quarter of the wakes, and four times the frames for each rate-conversion call. `dlink::Config::block` sets another of 16, 32, 64, 128 or 256. The pump margin W stays half the latency, and at least the block. The path grows by about 1 ms (B 128 at 96 kHz, inside the 10 ms budget).
 
 Why: SongPlayer's Dante output on a busy video PC (video playback running; dlink at block 32, normal priority, 96 kHz device; 3.11.2026, 12 h ledger) lost blocks in bursts (`pump_missed`, the last 17 blocks with the pump 5.85 ms late against W 5 ms) and had overload and overrun pairs every few minutes. The pairs rose from 0–4 to 8–28 per 12 min once the app ran at 48 kHz through `Rated`, whose sinc then ran on the pump thread every 333 µs. The check after the change is the same ledger (`pump_missed`, overruns per 12 min) over a few hours.
+
+## A send the NIC refuses for a moment (WSAENOBUFS)
+
+On a NIC that carries other traffic beside Dante (the FOH PC in November 2026: a Realtek 2.5GbE NIC with 10 to 19 MB/s of other traffic), Windows refuses a send now and then with WSAENOBUFS (10055): the NIC's transmit ring is full for a moment, for every program on the PC. dasio's logs on dstack 0.6.18 showed about 32 bursts a day, 1 to 14 refused packets each, on both of the PC's devices in the same second. Before v0.6.21 each refused packet was lost, and every receiver of the flow saw a hole (16 to 112 frames at a receiver of both devices). The socket's send buffer (1 MiB) does not help: the refusal comes from below it.
+
+Since v0.6.21 (dstack #1) the TX thread sends a refused packet again:
+
+- only on a transient refusal: WSAENOBUFS and WSAEWOULDBLOCK (10035) on Windows; ENOBUFS, EAGAIN and ENOMEM on Linux. Any other error fails at once;
+- at most 3 times, 100 µs apart (a yielding spin on the TX thread; the other flows' sends would fail meanwhile anyway);
+- only while the packet's age after the wait stays at least 100 µs under the flow's latency: a packet that would arrive late is not held (`media::tx::send_retry`).
+
+The status counts a packet that went out on a retry in its TX lane's `send_retries` (recovered, not lost); a packet still refused after its retries counts in `send_errors`, as before. dtray turns a device orange while its `send_errors` grow ("send errors +N" on its line). Retries are not shown there: they are the healthy case.
+
+The retry covers short refusals only. Whether to keep bulk traffic (file copies, web servers, other audio protocols) off the Dante NIC is the box owner's call; a second NIC for that traffic removes the refusals at their source. The check is the device's `send_errors` and `send_retries` over a day, and a receiver's holes at the same instants.
