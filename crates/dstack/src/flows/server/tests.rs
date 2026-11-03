@@ -255,16 +255,17 @@ fn a_receiver_s_own_fpp_is_granted_while_our_latency_covers_it() {
         fpp: 60,
         ..req()
     });
-    for fpp in [9, 16, 32, 96] {
+    for fpp in [9, 16, 32, 91] {
         dev.flow(&FlowRequest {
             fpp,
             rx: SocketAddrV4::new(PEER_IP, 4_000 + fpp),
             ..req()
         });
     }
-    // Past our 1 ms (96 frames at 96 kHz): our packets would reach it
-    // after it plays them.
-    for fpp in [97, 256] {
+    // Past our 1 ms with the send slack (91 frames at 96 kHz, 948 µs, plus
+    // 50 µs, the same rule as the config's check): our packets would
+    // reach it after it plays them.
+    for fpp in [92, 97, 256] {
         refused_with(&mut dev, &FlowRequest { fpp, ..req() }, status::BAD_REQUEST);
     }
     // A refusal the gap guard counts.
@@ -843,10 +844,13 @@ fn random_datagrams_never_panic_and_every_answer_is_one_of_inferno_s() {
         for (_, f) in dev.table.flows() {
             assert_eq!(*f.dest.ip(), PEER_IP, "audio only to the requester");
             assert!(f.channels.len() <= 8);
-            // Every granted packet fits inside our advertised latency.
+            // Every granted packet, with the margin and the send slack,
+            // fits inside our advertised latency.
             assert!(
-                u64::from(f.fpp) * 1_000_000_000
-                    <= dev.cfg.advertised_latency_ns() * u64::from(dev.cfg.sample_rate),
+                crate::media::tx::ns_of(u64::from(f.fpp), dev.cfg.sample_rate)
+                    + dev.cfg.tx_margin_ns
+                    + crate::device::TX_SEND_SLACK_NS
+                    <= dev.cfg.advertised_latency_ns(),
                 "{}",
                 f.fpp
             );
