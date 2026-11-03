@@ -2,7 +2,7 @@
 
 ## 0.6.11 (unreleased)
 
-- License (owner 3.11.2026, dstack #90): `dstack-resample` is MIT OR Apache-2.0, as rubato, so every app can take it for its own outputs (SongPlayer's VBAN and ASIO). The rest of dstack stays GPL-3.0-or-later. The crate ships `LICENSE-MIT` and `LICENSE-APACHE`.
+- License (owner 3.11.2026: as permissive as possible): `dlink`, `dstack-audio-io` and `dstack-resample` are MIT OR Apache-2.0 (`LICENSE-MIT`, `LICENSE-APACHE`, `LICENSE.md`). `dstack` stays GPL-3.0-or-later for now: some of its files began from inferno (GPL-3.0-or-later), and those must become our own implementation first. Its GPL text is now in `crates/dstack/COPYING`.
 
 ## 0.6.10 (2026-11-03)
 

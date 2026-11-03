@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! dlink: the Dante device an application embeds (owner, 2.11.2026,
 //! dstack #68). OBS, SongPlayer, the intercom and whatever comes next
