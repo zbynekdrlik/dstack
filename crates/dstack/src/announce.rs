@@ -10,6 +10,8 @@
 //!
 //! - `_netaudio-arc._udp` on 4440 and `_netaudio-cmc._udp` on 8800, both
 //!   named by the device;
+//! - `_netaudio-dbc._udp` on the flow-control port, named by the device,
+//!   with no TXT (DVS sends its flow requests to the port it names);
 //! - one `_netaudio-chan._udp` per TX channel on the flow-control port
 //!   4455, named `<channel>@<device>` by its default name and marked
 //!   `default`, and one more by its current name while the two differ (a
@@ -29,6 +31,7 @@ use mdns_sd::{ServiceDaemon, ServiceInfo, TxtProperty};
 use crate::arc::{MAX_CHANNELS_IN_FLOW, PCM_TYPE};
 use crate::cmc::device_id;
 use crate::device::{DeviceConfig, DeviceState};
+pub use crate::subscribe::directory::DBC_SERVICE;
 
 pub const ARC_SERVICE: &str = "_netaudio-arc._udp.local.";
 pub const CMC_SERVICE: &str = "_netaudio-cmc._udp.local.";
@@ -160,6 +163,16 @@ pub fn records(
             out.push(record(CHAN_SERVICE, named(now), cfg.flows_port, txt(false)));
         }
     }
+    // The flow-control service, on the port our chan records name: a
+    // receiver such as DVS sends its flow requests where this record says,
+    // and to 4455 without it (FOH 3.11.2026). Empty TXT, as every Dante
+    // device on the site.
+    out.push(record(
+        DBC_SERVICE,
+        state.name.clone(),
+        cfg.flows_port,
+        Vec::new(),
+    ));
     out
 }
 
