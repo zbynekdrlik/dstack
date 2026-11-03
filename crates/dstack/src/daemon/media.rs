@@ -211,9 +211,17 @@ impl Media {
 
     /// Sets the app's own part of the status (dstack #104): each status
     /// request calls `f`, and the status carries what it returns as `app`
-    /// when that text is one JSON object ([`crate::ctl::app_object`]). A
-    /// later call replaces the hook. Keep `f` quick and non-blocking: it
-    /// runs on the status request's task.
+    /// when that text is one JSON object of at most
+    /// [`crate::ctl::APP_MAX`] bytes ([`crate::ctl::app_object`]). A later
+    /// call replaces the hook (and a refusal of the new one is warned
+    /// again).
+    ///
+    /// `f` runs on the device's control task, inside each status request:
+    /// while it runs, the device answers no ARC, CMC or status request.
+    /// Keep it to reading a few values the app already holds (atomics, a
+    /// short lock): never I/O, never a wait, and never a status request of
+    /// its own (`ctl::status`, `Link::status`), which would call `f` again
+    /// without end.
     ///
     /// dtray reads two keys of it: `line`, a short text shown after the
     /// device's own line, and `state`, `"ok"`, `"warn"` (orange) or
@@ -222,17 +230,20 @@ impl Media {
     /// carry names: it is the app's.
     pub fn set_app_status(&self, f: impl Fn() -> String + Send + Sync + 'static) {
         *lock(&self.app) = Some(Arc::new(f));
+        self.app_refused.store(false, Ordering::Relaxed);
     }
 
     /// The app's part of the status as compact JSON, `None` without a hook
-    /// or when the hook's text is no JSON object (left out, and warned the
-    /// first time only).
+    /// or when the hook's text is no JSON object of at most
+    /// [`crate::ctl::APP_MAX`] bytes (left out, and warned the first time
+    /// for each hook). The hook runs after the lock is released.
     pub fn app_status(&self) -> Option<String> {
         let hook = lock(&self.app).clone()?;
         let part = crate::ctl::app_object(&hook());
         if part.is_none() && !self.app_refused.swap(true, Ordering::Relaxed) {
             warn!(
-                "the app's status part is no JSON object; the status leaves it out (warned once)"
+                max_bytes = crate::ctl::APP_MAX,
+                "the app's status part is no JSON object within the size; the status leaves it out (warned once)"
             );
         }
         part

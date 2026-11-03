@@ -1122,6 +1122,14 @@ fn the_app_object_is_one_compact_json_object_and_nothing_else() {
     for refused in ["", "[]", "\"ok\"", "1", "null", "{\"line\":", "{} {}"] {
         assert_eq!(app_object(refused), None, "{refused:?}");
     }
+    // The size counts the compact form: `{"x":"…"}` is 8 bytes and the text.
+    let at_most = format!("{{\"x\":\"{}\"}}", "a".repeat(APP_MAX - 8));
+    assert_eq!(at_most.len(), APP_MAX);
+    assert_eq!(app_object(&at_most), Some(at_most.clone()));
+    let spaced = format!("{{ \"x\" : \"{}\" }}", "a".repeat(APP_MAX - 8));
+    assert_eq!(app_object(&spaced), Some(at_most), "white space is free");
+    let over = format!("{{\"x\":\"{}\"}}", "a".repeat(APP_MAX - 7));
+    assert_eq!(app_object(&over), None);
 }
 
 #[test]
@@ -1191,6 +1199,19 @@ fn an_app_part_that_is_no_object_is_left_out_and_warned_once() {
         assert!(status(&media).ends_with(",\"app\":{\"state\":\"ok\"}}"));
     });
     assert_eq!(logs, "");
+    // A new hook that is refused is warned again, once.
+    media.set_app_status(|| "not json".to_string());
+    let logs = crate::test_log::capture_warnings(|| {
+        for _ in 0..3 {
+            assert_eq!(status(&media), before);
+        }
+    });
+    assert_eq!(
+        logs.matches("the app's status part is no JSON object")
+            .count(),
+        1,
+        "{logs}"
+    );
 }
 
 #[cfg(unix)]

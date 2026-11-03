@@ -46,8 +46,19 @@ fn anything_else_is_the_usage() {
 #[test]
 fn the_run_value_is_the_exe_path_quoted() {
     assert_eq!(
-        run_value(Path::new(r"C:\Program Files\dstack\dtray.exe")),
-        r#""C:\Program Files\dstack\dtray.exe""#
+        run_value(Path::new(r"C:\Program Files\dstack\dtray.exe")).as_deref(),
+        Some(r#""C:\Program Files\dstack\dtray.exe""#)
     );
-    assert_eq!(run_value(Path::new("dtray")), "\"dtray\"");
+    assert_eq!(run_value(Path::new("dtray")).as_deref(), Some("\"dtray\""));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_path_that_is_no_unicode_has_no_run_value() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    assert_eq!(
+        run_value(Path::new(OsStr::from_bytes(b"/opt/\xff/dtray"))),
+        None
+    );
 }

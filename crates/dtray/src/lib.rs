@@ -17,6 +17,8 @@
 //!   status (`app`: its `line` and `state`) and the expected devices not
 //!   running included.
 //! - [`latency`]: a device's latency menu from its ARC settings.
+//! - [`menu`]: the Windows menu's decisions (when to read settings, when
+//!   to build the menu again, whether a choice writes).
 //! - [`icon`]: the icon's pixels in a colour.
 //!
 //! The binary shows them as a tray icon on Windows, prints them once with
@@ -29,6 +31,7 @@ pub mod discover;
 pub mod expected;
 pub mod icon;
 pub mod latency;
+pub mod menu;
 pub mod model;
 pub mod probe;
 
@@ -67,9 +70,10 @@ pub fn mode_of<I: IntoIterator<Item = String>>(args: I) -> Result<Mode, &'static
 pub const RUN_VALUE_NAME: &str = "dtray";
 
 /// The Run value's text for the program at `exe`: the path in double
-/// quotes, so a path with spaces starts as one program.
-pub fn run_value(exe: &Path) -> String {
-    format!("\"{}\"", exe.display())
+/// quotes, so a path with spaces starts as one program; `None` for a path
+/// that is not valid Unicode (never a lossy, wrong path).
+pub fn run_value(exe: &Path) -> Option<String> {
+    exe.to_str().map(|p| format!("\"{p}\""))
 }
 
 #[cfg(test)]

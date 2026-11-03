@@ -3,10 +3,23 @@
 use dstack::subscribe::SubStatus;
 
 use super::{
-    App, AppState, Colour, Counts, NOT_RUNNING, Status, TOOLTIP_MAX, Tracker, View, app_of, clip,
-    copy_json, judge, keys, line, missing, missing_line, parse, print_text,
+    APP_LINE_MAX, App, AppState, Colour, Counts, NOT_RUNNING, Status, TOOLTIP_MAX, Tracker, View,
+    app_line, app_of, clip, copy_json, judge, keys, line, missing, missing_line, parse, print_text,
 };
 use crate::discover::Reading;
+
+#[test]
+fn an_app_line_is_one_line_of_at_most_64_units() {
+    assert_eq!(app_line("ASIO\n64\tok\r"), "ASIO 64 ok ");
+    assert_eq!(app_line("plain"), "plain");
+    let long = "x".repeat(APP_LINE_MAX + 10);
+    assert_eq!(app_line(&long), "x".repeat(APP_LINE_MAX));
+    assert_eq!(app_line(&"x".repeat(APP_LINE_MAX)).len(), APP_LINE_MAX);
+    // In a status: the line as shown.
+    let v: serde_json::Value =
+        serde_json::from_str(r#"{"line":"a\nb","state":"ok"}"#).expect("JSON");
+    assert_eq!(app_of(&v).and_then(|a| a.line).as_deref(), Some("a b"));
+}
 
 const RECEIVING: u32 = 0x0101_0009;
 

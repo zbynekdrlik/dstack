@@ -104,7 +104,7 @@ pub struct Status {
 /// The app's own part of a status (`app`), the keys the tray reads.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct App {
-    /// `line`, when it is text and not empty.
+    /// `line` ([`app_line`]), when it is text and not empty.
     pub line: Option<String>,
     /// `state`, when it is one of the three words.
     pub state: Option<AppState>,
@@ -118,14 +118,28 @@ pub enum AppState {
     Error,
 }
 
+/// The longest app line shown, in UTF-16 units (what a menu item and the
+/// tooltip count).
+pub const APP_LINE_MAX: usize = 64;
+
+/// An app's `line` as the menu shows it: each control character (a line
+/// break, a tab) a space, cut to [`APP_LINE_MAX`].
+pub fn app_line(raw: &str) -> String {
+    let flat: String = raw
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    clip(&flat, APP_LINE_MAX)
+}
+
 /// The app part of a status's `app` value; `None` when it is no object.
 pub fn app_of(v: &Value) -> Option<App> {
     let obj = v.as_object()?;
     let line = obj
         .get("line")
         .and_then(Value::as_str)
-        .filter(|l| !l.is_empty())
-        .map(str::to_string);
+        .map(app_line)
+        .filter(|l| !l.is_empty());
     let state = match obj.get("state").and_then(Value::as_str) {
         Some("ok") => Some(AppState::Ok),
         Some("warn") => Some(AppState::Warn),

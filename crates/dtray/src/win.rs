@@ -8,17 +8,18 @@
 //! [`latency::choices`], the configured one checked: choosing one writes it
 //! with [`control::set_latency`]), a line per expected device not running,
 //! Copy status (every device's JSON to the clipboard), Exit (the tray only;
-//! the devices are other processes and keep running).
+//! the devices are other processes and keep running). The decisions (when
+//! to read settings, when to build the menu again, whether a choice
+//! writes) are [`dtray::menu`]'s.
 //!
 //! [`autostart`]: the user's Run value for `dtray --autostart on|off`.
 
-use std::collections::BTreeMap;
 use std::net::SocketAddrV4;
 use std::sync::atomic::{AtomicBool, AtomicU16};
 use std::time::Duration;
 
 use dstack::arc::client::Udp;
-use dstack::arc::control::{self, Settings};
+use dstack::arc::control;
 use dstack::ctl::Requests;
 use tray_icon::menu::{
     CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu,
@@ -42,7 +43,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 
 use dtray::discover::{self, Local, Reading, Scanner};
-use dtray::latency::{self, Choice};
+use dtray::latency;
+use dtray::menu::{self, Known, Shape};
 use dtray::model::{self, Colour, Tracker, View};
 use dtray::{expected, icon};
 
@@ -50,9 +52,6 @@ use dtray::{expected, icon};
 const MUTEX: &str = r"Local\dtray";
 /// The timer's period, ms.
 const TICK_MS: u32 = 1000;
-/// Each device's ARC settings are read again every this many ticks (and
-/// at once for a new device and after a latency write).
-const SETTINGS_EVERY: u32 = 10;
 /// How long an ARC read or write waits for each reply.
 const ARC_WAIT: Duration = Duration::from_millis(300);
 /// The user's key of programs started at logon.
@@ -83,7 +82,9 @@ pub fn autostart(on: bool) -> Result<(), String> {
     let (key, name) = (wide(RUN_KEY), wide(dtray::RUN_VALUE_NAME));
     if on {
         let exe = std::env::current_exe().map_err(|e| format!("the program's path: {e}"))?;
-        let value = wide(&dtray::run_value(&exe));
+        let text = dtray::run_value(&exe)
+            .ok_or_else(|| "the program's path is not valid Unicode".to_string())?;
+        let value = wide(&text);
         let bytes = u32::try_from(value.len() * std::mem::size_of::<u16>())
             .map_err(|_| "the program's path is too long".to_string())?;
         // SAFETY: valid NUL-terminated strings; `bytes` covers `value` and
@@ -118,14 +119,6 @@ struct Fixed {
     exit: MenuItem,
 }
 
-/// One device's part of the menu as built: what decides whether the menu
-/// must be built again.
-#[derive(PartialEq)]
-struct Shape {
-    arc: SocketAddrV4,
-    choices: Vec<Choice>,
-}
-
 /// The menu's items that change between builds.
 #[derive(Default)]
 struct Built {
@@ -135,6 +128,15 @@ struct Built {
     missing: Vec<MenuItem>,
     /// Each latency item: the device's ARC and the value.
     choices: Vec<(MenuId, SocketAddrV4, u32)>,
+}
+
+impl Built {
+    fn counts(&self) -> menu::Counts {
+        menu::Counts {
+            devices: self.devices.len(),
+            missing: self.missing.len(),
+        }
+    }
 }
 
 /// One tick's input: the devices, their readings and the expected names.
@@ -160,13 +162,13 @@ pub fn run() -> Result<(), String> {
     };
     let mut scanner = Scanner::new();
     let mut tracker = Tracker::default();
-    let mut settings: BTreeMap<SocketAddrV4, Settings> = BTreeMap::new();
+    let mut known = Known::default();
     let mut ticks: u32 = 0;
     let mut now = tick(&mut scanner);
-    refresh_settings(&now.devices, &mut settings, true);
+    read_settings(&now.devices, &mut known, ticks);
     let first = tracker.update_with(&now.readings, &now.expected);
-    let mut shapes = shapes_of(&now.devices, &settings);
-    let (first_menu, mut built) = menu(&fixed, &first, &shapes, now.readings.len())?;
+    let mut shapes = menu::shapes_of(&now.devices, &known);
+    let (first_menu, mut built) = build(&fixed, &first, &shapes, now.readings.len())?;
     let tray: TrayIcon = TrayIconBuilder::new()
         .with_menu(Box::new(first_menu))
         .with_tooltip(&first.tooltip)
@@ -174,7 +176,7 @@ pub fn run() -> Result<(), String> {
         .build()
         .map_err(|e| format!("the tray icon: {e}"))?;
     let mut shown = first;
-    let mut rebuild = false;
+    let mut forced = false;
     // A thread timer: WM_TIMER in this thread's queue every TICK_MS.
     // SAFETY: no window, no callback.
     unsafe { SetTimer(std::ptr::null_mut(), 0, TICK_MS, None) };
@@ -197,32 +199,25 @@ pub fn run() -> Result<(), String> {
         if msg.message == WM_TIMER && msg.hwnd.is_null() {
             now = tick(&mut scanner);
             ticks = ticks.wrapping_add(1);
-            refresh_settings(
-                &now.devices,
-                &mut settings,
-                ticks.is_multiple_of(SETTINGS_EVERY),
-            );
+            read_settings(&now.devices, &mut known, ticks);
             let v = tracker.update_with(&now.readings, &now.expected);
-            let new_shapes = shapes_of(&now.devices, &settings);
+            let new_shapes = menu::shapes_of(&now.devices, &known);
             let devices = now.readings.len();
-            if rebuild
-                || new_shapes != shapes
-                || built.devices.len() != devices
-                || built.missing.len() != v.lines.len() - devices
-            {
-                let (m, b) = menu(&fixed, &v, &new_shapes, devices)?;
+            if menu::needs_rebuild(
+                forced,
+                built.counts(),
+                &shapes,
+                &new_shapes,
+                devices,
+                v.lines.len(),
+            ) {
+                let (m, b) = build(&fixed, &v, &new_shapes, devices)?;
                 built = b;
                 shapes = new_shapes;
-                rebuild = false;
+                forced = false;
                 tray.set_menu(Some(Box::new(m)));
             } else {
-                let items = built.devices.iter().map(|s| (s.text(), s as &dyn SetText));
-                let missing = built.missing.iter().map(|m| (m.text(), m as &dyn SetText));
-                for ((old, item), text) in items.chain(missing).zip(&v.lines) {
-                    if old != *text {
-                        item.set(text);
-                    }
-                }
+                set_texts(&built, &v.lines, devices);
             }
             if v.colour != shown.colour {
                 tray.set_icon(Some(tray_icon(v.colour)?))
@@ -250,16 +245,16 @@ pub fn run() -> Result<(), String> {
                 message(&format!("dtray: {err}"));
             }
             if let Some(&(_, arc, ns)) = built.choices.iter().find(|(id, _, _)| *id == e.id) {
-                // The item checked itself on the click: the next tick builds
-                // the menu from what the device reads.
-                rebuild = true;
+                // The item checked or unchecked itself on the click: the
+                // next tick builds the menu from what the device reads.
+                forced = true;
+                if !menu::write_needed(&shapes, arc, ns) {
+                    continue;
+                }
                 match arc_call(arc, |c| {
                     control::set_latency(c, ns).map_err(|e| e.to_string())
                 }) {
-                    Ok(s) => {
-                        settings.insert(arc, s);
-                        refresh_settings(&now.devices, &mut settings, true);
-                    }
+                    Ok(s) => known.record(arc, Some(s), ticks),
                     Err(err) => message(&format!(
                         "dtray: the latency {} was not set: {err}",
                         latency::label(ns)
@@ -270,20 +265,19 @@ pub fn run() -> Result<(), String> {
     }
 }
 
-/// A menu item whose text can be set (a submenu or an item).
-trait SetText {
-    fn set(&self, text: &str);
-}
-
-impl SetText for Submenu {
-    fn set(&self, text: &str) {
-        self.set_text(text);
+/// The view's lines into the built menu's items, where they changed:
+/// the first `devices` into the device submenus, the rest into the
+/// missing lines (their counts match: [`menu::needs_rebuild`]).
+fn set_texts(built: &Built, lines: &[String], devices: usize) {
+    for (sub, text) in built.devices.iter().zip(lines) {
+        if sub.text() != *text {
+            sub.set_text(text);
+        }
     }
-}
-
-impl SetText for MenuItem {
-    fn set(&self, text: &str) {
-        self.set_text(text);
+    for (item, text) in built.missing.iter().zip(lines.iter().skip(devices)) {
+        if item.text() != *text {
+            item.set_text(text);
+        }
     }
 }
 
@@ -315,43 +309,21 @@ fn arc_call<T>(
     f(&mut udp)
 }
 
-/// Reads the settings of each device not read yet, and of all when `all`;
-/// a device gone is forgotten. A failed read leaves the device without
-/// settings (no latency menu) until the next one.
-fn refresh_settings(devices: &[Local], settings: &mut BTreeMap<SocketAddrV4, Settings>, all: bool) {
-    settings.retain(|arc, _| devices.iter().any(|d| d.arc == *arc));
-    for d in devices {
-        if all || !settings.contains_key(&d.arc) {
-            match arc_call(d.arc, |c| control::settings(c).map_err(|e| e.to_string())) {
-                Ok(s) => {
-                    settings.insert(d.arc, s);
-                }
-                Err(_) => {
-                    settings.remove(&d.arc);
-                }
-            }
-        }
+/// Reads the settings of the devices [`Known::due`] names at `tick`; gone
+/// devices are forgotten.
+fn read_settings(devices: &[Local], known: &mut Known, tick: u32) {
+    let arcs: Vec<SocketAddrV4> = devices.iter().map(|d| d.arc).collect();
+    known.forget_gone(&arcs);
+    for arc in known.due(&arcs, tick) {
+        let read = arc_call(arc, |c| control::settings(c).map_err(|e| e.to_string())).ok();
+        known.record(arc, read, tick);
     }
-}
-
-/// Each device's ARC and latency menu.
-fn shapes_of(devices: &[Local], settings: &BTreeMap<SocketAddrV4, Settings>) -> Vec<Shape> {
-    devices
-        .iter()
-        .map(|d| Shape {
-            arc: d.arc,
-            choices: settings
-                .get(&d.arc)
-                .map(latency::choices)
-                .unwrap_or_default(),
-        })
-        .collect()
 }
 
 /// The menu: the version, a submenu per device (its line, its latency
 /// values), a line per expected device not running, Copy status, Exit.
 /// `devices` is how many of the view's lines are devices'.
-fn menu(
+fn build(
     fixed: &Fixed,
     v: &View,
     shapes: &[Shape],

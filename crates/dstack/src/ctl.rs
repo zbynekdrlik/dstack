@@ -649,11 +649,17 @@ pub fn status(media: &Media) -> String {
     j.out
 }
 
-/// `text` as one compact JSON object (on one line, whatever the app wrote),
-/// `None` when it is no JSON object.
+/// The longest app part the status carries, bytes of compact JSON: a
+/// reader (dtray) refuses a whole status past its own cap, so an app's
+/// part never makes its device's status unreadable.
+pub const APP_MAX: usize = 4096;
+
+/// `text` as one compact JSON object (on one line, whatever the app wrote)
+/// of at most [`APP_MAX`] bytes; `None` for anything else.
 pub fn app_object(text: &str) -> Option<String> {
     let v: serde_json::Value = serde_json::from_str(text).ok()?;
-    v.is_object().then(|| v.to_string())
+    let compact = v.to_string();
+    (v.is_object() && compact.len() <= APP_MAX).then_some(compact)
 }
 
 fn app_part(j: &mut Json, media: &Media) {
