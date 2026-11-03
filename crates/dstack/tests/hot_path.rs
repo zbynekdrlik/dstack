@@ -192,6 +192,46 @@ fn the_tx_thread_s_passes_do_not_allocate() {
     assert_eq!(b.recv(&mut buf).unwrap(), MEDIA_HEADER + 3 * 4 * 16);
 }
 
+/// dstack #1: a send the socket refuses goes through the retry decision
+/// in the TX pass without allocating; a lasting refusal (Linux refuses a
+/// send to port 0) is not retried and counts as a send error.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_refused_send_in_the_tx_pass_does_not_allocate() {
+    let cfg = DeviceConfig::from_toml(include_str!("../../../config/test-device.toml"))
+        .expect("config/test-device.toml");
+    let rings: Arc<[Ring]> = (0..1).map(|_| Ring::new()).collect::<Vec<_>>().into();
+    let shared = Arc::new(TxShared::new(cfg, Ipv4Addr::LOCALHOST, rings, 1, &[]).unwrap());
+    assert!(shared.set_source(0, Source::Counter));
+    {
+        let mut c = shared.lock();
+        let req = FlowRequest {
+            rx_host: "peer-device".to_string(),
+            rx_flow_name: "flow-1".to_string(),
+            sample_rate: RATE,
+            bits: 24,
+            channels: vec![Some(1)],
+            fpp: 32,
+            rx: SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0),
+        };
+        c.table.add(&req, shared.now_ns()).unwrap();
+        shared.publish(&c);
+    }
+    let mut tx = Transmitter::new(Arc::clone(&shared));
+    let start = T / u64::from(RATE) * 1_000_000_000;
+    reset_violation_count();
+    assert_no_alloc(|| {
+        for i in 0..40 {
+            tx.step(Some(start + i * 250_000), 0);
+        }
+    });
+    assert_eq!(violation_count(), 0, "the refused sends allocated");
+    let lane = shared.lane(0);
+    assert_eq!(lane.packets, 0, "{lane:?}");
+    assert!(lane.send_errors > 0, "{lane:?}");
+    assert_eq!(lane.send_retries, 0, "{lane:?}");
+}
+
 #[test]
 fn the_rx_thread_s_passes_do_not_allocate() {
     let rings: Arc<[Ring]> = (0..4).map(|_| Ring::new()).collect::<Vec<_>>().into();

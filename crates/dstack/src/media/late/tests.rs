@@ -171,9 +171,9 @@ fn the_send_watch_names_each_flow_s_new_failed_sends_with_the_os_error() {
     let mut w = SendWatch::new();
     let counts = |errors: [u64; 2], code: i32| {
         move |s: usize| match s {
-            0 => (errors[0], code),
-            1 => (errors[1], code),
-            _ => (0, 0),
+            0 => (errors[0], 0, code),
+            1 => (errors[1], 0, code),
+            _ => (0, 0, 0),
         }
     };
     // The first look only learns.
@@ -186,6 +186,7 @@ fn the_send_watch_names_each_flow_s_new_failed_sends_with_the_os_error() {
         vec![SendErrors {
             slot: 0,
             errors: 95,
+            retried: 0,
             os_error: 10055
         }]
     );
@@ -199,4 +200,40 @@ fn the_send_watch_names_each_flow_s_new_failed_sends_with_the_os_error() {
     );
     // Quiet: nothing.
     assert!(w.look(3 * EVERY_NS, counts([101, 12], 10035)).is_empty());
+}
+
+/// dstack #1: a flow whose refused packets all went out on a retry is
+/// reported too (not lost); one that lost packets as well is lost.
+#[test]
+fn the_send_watch_reports_retried_sends_apart_from_lost_ones() {
+    let mut w = SendWatch::new();
+    let counts = |errors: u64, retries: u64| {
+        move |s: usize| match s {
+            3 => (errors, retries, 10055),
+            _ => (0, 0, 0),
+        }
+    };
+    assert!(w.look(0, counts(2, 10)).is_empty());
+    // Retries alone: reported, nothing lost.
+    let r = w.look(EVERY_NS, counts(2, 14));
+    assert_eq!(
+        r,
+        vec![SendErrors {
+            slot: 3,
+            errors: 0,
+            retried: 4,
+            os_error: 10055
+        }]
+    );
+    assert!(!r[0].lost());
+    // Both: lost.
+    let r = w.look(2 * EVERY_NS, counts(3, 15));
+    assert_eq!((r[0].errors, r[0].retried), (1, 1));
+    assert!(r[0].lost());
+    // Lost alone.
+    let r = w.look(3 * EVERY_NS, counts(5, 15));
+    assert_eq!((r[0].errors, r[0].retried), (2, 0));
+    assert!(r[0].lost());
+    // Quiet.
+    assert!(w.look(4 * EVERY_NS, counts(5, 15)).is_empty());
 }

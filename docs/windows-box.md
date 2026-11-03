@@ -51,9 +51,9 @@ On a NIC that carries other traffic beside Dante (the FOH PC in November 2026: a
 Since v0.6.21 (dstack #1) the TX thread sends a refused packet again:
 
 - only on a transient refusal: WSAENOBUFS and WSAEWOULDBLOCK (10035) on Windows; ENOBUFS, EAGAIN and ENOMEM on Linux. Any other error fails at once;
-- at most 3 times, 100 µs apart (a yielding spin on the TX thread; the other flows' sends would fail meanwhile anyway);
+- at most 3 times, 100 µs apart (a yielding spin on the TX thread: up to 300 µs plus the sends per packet; the other flows' sends would fail meanwhile anyway);
 - only while the packet's age after the wait stays at least 100 µs under the flow's latency: a packet that would arrive late is not held (`media::tx::send_retry`).
 
-The status counts a packet that went out on a retry in its TX lane's `send_retries` (recovered, not lost); a packet still refused after its retries counts in `send_errors`, as before. dtray turns a device orange while its `send_errors` grow ("send errors +N" on its line). Retries are not shown there: they are the healthy case.
+The status counts a packet that went out on a retry in its TX lane's `send_retries` (recovered, not lost); a packet still refused after its retries counts in `send_errors`, as before. The log says the same once a second per flow: a warning "TX sends failed after their retries" for lost packets, an info line "TX sends refused for a moment went out on a retry" when none was lost. dtray turns a device orange while its `send_errors` grow ("send errors +N" on its line). Retries are not shown there: they are the healthy case.
 
 The retry covers short refusals only. Whether to keep bulk traffic (file copies, web servers, other audio protocols) off the Dante NIC is the box owner's call; a second NIC for that traffic removes the refusals at their source. The check is the device's `send_errors` and `send_retries` over a day, and a receiver's holes at the same instants.
