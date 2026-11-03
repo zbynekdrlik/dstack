@@ -1853,3 +1853,23 @@ fn the_table_and_the_sockets_hold_only_the_device_s_flow_slots() {
     assert!(s.ports[3..].iter().all(|&p| p == 0));
     assert_eq!(shared_with(Vec::new()).sockets.len(), MAX_FLOWS);
 }
+
+/// dasio (FOH, 3.11.2026): a flow of packets longer than our latency (DVS's
+/// fpp 60 at 0.5 ms) is late only for a receiver below fpp + margin + the
+/// send slack; its packets count as over latency only past that.
+#[test]
+fn a_flow_s_latency_floor_is_its_packet_when_longer_than_ours() {
+    // 60 frames at 96 kHz: 625 µs, + 250 µs margin + the send slack.
+    let floor = 625_000 + 250_000 + crate::device::TX_SEND_SLACK_NS;
+    assert_eq!(flow_latency_ns(500_000, 60, 96_000, 250_000), floor);
+    // A packet inside our latency: ours stands.
+    assert_eq!(flow_latency_ns(1_000_000, 8, 96_000, 250_000), 1_000_000);
+    assert!(!over_latency(
+        floor,
+        flow_latency_ns(500_000, 60, 96_000, 250_000)
+    ));
+    assert!(over_latency(
+        floor + 1,
+        flow_latency_ns(500_000, 60, 96_000, 250_000)
+    ));
+}
