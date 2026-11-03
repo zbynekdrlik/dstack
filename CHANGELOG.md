@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.6.14 (unreleased)
+## 0.6.14 (2026-11-03)
 
 - New (dstack #90 step 3, songplayer's servo rules): `asrc::Controller` takes SongPlayer's additions, all opt-in, so existing users (vstack) are unchanged:
   - the underrun cushion: `with_cushion_max_s`, `played_silence(total_s)`, `cushion_s()`. Silence the consumer played is kept as an excess up to the cap. The offset is braked against [target, target + cushion] (`band_error_ms`), while the level loop keeps the target. Each window the cushion follows the mean down, but a window that folded new silence keeps it; a re-centre or the priming drops it;
