@@ -158,7 +158,13 @@ fn a_48_khz_app_runs_a_96_khz_device_through_the_conversion() {
     // The app's own part (dstack #104): carried last, as one object.
     assert!(!status.contains("\"app\""), "{status}");
     link.set_app_status(|| r#"{"line": "48 kHz app", "state": "ok"}"#.to_string());
-    let with_app = link.status();
+    // The hook runs on its own thread: the part comes after a read or two.
+    let end = Instant::now() + Duration::from_secs(10);
+    let mut with_app = link.status();
+    while !with_app.contains("\"app\"") && Instant::now() < end {
+        std::thread::sleep(Duration::from_millis(10));
+        with_app = link.status();
+    }
     assert!(
         with_app.ends_with(r#","app":{"line":"48 kHz app","state":"ok"}}"#),
         "{with_app}"

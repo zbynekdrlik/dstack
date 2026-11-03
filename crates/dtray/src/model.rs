@@ -108,6 +108,9 @@ pub struct App {
     pub line: Option<String>,
     /// `state`, when it is one of the three words.
     pub state: Option<AppState>,
+    /// `stale`: dstack's mark on a part its app's hook has not refreshed
+    /// for over 3 s (the hook stalls); shown as a warning.
+    pub stale: bool,
 }
 
 /// The app's `state`.
@@ -146,7 +149,8 @@ pub fn app_of(v: &Value) -> Option<App> {
         Some("error") => Some(AppState::Error),
         _ => None,
     };
-    Some(App { line, state })
+    let stale = obj.get("stale") == Some(&Value::Bool(true));
+    Some(App { line, state, stale })
 }
 
 /// A field as a number: a JSON number, or a bool as 0/1; `None` when
@@ -214,8 +218,8 @@ fn app_reason(what: &str, app: &App) -> String {
 }
 
 /// A device's colour and, unless green, why (the first reason by weight:
-/// the clock, the app's error, the subscriptions, the app's warning, the
-/// counts).
+/// the clock, the app's error, the subscriptions, the app's warning, its
+/// stale part, the counts).
 pub fn judge(status: &Status, grew: Counts) -> (Colour, Option<String>) {
     if !status.ready {
         return (Colour::Red, Some("clock not ready".into()));
@@ -234,6 +238,9 @@ pub fn judge(status: &Status, grew: Counts) -> (Colour, Option<String>) {
     }
     if let Some(a) = app.filter(|a| a.state == Some(AppState::Warn)) {
         return (Colour::Orange, Some(app_reason("app warning", a)));
+    }
+    if let Some(a) = app.filter(|a| a.stale) {
+        return (Colour::Orange, Some(app_reason("app status stale", a)));
     }
     let grown = [
         ("late", grew.late),

@@ -480,7 +480,8 @@ fn the_app_part_reads_its_line_and_state() {
         app_of(&v(r#"{"line":"ASIO 64","state":"warn","x":1}"#)),
         Some(App {
             line: Some("ASIO 64".into()),
-            state: Some(AppState::Warn)
+            state: Some(AppState::Warn),
+            stale: false,
         })
     );
     assert_eq!(
@@ -496,16 +497,33 @@ fn the_app_part_reads_its_line_and_state() {
         app_of(&v(r#"{"line":"","state":"ERROR"}"#)),
         Some(App {
             line: None,
-            state: None
+            state: None,
+            stale: false,
         })
     );
     assert_eq!(
         app_of(&v(r#"{"line":7,"state":true}"#)),
         Some(App {
             line: None,
-            state: None
+            state: None,
+            stale: false,
         })
     );
+    // dstack's stale mark: only `true` counts.
+    assert_eq!(
+        app_of(&v(r#"{"state":"ok","stale":true}"#)),
+        Some(App {
+            line: None,
+            state: Some(AppState::Ok),
+            stale: true,
+        })
+    );
+    for not_stale in [r#"{"stale":false}"#, r#"{"stale":1}"#, "{}"] {
+        assert!(
+            !app_of(&v(not_stale)).expect("an object").stale,
+            "{not_stale}"
+        );
+    }
     assert_eq!(app_of(&v("[]")), None);
     assert_eq!(app_of(&v("\"ok\"")), None);
     // In a status: parsed; a non-object app is no app.
@@ -554,6 +572,7 @@ fn judge_weighs_the_app_s_error_after_the_clock_and_its_warning_after_subscripti
         Some(App {
             line: Some("l".into()),
             state: Some(state),
+            stale: false,
         })
     };
     let s = Status {
@@ -604,6 +623,27 @@ fn judge_weighs_the_app_s_error_after_the_clock_and_its_warning_after_subscripti
         app: app(AppState::Ok),
         ..warn
     };
+    let stale = |state| Status {
+        app: Some(App {
+            line: Some("l".into()),
+            state: Some(state),
+            stale: true,
+        }),
+        ..fine.clone()
+    };
+    // A stale part warns after the app's own warning, before the counts.
+    assert_eq!(
+        judge(&stale(AppState::Ok), grew),
+        (Colour::Orange, Some("app status stale: l".into()))
+    );
+    assert_eq!(
+        judge(&stale(AppState::Warn), grew),
+        (Colour::Orange, Some("app warning: l".into()))
+    );
+    assert_eq!(
+        judge(&stale(AppState::Error), grew),
+        (Colour::Red, Some("app error: l".into()))
+    );
     assert_eq!(judge(&fine, grew), (Colour::Orange, Some("late +1".into())));
     assert_eq!(judge(&fine, Counts::default()), (Colour::Green, None));
 }

@@ -1,0 +1,226 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// Copyright (C) 2026 dstack contributors.
+
+//! The app's own part of the status, off the device's control task (dstack
+//! #104 step 5).
+//!
+//! - [`AppHook::set`] stores the app's hook and starts, once, the
+//!   `dstack-app-status` thread. That thread calls the hook when its last
+//!   part is [`REFRESH`] old or older and someone read the status within
+//!   [`READ_WINDOW`] ([`next`]): nobody reading means no calls.
+//! - [`AppHook::read`] (the status request) returns the cached part and
+//!   never calls the hook, so a slow hook never delays the device's ARC,
+//!   CMC or status answers. A part older than [`STALE`] carries
+//!   `"stale":true` ([`mark_stale`]); a hook still running then is logged
+//!   once as stalled.
+//! - The thread ends with the [`AppHook`] (its owner, the `Media`): a stop
+//!   flag it checks between calls. A call in progress is never cut short.
+
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant};
+
+use tracing::{info, warn};
+
+/// How often the thread calls the hook at most.
+pub const REFRESH: Duration = Duration::from_secs(1);
+/// The thread calls the hook only while a status was read within this.
+pub const READ_WINDOW: Duration = Duration::from_secs(5);
+/// A part older than this carries `"stale":true`.
+pub const STALE: Duration = Duration::from_secs(3);
+
+/// An app's status hook ([`crate::daemon::media::Media::set_app_status`]).
+pub type AppStatus = Arc<dyn Fn() -> String + Send + Sync>;
+
+/// What the thread does next ([`next`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Next {
+    /// Call the hook now.
+    Call,
+    /// Wait this long (or until woken), then decide again.
+    Wait(Duration),
+    /// Nobody reads: wait until woken (a read, a new hook, the stop).
+    Idle,
+}
+
+/// The thread's decision at `now`, given the last status read (`read`) and
+/// when the last part was stored (`at`, `None` before the first call of
+/// this hook).
+pub fn next(now: Instant, read: Option<Instant>, at: Option<Instant>) -> Next {
+    let Some(read) = read else {
+        return Next::Idle;
+    };
+    if now.saturating_duration_since(read) >= READ_WINDOW {
+        return Next::Idle;
+    }
+    match at {
+        Some(at) if now.saturating_duration_since(at) < REFRESH => {
+            Next::Wait(REFRESH - now.saturating_duration_since(at))
+        }
+        _ => Next::Call,
+    }
+}
+
+/// A part stored at `at` is stale at `now`.
+pub fn is_stale(now: Instant, at: Instant) -> bool {
+    now.saturating_duration_since(at) > STALE
+}
+
+/// `part` (one compact JSON object, [`crate::ctl::app_object`]) with
+/// `"stale":true` set (over any `stale` key of the app's own), compact.
+pub fn mark_stale(part: &str) -> String {
+    match serde_json::from_str::<serde_json::Value>(part) {
+        Ok(serde_json::Value::Object(mut obj)) => {
+            obj.insert("stale".into(), serde_json::Value::Bool(true));
+            serde_json::Value::Object(obj).to_string()
+        }
+        _ => r#"{"stale":true}"#.to_string(),
+    }
+}
+
+/// What the readers and the thread share.
+#[derive(Default)]
+struct State {
+    hook: Option<AppStatus>,
+    /// Bumped by each new hook: a call of the hook it replaced stores
+    /// nothing.
+    generation: u64,
+    /// The last call's part (`None`: refused, no JSON object within the
+    /// size) and when the call returned.
+    part: Option<(Option<String>, Instant)>,
+    /// The last status read.
+    read: Option<Instant>,
+    /// The thread is inside a call of the hook.
+    calling: bool,
+    /// The thread was started.
+    started: bool,
+    /// The owner is gone: the thread ends.
+    stop: bool,
+}
+
+#[derive(Default)]
+struct Shared {
+    state: Mutex<State>,
+    wake: Condvar,
+}
+
+fn lock(m: &Mutex<State>) -> MutexGuard<'_, State> {
+    m.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The app's hook, its thread and its cached part (see the module).
+#[derive(Default)]
+pub struct AppHook {
+    shared: Arc<Shared>,
+    /// The hook gave text that is no JSON object, and that was warned.
+    refused: AtomicBool,
+    /// The hook was found stalled, and that was warned.
+    stalled: AtomicBool,
+}
+
+impl AppHook {
+    /// Sets the hook (a later call replaces it, its old part dropped and a
+    /// refusal or a stall of the new one warned again); starts the thread
+    /// at the first call.
+    pub fn set(&self, f: AppStatus) {
+        let start = {
+            let mut s = lock(&self.shared.state);
+            s.hook = Some(f);
+            s.generation += 1;
+            s.part = None;
+            !std::mem::replace(&mut s.started, true)
+        };
+        self.refused.store(false, Ordering::Relaxed);
+        self.stalled.store(false, Ordering::Relaxed);
+        self.shared.wake.notify_all();
+        if start {
+            let shared = Arc::clone(&self.shared);
+            match std::thread::Builder::new()
+                .name("dstack-app-status".into())
+                .spawn(move || run(&shared))
+            {
+                Ok(_) => info!("the app's status thread started"),
+                Err(e) => warn!(
+                    error = %e,
+                    "the app's status thread did not start; the status leaves the app part out"
+                ),
+            }
+        }
+    }
+
+    /// The cached part as compact JSON, `"stale":true` set once it is older
+    /// than [`STALE`]; `None` without a hook, before the hook's first call
+    /// returned, or when its text was no JSON object within
+    /// [`crate::ctl::APP_MAX`] bytes (warned the first time for each hook).
+    /// Never calls the hook: it counts as a read, which keeps the thread
+    /// calling it ([`next`]).
+    pub fn read(&self) -> Option<String> {
+        let now = Instant::now();
+        let (part, calling) = {
+            let mut s = lock(&self.shared.state);
+            s.hook.as_ref()?;
+            s.read = Some(now);
+            (s.part.clone(), s.calling)
+        };
+        self.shared.wake.notify_all();
+        let (text, at) = part?;
+        let Some(text) = text else {
+            if !self.refused.swap(true, Ordering::Relaxed) {
+                warn!(
+                    max_bytes = crate::ctl::APP_MAX,
+                    "the app's status part is no JSON object within the size; the status leaves it out (warned once)"
+                );
+            }
+            return None;
+        };
+        if !is_stale(now, at) {
+            return Some(text);
+        }
+        if calling && !self.stalled.swap(true, Ordering::Relaxed) {
+            warn!(
+                stale_after_ms = STALE.as_millis(),
+                "the app's status hook has not returned; the status carries its last part as stale (warned once)"
+            );
+        }
+        Some(mark_stale(&text))
+    }
+}
+
+impl Drop for AppHook {
+    fn drop(&mut self) {
+        lock(&self.shared.state).stop = true;
+        self.shared.wake.notify_all();
+    }
+}
+
+/// The thread: calls the hook as [`next`] decides, until the stop.
+fn run(shared: &Shared) {
+    let mut s = lock(&shared.state);
+    while !s.stop {
+        let at = s.part.as_ref().map(|p| p.1);
+        match (next(Instant::now(), s.read, at), s.hook.clone()) {
+            (Next::Call, Some(hook)) => {
+                let generation = s.generation;
+                s.calling = true;
+                drop(s);
+                let part = crate::ctl::app_object(&hook());
+                s = lock(&shared.state);
+                s.calling = false;
+                if s.generation == generation {
+                    s.part = Some((part, Instant::now()));
+                }
+            }
+            (Next::Wait(d), _) => {
+                s = shared
+                    .wake
+                    .wait_timeout(s, d)
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .0;
+            }
+            _ => s = shared.wake.wait(s).unwrap_or_else(PoisonError::into_inner),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests;

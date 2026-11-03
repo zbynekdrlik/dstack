@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.6.19 (unreleased)
+
+- Change (dstack #104 step 5): the app's status hook (`Media::set_app_status`, `dlink::Link::set_app_status`) runs on a thread of its own (`dstack-app-status`, started at the first call, ended with the `Media`), never inside a status request. A slow or stalled hook no longer delays the device's ARC, CMC or status answers.
+  - The thread calls the hook at most once a second, and only while the status is read (a read within 5 s): nobody reading means no calls (`daemon::media::app::REFRESH`, `READ_WINDOW`).
+  - The status carries the last part the hook returned. What a consumer notices: the first status after the hook is set (or after a pause in reading) has no `app` yet, or a stale one; a part over 3 s old carries `"stale":true` (`app::STALE`, set over any `stale` key of the app's own), and a hook still running then is warned once. A test that set a hook and read the status once must now read until `app` appears.
+  - `f` must not make a status request of its own (`ctl::status`, `Link::status`): each counts as a read and keeps `f` called for good.
+  - New: `daemon::media::app` (`AppHook`, `next`, `Next`, `is_stale`, `mark_stale`); `AppStatus` moved there (still re-exported from `daemon::media`).
+- dtray: a stale app part (`"stale":true`) turns the device orange, "app status stale" (after the app's own warning, before the counts); `model::App` has `stale`.
+
 ## 0.6.18 (2026-11-03)
 
 - New (dstack #104 step 4): an app's own part of the status, for dtray.

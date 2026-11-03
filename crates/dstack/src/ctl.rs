@@ -631,9 +631,12 @@ impl Json {
 ///   longer than one period), `rebootstraps`, `max_process_us`
 ///   ([`crate::stream::PumpView`]).
 /// - `app` (dstack #104), only once the app set a hook
-///   ([`Media::set_app_status`]) and while it returns a JSON object: that
-///   object, compact. It is the app's: dtray reads its `line` and `state`;
-///   it is the one part that may carry names.
+///   ([`Media::set_app_status`]), its thread's first call returned, and
+///   while it returns a JSON object: that object, compact (the cached part:
+///   the status never calls the hook), with `"stale":true` once the part is
+///   over [`crate::daemon::media::app::STALE`] old. It is the app's: dtray
+///   reads its `line`, `state` and `stale`; it is the one part that may
+///   carry names.
 pub fn status(media: &Media) -> String {
     let mut j = Json::new();
     j.open(None, '{');
