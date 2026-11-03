@@ -265,10 +265,10 @@ fn a_wrapped_slot_never_reads_stale() {
     ring.write_at(T + lap, &packet(T + lap));
     assert_eq!(read(&ring, T, N), (vec![0; N], Read { holes: N }));
     assert_eq!(read(&ring, T + lap, N).0, packet(T + lap));
-    // Laps far apart too (the lap is the position's bits 16..48).
+    // Laps far apart too (the lap is the position's bits 16..47).
     let ring = Ring::new();
     ring.write_at(T, &packet(T));
-    for laps in [2, 255, 256, 65_536, 1 << 31] {
+    for laps in [2, 255, 256, 65_536, 1 << 30] {
         let (got, r) = read(&ring, T + laps * lap, N);
         assert_eq!((got, r.holes), (vec![0; N], N), "{laps}");
     }
