@@ -8,6 +8,11 @@ use std::time::{Duration, Instant};
 
 use super::{MAX_ANSWER, ProbeError, REQUEST, line_of, status, status_at, time_left};
 
+/// The size tests' deadline: a megabyte through a coverage-instrumented
+/// build takes longer than the probe's own [`super::WAIT`]; they test the
+/// size, the deadline has its own test (`a_slow_drip_ends_at_the_deadline`).
+const SIZE_WAIT: Duration = Duration::from_secs(30);
+
 #[test]
 fn time_left_is_up_at_the_deadline() {
     let now = Instant::now();
@@ -46,7 +51,10 @@ fn a_newline_past_the_largest_size_is_too_long() {
     let mut fits = vec![b'a'; MAX_ANSWER];
     fits.push(b'\n');
     let (addr, server) = endpoint(vec![fits]);
-    assert_eq!(status_at(addr, WAIT).expect("a line").len(), MAX_ANSWER);
+    assert_eq!(
+        status_at(addr, SIZE_WAIT).expect("a line").len(),
+        MAX_ANSWER
+    );
     server.join().expect("the server");
     // The newline arrives in the same read as the bytes past the size.
     let mut over = vec![b'a'; MAX_ANSWER + 1];
@@ -55,7 +63,10 @@ fn a_newline_past_the_largest_size_is_too_long() {
         vec![b'a'; MAX_ANSWER - 10],
         over.split_off(MAX_ANSWER - 10),
     ]);
-    assert!(matches!(status_at(addr, WAIT), Err(ProbeError::TooLong)));
+    assert!(matches!(
+        status_at(addr, SIZE_WAIT),
+        Err(ProbeError::TooLong)
+    ));
     let _ = server.join();
 }
 
@@ -124,10 +135,16 @@ fn a_line_closed_without_newline_still_reads() {
 #[test]
 fn an_answer_of_the_largest_size_reads_and_one_byte_more_does_not() {
     let (addr, server) = endpoint(vec![vec![b'a'; MAX_ANSWER]]);
-    assert_eq!(status_at(addr, WAIT).expect("a line").len(), MAX_ANSWER);
+    assert_eq!(
+        status_at(addr, SIZE_WAIT).expect("a line").len(),
+        MAX_ANSWER
+    );
     server.join().expect("the server");
     let (addr, server) = endpoint(vec![vec![b'a'; MAX_ANSWER + 1]]);
-    assert!(matches!(status_at(addr, WAIT), Err(ProbeError::TooLong)));
+    assert!(matches!(
+        status_at(addr, SIZE_WAIT),
+        Err(ProbeError::TooLong)
+    ));
     let _ = server.join();
 }
 
