@@ -1478,3 +1478,61 @@ fn a_transmitter_at_another_rate_is_a_format_mismatch_said_once() {
         assert!(log.contains(part), "{part} missing: {log}");
     }
 }
+
+/// FOH 3.11.2026: dasio runs two Dante devices on one PC address
+/// (master-asio-dante on flow control 4455, band-asio-dante on 4456). The
+/// intercom subscribed two channels of each; dstack keyed its transmitters
+/// by address, put all four channels into one request to one of them, and
+/// asked again every 250 ms for the other's channels ("its transmitter's
+/// record changed"). Each transmitter is its flow-control address.
+#[test]
+fn two_transmitters_on_one_address_get_a_flow_each() {
+    let net = Fake::default();
+    let shared = Ipv4Addr::new(10, 0, 0, 30);
+    let at = |port: u16, id: u16| Advertised {
+        control: SocketAddrV4::new(shared, port),
+        ..adv(shared, id)
+    };
+    net.add("master", "Repro L", at(4455, 1));
+    net.add("master", "Repro R", at(4455, 2));
+    net.add("band", "Click", at(4456, 7));
+    net.add("band", "Guide", at(4456, 9));
+    let mut m = manager();
+    m.set(0, Some(sub("Repro L", "master")));
+    m.set(1, Some(sub("Repro R", "master")));
+    m.set(2, Some(sub("Click", "band")));
+    m.set(3, Some(sub("Guide", "band")));
+    let all = run(
+        &mut m,
+        &net,
+        0,
+        3 * S,
+        Some(Answer::Granted([1, 2, 3, 4, 5, 6])),
+    );
+    let requests: Vec<(SocketAddrV4, Vec<Option<u16>>)> = all
+        .iter()
+        .filter_map(|(_, a)| match a {
+            Action::Request { to, req, .. } => Some((*to, req.channels.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        requests.len(),
+        2,
+        "one request each, never again: {requests:?}"
+    );
+    let to_master = requests
+        .iter()
+        .find(|(to, _)| to.port() == 4455)
+        .expect("master asked");
+    let to_band = requests
+        .iter()
+        .find(|(to, _)| to.port() == 4456)
+        .expect("band asked");
+    let ids = |ch: &[Option<u16>]| ch.iter().flatten().copied().collect::<Vec<_>>();
+    assert_eq!(ids(&to_master.1), vec![1, 2]);
+    assert_eq!(ids(&to_band.1), vec![7, 9]);
+    for rx in 0..4 {
+        assert_eq!(m.status(rx), Some(SubStatus::Receiving), "rx {rx}");
+    }
+}
