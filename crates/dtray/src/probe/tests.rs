@@ -1,11 +1,63 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+use std::io::ErrorKind;
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use super::{MAX_ANSWER, ProbeError, REQUEST, line_of, status, status_at};
+use super::{MAX_ANSWER, ProbeError, REQUEST, line_of, status, status_at, time_left};
+
+#[test]
+fn time_left_is_up_at_the_deadline() {
+    let now = Instant::now();
+    let d = Duration::from_millis(300);
+    assert_eq!(time_left(now + d, now).expect("time left"), d);
+    let at = time_left(now, now).expect_err("none at the deadline");
+    assert_eq!(at.kind(), ErrorKind::TimedOut);
+    let past = time_left(now, now + d).expect_err("none past it");
+    assert_eq!(past.kind(), ErrorKind::TimedOut);
+}
+
+#[test]
+fn a_slow_drip_ends_at_the_deadline() {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let server = thread::spawn(move || {
+        let (mut s, _) = listener.accept().expect("a connection");
+        // One byte every 50 ms, never a newline, until the probe hangs up.
+        while s.write_all(b"a").is_ok() {
+            thread::sleep(Duration::from_millis(50));
+        }
+    });
+    let start = Instant::now();
+    let e = status_at(addr, Duration::from_millis(300)).expect_err("cut off");
+    let took = start.elapsed();
+    assert!(
+        matches!(&e, ProbeError::Io(io) if io.kind() == ErrorKind::TimedOut || io.kind() == ErrorKind::WouldBlock),
+        "{e:?}"
+    );
+    assert!(took < Duration::from_millis(1500), "{took:?}");
+    server.join().expect("the server");
+}
+
+#[test]
+fn a_newline_past_the_largest_size_is_too_long() {
+    let mut fits = vec![b'a'; MAX_ANSWER];
+    fits.push(b'\n');
+    let (addr, server) = endpoint(vec![fits]);
+    assert_eq!(status_at(addr, WAIT).expect("a line").len(), MAX_ANSWER);
+    server.join().expect("the server");
+    // The newline arrives in the same read as the bytes past the size.
+    let mut over = vec![b'a'; MAX_ANSWER + 1];
+    over.push(b'\n');
+    let (addr, server) = endpoint(vec![
+        vec![b'a'; MAX_ANSWER - 10],
+        over.split_off(MAX_ANSWER - 10),
+    ]);
+    assert!(matches!(status_at(addr, WAIT), Err(ProbeError::TooLong)));
+    let _ = server.join();
+}
 
 /// A status line as `dstack::ctl::status` writes it (a device with two RX
 /// channels and an engine), shortened to the parts a reader uses.

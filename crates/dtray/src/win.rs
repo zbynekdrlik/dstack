@@ -90,7 +90,14 @@ pub fn run() -> Result<(), String> {
     loop {
         // SAFETY: a valid MSG; all of this thread's messages.
         let got = unsafe { GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) };
-        if got <= 0 {
+        if got == -1 {
+            // SAFETY: plain call, right after GetMessageW failed.
+            let code = unsafe { GetLastError() };
+            return Err(format!(
+                "the message loop failed (GetMessageW, error {code})"
+            ));
+        }
+        if got == 0 {
             return Ok(());
         }
         if msg.message == WM_TIMER && msg.hwnd.is_null() {

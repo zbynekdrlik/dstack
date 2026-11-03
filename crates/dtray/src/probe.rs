@@ -2,14 +2,15 @@
 
 //! One `status` request to a device's local endpoint
 //! ([`dstack::ctl::local`]): TCP to 127.0.0.1 at the port its ARC record
-//! names, the request line, the JSON line back. Every step is bounded by
-//! [`WAIT`], so one stuck device holds the tray for a second at most.
+//! names, the request line, the JSON line back, all within one deadline
+//! of [`WAIT`]: a stuck or slow device holds the tray for a second at most.
 
-use std::io::{self, Read, Write};
+use std::io::{self, ErrorKind, Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpStream};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-/// How long the connection, the request and the answer may each take.
+/// How long the whole exchange may take: the connection, the request and
+/// the answer together.
 pub const WAIT: Duration = Duration::from_secs(1);
 /// The longest answer read, bytes: a status line is a few kB; a longer
 /// answer is no status of ours.
@@ -33,23 +34,37 @@ pub enum ProbeError {
 }
 
 /// The status line of the device whose local endpoint is at `port` on
-/// 127.0.0.1, within [`WAIT`] a step.
+/// 127.0.0.1, within [`WAIT`].
 pub fn status(port: u16) -> Result<String, ProbeError> {
     status_at(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port).into(), WAIT)
 }
 
-/// The status line of the endpoint at `addr`, within `wait` a step.
+/// The time from `now` to `deadline`; `TimedOut` when none is left (a
+/// socket timeout of zero would mean none at all).
+pub fn time_left(deadline: Instant, now: Instant) -> io::Result<Duration> {
+    deadline
+        .checked_duration_since(now)
+        .filter(|d| !d.is_zero())
+        .ok_or_else(|| io::Error::new(ErrorKind::TimedOut, "the probe's time is up"))
+}
+
+/// The status line of the endpoint at `addr`, the whole exchange within
+/// `wait`.
 pub fn status_at(addr: SocketAddr, wait: Duration) -> Result<String, ProbeError> {
+    let deadline = Instant::now() + wait;
     let mut stream = TcpStream::connect_timeout(&addr, wait)?;
-    stream.set_read_timeout(Some(wait))?;
-    stream.set_write_timeout(Some(wait))?;
+    stream.set_write_timeout(Some(time_left(deadline, Instant::now())?))?;
     stream.write_all(REQUEST)?;
     let mut answer = Vec::new();
     let mut buf = [0u8; 4096];
     loop {
+        stream.set_read_timeout(Some(time_left(deadline, Instant::now())?))?;
         let n = stream.read(&mut buf)?;
         answer.extend_from_slice(&buf[..n]);
         if let Some(end) = answer.iter().position(|&b| b == b'\n') {
+            if end > MAX_ANSWER {
+                return Err(ProbeError::TooLong);
+            }
             answer.truncate(end);
             break;
         }

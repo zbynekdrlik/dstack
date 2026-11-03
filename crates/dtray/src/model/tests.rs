@@ -3,7 +3,7 @@
 use dstack::subscribe::SubStatus;
 
 use super::{
-    Colour, Counts, Status, TOOLTIP_MAX, Tracker, View, clip, copy_json, judge, line, parse,
+    Colour, Counts, Status, TOOLTIP_MAX, Tracker, View, clip, copy_json, judge, keys, line, parse,
     print_text,
 };
 use crate::discover::Reading;
@@ -192,10 +192,46 @@ fn a_device_gone_and_back_starts_from_its_new_counts() {
     t.update(&[]);
     let v = t.update(&[ok("app", status_line(1, &[], &[50], None))]);
     assert_eq!(v.colour, Colour::Green);
-    // An unreadable reading forgets the counts too.
-    t.update(&[("app".into(), Err("x".into()))]);
+}
+
+#[test]
+fn counts_survive_an_unreadable_status() {
+    let mut t = Tracker::default();
+    t.update(&[ok("app", status_line(1, &[], &[50], None))]);
+    let v = t.update(&[("app".into(), Err("x".into()))]);
+    assert_eq!(v.colour, Colour::Red);
+    // What grew while it could not be read shows once it reads again.
     let v = t.update(&[ok("app", status_line(1, &[], &[90], None))]);
+    assert_eq!(v.tooltip, "dstack: 1 device, app: late +40");
+    // A device never read before an error has nothing to keep.
+    let mut t = Tracker::default();
+    t.update(&[("new".into(), Err("x".into()))]);
+    let v = t.update(&[ok("new", status_line(1, &[], &[7], None))]);
     assert_eq!(v.colour, Colour::Green);
+}
+
+#[test]
+fn two_devices_of_one_name_keep_their_own_counts() {
+    let mut t = Tracker::default();
+    t.update(&[
+        ok("twin", status_line(1, &[], &[100], None)),
+        ok("twin", status_line(1, &[], &[5], None)),
+    ]);
+    let v = t.update(&[
+        ok("twin", status_line(1, &[], &[100], None)),
+        ok("twin", status_line(1, &[], &[5], None)),
+    ]);
+    assert_eq!(v.colour, Colour::Green, "{:?}", v.lines);
+    assert_eq!(v.lines.len(), 2);
+    let readings = [
+        ok("a", "{}".into()),
+        ok("b", "{}".into()),
+        ok("a", "{}".into()),
+        ok("a", "{}".into()),
+    ];
+    assert_eq!(keys(&readings), vec!["a", "b", "a (2)", "a (3)"]);
+    let v: serde_json::Value = serde_json::from_str(&copy_json(&readings)).expect("JSON");
+    assert_eq!(v.as_object().expect("an object").len(), 4);
 }
 
 #[test]
@@ -368,6 +404,13 @@ fn the_tooltip_is_clipped() {
     assert!(v.tooltip.starts_with("dstack: 1 device, nnn"));
     assert_eq!(clip("ab\u{e9}d", 3), "ab\u{e9}");
     assert_eq!(clip("ab", 3), "ab");
+    assert_eq!(clip("abc", 3), "abc");
+    // A character outside the BMP is two UTF-16 units: never cut in half.
+    assert_eq!(clip("ab\u{1f3b5}", 3), "ab");
+    assert_eq!(clip("ab\u{1f3b5}", 4), "ab\u{1f3b5}");
+    let v = Tracker::default().update(&[("\u{1f3b5}".repeat(100), Err("x".into()))]);
+    assert!(v.tooltip.encode_utf16().count() <= TOOLTIP_MAX);
+    assert!(v.tooltip.encode_utf16().count() >= TOOLTIP_MAX - 1);
 }
 
 #[test]

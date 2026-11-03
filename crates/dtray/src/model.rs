@@ -14,7 +14,8 @@
 //!
 //! [`Tracker::update`] keeps each device's counts from the update before,
 //! so the view shows how much they grew since (the first sight of a device
-//! and a device that restarted show 0). The colour is the worst device's
+//! and a device that restarted show 0; while a status cannot be read, the
+//! counts before it are kept). The colour is the worst device's
 //! ([`Colour`]).
 
 use std::collections::BTreeMap;
@@ -48,7 +49,7 @@ pub struct View {
     pub lines: Vec<String>,
 }
 
-/// The longest tooltip, in characters (Windows keeps 127 and a NUL).
+/// The longest tooltip, in UTF-16 units (Windows keeps 127 and a NUL).
 pub const TOOLTIP_MAX: usize = 127;
 
 /// The late counts of a device, cumulative.
@@ -184,9 +185,16 @@ pub fn line(name: &str, status: &Status, grew: Counts) -> String {
     s
 }
 
-/// `s` cut to at most `max` characters.
+/// `s` cut to at most `max` UTF-16 units (what Windows counts), never
+/// inside a character.
 pub fn clip(s: &str, max: usize) -> String {
-    s.chars().take(max).collect()
+    let mut units = 0;
+    s.chars()
+        .take_while(|c| {
+            units += c.len_utf16();
+            units <= max
+        })
+        .collect()
 }
 
 /// The view's counts kept between updates (see the module).
@@ -203,7 +211,7 @@ impl Tracker {
         let mut last = BTreeMap::new();
         let mut lines = Vec::with_capacity(readings.len());
         let mut worst: Option<(Colour, String)> = None;
-        for (name, reading) in readings {
+        for ((name, reading), key) in readings.iter().zip(keys(readings)) {
             let parsed = match reading {
                 Ok(text) => parse(text).ok_or_else(|| "the status is not JSON".to_string()),
                 Err(e) => Err(e.clone()),
@@ -212,13 +220,18 @@ impl Tracker {
                 Ok(status) => {
                     let grew = self
                         .last
-                        .get(name)
+                        .get(&key)
                         .map_or(Counts::default(), |&before| status.counts.since(before));
-                    last.insert(name.clone(), status.counts);
+                    last.insert(key, status.counts);
                     lines.push(line(name, &status, grew));
                     judge(&status, grew)
                 }
                 Err(e) => {
+                    // The counts before stay: what grew meanwhile shows once
+                    // the status reads again.
+                    if let Some(&before) = self.last.get(&key) {
+                        last.insert(key, before);
+                    }
                     lines.push(format!("{name}: status unreadable ({e})"));
                     (Colour::Red, Some("status unreadable".to_string()))
                 }
@@ -260,15 +273,34 @@ pub fn print_text(view: &View) -> String {
 /// its status object, or to `{"error": <why>}`.
 pub fn copy_json(readings: &[Reading]) -> String {
     let mut all = serde_json::Map::new();
-    for (name, reading) in readings {
+    for ((_, reading), key) in readings.iter().zip(keys(readings)) {
         let v = match reading {
             Ok(text) => serde_json::from_str::<Value>(text)
                 .unwrap_or_else(|_| serde_json::json!({ "error": "the status is not JSON" })),
             Err(e) => serde_json::json!({ "error": e }),
         };
-        all.insert(name.clone(), v);
+        all.insert(key, v);
     }
     Value::Object(all).to_string()
+}
+
+/// Each reading's key: its name, and for a name already seen in
+/// `readings` (two devices of one name on the PC) the name and its count,
+/// `name (2)`, so neither device's counts or status hide the other's.
+pub fn keys(readings: &[Reading]) -> Vec<String> {
+    let mut seen: BTreeMap<&str, usize> = BTreeMap::new();
+    readings
+        .iter()
+        .map(|(name, _)| {
+            let n = seen.entry(name.as_str()).or_insert(0);
+            *n += 1;
+            if *n == 1 {
+                name.clone()
+            } else {
+                format!("{name} ({n})")
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
