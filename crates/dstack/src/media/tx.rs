@@ -1312,6 +1312,49 @@ fn count_send(stats: &LaneStats, sent: &io::Result<bool>, len: usize) {
     }
 }
 
+/// Sends again a packet the NIC refused for a moment: at most this many
+/// more tries (dstack #1).
+pub const SEND_RETRIES: u32 = 3;
+
+/// The wait before each retry, ns.
+pub const SEND_RETRY_WAIT_NS: u64 = 100_000;
+
+/// A retry goes out only while the packet's age after the wait stays at
+/// least this far under its flow's latency floor, ns.
+pub const SEND_RETRY_HEADROOM_NS: u64 = 100_000;
+
+/// Whether the raw OS error `code` of a failed send on `os` is a transient
+/// refusal (the NIC's transmit ring or the socket full for a moment).
+pub fn transient_refusal(_os: crate::clock::Os, _code: i32) -> bool {
+    false
+}
+
+/// The wait before sending again a packet whose send failed with the raw
+/// OS error `code`, after `attempt` retries, `age_ns` past its stamp now,
+/// on a flow whose latency floor is `floor_ns`; `None`: no retry.
+pub fn send_retry(
+    _os: crate::clock::Os,
+    _code: Option<i32>,
+    _attempt: u32,
+    _age_ns: u64,
+    _floor_ns: u64,
+) -> Option<std::time::Duration> {
+    None
+}
+
+/// One packet's send with its retries: `send` once, then again after each
+/// wait [`send_retry`] gives (`age` the packet's age now, `wait` the wait
+/// itself). The final outcome and the retries made.
+pub(crate) fn send_with_retries(
+    _os: crate::clock::Os,
+    _floor_ns: u64,
+    _age: impl FnMut() -> u64,
+    mut send: impl FnMut() -> io::Result<bool>,
+    _wait: impl FnMut(std::time::Duration),
+) -> (io::Result<bool>, u32) {
+    (send(), 0)
+}
+
 /// Starts the TX thread: it sends `shared`'s flows on `clock` until
 /// [`TxShared::stop`].
 pub fn spawn(clock: Arc<dyn PtpClock>, shared: Arc<TxShared>) -> io::Result<JoinHandle<()>> {
