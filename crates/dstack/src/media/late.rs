@@ -199,6 +199,53 @@ impl SendWatch {
     }
 }
 
+/// The host frame sender's watch (dstack #1, Windows): once a second, when
+/// the sender refused whole batches since the last look, one warning with
+/// their count and the last OS error. Their packets went out through the
+/// UDP sockets (each counted in its lane), so the line says the sender
+/// failed, not that packets were lost; never one line per packet.
+#[derive(Debug, Default)]
+pub struct HostWatch {
+    seen: u64,
+    next_ns: Option<u64>,
+}
+
+impl HostWatch {
+    pub const fn new() -> Self {
+        HostWatch {
+            seen: 0,
+            next_ns: None,
+        }
+    }
+
+    /// At `now_ns`, a look once [`EVERY_NS`] has passed (the first only
+    /// learns): the batches refused since the last look, of the cumulative
+    /// `refused`; `None` between looks and when none was.
+    pub fn look(&mut self, now_ns: u64, refused: u64) -> Option<u64> {
+        if self.next_ns.is_some_and(|next| now_ns < next) {
+            return None;
+        }
+        let first = self.next_ns.is_none();
+        self.next_ns = Some(now_ns.saturating_add(EVERY_NS));
+        let rose = refused.saturating_sub(self.seen);
+        self.seen = refused;
+        (rose > 0 && !first).then_some(rose)
+    }
+
+    /// [`HostWatch::look`] on `tx`'s host sender, a refusal logged as a
+    /// warning.
+    pub fn watch(&mut self, now_ns: u64, tx: &TxShared) {
+        let (refused, os_error) = tx.host_refusals();
+        if let Some(batches) = self.look(now_ns, refused) {
+            warn!(
+                batches,
+                os_error,
+                "TX host frame sender refused whole batches: their packets went through the UDP socket"
+            );
+        }
+    }
+}
+
 /// One RX flow's losses since the last look.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Loss {

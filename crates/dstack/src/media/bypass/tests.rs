@@ -157,3 +157,116 @@ fn the_loopback_address_has_an_interface() {
     assert!(nic_of(Ipv4Addr::LOCALHOST).is_some());
     assert_eq!(nic_of(Ipv4Addr::new(192, 0, 2, 77)), None);
 }
+
+// ---- the host frame sender (dstack #1, Windows) ----
+
+#[test]
+fn the_ethernet_header_is_dst_src_and_ipv4() {
+    let mut buf = [0xeeu8; ETHERNET_HEADER + 2];
+    write_ethernet(
+        &mut buf,
+        [0x00, 0x1d, 0xc1, 0x01, 0x02, 0x03],
+        [0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0xee],
+    );
+    assert_eq!(
+        buf,
+        [
+            0x00, 0x1d, 0xc1, 0x01, 0x02, 0x03, 0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x08, 0x00,
+            0xee, 0xee
+        ]
+    );
+    assert_eq!(FRAME_HEADROOM, 42);
+}
+
+const IP: Ipv4Addr = Ipv4Addr::new(192, 168, 7, 110);
+const MAC: [u8; 6] = [0x00, 0x1d, 0xc1, 0xaa, 0xbb, 0xcc];
+
+#[test]
+fn a_neighbour_row_has_a_mac_in_a_resolved_state_only() {
+    let want = Some(Neighbour {
+        ip: IP,
+        mac: MAC,
+        ifindex: 12,
+    });
+    // Probe, delay, stale, reachable, permanent.
+    for state in 2..=6 {
+        assert_eq!(neighbour_row(IP, &MAC, state, 12), want, "state {state}");
+    }
+    // Unreachable, incomplete, past the last state.
+    for state in [0, 1, 7, -1] {
+        assert_eq!(neighbour_row(IP, &MAC, state, 12), None, "state {state}");
+    }
+}
+
+#[test]
+fn a_neighbour_row_needs_six_bytes_not_all_zero() {
+    assert_eq!(neighbour_row(IP, &MAC[..5], 5, 1), None);
+    assert_eq!(neighbour_row(IP, &[1, 2, 3, 4, 5, 6, 7, 8], 5, 1), None);
+    assert_eq!(neighbour_row(IP, &[], 5, 1), None);
+    assert_eq!(neighbour_row(IP, &[0; 6], 5, 1), None);
+    assert!(neighbour_row(IP, &[0, 0, 0, 0, 0, 1], 5, 1).is_some());
+}
+
+#[test]
+fn a_neighbour_mac_is_its_address_on_our_interface() {
+    let rows = [
+        Neighbour {
+            ip: IP,
+            mac: [2; 6],
+            ifindex: 3,
+        },
+        Neighbour {
+            ip: IP,
+            mac: MAC,
+            ifindex: 12,
+        },
+        Neighbour {
+            ip: Ipv4Addr::new(192, 168, 7, 111),
+            mac: [4; 6],
+            ifindex: 12,
+        },
+    ];
+    assert_eq!(neighbour_mac(&rows, IP, 12), Some(MAC));
+    assert_eq!(neighbour_mac(&rows, IP, 3), Some([2; 6]));
+    assert_eq!(neighbour_mac(&rows, IP, 9), None, "another interface");
+    assert_eq!(
+        neighbour_mac(&rows, Ipv4Addr::new(192, 168, 7, 112), 12),
+        None
+    );
+    let group = Ipv4Addr::new(239, 69, 1, 2);
+    let rows = [
+        rows[1],
+        Neighbour {
+            ip: group,
+            mac: [1, 0, 0x5e, 0x45, 1, 2],
+            ifindex: 12,
+        },
+    ];
+    let dests = [
+        Some(SocketAddrV4::new(IP, 4321)),
+        Some(SocketAddrV4::new(group, 4321)),
+        Some(SocketAddrV4::new(Ipv4Addr::new(192, 168, 7, 99), 4321)),
+        None,
+    ];
+    let words: Vec<u64> = neighbour_mac_words(&rows, 12, dests.into_iter()).collect();
+    assert_eq!(words, [mac_word(Some(MAC)), 0, 0, 0], "multicast never");
+    let words: Vec<u64> = neighbour_mac_words(&rows, 13, dests.into_iter()).collect();
+    assert_eq!(words, [0, 0, 0, 0]);
+}
+
+#[test]
+fn a_mac_parses_from_six_hex_pairs() {
+    assert_eq!(parse_mac("00:1d:c1:aa:bb:cc"), Some(MAC));
+    assert_eq!(parse_mac("00:1D:C1:AA:BB:CC"), Some(MAC));
+    for bad in [
+        "",
+        "00:1d:c1:aa:bb",
+        "00:1d:c1:aa:bb:cc:dd",
+        "00:1d:c1:aa:bb:cg",
+        "0:1d:c1:aa:bb:cc",
+        "000:1d:c1:aa:bb:c",
+        "+0:1d:c1:aa:bb:cc",
+    ] {
+        assert_eq!(parse_mac(bad), None, "{bad}");
+    }
+}

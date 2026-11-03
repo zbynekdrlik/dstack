@@ -52,6 +52,37 @@ fn drain_into(fifo: &mut VecDeque<f64>, dst: &mut [f64]) -> usize {
     dst.len() - have
 }
 
+/// The delay each way, ns, from the converters' delays: RX `rx_frames` at
+/// the app's rate, TX `tx_frames` at the device's plus the FIFO's [`PRIME`]
+/// at the app's. The one formula [`Rated::delay_ns`] and [`delay_ns`] use,
+/// so `dlink::split` budgets what the converters really delay.
+fn delays_ns(rx_frames: usize, tx_frames: usize, device_rate: u32, app_rate: u32) -> (u64, u64) {
+    // Both rates are a converter's, which refuses 0.
+    let ns = |frames: usize, rate: u32| frames as u64 * 1_000_000_000 / u64::from(rate);
+    (
+        ns(rx_frames, app_rate),
+        ns(tx_frames, device_rate) + ns(PRIME, app_rate),
+    )
+}
+
+/// The delay each way, ns, of a [`Rated`] for an app at `app_rate` on a
+/// device at `device_rate` with `block` device frames a block (RX, TX; as
+/// [`Rated::delay_ns`] reads them): (0, 0) for one rate, which needs no
+/// `Rated`. A rate pair the converter refuses is its error.
+pub fn delay_ns(device_rate: u32, app_rate: u32, block: usize) -> Result<(u64, u64), ConvertError> {
+    if device_rate == app_rate {
+        return Ok((0, 0));
+    }
+    let rx = Converter::new(device_rate, app_rate, 1, block, Fixed::Input)?;
+    let tx = Converter::new(app_rate, device_rate, 1, block, Fixed::Output)?;
+    Ok(delays_ns(
+        rx.delay_frames(),
+        tx.delay_frames(),
+        device_rate,
+        app_rate,
+    ))
+}
+
 /// The app's processor at its own rate, behind the two converters.
 pub struct Rated<P> {
     inner: P,
@@ -124,12 +155,14 @@ impl<P: Process> Rated<P> {
 
     /// The delay each way, ns: RX (the device's input to the app's) and TX
     /// (the app's output to the device's, with the FIFO's [`PRIME`]).
+    /// [`delay_ns`] gives the same before a `Rated` exists.
     pub fn delay_ns(&self) -> (u64, u64) {
-        let (dev, app) = (u64::from(self.rates.0), u64::from(self.rates.1));
-        let rx = self.rx.delay_frames() as u64 * 1_000_000_000 / app;
-        let tx = self.tx.delay_frames() as u64 * 1_000_000_000 / dev
-            + PRIME as u64 * 1_000_000_000 / app;
-        (rx, tx)
+        delays_ns(
+            self.rx.delay_frames(),
+            self.tx.delay_frames(),
+            self.rates.0,
+            self.rates.1,
+        )
     }
 
     /// The TX FIFO's dry frames since the start (each played as silence).

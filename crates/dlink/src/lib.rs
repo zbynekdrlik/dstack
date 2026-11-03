@@ -13,19 +13,54 @@
 //! (loaded at run time, dsync v1.27); without it the device logs why and
 //! runs on the service.
 //!
-//! It needs no low latency: the device latency is 10 ms unless the app
-//! asks for another (4 ms at the least), and it asks the app for no
-//! real-time setup. Its media threads run unpinned and wait on the
-//! high-resolution timer without spinning a core. On Windows they ask
-//! THREAD_PRIORITY_HIGHEST within the process's normal class (no
-//! privilege, nothing process-wide) and opt out of power throttling (our
-//! threads only); elsewhere they run at normal priority. The pump's block
-//! is 128 frames unless the app sets another ([`Config::block`]), and its
-//! work margin is half the latency (at least the block), so a late wake
-//! still makes its block (dstack #90: a busy video PC preempted the pump
-//! for several ms at block 32 and normal priority).
-//! Very low latency is a different situation, for iemmixer and dasio,
-//! which use `dstack` directly with its `low_latency` profile.
+//! It needs no low latency, and it asks the app for no real-time setup.
+//! Its media threads run unpinned and wait on the high-resolution timer
+//! without spinning a core. On Windows they ask THREAD_PRIORITY_HIGHEST
+//! within the process's normal class (no privilege, nothing process-wide)
+//! and opt out of power throttling (our threads only); elsewhere they run
+//! at normal priority. Very low latency is a different situation, for
+//! iemmixer and dasio, which use `dstack` directly with its `low_latency`
+//! profile.
+//!
+//! # The latency budget
+//!
+//! The app's latency is 10 ms ([`BUDGET_NS`], [`Config::budget_ns`] sets
+//! another) for each direction's whole path, the work and the Dante
+//! latency together (owner, ROZHODNUTÉ 3.11.2026, dstack #68). dlink
+//! chooses the split ([`split`]):
+//!
+//! - B, the pump's block: 128 frames unless the app sets another
+//!   ([`Config::block`]; dstack #90: a busy video PC preempted the pump for
+//!   several ms at block 32 and normal priority).
+//! - W, the pump's work margin: the block, and at least 2 ms
+//!   ([`work_margin`]), so a late wake still makes its block.
+//! - The rate converter's delay each way when the app's rate differs from
+//!   the network's ([`Rated`], [`rated::delay_ns`]).
+//! - P, the device's Dante latency: what the larger direction's work
+//!   leaves of the budget, in whole samples, at least [`MIN_LATENCY_NS`]
+//!   (4 ms). The device's RX plays out at P and its TX channels advertise
+//!   it.
+//!
+//! TX (the app's output to a receiver's playout) is W + P, plus the
+//! converter's TX delay; RX (a sample's network stamp to the app's block)
+//! is P + B, plus the converter's RX delay. A receiver set to a longer
+//! latency than P adds the difference; a latency Dante Controller sets on
+//! the device replaces P (it is kept in the state file). At the default
+//! 10 ms and block 128:
+//!
+//! | Device | App | B | W | Converter RX / TX | P | TX path | RX path |
+//! |---|---|---|---|---|---|---|---|
+//! | 48 kHz | 48 kHz | 2.67 ms | 2.67 ms | none | 7.33 ms | 10 ms | 10 ms |
+//! | 96 kHz | 96 kHz | 1.33 ms | 2 ms | none | 8 ms | 10 ms | 9.33 ms |
+//! | 96 kHz | 48 kHz | 1.33 ms | 2 ms | 1.33 / 2.83 ms | 5.17 ms | 10 ms | 7.83 ms |
+//! | 96 kHz | 44.1 kHz | 1.33 ms | 2 ms | 1.32 / 3.08 ms | 4.92 ms | 9.99 ms | 7.57 ms |
+//! | 48 kHz | 44.1 kHz | 2.67 ms | 2.67 ms | 2.65 / 3.08 ms | 4.25 ms | 9.99 ms | 9.57 ms |
+//!
+//! A larger block with a conversion can leave under 4 ms (block 256 on a
+//! 48 kHz device with a 44.1 kHz app); [`Config::device`] refuses that
+//! budget with the other problems. Our TX looped into our own RX takes
+//! the two paths less the one P they share (W + B + P, plus both converter
+//! delays): the whole-device test measures it.
 //!
 //! ```no_run
 //! use dlink::{Block, Config, Link, Map, Place, Process};
@@ -65,13 +100,22 @@ pub mod rated;
 
 pub use rated::Rated;
 
-use dstack::device::{TimingProfile, normal_work_margin};
+use dstack::clock::latency_samples;
+use dstack::device::{NORMAL_MIN_LATENCY_NS, NORMAL_MIN_WORK_MARGIN_NS, TimingProfile};
 use dstack::embed::Embedded;
 use dstack::host::ClockSource;
+use dstack::media::bypass::FrameSender;
+use dstack::stream::BLOCKS;
 
-/// dlink's device latency unless the app sets one: 10 ms (owner,
-/// 2.11.2026: "kľudne základ môže byť aj 10 ms").
-pub const LATENCY_NS: u64 = 10_000_000;
+/// dlink's latency budget unless the app sets one, ns: 10 ms for each
+/// direction's whole path, the work (block, margin, rate conversion) and
+/// the Dante latency together (owner, ROZHODNUTÉ 3.11.2026, dstack #68).
+/// [`split`] gives the Dante latency what the work leaves.
+pub const BUDGET_NS: u64 = 10_000_000;
+/// The least Dante latency [`split`] leaves, ns: the normal profile's own
+/// floor (`dstack::device::NORMAL_MIN_LATENCY_NS`, 4 ms), which the device
+/// refuses to go under.
+pub const MIN_LATENCY_NS: u64 = NORMAL_MIN_LATENCY_NS;
 /// The sample rate unless the app sets one.
 pub const SAMPLE_RATE: u32 = 48_000;
 /// The pump's block unless the app sets one, frames (1.33 ms at 96 kHz,
@@ -92,7 +136,7 @@ pub struct Config {
     tx: Vec<String>,
     sample_rate: u32,
     network_rate: Option<u32>,
-    latency_ns: u64,
+    budget_ns: u64,
     manufacturer: String,
     model: String,
     ports: Option<Ports>,
@@ -101,7 +145,29 @@ pub struct Config {
     subscribe: Vec<(usize, String, String)>,
     flow_slots: Option<usize>,
     block: u64,
+    frame_sender: Sender,
 }
+
+/// The host's frame sender in a [`Config`] (compared by identity).
+#[derive(Clone, Default)]
+struct Sender(Option<Arc<dyn FrameSender>>);
+
+impl std::fmt::Debug for Sender {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.0.is_some() { "Some(..)" } else { "None" })
+    }
+}
+
+impl PartialEq for Sender {
+    fn eq(&self, other: &Self) -> bool {
+        match (&self.0, &other.0) {
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            (a, b) => a.is_none() && b.is_none(),
+        }
+    }
+}
+
+impl Eq for Sender {}
 
 /// A device's own control ports, for a second device on one address (the
 /// first keeps Dante's defaults: ARC 4440, CMC 8800, flows 4455).
@@ -124,7 +190,7 @@ impl Config {
             tx: Vec::new(),
             sample_rate: SAMPLE_RATE,
             network_rate: None,
-            latency_ns: LATENCY_NS,
+            budget_ns: BUDGET_NS,
             manufacturer: "dlink".to_string(),
             model: "dlink".to_string(),
             ports: None,
@@ -133,6 +199,7 @@ impl Config {
             subscribe: Vec::new(),
             flow_slots: None,
             block: BLOCK,
+            frame_sender: Sender::default(),
         }
     }
 
@@ -174,10 +241,25 @@ impl Config {
         self.device_rate() != self.sample_rate
     }
 
-    /// The device latency, ns (4 ms at the least).
-    pub fn latency_ns(mut self, ns: u64) -> Self {
-        self.latency_ns = ns;
+    /// The latency budget, ns ([`BUDGET_NS`] unless set): each direction's
+    /// whole path, the work and the Dante latency together. The Dante
+    /// latency is what the work leaves ([`split`]); a budget that leaves
+    /// under [`MIN_LATENCY_NS`] is refused by [`Config::device`] with the
+    /// other problems.
+    pub fn budget_ns(mut self, ns: u64) -> Self {
+        self.budget_ns = ns;
         self
+    }
+
+    /// How this config splits its budget ([`split`]): the Dante latency,
+    /// the pump's margin and each direction's path.
+    pub fn split(&self) -> Result<Split, String> {
+        split(
+            self.budget_ns,
+            self.device_rate(),
+            self.sample_rate,
+            self.block,
+        )
     }
 
     /// The manufacturer and model Dante Controller shows (both `dlink`
@@ -242,11 +324,26 @@ impl Config {
         self
     }
 
+    /// The host's kernel send path for the device's TX (dstack #1, Windows
+    /// only): dstack writes whole Ethernet II frames and hands each TX pass's
+    /// frames to `sender` in one call (`dstack::media::bypass::FrameSender`).
+    /// Without one (and off Windows) TX goes through the UDP sockets.
+    pub fn frame_sender(mut self, sender: Arc<dyn FrameSender>) -> Self {
+        self.frame_sender = Sender(Some(sender));
+        self
+    }
+
     /// The device config dstack runs: the normal timing profile, the
-    /// app's block ([`BLOCK`] unless set), the pump margin half the
-    /// latency and at least the block, 24-bit. Every problem is listed, as
-    /// a config file's would be.
+    /// app's block ([`BLOCK`] unless set), the Dante latency and the pump's
+    /// margin from the budget's [`split`], 24-bit. Every problem is listed,
+    /// as a config file's would be (a budget the work leaves too little of
+    /// first).
     pub fn device(&self) -> Result<DeviceConfig, Vec<String>> {
+        self.checked().map(|(cfg, _)| cfg)
+    }
+
+    /// [`Config::device`] and the [`split`] it runs, one computation.
+    fn checked(&self) -> Result<(DeviceConfig, Split), Vec<String>> {
         let mut t = toml::Table::new();
         t.insert("name".into(), self.name.clone().into());
         t.insert("manufacturer".into(), self.manufacturer.clone().into());
@@ -262,12 +359,16 @@ impl Config {
         }
         t.insert("sample_rate".into(), i64::from(rate).into());
         t.insert("encoding".into(), 24.into());
-        t.insert("latency_ns".into(), to_int(self.latency_ns).into());
+        // A budget the work leaves too little of is listed first; the
+        // device is checked at the floor meanwhile, for the other problems.
+        let split = self.split();
+        let (latency_ns, margin) = match &split {
+            Ok(s) => (s.latency_ns, s.margin),
+            Err(_) => (MIN_LATENCY_NS, work_margin(rate, self.block)),
+        };
+        t.insert("latency_ns".into(), to_int(latency_ns).into());
         t.insert("block".into(), to_int(self.block).into());
-        t.insert(
-            "work_margin".into(),
-            to_int(work_margin(self.latency_ns, rate, self.block)).into(),
-        );
+        t.insert("work_margin".into(), to_int(margin).into());
         t.insert("timing".into(), "normal".into());
         t.insert(
             "state_file".into(),
@@ -310,23 +411,101 @@ impl Config {
         t.insert("rx".into(), self.rx.clone().into());
         t.insert("tx".into(), self.tx.clone().into());
         let text = toml::to_string(&t).map_err(|e| vec![e.to_string()])?;
-        let cfg = DeviceConfig::from_toml(&text).map_err(|e| e.problems)?;
-        debug_assert_eq!(cfg.timing, TimingProfile::Normal);
-        Ok(cfg)
+        match (split, DeviceConfig::from_toml(&text)) {
+            (Ok(s), Ok(cfg)) => {
+                debug_assert_eq!(cfg.timing, TimingProfile::Normal);
+                Ok((cfg, s))
+            }
+            (Ok(_), Err(e)) => Err(e.problems),
+            (Err(p), Ok(_)) => Err(vec![p]),
+            // A device rate of 0 is the device's own sample_rate problem:
+            // listed once, as the device words it.
+            (Err(_), Err(e)) if rate == 0 => Err(e.problems),
+            (Err(p), Err(e)) => Err(std::iter::once(p).chain(e.problems).collect()),
+        }
     }
 }
 
-/// The pump's margin W, samples: half the latency at `rate`, at least the
-/// pump's `block` (a margin under one block is refused by the device; 4 ms
-/// at 48 kHz is 96 samples, under block 128). A block outside
-/// `stream::BLOCKS` is the block's problem alone: W stays half the latency.
-pub fn work_margin(latency_ns: u64, rate: u32, block: u64) -> u64 {
-    let half = normal_work_margin(latency_ns, rate);
-    if dstack::stream::BLOCKS.contains(&block) {
-        half.max(block)
+/// The pump's margin W, samples at `rate`: the block, and at least the
+/// normal profile's 2 ms (`dstack::device::NORMAL_MIN_WORK_MARGIN_NS`), so a
+/// wake that late still makes its block (dstack #90's thread priority
+/// keeps the pump's wakes within it). A block outside `stream::BLOCKS` is
+/// the block's problem alone: W follows [`BLOCK`] then.
+pub fn work_margin(rate: u32, block: u64) -> u64 {
+    valid_block(block).max(latency_samples(NORMAL_MIN_WORK_MARGIN_NS, rate))
+}
+
+/// `block` when it is one of `stream::BLOCKS`, else [`BLOCK`].
+fn valid_block(block: u64) -> u64 {
+    if BLOCKS.contains(&block) {
+        block
     } else {
-        half
+        BLOCK
     }
+}
+
+/// How a latency budget splits ([`split`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Split {
+    /// P, the device's Dante latency, ns: whole samples at the device's
+    /// rate. Its RX plays out at it and its TX channels advertise it.
+    pub latency_ns: u64,
+    /// W, the pump's work margin, samples at the device's rate
+    /// ([`work_margin`]).
+    pub margin: u64,
+    /// The app's output to a receiver's playout, ns: W + P, plus the rate
+    /// converter's TX delay when it runs. A receiver set to a longer
+    /// latency than P adds the difference.
+    pub tx_path_ns: u64,
+    /// A sample's network stamp to the app's block, ns: P + B, plus the
+    /// rate converter's RX delay when it runs.
+    pub rx_path_ns: u64,
+}
+
+/// Splits a latency budget (dstack #68, the owner's ROZHODNUTÉ of
+/// 3.11.2026): `budget_ns` is each direction's whole path. The pump's
+/// block B (`block` device frames; [`BLOCK`] when it is not one of
+/// `stream::BLOCKS`), its margin W ([`work_margin`]) and the rate
+/// converter's delays ([`rated::delay_ns`], none when `app_rate` is
+/// `device_rate`) are the work; the Dante latency P is the budget less the
+/// larger direction's work (TX: W + the converter's TX delay; RX: B + its
+/// RX delay), in whole samples at `device_rate`.
+///
+/// The path each way (`dstack::stream`: block k runs once media time
+/// passes kB + B + P, and its output goes out stamped kB + B + P + W): TX
+/// W + P, RX P + B. A budget that leaves P under [`MIN_LATENCY_NS`], a
+/// device rate of 0 and a rate pair the converter refuses are problems.
+pub fn split(budget_ns: u64, device_rate: u32, app_rate: u32, block: u64) -> Result<Split, String> {
+    if device_rate == 0 {
+        return Err("sample_rate: the device's rate is 0 Hz".to_string());
+    }
+    let b = valid_block(block);
+    let margin = work_margin(device_rate, b);
+    let (convert_rx, convert_tx) = rated::delay_ns(
+        device_rate,
+        app_rate,
+        usize::try_from(b).unwrap_or(usize::MAX),
+    )
+    .map_err(|e| format!("rate conversion: {e}"))?;
+    let rate = u128::from(device_rate);
+    let ns = |samples: u64| (u128::from(samples) * 1_000_000_000 / rate) as u64;
+    let tx_work = ns(margin) + convert_tx;
+    let rx_work = ns(b) + convert_rx;
+    let work = tx_work.max(rx_work);
+    let samples = (u128::from(budget_ns.saturating_sub(work)) * rate / 1_000_000_000) as u64;
+    let latency_ns = ns(samples);
+    if latency_ns < MIN_LATENCY_NS {
+        return Err(format!(
+            "budget_ns: {budget_ns} leaves a Dante latency of {latency_ns} ns after \
+             {work} ns of work (block, margin, rate conversion); at least {MIN_LATENCY_NS}"
+        ));
+    }
+    Ok(Split {
+        latency_ns,
+        margin,
+        tx_path_ns: tx_work + latency_ns,
+        rx_path_ns: rx_work + latency_ns,
+    })
 }
 
 fn to_int(v: u64) -> i64 {
@@ -363,9 +542,19 @@ impl Link {
         processor: P,
         source: ClockSource,
     ) -> Result<Link, HostError> {
-        let cfg = config.device().map_err(|problems| {
+        let (cfg, s) = config.checked().map_err(|problems| {
             HostError::Setup(format!("dlink config: {}", problems.join("; ")))
         })?;
+        let sender = config.frame_sender.0.clone();
+        tracing::info!(
+            budget_ns = config.budget_ns,
+            latency_ns = s.latency_ns,
+            margin = s.margin,
+            block = cfg.block,
+            tx_path_ns = s.tx_path_ns,
+            rx_path_ns = s.rx_path_ns,
+            "dlink: the latency budget's split (the Dante latency is what the work leaves)"
+        );
         let device = if config.converts() {
             tracing::info!(
                 device_rate = config.device_rate(),
@@ -383,9 +572,9 @@ impl Link {
                 outputs,
             )
             .map_err(|e| HostError::Setup(format!("dlink rate conversion: {e}")))?;
-            Embedded::start_with(cfg, place, map, rated, source)?
+            Embedded::start_with_sender(cfg, place, map, rated, source, sender)?
         } else {
-            Embedded::start_with(cfg, place, map, processor, source)?
+            Embedded::start_with_sender(cfg, place, map, processor, source, sender)?
         };
         Ok(Link { device })
     }
