@@ -1,6 +1,13 @@
 # Changelog
 
-## 0.6.14 (unreleased)
+## 0.6.15 (unreleased)
+
+- Fix (dstack #90, songplayer's port onto v0.6.14: 11 of its own tests failed on three laws that differed from its asrc_servo.rs):
+  - Priming: with `with_priming`, ANY first observation primes (`Step::Prime`, an insert under the target, a skip over it, 0 at it), and it is no part of the first window. It primed only under the target before.
+  - Stall: a window is judged by its OWN first and last rate points (more than `MAX_SANE_WINDOW_PPM` apart), so the first window can be one too. A stalled window no longer resets the slew's clock: the next window moves by the whole time since the last applied one. It compared consecutive window means before.
+  - `played_silence`: only what passes the HIGHEST count seen folds into the cushion. A count that went back made its later rise count again before.
+
+## 0.6.14 (2026-11-03)
 
 - New (dstack #90 step 3, songplayer's servo rules): `asrc::Controller` takes SongPlayer's additions, all opt-in, so existing users (vstack) are unchanged:
   - the underrun cushion: `with_cushion_max_s`, `played_silence(total_s)`, `cushion_s()`. Silence the consumer played is kept as an excess up to the cap. The offset is braked against [target, target + cushion] (`band_error_ms`), while the level loop keeps the target. Each window the cushion follows the mean down, but a window that folded new silence keeps it; a re-centre or the priming drops it;

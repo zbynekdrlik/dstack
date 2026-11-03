@@ -36,9 +36,9 @@
 //!   level loop keeps the target. Each window the cushion follows the mean
 //!   down, except a window that folded new silence keeps it; a re-centre
 //!   or the priming drops it.
-//! - **Stall:** a window whose rate point moves more than
-//!   [`MAX_SANE_WINDOW_PPM`] from the last (a consumer that stopped) flushes
-//!   the rate fit and holds the correction.
+//! - **Stall:** a window whose own first and last rate points are more than
+//!   [`MAX_SANE_WINDOW_PPM`] apart (a consumer that stopped) flushes the rate
+//!   fit and holds the correction; the slew's clock runs on across it.
 //! - **Last resort:** a depth more than `hard_excess_s` off the target (or
 //!   under `floor_s`) asks the caller for a re-centre (insert or skip under
 //!   fades), counted as a fault; the level loop's error starts over.
@@ -314,7 +314,8 @@ pub struct Controller {
     calm_ms: f64,
     cushion_max_s: f64,
     cushion_s: f64,
-    /// The consumer's silence so far, s (`None`: no count read yet).
+    /// The highest count of the consumer's silence seen, s (`None`: no
+    /// count read yet).
     silence_s: Option<f64>,
     /// New silence was folded since the open window started.
     folded: bool,
@@ -324,8 +325,6 @@ pub struct Controller {
     prime_next: bool,
     /// The last window's mean error outside the band, ms (positive: later).
     offset_ms: f64,
-    /// The last closed window's rate point.
-    last_point: Option<(f64, f64)>,
     stalls: u64,
 }
 
@@ -337,6 +336,9 @@ struct Window {
     y_s: f64,
     points: f64,
     n: f64,
+    /// The window's first and last rate points (the stall check).
+    first: Option<(f64, f64)>,
+    last: (f64, f64),
 }
 
 impl Controller {
@@ -365,7 +367,6 @@ impl Controller {
             priming: false,
             prime_next: false,
             offset_ms: 0.0,
-            last_point: None,
             stalls: 0,
         }
     }
@@ -406,10 +407,11 @@ impl Controller {
 
     /// The consumer's silence so far, `total_s` (cumulative): what is new
     /// since the last count joins the cushion, up to its cap. The first
-    /// count is the start; a count that went back folds nothing.
+    /// count is the start; only what passes the highest count seen is new
+    /// (a count that went back folds nothing until it passes it again).
     pub fn played_silence(&mut self, total_s: f64) {
-        let new = self.silence_s.map_or(0.0, |last| (total_s - last).max(0.0));
-        self.silence_s = Some(total_s);
+        let new = self.silence_s.map_or(0.0, |high| (total_s - high).max(0.0));
+        self.silence_s = Some(self.silence_s.map_or(total_s, |high| high.max(total_s)));
         if new > 0.0 {
             self.cushion_s = (self.cushion_s + new).min(self.cushion_max_s);
             self.folded = true;
@@ -489,14 +491,14 @@ impl Controller {
     pub fn observe(&mut self, now_s: f64, depth_s: f64, other_s: f64) -> Step {
         let err_s = self.target_s - depth_s;
         if self.prime_next {
+            // The first block goes to the target (an insert under it, a
+            // skip over it) and is no part of the first window.
             self.prime_next = false;
             self.cushion_s = 0.0;
-            if err_s > 0.0 {
-                return Step::Prime {
-                    by_s: err_s,
-                    ppm: self.applied_ppm,
-                };
-            }
+            return Step::Prime {
+                by_s: err_s,
+                ppm: self.applied_ppm,
+            };
         }
         if depth_s < self.floor_s || err_s.abs() > self.hard_excess_s {
             return self.recentre(err_s);
@@ -529,6 +531,8 @@ impl Controller {
             y_s: 0.0,
             points: 0.0,
             n: 0.0,
+            first: None,
+            last: (0.0, 0.0),
         });
         w.err_ms += err_ms;
         w.n += 1.0;
@@ -536,6 +540,8 @@ impl Controller {
             w.x_s += now_s;
             w.y_s += y;
             w.points += 1.0;
+            w.first.get_or_insert((now_s, y));
+            w.last = (now_s, y);
         }
         if now_s - w.start_s < WINDOW_S {
             return Step::Hold(self.applied_ppm);
@@ -543,25 +549,24 @@ impl Controller {
         let w = *w;
         self.window = None;
         let folded = std::mem::take(&mut self.folded);
+        // A window whose own first and last points are too far apart is a
+        // stall: the fit is flushed, the correction held, and the slew's
+        // clock kept, so the next window moves by the whole time since.
+        if let Some(first) = w.first
+            && stalled(w.last.0 - first.0, w.last.1 - first.1)
+        {
+            self.rate.flush();
+            self.stalls += 1;
+            return Step::Hold(self.applied_ppm);
+        }
         let dt_s = self
             .last_apply_s
             .map_or(now_s - w.start_s, |prev| now_s - prev)
             .max(0.0);
         self.last_apply_s = Some(now_s);
-        if w.points > 0.0 {
-            let point = (w.x_s / w.points, w.y_s / w.points);
-            let stalled = self
-                .last_point
-                .is_some_and(|(x, y)| stalled(point.0 - x, point.1 - y));
-            self.last_point = Some(point);
-            if stalled {
-                self.rate.flush();
-                self.stalls += 1;
-                return Step::Hold(self.applied_ppm);
-            }
-            if self.rate.offer(point.0, point.1) == Offered::Rebased {
-                self.rebases += 1;
-            }
+        if w.points > 0.0 && self.rate.offer(w.x_s / w.points, w.y_s / w.points) == Offered::Rebased
+        {
+            self.rebases += 1;
         }
         let err_ms = w.err_ms / w.n;
         // The excess over the target the window held: the cushion follows

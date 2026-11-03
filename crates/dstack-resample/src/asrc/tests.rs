@@ -559,11 +559,24 @@ fn the_first_block_primes_without_a_fault_and_a_restart_primes_again() {
             ppm: 0.0
         }
     );
-    // At the target exactly, or over it, there is nothing to prime.
+    // songplayer's law: ANY first block primes, a skip when it is over the
+    // target, nothing at the target itself (by 0).
     let mut at = Controller::new(0.010, 0.002, 0.050, Basis::Arrival).with_priming();
-    assert_eq!(at.observe(0.0, 0.010, 0.0), Step::Hold(0.0));
+    assert_eq!(
+        at.observe(0.0, 0.010, 0.0),
+        Step::Prime {
+            by_s: 0.0,
+            ppm: 0.0
+        }
+    );
     let mut excess = Controller::new(0.010, 0.002, 0.050, Basis::Arrival).with_priming();
-    assert_eq!(excess.observe(0.0, 0.020, 0.0), Step::Hold(0.0));
+    assert_eq!(
+        excess.observe(0.0, 0.020, 0.0),
+        Step::Prime {
+            by_s: -0.010,
+            ppm: 0.0
+        }
+    );
     assert_eq!(
         excess.observe(0.01, 0.0, 0.01),
         Step::Recentre {
@@ -682,12 +695,16 @@ fn rated_window(c: &mut Controller, t0: f64, other0: f64, rate: f64) -> f64 {
 fn a_window_150_000_ppm_off_is_a_stall_near_the_clock_s_start_too() {
     let mut c = Controller::new(0.010, 0.002, 0.100, Basis::Arrival);
     let other = rated_window(&mut c, 0.0, 0.0, 1.0);
-    rated_window(&mut c, 1.0, other, 0.7);
-    assert_eq!(c.stalls(), 1, "its mean point is 0.15 s off over 1 s");
+    rated_window(&mut c, 1.0, other, 0.85);
+    assert_eq!(
+        c.stalls(),
+        1,
+        "its own first and last points are 0.15 s off over 1 s"
+    );
     let mut d = Controller::new(0.010, 0.002, 0.100, Basis::Arrival);
     let other = rated_window(&mut d, 0.0, 0.0, 1.0);
-    rated_window(&mut d, 1.0, other, 0.85);
-    assert_eq!(d.stalls(), 0, "75 000 ppm is a clock");
+    rated_window(&mut d, 1.0, other, 0.95);
+    assert_eq!(d.stalls(), 0, "50 000 ppm is a clock");
 }
 
 #[test]
@@ -711,4 +728,82 @@ fn a_stall_is_strictly_beyond_100_000_ppm_either_way() {
     assert!(stalled(2.0, 0.300_001));
     assert!(!stalled(0.0, 1.0));
     assert!(!stalled(-1.0, 1.0));
+}
+
+/// songplayer (asrc_servo.rs): the priming block is no part of the first
+/// window, which opens on the next block.
+#[test]
+fn the_priming_block_is_no_part_of_the_first_window() {
+    let mut c = Controller::new(0.010, 0.002, 0.100, Basis::Arrival).with_priming();
+    assert!(matches!(c.observe(0.0, 0.060, 0.0), Step::Prime { .. }));
+    // The window opens at 0.01: still open at 1.0, closed at 1.01, and the
+    // primed block's 50 ms excess is not in its mean.
+    for i in 1..=100 {
+        let t = f64::from(i) * 0.01;
+        c.observe(t, 0.010, t);
+    }
+    assert_eq!(c.offset_ms(), 0.0, "not closed at 1.0");
+    c.observe(1.01, 0.010, 1.01);
+    assert!(
+        c.offset_ms().abs() < 1e-9,
+        "closed, mean at the target: {}",
+        c.offset_ms()
+    );
+}
+
+/// songplayer: a stall is ONE window's first point against its last, so
+/// the very first window can be one.
+#[test]
+fn the_first_window_can_be_a_stall() {
+    let mut c = Controller::new(0.010, 0.002, 0.100, Basis::Arrival);
+    for i in 0..=100 {
+        c.observe(f64::from(i) * 0.01, 0.010, 0.0);
+    }
+    assert_eq!(c.stalls(), 1);
+}
+
+/// songplayer: a stalled window keeps the slew's time step, so the next
+/// window may move the correction by the two seconds since the last.
+#[test]
+fn a_stalled_window_keeps_the_slew_s_time_step() {
+    // 20 ms short throughout (target 30 ms, depth 10 ms): the braking asks
+    // the bound; the slew moves 5 ppm a second.
+    let mut c = Controller::new(0.030, 0.002, 0.100, Basis::Arrival);
+    for i in 0..=100 {
+        let t = f64::from(i) * 0.01;
+        c.observe(t, 0.010, t);
+    }
+    let first = c.ppm();
+    assert!((first - 5.0).abs() < 1e-9, "{first}");
+    // A window the consumer stalls in (its clock stays at 1.0), from 1.01
+    // until it closes a little over a second later: held.
+    let mut t = 1.0;
+    while c.stalls() == 0 && t < 3.0 {
+        t += 0.01;
+        c.observe(t, 0.010, 1.0);
+    }
+    assert_eq!(c.stalls(), 1);
+    assert_eq!(c.ppm(), first);
+    // The next window runs again: the slew moves by the whole time since
+    // the last applied window (about two seconds, not one).
+    let resumed = t;
+    for _ in 0..=101 {
+        t += 0.01;
+        c.observe(t, 0.010, 1.0 + (t - resumed));
+    }
+    assert_eq!(c.stalls(), 1);
+    let moved = c.ppm() - first;
+    assert!((9.9..10.4).contains(&moved), "{moved}");
+}
+
+/// songplayer: a count that went back folds nothing; only what passes the
+/// highest count seen is new silence.
+#[test]
+fn only_silence_past_the_highest_count_folds() {
+    let mut c = Controller::new(0.010, 0.002, 0.100, Basis::Arrival).with_cushion_max_s(0.033);
+    c.played_silence(0.0);
+    c.played_silence(0.010);
+    c.played_silence(0.005);
+    c.played_silence(0.012);
+    assert!((c.cushion_s() - 0.012).abs() < 1e-12, "{}", c.cushion_s());
 }
