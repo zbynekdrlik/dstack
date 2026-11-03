@@ -16,9 +16,17 @@
 //! [`PRIME`] frames of silence, so the frame-to-frame variation never runs
 //! it dry; a dry FIFO plays silence and is counted.
 //!
-//! The filter is dstack-resample's sinc (THD+N above 120 dB). It delays RX
-//! by half its length at the app's rate and TX by half at the network's
-//! (2.7 ms and 1.3 ms at 48 and 96 kHz), plus the FIFO's [`PRIME`].
+//! The filter is dstack-resample's 256-tap sinc (THD+N above 120 dB),
+//! 128 taps each side at the higher rate. On a 96 kHz network
+//! ([`Rated::delay_ns`], measured by an impulse in the tests):
+//!
+//! | App rate | RX (network to app) | TX (app to network, with [`PRIME`]) |
+//! |---|---|---|
+//! | 48 kHz | 1.33 ms | 2.83 ms |
+//! | 44.1 kHz | 1.32 ms | 3.08 ms |
+//!
+//! (dstack #90: v0.5.20's 2:1 half-band, 63 taps, delayed about 0.3 ms each
+//! way.)
 //!
 //! `process` allocates nothing: every buffer is sized at the start.
 
@@ -67,6 +75,8 @@ pub struct Rated<P> {
     tx_in: Vec<f64>,
     /// The device's start of the last block and the app's.
     last: Option<(u64, u64, usize)>,
+    /// The device's rate and the app's, Hz.
+    rates: (u32, u32),
     /// TX FIFO runs dry, frames (shared with the app's status).
     dry: Arc<AtomicU64>,
 }
@@ -107,8 +117,19 @@ impl<P: Process> Rated<P> {
             rx,
             tx,
             last: None,
+            rates: (device_rate, app_rate),
             dry: Arc::new(AtomicU64::new(0)),
         })
+    }
+
+    /// The delay each way, ns: RX (the device's input to the app's) and TX
+    /// (the app's output to the device's, with the FIFO's [`PRIME`]).
+    pub fn delay_ns(&self) -> (u64, u64) {
+        let (dev, app) = (u64::from(self.rates.0), u64::from(self.rates.1));
+        let rx = self.rx.delay_frames() as u64 * 1_000_000_000 / app;
+        let tx = self.tx.delay_frames() as u64 * 1_000_000_000 / dev
+            + PRIME as u64 * 1_000_000_000 / app;
+        (rx, tx)
     }
 
     /// The TX FIFO's dry frames since the start (each played as silence).

@@ -259,3 +259,40 @@ fn each_channel_keeps_its_own_level_both_ways_at_a_ratio_that_does_not_divide() 
         }
     }
 }
+
+/// dstack #90 (obs, 3.11.2026): an impulse into the device reaches the app
+/// after the RX delay, and a step from the app reaches the device after
+/// the TX delay; both as [`Rated::delay_ns`] says, within a frame.
+#[test]
+fn an_impulse_and_a_step_take_the_delay_each_way_says() {
+    for (app, rx_ms, tx_ms) in [(48_000u32, 1.33, 2.83), (44_100, 1.32, 3.08)] {
+        let mut r = Rated::new(Probe::new(0.5), 96_000, app, 32, 1, 1).unwrap();
+        let (rx_ns, tx_ns) = r.delay_ns();
+        assert!(
+            (rx_ns as f64 / 1e6 - rx_ms).abs() < 0.01,
+            "{app}: rx {rx_ns}"
+        );
+        assert!(
+            (tx_ns as f64 / 1e6 - tx_ms).abs() < 0.01,
+            "{app}: tx {tx_ns}"
+        );
+        let at = 3_200u64;
+        let sent = run(&mut r, (1, 1), 32, 200, 0, |i| f64::from(u8::from(i == at)));
+        // RX: the app's loudest frame, after the impulse's own app frame.
+        let heard = &r.inner.heard;
+        let peak = (0..heard.len())
+            .max_by(|&a, &b| heard[a].abs().total_cmp(&heard[b].abs()))
+            .unwrap();
+        let rx_frames = peak as f64 - at as f64 * f64::from(app) / 96_000.0;
+        let want = rx_ns as f64 * f64::from(app) / 1e9;
+        assert!(
+            (rx_frames - want).abs() <= 1.0,
+            "{app}: rx {rx_frames} of {want}"
+        );
+        // TX: the app sends 0.5 from its first frame; the device's output
+        // passes half of it at the TX delay.
+        let half = sent.iter().position(|v| *v >= 0.25).unwrap() as f64;
+        let want = tx_ns as f64 * 96_000.0 / 1e9;
+        assert!((half - want).abs() <= 2.0, "{app}: tx {half} of {want}");
+    }
+}
