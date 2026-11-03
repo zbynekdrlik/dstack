@@ -261,3 +261,45 @@ fn the_shortest_subscription_reads_and_a_shorter_one_does_not() {
     ];
     assert_eq!(destination(&short), None);
 }
+
+/// dcontroller, 3.11.2026: the FOH card, a Yamaha AIC128-D (Dante PCIe IF
+/// 4.0.13.3, 128x128), sends version 3: byte 24 is 3, byte 25 is 0, then
+/// the TX and the RX counts as big-endian u16s at 26 and 28, the levels
+/// from 30, and no trailing 0. The captured frame (its header as sent;
+/// its 256 level bytes were all 0xfe, the floor, in the capture, so the
+/// test gives them distinct values to check where each side starts).
+fn yamaha_v3_frame() -> Vec<u8> {
+    let mut d = vec![
+        0xff, 0xff, 0x01, 0x1e, 0x27, 0x1b, 0x00, 0x00, // start, length 286, seq
+        0x00, 0x1d, 0xc1, 0x08, 0x02, 0x14, 0x00, 0x00, // device id
+    ];
+    d.extend_from_slice(b"Audinate");
+    d.extend_from_slice(&[0x03, 0x00, 0x00, 0x80, 0x00, 0x80]);
+    d.extend((0..128).map(|i| 0x10 + (i % 7) as u8)); // TX
+    d.extend((0..128).map(|i| 0x80 + (i % 5) as u8)); // RX
+    assert_eq!(d.len(), 286);
+    d
+}
+
+#[test]
+fn a_version_3_frame_of_a_128_channel_card_reads() {
+    let d = yamaha_v3_frame();
+    let f = parse_frame(&d).expect("a version 3 frame");
+    assert_eq!(
+        f.device_id,
+        [0x00, 0x1d, 0xc1, 0x08, 0x02, 0x14, 0x00, 0x00]
+    );
+    assert_eq!((f.tx.len(), f.rx.len()), (128, 128));
+    assert_eq!(f.tx[..3], [0x10, 0x11, 0x12]);
+    assert_eq!(f.rx[..3], [0x80, 0x81, 0x82]);
+    assert_eq!(f.tx[127], 0x10 + (127 % 7) as u8);
+    assert_eq!(f.rx[127], 0x80 + (127 % 5) as u8);
+    // Counts past the datagram: not a frame.
+    let mut cut = d.clone();
+    cut.truncate(285);
+    assert_eq!(parse_frame(&cut), None);
+    // Another version: not a frame.
+    let mut v4 = d;
+    v4[24] = 4;
+    assert_eq!(parse_frame(&v4), None);
+}
