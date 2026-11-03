@@ -1,6 +1,16 @@
 # Changelog
 
-## 0.6.17 (unreleased)
+## 0.6.18 (unreleased)
+
+- New (dstack #104 step 4): an app's own part of the status, for dtray.
+  - `daemon::media::Media::set_app_status(f)` and `dlink::Link::set_app_status(f)`: each status request calls `f`; the status line (`ctl::status`, the local endpoint, `Link::status`) ends with `"app":<object>` when `f` returns one JSON object of at most 4096 bytes compact (`ctl::APP_MAX`; written compact, so the line stays one line). Anything else is left out, with one warning per hook. A later call replaces the hook. `f` runs inside the device's control task (no ARC or status answer while it runs): read values the app holds, never I/O, a wait or a status request. Without a hook the status is as before. `ctl::app_object` is the check.
+  - The keys dtray reads: `line` (a short text after the device's line) and `state` (`"ok"`, `"warn"`: orange, `"error"`: red). Other keys are the app's own; dtray shows them in Copy status only. Unlike the rest of the status, this part may carry names.
+- New (dtray): expected devices. An installer writes one empty file per device it installs, `<device name>.device`, in `%ProgramData%\dstack\devices\` (Windows) or `/etc/dstack/devices/` (Linux), and its uninstaller removes it (`DSTACK_DEVICES_DIR` names another folder). An expected device that discovery does not find shows as "<name>: expected, not running" and turns the icon red.
+- New (dtray, Windows): each device's menu line is a submenu with its latency: Dante's 0.25/0.5/1/2/5/10 ms within the device's ARC range, the configured one checked; choosing one writes it over ARC (`arc::control::set_latency`). dtray now writes this one setting; it still never touches a device that is not ours on this PC.
+- New (dtray, Windows): `dtray --autostart on|off` sets or removes the user's Run value `dtray` (the exe path, quoted). On Linux it is a usage error (exit 2).
+- dtray library: `discover::Local` has the device's `arc` address; `discover::read`; `model::Status::app` (`App`, `AppState`, `app_of`), `Tracker::update_with`, `missing`; the `expected` and `latency` modules; `Mode::Autostart`, `run_value` (`None` for a path that is not Unicode); `menu` (the Windows menu's decisions: `Known`, `Shape`, `needs_rebuild`, `write_needed`); the app line is one line of at most 64 units (`model::app_line`).
+
+## 0.6.17 (2026-11-03)
 
 - New (dstack #104 step 3): the `dtray` crate, the PC's tray icon for its dstack devices (dlink apps, dasio, dstack-dev). No app changes for it: it finds the devices by mDNS on the PC's own addresses (the ARC records that carry `dstack_ctl`) and reads each one's local status endpoint once a second.
   - The icon is grey with no device, red when a status cannot be read or a clock is not ready, orange when a subscribed RX channel is not connected or a late, missed or overrun count grew since the last second, green otherwise. The tooltip names the worst device and why.

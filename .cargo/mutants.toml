@@ -36,7 +36,11 @@ exclude_re = [
   "src/bin/dstack-dev.rs.*replace main",
   # dtray's binary: its entry points only call the library (mode_of, the
   # model, the probe: each tested); --print is run by hand on dev1.
-  "dtray/src/main.rs.*replace (main|print|tray) -> ExitCode",
+  "dtray/src/main.rs.*replace (main|print|tray|autostart) -> ExitCode",
+  # The registration folder of this PC: reads the process environment
+  # (which a test may not set: every other test shares it); its rule
+  # `dir_for` is tested.
+  "dtray/src/expected.rs.*replace devices_dir -> PathBuf",
   # dtray's discovery on the PC's real interfaces (mDNS on port 5353, which
   # a unit test may not hold per mutant); its rules (own_addresses,
   # local_devices, plan) and the probe are tested.
@@ -54,6 +58,10 @@ exclude_re = [
   # The status line for apps: the same glue over `ctl::status` (tested);
   # crates/dlink/tests/link.rs reads it from a running device.
   "dlink/src/lib.rs.*Link::status",
+  # The app's status hook for apps: the same glue over
+  # `Media::set_app_status` (tested in ctl); crates/dlink/tests/link.rs sets
+  # it on a running device.
+  "dlink/src/lib.rs.*Link::set_app_status",
   # The heartbeat listen's socket loop: tests/system_clock.rs reads our
   # running device with it; its parse and gather are unit tested.
   "latency.rs.*listen",

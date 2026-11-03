@@ -219,7 +219,7 @@ dependencies = [
 
 [[package]]
 name = "dlink"
-version = "0.6.17"
+version = "0.6.18"
 dependencies = [
  "dstack",
  "dstack-audio-io",
@@ -237,7 +237,7 @@ checksum = "d8b14ccef22fc6f5a8f4d7d768562a182c04ce9a3b3157b91390b52ddfdf1a76"
 
 [[package]]
 name = "dstack"
-version = "0.6.17"
+version = "0.6.18"
 dependencies = [
  "assert_no_alloc",
  "dstack-audio-io",
@@ -261,11 +261,11 @@ dependencies = [
 
 [[package]]
 name = "dstack-audio-io"
-version = "0.6.17"
+version = "0.6.18"
 
 [[package]]
 name = "dstack-resample"
-version = "0.6.17"
+version = "0.6.18"
 dependencies = [
  "rubato",
 ]
@@ -288,10 +288,11 @@ dependencies = [
 
 [[package]]
 name = "dtray"
-version = "0.6.17"
+version = "0.6.18"
 dependencies = [
  "dstack",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.18",
  "tracing",
  "tracing-subscriber",

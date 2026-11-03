@@ -3,10 +3,23 @@
 use dstack::subscribe::SubStatus;
 
 use super::{
-    Colour, Counts, Status, TOOLTIP_MAX, Tracker, View, clip, copy_json, judge, keys, line, parse,
-    print_text,
+    APP_LINE_MAX, App, AppState, Colour, Counts, NOT_RUNNING, Status, TOOLTIP_MAX, Tracker, View,
+    app_line, app_of, clip, copy_json, judge, keys, line, missing, missing_line, parse, print_text,
 };
 use crate::discover::Reading;
+
+#[test]
+fn an_app_line_is_one_line_of_at_most_64_units() {
+    assert_eq!(app_line("ASIO\n64\tok\r"), "ASIO 64 ok ");
+    assert_eq!(app_line("plain"), "plain");
+    let long = "x".repeat(APP_LINE_MAX + 10);
+    assert_eq!(app_line(&long), "x".repeat(APP_LINE_MAX));
+    assert_eq!(app_line(&"x".repeat(APP_LINE_MAX)).len(), APP_LINE_MAX);
+    // In a status: the line as shown.
+    let v: serde_json::Value =
+        serde_json::from_str(r#"{"line":"a\nb","state":"ok"}"#).expect("JSON");
+    assert_eq!(app_of(&v).and_then(|a| a.line).as_deref(), Some("a b"));
+}
 
 const RECEIVING: u32 = 0x0101_0009;
 
@@ -289,6 +302,7 @@ fn missing_fields_read_as_absent() {
             connected: 0,
             counts: Counts::default(),
             engine: false,
+            app: None,
         }
     );
     let v = Tracker::default().update(&[ok("bare", "{}".into())]);
@@ -339,6 +353,7 @@ fn the_line_shows_holdover_and_the_engine_only_when_there() {
         connected: 4,
         counts: Counts::default(),
         engine: false,
+        app: None,
     };
     let grew = Counts {
         late: 1,
@@ -366,6 +381,7 @@ fn judge_weighs_the_clock_then_subscriptions_then_counts() {
         connected: 1,
         counts: Counts::default(),
         engine: true,
+        app: None,
     };
     let grew = Counts {
         late: 1,
@@ -447,4 +463,200 @@ fn copy_json_names_each_device() {
     assert_eq!(v["b"]["error"], "no answer: refused");
     assert_eq!(v["c"]["error"], "the status is not JSON");
     assert_eq!(copy_json(&[]), "{}");
+}
+
+/// `line` with the app part `app` (a JSON object's text) at its end.
+fn with_app(line: String, app: &str) -> String {
+    format!(
+        "{},\"app\":{app}}}",
+        line.strip_suffix('}').expect("an object")
+    )
+}
+
+#[test]
+fn the_app_part_reads_its_line_and_state() {
+    let v = |t: &str| serde_json::from_str::<serde_json::Value>(t).expect("JSON");
+    assert_eq!(
+        app_of(&v(r#"{"line":"ASIO 64","state":"warn","x":1}"#)),
+        Some(App {
+            line: Some("ASIO 64".into()),
+            state: Some(AppState::Warn)
+        })
+    );
+    assert_eq!(
+        app_of(&v(r#"{"state":"ok"}"#)).and_then(|a| a.state),
+        Some(AppState::Ok)
+    );
+    assert_eq!(
+        app_of(&v(r#"{"state":"error"}"#)).and_then(|a| a.state),
+        Some(AppState::Error)
+    );
+    // Unknown or wrong-kind fields read as absent; an empty line is none.
+    assert_eq!(
+        app_of(&v(r#"{"line":"","state":"ERROR"}"#)),
+        Some(App {
+            line: None,
+            state: None
+        })
+    );
+    assert_eq!(
+        app_of(&v(r#"{"line":7,"state":true}"#)),
+        Some(App {
+            line: None,
+            state: None
+        })
+    );
+    assert_eq!(app_of(&v("[]")), None);
+    assert_eq!(app_of(&v("\"ok\"")), None);
+    // In a status: parsed; a non-object app is no app.
+    let s = parse(&with_app(healthy(), r#"{"line":"x","state":"ok"}"#)).expect("status");
+    assert_eq!(s.app.and_then(|a| a.line), Some("x".to_string()));
+    let s = parse(&with_app(healthy(), "1")).expect("status");
+    assert_eq!(s.app, None);
+    assert_eq!(parse(&healthy()).expect("status").app, None);
+}
+
+#[test]
+fn the_app_line_follows_the_device_s_and_its_state_colours_the_device() {
+    let line_ok = with_app(healthy(), r#"{"line":"ASIO 64 attached","state":"ok"}"#);
+    let v = Tracker::default().update(&[ok("app", line_ok)]);
+    assert_eq!(v.colour, Colour::Green);
+    assert_eq!(v.tooltip, "dstack: 1 device, ok");
+    assert_eq!(
+        v.lines,
+        vec![
+            "app: clock dsync ready; RX 2/2 connected; late +0; missed +0, overruns +0; ASIO 64 attached"
+        ]
+    );
+    let warn = with_app(healthy(), r#"{"line":"no DAW","state":"warn"}"#);
+    let v = Tracker::default().update(&[ok("app", warn)]);
+    assert_eq!(v.colour, Colour::Orange);
+    assert_eq!(v.tooltip, "dstack: 1 device, app: app warning: no DAW");
+    let error = with_app(healthy(), r#"{"state":"error"}"#);
+    let v = Tracker::default().update(&[ok("app", error)]);
+    assert_eq!(v.colour, Colour::Red);
+    assert_eq!(v.tooltip, "dstack: 1 device, app: app error");
+    assert_eq!(
+        v.lines,
+        vec!["app: clock dsync ready; RX 2/2 connected; late +0; missed +0, overruns +0"]
+    );
+    // No state, or an unknown one: the device's own colour.
+    let none = with_app(healthy(), r#"{"line":"hi"}"#);
+    assert_eq!(
+        Tracker::default().update(&[ok("app", none)]).colour,
+        Colour::Green
+    );
+}
+
+#[test]
+fn judge_weighs_the_app_s_error_after_the_clock_and_its_warning_after_subscriptions() {
+    let app = |state| {
+        Some(App {
+            line: Some("l".into()),
+            state: Some(state),
+        })
+    };
+    let s = Status {
+        ready: true,
+        source: None,
+        holdover: false,
+        subscribed: 2,
+        connected: 1,
+        counts: Counts::default(),
+        engine: false,
+        app: app(AppState::Error),
+    };
+    let grew = Counts {
+        late: 1,
+        ..Counts::default()
+    };
+    assert_eq!(
+        judge(
+            &Status {
+                ready: false,
+                ..s.clone()
+            },
+            grew
+        ),
+        (Colour::Red, Some("clock not ready".into()))
+    );
+    assert_eq!(judge(&s, grew), (Colour::Red, Some("app error: l".into())));
+    let warn = Status {
+        app: app(AppState::Warn),
+        ..s.clone()
+    };
+    assert_eq!(
+        judge(&warn, grew),
+        (
+            Colour::Orange,
+            Some("1 of 2 subscriptions not connected".into())
+        )
+    );
+    let warn = Status {
+        connected: 2,
+        ..warn
+    };
+    assert_eq!(
+        judge(&warn, grew),
+        (Colour::Orange, Some("app warning: l".into()))
+    );
+    let fine = Status {
+        app: app(AppState::Ok),
+        ..warn
+    };
+    assert_eq!(judge(&fine, grew), (Colour::Orange, Some("late +1".into())));
+    assert_eq!(judge(&fine, Counts::default()), (Colour::Green, None));
+}
+
+#[test]
+fn an_expected_device_not_running_is_red_and_one_found_is_as_usual() {
+    let expected = vec!["App".to_string(), "Stopped one".to_string()];
+    // Found case aside: as usual; the other is missing.
+    let v = Tracker::default().update_with(&[ok("app", healthy())], &expected);
+    assert_eq!(v.colour, Colour::Red);
+    assert_eq!(
+        v.tooltip,
+        format!("dstack: 2 devices, Stopped one: {NOT_RUNNING}")
+    );
+    assert_eq!(v.lines.len(), 2);
+    assert_eq!(v.lines[1], "Stopped one: expected, not running");
+    // Nothing running at all: red, not grey.
+    let v = Tracker::default().update_with(&[], &expected[1..]);
+    assert_eq!(
+        v,
+        View {
+            colour: Colour::Red,
+            tooltip: "dstack: 1 device, Stopped one: expected, not running".into(),
+            lines: vec!["Stopped one: expected, not running".into()],
+        }
+    );
+    // Everything expected is running: the view of the readings alone.
+    let all = Tracker::default().update_with(&[ok("app", healthy())], &expected[..1]);
+    assert_eq!(all, Tracker::default().update(&[ok("app", healthy())]));
+    // A red device first keeps the tooltip's first reason.
+    let v = Tracker::default().update_with(
+        &[("gone".to_string(), Err("x".to_string()))],
+        &expected[1..],
+    );
+    assert_eq!(v.tooltip, "dstack: 2 devices, gone: status unreadable");
+    // An orange device first: the missing one's red wins.
+    let orange = status_line(1, &[0x0000_0001], &[], None);
+    let v = Tracker::default().update_with(&[ok("app", orange)], &expected[1..]);
+    assert_eq!(v.colour, Colour::Red);
+    assert_eq!(
+        v.tooltip,
+        "dstack: 2 devices, Stopped one: expected, not running"
+    );
+}
+
+#[test]
+fn missing_names_are_the_expected_no_reading_has() {
+    let readings = vec![ok("Alpha", healthy()), ("beta".into(), Err("x".into()))];
+    let expected: Vec<String> = ["ALPHA", "gamma", "Beta", "delta"]
+        .map(String::from)
+        .to_vec();
+    assert_eq!(missing(&readings, &expected), vec!["gamma", "delta"]);
+    assert!(missing(&readings, &[]).is_empty());
+    assert_eq!(missing(&[], &expected).len(), 4);
+    assert_eq!(missing_line("x"), "x: expected, not running");
 }
