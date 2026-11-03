@@ -205,6 +205,9 @@ pub struct TxTable {
     seq: u32,
     /// The cookies' generator state.
     rng: u64,
+    /// The flow server's last warning per (requester, reason), ns: a
+    /// refusal is warned once a minute each.
+    pub warned: Vec<(std::net::Ipv4Addr, &'static str, u64)>,
 }
 
 impl TxTable {
@@ -222,6 +225,7 @@ impl TxTable {
             slots: slots.min(MAX_FLOWS),
             seq: 0,
             rng: seed,
+            warned: Vec::new(),
         }
     }
 
