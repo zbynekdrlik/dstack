@@ -3,6 +3,7 @@ use super::*;
 use std::cell::RefCell;
 
 use crate::device::DeviceConfig;
+use crate::subscribe::directory::DBC_SERVICE;
 
 const TEST_DEVICE: &str = include_str!("../../../../config/test-device.toml");
 const HOST: &str = "test-device.local.";
@@ -26,7 +27,8 @@ fn one_chan_record_per_tx_channel_named_channel_at_device() {
     let cfg = config();
     let state = DeviceState::from_config(&cfg);
     let recs = records(&state, &cfg, HOST, IP);
-    assert_eq!(recs.len(), 2 + 16);
+    // arc, cmc, dbc and 16 chan records.
+    assert_eq!(recs.len(), 3 + 16);
     let chans = chan_records(&recs);
     assert_eq!(chans.len(), 16);
     for (i, rec) in chans.iter().enumerate() {
@@ -304,7 +306,7 @@ fn an_announcer_withdraws_the_old_records_first_and_repeats_nothing() {
     let mut a = Announcer::new(FakeRegistry::default());
     a.announce(&records(&state, &cfg, HOST, IP)).unwrap();
     let calls = take(&a);
-    assert_eq!(calls.len(), 18);
+    assert_eq!(calls.len(), 19);
     assert_eq!(
         calls[0],
         Call::Register("test-device._netaudio-arc._udp.local.".into())
@@ -352,10 +354,10 @@ fn an_announcer_withdraws_the_old_records_first_and_repeats_nothing() {
     state.name = "other-device".into();
     a.announce(&records(&state, &cfg, HOST, IP)).unwrap();
     let calls = take(&a);
-    assert_eq!(calls.len(), 36);
-    assert!(calls[..18].iter().all(|c| matches!(c, Call::Unregister(_))));
+    assert_eq!(calls.len(), 38);
+    assert!(calls[..19].iter().all(|c| matches!(c, Call::Unregister(_))));
     assert!(
-        calls[18..]
+        calls[19..]
             .iter()
             .all(|c| matches!(c, Call::Register(n) if n.contains("other-device")))
     );
@@ -408,7 +410,7 @@ fn a_full_daemon_queue_delays_the_announcement_and_never_ends_it() {
     let mut a = Announcer::new(FakeRegistry::default());
     a.registry().busy.set(5);
     a.announce(&records(&state, &cfg, HOST, IP)).unwrap();
-    assert_eq!(take(&a).len(), 18, "every record registered once");
+    assert_eq!(take(&a).len(), 19, "every record registered once");
     // A rename registers a record, its reset withdraws it: the same.
     state.tx[0] = "Click".into();
     a.registry().busy.set(5);
@@ -519,6 +521,9 @@ fn the_records_carry_the_config_s_ports_and_process_id() {
     let port_of = |service| recs.iter().find(|r| r.service == service).unwrap().port;
     assert_eq!(port_of(ARC_SERVICE), 4441);
     assert_eq!(port_of(CMC_SERVICE), 8801);
+    // The flow-control service: DVS sends its flow requests to the port
+    // this record names, and to 4455 without it (FOH 3.11.2026).
+    assert_eq!(port_of(DBC_SERVICE), 4456);
     assert!(
         recs.iter()
             .filter(|r| r.service == CHAN_SERVICE)
@@ -528,4 +533,19 @@ fn the_records_carry_the_config_s_ports_and_process_id() {
     assert!(cmc.txt.contains(&"process=2".to_string()), "{:?}", cmc.txt);
     let id = format!("id={}", hex(&crate::cmc::device_id(IP, 2)));
     assert!(cmc.txt.contains(&id), "{:?}", cmc.txt);
+}
+
+#[test]
+fn the_flow_control_service_is_announced_by_the_device_with_no_txt() {
+    // Every Dante device on the site publishes _netaudio-dbc._udp on its
+    // flow-control port with an empty TXT (the Tascam, the Yamaha cards,
+    // DVS). Without it DVS sent a second instance's flow requests to 4455.
+    let cfg = config();
+    let state = DeviceState::from_config(&cfg);
+    let recs = records(&state, &cfg, HOST, IP);
+    let dbc: Vec<_> = recs.iter().filter(|r| r.service == DBC_SERVICE).collect();
+    assert_eq!(dbc.len(), 1);
+    assert_eq!(dbc[0].instance, "test-device");
+    assert_eq!(dbc[0].port, cfg.flows_port);
+    assert!(dbc[0].txt.is_empty(), "{:?}", dbc[0].txt);
 }
