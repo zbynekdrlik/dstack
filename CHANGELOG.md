@@ -1,6 +1,16 @@
 # Changelog
 
-## 0.6.16 (unreleased)
+## 0.6.17 (unreleased)
+
+- New (dstack #104 step 3): the `dtray` crate, the PC's tray icon for its dstack devices (dlink apps, dasio, dstack-dev). No app changes for it: it finds the devices by mDNS on the PC's own addresses (the ARC records that carry `dstack_ctl`) and reads each one's local status endpoint once a second.
+  - The icon is grey with no device, red when a status cannot be read or a clock is not ready, orange when a subscribed RX channel is not connected or a late, missed or overrun count grew since the last second, green otherwise. The tooltip names the worst device and why.
+  - The menu (Windows): a line per device (clock, RX subscriptions connected, the counts' growth), Copy status (every device's status JSON), Exit (the tray only).
+  - `dtray --print` on every platform: one 3 s discovery pass, the tooltip and the lines on stdout. On Linux the tray itself is not there yet (`dtray` alone exits 2).
+  - The library is pure and tested: `discover` (the filter, `Scanner`), `probe`, `model` (`Tracker`, `View`, `Colour`), `icon`.
+- Dependencies: `tray-icon` 0.21.2 (Windows only, dtray). Lockfile: `crc32fast` held at 1.5.2 (1.5.3 and 1.5.4 are under two weeks old).
+- Release: the GitHub release also carries `dtray` for Linux and Windows (`dtray-<tag>-<os>`), with its sha256.
+
+## 0.6.16 (2026-11-03)
 
 - Fix (dasio, FOH 3.11.2026): a flow request whose packet is longer than our TX latency is granted (up to one datagram). master-asio-dante at a 0.5 ms TX latency refused DVS's fpp 60 ("more frames a packet than our latency covers"), and DVS showed Transmitter setup failed, though DVS plays at its own 10 ms. A receiver that asks past the advertised `tx_fpp_max` holds the packet in its own latency; one that plays at ours never asks it. The "TX flow started" line logs `receiver_latency_from_us`.
   - TX counts such a flow's packets as `over_latency` only past fpp + margin + the send slack (`media::tx::flow_latency_ns`), not against our advertised latency.

@@ -20,6 +20,7 @@ exclude_globs = [
   "crates/dstack/src/lso/windows.rs",
   "crates/dstack/src/media/dscp/windows.rs",
   "crates/dstack/src/traffic/windows.rs",
+  "crates/dtray/src/win.rs",
   # Third-party code (mdns-sd, one dstack change; tests/mdns_ipv4_only.rs).
   "vendor/**",
 ]
@@ -33,6 +34,13 @@ exclude_re = [
   # A binary's main only calls the library (`daemon::cli::main`), and a
   # unit test cannot run it.
   "src/bin/dstack-dev.rs.*replace main",
+  # dtray's binary: its entry points only call the library (mode_of, the
+  # model, the probe: each tested); --print is run by hand on dev1.
+  "dtray/src/main.rs.*replace (main|print|tray) -> ExitCode",
+  # dtray's discovery on the PC's real interfaces (mDNS on port 5353, which
+  # a unit test may not hold per mutant); its rules (own_addresses,
+  # local_devices, plan) and the probe are tested.
+  "dtray/src/discover.rs.*Scanner::(new|refresh|devices|readings)",
   # The embedding glue and its host paths (no socket, no signal handler):
   # tests/embed.rs runs a whole device with them (not per mutant);
   # Timing::of, their one computation, is unit tested.
