@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 iemmixer contributors.
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// Copyright (C) 2026 dstack contributors.
 
 //! The ARC server's count of the requests it refuses or leaves unanswered,
 //! and of the datagrams whose length field disagrees with their size

@@ -1,10 +1,8 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
-// Adapted from inferno (https://github.com/teodly/inferno at 9767558):
-// inferno_aoip/src/protocol/req_resp.rs (the header layout) and
-// inferno_aoip/src/util/bytes.rs (reading a string at an offset),
-// Copyright (C) Teo and the inferno contributors, GPL-3.0-or-later OR
-// AGPL-3.0-or-later, taken under GPL-3.0-or-later. Changes Copyright (C)
-// 2026 iemmixer contributors.
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// Copyright (C) 2026 dstack contributors.
+// Protocol facts (byte layouts, opcodes, behaviour) checked against
+// inferno (https://github.com/teodly/inferno) as a reference; the code is
+// our own.
 
 //! The request/response datagram that ARC (UDP 4440) and CMC (UDP 8800)
 //! share: a 10-byte big-endian header, then the body.

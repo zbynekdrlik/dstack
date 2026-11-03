@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 iemmixer contributors.
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// Copyright (C) 2026 dstack contributors.
 
 //! The device's local control socket (Gen 3 phase B, plan Task 7):
 //! [`SOCKET`] in the unit's runtime directory (`RuntimeDirectory=iem-dante`,

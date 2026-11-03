@@ -153,7 +153,8 @@ fn a_48_khz_app_runs_a_96_khz_device_through_the_conversion() {
         std::thread::sleep(Duration::from_millis(50));
     }
     let pump = link.media().engine().expect("the pump attached");
-    let status = dstack::ctl::answer("status", link.media());
+    let status = link.status();
+    assert!(status.starts_with("{\"clock\":{\"ready\":1,"), "{status}");
     assert_eq!(link.ended(), None);
     let stopped = link.stop();
     let got = f64::from_bits(heard.load(Ordering::Relaxed));

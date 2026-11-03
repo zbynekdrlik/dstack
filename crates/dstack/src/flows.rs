@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 iemmixer contributors.
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// Copyright (C) 2026 dstack contributors.
 
 //! Flow control on UDP 4455 (Gen 3 phase B, plan Task 4): a receiver asks
 //! the transmitter for a flow of channels, the transmitter answers with a

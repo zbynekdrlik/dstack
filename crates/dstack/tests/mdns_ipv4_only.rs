@@ -1,4 +1,5 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// Copyright (C) 2026 dstack contributors.
 
 //! dstack #1 (dasio#1): our mDNS daemon opens no IPv6 socket. mdns-sd
 //! always bound `[::]:5353`, which received every interface's mDNS; on a

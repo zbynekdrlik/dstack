@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 iemmixer contributors.
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// Copyright (C) 2026 dstack contributors.
 
 //! The device binary's command line (`--help`: [`super::usage`]), on
 //! Linux and Windows (Windows has no control socket, so `ctl` refuses

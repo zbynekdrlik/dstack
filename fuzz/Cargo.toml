@@ -2,7 +2,7 @@
 name = "dstack-fuzz"
 version = "0.0.0"
 edition = "2024"
-license = "GPL-3.0-or-later"
+license = "MIT OR Apache-2.0"
 publish = false
 description = "Coverage-guided fuzzing of dstack's datagram parsers and servers (cargo-fuzz)"
 

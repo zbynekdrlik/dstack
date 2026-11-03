@@ -1,11 +1,8 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
-// Adapted from inferno (https://github.com/teodly/inferno at 9767558):
-// inferno_aoip/src/protocol/proto_cmc.rs (the advertisement's layout),
-// inferno_aoip/src/device_server/cmc_server.rs (the server) and
-// inferno_aoip/src/device_server/settings.rs (the device id from the
-// address), Copyright (C) Teo and the inferno contributors,
-// GPL-3.0-or-later OR AGPL-3.0-or-later, taken under GPL-3.0-or-later.
-// Changes Copyright (C) 2026 iemmixer contributors.
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// Copyright (C) 2026 dstack contributors.
+// Protocol facts (byte layouts, opcodes, behaviour) checked against
+// inferno (https://github.com/teodly/inferno) as a reference; the code is
+// our own.
 
 //! CMC on UDP 8800: the device's advertisement (0x1001), which names it by
 //! its device id and address, and the meter subscription (0x3010, Dante

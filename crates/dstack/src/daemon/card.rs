@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 iemmixer contributors.
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// Copyright (C) 2026 dstack contributors.
 
 //! `card`: a device's channel labels and name, read and written by its IP
 //! on the ARC port ([`crate::arc::control`]), with iemmixer's

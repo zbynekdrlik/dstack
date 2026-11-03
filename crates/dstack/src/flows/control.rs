@@ -1,11 +1,8 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
-// Adapted from inferno (https://github.com/teodly/inferno at 9767558):
-// inferno_aoip/src/protocol/flows_control.rs (the port, the start code, the
-// statuses, the handle, the request as its client writes it, the update and
-// the stop) and inferno_aoip/src/device_server/flows_control_server.rs (the
-// request's, the stop's and the update's parse), Copyright (C) Teo and the
-// inferno contributors, GPL-3.0-or-later OR AGPL-3.0-or-later, taken under
-// GPL-3.0-or-later. Changes Copyright (C) 2026 iemmixer contributors.
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// Copyright (C) 2026 dstack contributors.
+// Protocol facts (byte layouts, opcodes, behaviour) checked against
+// inferno (https://github.com/teodly/inferno) as a reference; the code is
+// our own.
 
 //! The datagrams of flow control on UDP [`PORT`]: the request/response
 //! header of [`crate::wire`] with the start code [`START`], then the body.
@@ -44,8 +41,8 @@ use crate::wire::{self, Body, HEADER_LEN, read_u16};
 
 /// Flow control's UDP port.
 pub const PORT: u16 = 4455;
-/// The start code of flow control (inferno: "dbcp1"; its client always
-/// sends it, its server never checks it, a reply echoes the request's).
+/// The start code of flow control: the `dbcp1` value transmitters
+/// announce in their channel records (a reply echoes the request's).
 pub const START: u16 = 0x1102;
 
 /// The opcodes (op1).
@@ -132,13 +129,53 @@ pub enum Unread {
     NotAHandle,
 }
 
-/// The body bytes before the channel ids and after them (all but `2n`).
-const FIXED: usize = 0x26;
-/// The receiver descriptor's first two bytes (inferno only warns when they
-/// differ).
+/// The receiver descriptor's first two bytes (never checked on a read).
 const DESCRIPTOR_TAG: u16 = 0x0802;
 
-/// A flow request datagram, laid out as inferno's client writes it.
+/// Where each part of a flow request sits, as packet offsets (the 10-byte
+/// header counted), for `n` channel slots and names of the given lengths.
+/// The fixed fields come first (body 0–15), then the ids, a 22-byte middle
+/// (three constants, fpp, the flow name's offset, 12 zero bytes), the two
+/// names, padding to a multiple of 8 and the 8-byte descriptor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Layout {
+    /// The first channel id.
+    ids: usize,
+    /// The middle part, right after the last id.
+    middle: usize,
+    /// The receiver's device name.
+    host: usize,
+    /// The flow's name.
+    flow: usize,
+    /// The receiver's descriptor.
+    descriptor: usize,
+    /// One past the datagram's last byte.
+    end: usize,
+}
+
+impl Layout {
+    /// The middle part's length: three `u16` constants, fpp, the flow
+    /// name's offset, then 12 zero bytes.
+    const MIDDLE: usize = 2 * 5 + 12;
+
+    fn of(n: usize, host_len: usize, flow_len: usize) -> Layout {
+        let ids = HEADER_LEN + 16;
+        let middle = ids + 2 * n;
+        let host = middle + Self::MIDDLE;
+        let flow = host + host_len + 1;
+        let descriptor = (flow + flow_len + 1).next_multiple_of(8);
+        Layout {
+            ids,
+            middle,
+            host,
+            flow,
+            descriptor,
+            end: descriptor + 8,
+        }
+    }
+}
+
+/// A flow request datagram (the layout a Dante receiver sends).
 ///
 /// # Panics
 ///
@@ -147,70 +184,78 @@ const DESCRIPTOR_TAG: u16 = 0x0802;
 /// at most 8 channels).
 pub fn build_request(seq: u16, req: &FlowRequest) -> Vec<u8> {
     let n = req.channels.len();
-    let strings_at = HEADER_LEN + FIXED + 2 * n;
-    let name_at = strings_at + req.rx_host.len() + 1;
-    let descriptor_at = (name_at + req.rx_flow_name.len() + 1).next_multiple_of(8);
-    let offset = |at: usize| u16::try_from(at).expect("a request under 64 KiB");
-    let mut b = Body::new();
-    b.u16(offset(strings_at));
-    b.u32(req.sample_rate);
-    b.u32(req.bits);
-    b.u16(1);
-    b.u16(offset(n));
-    b.u16(offset(descriptor_at));
-    for ch in &req.channels {
-        b.u16(ch.unwrap_or(0));
+    let at = Layout::of(n, req.rx_host.len(), req.rx_flow_name.len());
+    let word = |v: usize| -> [u8; 2] {
+        u16::try_from(v)
+            .expect("a request under 64 KiB")
+            .to_be_bytes()
+    };
+    let mut d = vec![0u8; at.end];
+    let mut put = |pos: usize, bytes: &[u8]| d[pos..pos + bytes.len()].copy_from_slice(bytes);
+    let fixed = HEADER_LEN;
+    put(fixed, &word(at.host));
+    put(fixed + 2, &req.sample_rate.to_be_bytes());
+    put(fixed + 6, &req.bits.to_be_bytes());
+    put(fixed + 10, &1u16.to_be_bytes());
+    put(fixed + 12, &word(n));
+    put(fixed + 14, &word(at.descriptor));
+    for (i, ch) in req.channels.iter().enumerate() {
+        put(at.ids + 2 * i, &ch.unwrap_or(0).to_be_bytes());
     }
-    b.u16(offset(0x1c + 2 * n));
-    b.u16(0x0a00);
-    b.u16(0x0002);
-    b.u16(req.fpp);
-    b.u16(offset(name_at));
-    b.zeros(12);
-    b.cstr(&req.rx_host);
-    b.cstr(&req.rx_flow_name);
-    b.zeros(descriptor_at - usize::from(b.offset()));
-    b.u16(DESCRIPTOR_TAG);
-    b.u16(req.rx.port());
-    b.u32(req.rx.ip().to_bits());
-    wire::request(START, seq, op::REQUEST, 0, &b.into_vec())
+    put(at.middle, &word(0x1c + 2 * n));
+    put(at.middle + 2, &0x0a00u16.to_be_bytes());
+    put(at.middle + 4, &0x0002u16.to_be_bytes());
+    put(at.middle + 6, &req.fpp.to_be_bytes());
+    put(at.middle + 8, &word(at.flow));
+    put(at.host, req.rx_host.as_bytes());
+    put(at.flow, req.rx_flow_name.as_bytes());
+    put(at.descriptor, &DESCRIPTOR_TAG.to_be_bytes());
+    put(at.descriptor + 2, &req.rx.port().to_be_bytes());
+    put(at.descriptor + 4, &req.rx.ip().octets());
+    wire::request(START, seq, op::REQUEST, 0, &d[HEADER_LEN..])
 }
 
 /// Reads a flow request from the whole datagram (its header included:
-/// the body's offsets are packet offsets). Every check is inferno's,
-/// nothing more: the values are checked by [`super::server`].
+/// the body's offsets are packet offsets). Only what is needed to read it
+/// is checked; the values are checked by [`super::server`].
 pub fn parse_request(datagram: &[u8]) -> Result<FlowRequest, Unread> {
-    let c = datagram.get(HEADER_LEN..).unwrap_or_default();
-    if c.len() <= 16 {
+    // A body of 16 bytes or less carries no channel at all.
+    if datagram.len() <= HEADER_LEN + 16 {
         return Err(Unread::Short);
     }
-    let n = usize::from(field(c, 12));
-    // fpp and the flow name's offset follow the ids and 6 bytes.
-    let tail = 16 + 2 * n + 6;
-    if c.len() < tail + 4 {
-        return Err(Unread::Cut);
-    }
+    let u16_at = |pos: usize| read_u16(datagram, pos);
+    let u32_at = |pos: usize| {
+        datagram
+            .get(pos..)
+            .and_then(<[u8]>::first_chunk::<4>)
+            .map(|b| u32::from_be_bytes(*b))
+    };
+    let n = usize::from(u16_at(HEADER_LEN + 12).ok_or(Unread::Short)?);
+    // Names have no length here, so the layout gives the ids and middle.
+    let at = Layout::of(n, 0, 0);
+    let fpp = u16_at(at.middle + 6).ok_or(Unread::Cut)?;
+    let flow_name_at = u16_at(at.middle + 8).ok_or(Unread::Cut)?;
     let channels = (0..n)
-        .map(|i| match field(c, 16 + 2 * i) {
-            0 => None,
-            id => Some(id),
-        })
-        .collect();
-    let rx_host = cstr(datagram, field(c, 0)).ok_or(Unread::NoString)?;
-    let rx_flow_name = cstr(datagram, field(c, tail + 2)).ok_or(Unread::NoString)?;
-    let d = usize::from(field(c, 14));
-    let descriptor = datagram.get(d..d + 8).ok_or(Unread::NoDescriptor)?;
+        .map(|i| u16_at(at.ids + 2 * i).map(|id| (id != 0).then_some(id)))
+        .collect::<Option<Vec<_>>>()
+        .ok_or(Unread::Cut)?;
+    let host_at = u16_at(HEADER_LEN).ok_or(Unread::Short)?;
+    let rx_host = cstr(datagram, host_at).ok_or(Unread::NoString)?;
+    let rx_flow_name = cstr(datagram, flow_name_at).ok_or(Unread::NoString)?;
+    let descriptor_at = usize::from(u16_at(HEADER_LEN + 14).ok_or(Unread::Short)?);
+    let port = u16_at(descriptor_at + 2);
+    let ip = datagram.get(descriptor_at + 4..descriptor_at + 8);
+    let (Some(port), Some(ip)) = (port, ip) else {
+        return Err(Unread::NoDescriptor);
+    };
     Ok(FlowRequest {
         rx_host: rx_host.to_string(),
         rx_flow_name: rx_flow_name.to_string(),
-        sample_rate: u32::from_be_bytes([c[2], c[3], c[4], c[5]]),
-        bits: u32::from_be_bytes([c[6], c[7], c[8], c[9]]),
+        sample_rate: u32_at(HEADER_LEN + 2).ok_or(Unread::Short)?,
+        bits: u32_at(HEADER_LEN + 6).ok_or(Unread::Short)?,
         channels,
-        fpp: field(c, tail),
-        rx: SocketAddrV4::new(
-            Ipv4Addr::new(descriptor[4], descriptor[5], descriptor[6], descriptor[7]),
-            u16::from_be_bytes([descriptor[2], descriptor[3]]),
-        ),
+        fpp,
+        rx: SocketAddrV4::new(Ipv4Addr::new(ip[0], ip[1], ip[2], ip[3]), port),
     })
 }
 

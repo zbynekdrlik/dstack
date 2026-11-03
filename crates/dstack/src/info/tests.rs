@@ -227,7 +227,7 @@ fn only_a_datagram_shorter_than_the_header_is_no_request() {
 
 #[test]
 fn the_board_info_is_inferno_s_bytes() {
-    let mut mc = Multicaster::new(identity());
+    let mut mc = InfoBuilder::new(identity());
     let want = packet(0xffff, 1, BOARD_INFO, &board_info_body(b"iem-dante"));
     assert_eq!(want.len(), 232);
     assert_eq!(mc.board_info(), want);
@@ -235,7 +235,7 @@ fn the_board_info_is_inferno_s_bytes() {
     let long = "abcdefghijklmnopqrstuvwxyz01234";
     let mut id = identity();
     id.model = long.to_string();
-    let mut mc = Multicaster::new(id);
+    let mut mc = InfoBuilder::new(id);
     assert_eq!(
         mc.board_info(),
         packet(0xffff, 1, BOARD_INFO, &board_info_body(long.as_bytes()))
@@ -244,7 +244,7 @@ fn the_board_info_is_inferno_s_bytes() {
 
 #[test]
 fn the_product_info_is_inferno_s_bytes() {
-    let mut mc = Multicaster::new(identity());
+    let mut mc = InfoBuilder::new(identity());
     let version = workspace_version();
     let body = sparse(
         336,
@@ -263,7 +263,7 @@ fn the_product_info_is_inferno_s_bytes() {
     let mut id = identity();
     id.manufacturer = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".to_string();
     id.model = "abcdefghijklmnopqrstuvwxyz".to_string();
-    let mut mc = Multicaster::new(id);
+    let mut mc = InfoBuilder::new(id);
     let body = sparse(
         336,
         &[
@@ -280,7 +280,7 @@ fn the_product_info_is_inferno_s_bytes() {
 
 #[test]
 fn the_network_info_names_the_interface() {
-    let mut mc = Multicaster::new(identity());
+    let mut mc = InfoBuilder::new(identity());
     #[rustfmt::skip]
     let mut body = vec![
         0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
@@ -304,7 +304,7 @@ fn the_network_info_names_the_interface() {
     let mut id = identity();
     id.net.gateway = Ipv4Addr::UNSPECIFIED;
     id.net.link_speed = 0;
-    let mut mc = Multicaster::new(id);
+    let mut mc = InfoBuilder::new(id);
     body[6..8].copy_from_slice(&[0, 0]);
     body[24..32].copy_from_slice(&[0; 8]);
     assert_eq!(
@@ -315,7 +315,7 @@ fn the_network_info_names_the_interface() {
 
 #[test]
 fn each_known_request_gets_its_reply() {
-    let mut mc = Multicaster::new(identity());
+    let mut mc = InfoBuilder::new(identity());
     let version = workspace_version();
     assert_eq!(
         mc.answer(&captured()),
@@ -349,7 +349,7 @@ fn a_burst_of_requests_gets_at_most_ten_replies_a_kind_and_the_next_second_more(
     // (and for 0x13 and 0x77 the last byte) varies, as from a sender that
     // tries to pass a bound kept per whole opcode.
     let t0 = Instant::now();
-    let mut mc = Multicaster::new(identity());
+    let mut mc = InfoBuilder::new(identity());
     let mut limit = Limit::new();
     let kinds = [
         (0x61, BOARD_INFO),
@@ -395,7 +395,7 @@ fn a_burst_of_requests_gets_at_most_ten_replies_a_kind_and_the_next_second_more(
 
 #[test]
 fn clock_stats_and_unknown_requests_get_no_reply_and_use_no_sequence() {
-    let mut mc = Multicaster::new(identity());
+    let mut mc = InfoBuilder::new(identity());
     // inferno sends clock stats only with a clock's frequency offset;
     // phase A has no clock.
     assert_eq!(
@@ -414,7 +414,7 @@ fn clock_stats_and_unknown_requests_get_no_reply_and_use_no_sequence() {
 fn the_heartbeat_is_a_bare_header_with_no_clock() {
     // inferno before its clock has a frequency offset: no 0x8001 record,
     // no peaks, no latency; the header alone.
-    let mut mc = Multicaster::new(identity());
+    let mut mc = InfoBuilder::new(identity());
     let beat = mc.heartbeat(None);
     #[rustfmt::skip]
     let want = [
@@ -428,7 +428,7 @@ fn the_heartbeat_is_a_bare_header_with_no_clock() {
 
 #[test]
 fn every_packet_takes_the_next_sequence_number_from_1_and_it_wraps() {
-    let mut mc = Multicaster::new(identity());
+    let mut mc = InfoBuilder::new(identity());
     let seq = |p: &[u8]| u16::from_be_bytes([p[4], p[5]]);
     assert_eq!(seq(&mc.board_info()), 1);
     assert_eq!(seq(&mc.product_info()), 2);
@@ -444,7 +444,7 @@ fn every_packet_takes_the_next_sequence_number_from_1_and_it_wraps() {
 #[test]
 fn random_datagrams_never_panic() {
     let mut rng = Rng::new(0x1f0_8700);
-    let mut mc = Multicaster::new(identity());
+    let mut mc = InfoBuilder::new(identity());
     let known = [0x61, 0xc1, 0x21, 0x13, 0x77];
     let mut answered = 0;
     for i in 0..10_000 {
@@ -514,7 +514,7 @@ async fn the_server_says_who_it_is_answers_to_the_info_group_and_beats() {
     let requests = Arc::new(Requests::default());
     let task = tokio::spawn(serve_info(
         sock,
-        Multicaster::new(identity()),
+        InfoBuilder::new(identity()),
         to,
         Arc::new(NoClock),
         Arc::new(Changes::default()),
@@ -580,7 +580,7 @@ async fn the_server_bounds_its_replies_to_the_info_group() {
     let (at, info_rx, _beat_rx, to, sock) = loopback(NEVER).await;
     let task = tokio::spawn(serve_info(
         sock,
-        Multicaster::new(identity()),
+        InfoBuilder::new(identity()),
         to,
         Arc::new(NoClock),
         Arc::new(Changes::default()),
@@ -643,7 +643,7 @@ fn records() -> Records {
 
 #[test]
 fn the_heartbeat_with_a_clock_holds_inferno_s_three_records() {
-    let mut mc = Multicaster::new(identity());
+    let mut mc = InfoBuilder::new(identity());
     let beat = mc.heartbeat(Some(&records()));
     #[rustfmt::skip]
     let mut body = vec![
@@ -741,7 +741,7 @@ fn the_channel_change_bitmask_is_inferno_s() {
     assert_eq!(last.len(), 66);
     assert_eq!(last[..2], [0, 64]);
     assert_eq!(last[65], 0x80);
-    let mut mc = Multicaster::new(identity());
+    let mut mc = InfoBuilder::new(identity());
     assert_eq!(
         mc.channel_change(&[4, 12]),
         packet(
@@ -756,7 +756,7 @@ fn the_channel_change_bitmask_is_inferno_s() {
 #[test]
 fn changes_are_coalesced_and_the_notification_is_bounded() {
     let t0 = Instant::now();
-    let mut mc = Multicaster::new(identity());
+    let mut mc = InfoBuilder::new(identity());
     let mut limit = Limit::new();
     let changes = Changes::default();
     // Nothing waits: nothing sent, no sequence used.
@@ -857,7 +857,7 @@ async fn the_server_beats_with_its_records_and_notifies_changes() {
     let changes = Arc::new(Changes::default());
     let task = tokio::spawn(serve_info(
         sock,
-        Multicaster::new(identity()),
+        InfoBuilder::new(identity()),
         to,
         Arc::new(Fixed(Some(records()))),
         Arc::clone(&changes),
@@ -890,7 +890,7 @@ async fn the_server_sends_a_held_back_notification_within_a_second_or_two() {
     let changes = Arc::new(Changes::default());
     let task = tokio::spawn(serve_info(
         sock,
-        Multicaster::new(identity()),
+        InfoBuilder::new(identity()),
         to,
         Arc::new(NoClock),
         Arc::clone(&changes),
@@ -1076,7 +1076,7 @@ async fn the_heartbeat_repeats_at_its_period() {
     let (_, info_rx, beat_rx, to, sock) = loopback(Duration::from_millis(20)).await;
     let task = tokio::spawn(serve_info(
         sock,
-        Multicaster::new(identity()),
+        InfoBuilder::new(identity()),
         to,
         Arc::new(NoClock),
         Arc::new(Changes::default()),
@@ -1111,7 +1111,7 @@ async fn a_member_s_packets_leave_through_the_manager_and_it_takes_over_when_the
     let manager = tokio::spawn(serve_info_with(
         sock,
         Some(share),
-        Multicaster::new(a.clone()),
+        InfoBuilder::new(a.clone()),
         to,
         Arc::new(NoClock),
         Arc::new(Changes::default()),
@@ -1127,7 +1127,7 @@ async fn a_member_s_packets_leave_through_the_manager_and_it_takes_over_when_the
         member_sock,
         manager_at,
         held,
-        Multicaster::new(b.clone()),
+        InfoBuilder::new(b.clone()),
         to,
         Arc::new(NoClock),
         Arc::new(Changes::default()),
@@ -1170,7 +1170,7 @@ async fn a_send_from_an_unregistered_sender_is_dropped() {
     let manager = tokio::spawn(serve_info_with(
         sock,
         Some(share),
-        Multicaster::new(identity()),
+        InfoBuilder::new(identity()),
         to,
         Arc::new(NoClock),
         Arc::new(Changes::default()),
@@ -1203,7 +1203,7 @@ async fn a_member_outlives_a_dead_manager_and_takes_the_port_when_it_frees() {
         member_sock,
         manager_at,
         held,
-        Multicaster::new(identity()),
+        InfoBuilder::new(identity()),
         to,
         Arc::new(NoClock),
         Arc::new(Changes::default()),
@@ -1235,7 +1235,7 @@ async fn a_member_outlives_a_dead_manager_and_takes_the_port_when_it_frees() {
 
 #[test]
 fn a_sample_rate_read_or_write_gets_our_rate_in_the_hardware_s_layout() {
-    let mut mc = Multicaster::new(identity());
+    let mut mc = InfoBuilder::new(identity());
     let rate = identity().sample_rate;
     let mut want = vec![0x00, 0x18, 0x00, 0x01];
     want.extend_from_slice(&rate.to_be_bytes());
@@ -1300,7 +1300,7 @@ fn dante_controller_s_option_reads_get_the_hardware_s_layout_with_our_one_option
     // The Tascam's pull-up is none (0), first in its list.
     assert_eq!(PULLUP_BODY.to_vec(), one_option(&unhex(TASCAM_PULLUP)));
 
-    let mut mc = Multicaster::new(identity());
+    let mut mc = InfoBuilder::new(identity());
     // The opcodes as Dante Controller sent them (byte 1 0x3e, last 0x64).
     let encoding = asking([0x07, 0x3e, 0x00, 0x83, 0, 0, 0, 0x64]);
     assert_eq!(parse_request(&encoding).unwrap().kind, Kind::Encoding);
@@ -1329,7 +1329,7 @@ fn dante_controller_s_option_reads_get_the_hardware_s_layout_with_our_one_option
 #[test]
 fn clock_stats_are_answered_as_a_follower_once_a_grandmaster_is_known() {
     use crate::info::client::parse_clock;
-    let mut mc = Multicaster::new(identity());
+    let mut mc = InfoBuilder::new(identity());
     let ask = asking([0x07, 0x38, 0x00, 0x21, 0, 0, 0, 0x64]);
     // No grandmaster yet: no reply, no sequence used.
     assert_eq!(mc.answer(&ask), None);

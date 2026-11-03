@@ -1,4 +1,5 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// Copyright (C) 2026 dstack contributors.
 
 //! Windows' UDP "connection reset" (dasio plan Task 2). After a
 //! datagram to a closed port draws an ICMP port-unreachable, Windows fails

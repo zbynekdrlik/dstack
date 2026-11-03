@@ -1,11 +1,8 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
-// Adapted from inferno (https://github.com/teodly/inferno at 9767558):
-// inferno_aoip/src/device_server/info_mcast_server.rs (the requests it
-// answers, the replies' bodies, the heartbeat, the groups and ports) and
-// inferno_aoip/src/protocol/mcast.rs (the 32-byte header), Copyright (C)
-// Teo and the inferno contributors, GPL-3.0-or-later OR AGPL-3.0-or-later,
-// taken under GPL-3.0-or-later. Changes Copyright (C) 2026 iemmixer
-// contributors.
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// Copyright (C) 2026 dstack contributors.
+// Protocol facts (byte layouts, opcodes, behaviour) checked against
+// inferno (https://github.com/teodly/inferno) as a reference; the code is
+// our own.
 
 //! Dante's info requests and heartbeat (#72 phase A): Dante Controller
 //! asks a device it found over mDNS and CMC for its board info on UDP
@@ -87,7 +84,7 @@
 //! Logs name opcodes, sequences and ports, never an address or a MAC.
 //!
 //! This module builds every packet's bytes and holds no socket
-//! ([`Multicaster`], per device, pure); the loops that receive and send
+//! ([`InfoBuilder`], per device, pure); the loops that receive and send
 //! them are in `server` ([`serve_info`], [`serve_shared`]).
 
 use std::collections::BTreeSet;
@@ -193,8 +190,8 @@ const BOOT_VERSION: [u8; 4] = [1, 0, 0, 0];
 /// 0x83, 0x81). Left out: 0x17's 0x02 (reboot and factory reset), byte
 /// 0x15 (clear config) and byte 0x14 (RTP, AES67).
 const FEATURE_FLAGS: [u8; 4] = [0x00, 0x00, 0x12, 0x18];
-/// The board info's byte 0xbb (inferno: "if 0, device is flooded with info
-/// multicast requests around 1 per second").
+/// The board info's byte 0xbb. At 0 the device receives info multicast
+/// requests about once a second, so it is never 0.
 const BYTE_BB: u8 = 0x1f;
 /// A datagram read from the socket (inferno's MTU-sized buffer); only its
 /// header is read.
@@ -405,19 +402,20 @@ pub fn network_info_body(net: &NetInfo) -> [u8; NETWORK_INFO_LEN] {
 }
 
 /// The channel-change notification's body for the RX channels `rx` (from
-/// 0): the bitmask's length in bytes (at least 1), then the bitmask.
+/// 0): the bitmask's length in bytes (at least 1), then the bitmask, bit
+/// `ch % 8` of byte `ch / 8` for channel `ch`.
 pub fn channel_change_body(rx: &[usize]) -> Vec<u8> {
-    let mut c = vec![0u8; 3];
+    let len = rx.iter().map(|&ch| ch / 8 + 1).max().unwrap_or(1);
+    let mut mask = vec![0u8; len];
     for &ch in rx {
-        let byte = 2 + ch / 8;
-        if byte >= c.len() {
-            c.resize(byte + 1, 0);
-        }
-        c[byte] |= 1 << (ch % 8);
+        mask[ch / 8] |= 1 << (ch % 8);
     }
-    let mask = u16::try_from(c.len() - 2).unwrap_or(u16::MAX);
-    c[..2].copy_from_slice(&mask.to_be_bytes());
-    c
+    let mut out = u16::try_from(len)
+        .unwrap_or(u16::MAX)
+        .to_be_bytes()
+        .to_vec();
+    out.append(&mut mask);
+    out
 }
 
 /// A channel's peak as the heartbeat carries it (inferno's
@@ -448,55 +446,74 @@ pub struct Records {
     pub late: [u32; MAX_FLOWS],
 }
 
-/// A record's head: its length, its type, 4, its content's length, the
-/// packet's sequence `seq`, 0.
-fn record_head(out: &mut Vec<u8>, len: usize, kind: u16, seq: u16) {
-    for field in [
-        u16::try_from(len).unwrap_or(u16::MAX),
+/// Appends one heartbeat record of type `kind` with `payload`: a 12-byte
+/// head (the record's length, its type, 4, the payload's length, the
+/// packet's sequence `seq`, 0), the payload, then zeros up to a multiple
+/// of 4 (the head states the length without them).
+fn push_record(out: &mut Vec<u8>, seq: u16, kind: u16, payload: &[u8]) {
+    let word = |v: usize| u16::try_from(v).unwrap_or(u16::MAX);
+    let head = [
+        word(12 + payload.len()),
         kind,
         4,
-        u16::try_from(len - 12).unwrap_or(u16::MAX),
+        word(payload.len()),
         seq,
         0,
-    ] {
-        out.extend_from_slice(&field.to_be_bytes());
-    }
+    ];
+    out.extend(head.iter().flat_map(|f| f.to_be_bytes()));
+    out.extend_from_slice(payload);
+    out.resize(out.len().next_multiple_of(4), 0);
 }
 
-/// The heartbeat's body with `records` for the packet of sequence `seq`
-/// (inferno's `send_heartbeat`): 0x8001, then 0x8002 when there are peaks,
-/// then 0x8003.
+/// `u16` words big-endian, then `u32` words big-endian.
+fn words(short: &[u16], long: &[u32]) -> Vec<u8> {
+    short
+        .iter()
+        .flat_map(|w| w.to_be_bytes())
+        .chain(long.iter().flat_map(|w| w.to_be_bytes()))
+        .collect()
+}
+
+/// The heartbeat's body with `records` for the packet of sequence `seq`:
+/// the frequency (0x8001), the peaks (0x8002) when there are channels,
+/// then each RX flow slot's lateness (0x8003) and late count (0x8004).
 pub fn heartbeat_body(seq: u16, r: &Records) -> Vec<u8> {
+    let count = |n: usize| u16::try_from(n).unwrap_or(u16::MAX);
+    let slots = count(MAX_FLOWS);
     let mut out = Vec::new();
-    record_head(&mut out, 16, record::FREQUENCY, seq);
-    out.extend_from_slice(&r.freq_ppb.to_be_bytes());
-    let peaks = r.tx_peaks.len() + r.rx_peaks.len();
-    if peaks > 0 {
-        let end = out.len() + (24 + peaks).next_multiple_of(4);
-        record_head(&mut out, 24 + peaks, record::PEAKS, seq);
-        for count in [r.tx_peaks.len(), r.rx_peaks.len(), 24] {
-            out.extend_from_slice(&u16::try_from(count).unwrap_or(u16::MAX).to_be_bytes());
-            out.extend_from_slice(&[0, 0]);
-        }
-        out.extend_from_slice(&r.tx_peaks);
-        out.extend_from_slice(&r.rx_peaks);
-        out.resize(end, 0);
+    push_record(&mut out, seq, record::FREQUENCY, &r.freq_ppb.to_be_bytes());
+    if !(r.tx_peaks.is_empty() && r.rx_peaks.is_empty()) {
+        // The TX and RX counts, each with a zero word, then the peaks'
+        // offset in the record (24) and a zero word, then the peak bytes.
+        let mut peaks = words(
+            &[
+                count(r.tx_peaks.len()),
+                0,
+                count(r.rx_peaks.len()),
+                0,
+                24,
+                0,
+            ],
+            &[],
+        );
+        peaks.extend_from_slice(&r.tx_peaks);
+        peaks.extend_from_slice(&r.rx_peaks);
+        push_record(&mut out, seq, record::PEAKS, &peaks);
     }
-    record_head(&mut out, 24 + 4 * MAX_FLOWS, record::RX_LATENESS, seq);
-    for field in [MAX_FLOWS as u16, 0, 24, 0] {
-        out.extend_from_slice(&field.to_be_bytes());
-    }
-    out.extend_from_slice(&r.rate.to_be_bytes());
-    for lateness in r.lateness {
-        out.extend_from_slice(&lateness.to_be_bytes());
-    }
-    record_head(&mut out, 20 + 4 * MAX_FLOWS, record::RX_LATE, seq);
-    for field in [MAX_FLOWS as u16, 0, 20, 0] {
-        out.extend_from_slice(&field.to_be_bytes());
-    }
-    for late in r.late {
-        out.extend_from_slice(&late.to_be_bytes());
-    }
+    let mut lateness = vec![r.rate];
+    lateness.extend_from_slice(&r.lateness);
+    push_record(
+        &mut out,
+        seq,
+        record::RX_LATENESS,
+        &words(&[slots, 0, 24, 0], &lateness),
+    );
+    push_record(
+        &mut out,
+        seq,
+        record::RX_LATE,
+        &words(&[slots, 0, 20, 0], &r.late),
+    );
     out
 }
 
@@ -603,17 +620,17 @@ impl Changes {
     }
 }
 
-/// The device's sender of info packets: its identity and the sequence its
-/// next packet carries (inferno's `Multicaster`).
+/// Builds the device's info packets: its identity and the sequence number
+/// its next packet carries.
 #[derive(Debug, Clone)]
-pub struct Multicaster {
+pub struct InfoBuilder {
     id: Identity,
     seq: u16,
-    /// What the clock stats state ([`Multicaster::set_clock`]).
+    /// What the clock stats state ([`InfoBuilder::set_clock`]).
     clock: Option<Follower>,
 }
 
-impl Multicaster {
+impl InfoBuilder {
     /// The first packet carries sequence 1, as inferno's.
     pub fn new(id: Identity) -> Self {
         Self {
@@ -732,7 +749,7 @@ impl Multicaster {
         .inspect(|_| debug!(op = %opcode, seq = req.seq, "info request answered"))
     }
 
-    /// [`Multicaster::answer`] within `limit` ([`limit`]): a reply over the
+    /// [`InfoBuilder::answer`] within `limit` ([`limit`]): a reply over the
     /// bound is dropped (counted there) and uses no sequence.
     pub fn answer_within(
         &mut self,

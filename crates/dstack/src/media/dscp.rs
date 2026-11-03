@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 iemmixer contributors.
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// Copyright (C) 2026 dstack contributors.
 
 //! The DSCP of our audio on Windows (dstack #1, 3.11.2026). Dante hardware
 //! marks its audio Expedited Forwarding ([`super::tx::DSCP_EF`]); switches

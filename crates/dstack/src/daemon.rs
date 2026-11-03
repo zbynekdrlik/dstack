@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 iemmixer contributors.
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// Copyright (C) 2026 dstack contributors.
 
 //! The device daemon (iemmixer #72 phase A, plan Task 5): its command line,
 //! the address it serves on, and the loop that serves the device.
@@ -53,7 +53,7 @@ use crate::announce::{AnnounceError, Announcer, Registry, records};
 use crate::clock::{Event, Polled, Sample};
 use crate::device::{Device, DeviceConfig};
 use crate::flows::client::Client;
-use crate::info::{Changes, Identity, Multicast, Multicaster, NetInfo};
+use crate::info::{Changes, Identity, InfoBuilder, Multicast, NetInfo};
 use crate::subscribe::TICK;
 use crate::subscribe::directory::{self, ArcDirectory, Network};
 use crate::subscribe::instance::Instances;
@@ -668,7 +668,7 @@ pub async fn serve<R: Registry + Browse>(
     let info = info::serve_shared(
         ip,
         sockets.info,
-        Multicaster::new(identity),
+        InfoBuilder::new(identity),
         multicast,
         Arc::new(media.beat()),
         rx_changes,

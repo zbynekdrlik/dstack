@@ -367,6 +367,13 @@ impl Link {
         self.device.media().rx_channels()
     }
 
+    /// The device's numbers as one JSON line: the clock, the flows, the
+    /// pump, each channel (what `dstack-dev ctl status` prints). An app reads
+    /// it here, without a dependency on `dstack` (dstack #102, #104).
+    pub fn status(&self) -> String {
+        dstack::ctl::status(self.device.media())
+    }
+
     /// Why the device ended by itself, if it did.
     pub fn ended(&self) -> Option<String> {
         self.device.ended()

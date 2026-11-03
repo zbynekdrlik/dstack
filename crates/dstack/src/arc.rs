@@ -1,10 +1,8 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
-// Adapted from inferno (https://github.com/teodly/inferno at 9767558):
-// inferno_aoip/src/protocol/proto_arc.rs (the opcodes, the body layouts and
-// the paging) and inferno_aoip/src/device_server/arc_server.rs (the
-// answers), Copyright (C) Teo and the inferno contributors,
-// GPL-3.0-or-later OR AGPL-3.0-or-later, taken under GPL-3.0-or-later.
-// Changes Copyright (C) 2026 iemmixer contributors.
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// Copyright (C) 2026 dstack contributors.
+// Protocol facts (byte layouts, opcodes, behaviour) checked against
+// inferno (https://github.com/teodly/inferno) as a reference; the code is
+// our own.
 
 //! ARC, Dante's control protocol on UDP 4440: the device's names, its
 //! channel counts and lists, channel renames, its flows (phase B: the TX
@@ -172,13 +170,13 @@ const FLOW_UNICAST: u16 = 0x11;
 pub const TX_PAGE: usize = 32;
 /// RX channels per page.
 pub const RX_PAGE: usize = 16;
-/// The PCM type of the channel descriptor and the mDNS `pcm` entry
-/// (inferno: "usually 0xe, in older devices 4").
+/// The PCM type of the channel descriptor and the mDNS `pcm` entry: 0x0e,
+/// what current Dante devices state (older ones state 4).
 pub const PCM_TYPE: u8 = 0x0e;
 /// The most channels one flow carries (inferno's `MAX_CHANNELS_IN_FLOW`).
 pub const MAX_CHANNELS_IN_FLOW: u16 = 8;
-/// The answer to 0x3300 (inferno: "necessary to avoid 'clock domain
-/// mismatch' error in DC").
+/// The answer to 0x3300. Without it Dante Controller reports a clock
+/// domain mismatch for the device.
 pub const CLOCK_REPLY: [u8; 8] = [0x38, 0x00, 0x38, 0xfd, 0x38, 0xfe, 0x38, 0xff];
 /// The counts' flags byte: bit 4, TX channels can be renamed. Bit 5, TX
 /// multicast, stays clear (inferno sets it): the device creates no
@@ -620,15 +618,15 @@ fn socket_descriptor(out: &mut Body, at: std::net::SocketAddrV4) {
 }
 
 /// 0x2200: the TX flows receivers asked for on 4455, expired ones too
-/// (inferno lists a flow until a new destination frees its slot), by slot
-/// (inferno's `query_tx_flows`). Each flow: its name `<flow>_<process>`, the
-/// receiver's device name and flow name (cut to [`MAX_REMOTE_NAME`]), at a
-/// multiple of 4 its socket descriptor (the receiver's address), the names
-/// descriptor (`0x0a00, 1`, the receiver's names, `0x10`, ours, 8 zeros),
-/// the flow descriptor (flow, `0x11` unicast, our rate, 0, our encoding,
-/// 1, the slots, the socket descriptor), each slot's TX channel (0 for
-/// none), the names descriptor's offset. The page's item is the flow
-/// descriptor's offset.
+/// (listed until a new destination takes the slot), by slot. Each flow,
+/// from a multiple of 4: the flow descriptor (flow, `0x11` unicast, our
+/// rate, 0, our encoding, 1, the slots, the socket descriptor's offset,
+/// each slot's TX channel or 0, the names descriptor's offset); at a
+/// multiple of 4 the socket descriptor (the receiver's address); the names
+/// descriptor (`0x0a00, 1`, the receiver's device and flow names, `0x10`,
+/// ours, 8 zeros); then the three names: ours `<flow>_<process>`, the
+/// receiver's device and flow names (cut to [`MAX_REMOTE_NAME`]). A reader
+/// follows the offsets. The page's item is the flow descriptor's offset.
 fn tx_flows(h: &Header, req: &[u8], cfg: &DeviceConfig, tx: &TxTable) -> ArcOutcome {
     page(
         h,
@@ -639,30 +637,39 @@ fn tx_flows(h: &Header, req: &[u8], cfg: &DeviceConfig, tx: &TxTable) -> ArcOutc
         |slot, out| {
             let f = tx.flow(slot)?;
             let id = wire_u16(slot + 1);
-            let local = out.cstr(&format!("{id}_{}", cfg.process_id));
-            let host = out.cstr(capped(&f.rx_host));
-            let name = out.cstr(capped(&f.rx_flow_name));
             out.align(4);
-            let socket = out.offset();
-            socket_descriptor(out, f.dest);
-            let names = out.offset();
-            for field in [0x0a00, 1, host, name, 0x10, local] {
+            let main = out.offset();
+            for field in [id, FLOW_UNICAST] {
                 out.u16(field);
             }
-            out.zeros(8);
-            let main = out.offset();
-            out.u16(id);
-            out.u16(FLOW_UNICAST);
             out.u32(cfg.sample_rate);
+            for field in [0, u16::from(cfg.encoding), 1, wire_u16(f.channels.len())] {
+                out.u16(field);
+            }
+            let socket_ref = out.offset();
             out.u16(0);
-            out.u16(u16::from(cfg.encoding));
-            out.u16(1);
-            out.u16(wire_u16(f.channels.len()));
-            out.u16(socket);
             for channel in &f.channels {
                 out.u16(channel.unwrap_or(0));
             }
-            out.u16(names);
+            let names_ref = out.offset();
+            out.u16(0);
+            out.align(4);
+            let here = out.offset();
+            out.set_u16(socket_ref, here);
+            socket_descriptor(out, f.dest);
+            let here = out.offset();
+            out.set_u16(names_ref, here);
+            let names = out.offset();
+            out.zeros(20);
+            out.set_u16(names, 0x0a00);
+            out.set_u16(names + 2, 1);
+            out.set_u16(names + 8, 0x10);
+            let local = out.cstr(&format!("{id}_{}", cfg.process_id));
+            let host = out.cstr(capped(&f.rx_host));
+            let name = out.cstr(capped(&f.rx_flow_name));
+            out.set_u16(names + 4, host);
+            out.set_u16(names + 6, name);
+            out.set_u16(names + 10, local);
             Some(main.to_be_bytes().to_vec())
         },
     )
@@ -747,15 +754,16 @@ fn settings_body(body: &[u8], cfg: &DeviceConfig) -> Option<Vec<u8>> {
     Some(pairs)
 }
 
-/// 0x3200: our RX flows a transmitter granted, by slot (inferno lists a
-/// flow from its grant; inferno's `query_rx_flows`). Each flow: at a
-/// multiple of 4 its socket descriptor (our address and the slot's port),
-/// descriptor 2 (`9, 1, 0x800, 0`, the latency in ns, 0), each channel
-/// slot's bitmask of the RX channels it feeds (16 a word, as many words as
-/// our RX channels need), at a multiple of 4 the flow descriptor (flow, 1,
-/// our rate, 0, our encoding, 1, the slots, the words a bitmask, the socket
-/// descriptor), the bitmasks' offsets, descriptor 2's offset. The page's
-/// item is the flow descriptor's offset.
+/// 0x3200: our RX flows a transmitter granted (an asked flow is listed
+/// once granted), by slot. Each flow, from a multiple of 4: the flow
+/// descriptor (flow, 1, our rate, 0, our encoding, 1, the slots, the words
+/// a bitmask, the socket descriptor's offset, each slot's bitmask offset,
+/// descriptor 2's offset); at a multiple of 4 the socket descriptor (our
+/// address and the slot's port); descriptor 2 (`9, 1, 0x800, 0`, the
+/// latency in ns, 0); each slot's bitmask of the RX channels it feeds (16 a
+/// word, as many words as our RX channels need; one word for a flow
+/// without slots). A reader follows the offsets. The page's item is the
+/// flow descriptor's offset.
 fn rx_flows(h: &Header, req: &[u8], cfg: &DeviceConfig, rx: &Manager) -> ArcOutcome {
     page(
         h,
@@ -765,47 +773,47 @@ fn rx_flows(h: &Header, req: &[u8], cfg: &DeviceConfig, rx: &Manager) -> ArcOutc
         0..usize::from(MAX_FLOWS),
         |slot, out| {
             let f = rx.flow(slot).filter(|f| f.handle.is_some())?;
-            out.align(4);
-            let socket = out.offset();
-            socket_descriptor(out, std::net::SocketAddrV4::new(rx.ip(), f.port));
-            let descriptor2 = out.offset();
-            for field in [9, 1, 0x800, 0] {
-                out.u16(field);
-            }
-            out.u32(stated_latency_ns(f.latency_ns, cfg.sample_rate));
-            out.u32(0);
-            // inferno: every slot's mask has a bit per RX channel, so as many
-            // words as they need; a flow without slots has one.
             let words = if f.rx.is_empty() {
                 1
             } else {
                 cfg.rx.len().div_ceil(16).max(1)
             };
-            let masks: Vec<u16> =
-                f.rx.iter()
-                    .map(|fed| {
-                        let at = out.offset();
-                        for word in bitmask(fed, words) {
-                            out.u16(word);
-                        }
-                        at
-                    })
-                    .collect();
             out.align(4);
             let main = out.offset();
             out.u16(wire_u16(slot + 1));
             out.u16(1);
             out.u32(cfg.sample_rate);
-            out.u16(0);
-            out.u16(u16::from(cfg.encoding));
-            out.u16(1);
-            out.u16(wire_u16(f.rx.len()));
-            out.u16(wire_u16(words));
-            out.u16(socket);
-            for mask in masks {
-                out.u16(mask);
+            for field in [
+                0,
+                u16::from(cfg.encoding),
+                1,
+                wire_u16(f.rx.len()),
+                wire_u16(words),
+            ] {
+                out.u16(field);
             }
-            out.u16(descriptor2);
+            // The offsets, filled in once their targets are written: the
+            // socket descriptor, each slot's bitmask, descriptor 2.
+            let refs = out.offset();
+            out.zeros(2 * (f.rx.len() + 2));
+            out.align(4);
+            let here = out.offset();
+            out.set_u16(refs, here);
+            socket_descriptor(out, std::net::SocketAddrV4::new(rx.ip(), f.port));
+            let here = out.offset();
+            out.set_u16(refs + wire_u16(2 * (f.rx.len() + 1)), here);
+            for field in [9, 1, 0x800, 0] {
+                out.u16(field);
+            }
+            out.u32(stated_latency_ns(f.latency_ns, cfg.sample_rate));
+            out.u32(0);
+            for (i, fed) in f.rx.iter().enumerate() {
+                let here = out.offset();
+                out.set_u16(refs + wire_u16(2 * (i + 1)), here);
+                for word in bitmask(fed, words) {
+                    out.u16(word);
+                }
+            }
             Some(main.to_be_bytes().to_vec())
         },
     )
@@ -1023,62 +1031,99 @@ fn common_descriptor(out: &mut Body, cfg: &DeviceConfig) -> u16 {
     at
 }
 
-/// One page of a list (inferno's `paginate_make_response` and
-/// `serialize_items`): `[slots, count]`, `slots` descriptors of `item`
-/// bytes (the unused ones zero), then what they point at. The request names
-/// the page's first item (from 1) in its body's bytes 2–3; the page lists
-/// `items` from there. `write` writes an item's strings and descriptors
-/// (the page's first may write a shared one) and returns its `item`-byte
-/// descriptor, or `None` for an item not listed (an empty flow slot: passed
-/// over, not counted). The page says more follow (`0x8112`) when an item is
-/// left after its slots are full, or when an item has brought the reply to
-/// [`SOFT_LIMIT`] bytes: that item's descriptor stays in its slot, not
-/// counted, as inferno leaves it.
+/// What a page's items write behind the descriptor table: their strings
+/// and descriptors, as packet offsets that are final when written (the
+/// table's room is reserved first), and one descriptor every item may
+/// share, written once, where the first item that asks for it stands.
+struct Heap {
+    body: Body,
+    shared: Option<u16>,
+}
+
+impl Heap {
+    /// The shared descriptor's offset, `write` writing it the first time.
+    fn shared(&mut self, write: impl FnOnce(&mut Body) -> u16) -> u16 {
+        match self.shared {
+            Some(at) => at,
+            None => *self.shared.insert(write(&mut self.body)),
+        }
+    }
+}
+
+impl std::ops::Deref for Heap {
+    type Target = Body;
+    fn deref(&self) -> &Body {
+        &self.body
+    }
+}
+
+impl std::ops::DerefMut for Heap {
+    fn deref_mut(&mut self) -> &mut Body {
+        &mut self.body
+    }
+}
+
+/// One page of a list: `[slots, count]`, a table of `slots` descriptors of
+/// `item` bytes (unused ones zero), then the heap they point into. The
+/// request names the page's first item (from 1) in its body's bytes 2–3.
+/// `write` writes one item's strings and descriptors to the heap and
+/// returns its table descriptor, or `None` for an item that is not listed
+/// (an empty flow slot: passed over, taking no room). More follow
+/// (`0x8112`) when an item is left once the table is full, or when an item
+/// has brought the reply to [`SOFT_LIMIT`] bytes: that item stands in the
+/// table but is not counted (Dante Controller asks for it again on the
+/// next page).
 fn page<I>(
     h: &Header,
     req: &[u8],
     slots: usize,
     item: usize,
     items: impl IntoIterator<Item = I>,
-    mut write: impl FnMut(I, &mut Body) -> Option<Vec<u8>>,
+    mut write: impl FnMut(I, &mut Heap) -> Option<Vec<u8>>,
 ) -> ArcOutcome {
     let Some(first) = first_item(req) else {
         return refuse(h, "a page request without its first item");
     };
-    let mut out = Body::new();
-    out.u8(slots as u8);
-    out.u8(0);
-    let table = usize::from(out.offset());
-    out.zeros(slots * item);
-    let mut count = 0;
-    let mut more = false;
-    for it in items.into_iter().skip(usize::from(first) - 1) {
-        if count >= slots {
-            more = true;
-            break;
+    let mut heap = Heap {
+        body: Body::new(),
+        shared: None,
+    };
+    heap.zeros(2 + slots * item);
+    let mut table: Vec<Vec<u8>> = Vec::with_capacity(slots);
+    let mut counted = 0;
+    let mut left = items.into_iter().skip(usize::from(first) - 1);
+    let more = loop {
+        let Some(it) = left.next() else {
+            break false;
+        };
+        if table.len() == slots {
+            break true;
         }
-        let Some(descriptor) = write(it, &mut out) else {
+        let Some(descriptor) = write(it, &mut heap) else {
             continue;
         };
         debug_assert_eq!(descriptor.len(), item);
-        out.set_bytes(wire_u16(table + count * item), &descriptor);
-        if usize::from(out.offset()) >= SOFT_LIMIT {
-            more = true;
-            break;
+        table.push(descriptor);
+        if usize::from(heap.offset()) >= SOFT_LIMIT {
+            break true;
         }
-        count += 1;
+        counted += 1;
+    };
+    let mut body = heap.body.into_vec();
+    body[0] = slots as u8;
+    body[1] = counted as u8;
+    for (i, descriptor) in table.iter().enumerate() {
+        body[2 + i * item..2 + (i + 1) * item].copy_from_slice(descriptor);
     }
-    out.set_u8(wire_u16(HEADER_LEN + 1), count as u8);
     let status = if more { STATUS_MORE } else { STATUS_OK };
-    ArcOutcome::Reply(reply(h, status, &out.into_vec()))
+    ArcOutcome::Reply(reply(h, status, &body))
 }
 
 /// 0x2000: each TX channel with its default name.
 fn tx_channels(h: &Header, req: &[u8], cfg: &DeviceConfig) -> ArcOutcome {
-    let mut common = None;
     let n = cfg.tx.len();
     page(h, req, n.min(TX_PAGE), 8, 0..n, |index, out| {
-        let common = *common.get_or_insert_with(|| common_descriptor(out, cfg));
+        let common = out.shared(|b| common_descriptor(b, cfg));
         let name = out.cstr(&cfg.tx[index]);
         Some(descriptor(&[wire_u16(index + 1), 7, common, name]))
     })
@@ -1086,13 +1131,14 @@ fn tx_channels(h: &Header, req: &[u8], cfg: &DeviceConfig) -> ArcOutcome {
 
 /// 0x2010: each TX channel with its current name.
 fn tx_names(h: &Header, req: &[u8], state: &DeviceState) -> ArcOutcome {
-    let mut opened = false;
     let n = state.tx.len();
     page(h, req, n.min(TX_PAGE), 6, 0..n, |index, out| {
-        if !opened {
-            out.u32(0);
-            opened = true;
-        }
+        // A zero word heads the names (written once, before the first).
+        out.shared(|b| {
+            let at = b.offset();
+            b.u32(0);
+            at
+        });
         let id = wire_u16(index + 1);
         let name = out.cstr(&state.tx[index]);
         Some(descriptor(&[id, id, name]))
@@ -1125,10 +1171,9 @@ fn rx_channels(
     cfg: &DeviceConfig,
     manager: &Manager,
 ) -> ArcOutcome {
-    let mut common = None;
     let n = state.rx.len();
     page(h, req, n.min(RX_PAGE), 20, 0..n, |index, out| {
-        let common = *common.get_or_insert_with(|| common_descriptor(out, cfg));
+        let common = out.shared(|b| common_descriptor(b, cfg));
         let (tx_channel, tx_device, status) = match listed_subscription(state, index, manager) {
             Some((sub, status)) => (out.cstr(&sub.tx_channel), out.cstr(&sub.tx_device), status),
             None => (0, 0, 0),

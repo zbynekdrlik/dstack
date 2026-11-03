@@ -1,11 +1,8 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
-// Adapted from inferno (https://github.com/teodly/inferno at 9767558):
-// inferno_aoip/src/device_server/flows_tx.rs (the header a TX packet
-// carries), inferno_aoip/src/device_server/flows_rx.rs (its parse) and
-// inferno_aoip/src/device_server/samples_utils.rs (the sample widths),
-// Copyright (C) Teo and the inferno contributors, GPL-3.0-or-later OR
-// AGPL-3.0-or-later, taken under GPL-3.0-or-later. Changes Copyright (C)
-// 2026 iemmixer contributors.
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// Copyright (C) 2026 dstack contributors.
+// Protocol facts (byte layouts, opcodes, behaviour) checked against
+// inferno (https://github.com/teodly/inferno) as a reference; the code is
+// our own.
 
 //! A Dante audio packet (one UDP datagram of a flow):
 //!

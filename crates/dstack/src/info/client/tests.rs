@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use super::*;
 use crate::ctl::Requests;
-use crate::info::{Beat, Changes, Identity, Multicast, Multicaster, NetInfo, Records, serve_info};
+use crate::info::{Beat, Changes, Identity, InfoBuilder, Multicast, NetInfo, Records, serve_info};
 
 const TEST_DEVICE: &str = include_str!("../../../../../config/test-device.toml");
 const WAIT: Duration = Duration::from_secs(5);
@@ -223,7 +223,7 @@ fn our_server(client: &UdpSocket) -> (tokio::runtime::Runtime, std::net::SocketA
     let at = sock.local_addr().unwrap();
     rt.spawn(serve_info(
         sock,
-        Multicaster::new(identity()),
+        InfoBuilder::new(identity()),
         Multicast {
             info,
             heartbeat: "127.0.0.1:9".parse().unwrap(),

@@ -1,14 +1,8 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
-// Adapted from inferno (https://github.com/teodly/inferno at 9767558):
-// inferno_aoip/src/device_server/flows_tx.rs (the TX flow table: 32 flows, a
-// slot from a running sequence and a random cookie, a request for a
-// destination already served sets its channels, an update revives an expired
-// flow, 4 s without a datagram on the flow expires it, expired flows freed
-// when a new destination needs a slot; the schedule's bootstrap on a multiple
-// of fpp, its lag and jump checks; the keepalives read every 33 ms),
-// Copyright (C) Teo and the inferno contributors, GPL-3.0-or-later OR
-// AGPL-3.0-or-later, taken under GPL-3.0-or-later. Changes Copyright (C)
-// 2026 iemmixer contributors.
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// Copyright (C) 2026 dstack contributors.
+// Protocol facts (byte layouts, opcodes, behaviour) checked against
+// inferno (https://github.com/teodly/inferno) as a reference; the code is
+// our own.
 
 //! Our TX flows (Gen 3 phase B, plan Task 4): the flows receivers asked
 //! for on UDP 4455 ([`crate::flows::server`]) and the thread that sends

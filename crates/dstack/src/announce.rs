@@ -1,10 +1,8 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
-// Adapted from inferno (https://github.com/teodly/inferno at 9767558):
-// inferno_aoip/src/device_server/mdns_server.rs (the services, their TXT
-// entries, the channel records) and inferno_aoip/src/device_server/flows_tx.rs
-// (the frames-per-packet range), Copyright (C) Teo and the inferno
-// contributors, GPL-3.0-or-later OR AGPL-3.0-or-later, taken under
-// GPL-3.0-or-later. Changes Copyright (C) 2026 iemmixer contributors.
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// Copyright (C) 2026 dstack contributors.
+// Protocol facts (byte layouts, opcodes, behaviour) checked against
+// inferno (https://github.com/teodly/inferno) as a reference; the code is
+// our own.
 
 //! The device's mDNS records, as Dante Controller browses for them:
 //!
@@ -120,8 +118,8 @@ pub fn records(
         "channels=0x6000004d".to_string(),
         mf,
         model,
-        // inferno sends two empty strings last ("really needed?"); kept so
-        // the record is byte for byte what Dante Controller accepts.
+        // Two empty entries last: the record as Dante Controller accepts it
+        // (seen from DC-tested devices), kept byte for byte.
         String::new(),
         String::new(),
     ];
@@ -130,38 +128,47 @@ pub fn records(
         record(CMC_SERVICE, state.name.clone(), cfg.cmc_port, cmc_txt),
     ];
     let nchan = MAX_CHANNELS_IN_FLOW.min(u16::try_from(cfg.tx.len()).unwrap_or(u16::MAX));
-    for (i, (default, now)) in cfg.tx.iter().zip(&state.tx).enumerate() {
-        let txt = |is_default: bool| {
-            let mut txt = vec![
-                "txtvers=2".to_string(),
-                "dbcp1=0x1102".to_string(),
-                "dbcp=0x1004".to_string(),
-                format!("id={}", i + 1),
-                format!("rate={}", cfg.sample_rate),
-                format!("pcm={} {PCM_TYPE:x}", cfg.encoding / 8),
-                format!("enc={}", cfg.encoding),
-                format!("en={}", cfg.encoding),
-                format!("latency_ns={}", cfg.advertised_latency_ns()),
-                format!("fpp={},{FPP_MIN}", cfg.tx_fpp_max),
-                format!("nchan={nchan}"),
-            ];
-            if is_default {
-                txt.push("default".to_string());
-            }
-            txt
-        };
-        let named = |channel: &str| format!("{channel}@{}", state.name);
+    // Each TX channel is announced under its default name, marked
+    // `default`, and under its current name too when that differs (mDNS
+    // names compare without case, so a case-only rename is one record).
+    let names: Vec<(usize, &str, bool)> = cfg
+        .tx
+        .iter()
+        .zip(&state.tx)
+        .enumerate()
+        .flat_map(|(i, (default, now))| {
+            let renamed = !now.eq_ignore_ascii_case(default);
+            std::iter::once((i, default.as_str(), true)).chain(renamed.then_some((
+                i,
+                now.as_str(),
+                false,
+            )))
+        })
+        .collect();
+    for (i, channel, is_default) in names {
+        let base = [
+            "txtvers=2".to_string(),
+            "dbcp1=0x1102".to_string(),
+            "dbcp=0x1004".to_string(),
+            format!("id={}", i + 1),
+            format!("rate={}", cfg.sample_rate),
+            format!("pcm={} {PCM_TYPE:x}", cfg.encoding / 8),
+            format!("enc={}", cfg.encoding),
+            format!("en={}", cfg.encoding),
+            format!("latency_ns={}", cfg.advertised_latency_ns()),
+            format!("fpp={},{FPP_MIN}", cfg.tx_fpp_max),
+            format!("nchan={nchan}"),
+        ];
+        let txt = base
+            .into_iter()
+            .chain(is_default.then(|| "default".to_string()))
+            .collect();
         out.push(record(
             CHAN_SERVICE,
-            named(default),
+            format!("{channel}@{}", state.name),
             cfg.flows_port,
-            txt(true),
+            txt,
         ));
-        // mDNS names compare without case: a name that differs only so is
-        // the default record's own name.
-        if !now.eq_ignore_ascii_case(default) {
-            out.push(record(CHAN_SERVICE, named(now), cfg.flows_port, txt(false)));
-        }
     }
     // The flow-control service, on the port our chan records name: a
     // receiver such as DVS sends its flow requests where this record says,

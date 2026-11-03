@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 iemmixer contributors.
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// Copyright (C) 2026 dstack contributors.
 
 //! `dstack-dev`: the stack's own device binary, for its tests and the
 //! real-hardware gate. Glue only: [`dstack::daemon::cli::main`] does
