@@ -13,6 +13,13 @@
 //! holds the ratio exactly; the ASRC between two clocks (phase 2) steers the
 //! same stage.
 //!
+//! Measured by the tests (1 kHz at −1 dBFS, computed in `f64`, so far
+//! below any 24-bit floor): THD+N 230.7 dB at 48→96 kHz, 252.0 dB at
+//! 96→48, 206–213 dB at 44.1↔48; a 20 kHz tone's 28 kHz image at 48→96
+//! −214.9 dBFS; a 30 kHz tone folded at 96→48 −209.1 dBFS. The tests hold
+//! the bars (≥ 120 dB, ≤ −120 dBFS). Delay at 48→96: 256 output frames
+//! (2.67 ms); at 96→48: 64 (1.33 ms).
+//!
 //! Data is channel-major `f64`: channel `c` of a buffer of `frames` frames
 //! sits at `c * frames ..`. [`Converter::process`] allocates nothing.
 
@@ -40,10 +47,15 @@ pub const PARAMS: SincInterpolationParameters = SincInterpolationParameters {
     window: WindowFunction::BlackmanHarris2,
 };
 
-/// How far an ASRC's ratio may leave its nominal value: twice the
-/// controller's bound (600 ppm), so a ramp never reaches the core's limit.
-const MAX_RELATIVE: f64 = 1.000_6;
-const _: () = assert!(asrc::MAX_PPM == 300.0);
+/// How far [`Converter::set_ppm`] may move an ASRC's ratio, ppm: the room
+/// SongPlayer's outputs use (rubato's 1.001). [`asrc::Controller`] keeps
+/// its own correction within ±[`asrc::MAX_PPM`].
+pub const ROOM_PPM: f64 = 1000.0;
+/// The sinc core's limit on the ratio: a little over [`ROOM_PPM`], so a
+/// ramp to its edge never reaches the core's own.
+const MAX_RELATIVE: f64 = 1.001_1;
+const _: () = assert!(asrc::MAX_PPM < ROOM_PPM);
+const _: () = assert!(1.0 + ROOM_PPM * 1e-6 < MAX_RELATIVE);
 
 /// Which side of a converter has a fixed block size.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -124,7 +136,7 @@ impl Converter {
 
     /// A converter between two clocks (the ASRC): always the sinc stage,
     /// equal rates too, its ratio adjustable by [`Converter::set_ppm`] up
-    /// to ±[`asrc::MAX_PPM`] (with headroom).
+    /// to ±[`ROOM_PPM`] (with headroom).
     pub fn drifting(
         from: u32,
         to: u32,
@@ -257,7 +269,7 @@ impl Converter {
     }
 
     /// Leaves the nominal ratio by `ppm` (positive: more output per input),
-    /// ramped over the next call, within ±[`asrc::MAX_PPM`]. An error for a
+    /// ramped over the next call, within ±[`ROOM_PPM`]. An error for a
     /// converter made by [`Converter::new`] (its ratio is fixed).
     pub fn set_ppm(&mut self, ppm: f64) -> Result<(), ConvertError> {
         let Engine::Sinc(stage) = &mut self.engine else {
@@ -265,7 +277,7 @@ impl Converter {
                 "a copy has no ratio to adjust".into(),
             ));
         };
-        let ppm = ppm.clamp(-asrc::MAX_PPM, asrc::MAX_PPM);
+        let ppm = ppm.clamp(-ROOM_PPM, ROOM_PPM);
         stage
             .set_resample_ratio_relative(1.0 + ppm * 1e-6, true)
             .map_err(|e| ConvertError::Core(e.to_string()))

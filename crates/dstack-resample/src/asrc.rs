@@ -8,8 +8,11 @@
 //!
 //! The laws are SongPlayer's ASIO servo (`sp-server/src/playback/
 //! asrc_servo.rs`, #233), itself camera-box's `asrc-compensator` turned
-//! around, made generic: two clocks and a target buffer depth, no VBAN slot
-//! and no underrun cushion.
+//! around, made generic: two clocks and a target buffer depth, no VBAN
+//! slot. SongPlayer's additions are opt-in builders: the underrun cushion
+//! ([`Controller::with_cushion_max_s`]), the calm zone from the consumer's
+//! callback period ([`Controller::with_calm_zone_ms`], [`calm_zone_ms_for`])
+//! and the first block's priming ([`Controller::with_priming`]).
 //!
 //! - **Rate:** ordinary least squares over up to [`REGRESSION_SPAN_S`] of
 //!   1 s window means of `(x, y)` rate points (x on our clock, y the other
@@ -27,6 +30,15 @@
 //! - **Output:** rate + offset + P + I + the outside bias, within
 //!   ±[`MAX_PPM`], moved at most [`MAX_SLEW_PPM_PER_S`] per second
 //!   (inaudible).
+//! - **Cushion:** silence the consumer played ([`Controller::played_silence`])
+//!   is kept as an excess over the target, up to the cushion's cap: the
+//!   offset is braked against the band [target, target + cushion] while the
+//!   level loop keeps the target. Each window the cushion follows the mean
+//!   down, except a window that folded new silence keeps it; a re-centre
+//!   or the priming drops it.
+//! - **Stall:** a window whose rate point moves more than
+//!   [`MAX_SANE_WINDOW_PPM`] from the last (a consumer that stopped) flushes
+//!   the rate fit and holds the correction.
 //! - **Last resort:** a depth more than `hard_excess_s` off the target (or
 //!   under `floor_s`) asks the caller for a re-centre (insert or skip under
 //!   fades), counted as a fault; the level loop's error starts over.
@@ -70,6 +82,17 @@ pub const WINDOW_S: f64 = 1.0;
 pub const CALM_ZONE_MS: f64 = 1.0;
 /// Bound on the outside bias, ppm.
 pub const MAX_BIAS_PPM: f64 = 10.0;
+/// A window's rate beyond this is no clock but a stall, ppm.
+pub const MAX_SANE_WINDOW_PPM: f64 = 100_000.0;
+
+/// The calm zone for a consumer that takes `callback_s` a callback: half
+/// of it when that is longer than [`CALM_ZONE_MS`], ms. A depth read once a
+/// callback saws by a period, and the braking's steep gain near 0 would
+/// otherwise move the ratio on that sawtooth (2.67 ms for 512 frames at
+/// 96 kHz).
+pub fn calm_zone_ms_for(callback_s: f64) -> f64 {
+    (callback_s * 1000.0 / 2.0).max(CALM_ZONE_MS)
+}
 
 /// Where the error comes from (vstack rig-core's `AsrcBasis`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -240,6 +263,21 @@ pub fn braking_ppm(err_ms: f64, calm_ms: f64) -> f64 {
         .copysign(err_ms)
 }
 
+/// Whether a window's rate point, `dx` s on our clock and `dy` s of the
+/// other's less ours after the last one, is a stall: `|dy / dx|` beyond
+/// [`MAX_SANE_WINDOW_PPM`], written without the division (a window at the
+/// last one's time is none).
+pub fn stalled(dx: f64, dy: f64) -> bool {
+    dx > 0.0 && dy.abs() * 1e6 > MAX_SANE_WINDOW_PPM * dx
+}
+
+/// The error the offset is braked by, ms: `err_ms` (the target less the
+/// depth) measured from the band [target, target + `cushion_ms`]: a deficit
+/// from the target, an excess from the band's top, 0 within it.
+pub fn band_error_ms(err_ms: f64, cushion_ms: f64) -> f64 {
+    err_ms.max(0.0) - (-err_ms - cushion_ms).max(0.0)
+}
+
 /// What the caller does after an observation.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Step {
@@ -248,6 +286,9 @@ pub enum Step {
     /// Insert (> 0) or skip (< 0) this much before going on, s (under
     /// fades); then set the correction, ppm. A fault, counted.
     Recentre { by_s: f64, ppm: f64 },
+    /// The first observation ([`Controller::with_priming`]): insert this
+    /// much to reach the target, s; then set the correction, ppm. No fault.
+    Prime { by_s: f64, ppm: f64 },
 }
 
 /// The controller of one ASRC.
@@ -270,6 +311,22 @@ pub struct Controller {
     advanced: (f64, f64),
     recentres: u64,
     rebases: u64,
+    calm_ms: f64,
+    cushion_max_s: f64,
+    cushion_s: f64,
+    /// The consumer's silence so far, s (`None`: no count read yet).
+    silence_s: Option<f64>,
+    /// New silence was folded since the open window started.
+    folded: bool,
+    /// [`Controller::with_priming`] was asked for.
+    priming: bool,
+    /// The next observation primes.
+    prime_next: bool,
+    /// The last window's mean error outside the band, ms (positive: later).
+    offset_ms: f64,
+    /// The last closed window's rate point.
+    last_point: Option<(f64, f64)>,
+    stalls: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -300,7 +357,79 @@ impl Controller {
             advanced: (0.0, 0.0),
             recentres: 0,
             rebases: 0,
+            calm_ms: CALM_ZONE_MS,
+            cushion_max_s: 0.0,
+            cushion_s: 0.0,
+            silence_s: None,
+            folded: false,
+            priming: false,
+            prime_next: false,
+            offset_ms: 0.0,
+            last_point: None,
+            stalls: 0,
         }
+    }
+
+    /// Keeps up to `max_s` of the excess the consumer's silence leaves
+    /// ([`Controller::played_silence`]); 0 (the default) keeps none.
+    pub fn with_cushion_max_s(mut self, max_s: f64) -> Self {
+        self.cushion_max_s = max_s.max(0.0);
+        self
+    }
+
+    /// The calm zone, ms ([`CALM_ZONE_MS`] by default; [`calm_zone_ms_for`]
+    /// gives it from the consumer's callback period).
+    pub fn with_calm_zone_ms(mut self, ms: f64) -> Self {
+        self.calm_ms = ms.max(0.0);
+        self
+    }
+
+    /// The first observation inserts up to the target ([`Step::Prime`]),
+    /// not counted as a re-centre; [`Controller::restart`] primes again.
+    pub fn with_priming(mut self) -> Self {
+        self.priming = true;
+        self.prime_next = true;
+        self
+    }
+
+    /// After the consumer reopened: the next observation primes (with
+    /// [`Controller::with_priming`]), the window, the level loop's error
+    /// and the cushion start over; the rate fit is kept.
+    pub fn restart(&mut self) {
+        self.prime_next = self.priming;
+        self.window = None;
+        self.level.reset_error();
+        self.cushion_s = 0.0;
+        self.silence_s = None;
+        self.folded = false;
+    }
+
+    /// The consumer's silence so far, `total_s` (cumulative): what is new
+    /// since the last count joins the cushion, up to its cap. The first
+    /// count is the start; a count that went back folds nothing.
+    pub fn played_silence(&mut self, total_s: f64) {
+        let new = self.silence_s.map_or(0.0, |last| (total_s - last).max(0.0));
+        self.silence_s = Some(total_s);
+        if new > 0.0 {
+            self.cushion_s = (self.cushion_s + new).min(self.cushion_max_s);
+            self.folded = true;
+        }
+    }
+
+    /// The excess kept over the target, s.
+    pub fn cushion_s(&self) -> f64 {
+        self.cushion_s
+    }
+
+    /// The last window's mean depth outside [target, target + cushion], ms:
+    /// positive over it (later), negative under the target, 0 within.
+    pub fn offset_ms(&self) -> f64 {
+        self.offset_ms
+    }
+
+    /// Windows read as a stall (the rate fit flushed).
+    pub fn stalls(&self) -> u64 {
+        self.stalls
     }
 
     /// The correction it last gave, ppm.
@@ -359,6 +488,16 @@ impl Controller {
     /// the other clock's time (its frames consumed / its rate).
     pub fn observe(&mut self, now_s: f64, depth_s: f64, other_s: f64) -> Step {
         let err_s = self.target_s - depth_s;
+        if self.prime_next {
+            self.prime_next = false;
+            self.cushion_s = 0.0;
+            if err_s > 0.0 {
+                return Step::Prime {
+                    by_s: err_s,
+                    ppm: self.applied_ppm,
+                };
+            }
+        }
         if depth_s < self.floor_s || err_s.abs() > self.hard_excess_s {
             return self.recentre(err_s);
         }
@@ -378,6 +517,11 @@ impl Controller {
     }
 
     fn add(&mut self, now_s: f64, err_ms: f64, y: Option<f64>) -> Step {
+        // A clock that went back before the window's start: it starts over
+        // (it would stay open for the step and a second more).
+        if self.window.is_some_and(|w| now_s < w.start_s) {
+            self.window = None;
+        }
         let w = self.window.get_or_insert(Window {
             start_s: now_s,
             err_ms: 0.0,
@@ -398,17 +542,36 @@ impl Controller {
         }
         let w = *w;
         self.window = None;
-        if w.points > 0.0 && self.rate.offer(w.x_s / w.points, w.y_s / w.points) == Offered::Rebased
-        {
-            self.rebases += 1;
-        }
-        let err_ms = w.err_ms / w.n;
+        let folded = std::mem::take(&mut self.folded);
         let dt_s = self
             .last_apply_s
             .map_or(now_s - w.start_s, |prev| now_s - prev)
             .max(0.0);
         self.last_apply_s = Some(now_s);
-        let base = self.rate.rate_ppm() + braking_ppm(err_ms, CALM_ZONE_MS) + self.bias_ppm;
+        if w.points > 0.0 {
+            let point = (w.x_s / w.points, w.y_s / w.points);
+            let stalled = self
+                .last_point
+                .is_some_and(|(x, y)| stalled(point.0 - x, point.1 - y));
+            self.last_point = Some(point);
+            if stalled {
+                self.rate.flush();
+                self.stalls += 1;
+                return Step::Hold(self.applied_ppm);
+            }
+            if self.rate.offer(point.0, point.1) == Offered::Rebased {
+                self.rebases += 1;
+            }
+        }
+        let err_ms = w.err_ms / w.n;
+        // The excess over the target the window held: the cushion follows
+        // it down, unless the window folded new silence.
+        if !folded {
+            self.cushion_s = self.cushion_s.min((-err_ms / 1000.0).max(0.0));
+        }
+        let band_err_ms = band_error_ms(err_ms, self.cushion_s * 1000.0);
+        self.offset_ms = -band_err_ms;
+        let base = self.rate.rate_ppm() + braking_ppm(band_err_ms, self.calm_ms) + self.bias_ppm;
         let pi = self.level.update(err_ms, dt_s, base);
         let target = (base + pi).clamp(-MAX_PPM, MAX_PPM);
         self.applied_ppm = slew(self.applied_ppm, target, dt_s);
@@ -418,6 +581,7 @@ impl Controller {
     fn recentre(&mut self, err_s: f64) -> Step {
         self.window = None;
         self.level.reset_error();
+        self.cushion_s = 0.0;
         self.recentres += 1;
         Step::Recentre {
             by_s: err_s,

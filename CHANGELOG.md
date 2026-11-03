@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.6.14 (unreleased)
+
+- New (dstack #90 step 3, songplayer's servo rules): `asrc::Controller` takes SongPlayer's additions, all opt-in, so existing users (vstack) are unchanged:
+  - the underrun cushion: `with_cushion_max_s`, `played_silence(total_s)`, `cushion_s()`. Silence the consumer played is kept as an excess up to the cap. The offset is braked against [target, target + cushion] (`band_error_ms`), while the level loop keeps the target. Each window the cushion follows the mean down, but a window that folded new silence keeps it; a re-centre or the priming drops it;
+  - the calm zone as a parameter: `with_calm_zone_ms`, `calm_zone_ms_for(callback_s)` (half the callback period, at least 1 ms);
+  - priming: `with_priming()`, `restart()`; the first observation returns `Step::Prime { by_s, ppm }`, not counted as a re-centre;
+  - a stall: a window more than `MAX_SANE_WINDOW_PPM` (100 000 ppm) from the last flushes the rate fit and holds the correction (`stalls()`, `stalled(dx, dy)`);
+  - a clock that goes back before the open window's start starts it over;
+  - `offset_ms()`: the last window's mean depth outside the band.
+  - Port: `Step` has a new variant, `Prime`; an exhaustive `match` on `Step` needs its arm (it only comes with `with_priming`).
+- Changed: `Converter::set_ppm` moves the ratio within ±`ROOM_PPM` (1000 ppm, rubato's 1.001), no longer ±300; `asrc::Controller` still keeps its own correction within ±`asrc::MAX_PPM` (300).
+- Docs: the crate's measured THD+N, image and fold figures, and its delays at 48↔96.
+
 ## 0.6.13 (2026-11-03)
 
 - New (dstack #104, dtray): every device (dstack-dev, dlink, dasio's) opens a local status endpoint on 127.0.0.1 at a port the OS picks, and announces it in its ARC record as `dstack_ctl=<port>` (`announce::STATUS_PORT_KEY`). It answers `status` (the same JSON line as `ctl status`) and nothing else, on Windows too; the test requests stay on the Unix socket. New: `ctl::local`, `device::Device::status_port`, `announce::with_status_port`.

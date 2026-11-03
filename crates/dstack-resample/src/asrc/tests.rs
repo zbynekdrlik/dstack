@@ -436,3 +436,279 @@ fn saturation_is_the_correction_at_its_bound() {
     assert_eq!(c.ppm(), MAX_PPM);
     assert!(c.saturated());
 }
+
+/// songplayer's calm zone (#90 step 3, its #233 rules): half the consumer's
+/// callback period when longer than 1 ms.
+#[test]
+fn the_calm_zone_is_half_the_callback_period_at_least_1_ms() {
+    assert!((calm_zone_ms_for(512.0 / 96_000.0) - 2.666_666).abs() < 1e-5);
+    assert!((calm_zone_ms_for(0.004) - 2.0).abs() < 1e-12);
+    assert_eq!(calm_zone_ms_for(0.002), CALM_ZONE_MS);
+    assert_eq!(calm_zone_ms_for(0.001), CALM_ZONE_MS);
+    assert_eq!(calm_zone_ms_for(0.0), CALM_ZONE_MS);
+}
+
+/// The braking's error against [target, target + cushion]: a deficit from
+/// the target, an excess from the top, nothing within.
+#[test]
+fn the_band_error_is_measured_from_the_nearer_edge() {
+    assert_eq!(band_error_ms(3.0, 5.0), 3.0);
+    assert_eq!(band_error_ms(-2.0, 5.0), 0.0);
+    assert_eq!(band_error_ms(-5.0, 5.0), 0.0);
+    assert_eq!(band_error_ms(-7.5, 5.0), -2.5);
+    assert_eq!(band_error_ms(-7.5, 0.0), -7.5);
+    assert_eq!(band_error_ms(0.0, 0.0), 0.0);
+}
+
+/// One window of observations every 10 ms from `t0` to `t0 + 1` at
+/// `depth_s` (it closes on the last), the other clock running with ours;
+/// returns the last step.
+fn window(c: &mut Controller, t0: f64, depth_s: f64) -> Step {
+    let mut last = Step::Hold(0.0);
+    for i in 0..=100 {
+        let t = t0 + f64::from(i) * 0.01;
+        last = c.observe(t, depth_s, t);
+    }
+    last
+}
+
+#[test]
+fn silence_is_kept_as_a_cushion_up_to_its_cap_and_follows_the_mean_down() {
+    let mut c = Controller::new(0.010, 0.002, 0.100, Basis::Arrival).with_cushion_max_s(0.033);
+    c.played_silence(1.0); // the first count is the start
+    assert_eq!(c.cushion_s(), 0.0);
+    c.played_silence(1.005);
+    assert!((c.cushion_s() - 0.005).abs() < 1e-12);
+    // 5 ms over the target, all of it cushion: no braking, no offset.
+    window(&mut c, 0.0, 0.015);
+    assert!(c.offset_ms().abs() < 1e-9, "{}", c.offset_ms());
+    assert!(
+        (c.cushion_s() - 0.005).abs() < 1e-9,
+        "a folding window keeps it whole"
+    );
+    let p_only = c.ppm();
+    // A window 2 ms over: the cushion follows the mean down to 2 ms (a count
+    // with nothing new is no folding window).
+    c.played_silence(1.005);
+    window(&mut c, 1.0, 0.012);
+    assert!((c.cushion_s() - 0.002).abs() < 1e-9, "{}", c.cushion_s());
+    assert!(c.offset_ms().abs() < 1e-9, "{}", c.offset_ms());
+    // The cap; a count that went back folds nothing.
+    c.played_silence(2.0);
+    assert!((c.cushion_s() - 0.033).abs() < 1e-12);
+    c.played_silence(0.5);
+    assert!((c.cushion_s() - 0.033).abs() < 1e-12);
+    // A re-centre drops it.
+    assert!(matches!(c.observe(2.1, 0.001, 2.1), Step::Recentre { .. }));
+    assert_eq!(c.cushion_s(), 0.0);
+    assert!(p_only <= 0.0, "the level loop keeps the target: {p_only}");
+}
+
+#[test]
+fn without_a_cushion_an_excess_is_an_offset_and_braked() {
+    let mut c = Controller::new(0.010, 0.002, 0.100, Basis::Arrival);
+    c.played_silence(1.0);
+    c.played_silence(1.005);
+    assert_eq!(c.cushion_s(), 0.0, "no cap, no cushion");
+    window(&mut c, 0.0, 0.015);
+    assert!((c.offset_ms() - 5.0).abs() < 1e-9, "{}", c.offset_ms());
+    // The braking would ask −√(10·4·1000) = −200 ppm; the slew allows 5.
+    assert!(c.ppm() < 0.0);
+    // A deficit reads negative.
+    window(&mut c, 1.0, 0.007);
+    assert!((c.offset_ms() + 3.0).abs() < 1e-9, "{}", c.offset_ms());
+}
+
+#[test]
+fn a_cushion_spares_an_excess_the_braking_within_its_band() {
+    // The same excess, with and without a cushion: only without is it braked
+    // (the level loop's P is the same in both, its I a little).
+    let run = |cushion: bool| {
+        let mut c = Controller::new(0.010, 0.002, 0.100, Basis::Arrival)
+            .with_cushion_max_s(if cushion { 0.033 } else { 0.0 });
+        c.played_silence(0.0);
+        c.played_silence(0.006);
+        window(&mut c, 0.0, 0.016);
+        window(&mut c, 1.0, 0.016);
+        c.ppm()
+    };
+    let (kept, braked) = (run(true), run(false));
+    assert!(braked < kept - 2.0, "braked {braked}, kept {kept}");
+}
+
+#[test]
+fn the_first_block_primes_without_a_fault_and_a_restart_primes_again() {
+    let mut c = Controller::new(0.010, 0.002, 0.050, Basis::Arrival).with_priming();
+    assert_eq!(
+        c.observe(0.0, 0.0, 0.0),
+        Step::Prime {
+            by_s: 0.010,
+            ppm: 0.0
+        }
+    );
+    assert_eq!(c.recentres(), 0);
+    assert_eq!(c.observe(0.01, 0.010, 0.01), Step::Hold(0.0));
+    c.played_silence(0.0);
+    c.played_silence(0.004);
+    c.restart();
+    assert_eq!(c.cushion_s(), 0.0);
+    assert_eq!(
+        c.observe(0.02, 0.004, 0.02),
+        Step::Prime {
+            by_s: 0.006,
+            ppm: 0.0
+        }
+    );
+    // At the target exactly, or over it, there is nothing to prime.
+    let mut at = Controller::new(0.010, 0.002, 0.050, Basis::Arrival).with_priming();
+    assert_eq!(at.observe(0.0, 0.010, 0.0), Step::Hold(0.0));
+    let mut excess = Controller::new(0.010, 0.002, 0.050, Basis::Arrival).with_priming();
+    assert_eq!(excess.observe(0.0, 0.020, 0.0), Step::Hold(0.0));
+    assert_eq!(
+        excess.observe(0.01, 0.0, 0.01),
+        Step::Recentre {
+            by_s: 0.010,
+            ppm: 0.0
+        }
+    );
+    // Without priming the empty start is a fault, and a restart changes
+    // nothing about that.
+    let mut plain = Controller::new(0.010, 0.002, 0.050, Basis::Arrival);
+    plain.restart();
+    assert!(matches!(
+        plain.observe(0.0, 0.0, 0.0),
+        Step::Recentre { .. }
+    ));
+    assert_eq!(plain.recentres(), 1);
+}
+
+#[test]
+fn a_stalled_window_flushes_the_rate_fit_and_holds_the_correction() {
+    let mut c = Controller::new(0.010, 0.002, 0.100, Basis::Arrival);
+    // 70 s of a consumer 50 ppm fast: the fit locks (30 points over 60 s).
+    let mut t = 0.0;
+    let mut other = 0.0;
+    for _ in 0..7000 {
+        t += 0.01;
+        other += 0.01 * (1.0 + 50e-6);
+        c.observe(t, 0.010, other);
+    }
+    assert!(c.locked());
+    // The consumer stops for two windows: its clock does not move. The
+    // window that reads as a stall leaves the correction as it was.
+    let mut held_at_stall = None;
+    for _ in 0..250 {
+        t += 0.01;
+        let before = c.ppm();
+        let stalls = c.stalls();
+        let step = c.observe(t, 0.010, other);
+        if c.stalls() > stalls && held_at_stall.is_none() {
+            held_at_stall = Some((before, step));
+        }
+    }
+    assert!(c.stalls() >= 1);
+    assert!(!c.locked());
+    let (before, step) = held_at_stall.expect("a stall");
+    assert_eq!(step, Step::Hold(before));
+    let stalls = c.stalls();
+    // A window at 50 ppm again is no stall.
+    for _ in 0..100 {
+        t += 0.01;
+        other += 0.01 * (1.0 + 50e-6);
+        c.observe(t, 0.010, other);
+    }
+    assert_eq!(c.stalls(), stalls + 1, "the window spanning the restart");
+    for _ in 0..200 {
+        t += 0.01;
+        other += 0.01 * (1.0 + 50e-6);
+        c.observe(t, 0.010, other);
+    }
+    assert_eq!(c.stalls(), stalls + 1, "steady windows are no stall");
+}
+
+#[test]
+fn a_clock_that_goes_back_before_the_window_starts_it_over() {
+    let mut c = Controller::new(0.010, 0.002, 0.100, Basis::Arrival);
+    c.observe(10.0, 0.012, 10.0);
+    // Back before the window's start: a new window from 9.5.
+    c.observe(9.5, 0.012, 9.5);
+    assert_eq!(c.observe(10.4, 0.012, 10.4), Step::Hold(0.0));
+    assert_eq!(c.offset_ms(), 0.0, "not closed yet");
+    c.observe(10.5, 0.012, 10.5);
+    assert!(
+        (c.offset_ms() - 2.0).abs() < 1e-9,
+        "closed at 10.5: {}",
+        c.offset_ms()
+    );
+}
+
+#[test]
+fn the_calm_zone_set_widens_where_the_braking_starts() {
+    let braked = |calm_ms: f64| {
+        let mut c = Controller::new(0.010, 0.002, 0.100, Basis::Arrival).with_calm_zone_ms(calm_ms);
+        window(&mut c, 0.0, 0.0125);
+        window(&mut c, 1.0, 0.0125);
+        c.ppm()
+    };
+    // 2.5 ms over: braked with the 1 ms zone, not with a 2.67 ms one.
+    assert!(braked(1.0) < braked(calm_zone_ms_for(512.0 / 96_000.0)) - 5.0);
+}
+
+#[test]
+fn observations_at_the_window_s_start_all_count() {
+    let mut c = Controller::new(0.010, 0.002, 0.100, Basis::Arrival);
+    c.observe(10.0, 0.060, 10.0);
+    c.observe(10.0, 0.010, 10.0);
+    c.observe(11.0, 0.010, 11.0);
+    // The mean of −50, 0 and 0 ms.
+    assert!(
+        (c.offset_ms() - 50.0 / 3.0).abs() < 1e-9,
+        "{}",
+        c.offset_ms()
+    );
+}
+
+/// Windows of 101 observations from `t0` to `t0 + 1`, the other clock
+/// running at `rate` of ours from `other0`; returns the other clock after.
+fn rated_window(c: &mut Controller, t0: f64, other0: f64, rate: f64) -> f64 {
+    for i in 0..=100 {
+        let dt = f64::from(i) * 0.01;
+        c.observe(t0 + dt, 0.010, other0 + dt * rate);
+    }
+    other0 + rate
+}
+
+#[test]
+fn a_window_150_000_ppm_off_is_a_stall_near_the_clock_s_start_too() {
+    let mut c = Controller::new(0.010, 0.002, 0.100, Basis::Arrival);
+    let other = rated_window(&mut c, 0.0, 0.0, 1.0);
+    rated_window(&mut c, 1.0, other, 0.7);
+    assert_eq!(c.stalls(), 1, "its mean point is 0.15 s off over 1 s");
+    let mut d = Controller::new(0.010, 0.002, 0.100, Basis::Arrival);
+    let other = rated_window(&mut d, 0.0, 0.0, 1.0);
+    rated_window(&mut d, 1.0, other, 0.85);
+    assert_eq!(d.stalls(), 0, "75 000 ppm is a clock");
+}
+
+#[test]
+fn a_window_that_repeats_the_last_one_s_time_is_no_stall() {
+    let mut c = Controller::new(0.010, 0.002, 0.100, Basis::Arrival);
+    rated_window(&mut c, 0.0, 0.0, 1.0);
+    // Our clock went back: the same stretch again, the other clock on.
+    rated_window(&mut c, 0.0, 5.0, 1.0);
+    assert_eq!(c.stalls(), 0);
+}
+
+#[test]
+fn a_stall_is_strictly_beyond_100_000_ppm_either_way() {
+    // 0.125 s over 1.25 s is exactly 100 000 ppm: still a clock.
+    assert!(!stalled(1.25, 0.125));
+    assert!(!stalled(1.25, -0.125));
+    assert!(stalled(1.25, 0.125 + 1e-9));
+    assert!(stalled(1.25, -0.125 - 1e-9));
+    // 150 000 ppm over 2 s is 0.3 s.
+    assert!(!stalled(2.0, 0.15));
+    assert!(stalled(2.0, 0.300_001));
+    assert!(!stalled(0.0, 1.0));
+    assert!(!stalled(-1.0, 1.0));
+}
