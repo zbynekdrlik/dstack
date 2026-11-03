@@ -7,7 +7,7 @@
 //! (dstack #1: SongPlayer's flow, 24 late at the FOH card at 12:08:53 on
 //! 1.11, and no line on our side to say whose).
 
-use tracing::warn;
+use tracing::{info, warn};
 
 use super::rx::RxShared;
 use super::tx::{MAX_FLOWS, TxShared};
@@ -88,24 +88,39 @@ impl LateWatch {
     }
 }
 
-/// One TX flow's failed sends since the last look (dasio 2.11.2026: send
-/// errors on both FOH flows, about 100 every ~96 s, no reason known).
+/// One TX flow's failed and retried sends since the last look (dasio
+/// 2.11.2026: send errors on both FOH flows, about 100 every ~96 s;
+/// WSAENOBUFS bursts, dstack #1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SendErrors {
     /// The TX flow's slot.
     pub slot: usize,
-    /// Sends that failed since the last look.
+    /// Sends that failed since the last look, after their retries (lost).
     pub errors: u64,
-    /// The last one's OS error (raw errno or WSA code; -1 without one).
+    /// Packets refused for a moment that went out on a retry since the
+    /// last look (recovered, `media::tx::send_retry`).
+    pub retried: u64,
+    /// The last failed send's OS error (raw errno or WSA code; -1 without
+    /// one), a retried one's too.
     pub os_error: i32,
 }
 
+impl SendErrors {
+    /// Whether packets were lost (a warning), not only retried (info).
+    pub fn lost(&self) -> bool {
+        self.errors > 0
+    }
+}
+
 /// The TX side's send-error watch: once a second, each flow whose failed
-/// sends rose gets one warning line with the count and the OS error code
-/// (a failed packet is not sent again: the receiver sees a hole).
+/// or retried sends rose gets one line with the counts and the OS error
+/// code: a warning when packets were lost after their retries (the
+/// receiver sees a hole), info when every refused packet went out on a
+/// retry.
 #[derive(Debug, Default)]
 pub struct SendWatch {
     seen: [u64; MAX_FLOWS],
+    seen_retries: [u64; MAX_FLOWS],
     next_ns: Option<u64>,
 }
 
@@ -113,28 +128,42 @@ impl SendWatch {
     pub const fn new() -> Self {
         SendWatch {
             seen: [0; MAX_FLOWS],
+            seen_retries: [0; MAX_FLOWS],
             next_ns: None,
         }
     }
 
     /// At `now_ns`, a look once [`EVERY_NS`] has passed (the first only
-    /// learns): each slot's cumulative `(errors, last OS error)` from
-    /// `counts`. The slots whose errors rose; empty between looks.
-    pub fn look(&mut self, now_ns: u64, counts: impl Fn(usize) -> (u64, i32)) -> Vec<SendErrors> {
+    /// learns): each slot's cumulative `(errors, retries, last OS error)`
+    /// from `counts`. The slots whose errors or retries rose; empty between
+    /// looks.
+    pub fn look(
+        &mut self,
+        now_ns: u64,
+        counts: impl Fn(usize) -> (u64, u64, i32),
+    ) -> Vec<SendErrors> {
         if self.next_ns.is_some_and(|next| now_ns < next) {
             return Vec::new();
         }
         let first = self.next_ns.is_none();
         self.next_ns = Some(now_ns.saturating_add(EVERY_NS));
         let mut out = Vec::new();
-        for (slot, seen) in self.seen.iter_mut().enumerate() {
-            let (now, os_error) = counts(slot);
+        for (slot, (seen, seen_retries)) in self
+            .seen
+            .iter_mut()
+            .zip(self.seen_retries.iter_mut())
+            .enumerate()
+        {
+            let (now, retries, os_error) = counts(slot);
             let rose = now.saturating_sub(*seen);
+            let retried = retries.saturating_sub(*seen_retries);
             *seen = now;
-            if rose > 0 && !first {
+            *seen_retries = retries;
+            if (rose > 0 || retried > 0) && !first {
                 out.push(SendErrors {
                     slot,
                     errors: rose,
+                    retried,
                     os_error,
                 });
             }
@@ -142,19 +171,30 @@ impl SendWatch {
         out
     }
 
-    /// [`SendWatch::look`] on `tx`'s flows, each report logged as a warning.
+    /// [`SendWatch::look`] on `tx`'s flows, each report logged: a warning
+    /// when packets were lost ([`SendErrors::lost`]), else info.
     pub fn watch(&mut self, now_ns: u64, tx: &TxShared) {
         let counts = |s| {
             let l = tx.lane(s);
-            (l.send_errors, l.last_os_error)
+            (l.send_errors, l.send_retries, l.last_os_error)
         };
         for e in self.look(now_ns, counts) {
-            warn!(
-                slot = e.slot,
-                errors = e.errors,
-                os_error = e.os_error,
-                "TX sends failed (the packets were not sent: receivers see holes)"
-            );
+            if e.lost() {
+                warn!(
+                    slot = e.slot,
+                    errors = e.errors,
+                    retried = e.retried,
+                    os_error = e.os_error,
+                    "TX sends failed after their retries (the packets were not sent: receivers see holes)"
+                );
+            } else {
+                info!(
+                    slot = e.slot,
+                    retried = e.retried,
+                    os_error = e.os_error,
+                    "TX sends refused for a moment went out on a retry (no packet lost)"
+                );
+            }
         }
     }
 }

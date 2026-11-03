@@ -594,7 +594,9 @@ impl Json {
 ///   transmitters' channels (4096 once a directory read, 8192 and 8208 once
 ///   a page); `uncounted`: past the tables.
 /// - `tx`: each TX flow slot that has or had a flow: `flow`, `live` (a flow
-///   that sends), `fpp`, `channels`, `packets`, `send_errors`, `keepalives`,
+///   that sends), `fpp`, `channels`, `packets`, `send_errors` (packets refused after
+///   their retries: lost), `send_retries` (packets the NIC refused for a
+///   moment that went out on a retry, `media::tx::send_retry`), `keepalives`,
 ///   `rebootstraps`, `holes` (echo samples the ring did not hold),
 ///   `late_bins` (packets by how late they left past due, six counts at
 ///   the edges of `media::tx::LATE_EDGES_NS`: under 0.25, 0.5, 1, 2 and 5
@@ -751,6 +753,7 @@ fn tx_part(j: &mut Json, media: &Media) {
 fn lane_fields(j: &mut Json, lane: &LaneCounts) {
     j.num("packets", lane.packets);
     j.num("send_errors", lane.send_errors);
+    j.num("send_retries", lane.send_retries);
     j.num("keepalives", lane.keepalives);
     j.num("rebootstraps", lane.rebootstraps);
     j.num("holes", lane.holes);
