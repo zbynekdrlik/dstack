@@ -25,8 +25,10 @@ pub fn rgb(c: Colour) -> [u8; 3] {
 
 /// Whether the column or row `at` is inside a square.
 fn inside(at: u32) -> bool {
+    // Sums only: `2 * GAP` would equal `2 + GAP` (an unkillable mutant).
     let first = GAP..GAP + SQUARE;
-    let second = 2 * GAP + SQUARE..2 * (GAP + SQUARE);
+    let second_at = GAP + SQUARE + GAP;
+    let second = second_at..second_at + SQUARE;
     first.contains(&at) || second.contains(&at)
 }
 
