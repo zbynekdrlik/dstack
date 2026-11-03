@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.6.10 (unreleased)
+## 0.6.10 (2026-11-03)
 
 - New (dstack #68, dsync 1.27.3): the in-process follower starts from the dsync service's frequency word, and the linked clock keeps a ready service until the follower settles.
   - dsync-ptp moves to v1.27.3 (frequency seed, settled state, continuous boot re-seed).
