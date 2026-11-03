@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.7 (2026-11-03)
+
+- Changed (dstack #68): dsync-ptp v1.27.2 for the in-process PTP follower.
+  - It fixes the follower's boot fit, which re-seeded the frequency wrong after the first windows and left a fresh follower 20-40 us off for minutes (mbc, Windows).
+  - It holds a late measurement window instead of steering on it, the same rule as the dsync service.
+  - The follower logs its engagement and boot fit, so a lock problem is readable from the device log.
+  - No API change for consumers.
+
 ## 0.6.6 (2026-11-03)
 
 - New (dstack #1, dasio FOH data): `spin_tail_ns` in the device config (Windows, low-latency profile).
