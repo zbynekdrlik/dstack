@@ -1135,7 +1135,8 @@ mod socket {
         tokio::time::timeout(Duration::from_secs(5), session(theirs, media, wait))
             .await
             .expect("the session ends within the bound");
-        ours.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        ours.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
         let mut out = String::new();
         ours.read_to_string(&mut out).unwrap();
         out
@@ -1299,4 +1300,57 @@ fn a_lane_s_times_show_in_whole_microseconds() {
          \"holes\":0,\"late_bins\":[0,0,0,0,0,0],\"late_max_us\":204,\"send_max_us\":56,\
          \"age_max_us\":416,\"over_latency\":80,\"direct\":5}"
     );
+}
+
+/// dstack #104 (dtray): the local endpoint answers `status` and nothing
+/// else; a test request through it changes nothing.
+#[test]
+fn the_local_endpoint_answers_status_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let media = media_on(&device_at(dir.path()), Arc::new(Unready));
+    assert!(local::reply("status", &media).starts_with("{\"clock\":{"));
+    assert!(local::reply(" status \r", &media).starts_with("{\"clock\":{"));
+    let refused = format!("error: {}", local::ONLY_STATUS);
+    assert_eq!(local::reply("source 1 counter", &media), refused);
+    assert_eq!(local::reply("statusx", &media), refused);
+    assert_eq!(local::reply("", &media), refused);
+    assert_eq!(media.tx.source(0), Some(Source::Silence));
+}
+
+/// The endpoint over TCP on 127.0.0.1: one line in, one line out, closed;
+/// a request without its newline counts once its sender is done.
+#[tokio::test]
+async fn the_local_endpoint_serves_one_line_a_connection() {
+    use std::io::{Read, Write};
+    let dir = tempfile::tempdir().unwrap();
+    let media = media_on(&device_at(dir.path()), Arc::new(Unready));
+    let listener = local::bind().unwrap();
+    let at = listener.local_addr().unwrap();
+    assert!(at.ip().is_loopback());
+    tokio::spawn(local::serve(listener, Arc::clone(&media)));
+    let ask = move |req: &'static [u8], close_write: bool| {
+        tokio::task::spawn_blocking(move || {
+            let mut s = std::net::TcpStream::connect(at).unwrap();
+            s.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            s.write_all(req).unwrap();
+            if close_write {
+                s.shutdown(std::net::Shutdown::Write).unwrap();
+            }
+            let mut out = String::new();
+            s.read_to_string(&mut out).unwrap();
+            out
+        })
+    };
+    let out = ask(b"status\nsource 1 counter\n", false).await.unwrap();
+    assert!(
+        out.starts_with("{\"clock\":{") && out.ends_with("}\n"),
+        "{out}"
+    );
+    assert_eq!(out.matches('\n').count(), 1);
+    let out = ask(b"status", true).await.unwrap();
+    assert!(out.starts_with("{\"clock\":{"), "{out}");
+    let out = ask(b"source 1 counter\n", false).await.unwrap();
+    assert_eq!(out, format!("error: {}\n", local::ONLY_STATUS));
+    assert_eq!(media.tx.source(0), Some(Source::Silence));
 }

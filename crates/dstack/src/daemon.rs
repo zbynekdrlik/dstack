@@ -566,7 +566,11 @@ pub fn announce_device<R: Registry>(
 ) -> Result<usize, AnnounceError> {
     let recs = {
         let device = shared.lock().unwrap_or_else(PoisonError::into_inner);
-        records(&device.state, &device.cfg, &host_of(&device.state.name), ip)
+        let mut recs = records(&device.state, &device.cfg, &host_of(&device.state.name), ip);
+        if let Some(port) = device.status_port {
+            crate::announce::with_status_port(&mut recs, port);
+        }
+        recs
     };
     announcer.announce(&recs)?;
     Ok(recs.len())

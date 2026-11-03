@@ -549,3 +549,20 @@ fn the_flow_control_service_is_announced_by_the_device_with_no_txt() {
     assert_eq!(dbc[0].port, cfg.flows_port);
     assert!(dbc[0].txt.is_empty(), "{:?}", dbc[0].txt);
 }
+
+/// dstack #104: the ARC record names the local status endpoint for dtray;
+/// no other record carries it.
+#[test]
+fn the_status_port_rides_on_the_arc_record_only() {
+    let cfg = config();
+    let state = DeviceState::from_config(&cfg);
+    let mut recs = records(&state, &cfg, HOST, IP);
+    assert!(
+        recs.iter()
+            .all(|r| !r.txt.iter().any(|t| t.starts_with(STATUS_PORT_KEY)))
+    );
+    with_status_port(&mut recs, 52_001);
+    let carrying: Vec<_> = recs.iter().filter(|r| has(r, "dstack_ctl=52001")).collect();
+    assert_eq!(carrying.len(), 1);
+    assert_eq!(carrying[0].service, ARC_SERVICE);
+}

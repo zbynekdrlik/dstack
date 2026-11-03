@@ -83,6 +83,19 @@ impl ServiceRecord {
     }
 }
 
+/// The ARC record's TXT key that names a dstack device's local status
+/// endpoint ([`crate::ctl::local`]): `dstack_ctl=<port>` on 127.0.0.1. Only
+/// our devices carry it, so a reader on the PC (dtray, #104) tells them
+/// from other Dante devices.
+pub const STATUS_PORT_KEY: &str = "dstack_ctl";
+
+/// Adds the local status endpoint's `port` to the ARC record of `recs`.
+pub fn with_status_port(recs: &mut [ServiceRecord], port: u16) {
+    for r in recs.iter_mut().filter(|r| r.service == ARC_SERVICE) {
+        r.txt.push(format!("{STATUS_PORT_KEY}={port}"));
+    }
+}
+
 /// Every record of the device with `state`'s names, its SRV records
 /// pointing at `host` (e.g. `<device>.local.`) at `ip`.
 pub fn records(
