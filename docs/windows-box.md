@@ -34,3 +34,12 @@ Measured on the FOH PC (November 2026, dstack 0.6.6): one dasio device, block 25
 | 150 µs | 15 min | 0.36–0.48 ms | 2.4 ms | 1 | 0 | 1.43 |
 
 A short tail saves about 1.3 CPU per device and the timing gets better, not worse: the spin no longer takes the cores the device shares.
+
+## The normal profile (dlink apps)
+
+dlink apps (SongPlayer, OBS, the intercom) run the normal timing profile: about 10 ms of latency, no real-time setup asked of the app. Since v0.6.20 (dstack #90) the stack sets two things for it on a busy Windows PC:
+
+- **Thread priority:** the pump, TX and RX threads ask `THREAD_PRIORITY_HIGHEST` within the process's normal priority class (`clock::thread_priority_for`). It needs no privilege and changes nothing process-wide; the realtime class stays the low-latency profile's. The start log says "runs at THREAD_PRIORITY_HIGHEST" per thread, or warns that the priority was refused (the thread then runs on at normal priority). Linux keeps normal priority.
+- **Block:** dlink's pump runs 128 frames a block (1.33 ms at 96 kHz) instead of the stack's 32 (333 µs): a quarter of the wakes, and four times the frames for each rate-conversion call. `dlink::Config::block` sets another of 16, 32, 64, 128 or 256. The pump margin W stays half the latency, and at least the block. The path grows by about 1 ms (B 128 at 96 kHz, inside the 10 ms budget).
+
+Why: SongPlayer's Dante output on a busy video PC (video playback running; dlink at block 32, normal priority, 96 kHz device; 3.11.2026, 12 h ledger) lost blocks in bursts (`pump_missed`, the last 17 blocks with the pump 5.85 ms late against W 5 ms) and had overload and overrun pairs every few minutes. The pairs rose from 0–4 to 8–28 per 12 min once the app ran at 48 kHz through `Rated`, whose sinc then ran on the pump thread every 333 µs. The check after the change is the same ledger (`pump_missed`, overruns per 12 min) over a few hours.

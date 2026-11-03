@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.20 (unreleased)
+
+- Change (dstack #90, the dlink pump on a busy Windows PC): dlink's default pump block is 128 frames (1.33 ms at 96 kHz, 2.67 ms at 48 kHz), no longer the stack's 32. `dlink::Config::device()` now writes `block`; the pump wakes a quarter as often and `Rated` converts four times the frames a call (it follows the device block). The path grows by about one block (+1 ms at 96 kHz). What a consumer notices: an app's `process` gets 128 frames a block at the device's rate (64 at 48 kHz on a 96 kHz network through `Rated`), and the pump's offset is B + P + W with B 128. A test that pinned 32-frame blocks or their app frames sets `.block(32)` or moves its expectation.
+- New (dlink): `Config::block(n)` sets the pump's block, one of `stream::BLOCKS` (16, 32, 64, 128, 256); another is refused by `Config::device()` with the other problems ("block: 16, 32, 64, 128 or 256 frames"). `dlink::BLOCK` (128) is the default, `dlink::work_margin` the margin rule: W stays half the latency, now at least the block (4 ms at 48 kHz gives 128, no longer 96).
+- Change (dstack #90): under the normal timing profile on Windows the pump, TX and RX threads ask `THREAD_PRIORITY_HIGHEST` within the process's normal class (no privilege, nothing process-wide, nothing asked of the app); the log says so per thread, and a refusal is warned and the thread runs on at normal priority. Linux's normal profile and the low-latency profile are unchanged. New: `clock::thread_priority_for(profile, os)`, `clock::ThreadPriority` (`Realtime`, `Highest`, `Normal`), `clock::Os`, `media::tx::windows_priority_for`. Consumers port nothing.
+- Docs (dtray): `dtray.exe` is a GUI-subsystem program, so an installer runs `Start-Process dtray.exe -ArgumentList '--autostart','on' -Wait -PassThru` and reads `ExitCode` (PowerShell's `&` neither waits nor sets `$LASTEXITCODE`; dasio's note).
+- Docs: `docs/windows-box.md` has the normal profile's thread priority and block, from SongPlayer's Dante output ledger of 3.11.2026.
+
 ## 0.6.19 (2026-11-03)
 
 - Change (dstack #104 step 5): the app's status hook (`Media::set_app_status`, `dlink::Link::set_app_status`) runs on a thread of its own (`dstack-app-status`, started at the first call, ended with the `Media`), never inside a status request. A slow or stalled hook no longer delays the device's ARC, CMC or status answers.
