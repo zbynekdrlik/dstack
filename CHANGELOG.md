@@ -2,6 +2,10 @@
 
 ## 0.6.2 (2026-11-03)
 
+- Fix (dstack #20, FOH 3.11.2026): two Dante devices on one PC address (dasio's master-asio-dante on 4455, band-asio-dante on 4456) were one transmitter to our subscriber.
+  - Their channels went into one request to one of them, and the other's were asked again every 250 ms. The intercom heard the wrong channels, then lost the flow.
+  - Requests, flows, failures and fpp floors are now per flow-control address (address and port).
+  - Port: `Manager::peers` (a public field) is keyed by `SocketAddrV4`, no longer `Ipv4Addr`.
 - New (dstack #90, phase 2): the ASRC in `dstack-resample`.
   - `asrc::Controller` holds a buffer between two clocks at its target. Its laws are SongPlayer's ASIO servo (#233) made generic:
     - a least-squares rate fit (600 s, locked after 30 points over 60 s, a 10 ms step re-bases it);
