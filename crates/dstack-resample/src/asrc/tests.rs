@@ -695,12 +695,16 @@ fn rated_window(c: &mut Controller, t0: f64, other0: f64, rate: f64) -> f64 {
 fn a_window_150_000_ppm_off_is_a_stall_near_the_clock_s_start_too() {
     let mut c = Controller::new(0.010, 0.002, 0.100, Basis::Arrival);
     let other = rated_window(&mut c, 0.0, 0.0, 1.0);
-    rated_window(&mut c, 1.0, other, 0.7);
-    assert_eq!(c.stalls(), 1, "its mean point is 0.15 s off over 1 s");
+    rated_window(&mut c, 1.0, other, 0.85);
+    assert_eq!(
+        c.stalls(),
+        1,
+        "its own first and last points are 0.15 s off over 1 s"
+    );
     let mut d = Controller::new(0.010, 0.002, 0.100, Basis::Arrival);
     let other = rated_window(&mut d, 0.0, 0.0, 1.0);
-    rated_window(&mut d, 1.0, other, 0.85);
-    assert_eq!(d.stalls(), 0, "75 000 ppm is a clock");
+    rated_window(&mut d, 1.0, other, 0.95);
+    assert_eq!(d.stalls(), 0, "50 000 ppm is a clock");
 }
 
 #[test]
@@ -771,19 +775,22 @@ fn a_stalled_window_keeps_the_slew_s_time_step() {
     }
     let first = c.ppm();
     assert!((first - 5.0).abs() < 1e-9, "{first}");
-    // A window the consumer stalls in (its clock stays at 1.0): held.
-    for i in 1..=100 {
+    // A window the consumer stalls in (its clock stays at 1.0), from 1.01
+    // to 2.01 where it closes: held.
+    for i in 1..=101 {
         let t = 1.0 + f64::from(i) * 0.01;
         c.observe(t, 0.010, 1.0);
     }
     assert_eq!(c.stalls(), 1);
     assert_eq!(c.ppm(), first);
-    // The next window runs again: two seconds of slew.
-    for i in 1..=100 {
+    // The next window runs again, 2.02 to 3.02: the slew moves by the
+    // 2.02 s since the last applied window.
+    for i in 2..=102 {
         let t = 2.0 + f64::from(i) * 0.01;
-        c.observe(t, 0.010, 1.0 + (t - 2.0));
+        c.observe(t, 0.010, 1.0 + (t - 2.02));
     }
-    assert!((c.ppm() - (first + 10.0)).abs() < 1e-9, "{}", c.ppm());
+    assert_eq!(c.stalls(), 1);
+    assert!((c.ppm() - (first + 5.0 * 2.02)).abs() < 1e-6, "{}", c.ppm());
 }
 
 /// songplayer: a count that went back folds nothing; only what passes the
