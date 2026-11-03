@@ -397,6 +397,38 @@ pub enum WaitMode {
     Timer,
 }
 
+/// The spin tail of the low-latency wait on Windows unless the device sets
+/// one, ns: every wait shorter than this is spun ([`WaitMode::Spin`]).
+pub const SPIN_TAIL_NS: u64 = 50_000_000;
+/// The longest spin tail a device may set, ns.
+pub const SPIN_TAIL_MAX_NS: u64 = 50_000_000;
+
+/// The process's spin tail, ns ([`set_spin_tail_ns`]).
+static SPIN_TAIL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(SPIN_TAIL_NS);
+
+/// The spin tail for a device's `spin_tail_ns`: it, else
+/// [`SPIN_TAIL_NS`], at most [`SPIN_TAIL_MAX_NS`].
+pub fn spin_tail_of(configured: Option<u64>) -> u64 {
+    configured.unwrap_or(SPIN_TAIL_NS).min(SPIN_TAIL_MAX_NS)
+}
+
+/// Sets the process's spin tail ([`spin_tail_of`] the device's).
+pub fn set_spin_tail_ns(configured: Option<u64>) {
+    SPIN_TAIL.store(
+        spin_tail_of(configured),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
+
+/// The spin tail of a wait in `mode` with the process's tail `tail_ns`:
+/// none for the timer's wait.
+pub fn spin_tail_for(mode: WaitMode, tail_ns: u64) -> u64 {
+    match mode {
+        WaitMode::Spin => tail_ns,
+        WaitMode::Timer => 0,
+    }
+}
+
 /// The wait of a timing profile.
 pub fn wait_mode_for(profile: TimingProfile) -> WaitMode {
     match profile {

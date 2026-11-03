@@ -107,6 +107,15 @@ pub struct DeviceConfig {
     /// [`MAX_TX_MARGIN_NS`]; [`TX_MARGIN_NS`] when left out.
     #[serde(default = "default_tx_margin_ns")]
     pub tx_margin_ns: u64,
+    /// Windows, the low-latency profile: how long before each deadline the
+    /// media threads stop sleeping on the high-resolution timer and spin
+    /// (yielding), ns, 0 to [`crate::clock::SPIN_TAIL_MAX_NS`]; the
+    /// default [`crate::clock::SPIN_TAIL_NS`] spins every wait shorter
+    /// than 50 ms, so at 1 ms the threads never sleep. A short tail
+    /// (100-300 µs) frees their CPUs where the timer wakes on time (dasio,
+    /// FOH, 3.11.2026).
+    #[serde(default)]
+    pub spin_tail_ns: Option<u64>,
     /// The most frames per packet our TX channels offer (mDNS `fpp`, a
     /// receiver asks for at most this, a request for more is refused):
     /// [`FPP_MIN`] to [`FPP_MAX`], [`FPP_MAX`] when left out. The IEM card
@@ -329,6 +338,15 @@ impl DeviceConfig {
         }
         if self.tx_margin_ns > MAX_TX_MARGIN_NS {
             out.push(format!("tx_margin_ns: 0 to {MAX_TX_MARGIN_NS}"));
+        }
+        if self
+            .spin_tail_ns
+            .is_some_and(|ns| ns > crate::clock::SPIN_TAIL_MAX_NS)
+        {
+            out.push(format!(
+                "spin_tail_ns: 0 to {}",
+                crate::clock::SPIN_TAIL_MAX_NS
+            ));
         }
         if !(FPP_MIN..=FPP_MAX).contains(&self.tx_fpp_max) {
             out.push(format!("tx_fpp_max: {FPP_MIN} to {FPP_MAX}"));

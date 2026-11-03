@@ -86,6 +86,9 @@ exclude_re = [
   # Log-only: the qdisc verdict is tested in qdisc::check.
   "qdisc.rs.*report",
   "replace set_profile -> bool",
+  # The process-wide spin tail's setter (its value is `spin_tail_of`,
+  # tested); setting it in a test would change every other test's waits.
+  "replace set_spin_tail_ns with \\(\\)",
   "replace profile -> TimingProfile",
   # The direct socket needs CAP_NET_RAW, which neither CI nor the gate has;
   # the headers, the ARP lookup and the counting are tested (media::bypass).

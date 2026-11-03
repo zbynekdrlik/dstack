@@ -811,3 +811,14 @@ fn only_the_low_latency_profile_asks_for_real_time_priority() {
     assert!(realtime_for(TimingProfile::LowLatency));
     assert!(!realtime_for(TimingProfile::Normal));
 }
+
+#[test]
+fn the_spin_tail_is_the_device_s_within_its_bound_and_only_for_the_spin_wait() {
+    assert_eq!(spin_tail_of(None), SPIN_TAIL_NS);
+    assert_eq!(spin_tail_of(Some(200_000)), 200_000);
+    assert_eq!(spin_tail_of(Some(0)), 0);
+    assert_eq!(spin_tail_of(Some(SPIN_TAIL_MAX_NS)), SPIN_TAIL_MAX_NS);
+    assert_eq!(spin_tail_of(Some(SPIN_TAIL_MAX_NS + 1)), SPIN_TAIL_MAX_NS);
+    assert_eq!(spin_tail_for(WaitMode::Spin, 200_000), 200_000);
+    assert_eq!(spin_tail_for(WaitMode::Timer, 200_000), 0);
+}

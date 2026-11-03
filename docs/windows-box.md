@@ -18,3 +18,9 @@ the device's flows, for hours, with no late packet and every peak under
 the flow's latency. Two receivers that agree place a fault on the sending
 PC's side; a capture at the receiver's NIC (pktmon) shows whether the
 packets arrive in bursts.
+
+## The low-latency wait (`spin_tail_ns`)
+
+The low-latency profile's media threads sleep on the high-resolution waitable timer and spin, yielding, for the last `spin_tail_ns` before each deadline. The default of 50 ms spins every wait at 1 ms: on the FOH PC in October 2026 the timer woke up to 2.7 ms late, measured with the Realtek driver that had a 20–30 ms DPC. Two dasio devices then held 4–6 CPUs at 100 %.
+
+Where the timer wakes on time (the good driver, nothing else on the NIC's DPC CPUs), a tail of 100–300 µs frees those CPUs. Measure before you keep it: TX-late warnings and a receiver's lateness (rxlat) against the default.

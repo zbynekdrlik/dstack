@@ -328,6 +328,7 @@ pub fn prepare_config(
             crate::clock::profile()
         )));
     }
+    crate::clock::set_spin_tail_ns(device.cfg.spin_tail_ns);
     if let Some(&tx) = engine_tx.iter().find(|&&tx| tx >= device.cfg.tx.len()) {
         return Err(setup(format!(
             "the engine's TX channel {} is past the device's {} TX channels",
