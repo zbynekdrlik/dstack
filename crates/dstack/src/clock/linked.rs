@@ -6,6 +6,11 @@
 //! while the service is, the device runs on the service as before; and it
 //! has a clock when the service does not run.
 //!
+//! A fresh follower takes over from a ready service only once settled
+//! (dsync 1.27.3: locked in 9 s, but 20-60 µs off until its boot fit is
+//! done, 37 s seeded, 70 s not), and it starts seeded with the service's
+//! frequency word when the service is locked and settled ([`seed_of`]).
+//!
 //! A selector ([`Linked::tick`], once a second, off the media threads)
 //! picks the source by [`choose`]; the media threads read only the atomic
 //! choice and the chosen clock. A change of source changes the epoch, so
@@ -48,6 +53,9 @@ pub struct View {
     pub alive: bool,
     /// Locked (DSYX byte 41's rule: |e| ≤ 50 µs for 3 windows).
     pub locked: bool,
+    /// Its boot fit is done and its recent error small (dsync's
+    /// `FollowerState::settled`).
+    pub settled: bool,
     /// It has a PTP time (anchored; locked or in holdover).
     pub anchored: bool,
     /// Its re-anchors and new time bases so far.
@@ -55,12 +63,24 @@ pub struct View {
 }
 
 /// The source for a follower in `internal` (none when it did not start),
-/// a service clock that is ready or not, and whether the follower was
-/// locked once: the follower when locked; else the service when ready;
-/// else the follower in holdover after a lock; else none.
-pub fn choose(internal: Option<View>, service_ready: bool, was_locked: bool) -> Source {
+/// a service clock that is ready or not, whether the follower was locked
+/// once, and the source in use: the follower when locked, and settled or
+/// already in use or without a ready service; else the service when
+/// ready; else the follower in holdover after a lock; else none.
+pub fn choose(
+    internal: Option<View>,
+    service_ready: bool,
+    was_locked: bool,
+    current: Source,
+) -> Source {
     match internal {
-        Some(v) if v.alive && v.locked => Source::Internal,
+        Some(v)
+            if v.alive
+                && v.locked
+                && (v.settled || current == Source::Internal || !service_ready) =>
+        {
+            Source::Internal
+        }
         _ if service_ready => Source::Service,
         Some(v) if v.alive && v.anchored && was_locked => Source::Internal,
         _ => Source::None,
@@ -137,6 +157,7 @@ impl Linked {
             view,
             self.service.k_ns().is_some(),
             self.was_locked.load(Ordering::Acquire),
+            self.source(),
         );
         let before = Source::from_u8(self.choice.swap(next as u8, Ordering::AcqRel));
         if before != next {
@@ -198,22 +219,47 @@ impl Follow for dsync_ptp::follower::PtpClock {
         View {
             alive: self.alive(),
             locked: s.locked,
+            settled: s.settled,
             anchored: s.locked || s.holdover,
             epoch: s.epoch.wrapping_add(s.reanchors),
         }
     }
 }
 
-/// Starts dsync's follower on the interface `iface`: the linked clock's
-/// internal source, or `None` with the reason logged (Linux: no capability
-/// for port 319; Windows: no Npcap; anywhere: no such interface): the
-/// device then runs on the service.
-pub fn start_internal(iface: &str) -> Started {
-    match dsync_ptp::follower::Follower::start(dsync_ptp::follower::FollowerConfig::on_interface(
-        iface,
-    )) {
+/// The follower's frequency seed from a service reply: its frequency word
+/// (DSYX bytes 36-39, ppb, as dsync's `with_frequency_seed` takes it) when
+/// the service is locked and settled; a word still pulling in is no seed.
+pub fn seed_of(r: &super::dsyx::Reading) -> Option<i32> {
+    (r.locked && r.settled).then_some(r.freq_ppb)
+}
+
+/// The service's seed now ([`seed_of`]): one DSYX request to `target`
+/// ([`super::DSYNC`] on the box), at most its reply timeout; `None` when
+/// the service does not answer or is not locked and settled.
+pub async fn service_seed(target: std::net::SocketAddr) -> Option<i32> {
+    let mut poller = super::Poller::connect(target).await.ok()?;
+    let polled = poller
+        .once(&MonoClock::new(), &std::sync::atomic::AtomicI32::new(0))
+        .await;
+    polled.reading.as_ref().and_then(seed_of)
+}
+
+/// Starts dsync's follower on the interface `iface`, seeded with `seed_ppb`
+/// ([`seed_of`]) when given: the linked clock's internal source, or `None`
+/// with the reason logged (Linux: no capability for port 319; Windows: no
+/// Npcap; anywhere: no such interface): the device then runs on the
+/// service.
+pub fn start_internal(iface: &str, seed_ppb: Option<i32>) -> Started {
+    let mut cfg = dsync_ptp::follower::FollowerConfig::on_interface(iface);
+    if let Some(ppb) = seed_ppb {
+        cfg = cfg.with_frequency_seed(i64::from(ppb));
+    }
+    match dsync_ptp::follower::Follower::start(cfg) {
         Ok(f) => {
-            info!(iface, "media clock: dsync's in-process follower started");
+            info!(
+                iface,
+                seed_ppb, "media clock: dsync's in-process follower started"
+            );
             (Some(Box::new(f.clock())), Some(Box::new(f)))
         }
         Err(e) => {

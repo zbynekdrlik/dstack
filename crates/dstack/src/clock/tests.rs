@@ -699,6 +699,28 @@ mod os {
         .expect("a poll within 5 s")
     }
 
+    /// dstack #68: the follower's seed is one poll of the service: its
+    /// word when locked and settled, none when not locked or silent.
+    #[tokio::test]
+    async fn the_service_seed_is_one_poll_s_word() {
+        let server = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr = server.local_addr().unwrap();
+        let ask = |make: Option<fn(u32) -> Vec<u8>>| {
+            let server = &server;
+            async move {
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    tokio::join!(super::linked::service_seed(addr), answer(server, make))
+                })
+                .await
+                .expect("a seed within 5 s")
+                .0
+            }
+        };
+        assert_eq!(ask(Some(locked_now)).await, Some(-750));
+        assert_eq!(ask(Some(unlocked_now)).await, None);
+        assert_eq!(ask(None).await, None);
+    }
+
     /// One poll at a time (the `clock` subcommand's step): each reports the
     /// reply, its sample, the event and the anchored k, and sets the clock
     /// and the frequency as the service's poller does.
