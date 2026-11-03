@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.6.17 (unreleased)
+## 0.6.17 (2026-11-03)
 
 - New (dstack #104 step 3): the `dtray` crate, the PC's tray icon for its dstack devices (dlink apps, dasio, dstack-dev). No app changes for it: it finds the devices by mDNS on the PC's own addresses (the ARC records that carry `dstack_ctl`) and reads each one's local status endpoint once a second.
   - The icon is grey with no device, red when a status cannot be read or a clock is not ready, orange when a subscribed RX channel is not connected or a late, missed or overrun count grew since the last second, green otherwise. The tooltip names the worst device and why.
