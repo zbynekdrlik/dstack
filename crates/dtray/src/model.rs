@@ -11,6 +11,9 @@
 //! - its late counts, cumulative since the device started: the RX flows'
 //!   `rx[].late` summed, and the engine's `engine.missed` and
 //!   `engine.overruns` (only once an engine is attached);
+//! - its TX lanes' refused sends, cumulative: `tx[].send_errors` summed
+//!   (packets lost after their retries; the retries themselves are the
+//!   healthy case and not shown);
 //! - the app's own part, once the app sets one
 //!   ([`dstack::daemon::media::Media::set_app_status`]): `app.line`, a
 //!   short text shown after the device's line, and `app.state`, `"ok"`,
@@ -40,8 +43,8 @@ pub enum Colour {
     Grey,
     /// Every device is fine.
     Green,
-    /// A subscribed channel receives nothing, a late count grew, or the
-    /// app warns.
+    /// A subscribed channel receives nothing, a late count or the refused
+    /// sends grew, or the app warns.
     Orange,
     /// A device's status cannot be read, its clock is not ready, the app
     /// reports an error, or an expected device is not running.
@@ -62,12 +65,14 @@ pub struct View {
 /// The longest tooltip, in UTF-16 units (Windows keeps 127 and a NUL).
 pub const TOOLTIP_MAX: usize = 127;
 
-/// The late counts of a device, cumulative.
+/// The late counts and refused sends of a device, cumulative.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Counts {
     pub late: u64,
     pub missed: u64,
     pub overruns: u64,
+    /// The TX lanes' `send_errors`, summed.
+    pub send_errors: u64,
 }
 
 impl Counts {
@@ -78,6 +83,7 @@ impl Counts {
             late: self.late.saturating_sub(before.late),
             missed: self.missed.saturating_sub(before.missed),
             overruns: self.overruns.saturating_sub(before.overruns),
+            send_errors: self.send_errors.saturating_sub(before.send_errors),
         }
     }
 }
@@ -191,6 +197,11 @@ pub fn parse(line: &str) -> Option<Status> {
         .and_then(Value::as_array)
         .map(|flows| flows.iter().filter_map(|f| num(f.get("late"))).sum())
         .unwrap_or(0);
+    let send_errors = obj
+        .get("tx")
+        .and_then(Value::as_array)
+        .map(|lanes| lanes.iter().filter_map(|l| num(l.get("send_errors"))).sum())
+        .unwrap_or(0);
     let engine = obj.get("engine");
     Some(Status {
         ready: flag(field(clock, "ready").as_ref()),
@@ -202,6 +213,7 @@ pub fn parse(line: &str) -> Option<Status> {
             late,
             missed: num(field(engine, "missed").as_ref()).unwrap_or(0),
             overruns: num(field(engine, "overruns").as_ref()).unwrap_or(0),
+            send_errors,
         },
         engine: engine.is_some_and(Value::is_object),
         app: obj.get("app").and_then(app_of),
@@ -246,6 +258,7 @@ pub fn judge(status: &Status, grew: Counts) -> (Colour, Option<String>) {
         ("late", grew.late),
         ("missed", grew.missed),
         ("overruns", grew.overruns),
+        ("send errors", grew.send_errors),
     ];
     if let Some((what, n)) = grown.iter().find(|(_, n)| *n > 0) {
         return (Colour::Orange, Some(format!("{what} +{n}")));
@@ -267,6 +280,9 @@ pub fn line(name: &str, status: &Status, grew: Counts) -> String {
             "; missed +{}, overruns +{}",
             grew.missed, grew.overruns
         ));
+    }
+    if grew.send_errors > 0 {
+        s.push_str(&format!("; send errors +{}", grew.send_errors));
     }
     if let Some(l) = status.app.as_ref().and_then(|a| a.line.as_deref()) {
         s.push_str("; ");

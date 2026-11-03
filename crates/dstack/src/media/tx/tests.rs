@@ -1681,6 +1681,15 @@ fn a_send_counts_a_packet_a_direct_one_or_an_error() {
     assert_eq!(stats.send_errors.load(Ordering::Relaxed), 2);
 }
 
+/// dstack #1: the packets sent on a retry reach the lane's counts.
+#[test]
+fn a_lanes_retries_reach_its_counts() {
+    let shared = shared_with(Vec::new());
+    shared.lanes[2].send_retries.fetch_add(5, Ordering::Relaxed);
+    assert_eq!(shared.lane(2).send_retries, 5);
+    assert_eq!(shared.lane(1).send_retries, 0);
+}
+
 #[test]
 fn the_udp_path_sends_the_packet_after_the_headroom() {
     let shared = shared_with(Vec::new());
@@ -1704,12 +1713,17 @@ fn the_udp_path_sends_the_packet_after_the_headroom() {
 
 /// What `f` logs at WARN or above on this thread, as text.
 fn warned(f: impl FnOnce()) -> String {
+    logged(tracing::Level::WARN, f)
+}
+
+/// What `f` logs at `level` and above.
+fn logged(level: tracing::Level, f: impl FnOnce()) -> String {
     let buf = Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
     let sink = Arc::clone(&buf);
     let subscriber = tracing_subscriber::fmt()
         .with_writer(move || Writer(Arc::clone(&sink)))
         .with_ansi(false)
-        .with_max_level(tracing::Level::WARN)
+        .with_max_level(level)
         .finish();
     crate::test_log::undecided();
     tracing::subscriber::with_default(subscriber, f);
@@ -1857,9 +1871,50 @@ fn the_send_watch_logs_a_flow_s_failed_sends_with_the_os_error() {
     let log = warned(|| watch.watch(crate::media::late::EVERY_NS, &shared));
     assert_eq!(log.lines().count(), 1, "{log}");
     assert!(log.contains(" WARN "), "{log}");
-    assert!(log.contains("slot=2 errors=2 os_error=10055"), "{log}");
+    assert!(
+        log.contains("slot=2 errors=2 retried=0 os_error=10055"),
+        "{log}"
+    );
     assert_eq!(
         warned(|| watch.watch(2 * crate::media::late::EVERY_NS, &shared)),
+        "",
+        "quiet second"
+    );
+}
+
+/// dstack #1: packets that went out on a retry are logged at info, once a
+/// second, never as a warning (none was lost).
+#[test]
+fn the_send_watch_logs_retried_sends_at_info() {
+    let shared = shared_with(Vec::new());
+    let mut watch = crate::media::late::SendWatch::new();
+    assert_eq!(logged(tracing::Level::INFO, || watch.watch(0, &shared)), "");
+    count_send(
+        &shared.lanes[1],
+        &Err(io::Error::from_raw_os_error(10055)),
+        50,
+    );
+    let errors = shared.lane(1).send_errors;
+    shared.lanes[1].send_retries.fetch_add(3, Ordering::Relaxed);
+    let log = logged(tracing::Level::INFO, || {
+        watch.watch(crate::media::late::EVERY_NS, &shared)
+    });
+    assert_eq!(errors, 1);
+    // The lost one and the retries: one warning.
+    assert_eq!(log.lines().count(), 1, "{log}");
+    assert!(log.contains(" WARN "), "{log}");
+    assert!(log.contains("errors=1 retried=3"), "{log}");
+    // Retries alone: info, not a warning.
+    shared.lanes[1].send_retries.fetch_add(2, Ordering::Relaxed);
+    let log = logged(tracing::Level::INFO, || {
+        watch.watch(2 * crate::media::late::EVERY_NS, &shared)
+    });
+    assert_eq!(log.lines().count(), 1, "{log}");
+    assert!(log.contains(" INFO "), "{log}");
+    assert!(log.contains("slot=1 retried=2 os_error=10055"), "{log}");
+    assert!(log.contains("went out on a retry"), "{log}");
+    assert_eq!(
+        warned(|| watch.watch(3 * crate::media::late::EVERY_NS, &shared)),
         "",
         "quiet second"
     );

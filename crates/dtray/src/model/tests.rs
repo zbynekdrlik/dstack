@@ -325,7 +325,8 @@ fn missing_fields_read_as_absent() {
         Counts {
             late: 2,
             missed: 0,
-            overruns: 0
+            overruns: 0,
+            send_errors: 0,
         }
     );
     // A flag of 0 or false is not set; "engine" that is no object is none.
@@ -359,6 +360,7 @@ fn the_line_shows_holdover_and_the_engine_only_when_there() {
         late: 1,
         missed: 2,
         overruns: 3,
+        send_errors: 0,
     };
     assert_eq!(
         line("d", &s, grew),
@@ -387,6 +389,7 @@ fn judge_weighs_the_clock_then_subscriptions_then_counts() {
         late: 1,
         missed: 1,
         overruns: 1,
+        send_errors: 0,
     };
     assert_eq!(
         judge(&s, grew),
@@ -435,20 +438,29 @@ fn counts_since_never_go_below_0() {
         late: 5,
         missed: 1,
         overruns: 9,
+        send_errors: 7,
     };
     let before = Counts {
         late: 2,
         missed: 4,
         overruns: 9,
+        send_errors: 3,
     };
     assert_eq!(
         now.since(before),
         Counts {
             late: 3,
             missed: 0,
-            overruns: 0
+            overruns: 0,
+            send_errors: 4,
         }
     );
+    // A device that restarted: its refused sends grew by 0.
+    let restarted = Counts {
+        send_errors: 1,
+        ..Counts::default()
+    };
+    assert_eq!(restarted.since(before).send_errors, 0);
 }
 
 #[test]
@@ -699,4 +711,71 @@ fn missing_names_are_the_expected_no_reading_has() {
     assert!(missing(&readings, &[]).is_empty());
     assert_eq!(missing(&[], &expected).len(), 4);
     assert_eq!(missing_line("x"), "x: expected, not running");
+}
+
+/// [`status_line`] with TX lanes whose `send_errors` are `errors`.
+fn with_tx(errors: &[u64]) -> String {
+    let lanes: Vec<String> = errors
+        .iter()
+        .enumerate()
+        .map(|(i, e)| {
+            format!(
+                r#"{{"flow":{},"live":1,"packets":9,"send_errors":{e},"send_retries":4}}"#,
+                i + 1
+            )
+        })
+        .collect();
+    healthy().replace(r#""tx":[]"#, &format!(r#""tx":[{}]"#, lanes.join(",")))
+}
+
+#[test]
+fn growing_send_errors_are_orange_and_shown_on_the_line() {
+    let mut t = Tracker::default();
+    // The first sight: no growth, whatever was refused before.
+    let v = t.update(&[ok("app", with_tx(&[5, 2]))]);
+    assert_eq!(v.colour, Colour::Green);
+    assert!(!v.lines[0].contains("send errors"), "{}", v.lines[0]);
+    // Two lanes refuse 3 more between them: orange, `send errors +3`.
+    let v = t.update(&[ok("app", with_tx(&[7, 3]))]);
+    assert_eq!(v.colour, Colour::Orange);
+    assert_eq!(v.tooltip, "dstack: 1 device, app: send errors +3");
+    assert_eq!(
+        v.lines[0],
+        "app: clock dsync ready; RX 2/2 connected; late +0; missed +0, overruns +0; send errors +3"
+    );
+    // Unchanged (retries alone are healthy): green, no send errors shown.
+    let v = t.update(&[ok("app", with_tx(&[7, 3]))]);
+    assert_eq!(v.colour, Colour::Green);
+    assert!(!v.lines[0].contains("send errors"), "{}", v.lines[0]);
+    // One more: +1.
+    let v = t.update(&[ok("app", with_tx(&[7, 4]))]);
+    assert!(v.lines[0].ends_with("; send errors +1"), "{}", v.lines[0]);
+    // A lane's count that is no number counts for nothing.
+    let s = parse(&healthy().replace(
+        r#""tx":[]"#,
+        r#""tx":[{"send_errors":"x"},{"flow":2},{"send_errors":6}]"#,
+    ))
+    .expect("an object");
+    assert_eq!(s.counts.send_errors, 6);
+}
+
+#[test]
+fn judge_weighs_send_errors_after_the_late_counts() {
+    let s = parse(&healthy()).expect("an object");
+    let grew = Counts {
+        send_errors: 2,
+        ..Counts::default()
+    };
+    assert_eq!(
+        judge(&s, grew),
+        (Colour::Orange, Some("send errors +2".into()))
+    );
+    let grew = Counts {
+        overruns: 1,
+        ..grew
+    };
+    assert_eq!(
+        judge(&s, grew),
+        (Colour::Orange, Some("overruns +1".into()))
+    );
 }
