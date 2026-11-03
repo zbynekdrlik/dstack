@@ -9,12 +9,13 @@
 //!   running ones are gone.
 //! - [`Scanner`]: a [`Discovery`] per own address, kept in step with the
 //!   PC's addresses on each [`Scanner::refresh`] (a tray started before the
-//!   network is up finds it later), and the readings of every local device.
+//!   network is up finds it later), and the readings of every local device
+//!   ([`read`]).
 //!
 //! Logs carry counts, never a name or an address.
 
 use std::collections::BTreeMap;
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, SocketAddrV4};
 
 use dstack::announce::STATUS_PORT_KEY;
 use dstack::daemon::IfAddr;
@@ -23,11 +24,13 @@ use tracing::{debug, info, warn};
 
 use crate::probe;
 
-/// A dstack device on this PC: its name and its local status port.
+/// A dstack device on this PC: its name, its local status port and its
+/// ARC (the latency menu's reads and writes).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Local {
     pub name: String,
     pub port: u16,
+    pub arc: SocketAddrV4,
 }
 
 /// The PC's own IPv4 addresses discovery listens on: every interface's
@@ -64,6 +67,7 @@ pub fn local_devices(found: &[Device], own: &[Ipv4Addr]) -> Vec<Local> {
             status_port(d).map(|port| Local {
                 name: d.name.clone(),
                 port,
+                arc: d.arc,
             })
         })
         .collect();
@@ -150,16 +154,21 @@ impl Scanner {
         local_devices(&found, &own)
     }
 
-    /// Every local device's status now ([`probe::status`]), by name.
+    /// Every local device's status now ([`read`]), by name.
     pub fn readings(&self) -> Vec<Reading> {
-        self.devices()
-            .into_iter()
-            .map(|d| {
-                let r = probe::status(d.port).map_err(|e| e.to_string());
-                (d.name, r)
-            })
-            .collect()
+        read(&self.devices())
     }
+}
+
+/// Each of `devices`' status now ([`probe::status`]), by name, in order.
+pub fn read(devices: &[Local]) -> Vec<Reading> {
+    devices
+        .iter()
+        .map(|d| {
+            let r = probe::status(d.port).map_err(|e| e.to_string());
+            (d.name.clone(), r)
+        })
+        .collect()
 }
 
 #[cfg(test)]

@@ -231,7 +231,9 @@ impl Media {
         let hook = lock(&self.app).clone()?;
         let part = crate::ctl::app_object(&hook());
         if part.is_none() && !self.app_refused.swap(true, Ordering::Relaxed) {
-            warn!("the app's status part is no JSON object; the status leaves it out (warned once)");
+            warn!(
+                "the app's status part is no JSON object; the status leaves it out (warned once)"
+            );
         }
         part
     }

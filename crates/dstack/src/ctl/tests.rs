@@ -1179,7 +1179,8 @@ fn an_app_part_that_is_no_object_is_left_out_and_warned_once() {
         assert_eq!(status(&media), before);
     });
     assert_eq!(
-        logs.matches("the app's status part is no JSON object").count(),
+        logs.matches("the app's status part is no JSON object")
+            .count(),
         1,
         "{logs}"
     );
