@@ -88,6 +88,8 @@ enum Take {
     /// None: the whole batch refused with this OS error (after marking
     /// every frame, which must not count).
     Refuse(i32),
+    /// None, refused with an error that has no OS code.
+    RefuseOther,
 }
 
 /// A host sender that keeps every call's frames (the host's interface:
@@ -116,6 +118,7 @@ impl FrameSender for Recorder {
                 sent.fill(true);
                 return Err(io::Error::from_raw_os_error(code));
             }
+            Take::RefuseOther => return Err(io::Error::other("the filter is gone")),
         }
         Ok(())
     }
@@ -326,6 +329,20 @@ fn a_batch_refused_whole_goes_through_the_udp_socket_and_is_counted() {
     assert_eq!(drain(&a).len() as u64, lane.packets);
     assert_eq!(lane.packets, rec.frames().len() as u64);
     assert_eq!(shared.host_refusals(), (calls, 10055));
+}
+
+/// A refusal without an OS code reads -1, as a lane's `last_os_error`.
+#[test]
+fn a_refusal_without_an_os_code_reads_minus_one() {
+    let shared = shared();
+    let (_a, at_a) = receiver(RESOLVED);
+    let slot = flow(&shared, at_a, 32);
+    let rec = host(&shared, Take::RefuseOther);
+    let mut tx = Transmitter::new(Arc::clone(&shared));
+    run(&mut tx, &shared, &rec, slot, 2);
+    let calls = rec.calls().len() as u64;
+    assert!(calls > 0);
+    assert_eq!(shared.host_refusals(), (calls, -1));
 }
 
 #[test]
