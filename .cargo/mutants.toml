@@ -18,6 +18,7 @@ exclude_globs = [
   "crates/dstack/src/daemon/cli/windows.rs",
   "crates/dstack/src/host/windows.rs",
   "crates/dstack/src/lso/windows.rs",
+  "crates/dstack/src/media/bypass/windows.rs",
   "crates/dstack/src/media/dscp/windows.rs",
   "crates/dstack/src/traffic/windows.rs",
   "crates/dtray/src/win.rs",

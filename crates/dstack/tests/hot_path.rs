@@ -15,18 +15,20 @@
 
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use assert_no_alloc::{AllocDisabler, assert_no_alloc, reset_violation_count, violation_count};
 use dstack::clock;
 use dstack::device::DeviceConfig;
 use dstack::flows::control::FlowRequest;
+use dstack::media::bypass::{FrameSender, Neighbour};
 use dstack::media::check::{CounterCheck, SineCheck};
 use dstack::media::packet::{self, MEDIA_HEADER};
 use dstack::media::ring::Ring;
 use dstack::media::rx::{Receiver, RxPlan, RxRoute, RxShared};
 use dstack::media::source::Source;
-use dstack::media::tx::{Transmitter, TxShared, ns_of};
+use dstack::media::tx::{HostNic, Transmitter, TxShared, ns_of};
 use dstack::stream::{BLOCK, Map, Pump, PumpStats, Timing, WORK_MARGIN};
 use dstack_audio_io::{Block, Process};
 
@@ -230,6 +232,99 @@ fn a_refused_send_in_the_tx_pass_does_not_allocate() {
     assert_eq!(lane.packets, 0, "{lane:?}");
     assert!(lane.send_errors > 0, "{lane:?}");
     assert_eq!(lane.send_retries, 0, "{lane:?}");
+}
+
+/// A host frame sender that takes every second frame and counts its calls
+/// and frames (atomics only: it runs inside the detector).
+struct Counting {
+    calls: AtomicU64,
+    frames: AtomicU64,
+}
+
+impl FrameSender for Counting {
+    fn send(&self, frames: &[&[u8]], sent: &mut [bool]) -> std::io::Result<()> {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        self.frames
+            .fetch_add(frames.len() as u64, Ordering::Relaxed);
+        for (i, s) in sent.iter_mut().enumerate() {
+            *s = i % 2 == 0;
+        }
+        Ok(())
+    }
+}
+
+/// dstack #1: a TX pass through a host frame sender (the batch of frames,
+/// the one call, the frames it did not take sent on the UDP socket)
+/// allocates nothing.
+#[test]
+fn the_tx_passes_through_a_host_sender_do_not_allocate() {
+    let cfg = DeviceConfig::from_toml(include_str!("../../../config/test-device.toml"))
+        .expect("config/test-device.toml");
+    let rings: Arc<[Ring]> = (0..1).map(|_| Ring::new()).collect::<Vec<_>>().into();
+    let shared = Arc::new(TxShared::new(cfg, Ipv4Addr::LOCALHOST, rings, 1, &[]).unwrap());
+    assert!(shared.set_source(0, Source::Counter));
+    let (a, at_a) = receiver();
+    let (b, at_b) = receiver();
+    {
+        let mut c = shared.lock();
+        for rx in [at_a, at_b] {
+            let req = FlowRequest {
+                rx_host: "peer-device".to_string(),
+                rx_flow_name: "flow-1".to_string(),
+                sample_rate: RATE,
+                bits: 24,
+                channels: vec![Some(1)],
+                fpp: 32,
+                rx,
+            };
+            c.table.add(&req, shared.now_ns()).unwrap();
+        }
+        shared.publish(&c);
+    }
+    let sender = Arc::new(Counting {
+        calls: AtomicU64::new(0),
+        frames: AtomicU64::new(0),
+    });
+    let nic = HostNic {
+        ifindex: 3,
+        mac: [2, 0, 0, 0, 0, 1],
+        name: "test0".to_string(),
+    };
+    assert!(shared.use_frame_sender(sender.clone(), nic));
+    shared.set_neighbours(&[Neighbour {
+        ip: Ipv4Addr::LOCALHOST,
+        mac: [0, 0x1d, 0xc1, 1, 2, 3],
+        ifindex: 3,
+    }]);
+    let mut tx = Transmitter::new(Arc::clone(&shared));
+    let start = T / u64::from(RATE) * 1_000_000_000;
+    reset_violation_count();
+    assert_no_alloc(|| {
+        for i in 0..400 {
+            tx.step(Some(start + i * 250_000), 0);
+        }
+    });
+    assert_eq!(violation_count(), 0, "the host sender's passes allocated");
+    let (la, lb) = (shared.lane(0), shared.lane(1));
+    let frames = sender.frames.load(Ordering::Relaxed);
+    assert!((295..=300).contains(&la.packets), "{la:?}");
+    assert!((295..=300).contains(&lb.packets), "{lb:?}");
+    assert_eq!(frames, la.packets + lb.packets, "both flows to the sender");
+    assert!(
+        sender.calls.load(Ordering::Relaxed) < frames,
+        "a call a pass"
+    );
+    let direct = la.direct + lb.direct;
+    assert!(
+        direct >= frames / 2 && direct < frames,
+        "{direct} of {frames}"
+    );
+    // The frames not taken went out on the flows' sockets (sent whole; the
+    // loopback receivers' buffers may not hold them all).
+    assert_eq!((la.send_errors, lb.send_errors), (0, 0));
+    let mut buf = [0u8; 2048];
+    let got = [&a, &b].map(|s| s.recv(&mut buf).ok());
+    assert!(got.contains(&Some(MEDIA_HEADER + 3 * 32)), "{got:?}");
 }
 
 #[test]

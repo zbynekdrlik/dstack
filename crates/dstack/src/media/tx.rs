@@ -51,8 +51,8 @@
 
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering, fence};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering, fence};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::thread::JoinHandle;
 use std::time::Instant;
 
@@ -631,8 +631,16 @@ pub struct TxShared {
     /// goes through its UDP socket ([`bypass`]).
     direct: Option<(Direct, String)>,
     /// Each slot's destination MAC for a direct send ([`bypass::mac_word`];
-    /// 0: through the UDP socket), from the control tick.
+    /// 0: through the UDP socket), from the control tick: the ARP table's
+    /// past the qdisc, the Windows neighbour table's for a host sender.
     macs: [Cell<1>; MAX_FLOWS],
+    /// The host's frame sender and our NIC (dstack #1, Windows), set once
+    /// before the TX thread starts ([`TxShared::use_frame_sender`]).
+    host: OnceLock<host::HostPath>,
+    /// Batches the host sender refused whole, and the last one's OS error
+    /// (the send watch logs them, [`super::late::HostWatch`]).
+    host_refused: AtomicU64,
+    host_error: AtomicI32,
     rings: Arc<[Ring]>,
     /// Each TX channel's engine ring (phase C): the engine's pump writes
     /// it, [`Source::Engine`] sends it; `None` for a channel the engine
@@ -695,6 +703,9 @@ impl TxShared {
             ip,
             direct: bypass::open_for(ip),
             macs: std::array::from_fn(|_| Cell::new()),
+            host: OnceLock::new(),
+            host_refused: AtomicU64::new(0),
+            host_error: AtomicI32::new(0),
             sources: (0..cfg.tx.len()).map(|_| Cell::new()).collect(),
             peaks: (0..cfg.tx.len()).map(|_| AtomicU32::new(0)).collect(),
             advertised_ns: AtomicU64::new(cfg.advertised_latency_ns()),
@@ -758,6 +769,10 @@ impl TxShared {
         if let Some((_, nic)) = &self.direct {
             let table = std::fs::read_to_string("/proc/net/arp").unwrap_or_default();
             self.set_macs(&c, &table, nic);
+        }
+        #[cfg(windows)]
+        if self.host.get().is_some() {
+            self.set_host_macs(&c, &bypass::windows::neighbours());
         }
         expired
     }
@@ -1034,6 +1049,9 @@ pub struct Transmitter {
     packet: Box<[u8; HEADROOM + MAX_DATAGRAM]>,
     /// The IPv4 ID of the next direct packet.
     ip_id: u16,
+    /// The host sender's frames of a pass (dstack #1); `None` without a
+    /// host sender.
+    batch: Option<host::Batch>,
     /// The clock's epoch at the last pass.
     epoch: Option<u32>,
     /// When the next read of the plans, sources and keepalives is due.
@@ -1059,6 +1077,7 @@ impl Transmitter {
             frames: Box::new([[0; FPP_MAX as usize]; MAX_CHANNELS]),
             packet: Box::new([0; HEADROOM + MAX_DATAGRAM]),
             ip_id: 0,
+            batch: shared.host.get().map(host::Batch::new),
             epoch: None,
             next_events: None,
             rate,
@@ -1170,7 +1189,9 @@ impl Transmitter {
 
     /// Every packet due at media time `now` (PTP `now_ns`, read at `pass`),
     /// each flow in turn (the hot path: no allocation, no lock, no log; the
-    /// send is its one system call).
+    /// send is its one system call). With a host sender, the packets to
+    /// resolved neighbours are gathered as frames and sent in one call at
+    /// the end of the pass ([`host::Batch`]); the rest go out at once.
     fn send_due(&mut self, now: u64, now_ns: u64, pass: Instant) {
         let Transmitter {
             shared,
@@ -1183,8 +1204,16 @@ impl Transmitter {
             margin_ns,
             latency_ns,
             ip_id,
+            batch,
             ..
         } = self;
+        let clock = PassClock {
+            now_ns,
+            pass,
+            rate: *rate,
+            margin_ns: *margin_ns,
+            latency_ns: *latency_ns,
+        };
         let rings: &[Ring] = &shared.rings;
         for (slot, lane) in lanes.iter_mut().enumerate() {
             let Some(dest) = lane.plan.dest else {
@@ -1194,6 +1223,8 @@ impl Transmitter {
             let stats = &shared.lanes[slot];
             let socket = &shared.sockets[slot];
             let direct = shared.direct_mac(slot);
+            // The host sender, when the slot's receiver is resolved.
+            let host_mac = batch.as_ref().and_then(|_| shared.host_mac(slot));
             let src = SocketAddrV4::new(shared.ip, shared.ports[slot]);
             let schedule = lane
                 .schedule
@@ -1217,6 +1248,23 @@ impl Transmitter {
                     }
                 }
                 let (secs, sub) = clock::stamp(stamp, *rate);
+                let samples = |f: usize, s: usize| frames[s][f];
+                if let (Some(batch), Some(mac)) = (batch.as_mut(), host_mac) {
+                    let queued = host::Queued {
+                        slot,
+                        stamp,
+                        fpp: plan.fpp,
+                        src,
+                        dest,
+                        mac,
+                    };
+                    // The plan is sendable (TxTable::plan), so the packet
+                    // is whole and fits the frame.
+                    batch.push(&clock, shared, queued, ip_id, |buf| {
+                        packet::write(buf, secs, sub, nch, usize::from(plan.bps), fpp, samples)
+                    });
+                    continue;
+                }
                 // The plan is sendable (TxTable::plan), so the packet is
                 // whole and fits the buffer.
                 let n = packet::write(
@@ -1226,55 +1274,20 @@ impl Transmitter {
                     nch,
                     usize::from(plan.bps),
                     fpp,
-                    |f, s| frames[s][f],
+                    samples,
                 );
-                let floor = flow_latency_ns(*latency_ns, plan.fpp, *rate, *margin_ns);
-                let stamp_ns = ns_of(stamp, *rate);
-                // The longest single send of its tries.
-                let mut took = 0;
-                // A send the NIC refused for a moment goes again while the
-                // packet still arrives in time (dstack #1).
-                let (sent, retries) = send_with_retries(
-                    crate::clock::Os::current(),
-                    floor,
-                    || {
-                        now_ns
-                            .saturating_add(nanos(pass.elapsed()))
-                            .saturating_sub(stamp_ns)
-                    },
-                    || {
-                        let sent_at = Instant::now();
-                        let sent = send_one(direct, socket, &mut packet[..], src, dest, ip_id, n);
-                        took = took.max(nanos(sent_at.elapsed()));
-                        sent
-                    },
-                    spin_for,
-                );
-                // How late it left: the pass's PTP time plus the time since,
-                // after the last send (a thread not scheduled, a send that
-                // blocked, or retries, all make it late).
-                let after = Instant::now();
-                let left = now_ns.saturating_add(nanos(after - pass));
-                let due =
-                    ns_of(stamp.saturating_add(plan.fpp.into()), *rate).saturating_add(*margin_ns);
-                let late = left.saturating_sub(due);
-                // A receiver's lateness: the arrival past the stamp.
-                let age = left.saturating_sub(stamp_ns);
-                stats.age_max_ns.fetch_max(age, Ordering::Relaxed);
-                stats.age_peak_ns.fetch_max(age, Ordering::Relaxed);
-                if over_latency(age, floor) {
-                    stats.over_latency.fetch_add(1, Ordering::Relaxed);
-                }
-                stats.late[late_bin(late)].fetch_add(1, Ordering::Relaxed);
-                stats.late_max_ns.fetch_max(late, Ordering::Relaxed);
-                stats.send_max_ns.fetch_max(took, Ordering::Relaxed);
-                count_retried(stats, &sent, retries);
-                count_send(stats, &sent, n);
+                let sent = send_timed(&clock, stamp, plan.fpp, || {
+                    send_one(direct, socket, &mut packet[..], src, dest, ip_id, n)
+                });
+                account(stats, &clock, stamp, plan.fpp, &sent, n);
             }
             stats.holes.fetch_add(holes as u64, Ordering::Relaxed);
             stats
                 .rebootstraps
                 .fetch_add(schedule.take_rebootstraps(), Ordering::Relaxed);
+        }
+        if let Some(batch) = batch.as_mut() {
+            batch.flush(&clock, shared);
         }
     }
 }
@@ -1404,6 +1417,7 @@ fn run(clock: &dyn PtpClock, shared: Arc<TxShared>) {
         asked = SEND_BUFFER_BYTES,
         "TX flow sockets' send buffer"
     );
+    info!("{}", host::path_line(shared.tx_path(), &shared.tx_nic()));
     // Held while the thread runs: deep idle states delay every packet
     // after its send (`super::qos`).
     #[cfg(target_os = "linux")]
@@ -1573,11 +1587,14 @@ pub(crate) fn pin_to_cpu(_cpu: usize) -> bool {
     false
 }
 
+pub mod host;
+pub use host::{HostNic, TxPath};
+mod pass;
+use pass::{PassClock, Sent, account, send_timed};
 mod retry;
 pub use retry::{
     SEND_RETRIES, SEND_RETRY_HEADROOM_NS, SEND_RETRY_WAIT_NS, send_retry, transient_refusal,
 };
-use retry::{count_retried, send_with_retries, spin_for};
 
 #[cfg(test)]
 mod tests;

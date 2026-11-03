@@ -237,3 +237,18 @@ fn the_send_watch_reports_retried_sends_apart_from_lost_ones() {
     // Quiet.
     assert!(w.look(4 * EVERY_NS, counts(5, 15)).is_empty());
 }
+
+/// dstack #1: the host frame sender's whole-batch refusals, once a second,
+/// never per packet.
+#[test]
+fn the_host_watch_reports_refused_batches_once_a_second() {
+    let mut w = HostWatch::new();
+    // The first look only learns.
+    assert_eq!(w.look(0, 4), None);
+    assert_eq!(w.look(S - 1, 9), None, "between looks");
+    assert_eq!(w.look(S, 9), Some(5));
+    assert_eq!(w.look(2 * S, 9), None, "none since");
+    assert_eq!(w.look(3 * S, 10), Some(1));
+    assert_eq!(w.look(3 * S + 1, 12), None, "the next look is a second on");
+    assert_eq!(w.look(4 * S, 12), Some(2));
+}

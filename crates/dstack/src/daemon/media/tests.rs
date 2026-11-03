@@ -600,3 +600,22 @@ async fn the_checks_read_a_granted_flow_s_ring_on_a_ready_clock_only() {
     };
     assert_eq!(s.blind, 960);
 }
+
+/// dstack #1: a host frame sender is used on Windows only; elsewhere the
+/// call says no and TX keeps its own path.
+#[cfg(not(windows))]
+#[test]
+fn a_frame_sender_is_refused_off_windows() {
+    struct Never;
+    impl crate::media::bypass::FrameSender for Never {
+        fn send(&self, _: &[&[u8]], _: &mut [bool]) -> std::io::Result<()> {
+            unreachable!("never called off Windows")
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let media = media_on(&device_at(dir.path()), Arc::new(Unready));
+    let before = media.tx.tx_path();
+    assert!(!media.set_frame_sender(Arc::new(Never)));
+    assert_eq!(media.tx.tx_path(), before);
+    assert_ne!(before, crate::media::tx::TxPath::HostSender);
+}

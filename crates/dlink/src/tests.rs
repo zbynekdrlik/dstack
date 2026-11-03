@@ -258,3 +258,31 @@ fn an_app_rate_outside_the_range_is_refused() {
         );
     }
 }
+
+/// A host sender that is never called (the config only carries it).
+struct Never;
+
+impl FrameSender for Never {
+    fn send(&self, _: &[&[u8]], _: &mut [bool]) -> std::io::Result<()> {
+        unreachable!("a config never sends")
+    }
+}
+
+/// dstack #1: the app's frame sender rides the config to the device; two
+/// configs are equal with the same sender (or none), not with another.
+#[test]
+fn the_config_carries_the_app_s_frame_sender() {
+    assert!(config().frame_sender.0.is_none());
+    let sender: Arc<dyn FrameSender> = Arc::new(Never);
+    let with = config().frame_sender(Arc::clone(&sender));
+    assert!(Arc::ptr_eq(with.frame_sender.0.as_ref().unwrap(), &sender));
+    assert_eq!(with, config().frame_sender(Arc::clone(&sender)));
+    assert_ne!(with, config().frame_sender(Arc::new(Never)));
+    assert_ne!(with, config());
+    assert_ne!(config(), with);
+    assert_eq!(config(), config());
+    assert_eq!(format!("{:?}", with.frame_sender), "Some(..)");
+    assert_eq!(format!("{:?}", config().frame_sender), "None");
+    // The device config is the same either way.
+    assert_eq!(with.device().unwrap(), config().device().unwrap());
+}

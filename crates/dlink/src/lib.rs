@@ -68,6 +68,7 @@ pub use rated::Rated;
 use dstack::device::{TimingProfile, normal_work_margin};
 use dstack::embed::Embedded;
 use dstack::host::ClockSource;
+use dstack::media::bypass::FrameSender;
 
 /// dlink's device latency unless the app sets one: 10 ms (owner,
 /// 2.11.2026: "kľudne základ môže byť aj 10 ms").
@@ -101,7 +102,29 @@ pub struct Config {
     subscribe: Vec<(usize, String, String)>,
     flow_slots: Option<usize>,
     block: u64,
+    frame_sender: Sender,
 }
+
+/// The host's frame sender in a [`Config`] (compared by identity).
+#[derive(Clone, Default)]
+struct Sender(Option<Arc<dyn FrameSender>>);
+
+impl std::fmt::Debug for Sender {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.0.is_some() { "Some(..)" } else { "None" })
+    }
+}
+
+impl PartialEq for Sender {
+    fn eq(&self, other: &Self) -> bool {
+        match (&self.0, &other.0) {
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            (a, b) => a.is_none() && b.is_none(),
+        }
+    }
+}
+
+impl Eq for Sender {}
 
 /// A device's own control ports, for a second device on one address (the
 /// first keeps Dante's defaults: ARC 4440, CMC 8800, flows 4455).
@@ -133,6 +156,7 @@ impl Config {
             subscribe: Vec::new(),
             flow_slots: None,
             block: BLOCK,
+            frame_sender: Sender::default(),
         }
     }
 
@@ -239,6 +263,15 @@ impl Config {
     /// adds to the path's latency.
     pub fn block(mut self, frames: u64) -> Self {
         self.block = frames;
+        self
+    }
+
+    /// The host's kernel send path for the device's TX (dstack #1, Windows
+    /// only): dstack writes whole Ethernet II frames and hands each TX pass's
+    /// frames to `sender` in one call (`dstack::media::bypass::FrameSender`).
+    /// Without one (and off Windows) TX goes through the UDP sockets.
+    pub fn frame_sender(mut self, sender: Arc<dyn FrameSender>) -> Self {
+        self.frame_sender = Sender(Some(sender));
         self
     }
 
@@ -366,6 +399,7 @@ impl Link {
         let cfg = config.device().map_err(|problems| {
             HostError::Setup(format!("dlink config: {}", problems.join("; ")))
         })?;
+        let sender = config.frame_sender.0.clone();
         let device = if config.converts() {
             tracing::info!(
                 device_rate = config.device_rate(),
@@ -383,9 +417,9 @@ impl Link {
                 outputs,
             )
             .map_err(|e| HostError::Setup(format!("dlink rate conversion: {e}")))?;
-            Embedded::start_with(cfg, place, map, rated, source)?
+            Embedded::start_with_sender(cfg, place, map, rated, source, sender)?
         } else {
-            Embedded::start_with(cfg, place, map, processor, source)?
+            Embedded::start_with_sender(cfg, place, map, processor, source, sender)?
         };
         Ok(Link { device })
     }
