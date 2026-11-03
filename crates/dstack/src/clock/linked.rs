@@ -188,7 +188,6 @@ impl PtpClock for Linked {
 }
 
 /// dsync's in-process follower (dsync-ptp) as the linked clock reads it.
-#[cfg(target_os = "linux")]
 impl Follow for dsync_ptp::follower::PtpClock {
     fn now_ns(&self) -> Option<i64> {
         self.now_ptp_ns()
@@ -206,9 +205,9 @@ impl Follow for dsync_ptp::follower::PtpClock {
 }
 
 /// Starts dsync's follower on the interface `iface`: the linked clock's
-/// internal source, or `None` with the reason logged (no capability for
-/// port 319, no such interface): the device then runs on the service.
-#[cfg(target_os = "linux")]
+/// internal source, or `None` with the reason logged (Linux: no capability
+/// for port 319; Windows: no Npcap; anywhere: no such interface): the
+/// device then runs on the service.
 pub fn start_internal(iface: &str) -> Started {
     match dsync_ptp::follower::Follower::start(dsync_ptp::follower::FollowerConfig::on_interface(
         iface,
@@ -218,26 +217,26 @@ pub fn start_internal(iface: &str) -> Started {
             (Some(Box::new(f.clock())), Some(Box::new(f)))
         }
         Err(e) => {
-            let denied = e
-                .downcast_ref::<std::io::Error>()
-                .is_some_and(|io| io.kind() == std::io::ErrorKind::PermissionDenied);
             warn!(
                 iface,
+                reason = follower_failure(&e),
                 error = %e,
-                denied,
-                "media clock: dsync's in-process follower did not start (port 319 needs CAP_NET_BIND_SERVICE): the dsync service's clock is used"
+                "media clock: dsync's in-process follower did not start: the dsync service's clock is used"
             );
             (None, None)
         }
     }
 }
 
-/// Elsewhere the follower waits for dsync's run-time Npcap load (#68): the
-/// device runs on the service.
-#[cfg(not(target_os = "linux"))]
-pub fn start_internal(_iface: &str) -> Started {
-    info!("media clock: no in-process follower on this OS yet: the dsync service's clock is used");
-    (None, None)
+/// What the app can do about a follower that did not start, in a word.
+pub fn follower_failure(e: &dsync_ptp::follower::FollowerError) -> &'static str {
+    use dsync_ptp::follower::FollowerError;
+    match e {
+        FollowerError::NpcapMissing { .. } => "Npcap is not installed",
+        FollowerError::PermissionDenied { .. } => "port 319 needs CAP_NET_BIND_SERVICE or root",
+        FollowerError::InterfaceNotFound { .. } => "no such interface, or no IPv4 on it",
+        _ => "another failure",
+    }
 }
 
 #[cfg(test)]

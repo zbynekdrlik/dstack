@@ -171,3 +171,33 @@ fn a_follower_never_locked_is_not_taken_in_holdover() {
     set(&fake, Some(7), HOLDOVER);
     assert_eq!(linked.tick(), Source::Internal);
 }
+
+#[test]
+fn a_follower_that_did_not_start_says_why_in_a_word() {
+    use dsync_ptp::follower::FollowerError;
+    assert_eq!(
+        follower_failure(&FollowerError::NpcapMissing {
+            detail: "wpcap.dll".into()
+        }),
+        "Npcap is not installed"
+    );
+    assert_eq!(
+        follower_failure(&FollowerError::PermissionDenied {
+            cause: std::io::Error::from(std::io::ErrorKind::PermissionDenied).into()
+        }),
+        "port 319 needs CAP_NET_BIND_SERVICE or root"
+    );
+    assert_eq!(
+        follower_failure(&FollowerError::InterfaceNotFound {
+            interface: "eth9".into(),
+            cause: std::io::Error::from(std::io::ErrorKind::NotFound).into()
+        }),
+        "no such interface, or no IPv4 on it"
+    );
+    assert_eq!(
+        follower_failure(&FollowerError::Other(
+            std::io::Error::from(std::io::ErrorKind::Other).into()
+        )),
+        "another failure"
+    );
+}

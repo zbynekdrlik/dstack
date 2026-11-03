@@ -15,6 +15,10 @@ description = "The one Dante stack for our applications: discovery, ARC, CMC, fl
 name = "dstack"
 
 [dependencies]
+# dsync's in-process PTP follower (dstack #68): a dlink device's internal
+# clock, on Linux (kernel sockets) and Windows (Npcap, loaded at run time
+# since v1.27.0). MIT, our own project.
+dsync-ptp = { git = "https://github.com/zbynekdrlik/dsync", tag = "v1.27.1" }
 # The engine's callback contract for the pump (phase C, `stream`): Process,
 # Block, StreamStats and the stream histograms. MIT OR Apache-2.0, no
 # dependency of its own on Linux; the engine already links it.
@@ -72,10 +76,6 @@ windows-sys = { version = "0.61", features = [
 ] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-# dsync's in-process PTP follower (dstack #68): a dlink device's internal
-# clock. Linux only until dsync loads wpcap.dll at run time (dsync#136).
-# MIT, our own project.
-dsync-ptp = { git = "https://github.com/zbynekdrlik/dsync", tag = "v1.26.0" }
 # The media clock (phase B): clock_gettime(CLOCK_MONOTONIC / CLOCK_REALTIME)
 # and clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME). MIT OR Apache-2.0,
 # already in the lockfile (through tokio and others).
