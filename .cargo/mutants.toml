@@ -42,6 +42,7 @@ exclude_re = [
   # and the rings (each tested); crates/dlink/tests/link.rs reads it from a
   # running device (not per mutant).
   "daemon/media.rs.*rx_channels",
+  "dlink/src/lib.rs.*Link::rx_channels",
   # The heartbeat listen's socket loop: tests/system_clock.rs reads our
   # running device with it; its parse and gather are unit tested.
   "latency.rs.*listen",
