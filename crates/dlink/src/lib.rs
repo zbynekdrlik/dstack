@@ -15,10 +15,15 @@
 //!
 //! It needs no low latency: the device latency is 10 ms unless the app
 //! asks for another (4 ms at the least), and it asks the app for no
-//! real-time setup. Its media threads run at normal priority, unpinned,
-//! wait on the high-resolution timer without spinning a core, and on
-//! Windows opt out of power throttling (our threads only). The pump's
-//! work margin is half the latency, so a late wake still makes its block.
+//! real-time setup. Its media threads run unpinned and wait on the
+//! high-resolution timer without spinning a core. On Windows they ask
+//! THREAD_PRIORITY_HIGHEST within the process's normal class (no
+//! privilege, nothing process-wide) and opt out of power throttling (our
+//! threads only); elsewhere they run at normal priority. The pump's block
+//! is 128 frames unless the app sets another ([`Config::block`]), and its
+//! work margin is half the latency (at least the block), so a late wake
+//! still makes its block (dstack #90: a busy video PC preempted the pump
+//! for several ms at block 32 and normal priority).
 //! Very low latency is a different situation, for iemmixer and dasio,
 //! which use `dstack` directly with its `low_latency` profile.
 //!
@@ -69,6 +74,10 @@ use dstack::host::ClockSource;
 pub const LATENCY_NS: u64 = 10_000_000;
 /// The sample rate unless the app sets one.
 pub const SAMPLE_RATE: u32 = 48_000;
+/// The pump's block unless the app sets one, frames (1.33 ms at 96 kHz,
+/// 2.67 ms at 48 kHz): a quarter of the stack's wakes at block 32, and
+/// four times the frames for each [`Rated`] call (dstack #90).
+pub const BLOCK: u64 = 128;
 /// The app rates dlink converts from and to, Hz.
 pub const APP_RATES: std::ops::RangeInclusive<u32> = 8_000..=384_000;
 /// How long [`Link::stop`] waits for the device's goodbyes.
@@ -91,6 +100,7 @@ pub struct Config {
     rx_port_base: Option<u16>,
     subscribe: Vec<(usize, String, String)>,
     flow_slots: Option<usize>,
+    block: u64,
 }
 
 /// A device's own control ports, for a second device on one address (the
@@ -122,6 +132,7 @@ impl Config {
             rx_port_base: None,
             subscribe: Vec::new(),
             flow_slots: None,
+            block: BLOCK,
         }
     }
 
@@ -221,9 +232,20 @@ impl Config {
         self
     }
 
-    /// The device config dstack runs: the normal timing profile, the pump
-    /// margin half the latency, 24-bit. Every problem is listed, as a
-    /// config file's would be.
+    /// The pump's block, frames at the device's rate: one of
+    /// `dstack::stream::BLOCKS` (16, 32, 64, 128 or 256; [`BLOCK`] unless
+    /// set). Another is refused by [`Config::device`] with the other
+    /// problems. A smaller block wakes the pump more often; a larger one
+    /// adds to the path's latency.
+    pub fn block(mut self, frames: u64) -> Self {
+        self.block = frames;
+        self
+    }
+
+    /// The device config dstack runs: the normal timing profile, the
+    /// app's block ([`BLOCK`] unless set), the pump margin half the
+    /// latency and at least the block, 24-bit. Every problem is listed, as
+    /// a config file's would be.
     pub fn device(&self) -> Result<DeviceConfig, Vec<String>> {
         let mut t = toml::Table::new();
         t.insert("name".into(), self.name.clone().into());
@@ -241,9 +263,10 @@ impl Config {
         t.insert("sample_rate".into(), i64::from(rate).into());
         t.insert("encoding".into(), 24.into());
         t.insert("latency_ns".into(), to_int(self.latency_ns).into());
+        t.insert("block".into(), to_int(self.block).into());
         t.insert(
             "work_margin".into(),
-            to_int(normal_work_margin(self.latency_ns, rate)).into(),
+            to_int(work_margin(self.latency_ns, rate, self.block)).into(),
         );
         t.insert("timing".into(), "normal".into());
         t.insert(
@@ -291,6 +314,13 @@ impl Config {
         debug_assert_eq!(cfg.timing, TimingProfile::Normal);
         Ok(cfg)
     }
+}
+
+/// The pump's margin W, samples: half the latency at `rate`, at least the
+/// pump's `block` (a margin under one block is refused by the device; 4 ms
+/// at 48 kHz is 96 samples, under block 128).
+pub fn work_margin(latency_ns: u64, rate: u32, block: u64) -> u64 {
+    normal_work_margin(latency_ns, rate).max(block)
 }
 
 fn to_int(v: u64) -> i64 {
