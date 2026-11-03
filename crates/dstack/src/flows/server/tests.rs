@@ -266,14 +266,20 @@ fn a_receiver_s_own_fpp_is_granted_while_our_latency_covers_it() {
     // packet longer than our latency plays at a latency of its own that
     // holds it (DVS: 10 ms); one that plays at ours never asks past the
     // advertised range. Only past one datagram's 256 frames is it refused.
-    for fpp in [68, 97, 256] {
+    // (256 frames of 2 channels at 24 bits pass one datagram: refused as
+    // unsendable, below.)
+    for fpp in [68, 97, 200] {
         dev.flow(&FlowRequest {
             fpp,
             rx: SocketAddrV4::new(PEER_IP, 5_000 + fpp),
             ..req()
         });
     }
-    refused_with(&mut dev, &FlowRequest { fpp: 257, ..req() }, status::BAD_REQUEST);
+    refused_with(
+        &mut dev,
+        &FlowRequest { fpp: 257, ..req() },
+        status::BAD_REQUEST,
+    );
     // A refusal the gap guard counts.
     assert_eq!(
         dev.send(&build_request(1, &FlowRequest { fpp: 257, ..req() }), 0)
@@ -869,13 +875,10 @@ fn random_datagrams_never_panic_and_every_answer_is_one_of_inferno_s() {
         for (_, f) in dev.table.flows() {
             assert_eq!(*f.dest.ip(), PEER_IP, "audio only to the requester");
             assert!(f.channels.len() <= 8);
-            // Every granted packet, with the margin and the send slack,
-            // fits inside our advertised latency.
+            // Every granted packet fits one datagram (a packet longer than
+            // our latency is the asking receiver's to hold, dasio 3.11.2026).
             assert!(
-                crate::media::tx::ns_of(u64::from(f.fpp), dev.cfg.sample_rate)
-                    + dev.cfg.tx_margin_ns
-                    + crate::device::TX_SEND_SLACK_NS
-                    <= dev.cfg.advertised_latency_ns(),
+                crate::media::tx::sendable(f.channels.len(), usize::from(f.bps), f.fpp),
                 "{}",
                 f.fpp
             );
@@ -953,7 +956,7 @@ async fn the_server_answers_the_requester_and_hands_the_flow_to_the_tx_thread() 
 fn a_refusal_is_warned_again_only_after_a_minute() {
     let mut dev = Dev::new();
     let ask = |dev: &mut Dev, now: u64| {
-        dev.send(&build_request(1, &FlowRequest { fpp: 97, ..req() }), now);
+        dev.send(&build_request(1, &FlowRequest { fpp: 257, ..req() }), now);
     };
     let at = |dev: &mut Dev, now: u64| {
         crate::test_log::capture_warnings(|| ask(dev, now))
