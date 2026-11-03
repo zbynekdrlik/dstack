@@ -1347,20 +1347,67 @@ fn on_windows_tx_runs_above_rx_and_the_pump() {
     assert_eq!((WINDOWS_TIME_CRITICAL, WINDOWS_HIGHEST), (15, 2));
 }
 
+/// dstack #90: the normal profile's threads ask THREAD_PRIORITY_HIGHEST on
+/// Windows whatever their real-time number, real-time keeps TX above RX
+/// and the pump, and normal asks nothing.
+#[test]
+fn windows_asks_highest_under_the_normal_profile_and_nothing_at_normal() {
+    use crate::clock::ThreadPriority as Asked;
+    for p in [
+        TX_PRIORITY,
+        crate::media::rx::RX_PRIORITY,
+        crate::stream::ENGINE_PRIORITY,
+    ] {
+        assert_eq!(
+            windows_priority_for(Asked::Highest, p),
+            Some(WINDOWS_HIGHEST)
+        );
+        assert_eq!(windows_priority_for(Asked::Normal, p), None);
+    }
+    assert_eq!(
+        windows_priority_for(Asked::Realtime, TX_PRIORITY),
+        Some(WINDOWS_TIME_CRITICAL)
+    );
+    assert_eq!(
+        windows_priority_for(Asked::Realtime, crate::media::rx::RX_PRIORITY),
+        Some(WINDOWS_HIGHEST)
+    );
+}
+
 #[cfg(windows)]
 #[test]
 fn a_windows_media_thread_gets_its_priority_and_its_cpu() {
     use windows_sys::Win32::System::Threading::{GetCurrentThread, GetThreadPriority};
     std::thread::spawn(|| {
-        assert!(ask_realtime(TX_PRIORITY), "Windows gives TX TIME_CRITICAL");
+        use crate::clock::ThreadPriority as Asked;
+        assert!(
+            ask_priority(Asked::Realtime, TX_PRIORITY),
+            "Windows gives TX TIME_CRITICAL"
+        );
         // SAFETY: the calling thread's pseudo handle.
         assert_eq!(
             unsafe { GetThreadPriority(GetCurrentThread()) },
             WINDOWS_TIME_CRITICAL
         );
         assert!(
-            ask_realtime(crate::media::rx::RX_PRIORITY),
+            ask_priority(Asked::Realtime, crate::media::rx::RX_PRIORITY),
             "and RX HIGHEST"
+        );
+        // SAFETY: as above.
+        assert_eq!(
+            unsafe { GetThreadPriority(GetCurrentThread()) },
+            WINDOWS_HIGHEST
+        );
+        // The normal profile (dlink, dstack #90): HIGHEST, in the normal
+        // class, without privilege.
+        assert!(
+            !ask_priority(Asked::Normal, TX_PRIORITY),
+            "normal asks nothing"
+        );
+        assert!(ask_priority(Asked::Realtime, TX_PRIORITY));
+        assert!(
+            ask_priority(Asked::Highest, TX_PRIORITY),
+            "the normal profile gets HIGHEST"
         );
         // SAFETY: as above.
         assert_eq!(
@@ -1757,14 +1804,18 @@ fn a_device_latency_set_live_moves_the_advertised_latency_and_the_late_count() {
 }
 
 /// dlink (#68): under the normal profile a thread at normal priority is
-/// what was asked, said at info; a warning only when real-time priority
-/// was asked and refused.
+/// what was asked, said at info; THREAD_PRIORITY_HIGHEST on Windows
+/// (dstack #90) likewise; a warning only when a raised priority was asked
+/// and refused.
 #[test]
-fn a_thread_s_priority_is_granted_normal_by_profile_or_refused() {
-    assert_eq!(priority_outcome(true, true), Priority::Granted);
-    assert_eq!(priority_outcome(true, false), Priority::Refused);
-    assert_eq!(priority_outcome(false, false), Priority::Normal);
-    assert_eq!(priority_outcome(false, true), Priority::Normal);
+fn a_thread_s_priority_is_granted_highest_normal_by_profile_or_refused() {
+    use crate::clock::ThreadPriority as Asked;
+    assert_eq!(priority_outcome(Asked::Realtime, true), Priority::Granted);
+    assert_eq!(priority_outcome(Asked::Realtime, false), Priority::Refused);
+    assert_eq!(priority_outcome(Asked::Highest, true), Priority::Highest);
+    assert_eq!(priority_outcome(Asked::Highest, false), Priority::Refused);
+    assert_eq!(priority_outcome(Asked::Normal, false), Priority::Normal);
+    assert_eq!(priority_outcome(Asked::Normal, true), Priority::Normal);
 }
 
 #[test]

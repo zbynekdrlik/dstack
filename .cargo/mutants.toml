@@ -30,7 +30,7 @@ exclude_globs = [
   "vendor/**",
 ]
 # Thin glue no unit test can observe without changing the process: the OS
-# priority calls (their decision is `clock::realtime_for`, tested) and the
+# priority calls (their decision is `clock::thread_priority_for`, tested) and the
 # process-wide profile's wrappers (its logic is `clock::ProfileCell`,
 # tested); setting the profile in a test would change every other test.
 exclude_re = [
@@ -80,12 +80,12 @@ exclude_re = [
   # reads our running device through the real info group with them; the
   # request, the reply match, the parses and `ask` are unit tested.
   "info/client.rs.*(replace|in) (group_socket|on_group|product_info|board_info|clock_status|network_info|sample_rate|set_sample_rate|set_encoding)\\b",
-  "ask_realtime",
+  "ask_priority",
   # Windows-only (cfg(windows)) power-throttling call: not compiled on the
   # gate's Linux, so its mutants build and cannot fail; CI runs it on Windows.
   "tx.rs.*unthrottle",
   # The OS priority call and its log line; the decision is priority_outcome
-  # (tested), the call is ask_realtime (excluded above).
+  # (tested), the call is ask_priority (excluded above).
   "tx.rs.*take_priority",
   # dsync's real follower (dsync-ptp): it binds port 319, which neither CI
   # nor the gate may; the selector's rule (`choose`) and `Linked` are tested

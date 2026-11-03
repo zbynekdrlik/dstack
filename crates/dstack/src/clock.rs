@@ -477,6 +477,51 @@ pub fn realtime_for(profile: TimingProfile) -> bool {
     profile == TimingProfile::LowLatency
 }
 
+/// The OS a media thread runs on, for [`thread_priority_for`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Os {
+    Windows,
+    /// Linux and the rest.
+    Other,
+}
+
+impl Os {
+    /// The OS this build runs on.
+    pub const fn current() -> Os {
+        if cfg!(windows) {
+            Os::Windows
+        } else {
+            Os::Other
+        }
+    }
+}
+
+/// The priority a media thread (the pump, TX, RX) asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThreadPriority {
+    /// Real-time priority: `SCHED_FIFO` on Linux, TIME_CRITICAL/HIGHEST
+    /// on Windows (the low-latency profile).
+    Realtime,
+    /// Windows' THREAD_PRIORITY_HIGHEST within the process's normal
+    /// class: no privilege, no process-wide change (dstack #90).
+    Highest,
+    /// The OS's normal priority.
+    Normal,
+}
+
+/// The priority a media thread under `profile` asks for on `os`: low
+/// latency asks real-time priority ([`realtime_for`]); normal asks
+/// THREAD_PRIORITY_HIGHEST on Windows, where a busy video PC's threads
+/// otherwise preempt dlink's pump for several ms (dstack #90:
+/// songplayer's out-4 lost blocks), and normal priority elsewhere.
+pub fn thread_priority_for(profile: TimingProfile, os: Os) -> ThreadPriority {
+    match (profile, os) {
+        (TimingProfile::LowLatency, _) => ThreadPriority::Realtime,
+        (TimingProfile::Normal, Os::Windows) => ThreadPriority::Highest,
+        (TimingProfile::Normal, Os::Other) => ThreadPriority::Normal,
+    }
+}
+
 /// This process's wait mode ([`wait_mode_for`] its profile).
 pub fn wait_mode() -> WaitMode {
     wait_mode_for(profile())
