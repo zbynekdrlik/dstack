@@ -330,6 +330,11 @@ fn a_write_the_reader_overtakes_counts_the_overtaken_samples_late() {
     let end = T + BLOCKS * BLOCK as u64;
     for _ in 0..8 {
         let ring = Arc::new(Ring::new());
+        // The reader's end at T before the writer starts: with no read yet
+        // a write has no early check, and a reader thread a runner starts
+        // late would find samples a later lap overwrote (holes, neither
+        // late nor early). Those READ positions count as holes.
+        let primed = ring.read_at(T - READ as u64, &mut [0i32; READ]).holes as u64;
         let started = Arc::new(AtomicU64::new(T));
         let done = Arc::new(AtomicBool::new(false));
         let reader = {
@@ -368,7 +373,7 @@ fn a_write_the_reader_overtakes_counts_the_overtaken_samples_late() {
         // start) stores nothing: early, a hole too.
         assert_eq!(c.written + c.late + c.early, total, "{c:?}");
         assert_eq!(
-            c.holes,
+            c.holes - primed,
             c.late + c.early,
             "every hole is a late or early sample: {c:?}"
         );
