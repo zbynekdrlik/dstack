@@ -26,6 +26,12 @@
 //! The binary shows them as a tray icon on Windows and Linux, prints them
 //! once with `dtray --print` on every platform, and sets or removes its own
 //! start at logon with `dtray --autostart on|off` (Windows and Linux).
+//!
+//! On Windows `dtray.exe` is a GUI-subsystem program: a console does not
+//! wait for it, and PowerShell's `&` neither waits nor sets
+//! `$LASTEXITCODE`. An installer that runs `--autostart` starts it with
+//! `Start-Process dtray.exe -ArgumentList '--autostart','on' -Wait -PassThru`
+//! and reads the returned process's `ExitCode` (dasio's installer).
 
 use std::path::Path;
 

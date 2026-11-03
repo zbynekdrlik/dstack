@@ -58,6 +58,8 @@ use std::time::Instant;
 
 use tracing::{info, warn};
 
+use crate::clock::ThreadPriority;
+
 use super::bypass::{self, Direct, HEADROOM};
 use super::packet::{self, MEDIA_HEADER};
 use super::ring::Ring;
@@ -1323,36 +1325,49 @@ pub fn spawn(clock: Arc<dyn PtpClock>, shared: Arc<TxShared>) -> io::Result<Join
 pub(crate) enum Priority {
     /// Real-time priority, as asked.
     Granted,
-    /// Normal priority, as the normal profile asks (dlink).
+    /// THREAD_PRIORITY_HIGHEST, as the normal profile asks on Windows
+    /// (dstack #90).
+    Highest,
+    /// Normal priority, as the normal profile asks elsewhere (dlink on
+    /// Linux).
     Normal,
-    /// Real-time priority asked and refused.
+    /// A raised priority asked and refused: the thread runs at normal.
     Refused,
 }
 
-/// The outcome for a thread whose profile asks real-time priority
-/// (`asked`) and whose ask succeeded (`granted`).
-pub(crate) fn priority_outcome(asked: bool, granted: bool) -> Priority {
+/// The outcome for a thread that asked `asked` and whose ask succeeded
+/// (`granted`).
+pub(crate) fn priority_outcome(asked: ThreadPriority, granted: bool) -> Priority {
     match (asked, granted) {
-        (false, _) => Priority::Normal,
-        (true, true) => Priority::Granted,
-        (true, false) => Priority::Refused,
+        (ThreadPriority::Normal, _) => Priority::Normal,
+        (ThreadPriority::Realtime, true) => Priority::Granted,
+        (ThreadPriority::Highest, true) => Priority::Highest,
+        (_, false) => Priority::Refused,
     }
 }
 
-/// Asks the priority for the calling media thread named `thread` (the
-/// profile's, [`ask_realtime`]) and logs what it got: info when it is what
-/// the profile asks, a warning when real-time priority was refused.
+/// Asks the priority for the calling media thread named `thread` (its
+/// profile's on this OS, [`crate::clock::thread_priority_for`], through
+/// [`ask_priority`]) and logs what it got: info when it is what was asked,
+/// a warning when a raised priority was refused (the thread runs on).
 pub(crate) fn take_priority(thread: &str, priority: i32) {
-    let asked = crate::clock::realtime_for(crate::clock::profile());
-    match priority_outcome(asked, ask_realtime(priority)) {
+    let asked =
+        crate::clock::thread_priority_for(crate::clock::profile(), crate::clock::Os::current());
+    match priority_outcome(asked, ask_priority(asked, priority)) {
         Priority::Granted => info!(thread, priority, "runs SCHED_FIFO"),
+        Priority::Highest => info!(
+            thread,
+            "runs at THREAD_PRIORITY_HIGHEST (the normal timing profile on Windows)"
+        ),
         Priority::Normal => info!(
             thread,
             "runs at normal priority (the normal timing profile)"
         ),
         Priority::Refused => warn!(
             thread,
-            priority, "real-time priority refused: runs at normal priority"
+            asked = ?asked,
+            priority,
+            "the asked priority was refused: runs at normal priority"
         ),
     }
 }
@@ -1380,12 +1395,13 @@ fn run(clock: &dyn PtpClock, shared: Arc<TxShared>) {
     }
 }
 
-/// Asks for `SCHED_FIFO` at `priority` for the calling thread (reset in
-/// any child it forks); `false` when the kernel refuses it. The RX thread
-/// asks too ([`super::rx`]).
+/// On Linux: when `asked` is real-time, `SCHED_FIFO` at `priority` for
+/// the calling thread (reset in any child it forks); `false` when the
+/// kernel refuses it or nothing raised was asked. The RX thread and the
+/// pump ask too ([`take_priority`]).
 #[cfg(target_os = "linux")]
-pub(crate) fn ask_realtime(priority: i32) -> bool {
-    if !crate::clock::realtime_for(crate::clock::profile()) {
+pub(crate) fn ask_priority(asked: ThreadPriority, priority: i32) -> bool {
+    if asked != ThreadPriority::Realtime {
         return false;
     }
     let param = libc::sched_param {
@@ -1419,26 +1435,39 @@ pub const WINDOWS_TIME_CRITICAL: i32 = 15;
 /// THREAD_PRIORITY_HIGHEST.
 pub const WINDOWS_HIGHEST: i32 = 2;
 
-/// On Windows: the thread at [`windows_thread_priority`]`(priority)`;
-/// `false` when Windows refuses it.
-/// Under the normal profile (dlink, #68) the thread asks no priority; it
-/// only opts out of Windows' power throttling (EcoQoS), which would end
-/// its timer waits on the coarse system tick (SongPlayer 31.10: peaks of
-/// two 15.6 ms ticks). Our thread only, nothing process-wide.
-#[cfg(windows)]
-pub(crate) fn ask_realtime(priority: i32) -> bool {
-    if !crate::clock::realtime_for(crate::clock::profile()) {
-        if !unthrottle() {
-            warn!(
-                error = %std::io::Error::last_os_error(),
-                "a media thread could not opt out of power throttling: its waits may end late"
-            );
-        }
-        return false;
+/// Windows' thread priority for a media thread that asks `asked` at
+/// `priority` (the Linux `SCHED_FIFO` number): [`windows_thread_priority`]
+/// for real-time, THREAD_PRIORITY_HIGHEST within the process's normal
+/// class for the normal profile (dstack #90: no privilege, nothing
+/// process-wide, no setup asked of the app), none at normal.
+pub fn windows_priority_for(asked: ThreadPriority, priority: i32) -> Option<i32> {
+    match asked {
+        ThreadPriority::Realtime => Some(windows_thread_priority(priority)),
+        ThreadPriority::Highest => Some(WINDOWS_HIGHEST),
+        ThreadPriority::Normal => None,
     }
+}
+
+/// On Windows: the thread at [`windows_priority_for`]`(asked, priority)`;
+/// `false` when Windows refuses it or nothing raised was asked.
+/// Under the normal profile (dlink, #68) the thread also opts out of
+/// Windows' power throttling (EcoQoS), which would end its timer waits on
+/// the coarse system tick (SongPlayer 31.10: peaks of two 15.6 ms ticks).
+/// Our thread only, nothing process-wide.
+#[cfg(windows)]
+pub(crate) fn ask_priority(asked: ThreadPriority, priority: i32) -> bool {
+    if asked != ThreadPriority::Realtime && !unthrottle() {
+        warn!(
+            error = %std::io::Error::last_os_error(),
+            "a media thread could not opt out of power throttling: its waits may end late"
+        );
+    }
+    let Some(level) = windows_priority_for(asked, priority) else {
+        return false;
+    };
     use windows_sys::Win32::System::Threading::{GetCurrentThread, SetThreadPriority};
     // SAFETY: the calling thread's pseudo handle.
-    unsafe { SetThreadPriority(GetCurrentThread(), windows_thread_priority(priority)) != 0 }
+    unsafe { SetThreadPriority(GetCurrentThread(), level) != 0 }
 }
 
 /// Takes the calling thread out of Windows' execution-speed throttling;
@@ -1468,7 +1497,7 @@ pub(crate) fn unthrottle() -> bool {
 }
 
 #[cfg(not(any(target_os = "linux", windows)))]
-pub(crate) fn ask_realtime(_priority: i32) -> bool {
+pub(crate) fn ask_priority(_asked: ThreadPriority, _priority: i32) -> bool {
     false
 }
 

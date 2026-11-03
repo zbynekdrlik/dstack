@@ -834,6 +834,35 @@ fn only_the_low_latency_profile_asks_for_real_time_priority() {
     assert!(!realtime_for(TimingProfile::Normal));
 }
 
+/// dstack #90: dlink's normal-profile threads ask THREAD_PRIORITY_HIGHEST
+/// on Windows, normal elsewhere; low latency asks real-time everywhere.
+#[test]
+fn a_media_thread_s_priority_follows_the_profile_and_the_os() {
+    use ThreadPriority::*;
+    assert_eq!(
+        thread_priority_for(TimingProfile::LowLatency, Os::Windows),
+        Realtime
+    );
+    assert_eq!(
+        thread_priority_for(TimingProfile::LowLatency, Os::Other),
+        Realtime
+    );
+    assert_eq!(
+        thread_priority_for(TimingProfile::Normal, Os::Windows),
+        Highest
+    );
+    assert_eq!(
+        thread_priority_for(TimingProfile::Normal, Os::Other),
+        Normal
+    );
+    let here = if cfg!(windows) {
+        Os::Windows
+    } else {
+        Os::Other
+    };
+    assert_eq!(Os::current(), here);
+}
+
 #[test]
 fn the_spin_tail_is_the_device_s_within_its_bound_and_only_for_the_spin_wait() {
     assert_eq!(spin_tail_of(None), SPIN_TAIL_NS);
