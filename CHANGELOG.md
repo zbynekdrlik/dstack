@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.6.12 (unreleased)
+## 0.6.12 (2026-11-03)
 
 - License (dstack #102, owner 3.11.2026: as permissive as possible): `dstack` and `dstack-dev` are MIT OR Apache-2.0 too, so every crate of the workspace is (`LICENSE.md`). The functions an audit found structured after inferno's code were rewritten in our own structure, with the bytes on the wire unchanged: ARC's paging, the flow request's build and parse, the info change and heartbeat bodies, the mDNS channel records and the flow-control client's exchange. Quoted comments were reworded.
   - Changed: the ARC TX and RX flow lists (0x2200, 0x3200) place their descriptors in another order behind the table; every offset is stated, so a reader that follows offsets (Dante Controller, `arc::control`) reads the same flows. Verified live with Dante Controller.
