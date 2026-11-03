@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.6.18 (unreleased)
+## 0.6.18 (2026-11-03)
 
 - New (dstack #104 step 4): an app's own part of the status, for dtray.
   - `daemon::media::Media::set_app_status(f)` and `dlink::Link::set_app_status(f)`: each status request calls `f`; the status line (`ctl::status`, the local endpoint, `Link::status`) ends with `"app":<object>` when `f` returns one JSON object of at most 4096 bytes compact (`ctl::APP_MAX`; written compact, so the line stays one line). Anything else is left out, with one warning per hook. A later call replaces the hook. `f` runs inside the device's control task (no ARC or status answer while it runs): read values the app holds, never I/O, a wait or a status request. Without a hook the status is as before. `ctl::app_object` is the check.
