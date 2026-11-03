@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.6.9 (unreleased)
+## 0.6.9 (2026-11-03)
 
 - New (dstack #90, obs): `dlink::Rated::delay_ns()`, the converters' delay each way (RX, TX with the FIFO prime). The rated.rs doc had RX and TX swapped; on a 96 kHz network: 48 kHz app RX 1.33 ms, TX 2.83 ms; 44.1 kHz RX 1.32 ms, TX 3.08 ms. v0.5.20's 2:1 half-band delayed about 0.3 ms each way.
 
