@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.6.2 (2026-11-03)
+
+- New (dstack #90, phase 2): the ASRC in `dstack-resample`.
+  - `asrc::Controller` holds a buffer between two clocks at its target. Its laws are SongPlayer's ASIO servo (#233) made generic:
+    - a least-squares rate fit (600 s, locked after 30 points over 60 s, a 10 ms step re-bases it);
+    - the level loop (P 2 ppm/ms on a 10 s EMA, ±50; I, ±3, frozen at saturation);
+    - an offset drained by the ratio, never skipped;
+    - at most ±300 ppm, moved at most 5 ppm/s.
+  - A re-centre (insert or skip under fades) is asked for only past the floor or the excess, and counted.
+  - The outside input from vstack's genlock pairing: a `Basis`, a placement error and a bias of at most ±10 ppm.
+  - `Converter::drifting` keeps the sinc stage at equal rates. `Converter::set_ppm` steers it.
+  - New: `dstack_resample::asrc::{Controller, Step, Basis, RateFit, LevelLoop, Offered, slew, braking_ppm}` and its constants, plus `Converter::{drifting, set_ppm}`.
+- Correction to 0.6.1's notes: publishing `_netaudio-dbc` is right, because every Dante device does it, but it did not cause DVS's status 21 that night. DVS reaches a flows port of 4456 without it. The causes were the fpp 60 refusal (fixed in 0.6.0) and nothing listening on 4455 while instance 1 was stopped.
+
 ## 0.6.1 (2026-11-03)
 
 - Fix (dstack #1): the device now announces `_netaudio-dbc._udp` on its flow-control port, with an empty TXT, as every Dante device on the site does. Without it, DVS sent its flow requests to 4455 whatever our chan records said. A second instance on one address (4456) was unreachable from DVS: the FOH gate's status 21 before the move to the default ports.
