@@ -364,8 +364,14 @@ fn a_write_the_reader_overtakes_counts_the_overtaken_samples_late() {
         let delivered = reader.join().unwrap();
         let c = ring.counters();
         let total = BLOCKS * BLOCK as u64;
-        assert_eq!(c.written + c.late, total, "{c:?}");
-        assert_eq!(c.holes, c.late, "every hole is a late sample: {c:?}");
+        // A writer a whole ring ahead of a slow reader (a runner's thread
+        // start) stores nothing: early, a hole too.
+        assert_eq!(c.written + c.late + c.early, total, "{c:?}");
+        assert_eq!(
+            c.holes,
+            c.late + c.early,
+            "every hole is a late or early sample: {c:?}"
+        );
         assert_eq!(delivered, c.written, "{c:?}");
     }
 }
