@@ -616,7 +616,7 @@ fn rx_flow_at(body: &[u8], main: u16) -> Option<RxFlow> {
 
 /// A page of 0x3200 (the RX flows) with status `status`: each flow that
 /// reads (one that does not is counted, not listed).
-fn rx_flow_page(status: u16, body: &[u8]) -> Option<Page<RxFlow>> {
+pub(crate) fn rx_flow_page(status: u16, body: &[u8]) -> Option<Page<RxFlow>> {
     let (slots, count) = table(body, FLOW_ITEM)?;
     let items = (0..count)
         .filter_map(|i| rx_flow_at(body, read_u16(body, 2 + i * FLOW_ITEM)?))
