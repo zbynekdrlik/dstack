@@ -314,3 +314,58 @@ fn put_at_stores_behind_and_far_ahead_of_the_reader() {
     ring.put_at(T + 999, &[]);
     assert_eq!(ring.counters().written, 4 * N as u64 + 2);
 }
+
+/// obs (camera-box#1485): the RX thread and the reader on one CPU. A
+/// write whose positions the reader passes while the write runs must
+/// count them late, not written: each position the writer gives is
+/// either read as its sample or counted late, and every hole the reader
+/// saw at a written position is such a late sample.
+#[test]
+fn a_write_the_reader_overtakes_counts_the_overtaken_samples_late() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicU64};
+    const BLOCK: usize = 4096;
+    const READ: usize = 16;
+    const BLOCKS: u64 = 256;
+    let end = T + BLOCKS * BLOCK as u64;
+    for _ in 0..8 {
+        let ring = Arc::new(Ring::new());
+        let started = Arc::new(AtomicU64::new(T));
+        let done = Arc::new(AtomicBool::new(false));
+        let reader = {
+            let (ring, started, done) = (ring.clone(), started.clone(), done.clone());
+            std::thread::spawn(move || {
+                let mut delivered = 0u64;
+                let mut pos = T;
+                let mut out = [0i32; READ];
+                while pos < end {
+                    // Read up to the end of the block being written, at
+                    // once: the writer is still storing it.
+                    if pos + READ as u64 <= started.load(Ordering::Acquire)
+                        || done.load(Ordering::Acquire)
+                    {
+                        let r = ring.read_at(pos, &mut out);
+                        delivered += (READ - r.holes) as u64;
+                        pos += READ as u64;
+                    } else {
+                        std::hint::spin_loop();
+                    }
+                }
+                delivered
+            })
+        };
+        let block: Vec<i32> = (0..BLOCK as i32).map(|i| (i | 1) << 8).collect();
+        for b in 0..BLOCKS {
+            let pos = T + b * BLOCK as u64;
+            started.store(pos + BLOCK as u64, Ordering::Release);
+            ring.write_at(pos, &block);
+        }
+        done.store(true, Ordering::Release);
+        let delivered = reader.join().unwrap();
+        let c = ring.counters();
+        let total = BLOCKS * BLOCK as u64;
+        assert_eq!(c.written + c.late, total, "{c:?}");
+        assert_eq!(c.holes, c.late, "every hole is a late sample: {c:?}");
+        assert_eq!(delivered, c.written, "{c:?}");
+    }
+}
