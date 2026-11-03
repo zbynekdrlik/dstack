@@ -102,6 +102,7 @@ version = "0.6.0"
 dependencies = [
  "dstack",
  "dstack-audio-io",
+ "dstack-resample",
  "tempfile",
  "toml",
  "tracing",

@@ -54,9 +54,9 @@ pub use dstack::host::{HostError, Stopped};
 pub use dstack::stream::Map;
 pub use dstack_audio_io::{Block, Process};
 
-pub mod halve;
+pub mod rated;
 
-pub use halve::Halve;
+pub use rated::Rated;
 
 use dstack::device::{TimingProfile, normal_work_margin};
 use dstack::embed::Embedded;
@@ -67,6 +67,8 @@ use dstack::host::ClockSource;
 pub const LATENCY_NS: u64 = 10_000_000;
 /// The sample rate unless the app sets one.
 pub const SAMPLE_RATE: u32 = 48_000;
+/// The app rates dlink converts from and to, Hz.
+pub const APP_RATES: std::ops::RangeInclusive<u32> = 8_000..=384_000;
 /// How long [`Link::stop`] waits for the device's goodbyes.
 pub const STOP_WAIT: Duration = Duration::from_secs(5);
 
@@ -140,10 +142,10 @@ impl Config {
     }
 
     /// The network's sample rate, Hz, when it differs from the app's: the
-    /// device runs at it (a Dante flow needs both ends at one rate), and a
-    /// 2:1 step ([`Halve`]) hands the app its own rate. It must be the
-    /// app's rate or twice it (dstack #20: 96 kHz on the site, 48 kHz in
-    /// the intercom's hub). Unset: the app's rate.
+    /// device runs at it (a Dante flow needs both ends at one rate), and
+    /// [`Rated`] converts between it and the app's rate on the device's
+    /// clock (dstack #90: 96 kHz on the site, 48 kHz for the intercom and
+    /// OBS). Unset: the app's rate.
     pub fn network_rate(mut self, hz: u32) -> Self {
         self.network_rate = Some(hz);
         self
@@ -154,9 +156,9 @@ impl Config {
         self.network_rate.unwrap_or(self.sample_rate)
     }
 
-    /// Whether the app runs at half the device's rate (the 2:1 step).
-    pub fn halved(&self) -> bool {
-        self.device_rate() == self.sample_rate.saturating_mul(2)
+    /// Whether the app's rate differs from the device's ([`Rated`] runs).
+    pub fn converts(&self) -> bool {
+        self.device_rate() != self.sample_rate
     }
 
     /// The device latency, ns (4 ms at the least).
@@ -226,10 +228,12 @@ impl Config {
         t.insert("manufacturer".into(), self.manufacturer.clone().into());
         t.insert("model".into(), self.model.clone().into());
         let rate = self.device_rate();
-        if rate != self.sample_rate && !self.halved() {
+        if !APP_RATES.contains(&self.sample_rate) {
             return Err(vec![format!(
-                "network_rate {rate} must be the sample rate {} or twice it",
-                self.sample_rate
+                "sample_rate {} must be between {} and {} Hz",
+                self.sample_rate,
+                APP_RATES.start(),
+                APP_RATES.end()
             )]);
         }
         t.insert("sample_rate".into(), i64::from(rate).into());
@@ -324,15 +328,24 @@ impl Link {
         let cfg = config.device().map_err(|problems| {
             HostError::Setup(format!("dlink config: {}", problems.join("; ")))
         })?;
-        let device = if config.halved() {
+        let device = if config.converts() {
             tracing::info!(
                 device_rate = config.device_rate(),
                 app_rate = config.sample_rate,
-                "dlink: the device runs at the network's rate, the app at half of it (2:1 step)"
+                "dlink: the device runs at the network's rate, the app at its own (converted on the device's clock)"
             );
             let (inputs, outputs) = (map.rx.len(), map.tx.len());
-            let halve = Halve::new(processor, inputs, outputs);
-            Embedded::start_with(cfg, place, map, halve, source)?
+            let block = usize::try_from(cfg.block).unwrap_or(usize::MAX);
+            let rated = Rated::new(
+                processor,
+                config.device_rate(),
+                config.sample_rate,
+                block,
+                inputs,
+                outputs,
+            )
+            .map_err(|e| HostError::Setup(format!("dlink rate conversion: {e}")))?;
+            Embedded::start_with(cfg, place, map, rated, source)?
         } else {
             Embedded::start_with(cfg, place, map, processor, source)?
         };

@@ -16,6 +16,8 @@ dstack-audio-io = { path = "../dstack-audio-io" }
 toml = "0.9"
 # The 2:1 step's start line (already in the lockfile through dstack).
 tracing = "0.1"
+# The rate conversion (dstack #90).
+dstack-resample = { path = "../dstack-resample" }
 
 [dev-dependencies]
 tempfile = "3"

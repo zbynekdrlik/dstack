@@ -101,13 +101,13 @@ fn a_dlink_device_runs_the_app_s_processor_at_its_defaults() {
     );
 }
 
-/// An app at 48 kHz on a 96 kHz network (dstack #20): the device runs at
+/// An app at 48 kHz on a 96 kHz network (dstack #20, #90): the device runs at
 /// 96 kHz, the app gets blocks of half its frames, and our TX 1 comes back
-/// on RX 1 through both 2:1 steps at the level the app sent (once the
+/// on RX 1 through both conversions at the level the app sent (once the
 /// filters settle: the step from silence rings, so the last sample counts,
 /// not the peak).
 #[test]
-fn a_48_khz_app_runs_a_96_khz_device_through_the_2_to_1_step() {
+fn a_48_khz_app_runs_a_96_khz_device_through_the_conversion() {
     let _one = ONE_DEVICE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
