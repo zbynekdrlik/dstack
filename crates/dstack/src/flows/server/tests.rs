@@ -62,11 +62,13 @@ impl Dev {
     }
 
     /// A device whose channels offered 256 frames a packet (a config sets
-    /// at most 32): inferno's bound and one datagram's are reached only
-    /// past `tx_fpp_max`, so their tests ask such a device.
+    /// at most 32) and whose latency covers them (3 ms: 288 frames at
+    /// 96 kHz): inferno's bound and one datagram's are reached only past
+    /// those, so their tests ask such a device.
     fn offering_256() -> Self {
         Dev::with(DeviceConfig {
             tx_fpp_max: 256,
+            tx_latency_ns: Some(3_000_000),
             ..cfg()
         })
     }
@@ -234,32 +236,69 @@ fn more_than_256_frames_is_0x0302_and_256_are_taken() {
 }
 
 #[test]
-fn more_frames_than_our_channels_offer_is_0x0302_and_tx_fpp_max_is_taken() {
-    // The review of PR #84 (#72 phase F): the config's advertised latency
-    // covers tx_fpp_max frames a packet; a receiver asking more would get
-    // our packets after it plays them.
+fn a_receiver_s_own_fpp_is_granted_while_our_latency_covers_it() {
+    // FOH, 3.11.2026: Dante Virtual Soundcard asked fpp 60 of a device
+    // advertising fpp 8,2 at 1 ms and got 0x0302 every time (status 21 on
+    // all its channels). DVS ignores the advertised range; a packet of 60
+    // frames at 96 kHz (0.625 ms) is still inside our 1 ms, so it is the
+    // receiver's to choose. tx_fpp_max is what we advertise.
     let mut dev = Dev::with(DeviceConfig {
         tx_fpp_max: 8,
         ..cfg()
     });
-    for fpp in [9, 16, 32, 256] {
+    // The DVS request as captured (4 slots, the last one empty; its third
+    // id, 30, mapped into the test device's 16 channels).
+    dev.flow(&FlowRequest {
+        rx_host: "mbc-snv".to_string(),
+        rx_flow_name: "4_0".to_string(),
+        channels: vec![Some(11), Some(4), Some(13), None],
+        fpp: 60,
+        ..req()
+    });
+    for fpp in [9, 16, 32, 96] {
+        dev.flow(&FlowRequest {
+            fpp,
+            rx: SocketAddrV4::new(PEER_IP, 4_000 + fpp),
+            ..req()
+        });
+    }
+    // Past our 1 ms (96 frames at 96 kHz): our packets would reach it
+    // after it plays them.
+    for fpp in [97, 256] {
         refused_with(&mut dev, &FlowRequest { fpp, ..req() }, status::BAD_REQUEST);
     }
-    dev.flow(&FlowRequest { fpp: 8, ..req() });
-    // The test device offers the default, 32.
-    let mut dev = Dev::new();
-    refused_with(
-        &mut dev,
-        &FlowRequest { fpp: 33, ..req() },
-        status::BAD_REQUEST,
-    );
-    dev.flow(&FlowRequest { fpp: 32, ..req() });
     // A refusal the gap guard counts.
     assert_eq!(
-        dev.send(&build_request(1, &FlowRequest { fpp: 33, ..req() }), 0)
+        dev.send(&build_request(1, &FlowRequest { fpp: 97, ..req() }), 0)
             .gap(),
         Some((op::REQUEST, Gap::Refused))
     );
+}
+
+#[test]
+fn a_refused_request_is_warned_with_its_fields_once_a_minute() {
+    let mut dev = Dev::new();
+    let log = crate::test_log::capture_warnings(|| {
+        for _ in 0..5 {
+            refused_with(
+                &mut dev,
+                &FlowRequest { fpp: 97, ..req() },
+                status::BAD_REQUEST,
+            );
+        }
+    });
+    assert_eq!(log.lines().count(), 1, "{log}");
+    for part in [
+        "flow request refused",
+        "peer-device",
+        "fpp=97",
+        "bits=24",
+        "slots=2",
+        "rate=96000",
+        "more frames a packet than our latency covers",
+    ] {
+        assert!(log.contains(part), "{part} missing: {log}");
+    }
 }
 
 #[test]
@@ -804,7 +843,13 @@ fn random_datagrams_never_panic_and_every_answer_is_one_of_inferno_s() {
         for (_, f) in dev.table.flows() {
             assert_eq!(*f.dest.ip(), PEER_IP, "audio only to the requester");
             assert!(f.channels.len() <= 8);
-            assert!(f.fpp <= dev.cfg.tx_fpp_max, "{}", f.fpp);
+            // Every granted packet fits inside our advertised latency.
+            assert!(
+                u64::from(f.fpp) * 1_000_000_000
+                    <= dev.cfg.advertised_latency_ns() * u64::from(dev.cfg.sample_rate),
+                "{}",
+                f.fpp
+            );
             assert!(
                 f.channels
                     .iter()
