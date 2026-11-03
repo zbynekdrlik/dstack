@@ -327,3 +327,16 @@ fn a_held_info_port_makes_a_member_any_other_bind_error_ends_the_start() {
     let other = member_or(Error::from(ErrorKind::PermissionDenied)).unwrap_err();
     assert_eq!(other.kind(), ErrorKind::PermissionDenied);
 }
+
+/// dstack #104: the local status endpoint listens on 127.0.0.1 and its
+/// port is the one the device announces.
+#[tokio::test]
+async fn the_local_endpoint_s_port_is_the_device_s() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut device = crate::daemon::media::tests::device_at(dir.path());
+    assert_eq!(device.status_port, None);
+    let listener = open_local(&mut device).expect("127.0.0.1 binds");
+    let at = listener.local_addr().unwrap();
+    assert!(at.ip().is_loopback());
+    assert_eq!(device.status_port, Some(at.port()));
+}

@@ -628,6 +628,9 @@ fn default_past(defaults: &[String], n: usize) -> Option<String> {
 pub struct Device {
     pub cfg: DeviceConfig,
     pub state: DeviceState,
+    /// The local status endpoint's port on 127.0.0.1 ([`crate::ctl::local`]),
+    /// once it listens: announced in the ARC record for dtray (#104).
+    pub status_port: Option<u16>,
 }
 
 impl Device {
@@ -644,7 +647,11 @@ impl Device {
             state.save(&cfg.state_file)?;
         }
         cfg.latency_ns = latency;
-        Ok(Self { cfg, state })
+        Ok(Self {
+            cfg,
+            state,
+            status_port: None,
+        })
     }
 }
 

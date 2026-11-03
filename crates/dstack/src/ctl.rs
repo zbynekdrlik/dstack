@@ -920,6 +920,177 @@ fn engine_part(j: &mut Json, media: &Media) {
     j.close('}');
 }
 
+/// The status endpoint for local readers (dtray, dstack #104): TCP on
+/// 127.0.0.1 at a port the OS picks, announced in the device's ARC record
+/// (`dstack_ctl`). It answers `status` only: the test requests (`source`,
+/// `check`) stay on the Unix socket, so nothing on the PC changes the
+/// device's audio through it. Every platform has it.
+pub mod local {
+    use std::io;
+    use std::net::Ipv4Addr;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use tokio::net::{TcpListener, TcpStream};
+
+    use super::status;
+    use crate::daemon::media::Media;
+
+    /// How long a connection may take to send its request, and its answer
+    /// to be taken.
+    pub const WAIT: Duration = Duration::from_secs(1);
+    /// The answer to anything but `status`.
+    pub const ONLY_STATUS: &str = "this endpoint answers status only";
+
+    /// The answer line to `line` (without its newline).
+    pub fn reply(line: &str, media: &Media) -> String {
+        if line.trim() == "status" {
+            status(media)
+        } else {
+            format!("error: {ONLY_STATUS}")
+        }
+    }
+
+    /// A listener on 127.0.0.1 at a port the OS picks, made from a std one
+    /// (inside the device's runtime).
+    pub fn bind() -> io::Result<TcpListener> {
+        let std = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
+        std.set_nonblocking(true)?;
+        TcpListener::from_std(std)
+    }
+
+    /// Answers every connection, each on its own task within [`WAIT`].
+    /// Ends only with an error accepting.
+    pub async fn serve(listener: TcpListener, media: Arc<Media>) -> io::Result<()> {
+        loop {
+            let (stream, _) = listener.accept().await?;
+            let media = Arc::clone(&media);
+            tokio::spawn(async move { session(stream, &media).await });
+        }
+    }
+
+    /// One connection: its request line within [`WAIT`], the answer line
+    /// ([`reply`]), then closed.
+    async fn session(stream: TcpStream, media: &Media) {
+        super::line::exchange(&stream, WAIT, |line| reply(line, media)).await;
+    }
+}
+
+/// One request line in, one answer line out, on a stream read and written
+/// by readiness: the Unix socket's sessions and the local endpoint's.
+mod line {
+    use std::io::{self, ErrorKind};
+    use std::time::Duration;
+
+    use tracing::debug;
+
+    use super::MAX_LINE;
+
+    /// A stream read and written by readiness (tokio's TCP and Unix ones).
+    pub(super) trait Ready {
+        async fn readable(&self) -> io::Result<()>;
+        fn try_read(&self, buf: &mut [u8]) -> io::Result<usize>;
+        async fn writable(&self) -> io::Result<()>;
+        fn try_write(&self, buf: &[u8]) -> io::Result<usize>;
+    }
+
+    macro_rules! ready_for {
+        ($t:ty) => {
+            impl Ready for $t {
+                async fn readable(&self) -> io::Result<()> {
+                    <$t>::readable(self).await
+                }
+                fn try_read(&self, buf: &mut [u8]) -> io::Result<usize> {
+                    <$t>::try_read(self, buf)
+                }
+                async fn writable(&self) -> io::Result<()> {
+                    <$t>::writable(self).await
+                }
+                fn try_write(&self, buf: &[u8]) -> io::Result<usize> {
+                    <$t>::try_write(self, buf)
+                }
+            }
+        };
+    }
+    ready_for!(tokio::net::TcpStream);
+    #[cfg(unix)]
+    ready_for!(tokio::net::UnixStream);
+
+    pub(super) const TOO_LONG: &str = "the request is longer than 256 bytes";
+
+    /// The connection's request line within `wait`, `answer`'s line back
+    /// within `wait`; failures are answered or logged, never raised.
+    pub(super) async fn exchange(
+        stream: &impl Ready,
+        wait: Duration,
+        answer: impl FnOnce(&str) -> String,
+    ) {
+        let reply = match tokio::time::timeout(wait, read_request(stream)).await {
+            Ok(Ok(line)) => answer(&line),
+            Ok(Err(reason)) => format!("error: {reason}"),
+            Err(_) => "error: no request line within the wait".to_string(),
+        };
+        let mut out = reply.into_bytes();
+        out.push(b'\n');
+        match tokio::time::timeout(wait, write_all(stream, &out)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => debug!(error = %e, "a control answer could not be sent"),
+            Err(_) => debug!("a control answer was not taken within the wait"),
+        }
+    }
+
+    pub(super) async fn read_request(stream: &impl Ready) -> Result<String, &'static str> {
+        let mut line = Vec::with_capacity(MAX_LINE);
+        let mut buf = [0u8; 512];
+        loop {
+            stream
+                .readable()
+                .await
+                .map_err(|_| "the request could not be read")?;
+            match stream.try_read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    line.extend_from_slice(&buf[..n]);
+                    if let Some(end) = line.iter().position(|&b| b == b'\n') {
+                        line.truncate(end);
+                        break;
+                    }
+                    if line.len() > MAX_LINE {
+                        return Err(TOO_LONG);
+                    }
+                }
+                Err(e) => would_block(e).map_err(|_| "the request could not be read")?,
+            }
+        }
+        if line.len() > MAX_LINE {
+            return Err(TOO_LONG);
+        }
+        // A trailing CR is white space to the parse.
+        String::from_utf8(line).map_err(|_| "the request is not UTF-8")
+    }
+
+    pub(super) async fn write_all(stream: &impl Ready, mut data: &[u8]) -> io::Result<()> {
+        while !data.is_empty() {
+            stream.writable().await?;
+            match stream.try_write(data) {
+                Ok(n) => data = &data[n..],
+                Err(e) => would_block(e)?,
+            }
+        }
+        Ok(())
+    }
+
+    /// A readiness that was not (would block): wait again; any other error
+    /// ends the session.
+    pub(super) fn would_block(e: io::Error) -> io::Result<()> {
+        if e.kind() == ErrorKind::WouldBlock {
+            Ok(())
+        } else {
+            Err(e)
+        }
+    }
+}
+
 #[cfg(unix)]
 pub use socket::{WAIT, bind_control, serve_control, session};
 
@@ -932,9 +1103,8 @@ mod socket {
     use std::time::Duration;
 
     use tokio::net::{UnixListener, UnixStream};
-    use tracing::debug;
 
-    use super::{MAX_LINE, answer};
+    use super::answer;
     use crate::daemon::media::Media;
 
     /// How long a connection may take to send its request, and its answer
@@ -971,75 +1141,11 @@ mod socket {
         }
     }
 
-    /// One connection: its request line (at most [`MAX_LINE`] bytes, ended
+    /// One connection: its request line (at most [`super::MAX_LINE`] bytes, ended
     /// by a newline or the end of what it sends) within `wait`, and the
     /// answer line, given `wait` to be taken; then it is closed.
     pub async fn session(stream: UnixStream, media: &Media, wait: Duration) {
-        let reply = match tokio::time::timeout(wait, read_request(&stream)).await {
-            Ok(Ok(line)) => answer(&line, media),
-            Ok(Err(reason)) => format!("error: {reason}"),
-            Err(_) => "error: no request line within the wait".to_string(),
-        };
-        let mut out = reply.into_bytes();
-        out.push(b'\n');
-        match tokio::time::timeout(wait, write_all(&stream, &out)).await {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => debug!(error = %e, "a control answer could not be sent"),
-            Err(_) => debug!("a control answer was not taken within the wait"),
-        }
-    }
-
-    const TOO_LONG: &str = "the request is longer than 256 bytes";
-
-    async fn read_request(stream: &UnixStream) -> Result<String, &'static str> {
-        let mut line = Vec::with_capacity(MAX_LINE);
-        let mut buf = [0u8; 512];
-        loop {
-            stream
-                .readable()
-                .await
-                .map_err(|_| "the request could not be read")?;
-            match stream.try_read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => {
-                    line.extend_from_slice(&buf[..n]);
-                    if let Some(end) = line.iter().position(|&b| b == b'\n') {
-                        line.truncate(end);
-                        break;
-                    }
-                    if line.len() > MAX_LINE {
-                        return Err(TOO_LONG);
-                    }
-                }
-                Err(e) => would_block(e).map_err(|_| "the request could not be read")?,
-            }
-        }
-        if line.len() > MAX_LINE {
-            return Err(TOO_LONG);
-        }
-        // A trailing CR is white space to the parse.
-        String::from_utf8(line).map_err(|_| "the request is not UTF-8")
-    }
-
-    async fn write_all(stream: &UnixStream, mut data: &[u8]) -> io::Result<()> {
-        while !data.is_empty() {
-            stream.writable().await?;
-            match stream.try_write(data) {
-                Ok(n) => data = &data[n..],
-                Err(e) => would_block(e)?,
-            }
-        }
-        Ok(())
-    }
-
-    /// A readiness that was not (would block): wait again; any other error
-    /// ends the session.
-    fn would_block(e: io::Error) -> io::Result<()> {
-        if e.kind() == ErrorKind::WouldBlock {
-            Ok(())
-        } else {
-            Err(e)
-        }
+        super::line::exchange(&stream, wait, |line| answer(line, media)).await;
     }
 }
 

@@ -493,9 +493,10 @@ impl Prepared {
             #[cfg(unix)]
             listener,
         } = self;
-        let watch = {
+        let mut device = device;
+        let (watch, local) = {
             let _in_rt = rt.enter();
-            Watch::new(signals)?
+            (Watch::new(signals)?, open_local(&mut device))
         };
         let mdns = ServiceDaemon::new().map_err(|e| run_failed(format!("the mDNS daemon: {e}")))?;
         // Only the served address's interface, IPv4: no other network sees
@@ -518,6 +519,7 @@ impl Prepared {
             linked,
             source,
             media,
+            local,
             #[cfg(unix)]
             listener,
         };
@@ -558,8 +560,28 @@ struct Served {
     linked: Option<Arc<Linked>>,
     source: ClockSource,
     media: Arc<Media>,
+    /// The local status endpoint ([`crate::ctl::local`]), when it listens.
+    local: Option<tokio::net::TcpListener>,
     #[cfg(unix)]
     listener: Option<UnixListener>,
+}
+
+/// The local status endpoint for dtray (#104, [`crate::ctl::local`]): a listener
+/// on 127.0.0.1, its port kept in `device` for the ARC record. Without it
+/// the device runs on, unseen by dtray (logged). Call it inside the
+/// device's runtime.
+fn open_local(device: &mut Device) -> Option<tokio::net::TcpListener> {
+    match crate::ctl::local::bind().and_then(|l| Ok((l.local_addr()?.port(), l))) {
+        Ok((port, listener)) => {
+            info!(port, "local status endpoint on 127.0.0.1 (dtray reads it)");
+            device.status_port = Some(port);
+            Some(listener)
+        }
+        Err(e) => {
+            warn!(error = %e, "no local status endpoint: dtray will not list this device");
+            None
+        }
+    }
 }
 
 /// The signals as registered (in the device's runtime).
@@ -732,6 +754,14 @@ async fn serve_device(
     }
     if let Some(linked) = s.linked {
         tokio::spawn(select_source(linked));
+    }
+    if let Some(listener) = s.local {
+        let media = Arc::clone(&s.media);
+        tokio::spawn(async move {
+            if let Err(e) = crate::ctl::local::serve(listener, media).await {
+                warn!(error = %e, "the local status endpoint stopped");
+            }
+        });
     }
     #[cfg(unix)]
     let ctl_server = {

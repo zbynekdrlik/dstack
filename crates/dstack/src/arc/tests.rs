@@ -1849,6 +1849,14 @@ fn the_rx_flow_list_states_each_flow_by_offsets() {
         0x00, 0x00, 0x00, 0x00,
     ]);
     assert_eq!(reply_bytes(&mut dev, &packet), want);
+    // Our own client (what dcontroller reads) follows the offsets to the
+    // same flow: RX 1–3 fed, the peer's 2 ms.
+    let page = control::rx_flow_page(STATUS_OK, &want[HEADER_LEN..]).unwrap();
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(
+        (page.items[0].channels.as_slice(), page.items[0].latency_ns),
+        (&[1, 2, 3][..], 2_000_000)
+    );
     // The channels read Receiving with their TX names.
     let subs = read_subs(&mut dev);
     assert_eq!(
