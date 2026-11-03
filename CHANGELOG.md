@@ -6,6 +6,7 @@
   - Before, `Ring::write_at` checked the reader once before its loop. With the RX thread and the reader on one CPU, the reader read holes and the writer then stored those samples as `written`: silence reached the app with `late` at 0.
   - Now a read that finds a hole marks the slot by compare-and-swap, and the writer stores by compare-and-swap, so that sample is `late`. Ring `holes` at written positions now equal `late`.
   - New: `ring::READ_EMPTY`. The ring's lap is 31 bits (positions 2^47 apart, 46 years at 96 kHz, share a slot; was 2^48).
+  - An unwritten slot is its own word, never a lap: a read marks it in every lap (laps 2^30 to 2^31 - 2 left it unmarked), and in the lap 2^31 - 1 it reads as a hole, not a sample 0.
 - Docs (dstack #1): the FOH measurement of `spin_tail_ns` in `docs/windows-box.md`: 150 µs saved about 1.3 CPU per dasio device and lowered the receiver's lateness.
 
 ## 0.6.7 (2026-11-03)

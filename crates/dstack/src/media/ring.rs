@@ -35,8 +35,7 @@
 //!   heartbeat's peaks, once a second): one atomic per write.
 //!
 //! Known limit: the lap is kept mod 2³¹, so positions 2⁴⁷ apart (46 years
-//! at 96 kHz) share a slot and a lap, and a sample 0 stored in the lap
-//! 2³¹ − 1 reads like the empty slot (a sample 0, not a hole).
+//! at 96 kHz) share a slot and a lap.
 
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
@@ -221,8 +220,9 @@ impl Ring {
 /// The bit above the lap that marks a slot the reader found empty.
 pub const READ_EMPTY: u32 = 1 << 31;
 
-/// A slot no write has stored: the lap 2³¹ − 1, the sample 0.
-const EMPTY: u64 = ((READ_EMPTY - 1) as u64) << 32;
+/// A slot no write has stored. No write makes this word (its bit 63 is
+/// clear), nor a read-empty mark (its low 32 bits are 0).
+const EMPTY: u64 = u64::MAX;
 
 /// The lap of position `p`: which time round the ring it is, mod 2³¹.
 fn lap(p: u64) -> u32 {
@@ -232,6 +232,9 @@ fn lap(p: u64) -> u32 {
 /// Whether slot word `w` holds a later lap than position `p`'s (up to 2³⁰
 /// laps on, mod 2³¹): a read of `p` then leaves it alone.
 fn newer(w: u64, p: u64) -> bool {
+    if w == EMPTY {
+        return false;
+    }
     let ahead = (lap_of(w) & (READ_EMPTY - 1)).wrapping_sub(lap(p)) & (READ_EMPTY - 1);
     (1..1 << 30).contains(&ahead)
 }
