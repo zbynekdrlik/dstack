@@ -159,9 +159,8 @@ fn sleep_until_in(target: i64, mode: super::WaitMode) {
     let left = target - monotonic_ns();
     // The timer mode (problem A's measurement): the whole wait on the
     // timer, no core spun.
-    let tail =
-        i64::try_from(super::spin_tail_for(mode, super::spin_tail_ns_raw())).unwrap_or(i64::MAX);
-    let spin = tail;
+    let tail = super::SPIN_TAIL.load(std::sync::atomic::Ordering::Relaxed);
+    let spin = i64::try_from(super::spin_tail_for(mode, tail)).unwrap_or(i64::MAX);
     if left > spin {
         let h = timer();
         if !h.is_null() {
