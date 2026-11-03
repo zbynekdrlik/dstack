@@ -240,6 +240,39 @@ impl Media {
         self.app.set(Arc::new(f));
     }
 
+    /// Sends this device's TX through the host's `sender` (dstack #1): its
+    /// own kernel send path (an NDIS filter), so packets skip Winsock's send
+    /// path. Call it before the media threads start (before serving; dlink
+    /// and [`crate::embed`] pass it through). Windows only: the TX thread
+    /// then writes whole Ethernet II frames from our NIC's MAC and hands the
+    /// frames of each pass to `sender` in one call, for unicast receivers
+    /// the neighbour table resolved; multicast, unresolved receivers and any
+    /// frame the sender did not take go through the UDP socket as before.
+    /// `false` (logged): not Windows (Linux has its own path past the
+    /// qdisc), no adapter holds the device's address, or a sender was set
+    /// already; TX stays as it was.
+    pub fn set_frame_sender(&self, sender: Arc<dyn crate::media::bypass::FrameSender>) -> bool {
+        #[cfg(windows)]
+        {
+            let Some((ifindex, mac, name)) = crate::media::bypass::windows::nic(self.ip) else {
+                warn!(ip = %self.ip, "no adapter holds the device's address: TX stays on the UDP socket");
+                return false;
+            };
+            let nic = crate::media::tx::HostNic { ifindex, mac, name };
+            if !self.tx.use_frame_sender(sender, nic) {
+                warn!("a host frame sender was set already: the first one stays");
+                return false;
+            }
+            true
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = sender;
+            info!("a host frame sender is used on Windows only: TX keeps its own path");
+            false
+        }
+    }
+
     /// The app's part of the status as compact JSON (the cache the hook's
     /// thread keeps, never a call of the hook): `None` without a hook,
     /// before its first call returned, or when its text is no JSON object
@@ -383,6 +416,8 @@ pub struct Driver {
     loss: crate::media::late::RxWatch,
     /// Our TX flows' failed sends, logged once a second with the OS error.
     sends: crate::media::late::SendWatch,
+    /// The host frame sender's refused batches, logged once a second.
+    host: crate::media::late::HostWatch,
     /// Other traffic on our NIC, logged once a minute.
     traffic: crate::traffic::TrafficWatch,
 }
@@ -404,6 +439,7 @@ impl Driver {
                 late: crate::media::late::LateWatch::new(),
                 loss: crate::media::late::RxWatch::new(),
                 sends: crate::media::late::SendWatch::new(),
+                host: crate::media::late::HostWatch::new(),
                 traffic: crate::traffic::TrafficWatch::new(),
             },
             back,
@@ -422,6 +458,7 @@ impl Driver {
         self.late.watch(now, &self.media.tx);
         self.loss.watch(now, &self.media.rx);
         self.sends.watch(now, &self.media.tx);
+        self.host.watch(now, &self.media.tx);
         self.traffic.watch(now, self.media.ip, &self.media.tx);
     }
 

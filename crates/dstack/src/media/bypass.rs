@@ -18,12 +18,34 @@
 //! with no complete ARP entry also stays on the UDP socket, which lets the
 //! kernel resolve it. Opening the socket needs `CAP_NET_RAW`; without it the
 //! device warns at start and every flow uses the UDP socket.
+//!
+//! On Windows (dstack #1, the FOH PC's send stalls below Winsock) the host
+//! application may hand dstack a [`FrameSender`]: its own kernel send path
+//! (an NDIS filter, dasio's). dstack then writes the whole Ethernet II frame
+//! ([`write_ethernet`] in front of [`write_headers`]) and passes the frames
+//! due in a TX pass to the sender in one call; the host only moves bytes.
+//! The same rule picks the flows: a unicast destination whose MAC the
+//! Windows neighbour table holds ([`neighbour_row`], read once a second off
+//! the hot path) goes to the sender, multicast and unresolved destinations
+//! stay on the UDP socket, and a frame the sender did not take goes out on
+//! the UDP socket after all (`media::tx::host`).
 
 use std::io;
 use std::net::{Ipv4Addr, SocketAddrV4};
 
 /// The IPv4 and UDP headers written in front of a media packet.
 pub const HEADROOM: usize = IP_HEADER + UDP_HEADER;
+/// The Ethernet II header in front of a host sender's frame
+/// ([`write_ethernet`]).
+pub const ETHERNET_HEADER: usize = 14;
+/// Every header in front of a media packet in a host sender's frame.
+pub const FRAME_HEADROOM: usize = ETHERNET_HEADER + HEADROOM;
+/// Ethernet II's type of an IPv4 frame.
+const ETHERTYPE_IPV4: u16 = 0x0800;
+/// The Windows neighbour states with a MAC (`NL_NEIGHBOR_STATE`): probe,
+/// delay, stale, reachable, permanent. Unreachable (0) and incomplete (1)
+/// have none.
+const NEIGHBOUR_RESOLVED: std::ops::RangeInclusive<i32> = 2..=6;
 const IP_HEADER: usize = 20;
 const UDP_HEADER: usize = 8;
 /// The TTL of a direct packet (Linux's default).
@@ -88,6 +110,81 @@ pub fn write_headers(
     total
 }
 
+/// Writes the Ethernet II header of an IPv4 frame from `src` (our NIC's
+/// MAC) to `dst` into `buf[..ETHERNET_HEADER]`. `buf` must hold
+/// [`ETHERNET_HEADER`] bytes.
+pub fn write_ethernet(buf: &mut [u8], dst: [u8; 6], src: [u8; 6]) {
+    buf[..6].copy_from_slice(&dst);
+    buf[6..12].copy_from_slice(&src);
+    buf[12..ETHERNET_HEADER].copy_from_slice(&ETHERTYPE_IPV4.to_be_bytes());
+}
+
+/// A host's kernel send path (dstack #1): the application hands it to the
+/// device before its media threads start (`Media::set_frame_sender`), and
+/// the TX thread passes it every frame due in a pass, in one call. Used on
+/// Windows only; without one, every flow goes through its UDP socket there.
+///
+/// Each frame is a complete Ethernet II frame of one media packet: our NIC's
+/// MAC as the source, IPv4 (DSCP EF, don't fragment, TTL 64) and UDP, all
+/// written by dstack. The sender queues them on the NIC in order.
+pub trait FrameSender: Send + Sync {
+    /// Sends `frames`, marking in `sent` (as long as `frames`, all `false`
+    /// on the call) each frame it took. A frame not marked goes out through
+    /// the UDP socket after all. `Err`: the whole batch was refused (none
+    /// taken, whatever `sent` holds). Called on the TX thread, once a pass:
+    /// it must not block, and should not allocate.
+    fn send(&self, frames: &[&[u8]], sent: &mut [bool]) -> io::Result<()>;
+}
+
+/// One resolved entry of the Windows neighbour table (`MIB_IPNET_ROW2`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Neighbour {
+    pub ip: Ipv4Addr,
+    pub mac: [u8; 6],
+    /// The interface it was resolved on (`InterfaceIndex`).
+    pub ifindex: u32,
+}
+
+/// The neighbour of a table row: `ip`, its physical address `phys` (the
+/// row's bytes up to its length), its `NL_NEIGHBOR_STATE` and the
+/// interface. `None` for a row without a MAC: a state that has none
+/// (unreachable, incomplete), an address that is not 6 bytes, or all zero.
+pub fn neighbour_row(ip: Ipv4Addr, phys: &[u8], state: i32, ifindex: u32) -> Option<Neighbour> {
+    let mac: [u8; 6] = phys.try_into().ok()?;
+    (NEIGHBOUR_RESOLVED.contains(&state) && mac != [0; 6]).then_some(Neighbour { ip, mac, ifindex })
+}
+
+/// The MAC of `ip` on the interface `ifindex` among `rows`.
+pub fn neighbour_mac(rows: &[Neighbour], ip: Ipv4Addr, ifindex: u32) -> Option<[u8; 6]> {
+    rows.iter()
+        .find(|n| n.ip == ip && n.ifindex == ifindex)
+        .map(|n| n.mac)
+}
+
+/// [`mac_words`] from the Windows neighbour `rows` on `ifindex`.
+pub fn neighbour_mac_words<'a>(
+    rows: &'a [Neighbour],
+    ifindex: u32,
+    dests: impl Iterator<Item = Option<SocketAddrV4>> + 'a,
+) -> impl Iterator<Item = u64> + 'a {
+    words_by(dests, move |ip| neighbour_mac(rows, ip, ifindex))
+}
+
+/// A MAC written `aa:bb:cc:dd:ee:ff` (hex, either case).
+pub fn parse_mac(text: &str) -> Option<[u8; 6]> {
+    let mut out = [0u8; 6];
+    let mut parts = text.split(':');
+    for b in &mut out {
+        let part = parts.next()?;
+        // Two hex digits: `from_str_radix` alone takes a sign and one digit.
+        if part.len() != 2 || !part.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
+        *b = u8::from_str_radix(part, 16).ok()?;
+    }
+    parts.next().is_none().then_some(out)
+}
+
 /// The one's complement sum of `data` as 16-bit big-endian words (an odd
 /// last byte padded with zero), added to `sum`, not yet folded.
 fn sum16(data: &[u8], sum: u32) -> u32 {
@@ -138,10 +235,19 @@ pub fn mac_words<'a>(
     dev: &'a str,
     dests: impl Iterator<Item = Option<SocketAddrV4>> + 'a,
 ) -> impl Iterator<Item = u64> + 'a {
+    words_by(dests, move |ip| arp_mac(table, ip, dev))
+}
+
+/// The [`mac_word`] of each destination: `lookup`'s MAC for a unicast
+/// one, 0 for multicast and none.
+fn words_by<'a>(
+    dests: impl Iterator<Item = Option<SocketAddrV4>> + 'a,
+    lookup: impl Fn(Ipv4Addr) -> Option<[u8; 6]> + 'a,
+) -> impl Iterator<Item = u64> + 'a {
     dests.map(move |dest| {
         mac_word(
             dest.filter(|d| !d.ip().is_multicast())
-                .and_then(|d| arp_mac(table, *d.ip(), dev)),
+                .and_then(|d| lookup(*d.ip())),
         )
     })
 }
@@ -299,6 +405,10 @@ pub fn open_for(ip: Ipv4Addr) -> Option<(Direct, String)> {
         }
     }
 }
+
+/// The Windows glue: the neighbour table and our NIC.
+#[cfg(windows)]
+pub(crate) mod windows;
 
 #[cfg(test)]
 mod tests;

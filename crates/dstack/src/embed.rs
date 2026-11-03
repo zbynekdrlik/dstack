@@ -40,6 +40,7 @@ use crate::daemon::Place;
 use crate::daemon::media::Media;
 use crate::device::DeviceConfig;
 use crate::host::{self, ClockSource, Host, HostError, Signals, Stopped};
+use crate::media::bypass::FrameSender;
 use crate::media::source::Source;
 use crate::stream::{self, Map, Pump, PumpStats, Timing};
 
@@ -75,6 +76,20 @@ impl Embedded {
         processor: P,
         source: ClockSource,
     ) -> Result<Embedded, HostError> {
+        Self::start_with_sender(cfg, place, map, processor, source, None)
+    }
+
+    /// [`Embedded::start_with`], the TX sent through the host's
+    /// `frame_sender` when one is given ([`Media::set_frame_sender`]:
+    /// Windows only, set before the device's threads start).
+    pub fn start_with_sender<P: Process + 'static>(
+        cfg: DeviceConfig,
+        place: &Place,
+        map: Map,
+        processor: P,
+        source: ClockSource,
+        frame_sender: Option<Arc<dyn FrameSender>>,
+    ) -> Result<Embedded, HostError> {
         if let Some(&rx) = map.rx.iter().find(|&&rx| rx >= cfg.rx.len()) {
             return Err(HostError::Setup(format!(
                 "the app's RX channel {} is past the device's {} RX channels",
@@ -89,6 +104,9 @@ impl Embedded {
         let bits = prepared.config().encoding;
         let rate = prepared.config().sample_rate;
         let media = prepared.media();
+        if let Some(sender) = frame_sender {
+            media.set_frame_sender(sender);
+        }
         // Every TX channel is silent at start: the app's outputs go out as
         // their channels' engine rings (each has one: `prepare_config`
         // made a ring on every channel of `map.tx`).
