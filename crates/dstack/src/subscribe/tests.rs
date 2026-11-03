@@ -853,13 +853,13 @@ fn transmitters_with_nothing_pending_are_forgotten_after_their_wait() {
     heard[0] = 2;
     assert_eq!(stops(&m.tick(2 * S, &heard, &net)).len(), 1);
     assert!(
-        m.peers.contains_key(&PEER_IP),
+        m.peers.contains_key(&SocketAddrV4::new(PEER_IP, 4455)),
         "kept until its wait is over"
     );
     m.tick(9 * S - 1, &heard, &net);
-    assert!(m.peers.contains_key(&PEER_IP));
+    assert!(m.peers.contains_key(&SocketAddrV4::new(PEER_IP, 4455)));
     m.tick(9 * S, &heard, &net);
-    assert!(!m.peers.contains_key(&PEER_IP));
+    assert!(!m.peers.contains_key(&SocketAddrV4::new(PEER_IP, 4455)));
     // A new subscription asks at once.
     m.set(0, Some(sub("TX 3", "peer-device")));
     assert_eq!(requests(&m.tick(9 * S + 1, &heard, &net)).len(), 1);
@@ -885,8 +885,8 @@ fn a_transmitter_is_kept_while_it_has_a_flow_or_failures() {
     }
     // A minute on: the peer for its flow, the other for its failure (its
     // wait grows if it is asked again).
-    assert!(m.peers.contains_key(&PEER_IP));
-    assert_eq!(m.peers[&OTHER_IP].failures, 1);
+    assert!(m.peers.contains_key(&SocketAddrV4::new(PEER_IP, 4455)));
+    assert_eq!(m.peers[&SocketAddrV4::new(OTHER_IP, 4455)].failures, 1);
     // Another transmitter's flow never keeps one that has nothing.
     let mut m = manager();
     m.set(0, Some(sub("TX 3", "peer-device")));
@@ -901,8 +901,8 @@ fn a_transmitter_is_kept_while_it_has_a_flow_or_failures() {
     assert_eq!(stops(&m.tick(2 * S, &heard, &net)).len(), 1);
     heard = [3; MAX_FLOWS];
     m.tick(10 * S, &heard, &net);
-    assert!(m.peers.contains_key(&PEER_IP));
-    assert!(!m.peers.contains_key(&OTHER_IP));
+    assert!(m.peers.contains_key(&SocketAddrV4::new(PEER_IP, 4455)));
+    assert!(!m.peers.contains_key(&SocketAddrV4::new(OTHER_IP, 4455)));
 }
 
 #[test]
