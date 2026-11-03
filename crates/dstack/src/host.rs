@@ -382,7 +382,10 @@ pub fn prepare_config(
     let mono = Arc::new(MonoClock::new());
     // dlink's: dsync's follower when locked, the service otherwise.
     let linked = (source == ClockSource::Linked).then(|| {
-        let (internal, keep) = crate::clock::linked::start_internal(&ifa.name);
+        // Seeded with the service's frequency word when it is locked and
+        // settled (dstack #68): settled in 37 s instead of 70.
+        let seed = rt.block_on(crate::clock::linked::service_seed(crate::clock::DSYNC));
+        let (internal, keep) = crate::clock::linked::start_internal(&ifa.name, seed);
         Arc::new(Linked::new(internal, Arc::clone(&mono), keep))
     });
     let ptp: Arc<dyn crate::clock::PtpClock> = match &linked {

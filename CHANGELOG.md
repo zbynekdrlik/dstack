@@ -1,6 +1,13 @@
 # Changelog
 
-## 0.6.9 (unreleased)
+## 0.6.10 (unreleased)
+
+- New (dstack #68, dsync 1.27.3): the in-process follower starts from the dsync service's frequency word, and the linked clock keeps a ready service until the follower settles.
+  - dsync-ptp moves to v1.27.3 (frequency seed, settled state, continuous boot re-seed).
+  - The seed is read once at the start from the service (DSYX bytes 36-39, ppb), only when the service is locked and settled (`clock::linked::seed_of`, `service_seed`). On mbc: settled in 37 s with the seed (|diff| p99 5.1 µs, max 31 µs) vs 70 s without (p99 51.4 µs).
+  - The selector takes the follower over a ready service only once it is settled; once in use, losing `settled` alone does not switch back (a switch costs a re-align). With no service, a locked follower is taken as before.
+
+## 0.6.9 (2026-11-03)
 
 - New (dstack #90, obs): `dlink::Rated::delay_ns()`, the converters' delay each way (RX, TX with the FIFO prime). The rated.rs doc had RX and TX swapped; on a 96 kHz network: 48 kHz app RX 1.33 ms, TX 2.83 ms; 44.1 kHz RX 1.32 ms, TX 3.08 ms. v0.5.20's 2:1 half-band delayed about 0.3 ms each way.
 
