@@ -429,11 +429,6 @@ pub fn spin_tail_for(mode: WaitMode, tail_ns: u64) -> u64 {
     }
 }
 
-/// The process's spin tail as set, whatever the wait ([`set_spin_tail_ns`]).
-pub fn spin_tail_ns_raw() -> u64 {
-    SPIN_TAIL.load(std::sync::atomic::Ordering::Relaxed)
-}
-
 /// The wait of a timing profile.
 pub fn wait_mode_for(profile: TimingProfile) -> WaitMode {
     match profile {

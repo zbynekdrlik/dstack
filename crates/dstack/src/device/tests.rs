@@ -1727,6 +1727,11 @@ fn the_spin_tail_is_taken_and_checked() {
         DeviceConfig::from_toml(TEST_DEVICE).unwrap().spin_tail_ns,
         None
     );
+    let longest = format!("{TEST_DEVICE}\nspin_tail_ns = 50000000\n");
+    assert_eq!(
+        DeviceConfig::from_toml(&longest).unwrap().spin_tail_ns,
+        Some(50_000_000)
+    );
     let too_long = format!("{TEST_DEVICE}\nspin_tail_ns = 50000001\n");
     let problems = DeviceConfig::from_toml(&too_long).unwrap_err().problems;
     assert!(

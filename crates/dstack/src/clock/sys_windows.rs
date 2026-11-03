@@ -23,7 +23,7 @@ use windows_sys::Win32::System::Threading::{
 
 /// 100 ns intervals from 1601-01-01 to 1970-01-01.
 const UNIX_EPOCH_FT: i64 = 116_444_736_000_000_000;
-// The spin tail (`super::spin_tail_ns`, the device's `spin_tail_ns`,
+// The spin tail (`super::SPIN_TAIL`, the device's `spin_tail_ns`,
 // 50 ms unless set): waits up to it are spun (yielding), never slept. On
 // the FOH PC (October 2026) the media threads, alone on their CPUs at
 // priority 31, still woke past 2.7 ms now and then while the CPUs
@@ -149,7 +149,7 @@ impl Drop for Timer {
 }
 
 /// Sleeps until [`monotonic_ns`] reaches `target`: the timer for all but
-/// the last spin tail (`super::spin_tail_ns`), then a spin.
+/// the last spin tail (`super::SPIN_TAIL`), then a spin.
 pub fn sleep_until_monotonic(target: i64) {
     sleep_until_in(target, super::wait_mode());
 }
