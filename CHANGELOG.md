@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.6.13 (unreleased)
+## 0.6.13 (2026-11-03)
 
 - New (dstack #104, dtray): every device (dstack-dev, dlink, dasio's) opens a local status endpoint on 127.0.0.1 at a port the OS picks, and announces it in its ARC record as `dstack_ctl=<port>` (`announce::STATUS_PORT_KEY`). It answers `status` (the same JSON line as `ctl status`) and nothing else, on Windows too; the test requests stay on the Unix socket. New: `ctl::local`, `device::Device::status_port`, `announce::with_status_port`.
 - Test: the RX flow list's byte test also reads its reply with `arc::control`'s parser (dcontroller's).
