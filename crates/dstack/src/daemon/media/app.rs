@@ -95,7 +95,7 @@ struct State {
     /// When the hook's last call ended, returned or panicked: the
     /// refresh's clock ([`next`]).
     called: Option<Instant>,
-    /// The hook panicked, and that was warned.
+    /// The hook panicked (since it was set).
     panicked: bool,
     /// The last status read.
     read: Option<Instant>,
@@ -125,6 +125,8 @@ pub struct AppHook {
     refused: AtomicBool,
     /// The hook was found stalled, and that was warned.
     stalled: AtomicBool,
+    /// The hook was found to have panicked, and that was warned.
+    panic_warned: AtomicBool,
 }
 
 impl AppHook {
@@ -145,6 +147,7 @@ impl AppHook {
             // after the reset and leave the new hook's warning spent.
             self.refused.store(false, Ordering::Relaxed);
             self.stalled.store(false, Ordering::Relaxed);
+            self.panic_warned.store(false, Ordering::Relaxed);
             !std::mem::replace(&mut s.started, true)
         };
         self.shared.wake.notify_all();
@@ -171,13 +174,19 @@ impl AppHook {
     /// calling it ([`next`]).
     pub fn read(&self) -> Option<String> {
         let now = Instant::now();
-        let (part, calling) = {
+        let (part, calling, panicked) = {
             let mut s = lock(&self.shared.state);
             s.hook.as_ref()?;
             s.read = Some(now);
-            (s.part.clone(), s.calling)
+            (s.part.clone(), s.calling, s.panicked)
         };
         self.shared.wake.notify_all();
+        // Warned here, on the reader's thread, like the other warnings.
+        if panicked && !self.panic_warned.swap(true, Ordering::Relaxed) {
+            warn!(
+                "the app's status hook panicked; the status keeps its last part, the hook is called again at each refresh (warned once)"
+            );
+        }
         let (text, at) = part?;
         let Some(text) = text else {
             if !self.refused.swap(true, Ordering::Relaxed) {
@@ -227,10 +236,7 @@ fn run(shared: &Shared) {
                 s.called = Some(now);
                 match text {
                     Ok(text) => s.part = Some((crate::ctl::app_object(&text), now)),
-                    Err(_) if !std::mem::replace(&mut s.panicked, true) => warn!(
-                        "the app's status hook panicked; the status keeps its last part, the hook is called again at the next refresh (warned once)"
-                    ),
-                    Err(_) => {}
+                    Err(_) => s.panicked = true,
                 }
             }
             (Next::Wait(d), _) => {

@@ -212,6 +212,7 @@ fn a_new_hook_takes_effect_and_the_old_one_s_late_part_is_dropped() {
 
 #[test]
 fn a_hook_that_panics_keeps_its_last_part_and_the_thread_alive() {
+    crate::test_log::undecided();
     let calls = Arc::new(AtomicUsize::new(0));
     let n = Arc::clone(&calls);
     let hook = AppHook::default();
@@ -225,18 +226,29 @@ fn a_hook_that_panics_keeps_its_last_part_and_the_thread_alive() {
         read_until(&hook, Option::is_some).as_deref(),
         Some(r#"{"n":1}"#)
     );
-    // Called again at each refresh after a panic, the last part kept.
-    while calls.load(Ordering::Relaxed) < 3 {
-        let got = hook.read();
-        assert!(
-            got.as_deref().is_some_and(|p| p.starts_with(r#"{"n":1"#)),
-            "{got:?}"
-        );
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    // A new hook takes over on the same thread.
+    // Called again at each refresh after a panic, the last part kept; the
+    // panic warned once over three panics and many reads.
+    let logs = crate::test_log::capture_warnings(|| {
+        while calls.load(Ordering::Relaxed) < 4 {
+            let got = hook.read();
+            assert!(
+                got.as_deref().is_some_and(|p| p.starts_with(r#"{"n":1"#)),
+                "{got:?}"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        for _ in 0..3 {
+            let _ = hook.read();
+        }
+    });
+    assert_eq!(logs.matches("hook panicked").count(), 1, "{logs}");
+    // A new hook takes over on the same thread, and warns nothing of the
+    // old one's panics.
     hook.set(Arc::new(|| r#"{"n":2}"#.to_string()));
-    read_until(&hook, |p| p.as_deref() == Some(r#"{"n":2}"#));
+    let logs = crate::test_log::capture_warnings(|| {
+        read_until(&hook, |p| p.as_deref() == Some(r#"{"n":2}"#));
+    });
+    assert_eq!(logs, "");
 }
 
 #[test]
