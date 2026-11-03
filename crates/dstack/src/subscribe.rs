@@ -676,7 +676,10 @@ impl Manager {
 
     /// The subscribed channels without a flow: each routed to a flow that
     /// carries its TX channel already, or listed under its transmitter.
-    fn resolve(&mut self, resolver: &dyn Resolver) -> BTreeMap<SocketAddrV4, Vec<(usize, Advertised)>> {
+    fn resolve(
+        &mut self,
+        resolver: &dyn Resolver,
+    ) -> BTreeMap<SocketAddrV4, Vec<(usize, Advertised)>> {
         let mut pending: BTreeMap<SocketAddrV4, Vec<(usize, Advertised)>> = BTreeMap::new();
         for rx in 0..self.subs.len() {
             let Some(sub) = self.subs[rx].as_ref().filter(|_| self.routes[rx].is_none()) else {
