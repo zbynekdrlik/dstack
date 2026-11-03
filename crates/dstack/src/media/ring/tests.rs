@@ -369,3 +369,31 @@ fn a_write_the_reader_overtakes_counts_the_overtaken_samples_late() {
         assert_eq!(delivered, c.written, "{c:?}");
     }
 }
+
+/// A read leaves a later lap's sample alone and marks an earlier lap's,
+/// the empty slot or its own position's mark; the comparison is mod 2³¹.
+#[test]
+fn a_read_marks_only_a_slot_of_no_later_lap() {
+    let one = SLOTS as u64;
+    let p = T;
+    assert!(newer(word(p + one, 5), p));
+    assert!(
+        newer(word(p + (1 << 30) * one - one, 5), p),
+        "the last later lap"
+    );
+    assert!(
+        !newer(word(p + (1 << 30) * one, 5), p),
+        "2^30 laps on is earlier"
+    );
+    assert!(!newer(word(p, 5), p), "its own lap");
+    assert!(!newer(word(p - one, 5), p));
+    assert!(!newer(EMPTY, p));
+    assert!(!newer(read_empty(p), p));
+    assert!(newer(read_empty(p + one), p), "a later lap's mark");
+    // Across the lap's wrap: lap 2^31 - 1 is just before lap 0.
+    let last = ((1u64 << 31) - 1) * one;
+    assert!(newer(word(last + one, 5), last));
+    assert!(!newer(word(last, 5), last + one));
+    assert_eq!(lap(last + one), 0);
+    assert_eq!(read_empty(p) >> 32, u64::from(lap(p) | READ_EMPTY));
+}

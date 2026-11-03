@@ -19,6 +19,13 @@
 //!
 //! - A write behind the reader (a position before the end of the furthest
 //!   read) is late: not written, counted.
+//! - A read that finds a hole marks the slot as read empty (the position's
+//!   lap with [`READ_EMPTY`] set), by compare-and-swap. The writer stores
+//!   by compare-and-swap too, so a sample whose hole the reader already
+//!   read is late, not written, even when the reader passed it while the
+//!   write ran (obs, camera-box#1485: the RX thread and the reader on one
+//!   CPU; before, those samples counted written and the app got silence
+//!   with late at 0).
 //! - A write of a position the slot already holds is a duplicate: written
 //!   again (the last copy wins), counted.
 //! - A write [`SLOTS`] or more ahead of the reader would overwrite samples
@@ -27,9 +34,9 @@
 //! - The largest magnitude stored is kept until [`Ring::take_peak`] (the
 //!   heartbeat's peaks, once a second): one atomic per write.
 //!
-//! Known limit: positions 2⁴⁸ apart (93 years at 96 kHz) share a slot and
-//! a lap, and the lap `u32::MAX` (positions from 2⁴⁸ − 2¹⁶, by then) is
-//! the empty slot's.
+//! Known limit: the lap is kept mod 2³¹, so positions 2⁴⁷ apart (46 years
+//! at 96 kHz) share a slot and a lap, and a sample 0 stored in the lap
+//! 2³¹ − 1 reads like the empty slot (a sample 0, not a hole).
 
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
@@ -115,12 +122,27 @@ impl Ring {
                 w.early += 1;
             } else {
                 let slot = self.slot(p);
-                if lap_of(slot.load(Ordering::Relaxed)) == lap(p) {
+                let held = slot.load(Ordering::Relaxed);
+                // One writer: the swap fails only when the reader marked
+                // the slot read empty since the load.
+                if held == read_empty(p)
+                    || slot
+                        .compare_exchange(
+                            held,
+                            word(p, sample),
+                            Ordering::Relaxed,
+                            Ordering::Relaxed,
+                        )
+                        .is_err()
+                {
+                    w.late += 1;
+                    continue;
+                }
+                if lap_of(held) == lap(p) {
                     w.duplicate += 1;
                 } else {
                     w.written += 1;
                 }
-                slot.store(word(p, sample), Ordering::Relaxed);
                 peak = peak.max(sample.unsigned_abs());
             }
         }
@@ -152,7 +174,17 @@ impl Ring {
         let mut holes = 0;
         for (i, o) in out.iter_mut().enumerate() {
             let p = pos.wrapping_add(i as u64);
-            let w = self.slot(p).load(Ordering::Relaxed);
+            let slot = self.slot(p);
+            let w = slot.load(Ordering::Relaxed);
+            let w = if lap_of(w) == lap(p) || newer(w, p) {
+                w
+            } else {
+                // A hole: mark it read empty, unless the writer stored the
+                // sample since the load.
+                slot.compare_exchange(w, read_empty(p), Ordering::Relaxed, Ordering::Relaxed)
+                    .err()
+                    .unwrap_or(w)
+            };
             *o = if lap_of(w) == lap(p) {
                 w as u32 as i32
             } else {
@@ -186,12 +218,27 @@ impl Ring {
     }
 }
 
-/// A slot no write has stored: the lap `u32::MAX`, the sample 0.
-const EMPTY: u64 = (u32::MAX as u64) << 32;
+/// The bit above the lap that marks a slot the reader found empty.
+pub const READ_EMPTY: u32 = 1 << 31;
 
-/// The lap of position `p`: which time round the ring it is.
+/// A slot no write has stored: the lap 2³¹ − 1, the sample 0.
+const EMPTY: u64 = ((READ_EMPTY - 1) as u64) << 32;
+
+/// The lap of position `p`: which time round the ring it is, mod 2³¹.
 fn lap(p: u64) -> u32 {
-    (p / SLOTS as u64) as u32
+    (p / SLOTS as u64) as u32 & (READ_EMPTY - 1)
+}
+
+/// Whether slot word `w` holds a later lap than position `p`'s (up to 2³⁰
+/// laps on, mod 2³¹): a read of `p` then leaves it alone.
+fn newer(w: u64, p: u64) -> bool {
+    let ahead = (lap_of(w) & (READ_EMPTY - 1)).wrapping_sub(lap(p)) & (READ_EMPTY - 1);
+    (1..1 << 30).contains(&ahead)
+}
+
+/// Position `p`'s slot after a read found it empty.
+fn read_empty(p: u64) -> u64 {
+    u64::from(lap(p) | READ_EMPTY) << 32
 }
 
 /// The lap a slot's word holds.
