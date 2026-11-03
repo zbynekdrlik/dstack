@@ -13,9 +13,13 @@
 //!   CMC or status answers. A part older than [`STALE`] carries
 //!   `"stale":true` ([`mark_stale`]); a hook still running then is logged
 //!   once as stalled.
+//! - A hook that panics leaves the last part (stale in time) and the
+//!   thread running: it is called again at the next refresh, and a new hook
+//!   takes over; the panic is warned once for each hook.
 //! - The thread ends with the [`AppHook`] (its owner, the `Media`): a stop
 //!   flag it checks between calls. A call in progress is never cut short.
 
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
@@ -85,9 +89,14 @@ struct State {
     /// Bumped by each new hook: a call of the hook it replaced stores
     /// nothing.
     generation: u64,
-    /// The last call's part (`None`: refused, no JSON object within the
-    /// size) and when the call returned.
+    /// The last part the hook returned (`None`: refused, no JSON object
+    /// within the size) and when that call returned.
     part: Option<(Option<String>, Instant)>,
+    /// When the hook's last call ended, returned or panicked: the
+    /// refresh's clock ([`next`]).
+    called: Option<Instant>,
+    /// The hook panicked, and that was warned.
+    panicked: bool,
     /// The last status read.
     read: Option<Instant>,
     /// The thread is inside a call of the hook.
@@ -120,18 +129,24 @@ pub struct AppHook {
 
 impl AppHook {
     /// Sets the hook (a later call replaces it, its old part dropped and a
-    /// refusal or a stall of the new one warned again); starts the thread
-    /// at the first call.
+    /// refusal, a stall or a panic of the new one warned again); starts the
+    /// thread at the first call. A hook replaced while its call stalls
+    /// holds the thread: the new one is first called once the old call
+    /// returns, and the status has no app part until then.
     pub fn set(&self, f: AppStatus) {
         let start = {
             let mut s = lock(&self.shared.state);
             s.hook = Some(f);
             s.generation += 1;
             s.part = None;
+            s.called = None;
+            s.panicked = false;
+            // Under the lock: a reader of the old hook's part cannot warn
+            // after the reset and leave the new hook's warning spent.
+            self.refused.store(false, Ordering::Relaxed);
+            self.stalled.store(false, Ordering::Relaxed);
             !std::mem::replace(&mut s.started, true)
         };
-        self.refused.store(false, Ordering::Relaxed);
-        self.stalled.store(false, Ordering::Relaxed);
         self.shared.wake.notify_all();
         if start {
             let shared = Arc::clone(&self.shared);
@@ -197,17 +212,25 @@ impl Drop for AppHook {
 fn run(shared: &Shared) {
     let mut s = lock(&shared.state);
     while !s.stop {
-        let at = s.part.as_ref().map(|p| p.1);
-        match (next(Instant::now(), s.read, at), s.hook.clone()) {
+        match (next(Instant::now(), s.read, s.called), s.hook.clone()) {
             (Next::Call, Some(hook)) => {
                 let generation = s.generation;
                 s.calling = true;
                 drop(s);
-                let part = crate::ctl::app_object(&hook());
+                let text = catch_unwind(AssertUnwindSafe(|| hook()));
                 s = lock(&shared.state);
                 s.calling = false;
-                if s.generation == generation {
-                    s.part = Some((part, Instant::now()));
+                if s.generation != generation {
+                    continue;
+                }
+                let now = Instant::now();
+                s.called = Some(now);
+                match text {
+                    Ok(text) => s.part = Some((crate::ctl::app_object(&text), now)),
+                    Err(_) if !std::mem::replace(&mut s.panicked, true) => warn!(
+                        "the app's status hook panicked; the status keeps its last part, the hook is called again at the next refresh (warned once)"
+                    ),
+                    Err(_) => {}
                 }
             }
             (Next::Wait(d), _) => {

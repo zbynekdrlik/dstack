@@ -4,7 +4,8 @@
 //! `dtray`: the PC's tray icon for its dstack devices (Windows and Linux),
 //! see the library. `dtray --print` runs one discovery pass of
 //! [`PRINT_WAIT`] and writes the tooltip and the lines to stdout (every
-//! platform: a check without a desktop), the expected devices
+//! platform: a check without a desktop session; the Linux binary still
+//! loads GTK's libraries), the expected devices
 //! ([`dtray::expected`]) included. `dtray --autostart on|off` sets or
 //! removes the tray's start at the user's logon (the Run value on Windows,
 //! the XDG autostart entry on Linux; installers call it). Exit codes: 0
@@ -28,6 +29,10 @@ mod win;
 
 /// How long `--print` lets discovery find the devices.
 const PRINT_WAIT: Duration = Duration::from_secs(3);
+/// How long `--print` lets the apps' status hooks answer after its first
+/// read: a device calls its hook on its own thread once a status is read,
+/// and the read before that has no app part yet (dstack #104 step 5).
+const APP_WAIT: Duration = Duration::from_millis(500);
 
 fn main() -> ExitCode {
     let mode = match dtray::mode_of(std::env::args().skip(1)) {
@@ -56,6 +61,8 @@ fn print() -> ExitCode {
     let mut scanner = Scanner::new();
     let failed = scanner.refresh();
     std::thread::sleep(PRINT_WAIT);
+    let _first = scanner.readings();
+    std::thread::sleep(APP_WAIT);
     let expected = expected::expected(&expected::devices_dir());
     let view = Tracker::default().update_with(&scanner.readings(), &expected);
     print!("{}", model::print_text(&view));

@@ -224,7 +224,10 @@ impl Media {
     /// `"stale":true` (dtray shows it orange), and a hook still running then
     /// is warned once. The first status after the hook is set (or after a
     /// pause in reading) has no part yet or a stale one; the thread calls
-    /// `f` at once for it. `f` makes no status request of its own
+    /// `f` at once for it. A panic in `f` keeps the last part (warned once;
+    /// `f` is called again at the next refresh). A hook replaced while its
+    /// call stalls holds the thread: the new one runs once that call
+    /// returns. `f` makes no status request of its own
     /// ([`crate::ctl::status`], `Link::status`): each counts as a read and
     /// would keep `f` called once a second for good.
     ///

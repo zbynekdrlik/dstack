@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 use super::*;
 
 use std::sync::atomic::AtomicUsize;
@@ -110,7 +112,10 @@ fn the_hook_is_called_only_when_the_status_is_read() {
     let started = Instant::now();
     assert_eq!(hook.read(), None);
     count_reaches(&calls, 1);
-    assert_eq!(hook.read().as_deref(), Some(r#"{"state":"ok"}"#));
+    assert_eq!(
+        read_until(&hook, Option::is_some).as_deref(),
+        Some(r#"{"state":"ok"}"#)
+    );
     // Within the read window it keeps refreshing, unread: not before a
     // refresh, and again after one.
     count_reaches(&calls, 2);
@@ -155,8 +160,9 @@ fn a_hook_that_stalls_never_delays_the_status_which_turns_stale() {
         }
     });
     assert!(calls.load(Ordering::Relaxed) >= 2, "the second call stalls");
-    // A read is a lock and a copy: far below the hook's stall (> 3 s).
-    assert!(slowest < Duration::from_millis(500), "{slowest:?}");
+    // A read is a lock and a copy: it never waits out the hook's stall
+    // (it turned stale while the hook still waited).
+    assert!(slowest < STALE, "{slowest:?}");
     assert_eq!(logs.matches("has not returned").count(), 1, "{logs}");
     release.send(()).unwrap();
     read_until(&hook, |p| p.as_deref() == Some(r#"{"n":2}"#));
@@ -201,10 +207,36 @@ fn a_new_hook_takes_effect_and_the_old_one_s_late_part_is_dropped() {
         old,
         "the old hook is gone"
     );
-    assert!(
-        new_calls.load(Ordering::Relaxed) >= 2,
-        "the new one refreshes"
+    count_reaches(&new_calls, 2);
+}
+
+#[test]
+fn a_hook_that_panics_keeps_its_last_part_and_the_thread_alive() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let n = Arc::clone(&calls);
+    let hook = AppHook::default();
+    hook.set(Arc::new(move || {
+        if n.fetch_add(1, Ordering::Relaxed) == 0 {
+            return r#"{"n":1}"#.to_string();
+        }
+        panic!("the app's hook fails (a test)");
+    }));
+    assert_eq!(
+        read_until(&hook, Option::is_some).as_deref(),
+        Some(r#"{"n":1}"#)
     );
+    // Called again at each refresh after a panic, the last part kept.
+    while calls.load(Ordering::Relaxed) < 3 {
+        let got = hook.read();
+        assert!(
+            got.as_deref().is_some_and(|p| p.starts_with(r#"{"n":1"#)),
+            "{got:?}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // A new hook takes over on the same thread.
+    hook.set(Arc::new(|| r#"{"n":2}"#.to_string()));
+    read_until(&hook, |p| p.as_deref() == Some(r#"{"n":2}"#));
 }
 
 #[test]

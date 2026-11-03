@@ -180,7 +180,9 @@ impl Tray {
         let mut out = Vec::new();
         while let Ok(e) = MenuEvent::receiver().try_recv() {
             if e.id == *self.fixed.exit.id() {
+                // Clicks after Exit write nothing.
                 out.push(Action::Exit);
+                break;
             } else if e.id == *self.fixed.copy.id() {
                 out.push(Action::Copy(model::copy_json(&self.now.readings)));
             } else if let Some(&(_, arc, ns)) =
