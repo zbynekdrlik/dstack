@@ -1,6 +1,10 @@
 # Changelog
 
-## 0.6.11 (unreleased)
+## 0.6.12 (unreleased)
+
+- New (dstack #102, #104, songplayer): `dlink::Link::status()`, the device's numbers as one JSON line (what `dstack-dev ctl status` prints). An app reads it from dlink instead of calling `dstack::ctl` itself.
+
+## 0.6.11 (2026-11-03)
 
 - License (owner 3.11.2026: as permissive as possible): `dlink`, `dstack-audio-io` and `dstack-resample` are MIT OR Apache-2.0 (`LICENSE-MIT`, `LICENSE-APACHE`, `LICENSE.md`). `dstack` stays GPL-3.0-or-later for now: some of its files began from inferno (GPL-3.0-or-later), and those must become our own implementation first. Its GPL text is now in `crates/dstack/COPYING`.
 
