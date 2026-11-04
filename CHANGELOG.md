@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.6.28 (unreleased)
+
+- **Latency change** for every dlink app with TX channels, and for every dlink app converting 48 kHz to 96 kHz or back (dstack #1; songplayer's report against v0.6.25: its TX-only 48 kHz device on a 96 kHz network ran P 4.01 ms, its TX thread left packets up to 3.71 ms past due, and a receiver at that latency counted 137 late in 1 h 50 min). Two changes:
+  - A TX floor for P: a device with TX channels gets P at least `dlink::tx_floor_ns(device_rate)`, a TX packet's own age when it leaves = 32 frames (`dstack::announce::FPP_MAX`, the most a receiver asks in a packet) + the TX margin (0.25 ms, `dstack::media::tx::TX_MARGIN_NS`) + 4 ms of lateness (`dlink::TX_LATE_NS`; the measured 3.71 ms rounded up, the 5 ms bin was empty): 4583333 ns at 96 kHz, 4916666 ns at 48 kHz, 4975623 ns at 44.1 kHz. W gives way to it, down to its least (the block and 2 ms). An RX-only device keeps the 4 ms profile floor (`MIN_LATENCY_NS`).
+  - A short converter for an exact 2:1 or 1:2: dlink's `Rated` (and `rated::delay_ns`, so `dlink::split`) use the new `dstack_resample::Converter::low_delay`, which steps a 2:1 or 1:2 ratio with an even block through a 123-tap linear-phase half-band FIR (Kaiser beta 15.57, polyphase, `dstack_resample::halfband`), with no TX FIFO prime. Its delay is 61 samples at 96 kHz: RX 625000 ns, TX 635416 ns for a 48 kHz app on a 96 kHz device (the 256-tap sinc took 1.33 / 2.83 ms with its prime). Measured by its tests: passband ripple 0.0000006 dB to 20 kHz at 96 kHz; stopband at least 149.0 dB down from 28 kHz (under a 24-bit LSB, -144.5 dBFS, for a full-scale tone); THD+N of a 1 kHz tone at -1 dBFS 252.4 dB at 96 -> 48 kHz and 161.4 dB at 48 -> 96 (the sinc: 252.0 / 230.7 dB); a 30 kHz tone folded at 96 -> 48 at -157.6 dBFS (sinc -209.1); a 20 kHz tone's 28 kHz image at 48 -> 96 at -150.2 dBFS (sinc -214.9); 1 kHz and 20 kHz at their level within 0.0001 dB. 44.1 kHz pairs stay on the sinc. `Converter::new`, `drifting` (SongPlayer's ASRC) are unchanged.
+  - Before (v0.6.24 to v0.6.27) and after, at the default 10 ms and block 128. A TX-only device splits as one with both directions in every row:
+
+    | Device | App | Directions | W before | W after | Converter RX / TX before | Converter RX / TX after | P before | P after | TX path before -> after | RX path before -> after |
+    |---|---|---|---|---|---|---|---|---|---|---|
+    | 48 kHz | 48 kHz | any | 4 ms | 4 ms | none | none | 6 ms (RX only 7.33 ms) | unchanged | 10 -> 10 ms | unchanged |
+    | 96 kHz | 96 kHz | any | 4 ms | 4 ms | none | none | 6 ms (RX only 8.67 ms) | unchanged | 10 -> 10 ms | unchanged |
+    | 96 kHz | 48 kHz | both, TX only | 3.16 ms | 4 ms | 1.33 / 2.83 ms | 0.63 / 0.64 ms | 4.01 ms | 5.36 ms | 10 -> 10 ms | 6.68 -> 7.32 ms |
+    | 96 kHz | 48 kHz | RX only | 4 ms | 4 ms | 1.33 / 2.83 ms | 0.63 / 0.64 ms | 7.33 ms | 8.04 ms | none | 10 -> 10 ms |
+    | 96 kHz | 44.1 kHz | both, TX only | 2.91 ms | 2.32 ms | 1.32 / 3.08 ms | 1.32 / 3.08 ms | 4.01 ms | 4.59 ms | 9.99 -> 9.99 ms | 6.66 -> 7.24 ms |
+    | 96 kHz | 44.1 kHz | RX only | 4 ms | 4 ms | 1.32 / 3.08 ms | 1.32 / 3.08 ms | 7.34 ms | 7.34 ms | none | 9.99 -> 9.99 ms |
+    | 48 kHz | 44.1 kHz | both, TX only | 2.90 ms | refused | 2.65 / 3.08 ms | 2.65 / 3.08 ms | 4.02 ms | refused | 9.99 ms -> refused | 9.34 ms -> refused |
+    | 48 kHz | 44.1 kHz | RX only | 4 ms | 4 ms | 2.65 / 3.08 ms | 2.65 / 3.08 ms | 4.67 ms | 4.67 ms | none | 9.99 -> 9.99 ms |
+    | 48 kHz | 96 kHz | both, TX only | 4 ms | 4 ms | 2.67 / 1.42 ms | 0.64 / 0.63 ms | 4.58 ms | 5.38 ms | 10 -> 10 ms | 9.92 -> 8.68 ms |
+    | 48 kHz | 96 kHz | RX only | 4 ms | 4 ms | 2.67 / 1.42 ms | 0.64 / 0.63 ms | 4.67 ms | 6.69 ms | none | 10 -> 9.99 ms |
+
+    Exact P after, ns: both and TX only 6000000 (48/48, 96/96), 5364583 (96/48), 4593750 (96/44.1), 5375000 (48/96); RX only 7333333 (48/48), 8666666 (96/96), 8041666 (96/48), 7343750 (96/44.1), 4666666 (48/44.1), 6687500 (48/96). W after, samples: 384 (96/48, was 303), 223 (96/44.1, was 279), 192 (48/96). Converter delays after, ns: 96/48 RX 625000, TX 635416; 48/96 RX 635416, TX 625000 (no FIFO prime); 96/44.1 RX 1315192, TX 3077238 (unchanged).
+  - Lateness room at a receiver playing at P, songplayer's device (96 kHz, 48 kHz app, TX only): P less 32 frames and the TX margin = 4.78 ms against the measured 3.71 ms (was 3.43 ms).
+  - Refused now by `Config::device` (and `dlink::split`), with the floor named ("at least 4916666 (a TX packet's own age, dlink::tx_floor_ns)"), at 10 ms, for devices with TX: a 48 kHz device with a 44.1 kHz app at block 128 (block 64 fits: W 2 ms, P 4916666 ns, TX 9.99 ms, RX 8.90 ms); a 44.1 kHz device with a 48 kHz app at block 128 (block 64 fits: P 4988662 ns); block 256 on a 48 kHz or 44.1 kHz device (48/48, 48/44.1, 48/96, 44.1/48, 44.1/44.1); a 96 kHz device with a 44.1 kHz app at block 256. All ran at 10 ms before with P at about 4 ms, under a TX packet's age. A larger budget (12 ms takes block 256 at 48 kHz; 10.25 ms takes 48/48) or a smaller block takes them. 96/48 and 96/96 fit at every block.
+  - At a 20 ms budget: a 48 kHz app on a 96 kHz device P 9.17 -> 11.36 ms (RX only 17.33 -> 18.04 ms), W 8 ms as before; a 96 kHz device with a 44.1 kHz app P 8.92 ms, W 8 ms.
+  - What a consumer re-measures: an app that aligns by the device latency (SongPlayer's ledger, camera-box's A/V) moves to the P above. Pinned test numbers move: a 48 kHz app on a 96 kHz device with both directions P 385 -> 515 samples, W 303 -> 384, pump offset 816 -> 1027; RX only P 772 (8.04 ms), offset 1284.
+  - Problem text: `dlink::split`'s refusal ends with "(the normal profile's floor)" for an RX-only device and "(a TX packet's own age, dlink::tx_floor_ns)" with TX, after "at least <ns>"; a test matching the old text moves.
+  - New: `dlink::tx_floor_ns`, `dlink::TX_LATE_NS`; `dstack_resample::Converter::low_delay`, `Converter::is_half_band`, `dstack_resample::halfband` (`HalfBand`, `Step`, `taps`, `TAPS`, `DELAY_HIGH`, `BETA`, `STOP_DB`, `RIPPLE_DB`). `Converter::set_ppm` refuses a half-band step as it refuses a copy.
+
 ## 0.6.27 (unreleased)
 
 - Fix (obs's review of v0.6.26): on Windows a config's `pump_cpu`, `io_cpu` or `rx_cpu` from 64 on is refused ("pump_cpu: 0 to 63"); Windows pins a thread only within its first processor group. Before, it passed the check and the thread was then never pinned. New: `dstack::device::max_cpu_for(Os)`. Linux keeps 0 to 1023. No latency change.
