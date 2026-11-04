@@ -353,3 +353,143 @@ fn a_drifting_converter_follows_its_correction_and_a_copy_has_none() {
     let least = run(&mut c, &mut out, 10_000);
     assert!((least as i64 - 319_680).abs() <= 1, "{least}");
 }
+
+/// dstack #1: dlink's low-delay converter. 2:1 and 1:2 through the
+/// half-band, with the sinc's bars on the audio band: a 1 kHz tone above
+/// 120 dB THD+N at its level, 20 kHz at its level, the folded band and the
+/// image below −145 dBFS (under a 24-bit LSB).
+#[test]
+fn a_low_delay_2_to_1_step_keeps_the_audio_transparent() {
+    for (from, to) in [(96_000, 48_000), (48_000, 96_000)] {
+        let mut c = Converter::low_delay(from, to, 1, 32, Fixed::Input).unwrap();
+        assert!(c.is_half_band() && !c.is_copy(), "{from} -> {to}");
+        let input = tone(1_000.0, f64::from(from), 32 * 3_000, MINUS_1_DBFS);
+        let out = run_fixed_input(&mut c, &input, 32);
+        let settled = &out[halfband::TAPS * 2..];
+        let db = thd_n_db(settled, 1_000.0, f64::from(to));
+        assert!(db >= 120.0, "{from} -> {to}: THD+N {db:.1} dB");
+        let lvl = level_dbfs(settled, 1_000.0, f64::from(to));
+        assert!(
+            (lvl + 1.0).abs() < 0.0001,
+            "{from} -> {to}: level {lvl:.5} dBFS"
+        );
+        // 20 kHz, the passband's edge, at its level too.
+        let mut c = Converter::low_delay(from, to, 1, 32, Fixed::Input).unwrap();
+        let input = tone(20_000.0, f64::from(from), 32 * 3_000, MINUS_1_DBFS);
+        let out = run_fixed_input(&mut c, &input, 32);
+        let lvl = level_dbfs(&out[halfband::TAPS * 2..], 20_000.0, f64::from(to));
+        assert!(
+            (lvl + 1.0).abs() < 0.0001,
+            "{from} -> {to}: 20 kHz at {lvl:.5} dBFS"
+        );
+    }
+    let mut c = Converter::low_delay(96_000, 48_000, 1, 32, Fixed::Input).unwrap();
+    let input = tone(30_000.0, 96_000.0, 32 * 3_000, MINUS_1_DBFS);
+    let out = run_fixed_input(&mut c, &input, 32);
+    let folded = level_dbfs(&out[halfband::TAPS * 2..], 18_000.0, 48_000.0);
+    assert!(folded < -145.0, "folded at {folded:.1} dBFS");
+    let mut c = Converter::low_delay(48_000, 96_000, 1, 32, Fixed::Input).unwrap();
+    let input = tone(20_000.0, 48_000.0, 32 * 3_000, MINUS_1_DBFS);
+    let out = run_fixed_input(&mut c, &input, 32);
+    let image = level_dbfs(&out[halfband::TAPS * 2..], 28_000.0, 96_000.0);
+    assert!(image < -145.0, "image at {image:.1} dBFS");
+}
+
+#[test]
+fn a_low_delay_step_delays_a_fraction_of_the_sinc() {
+    // 96 -> 48 (a device's RX into a 48 kHz app): 30 frames at 48 kHz
+    // (0.63 ms) against the sinc's 64 (1.33 ms); 48 -> 96 (the app's TX):
+    // 61 at 96 kHz (0.64 ms) against 256 (2.67 ms).
+    let rx = Converter::low_delay(96_000, 48_000, 2, 128, Fixed::Input).unwrap();
+    let tx = Converter::low_delay(48_000, 96_000, 2, 128, Fixed::Output).unwrap();
+    assert_eq!((rx.delay_frames(), tx.delay_frames()), (30, 61));
+    let sinc_rx = Converter::new(96_000, 48_000, 2, 128, Fixed::Input).unwrap();
+    let sinc_tx = Converter::new(48_000, 96_000, 2, 128, Fixed::Output).unwrap();
+    assert_eq!((sinc_rx.delay_frames(), sinc_tx.delay_frames()), (64, 256));
+    // The frames each side of a call: exact, every call.
+    assert_eq!(
+        (
+            rx.input_frames_next(),
+            rx.input_frames_max(),
+            rx.output_frames_max()
+        ),
+        (128, 128, 64)
+    );
+    assert_eq!(
+        (
+            tx.input_frames_next(),
+            tx.input_frames_max(),
+            tx.output_frames_max()
+        ),
+        (64, 64, 128)
+    );
+    let down_out = Converter::low_delay(96_000, 48_000, 1, 64, Fixed::Output).unwrap();
+    assert_eq!(
+        (down_out.input_frames_next(), down_out.output_frames_max()),
+        (128, 64)
+    );
+    let up_in = Converter::low_delay(48_000, 96_000, 1, 64, Fixed::Input).unwrap();
+    assert_eq!(
+        (up_in.input_frames_next(), up_in.output_frames_max()),
+        (64, 128)
+    );
+}
+
+#[test]
+fn a_low_delay_converter_is_the_sinc_for_any_other_pair() {
+    // 44.1 kHz, an odd block and equal rates are not a half-band step.
+    let cd = Converter::low_delay(44_100, 96_000, 1, 128, Fixed::Output).unwrap();
+    assert!(!cd.is_half_band() && !cd.is_copy());
+    assert_eq!(
+        cd.delay_frames(),
+        Converter::new(44_100, 96_000, 1, 128, Fixed::Output)
+            .unwrap()
+            .delay_frames()
+    );
+    let odd = Converter::low_delay(96_000, 48_000, 1, 33, Fixed::Input).unwrap();
+    assert!(!odd.is_half_band() && !odd.is_copy());
+    let same = Converter::low_delay(48_000, 48_000, 1, 32, Fixed::Input).unwrap();
+    assert!(same.is_copy() && !same.is_half_band());
+    for (from, to, ch, block) in [
+        (0, 0, 1, 32),
+        (0, 48_000, 1, 32),
+        (96_000, 48_000, 0, 32),
+        (96_000, 48_000, 1, 0),
+    ] {
+        assert!(
+            matches!(
+                Converter::low_delay(from, to, ch, block, Fixed::Input),
+                Err(ConvertError::Invalid(_))
+            ),
+            "{from} {to} {ch} {block}"
+        );
+    }
+}
+
+#[test]
+fn a_low_delay_step_refuses_a_wrong_call_and_has_no_ratio_to_adjust() {
+    let mut c = Converter::low_delay(48_000, 96_000, 2, 32, Fixed::Output).unwrap();
+    assert!(format!("{c:?}").contains("copy: false"));
+    assert!(c.set_ppm(10.0).is_err());
+    let input = vec![0.25; 2 * 16];
+    let mut out = vec![0.0; 2 * 32];
+    assert_eq!(c.process(&input, 16, &mut out, 32).unwrap(), (16, 32));
+    // Exactly the room is taken; not the frames it takes, too little
+    // room, short buffers: refused.
+    let mut wide = vec![0.0; 2 * 40];
+    assert_eq!(c.process(&input, 16, &mut wide, 40).unwrap(), (16, 32));
+    assert!(c.process(&input, 15, &mut out, 32).is_err());
+    assert!(c.process(&input, 16, &mut out, 31).is_err());
+    assert!(c.process(&input[..31], 16, &mut out, 32).is_err());
+    assert!(c.process(&input, 16, &mut out[..63], 32).is_err());
+    // Channels stay apart, each at its level once the filter is full.
+    let mut split = vec![0.0; 2 * 16];
+    split[16..].fill(0.5);
+    for _ in 0..20 {
+        c.process(&split, 16, &mut out, 32).unwrap();
+    }
+    assert!(out[31].abs() < 1e-12 && (out[63] - 0.5).abs() < 1e-9);
+    c.reset();
+    c.process(&[0.0; 32], 16, &mut out, 32).unwrap();
+    assert!(out.iter().all(|&v| v == 0.0));
+}

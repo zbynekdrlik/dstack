@@ -12,21 +12,29 @@
 //! `block * ratio` frames, which varies by a frame around that for a ratio
 //! that does not divide the block (44.1 kHz from 96 kHz). The app's
 //! output goes into a small FIFO, from which the TX converter takes what
-//! it needs for exactly the device's block. The FIFO starts with
-//! [`PRIME`] frames of silence, so the frame-to-frame variation never runs
-//! it dry; a dry FIFO plays silence and is counted.
+//! it needs for exactly the device's block. For a ratio that does not
+//! divide the block the FIFO starts with [`PRIME`] frames of silence, so
+//! the frame-to-frame variation never runs it dry; a dry FIFO plays
+//! silence and is counted. An exact 2:1 or 1:2 gives TX exactly what it
+//! takes every block, and starts with none.
 //!
-//! The filter is dstack-resample's 256-tap sinc (THD+N above 120 dB),
-//! 128 taps each side at the higher rate. On a 96 kHz network
-//! ([`Rated::delay_ns`], measured by an impulse in the tests):
+//! The converter is [`Converter::low_delay`] (dstack #1, 4.11.2026): an
+//! exact 2:1 or 1:2 with an even block steps through dstack-resample's
+//! 123-tap half-band (flat to 20 kHz, the folded band and the image below
+//! −145 dB, under a 24-bit LSB), any other pair through its 256-tap sinc
+//! (THD+N above 120 dB, 128 taps each side at the higher rate). On a
+//! 96 kHz network ([`Rated::delay_ns`], measured by an impulse in the
+//! tests):
 //!
-//! | App rate | RX (network to app) | TX (app to network, with [`PRIME`]) |
-//! |---|---|---|
-//! | 48 kHz | 1.33 ms | 2.83 ms |
-//! | 44.1 kHz | 1.32 ms | 3.08 ms |
+//! | App rate | Filter | RX (network to app) | TX (app to network, with its prime) |
+//! |---|---|---|---|
+//! | 48 kHz | half-band | 0.63 ms | 0.64 ms |
+//! | 44.1 kHz | sinc | 1.32 ms | 3.08 ms |
 //!
-//! (dstack #90: v0.5.20's 2:1 half-band, 63 taps, delayed about 0.3 ms each
-//! way.)
+//! (v0.6.20 to v0.6.27 ran 48 kHz through the sinc too, 1.33 / 2.83 ms;
+//! v0.5.20's 2:1 half-band, 63 taps, delayed about 0.3 ms each way.
+//! The sinc stays for
+//! SongPlayer's own ASRC through `Converter::new` and `drifting`.)
 //!
 //! `process` allocates nothing: every buffer is sized at the start.
 
@@ -56,13 +64,44 @@ fn drain_into(fifo: &mut VecDeque<f64>, dst: &mut [f64]) -> usize {
 /// the app's rate, TX `tx_frames` at the device's plus the FIFO's [`PRIME`]
 /// at the app's. The one formula [`Rated::delay_ns`] and [`delay_ns`] use,
 /// so `dlink::split` budgets what the converters really delay.
-fn delays_ns(rx_frames: usize, tx_frames: usize, device_rate: u32, app_rate: u32) -> (u64, u64) {
+fn delays_ns(
+    rx_frames: usize,
+    tx_frames: usize,
+    prime: usize,
+    device_rate: u32,
+    app_rate: u32,
+) -> (u64, u64) {
     // Both rates are a converter's, which refuses 0.
     let ns = |frames: usize, rate: u32| frames as u64 * 1_000_000_000 / u64::from(rate);
     (
         ns(rx_frames, app_rate),
-        ns(tx_frames, device_rate) + ns(PRIME, app_rate),
+        ns(tx_frames, device_rate) + ns(prime, app_rate),
     )
+}
+
+/// The silence the TX FIFO starts with for the TX converter `tx`: none for
+/// the half-band's 2:1 or 1:2 (its RX twin from [`converters`], the same
+/// ratio inverted, is a half-band too and gives exactly what TX takes,
+/// every block, and the app's output enters the FIFO before TX takes it),
+/// else [`PRIME`].
+fn prime_for(tx: &Converter) -> usize {
+    if tx.is_half_band() { 0 } else { PRIME }
+}
+
+/// The converters for the device's RX into the app and the app's TX into
+/// the device: [`Converter::low_delay`], whose delay is in the budget
+/// (dstack #1: the half-band for 2:1 and 1:2).
+fn converters(
+    device_rate: u32,
+    app_rate: u32,
+    block: usize,
+    inputs: usize,
+    outputs: usize,
+) -> Result<(Converter, Converter), ConvertError> {
+    Ok((
+        Converter::low_delay(device_rate, app_rate, inputs, block, Fixed::Input)?,
+        Converter::low_delay(app_rate, device_rate, outputs, block, Fixed::Output)?,
+    ))
 }
 
 /// The delay each way, ns, of a [`Rated`] for an app at `app_rate` on a
@@ -73,11 +112,11 @@ pub fn delay_ns(device_rate: u32, app_rate: u32, block: usize) -> Result<(u64, u
     if device_rate == app_rate {
         return Ok((0, 0));
     }
-    let rx = Converter::new(device_rate, app_rate, 1, block, Fixed::Input)?;
-    let tx = Converter::new(app_rate, device_rate, 1, block, Fixed::Output)?;
+    let (rx, tx) = converters(device_rate, app_rate, block, 1, 1)?;
     Ok(delays_ns(
         rx.delay_frames(),
         tx.delay_frames(),
+        prime_for(&tx),
         device_rate,
         app_rate,
     ))
@@ -108,6 +147,8 @@ pub struct Rated<P> {
     last: Option<(u64, u64, usize)>,
     /// The device's rate and the app's, Hz.
     rates: (u32, u32),
+    /// The silence the TX FIFO starts with, app frames ([`prime_for`]).
+    prime: usize,
     /// TX FIFO runs dry, frames (shared with the app's status).
     dry: Arc<AtomicU64>,
 }
@@ -123,15 +164,15 @@ impl<P: Process> Rated<P> {
         inputs: usize,
         outputs: usize,
     ) -> Result<Self, ConvertError> {
-        let rx = Converter::new(device_rate, app_rate, inputs.max(1), block, Fixed::Input)?;
-        let tx = Converter::new(app_rate, device_rate, outputs.max(1), block, Fixed::Output)?;
+        let (rx, tx) = converters(device_rate, app_rate, block, inputs.max(1), outputs.max(1))?;
+        let prime = prime_for(&tx);
         let rx_room = rx.output_frames_max();
         let fifo_room = 4 * (rx_room + tx.input_frames_max() + PRIME);
         let mut fifo: Vec<VecDeque<f64>> = (0..outputs)
             .map(|_| VecDeque::with_capacity(fifo_room))
             .collect();
         for f in &mut fifo {
-            f.extend(std::iter::repeat_n(0.0, PRIME));
+            f.extend(std::iter::repeat_n(0.0, prime));
         }
         Ok(Rated {
             inner,
@@ -149,6 +190,7 @@ impl<P: Process> Rated<P> {
             tx,
             last: None,
             rates: (device_rate, app_rate),
+            prime,
             dry: Arc::new(AtomicU64::new(0)),
         })
     }
@@ -160,6 +202,7 @@ impl<P: Process> Rated<P> {
         delays_ns(
             self.rx.delay_frames(),
             self.tx.delay_frames(),
+            self.prime,
             self.rates.0,
             self.rates.1,
         )
@@ -258,7 +301,7 @@ impl<P: Process> Process for Rated<P> {
         self.tx.reset();
         for f in &mut self.fifo {
             f.clear();
-            f.extend(std::iter::repeat_n(0.0, PRIME));
+            f.extend(std::iter::repeat_n(0.0, self.prime));
         }
         self.last = None;
         self.inner.discontinuity();

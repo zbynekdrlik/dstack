@@ -656,3 +656,26 @@ async fn the_driver_s_tick_warns_once_for_a_second_the_pump_restarted() {
     assert_eq!(lines.len(), 1, "{log}");
     assert!(lines[0].contains("missed=4"), "{log}");
 }
+
+#[tokio::test]
+async fn the_driver_s_tick_tells_a_reset_pin_once() {
+    use crate::media::repin::{PinOutcome, RESET_LINE, note, tests::counter};
+    use crate::test_log::{capture_at, undecided};
+    undecided();
+    let dir = tempfile::tempdir().unwrap();
+    let device = device_at(dir.path());
+    let media = media_with_engine(&device, Arc::new(Unready), &[0]);
+    let records = Records::default();
+    let (mut driver, _answers, _changes) = driver_of(&media);
+    {
+        let _turn = counter();
+        note(PinOutcome::Reset);
+    }
+    let log = capture_at(tracing::Level::INFO, || {
+        driver.tick(&records);
+        driver.tick(&records);
+        driver.tick(&records);
+    });
+    let lines = log.lines().filter(|l| l.contains(RESET_LINE)).count();
+    assert_eq!(lines, 1, "{log}");
+}
