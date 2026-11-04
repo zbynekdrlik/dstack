@@ -596,7 +596,7 @@ fn a_pump_late_within_its_share_of_the_budget_keeps_the_tone_whole() {
     // and margin (offset = B + P + W), from `Config::split`: the TX-only
     // sender's P is the budget less W's 12 ms share, the RX-only receiver's
     // the budget less its block and the half-band's RX delay, with the
-    // whole share as its W.
+    // whole budget as its W (30 ms, v0.6.32: in no path of its own).
     let (tx, rx) = pumps;
     for (pump, config) in [(tx, &tx_split), (rx, &rx_split)] {
         let playout = dstack::clock::latency_samples(config.latency_ns, 96_000);

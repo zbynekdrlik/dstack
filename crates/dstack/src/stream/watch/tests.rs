@@ -150,3 +150,42 @@ fn another_engine_s_counts_are_learnt_not_reported() {
     let log = capture_warnings(|| w.watch(3 * S, "d1", Some(&b)));
     assert!(log.contains("missed=2"), "{log}");
 }
+
+/// dstack #1 (camera-box, 4.11.2026): the warning's `max_process_us` is
+/// that second's longest block, not the longest since the start (which
+/// repeated one old long block in every later line). The since-start max
+/// stays in the pump's view (the status).
+#[test]
+fn the_warning_s_max_process_us_is_that_second_s() {
+    undecided();
+    let s = stats();
+    let mut w = PumpWatch::new();
+    // A long block before the first look is only learnt with the counts.
+    s.record(40_000_000);
+    w.watch(0, "d1", Some(&s));
+    let line = |w: &mut PumpWatch, at: u64| capture_warnings(|| w.watch(at, "d1", Some(&s)));
+    s.record(5_000_000);
+    s.rebootstrapped(1);
+    let log = line(&mut w, S);
+    assert!(log.contains("max_process_us=5000 "), "{log}");
+    s.record(2_000_000);
+    s.rebootstrapped(1);
+    let log = line(&mut w, 2 * S);
+    assert!(log.contains("max_process_us=2000 "), "{log}");
+    // A quiet second's longest block (under the 0.67 ms period: no
+    // overrun) is that second's, not the next one's.
+    s.record(600_000);
+    assert_eq!(line(&mut w, 3 * S), "");
+    s.record(100_000);
+    s.rebootstrapped(1);
+    let log = line(&mut w, 4 * S);
+    assert!(log.contains("max_process_us=100 "), "{log}");
+    // Between looks nothing is taken: the block counts in the next look.
+    s.record(7_000_000);
+    assert_eq!(line(&mut w, 5 * S - 1), "");
+    s.rebootstrapped(1);
+    let log = line(&mut w, 5 * S);
+    assert!(log.contains("max_process_us=7000 "), "{log}");
+    // The status keeps the longest since the start.
+    assert_eq!(s.view().max_process_us, 40_000);
+}
