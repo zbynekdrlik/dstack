@@ -172,13 +172,14 @@ fn the_warning_s_max_process_us_is_that_second_s() {
     s.rebootstrapped(1);
     let log = line(&mut w, 2 * S);
     assert!(log.contains("max_process_us=2000 "), "{log}");
-    // A quiet second's long block is that second's, not the next one's.
-    s.record(9_000_000);
+    // A quiet second's longest block (under the 0.67 ms period: no
+    // overrun) is that second's, not the next one's.
+    s.record(600_000);
     assert_eq!(line(&mut w, 3 * S), "");
-    s.record(1_000_000);
+    s.record(100_000);
     s.rebootstrapped(1);
     let log = line(&mut w, 4 * S);
-    assert!(log.contains("max_process_us=1000 "), "{log}");
+    assert!(log.contains("max_process_us=100 "), "{log}");
     // Between looks nothing is taken: the block counts in the next look.
     s.record(7_000_000);
     assert_eq!(line(&mut w, 5 * S - 1), "");
