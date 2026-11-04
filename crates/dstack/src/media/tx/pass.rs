@@ -36,6 +36,13 @@ impl PassClock {
     pub(super) fn floor(&self, fpp: u16) -> u64 {
         flow_latency_ns(self.latency_ns, fpp, self.rate, self.margin_ns)
     }
+
+    /// The age past which a packet of a flow of `fpp`-frame packets is late
+    /// at its receiver, whose own latency is `receiver_ns` (0: unknown).
+    pub(super) fn late_threshold(&self, fpp: u16, receiver_ns: u64) -> Option<u64> {
+        let _ = receiver_ns;
+        Some(self.floor(fpp))
+    }
 }
 
 /// One packet's send: its outcome (`Ok(true)`: it went direct, past the
@@ -90,6 +97,7 @@ pub(super) fn account(
     fpp: u16,
     sent: &Sent,
     n: usize,
+    receiver_ns: u64,
 ) {
     let left = clock.now();
     let due = ns_of(stamp.saturating_add(fpp.into()), clock.rate).saturating_add(clock.margin_ns);
@@ -97,7 +105,10 @@ pub(super) fn account(
     let age = left.saturating_sub(ns_of(stamp, clock.rate));
     stats.age_max_ns.fetch_max(age, Ordering::Relaxed);
     stats.age_peak_ns.fetch_max(age, Ordering::Relaxed);
-    if over_latency(age, clock.floor(fpp)) {
+    if clock
+        .late_threshold(fpp, receiver_ns)
+        .is_some_and(|t| over_latency(age, t))
+    {
         stats.over_latency.fetch_add(1, Ordering::Relaxed);
     }
     stats.late[late_bin(late)].fetch_add(1, Ordering::Relaxed);

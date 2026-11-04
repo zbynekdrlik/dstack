@@ -1532,6 +1532,8 @@ fn a_packet_older_than_the_latency_since_its_stamp_counts_as_over_latency() {
         Arc::new(TxShared::new(cfg, Ipv4Addr::LOCALHOST, Vec::new().into(), 1, &[]).unwrap());
     let mut rig = Rig::with(shared);
     let (slot, _) = rig.flow(vec![Some(1), Some(2)]);
+    // The receiver states a latency under ours: it plays at ours.
+    rig.shared.set_receiver_latency(slot, v4(&rig.rx), 250_000);
     let start = T;
     rig.tx.step(Some(start), 0);
     // 50 µs past due: well under the first bin's edge, but 333 µs (fpp 32) +
@@ -1565,6 +1567,24 @@ fn a_packet_older_than_the_latency_since_its_stamp_counts_as_over_latency() {
         (age..age + took + 1_000).contains(&lane.age_max_ns),
         "{lane:?}, step took {took} ns"
     );
+}
+
+/// dstack #1: a receiver's stated latency counts for its flow only while
+/// the slot still sends to it; a reused slot starts unknown.
+#[test]
+fn a_receiver_latency_holds_only_for_the_destination_it_was_read_for() {
+    let shared = shared_with(Vec::new());
+    let a = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 2), 4000);
+    let b = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 2), 4001);
+    let c = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 3), 4000);
+    assert_eq!(shared.receiver_latency_ns(0, a), 0, "never read");
+    shared.set_receiver_latency(0, a, 10_000_000);
+    assert_eq!(shared.receiver_latency_ns(0, a), 10_000_000);
+    assert_eq!(shared.receiver_latency_ns(0, b), 0, "another port");
+    assert_eq!(shared.receiver_latency_ns(0, c), 0, "another address");
+    assert_eq!(shared.receiver_latency_ns(1, a), 0, "another slot");
+    shared.set_receiver_latency(MAX_FLOWS, a, 1);
+    assert_eq!(shared.receiver_latency_ns(MAX_FLOWS, a), 0, "no such slot");
 }
 
 #[test]
@@ -1752,6 +1772,8 @@ fn the_late_watch_logs_a_flow_s_late_packets_with_their_peak() {
         Arc::new(TxShared::new(cfg, Ipv4Addr::LOCALHOST, Vec::new().into(), 1, &[]).unwrap());
     let mut rig = Rig::with(shared);
     let (slot, _) = rig.flow(vec![Some(1), Some(2)]);
+    // The receiver states a latency under ours: it plays at ours.
+    rig.shared.set_receiver_latency(slot, v4(&rig.rx), 250_000);
     let mut watch = crate::media::late::LateWatch::new();
     let quiet = warned(|| watch.watch(0, &rig.shared));
     assert_eq!(quiet, "", "the first look learns");
@@ -1769,13 +1791,17 @@ fn the_late_watch_logs_a_flow_s_late_packets_with_their_peak() {
     assert!(log.contains(" WARN "), "{log}");
     assert!(
         log.contains(&format!(
-            "slot={slot} packets={} age_peak_us={}",
+            "slot={slot} packets={} age_peak_us={} receiver_latency_us=250",
             lane.over_latency,
             lane.age_max_ns / 1_000
         )),
         "{log}"
     );
-    assert!(log.contains("receivers count them late"), "{log}");
+    assert_eq!(lane.receiver_latency_ns, 250_000);
+    assert!(
+        log.contains("older than the latency their receiver plays at"),
+        "{log}"
+    );
     // The peak went with the look; the lane's maximum stays.
     assert_eq!(rig.shared.take_age_peak(slot), 0);
     assert_eq!(rig.shared.lane(slot).age_max_ns, lane.age_max_ns);
@@ -1800,6 +1826,8 @@ fn a_device_latency_set_live_moves_the_advertised_latency_and_the_late_count() {
     assert_eq!(shared.advertised_latency_ns(), 2_000_000);
     let mut rig = Rig::with(Arc::clone(&shared));
     let (slot, _) = rig.flow(vec![Some(1), Some(2)]);
+    // The receiver states a latency under ours: it plays at ours.
+    rig.shared.set_receiver_latency(slot, v4(&rig.rx), 250_000);
     // Set after the TX thread's state was made with 2 ms: its next events
     // pass takes it.
     shared.set_device_latency(500_000);

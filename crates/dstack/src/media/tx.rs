@@ -594,10 +594,15 @@ pub struct LaneCounts {
     /// first sample's time (its stamp): what a receiver measures, less the
     /// network (a maximum).
     pub age_max_ns: u64,
-    /// Packets whose age past their stamp was over the advertised latency:
-    /// a receiver at that latency counts each one late (Dante Controller's
-    /// Latency tab), whatever bin it fell in.
+    /// Packets whose age past their stamp was over the latency their
+    /// receiver plays at (its own as it states it, at least our advertised
+    /// latency and the packet's floor): it counts each one late (Dante
+    /// Controller's Latency tab), whatever bin it fell in. Never counted
+    /// while the receiver's latency is unknown (dstack #1).
     pub over_latency: u64,
+    /// The latency the slot's receiver states now (ARC 0x1100), ns; 0:
+    /// unknown.
+    pub receiver_latency_ns: u64,
     /// Packets sent past the qdisc ([`bypass`]); the rest of `packets`
     /// went through the UDP socket.
     pub direct: u64,
@@ -650,6 +655,12 @@ pub struct TxShared {
     /// does not feed.
     engine: Box<[Option<Ring>]>,
     lanes: [LaneStats; MAX_FLOWS],
+    /// Each slot's receiver latency as the receiver states it (ARC 0x1100,
+    /// [`crate::flows::receivers`]): `[dest_word(dest), ns]`, written by
+    /// the reader under the control lock, read by the TX thread for the
+    /// late check (dstack #1). A word for another destination than the
+    /// slot's plan is not this flow's: unknown.
+    receivers: [Cell<2>; MAX_FLOWS],
     /// Each TX channel's largest magnitude sent since the last take (the
     /// heartbeat's peaks).
     peaks: Box<[AtomicU32]>,
@@ -726,6 +737,7 @@ impl TxShared {
             sockets,
             rings,
             lanes: std::array::from_fn(|_| LaneStats::default()),
+            receivers: std::array::from_fn(|_| Cell::new()),
             stop: AtomicBool::new(false),
             base: Instant::now(),
         })
@@ -819,6 +831,42 @@ impl TxShared {
         self.advertised_ns.load(Ordering::Relaxed)
     }
 
+    /// Slot `slot`'s receiver at `dest` states its latency as `ns` (0:
+    /// unknown); the TX thread counts the slot's late packets against it
+    /// from its next pass while the slot still sends to `dest`.
+    pub fn set_receiver_latency(&self, slot: usize, dest: SocketAddrV4, ns: u64) {
+        let _writer = self.lock();
+        if let Some(cell) = self.receivers.get(slot) {
+            cell.write([dest_word(dest), ns]);
+        }
+    }
+
+    /// Slot `slot`'s receiver latency, ns, when the receiver at `dest`
+    /// stated it; 0: unknown (never read, or read for another
+    /// destination). No lock: the TX thread's.
+    pub fn receiver_latency_ns(&self, slot: usize, dest: SocketAddrV4) -> u64 {
+        match self.receivers.get(slot).and_then(|c| c.read()) {
+            Some((_, [word, ns])) if word == dest_word(dest) => ns,
+            _ => 0,
+        }
+    }
+
+    /// Slot `slot`'s receiver as its published plan has it.
+    fn plan_dest(&self, slot: usize) -> Option<SocketAddrV4> {
+        Plan::from_words(self.plans.get(slot)?.read()?.1).dest
+    }
+
+    /// The flows sending now (not expired): each one's slot, receiver and
+    /// receiving device's name, for the receiver latency reader.
+    pub fn receiver_flows(&self) -> Vec<(usize, SocketAddrV4, String)> {
+        self.lock()
+            .table
+            .flows()
+            .filter(|(_, f)| !f.expired)
+            .map(|(slot, f)| (slot, f.dest, f.rx_host.clone()))
+            .collect()
+    }
+
     /// Sets TX channel `tx`'s source (from 0); `false` when there is no
     /// such channel, or for [`Source::Engine`] on a channel without an
     /// engine ring. Runtime only: every channel is silent at start.
@@ -880,6 +928,7 @@ impl TxShared {
             send_max_ns: l.send_max_ns.load(Ordering::Relaxed),
             age_max_ns: l.age_max_ns.load(Ordering::Relaxed),
             over_latency: l.over_latency.load(Ordering::Relaxed),
+            receiver_latency_ns: self.plan_dest(slot).map_or(0, |dest| self.receiver_latency_ns(slot, dest)),
             direct: l.direct.load(Ordering::Relaxed),
         }
     }
@@ -989,6 +1038,14 @@ impl Schedule {
     pub fn wake_ns(&self, rate: u32, margin_ns: u64) -> u64 {
         ns_of(self.next.saturating_add(self.fpp), rate).saturating_add(margin_ns)
     }
+}
+
+/// `dest` as one word for [`TxShared::receiver_latency_ns`]: its address,
+/// port and a 1, never 0 (an unwritten cell).
+fn dest_word(dest: SocketAddrV4) -> u64 {
+    let [a, b, c, d] = dest.ip().octets();
+    let [p, q] = dest.port().to_be_bytes();
+    u64::from_be_bytes([a, b, c, d, p, q, 0, 1])
 }
 
 /// The first multiple of `fpp` after `now`.
@@ -1225,6 +1282,7 @@ impl Transmitter {
             };
             let plan = lane.plan;
             let stats = &shared.lanes[slot];
+            let receiver_ns = shared.receiver_latency_ns(slot, dest);
             let socket = &shared.sockets[slot];
             let direct = shared.direct_mac(slot);
             // The host sender, when the slot's receiver is resolved.
@@ -1283,7 +1341,7 @@ impl Transmitter {
                 let sent = send_timed(&clock, stamp, plan.fpp, || {
                     send_one(direct, socket, &mut packet[..], src, dest, ip_id, n)
                 });
-                account(stats, &clock, stamp, plan.fpp, &sent, n);
+                account(stats, &clock, stamp, plan.fpp, &sent, n, receiver_ns);
             }
             stats.holes.fetch_add(holes as u64, Ordering::Relaxed);
             stats
