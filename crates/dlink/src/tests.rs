@@ -22,7 +22,8 @@ fn the_block_is_128_unless_the_app_sets_another_of_the_stack_s_blocks() {
             config().block(bad).device().unwrap_err(),
             ["block: 16, 32, 64, 128 or 256 frames"]
         );
-        assert_eq!(work_margin(48_000, bad), 128);
+        assert_eq!(least_work_margin(48_000, bad), 128);
+        assert_eq!(work_margin(BUDGET_NS, 48_000, bad), 192);
         assert_eq!(
             split(BUDGET_NS, 48_000, 48_000, bad, Directions::Both),
             split(BUDGET_NS, 48_000, 48_000, BLOCK, Directions::Both)
@@ -39,19 +40,19 @@ fn the_block_is_128_unless_the_app_sets_another_of_the_stack_s_blocks() {
     );
 }
 
-/// dstack #68 (the design on #68; was half the latency, #90): W is the
-/// pump's block and at least 2 ms, the normal profile's least, so it no
-/// longer grows with the latency (5 ms of a 10 ms latency once).
+/// dstack #68, #1 (was half the latency, #90; the block and 2 ms in
+/// v0.6.22): W's least is the pump's block and at least 2 ms, the normal
+/// profile's least; W itself is 2/5 of the budget above that.
 #[test]
 fn the_pump_margin_is_the_block_and_at_least_2_ms() {
     // 2 ms at 48 kHz is 96 samples, under block 128.
-    assert_eq!(work_margin(48_000, 128), 128);
-    assert_eq!(work_margin(48_000, 64), 96);
-    assert_eq!(work_margin(96_000, 128), 192);
-    assert_eq!(work_margin(96_000, 256), 256);
-    assert_eq!(work_margin(44_100, 16), 88);
+    assert_eq!(least_work_margin(48_000, 128), 128);
+    assert_eq!(least_work_margin(48_000, 64), 96);
+    assert_eq!(least_work_margin(96_000, 128), 192);
+    assert_eq!(least_work_margin(96_000, 256), 256);
+    assert_eq!(least_work_margin(44_100, 16), 88);
     let small = config().block(32).device().unwrap();
-    assert_eq!((small.block, small.work_margin), (32, 96));
+    assert_eq!((small.block, small.work_margin), (32, 192));
     for b in dstack::stream::BLOCKS {
         for (budget, rate) in [
             (10_000_000, 44_100),
@@ -65,22 +66,26 @@ fn the_pump_margin_is_the_block_and_at_least_2_ms() {
                 .device()
                 .unwrap();
             assert!(cfg.work_margin >= cfg.block, "{b} {budget} {rate}");
-            assert_eq!(cfg.work_margin, work_margin(rate, b), "{b} {budget} {rate}");
+            assert_eq!(
+                cfg.work_margin,
+                work_margin(budget, rate, b),
+                "{b} {budget} {rate}"
+            );
         }
     }
 }
 
-/// dstack #68: the defaults' 10 ms is the whole path. At 48 kHz block 128
-/// (2.67 ms) and W 128 (2.67 ms) leave a Dante latency of 352 samples
-/// (7.33 ms; was 10 ms with W 5 ms on top).
+/// dstack #68, #1: the defaults' 10 ms is the whole path. At 48 kHz W
+/// 192 (4 ms, 2/5 of the budget) leaves a Dante latency of 288 samples
+/// (6 ms; 7.33 ms with W 128 in v0.6.22, 10 ms with W 5 ms on top before).
 #[test]
-fn the_defaults_are_a_10_ms_budget_normal_timing_and_the_block_as_pump_margin() {
+fn the_defaults_are_a_10_ms_budget_normal_timing_and_a_share_as_pump_margin() {
     let cfg = config().device().unwrap();
-    assert_eq!(cfg.latency_ns, 7_333_333);
-    assert_eq!(dstack::clock::latency_samples(cfg.latency_ns, 48_000), 352);
+    assert_eq!(cfg.latency_ns, 6_000_000);
+    assert_eq!(dstack::clock::latency_samples(cfg.latency_ns, 48_000), 288);
     assert_eq!(cfg.timing, TimingProfile::Normal);
     assert_eq!(cfg.sample_rate, 48_000);
-    assert_eq!(cfg.work_margin, 128);
+    assert_eq!(cfg.work_margin, 192);
     assert_eq!(BUDGET_NS, 10_000_000);
     assert_eq!(cfg.encoding, 24);
     assert_eq!(cfg.name, "app-link");
@@ -93,8 +98,9 @@ fn the_defaults_are_a_10_ms_budget_normal_timing_and_the_block_as_pump_margin() 
     assert_eq!(cfg.io_cpu, None);
 }
 
-/// dstack #68: a 20 ms budget at 96 kHz less W 192 (2 ms, over block 128)
-/// is an 18 ms Dante latency (was the latency itself, W half of it).
+/// dstack #68, #1: a 20 ms budget at 96 kHz less W 768 (8 ms, 2/5 of it:
+/// W grows with the budget) is a 12 ms Dante latency (18 ms with W 2 ms in
+/// v0.6.22; the latency itself, W half of it, before).
 #[test]
 fn the_app_s_rate_budget_and_product_are_taken_and_the_split_follows() {
     let cfg = config()
@@ -104,8 +110,8 @@ fn the_app_s_rate_budget_and_product_are_taken_and_the_split_follows() {
         .device()
         .unwrap();
     assert_eq!(cfg.sample_rate, 96_000);
-    assert_eq!(cfg.latency_ns, 18_000_000);
-    assert_eq!(cfg.work_margin, 192);
+    assert_eq!(cfg.latency_ns, 12_000_000);
+    assert_eq!(cfg.work_margin, 768);
     assert_eq!(
         (cfg.manufacturer.as_str(), cfg.model.as_str()),
         ("SongPlayer", "sp")
@@ -231,10 +237,11 @@ fn a_network_rate_runs_the_device_at_it_and_the_app_at_its_own() {
     assert_eq!((c.device_rate(), c.converts()), (96_000, true));
     let cfg = c.device().unwrap();
     assert_eq!(cfg.sample_rate, 96_000);
-    // The pump's margin is 2 ms at the device's rate (over block 128), the
-    // Dante latency what the work and the converter leave (dstack #68).
-    assert_eq!(cfg.work_margin, 192);
-    assert_eq!(cfg.latency_ns, 5_166_666);
+    // The pump's margin is what keeps the Dante latency at its 4 ms floor
+    // (and a sample) after the converter's TX delay, under its 4 ms share
+    // (dstack #68, #1): 303 samples (3.16 ms), P 385 samples.
+    assert_eq!(cfg.work_margin, 303);
+    assert_eq!(cfg.latency_ns, 4_010_416);
     // 44.1 kHz on a 96 kHz network converts too (any ratio).
     let cd = config().sample_rate(44_100).network_rate(96_000);
     assert_eq!((cd.device_rate(), cd.converts()), (96_000, true));
@@ -291,13 +298,14 @@ fn the_budget_splits_into_the_dante_latency_and_the_work() {
     let ms = |ns: u64| ns / 10_000;
     // (device, app, block) -> (P, W, TX path, RX path), in 10 us steps.
     for ((dev, app, block), want) in [
-        ((48_000, 48_000, 128), (733, 128, 999, 999)),
-        ((96_000, 96_000, 128), (800, 192, 1_000, 933)),
-        ((96_000, 48_000, 128), (516, 192, 999, 783)),
-        ((96_000, 44_100, 128), (491, 192, 999, 756)),
-        ((48_000, 44_100, 128), (425, 128, 999, 956)),
-        ((96_000, 48_000, 256), (450, 256, 999, 849)),
+        ((48_000, 48_000, 128), (600, 192, 1_000, 866)),
+        ((96_000, 96_000, 128), (600, 384, 1_000, 733)),
+        ((96_000, 48_000, 128), (401, 303, 999, 667)),
+        ((96_000, 44_100, 128), (401, 279, 999, 665)),
+        ((48_000, 44_100, 128), (402, 139, 999, 934)),
+        ((96_000, 48_000, 256), (401, 303, 999, 801)),
         ((48_000, 48_000, 256), (466, 256, 999, 999)),
+        ((48_000, 96_000, 128), (458, 192, 999, 991)),
     ] {
         let s = split(BUDGET_NS, dev, app, block, Directions::Both).unwrap();
         assert_eq!(
@@ -353,17 +361,19 @@ fn the_config_carries_the_app_s_frame_sender() {
 fn each_path_is_its_work_plus_the_dante_latency() {
     let ns = |samples: u64, rate: u64| samples * 1_000_000_000 / rate;
     let s = split(BUDGET_NS, 96_000, 96_000, 128, Directions::Both).unwrap();
-    assert_eq!(s.tx_path_ns, ns(192, 96_000) + s.latency_ns);
+    assert_eq!(s.tx_path_ns, ns(384, 96_000) + s.latency_ns);
     assert_eq!(s.rx_path_ns, ns(128, 96_000) + s.latency_ns);
     let (rx, tx) = rated::delay_ns(96_000, 48_000, 128).unwrap();
     let c = split(BUDGET_NS, 96_000, 48_000, 128, Directions::Both).unwrap();
-    assert_eq!(c.tx_path_ns, ns(192, 96_000) + tx + c.latency_ns);
+    assert_eq!(c.tx_path_ns, ns(303, 96_000) + tx + c.latency_ns);
     assert_eq!(c.rx_path_ns, ns(128, 96_000) + rx + c.latency_ns);
-    // A 96 kHz app on a 48 kHz device: the RX side is the larger work, and
-    // it sets the Dante latency.
-    let up = split(BUDGET_NS, 48_000, 96_000, 128, Directions::Both).unwrap();
+    // A 96 kHz app on a 48 kHz device at 9.5 ms: W's share (182 samples,
+    // 3.79 ms) and the converter's TX delay are less than the block and
+    // its RX delay, so the RX side sets the Dante latency.
+    let up = split(9_500_000, 48_000, 96_000, 128, Directions::Both).unwrap();
+    assert_eq!(up.margin, 182);
     assert!(up.rx_path_ns > up.tx_path_ns, "{up:?}");
-    assert_eq!(BUDGET_NS - up.rx_path_ns, 2);
+    assert!(9_500_000 - up.rx_path_ns <= 1_000_000_000 / 48_000 + 1);
 }
 
 /// dstack #68: the Dante latency's floor is the normal profile's 4 ms: a
@@ -457,22 +467,25 @@ fn the_dante_latency_follows_the_directions_the_device_has() {
     let cfg = rx_only.device().unwrap();
     assert_eq!(cfg.latency_ns, s.latency_ns);
     // TX-only where RX is the larger work (a 96 kHz app on a 48 kHz
-    // device): the TX path takes the whole budget.
+    // device, at 9.5 ms: W's share is under the block and the converter's
+    // RX delay there): the TX path takes the whole budget. (The RX side
+    // stopped being the larger at 10 ms once W took its share of the
+    // budget, the second change on #1.)
+    let budget = 9_500_000;
     let tx_only = Config::new("tx-only", "/tmp/never-written.toml")
         .tx(["Out 1"])
         .sample_rate(96_000)
-        .network_rate(48_000);
+        .network_rate(48_000)
+        .budget_ns(budget);
     let t = tx_only.split().unwrap();
-    assert!(t.tx_path_ns <= BUDGET_NS, "{t:?}");
-    assert!(
-        BUDGET_NS - t.tx_path_ns <= 1_000_000_000 / 48_000 + 1,
-        "{t:?}"
-    );
-    assert!(t.rx_path_ns > BUDGET_NS, "{t:?}");
+    assert!(t.tx_path_ns <= budget, "{t:?}");
+    assert!(budget - t.tx_path_ns <= 1_000_000_000 / 48_000 + 1, "{t:?}");
+    assert!(t.rx_path_ns > budget, "{t:?}");
     assert_eq!(tx_only.device().unwrap().latency_ns, t.latency_ns);
-    // Both directions: the larger work, as before (5.17 ms here).
+    // Both directions: the larger work (4.01 ms here: P's floor and a
+    // sample, W gave way to keep it).
     let both = base(config()).split().unwrap();
-    assert_eq!(ms(both.latency_ns), 516);
+    assert_eq!(ms(both.latency_ns), 401);
     assert!(both.tx_path_ns <= BUDGET_NS && both.rx_path_ns <= BUDGET_NS);
 }
 
@@ -485,15 +498,15 @@ fn a_one_direction_device_splits_by_that_direction_s_work() {
     let ms = |ns: u64| ns / 10_000;
     // (device, app, directions) -> (P, TX path, RX path), in 10 us steps.
     for ((dev, app, dir), want) in [
-        ((96_000, 96_000, Rx), (866, 1_066, 999)),
-        ((96_000, 96_000, Tx), (800, 1_000, 933)),
-        ((96_000, 48_000, Rx), (733, 1_216, 999)),
-        ((96_000, 48_000, Tx), (516, 999, 783)),
-        ((96_000, 44_100, Rx), (734, 1_242, 999)),
-        ((48_000, 44_100, Rx), (466, 1_041, 998)),
-        ((48_000, 96_000, Tx), (591, 999, 1_124)),
-        ((48_000, 96_000, Rx), (466, 874, 999)),
-        ((48_000, 48_000, Rx), (733, 999, 999)),
+        ((96_000, 96_000, Rx), (866, 1_266, 999)),
+        ((96_000, 96_000, Tx), (600, 1_000, 733)),
+        ((96_000, 48_000, Rx), (733, 1_416, 999)),
+        ((96_000, 48_000, Tx), (401, 999, 667)),
+        ((96_000, 44_100, Rx), (734, 1_442, 999)),
+        ((48_000, 44_100, Rx), (466, 1_174, 998)),
+        ((48_000, 96_000, Tx), (458, 999, 991)),
+        ((48_000, 96_000, Rx), (466, 1_008, 999)),
+        ((48_000, 48_000, Rx), (733, 1_133, 999)),
     ] {
         let s = split(BUDGET_NS, dev, app, 128, dir).unwrap();
         assert_eq!(
@@ -549,4 +562,44 @@ fn the_config_s_directions_are_its_channels() {
     );
     let cfg = c.device().unwrap();
     assert_eq!((cfg.latency_ns, cfg.work_margin), (s.latency_ns, s.margin));
+}
+
+/// dstack #1 (intercom's report against v0.6.22: W at 2 ms restarted the
+/// pump on a loaded PC, and a 20 ms budget kept it at 2 ms): W is 2/5 of
+/// the budget, at least the block and 2 ms, at most the stack's largest
+/// margin. A device with TX gives W up to keep P's 4 ms floor; an RX-only
+/// device keeps the whole share (W is not in its path).
+#[test]
+fn the_pump_margin_is_two_fifths_of_the_budget() {
+    use Directions::{Both, Rx, Tx};
+    assert_eq!(work_margin(10_000_000, 48_000, 128), 192);
+    assert_eq!(work_margin(10_000_000, 96_000, 128), 384);
+    assert_eq!(work_margin(20_000_000, 96_000, 128), 768);
+    assert_eq!(work_margin(20_000_000, 48_000, 128), 384);
+    // The block, and 2 ms, are its least.
+    assert_eq!(work_margin(10_000_000, 48_000, 256), 256);
+    assert_eq!(work_margin(5_000_000, 48_000, 64), 96);
+    // The stack's largest margin is its most.
+    assert_eq!(work_margin(100_000_000, 96_000, 128), 3_840);
+    assert_eq!(work_margin(200_000_000, 96_000, 128), MAX_WORK_MARGIN);
+    // With a converter the TX side gives W up for P's floor (P 4.01 ms:
+    // 385 whole samples); RX only keeps the share.
+    for dir in [Both, Tx] {
+        let s = split(BUDGET_NS, 96_000, 48_000, 128, dir).unwrap();
+        assert_eq!((s.margin, s.latency_ns), (303, 4_010_416), "{dir:?}");
+    }
+    let rx = split(BUDGET_NS, 96_000, 48_000, 128, Rx).unwrap();
+    assert_eq!((rx.margin, rx.latency_ns), (384, 7_333_333));
+    // A 20 ms budget: W grows to its 8 ms share, the converter's TX side
+    // too.
+    let wide = split(20_000_000, 96_000, 48_000, 128, Both).unwrap();
+    assert_eq!(wide.margin, 768);
+    // Under the floor even at W's least: W stays at its least (the block).
+    let tight = split(6_666_666, 48_000, 48_000, 128, Both).unwrap();
+    assert_eq!((tight.margin, tight.latency_ns), (128, 4_000_000));
+    // A 44.1 kHz network with a 48 kHz app: P's floor is not whole samples
+    // there, and the room's last sample keeps P at it or above.
+    let odd = split(BUDGET_NS, 44_100, 48_000, 128, Both).unwrap();
+    assert!(odd.latency_ns >= MIN_LATENCY_NS, "{odd:?}");
+    assert!(odd.margin < work_margin(BUDGET_NS, 44_100, 128), "{odd:?}");
 }
