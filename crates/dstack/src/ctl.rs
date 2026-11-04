@@ -687,13 +687,26 @@ fn clock_part(j: &mut Json, media: &Media) {
     j.num("freq_ppb", media.freq.load(Ordering::Relaxed));
     j.word(
         "source",
-        if media.clock_stats.is_system() {
-            "system"
-        } else {
-            "dsync"
-        },
+        clock_source_word(media.clock_stats.is_system(), media.clock_stats.linked()),
     );
     j.close('}');
+}
+
+/// The clock source's word in the status: `system` (tests), `dsync` (the
+/// service only), else what a linked clock uses now: `internal` (dsync's
+/// follower in process), `service`, or `none` (nothing ready yet).
+pub fn clock_source_word(
+    system: bool,
+    linked: Option<crate::clock::linked::Source>,
+) -> &'static str {
+    use crate::clock::linked::Source;
+    match (system, linked) {
+        (true, _) => "system",
+        (false, None) => "dsync",
+        (false, Some(Source::Internal)) => "internal",
+        (false, Some(Source::Service)) => "service",
+        (false, Some(Source::None)) => "none",
+    }
 }
 
 fn requests_part(j: &mut Json, media: &Media) {

@@ -736,11 +736,12 @@ fn device_thread(
 }
 
 /// The linked clock's selector: once a second, for the device's life.
-async fn select_source(linked: Arc<Linked>) {
+async fn select_source(linked: Arc<Linked>, stats: Arc<crate::clock::ClockStats>) {
     let mut every = tokio::time::interval(Duration::from_secs(1));
     loop {
         every.tick().await;
         linked.tick();
+        stats.set_linked(linked.source());
     }
 }
 
@@ -759,7 +760,7 @@ async fn serve_device(
         ));
     }
     if let Some(linked) = s.linked {
-        tokio::spawn(select_source(linked));
+        tokio::spawn(select_source(linked, Arc::clone(&s.media.clock_stats)));
     }
     if let Some(listener) = s.local {
         let media = Arc::clone(&s.media);

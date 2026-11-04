@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.29 (unreleased)
+
+- Fix (iemmixer, 4.11): `ctl status` `clock.source` names what a linked clock uses now: `internal` (dsync's follower in process), `service` (the dsync service), or `none` (nothing ready yet). Before, it said `dsync` whichever was in use. A clock that isn't linked still says `dsync`, and the test clock `system`. The host's once-a-second source selection stores it (`ClockStats::set_linked` / `linked`). New: `ctl::clock_source_word`. A reader matching `"source":"dsync"` on a linked device moves to the new words. No latency change.
+
 ## 0.6.28 (unreleased)
 
 - **Latency change** for every dlink app (dstack #1; songplayer's report against v0.6.25, and the owner's ROZHODNUTÉ of 4.11.2026). songplayer's TX-only 48 kHz device on a 96 kHz network ran P 4.01 ms, its TX thread left packets up to 3.71 ms past due, and a receiver at that latency counted 137 late in 1 h 50 min. Three changes:

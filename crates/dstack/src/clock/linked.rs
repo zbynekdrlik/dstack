@@ -37,7 +37,7 @@ pub enum Source {
 }
 
 impl Source {
-    fn from_u8(v: u8) -> Source {
+    pub(crate) fn from_u8(v: u8) -> Source {
         match v {
             1 => Source::Internal,
             2 => Source::Service,
