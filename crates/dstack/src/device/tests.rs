@@ -443,20 +443,18 @@ fn the_threads_cpus_are_read_and_bounded() {
     let cfg = DeviceConfig::from_toml(&text).unwrap();
     assert_eq!((cfg.pump_cpu, cfg.io_cpu), (Some(3), Some(2)));
     assert_eq!(cfg.rx_thread_cpu(), Some(2), "RX on io_cpu without rx_cpu");
-    for (line, field) in [
-        ("pump_cpu = 1024", "pump_cpu"),
-        ("io_cpu = 1024", "io_cpu"),
-        ("rx_cpu = 1024", "rx_cpu"),
-    ] {
+    // The bound is the OS's own (v0.6.27): 64 on Windows, MAX_CPU elsewhere.
+    let limit = max_cpu_for(crate::clock::Os::current());
+    for field in ["pump_cpu", "io_cpu", "rx_cpu"] {
         let found = problems(&config_with(
             "latency_ns =",
-            &format!("latency_ns = 1000000\n{line}"),
+            &format!("latency_ns = 1000000\n{field} = {limit}"),
         ));
-        assert_eq!(found, vec![format!("{field}: 0 to 1023")]);
+        assert_eq!(found, vec![format!("{field}: 0 to {}", limit - 1)]);
     }
     DeviceConfig::from_toml(&config_with(
         "latency_ns =",
-        "latency_ns = 1000000\nio_cpu = 1023",
+        &format!("latency_ns = 1000000\nio_cpu = {}", limit - 1),
     ))
     .unwrap();
 }
