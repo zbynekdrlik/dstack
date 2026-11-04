@@ -42,7 +42,7 @@ use std::future::Future;
 use std::io;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU16};
+use std::sync::atomic::AtomicU16;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use tokio::net::UdpSocket;
@@ -617,14 +617,13 @@ fn receiver_reader(
     let requests = Arc::clone(&media.requests);
     let reply = network.arc.timing().reply;
     let seq = AtomicU16::new(1);
-    let stop = AtomicBool::new(false);
     flows::receivers::spawn(
         Arc::clone(&media.tx),
         network.arc.records(),
         flows::receivers::IDLE,
-        move |at| {
+        move |at, stop| {
             let mut ex =
-                Udp::open(ip, at, &seq, reply, &requests, &stop).map_err(|e| ReadError::Io {
+                Udp::open(ip, at, &seq, reply, &requests, stop).map_err(|e| ReadError::Io {
                     op: arc::op::ZEROS_1100,
                     kind: e.kind(),
                 })?;

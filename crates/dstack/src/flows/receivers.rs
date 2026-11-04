@@ -11,8 +11,10 @@
 //! ([`crate::arc::control::settings`], ARC 0x1100, start 0x2809) of the device that
 //! asked for the flow, at the ARC its `_netaudio-arc` record announces
 //! ([`ArcRecords`], the device's own browse; several devices on one PC each
-//! have their own port), only when that record's address is the flow's
-//! destination. Read-only: nothing is written to the receiver.
+//! have their own port), only when that record announces the flow's
+//! destination address among its addresses. Read-only: nothing is
+//! written to the receiver. A device several flows go to is read once a
+//! look.
 //!
 //! - [`Reads`] (pure, times in ns): which flow is due. A flow is read when
 //!   it starts and again every [`REREAD_NS`] (Dante Controller may change a
@@ -38,7 +40,7 @@ use tracing::{debug, info};
 use crate::arc::client::ReadError;
 use crate::arc::control::Settings;
 use crate::media::tx::{MAX_FLOWS, TxShared};
-use crate::subscribe::directory::ArcRecords;
+use crate::subscribe::directory::{ArcMiss, ArcRecords};
 use crate::subscribe::retry_after;
 
 /// How often a flow's receiver latency is read again, ns.
@@ -158,7 +160,7 @@ pub fn latency_of(s: &Settings) -> u64 {
 pub enum Unread {
     #[error("no ARC record of the receiving device")]
     NoRecord,
-    #[error("the device's ARC record is at another address than the flow")]
+    #[error("the device's ARC record announces other addresses than the flow's")]
     OtherAddress,
     #[error("the device states no latency")]
     NoLatency,
@@ -166,18 +168,33 @@ pub enum Unread {
     Read(#[from] ReadError),
 }
 
-/// `job`'s receiver latency, ns: the settings `read` gives from the ARC at
-/// `arc` (the device's record), when that is at the flow's address.
+impl From<ArcMiss> for Unread {
+    fn from(miss: ArcMiss) -> Self {
+        match miss {
+            ArcMiss::NoRecord => Unread::NoRecord,
+            ArcMiss::OtherAddress => Unread::OtherAddress,
+        }
+    }
+}
+
+impl Unread {
+    /// What the read's end means for the next one: a record not in yet is
+    /// looked up again at the next look; anything else is a failure.
+    pub fn outcome(&self) -> Outcome {
+        match self {
+            Unread::NoRecord => Outcome::NotYet,
+            _ => Outcome::Failed,
+        }
+    }
+}
+
+/// A receiver's latency, ns: the settings `read` gives from its ARC `arc`
+/// at the flow's address ([`ArcRecords::arc_at`]).
 pub fn read_latency(
-    job: &Job,
-    arc: Option<SocketAddrV4>,
+    arc: Result<SocketAddrV4, ArcMiss>,
     read: impl FnOnce(SocketAddrV4) -> Result<Settings, ReadError>,
 ) -> Result<u64, Unread> {
-    let arc = arc.ok_or(Unread::NoRecord)?;
-    if arc.ip() != job.dest.ip() {
-        return Err(Unread::OtherAddress);
-    }
-    match latency_of(&read(arc)?) {
+    match latency_of(&read(arc?)?) {
         0 => Err(Unread::NoLatency),
         ns => Ok(ns),
     }
@@ -185,17 +202,32 @@ pub fn read_latency(
 
 /// One look at `now`: follows `tx`'s flows, then makes every read due
 /// (each receiver's ARC from `records`, its settings from `read`) and hands
-/// each latency read to `tx`.
+/// each latency read to `tx`. A device several flows go to is read once a
+/// look, its result taken for each of them. Ends early once `stop` is set.
 pub fn look(
     reads: &mut Reads,
     tx: &TxShared,
     records: &ArcRecords,
     now: u64,
+    stop: &AtomicBool,
     mut read: impl FnMut(SocketAddrV4) -> Result<Settings, ReadError>,
 ) {
     reads.follow(&tx.receiver_flows(), now);
+    let mut read_now: Vec<(String, std::net::Ipv4Addr, Result<u64, Unread>)> = Vec::new();
     while let Some(job) = reads.next(now) {
-        let result = read_latency(&job, records.arc_of(&job.device), &mut read);
+        if stop.load(Ordering::Relaxed) {
+            return;
+        }
+        let device = job.device.to_ascii_lowercase();
+        let ip = *job.dest.ip();
+        let result = match read_now.iter().find(|(d, i, _)| *d == device && *i == ip) {
+            Some((_, _, r)) => r.clone(),
+            None => {
+                let r = read_latency(records.arc_at(&job.device, ip), &mut read);
+                read_now.push((device, ip, r.clone()));
+                r
+            }
+        };
         match &result {
             Ok(ns) => {
                 if tx.receiver_latency_ns(job.slot, job.dest) != *ns {
@@ -209,17 +241,16 @@ pub fn look(
             }
             Err(e) => debug!(slot = job.slot, error = %e, "a TX flow's receiver latency not read"),
         }
-        let outcome = match result {
-            Ok(_) => Outcome::Read,
-            Err(Unread::NoRecord) => Outcome::NotYet,
-            Err(_) => Outcome::Failed,
-        };
+        let outcome = result
+            .as_ref()
+            .map_or_else(Unread::outcome, |_| Outcome::Read);
         reads.finished(&job, outcome, now);
     }
 }
 
-/// The reader thread ([`spawn`]): it ends when this is dropped (after the
-/// read it waits on, at most [`IDLE`] later otherwise).
+/// The reader thread ([`spawn`]): it ends when this is dropped, after the
+/// look under way (a read under way ends at once: `read` is handed the
+/// stop).
 #[derive(Debug)]
 pub struct Reader {
     stop: Arc<AtomicBool>,
@@ -232,13 +263,15 @@ impl Drop for Reader {
     }
 }
 
-/// Starts the reader: a [`look`] every `idle` with `read` (the daemon's
-/// reads [`crate::arc::control::settings`] over UDP from our address).
+/// Starts the reader: a [`look`] every `idle` with `read`, which is handed
+/// the reader's stop (the daemon's reads
+/// [`crate::arc::control::settings`] over UDP from our address, and its
+/// exchange sends nothing once the stop is set).
 pub fn spawn(
     tx: Arc<TxShared>,
     records: ArcRecords,
     idle: Duration,
-    mut read: impl FnMut(SocketAddrV4) -> Result<Settings, ReadError> + Send + 'static,
+    mut read: impl FnMut(SocketAddrV4, &AtomicBool) -> Result<Settings, ReadError> + Send + 'static,
 ) -> io::Result<Reader> {
     let stop = Arc::new(AtomicBool::new(false));
     let ends = Arc::clone(&stop);
@@ -249,7 +282,7 @@ pub fn spawn(
             let mut reads = Reads::new();
             while !ends.load(Ordering::Relaxed) {
                 let now = u64::try_from(origin.elapsed().as_nanos()).unwrap_or(u64::MAX);
-                look(&mut reads, &tx, &records, now, &mut read);
+                look(&mut reads, &tx, &records, now, &ends, |at| read(at, &ends));
                 std::thread::sleep(idle);
             }
         })?;

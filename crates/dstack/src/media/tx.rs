@@ -831,42 +831,6 @@ impl TxShared {
         self.advertised_ns.load(Ordering::Relaxed)
     }
 
-    /// Slot `slot`'s receiver at `dest` states its latency as `ns` (0:
-    /// unknown); the TX thread counts the slot's late packets against it
-    /// from its next pass while the slot still sends to `dest`.
-    pub fn set_receiver_latency(&self, slot: usize, dest: SocketAddrV4, ns: u64) {
-        let _writer = self.lock();
-        if let Some(cell) = self.receivers.get(slot) {
-            cell.write([dest_word(dest), ns]);
-        }
-    }
-
-    /// Slot `slot`'s receiver latency, ns, when the receiver at `dest`
-    /// stated it; 0: unknown (never read, or read for another
-    /// destination). No lock: the TX thread's.
-    pub fn receiver_latency_ns(&self, slot: usize, dest: SocketAddrV4) -> u64 {
-        match self.receivers.get(slot).and_then(|c| c.read()) {
-            Some((_, [word, ns])) if word == dest_word(dest) => ns,
-            _ => 0,
-        }
-    }
-
-    /// Slot `slot`'s receiver as its published plan has it.
-    fn plan_dest(&self, slot: usize) -> Option<SocketAddrV4> {
-        Plan::from_words(self.plans.get(slot)?.read()?.1).dest
-    }
-
-    /// The flows sending now (not expired): each one's slot, receiver and
-    /// receiving device's name, for the receiver latency reader.
-    pub fn receiver_flows(&self) -> Vec<(usize, SocketAddrV4, String)> {
-        self.lock()
-            .table
-            .flows()
-            .filter(|(_, f)| !f.expired)
-            .map(|(slot, f)| (slot, f.dest, f.rx_host.clone()))
-            .collect()
-    }
-
     /// Sets TX channel `tx`'s source (from 0); `false` when there is no
     /// such channel, or for [`Source::Engine`] on a channel without an
     /// engine ring. Runtime only: every channel is silent at start.
@@ -1040,14 +1004,6 @@ impl Schedule {
     pub fn wake_ns(&self, rate: u32, margin_ns: u64) -> u64 {
         ns_of(self.next.saturating_add(self.fpp), rate).saturating_add(margin_ns)
     }
-}
-
-/// `dest` as one word for [`TxShared::receiver_latency_ns`]: its address,
-/// port and a 1, never 0 (an unwritten cell).
-fn dest_word(dest: SocketAddrV4) -> u64 {
-    let [a, b, c, d] = dest.ip().octets();
-    let [p, q] = dest.port().to_be_bytes();
-    u64::from_be_bytes([a, b, c, d, p, q, 0, 1])
 }
 
 /// The first multiple of `fpp` after `now`.
@@ -1659,6 +1615,8 @@ mod retry;
 pub use retry::{
     SEND_RETRIES, SEND_RETRY_HEADROOM_NS, SEND_RETRY_WAIT_NS, send_retry, transient_refusal,
 };
+
+mod receivers;
 
 #[cfg(test)]
 mod tests;
