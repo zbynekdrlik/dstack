@@ -104,8 +104,9 @@ pub enum Step {
 
 /// The samples a down step keeps from the call before, at its input rate.
 const HISTORY_DOWN: usize = TAPS - 1;
-/// The samples an up step keeps from the call before, at its input rate.
-const HISTORY_UP: usize = 2 * SIDE;
+/// The samples an up step keeps from the call before, at its input rate:
+/// the even phase reads back `2 SIDE − 1` inputs from the newest.
+const HISTORY_UP: usize = 2 * SIDE - 1;
 
 /// A half-band step for `channels` channels of up to `max_in` input frames
 /// a call.
@@ -168,7 +169,13 @@ impl HalfBand {
     /// Steps `frames_in` frames of `input` (channel `c` at
     /// `c * frames_in`) into `output` (channel `c` at `c * out_frames`).
     /// `frames_in` is at most `max_in` (even for down) and `out_frames` at
-    /// least [`HalfBand::output_frames`] of it; the caller checks.
+    /// least [`HalfBand::output_frames`] of it; the caller checks
+    /// ([`crate::Converter::process`] does).
+    ///
+    /// # Panics
+    ///
+    /// When `frames_in` passes `max_in`, or `input` or `output` is shorter
+    /// than `channels` times its frames.
     pub fn process(
         &mut self,
         input: &[f64],

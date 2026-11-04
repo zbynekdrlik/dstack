@@ -24,10 +24,11 @@
 //!
 //! # The latency budget
 //!
-//! The app's latency is 10 ms ([`BUDGET_NS`], [`Config::budget_ns`] sets
+//! The app's latency is 15 ms ([`BUDGET_NS`], [`Config::budget_ns`] sets
 //! another) for each direction's whole path, the work and the Dante
-//! latency together (owner, ROZHODNUTÉ 3.11.2026, dstack #68). dlink
-//! chooses the split ([`split`]):
+//! latency together (owner, ROZHODNUTÉ 3.11.2026, dstack #68: 10 ms;
+//! ROZHODNUTÉ 4.11.2026, dstack #1: 15 ms, 10 ms was never meant to push
+//! dlink apps low). dlink chooses the split ([`split`]):
 //!
 //! - B, the pump's block: 128 frames unless the app sets another
 //!   ([`Config::block`]; dstack #90: a busy video PC preempted the pump for
@@ -35,10 +36,12 @@
 //! - W, the pump's work margin: how late the pump may run. A pump more
 //!   than W behind a block starts its schedule again, and the skipped
 //!   blocks are lost on both sides (`dstack::stream::Blocks`; dstack #1:
-//!   2 ms restarted on a loaded PC). W is 2/5 of the budget (4 ms of 10 ms,
-//!   8 ms of 20 ms; [`work_margin`]), at least the block and 2 ms. On a
+//!   2 ms restarted on a loaded PC). W is 2/5 of the budget (6 ms of 15 ms,
+//!   4 ms of 10 ms; [`work_margin`]), at least the block and 2 ms: at the
+//!   default, room for the 2.7 to 3.6 ms preemptions seen on loaded PCs,
+//!   where a dlink app's threads run unpinned and without real time. On a
 //!   device with TX, W is in the TX path and gives way to keep P's TX
-//!   floor (with the sinc converter, a 44.1 kHz app); an RX-only device
+//!   floor when a smaller budget leaves no room for both; an RX-only device
 //!   keeps the whole share, at no cost to its path (a late block only
 //!   reaches the app later).
 //! - The rate converter's delay each way when the app's rate differs from
@@ -57,46 +60,44 @@
 //! is P + B, plus the converter's RX delay. A receiver set to a longer
 //! latency than P adds the difference; a latency Dante Controller sets on
 //! the device replaces P (it is kept in the state file). At the default
-//! 10 ms and block 128, a device with both directions (and a TX-only one,
-//! whose TX work is the larger in every row):
+//! 15 ms and block 128, a device with both directions (and a TX-only one,
+//! whose TX work is the larger in every row), W 6 ms in every row:
 //!
-//! | Device | App | B | W | Converter RX / TX | P | TX path | RX path |
-//! |---|---|---|---|---|---|---|---|
-//! | 48 kHz | 48 kHz | 2.67 ms | 4 ms | none | 6 ms | 10 ms | 8.67 ms |
-//! | 96 kHz | 96 kHz | 1.33 ms | 4 ms | none | 6 ms | 10 ms | 7.33 ms |
-//! | 96 kHz | 48 kHz | 1.33 ms | 4 ms | 0.63 / 0.64 ms | 5.36 ms | 10 ms | 7.32 ms |
-//! | 96 kHz | 44.1 kHz | 1.33 ms | 2.32 ms | 1.32 / 3.08 ms | 4.59 ms | 9.99 ms | 7.24 ms |
-//! | 48 kHz | 96 kHz | 2.67 ms | 4 ms | 0.64 / 0.63 ms | 5.38 ms | 10 ms | 8.68 ms |
-//!
-//! A 48 kHz device with a 44.1 kHz app has no room for the TX floor at
-//! block 128 (refused, below); at block 64 it gets W 2 ms, P 4.92 ms, TX
-//! path 9.99 ms, RX path 8.90 ms.
+//! | Device | App | B | Converter RX / TX | P | TX path | RX path |
+//! |---|---|---|---|---|---|---|
+//! | 48 kHz | 48 kHz | 2.67 ms | none | 9 ms | 15 ms | 11.67 ms |
+//! | 96 kHz | 96 kHz | 1.33 ms | none | 9 ms | 15 ms | 10.33 ms |
+//! | 96 kHz | 48 kHz | 1.33 ms | 0.63 / 0.64 ms | 8.36 ms | 15 ms | 10.32 ms |
+//! | 96 kHz | 44.1 kHz | 1.33 ms | 1.32 / 3.08 ms | 5.92 ms | 14.99 ms | 8.57 ms |
+//! | 48 kHz | 44.1 kHz | 2.67 ms | 2.65 / 3.08 ms | 5.92 ms | 14.99 ms | 11.24 ms |
+//! | 48 kHz | 96 kHz | 2.67 ms | 0.64 / 0.63 ms | 8.38 ms | 15 ms | 11.68 ms |
 //!
 //! A device with RX channels only sizes P by its RX work alone, so its RX
-//! path takes the whole budget (dstack #1), and W keeps its 4 ms share:
+//! path takes the whole budget (dstack #1), and W keeps its 6 ms share:
 //!
-//! | Device | App | W | P | RX path |
-//! |---|---|---|---|---|
-//! | 48 kHz | 48 kHz | 4 ms | 7.33 ms | 10 ms |
-//! | 96 kHz | 96 kHz | 4 ms | 8.67 ms | 10 ms |
-//! | 96 kHz | 48 kHz | 4 ms | 8.04 ms | 10 ms |
-//! | 96 kHz | 44.1 kHz | 4 ms | 7.34 ms | 9.99 ms |
-//! | 48 kHz | 44.1 kHz | 4 ms | 4.67 ms | 9.99 ms |
-//! | 48 kHz | 96 kHz | 4 ms | 6.69 ms | 9.99 ms |
+//! | Device | App | P | RX path |
+//! |---|---|---|---|
+//! | 48 kHz | 48 kHz | 12.33 ms | 15 ms |
+//! | 96 kHz | 96 kHz | 13.67 ms | 15 ms |
+//! | 96 kHz | 48 kHz | 13.04 ms | 15 ms |
+//! | 96 kHz | 44.1 kHz | 12.34 ms | 14.99 ms |
+//! | 48 kHz | 44.1 kHz | 9.67 ms | 14.99 ms |
+//! | 48 kHz | 96 kHz | 11.69 ms | 14.99 ms |
 //!
-//! A larger budget grows W and P together: at 20 ms a 48 kHz or 96 kHz
-//! device gets W 8 ms and P 12 ms, a 48 kHz app on a 96 kHz device W 8 ms
-//! and P 11.36 ms (18.04 ms RX only).
+//! Block 256 at the default changes only the RX path (W stays 6 ms, over
+//! the block). Every pair of 44.1, 48 and 96 kHz fits 15 ms at every block
+//! of the stack. A larger budget grows W and P together: at 20 ms a 48 kHz
+//! or 96 kHz device gets W 8 ms and P 12 ms, a 48 kHz app on a 96 kHz
+//! device W 8 ms and P 11.36 ms (18.04 ms RX only).
 //!
-//! A device with TX whose TX path cannot hold the TX floor inside the
-//! budget is refused by [`Config::device`] with the floor named, with the
-//! other problems (dstack #1: they ran at P 4 ms before, and played late
-//! at a receiver): at 10 ms a 48 kHz device with a 44.1 kHz app at block
-//! 128, block 256 on a 48 or 44.1 kHz device, a 96 kHz device with a
-//! 44.1 kHz app at block 256, and a 44.1 kHz device with a 48 kHz app at
-//! block 128. A larger budget (named in the message) or a smaller block takes them. Our TX looped into our own RX takes
-//! the two paths less the one P they share (W + B + P, plus both converter
-//! delays): the whole-device test measures it.
+//! A smaller budget an app sets may not hold the TX floor: [`Config::device`]
+//! refuses it with the floor named, with the other problems (dstack #1: such
+//! configs ran at P 4 ms before, and played late at a receiver). At 10 ms
+//! those are a 48 kHz device with a 44.1 kHz app at block 128, block 256 on
+//! a 48 or 44.1 kHz device, a 96 kHz device with a 44.1 kHz app at block
+//! 256, and a 44.1 kHz device with a 48 kHz app at block 128. Our TX looped
+//! into our own RX takes the two paths less the one P they share (W + B +
+//! P, plus both converter delays): the whole-device test measures it.
 //!
 //! # Debug builds with a rate converter
 //!
@@ -169,11 +170,16 @@ use dstack::media::bypass::FrameSender;
 use dstack::media::tx::TX_MARGIN_NS;
 use dstack::stream::{BLOCKS, MAX_WORK_MARGIN};
 
-/// dlink's latency budget unless the app sets one, ns: 10 ms for each
+/// dlink's latency budget unless the app sets one, ns: 15 ms for each
 /// direction's whole path, the work (block, margin, rate conversion) and
-/// the Dante latency together (owner, ROZHODNUTÉ 3.11.2026, dstack #68).
-/// [`split`] gives the Dante latency what the work leaves.
-pub const BUDGET_NS: u64 = 10_000_000;
+/// the Dante latency together. [`split`] gives the Dante latency what the
+/// work leaves. 10 ms from v0.6.22 (owner, ROZHODNUTÉ 3.11.2026, dstack
+/// #68); 15 ms since v0.6.28 (owner, ROZHODNUTÉ 4.11.2026, dstack #1: 10 ms
+/// was never meant to push dlink apps low). At 15 ms W gets 6 ms, room for
+/// the 2.7 to 3.6 ms preemptions seen on loaded PCs with no CPU pinning
+/// and no real time, and P stays over the TX floor ([`tx_floor_ns`]) for
+/// every rate pair at every block.
+pub const BUDGET_NS: u64 = 15_000_000;
 /// The least Dante latency [`split`] leaves, ns: the normal profile's own
 /// floor (`dstack::device::NORMAL_MIN_LATENCY_NS`, 4 ms), which the device
 /// refuses to go under.
@@ -524,8 +530,10 @@ impl Config {
 }
 
 /// The pump's share of the budget: W is [`WORK_SHARE_NUM`] /
-/// [`WORK_SHARE_DEN`] of it (4 ms of 10 ms; the owner's 48 kHz example, dstack
-/// #1: about 4 ms of pump margin and 6 ms of Dante latency).
+/// [`WORK_SHARE_DEN`] of it (the owner's 48 kHz example, dstack #1: about
+/// 4 ms of pump margin and 6 ms of Dante latency at 10 ms; 6 ms of 15 ms,
+/// the default since v0.6.28, 1.7 times the longest preemption seen on a
+/// loaded PC, 3.6 ms).
 pub const WORK_SHARE_NUM: u64 = 2;
 /// See [`WORK_SHARE_NUM`].
 pub const WORK_SHARE_DEN: u64 = 5;
