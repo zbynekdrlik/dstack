@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! dstack #68: a dlink device in the app's process, on the box's routed
-//! address and its own system clock, at dlink's defaults (a 10 ms budget,
+//! address and its own system clock, at dlink's defaults (a 15 ms budget,
 //! the normal profile: no real-time priority, no pinning). A file of its own,
 //! so its process sets the normal profile (one per process). Our device
 //! hears itself (the tests' rule: our device only).
@@ -91,10 +91,17 @@ fn a_dlink_device_runs_the_app_s_processor_at_its_defaults() {
         "our TX 1 came back on RX 1 as {got}"
     );
     assert!(pump.media && pump.blocks > 0, "{pump:?}");
-    // The pump runs at dlink's timing (48 kHz): B 128 (dstack #90) + P 288
-    // (6 ms, what the 10 ms budget leaves after W; dstack #68) + W 192
-    // (4 ms, 2/5 of the budget; dstack #1).
-    assert_eq!((pump.playout, pump.offset), (288, 608), "{pump:?}");
+    // The pump runs at dlink's timing (48 kHz), as the split says: B 128
+    // (dstack #90) + P 432 (9 ms, what the 15 ms budget leaves after W;
+    // dstack #68, #1) + W 288 (6 ms, 2/5 of the budget).
+    let s = config.split().unwrap();
+    let p = dstack::clock::latency_samples(s.latency_ns, 48_000);
+    assert_eq!((p, s.margin), (432, 288));
+    assert_eq!(
+        (pump.playout, pump.offset),
+        (p, 128 + p + s.margin),
+        "{pump:?}"
+    );
     assert!(matches!(stopped, Stopped::Done), "{stopped:?}");
     assert_eq!(
         dstack::clock::profile(),
@@ -180,13 +187,20 @@ fn a_48_khz_app_runs_a_96_khz_device_through_the_conversion() {
     // The device's block is 128 frames at 96 kHz (dstack #90): the app gets 64
     // at 48 kHz.
     assert_eq!(frames.load(Ordering::Relaxed), 64);
-    // The RX flow runs at 96 kHz: the split's 5.36 ms latency (10 ms less
-    // W's 4 ms share and the half-band's 0.64 ms TX delay, over a TX
-    // packet's own age of 4.58 ms; dstack #68, #1) is 515 samples.
-    assert!(status.contains("\"latency\":515"), "{status}");
-    // The pump runs at the device's 96 kHz: B 128 + P 515 + W 384 (4 ms,
-    // W's whole share: the half-band leaves room for it).
-    assert_eq!((pump.playout, pump.offset), (515, 1027), "{pump:?}");
+    // The RX flow runs at 96 kHz: the split's 8.36 ms latency (15 ms less
+    // W's 6 ms share and the half-band's 0.64 ms TX delay, over a TX
+    // packet's own age of 4.58 ms; dstack #68, #1) is 802 samples.
+    let s = config.split().unwrap();
+    let p = dstack::clock::latency_samples(s.latency_ns, 96_000);
+    assert_eq!((p, s.margin), (802, 576));
+    assert!(status.contains(&format!("\"latency\":{p}")), "{status}");
+    // The pump runs at the device's 96 kHz: B 128 + P 802 + W 576 (6 ms,
+    // W's whole share).
+    assert_eq!(
+        (pump.playout, pump.offset),
+        (p, 128 + p + s.margin),
+        "{pump:?}"
+    );
     assert!(matches!(stopped, Stopped::Done), "{stopped:?}");
 }
 
@@ -391,7 +405,7 @@ fn the_loop_through_our_own_flow_takes_what_the_split_says() {
             .subscribe(1, "Out 1", name);
         let split = config.split().unwrap();
         let want = split.tx_path_ns + split.rx_path_ns - split.latency_ns;
-        // Each path is within the 10 ms budget.
+        // Each path is within the 15 ms budget.
         assert!(split.tx_path_ns <= dlink::BUDGET_NS && split.rx_path_ns <= dlink::BUDGET_NS);
         let got = measured_loop(&config, app);
         // The design allows one block; the stamps are exact, so a few app
