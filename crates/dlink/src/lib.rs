@@ -391,7 +391,7 @@ impl Config {
     /// the app reserves for it keeps a loaded PC's other threads from
     /// preempting the pump past its margin (dstack #1, camera-box's hub on
     /// a box at load 11). Anywhere the kernel puts it when not set; a CPU
-    /// at or past `dstack::device::MAX_CPU` is refused by
+    /// at or past the OS's limit (`dstack::device::max_cpu_for`) is refused by
     /// [`Config::device`].
     pub fn pump_cpu(mut self, cpu: usize) -> Self {
         self.pump_cpu = Some(cpu);
