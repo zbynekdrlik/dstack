@@ -912,6 +912,7 @@ fn run(clock: &dyn PtpClock, shared: &RxShared, mut rx: Receiver, cpu: Option<us
         asked = RECV_BUFFER_BYTES,
         "RX flow sockets' receive buffer"
     );
+    let mut pin = super::repin::RePin::new(cpu);
     while !shared.stopping() {
         if let Err(e) = rx.wait(rx.timeout(shared.now_ns()))
             && failed_wait(shared, &e)
@@ -919,6 +920,7 @@ fn run(clock: &dyn PtpClock, shared: &RxShared, mut rx: Receiver, cpu: Option<us
             std::thread::sleep(Duration::from_nanos(WAKE_NS));
         }
         let began = shared.now_ns();
+        pin.keep(began);
         rx.pass(clock.now_ns(), began);
         // Linux sleeps precisely; Windows' sleep is coarse (ms), so it
         // keeps a wake per datagram.
