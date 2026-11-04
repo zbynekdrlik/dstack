@@ -30,6 +30,9 @@ use rubato::{
 };
 
 pub mod asrc;
+pub mod halfband;
+
+use halfband::{HalfBand, Step};
 
 /// The sinc filter's length, taps.
 pub const TAPS: usize = 256;
@@ -95,6 +98,37 @@ enum Engine {
     Copy,
     /// The sinc stage.
     Sinc(Box<Async<f64>>),
+    /// The half-band 2:1 or 1:2 step ([`Converter::low_delay`]).
+    Half(Box<HalfBand>),
+}
+
+/// The half-band step for `from` to `to` Hz with `block` frames on the
+/// fixed side: an exact 2:1 or 1:2 ratio and an even block (so a fixed
+/// output's input, and a fixed input's output, are whole frames). None
+/// otherwise.
+fn half_band_step(from: u32, to: u32, block: usize) -> Option<Step> {
+    // A rate of 0 or an empty block: the sinc's own check refuses it.
+    if from == 0 || block == 0 || !block.is_multiple_of(2) {
+        return None;
+    }
+    if u64::from(from) == 2 * u64::from(to) {
+        Some(Step::Down)
+    } else if u64::from(to) == 2 * u64::from(from) {
+        Some(Step::Up)
+    } else {
+        None
+    }
+}
+
+/// The input frames a half-band call takes with `block` frames on the
+/// `fixed` side: the block on a fixed input, what makes the block on a
+/// fixed output.
+fn half_input(fixed: Fixed, step: Step, block: usize) -> usize {
+    match (fixed, step) {
+        (Fixed::Input, _) => block,
+        (Fixed::Output, Step::Down) => 2 * block,
+        (Fixed::Output, Step::Up) => block / 2,
+    }
 }
 
 /// A converter from `from` Hz to `to` Hz on one clock, for `channels`
@@ -132,6 +166,37 @@ impl Converter {
         fixed: Fixed,
     ) -> Result<Converter, ConvertError> {
         Self::build(from, to, channels, block, fixed, false)
+    }
+
+    /// A converter like [`Converter::new`] whose delay sits in a latency
+    /// budget (dlink, dstack #1): an exact 2:1 or 1:2 ratio with an even
+    /// `block` steps through the half-band ([`halfband`]: 0.64 ms at
+    /// 96 kHz instead of the sinc's 2.67 ms, below −145 dB where the sinc
+    /// is below −200 dB); any other pair is [`Converter::new`]'s sinc.
+    pub fn low_delay(
+        from: u32,
+        to: u32,
+        channels: usize,
+        block: usize,
+        fixed: Fixed,
+    ) -> Result<Converter, ConvertError> {
+        let Some(step) = half_band_step(from, to, block) else {
+            return Self::new(from, to, channels, block, fixed);
+        };
+        if channels == 0 {
+            return Err(ConvertError::Invalid(format!(
+                "from {from} Hz, to {to} Hz, {channels} channels, block {block}"
+            )));
+        }
+        let max_in = half_input(fixed, step, block);
+        Ok(Converter {
+            engine: Engine::Half(Box::new(HalfBand::new(step, channels, max_in))),
+            channels,
+            block,
+            fixed,
+            from,
+            to,
+        })
     }
 
     /// A converter between two clocks (the ASRC): always the sinc stage,
@@ -183,6 +248,12 @@ impl Converter {
         })
     }
 
+    /// Whether this converter steps through the half-band
+    /// ([`Converter::low_delay`]).
+    pub fn is_half_band(&self) -> bool {
+        matches!(self.engine, Engine::Half(_))
+    }
+
     /// Whether this converter only copies (equal rates).
     pub fn is_copy(&self) -> bool {
         matches!(self.engine, Engine::Copy)
@@ -198,6 +269,7 @@ impl Converter {
         match &self.engine {
             Engine::Copy => self.block,
             Engine::Sinc(s) => s.input_frames_next(),
+            Engine::Half(h) => half_input(self.fixed, h.step(), self.block),
         }
     }
 
@@ -206,6 +278,7 @@ impl Converter {
         match &self.engine {
             Engine::Copy => self.block,
             Engine::Sinc(s) => s.input_frames_max(),
+            Engine::Half(h) => half_input(self.fixed, h.step(), self.block),
         }
     }
 
@@ -214,6 +287,7 @@ impl Converter {
         match &self.engine {
             Engine::Copy => self.block,
             Engine::Sinc(s) => s.output_frames_max(),
+            Engine::Half(h) => h.output_frames(half_input(self.fixed, h.step(), self.block)),
         }
     }
 
@@ -223,6 +297,7 @@ impl Converter {
         match &self.engine {
             Engine::Copy => 0,
             Engine::Sinc(s) => s.output_delay(),
+            Engine::Half(h) => h.delay_frames(),
         }
     }
 
@@ -265,6 +340,20 @@ impl Converter {
                     .process_into_buffer(&i, &mut o, None)
                     .map_err(|e| core(&e))
             }
+            Engine::Half(h) => {
+                let made = h.output_frames(frames_in);
+                if frames_in != half_input(self.fixed, h.step(), self.block)
+                    || made > out_frames
+                    || input.len() < channels * frames_in
+                    || output.len() < channels * out_frames
+                {
+                    return Err(ConvertError::Invalid(format!(
+                        "half-band step of {frames_in} frames into room for {out_frames}"
+                    )));
+                }
+                h.process(input, frames_in, output, out_frames);
+                Ok((frames_in, made))
+            }
         }
     }
 
@@ -274,7 +363,7 @@ impl Converter {
     pub fn set_ppm(&mut self, ppm: f64) -> Result<(), ConvertError> {
         let Engine::Sinc(stage) = &mut self.engine else {
             return Err(ConvertError::Invalid(
-                "a copy has no ratio to adjust".into(),
+                "a copy or a half-band step has no ratio to adjust".into(),
             ));
         };
         let ppm = ppm.clamp(-ROOM_PPM, ROOM_PPM);
@@ -285,8 +374,10 @@ impl Converter {
 
     /// Forgets the filter's history (after a gap in the audio).
     pub fn reset(&mut self) {
-        if let Engine::Sinc(s) = &mut self.engine {
-            s.reset();
+        match &mut self.engine {
+            Engine::Copy => {}
+            Engine::Sinc(s) => s.reset(),
+            Engine::Half(h) => h.reset(),
         }
     }
 }

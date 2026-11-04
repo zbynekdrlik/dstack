@@ -385,7 +385,10 @@ fn each_path_is_its_work_plus_the_dante_latency() {
     let up = split(11_000_000, 48_000, 96_000, 256, Directions::Both).unwrap();
     assert_eq!(up.margin, 256);
     assert!(up.rx_path_ns > up.tx_path_ns, "{up:?}");
-    assert!(11_000_000 - up.rx_path_ns <= 1_000_000_000 / 48_000 + 1, "{up:?}");
+    assert!(
+        11_000_000 - up.rx_path_ns <= 1_000_000_000 / 48_000 + 1,
+        "{up:?}"
+    );
     assert!(up.latency_ns >= 4_916_666, "{up:?}");
 }
 
@@ -728,7 +731,11 @@ fn a_96_khz_tx_device_with_a_48_khz_app_gets_p_over_a_tx_packet_s_age() {
     assert_eq!(age, 4_583_333);
     for dir in [Directions::Tx, Directions::Both] {
         let s = split(BUDGET_NS, 96_000, 48_000, 128, dir).unwrap();
-        assert!(s.latency_ns >= age, "{dir:?}: P {} under {age}", s.latency_ns);
+        assert!(
+            s.latency_ns >= age,
+            "{dir:?}: P {} under {age}",
+            s.latency_ns
+        );
         assert!(s.margin >= least_work_margin(96_000, 128), "{dir:?}: {s:?}");
         assert!(s.tx_path_ns <= BUDGET_NS, "{dir:?}: {s:?}");
     }
