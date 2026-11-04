@@ -634,8 +634,10 @@ fn the_pump_margin_is_two_fifths_of_the_budget() {
         let s = split(TEN_MS, 96_000, 48_000, 128, dir).unwrap();
         assert_eq!((s.margin, s.latency_ns), (384, 5_364_583), "{dir:?}");
     }
+    // RX only: W is the whole budget (v0.6.32: in no path of its own), P
+    // as before.
     let rx = split(TEN_MS, 96_000, 48_000, 128, Rx).unwrap();
-    assert_eq!((rx.margin, rx.latency_ns), (384, 8_041_666));
+    assert_eq!((rx.margin, rx.latency_ns), (960, 8_041_666));
     // A 44.1 kHz app (the sinc, 3.08 ms TX delay): the TX side gives W up,
     // to 223 samples (2.32 ms), for P's TX floor (4.58 ms at 96 kHz: P
     // 441 whole samples).
@@ -700,6 +702,63 @@ fn at_the_default_budget_a_pump_5_ms_late_still_runs_its_block() {
     }
 }
 
+/// dstack #1 (camera-box, 4.11.2026, v0.6.31 live): OBS dante-input, an
+/// RX-only 48 kHz app on a 96 kHz network at the default budget, block
+/// 128, unpinned on a loaded PC: its pump was preempted about 6 ms, right
+/// at W 6 ms, and re-bootstrapped 19 -> 30 in 15 min, each time losing
+/// blocks. An RX-only device's W is in none of its paths (RX is P + B +
+/// the converter's RX delay; D = B + P + W stamps TX rings it does not
+/// have), so its W is the whole budget: a pump 8 ms late still runs its
+/// block, and P and the RX path stay as they were. A device with TX keeps
+/// W 6 ms (it is in its TX path), so 8 ms late restarts it.
+#[test]
+fn at_the_default_budget_an_rx_only_pump_8_ms_late_still_runs_its_block() {
+    use dstack::stream::{Blocks, Due, Timing};
+    let rx_only = |name: &str, app: u32, net: u32| {
+        Config::new(name, "/tmp/never-written.toml")
+            .rx(["In"])
+            .sample_rate(app)
+            .network_rate(net)
+    };
+    // (config, P ns and RX path in 10 us as before v0.6.32, W samples).
+    for (c, p, rx_path, w) in [
+        (rx_only("obs", 48_000, 96_000), 13_041_666, 1_499, 1_440),
+        (rx_only("rx-48", 48_000, 48_000), 12_333_333, 1_499, 720),
+        (rx_only("rx-96", 96_000, 96_000), 13_666_666, 1_499, 1_440),
+        (rx_only("rx-cd", 44_100, 96_000), 12_343_750, 1_499, 1_440),
+    ] {
+        let cfg = c.device().unwrap();
+        let s = c.split().unwrap();
+        assert_eq!(cfg.latency_ns, p, "{}", cfg.name);
+        assert_eq!(s.rx_path_ns / 10_000, rx_path, "{}", cfg.name);
+        let t = Timing::of(&cfg);
+        assert_eq!(t.margin, w, "{}", cfg.name);
+        assert_eq!(t.margin, latency_samples(BUDGET_NS, cfg.sample_rate));
+        let late = latency_samples(8_000_000, cfg.sample_rate);
+        let due = Blocks::bootstrap(0, t).due();
+        for (behind, runs) in [(late, true), (t.margin, true), (t.margin + 1, false)] {
+            let mut blocks = Blocks::bootstrap(0, t);
+            let got = blocks.next(due + behind);
+            assert_eq!(
+                matches!(got, Due::Run { .. }),
+                runs,
+                "{} at {behind} behind: {got:?} ({t:?})",
+                cfg.name
+            );
+        }
+    }
+    // With TX the margin stays 6 ms: 8 ms late starts the schedule again.
+    let both = config().sample_rate(48_000).network_rate(96_000);
+    let t = Timing::of(&both.device().unwrap());
+    assert_eq!(t.margin, 576);
+    let mut blocks = Blocks::bootstrap(0, t);
+    let due = blocks.due();
+    assert!(matches!(
+        blocks.next(due + latency_samples(8_000_000, 96_000)),
+        Due::Rebootstrap { .. }
+    ));
+}
+
 /// dstack #1 (songplayer, 4.11.2026): a TX-only 48 kHz app on a 96 kHz
 /// network at the 10 ms budget split P to the 4 ms floor (4.01 ms, W
 /// 3.16 ms), and a receiver at that latency counted 137 packets late in
@@ -740,7 +799,8 @@ fn a_96_khz_tx_device_with_a_48_khz_app_gets_p_over_a_tx_packet_s_age() {
 /// dstack #1 (the owner's ruling of 4.11.2026): the default 15 ms fits
 /// every common rate pair at blocks 128 and 256 with W's whole 6 ms share
 /// (room for the 2.7 to 3.6 ms preemptions seen on loaded PCs with no CPU
-/// pinning) and P over the TX floor; the crate docs' tables.
+/// pinning) and P over the TX floor; an RX-only device's W is the whole
+/// 15 ms (v0.6.32) at the same P; the crate docs' tables.
 #[test]
 fn the_default_15_ms_fits_every_common_config_with_w_6_ms() {
     use Directions::{Both, Rx};
@@ -757,12 +817,12 @@ fn the_default_15_ms_fits_every_common_config_with_w_6_ms() {
         ((96_000, 48_000, 256, Both), (8_364_583, 1_499, 1_165)),
         ((96_000, 44_100, 256, Both), (5_916_666, 1_499, 989)),
         ((48_000, 44_100, 256, Both), (5_916_666, 1_499, 1_390)),
-        ((48_000, 48_000, 128, Rx), (12_333_333, 1_833, 1_499)),
-        ((96_000, 96_000, 128, Rx), (13_666_666, 1_966, 1_499)),
-        ((96_000, 48_000, 128, Rx), (13_041_666, 1_967, 1_499)),
-        ((96_000, 44_100, 128, Rx), (12_343_750, 2_142, 1_499)),
-        ((48_000, 44_100, 128, Rx), (9_666_666, 1_874, 1_498)),
-        ((48_000, 96_000, 128, Rx), (11_687_500, 1_831, 1_498)),
+        ((48_000, 48_000, 128, Rx), (12_333_333, 2_733, 1_499)),
+        ((96_000, 96_000, 128, Rx), (13_666_666, 2_866, 1_499)),
+        ((96_000, 48_000, 128, Rx), (13_041_666, 2_867, 1_499)),
+        ((96_000, 44_100, 128, Rx), (12_343_750, 3_042, 1_499)),
+        ((48_000, 44_100, 128, Rx), (9_666_666, 2_774, 1_498)),
+        ((48_000, 96_000, 128, Rx), (11_687_500, 2_731, 1_498)),
     ] {
         let s = split(BUDGET_NS, dev, app, block, dir).unwrap();
         assert_eq!(
@@ -770,9 +830,13 @@ fn the_default_15_ms_fits_every_common_config_with_w_6_ms() {
             want,
             "{dev} {app} {block} {dir:?}"
         );
+        // W is 6 ms with TX (it is in the TX path); an RX-only device's W
+        // is the whole budget (in no path of its own, dstack #1, v0.6.32),
+        // and its TX path figure is only W + P.
+        let w = if dir == Rx { BUDGET_NS } else { 6_000_000 };
         assert_eq!(
             s.margin,
-            latency_samples(6_000_000, dev),
+            latency_samples(w, dev),
             "{dev} {app} {block} {dir:?}"
         );
         if dir == Both {
