@@ -719,3 +719,21 @@ fn a_wait_that_ends_without_a_switch_logs_once() {
     });
     assert_eq!(log.matches(WAIT_ENDED_LINE).count(), 1, "{log}");
 }
+
+/// The offset of a handover counts the gap between the reads against
+/// agreement: the old source read before and after the new one, the
+/// farther difference wins, whichever side it is on.
+#[test]
+fn the_offset_is_the_difference_farther_from_zero() {
+    let t: i128 = 1_000_000_000_000;
+    // Read back to back (no gap): the plain difference.
+    assert_eq!(offset_of(t, t + 10_000, t), Some(10_000));
+    // A 1 ms gap before the new read: 1 ms, not 0 or the midpoint.
+    assert_eq!(offset_of(t, t + 1_000_000, t + 1_000_100), Some(1_000_000));
+    // A gap after it: the read after counts.
+    assert_eq!(offset_of(t, t + 100, t + 1_000_100), Some(-1_000_000));
+    assert_eq!(offset_of(t + 20_000, t, t + 20_000), Some(-20_000));
+    // Past i64: none.
+    assert_eq!(offset_of(0, i128::from(i64::MAX) + 1, 0), None);
+    assert_eq!(offset_of(0, i128::from(i64::MIN), 0), Some(i64::MIN));
+}

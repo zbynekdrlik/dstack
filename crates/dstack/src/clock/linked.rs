@@ -137,6 +137,16 @@ pub fn handover(offset_ns: Option<i64>, voluntary: bool, waited: u32) -> Handove
     }
 }
 
+/// The new source's time `new` less the old one's, read `before` and
+/// `after` it: the difference farther from 0, so the time between the reads
+/// counts against agreement, never for it; `None` past `i64`.
+pub fn offset_of(before: i128, new: i128, after: i128) -> Option<i64> {
+    [new - before, new - after]
+        .into_iter()
+        .max_by_key(|d| d.unsigned_abs())
+        .and_then(|d| i64::try_from(d).ok())
+}
+
 /// The first wait of a handover (with the offset).
 pub const WAIT_LINE: &str = "media clock: the new source waits to agree with the one in use";
 /// A wait that ended without a switch (the selector chose the source in
@@ -312,10 +322,7 @@ impl Linked {
         let before = self.time_of(from)?;
         let new = self.time_of(to)?;
         let after = self.time_of(from)?;
-        [new - before, new - after]
-            .into_iter()
-            .max_by_key(|d| d.unsigned_abs())
-            .and_then(|d| i64::try_from(d).ok())
+        offset_of(before, new, after)
     }
 
     /// The selector's round: picks the source by [`choose`]; a change
