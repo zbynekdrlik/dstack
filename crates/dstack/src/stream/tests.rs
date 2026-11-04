@@ -1310,3 +1310,59 @@ fn each_block_carries_its_media_start_across_a_skip() {
     r.pump.free();
     assert_eq!(r.pump.processor.starts.last(), Some(&None));
 }
+
+/// iemmixer (4.11.2026, v0.6.29 live, an engine restart): the Service ->
+/// Internal switch 36 s in took the pump's re-bootstraps 0 -> 1 (missed 0,
+/// late 0), from the epoch change alone. A seamless handover (v0.6.30,
+/// `clock::linked::handover`) keeps the epoch and steps media time by at
+/// most `HANDOVER_NS`: at block 16 and W 16 a step that size either way at
+/// any point of a block runs every block, re-bootstraps none, misses none,
+/// calls no `discontinuity` and leaves no hole in the engine ring.
+#[test]
+fn a_seamless_handover_step_neither_rebootstraps_nor_loses_a_block() {
+    use crate::clock::linked::HANDOVER_NS;
+    let step = crate::clock::to_samples(HANDOVER_NS.unsigned_abs(), RATE) + 1;
+    assert_eq!(step, 3);
+    for forward in [true, false] {
+        for into in 0..B16 {
+            let mut r = rig_at(
+                Map {
+                    rx: vec![0],
+                    tx: vec![0],
+                },
+                &[0],
+                &[0],
+                TIMING_16,
+            );
+            fill(&r, 0, T - 1_000, 4_000, counter);
+            let mut now = T;
+            for _ in 0..8 {
+                now = r.pump.media(now, 5);
+            }
+            let at = now - B16 + into;
+            let stepped = if forward { at + step } else { at - step };
+            let end = run_to(&mut r, stepped, T + 2_000, 5);
+            assert!(end > 0);
+            let v = r.stats.view();
+            assert_eq!(
+                (v.rebootstraps, v.missed),
+                (0, 0),
+                "forward {forward} into {into}: {v:?}"
+            );
+            assert_eq!(
+                r.pump.processor.log.matches('d').count(),
+                1,
+                "only the start's"
+            );
+            let first = Blocks::bootstrap(T, TIMING_16).start();
+            let n = (v.blocks * B16) as usize;
+            let (out, holes) = engine_at(&r, 0, first + D16, n);
+            assert_eq!(holes, 0, "forward {forward} into {into}");
+            assert!(
+                out.iter()
+                    .enumerate()
+                    .all(|(i, &v)| v == counter(first + i as u64))
+            );
+        }
+    }
+}
