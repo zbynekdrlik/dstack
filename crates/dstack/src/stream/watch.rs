@@ -7,9 +7,11 @@
 //! block so far and the pump's timing (B, W, P, D). The pump only counts
 //! ([`super::PumpStats`]); this runs on the daemon's tick, never on the
 //! real-time pump thread, and never logs per event. A gap in an app's RX or
-//! a TX hole in the same second as this line is the pump being late (more
-//! than W behind its block); one without it is the network or the RX/TX
-//! path.
+//! a TX hole in the same second as this line with `rebootstraps` or
+//! `missed` grown is the pump falling more than W behind its block; with
+//! only `overruns` grown, blocks took longer than their period (an
+//! unoptimised converter in a debug build, dstack #1). A gap without the
+//! line is the network or the RX/TX path.
 
 use tracing::warn;
 
@@ -36,6 +38,9 @@ pub struct Grew {
 pub struct PumpWatch {
     seen: Grew,
     next_ns: Option<u64>,
+    /// The address of the engine's counts at the last watch: another
+    /// engine (a later attach) is learnt afresh.
+    engine: usize,
 }
 
 impl PumpWatch {
@@ -47,6 +52,7 @@ impl PumpWatch {
                 overruns: 0,
             },
             next_ns: None,
+            engine: 0,
         }
     }
 
@@ -76,9 +82,15 @@ impl PumpWatch {
 
     /// [`PumpWatch::look`] on the engine `stats` of the device `device`
     /// (`None` before an engine is attached: nothing), a growth logged as
-    /// one warning ([`PUMP_WARNING`]).
+    /// one warning ([`PUMP_WARNING`]). Counts from another engine than the
+    /// last watch's (a later attach) are only learnt, as a first look.
     pub fn watch(&mut self, now_ns: u64, device: &str, stats: Option<&PumpStats>) {
         let Some(stats) = stats else { return };
+        let engine = std::ptr::from_ref(stats).addr();
+        if engine != self.engine {
+            self.engine = engine;
+            self.next_ns = None;
+        }
         let view = stats.view();
         let Some(grew) = self.look(now_ns, &view) else {
             return;
@@ -94,7 +106,7 @@ impl PumpWatch {
             block = timing.block,
             margin = timing.margin,
             playout = timing.playout,
-            offset = view.offset,
+            offset = timing.offset(),
             "{PUMP_WARNING}"
         );
     }

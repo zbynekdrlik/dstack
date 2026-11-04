@@ -134,3 +134,19 @@ fn no_engine_logs_nothing_and_its_first_look_only_learns() {
     s.rebootstrapped(1);
     assert!(capture_warnings(|| w.watch(2 * S, "d1", Some(&s))).contains("missed=1"));
 }
+
+#[test]
+fn another_engine_s_counts_are_learnt_not_reported() {
+    undecided();
+    let (a, b) = (stats(), stats());
+    let mut w = PumpWatch::new();
+    w.watch(0, "d1", Some(&a));
+    // A later attach: the new engine already restarted more than the old
+    // one had counted, still nothing (its counts are learnt).
+    b.rebootstrapped(9);
+    assert_eq!(capture_warnings(|| w.watch(S, "d1", Some(&b))), "");
+    assert_eq!(capture_warnings(|| w.watch(2 * S, "d1", Some(&b))), "");
+    b.rebootstrapped(2);
+    let log = capture_warnings(|| w.watch(3 * S, "d1", Some(&b)));
+    assert!(log.contains("missed=2"), "{log}");
+}

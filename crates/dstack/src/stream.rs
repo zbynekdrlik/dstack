@@ -236,6 +236,8 @@ pub struct PumpStats {
     /// changes ([`PumpStats::retimed`]).
     offset: AtomicU64,
     playout: AtomicU64,
+    /// W, samples: fixed for the pump's life (a new latency moves P and D).
+    margin: u64,
     /// One block's period, ns: a block longer than this is an overrun.
     period_ns: u64,
     /// The last step was on the media clock (not free pacing).
@@ -284,6 +286,7 @@ impl PumpStats {
             frames,
             offset: AtomicU64::new(timing.offset()),
             playout: AtomicU64::new(timing.playout),
+            margin: timing.margin,
             period_ns: period,
             media: AtomicBool::new(false),
             running: AtomicBool::new(false),
@@ -311,14 +314,14 @@ impl PumpStats {
         }
     }
 
-    /// A re-bootstrap that skipped `skipped` blocks.
-    /// The pump plays at `timing` now.
+    /// The pump plays at `timing` now (its W unchanged).
     fn retimed(&self, timing: Timing) {
         self.offset.store(timing.offset(), Ordering::Relaxed);
         self.playout.store(timing.playout, Ordering::Relaxed);
     }
 
-    fn rebootstrapped(&self, skipped: u64) {
+    /// A re-bootstrap that skipped `skipped` blocks.
+    pub(crate) fn rebootstrapped(&self, skipped: u64) {
         self.rebootstraps.fetch_add(1, Ordering::Relaxed);
         self.missed.fetch_add(skipped, Ordering::Relaxed);
     }
@@ -364,16 +367,13 @@ impl PumpStats {
         self.hists.snapshot()
     }
 
-    /// The pump's timing now: B, P (moved with the device latency) and W
-    /// (D − B − P; a new latency moves D and P together).
+    /// The pump's timing now: B and W (fixed) and P (moved with the
+    /// device latency); one load, so B + P + W is always a D the pump had.
     pub fn timing(&self) -> Timing {
-        let block = u64::from(self.frames);
-        let playout = self.playout.load(Ordering::Relaxed);
-        let offset = self.offset.load(Ordering::Relaxed);
         Timing {
-            block,
-            playout,
-            margin: offset.saturating_sub(block + playout),
+            block: u64::from(self.frames),
+            playout: self.playout.load(Ordering::Relaxed),
+            margin: self.margin,
         }
     }
 

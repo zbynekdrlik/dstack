@@ -627,3 +627,32 @@ fn a_frame_sender_is_refused_off_windows() {
     assert_eq!(media.tx.tx_path(), before);
     assert_ne!(before, crate::media::tx::TxPath::HostSender);
 }
+
+/// The driver's tick runs the pump watch (dstack #1): a second in which the
+/// attached pump restarted logs one warning on the tick's own thread.
+#[tokio::test]
+async fn the_driver_s_tick_warns_once_for_a_second_the_pump_restarted() {
+    use crate::stream::watch::PUMP_WARNING;
+    use crate::stream::{PumpStats, Timing};
+    use crate::test_log::{capture_warnings, undecided};
+    undecided();
+    let dir = tempfile::tempdir().unwrap();
+    let device = device_at(dir.path());
+    let media = media_with_engine(&device, Arc::new(Unready), &[0]);
+    let timing = Timing {
+        block: 32,
+        playout: 96,
+        margin: 96,
+    };
+    let stats = Arc::new(PumpStats::new(timing, 96_000));
+    media.attach_engine(Arc::clone(&stats));
+    let records = Records::default();
+    let (mut driver, _answers, _changes) = driver_of(&media);
+    driver.tick(&records);
+    stats.rebootstrapped(4);
+    std::thread::sleep(Duration::from_millis(1_010));
+    let log = capture_warnings(|| driver.tick(&records));
+    let lines: Vec<&str> = log.lines().filter(|l| l.contains(PUMP_WARNING)).collect();
+    assert_eq!(lines.len(), 1, "{log}");
+    assert!(lines[0].contains("missed=4"), "{log}");
+}
