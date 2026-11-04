@@ -373,7 +373,7 @@ fn each_path_is_its_work_plus_the_dante_latency() {
     let up = split(9_500_000, 48_000, 96_000, 128, Directions::Both).unwrap();
     assert_eq!(up.margin, 182);
     assert!(up.rx_path_ns > up.tx_path_ns, "{up:?}");
-    assert!(9_500_000 - up.rx_path_ns <= 1_000_000_000 / 48_000 + 1);
+    assert_eq!(9_500_000 - up.rx_path_ns, 2);
 }
 
 /// dstack #68: the Dante latency's floor is the normal profile's 4 ms: a
@@ -602,4 +602,42 @@ fn the_pump_margin_is_two_fifths_of_the_budget() {
     let odd = split(BUDGET_NS, 44_100, 48_000, 128, Both).unwrap();
     assert!(odd.latency_ns >= MIN_LATENCY_NS, "{odd:?}");
     assert!(odd.margin < work_margin(BUDGET_NS, 44_100, 128), "{odd:?}");
+}
+
+/// dstack #1 (intercom's report against v0.6.22): at the default 10 ms
+/// budget a pump 3 ms late (over v0.6.22's 2 ms W) still runs its block, on
+/// dlink's default device and on the devices intercom runs (a native 96 kHz
+/// sender, a 48 kHz app on a 96 kHz device receiving, or with both
+/// directions); a block more than W late starts the schedule again. The
+/// pump's own schedule (`dstack::stream::Blocks`) at the split's timing,
+/// with no clock and no threads, so it holds on any box.
+#[test]
+fn at_the_default_budget_a_pump_3_ms_late_still_runs_its_block() {
+    use dstack::stream::{Blocks, Due, Timing};
+    let one = |name: &str| Config::new(name, "/tmp/never-written.toml");
+    for c in [
+        config(),
+        one("tx-96").tx(["Out"]).sample_rate(96_000),
+        one("rx-96-48")
+            .rx(["In"])
+            .sample_rate(48_000)
+            .network_rate(96_000),
+        config().sample_rate(48_000).network_rate(96_000),
+    ] {
+        let cfg = c.device().unwrap();
+        let t = Timing::of(&cfg);
+        let late = latency_samples(3_000_000, cfg.sample_rate);
+        assert!(late > latency_samples(2_000_000, cfg.sample_rate));
+        let due = Blocks::bootstrap(0, t).due();
+        for (behind, runs) in [(late, true), (t.margin, true), (t.margin + 1, false)] {
+            let mut blocks = Blocks::bootstrap(0, t);
+            let got = blocks.next(due + behind);
+            assert_eq!(
+                matches!(got, Due::Run { .. }),
+                runs,
+                "{} at {behind} behind: {got:?} ({t:?})",
+                cfg.name
+            );
+        }
+    }
 }
