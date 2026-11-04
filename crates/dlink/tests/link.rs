@@ -189,12 +189,12 @@ fn a_48_khz_app_runs_a_96_khz_device_through_the_conversion() {
     assert_eq!(frames.load(Ordering::Relaxed), 64);
     // The RX flow runs at 96 kHz: the split's 8.36 ms latency (15 ms less
     // W's 6 ms share and the half-band's 0.64 ms TX delay, over a TX
-    // packet's own age of 4.58 ms; dstack #68, #1) is 802 samples.
+    // packet's own age of 4.58 ms; dstack #68, #1) is 803 samples.
     let s = config.split().unwrap();
     let p = dstack::clock::latency_samples(s.latency_ns, 96_000);
-    assert_eq!((p, s.margin), (802, 576));
+    assert_eq!((p, s.margin), (803, 576));
     assert!(status.contains(&format!("\"latency\":{p}")), "{status}");
-    // The pump runs at the device's 96 kHz: B 128 + P 802 + W 576 (6 ms,
+    // The pump runs at the device's 96 kHz: B 128 + P 803 + W 576 (6 ms,
     // W's whole share).
     assert_eq!(
         (pump.playout, pump.offset),

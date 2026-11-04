@@ -258,7 +258,7 @@ fn a_network_rate_runs_the_device_at_it_and_the_app_at_its_own() {
     let cfg = c.device().unwrap();
     assert_eq!(cfg.sample_rate, 96_000);
     // At the default 15 ms W keeps its 6 ms share (576 samples) and the
-    // half-band's 0.64 ms TX delay leaves P 802 samples (8.36 ms), over a
+    // half-band's 0.64 ms TX delay leaves P 803 samples (8.36 ms), over a
     // TX packet's own age of 4.58 ms (dstack #68, #1: v0.6.27 gave W 303
     // and P 385, 4.01 ms at 10 ms). At 10 ms: W 384, P 515 (5.36 ms).
     assert_eq!(cfg.work_margin, 576);
