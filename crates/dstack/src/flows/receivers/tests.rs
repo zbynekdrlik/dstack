@@ -280,6 +280,26 @@ fn a_device_several_flows_go_to_is_read_once_a_look() {
 }
 
 #[test]
+fn two_devices_at_one_address_are_each_read_in_the_same_look() {
+    let (tx, records, _dir, first) = rig("127.0.0.2");
+    let other = add_flow(&tx, "other", 4002);
+    let info = ServiceInfo::new(ARC_SERVICE, "other", "o.local.", "127.0.0.2", 4442, None);
+    records.keep(&ServiceEvent::ServiceResolved(Box::new(
+        info.unwrap().as_resolved_service(),
+    )));
+    let mut reads = Reads::new();
+    look(&mut reads, &tx, &records, 0, &go(), |a| {
+        Ok(at(if a.port() == 4441 {
+            10_000_000
+        } else {
+            2_000_000
+        }))
+    });
+    assert_eq!(tx.receiver_latency_ns(first, dest(4000)), 10_000_000);
+    assert_eq!(tx.receiver_latency_ns(other, dest(4002)), 2_000_000);
+}
+
+#[test]
 fn a_stopped_look_reads_nothing_more() {
     let (tx, records, _dir, slot) = rig("127.0.0.2");
     let mut reads = Reads::new();
