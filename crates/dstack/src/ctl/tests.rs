@@ -607,6 +607,8 @@ const WORDS: &[&str] = &[
     "holdovers",
     "holdover",
     "freq_ppb",
+    "follower",
+    "windows",
     "dsync",
     "system",
     "internal",
@@ -1512,4 +1514,93 @@ fn the_clock_source_names_what_a_linked_device_uses() {
     assert_eq!(stats.linked(), Some(Source::Internal));
     stats.set_linked(Source::Service);
     assert_eq!(stats.linked(), Some(Source::Service));
+}
+
+/// iemmixer (4.11.2026, v0.6.29 live): stopping the dsync service for 30 s
+/// showed holdover 1 and re_anchors 1 at the top of the clock status while
+/// the device ran on the follower, and the follower's own counts were
+/// nowhere. The top level now describes the source in use, and a linked
+/// clock names each source's counts on its own.
+#[test]
+fn the_clock_counts_describe_the_source_in_use_and_each_source_apart() {
+    use crate::clock::ClockCounts;
+    use crate::clock::linked::Source;
+    let service = ClockCounts {
+        polls: 40,
+        re_anchors: 1,
+        holdovers: 1,
+        in_holdover: true,
+    };
+    let follower = ClockCounts {
+        polls: 300,
+        re_anchors: 0,
+        holdovers: 0,
+        in_holdover: false,
+    };
+    assert_eq!(
+        clock_counts_in_use(Some(Source::Internal), service, Some(follower)),
+        follower
+    );
+    assert_eq!(
+        clock_counts_in_use(Some(Source::Service), service, Some(follower)),
+        service
+    );
+    assert_eq!(
+        clock_counts_in_use(Some(Source::None), service, Some(follower)),
+        service
+    );
+    assert_eq!(clock_counts_in_use(None, service, Some(follower)), service);
+    assert_eq!(
+        clock_counts_in_use(Some(Source::Internal), service, None),
+        service
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let device = device_at(dir.path());
+    let media = media_on(&device, Arc::new(Unready));
+    media.clock_stats.record(Event::Ready { k_ns: 1 });
+    media.clock_stats.record(Event::Holdover);
+    // Not linked: no per-source objects, the poller's counts on top.
+    let s = status(&media);
+    assert!(
+        s.contains("\"polls\":2,\"re_anchors\":0,\"holdovers\":1,\"holdover\":1,"),
+        "{s}"
+    );
+    assert!(!s.contains("\"service\":{"), "{s}");
+    assert!(!s.contains("\"follower\""), "{s}");
+    // Linked, on the follower.
+    media.clock_stats.set_linked(Source::Internal);
+    media.clock_stats.set_follower(Some(ClockCounts {
+        polls: 300,
+        re_anchors: 4,
+        holdovers: 3,
+        in_holdover: false,
+    }));
+    assert_eq!(media.clock_stats.follower().map(|c| c.polls), Some(300));
+    let s = status(&media);
+    for word in strings_of_json(&s) {
+        assert!(WORDS.contains(&word.as_str()), "{word:?} in {s}");
+    }
+    assert!(
+        s.contains(
+            "\"polls\":300,\"re_anchors\":4,\"holdovers\":3,\"holdover\":0,\"freq_ppb\":-750,\
+             \"source\":\"internal\",\
+             \"service\":{\"polls\":2,\"re_anchors\":0,\"holdovers\":1,\"holdover\":1},\
+             \"follower\":{\"windows\":300,\"re_anchors\":4,\"holdovers\":3,\"holdover\":0}}"
+        ),
+        "{s}"
+    );
+    // On the service: its counts on top; the follower still named.
+    media.clock_stats.set_linked(Source::Service);
+    let s = status(&media);
+    assert!(
+        s.contains("\"polls\":2,\"re_anchors\":0,\"holdovers\":1,\"holdover\":1,"),
+        "{s}"
+    );
+    assert!(s.contains("\"follower\":{\"windows\":300,"), "{s}");
+    // A linked clock whose follower did not start: no follower object.
+    media.clock_stats.set_follower(None);
+    let s = status(&media);
+    assert!(s.contains("\"service\":{\"polls\":2,"), "{s}");
+    assert!(!s.contains("\"follower\""), "{s}");
 }

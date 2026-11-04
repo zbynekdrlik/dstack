@@ -114,6 +114,17 @@ impl Follow for Arc<Fake> {
     fn view(&self) -> View {
         self.0.lock().unwrap().1
     }
+    /// Counts the test can tell apart from the service's: 7 windows, the
+    /// view's epoch as re-anchors, 2 holdovers, in holdover while unlocked.
+    fn counts(&self) -> ClockCounts {
+        let v = self.view();
+        ClockCounts {
+            polls: 7,
+            re_anchors: v.epoch,
+            holdovers: 2,
+            in_holdover: !v.locked,
+        }
+    }
 }
 
 fn set(f: &Fake, now: Option<i64>, view: View) {
@@ -141,8 +152,12 @@ fn the_linked_clock_reads_the_chosen_source_and_moves_its_epoch_on_a_switch() {
     assert!(from_service >= 1_000_000_000_000, "{from_service}");
     let e1 = linked.epoch();
     assert_ne!(e1, e0);
-    // The follower locks: it wins, and its time is read.
+    // The follower locks, far off the service: it waits to agree (v0.6.30),
+    // then wins with a re-align, and its time is read.
     set(&fake, Some(42_000_000_000), ALIVE_LOCKED);
+    for _ in 0..HANDOVER_WAIT {
+        assert_eq!(linked.tick(), Source::Service);
+    }
     assert_eq!(linked.tick(), Source::Internal);
     assert_eq!(linked.now_ns(), Some(42_000_000_000));
     let e2 = linked.epoch();
@@ -164,8 +179,12 @@ fn the_linked_clock_reads_the_chosen_source_and_moves_its_epoch_on_a_switch() {
     assert_eq!(linked.tick(), Source::Service);
     assert_ne!(linked.epoch(), e3);
     assert_eq!(linked.source(), Source::Service);
-    // A negative PTP time from the follower reads as not ready.
+    // A negative PTP time from the follower reads as not ready (it never
+    // agrees with the service: taken after the wait).
     set(&fake, Some(-1), ALIVE_LOCKED);
+    for _ in 0..HANDOVER_WAIT {
+        assert_eq!(linked.tick(), Source::Service);
+    }
     assert_eq!(linked.tick(), Source::Internal);
     assert_eq!(linked.now_ns(), None);
 }
@@ -231,7 +250,8 @@ fn the_linked_clock_waits_for_a_settled_follower_while_the_service_is_ready() {
     set(&fake, Some(42_000_000_000), UNSETTLED);
     assert_eq!(linked.tick(), Source::Service);
     assert_eq!(linked.tick(), Source::Service);
-    set(&fake, Some(42_000_000_000), ALIVE_LOCKED);
+    // Settled, and in agreement with the service: it takes over at once.
+    set(&fake, service_now(&service), ALIVE_LOCKED);
     assert_eq!(linked.tick(), Source::Internal);
     set(&fake, Some(42_000_000_000), UNSETTLED);
     assert_eq!(
@@ -310,4 +330,251 @@ fn a_follower_that_did_not_start_says_why_in_a_word() {
         )),
         "another failure"
     );
+}
+
+/// The service's time now, as the follower's type.
+fn service_now(service: &MonoClock) -> Option<i64> {
+    service.now_ns().map(|t| i64::try_from(t).unwrap())
+}
+
+/// The service's time now moved by `offset_ns`.
+fn service_now_plus(service: &MonoClock, offset_ns: i64) -> Option<i64> {
+    service_now(service).map(|t| t + offset_ns)
+}
+
+/// A linked clock on a ready service with a fake follower.
+fn linked_on_service() -> (Arc<Fake>, Arc<MonoClock>, Linked) {
+    let fake = Arc::new(Fake(Mutex::new((None, View::default()))));
+    let service = Arc::new(MonoClock::new());
+    let linked = Linked::new(
+        Some(Box::new(Arc::clone(&fake))),
+        Arc::clone(&service),
+        None,
+    );
+    service.set_k(1_000_000_000_000);
+    assert_eq!(linked.tick(), Source::Service);
+    (fake, service, linked)
+}
+
+/// iemmixer (4.11.2026, v0.6.29 live): every engine start re-aligned the
+/// pump once, at the Service -> Internal switch about 35 s in (epoch 65536
+/// -> 131072, missed 0). The follower and the service trail the grandmaster
+/// by the same receive latency: a settled follower that agrees with the
+/// service takes over with the epoch unchanged, so neither the pump nor the
+/// TX flows start again; its own re-anchor after that still moves it.
+#[test]
+fn a_follower_that_settles_in_agreement_takes_over_without_a_new_epoch() {
+    for offset in [0, 10_000, -10_000] {
+        let (fake, service, linked) = linked_on_service();
+        let before = linked.epoch();
+        set(&fake, service_now_plus(&service, offset), ALIVE_LOCKED);
+        assert_eq!(linked.tick(), Source::Internal, "offset {offset}");
+        assert_eq!(linked.epoch(), before, "offset {offset}: no re-align");
+        assert_eq!(linked.tick(), Source::Internal);
+        assert_eq!(linked.epoch(), before, "offset {offset}: stays");
+        // Its own re-anchor is a new epoch.
+        set(
+            &fake,
+            service_now(&service),
+            View {
+                epoch: 1,
+                ..ALIVE_LOCKED
+            },
+        );
+        assert_ne!(linked.epoch(), before, "offset {offset}: a re-anchor");
+    }
+}
+
+/// A seamless handover carries the re-anchors already counted: a service
+/// that re-anchored twice before the switch hands over the same epoch, to
+/// a follower whose own count is elsewhere, and back.
+#[test]
+fn a_seamless_handover_keeps_an_epoch_with_re_anchors_in_it() {
+    let (fake, service, linked) = linked_on_service();
+    service.set_k(1_000_100_000_000);
+    service.set_k(1_000_200_000_000);
+    let before = linked.epoch();
+    assert_eq!(before & 0xffff, 2, "{before:#x}");
+    set(
+        &fake,
+        service_now(&service),
+        View {
+            epoch: 9,
+            ..ALIVE_LOCKED
+        },
+    );
+    assert_eq!(linked.tick(), Source::Internal);
+    assert_eq!(linked.epoch(), before);
+    // And back: the follower loses its lock, the service agrees.
+    set(
+        &fake,
+        service_now(&service),
+        View {
+            epoch: 9,
+            ..HOLDOVER
+        },
+    );
+    assert_eq!(linked.tick(), Source::Service);
+    assert_eq!(linked.epoch(), before, "seamless back too");
+    // The service's next re-anchor is a new epoch.
+    service.set_k(1_000_300_000_000);
+    assert_ne!(linked.epoch(), before);
+}
+
+/// A follower that disagrees with a ready service waits up to
+/// [`HANDOVER_WAIT`] rounds to come into agreement, then takes over with a
+/// re-align (no more breaks than before v0.6.30); one that agrees within
+/// the wait takes over seamlessly.
+#[test]
+fn a_follower_that_disagrees_waits_then_takes_over_with_a_new_epoch() {
+    let (fake, service, linked) = linked_on_service();
+    let before = linked.epoch();
+    for _ in 0..HANDOVER_WAIT {
+        set(&fake, service_now_plus(&service, 1_000_000), ALIVE_LOCKED);
+        assert_eq!(linked.tick(), Source::Service);
+        assert_eq!(linked.epoch(), before);
+    }
+    set(&fake, service_now_plus(&service, 1_000_000), ALIVE_LOCKED);
+    assert_eq!(linked.tick(), Source::Internal);
+    assert_ne!(linked.epoch(), before, "a re-align after the wait");
+
+    // Agreement within the wait: seamless.
+    let (fake, service, linked) = linked_on_service();
+    let before = linked.epoch();
+    for _ in 0..HANDOVER_WAIT - 1 {
+        set(&fake, service_now_plus(&service, -1_000_000), ALIVE_LOCKED);
+        assert_eq!(linked.tick(), Source::Service);
+    }
+    set(&fake, service_now(&service), ALIVE_LOCKED);
+    assert_eq!(linked.tick(), Source::Internal);
+    assert_eq!(linked.epoch(), before);
+
+    // A wait that ended (the follower unsettled) starts again from zero.
+    let (fake, service, linked) = linked_on_service();
+    for _ in 0..HANDOVER_WAIT - 1 {
+        set(&fake, service_now_plus(&service, 1_000_000), ALIVE_LOCKED);
+        assert_eq!(linked.tick(), Source::Service);
+    }
+    set(&fake, service_now_plus(&service, 1_000_000), UNSETTLED);
+    assert_eq!(linked.tick(), Source::Service);
+    set(&fake, service_now_plus(&service, 1_000_000), ALIVE_LOCKED);
+    assert_eq!(linked.tick(), Source::Service, "the wait starts again");
+}
+
+/// A forced switch (the follower in use lost its lock) never waits: a
+/// re-align when the service disagrees (seamless when it agrees: above).
+#[test]
+fn a_forced_switch_that_disagrees_re_aligns_at_once() {
+    let (fake, service, linked) = linked_on_service();
+    set(&fake, service_now(&service), ALIVE_LOCKED);
+    assert_eq!(linked.tick(), Source::Internal);
+    let before = linked.epoch();
+    set(&fake, service_now_plus(&service, 1_000_000), HOLDOVER);
+    assert_eq!(linked.tick(), Source::Service);
+    assert_ne!(linked.epoch(), before);
+}
+
+/// The first round's waits are logged once, with the offset; a seamless
+/// handover and a re-align each log their own line.
+#[test]
+fn the_handover_logs_its_wait_once_and_its_outcome() {
+    crate::test_log::undecided();
+    let (fake, service, linked) = linked_on_service();
+    let log = crate::test_log::capture_at(tracing::Level::INFO, || {
+        for _ in 0..3 {
+            set(&fake, service_now_plus(&service, 1_000_000), ALIVE_LOCKED);
+            linked.tick();
+        }
+    });
+    assert_eq!(log.matches(WAIT_LINE).count(), 1, "{log}");
+    let log = crate::test_log::capture_at(tracing::Level::INFO, || {
+        set(&fake, service_now(&service), ALIVE_LOCKED);
+        linked.tick();
+    });
+    assert_eq!(log.matches(SEAMLESS_LINE).count(), 1, "{log}");
+    assert_eq!(log.matches(WAIT_LINE).count(), 0, "{log}");
+    let log = crate::test_log::capture_at(tracing::Level::INFO, || {
+        set(&fake, service_now_plus(&service, 1_000_000), HOLDOVER);
+        linked.tick();
+    });
+    assert_eq!(log.matches(RE_ALIGN_LINE).count(), 1, "{log}");
+}
+
+#[test]
+fn the_handover_is_seamless_within_the_bound_else_waits_when_voluntary() {
+    assert_eq!(handover(Some(0), true, 0), Handover::Seamless);
+    assert_eq!(handover(Some(HANDOVER_NS), true, 0), Handover::Seamless);
+    assert_eq!(handover(Some(-HANDOVER_NS), false, 0), Handover::Seamless);
+    assert_eq!(handover(Some(HANDOVER_NS + 1), true, 0), Handover::Wait);
+    assert_eq!(handover(Some(-HANDOVER_NS - 1), true, 0), Handover::Wait);
+    assert_eq!(
+        handover(Some(HANDOVER_NS + 1), true, HANDOVER_WAIT - 1),
+        Handover::Wait
+    );
+    assert_eq!(
+        handover(Some(HANDOVER_NS + 1), true, HANDOVER_WAIT),
+        Handover::Break
+    );
+    assert_eq!(handover(Some(HANDOVER_NS + 1), false, 0), Handover::Break);
+    assert_eq!(handover(None, true, 0), Handover::Wait);
+    assert_eq!(handover(None, false, 0), Handover::Break);
+    assert_eq!(handover(Some(i64::MIN), false, 0), Handover::Break);
+}
+
+/// The bound against the pump's tolerance: at the tightest schedule the
+/// stack allows (192 kHz, block 16, W 16), a step of [`HANDOVER_NS`] either
+/// way at any point of a block is a late block or a wait, never a
+/// re-bootstrap.
+#[test]
+fn the_pump_absorbs_a_handover_step_at_its_tightest_schedule() {
+    use crate::stream::{Blocks, Due, Timing};
+    let step = crate::clock::to_samples(HANDOVER_NS.unsigned_abs(), 192_000) + 1;
+    assert_eq!(step, 6);
+    let t = Timing {
+        block: 16,
+        playout: 16,
+        margin: 16,
+    };
+    for forward in [true, false] {
+        for into in 0..t.block {
+            let mut b = Blocks::bootstrap(1_000_000, t);
+            // In time: every block due up to here ran at its due time.
+            let mut now = b.due();
+            while let Due::Run { .. } | Due::Wait { .. } = b.next(now) {
+                if b.due() > 1_000_000 + 10 * t.block {
+                    break;
+                }
+                now = b.due();
+            }
+            let at = now + into;
+            let mut now = if forward { at + step } else { at - step };
+            for _ in 0..4 {
+                match b.next(now) {
+                    Due::Run { .. } => {}
+                    Due::Wait { until } => now = until,
+                    Due::Rebootstrap { .. } => {
+                        panic!("forward {forward} into {into}: a re-bootstrap")
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The follower's counts, for the status (v0.6.30); none without one.
+#[test]
+fn the_linked_clock_reads_the_follower_s_counts() {
+    let (fake, _service, linked) = linked_on_service();
+    set(&fake, None, HOLDOVER);
+    assert_eq!(
+        linked.follower_counts(),
+        Some(ClockCounts {
+            polls: 7,
+            re_anchors: 0,
+            holdovers: 2,
+            in_holdover: true
+        })
+    );
+    let service = Arc::new(MonoClock::new());
+    assert_eq!(Linked::new(None, service, None).follower_counts(), None);
 }
