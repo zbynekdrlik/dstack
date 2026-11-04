@@ -57,7 +57,8 @@ pub fn main(build: Build) -> ExitCode {
         Ok(Command::Clock { seconds }) => return clock(build.name, seconds),
         Ok(Command::Ctl { socket, request }) => return ctl_request(build.name, &socket, &request),
         Ok(Command::Card(args)) => return card(build.name, &args),
-        Ok(Command::Run(opts)) => (opts, host::ClockSource::Dsync),
+        Ok(Command::Run(opts)) => (opts, host::ClockSource::default()),
+        Ok(Command::RunOnService(opts)) => (opts, host::ClockSource::Dsync),
         Ok(Command::RunOnSystemClock(opts)) => (opts, host::ClockSource::System),
         Err(msg) => {
             eprintln!("{}: {msg}\n\n{}", build.name, usage(build.name));

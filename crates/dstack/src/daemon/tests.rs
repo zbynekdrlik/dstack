@@ -78,15 +78,22 @@ fn a_run_takes_the_system_clock_only_when_asked() {
         control: PathBuf::from("/run/dstack/control.sock"),
     };
     assert_eq!(with(&[]), Ok(Command::Run(opts())));
-    assert_eq!(with(&["--clock", "dsync"]), Ok(Command::Run(opts())));
+    assert_eq!(with(&["--clock", "linked"]), Ok(Command::Run(opts())));
+    assert_eq!(
+        with(&["--clock", "dsync"]),
+        Ok(Command::RunOnService(opts()))
+    );
     assert_eq!(
         with(&["--clock", "system"]),
         Ok(Command::RunOnSystemClock(opts()))
     );
     for (extra, want) in [
         (&["--clock"][..], "--clock needs a value"),
-        (&["--clock", "ptp"][..], "--clock is dsync or system"),
-        (&["--clock", ""][..], "--clock is dsync or system"),
+        (
+            &["--clock", "ptp"][..],
+            "--clock is linked, dsync or system",
+        ),
+        (&["--clock", ""][..], "--clock is linked, dsync or system"),
         (
             &["--clock", "system", "--clock", "system"][..],
             "--clock given twice",

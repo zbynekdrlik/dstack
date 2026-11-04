@@ -115,7 +115,7 @@ pub fn usage(name: &str) -> String {
 /// The `--help` text, naming [`NAME`]; [`usage`] names another binary.
 pub const USAGE: &str = "\
 usage: dstack-dev --config <path> (--iface <name> | --ip <IPv4 address>)
-                     [--control <socket path>] [--clock dsync|system]
+                     [--control <socket path>] [--clock linked|dsync|system]
        dstack-dev ctl [--socket <path>] <request>
        dstack-dev clock --seconds <n>
        dstack-dev card read <ip> <expected-name>
@@ -129,7 +129,9 @@ IPv4 address (info replies to 224.0.0.231:8702, a heartbeat every second to
 224.0.0.233:8708), its mDNS records on that interface only, renames and RX
 subscriptions saved to the config's state file. It sends the TX flows
 receivers ask for and asks transmitters for its subscribed RX channels, on
-PTP time read from dsync (127.0.0.1:31900); it never sends PTP. Its
+PTP time it follows itself (dsync's in-process follower on the interface,
+the default, --clock linked), else from the dsync service (127.0.0.1:31900);
+it never sends PTP. --clock dsync takes the service's time only. Its
 control socket (default /run/dstack/control.sock) takes one request
 line a connection. SIGTERM or SIGINT stops every RX flow at its
 transmitter, ends the media threads and withdraws the records (mDNS
@@ -186,7 +188,11 @@ pub struct Options {
 /// What the command line asks for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
+    /// The device on the default clock (`--clock linked` or none: dsync's
+    /// in-process follower, the service its fallback).
     Run(Options),
+    /// `--clock dsync`: the device on the dsync service's time only.
+    RunOnService(Options),
     /// TEST ONLY (`--clock system`): the device on this machine's own clock
     /// (`host::ClockSource::System`), for a box with no PTP network (CI).
     RunOnSystemClock(Options),
@@ -261,9 +267,10 @@ pub fn parse_args(args: &[String]) -> Result<Command, String> {
         control,
     };
     match clock.as_deref() {
-        None | Some("dsync") => Ok(Command::Run(opts)),
+        None | Some("linked") => Ok(Command::Run(opts)),
+        Some("dsync") => Ok(Command::RunOnService(opts)),
         Some("system") => Ok(Command::RunOnSystemClock(opts)),
-        Some(_) => Err("--clock is dsync or system".into()),
+        Some(_) => Err("--clock is linked, dsync or system".into()),
     }
 }
 
