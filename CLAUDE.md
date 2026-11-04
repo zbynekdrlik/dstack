@@ -5,7 +5,7 @@ The one Dante expert project. All Dante code lives here: discovery, ARC, CMC, fl
 Repo `zbynekdrlik/dstack` (renamed from dante-stack on 31.10.2026). Crates (v0.5.0, #68): `dstack` (the stack), `dstack-audio-io` (the engine-agnostic audio API), binary `dstack-dev`; consumers write `git = "https://github.com/zbynekdrlik/dstack"`. `dlink` is the part an application embeds (#68).
 
 - Names (owner 2.11.2026, #68): no "dante" in our project, crate, binary or thread names (dstack, dasio, dlink). The protocol stays "Dante" in docs and comments.
-- dlink needs no low latency (owner 2.11.2026): about 10 ms is fine, and it never asks an application for real-time setup (rtprio, SCHED_FIFO, special timers). Very low latency is only iemmixer (`low_latency`, gen3) and dasio (ASIO).
+- dlink needs no low latency (owner 2.11 and 4.11.2026): its default budget is 15 ms (10 ms was never a cap), and it never asks an application for real-time setup or CPU-core pinning (rtprio, SCHED_FIFO, special timers, affinity). Very low latency is only iemmixer (`low_latency`, gen3) and dasio (ASIO).
 
 Start from `docs/HANDOVER.md`, then `docs/design/2026-10-30-shared-dstack.md`.
 
