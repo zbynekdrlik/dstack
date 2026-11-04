@@ -659,7 +659,7 @@ async fn the_driver_s_tick_warns_once_for_a_second_the_pump_restarted() {
 
 #[tokio::test]
 async fn the_driver_s_tick_tells_a_reset_pin_once() {
-    use crate::media::repin::{RESET_LINE, note_reset, tests::counter};
+    use crate::media::repin::{PinOutcome, RESET_LINE, note, tests::counter};
     use crate::test_log::{capture_at, undecided};
     undecided();
     let dir = tempfile::tempdir().unwrap();
@@ -669,7 +669,7 @@ async fn the_driver_s_tick_tells_a_reset_pin_once() {
     let (mut driver, _answers, _changes) = driver_of(&media);
     {
         let _turn = counter();
-        note_reset();
+        note(PinOutcome::Reset);
     }
     let log = capture_at(tracing::Level::INFO, || {
         driver.tick(&records);

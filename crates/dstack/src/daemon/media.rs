@@ -429,8 +429,8 @@ pub struct Driver {
     pump: crate::stream::watch::PumpWatch,
     /// Other traffic on our NIC, logged once a minute.
     traffic: crate::traffic::TrafficWatch,
-    /// A media thread's CPU pin found reset (another program's process
-    /// affinity rule), told once.
+    /// A media thread's CPU pin found lost (another program's process
+    /// affinity rule) or refused, each told once.
     pins: crate::media::repin::PinWatch,
 }
 
@@ -479,7 +479,10 @@ impl Driver {
             self.media.engine_stats().as_deref(),
         );
         self.traffic.watch(now, self.media.ip, &self.media.tx);
-        self.pins.watch(crate::media::repin::pin_resets());
+        self.pins.watch(
+            crate::media::repin::pin_resets(),
+            crate::media::repin::pin_refusals(),
+        );
     }
 
     /// The answer to the request of `flow`.
