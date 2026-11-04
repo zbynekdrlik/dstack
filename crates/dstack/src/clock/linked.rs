@@ -31,7 +31,9 @@ use std::time::Duration;
 
 use tracing::{info, warn};
 
-use super::{ClockCounts, MonoClock, NOT_READY_NAP_NS, PtpClock, monotonic_ns};
+use dsync_ptp::follower::model::ClockModel;
+
+use super::{ClockCounts, FollowerCounts, MonoClock, NOT_READY_NAP_NS, PtpClock, monotonic_ns};
 
 /// Where the linked clock takes PTP time from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -181,8 +183,9 @@ pub trait Follow: Send + Sync {
     /// Its state for the selector.
     fn view(&self) -> View;
     /// Its counts for the status: windows (as `polls`), re-anchors,
-    /// holdovers, and whether it is in holdover now.
-    fn counts(&self) -> ClockCounts;
+    /// holdovers, whether it is in holdover now, and the re-anchors
+    /// absorbed.
+    fn counts(&self) -> FollowerCounts;
 }
 
 /// What the media threads read of the selector's choice, in one word so a
@@ -275,7 +278,7 @@ impl Linked {
 
     /// The follower's counts ([`Follow::counts`]); `None` when it did not
     /// start.
-    pub fn follower_counts(&self) -> Option<ClockCounts> {
+    pub fn follower_counts(&self) -> Option<FollowerCounts> {
         self.internal.as_ref().map(|f| f.counts())
     }
 
@@ -422,32 +425,140 @@ impl PtpClock for Linked {
     }
 }
 
-/// dsync's in-process follower (dsync-ptp) as the linked clock reads it.
-impl Follow for dsync_ptp::follower::PtpClock {
+/// The step of a re-anchor from the model `old` to `new`: `new`'s time at
+/// its own anchor less `old`'s at that instant (`old`'s rate counted);
+/// `None` when either has no anchor.
+pub fn re_anchor_step(old: &ClockModel, new: &ClockModel) -> Option<i64> {
+    let was = old.ptp_at(new.m0)?;
+    new.ptp_at(new.m0).map(|now| now.wrapping_sub(was))
+}
+
+/// The follower's re-anchors sorted by their step (v0.6.31, iemmixer
+/// 4.11.2026: a grandmaster reboot re-anchored it by +2557 ns, then -5710
+/// ns, and each re-aligned the media threads): a change of dsync's
+/// (epoch, reanchors) whose [`re_anchor_step`] is within [`HANDOVER_NS`] is
+/// absorbed, any other a re-align. The service needs no such rule: its
+/// tracker holds k for steps under [`super::TOLERANCE_NS`].
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Absorb {
+    last: Option<ClockModel>,
+    realigns: u32,
+    absorbed: u32,
+}
+
+impl Absorb {
+    /// The model now; returns the re-aligns and the absorbed so far.
+    pub fn feed(&mut self, m: ClockModel) -> (u32, u32) {
+        if let Some(old) = self.last
+            && (old.epoch, old.reanchors) != (m.epoch, m.reanchors)
+        {
+            match re_anchor_step(&old, &m) {
+                Some(d) if d.unsigned_abs() <= HANDOVER_NS.unsigned_abs() => {
+                    self.absorbed = self.absorbed.wrapping_add(1);
+                }
+                _ => self.realigns = self.realigns.wrapping_add(1),
+            }
+        }
+        self.last = Some(m);
+        (self.realigns, self.absorbed)
+    }
+}
+
+/// What the linked clock reads of dsync's follower.
+pub trait Model: Send + Sync {
+    /// The published model (a stale receive thread reads as holdover).
+    fn model(&self) -> ClockModel;
+    /// Its receive thread runs.
+    fn alive(&self) -> bool;
+    /// PTP time now, ns.
+    fn now_ns(&self) -> Option<i64>;
+}
+
+/// dsync-ptp's reader handle.
+impl Model for dsync_ptp::follower::PtpClock {
+    fn model(&self) -> ClockModel {
+        dsync_ptp::follower::PtpClock::model(self)
+    }
+
+    fn alive(&self) -> bool {
+        dsync_ptp::follower::PtpClock::alive(self)
+    }
+
     fn now_ns(&self) -> Option<i64> {
         self.now_ptp_ns()
     }
+}
+
+/// The follower as the linked clock reads it: its view's epoch counts only
+/// the re-anchors to re-align for ([`Absorb`]). Whichever thread reads
+/// first (the selector, the pump, the TX thread) feeds the tracker; one
+/// that finds it busy reads the counts last published, so a media thread
+/// never waits.
+pub struct Absorbing<M> {
+    source: M,
+    pub(crate) absorb: std::sync::Mutex<Absorb>,
+    /// The last (re-aligns, absorbed), packed.
+    published: AtomicU64,
+}
+
+impl<M: Model> Absorbing<M> {
+    pub fn new(source: M) -> Self {
+        Absorbing {
+            source,
+            absorb: std::sync::Mutex::new(Absorb::default()),
+            published: AtomicU64::new(0),
+        }
+    }
+
+    /// The model now and the (re-aligns, absorbed) with it.
+    fn read(&self) -> (ClockModel, u32, u32) {
+        let m = self.source.model();
+        if let Ok(mut a) = self.absorb.try_lock() {
+            let (r, ab) = a.feed(m);
+            let [r0, r1, r2, r3] = r.to_be_bytes();
+            let [a0, a1, a2, a3] = ab.to_be_bytes();
+            self.published.store(
+                u64::from_be_bytes([r0, r1, r2, r3, a0, a1, a2, a3]),
+                Ordering::Release,
+            );
+        }
+        let [r0, r1, r2, r3, a0, a1, a2, a3] = self.published.load(Ordering::Acquire).to_be_bytes();
+        (
+            m,
+            u32::from_be_bytes([r0, r1, r2, r3]),
+            u32::from_be_bytes([a0, a1, a2, a3]),
+        )
+    }
+}
+
+impl<M: Model> Follow for Absorbing<M> {
+    fn now_ns(&self) -> Option<i64> {
+        self.source.now_ns()
+    }
 
     fn view(&self) -> View {
-        let s = self.state();
+        let (m, realigns, _) = self.read();
         View {
-            alive: self.alive(),
-            locked: s.locked,
-            settled: s.settled,
-            anchored: s.locked || s.holdover,
-            epoch: s.epoch.wrapping_add(s.reanchors),
+            alive: self.source.alive(),
+            locked: m.locked,
+            settled: m.settled,
+            anchored: m.locked || m.holdover,
+            epoch: realigns,
         }
     }
 
     /// dsync-ptp counts phase-lock windows (it has no polls), re-anchors
     /// (every discontinuity of its published time) and holdovers.
-    fn counts(&self) -> ClockCounts {
-        let s = self.state();
-        ClockCounts {
-            polls: s.windows,
-            re_anchors: s.reanchors,
-            holdovers: s.holdovers,
-            in_holdover: s.holdover,
+    fn counts(&self) -> FollowerCounts {
+        let (m, _, absorbed) = self.read();
+        FollowerCounts {
+            counts: ClockCounts {
+                polls: m.windows,
+                re_anchors: m.reanchors,
+                holdovers: m.holdovers,
+                in_holdover: m.holdover,
+            },
+            absorbed,
         }
     }
 }
@@ -486,7 +597,7 @@ pub fn start_internal(iface: &str, seed_ppb: Option<i32>) -> Started {
                 iface,
                 seed_ppb, "media clock: dsync's in-process follower started"
             );
-            (Some(Box::new(f.clock())), Some(Box::new(f)))
+            (Some(Box::new(Absorbing::new(f.clock()))), Some(Box::new(f)))
         }
         Err(e) => {
             warn!(

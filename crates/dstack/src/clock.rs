@@ -194,7 +194,7 @@ pub struct ClockStats {
     linked: std::sync::atomic::AtomicU8,
     /// A linked clock's follower counts, as the selector read them last
     /// (`None`: no follower).
-    follower: std::sync::Mutex<Option<ClockCounts>>,
+    follower: std::sync::Mutex<Option<FollowerCounts>>,
 }
 
 /// [`ClockStats`] read at one moment.
@@ -205,6 +205,16 @@ pub struct ClockCounts {
     pub holdovers: u32,
     /// The last poll was in holdover.
     pub in_holdover: bool,
+}
+
+/// A linked clock's follower counts: dsync's own (its phase-lock windows in
+/// `polls`, its re-anchors, holdovers), and how many of its re-anchors the
+/// media threads absorbed without a re-align (a step within
+/// [`linked::HANDOVER_NS`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FollowerCounts {
+    pub counts: ClockCounts,
+    pub absorbed: u32,
 }
 
 impl ClockStats {
@@ -267,7 +277,7 @@ impl ClockStats {
 
     /// A linked clock's follower counts now (the host's selection, once a
     /// second; `None` when the follower did not start).
-    pub fn set_follower(&self, counts: Option<ClockCounts>) {
+    pub fn set_follower(&self, counts: Option<FollowerCounts>) {
         *self
             .follower
             .lock()
@@ -276,7 +286,7 @@ impl ClockStats {
 
     /// The follower's counts as last set (its windows in `polls`); `None`
     /// without a follower.
-    pub fn follower(&self) -> Option<ClockCounts> {
+    pub fn follower(&self) -> Option<FollowerCounts> {
         *self
             .follower
             .lock()

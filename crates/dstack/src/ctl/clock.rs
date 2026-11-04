@@ -19,7 +19,7 @@ pub(super) fn clock_part(j: &mut Json, media: &Media) {
     let linked = media.clock_stats.linked();
     let service = media.clock_stats.counts();
     let follower = media.clock_stats.follower();
-    let c = clock_counts_in_use(linked, service, follower);
+    let c = clock_counts_in_use(linked, service, follower.map(|f| f.counts));
     j.open(Some("clock"), '{');
     j.flag("ready", media.clock.now_ns().is_some());
     j.num("epoch", media.clock.epoch());
@@ -33,22 +33,25 @@ pub(super) fn clock_part(j: &mut Json, media: &Media) {
         clock_source_word(media.clock_stats.is_system(), linked),
     );
     if linked.is_some() {
-        counts_part(j, "service", "polls", service);
+        j.open(Some("service"), '{');
+        counts_part(j, "polls", service);
+        j.close('}');
         if let Some(f) = follower {
-            counts_part(j, "follower", "windows", f);
+            j.open(Some("follower"), '{');
+            counts_part(j, "windows", f.counts);
+            j.num("absorbed", f.absorbed);
+            j.close('}');
         }
     }
     j.close('}');
 }
 
-/// One source's counts as an object `key`, its polls named `polls_key`.
-fn counts_part(j: &mut Json, key: &str, polls_key: &str, c: ClockCounts) {
-    j.open(Some(key), '{');
+/// One source's counts, its polls named `polls_key`.
+fn counts_part(j: &mut Json, polls_key: &str, c: ClockCounts) {
     j.num(polls_key, c.polls);
     j.num("re_anchors", c.re_anchors);
     j.num("holdovers", c.holdovers);
     j.flag("holdover", c.in_holdover);
-    j.close('}');
 }
 
 /// The counts the clock status shows on top: the follower's while a linked

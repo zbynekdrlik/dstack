@@ -98,9 +98,9 @@ exclude_re = [
   # (tested), the call is ask_priority (excluded above).
   "tx.rs.*take_priority",
   # dsync's real follower (dsync-ptp): it binds port 319, which neither CI
-  # nor the gate may; the selector's rule (`choose`) and `Linked` are tested
-  # with a fake follower.
-  "linked.rs.*impl Follow for dsync_ptp",
+  # nor the gate may; the selector's rule (`choose`), `Linked` and `Absorbing`
+  # are tested with a fake follower (a fake model for `Absorbing`).
+  "linked.rs.*impl Model for dsync_ptp",
   "linked.rs.*start_internal",
   # The selector's log level only (warn on no source, info otherwise).
   "linked.rs.*delete match arm Source::None in Linked::tick",
