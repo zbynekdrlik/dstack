@@ -288,6 +288,12 @@ impl Media {
         lock(&self.engine).as_ref().map(|stats| stats.view())
     }
 
+    /// The attached engine's counts, `None` before one is attached (the
+    /// pump watch reads them each tick).
+    pub fn engine_stats(&self) -> Option<Arc<PumpStats>> {
+        lock(&self.engine).clone()
+    }
+
     /// The numbers a control request is checked against.
     pub fn limits(&self) -> Limits {
         Limits {
@@ -418,6 +424,9 @@ pub struct Driver {
     sends: crate::media::late::SendWatch,
     /// The host frame sender's refused batches, logged once a second.
     host: crate::media::late::HostWatch,
+    /// The engine pump's re-bootstraps, skipped blocks and overruns, logged
+    /// once a second.
+    pump: crate::stream::watch::PumpWatch,
     /// Other traffic on our NIC, logged once a minute.
     traffic: crate::traffic::TrafficWatch,
 }
@@ -440,6 +449,7 @@ impl Driver {
                 loss: crate::media::late::RxWatch::new(),
                 sends: crate::media::late::SendWatch::new(),
                 host: crate::media::late::HostWatch::new(),
+                pump: crate::stream::watch::PumpWatch::new(),
                 traffic: crate::traffic::TrafficWatch::new(),
             },
             back,
@@ -447,8 +457,8 @@ impl Driver {
     }
 
     /// One round of the manager now, with the channel records `resolver`
-    /// knows; then the checks' round and the late, loss and traffic
-    /// watches.
+    /// knows; then the checks' round and the late, loss, send, host, pump
+    /// and traffic watches.
     pub fn tick(&mut self, resolver: &dyn Resolver) {
         let now = self.media.rx.now_ns();
         let packets = self.media.rx.packets();
@@ -459,6 +469,11 @@ impl Driver {
         self.loss.watch(now, &self.media.rx);
         self.sends.watch(now, &self.media.tx);
         self.host.watch(now, &self.media.tx);
+        self.pump.watch(
+            now,
+            &self.media.tx.cfg.name,
+            self.media.engine_stats().as_deref(),
+        );
         self.traffic.watch(now, self.media.ip, &self.media.tx);
     }
 
