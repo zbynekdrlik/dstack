@@ -1037,3 +1037,69 @@ fn an_arc_resolved_device_is_asked_for_no_more_slots_than_its_channels() {
         assert_eq!(a.nchan, want, "{n} channels");
     }
 }
+
+/// dstack #1: the TX side finds a receiver's ARC by its device name in the
+/// records, and asking marks the directory asked (the daemon starts it).
+#[test]
+fn a_device_s_arc_address_is_found_by_name_and_asks_for_the_browses() {
+    let dir = ArcDirectory::new(Timing::default());
+    let records = dir.records();
+    let no_record = Err(ArcMiss::NoRecord);
+    assert!(!dir.asked());
+    assert_eq!(records.arc_at("peer-device", PEER_IP), no_record);
+    assert!(dir.asked());
+    let arc = record(ARC_SERVICE, "peer-device", "10.0.0.11", 4441);
+    lock(&dir.shared.book).apply(&arc, 0);
+    let at = Ok(SocketAddrV4::new(PEER_IP, 4441));
+    assert_eq!(records.arc_at("peer-device", PEER_IP), at);
+    assert_eq!(records.arc_at("PEER-Device", PEER_IP), at, "case aside");
+    assert_eq!(records.arc_at("other", PEER_IP), no_record);
+    assert_eq!(
+        records.arc_at("peer-device", OUR_IP),
+        Err(ArcMiss::OtherAddress)
+    );
+    // A device with only its flow-control record has no ARC address.
+    let dbc = record(DBC_SERVICE, "dbc-only", "10.0.0.12", 4455);
+    lock(&dir.shared.book).apply(&dbc, 0);
+    assert_eq!(records.arc_at("dbc-only", dbc_ip()), no_record);
+    // Several cards: every address of the record is the device's, at the
+    // record's port; the lowest stays the directory's (`arc`).
+    let multi = record(ARC_SERVICE, "multi", "10.0.0.20, 10.0.0.5", 4443);
+    lock(&dir.shared.book).apply(&multi, 0);
+    for ip in [Ipv4Addr::new(10, 0, 0, 5), Ipv4Addr::new(10, 0, 0, 20)] {
+        assert_eq!(records.arc_at("multi", ip), Ok(SocketAddrV4::new(ip, 4443)));
+    }
+    assert_eq!(
+        lock(&dir.shared.book).records["multi"].arc,
+        Some(SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 5), 4443))
+    );
+    // Its withdrawal forgets every address.
+    lock(&dir.shared.book).apply(&gone(ARC_SERVICE, "multi"), 0);
+    assert_eq!(
+        records.arc_at("multi", Ipv4Addr::new(10, 0, 0, 20)),
+        no_record
+    );
+}
+
+/// The dbc-only record's address.
+fn dbc_ip() -> Ipv4Addr {
+    Ipv4Addr::new(10, 0, 0, 12)
+}
+
+/// A record with more addresses than kept keeps the lowest ones.
+#[test]
+fn a_record_keeps_its_lowest_addresses_up_to_the_bound() {
+    let ips: Vec<String> = (1..=MAX_ARC_ADDRESSES + 2)
+        .rev()
+        .map(|i| format!("10.0.1.{i}"))
+        .collect();
+    let mut book = Book::new(Timing::default());
+    book.apply(&record(ARC_SERVICE, "many", &ips.join(","), 4440), 0);
+    let kept = &book.records["many"].arc_ips;
+    assert_eq!(kept.len(), MAX_ARC_ADDRESSES);
+    assert_eq!(kept[0], Ipv4Addr::new(10, 0, 1, 1));
+    assert!(kept.windows(2).all(|w| w[0] < w[1]), "{kept:?}");
+    let highest = u8::try_from(MAX_ARC_ADDRESSES + 2).unwrap();
+    let dropped = Ipv4Addr::new(10, 0, 1, highest);
+    assert_eq!(book.arc_at("many", dropped), Err(ArcMiss::OtherAddress));
+}

@@ -60,6 +60,11 @@ fn a_scoped_subscriber_sees_an_event_with_the_global_one_set() {
 
 /// The WARN lines `f` logs on this thread, as text.
 pub fn capture_warnings(f: impl FnOnce()) -> String {
+    capture_at(tracing::Level::WARN, f)
+}
+
+/// The lines at `level` and above `f` logs on this thread, as text.
+pub fn capture_at(level: tracing::Level, f: impl FnOnce()) -> String {
     use std::sync::{Arc, Mutex};
     #[derive(Clone)]
     struct Sink(Arc<Mutex<Vec<u8>>>);
@@ -80,7 +85,7 @@ pub fn capture_warnings(f: impl FnOnce()) -> String {
     let subscriber = tracing_subscriber::fmt()
         .with_writer(move || out.clone())
         .with_ansi(false)
-        .with_max_level(tracing::Level::WARN)
+        .with_max_level(level)
         .finish();
     undecided();
     tracing::subscriber::with_default(subscriber, f);

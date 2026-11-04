@@ -766,6 +766,7 @@ fn lane_fields(j: &mut Json, lane: &LaneCounts) {
     j.num("send_max_us", lane.send_max_ns / 1_000);
     j.num("age_max_us", lane.age_max_ns / 1_000);
     j.num("over_latency", lane.over_latency);
+    j.num("receiver_latency_us", lane.receiver_latency_ns / 1_000);
     j.num("direct", lane.direct);
 }
 
