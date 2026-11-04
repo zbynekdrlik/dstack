@@ -610,6 +610,7 @@ const WORDS: &[&str] = &[
     "freq_ppb",
     "follower",
     "windows",
+    "absorbed",
     "dsync",
     "system",
     "internal",
@@ -1571,13 +1572,21 @@ fn the_clock_counts_describe_the_source_in_use_and_each_source_apart() {
     assert!(!s.contains("\"follower\""), "{s}");
     // Linked, on the follower.
     media.clock_stats.set_linked(Source::Internal);
-    media.clock_stats.set_follower(Some(ClockCounts {
-        polls: 300,
-        re_anchors: 4,
-        holdovers: 3,
-        in_holdover: false,
-    }));
-    assert_eq!(media.clock_stats.follower().map(|c| c.polls), Some(300));
+    media
+        .clock_stats
+        .set_follower(Some(crate::clock::FollowerCounts {
+            counts: ClockCounts {
+                polls: 300,
+                re_anchors: 4,
+                holdovers: 3,
+                in_holdover: false,
+            },
+            absorbed: 2,
+        }));
+    assert_eq!(
+        media.clock_stats.follower().map(|c| c.counts.polls),
+        Some(300)
+    );
     let s = status(&media);
     for word in strings_of_json(&s) {
         assert!(WORDS.contains(&word.as_str()), "{word:?} in {s}");
@@ -1587,7 +1596,7 @@ fn the_clock_counts_describe_the_source_in_use_and_each_source_apart() {
             "\"polls\":300,\"re_anchors\":4,\"holdovers\":3,\"holdover\":0,\"freq_ppb\":-750,\
              \"source\":\"internal\",\
              \"service\":{\"polls\":2,\"re_anchors\":0,\"holdovers\":1,\"holdover\":1},\
-             \"follower\":{\"windows\":300,\"re_anchors\":4,\"holdovers\":3,\"holdover\":0}}"
+             \"follower\":{\"windows\":300,\"re_anchors\":4,\"holdovers\":3,\"holdover\":0,\"absorbed\":2}}"
         ),
         "{s}"
     );
