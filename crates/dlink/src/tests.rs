@@ -24,8 +24,8 @@ fn the_block_is_128_unless_the_app_sets_another_of_the_stack_s_blocks() {
         );
         assert_eq!(work_margin(48_000, bad), 128);
         assert_eq!(
-            split(BUDGET_NS, 48_000, 48_000, bad),
-            split(BUDGET_NS, 48_000, 48_000, BLOCK)
+            split(BUDGET_NS, 48_000, 48_000, bad, Directions::Both),
+            split(BUDGET_NS, 48_000, 48_000, BLOCK, Directions::Both)
         );
     }
     // Listed with the others, as a config file's would be.
@@ -299,7 +299,7 @@ fn the_budget_splits_into_the_dante_latency_and_the_work() {
         ((96_000, 48_000, 256), (450, 256, 999, 849)),
         ((48_000, 48_000, 256), (466, 256, 999, 999)),
     ] {
-        let s = split(BUDGET_NS, dev, app, block).unwrap();
+        let s = split(BUDGET_NS, dev, app, block, Directions::Both).unwrap();
         assert_eq!(
             (
                 ms(s.latency_ns),
@@ -352,16 +352,16 @@ fn the_config_carries_the_app_s_frame_sender() {
 #[test]
 fn each_path_is_its_work_plus_the_dante_latency() {
     let ns = |samples: u64, rate: u64| samples * 1_000_000_000 / rate;
-    let s = split(BUDGET_NS, 96_000, 96_000, 128).unwrap();
+    let s = split(BUDGET_NS, 96_000, 96_000, 128, Directions::Both).unwrap();
     assert_eq!(s.tx_path_ns, ns(192, 96_000) + s.latency_ns);
     assert_eq!(s.rx_path_ns, ns(128, 96_000) + s.latency_ns);
     let (rx, tx) = rated::delay_ns(96_000, 48_000, 128).unwrap();
-    let c = split(BUDGET_NS, 96_000, 48_000, 128).unwrap();
+    let c = split(BUDGET_NS, 96_000, 48_000, 128, Directions::Both).unwrap();
     assert_eq!(c.tx_path_ns, ns(192, 96_000) + tx + c.latency_ns);
     assert_eq!(c.rx_path_ns, ns(128, 96_000) + rx + c.latency_ns);
     // A 96 kHz app on a 48 kHz device: the RX side is the larger work, and
     // it sets the Dante latency.
-    let up = split(BUDGET_NS, 48_000, 96_000, 128).unwrap();
+    let up = split(BUDGET_NS, 48_000, 96_000, 128, Directions::Both).unwrap();
     assert!(up.rx_path_ns > up.tx_path_ns, "{up:?}");
     assert_eq!(BUDGET_NS - up.rx_path_ns, 2);
 }
@@ -372,21 +372,21 @@ fn each_path_is_its_work_plus_the_dante_latency() {
 fn a_budget_that_leaves_under_4_ms_of_dante_latency_is_a_problem() {
     assert_eq!(MIN_LATENCY_NS, 4_000_000);
     // 48 kHz, block 128: the work is 128 samples, 2666666 ns.
-    let s = split(6_666_666, 48_000, 48_000, 128).unwrap();
+    let s = split(6_666_666, 48_000, 48_000, 128, Directions::Both).unwrap();
     assert_eq!(s.latency_ns, 4_000_000);
     assert_eq!(
-        split(6_666_665, 48_000, 48_000, 128).unwrap_err(),
+        split(6_666_665, 48_000, 48_000, 128, Directions::Both).unwrap_err(),
         "budget_ns: 6666665 leaves a Dante latency of 3979166 ns after 2666666 ns of work \
          (block, margin, rate conversion); at least 4000000"
     );
     // Under the work itself: nothing left.
     assert!(
-        split(1_000_000, 48_000, 48_000, 128)
+        split(1_000_000, 48_000, 48_000, 128, Directions::Both)
             .unwrap_err()
             .contains("Dante latency of 0 ns")
     );
     // A large block with a conversion can reach the floor.
-    assert!(split(BUDGET_NS, 48_000, 44_100, 256).is_err());
+    assert!(split(BUDGET_NS, 48_000, 44_100, 256, Directions::Both).is_err());
 }
 
 /// dstack #68: a device rate of 0 and a rate pair the converter refuses are
@@ -394,11 +394,11 @@ fn a_budget_that_leaves_under_4_ms_of_dante_latency_is_a_problem() {
 #[test]
 fn a_rate_the_split_cannot_use_is_a_problem() {
     assert_eq!(
-        split(BUDGET_NS, 0, 48_000, 128).unwrap_err(),
+        split(BUDGET_NS, 0, 48_000, 128, Directions::Both).unwrap_err(),
         "sample_rate: the device's rate is 0 Hz"
     );
     assert!(
-        split(BUDGET_NS, 96_000, 0, 128)
+        split(BUDGET_NS, 96_000, 0, 128, Directions::Both)
             .unwrap_err()
             .starts_with("rate conversion: ")
     );
@@ -414,7 +414,10 @@ fn the_config_s_split_is_what_its_device_runs() {
         .block(64)
         .budget_ns(12_000_000);
     let s = c.split().unwrap();
-    assert_eq!(s, split(12_000_000, 96_000, 48_000, 64).unwrap());
+    assert_eq!(
+        s,
+        split(12_000_000, 96_000, 48_000, 64, Directions::Both).unwrap()
+    );
     let cfg = c.device().unwrap();
     assert_eq!((cfg.latency_ns, cfg.work_margin), (s.latency_ns, s.margin));
 }
@@ -461,11 +464,89 @@ fn the_dante_latency_follows_the_directions_the_device_has() {
         .network_rate(48_000);
     let t = tx_only.split().unwrap();
     assert!(t.tx_path_ns <= BUDGET_NS, "{t:?}");
-    assert!(BUDGET_NS - t.tx_path_ns <= 1_000_000_000 / 48_000 + 1, "{t:?}");
+    assert!(
+        BUDGET_NS - t.tx_path_ns <= 1_000_000_000 / 48_000 + 1,
+        "{t:?}"
+    );
     assert!(t.rx_path_ns > BUDGET_NS, "{t:?}");
     assert_eq!(tx_only.device().unwrap().latency_ns, t.latency_ns);
     // Both directions: the larger work, as before (5.17 ms here).
     let both = base(config()).split().unwrap();
     assert_eq!(ms(both.latency_ns), 516);
     assert!(both.tx_path_ns <= BUDGET_NS && both.rx_path_ns <= BUDGET_NS);
+}
+
+/// dstack #1, the one-direction table in the crate docs: P is the budget
+/// less that direction's work alone, in whole samples, and that path stays
+/// within a sample of the budget.
+#[test]
+fn a_one_direction_device_splits_by_that_direction_s_work() {
+    use Directions::{Both, Rx, Tx};
+    let ms = |ns: u64| ns / 10_000;
+    // (device, app, directions) -> (P, TX path, RX path), in 10 us steps.
+    for ((dev, app, dir), want) in [
+        ((96_000, 96_000, Rx), (866, 1_066, 999)),
+        ((96_000, 96_000, Tx), (800, 1_000, 933)),
+        ((96_000, 48_000, Rx), (733, 1_216, 999)),
+        ((96_000, 48_000, Tx), (516, 999, 783)),
+        ((96_000, 44_100, Rx), (734, 1_242, 999)),
+        ((48_000, 44_100, Rx), (466, 1_041, 998)),
+        ((48_000, 96_000, Tx), (591, 999, 1_124)),
+        ((48_000, 96_000, Rx), (466, 874, 999)),
+        ((48_000, 48_000, Rx), (733, 999, 999)),
+    ] {
+        let s = split(BUDGET_NS, dev, app, 128, dir).unwrap();
+        assert_eq!(
+            (ms(s.latency_ns), ms(s.tx_path_ns), ms(s.rx_path_ns)),
+            want,
+            "{dev} {app} {dir:?}"
+        );
+        let path = if dir == Rx {
+            s.rx_path_ns
+        } else {
+            s.tx_path_ns
+        };
+        assert!(path <= BUDGET_NS, "{dev} {app} {dir:?}");
+        assert!(BUDGET_NS - path <= 1_000_000_000 / u64::from(dev) + 1);
+        // Both takes the larger work: never above either direction's P.
+        let both = split(BUDGET_NS, dev, app, 128, Both).unwrap();
+        assert!(both.latency_ns <= s.latency_ns, "{dev} {app} {dir:?}");
+    }
+    // The floor holds for one direction too: 48 kHz, block 128, RX work
+    // 128 samples (2666666 ns).
+    let floor = split(6_666_666, 48_000, 48_000, 128, Rx).unwrap();
+    assert_eq!(floor.latency_ns, MIN_LATENCY_NS);
+    assert!(
+        split(6_666_665, 48_000, 48_000, 128, Tx)
+            .unwrap_err()
+            .contains("at least 4000000")
+    );
+}
+
+/// dstack #1: a config's directions come from its channels; one with
+/// neither splits as both.
+#[test]
+fn the_config_s_directions_are_its_channels() {
+    assert_eq!(Directions::of(true, true), Directions::Both);
+    assert_eq!(Directions::of(true, false), Directions::Rx);
+    assert_eq!(Directions::of(false, true), Directions::Tx);
+    assert_eq!(Directions::of(false, false), Directions::Both);
+    let named = |rx: &[&str], tx: &[&str]| {
+        Config::new("dirs", "/tmp/never-written.toml")
+            .rx(rx.iter().copied())
+            .tx(tx.iter().copied())
+    };
+    assert_eq!(config().directions(), Directions::Both);
+    assert_eq!(named(&["In"], &[]).directions(), Directions::Rx);
+    assert_eq!(named(&[], &["Out"]).directions(), Directions::Tx);
+    assert_eq!(named(&[], &[]).directions(), Directions::Both);
+    // Config::split and Config::device run that split.
+    let c = named(&["In"], &[]).network_rate(96_000);
+    let s = c.split().unwrap();
+    assert_eq!(
+        s,
+        split(BUDGET_NS, 96_000, 48_000, 128, Directions::Rx).unwrap()
+    );
+    let cfg = c.device().unwrap();
+    assert_eq!((cfg.latency_ns, cfg.work_margin), (s.latency_ns, s.margin));
 }

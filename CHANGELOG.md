@@ -1,6 +1,14 @@
 ## 0.6.24 (unreleased)
 
 - Docs: `.claude/rules/release.md` notes how to recover a PR whose head did not move after a GitHub 500 on push.
+- **Latency change** for one-direction dlink apps (dstack #1): `dlink::split` sizes the Dante latency P by the directions the device has. A device with RX channels only (or TX channels only) gets the budget less that direction's work, so its path takes the whole 10 ms; before, it got the budget less the larger of both directions' work, a TX path it never runs included. Before -> after, 10 ms budget, block 128 (P, and the path the device has):
+  - 96 kHz device, 48 kHz app, RX only: P 5.17 -> 7.33 ms, RX path 7.83 -> 10 ms (it advertises and plays out at 7.33 ms).
+  - 96 kHz device, 96 kHz app, RX only: P 8 -> 8.67 ms, RX path 9.33 -> 10 ms.
+  - 96 kHz device, 44.1 kHz app, RX only: P 4.92 -> 7.34 ms, RX path 7.57 -> 9.99 ms.
+  - 48 kHz device, 44.1 kHz app, RX only: P 4.25 -> 4.67 ms, RX path 9.57 -> 9.99 ms.
+  - 48 kHz device, 96 kHz app, TX only: P 4.67 -> 5.92 ms, TX path 8.75 -> 10 ms.
+  - Unchanged: every device with both directions (or no channels), and the other one-direction cases (TX only on a 96 kHz device; RX or TX only at 48 kHz with a 48 kHz app). The 4 ms floor (`MIN_LATENCY_NS`) and its problem text are as before. A latency Dante Controller set on the device still wins.
+  - Port: `dlink::split(budget_ns, device_rate, app_rate, block)` takes a fifth argument, `directions: Directions` (`Directions::Both` gives the old split). New: `dlink::Directions` (`Both`, `Rx`, `Tx`; `Directions::of(rx, tx)`), `Config::directions`. `Config::split`, `Config::device` and `Link::start` use the config's own channels. `Split::tx_path_ns` / `rx_path_ns` of the direction a device lacks may now pass the budget (that path carries no audio).
 
 # Changelog
 

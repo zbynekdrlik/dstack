@@ -36,8 +36,9 @@
 //!   ([`work_margin`]), so a late wake still makes its block.
 //! - The rate converter's delay each way when the app's rate differs from
 //!   the network's ([`Rated`], [`rated::delay_ns`]).
-//! - P, the device's Dante latency: what the larger direction's work
-//!   leaves of the budget, in whole samples, at least [`MIN_LATENCY_NS`]
+//! - P, the device's Dante latency: what the work of the directions the
+//!   device has leaves of the budget (the larger direction's when it has
+//!   both; [`Directions`]), in whole samples, at least [`MIN_LATENCY_NS`]
 //!   (4 ms). The device's RX plays out at P and its TX channels advertise
 //!   it.
 //!
@@ -55,6 +56,23 @@
 //! | 96 kHz | 48 kHz | 1.33 ms | 2 ms | 1.33 / 2.83 ms | 5.17 ms | 10 ms | 7.83 ms |
 //! | 96 kHz | 44.1 kHz | 1.33 ms | 2 ms | 1.32 / 3.08 ms | 4.92 ms | 9.99 ms | 7.57 ms |
 //! | 48 kHz | 44.1 kHz | 2.67 ms | 2.67 ms | 2.65 / 3.08 ms | 4.25 ms | 9.99 ms | 9.57 ms |
+//!
+//! A device with one direction only (no TX channels, or no RX channels)
+//! sizes P by that direction's work alone, so its path takes the whole
+//! budget (dstack #1); the path it lacks carries no audio. Where the
+//! other direction's work was the larger, P grows:
+//!
+//! | Device | App | Directions | P | TX path | RX path |
+//! |---|---|---|---|---|---|
+//! | 96 kHz | 96 kHz | RX only | 8.67 ms | none | 10 ms |
+//! | 96 kHz | 48 kHz | RX only | 7.33 ms | none | 10 ms |
+//! | 96 kHz | 44.1 kHz | RX only | 7.34 ms | none | 9.99 ms |
+//! | 48 kHz | 44.1 kHz | RX only | 4.67 ms | none | 9.99 ms |
+//! | 48 kHz | 96 kHz | TX only | 5.92 ms | 10 ms | none |
+//!
+//! The other one-direction cases (TX only in every row of the first
+//! table, RX only on a 48 kHz device with a 48 kHz app) keep the first
+//! table's P.
 //!
 //! A larger block with a conversion can leave under 4 ms (block 256 on a
 //! 48 kHz device with a 44.1 kHz app); [`Config::device`] refuses that
@@ -251,14 +269,22 @@ impl Config {
         self
     }
 
-    /// How this config splits its budget ([`split`]): the Dante latency,
-    /// the pump's margin and each direction's path.
+    /// The directions the device has: RX with RX channels, TX with TX
+    /// channels ([`Directions::of`]).
+    pub fn directions(&self) -> Directions {
+        Directions::of(!self.rx.is_empty(), !self.tx.is_empty())
+    }
+
+    /// How this config splits its budget ([`split`]) for the directions it
+    /// has ([`Config::directions`]): the Dante latency, the pump's margin
+    /// and each direction's path.
     pub fn split(&self) -> Result<Split, String> {
         split(
             self.budget_ns,
             self.device_rate(),
             self.sample_rate,
             self.block,
+            self.directions(),
         )
     }
 
@@ -444,6 +470,29 @@ fn valid_block(block: u64) -> u64 {
     }
 }
 
+/// The directions a device has, which size its Dante latency ([`split`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Directions {
+    /// RX and TX (or no channels at all): the larger direction's work.
+    Both,
+    /// RX only (no TX channels): the RX work alone.
+    Rx,
+    /// TX only (no RX channels): the TX work alone.
+    Tx,
+}
+
+impl Directions {
+    /// The directions of a device with RX channels (`rx`) and TX channels
+    /// (`tx`); one with neither splits as [`Directions::Both`].
+    pub fn of(rx: bool, tx: bool) -> Self {
+        match (rx, tx) {
+            (true, false) => Self::Rx,
+            (false, true) => Self::Tx,
+            _ => Self::Both,
+        }
+    }
+}
+
 /// How a latency budget splits ([`split`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Split {
@@ -455,10 +504,12 @@ pub struct Split {
     pub margin: u64,
     /// The app's output to a receiver's playout, ns: W + P, plus the rate
     /// converter's TX delay when it runs. A receiver set to a longer
-    /// latency than P adds the difference.
+    /// latency than P adds the difference. An RX-only device has no TX
+    /// path: the figure may then pass the budget.
     pub tx_path_ns: u64,
     /// A sample's network stamp to the app's block, ns: P + B, plus the
-    /// rate converter's RX delay when it runs.
+    /// rate converter's RX delay when it runs. A TX-only device has no RX
+    /// path: the figure may then pass the budget.
     pub rx_path_ns: u64,
 }
 
@@ -468,14 +519,22 @@ pub struct Split {
 /// `stream::BLOCKS`), its margin W ([`work_margin`]) and the rate
 /// converter's delays ([`rated::delay_ns`], none when `app_rate` is
 /// `device_rate`) are the work; the Dante latency P is the budget less the
-/// larger direction's work (TX: W + the converter's TX delay; RX: B + its
-/// RX delay), in whole samples at `device_rate`.
+/// work of the device's `directions` (TX: W + the converter's TX delay; RX:
+/// B + its RX delay; the larger of the two for [`Directions::Both`]), in
+/// whole samples at `device_rate` (dstack #1: an RX-only device no longer
+/// pays for a TX path it never runs).
 ///
 /// The path each way (`dstack::stream`: block k runs once media time
 /// passes kB + B + P, and its output goes out stamped kB + B + P + W): TX
 /// W + P, RX P + B. A budget that leaves P under [`MIN_LATENCY_NS`], a
 /// device rate of 0 and a rate pair the converter refuses are problems.
-pub fn split(budget_ns: u64, device_rate: u32, app_rate: u32, block: u64) -> Result<Split, String> {
+pub fn split(
+    budget_ns: u64,
+    device_rate: u32,
+    app_rate: u32,
+    block: u64,
+    directions: Directions,
+) -> Result<Split, String> {
     if device_rate == 0 {
         return Err("sample_rate: the device's rate is 0 Hz".to_string());
     }
@@ -491,7 +550,11 @@ pub fn split(budget_ns: u64, device_rate: u32, app_rate: u32, block: u64) -> Res
     let ns = |samples: u64| (u128::from(samples) * 1_000_000_000 / rate) as u64;
     let tx_work = ns(margin) + convert_tx;
     let rx_work = ns(b) + convert_rx;
-    let work = tx_work.max(rx_work);
+    let work = match directions {
+        Directions::Both => tx_work.max(rx_work),
+        Directions::Rx => rx_work,
+        Directions::Tx => tx_work,
+    };
     let samples = (u128::from(budget_ns.saturating_sub(work)) * rate / 1_000_000_000) as u64;
     let latency_ns = ns(samples);
     if latency_ns < MIN_LATENCY_NS {
