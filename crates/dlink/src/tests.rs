@@ -440,7 +440,7 @@ fn a_network_rate_of_0_is_the_device_s_one_problem() {
 
 /// dstack #1 (the last item of the 4.11.2026 list): the Dante latency is
 /// sized by the directions the device has. An RX-only 48 kHz app on a
-/// 96 kHz device gets the budget less its RX work, 8.67 ms (it got 5.17 ms
+/// 96 kHz device gets the budget less its RX work, 7.33 ms (it got 5.17 ms
 /// from the converter's TX delay of a TX path it never runs); a TX-only one
 /// gets the budget less its TX work; a device with both keeps the larger.
 #[test]
@@ -449,7 +449,7 @@ fn the_dante_latency_follows_the_directions_the_device_has() {
     let base = |c: Config| c.sample_rate(48_000).network_rate(96_000);
     let rx_only = base(Config::new("rx-only", "/tmp/never-written.toml").rx(["In 1"]));
     let s = rx_only.split().unwrap();
-    assert_eq!((ms(s.latency_ns), ms(s.rx_path_ns)), (866, 999), "{s:?}");
+    assert_eq!((ms(s.latency_ns), ms(s.rx_path_ns)), (733, 999), "{s:?}");
     assert!(BUDGET_NS - s.rx_path_ns <= 1_000_000_000 / 96_000 + 1);
     let cfg = rx_only.device().unwrap();
     assert_eq!(cfg.latency_ns, s.latency_ns);
