@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.30 (unreleased)
+
+- **Fix, urgent** (dstack #1, dasio 4.11): revert v0.6.28's `Sleep(0)` in the Windows spin tail back to `SwitchToThread`. Sleep(0) yields only to threads of equal or higher priority. A media thread at real-time priority (timing = low latency, windows_wait = spin) spinning through its wait then starved every lower-priority thread on its CPU, and two Windows PCs running dasio on v0.6.28 stopped answering anything else. SwitchToThread lets lower-priority threads run again. The 10–23 ms waits it can cause on a busy CPU (dasio's FOH trace) are left to the per-thread pins (re-applied once a second since v0.6.28) and to a separate fix. No latency change.
+
 ## 0.6.29 (unreleased)
 
 - Fix (iemmixer, 4.11): `ctl status` `clock.source` names what a linked clock uses now: `internal` (dsync's follower in process), `service` (the dsync service), or `none` (nothing ready yet). Before, it said `dsync` whichever was in use. A clock that isn't linked still says `dsync`, and the test clock `system`. The host's once-a-second source selection stores it (`ClockStats::set_linked` / `linked`). New: `ctl::clock_source_word`. A reader matching `"source":"dsync"` on a linked device moves to the new words. No latency change.
