@@ -41,9 +41,11 @@
 //!   default, room for the 2.7 to 3.6 ms preemptions seen on loaded PCs,
 //!   where a dlink app's threads run unpinned and without real time. On a
 //!   device with TX, W is in the TX path and gives way to keep P's TX
-//!   floor when a smaller budget leaves no room for both; an RX-only device
-//!   keeps the whole share, at no cost to its path (a late block only
-//!   reaches the app later).
+//!   floor when a smaller budget leaves no room for both. An RX-only
+//!   device's W is in none of its paths (a late block only reaches the app
+//!   later), so it is the whole budget ([`rx_work_margin`]; 15 ms at the
+//!   default, v0.6.32, dstack #1: OBS on a loaded PC was preempted about
+//!   6 ms and restarted at W 6 ms), at no cost to its latency.
 //! - The rate converter's delay each way when the app's rate differs from
 //!   the network's ([`Rated`], [`rated::delay_ns`]).
 //! - P, the device's Dante latency: what the work of the directions the
@@ -73,7 +75,8 @@
 //! | 48 kHz | 96 kHz | 2.67 ms | 0.64 / 0.63 ms | 8.38 ms | 15 ms | 11.68 ms |
 //!
 //! A device with RX channels only sizes P by its RX work alone, so its RX
-//! path takes the whole budget (dstack #1), and W keeps its 6 ms share:
+//! path takes the whole budget (dstack #1), and its W is the whole 15 ms
+//! (1440 samples at 96 kHz, 720 at 48 kHz; v0.6.32, 6 ms before):
 //!
 //! | Device | App | P | RX path |
 //! |---|---|---|---|
@@ -84,11 +87,11 @@
 //! | 48 kHz | 44.1 kHz | 9.67 ms | 14.99 ms |
 //! | 48 kHz | 96 kHz | 11.69 ms | 14.99 ms |
 //!
-//! Block 256 at the default changes only the RX path (W stays 6 ms, over
-//! the block). Every pair of 44.1, 48 and 96 kHz fits 15 ms at every block
+//! Block 256 at the default changes only the RX path (W stays 6 ms with
+//! TX, over the block). Every pair of 44.1, 48 and 96 kHz fits 15 ms at every block
 //! of the stack. A larger budget grows W and P together: at 20 ms a 48 kHz
 //! or 96 kHz device gets W 8 ms and P 12 ms, a 48 kHz app on a 96 kHz
-//! device W 8 ms and P 11.36 ms (18.04 ms RX only).
+//! device W 8 ms and P 11.36 ms (18.04 ms and W 20 ms RX only).
 //!
 //! A smaller budget an app sets may not hold the TX floor: [`Config::device`]
 //! refuses it with the floor named, with the other problems (dstack #1: such
@@ -120,8 +123,9 @@
 //! ```
 //!
 //! A pump that overruns or restarts logs `engine pump lost or overran
-//! blocks this second` once a second, with its `overruns` and
-//! `max_process_us` (dstack 0.6.25).
+//! blocks this second` once a second, with its `overruns` and that
+//! second's longest block, `max_process_us` (dstack 0.6.25; that second's
+//! since 0.6.32, the longest since the start before).
 //!
 //! ```no_run
 //! use dlink::{Block, Config, Link, Map, Place, Process};
@@ -554,6 +558,26 @@ pub fn work_margin(budget_ns: u64, rate: u32, block: u64) -> u64 {
         .max(least_work_margin(rate, block))
 }
 
+/// The pump's margin W of an RX-only device, samples at `rate`: the whole
+/// `budget_ns` (dstack #1, camera-box 4.11.2026: OBS dante-input, RX only
+/// and unpinned, was preempted about 6 ms, right at its W 6 ms, and
+/// re-bootstrapped every half minute), at most
+/// `dstack::stream::MAX_WORK_MARGIN`, at least [`least_work_margin`].
+///
+/// W is in none of an RX-only device's paths: its RX path is P + B + the
+/// converter's RX delay (block k reads the RX rings at its own stamps
+/// whenever the pump runs), and D = B + P + W only stamps the engine's TX
+/// rings, which it does not have. W only says how late the pump may run
+/// before it starts again; a block that late reaches the app that much
+/// later, so the app's own budget bounds it. The stack holds any W up to
+/// `MAX_WORK_MARGIN` beside any P: `dstack::device::MAX_LATENCY_SAMPLES`
+/// keeps it inside half the RX rings (`dstack::media::ring::SLOTS`).
+pub fn rx_work_margin(budget_ns: u64, rate: u32, block: u64) -> u64 {
+    latency_samples(budget_ns, rate)
+        .min(MAX_WORK_MARGIN)
+        .max(least_work_margin(rate, block))
+}
+
 /// The least pump margin, samples at `rate`: the block, and at least the
 /// normal profile's 2 ms (`dstack::device::NORMAL_MIN_WORK_MARGIN_NS`), the
 /// device's own floor.
@@ -601,12 +625,14 @@ pub struct Split {
     pub latency_ns: u64,
     /// W, the pump's work margin, samples at the device's rate: how late
     /// its pump may run before it starts again ([`work_margin`], given way
-    /// to P's TX floor on a device with TX).
+    /// to P's TX floor on a device with TX; [`rx_work_margin`], the whole
+    /// budget, on an RX-only device).
     pub margin: u64,
     /// The app's output to a receiver's playout, ns: W + P, plus the rate
     /// converter's TX delay when it runs. A receiver set to a longer
     /// latency than P adds the difference. An RX-only device has no TX
-    /// path: the figure may then pass the budget.
+    /// path: the figure (its W of the whole budget + P) then passes the
+    /// budget.
     pub tx_path_ns: u64,
     /// A sample's network stamp to the app's block, ns: P + B, plus the
     /// rate converter's RX delay when it runs. A TX-only device has no RX
@@ -619,7 +645,8 @@ pub struct Split {
 /// block B (`block` device frames; [`BLOCK`] when it is not one of
 /// `stream::BLOCKS`), its margin W ([`work_margin`]: 2/5 of the budget;
 /// with TX, no more than leaves P its floor after the converter's TX delay,
-/// never under the block and 2 ms; dstack #1) and the rate converter's
+/// never under the block and 2 ms; RX only, the whole budget,
+/// [`rx_work_margin`]; dstack #1) and the rate converter's
 /// delays ([`rated::delay_ns`], none when `app_rate` is
 /// `device_rate`) are the work; the Dante latency P is the budget less the
 /// work of the device's `directions` (TX: W + the converter's TX delay; RX:
@@ -654,19 +681,18 @@ pub fn split(
     // W is in the TX path: a device with TX keeps P's TX floor (the
     // packets' own age, [`tx_floor_ns`]), and W gives way, down to its own
     // least. The room's last sample is left to P, so P's whole samples
-    // still reach the floor at any rate. An RX-only device's W is not in
-    // its path (a late block only comes later): it keeps the whole share,
-    // and its P has the profile's floor.
-    let mut margin = work_margin(budget_ns, device_rate, b);
-    let floor = if directions == Directions::Rx {
-        MIN_LATENCY_NS
+    // still reach the floor at any rate. An RX-only device's W is in none
+    // of its paths (a late block only comes later): W is the whole budget
+    // ([`rx_work_margin`]), and its P has the profile's floor.
+    let (margin, floor) = if directions == Directions::Rx {
+        (rx_work_margin(budget_ns, device_rate, b), MIN_LATENCY_NS)
     } else {
         let floor = tx_floor_ns(device_rate);
         let room = budget_ns.saturating_sub(convert_tx + floor);
-        margin = margin
+        let margin = work_margin(budget_ns, device_rate, b)
             .min(samples_in(room).saturating_sub(1))
             .max(least_work_margin(device_rate, b));
-        floor
+        (margin, floor)
     };
     let tx_work = ns(margin) + convert_tx;
     let rx_work = ns(b) + convert_rx;

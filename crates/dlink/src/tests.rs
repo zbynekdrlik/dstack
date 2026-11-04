@@ -664,6 +664,30 @@ fn the_pump_margin_is_two_fifths_of_the_budget() {
     assert!(split(TEN_MS, 44_100, 48_000, 128, Both).is_err());
 }
 
+/// dstack #1 (camera-box, v0.6.32): an RX-only device's W is the whole
+/// budget, at most the stack's largest margin (which the RX rings hold
+/// beside any P), at least the block and 2 ms.
+#[test]
+fn an_rx_only_margin_is_the_budget_within_the_stack_s_bounds() {
+    assert_eq!(rx_work_margin(BUDGET_NS, 96_000, 128), 1_440);
+    assert_eq!(rx_work_margin(BUDGET_NS, 48_000, 128), 720);
+    assert_eq!(rx_work_margin(BUDGET_NS, 44_100, 128), 662);
+    assert_eq!(rx_work_margin(TEN_MS, 96_000, 128), 960);
+    // The stack's largest margin is its most.
+    assert_eq!(rx_work_margin(42_656_250, 96_000, 128), 4_095);
+    assert_eq!(rx_work_margin(42_666_667, 96_000, 128), MAX_WORK_MARGIN);
+    assert_eq!(rx_work_margin(50_000_000, 96_000, 128), MAX_WORK_MARGIN);
+    const _: () = assert!(
+        dstack::device::MAX_LATENCY_SAMPLES + MAX_WORK_MARGIN + 256
+            <= dstack::media::ring::SLOTS as u64 / 2
+    );
+    // The block, and 2 ms, are its least.
+    assert_eq!(rx_work_margin(1_000_000, 48_000, 128), 128);
+    assert_eq!(rx_work_margin(1_000_000, 96_000, 256), 256);
+    assert_eq!(rx_work_margin(1_000_000, 48_000, 16), 96);
+    assert_eq!(rx_work_margin(3_000_000, 48_000, 64), 144);
+}
+
 /// dstack #1 (intercom's report against v0.6.22; the owner's 15 ms of
 /// 4.11.2026): at the default 15 ms budget a pump 5 ms late (over the
 /// 2.7 to 3.6 ms preemptions seen on loaded PCs with no CPU pinning)
