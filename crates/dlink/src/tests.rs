@@ -537,16 +537,18 @@ fn a_one_direction_device_splits_by_that_direction_s_work() {
     use Directions::{Both, Rx, Tx};
     let ms = |ns: u64| ns / 10_000;
     // (device, app, directions) -> (P, TX path, RX path), in 10 us steps.
+    // An RX-only device's TX figure is only W (its whole budget since
+    // v0.6.32) + P + the converter's TX delay: it has no TX path.
     for ((dev, app, dir), want) in [
-        ((96_000, 96_000, Rx), (866, 1_266, 999)),
+        ((96_000, 96_000, Rx), (866, 1_866, 999)),
         ((96_000, 96_000, Tx), (600, 1_000, 733)),
-        ((96_000, 48_000, Rx), (804, 1_267, 999)),
+        ((96_000, 48_000, Rx), (804, 1_867, 999)),
         ((96_000, 48_000, Tx), (536, 999, 732)),
-        ((96_000, 44_100, Rx), (734, 1_442, 999)),
-        ((48_000, 44_100, Rx), (466, 1_174, 998)),
+        ((96_000, 44_100, Rx), (734, 2_042, 999)),
+        ((48_000, 44_100, Rx), (466, 1_774, 998)),
         ((48_000, 96_000, Tx), (537, 1_000, 867)),
-        ((48_000, 96_000, Rx), (668, 1_131, 998)),
-        ((48_000, 48_000, Rx), (733, 1_133, 999)),
+        ((48_000, 96_000, Rx), (668, 1_731, 998)),
+        ((48_000, 48_000, Rx), (733, 1_733, 999)),
     ] {
         let s = split(TEN_MS, dev, app, 128, dir).unwrap();
         assert_eq!(
