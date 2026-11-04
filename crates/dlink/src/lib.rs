@@ -87,6 +87,30 @@
 //! the two paths less the one P they share (W + B + P, plus both converter
 //! delays): the whole-device test measures it.
 //!
+//! # Debug builds with a rate converter
+//!
+//! A device whose app rate differs from the network's runs the converter
+//! ([`Rated`], `dstack-resample` over rubato) inside the pump's block.
+//! Unoptimised, rubato takes longer than a block: intercom's debug tests
+//! (a 48 kHz app on a 96 kHz device, block 1.33 ms) overran every block,
+//! the longest 2.84 ms, and the tone broke (dstack #1, 4.11.2026); at
+//! opt-level 3 the same block took at most 0.14 ms with no overrun. Cargo
+//! takes profiles only from the top workspace, so a consumer that runs a
+//! converting device in a debug build or its tests sets, in its own
+//! workspace `Cargo.toml` (as dstack's own does):
+//!
+//! ```toml
+//! [profile.dev.package.rubato]
+//! opt-level = 3
+//!
+//! [profile.dev.package.dstack-resample]
+//! opt-level = 3
+//! ```
+//!
+//! A pump that overruns or restarts logs `engine pump lost or overran
+//! blocks this second` once a second, with its `overruns` and
+//! `max_process_us` (dstack 0.6.25).
+//!
 //! ```no_run
 //! use dlink::{Block, Config, Link, Map, Place, Process};
 //!
