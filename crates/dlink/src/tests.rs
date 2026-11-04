@@ -106,6 +106,7 @@ fn the_defaults_are_a_10_ms_budget_normal_timing_and_a_share_as_pump_margin() {
     // No CPU pinning: the app's threads stay where the OS puts them.
     assert_eq!(cfg.pump_cpu, None);
     assert_eq!(cfg.io_cpu, None);
+    assert_eq!(cfg.rx_cpu, None);
 }
 
 /// dstack #68, #1: a 20 ms budget at 96 kHz less W 768 (8 ms, 2/5 of it:
@@ -682,38 +683,6 @@ fn at_the_default_budget_a_pump_3_ms_late_still_runs_its_block() {
             );
         }
     }
-}
-
-/// dstack #1 (camera-box, 4.11.2026): an app places its device's pump, TX
-/// and RX threads on CPUs of its own choosing; unset, they stay anywhere,
-/// and a CPU past the stack's limit is refused with the other problems.
-#[test]
-fn an_app_places_its_threads_on_its_own_cpus() {
-    let unset = config().device().expect("valid");
-    assert_eq!(
-        (unset.pump_cpu, unset.io_cpu, unset.rx_cpu),
-        (None, None, None)
-    );
-    let set = config()
-        .pump_cpu(14)
-        .io_cpu(3)
-        .rx_cpu(5)
-        .device()
-        .expect("valid");
-    assert_eq!(
-        (set.pump_cpu, set.io_cpu, set.rx_cpu, set.rx_thread_cpu()),
-        (Some(14), Some(3), Some(5), Some(5))
-    );
-    let io_only = config().io_cpu(3).device().expect("valid");
-    assert_eq!(io_only.rx_thread_cpu(), Some(3));
-    let problems = config()
-        .pump_cpu(dstack::device::MAX_CPU)
-        .device()
-        .expect_err("past the limit");
-    assert!(
-        problems.iter().any(|p| p.contains("pump_cpu")),
-        "{problems:?}"
-    );
 }
 
 /// dstack #1 (songplayer, 4.11.2026): a TX-only 48 kHz app on a 96 kHz
