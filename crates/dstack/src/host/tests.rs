@@ -340,3 +340,11 @@ async fn the_local_endpoint_s_port_is_the_device_s() {
     assert!(at.ip().is_loopback());
     assert_eq!(device.status_port, Some(at.port()));
 }
+
+/// Owner 4.11.2026: every device of ours follows Dante PTP in its own
+/// process by default (dsync's follower), the dsync service only its
+/// fallback; `prepare`, `Embedded::start` and the daemon take the default.
+#[test]
+fn the_default_clock_is_the_in_process_follower_linked_to_the_service() {
+    assert_eq!(ClockSource::default(), ClockSource::Linked);
+}

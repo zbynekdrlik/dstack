@@ -172,12 +172,28 @@ pub fn offer_in(dir: &Directory, ch: &TxChannel, dbc: SocketAddrV4, fpp: u16) ->
 }
 
 /// A device's records.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 struct Records {
     arc: Option<SocketAddrV4>,
+    /// Every IPv4 address of its `_netaudio-arc` record (at most
+    /// [`MAX_ARC_ADDRESSES`]), lowest first; `arc` holds the lowest.
+    arc_ips: Vec<Ipv4Addr>,
     dbc: Option<SocketAddrV4>,
     /// When its `_netaudio-arc` record was kept (again).
     since: u64,
+}
+
+/// The most IPv4 addresses kept of a device's `_netaudio-arc` record (a PC
+/// with several network cards announces one per card).
+pub const MAX_ARC_ADDRESSES: usize = 8;
+
+/// Why a device's ARC is not at an address ([`Book::arc_at`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArcMiss {
+    /// No `_netaudio-arc` record of the device.
+    NoRecord,
+    /// Its record announces other addresses only.
+    OtherAddress,
 }
 
 /// Why a read is asked for.
@@ -349,6 +365,7 @@ impl Book {
                             rec.since = now;
                         }
                         rec.arc = at;
+                        rec.arc_ips = ipv4s(r);
                     }
                     Service::Dbc => rec.dbc = at,
                 }
@@ -362,7 +379,10 @@ impl Book {
                     return Applied::Ignored;
                 };
                 let gone = match service {
-                    Service::Arc => rec.arc.take(),
+                    Service::Arc => {
+                        rec.arc_ips.clear();
+                        rec.arc.take()
+                    }
                     Service::Dbc => rec.dbc.take(),
                 };
                 if rec.arc.is_none() && rec.dbc.is_none() {
@@ -377,6 +397,20 @@ impl Book {
         }
     }
 
+    /// `device`'s ARC (case aside) at `ip`: its `_netaudio-arc` record's
+    /// port, when the record announces `ip` among its addresses.
+    pub fn arc_at(&self, device: &str, ip: Ipv4Addr) -> Result<SocketAddrV4, ArcMiss> {
+        let rec = self
+            .records
+            .get(&device.to_ascii_lowercase())
+            .filter(|rec| rec.arc.is_some())
+            .ok_or(ArcMiss::NoRecord)?;
+        match (rec.arc, rec.arc_ips.contains(&ip)) {
+            (Some(arc), true) => Ok(SocketAddrV4::new(ip, arc.port())),
+            _ => Err(ArcMiss::OtherAddress),
+        }
+    }
+
     /// `channel` of `device` at `now`, from its directory when one was read
     /// within [`Timing::max_age_ns`]; otherwise a read is wanted (unless one
     /// runs) and the answer is `None`. A device without both records, or
@@ -388,6 +422,7 @@ impl Book {
             arc: Some(_),
             dbc: Some(dbc),
             since,
+            ..
         }) = self.records.get(&key)
         else {
             self.counts.unknown += 1;
@@ -516,11 +551,49 @@ impl Shared {
     }
 }
 
+/// A record's IPv4 addresses, lowest first, at most [`MAX_ARC_ADDRESSES`].
+fn ipv4s(r: &mdns_sd::ResolvedService) -> Vec<Ipv4Addr> {
+    let mut ips: Vec<Ipv4Addr> = r
+        .get_addresses()
+        .iter()
+        .filter_map(|a| match a.to_ip_addr() {
+            std::net::IpAddr::V4(v4) => Some(v4),
+            std::net::IpAddr::V6(_) => None,
+        })
+        .collect();
+    ips.sort_unstable();
+    ips.truncate(MAX_ARC_ADDRESSES);
+    ips
+}
+
+/// A device's ARC address from the directory's `_netaudio-arc` records
+/// ([`ArcDirectory::records`]).
+#[derive(Debug, Clone)]
+pub struct ArcRecords {
+    shared: Arc<Shared>,
+    asked: Arc<AtomicBool>,
+}
+
+impl ArcRecords {
+    /// `device`'s ARC at `ip` ([`Book::arc_at`]). Asking marks the directory
+    /// asked: the daemon then starts its browses, as for an RX lookup.
+    pub fn arc_at(&self, device: &str, ip: Ipv4Addr) -> Result<SocketAddrV4, ArcMiss> {
+        self.asked.store(true, Ordering::Relaxed);
+        lock(&self.shared.book).arc_at(device, ip)
+    }
+
+    /// Keeps a browse event, as the browse threads do (tests).
+    #[cfg(test)]
+    pub(crate) fn keep(&self, ev: &ServiceEvent) {
+        lock(&self.shared.book).apply(ev, 0);
+    }
+}
+
 /// The transmitters' channels read through their ARC (see the module).
 #[derive(Debug)]
 pub struct ArcDirectory {
     shared: Arc<Shared>,
-    asked: AtomicBool,
+    asked: Arc<AtomicBool>,
     threads: Vec<JoinHandle<()>>,
 }
 
@@ -540,8 +613,17 @@ impl ArcDirectory {
                 stop: AtomicBool::new(false),
                 timing,
             }),
-            asked: AtomicBool::new(false),
+            asked: Arc::new(AtomicBool::new(false)),
             threads: Vec::new(),
+        }
+    }
+
+    /// A handle on its `_netaudio-arc` records for another reader (the TX
+    /// side's receiver latencies, [`crate::flows::receivers`]).
+    pub fn records(&self) -> ArcRecords {
+        ArcRecords {
+            shared: Arc::clone(&self.shared),
+            asked: Arc::clone(&self.asked),
         }
     }
 

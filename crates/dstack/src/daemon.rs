@@ -42,6 +42,7 @@ use std::future::Future;
 use std::io;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicU16;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use tokio::net::UdpSocket;
@@ -50,6 +51,7 @@ use tokio::time::MissedTickBehavior;
 use tracing::{info, warn};
 
 use crate::announce::{AnnounceError, Announcer, Registry, records};
+use crate::arc::client::{ReadError, Udp};
 use crate::clock::{Event, Polled, Sample};
 use crate::device::{Device, DeviceConfig};
 use crate::flows::client::Client;
@@ -113,7 +115,7 @@ pub fn usage(name: &str) -> String {
 /// The `--help` text, naming [`NAME`]; [`usage`] names another binary.
 pub const USAGE: &str = "\
 usage: dstack-dev --config <path> (--iface <name> | --ip <IPv4 address>)
-                     [--control <socket path>] [--clock dsync|system]
+                     [--control <socket path>] [--clock linked|dsync|system]
        dstack-dev ctl [--socket <path>] <request>
        dstack-dev clock --seconds <n>
        dstack-dev card read <ip> <expected-name>
@@ -127,7 +129,9 @@ IPv4 address (info replies to 224.0.0.231:8702, a heartbeat every second to
 224.0.0.233:8708), its mDNS records on that interface only, renames and RX
 subscriptions saved to the config's state file. It sends the TX flows
 receivers ask for and asks transmitters for its subscribed RX channels, on
-PTP time read from dsync (127.0.0.1:31900); it never sends PTP. Its
+PTP time it follows itself (dsync's in-process follower on the interface,
+the default, --clock linked), else from the dsync service (127.0.0.1:31900);
+it never sends PTP. --clock dsync takes the service's time only. Its
 control socket (default /run/dstack/control.sock) takes one request
 line a connection. SIGTERM or SIGINT stops every RX flow at its
 transmitter, ends the media threads and withdraws the records (mDNS
@@ -184,7 +188,11 @@ pub struct Options {
 /// What the command line asks for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
+    /// The device on the default clock (`--clock linked` or none: dsync's
+    /// in-process follower, the service its fallback).
     Run(Options),
+    /// `--clock dsync`: the device on the dsync service's time only.
+    RunOnService(Options),
     /// TEST ONLY (`--clock system`): the device on this machine's own clock
     /// (`host::ClockSource::System`), for a box with no PTP network (CI).
     RunOnSystemClock(Options),
@@ -259,9 +267,10 @@ pub fn parse_args(args: &[String]) -> Result<Command, String> {
         control,
     };
     match clock.as_deref() {
-        None | Some("dsync") => Ok(Command::Run(opts)),
+        None | Some("linked") => Ok(Command::Run(opts)),
+        Some("dsync") => Ok(Command::RunOnService(opts)),
         Some("system") => Ok(Command::RunOnSystemClock(opts)),
-        Some(_) => Err("--clock is dsync or system".into()),
+        Some(_) => Err("--clock is linked, dsync or system".into()),
     }
 }
 
@@ -602,6 +611,34 @@ fn network_of(cfg: &DeviceConfig) -> Network {
     }
 }
 
+/// The TX flows' receiver latency reader ([`flows::receivers`], dstack
+/// #1): each receiver's settings (ARC 0x1100) asked from our address
+/// `ip` at the ARC its record in `network`'s directory announces, every
+/// request counted in `media`'s requests; it ends when the returned
+/// reader is dropped.
+fn receiver_reader(
+    media: &Media,
+    network: &Network,
+    ip: Ipv4Addr,
+) -> io::Result<flows::receivers::Reader> {
+    let requests = Arc::clone(&media.requests);
+    let reply = network.arc.timing().reply;
+    let seq = AtomicU16::new(1);
+    flows::receivers::spawn(
+        Arc::clone(&media.tx),
+        network.arc.records(),
+        flows::receivers::IDLE,
+        move |at, stop| {
+            let mut ex =
+                Udp::open(ip, at, &seq, reply, &requests, stop).map_err(|e| ReadError::Io {
+                    op: arc::op::ZEROS_1100,
+                    kind: e.kind(),
+                })?;
+            arc::control::settings(&mut ex)
+        },
+    )
+}
+
 /// Serves the device at `net.ip` until `stop` ends: announces its records
 /// first, then answers ARC, CMC, the info requests and flow control on
 /// `sockets` (every datagram counted in `media`'s requests), sends the
@@ -647,6 +684,7 @@ pub async fn serve<R: Registry + Browse>(
         (Identity::new(&device.cfg, net), network_of(&device.cfg))
     };
     let threads = media.spawn_threads().map_err(ServeError::Threads)?;
+    let _receivers = receiver_reader(&media, &network, ip).map_err(ServeError::Threads)?;
     let rx_changes = Arc::new(Changes::default());
     let requests = Arc::clone(&media.requests);
     let (mut driver, mut answers) = Driver::new(

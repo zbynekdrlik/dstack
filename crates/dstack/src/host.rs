@@ -99,16 +99,21 @@ fn run_failed(e: impl Display) -> HostError {
     HostError::Run(e.to_string())
 }
 
-/// Where the media clock's PTP time comes from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Where the media clock's PTP time comes from. The default is
+/// [`ClockSource::Linked`] for every device of ours (owner 4.11.2026): it
+/// follows Dante PTP in its own process, as DVS does, so its audio does not
+/// hang on the PC's dsync service; the service serves the rest of the
+/// system, on the same grandmaster.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ClockSource {
-    /// dsync on the box, polled once a second: the network's PTP time
-    /// (production; [`prepare`] always uses it).
+    /// dsync on the box, polled once a second: the network's PTP time, and
+    /// nothing else (no in-process follower).
     Dsync,
-    /// dlink's default (dstack #68, owner 2.11.2026): dsync's in-process
+    /// The default (owner 2.11 and 4.11.2026): dsync's in-process
     /// follower (dsync-ptp) on the device's interface when it is locked,
     /// the dsync service otherwise ([`crate::clock::linked`]): a clock with
     /// or without the service, never worse than it.
+    #[default]
     Linked,
     /// TEST ONLY: this machine's own clock (realtime, read once, then
     /// monotonic), ready at once, never re-anchored. For a device with no
@@ -279,9 +284,10 @@ pub struct Prepared {
     listener: Option<UnixListener>,
 }
 
-/// [`prepare_with`] on dsync's clock: the production device.
+/// [`prepare_with`] on the default clock ([`ClockSource::Linked`]): the
+/// production device.
 pub fn prepare(opts: &Options, engine_tx: &[usize]) -> Result<Prepared, HostError> {
-    prepare_with(opts, engine_tx, ClockSource::Dsync)
+    prepare_with(opts, engine_tx, ClockSource::default())
 }
 
 /// The device of `opts` set up, nothing served yet: the config, its state

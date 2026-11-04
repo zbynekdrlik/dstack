@@ -226,6 +226,25 @@ fn our_tx_reaches_our_rx_clean_on_the_system_clock() {
         dstack::arc::control::rx_flows(&mut udp)
     };
     let heard = dstack::latency::listen(ip, ip, Duration::from_millis(2_500));
+    // dstack #1: our TX reads its receiver's latency (our own device, from
+    // its ARC record, as any receiver) for the late check.
+    let receiver_us = {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            let status = ctl::answer("status", &media);
+            let us = field(&status, "\"tx\":[{", "receiver_latency_us");
+            if us == Some(u64::from(latency) / 1_000) || Instant::now() >= deadline {
+                break (us, status);
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    };
+    assert_eq!(
+        receiver_us.0,
+        Some(u64::from(latency) / 1_000),
+        "{}",
+        receiver_us.1
+    );
     let stopped = host.stop(Duration::from_secs(5));
     let flows = flows.expect("our RX flows");
     assert_eq!(flows.len(), 1, "{flows:?}");
