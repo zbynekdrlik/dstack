@@ -1498,11 +1498,11 @@ async fn the_local_endpoint_serves_one_line_a_connection() {
 #[test]
 fn the_clock_source_names_what_a_linked_device_uses() {
     use crate::clock::linked::Source;
-    assert_eq!(source_word(true, None), "system");
-    assert_eq!(source_word(false, None), "dsync");
-    assert_eq!(source_word(false, Some(Source::Internal)), "internal");
-    assert_eq!(source_word(false, Some(Source::Service)), "service");
-    assert_eq!(source_word(false, Some(Source::None)), "none");
+    assert_eq!(clock_source_word(true, None), "system");
+    assert_eq!(clock_source_word(false, None), "dsync");
+    assert_eq!(clock_source_word(false, Some(Source::Internal)), "internal");
+    assert_eq!(clock_source_word(false, Some(Source::Service)), "service");
+    assert_eq!(clock_source_word(false, Some(Source::None)), "none");
     let stats = crate::clock::ClockStats::default();
     assert_eq!(stats.linked(), None, "a device without the follower");
     stats.set_linked(Source::Internal);
