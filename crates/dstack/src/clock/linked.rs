@@ -303,7 +303,9 @@ impl Linked {
 
     /// A switch's measure: the two sources' re-anchor counts, read before
     /// their times, and `to`'s time less `from`'s ([`Linked::offset_ns`]),
-    /// `None` when either re-anchored while it was read.
+    /// `None` when either re-aligned while it was read (a follower step the
+    /// tracker absorbs moves no count: [`offset_of`]'s farther difference
+    /// carries it).
     fn measure(&self, from: Source, to: Source) -> Measured {
         let from_anchors = self.component(from);
         let to_anchors = self.component(to);
@@ -511,9 +513,23 @@ impl<M: Model> Absorbing<M> {
     }
 
     /// The model now and the (re-aligns, absorbed) with it.
+    ///
+    /// The model is read under the lock, so the tracker sees models in the
+    /// order dsync published them (a model read before the lock could reach
+    /// it after a newer one and count one re-anchor three times). A reader
+    /// that finds the lock taken reads its own model and the counts last
+    /// published: on a re-align in that very step it may see the new time
+    /// under the old epoch for one step (the pump then re-bootstraps on the
+    /// jump itself, once more on the epoch), never for a step it absorbs.
+    /// A poisoned lock is used as it is (`feed` cannot panic).
     fn read(&self) -> (ClockModel, u32, u32) {
+        let held = match self.absorb.try_lock() {
+            Ok(a) => Some(a),
+            Err(std::sync::TryLockError::Poisoned(p)) => Some(p.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => None,
+        };
         let m = self.source.model();
-        if let Ok(mut a) = self.absorb.try_lock() {
+        if let Some(mut a) = held {
             let (r, ab) = a.feed(m);
             let [r0, r1, r2, r3] = r.to_be_bytes();
             let [a0, a1, a2, a3] = ab.to_be_bytes();
@@ -622,5 +638,7 @@ pub fn follower_failure(e: &dsync_ptp::follower::FollowerError) -> &'static str 
     }
 }
 
+#[cfg(test)]
+mod absorb_tests;
 #[cfg(test)]
 mod tests;
