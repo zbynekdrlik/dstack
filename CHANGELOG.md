@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.6.24 (unreleased)
+
+- Docs: `.claude/rules/release.md` notes how to recover a PR whose head did not move after a GitHub 500 on push.
+- **Latency change** for every dlink app (dstack #1; intercom's report against v0.6.22, and the RX-only sizing of an obs input). Two changes to `dlink::split`, the budget's split:
+  - The pump margin W takes a share of the budget: 2/5 of it (4 ms of 10 ms, 8 ms of 20 ms), at least the block and 2 ms. It was the block and at least 2 ms since v0.6.22 (half the latency, 5 ms, before), whatever the budget. W is how late the pump may run: a pump more than W behind starts its schedule again and the skipped blocks are lost, as TX holes on the sending side and as a gap in the app's RX on the receiving side. intercom saw those gaps on a loaded PC with v0.6.22 and v0.6.23 (a 96 kHz TX into a 96 kHz RX with a 48 kHz app), also at a 20 ms budget. On a device with TX, W is in the TX path, and with a rate converter it gives way to keep P at its 4 ms floor (down to its own least). An RX-only device keeps the whole share: W is not in its path.
+  - P is sized by the directions the device has: RX channels only, the budget less the RX work (B + the converter's RX delay); TX channels only, less the TX work (W + the converter's TX delay); both (or no channels), the larger, as before. Before, a one-direction device paid for a path it never runs: an RX-only 48 kHz app on a 96 kHz device got P 5.17 ms from the converter's TX delay.
+  - Before (v0.6.22 and v0.6.23) and after, at the default 10 ms and block 128. P is what the device's RX plays out at and its TX channels advertise; a TX-only device now splits as one with both directions in every row (its TX work is the larger), and so does a one-direction device before:
+
+    | Device | App | Directions | W before | W after | P before | P after | TX path before -> after | RX path before -> after |
+    |---|---|---|---|---|---|---|---|---|
+    | 48 kHz | 48 kHz | both, TX only | 2.67 ms | 4 ms | 7.33 ms | 6 ms | 10 -> 10 ms | 10 -> 8.67 ms |
+    | 48 kHz | 48 kHz | RX only | 2.67 ms | 4 ms | 7.33 ms | 7.33 ms | none | 10 -> 10 ms |
+    | 96 kHz | 96 kHz | both, TX only | 2 ms | 4 ms | 8 ms | 6 ms | 10 -> 10 ms | 9.33 -> 7.33 ms |
+    | 96 kHz | 96 kHz | RX only | 2 ms | 4 ms | 8 ms | 8.67 ms | none | 9.33 -> 10 ms |
+    | 96 kHz | 48 kHz | both, TX only | 2 ms | 3.16 ms | 5.17 ms | 4.01 ms | 10 -> 10 ms | 7.83 -> 6.68 ms |
+    | 96 kHz | 48 kHz | RX only | 2 ms | 4 ms | 5.17 ms | 7.33 ms | none | 7.83 -> 10 ms |
+    | 96 kHz | 44.1 kHz | both, TX only | 2 ms | 2.91 ms | 4.92 ms | 4.01 ms | 9.99 -> 9.99 ms | 7.57 -> 6.66 ms |
+    | 96 kHz | 44.1 kHz | RX only | 2 ms | 4 ms | 4.92 ms | 7.34 ms | none | 7.57 -> 9.99 ms |
+    | 48 kHz | 44.1 kHz | both, TX only | 2.67 ms | 2.90 ms | 4.25 ms | 4.02 ms | 9.99 -> 9.99 ms | 9.57 -> 9.34 ms |
+    | 48 kHz | 44.1 kHz | RX only | 2.67 ms | 4 ms | 4.25 ms | 4.67 ms | none | 9.57 -> 9.99 ms |
+    | 48 kHz | 96 kHz | both, TX only | 2.67 ms | 4 ms | 4.67 ms | 4.58 ms | 8.75 -> 10 ms | 10 -> 9.92 ms |
+    | 48 kHz | 96 kHz | RX only | 2.67 ms | 4 ms | 4.67 ms | 4.67 ms | none | 10 -> 10 ms |
+
+    Exact P after, ns: 6000000 (48/48), 6000000 (96/96), 4010416 (96/48 and 96/44.1), 4020833 (48/44.1), 4583333 (48/96); RX only 7333333 (48/48, 96/48), 8666666 (96/96), 7343750 (96/44.1), 4666666 (48/44.1, 48/96).
+  - At a 20 ms budget W grows to 8 ms: 48 kHz and 96 kHz devices go from W 2.67 / 2 ms and P 17.33 / 18 ms to W 8 ms and P 12 ms; a 48 kHz app on a 96 kHz device from W 2 ms and P 15.17 ms to W 8 ms and P 9.17 ms (RX only: P 17.33 ms).
+  - Block 256 at 48 kHz (W is the block, 5.33 ms, over its share) is unchanged: P 4.67 ms. A budget that leaves P under 4 ms is refused as before; the floor (`MIN_LATENCY_NS`) and its problem text are unchanged. A latency Dante Controller set on the device still wins.
+  - What a consumer re-measures: an app that aligns by the device latency (camera-box's A/V by measurement, SongPlayer's ledger) moves to the P above for its rates and directions. Pinned test numbers move: 48/48 P 352 -> 288 samples, W 128 -> 192 (pump offset 608 unchanged); 96/96 P 768 -> 576, W 192 -> 384 (offset 1088 unchanged); a 48 kHz app on a 96 kHz device with both directions P 496 -> 385, W 192 -> 303 (offset 816 unchanged), RX only P 496 -> 704, W 192 -> 384 (offset 816 -> 1216).
+  - Port: `dlink::split(budget_ns, device_rate, app_rate, block)` takes a fifth argument, `directions: Directions` (`Directions::Both` is the old sizing of P). `dlink::work_margin(rate, block)` is `work_margin(budget_ns, rate, block)` (the share before the TX cap); `dlink::least_work_margin(rate, block)` is the old value (the block, at least 2 ms). New: `dlink::Directions` (`Both`, `Rx`, `Tx`; `Directions::of(rx, tx)`), `Config::directions`, `WORK_SHARE_NUM` / `WORK_SHARE_DEN`. `Config::split`, `Config::device` and `Link::start` use the config's own channels. The start log's split line has a new field, `directions`. `Split::tx_path_ns` / `rx_path_ns` of the direction a device lacks may pass the budget (that path carries no audio).
+
 ## 0.6.23 (unreleased)
 
 - **Changed default** (dstack #1, the owner's ROZHODNUTÉ of 4.11.2026): every device of ours follows Dante PTP in its own process by default, the way Dante Virtual Soundcard does, so its audio does not hang on the PC's dsync service. The service serves the rest of the system on the same grandmaster and stays the follower's fallback.

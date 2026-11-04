@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use dlink::{Block, Clock, Config, Link, Map, Place, Process, Stopped, SubState, SubStatus};
+use dlink::{Block, Clock, Config, Link, Map, Place, Ports, Process, Stopped, SubState, SubStatus};
 use dstack::device::{DeviceState, Subscription};
 
 /// The box's IPv4 address on its default route (connecting a UDP socket
@@ -91,10 +91,10 @@ fn a_dlink_device_runs_the_app_s_processor_at_its_defaults() {
         "our TX 1 came back on RX 1 as {got}"
     );
     assert!(pump.media && pump.blocks > 0, "{pump:?}");
-    // The pump runs at dlink's timing (48 kHz): B 128 (dstack #90) + P 352
-    // (7.33 ms, what the 10 ms budget leaves after B and W; dstack #68) + W
-    // 128 (the block, over 2 ms).
-    assert_eq!((pump.playout, pump.offset), (352, 608), "{pump:?}");
+    // The pump runs at dlink's timing (48 kHz): B 128 (dstack #90) + P 288
+    // (6 ms, what the 10 ms budget leaves after W; dstack #68) + W 192
+    // (4 ms, 2/5 of the budget; dstack #1).
+    assert_eq!((pump.playout, pump.offset), (288, 608), "{pump:?}");
     assert!(matches!(stopped, Stopped::Done), "{stopped:?}");
     assert_eq!(
         dstack::clock::profile(),
@@ -180,11 +180,13 @@ fn a_48_khz_app_runs_a_96_khz_device_through_the_conversion() {
     // The device's block is 128 frames at 96 kHz (dstack #90): the app gets 64
     // at 48 kHz.
     assert_eq!(frames.load(Ordering::Relaxed), 64);
-    // The RX flow runs at 96 kHz: the split's 5.17 ms latency (10 ms less W
-    // 2 ms and the converter's 2.83 ms TX delay; dstack #68) is 496 samples.
-    assert!(status.contains("\"latency\":496"), "{status}");
-    // The pump runs at the device's 96 kHz: B 128 + P 496 + W 192 (2 ms).
-    assert_eq!((pump.playout, pump.offset), (496, 816), "{pump:?}");
+    // The RX flow runs at 96 kHz: the split's 4.01 ms latency (P's 4 ms
+    // floor in whole samples: 10 ms less W and the converter's 2.83 ms TX
+    // delay; dstack #68, #1) is 385 samples.
+    assert!(status.contains("\"latency\":385"), "{status}");
+    // The pump runs at the device's 96 kHz: B 128 + P 385 + W 303 (3.16 ms,
+    // what the converter leaves of W's 4 ms share).
+    assert_eq!((pump.playout, pump.offset), (385, 816), "{pump:?}");
     assert!(matches!(stopped, Stopped::Done), "{stopped:?}");
 }
 
@@ -401,4 +403,184 @@ fn the_loop_through_our_own_flow_takes_what_the_split_says() {
             "{name}: the loop took {got} ns, the split says {want} ns ({split:?})"
         );
     }
+}
+
+/// How long [`Napping`] sleeps, and how often (every `NAP_EVERY`th block):
+/// a pump that late, on a loaded PC (intercom's OBS box, a busy core).
+const NAP: Duration = Duration::from_millis(4);
+const NAP_EVERY: u64 = 40;
+
+/// Writes 0.5 on output 0, and counts input 0's samples while `count` is
+/// set: those at 0.5 (`good`) and those off it (`bad`, a gap ringing
+/// through the converter). Sleeps [`NAP`] every [`NAP_EVERY`]th block, so
+/// the pump runs that late (less one block) now and then.
+struct Napping {
+    calls: u64,
+    count: Arc<AtomicBool>,
+    good: Arc<AtomicU64>,
+    bad: Arc<AtomicU64>,
+}
+
+impl Napping {
+    fn new(count: &Arc<AtomicBool>, good: &Arc<AtomicU64>, bad: &Arc<AtomicU64>) -> Self {
+        Napping {
+            calls: 0,
+            count: Arc::clone(count),
+            good: Arc::clone(good),
+            bad: Arc::clone(bad),
+        }
+    }
+}
+
+impl Process for Napping {
+    fn process(&mut self, block: &mut Block<'_>) {
+        self.calls += 1;
+        if self.calls.is_multiple_of(NAP_EVERY) {
+            std::thread::sleep(NAP);
+        }
+        if block.inputs() > 0 && self.count.load(Ordering::Relaxed) {
+            let (mut good, mut bad) = (0, 0);
+            for &x in block.input(0) {
+                if (x - 0.5).abs() < 1e-3 {
+                    good += 1;
+                } else {
+                    bad += 1;
+                }
+            }
+            self.good.fetch_add(good, Ordering::Relaxed);
+            self.bad.fetch_add(bad, Ordering::Relaxed);
+        }
+        if block.outputs() > 0 {
+            block.output(0).fill(0.5);
+        }
+    }
+}
+
+/// intercom's report against v0.6.22 (dstack #1): a native 96 kHz dlink TX
+/// heard by a dlink RX on the 96 kHz network with a 48 kHz app had gaps
+/// on a loaded PC, where v0.6.21 had none. The pump margin W, the
+/// lateness a pump may have before it starts again, had dropped to 2 ms
+/// (half the latency, 5 ms, before), and stayed there at intercom's 20 ms
+/// budget. Both devices' pumps run up to [`NAP`] less a block late now and
+/// then: within their share of the budget, the tone arrives whole (no pump
+/// starts again, no sample off the level), on both the sending and the
+/// receiving side. The test runs intercom's 20 ms budget (W 8 ms; 2 ms
+/// before the fix): at 10 ms W's 4 ms leaves a nap 1.3 ms of slack, which
+/// wake jitter on a loaded shared box can take (tests.md: real-time
+/// lateness is the hardware gate's).
+#[test]
+fn a_pump_late_within_its_share_of_the_budget_keeps_the_tone_whole() {
+    let _one = ONE_DEVICE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let dir = tempfile::tempdir().unwrap();
+    let place = Place::Ip(routed_ipv4());
+    let count = Arc::new(AtomicBool::new(false));
+    let good = Arc::new(AtomicU64::new(0));
+    let bad = Arc::new(AtomicU64::new(0));
+    let budget = 20_000_000;
+    let tx_config = Config::new("dlink-late-tx", dir.path().join("tx.toml"))
+        .tx(["Out 1"])
+        .sample_rate(96_000)
+        .budget_ns(budget);
+    let rx_config = Config::new("dlink-late-rx", dir.path().join("rx.toml"))
+        .rx(["In 1"])
+        .sample_rate(48_000)
+        .network_rate(96_000)
+        .budget_ns(budget)
+        .ports(Ports {
+            arc: 4441,
+            cmc: 8801,
+            flows: 4456,
+        })
+        .process_id(1)
+        .subscribe(1, "Out 1", "dlink-late-tx");
+    let sender = Link::start_on(
+        &tx_config,
+        &place,
+        Map {
+            rx: vec![],
+            tx: vec![0],
+        },
+        Napping::new(&count, &good, &bad),
+        Clock::System,
+    )
+    .expect("the sending device started");
+    let receiver = Link::start_on(
+        &rx_config,
+        &place,
+        Map {
+            rx: vec![0],
+            tx: vec![],
+        },
+        Napping::new(&count, &good, &bad),
+        Clock::System,
+    )
+    .expect("the receiving device started");
+    let end = Instant::now() + Duration::from_secs(15);
+    while receiver.rx_channels()[0].status != Some(SubStatus::Receiving) && Instant::now() < end {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // The flow carries the tone and the converter's filters settle.
+    std::thread::sleep(Duration::from_millis(500));
+    let before = (
+        sender
+            .media()
+            .engine()
+            .expect("the sender's pump")
+            .rebootstraps,
+        receiver
+            .media()
+            .engine()
+            .expect("the receiver's pump")
+            .rebootstraps,
+    );
+    count.store(true, Ordering::Relaxed);
+    // Three seconds of the 48 kHz app's samples: about 50 naps a side.
+    let end = Instant::now() + Duration::from_secs(10);
+    while good.load(Ordering::Relaxed) + bad.load(Ordering::Relaxed) < 3 * 48_000
+        && Instant::now() < end
+    {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    count.store(false, Ordering::Relaxed);
+    let after = (
+        sender
+            .media()
+            .engine()
+            .expect("the sender's pump")
+            .rebootstraps,
+        receiver
+            .media()
+            .engine()
+            .expect("the receiver's pump")
+            .rebootstraps,
+    );
+    let pumps = (
+        sender.media().engine().expect("the sender's pump"),
+        receiver.media().engine().expect("the receiver's pump"),
+    );
+    let channel = receiver.rx_channels().remove(0);
+    assert_eq!((sender.ended(), receiver.ended()), (None, None));
+    assert!(matches!(receiver.stop(), Stopped::Done));
+    assert!(matches!(sender.stop(), Stopped::Done));
+    let (good, bad) = (good.load(Ordering::Relaxed), bad.load(Ordering::Relaxed));
+    assert!(
+        good + bad >= 3 * 48_000,
+        "{good} on, {bad} off: {channel:?}"
+    );
+    assert_eq!(
+        (after.0 - before.0, after.1 - before.1),
+        (0, 0),
+        "pump restarts (sender, receiver) while late within the margin"
+    );
+    assert_eq!(bad, 0, "{bad} samples off the tone, {good} on it");
+    // The split each device runs (dstack #1), as its pump's playout point
+    // and margin (offset = B + P + W): the TX-only sender at 12 ms (1152
+    // samples at 96 kHz: the budget less W's 8 ms share, 768), the RX-only
+    // receiver at 17.33 ms (1664: the budget less its block and the
+    // converter's RX delay), with the whole 8 ms share as its W.
+    let (tx, rx) = pumps;
+    assert_eq!((tx.playout, tx.offset), (1152, 128 + 1152 + 768), "{tx:?}");
+    assert_eq!((rx.playout, rx.offset), (1664, 128 + 1664 + 768), "{rx:?}");
 }
