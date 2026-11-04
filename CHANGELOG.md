@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.28 (unreleased)
+
+- Fix (dstack #1, dasio's FOH trace): on Windows the spin tail of a media thread's wait yields with `Sleep(0)` instead of `SwitchToThread` (`std::thread::yield_now`). SwitchToThread gave the CPU to any ready thread on it, a lower-priority one included (System workers, a fan tool at priority 10), for that thread's whole quantum: dasio's pumps sat Ready for 10–23 ms (`WrYieldExecution`) and ran late on both FOH instances together. Sleep(0) runs only a ready thread of equal or higher priority, so our RX/TX threads sharing a core still get it, and returns at once otherwise. No latency change.
+
 ## 0.6.27 (unreleased)
 
 - Fix (obs's review of v0.6.26): on Windows a config's `pump_cpu`, `io_cpu` or `rx_cpu` from 64 on is refused ("pump_cpu: 0 to 63"); Windows pins a thread only within its first processor group. Before, it passed the check and the thread was then never pinned. New: `dstack::device::max_cpu_for(Os)`. Linux keeps 0 to 1023. No latency change.

@@ -18,7 +18,7 @@ use windows_sys::Win32::System::Performance::{QueryPerformanceCounter, QueryPerf
 use windows_sys::Win32::System::SystemInformation::GetSystemTimePreciseAsFileTime;
 use windows_sys::Win32::System::Threading::{
     CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, CreateWaitableTimerExW, INFINITE, SetWaitableTimer,
-    TIMER_ALL_ACCESS, WaitForSingleObject,
+    Sleep, TIMER_ALL_ACCESS, WaitForSingleObject,
 };
 
 /// 100 ns intervals from 1601-01-01 to 1970-01-01.
@@ -179,12 +179,18 @@ fn sleep_until_in(target: i64, mode: super::WaitMode) {
     }
     // The spin yields: the media threads share cores on Windows (the FOH
     // PC gives the device two), and a plain spin kept the RX thread off its
-    // core (RX packets up to 48 ms late, 2026-10-29).
+    // core (RX packets up to 48 ms late, 2026-10-29). It yields with
+    // Sleep(0), which runs only a ready thread of equal or higher priority
+    // and returns at once when there is none; SwitchToThread
+    // (`std::thread::yield_now`) handed the CPU to any ready thread on it,
+    // a lower-priority one too, for its whole quantum: dasio's FOH pumps
+    // sat Ready 10-23 ms in WrYieldExecution (xperf, 4.11.2026, dstack #1).
     if spin == 0 {
         return;
     }
     while monotonic_ns() < target {
-        std::thread::yield_now();
+        // SAFETY: Sleep takes a plain millisecond count; 0 only yields.
+        unsafe { Sleep(0) };
     }
 }
 
