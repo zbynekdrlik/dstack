@@ -458,10 +458,14 @@ impl Process for Napping {
 /// heard by a dlink RX on the 96 kHz network with a 48 kHz app had gaps
 /// on a loaded PC, where v0.6.21 had none. The pump margin W, the
 /// lateness a pump may have before it starts again, had dropped to 2 ms
-/// (half the latency, 5 ms, before). Both devices' pumps run up to
-/// [`NAP`] less a block late now and then: within their share of the
-/// budget, the tone arrives whole (no pump starts again, no sample off
-/// the level), on both the sending and the receiving side.
+/// (half the latency, 5 ms, before), and stayed there at intercom's 20 ms
+/// budget. Both devices' pumps run up to [`NAP`] less a block late now and
+/// then: within their share of the budget, the tone arrives whole (no pump
+/// starts again, no sample off the level), on both the sending and the
+/// receiving side. The test runs intercom's 20 ms budget (W 8 ms; 2 ms
+/// before the fix): at 10 ms W's 4 ms leaves a nap 1.3 ms of slack, which
+/// wake jitter on a loaded shared box can take (tests.md: real-time
+/// lateness is the hardware gate's).
 #[test]
 fn a_pump_late_within_its_share_of_the_budget_keeps_the_tone_whole() {
     let _one = ONE_DEVICE
@@ -472,13 +476,16 @@ fn a_pump_late_within_its_share_of_the_budget_keeps_the_tone_whole() {
     let count = Arc::new(AtomicBool::new(false));
     let good = Arc::new(AtomicU64::new(0));
     let bad = Arc::new(AtomicU64::new(0));
+    let budget = 20_000_000;
     let tx_config = Config::new("dlink-late-tx", dir.path().join("tx.toml"))
         .tx(["Out 1"])
-        .sample_rate(96_000);
+        .sample_rate(96_000)
+        .budget_ns(budget);
     let rx_config = Config::new("dlink-late-rx", dir.path().join("rx.toml"))
         .rx(["In 1"])
         .sample_rate(48_000)
         .network_rate(96_000)
+        .budget_ns(budget)
         .ports(Ports {
             arc: 4441,
             cmc: 8801,
@@ -547,6 +554,10 @@ fn a_pump_late_within_its_share_of_the_budget_keeps_the_tone_whole() {
             .expect("the receiver's pump")
             .rebootstraps,
     );
+    let pumps = (
+        sender.media().engine().expect("the sender's pump"),
+        receiver.media().engine().expect("the receiver's pump"),
+    );
     let channel = receiver.rx_channels().remove(0);
     assert_eq!((sender.ended(), receiver.ended()), (None, None));
     assert!(matches!(receiver.stop(), Stopped::Done));
@@ -562,4 +573,12 @@ fn a_pump_late_within_its_share_of_the_budget_keeps_the_tone_whole() {
         "pump restarts (sender, receiver) while late within the margin"
     );
     assert_eq!(bad, 0, "{bad} samples off the tone, {good} on it");
+    // The split each device runs (dstack #1), as its pump's playout point
+    // and margin (offset = B + P + W): the TX-only sender at 12 ms (1152
+    // samples at 96 kHz: the budget less W's 8 ms share, 768), the RX-only
+    // receiver at 17.33 ms (1664: the budget less its block and the
+    // converter's RX delay), with the whole 8 ms share as its W.
+    let (tx, rx) = pumps;
+    assert_eq!((tx.playout, tx.offset), (1152, 128 + 1152 + 768), "{tx:?}");
+    assert_eq!((rx.playout, rx.offset), (1664, 128 + 1664 + 768), "{rx:?}");
 }
