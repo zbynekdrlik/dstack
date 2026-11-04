@@ -189,6 +189,8 @@ pub struct ClockStats {
     grandmaster: AtomicU64,
     /// The master's UUID, as `grandmaster` (dsync 1.26 on).
     master: AtomicU64,
+    /// A linked clock's source ([`linked::Source`] + 1; 0: not linked).
+    linked: std::sync::atomic::AtomicU8,
 }
 
 /// [`ClockStats`] read at one moment.
@@ -242,6 +244,21 @@ impl ClockStats {
     /// Whether the clock is the TEST system clock.
     pub fn is_system(&self) -> bool {
         self.system.load(Ordering::Relaxed)
+    }
+
+    /// A linked clock uses `source` now (the host's selection, once a
+    /// second).
+    pub fn set_linked(&self, source: linked::Source) {
+        self.linked.store(source as u8 + 1, Ordering::Relaxed);
+    }
+
+    /// The source a linked clock uses; `None` for a clock that is not
+    /// linked (the dsync service only, or the system clock).
+    pub fn linked(&self) -> Option<linked::Source> {
+        match self.linked.load(Ordering::Relaxed) {
+            0 => None,
+            v => Some(linked::Source::from_u8(v - 1)),
+        }
     }
 
     pub fn counts(&self) -> ClockCounts {

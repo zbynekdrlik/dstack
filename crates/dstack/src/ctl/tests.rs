@@ -609,6 +609,9 @@ const WORDS: &[&str] = &[
     "freq_ppb",
     "dsync",
     "system",
+    "internal",
+    "service",
+    "none",
     "requests",
     "port",
     "peer",
@@ -1490,4 +1493,23 @@ async fn the_local_endpoint_serves_one_line_a_connection() {
     let out = ask(b"source 1 counter\n", false).await.unwrap();
     assert_eq!(out, format!("error: {}\n", local::ONLY_STATUS));
     assert_eq!(media.tx.source(0), Some(Source::Silence));
+}
+
+/// iemmixer (4.11.2026): the status names the clock source a linked device
+/// actually uses (the follower in process, the dsync service, or none yet),
+/// not "dsync" whichever it is; the owner's acceptance reads it there.
+#[test]
+fn the_clock_source_names_what_a_linked_device_uses() {
+    use crate::clock::linked::Source;
+    assert_eq!(clock_source_word(true, None), "system");
+    assert_eq!(clock_source_word(false, None), "dsync");
+    assert_eq!(clock_source_word(false, Some(Source::Internal)), "internal");
+    assert_eq!(clock_source_word(false, Some(Source::Service)), "service");
+    assert_eq!(clock_source_word(false, Some(Source::None)), "none");
+    let stats = crate::clock::ClockStats::default();
+    assert_eq!(stats.linked(), None, "a device without the follower");
+    stats.set_linked(Source::Internal);
+    assert_eq!(stats.linked(), Some(Source::Internal));
+    stats.set_linked(Source::Service);
+    assert_eq!(stats.linked(), Some(Source::Service));
 }
