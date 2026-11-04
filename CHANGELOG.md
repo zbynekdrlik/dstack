@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.26 (unreleased)
+
+- New (dstack #1, camera-box): `dlink::Config::pump_cpu(cpu)`, `io_cpu(cpu)` and `rx_cpu(cpu)` place the device's pump (`dstack-engine`), TX (`dstack-tx`, and RX unless `rx_cpu` is set) and RX (`dstack-rx`) threads on CPUs the app chooses, the way a dstack config's `pump_cpu`/`io_cpu`/`rx_cpu` do. Unset, they stay anywhere, as before. A CPU at or past `dstack::device::MAX_CPU` is refused by `Config::device`. Why: on a loaded PC (load 11 on 20 CPUs), a hub's unpinned pump was preempted for about 3.5 ms, past its margin, and lost blocks. No latency change.
+
 ## 0.6.25 (unreleased)
 
 - New log line (dstack #1; intercom's CI, where a 96 kHz TX into a 96 kHz RX with a 48 kHz app breaks the tone about once a second): once a second, when an engine pump re-bootstrapped, skipped blocks or overran in that second, one WARN `engine pump lost or overran blocks this second` (grep for that text; `dstack::stream::watch::PUMP_WARNING`), with `device`, the growth that second (`rebootstraps`, `missed`, `overruns`), `max_process_us` (the longest block since the start), `media` (on the media clock or free pacing) and the pump's timing in samples: `block` (B), `margin` (W), `playout` (P), `offset` (D). It comes from the daemon's tick, never the pump thread, for every device with an engine: every dlink device and every `embed` engine. A gap in an app's RX in the same second as this line is the pump; a gap without it is the flow (the RX loss line, `RX packets missing from a flow`, or the sender). Quiet seconds log nothing.

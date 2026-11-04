@@ -195,6 +195,9 @@ pub struct Config {
     flow_slots: Option<usize>,
     block: u64,
     frame_sender: Sender,
+    pump_cpu: Option<usize>,
+    io_cpu: Option<usize>,
+    rx_cpu: Option<usize>,
 }
 
 /// The host's frame sender in a [`Config`] (compared by identity).
@@ -249,6 +252,9 @@ impl Config {
             flow_slots: None,
             block: BLOCK,
             frame_sender: Sender::default(),
+            pump_cpu: None,
+            io_cpu: None,
+            rx_cpu: None,
         }
     }
 
@@ -381,6 +387,30 @@ impl Config {
         self
     }
 
+    /// The CPU the device's pump thread (`dstack-engine`) runs on: a core
+    /// the app reserves for it keeps a loaded PC's other threads from
+    /// preempting the pump past its margin (dstack #1, camera-box's hub on
+    /// a box at load 11). Anywhere the kernel puts it when not set; a CPU
+    /// at or past `dstack::device::MAX_CPU` is refused by
+    /// [`Config::device`].
+    pub fn pump_cpu(mut self, cpu: usize) -> Self {
+        self.pump_cpu = Some(cpu);
+        self
+    }
+
+    /// The CPU the device's TX thread (`dstack-tx`) runs on, and its RX
+    /// thread unless [`Config::rx_cpu`] names another.
+    pub fn io_cpu(mut self, cpu: usize) -> Self {
+        self.io_cpu = Some(cpu);
+        self
+    }
+
+    /// The CPU the device's RX thread (`dstack-rx`) runs on.
+    pub fn rx_cpu(mut self, cpu: usize) -> Self {
+        self.rx_cpu = Some(cpu);
+        self
+    }
+
     /// The host's kernel send path for the device's TX (dstack #1, Windows
     /// only): dstack writes whole Ethernet II frames and hands each TX pass's
     /// frames to `sender` in one call (`dstack::media::bypass::FrameSender`).
@@ -441,6 +471,18 @@ impl Config {
         }
         if let Some(id) = self.process_id {
             t.insert("process_id".into(), i64::from(id).into());
+        }
+        for (key, cpu) in [
+            ("pump_cpu", self.pump_cpu),
+            ("io_cpu", self.io_cpu),
+            ("rx_cpu", self.rx_cpu),
+        ] {
+            if let Some(cpu) = cpu {
+                t.insert(
+                    key.into(),
+                    to_int(u64::try_from(cpu).unwrap_or(u64::MAX)).into(),
+                );
+            }
         }
         if let Some(n) = self.flow_slots {
             t.insert(
