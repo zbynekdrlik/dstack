@@ -561,7 +561,7 @@ pub fn work_margin(budget_ns: u64, rate: u32, block: u64) -> u64 {
 /// The pump's margin W of an RX-only device, samples at `rate`: the whole
 /// `budget_ns` (dstack #1, camera-box 4.11.2026: OBS dante-input, RX only
 /// and unpinned, was preempted about 6 ms, right at its W 6 ms, and
-/// re-bootstrapped every half minute), at most
+/// re-bootstrapped 19 -> 30 in about 15 minutes), at most
 /// `dstack::stream::MAX_WORK_MARGIN`, at least [`least_work_margin`].
 ///
 /// W is in none of an RX-only device's paths: its RX path is P + B + the
@@ -631,8 +631,8 @@ pub struct Split {
     /// The app's output to a receiver's playout, ns: W + P, plus the rate
     /// converter's TX delay when it runs. A receiver set to a longer
     /// latency than P adds the difference. An RX-only device has no TX
-    /// path: the figure (its W of the whole budget + P) then passes the
-    /// budget.
+    /// path: the figure (W, the whole budget, + P + the converter's TX
+    /// delay) then passes the budget.
     pub tx_path_ns: u64,
     /// A sample's network stamp to the app's block, ns: P + B, plus the
     /// rate converter's RX delay when it runs. A TX-only device has no RX
