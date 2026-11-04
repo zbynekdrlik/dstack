@@ -2013,3 +2013,39 @@ fn a_flow_s_latency_floor_is_its_packet_when_longer_than_ours() {
         flow_latency_ns(500_000, 60, 96_000, 250_000)
     ));
 }
+
+/// iemmixer (4.11.2026, v0.6.29 live): the Service -> Internal switch took
+/// every TX flow's re-bootstraps 0 -> 1 (4 of 4). A seamless handover
+/// (v0.6.31) keeps the epoch and steps the clock by at most
+/// `clock::linked::HANDOVER_NS` (3 samples at 96 kHz): even at the least
+/// advertised latency (0.25 ms, 24 samples) and fpp 16, a schedule stepped
+/// either way at any point of a packet starts no schedule again and sends
+/// every stamp once, in order.
+#[test]
+fn a_seamless_handover_step_restarts_no_tx_schedule() {
+    use crate::clock::linked::HANDOVER_NS;
+    let step = clock::to_samples(HANDOVER_NS.unsigned_abs(), 96_000) + 1;
+    for forward in [true, false] {
+        for into in 0..16 {
+            let mut s = Schedule::bootstrap(1_000, 16, 24);
+            let mut stamps = Vec::new();
+            for now in 1_000..1_200 {
+                while let Some(t) = s.due(now) {
+                    stamps.push(t);
+                }
+            }
+            let at = 1_200 + into;
+            let from = if forward { at + step } else { at - step };
+            for now in from..from + 200 {
+                while let Some(t) = s.due(now) {
+                    stamps.push(t);
+                }
+            }
+            assert_eq!(s.take_rebootstraps(), 0, "forward {forward} into {into}");
+            assert!(
+                stamps.windows(2).all(|w| w[1] == w[0] + 16),
+                "forward {forward} into {into}: {stamps:?}"
+            );
+        }
+    }
+}

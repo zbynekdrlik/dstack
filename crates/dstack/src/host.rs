@@ -742,6 +742,7 @@ async fn select_source(linked: Arc<Linked>, stats: Arc<crate::clock::ClockStats>
         every.tick().await;
         linked.tick();
         stats.set_linked(linked.source());
+        stats.set_follower(linked.follower_counts());
     }
 }
 
