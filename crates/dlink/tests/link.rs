@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! dstack #68: a dlink device in the app's process, on the box's routed
-//! address and its own system clock, at dlink's defaults (a 10 ms budget,
+//! address and its own system clock, at dlink's defaults (a 15 ms budget,
 //! the normal profile: no real-time priority, no pinning). A file of its own,
 //! so its process sets the normal profile (one per process). Our device
 //! hears itself (the tests' rule: our device only).
@@ -91,10 +91,17 @@ fn a_dlink_device_runs_the_app_s_processor_at_its_defaults() {
         "our TX 1 came back on RX 1 as {got}"
     );
     assert!(pump.media && pump.blocks > 0, "{pump:?}");
-    // The pump runs at dlink's timing (48 kHz): B 128 (dstack #90) + P 288
-    // (6 ms, what the 10 ms budget leaves after W; dstack #68) + W 192
-    // (4 ms, 2/5 of the budget; dstack #1).
-    assert_eq!((pump.playout, pump.offset), (288, 608), "{pump:?}");
+    // The pump runs at dlink's timing (48 kHz), as the split says: B 128
+    // (dstack #90) + P 432 (9 ms, what the 15 ms budget leaves after W;
+    // dstack #68, #1) + W 288 (6 ms, 2/5 of the budget).
+    let s = config.split().unwrap();
+    let p = dstack::clock::latency_samples(s.latency_ns, 48_000);
+    assert_eq!((p, s.margin), (432, 288));
+    assert_eq!(
+        (pump.playout, pump.offset),
+        (p, 128 + p + s.margin),
+        "{pump:?}"
+    );
     assert!(matches!(stopped, Stopped::Done), "{stopped:?}");
     assert_eq!(
         dstack::clock::profile(),
@@ -180,13 +187,20 @@ fn a_48_khz_app_runs_a_96_khz_device_through_the_conversion() {
     // The device's block is 128 frames at 96 kHz (dstack #90): the app gets 64
     // at 48 kHz.
     assert_eq!(frames.load(Ordering::Relaxed), 64);
-    // The RX flow runs at 96 kHz: the split's 4.01 ms latency (P's 4 ms
-    // floor in whole samples: 10 ms less W and the converter's 2.83 ms TX
-    // delay; dstack #68, #1) is 385 samples.
-    assert!(status.contains("\"latency\":385"), "{status}");
-    // The pump runs at the device's 96 kHz: B 128 + P 385 + W 303 (3.16 ms,
-    // what the converter leaves of W's 4 ms share).
-    assert_eq!((pump.playout, pump.offset), (385, 816), "{pump:?}");
+    // The RX flow runs at 96 kHz: the split's 8.36 ms latency (15 ms less
+    // W's 6 ms share and the half-band's 0.64 ms TX delay, over a TX
+    // packet's own age of 4.58 ms; dstack #68, #1) is 803 samples.
+    let s = config.split().unwrap();
+    let p = dstack::clock::latency_samples(s.latency_ns, 96_000);
+    assert_eq!((p, s.margin), (803, 576));
+    assert!(status.contains(&format!("\"latency\":{p}")), "{status}");
+    // The pump runs at the device's 96 kHz: B 128 + P 803 + W 576 (6 ms,
+    // W's whole share).
+    assert_eq!(
+        (pump.playout, pump.offset),
+        (p, 128 + p + s.margin),
+        "{pump:?}"
+    );
     assert!(matches!(stopped, Stopped::Done), "{stopped:?}");
 }
 
@@ -391,7 +405,7 @@ fn the_loop_through_our_own_flow_takes_what_the_split_says() {
             .subscribe(1, "Out 1", name);
         let split = config.split().unwrap();
         let want = split.tx_path_ns + split.rx_path_ns - split.latency_ns;
-        // Each path is within the 10 ms budget.
+        // Each path is within the 15 ms budget.
         assert!(split.tx_path_ns <= dlink::BUDGET_NS && split.rx_path_ns <= dlink::BUDGET_NS);
         let got = measured_loop(&config, app);
         // The design allows one block; the stamps are exact, so a few app
@@ -578,9 +592,9 @@ fn a_pump_late_within_its_share_of_the_budget_keeps_the_tone_whole() {
     // The split each device runs (dstack #1), as its pump's playout point
     // and margin (offset = B + P + W): the TX-only sender at 12 ms (1152
     // samples at 96 kHz: the budget less W's 8 ms share, 768), the RX-only
-    // receiver at 17.33 ms (1664: the budget less its block and the
-    // converter's RX delay), with the whole 8 ms share as its W.
+    // receiver at 18.04 ms (1732: the budget less its block and the
+    // half-band's 0.63 ms RX delay), with the whole 8 ms share as its W.
     let (tx, rx) = pumps;
     assert_eq!((tx.playout, tx.offset), (1152, 128 + 1152 + 768), "{tx:?}");
-    assert_eq!((rx.playout, rx.offset), (1664, 128 + 1664 + 768), "{rx:?}");
+    assert_eq!((rx.playout, rx.offset), (1732, 128 + 1732 + 768), "{rx:?}");
 }

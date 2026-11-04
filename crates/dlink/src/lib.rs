@@ -24,10 +24,11 @@
 //!
 //! # The latency budget
 //!
-//! The app's latency is 10 ms ([`BUDGET_NS`], [`Config::budget_ns`] sets
+//! The app's latency is 15 ms ([`BUDGET_NS`], [`Config::budget_ns`] sets
 //! another) for each direction's whole path, the work and the Dante
-//! latency together (owner, ROZHODNUTÉ 3.11.2026, dstack #68). dlink
-//! chooses the split ([`split`]):
+//! latency together (owner, ROZHODNUTÉ 3.11.2026, dstack #68: 10 ms;
+//! ROZHODNUTÉ 4.11.2026, dstack #1: 15 ms, 10 ms was never meant to push
+//! dlink apps low). dlink chooses the split ([`split`]):
 //!
 //! - B, the pump's block: 128 frames unless the app sets another
 //!   ([`Config::block`]; dstack #90: a busy video PC preempted the pump for
@@ -35,57 +36,68 @@
 //! - W, the pump's work margin: how late the pump may run. A pump more
 //!   than W behind a block starts its schedule again, and the skipped
 //!   blocks are lost on both sides (`dstack::stream::Blocks`; dstack #1:
-//!   2 ms restarted on a loaded PC). W is 2/5 of the budget (4 ms of 10 ms,
-//!   8 ms of 20 ms; [`work_margin`]), at least the block and 2 ms. On a
-//!   device with TX, W is in the TX path and gives way to keep P's floor
-//!   (with a rate converter); an RX-only device keeps the whole share, at
-//!   no cost to its path (a late block only reaches the app later).
+//!   2 ms restarted on a loaded PC). W is 2/5 of the budget (6 ms of 15 ms,
+//!   4 ms of 10 ms; [`work_margin`]), at least the block and 2 ms: at the
+//!   default, room for the 2.7 to 3.6 ms preemptions seen on loaded PCs,
+//!   where a dlink app's threads run unpinned and without real time. On a
+//!   device with TX, W is in the TX path and gives way to keep P's TX
+//!   floor when a smaller budget leaves no room for both; an RX-only device
+//!   keeps the whole share, at no cost to its path (a late block only
+//!   reaches the app later).
 //! - The rate converter's delay each way when the app's rate differs from
 //!   the network's ([`Rated`], [`rated::delay_ns`]).
 //! - P, the device's Dante latency: what the work of the directions the
 //!   device has leaves of the budget (the larger direction's when it has
-//!   both; [`Directions`]), in whole samples, at least [`MIN_LATENCY_NS`]
-//!   (4 ms). The device's RX plays out at P and its TX channels advertise
-//!   it.
+//!   both; [`Directions`]), in whole samples. Its floor is
+//!   [`tx_floor_ns`] on a device with TX channels: a TX packet's own age
+//!   when it leaves (the most frames in a packet + the TX margin + 4 ms of
+//!   lateness, 4.58 ms at 96 kHz, 4.92 ms at 48 kHz; dstack #1), and
+//!   [`MIN_LATENCY_NS`] (4 ms) on an RX-only device. The device's RX plays
+//!   out at P and its TX channels advertise it.
 //!
 //! TX (the app's output to a receiver's playout) is W + P, plus the
 //! converter's TX delay; RX (a sample's network stamp to the app's block)
 //! is P + B, plus the converter's RX delay. A receiver set to a longer
 //! latency than P adds the difference; a latency Dante Controller sets on
 //! the device replaces P (it is kept in the state file). At the default
-//! 10 ms and block 128, a device with both directions (and a TX-only one,
-//! whose TX work is the larger in every row):
+//! 15 ms and block 128, a device with both directions (and a TX-only one,
+//! whose TX work is the larger in every row), W 6 ms in every row:
 //!
-//! | Device | App | B | W | Converter RX / TX | P | TX path | RX path |
-//! |---|---|---|---|---|---|---|---|
-//! | 48 kHz | 48 kHz | 2.67 ms | 4 ms | none | 6 ms | 10 ms | 8.67 ms |
-//! | 96 kHz | 96 kHz | 1.33 ms | 4 ms | none | 6 ms | 10 ms | 7.33 ms |
-//! | 96 kHz | 48 kHz | 1.33 ms | 3.16 ms | 1.33 / 2.83 ms | 4.01 ms | 10 ms | 6.68 ms |
-//! | 96 kHz | 44.1 kHz | 1.33 ms | 2.91 ms | 1.32 / 3.08 ms | 4.01 ms | 9.99 ms | 6.66 ms |
-//! | 48 kHz | 44.1 kHz | 2.67 ms | 2.90 ms | 2.65 / 3.08 ms | 4.02 ms | 9.99 ms | 9.34 ms |
-//! | 48 kHz | 96 kHz | 2.67 ms | 4 ms | 2.67 / 1.42 ms | 4.58 ms | 10 ms | 9.92 ms |
+//! | Device | App | B | Converter RX / TX | P | TX path | RX path |
+//! |---|---|---|---|---|---|---|
+//! | 48 kHz | 48 kHz | 2.67 ms | none | 9 ms | 15 ms | 11.67 ms |
+//! | 96 kHz | 96 kHz | 1.33 ms | none | 9 ms | 15 ms | 10.33 ms |
+//! | 96 kHz | 48 kHz | 1.33 ms | 0.63 / 0.64 ms | 8.36 ms | 15 ms | 10.32 ms |
+//! | 96 kHz | 44.1 kHz | 1.33 ms | 1.32 / 3.08 ms | 5.92 ms | 14.99 ms | 8.57 ms |
+//! | 48 kHz | 44.1 kHz | 2.67 ms | 2.65 / 3.08 ms | 5.92 ms | 14.99 ms | 11.24 ms |
+//! | 48 kHz | 96 kHz | 2.67 ms | 0.64 / 0.63 ms | 8.38 ms | 15 ms | 11.68 ms |
 //!
 //! A device with RX channels only sizes P by its RX work alone, so its RX
-//! path takes the whole budget (dstack #1), and W keeps its 4 ms share:
+//! path takes the whole budget (dstack #1), and W keeps its 6 ms share:
 //!
-//! | Device | App | W | P | RX path |
-//! |---|---|---|---|---|
-//! | 48 kHz | 48 kHz | 4 ms | 7.33 ms | 10 ms |
-//! | 96 kHz | 96 kHz | 4 ms | 8.67 ms | 10 ms |
-//! | 96 kHz | 48 kHz | 4 ms | 7.33 ms | 10 ms |
-//! | 96 kHz | 44.1 kHz | 4 ms | 7.34 ms | 9.99 ms |
-//! | 48 kHz | 44.1 kHz | 4 ms | 4.67 ms | 9.99 ms |
-//! | 48 kHz | 96 kHz | 4 ms | 4.67 ms | 10 ms |
+//! | Device | App | P | RX path |
+//! |---|---|---|---|
+//! | 48 kHz | 48 kHz | 12.33 ms | 15 ms |
+//! | 96 kHz | 96 kHz | 13.67 ms | 15 ms |
+//! | 96 kHz | 48 kHz | 13.04 ms | 15 ms |
+//! | 96 kHz | 44.1 kHz | 12.34 ms | 14.99 ms |
+//! | 48 kHz | 44.1 kHz | 9.67 ms | 14.99 ms |
+//! | 48 kHz | 96 kHz | 11.69 ms | 14.99 ms |
 //!
-//! A larger budget grows W and P together: at 20 ms a 48 kHz or 96 kHz
-//! device gets W 8 ms and P 12 ms, a 48 kHz app on a 96 kHz device W 8 ms
-//! and P 9.17 ms (17.33 ms RX only).
+//! Block 256 at the default changes only the RX path (W stays 6 ms, over
+//! the block). Every pair of 44.1, 48 and 96 kHz fits 15 ms at every block
+//! of the stack. A larger budget grows W and P together: at 20 ms a 48 kHz
+//! or 96 kHz device gets W 8 ms and P 12 ms, a 48 kHz app on a 96 kHz
+//! device W 8 ms and P 11.36 ms (18.04 ms RX only).
 //!
-//! A larger block with a conversion can leave under 4 ms (block 256 on a
-//! 48 kHz device with a 44.1 kHz app); [`Config::device`] refuses that
-//! budget with the other problems. Our TX looped into our own RX takes
-//! the two paths less the one P they share (W + B + P, plus both converter
-//! delays): the whole-device test measures it.
+//! A smaller budget an app sets may not hold the TX floor: [`Config::device`]
+//! refuses it with the floor named, with the other problems (dstack #1: such
+//! configs ran at P 4 ms before, and played late at a receiver). At 10 ms
+//! those are a 48 kHz device with a 44.1 kHz app at block 128, block 256 on
+//! a 48 or 44.1 kHz device, a 96 kHz device with a 44.1 kHz app at block
+//! 256, and a 44.1 kHz device with a 48 kHz app at block 128. Our TX looped
+//! into our own RX takes the two paths less the one P they share (W + B +
+//! P, plus both converter delays): the whole-device test measures it.
 //!
 //! # Debug builds with a rate converter
 //!
@@ -149,22 +161,53 @@ pub mod rated;
 
 pub use rated::Rated;
 
+use dstack::announce::FPP_MAX;
 use dstack::clock::latency_samples;
 use dstack::device::{NORMAL_MIN_LATENCY_NS, NORMAL_MIN_WORK_MARGIN_NS, TimingProfile};
 use dstack::embed::Embedded;
 use dstack::host::ClockSource;
 use dstack::media::bypass::FrameSender;
+use dstack::media::tx::TX_MARGIN_NS;
 use dstack::stream::{BLOCKS, MAX_WORK_MARGIN};
 
-/// dlink's latency budget unless the app sets one, ns: 10 ms for each
+/// dlink's latency budget unless the app sets one, ns: 15 ms for each
 /// direction's whole path, the work (block, margin, rate conversion) and
-/// the Dante latency together (owner, ROZHODNUTÉ 3.11.2026, dstack #68).
-/// [`split`] gives the Dante latency what the work leaves.
-pub const BUDGET_NS: u64 = 10_000_000;
+/// the Dante latency together. [`split`] gives the Dante latency what the
+/// work leaves. 10 ms from v0.6.22 (owner, ROZHODNUTÉ 3.11.2026, dstack
+/// #68); 15 ms since v0.6.28 (owner, ROZHODNUTÉ 4.11.2026, dstack #1: 10 ms
+/// was never meant to push dlink apps low). At 15 ms W gets 6 ms, room for
+/// the 2.7 to 3.6 ms preemptions seen on loaded PCs with no CPU pinning
+/// and no real time, and P stays over the TX floor ([`tx_floor_ns`]) for
+/// every rate pair at every block.
+pub const BUDGET_NS: u64 = 15_000_000;
 /// The least Dante latency [`split`] leaves, ns: the normal profile's own
 /// floor (`dstack::device::NORMAL_MIN_LATENCY_NS`, 4 ms), which the device
 /// refuses to go under.
 pub const MIN_LATENCY_NS: u64 = NORMAL_MIN_LATENCY_NS;
+/// How late a TX packet may leave past its due time on the normal profile,
+/// ns (dstack #1, songplayer 4.11.2026): a Windows PC's TX thread at
+/// THREAD_PRIORITY_HIGHEST, no real time, left a packet up to 3.71 ms past
+/// due over 1 h 50 min (late_max_us 3712; of 80 million packets 301 in the
+/// 2 to 5 ms bin, none at 5 ms or more), and a receiver set to our 4 ms
+/// counted 137 of them late. Its TX floor ([`tx_floor_ns`]) covers it.
+pub const TX_LATE_NS: u64 = 4_000_000;
+
+/// The least Dante latency of a device with TX channels, ns: a TX packet's
+/// own age when it leaves. That is the most frames a receiver may ask in a
+/// packet (`dstack::announce::FPP_MAX`, our device's `tx_fpp_max`) at
+/// `device_rate`, plus the device's TX margin
+/// (`dstack::media::tx::TX_MARGIN_NS`), plus how late it may leave on the
+/// normal profile ([`TX_LATE_NS`]). A receiver plays the packet that P
+/// after its stamp, so P under it plays packets late (dstack #1). The
+/// frames count in whole ns as [`split`] counts P's samples (rounded down),
+/// so a P of exactly that age is taken: 4583333 ns at 96 kHz, 4916666 ns
+/// at 48 kHz; over [`MIN_LATENCY_NS`] at any rate (a rate of 0 counts as
+/// 1 Hz).
+pub fn tx_floor_ns(device_rate: u32) -> u64 {
+    let frames = u64::from(FPP_MAX) * 1_000_000_000 / u64::from(device_rate.max(1));
+    frames + TX_MARGIN_NS + TX_LATE_NS
+}
+const _: () = assert!(TX_MARGIN_NS + TX_LATE_NS > MIN_LATENCY_NS);
 /// The sample rate unless the app sets one.
 pub const SAMPLE_RATE: u32 = 48_000;
 /// The pump's block unless the app sets one, frames (1.33 ms at 96 kHz,
@@ -195,9 +238,6 @@ pub struct Config {
     flow_slots: Option<usize>,
     block: u64,
     frame_sender: Sender,
-    pump_cpu: Option<usize>,
-    io_cpu: Option<usize>,
-    rx_cpu: Option<usize>,
 }
 
 /// The host's frame sender in a [`Config`] (compared by identity).
@@ -252,9 +292,6 @@ impl Config {
             flow_slots: None,
             block: BLOCK,
             frame_sender: Sender::default(),
-            pump_cpu: None,
-            io_cpu: None,
-            rx_cpu: None,
         }
     }
 
@@ -387,30 +424,6 @@ impl Config {
         self
     }
 
-    /// The CPU the device's pump thread (`dstack-engine`) runs on: a core
-    /// the app reserves for it keeps a loaded PC's other threads from
-    /// preempting the pump past its margin (dstack #1, camera-box's hub on
-    /// a box at load 11). Anywhere the kernel puts it when not set; a CPU
-    /// at or past the OS's limit (`dstack::device::max_cpu_for`) is refused by
-    /// [`Config::device`].
-    pub fn pump_cpu(mut self, cpu: usize) -> Self {
-        self.pump_cpu = Some(cpu);
-        self
-    }
-
-    /// The CPU the device's TX thread (`dstack-tx`) runs on, and its RX
-    /// thread unless [`Config::rx_cpu`] names another.
-    pub fn io_cpu(mut self, cpu: usize) -> Self {
-        self.io_cpu = Some(cpu);
-        self
-    }
-
-    /// The CPU the device's RX thread (`dstack-rx`) runs on.
-    pub fn rx_cpu(mut self, cpu: usize) -> Self {
-        self.rx_cpu = Some(cpu);
-        self
-    }
-
     /// The host's kernel send path for the device's TX (dstack #1, Windows
     /// only): dstack writes whole Ethernet II frames and hands each TX pass's
     /// frames to `sender` in one call (`dstack::media::bypass::FrameSender`).
@@ -472,18 +485,6 @@ impl Config {
         if let Some(id) = self.process_id {
             t.insert("process_id".into(), i64::from(id).into());
         }
-        for (key, cpu) in [
-            ("pump_cpu", self.pump_cpu),
-            ("io_cpu", self.io_cpu),
-            ("rx_cpu", self.rx_cpu),
-        ] {
-            if let Some(cpu) = cpu {
-                t.insert(
-                    key.into(),
-                    to_int(u64::try_from(cpu).unwrap_or(u64::MAX)).into(),
-                );
-            }
-        }
         if let Some(n) = self.flow_slots {
             t.insert(
                 "flow_slots".into(),
@@ -529,8 +530,10 @@ impl Config {
 }
 
 /// The pump's share of the budget: W is [`WORK_SHARE_NUM`] /
-/// [`WORK_SHARE_DEN`] of it (4 ms of 10 ms; the owner's 48 kHz example, dstack
-/// #1: about 4 ms of pump margin and 6 ms of Dante latency).
+/// [`WORK_SHARE_DEN`] of it (the owner's 48 kHz example, dstack #1: about
+/// 4 ms of pump margin and 6 ms of Dante latency at 10 ms; 6 ms of 15 ms,
+/// the default since v0.6.28, 1.7 times the longest preemption seen on a
+/// loaded PC, 3.6 ms).
 pub const WORK_SHARE_NUM: u64 = 2;
 /// See [`WORK_SHARE_NUM`].
 pub const WORK_SHARE_DEN: u64 = 5;
@@ -598,7 +601,7 @@ pub struct Split {
     pub latency_ns: u64,
     /// W, the pump's work margin, samples at the device's rate: how late
     /// its pump may run before it starts again ([`work_margin`], given way
-    /// to P's floor on a device with TX).
+    /// to P's TX floor on a device with TX).
     pub margin: u64,
     /// The app's output to a receiver's playout, ns: W + P, plus the rate
     /// converter's TX delay when it runs. A receiver set to a longer
@@ -648,18 +651,23 @@ pub fn split(
     let rate = u128::from(device_rate);
     let ns = |samples: u64| (u128::from(samples) * 1_000_000_000 / rate) as u64;
     let samples_in = |ns: u64| (u128::from(ns) * rate / 1_000_000_000) as u64;
-    // W is in the TX path: a device with TX keeps P's floor, and W gives
-    // way, down to its own least. The room's last sample is left to P, so
-    // P's whole samples still reach the floor at any rate. An RX-only
-    // device's W is not in its path (a late block only comes later): it
-    // keeps the whole share.
+    // W is in the TX path: a device with TX keeps P's TX floor (the
+    // packets' own age, [`tx_floor_ns`]), and W gives way, down to its own
+    // least. The room's last sample is left to P, so P's whole samples
+    // still reach the floor at any rate. An RX-only device's W is not in
+    // its path (a late block only comes later): it keeps the whole share,
+    // and its P has the profile's floor.
     let mut margin = work_margin(budget_ns, device_rate, b);
-    if directions != Directions::Rx {
-        let room = budget_ns.saturating_sub(convert_tx + MIN_LATENCY_NS);
+    let floor = if directions == Directions::Rx {
+        MIN_LATENCY_NS
+    } else {
+        let floor = tx_floor_ns(device_rate);
+        let room = budget_ns.saturating_sub(convert_tx + floor);
         margin = margin
             .min(samples_in(room).saturating_sub(1))
             .max(least_work_margin(device_rate, b));
-    }
+        floor
+    };
     let tx_work = ns(margin) + convert_tx;
     let rx_work = ns(b) + convert_rx;
     let work = match directions {
@@ -668,10 +676,16 @@ pub fn split(
         Directions::Tx => tx_work,
     };
     let latency_ns = ns(samples_in(budget_ns.saturating_sub(work)));
-    if latency_ns < MIN_LATENCY_NS {
+    if latency_ns < floor {
         return Err(format!(
             "budget_ns: {budget_ns} leaves a Dante latency of {latency_ns} ns after \
-             {work} ns of work (block, margin, rate conversion); at least {MIN_LATENCY_NS}"
+             {work} ns of work (block, margin, rate conversion); at least {floor} \
+             ({})",
+            if directions == Directions::Rx {
+                "the normal profile's floor"
+            } else {
+                "a TX packet's own age, dlink::tx_floor_ns"
+            }
         ));
     }
     Ok(Split {
