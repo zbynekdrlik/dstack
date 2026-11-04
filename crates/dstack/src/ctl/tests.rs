@@ -9,6 +9,7 @@ const DROPS: &str = if cfg!(target_os = "linux") {
 
 use std::net::Ipv4Addr;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use crate::clock::{Event, ManualClock};
 use crate::daemon::media::tests::{BOUND, T, Unready, device_at, media_on, media_with_engine, sub};

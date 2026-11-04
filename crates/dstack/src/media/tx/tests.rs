@@ -2016,7 +2016,7 @@ fn a_flow_s_latency_floor_is_its_packet_when_longer_than_ours() {
 
 /// iemmixer (4.11.2026, v0.6.29 live): the Service -> Internal switch took
 /// every TX flow's re-bootstraps 0 -> 1 (4 of 4). A seamless handover
-/// (v0.6.30) keeps the epoch and steps the clock by at most
+/// (v0.6.31) keeps the epoch and steps the clock by at most
 /// `clock::linked::HANDOVER_NS` (3 samples at 96 kHz): even at the least
 /// advertised latency (0.25 ms, 24 samples) and fpp 16, a schedule stepped
 /// either way at any point of a packet starts no schedule again and sends

@@ -152,7 +152,7 @@ fn the_linked_clock_reads_the_chosen_source_and_moves_its_epoch_on_a_switch() {
     assert!(from_service >= 1_000_000_000_000, "{from_service}");
     let e1 = linked.epoch();
     assert_ne!(e1, e0);
-    // The follower locks, far off the service: it waits to agree (v0.6.30),
+    // The follower locks, far off the service: it waits to agree (v0.6.31),
     // then wins with a re-align, and its time is read.
     set(&fake, Some(42_000_000_000), ALIVE_LOCKED);
     for _ in 0..HANDOVER_WAIT {
@@ -423,7 +423,7 @@ fn a_seamless_handover_keeps_an_epoch_with_re_anchors_in_it() {
 
 /// A follower that disagrees with a ready service waits up to
 /// [`HANDOVER_WAIT`] rounds to come into agreement, then takes over with a
-/// re-align (no more breaks than before v0.6.30); one that agrees within
+/// re-align (no more breaks than before v0.6.31); one that agrees within
 /// the wait takes over seamlessly.
 #[test]
 fn a_follower_that_disagrees_waits_then_takes_over_with_a_new_epoch() {
@@ -521,7 +521,8 @@ fn the_handover_is_seamless_within_the_bound_else_waits_when_voluntary() {
     assert_eq!(handover(Some(i64::MIN), false, 0), Handover::Break);
 }
 
-/// The bound against the pump's tolerance: at the tightest schedule the
+/// The bound against the pump's tolerance (its schedule alone, at 192 kHz;
+/// `stream::tests` runs the whole pump at 96 kHz): at the tightest schedule the
 /// stack allows (192 kHz, block 16, W 16), a step of [`HANDOVER_NS`] either
 /// way at any point of a block is a late block or a wait, never a
 /// re-bootstrap.
@@ -561,7 +562,7 @@ fn the_pump_absorbs_a_handover_step_at_its_tightest_schedule() {
     }
 }
 
-/// The follower's counts, for the status (v0.6.30); none without one.
+/// The follower's counts, for the status (v0.6.31); none without one.
 #[test]
 fn the_linked_clock_reads_the_follower_s_counts() {
     let (fake, _service, linked) = linked_on_service();
@@ -606,4 +607,115 @@ fn the_first_source_and_no_source_log_their_own_lines() {
     });
     assert_eq!(log.matches(NO_SOURCE_LINE).count(), 1, "{log}");
     assert_eq!(log.matches(FIRST_SOURCE_LINE).count(), 0, "{log}");
+}
+
+/// A follower whose time is the service's own, read slowly (it returns
+/// `slow_ns` of the service's time after the read began) or with a
+/// re-anchor of its own during the read.
+struct Tricky {
+    service: Arc<MonoClock>,
+    slow_ns: u64,
+    re_anchor_on_read: bool,
+    view: Mutex<View>,
+}
+
+impl Follow for Arc<Tricky> {
+    fn now_ns(&self) -> Option<i64> {
+        if self.re_anchor_on_read {
+            self.view.lock().unwrap().epoch += 1;
+        }
+        let target = self.service.now_ns()? + self.slow_ns;
+        while self.service.now_ns()? < target {
+            std::hint::spin_loop();
+        }
+        i64::try_from(target).ok()
+    }
+    fn view(&self) -> View {
+        *self.view.lock().unwrap()
+    }
+    fn counts(&self) -> ClockCounts {
+        ClockCounts::default()
+    }
+}
+
+/// A linked clock on a ready service whose [`Tricky`] follower is unlocked:
+/// the clock runs on the service.
+fn tricky_on_service(slow_ns: u64, re_anchor_on_read: bool) -> (Arc<Tricky>, Linked) {
+    let service = Arc::new(MonoClock::new());
+    service.set_k(1_000_000_000_000);
+    let f = Arc::new(Tricky {
+        service: Arc::clone(&service),
+        slow_ns,
+        re_anchor_on_read,
+        view: Mutex::new(HOLDOVER),
+    });
+    let linked = Linked::new(Some(Box::new(Arc::clone(&f))), service, None);
+    assert_eq!(linked.tick(), Source::Service);
+    (f, linked)
+}
+
+/// A slow read (a preempted selector) never passes for agreement: the
+/// follower's time is the service's at the end of its 1 ms read, so it is
+/// 1 ms off the service read before it and about 0 off the one read after
+/// it. The farther difference counts: the switch waits. Read at once, the
+/// same follower hands over seamlessly.
+#[test]
+fn a_slow_read_counts_against_agreement() {
+    let (f, linked) = tricky_on_service(1_000_000, false);
+    let e = linked.epoch();
+    *f.view.lock().unwrap() = ALIVE_LOCKED;
+    assert_eq!(linked.tick(), Source::Service, "waits: 1 ms apart");
+    assert_eq!(linked.epoch(), e);
+
+    let (f, linked) = tricky_on_service(0, false);
+    let e = linked.epoch();
+    *f.view.lock().unwrap() = ALIVE_LOCKED;
+    assert_eq!(linked.tick(), Source::Internal);
+    assert_eq!(linked.epoch(), e);
+}
+
+/// A follower that re-anchors while the switch reads it gives no offset:
+/// a voluntary switch waits, never a seamless one over the jump.
+#[test]
+fn a_re_anchor_during_the_measure_is_no_agreement() {
+    let (f, linked) = tricky_on_service(0, true);
+    let e = linked.epoch();
+    *f.view.lock().unwrap() = ALIVE_LOCKED;
+    assert_eq!(linked.tick(), Source::Service, "no agreement: it waits");
+    assert_eq!(linked.epoch(), e);
+}
+
+/// Switches on back-to-back rounds: after a wait ran out and the follower
+/// took over, a forced switch back and a voluntary switch on the next
+/// round waits again from zero (the count starts again at every switch).
+#[test]
+fn every_switch_starts_the_wait_count_again() {
+    let (fake, service, linked) = linked_on_service();
+    for _ in 0..HANDOVER_WAIT {
+        set(&fake, service_now_plus(&service, 1_000_000), ALIVE_LOCKED);
+        assert_eq!(linked.tick(), Source::Service);
+    }
+    set(&fake, service_now_plus(&service, 1_000_000), ALIVE_LOCKED);
+    assert_eq!(linked.tick(), Source::Internal);
+    set(&fake, service_now_plus(&service, 1_000_000), HOLDOVER);
+    assert_eq!(linked.tick(), Source::Service, "forced back");
+    set(&fake, service_now_plus(&service, 1_000_000), ALIVE_LOCKED);
+    assert_eq!(linked.tick(), Source::Service, "waits again");
+}
+
+/// A wait that ends without a switch says so once.
+#[test]
+fn a_wait_that_ends_without_a_switch_logs_once() {
+    crate::test_log::undecided();
+    let (fake, service, linked) = linked_on_service();
+    let log = crate::test_log::capture_at(tracing::Level::INFO, || {
+        set(&fake, service_now_plus(&service, 1_000_000), ALIVE_LOCKED);
+        assert_eq!(linked.tick(), Source::Service);
+        assert_eq!(linked.tick(), Source::Service);
+        set(&fake, service_now_plus(&service, 1_000_000), UNSETTLED);
+        for _ in 0..3 {
+            assert_eq!(linked.tick(), Source::Service);
+        }
+    });
+    assert_eq!(log.matches(WAIT_ENDED_LINE).count(), 1, "{log}");
 }

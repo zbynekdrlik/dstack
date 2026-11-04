@@ -1313,7 +1313,7 @@ fn each_block_carries_its_media_start_across_a_skip() {
 
 /// iemmixer (4.11.2026, v0.6.29 live, an engine restart): the Service ->
 /// Internal switch 36 s in took the pump's re-bootstraps 0 -> 1 (missed 0,
-/// late 0), from the epoch change alone. A seamless handover (v0.6.30,
+/// late 0), from the epoch change alone. A seamless handover (v0.6.31,
 /// `clock::linked::handover`) keeps the epoch and steps media time by at
 /// most `HANDOVER_NS`: at block 16 and W 16 a step that size either way at
 /// any point of a block runs every block, re-bootstraps none, misses none,

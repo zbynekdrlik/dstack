@@ -16,7 +16,7 @@
 //! state and the chosen clock.
 //!
 //! A change between the follower and the service is a handover
-//! ([`handover`], v0.6.30, iemmixer 4.11.2026): the two trail the
+//! ([`handover`], v0.6.31, iemmixer 4.11.2026): the two trail the
 //! grandmaster by the same receive latency, so when their times agree
 //! within [`HANDOVER_NS`] the epoch stays and the media threads see one
 //! small step of time, which the pump's and the TX flows' schedules absorb
@@ -100,7 +100,10 @@ pub fn choose(
 /// re-align (30 µs, dsync's settled bound: the follower takes over a ready
 /// service only once settled). The step it leaves in media time is at most
 /// 6 samples at 192 kHz, under half the smallest pump margin (W is at least
-/// the block, 16 samples) and under the default TX margin (250 µs).
+/// the block, 16 samples), and under the TX send slack every advertised
+/// latency covers ([`crate::device::TX_SEND_SLACK_NS`], 50 µs; a step back
+/// sends the next packets that much later, once). The step is measured
+/// with the reads' own gap counted against it ([`Linked::tick`]).
 pub const HANDOVER_NS: i64 = 30_000;
 /// How many rounds (one a second) a switch away from a source that still
 /// works waits for the two sources to agree before it re-aligns.
@@ -108,7 +111,7 @@ pub const HANDOVER_WAIT: u32 = 60;
 
 // The step stays under half the tightest pump margin: 16 samples at 192 kHz.
 const _: () = assert!(HANDOVER_NS * 192_000 * 2 < 16 * 1_000_000_000);
-const _: () = assert!(HANDOVER_NS < crate::media::tx::TX_MARGIN_NS as i64);
+const _: () = assert!(HANDOVER_NS < crate::device::TX_SEND_SLACK_NS as i64);
 
 /// How a change of source goes ([`handover`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -136,6 +139,9 @@ pub fn handover(offset_ns: Option<i64>, voluntary: bool, waited: u32) -> Handove
 
 /// The first wait of a handover (with the offset).
 pub const WAIT_LINE: &str = "media clock: the new source waits to agree with the one in use";
+/// A wait that ended without a switch (the selector chose the source in
+/// use again).
+pub const WAIT_ENDED_LINE: &str = "media clock: the wait for a handover ended, no switch";
 /// A handover without a re-align.
 pub const SEAMLESS_LINE: &str = "media clock source handed over, no re-align";
 /// A handover with a re-align.
@@ -146,7 +152,8 @@ pub const FIRST_SOURCE_LINE: &str = "media clock: a first source is ready";
 pub const NO_SOURCE_LINE: &str = "media clock: no source ready";
 
 /// The epoch the media threads see: the re-aligns (`switches`) in the high
-/// half; the chosen clock's own re-anchors since it took over the low half.
+/// half; the re-anchors since the last re-align in the low half (a seamless
+/// handover carries them over to the new source).
 pub fn epoch_of(switches: u32, component: u32) -> u32 {
     // `wrapping_add` of disjoint halves: an `|` would leave its `^` mutant
     // equal (.claude/rules/tests.md).
@@ -195,6 +202,13 @@ impl State {
             base: u32::from_be_bytes([c0, c1, c2, c3]),
         }
     }
+}
+
+/// What [`Linked::tick`] measured at a switch.
+struct Measured {
+    offset_ns: Option<i64>,
+    from_anchors: u32,
+    to_anchors: u32,
 }
 
 /// The linked clock (see the module).
@@ -274,16 +288,34 @@ impl Linked {
         }
     }
 
-    /// `to`'s time less `from`'s, read back to back; `None` when either has
-    /// no time or `to` re-anchored meanwhile.
-    fn offset_ns(&self, from: Source, to: Source) -> Option<i64> {
-        let anchors = self.component(to);
-        let old = self.time_of(from)?;
-        let new = self.time_of(to)?;
-        if self.component(to) != anchors {
-            return None;
+    /// A switch's measure: the two sources' re-anchor counts, read before
+    /// their times, and `to`'s time less `from`'s ([`Linked::offset_ns`]),
+    /// `None` when either re-anchored while it was read.
+    fn measure(&self, from: Source, to: Source) -> Measured {
+        let from_anchors = self.component(from);
+        let to_anchors = self.component(to);
+        let offset_ns = self
+            .offset_ns(from, to)
+            .filter(|_| self.component(from) == from_anchors && self.component(to) == to_anchors);
+        Measured {
+            offset_ns,
+            from_anchors,
+            to_anchors,
         }
-        i64::try_from(new - old).ok()
+    }
+
+    /// `to`'s time less `from`'s: `from` read before and after `to`, and the
+    /// difference farther from 0 of the two, so the time between the reads
+    /// (a preempted selector) counts against agreement, never for it.
+    /// `None` when either has no time.
+    fn offset_ns(&self, from: Source, to: Source) -> Option<i64> {
+        let before = self.time_of(from)?;
+        let new = self.time_of(to)?;
+        let after = self.time_of(from)?;
+        [new - before, new - after]
+            .into_iter()
+            .max_by_key(|d| d.unsigned_abs())
+            .and_then(|d| i64::try_from(d).ok())
     }
 
     /// The selector's round: picks the source by [`choose`]; a change
@@ -304,16 +336,21 @@ impl Linked {
             before,
         );
         if next == before {
-            self.waited.store(0, Ordering::Release);
+            if self.waited.swap(0, Ordering::AcqRel) != 0 {
+                info!(source = ?before, "{WAIT_ENDED_LINE}");
+            }
             return next;
         }
         // From or to none there is no offset, and the source in use is not
         // a ready service: a break.
-        let offset = self.offset_ns(before, next);
+        let m = self.measure(before, next);
+        let offset = m.offset_ns;
         let waited = self.waited.load(Ordering::Acquire);
         let way = handover(offset, before == Source::Service && service_ready, waited);
-        let low = self.component(before).wrapping_sub(s.base);
-        let comp = self.component(next);
+        // The counts the offset was measured with: a re-anchor after them
+        // still moves the epoch.
+        let low = m.from_anchors.wrapping_sub(s.base);
+        let comp = m.to_anchors;
         let state = match way {
             Handover::Wait => {
                 if waited == 0 {
