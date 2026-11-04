@@ -320,7 +320,15 @@ impl Batch {
         };
         for ((q, n), _) in queued.iter().zip(sent.iter()).filter(|(_, s)| **s) {
             let receiver_ns = shared.receiver_latency_ns(q.slot, q.dest);
-            account(&shared.lanes[q.slot], clock, q.stamp, q.fpp, &taken, *n, receiver_ns);
+            account(
+                &shared.lanes[q.slot],
+                clock,
+                q.stamp,
+                q.fpp,
+                &taken,
+                *n,
+                receiver_ns,
+            );
         }
         for ((q, n), frame) in queued
             .iter()
@@ -334,7 +342,15 @@ impl Batch {
                 socket.send_to(datagram, q.dest).map(|_| false)
             });
             let receiver_ns = shared.receiver_latency_ns(q.slot, q.dest);
-            account(&shared.lanes[q.slot], clock, q.stamp, q.fpp, &out, *n, receiver_ns);
+            account(
+                &shared.lanes[q.slot],
+                clock,
+                q.stamp,
+                q.fpp,
+                &out,
+                *n,
+                receiver_ns,
+            );
         }
     }
 }

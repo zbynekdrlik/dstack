@@ -42,6 +42,7 @@ use std::future::Future;
 use std::io;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU16};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use tokio::net::UdpSocket;
@@ -50,6 +51,7 @@ use tokio::time::MissedTickBehavior;
 use tracing::{info, warn};
 
 use crate::announce::{AnnounceError, Announcer, Registry, records};
+use crate::arc::client::{ReadError, Udp};
 use crate::clock::{Event, Polled, Sample};
 use crate::device::{Device, DeviceConfig};
 use crate::flows::client::Client;
@@ -602,6 +604,35 @@ fn network_of(cfg: &DeviceConfig) -> Network {
     }
 }
 
+/// The TX flows' receiver latency reader ([`flows::receivers`], dstack
+/// #1): each receiver's settings (ARC 0x1100) asked from our address
+/// `ip` at the ARC its record in `network`'s directory announces, every
+/// request counted in `media`'s requests; it ends when the returned
+/// reader is dropped.
+fn receiver_reader(
+    media: &Media,
+    network: &Network,
+    ip: Ipv4Addr,
+) -> io::Result<flows::receivers::Reader> {
+    let requests = Arc::clone(&media.requests);
+    let reply = network.arc.timing().reply;
+    let seq = AtomicU16::new(1);
+    let stop = AtomicBool::new(false);
+    flows::receivers::spawn(
+        Arc::clone(&media.tx),
+        network.arc.records(),
+        flows::receivers::IDLE,
+        move |at| {
+            let mut ex =
+                Udp::open(ip, at, &seq, reply, &requests, &stop).map_err(|e| ReadError::Io {
+                    op: arc::op::ZEROS_1100,
+                    kind: e.kind(),
+                })?;
+            arc::control::settings(&mut ex)
+        },
+    )
+}
+
 /// Serves the device at `net.ip` until `stop` ends: announces its records
 /// first, then answers ARC, CMC, the info requests and flow control on
 /// `sockets` (every datagram counted in `media`'s requests), sends the
@@ -647,6 +678,7 @@ pub async fn serve<R: Registry + Browse>(
         (Identity::new(&device.cfg, net), network_of(&device.cfg))
     };
     let threads = media.spawn_threads().map_err(ServeError::Threads)?;
+    let _receivers = receiver_reader(&media, &network, ip).map_err(ServeError::Threads)?;
     let rx_changes = Arc::new(Changes::default());
     let requests = Arc::clone(&media.requests);
     let (mut driver, mut answers) = Driver::new(

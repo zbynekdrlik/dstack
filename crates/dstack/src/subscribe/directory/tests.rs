@@ -1037,3 +1037,24 @@ fn an_arc_resolved_device_is_asked_for_no_more_slots_than_its_channels() {
         assert_eq!(a.nchan, want, "{n} channels");
     }
 }
+
+/// dstack #1: the TX side finds a receiver's ARC by its device name in the
+/// records, and asking marks the directory asked (the daemon starts it).
+#[test]
+fn a_device_s_arc_address_is_found_by_name_and_asks_for_the_browses() {
+    let dir = ArcDirectory::new(Timing::default());
+    let records = dir.records();
+    assert!(!dir.asked());
+    assert_eq!(records.arc_of("peer-device"), None, "no record yet");
+    assert!(dir.asked());
+    let arc = record(ARC_SERVICE, "peer-device", "10.0.0.11", 4441);
+    lock(&dir.shared.book).apply(&arc, 0);
+    let at = Some(SocketAddrV4::new(PEER_IP, 4441));
+    assert_eq!(records.arc_of("peer-device"), at);
+    assert_eq!(records.arc_of("PEER-Device"), at, "case aside");
+    assert_eq!(records.arc_of("other"), None);
+    // A device with only its flow-control record has no ARC address.
+    let dbc = record(DBC_SERVICE, "dbc-only", "10.0.0.12", 4455);
+    lock(&dir.shared.book).apply(&dbc, 0);
+    assert_eq!(records.arc_of("dbc-only"), None);
+}

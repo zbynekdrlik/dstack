@@ -377,6 +377,12 @@ impl Book {
         }
     }
 
+    /// The ARC address `device`'s `_netaudio-arc` record announces (case
+    /// aside), when it is in.
+    pub fn arc_of(&self, device: &str) -> Option<SocketAddrV4> {
+        self.records.get(&device.to_ascii_lowercase())?.arc
+    }
+
     /// `channel` of `device` at `now`, from its directory when one was read
     /// within [`Timing::max_age_ns`]; otherwise a read is wanted (unless one
     /// runs) and the answer is `None`. A device without both records, or
@@ -516,11 +522,35 @@ impl Shared {
     }
 }
 
+/// A device's ARC address from the directory's `_netaudio-arc` records
+/// ([`ArcDirectory::records`]).
+#[derive(Debug, Clone)]
+pub struct ArcRecords {
+    shared: Arc<Shared>,
+    asked: Arc<AtomicBool>,
+}
+
+impl ArcRecords {
+    /// The ARC address `device`'s record announces (case aside), when it is
+    /// in. Asking marks the directory asked: the daemon then starts its
+    /// browses, as for an RX lookup.
+    pub fn arc_of(&self, device: &str) -> Option<SocketAddrV4> {
+        self.asked.store(true, Ordering::Relaxed);
+        lock(&self.shared.book).arc_of(device)
+    }
+
+    /// Keeps a browse event, as the browse threads do (tests).
+    #[cfg(test)]
+    pub(crate) fn keep(&self, ev: &ServiceEvent) {
+        lock(&self.shared.book).apply(ev, 0);
+    }
+}
+
 /// The transmitters' channels read through their ARC (see the module).
 #[derive(Debug)]
 pub struct ArcDirectory {
     shared: Arc<Shared>,
-    asked: AtomicBool,
+    asked: Arc<AtomicBool>,
     threads: Vec<JoinHandle<()>>,
 }
 
@@ -540,8 +570,17 @@ impl ArcDirectory {
                 stop: AtomicBool::new(false),
                 timing,
             }),
-            asked: AtomicBool::new(false),
+            asked: Arc::new(AtomicBool::new(false)),
             threads: Vec::new(),
+        }
+    }
+
+    /// A handle on its `_netaudio-arc` records for another reader (the TX
+    /// side's receiver latencies, [`crate::flows::receivers`]).
+    pub fn records(&self) -> ArcRecords {
+        ArcRecords {
+            shared: Arc::clone(&self.shared),
+            asked: Arc::clone(&self.asked),
         }
     }
 

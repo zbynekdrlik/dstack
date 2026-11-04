@@ -13,6 +13,8 @@
 //!   server on UDP 4455 that feeds the TX flow table
 //!   ([`crate::media::tx::TxTable`]).
 //!
+//! - [`receivers`]: each TX flow's receiver latency, read from the
+//!   receiver (dstack #1), for the late check.
 //! - [`client`]: our own requests to a transmitter (the RX side, plan Task
 //!   5): a flow of its channels to one of our flow sockets, and its stop.
 //!
@@ -23,4 +25,5 @@
 
 pub mod client;
 pub mod control;
+pub mod receivers;
 pub mod server;

@@ -928,7 +928,9 @@ impl TxShared {
             send_max_ns: l.send_max_ns.load(Ordering::Relaxed),
             age_max_ns: l.age_max_ns.load(Ordering::Relaxed),
             over_latency: l.over_latency.load(Ordering::Relaxed),
-            receiver_latency_ns: self.plan_dest(slot).map_or(0, |dest| self.receiver_latency_ns(slot, dest)),
+            receiver_latency_ns: self
+                .plan_dest(slot)
+                .map_or(0, |dest| self.receiver_latency_ns(slot, dest)),
             direct: l.direct.load(Ordering::Relaxed),
         }
     }
