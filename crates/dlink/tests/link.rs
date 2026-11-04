@@ -180,13 +180,13 @@ fn a_48_khz_app_runs_a_96_khz_device_through_the_conversion() {
     // The device's block is 128 frames at 96 kHz (dstack #90): the app gets 64
     // at 48 kHz.
     assert_eq!(frames.load(Ordering::Relaxed), 64);
-    // The RX flow runs at 96 kHz: the split's 4.01 ms latency (P's 4 ms
-    // floor in whole samples: 10 ms less W and the converter's 2.83 ms TX
-    // delay; dstack #68, #1) is 385 samples.
-    assert!(status.contains("\"latency\":385"), "{status}");
-    // The pump runs at the device's 96 kHz: B 128 + P 385 + W 303 (3.16 ms,
-    // what the converter leaves of W's 4 ms share).
-    assert_eq!((pump.playout, pump.offset), (385, 816), "{pump:?}");
+    // The RX flow runs at 96 kHz: the split's 5.36 ms latency (10 ms less
+    // W's 4 ms share and the half-band's 0.64 ms TX delay, over a TX
+    // packet's own age of 4.58 ms; dstack #68, #1) is 515 samples.
+    assert!(status.contains("\"latency\":515"), "{status}");
+    // The pump runs at the device's 96 kHz: B 128 + P 515 + W 384 (4 ms,
+    // W's whole share: the half-band leaves room for it).
+    assert_eq!((pump.playout, pump.offset), (515, 1027), "{pump:?}");
     assert!(matches!(stopped, Stopped::Done), "{stopped:?}");
 }
 
@@ -578,9 +578,9 @@ fn a_pump_late_within_its_share_of_the_budget_keeps_the_tone_whole() {
     // The split each device runs (dstack #1), as its pump's playout point
     // and margin (offset = B + P + W): the TX-only sender at 12 ms (1152
     // samples at 96 kHz: the budget less W's 8 ms share, 768), the RX-only
-    // receiver at 17.33 ms (1664: the budget less its block and the
-    // converter's RX delay), with the whole 8 ms share as its W.
+    // receiver at 18.04 ms (1732: the budget less its block and the
+    // half-band's 0.63 ms RX delay), with the whole 8 ms share as its W.
     let (tx, rx) = pumps;
     assert_eq!((tx.playout, tx.offset), (1152, 128 + 1152 + 768), "{tx:?}");
-    assert_eq!((rx.playout, rx.offset), (1664, 128 + 1664 + 768), "{rx:?}");
+    assert_eq!((rx.playout, rx.offset), (1732, 128 + 1732 + 768), "{rx:?}");
 }

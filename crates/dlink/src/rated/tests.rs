@@ -121,6 +121,7 @@ fn a_tone_comes_in_at_the_app_s_rate_and_the_app_s_level_goes_out() {
 fn the_tx_fifo_never_runs_dry_at_any_ratio() {
     for (dev, app) in [
         (96_000u32, 48_000u32),
+        (48_000, 96_000),
         (96_000, 44_100),
         (48_000, 44_100),
         (44_100, 48_000),
@@ -136,7 +137,9 @@ fn the_tx_fifo_never_runs_dry_at_any_ratio() {
 
 #[test]
 fn a_dry_fifo_plays_silence_and_is_counted() {
-    let mut r = Rated::new(Probe::new(0.5), 96_000, 48_000, 32, 1, 1).unwrap();
+    // A ratio that does not divide the block (the sinc, with its PRIME): the
+    // half-band's 2:1 gives TX exactly what it takes and never runs dry.
+    let mut r = Rated::new(Probe::new(0.5), 96_000, 44_100, 32, 1, 1).unwrap();
     r.fifo[0].clear();
     let dry = r.dry();
     // An app that hands back nothing: an RX side with no frames yet is
@@ -182,15 +185,22 @@ fn a_block_of_another_size_reaches_no_app_and_sends_silence() {
 
 #[test]
 fn a_discontinuity_clears_the_filters_and_reaches_the_app() {
-    let mut r = Rated::new(Probe::new(0.0), 96_000, 48_000, 32, 1, 1).unwrap();
-    run(&mut r, (1, 1), 32, 100, 0, |_| 1.0);
-    r.discontinuity();
-    assert_eq!(r.inner.resets, 1);
-    assert_eq!(r.fifo[0].len(), PRIME);
-    assert!(r.last.is_none());
-    let before = r.inner.heard.len();
-    run(&mut r, (1, 1), 32, 1, 0, |_| 0.0);
-    assert!(r.inner.heard[before..].iter().all(|v| v.abs() < 1e-12));
+    // The FIFO starts again with its own prime: none for the half-band's
+    // 2:1, PRIME for a ratio that does not divide the block.
+    for (app, prime) in [(48_000u32, 0), (44_100, PRIME)] {
+        let mut r = Rated::new(Probe::new(0.0), 96_000, app, 32, 1, 1).unwrap();
+        assert_eq!(r.fifo[0].len(), prime, "{app}");
+        run(&mut r, (1, 1), 32, 100, 0, |_| 1.0);
+        r.fifo[0].push_back(1.0);
+        r.discontinuity();
+        assert_eq!(r.inner.resets, 1);
+        assert_eq!(r.fifo[0].len(), prime, "{app}");
+        assert!(r.fifo[0].iter().all(|&v| v == 0.0));
+        assert!(r.last.is_none());
+        let before = r.inner.heard.len();
+        run(&mut r, (1, 1), 32, 1, 0, |_| 0.0);
+        assert!(r.inner.heard[before..].iter().all(|v| v.abs() < 1e-12));
+    }
 }
 
 #[test]
@@ -265,7 +275,7 @@ fn each_channel_keeps_its_own_level_both_ways_at_a_ratio_that_does_not_divide() 
 /// the TX delay; both as [`Rated::delay_ns`] says, within a frame.
 #[test]
 fn an_impulse_and_a_step_take_the_delay_each_way_says() {
-    for (app, rx_ms, tx_ms) in [(48_000u32, 1.33, 2.83), (44_100, 1.32, 3.08)] {
+    for (app, rx_ms, tx_ms) in [(48_000u32, 0.63, 0.64), (44_100, 1.32, 3.08)] {
         let mut r = Rated::new(Probe::new(0.5), 96_000, app, 32, 1, 1).unwrap();
         let (rx_ns, tx_ns) = r.delay_ns();
         assert!(
@@ -319,8 +329,14 @@ fn the_delay_before_the_start_is_the_running_rated_s() {
         }
         assert_eq!(delay_ns(96_000, 96_000, b).unwrap(), (0, 0));
     }
-    // 48 kHz on 96 kHz: RX 1.33 ms, TX 2.83 ms (the module's table).
-    let (rx, tx) = delay_ns(96_000, 48_000, 128).unwrap();
-    assert_eq!((rx / 10_000, tx / 10_000), (133, 283));
+    // 48 kHz on 96 kHz: RX 0.63 ms, TX 0.64 ms (the module's table: the
+    // half-band, dstack #1; the sinc took 1.33 and 2.83 ms), exactly 30
+    // frames at 48 kHz and 61 at 96 kHz with no FIFO prime; 96 kHz on
+    // 48 kHz the other way round.
+    assert_eq!(delay_ns(96_000, 48_000, 128).unwrap(), (625_000, 635_416));
+    assert_eq!(delay_ns(48_000, 96_000, 128).unwrap(), (635_416, 625_000));
+    // 44.1 kHz stays on the sinc, with the FIFO's PRIME in its TX delay.
+    let (rx, tx) = delay_ns(96_000, 44_100, 128).unwrap();
+    assert_eq!((rx / 10_000, tx / 10_000), (131, 307));
     assert!(delay_ns(96_000, 0, 128).is_err());
 }
