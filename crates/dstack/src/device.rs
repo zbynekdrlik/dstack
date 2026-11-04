@@ -376,8 +376,9 @@ impl DeviceConfig {
             ("io_cpu", self.io_cpu),
             ("rx_cpu", self.rx_cpu),
         ] {
-            if cpu.is_some_and(|c| c >= MAX_CPU) {
-                out.push(format!("{field}: 0 to {}", MAX_CPU - 1));
+            let limit = max_cpu_for(crate::clock::Os::current());
+            if cpu.is_some_and(|c| c >= limit) {
+                out.push(format!("{field}: 0 to {}", limit - 1));
             }
         }
         if !BLOCKS.contains(&self.block) {
@@ -527,6 +528,16 @@ pub fn normal_work_margin(latency_ns: u64, rate: u32) -> u64 {
 }
 /// The CPUs a `pump_cpu` or `io_cpu` may name: Linux's `CPU_SETSIZE`.
 pub const MAX_CPU: usize = 1024;
+
+/// The CPUs a `pump_cpu`, `io_cpu` or `rx_cpu` may name on `os`: Windows
+/// pins a thread only within its first processor group (64 CPUs,
+/// `SetThreadAffinityMask`), elsewhere [`MAX_CPU`].
+pub fn max_cpu_for(os: crate::clock::Os) -> usize {
+    match os {
+        crate::clock::Os::Windows => 64,
+        crate::clock::Os::Other => MAX_CPU,
+    }
+}
 
 const DEVICE_NAME_RULE: &str = "name: not a valid Dante device name \
      (1 to 31 of A-Z a-z 0-9 and '-', no '-' at either end)";

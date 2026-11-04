@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.27 (unreleased)
+
+- Fix (obs's review of v0.6.26): on Windows a config's `pump_cpu`, `io_cpu` or `rx_cpu` from 64 on is refused ("pump_cpu: 0 to 63"); Windows pins a thread only within its first processor group. Before, it passed the check and the thread was then never pinned. New: `dstack::device::max_cpu_for(Os)`. Linux keeps 0 to 1023. No latency change.
+
 ## 0.6.26 (unreleased)
 
 - New (dstack #1, camera-box): `dlink::Config::pump_cpu(cpu)`, `io_cpu(cpu)` and `rx_cpu(cpu)` place the device's pump (`dstack-engine`), TX (`dstack-tx`, and RX unless `rx_cpu` is set) and RX (`dstack-rx`) threads on CPUs the app chooses, the way a dstack config's `pump_cpu`/`io_cpu`/`rx_cpu` do. Unset, they stay anywhere, as before. A CPU at or past `dstack::device::MAX_CPU` is refused by `Config::device`. Why: on a loaded PC (load 11 on 20 CPUs), a hub's unpinned pump was preempted for about 3.5 ms, past its margin, and lost blocks. No latency change.
