@@ -1739,3 +1739,14 @@ fn the_spin_tail_is_taken_and_checked() {
         "{problems:?}"
     );
 }
+
+/// obs's review of v0.6.26: Windows pins a thread only within the first
+/// processor group (64 CPUs), so a config that names a CPU from 64 on
+/// passed the check there and was then never pinned. The limit is the
+/// OS's: 64 on Windows, `MAX_CPU` elsewhere.
+#[test]
+fn the_cpu_limit_is_the_oss_own() {
+    use crate::clock::Os;
+    assert_eq!(max_cpu_for(Os::Windows), 64);
+    assert_eq!(max_cpu_for(Os::Other), MAX_CPU);
+}
