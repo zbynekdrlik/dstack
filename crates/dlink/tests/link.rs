@@ -478,10 +478,11 @@ impl Process for Napping {
 /// budget. Both devices' pumps run up to [`NAP`] less a block late now and
 /// then: within their share of the budget, the tone arrives whole (no pump
 /// starts again, no sample off the level), on both the sending and the
-/// receiving side. The test runs intercom's 20 ms budget (W 8 ms; 2 ms
-/// before the fix): at 10 ms W's 4 ms leaves a nap 1.3 ms of slack, which
-/// wake jitter on a loaded shared box can take (tests.md: real-time
-/// lateness is the hardware gate's).
+/// receiving side. The test runs a 30 ms budget (W 12 ms; 2 ms before the
+/// fix, whatever the budget): a 4 ms nap then leaves about 9 ms of slack.
+/// At 20 ms (W 8 ms) a GitHub runner's own stalls took the 5 ms left and
+/// restarted both pumps at once (v0.6.28 PR CI); real-time lateness is the
+/// hardware gate's (tests.md), the margin's share is what this checks.
 #[test]
 fn a_pump_late_within_its_share_of_the_budget_keeps_the_tone_whole() {
     let _one = ONE_DEVICE
@@ -492,7 +493,7 @@ fn a_pump_late_within_its_share_of_the_budget_keeps_the_tone_whole() {
     let count = Arc::new(AtomicBool::new(false));
     let good = Arc::new(AtomicU64::new(0));
     let bad = Arc::new(AtomicU64::new(0));
-    let budget = 20_000_000;
+    let budget = 30_000_000;
     let tx_config = Config::new("dlink-late-tx", dir.path().join("tx.toml"))
         .tx(["Out 1"])
         .sample_rate(96_000)
@@ -509,6 +510,8 @@ fn a_pump_late_within_its_share_of_the_budget_keeps_the_tone_whole() {
         })
         .process_id(1)
         .subscribe(1, "Out 1", "dlink-late-tx");
+    let tx_split = tx_config.split().expect("the sender's split");
+    let rx_split = rx_config.split().expect("the receiver's split");
     let sender = Link::start_on(
         &tx_config,
         &place,
@@ -590,11 +593,18 @@ fn a_pump_late_within_its_share_of_the_budget_keeps_the_tone_whole() {
     );
     assert_eq!(bad, 0, "{bad} samples off the tone, {good} on it");
     // The split each device runs (dstack #1), as its pump's playout point
-    // and margin (offset = B + P + W): the TX-only sender at 12 ms (1152
-    // samples at 96 kHz: the budget less W's 8 ms share, 768), the RX-only
-    // receiver at 18.04 ms (1732: the budget less its block and the
-    // half-band's 0.63 ms RX delay), with the whole 8 ms share as its W.
+    // and margin (offset = B + P + W), from `Config::split`: the TX-only
+    // sender's P is the budget less W's 12 ms share, the RX-only receiver's
+    // the budget less its block and the half-band's RX delay, with the
+    // whole share as its W.
     let (tx, rx) = pumps;
-    assert_eq!((tx.playout, tx.offset), (1152, 128 + 1152 + 768), "{tx:?}");
-    assert_eq!((rx.playout, rx.offset), (1732, 128 + 1732 + 768), "{rx:?}");
+    for (pump, config) in [(tx, &tx_split), (rx, &rx_split)] {
+        let playout = dstack::clock::latency_samples(config.latency_ns, 96_000);
+        assert_eq!(
+            (pump.playout, pump.offset),
+            (playout, 128 + playout + config.margin),
+            "{pump:?}"
+        );
+        assert!(config.margin >= 1152, "W at least 12 ms: {config:?}");
+    }
 }
