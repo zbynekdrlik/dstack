@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.25 (unreleased)
+
+- New log line (dstack #1; intercom's CI, where a 96 kHz TX into a 96 kHz RX with a 48 kHz app breaks the tone about once a second): once a second, when an engine pump re-bootstrapped, skipped blocks or overran in that second, one WARN `engine pump lost or overran blocks this second` (grep for that text; `dstack::stream::watch::PUMP_WARNING`), with `device`, the growth that second (`rebootstraps`, `missed`, `overruns`), `max_process_us` (the longest block since the start), `media` (on the media clock or free pacing) and the pump's timing in samples: `block` (B), `margin` (W), `playout` (P), `offset` (D). It comes from the daemon's tick, never the pump thread, for every device with an engine: every dlink device and every `embed` engine. A gap in an app's RX in the same second as this line is the pump; a gap without it is the flow (the RX loss line, `RX packets missing from a flow`, or the sender). Quiet seconds log nothing.
+- New: `dstack::stream::watch` (`PumpWatch`, `Grew`, `PUMP_WARNING`), `PumpStats::timing` (B, P and W now), `daemon::media::Media::engine_stats`.
+- No latency change.
+
 ## 0.6.24 (unreleased)
 
 - Docs: `.claude/rules/release.md` notes how to recover a PR whose head did not move after a GitHub 500 on push.

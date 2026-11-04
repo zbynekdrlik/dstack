@@ -43,6 +43,9 @@
 //! - [`PumpStats`]: what the engine's status and the control socket read,
 //!   as [`StreamStats`], the stream histograms ([`HistSnapshot`]) and a
 //!   [`PumpView`].
+//! - [`watch::PumpWatch`]: once a second, from the daemon's tick (never
+//!   the pump thread), one warning when re-bootstraps, skipped blocks or
+//!   overruns grew in that second.
 //! - [`spawn`]: the `dstack-engine` thread (`SCHED_FIFO` [`ENGINE_PRIORITY`]
 //!   when allowed): on the media clock while it is ready, paced on its own
 //!   ([`free_deadline`], NullRt's rule) while it is not.
@@ -361,6 +364,19 @@ impl PumpStats {
         self.hists.snapshot()
     }
 
+    /// The pump's timing now: B, P (moved with the device latency) and W
+    /// (D − B − P; a new latency moves D and P together).
+    pub fn timing(&self) -> Timing {
+        let block = u64::from(self.frames);
+        let playout = self.playout.load(Ordering::Relaxed);
+        let offset = self.offset.load(Ordering::Relaxed);
+        Timing {
+            block,
+            playout,
+            margin: offset.saturating_sub(block + playout),
+        }
+    }
+
     /// The numbers the device's control socket shows.
     pub fn view(&self) -> PumpView {
         PumpView {
@@ -651,6 +667,8 @@ fn run<P: Process>(clock: &dyn PtpClock, mut pump: Pump<P>, stop: &AtomicBool) {
     }
     pump.stats.running.store(false, Ordering::Release);
 }
+
+pub mod watch;
 
 #[cfg(test)]
 mod tests;

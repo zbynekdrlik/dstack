@@ -291,12 +291,20 @@ fn an_attached_engine_s_numbers_are_its_pump_s() {
     let device = device_at(dir.path());
     let media = media_with_engine(&device, Arc::new(Unready), &[0]);
     assert_eq!(media.engine(), None, "none before it is attached");
+    assert!(media.engine_stats().is_none());
     let timing = Timing {
         block: 32,
         playout: 96,
         margin: 96,
     };
-    media.attach_engine(Arc::new(PumpStats::new(timing, 96_000)));
+    let stats = Arc::new(PumpStats::new(timing, 96_000));
+    media.attach_engine(Arc::clone(&stats));
+    assert!(
+        media
+            .engine_stats()
+            .is_some_and(|s| Arc::ptr_eq(&s, &stats)),
+        "the pump watch reads the attached pump's counts"
+    );
     assert_eq!(
         media.engine(),
         Some(PumpView {
