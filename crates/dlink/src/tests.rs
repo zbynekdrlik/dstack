@@ -437,3 +437,35 @@ fn a_network_rate_of_0_is_the_device_s_one_problem() {
         .unwrap_err();
     assert_eq!(two.len(), 2, "{two:?}");
 }
+
+/// dstack #1 (the last item of the 4.11.2026 list): the Dante latency is
+/// sized by the directions the device has. An RX-only 48 kHz app on a
+/// 96 kHz device gets the budget less its RX work, 8.67 ms (it got 5.17 ms
+/// from the converter's TX delay of a TX path it never runs); a TX-only one
+/// gets the budget less its TX work; a device with both keeps the larger.
+#[test]
+fn the_dante_latency_follows_the_directions_the_device_has() {
+    let ms = |ns: u64| ns / 10_000;
+    let base = |c: Config| c.sample_rate(48_000).network_rate(96_000);
+    let rx_only = base(Config::new("rx-only", "/tmp/never-written.toml").rx(["In 1"]));
+    let s = rx_only.split().unwrap();
+    assert_eq!((ms(s.latency_ns), ms(s.rx_path_ns)), (866, 999), "{s:?}");
+    assert!(BUDGET_NS - s.rx_path_ns <= 1_000_000_000 / 96_000 + 1);
+    let cfg = rx_only.device().unwrap();
+    assert_eq!(cfg.latency_ns, s.latency_ns);
+    // TX-only where RX is the larger work (a 96 kHz app on a 48 kHz
+    // device): the TX path takes the whole budget.
+    let tx_only = Config::new("tx-only", "/tmp/never-written.toml")
+        .tx(["Out 1"])
+        .sample_rate(96_000)
+        .network_rate(48_000);
+    let t = tx_only.split().unwrap();
+    assert!(t.tx_path_ns <= BUDGET_NS, "{t:?}");
+    assert!(BUDGET_NS - t.tx_path_ns <= 1_000_000_000 / 48_000 + 1, "{t:?}");
+    assert!(t.rx_path_ns > BUDGET_NS, "{t:?}");
+    assert_eq!(tx_only.device().unwrap().latency_ns, t.latency_ns);
+    // Both directions: the larger work, as before (5.17 ms here).
+    let both = base(config()).split().unwrap();
+    assert_eq!(ms(both.latency_ns), 516);
+    assert!(both.tx_path_ns <= BUDGET_NS && both.rx_path_ns <= BUDGET_NS);
+}
