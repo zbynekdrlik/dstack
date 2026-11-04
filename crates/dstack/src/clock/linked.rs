@@ -140,6 +140,10 @@ pub const WAIT_LINE: &str = "media clock: the new source waits to agree with the
 pub const SEAMLESS_LINE: &str = "media clock source handed over, no re-align";
 /// A handover with a re-align.
 pub const RE_ALIGN_LINE: &str = "media clock source changed with a re-align";
+/// The first source after none.
+pub const FIRST_SOURCE_LINE: &str = "media clock: a first source is ready";
+/// No source ready any more (a warning).
+pub const NO_SOURCE_LINE: &str = "media clock: no source ready";
 
 /// The epoch the media threads see: the re-aligns (`switches`) in the high
 /// half; the chosen clock's own re-anchors since it took over the low half.
@@ -303,21 +307,17 @@ impl Linked {
             self.waited.store(0, Ordering::Release);
             return next;
         }
-        let offset = match (before, next) {
-            (Source::None, _) | (_, Source::None) => None,
-            _ => Some(self.offset_ns(before, next)),
-        };
+        // From or to none there is no offset, and the source in use is not
+        // a ready service: a break.
+        let offset = self.offset_ns(before, next);
         let waited = self.waited.load(Ordering::Acquire);
-        let way = match offset {
-            Some(d) => handover(d, before == Source::Service && service_ready, waited),
-            None => Handover::Break,
-        };
+        let way = handover(offset, before == Source::Service && service_ready, waited);
         let low = self.component(before).wrapping_sub(s.base);
         let comp = self.component(next);
         let state = match way {
             Handover::Wait => {
                 if waited == 0 {
-                    info!(source = ?next, from = ?before, offset_ns = ?offset.flatten(), "{WAIT_LINE}");
+                    info!(source = ?next, from = ?before, offset_ns = ?offset, "{WAIT_LINE}");
                 }
                 self.waited.store(waited.wrapping_add(1), Ordering::Release);
                 return before;
@@ -335,15 +335,15 @@ impl Linked {
         };
         self.state.store(state.pack(), Ordering::Release);
         self.waited.store(0, Ordering::Release);
-        match (way, next, offset) {
-            (_, Source::None, _) => warn!(from = ?before, "media clock: no source ready"),
-            (Handover::Seamless, _, _) => {
-                info!(source = ?next, from = ?before, offset_ns = ?offset.flatten(), "{SEAMLESS_LINE}")
+        match (way, next) {
+            (_, Source::None) => warn!(from = ?before, "{NO_SOURCE_LINE}"),
+            (Handover::Seamless, _) => {
+                info!(source = ?next, from = ?before, offset_ns = ?offset, "{SEAMLESS_LINE}")
             }
-            (_, _, Some(d)) => {
-                info!(source = ?next, from = ?before, offset_ns = ?d, waited, "{RE_ALIGN_LINE}")
+            _ if before != Source::None => {
+                info!(source = ?next, from = ?before, offset_ns = ?offset, waited, "{RE_ALIGN_LINE}")
             }
-            _ => info!(source = ?next, from = ?before, "media clock source"),
+            _ => info!(source = ?next, from = ?before, "{FIRST_SOURCE_LINE}"),
         }
         next
     }

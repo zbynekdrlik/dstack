@@ -578,3 +578,32 @@ fn the_linked_clock_reads_the_follower_s_counts() {
     let service = Arc::new(MonoClock::new());
     assert_eq!(Linked::new(None, service, None).follower_counts(), None);
 }
+
+/// A first source after none is its own line (no re-align to report), and
+/// losing every source is a warning.
+#[test]
+fn the_first_source_and_no_source_log_their_own_lines() {
+    crate::test_log::undecided();
+    let fake = Arc::new(Fake(Mutex::new((None, View::default()))));
+    let service = Arc::new(MonoClock::new());
+    let linked = Linked::new(Some(Box::new(Arc::clone(&fake))), service, None);
+    let log = crate::test_log::capture_at(tracing::Level::INFO, || {
+        set(&fake, Some(7_000_000_000), ALIVE_LOCKED);
+        assert_eq!(linked.tick(), Source::Internal);
+    });
+    assert_eq!(log.matches(FIRST_SOURCE_LINE).count(), 1, "{log}");
+    assert_eq!(log.matches(RE_ALIGN_LINE).count(), 0, "{log}");
+    let log = crate::test_log::capture_warnings(|| {
+        set(
+            &fake,
+            Some(7_000_000_000),
+            View {
+                alive: false,
+                ..ALIVE_LOCKED
+            },
+        );
+        assert_eq!(linked.tick(), Source::None);
+    });
+    assert_eq!(log.matches(NO_SOURCE_LINE).count(), 1, "{log}");
+    assert_eq!(log.matches(FIRST_SOURCE_LINE).count(), 0, "{log}");
+}
