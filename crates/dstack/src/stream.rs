@@ -67,6 +67,7 @@ use dstack_audio_io::telemetry::period_ns;
 use dstack_audio_io::{Block, Process, StreamStats, panic_message};
 
 use crate::clock::{PtpClock, to_samples};
+use crate::media::repin::RePin;
 use crate::media::ring::Ring;
 use crate::media::rx::RxShared;
 use crate::media::tx::{DISCONTINUITY, TxShared, ns_of, place, take_priority};
@@ -652,7 +653,9 @@ fn run<P: Process>(clock: &dyn PtpClock, mut pump: Pump<P>, stop: &AtomicBool) {
     let rate = pump.tx.cfg.sample_rate;
     let period = Duration::from_nanos(pump.stats.period_ns);
     let mut deadline: Option<Instant> = None;
+    let mut pin = RePin::new(pump.tx.cfg.pump_cpu);
     while !stop.load(Ordering::Acquire) {
+        pin.keep(pump.tx.now_ns());
         if let Some(now_ns) = clock.now_ns() {
             deadline = None;
             let wake = pump.media(to_samples(now_ns, rate), clock.epoch());
