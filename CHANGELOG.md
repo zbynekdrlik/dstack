@@ -1,3 +1,7 @@
+## 0.6.24 (unreleased)
+
+- Docs: `.claude/rules/release.md` notes how to recover a PR whose head did not move after a GitHub 500 on push.
+
 # Changelog
 
 ## 0.6.23 (unreleased)
