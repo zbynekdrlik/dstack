@@ -38,10 +38,21 @@ impl PassClock {
     }
 
     /// The age past which a packet of a flow of `fpp`-frame packets is late
-    /// at its receiver, whose own latency is `receiver_ns` (0: unknown).
+    /// at its receiver, whose own latency is `receiver_ns` (0: unknown): the
+    /// latency it plays the flow at (its own, at least our advertised one:
+    /// Dante's rule, as our RX plays a flow), or the packet's floor when
+    /// that is longer ([`flow_latency_ns`]). `None` while the receiver's
+    /// latency is unknown: no packet is called late against a guess (the
+    /// owner's ruling, dstack #1).
     pub(super) fn late_threshold(&self, fpp: u16, receiver_ns: u64) -> Option<u64> {
-        let _ = receiver_ns;
-        Some(self.floor(fpp))
+        (receiver_ns != 0).then(|| {
+            flow_latency_ns(
+                self.latency_ns.max(receiver_ns),
+                fpp,
+                self.rate,
+                self.margin_ns,
+            )
+        })
     }
 }
 

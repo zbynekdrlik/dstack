@@ -1,8 +1,11 @@
-//! The late watch: once a second, each TX flow whose packets left later
-//! than the advertised latency since the last look gets one warning line,
-//! with the count and the oldest packet. A receiver at that latency counts
-//! each such packet late (Dante Controller's Latency tab), so the log says
-//! when our side was late. A receiver that counts late packets while this
+//! The late watch: once a second, each TX flow whose packets were older
+//! than the latency their receiver plays at since the last look gets one
+//! warning line, with the count, the oldest packet and the receiver's own
+//! latency. The receiver counts each such packet late (Dante Controller's
+//! Latency tab), so the log says when our side was late. A flow whose
+//! receiver's latency is unknown is never called late (the owner's ruling,
+//! dstack #1: DVS plays at 10 ms, and packets of 1.15 ms were warned late
+//! against our advertised latency). A receiver that counts late packets while this
 //! stays quiet points past our send: the OS's send path or the network
 //! (dstack #1: SongPlayer's flow, 24 late at the FOH card at 12:08:53 on
 //! 1.11, and no line on our side to say whose).
@@ -20,7 +23,7 @@ pub const EVERY_NS: u64 = 1_000_000_000;
 pub struct Late {
     /// The TX flow's slot.
     pub slot: usize,
-    /// Packets that left later than the advertised latency.
+    /// Packets older than the latency their receiver plays at.
     pub packets: u64,
     /// The oldest packet in that time, ns past its stamp.
     pub age_peak_ns: u64,
@@ -81,8 +84,9 @@ impl LateWatch {
                 slot = late.slot,
                 packets = late.packets,
                 age_peak_us = late.age_peak_ns / 1_000,
-                "TX packets left later than the advertised latency: \
-                 receivers count them late"
+                receiver_latency_us = tx.lane(late.slot).receiver_latency_ns / 1_000,
+                "TX packets older than the latency their receiver plays at: \
+                 it counts them late"
             );
         }
     }
