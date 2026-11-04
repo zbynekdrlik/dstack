@@ -231,6 +231,26 @@ fn a_look_hands_each_flow_s_receiver_latency_to_the_tx_side() {
 }
 
 #[test]
+fn a_receiver_s_latency_is_logged_when_read_first_and_when_it_changes() {
+    let (tx, records, _dir, slot) = rig("127.0.0.2");
+    let mut reads = Reads::new();
+    let info = |now: u64, reads: &mut Reads, ns: u32| {
+        crate::test_log::capture_at(tracing::Level::INFO, || {
+            look(reads, &tx, &records, now, |_| Ok(at(ns)));
+        })
+    };
+    let first = info(0, &mut reads, 10_000_000);
+    assert!(
+        first.contains(&format!("slot={slot} latency_us=10000")),
+        "{first}"
+    );
+    assert!(first.contains("a TX flow's receiver states its latency"));
+    assert_eq!(info(REREAD_NS, &mut reads, 10_000_000), "", "unchanged");
+    let changed = info(2 * REREAD_NS, &mut reads, 2_000_000);
+    assert!(changed.contains("latency_us=2000"), "{changed}");
+}
+
+#[test]
 fn a_receiver_whose_record_is_at_another_address_stays_unknown() {
     let (tx, records, _dir, slot) = rig("127.0.0.3");
     let mut reads = Reads::new();
