@@ -26,7 +26,7 @@
 /// non-zero.
 pub const TAPS: usize = 123;
 /// The filter's delay, samples at the higher rate.
-pub const DELAY_HIGH: usize = (TAPS - 1) / 2;
+pub const DELAY_HIGH: usize = TAPS / 2;
 /// The Kaiser window's beta: 0.1102 (A − 8.7) for A = 150 dB.
 pub const BETA: f64 = 15.57;
 /// The least attenuation from 28 kHz up at 96 kHz (the band that folds
@@ -102,8 +102,9 @@ pub enum Step {
     Up,
 }
 
-/// The samples a down step keeps from the call before, at its input rate.
-const HISTORY_DOWN: usize = TAPS - 1;
+/// The samples a down step keeps from the call before, at its input rate:
+/// output 0 reads back `TAPS − 2` inputs before input 1, its newest.
+const HISTORY_DOWN: usize = TAPS - 2;
 /// The samples an up step keeps from the call before, at its input rate:
 /// the even phase reads back `2 SIDE − 1` inputs from the newest.
 const HISTORY_UP: usize = 2 * SIDE - 1;
@@ -185,13 +186,15 @@ impl HalfBand {
     ) {
         let span = self.history + self.max_in;
         let h = self.history;
+        let made = self.output_frames(frames_in);
         for c in 0..self.channels {
             let line = &mut self.lines[c * span..(c + 1) * span];
             line[h..h + frames_in].copy_from_slice(&input[c * frames_in..(c + 1) * frames_in]);
-            let out = &mut output[c * out_frames..c * out_frames + out_frames];
+            let start = c * out_frames;
+            let out = &mut output[start..start + made];
             match self.step {
-                Step::Down => down(&self.side, line, frames_in, out),
-                Step::Up => up(&self.side, line, frames_in, out),
+                Step::Down => down(&self.side, line, out),
+                Step::Up => up(&self.side, line, out),
             }
             line.copy_within(frames_in..frames_in + h, 0);
         }
@@ -202,8 +205,8 @@ impl HalfBand {
 /// `HISTORY_DOWN + 2k + 1`); its centre is the even input
 /// `2k + 1 − DELAY_HIGH` (DELAY_HIGH is odd), so
 /// the delay is a whole [`DELAY_HIGH`] / 2 output frames.
-fn down(side: &[f64; SIDE], line: &[f64], frames_in: usize, out: &mut [f64]) {
-    for (k, y) in out.iter_mut().enumerate().take(frames_in / 2) {
+fn down(side: &[f64; SIDE], line: &[f64], out: &mut [f64]) {
+    for (k, y) in out.iter_mut().enumerate() {
         let end = HISTORY_DOWN + 2 * k + 1;
         let mid = end - DELAY_HIGH;
         let mut acc = CENTRE * line[mid];
@@ -218,8 +221,8 @@ fn down(side: &[f64; SIDE], line: &[f64], frames_in: usize, out: &mut [f64]) {
 /// Up: output 2m + 1 is the centre's input sample, `m − SIDE + 1` back
 /// from input m (the odd phase); output 2m the non-zero side taps over
 /// the inputs around it (the even phase), both with the step's gain 2.
-fn up(side: &[f64; SIDE], line: &[f64], frames_in: usize, out: &mut [f64]) {
-    for m in 0..frames_in {
+fn up(side: &[f64; SIDE], line: &[f64], out: &mut [f64]) {
+    for m in 0..out.len() / 2 {
         // Input m sits at the line's index HISTORY_UP + m. The even output
         // 2m has its centre half-way between inputs m − SIDE and
         // m − SIDE + 1 (DELAY_HIGH = 2 SIDE − 1 output samples back).

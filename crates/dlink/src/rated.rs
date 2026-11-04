@@ -79,16 +79,13 @@ fn delays_ns(
     )
 }
 
-/// The silence the TX FIFO starts with for the converters `rx` and `tx`:
-/// none for the half-band's 2:1 or 1:2 (RX gives exactly what TX takes,
+/// The silence the TX FIFO starts with for the TX converter `tx`: none for
+/// the half-band's 2:1 or 1:2 (its RX twin from [`converters`], the same
+/// ratio inverted, is a half-band too and gives exactly what TX takes,
 /// every block, and the app's output enters the FIFO before TX takes it),
 /// else [`PRIME`].
-fn prime_for(rx: &Converter, tx: &Converter) -> usize {
-    if rx.is_half_band() && tx.is_half_band() {
-        0
-    } else {
-        PRIME
-    }
+fn prime_for(tx: &Converter) -> usize {
+    if tx.is_half_band() { 0 } else { PRIME }
 }
 
 /// The converters for the device's RX into the app and the app's TX into
@@ -119,7 +116,7 @@ pub fn delay_ns(device_rate: u32, app_rate: u32, block: usize) -> Result<(u64, u
     Ok(delays_ns(
         rx.delay_frames(),
         tx.delay_frames(),
-        prime_for(&rx, &tx),
+        prime_for(&tx),
         device_rate,
         app_rate,
     ))
@@ -168,7 +165,7 @@ impl<P: Process> Rated<P> {
         outputs: usize,
     ) -> Result<Self, ConvertError> {
         let (rx, tx) = converters(device_rate, app_rate, block, inputs.max(1), outputs.max(1))?;
-        let prime = prime_for(&rx, &tx);
+        let prime = prime_for(&tx);
         let rx_room = rx.output_frames_max();
         let fifo_room = 4 * (rx_room + tx.input_frames_max() + PRIME);
         let mut fifo: Vec<VecDeque<f64>> = (0..outputs)

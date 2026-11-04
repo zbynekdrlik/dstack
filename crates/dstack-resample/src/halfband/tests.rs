@@ -117,3 +117,20 @@ fn the_output_frames_follow_the_step() {
     let u = HalfBand::new(Step::Up, 2, 64);
     assert_eq!((d.output_frames(128), u.output_frames(64)), (64, 128));
 }
+
+/// Each step keeps exactly the history it reads: the oldest kept sample
+/// reaches the next call's first output through the filter's last tap.
+#[test]
+fn the_oldest_history_sample_reaches_the_first_output() {
+    let last = side_taps()[SIDE - 1];
+    for (step, frames_in, frames_out, want) in
+        [(Step::Down, 64, 32, last), (Step::Up, 32, 64, 2.0 * last)]
+    {
+        let mut s = HalfBand::new(step, 1, frames_in);
+        s.lines[0] = 1.0;
+        let mut out = vec![0.0; frames_out];
+        s.process(&vec![0.0; frames_in], frames_in, &mut out, frames_out);
+        assert_eq!(out[0], want, "{step:?}");
+        assert!(out[1..].iter().all(|&v| v == 0.0), "{step:?}");
+    }
+}
