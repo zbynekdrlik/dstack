@@ -429,6 +429,9 @@ pub struct Driver {
     pump: crate::stream::watch::PumpWatch,
     /// Other traffic on our NIC, logged once a minute.
     traffic: crate::traffic::TrafficWatch,
+    /// A media thread's CPU pin found reset (another program's process
+    /// affinity rule), told once.
+    pins: crate::media::repin::PinWatch,
 }
 
 impl Driver {
@@ -451,14 +454,15 @@ impl Driver {
                 host: crate::media::late::HostWatch::new(),
                 pump: crate::stream::watch::PumpWatch::new(),
                 traffic: crate::traffic::TrafficWatch::new(),
+                pins: crate::media::repin::PinWatch::new(),
             },
             back,
         )
     }
 
     /// One round of the manager now, with the channel records `resolver`
-    /// knows; then the checks' round and the late, loss, send, host, pump
-    /// and traffic watches.
+    /// knows; then the checks' round and the late, loss, send, host, pump,
+    /// traffic and pin watches.
     pub fn tick(&mut self, resolver: &dyn Resolver) {
         let now = self.media.rx.now_ns();
         let packets = self.media.rx.packets();
@@ -475,6 +479,7 @@ impl Driver {
             self.media.engine_stats().as_deref(),
         );
         self.traffic.watch(now, self.media.ip, &self.media.tx);
+        self.pins.watch(crate::media::repin::pin_resets());
     }
 
     /// The answer to the request of `flow`.

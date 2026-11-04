@@ -24,6 +24,7 @@ pub mod dscp;
 pub mod late;
 pub mod packet;
 pub mod qos;
+pub mod repin;
 pub mod ring;
 pub mod rx;
 pub mod source;

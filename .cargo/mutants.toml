@@ -89,6 +89,10 @@ exclude_re = [
   # Windows-only (cfg(windows)) power-throttling call: not compiled on the
   # gate's Linux, so its mutants build and cannot fail; CI runs it on Windows.
   "tx.rs.*unthrottle",
+  # The media threads' re-pin (dstack #1): the Windows SetThreadAffinityMask
+  # call is not compiled on the gate's Linux, and elsewhere it is a constant
+  # false; its schedule (RePin::due) and the counting are tested.
+  "media/repin.rs.*(replace repin -> bool|in repin$)",
   # The OS priority call and its log line; the decision is priority_outcome
   # (tested), the call is ask_priority (excluded above).
   "tx.rs.*take_priority",

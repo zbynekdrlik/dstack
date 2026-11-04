@@ -1445,7 +1445,9 @@ fn run(clock: &dyn PtpClock, shared: Arc<TxShared>) {
         .then(|| super::qos::hold(std::path::Path::new(super::qos::CPU_DMA_LATENCY)))
         .flatten();
     let mut tx = Transmitter::new(Arc::clone(&shared));
+    let mut pin = super::repin::RePin::new(shared.cfg.io_cpu);
     while !shared.stopping() {
+        pin.keep(shared.now_ns());
         let now = clock.now_ns();
         tx.step(now, clock.epoch());
         clock.sleep_until(tx.wake_ns(now));
