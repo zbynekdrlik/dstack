@@ -37,7 +37,6 @@
 use std::collections::BTreeMap;
 use std::fmt::{Display, Write as _};
 use std::net::IpAddr;
-use std::sync::atomic::Ordering;
 use std::sync::{Mutex, PoisonError};
 
 use tracing::{debug, info};
@@ -51,6 +50,12 @@ use crate::media::source::{SINE_CAP_DBFS, Source};
 use crate::media::tx::{LaneCounts, MAX_FLOWS};
 use crate::subscribe::SubStatus;
 use crate::wire::read_u16;
+
+mod clock;
+#[cfg(test)]
+use clock::clock_counts_in_use;
+use clock::clock_part;
+pub use clock::clock_source_word;
 
 /// Where the device listens.
 pub const SOCKET: &str = "/run/dstack/control.sock";
@@ -673,40 +678,6 @@ fn app_part(j: &mut Json, media: &Media) {
     };
     j.key("app");
     j.out.push_str(&part);
-}
-
-fn clock_part(j: &mut Json, media: &Media) {
-    let c = media.clock_stats.counts();
-    j.open(Some("clock"), '{');
-    j.flag("ready", media.clock.now_ns().is_some());
-    j.num("epoch", media.clock.epoch());
-    j.num("polls", c.polls);
-    j.num("re_anchors", c.re_anchors);
-    j.num("holdovers", c.holdovers);
-    j.flag("holdover", c.in_holdover);
-    j.num("freq_ppb", media.freq.load(Ordering::Relaxed));
-    j.word(
-        "source",
-        clock_source_word(media.clock_stats.is_system(), media.clock_stats.linked()),
-    );
-    j.close('}');
-}
-
-/// The clock source's word in the status: `system` (tests), `dsync` (the
-/// service only), else what a linked clock uses now: `internal` (dsync's
-/// follower in process), `service`, or `none` (nothing ready yet).
-pub fn clock_source_word(
-    system: bool,
-    linked: Option<crate::clock::linked::Source>,
-) -> &'static str {
-    use crate::clock::linked::Source;
-    match (system, linked) {
-        (true, _) => "system",
-        (false, None) => "dsync",
-        (false, Some(Source::Internal)) => "internal",
-        (false, Some(Source::Service)) => "service",
-        (false, Some(Source::None)) => "none",
-    }
 }
 
 fn requests_part(j: &mut Json, media: &Media) {
