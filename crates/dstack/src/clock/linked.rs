@@ -13,16 +13,25 @@
 //!
 //! A selector ([`Linked::tick`], once a second, off the media threads)
 //! picks the source by [`choose`]; the media threads read only the atomic
-//! choice and the chosen clock. A change of source changes the epoch, so
-//! the media threads re-align as on a re-anchor.
+//! state and the chosen clock.
+//!
+//! A change between the follower and the service is a handover
+//! ([`handover`], v0.6.30, iemmixer 4.11.2026): the two trail the
+//! grandmaster by the same receive latency, so when their times agree
+//! within [`HANDOVER_NS`] the epoch stays and the media threads see one
+//! small step of time, which the pump's and the TX flows' schedules absorb
+//! (no re-align, nothing lost). When they disagree, a switch away from a
+//! source that still works waits up to [`HANDOVER_WAIT`] rounds for them to
+//! agree; then, or at once when the source in use is gone, the switch
+//! changes the epoch and the media threads re-align as on a re-anchor.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 
 use tracing::{info, warn};
 
-use super::{MonoClock, NOT_READY_NAP_NS, PtpClock, monotonic_ns};
+use super::{ClockCounts, MonoClock, NOT_READY_NAP_NS, PtpClock, monotonic_ns};
 
 /// Where the linked clock takes PTP time from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,8 +96,53 @@ pub fn choose(
     }
 }
 
-/// The epoch the media threads see: a change of source always changes the
-/// high half; the chosen clock's own re-anchors the low half.
+/// Two sources whose times differ by at most this hand over without a
+/// re-align (30 µs, dsync's settled bound: the follower takes over a ready
+/// service only once settled). The step it leaves in media time is at most
+/// 6 samples at 192 kHz, under half the smallest pump margin (W is at least
+/// the block, 16 samples) and under the default TX margin (250 µs).
+pub const HANDOVER_NS: i64 = 30_000;
+/// How many rounds (one a second) a switch away from a source that still
+/// works waits for the two sources to agree before it re-aligns.
+pub const HANDOVER_WAIT: u32 = 60;
+
+// The step stays under half the tightest pump margin: 16 samples at 192 kHz.
+const _: () = assert!(HANDOVER_NS * 192_000 * 2 < 16 * 1_000_000_000);
+const _: () = assert!(HANDOVER_NS < crate::media::tx::TX_MARGIN_NS as i64);
+
+/// How a change of source goes ([`handover`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Handover {
+    /// The times agree: the epoch stays.
+    Seamless,
+    /// They do not, and the source in use still works: keep it this round.
+    Wait,
+    /// A re-align: the epoch changes.
+    Break,
+}
+
+/// A change of source with the new source's time `offset_ns` from the old
+/// one's (`None`: one of them has no time), `voluntary` when the source in
+/// use still works, after `waited` rounds of waiting: seamless within
+/// [`HANDOVER_NS`]; else a wait while voluntary and under
+/// [`HANDOVER_WAIT`]; else a break.
+pub fn handover(offset_ns: Option<i64>, voluntary: bool, waited: u32) -> Handover {
+    match offset_ns {
+        Some(d) if d.unsigned_abs() <= HANDOVER_NS.unsigned_abs() => Handover::Seamless,
+        _ if voluntary && waited < HANDOVER_WAIT => Handover::Wait,
+        _ => Handover::Break,
+    }
+}
+
+/// The first wait of a handover (with the offset).
+pub const WAIT_LINE: &str = "media clock: the new source waits to agree with the one in use";
+/// A handover without a re-align.
+pub const SEAMLESS_LINE: &str = "media clock source handed over, no re-align";
+/// A handover with a re-align.
+pub const RE_ALIGN_LINE: &str = "media clock source changed with a re-align";
+
+/// The epoch the media threads see: the re-aligns (`switches`) in the high
+/// half; the chosen clock's own re-anchors since it took over the low half.
 pub fn epoch_of(switches: u32, component: u32) -> u32 {
     // `wrapping_add` of disjoint halves: an `|` would leave its `^` mutant
     // equal (.claude/rules/tests.md).
@@ -105,14 +159,48 @@ pub trait Follow: Send + Sync {
     fn now_ns(&self) -> Option<i64>;
     /// Its state for the selector.
     fn view(&self) -> View;
+    /// Its counts for the status: windows (as `polls`), re-anchors,
+    /// holdovers, and whether it is in holdover now.
+    fn counts(&self) -> ClockCounts;
+}
+
+/// What the media threads read of the selector's choice, in one word so a
+/// reader never sees a new source with an old base.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct State {
+    /// The source in use.
+    source: Source,
+    /// The re-aligns so far (the epoch's high half).
+    breaks: u16,
+    /// The source's re-anchor count that reads as the low half's 0.
+    base: u32,
+}
+
+impl State {
+    fn pack(self) -> u64 {
+        let [b0, b1] = self.breaks.to_be_bytes();
+        let [c0, c1, c2, c3] = self.base.to_be_bytes();
+        u64::from_be_bytes([0, self.source as u8, b0, b1, c0, c1, c2, c3])
+    }
+
+    fn unpack(w: u64) -> State {
+        let [_, s, b0, b1, c0, c1, c2, c3] = w.to_be_bytes();
+        State {
+            source: Source::from_u8(s),
+            breaks: u16::from_be_bytes([b0, b1]),
+            base: u32::from_be_bytes([c0, c1, c2, c3]),
+        }
+    }
 }
 
 /// The linked clock (see the module).
 pub struct Linked {
     internal: Option<Box<dyn Follow>>,
     service: Arc<MonoClock>,
-    choice: AtomicU8,
-    switches: AtomicU32,
+    /// [`State::pack`].
+    state: AtomicU64,
+    /// Rounds a voluntary switch has waited for agreement.
+    waited: AtomicU32,
     was_locked: AtomicBool,
     /// Keeps the follower's thread alive for the clock's life.
     _keep: Option<Box<dyn Send + Sync>>,
@@ -129,16 +217,27 @@ impl Linked {
         Linked {
             internal,
             service,
-            choice: AtomicU8::new(Source::None as u8),
-            switches: AtomicU32::new(0),
+            state: AtomicU64::new(
+                State {
+                    source: Source::None,
+                    breaks: 0,
+                    base: 0,
+                }
+                .pack(),
+            ),
+            waited: AtomicU32::new(0),
             was_locked: AtomicBool::new(false),
             _keep: keep,
         }
     }
 
+    fn state(&self) -> State {
+        State::unpack(self.state.load(Ordering::Acquire))
+    }
+
     /// The source in use.
     pub fn source(&self) -> Source {
-        Source::from_u8(self.choice.load(Ordering::Acquire))
+        self.state().source
     }
 
     /// Whether the follower started.
@@ -146,26 +245,105 @@ impl Linked {
         self.internal.is_some()
     }
 
-    /// The selector's round: picks the source by [`choose`]; a change is
-    /// logged and counted (the epoch moves).
+    /// The follower's counts ([`Follow::counts`]); `None` when it did not
+    /// start.
+    pub fn follower_counts(&self) -> Option<ClockCounts> {
+        self.internal.as_ref().map(|f| f.counts())
+    }
+
+    /// A source's re-anchor count (the follower's re-anchors and time
+    /// bases, the service's re-anchors; 0 for none).
+    fn component(&self, source: Source) -> u32 {
+        match source {
+            Source::Internal => self.internal.as_ref().map_or(0, |f| f.view().epoch),
+            Source::Service => self.service.epoch(),
+            Source::None => 0,
+        }
+    }
+
+    /// A source's PTP time now, ns (`None`: it has none).
+    fn time_of(&self, source: Source) -> Option<i128> {
+        match source {
+            Source::Internal => self.internal.as_ref()?.now_ns().map(i128::from),
+            Source::Service => self.service.now_ns().map(i128::from),
+            Source::None => None,
+        }
+    }
+
+    /// `to`'s time less `from`'s, read back to back; `None` when either has
+    /// no time or `to` re-anchored meanwhile.
+    fn offset_ns(&self, from: Source, to: Source) -> Option<i64> {
+        let anchors = self.component(to);
+        let old = self.time_of(from)?;
+        let new = self.time_of(to)?;
+        if self.component(to) != anchors {
+            return None;
+        }
+        i64::try_from(new - old).ok()
+    }
+
+    /// The selector's round: picks the source by [`choose`]; a change
+    /// between the follower and the service is a [`handover`] (seamless,
+    /// a wait, or a re-align that moves the epoch); every change is logged.
     pub fn tick(&self) -> Source {
         let view = self.internal.as_ref().map(|f| f.view());
         if view.is_some_and(|v| v.alive && v.locked) {
             self.was_locked.store(true, Ordering::Release);
         }
+        let service_ready = self.service.k_ns().is_some();
+        let s = self.state();
+        let before = s.source;
         let next = choose(
             view,
-            self.service.k_ns().is_some(),
+            service_ready,
             self.was_locked.load(Ordering::Acquire),
-            self.source(),
+            before,
         );
-        let before = Source::from_u8(self.choice.swap(next as u8, Ordering::AcqRel));
-        if before != next {
-            self.switches.fetch_add(1, Ordering::AcqRel);
-            match next {
-                Source::None => warn!(from = ?before, "media clock: no source ready"),
-                _ => info!(source = ?next, from = ?before, "media clock source"),
+        if next == before {
+            self.waited.store(0, Ordering::Release);
+            return next;
+        }
+        let offset = match (before, next) {
+            (Source::None, _) | (_, Source::None) => None,
+            _ => Some(self.offset_ns(before, next)),
+        };
+        let waited = self.waited.load(Ordering::Acquire);
+        let way = match offset {
+            Some(d) => handover(d, before == Source::Service && service_ready, waited),
+            None => Handover::Break,
+        };
+        let low = self.component(before).wrapping_sub(s.base);
+        let comp = self.component(next);
+        let state = match way {
+            Handover::Wait => {
+                if waited == 0 {
+                    info!(source = ?next, from = ?before, offset_ns = ?offset.flatten(), "{WAIT_LINE}");
+                }
+                self.waited.store(waited.wrapping_add(1), Ordering::Release);
+                return before;
             }
+            Handover::Seamless => State {
+                source: next,
+                breaks: s.breaks,
+                base: comp.wrapping_sub(low),
+            },
+            Handover::Break => State {
+                source: next,
+                breaks: s.breaks.wrapping_add(1),
+                base: comp,
+            },
+        };
+        self.state.store(state.pack(), Ordering::Release);
+        self.waited.store(0, Ordering::Release);
+        match (way, next, offset) {
+            (_, Source::None, _) => warn!(from = ?before, "media clock: no source ready"),
+            (Handover::Seamless, _, _) => {
+                info!(source = ?next, from = ?before, offset_ns = ?offset.flatten(), "{SEAMLESS_LINE}")
+            }
+            (_, _, Some(d)) => {
+                info!(source = ?next, from = ?before, offset_ns = ?d, waited, "{RE_ALIGN_LINE}")
+            }
+            _ => info!(source = ?next, from = ?before, "media clock source"),
         }
         next
     }
@@ -173,15 +351,8 @@ impl Linked {
 
 impl PtpClock for Linked {
     fn now_ns(&self) -> Option<u64> {
-        match self.source() {
-            Source::Internal => self
-                .internal
-                .as_ref()?
-                .now_ns()
-                .and_then(|t| u64::try_from(t).ok()),
-            Source::Service => self.service.now_ns(),
-            Source::None => None,
-        }
+        self.time_of(self.source())
+            .and_then(|t| u64::try_from(t).ok())
     }
 
     fn sleep_until(&self, ptp_ns: u64) {
@@ -199,12 +370,11 @@ impl PtpClock for Linked {
     }
 
     fn epoch(&self) -> u32 {
-        let component = match self.source() {
-            Source::Internal => self.internal.as_ref().map_or(0, |f| f.view().epoch),
-            Source::Service => self.service.epoch(),
-            Source::None => 0,
-        };
-        epoch_of(self.switches.load(Ordering::Acquire), component)
+        let s = self.state();
+        epoch_of(
+            u32::from(s.breaks),
+            self.component(s.source).wrapping_sub(s.base),
+        )
     }
 }
 
@@ -222,6 +392,18 @@ impl Follow for dsync_ptp::follower::PtpClock {
             settled: s.settled,
             anchored: s.locked || s.holdover,
             epoch: s.epoch.wrapping_add(s.reanchors),
+        }
+    }
+
+    /// dsync-ptp counts phase-lock windows (it has no polls), re-anchors
+    /// (every discontinuity of its published time) and holdovers.
+    fn counts(&self) -> ClockCounts {
+        let s = self.state();
+        ClockCounts {
+            polls: s.windows,
+            re_anchors: s.reanchors,
+            holdovers: s.holdovers,
+            in_holdover: s.holdover,
         }
     }
 }
