@@ -3,8 +3,8 @@
 
 //! The pump watch (dstack #1, intercom 4.11.2026): once a second, when the
 //! engine's pump re-bootstrapped, skipped blocks or overran in that second,
-//! one warning line with the device, the counts that grew, the longest
-//! block so far and the pump's timing (B, W, P, D). The pump only counts
+//! one warning line with the device, the counts that grew, that second's
+//! longest block and the pump's timing (B, W, P, D). The pump only counts
 //! ([`super::PumpStats`]); this runs on the daemon's tick, never on the
 //! real-time pump thread, and never logs per event. A gap in an app's RX or
 //! a TX hole in the same second as this line with `rebootstraps` or
@@ -61,6 +61,12 @@ impl PumpWatch {
     /// `None` between looks and when nothing grew. Counts that went down (a
     /// new engine attached) count as no growth and are learnt.
     pub fn look(&mut self, now_ns: u64, view: &PumpView) -> Option<Grew> {
+        self.looked(now_ns, view).flatten()
+    }
+
+    /// [`PumpWatch::look`], told apart: `None` between looks, `Some` at a
+    /// look (with what grew, if anything reportable did).
+    fn looked(&mut self, now_ns: u64, view: &PumpView) -> Option<Option<Grew>> {
         if self.next_ns.is_some_and(|next| now_ns < next) {
             return None;
         }
@@ -77,13 +83,16 @@ impl PumpWatch {
             overruns: view.overruns,
         };
         let any = grew.rebootstraps > 0 || grew.missed > 0 || grew.overruns > 0;
-        (any && !first).then_some(grew)
+        Some((any && !first).then_some(grew))
     }
 
     /// [`PumpWatch::look`] on the engine `stats` of the device `device`
     /// (`None` before an engine is attached: nothing), a growth logged as
-    /// one warning ([`PUMP_WARNING`]). Counts from another engine than the
-    /// last watch's (a later attach) are only learnt, as a first look.
+    /// one warning ([`PUMP_WARNING`]) whose `max_process_us` is that
+    /// second's longest block (taken at every look, a quiet one too; the
+    /// longest since the start stays in the pump's view). Counts from
+    /// another engine than the last watch's (a later attach) are only
+    /// learnt, as a first look.
     pub fn watch(&mut self, now_ns: u64, device: &str, stats: Option<&PumpStats>) {
         let Some(stats) = stats else { return };
         let engine = std::ptr::from_ref(stats).addr();
@@ -92,7 +101,12 @@ impl PumpWatch {
             self.next_ns = None;
         }
         let view = stats.view();
-        let Some(grew) = self.look(now_ns, &view) else {
+        let Some(grew) = self.looked(now_ns, &view) else {
+            return;
+        };
+        // Every look starts the next second's longest block afresh.
+        let second_max_us = stats.take_second_max_us();
+        let Some(grew) = grew else {
             return;
         };
         let timing = stats.timing();
@@ -101,7 +115,7 @@ impl PumpWatch {
             rebootstraps = grew.rebootstraps,
             missed = grew.missed,
             overruns = grew.overruns,
-            max_process_us = view.max_process_us,
+            max_process_us = second_max_us,
             media = view.media,
             block = timing.block,
             margin = timing.margin,

@@ -251,6 +251,10 @@ pub struct PumpStats {
     overruns: AtomicU64,
     rebootstraps: AtomicU64,
     max_process_ns: AtomicU64,
+    /// The longest block since the pump watch's last look, ns
+    /// ([`PumpStats::take_second_max_us`]; dstack #1: the watch's line
+    /// reports that second's, not the longest since the start).
+    second_max_ns: AtomicU64,
     /// The faulting block's own time; stored before `faulted`.
     fault_ns: AtomicU64,
     fault: Mutex<Option<String>>,
@@ -298,21 +302,30 @@ impl PumpStats {
             overruns: AtomicU64::new(0),
             rebootstraps: AtomicU64::new(0),
             max_process_ns: AtomicU64::new(0),
+            second_max_ns: AtomicU64::new(0),
             fault_ns: AtomicU64::new(0),
             fault: Mutex::new(None),
             hists: StreamHists::new(period),
         }
     }
 
-    /// One block's own time (the pump thread): counted, the longest kept,
-    /// its histogram, an overrun when longer than one period.
+    /// One block's own time (the pump thread): counted, the longest kept
+    /// (since the start and since the watch's last look), its histogram,
+    /// an overrun when longer than one period.
     fn record(&self, took_ns: u64) {
         self.blocks.fetch_add(1, Ordering::Relaxed);
         self.max_process_ns.fetch_max(took_ns, Ordering::Relaxed);
+        self.second_max_ns.fetch_max(took_ns, Ordering::Relaxed);
         self.hists.process.record(took_ns);
         if took_ns > self.period_ns {
             self.overruns.fetch_add(1, Ordering::Relaxed);
         }
+    }
+
+    /// The longest block since the last call, whole µs, and a fresh start
+    /// for the next (the pump watch, once a second).
+    pub(crate) fn take_second_max_us(&self) -> u64 {
+        self.second_max_ns.swap(0, Ordering::Relaxed) / 1_000
     }
 
     /// The pump plays at `timing` now (its W unchanged).
