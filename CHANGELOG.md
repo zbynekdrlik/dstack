@@ -1,6 +1,11 @@
 # Changelog
 
-## 0.6.43 (unreleased)
+## 0.6.44 (unreleased)
+
+- Fix (iemmixer, 5.11, v0.6.43; dstack #1): a channel counted 11531 holes and 6982 late samples, in bursts every 15-20 s, while its flow counted 0 late packets. A flow judged a packet late only once its first frame passed playout + block, the most a block's read can wait. The pump reads a block at each wake, so a packet that passes playout within the block is behind the reader or not depending on the pump's phase. Its channels counted it; the flow never did. The status's `lateness` holds only the last second's peak, so the bursts did not show there either. Each RX flow now also counts `late_at_read`: packets with a frame that a ring refused as already read, the same packets its channels count. It also keeps `lateness_peak`, the largest lateness since start. `late` keeps its meaning.
+  - Additive status fields only; no API change, no latency change.
+
+## 0.6.43
 
 - Fix (dasio, FOH 5.11, v0.6.39; dstack #1): every 96 s each device process sent about 60 mDNS queries in one second, and the answers made a burst of over 500 packets. FOH's audio TX stalled in that second on both instances (TX schedule restarts, send error 10055, late packets at the receivers), 60 times in 2 h. The vendored mdns-sd queried each cached instance and host in its own message at exactly 80 % of the record's TTL (120 s), so records learned together re-queried together forever. Now a refresh pass asks every due question in one message, split only where a packet is full, and a pass with a record due takes along those due within 2 % of their TTL. Each responder answers once for all its records. On the wire (`tests/mdns_refresh.rs`): 4 instances over 4 refresh stages went from 16 query messages to 4.
   - No API change, no latency change.
