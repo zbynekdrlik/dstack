@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.6.35 (unreleased)
+
+- Fix (dasio, 5.11, v0.6.34 in its CI; dstack #1): a media thread without a CPU of its own yields in its spin again. In v0.6.34 every low-latency spin on Windows stopped yielding. dasio's Windows e2e runs two unpinned devices on one runner, and there the spinners starved the box: the pump overran 67-398 blocks a second, re-bootstrapped (missed 16), and the device drove the host 0 times in 4 s. Now:
+  - A thread the stack pinned to a CPU of its own (`pump_cpu`, `io_cpu`, `rx_cpu`, the pin taken; `clock::set_pinned`, cleared when a re-pin is refused) never yields. That is v0.6.34's fix for the FOH TX restarts, kept for dasio's pinned threads.
+  - Any other thread yields as in v0.6.33, and so does the TX retry wait.
+  - The default spin tail is back to 50 ms (`clock::SPIN_TAIL_NS`; it was 2 ms in v0.6.34). So an unpinned device waits exactly as in v0.6.33.
+  - Regression test: `an_unpinned_spun_wait_lets_a_lower_priority_thread_on_its_cpu_run`. On v0.6.34, on the Windows runner, the lower-priority thread never ran during 100 spun waits.
+  - No API removed (new: `clock::set_pinned`, `clock::pinned`), no latency change.
+
 ## 0.6.34 (unreleased)
 
 - Fix (dasio, FOH, 5.11; dstack #1): on Windows the low-latency wait no longer yields its CPU to a lower priority. Before, the media threads spun the last `spin_tail_ns` (50 ms by default) of every wait with SwitchToThread, which hands the CPU to any ready thread, a lower priority included, for the rest of that thread's slice. dasio's CSwitch trace caught FanControl (priority 10) holding the band TX thread's CPU (priority 31) for 1.66 ms; the TX schedule started again (lag 156 samples > max_lag 96), and the receivers lost those packets. Now:

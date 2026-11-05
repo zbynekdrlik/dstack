@@ -24,12 +24,11 @@ use windows_sys::Win32::System::Threading::{
 /// 100 ns intervals from 1601-01-01 to 1970-01-01.
 const UNIX_EPOCH_FT: i64 = 116_444_736_000_000_000;
 // The spin tail (`super::SPIN_TAIL`, the device's `spin_tail_ns`,
-// 2 ms unless set): the last part of every wait is spun, never slept, and
-// the spin never yields. The high-resolution timer wakes on the system
-// tick: on the FOH PC (5.11.2026) at most one tick + 140 µs late (1.1 ms at
-// the 1 ms resolution, 0.64 ms at 0.5 ms). Until 0.6.33 the tail was 50 ms
-// and yielding: in October 2026, with the Realtek driver's 20-30 ms DPC,
-// the timer woke up to 2.7 ms late.
+// 50 ms unless set): waits up to it are spun, never slept. The
+// high-resolution timer wakes on the system tick: on the FOH PC (5.11.2026)
+// at most one tick + 140 µs late (1.1 ms at the 1 ms resolution, 0.64 ms at
+// 0.5 ms); in October 2026, with the Realtek driver's 20-30 ms DPC, up to
+// 2.7 ms. A shorter tail is for a PC where the timer wakes on time.
 
 /// The precise system time, ns since 1970.
 pub fn realtime_ns() -> i64 {
@@ -177,24 +176,30 @@ fn sleep_until_in(target: i64, mode: super::WaitMode) {
             std::thread::sleep(std::time::Duration::from_nanos((left - spin) as u64));
         }
     }
-    // The spin never yields (dstack #1, dasio's CSwitch trace on the FOH
-    // PC, 5.11.2026): SwitchToThread (`std::thread::yield_now`) handed the
-    // band TX thread's CPU (priority 31) to a priority-10 thread, which
-    // kept it for the rest of its slice, 1.66 ms, and the TX schedule
-    // started again. A timer expiry preempts a lower priority at once; a
-    // yield does not. So the threads give their CPU away only on the timer
-    // above, until the last spin tail, and spin without yielding in it.
-    // Sleep(0) (v0.6.28) was no better: it yields only to equal or higher
-    // priority, the spin then never blocked, and two Windows PCs stopped
-    // answering (dasio, 4.11.2026). A thread whose deadlines come closer
-    // than the tail (TX at 8 frames a packet: every 83 µs) spins all the
-    // time, so it needs its CPU alone, and the other CPU of its core must
-    // run threads that block (`docs/windows-box.md`).
+    // The spin of a thread pinned to a CPU of its own never yields (dstack
+    // #1, dasio's CSwitch trace on the FOH PC, 5.11.2026): SwitchToThread
+    // (`std::thread::yield_now`) handed the band TX thread's CPU (priority
+    // 31) to a priority-10 thread, which kept it for the rest of its slice,
+    // 1.66 ms, and the TX schedule started again. A timer expiry preempts a
+    // lower priority at once; a yield does not. Any other thread yields:
+    // without a CPU of its own a spin that never yields starves what shares
+    // it (0.6.34 on dasio's runner: two unpinned devices, the pump overran
+    // hundreds of blocks a second). Sleep(0) (v0.6.28) is no answer either:
+    // it yields only to equal or higher priority, the spin never blocked,
+    // and two Windows PCs stopped answering (dasio, 4.11.2026). A pinned
+    // thread whose deadlines come closer than the tail (TX at 8 frames a
+    // packet: every 83 µs) spins all the time, so the other CPU of its core
+    // must run threads that block (`docs/windows-box.md`).
     if spin == 0 {
         return;
     }
+    let pinned = super::pinned();
     while monotonic_ns() < target {
-        std::hint::spin_loop();
+        if pinned {
+            std::hint::spin_loop();
+        } else {
+            std::thread::yield_now();
+        }
     }
 }
 
@@ -227,8 +232,8 @@ mod tests {
     /// dstack #1 (dasio's CSwitch trace, FOH 5.11.2026): the spin tail's
     /// SwitchToThread gave the band TX thread's CPU (priority 31) to a
     /// priority-10 thread for 1.66 ms, and the TX schedule started again.
-    /// A spun wait never hands its CPU to a lower priority: with a
-    /// lower-priority thread busy on the same CPU, 100 spun waits of 300 µs
+    /// A pinned thread's spun wait never hands its CPU to a lower priority:
+    /// with a lower-priority thread busy on the same CPU, 100 spun waits of 300 µs
     /// end within 100 µs at the median (a yield costs the other thread's
     /// whole slice, many ms).
     #[test]
@@ -266,6 +271,8 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
         pin(TIME_CRITICAL);
+        // The stack's pin: a CPU of its own (`media::tx::place`).
+        super::super::set_pinned(true);
         let mut late: Vec<i64> = (0..100)
             .map(|_| {
                 let target = monotonic_ns() + 300_000;
