@@ -7,10 +7,13 @@
 //! menu: a submenu per device (its line; inside, its latency values,
 //! [`latency::choices`], the configured one checked: choosing one writes it
 //! with [`control::set_latency`]), a line per expected device not running,
-//! Copy status (every device's JSON, to the clipboard by the OS's glue),
-//! Exit (the tray only; the devices are other processes and keep running).
-//! The decisions (when to read settings, when to build the menu again,
-//! whether a choice writes) are [`dtray::menu`]'s.
+//! and, for an app that offers outputs (dstack #139: dlisten), its Output
+//! list, the one in use checked: choosing one sends `app output <n>` to the
+//! device ([`probe::ask`], [`output::request`]); Copy status (every device's
+//! JSON, to the clipboard by the OS's glue), Exit (the tray only; the
+//! devices are other processes and keep running). The decisions (when to
+//! read settings, when to build the menu again, whether a choice writes)
+//! are [`dtray::menu`]'s.
 
 use std::net::SocketAddrV4;
 use std::sync::atomic::{AtomicBool, AtomicU16};
@@ -28,7 +31,7 @@ use dtray::discover::{self, Local, Reading, Scanner};
 use dtray::latency;
 use dtray::menu::{self, Known, Shape};
 use dtray::model::{self, Colour, Tracker, View};
-use dtray::{expected, icon};
+use dtray::{expected, icon, output, probe};
 
 /// How long an ARC read or write waits for each reply.
 const ARC_WAIT: Duration = Duration::from_millis(300);
@@ -59,6 +62,8 @@ struct Built {
     missing: Vec<MenuItem>,
     /// Each latency item: the device's ARC and the value.
     choices: Vec<(MenuId, SocketAddrV4, u32)>,
+    /// Each output item: the device's ARC and the output's index.
+    outputs: Vec<(MenuId, SocketAddrV4, usize)>,
 }
 
 impl Built {
@@ -109,7 +114,7 @@ impl Tray {
         let now = tick(&mut scanner);
         read_settings(&now.devices, &mut known, 0);
         let first = tracker.update_with(&now.readings, &now.expected);
-        let shapes = menu::shapes_of(&now.devices, &known);
+        let shapes = menu::shapes_of(&now.devices, &known, &now.readings);
         let (first_menu, built) = build(&fixed, &first, &shapes, now.readings.len())?;
         let icon = TrayIconBuilder::new()
             .with_menu(Box::new(first_menu))
@@ -141,7 +146,7 @@ impl Tray {
         let v = self
             .tracker
             .update_with(&self.now.readings, &self.now.expected);
-        let new_shapes = menu::shapes_of(&self.now.devices, &self.known);
+        let new_shapes = menu::shapes_of(&self.now.devices, &self.known, &self.now.readings);
         let devices = self.now.readings.len();
         if menu::needs_rebuild(
             self.forced,
@@ -200,6 +205,29 @@ impl Tray {
                         "dtray: the latency {} was not set: {err}",
                         latency::label(ns)
                     ))),
+                }
+            } else if let Some(&(_, arc, index)) =
+                self.built.outputs.iter().find(|(id, _, _)| *id == e.id)
+            {
+                // The item checked itself: the next tick builds the menu
+                // from what the app reports.
+                self.forced = true;
+                if !menu::output_needed(&self.shapes, arc, index) {
+                    continue;
+                }
+                let Some(port) = self
+                    .now
+                    .devices
+                    .iter()
+                    .find(|d| d.arc == arc)
+                    .map(|d| d.port)
+                else {
+                    continue;
+                };
+                if let Err(err) = probe::ask(port, &output::request(index)) {
+                    out.push(Action::Error(format!(
+                        "dtray: the output was not chosen: {err}"
+                    )));
                 }
             }
         }
@@ -289,6 +317,15 @@ fn build(
         for c in &shape.choices {
             let item = CheckMenuItem::new(&c.label, true, c.checked, None);
             built.choices.push((item.id().clone(), shape.arc, c.ns));
+            e(sub.append(&item))?;
+        }
+        if !shape.outputs.is_empty() {
+            e(sub.append(&PredefinedMenuItem::separator()))?;
+            e(sub.append(&MenuItem::new("Output", false, None)))?;
+        }
+        for o in &shape.outputs {
+            let item = CheckMenuItem::new(&o.label, true, o.checked, None);
+            built.outputs.push((item.id().clone(), shape.arc, o.index));
             e(sub.append(&item))?;
         }
         e(menu.append(&sub))?;

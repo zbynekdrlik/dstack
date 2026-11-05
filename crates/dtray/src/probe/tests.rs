@@ -6,7 +6,7 @@ use std::net::{Ipv4Addr, SocketAddr, TcpListener};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use super::{MAX_ANSWER, ProbeError, REQUEST, line_of, status, status_at, time_left};
+use super::{MAX_ANSWER, ProbeError, REQUEST, ask, line_of, status, status_at, time_left};
 
 /// The size tests' deadline: a megabyte through a coverage-instrumented
 /// build takes longer than the probe's own [`super::WAIT`]; they test the
@@ -198,4 +198,31 @@ fn line_of_reads_text_only() {
         ProbeError::Refused("x".into()).to_string(),
         "the device answered: x"
     );
+}
+
+/// dstack #139: an app request goes out as its line, and the app's answer
+/// comes back; its refusal is an error.
+#[test]
+fn asks_an_app_and_reads_its_answer() {
+    let serve = |answer: &'static [u8]| {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind 127.0.0.1");
+        let port = listener.local_addr().expect("its address").port();
+        let handle = thread::spawn(move || {
+            let (mut s, _) = listener.accept().expect("a connection");
+            let mut req = vec![0u8; b"app output 2\n".len()];
+            s.read_exact(&mut req).expect("the request");
+            s.write_all(answer).expect("the answer");
+            req
+        });
+        (port, handle)
+    };
+    let (port, handle) = serve(b"ok\n");
+    assert_eq!(ask(port, "app output 2").unwrap(), "ok");
+    assert_eq!(handle.join().unwrap(), b"app output 2\n");
+    let (port, handle) = serve(b"error: no app command\n");
+    match ask(port, "app output 2") {
+        Err(ProbeError::Refused(r)) => assert_eq!(r, "no app command"),
+        other => panic!("{other:?}"),
+    }
+    handle.join().unwrap();
 }
