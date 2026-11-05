@@ -517,6 +517,16 @@ impl DnsRecord {
         now >= self.refresh
     }
 
+    /// dstack #1: the refresh is due within the coming 2 % of the TTL. A
+    /// refresh pass that has a record due takes these along, so the records
+    /// learned a little apart (as devices answer one by one) go in one query
+    /// instead of one each, and their answers re-arm them together. A record
+    /// past its last refresh stage (`refresh_no_more`) is never due.
+    pub fn refresh_due_soon(&self, now: Instant) -> bool {
+        let ahead = Duration::from_millis(u64::from(self.ttl) * 20);
+        self.refresh < self.expires && now + ahead >= self.refresh
+    }
+
     /// Returns whether `now` (in millis) has passed half of TTL.
     pub fn halflife_passed(&self, now: Instant) -> bool {
         let halflife = get_expiration_time(self.created, self.ttl, 50);
@@ -534,8 +544,14 @@ impl DnsRecord {
     }
 
     /// Returns if this record is due for refresh. If yes, `refresh` time is updated.
-    pub fn refresh_maybe(&mut self, now: Instant) -> bool {
-        if self.is_expired(now) || !self.refresh_due(now) {
+    /// `early`: due soon is enough ([`Self::refresh_due_soon`]).
+    pub fn refresh_maybe(&mut self, now: Instant, early: bool) -> bool {
+        let due = if early {
+            self.refresh_due_soon(now)
+        } else {
+            self.refresh_due(now)
+        };
+        if self.is_expired(now) || !due {
             return false;
         }
 
@@ -745,8 +761,8 @@ pub trait DnsRecordExt: fmt::Debug {
 
     /// Given `now`, if the record is due to refresh, this method updates the refresh time
     /// and returns the new refresh time. Otherwise, returns None.
-    fn updated_refresh_time(&mut self, now: Instant) -> Option<Instant> {
-        if self.get_record_mut().refresh_maybe(now) {
+    fn updated_refresh_time(&mut self, now: Instant, early: bool) -> Option<Instant> {
+        if self.get_record_mut().refresh_maybe(now, early) {
             Some(self.get_record().get_refresh_time())
         } else {
             None

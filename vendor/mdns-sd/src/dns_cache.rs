@@ -499,7 +499,7 @@ impl DnsCache {
 
     /// Checks refresh due for PTR records of `ty_domain`.
     /// Returns all updated refresh time.
-    pub(crate) fn refresh_due_ptr(&mut self, ty_domain: &str) -> HashSet<Instant> {
+    pub(crate) fn refresh_due_ptr(&mut self, ty_domain: &str, early: bool) -> HashSet<Instant> {
         let now = Instant::now();
 
         // Check all PTR records for this ty_domain.
@@ -507,7 +507,7 @@ impl DnsCache {
             .get_mut(ty_domain)
             .into_iter()
             .flatten()
-            .filter_map(|record| record.record.updated_refresh_time(now))
+            .filter_map(|record| record.record.updated_refresh_time(now, early))
             .collect()
     }
 
@@ -518,6 +518,7 @@ impl DnsCache {
     pub(crate) fn refresh_due_srv_txt(
         &mut self,
         ty_domain: &str,
+        early: bool,
     ) -> (HashMap<String, Vec<RRType>>, HashSet<Instant>) {
         let now = Instant::now();
 
@@ -545,7 +546,7 @@ impl DnsCache {
                 .get_mut(instance)
                 .into_iter()
                 .flatten()
-                .filter_map(|record| record.record.updated_refresh_time(now))
+                .filter_map(|record| record.record.updated_refresh_time(now, early))
                 .collect();
 
             if !refresh_timers.is_empty() {
@@ -562,7 +563,7 @@ impl DnsCache {
                 .get_mut(instance)
                 .into_iter()
                 .flatten()
-                .filter_map(|record| record.record.updated_refresh_time(now))
+                .filter_map(|record| record.record.updated_refresh_time(now, early))
                 .collect();
 
             if !refresh_timers.is_empty() {
@@ -582,6 +583,7 @@ impl DnsCache {
     pub(crate) fn refresh_due_hosts(
         &mut self,
         ty_domain: &str,
+        early: bool,
     ) -> (HashSet<String>, HashSet<Instant>) {
         let now = Instant::now();
 
@@ -627,7 +629,7 @@ impl DnsCache {
                 .get_mut(&hostname.to_lowercase())
                 .into_iter()
                 .flatten()
-                .filter_map(|record| record.record.updated_refresh_time(now))
+                .filter_map(|record| record.record.updated_refresh_time(now, early))
                 .collect();
 
             if !refresh_timers.is_empty() {

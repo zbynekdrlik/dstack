@@ -4428,39 +4428,68 @@ impl Zeroconf {
     }
 
     /// Refresh cached service records with active queriers
+    ///
+    /// dstack #1: every question due in this pass goes in one message (split
+    /// only where a packet is full), not one message per instance and host.
+    /// Each responder then answers once for all of its records. A pass that
+    /// has a record due also takes along those due within 2 % of their TTL
+    /// (`DnsRecord::refresh_due_soon`), so records learned a little apart
+    /// are asked together, and their answers re-arm them together. FOH's two
+    /// device processes sent about 60 queries each every 96 s, and the
+    /// answers made a burst of over 500 packets.
     fn refresh_active_services(&mut self) {
         let mut query_ptr_count = 0;
         let mut query_srv_count = 0;
         let mut new_timers = HashSet::new();
         let mut query_addr_count = 0;
+        let mut questions: Vec<(String, RRType)> = Vec::new();
 
-        for (ty_domain, _sender) in self.service_queriers.iter() {
-            let refreshed_timers = self.cache.refresh_due_ptr(ty_domain);
-            if !refreshed_timers.is_empty() {
-                trace!("sending refresh query for PTR: {}", ty_domain);
-                self.send_query(ty_domain, RRType::PTR);
-                query_ptr_count += 1;
-                new_timers.extend(refreshed_timers);
+        // The records due now, then (only when there are any) those due soon.
+        for early in [false, true] {
+            if early && questions.is_empty() {
+                break;
             }
+            for (ty_domain, _sender) in self.service_queriers.iter() {
+                let refreshed_timers = self.cache.refresh_due_ptr(ty_domain, early);
+                if !refreshed_timers.is_empty() {
+                    trace!("refresh query for PTR: {}", ty_domain);
+                    questions.push((ty_domain.clone(), RRType::PTR));
+                    query_ptr_count += 1;
+                    new_timers.extend(refreshed_timers);
+                }
 
-            let (instances, timers) = self.cache.refresh_due_srv_txt(ty_domain);
-            for (instance, types) in instances {
-                trace!("sending refresh query for: {}", &instance);
-                let query_vec = types
-                    .into_iter()
-                    .map(|ty| (instance.as_str(), ty))
-                    .collect::<Vec<_>>();
-                self.send_query_vec(&query_vec);
-                query_srv_count += 1;
+                let (instances, timers) = self.cache.refresh_due_srv_txt(ty_domain, early);
+                for (instance, types) in instances {
+                    trace!("refresh query for: {}", &instance);
+                    questions.extend(types.into_iter().map(|ty| (instance.clone(), ty)));
+                    query_srv_count += 1;
+                }
+                new_timers.extend(timers);
+                let (hostnames, timers) = self.cache.refresh_due_hosts(ty_domain, early);
+                for hostname in hostnames {
+                    trace!("refresh queries for A and AAAA:  {}", hostname);
+                    questions.push((hostname.clone(), RRType::A));
+                    questions.push((hostname, RRType::AAAA));
+                    query_addr_count += 2;
+                }
+                new_timers.extend(timers);
             }
-            new_timers.extend(timers);
-            let (hostnames, timers) = self.cache.refresh_due_hosts(ty_domain);
-            for hostname in hostnames.iter() {
-                trace!("sending refresh queries for A and AAAA:  {}", hostname);
-                self.send_query_vec(&[(hostname, RRType::A), (hostname, RRType::AAAA)]);
-                query_addr_count += 2;
+        }
+        // A question asked twice (a host of two types) goes once.
+        let mut unique: Vec<(String, RRType)> = Vec::with_capacity(questions.len());
+        for q in questions {
+            if !unique.contains(&q) {
+                unique.push(q);
             }
-            new_timers.extend(timers);
+        }
+        let questions = unique;
+
+        if !questions.is_empty() {
+            let questions: Vec<(&str, RRType)> = questions
+                .iter()
+                .map(|(name, ty)| (name.as_str(), *ty))
+                .collect();
+            self.send_query_vec(&questions);
         }
 
         for timer in new_timers {
