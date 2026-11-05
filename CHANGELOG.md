@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.41 (unreleased)
+
+- Fix (v0.6.40's main CI on windows-2025; dstack #1): a handover wait's round counts as progress only when it comes `clock::linked::CONVERGE_NS` = 5 µs nearer than the mark (was 1 µs). Measured offsets jitter by a few µs from read to read. At 1 µs a steady disagreement could read as progress now and then, and the wait went on past `HANDOVER_WAIT`. The test with a constant 1 ms offset failed that way on main. A converging follower still hands over seamlessly: iemmixer's -61 µs to -31.75 µs over about 3 minutes makes progress every 20-30 rounds.
+  - No API change, no latency change.
+
 ## 0.6.40 (unreleased)
 
 - Fix (iemmixer, 5.11, v0.6.37, after a hard reset of its box; dstack #1): a linked clock's handover wait keeps waiting while the two sources keep closing in. Before, a switch from a working service to the follower waited a fixed 60 rounds for them to agree within `clock::linked::HANDOVER_NS` (30 µs), then re-aligned. After the reset the follower closed on the service slowly (-61 µs, -43 µs, -31.75 µs), and the wait ran out 1.75 µs outside the bound. The result was a re-align and one pump re-bootstrap, about 5 minutes after boot, with the band possibly playing. Now a waiting round that comes `clock::linked::CONVERGE_NS` (1 µs) nearer than the last progress starts the count again (`clock::linked::wait_round`). So a converging follower hands over seamlessly once within 30 µs. A steady disagreement still re-aligns after `HANDOVER_WAIT` (60) rounds without progress, for example strih's 0.48 ms before dsync 1.27.4.

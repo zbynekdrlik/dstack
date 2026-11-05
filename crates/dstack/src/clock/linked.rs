@@ -112,8 +112,10 @@ pub const HANDOVER_NS: i64 = 30_000;
 /// re-aligns ([`wait_round`]).
 pub const HANDOVER_WAIT: u32 = 60;
 /// How much closer the two sources must come for a waiting round to count
-/// as progress, ns ([`wait_round`]).
-pub const CONVERGE_NS: u64 = 1_000;
+/// as progress, ns ([`wait_round`]): above the jitter of the measured
+/// offset (a few µs from read to read; at 1 µs a constant 1 ms offset read
+/// as progress on windows-2025, v0.6.40).
+pub const CONVERGE_NS: u64 = 5_000;
 
 // The step stays under half the tightest pump margin: 16 samples at 192 kHz.
 const _: () = assert!(HANDOVER_NS * 192_000 * 2 < 16 * 1_000_000_000);
