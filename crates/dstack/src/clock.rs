@@ -232,6 +232,9 @@ pub struct FollowerCounts {
     pub offset_ns: Option<i64>,
     /// The recent windows' |e| p90, ns (`None` until there are enough).
     pub recent_abs_e_ns: Option<i64>,
+    /// The phase, ns, still being retired along dsync's pull after a
+    /// grandmaster change in the same time base (dsync#158); 0 when none.
+    pub pull_ns: i64,
 }
 
 impl ClockStats {

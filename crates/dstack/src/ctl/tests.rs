@@ -615,6 +615,7 @@ const WORDS: &[&str] = &[
     "settled",
     "offset_ns",
     "recent_abs_e_ns",
+    "pull_ns",
     "dsync",
     "system",
     "internal",
@@ -1593,6 +1594,7 @@ fn the_clock_counts_describe_the_source_in_use_and_each_source_apart() {
             settled: false,
             offset_ns: Some(-39_806),
             recent_abs_e_ns: None,
+            pull_ns: -88_000,
         }));
     assert_eq!(
         media.clock_stats.follower().map(|c| c.counts.polls),
@@ -1608,7 +1610,7 @@ fn the_clock_counts_describe_the_source_in_use_and_each_source_apart() {
              \"source\":\"internal\",\
              \"service\":{\"polls\":2,\"re_anchors\":0,\"holdovers\":1,\"holdover\":1},\
              \"follower\":{\"windows\":300,\"re_anchors\":4,\"holdovers\":3,\"holdover\":0,\"absorbed\":2,\
-             \"locked\":1,\"settled\":0,\"offset_ns\":-39806,\"recent_abs_e_ns\":null}}"
+             \"locked\":1,\"settled\":0,\"offset_ns\":-39806,\"recent_abs_e_ns\":null,\"pull_ns\":-88000}}"
         ),
         "{s}"
     );

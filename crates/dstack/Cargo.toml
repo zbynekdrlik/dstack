@@ -16,7 +16,7 @@ name = "dstack"
 # dsync's in-process PTP follower (dstack #68): a dlink device's internal
 # clock, on Linux (kernel sockets) and Windows (Npcap, loaded at run time
 # since v1.27.0). MIT, our own project.
-dsync-ptp = { git = "https://github.com/zbynekdrlik/dsync", tag = "v1.27.4" }
+dsync-ptp = { git = "https://github.com/zbynekdrlik/dsync", tag = "v1.28.0" }
 # The engine's callback contract for the pump (phase C, `stream`): Process,
 # Block, StreamStats and the stream histograms. MIT OR Apache-2.0, no
 # dependency of its own on Linux; the engine already links it.

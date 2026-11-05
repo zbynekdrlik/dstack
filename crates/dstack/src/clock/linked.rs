@@ -610,6 +610,7 @@ impl<M: Model> Follow for Absorbing<M> {
             settled: m.settled,
             offset_ns: m.offset_ns,
             recent_abs_e_ns: m.recent_abs_e_ns,
+            pull_ns: m.pull_ns,
         }
     }
 }

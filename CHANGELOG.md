@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.42 (unreleased)
+
+- dsync v1.28.0 (dsync#158, asked by dstack #1 after iemmixer's GM loss at the FOH reboot of 5.11): the in-process follower keeps its time base over a grandmaster change within 1 ms of it. The residual is retired along dsync's pull (τ 20 s, at most 50 ppm), so no step reaches the media clock and no re-align follows. dsync logs it as `[FOLLOWER] grandmaster change in the same time base`. A change over 1 ms still re-anchors as before. After every grandmaster change dsync fits the rate afresh once, so the follower settles again within about a minute (8-10 ppm off: 48-50 s in its simulation).
+- New: the clock status's `follower` object carries `pull_ns`, the phase dsync still retires (0 when none).
+  - No API removed (new field: `FollowerCounts::pull_ns`), no latency change.
+
 ## 0.6.41 (unreleased)
 
 - Fix (v0.6.40's main CI on windows-2025; dstack #1): a handover wait's round counts as progress only when it comes `clock::linked::CONVERGE_NS` = 5 µs nearer than the mark (was 1 µs). Measured offsets jitter by a few µs from read to read. At 1 µs a steady disagreement could read as progress now and then, and the wait went on past `HANDOVER_WAIT`. The test with a constant 1 ms offset failed that way on main. A converging follower still hands over seamlessly: iemmixer's -61 µs to -31.75 µs over about 3 minutes makes progress every 20-30 rounds.

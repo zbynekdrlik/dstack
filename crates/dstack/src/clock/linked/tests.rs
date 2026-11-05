@@ -131,6 +131,7 @@ impl Follow for Arc<Fake> {
             settled: v.settled,
             offset_ns: Some(-39_806),
             recent_abs_e_ns: None,
+            pull_ns: 0,
         }
     }
 }
@@ -435,14 +436,20 @@ fn a_seamless_handover_keeps_an_epoch_with_re_anchors_in_it() {
 /// the wait takes over seamlessly.
 #[test]
 fn a_follower_that_disagrees_waits_then_takes_over_with_a_new_epoch() {
+    // Drifting apart 1 ms a round: never progress, whatever the gap
+    // between `set` and the selector's reads (the fake's time is fixed at
+    // `set`; v0.6.42's coverage run: a constant 1 ms offset read 5 µs nearer
+    // once under the instrumentation, and the wait went on).
     let (fake, service, linked) = linked_on_service();
     let before = linked.epoch();
+    let mut off = 1_000_000;
     for _ in 0..HANDOVER_WAIT {
-        set(&fake, service_now_plus(&service, 1_000_000), ALIVE_LOCKED);
+        set(&fake, service_now_plus(&service, off), ALIVE_LOCKED);
         assert_eq!(linked.tick(), Source::Service);
         assert_eq!(linked.epoch(), before);
+        off += 1_000_000;
     }
-    set(&fake, service_now_plus(&service, 1_000_000), ALIVE_LOCKED);
+    set(&fake, service_now_plus(&service, off), ALIVE_LOCKED);
     assert_eq!(linked.tick(), Source::Internal);
     assert_ne!(linked.epoch(), before, "a re-align after the wait");
 
@@ -459,13 +466,19 @@ fn a_follower_that_disagrees_waits_then_takes_over_with_a_new_epoch() {
 
     // A wait that ended (the follower unsettled) starts again from zero.
     let (fake, service, linked) = linked_on_service();
+    let mut off = 1_000_000;
     for _ in 0..HANDOVER_WAIT - 1 {
-        set(&fake, service_now_plus(&service, 1_000_000), ALIVE_LOCKED);
+        set(&fake, service_now_plus(&service, off), ALIVE_LOCKED);
         assert_eq!(linked.tick(), Source::Service);
+        off += 1_000_000;
     }
-    set(&fake, service_now_plus(&service, 1_000_000), UNSETTLED);
+    set(&fake, service_now_plus(&service, off), UNSETTLED);
     assert_eq!(linked.tick(), Source::Service);
-    set(&fake, service_now_plus(&service, 1_000_000), ALIVE_LOCKED);
+    set(
+        &fake,
+        service_now_plus(&service, off + 1_000_000),
+        ALIVE_LOCKED,
+    );
     assert_eq!(linked.tick(), Source::Service, "the wait starts again");
 }
 
@@ -589,6 +602,7 @@ fn the_linked_clock_reads_the_follower_s_counts() {
             settled: false,
             offset_ns: Some(-39_806),
             recent_abs_e_ns: None,
+            pull_ns: 0,
         })
     );
     let service = Arc::new(MonoClock::new());
@@ -706,14 +720,14 @@ fn a_re_anchor_during_the_measure_is_no_agreement() {
 #[test]
 fn every_switch_starts_the_wait_count_again() {
     let (fake, service, linked) = linked_on_service();
-    // Drifting apart 10 µs a round: never progress, whatever the jitter of
+    // Drifting apart 1 ms a round: never progress, whatever the jitter of
     // the real clock reads (v0.6.40's main CI on windows-2025: a constant
     // 1 ms offset read a few µs nearer once, and the wait went on).
     let mut off = 1_000_000;
     for _ in 0..HANDOVER_WAIT {
         set(&fake, service_now_plus(&service, off), ALIVE_LOCKED);
         assert_eq!(linked.tick(), Source::Service);
-        off += 10_000;
+        off += 1_000_000;
     }
     set(&fake, service_now_plus(&service, off), ALIVE_LOCKED);
     assert_eq!(linked.tick(), Source::Internal);
