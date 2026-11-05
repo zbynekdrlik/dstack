@@ -3,8 +3,8 @@
 
 //! The bounded escape of the Windows low-latency wait (dstack #1,
 //! `DeviceConfig::spin_escape_ms`, a trial, off by default): the spin
-//! yields with Sleep(0) instead of SwitchToThread, so no lower priority
-//! takes a media thread's CPU near a send, and once a period each spinning
+//! does not yield (SwitchToThread and Sleep(0) both gave a lower priority
+//! the CPU), so none takes a media thread's CPU near a send, and once a period each spinning
 //! media thread blocks one timer tick, whose expiry preempts lower
 //! priorities at once, so per-CPU system work still runs. The decisions
 //! live here, cross-platform and tested on Linux; the Windows wait
@@ -48,7 +48,7 @@ pub fn spin_escape_line(configured_ms: Option<u64>, os: Os) -> Option<String> {
     let ms = configured_ms?;
     Some(match os {
         Os::Windows => format!(
-            "bounded escape on (trial, dstack #1): the low-latency spin yields with Sleep(0), \
+            "bounded escape on (trial, dstack #1): the low-latency spin does not yield, \
              each spinning media thread blocks {} µs on the timer every {ms} ms, TX sends {} µs ahead first",
             ESCAPE_BLOCK_NS / 1_000,
             PRESEND_NS / 1_000

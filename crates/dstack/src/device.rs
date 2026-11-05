@@ -116,9 +116,9 @@ pub struct DeviceConfig {
     /// Windows, the low-latency profile, a TRIAL (dstack #1), off when left
     /// out: the bounded escape's period, ms,
     /// [`crate::clock::SPIN_ESCAPE_MIN_MS`] to
-    /// [`crate::clock::SPIN_ESCAPE_MAX_MS`]. When set, the spin yields with
-    /// Sleep(0) (to equal or higher priorities only) instead of
-    /// SwitchToThread, and every spinning media thread blocks one timer
+    /// [`crate::clock::SPIN_ESCAPE_MAX_MS`]. When set, the spin does not
+    /// yield between the escape's blocks (Sleep(0) gave lower priorities
+    /// the CPU on windows-2025), and every spinning media thread blocks one timer
     /// tick ([`crate::clock::ESCAPE_BLOCK_NS`]) at least once a period, so
     /// per-CPU system work runs; TX first sends the packets due within
     /// [`crate::clock::PRESEND_NS`] whose samples it already holds (and

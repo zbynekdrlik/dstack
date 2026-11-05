@@ -18,7 +18,7 @@ use windows_sys::Win32::System::Performance::{QueryPerformanceCounter, QueryPerf
 use windows_sys::Win32::System::SystemInformation::GetSystemTimePreciseAsFileTime;
 use windows_sys::Win32::System::Threading::{
     CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, CreateWaitableTimerExW, INFINITE, SetWaitableTimer,
-    Sleep, TIMER_ALL_ACCESS, WaitForSingleObject,
+    TIMER_ALL_ACCESS, WaitForSingleObject,
 };
 
 /// 100 ns intervals from 1601-01-01 to 1970-01-01.
@@ -247,23 +247,24 @@ fn sleep_until_in(target: i64, mode: super::WaitMode, escape_ns: u64) {
     // (`std::thread::yield_now`) lets ANY ready thread on the CPU run,
     // lower priority included, for the rest of its slice: on the FOH PC
     // (5.11.2026) a priority-10 thread kept the band TX thread's CPU for
-    // 1.66 ms and the TX schedule started again. Every spin that does not
-    // yield to lower priorities froze a Windows PC: Sleep(0) in v0.6.28,
-    // and the no-yield spin of pinned threads in v0.6.34/35 (FOH, 5.11.2026:
-    // per-CPU system work that must run on that exact CPU never ran).
+    // 1.66 ms and the TX schedule started again. Every other spin froze a
+    // Windows PC: Sleep(0) in v0.6.28 (why is not known: on windows-2025 a
+    // Sleep(0) spin does let a lower priority run), and the no-yield spin
+    // of pinned threads in v0.6.34/35 (FOH, 5.11.2026: per-CPU system work
+    // that must run on that exact CPU never ran).
     // Without a CPU of its own it also starves its neighbours (v0.6.34 on
     // dasio's runner). Never make this spin starve lower priorities. The
     // bounded escape (above, off by default, a trial) is the one exception:
-    // its spin yields with Sleep(0), to equal or higher priorities only, so
-    // no lower priority takes the CPU near a send, and its block once a
-    // period lets them run.
+    // its spin does not yield at all between the blocks (Sleep(0) is no
+    // shelter: on windows-2025 a lower-priority thread ran 21 million turns
+    // in 0.3 s of a Sleep(0) spin, and the waits went 3 ms late), and its
+    // block once a period lets lower priorities run.
     if spin == 0 {
         return;
     }
     while monotonic_ns() < target {
         if escape {
-            // SAFETY: Sleep(0) only gives up the rest of the time slice.
-            unsafe { Sleep(0) };
+            std::hint::spin_loop();
         } else {
             std::thread::yield_now();
         }
@@ -350,7 +351,7 @@ mod tests {
     }
 
     /// The bounded escape (dstack #1, `spin_escape_ms`, a trial): the spin
-    /// yields with Sleep(0), which gives a lower priority nothing, and the
+    /// does not yield between the blocks, so a lower priority gets nothing there, and the
     /// thread blocks one timer tick each period. Over about 1 s of spun
     /// waits at a 100 ms period, a busy lower-priority thread on the same
     /// CPU still runs (in the blocks), and the waits stay on time: the
@@ -390,8 +391,8 @@ mod tests {
         }
         pin(TIME_CRITICAL);
         // The spin alone first (a period past the run: one block at the
-        // start, then Sleep(0) only), for the failure message: whether the
-        // lower thread gets the CPU from Sleep(0) or only in the blocks.
+        // start, then the spin only), for the failure message: whether the
+        // lower thread gets the CPU from the spin or only in the blocks.
         let (spin_ran, spin_late) = {
             let before = turns.load(Ordering::Relaxed);
             let end = monotonic_ns() + 300_000_000;
@@ -425,7 +426,7 @@ mod tests {
         assert!(
             median < 100_000,
             "median late {median} ns over {} waits; p99 {} ns, max {} ns; over 0.5 ms: {}; \
-             the Sleep(0) spin alone: {} waits, median {} ns, max {} ns, lower thread ran {}",
+             the spin alone: {} waits, median {} ns, max {} ns, lower thread ran {}",
             late.len(),
             late[late.len() * 99 / 100],
             late[late.len() - 1],

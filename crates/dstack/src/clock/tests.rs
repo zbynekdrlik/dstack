@@ -895,7 +895,7 @@ fn the_spin_escape_line_names_the_mode_on_windows_and_says_ignored_elsewhere() {
     assert_eq!(spin_escape_line(None, Os::Other), None);
     assert_eq!(
         spin_escape_line(Some(250), Os::Windows).unwrap(),
-        "bounded escape on (trial, dstack #1): the low-latency spin yields with Sleep(0), \
+        "bounded escape on (trial, dstack #1): the low-latency spin does not yield, \
          each spinning media thread blocks 1000 µs on the timer every 250 ms, TX sends 2140 µs ahead first"
     );
     assert_eq!(
