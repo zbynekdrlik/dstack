@@ -113,6 +113,20 @@ pub struct DeviceConfig {
     /// FOH, 3.11.2026).
     #[serde(default)]
     pub spin_tail_ns: Option<u64>,
+    /// Windows, the low-latency profile, a TRIAL (dstack #1), off when left
+    /// out: the bounded escape's period, ms,
+    /// [`crate::clock::SPIN_ESCAPE_MIN_MS`] to
+    /// [`crate::clock::SPIN_ESCAPE_MAX_MS`]. When set, the spin yields with
+    /// Sleep(0) (to equal or higher priorities only) instead of
+    /// SwitchToThread, and every spinning media thread blocks one timer
+    /// tick ([`crate::clock::ESCAPE_BLOCK_NS`]) at least once a period, so
+    /// per-CPU system work runs; TX first sends the packets due within
+    /// [`crate::clock::PRESEND_NS`] whose samples it already holds (and
+    /// puts the escape off, at most [`crate::clock::ESCAPE_DEFER_MAX_NS`],
+    /// while one has none). Process-wide: the last device set wins.
+    /// Accepted and ignored on Linux, whose wait never spins.
+    #[serde(default)]
+    pub spin_escape_ms: Option<u64>,
     /// The most frames per packet our TX channels offer (mDNS `fpp`, a
     /// receiver asks for at most this, a request for more is refused):
     /// [`FPP_MIN`] to [`FPP_MAX`], [`FPP_MAX`] when left out. The IEM card
@@ -344,6 +358,15 @@ impl DeviceConfig {
             out.push(format!(
                 "spin_tail_ns: 0 to {}",
                 crate::clock::SPIN_TAIL_MAX_NS
+            ));
+        }
+        if self.spin_escape_ms.is_some_and(|ms| {
+            !(crate::clock::SPIN_ESCAPE_MIN_MS..=crate::clock::SPIN_ESCAPE_MAX_MS).contains(&ms)
+        }) {
+            out.push(format!(
+                "spin_escape_ms: {} to {}",
+                crate::clock::SPIN_ESCAPE_MIN_MS,
+                crate::clock::SPIN_ESCAPE_MAX_MS
             ));
         }
         if !(FPP_MIN..=FPP_MAX).contains(&self.tx_fpp_max) {

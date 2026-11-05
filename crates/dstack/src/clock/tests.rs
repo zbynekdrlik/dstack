@@ -873,3 +873,104 @@ fn the_spin_tail_is_the_device_s_within_its_bound_and_only_for_the_spin_wait() {
     assert_eq!(spin_tail_for(WaitMode::Spin, 200_000), 200_000);
     assert_eq!(spin_tail_for(WaitMode::Timer, 200_000), 0);
 }
+
+#[test]
+fn the_spin_escape_is_the_device_s_period_in_ns_and_off_when_unset() {
+    assert_eq!(spin_escape_of(None), 0);
+    assert_eq!(spin_escape_of(Some(100)), 100_000_000);
+    assert_eq!(spin_escape_of(Some(SPIN_ESCAPE_MAX_MS)), 10_000_000_000);
+    assert_eq!(spin_escape_of(Some(u64::MAX)), u64::MAX);
+}
+
+#[test]
+fn the_presend_window_covers_the_escape_block_and_the_timer_s_late_wake() {
+    assert_eq!(ESCAPE_BLOCK_NS, 1_000_000);
+    assert_eq!(TIMER_LATE_NS, 1_140_000);
+    assert_eq!(PRESEND_NS, 2_140_000);
+}
+
+#[test]
+fn the_spin_escape_line_names_the_mode_on_windows_and_says_ignored_elsewhere() {
+    assert_eq!(spin_escape_line(None, Os::Windows), None);
+    assert_eq!(spin_escape_line(None, Os::Other), None);
+    assert_eq!(
+        spin_escape_line(Some(250), Os::Windows).unwrap(),
+        "bounded escape on (trial, dstack #1): the low-latency spin yields with Sleep(0), \
+         each spinning media thread blocks 1000 µs on the timer every 250 ms, TX sends 2140 µs ahead first"
+    );
+    assert_eq!(
+        spin_escape_line(Some(250), Os::Other).unwrap(),
+        "spin_escape_ms = 250 is for Windows only: ignored on this OS"
+    );
+}
+
+#[test]
+fn a_thread_that_never_asks_escapes_once_a_period_from_its_first_wait() {
+    const P: u64 = 100_000_000;
+    let mut s = EscapeState::new();
+    // The first wait only starts the period.
+    assert!(!s.take(1_000, P));
+    assert!(!s.take(1_000 + 99_999_999, P));
+    assert!(s.take(1_000 + 100_000_000, P));
+    // The escape starts the next period.
+    assert!(!s.take(1_000 + 100_000_001, P));
+    assert!(!s.take(1_000 + 199_999_999, P));
+    assert!(s.take(1_000 + 200_000_000, P));
+    // Off: never.
+    let mut off = EscapeState::new();
+    assert!(!off.take(0, 0));
+    assert!(!off.take(i64::MAX, 0));
+}
+
+#[test]
+fn a_thread_that_asks_escapes_only_after_an_ask_said_so() {
+    const P: u64 = 100_000_000;
+    let mut s = EscapeState::new();
+    assert!(!s.ask(0, P));
+    assert!(!s.take(0, P));
+    // The period ends between the ask and the wait: no escape, since
+    // nothing was sent ahead for it.
+    assert!(!s.ask(99_999_999, P));
+    assert!(!s.take(100_000_000, P));
+    assert!(s.ask(100_000_000, P));
+    assert!(s.take(100_000_050, P));
+    // Taken once: the next wait does not escape again.
+    assert!(!s.take(100_000_060, P));
+    // The period runs from the escape itself.
+    assert!(!s.ask(200_000_049, P));
+    assert!(s.ask(200_000_050, P));
+    // A disarming ask cancels an armed one.
+    assert!(!s.ask(200_000_051, 0));
+    assert!(!s.take(200_000_052, P));
+}
+
+/// TX puts off an armed escape while a packet in its window has no
+/// samples, up to `ESCAPE_DEFER_MAX_NS` past the period; then the escape
+/// happens anyway.
+#[test]
+fn an_armed_escape_is_put_off_until_20_ms_past_its_period() {
+    const P: u64 = 100_000_000;
+    let mut s = EscapeState::new();
+    assert!(!s.defer(0, P), "nothing armed");
+    assert!(!s.ask(0, P));
+    assert!(!s.defer(50, P), "nothing armed");
+    assert!(s.ask(100_000_000, P));
+    assert!(s.defer(100_000_000, P));
+    assert!(!s.take(100_000_001, P), "put off: no escape");
+    assert!(s.ask(119_999_999, P));
+    assert!(s.defer(119_999_999, P), "1 ns under the cap");
+    assert!(s.ask(120_000_000, P));
+    assert!(!s.defer(120_000_000, P), "at the cap: escapes anyway");
+    assert!(s.take(120_000_001, P));
+    // The next period runs from that escape.
+    assert!(!s.ask(220_000_000, P));
+    assert!(s.ask(220_000_001, P));
+    assert_eq!(ESCAPE_DEFER_MAX_NS, 20_000_000);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn no_wait_escapes_on_linux() {
+    assert!(!ask_escape());
+    assert!(!defer_escape());
+}

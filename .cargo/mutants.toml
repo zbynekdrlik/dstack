@@ -123,6 +123,9 @@ exclude_re = [
   # The process-wide spin tail's setter (its value is `spin_tail_of`,
   # tested); setting it in a test would change every other test's waits.
   "replace set_spin_tail_ns with \\(\\)",
+  # The bounded escape's setter (dstack #1): the same, its value is
+  # `spin_escape_of` (tested), and only the Windows wait reads it.
+  "replace set_spin_escape_ms with \\(\\)",
   "replace profile -> TimingProfile",
   # The direct socket needs CAP_NET_RAW, which neither CI nor the gate has;
   # the headers, the ARP lookup and the counting are tested (media::bypass).

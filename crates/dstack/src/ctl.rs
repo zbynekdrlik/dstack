@@ -606,7 +606,8 @@ impl Json {
 ///   `late_bins` (packets by how late they left past due, six counts at
 ///   the edges of `media::tx::LATE_EDGES_NS`: under 0.25, 0.5, 1, 2 and 5
 ///   ms, then 5 ms or more), `late_max_us` and `send_max_us` (the largest lateness and
-///   the longest single send since the device started: maxima).
+///   the longest single send since the device started: maxima), `early`
+///   (packets sent ahead before a bounded escape, `spin_escape_ms`).
 /// - `rx`: each RX flow slot that has or had a flow: `flow`, `granted`,
 ///   `fpp`, `channels`, `latency` (samples), `packets`, `refused`, `stray`,
 ///   `out_of_order`, `gaps` and `gap_frames` (packets that began past the
@@ -752,6 +753,7 @@ fn lane_fields(j: &mut Json, lane: &LaneCounts) {
     j.num("over_latency", lane.over_latency);
     j.num("receiver_latency_us", lane.receiver_latency_ns / 1_000);
     j.num("direct", lane.direct);
+    j.num("early", lane.early);
 }
 
 /// An RX flow as the status shows it.
