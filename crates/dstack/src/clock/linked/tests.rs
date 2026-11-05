@@ -783,8 +783,10 @@ fn a_converging_wait_keeps_waiting_and_hands_over_seamlessly() {
         rounds += 1;
     };
     assert_eq!((way, rounds), (Handover::Break, HANDOVER_WAIT));
-    // Progress under 1 µs is no progress; an unmeasured round is none.
-    assert_eq!(wait_round(5, 40_000, Some(-39_500)), (6, 39_500));
+    // Progress under 1 µs is no progress and leaves the mark where it
+    // was (a creeping best would never be 1 µs behind); an unmeasured
+    // round is none.
+    assert_eq!(wait_round(5, 40_000, Some(-39_500)), (6, 40_000));
     assert_eq!(wait_round(5, 40_000, Some(39_000)), (1, 39_000));
     assert_eq!(wait_round(5, 40_000, None), (6, 40_000));
 }
