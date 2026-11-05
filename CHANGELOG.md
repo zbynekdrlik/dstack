@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.6.38 (unreleased)
+
+- New, OFF by default, for a trial only (dstack #1, agreed with dasio 5.11): `DeviceConfig::spin_escape_ms`, a bounded escape for the Windows low-latency wait. Left out, nothing changes: the spin yields with SwitchToThread as in v0.6.36. Set (100 to 10000 ms), on Windows:
+  - The spin yields with Sleep(0), to equal or higher priorities only, so no lower priority takes a media thread's CPU near a send (the FanControl steal of 5.11, 1.66 ms, a band TX restart).
+  - At least once a period each spinning media thread blocks one timer tick (`clock::ESCAPE_BLOCK_NS`, 1 ms). The timer's expiry preempts lower priorities at once, so per-CPU system work runs on every CPU; its absence froze FOH on v0.6.28 and v0.6.35.
+  - The pump just blocks (W absorbs it). The TX thread first sends every packet due within `clock::PRESEND_NS` (2.14 ms = the block + the timer's late wake of one tick + 140 µs) whose samples the engine ring (or the echo's RX ring) already holds, then blocks right after that pass. A packet not ready yet, and those after it, go out at their time and count late as usual.
+  - Status: each TX lane gains `early` (packets sent ahead); `media::tx::LaneCounts::early`. The start log names the mode and its period.
+  - Linux: the field is accepted and ignored, said in the start log.
+  - New API: `clock::{SPIN_ESCAPE_MIN_MS, SPIN_ESCAPE_MAX_MS, ESCAPE_BLOCK_NS, TIMER_LATE_NS, PRESEND_NS, spin_escape_of, set_spin_escape_ms, spin_escape_line, EscapeState, ask_escape}`, `media::tx::Schedule::due_early`, `media::tx::Transmitter::presend`, `media::ring::Ring::holds`, `media::source::Source::ready`.
+  - First trial on dasio's test PC (iem-snv), never on FOH before it: a real receiver must accept the early packets within its buffer.
+  - No latency change; no behaviour change without the field.
+
 ## 0.6.37 (unreleased)
 
 - New (iemmixer, 5.11; dstack #1): the status's `clock.follower` object carries what the linked clock's selector decides on: `locked` (dsync's lock gate, |e| within 50 µs for 3 windows), `settled` (locked, and |pull| and the recent |e| p90 within 30 µs; only a settled follower takes over a ready service), `offset_ns` (the last window's error) and `recent_abs_e_ns` (the recent |e| p90; `null` until there are enough windows). `clock::FollowerCounts` gains the same four fields.

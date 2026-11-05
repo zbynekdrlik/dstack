@@ -1738,6 +1738,28 @@ fn the_spin_tail_is_taken_and_checked() {
     );
 }
 
+/// The bounded escape (dstack #1) is off unless set, and its period is
+/// 100 ms to 10 s, both ends included.
+#[test]
+fn the_spin_escape_is_off_by_default_taken_and_checked() {
+    assert_eq!(
+        DeviceConfig::from_toml(TEST_DEVICE).unwrap().spin_escape_ms,
+        None
+    );
+    for ms in [100, 1_000, 10_000] {
+        let text = format!("{TEST_DEVICE}\nspin_escape_ms = {ms}\n");
+        assert_eq!(
+            DeviceConfig::from_toml(&text).unwrap().spin_escape_ms,
+            Some(ms)
+        );
+    }
+    for ms in [0, 99, 10_001] {
+        let text = format!("{TEST_DEVICE}\nspin_escape_ms = {ms}\n");
+        let problems = DeviceConfig::from_toml(&text).unwrap_err().problems;
+        assert_eq!(problems, ["spin_escape_ms: 100 to 10000"], "{ms}");
+    }
+}
+
 /// obs's review of v0.6.26: Windows pins a thread only within the first
 /// processor group (64 CPUs), so a config that names a CPU from 64 on
 /// passed the check there and was then never pinned. The limit is the

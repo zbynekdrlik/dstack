@@ -390,6 +390,37 @@ fn a_clock_jump_back_restarts_once() {
     assert_eq!(s.next, 808_064);
 }
 
+/// The bounded escape's send ahead (dstack #1): a packet due by the
+/// horizon whose samples are there; nothing moves otherwise, and never a
+/// restart, however far the horizon is past the lag bound.
+#[test]
+fn due_early_takes_a_packet_due_by_the_horizon_whose_samples_are_there() {
+    let mut s = Schedule::bootstrap(1_000, 32, 96);
+    // The first packet (stamp 1 024) is due at 1 056.
+    assert_eq!(s.due_early(1_055, |_| true), None);
+    assert_eq!(s.next, 1_024);
+    assert_eq!(s.due_early(1_056, |_| false), None, "samples not there");
+    assert_eq!(s.next, 1_024);
+    let mut asked = Vec::new();
+    assert_eq!(
+        s.due_early(1_056, |t| {
+            asked.push(t);
+            true
+        }),
+        Some(1_024)
+    );
+    assert_eq!(asked, [1_024], "asked about the packet's own stamp");
+    assert_eq!(s.next, 1_056);
+    // A horizon far past the lag bound sends ahead, never restarts.
+    for want in [1_056, 1_088, 1_120] {
+        assert_eq!(s.due_early(1_152 + 1_000, |t| t < 1_152), Some(want));
+    }
+    assert_eq!(s.due_early(1_152 + 1_000, |t| t < 1_152), None);
+    assert_eq!((s.next, s.take_rebootstraps()), (1_152, 0));
+    // The normal pass goes on from there.
+    assert_eq!(s.due(1_184), Some(1_152));
+}
+
 #[test]
 fn a_realign_counts_and_starts_on_a_multiple_of_fpp() {
     let mut s = Schedule::bootstrap(0, 32, 96);
@@ -882,6 +913,101 @@ fn an_engine_source_sends_its_engine_ring_at_the_stamp() {
         .max()
         .unwrap();
     assert_eq!(rig.shared.take_peak(1), loudest);
+}
+
+/// The stamps of the packets due within `clock::PRESEND_NS` of PTP `now`
+/// from a schedule whose next stamp is `first` (32 frames a packet).
+fn due_within_presend(first: u64, now: u64) -> Vec<u64> {
+    let horizon = send_clock(now + crate::clock::PRESEND_NS, RATE, TX_MARGIN_NS);
+    (0..)
+        .map(|k| first + k * FPP)
+        .take_while(|&t| t + FPP <= horizon)
+        .collect()
+}
+
+/// Before a bounded escape (dstack #1, `spin_escape_ms`), TX sends now
+/// every packet due within the presend window, each with its engine ring's
+/// samples at its stamp, and counts them `early`; the next passes go on
+/// from there, every stamp once and in turn.
+#[test]
+fn presend_sends_the_packets_due_within_the_window_early_with_their_samples() {
+    let mut rig = Rig::with_engine(&[1]);
+    let n0 = send_clock(T, RATE, TX_MARGIN_NS);
+    let base = n0 - 1_000;
+    let values: Vec<i32> = (base..n0 + 3_000).map(engine_value).collect();
+    rig.shared.engine_ring(1).unwrap().put_at(base, &values);
+    assert!(rig.shared.set_source(0, Source::Counter));
+    assert!(rig.shared.set_source(1, Source::Engine));
+    let (slot, _) = rig.flow(vec![Some(2), Some(1)]);
+    rig.tx.step(Some(T), 0);
+    assert!(drain(&rig.rx).is_empty(), "nothing due yet");
+    rig.tx.presend(None);
+    assert!(drain(&rig.rx).is_empty(), "no clock: nothing sent ahead");
+    rig.tx.presend(Some(T));
+    let early = drain(&rig.rx);
+    let want = due_within_presend(n0 - n0 % FPP + FPP, T);
+    // 2.14 ms at 96 kHz is 205 samples; past the first packet's phase at
+    // T, five 32-frame packets are due within it.
+    assert_eq!(want.len(), 5, "{want:?}");
+    assert_eq!(early.iter().map(|p| stamp_of(p)).collect::<Vec<_>>(), want);
+    for p in &early {
+        let t = stamp_of(p);
+        let ring: Vec<i32> = (t..t + FPP).map(engine_value).collect();
+        assert_eq!(slot_samples(p, 2, 0), ring, "TX 2 at T is its ring at T");
+        assert_eq!(slot_samples(p, 2, 1), counter(t, 32), "TX 1's counter");
+    }
+    let lane = rig.shared.lane(slot);
+    assert_eq!(
+        (lane.early, lane.packets, lane.holes, lane.rebootstraps),
+        (5, 5, 0, 0),
+        "{lane:?}"
+    );
+    // A second presend at the same time has nothing more to send.
+    rig.tx.presend(Some(T));
+    assert!(drain(&rig.rx).is_empty());
+    // The passes after the escape go on with the next stamp.
+    let later = run(&mut rig, 500, 6_000);
+    let next = want[4] + FPP;
+    assert_eq!(stamp_of(&later[0]), next);
+    for (k, p) in later.iter().enumerate() {
+        assert_eq!(stamp_of(p), next + k as u64 * FPP, "every stamp, in turn");
+    }
+    let lane = rig.shared.lane(slot);
+    assert_eq!((lane.early, lane.rebootstraps), (5, 0), "{lane:?}");
+}
+
+/// A packet whose samples the engine ring does not hold yet is not sent
+/// ahead, nor any after it: the flow stops there, and the normal pass sends
+/// it at its time.
+#[test]
+fn presend_stops_at_the_first_packet_whose_samples_are_not_there() {
+    let mut rig = Rig::with_engine(&[0]);
+    let n0 = send_clock(T, RATE, TX_MARGIN_NS);
+    let first = n0 - n0 % FPP + FPP;
+    // The ring holds the first two packets and 10 samples of the third.
+    let base = n0 - 1_000;
+    let end = first + 2 * FPP + 10;
+    let values: Vec<i32> = (base..end).map(engine_value).collect();
+    rig.shared.engine_ring(0).unwrap().put_at(base, &values);
+    assert!(rig.shared.set_source(0, Source::Engine));
+    let (slot, _) = rig.flow(vec![Some(1), None]);
+    rig.tx.step(Some(T), 0);
+    rig.tx.presend(Some(T));
+    let early = drain(&rig.rx);
+    assert_eq!(
+        early.iter().map(|p| stamp_of(p)).collect::<Vec<_>>(),
+        [first, first + FPP]
+    );
+    let lane = rig.shared.lane(slot);
+    assert_eq!((lane.early, lane.holes), (2, 0), "{lane:?}");
+    // The third packet goes out at its time, its missing samples holes.
+    let at = ns_of(first + 3 * FPP, RATE) + TX_MARGIN_NS;
+    rig.tx.step(Some(at), 0);
+    let third = drain(&rig.rx);
+    assert_eq!(third.len(), 1);
+    assert_eq!(stamp_of(&third[0]), first + 2 * FPP);
+    let lane = rig.shared.lane(slot);
+    assert_eq!((lane.early, lane.holes), (2, 22), "{lane:?}");
 }
 
 #[test]

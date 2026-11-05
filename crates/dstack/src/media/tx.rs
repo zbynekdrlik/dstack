@@ -555,6 +555,7 @@ pub struct LaneStats {
     age_peak_ns: AtomicU64,
     over_latency: AtomicU64,
     direct: AtomicU64,
+    early: AtomicU64,
 }
 
 /// One slot's counts since the device started (every flow it carried).
@@ -606,6 +607,9 @@ pub struct LaneCounts {
     /// Packets sent past the qdisc ([`bypass`]); the rest of `packets`
     /// went through the UDP socket.
     pub direct: u64,
+    /// Packets sent ahead of their time before a bounded escape
+    /// ([`Transmitter::presend`], dstack #1; 0 unless `spin_escape_ms`).
+    pub early: u64,
 }
 
 /// The control side's half of [`TxShared`]: the table, and the keepalive
@@ -896,6 +900,7 @@ impl TxShared {
                 .plan_dest(slot)
                 .map_or(0, |dest| self.receiver_latency_ns(slot, dest)),
             direct: l.direct.load(Ordering::Relaxed),
+            early: l.early.load(Ordering::Relaxed),
         }
     }
 
@@ -997,6 +1002,21 @@ impl Schedule {
     /// The starts again since the last call.
     pub fn take_rebootstraps(&mut self) -> u64 {
         std::mem::take(&mut self.rebootstraps)
+    }
+
+    /// The stamp of the next packet when it is due by media time
+    /// `horizon` and `ready` says its samples are there (the schedule moves
+    /// on by fpp); else nothing moves. Sends ahead of time before a bounded
+    /// escape ([`Transmitter::presend`], dstack #1); never a restart, since
+    /// [`Schedule::due`] judged the lag at the clock's own time just before.
+    pub fn due_early(&mut self, horizon: u64, ready: impl FnOnce(u64) -> bool) -> Option<u64> {
+        let send = self.next.saturating_add(self.fpp);
+        if send > horizon || !ready(self.next) {
+            return None;
+        }
+        let stamp = self.next;
+        self.next = send;
+        Some(stamp)
     }
 
     /// The PTP ns at which the next packet is due at `rate`, `margin_ns`
@@ -1135,7 +1155,28 @@ impl Transmitter {
             }
         }
         self.epoch = Some(epoch);
-        self.send_due(now, now_ns, pass);
+        self.send_due(now, now_ns, pass, None);
+    }
+
+    /// Before a bounded escape (dstack #1, `spin_escape_ms`; right after a
+    /// [`Transmitter::step`]): every packet due within
+    /// [`clock::PRESEND_NS`] of PTP `now_ns`, the longest the thread can
+    /// then be away, sent now, each flow in order up to its first packet
+    /// whose samples are not there yet ([`Source::ready`]). Those, and the
+    /// rest, go out after the escape, late as the counters count them.
+    /// Counted in the lanes' `early`.
+    pub fn presend(&mut self, now_ns: Option<u64>) {
+        let pass = Instant::now();
+        let Some(now_ns) = now_ns else {
+            return;
+        };
+        let now = send_clock(now_ns, self.rate, self.margin_ns);
+        let horizon = send_clock(
+            now_ns.saturating_add(clock::PRESEND_NS),
+            self.rate,
+            self.margin_ns,
+        );
+        self.send_due(now, now_ns, pass, Some(horizon));
     }
 
     /// When the next pass is due, PTP ns: the next packet of any flow or
@@ -1208,10 +1249,12 @@ impl Transmitter {
 
     /// Every packet due at media time `now` (PTP `now_ns`, read at `pass`),
     /// each flow in turn (the hot path: no allocation, no lock, no log; the
-    /// send is its one system call). With a host sender, the packets to
-    /// resolved neighbours are gathered as frames and sent in one call at
-    /// the end of the pass ([`host::Batch`]); the rest go out at once.
-    fn send_due(&mut self, now: u64, now_ns: u64, pass: Instant) {
+    /// send is its one system call); with `early`, every packet due by that
+    /// media time whose samples are there instead ([`Transmitter::presend`]).
+    /// With a host sender, the packets to resolved neighbours are gathered
+    /// as frames and sent in one call at the end of the pass
+    /// ([`host::Batch`]); the rest go out at once.
+    fn send_due(&mut self, now: u64, now_ns: u64, pass: Instant, early: Option<u64>) {
         let Transmitter {
             shared,
             lanes,
@@ -1252,7 +1295,18 @@ impl Transmitter {
             let fpp = usize::from(plan.fpp);
             let nch = usize::from(plan.nch);
             let mut holes = 0;
-            while let Some(stamp) = schedule.due(now) {
+            let mut ahead = 0;
+            loop {
+                let due = match early {
+                    None => schedule.due(now),
+                    Some(horizon) => schedule.due_early(horizon, |at| {
+                        packet_ready(&plan, sources, &shared.engine, rings, at)
+                    }),
+                };
+                let Some(stamp) = due else {
+                    break;
+                };
+                ahead += u64::from(early.is_some());
                 for (frame, &id) in frames.iter_mut().zip(&plan.channels).take(nch) {
                     let out = &mut frame[..fpp];
                     match usize::from(id).checked_sub(1).and_then(|i| {
@@ -1302,6 +1356,7 @@ impl Transmitter {
                 account(stats, &clock, stamp, plan.fpp, &sent, n, receiver_ns);
             }
             stats.holes.fetch_add(holes as u64, Ordering::Relaxed);
+            stats.early.fetch_add(ahead, Ordering::Relaxed);
             stats
                 .rebootstraps
                 .fetch_add(schedule.take_rebootstraps(), Ordering::Relaxed);
@@ -1310,6 +1365,28 @@ impl Transmitter {
             batch.flush(&clock, shared);
         }
     }
+}
+
+/// Whether every channel of `plan`'s packet stamped `at` has its samples
+/// there ([`Source::ready`] with the TX channels' `sources`, their `engine`
+/// rings and the RX `rings`); a channel mapped to no TX channel sends
+/// silence and waits for nothing.
+fn packet_ready(
+    plan: &Plan,
+    sources: &[Source],
+    engine: &[Option<Ring>],
+    rings: &[Ring],
+    at: u64,
+) -> bool {
+    let fpp = usize::from(plan.fpp);
+    plan.channels.iter().take(usize::from(plan.nch)).all(|&id| {
+        usize::from(id).checked_sub(1).is_none_or(|i| {
+            let own = engine.get(i).and_then(Option::as_ref);
+            sources
+                .get(i)
+                .is_none_or(|source| source.ready(at, fpp, rings, own))
+        })
+    })
 }
 
 /// Sends the media packet of `n` bytes at `buf[HEADROOM..]` from `src` to
@@ -1450,6 +1527,13 @@ fn run(clock: &dyn PtpClock, shared: Arc<TxShared>) {
         pin.keep(shared.now_ns());
         let now = clock.now_ns();
         tx.step(now, clock.epoch());
+        // The bounded escape (dstack #1, `spin_escape_ms`, Windows): when
+        // this wait will block one timer tick, the packets due meanwhile go
+        // out first.
+        #[cfg(any(target_os = "linux", windows))]
+        if crate::clock::ask_escape() {
+            tx.presend(clock.now_ns());
+        }
         clock.sleep_until(tx.wake_ns(now));
     }
 }
