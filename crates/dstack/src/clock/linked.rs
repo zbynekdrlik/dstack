@@ -22,7 +22,7 @@
 //! small step of time, which the pump's and the TX flows' schedules absorb
 //! (no re-align, nothing lost). When they disagree, a switch away from a
 //! source that still works waits up to [`HANDOVER_WAIT`] rounds for them to
-//! agree; then, or at once when the source in use is gone, the switch
+//! agree, longer while they keep closing in ([`wait_round`]); then, or at once when the source in use is gone, the switch
 //! changes the epoch and the media threads re-align as on a re-anchor.
 
 use std::sync::Arc;
@@ -107,9 +107,13 @@ pub fn choose(
 /// sends the next packets that much later, once). The step is measured
 /// with the reads' own gap counted against it ([`Linked::tick`]).
 pub const HANDOVER_NS: i64 = 30_000;
-/// How many rounds (one a second) a switch away from a source that still
-/// works waits for the two sources to agree before it re-aligns.
+/// How many rounds (one a second) without progress a switch away from a
+/// source that still works waits for the two sources to agree before it
+/// re-aligns ([`wait_round`]).
 pub const HANDOVER_WAIT: u32 = 60;
+/// How much closer the two sources must come for a waiting round to count
+/// as progress, ns ([`wait_round`]).
+pub const CONVERGE_NS: u64 = 1_000;
 
 // The step stays under half the tightest pump margin: 16 samples at 192 kHz.
 const _: () = assert!(HANDOVER_NS * 192_000 * 2 < 16 * 1_000_000_000);
@@ -136,6 +140,23 @@ pub fn handover(offset_ns: Option<i64>, voluntary: bool, waited: u32) -> Handove
         Some(d) if d.unsigned_abs() <= HANDOVER_NS.unsigned_abs() => Handover::Seamless,
         _ if voluntary && waited < HANDOVER_WAIT => Handover::Wait,
         _ => Handover::Break,
+    }
+}
+
+/// One round of a handover wait: the rounds without progress so far
+/// (`waited`; [`handover`] re-aligns at [`HANDOVER_WAIT`]) and the mark
+/// (`best_ns`, the |offset| at the last progress; `u64::MAX` before one),
+/// with this round's `offset_ns`. A round [`CONVERGE_NS`] nearer than the
+/// best is progress and starts the count again at 1 (iemmixer 5.11.2026:
+/// the follower closed on the service from -61 µs over minutes, and a
+/// fixed 60 rounds re-aligned it at -31.75 µs, a pump re-bootstrap); a
+/// steady disagreement (strih: 0.48 ms) still re-aligns.
+pub fn wait_round(waited: u32, best_ns: u64, offset_ns: Option<i64>) -> (u32, u64) {
+    let abs = offset_ns.map_or(u64::MAX, i64::unsigned_abs);
+    if abs.saturating_add(CONVERGE_NS) <= best_ns {
+        (1, abs)
+    } else {
+        (waited.saturating_add(1), best_ns)
     }
 }
 
@@ -230,8 +251,11 @@ pub struct Linked {
     service: Arc<MonoClock>,
     /// [`State::pack`].
     state: AtomicU64,
-    /// Rounds a voluntary switch has waited for agreement.
+    /// Rounds a voluntary switch has waited for agreement without progress
+    /// ([`wait_round`]).
     waited: AtomicU32,
+    /// The wait's mark: the |offset| at its last progress, ns.
+    best: AtomicU64,
     was_locked: AtomicBool,
     /// Keeps the follower's thread alive for the clock's life.
     _keep: Option<Box<dyn Send + Sync>>,
@@ -257,6 +281,7 @@ impl Linked {
                 .pack(),
             ),
             waited: AtomicU32::new(0),
+            best: AtomicU64::new(u64::MAX),
             was_locked: AtomicBool::new(false),
             _keep: keep,
         }
@@ -348,6 +373,7 @@ impl Linked {
             before,
         );
         if next == before {
+            self.best.store(u64::MAX, Ordering::Release);
             if self.waited.swap(0, Ordering::AcqRel) != 0 {
                 info!(source = ?before, "{WAIT_ENDED_LINE}");
             }
@@ -368,7 +394,9 @@ impl Linked {
                 if waited == 0 {
                     info!(source = ?next, from = ?before, offset_ns = ?offset, "{WAIT_LINE}");
                 }
-                self.waited.store(waited.wrapping_add(1), Ordering::Release);
+                let (rounds, best) = wait_round(waited, self.best.load(Ordering::Acquire), offset);
+                self.waited.store(rounds, Ordering::Release);
+                self.best.store(best, Ordering::Release);
                 return before;
             }
             Handover::Seamless => State {
@@ -384,6 +412,7 @@ impl Linked {
         };
         self.state.store(state.pack(), Ordering::Release);
         self.waited.store(0, Ordering::Release);
+        self.best.store(u64::MAX, Ordering::Release);
         match (way, next) {
             (_, Source::None) => warn!(from = ?before, "{NO_SOURCE_LINE}"),
             (Handover::Seamless, _) => {
