@@ -1148,3 +1148,42 @@ fn only_the_device_s_flow_slots_get_rx_sockets() {
     assert!(s.local_addr(2).is_ok());
     assert!(s.local_addr(3).is_err());
 }
+
+#[test]
+fn a_packet_the_ring_refuses_as_read_counts_late_at_read_on_its_flow() {
+    // iemmixer, 5.11.2026: a channel counted holes and late samples while
+    // its flow counted no late packet. The flow judged a packet late only
+    // past playout + block, but the pump had already read its positions.
+    let p0 = 1_000 * u64::from(RATE);
+    let s = shared(1);
+    let mut rx = Receiver::new(Arc::clone(&s)).unwrap();
+    publish(
+        &s,
+        &[(2, plan(LOOPBACK, 1, true, 1))],
+        &[(0, RxRoute { flow: 2, slot: 0 })],
+    );
+    // The reader has read up to p0 + 100.
+    let mut out = [0i32; 100];
+    assert_eq!(s.rings()[0].read_at(p0, &mut out).holes, 100);
+    let t = transmitter(LOOPBACK);
+    let now = ns_of(p0 + 150, RATE);
+    // 60 samples late, below the flow's 192: its first frames were read.
+    t.send_to(&packet_at(p0 + 90, 1, 16), slot_addr(&s, 2))
+        .unwrap();
+    pump(&mut rx, 2, 1, Some(now), 0);
+    // 50 samples late, nothing of it read yet.
+    t.send_to(&packet_at(p0 + 100, 1, 16), slot_addr(&s, 2))
+        .unwrap();
+    pump(&mut rx, 2, 2, Some(now), 0);
+    let c = s.lane(2);
+    assert_eq!((c.packets, c.late, c.late_at_read), (2, 0, 1), "{c:?}");
+    assert_eq!(s.rings()[0].counters().late, 10);
+    // The peak lateness outlives the heartbeat's take.
+    assert_eq!(s.take_max_lateness(2), 60);
+    t.send_to(&packet_at(p0 + 140, 1, 1), slot_addr(&s, 2))
+        .unwrap();
+    pump(&mut rx, 2, 3, Some(now), 0);
+    assert_eq!(s.take_max_lateness(2), 10);
+    assert_eq!(s.lane(2).lateness_peak, 60);
+    assert_eq!(s.lane(9).lateness_peak, 0);
+}
