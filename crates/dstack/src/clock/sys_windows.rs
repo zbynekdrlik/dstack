@@ -24,12 +24,12 @@ use windows_sys::Win32::System::Threading::{
 /// 100 ns intervals from 1601-01-01 to 1970-01-01.
 const UNIX_EPOCH_FT: i64 = 116_444_736_000_000_000;
 // The spin tail (`super::SPIN_TAIL`, the device's `spin_tail_ns`,
-// 50 ms unless set): waits up to it are spun (yielding), never slept. On
-// the FOH PC (October 2026) the media threads, alone on their CPUs at
-// priority 31, still woke past 2.7 ms now and then while the CPUs
-// themselves were never held over 0.2 ms (`dasio jitter`): the waitable
-// timer's late wakes, measured with the Realtek driver that had a 20-30 ms
-// DPC. A shorter tail is for a PC where the timer wakes on time.
+// 2 ms unless set): the last part of every wait is spun, never slept, and
+// the spin never yields. The high-resolution timer wakes on the system
+// tick: on the FOH PC (5.11.2026) at most one tick + 140 µs late (1.1 ms at
+// the 1 ms resolution, 0.64 ms at 0.5 ms). Until 0.6.33 the tail was 50 ms
+// and yielding: in October 2026, with the Realtek driver's 20-30 ms DPC,
+// the timer woke up to 2.7 ms late.
 
 /// The precise system time, ns since 1970.
 pub fn realtime_ns() -> i64 {
@@ -177,20 +177,24 @@ fn sleep_until_in(target: i64, mode: super::WaitMode) {
             std::thread::sleep(std::time::Duration::from_nanos((left - spin) as u64));
         }
     }
-    // The spin yields: the media threads share cores on Windows (the FOH
-    // PC gives the device two), and a plain spin kept the RX thread off its
-    // core (RX packets up to 48 ms late, 2026-10-29). It yields with
-    // SwitchToThread (`std::thread::yield_now`), which lets ANY ready
-    // thread on the CPU run, lower priority included. Sleep(0) (v0.6.28)
-    // yields only to equal or higher priority: a real-time spinner then
-    // starved everything below it on its CPU, and two Windows PCs stopped
-    // answering (dasio, 4.11.2026, dstack #1). Never make this spin
-    // starve lower priorities.
+    // The spin never yields (dstack #1, dasio's CSwitch trace on the FOH
+    // PC, 5.11.2026): SwitchToThread (`std::thread::yield_now`) handed the
+    // band TX thread's CPU (priority 31) to a priority-10 thread, which
+    // kept it for the rest of its slice, 1.66 ms, and the TX schedule
+    // started again. A timer expiry preempts a lower priority at once; a
+    // yield does not. So the threads give their CPU away only on the timer
+    // above, until the last spin tail, and spin without yielding in it.
+    // Sleep(0) (v0.6.28) was no better: it yields only to equal or higher
+    // priority, the spin then never blocked, and two Windows PCs stopped
+    // answering (dasio, 4.11.2026). A thread whose deadlines come closer
+    // than the tail (TX at 8 frames a packet: every 83 µs) spins all the
+    // time, so it needs its CPU alone, and the other CPU of its core must
+    // run threads that block (`docs/windows-box.md`).
     if spin == 0 {
         return;
     }
     while monotonic_ns() < target {
-        std::thread::yield_now();
+        std::hint::spin_loop();
     }
 }
 
@@ -215,6 +219,67 @@ mod tests {
         assert!(
             (0..1_000_000).contains(&median),
             "median oversleep {median} ns; p90 {} ns, max {} ns",
+            late[late.len() * 9 / 10],
+            late[late.len() - 1]
+        );
+    }
+
+    /// dstack #1 (dasio's CSwitch trace, FOH 5.11.2026): the spin tail's
+    /// SwitchToThread gave the band TX thread's CPU (priority 31) to a
+    /// priority-10 thread for 1.66 ms, and the TX schedule started again.
+    /// A spun wait never hands its CPU to a lower priority: with a
+    /// lower-priority thread busy on the same CPU, 100 spun waits of 300 µs
+    /// end within 100 µs at the median (a yield costs the other thread's
+    /// whole slice, many ms).
+    #[test]
+    fn a_spun_wait_never_yields_its_cpu_to_a_lower_priority_thread() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use windows_sys::Win32::System::Threading::{
+            GetCurrentThread, SetThreadAffinityMask, SetThreadPriority,
+        };
+        /// THREAD_PRIORITY_TIME_CRITICAL and THREAD_PRIORITY_LOWEST.
+        const TIME_CRITICAL: i32 = 15;
+        const LOWEST: i32 = -2;
+        /// Both threads on CPU 0 only.
+        const CPU0: usize = 1;
+        let pin = |priority: i32| {
+            // SAFETY: the calling thread's pseudo handle.
+            unsafe {
+                assert_ne!(SetThreadAffinityMask(GetCurrentThread(), CPU0), 0);
+                assert_ne!(SetThreadPriority(GetCurrentThread(), priority), 0);
+            }
+        };
+        let stop = Arc::new(AtomicBool::new(false));
+        let running = Arc::new(AtomicBool::new(false));
+        let busy = {
+            let (stop, running) = (Arc::clone(&stop), Arc::clone(&running));
+            std::thread::spawn(move || {
+                pin(LOWEST);
+                running.store(true, Ordering::Release);
+                while !stop.load(Ordering::Relaxed) {
+                    std::hint::spin_loop();
+                }
+            })
+        };
+        while !running.load(Ordering::Acquire) {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        pin(TIME_CRITICAL);
+        let mut late: Vec<i64> = (0..100)
+            .map(|_| {
+                let target = monotonic_ns() + 300_000;
+                sleep_until_in(target, super::super::WaitMode::Spin);
+                monotonic_ns() - target
+            })
+            .collect();
+        stop.store(true, Ordering::Relaxed);
+        busy.join().unwrap();
+        late.sort_unstable();
+        let median = late[late.len() / 2];
+        assert!(
+            median < 100_000,
+            "median late {median} ns; p90 {} ns, max {} ns",
             late[late.len() * 9 / 10],
             late[late.len() - 1]
         );

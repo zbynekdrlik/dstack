@@ -80,14 +80,15 @@ pub(super) fn send_with_retries(
     (sent, retries)
 }
 
-/// Waits `d` on the calling thread, yielding while it spins (the TX
+/// Waits `d` on the calling thread, spinning without yielding (the TX
 /// thread's wait before a retry: far below a timer's resolution on
-/// Windows). The same yielding spin as the clock's tail on Windows
-/// (`clock::sys_windows`), on `Instant` so it runs on every OS.
+/// Windows). The same spin as the clock's tail on Windows
+/// (`clock::sys_windows`, dstack #1: a yield hands the CPU to a lower
+/// priority for the rest of its slice), on `Instant` so it runs on every OS.
 pub(super) fn spin_for(d: std::time::Duration) {
     let start = Instant::now();
     while !d.saturating_sub(start.elapsed()).is_zero() {
-        std::thread::yield_now();
+        std::hint::spin_loop();
     }
 }
 
