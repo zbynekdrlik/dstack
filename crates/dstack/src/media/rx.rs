@@ -205,11 +205,14 @@ struct RxStats {
     gaps: AtomicU64,
     gap_frames: AtomicU64,
     late: AtomicU64,
+    late_at_read: AtomicU64,
     unplaced: AtomicU64,
     keepalives: AtomicU64,
     keepalive_errors: AtomicU64,
     recv_errors: AtomicU64,
     max_lateness: AtomicU64,
+    /// The largest lateness since the device started, samples.
+    lateness_peak: AtomicU64,
     /// What the last [`RxShared::take_max_lateness`] took.
     last_lateness: AtomicU64,
     /// The packets' judge: the least lateness in ns since the last take.
@@ -246,8 +249,17 @@ pub struct RxCounts {
     pub gaps: u64,
     /// The frames those gaps skipped.
     pub gap_frames: u64,
-    /// Packets later than the flow's latency.
+    /// Packets whose first frame was later than the flow's playout plus
+    /// the pump's block: the most a block's read can wait.
     pub late: u64,
+    /// Packets with a frame the pump had already read (a ring refused it
+    /// late): what its channels count as holes and late samples. A packet
+    /// past the playout but within the block counts here, never in `late`
+    /// (iemmixer, 5.11.2026).
+    pub late_at_read: u64,
+    /// The largest lateness of any packet since the device started,
+    /// samples (`lateness` is the last second's only).
+    pub lateness_peak: u64,
     /// Packets read before our clock was ready.
     pub unplaced: u64,
     pub keepalives: u64,
@@ -469,6 +481,8 @@ impl RxShared {
             gaps: get(&l.gaps),
             gap_frames: get(&l.gap_frames),
             late: get(&l.late),
+            late_at_read: get(&l.late_at_read),
+            lateness_peak: get(&l.lateness_peak),
             unplaced: get(&l.unplaced),
             keepalives: get(&l.keepalives),
             keepalive_errors: get(&l.keepalive_errors),
@@ -813,6 +827,7 @@ impl Receiver {
             let pos = clock::from_stamp(secs, sub, rate, now);
             let lateness = now.saturating_sub(pos);
             stats.max_lateness.fetch_max(lateness, Ordering::Relaxed);
+            stats.lateness_peak.fetch_max(lateness, Ordering::Relaxed);
             // The judge: the packet's own stamp in ns against our now in ns.
             stats
                 .min_lateness_ns
@@ -834,12 +849,16 @@ impl Receiver {
                 }
                 _ => lane.end = Some(end),
             }
+            let mut read_before = false;
             for &(s, rx) in &lane.targets {
                 if s < nslots
                     && let Some(ring) = rings.get(rx)
                 {
-                    ring.write_at(pos, &frames[s][..nframes]);
+                    read_before |= ring.write_at(pos, &frames[s][..nframes]).late > 0;
                 }
+            }
+            if read_before {
+                count(&stats.late_at_read);
             }
         }
         false
