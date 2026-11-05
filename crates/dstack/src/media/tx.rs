@@ -1505,9 +1505,12 @@ fn run(clock: &dyn PtpClock, shared: Arc<TxShared>) {
         // out first; when some had no samples yet, the escape waits for a
         // later pass (at most `clock::ESCAPE_DEFER_MAX_NS` past its period).
         #[cfg(any(target_os = "linux", windows))]
-        if crate::clock::ask_escape() && !tx.presend_all(epoch, || clock.now_ns()) {
-            let _put_off = crate::clock::defer_escape();
-        }
+        let _escapes = tx.before_wait(
+            epoch,
+            || clock.now_ns(),
+            crate::clock::ask_escape,
+            crate::clock::defer_escape,
+        );
         clock.sleep_until(tx.wake_ns(now));
     }
 }

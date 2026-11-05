@@ -67,6 +67,22 @@ impl Transmitter {
         }
         true
     }
+
+    /// Before the TX thread's wait (after a pass at the clock's `epoch`):
+    /// when `ask` says the wait will escape (`clock::ask_escape`), the send
+    /// ahead ([`Transmitter::presend_all`] on `now_ns`); when that left a
+    /// packet due in the window, `defer` puts the escape off
+    /// (`clock::defer_escape`, `false` when it is overdue and escapes
+    /// anyway). Whether the wait escapes.
+    pub fn before_wait(
+        &mut self,
+        epoch: u32,
+        now_ns: impl FnMut() -> Option<u64>,
+        ask: impl FnOnce() -> bool,
+        defer: impl FnOnce() -> bool,
+    ) -> bool {
+        ask() && (self.presend_all(epoch, now_ns) || !defer())
+    }
 }
 
 /// Whether every channel of `plan`'s packet stamped `at` has its samples

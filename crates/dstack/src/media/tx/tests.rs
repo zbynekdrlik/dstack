@@ -1088,6 +1088,46 @@ fn presend_all_repeats_from_a_fresh_clock_until_a_round_sends_nothing() {
     assert_eq!(calls, 1);
 }
 
+/// The TX loop's step before its wait: no send ahead unless the wait
+/// escapes; an escape that would hold back a packet without samples is put
+/// off, unless it is overdue.
+#[test]
+fn before_wait_sends_ahead_only_for_an_escape_and_puts_off_an_uncovered_one() {
+    let mut rig = Rig::with_engine(&[0]);
+    let n0 = send_clock(T, RATE, TX_MARGIN_NS);
+    let first = n0 - n0 % FPP + FPP;
+    // The ring holds the first two packets only.
+    let values: Vec<i32> = (n0 - 1_000..first + 2 * FPP).map(engine_value).collect();
+    rig.shared
+        .engine_ring(0)
+        .unwrap()
+        .put_at(n0 - 1_000, &values);
+    assert!(rig.shared.set_source(0, Source::Engine));
+    rig.flow(vec![Some(1)]);
+    rig.tx.step(Some(T), 0);
+    let never = || -> bool { panic!("no defer without an escape") };
+    // No escape: nothing sent ahead, no defer.
+    assert!(!rig.tx.before_wait(0, || Some(T), || false, never));
+    assert!(drain(&rig.rx).is_empty());
+    // An escape whose window is not covered: put off.
+    let mut deferred = 0;
+    let put_off = || {
+        deferred += 1;
+        true
+    };
+    assert!(!rig.tx.before_wait(0, || Some(T), || true, put_off));
+    assert_eq!((drain(&rig.rx).len(), deferred), (2, 1));
+    // Overdue: escapes anyway.
+    assert!(rig.tx.before_wait(0, || Some(T), || true, || false));
+    // Covered (a ring source with every sample there): escapes, no defer.
+    let mut rig = Rig::new(Vec::new());
+    assert!(rig.shared.set_source(0, Source::Counter));
+    rig.flow(vec![Some(1)]);
+    rig.tx.step(Some(T), 0);
+    assert!(rig.tx.before_wait(0, || Some(T), || true, never));
+    assert_eq!(drain(&rig.rx).len(), 5);
+}
+
 #[test]
 fn an_engine_hole_is_silence_counted_in_the_lane() {
     let mut rig = Rig::with_engine(&[0, 2]);
