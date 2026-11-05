@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 use super::*;
 
 use std::f64::consts::TAU;
@@ -283,10 +285,10 @@ fn each_underrun_primes_a_larger_cushion_up_to_its_cap() {
         };
         levels.push(level);
         assert!(
-            (s.player.ctl.cushion_s() - s.player.extra_s).abs() < 1e-12,
+            (s.player.ctl.cushion_s() - s.player.extra_s()).abs() < 1e-12,
             "cushion {} for extra {}",
             s.player.ctl.cushion_s(),
-            s.player.extra_s
+            s.player.extra_s()
         );
         s.pumping = true;
     }
@@ -424,4 +426,53 @@ fn a_new_player_counts_on_in_the_same_stats() {
     assert_eq!(stats.played(), played + 441);
     assert_eq!(stats.underruns(), underruns);
     assert_eq!(stats.recentres(), recentres);
+}
+
+/// Priming ends the block the FIFO holds exactly the level (the target
+/// and the sawtooth's half callback and block), not a block later.
+#[test]
+fn priming_ends_at_exactly_the_level() {
+    for (short, primed) in [(1, false), (0, true)] {
+        let fifo = Arc::new(fifo_for(1, 48_000));
+        let mut player = Player::new(Arc::clone(&fifo), 48_000, 48_000, Arc::default()).unwrap();
+        let need = player.conv.input_frames_next();
+        // One frame a callback: half of it rounds with the block.
+        let level = 1920 + need.div_ceil(2);
+        fifo.push_with(level - short, |_, _| 0.25);
+        let mut out = [0.0f64; 1];
+        player.fill_with(&mut out, 1, |x| x);
+        assert_eq!(!player.stats().priming(), primed, "{short} short");
+        let taken = if primed { need as u64 } else { 0 };
+        assert_eq!(player.consumed(), taken);
+        assert_eq!(fifo.len() as u64, (level - short) as u64 - taken);
+    }
+}
+
+/// The cushion steps down every minute with no dropout, to none.
+#[test]
+fn the_cushion_steps_down_after_a_calm_minute() {
+    let mut s = Sim::new(48_000, 48_000, 0.0, 1, 1);
+    for _ in 0..2 {
+        s.run(1.0);
+        s.pumping = false;
+        s.run(0.2);
+        s.pumping = true;
+    }
+    assert_eq!(s.player.steps, 2);
+    let since = s.player.calm_since;
+    // Just under a minute: no step yet.
+    s.run(CUSHION_DECAY_S - 1.0);
+    assert_eq!(s.player.steps, 2);
+    s.run(2.0);
+    assert_eq!(s.player.steps, 1, "one step a calm minute");
+    assert!(s.player.calm_since >= since + 60 * 48_000);
+    s.run(CUSHION_DECAY_S);
+    assert_eq!(s.player.steps, 0);
+    s.run(CUSHION_DECAY_S);
+    assert_eq!(s.player.steps, 0, "never under none");
+    assert_eq!(s.player.stats().underruns(), 2);
+    // The next dropout primes one step again.
+    s.pumping = false;
+    s.run(0.2);
+    assert_eq!(s.player.state, State::Priming(2400));
 }

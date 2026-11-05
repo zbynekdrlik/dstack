@@ -4,9 +4,11 @@
 //! dtray is the one tray for every Dante app on the PC). An app whose
 //! status part (`app`) carries `outputs`, a list of names, and `output`,
 //! the index of the one in use (dlisten: its sound output), gets an Output
-//! menu in its device's submenu; choosing one sends `app output <index>` to
-//! the device's local endpoint ([`crate::probe::ask`]), which hands it to
-//! the app's own command hook. Pure, every platform.
+//! menu in its device's submenu; choosing one sends `app output <index>
+//! <name>` to the device's local endpoint ([`crate::probe::ask`]), which
+//! hands it to the app's own command hook. The name lets the app refuse a
+//! choice made from a list that changed since (a device plugged in or
+//! out), never play another output. Pure, every platform.
 
 use serde_json::Value;
 
@@ -20,6 +22,8 @@ pub const MAX_OUTPUTS: usize = 64;
 pub struct OutputChoice {
     /// What `app output <index>` names.
     pub index: usize,
+    /// Its name as the app gave it (sent back with the choice).
+    pub name: String,
     /// Its name as the menu shows it ([`app_line`]).
     pub label: String,
     /// The one in use.
@@ -46,9 +50,11 @@ pub fn choices(line: &str) -> Vec<OutputChoice> {
         .take(MAX_OUTPUTS)
         .enumerate()
         .filter_map(|(index, name)| {
-            let label = app_line(name.as_str()?);
-            (!label.is_empty()).then_some(OutputChoice {
+            let name = name.as_str()?;
+            let label = app_line(name);
+            (!label.is_empty()).then(|| OutputChoice {
                 index,
+                name: name.to_string(),
                 label,
                 checked: current == Some(index),
             })
@@ -56,9 +62,17 @@ pub fn choices(line: &str) -> Vec<OutputChoice> {
         .collect()
 }
 
-/// The request that chooses output `index`.
-pub fn request(index: usize) -> String {
-    format!("app output {index}")
+/// The request that chooses output `index` named `name`: `app output
+/// <index> <name>`, or without the name when it holds a control character
+/// or the line would pass the request's limit
+/// ([`dstack::ctl::MAX_LINE`]).
+pub fn request(index: usize, name: &str) -> String {
+    let with = format!("app output {index} {name}");
+    if name.chars().any(char::is_control) || with.len() >= dstack::ctl::MAX_LINE {
+        format!("app output {index}")
+    } else {
+        with
+    }
 }
 
 #[cfg(test)]
@@ -72,6 +86,7 @@ mod tests {
     fn choice(index: usize, label: &str, checked: bool) -> OutputChoice {
         OutputChoice {
             index,
+            name: label.into(),
             label: label.into(),
             checked,
         }
@@ -97,10 +112,9 @@ mod tests {
     #[test]
     fn odd_entries_keep_the_indexes_and_a_missing_current_checks_none() {
         let line = status(r#"{"outputs":[3,"","Line\nOut",null,"USB"]}"#);
-        assert_eq!(
-            choices(&line),
-            [choice(2, "Line Out", false), choice(4, "USB", false)]
-        );
+        let mut line_out = choice(2, "Line Out", false);
+        line_out.name = "Line\nOut".into();
+        assert_eq!(choices(&line), [line_out, choice(4, "USB", false)]);
         let neg = status(r#"{"outputs":["A"],"output":-1}"#);
         assert_eq!(choices(&neg), [choice(0, "A", false)]);
     }
@@ -117,10 +131,19 @@ mod tests {
         assert!(got.iter().all(|c| !c.checked), "70 is past the menu");
         let long = status(&format!(r#"{{"outputs":["{}"]}}"#, "x".repeat(100)));
         assert_eq!(choices(&long)[0].label.chars().count(), 64);
+        assert_eq!(choices(&long)[0].name.len(), 100, "the name is kept whole");
     }
 
     #[test]
-    fn the_request_names_the_index() {
-        assert_eq!(request(3), "app output 3");
+    fn the_request_names_the_index_and_the_name_when_it_can() {
+        assert_eq!(request(3, "HDMI 2"), "app output 3 HDMI 2");
+        assert_eq!(request(3, "Line\nOut"), "app output 3");
+        let max = dstack::ctl::MAX_LINE;
+        // "app output 3 " is 13 bytes: a name that brings the line to the
+        // limit is left out; one byte less is sent.
+        assert_eq!(request(3, &"x".repeat(max - 13)), "app output 3");
+        let fits = "x".repeat(max - 14);
+        assert_eq!(request(3, &fits), format!("app output 3 {fits}"));
+        assert_eq!(request(3, &fits).len(), max - 1);
     }
 }

@@ -119,11 +119,25 @@ pub enum Offered {
 }
 
 /// The rate: least squares over up to [`REGRESSION_SPAN_S`].
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct RateFit {
     points: VecDeque<(f64, f64)>,
     offset_s: f64,
     realign_next: bool,
+}
+
+impl Default for RateFit {
+    /// Its points' room made at once ([`REGRESSION_CAP`] and the one pushed
+    /// before the oldest is dropped): the controller
+    /// runs on an audio callback (dlisten, dstack #139), where a growing
+    /// queue would allocate now and then for the first minutes.
+    fn default() -> Self {
+        RateFit {
+            points: VecDeque::with_capacity(REGRESSION_CAP + 1),
+            offset_s: 0.0,
+            realign_next: false,
+        }
+    }
 }
 
 impl RateFit {

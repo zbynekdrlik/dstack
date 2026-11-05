@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 use super::*;
 
 use std::sync::Arc;
@@ -20,6 +22,7 @@ fn frames_come_out_in_order_channel_major_across_the_wrap() {
         assert_eq!(fifo.push_with(3, |f, c| value(base + f, c)), 3);
         next += 3;
         assert_eq!(fifo.len(), 3);
+        assert!(!fifo.is_empty());
         let mut out = [0.0; 6];
         assert!(fifo.pop_planar(&mut out, 3));
         for f in 0..3 {

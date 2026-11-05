@@ -62,14 +62,15 @@ pub fn config_of(device: &cpal::Device) -> Result<cpal::SupportedStreamConfig, S
         .map_err(|e| format!("the output has no default config: {e}"))
 }
 
-/// Plays `player` on `device` at `config` (its default): the driver's
-/// callback pulls the frames, each made into the driver's sample format.
-pub fn play(
+/// Opens (does not start) a stream of `player` on `device` at `config`
+/// (its default): the driver's callback will pull the frames, each made
+/// into the driver's sample format.
+pub fn open(
     device: &cpal::Device,
     config: &cpal::SupportedStreamConfig,
     player: Player,
-) -> Result<Playing, String> {
-    let stream = match config.sample_format() {
+) -> Result<cpal::Stream, String> {
+    match config.sample_format() {
         SampleFormat::F32 => build::<f32>(device, config, player),
         SampleFormat::I16 => build::<i16>(device, config, player),
         SampleFormat::I32 => build::<i32>(device, config, player),
@@ -78,7 +79,11 @@ pub fn play(
         other => Err(format!(
             "the output's sample format {other} is not supported"
         )),
-    }?;
+    }
+}
+
+/// Starts an opened stream.
+pub fn start(stream: cpal::Stream) -> Result<Playing, String> {
     stream
         .play()
         .map_err(|e| format!("the output did not start: {e}"))?;

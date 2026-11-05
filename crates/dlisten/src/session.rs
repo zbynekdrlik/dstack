@@ -169,7 +169,6 @@ impl Session {
             .devices
             .get(index)
             .ok_or_else(|| format!("no output {index}"))?;
-        self.playing = None;
         let config = audio::config_of(device)?;
         let out_rate = config.sample_rate();
         let player = Player::new(
@@ -179,7 +178,22 @@ impl Session {
             Arc::clone(&self.stats),
         )
         .map_err(|e| format!("the rate conversion {} to {out_rate} Hz: {e}", self.rate))?;
-        self.playing = Some(audio::play(device, &config, player)?);
+        // The new stream is opened while the old one plays (a failure
+        // leaves the old one playing); the old one stops before the new
+        // one starts: the FIFO has one reader.
+        let stream = audio::open(device, &config, player)?;
+        let was = self.playing.take().map(|_| self.current);
+        match audio::start(stream) {
+            Ok(p) => self.playing = Some(p),
+            Err(e) => {
+                if let Some(old) = was.filter(|&old| old != index)
+                    && let Err(back) = self.play(old)
+                {
+                    tracing::warn!("dlisten: the output before did not start again: {back}");
+                }
+                return Err(e);
+            }
+        }
         self.current = index;
         tracing::info!(
             output = %self.outputs[index].name,
@@ -209,7 +223,8 @@ impl Session {
 
     /// The app's hooks: its status for dtray ([`status::app_status`]: the
     /// numbers, whether audio flows, the outputs) and its command
-    /// (`output <n>`, [`status::parse_command`]), handed to `events`.
+    /// (`output <n> [<name>]`, [`status::parse_command`]), handed to
+    /// `events`.
     fn hooks(&self, events: Sender<Event>) {
         let (fifo, stats, shown, media) = (
             Arc::clone(&self.fifo),
@@ -240,8 +255,7 @@ impl Session {
         });
         let (shown, events) = (Arc::clone(&self.shown), Mutex::new(events));
         self.link.set_app_command(move |words| {
-            let count = lock(&shown).0.len();
-            let n = status::parse_command(words, count)?;
+            let n = status::parse_command(words, &lock(&shown).0)?;
             lock(&events)
                 .send(Event::Output(n))
                 .map_err(|_| "dlisten is stopping".to_string())?;
@@ -259,16 +273,32 @@ impl Session {
         if outputs == self.outputs {
             return false;
         }
-        let playing = &self.outputs[self.current].name;
-        if let Some(i) = outputs.iter().position(|o| &o.name == playing) {
-            self.current = i;
-        } else {
-            tracing::warn!(output = %playing, "dlisten: the output playing is gone from the list");
-        }
+        let playing = self.outputs[self.current].name.clone();
+        let found = outputs.iter().position(|o| o.name == playing);
         self.devices = devices;
         self.outputs = outputs;
-        self.current = self.current.min(self.outputs.len().saturating_sub(1));
-        self.show();
+        match found {
+            Some(i) => {
+                self.current = i;
+                self.show();
+            }
+            None => match outputs::choose(&self.outputs, None, None) {
+                // Its stream is dead: play on the default.
+                Ok((i, _)) => {
+                    tracing::warn!(
+                        output = %playing,
+                        default = %self.outputs[i].name,
+                        "dlisten: the output playing is gone: playing on the default"
+                    );
+                    if let Err(e) = self.play(i) {
+                        tracing::warn!("dlisten: the default output: {e}");
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(output = %playing, "dlisten: the output playing is gone: {e}")
+                }
+            },
+        }
         true
     }
 

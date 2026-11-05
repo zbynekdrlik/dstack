@@ -95,6 +95,23 @@ pub fn written(now: &[RxChannel]) -> Vec<u64> {
     now.iter().map(|ch| ch.written).collect()
 }
 
+/// The most bytes of an output's name in the status (and in dtray's
+/// request back): a longer one is cut at a character's edge.
+pub const NAME_MAX: usize = 96;
+
+/// An output's name as the status carries it: each control character a
+/// space, cut to [`NAME_MAX`] bytes at a character's edge.
+pub fn status_name(name: &str) -> String {
+    let mut out = String::new();
+    for c in name.chars() {
+        if out.len() + c.len_utf8() > NAME_MAX {
+            break;
+        }
+        out.push(if c.is_control() { ' ' } else { c });
+    }
+    out
+}
+
 /// What dtray shows of dlisten.
 #[derive(Debug, Clone, Copy)]
 pub struct AppView<'a> {
@@ -102,7 +119,8 @@ pub struct AppView<'a> {
     /// The underruns of the last reading.
     pub underruns_before: u64,
     pub flowing: bool,
-    /// The output devices' names, in the order `output <n>` counts them.
+    /// The output devices' names, in the order `output <n>` counts them
+    /// (the status carries each as [`status_name`] gives it).
     pub outputs: &'a [String],
     /// The one playing.
     pub current: usize,
@@ -111,7 +129,10 @@ pub struct AppView<'a> {
 /// dtray's line for dlisten: `<output> (48000 Hz): audio flowing, depth
 /// 40.1 ms, 2 underruns`.
 pub fn short_line(v: &AppView<'_>) -> String {
-    let output = v.outputs.get(v.current).map_or("no output", String::as_str);
+    let output = v
+        .outputs
+        .get(v.current)
+        .map_or_else(|| "no output".to_string(), |o| status_name(o));
     let audio = if v.flowing {
         "audio flowing"
     } else {
@@ -128,10 +149,15 @@ pub fn short_line(v: &AppView<'_>) -> String {
 /// ([`state`]), the numbers, and the outputs dtray's Output menu offers:
 /// `outputs` (their names) and `output` (the index of the one playing; the
 /// index is what `app output <n>` names). Within [`APP_MAX`]: outputs past
-/// it are left off the list (`outputs_cut`: true).
+/// it are left off the list (`outputs_cut`: true), the one playing kept
+/// while it fits.
 pub fn app_status(v: &AppView<'_>) -> String {
     let s = v.snap;
     let mut outputs = v.outputs.len();
+    let names: Vec<String> = v.outputs.iter().map(|o| status_name(o)).collect();
+    // The list is cut from its end, down to the one playing; past that
+    // (it alone does not fit), to none.
+    let keep = (v.current + 1).min(outputs);
     loop {
         let mut obj = serde_json::json!({
             "line": short_line(v),
@@ -143,7 +169,7 @@ pub fn app_status(v: &AppView<'_>) -> String {
             "played": s.played,
             "out_rate": s.out_rate,
             "output": v.current,
-            "outputs": &v.outputs[..outputs],
+            "outputs": names[..outputs],
         });
         if outputs < v.outputs.len() {
             obj["outputs_cut"] = serde_json::Value::Bool(true);
@@ -152,26 +178,42 @@ pub fn app_status(v: &AppView<'_>) -> String {
         if text.len() <= APP_MAX || outputs == 0 {
             return text;
         }
-        outputs -= 1;
+        outputs = if outputs > keep { outputs - 1 } else { 0 };
     }
 }
 
-/// The app command dlisten takes (`app output <n>`, from dtray's menu):
-/// output `n` of the `count` it offers. An error says what it takes.
-pub fn parse_command(words: &str, count: usize) -> Result<usize, String> {
-    match words.split_ascii_whitespace().collect::<Vec<_>>()[..] {
-        ["output", n] => {
-            let n: usize = n
-                .parse()
-                .map_err(|_| format!("output needs a number, not {n:?}"))?;
-            if n < count {
-                Ok(n)
-            } else {
-                Err(format!("no output {n} (there are {count})"))
-            }
-        }
-        _ => Err("dlisten takes: output <n>".to_string()),
+/// The words of a name, single-spaced (a request's words lose their
+/// spacing).
+fn spaced(text: &str) -> String {
+    text.split_ascii_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The app command dlisten takes (`app output <n> [<name>]`, from dtray's
+/// menu): output `n` of the `outputs` it offers (their status names).
+/// With the name (its [`status_name`]), the list must still have it at `n`:
+/// a list that changed
+/// since dtray read it is refused, never another device chosen. An error
+/// says what it takes.
+pub fn parse_command(words: &str, outputs: &[String]) -> Result<usize, String> {
+    let usage = || "dlisten takes: output <n> [<name>]".to_string();
+    let mut parts = words.split_ascii_whitespace();
+    if parts.next() != Some("output") {
+        return Err(usage());
     }
+    let n = parts.next().ok_or_else(usage)?;
+    let n: usize = n
+        .parse()
+        .map_err(|_| format!("output needs a number, not {n:?}"))?;
+    let name = parts.collect::<Vec<_>>().join(" ");
+    let Some(have) = outputs.get(n) else {
+        return Err(format!("no output {n} (there are {})", outputs.len()));
+    };
+    if !name.is_empty() && spaced(&status_name(have)) != name {
+        return Err(format!(
+            "output {n} is now {have:?}, not {name:?}: the list changed, choose again"
+        ));
+    }
+    Ok(n)
 }
 
 #[cfg(test)]
@@ -302,35 +344,107 @@ mod tests {
             "{}",
             text.len()
         );
-        // Nothing fits: no outputs at all, still one object.
+        // A long name is cut ([`status_name`]) in the list and the line:
+        // one object within the bound.
         let huge = vec!["y".repeat(5000)];
         let text = app_status(&AppView {
             outputs: &huge,
             ..v
         });
+        assert!(text.len() <= APP_MAX, "{}", text.len());
+        assert!(dstack::ctl::app_object(&text).is_some());
         let j: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(j["outputs"], serde_json::json!(["y".repeat(NAME_MAX)]));
+        let line = j["line"].as_str().unwrap();
+        assert!(
+            line.starts_with(&format!("{} (", "y".repeat(NAME_MAX))),
+            "{line}"
+        );
+    }
+
+    #[test]
+    fn a_cut_list_keeps_the_one_playing() {
+        let outs: Vec<String> = (0..200)
+            .map(|i| format!("{i:03} {}", "x".repeat(40)))
+            .collect();
+        let v = AppView {
+            snap: &snap(),
+            underruns_before: 2,
+            flowing: true,
+            outputs: &outs,
+            current: 150,
+        };
+        let j: serde_json::Value = serde_json::from_str(&app_status(&v)).unwrap();
+        // 151 names of 44 bytes do not fit 4096 bytes: the list cannot be
+        // cut short of the playing one, so it is dropped whole.
         assert_eq!(j["outputs"], serde_json::json!([]));
+        assert_eq!(j["output"], 150);
+        let few = AppView { current: 20, ..v };
+        let j: serde_json::Value = serde_json::from_str(&app_status(&few)).unwrap();
+        let kept = j["outputs"].as_array().unwrap();
+        assert!(kept.len() > 21, "{}", kept.len());
+        assert_eq!(kept[20], outs[20].as_str());
+        assert_eq!(j["outputs_cut"], true);
+        // At the edge: the last playing index the list still reaches keeps
+        // exactly up to it; one more and the list is dropped.
+        let len = |current: usize| {
+            let j: serde_json::Value =
+                serde_json::from_str(&app_status(&AppView { current, ..v })).unwrap();
+            j["outputs"].as_array().unwrap().len()
+        };
+        let edge = (0..200).find(|&c| len(c) == 0).unwrap();
+        assert!(edge > 50, "{edge}");
+        assert_eq!(len(edge - 1), edge, "cut down to the playing one");
     }
 
     #[test]
     fn the_command_is_output_and_an_index_it_offers() {
-        assert_eq!(parse_command("output 0", 2), Ok(0));
-        assert_eq!(parse_command(" output  1 ", 2), Ok(1));
+        let outs = vec!["Speakers (USB  Audio)".to_string(), "HDMI".to_string()];
+        assert_eq!(parse_command("output 0", &outs), Ok(0));
+        assert_eq!(parse_command(" output  1 ", &outs), Ok(1));
         assert_eq!(
-            parse_command("output 2", 2),
+            parse_command("output 2", &outs),
             Err("no output 2 (there are 2)".into())
         );
         assert_eq!(
-            parse_command("output x", 2),
+            parse_command("output x", &outs),
             Err("output needs a number, not \"x\"".into())
         );
-        for bad in ["", "output", "volume 3", "output 1 2"] {
+        for bad in ["", "output", "volume 3", "outputs 1"] {
             assert_eq!(
-                parse_command(bad, 2),
-                Err("dlisten takes: output <n>".into()),
+                parse_command(bad, &outs),
+                Err("dlisten takes: output <n> [<name>]".into()),
                 "{bad}"
             );
         }
+    }
+
+    #[test]
+    fn a_named_choice_must_still_be_at_its_index() {
+        let outs = vec!["Speakers (USB  Audio)".to_string(), "HDMI".to_string()];
+        // The request's words lose the double space; the name still fits.
+        assert_eq!(parse_command("output 0 Speakers (USB Audio)", &outs), Ok(0));
+        assert_eq!(parse_command("output 1 HDMI", &outs), Ok(1));
+        assert_eq!(
+            parse_command("output 1 USB DAC", &outs),
+            Err("output 1 is now \"HDMI\", not \"USB DAC\": the list changed, choose again".into())
+        );
+    }
+
+    #[test]
+    fn a_status_name_is_one_line_within_its_bound() {
+        assert_eq!(status_name("Line\nOut\t2"), "Line Out 2");
+        assert_eq!(status_name(&"x".repeat(200)).len(), NAME_MAX);
+        let mut edge = "x".repeat(NAME_MAX - 1);
+        edge.push('é');
+        assert_eq!(
+            status_name(&edge).len(),
+            NAME_MAX - 1,
+            "a character is never split"
+        );
+        let mut fits = "x".repeat(NAME_MAX - 2);
+        fits.push('é');
+        assert_eq!(status_name(&fits).len(), NAME_MAX);
     }
 
     fn ch(status: Option<SubStatus>, written: u64) -> RxChannel {

@@ -25,7 +25,8 @@
 //!   fills by [`CUSHION_STEP_S`], up to [`CUSHION_MAX_S`]: a PC whose pump
 //!   comes late gets more margin, and the controller keeps that excess as
 //!   its cushion (`with_cushion_max_s`, `played_silence`) instead of braking
-//!   it away at once.
+//!   it away at once. Every [`CUSHION_DECAY_S`] with no dropout it steps
+//!   down again.
 //! - **Re-centre:** a depth the controller cannot steer back (under
 //!   [`FLOOR_S`] or more than [`HARD_EXCESS_S`] off) skips an excess; a
 //!   deficit is a dropout like an underrun (counted, refilled with a
@@ -54,14 +55,22 @@ pub const FLOOR_S: f64 = 0.005;
 pub const HARD_EXCESS_S: f64 = 0.060;
 /// The cushion each underrun adds to the next priming, s.
 pub const CUSHION_STEP_S: f64 = 0.010;
+/// The most cushion steps: the largest cushion is this many
+/// [`CUSHION_STEP_S`].
+pub const CUSHION_STEPS: u32 = 4;
 /// The largest cushion, s.
 pub const CUSHION_MAX_S: f64 = 0.040;
+/// After this long playing with no dropout, the cushion steps down one
+/// [`CUSHION_STEP_S`], s: a PC whose pump was late once does not keep the
+/// largest latency for good.
+pub const CUSHION_DECAY_S: f64 = 60.0;
 /// The FIFO's size, s of the network's rate: the target, the cushion and
 /// the excess with room to spare.
 pub const FIFO_S: f64 = 0.5;
 /// The converter's output frames a call.
 pub const BLOCK: usize = 128;
 
+const _: () = assert!(CUSHION_STEPS as f64 * CUSHION_STEP_S == CUSHION_MAX_S);
 const _: () = assert!(TARGET_S + CUSHION_MAX_S < TARGET_S + HARD_EXCESS_S);
 const _: () = assert!(TARGET_S + HARD_EXCESS_S < FIFO_S);
 
@@ -147,8 +156,10 @@ pub struct Player {
     /// The last callback's frames, in input frames.
     callback_in: usize,
     state: State,
-    /// The cushion the next priming fills, s.
-    extra_s: f64,
+    /// The cushion the next priming fills, in [`CUSHION_STEP_S`].
+    steps: u32,
+    /// The output frame (`made`) of the last dropout or cushion step down.
+    calm_since: u64,
     /// Output frames made (blocks, silence too): the output's clock.
     made: u64,
     /// Input frames converted.
@@ -197,7 +208,8 @@ impl Player {
             pos: BLOCK,
             callback_in: 0,
             state: State::Priming(frames_of(TARGET_S, net_rate)),
-            extra_s: 0.0,
+            steps: 0,
+            calm_since: 0,
             made: 0,
             consumed: 0,
             underruns: stats.underruns(),
@@ -292,6 +304,7 @@ impl Player {
             self.block.fill(0.0);
         }
         self.consumed += need as u64;
+        self.calm_down();
         self.steer();
     }
 
@@ -307,14 +320,31 @@ impl Player {
     /// a larger cushion (module doc).
     fn dropout(&mut self) {
         self.underruns += 1;
-        self.extra_s = (self.extra_s + CUSHION_STEP_S).min(CUSHION_MAX_S);
+        self.steps = (self.steps + 1).min(CUSHION_STEPS);
+        self.calm_since = self.made;
+        let extra_s = self.extra_s();
         // The controller keeps the extra as its cushion: restart drops the
         // old one and the silence count, the first count is the start and
         // the second adds the extra.
         self.ctl.restart();
         self.ctl.played_silence(0.0);
-        self.ctl.played_silence(self.extra_s);
-        self.state = State::Priming(frames_of(TARGET_S + self.extra_s, self.net_rate));
+        self.ctl.played_silence(extra_s);
+        self.state = State::Priming(frames_of(TARGET_S + extra_s, self.net_rate));
+    }
+
+    /// The cushion the next priming fills, s.
+    fn extra_s(&self) -> f64 {
+        f64::from(self.steps) * CUSHION_STEP_S
+    }
+
+    /// One step down of the cushion after [`CUSHION_DECAY_S`] with no
+    /// dropout.
+    fn calm_down(&mut self) {
+        let calm = frames_of(CUSHION_DECAY_S, self.out_rate) as u64;
+        if self.steps > 0 && self.made - self.calm_since >= calm {
+            self.steps -= 1;
+            self.calm_since = self.made;
+        }
     }
 
     /// One observation after a converted block, and its answer.
@@ -326,10 +356,15 @@ impl Player {
         let ppm = match self.ctl.observe(now_s, depth_s, 2.0 * now_s - produced_s) {
             Step::Hold(ppm) => ppm,
             Step::Recentre { by_s, ppm } | Step::Prime { by_s, ppm } => {
-                if by_s > 0.0 {
-                    self.dropout();
-                } else {
+                // A re-centre is never at 0 (it is past the floor or the
+                // excess): the sign alone tells a deficit from an excess.
+                if by_s.is_sign_negative() {
                     self.fifo.skip(frames_of(-by_s, self.net_rate));
+                    // The audio jumps: the filter's history is no longer
+                    // its past.
+                    self.conv.reset();
+                } else {
+                    self.dropout();
                 }
                 ppm
             }

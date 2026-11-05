@@ -174,6 +174,7 @@ fn choosing_the_checked_value_writes_nothing() {
 fn output(index: usize, label: &str, checked: bool) -> OutputChoice {
     OutputChoice {
         index,
+        name: label.into(),
         label: label.into(),
         checked,
     }

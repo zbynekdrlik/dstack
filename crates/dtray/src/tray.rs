@@ -62,8 +62,8 @@ struct Built {
     missing: Vec<MenuItem>,
     /// Each latency item: the device's ARC and the value.
     choices: Vec<(MenuId, SocketAddrV4, u32)>,
-    /// Each output item: the device's ARC and the output's index.
-    outputs: Vec<(MenuId, SocketAddrV4, usize)>,
+    /// Each output item: the device's ARC and the request choosing it.
+    outputs: Vec<(MenuId, SocketAddrV4, usize, String)>,
 }
 
 impl Built {
@@ -206,9 +206,10 @@ impl Tray {
                         latency::label(ns)
                     ))),
                 }
-            } else if let Some(&(_, arc, index)) =
-                self.built.outputs.iter().find(|(id, _, _)| *id == e.id)
+            } else if let Some((_, arc, index, request)) =
+                self.built.outputs.iter().find(|(id, _, _, _)| *id == e.id)
             {
+                let (arc, index) = (*arc, *index);
                 // The item checked itself: the next tick builds the menu
                 // from what the app reports.
                 self.forced = true;
@@ -224,7 +225,7 @@ impl Tray {
                 else {
                     continue;
                 };
-                if let Err(err) = probe::ask(port, &output::request(index)) {
+                if let Err(err) = probe::ask(port, request) {
                     out.push(Action::Error(format!(
                         "dtray: the output was not chosen: {err}"
                     )));
@@ -325,7 +326,12 @@ fn build(
         }
         for o in &shape.outputs {
             let item = CheckMenuItem::new(&o.label, true, o.checked, None);
-            built.outputs.push((item.id().clone(), shape.arc, o.index));
+            built.outputs.push((
+                item.id().clone(),
+                shape.arc,
+                o.index,
+                output::request(o.index, &o.name),
+            ));
             e(sub.append(&item))?;
         }
         e(menu.append(&sub))?;
