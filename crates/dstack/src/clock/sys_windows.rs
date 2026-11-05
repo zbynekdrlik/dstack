@@ -343,4 +343,57 @@ mod tests {
             "the lower-priority thread never ran during 100 spun waits"
         );
     }
+    /// FOH froze (5.11.2026, ~04:48Z) right after dasio rolled v0.6.35:
+    /// its pinned TX and engine threads spun without yielding, and some
+    /// per-CPU system work that must run on exactly those CPUs never ran
+    /// (the same freeze as v0.6.28's Sleep(0)). A pinned thread's spun
+    /// wait also lets a lower-priority thread on its CPU run.
+    #[test]
+    fn a_pinned_spun_wait_lets_a_lower_priority_thread_on_its_cpu_run() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+        use windows_sys::Win32::System::Threading::{
+            GetCurrentThread, SetThreadAffinityMask, SetThreadPriority,
+        };
+        /// THREAD_PRIORITY_TIME_CRITICAL and THREAD_PRIORITY_LOWEST.
+        const TIME_CRITICAL: i32 = 15;
+        const LOWEST: i32 = -2;
+        /// Both threads on CPU 0 only.
+        const CPU0: usize = 1;
+        let pin = |priority: i32| {
+            // SAFETY: the calling thread's pseudo handle.
+            unsafe {
+                assert_ne!(SetThreadAffinityMask(GetCurrentThread(), CPU0), 0);
+                assert_ne!(SetThreadPriority(GetCurrentThread(), priority), 0);
+            }
+        };
+        let stop = Arc::new(AtomicBool::new(false));
+        let turns = Arc::new(AtomicU64::new(0));
+        let busy = {
+            let (stop, turns) = (Arc::clone(&stop), Arc::clone(&turns));
+            std::thread::spawn(move || {
+                pin(LOWEST);
+                while !stop.load(Ordering::Relaxed) {
+                    turns.fetch_add(1, Ordering::Relaxed);
+                }
+            })
+        };
+        while turns.load(Ordering::Relaxed) == 0 {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        pin(TIME_CRITICAL);
+        // As the stack's own pin does (`media::tx::place`).
+        super::super::set_pinned(true);
+        let before = turns.load(Ordering::Relaxed);
+        for _ in 0..100 {
+            sleep_until_in(monotonic_ns() + 300_000, super::super::WaitMode::Spin);
+        }
+        let ran = turns.load(Ordering::Relaxed) - before;
+        stop.store(true, Ordering::Relaxed);
+        busy.join().unwrap();
+        assert!(
+            ran > 0,
+            "the lower-priority thread never ran during 100 spun waits of a pinned thread"
+        );
+    }
 }
