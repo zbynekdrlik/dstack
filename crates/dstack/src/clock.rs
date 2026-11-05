@@ -208,13 +208,24 @@ pub struct ClockCounts {
 }
 
 /// A linked clock's follower counts: dsync's own (its phase-lock windows in
-/// `polls`, its re-anchors, holdovers), and how many of its re-anchors the
+/// `polls`, its re-anchors, holdovers), how many of its re-anchors the
 /// media threads absorbed without a re-align (a step within
-/// [`linked::HANDOVER_NS`]).
+/// [`linked::HANDOVER_NS`]), and the state the selector decides on
+/// (dstack #1, iemmixer 5.11.2026: after a grandmaster change the status
+/// could not tell why the follower did not take over again).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct FollowerCounts {
     pub counts: ClockCounts,
     pub absorbed: u32,
+    /// dsync's lock gate: |e| within 50 µs for 3 windows.
+    pub locked: bool,
+    /// Locked, |pull| and the recent |e| p90 within 30 µs: only a settled
+    /// follower takes over a ready service ([`linked::choose`]).
+    pub settled: bool,
+    /// The last window's error, ns (`None` before the first).
+    pub offset_ns: Option<i64>,
+    /// The recent windows' |e| p90, ns (`None` until there are enough).
+    pub recent_abs_e_ns: Option<i64>,
 }
 
 impl ClockStats {
