@@ -150,48 +150,124 @@ impl Drop for Timer {
 /// Sleeps until [`monotonic_ns`] reaches `target`: the timer for all but
 /// the last spin tail (`super::SPIN_TAIL`), then a spin.
 pub fn sleep_until_monotonic(target: i64) {
-    sleep_until_in(target, super::wait_mode());
+    sleep_until_in(target, super::wait_mode(), escape_period());
 }
 
-/// [`sleep_until_monotonic`] in the wait `mode`.
-fn sleep_until_in(target: i64, mode: super::WaitMode) {
+/// The process's bounded-escape period, ns (0: off; `super::SPIN_ESCAPE`).
+fn escape_period() -> u64 {
+    super::SPIN_ESCAPE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+thread_local! {
+    /// This thread's bounded escape (dstack #1).
+    static ESCAPE: std::cell::Cell<super::EscapeState> =
+        const { std::cell::Cell::new(super::EscapeState::new()) };
+}
+
+/// Whether this thread's next low-latency wait makes a bounded escape
+/// (dstack #1, `spin_escape_ms`): TX asks after its pass and sends the
+/// packets due within [`super::PRESEND_NS`] first. From its first ask the
+/// thread's waits escape only when an ask said so
+/// ([`super::EscapeState::ask`]).
+pub fn ask_escape() -> bool {
+    let period = escape_period();
+    if period == 0 || super::wait_mode() != super::WaitMode::Spin {
+        return false;
+    }
+    ESCAPE.with(|e| {
+        let mut s = e.get();
+        let go = s.ask(monotonic_ns(), period);
+        e.set(s);
+        go
+    })
+}
+
+/// Puts off this thread's armed escape: TX could not send ahead the whole
+/// window ([`super::EscapeState::defer`]); `false` when the escape still
+/// happens (nothing armed, or already overdue).
+pub fn defer_escape() -> bool {
+    let period = escape_period();
+    ESCAPE.with(|e| {
+        let mut s = e.get();
+        let put_off = s.defer(monotonic_ns(), period);
+        e.set(s);
+        put_off
+    })
+}
+
+/// Blocks the calling thread on its high-resolution timer for `ns`
+/// (relative), no spin; `std::thread::sleep` without the timer.
+fn block_for(ns: i64) {
+    let h = timer();
+    if !h.is_null() {
+        // Relative due time: negative, in 100 ns units.
+        let due = -(ns / 100);
+        // SAFETY: a valid timer handle, a valid due time, no callback.
+        let set = unsafe { SetWaitableTimer(h, &due, 0, None, std::ptr::null(), 0) };
+        if set != 0 {
+            // SAFETY: a valid handle.
+            unsafe { WaitForSingleObject(h, INFINITE) };
+        }
+    } else {
+        no_timer_warning();
+        std::thread::sleep(std::time::Duration::from_nanos(ns as u64));
+    }
+}
+
+/// [`sleep_until_monotonic`] in the wait `mode`, with a bounded escape
+/// every `escape_ns` (0: none; the spin wait only).
+fn sleep_until_in(target: i64, mode: super::WaitMode, escape_ns: u64) {
+    let escape = mode == super::WaitMode::Spin && escape_ns != 0;
+    // The bounded escape (dstack #1, `spin_escape_ms`): once a period the
+    // thread blocks one timer tick, whatever its deadline. The timer's
+    // expiry preempts a lower priority at once, so per-CPU system work
+    // that must run on this CPU gets it each period, and the spin below
+    // needs no SwitchToThread. TX sent ahead before this wait
+    // (`ask_escape`); a pump's W absorbs the block.
+    if escape {
+        let go = ESCAPE.with(|e| {
+            let mut s = e.get();
+            let go = s.take(monotonic_ns(), escape_ns);
+            e.set(s);
+            go
+        });
+        if go {
+            block_for(super::ESCAPE_BLOCK_NS as i64);
+        }
+    }
     let left = target - monotonic_ns();
     // The timer mode (problem A's measurement): the whole wait on the
     // timer, no core spun.
     let tail = super::SPIN_TAIL.load(std::sync::atomic::Ordering::Relaxed);
     let spin = i64::try_from(super::spin_tail_for(mode, tail)).unwrap_or(i64::MAX);
     if left > spin {
-        let h = timer();
-        if !h.is_null() {
-            // Relative due time: negative, in 100 ns units.
-            let due = -((left - spin) / 100);
-            // SAFETY: a valid timer handle, a valid due time, no callback.
-            let set = unsafe { SetWaitableTimer(h, &due, 0, None, std::ptr::null(), 0) };
-            if set != 0 {
-                // SAFETY: a valid handle.
-                unsafe { WaitForSingleObject(h, INFINITE) };
-            }
-        } else {
-            no_timer_warning();
-            std::thread::sleep(std::time::Duration::from_nanos((left - spin) as u64));
-        }
+        block_for(left - spin);
     }
     // The spin yields, on every thread (dstack #1). SwitchToThread
     // (`std::thread::yield_now`) lets ANY ready thread on the CPU run,
     // lower priority included, for the rest of its slice: on the FOH PC
     // (5.11.2026) a priority-10 thread kept the band TX thread's CPU for
-    // 1.66 ms and the TX schedule started again. Every spin that does not
-    // yield to lower priorities froze a Windows PC: Sleep(0) in v0.6.28,
-    // and the no-yield spin of pinned threads in v0.6.34/35 (FOH, 5.11.2026:
-    // per-CPU system work that must run on that exact CPU never ran).
+    // 1.66 ms and the TX schedule started again. Every other spin froze a
+    // Windows PC: Sleep(0) in v0.6.28 (why is not known: on windows-2025 a
+    // Sleep(0) spin does let a lower priority run), and the no-yield spin
+    // of pinned threads in v0.6.34/35 (FOH, 5.11.2026: per-CPU system work
+    // that must run on that exact CPU never ran).
     // Without a CPU of its own it also starves its neighbours (v0.6.34 on
-    // dasio's runner). Never make this spin starve lower priorities; a
-    // bounded escape for the yield's cost is dstack #1's open item.
+    // dasio's runner). Never make this spin starve lower priorities. The
+    // bounded escape (above, off by default, a trial) is the one exception:
+    // its spin does not yield at all between the blocks (Sleep(0) is no
+    // shelter: on windows-2025 a lower-priority thread ran 21 million turns
+    // in 0.3 s of a Sleep(0) spin, and the waits went 3 ms late), and its
+    // block once a period lets lower priorities run.
     if spin == 0 {
         return;
     }
     while monotonic_ns() < target {
-        std::thread::yield_now();
+        if escape {
+            std::hint::spin_loop();
+        } else {
+            std::thread::yield_now();
+        }
     }
 }
 
@@ -207,7 +283,7 @@ mod tests {
         let mut late: Vec<i64> = (0..200)
             .map(|_| {
                 let target = monotonic_ns() + 1_000_000;
-                sleep_until_in(target, super::super::WaitMode::Timer);
+                sleep_until_in(target, super::super::WaitMode::Timer, 0);
                 monotonic_ns() - target
             })
             .collect();
@@ -263,7 +339,7 @@ mod tests {
         pin(TIME_CRITICAL);
         let before = turns.load(Ordering::Relaxed);
         for _ in 0..100 {
-            sleep_until_in(monotonic_ns() + 300_000, super::super::WaitMode::Spin);
+            sleep_until_in(monotonic_ns() + 300_000, super::super::WaitMode::Spin, 0);
         }
         let ran = turns.load(Ordering::Relaxed) - before;
         stop.store(true, Ordering::Relaxed);
@@ -271,6 +347,94 @@ mod tests {
         assert!(
             ran > 0,
             "the lower-priority thread never ran during 100 spun waits"
+        );
+    }
+
+    /// The bounded escape (dstack #1, `spin_escape_ms`, a trial): the spin
+    /// does not yield between the blocks, so a lower priority gets nothing there, and the
+    /// thread blocks one timer tick each period. Over about 1 s of spun
+    /// waits at a 100 ms period, a busy lower-priority thread on the same
+    /// CPU still runs (in the blocks), and the waits stay on time: the
+    /// median is late under 100 µs (a yield's victim kept the CPU for its
+    /// slice: median 2.49 ms on windows-2025, v0.6.34's test).
+    #[test]
+    fn the_bounded_escape_lets_a_lower_priority_thread_run_and_keeps_waits_on_time() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+        use windows_sys::Win32::System::Threading::{
+            GetCurrentThread, SetThreadAffinityMask, SetThreadPriority,
+        };
+        const TIME_CRITICAL: i32 = 15;
+        const LOWEST: i32 = -2;
+        const CPU0: usize = 1;
+        const PERIOD_NS: u64 = 100_000_000;
+        let pin = |priority: i32| {
+            // SAFETY: the calling thread's pseudo handle.
+            unsafe {
+                assert_ne!(SetThreadAffinityMask(GetCurrentThread(), CPU0), 0);
+                assert_ne!(SetThreadPriority(GetCurrentThread(), priority), 0);
+            }
+        };
+        let stop = Arc::new(AtomicBool::new(false));
+        let turns = Arc::new(AtomicU64::new(0));
+        let busy = {
+            let (stop, turns) = (Arc::clone(&stop), Arc::clone(&turns));
+            std::thread::spawn(move || {
+                pin(LOWEST);
+                while !stop.load(Ordering::Relaxed) {
+                    turns.fetch_add(1, Ordering::Relaxed);
+                }
+            })
+        };
+        while turns.load(Ordering::Relaxed) == 0 {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        pin(TIME_CRITICAL);
+        // The spin alone first (a period past the run: one block at the
+        // start, then the spin only), for the failure message: whether the
+        // lower thread gets the CPU from the spin or only in the blocks.
+        let (spin_ran, spin_late) = {
+            let before = turns.load(Ordering::Relaxed);
+            let end = monotonic_ns() + 300_000_000;
+            let mut late = Vec::with_capacity(1_000);
+            while monotonic_ns() < end {
+                let target = monotonic_ns() + 300_000;
+                sleep_until_in(target, super::super::WaitMode::Spin, 10_000_000_000);
+                late.push(monotonic_ns() - target);
+            }
+            late.sort_unstable();
+            (turns.load(Ordering::Relaxed) - before, late)
+        };
+        let before = turns.load(Ordering::Relaxed);
+        let end = monotonic_ns() + 1_050_000_000;
+        let mut late = Vec::with_capacity(4_000);
+        while monotonic_ns() < end {
+            let target = monotonic_ns() + 300_000;
+            sleep_until_in(target, super::super::WaitMode::Spin, PERIOD_NS);
+            late.push(monotonic_ns() - target);
+        }
+        let ran = turns.load(Ordering::Relaxed) - before;
+        stop.store(true, Ordering::Relaxed);
+        busy.join().unwrap();
+        late.sort_unstable();
+        let median = late[late.len() / 2];
+        assert!(
+            ran > 0,
+            "the lower-priority thread never ran during {} escaping waits",
+            late.len()
+        );
+        assert!(
+            median < 100_000,
+            "median late {median} ns over {} waits; p99 {} ns, max {} ns; over 0.5 ms: {}; \
+             the spin alone: {} waits, median {} ns, max {} ns, lower thread ran {}",
+            late.len(),
+            late[late.len() * 99 / 100],
+            late[late.len() - 1],
+            late.iter().filter(|&&l| l > 500_000).count(),
+            spin_late.len(),
+            spin_late[spin_late.len() / 2],
+            spin_late[spin_late.len() - 1],
+            spin_ran
         );
     }
 }

@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.6.38 (unreleased)
+
+- New, OFF by default, for a trial only (dstack #1, agreed with dasio 5.11): `DeviceConfig::spin_escape_ms`, a bounded escape for the Windows low-latency wait. Left out, nothing changes: the spin yields with SwitchToThread as in v0.6.36. Set (100 to 10000 ms), on Windows:
+  - The spin does not yield between the blocks, so no lower priority takes a media thread's CPU near a send (the FanControl steal of 5.11, 1.66 ms, a band TX restart). Sleep(0) was tried first and is no shelter: on windows-2025 a lower-priority thread on the same CPU ran 21 million turns in 0.3 s of a Sleep(0) spin, and the waits went 3 ms late at the median.
+  - At least once a period each spinning media thread blocks one timer tick (`clock::ESCAPE_BLOCK_NS`, 1 ms). The timer's expiry preempts lower priorities at once, so per-CPU system work runs on every CPU; its absence froze FOH on v0.6.28 and v0.6.35.
+  - The pump just blocks (W absorbs it). The TX thread blocks right after a pass, and first sends every packet due within `clock::PRESEND_NS` (2.14 ms = the block + the timer's late wake of one tick + 140 µs) whose samples the engine ring (or the echo's RX ring) already holds. It repeats that from a fresh clock read while it sends anything (at most 4 rounds), so the window also covers its own send time (all but the last round's when every round sent).
+  - When a packet in the window has no samples yet, TX puts the escape off to a later pass instead of blocking: held through the block, that packet would pass a short latency (`max_lag`, 96 samples at 1 ms) and restart its flow. It puts it off at most 20 ms past the period (`clock::ESCAPE_DEFER_MAX_NS`); then it escapes anyway, and such a packet may restart its flow. A re-anchor between the pass and any round of the send ahead (each round reads the clock's time and epoch) sends nothing more and puts it off.
+  - Status: each TX lane gains `early` (packets sent ahead); `media::tx::LaneCounts::early`. The start log names the mode and its period.
+  - Linux: the field is accepted and ignored, said in the start log.
+  - The period is process-wide: the last device a process sets wins, as with `spin_tail_ns`.
+  - New API: `clock::escape` (re-exported in `clock`: `SPIN_ESCAPE_MIN_MS`, `SPIN_ESCAPE_MAX_MS`, `ESCAPE_BLOCK_NS`, `TIMER_LATE_NS`, `PRESEND_NS`, `ESCAPE_DEFER_MAX_NS`, `EscapeState`, `spin_escape_of`, `spin_escape_line`), `clock::{set_spin_escape_ms, ask_escape, defer_escape}`, `media::tx::Schedule::{due_early, due_by}`, `media::tx::Transmitter::{presend, presend_all, before_wait}`, `media::tx::{Presend, PRESEND_ROUNDS}`, `media::ring::Ring::holds`, `media::source::Source::ready`.
+  - First trial on dasio's test PC (iem-snv), never on FOH before it: a real receiver must accept the early packets within its buffer.
+  - No latency change; no behaviour change without the field.
+
 ## 0.6.37 (unreleased)
 
 - New (iemmixer, 5.11; dstack #1): the status's `clock.follower` object carries what the linked clock's selector decides on: `locked` (dsync's lock gate, |e| within 50 µs for 3 windows), `settled` (locked, and |pull| and the recent |e| p90 within 30 µs; only a settled follower takes over a ready service), `offset_ns` (the last window's error) and `recent_abs_e_ns` (the recent |e| p90; `null` until there are enough windows). `clock::FollowerCounts` gains the same four fields.

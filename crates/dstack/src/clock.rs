@@ -36,6 +36,7 @@
 //! judge, [`crate::media::rx::RxShared::last_min_lateness_ns`]).
 
 pub mod dsyx;
+pub mod escape;
 pub mod steer;
 
 use crate::device::TimingProfile;
@@ -47,6 +48,10 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::atomic::{AtomicI32, AtomicI64};
 
 pub use dsyx::{DateState, Reading};
+pub use escape::{
+    ESCAPE_BLOCK_NS, ESCAPE_DEFER_MAX_NS, EscapeState, PRESEND_NS, SPIN_ESCAPE_MAX_MS,
+    SPIN_ESCAPE_MIN_MS, TIMER_LATE_NS, spin_escape_line, spin_escape_of,
+};
 
 /// Two readings whose k differ by at most this agree (20 µs: far above
 /// dsync's reply jitter, two clock reads microseconds apart, and below
@@ -490,6 +495,20 @@ pub fn spin_tail_for(mode: WaitMode, tail_ns: u64) -> u64 {
         WaitMode::Timer => 0,
     }
 }
+
+/// The process's bounded-escape period, ns; 0: off
+/// ([`set_spin_escape_ms`]; process-wide, the last device set wins, as
+/// the spin tail). Read by the Windows wait only.
+static SPIN_ESCAPE: AtomicU64 = AtomicU64::new(0);
+
+/// Sets the process's bounded-escape period ([`spin_escape_of`] the
+/// device's). Only the Windows low-latency wait reads it.
+pub fn set_spin_escape_ms(configured_ms: Option<u64>) {
+    SPIN_ESCAPE.store(spin_escape_of(configured_ms), Ordering::Relaxed);
+}
+
+#[cfg(any(target_os = "linux", windows))]
+pub use sys::{ask_escape, defer_escape};
 
 /// The wait of a timing profile.
 pub fn wait_mode_for(profile: TimingProfile) -> WaitMode {

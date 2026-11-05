@@ -438,3 +438,35 @@ fn an_unwritten_slot_reads_as_a_hole_in_the_last_lap() {
     assert_eq!(ring.read_at(last, &mut out).holes, 2);
     assert_eq!(out, [0, 0]);
 }
+
+/// TX's look before it sends ahead (dstack #1): every position there,
+/// nothing marked, the read end left where it was.
+#[test]
+fn holds_says_whether_every_position_is_there_and_marks_nothing() {
+    let ring = Ring::new();
+    let base = 7 * SLOTS as u64 + 100;
+    assert!(!ring.holds(base, 1));
+    assert!(ring.holds(base, 0), "nothing asked is held");
+    ring.put_at(base, &[1, 2, 3, 4]);
+    assert!(ring.holds(base, 4));
+    assert!(ring.holds(base + 1, 3));
+    assert!(!ring.holds(base, 5), "one past the written end");
+    assert!(!ring.holds(base - 1, 2), "one before it");
+    // The same slots one lap earlier are not held.
+    assert!(!ring.holds(base - SLOTS as u64, 4));
+    // A look that found holes marked none: a late write still lands and
+    // a read finds it whole.
+    ring.put_at(base + 4, &[5]);
+    assert!(ring.holds(base, 5));
+    let (out, r) = read(&ring, base, 5);
+    assert_eq!(out, [1, 2, 3, 4, 5]);
+    assert_eq!(r.holes, 0);
+    // An RX write after a look at a missing position is not late: the
+    // look moved no read end.
+    let rx = Ring::new();
+    // A read up to `base`, so a write before the read end would be late.
+    let _ = read(&rx, base - 10, 10);
+    assert!(!rx.holds(base, 4));
+    assert_eq!(rx.write_at(base, &[9, 9, 9, 9]).late, 0);
+    assert!(rx.holds(base, 4));
+}

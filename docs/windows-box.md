@@ -23,7 +23,7 @@ packets arrive in bursts.
 
 The low-latency profile's media threads sleep on the high-resolution waitable timer and spin for the last `spin_tail_ns` before each deadline. The default of 50 ms spins every wait at 1 ms: on the FOH PC in October 2026 the timer woke up to 2.7 ms late, measured with the Realtek driver that had a 20–30 ms DPC. Two dasio devices then held 4–6 CPUs at 100 %. On 5.11.2026, with the driver fixed, it woke at most one tick + 140 µs late (1.1 ms at the 1 ms resolution, 0.64 ms at 0.5 ms).
 
-The spin yields (SwitchToThread), on every thread. A yield hands the CPU to any ready thread, a lower priority included, for the rest of that thread's slice: dasio's CSwitch trace on the FOH PC (5.11.2026) caught FanControl (priority 10) holding the band TX thread's CPU (priority 31) for 1.66 ms, and the TX schedule started again. That cost stays until dstack #1's bounded escape exists.
+The spin yields (SwitchToThread), on every thread. A yield hands the CPU to any ready thread, a lower priority included, for the rest of that thread's slice: dasio's CSwitch trace on the FOH PC (5.11.2026) caught FanControl (priority 10) holding the band TX thread's CPU (priority 31) for 1.66 ms, and the TX schedule started again. That is the default, and the safe one.
 
 Every spin that did not yield to lower priorities froze a Windows PC (dstack #1):
 
@@ -32,6 +32,21 @@ Every spin that did not yield to lower priorities froze a Windows PC (dstack #1)
 - The no-yield spin of pinned threads only (0.6.35), with each spinner alone on its CPU and only blocking threads on its SMT sibling: FOH froze minutes after the start. Some per-CPU system work must run on exactly that CPU.
 
 Never ship a spin that starves lower priorities; a change to this wait is tried on a non-production Windows box before FOH.
+
+### The bounded escape (`spin_escape_ms`, a trial, off by default)
+
+Since 0.6.38 (dstack #1) a device may set `spin_escape_ms` (100 to 10000; left out: off, the yielding spin above; process-wide, the last device set wins). It is built for a trial on dasio's test PC (iem-snv, no live receivers) before any production PC. When set, on Windows in the low-latency profile:
+
+- The spin does not yield between the blocks, so no lower priority takes the CPU close to a send. Sleep(0) is no shelter on current Windows: on windows-2025 a lower-priority thread pinned to the same CPU ran 21 million turns in 0.3 s of a Sleep(0) spin, and the waits went 3 ms late at the median.
+- At least once every `spin_escape_ms`, each spinning media thread blocks on its high-resolution timer for one tick (`clock::ESCAPE_BLOCK_NS`, a 1 ms relative due time). The timer's expiry preempts a lower priority at once, so per-CPU system work and per-CPU programs (FanControl's sensor walk) get the CPU in each block. This is what the Sleep(0) spin of 0.6.28 lacked.
+- The engine's pump just blocks when its escape is due; its margin W (4 to 5.3 ms on FOH) absorbs the block.
+- The TX thread escapes right after a pass. First it sends every packet due within `clock::PRESEND_NS` (2.14 ms: the 1 ms block + the timer's late wake of one tick + 140 µs at the 1 ms resolution, 1.14 ms) whose samples are already there: the engine ring (or the echo's RX ring) holds every sample of the packet's stamp. It repeats that from a fresh clock read while it sends anything (at most 4 rounds), so the window also covers the send ahead's own time (all but the last round's when every round sent). TX at 8 frames a packet is due every 83 µs at 96 kHz, so a block holds back up to about 26 packets a flow, which this sends ahead.
+- A flow stops at its first packet that is not ready. Held through the block, that packet would pass a short latency (`max_lag` is the advertised latency: 96 samples at 1 ms) and restart its flow, the very fault the mode is for. So TX then puts the escape off to a later pass, at most `clock::ESCAPE_DEFER_MAX_NS` (20 ms) past the period; after that it escapes anyway. A re-anchor between the pass and any round of the send ahead puts it off too: each round reads the clock's time and epoch, and sends nothing on a new epoch.
+- Counted: the status's TX lanes show `early`, the packets sent ahead. The start log says the mode is on, with its period.
+
+On Linux the field is accepted and ignored (the start log says so): the wait sleeps on `clock_nanosleep` and never spins.
+
+Open before it can leave the trial: whether a real receiver (a Dante card) accepts packets up to 2.14 ms early within its buffer (rxlat against a card, which needs the owner's approval to subscribe it), and whether the PC stays responsive with a FanControl-like per-CPU worker on the spinners' CPUs.
 
 Where the timer wakes on time (the good driver, nothing else on the NIC's DPC CPUs), a tail of 100–300 µs frees those CPUs. Measure before you keep it: TX-late warnings and a receiver's lateness (rxlat) against the default.
 

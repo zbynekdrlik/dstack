@@ -46,3 +46,16 @@ pub fn sleep_until_monotonic(target: i64) {
         )
     };
 }
+
+/// Whether this thread's next wait makes a bounded escape (dstack #1):
+/// never on Linux, where the wait sleeps on `clock_nanosleep` and never
+/// spins (`spin_escape_ms` is Windows only).
+pub fn ask_escape() -> bool {
+    false
+}
+
+/// Puts off this thread's armed escape (dstack #1): nothing is ever armed
+/// on Linux, so never.
+pub fn defer_escape() -> bool {
+    false
+}
