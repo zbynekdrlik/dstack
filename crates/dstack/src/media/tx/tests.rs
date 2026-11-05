@@ -1030,7 +1030,7 @@ fn presend_stops_at_the_first_packet_whose_samples_are_not_there() {
         [first, first + FPP]
     );
     // presend_all says so: the escape must wait.
-    assert!(!rig.tx.presend_all(0, || Some(T)));
+    assert!(!rig.tx.presend_all(|| (Some(T), 0)));
     assert!(drain(&rig.rx).is_empty());
     let lane = rig.shared.lane(slot);
     assert_eq!((lane.early, lane.holes), (2, 0), "{lane:?}");
@@ -1057,10 +1057,10 @@ fn presend_all_repeats_from_a_fresh_clock_until_a_round_sends_nothing() {
     let first = n0 - n0 % FPP + FPP;
     // Each read 1 ms later than the one before.
     let mut reads = Vec::new();
-    assert!(rig.tx.presend_all(0, || {
+    assert!(rig.tx.presend_all(|| {
         let at = T + reads.len() as u64 * MS;
         reads.push(at);
-        Some(at)
+        (Some(at), 0)
     }));
     // Rounds 1-4 each send what came within the window since the round
     // before; the fourth is the last whatever it sent.
@@ -1073,19 +1073,30 @@ fn presend_all_repeats_from_a_fresh_clock_until_a_round_sends_nothing() {
     rig.flow(vec![Some(1)]);
     rig.tx.step(Some(T), 0);
     let mut calls = 0;
-    assert!(rig.tx.presend_all(0, || {
+    assert!(rig.tx.presend_all(|| {
         calls += 1;
-        Some(T)
+        (Some(T), 0)
     }));
     assert_eq!(calls, 2);
     assert_eq!(drain(&rig.rx).len(), 5);
     // Not covered (a new epoch): false at once.
     let mut calls = 0;
-    assert!(!rig.tx.presend_all(1, || {
+    assert!(!rig.tx.presend_all(|| {
         calls += 1;
-        Some(T)
+        (Some(T), 1)
     }));
     assert_eq!(calls, 1);
+    // A re-anchor between two rounds: the second round sends nothing and
+    // the escape is not covered.
+    let mut rig = Rig::new(Vec::new());
+    rig.flow(vec![Some(1)]);
+    rig.tx.step(Some(T), 0);
+    let mut reads = 0;
+    assert!(!rig.tx.presend_all(|| {
+        reads += 1;
+        (Some(T + (reads - 1) * MS), u32::from(reads > 1))
+    }));
+    assert_eq!((reads, drain(&rig.rx).len()), (2, 5));
 }
 
 /// The TX loop's step before its wait: no send ahead unless the wait
@@ -1107,7 +1118,7 @@ fn before_wait_sends_ahead_only_for_an_escape_and_puts_off_an_uncovered_one() {
     rig.tx.step(Some(T), 0);
     let never = || -> bool { panic!("no defer without an escape") };
     // No escape: nothing sent ahead, no defer.
-    assert!(!rig.tx.before_wait(0, || Some(T), || false, never));
+    assert!(!rig.tx.before_wait(|| (Some(T), 0), || false, never));
     assert!(drain(&rig.rx).is_empty());
     // An escape whose window is not covered: put off.
     let mut deferred = 0;
@@ -1115,17 +1126,25 @@ fn before_wait_sends_ahead_only_for_an_escape_and_puts_off_an_uncovered_one() {
         deferred += 1;
         true
     };
-    assert!(!rig.tx.before_wait(0, || Some(T), || true, put_off));
+    assert!(!rig.tx.before_wait(|| (Some(T), 0), || true, put_off));
     assert_eq!((drain(&rig.rx).len(), deferred), (2, 1));
     // Overdue: escapes anyway.
-    assert!(rig.tx.before_wait(0, || Some(T), || true, || false));
+    assert!(rig.tx.before_wait(|| (Some(T), 0), || true, || false));
     // Covered (a ring source with every sample there): escapes, no defer.
     let mut rig = Rig::new(Vec::new());
     assert!(rig.shared.set_source(0, Source::Counter));
     rig.flow(vec![Some(1)]);
     rig.tx.step(Some(T), 0);
-    assert!(rig.tx.before_wait(0, || Some(T), || true, never));
+    assert!(rig.tx.before_wait(|| (Some(T), 0), || true, never));
     assert_eq!(drain(&rig.rx).len(), 5);
+    // The clock re-anchored since the pass: nothing sent ahead, put off.
+    let mut deferred = 0;
+    let put_off = || {
+        deferred += 1;
+        true
+    };
+    assert!(!rig.tx.before_wait(|| (Some(T + MS), 1), || true, put_off));
+    assert_eq!((drain(&rig.rx).len(), deferred), (0, 1));
 }
 
 #[test]

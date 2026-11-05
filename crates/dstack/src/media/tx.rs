@@ -1506,8 +1506,7 @@ fn run(clock: &dyn PtpClock, shared: Arc<TxShared>) {
         // later pass (at most `clock::ESCAPE_DEFER_MAX_NS` past its period).
         #[cfg(any(target_os = "linux", windows))]
         let _escapes = tx.before_wait(
-            epoch,
-            || clock.now_ns(),
+            || (clock.now_ns(), clock.epoch()),
             crate::clock::ask_escape,
             crate::clock::defer_escape,
         );

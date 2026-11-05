@@ -49,15 +49,18 @@ impl Transmitter {
         self.send_due(now, now_ns, pass, Some(horizon))
     }
 
-    /// [`Transmitter::presend`] from a fresh clock read (`now_ns`) again
-    /// while it sends anything, at most [`PRESEND_ROUNDS`] times, so the
-    /// window also covers the send ahead's own time: `true` when the last
-    /// round left nothing due within it. `false`: put the escape off
-    /// (`clock::defer_escape`), a packet held through the block could pass
-    /// its latency and restart its flow.
-    pub fn presend_all(&mut self, epoch: u32, mut now_ns: impl FnMut() -> Option<u64>) -> bool {
+    /// [`Transmitter::presend`] from a fresh clock read (`read`: PTP ns and
+    /// the clock's epoch, read in that order) again while it sends anything,
+    /// at most [`PRESEND_ROUNDS`] times, so the window also covers the send
+    /// ahead's own time (all but the last round's, when every round sent):
+    /// `true` when no round left a packet due within it. `false`: put the
+    /// escape off (`clock::defer_escape`), a packet held through the block
+    /// could pass its latency and restart its flow; also when the clock
+    /// re-anchored since the pass.
+    pub fn presend_all(&mut self, mut read: impl FnMut() -> (Option<u64>, u32)) -> bool {
         for _ in 0..PRESEND_ROUNDS {
-            let done = self.presend(now_ns(), epoch);
+            let (now_ns, epoch) = read();
+            let done = self.presend(now_ns, epoch);
             if !done.covered {
                 return false;
             }
@@ -68,20 +71,19 @@ impl Transmitter {
         true
     }
 
-    /// Before the TX thread's wait (after a pass at the clock's `epoch`):
-    /// when `ask` says the wait will escape (`clock::ask_escape`), the send
-    /// ahead ([`Transmitter::presend_all`] on `now_ns`); when that left a
-    /// packet due in the window, `defer` puts the escape off
-    /// (`clock::defer_escape`, `false` when it is overdue and escapes
-    /// anyway). Whether the wait escapes.
+    /// Before the TX thread's wait (after a pass): when `ask` says the wait
+    /// will escape (`clock::ask_escape`), the send ahead
+    /// ([`Transmitter::presend_all`] on the clock's `read`); when that left
+    /// a packet due in the window, or the clock re-anchored, `defer` puts
+    /// the escape off (`clock::defer_escape`, `false` when it is overdue
+    /// and escapes anyway). Whether the wait escapes.
     pub fn before_wait(
         &mut self,
-        epoch: u32,
-        now_ns: impl FnMut() -> Option<u64>,
+        read: impl FnMut() -> (Option<u64>, u32),
         ask: impl FnOnce() -> bool,
         defer: impl FnOnce() -> bool,
     ) -> bool {
-        ask() && (self.presend_all(epoch, now_ns) || !defer())
+        ask() && (self.presend_all(read) || !defer())
     }
 }
 
