@@ -1184,6 +1184,8 @@ fn a_packet_the_ring_refuses_as_read_counts_late_at_read_on_its_flow() {
         .unwrap();
     pump(&mut rx, 2, 3, Some(now), 0);
     assert_eq!(s.take_max_lateness(2), 10);
-    assert_eq!(s.lane(2).lateness_peak, 60);
+    // On time past the reader: still the one packet.
+    let c = s.lane(2);
+    assert_eq!((c.late_at_read, c.lateness_peak), (1, 60), "{c:?}");
     assert_eq!(s.lane(9).lateness_peak, 0);
 }
