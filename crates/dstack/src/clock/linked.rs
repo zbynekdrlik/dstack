@@ -575,6 +575,10 @@ impl<M: Model> Follow for Absorbing<M> {
                 in_holdover: m.holdover,
             },
             absorbed,
+            locked: m.locked,
+            settled: m.settled,
+            offset_ns: m.offset_ns,
+            recent_abs_e_ns: m.recent_abs_e_ns,
         }
     }
 }

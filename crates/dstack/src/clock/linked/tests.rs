@@ -127,6 +127,10 @@ impl Follow for Arc<Fake> {
                 in_holdover: !v.locked,
             },
             absorbed: 1,
+            locked: v.locked,
+            settled: v.settled,
+            offset_ns: Some(-39_806),
+            recent_abs_e_ns: None,
         }
     }
 }
@@ -580,7 +584,11 @@ fn the_linked_clock_reads_the_follower_s_counts() {
                 holdovers: 2,
                 in_holdover: true
             },
-            absorbed: 1
+            absorbed: 1,
+            locked: false,
+            settled: false,
+            offset_ns: Some(-39_806),
+            recent_abs_e_ns: None,
         })
     );
     let service = Arc::new(MonoClock::new());

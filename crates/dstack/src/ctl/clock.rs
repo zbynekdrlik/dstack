@@ -14,7 +14,9 @@ use crate::daemon::media::Media;
 
 /// The clock status: the counts of the source in use on top
 /// ([`clock_counts_in_use`]), and for a linked clock each source's apart
-/// (`service`: the poller's polls; `follower`: dsync's follower's windows).
+/// (`service`: the poller's polls; `follower`: dsync's follower's windows,
+/// and its `locked`, `settled`, `offset_ns` and `recent_abs_e_ns`, what the
+/// selector decides on).
 pub(super) fn clock_part(j: &mut Json, media: &Media) {
     let linked = media.clock_stats.linked();
     let service = media.clock_stats.counts();
@@ -40,6 +42,10 @@ pub(super) fn clock_part(j: &mut Json, media: &Media) {
             j.open(Some("follower"), '{');
             counts_part(j, "windows", f.counts);
             j.num("absorbed", f.absorbed);
+            j.flag("locked", f.locked);
+            j.flag("settled", f.settled);
+            j.opt("offset_ns", f.offset_ns);
+            j.opt("recent_abs_e_ns", f.recent_abs_e_ns);
             j.close('}');
         }
     }

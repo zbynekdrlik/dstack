@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.37 (unreleased)
+
+- New (iemmixer, 5.11; dstack #1): the status's `clock.follower` object carries what the linked clock's selector decides on: `locked` (dsync's lock gate, |e| within 50 µs for 3 windows), `settled` (locked, and |pull| and the recent |e| p90 within 30 µs; only a settled follower takes over a ready service), `offset_ns` (the last window's error) and `recent_abs_e_ns` (the recent |e| p90; `null` until there are enough windows). `clock::FollowerCounts` gains the same four fields.
+  - Why: the FOH freeze (5.11, 06:01 CET) changed the grandmaster under iemmixer. Its follower lost its lock, the clock handed over to the service seamlessly, and the follower relocked at -39.8 µs. It took over again only 6 min 41 s later, once settled, and the status could not say which condition it was waiting on. The audio was unaffected throughout (late, missed, rebootstraps and TX holes 0).
+  - No behaviour change, no latency change.
+
 ## 0.6.36 (unreleased)
 
 - HOTFIX (FOH froze, 5.11 ~04:48Z, minutes after dasio rolled v0.6.35; dstack #1): every Windows low-latency spin yields again, as in v0.6.33. v0.6.35 kept a spin that never yields on threads pinned to a CPU of its own. With FOH's pinned TX and engine threads (each alone on its CPU, only blocking threads on the SMT sibling), the PC stopped answering, the same freeze as v0.6.28's Sleep(0): some per-CPU system work must run on exactly that CPU. **Do not run v0.6.34 or v0.6.35 on Windows.**
