@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.6.34 (unreleased)
+
+- Fix (dasio, FOH, 5.11; dstack #1): on Windows the low-latency wait no longer yields its CPU to a lower priority. Before, the media threads spun the last `spin_tail_ns` (50 ms by default) of every wait with SwitchToThread, which hands the CPU to any ready thread, a lower priority included, for the rest of that thread's slice. dasio's CSwitch trace caught FanControl (priority 10) holding the band TX thread's CPU (priority 31) for 1.66 ms; the TX schedule started again (lag 156 samples > max_lag 96), and the receivers lost those packets. Now:
+  - The spin never yields (`spin_loop`), and the TX retry wait does the same (`media::tx::retry`). A thread gives its CPU away only on the high-resolution timer, whose expiry preempts a lower priority at once.
+  - The default spin tail is 2 ms (`clock::SPIN_TAIL_NS`, was 50 ms). It covers the timer's late wake measured on the FOH PC: one tick + 140 µs, 1.1 ms at the 1 ms resolution. A wait longer than the tail sleeps on the timer until the tail. A device's own `spin_tail_ns` is unchanged.
+  - A thread whose deadlines come closer than the tail spins all the time: TX at 8 frames a packet (every 83 µs at 96 kHz), or a pump whose block is shorter than the tail. Such a thread needs its CPU alone, and the other CPU of its core must run only threads that block. Windows pins a priority-0 System thread to each core; with both CPUs spun it never runs, which is how 0.6.28's Sleep(0) froze two PCs (`docs/windows-box.md`). dasio's FOH layout meets this.
+  - Regression test: `a_spun_wait_never_yields_its_cpu_to_a_lower_priority_thread`, with a lower-priority busy thread on the same CPU. Before the fix, on the Windows runner: median 2.49 ms late, max 32.7 ms.
+  - The normal profile (dlink) waits on the timer only and is unchanged. No latency change.
+
 ## 0.6.33 (unreleased)
 
 - Fix (strih, 5.11, v0.6.32 live; dstack #1, dsync#136): dsync-ptp v1.27.3 -> v1.27.4. On a PC that hears both ports of a dual-port Dante grandmaster, the in-process follower ran about 0.48 ms behind the dsync service. Such a grandmaster sends the same clock id and sequence numbers on its primary (VLAN) and secondary (untagged) port, about 470 µs apart. The follower paired the Sync from one port with the Follow_Up from the other. So every start re-aligned the media threads at the Service -> Internal switch (strih: offset -471..-495 µs, over `HANDOVER_NS`), one pump re-bootstrap and every TX flow started again.

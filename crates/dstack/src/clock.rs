@@ -439,8 +439,9 @@ pub use os::{DSYNC, MonoClock, POLL, Poller, monotonic_ns, poll_dsync, realtime_
 /// How a media thread's wait ends on Windows (dstack #1 problem A).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WaitMode {
-    /// The high-resolution waitable timer for all but the last 50 ms,
-    /// then a yielding spin (the low-latency profile).
+    /// The high-resolution waitable timer for all but the last spin tail
+    /// (2 ms unless the device sets one), then a spin that never yields
+    /// (the low-latency profile).
     Spin,
     /// The high-resolution waitable timer for the whole wait, no spin
     /// (the normal profile).
@@ -448,8 +449,10 @@ pub enum WaitMode {
 }
 
 /// The spin tail of the low-latency wait on Windows unless the device sets
-/// one, ns: every wait shorter than this is spun ([`WaitMode::Spin`]).
-pub const SPIN_TAIL_NS: u64 = 50_000_000;
+/// one, ns: the last part of every wait is spun ([`WaitMode::Spin`]). It
+/// covers the timer's late wake on the FOH PC (one tick + 140 µs, 1.1 ms at
+/// the 1 ms resolution; dstack #1). 50 ms until 0.6.33.
+pub const SPIN_TAIL_NS: u64 = 2_000_000;
 /// The longest spin tail a device may set, ns.
 pub const SPIN_TAIL_MAX_NS: u64 = 50_000_000;
 
