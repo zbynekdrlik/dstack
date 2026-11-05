@@ -476,3 +476,24 @@ fn the_cushion_steps_down_after_a_calm_minute() {
     s.run(0.2);
     assert_eq!(s.player.state, State::Priming(2400));
 }
+
+/// A FIFO emptied at once (no depth under the floor first): the block
+/// whose input is not there plays silence, counted, and the output primes.
+#[test]
+fn a_block_with_no_input_plays_silence_and_primes() {
+    let mut s = Sim::new(48_000, 48_000, 0.0, 1, 1);
+    s.run(2.0);
+    // Hand out the rest of the current block: the next fill starts one.
+    let rest = BLOCK - s.player.pos;
+    let mut out = vec![0.0f64; rest];
+    s.player.fill_with(&mut out, 1, |x| x);
+    let held = s.fifo.len();
+    s.fifo.skip(held);
+    let mut block = vec![9.0f64; BLOCK];
+    s.player.fill_with(&mut block, 1, |x| x);
+    assert!(block.iter().all(|&x| x == 0.0), "silence");
+    let stats = s.player.stats();
+    assert_eq!(stats.underruns(), 1);
+    assert_eq!(stats.recentres(), 0, "an underrun, not a re-centre");
+    assert_eq!(s.player.state, State::Priming(2400));
+}
