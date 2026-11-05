@@ -679,3 +679,38 @@ async fn the_driver_s_tick_tells_a_reset_pin_once() {
     let lines = log.lines().filter(|l| l.contains(RESET_LINE)).count();
     assert_eq!(lines, 1, "{log}");
 }
+
+/// camera-box (strih-snv OBS, 5.11.2026): a restart failed with "RX flow
+/// port 47217: Address already in use". The TX side bound its 32 sockets
+/// on ports the OS chose before the RX side bound its fixed ports, and the
+/// base (47200) lies in Linux's ephemeral range, so a TX socket could take
+/// one of them (about one start in 28). The fixed ports come first now.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_fixed_rx_ports_are_bound_before_any_port_the_os_chooses() {
+    let range = std::fs::read_to_string("/proc/sys/net/ipv4/ip_local_port_range").unwrap();
+    let mut ends = range.split_whitespace().map(|p| p.parse::<u16>().unwrap());
+    let (low, high) = (ends.next().unwrap(), ends.next().unwrap());
+    assert!(high - low > 1_000, "ephemeral range {low}..{high}");
+    // An address of its own, so no other test's sockets share its ports.
+    let ip = Ipv4Addr::new(127, 0, 0, 77);
+    let dir = tempfile::tempdir().unwrap();
+    for k in 0..300u32 {
+        let base = low + u16::try_from(k * 89 % u32::from(high - low - 40)).unwrap();
+        let cfg = DeviceConfig {
+            state_file: dir.path().join("state.toml"),
+            rx_port_base: Some(base),
+            ..DeviceConfig::from_toml(TEST_DEVICE).unwrap()
+        };
+        let device = Device::load(cfg).unwrap();
+        let clock = Clock {
+            ptp: Arc::new(Unready),
+            freq: Arc::default(),
+            stats: Arc::default(),
+        };
+        let media = Media::new(&device, ip, clock, 7, &[])
+            .unwrap_or_else(|e| panic!("start {k}, base {base}: {e}"));
+        let ports = media.rx.ports().unwrap();
+        assert_eq!(usize::from(ports[0]), usize::from(base));
+    }
+}
