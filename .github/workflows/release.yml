@@ -1,7 +1,7 @@
 name: Release
 
-# A tag v* gets a GitHub release with prebuilt `dstack-dev` and `dtray`
-# binaries for Linux and Windows and their sha256 files. dsync's stability gate pins
+# A tag v* gets a GitHub release with prebuilt `dstack-dev`, `dtray` and
+# `dlisten` binaries for Linux and Windows and their sha256 files. dsync's stability gate pins
 # an exact tag and checks the sha256 (dsync#98), so a dstack change never
 # moves the gate by itself.
 
@@ -27,7 +27,7 @@ jobs:
         run: |
           gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
             || gh release create "$TAG" -R "$GITHUB_REPOSITORY" --verify-tag \
-                 --title "$TAG" --notes "dstack $TAG. CHANGELOG.md has the changes. Prebuilt dstack-dev and dtray binaries with their sha256 below."
+                 --title "$TAG" --notes "dstack $TAG. CHANGELOG.md has the changes. Prebuilt dstack-dev, dtray and dlisten binaries with their sha256 below."
 
   binaries:
     needs: release
@@ -47,10 +47,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: GTK and AppIndicator headers (dtray's Linux tray)
+      - name: GTK, AppIndicator and ALSA headers (dtray's Linux tray, dlisten's output)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libayatana-appindicator3-dev
-      - run: cargo build --release --locked -p dstack --bin dstack-dev -p dtray --bin dtray
+        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libayatana-appindicator3-dev libasound2-dev
+      - run: cargo build --release --locked -p dstack --bin dstack-dev -p dtray --bin dtray -p dlisten --bin dlisten
       - name: Name, hash and upload the binaries
         shell: bash
         env:
@@ -58,7 +58,7 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          for bin in dstack-dev dtray; do
+          for bin in dstack-dev dtray dlisten; do
             name="${bin}-${TAG}-${{ matrix.suffix }}${{ matrix.exe }}"
             cp "target/release/${bin}${{ matrix.exe }}" "$name"
             sha256sum "$name" > "$name.sha256"

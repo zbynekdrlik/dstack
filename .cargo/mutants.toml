@@ -27,6 +27,16 @@ exclude_globs = [
   # desktop: each tested), and it is run by hand on a desktop.
   "crates/dtray/src/linux.rs",
   "crates/dtray/src/tray.rs",
+  # dlisten's binary glue (dstack #139): the output device (cpal), the
+  # running session (dlink, the network), the OS calls (autostart, the
+  # console) and main need a sound card or the process; their decisions
+  # are the library's (cli, outputs, settings, status, player, autostart:
+  # each tested), and it is run by hand.
+  "crates/dlisten/src/main.rs",
+  "crates/dlisten/src/audio.rs",
+  "crates/dlisten/src/session.rs",
+  "crates/dlisten/src/os_linux.rs",
+  "crates/dlisten/src/win.rs",
   # Third-party code (mdns-sd, one dstack change; tests/mdns_ipv4_only.rs).
   "vendor/**",
 ]
@@ -68,6 +78,10 @@ exclude_re = [
   # `Media::set_app_status` (tested in ctl); crates/dlink/tests/link.rs sets
   # it on a running device.
   "dlink/src/lib.rs.*Link::set_app_status",
+  # The app's command hook (dstack #139): the same glue over
+  # `Media::set_app_command` (tested in ctl); crates/dlink/tests/link.rs
+  # sets it on a running device.
+  "dlink/src/lib.rs.*Link::set_app_command",
   # The heartbeat listen's socket loop: tests/system_clock.rs reads our
   # running device with it; its parse and gather are unit tested.
   "latency.rs.*listen",
