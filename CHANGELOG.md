@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.33 (unreleased)
+
+- Fix (strih, 5.11, v0.6.32 live; dstack #1, dsync#136): dsync-ptp v1.27.3 -> v1.27.4. On a PC that hears both ports of a dual-port Dante grandmaster, the in-process follower ran about 0.48 ms behind the dsync service. Such a grandmaster sends the same clock id and sequence numbers on its primary (VLAN) and secondary (untagged) port, about 470 µs apart. The follower paired the Sync from one port with the Follow_Up from the other. So every start re-aligned the media threads at the Service -> Internal switch (strih: offset -471..-495 µs, over `HANDOVER_NS`), one pump re-bootstrap and every TX flow started again.
+  - dsync v1.27.4 follows one grandmaster port (the first heard; it switches only after 2 s of silence) and pairs a Follow_Up only with that port's Sync. On Linux its sockets set `IP_MULTICAST_ALL=0`, so a follower hears only the NIC it joined on.
+  - The follower stays on the device's media interface (the Dante primary). On strih the service follows the secondary port; the ports' own difference, measured there, is about 20 µs (median over 24 sequence numbers), under `HANDOVER_NS`.
+  - No API change, no latency change.
+
 ## 0.6.32 (unreleased)
 
 - Fix (camera-box, 4.11, v0.6.31 live; dstack #1): an RX-only dlink device's pump margin W is the whole budget, so a pump preempted several ms no longer restarts and loses blocks. OBS dante-input (RX only, a 48 kHz app on a 96 kHz network, the default 15 ms budget, block 128, unpinned on a loaded PC) was preempted about 6 ms, right at its W of 6 ms (576 samples), and re-bootstrapped 19 -> 30 in about 15 minutes, each one an audible gap. An RX-only device's W is in none of its paths: its RX path is P + B + the converter's RX delay (block k reads the RX rings at its own stamps whenever the pump runs), and D = B + P + W only stamps the engine's TX rings, which it does not have. W only says how late its pump may run before it starts again; a block that late reaches the app that much later, so the app's budget bounds it. The stack holds any W up to `stream::MAX_WORK_MARGIN` (4096 samples) beside any P (`device::MAX_LATENCY_SAMPLES` keeps both inside half the RX rings).
