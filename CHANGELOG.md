@@ -1,6 +1,10 @@
 # Changelog
 
-## 0.6.45 (unreleased)
+## 0.6.46 (unreleased)
+
+- New: `dlisten` (dstack #139), a small Windows app (it also runs on Linux) that plays Dante audio on a local output.
+
+## 0.6.45
 
 - Fix (camera-box, strih-snv OBS, 5.11, v0.6.33): after a restart the device did not start ("RX flow port 47217: Address already in use"), and the strih program had no audio for 70 min. The TX side bound its 32 sockets on ports the OS chose before the RX side bound its fixed `rx_port_base` ports. The base 47200 lies in Linux's ephemeral range, so a TX socket could take one of them: in the test, about one start in 28. The RX side now binds first. A base inside the ephemeral range can still collide with another process's socket, so the `rx_port_base` doc now says to pick one outside it.
   - No API change, no latency change.
