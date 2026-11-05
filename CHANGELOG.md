@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.43 (unreleased)
+
+- Fix (dasio, FOH 5.11, v0.6.39; dstack #1): every 96 s each device process sent about 60 mDNS queries in one second, and the answers made a burst of over 500 packets. FOH's audio TX stalled in that second on both instances (TX schedule restarts, send error 10055, late packets at the receivers), 60 times in 2 h. The vendored mdns-sd queried each cached instance and host in its own message at exactly 80 % of the record's TTL (120 s), so records learned together re-queried together forever. Now a refresh pass asks every due question in one message, split only where a packet is full, and a pass with a record due takes along those due within 2 % of their TTL. Each responder answers once for all its records. On the wire (`tests/mdns_refresh.rs`): 4 instances over 4 refresh stages went from 16 query messages to 4.
+  - No API change, no latency change.
+
 ## 0.6.42 (unreleased)
 
 - dsync v1.28.0 (dsync#158, asked by dstack #1 after iemmixer's GM loss at the FOH reboot of 5.11): the in-process follower keeps its time base over a grandmaster change within 1 ms of it. The residual is retired along dsync's pull (τ 20 s, at most 50 ppm), so no step reaches the media clock and no re-align follows. dsync logs it as `[FOLLOWER] grandmaster change in the same time base`. A change over 1 ms still re-anchors as before. After every grandmaster change dsync fits the rate afresh once, so the follower settles again within about a minute (8-10 ppm off: 48-50 s in its simulation).
