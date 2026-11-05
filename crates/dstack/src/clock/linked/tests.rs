@@ -131,6 +131,7 @@ impl Follow for Arc<Fake> {
             settled: v.settled,
             offset_ns: Some(-39_806),
             recent_abs_e_ns: None,
+            pull_ns: 0,
         }
     }
 }
@@ -589,6 +590,7 @@ fn the_linked_clock_reads_the_follower_s_counts() {
             settled: false,
             offset_ns: Some(-39_806),
             recent_abs_e_ns: None,
+            pull_ns: 0,
         })
     );
     let service = Arc::new(MonoClock::new());

@@ -207,7 +207,13 @@ fn the_follower_counts_carry_its_lock_settled_and_errors() {
     let src = Arc::new(FakeModel(Mutex::new((unsettled, true))));
     let c = Absorbing::new(Arc::clone(&src)).counts();
     assert_eq!(
-        (c.locked, c.settled, c.offset_ns, c.recent_abs_e_ns, c.pull_ns),
+        (
+            c.locked,
+            c.settled,
+            c.offset_ns,
+            c.recent_abs_e_ns,
+            c.pull_ns
+        ),
         (true, false, Some(-39_806), Some(41_250), 87_500)
     );
     let fresh = ClockModel {
@@ -220,7 +226,13 @@ fn the_follower_counts_carry_its_lock_settled_and_errors() {
     *src.0.lock().unwrap() = (fresh, true);
     let c = Absorbing::new(src).counts();
     assert_eq!(
-        (c.locked, c.settled, c.offset_ns, c.recent_abs_e_ns, c.pull_ns),
+        (
+            c.locked,
+            c.settled,
+            c.offset_ns,
+            c.recent_abs_e_ns,
+            c.pull_ns
+        ),
         (false, false, None, None, 0)
     );
 }
