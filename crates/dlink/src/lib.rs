@@ -830,6 +830,23 @@ impl Link {
         self.device.media().set_app_status(f);
     }
 
+    /// Sets the app's command hook (dstack #139): a request `app <words>` on
+    /// the device's local endpoint (dtray's menu) or its control socket
+    /// calls `f` with `<words>` and answers `ok` for `Ok("")`, the text for
+    /// another `Ok`, `error: <reason>` for an `Err`
+    /// ([`Media::set_app_command`]). Without a hook the answer is `error: no
+    /// app command`. A later call replaces the hook.
+    ///
+    /// The command is the app's own (dlisten's output: `output <n>`); it
+    /// changes nothing of the device. `f` runs on the device's control
+    /// task: answer at once, and hand longer work to the app's own thread.
+    pub fn set_app_command(
+        &self,
+        f: impl Fn(&str) -> Result<String, String> + Send + Sync + 'static,
+    ) {
+        self.device.media().set_app_command(f);
+    }
+
     /// Why the device ended by itself, if it did.
     pub fn ended(&self) -> Option<String> {
         self.device.ended()

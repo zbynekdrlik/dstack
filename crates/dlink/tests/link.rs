@@ -177,6 +177,15 @@ fn a_48_khz_app_runs_a_96_khz_device_through_the_conversion() {
         with_app.ends_with(r#","app":{"line":"48 kHz app","state":"ok"}}"#),
         "{with_app}"
     );
+    // The app's command (dstack #139): a request `app <words>` reaches it.
+    let ask = |line: &str| dstack::ctl::local::reply(line, link.media());
+    assert_eq!(ask("app output 1"), "error: no app command");
+    link.set_app_command(|w| match w {
+        "output 1" => Ok(String::new()),
+        other => Err(format!("unknown: {other}")),
+    });
+    assert_eq!(ask("app output 1"), "ok");
+    assert_eq!(ask("app volume"), "error: unknown: volume");
     assert_eq!(link.ended(), None);
     let stopped = link.stop();
     let got = f64::from_bits(heard.load(Ordering::Relaxed));

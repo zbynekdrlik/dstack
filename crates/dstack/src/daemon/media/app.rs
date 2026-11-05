@@ -251,5 +251,44 @@ fn run(shared: &Shared) {
     }
 }
 
+/// An app's command hook ([`crate::daemon::media::Media::set_app_command`]):
+/// the words of a control request `app <words>`, answered `Ok` (done) or
+/// `Err` (why not).
+pub type AppCommand = Arc<dyn Fn(&str) -> Result<String, String> + Send + Sync>;
+
+/// The app's command hook (dstack #139): set once or replaced, called on
+/// the control task that got the request.
+#[derive(Default)]
+pub struct CommandHook {
+    hook: Mutex<Option<AppCommand>>,
+}
+
+impl CommandHook {
+    /// Sets the hook (a later call replaces it).
+    pub fn set(&self, f: AppCommand) {
+        *self.hook.lock().unwrap_or_else(PoisonError::into_inner) = Some(f);
+    }
+
+    /// The hook's answer to `words`, `None` without a hook. The hook runs
+    /// outside the lock; a panic in it is an `Err` (warned), never the
+    /// control task's.
+    pub fn call(&self, words: &str) -> Option<Result<String, String>> {
+        let f = self
+            .hook
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()?;
+        Some(
+            catch_unwind(AssertUnwindSafe(|| f(words))).unwrap_or_else(|_| {
+                warn!("the app's command hook panicked");
+                Err(PANICKED.to_string())
+            }),
+        )
+    }
+}
+
+/// The answer to a command whose hook panicked.
+pub const PANICKED: &str = "the app's command failed";
+
 #[cfg(test)]
 mod tests;
