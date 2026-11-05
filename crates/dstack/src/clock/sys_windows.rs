@@ -389,6 +389,21 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
         pin(TIME_CRITICAL);
+        // The spin alone first (a period past the run: one block at the
+        // start, then Sleep(0) only), for the failure message: whether the
+        // lower thread gets the CPU from Sleep(0) or only in the blocks.
+        let (spin_ran, spin_late) = {
+            let before = turns.load(Ordering::Relaxed);
+            let end = monotonic_ns() + 300_000_000;
+            let mut late = Vec::with_capacity(1_000);
+            while monotonic_ns() < end {
+                let target = monotonic_ns() + 300_000;
+                sleep_until_in(target, super::super::WaitMode::Spin, 10_000_000_000);
+                late.push(monotonic_ns() - target);
+            }
+            late.sort_unstable();
+            (turns.load(Ordering::Relaxed) - before, late)
+        };
         let before = turns.load(Ordering::Relaxed);
         let end = monotonic_ns() + 1_050_000_000;
         let mut late = Vec::with_capacity(4_000);
@@ -409,10 +424,16 @@ mod tests {
         );
         assert!(
             median < 100_000,
-            "median late {median} ns over {} waits; p99 {} ns, max {} ns",
+            "median late {median} ns over {} waits; p99 {} ns, max {} ns; over 0.5 ms: {}; \
+             the Sleep(0) spin alone: {} waits, median {} ns, max {} ns, lower thread ran {}",
             late.len(),
             late[late.len() * 99 / 100],
-            late[late.len() - 1]
+            late[late.len() - 1],
+            late.iter().filter(|&&l| l > 500_000).count(),
+            spin_late.len(),
+            spin_late[spin_late.len() / 2],
+            spin_late[spin_late.len() - 1],
+            spin_ran
         );
     }
 }
