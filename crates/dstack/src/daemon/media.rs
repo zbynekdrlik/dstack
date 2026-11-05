@@ -146,20 +146,18 @@ impl Media {
     ) -> std::io::Result<Media> {
         let cfg = &device.cfg;
         let rings: Arc<[Ring]> = (0..cfg.rx.len()).map(|_| Ring::new()).collect();
-        let tx = Arc::new(TxShared::new(
-            cfg.clone(),
-            ip,
-            Arc::clone(&rings),
-            seed,
-            engine_tx,
-        )?);
+        // The RX side first: its fixed ports (`rx_port_base`) before the
+        // TX sockets' ports the OS chooses, which may lie in that range
+        // (camera-box, strih-snv OBS 5.11.2026: "RX flow port 47217:
+        // Address already in use" on a restart).
         let rx = Arc::new(RxShared::with_slots(
             cfg.sample_rate,
             ip,
-            rings,
+            Arc::clone(&rings),
             cfg.rx_port_base,
             cfg.flow_slots,
         )?);
+        let tx = Arc::new(TxShared::new(cfg.clone(), ip, rings, seed, engine_tx)?);
         let mut manager = Manager::new(cfg, &device.state.name, ip, rx.ports()?);
         manager.load(&device.state.subscriptions);
         manager.changed();
