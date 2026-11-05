@@ -664,6 +664,18 @@ fn run<P: Process>(clock: &dyn PtpClock, mut pump: Pump<P>, stop: &AtomicBool) {
     take_priority("engine pump", ENGINE_PRIORITY);
     place("engine pump", pump.tx.cfg.pump_cpu);
     let rate = pump.tx.cfg.sample_rate;
+    // The bounded escape (dstack #1, Windows): only when W covers its block.
+    let escapes = crate::clock::pump_may_escape(pump.timing.margin, pump.timing.block, rate);
+    #[cfg(any(target_os = "linux", windows))]
+    crate::clock::allow_escape(escapes);
+    if let Some(line) = crate::clock::pump_escape_line(
+        crate::clock::escape_on(),
+        escapes,
+        pump.timing.margin,
+        pump.timing.block,
+    ) {
+        tracing::info!("{line}");
+    }
     let period = Duration::from_nanos(pump.stats.period_ns);
     let mut deadline: Option<Instant> = None;
     let mut pin = RePin::new(pump.tx.cfg.pump_cpu);

@@ -993,3 +993,20 @@ fn a_pump_takes_the_escape_only_when_its_margin_covers_the_block() {
     assert!(pump_may_escape(71, 32, 48_000));
     assert!(!pump_may_escape(10_000, 10_000, 0), "no rate");
 }
+
+/// dstack #1: a pump out of the escape says so at its start, only when
+/// the escape is on; and the process's escape is on while a period is set.
+#[test]
+fn a_pump_out_of_the_escape_says_so_and_the_escape_is_on_while_set() {
+    assert_eq!(
+        pump_escape_line(true, false, 64, 64).unwrap(),
+        "the engine pump stays out of the bounded escape: its margin (64) and block (64) \
+         are under the escape's block (2140 µs); it spins yielding"
+    );
+    assert_eq!(pump_escape_line(true, true, 384, 64), None);
+    assert_eq!(pump_escape_line(false, false, 64, 64), None);
+    set_spin_escape_ms(Some(250));
+    assert!(escape_on());
+    set_spin_escape_ms(None);
+    assert!(!escape_on());
+}

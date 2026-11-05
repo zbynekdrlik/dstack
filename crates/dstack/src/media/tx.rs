@@ -1494,6 +1494,9 @@ fn run(clock: &dyn PtpClock, shared: Arc<TxShared>) {
         .then(|| super::qos::hold(std::path::Path::new(super::qos::CPU_DMA_LATENCY)))
         .flatten();
     let mut tx = Transmitter::new(Arc::clone(&shared));
+    // TX sends ahead before each escape (`Transmitter::before_wait`).
+    #[cfg(any(target_os = "linux", windows))]
+    crate::clock::allow_escape(true);
     let mut pin = super::repin::RePin::new(shared.cfg.io_cpu);
     while !shared.stopping() {
         pin.keep(shared.now_ns());
