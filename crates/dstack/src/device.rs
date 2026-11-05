@@ -106,11 +106,11 @@ pub struct DeviceConfig {
     pub tx_margin_ns: u64,
     /// Windows, the low-latency profile: how long before each deadline the
     /// media threads stop sleeping on the high-resolution timer and spin
-    /// (never yielding on a thread pinned to a CPU of its own, yielding on
-    /// any other), ns, 0 to [`crate::clock::SPIN_TAIL_MAX_NS`]; the default
-    /// [`crate::clock::SPIN_TAIL_NS`] spins every wait shorter than 50 ms.
-    /// A short tail (100-300 µs) frees the CPUs where the timer wakes on
-    /// time (dasio, FOH, 3.11.2026); `docs/windows-box.md`.
+    /// (yielding), ns, 0 to [`crate::clock::SPIN_TAIL_MAX_NS`]; the
+    /// default [`crate::clock::SPIN_TAIL_NS`] spins every wait shorter
+    /// than 50 ms, so at 1 ms the threads never sleep. A short tail
+    /// (100-300 µs) frees their CPUs where the timer wakes on time (dasio,
+    /// FOH, 3.11.2026).
     #[serde(default)]
     pub spin_tail_ns: Option<u64>,
     /// The most frames per packet our TX channels offer (mDNS `fpp`, a
@@ -214,8 +214,7 @@ pub struct Declared {
 #[serde(rename_all = "snake_case")]
 pub enum TimingProfile {
     /// Tight timing: real-time priority for the media threads and, on
-    /// Windows, a spin through the last spin tail of a wait (50 ms unless
-    /// set; never yielding on a pinned thread).
+    /// Windows, a yielding spin through the last 50 ms of a wait.
     #[default]
     LowLatency,
     /// Stability and little CPU (dlink, #68): no real-time priority

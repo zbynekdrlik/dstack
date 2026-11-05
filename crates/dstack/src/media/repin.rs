@@ -52,9 +52,7 @@ impl RePin {
         if self.due(now_ns)
             && let Some(cpu) = self.cpu
         {
-            let found = repin(cpu);
-            crate::clock::set_pinned(found != PinOutcome::Refused);
-            note(found);
+            note(repin(cpu));
         }
     }
 }

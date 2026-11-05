@@ -440,9 +440,8 @@ pub use os::{DSYNC, MonoClock, POLL, Poller, monotonic_ns, poll_dsync, realtime_
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WaitMode {
     /// The high-resolution waitable timer for all but the last spin tail
-    /// (50 ms unless the device sets one), then a spin (the low-latency
-    /// profile): never yielding on a thread pinned to a CPU of its own
-    /// ([`set_pinned`]), yielding on any other.
+    /// (50 ms unless the device sets one), then a yielding spin (the
+    /// low-latency profile).
     Spin,
     /// The high-resolution waitable timer for the whole wait, no spin
     /// (the normal profile).
@@ -450,9 +449,7 @@ pub enum WaitMode {
 }
 
 /// The spin tail of the low-latency wait on Windows unless the device sets
-/// one, ns: every wait shorter than this is spun ([`WaitMode::Spin`]). (2 ms
-/// in 0.6.34 only: with the unpinned threads' yield back, 0.6.35 waits as
-/// 0.6.33 did unless a device sets its tail.)
+/// one, ns: every wait shorter than this is spun ([`WaitMode::Spin`]).
 pub const SPIN_TAIL_NS: u64 = 50_000_000;
 /// The longest spin tail a device may set, ns.
 pub const SPIN_TAIL_MAX_NS: u64 = 50_000_000;
@@ -472,28 +469,6 @@ pub fn set_spin_tail_ns(configured: Option<u64>) {
         spin_tail_of(configured),
         std::sync::atomic::Ordering::Relaxed,
     );
-}
-
-thread_local! {
-    /// Whether the stack pinned the calling thread to a CPU of its own
-    /// ([`set_pinned`]).
-    static PINNED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-/// Marks the calling thread pinned to a CPU of its own (`true`: the
-/// stack's pin was taken) or not (refused, or never asked). On Windows a
-/// pinned thread's spin never yields; any other thread's yields (dstack
-/// #1: a yield handed a pinned TX thread's CPU to a lower priority for
-/// 1.66 ms, and spinners that never yield without a CPU of their own
-/// starved a runner with two devices).
-pub fn set_pinned(pinned: bool) {
-    PINNED.with(|p| p.set(pinned));
-}
-
-/// Whether the calling thread is pinned to a CPU of its own
-/// ([`set_pinned`]).
-pub fn pinned() -> bool {
-    PINNED.with(std::cell::Cell::get)
 }
 
 /// The spin tail of a wait in `mode` with the process's tail `tail_ns`:
