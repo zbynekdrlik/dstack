@@ -193,20 +193,22 @@ fn a_poisoned_tracker_is_still_fed() {
 /// dstack #1 (iemmixer 5.11.2026): after a grandmaster change the follower
 /// relocked at -39.8 µs and took 6 min 41 s to take over again, and the
 /// status could not say why. Its counts carry what the selector decides
-/// on: dsync's lock, settled, last error and recent |e| p90.
+/// on: dsync's lock, settled, last error and recent |e| p90, and the phase
+/// still being retired after a grandmaster change (dsync#158).
 #[test]
 fn the_follower_counts_carry_its_lock_settled_and_errors() {
     let unsettled = ClockModel {
         settled: false,
         offset_ns: Some(-39_806),
         recent_abs_e_ns: Some(41_250),
+        pull_ns: 87_500,
         ..model(M0, P0, 0, 0)
     };
     let src = Arc::new(FakeModel(Mutex::new((unsettled, true))));
     let c = Absorbing::new(Arc::clone(&src)).counts();
     assert_eq!(
-        (c.locked, c.settled, c.offset_ns, c.recent_abs_e_ns),
-        (true, false, Some(-39_806), Some(41_250))
+        (c.locked, c.settled, c.offset_ns, c.recent_abs_e_ns, c.pull_ns),
+        (true, false, Some(-39_806), Some(41_250), 87_500)
     );
     let fresh = ClockModel {
         locked: false,
@@ -218,7 +220,7 @@ fn the_follower_counts_carry_its_lock_settled_and_errors() {
     *src.0.lock().unwrap() = (fresh, true);
     let c = Absorbing::new(src).counts();
     assert_eq!(
-        (c.locked, c.settled, c.offset_ns, c.recent_abs_e_ns),
-        (false, false, None, None)
+        (c.locked, c.settled, c.offset_ns, c.recent_abs_e_ns, c.pull_ns),
+        (false, false, None, None, 0)
     );
 }
