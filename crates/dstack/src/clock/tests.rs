@@ -974,3 +974,39 @@ fn no_wait_escapes_on_linux() {
     assert!(!ask_escape());
     assert!(!defer_escape());
 }
+
+/// dstack #1 (iem-snv trial of v0.6.38, 5.11): a pump at block 64 with
+/// W 64 (96 kHz, 0.67 ms each) re-bootstrapped and lost 2 blocks at every
+/// escape. Woken up to `PRESEND_NS` after its last run, a pump is behind by
+/// up to `PRESEND_NS` less one block, so it takes the escape's block only
+/// when W covers that; FOH's pumps (W 384 and 512 at 96 kHz) do.
+#[test]
+fn a_pump_takes_the_escape_only_when_its_margin_covers_the_block() {
+    // 96 kHz: PRESEND_NS (2.14 ms) is 205.44 samples.
+    assert!(!pump_may_escape(64, 64, 96_000), "the trial's pump");
+    assert!(pump_may_escape(384, 64, 96_000), "FOH master");
+    assert!(pump_may_escape(512, 256, 96_000), "FOH band");
+    assert!(!pump_may_escape(141, 64, 96_000), "205 samples: 2.135 ms");
+    assert!(pump_may_escape(142, 64, 96_000), "206 samples: 2.146 ms");
+    // 48 kHz: 102.72 samples.
+    assert!(!pump_may_escape(70, 32, 48_000));
+    assert!(pump_may_escape(71, 32, 48_000));
+    assert!(!pump_may_escape(10_000, 10_000, 0), "no rate");
+}
+
+/// dstack #1: a pump out of the escape says so at its start, only when
+/// the escape is on; and the process's escape is on while a period is set.
+#[test]
+fn a_pump_out_of_the_escape_says_so_and_the_escape_is_on_while_set() {
+    assert_eq!(
+        pump_escape_line(true, false, 64, 64).unwrap(),
+        "the engine pump stays out of the bounded escape: its margin (64) and block (64) \
+         are under the escape's block (2140 µs); it spins yielding"
+    );
+    assert_eq!(pump_escape_line(true, true, 384, 64), None);
+    assert_eq!(pump_escape_line(false, false, 64, 64), None);
+    set_spin_escape_ms(Some(250));
+    assert!(escape_on());
+    set_spin_escape_ms(None);
+    assert!(!escape_on());
+}

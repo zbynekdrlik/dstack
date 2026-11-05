@@ -54,6 +54,10 @@ pub fn ask_escape() -> bool {
     false
 }
 
+/// Lets this thread's waits make the bounded escape (dstack #1): nothing
+/// on Linux, whose wait never spins.
+pub fn allow_escape(_allowed: bool) {}
+
 /// Puts off this thread's armed escape (dstack #1): nothing is ever armed
 /// on Linux, so never.
 pub fn defer_escape() -> bool {

@@ -159,6 +159,19 @@ fn escape_period() -> u64 {
 }
 
 thread_local! {
+    /// Whether this thread's waits make the bounded escape ([`allow_escape`]).
+    static ALLOWED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Lets this thread's low-latency waits make the bounded escape (dstack
+/// #1, `spin_escape_ms`): the TX thread (it sends ahead first) and an
+/// engine pump whose margin covers the block ([`super::pump_may_escape`]).
+/// Any other thread spins yielding, as without the escape.
+pub fn allow_escape(allowed: bool) {
+    ALLOWED.with(|a| a.set(allowed));
+}
+
+thread_local! {
     /// This thread's bounded escape (dstack #1).
     static ESCAPE: std::cell::Cell<super::EscapeState> =
         const { std::cell::Cell::new(super::EscapeState::new()) };
@@ -217,7 +230,7 @@ fn block_for(ns: i64) {
 /// [`sleep_until_monotonic`] in the wait `mode`, with a bounded escape
 /// every `escape_ns` (0: none; the spin wait only).
 fn sleep_until_in(target: i64, mode: super::WaitMode, escape_ns: u64) {
-    let escape = mode == super::WaitMode::Spin && escape_ns != 0;
+    let escape = mode == super::WaitMode::Spin && escape_ns != 0 && ALLOWED.with(|a| a.get());
     // The bounded escape (dstack #1, `spin_escape_ms`): once a period the
     // thread blocks one timer tick, whatever its deadline. The timer's
     // expiry preempts a lower priority at once, so per-CPU system work
@@ -390,6 +403,8 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
         pin(TIME_CRITICAL);
+        // As the TX thread does (`media::tx::run`).
+        allow_escape(true);
         // The spin alone first (a period past the run: one block at the
         // start, then the spin only), for the failure message: whether the
         // lower thread gets the CPU from the spin or only in the blocks.

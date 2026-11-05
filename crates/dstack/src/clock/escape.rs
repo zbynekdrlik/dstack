@@ -29,6 +29,33 @@ pub const TIMER_LATE_NS: u64 = 1_140_000;
 /// read while it sends anything, so its own send time is covered too
 /// (`media::tx::Transmitter::presend_all`).
 pub const PRESEND_NS: u64 = ESCAPE_BLOCK_NS + TIMER_LATE_NS;
+/// Whether an engine pump with work margin `margin` and block `block`
+/// (samples at `rate`) takes the bounded escape's block. Woken up to
+/// [`PRESEND_NS`] after its last run, the pump is behind by up to
+/// [`PRESEND_NS`] less one block, and past W it re-bootstraps and loses
+/// blocks (the iem-snv trial of v0.6.38, 5.11.2026: block 64 and W 64 at
+/// 96 kHz lost 2 blocks at every escape). A pump that does not take it
+/// spins yielding, as without the escape.
+pub fn pump_may_escape(margin: u64, block: u64, rate: u32) -> bool {
+    if rate == 0 {
+        return false;
+    }
+    let ns = |samples: u64| samples.saturating_mul(1_000_000_000) / u64::from(rate);
+    ns(margin).saturating_add(ns(block)) >= PRESEND_NS
+}
+
+/// The start line of an engine pump that stays out of the bounded escape
+/// (the escape is on and [`pump_may_escape`] says no); `None` otherwise.
+pub fn pump_escape_line(escape_on: bool, escapes: bool, margin: u64, block: u64) -> Option<String> {
+    (escape_on && !escapes).then(|| {
+        format!(
+            "the engine pump stays out of the bounded escape: its margin ({margin}) and block ({block}) \
+             are under the escape's block ({} µs); it spins yielding",
+            PRESEND_NS / 1_000
+        )
+    })
+}
+
 /// How long past its period TX may put off an escape because a packet in
 /// the presend window had no samples yet, ns: a packet held through the
 /// block past the latency would restart its flow's schedule. Past this

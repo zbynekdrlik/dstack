@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.39 (unreleased)
+
+- Fix (dasio's iem-snv trial of v0.6.38, 5.11; dstack #1): with `spin_escape_ms` set, an engine pump takes the escape's one-tick block only when its work margin covers it (`clock::pump_may_escape`: W + one block >= `clock::PRESEND_NS`, 2.14 ms). In the trial a pump at block 64 with W 64 (96 kHz, 0.67 ms each) re-bootstrapped and lost 2 blocks at every escape (152 re-bootstraps, 304 missed blocks in 7 min). A pump out of the escape spins yielding, as without it, and says so at its start. FOH's pumps (W 384 and 512 at 96 kHz) still take it.
+  - Only the threads that opt in make the escape (`clock::allow_escape`): the TX thread, which sends ahead first, and a pump whose margin covers the block. Every other thread spins yielding.
+  - The trial's other results: TX made no restarts and sent about 74 k packets ahead per flow, and the receiver at 250 µs had 0 gaps and 0 late; the PC stayed responsive, and the per-CPU walker waited at most one period on the spinning CPUs.
+  - Still OFF by default; unset, nothing changes.
+
 ## 0.6.38 (unreleased)
 
 - New, OFF by default, for a trial only (dstack #1, agreed with dasio 5.11): `DeviceConfig::spin_escape_ms`, a bounded escape for the Windows low-latency wait. Left out, nothing changes: the spin yields with SwitchToThread as in v0.6.36. Set (100 to 10000 ms), on Windows:
