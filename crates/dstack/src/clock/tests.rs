@@ -873,3 +873,22 @@ fn the_spin_tail_is_the_device_s_within_its_bound_and_only_for_the_spin_wait() {
     assert_eq!(spin_tail_for(WaitMode::Spin, 200_000), 200_000);
     assert_eq!(spin_tail_for(WaitMode::Timer, 200_000), 0);
 }
+
+/// dstack #1 (0.6.35): a thread is unpinned until the stack marks it, and
+/// the mark is the calling thread's own (a media thread's pin, set by
+/// `media::tx::place` and the re-pin), so it can be taken back.
+#[test]
+fn a_thread_is_pinned_only_while_the_stack_marks_it() {
+    std::thread::spawn(|| {
+        assert!(!pinned(), "a new thread is not pinned");
+        set_pinned(true);
+        assert!(pinned());
+        std::thread::spawn(|| assert!(!pinned(), "another thread is not"))
+            .join()
+            .unwrap();
+        set_pinned(false);
+        assert!(!pinned());
+    })
+    .join()
+    .unwrap();
+}

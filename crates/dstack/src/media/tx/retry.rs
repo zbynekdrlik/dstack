@@ -80,15 +80,20 @@ pub(super) fn send_with_retries(
     (sent, retries)
 }
 
-/// Waits `d` on the calling thread, spinning without yielding (the TX
-/// thread's wait before a retry: far below a timer's resolution on
-/// Windows). The same spin as the clock's tail on Windows
-/// (`clock::sys_windows`, dstack #1: a yield hands the CPU to a lower
-/// priority for the rest of its slice), on `Instant` so it runs on every OS.
+/// Waits `d` on the calling thread, spinning (the TX thread's wait before
+/// a retry: far below a timer's resolution on Windows). The same spin as
+/// the clock's tail on Windows (`clock::sys_windows`, dstack #1): never
+/// yielding on a thread pinned to a CPU of its own, yielding on any other;
+/// on `Instant` so it runs on every OS.
 pub(super) fn spin_for(d: std::time::Duration) {
     let start = Instant::now();
+    let pinned = crate::clock::pinned();
     while !d.saturating_sub(start.elapsed()).is_zero() {
-        std::hint::spin_loop();
+        if pinned {
+            std::hint::spin_loop();
+        } else {
+            std::thread::yield_now();
+        }
     }
 }
 
