@@ -192,7 +192,9 @@ pub struct DeviceConfig {
     /// The first of the RX flow ports (UDP): slot `n` (from 0) receives on
     /// `rx_port_base + n`, [`crate::media::rx::MAX_FLOWS`] ports, so a
     /// firewall can name them (camera-box's nft table, dstack #20). Ports
-    /// the OS chooses when left out.
+    /// the OS chooses when left out. Pick a base outside the OS's ephemeral
+    /// range (Linux 32768-60999, Windows 49152-65535): there any other
+    /// process's socket may hold one of them, and the device does not start.
     #[serde(default)]
     pub rx_port_base: Option<u16>,
     /// RX subscriptions the app declares (`[[subscribe]]`, intercom#5):

@@ -1,6 +1,11 @@
 # Changelog
 
-## 0.6.44 (unreleased)
+## 0.6.45 (unreleased)
+
+- Fix (camera-box, strih-snv OBS, 5.11, v0.6.33): after a restart the device did not start ("RX flow port 47217: Address already in use"), and the strih program had no audio for 70 min. The TX side bound its 32 sockets on ports the OS chose before the RX side bound its fixed `rx_port_base` ports. The base 47200 lies in Linux's ephemeral range, so a TX socket could take one of them: in the test, about one start in 28. The RX side now binds first. A base inside the ephemeral range can still collide with another process's socket, so the `rx_port_base` doc now says to pick one outside it.
+  - No API change, no latency change.
+
+## 0.6.44
 
 - Fix (iemmixer, 5.11, v0.6.43; dstack #1): a channel counted 11531 holes and 6982 late samples, in bursts every 15-20 s, while its flow counted 0 late packets. A flow judged a packet late only once its first frame passed playout + block, the most a block's read can wait. The pump reads a block at each wake, so a packet that passes playout within the block is behind the reader or not depending on the pump's phase. Its channels counted it; the flow never did. The status's `lateness` holds only the last second's peak, so the bursts did not show there either. Each RX flow now also counts `late_at_read`: packets with a frame that a ring refused as already read, the same packets its channels count. It also keeps `lateness_peak`, the largest lateness since start. `late` keeps its meaning.
   - Additive status fields only; no API change, no latency change.
