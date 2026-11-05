@@ -398,6 +398,8 @@ fn due_early_takes_a_packet_due_by_the_horizon_whose_samples_are_there() {
     let mut s = Schedule::bootstrap(1_000, 32, 96);
     // The first packet (stamp 1 024) is due at 1 056.
     assert_eq!(s.due_early(1_055, |_| true), None);
+    assert!(!s.due_by(1_055));
+    assert!(s.due_by(1_056));
     assert_eq!(s.next, 1_024);
     assert_eq!(s.due_early(1_056, |_| false), None, "samples not there");
     assert_eq!(s.next, 1_024);
@@ -941,9 +943,25 @@ fn presend_sends_the_packets_due_within_the_window_early_with_their_samples() {
     let (slot, _) = rig.flow(vec![Some(2), Some(1)]);
     rig.tx.step(Some(T), 0);
     assert!(drain(&rig.rx).is_empty(), "nothing due yet");
-    rig.tx.presend(None);
+    let none = Presend {
+        sent: 0,
+        covered: false,
+    };
+    assert_eq!(rig.tx.presend(None, 0), none);
     assert!(drain(&rig.rx).is_empty(), "no clock: nothing sent ahead");
-    rig.tx.presend(Some(T));
+    assert_eq!(
+        rig.tx.presend(Some(T), 1),
+        none,
+        "re-anchored since the pass"
+    );
+    assert!(drain(&rig.rx).is_empty(), "a new epoch: nothing sent ahead");
+    assert_eq!(
+        rig.tx.presend(Some(T), 0),
+        Presend {
+            sent: 5,
+            covered: true
+        }
+    );
     let early = drain(&rig.rx);
     let want = due_within_presend(n0 - n0 % FPP + FPP, T);
     // 2.14 ms at 96 kHz is 205 samples; past the first packet's phase at
@@ -963,7 +981,13 @@ fn presend_sends_the_packets_due_within_the_window_early_with_their_samples() {
         "{lane:?}"
     );
     // A second presend at the same time has nothing more to send.
-    rig.tx.presend(Some(T));
+    assert_eq!(
+        rig.tx.presend(Some(T), 0),
+        Presend {
+            sent: 0,
+            covered: true
+        }
+    );
     assert!(drain(&rig.rx).is_empty());
     // The passes after the escape go on with the next stamp.
     let later = run(&mut rig, 500, 6_000);
@@ -992,12 +1016,22 @@ fn presend_stops_at_the_first_packet_whose_samples_are_not_there() {
     assert!(rig.shared.set_source(0, Source::Engine));
     let (slot, _) = rig.flow(vec![Some(1), None]);
     rig.tx.step(Some(T), 0);
-    rig.tx.presend(Some(T));
+    assert_eq!(
+        rig.tx.presend(Some(T), 0),
+        Presend {
+            sent: 2,
+            covered: false
+        },
+        "the third packet is due within the window"
+    );
     let early = drain(&rig.rx);
     assert_eq!(
         early.iter().map(|p| stamp_of(p)).collect::<Vec<_>>(),
         [first, first + FPP]
     );
+    // presend_all says so: the escape must wait.
+    assert!(!rig.tx.presend_all(0, || Some(T)));
+    assert!(drain(&rig.rx).is_empty());
     let lane = rig.shared.lane(slot);
     assert_eq!((lane.early, lane.holes), (2, 0), "{lane:?}");
     // The third packet goes out at its time, its missing samples holes.
@@ -1008,6 +1042,50 @@ fn presend_stops_at_the_first_packet_whose_samples_are_not_there() {
     assert_eq!(stamp_of(&third[0]), first + 2 * FPP);
     let lane = rig.shared.lane(slot);
     assert_eq!((lane.early, lane.holes), (2, 22), "{lane:?}");
+}
+
+/// The send ahead repeats from a fresh clock read while it sends, so the
+/// window also covers its own send time; it stops once a round sends
+/// nothing, and at most after `PRESEND_ROUNDS` rounds.
+#[test]
+fn presend_all_repeats_from_a_fresh_clock_until_a_round_sends_nothing() {
+    let mut rig = Rig::new(Vec::new());
+    assert!(rig.shared.set_source(0, Source::Counter));
+    let (slot, _) = rig.flow(vec![Some(1)]);
+    rig.tx.step(Some(T), 0);
+    let n0 = send_clock(T, RATE, TX_MARGIN_NS);
+    let first = n0 - n0 % FPP + FPP;
+    // Each read 1 ms later than the one before.
+    let mut reads = Vec::new();
+    assert!(rig.tx.presend_all(0, || {
+        let at = T + reads.len() as u64 * MS;
+        reads.push(at);
+        Some(at)
+    }));
+    // Rounds 1-4 each send what came within the window since the round
+    // before; the fourth is the last whatever it sent.
+    assert_eq!(reads.len(), 4, "{reads:?}");
+    let sent: Vec<u64> = drain(&rig.rx).iter().map(|p| stamp_of(p)).collect();
+    assert_eq!(sent, due_within_presend(first, T + 3 * MS));
+    assert_eq!(rig.shared.lane(slot).early, sent.len() as u64);
+    // A clock that stands still: one round sends, the next sends nothing.
+    let mut rig = Rig::new(Vec::new());
+    rig.flow(vec![Some(1)]);
+    rig.tx.step(Some(T), 0);
+    let mut calls = 0;
+    assert!(rig.tx.presend_all(0, || {
+        calls += 1;
+        Some(T)
+    }));
+    assert_eq!(calls, 2);
+    assert_eq!(drain(&rig.rx).len(), 5);
+    // Not covered (a new epoch): false at once.
+    let mut calls = 0;
+    assert!(!rig.tx.presend_all(1, || {
+        calls += 1;
+        Some(T)
+    }));
+    assert_eq!(calls, 1);
 }
 
 #[test]

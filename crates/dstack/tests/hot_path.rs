@@ -499,7 +499,7 @@ fn the_engine_pump_and_its_tx_passes_do_not_allocate() {
             let at = start + i * 250_000;
             transmitter.step(Some(at), 0);
             if i % 40 == 20 && i < 360 {
-                transmitter.presend(Some(at));
+                let _ = transmitter.presend_all(0, || Some(at));
             }
         }
     });

@@ -170,15 +170,28 @@ thread_local! {
 /// thread's waits escape only when an ask said so
 /// ([`super::EscapeState::ask`]).
 pub fn ask_escape() -> bool {
-    if super::wait_mode() != super::WaitMode::Spin {
+    let period = escape_period();
+    if period == 0 || super::wait_mode() != super::WaitMode::Spin {
         return false;
     }
-    let period = escape_period();
     ESCAPE.with(|e| {
         let mut s = e.get();
         let go = s.ask(monotonic_ns(), period);
         e.set(s);
         go
+    })
+}
+
+/// Puts off this thread's armed escape: TX could not send ahead the whole
+/// window ([`super::EscapeState::defer`]); `false` when the escape still
+/// happens (nothing armed, or already overdue).
+pub fn defer_escape() -> bool {
+    let period = escape_period();
+    ESCAPE.with(|e| {
+        let mut s = e.get();
+        let put_off = s.defer(monotonic_ns(), period);
+        e.set(s);
+        put_off
     })
 }
 

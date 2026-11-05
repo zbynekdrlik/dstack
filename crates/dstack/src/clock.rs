@@ -36,6 +36,7 @@
 //! judge, [`crate::media::rx::RxShared::last_min_lateness_ns`]).
 
 pub mod dsyx;
+pub mod escape;
 pub mod steer;
 
 use crate::device::TimingProfile;
@@ -47,6 +48,10 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::atomic::{AtomicI32, AtomicI64};
 
 pub use dsyx::{DateState, Reading};
+pub use escape::{
+    ESCAPE_BLOCK_NS, ESCAPE_DEFER_MAX_NS, EscapeState, PRESEND_NS, SPIN_ESCAPE_MAX_MS,
+    SPIN_ESCAPE_MIN_MS, TIMER_LATE_NS, spin_escape_line, spin_escape_of,
+};
 
 /// Two readings whose k differ by at most this agree (20 µs: far above
 /// dsync's reply jitter, two clock reads microseconds apart, and below
@@ -491,32 +496,10 @@ pub fn spin_tail_for(mode: WaitMode, tail_ns: u64) -> u64 {
     }
 }
 
-/// The shortest bounded-escape period a device may set, ms
-/// (`spin_escape_ms`, dstack #1).
-pub const SPIN_ESCAPE_MIN_MS: u64 = 100;
-/// The longest bounded-escape period a device may set, ms.
-pub const SPIN_ESCAPE_MAX_MS: u64 = 10_000;
-/// The bounded escape's block: a relative due time on the high-resolution
-/// timer, ns (one tick at the 1 ms resolution).
-pub const ESCAPE_BLOCK_NS: u64 = 1_000_000;
-/// How late the high-resolution timer wakes at most, ns: one tick + 140 µs
-/// at the 1 ms resolution (the FOH PC, 5.11.2026: max 1.11 ms; at 0.5 ms,
-/// max 0.64 ms).
-pub const TIMER_LATE_NS: u64 = 1_140_000;
-/// How far ahead TX sends before a bounded escape, ns: the block and the
-/// timer's late wake, the longest the TX thread can be away
-/// ([`ESCAPE_BLOCK_NS`] + [`TIMER_LATE_NS`], 2.14 ms).
-pub const PRESEND_NS: u64 = ESCAPE_BLOCK_NS + TIMER_LATE_NS;
-
 /// The process's bounded-escape period, ns; 0: off
-/// ([`set_spin_escape_ms`]). Read by the Windows wait only.
+/// ([`set_spin_escape_ms`]; process-wide, the last device set wins, as
+/// the spin tail). Read by the Windows wait only.
 static SPIN_ESCAPE: AtomicU64 = AtomicU64::new(0);
-
-/// The bounded-escape period for a device's `spin_escape_ms`, ns: 0
-/// (off) when it sets none.
-pub fn spin_escape_of(configured_ms: Option<u64>) -> u64 {
-    configured_ms.map_or(0, |ms| ms.saturating_mul(1_000_000))
-}
 
 /// Sets the process's bounded-escape period ([`spin_escape_of`] the
 /// device's). Only the Windows low-latency wait reads it.
@@ -524,89 +507,8 @@ pub fn set_spin_escape_ms(configured_ms: Option<u64>) {
     SPIN_ESCAPE.store(spin_escape_of(configured_ms), Ordering::Relaxed);
 }
 
-/// The start line for a device's `spin_escape_ms` on `os`: `None` when
-/// it sets none.
-pub fn spin_escape_line(configured_ms: Option<u64>, os: Os) -> Option<String> {
-    let ms = configured_ms?;
-    Some(match os {
-        Os::Windows => format!(
-            "bounded escape on (trial, dstack #1): the low-latency spin yields with Sleep(0), \
-             each spinning media thread blocks {} µs on the timer every {ms} ms, TX sends {} µs ahead first",
-            ESCAPE_BLOCK_NS / 1_000,
-            PRESEND_NS / 1_000
-        ),
-        Os::Other => {
-            format!("spin_escape_ms = {ms} is for Windows only: ignored on this OS")
-        }
-    })
-}
-
-/// A media thread's bounded escape (dstack #1): when its last escape was,
-/// and, for a thread that sends ahead first (TX, [`EscapeState::ask`]),
-/// whether its next wait escapes. Kept per thread.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct EscapeState {
-    /// Monotonic ns of the last escape (or of the first look).
-    last: Option<i64>,
-    /// The thread asks before its waits ([`EscapeState::ask`]): its waits
-    /// escape only when it was told so.
-    asks: bool,
-    /// The thread was told its next wait escapes.
-    armed: bool,
-}
-
-impl EscapeState {
-    pub const fn new() -> Self {
-        EscapeState {
-            last: None,
-            asks: false,
-            armed: false,
-        }
-    }
-
-    /// Whether an escape is due at monotonic `now` with `period_ns`
-    /// between escapes (0: never); the first look only starts the period.
-    fn due(&mut self, now: i64, period_ns: u64) -> bool {
-        if period_ns == 0 {
-            return false;
-        }
-        match self.last {
-            None => {
-                self.last = Some(now);
-                false
-            }
-            Some(last) => now.saturating_sub(last) >= i64::try_from(period_ns).unwrap_or(i64::MAX),
-        }
-    }
-
-    /// A thread that sends ahead before it escapes (TX) asks before its
-    /// wait: `true` when the wait will escape. From the first ask, the
-    /// thread's waits escape only when an ask said so, so what it sent
-    /// ahead and its escape always go together.
-    pub fn ask(&mut self, now: i64, period_ns: u64) -> bool {
-        self.asks = true;
-        self.armed = self.due(now, period_ns);
-        self.armed
-    }
-
-    /// The wait at monotonic `now`: whether it escapes (an ask said so, or,
-    /// for a thread that never asks, the period is over). An escape starts
-    /// the next period.
-    pub fn take(&mut self, now: i64, period_ns: u64) -> bool {
-        let go = if self.asks {
-            std::mem::take(&mut self.armed)
-        } else {
-            self.due(now, period_ns)
-        };
-        if go {
-            self.last = Some(now);
-        }
-        go
-    }
-}
-
 #[cfg(any(target_os = "linux", windows))]
-pub use sys::ask_escape;
+pub use sys::{ask_escape, defer_escape};
 
 /// The wait of a timing profile.
 pub fn wait_mode_for(profile: TimingProfile) -> WaitMode {

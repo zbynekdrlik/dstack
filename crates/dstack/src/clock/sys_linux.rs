@@ -53,3 +53,9 @@ pub fn sleep_until_monotonic(target: i64) {
 pub fn ask_escape() -> bool {
     false
 }
+
+/// Puts off this thread's armed escape (dstack #1): nothing is ever armed
+/// on Linux, so never.
+pub fn defer_escape() -> bool {
+    false
+}

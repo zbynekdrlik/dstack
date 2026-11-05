@@ -121,7 +121,9 @@ pub struct DeviceConfig {
     /// SwitchToThread, and every spinning media thread blocks one timer
     /// tick ([`crate::clock::ESCAPE_BLOCK_NS`]) at least once a period, so
     /// per-CPU system work runs; TX first sends the packets due within
-    /// [`crate::clock::PRESEND_NS`] whose samples it already holds.
+    /// [`crate::clock::PRESEND_NS`] whose samples it already holds (and
+    /// puts the escape off, at most [`crate::clock::ESCAPE_DEFER_MAX_NS`],
+    /// while one has none). Process-wide: the last device set wins.
     /// Accepted and ignored on Linux, whose wait never spins.
     #[serde(default)]
     pub spin_escape_ms: Option<u64>,

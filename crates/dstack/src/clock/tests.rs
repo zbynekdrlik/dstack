@@ -944,8 +944,33 @@ fn a_thread_that_asks_escapes_only_after_an_ask_said_so() {
     assert!(!s.take(200_000_052, P));
 }
 
+/// TX puts off an armed escape while a packet in its window has no
+/// samples, up to `ESCAPE_DEFER_MAX_NS` past the period; then the escape
+/// happens anyway.
+#[test]
+fn an_armed_escape_is_put_off_until_20_ms_past_its_period() {
+    const P: u64 = 100_000_000;
+    let mut s = EscapeState::new();
+    assert!(!s.defer(0, P), "nothing armed");
+    assert!(!s.ask(0, P));
+    assert!(!s.defer(50, P), "nothing armed");
+    assert!(s.ask(100_000_000, P));
+    assert!(s.defer(100_000_000, P));
+    assert!(!s.take(100_000_001, P), "put off: no escape");
+    assert!(s.ask(119_999_999, P));
+    assert!(s.defer(119_999_999, P), "1 ns under the cap");
+    assert!(s.ask(120_000_000, P));
+    assert!(!s.defer(120_000_000, P), "at the cap: escapes anyway");
+    assert!(s.take(120_000_001, P));
+    // The next period runs from that escape.
+    assert!(!s.ask(220_000_000, P));
+    assert!(s.ask(220_000_001, P));
+    assert_eq!(ESCAPE_DEFER_MAX_NS, 20_000_000);
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn no_wait_escapes_on_linux() {
     assert!(!ask_escape());
+    assert!(!defer_escape());
 }

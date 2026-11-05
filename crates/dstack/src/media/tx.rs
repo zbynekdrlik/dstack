@@ -1010,13 +1010,17 @@ impl Schedule {
     /// escape ([`Transmitter::presend`], dstack #1); never a restart, since
     /// [`Schedule::due`] judged the lag at the clock's own time just before.
     pub fn due_early(&mut self, horizon: u64, ready: impl FnOnce(u64) -> bool) -> Option<u64> {
-        let send = self.next.saturating_add(self.fpp);
-        if send > horizon || !ready(self.next) {
+        if !self.due_by(horizon) || !ready(self.next) {
             return None;
         }
         let stamp = self.next;
-        self.next = send;
+        self.next = stamp.saturating_add(self.fpp);
         Some(stamp)
+    }
+
+    /// Whether the next packet is due by media time `horizon`.
+    pub fn due_by(&self, horizon: u64) -> bool {
+        self.next.saturating_add(self.fpp) <= horizon
     }
 
     /// The PTP ns at which the next packet is due at `rate`, `margin_ns`
@@ -1158,27 +1162,6 @@ impl Transmitter {
         self.send_due(now, now_ns, pass, None);
     }
 
-    /// Before a bounded escape (dstack #1, `spin_escape_ms`; right after a
-    /// [`Transmitter::step`]): every packet due within
-    /// [`clock::PRESEND_NS`] of PTP `now_ns`, the longest the thread can
-    /// then be away, sent now, each flow in order up to its first packet
-    /// whose samples are not there yet ([`Source::ready`]). Those, and the
-    /// rest, go out after the escape, late as the counters count them.
-    /// Counted in the lanes' `early`.
-    pub fn presend(&mut self, now_ns: Option<u64>) {
-        let pass = Instant::now();
-        let Some(now_ns) = now_ns else {
-            return;
-        };
-        let now = send_clock(now_ns, self.rate, self.margin_ns);
-        let horizon = send_clock(
-            now_ns.saturating_add(clock::PRESEND_NS),
-            self.rate,
-            self.margin_ns,
-        );
-        self.send_due(now, now_ns, pass, Some(horizon));
-    }
-
     /// When the next pass is due, PTP ns: the next packet of any flow or
     /// the next read of the plans; 0 (at once: a clock that is not ready
     /// naps) when the clock is not ready.
@@ -1250,11 +1233,11 @@ impl Transmitter {
     /// Every packet due at media time `now` (PTP `now_ns`, read at `pass`),
     /// each flow in turn (the hot path: no allocation, no lock, no log; the
     /// send is its one system call); with `early`, every packet due by that
-    /// media time whose samples are there instead ([`Transmitter::presend`]).
-    /// With a host sender, the packets to resolved neighbours are gathered
-    /// as frames and sent in one call at the end of the pass
-    /// ([`host::Batch`]); the rest go out at once.
-    fn send_due(&mut self, now: u64, now_ns: u64, pass: Instant, early: Option<u64>) {
+    /// media time whose samples are there instead ([`Transmitter::presend`]),
+    /// and what that sent. With a host sender, the packets to resolved
+    /// neighbours are gathered as frames and sent in one call at the end of
+    /// the pass ([`host::Batch`]); the rest go out at once.
+    fn send_due(&mut self, now: u64, now_ns: u64, pass: Instant, early: Option<u64>) -> Presend {
         let Transmitter {
             shared,
             lanes,
@@ -1277,6 +1260,10 @@ impl Transmitter {
             latency_ns: *latency_ns,
         };
         let rings: &[Ring] = &shared.rings;
+        let mut done = Presend {
+            sent: 0,
+            covered: true,
+        };
         for (slot, lane) in lanes.iter_mut().enumerate() {
             let Some(dest) = lane.plan.dest else {
                 continue;
@@ -1300,7 +1287,7 @@ impl Transmitter {
                 let due = match early {
                     None => schedule.due(now),
                     Some(horizon) => schedule.due_early(horizon, |at| {
-                        packet_ready(&plan, sources, &shared.engine, rings, at)
+                        early::packet_ready(&plan, sources, &shared.engine, rings, at)
                     }),
                 };
                 let Some(stamp) = due else {
@@ -1357,6 +1344,12 @@ impl Transmitter {
             }
             stats.holes.fetch_add(holes as u64, Ordering::Relaxed);
             stats.early.fetch_add(ahead, Ordering::Relaxed);
+            done.sent += ahead;
+            // A packet due within the window was left: its samples were
+            // not there.
+            if early.is_some_and(|horizon| schedule.due_by(horizon)) {
+                done.covered = false;
+            }
             stats
                 .rebootstraps
                 .fetch_add(schedule.take_rebootstraps(), Ordering::Relaxed);
@@ -1364,29 +1357,8 @@ impl Transmitter {
         if let Some(batch) = batch.as_mut() {
             batch.flush(&clock, shared);
         }
+        done
     }
-}
-
-/// Whether every channel of `plan`'s packet stamped `at` has its samples
-/// there ([`Source::ready`] with the TX channels' `sources`, their `engine`
-/// rings and the RX `rings`); a channel mapped to no TX channel sends
-/// silence and waits for nothing.
-fn packet_ready(
-    plan: &Plan,
-    sources: &[Source],
-    engine: &[Option<Ring>],
-    rings: &[Ring],
-    at: u64,
-) -> bool {
-    let fpp = usize::from(plan.fpp);
-    plan.channels.iter().take(usize::from(plan.nch)).all(|&id| {
-        usize::from(id).checked_sub(1).is_none_or(|i| {
-            let own = engine.get(i).and_then(Option::as_ref);
-            sources
-                .get(i)
-                .is_none_or(|source| source.ready(at, fpp, rings, own))
-        })
-    })
 }
 
 /// Sends the media packet of `n` bytes at `buf[HEADROOM..]` from `src` to
@@ -1526,13 +1498,15 @@ fn run(clock: &dyn PtpClock, shared: Arc<TxShared>) {
     while !shared.stopping() {
         pin.keep(shared.now_ns());
         let now = clock.now_ns();
-        tx.step(now, clock.epoch());
+        let epoch = clock.epoch();
+        tx.step(now, epoch);
         // The bounded escape (dstack #1, `spin_escape_ms`, Windows): when
         // this wait will block one timer tick, the packets due meanwhile go
-        // out first.
+        // out first; when some had no samples yet, the escape waits for a
+        // later pass (at most `clock::ESCAPE_DEFER_MAX_NS` past its period).
         #[cfg(any(target_os = "linux", windows))]
-        if crate::clock::ask_escape() {
-            tx.presend(clock.now_ns());
+        if crate::clock::ask_escape() && !tx.presend_all(epoch, || clock.now_ns()) {
+            let _put_off = crate::clock::defer_escape();
         }
         clock.sleep_until(tx.wake_ns(now));
     }
@@ -1693,6 +1667,8 @@ pub(crate) fn pin_to_cpu(_cpu: usize) -> bool {
     false
 }
 
+mod early;
+pub use early::{PRESEND_ROUNDS, Presend};
 pub mod host;
 pub use host::{HostNic, TxPath};
 mod pass;
