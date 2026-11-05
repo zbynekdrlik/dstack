@@ -219,4 +219,65 @@ mod tests {
             late[late.len() - 1]
         );
     }
+
+    /// dstack #1 (dasio's CSwitch trace, FOH 5.11.2026): the spin tail's
+    /// SwitchToThread gave the band TX thread's CPU (priority 31) to a
+    /// priority-10 thread for 1.66 ms, and the TX schedule started again.
+    /// A spun wait never hands its CPU to a lower priority: with a
+    /// lower-priority thread busy on the same CPU, 100 spun waits of 300 µs
+    /// end within 100 µs at the median (a yield costs the other thread's
+    /// whole slice, many ms).
+    #[test]
+    fn a_spun_wait_never_yields_its_cpu_to_a_lower_priority_thread() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use windows_sys::Win32::System::Threading::{
+            GetCurrentThread, SetThreadAffinityMask, SetThreadPriority,
+        };
+        /// THREAD_PRIORITY_TIME_CRITICAL and THREAD_PRIORITY_LOWEST.
+        const TIME_CRITICAL: i32 = 15;
+        const LOWEST: i32 = -2;
+        /// Both threads on CPU 0 only.
+        const CPU0: usize = 1;
+        let pin = |priority: i32| {
+            // SAFETY: the calling thread's pseudo handle.
+            unsafe {
+                assert_ne!(SetThreadAffinityMask(GetCurrentThread(), CPU0), 0);
+                assert_ne!(SetThreadPriority(GetCurrentThread(), priority), 0);
+            }
+        };
+        let stop = Arc::new(AtomicBool::new(false));
+        let running = Arc::new(AtomicBool::new(false));
+        let busy = {
+            let (stop, running) = (Arc::clone(&stop), Arc::clone(&running));
+            std::thread::spawn(move || {
+                pin(LOWEST);
+                running.store(true, Ordering::Release);
+                while !stop.load(Ordering::Relaxed) {
+                    std::hint::spin_loop();
+                }
+            })
+        };
+        while !running.load(Ordering::Acquire) {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        pin(TIME_CRITICAL);
+        let mut late: Vec<i64> = (0..100)
+            .map(|_| {
+                let target = monotonic_ns() + 300_000;
+                sleep_until_in(target, super::super::WaitMode::Spin);
+                monotonic_ns() - target
+            })
+            .collect();
+        stop.store(true, Ordering::Relaxed);
+        busy.join().unwrap();
+        late.sort_unstable();
+        let median = late[late.len() / 2];
+        assert!(
+            median < 100_000,
+            "median late {median} ns; p90 {} ns, max {} ns",
+            late[late.len() * 9 / 10],
+            late[late.len() - 1]
+        );
+    }
 }
