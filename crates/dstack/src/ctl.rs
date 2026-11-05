@@ -613,8 +613,11 @@ impl Json {
 ///   `out_of_order`, `gaps` and `gap_frames` (packets that began past the
 ///   end of the one before, and the frames skipped: packets that never
 ///   came), `socket_drops` (Linux: the kernel's drops at the slot's
-///   socket), `late`, `unplaced`, `lateness` (the largest in the
+///   socket), `late` (packets past playout + block), `late_at_read`
+///   (packets with a frame the pump had already read: its channels' holes
+///   and late samples), `unplaced`, `lateness` (the largest in the
 ///   heartbeat's last second, samples; the status takes nothing),
+///   `lateness_peak` (the largest since the device started, samples),
 ///   `lateness_min_ns` (the packets' judge, phase D: the least lateness of
 ///   that second in ns, our clock's now less the packets' own stamps; absent
 ///   for a second without a placed packet), `keepalives`,
@@ -831,8 +834,10 @@ fn rx_part(j: &mut Json, media: &Media) {
             j.num("socket_drops", drops[slot]);
         }
         j.num("late", lane.late);
+        j.num("late_at_read", lane.late_at_read);
         j.num("unplaced", lane.unplaced);
         j.num("lateness", media.rx.last_lateness(slot));
+        j.num("lateness_peak", lane.lateness_peak);
         if let Some(ns) = media.rx.last_min_lateness_ns(slot) {
             j.num("lateness_min_ns", ns);
         }
