@@ -159,3 +159,17 @@ fn the_watch_tells_nothing_without_a_reset_or_a_refusal() {
     assert!(!log.contains(RESET_LINE), "{log}");
     assert!(!log.contains(REFUSED_LINE), "{log}");
 }
+
+/// dstack #1 (0.6.35): a re-pin that holds marks the thread pinned (its
+/// spin then never yields on Windows); off Windows the pin always holds.
+#[test]
+fn a_re_pin_that_holds_marks_the_thread_pinned() {
+    std::thread::spawn(|| {
+        assert!(!crate::clock::pinned());
+        let mut pin = RePin::new(Some(0));
+        pin.keep(0);
+        assert!(crate::clock::pinned(), "the pin held: the thread is pinned");
+    })
+    .join()
+    .unwrap();
+}
