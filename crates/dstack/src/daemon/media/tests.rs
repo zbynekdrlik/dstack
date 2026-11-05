@@ -695,8 +695,19 @@ fn the_fixed_rx_ports_are_bound_before_any_port_the_os_chooses() {
     // An address of its own, so no other test's sockets share its ports.
     let ip = Ipv4Addr::new(127, 0, 0, 77);
     let dir = tempfile::tempdir().unwrap();
+    // A base whose ports another process already holds (a socket on every
+    // address, dev1's `*:44874`) is the host's, not this start's: skipped.
+    let free = |base: u16| {
+        let held: Vec<_> = (base..base + MAX_FLOWS as u16)
+            .map_while(|p| std::net::UdpSocket::bind((ip, p)).ok())
+            .collect();
+        held.len() == MAX_FLOWS
+    };
     for k in 0..300u32 {
-        let base = low + u16::try_from(k * 89 % u32::from(high - low - 40)).unwrap();
+        let mut base = low + u16::try_from(k * 89 % u32::from(high - low - 40)).unwrap();
+        while !free(base) {
+            base += MAX_FLOWS as u16;
+        }
         let cfg = DeviceConfig {
             state_file: dir.path().join("state.toml"),
             rx_port_base: Some(base),
