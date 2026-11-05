@@ -752,3 +752,41 @@ fn the_offset_is_the_difference_farther_from_zero() {
     assert_eq!(offset_of(0, i128::from(i64::MAX) + 1, 0), None);
     assert_eq!(offset_of(0, i128::from(i64::MIN), 0), Some(i64::MIN));
 }
+
+/// iemmixer (5.11, v0.6.37, after a hard reset): the follower converged on
+/// the service slowly (-61 µs, -43 µs, -31.75 µs) and the 60-round wait
+/// ran out 1.75 µs outside the bound: a re-align, one pump re-bootstrap.
+/// A wait that keeps converging keeps waiting; it re-aligns only after
+/// [`HANDOVER_WAIT`] rounds without progress.
+#[test]
+fn a_converging_wait_keeps_waiting_and_hands_over_seamlessly() {
+    // -61 µs closing 0.25 µs a round: 125 rounds to the bound.
+    let (mut waited, mut best) = (0, u64::MAX);
+    let mut offset = -61_000_i64;
+    let way = loop {
+        match handover(Some(offset), true, waited) {
+            Handover::Wait => (waited, best) = wait_round(waited, best, Some(offset)),
+            way => break way,
+        }
+        offset += 250;
+    };
+    assert_eq!(way, Handover::Seamless, "waited {waited}, offset {offset}");
+    // A steady disagreement (strih, 5.11: 0.48 ms) still re-aligns after
+    // HANDOVER_WAIT rounds without progress.
+    let (mut waited, mut best) = (0, u64::MAX);
+    let mut rounds = 0;
+    let way = loop {
+        match handover(Some(-480_000), true, waited) {
+            Handover::Wait => (waited, best) = wait_round(waited, best, Some(-480_000)),
+            way => break way,
+        }
+        rounds += 1;
+    };
+    assert_eq!((way, rounds), (Handover::Break, HANDOVER_WAIT));
+    // Progress under 1 µs is no progress and leaves the mark where it
+    // was (a creeping best would never be 1 µs behind); an unmeasured
+    // round is none.
+    assert_eq!(wait_round(5, 40_000, Some(-39_500)), (6, 40_000));
+    assert_eq!(wait_round(5, 40_000, Some(39_000)), (1, 39_000));
+    assert_eq!(wait_round(5, 40_000, None), (6, 40_000));
+}

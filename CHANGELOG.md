@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.40 (unreleased)
+
+- Fix (iemmixer, 5.11, v0.6.37, after a hard reset of its box; dstack #1): a linked clock's handover wait keeps waiting while the two sources keep closing in. Before, a switch from a working service to the follower waited a fixed 60 rounds for them to agree within `clock::linked::HANDOVER_NS` (30 µs), then re-aligned. After the reset the follower closed on the service slowly (-61 µs, -43 µs, -31.75 µs), and the wait ran out 1.75 µs outside the bound. The result was a re-align and one pump re-bootstrap, about 5 minutes after boot, with the band possibly playing. Now a waiting round that comes `clock::linked::CONVERGE_NS` (1 µs) nearer than the last progress starts the count again (`clock::linked::wait_round`). So a converging follower hands over seamlessly once within 30 µs. A steady disagreement still re-aligns after `HANDOVER_WAIT` (60) rounds without progress, for example strih's 0.48 ms before dsync 1.27.4.
+  - No API removed (new: `wait_round`, `CONVERGE_NS`), no latency change.
+
 ## 0.6.39 (unreleased)
 
 - Fix (dasio's iem-snv trial of v0.6.38, 5.11; dstack #1): with `spin_escape_ms` set, an engine pump takes the escape's one-tick block only when its work margin covers it (`clock::pump_may_escape`: W + one block >= `clock::PRESEND_NS`, 2.14 ms). In the trial a pump at block 64 with W 64 (96 kHz, 0.67 ms each) re-bootstrapped and lost 2 blocks at every escape (152 re-bootstraps, 304 missed blocks in 7 min). A pump out of the escape spins yielding, as without it, and says so at its start. FOH's pumps (W 384 and 512 at 96 kHz) still take it.
