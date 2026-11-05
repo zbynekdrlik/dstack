@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.36 (unreleased)
+
+- HOTFIX (FOH froze, 5.11 ~04:48Z, minutes after dasio rolled v0.6.35; dstack #1): every Windows low-latency spin yields again, as in v0.6.33. v0.6.35 kept a spin that never yields on threads pinned to a CPU of its own. With FOH's pinned TX and engine threads (each alone on its CPU, only blocking threads on the SMT sibling), the PC stopped answering, the same freeze as v0.6.28's Sleep(0): some per-CPU system work must run on exactly that CPU. **Do not run v0.6.34 or v0.6.35 on Windows.**
+  - Removed: `clock::set_pinned`, `clock::pinned` (v0.6.35).
+  - The yield's cost comes back: a lower-priority thread can keep a media thread's CPU for the rest of its slice (FanControl, 1.66 ms, a TX restart on FOH). A bounded escape is dstack #1's open item, to be tried on a non-production Windows box before FOH.
+  - Regression test: `a_spun_wait_lets_a_lower_priority_thread_on_its_cpu_run` (pinned to CPU 0 with a busy lower-priority thread); it failed on v0.6.35. The v0.6.34 test that required no yield is removed: it required the behaviour that froze FOH.
+  - No latency change.
+
 ## 0.6.35 (unreleased)
 
 - Fix (dasio, 5.11, v0.6.34 in its CI; dstack #1): a media thread without a CPU of its own yields in its spin again. In v0.6.34 every low-latency spin on Windows stopped yielding. dasio's Windows e2e runs two unpinned devices on one runner, and there the spinners starved the box: the pump overran 67-398 blocks a second, re-bootstrapped (missed 16), and the device drove the host 0 times in 4 s. Now:

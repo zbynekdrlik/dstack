@@ -1567,9 +1567,7 @@ pub(crate) fn place(thread: &str, cpu: Option<usize>) {
     let Some(cpu) = cpu else {
         return;
     };
-    let pinned = pin_to_cpu(cpu);
-    crate::clock::set_pinned(pinned);
-    if pinned {
+    if pin_to_cpu(cpu) {
         info!(thread, cpu, "pinned to its CPU");
     } else {
         let error = std::io::Error::last_os_error();

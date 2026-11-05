@@ -176,30 +176,22 @@ fn sleep_until_in(target: i64, mode: super::WaitMode) {
             std::thread::sleep(std::time::Duration::from_nanos((left - spin) as u64));
         }
     }
-    // The spin of a thread pinned to a CPU of its own never yields (dstack
-    // #1, dasio's CSwitch trace on the FOH PC, 5.11.2026): SwitchToThread
-    // (`std::thread::yield_now`) handed the band TX thread's CPU (priority
-    // 31) to a priority-10 thread, which kept it for the rest of its slice,
-    // 1.66 ms, and the TX schedule started again. A timer expiry preempts a
-    // lower priority at once; a yield does not. Any other thread yields:
-    // without a CPU of its own a spin that never yields starves what shares
-    // it (0.6.34 on dasio's runner: two unpinned devices, the pump overran
-    // hundreds of blocks a second). Sleep(0) (v0.6.28) is no answer either:
-    // it yields only to equal or higher priority, the spin never blocked,
-    // and two Windows PCs stopped answering (dasio, 4.11.2026). A pinned
-    // thread whose deadlines come closer than the tail (TX at 8 frames a
-    // packet: every 83 µs) spins all the time, so the other CPU of its core
-    // must run threads that block (`docs/windows-box.md`).
+    // The spin yields, on every thread (dstack #1). SwitchToThread
+    // (`std::thread::yield_now`) lets ANY ready thread on the CPU run,
+    // lower priority included, for the rest of its slice: on the FOH PC
+    // (5.11.2026) a priority-10 thread kept the band TX thread's CPU for
+    // 1.66 ms and the TX schedule started again. Every spin that does not
+    // yield to lower priorities froze a Windows PC: Sleep(0) in v0.6.28,
+    // and the no-yield spin of pinned threads in v0.6.34/35 (FOH, 5.11.2026:
+    // per-CPU system work that must run on that exact CPU never ran).
+    // Without a CPU of its own it also starves its neighbours (v0.6.34 on
+    // dasio's runner). Never make this spin starve lower priorities; a
+    // bounded escape for the yield's cost is dstack #1's open item.
     if spin == 0 {
         return;
     }
-    let pinned = super::pinned();
     while monotonic_ns() < target {
-        if pinned {
-            std::hint::spin_loop();
-        } else {
-            std::thread::yield_now();
-        }
+        std::thread::yield_now();
     }
 }
 
@@ -229,75 +221,14 @@ mod tests {
         );
     }
 
-    /// dstack #1 (dasio's CSwitch trace, FOH 5.11.2026): the spin tail's
-    /// SwitchToThread gave the band TX thread's CPU (priority 31) to a
-    /// priority-10 thread for 1.66 ms, and the TX schedule started again.
-    /// A pinned thread's spun wait never hands its CPU to a lower priority:
-    /// with a lower-priority thread busy on the same CPU, 100 spun waits of 300 µs
-    /// end within 100 µs at the median (a yield costs the other thread's
-    /// whole slice, many ms).
+    /// FOH froze (5.11.2026, ~04:48Z) right after dasio rolled v0.6.35:
+    /// its pinned TX and engine threads spun without yielding, and some
+    /// per-CPU system work that must run on exactly those CPUs never ran
+    /// (the same freeze as v0.6.28's Sleep(0)); in v0.6.34 unpinned
+    /// spinners starved dasio's runner. A spun wait, pinned or not, lets a
+    /// lower-priority thread on its CPU run.
     #[test]
-    fn a_spun_wait_never_yields_its_cpu_to_a_lower_priority_thread() {
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicBool, Ordering};
-        use windows_sys::Win32::System::Threading::{
-            GetCurrentThread, SetThreadAffinityMask, SetThreadPriority,
-        };
-        /// THREAD_PRIORITY_TIME_CRITICAL and THREAD_PRIORITY_LOWEST.
-        const TIME_CRITICAL: i32 = 15;
-        const LOWEST: i32 = -2;
-        /// Both threads on CPU 0 only.
-        const CPU0: usize = 1;
-        let pin = |priority: i32| {
-            // SAFETY: the calling thread's pseudo handle.
-            unsafe {
-                assert_ne!(SetThreadAffinityMask(GetCurrentThread(), CPU0), 0);
-                assert_ne!(SetThreadPriority(GetCurrentThread(), priority), 0);
-            }
-        };
-        let stop = Arc::new(AtomicBool::new(false));
-        let running = Arc::new(AtomicBool::new(false));
-        let busy = {
-            let (stop, running) = (Arc::clone(&stop), Arc::clone(&running));
-            std::thread::spawn(move || {
-                pin(LOWEST);
-                running.store(true, Ordering::Release);
-                while !stop.load(Ordering::Relaxed) {
-                    std::hint::spin_loop();
-                }
-            })
-        };
-        while !running.load(Ordering::Acquire) {
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
-        pin(TIME_CRITICAL);
-        // The stack's pin: a CPU of its own (`media::tx::place`).
-        super::super::set_pinned(true);
-        let mut late: Vec<i64> = (0..100)
-            .map(|_| {
-                let target = monotonic_ns() + 300_000;
-                sleep_until_in(target, super::super::WaitMode::Spin);
-                monotonic_ns() - target
-            })
-            .collect();
-        stop.store(true, Ordering::Relaxed);
-        busy.join().unwrap();
-        late.sort_unstable();
-        let median = late[late.len() / 2];
-        assert!(
-            median < 100_000,
-            "median late {median} ns; p90 {} ns, max {} ns",
-            late[late.len() * 9 / 10],
-            late[late.len() - 1]
-        );
-    }
-    /// dasio's Windows e2e (v0.6.34, two devices on one runner, unpinned):
-    /// spinners that never yield starved everything else on the box (the
-    /// pump overran hundreds of blocks a second and re-bootstrapped). A
-    /// thread without a CPU of its own still yields in its spin: a
-    /// lower-priority thread on its CPU makes progress while it waits.
-    #[test]
-    fn an_unpinned_spun_wait_lets_a_lower_priority_thread_on_its_cpu_run() {
+    fn a_spun_wait_lets_a_lower_priority_thread_on_its_cpu_run() {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
         use windows_sys::Win32::System::Threading::{
@@ -306,8 +237,7 @@ mod tests {
         /// THREAD_PRIORITY_TIME_CRITICAL and THREAD_PRIORITY_LOWEST.
         const TIME_CRITICAL: i32 = 15;
         const LOWEST: i32 = -2;
-        /// Both threads on CPU 0 only, set behind the stack's back: the
-        /// stack did not pin the waiting thread.
+        /// Both threads on CPU 0 only.
         const CPU0: usize = 1;
         let pin = |priority: i32| {
             // SAFETY: the calling thread's pseudo handle.
@@ -341,59 +271,6 @@ mod tests {
         assert!(
             ran > 0,
             "the lower-priority thread never ran during 100 spun waits"
-        );
-    }
-    /// FOH froze (5.11.2026, ~04:48Z) right after dasio rolled v0.6.35:
-    /// its pinned TX and engine threads spun without yielding, and some
-    /// per-CPU system work that must run on exactly those CPUs never ran
-    /// (the same freeze as v0.6.28's Sleep(0)). A pinned thread's spun
-    /// wait also lets a lower-priority thread on its CPU run.
-    #[test]
-    fn a_pinned_spun_wait_lets_a_lower_priority_thread_on_its_cpu_run() {
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-        use windows_sys::Win32::System::Threading::{
-            GetCurrentThread, SetThreadAffinityMask, SetThreadPriority,
-        };
-        /// THREAD_PRIORITY_TIME_CRITICAL and THREAD_PRIORITY_LOWEST.
-        const TIME_CRITICAL: i32 = 15;
-        const LOWEST: i32 = -2;
-        /// Both threads on CPU 0 only.
-        const CPU0: usize = 1;
-        let pin = |priority: i32| {
-            // SAFETY: the calling thread's pseudo handle.
-            unsafe {
-                assert_ne!(SetThreadAffinityMask(GetCurrentThread(), CPU0), 0);
-                assert_ne!(SetThreadPriority(GetCurrentThread(), priority), 0);
-            }
-        };
-        let stop = Arc::new(AtomicBool::new(false));
-        let turns = Arc::new(AtomicU64::new(0));
-        let busy = {
-            let (stop, turns) = (Arc::clone(&stop), Arc::clone(&turns));
-            std::thread::spawn(move || {
-                pin(LOWEST);
-                while !stop.load(Ordering::Relaxed) {
-                    turns.fetch_add(1, Ordering::Relaxed);
-                }
-            })
-        };
-        while turns.load(Ordering::Relaxed) == 0 {
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
-        pin(TIME_CRITICAL);
-        // As the stack's own pin does (`media::tx::place`).
-        super::super::set_pinned(true);
-        let before = turns.load(Ordering::Relaxed);
-        for _ in 0..100 {
-            sleep_until_in(monotonic_ns() + 300_000, super::super::WaitMode::Spin);
-        }
-        let ran = turns.load(Ordering::Relaxed) - before;
-        stop.store(true, Ordering::Relaxed);
-        busy.join().unwrap();
-        assert!(
-            ran > 0,
-            "the lower-priority thread never ran during 100 spun waits of a pinned thread"
         );
     }
 }
