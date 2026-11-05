@@ -706,11 +706,16 @@ fn a_re_anchor_during_the_measure_is_no_agreement() {
 #[test]
 fn every_switch_starts_the_wait_count_again() {
     let (fake, service, linked) = linked_on_service();
+    // Drifting apart 10 µs a round: never progress, whatever the jitter of
+    // the real clock reads (v0.6.40's main CI on windows-2025: a constant
+    // 1 ms offset read a few µs nearer once, and the wait went on).
+    let mut off = 1_000_000;
     for _ in 0..HANDOVER_WAIT {
-        set(&fake, service_now_plus(&service, 1_000_000), ALIVE_LOCKED);
+        set(&fake, service_now_plus(&service, off), ALIVE_LOCKED);
         assert_eq!(linked.tick(), Source::Service);
+        off += 10_000;
     }
-    set(&fake, service_now_plus(&service, 1_000_000), ALIVE_LOCKED);
+    set(&fake, service_now_plus(&service, off), ALIVE_LOCKED);
     assert_eq!(linked.tick(), Source::Internal);
     set(&fake, service_now_plus(&service, 1_000_000), HOLDOVER);
     assert_eq!(linked.tick(), Source::Service, "forced back");
@@ -760,7 +765,8 @@ fn the_offset_is_the_difference_farther_from_zero() {
 /// [`HANDOVER_WAIT`] rounds without progress.
 #[test]
 fn a_converging_wait_keeps_waiting_and_hands_over_seamlessly() {
-    // -61 µs closing 0.25 µs a round: 125 rounds to the bound.
+    // -61 µs closing 0.25 µs a round (progress every 20 rounds): 125
+    // rounds to the bound.
     let (mut waited, mut best) = (0, u64::MAX);
     let mut offset = -61_000_i64;
     let way = loop {
@@ -783,10 +789,10 @@ fn a_converging_wait_keeps_waiting_and_hands_over_seamlessly() {
         rounds += 1;
     };
     assert_eq!((way, rounds), (Handover::Break, HANDOVER_WAIT));
-    // Progress under 1 µs is no progress and leaves the mark where it
-    // was (a creeping best would never be 1 µs behind); an unmeasured
-    // round is none.
-    assert_eq!(wait_round(5, 40_000, Some(-39_500)), (6, 40_000));
-    assert_eq!(wait_round(5, 40_000, Some(39_000)), (1, 39_000));
+    // Progress under 5 µs is no progress (the reads' jitter is µs) and
+    // leaves the mark where it was (a creeping mark would never be 5 µs
+    // behind); an unmeasured round is none.
+    assert_eq!(wait_round(5, 40_000, Some(-35_001)), (6, 40_000));
+    assert_eq!(wait_round(5, 40_000, Some(35_000)), (1, 35_000));
     assert_eq!(wait_round(5, 40_000, None), (6, 40_000));
 }
