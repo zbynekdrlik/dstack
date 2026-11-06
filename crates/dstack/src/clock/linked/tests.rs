@@ -810,3 +810,58 @@ fn a_converging_wait_keeps_waiting_and_hands_over_seamlessly() {
     assert_eq!(wait_round(5, 40_000, Some(35_000)), (1, 35_000));
     assert_eq!(wait_round(5, 40_000, None), (6, 40_000));
 }
+
+/// dstack #1 (6.11.2026): on the service, the linked clock reports the
+/// service's re-anchor step with its own epoch, so the media threads shift
+/// by it; an epoch a re-align began (a forced switch the times disagree
+/// on) reports none, even when the new source has a known step of its own.
+#[test]
+fn the_linked_clock_reports_the_source_s_step_and_none_after_a_re_align() {
+    let (fake, service, linked) = linked_on_service();
+    assert_eq!(linked.last_re_anchor(), None, "no re-anchor yet");
+    service.set_k(1_001_600_000_000);
+    let epoch = linked.epoch();
+    assert_eq!(epoch & 0xffff, 1);
+    let step = ReAnchor {
+        epoch,
+        step_ns: 1_600_000_000,
+    };
+    assert_eq!(linked.last_re_anchor(), Some(step));
+    assert_eq!(
+        crate::clock::Anchor::of(&linked).step_from(epoch - 1),
+        Some(1_600_000_000)
+    );
+    // To the follower (in agreement): the epoch stays, and the step is the
+    // source's, which this fake does not know (a media thread that saw the
+    // epoch change already took it).
+    set(&fake, service_now(&service), ALIVE_LOCKED);
+    assert_eq!(linked.tick(), Source::Internal);
+    assert_eq!(linked.epoch(), epoch);
+    assert_eq!(linked.last_re_anchor(), None);
+    set(
+        &fake,
+        service_now(&service),
+        View {
+            epoch: 1,
+            ..ALIVE_LOCKED
+        },
+    );
+    assert_eq!(linked.last_re_anchor(), None);
+    // The service re-anchors while not in use, then a forced switch back
+    // that disagrees: a re-align, no step, though the service has one.
+    service.set_k(1_001_700_000_000);
+    set(&fake, service_now_plus(&service, 5_000_000), HOLDOVER);
+    assert_eq!(linked.tick(), Source::Service);
+    assert_eq!(linked.epoch() & 0xffff, 0);
+    assert!(service.last_re_anchor().is_some());
+    assert_eq!(linked.last_re_anchor(), None);
+    // Its next re-anchor has one again.
+    service.set_k(1_001_800_000_000);
+    assert_eq!(
+        linked.last_re_anchor(),
+        Some(ReAnchor {
+            epoch: linked.epoch(),
+            step_ns: 100_000_000
+        })
+    );
+}

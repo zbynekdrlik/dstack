@@ -236,3 +236,66 @@ fn the_follower_counts_carry_its_lock_settled_and_errors() {
         (false, false, None, None, 0)
     );
 }
+
+/// dstack #1: the tracker keeps the step of each re-align it measured, with
+/// the re-align it began; an absorbed re-anchor leaves it, a re-align with
+/// no step measured (no anchored model before) clears it.
+#[test]
+fn a_re_align_keeps_its_measured_step() {
+    let mut a = Absorb::default();
+    a.feed(model(M0, P0, 0, 0));
+    assert_eq!(a.step(), None);
+    a.feed(model(2 * M0, P0 + M0 + 1_000_000, 0, 1));
+    assert_eq!(a.step(), Some((1, 1_000_000)));
+    a.feed(model(3 * M0, P0 + 2 * M0 + 1_000_000 + 2_557, 0, 2));
+    assert_eq!(a.step(), Some((1, 1_000_000)), "absorbed: kept");
+    a.feed(ClockModel::default());
+    assert_eq!(a.step(), None, "no anchor: a re-align with no step");
+}
+
+/// The follower's step reaches the linked clock: a re-align of its time by
+/// 1 ms reports that step with the linked clock's new epoch.
+#[test]
+fn a_linked_clock_on_the_follower_reports_its_re_align_s_step() {
+    let src = Arc::new(FakeModel(Mutex::new((model(M0, P0, 0, 0), true))));
+    let linked = Linked::new(
+        Some(Box::new(Absorbing::new(Arc::clone(&src)))),
+        Arc::new(MonoClock::new()),
+        None,
+    );
+    assert_eq!(linked.tick(), Source::Internal);
+    assert_eq!(linked.last_re_anchor(), None);
+    src.0.lock().unwrap().0 = model(2 * M0, P0 + M0 + 1_000_000, 1, 1);
+    let epoch = linked.epoch();
+    assert_eq!(
+        linked.last_re_anchor(),
+        Some(ReAnchor {
+            epoch,
+            step_ns: 1_000_000
+        })
+    );
+    // An absorbed re-anchor keeps the epoch and the step.
+    src.0.lock().unwrap().0 = model(3 * M0, P0 + 2 * M0 + 1_000_000 - 5_710, 1, 2);
+    assert_eq!(linked.epoch(), epoch);
+    assert_eq!(linked.last_re_anchor().map(|r| r.step_ns), Some(1_000_000));
+}
+
+/// A re-align with no step measured publishes none: the linked clock then
+/// reports no step for its epoch (the media threads start again).
+#[test]
+fn a_re_align_with_no_measured_step_publishes_none() {
+    let src = Arc::new(FakeModel(Mutex::new((model(M0, P0, 0, 0), true))));
+    let f = Absorbing::new(Arc::clone(&src));
+    f.view();
+    src.0.lock().unwrap().0 = model(2 * M0, P0 + M0 + 1_000_000, 1, 1);
+    f.view();
+    assert_eq!(f.last_re_anchor(), Some((1, 1_000_000)));
+    src.0.lock().unwrap().0 = ClockModel {
+        anchored: false,
+        ..model(3 * M0, P0, 1, 2)
+    };
+    f.view();
+    src.0.lock().unwrap().0 = model(4 * M0, P0 + 3 * M0, 1, 3);
+    assert_eq!(f.view().epoch, 3);
+    assert_eq!(f.last_re_anchor(), None);
+}
