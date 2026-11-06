@@ -23,6 +23,8 @@ receives, played on the output at its own rate and clock.
                               (any case; default: the default output)
   --channels <n>              the device's RX channels (default 2, L and R;
                               1 to 64)
+  --mono                      every RX channel summed at 0 dB to both
+                              speakers (clamped at full scale)
   --name <name>               the device's Dante name (default <host>-dlisten)
   --subscribe <rx>=<ch>@<dev> our RX channel <rx> (from 1) receives TX
                               channel <ch> of device <dev>; repeatable. Only
@@ -94,6 +96,8 @@ pub struct Options {
     pub ports: Option<Ports>,
     pub process_id: Option<u16>,
     pub state: Option<PathBuf>,
+    /// `--mono`: every RX channel summed at 0 dB to both speakers.
+    pub mono: bool,
 }
 
 /// What the command line asks for.
@@ -172,6 +176,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
         ports: None,
         process_id: None,
         state: None,
+        mono: false,
     };
     let mut list = false;
     let mut it = args.iter();
@@ -182,6 +187,10 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             "--version" | "-V" => return Ok(Command::Version),
             "--list-outputs" => {
                 list = true;
+                continue;
+            }
+            "--mono" => {
+                o.mono = true;
                 continue;
             }
             _ => {}

@@ -168,6 +168,8 @@ pub struct Player {
     played: u64,
     /// The re-centres of the players before this one.
     recentres_before: u64,
+    /// `--mono`: every channel summed to both speakers ([`map::source_mono`]).
+    mono: bool,
     stats: Arc<Stats>,
 }
 
@@ -215,8 +217,15 @@ impl Player {
             underruns: stats.underruns(),
             played: stats.played(),
             recentres_before: stats.recentres(),
+            mono: false,
             stats,
         })
+    }
+
+    /// Under `--mono`: every channel summed to both speakers.
+    pub fn with_mono(mut self, mono: bool) -> Self {
+        self.mono = mono;
+        self
     }
 
     /// The counts, for the status thread.
@@ -242,7 +251,11 @@ impl Player {
                 self.next_block();
             }
             for (o, slot) in frame.iter_mut().enumerate() {
-                let src = map::source(o, outputs, inputs);
+                let src = if self.mono {
+                    map::source_mono(o, outputs, inputs)
+                } else {
+                    map::source(o, outputs, inputs)
+                };
                 *slot = to(map::sample(src, &self.block, BLOCK, self.pos));
             }
             self.pos += 1;

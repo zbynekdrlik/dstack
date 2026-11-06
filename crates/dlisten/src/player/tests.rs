@@ -498,3 +498,27 @@ fn a_block_with_no_input_plays_silence_and_primes() {
     assert_eq!(stats.recentres(), 0, "an underrun, not a re-centre");
     assert_eq!(s.player.state, State::Priming(2400));
 }
+
+#[test]
+fn under_mono_both_speakers_play_the_sum_of_our_channels() {
+    let mut s = Sim::new(48_000, 48_000, 0.0, 2, 2);
+    let stand_in = Player::new(
+        Arc::new(fifo_for(2, 48_000)),
+        48_000,
+        48_000,
+        Arc::default(),
+    );
+    let player = std::mem::replace(&mut s.player, stand_in.unwrap());
+    s.player = player.with_mono(true);
+    s.run(2.0);
+    for f in s.out.as_chunks::<2>().0 {
+        assert_eq!(f[0], f[1], "the sum on both");
+    }
+    // L and R one radian apart, summed at 0 dB: 2 cos(0.5) of one's level.
+    let want = s.amp * 2.0 * (0.5f64).cos() / 2f64.sqrt();
+    assert!(
+        (rms(&s.out) / want - 1.0).abs() < 0.02,
+        "{} vs {want}",
+        rms(&s.out)
+    );
+}

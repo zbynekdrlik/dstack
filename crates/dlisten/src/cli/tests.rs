@@ -36,6 +36,7 @@ fn no_arguments_run_at_the_defaults() {
             ports: None,
             process_id: None,
             state: None,
+            mono: false,
         }
     );
 }
@@ -341,4 +342,18 @@ fn autostart_keeps_the_other_options_for_the_logon_start() {
         error("--autostart on --help"),
         "--autostart takes run options only"
     );
+}
+
+#[test]
+fn mono_is_read_and_kept_for_the_logon_start() {
+    assert!(run("--mono --rate 96000").mono);
+    assert!(!run("--rate 96000").mono);
+    let args: Vec<String> = ["--mono", "--autostart", "on"].map(String::from).to_vec();
+    match parse(&args).unwrap() {
+        Command::Autostart { on, args } => {
+            assert!(on);
+            assert_eq!(args, ["--mono"]);
+        }
+        other => panic!("{other:?}"),
+    }
 }
