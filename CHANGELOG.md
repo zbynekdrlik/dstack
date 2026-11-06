@@ -1,6 +1,8 @@
 # Changelog
 
-## 0.6.50 (unreleased)
+## 0.6.51 (unreleased)
+
+## 0.6.50
 
 - dlisten (dstack #139): the status line (log and dtray) names the mix: `, mono` under `--mono`. On FOH (dasio) it could not be seen. New: `Stats::mono`, `Snapshot::mono`.
 
