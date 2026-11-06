@@ -26,14 +26,16 @@
 //! changes the epoch and the media threads re-align as on a re-anchor.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 
 use tracing::{info, warn};
 
 use dsync_ptp::follower::model::ClockModel;
 
-use super::{ClockCounts, FollowerCounts, MonoClock, NOT_READY_NAP_NS, PtpClock, monotonic_ns};
+use super::{
+    ClockCounts, FollowerCounts, MonoClock, NOT_READY_NAP_NS, PtpClock, ReAnchor, monotonic_ns,
+};
 
 /// Where the linked clock takes PTP time from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -209,6 +211,12 @@ pub trait Follow: Send + Sync {
     /// holdovers, whether it is in holdover now, and the re-anchors
     /// absorbed.
     fn counts(&self) -> FollowerCounts;
+    /// Its latest re-align whose step is known: the [`View::epoch`] it
+    /// began and the step of its time, ns (dstack #1). `None`, the default:
+    /// none yet, or its step unknown.
+    fn last_re_anchor(&self) -> Option<(u32, i64)> {
+        None
+    }
 }
 
 /// What the media threads read of the selector's choice, in one word so a
@@ -456,6 +464,33 @@ impl PtpClock for Linked {
             self.component(s.source).wrapping_sub(s.base),
         )
     }
+
+    /// The source in use's latest known re-anchor, when it began the
+    /// current epoch: within a source the linked clock's time is the
+    /// source's, so it steps by the source's step. An epoch a re-align
+    /// began (the low half 0: a source switch, or a re-anchor carried past
+    /// 2^16) has no known step: the two sources' times differed by more
+    /// than a handover takes, and the media threads start again.
+    fn last_re_anchor(&self) -> Option<ReAnchor> {
+        let s = self.state();
+        let component = self.component(s.source);
+        let low = component.wrapping_sub(s.base);
+        if low & 0xffff == 0 {
+            return None;
+        }
+        let (at, step_ns) = match s.source {
+            Source::Service => self
+                .service
+                .last_re_anchor()
+                .map(|r| (r.epoch, r.step_ns))?,
+            Source::Internal => self.internal.as_ref()?.last_re_anchor()?,
+            Source::None => return None,
+        };
+        (at == component).then(|| ReAnchor {
+            epoch: epoch_of(u32::from(s.breaks), low),
+            step_ns,
+        })
+    }
 }
 
 /// The step of a re-anchor from the model `old` to `new`: `new`'s time at
@@ -477,6 +512,9 @@ pub struct Absorb {
     last: Option<ClockModel>,
     realigns: u32,
     absorbed: u32,
+    /// The latest re-align's step when it was measured, with the re-align
+    /// count it took the view's epoch to (dstack #1).
+    step: Option<(u32, i64)>,
 }
 
 impl Absorb {
@@ -485,15 +523,25 @@ impl Absorb {
         if let Some(old) = self.last
             && (old.epoch, old.reanchors) != (m.epoch, m.reanchors)
         {
-            match re_anchor_step(&old, &m) {
+            let step = re_anchor_step(&old, &m);
+            match step {
                 Some(d) if d.unsigned_abs() <= HANDOVER_NS.unsigned_abs() => {
                     self.absorbed = self.absorbed.wrapping_add(1);
                 }
-                _ => self.realigns = self.realigns.wrapping_add(1),
+                _ => {
+                    self.realigns = self.realigns.wrapping_add(1);
+                    self.step = step.map(|d| (self.realigns, d));
+                }
             }
         }
         self.last = Some(m);
         (self.realigns, self.absorbed)
+    }
+
+    /// The latest re-align whose step was measured: the re-align count it
+    /// began and its step, ns.
+    pub fn step(&self) -> Option<(u32, i64)> {
+        self.step
     }
 }
 
@@ -532,6 +580,10 @@ pub struct Absorbing<M> {
     pub(crate) absorb: std::sync::Mutex<Absorb>,
     /// The last (re-aligns, absorbed), packed.
     published: AtomicU64,
+    /// The latest measured re-align's count (0: none) and step, published
+    /// with the counts.
+    step_at: AtomicU32,
+    step_ns: AtomicI64,
 }
 
 impl<M: Model> Absorbing<M> {
@@ -540,6 +592,8 @@ impl<M: Model> Absorbing<M> {
             source,
             absorb: std::sync::Mutex::new(Absorb::default()),
             published: AtomicU64::new(0),
+            step_at: AtomicU32::new(0),
+            step_ns: AtomicI64::new(0),
         }
     }
 
@@ -562,6 +616,12 @@ impl<M: Model> Absorbing<M> {
         let m = self.source.model();
         if let Some(mut a) = held {
             let (r, ab) = a.feed(m);
+            // The step before the counts: a reader that sees a re-align's
+            // count in the view sees its step.
+            if let Some((at, d)) = a.step() {
+                self.step_ns.store(d, Ordering::Relaxed);
+                self.step_at.store(at, Ordering::Release);
+            }
             let [r0, r1, r2, r3] = r.to_be_bytes();
             let [a0, a1, a2, a3] = ab.to_be_bytes();
             self.published.store(
@@ -612,6 +672,11 @@ impl<M: Model> Follow for Absorbing<M> {
             recent_abs_e_ns: m.recent_abs_e_ns,
             pull_ns: m.pull_ns,
         }
+    }
+
+    fn last_re_anchor(&self) -> Option<(u32, i64)> {
+        let at = self.step_at.load(Ordering::Acquire);
+        (at != 0).then(|| (at, self.step_ns.load(Ordering::Relaxed)))
     }
 }
 

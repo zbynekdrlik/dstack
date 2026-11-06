@@ -658,6 +658,9 @@ pub struct TxShared {
     /// it, [`Source::Engine`] sends it; `None` for a channel the engine
     /// does not feed.
     engine: Box<[Option<Ring>]>,
+    /// The engine rings' line of positions across clock re-anchors
+    /// ([`shift`]): the pump and the TX thread read S here.
+    pub engine_line: EngineLine,
     lanes: [LaneStats; MAX_FLOWS],
     /// Each slot's receiver latency as the receiver states it (ARC 0x1100,
     /// [`crate::flows::receivers`]): `[dest_word(dest), ns]`, written by
@@ -731,6 +734,7 @@ impl TxShared {
             engine: (0..cfg.tx.len())
                 .map(|tx| engine.contains(&tx).then(Ring::new))
                 .collect(),
+            engine_line: EngineLine::default(),
             cfg,
             control: Mutex::new(Control {
                 table: TxTable::with_slots(seed, slots),
@@ -992,8 +996,14 @@ impl Schedule {
         Some(stamp)
     }
 
+    /// Moves the schedule by `by` samples (a re-anchor whose step the clock
+    /// knows, on the fpp grid: [`shift`]); not a start again, not counted.
+    pub fn shift(&mut self, by: i64) {
+        self.next = self.next.wrapping_add_signed(by);
+    }
+
     /// Starts the schedule again at `now` (counted): a lag, a jump, a
-    /// re-anchor of the clock.
+    /// re-anchor of the clock whose step is unknown.
     pub fn realign(&mut self, now: u64) {
         self.next = aligned_after(now, self.fpp);
         self.rebootstraps += 1;
@@ -1097,6 +1107,8 @@ pub struct Transmitter {
     batch: Option<host::Batch>,
     /// The clock's epoch at the last pass.
     epoch: Option<u32>,
+    /// The engine shift at that epoch ([`shift::EngineLine`]).
+    engine_shift: i64,
     /// When the next read of the plans, sources and keepalives is due.
     next_events: Option<u64>,
     rate: u32,
@@ -1122,6 +1134,7 @@ impl Transmitter {
             ip_id: 0,
             batch: shared.host_for_tx().map(host::Batch::new),
             epoch: None,
+            engine_shift: 0,
             next_events: None,
             rate,
             max_lag: clock::latency_samples(shared.advertised_latency_ns(), rate),
@@ -1132,12 +1145,14 @@ impl Transmitter {
     }
 
     /// One pass at PTP time `now_ns` (`None`: the clock is not ready) and
-    /// the clock's `epoch`: the plans, sources and keepalives when due
+    /// the clock's `anchor` (its epoch and latest known re-anchor; a bare
+    /// epoch knows no step): the plans, sources and keepalives when due
     /// (every pass while the clock is not ready, and at once when the clock
-    /// went back), every flow realigned after a re-anchor, then every
-    /// packet due sent. Nothing is sent before the clock is ready.
+    /// went back), every flow shifted by a re-anchor's known step or else
+    /// realigned ([`shift`]), then every packet due sent. Nothing is sent
+    /// before the clock is ready.
     pub fn step(&mut self, now_ns: Option<u64>, anchor: impl Into<clock::Anchor>) {
-        let epoch = anchor.into().epoch;
+        let anchor = anchor.into();
         // Taken with the clock read (the caller's), so a slow events pass
         // counts in the lateness of the packets after it.
         let pass = Instant::now();
@@ -1154,12 +1169,10 @@ impl Transmitter {
             return;
         };
         let now = send_clock(now_ns, self.rate, self.margin_ns);
-        if self.epoch.is_some_and(|e| e != epoch) {
-            for schedule in self.lanes.iter_mut().filter_map(|l| l.schedule.as_mut()) {
-                schedule.realign(now);
-            }
+        if self.epoch != Some(anchor.epoch) {
+            self.re_anchored(now, anchor);
         }
-        self.epoch = Some(epoch);
+        self.epoch = Some(anchor.epoch);
         self.send_due(now, now_ns, pass, None);
     }
 
@@ -1251,6 +1264,7 @@ impl Transmitter {
             latency_ns,
             ip_id,
             batch,
+            engine_shift,
             ..
         } = self;
         let clock = PassClock {
@@ -1288,7 +1302,14 @@ impl Transmitter {
                 let due = match early {
                     None => schedule.due(now),
                     Some(horizon) => schedule.due_early(horizon, |at| {
-                        early::packet_ready(&plan, sources, &shared.engine, rings, at)
+                        early::packet_ready(
+                            &plan,
+                            sources,
+                            &shared.engine,
+                            rings,
+                            at,
+                            *engine_shift,
+                        )
                     }),
                 };
                 let Some(stamp) = due else {
@@ -1302,7 +1323,8 @@ impl Transmitter {
                         Some((sources.get_mut(i)?, shared.peaks.get(i)?, own))
                     }) {
                         Some((source, peak, own)) => {
-                            holes += source.fill(stamp, *rate, out, rings, own).holes;
+                            let at = shift::source_position(source, stamp, *engine_shift);
+                            holes += source.fill(at, *rate, out, rings, own).holes;
                             let loudest = out.iter().fold(0, |m: u32, s| m.max(s.unsigned_abs()));
                             peak.fetch_max(loudest, Ordering::Relaxed);
                         }
@@ -1502,8 +1524,7 @@ fn run(clock: &dyn PtpClock, shared: Arc<TxShared>) {
     while !shared.stopping() {
         pin.keep(shared.now_ns());
         let now = clock.now_ns();
-        let epoch = clock.epoch();
-        tx.step(now, epoch);
+        tx.step(now, crate::clock::Anchor::of(clock));
         // The bounded escape (dstack #1, `spin_escape_ms`, Windows): when
         // this wait will block one timer tick, the packets due meanwhile go
         // out first; when some had no samples yet, the escape waits for a
@@ -1674,7 +1695,10 @@ pub(crate) fn pin_to_cpu(_cpu: usize) -> bool {
 }
 
 mod early;
+
+pub mod shift;
 pub use early::{PRESEND_ROUNDS, Presend};
+pub use shift::EngineLine;
 pub mod host;
 pub use host::{HostNic, TxPath};
 mod pass;

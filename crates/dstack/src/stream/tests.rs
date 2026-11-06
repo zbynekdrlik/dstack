@@ -1370,6 +1370,46 @@ fn a_re_anchor_by_whole_blocks_shifts_the_pump_and_loses_no_block() {
     );
 }
 
+/// A pump that starts after the engine line moved (the TX thread saw a
+/// re-anchor first) writes on the line where TX reads: its position less
+/// the line's shift.
+#[test]
+fn a_pump_that_starts_late_writes_on_the_engine_line() {
+    use crate::clock::{Anchor, ReAnchor};
+    const STEP: u64 = 153_600;
+    let mut r = rig(
+        Map {
+            rx: vec![0],
+            tx: vec![0],
+        },
+        &[0],
+        &[0],
+    );
+    let line = &r.tx.engine_line;
+    line.shift_at(Anchor::from(3), RATE, B);
+    let moved = Anchor {
+        epoch: 4,
+        re_anchor: Some(ReAnchor {
+            epoch: 4,
+            step_ns: 1_600_000_000,
+        }),
+    };
+    assert_eq!(line.shift_at(moved, RATE, B), STEP as i64);
+    fill(&r, 0, T - 1_000, 4_000, counter);
+    let end = run_to(&mut r, T, T + 2_000, 4);
+    assert!(end > 0);
+    let first = Blocks::bootstrap(T, TIMING).start();
+    let n = (r.stats.view().blocks * B) as usize;
+    let (out, holes) = engine_at(&r, 0, first + D - STEP, n);
+    assert_eq!(holes, 0);
+    assert!(
+        out.iter()
+            .enumerate()
+            .all(|(i, &v)| v == counter(first + i as u64))
+    );
+    assert_eq!(engine_at(&r, 0, first + D, 1).1, 1, "nothing off the line");
+}
+
 /// iemmixer (4.11.2026, v0.6.29 live, an engine restart): the Service ->
 /// Internal switch 36 s in took the pump's re-bootstraps 0 -> 1 (missed 0,
 /// late 0), from the epoch change alone. A seamless handover (v0.6.31,

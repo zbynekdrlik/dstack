@@ -89,22 +89,25 @@ impl Transmitter {
 
 /// Whether every channel of `plan`'s packet stamped `at` has its samples
 /// there ([`Source::ready`] with the TX channels' `sources`, their `engine`
-/// rings and the RX `rings`); a channel mapped to no TX channel sends
-/// silence and waits for nothing.
+/// rings, read on their line with the engine shift `engine_shift`, and
+/// the RX `rings`); a channel mapped to no TX channel sends silence and
+/// waits for nothing.
 pub(super) fn packet_ready(
     plan: &Plan,
     sources: &[Source],
     engine: &[Option<Ring>],
     rings: &[Ring],
     at: u64,
+    engine_shift: i64,
 ) -> bool {
     let fpp = usize::from(plan.fpp);
     plan.channels.iter().take(usize::from(plan.nch)).all(|&id| {
         usize::from(id).checked_sub(1).is_none_or(|i| {
             let own = engine.get(i).and_then(Option::as_ref);
-            sources
-                .get(i)
-                .is_none_or(|source| source.ready(at, fpp, rings, own))
+            sources.get(i).is_none_or(|source| {
+                let at = super::shift::source_position(source, at, engine_shift);
+                source.ready(at, fpp, rings, own)
+            })
         })
     })
 }

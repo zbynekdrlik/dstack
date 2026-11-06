@@ -1300,6 +1300,37 @@ fn a_re_anchor_by_whole_packets_shifts_every_flow_and_loses_no_packet() {
     }
 }
 
+/// A TX thread that starts after the engine line moved (the pump saw a
+/// re-anchor first) reads the engine's ring on the line.
+#[test]
+fn a_tx_that_starts_late_reads_the_engine_on_its_line() {
+    let mut rig = Rig::with_engine(&[0]);
+    rig.shared
+        .engine_line
+        .shift_at(crate::clock::Anchor::from(1), RATE, 32);
+    rig.shared
+        .engine_line
+        .shift_at(stepped(2, DATE_STEP_NS), RATE, 32);
+    let n0 = send_clock(T, RATE, TX_MARGIN_NS);
+    let base = n0 - DATE_STEP - 1_000;
+    let values: Vec<i32> = (base..base + 6_000).map(engine_value).collect();
+    rig.shared.engine_ring(0).unwrap().put_at(base, &values);
+    assert!(rig.shared.set_source(0, Source::Engine));
+    let (slot, _) = rig.flow(vec![Some(1)]);
+    let mut packets = Vec::new();
+    for us in (0..=10_000).step_by(500) {
+        rig.tx.step(Some(T + us * 1_000), 2);
+        packets.extend(drain(&rig.rx));
+    }
+    assert!(packets.len() > 25, "{}", packets.len());
+    for p in &packets {
+        let line = stamp_of(p) - DATE_STEP;
+        let want: Vec<i32> = (line..line + FPP).map(engine_value).collect();
+        assert_eq!(slot_samples(p, 1, 0), want);
+    }
+    assert_eq!(rig.shared.lane(slot).holes, 0);
+}
+
 /// A re-anchor whose step is not a whole number of packets (a local k
 /// correction of 50 µs, 4.8 samples at 96 kHz; the date step plus it) keeps
 /// the stamps going: the schedule moves by the step rounded to its grid and

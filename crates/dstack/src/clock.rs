@@ -353,12 +353,12 @@ pub trait PtpClock: Send + Sync {
     /// shift their schedules by the step instead of starting again
     /// ([`Anchor::step_from`]). `None`, the default: no re-anchor yet, or
     /// its step is unknown; the media threads then start again, counted.
-    fn re_anchor(&self) -> Option<ReAnchor> {
+    fn last_re_anchor(&self) -> Option<ReAnchor> {
         None
     }
 }
 
-/// A re-anchor whose time step the clock knows ([`PtpClock::re_anchor`]).
+/// A re-anchor whose time step the clock knows ([`PtpClock::last_re_anchor`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReAnchor {
     /// The epoch it began.
@@ -391,7 +391,7 @@ impl Anchor {
     pub fn of(clock: &(impl PtpClock + ?Sized)) -> Anchor {
         Anchor {
             epoch: clock.epoch(),
-            re_anchor: clock.re_anchor(),
+            re_anchor: clock.last_re_anchor(),
         }
     }
 
@@ -445,7 +445,7 @@ impl ManualClock {
     }
 
     /// A re-anchor: time jumps by `delta_ns` and the epoch counts it; its
-    /// step is known ([`PtpClock::re_anchor`]).
+    /// step is known ([`PtpClock::last_re_anchor`]).
     pub fn re_anchor(&self, delta_ns: i64) {
         let epoch = self.epoch.load(Ordering::SeqCst).wrapping_add(1);
         self.step_ns.store(delta_ns, Ordering::SeqCst);
@@ -471,13 +471,43 @@ impl PtpClock for ManualClock {
         self.epoch.load(Ordering::SeqCst)
     }
 
-    fn re_anchor(&self) -> Option<ReAnchor> {
+    fn last_re_anchor(&self) -> Option<ReAnchor> {
         let epoch = self.step_epoch.load(Ordering::SeqCst);
         (epoch != 0).then(|| ReAnchor {
             epoch,
             step_ns: self.step_ns.load(Ordering::SeqCst),
         })
     }
+}
+
+/// How far a schedule on a grid of `grid` samples (a flow's fpp, the pump's
+/// block; above 0) moves for a re-anchor of `step_ns` at `rate` (dstack #1,
+/// 6.11.2026): the step in samples rounded to the nearest whole multiple of
+/// the grid (a half rounds up).
+///
+/// - dsync's coordinated date step moves every device's time by the same
+///   step (1.6 s is 153 600 samples at 96 kHz, a whole number of packets):
+///   the receivers expect the stamps to go on at the old ones + the step,
+///   which is what a whole-grid shift sends.
+/// - A local correction of k (more than the tracker's 20 µs, a few samples)
+///   rounds to 0: the stamps simply go on, and the clock's new time shows
+///   as a lag or a wait of at most half the grid, which the schedule's own
+///   checks absorb (a lag past the latency still starts it again).
+/// - Starting again instead never lands nearer the clock (it starts on the
+///   grid after now) and drops up to one grid step plus the lag: 2 packets
+///   at a receiver in the field. So a known step is never refused for being
+///   off the grid; only an unknown one starts the schedules again.
+pub fn grid_shift(step_ns: i64, rate: u32, grid: u64) -> i64 {
+    let grid = i128::from(grid);
+    let m = nearest(i128::from(step_ns) * i128::from(rate), 1_000_000_000 * grid);
+    // |step_ns| < 2^63 ns and rate < 10^9, so the shift fits an i64.
+    (m * grid) as i64
+}
+
+/// `n / d` rounded to the nearest integer, a half up (`d` above 0).
+fn nearest(n: i128, d: i128) -> i128 {
+    let r = n.rem_euclid(d);
+    n.div_euclid(d) + i128::from(r + r >= d)
 }
 
 /// A 6-byte UUID as the low bytes of a `u64` (big-endian).
@@ -730,6 +760,11 @@ mod os {
     pub struct MonoClock {
         k_ns: AtomicI64,
         epoch: AtomicU32,
+        /// The latest re-anchor's step (k after less k before: the clock's
+        /// time is `CLOCK_MONOTONIC` + k, so that is its step exactly) and
+        /// the epoch it began (0: none yet).
+        step_ns: AtomicI64,
+        step_epoch: AtomicU32,
     }
 
     impl Default for MonoClock {
@@ -744,6 +779,8 @@ mod os {
             MonoClock {
                 k_ns: AtomicI64::new(NOT_READY),
                 epoch: AtomicU32::new(0),
+                step_ns: AtomicI64::new(0),
+                step_epoch: AtomicU32::new(0),
             }
         }
 
@@ -753,11 +790,23 @@ mod os {
             (k != NOT_READY).then_some(k)
         }
 
-        /// Sets k: the first makes the clock ready, a change re-anchors it.
+        /// Sets k: the first makes the clock ready, a change re-anchors it
+        /// (its step recorded with the epoch it begins, before the epoch
+        /// moves, so a reader that sees the epoch sees its step).
+        ///
+        /// One writer (the poller). A reader may read the new k with the
+        /// old epoch in the instant between the two stores: its pass sees
+        /// the step as a jump of time (a lag or a wait, as before 0.6.48),
+        /// and the next pass shifts. Re-anchors are at least [`CONFIRM`]
+        /// polls apart, so a step is never read under another's epoch.
         pub fn set_k(&self, k_ns: i64) {
             let old = self.k_ns.swap(k_ns, Ordering::AcqRel);
             if old != NOT_READY && old != k_ns {
-                self.epoch.fetch_add(1, Ordering::Release);
+                let epoch = self.epoch.load(Ordering::Acquire).wrapping_add(1);
+                self.step_ns
+                    .store(k_ns.wrapping_sub(old), Ordering::Relaxed);
+                self.step_epoch.store(epoch, Ordering::Release);
+                self.epoch.store(epoch, Ordering::Release);
             }
         }
     }
@@ -779,6 +828,14 @@ mod os {
 
         fn epoch(&self) -> u32 {
             self.epoch.load(Ordering::Acquire)
+        }
+
+        fn last_re_anchor(&self) -> Option<ReAnchor> {
+            let epoch = self.step_epoch.load(Ordering::Acquire);
+            (epoch != 0).then(|| ReAnchor {
+                epoch,
+                step_ns: self.step_ns.load(Ordering::Relaxed),
+            })
         }
     }
 
@@ -933,3 +990,6 @@ mod os {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod anchor_tests;

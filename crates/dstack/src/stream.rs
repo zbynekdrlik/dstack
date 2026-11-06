@@ -217,8 +217,17 @@ impl Blocks {
         }
     }
 
+    /// Moves the schedule by `by` samples (a re-anchor whose step the clock
+    /// knows, on the block grid: [`crate::media::tx::shift`]); nothing is
+    /// skipped and nothing counted. A rest of the step off the grid is a
+    /// lag or a wait of at most half a block, which [`Blocks::next`]
+    /// judges as any other (W is at least the block).
+    pub fn shift(&mut self, by: i64) {
+        self.start = self.start.wrapping_add_signed(by);
+    }
+
     /// Starts the schedule again at media time `now` (a lag, a clock that
-    /// went back, a new epoch); returns the blocks between the old next
+    /// went back, a new epoch whose step is unknown); returns the blocks between the old next
     /// start and the new one that never run (0 when the new one is not
     /// later).
     pub fn rebootstrap(&mut self, now: u64) -> u64 {
@@ -432,6 +441,9 @@ pub struct Pump<P: Process> {
     blocks: Option<Blocks>,
     /// The clock's epoch at the last media step.
     epoch: Option<u32>,
+    /// The engine shift at that epoch: the outputs go into the engine rings
+    /// at their position less it ([`crate::media::tx::EngineLine`]).
+    engine_shift: i64,
     /// `Process::discontinuity` is due before the next block.
     discontinuity: bool,
     /// The processor panicked: never called again.
@@ -468,6 +480,7 @@ impl<P: Process> Pump<P> {
             frames,
             blocks: None,
             epoch: None,
+            engine_shift: 0,
             discontinuity: false,
             faulted: false,
             last_entry: None,
@@ -475,12 +488,17 @@ impl<P: Process> Pump<P> {
     }
 
     /// Every block due at media sample time `now` with the clock at
-    /// `epoch`; returns the media sample time to wake at. The first media
-    /// step (and the first after free pacing) bootstraps, a new epoch
-    /// re-bootstraps (counted); either calls the processor's
+    /// `anchor` (its epoch and latest known re-anchor; a bare epoch knows
+    /// no step); returns the media sample time to wake at. The first media
+    /// step (and the first after free pacing) bootstraps; a new epoch
+    /// shifts the schedule by the re-anchor's step on the block grid when
+    /// the clock knows it (no block lost, no `discontinuity`: the inputs
+    /// and outputs go on, [`crate::media::tx::shift`]), else re-bootstraps
+    /// (counted); a bootstrap or re-bootstrap calls the processor's
     /// `discontinuity` once before the next block.
     pub fn media(&mut self, now: u64, anchor: impl Into<crate::clock::Anchor>) -> u64 {
-        let epoch = anchor.into().epoch;
+        let anchor = anchor.into();
+        let rate = self.tx.cfg.sample_rate;
         self.stats.media.store(true, Ordering::Relaxed);
         // The device latency the RX delays are planned against moved (Dante
         // Controller set it): play at it, the schedule started again.
@@ -494,9 +512,14 @@ impl<P: Process> Pump<P> {
             }
         }
         let mut blocks = match self.blocks {
-            Some(mut b) if self.epoch != Some(epoch) => {
-                self.stats.rebootstrapped(b.rebootstrap(now));
-                self.discontinuity = true;
+            Some(mut b) if self.epoch != Some(anchor.epoch) => {
+                match self.epoch.and_then(|e| anchor.step_from(e)) {
+                    Some(d) => b.shift(crate::clock::grid_shift(d, rate, self.timing.block)),
+                    None => {
+                        self.stats.rebootstrapped(b.rebootstrap(now));
+                        self.discontinuity = true;
+                    }
+                }
                 b
             }
             Some(b) => b,
@@ -505,7 +528,13 @@ impl<P: Process> Pump<P> {
                 Blocks::bootstrap(now, self.timing)
             }
         };
-        self.epoch = Some(epoch);
+        if self.epoch != Some(anchor.epoch) {
+            self.engine_shift = self
+                .tx
+                .engine_line
+                .shift_at(anchor, rate, self.timing.block);
+        }
+        self.epoch = Some(anchor.epoch);
         let wake = loop {
             match blocks.next(now) {
                 Due::Run { start, late } => {
@@ -540,7 +569,8 @@ impl<P: Process> Pump<P> {
     /// The block whose inputs are stamped `start`…`start + B − 1` (the
     /// real-time part): each routed RX channel's ring read there (an
     /// unrouted one is silence and reads nothing), the processor, and each
-    /// output quantized into its TX channel's engine ring at `start + D`.
+    /// output quantized into its TX channel's engine ring at `start + D`
+    /// (on the rings' line: less the engine shift).
     #[cfg_attr(iem_rtsan, sanitize(realtime = "nonblocking"))]
     pub fn block(&mut self, start: u64) {
         let entry = self.enter();
@@ -559,7 +589,8 @@ impl<P: Process> Pump<P> {
             }
         }
         let fault = self.run_processor(Some(start));
-        let at = start + self.timing.offset();
+        let at =
+            (start + self.timing.offset()).wrapping_add_signed(self.engine_shift.wrapping_neg());
         for (chan, &tx) in self.output.chunks_exact(self.frames).zip(&self.map.tx) {
             if let Some(ring) = self.tx.engine_ring(tx) {
                 for (q, &y) in self.samples.iter_mut().zip(chan) {
@@ -684,7 +715,7 @@ fn run<P: Process>(clock: &dyn PtpClock, mut pump: Pump<P>, stop: &AtomicBool) {
         pin.keep(pump.tx.now_ns());
         if let Some(now_ns) = clock.now_ns() {
             deadline = None;
-            let wake = pump.media(to_samples(now_ns, rate), clock.epoch());
+            let wake = pump.media(to_samples(now_ns, rate), crate::clock::Anchor::of(clock));
             clock.sleep_until(ns_of(wake, rate));
         } else {
             pump.free();
