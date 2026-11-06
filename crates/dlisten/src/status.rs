@@ -27,6 +27,8 @@ pub struct Snapshot {
     /// The output waits for the FIFO to fill (silence: no Dante audio yet,
     /// or a refill after an underrun).
     pub priming: bool,
+    /// Every channel summed to both speakers (`--mono`).
+    pub mono: bool,
 }
 
 impl Snapshot {
@@ -41,18 +43,22 @@ impl Snapshot {
             overflows: fifo.overflows(),
             recentres: stats.recentres(),
             priming: stats.priming(),
+            mono: stats.mono(),
         }
     }
 }
 
 /// The status line: `depth 40.1 ms, +3.2 ppm, 0 underruns, 480000 frames
-/// played at 48000 Hz`, then `, waiting for audio` while priming and the
+/// played at 48000 Hz`, then `, mono` under `--mono`, `, waiting for audio` while priming and the
 /// overflows and re-centres when there are any.
 pub fn line(s: &Snapshot) -> String {
     let mut text = format!(
         "depth {:.1} ms, {:+.1} ppm, {} underruns, {} frames played at {} Hz",
         s.depth_ms, s.ppm, s.underruns, s.played, s.out_rate
     );
+    if s.mono {
+        text.push_str(", mono");
+    }
     if s.priming {
         text.push_str(", waiting for audio");
     }
@@ -237,6 +243,7 @@ mod tests {
             overflows: 0,
             recentres: 0,
             priming: false,
+            mono: false,
         }
     }
 
@@ -248,6 +255,7 @@ mod tests {
         );
         let all = Snapshot {
             ppm: -12.0,
+            mono: true,
             priming: true,
             overflows: 128,
             recentres: 1,
@@ -256,7 +264,7 @@ mod tests {
         assert_eq!(
             line(&all),
             "depth 40.1 ms, -12.0 ppm, 2 underruns, 480000 frames played at 44100 Hz, \
-             waiting for audio, 128 frames overflowed, 1 re-centres"
+             mono, waiting for audio, 128 frames overflowed, 1 re-centres"
         );
     }
 
@@ -493,8 +501,11 @@ mod tests {
                 overflows: 0,
                 recentres: 0,
                 priming: true,
+                mono: false,
             }
         );
+        let player = player.with_mono(true);
+        assert!(Snapshot::read(&fifo, &player.stats(), 48_000).mono);
         fifo.push_with(24_000, |_, _| 0.0);
         let full = Snapshot::read(&fifo, &player.stats(), 48_000);
         assert_eq!(full.overflows, 480);

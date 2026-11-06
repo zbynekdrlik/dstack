@@ -2,6 +2,8 @@
 
 ## 0.6.50 (unreleased)
 
+- dlisten (dstack #139): the status line (log and dtray) names the mix: `, mono` under `--mono`. On FOH (dasio) it could not be seen. New: `Stats::mono`, `Snapshot::mono`.
+
 ## 0.6.49
 
 - New (dlisten, dstack #139): `--mono` sums every RX channel at 0 dB onto both speakers, clamped at full scale (`map::source_mono`, `map::Source::Sum`, `Player::with_mono`). The FOH monitor speaker's old VB-Matrix route summed its two sources (an alert and a stage feed) this way.
