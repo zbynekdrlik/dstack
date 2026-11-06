@@ -1456,19 +1456,28 @@ fn a_lane_s_times_show_in_whole_microseconds() {
     );
 }
 
-/// dstack #104 (dtray): the local endpoint answers `status` and nothing
-/// else; a test request through it changes nothing.
+/// dstack #104 (dtray): the local endpoint answers `status` and `app`
+/// (dstack #139) and nothing else; a test request through it changes
+/// nothing.
 #[test]
-fn the_local_endpoint_answers_status_only() {
+fn the_local_endpoint_answers_status_and_app_only() {
     let dir = tempfile::tempdir().unwrap();
     let media = media_on(&device_at(dir.path()), Arc::new(Unready));
     assert!(local::reply("status", &media).starts_with("{\"clock\":{"));
     assert!(local::reply(" status \r", &media).starts_with("{\"clock\":{"));
-    let refused = format!("error: {}", local::ONLY_STATUS);
+    let refused = format!("error: {}", local::ONLY_STATUS_AND_APP);
     assert_eq!(local::reply("source 1 counter", &media), refused);
     assert_eq!(local::reply("statusx", &media), refused);
+    assert_eq!(local::reply("appx 1", &media), refused);
     assert_eq!(local::reply("", &media), refused);
     assert_eq!(media.tx.source(0), Some(Source::Silence));
+    assert_eq!(
+        local::reply("app output 1", &media),
+        "error: no app command"
+    );
+    assert_eq!(local::reply(" app ", &media), "error: app <words>");
+    media.set_app_command(|w| Ok(format!("got {w}")));
+    assert_eq!(local::reply("app output 1", &media), "got output 1");
 }
 
 /// The endpoint over TCP on 127.0.0.1: one line in, one line out, closed;
@@ -1505,8 +1514,107 @@ async fn the_local_endpoint_serves_one_line_a_connection() {
     let out = ask(b"status", true).await.unwrap();
     assert!(out.starts_with("{\"clock\":{"), "{out}");
     let out = ask(b"source 1 counter\n", false).await.unwrap();
-    assert_eq!(out, format!("error: {}\n", local::ONLY_STATUS));
+    assert_eq!(out, format!("error: {}\n", local::ONLY_STATUS_AND_APP));
     assert_eq!(media.tx.source(0), Some(Source::Silence));
+}
+
+/// dstack #139: an app command over the real endpoint reaches the app's
+/// hook with its words, and its answer comes back as the line; without a
+/// hook the answer says so.
+#[tokio::test]
+async fn an_app_command_round_trips_over_the_local_endpoint() {
+    use std::io::{Read, Write};
+    use std::sync::Mutex;
+    let dir = tempfile::tempdir().unwrap();
+    let media = media_on(&device_at(dir.path()), Arc::new(Unready));
+    let listener = local::bind().unwrap();
+    let at = listener.local_addr().unwrap();
+    tokio::spawn(local::serve(listener, Arc::clone(&media)));
+    let ask = move |req: &'static [u8]| {
+        tokio::task::spawn_blocking(move || {
+            let mut s = std::net::TcpStream::connect(at).unwrap();
+            s.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            s.write_all(req).unwrap();
+            let mut out = String::new();
+            s.read_to_string(&mut out).unwrap();
+            out
+        })
+    };
+    assert_eq!(
+        ask(b"app output 2\n").await.unwrap(),
+        "error: no app command\n"
+    );
+    let got = Arc::new(Mutex::new(Vec::new()));
+    let seen = Arc::clone(&got);
+    media.set_app_command(move |words| {
+        seen.lock().unwrap().push(words.to_string());
+        match words {
+            "output 2" => Ok(String::new()),
+            _ => Err("no such output".into()),
+        }
+    });
+    assert_eq!(ask(b"app output 2\n").await.unwrap(), "ok\n");
+    assert_eq!(
+        ask(b"app output 9\n").await.unwrap(),
+        "error: no such output\n"
+    );
+    assert_eq!(*got.lock().unwrap(), ["output 2", "output 9"]);
+}
+
+#[test]
+fn an_app_request_parses_with_its_words_kept_whole() {
+    assert_eq!(parsed("app output 2"), Ok(Request::App));
+    assert_eq!(parsed("  app x"), Ok(Request::App));
+    assert_eq!(parsed("app"), Err(APP_USAGE));
+    assert_eq!(parsed("app   "), Err(APP_USAGE));
+    assert_eq!(parsed("APP x"), Err(UNKNOWN));
+    assert_eq!(app_words("app output 2"), "output 2");
+    assert_eq!(app_words("  app  Speakers (USB)  \r"), "Speakers (USB)");
+    assert_eq!(app_words("app"), "");
+    assert_eq!(app_words("xyz"), "xyz", "no app word: the line, trimmed");
+}
+
+#[test]
+fn an_app_answer_is_one_line_within_its_bound() {
+    assert_eq!(app_answer(None), "error: no app command");
+    assert_eq!(app_answer(Some(Ok(String::new()))), "ok");
+    assert_eq!(app_answer(Some(Ok("ok: HDMI".into()))), "ok: HDMI");
+    assert_eq!(app_answer(Some(Err("gone".into()))), "error: gone");
+    assert_eq!(app_answer(Some(Ok("a\nb\tc".into()))), "a b c");
+    let long = app_answer(Some(Ok("x".repeat(300))));
+    assert_eq!(long.len(), APP_ANSWER_MAX);
+    // A two-byte character that would pass the bound is left out whole.
+    let mut text = "x".repeat(APP_ANSWER_MAX - 1);
+    text.push('é');
+    assert_eq!(app_answer(Some(Ok(text))).len(), APP_ANSWER_MAX - 1);
+    let mut fits = "x".repeat(APP_ANSWER_MAX - 2);
+    fits.push('é');
+    assert_eq!(app_answer(Some(Ok(fits))).len(), APP_ANSWER_MAX);
+}
+
+#[test]
+fn an_app_command_goes_to_the_hook_and_a_panic_is_an_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let media = media_on(&device_at(dir.path()), Arc::new(Unready));
+    assert_eq!(answer("app x", &media), "error: no app command");
+    media.set_app_command(|w| {
+        if w == "x" {
+            Ok(String::new())
+        } else {
+            Err(w.to_string())
+        }
+    });
+    assert_eq!(answer("app x", &media), "ok");
+    assert_eq!(answer("app y z", &media), "error: y z");
+    media.set_app_command(|_| panic!("the app's bug"));
+    assert_eq!(
+        answer("app x", &media),
+        format!("error: {}", crate::daemon::media::app::PANICKED)
+    );
+    // The hook replaced: the newest answers.
+    media.set_app_command(|_| Ok("second".into()));
+    assert_eq!(answer("app x", &media), "second");
 }
 
 /// iemmixer (4.11.2026): the status names the clock source a linked device

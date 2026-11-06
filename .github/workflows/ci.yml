@@ -26,8 +26,8 @@ jobs:
         with:
           persist-credentials: false
       - run: cargo fmt --all --check
-      - name: GTK and AppIndicator headers (dtray's Linux tray)
-        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libayatana-appindicator3-dev
+      - name: GTK, AppIndicator and ALSA headers (dtray's Linux tray, dlisten's output)
+        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libayatana-appindicator3-dev libasound2-dev
       - name: Docs build without warnings (broken or private links)
         run: cargo doc --workspace --no-deps --locked
         env:
@@ -45,9 +45,9 @@ jobs:
         with:
           persist-credentials: false
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - name: GTK and AppIndicator headers (dtray's Linux tray)
+      - name: GTK, AppIndicator and ALSA headers (dtray's Linux tray, dlisten's output)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libayatana-appindicator3-dev
+        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libayatana-appindicator3-dev libasound2-dev
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
 
@@ -62,8 +62,8 @@ jobs:
       - uses: taiki-e/install-action@7623a79cdfecb99d681017af368ca353d9f49bb5 # v2.87.19
         with:
           tool: cargo-llvm-cov@0.9.1
-      - name: GTK and AppIndicator headers (dtray's Linux tray)
-        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libayatana-appindicator3-dev
+      - name: GTK, AppIndicator and ALSA headers (dtray's Linux tray, dlisten's output)
+        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libayatana-appindicator3-dev libasound2-dev
       - name: Line coverage against the floor (.github/coverage-floor)
         run: |
           set -euo pipefail
@@ -121,9 +121,9 @@ jobs:
           done
 
   mutation:
-    # Mutants of the PR's own diff only (.cargo/mutants.toml), 4 shards of at
-    # most 20 minutes; a mutant the tests miss fails the PR (kill it with an
-    # assertion). An overrun is a setup bug: shard more or narrow, never a
+    # Mutants of the PR's own diff only (.cargo/mutants.toml), 8 shards of at
+    # most 20 minutes (4 overran with dlisten's 380 mutants, dstack #139); a
+    # mutant the tests miss fails the PR (kill it with an assertion). An overrun is a setup bug: shard more or narrow, never a
     # longer timeout.
     if: github.event_name == 'pull_request'
     needs: [test]
@@ -132,7 +132,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -144,8 +144,8 @@ jobs:
       - uses: taiki-e/install-action@7623a79cdfecb99d681017af368ca353d9f49bb5 # v2.87.19
         with:
           tool: cargo-mutants@27.1.0,cargo-nextest@0.9.146
-      - name: GTK and AppIndicator headers (dtray's Linux tray)
-        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libayatana-appindicator3-dev
+      - name: GTK, AppIndicator and ALSA headers (dtray's Linux tray, dlisten's output)
+        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libayatana-appindicator3-dev libasound2-dev
       - name: Mutants of the diff
         env:
           NEXTEST_PROFILE: mutants
@@ -157,9 +157,12 @@ jobs:
             exit 0
           fi
           status=0
+          # Round-robin: a diff's mutants come sorted by file, and a slice
+          # of dstack's own (each rebuilds every crate above it) overran one
+          # shard's 20 minutes while the others idled (dstack #139).
           cargo mutants --in-diff "$RUNNER_TEMP/pr.diff" --baseline=skip --timeout 60 --jobs 2 --test-workspace=true \
-            --shard "${{ matrix.shard }}/${{ strategy.job-total }}" \
-            --package dstack --package dstack-audio-io --package dlink --package dstack-resample --package dtray || status=$?
+            --shard "${{ matrix.shard }}/${{ strategy.job-total }}" --sharding round-robin \
+            --package dstack --package dstack-audio-io --package dlink --package dstack-resample --package dtray --package dlisten || status=$?
           if [ -s mutants.out/missed.txt ]; then
             echo "::group::missed mutants"; cat mutants.out/missed.txt; echo "::endgroup::"
           fi

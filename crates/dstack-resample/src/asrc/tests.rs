@@ -807,3 +807,23 @@ fn only_silence_past_the_highest_count_folds() {
     c.played_silence(0.012);
     assert!((c.cushion_s() - 0.012).abs() < 1e-12, "{}", c.cushion_s());
 }
+
+/// dstack #139: the fit's room is made at once, so a controller on an
+/// audio callback never allocates as its points come in (a flush keeps it).
+#[test]
+fn the_rate_fit_s_room_is_made_at_once() {
+    let mut fit = RateFit::default();
+    let room = fit.points.capacity();
+    assert!(room > REGRESSION_CAP, "{room}");
+    // Dense points: the cap, not the span, holds them.
+    for i in 0..REGRESSION_CAP + 10 {
+        fit.offer(i as f64 * 0.1, 0.0);
+    }
+    assert_eq!(fit.points.capacity(), room, "no growth");
+    fit.flush();
+    assert_eq!(fit.points.capacity(), room);
+    assert_eq!(
+        (fit.points(), fit.offset_s, fit.realign_next),
+        (0, 0.0, false)
+    );
+}

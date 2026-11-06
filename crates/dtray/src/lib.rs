@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! dtray: one tray icon per PC for every dstack device living there
-//! (dlink apps, dasio, dstack-dev), dstack #104. It reads; the one thing it
-//! writes is a device's latency, chosen in its menu.
+//! (dlink apps, dasio, dstack-dev), dstack #104. It reads; it writes only
+//! what its menu chooses: a device's latency, and an app's output (dstack
+//! #139: dlisten; [`output`], sent as the app's own command).
 //!
 //! - [`discover`]: the devices on this PC. mDNS discovery on each of the
 //!   PC's own IPv4 addresses keeps the ARC records that sit on one of them
@@ -19,6 +20,8 @@
 //! - [`latency`]: a device's latency menu from its ARC settings.
 //! - [`menu`]: the tray menu's decisions (when to read settings, when to
 //!   build the menu again, whether a choice writes).
+//! - [`output`]: an app's Output menu from its status part, and the
+//!   request a choice sends.
 //! - [`icon`]: the icon's pixels in a colour.
 //! - [`desktop`]: the Linux desktop's files (the single-instance lock, the
 //!   autostart entry and its text).
@@ -43,6 +46,7 @@ pub mod icon;
 pub mod latency;
 pub mod menu;
 pub mod model;
+pub mod output;
 pub mod probe;
 
 /// What the command line asks for.

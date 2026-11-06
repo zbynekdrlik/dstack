@@ -22,6 +22,11 @@
 //!   channel the engine feeds (`error: no engine on that channel`).
 //! - `check <rx> off|counter|sine <hz>`: which checker reads RX channel
 //!   `rx`'s ring at its playout point ([`Checks`]); runtime only.
+//! - `app <words>` (dstack #139): the app's own command, handed to its hook
+//!   ([`Media::set_app_command`]) and answered by it ([`app_answer`]):
+//!   `ok`, the app's one-line text, or `error: <reason>`; `error: no app
+//!   command` without a hook. The one request whose answer may carry the
+//!   app's words. The local endpoint takes it too ([`local`]).
 //!
 //! Anything else is one line `error: <reason>`, the reason a fixed text
 //! (the request is never echoed back). Settings answer `ok`.
@@ -107,9 +112,16 @@ pub enum Request {
         rx: usize,
         check: Option<CheckKind>,
     },
+    /// The app's own command: the words after `app` ([`app_words`]).
+    App,
 }
 
-const UNKNOWN: &str = "unknown request: status, source or check";
+const UNKNOWN: &str = "unknown request: status, source, check or app";
+const APP_USAGE: &str = "app <words>";
+/// The answer without an app command hook.
+pub const NO_APP_COMMAND: &str = "no app command";
+/// The longest app answer, bytes (one line; the rest is cut).
+pub const APP_ANSWER_MAX: usize = 256;
 const SOURCE_USAGE: &str =
     "source <tx> silence|counter|sine <hz> <dbfs>|echo <rx> <samples>|engine";
 const NO_ENGINE: &str = "no engine on that channel";
@@ -157,10 +169,41 @@ pub fn parse(line: &str, lim: Limits) -> Result<Request, &'static str> {
             };
             Ok(Request::Check { rx, check })
         }
+        ["app"] => Err(APP_USAGE),
+        ["app", ..] => Ok(Request::App),
         ["source"] => Err(SOURCE_USAGE),
         ["check"] => Err(CHECK_USAGE),
         _ => Err(UNKNOWN),
     }
+}
+
+/// The words of an `app` request line: what follows the word `app`, its
+/// spaces at both ends trimmed (inner spaces kept: an app's words may be a
+/// name).
+pub fn app_words(line: &str) -> &str {
+    let line = line.trim_start();
+    line.strip_prefix("app").unwrap_or(line).trim()
+}
+
+/// The answer line to an app command: `error: no app command` without a
+/// hook (`None`), `ok` for an empty `Ok`, the text of another, `error:
+/// <reason>` for an `Err`; control characters (a line break) as spaces,
+/// cut to [`APP_ANSWER_MAX`] bytes at a character's edge.
+pub fn app_answer(r: Option<Result<String, String>>) -> String {
+    let text = match r {
+        None => format!("error: {NO_APP_COMMAND}"),
+        Some(Ok(t)) if t.is_empty() => "ok".to_string(),
+        Some(Ok(t)) => t,
+        Some(Err(e)) => format!("error: {e}"),
+    };
+    let mut out = String::new();
+    for c in text.chars() {
+        if out.len() + c.len_utf8() > APP_ANSWER_MAX {
+            break;
+        }
+        out.push(if c.is_control() { ' ' } else { c });
+    }
+    out
 }
 
 /// A channel number from 1 to `count`, as an index from 0.
@@ -206,6 +249,12 @@ pub fn answer(line: &str, media: &Media) -> String {
             }
             info!(rx = rx + 1, check = check_word(check), "RX check set");
             "ok".to_string()
+        }
+        Ok(Request::App) => {
+            let words = app_words(line);
+            let answer = app_answer(media.app_command(words));
+            info!(words, answer, "app command");
+            answer
         }
         Err(reason) => {
             debug!(reason, "control request refused");
@@ -947,9 +996,11 @@ fn engine_part(j: &mut Json, media: &Media) {
 
 /// The status endpoint for local readers (dtray, dstack #104): TCP on
 /// 127.0.0.1 at a port the OS picks, announced in the device's ARC record
-/// (`dstack_ctl`). It answers `status` only: the test requests (`source`,
-/// `check`) stay on the Unix socket, so nothing on the PC changes the
-/// device's audio through it. Every platform has it.
+/// (`dstack_ctl`). It answers `status`, and `app <words>` (dstack #139: the
+/// app's own command, such as dlisten's output, which dtray's menu sends;
+/// [`answer`]). The test requests (`source`, `check`) stay on the
+/// Unix socket, so nothing on the PC changes the device's audio through
+/// it. Every platform has it.
 pub mod local {
     use std::io;
     use std::net::Ipv4Addr;
@@ -958,21 +1009,23 @@ pub mod local {
 
     use tokio::net::{TcpListener, TcpStream};
 
-    use super::status;
+    use super::{answer, status};
     use crate::daemon::media::Media;
 
     /// How long a connection may take to send its request, and its answer
     /// to be taken.
     pub const WAIT: Duration = Duration::from_secs(1);
-    /// The answer to anything but `status`.
-    pub const ONLY_STATUS: &str = "this endpoint answers status only";
+    /// The answer to anything but `status` and `app <words>`.
+    pub const ONLY_STATUS_AND_APP: &str = "this endpoint answers status and app only";
 
     /// The answer line to `line` (without its newline).
     pub fn reply(line: &str, media: &Media) -> String {
         if line.trim() == "status" {
             status(media)
+        } else if line.split_ascii_whitespace().next() == Some("app") {
+            answer(line, media)
         } else {
-            format!("error: {ONLY_STATUS}")
+            format!("error: {ONLY_STATUS_AND_APP}")
         }
     }
 

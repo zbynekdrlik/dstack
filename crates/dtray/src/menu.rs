@@ -11,15 +11,17 @@
 //! - [`Shape`], [`shapes_of`]: each device's part of the menu as built.
 //! - [`needs_rebuild`]: whether the menu must be built again, or only its
 //!   texts set.
-//! - [`write_needed`]: whether a latency choice changes anything.
+//! - [`write_needed`]: whether a latency choice changes anything;
+//!   [`output_needed`] the same for an app's output ([`crate::output`]).
 
 use std::collections::BTreeMap;
 use std::net::SocketAddrV4;
 
 use dstack::arc::control::Settings;
 
-use crate::discover::Local;
+use crate::discover::{Local, Reading};
 use crate::latency::{self, Choice};
+use crate::output::{self, OutputChoice};
 
 /// A device's settings are read again every this many ticks.
 pub const SETTINGS_EVERY: u32 = 10;
@@ -77,21 +79,29 @@ impl Known {
     }
 }
 
-/// One device's part of the menu as built: its ARC and latency values.
+/// One device's part of the menu as built: its ARC, latency values and
+/// the app's outputs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Shape {
     pub arc: SocketAddrV4,
     pub choices: Vec<Choice>,
+    pub outputs: Vec<OutputChoice>,
 }
 
 /// Each device's shape: its latency menu from `known`'s settings, none
-/// without them.
-pub fn shapes_of(devices: &[Local], known: &Known) -> Vec<Shape> {
+/// without them; the app's outputs from its reading in `readings` (the
+/// reading of the same name at the same place; none without it).
+pub fn shapes_of(devices: &[Local], known: &Known, readings: &[Reading]) -> Vec<Shape> {
     devices
         .iter()
-        .map(|d| Shape {
+        .enumerate()
+        .map(|(i, d)| Shape {
             arc: d.arc,
             choices: known.get(&d.arc).map(latency::choices).unwrap_or_default(),
+            outputs: match readings.get(i) {
+                Some((name, Ok(line))) if *name == d.name => output::choices(line),
+                _ => Vec::new(),
+            },
         })
         .collect()
 }
@@ -134,6 +144,16 @@ pub fn write_needed(shapes: &[Shape], arc: SocketAddrV4, ns: u32) -> bool {
         .filter(|s| s.arc == arc)
         .flat_map(|s| &s.choices)
         .any(|c| c.ns == ns && c.checked)
+}
+
+/// Whether choosing output `index` of the device at `arc` sends
+/// anything: not when it is the one already checked.
+pub fn output_needed(shapes: &[Shape], arc: SocketAddrV4, index: usize) -> bool {
+    !shapes
+        .iter()
+        .filter(|s| s.arc == arc)
+        .flat_map(|s| &s.outputs)
+        .any(|o| o.index == index && o.checked)
 }
 
 #[cfg(test)]

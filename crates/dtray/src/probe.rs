@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! One `status` request to a device's local endpoint
-//! ([`dstack::ctl::local`]): TCP to 127.0.0.1 at the port its ARC record
-//! names, the request line, the JSON line back, all within one deadline
-//! of [`WAIT`]: a stuck or slow device holds the tray for a second at most.
+//! One request to a device's local endpoint ([`dstack::ctl::local`]): TCP
+//! to 127.0.0.1 at the port its ARC record names, the request line, the
+//! answer line back, all within one deadline of [`WAIT`]: a stuck or slow
+//! device holds the tray for a second at most. `status` reads it
+//! ([`status`]); `app <words>` asks the app ([`ask`], dstack #139: an app's
+//! output from its menu).
 
 use std::io::{self, ErrorKind, Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpStream};
@@ -39,6 +41,19 @@ pub fn status(port: u16) -> Result<String, ProbeError> {
     status_at(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port).into(), WAIT)
 }
 
+/// The answer of the device whose local endpoint is at `port` to the
+/// request `line` (without its newline), within [`WAIT`]: `ok` or the
+/// app's text; `error: ...` is [`ProbeError::Refused`].
+pub fn ask(port: u16, line: &str) -> Result<String, ProbeError> {
+    let mut request = line.as_bytes().to_vec();
+    request.push(b'\n');
+    ask_at(
+        SocketAddrV4::new(Ipv4Addr::LOCALHOST, port).into(),
+        &request,
+        WAIT,
+    )
+}
+
 /// The time from `now` to `deadline`; `TimedOut` when none is left (a
 /// socket timeout of zero would mean none at all).
 pub fn time_left(deadline: Instant, now: Instant) -> io::Result<Duration> {
@@ -51,10 +66,16 @@ pub fn time_left(deadline: Instant, now: Instant) -> io::Result<Duration> {
 /// The status line of the endpoint at `addr`, the whole exchange within
 /// `wait`.
 pub fn status_at(addr: SocketAddr, wait: Duration) -> Result<String, ProbeError> {
+    ask_at(addr, REQUEST, wait)
+}
+
+/// The endpoint at `addr`'s answer line to `request` (a line with its
+/// newline), the whole exchange within `wait`.
+pub fn ask_at(addr: SocketAddr, request: &[u8], wait: Duration) -> Result<String, ProbeError> {
     let deadline = Instant::now() + wait;
     let mut stream = TcpStream::connect_timeout(&addr, wait)?;
     stream.set_write_timeout(Some(time_left(deadline, Instant::now())?))?;
-    stream.write_all(REQUEST)?;
+    stream.write_all(request)?;
     let mut answer = Vec::new();
     let mut buf = [0u8; 4096];
     loop {

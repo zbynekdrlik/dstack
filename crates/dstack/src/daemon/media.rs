@@ -104,6 +104,8 @@ pub struct Media {
     /// The app's status hook, its thread and its cached part
     /// ([`Media::set_app_status`]).
     app: app::AppHook,
+    /// The app's command hook ([`Media::set_app_command`]).
+    app_command: app::CommandHook,
 }
 
 /// One RX channel's state ([`Media::rx_channels`]).
@@ -174,6 +176,7 @@ impl Media {
             engine: Mutex::new(None),
             levels: Arc::default(),
             app: app::AppHook::default(),
+            app_command: app::CommandHook::default(),
         })
     }
 
@@ -236,6 +239,32 @@ impl Media {
     /// rest of the status, the part may carry names: it is the app's.
     pub fn set_app_status(&self, f: impl Fn() -> String + Send + Sync + 'static) {
         self.app.set(Arc::new(f));
+    }
+
+    /// Sets the app's command hook (dstack #139): a control request
+    /// `app <words>` (the Unix socket, and the local endpoint dtray uses,
+    /// [`crate::ctl::local`]) calls `f` with `<words>`, and answers `ok` for
+    /// `Ok("")`, the text for another `Ok`, `error: <reason>` for an `Err`
+    /// ([`crate::ctl::app_answer`]); without a hook `error: no app command`.
+    /// A later call replaces the hook. The request is the app's own (its
+    /// settings, such as dlisten's output); the device itself is never
+    /// changed through it.
+    ///
+    /// `f` runs on the control task that got the request: it answers at
+    /// once and hands longer work to the app's own thread (a slow `f` holds
+    /// that connection, and a task of the device's runtime). A panic in `f`
+    /// is answered as an error and warned.
+    pub fn set_app_command(
+        &self,
+        f: impl Fn(&str) -> Result<String, String> + Send + Sync + 'static,
+    ) {
+        self.app_command.set(Arc::new(f));
+    }
+
+    /// The app command hook's answer to `words` ([`Media::set_app_command`]),
+    /// `None` without a hook.
+    pub fn app_command(&self, words: &str) -> Option<Result<String, String>> {
+        self.app_command.call(words)
     }
 
     /// Sends this device's TX through the host's `sender` (dstack #1): its

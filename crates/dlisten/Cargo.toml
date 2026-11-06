@@ -1,0 +1,54 @@
+[package]
+name = "dlisten"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+repository.workspace = true
+authors.workspace = true
+description = "Plays Dante audio on a local output (a PC's speakers, a monitor's audio): a dlink RX device into the output's own clock and rate through the ASRC"
+
+[lib]
+name = "dlisten"
+
+[[bin]]
+name = "dlisten"
+path = "src/main.rs"
+
+[dependencies]
+dlink = { path = "../dlink" }
+dstack-resample = { path = "../dstack-resample" }
+# dtray's Run value and autostart entry quoting, for `--autostart`
+# (its library; dlisten has no tray of its own: dtray shows it).
+dtray = { path = "../dtray" }
+# The output device: WASAPI shared on Windows, ALSA on Linux, at the
+# device's own default config (RustAudio, Apache-2.0). 0.18.2 was
+# published on 2026-08-16. No default features (no JACK, no PipeWire);
+# on Linux it builds against libasound2-dev (CI installs it).
+cpal = "=0.18.2"
+# The app status's JSON for dtray (already in the lockfile through dstack).
+serde_json = "1.0"
+# Ctrl+C (already in the lockfile through dstack, with these features).
+tokio = { version = "1", features = ["rt", "signal"] }
+tracing = "0.1"
+# The log on stderr, RUST_LOG as the devices read it (already in the
+# lockfile through dstack).
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+# Settings files in tests (already in the lockfile).
+tempfile = "3"
+# RX channel readings in the status's tests (dlink re-exports the
+# channel, not its subscription's type), and the status's size bound.
+dstack = { path = "../dstack" }
+
+[target.'cfg(windows)'.dependencies]
+# The parent console for the command line's output (a GUI-subsystem
+# program has none), the error box, and the autostart's Run value (the
+# version dstack uses).
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_System_Console",
+  "Win32_System_Registry",
+  "Win32_UI_WindowsAndMessaging",
+] }
