@@ -60,7 +60,7 @@ const MAC_PRESENT: u64 = 1 << 48;
 const _: () = assert!(MAC_PRESENT == u64::from_be_bytes([0, 1, 0, 0, 0, 0, 0, 0]));
 
 /// Writes the IPv4 header (DSCP `tos`, don't fragment, `id`) and the UDP
-/// header from `src` to `dst` into `buf[..HEADROOM]`, for the payload of
+/// header (no checksum) from `src` to `dst` into `buf[..HEADROOM]`, for the payload of
 /// `len` bytes already in `buf[HEADROOM..]`. Returns the frame's length.
 /// `buf` must hold `HEADROOM + len` bytes.
 pub fn write_headers(
@@ -94,19 +94,9 @@ pub fn write_headers(
     udp[0..2].copy_from_slice(&src.port().to_be_bytes());
     udp[2..4].copy_from_slice(&dst.port().to_be_bytes());
     udp[4..6].copy_from_slice(&udp_len.to_be_bytes());
+    // No UDP checksum (0, RFC 768), as every Audinate sender sends media:
+    // an UltimoX2 read our checksummed flow ~3 ms late (dstack #141).
     udp[6..8].fill(0);
-    let pseudo = u32::from(u16::from_be_bytes([s[0], s[1]]))
-        + u32::from(u16::from_be_bytes([s[2], s[3]]))
-        + u32::from(u16::from_be_bytes([d[0], d[1]]))
-        + u32::from(u16::from_be_bytes([d[2], d[3]]))
-        + u32::from(UDP)
-        + u32::from(udp_len);
-    // A computed 0 is sent as all ones (RFC 768): 0 means "no checksum".
-    let sum = match checksum(sum16(udp, pseudo)) {
-        0 => 0xffff,
-        s => s,
-    };
-    udp[6..8].copy_from_slice(&sum.to_be_bytes());
     total
 }
 
