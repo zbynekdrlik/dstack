@@ -7,8 +7,11 @@
 //! The start at logon is the user's Run value, as dtray's
 //! ([`dlisten::autostart`]).
 
+use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
 use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS};
-use windows_sys::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole};
+use windows_sys::Win32::System::Console::{
+    ATTACH_PARENT_PROCESS, AttachConsole, GetStdHandle, STD_ERROR_HANDLE,
+};
 use windows_sys::Win32::System::Registry::{
     HKEY_CURRENT_USER, REG_SZ, RRF_RT_REG_SZ, RegDeleteKeyValueW, RegGetValueW, RegSetKeyValueW,
 };
@@ -23,11 +26,17 @@ fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(Some(0)).collect()
 }
 
-/// The console of the process that started us, when there is one (a
-/// command line); none from Explorer or the Run value.
-pub fn attach_console() {
+/// Where a failure can be read: whether stderr was handed to us (a script
+/// redirected it), then whether we got the console of the process that
+/// started us (a command line). Neither from Explorer or the Run value
+/// ([`dlisten::alert::shows_box`]).
+pub fn attach_console() -> (bool, bool) {
+    // SAFETY: plain call; reads the handle the process started with.
+    let err = unsafe { GetStdHandle(STD_ERROR_HANDLE) };
+    let has_stderr = !err.is_null() && err != INVALID_HANDLE_VALUE;
     // SAFETY: plain call; failing (no parent console) changes nothing.
-    unsafe { AttachConsole(ATTACH_PARENT_PROCESS) };
+    let attached = unsafe { AttachConsole(ATTACH_PARENT_PROCESS) } != 0;
+    (attached, has_stderr)
 }
 
 /// An error box (a start from Explorer or the Run value has no console).
