@@ -6,10 +6,11 @@ fn at(a: [u8; 4], port: u16) -> SocketAddrV4 {
 
 #[test]
 fn the_headers_match_a_packet_built_by_hand() {
-    // Built independently (Python struct + RFC 1071), payload of odd length.
+    // Built independently (Python struct + RFC 1071), payload of odd length;
+    // the UDP checksum is 0, as every Audinate sender sends it.
     let want: [u8; HEADROOM] = [
         0x45, 0xb8, 0x00, 0x1f, 0x12, 0x34, 0x40, 0x00, 0x40, 0x11, 0x13, 0xe0, 0x0a, 0x00, 0x00,
-        0x01, 0x0a, 0x00, 0x00, 0x02, 0x0f, 0xa0, 0x13, 0x88, 0x00, 0x0b, 0xc4, 0xab,
+        0x01, 0x0a, 0x00, 0x00, 0x02, 0x0f, 0xa0, 0x13, 0x88, 0x00, 0x0b, 0x00, 0x00,
     ];
     let mut buf = [0xeeu8; HEADROOM + 3];
     buf[HEADROOM..].copy_from_slice(&[1, 2, 3]);
@@ -32,8 +33,12 @@ fn verifies(sum: u32) -> bool {
     checksum(sum) == 0
 }
 
+/// dstack #141: an UltimoX2 receiver read our flow ~3 ms late while an
+/// Audinate sender's read 0.4 ms on the same card. Audinate senders send
+/// media with no UDP checksum (0, RFC 768); our frames carried one. The IP
+/// header still verifies, the UDP checksum is 0, for any payload.
 #[test]
-fn both_checksums_verify_for_any_payload_length() {
+fn the_ip_checksum_verifies_and_the_udp_checksum_is_zero_for_any_payload_length() {
     for len in [0usize, 1, 2, 17, 1024, 1443] {
         let mut buf = vec![0u8; HEADROOM + len];
         for (i, b) in buf[HEADROOM..].iter_mut().enumerate() {
@@ -42,30 +47,11 @@ fn both_checksums_verify_for_any_payload_length() {
         let (src, dst) = (at([192, 168, 7, 112], 40001), at([192, 168, 7, 110], 4321));
         let n = write_headers(&mut buf, src, dst, 0xb8, len as u16, len);
         assert!(verifies(sum16(&buf[..IP_HEADER], 0)), "IP, len {len}");
-        let pseudo = sum16(&src.ip().octets(), 0)
-            + sum16(&dst.ip().octets(), 0)
-            + u32::from(UDP)
-            + (UDP_HEADER + len) as u32;
-        assert!(
-            verifies(sum16(&buf[IP_HEADER..n], pseudo)),
-            "UDP, len {len}"
-        );
+        assert_eq!(buf[IP_HEADER + 6..IP_HEADER + 8], [0, 0], "UDP, len {len}");
         assert_eq!(usize::from(u16::from_be_bytes([buf[2], buf[3]])), n);
+        let udp_len = u16::from_be_bytes([buf[IP_HEADER + 4], buf[IP_HEADER + 5]]);
+        assert_eq!(usize::from(udp_len), UDP_HEADER + len);
     }
-}
-
-#[test]
-fn a_udp_checksum_of_zero_goes_out_as_all_ones() {
-    // Pick the payload's last two bytes so the computed checksum is 0.
-    let (src, dst) = (at([10, 0, 0, 1], 1), at([10, 0, 0, 2], 2));
-    let mut buf = [0u8; HEADROOM + 2];
-    write_headers(&mut buf, src, dst, 0, 0, 2);
-    let c = u16::from_be_bytes([buf[26], buf[27]]);
-    // Adding the checksum to the payload makes the sum all ones, so the
-    // next computation would give 0.
-    buf[HEADROOM..].copy_from_slice(&c.to_be_bytes());
-    write_headers(&mut buf, src, dst, 0, 0, 2);
-    assert_eq!(buf[26..28], [0xff, 0xff]);
 }
 
 #[test]
