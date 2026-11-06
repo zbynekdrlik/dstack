@@ -144,7 +144,8 @@ fn an_output_200_ppm_slow_keeps_the_fifo_at_its_target_with_no_underrun() {
 
 fn drifting(drift: f64) {
     {
-        let mut s = Sim::new(48_000, 48_000, drift, 2, 2);
+        // One channel: the clocks are the test, the converter costs per channel.
+        let mut s = Sim::new(48_000, 48_000, drift, 1, 1);
         s.run(210.0);
         s.depth_ms();
         s.run(30.0);

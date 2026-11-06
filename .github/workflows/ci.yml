@@ -157,8 +157,11 @@ jobs:
             exit 0
           fi
           status=0
+          # Round-robin: a diff's mutants come sorted by file, and a slice
+          # of dstack's own (each rebuilds every crate above it) overran one
+          # shard's 20 minutes while the others idled (dstack #139).
           cargo mutants --in-diff "$RUNNER_TEMP/pr.diff" --baseline=skip --timeout 60 --jobs 2 --test-workspace=true \
-            --shard "${{ matrix.shard }}/${{ strategy.job-total }}" \
+            --shard "${{ matrix.shard }}/${{ strategy.job-total }}" --sharding round-robin \
             --package dstack --package dstack-audio-io --package dlink --package dstack-resample --package dtray --package dlisten || status=$?
           if [ -s mutants.out/missed.txt ]; then
             echo "::group::missed mutants"; cat mutants.out/missed.txt; echo "::endgroup::"
