@@ -34,6 +34,7 @@
 //! (`src/main.rs`) is the glue: the command line ([`cli`]), cpal, dlink,
 //! the log and `--autostart` ([`autostart`]).
 
+pub mod alert;
 pub mod autostart;
 pub mod cli;
 pub mod feed;
