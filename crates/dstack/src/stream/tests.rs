@@ -940,7 +940,6 @@ fn stream_stats_map_every_count() {
             missed: 4,
             overruns: 2,
             resets: 2,
-            parked: false,
             faulted: false,
             running: true,
             max_process_ns: 5_000_999,

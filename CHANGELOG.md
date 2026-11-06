@@ -1,6 +1,10 @@
 # Changelog
 
-## 0.6.51 (unreleased)
+## 0.6.52 (unreleased)
+
+- `dstack-audio-io`: `StreamStats::parked` is removed. No backend ever set it (always false), and no consumer reads it any more (iemmixer dropped its reader). A consumer that names the field in a `StreamStats` literal or reads it drops that line.
+
+## 0.6.51
 
 - Media on the direct TX paths (Windows host frame sender, Linux AF_PACKET) goes out with no UDP checksum (0, RFC 768), as every Audinate sender sends it (dstack #141). An UltimoX2 receiver (ESI planet 22) read band-asio-dante's flow ~3 ms late while it read an Audinate sender at 0.4 ms on the same card. Our packets leave on time, with the same media header; the UDP checksum is the one wire difference a capture on FOH shows. No API change; the UDP socket path is unchanged.
 
