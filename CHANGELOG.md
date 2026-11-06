@@ -1,6 +1,10 @@
 # Changelog
 
-## 0.6.50 (unreleased)
+## 0.6.51 (unreleased)
+
+- Media on the direct TX paths (Windows host frame sender, Linux AF_PACKET) goes out with no UDP checksum (0, RFC 768), as every Audinate sender sends it (dstack #141). An UltimoX2 receiver (ESI planet 22) read band-asio-dante's flow ~3 ms late while it read an Audinate sender at 0.4 ms on the same card. Our packets leave on time, with the same media header; the UDP checksum is the one wire difference a capture on FOH shows. No API change; the UDP socket path is unchanged.
+
+## 0.6.50
 
 - dlisten (dstack #139): the status line (log and dtray) names the mix: `, mono` under `--mono`. On FOH (dasio) it could not be seen. New: `Stats::mono`, `Snapshot::mono`.
 
