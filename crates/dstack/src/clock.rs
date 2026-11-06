@@ -43,9 +43,9 @@ use crate::device::TimingProfile;
 
 #[cfg(any(target_os = "linux", windows))]
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 #[cfg(any(target_os = "linux", windows))]
-use std::sync::atomic::{AtomicI32, AtomicI64};
+use std::sync::atomic::AtomicI32;
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 
 pub use dsyx::{DateState, Reading};
 pub use escape::{
@@ -348,6 +348,63 @@ pub trait PtpClock: Send + Sync {
     fn sleep_until(&self, ptp_ns: u64);
     /// The re-anchors so far: a change tells the media threads to re-align.
     fn epoch(&self) -> u32;
+    /// The latest re-anchor whose time step the clock knows, with the epoch
+    /// it began (dstack #1, 6.11.2026): on that epoch the media threads
+    /// shift their schedules by the step instead of starting again
+    /// ([`Anchor::step_from`]). `None`, the default: no re-anchor yet, or
+    /// its step is unknown; the media threads then start again, counted.
+    fn re_anchor(&self) -> Option<ReAnchor> {
+        None
+    }
+}
+
+/// A re-anchor whose time step the clock knows ([`PtpClock::re_anchor`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReAnchor {
+    /// The epoch it began.
+    pub epoch: u32,
+    /// The clock's time just after it less just before it, ns.
+    pub step_ns: i64,
+}
+
+/// What a media thread reads of the clock's time base with each time read:
+/// the epoch and the latest known re-anchor ([`Anchor::of`]). A bare epoch
+/// converts into one with no known step (the media threads start again on
+/// a change, as before 0.6.48).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Anchor {
+    pub epoch: u32,
+    pub re_anchor: Option<ReAnchor>,
+}
+
+impl From<u32> for Anchor {
+    fn from(epoch: u32) -> Anchor {
+        Anchor {
+            epoch,
+            re_anchor: None,
+        }
+    }
+}
+
+impl Anchor {
+    /// `clock`'s epoch and latest known re-anchor, read after its time.
+    pub fn of(clock: &(impl PtpClock + ?Sized)) -> Anchor {
+        Anchor {
+            epoch: clock.epoch(),
+            re_anchor: clock.re_anchor(),
+        }
+    }
+
+    /// The time step from epoch `from` to this one, ns: known only when
+    /// this epoch is the one after `from` and the clock's latest known
+    /// re-anchor began it. Two re-anchors between two reads, or one whose
+    /// step the clock does not know (a source switch of the linked clock),
+    /// give `None`.
+    pub fn step_from(&self, from: u32) -> Option<i64> {
+        self.re_anchor
+            .filter(|r| r.epoch == self.epoch && from.wrapping_add(1) == self.epoch)
+            .map(|r| r.step_ns)
+    }
 }
 
 /// How long [`PtpClock::sleep_until`] waits on a clock that is not ready.
@@ -361,6 +418,9 @@ pub struct ManualClock {
     now: AtomicU64,
     ready: AtomicBool,
     epoch: AtomicU32,
+    /// The latest re-anchor's step and the epoch it began (0: none).
+    step_ns: AtomicI64,
+    step_epoch: AtomicU32,
 }
 
 impl ManualClock {
@@ -370,6 +430,8 @@ impl ManualClock {
             now: AtomicU64::new(start_ns),
             ready: AtomicBool::new(true),
             epoch: AtomicU32::new(0),
+            step_ns: AtomicI64::new(0),
+            step_epoch: AtomicU32::new(0),
         }
     }
 
@@ -382,11 +444,15 @@ impl ManualClock {
         self.now.fetch_add(ns, Ordering::SeqCst);
     }
 
-    /// A re-anchor: time jumps by `delta_ns` and the epoch counts it.
+    /// A re-anchor: time jumps by `delta_ns` and the epoch counts it; its
+    /// step is known ([`PtpClock::re_anchor`]).
     pub fn re_anchor(&self, delta_ns: i64) {
+        let epoch = self.epoch.load(Ordering::SeqCst).wrapping_add(1);
+        self.step_ns.store(delta_ns, Ordering::SeqCst);
+        self.step_epoch.store(epoch, Ordering::SeqCst);
         // Two's complement: adding the bits of a negative delta subtracts.
         self.now.fetch_add(delta_ns as u64, Ordering::SeqCst);
-        self.epoch.fetch_add(1, Ordering::SeqCst);
+        self.epoch.store(epoch, Ordering::SeqCst);
     }
 }
 
@@ -403,6 +469,14 @@ impl PtpClock for ManualClock {
 
     fn epoch(&self) -> u32 {
         self.epoch.load(Ordering::SeqCst)
+    }
+
+    fn re_anchor(&self) -> Option<ReAnchor> {
+        let epoch = self.step_epoch.load(Ordering::SeqCst);
+        (epoch != 0).then(|| ReAnchor {
+            epoch,
+            step_ns: self.step_ns.load(Ordering::SeqCst),
+        })
     }
 }
 

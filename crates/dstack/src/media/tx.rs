@@ -1136,7 +1136,8 @@ impl Transmitter {
     /// (every pass while the clock is not ready, and at once when the clock
     /// went back), every flow realigned after a re-anchor, then every
     /// packet due sent. Nothing is sent before the clock is ready.
-    pub fn step(&mut self, now_ns: Option<u64>, epoch: u32) {
+    pub fn step(&mut self, now_ns: Option<u64>, anchor: impl Into<clock::Anchor>) {
+        let epoch = anchor.into().epoch;
         // Taken with the clock read (the caller's), so a slow events pass
         // counts in the lateness of the packets after it.
         let pass = Instant::now();

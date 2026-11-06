@@ -479,7 +479,8 @@ impl<P: Process> Pump<P> {
     /// step (and the first after free pacing) bootstraps, a new epoch
     /// re-bootstraps (counted); either calls the processor's
     /// `discontinuity` once before the next block.
-    pub fn media(&mut self, now: u64, epoch: u32) -> u64 {
+    pub fn media(&mut self, now: u64, anchor: impl Into<crate::clock::Anchor>) -> u64 {
+        let epoch = anchor.into().epoch;
         self.stats.media.store(true, Ordering::Relaxed);
         // The device latency the RX delays are planned against moved (Dante
         // Controller set it): play at it, the schedule started again.

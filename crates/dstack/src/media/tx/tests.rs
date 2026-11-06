@@ -1211,6 +1211,169 @@ fn a_re_anchor_realigns_every_flow_and_counts_it() {
     assert_eq!(rig.shared.lane(a).rebootstraps, 1);
 }
 
+/// iemmixer and SongPlayer (6.11.2026, v0.6.43; dstack #1): after dsync's
+/// coordinated date step the clock re-anchored, every flow started again
+/// on the fpp grid after now, and a receiver saw 2 packets (64 frames)
+/// missing. Every device steps by the same time, so the receivers expect
+/// the stamps to go on at the old ones + the step: 1.6 s is 153 600
+/// samples at 96 kHz, a whole number of packets at fpp 32 and 16.
+const DATE_STEP_NS: i64 = 1_600_000_000;
+const DATE_STEP: u64 = 153_600;
+
+/// The clock's anchor after one re-anchor of `step_ns` into `epoch`.
+fn stepped(epoch: u32, step_ns: i64) -> crate::clock::Anchor {
+    crate::clock::Anchor {
+        epoch,
+        re_anchor: Some(crate::clock::ReAnchor { epoch, step_ns }),
+    }
+}
+
+/// The stamps' steps: each packet's stamp less the one before.
+fn stamp_steps(packets: &[Vec<u8>]) -> Vec<u64> {
+    packets
+        .windows(2)
+        .map(|w| stamp_of(&w[1]).wrapping_sub(stamp_of(&w[0])))
+        .collect()
+}
+
+#[test]
+fn a_re_anchor_by_whole_packets_shifts_every_flow_and_loses_no_packet() {
+    let mut rig = Rig::with_engine(&[1]);
+    let n0 = send_clock(T, RATE, TX_MARGIN_NS);
+    // The engine ring as the pump writes it: one line of positions across
+    // the step (the pump shifts its own schedule by the same step).
+    let base = n0 - 1_000;
+    let values: Vec<i32> = (base..base + 6_000).map(engine_value).collect();
+    rig.shared.engine_ring(1).unwrap().put_at(base, &values);
+    assert!(rig.shared.set_source(0, Source::Counter));
+    assert!(rig.shared.set_source(1, Source::Engine));
+    let (a, _) = rig.flow(vec![Some(1), Some(2)]);
+    let (b, _) = add(
+        &rig.shared,
+        &FlowRequest {
+            fpp: 16,
+            ..req(v4(&rig.stranger))
+        },
+    );
+    let (mut to_a, mut to_b) = (Vec::new(), Vec::new());
+    for us in (0..=10_000).step_by(500) {
+        rig.tx.step(Some(T + us * 1_000), 7);
+        to_a.extend(drain(&rig.rx));
+        to_b.extend(drain(&rig.stranger));
+    }
+    let before = to_a.len();
+    // The step lands between two passes.
+    for us in (10_500..=20_000).step_by(500) {
+        let now = T + DATE_STEP_NS as u64 + us * 1_000;
+        rig.tx.step(Some(now), stepped(8, DATE_STEP_NS));
+        to_a.extend(drain(&rig.rx));
+        to_b.extend(drain(&rig.stranger));
+    }
+    for (packets, fpp) in [(&to_a, FPP), (&to_b, 16)] {
+        let steps = stamp_steps(packets);
+        assert_eq!(
+            steps.iter().filter(|&&d| d == fpp + DATE_STEP).count(),
+            1,
+            "fpp {fpp}: one step of a packet + the date step"
+        );
+        assert!(
+            steps.iter().all(|&d| d == fpp || d == fpp + DATE_STEP),
+            "fpp {fpp}: no packet missing: {steps:?}"
+        );
+    }
+    assert!((58..=60).contains(&to_a.len()), "{}", to_a.len());
+    for (i, p) in to_a.iter().enumerate() {
+        let t = stamp_of(p);
+        assert_eq!(
+            slot_samples(p, 2, 0),
+            counter(t, 32),
+            "the counter names its stamp"
+        );
+        // After the step the engine's samples go on where they were.
+        let line = if i < before { t } else { t - DATE_STEP };
+        let want: Vec<i32> = (line..line + FPP).map(engine_value).collect();
+        assert_eq!(slot_samples(p, 2, 1), want, "packet {i} at {t}");
+    }
+    for slot in [a, b] {
+        let lane = rig.shared.lane(slot);
+        assert_eq!((lane.rebootstraps, lane.holes), (0, 0), "{lane:?}");
+    }
+}
+
+/// A re-anchor whose step is not a whole number of packets (a local k
+/// correction of 50 µs, 4.8 samples at 96 kHz; the date step plus it) keeps
+/// the stamps going: the schedule moves by the step rounded to its grid and
+/// the rest is a lag or a wait well inside the latency. Starting again
+/// instead would drop up to a packet and never land nearer the clock.
+#[test]
+fn a_re_anchor_off_the_grid_shifts_by_the_nearest_whole_packets() {
+    for (step_ns, shift) in [
+        (50_000, 0),
+        (-50_000, 0),
+        (DATE_STEP_NS + 50_000, DATE_STEP),
+    ] {
+        let mut rig = Rig::new(Vec::new());
+        let (slot, _) = rig.flow(vec![Some(1)]);
+        let mut packets = Vec::new();
+        for us in (0..=5_000).step_by(500) {
+            rig.tx.step(Some(T + us * 1_000), 3);
+            packets.extend(drain(&rig.rx));
+        }
+        for us in (5_500..=10_000).step_by(500) {
+            let now = (T + us * 1_000).wrapping_add_signed(step_ns);
+            rig.tx.step(Some(now), stepped(4, step_ns));
+            packets.extend(drain(&rig.rx));
+        }
+        let steps = stamp_steps(&packets);
+        assert!(
+            steps
+                .iter()
+                .all(|&d| d == FPP || (shift > 0 && d == FPP + shift)),
+            "{step_ns}: {steps:?}"
+        );
+        assert_eq!(
+            steps.iter().filter(|&&d| d == FPP + shift).count(),
+            if shift > 0 { 1 } else { steps.len() }
+        );
+        assert_eq!(rig.shared.lane(slot).rebootstraps, 0, "{step_ns}");
+    }
+}
+
+/// A step the media threads cannot use still starts every flow again,
+/// counted: the clock knows no step, its step is for another epoch, or two
+/// re-anchors came between two passes.
+#[test]
+fn a_re_anchor_without_a_usable_step_realigns_and_counts_it() {
+    let unusable = [
+        crate::clock::Anchor::from(8),
+        crate::clock::Anchor {
+            epoch: 8,
+            re_anchor: Some(crate::clock::ReAnchor {
+                epoch: 7,
+                step_ns: DATE_STEP_NS,
+            }),
+        },
+        stepped(9, DATE_STEP_NS),
+    ];
+    for anchor in unusable {
+        let mut rig = Rig::new(Vec::new());
+        let (slot, _) = rig.flow(vec![Some(1)]);
+        rig.tx.step(Some(T), 7);
+        rig.tx.step(Some(T + MS), 7);
+        assert!(!drain(&rig.rx).is_empty());
+        let now = T + DATE_STEP_NS as u64 + 2 * MS;
+        rig.tx.step(Some(now), anchor);
+        assert_eq!(rig.shared.lane(slot).rebootstraps, 1, "{anchor:?}");
+        rig.tx.step(Some(now + MS), anchor);
+        let after = drain(&rig.rx);
+        assert!(!after.is_empty());
+        assert!(
+            stamp_of(&after[0]) > send_clock(now, RATE, TX_MARGIN_NS),
+            "{anchor:?}"
+        );
+    }
+}
+
 #[test]
 fn a_lag_past_the_latency_restarts_once_and_sends_no_burst() {
     let mut rig = Rig::new(Vec::new());

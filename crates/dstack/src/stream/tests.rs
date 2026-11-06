@@ -1311,6 +1311,65 @@ fn each_block_carries_its_media_start_across_a_skip() {
     assert_eq!(r.pump.processor.starts.last(), Some(&None));
 }
 
+/// SongPlayer (6.11.2026, v0.6.43; dstack #1): dsync's coordinated date
+/// step re-anchored the clock and the pump re-bootstrapped on the new epoch
+/// (`pump_missed`). Every device steps by the same time (1.6 s, 153 600
+/// samples at 96 kHz, a whole number of blocks), so the senders' stamps go
+/// on at the old ones + the step: the pump shifts its schedule by it and
+/// writes its outputs on the engine rings' one line of positions, so the
+/// TX thread, shifted by the same step, sends every sample once.
+#[test]
+fn a_re_anchor_by_whole_blocks_shifts_the_pump_and_loses_no_block() {
+    use crate::clock::{Anchor, ReAnchor};
+    const STEP_NS: i64 = 1_600_000_000;
+    const STEP: u64 = 153_600;
+    let mut r = rig(
+        Map {
+            rx: vec![0],
+            tx: vec![0],
+        },
+        &[0],
+        &[0],
+    );
+    // A sender that stepped too: its stamps after the step are its old
+    // ones + the step.
+    fill(&r, 0, T - 1_000, 4_000, counter);
+    fill(&r, 0, T + STEP + 2_000, 4_000, |p| counter(p - STEP));
+    let mut now = T;
+    while now < T + 3_000 {
+        now = r.pump.media(now, 5);
+    }
+    let stepped = Anchor {
+        epoch: 6,
+        re_anchor: Some(ReAnchor {
+            epoch: 6,
+            step_ns: STEP_NS,
+        }),
+    };
+    now += STEP;
+    while now < T + STEP + 5_000 {
+        now = r.pump.media(now, stepped);
+    }
+    let v = r.stats.view();
+    assert_eq!((v.rebootstraps, v.missed, v.late), (0, 0, 0), "{v:?}");
+    assert_eq!(
+        r.pump.processor.log.matches('d').count(),
+        1,
+        "only the start's discontinuity"
+    );
+    let first = Blocks::bootstrap(T, TIMING).start();
+    let n = (v.blocks * B) as usize;
+    assert!(n > 4_000, "{n}");
+    let (out, holes) = engine_at(&r, 0, first + D, n);
+    assert_eq!(holes, 0);
+    assert!(
+        out.iter()
+            .enumerate()
+            .all(|(i, &v)| v == counter(first + i as u64)),
+        "every input once, in order, on one line"
+    );
+}
+
 /// iemmixer (4.11.2026, v0.6.29 live, an engine restart): the Service ->
 /// Internal switch 36 s in took the pump's re-bootstraps 0 -> 1 (missed 0,
 /// late 0), from the epoch change alone. A seamless handover (v0.6.31,
