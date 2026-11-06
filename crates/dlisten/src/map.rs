@@ -8,6 +8,9 @@
 //!   output channels past ours are silent.
 //! - A mono source goes to the first two output channels (both speakers).
 //! - A mono output gets L and R mixed at half each (neither side lost).
+//! - `--mono` ([`source_mono`]): every channel summed at 0 dB to the first
+//!   two output channels (both speakers), clamped to full scale: the old
+//!   VB-Matrix route to the FOH monitor speaker summed its two sources so.
 
 /// Where an output channel's samples come from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -16,6 +19,8 @@ pub enum Source {
     Channel(usize),
     /// Our first two channels at half each (a mono output).
     Mix,
+    /// Every channel summed at 0 dB, clamped to full scale (`--mono`).
+    Sum,
     /// Nothing: silence.
     Silence,
 }
@@ -40,12 +45,27 @@ pub fn source(out: usize, outputs: usize, inputs: usize) -> Source {
     }
 }
 
+/// The source of output channel `out` under `--mono`: the sum of all our
+/// channels on the first two output channels (one on a mono output), the
+/// rest silent.
+pub fn source_mono(out: usize, outputs: usize, inputs: usize) -> Source {
+    if inputs == 0 || out >= outputs.min(2) {
+        Source::Silence
+    } else {
+        Source::Sum
+    }
+}
+
 /// The sample of output channel `out`'s `source` at frame `frame` of a
 /// channel-major block of `frames` frames.
 pub fn sample(source: Source, block: &[f64], frames: usize, frame: usize) -> f64 {
     match source {
         Source::Channel(c) => block[c * frames + frame],
         Source::Mix => 0.5 * (block[frame] + block[frames + frame]),
+        Source::Sum => (0..block.len() / frames.max(1))
+            .map(|c| block[c * frames + frame])
+            .sum::<f64>()
+            .clamp(-1.0, 1.0),
         Source::Silence => 0.0,
     }
 }
@@ -53,6 +73,24 @@ pub fn sample(source: Source, block: &[f64], frames: usize, frame: usize) -> f64
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mono_sums_every_channel_to_both_speakers_at_unity() {
+        assert_eq!(source_mono(0, 2, 2), Source::Sum);
+        assert_eq!(source_mono(1, 2, 2), Source::Sum);
+        assert_eq!(source_mono(2, 6, 2), Source::Silence);
+        assert_eq!(source_mono(0, 1, 2), Source::Sum);
+        assert_eq!(source_mono(1, 1, 2), Source::Silence);
+        assert_eq!(source_mono(0, 2, 0), Source::Silence);
+        // Two channels of 3 frames, channel-major: TechAlert left, Stage right.
+        let block = [0.25, 0.0, 0.75, 0.5, 0.25, 0.75];
+        assert_eq!(sample(Source::Sum, &block, 3, 0), 0.75);
+        assert_eq!(sample(Source::Sum, &block, 3, 1), 0.25);
+        // Clamped at full scale, never wrapped.
+        assert_eq!(sample(Source::Sum, &block, 3, 2), 1.0);
+        let neg = [-0.75, -0.5];
+        assert_eq!(sample(Source::Sum, &neg, 1, 0), -1.0);
+    }
 
     #[test]
     fn stereo_goes_to_the_first_two_outputs_and_the_rest_is_silent() {

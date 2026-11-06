@@ -76,6 +76,8 @@ pub struct Session {
     fifo: Arc<Fifo>,
     stats: Arc<Stats>,
     rate: u32,
+    /// `--mono` ([`dlisten::map::source_mono`]).
+    mono: bool,
     devices: Vec<cpal::Device>,
     outputs: Vec<Output>,
     current: usize,
@@ -147,6 +149,7 @@ impl Session {
             fifo,
             stats: Arc::default(),
             rate: o.rate,
+            mono: o.mono,
             devices,
             outputs,
             current,
@@ -177,7 +180,8 @@ impl Session {
             out_rate,
             Arc::clone(&self.stats),
         )
-        .map_err(|e| format!("the rate conversion {} to {out_rate} Hz: {e}", self.rate))?;
+        .map_err(|e| format!("the rate conversion {} to {out_rate} Hz: {e}", self.rate))?
+        .with_mono(self.mono);
         // The new stream is opened while the old one plays (a failure
         // leaves the old one playing); the old one stops before the new
         // one starts: the FIFO has one reader.
