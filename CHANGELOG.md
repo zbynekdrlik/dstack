@@ -2,6 +2,8 @@
 
 ## 0.6.47 (unreleased)
 
+- Fix (dlisten, dstack #139): a failure shows its message box only when nothing reads stderr (a start from Explorer or the Run value). Started from a command line or a script, it prints the error and exits. Seen live: `dlisten --list-outputs` on a Windows PC with no output printed its error, then held the exit on a modal box. New: `dlisten::alert::shows_box`.
+
 ## 0.6.46
 
 - New: `dlisten` (dstack #139), a small app with no window (Windows; it also runs on Linux) that plays Dante audio on a local output: PC or notebook speakers, a monitor's audio. A dlink device `<host>-dlisten`, RX only, 2 channels L/R by default (`--channels`, `--name`, `--subscribe <rx>=<ch>@<dev>` for our own device only, `--rate`, `--budget-ms`, `--ip`/`--iface`, `--ports`/`--process-id`). The output plays at its own default config (WASAPI shared on Windows, ALSA on Linux, through cpal 0.18.2), through `dstack-resample`'s drifting converter, its ratio steered by the ASRC controller on the FIFO's depth (target 40 ms; each underrun primes 10 ms more, up to 40 ms, kept as the controller's cushion). L/R go to the output's first two channels, a mono source to both, a mono output gets L and R at half each. dtray shows it: its status line (output, rate, audio flowing, depth, underruns) and an Output menu. The chosen output is kept in `<state file>.settings` and restored at start (`--output <text>` wins; a saved output that is gone falls back to the default, logged). `--list-outputs`, `--autostart on|off` (with the other options given). The status is logged every 10 s to stderr and `<state file>.log`. The release ships `dlisten-<tag>-<suffix>` for Linux and Windows with its sha256, like dtray.

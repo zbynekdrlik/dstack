@@ -11,8 +11,7 @@
 /// parent console (`attached` false) and has no stderr handle of its own
 /// (`has_stderr` false: nothing redirected it).
 pub fn shows_box(attached: bool, has_stderr: bool) -> bool {
-    let _ = (attached, has_stderr);
-    true
+    !attached && !has_stderr
 }
 
 #[cfg(test)]

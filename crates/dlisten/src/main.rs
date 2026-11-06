@@ -43,7 +43,10 @@ const OUTPUTS_EVERY: u32 = 5;
 
 fn main() -> ExitCode {
     #[cfg(windows)]
-    win::attach_console();
+    let (attached, has_stderr) = win::attach_console();
+    #[cfg(not(windows))]
+    let (attached, has_stderr) = (true, true);
+    let boxed = dlisten::alert::shows_box(attached, has_stderr);
     let args: Vec<String> = std::env::args().skip(1).collect();
     let command = match cli::parse(&args) {
         Ok(c) => c,
@@ -69,18 +72,23 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             tracing::error!("dlisten: {e}");
-            fail(&e);
+            fail(&e, boxed);
             ExitCode::FAILURE
         }
     }
 }
 
-/// A failure the user must see: stderr, and on Windows a message box (no
-/// console from Explorer or the Run value).
-fn fail(text: &str) {
+/// A failure the user must see: stderr, and a message box when nothing
+/// reads stderr (`boxed`: a Windows start from Explorer or the Run value,
+/// [`dlisten::alert::shows_box`]).
+fn fail(text: &str, boxed: bool) {
     eprintln!("dlisten: {text}");
     #[cfg(windows)]
-    win::message(&format!("dlisten: {text}"));
+    if boxed {
+        win::message(&format!("dlisten: {text}"));
+    }
+    #[cfg(not(windows))]
+    let _ = boxed;
 }
 
 /// The log on stderr and in `file` (when it opens), RUST_LOG as the
