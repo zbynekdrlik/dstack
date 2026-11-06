@@ -1,6 +1,10 @@
 # Changelog
 
-## 0.6.47 (unreleased)
+## 0.6.48 (unreleased)
+
+- Fix (iemmixer, SongPlayer, 6.11.2026; dstack #1): TX and the pump lose no packet across a clock re-anchor whose step the clock knows.
+
+## 0.6.47
 
 - Fix (dlisten, dstack #139): a failure shows its message box only when nothing reads stderr (a start from Explorer or the Run value). Started from a command line or a script, it prints the error and exits. Seen live: `dlisten --list-outputs` on a Windows PC with no output printed its error, then held the exit on a modal box. New: `dlisten::alert::shows_box`.
 
