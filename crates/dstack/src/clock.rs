@@ -794,11 +794,13 @@ mod os {
         /// (its step recorded with the epoch it begins, before the epoch
         /// moves, so a reader that sees the epoch sees its step).
         ///
-        /// One writer (the poller). A reader may read the new k with the
-        /// old epoch in the instant between the two stores: its pass sees
-        /// the step as a jump of time (a lag or a wait, as before 0.6.48),
-        /// and the next pass shifts. Re-anchors are at least [`CONFIRM`]
-        /// polls apart, so a step is never read under another's epoch.
+        /// One writer (the poller); k moves before the epoch. The media
+        /// threads read the epoch before the time ([`Anchor::of`] first),
+        /// so a pass may see the new k with the old epoch (the jump starts
+        /// its schedule again at the new time, and the next pass keeps it
+        /// there: `media::tx::shift`), never the old k with the new epoch.
+        /// Re-anchors are at least [`CONFIRM`] polls apart, so a step is
+        /// never read under another's epoch.
         pub fn set_k(&self, k_ns: i64) {
             let old = self.k_ns.swap(k_ns, Ordering::AcqRel);
             if old != NOT_READY && old != k_ns {

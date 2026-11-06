@@ -61,14 +61,6 @@ fn the_engine_line_moves_once_an_epoch_by_the_step_on_the_block_grid() {
 }
 
 #[test]
-fn the_line_s_word_keeps_its_epoch_and_a_negative_shift() {
-    for (epoch, shift) in [(0, 0), (7, -153_600), (u32::MAX, i32::MIN), (1, i32::MAX)] {
-        assert_eq!(unpack(pack(epoch, shift)), (epoch, shift));
-    }
-    assert_eq!(pack(1, -1), 0x0000_0001_ffff_ffff);
-}
-
-#[test]
 fn only_the_engine_s_ring_is_read_on_its_line() {
     let stamp = 1_000_000;
     assert_eq!(source_position(&Source::Engine, stamp, 100), stamp - 100);

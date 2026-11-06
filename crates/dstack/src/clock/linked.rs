@@ -605,7 +605,8 @@ impl<M: Model> Absorbing<M> {
     /// that finds the lock taken reads its own model and the counts last
     /// published: on a re-align in that very step it may see the new time
     /// under the old epoch for one step (the pump then re-bootstraps on the
-    /// jump itself, once more on the epoch), never for a step it absorbs.
+    /// jump itself and keeps that schedule on the epoch, see
+    /// `media::tx::shift`), never for a step it absorbs.
     /// A poisoned lock is used as it is (`feed` cannot panic).
     fn read(&self) -> (ClockModel, u32, u32) {
         let held = match self.absorb.try_lock() {
@@ -617,10 +618,14 @@ impl<M: Model> Absorbing<M> {
         if let Some(mut a) = held {
             let (r, ab) = a.feed(m);
             // The step before the counts: a reader that sees a re-align's
-            // count in the view sees its step.
-            if let Some((at, d)) = a.step() {
-                self.step_ns.store(d, Ordering::Relaxed);
-                self.step_at.store(at, Ordering::Release);
+            // count in the view sees its step; a re-align with no step
+            // measured publishes none.
+            match a.step() {
+                Some((at, d)) => {
+                    self.step_ns.store(d, Ordering::Relaxed);
+                    self.step_at.store(at, Ordering::Release);
+                }
+                None => self.step_at.store(0, Ordering::Release),
             }
             let [r0, r1, r2, r3] = r.to_be_bytes();
             let [a0, a1, a2, a3] = ab.to_be_bytes();

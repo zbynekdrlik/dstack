@@ -279,3 +279,23 @@ fn a_linked_clock_on_the_follower_reports_its_re_align_s_step() {
     assert_eq!(linked.epoch(), epoch);
     assert_eq!(linked.last_re_anchor().map(|r| r.step_ns), Some(1_000_000));
 }
+
+/// A re-align with no step measured publishes none: the linked clock then
+/// reports no step for its epoch (the media threads start again).
+#[test]
+fn a_re_align_with_no_measured_step_publishes_none() {
+    let src = Arc::new(FakeModel(Mutex::new((model(M0, P0, 0, 0), true))));
+    let f = Absorbing::new(Arc::clone(&src));
+    f.view();
+    src.0.lock().unwrap().0 = model(2 * M0, P0 + M0 + 1_000_000, 1, 1);
+    f.view();
+    assert_eq!(f.last_re_anchor(), Some((1, 1_000_000)));
+    src.0.lock().unwrap().0 = ClockModel {
+        anchored: false,
+        ..model(3 * M0, P0, 1, 2)
+    };
+    f.view();
+    src.0.lock().unwrap().0 = model(4 * M0, P0 + 3 * M0, 1, 3);
+    assert_eq!(f.view().epoch, 3);
+    assert_eq!(f.last_re_anchor(), None);
+}

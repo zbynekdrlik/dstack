@@ -996,10 +996,26 @@ impl Schedule {
         Some(stamp)
     }
 
-    /// Moves the schedule by `by` samples (a re-anchor whose step the clock
-    /// knows, on the fpp grid: [`shift`]); not a start again, not counted.
-    pub fn shift(&mut self, by: i64) {
-        self.next = self.next.wrapping_add_signed(by);
+    /// A re-anchor of the clock at media time `now` (after it) with the
+    /// device's `shift` ([`shift`]; `None`: the step is unknown): moved by
+    /// it when it is a whole number of packets and leaves the next stamp at
+    /// most the latency and a packet past now (not counted; a rest of the
+    /// step off the grid is a lag or a wait of at most half a block, which
+    /// [`Schedule::due`] judges as any other); kept when it would leave it
+    /// further (the pass before read the new time with the old
+    /// epoch and already started it again there); else started again,
+    /// counted.
+    pub fn re_anchor(&mut self, shift: Option<i64>, now: u64) -> Shift {
+        let Some(by) = shift.filter(|by| by.rem_euclid(self.fpp as i64) == 0) else {
+            self.realign(now);
+            return Shift::Restarted;
+        };
+        let next = self.next.wrapping_add_signed(by);
+        if next > now.saturating_add(self.max_lag).saturating_add(self.fpp) {
+            return Shift::Kept;
+        }
+        self.next = next;
+        Shift::Moved
     }
 
     /// Starts the schedule again at `now` (counted): a lag, a jump, a
@@ -1523,8 +1539,11 @@ fn run(clock: &dyn PtpClock, shared: Arc<TxShared>) {
     let mut pin = super::repin::RePin::new(shared.cfg.io_cpu);
     while !shared.stopping() {
         pin.keep(shared.now_ns());
+        // The epoch before the time: the clock moves k before the epoch,
+        // so a pass never sees a new epoch with the old time ([`shift`]).
+        let anchor = crate::clock::Anchor::of(clock);
         let now = clock.now_ns();
-        tx.step(now, crate::clock::Anchor::of(clock));
+        tx.step(now, anchor);
         // The bounded escape (dstack #1, `spin_escape_ms`, Windows): when
         // this wait will block one timer tick, the packets due meanwhile go
         // out first; when some had no samples yet, the escape waits for a
@@ -1698,7 +1717,7 @@ mod early;
 
 pub mod shift;
 pub use early::{PRESEND_ROUNDS, Presend};
-pub use shift::EngineLine;
+pub use shift::{EngineLine, Shift};
 pub mod host;
 pub use host::{HostNic, TxPath};
 mod pass;

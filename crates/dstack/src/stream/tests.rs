@@ -1370,6 +1370,139 @@ fn a_re_anchor_by_whole_blocks_shifts_the_pump_and_loses_no_block() {
     );
 }
 
+/// The clock's anchor after one re-anchor of `step_ns` into `epoch`.
+fn stepped(epoch: u32, step_ns: i64) -> crate::clock::Anchor {
+    crate::clock::Anchor {
+        epoch,
+        re_anchor: Some(crate::clock::ReAnchor { epoch, step_ns }),
+    }
+}
+
+/// A pump over RX 1 into TX 1, stepped from `T` for 3000 samples at epoch 5.
+fn pump_at_epoch_5() -> (Rig, u64) {
+    let mut r = rig(
+        Map {
+            rx: vec![0],
+            tx: vec![0],
+        },
+        &[0],
+        &[0],
+    );
+    fill(&r, 0, T - 1_000, 4_000, counter);
+    let mut now = T;
+    while now < T + 3_000 {
+        now = r.pump.media(now, 5);
+    }
+    (r, now)
+}
+
+/// A step the block grid rounds (16 samples past whole blocks): the pump
+/// moves by the whole blocks and its processor hears of the inputs' jump;
+/// a local correction of 2 samples moves nothing and tells it nothing.
+#[test]
+fn a_step_off_the_block_grid_moves_the_pump_and_calls_discontinuity() {
+    let (mut r, now) = pump_at_epoch_5();
+    let step_ns = 1_600_166_667; // 153 616 samples at 96 kHz
+    let wake = r.pump.media(now + 153_616, stepped(6, step_ns));
+    assert!(
+        wake > now + 153_616 && wake <= now + 153_616 + 2 * B,
+        "{wake}"
+    );
+    let v = r.stats.view();
+    assert_eq!((v.rebootstraps, v.missed), (0, 0), "{v:?}");
+    r.pump.media(wake, stepped(6, step_ns));
+    assert_eq!(r.pump.processor.log.matches('d').count(), 2);
+    let (mut r, now) = pump_at_epoch_5();
+    let wake = r.pump.media(now + 2, stepped(6, 20_834));
+    r.pump.media(wake, stepped(6, 20_834));
+    let v = r.stats.view();
+    assert_eq!((v.rebootstraps, v.missed), (0, 0), "{v:?}");
+    assert_eq!(r.pump.processor.log.matches('d').count(), 1);
+    assert_eq!(
+        engine_at(&r, 0, Blocks::bootstrap(T, TIMING).start() + D, 3_000).1,
+        0
+    );
+}
+
+/// A step the media thread read as a time jump with the old epoch: the
+/// pump re-bootstraps on the jump, then keeps that schedule on the new
+/// epoch instead of shifting it a date step ahead.
+#[test]
+fn a_time_read_before_its_epoch_rebootstraps_once_and_is_not_shifted_again() {
+    let (mut r, now) = pump_at_epoch_5();
+    let jumped = now + 153_600;
+    let wake = r.pump.media(jumped, 5);
+    assert_eq!(r.stats.view().rebootstraps, 1);
+    let wake = r.pump.media(wake, stepped(6, 1_600_000_000));
+    assert!(wake <= jumped + 2 * B, "no wait of a date step: {wake}");
+    assert_eq!(r.stats.view().rebootstraps, 1);
+}
+
+/// A shift off the pump's own block grid (the line moved on a grid of 16 by
+/// a thread with another block) re-bootstraps the pump, counted.
+#[test]
+fn a_shift_off_the_pump_s_block_rebootstraps_it() {
+    let (mut r, now) = pump_at_epoch_5();
+    let step_ns = 166_667; // 16 samples
+    assert_eq!(r.tx.engine_line.shift_at(stepped(6, step_ns), RATE, 16), 16);
+    r.pump.media(now + 16, stepped(6, step_ns));
+    assert_eq!(r.stats.view().rebootstraps, 1);
+    assert_eq!(r.pump.processor.log.matches('d').count(), 1, "one so far");
+    let wake = r.pump.media(now + 16, stepped(6, step_ns));
+    r.pump.media(wake, stepped(6, step_ns));
+    assert_eq!(r.pump.processor.log.matches('d').count(), 2);
+}
+
+#[test]
+fn a_re_anchor_moves_the_blocks_up_to_w_and_a_block_past_now() {
+    let now = T;
+    let fresh = || Blocks::bootstrap(now, TIMING);
+    let start = fresh().start();
+    // Due at start + B + P; moved while due ≤ now + W + B.
+    let room = (now + WORK_MARGIN + B) - (start + B + P);
+    let by = (room / B * B) as i64;
+    let mut b = fresh();
+    assert_eq!(b.re_anchor(Some(by), now), (Shift::Moved, 0));
+    assert_eq!(b.start(), start + by as u64);
+    let mut b = fresh();
+    assert_eq!(b.re_anchor(Some(by + B as i64), now), (Shift::Kept, 0));
+    assert_eq!(b.start(), start);
+    let mut b = fresh();
+    assert_eq!(b.re_anchor(Some(-3_200), now), (Shift::Moved, 0));
+    assert_eq!(b.start(), start - 3_200);
+    let mut b = fresh();
+    assert_eq!(b.re_anchor(Some(16), now + 3_200), (Shift::Restarted, 100));
+    assert_eq!(b, Blocks::bootstrap(now + 3_200, TIMING));
+    let mut b = fresh();
+    assert_eq!(b.re_anchor(None, now).0, Shift::Restarted);
+}
+
+/// The boundary of the move exactly: due at now + W + B moves, a block more
+/// stays.
+#[test]
+fn a_re_anchor_at_the_edge_of_the_room_still_moves() {
+    let t = Timing {
+        block: 32,
+        playout: 96,
+        margin: 64,
+    };
+    let b0 = Blocks::bootstrap(T, t);
+    // Due = start + 128 (+ the shift); the room ends at now + 96.
+    let now = b0.start() + 64 + 32;
+    let mut b = b0;
+    assert_eq!(b.re_anchor(Some(64), now), (Shift::Moved, 0));
+    let mut b = b0;
+    assert_eq!(b.re_anchor(Some(96), now), (Shift::Kept, 0));
+}
+
+#[test]
+fn the_inputs_jump_only_when_a_non_zero_shift_differs_from_the_step() {
+    assert!(!inputs_jump(1_600_000_000, RATE, Some(153_600)));
+    assert!(inputs_jump(1_600_166_667, RATE, Some(153_632)));
+    assert!(!inputs_jump(20_834, RATE, Some(0)), "a local correction");
+    assert!(!inputs_jump(1_600_000_000, RATE, None));
+}
+
 /// A pump that starts after the engine line moved (the TX thread saw a
 /// re-anchor first) writes on the line where TX reads: its position less
 /// the line's shift.

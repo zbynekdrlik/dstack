@@ -1331,6 +1331,138 @@ fn a_tx_that_starts_late_reads_the_engine_on_its_line() {
     assert_eq!(rig.shared.lane(slot).holes, 0);
 }
 
+/// One shift for the whole device (review of dstack #1's fix): a step off
+/// the block grid (the date step + 16 samples) moves a fpp-16 flow by the
+/// same whole blocks as the pump and the engine line (153 632), so its
+/// engine samples go on with none skipped or repeated.
+#[test]
+fn a_flow_on_a_finer_grid_shifts_with_the_block_and_its_samples_go_on() {
+    let step_ns = 1_600_166_667; // 153 616 samples at 96 kHz
+    let shift = 153_632;
+    let mut rig = Rig::with_engine(&[0]);
+    let n0 = send_clock(T, RATE, TX_MARGIN_NS);
+    let base = n0 - 1_000;
+    let values: Vec<i32> = (base..base + 6_000).map(engine_value).collect();
+    rig.shared.engine_ring(0).unwrap().put_at(base, &values);
+    assert!(rig.shared.set_source(0, Source::Engine));
+    let (slot, _) = add(
+        &rig.shared,
+        &FlowRequest {
+            fpp: 16,
+            channels: vec![Some(1)],
+            ..req(v4(&rig.rx))
+        },
+    );
+    let mut packets = Vec::new();
+    for us in (0..=5_000).step_by(500) {
+        rig.tx.step(Some(T + us * 1_000), 1);
+        packets.extend(drain(&rig.rx));
+    }
+    let before = packets.len();
+    for us in (5_500..=10_000).step_by(500) {
+        rig.tx
+            .step(Some(T + step_ns as u64 + us * 1_000), stepped(2, step_ns));
+        packets.extend(drain(&rig.rx));
+    }
+    let steps = stamp_steps(&packets);
+    assert!(
+        steps.iter().all(|&d| d == 16 || d == 16 + shift),
+        "{steps:?}"
+    );
+    assert_eq!(steps.iter().filter(|&&d| d == 16 + shift).count(), 1);
+    for (i, p) in packets.iter().enumerate() {
+        let t = stamp_of(p);
+        let line = if i < before { t } else { t - shift };
+        let want: Vec<i32> = (line..line + 16).map(engine_value).collect();
+        assert_eq!(slot_samples(p, 1, 0), want, "packet {i}");
+    }
+    let lane = rig.shared.lane(slot);
+    assert_eq!((lane.rebootstraps, lane.holes), (0, 0), "{lane:?}");
+}
+
+/// A flow whose fpp does not divide the device's shift (fpp 64, a shift of
+/// one block of 32) starts again, counted, so its stamps stay on its grid;
+/// a fpp-32 flow beside it moves.
+#[test]
+fn a_flow_whose_fpp_does_not_divide_the_shift_starts_again() {
+    let mut rig = Rig::new(Vec::new());
+    let (a, _) = rig.flow(vec![Some(1)]);
+    let (b, _) = add(
+        &rig.shared,
+        &FlowRequest {
+            fpp: 64,
+            ..req(v4(&rig.stranger))
+        },
+    );
+    for us in (0..=3_000).step_by(500) {
+        rig.tx.step(Some(T + us * 1_000), 1);
+    }
+    drain(&rig.rx);
+    drain(&rig.stranger);
+    let step_ns = 333_333; // 32 samples at 96 kHz
+    let now = T + 3_500_000 + step_ns as u64;
+    rig.tx.step(Some(now), stepped(2, step_ns));
+    assert_eq!(rig.shared.lane(a).rebootstraps, 0);
+    assert_eq!(rig.shared.lane(b).rebootstraps, 1);
+    rig.tx.step(Some(now + 2 * MS), stepped(2, step_ns));
+    let after = drain(&rig.stranger);
+    assert!(!after.is_empty());
+    assert!(after.iter().all(|p| stamp_of(p).is_multiple_of(64)));
+}
+
+/// A pass that reads the clock's new time with its old epoch (the clock
+/// moves k before the epoch): the jump starts the flow again at the new
+/// time, and the next pass, at the new epoch, keeps it there instead of
+/// shifting it a whole date step ahead (1.6 s of silence).
+#[test]
+fn a_time_read_before_its_epoch_restarts_once_and_is_not_shifted_again() {
+    let mut rig = Rig::new(Vec::new());
+    let (slot, _) = rig.flow(vec![Some(1)]);
+    for us in (0..=3_000).step_by(500) {
+        rig.tx.step(Some(T + us * 1_000), 1);
+    }
+    drain(&rig.rx);
+    let new = T + DATE_STEP_NS as u64 + 3_500_000;
+    rig.tx.step(Some(new), 1);
+    assert_eq!(rig.shared.lane(slot).rebootstraps, 1);
+    let mut packets = Vec::new();
+    for us in (500..=3_000).step_by(500) {
+        rig.tx
+            .step(Some(new + us * 1_000), stepped(2, DATE_STEP_NS));
+        packets.extend(drain(&rig.rx));
+    }
+    assert_eq!(rig.shared.lane(slot).rebootstraps, 1);
+    assert!(packets.len() >= 7, "sending on at once: {}", packets.len());
+    assert!(stamp_steps(&packets).iter().all(|&d| d == FPP));
+}
+
+#[test]
+fn a_re_anchor_moves_a_schedule_up_to_its_latency_and_a_packet_past_now() {
+    let now = 1_000_000;
+    let fresh = || Schedule::bootstrap(now - 64, 32, 96);
+    // Bootstrapped at now − 64: next = now − 32.
+    assert_eq!(fresh().next, now - 32);
+    let mut s = fresh();
+    assert_eq!(s.re_anchor(Some(160), now), Shift::Moved);
+    assert_eq!((s.next, s.take_rebootstraps()), (now + 128, 0));
+    let mut s = fresh();
+    assert_eq!(
+        s.re_anchor(Some(192), now),
+        Shift::Kept,
+        "now + 160 is past it"
+    );
+    assert_eq!((s.next, s.take_rebootstraps()), (now - 32, 0));
+    let mut s = fresh();
+    assert_eq!(s.re_anchor(Some(-320), now), Shift::Moved);
+    assert_eq!(s.next, now - 352);
+    let mut s = fresh();
+    assert_eq!(s.re_anchor(Some(16), now), Shift::Restarted, "off its grid");
+    assert_eq!((s.next, s.take_rebootstraps()), (now + 32, 1));
+    let mut s = fresh();
+    assert_eq!(s.re_anchor(None, now), Shift::Restarted);
+    assert_eq!(s.take_rebootstraps(), 1);
+}
+
 /// A re-anchor whose step is not a whole number of packets (a local k
 /// correction of 50 µs, 4.8 samples at 96 kHz; the date step plus it) keeps
 /// the stamps going: the schedule moves by the step rounded to its grid and
