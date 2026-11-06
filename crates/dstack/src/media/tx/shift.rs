@@ -29,9 +29,9 @@
 //!   moves k, then the epoch; the media threads read the epoch first, so
 //!   never the other way round): the jump starts the schedule again at the
 //!   new time on that pass, and the shift on the next pass would put it a
-//!   whole step ahead. A shift that lands more than the latency past now
-//!   is therefore kept out ([`Shift::Kept`]); the schedule stays where the
-//!   restart put it.
+//!   whole step ahead. A shift that lands more than the latency (at least
+//!   the block) and a packet past now is therefore kept out
+//!   ([`Shift::Kept`]); the schedule stays where the restart put it.
 //! - The counter and the sine are functions of the stamp they name, and an
 //!   echo reads an RX ring where the senders' own stamps put the samples:
 //!   those stay at the stamp.
@@ -79,6 +79,11 @@ impl EngineLine {
     }
 }
 
+/// The TX thread's line on a re-anchor (with its counts).
+pub const TX_LINE: &str = "TX flows across a clock re-anchor";
+/// The pump's line on a re-anchor (with its outcome).
+pub const PUMP_LINE: &str = "engine pump across a clock re-anchor";
+
 /// What a re-anchor did to one schedule (a flow's or the pump's).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Shift {
@@ -119,9 +124,10 @@ impl Transmitter {
         };
         let step = anchor.step_from(old);
         let shift = step.map(|_| self.engine_shift.wrapping_sub(before));
+        let block = self.shared.cfg.block;
         let mut counts = [0u32; 3];
         for schedule in self.lanes.iter_mut().filter_map(|l| l.schedule.as_mut()) {
-            counts[schedule.re_anchor(shift, now) as usize] += 1;
+            counts[schedule.re_anchor(shift, now, block) as usize] += 1;
         }
         let [moved, kept, restarted] = counts;
         info!(
@@ -132,7 +138,7 @@ impl Transmitter {
             moved,
             kept,
             restarted,
-            "TX flows across a clock re-anchor"
+            "{TX_LINE}"
         );
     }
 }

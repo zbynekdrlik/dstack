@@ -554,7 +554,8 @@ impl<P: Process> Pump<P> {
                     engine_shift = self.engine_shift,
                     ?outcome,
                     skipped,
-                    "engine pump across a clock re-anchor"
+                    "{}",
+                    crate::media::tx::shift::PUMP_LINE
                 );
                 b
             }

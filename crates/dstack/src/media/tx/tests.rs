@@ -1443,24 +1443,83 @@ fn a_re_anchor_moves_a_schedule_up_to_its_latency_and_a_packet_past_now() {
     // Bootstrapped at now − 64: next = now − 32.
     assert_eq!(fresh().next, now - 32);
     let mut s = fresh();
-    assert_eq!(s.re_anchor(Some(160), now), Shift::Moved);
+    assert_eq!(s.re_anchor(Some(160), now, 32), Shift::Moved);
     assert_eq!((s.next, s.take_rebootstraps()), (now + 128, 0));
     let mut s = fresh();
     assert_eq!(
-        s.re_anchor(Some(192), now),
+        s.re_anchor(Some(192), now, 32),
         Shift::Kept,
         "now + 160 is past it"
     );
     assert_eq!((s.next, s.take_rebootstraps()), (now - 32, 0));
     let mut s = fresh();
-    assert_eq!(s.re_anchor(Some(-320), now), Shift::Moved);
+    assert_eq!(s.re_anchor(Some(-320), now, 32), Shift::Moved);
     assert_eq!(s.next, now - 352);
     let mut s = fresh();
-    assert_eq!(s.re_anchor(Some(16), now), Shift::Restarted, "off its grid");
+    assert_eq!(
+        s.re_anchor(Some(16), now, 32),
+        Shift::Restarted,
+        "off its grid"
+    );
     assert_eq!((s.next, s.take_rebootstraps()), (now + 32, 1));
     let mut s = fresh();
-    assert_eq!(s.re_anchor(None, now), Shift::Restarted);
+    assert_eq!(s.re_anchor(None, now, 32), Shift::Restarted);
     assert_eq!(s.take_rebootstraps(), 1);
+}
+
+/// A latency set apart from the block (smaller than it): the room for a
+/// shift is the block, since the rest of a step on the block grid can leave
+/// the stamp up to half a block ahead.
+#[test]
+fn a_re_anchor_s_room_is_at_least_the_block() {
+    let now = 1_000_000;
+    // fpp 32, a latency of 24 samples (0.25 ms at 96 kHz), block 64.
+    let fresh = || Schedule::bootstrap(now - 64, 32, 24);
+    let mut s = fresh();
+    assert_eq!(s.re_anchor(Some(128), now, 64), Shift::Moved);
+    assert_eq!(s.next, now + 96);
+    let mut s = fresh();
+    assert_eq!(s.re_anchor(Some(160), now, 64), Shift::Kept);
+    assert_eq!(s.next, now - 32);
+}
+
+/// Each re-anchor is one info line with what it did to the flows.
+#[test]
+fn a_re_anchor_logs_what_it_did_to_the_flows() {
+    crate::test_log::undecided();
+    let mut rig = Rig::new(Vec::new());
+    rig.flow(vec![Some(1)]);
+    add(
+        &rig.shared,
+        &FlowRequest {
+            fpp: 64,
+            ..req(v4(&rig.stranger))
+        },
+    );
+    for us in (0..=3_000).step_by(500) {
+        rig.tx.step(Some(T + us * 1_000), 1);
+    }
+    let log = crate::test_log::capture_at(tracing::Level::INFO, || {
+        rig.tx
+            .step(Some(T + 3_500_000 + 333_333), stepped(2, 333_333));
+        rig.tx.step(Some(T + 4_000_000 + 333_333), 2);
+        rig.tx
+            .step(Some(T + 4_500_000 + 333_333), crate::clock::Anchor::from(3));
+    });
+    let lines: Vec<&str> = log.lines().filter(|l| l.contains(shift::TX_LINE)).collect();
+    assert_eq!(lines.len(), 2, "{log}");
+    assert!(
+        lines[0].contains("moved=1") && lines[0].contains("restarted=1"),
+        "{log}"
+    );
+    assert!(
+        lines[0].contains("kept=0") && lines[0].contains("shift=Some(32)"),
+        "{log}"
+    );
+    assert!(
+        lines[1].contains("moved=0") && lines[1].contains("restarted=2"),
+        "{log}"
+    );
 }
 
 /// A re-anchor whose step is not a whole number of packets (a local k

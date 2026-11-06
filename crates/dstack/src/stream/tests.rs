@@ -1424,6 +1424,24 @@ fn a_step_off_the_block_grid_moves_the_pump_and_calls_discontinuity() {
     );
 }
 
+/// Each re-anchor is one info line with the pump's outcome.
+#[test]
+fn a_re_anchor_logs_the_pump_s_outcome() {
+    crate::test_log::undecided();
+    let (mut r, now) = pump_at_epoch_5();
+    let log = crate::test_log::capture_at(tracing::Level::INFO, || {
+        let wake = r.pump.media(now + 153_600, stepped(6, 1_600_000_000));
+        r.pump.media(wake, 7);
+    });
+    let lines: Vec<&str> = log
+        .lines()
+        .filter(|l| l.contains(crate::media::tx::shift::PUMP_LINE))
+        .collect();
+    assert_eq!(lines.len(), 2, "{log}");
+    assert!(lines[0].contains("outcome=Moved"), "{log}");
+    assert!(lines[1].contains("outcome=Restarted"), "{log}");
+}
+
 /// A step the media thread read as a time jump with the old epoch: the
 /// pump re-bootstraps on the jump, then keeps that schedule on the new
 /// epoch instead of shifting it a date step ahead.
