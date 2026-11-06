@@ -374,7 +374,7 @@ impl PumpStats {
 
     /// The pump as a stream: frames B, callbacks the blocks, late, missed
     /// the skipped blocks, overruns, resets the re-bootstraps; no card, so
-    /// nothing parked and no reopen.
+    /// no reopen.
     pub fn stream_stats(&self) -> StreamStats {
         let faulted = self.faulted.load(Ordering::Acquire);
         StreamStats {
@@ -384,7 +384,6 @@ impl PumpStats {
             missed: self.missed.load(Ordering::Relaxed),
             overruns: self.overruns.load(Ordering::Relaxed),
             resets: self.rebootstraps.load(Ordering::Relaxed),
-            parked: false,
             faulted,
             running: self.running.load(Ordering::Acquire),
             max_process_ns: self.max_process_ns.load(Ordering::Relaxed),
