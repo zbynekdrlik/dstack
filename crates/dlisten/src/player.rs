@@ -98,9 +98,16 @@ pub struct Stats {
     /// The converter's correction, ppm (`f64` bits).
     ppm: AtomicU64,
     priming: AtomicBool,
+    /// The player sums every channel to both speakers (`--mono`).
+    mono: AtomicBool,
 }
 
 impl Stats {
+    /// Whether the player sums every channel to both speakers (`--mono`).
+    pub fn mono(&self) -> bool {
+        self.mono.load(Ordering::Relaxed)
+    }
+
     /// Blocks played as silence because their input was not there.
     pub fn underruns(&self) -> u64 {
         self.underruns.load(Ordering::Relaxed)
@@ -225,6 +232,7 @@ impl Player {
     /// Under `--mono`: every channel summed to both speakers.
     pub fn with_mono(mut self, mono: bool) -> Self {
         self.mono = mono;
+        self.stats.mono.store(mono, Ordering::Relaxed);
         self
     }
 
