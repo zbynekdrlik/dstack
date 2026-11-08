@@ -110,6 +110,11 @@ pub const SETTLE_NS: u64 = 5_000_000_000;
 pub const MAX_AGE_NS: u64 = 60_000_000_000;
 /// The most devices whose records are kept.
 pub const MAX_RECORDS: usize = 256;
+/// How long after the first multicast lookup a device with no
+/// `_netaudio-arc` record yet is waited for ([`Book::multicast`]): the
+/// browse's first answers come within it, so no unicast flow is asked for
+/// at start before a transmitter's multicast flows are known.
+pub const RECORD_GRACE_NS: u64 = 2_000_000_000;
 /// The most devices a lookup asked about (their directories and reads).
 pub const MAX_DEVICES: usize = 64;
 /// The reader looks at least this often at the minute's report (a new
@@ -358,6 +363,8 @@ pub struct Book {
     records: BTreeMap<String, Records>,
     reads: BTreeMap<String, Reads>,
     flow_reads: BTreeMap<String, FlowReads>,
+    /// When [`Book::multicast`] was first asked.
+    first_multicast: Option<u64>,
     counts: Counts,
     /// Wants registered so far (the reader is woken when it moves).
     wants: u64,
@@ -395,6 +402,7 @@ impl Book {
             records: BTreeMap::new(),
             reads: BTreeMap::new(),
             flow_reads: BTreeMap::new(),
+            first_multicast: None,
             counts: Counts::default(),
             wants: 0,
         }
@@ -575,22 +583,22 @@ impl Book {
     /// channel `a` at `now`, from its flow list (dstack #148): read within
     /// [`Timing::max_age_ns`], or the last one while a new read is wanted;
     /// [`MulticastLookup::Unknown`] while the first read is wanted or runs.
-    /// A device without a `_netaudio-arc` record, or whose record is
-    /// younger than [`Timing::settle_ns`], or past [`MAX_DEVICES`], is not
-    /// read: [`MulticastLookup::None`].
+    /// Only its `_netaudio-arc` record is needed, read at once (no settle:
+    /// the list needs no other record). A device without that record is
+    /// [`MulticastLookup::Unknown`] for [`RECORD_GRACE_NS`] after the first
+    /// multicast lookup (the browse may not have answered yet), then
+    /// [`MulticastLookup::None`]; so is one past [`MAX_DEVICES`].
     pub fn multicast(&mut self, device: &str, a: &Advertised, now: u64) -> MulticastLookup {
         let key = device.to_ascii_lowercase();
-        let Some(&Records {
-            arc: Some(_),
-            since,
-            ..
-        }) = self.records.get(&key)
-        else {
-            return MulticastLookup::None;
-        };
-        if now.saturating_sub(since) < self.timing.settle_ns
-            || (self.flow_reads.len() >= MAX_DEVICES && !self.flow_reads.contains_key(&key))
-        {
+        let first = *self.first_multicast.get_or_insert(now);
+        if !self.records.get(&key).is_some_and(|r| r.arc.is_some()) {
+            return if now.saturating_sub(first) < RECORD_GRACE_NS {
+                MulticastLookup::Unknown
+            } else {
+                MulticastLookup::None
+            };
+        }
+        if self.flow_reads.len() >= MAX_DEVICES && !self.flow_reads.contains_key(&key) {
             return MulticastLookup::None;
         }
         let max_age = self.timing.max_age_ns;

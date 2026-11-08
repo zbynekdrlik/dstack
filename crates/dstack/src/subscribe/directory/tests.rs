@@ -1133,7 +1133,7 @@ const ULTIMO_GROUP: SocketAddrV4 = SocketAddrV4::new(Ipv4Addr::new(239, 255, 0, 
 #[test]
 fn a_device_s_flows_are_read_once_and_name_the_multicast_flow_of_a_channel() {
     let mut book = peer_book();
-    let t = SETTLE_NS;
+    let t = MS;
     // Not read yet: unknown, and one read wanted however often it is asked.
     for id in [1, 2, 1] {
         assert_eq!(
@@ -1212,23 +1212,39 @@ fn a_device_whose_flows_cannot_be_read_offers_none_and_waits_longer() {
 }
 
 #[test]
-fn a_device_without_an_arc_record_or_young_is_not_read_for_flows() {
+fn a_device_without_an_arc_record_is_waited_for_briefly_then_not_read() {
     let mut book = Book::new(Timing::default());
+    let t = 7 * S;
+    // The browse may not have answered yet: unknown for the grace.
     assert_eq!(
-        book.multicast("peer-device", &peer_channel(1), SETTLE_NS),
-        MulticastLookup::None
+        book.multicast("peer-device", &peer_channel(1), t),
+        MulticastLookup::Unknown
     );
-    let mut book = peer_book();
     assert_eq!(
-        book.multicast("peer-device", &peer_channel(1), SETTLE_NS - 1),
+        book.multicast("other", &peer_channel(1), t + RECORD_GRACE_NS - 1),
+        MulticastLookup::Unknown
+    );
+    assert_eq!(
+        book.multicast("peer-device", &peer_channel(1), t + RECORD_GRACE_NS),
         MulticastLookup::None
     );
     assert_eq!(book.wants(), 0);
-    assert_eq!(book.next_due(), None);
+    // A record that comes is read at once, however young.
+    book.apply(
+        &record(ARC_SERVICE, "peer-device", "10.0.0.11", 4440),
+        t + 3 * S,
+    );
+    assert_eq!(
+        book.multicast("peer-device", &peer_channel(1), t + 3 * S),
+        MulticastLookup::Unknown
+    );
+    let job = book.next(t + 3 * S).unwrap();
+    assert_eq!(job.kind, Kind::Flows);
     // Its record gone before the read: the want is dropped.
-    book.multicast("peer-device", &peer_channel(1), SETTLE_NS);
-    book.apply(&gone(ARC_SERVICE, "peer-device"), SETTLE_NS);
-    assert_eq!(book.next(SETTLE_NS), None);
+    let mut book = peer_book();
+    book.multicast("peer-device", &peer_channel(1), 0);
+    book.apply(&gone(ARC_SERVICE, "peer-device"), 0);
+    assert_eq!(book.next(0), None);
 }
 
 #[test]
