@@ -1788,6 +1788,29 @@ fn an_escape_whose_relay_does_not_take_over_is_put_off_and_warned_rarely() {
     assert_eq!(drain(&rig.rx).len(), 2);
 }
 
+/// dstack #141: the TX loop starts its relay thread only with the
+/// bounded escape on; without it, no second thread.
+#[test]
+fn the_tx_loop_starts_a_relay_thread_only_with_the_escape_on() {
+    crate::test_log::undecided();
+    for escape in [false, true] {
+        let shared = shared_with(Vec::new());
+        let clock = StepClock::at(T);
+        let stopper = {
+            let shared = Arc::clone(&shared);
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(50));
+                shared.stop();
+            })
+        };
+        let log = crate::test_log::capture_at(tracing::Level::INFO, || {
+            run_with(clock.as_ref(), Arc::clone(&shared), escape)
+        });
+        stopper.join().unwrap();
+        assert_eq!(log.contains("TX relay thread started"), escape, "{log}");
+    }
+}
+
 #[test]
 fn the_tx_thread_sends_nothing_before_the_clock_is_ready() {
     let shared = shared_with(Vec::new());

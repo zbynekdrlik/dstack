@@ -1506,6 +1506,12 @@ pub const RELAY_TAKE_MAX: std::time::Duration = std::time::Duration::from_micros
 /// the bounded escape on, a relay thread covers the TX thread's blocks
 /// ([`relay`], dstack #141).
 fn run(clock: &dyn PtpClock, shared: Arc<TxShared>) {
+    run_with(clock, shared, crate::clock::escape_on());
+}
+
+/// [`run`] with the bounded escape on (`escape`, `clock::escape_on`) or
+/// off: only with it on does a relay thread start.
+fn run_with(clock: &dyn PtpClock, shared: Arc<TxShared>, escape: bool) {
     take_priority("TX thread", TX_PRIORITY);
     place("TX thread", shared.cfg.io_cpu);
     info!(
@@ -1521,7 +1527,7 @@ fn run(clock: &dyn PtpClock, shared: Arc<TxShared>) {
         .then(|| super::qos::hold(std::path::Path::new(super::qos::CPU_DMA_LATENCY)))
         .flatten();
     let tx = Transmitter::new(Arc::clone(&shared));
-    if !crate::clock::escape_on() {
+    if !escape {
         return run_passes(clock, &shared, tx, None);
     }
     let relay = relay::Relay::new();
