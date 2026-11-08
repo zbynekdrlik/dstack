@@ -247,6 +247,9 @@ pub struct FlowView {
 pub struct Manager {
     host: String,
     ip: Ipv4Addr,
+    /// Our multicast sockets are bound to the port only
+    /// ([`crate::media::rx::GROUP_BOUND_TO_PORT`]).
+    port_only: bool,
     ports: [u16; MAX_FLOWS],
     rate: u32,
     latency_ns: u64,
@@ -329,6 +332,7 @@ impl Manager {
             fpp_floor: BTreeMap::new(),
             abandoned: Vec::new(),
             reported: vec![None; n],
+            port_only: crate::media::rx::GROUP_BOUND_TO_PORT,
             now: 0,
         }
     }
@@ -759,12 +763,29 @@ impl Manager {
                 continue;
             }
             match resolver.multicast(&sub.tx_device, &sub.tx_channel, &a) {
-                MulticastLookup::Found(m) if fits(&m, &a) => shared.push((rx, a, m)),
+                MulticastLookup::Found(m) if fits(&m, &a) && !self.port_clash(&m, &a) => {
+                    shared.push((rx, a, m))
+                }
                 MulticastLookup::Unknown => {}
                 _ => pending.entry(a.control).or_default().push((rx, a)),
             }
         }
         (pending, shared)
+    }
+
+    /// Whether `m` shares its port with another group of `a`'s transmitter
+    /// that one of our flows receives, where our socket cannot tell the two
+    /// groups apart: on Windows a group's socket is bound to the port only,
+    /// so it gets every group sent to that port, and the same source passes
+    /// the RX filter (Linux binds the group itself). Such a flow is asked
+    /// for as unicast instead.
+    fn port_clash(&self, m: &Multicast, a: &Advertised) -> bool {
+        self.port_only
+            && self.flows.iter().flatten().any(|f| {
+                f.to == a.control
+                    && f.group
+                        .is_some_and(|g| g.port() == m.group.port() && g != m.group)
+            })
     }
 
     /// RX channel `rx` (its record `a`) receives the multicast flow `m`:

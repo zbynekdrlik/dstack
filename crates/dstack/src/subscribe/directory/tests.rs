@@ -1321,3 +1321,59 @@ fn the_reader_lists_a_device_s_flows_over_its_arc() {
     let mut arc = network.arc;
     arc.join_within(BOUND);
 }
+
+#[test]
+fn the_record_grace_runs_from_each_device_s_first_lookup() {
+    let mut book = Book::new(Timing::default());
+    book.multicast("early", &peer_channel(1), 0);
+    // Ten minutes on, a device asked about for the first time is waited for.
+    let later = 600 * S;
+    assert_eq!(
+        book.multicast("late", &peer_channel(1), later),
+        MulticastLookup::Unknown
+    );
+    assert_eq!(
+        book.multicast("early", &peer_channel(1), later),
+        MulticastLookup::None
+    );
+    assert_eq!(
+        book.multicast("late", &peer_channel(1), later + RECORD_GRACE_NS),
+        MulticastLookup::None
+    );
+}
+
+#[test]
+fn a_failed_flow_list_read_keeps_the_last_list() {
+    let mut book = peer_book();
+    book.multicast("peer-device", &peer_channel(1), MS);
+    let job = book.next(MS).unwrap();
+    book.finished_flows(&job, Ok(ultimo_flows()), 1, MS);
+    let old = MS + MAX_AGE_NS;
+    book.multicast("peer-device", &peer_channel(1), old);
+    let job = book.next(old).unwrap();
+    book.finished_flows(&job, Err(ReadError::Timeout { op: 0x2600 }), 1, old);
+    assert!(matches!(
+        book.multicast("peer-device", &peer_channel(1), old),
+        MulticastLookup::Found(_)
+    ));
+}
+
+#[test]
+fn devices_waited_for_are_bounded() {
+    let mut book = Book::new(Timing::default());
+    for k in 0..MAX_DEVICES {
+        assert_eq!(
+            book.multicast(&format!("dev-{k}"), &peer_channel(1), 0),
+            MulticastLookup::Unknown
+        );
+    }
+    // One more is not kept: none at once; the kept ones still wait.
+    assert_eq!(
+        book.multicast("one-more", &peer_channel(1), 0),
+        MulticastLookup::None
+    );
+    assert_eq!(
+        book.multicast("dev-0", &peer_channel(1), 0),
+        MulticastLookup::Unknown
+    );
+}

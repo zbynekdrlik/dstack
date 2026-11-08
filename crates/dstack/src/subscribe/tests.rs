@@ -1761,3 +1761,71 @@ fn a_moved_group_is_joined_anew() {
     let groups: Vec<_> = (0..MAX_FLOWS).filter_map(|s| m.rx_plan(s).group).collect();
     assert_eq!(groups, [other]);
 }
+
+#[test]
+fn two_groups_of_one_transmitter_on_one_port_are_joined_only_where_the_socket_tells_them_apart() {
+    let net = shared_network();
+    // Its TX 3 in a second group on the same port.
+    let other = SocketAddrV4::new(Ipv4Addr::new(239, 255, 0, 2), GROUP.port());
+    net.multicast.borrow_mut().clear();
+    let first = Multicast {
+        group: GROUP,
+        channels: vec![1, 2],
+        fpp: 32,
+        bits: 24,
+    };
+    let second = Multicast {
+        group: other,
+        channels: vec![3],
+        fpp: 32,
+        bits: 24,
+    };
+    // A resolver that answers by channel.
+    struct Two(Shared, Multicast, Multicast);
+    impl Resolver for Two {
+        fn lookup(&self, d: &str, c: &str) -> Option<Advertised> {
+            self.0.lookup(d, c)
+        }
+        fn multicast(&self, _: &str, _: &str, a: &Advertised) -> MulticastLookup {
+            let m = if self.1.channels.contains(&a.tx_channel_id) {
+                &self.1
+            } else {
+                &self.2
+            };
+            MulticastLookup::Found(m.clone())
+        }
+    }
+    let two = Two(net, first, second);
+    for port_only in [false, true] {
+        let mut m = manager();
+        m.port_only = port_only;
+        m.set(0, Some(sub("TX 1", "peer-device")));
+        m.tick(0, &NONE, &two);
+        m.set(1, Some(sub("TX 3", "peer-device")));
+        let out = m.tick(S / 4, &NONE, &two);
+        let groups: Vec<_> = (0..MAX_FLOWS).filter_map(|s| m.rx_plan(s).group).collect();
+        if port_only {
+            assert_eq!(groups, [GROUP]);
+            assert_eq!(requests(&out).len(), 1, "TX 3 asked for as unicast");
+        } else {
+            assert_eq!(groups, [GROUP, other]);
+            assert_eq!(requests(&out), []);
+        }
+    }
+    // Another port, or the same group: no clash.
+    let mut m = manager();
+    m.port_only = true;
+    m.set(0, Some(sub("TX 1", "peer-device")));
+    m.set(1, Some(sub("TX 2", "peer-device")));
+    assert_eq!(m.tick(0, &NONE, &two), []);
+    let groups: Vec<_> = (0..MAX_FLOWS).filter_map(|s| m.rx_plan(s).group).collect();
+    assert_eq!(groups, [GROUP], "one flow carries both");
+    let elsewhere = Multicast {
+        group: SocketAddrV4::new(Ipv4Addr::new(239, 255, 0, 2), GROUP.port() + 1),
+        ..two.2.clone()
+    };
+    let two = Two(two.0, two.1, elsewhere);
+    m.set(2, Some(sub("TX 3", "peer-device")));
+    assert_eq!(m.tick(S / 4, &NONE, &two), []);
+    assert_eq!((0..MAX_FLOWS).filter_map(|s| m.rx_plan(s).group).count(), 2);
+}

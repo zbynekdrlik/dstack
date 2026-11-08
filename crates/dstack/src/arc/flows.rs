@@ -174,16 +174,22 @@ fn segments(body: &[u8], at: usize) -> Option<Vec<usize>> {
 /// One flow record at body offset `at`.
 fn record(body: &[u8], at: usize) -> Option<TxFlow> {
     let seg = segments(body, at)?;
-    let (&first, &dests, &chans, &frames) = (seg.first()?, seg.get(2)?, seg.get(3)?, seg.get(4)?);
-    let flags = u32::from_be_bytes(body.get(first + 12..first + 16)?.try_into().ok()?);
-    let n = usize::from(read_u16(body, chans + 2)?);
+    // Each field is read inside its own segment, never past it into the
+    // next one.
+    let part = |i: usize| {
+        let s = *seg.get(i)?;
+        body.get(s..s + 2 * usize::from(*body.get(s)?))
+    };
+    let (first, dests, chans, frames) = (part(0)?, part(2)?, part(3)?, part(4)?);
+    let flags = u32::from_be_bytes(first.get(12..16)?.try_into().ok()?);
+    let n = usize::from(read_u16(chans, 2)?);
     let channels = (0..n)
-        .map(|i| read_u16(body, chans + 4 + 2 * i))
+        .map(|i| read_u16(chans, 4 + 2 * i))
         .collect::<Option<Vec<_>>>()?;
-    let count = usize::from(*body.get(dests + 3)?);
+    let count = usize::from(*dests.get(3)?);
     let destinations = (0..count)
         .map(|i| {
-            let d = usize::from(read_u16(body, dests + 4 + 2 * i)?).checked_sub(HEADER_LEN)?;
+            let d = usize::from(read_u16(dests, 4 + 2 * i)?).checked_sub(HEADER_LEN)?;
             if body.get(d..d + 2)? != [8, 2] {
                 return None;
             }
@@ -193,12 +199,12 @@ fn record(body: &[u8], at: usize) -> Option<TxFlow> {
         })
         .collect::<Option<Vec<_>>>()?;
     Some(TxFlow {
-        id: read_u16(body, first + 2)?,
-        local_id: read_u16(body, first + 8)?,
+        id: read_u16(first, 2)?,
+        local_id: read_u16(first, 8)?,
         flags,
         channels,
-        fpp: read_u16(body, frames + 2)?,
-        bits: read_u16(body, first + 22)?,
+        fpp: read_u16(frames, 2)?,
+        bits: read_u16(first, 22)?,
         destinations,
     })
 }
@@ -280,10 +286,12 @@ pub fn create_multicast(
     if flows.unread > 0 {
         return Err(ReadError::Malformed { op: CREATE }.into());
     }
+    // The flow asked for: its slot and its channels, multicast. A reply
+    // naming another flow made none of ours.
     flows
         .flows
         .into_iter()
-        .next()
+        .find(|f| f.local_id == local_id && f.channels == channels && f.multicast())
         .ok_or(CreateError::NotCreated)
 }
 

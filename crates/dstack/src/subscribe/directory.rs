@@ -363,8 +363,10 @@ pub struct Book {
     records: BTreeMap<String, Records>,
     reads: BTreeMap<String, Reads>,
     flow_reads: BTreeMap<String, FlowReads>,
-    /// When [`Book::multicast`] was first asked.
-    first_multicast: Option<u64>,
+    /// When [`Book::multicast`] was first asked about each device (case
+    /// aside) that had no `_netaudio-arc` record then, at most
+    /// [`MAX_DEVICES`].
+    first_asked: BTreeMap<String, u64>,
     counts: Counts,
     /// Wants registered so far (the reader is woken when it moves).
     wants: u64,
@@ -402,7 +404,7 @@ impl Book {
             records: BTreeMap::new(),
             reads: BTreeMap::new(),
             flow_reads: BTreeMap::new(),
-            first_multicast: None,
+            first_asked: BTreeMap::new(),
             counts: Counts::default(),
             wants: 0,
         }
@@ -590,8 +592,11 @@ impl Book {
     /// [`MulticastLookup::None`]; so is one past [`MAX_DEVICES`].
     pub fn multicast(&mut self, device: &str, a: &Advertised, now: u64) -> MulticastLookup {
         let key = device.to_ascii_lowercase();
-        let first = *self.first_multicast.get_or_insert(now);
         if !self.records.get(&key).is_some_and(|r| r.arc.is_some()) {
+            if self.first_asked.len() >= MAX_DEVICES && !self.first_asked.contains_key(&key) {
+                return MulticastLookup::None;
+            }
+            let first = *self.first_asked.entry(key).or_insert(now);
             return if now.saturating_sub(first) < RECORD_GRACE_NS {
                 MulticastLookup::Unknown
             } else {
@@ -622,9 +627,11 @@ impl Book {
     }
 
     /// The flow list read `job` ended at `now` with `result` after
-    /// `requests` requests. A list that could not be read counts as one
-    /// with no flow until the next (a device that answers no 0x2600 gets
-    /// unicast flows) and as a failure (its next read waits longer).
+    /// `requests` requests. A list that could not be read is a failure (the
+    /// next read waits longer); the last list read stays (a multicast flow
+    /// is not left over one lost reply), and a device never read counts as
+    /// one with no flow until the next read (a device that answers no
+    /// 0x2600 gets unicast flows).
     pub fn finished_flows(
         &mut self,
         job: &Job,
@@ -646,7 +653,9 @@ impl Book {
             Err(e) => {
                 self.counts.count_error(e);
                 r.failures = r.failures.saturating_add(1);
-                r.flows = Some((Vec::new(), now));
+                if r.flows.is_none() {
+                    r.flows = Some((Vec::new(), now));
+                }
             }
         }
     }

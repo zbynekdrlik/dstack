@@ -337,3 +337,26 @@ fn a_flow_lists_every_destination_in_order() {
         ]
     );
 }
+
+#[test]
+fn a_create_reply_naming_another_flow_made_none_of_ours() {
+    // The UltimoX2's reply names slot 1, channels 1+2: asked for slot 2, or
+    // for channel 1 alone, it is not our flow.
+    for (slot, channels) in [(2u16, &[1u16, 2][..]), (1, &[1][..])] {
+        assert_eq!(
+            create_multicast(&mut Recorded::new(ULTIMO_CREATED), slot, channels, 1),
+            Err(CreateError::NotCreated),
+            "{slot} {channels:?}"
+        );
+    }
+}
+
+#[test]
+fn a_field_is_never_read_from_the_next_segment() {
+    // The first segment cut to 4 words (its next segment moved up by the
+    // chain): its flags and bits would lie in the bytes after it.
+    let mut d = hex(ULTIMO_LIST);
+    d[0x20] = 4;
+    let flows = parse_flows(&d[HEADER_LEN..]).unwrap();
+    assert_eq!((flows.unread, flows.flows.len()), (1, 1));
+}

@@ -1255,6 +1255,23 @@ fn a_slot_whose_plan_names_a_group_joins_it_and_receives_its_flow() {
     let mut got = [0i32; 64];
     assert_eq!(s.rings()[1].read_at(p0, &mut got).holes, 0);
     assert_eq!(got[5], value(p0 + 5, 1));
+    // The manager's next flow of the same group in the slot: no new join.
+    publish(
+        &s,
+        &[(
+            3,
+            RxPlan {
+                generation: 9,
+                ..multicast
+            },
+        )],
+        &[
+            (0, RxRoute { flow: 3, slot: 0 }),
+            (1, RxRoute { flow: 3, slot: 1 }),
+        ],
+    );
+    rx.pass(None, 0);
+    assert_eq!(s.lane(3).joins, 1);
     // No keepalive to a multicast flow, however long it plays.
     rx.pass(Some(ns_of(p0 + 100, RATE)), KEEPALIVE_NS * 4);
     assert_eq!(s.lane(3).keepalives, 0);
@@ -1323,4 +1340,28 @@ fn two_of_our_devices_on_one_pc_both_receive_one_group() {
         assert_eq!(n, packet_at(1000, 1, 32).len());
         assert_eq!(from.ip(), std::net::IpAddr::V4(LOOPBACK));
     }
+}
+
+/// Linux only: there a socket bound to the port without sharing makes the
+/// join's bind fail; Windows' SO_REUSEADDR lets the join take the port.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_failed_join_is_tried_again_with_the_slot_s_next_flow() {
+    let group = SocketAddrV4::new(Ipv4Addr::new(239, 255, 77, 4), free_port());
+    let s = shared(1);
+    let mut rx = Receiver::new(Arc::clone(&s)).unwrap();
+    // A join that cannot succeed: the group's port taken without sharing.
+    let blocker = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, group.port())).unwrap();
+    let p = |generation| RxPlan {
+        group: Some(group),
+        ..plan(LOOPBACK, 1, false, generation)
+    };
+    publish(&s, &[(0, p(1))], &[]);
+    rx.pass(None, 0);
+    assert_eq!((s.lane(0).joins, s.lane(0).join_errors), (0, 1));
+    drop(blocker);
+    // The manager's next flow of that group in the slot: joined now.
+    publish(&s, &[(0, p(2))], &[]);
+    rx.pass(None, 0);
+    assert_eq!((s.lane(0).joins, s.lane(0).join_errors), (1, 1));
 }

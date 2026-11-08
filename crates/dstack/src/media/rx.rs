@@ -757,7 +757,10 @@ impl Receiver {
             {
                 let plan = RxPlan::from_words(w);
                 if plan != lane.plan {
-                    if plan.group != lane.plan.group {
+                    // Another group, or a new flow of a group whose join
+                    // failed: (re)joined.
+                    let unjoined = plan.group.is_some() && self.joined[slot].is_none();
+                    if plan.group != lane.plan.group || unjoined {
                         regrouped |= 1 << slot;
                     }
                     lane.plan = plan;
@@ -967,6 +970,10 @@ impl Receiver {
     }
 }
 
+/// Whether [`join`] binds a group's socket to the port only (Windows binds
+/// no multicast address), so it gets every group sent to that port.
+pub const GROUP_BOUND_TO_PORT: bool = cfg!(not(target_os = "linux"));
+
 /// A socket that receives the multicast `group` on our address `ip`:
 /// bound to the group's port (on Linux to the group itself, so it gets no
 /// other group's datagrams to that port; Windows binds no multicast
@@ -983,10 +990,10 @@ pub fn join(ip: Ipv4Addr, group: SocketAddrV4) -> io::Result<UdpSocket> {
     }
     let s = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
     s.set_reuse_address(true)?;
-    let at = if cfg!(target_os = "linux") {
-        *group.ip()
-    } else {
+    let at = if GROUP_BOUND_TO_PORT {
         Ipv4Addr::UNSPECIFIED
+    } else {
+        *group.ip()
     };
     s.bind(&SocketAddrV4::new(at, group.port()).into())?;
     s.join_multicast_v4(group.ip(), &ip)?;
