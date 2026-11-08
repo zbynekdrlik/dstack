@@ -164,7 +164,7 @@ thread_local! {
 }
 
 /// Lets this thread's low-latency waits make the bounded escape (dstack
-/// #1, `spin_escape_ms`): the TX thread (it sends ahead first) and an
+/// #1, `spin_escape_ms`): the TX thread (its relay covers the block) and an
 /// engine pump whose margin covers the block ([`super::pump_may_escape`]).
 /// Any other thread spins yielding, as without the escape.
 pub fn allow_escape(allowed: bool) {
@@ -178,8 +178,8 @@ thread_local! {
 }
 
 /// Whether this thread's next low-latency wait makes a bounded escape
-/// (dstack #1, `spin_escape_ms`): TX asks after its pass and sends the
-/// packets due within [`super::PRESEND_NS`] first. From its first ask the
+/// (dstack #1, `spin_escape_ms`): TX asks after its pass and hands its
+/// passes to its relay thread first (dstack #141). From its first ask the
 /// thread's waits escape only when an ask said so
 /// ([`super::EscapeState::ask`]).
 pub fn ask_escape() -> bool {
@@ -195,8 +195,8 @@ pub fn ask_escape() -> bool {
     })
 }
 
-/// Puts off this thread's armed escape: TX could not send ahead the whole
-/// window ([`super::EscapeState::defer`]); `false` when the escape still
+/// Puts off this thread's armed escape: TX's relay did not take over, or
+/// the clock re-anchored ([`super::EscapeState::defer`]); `false` when the escape still
 /// happens (nothing armed, or already overdue).
 pub fn defer_escape() -> bool {
     let period = escape_period();
@@ -206,6 +206,30 @@ pub fn defer_escape() -> bool {
         e.set(s);
         put_off
     })
+}
+
+/// Blocks this thread's armed bounded escape now (dstack #141): TX handed
+/// its passes to its relay thread first. `false`: nothing armed.
+pub fn block_escape() -> bool {
+    let period = escape_period();
+    let go = ESCAPE.with(|e| {
+        let mut s = e.get();
+        let go = s.take(monotonic_ns(), period);
+        e.set(s);
+        go
+    });
+    if go {
+        block_for(super::ESCAPE_BLOCK_NS as i64);
+    }
+    go
+}
+
+/// Makes this thread's low-latency waits spin without yielding and never
+/// escape (TX's relay thread, dstack #141): it spins only while it covers
+/// the TX thread's block, at most once a period.
+pub fn relay_spin() {
+    ALLOWED.with(|a| a.set(true));
+    ESCAPE.with(|e| e.set(super::EscapeState::relay()));
 }
 
 /// Blocks the calling thread on its high-resolution timer for `ns`
@@ -235,8 +259,8 @@ fn sleep_until_in(target: i64, mode: super::WaitMode, escape_ns: u64) {
     // thread blocks one timer tick, whatever its deadline. The timer's
     // expiry preempts a lower priority at once, so per-CPU system work
     // that must run on this CPU gets it each period, and the spin below
-    // needs no SwitchToThread. TX sent ahead before this wait
-    // (`ask_escape`); a pump's W absorbs the block.
+    // needs no SwitchToThread. TX's relay thread covers its block
+    // (`block_escape`, dstack #141); a pump's W absorbs the block.
     if escape {
         let go = ESCAPE.with(|e| {
             let mut s = e.get();

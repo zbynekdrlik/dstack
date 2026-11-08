@@ -493,13 +493,12 @@ fn the_engine_pump_and_its_tx_passes_do_not_allocate() {
             now = pump.media(now, 0);
         }
         // 100 ms of TX passes 250 µs apart over what the pump wrote, with
-        // a send ahead every 10 ms (the bounded escape's, dstack #1), none
-        // in the last 10 ms so the counts below stay those of the passes.
+        // a bounded escape's last pass every 10 ms (dstack #1, #141).
         for i in 0..400 {
             let at = start + i * 250_000;
             transmitter.step(Some(at), 0);
-            if i % 40 == 20 && i < 360 {
-                let _ = transmitter.presend_all(|| (Some(at), 0));
+            if i % 40 == 20 {
+                let _ = transmitter.before_wait(|| (Some(at + 100_000), 0), || true, || false);
             }
         }
     });
@@ -507,7 +506,6 @@ fn the_engine_pump_and_its_tx_passes_do_not_allocate() {
     let v = stats.view();
     assert_eq!((v.blocks, v.late, v.rebootstraps), (300, 0, 0), "{v:?}");
     let (la, lb) = (tx.lane(0), tx.lane(1));
-    assert!(la.early > 0 && lb.early > 0, "{la:?} {lb:?}");
     assert_eq!(la.rebootstraps + lb.rebootstraps, 0, "{la:?} {lb:?}");
     assert!((295..=300).contains(&la.packets), "{la:?}");
     assert!((295..=300).contains(&lb.packets), "{lb:?}");

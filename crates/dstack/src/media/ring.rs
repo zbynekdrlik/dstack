@@ -197,16 +197,6 @@ impl Ring {
         Read { holes }
     }
 
-    /// Whether the ring holds every position `pos`, `pos + 1`, … of `n`:
-    /// a read of them would find no hole. Marks nothing and moves no
-    /// read end (TX's look before it sends ahead, dstack #1).
-    pub fn holds(&self, pos: u64, n: usize) -> bool {
-        (0..n as u64).all(|i| {
-            let p = pos.wrapping_add(i);
-            lap_of(self.slot(p).load(Ordering::Relaxed)) == lap(p)
-        })
-    }
-
     /// The largest magnitude stored since the last call (0 for none).
     pub fn take_peak(&self) -> u32 {
         self.peak.swap(0, Ordering::Relaxed)
