@@ -1029,11 +1029,7 @@ impl Manager {
 /// datagram.
 fn fits(m: &Multicast, a: &Advertised) -> bool {
     let bps = usize::try_from(a.bits / 8).unwrap_or(0);
-    m.bits == a.bits
-        && m.fpp > 0
-        && !m.channels.is_empty()
-        && m.channels.len() <= MAX_CHANNELS
-        && sendable(m.channels.len(), bps, m.fpp)
+    m.bits == a.bits && !m.channels.is_empty() && sendable(m.channels.len(), bps, m.fpp)
 }
 
 /// Whether two records of a transmitter's channels ask for the same flow:

@@ -227,6 +227,13 @@ fn a_record_that_does_not_read_is_counted_and_the_rest_listed() {
     d[0x6a] = 3;
     let flows = parse_flows(&d[HEADER_LEN..]).unwrap();
     assert_eq!((flows.unread, flows.flows[0].id), (1, 2));
+    // The last segment two words longer than its record (the record made
+    // one word longer, so the overrun is not caught by the chain alone).
+    let mut d = hex(ULTIMO_LIST);
+    d[0x21] = 0x28;
+    d[0x6a] = 4;
+    let flows = parse_flows(&d[HEADER_LEN..]).unwrap();
+    assert_eq!((flows.unread, flows.flows[0].id), (1, 2));
     // A record offset past the reply: the table does not read.
     let mut d = hex(ULTIMO_LIST);
     d.truncate(0x13);

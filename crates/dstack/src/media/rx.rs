@@ -816,8 +816,6 @@ impl Receiver {
                 stats.joins.fetch_add(1, Ordering::Relaxed);
                 info!(slot = slot + 1, %group, "RX multicast flow: group joined");
                 self.joined[slot] = Some((group, s));
-                // Datagrams that came before the registration are read now.
-                self.ready |= 1 << slot;
             }
             Err(e) => {
                 stats.join_errors.fetch_add(1, Ordering::Relaxed);
