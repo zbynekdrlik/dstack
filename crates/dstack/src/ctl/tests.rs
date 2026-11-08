@@ -953,8 +953,7 @@ fn the_status_lists_the_flows_of_both_sides() {
             "\"tx\":[{\"flow\":1,\"live\":1,\"fpp\":32,\"channels\":3,\"packets\":0,\
              \"send_errors\":0,\"send_retries\":0,\"keepalives\":0,\"rebootstraps\":0,\
              \"holes\":0,\"late_bins\":[0,0,0,0,0,0],\"late_max_us\":0,\"send_max_us\":0,\
-             \"age_max_us\":0,\"over_latency\":0,\"receiver_latency_us\":0,\"direct\":0,\
-             \"early\":0}]"
+             \"age_max_us\":0,\"over_latency\":0,\"receiver_latency_us\":0,\"direct\":0}]"
         ),
         "{s}"
     );
@@ -1440,7 +1439,6 @@ fn a_lane_s_times_show_in_whole_microseconds() {
         over_latency: 80,
         receiver_latency_ns: 10_000_999,
         direct: 5,
-        early: 4,
         ..LaneCounts::default()
     };
     let mut j = Json::new();
@@ -1451,8 +1449,7 @@ fn a_lane_s_times_show_in_whole_microseconds() {
         j.out,
         "{\"packets\":7,\"send_errors\":0,\"send_retries\":3,\"keepalives\":0,\"rebootstraps\":0,\
          \"holes\":0,\"late_bins\":[0,0,0,0,0,0],\"late_max_us\":204,\"send_max_us\":56,\
-         \"age_max_us\":416,\"over_latency\":80,\"receiver_latency_us\":10000,\"direct\":5,\
-         \"early\":4}"
+         \"age_max_us\":416,\"over_latency\":80,\"receiver_latency_us\":10000,\"direct\":5}"
     );
 }
 

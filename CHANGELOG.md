@@ -2,6 +2,8 @@
 
 ## 0.6.53 (unreleased)
 
+- TX sends no packet before its due time around a bounded escape (`spin_escape_ms`, Windows, dstack #141). The send ahead (up to 2.14 ms before the packets' media time, once a period) is gone. While the TX thread blocks its escape tick, a relay thread (`dstack-tx-relay`, `media::tx::relay`) runs its passes. An UltimoX2 card (ESI planet 22) read band-asio-dante's flow at 3.5 ms because it counts an early packet as latency; the same device without the send ahead read 0.77 ms. API: the TX lane counter `LaneCounts::early` and the status's TX `early` are removed, as are `Transmitter::presend`/`presend_all`, `Schedule::due_early`/`due_by`, `Presend`, `PRESEND_ROUNDS`, `Source::ready` and `Ring::holds`. `clock::PRESEND_NS` is renamed `clock::ESCAPE_MAX_NS` (same value). New: `clock::block_escape`, `clock::relay_spin`, `media::tx::RELAY_TAKE_MAX`, `EscapeState::relay`.
+
 ## 0.6.52
 
 - `dstack-audio-io`: `StreamStats::parked` is removed. No backend ever set it (always false), and no consumer reads it any more (iemmixer dropped its reader). A consumer that names the field in a `StreamStats` literal or reads it drops that line.

@@ -883,10 +883,10 @@ fn the_spin_escape_is_the_device_s_period_in_ns_and_off_when_unset() {
 }
 
 #[test]
-fn the_presend_window_covers_the_escape_block_and_the_timer_s_late_wake() {
+fn the_escape_s_longest_block_is_the_block_and_the_timer_s_late_wake() {
     assert_eq!(ESCAPE_BLOCK_NS, 1_000_000);
     assert_eq!(TIMER_LATE_NS, 1_140_000);
-    assert_eq!(PRESEND_NS, 2_140_000);
+    assert_eq!(ESCAPE_MAX_NS, 2_140_000);
 }
 
 #[test]
@@ -896,12 +896,28 @@ fn the_spin_escape_line_names_the_mode_on_windows_and_says_ignored_elsewhere() {
     assert_eq!(
         spin_escape_line(Some(250), Os::Windows).unwrap(),
         "bounded escape on (trial, dstack #1): the low-latency spin does not yield, \
-         each spinning media thread blocks 1000 µs on the timer every 250 ms, TX sends 2140 µs ahead first"
+         each spinning media thread blocks 1000 µs on the timer every 250 ms, a relay thread sends TX's packets meanwhile"
     );
     assert_eq!(
         spin_escape_line(Some(250), Os::Other).unwrap(),
         "spin_escape_ms = 250 is for Windows only: ignored on this OS"
     );
+}
+
+/// TX's relay thread (dstack #141) never escapes: it asks nothing, is
+/// never armed, and its waits never block, however long it runs.
+#[test]
+fn the_relay_s_escape_state_never_escapes() {
+    const P: u64 = 100_000_000;
+    let mut s = EscapeState::relay();
+    for k in 0..5 {
+        assert!(!s.take(1_000 + k * P as i64, P), "wait {k}");
+    }
+    assert!(
+        !s.defer(1_000 + 5 * P as i64, P),
+        "nothing armed to put off"
+    );
+    assert_ne!(EscapeState::relay(), EscapeState::new());
 }
 
 #[test]
@@ -929,7 +945,7 @@ fn a_thread_that_asks_escapes_only_after_an_ask_said_so() {
     assert!(!s.ask(0, P));
     assert!(!s.take(0, P));
     // The period ends between the ask and the wait: no escape, since
-    // nothing was sent ahead for it.
+    // nothing was handed over for it.
     assert!(!s.ask(99_999_999, P));
     assert!(!s.take(100_000_000, P));
     assert!(s.ask(100_000_000, P));
@@ -973,16 +989,18 @@ fn an_armed_escape_is_put_off_until_20_ms_past_its_period() {
 fn no_wait_escapes_on_linux() {
     assert!(!ask_escape());
     assert!(!defer_escape());
+    relay_spin();
+    assert!(!block_escape());
 }
 
 /// dstack #1 (iem-snv trial of v0.6.38, 5.11): a pump at block 64 with
 /// W 64 (96 kHz, 0.67 ms each) re-bootstrapped and lost 2 blocks at every
-/// escape. Woken up to `PRESEND_NS` after its last run, a pump is behind by
-/// up to `PRESEND_NS` less one block, so it takes the escape's block only
+/// escape. Woken up to `ESCAPE_MAX_NS` after its last run, a pump is behind by
+/// up to `ESCAPE_MAX_NS` less one block, so it takes the escape's block only
 /// when W covers that; FOH's pumps (W 384 and 512 at 96 kHz) do.
 #[test]
 fn a_pump_takes_the_escape_only_when_its_margin_covers_the_block() {
-    // 96 kHz: PRESEND_NS (2.14 ms) is 205.44 samples.
+    // 96 kHz: ESCAPE_MAX_NS (2.14 ms) is 205.44 samples.
     assert!(!pump_may_escape(64, 64, 96_000), "the trial's pump");
     assert!(pump_may_escape(384, 64, 96_000), "FOH master");
     assert!(pump_may_escape(512, 256, 96_000), "FOH band");

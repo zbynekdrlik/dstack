@@ -120,10 +120,11 @@ pub struct DeviceConfig {
     /// yield between the escape's blocks (Sleep(0) gave lower priorities
     /// the CPU on windows-2025), and every spinning media thread blocks one timer
     /// tick ([`crate::clock::ESCAPE_BLOCK_NS`]) at least once a period, so
-    /// per-CPU system work runs; TX first sends the packets due within
-    /// [`crate::clock::PRESEND_NS`] whose samples it already holds (and
+    /// per-CPU system work runs; TX's relay thread sends its packets at
+    /// their times meanwhile (dstack #141: nothing ahead of its time; TX
     /// puts the escape off, at most [`crate::clock::ESCAPE_DEFER_MAX_NS`],
-    /// while one has none). Process-wide: the last device set wins.
+    /// while the relay does not take over). Process-wide: the last device
+    /// set wins.
     /// Accepted and ignored on Linux, whose wait never spins.
     #[serde(default)]
     pub spin_escape_ms: Option<u64>,

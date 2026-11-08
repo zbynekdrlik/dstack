@@ -555,7 +555,6 @@ pub struct LaneStats {
     age_peak_ns: AtomicU64,
     over_latency: AtomicU64,
     direct: AtomicU64,
-    early: AtomicU64,
 }
 
 /// One slot's counts since the device started (every flow it carried).
@@ -607,9 +606,6 @@ pub struct LaneCounts {
     /// Packets sent past the qdisc ([`bypass`]); the rest of `packets`
     /// went through the UDP socket.
     pub direct: u64,
-    /// Packets sent ahead of their time before a bounded escape
-    /// ([`Transmitter::presend`], dstack #1; 0 unless `spin_escape_ms`).
-    pub early: u64,
 }
 
 /// The control side's half of [`TxShared`]: the table, and the keepalive
@@ -904,7 +900,6 @@ impl TxShared {
                 .plan_dest(slot)
                 .map_or(0, |dest| self.receiver_latency_ns(slot, dest)),
             direct: l.direct.load(Ordering::Relaxed),
-            early: l.early.load(Ordering::Relaxed),
         }
     }
 
@@ -1035,25 +1030,6 @@ impl Schedule {
     /// The starts again since the last call.
     pub fn take_rebootstraps(&mut self) -> u64 {
         std::mem::take(&mut self.rebootstraps)
-    }
-
-    /// The stamp of the next packet when it is due by media time
-    /// `horizon` and `ready` says its samples are there (the schedule moves
-    /// on by fpp); else nothing moves. Sends ahead of time before a bounded
-    /// escape ([`Transmitter::presend`], dstack #1); never a restart, since
-    /// [`Schedule::due`] judged the lag at the clock's own time just before.
-    pub fn due_early(&mut self, horizon: u64, ready: impl FnOnce(u64) -> bool) -> Option<u64> {
-        if !self.due_by(horizon) || !ready(self.next) {
-            return None;
-        }
-        let stamp = self.next;
-        self.next = stamp.saturating_add(self.fpp);
-        Some(stamp)
-    }
-
-    /// Whether the next packet is due by media time `horizon`.
-    pub fn due_by(&self, horizon: u64) -> bool {
-        self.next.saturating_add(self.fpp) <= horizon
     }
 
     /// The PTP ns at which the next packet is due at `rate`, `margin_ns`
@@ -1196,7 +1172,36 @@ impl Transmitter {
             self.re_anchored(now, anchor);
         }
         self.epoch = Some(anchor.epoch);
-        self.send_due(now, now_ns, pass, None);
+        self.send_due(now, now_ns, pass);
+    }
+
+    /// Before the TX thread's wait (after a pass): whether the wait makes a
+    /// bounded escape (dstack #1, `spin_escape_ms`), whose block the relay
+    /// thread covers ([`relay`], dstack #141). `ask` says whether one is due
+    /// (`clock::ask_escape`). A last pass at a fresh clock `read` (PTP ns
+    /// and the clock's epoch) sends what is due by then, never anything
+    /// ahead of its time; a clock that is not ready or re-anchored since
+    /// the pass puts the escape off (`defer`, `clock::defer_escape`;
+    /// `false` when it is overdue and escapes anyway), so a re-anchor is
+    /// always the TX thread's own pass.
+    pub fn before_wait(
+        &mut self,
+        read: impl FnOnce() -> (Option<u64>, u32),
+        ask: impl FnOnce() -> bool,
+        defer: impl FnOnce() -> bool,
+    ) -> bool {
+        if !ask() {
+            return false;
+        }
+        let (now_ns, epoch) = read();
+        match now_ns {
+            Some(now_ns) if self.epoch == Some(epoch) => {
+                let now = send_clock(now_ns, self.rate, self.margin_ns);
+                self.send_due(now, now_ns, Instant::now());
+                true
+            }
+            _ => !defer(),
+        }
     }
 
     /// When the next pass is due, PTP ns: the next packet of any flow or
@@ -1269,12 +1274,11 @@ impl Transmitter {
 
     /// Every packet due at media time `now` (PTP `now_ns`, read at `pass`),
     /// each flow in turn (the hot path: no allocation, no lock, no log; the
-    /// send is its one system call); with `early`, every packet due by that
-    /// media time whose samples are there instead ([`Transmitter::presend`]),
-    /// and what that sent. With a host sender, the packets to resolved
+    /// send is its one system call). Never a packet before its due time
+    /// (dstack #141). With a host sender, the packets to resolved
     /// neighbours are gathered as frames and sent in one call at the end of
     /// the pass ([`host::Batch`]); the rest go out at once.
-    fn send_due(&mut self, now: u64, now_ns: u64, pass: Instant, early: Option<u64>) -> Presend {
+    fn send_due(&mut self, now: u64, now_ns: u64, pass: Instant) {
         let Transmitter {
             shared,
             lanes,
@@ -1298,10 +1302,6 @@ impl Transmitter {
             latency_ns: *latency_ns,
         };
         let rings: &[Ring] = &shared.rings;
-        let mut done = Presend {
-            sent: 0,
-            covered: true,
-        };
         for (slot, lane) in lanes.iter_mut().enumerate() {
             let Some(dest) = lane.plan.dest else {
                 continue;
@@ -1320,25 +1320,7 @@ impl Transmitter {
             let fpp = usize::from(plan.fpp);
             let nch = usize::from(plan.nch);
             let mut holes = 0;
-            let mut ahead = 0;
-            loop {
-                let due = match early {
-                    None => schedule.due(now),
-                    Some(horizon) => schedule.due_early(horizon, |at| {
-                        early::packet_ready(
-                            &plan,
-                            sources,
-                            &shared.engine,
-                            rings,
-                            at,
-                            *engine_shift,
-                        )
-                    }),
-                };
-                let Some(stamp) = due else {
-                    break;
-                };
-                ahead += u64::from(early.is_some());
+            while let Some(stamp) = schedule.due(now) {
                 for (frame, &id) in frames.iter_mut().zip(&plan.channels).take(nch) {
                     let out = &mut frame[..fpp];
                     match usize::from(id).checked_sub(1).and_then(|i| {
@@ -1389,13 +1371,6 @@ impl Transmitter {
                 account(stats, &clock, stamp, plan.fpp, &sent, n, receiver_ns);
             }
             stats.holes.fetch_add(holes as u64, Ordering::Relaxed);
-            stats.early.fetch_add(ahead, Ordering::Relaxed);
-            done.sent += ahead;
-            // A packet due within the window was left: its samples were
-            // not there.
-            if early.is_some_and(|horizon| schedule.due_by(horizon)) {
-                done.covered = false;
-            }
             stats
                 .rebootstraps
                 .fetch_add(schedule.take_rebootstraps(), Ordering::Relaxed);
@@ -1403,7 +1378,6 @@ impl Transmitter {
         if let Some(batch) = batch.as_mut() {
             batch.flush(&clock, shared);
         }
-        done
     }
 }
 
@@ -1523,7 +1497,14 @@ pub(crate) fn take_priority(thread: &str, priority: i32) {
     }
 }
 
-/// The TX thread's loop (glue: every decision is [`Transmitter`]'s).
+/// How long the TX thread waits for its relay thread to take over before
+/// it puts its escape off (dstack #141): its packets due meanwhile wait
+/// that long.
+pub const RELAY_TAKE_MAX: std::time::Duration = std::time::Duration::from_micros(200);
+
+/// The TX thread's loop (glue: every decision is [`Transmitter`]'s). With
+/// the bounded escape on, a relay thread covers the TX thread's blocks
+/// ([`relay`], dstack #141).
 fn run(clock: &dyn PtpClock, shared: Arc<TxShared>) {
     take_priority("TX thread", TX_PRIORITY);
     place("TX thread", shared.cfg.io_cpu);
@@ -1539,11 +1520,44 @@ fn run(clock: &dyn PtpClock, shared: Arc<TxShared>) {
     let _wake = crate::clock::realtime_for(crate::clock::profile())
         .then(|| super::qos::hold(std::path::Path::new(super::qos::CPU_DMA_LATENCY)))
         .flatten();
-    let mut tx = Transmitter::new(Arc::clone(&shared));
-    // TX sends ahead before each escape (`Transmitter::before_wait`).
+    let tx = Transmitter::new(Arc::clone(&shared));
+    if !crate::clock::escape_on() {
+        return run_passes(clock, &shared, tx, None);
+    }
+    let relay = relay::Relay::new();
+    std::thread::scope(|scope| {
+        let started = std::thread::Builder::new()
+            .name("dstack-tx-relay".to_string())
+            .spawn_scoped(scope, || run_relay(clock, &relay));
+        match started {
+            Ok(_) => {
+                info!(
+                    "TX relay thread started: it sends TX's packets while the TX thread blocks its bounded escape"
+                );
+                run_passes(clock, &shared, tx, Some(&relay));
+            }
+            Err(e) => {
+                warn!(error = %e, "the TX relay thread did not start: the TX thread makes no bounded escape");
+                run_passes(clock, &shared, tx, None);
+            }
+        }
+        relay.stop();
+    });
+}
+
+/// The TX thread's passes until [`TxShared::stop`]; with a `relay`, its
+/// bounded escapes hand the passes to the relay thread (dstack #141),
+/// without one its waits never escape.
+fn run_passes(
+    clock: &dyn PtpClock,
+    shared: &TxShared,
+    mut tx: Transmitter,
+    relay: Option<&relay::Relay<Transmitter>>,
+) {
     #[cfg(any(target_os = "linux", windows))]
-    crate::clock::allow_escape(true);
+    crate::clock::allow_escape(relay.is_some());
     let mut pin = super::repin::RePin::new(shared.cfg.io_cpu);
+    let mut misses = 0u64;
     while !shared.stopping() {
         pin.keep(shared.now_ns());
         // The epoch before the time: the clock moves k before the epoch,
@@ -1551,18 +1565,89 @@ fn run(clock: &dyn PtpClock, shared: Arc<TxShared>) {
         let anchor = crate::clock::Anchor::of(clock);
         let now = clock.now_ns();
         tx.step(now, anchor);
-        // The bounded escape (dstack #1, `spin_escape_ms`, Windows): when
-        // this wait will block one timer tick, the packets due meanwhile go
-        // out first; when some had no samples yet, the escape waits for a
-        // later pass (at most `clock::ESCAPE_DEFER_MAX_NS` past its period).
+        // The bounded escape (dstack #1, `spin_escape_ms`, Windows): the
+        // relay thread sends while this thread blocks one timer tick.
         #[cfg(any(target_os = "linux", windows))]
-        let _escapes = tx.before_wait(
-            || (clock.now_ns(), clock.epoch()),
-            crate::clock::ask_escape,
-            crate::clock::defer_escape,
-        );
+        if let Some(relay) = relay
+            && tx.before_wait(
+                || (clock.now_ns(), clock.epoch()),
+                crate::clock::ask_escape,
+                crate::clock::defer_escape,
+            )
+        {
+            tx = escape_through(
+                relay,
+                tx,
+                &mut misses,
+                RELAY_TAKE_MAX,
+                || {
+                    crate::clock::block_escape();
+                },
+                crate::clock::defer_escape,
+            );
+            continue;
+        }
         clock.sleep_until(tx.wake_ns(now));
     }
+}
+
+/// The TX thread's bounded escape with `relay` covering it: hands `tx`
+/// over, `block`s (`clock::block_escape`), takes it back. A relay that
+/// does not take over within `take_max` ([`RELAY_TAKE_MAX`]) puts the
+/// escape off (`defer`, `clock::defer_escape`; counted in `misses`, warned
+/// at the first and every 100th); one that is overdue blocks uncovered.
+fn escape_through(
+    relay: &relay::Relay<Transmitter>,
+    tx: Transmitter,
+    misses: &mut u64,
+    take_max: std::time::Duration,
+    block: impl FnOnce(),
+    defer: impl FnOnce() -> bool,
+) -> Transmitter {
+    let start = Instant::now();
+    match relay.hand_over(tx, || !take_max.saturating_sub(start.elapsed()).is_zero()) {
+        Ok(()) => {
+            block();
+            relay.take_back()
+        }
+        Err(tx) => {
+            *misses += 1;
+            let put_off = defer();
+            if *misses % 100 == 1 {
+                warn!(
+                    misses = *misses,
+                    put_off,
+                    "the TX relay thread did not take over in time: the escape is put off (uncovered when overdue)"
+                );
+            }
+            if !put_off {
+                block();
+            }
+            tx
+        }
+    }
+}
+
+/// The relay thread's loop: while it covers, the TX thread's passes at
+/// their times, spinning without an escape (dstack #141).
+fn run_relay(clock: &dyn PtpClock, relay: &relay::Relay<Transmitter>) {
+    take_priority("TX relay thread", TX_PRIORITY);
+    #[cfg(any(target_os = "linux", windows))]
+    crate::clock::relay_spin();
+    relay.serve(|tx, back| {
+        loop {
+            let anchor = crate::clock::Anchor::of(clock);
+            let now = clock.now_ns();
+            tx.step(now, anchor);
+            if back() {
+                return;
+            }
+            // At most an escape's length, so a TX thread back from its block
+            // never waits long for the handback.
+            let wake = tx.wake_ns(now);
+            clock.sleep_until(now.map_or(wake, |n| wake.min(n + crate::clock::ESCAPE_MAX_NS)));
+        }
+    });
 }
 
 /// On Linux: when `asked` is real-time, `SCHED_FIFO` at `priority` for
@@ -1720,10 +1805,8 @@ pub(crate) fn pin_to_cpu(_cpu: usize) -> bool {
     false
 }
 
-mod early;
-
+pub mod relay;
 pub mod shift;
-pub use early::{PRESEND_ROUNDS, Presend};
 pub use shift::{EngineLine, Shift};
 pub mod host;
 pub use host::{HostNic, TxPath};

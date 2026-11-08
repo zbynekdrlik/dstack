@@ -114,25 +114,6 @@ impl Source {
         }
         Fill::default()
     }
-
-    /// Whether a [`Source::fill`] of `n` positions from `stamp` would find
-    /// every sample it reads already there: always for a source computed
-    /// from the position, and for a ring source when the ring holds them
-    /// ([`Ring::holds`]); a fill that can only be silence (no such ring, a
-    /// position before time began) has nothing to wait for. TX sends a
-    /// packet ahead only then (the bounded escape, dstack #1).
-    pub fn ready(&self, stamp: u64, n: usize, rings: &[Ring], own: Option<&Ring>) -> bool {
-        match *self {
-            Source::Silence | Source::Counter | Source::Sine { .. } => true,
-            Source::Echo { rx, offset } => {
-                match (rings.get(rx), stamp.checked_sub(u64::from(offset))) {
-                    (Some(ring), Some(at)) => ring.holds(at, n),
-                    _ => true,
-                }
-            }
-            Source::Engine => own.is_none_or(|ring| ring.holds(stamp, n)),
-        }
-    }
 }
 
 #[cfg(test)]

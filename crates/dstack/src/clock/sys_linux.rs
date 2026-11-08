@@ -63,3 +63,13 @@ pub fn allow_escape(_allowed: bool) {}
 pub fn defer_escape() -> bool {
     false
 }
+
+/// Blocks this thread's armed escape now (dstack #141): nothing is ever
+/// armed on Linux, so never.
+pub fn block_escape() -> bool {
+    false
+}
+
+/// Makes this thread's waits spin without an escape (TX's relay thread,
+/// dstack #141): nothing on Linux, whose wait never spins.
+pub fn relay_spin() {}

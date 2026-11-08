@@ -23,16 +23,14 @@ pub const ESCAPE_BLOCK_NS: u64 = 1_000_000;
 /// at the 1 ms resolution (the FOH PC, 5.11.2026: max 1.11 ms; at 0.5 ms,
 /// max 0.64 ms).
 pub const TIMER_LATE_NS: u64 = 1_140_000;
-/// How far ahead TX sends before a bounded escape, ns: the longest its
-/// block lasts, the block and the timer's late wake ([`ESCAPE_BLOCK_NS`] +
-/// [`TIMER_LATE_NS`], 2.14 ms). The send ahead repeats from a fresh clock
-/// read while it sends anything, so its own send time is covered too
-/// (`media::tx::Transmitter::presend_all`).
-pub const PRESEND_NS: u64 = ESCAPE_BLOCK_NS + TIMER_LATE_NS;
+/// The longest a bounded escape's block lasts, ns: the block and the
+/// timer's late wake ([`ESCAPE_BLOCK_NS`] + [`TIMER_LATE_NS`], 2.14 ms).
+/// TX's relay thread covers it (`media::tx::relay`, dstack #141).
+pub const ESCAPE_MAX_NS: u64 = ESCAPE_BLOCK_NS + TIMER_LATE_NS;
 /// Whether an engine pump with work margin `margin` and block `block`
 /// (samples at `rate`) takes the bounded escape's block. Woken up to
-/// [`PRESEND_NS`] after its last run, the pump is behind by up to
-/// [`PRESEND_NS`] less one block, and past W it re-bootstraps and loses
+/// [`ESCAPE_MAX_NS`] after its last run, the pump is behind by up to
+/// [`ESCAPE_MAX_NS`] less one block, and past W it re-bootstraps and loses
 /// blocks (the iem-snv trial of v0.6.38, 5.11.2026: block 64 and W 64 at
 /// 96 kHz lost 2 blocks at every escape). A pump that does not take it
 /// spins yielding, as without the escape.
@@ -41,7 +39,7 @@ pub fn pump_may_escape(margin: u64, block: u64, rate: u32) -> bool {
         return false;
     }
     let ns = |samples: u64| samples.saturating_mul(1_000_000_000) / u64::from(rate);
-    ns(margin).saturating_add(ns(block)) >= PRESEND_NS
+    ns(margin).saturating_add(ns(block)) >= ESCAPE_MAX_NS
 }
 
 /// The start line of an engine pump that stays out of the bounded escape
@@ -51,16 +49,16 @@ pub fn pump_escape_line(escape_on: bool, escapes: bool, margin: u64, block: u64)
         format!(
             "the engine pump stays out of the bounded escape: its margin ({margin}) and block ({block}) \
              are under the escape's block ({} µs); it spins yielding",
-            PRESEND_NS / 1_000
+            ESCAPE_MAX_NS / 1_000
         )
     })
 }
 
-/// How long past its period TX may put off an escape because a packet in
-/// the presend window had no samples yet, ns: a packet held through the
-/// block past the latency would restart its flow's schedule. Past this
-/// the escape happens anyway, so a thread escapes at least every period +
-/// 20 ms.
+/// How long past its period TX may put off an escape (its relay thread did
+/// not take over in time, or the clock re-anchored since the pass), ns: a
+/// packet held through the block past the latency would restart its
+/// flow's schedule. Past this the escape happens anyway, so a thread
+/// escapes at least every period + 20 ms.
 pub const ESCAPE_DEFER_MAX_NS: u64 = 20_000_000;
 
 /// The bounded-escape period for a device's `spin_escape_ms`, ns: 0
@@ -76,9 +74,8 @@ pub fn spin_escape_line(configured_ms: Option<u64>, os: Os) -> Option<String> {
     Some(match os {
         Os::Windows => format!(
             "bounded escape on (trial, dstack #1): the low-latency spin does not yield, \
-             each spinning media thread blocks {} µs on the timer every {ms} ms, TX sends {} µs ahead first",
-            ESCAPE_BLOCK_NS / 1_000,
-            PRESEND_NS / 1_000
+             each spinning media thread blocks {} µs on the timer every {ms} ms, a relay thread sends TX's packets meanwhile",
+            ESCAPE_BLOCK_NS / 1_000
         ),
         Os::Other => {
             format!("spin_escape_ms = {ms} is for Windows only: ignored on this OS")
@@ -87,7 +84,7 @@ pub fn spin_escape_line(configured_ms: Option<u64>, os: Os) -> Option<String> {
 }
 
 /// A media thread's bounded escape: when its last escape was, and, for a
-/// thread that sends ahead first (TX, [`EscapeState::ask`]), whether its
+/// thread that hands its work over first (TX, [`EscapeState::ask`]), whether its
 /// next wait escapes. Kept per thread.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct EscapeState {
@@ -109,6 +106,17 @@ impl EscapeState {
         }
     }
 
+    /// The state of TX's relay thread (dstack #141): it asks, so it escapes
+    /// only when told, and it is never told: its waits spin without a
+    /// block (it covers the TX thread's block, at most once a period).
+    pub const fn relay() -> Self {
+        EscapeState {
+            last: None,
+            asks: true,
+            armed: false,
+        }
+    }
+
     /// Whether an escape is due at monotonic `now` with `period_ns`
     /// between escapes (0: never); the first look only starts the period.
     fn due(&mut self, now: i64, period_ns: u64) -> bool {
@@ -124,18 +132,18 @@ impl EscapeState {
         }
     }
 
-    /// A thread that sends ahead before it escapes (TX) asks before its
-    /// wait: `true` when the wait will escape. From the first ask, the
-    /// thread's waits escape only when an ask said so, so what it sent
-    /// ahead and its escape always go together.
+    /// A thread that hands its work to a relay before it escapes (TX) asks
+    /// before its wait: `true` when the wait will escape. From the first
+    /// ask, the thread's waits escape only when an ask said so, so the
+    /// handover and its escape always go together.
     pub fn ask(&mut self, now: i64, period_ns: u64) -> bool {
         self.asks = true;
         self.armed = self.due(now, period_ns);
         self.armed
     }
 
-    /// TX could not send ahead the whole window (a packet's samples were
-    /// not there yet): puts off the armed escape at monotonic `now`, unless
+    /// TX could not hand its passes over (its relay did not take over in
+    /// time, or the clock re-anchored): puts off the armed escape at monotonic `now`, unless
     /// it is already [`ESCAPE_DEFER_MAX_NS`] past its period. `true`: put
     /// off (the next ask asks again); `false`: nothing armed, or overdue,
     /// so the wait escapes anyway.
