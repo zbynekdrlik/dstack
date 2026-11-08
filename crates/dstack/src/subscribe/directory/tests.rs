@@ -1208,7 +1208,11 @@ fn a_device_whose_flows_cannot_be_read_offers_none_and_waits_longer() {
     book.multicast("peer-device", &peer_channel(1), old);
     assert_eq!(book.next(t + crate::subscribe::RETRY_NS - 1), None);
     assert_eq!(book.next_due(), Some(t + crate::subscribe::RETRY_NS));
-    assert_eq!(book.next(old).map(|j| j.kind), Some(Kind::Flows));
+    // Due at the wait's end exactly.
+    assert_eq!(
+        book.next(t + crate::subscribe::RETRY_NS).map(|j| j.kind),
+        Some(Kind::Flows)
+    );
 }
 
 #[test]
@@ -1376,4 +1380,78 @@ fn devices_waited_for_are_bounded() {
         book.multicast("dev-0", &peer_channel(1), 0),
         MulticastLookup::Unknown
     );
+}
+
+#[test]
+fn a_fresh_flow_list_asks_for_no_new_read() {
+    let mut book = peer_book();
+    book.multicast("peer-device", &peer_channel(1), MS);
+    let job = book.next(MS).unwrap();
+    book.finished_flows(&job, Ok(ultimo_flows()), 1, MS);
+    let wants = book.wants();
+    for t in [MS, MAX_AGE_NS] {
+        book.multicast("peer-device", &peer_channel(1), t);
+    }
+    assert_eq!(book.wants(), wants);
+    assert_eq!(book.next_due(), None);
+}
+
+#[test]
+fn the_devices_whose_flows_are_read_are_bounded() {
+    let mut book = Book::new(Timing::default());
+    for k in 0..=MAX_DEVICES {
+        book.apply(
+            &record(ARC_SERVICE, &format!("dev-{k}"), "10.0.0.11", 4440),
+            0,
+        );
+    }
+    for k in 0..MAX_DEVICES {
+        assert_eq!(
+            book.multicast(&format!("dev-{k}"), &peer_channel(1), 0),
+            MulticastLookup::Unknown
+        );
+    }
+    let last = format!("dev-{MAX_DEVICES}");
+    assert_eq!(
+        book.multicast(&last, &peer_channel(1), 0),
+        MulticastLookup::None
+    );
+    // A device already kept is still answered.
+    assert_eq!(
+        book.multicast("dev-0", &peer_channel(1), 0),
+        MulticastLookup::Unknown
+    );
+}
+
+#[test]
+fn a_flow_read_whose_socket_cannot_open_ends_as_a_failed_list() {
+    let (daemon, senders) = FakeDaemon::new(&[ARC_SERVICE, DBC_SERVICE]);
+    let mut arc = ArcDirectory::new(Timing {
+        settle_ns: 0,
+        max_age_ns: MAX_AGE_NS,
+        reply: Duration::from_millis(100),
+        idle: Duration::from_secs(30),
+        fpp: FPP,
+    });
+    // Our address is none of this host's: the reader's socket cannot bind.
+    let not_ours = Ipv4Addr::new(192, 0, 2, 1);
+    let requests = Arc::new(Requests::default());
+    assert!(arc.start(&daemon, not_ours, Arc::clone(&requests)).unwrap());
+    senders[0]
+        .send(record(ARC_SERVICE, "mics", "127.0.0.1", 4440))
+        .unwrap();
+    eventually("the device's record", || {
+        lock(&arc.shared.book)
+            .records
+            .get("mics")
+            .is_some_and(|r| r.arc.is_some())
+    });
+    let a = peer_channel(1);
+    assert_eq!(arc.multicast("mics", "01", &a), MulticastLookup::Unknown);
+    eventually("the failed list", || {
+        arc.multicast("mics", "01", &a) == MulticastLookup::None
+    });
+    assert_eq!(arc.counts().socket, 1);
+    drop(senders);
+    arc.join_within(BOUND);
 }
