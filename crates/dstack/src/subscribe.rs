@@ -45,7 +45,19 @@
 //! few): a subscribed channel is
 //! Unresolved without a flow (or TX fail / too many TX flows after its last
 //! request failed), InProgress while its flow is asked for or quiet, and
-//! Receiving while its flow's audio arrives. No multicast in phase B.
+//! Receiving while its flow's audio arrives.
+//!
+//! **Multicast flows** (dstack #148): a transmitter's own multicast flow
+//! that carries a channel ([`Resolver::multicast`], read from its ARC flow
+//! list) is received instead of asking for a unicast flow: one of our flow
+//! slots joins its group ([`RxPlan::group`]), no request, no stop and no
+//! keepalive is sent, and its channels show Receiving (multicast). While the
+//! transmitter's flows are being read the channel waits, so no unicast flow
+//! takes a transmitter's last slot first. A channel on a unicast flow moves
+//! to a multicast flow that appears (its unicast flow is stopped, a slot at
+//! the transmitter freed); one on a multicast flow that is gone, moved or
+//! silent is resolved again. We never create, change or end another
+//! device's multicast flow here.
 //!
 //! The RX thread learns the flows through [`Manager::rx_plan`] and
 //! [`Manager::rx_route`] (handed over by `RxShared::publish`). Times are the
@@ -71,7 +83,7 @@ use crate::media::packet::MEDIA_HEADER;
 use crate::media::rx::{RxPlan, RxRoute};
 use crate::media::tx::{FPP_MAX, MAX_CHANNELS, sendable};
 use crate::wire::MAX_DATAGRAM;
-use resolve::{Advertised, Resolver};
+use resolve::{Advertised, Multicast, MulticastLookup, Resolver};
 
 pub use crate::media::rx::MAX_FLOWS;
 
@@ -168,12 +180,22 @@ struct Flow {
     advert: Advertised,
     /// When it was asked for.
     since: u64,
-    /// The transmitter's handle; `None` while asked for.
+    /// The transmitter's handle; `None` while asked for (and for a
+    /// multicast flow, which is never asked for).
     handle: Option<Handle>,
+    /// A multicast flow's group: received, never asked for (dstack #148).
+    group: Option<SocketAddrV4>,
     /// When its slot last received a packet.
     heard: Option<u64>,
     /// The slot's packet count when last looked at.
     packets: u64,
+}
+
+impl Flow {
+    /// Asked for and not granted yet: a request waits on its answer.
+    fn asked(&self) -> bool {
+        self.handle.is_none() && self.group.is_none()
+    }
 }
 
 /// A transmitter we ask, by address.
@@ -202,8 +224,10 @@ pub struct FlowView {
     pub port: u16,
     /// The transmitter's flow control.
     pub to: SocketAddrV4,
-    /// `None` while asked for.
+    /// `None` while asked for, and for a multicast flow.
     pub handle: Option<Handle>,
+    /// A multicast flow's group (dstack #148).
+    pub group: Option<SocketAddrV4>,
     /// The TX channel of each channel slot.
     pub channels: Vec<Option<u16>>,
     /// Our RX channels (from 0) each channel slot feeds.
@@ -371,7 +395,10 @@ impl Manager {
         }
         self.reresolve(resolver);
         self.close(now, &mut out);
-        let pending = self.resolve(resolver);
+        let (pending, shared) = self.resolve(resolver);
+        for (rx, a, m) in shared {
+            self.receive_multicast(rx, &a, &m, now, packets);
+        }
         for (to, waiting) in pending {
             if self.may_request(to, now)
                 && let Some(action) = self.request(&waiting, now, packets)
@@ -395,7 +422,7 @@ impl Manager {
         }
         let current = self.flows[flow.slot]
             .as_ref()
-            .is_some_and(|f| f.generation == flow.generation && f.handle.is_none());
+            .is_some_and(|f| f.generation == flow.generation && f.asked());
         if !current {
             let stale = self.abandoned.iter().position(|(id, _)| *id == flow);
             let to = stale.map(|at| self.abandoned.remove(at).1);
@@ -449,10 +476,10 @@ impl Manager {
         let fresh = flow
             .heard
             .is_some_and(|h| self.now.saturating_sub(h) < SILENT_NS);
-        Some(if flow.handle.is_some() && fresh {
-            SubStatus::Receiving
-        } else {
-            SubStatus::InProgress
+        Some(match (fresh, flow.group, flow.handle) {
+            (true, Some(_), _) => SubStatus::ReceivingMulticast,
+            (true, None, Some(_)) => SubStatus::Receiving,
+            _ => SubStatus::InProgress,
         })
     }
 
@@ -485,6 +512,7 @@ impl Manager {
             block: u16::try_from(self.block).unwrap_or(u16::MAX),
             live: f.handle.is_some(),
             generation: f.generation,
+            group: f.group,
         }
     }
 
@@ -546,6 +574,7 @@ impl Manager {
             port: self.ports[slot],
             to: f.to,
             handle: f.handle,
+            group: f.group,
             channels: f.slots.clone(),
             rx,
             bits: f.bits,
@@ -577,7 +606,7 @@ impl Manager {
     fn give_up(&mut self, now: u64) {
         for slot in 0..MAX_FLOWS {
             let Some(f) = &self.flows[slot] else { continue };
-            if f.handle.is_none() && now.saturating_sub(f.since) >= GIVE_UP_NS {
+            if f.asked() && now.saturating_sub(f.since) >= GIVE_UP_NS {
                 self.abandon(slot);
                 self.fail(slot, SubStatus::TxFail, now);
             }
@@ -588,7 +617,7 @@ impl Manager {
     /// still comes is stopped ([`Manager::answered`]); its transmitter may
     /// be asked again. The last [`MAX_FLOWS`] are kept.
     fn abandon(&mut self, slot: usize) {
-        let Some(f) = self.flows[slot].as_ref().filter(|f| f.handle.is_none()) else {
+        let Some(f) = self.flows[slot].as_ref().filter(|f| f.asked()) else {
             return;
         };
         let id = FlowId {
@@ -611,13 +640,27 @@ impl Manager {
     fn close(&mut self, now: u64, out: &mut Vec<Action>) {
         for slot in 0..MAX_FLOWS {
             let Some(f) = &self.flows[slot] else { continue };
-            let Some(handle) = f.handle else { continue };
+            if f.asked() {
+                continue;
+            }
             let used = self.routes.iter().flatten().any(|r| r.flow.slot == slot);
             let silent = f.heard.is_none_or(|h| now.saturating_sub(h) >= SILENT_NS)
                 && now.saturating_sub(f.since) >= YOUNG_NS;
             if used && !silent {
                 continue;
             }
+            // A multicast flow is left (its socket closed), never stopped:
+            // it is the transmitter's, for every receiver.
+            let Some(handle) = f.handle else {
+                if used {
+                    info!(
+                        slot = slot + 1,
+                        "RX multicast flow silent: its channels are resolved again"
+                    );
+                }
+                self.free(slot, now);
+                continue;
+            };
             out.push(Action::Stop { to: f.to, handle });
             if used && let Some(peer) = self.peers.get_mut(&f.to) {
                 peer.failures += 1;
@@ -643,22 +686,31 @@ impl Manager {
             let Some(now) = resolver.lookup(&route.sub.tx_device, &route.sub.tx_channel) else {
                 continue;
             };
-            if same_source(&f.advert, &now) {
-                continue;
-            }
-            info!(
-                channel = rx + 1,
-                "RX channel: its transmitter's record changed, its flow is asked for again"
-            );
+            let shared = resolver.multicast(&route.sub.tx_device, &route.sub.tx_channel, &now);
+            let moves = match (&shared, f.group) {
+                // A multicast flow carries it now: it leaves its unicast flow
+                // (a transmitter slot freed) for that one.
+                (MulticastLookup::Found(m), None) => {
+                    fits(m, &now).then_some("a multicast flow carries it now, it moves there")
+                }
+                // Its multicast flow is gone, or moved.
+                (MulticastLookup::None, Some(_)) => Some("its multicast flow is gone"),
+                (MulticastLookup::Found(m), Some(g)) if m.group != g => {
+                    Some("its multicast flow moved to another group")
+                }
+                _ => None,
+            };
+            let why = match moves {
+                Some(why) => why,
+                None if same_source(&f.advert, &now) => continue,
+                None => "its transmitter's record changed, its flow is asked for again",
+            };
+            info!(channel = rx + 1, "RX channel: {why}");
             self.routes[rx] = None;
             // A granted flow no channel uses is stopped by `close`; one
             // still asked for is given up here.
             let used = self.routes.iter().flatten().any(|r| r.flow.slot == slot);
-            if !used
-                && self.flows[slot]
-                    .as_ref()
-                    .is_some_and(|f| f.handle.is_none())
-            {
+            if !used && self.flows[slot].as_ref().is_some_and(Flow::asked) {
                 self.abandon(slot);
                 self.free(slot, self.now);
             }
@@ -666,12 +718,19 @@ impl Manager {
     }
 
     /// The subscribed channels without a flow: each routed to a flow that
-    /// carries its TX channel already, or listed under its transmitter.
+    /// carries its TX channel already, or listed with the multicast flow
+    /// that carries it, or listed under its transmitter for a unicast flow.
+    /// A channel whose transmitter's flows are being read waits.
+    #[allow(clippy::type_complexity)]
     fn resolve(
         &mut self,
         resolver: &dyn Resolver,
-    ) -> BTreeMap<SocketAddrV4, Vec<(usize, Advertised)>> {
+    ) -> (
+        BTreeMap<SocketAddrV4, Vec<(usize, Advertised)>>,
+        Vec<(usize, Advertised, Multicast)>,
+    ) {
         let mut pending: BTreeMap<SocketAddrV4, Vec<(usize, Advertised)>> = BTreeMap::new();
+        let mut shared = Vec::new();
         for rx in 0..self.subs.len() {
             let Some(sub) = self.subs[rx].as_ref().filter(|_| self.routes[rx].is_none()) else {
                 continue;
@@ -695,12 +754,72 @@ impl Manager {
                 self.failed[rx] = Some(SubStatus::ChannelFormat);
                 continue;
             }
-            match self.carrying(&a) {
-                Some((flow, slot)) => self.route(rx, flow, slot),
-                None => pending.entry(a.control).or_default().push((rx, a)),
+            if let Some((flow, slot)) = self.carrying(&a) {
+                self.route(rx, flow, slot);
+                continue;
+            }
+            match resolver.multicast(&sub.tx_device, &sub.tx_channel, &a) {
+                MulticastLookup::Found(m) if fits(&m, &a) => shared.push((rx, a, m)),
+                MulticastLookup::Unknown => {}
+                _ => pending.entry(a.control).or_default().push((rx, a)),
             }
         }
-        pending
+        (pending, shared)
+    }
+
+    /// RX channel `rx` (its record `a`) receives the multicast flow `m`:
+    /// routed to it when a flow of ours receives it already (another
+    /// channel joined it this tick), else to a new flow in a free slot,
+    /// which the RX thread joins. No request is sent. No free slot: it
+    /// waits for one.
+    fn receive_multicast(
+        &mut self,
+        rx: usize,
+        a: &Advertised,
+        m: &Multicast,
+        now: u64,
+        packets: &[u64; MAX_FLOWS],
+    ) {
+        if let Some((flow, slot)) = self.carrying(a) {
+            self.route(rx, flow, slot);
+            return;
+        }
+        let Some(slot) = self.free_slot() else { return };
+        self.generation = self.generation.wrapping_add(1);
+        let id = FlowId {
+            slot,
+            generation: self.generation,
+        };
+        let slots: Vec<Option<u16>> = m.channels.iter().map(|&c| Some(c)).collect();
+        let at = slots.iter().position(|&c| c == Some(a.tx_channel_id));
+        info!(
+            slot = slot + 1,
+            channels = slots.len(),
+            fpp = m.fpp,
+            group = %m.group,
+            "RX multicast flow: a transmitter's multicast flow is received"
+        );
+        self.flows[slot] = Some(Flow {
+            generation: id.generation,
+            to: a.control,
+            slots,
+            bits: m.bits,
+            fpp: m.fpp,
+            latency_ns: a.latency_ns.max(self.latency_ns),
+            device: self.subs[rx]
+                .as_ref()
+                .map_or_else(String::new, |s| s.tx_device.to_ascii_lowercase()),
+            advertised_ns: a.latency_ns,
+            advert: *a,
+            since: now,
+            handle: None,
+            group: Some(m.group),
+            heard: None,
+            packets: packets[slot],
+        });
+        if let Some(at) = at {
+            self.route(rx, id, at);
+        }
     }
 
     /// A flow from `a`'s transmitter that carries its TX channel, and the
@@ -797,6 +916,7 @@ impl Manager {
             advert: first,
             since: now,
             handle: None,
+            group: None,
             heard: None,
             packets: packets[slot],
         });
@@ -902,6 +1022,18 @@ impl Manager {
                     .is_some_and(|t| now < t.saturating_add(RETRY_NS))
         });
     }
+}
+
+/// Whether one of our flow slots can receive the multicast flow `m` for
+/// the channel `a`: our sample format (its bits) and frames that fit one
+/// datagram.
+fn fits(m: &Multicast, a: &Advertised) -> bool {
+    let bps = usize::try_from(a.bits / 8).unwrap_or(0);
+    m.bits == a.bits
+        && m.fpp > 0
+        && !m.channels.is_empty()
+        && m.channels.len() <= MAX_CHANNELS
+        && sendable(m.channels.len(), bps, m.fpp)
 }
 
 /// Whether two records of a transmitter's channels ask for the same flow:

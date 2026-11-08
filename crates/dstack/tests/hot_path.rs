@@ -338,6 +338,7 @@ fn the_rx_thread_s_passes_do_not_allocate() {
         block: 0,
         live: true,
         generation: 1,
+        group: None,
     };
     // RX 1 and 3 from slot 0, RX 2 from slot 1, RX 4 from nothing.
     shared.publish(

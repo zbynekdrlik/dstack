@@ -68,8 +68,6 @@ pub const LIST: u16 = 0x2600;
 pub const CREATE: u16 = 0x2601;
 /// A record's flags: a multicast flow.
 pub const MULTICAST: u32 = 0x0000_0002;
-/// The most records one list reply is read for.
-pub const MAX_RECORDS: usize = 64;
 /// The most channels one created flow carries (a record's word counts are
 /// bytes, and Dante's flows carry at most 8).
 pub const MAX_FLOW_CHANNELS: usize = 8;
@@ -137,7 +135,7 @@ pub fn list_body() -> [u8; 24] {
 pub fn parse_flows(body: &[u8]) -> Option<Flows> {
     let (&slots, &count) = (body.get(6)?, body.get(7)?);
     let (slots, count) = (usize::from(slots), usize::from(count));
-    if count > slots || count > MAX_RECORDS || 8 + 2 * count > body.len() {
+    if count > slots {
         return None;
     }
     let mut out = Flows::default();
@@ -162,7 +160,7 @@ fn segments(body: &[u8], at: usize) -> Option<Vec<usize>> {
     }
     let mut out = Vec::new();
     let mut s = at;
-    while s < end && out.len() < 8 {
+    while s < end {
         let words = usize::from(*body.get(s)?);
         if words == 0 || s + 2 * words > end {
             return None;
@@ -290,4 +288,4 @@ pub fn create_multicast(
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

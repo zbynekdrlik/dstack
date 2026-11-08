@@ -3,7 +3,7 @@ use super::*;
 use crate::wire::STATUS_ERROR;
 
 /// Hex to bytes.
-fn hex(s: &str) -> Vec<u8> {
+pub(crate) fn hex(s: &str) -> Vec<u8> {
     (0..s.len())
         .step_by(2)
         .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
@@ -15,7 +15,7 @@ fn hex(s: &str) -> Vec<u8> {
 /// unicast to a receiver, channels 2 and 1. The group, the receiver's
 /// address and its name are replaced (TEST-NET, a synthetic name of the
 /// same length).
-const ULTIMO_LIST: &str = "280900e851022600000100000000000002020020007c31000001770000000018142700010000000300010000000000020000000000160018000f424000000000000000000000000008130000000000000001000000000000040b01010070000005070002000100020000020000200000080210e1efff000132000000142700020000000300020000000000110000000000780018000000000000000000000000000000000813000000d400e40001000000000000040b010100cc0000050700020002000100000200002000000802e014c000021e746573742d72656365697665722d3100325f3100";
+pub(crate) const ULTIMO_LIST: &str = "280900e851022600000100000000000002020020007c31000001770000000018142700010000000300010000000000020000000000160018000f424000000000000000000000000008130000000000000001000000000000040b01010070000005070002000100020000020000200000080210e1efff000132000000142700020000000300020000000000110000000000780018000000000000000000000000000000000813000000d400e40001000000000000040b010100cc0000050700020002000100000200002000000802e014c000021e746573742d72656365697665722d3100325f3100";
 
 /// Our create sent to that UltimoX2 (media-local id 1, channels 1 and 2)
 /// and its reply: the flow it made.
@@ -222,6 +222,15 @@ fn a_record_that_does_not_read_is_counted_and_the_rest_listed() {
     let mut d = hex(ULTIMO_LIST);
     d[0x70] = 9;
     assert_eq!(parse_flows(&d[HEADER_LEN..]).unwrap().unread, 1);
+    // A segment longer than its record.
+    let mut d = hex(ULTIMO_LIST);
+    d[0x6a] = 3;
+    let flows = parse_flows(&d[HEADER_LEN..]).unwrap();
+    assert_eq!((flows.unread, flows.flows[0].id), (1, 2));
+    // A record offset past the reply: the table does not read.
+    let mut d = hex(ULTIMO_LIST);
+    d.truncate(0x13);
+    assert_eq!(parse_flows(&d[HEADER_LEN..]), None);
     // More records than slots: the table does not read.
     let mut d = hex(ULTIMO_LIST);
     d[0x10] = 1;
@@ -302,5 +311,22 @@ fn the_list_goes_over_udp_with_the_2809_start_code() {
     assert_eq!(
         asked,
         hex("28090022000726000000000000000000000100010001000000000000000000000000")
+    );
+}
+
+#[test]
+fn a_flow_lists_every_destination_in_order() {
+    // The multicast record's destination table, given a second entry: the
+    // unicast record's descriptor.
+    let mut d = hex(ULTIMO_LIST);
+    d[0x5a..0x5c].copy_from_slice(&[2, 2]);
+    d[0x5e..0x60].copy_from_slice(&0x00ccu16.to_be_bytes());
+    let flows = parse_flows(&d[HEADER_LEN..]).unwrap();
+    assert_eq!(
+        flows.flows[0].destinations,
+        vec![
+            SocketAddrV4::new(Ipv4Addr::new(239, 255, 0, 1), 4321),
+            SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 30), 57364),
+        ]
     );
 }

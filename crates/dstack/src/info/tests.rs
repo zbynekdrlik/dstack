@@ -1010,6 +1010,7 @@ fn the_records_come_once_the_clock_is_ready_and_each_beat_takes_its_own_second()
         block: 0,
         live: true,
         generation: 1,
+        group: None,
     };
     rx.publish(
         |slot| if slot < 2 { plan } else { RxPlan::default() },

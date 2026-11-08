@@ -669,7 +669,10 @@ impl Json {
 ///   `lateness_min_ns` (the packets' judge, phase D: the least lateness of
 ///   that second in ns, our clock's now less the packets' own stamps; absent
 ///   for a second without a placed packet), `keepalives`,
-///   `keepalive_errors`, `recv_errors`; `rx_poll_errors`.
+///   `keepalive_errors`, `recv_errors`, `multicast` (a transmitter's
+///   multicast flow the slot joined: no request, no keepalive), `joins` and
+///   `join_errors` (its multicast groups joined, and the joins that
+///   failed); `rx_poll_errors`.
 /// - `channels`: each RX channel subscribed or whose ring counted anything
 ///   (written, or read by the echo or a check): `rx`, `status`
 ///   (ARC 0x3000's code, 0 without a subscription), its ring's `written`,
@@ -810,6 +813,8 @@ fn lane_fields(j: &mut Json, lane: &LaneCounts) {
 #[derive(Default)]
 struct RxFlow {
     granted: bool,
+    /// A transmitter's multicast flow, joined (dstack #148).
+    multicast: bool,
     fpp: u16,
     channels: usize,
     /// The negotiated latency (its transmitter's or ours), samples.
@@ -837,6 +842,7 @@ fn rx_part(j: &mut Json, media: &Media) {
                         let plan = m.rx_plan(s);
                         RxFlow {
                             granted: f.handle.is_some(),
+                            multicast: f.group.is_some(),
                             fpp: f.fpp,
                             channels: f.channels.len(),
                             latency: latency_samples(f.latency_ns, media.tx.cfg.sample_rate),
@@ -863,6 +869,7 @@ fn rx_part(j: &mut Json, media: &Media) {
         j.open(None, '{');
         j.num("flow", slot + 1);
         j.flag("granted", f.granted);
+        j.flag("multicast", f.multicast);
         j.num("fpp", f.fpp);
         j.num("channels", f.channels);
         j.num("latency", f.latency);
@@ -891,6 +898,8 @@ fn rx_part(j: &mut Json, media: &Media) {
         j.num("keepalives", lane.keepalives);
         j.num("keepalive_errors", lane.keepalive_errors);
         j.num("recv_errors", lane.recv_errors);
+        j.num("joins", lane.joins);
+        j.num("join_errors", lane.join_errors);
         j.close('}');
     }
     j.close(']');

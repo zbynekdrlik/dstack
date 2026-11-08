@@ -26,6 +26,7 @@ fn plan(src: Ipv4Addr, nslots: u8, live: bool, generation: u32) -> RxPlan {
         block: 0,
         live,
         generation,
+        group: None,
     }
 }
 
@@ -106,8 +107,20 @@ fn a_plan_and_a_route_round_trip_through_their_words() {
             block: 511,
             live: false,
             generation: 0,
+            group: None,
         },
         plan(Ipv4Addr::UNSPECIFIED, 0, false, 7),
+        RxPlan {
+            group: Some(SocketAddrV4::new(
+                Ipv4Addr::new(239, 255, 255, 255),
+                u16::MAX,
+            )),
+            ..plan(Ipv4Addr::new(10, 0, 0, 12), 2, false, 3)
+        },
+        RxPlan {
+            group: Some(SocketAddrV4::new(Ipv4Addr::new(224, 0, 0, 1), 1)),
+            ..plan(Ipv4Addr::new(10, 0, 0, 12), 2, false, 3)
+        },
     ] {
         assert_eq!(RxPlan::from_words(p.words()), p, "{p:?}");
     }
@@ -117,8 +130,11 @@ fn a_plan_and_a_route_round_trip_through_their_words() {
     big.block = 512 + 32;
     let back = RxPlan::from_words(big.words());
     assert_eq!((back.latency, back.block), (u32::from(u16::MAX), 32));
-    assert_eq!(RxPlan::default().words(), [0, 0]);
-    assert_eq!(RxPlan::from_words([u64::MAX, 0]), RxPlan::default());
+    assert_eq!(RxPlan::default().words(), [0, 0, 0]);
+    assert_eq!(
+        RxPlan::from_words([u64::MAX, 0, u64::MAX]),
+        RxPlan::default()
+    );
     for r in [
         RxRoute { flow: 0, slot: 0 },
         RxRoute { flow: 31, slot: 7 },
@@ -1188,4 +1204,123 @@ fn a_packet_the_ring_refuses_as_read_counts_late_at_read_on_its_flow() {
     let c = s.lane(2);
     assert_eq!((c.late_at_read, c.lateness_peak), (1, 60), "{c:?}");
     assert_eq!(s.lane(9).lateness_peak, 0);
+}
+
+/// A free UDP port on loopback (bound and released).
+fn free_port() -> u16 {
+    UdpSocket::bind((LOOPBACK, 0))
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
+/// A transmitter on loopback that sends to a multicast group on loopback.
+fn multicast_transmitter() -> UdpSocket {
+    let t = transmitter(LOOPBACK);
+    socket2::SockRef::from(&t)
+        .set_multicast_if_v4(&LOOPBACK)
+        .unwrap();
+    t.set_multicast_loop_v4(true).unwrap();
+    t
+}
+
+#[test]
+fn a_slot_whose_plan_names_a_group_joins_it_and_receives_its_flow() {
+    let group = SocketAddrV4::new(Ipv4Addr::new(239, 255, 77, 1), free_port());
+    let s = shared(2);
+    let mut rx = Receiver::new(Arc::clone(&s)).unwrap();
+    let multicast = RxPlan {
+        group: Some(group),
+        ..plan(LOOPBACK, 2, false, 1)
+    };
+    publish(
+        &s,
+        &[(3, multicast)],
+        &[
+            (0, RxRoute { flow: 3, slot: 0 }),
+            (1, RxRoute { flow: 3, slot: 1 }),
+        ],
+    );
+    rx.pass(None, 0);
+    assert_eq!((s.lane(3).joins, s.lane(3).join_errors), (1, 0));
+    let t = multicast_transmitter();
+    let p0 = 10 * 365 * 86_400 * u64::from(RATE);
+    for k in 0..2 {
+        t.send_to(&packet_at(p0 + 32 * k, 2, 32), group).unwrap();
+    }
+    pump(&mut rx, 3, 2, Some(ns_of(p0 + 100, RATE)), 0);
+    let c = s.lane(3);
+    assert_eq!((c.packets, c.stray, c.late), (2, 0, 0), "{c:?}");
+    let mut got = [0i32; 64];
+    assert_eq!(s.rings()[1].read_at(p0, &mut got).holes, 0);
+    assert_eq!(got[5], value(p0 + 5, 1));
+    // No keepalive to a multicast flow, however long it plays.
+    rx.pass(Some(ns_of(p0 + 100, RATE)), KEEPALIVE_NS * 4);
+    assert_eq!(s.lane(3).keepalives, 0);
+    // The plan without the group: the group is left, nothing more is read.
+    publish(&s, &[(3, plan(LOOPBACK, 2, false, 2))], &[]);
+    rx.pass(None, 0);
+    t.send_to(&packet_at(p0 + 64, 2, 32), group).unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    rx.wait(Duration::from_millis(20)).unwrap();
+    rx.pass(None, 0);
+    assert_eq!(read_of(s.lane(3)), 2, "{:?}", s.lane(3));
+    assert_eq!(s.lane(3).joins, 1);
+}
+
+#[test]
+fn a_group_s_datagrams_from_another_sender_are_stray() {
+    let group = SocketAddrV4::new(Ipv4Addr::new(239, 255, 77, 2), free_port());
+    let s = shared(1);
+    let mut rx = Receiver::new(Arc::clone(&s)).unwrap();
+    // The flow's transmitter is another address than the loopback sender.
+    let multicast = RxPlan {
+        group: Some(group),
+        ..plan(Ipv4Addr::new(10, 0, 0, 99), 1, false, 1)
+    };
+    publish(&s, &[(0, multicast)], &[(0, RxRoute { flow: 0, slot: 0 })]);
+    rx.pass(None, 0);
+    multicast_transmitter()
+        .send_to(&packet_at(1000, 1, 32), group)
+        .unwrap();
+    pump(&mut rx, 0, 1, None, 0);
+    assert_eq!((s.lane(0).stray, s.lane(0).packets), (1, 0));
+}
+
+#[test]
+fn only_a_multicast_group_is_joined() {
+    let not = SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 1), 4321);
+    assert_eq!(
+        join(LOOPBACK, not).unwrap_err().kind(),
+        ErrorKind::InvalidInput
+    );
+    // A plan naming one: counted as a failed join, the slot reads nothing.
+    let s = shared(1);
+    let mut rx = Receiver::new(Arc::clone(&s)).unwrap();
+    let bad = RxPlan {
+        group: Some(not),
+        ..plan(LOOPBACK, 1, false, 1)
+    };
+    publish(&s, &[(0, bad)], &[]);
+    rx.pass(None, 0);
+    assert_eq!((s.lane(0).joins, s.lane(0).join_errors), (0, 1));
+}
+
+#[test]
+fn two_of_our_devices_on_one_pc_both_receive_one_group() {
+    let group = SocketAddrV4::new(Ipv4Addr::new(239, 255, 77, 3), free_port());
+    let a = join(LOOPBACK, group).unwrap();
+    let b = join(LOOPBACK, group).unwrap();
+    multicast_transmitter()
+        .send_to(&packet_at(1000, 1, 32), group)
+        .unwrap();
+    for s in [a, b] {
+        s.set_nonblocking(false).unwrap();
+        s.set_read_timeout(Some(BOUND)).unwrap();
+        let mut buf = [0u8; 2048];
+        let (n, from) = s.recv_from(&mut buf).unwrap();
+        assert_eq!(n, packet_at(1000, 1, 32).len());
+        assert_eq!(from.ip(), std::net::IpAddr::V4(LOOPBACK));
+    }
 }

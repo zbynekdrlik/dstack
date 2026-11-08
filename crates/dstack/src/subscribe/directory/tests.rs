@@ -162,6 +162,7 @@ fn many_lookups_of_one_device_make_one_read() {
             device: "peer-device".into(),
             arc: SocketAddrV4::new(PEER_IP, 4440),
             want: Want::Missing,
+            kind: Kind::Channels,
         }
     );
     // While it runs: no second read, no want.
@@ -502,6 +503,7 @@ fn a_failed_read_counts_why() {
         device: "gone".into(),
         arc: DBC,
         want: Want::Missing,
+        kind: Kind::Channels,
     };
     book.finished(&job, done(card(), 3), t);
     assert_eq!(book.counts().requests, 13);
@@ -1102,4 +1104,204 @@ fn a_record_keeps_its_lowest_addresses_up_to_the_bound() {
     let highest = u8::try_from(MAX_ARC_ADDRESSES + 2).unwrap();
     let dropped = Ipv4Addr::new(10, 0, 1, highest);
     assert_eq!(book.arc_at("many", dropped), Err(ArcMiss::OtherAddress));
+}
+
+/// The peer's TX channel `id` as an ARC-resolved record of 24 bits.
+fn peer_channel(id: u16) -> Advertised {
+    Advertised {
+        control: DBC,
+        tx_channel_id: id,
+        nchan: 4,
+        bits: 24,
+        rate: 96_000,
+        dbcp1: 0x1102,
+        fpp_min: 16,
+        fpp_max: 16,
+        latency_ns: 0,
+    }
+}
+
+/// A UltimoX2's TX flows (`crate::arc::flows`'s replay fixture): flow 1
+/// multicast of TX 1 and 2, flow 2 unicast of TX 2 and 1.
+fn ultimo_flows() -> Flows {
+    use crate::arc::flows::tests::{ULTIMO_LIST, hex};
+    crate::arc::flows::parse_flows(&hex(ULTIMO_LIST)[10..]).unwrap()
+}
+
+const ULTIMO_GROUP: SocketAddrV4 = SocketAddrV4::new(Ipv4Addr::new(239, 255, 0, 1), 4321);
+
+#[test]
+fn a_device_s_flows_are_read_once_and_name_the_multicast_flow_of_a_channel() {
+    let mut book = peer_book();
+    let t = SETTLE_NS;
+    // Not read yet: unknown, and one read wanted however often it is asked.
+    for id in [1, 2, 1] {
+        assert_eq!(
+            book.multicast("Peer-Device", &peer_channel(id), t),
+            MulticastLookup::Unknown
+        );
+    }
+    assert_eq!(book.wants(), 1);
+    let job = book.next(t).unwrap();
+    assert_eq!(
+        job,
+        Job {
+            device: "peer-device".into(),
+            arc: SocketAddrV4::new(PEER_IP, 4440),
+            want: Want::Missing,
+            kind: Kind::Flows,
+        }
+    );
+    // While it runs, still unknown, and no second read.
+    assert_eq!(
+        book.multicast("peer-device", &peer_channel(1), t),
+        MulticastLookup::Unknown
+    );
+    assert_eq!(book.next(t), None);
+    book.finished_flows(&job, Ok(ultimo_flows()), 1, t + MS);
+    assert_eq!(book.counts().requests, 1);
+    let found = MulticastLookup::Found(Multicast {
+        group: ULTIMO_GROUP,
+        channels: vec![1, 2],
+        fpp: 32,
+        bits: 24,
+    });
+    assert_eq!(
+        book.multicast("peer-device", &peer_channel(2), t + MS),
+        found
+    );
+    // TX 3 is in no multicast flow; TX 1 at 16 bits is not this flow.
+    assert_eq!(
+        book.multicast("peer-device", &peer_channel(3), t + MS),
+        MulticastLookup::None
+    );
+    let narrow = Advertised {
+        bits: 16,
+        ..peer_channel(1)
+    };
+    assert_eq!(
+        book.multicast("peer-device", &narrow, t + MS),
+        MulticastLookup::None
+    );
+    assert_eq!(book.next(t + MS), None);
+    // Old: the last list still answers while a new read is wanted.
+    let old = t + MS + MAX_AGE_NS;
+    assert_eq!(book.multicast("peer-device", &peer_channel(1), old), found);
+    let job = book.next(old).unwrap();
+    assert_eq!((job.kind, job.want), (Kind::Flows, Want::Old));
+}
+
+#[test]
+fn a_device_whose_flows_cannot_be_read_offers_none_and_waits_longer() {
+    let mut book = peer_book();
+    let t = SETTLE_NS;
+    book.multicast("peer-device", &peer_channel(1), t);
+    let job = book.next(t).unwrap();
+    book.finished_flows(&job, Err(ReadError::Timeout { op: 0x2600 }), 1, t);
+    assert_eq!(book.counts().no_reply, 1);
+    assert_eq!(
+        book.multicast("peer-device", &peer_channel(1), t),
+        MulticastLookup::None
+    );
+    // Past its age it is wanted again, after the failure's wait only.
+    let old = t + MAX_AGE_NS;
+    book.multicast("peer-device", &peer_channel(1), old);
+    assert_eq!(book.next(t + crate::subscribe::RETRY_NS - 1), None);
+    assert_eq!(book.next_due(), Some(t + crate::subscribe::RETRY_NS));
+    assert_eq!(book.next(old).map(|j| j.kind), Some(Kind::Flows));
+}
+
+#[test]
+fn a_device_without_an_arc_record_or_young_is_not_read_for_flows() {
+    let mut book = Book::new(Timing::default());
+    assert_eq!(
+        book.multicast("peer-device", &peer_channel(1), SETTLE_NS),
+        MulticastLookup::None
+    );
+    let mut book = peer_book();
+    assert_eq!(
+        book.multicast("peer-device", &peer_channel(1), SETTLE_NS - 1),
+        MulticastLookup::None
+    );
+    assert_eq!(book.wants(), 0);
+    assert_eq!(book.next_due(), None);
+    // Its record gone before the read: the want is dropped.
+    book.multicast("peer-device", &peer_channel(1), SETTLE_NS);
+    book.apply(&gone(ARC_SERVICE, "peer-device"), SETTLE_NS);
+    assert_eq!(book.next(SETTLE_NS), None);
+}
+
+#[test]
+fn a_flow_with_no_multicast_group_or_too_many_slots_carries_nothing() {
+    let mut f = ultimo_flows().flows;
+    let a = peer_channel(1);
+    assert!(carried(&f, &a).is_some());
+    f[0].destinations = vec![SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 1), 4321)];
+    assert_eq!(carried(&f, &a), None);
+    let mut f = ultimo_flows().flows;
+    f[0].flags = 0x11;
+    assert_eq!(carried(&f, &a), None);
+    let mut f = ultimo_flows().flows;
+    f[0].channels = (1..=crate::media::tx::MAX_CHANNELS as u16 + 1).collect();
+    assert_eq!(carried(&f, &a), None);
+    f[0].channels = (1..=crate::media::tx::MAX_CHANNELS as u16).collect();
+    assert!(carried(&f, &a).is_some());
+}
+
+#[test]
+fn the_reader_lists_a_device_s_flows_over_its_arc() {
+    use crate::arc::flows::tests::{ULTIMO_LIST, hex};
+    let dev = UdpSocket::bind((LOOPBACK, 0)).unwrap();
+    dev.set_read_timeout(Some(BOUND)).unwrap();
+    let std::net::SocketAddr::V4(at) = dev.local_addr().unwrap() else {
+        panic!("IPv4")
+    };
+    let device = std::thread::spawn(move || {
+        let mut buf = [0u8; 256];
+        let (n, from) = dev.recv_from(&mut buf).unwrap();
+        let mut reply = hex(ULTIMO_LIST);
+        reply[4..6].copy_from_slice(&buf[4..6]);
+        dev.send_to(&reply, from).unwrap();
+        buf[..n].to_vec()
+    });
+    let (daemon, senders) = FakeDaemon::new(&[ARC_SERVICE, DBC_SERVICE]);
+    let mut arc = ArcDirectory::new(Timing {
+        settle_ns: 0,
+        max_age_ns: MAX_AGE_NS,
+        reply: BOUND,
+        idle: Duration::from_secs(30),
+        fpp: FPP,
+    });
+    let requests = Arc::new(Requests::default());
+    assert!(arc.start(&daemon, LOOPBACK, Arc::clone(&requests)).unwrap());
+    senders[0]
+        .send(record(ARC_SERVICE, "mics", "127.0.0.1", at.port()))
+        .unwrap();
+    eventually("the device's record", || {
+        lock(&arc.shared.book)
+            .records
+            .get("mics")
+            .is_some_and(|r| r.arc.is_some())
+    });
+    let a = peer_channel(2);
+    assert_eq!(arc.multicast("mics", "02", &a), MulticastLookup::Unknown);
+    assert!(arc.asked());
+    let asked = device.join().unwrap();
+    assert_eq!(&asked[6..8], &0x2600u16.to_be_bytes());
+    assert_eq!(&asked[..2], &0x2809u16.to_be_bytes());
+    eventually("the list", || {
+        matches!(arc.multicast("mics", "02", &a), MulticastLookup::Found(_))
+    });
+    let network = Network {
+        chan: Mdns::new(),
+        instances: Instances::new(),
+        arc,
+    };
+    let MulticastLookup::Found(m) = network.multicast("mics", "02", &a) else {
+        panic!("the network answers from its ARC directory")
+    };
+    assert_eq!(m.group, ULTIMO_GROUP);
+    drop(senders);
+    let mut arc = network.arc;
+    arc.join_within(BOUND);
 }
