@@ -1,6 +1,8 @@
 # Changelog
 
-## 0.6.52 (unreleased)
+## 0.6.53 (unreleased)
+
+## 0.6.52
 
 - `dstack-audio-io`: `StreamStats::parked` is removed. No backend ever set it (always false), and no consumer reads it any more (iemmixer dropped its reader). A consumer that names the field in a `StreamStats` literal or reads it drops that line.
 
