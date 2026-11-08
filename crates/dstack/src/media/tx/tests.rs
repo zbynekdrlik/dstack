@@ -1147,6 +1147,29 @@ fn before_wait_sends_ahead_only_for_an_escape_and_puts_off_an_uncovered_one() {
     assert_eq!((drain(&rig.rx).len(), deferred), (0, 1));
 }
 
+/// dstack #141: around a bounded escape TX sends no packet before its due
+/// time (stamp + fpp + margin). An UltimoX2 receiver (ESI planet 22) reads
+/// a packet that arrives before its media time as latency plus that early
+/// time: band-asio-dante's send ahead of up to 2.14 ms once a second read
+/// 3.5 ms there, the same device without it 0.77 ms.
+#[test]
+fn an_escape_sends_no_packet_before_its_due_time() {
+    let mut rig = Rig::new(Vec::new());
+    assert!(rig.shared.set_source(0, Source::Counter));
+    let (slot, _) = rig.flow(vec![Some(1)]);
+    rig.tx.step(Some(T), 0);
+    assert!(drain(&rig.rx).is_empty(), "nothing due yet at T");
+    assert!(rig.tx.before_wait(|| (Some(T), 0), || true, || false));
+    let sent = drain(&rig.rx);
+    let early: Vec<u64> = sent
+        .iter()
+        .map(|p| stamp_of(p))
+        .filter(|&t| ns_of(t + FPP, RATE) + TX_MARGIN_NS > T)
+        .collect();
+    assert!(early.is_empty(), "sent before their due time: {early:?}");
+    assert_eq!(rig.shared.lane(slot).rebootstraps, 0);
+}
+
 #[test]
 fn an_engine_hole_is_silence_counted_in_the_lane() {
     let mut rig = Rig::with_engine(&[0, 2]);
