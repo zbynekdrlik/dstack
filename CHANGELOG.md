@@ -1,6 +1,8 @@
 # Changelog
 
-## 0.6.59 (unreleased)
+## 0.6.60 (unreleased)
+
+## 0.6.59
 
 - Fix (dstack #141): v0.6.58's network listing (`discover::Discovery`) removed and added devices that stayed online and reported changes that were none: dcontroller saw devices flap and went back to v0.6.31; dev1 counted 94 changes and one removal in 3 min. Three causes in `subscribe::instance`, each with a test: another host's query was read as an answer (its known answers; `read` now takes responses only); an answer without TXT emptied a record's TXT (a device id gone; the last TXT is kept); and a refresh whose answer lacked the target's A asked the instance again until the record aged out (it now asks the A). A record's addresses are those answered within its age (`Srv::ips`), so one datagram carrying only some of them changes nothing. A device the sweeps still name stays listed while its record's queries catch up (`Names::named_lately`). After the fix dev1 listed all 15 devices for 10 min with no change after the start. The plain-record line logs at debug.
 
