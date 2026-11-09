@@ -45,6 +45,10 @@ pub const PORT: u16 = 5353;
 /// a service type's PTR, as mdns-sd gives them.
 const HOST_TTL: u32 = 120;
 const OTHER_TTL: u32 = 4500;
+/// The largest reply datagram: mdns-sd's own (`MAX_PKT_DEFAULT`), one
+/// Ethernet frame with no IP fragments, as Audinate devices send their
+/// answers (dstack #141).
+pub const MAX_DATAGRAM: usize = 1452;
 /// The thread's receive wait (it looks at the stop between two).
 const WAIT: Duration = Duration::from_millis(250);
 
@@ -132,6 +136,12 @@ pub fn answer(bytes: &[u8], recs: &[ServiceRecord]) -> Option<Vec<u8>> {
         reply.additional_records.push(a(first));
     }
     reply.build_bytes_vec().ok()
+}
+
+/// The reply to the query `bytes` for the records `recs` as the datagrams
+/// that carry it.
+pub fn answers(bytes: &[u8], recs: &[ServiceRecord]) -> Vec<Vec<u8>> {
+    answer(bytes, recs).into_iter().collect()
 }
 
 fn srv<'a>(rec: &'a ServiceRecord, full: &'a str) -> ResourceRecord<'a> {
@@ -251,12 +261,14 @@ fn serve(sock: &UdpSocket, published: &Mutex<Vec<ServiceRecord>>, stop: &AtomicB
                 continue;
             }
         };
-        let reply = {
+        let replies = {
             let recs = published.lock().unwrap_or_else(PoisonError::into_inner);
-            answer(&buf[..n], &recs)
+            answers(&buf[..n], &recs)
         };
-        if let Some(Err(e)) = reply.map(|r| sock.send_to(&r, reply_to(from))) {
-            debug!(%e, "mDNS answer from the device's address not sent");
+        for r in replies {
+            if let Err(e) = sock.send_to(&r, reply_to(from)) {
+                debug!(%e, "mDNS answer from the device's address not sent");
+            }
         }
     }
 }
