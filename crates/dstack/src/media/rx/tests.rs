@@ -1347,11 +1347,14 @@ fn two_of_our_devices_on_one_pc_both_receive_one_group() {
 #[cfg(target_os = "linux")]
 #[test]
 fn a_failed_join_is_tried_again_with_the_slot_s_next_flow() {
-    let group = SocketAddrV4::new(Ipv4Addr::new(239, 255, 77, 4), free_port());
+    // A join that cannot succeed: the group's port taken without sharing.
+    // The port is the blocker's own (a port picked free first and bound
+    // after could be another test's by then: CI, main, 9.11.2026).
+    let blocker = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).unwrap();
+    let port = blocker.local_addr().unwrap().port();
+    let group = SocketAddrV4::new(Ipv4Addr::new(239, 255, 77, 4), port);
     let s = shared(1);
     let mut rx = Receiver::new(Arc::clone(&s)).unwrap();
-    // A join that cannot succeed: the group's port taken without sharing.
-    let blocker = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, group.port())).unwrap();
     let p = |generation| RxPlan {
         group: Some(group),
         ..plan(LOOPBACK, 1, false, generation)

@@ -103,6 +103,10 @@ version = "0.4.0"
 version = "0.6"
 features = ["all"]
 
+# dstack #155: a legacy unicast reply leaves from the interface's address.
+[target.'cfg(target_os = "linux")'.dependencies.libc]
+version = "0.2"
+
 [dev-dependencies.env_logger]
 version = "= 0.11.6"
 features = ["humantime"]

@@ -5095,7 +5095,7 @@ fn send_dns_outgoing_impl(
     let packet_list = out.to_data_on_wire(config.max_packet_size, config.is_ipv4);
     for packet in packet_list.iter() {
         match unicast_dest {
-            Some(dest) => unicast_on_intf(packet, if_name, dest, sock),
+            Some(dest) => unicast_on_intf(packet, if_name, dest, sock, if_addr.ip()),
             None => multicast_on_intf(packet, if_name, if_index, if_addr, sock, config.port),
         }
     }
@@ -5104,12 +5104,38 @@ fn send_dns_outgoing_impl(
 
 /// Sends a unicast packet directly to `dest` (used for RFC 6762 §6.7
 /// legacy unicast responses).
-fn unicast_on_intf(packet: &[u8], if_name: &str, dest: SocketAddr, socket: &PktInfoUdpSocket) {
+///
+/// dstack #155: on Linux the reply leaves from `source`, the interface's
+/// address ([`send_from_v4`]). With `send_to` on the socket bound to
+/// 0.0.0.0:5353 the kernel picked the source by the main routing table: a
+/// host whose Dante leg is routed only for its own address (a policy
+/// table) answered from its LAN address, through the router.
+fn unicast_on_intf(
+    packet: &[u8],
+    if_name: &str,
+    dest: SocketAddr,
+    socket: &PktInfoUdpSocket,
+    source: IpAddr,
+) {
     let max_size = max_pkt_absolute(dest.is_ipv4());
     if packet.len() > max_size {
         debug!("Drop over-sized packet ({} > {max_size})", packet.len());
         return;
     }
+
+    #[cfg(target_os = "linux")]
+    if let (SocketAddr::V4(dest), IpAddr::V4(source)) = (dest, source) {
+        use std::os::unix::io::AsRawFd;
+        match send_from_v4(socket.as_raw_fd(), packet, dest, source) {
+            Ok(sz) => {
+                trace!("sent unicast {sz} bytes on interface {if_name} to {dest} from {source}")
+            }
+            Err(e) => trace!("Failed to send unicast to {dest} from {source} via {if_name:?}: {e}"),
+        }
+        return;
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = source;
 
     let sock_addr = dest.into();
     match socket.send_to(packet, &sock_addr) {
@@ -5125,6 +5151,71 @@ fn unicast_on_intf(packet: &[u8], if_name: &str, dest: SocketAddr, socket: &PktI
             &if_name,
             e
         ),
+    }
+}
+
+/// Sends `packet` to `dest` on the UDP socket `fd` with `source` as its
+/// source address (IP_PKTINFO's `ipi_spec_dst`), whatever the address the
+/// socket is bound to (dstack #155).
+#[cfg(target_os = "linux")]
+#[allow(unsafe_code)]
+pub fn send_from_v4(
+    fd: std::os::unix::io::RawFd,
+    packet: &[u8],
+    dest: std::net::SocketAddrV4,
+    source: Ipv4Addr,
+) -> std::io::Result<usize> {
+    let mut to = libc::sockaddr_in {
+        sin_family: libc::AF_INET as libc::sa_family_t,
+        sin_port: dest.port().to_be(),
+        sin_addr: libc::in_addr {
+            s_addr: u32::from(*dest.ip()).to_be(),
+        },
+        sin_zero: [0; 8],
+    };
+    let info = libc::in_pktinfo {
+        ipi_ifindex: 0,
+        ipi_spec_dst: libc::in_addr {
+            s_addr: u32::from(source).to_be(),
+        },
+        ipi_addr: libc::in_addr { s_addr: 0 },
+    };
+    let mut iov = libc::iovec {
+        iov_base: packet.as_ptr() as *mut libc::c_void,
+        iov_len: packet.len(),
+    };
+    // SAFETY: CMSG_SPACE is a pure size computation.
+    let space =
+        unsafe { libc::CMSG_SPACE(std::mem::size_of::<libc::in_pktinfo>() as u32) } as usize;
+    let mut control = vec![0u8; space];
+    // SAFETY: an all-zero msghdr is valid; its fields are set below to
+    // buffers that outlive the call.
+    let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+    msg.msg_name = (&raw mut to).cast();
+    msg.msg_namelen = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
+    msg.msg_iov = &raw mut iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = control.as_mut_ptr().cast();
+    msg.msg_controllen = space as _;
+    // SAFETY: `msg` holds a control buffer of CMSG_SPACE(in_pktinfo), so
+    // its first header and data fit.
+    unsafe {
+        let cmsg = libc::CMSG_FIRSTHDR(&msg);
+        (*cmsg).cmsg_level = libc::IPPROTO_IP;
+        (*cmsg).cmsg_type = libc::IP_PKTINFO;
+        (*cmsg).cmsg_len = libc::CMSG_LEN(std::mem::size_of::<libc::in_pktinfo>() as u32) as _;
+        std::ptr::copy_nonoverlapping(
+            (&raw const info).cast::<u8>(),
+            libc::CMSG_DATA(cmsg),
+            std::mem::size_of::<libc::in_pktinfo>(),
+        );
+    }
+    // SAFETY: `fd` is the caller's open socket; `msg` points at live buffers.
+    let n = unsafe { libc::sendmsg(fd, &msg, 0) };
+    if n < 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(n as usize)
     }
 }
 
