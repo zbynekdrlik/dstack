@@ -51,7 +51,7 @@ use std::time::{Duration, Instant};
 
 use simple_dns::rdata::RData;
 use simple_dns::{CLASS, Name, Packet, QCLASS, QTYPE, Question, TYPE};
-use tracing::{debug, info, warn};
+use tracing::{debug, info, trace, warn};
 
 use crate::announce::{ARC_SERVICE, CMC_SERVICE};
 use crate::subscribe::directory::DBC_SERVICE;
@@ -59,6 +59,8 @@ use crate::subscribe::instance::{Instances, MDNS, Srv};
 
 /// Devices kept at most; a record of a further device is ignored.
 pub const MAX_DEVICES: usize = 256;
+/// Instances known at most: the three records of each of [`MAX_DEVICES`].
+pub const MAX_NAMES: usize = 3 * MAX_DEVICES;
 /// TXT strings kept of a record at most.
 pub const MAX_TXT: usize = 32;
 /// How long [`Discovery::stop`] waits for the threads.
@@ -71,6 +73,9 @@ pub const SWEEP_JITTER: Duration = Duration::from_secs(30);
 /// The thread's round: the group and the sweep's answers read, the list
 /// brought up to date.
 pub const ROUND: Duration = Duration::from_millis(250);
+/// The longest one socket's read waits within a round (the sweep's and the
+/// group's sockets take turns).
+pub const READ_WAIT: Duration = Duration::from_millis(50);
 /// The three services a device is listed by, in their [`Service`] order.
 pub const SERVICES: [&str; 3] = [ARC_SERVICE, DBC_SERVICE, CMC_SERVICE];
 
@@ -330,7 +335,7 @@ impl Names {
         }
         for (service, name) in &heard.named {
             let key = (*service, name.to_ascii_lowercase());
-            if self.known.len() >= 3 * MAX_DEVICES && !self.known.contains_key(&key) {
+            if self.known.len() >= MAX_NAMES && !self.known.contains_key(&key) {
                 continue;
             }
             if self.known.insert(key, (name.clone(), now)).is_none() {
@@ -402,7 +407,7 @@ fn group_listener(ip: Ipv4Addr) -> io::Result<UdpSocket> {
     sock.bind(&SocketAddrV4::new(bind, MDNS.port()).into())?;
     sock.join_multicast_v4(MDNS.ip(), &ip)?;
     let sock: UdpSocket = sock.into();
-    sock.set_read_timeout(Some(ROUND / 5))?;
+    sock.set_read_timeout(Some(READ_WAIT))?;
     Ok(sock)
 }
 
@@ -431,11 +436,11 @@ impl Discovery {
         listener: Option<UdpSocket>,
     ) -> Result<(Self, Receiver<Change>), DiscoverError> {
         let sweeper = UdpSocket::bind(SocketAddrV4::new(ip, 0))?;
-        sweeper.set_read_timeout(Some(ROUND / 5))?;
+        sweeper.set_read_timeout(Some(READ_WAIT))?;
         if mdns.ip().is_multicast() {
             socket2::SockRef::from(&sweeper).set_multicast_if_v4(&ip)?;
         }
-        let mut records = Instances::with_max(3 * MAX_DEVICES);
+        let mut records = Instances::with_max(MAX_NAMES);
         records.start_to(ip, mdns)?;
         let records = Arc::new(records);
         let devices = Arc::new(Mutex::new(Devices::default()));
@@ -531,7 +536,7 @@ impl Run {
                 next_sweep = origin.elapsed() + sweep_after(seed);
             }
             let round = Instant::now() + ROUND;
-            while Instant::now() < round {
+            while !round.saturating_duration_since(Instant::now()).is_zero() {
                 for sock in std::iter::once(&self.sweeper).chain(self.listener.as_ref()) {
                     if let Ok((n, _)) = sock.recv_from(&mut buf) {
                         self.take(&buf[..n], &mut names, now_ns(origin));
@@ -551,9 +556,8 @@ impl Run {
             let change = lock(&self.devices).set(*service, name, None);
             self.send(change);
         }
-        if names.take(&heard, now) > 0 {
-            debug!(names = heard.named.len(), "discovery: new instances named");
-        }
+        let new = names.take(&heard, now);
+        trace!(new, named = heard.named.len(), "discovery: instances named");
         for (service, name) in &heard.named {
             self.records.record(name, service.ty());
         }

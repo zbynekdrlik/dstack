@@ -289,6 +289,12 @@ fn a_datagram_names_the_instances_its_ptrs_point_at_and_its_goodbyes() {
             "card._netaudio-chan._udp.local",
             4500,
         ),
+        // A PTR of another type naming one of ours: not ours to take.
+        ptr(
+            "_netaudio-chan._udp.local",
+            "Stray._netaudio-arc._udp.local",
+            4500,
+        ),
         // A goodbye of the PTR and one of an SRV.
         ptr(
             "_netaudio-dbc._udp.local",
@@ -353,6 +359,11 @@ fn a_sweep_waits_between_its_least_and_most_and_spreads() {
         .saturating_sub(*waits.iter().min().unwrap());
     assert!(spread > SWEEP_JITTER / 2, "{spread:?}");
     assert_eq!(sweep_after(0), SWEEP);
+    // Its most is reached too.
+    assert!(
+        (0..200_000u64).any(|s| sweep_after(s) == SWEEP + SWEEP_JITTER),
+        "the jitter's top"
+    );
 }
 
 #[test]
@@ -380,12 +391,12 @@ fn names_are_kept_named_or_fresh_and_forgotten_after_a_while() {
     assert!(n.all(FORGET_NS + 2).is_empty());
     // Bounded.
     let many = Heard {
-        named: (0..3 * MAX_DEVICES + 3)
+        named: (0..MAX_NAMES + 3)
             .map(|i| (Service::Arc, format!("d{i}")))
             .collect(),
         gone: Vec::new(),
     };
-    assert_eq!(n.take(&many, 0), 3 * MAX_DEVICES);
+    assert_eq!(n.take(&many, 0), MAX_NAMES);
 }
 
 /// Devices' mDNS records answered as our own responder answers (each set
@@ -499,9 +510,12 @@ fn live_discovery_sweeps_lists_a_device_and_drops_it_at_its_goodbye() {
         }
     }
     assert!(discovery.devices().is_empty());
+    // The stop ends the thread before it returns: nothing holds the list.
+    let devices = Arc::clone(&discovery.devices);
     let started = Instant::now();
     discovery.stop().unwrap();
     assert!(started.elapsed() < STOP_WAIT);
+    assert_eq!(Arc::strong_count(&devices), 1);
 }
 
 #[test]
@@ -535,4 +549,13 @@ fn discovery_that_cannot_bind_its_address_is_an_error() {
 fn discovery_on_loopback_starts_and_stops() {
     let (discovery, _changes) = Discovery::start(LOOPBACK).unwrap();
     discovery.stop().unwrap();
+}
+
+#[test]
+fn the_thread_s_time_runs_from_its_origin() {
+    let origin = Instant::now()
+        .checked_sub(Duration::from_secs(2))
+        .expect("a clock 2 s old");
+    let t = now_ns(origin);
+    assert!((2_000_000_000..60_000_000_000).contains(&t), "{t}");
 }
