@@ -61,6 +61,8 @@ use crate::subscribe::instance::{Instances, MDNS, Srv};
 pub const MAX_DEVICES: usize = 256;
 /// Instances known at most: the three records of each of [`MAX_DEVICES`].
 pub const MAX_NAMES: usize = 3 * MAX_DEVICES;
+// The three records of each device: a name per service.
+const _: () = assert!(MAX_NAMES == SERVICES.len() * MAX_DEVICES);
 /// TXT strings kept of a record at most.
 pub const MAX_TXT: usize = 32;
 /// How long [`Discovery::stop`] waits for the threads.
