@@ -1,6 +1,10 @@
 # Changelog
 
-## 0.6.58 (unreleased)
+## 0.6.59 (unreleased)
+
+- Docs (dstack #155): `docs/two-networks.md`, the rule for a host on both the Dante network and the LAN: the LAN holds the only default route and DNS, the Dante leg is reached only by sockets bound to its address and filtered to Dante, PTP and mDNS-for-Dante; Linux and Windows recipes, the site's facts, and the single-NIC hosts.
+
+## 0.6.58
 
 - Fix (dstack #141): `discover::Discovery` (dcontroller, dtray) keeps no standing mDNS browse. Its three browses (`_netaudio-arc`, `_netaudio-dbc`, `_netaudio-cmc`) made mdns-sd refresh every device's records from port 5353 at 80 % of their TTL, every 96 s, so every device answered by multicast to the whole network, in step with every other browsing host (dcontroller's capture on companion-snv: 20 refreshes 96 s apart). Now it sends one PTR sweep of the three services every 30-60 s (jittered, `SWEEP`, `SWEEP_JITTER`, `sweep_after`) from a port of its own, so the answers come back to it alone; it listens to the mDNS group as a passive member (announcements, goodbyes, others' answers: a device that answers no PTR query is still heard); and it reads each instance's SRV, TXT and A by direct legacy unicast queries (`subscribe::instance`). A device leaves the list at its goodbye, or when its `_netaudio-arc` record has gone unanswered for 120 s; a name heard of nowhere for 5 min is no longer asked (`FORGET_NS`). API: `Device` and `Change` unchanged, `Discovery::start(ip)` unchanged; `Discovery::start_with` (a `Browse`) is replaced by `Discovery::start_to(ip, mdns, listener)`; `DiscoverError` is now `Io` or `StopTimeout`; `Devices::apply` (a browse event) is replaced by `Devices::set(service, name, record)`; new: `Service`, `record_of`, `Heard`, `heard`, `sweep_query`, `sweep_after`, `Names`, `SERVICES`, `ROUND`, `FORGET_NS`. `subscribe::resolve::{Browse, BrowseError}` are removed (nothing browses). `instance::Srv` has the TXT strings (`txt`), `Instances::with_max`, `answer` and `forget` are new. No latency change.
 
