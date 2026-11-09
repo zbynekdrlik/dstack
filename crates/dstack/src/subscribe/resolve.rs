@@ -22,14 +22,13 @@
 //! ([`super::instance`]); a device keeps no browse of a whole service
 //! (dstack #141). A channel with no record is read through its device's
 //! ARC ([`super::directory`], plan Task 9b: the band's Yamaha Dante cards
-//! publish no `_netaudio-chan` record). [`Browse`] serves the network
-//! listing ([`crate::discover`]) only.
+//! publish no `_netaudio-chan` record). The network listing
+//! ([`crate::discover`]) keeps no standing browse either.
 
 use std::collections::HashMap;
-use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddrV4};
 
-use mdns_sd::{ResolvedService, ServiceDaemon, ServiceEvent};
+use mdns_sd::{ResolvedService, ServiceEvent};
 
 use crate::announce::{CHAN_SERVICE, records};
 use crate::daemon::host_of;
@@ -298,32 +297,6 @@ impl Resolver for Own {
     fn lookup(&self, tx_device: &str, tx_channel: &str) -> Option<Advertised> {
         self.0.get(tx_device, tx_channel)
     }
-}
-
-/// Where a browse's events come from: the mDNS daemon, or a test's
-/// channel.
-pub trait Browse {
-    type Events: Iterator<Item = ServiceEvent> + Send + 'static;
-    /// Starts browsing `service` (`_netaudio-chan`, and for the ARC reads
-    /// `_netaudio-arc` and `_netaudio-dbc`); the events end when the daemon
-    /// does.
-    fn browse(&self, service: &str) -> Result<Self::Events, mdns_sd::Error>;
-}
-
-impl Browse for ServiceDaemon {
-    type Events = <mdns_sd::Receiver<ServiceEvent> as IntoIterator>::IntoIter;
-    fn browse(&self, service: &str) -> Result<Self::Events, mdns_sd::Error> {
-        Ok(ServiceDaemon::browse(self, service)?.into_iter())
-    }
-}
-
-/// Why the browse did not start.
-#[derive(Debug, thiserror::Error)]
-pub enum BrowseError {
-    #[error("mDNS browse: {0}")]
-    Mdns(#[from] mdns_sd::Error),
-    #[error("the browse's thread: {0}")]
-    Thread(#[from] io::Error),
 }
 
 #[cfg(test)]

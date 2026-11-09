@@ -477,6 +477,7 @@ fn a_device_s_record_completes_with_its_srv_and_its_host_s_addresses_no_txt() {
     let want = Srv {
         port: 4440,
         ips: vec![b, a],
+        txt: HashMap::new(),
     };
     assert_eq!(t.record(ARC_NAME, S), Some(want.clone()));
     assert_eq!(t.record("Card._Netaudio-Arc._udp.local", S), Some(want));
@@ -568,4 +569,24 @@ fn the_resolver_asks_a_device_s_record_by_its_name() {
         std::thread::sleep(Duration::from_millis(10));
     };
     assert_eq!(found.port, 4440);
+}
+
+/// A goodbye (dstack #141, the network listing): a forgotten record is
+/// gone at once, not used until its age.
+#[test]
+fn a_forgotten_record_is_gone_at_once() {
+    let mut t = Table::default();
+    t.record(ARC_NAME, 0);
+    t.answer(&arc_answer(&[Ipv4Addr::new(10, 0, 0, 5)]), S);
+    assert!(t.record(ARC_NAME, S).is_some());
+    t.forget("CARD._netaudio-arc._udp.local");
+    assert_eq!(t.record(ARC_NAME, S), None);
+    // The resolver's own: a datagram heard elsewhere completes it, and the
+    // forget drops it.
+    let i = Instances::new();
+    assert_eq!(i.record("card", "_netaudio-arc._udp.local."), None);
+    i.answer(&arc_answer(&[Ipv4Addr::new(10, 0, 0, 5)]));
+    assert!(i.record("card", "_netaudio-arc._udp.local.").is_some());
+    i.forget("card", "_netaudio-arc._udp.local.");
+    assert_eq!(i.record("card", "_netaudio-arc._udp.local."), None);
 }

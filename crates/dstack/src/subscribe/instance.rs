@@ -165,12 +165,14 @@ pub fn read(bytes: &[u8], instance: &str) -> Option<Found> {
 }
 
 /// A device's record of a service other than the channels' (its
-/// `_netaudio-arc` or `_netaudio-dbc`): the SRV's port and every address
-/// the answer gave the SRV's target.
+/// `_netaudio-arc`, `_netaudio-dbc` or `_netaudio-cmc`): the SRV's port,
+/// every address the answer gave the SRV's target, and the TXT strings
+/// when the answer had them (empty otherwise).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Srv {
     pub port: u16,
     pub ips: Vec<Ipv4Addr>,
+    pub txt: HashMap<String, String>,
 }
 
 /// The suffix of a channel record's instance name (lower case, no dot at
@@ -211,12 +213,34 @@ pub enum Ask {
 }
 
 /// The instances and their answers (see the module).
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Table {
     entries: BTreeMap<String, Entry>,
+    /// Instances kept at most.
+    max: usize,
+}
+
+impl Default for Table {
+    fn default() -> Self {
+        Self::with_max(MAX_INSTANCES)
+    }
 }
 
 impl Table {
+    /// A table of at most `max` instances.
+    pub fn with_max(max: usize) -> Self {
+        Table {
+            entries: BTreeMap::new(),
+            max,
+        }
+    }
+
+    /// Forgets `name` (a full instance name) and what it answered: a
+    /// device's goodbye.
+    pub fn forget(&mut self, name: &str) {
+        self.entries.remove(&key(name));
+    }
+
     /// The record of `tx_channel` on `tx_device` if one is fresh at `now`;
     /// otherwise the instance is wanted (and asked when due).
     pub fn lookup(&mut self, tx_device: &str, tx_channel: &str, now: u64) -> Option<Advertised> {
@@ -240,7 +264,7 @@ impl Table {
     /// `name`'s entry, made if there is room, marked wanted at `now`.
     fn want(&mut self, name: &str, now: u64) -> Option<&Entry> {
         let name = key(name);
-        if self.entries.len() >= MAX_INSTANCES && !self.entries.contains_key(&name) {
+        if self.entries.len() >= self.max && !self.entries.contains_key(&name) {
             return None;
         }
         let entry = self.entries.entry(name).or_insert_with(|| Entry {
@@ -334,7 +358,15 @@ impl Table {
                     continue;
                 }
                 info!("a device's record read by a direct instance query");
-                e.srv = Some((Srv { port: *port, ips }, now));
+                let txt = e.found.txt.clone().unwrap_or_default();
+                e.srv = Some((
+                    Srv {
+                        port: *port,
+                        ips,
+                        txt,
+                    },
+                    now,
+                ));
                 e.found = Found::default();
                 e.tries = 0;
                 completed += 1;
@@ -400,8 +432,14 @@ pub struct Instances {
 
 impl Instances {
     pub fn new() -> Self {
+        Self::with_max(MAX_INSTANCES)
+    }
+
+    /// A resolver that keeps at most `max` instances (a network listing
+    /// asks three records of every device, [`crate::discover`]).
+    pub fn with_max(max: usize) -> Self {
         Self {
-            table: Arc::default(),
+            table: Arc::new(Mutex::new(Table::with_max(max))),
             stop: Arc::default(),
             asked: AtomicBool::new(false),
             tried: false,
@@ -497,6 +535,19 @@ impl Instances {
         self.asked.store(true, Ordering::Relaxed);
         let now = self.clock.now();
         lock(&self.table).record(&format!("{device}.{service}"), now)
+    }
+
+    /// Takes a datagram heard elsewhere (the mDNS group, a sweep's
+    /// answers): every wanted instance it answers is updated, as the
+    /// thread's own answers are.
+    pub fn answer(&self, bytes: &[u8]) {
+        let now = self.clock.now();
+        lock(&self.table).answer(bytes, now);
+    }
+
+    /// Forgets `device`'s record of `service` ([`Table::forget`]).
+    pub fn forget(&self, device: &str, service: &str) {
+        lock(&self.table).forget(&format!("{device}.{service}"));
     }
 }
 
