@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use super::{Mode, USAGE, mode_of, run_value};
+use super::{Mode, USAGE, mode_of, run_value, version_line};
 
 fn args(a: &[&str]) -> Vec<String> {
     a.iter().map(|s| s.to_string()).collect()
@@ -12,6 +12,7 @@ fn args(a: &[&str]) -> Vec<String> {
 fn no_argument_is_the_tray_and_print_prints() {
     assert_eq!(mode_of(args(&[])), Ok(Mode::Tray));
     assert_eq!(mode_of(args(&["--print"])), Ok(Mode::Print));
+    assert_eq!(mode_of(args(&["--version"])), Ok(Mode::Version));
 }
 
 #[test]
@@ -61,4 +62,14 @@ fn a_path_that_is_no_unicode_has_no_run_value() {
         run_value(Path::new(OsStr::from_bytes(b"/opt/\xff/dtray"))),
         None
     );
+}
+
+/// The owner (9.11.2026): every PC's dtray can be checked for its version.
+#[test]
+fn the_version_line_names_the_dstack_release() {
+    assert_eq!(
+        version_line(),
+        format!("dtray {}", env!("CARGO_PKG_VERSION"))
+    );
+    assert!(USAGE.contains("--version"));
 }

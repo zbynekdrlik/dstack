@@ -59,10 +59,18 @@ pub enum Mode {
     /// Start the tray at the user's logon (`true`) or not (`false`)
     /// (Windows and Linux).
     Autostart(bool),
+    /// The version line on stdout ([`version_line`]).
+    Version,
+}
+
+/// dtray's version as one line: the dstack release it was built from
+/// (the tray's menu shows the same; `dtray --version`, `--print`).
+pub fn version_line() -> String {
+    format!("dtray {}", env!("CARGO_PKG_VERSION"))
 }
 
 /// The usage line.
-pub const USAGE: &str = "usage: dtray [--print | --autostart on|off]";
+pub const USAGE: &str = "usage: dtray [--print | --version | --autostart on|off]";
 
 /// The mode of the arguments after the program's name: none for the tray,
 /// `--print` to print once, `--autostart on` or `off`; anything else is the
@@ -73,6 +81,7 @@ pub fn mode_of<I: IntoIterator<Item = String>>(args: I) -> Result<Mode, &'static
     match args.as_slice() {
         [] => Ok(Mode::Tray),
         ["--print"] => Ok(Mode::Print),
+        ["--version"] => Ok(Mode::Version),
         ["--autostart", "on"] => Ok(Mode::Autostart(true)),
         ["--autostart", "off"] => Ok(Mode::Autostart(false)),
         _ => Err(USAGE),

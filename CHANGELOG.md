@@ -2,6 +2,8 @@
 
 ## 0.6.61 (unreleased)
 
+- dtray: `dtray --version` prints `dtray <version>` (the dstack release it was built from), and `--print` starts with that line. The tray's menu shows it already (`dstack <version>`). Each PC's dtray can be checked in one command. New: `Mode::Version`, `version_line`.
+
 ## 0.6.60
 
 - Fix (dstack #155): on Linux our mDNS daemon's legacy unicast replies (the answers to direct queries, which every device and the network listing now use) leave from the interface's address. mdns-sd sent them with `send_to` on its socket bound to 0.0.0.0:5353, so the kernel picked the source by the main routing table: strih-obs, whose Dante leg is routed only for its own address, answered from its LAN address through the router. The vendored mdns-sd now sends them with IP_PKTINFO's source (`mdns_sd::send_from_v4`, `vendor/mdns-sd/DSTACK.md`). Windows answers from our own responder bound to the Dante address already. No API change of ours, no latency change.
