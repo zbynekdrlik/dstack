@@ -1,6 +1,8 @@
 # Changelog
 
-## 0.6.55 (unreleased)
+## 0.6.56 (unreleased)
+
+## 0.6.55
 
 - Fix (dstack #141, FOH): our own mDNS responder (Windows, the answers from the device's address) answered a query for a service type with every instance in ONE datagram: band-asio-dante's 64 channels went out as 9 kB+, dasio-test's and mbc's 16 as 5 kB. Each became 4 to 7 IP fragments flooded to every port (224.0.0.251), and an UltimoX2 receiver (zvukar) read a latency spike of 1.5 to 2.9 ms at each burst while 1 Gbit receivers of the same flow read none. Audinate devices never send an mDNS datagram over ~1450 B. Now a reply is split into datagrams of at most 1452 B (`announce::responder::MAX_DATAGRAM`, mdns-sd's own limit), names compressed; each PTR travels with its instance's SRV and TXT, each datagram carries the host's A, so each reads on its own. 64 channels now go in at most 10 datagrams. New: `announce::responder::answers` (every datagram); `answer` returns the first. No latency change.
 
