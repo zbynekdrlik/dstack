@@ -1010,6 +1010,7 @@ dependencies = [
  "fastrand",
  "flume",
  "if-addrs 0.15.0",
+ "libc",
  "log",
  "mio",
  "socket-pktinfo",

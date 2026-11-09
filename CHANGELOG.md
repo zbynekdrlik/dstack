@@ -2,6 +2,9 @@
 
 ## 0.6.60 (unreleased)
 
+- Fix (dstack #155): on Linux our mDNS daemon's legacy unicast replies (the answers to direct queries, which every device and the network listing now use) leave from the interface's address. mdns-sd sent them with `send_to` on its socket bound to 0.0.0.0:5353, so the kernel picked the source by the main routing table: strih-obs, whose Dante leg is routed only for its own address, answered from its LAN address through the router. The vendored mdns-sd now sends them with IP_PKTINFO's source (`mdns_sd::send_from_v4`, `vendor/mdns-sd/DSTACK.md`). Windows answers from our own responder bound to the Dante address already. No API change of ours, no latency change.
+- Test: the failed-join test of the multicast RX owns its group port (main's CI failed it with EADDRINUSE when a parallel test took a port picked free).
+
 ## 0.6.59
 
 - Fix (dstack #141): v0.6.58's network listing (`discover::Discovery`) removed and added devices that stayed online and reported changes that were none: dcontroller saw devices flap and went back to v0.6.31; dev1 counted 94 changes and one removal in 3 min. Three causes in `subscribe::instance`, each with a test: another host's query was read as an answer (its known answers; `read` now takes responses only); an answer without TXT emptied a record's TXT (a device id gone; the last TXT is kept); and a refresh whose answer lacked the target's A asked the instance again until the record aged out (it now asks the A). A record's addresses are those answered within its age (`Srv::ips`), so one datagram carrying only some of them changes nothing. A device the sweeps still name stays listed while its record's queries catch up (`Names::named_lately`). After the fix dev1 listed all 15 devices for 10 min with no change after the start. The plain-record line logs at debug.

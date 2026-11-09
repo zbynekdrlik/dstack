@@ -154,7 +154,7 @@
 //! ```
 //!
 
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 #![allow(clippy::single_component_path_imports)]
 
 // log for logging (optional).
@@ -183,6 +183,9 @@ pub mod fuzz_api;
 
 pub use dns_parser::{InterfaceId, RRType, ScopedIp, ScopedIpV4, ScopedIpV6, MAX_PKT_DEFAULT};
 pub use error::{Error, Result};
+/// dstack #155: a unicast send from a given source address (Linux).
+#[cfg(target_os = "linux")]
+pub use service_daemon::send_from_v4;
 pub use service_daemon::{
     DaemonEvent, DaemonStatus, DnsNameChange, HostnameResolutionEvent, IfKind, IfPredicate,
     Metrics, ServiceDaemon, ServiceEvent, UnregisterStatus, IP_CHECK_INTERVAL_IN_SECS_DEFAULT,

@@ -16,4 +16,13 @@ LICENSE-APACHE and LICENSE-MIT), copied unchanged except:
   in which FOH's audio TX stalled (dstack #1, dasio, 5.11.2026;
   `crates/dstack/tests/mdns_refresh.rs`).
 
-Drop this copy when upstream offers both.
+- `src/service_daemon.rs` `unicast_on_intf`, `send_from_v4` (exported from
+  `src/lib.rs`, whose `forbid(unsafe_code)` is `deny` so this one
+  function may allow it), `Cargo.toml` (libc on Linux): on Linux a legacy unicast
+  reply leaves from the interface's address (IP_PKTINFO `ipi_spec_dst`).
+  Upstream used `send_to` on the socket bound to 0.0.0.0:5353, so the
+  kernel picked the source by the main table: strih-obs (its Dante leg
+  routed only for its own address) answered from its LAN address, through
+  the router (dstack #155, 9.11.2026; `crates/dstack/tests/mdns_reply_source.rs`).
+
+Drop this copy when upstream offers all three.
