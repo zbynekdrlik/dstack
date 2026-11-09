@@ -127,7 +127,8 @@ impl TxShared {
     /// sender follows it (the control tick reads the table on Windows once
     /// a second; nothing without a host sender).
     pub fn set_neighbours(&self, rows: &[bypass::Neighbour]) {
-        let c = self.lock();
+        let mut c = self.lock();
+        c.neighbours = rows.to_vec();
         self.set_host_macs(&c, rows);
     }
 

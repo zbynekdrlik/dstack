@@ -2,6 +2,8 @@
 
 ## 0.6.56 (unreleased)
 
+- Fix (dstack #141, band 9.11.2026): a TX flow made between two control ticks went out on the UDP socket until the next tick (up to 100 ms) read the neighbour table, even when its receiver's MAC was in it already. band's re-made 8-channel flow to iem-mixer sent its first 984 packets (82 ms) that way, and the 250 µs receiver read 32 late. The tables as last read (`/proc/net/arp`, the Windows neighbour rows) are kept, and `TxShared::publish` sets each slot's MAC from them, so a new flow to a known neighbour takes the direct (or host sender) path from its first packet. No API change, no latency change.
+
 ## 0.6.55
 
 - Fix (dstack #141, FOH): our own mDNS responder (Windows, the answers from the device's address) answered a query for a service type with every instance in ONE datagram: band-asio-dante's 64 channels went out as 9 kB+, dasio-test's and mbc's 16 as 5 kB. Each became 4 to 7 IP fragments flooded to every port (224.0.0.251), and an UltimoX2 receiver (zvukar) read a latency spike of 1.5 to 2.9 ms at each burst while 1 Gbit receivers of the same flow read none. Audinate devices never send an mDNS datagram over ~1450 B. Now a reply is split into datagrams of at most 1452 B (`announce::responder::MAX_DATAGRAM`, mdns-sd's own limit), names compressed; each PTR travels with its instance's SRV and TXT, each datagram carries the host's A, so each reads on its own. 64 channels now go in at most 10 datagrams. New: `announce::responder::answers` (every datagram); `answer` returns the first. No latency change.
