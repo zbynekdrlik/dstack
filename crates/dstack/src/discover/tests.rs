@@ -559,3 +559,24 @@ fn the_thread_s_time_runs_from_its_origin() {
     let t = now_ns(origin);
     assert!((2_000_000_000..60_000_000_000).contains(&t), "{t}");
 }
+
+/// dstack #141 (v0.6.58, dcontroller): a device the sweeps still name is
+/// not taken off the list while its record's queries catch up.
+#[test]
+fn a_name_is_named_lately_until_the_record_s_age() {
+    let max = crate::subscribe::instance::MAX_AGE_NS;
+    let mut n = Names::default();
+    let named = Heard {
+        named: vec![(Service::Arc, "Card".to_string())],
+        gone: Vec::new(),
+    };
+    n.take(&named, 10);
+    assert!(n.named_lately(Service::Arc, "CARD", 10 + max - 1));
+    assert!(!n.named_lately(Service::Arc, "card", 10 + max));
+    assert!(!n.named_lately(Service::Dbc, "card", 10));
+    // A fresh record keeps a name known, not "named".
+    n.touch(Service::Arc, "card", 10 + max);
+    assert!(!n.named_lately(Service::Arc, "card", 10 + max));
+    n.take(&named, 10 + max);
+    assert!(n.named_lately(Service::Arc, "card", 10 + max));
+}
