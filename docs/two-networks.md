@@ -20,6 +20,8 @@ Every production host that sees both the Dante network and the normal LAN keeps 
 | Discovery (NDI, Bonjour, web UIs) | here only | never |
 | `.lan` name | its LAN address | none |
 
+**A host with an input filter on its Dante leg must accept UDP from source port 5353.** Our devices and the network listing ask mDNS by direct queries sent to the group (224.0.0.251:5353), and each device answers unicast from its own address and port 5353 to the asker's port. Conntrack does not tie that answer to the multicast query, so a filter that accepts only `ct state established,related` drops every answer. dcontroller's guard did that on 9.11.2026 (3351 packets dropped), and its listing then lost every device after 120 s. In nftables: `udp sport 5353 accept` on the Dante interface. Windows Firewall allows the unicast answer to a multicast query by default.
+
 The Dante devices (dstack, dasio, dlink apps, iemmixer) bind every socket to the Dante address. That includes their direct mDNS queries since dstack v0.6.56 (no browse) and the network listing since v0.6.58. They need no gateway and no DNS on that leg.
 
 ### Linux: the model, strih-snv

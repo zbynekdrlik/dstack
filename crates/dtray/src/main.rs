@@ -46,6 +46,10 @@ fn main() -> ExitCode {
         Mode::Print => print(),
         Mode::Tray => tray(),
         Mode::Autostart(on) => autostart(on),
+        Mode::Version => {
+            println!("{}", dtray::version_line());
+            ExitCode::SUCCESS
+        }
     }
 }
 
@@ -65,6 +69,7 @@ fn print() -> ExitCode {
     std::thread::sleep(APP_WAIT);
     let expected = expected::expected(&expected::devices_dir());
     let view = Tracker::default().update_with(&scanner.readings(), &expected);
+    println!("{}", dtray::version_line());
     print!("{}", model::print_text(&view));
     for f in &failed {
         eprintln!("dtray: {f}");
