@@ -1301,10 +1301,20 @@ async fn our_stop_of_a_flow_from_our_own_tx_is_answered_by_our_own_flow_control(
         took < STOP_WAIT * 7 / 10,
         "the daemon ended {took:?} after its stop"
     );
-    // One request and one stop, both to our own flow control (peer 1).
+    // One request and one stop, both to our own flow control (peer 1). A
+    // read of the loop's TX flow list (ARC 0x2600) may come beside them: it
+    // publishes no ARC record, so past the record's grace its ARC is asked
+    // at its address (dstack #148).
     let sent = |op, n| crate::ctl::Sent { peer: 1, op, n };
+    let flow_control: Vec<crate::ctl::Sent> = media
+        .requests
+        .counts()
+        .sent
+        .into_iter()
+        .filter(|s| s.op != crate::arc::flows::LIST)
+        .collect();
     assert_eq!(
-        media.requests.counts().sent,
+        flow_control,
         [
             sent(crate::flows::control::op::REQUEST, 1),
             sent(crate::flows::control::op::STOP, 1)

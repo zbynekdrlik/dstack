@@ -366,6 +366,10 @@ pub struct Book {
     /// aside) that had no `_netaudio-arc` record then, at most
     /// [`MAX_DEVICES`].
     first_asked: BTreeMap<String, u64>,
+    /// Where the flow list of a device with no `_netaudio-arc` record is
+    /// read: its channel's flow-control address on ARC's port (dstack
+    /// #148: the DT_20 answers no query for that record).
+    flow_arcs: BTreeMap<String, SocketAddrV4>,
     counts: Counts,
     /// Wants registered so far (the reader is woken when it moves).
     wants: u64,
@@ -407,6 +411,7 @@ impl Book {
             reads: BTreeMap::new(),
             flow_reads: BTreeMap::new(),
             first_asked: BTreeMap::new(),
+            flow_arcs: BTreeMap::new(),
             counts: Counts::default(),
             wants: 0,
         }
@@ -590,7 +595,8 @@ impl Book {
             {
                 continue;
             }
-            let Some(arc) = self.records.get(device).and_then(|rec| rec.arc) else {
+            let record = self.records.get(device).and_then(|rec| rec.arc);
+            let Some(arc) = record.or_else(|| self.flow_arcs.get(device).copied()) else {
                 r.state = State::Idle;
                 continue;
             };
@@ -620,12 +626,15 @@ impl Book {
             if self.first_asked.len() >= MAX_DEVICES && !self.first_asked.contains_key(&key) {
                 return MulticastLookup::None;
             }
-            let first = *self.first_asked.entry(key).or_insert(now);
-            return if now.saturating_sub(first) < RECORD_GRACE_NS {
-                MulticastLookup::Unknown
-            } else {
-                MulticastLookup::None
-            };
+            let first = *self.first_asked.entry(key.clone()).or_insert(now);
+            if now.saturating_sub(first) < RECORD_GRACE_NS {
+                return MulticastLookup::Unknown;
+            }
+            // No record within the grace: its ARC at the channel's address.
+            self.flow_arcs.insert(
+                key.clone(),
+                SocketAddrV4::new(*a.control.ip(), crate::arc::PORT),
+            );
         }
         if self.flow_reads.len() >= MAX_DEVICES && !self.flow_reads.contains_key(&key) {
             return MulticastLookup::None;

@@ -2,6 +2,8 @@
 
 ## 0.6.62 (unreleased)
 
+- Fix (dstack #148, 9.11.2026, a v0.6.56 regression): a receiver joined no multicast flow of a transmitter that answers no query for its `_netaudio-arc` record. The DT_20 is one: it answers only for its channels. Since v0.6.56 our devices keep no browse, so the ARC directory never had that record and never read the DT_20's 0x2600 list. band and iem-mixer then asked the DT_20 for unicast flows beside its multicast flow, and band got "No more flows (Tx)" on HAND 1 and PETA. Now, past the record's 2 s grace (`RECORD_GRACE_NS`), the flow list of a device with no record is read at its channel's flow-control address on ARC's port 4440. Read on dev1: the DT_20 answers 0x2600 at 10.77.7.102:4440 with its 2 flows. No API change, no latency change.
+
 ## 0.6.61
 
 - Docs (dstack #141, #155): `docs/two-networks.md` says that a host with an input filter on its Dante leg must accept UDP from source port 5353. Direct mDNS queries are answered unicast from the device's port 5353, which conntrack does not tie to the multicast query. dcontroller's guard dropped them, and its listing lost every device after 120 s.
