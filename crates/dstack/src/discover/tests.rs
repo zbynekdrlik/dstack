@@ -1,37 +1,26 @@
 use super::*;
 
-use std::cell::RefCell;
 use std::collections::HashMap;
 
-use mdns_sd::ServiceInfo;
+use simple_dns::ResourceRecord;
+use simple_dns::rdata::{PTR, SRV};
+
+use crate::announce::ServiceRecord;
 
 /// Every wait in these tests ends.
 const BOUND: Duration = Duration::from_secs(5);
+const LOOPBACK: Ipv4Addr = Ipv4Addr::LOCALHOST;
 
-/// A resolved record of `service` for `name` at `ip`:`port` with `txt`.
-fn record(service: &str, name: &str, ip: &str, port: u16, txt: &[(&str, &str)]) -> ServiceEvent {
-    let props: HashMap<String, String> = txt
-        .iter()
-        .map(|(k, v)| (k.to_string(), v.to_string()))
-        .collect();
-    let info = ServiceInfo::new(service, name, "peer.local.", ip, port, Some(props)).unwrap();
-    ServiceEvent::ServiceResolved(Box::new(info.as_resolved_service()))
-}
-
-fn arc(name: &str, ip: &str, txt: &[(&str, &str)]) -> ServiceEvent {
-    record(ARC_SERVICE, name, ip, 4440, txt)
-}
-
-fn dbc(name: &str, ip: &str) -> ServiceEvent {
-    record(DBC_SERVICE, name, ip, 4455, &[])
-}
-
-fn cmc(name: &str, ip: &str, id: &str) -> ServiceEvent {
-    record(CMC_SERVICE, name, ip, 8800, &[("id", id), ("process", "0")])
-}
-
-fn gone(service: &str, name: &str) -> ServiceEvent {
-    ServiceEvent::ServiceRemoved(service.to_string(), format!("{name}.{service}"))
+/// A record as the queries read it: `ip`:`port` with `txt`.
+fn srv(ip: [u8; 4], port: u16, txt: &[(&str, &str)]) -> Srv {
+    Srv {
+        port,
+        ips: vec![Ipv4Addr::from(ip)],
+        txt: txt
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect::<HashMap<_, _>>(),
+    }
 }
 
 fn at(ip: [u8; 4], port: u16) -> SocketAddrV4 {
@@ -41,32 +30,28 @@ fn at(ip: [u8; 4], port: u16) -> SocketAddrV4 {
 #[test]
 fn a_device_is_listed_with_its_arc_record_name_address_and_txt() {
     let mut d = Devices::default();
-    let change = d.apply(&arc(
-        "Stage-Card",
-        "10.0.0.11",
-        &[("mf", "Acme"), ("model", "X1")],
-    ));
-    let want = Device {
-        name: "Stage-Card".to_string(),
-        arc: at([10, 0, 0, 11], 4440),
-        dbc: None,
-        device_id: None,
-        txt: [("mf", "Acme"), ("model", "X1")]
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect(),
+    let mut two = srv([10, 0, 0, 12], 4440, &[("model", "X1"), ("mf", "Acme")]);
+    two.ips.push(Ipv4Addr::new(10, 0, 0, 11));
+    let Some(Change::Added(dev)) = d.set(Service::Arc, "Card-1", Some(&two)) else {
+        panic!("listed");
     };
-    assert_eq!(change, Some(Change::Added(want.clone())));
-    assert_eq!(d.list(), vec![want]);
+    assert_eq!(dev.name, "Card-1", "its case kept");
+    assert_eq!(dev.arc, at([10, 0, 0, 11], 4440), "the lowest address");
+    assert_eq!(dev.txt.get("model").map(String::as_str), Some("X1"));
+    assert_eq!((dev.dbc, dev.device_id), (None, None));
+    assert_eq!(d.list(), [dev]);
 }
 
 #[test]
 fn a_dbc_record_alone_lists_nothing_and_joins_the_device_later() {
     let mut d = Devices::default();
-    assert_eq!(d.apply(&dbc("card", "10.0.0.11")), None);
+    let dbc = srv([10, 0, 0, 11], 4455, &[]);
+    assert_eq!(d.set(Service::Dbc, "card", Some(&dbc)), None);
     assert!(d.list().is_empty());
-    let Some(Change::Added(dev)) = d.apply(&arc("card", "10.0.0.11", &[])) else {
-        panic!("the ARC record lists the device");
+    let Some(Change::Added(dev)) =
+        d.set(Service::Arc, "card", Some(&srv([10, 0, 0, 11], 4440, &[])))
+    else {
+        panic!("listed");
     };
     assert_eq!(dev.dbc, Some(at([10, 0, 0, 11], 4455)));
 }
@@ -74,253 +59,48 @@ fn a_dbc_record_alone_lists_nothing_and_joins_the_device_later() {
 #[test]
 fn a_changed_address_txt_or_flow_control_is_a_change_and_the_same_record_is_none() {
     let mut d = Devices::default();
-    d.apply(&arc("card", "10.0.0.11", &[("model", "X1")]));
-    assert_eq!(d.apply(&arc("card", "10.0.0.11", &[("model", "X1")])), None);
-    let Some(Change::Changed(dev)) = d.apply(&arc("card", "10.0.0.12", &[("model", "X1")])) else {
-        panic!("a new address is a change");
-    };
-    assert_eq!(dev.arc, at([10, 0, 0, 12], 4440));
-    let Some(Change::Changed(dev)) = d.apply(&arc("card", "10.0.0.12", &[("model", "X2")])) else {
-        panic!("a new TXT is a change");
-    };
-    assert_eq!(dev.txt.get("model").map(String::as_str), Some("X2"));
-    let Some(Change::Changed(dev)) = d.apply(&dbc("CARD", "10.0.0.12")) else {
-        panic!("flow control (any case of the name) is a change");
-    };
-    assert_eq!(dev.dbc, Some(at([10, 0, 0, 12], 4455)));
-    let Some(Change::Changed(dev)) = d.apply(&gone(DBC_SERVICE, "card")) else {
-        panic!("flow control withdrawn is a change");
-    };
-    assert_eq!(dev.dbc, None);
-    assert_eq!(d.list().len(), 1);
-}
-
-#[test]
-fn a_withdrawn_arc_record_removes_the_device_and_an_unknown_one_is_none() {
-    let mut d = Devices::default();
-    d.apply(&arc("Card", "10.0.0.11", &[]));
-    d.apply(&dbc("card", "10.0.0.11"));
-    assert_eq!(d.apply(&gone(ARC_SERVICE, "other")), None);
-    assert_eq!(
-        d.apply(&gone(ARC_SERVICE, "card")),
-        Some(Change::Removed("Card".to_string()))
-    );
-    assert!(d.list().is_empty());
-    // Its flow control record goes after: nothing listed changes, and the
-    // entry is gone (a new ARC record is an addition again).
-    assert_eq!(d.apply(&gone(DBC_SERVICE, "card")), None);
-    assert!(d.entries.is_empty());
+    let arc = srv([10, 0, 0, 11], 4440, &[("model", "X1")]);
+    d.set(Service::Arc, "card", Some(&arc));
+    assert_eq!(d.set(Service::Arc, "card", Some(&arc)), None);
+    let moved = srv([10, 0, 0, 12], 4440, &[("model", "X1")]);
     assert!(matches!(
-        d.apply(&arc("Card", "10.0.0.11", &[])),
-        Some(Change::Added(_))
-    ));
-}
-
-#[test]
-fn other_services_and_records_without_ipv4_are_ignored() {
-    let mut d = Devices::default();
-    assert_eq!(
-        d.apply(&record(
-            "_netaudio-cmc._udp.local.",
-            "card",
-            "10.0.0.11",
-            8800,
-            &[]
-        )),
-        None
-    );
-    let no_ip = ServiceInfo::new(ARC_SERVICE, "card", "x.local.", "", 4440, None).unwrap();
-    assert_eq!(
-        d.apply(&ServiceEvent::ServiceResolved(Box::new(
-            no_ip.as_resolved_service()
-        ))),
-        None
-    );
-    assert_eq!(
-        d.apply(&ServiceEvent::ServiceRemoved(
-            ARC_SERVICE.to_string(),
-            ARC_SERVICE.to_string()
-        )),
-        None
-    );
-    assert!(d.list().is_empty());
-}
-
-#[test]
-fn a_record_name_keeps_its_case_and_needs_its_service_suffix() {
-    assert_eq!(
-        record_of(ARC_SERVICE, "My-Card._netaudio-ARC._udp.local."),
-        Some((Service::Arc, "My-Card".to_string()))
-    );
-    assert_eq!(
-        record_of(DBC_SERVICE, "x._netaudio-dbc._udp.local."),
-        Some((Service::Dbc, "x".to_string()))
-    );
-    assert_eq!(record_of(ARC_SERVICE, "._netaudio-arc._udp.local."), None);
-    assert_eq!(
-        record_of(ARC_SERVICE, "card-netaudio-arc._udp.local."),
-        None
-    );
-    assert_eq!(
-        record_of(ARC_SERVICE, "card._netaudio-dbc._udp.local."),
-        None
-    );
-    assert_eq!(record_of(ARC_SERVICE, "short"), None);
-    assert_eq!(record_of("_http._tcp.local.", "a._http._tcp.local."), None);
-}
-
-#[test]
-fn the_list_is_bounded_and_txt_too() {
-    let mut d = Devices::default();
-    for i in 0..MAX_DEVICES {
-        assert!(d.apply(&arc(&format!("d{i}"), "10.0.0.11", &[])).is_some());
-    }
-    assert_eq!(d.apply(&arc("one-more", "10.0.0.11", &[])), None);
-    // A known device still updates at the bound.
-    assert!(matches!(
-        d.apply(&arc("d0", "10.0.0.12", &[])),
+        d.set(Service::Arc, "CARD", Some(&moved)),
         Some(Change::Changed(_))
     ));
-    assert_eq!(d.list().len(), MAX_DEVICES);
-    let many: Vec<(String, String)> = (0..MAX_TXT + 5)
-        .map(|i| (format!("k{i:02}"), "v".to_string()))
-        .collect();
-    let many: Vec<(&str, &str)> = many.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-    let mut d = Devices::default();
-    let Some(Change::Added(dev)) = d.apply(&arc("card", "10.0.0.11", &many)) else {
-        panic!("listed");
+    let txt = srv([10, 0, 0, 12], 4440, &[("model", "X2")]);
+    assert!(matches!(
+        d.set(Service::Arc, "card", Some(&txt)),
+        Some(Change::Changed(_))
+    ));
+    let Some(Change::Changed(dev)) =
+        d.set(Service::Dbc, "card", Some(&srv([10, 0, 0, 12], 4455, &[])))
+    else {
+        panic!("changed");
     };
-    assert_eq!(dev.txt.len(), MAX_TXT);
-}
-
-// ---- live, through a fake daemon ----
-
-struct FakeDaemon(RefCell<HashMap<String, mpsc::Receiver<ServiceEvent>>>);
-
-impl FakeDaemon {
-    fn new() -> (Self, mpsc::Sender<ServiceEvent>, mpsc::Sender<ServiceEvent>) {
-        let (daemon, arc_tx, dbc_tx, _cmc_tx) = Self::with_cmc();
-        (daemon, arc_tx, dbc_tx)
-    }
-
-    /// The three browses' senders (a dropped one ends its browse).
-    fn with_cmc() -> (
-        Self,
-        mpsc::Sender<ServiceEvent>,
-        mpsc::Sender<ServiceEvent>,
-        mpsc::Sender<ServiceEvent>,
-    ) {
-        let (arc_tx, arc_rx) = mpsc::channel();
-        let (dbc_tx, dbc_rx) = mpsc::channel();
-        let (cmc_tx, cmc_rx) = mpsc::channel();
-        let map = HashMap::from([
-            (ARC_SERVICE.to_string(), arc_rx),
-            (DBC_SERVICE.to_string(), dbc_rx),
-            (CMC_SERVICE.to_string(), cmc_rx),
-        ]);
-        (FakeDaemon(RefCell::new(map)), arc_tx, dbc_tx, cmc_tx)
-    }
-}
-
-impl Browse for FakeDaemon {
-    type Events = mpsc::IntoIter<ServiceEvent>;
-    fn browse(&self, service: &str) -> Result<Self::Events, mdns_sd::Error> {
-        self.0
-            .borrow_mut()
-            .remove(service)
-            .map(mpsc::Receiver::into_iter)
-            .ok_or_else(|| mdns_sd::Error::Msg(format!("no browse of {service}")))
-    }
+    assert_eq!(dev.dbc, Some(at([10, 0, 0, 12], 4455)));
+    // Flow control gone: a change, the device stays.
+    let Some(Change::Changed(dev)) = d.set(Service::Dbc, "card", None) else {
+        panic!("changed");
+    };
+    assert_eq!(dev.dbc, None);
+    assert_eq!(d.set(Service::Dbc, "card", None), None);
 }
 
 #[test]
-fn live_discovery_lists_devices_and_sends_each_change_until_stopped() {
-    let (daemon, arc_tx, dbc_tx) = FakeDaemon::new();
-    let (discovery, changes) = Discovery::start_with(&daemon).unwrap();
-    arc_tx
-        .send(arc("card", "10.0.0.11", &[("model", "X1")]))
-        .unwrap();
-    let Change::Added(dev) = changes.recv_timeout(BOUND).unwrap() else {
-        panic!("an addition first");
-    };
-    assert_eq!(dev.name, "card");
-    dbc_tx.send(dbc("card", "10.0.0.11")).unwrap();
-    assert!(matches!(
-        changes.recv_timeout(BOUND).unwrap(),
-        Change::Changed(_)
-    ));
-    assert_eq!(discovery.devices().len(), 1);
-    assert_eq!(discovery.devices()[0].dbc, Some(at([10, 0, 0, 11], 4455)));
-    arc_tx.send(gone(ARC_SERVICE, "card")).unwrap();
+fn a_gone_arc_record_removes_the_device_and_an_unknown_one_is_none() {
+    let mut d = Devices::default();
+    assert_eq!(d.set(Service::Arc, "card", None), None);
+    d.set(Service::Arc, "Card", Some(&srv([10, 0, 0, 11], 4440, &[])));
     assert_eq!(
-        changes.recv_timeout(BOUND).unwrap(),
-        Change::Removed("card".to_string())
+        d.set(Service::Arc, "card", None),
+        Some(Change::Removed("Card".to_string()))
     );
-    assert!(discovery.devices().is_empty());
-    // The events end (the daemon's shutdown does that): the threads end.
-    drop((arc_tx, dbc_tx));
-    discovery.stop().unwrap();
-}
-
-#[test]
-fn the_list_follows_with_nobody_listening_for_changes() {
-    let (daemon, arc_tx, dbc_tx) = FakeDaemon::new();
-    let (discovery, changes) = Discovery::start_with(&daemon).unwrap();
-    drop(changes);
-    arc_tx.send(arc("card", "10.0.0.11", &[])).unwrap();
-    let deadline = Instant::now() + BOUND;
-    while discovery.devices().is_empty() {
-        assert!(Instant::now() < deadline, "the device was never listed");
-        std::thread::sleep(Duration::from_millis(5));
-    }
-    drop((arc_tx, dbc_tx));
-    discovery.stop().unwrap();
-}
-
-#[test]
-fn a_browse_that_does_not_start_is_an_error() {
-    let daemon = FakeDaemon(RefCell::new(HashMap::new()));
-    assert!(matches!(
-        Discovery::start_with(&daemon),
-        Err(DiscoverError::Browse(_))
-    ));
-}
-
-#[test]
-fn a_stop_with_events_still_open_is_a_timeout() {
-    let (daemon, arc_tx, dbc_tx) = FakeDaemon::new();
-    let (discovery, _changes) = Discovery::start_with(&daemon).unwrap();
-    let started = Instant::now();
-    assert!(matches!(discovery.stop(), Err(DiscoverError::StopTimeout)));
-    assert!(started.elapsed() >= STOP_WAIT);
-    drop((arc_tx, dbc_tx));
-}
-
-#[test]
-fn discovery_on_a_real_daemon_starts_and_stops() {
-    let (discovery, _changes) = Discovery::start(Ipv4Addr::LOCALHOST).unwrap();
-    discovery.stop().unwrap();
-}
-
-#[test]
-fn flow_control_withdrawn_from_a_device_without_it_changes_nothing() {
-    let mut d = Devices::default();
-    d.apply(&arc("card", "10.0.0.11", &[]));
-    assert_eq!(d.apply(&gone(DBC_SERVICE, "card")), None);
-    assert_eq!(d.list().len(), 1);
-}
-
-#[test]
-fn dropping_discovery_shuts_its_daemon_down() {
-    let (discovery, _changes) = Discovery::start(Ipv4Addr::LOCALHOST).unwrap();
-    let daemon = discovery.daemon().expect("its own daemon");
-    assert!(daemon.get_metrics().is_ok());
-    drop(discovery);
-    let deadline = Instant::now() + BOUND;
-    while !matches!(daemon.get_metrics(), Err(mdns_sd::Error::DaemonShutdown)) {
-        assert!(Instant::now() < deadline, "the daemon still runs");
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    assert!(d.list().is_empty() && d.entries.is_empty());
+    // A record with no address is no record.
+    let mut none = srv([10, 0, 0, 11], 4440, &[]);
+    none.ips.clear();
+    assert_eq!(d.set(Service::Arc, "card", Some(&none)), None);
+    assert!(d.entries.is_empty());
 }
 
 /// dcontroller (1.11): a controller maps a device to its heartbeats by the
@@ -329,40 +109,47 @@ fn dropping_discovery_shuts_its_daemon_down() {
 #[test]
 fn the_cmc_record_gives_the_device_id_its_heartbeat_carries() {
     let mut d = Devices::default();
-    assert_eq!(d.apply(&cmc("card", "10.0.0.11", "00000a4d07720001")), None);
-    let Some(Change::Added(dev)) = d.apply(&arc("card", "10.0.0.11", &[])) else {
+    let cmc = |id: &str| srv([10, 0, 0, 11], 8800, &[("id", id), ("process", "0")]);
+    assert_eq!(
+        d.set(Service::Cmc, "card", Some(&cmc("00000a4d07720001"))),
+        None
+    );
+    let Some(Change::Added(dev)) =
+        d.set(Service::Arc, "card", Some(&srv([10, 0, 0, 11], 4440, &[])))
+    else {
         panic!("listed");
     };
     assert_eq!(dev.device_id, Some([0, 0, 10, 77, 7, 114, 0, 1]));
     // A hardware id, upper case: read the same.
-    let Some(Change::Changed(dev)) = d.apply(&cmc("CARD", "10.0.0.11", "001DC10821C40000")) else {
+    let Some(Change::Changed(dev)) = d.set(Service::Cmc, "CARD", Some(&cmc("001DC10821C40000")))
+    else {
         panic!("changed");
     };
     assert_eq!(dev.device_id, Some([0, 0x1d, 0xc1, 0x08, 0x21, 0xc4, 0, 0]));
     // An id that does not read: none, the device still listed.
-    let Some(Change::Changed(dev)) = d.apply(&cmc("card", "10.0.0.11", "xyz")) else {
+    let Some(Change::Changed(dev)) = d.set(Service::Cmc, "card", Some(&cmc("xyz"))) else {
         panic!("changed");
     };
     assert_eq!(dev.device_id, None);
-    d.apply(&cmc("card", "10.0.0.11", "c8a362fffe2e958a"));
-    // The CMC record withdrawn: the id goes, the device stays.
-    let Some(Change::Changed(dev)) = d.apply(&gone(CMC_SERVICE, "card")) else {
+    d.set(Service::Cmc, "card", Some(&cmc("c8a362fffe2e958a")));
+    // The CMC record gone: the id goes, the device stays.
+    let Some(Change::Changed(dev)) = d.set(Service::Cmc, "card", None) else {
         panic!("changed");
     };
     assert_eq!(dev.device_id, None);
-    // Withdrawn last, a CMC record alone keeps no entry.
-    d.apply(&cmc("solo", "10.0.0.12", "0000000000000001"));
-    assert_eq!(d.apply(&gone(CMC_SERVICE, "solo")), None);
+    // Gone last, a CMC record alone keeps no entry.
+    d.set(Service::Cmc, "solo", Some(&cmc("0000000000000001")));
+    assert_eq!(d.set(Service::Cmc, "solo", None), None);
     assert_eq!(d.entries.len(), 1, "only card");
-    // The ARC record goes while the CMC record stays: removed from the list,
-    // kept until the CMC record goes too.
-    d.apply(&cmc("card", "10.0.0.11", "0000000000000002"));
+    // The ARC record goes while the CMC record stays: removed from the
+    // list, kept until the CMC record goes too.
+    d.set(Service::Cmc, "card", Some(&cmc("0000000000000002")));
     assert_eq!(
-        d.apply(&gone(ARC_SERVICE, "card")),
+        d.set(Service::Arc, "card", None),
         Some(Change::Removed("card".to_string()))
     );
     assert_eq!(d.entries.len(), 1);
-    d.apply(&gone(CMC_SERVICE, "card"));
+    d.set(Service::Cmc, "card", None);
     assert!(d.entries.is_empty());
 }
 
@@ -384,21 +171,368 @@ fn a_device_id_is_16_hex_digits() {
 }
 
 #[test]
-fn live_discovery_reads_the_cmc_record_too() {
-    let (daemon, arc_tx, dbc_tx, cmc_tx) = FakeDaemon::with_cmc();
-    let (discovery, changes) = Discovery::start_with(&daemon).unwrap();
-    arc_tx.send(arc("card", "10.0.0.11", &[])).unwrap();
-    assert!(matches!(
-        changes.recv_timeout(BOUND).unwrap(),
-        Change::Added(_)
-    ));
-    cmc_tx
-        .send(cmc("card", "10.0.0.11", "00000a4d070b0000"))
-        .unwrap();
-    let Change::Changed(dev) = changes.recv_timeout(BOUND).unwrap() else {
-        panic!("a change");
+fn the_list_is_bounded_and_txt_too() {
+    let mut d = Devices::default();
+    for i in 0..MAX_DEVICES {
+        let name = format!("d{i}");
+        assert!(
+            d.set(Service::Arc, &name, Some(&srv([10, 0, 0, 11], 4440, &[])))
+                .is_some()
+        );
+    }
+    assert_eq!(
+        d.set(
+            Service::Arc,
+            "one-more",
+            Some(&srv([10, 0, 0, 11], 4440, &[]))
+        ),
+        None
+    );
+    // A kept device still changes.
+    assert!(
+        d.set(Service::Arc, "d0", Some(&srv([10, 0, 0, 12], 4440, &[])))
+            .is_some()
+    );
+    let keys: Vec<String> = (0..MAX_TXT + 5).map(|i| format!("k{i:02}")).collect();
+    let txt: Vec<(&str, &str)> = keys.iter().map(|k| (k.as_str(), "v")).collect();
+    let Some(Change::Changed(dev)) =
+        d.set(Service::Arc, "d1", Some(&srv([10, 0, 0, 11], 4440, &txt)))
+    else {
+        panic!("changed");
     };
-    assert_eq!(dev.device_id, Some([0, 0, 10, 77, 7, 11, 0, 0]));
-    drop((arc_tx, dbc_tx, cmc_tx));
+    assert_eq!(dev.txt.len(), MAX_TXT);
+    assert!(dev.txt.contains_key("k00"), "the first keys kept");
+}
+
+#[test]
+fn a_record_name_keeps_its_case_and_needs_its_service_suffix() {
+    assert_eq!(
+        record_of("Card-1._netaudio-arc._udp.local."),
+        Some((Service::Arc, "Card-1".to_string()))
+    );
+    assert_eq!(
+        record_of("x._NETAUDIO-DBC._udp.local"),
+        Some((Service::Dbc, "x".to_string()))
+    );
+    assert_eq!(
+        record_of("a.b._netaudio-cmc._udp.local."),
+        Some((Service::Cmc, "a.b".to_string()))
+    );
+    for bad in [
+        "_netaudio-arc._udp.local.",
+        "._netaudio-arc._udp.local.",
+        "card_netaudio-arc._udp.local.",
+        "tx 1@card._netaudio-chan._udp.local.",
+        "card.local.",
+    ] {
+        assert_eq!(record_of(bad), None, "{bad:?}");
+    }
+    for s in [Service::Arc, Service::Dbc, Service::Cmc] {
+        assert_eq!(Service::of(s.ty()), Some(s));
+        assert_eq!(Service::of(&s.ty().to_ascii_uppercase()), Some(s));
+        assert_eq!(Service::of(s.ty().trim_end_matches('.')), Some(s));
+    }
+    assert_eq!(Service::of("_netaudio-chan._udp.local."), None);
+}
+
+/// A response with `answers`.
+fn response(answers: Vec<ResourceRecord<'static>>) -> Vec<u8> {
+    let mut p = Packet::new_reply(0);
+    p.answers = answers;
+    p.build_bytes_vec().unwrap()
+}
+
+fn ptr(ty: &'static str, instance: &'static str, ttl: u32) -> ResourceRecord<'static> {
+    ResourceRecord::new(
+        Name::new_unchecked(ty),
+        CLASS::IN,
+        ttl,
+        RData::PTR(PTR(Name::new_unchecked(instance))),
+    )
+}
+
+fn srv_rr(instance: &'static str, ttl: u32) -> ResourceRecord<'static> {
+    ResourceRecord::new(
+        Name::new_unchecked(instance),
+        CLASS::IN,
+        ttl,
+        RData::SRV(SRV {
+            priority: 0,
+            weight: 0,
+            port: 4440,
+            target: Name::new_unchecked("card.local"),
+        }),
+    )
+}
+
+#[test]
+fn a_datagram_names_the_instances_its_ptrs_point_at_and_its_goodbyes() {
+    let bytes = response(vec![
+        ptr(
+            "_netaudio-arc._udp.local",
+            "Card._netaudio-arc._udp.local",
+            4500,
+        ),
+        ptr(
+            "_netaudio-cmc._udp.local",
+            "Card._netaudio-cmc._udp.local",
+            4500,
+        ),
+        // Another service's PTR, and a PTR to an instance of another type.
+        ptr(
+            "_netaudio-chan._udp.local",
+            "tx 1@card._netaudio-chan._udp.local",
+            4500,
+        ),
+        ptr(
+            "_netaudio-arc._udp.local",
+            "card._netaudio-chan._udp.local",
+            4500,
+        ),
+        // A goodbye of the PTR and one of an SRV.
+        ptr(
+            "_netaudio-dbc._udp.local",
+            "Old._netaudio-dbc._udp.local",
+            0,
+        ),
+        srv_rr("Gone._netaudio-arc._udp.local", 0),
+        // A live SRV names nothing (a PTR does).
+        srv_rr("Other._netaudio-arc._udp.local", 120),
+    ]);
+    let h = heard(&bytes);
+    assert_eq!(
+        h.named,
+        [
+            (Service::Arc, "Card".to_string()),
+            (Service::Cmc, "Card".to_string())
+        ]
+    );
+    assert_eq!(
+        h.gone,
+        [
+            (Service::Dbc, "Old".to_string()),
+            (Service::Arc, "Gone".to_string())
+        ]
+    );
+    // A query, or bytes that do not read, say nothing.
+    assert_eq!(heard(&sweep_query(1)), Heard::default());
+    assert_eq!(heard(&[1, 2, 3]), Heard::default());
+}
+
+#[test]
+fn the_sweep_asks_the_three_services_ptr_once() {
+    let bytes = sweep_query(7);
+    let p = Packet::parse(&bytes).unwrap();
+    assert!(!p.has_flags(simple_dns::PacketFlag::RESPONSE));
+    assert_eq!(p.id(), 7);
+    let asked: Vec<String> = p.questions.iter().map(|q| q.qname.to_string()).collect();
+    let want: Vec<String> = SERVICES
+        .iter()
+        .map(|s| s.trim_end_matches('.').to_string())
+        .collect();
+    assert_eq!(asked, want);
+    assert!(
+        p.questions
+            .iter()
+            .all(|q| q.qtype == QTYPE::TYPE(TYPE::PTR) && !q.unicast_response)
+    );
+}
+
+#[test]
+fn a_sweep_waits_between_its_least_and_most_and_spreads() {
+    let waits: Vec<Duration> = (0..200u64).map(|s| sweep_after(s * 1_000_003)).collect();
+    assert!(
+        waits
+            .iter()
+            .all(|w| *w >= SWEEP && *w <= SWEEP + SWEEP_JITTER)
+    );
+    let spread = waits
+        .iter()
+        .max()
+        .unwrap()
+        .saturating_sub(*waits.iter().min().unwrap());
+    assert!(spread > SWEEP_JITTER / 2, "{spread:?}");
+    assert_eq!(sweep_after(0), SWEEP);
+}
+
+#[test]
+fn names_are_kept_named_or_fresh_and_forgotten_after_a_while() {
+    let mut n = Names::default();
+    let named = Heard {
+        named: vec![
+            (Service::Arc, "Card".to_string()),
+            (Service::Dbc, "card".to_string()),
+        ],
+        gone: Vec::new(),
+    };
+    assert_eq!(n.take(&named, 0), 2);
+    assert_eq!(n.take(&named, 1), 0, "known already");
+    assert_eq!(n.all(FORGET_NS - 1).len(), 2);
+    // Kept by a fresh record, forgotten without one.
+    n.touch(Service::Arc, "CARD", FORGET_NS - 1);
+    assert_eq!(n.all(FORGET_NS + 1), [(Service::Arc, "Card".to_string())]);
+    // A goodbye forgets at once.
+    let bye = Heard {
+        named: Vec::new(),
+        gone: vec![(Service::Arc, "card".to_string())],
+    };
+    n.take(&bye, FORGET_NS + 2);
+    assert!(n.all(FORGET_NS + 2).is_empty());
+    // Bounded.
+    let many = Heard {
+        named: (0..3 * MAX_DEVICES + 3)
+            .map(|i| (Service::Arc, format!("d{i}")))
+            .collect(),
+        gone: Vec::new(),
+    };
+    assert_eq!(n.take(&many, 0), 3 * MAX_DEVICES);
+}
+
+/// Devices' mDNS records answered as our own responder answers (each set
+/// on its own, sent back to the asker), every query's names logged. It
+/// answers until `BOUND` passes without a query.
+/// Every query's names, with the port it came from.
+type Asked = Arc<Mutex<Vec<(u16, String)>>>;
+
+fn responder(hosts: Vec<Vec<ServiceRecord>>) -> (SocketAddrV4, Asked) {
+    let sock = UdpSocket::bind((LOOPBACK, 0)).unwrap();
+    sock.set_read_timeout(Some(BOUND)).unwrap();
+    let std::net::SocketAddr::V4(at) = sock.local_addr().unwrap() else {
+        panic!("IPv4")
+    };
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let log = Arc::clone(&asked);
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 1500];
+        while let Ok((n, from)) = sock.recv_from(&mut buf) {
+            if let Ok(q) = Packet::parse(&buf[..n]) {
+                let names = q
+                    .questions
+                    .iter()
+                    .map(|q| (from.port(), q.qname.to_string()));
+                log.lock().unwrap().extend(names);
+            }
+            for recs in &hosts {
+                for d in crate::announce::responder::answers(&buf[..n], recs) {
+                    sock.send_to(&d, from).unwrap();
+                }
+            }
+        }
+    });
+    (at, asked)
+}
+
+fn rec(service: &'static str, name: &str, port: u16, txt: &[&str]) -> ServiceRecord {
+    ServiceRecord {
+        service,
+        instance: name.to_string(),
+        host: "card.local.".to_string(),
+        ip: LOOPBACK,
+        port,
+        txt: txt.iter().map(|s| (*s).to_string()).collect(),
+    }
+}
+
+/// The card's three records.
+fn card() -> Vec<ServiceRecord> {
+    vec![
+        rec(ARC_SERVICE, "Card", 4440, &["model=X1", "mf=Acme"]),
+        rec(DBC_SERVICE, "Card", 4455, &[]),
+        rec(CMC_SERVICE, "Card", 8800, &["id=00000a4d070b0000"]),
+    ]
+}
+
+/// Waits until `f` is true, at most `BOUND`.
+fn eventually(what: &str, f: impl Fn() -> bool) {
+    let deadline = Instant::now() + BOUND;
+    while !f() {
+        assert!(Instant::now() < deadline, "{what} never happened");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn live_discovery_sweeps_lists_a_device_and_drops_it_at_its_goodbye() {
+    let (mdns, asked) = responder(vec![card()]);
+    // The mDNS group stands in as a socket of the test's.
+    let group = UdpSocket::bind((LOOPBACK, 0)).unwrap();
+    let group_at = group.local_addr().unwrap();
+    let listener = group.try_clone().unwrap();
+    listener.set_read_timeout(Some(ROUND / 5)).unwrap();
+    let (discovery, changes) = Discovery::start_to(LOOPBACK, mdns, Some(listener)).unwrap();
+    let Change::Added(dev) = changes.recv_timeout(BOUND).unwrap() else {
+        panic!("an addition first");
+    };
+    assert_eq!(dev.name, "Card");
+    assert_eq!(dev.arc, SocketAddrV4::new(LOOPBACK, 4440));
+    assert_eq!(dev.txt.get("model").map(String::as_str), Some("X1"));
+    eventually("its flow control and id", || {
+        discovery.devices().first().is_some_and(|d| {
+            d.dbc == Some(SocketAddrV4::new(LOOPBACK, 4455))
+                && d.device_id == Some([0, 0, 10, 77, 7, 11, 0, 0])
+        })
+    });
+    // One sweep so far, from a port of our own: never mDNS's 5353, so its
+    // answers come back to us alone (dstack #141).
+    let queries = asked.lock().unwrap().clone();
+    let sweeps = queries
+        .iter()
+        .filter(|(_, n)| Service::of(n).is_some())
+        .count();
+    assert_eq!(sweeps, 3, "{queries:?}");
+    assert!(queries.iter().all(|(port, _)| *port != MDNS.port()));
+    // The device's goodbye on the group: gone at once.
+    let bye = response(vec![ptr(
+        "_netaudio-arc._udp.local",
+        "Card._netaudio-arc._udp.local",
+        0,
+    )]);
+    UdpSocket::bind((LOOPBACK, 0))
+        .unwrap()
+        .send_to(&bye, group_at)
+        .unwrap();
+    loop {
+        match changes.recv_timeout(BOUND).unwrap() {
+            Change::Removed(name) => break assert_eq!(name, "Card"),
+            Change::Changed(_) => {}
+            other => panic!("{other:?}"),
+        }
+    }
+    assert!(discovery.devices().is_empty());
+    let started = Instant::now();
+    discovery.stop().unwrap();
+    assert!(started.elapsed() < STOP_WAIT);
+}
+
+#[test]
+fn the_list_follows_with_nobody_listening_for_changes() {
+    let (mdns, _) = responder(vec![card()]);
+    let (discovery, changes) = Discovery::start_to(LOOPBACK, mdns, None).unwrap();
+    drop(changes);
+    eventually("the device listed", || !discovery.devices().is_empty());
+    discovery.stop().unwrap();
+}
+
+#[test]
+fn dropping_discovery_ends_its_thread() {
+    let (mdns, _) = responder(Vec::new());
+    let (discovery, _changes) = Discovery::start_to(LOOPBACK, mdns, None).unwrap();
+    let stop = Arc::clone(&discovery.stop);
+    drop(discovery);
+    assert!(stop.load(Ordering::Relaxed));
+}
+
+#[test]
+fn discovery_that_cannot_bind_its_address_is_an_error() {
+    let not_ours = Ipv4Addr::new(192, 0, 2, 1);
+    assert!(matches!(
+        Discovery::start_to(not_ours, MDNS, None),
+        Err(DiscoverError::Io(_))
+    ));
+}
+
+#[test]
+fn discovery_on_loopback_starts_and_stops() {
+    let (discovery, _changes) = Discovery::start(LOOPBACK).unwrap();
     discovery.stop().unwrap();
 }

@@ -477,6 +477,7 @@ fn a_device_s_record_completes_with_its_srv_and_its_host_s_addresses_no_txt() {
     let want = Srv {
         port: 4440,
         ips: vec![b, a],
+        txt: HashMap::new(),
     };
     assert_eq!(t.record(ARC_NAME, S), Some(want.clone()));
     assert_eq!(t.record("Card._Netaudio-Arc._udp.local", S), Some(want));
