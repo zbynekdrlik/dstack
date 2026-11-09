@@ -590,3 +590,110 @@ fn a_forgotten_record_is_gone_at_once() {
     i.forget("card", "_netaudio-arc._udp.local.");
     assert_eq!(i.record("card", "_netaudio-arc._udp.local."), None);
 }
+
+/// The records of an answer to [`ARC_NAME`]: SRV (4440 on `card.local`),
+/// the TXT `model=X1` when `txt`, and an A of that host for each of `ips`.
+fn arc_records(ips: &[Ipv4Addr], txt: bool) -> Vec<ResourceRecord<'static>> {
+    let name = Name::new_unchecked(ARC_NAME.trim_end_matches('.'));
+    let mut out = vec![ResourceRecord::new(
+        name.clone(),
+        CLASS::IN,
+        120,
+        RData::SRV(SRV {
+            priority: 0,
+            weight: 0,
+            port: 4440,
+            target: Name::new_unchecked("card.local"),
+        }),
+    )];
+    if txt {
+        let mut t = TXT::new();
+        t.add_string("model=X1").unwrap();
+        out.push(ResourceRecord::new(name, CLASS::IN, 120, RData::TXT(t)));
+    }
+    for ip in ips {
+        out.push(ResourceRecord::new(
+            Name::new_unchecked("card.local"),
+            CLASS::IN,
+            120,
+            RData::A(A {
+                address: u32::from(*ip),
+            }),
+        ));
+    }
+    out
+}
+
+/// [`arc_answer`] with the record's TXT (`model=X1`) too.
+fn arc_answer_txt(ips: &[Ipv4Addr]) -> Vec<u8> {
+    let mut p = Packet::new_reply(0);
+    p.answers = arc_records(ips, true);
+    p.build_bytes_vec().unwrap()
+}
+
+/// dstack #141 (v0.6.58, dcontroller saw devices removed and added again):
+/// another host's query carries known answers in its answer section; a
+/// query is no answer and changes nothing.
+#[test]
+fn a_query_s_known_answers_are_no_answer() {
+    let mut t = Table::default();
+    t.record(ARC_NAME, 0);
+    // A query with the record as its known answer.
+    let mut q = Packet::new_query(1);
+    q.questions.push(Question::new(
+        Name::new_unchecked(ARC_NAME.trim_end_matches('.')),
+        QTYPE::TYPE(TYPE::SRV),
+        QCLASS::CLASS(CLASS::IN),
+        false,
+    ));
+    q.answers = arc_records(&[Ipv4Addr::new(10, 0, 0, 5)], true);
+    let bytes = q.build_bytes_vec().unwrap();
+    assert!(
+        !Packet::parse(&bytes)
+            .unwrap()
+            .has_flags(simple_dns::PacketFlag::RESPONSE)
+    );
+    assert_eq!(read(&bytes, ARC_NAME), None);
+    assert_eq!(t.answer(&bytes, S), 0);
+    assert_eq!(t.record(ARC_NAME, S), None);
+}
+
+/// dstack #141 (v0.6.58): an answer with SRV and A but no TXT keeps the
+/// TXT the record had (a device's id, its model), and an address seen
+/// within the record's age stays among its addresses: a device's listing
+/// never flips with what one datagram happened to carry.
+#[test]
+fn a_partial_answer_keeps_the_record_s_txt_and_recent_addresses() {
+    let mut t = Table::default();
+    t.record(ARC_NAME, 0);
+    let (low, lan) = (Ipv4Addr::new(10, 0, 0, 5), Ipv4Addr::new(10, 0, 9, 230));
+    assert_eq!(t.answer(&arc_answer_txt(&[low]), S), 1);
+    assert_eq!(t.answer(&arc_answer(&[lan]), 2 * S), 1);
+    let r = t.record(ARC_NAME, 2 * S).unwrap();
+    assert_eq!(r.txt.get("model").map(String::as_str), Some("X1"));
+    assert_eq!(r.ips, [low, lan]);
+    // An address not seen for the record's age is dropped.
+    let late = S + MAX_AGE_NS;
+    assert_eq!(t.answer(&arc_answer(&[lan]), late), 1);
+    assert_eq!(t.record(ARC_NAME, late).unwrap().ips, [lan]);
+}
+
+/// dstack #141 (v0.6.58): a refresh whose answer lacks the target's A asks
+/// for that A; before, it asked the instance again and again until the
+/// record aged out and the device was listed as gone.
+#[test]
+fn a_refresh_without_the_host_s_address_asks_for_the_address() {
+    let mut t = Table::default();
+    t.record(ARC_NAME, 0);
+    t.due(0);
+    assert_eq!(t.answer(&arc_answer(&[Ipv4Addr::new(10, 0, 0, 5)]), S), 1);
+    let refresh = S + MAX_AGE_NS / 2;
+    assert_eq!(t.due(refresh), [Ask::Instance(key(ARC_NAME))]);
+    // The refresh's answer: SRV only.
+    assert_eq!(t.answer(&arc_answer(&[]), refresh), 0);
+    let next = refresh + REQUERY_NS;
+    assert_eq!(
+        t.due(next),
+        [Ask::Host(key(ARC_NAME), "card.local".to_string())]
+    );
+}
