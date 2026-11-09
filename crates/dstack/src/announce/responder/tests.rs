@@ -204,3 +204,96 @@ fn the_responder_answers_from_the_published_records_and_stops_when_dropped() {
     drop(r);
     assert!(stop.load(Ordering::Relaxed));
 }
+
+/// A device of `n` channels as band-asio-dante publishes them: a channel
+/// record each, with Dante's keys.
+fn many(n: usize) -> Vec<ServiceRecord> {
+    (1..=n)
+        .map(|k| ServiceRecord {
+            service: CHAN_SERVICE,
+            instance: format!("Channel name {k:02}@band-asio-dante"),
+            host: HOST.to_string(),
+            ip: IP,
+            port: 4455,
+            txt: [
+                format!("id={k}"),
+                "rate=96000".to_string(),
+                "en=24".to_string(),
+                "enc=24".to_string(),
+                "latency_ns=1000000".to_string(),
+                "fpp=32,4".to_string(),
+                "nchan=8".to_string(),
+                "dbcp1=0x1102".to_string(),
+                "dbcp=0x1004".to_string(),
+                "pdbcp=1".to_string(),
+            ]
+            .to_vec(),
+        })
+        .collect()
+}
+
+#[test]
+fn a_big_answer_is_split_into_datagrams_with_no_ip_fragments() {
+    // dstack #141: band's 64 channels went out as one 9 kB datagram (IP
+    // fragments flooded to every port); a UltimoX2 receiver read a spike at
+    // each. Every datagram fits MAX_DATAGRAM; every instance's PTR travels
+    // with its SRV and TXT; every datagram that names the host carries its A.
+    let recs = many(64);
+    let replies = answers(
+        &ask("_netaudio-chan._udp.local", QTYPE::TYPE(TYPE::PTR)),
+        &recs,
+    );
+    assert!(replies.len() > 1);
+    let mut ptrs = Vec::new();
+    for r in &replies {
+        assert!(r.len() <= MAX_DATAGRAM, "{} bytes", r.len());
+        let (answered, more) = records_of(r);
+        for (name, t) in &answered {
+            assert_eq!(*t, TYPE::PTR);
+            assert_eq!(name, "_netaudio-chan._udp.local");
+        }
+        let p = Packet::parse(r).unwrap();
+        for rr in &p.answers {
+            let RData::PTR(PTR(target)) = &rr.rdata else {
+                panic!("a PTR")
+            };
+            let inst = target.to_string();
+            assert!(more.contains(&(inst.clone(), TYPE::SRV)), "{inst} SRV");
+            assert!(more.contains(&(inst.clone(), TYPE::TXT)), "{inst} TXT");
+            ptrs.push(inst);
+        }
+        assert!(more.contains(&("test-device.local".to_string(), TYPE::A)));
+    }
+    ptrs.sort();
+    let mut want: Vec<String> = recs.iter().map(full).map(|f| key(&f)).collect();
+    want.sort();
+    let got: Vec<String> = ptrs.iter().map(|p| key(p)).collect();
+    assert_eq!(got, want, "every channel answered once");
+}
+
+#[test]
+fn an_answer_packs_as_many_channels_as_fit_and_sends_an_oversize_one_alone() {
+    // 64 channels of ~150 bytes each fit in far fewer datagrams than one a
+    // channel: each datagram but the last has no room for the next one.
+    let recs = many(64);
+    let replies = answers(
+        &ask("_netaudio-chan._udp.local", QTYPE::TYPE(TYPE::PTR)),
+        &recs,
+    );
+    assert!(replies.len() <= 64 / 6, "{} datagrams", replies.len());
+    for r in &replies[..replies.len() - 1] {
+        assert!(r.len() > MAX_DATAGRAM / 2, "{} bytes", r.len());
+    }
+    // A channel whose TXT alone passes a datagram still goes out, alone.
+    let mut big = many(2);
+    big[0].txt = (0..12)
+        .map(|k| format!("k{k}={}", "x".repeat(200)))
+        .collect();
+    let replies = answers(
+        &ask("_netaudio-chan._udp.local", QTYPE::TYPE(TYPE::PTR)),
+        &big,
+    );
+    assert_eq!(replies.len(), 2);
+    assert!(replies[0].len() > MAX_DATAGRAM);
+    assert!(replies[1].len() <= MAX_DATAGRAM);
+}

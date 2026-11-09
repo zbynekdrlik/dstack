@@ -45,6 +45,10 @@ pub const PORT: u16 = 5353;
 /// a service type's PTR, as mdns-sd gives them.
 const HOST_TTL: u32 = 120;
 const OTHER_TTL: u32 = 4500;
+/// The largest reply datagram: mdns-sd's own (`MAX_PKT_DEFAULT`), one
+/// Ethernet frame with no IP fragments, as Audinate devices send their
+/// answers (dstack #141).
+pub const MAX_DATAGRAM: usize = 1452;
 /// The thread's receive wait (it looks at the stop between two).
 const WAIT: Duration = Duration::from_millis(250);
 
@@ -73,18 +77,40 @@ pub fn reply_to(from: SocketAddrV4) -> SocketAddrV4 {
     }
 }
 
-/// The reply to the query `bytes` for the records `recs`; `None` when it
-/// asks for none of them (or is no query).
+/// The reply to the query `bytes` for the records `recs`, its first
+/// datagram; `None` when it asks for none of them (or is no query). See
+/// [`answers`] for all of it.
 pub fn answer(bytes: &[u8], recs: &[ServiceRecord]) -> Option<Vec<u8>> {
-    let query = Packet::parse(bytes).ok()?;
+    answers(bytes, recs).into_iter().next()
+}
+
+/// One answer and the records that go along with it in its datagram.
+struct Group<'a> {
+    answers: Vec<ResourceRecord<'a>>,
+    along: Vec<ResourceRecord<'a>>,
+    /// Its records name our host: the datagram carries the host's A.
+    needs_a: bool,
+}
+
+/// The reply to the query `bytes` for the records `recs` as datagrams of
+/// at most [`MAX_DATAGRAM`] bytes; empty when it asks for none of them (or
+/// is no query). Each PTR of a service type travels with its instance's
+/// SRV and TXT, and every datagram whose records name our host carries its
+/// A, so each datagram reads on its own. A single group too big for one
+/// datagram is sent alone (RFC 6762 §17 allows it; ours never are).
+pub fn answers(bytes: &[u8], recs: &[ServiceRecord]) -> Vec<Vec<u8>> {
+    let Ok(query) = Packet::parse(bytes) else {
+        return Vec::new();
+    };
     if query.has_flags(simple_dns::PacketFlag::RESPONSE) {
-        return None;
+        return Vec::new();
     }
+    let Some(first) = recs.first() else {
+        return Vec::new();
+    };
     let fulls: Vec<String> = recs.iter().map(full).collect();
-    let mut reply = Packet::new_reply(0);
-    // Instances whose PTR is answered: their SRV and TXT go along.
-    let mut along: Vec<usize> = Vec::new();
-    let (mut a_answered, mut a_wanted) = (false, false);
+    let mut groups: Vec<Group> = Vec::new();
+    let mut a_answered = false;
     for q in &query.questions {
         let asked = key(&q.qname.to_string());
         let t = match q.qtype {
@@ -95,43 +121,90 @@ pub fn answer(bytes: &[u8], recs: &[ServiceRecord]) -> Option<Vec<u8>> {
         let wants = |want: TYPE| t.is_none_or(|t| t == want);
         for (i, rec) in recs.iter().enumerate() {
             if asked == key(rec.service) && wants(TYPE::PTR) {
-                reply.answers.push(ResourceRecord::new(
-                    dns(rec.service),
-                    CLASS::IN,
-                    OTHER_TTL,
-                    RData::PTR(PTR(dns(&fulls[i]))),
-                ));
-                along.push(i);
+                let Some(txt) = txt(rec, &fulls[i]) else {
+                    return Vec::new();
+                };
+                groups.push(Group {
+                    answers: vec![ResourceRecord::new(
+                        dns(rec.service),
+                        CLASS::IN,
+                        OTHER_TTL,
+                        RData::PTR(PTR(dns(&fulls[i]))),
+                    )],
+                    along: vec![srv(rec, &fulls[i]), txt],
+                    needs_a: true,
+                });
             }
             if asked == key(&fulls[i]) {
+                let mut answers = Vec::new();
+                let mut needs_a = false;
                 if wants(TYPE::SRV) {
-                    reply.answers.push(srv(rec, &fulls[i]));
-                    a_wanted = true;
+                    answers.push(srv(rec, &fulls[i]));
+                    needs_a = true;
                 }
                 if wants(TYPE::TXT) {
-                    reply.answers.push(txt(rec, &fulls[i])?);
+                    let Some(txt) = txt(rec, &fulls[i]) else {
+                        return Vec::new();
+                    };
+                    answers.push(txt);
+                }
+                if !answers.is_empty() {
+                    groups.push(Group {
+                        answers,
+                        along: Vec::new(),
+                        needs_a,
+                    });
                 }
             }
             if asked == key(&rec.host) && wants(TYPE::A) && !a_answered {
-                reply.answers.push(a(rec));
+                groups.push(Group {
+                    answers: vec![a(rec)],
+                    along: Vec::new(),
+                    needs_a: false,
+                });
                 a_answered = true;
             }
         }
     }
-    let first = recs.first()?;
-    if reply.answers.is_empty() {
-        return None;
+    pack(&groups, first, a_answered)
+}
+
+/// `groups` packed in order into datagrams of at most [`MAX_DATAGRAM`]
+/// bytes, our host's A (`first`'s) added to each whose records name the
+/// host unless the reply answers it already (`a_answered`).
+fn pack(groups: &[Group], first: &ServiceRecord, a_answered: bool) -> Vec<Vec<u8>> {
+    let build = |gs: &[&Group]| -> Option<Vec<u8>> {
+        let mut reply = Packet::new_reply(0);
+        for g in gs {
+            reply.answers.extend(g.answers.iter().cloned());
+            reply.additional_records.extend(g.along.iter().cloned());
+        }
+        if !a_answered && gs.iter().any(|g| g.needs_a) {
+            reply.additional_records.push(a(first));
+        }
+        // Names compressed (RFC 1035 §4.1.4), as every mDNS sender does: a
+        // channel's PTR, SRV and TXT repeat its long instance name.
+        reply.build_bytes_vec_compressed().ok()
+    };
+    let mut out = Vec::new();
+    let mut current: Vec<&Group> = Vec::new();
+    let mut built: Option<Vec<u8>> = None;
+    for g in groups {
+        current.push(g);
+        match build(&current) {
+            Some(b) if b.len() <= MAX_DATAGRAM || current.len() == 1 => built = Some(b),
+            _ => {
+                // Too big with this group: the datagram so far goes, the
+                // group starts the next one.
+                current.pop();
+                out.extend(built.take());
+                current = vec![g];
+                built = build(&current);
+            }
+        }
     }
-    for &i in &along {
-        reply.additional_records.push(srv(&recs[i], &fulls[i]));
-        reply.additional_records.push(txt(&recs[i], &fulls[i])?);
-        a_wanted = true;
-    }
-    // Every record is our one host's: its A once.
-    if a_wanted && !a_answered {
-        reply.additional_records.push(a(first));
-    }
-    reply.build_bytes_vec().ok()
+    out.extend(built);
+    out
 }
 
 fn srv<'a>(rec: &'a ServiceRecord, full: &'a str) -> ResourceRecord<'a> {
@@ -251,12 +324,14 @@ fn serve(sock: &UdpSocket, published: &Mutex<Vec<ServiceRecord>>, stop: &AtomicB
                 continue;
             }
         };
-        let reply = {
+        let replies = {
             let recs = published.lock().unwrap_or_else(PoisonError::into_inner);
-            answer(&buf[..n], &recs)
+            answers(&buf[..n], &recs)
         };
-        if let Some(Err(e)) = reply.map(|r| sock.send_to(&r, reply_to(from))) {
-            debug!(%e, "mDNS answer from the device's address not sent");
+        for r in replies {
+            if let Err(e) = sock.send_to(&r, reply_to(from)) {
+                debug!(%e, "mDNS answer from the device's address not sent");
+            }
         }
     }
 }
