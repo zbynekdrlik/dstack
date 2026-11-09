@@ -228,6 +228,7 @@ fn our_server(client: &UdpSocket) -> (tokio::runtime::Runtime, std::net::SocketA
             info,
             heartbeat: "127.0.0.1:9".parse().unwrap(),
             every: Duration::from_secs(3600),
+            mdns: "127.0.0.1:9".parse().unwrap(),
         },
         Arc::new(NoClock),
         Arc::new(Changes::default()),

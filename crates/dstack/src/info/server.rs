@@ -147,7 +147,8 @@ impl Sources {
     }
 }
 
-/// Where the info packets go, and how often the heartbeat.
+/// Where the device's group traffic goes (the info packets, the heartbeat
+/// and the direct mDNS queries), and how often the heartbeat.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Multicast {
     /// Where the replies and the start's board and product info go.
@@ -156,6 +157,10 @@ pub struct Multicast {
     pub heartbeat: SocketAddrV4,
     /// The heartbeat's period; never zero.
     pub every: Duration,
+    /// Where the direct mDNS instance queries go
+    /// ([`crate::subscribe::instance`]): mDNS's group, or a test's
+    /// responder.
+    pub mdns: SocketAddrV4,
 }
 
 impl Multicast {
@@ -164,6 +169,7 @@ impl Multicast {
         info: SocketAddrV4::new(INFO_GROUP, INFO_PORT),
         heartbeat: SocketAddrV4::new(HEARTBEAT_GROUP, HEARTBEAT_PORT),
         every: HEARTBEAT_EVERY,
+        mdns: crate::subscribe::instance::MDNS,
     };
 }
 

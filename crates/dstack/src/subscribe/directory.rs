@@ -8,7 +8,8 @@
 //! subscription to one of their channels never resolved (#72, 2026-10-26).
 //!
 //! - [`Book`] (pure, times in ns): the devices' `_netaudio-arc` and
-//!   `_netaudio-dbc` records (at most [`MAX_RECORDS`]), and for each device a
+//!   `_netaudio-dbc` records ([`Book::set_record`], at most
+//!   [`MAX_RECORDS`]), and for each device a
 //!   lookup asked about (at most [`MAX_DEVICES`]) its directory and its
 //!   reads. [`Book::lookup`] answers only from a directory read within
 //!   [`Timing::max_age_ns`]; otherwise it registers a want and answers
@@ -17,14 +18,15 @@
 //! - [`ArcDirectory`]: the [`Resolver`] the manager calls every tick. A
 //!   lookup only reads the book and registers a want, never the network.
 //!   [`ArcDirectory::start`] (once, after a lookup first reached it, by the
-//!   daemon): **one** mdns-sd browse each of `_netaudio-arc` and
-//!   `_netaudio-dbc` for the device's life (their queries are mdns-sd's, as
-//!   [`super::resolve::Mdns`]'s), a thread keeping each browse's events,
-//!   and **one** reader thread that performs the reads one after another
-//!   ([`crate::arc::client`]).
-//! - [`Network`]: `_netaudio-chan` first; a device any channel record names
-//!   resolves through those records only and never reaches its ARC. The
-//!   daemon's resolver is `(Own, Network)`.
+//!   daemon): the direct queries of the two records of each device looked
+//!   up ([`super::instance`], dstack #141: no browse of a whole service,
+//!   whose answers and their refreshes burst over the whole network), and
+//!   **one** reader thread that performs the reads one after another
+//!   ([`crate::arc::client`]). Every lookup first takes the queries'
+//!   answers for its device into the book.
+//! - [`Network`]: the channel's own record first, by its direct query; a
+//!   channel with no answer within the query's grace is read through its
+//!   device's ARC. The daemon's resolver is `(Own, Network)`.
 //!
 //! **Bounds (plan Review Focus 1, and the lesson of Dante Controller's loop
 //! against our refusals):** one reader for every device, so at most one
@@ -37,10 +39,8 @@
 //! 18, 36 and 72 s): a failed read, and a read asked because a name was not
 //! listed, count a failure; a read of a missing or old directory that
 //! succeeds clears them. A device's ARC is read only with both its records
-//! known, its `_netaudio-arc` one for [`Timing::settle_ns`] (both browses
-//! start together with the channel records' one, so a device that
-//! publishes channel records has them in long before), and only while no
-//! channel record names it ([`Network`]).
+//! known, its `_netaudio-arc` one for [`Timing::settle_ns`], and only for a
+//! channel whose own record did not answer ([`Network`]).
 //!
 //! **What an ARC-resolved channel offers** ([`offer`]): flow control at the
 //! `_netaudio-dbc` record's address and port; the id, rate and bits its
@@ -69,20 +69,19 @@
 //! the reads, failures and lookups that found nothing ([`Counts`]).
 
 use std::collections::BTreeMap;
+use std::io;
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+#[cfg(test)]
 use mdns_sd::ServiceEvent;
 use tracing::{debug, info};
 
 use super::instance::Instances;
-use super::resolve::{
-    Advertised, Applied, Browse, BrowseError, Mdns, Multicast, MulticastLookup, Resolver,
-    lowest_ipv4,
-};
+use super::resolve::{Advertised, Applied, Multicast, MulticastLookup, Resolver};
 use super::retry_after;
 use crate::announce::ARC_SERVICE;
 use crate::arc::client::{Directory, REPLY_TIMEOUT, ReadError, TxChannel, Udp, read_directory};
@@ -112,7 +111,7 @@ pub const MAX_AGE_NS: u64 = 60_000_000_000;
 pub const MAX_RECORDS: usize = 256;
 /// How long after the first multicast lookup a device with no
 /// `_netaudio-arc` record yet is waited for ([`Book::multicast`]): the
-/// browse's first answers come within it, so no unicast flow is asked for
+/// direct query's first answers come within it, so no unicast flow is asked for
 /// at start before a transmitter's multicast flows are known.
 pub const RECORD_GRACE_NS: u64 = 2_000_000_000;
 /// The most devices a lookup asked about (their directories and reads).
@@ -374,13 +373,16 @@ pub struct Book {
 
 /// Which of the two services a record is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Service {
+pub enum Service {
+    /// `_netaudio-arc`.
     Arc,
+    /// `_netaudio-dbc`.
     Dbc,
 }
 
 /// The service `ty` names, and the device of its record `fullname` (case
 /// aside).
+#[cfg(test)]
 fn record_of(ty: &str, fullname: &str) -> Option<(Service, String)> {
     let service = if ty.eq_ignore_ascii_case(ARC_SERVICE) {
         Service::Arc
@@ -420,57 +422,79 @@ impl Book {
     }
 
     /// Keeps what a browse event of `_netaudio-arc` or `_netaudio-dbc` says,
-    /// at `now`.
+    /// at `now` (the tests' records).
+    #[cfg(test)]
     pub fn apply(&mut self, ev: &ServiceEvent, now: u64) -> Applied {
         match ev {
             ServiceEvent::ServiceResolved(r) => {
                 let Some((service, device)) = record_of(&r.ty_domain, r.get_fullname()) else {
                     return Applied::Ignored;
                 };
-                let Some(ip) = lowest_ipv4(r) else {
-                    return Applied::Ignored;
-                };
-                if self.records.len() >= MAX_RECORDS && !self.records.contains_key(&device) {
-                    return Applied::Ignored;
-                }
-                let rec = self.records.entry(device).or_default();
-                let at = Some(SocketAddrV4::new(ip, r.get_port()));
-                match service {
-                    Service::Arc => {
-                        if rec.arc.is_none() {
-                            rec.since = now;
-                        }
-                        rec.arc = at;
-                        rec.arc_ips = ipv4s(r);
-                    }
-                    Service::Dbc => rec.dbc = at,
-                }
-                Applied::Resolved
+                self.set_record(service, &device, Some((r.get_port(), &ipv4s(r))), now)
             }
             ServiceEvent::ServiceRemoved(ty, fullname) => {
                 let Some((service, device)) = record_of(ty, fullname) else {
                     return Applied::Ignored;
                 };
-                let Some(rec) = self.records.get_mut(&device) else {
-                    return Applied::Ignored;
-                };
-                let gone = match service {
-                    Service::Arc => {
-                        rec.arc_ips.clear();
-                        rec.arc.take()
-                    }
-                    Service::Dbc => rec.dbc.take(),
-                };
-                if rec.arc.is_none() && rec.dbc.is_none() {
-                    self.records.remove(&device);
-                }
-                match gone {
-                    Some(_) => Applied::Removed,
-                    None => Applied::Ignored,
-                }
+                self.set_record(service, &device, None, now)
             }
             _ => Applied::Ignored,
         }
+    }
+
+    /// Keeps `device`'s (case aside) record of `service` at `now`: its port
+    /// and addresses, or `None` when it is gone. A record with no address
+    /// is not kept; of its addresses the lowest [`MAX_ARC_ADDRESSES`] are.
+    pub fn set_record(
+        &mut self,
+        service: Service,
+        device: &str,
+        record: Option<(u16, &[Ipv4Addr])>,
+        now: u64,
+    ) -> Applied {
+        let device = device.to_ascii_lowercase();
+        let Some((port, ips)) = record else {
+            let Some(rec) = self.records.get_mut(&device) else {
+                return Applied::Ignored;
+            };
+            let gone = match service {
+                Service::Arc => {
+                    rec.arc_ips.clear();
+                    rec.arc.take()
+                }
+                Service::Dbc => rec.dbc.take(),
+            };
+            if rec.arc.is_none() && rec.dbc.is_none() {
+                self.records.remove(&device);
+            }
+            return match gone {
+                Some(_) => Applied::Removed,
+                None => Applied::Ignored,
+            };
+        };
+        let mut ips = ips.to_vec();
+        ips.sort_unstable();
+        ips.dedup();
+        ips.truncate(MAX_ARC_ADDRESSES);
+        let Some(&lowest) = ips.first() else {
+            return Applied::Ignored;
+        };
+        if self.records.len() >= MAX_RECORDS && !self.records.contains_key(&device) {
+            return Applied::Ignored;
+        }
+        let rec = self.records.entry(device).or_default();
+        let at = Some(SocketAddrV4::new(lowest, port));
+        match service {
+            Service::Arc => {
+                if rec.arc.is_none() {
+                    rec.since = now;
+                }
+                rec.arc = at;
+                rec.arc_ips = ips;
+            }
+            Service::Dbc => rec.dbc = at,
+        }
+        Applied::Resolved
     }
 
     /// `device`'s ARC (case aside) at `ip`: its `_netaudio-arc` record's
@@ -588,7 +612,7 @@ impl Book {
     /// Only its `_netaudio-arc` record is needed, read at once (no settle:
     /// the list needs no other record). A device without that record is
     /// [`MulticastLookup::Unknown`] for [`RECORD_GRACE_NS`] after the first
-    /// multicast lookup (the browse may not have answered yet), then
+    /// multicast lookup (its query may not have answered yet), then
     /// [`MulticastLookup::None`]; so is one past [`MAX_DEVICES`].
     pub fn multicast(&mut self, device: &str, a: &Advertised, now: u64) -> MulticastLookup {
         let key = device.to_ascii_lowercase();
@@ -715,7 +739,7 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// What the lookups, the browse threads and the reader share.
+/// What the lookups and the reader share.
 #[derive(Debug)]
 struct Shared {
     book: Mutex<Book>,
@@ -733,19 +757,16 @@ impl Shared {
     }
 }
 
-/// A record's IPv4 addresses, lowest first, at most [`MAX_ARC_ADDRESSES`].
+/// A record's IPv4 addresses ([`Book::set_record`] orders and bounds them).
+#[cfg(test)]
 fn ipv4s(r: &mdns_sd::ResolvedService) -> Vec<Ipv4Addr> {
-    let mut ips: Vec<Ipv4Addr> = r
-        .get_addresses()
+    r.get_addresses()
         .iter()
         .filter_map(|a| match a.to_ip_addr() {
             std::net::IpAddr::V4(v4) => Some(v4),
             std::net::IpAddr::V6(_) => None,
         })
-        .collect();
-    ips.sort_unstable();
-    ips.truncate(MAX_ARC_ADDRESSES);
-    ips
+        .collect()
 }
 
 /// A device's ARC address from the directory's `_netaudio-arc` records
@@ -754,17 +775,19 @@ fn ipv4s(r: &mdns_sd::ResolvedService) -> Vec<Ipv4Addr> {
 pub struct ArcRecords {
     shared: Arc<Shared>,
     asked: Arc<AtomicBool>,
+    records: Arc<Mutex<Instances>>,
 }
 
 impl ArcRecords {
     /// `device`'s ARC at `ip` ([`Book::arc_at`]). Asking marks the directory
-    /// asked: the daemon then starts its browses, as for an RX lookup.
+    /// asked: the daemon then starts its queries, as for an RX lookup.
     pub fn arc_at(&self, device: &str, ip: Ipv4Addr) -> Result<SocketAddrV4, ArcMiss> {
         self.asked.store(true, Ordering::Relaxed);
+        sync(&self.shared, &self.records, device);
         lock(&self.shared.book).arc_at(device, ip)
     }
 
-    /// Keeps a browse event, as the browse threads do (tests).
+    /// Keeps a browse event as a record (tests).
     #[cfg(test)]
     pub(crate) fn keep(&self, ev: &ServiceEvent) {
         lock(&self.shared.book).apply(ev, 0);
@@ -776,6 +799,10 @@ impl ArcRecords {
 pub struct ArcDirectory {
     shared: Arc<Shared>,
     asked: Arc<AtomicBool>,
+    /// The direct queries of the records of the devices looked up.
+    records: Arc<Mutex<Instances>>,
+    /// Its start was tried (once, whatever came of it).
+    tried: bool,
     threads: Vec<JoinHandle<()>>,
 }
 
@@ -796,6 +823,8 @@ impl ArcDirectory {
                 timing,
             }),
             asked: Arc::new(AtomicBool::new(false)),
+            records: Arc::default(),
+            tried: false,
             threads: Vec::new(),
         }
     }
@@ -806,6 +835,7 @@ impl ArcDirectory {
         ArcRecords {
             shared: Arc::clone(&self.shared),
             asked: Arc::clone(&self.asked),
+            records: Arc::clone(&self.records),
         }
     }
 
@@ -823,43 +853,46 @@ impl ArcDirectory {
         !self.threads.is_empty()
     }
 
+    /// Its start was tried: a start that failed is not tried again (the
+    /// channels with records of their own still resolve).
+    pub fn tried(&self) -> bool {
+        self.tried
+    }
+
     /// The directory's counts so far.
     pub fn counts(&self) -> Counts {
         lock(&self.shared.book).counts()
     }
 
-    /// Starts the browses of `_netaudio-arc` and `_netaudio-dbc` on
-    /// `daemon` and the reader (reads from our address `ip`, every request
-    /// counted in `requests`), once for this directory's life: `true` when
-    /// it started now, `false` when it had.
-    pub fn start<B: Browse>(
+    /// Starts the direct queries of the devices' `_netaudio-arc` and
+    /// `_netaudio-dbc` records (from our address `ip` to `mdns`, mDNS's
+    /// group or a test's responder) and the reader (reads from `ip`, every
+    /// request counted in `requests`), once for this directory's life:
+    /// `true` when it started now, `false` when it had.
+    pub fn start(
         &mut self,
-        daemon: &B,
         ip: Ipv4Addr,
+        mdns: SocketAddrV4,
         requests: Arc<Requests>,
-    ) -> Result<bool, BrowseError> {
+    ) -> io::Result<bool> {
         if self.started() {
             return Ok(false);
         }
-        let browses = [
-            ("dstack-mdns-arc", daemon.browse(ARC_SERVICE)?),
-            ("dstack-mdns-dbc", daemon.browse(DBC_SERVICE)?),
-        ];
-        for (name, events) in browses {
-            let shared = Arc::clone(&self.shared);
-            self.threads.push(
-                std::thread::Builder::new()
-                    .name(name.to_string())
-                    .spawn(move || keep(events, &shared))?,
-            );
-        }
+        self.tried = true;
+        lock(&self.records).start_to(ip, mdns)?;
+        self.start_reader(ip, requests)?;
+        Ok(true)
+    }
+
+    /// The reader alone (reads from `ip`).
+    fn start_reader(&mut self, ip: Ipv4Addr, requests: Arc<Requests>) -> io::Result<()> {
         let shared = Arc::clone(&self.shared);
         self.threads.push(
             std::thread::Builder::new()
                 .name("dstack-arc-read".to_string())
                 .spawn(move || reader(&shared, ip, &requests))?,
         );
-        Ok(true)
+        Ok(())
     }
 
     /// Waits for every thread to end (the stop asked, the daemon's events
@@ -880,8 +913,8 @@ impl ArcDirectory {
 
 impl Drop for ArcDirectory {
     /// The reader sends nothing more and ends (woken at once, or after the
-    /// request it waits on); the browse threads end with the mDNS daemon's
-    /// events.
+    /// request it waits on); the query thread ends with the last holder of
+    /// the records (a receiver reader keeps a handle).
     fn drop(&mut self) {
         ask_stop(&self.shared);
     }
@@ -896,9 +929,33 @@ fn ask_stop(shared: &Shared) {
     shared.wake.notify_all();
 }
 
+/// The book takes what the direct queries know of `device`'s two records
+/// now (a record not fresh is dropped), once the queries run.
+fn sync(shared: &Shared, records: &Mutex<Instances>, device: &str) {
+    let records = lock(records);
+    if !records.started() {
+        return;
+    }
+    let found = [
+        (Service::Arc, records.record(device, ARC_SERVICE)),
+        (Service::Dbc, records.record(device, DBC_SERVICE)),
+    ];
+    let now = shared.now();
+    let mut book = lock(&shared.book);
+    for (service, record) in found {
+        book.set_record(
+            service,
+            device,
+            record.as_ref().map(|r| (r.port, r.ips.as_slice())),
+            now,
+        );
+    }
+}
+
 impl Resolver for ArcDirectory {
     fn lookup(&self, tx_device: &str, tx_channel: &str) -> Option<Advertised> {
         self.asked.store(true, Ordering::Relaxed);
+        sync(&self.shared, &self.records, tx_device);
         let now = self.shared.now();
         let mut book = lock(&self.shared.book);
         let wants = book.wants();
@@ -911,6 +968,7 @@ impl Resolver for ArcDirectory {
 
     fn multicast(&self, tx_device: &str, _tx_channel: &str, a: &Advertised) -> MulticastLookup {
         self.asked.store(true, Ordering::Relaxed);
+        sync(&self.shared, &self.records, tx_device);
         let now = self.shared.now();
         let mut book = lock(&self.shared.book);
         let wants = book.wants();
@@ -919,14 +977,6 @@ impl Resolver for ArcDirectory {
             self.shared.wake.notify_all();
         }
         found
-    }
-}
-
-/// A browse thread: every event into the book, until the events end.
-fn keep(events: impl Iterator<Item = ServiceEvent>, shared: &Shared) {
-    for ev in events {
-        let now = shared.now();
-        lock(&shared.book).apply(&ev, now);
     }
 }
 
@@ -1096,31 +1146,23 @@ impl Report {
     }
 }
 
-/// The network's channels: `_netaudio-chan` records first; a device no
-/// browsed record names is asked for the instance's record directly (a
-/// transmitter that answers no browse query, [`super::instance`]), and read
-/// through its ARC while that has no answer.
+/// The network's channels: each one's record asked directly
+/// ([`super::instance`]); a channel with no answer within the query's grace
+/// is read through its device's ARC.
 #[derive(Debug, Default)]
 pub struct Network {
-    pub chan: Mdns,
     pub instances: Instances,
     pub arc: ArcDirectory,
 }
 
 impl Resolver for Network {
     fn lookup(&self, tx_device: &str, tx_channel: &str) -> Option<Advertised> {
-        self.chan.lookup(tx_device, tx_channel).or_else(|| {
-            if self.chan.names_device(tx_device) {
+        self.instances.lookup(tx_device, tx_channel).or_else(|| {
+            if self.instances.young(tx_device, tx_channel) {
+                // Its direct query may still answer: no ARC yet.
                 None
             } else {
-                self.instances.lookup(tx_device, tx_channel).or_else(|| {
-                    if self.instances.young(tx_device, tx_channel) {
-                        // Its direct query may still answer: no ARC yet.
-                        None
-                    } else {
-                        self.arc.lookup(tx_device, tx_channel)
-                    }
-                })
+                self.arc.lookup(tx_device, tx_channel)
             }
         })
     }

@@ -616,6 +616,12 @@ pub struct Control {
     seen: [u64; MAX_FLOWS],
     /// The flow sockets' DSCP marks (Windows), following the table.
     marks: super::dscp::Marks,
+    /// The neighbour tables as last read (`/proc/net/arp`'s text, the
+    /// Windows rows): a flow made between two ticks takes its receiver's MAC
+    /// from them at once ([`TxShared::publish`]), not 100 ms later on the UDP
+    /// socket (dstack #141).
+    arp: String,
+    neighbours: Vec<bypass::Neighbour>,
 }
 
 /// What the control side and the TX thread share.
@@ -736,6 +742,8 @@ impl TxShared {
                 table: TxTable::with_slots(seed, slots),
                 seen: [0; MAX_FLOWS],
                 marks: super::dscp::Marks::new(),
+                arp: String::new(),
+                neighbours: Vec::new(),
             }),
             plans: std::array::from_fn(|_| Cell::new()),
             sockets,
@@ -766,6 +774,12 @@ impl TxShared {
                 cell.write(w);
             }
         }
+        // Each slot's MAC from the tables as last read: a new flow goes on
+        // the direct path from its first packet when its receiver is there.
+        if let Some((_, nic)) = &self.direct {
+            self.set_macs(c, &c.arp, nic);
+        }
+        self.set_host_macs(c, &c.neighbours);
     }
 
     /// The control side's tick: a slot whose receiver was heard since the
@@ -782,18 +796,17 @@ impl TxShared {
             }
         }
         let expired = c.table.expire(now);
-        self.publish(&c);
         let dests: [Option<SocketAddrV4>; MAX_FLOWS] =
             std::array::from_fn(|slot| c.table.plan(slot).dest);
         c.marks.follow(&self.sockets, &dests);
-        if let Some((_, nic)) = &self.direct {
-            let table = std::fs::read_to_string("/proc/net/arp").unwrap_or_default();
-            self.set_macs(&c, &table, nic);
+        if self.direct.is_some() {
+            c.arp = std::fs::read_to_string("/proc/net/arp").unwrap_or_default();
         }
         #[cfg(windows)]
         if self.host.get().is_some() {
-            self.set_host_macs(&c, &bypass::windows::neighbours());
+            c.neighbours = bypass::windows::neighbours();
         }
+        self.publish(&c);
         expired
     }
 

@@ -482,3 +482,22 @@ impl std::io::Write for Writer {
         Ok(())
     }
 }
+
+/// dstack #141 (band, 9.11.2026): a flow made after the neighbour table
+/// was read went out on the UDP socket until the next tick (82 ms, 984
+/// packets), and a 250 µs receiver read them late. A new flow's slot takes
+/// its MAC from the table already read when the request is answered.
+#[test]
+fn a_new_flow_takes_its_receivers_mac_when_it_is_made_not_at_the_next_tick() {
+    let shared = shared();
+    let _rec = host(&shared, Take::All);
+    let (_s, rx) = receiver(RESOLVED);
+    let slot = flow(&shared, rx, 8);
+    assert_eq!(shared.host_mac(slot), Some(PEER_MAC));
+    // Its receiver gone from the table, the next flow there stays on the UDP
+    // socket until the table holds it.
+    shared.set_neighbours(&[]);
+    let (_t, other) = receiver(RESOLVED);
+    let next = flow(&shared, other, 8);
+    assert_eq!(shared.host_mac(next), None);
+}

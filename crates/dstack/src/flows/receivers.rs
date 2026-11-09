@@ -10,7 +10,7 @@
 //! The read is the standard one, dcontroller's too: the settings
 //! ([`crate::arc::control::settings`], ARC 0x1100, start 0x2809) of the device that
 //! asked for the flow, at the ARC its `_netaudio-arc` record announces
-//! ([`ArcRecords`], the device's own browse; several devices on one PC each
+//! ([`ArcRecords`], asked by the device's direct query; several devices on one PC each
 //! have their own port), only when that record announces the flow's
 //! destination address among its addresses. Read-only: nothing is
 //! written to the receiver. A device several flows go to is read once a
