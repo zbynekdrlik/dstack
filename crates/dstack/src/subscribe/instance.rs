@@ -138,9 +138,14 @@ fn key(name: &str) -> String {
 }
 
 /// What datagram `bytes` says about `instance` (and every A record in it);
-/// `None` for a datagram that is no DNS answer.
+/// `None` for a datagram that is no DNS answer. A query is none either: its
+/// answer section holds the asker's known answers, which may be partial or
+/// old (dstack #141).
 pub fn read(bytes: &[u8], instance: &str) -> Option<Found> {
     let packet = Packet::parse(bytes).ok()?;
+    if !packet.has_flags(simple_dns::PacketFlag::RESPONSE) {
+        return None;
+    }
     let want = key(instance);
     let mut found = Found::default();
     for rr in packet.answers.iter().chain(&packet.additional_records) {
@@ -193,6 +198,13 @@ struct Entry {
     advert: Option<(Advertised, u64)>,
     /// A plain record, once complete, and when.
     srv: Option<(Srv, u64)>,
+    /// A plain record's addresses and when each was last answered: one
+    /// answered within [`MAX_AGE_NS`] stays among its addresses (dstack
+    /// #141: a datagram that carries only some of them changes nothing).
+    ips_seen: BTreeMap<Ipv4Addr, u64>,
+    /// A plain record's TXT as last answered: an answer without TXT keeps
+    /// it.
+    txt_kept: HashMap<String, String>,
     /// When its last query went out.
     asked: Option<u64>,
     /// Queries since its last answer.
@@ -312,7 +324,10 @@ impl Table {
             e.tries = e.tries.saturating_add(1);
             let answered = e.found.txt.is_some() || !is_channel(name);
             match &e.found.srv {
-                Some((_, host)) if answered && done.is_none() => {
+                // SRV (and TXT) in hand, not the target's address: ask for
+                // it, a refresh too (dstack #141: asking the instance again
+                // let the record age out).
+                Some((_, host)) if answered && !e.found.hosts.iter().any(|(h, _)| h == host) => {
                     out.push(Ask::Host(name.clone(), host.clone()));
                 }
                 _ => out.push(Ask::Instance(name.clone())),
@@ -345,25 +360,30 @@ impl Table {
                 let Some((port, host)) = &e.found.srv else {
                     continue;
                 };
-                let mut ips: Vec<Ipv4Addr> = e
+                let fresh: Vec<Ipv4Addr> = e
                     .found
                     .hosts
                     .iter()
                     .filter(|(h, _)| h == host)
                     .map(|&(_, ip)| ip)
                     .collect();
-                ips.sort_unstable();
-                ips.dedup();
-                if ips.is_empty() {
+                if fresh.is_empty() {
                     continue;
                 }
-                info!("a device's record read by a direct instance query");
-                let txt = e.found.txt.clone().unwrap_or_default();
+                for ip in fresh {
+                    e.ips_seen.insert(ip, now);
+                }
+                e.ips_seen
+                    .retain(|_, seen| now.saturating_sub(*seen) < MAX_AGE_NS);
+                if let Some(txt) = e.found.txt.take() {
+                    e.txt_kept = txt;
+                }
+                debug!("a device's record read by a direct instance query");
                 e.srv = Some((
                     Srv {
                         port: *port,
-                        ips,
-                        txt,
+                        ips: e.ips_seen.keys().copied().collect(),
+                        txt: e.txt_kept.clone(),
                     },
                     now,
                 ));

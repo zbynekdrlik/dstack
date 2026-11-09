@@ -321,10 +321,11 @@ pub const FORGET_NS: u64 = 300_000_000_000;
 
 /// The instances known, by service and name (case aside, the announced
 /// case kept), at most three for each of [`MAX_DEVICES`], each with the
-/// last time (ns) a PTR named it or its record was fresh.
+/// last time (ns) a PTR named it or its record was fresh, and the last
+/// time a PTR named it.
 #[derive(Debug, Default)]
 pub struct Names {
-    known: BTreeMap<(Service, String), (String, u64)>,
+    known: BTreeMap<(Service, String), (String, u64, u64)>,
 }
 
 impl Names {
@@ -340,7 +341,7 @@ impl Names {
             if self.known.len() >= MAX_NAMES && !self.known.contains_key(&key) {
                 continue;
             }
-            if self.known.insert(key, (name.clone(), now)).is_none() {
+            if self.known.insert(key, (name.clone(), now, now)).is_none() {
                 new += 1;
             }
         }
@@ -354,14 +355,26 @@ impl Names {
         }
     }
 
+    /// Whether a PTR named `name`'s instance of `service` within
+    /// [`crate::subscribe::instance::MAX_AGE_NS`] before `now`: the device
+    /// answers the sweeps, so a record of it that went unanswered for a
+    /// while does not take it off the list (dstack #141).
+    pub fn named_lately(&self, service: Service, name: &str, now: u64) -> bool {
+        self.known
+            .get(&(service, name.to_ascii_lowercase()))
+            .is_some_and(|(_, _, named)| {
+                now.saturating_sub(*named) < crate::subscribe::instance::MAX_AGE_NS
+            })
+    }
+
     /// Every instance known at `now`: its service and name. One with
     /// nothing heard of it for [`FORGET_NS`] is forgotten.
     pub fn all(&mut self, now: u64) -> Vec<(Service, String)> {
         self.known
-            .retain(|_, (_, seen)| now.saturating_sub(*seen) < FORGET_NS);
+            .retain(|_, (_, seen, _)| now.saturating_sub(*seen) < FORGET_NS);
         self.known
             .iter()
-            .map(|((service, _), (name, _))| (*service, name.clone()))
+            .map(|((service, _), (name, _, _))| (*service, name.clone()))
             .collect()
     }
 }
@@ -574,6 +587,9 @@ impl Run {
             let record = self.records.record(&name, service.ty());
             if record.is_some() {
                 names.touch(service, &name, now);
+            } else if names.named_lately(service, &name, now) {
+                // It answers the sweeps: its record's queries will catch up.
+                continue;
             }
             changes.push(lock(&self.devices).set(service, &name, record.as_ref()));
         }
