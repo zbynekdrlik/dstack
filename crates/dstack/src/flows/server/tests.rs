@@ -1021,3 +1021,63 @@ fn a_refusal_is_warned_again_only_after_a_minute() {
     assert_eq!(at(&mut dev, T + REFUSAL_WARN_EVERY_NS), 1);
     assert_eq!(at(&mut dev, T + REFUSAL_WARN_EVERY_NS + 1), 0);
 }
+
+#[test]
+fn held_requests_are_answered_once_ready_and_dropped_after_the_hold() {
+    let mut held = Held::default();
+    let t0 = Instant::now();
+    assert!(held.hold(t0, FROM, b"one"));
+    assert!(held.hold(t0 + ms(2_000), FROM, b"two"));
+    // Not ready: nothing to answer, nothing dropped yet.
+    assert_eq!(held.take(t0 + ms(2_999), false), (Vec::new(), 0));
+    // Past the hold, the first is dropped; ready, the second is answered.
+    let (due, dropped) = held.take(t0 + HOLD, true);
+    assert_eq!(dropped, 1);
+    assert_eq!(due, vec![(FROM, b"two".to_vec())]);
+    assert_eq!(held.take(t0 + HOLD, true), (Vec::new(), 0));
+    // Bounded.
+    for _ in 0..MAX_HELD {
+        assert!(held.hold(t0, FROM, b"x"));
+    }
+    assert!(!held.hold(t0, FROM, b"x"));
+}
+
+/// dstack #20 (dasio, band's restart 9.11.2026): a request that comes
+/// before our TX clock is ready is held and granted once it is, within the
+/// hold, so the receiver needs no retry.
+#[tokio::test]
+async fn a_request_before_the_clock_is_held_and_granted_once_ready() {
+    let rings: Arc<[Ring]> = Arc::from(Vec::new());
+    let shared = Arc::new(TxShared::new(cfg(), Ipv4Addr::LOCALHOST, rings, 7, &[]).unwrap());
+    let sock = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let server = sock.local_addr().unwrap();
+    let task = tokio::spawn(serve(
+        sock,
+        Arc::clone(&shared),
+        Arc::new(Requests::default()),
+    ));
+    let client = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let SocketAddr::V4(rx) = client.local_addr().unwrap() else {
+        panic!("an IPv4 socket");
+    };
+    client
+        .send_to(&build_request(5, &FlowRequest { rx, ..req() }), server)
+        .await
+        .unwrap();
+    let mut buf = [0u8; 2048];
+    // Not ready: no answer yet.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), client.recv_from(&mut buf))
+            .await
+            .is_err()
+    );
+    shared.set_clock_ready(true);
+    let (n, _) = tokio::time::timeout(Duration::from_secs(1), client.recv_from(&mut buf))
+        .await
+        .expect("granted once ready")
+        .unwrap();
+    let (h, _) = Header::parse(&buf[..n]).unwrap();
+    assert_eq!((h.seq, h.op2), (5, status::OK));
+    assert_eq!(shared.lock().table.flows().count(), 1);
+    task.abort();
+}

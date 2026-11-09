@@ -71,6 +71,47 @@ pub const GAP_CHECK: Duration = Duration::from_secs(1);
 /// How often the server keeps heard flows alive and expires the rest
 /// ([`TxShared::sync`]).
 pub const EXPIRE_CHECK: Duration = Duration::from_millis(100);
+/// How long a new-flow request that came before our TX clock was ready is
+/// held to be answered once it is (dstack #20): under every receiver's
+/// give-up (ours 4 s).
+pub const HOLD: Duration = Duration::from_secs(3);
+/// Requests held at most.
+pub const MAX_HELD: usize = 32;
+
+/// New-flow requests held until our TX clock is ready (dstack #20): at
+/// band's restart its clock was ready 41 ms after its start, and a request
+/// that came 0.35 s in, unanswered, cost iem-mixer's retry interval.
+#[derive(Debug, Default)]
+pub struct Held {
+    items: Vec<(Instant, SocketAddrV4, Vec<u8>)>,
+}
+
+impl Held {
+    /// Holds request `bytes` from `from`, come at `at`; `false` when
+    /// [`MAX_HELD`] are held already (it is then left unanswered).
+    pub fn hold(&mut self, at: Instant, from: SocketAddrV4, bytes: &[u8]) -> bool {
+        if self.items.len() >= MAX_HELD {
+            return false;
+        }
+        self.items.push((at, from, bytes.to_vec()));
+        true
+    }
+
+    /// At `now`: the held requests to answer now (all, once the clock is
+    /// `ready`) and how many were dropped as held longer than [`HOLD`].
+    pub fn take(&mut self, now: Instant, ready: bool) -> (Vec<(SocketAddrV4, Vec<u8>)>, usize) {
+        let before = self.items.len();
+        self.items
+            .retain(|(at, _, _)| now.saturating_duration_since(*at) < HOLD);
+        let dropped = before - self.items.len();
+        let due = if ready {
+            self.items.drain(..).map(|(_, from, b)| (from, b)).collect()
+        } else {
+            Vec::new()
+        };
+        (due, dropped)
+    }
+}
 /// A datagram read from the socket; anything longer is cut and so fails
 /// [`Header::parse`].
 const RECV_BUFFER: usize = 2048;
@@ -440,6 +481,7 @@ pub async fn serve(
     expiry.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut check = tokio::time::interval(GAP_CHECK);
     check.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let mut held = Held::default();
     loop {
         let report = tokio::select! {
             got = sock.recv_from(&mut buf) => {
@@ -459,6 +501,12 @@ pub async fn serve(
                         {
                             warn!(error = %e, "a flow-control reply could not be sent");
                         }
+                        if outcome == (FlowOutcome::Unanswered { op: op::REQUEST })
+                            && !shared.clock_ready()
+                        {
+                            let kept = held.hold(at, from, &buf[..n]);
+                            info!(peer = %from.ip(), kept, "a flow request held: our TX clock is not ready yet");
+                        }
                         outcome
                             .gap()
                             .and_then(|(op, gap)| gaps.record(at, IpAddr::V4(*from.ip()), op, gap))
@@ -467,6 +515,24 @@ pub async fn serve(
                 }
             }
             _ = expiry.tick() => {
+                let (due, dropped) = held.take(Instant::now(), shared.clock_ready());
+                if dropped > 0 {
+                    info!(dropped, "held flow requests dropped: our TX clock was not ready within 3 s");
+                }
+                for (from, bytes) in due {
+                    let outcome = {
+                        let mut c = shared.lock();
+                        let outcome = handle(&mut c.table, &shared.cfg, from, &bytes, shared.now_ns());
+                        shared.publish(&c);
+                        outcome
+                    };
+                    info!(peer = %from.ip(), "a held flow request answered: our TX clock is ready");
+                    if let FlowOutcome::Reply(reply) = &outcome
+                        && let Err(e) = sock.send_to(reply, SocketAddr::V4(from)).await
+                    {
+                        warn!(error = %e, "a flow-control reply could not be sent");
+                    }
+                }
                 let expired = shared.sync(shared.now_ns());
                 for slot in (0..MAX_FLOWS).filter(|s| expired >> s & 1 == 1) {
                     info!(slot, "TX flow expired: nothing from its receiver for 4 s");
