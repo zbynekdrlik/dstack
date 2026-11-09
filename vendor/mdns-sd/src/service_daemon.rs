@@ -5127,7 +5127,9 @@ fn unicast_on_intf(
     if let (SocketAddr::V4(dest), IpAddr::V4(source)) = (dest, source) {
         use std::os::unix::io::AsRawFd;
         match send_from_v4(socket.as_raw_fd(), packet, dest, source) {
-            Ok(sz) => trace!("sent unicast {sz} bytes on interface {if_name} to {dest} from {source}"),
+            Ok(sz) => {
+                trace!("sent unicast {sz} bytes on interface {if_name} to {dest} from {source}")
+            }
             Err(e) => trace!("Failed to send unicast to {dest} from {source} via {if_name:?}: {e}"),
         }
         return;
@@ -5183,7 +5185,8 @@ pub fn send_from_v4(
         iov_len: packet.len(),
     };
     // SAFETY: CMSG_SPACE is a pure size computation.
-    let space = unsafe { libc::CMSG_SPACE(std::mem::size_of::<libc::in_pktinfo>() as u32) } as usize;
+    let space =
+        unsafe { libc::CMSG_SPACE(std::mem::size_of::<libc::in_pktinfo>() as u32) } as usize;
     let mut control = vec![0u8; space];
     // SAFETY: an all-zero msghdr is valid; its fields are set below to
     // buffers that outlive the call.
