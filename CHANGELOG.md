@@ -1,6 +1,8 @@
 # Changelog
 
-## 0.6.61 (unreleased)
+## 0.6.62 (unreleased)
+
+## 0.6.61
 
 - Docs (dstack #141, #155): `docs/two-networks.md` says that a host with an input filter on its Dante leg must accept UDP from source port 5353. Direct mDNS queries are answered unicast from the device's port 5353, which conntrack does not tie to the multicast query. dcontroller's guard dropped them, and its listing lost every device after 120 s.
 
