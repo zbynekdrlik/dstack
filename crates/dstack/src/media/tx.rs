@@ -655,6 +655,9 @@ pub struct TxShared {
     /// The TX thread's state was built (it read `host` then): a sender
     /// set later is refused. Written under the control lock.
     tx_built: AtomicBool,
+    /// The TX thread's last pass had its clock ready (it can send); the
+    /// flow server grants no flow before (dstack #20).
+    clock_ready: AtomicBool,
     rings: Arc<[Ring]>,
     /// Each TX channel's engine ring (phase C): the engine's pump writes
     /// it, [`Source::Engine`] sends it; `None` for a channel the engine
@@ -730,6 +733,7 @@ impl TxShared {
             host_refused: AtomicU64::new(0),
             host_error: AtomicI32::new(0),
             tx_built: AtomicBool::new(false),
+            clock_ready: AtomicBool::new(false),
             sources: (0..cfg.tx.len()).map(|_| Cell::new()).collect(),
             peaks: (0..cfg.tx.len()).map(|_| AtomicU32::new(0)).collect(),
             advertised_ns: AtomicU64::new(cfg.advertised_latency_ns()),
@@ -763,6 +767,21 @@ impl TxShared {
     /// The control side's clock: ns since this state was built.
     pub fn now_ns(&self) -> u64 {
         u64::try_from(self.base.elapsed().as_nanos()).unwrap_or(u64::MAX)
+    }
+
+    /// Whether the TX thread's clock was ready at its last pass: it sends
+    /// a granted flow's packets ([`Transmitter::step`]).
+    pub fn clock_ready(&self) -> bool {
+        self.clock_ready.load(Ordering::Relaxed)
+    }
+
+    /// The TX thread's clock is `ready`: its [`Transmitter::step`] sets it
+    /// each pass (written only when it changes); a host or a test that
+    /// steps the TX itself may set it first.
+    pub fn set_clock_ready(&self, ready: bool) {
+        if self.clock_ready.load(Ordering::Relaxed) != ready {
+            self.clock_ready.store(ready, Ordering::Relaxed);
+        }
     }
 
     /// Hands the table's plans to the TX thread (the slots that changed).
@@ -1164,6 +1183,7 @@ impl Transmitter {
     /// realigned ([`shift`]), then every packet due sent. Nothing is sent
     /// before the clock is ready.
     pub fn step(&mut self, now_ns: Option<u64>, anchor: impl Into<clock::Anchor>) {
+        self.shared.set_clock_ready(now_ns.is_some());
         let anchor = anchor.into();
         // Taken with the clock read (the caller's), so a slow events pass
         // counts in the lateness of the packets after it.

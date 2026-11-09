@@ -114,6 +114,10 @@ async fn our_tx_counter_reaches_our_rx_clean_for_a_second_then_the_stop_releases
         Client::new(Ipv4Addr::LOCALHOST),
         Arc::clone(&changes),
     );
+    // Our TX grants a flow only once its clock is ready (dstack #20); the
+    // TX thread says so at its passes, which this test steps itself below.
+    assert!(!media.tx.clock_ready());
+    media.tx.set_clock_ready(true);
     driver.tick(&record);
     let (flow, answer) = tokio::time::timeout(BOUND, answers.recv())
         .await

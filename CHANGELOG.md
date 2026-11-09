@@ -1,6 +1,10 @@
 # Changelog
 
-## 0.6.62 (unreleased)
+## 0.6.63 (unreleased)
+
+- Fix (dstack #20, 9.11.2026): a transmitter grants no flow before its media clock is ready. After mbc-snv's restart its clock was ready only after ~80 s (waiting for dsync). Our TX sends nothing before that, yet the flow server granted stream-obs's requests: two silent flows, captured on both sides. The receiver gave each up after 6 s, its retries backed off to 72 s, and the stream program was silent for 2-4 min after every mbc restart. Now a flow request (0x0100) before the TX clock is ready gets no answer, as from a device not up yet, and the receiver asks again. Stops and updates are answered as before. New: `TxShared::clock_ready`, `TxShared::set_clock_ready` (a host or test that steps the TX itself); `flows::server::answer` takes `ready`. No latency change.
+
+## 0.6.62
 
 - Fix (dstack #148, 9.11.2026, a v0.6.56 regression): a receiver joined no multicast flow of a transmitter that answers no query for its `_netaudio-arc` record. The DT_20 is one: it answers only for its channels. Since v0.6.56 our devices keep no browse, so the ARC directory never had that record and never read the DT_20's 0x2600 list. band and iem-mixer then asked the DT_20 for unicast flows beside its multicast flow, and band got "No more flows (Tx)" on HAND 1 and PETA. Now, past the record's 2 s grace (`RECORD_GRACE_NS`), the flow list of a device with no record is read at its channel's flow-control address on ARC's port 4440. Read on dev1: the DT_20 answers 0x2600 at 10.77.7.102:4440 with its 2 flows. No API change, no latency change.
 

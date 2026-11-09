@@ -778,6 +778,7 @@ fn answer_drops_a_request_over_the_bound_unread() {
             &build_request(i, &r),
             t0 + ms(u64::from(i)),
             0,
+            true,
         );
         if usize::from(i) < PER_SPAN {
             assert_eq!(decode(outcome).header.op2, status::OK);
@@ -788,9 +789,59 @@ fn answer_drops_a_request_over_the_bound_unread() {
     assert_eq!(dev.flows().len(), PER_SPAN);
     // A datagram too short to name its opcode.
     assert_eq!(
-        answer(&mut limit, &mut dev.table, &dev.cfg, FROM, &[1], t0, 0),
+        answer(
+            &mut limit,
+            &mut dev.table,
+            &dev.cfg,
+            FROM,
+            &[1],
+            t0,
+            0,
+            true
+        ),
         FlowOutcome::Limited { op: 0 }
     );
+}
+
+/// dstack #20 (9.11.2026): after mbc-snv's restart its media clock was
+/// ready only after ~80 s. Our TX sends nothing before that, yet the flow
+/// server granted stream-obs's requests: two silent flows, the receiver
+/// gave up each after 6 s, and its retries backed off to 72 s. A request
+/// for a new flow before our TX clock is ready is not answered: the
+/// receiver sees the device as not up yet and asks again.
+#[test]
+fn a_flow_request_before_our_tx_clock_is_ready_is_unanswered_and_grants_nothing() {
+    let mut dev = Dev::new();
+    let mut limit = PeerLimit::new();
+    let t0 = Instant::now();
+    let bytes = build_request(1, &req());
+    assert_eq!(
+        answer(
+            &mut limit,
+            &mut dev.table,
+            &dev.cfg,
+            FROM,
+            &bytes,
+            t0,
+            0,
+            false
+        ),
+        FlowOutcome::Unanswered { op: op::REQUEST }
+    );
+    assert!(dev.flows().is_empty());
+    // Once it is ready, the same request is granted.
+    let granted = answer(
+        &mut limit,
+        &mut dev.table,
+        &dev.cfg,
+        FROM,
+        &bytes,
+        t0 + ms(200),
+        0,
+        true,
+    );
+    assert_eq!(decode(granted).header.op2, status::OK);
+    assert_eq!(dev.flows().len(), 1);
 }
 
 #[test]
@@ -901,6 +952,8 @@ fn random_datagrams_never_panic_and_every_answer_is_one_of_inferno_s() {
 async fn the_server_answers_the_requester_and_hands_the_flow_to_the_tx_thread() {
     let rings: Arc<[Ring]> = Arc::from(Vec::new());
     let shared = Arc::new(TxShared::new(cfg(), Ipv4Addr::LOCALHOST, rings, 7, &[]).unwrap());
+    // Our TX clock ready (no TX thread here to say so): flows are granted.
+    shared.set_clock_ready(true);
     let sock = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let server = sock.local_addr().unwrap();
     let requests = Arc::new(Requests::default());
