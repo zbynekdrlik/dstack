@@ -16,9 +16,11 @@
 //! It needs no low latency, and it asks the app for no real-time setup.
 //! Its media threads run unpinned and wait on the high-resolution timer
 //! without spinning a core. On Windows they ask THREAD_PRIORITY_HIGHEST
-//! within the process's normal class (no privilege, nothing process-wide)
-//! and opt out of power throttling (our threads only); elsewhere they run
-//! at normal priority. Very low latency is a different situation, for
+//! within the process's normal class, join MMCSS "Pro Audio" at
+//! AVRT_PRIORITY_HIGH (so an app's own MMCSS audio threads no longer
+//! outrank them; dstack #1) and opt out of power throttling, all without
+//! privilege, for our threads only, nothing process-wide; elsewhere they
+//! run at normal priority. Very low latency is a different situation, for
 //! iemmixer and dasio, which use `dstack` directly with its `low_latency`
 //! profile.
 //!

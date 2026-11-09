@@ -1464,8 +1464,11 @@ pub(crate) enum Priority {
     /// Real-time priority, as asked.
     Granted,
     /// THREAD_PRIORITY_HIGHEST, as the normal profile asks on Windows
-    /// (dstack #90).
+    /// (dstack #90), outside MMCSS (it refused).
     Highest,
+    /// The normal profile on Windows in MMCSS "Pro Audio" at
+    /// AVRT_PRIORITY_HIGH (dstack #1), HIGHEST beneath it.
+    Mmcss,
     /// Normal priority, as the normal profile asks elsewhere (dlink on
     /// Linux).
     Normal,
@@ -1473,15 +1476,29 @@ pub(crate) enum Priority {
     Refused,
 }
 
-/// The outcome for a thread that asked `asked` and whose ask succeeded
-/// (`granted`).
-pub(crate) fn priority_outcome(asked: ThreadPriority, granted: bool) -> Priority {
-    match (asked, granted) {
-        (ThreadPriority::Normal, _) => Priority::Normal,
-        (ThreadPriority::Realtime, true) => Priority::Granted,
-        (ThreadPriority::Highest, true) => Priority::Highest,
-        (_, false) => Priority::Refused,
+/// The outcome for a thread that asked `asked`, whose ask succeeded
+/// (`granted`) and which joined MMCSS (`mmcss`, asked only with
+/// [`ThreadPriority::Highest`], [`wants_mmcss`]).
+pub(crate) fn priority_outcome(asked: ThreadPriority, granted: bool, mmcss: bool) -> Priority {
+    match (asked, granted, mmcss) {
+        (ThreadPriority::Normal, _, _) => Priority::Normal,
+        (ThreadPriority::Realtime, true, _) => Priority::Granted,
+        (ThreadPriority::Highest, _, true) => Priority::Mmcss,
+        (ThreadPriority::Highest, true, false) => Priority::Highest,
+        (_, false, _) => Priority::Refused,
     }
+}
+
+/// Whether a media thread that asks `asked` also joins MMCSS "Pro Audio"
+/// (dstack #1, songplayer #285): the normal profile on Windows
+/// ([`ThreadPriority::Highest`]). Its THREAD_PRIORITY_HIGHEST is base 10 in
+/// the app's normal class, under an app's own MMCSS audio threads (the
+/// realtime band), which left SongPlayer's pump off the CPU for 22 to 41 ms
+/// under load (pump misses: silence in the in-ears). MMCSS asks no
+/// privilege and keeps its share of the CPU for the rest of the system.
+/// The real-time profile (dasio, iemmixer) is above MMCSS already.
+pub(crate) fn wants_mmcss(asked: ThreadPriority) -> bool {
+    asked == ThreadPriority::Highest
 }
 
 /// Asks the priority for the calling media thread named `thread` (its
@@ -1491,11 +1508,18 @@ pub(crate) fn priority_outcome(asked: ThreadPriority, granted: bool) -> Priority
 pub(crate) fn take_priority(thread: &str, priority: i32) {
     let asked =
         crate::clock::thread_priority_for(crate::clock::profile(), crate::clock::Os::current());
-    match priority_outcome(asked, ask_priority(asked, priority)) {
+    let granted = ask_priority(asked, priority);
+    let mmcss = wants_mmcss(asked) && join_mmcss();
+    match priority_outcome(asked, granted, mmcss) {
         Priority::Granted => info!(thread, priority, "runs SCHED_FIFO"),
-        Priority::Highest => info!(
+        Priority::Mmcss => info!(
             thread,
-            "runs at THREAD_PRIORITY_HIGHEST (the normal timing profile on Windows)"
+            "runs in MMCSS Pro Audio at AVRT_PRIORITY_HIGH (the normal timing profile on Windows)"
+        ),
+        Priority::Highest => warn!(
+            thread,
+            error = %std::io::Error::last_os_error(),
+            "MMCSS refused: runs at THREAD_PRIORITY_HIGHEST (the normal timing profile on Windows)"
         ),
         Priority::Normal => info!(
             thread,
@@ -1713,7 +1737,8 @@ pub const WINDOWS_HIGHEST: i32 = 2;
 /// `priority` (the Linux `SCHED_FIFO` number): [`windows_thread_priority`]
 /// for real-time, THREAD_PRIORITY_HIGHEST within the process's normal
 /// class for the normal profile (dstack #90: no privilege, nothing
-/// process-wide, no setup asked of the app), none at normal.
+/// process-wide, no setup asked of the app; the thread then also joins
+/// MMCSS 'Pro Audio' on Windows), none at normal.
 pub fn windows_priority_for(asked: ThreadPriority, priority: i32) -> Option<i32> {
     match asked {
         ThreadPriority::Realtime => Some(windows_thread_priority(priority)),
@@ -1772,6 +1797,39 @@ pub(crate) fn unthrottle() -> bool {
 
 #[cfg(not(any(target_os = "linux", windows)))]
 pub(crate) fn ask_priority(_asked: ThreadPriority, _priority: i32) -> bool {
+    false
+}
+
+/// On Windows: the calling thread joins MMCSS's "Pro Audio" task at
+/// AVRT_PRIORITY_HIGH, for the thread's life ([`wants_mmcss`]); `false`
+/// when MMCSS refuses (its service stopped), and the thread keeps its
+/// priority.
+#[cfg(windows)]
+pub(crate) fn join_mmcss() -> bool {
+    use windows_sys::Win32::System::Threading::{
+        AVRT_PRIORITY_HIGH, AvSetMmThreadCharacteristicsW, AvSetMmThreadPriority,
+    };
+    let mut index = 0u32;
+    // SAFETY: `MMCSS_TASK` is a NUL-terminated UTF-16 string; `index` is a
+    // valid u32 the call writes.
+    let handle = unsafe { AvSetMmThreadCharacteristicsW(MMCSS_TASK.as_ptr(), &raw mut index) };
+    if handle.is_null() {
+        return false;
+    }
+    // SAFETY: the handle MMCSS just gave this thread.
+    unsafe { AvSetMmThreadPriority(handle, AVRT_PRIORITY_HIGH) != 0 }
+}
+
+/// MMCSS's task "Pro Audio", NUL-terminated UTF-16 (no allocation: a
+/// media thread joins at its start).
+#[cfg(windows)]
+const MMCSS_TASK: [u16; 10] = [
+    0x50, 0x72, 0x6f, 0x20, 0x41, 0x75, 0x64, 0x69, 0x6f, 0, // "Pro Audio\0"
+];
+
+/// Elsewhere there is no MMCSS.
+#[cfg(not(windows))]
+pub(crate) fn join_mmcss() -> bool {
     false
 }
 

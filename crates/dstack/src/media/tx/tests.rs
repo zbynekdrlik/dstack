@@ -2424,12 +2424,55 @@ fn a_device_latency_set_live_moves_the_advertised_latency_and_the_late_count() {
 #[test]
 fn a_thread_s_priority_is_granted_highest_normal_by_profile_or_refused() {
     use crate::clock::ThreadPriority as Asked;
-    assert_eq!(priority_outcome(Asked::Realtime, true), Priority::Granted);
-    assert_eq!(priority_outcome(Asked::Realtime, false), Priority::Refused);
-    assert_eq!(priority_outcome(Asked::Highest, true), Priority::Highest);
-    assert_eq!(priority_outcome(Asked::Highest, false), Priority::Refused);
-    assert_eq!(priority_outcome(Asked::Normal, false), Priority::Normal);
-    assert_eq!(priority_outcome(Asked::Normal, true), Priority::Normal);
+    for mmcss in [false, true] {
+        let realtime = priority_outcome(Asked::Realtime, true, mmcss);
+        assert_eq!(realtime, Priority::Granted);
+        let refused = priority_outcome(Asked::Realtime, false, mmcss);
+        assert_eq!(refused, Priority::Refused);
+        assert_eq!(
+            priority_outcome(Asked::Normal, false, mmcss),
+            Priority::Normal
+        );
+        assert_eq!(
+            priority_outcome(Asked::Normal, true, mmcss),
+            Priority::Normal
+        );
+    }
+    assert_eq!(
+        priority_outcome(Asked::Highest, true, false),
+        Priority::Highest
+    );
+    assert_eq!(
+        priority_outcome(Asked::Highest, false, false),
+        Priority::Refused
+    );
+    // dstack #1: in MMCSS, whatever the level beneath it.
+    assert_eq!(
+        priority_outcome(Asked::Highest, true, true),
+        Priority::Mmcss
+    );
+    assert_eq!(
+        priority_outcome(Asked::Highest, false, true),
+        Priority::Mmcss
+    );
+}
+
+/// dstack #1 (songplayer #285): only the normal profile's Windows threads
+/// join MMCSS; the real-time profile is above it, and the normal profile
+/// elsewhere asks nothing.
+#[test]
+fn only_the_normal_profile_on_windows_joins_mmcss() {
+    use crate::clock::ThreadPriority as Asked;
+    assert!(wants_mmcss(Asked::Highest));
+    assert!(!wants_mmcss(Asked::Realtime));
+    assert!(!wants_mmcss(Asked::Normal));
+}
+
+/// No MMCSS off Windows: a thread never claims to have joined it.
+#[cfg(not(windows))]
+#[test]
+fn off_windows_no_thread_joins_mmcss() {
+    assert!(!join_mmcss());
 }
 
 #[test]
