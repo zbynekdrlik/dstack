@@ -59,7 +59,7 @@ use crate::info::{Changes, Identity, InfoBuilder, Multicast, NetInfo};
 use crate::subscribe::TICK;
 use crate::subscribe::directory::{self, ArcDirectory, Network};
 use crate::subscribe::instance::Instances;
-use crate::subscribe::resolve::{Browse, BrowseError, Mdns, Own};
+use crate::subscribe::resolve::Own;
 use crate::{arc, cmc, flows, info};
 use media::{Driver, Media, THREADS_WAIT};
 
@@ -560,8 +560,6 @@ pub enum ServeError {
     Control(io::Error),
     #[error("the media threads did not start: {0}")]
     Threads(io::Error),
-    #[error("the channel records' browse did not start: {0}")]
-    Browse(#[from] BrowseError),
     #[error("announcing the device: {0}")]
     Announce(#[from] AnnounceError),
 }
@@ -600,12 +598,11 @@ pub struct Sockets {
     pub flows: UdpSocket,
 }
 
-/// The network's channels: one browse of the channel records, and a device
-/// that publishes none read through its ARC, asked for the config's
+/// The network's channels: each channel's record asked directly, and a
+/// device that publishes none read through its ARC, asked for the config's
 /// `arc_rx_fpp` frames a packet.
 fn network_of(cfg: &DeviceConfig) -> Network {
     Network {
-        chan: Mdns::new(),
         instances: Instances::new(),
         arc: ArcDirectory::new(directory::Timing::of(cfg)),
     }
@@ -646,12 +643,13 @@ fn receiver_reader(
 /// heartbeat with `media`'s records where `multicast` says (the info
 /// server, [`info::serve_info`]), runs `media`'s TX and RX threads and its
 /// manager every [`TICK`] ([`Driver`]: the channel records it resolves are
-/// our own and those of one mDNS browse, started at the first
-/// subscription; a device no channel record names is read through its ARC,
-/// [`Network`], whose browses and reader start once a lookup reached
-/// them), serves `control` (the control socket's server, the
+/// our own and those its direct mDNS queries read, sent to `multicast.mdns`
+/// once a lookup reached them, never a browse of a whole service, dstack
+/// #141; a channel with no record is read through its device's ARC,
+/// [`Network`], whose record queries and reader start once a lookup
+/// reached them), serves `control` (the control socket's server, the
 /// host's [`crate::ctl::serve_control`]), and announces again after every
-/// rename the ARC server saved. A failed announcement or browse, a server
+/// rename the ARC server saved. A failed announcement, a server
 /// that stops, or threads that do not start end it with an error (the
 /// service restarts the daemon; the state file holds every saved rename and
 /// subscription). Whatever ended it, every RX flow is then stopped at its
@@ -661,7 +659,7 @@ fn receiver_reader(
 /// (waited for [`THREADS_WAIT`]). The caller withdraws the records after
 /// it returns.
 #[allow(clippy::too_many_arguments)]
-pub async fn serve<R: Registry + Browse>(
+pub async fn serve<R: Registry>(
     sockets: Sockets,
     shared: Arc<Mutex<Device>>,
     announcer: &mut Announcer<R>,
@@ -672,6 +670,7 @@ pub async fn serve<R: Registry + Browse>(
     stop: impl Future<Output = ()>,
 ) -> Result<(), ServeError> {
     let ip = net.ip;
+    let mdns = multicast.mdns;
     let changed = Arc::new(Notify::new());
     let n = announce_device(&shared, announcer, ip)?;
     info!(
@@ -751,30 +750,19 @@ pub async fn serve<R: Registry + Browse>(
                     resolver.0 = Own::new(&device.state, &device.cfg, ip);
                     own_stale = false;
                 }
-                let subscribed = media
-                    .manager
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .subscribed();
-                if subscribed && !resolver.1.chan.started() {
-                    if let Err(e) = resolver.1.chan.start(announcer.registry()) {
-                        break Err(e.into());
-                    }
-                    info!("mDNS browse of the channel records started");
-                }
                 let instances = &mut resolver.1.instances;
                 if instances.asked() && !instances.tried() {
-                    match instances.start(ip) {
+                    match instances.start_to(ip, mdns) {
                         Ok(_) => info!("direct instance queries of channel records started"),
                         Err(e) => warn!(%e, "direct instance queries not started: records and ARC only"),
                     }
                 }
                 let arc = &mut resolver.1.arc;
-                if arc.asked() && !arc.started() {
-                    if let Err(e) = arc.start(announcer.registry(), ip, Arc::clone(&media.requests)) {
-                        break Err(e.into());
+                if arc.asked() && !arc.tried() {
+                    match arc.start(ip, mdns, Arc::clone(&media.requests)) {
+                        Ok(_) => info!("direct queries of the ARC and flow-control records and the ARC reader started"),
+                        Err(e) => warn!(%e, "ARC record queries not started: channel records only"),
                     }
-                    info!("mDNS browses of the ARC and flow-control records and the ARC reader started");
                 }
                 driver.tick(&resolver);
             }

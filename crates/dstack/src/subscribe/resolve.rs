@@ -13,30 +13,21 @@
 //!
 //! - [`Resolver`]: the manager's view, a lookup by device and channel name
 //!   (case aside, as mDNS compares names); no lookup sends anything.
-//! - [`Adverts`]: the records, kept from the events of one mDNS browse,
-//!   bounded at [`MAX_ADVERTS`].
-//! - [`Mdns`]: the records of the device's own mdns-sd daemon (on our
-//!   interface only, as the daemon is set up): **one** browse of
-//!   `_netaudio-chan` for the device's life, started at the first
-//!   subscription ([`Mdns::start`], at most once), its events kept by a
-//!   thread of their own. The queries it sends are mdns-sd's: a PTR query
-//!   1 s after the start, then at doubling intervals up to one an hour,
-//!   and each cached record's refresh at 80–95 % of its TTL (RFC 6762
-//!   §5.2); a transmitter's announcement (a reboot) reaches it with no
-//!   query of ours. Nothing here queries per lookup or per retry.
+//! - [`Adverts`]: channel records kept by name, bounded at
+//!   [`MAX_ADVERTS`].
 //! - [`Own`]: our own device's channels, from the records it announces
 //!   (a subscription to our own TX is resolved without the network).
 //!
-//! A device no channel record names ([`Adverts::names_device`]) is read
-//! through its ARC instead ([`super::directory`], plan Task 9b: the band's
-//! Yamaha Dante cards publish no `_netaudio-chan` record); [`Browse`] starts
-//! that directory's browses too.
+//! Another device's channel is asked by a direct query of its record
+//! ([`super::instance`]); a device keeps no browse of a whole service
+//! (dstack #141). A channel with no record is read through its device's
+//! ARC ([`super::directory`], plan Task 9b: the band's Yamaha Dante cards
+//! publish no `_netaudio-chan` record). [`Browse`] serves the network
+//! listing ([`crate::discover`]) only.
 
 use std::collections::HashMap;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddrV4};
-use std::sync::{Arc, Mutex, PoisonError};
-use std::thread::JoinHandle;
 
 use mdns_sd::{ResolvedService, ServiceDaemon, ServiceEvent};
 
@@ -231,21 +222,10 @@ pub enum Applied {
     Ignored,
 }
 
-/// The channel records known, by name (case aside), and how many each
-/// device has.
+/// The channel records known, by name (case aside).
 #[derive(Debug, Default)]
 pub struct Adverts {
     map: HashMap<String, Advertised>,
-    devices: HashMap<String, usize>,
-}
-
-/// The device a channel record's name (as [`instance`] writes it) names.
-fn device_of(name: &str) -> Option<&str> {
-    let (_, device) = name
-        .strip_suffix(CHAN_SERVICE)?
-        .strip_suffix('.')?
-        .rsplit_once('@')?;
-    Some(device)
 }
 
 impl Adverts {
@@ -259,24 +239,12 @@ impl Adverts {
                 if self.map.len() >= MAX_ADVERTS && !self.map.contains_key(&name) {
                     return Applied::Ignored;
                 }
-                if let Some(device) = device_of(&name).filter(|_| !self.map.contains_key(&name)) {
-                    *self.devices.entry(device.to_string()).or_default() += 1;
-                }
                 self.map.insert(name, a);
                 Applied::Resolved
             }
             ServiceEvent::ServiceRemoved(_, fullname) => {
-                let name = fullname.to_ascii_lowercase();
-                if self.map.remove(&name).is_none() {
+                if self.map.remove(&fullname.to_ascii_lowercase()).is_none() {
                     return Applied::Ignored;
-                }
-                if let Some(device) = device_of(&name)
-                    && let Some(n) = self.devices.get_mut(device)
-                {
-                    *n -= 1;
-                    if *n == 0 {
-                        self.devices.remove(device);
-                    }
                 }
                 Applied::Removed
             }
@@ -287,13 +255,6 @@ impl Adverts {
     /// The record of `channel` on `device`.
     pub fn get(&self, device: &str, channel: &str) -> Option<Advertised> {
         self.map.get(&instance(device, channel)).copied()
-    }
-
-    /// Whether any channel record names `device` (case aside): such a
-    /// device resolves through its records only, never through its ARC
-    /// ([`crate::subscribe::directory::Network`]).
-    pub fn names_device(&self, device: &str) -> bool {
-        self.devices.contains_key(&device.to_ascii_lowercase())
     }
 
     pub fn len(&self) -> usize {
@@ -363,81 +324,6 @@ pub enum BrowseError {
     Mdns(#[from] mdns_sd::Error),
     #[error("the browse's thread: {0}")]
     Thread(#[from] io::Error),
-}
-
-/// The channel records our mDNS daemon's one browse finds.
-#[derive(Debug, Default)]
-pub struct Mdns {
-    adverts: Arc<Mutex<Adverts>>,
-    thread: Option<JoinHandle<()>>,
-}
-
-impl Mdns {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Starts the browse and the thread keeping its records, once for this
-    /// resolver's life: `true` when it started now, `false` when it had.
-    pub fn start<B: Browse>(&mut self, daemon: &B) -> Result<bool, BrowseError> {
-        if self.thread.is_some() {
-            return Ok(false);
-        }
-        let events = daemon.browse(CHAN_SERVICE)?;
-        let adverts = Arc::clone(&self.adverts);
-        let thread = std::thread::Builder::new()
-            .name("dstack-mdns-chan".to_string())
-            .spawn(move || keep(events, &adverts))?;
-        self.thread = Some(thread);
-        Ok(true)
-    }
-
-    pub fn started(&self) -> bool {
-        self.thread.is_some()
-    }
-
-    /// Whether any channel record names `device` ([`Adverts::names_device`]).
-    pub fn names_device(&self, device: &str) -> bool {
-        self.adverts
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .names_device(device)
-    }
-
-    /// Waits for the thread to end (the daemon's events ended), at most
-    /// `limit`.
-    #[cfg(test)]
-    fn join_within(&mut self, limit: std::time::Duration) {
-        let thread = self.thread.take().expect("started");
-        let deadline = std::time::Instant::now() + limit;
-        while !thread.is_finished() {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the thread never ended"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
-        thread.join().unwrap();
-    }
-}
-
-impl Resolver for Mdns {
-    fn lookup(&self, tx_device: &str, tx_channel: &str) -> Option<Advertised> {
-        self.adverts
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(tx_device, tx_channel)
-    }
-}
-
-/// The browse thread: every event into `adverts`, until the events end.
-fn keep(events: impl Iterator<Item = ServiceEvent>, adverts: &Mutex<Adverts>) {
-    for ev in events {
-        adverts
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .apply(&ev);
-    }
 }
 
 #[cfg(test)]

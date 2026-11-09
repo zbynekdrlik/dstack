@@ -368,7 +368,7 @@ impl Manager {
         self.subs.get(rx)?.as_ref()
     }
 
-    /// Whether any RX channel is subscribed (the mDNS browse starts then).
+    /// Whether any RX channel is subscribed.
     pub fn subscribed(&self) -> bool {
         self.subs.iter().any(Option::is_some)
     }

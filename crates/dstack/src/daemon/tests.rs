@@ -6,7 +6,7 @@ use std::path::Path;
 use std::rc::Rc;
 use std::time::Duration;
 
-use mdns_sd::{ServiceEvent, ServiceInfo};
+use mdns_sd::ServiceInfo;
 use tokio::sync::oneshot;
 
 use super::media::STOP_WAIT;
@@ -770,13 +770,11 @@ fn the_records_point_at_the_device_names_local_host() {
 }
 
 /// The mDNS daemon's place: logs every registration and withdrawal, and
-/// refuses registrations after `allow` of them; its browse of the channel
-/// records finds `chan`.
+/// refuses registrations after `allow` of them.
 #[derive(Clone)]
 struct Log {
     calls: Rc<RefCell<Vec<String>>>,
     allow: Rc<Cell<usize>>,
-    chan: Rc<Vec<ServiceInfo>>,
 }
 
 impl Log {
@@ -784,41 +782,11 @@ impl Log {
         Self {
             calls: Rc::default(),
             allow: Rc::new(Cell::new(allow)),
-            chan: Rc::default(),
-        }
-    }
-
-    /// The same, its browse of the channel records finding `chan`.
-    fn with_chan(self, chan: Vec<ServiceInfo>) -> Self {
-        Self {
-            chan: Rc::new(chan),
-            ..self
         }
     }
 
     fn calls(&self) -> Vec<String> {
         self.calls.borrow().clone()
-    }
-}
-
-/// A browse (the channel records, the ARC and flow-control records):
-/// logged with its service; the channel records' finds `chan`, the others
-/// no record.
-impl Browse for Log {
-    type Events = std::vec::IntoIter<ServiceEvent>;
-    fn browse(&self, service: &str) -> Result<Self::Events, mdns_sd::Error> {
-        self.calls.borrow_mut().push(format!("browse {service}"));
-        let found: Vec<ServiceEvent> = if service == CHAN_SERVICE {
-            self.chan
-                .iter()
-                .map(|info| {
-                    ServiceEvent::ServiceResolved(Box::new(info.clone().as_resolved_service()))
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
-        Ok(found.into_iter())
     }
 }
 
@@ -895,6 +863,7 @@ async fn loopback() -> Loopback {
         info: v4(info_rx.local_addr().unwrap()),
         heartbeat: v4(beat_rx.local_addr().unwrap()),
         every: Duration::from_secs(3600),
+        mdns: "127.0.0.1:9".parse().unwrap(),
     };
     Loopback {
         arc: sockets.arc.local_addr().unwrap(),
@@ -1219,7 +1188,7 @@ const LOOP: &str = "loop-device";
 
 /// [`LOOP`]'s channel records: our own TX channels at `flows`, our
 /// flow-control socket.
-fn loop_records(shared: &Mutex<Device>, flows: SocketAddr) -> Vec<ServiceInfo> {
+fn loop_records(shared: &Mutex<Device>, flows: SocketAddr) -> Vec<ServiceRecord> {
     let device = shared.lock().unwrap();
     let state = DeviceState {
         name: LOOP.into(),
@@ -1229,13 +1198,9 @@ fn loop_records(shared: &Mutex<Device>, flows: SocketAddr) -> Vec<ServiceInfo> {
     crate::announce::records(&state, &device.cfg, &host_of(LOOP), *at.ip())
         .into_iter()
         .filter(|r| r.service == CHAN_SERVICE)
-        .map(|r| {
-            ServiceRecord {
-                port: at.port(),
-                ..r
-            }
-            .info()
-            .unwrap()
+        .map(|r| ServiceRecord {
+            port: at.port(),
+            ..r
         })
         .collect()
 }
@@ -1261,9 +1226,20 @@ async fn our_stop_of_a_flow_from_our_own_tx_is_answered_by_our_own_flow_control(
             .state
             .set_subscription(&cfg, 0, Some(sub("TX 1", LOOP)));
     }
-    let lo = loopback().await;
-    let log = Log::new(usize::MAX).with_chan(loop_records(&shared, lo.flows));
-    let mut announcer = Announcer::new(log);
+    let mut lo = loopback().await;
+    // LOOP's records answered by our own responder on loopback, where the
+    // daemon's direct queries go (from its address: loopback here).
+    let port = std::net::UdpSocket::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    lo.multicast.mdns = SocketAddrV4::new(Ipv4Addr::LOCALHOST, port);
+    let published = Arc::new(Mutex::new(loop_records(&shared, lo.flows)));
+    let _responder =
+        crate::announce::responder::Responder::start_on(lo.multicast.mdns, false, published)
+            .unwrap();
+    let mut announcer = Announcer::new(Log::new(usize::MAX));
     let media = media_of(&shared);
     let (stop_tx, stop_rx) = oneshot::channel::<()>();
     let stop = async move {
@@ -1290,7 +1266,11 @@ async fn our_stop_of_a_flow_from_our_own_tx_is_answered_by_our_own_flow_control(
                 lo.sockets,
                 Arc::clone(&shared),
                 &mut announcer,
-                net(),
+                // The direct queries go from the device's address.
+                NetInfo {
+                    ip: Ipv4Addr::LOCALHOST,
+                    ..net()
+                },
                 lo.multicast,
                 Arc::clone(&media),
                 std::future::pending(),

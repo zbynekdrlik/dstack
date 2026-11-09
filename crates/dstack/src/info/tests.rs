@@ -143,6 +143,7 @@ fn the_ports_and_groups_are_inferno_s() {
             info: "224.0.0.231:8702".parse().unwrap(),
             heartbeat: "224.0.0.233:8708".parse().unwrap(),
             every: Duration::from_secs(1),
+            mdns: "224.0.0.251:5353".parse().unwrap(),
         }
     );
 }
@@ -504,6 +505,7 @@ async fn loopback(every: Duration) -> (SocketAddr, UdpSocket, UdpSocket, Multica
         info: v4(info_rx.local_addr().unwrap()),
         heartbeat: v4(beat_rx.local_addr().unwrap()),
         every,
+        mdns: "127.0.0.1:9".parse().unwrap(),
     };
     (at, info_rx, beat_rx, to, sock)
 }

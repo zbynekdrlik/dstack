@@ -426,3 +426,146 @@ fn the_thread_spaces_its_queries() {
         );
     }
 }
+
+/// A device's `_netaudio-arc` record as a direct query names it.
+const ARC_NAME: &str = "card._netaudio-arc._udp.local.";
+
+/// An answer to the query of [`ARC_NAME`]: its SRV (port 4440 on
+/// `card.local`), and the A records `ips` of that host plus one of another
+/// host.
+fn arc_answer(ips: &[Ipv4Addr]) -> Vec<u8> {
+    let mut p = Packet::new_reply(0);
+    p.answers.push(ResourceRecord::new(
+        Name::new_unchecked(ARC_NAME.trim_end_matches('.')),
+        CLASS::IN,
+        120,
+        RData::SRV(SRV {
+            priority: 0,
+            weight: 0,
+            port: 4440,
+            target: Name::new_unchecked("Card.local"),
+        }),
+    ));
+    for ip in ips {
+        p.additional_records.push(ResourceRecord::new(
+            Name::new_unchecked("card.local"),
+            CLASS::IN,
+            120,
+            RData::A(A {
+                address: u32::from(*ip),
+            }),
+        ));
+    }
+    p.additional_records.push(ResourceRecord::new(
+        Name::new_unchecked("other.local"),
+        CLASS::IN,
+        120,
+        RData::A(A {
+            address: u32::from(Ipv4Addr::new(10, 0, 0, 99)),
+        }),
+    ));
+    p.build_bytes_vec().unwrap()
+}
+
+#[test]
+fn a_device_s_record_completes_with_its_srv_and_its_host_s_addresses_no_txt() {
+    let mut t = Table::default();
+    assert_eq!(t.record(ARC_NAME, 0), None);
+    assert_eq!(t.due(0), [Ask::Instance(key(ARC_NAME))]);
+    let (a, b) = (Ipv4Addr::new(10, 0, 0, 20), Ipv4Addr::new(10, 0, 0, 5));
+    assert_eq!(t.answer(&arc_answer(&[a, b, a]), S), 1);
+    let want = Srv {
+        port: 4440,
+        ips: vec![b, a],
+    };
+    assert_eq!(t.record(ARC_NAME, S), Some(want.clone()));
+    assert_eq!(t.record("Card._Netaudio-Arc._udp.local", S), Some(want));
+    // Asked again from half its age, used until its age.
+    assert!(t.due(S + MAX_AGE_NS / 2 - 1).is_empty());
+    assert_eq!(t.due(S + MAX_AGE_NS / 2), [Ask::Instance(key(ARC_NAME))]);
+    assert!(t.record(ARC_NAME, S + MAX_AGE_NS - 1).is_some());
+    assert_eq!(t.record(ARC_NAME, S + MAX_AGE_NS), None);
+}
+
+#[test]
+fn a_device_s_record_without_its_host_s_address_asks_for_the_host() {
+    let mut t = Table::default();
+    t.record(ARC_NAME, 0);
+    t.due(0);
+    assert_eq!(t.answer(&arc_answer(&[]), S), 0);
+    assert_eq!(t.record(ARC_NAME, S), None);
+    // The query's wait (its first quick one) passes: the host's A is asked.
+    let next = S + requery_after(1);
+    assert_eq!(
+        t.due(next),
+        [Ask::Host(key(ARC_NAME), "card.local".to_string())]
+    );
+    assert_eq!(
+        t.answer(&arc_answer(&[Ipv4Addr::new(10, 0, 0, 5)]), next),
+        1
+    );
+    assert_eq!(
+        t.record(ARC_NAME, next).unwrap().ips,
+        [Ipv4Addr::new(10, 0, 0, 5)]
+    );
+}
+
+#[test]
+fn a_channel_record_still_needs_its_txt() {
+    let mut t = Table::default();
+    t.lookup(DEVICE, CHANNEL, 0);
+    t.due(0);
+    // SRV and A but no TXT: not complete, and asked again as an instance.
+    let name = inst();
+    let mut p = Packet::new_reply(0);
+    p.answers.push(ResourceRecord::new(
+        Name::new_unchecked(name.trim_end_matches('.')),
+        CLASS::IN,
+        120,
+        RData::SRV(SRV {
+            priority: 0,
+            weight: 0,
+            port: 4455,
+            target: Name::new_unchecked(HOST),
+        }),
+    ));
+    p.additional_records.push(host_a());
+    assert_eq!(t.answer(&p.build_bytes_vec().unwrap(), S), 0);
+    assert_eq!(t.lookup(DEVICE, CHANNEL, S), None);
+    assert_eq!(t.due(S + requery_after(1)), [Ask::Instance(key(&name))]);
+}
+
+#[test]
+fn the_resolver_asks_a_device_s_record_by_its_name() {
+    let responder = UdpSocket::bind("127.0.0.1:0").unwrap();
+    responder
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let to = match responder.local_addr().unwrap() {
+        std::net::SocketAddr::V4(a) => a,
+        other => panic!("{other}"),
+    };
+    let mut i = Instances::new();
+    assert_eq!(i.record("card", "_netaudio-arc._udp.local."), None);
+    assert!(i.asked());
+    i.start_to(Ipv4Addr::LOCALHOST, to).unwrap();
+    let mut buf = [0u8; 1500];
+    let (n, from) = responder.recv_from(&mut buf).expect("a query");
+    let q = Packet::parse(&buf[..n]).unwrap();
+    assert_eq!(
+        q.questions[0].qname.to_string(),
+        ARC_NAME.trim_end_matches('.')
+    );
+    responder
+        .send_to(&arc_answer(&[Ipv4Addr::LOCALHOST]), from)
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let found = loop {
+        if let Some(r) = i.record("card", "_netaudio-arc._udp.local.") {
+            break r;
+        }
+        assert!(Instant::now() < deadline, "never resolved");
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert_eq!(found.port, 4440);
+}

@@ -8,6 +8,17 @@
 //! once (dev1, 31.10.2026). Without its record the stack read it through
 //! ARC: no latency, the config's fpp.
 //!
+//! It is also the only way a device reads mDNS (dstack #141): no browse of
+//! a whole service. A browse's PTR query makes every Dante device answer
+//! with all its records at once, and mdns-sd refreshes each record it
+//! learned at 80 % of its TTL, on every host that heard the multicast
+//! answer, in the same second (the channel records' TTL is 120 s: a burst
+//! every 96 s, which an UltimoX2 receiver read as late packets). A direct
+//! query here is a legacy unicast one: the answer comes back to us alone.
+//! Audinate devices query this way too. A device's `_netaudio-arc` and
+//! `_netaudio-dbc` records are asked the same way ([`Instances::record`]):
+//! SRV and the target's A, no TXT needed.
+//!
 //! - The packets ([`query`], [`host_query`], [`read`]) are built and parsed
 //!   with simple-dns: SRV and TXT of the instance, then A of the SRV's
 //!   target when the answer carries none. A legacy unicast query (sent
@@ -153,13 +164,33 @@ pub fn read(bytes: &[u8], instance: &str) -> Option<Found> {
     Some(found)
 }
 
+/// A device's record of a service other than the channels' (its
+/// `_netaudio-arc` or `_netaudio-dbc`): the SRV's port and every address
+/// the answer gave the SRV's target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Srv {
+    pub port: u16,
+    pub ips: Vec<Ipv4Addr>,
+}
+
+/// The suffix of a channel record's instance name (lower case, no dot at
+/// the end); any other name is a plain record ([`Srv`]).
+const CHAN_SUFFIX: &str = "._netaudio-chan._udp.local";
+
+/// Whether `name` (as compared, [`key`]) is a channel record's instance.
+fn is_channel(name: &str) -> bool {
+    name.ends_with(CHAN_SUFFIX)
+}
+
 /// One instance's state.
 #[derive(Debug, Clone, Default)]
 struct Entry {
     /// What it answered so far (SRV, TXT, its host's address).
     found: Found,
-    /// The record, once complete, and when.
+    /// The channel record, once complete, and when.
     advert: Option<(Advertised, u64)>,
+    /// A plain record, once complete, and when.
+    srv: Option<(Srv, u64)>,
     /// When its last query went out.
     asked: Option<u64>,
     /// Queries since its last answer.
@@ -189,7 +220,26 @@ impl Table {
     /// The record of `tx_channel` on `tx_device` if one is fresh at `now`;
     /// otherwise the instance is wanted (and asked when due).
     pub fn lookup(&mut self, tx_device: &str, tx_channel: &str, now: u64) -> Option<Advertised> {
-        let name = key(&instance(tx_device, tx_channel));
+        self.want(&instance(tx_device, tx_channel), now)?
+            .advert
+            .filter(|&(_, at)| now.saturating_sub(at) < MAX_AGE_NS)
+            .map(|(a, _)| a)
+    }
+
+    /// The plain record `name` (a full instance name, such as
+    /// `<device>._netaudio-arc._udp.local.`) if one is fresh at `now`;
+    /// otherwise it is wanted (and asked when due).
+    pub fn record(&mut self, name: &str, now: u64) -> Option<Srv> {
+        self.want(name, now)?
+            .srv
+            .as_ref()
+            .filter(|(_, at)| now.saturating_sub(*at) < MAX_AGE_NS)
+            .map(|(r, _)| r.clone())
+    }
+
+    /// `name`'s entry, made if there is room, marked wanted at `now`.
+    fn want(&mut self, name: &str, now: u64) -> Option<&Entry> {
+        let name = key(name);
         if self.entries.len() >= MAX_INSTANCES && !self.entries.contains_key(&name) {
             return None;
         }
@@ -198,10 +248,7 @@ impl Table {
             ..Entry::default()
         });
         entry.wanted = now;
-        entry
-            .advert
-            .filter(|&(_, at)| now.saturating_sub(at) < MAX_AGE_NS)
-            .map(|(a, _)| a)
+        Some(entry)
     }
 
     /// Whether the instance of `tx_channel` on `tx_device` is still being
@@ -223,10 +270,12 @@ impl Table {
             if now.saturating_sub(e.wanted) >= MAX_AGE_NS {
                 continue;
             }
-            let stale = e
-                .advert
-                .is_none_or(|(_, at)| now.saturating_sub(at) >= MAX_AGE_NS / 2);
-            let wait = if e.advert.is_some() {
+            let done = match (&e.advert, &e.srv) {
+                (Some((_, at)), _) | (None, Some((_, at))) => Some(*at),
+                (None, None) => None,
+            };
+            let stale = done.is_none_or(|at| now.saturating_sub(at) >= MAX_AGE_NS / 2);
+            let wait = if done.is_some() {
                 REQUERY_NS
             } else {
                 requery_after(e.tries)
@@ -237,8 +286,9 @@ impl Table {
             }
             e.asked = Some(now);
             e.tries = e.tries.saturating_add(1);
+            let answered = e.found.txt.is_some() || !is_channel(name);
             match &e.found.srv {
-                Some((_, host)) if e.found.txt.is_some() && e.advert.is_none() => {
+                Some((_, host)) if answered && done.is_none() => {
                     out.push(Ask::Host(name.clone(), host.clone()));
                 }
                 _ => out.push(Ask::Instance(name.clone())),
@@ -249,7 +299,8 @@ impl Table {
 
     /// Takes datagram `bytes` at `now`: every wanted instance it answers is
     /// updated, and complete once SRV, TXT and its host's address are known
-    /// and the TXT reads as a channel record. The number completed.
+    /// and the TXT reads as a channel record (a plain record: once SRV and
+    /// its host's addresses are). The number completed.
     pub fn answer(&mut self, bytes: &[u8], now: u64) -> usize {
         let mut completed = 0;
         for (name, e) in &mut self.entries {
@@ -266,6 +317,29 @@ impl Table {
             // The latest few addresses only (an answer's own A records).
             let extra = e.found.hosts.len().saturating_sub(MAX_HOSTS);
             e.found.hosts.drain(..extra);
+            if !is_channel(name) {
+                let Some((port, host)) = &e.found.srv else {
+                    continue;
+                };
+                let mut ips: Vec<Ipv4Addr> = e
+                    .found
+                    .hosts
+                    .iter()
+                    .filter(|(h, _)| h == host)
+                    .map(|&(_, ip)| ip)
+                    .collect();
+                ips.sort_unstable();
+                ips.dedup();
+                if ips.is_empty() {
+                    continue;
+                }
+                info!("a device's record read by a direct instance query");
+                e.srv = Some((Srv { port: *port, ips }, now));
+                e.found = Found::default();
+                e.tries = 0;
+                completed += 1;
+                continue;
+            }
             let (Some((port, host)), Some(txt)) = (&e.found.srv, &e.found.txt) else {
                 continue;
             };
@@ -338,7 +412,7 @@ impl Instances {
 
     /// A resolver on a test's clock (ns).
     #[cfg(test)]
-    fn with_clock(t: Arc<std::sync::atomic::AtomicU64>) -> Self {
+    pub(crate) fn with_clock(t: Arc<std::sync::atomic::AtomicU64>) -> Self {
         let mut i = Self::new();
         i.clock = Clock::Fake(t);
         i
@@ -413,6 +487,16 @@ impl Instances {
     /// resolver that does not query keeps nothing from ARC).
     pub fn young(&self, tx_device: &str, tx_channel: &str) -> bool {
         self.started() && lock(&self.table).young(tx_device, tx_channel, self.clock.now())
+    }
+}
+
+impl Instances {
+    /// `device`'s record of `service` (`_netaudio-arc._udp.local.` or
+    /// `_netaudio-dbc._udp.local.`), when one is fresh ([`Table::record`]).
+    pub fn record(&self, device: &str, service: &str) -> Option<Srv> {
+        self.asked.store(true, Ordering::Relaxed);
+        let now = self.clock.now();
+        lock(&self.table).record(&format!("{device}.{service}"), now)
     }
 }
 

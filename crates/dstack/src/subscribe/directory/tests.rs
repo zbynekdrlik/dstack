@@ -1,13 +1,11 @@
 use super::*;
 
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::net::UdpSocket;
-use std::sync::mpsc;
 
 use mdns_sd::ServiceInfo;
 
-use crate::announce::CHAN_SERVICE;
+use crate::announce::{CHAN_SERVICE, ServiceRecord};
 use crate::arc::client::TxChannel;
 use crate::arc::{ArcOutcome, Live, handle};
 use crate::ctl::Sent;
@@ -684,43 +682,60 @@ fn the_manager_asks_an_arc_resolved_transmitter_for_the_config_s_arc_rx_fpp() {
     assert_eq!(m.flow(0).unwrap().fpp, 4);
 }
 
-/// The mDNS daemon's browses, as a test sees them: each service's events
-/// from a channel; each browse counted.
-struct FakeDaemon {
-    events: RefCell<HashMap<String, mpsc::Receiver<ServiceEvent>>>,
-    browses: RefCell<Vec<String>>,
-}
-
-impl FakeDaemon {
-    /// The daemon and the senders of `services`' events.
-    fn new(services: &[&str]) -> (Self, Vec<mpsc::Sender<ServiceEvent>>) {
-        let mut events = HashMap::new();
-        let mut senders = Vec::new();
-        for s in services {
-            let (send, recv) = mpsc::channel();
-            events.insert(s.to_string(), recv);
-            senders.push(send);
+/// Devices' mDNS records answered as our own responder answers a direct
+/// query (each host's set on its own, sent back to the asker), the name of
+/// every question asked logged. It answers until `BOUND` passes without a
+/// query.
+fn responder(hosts: Vec<Vec<ServiceRecord>>) -> (SocketAddrV4, Arc<Mutex<Vec<String>>>) {
+    let sock = UdpSocket::bind((LOOPBACK, 0)).unwrap();
+    sock.set_read_timeout(Some(BOUND)).unwrap();
+    let std::net::SocketAddr::V4(at) = sock.local_addr().unwrap() else {
+        panic!("IPv4")
+    };
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let log = Arc::clone(&asked);
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 1500];
+        while let Ok((n, from)) = sock.recv_from(&mut buf) {
+            if let Ok(q) = simple_dns::Packet::parse(&buf[..n]) {
+                let names = q.questions.iter().map(|q| q.qname.to_string());
+                log.lock().unwrap().extend(names);
+            }
+            for recs in &hosts {
+                for d in crate::announce::responder::answers(&buf[..n], recs) {
+                    sock.send_to(&d, from).unwrap();
+                }
+            }
         }
-        (
-            FakeDaemon {
-                events: RefCell::new(events),
-                browses: RefCell::default(),
-            },
-            senders,
-        )
+    });
+    (at, asked)
+}
+
+/// `device`'s record of `service` at `ip`:`port`, its host `<device>.local.`.
+fn rec(
+    service: &'static str,
+    instance: &str,
+    device: &str,
+    ip: Ipv4Addr,
+    port: u16,
+) -> ServiceRecord {
+    ServiceRecord {
+        service,
+        instance: instance.to_string(),
+        host: format!("{device}.local."),
+        ip,
+        port,
+        txt: Vec::new(),
     }
 }
 
-impl Browse for FakeDaemon {
-    type Events = mpsc::IntoIter<ServiceEvent>;
-    fn browse(&self, service: &str) -> Result<Self::Events, mdns_sd::Error> {
-        self.browses.borrow_mut().push(service.to_string());
-        self.events
-            .borrow_mut()
-            .remove(service)
-            .map(mpsc::Receiver::into_iter)
-            .ok_or_else(|| mdns_sd::Error::Msg(format!("no browse of {service}")))
-    }
+/// Whether a question asked for a whole service (a browse's PTR query)
+/// rather than one instance.
+fn whole_service(name: &str) -> bool {
+    [CHAN_SERVICE, ARC_SERVICE, DBC_SERVICE].iter().any(|s| {
+        s.trim_end_matches('.')
+            .eq_ignore_ascii_case(name.trim_end_matches('.'))
+    })
 }
 
 /// Our own ARC server on loopback (the test device's channels) standing in
@@ -762,12 +777,36 @@ fn eventually(what: &str, f: impl Fn() -> bool) {
 }
 
 #[test]
-fn the_network_resolves_channel_records_first_and_reads_a_device_without_them() {
+fn the_network_asks_each_channel_s_record_and_reads_a_device_without_them() {
     let (at, got) = our_server();
-    let (daemon, senders) = FakeDaemon::new(&[CHAN_SERVICE, ARC_SERVICE, DBC_SERVICE]);
+    // A rack publishes channel records; a card only its ARC and
+    // flow-control records.
+    let mut rack = rec(
+        CHAN_SERVICE,
+        "TX 3@rack",
+        "rack",
+        Ipv4Addr::new(10, 0, 0, 12),
+        4455,
+    );
+    rack.txt = [
+        "id=3",
+        "rate=96000",
+        "enc=24",
+        "dbcp1=0x1102",
+        "fpp=32,2",
+        "latency_ns=1000000",
+        "nchan=8",
+    ]
+    .map(String::from)
+    .to_vec();
+    let card = vec![
+        rec(ARC_SERVICE, "card", "card", LOOPBACK, at.port()),
+        rec(DBC_SERVICE, "card", "card", LOOPBACK, 4455),
+    ];
+    let (mdns, asked) = responder(vec![vec![rack], card]);
+    let t = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let mut network = Network {
-        chan: Mdns::new(),
-        instances: Instances::new(),
+        instances: Instances::with_clock(Arc::clone(&t)),
         // A settle the reader's clock must pass; a reader that is only
         // woken by the want (its idle wait is longer than the test).
         arc: ArcDirectory::new(Timing {
@@ -778,69 +817,37 @@ fn the_network_resolves_channel_records_first_and_reads_a_device_without_them() 
             fpp: FPP,
         }),
     };
-    assert!(network.chan.start(&daemon).unwrap());
-    // A rack publishes channel records (and an ARC record).
-    let rack = ServiceInfo::new(
-        CHAN_SERVICE,
-        "TX 3@rack",
-        "rack.local.",
-        "10.0.0.12",
-        4455,
-        [
-            ("id", "3"),
-            ("rate", "96000"),
-            ("enc", "24"),
-            ("dbcp1", "0x1102"),
-            ("fpp", "32,2"),
-            ("latency_ns", "1000000"),
-            ("nchan", "8"),
-        ]
-        .into_iter()
-        .map(|(k, v)| (k.to_string(), v.to_string()))
-        .collect::<HashMap<String, String>>(),
-    )
-    .unwrap();
-    senders[0]
-        .send(ServiceEvent::ServiceResolved(Box::new(
-            rack.as_resolved_service(),
-        )))
-        .unwrap();
-    eventually("the rack's record", || network.chan.names_device("rack"));
+    assert!(network.instances.start_to(LOOPBACK, mdns).unwrap());
+    eventually("the rack's record", || {
+        network.lookup("rack", "TX 3").is_some()
+    });
     let a = network.lookup("rack", "TX 3").unwrap();
     assert_eq!((a.nchan, a.fpp_max), (8, 32));
-    // Another channel of the rack never reaches the ARC directory.
+    // While their direct queries may still answer, the other names stay
+    // away from the ARC directory.
     assert_eq!(network.lookup("rack", "TX 9"), None);
+    assert_eq!(network.lookup("card", "Spare"), None);
     assert!(!network.arc.asked());
-    // A card without channel records does.
+    // Past the grace a name with no record is read through the ARC.
+    t.store(crate::subscribe::instance::GRACE_NS, Ordering::Relaxed);
     assert_eq!(network.lookup("card", "Spare"), None);
     assert!(network.arc.asked());
     let requests = Arc::new(Requests::default());
     assert!(
         network
             .arc
-            .start(&daemon, LOOPBACK, Arc::clone(&requests))
+            .start(LOOPBACK, mdns, Arc::clone(&requests))
             .unwrap()
     );
     // Once for the directory's life.
     assert!(
         !network
             .arc
-            .start(&daemon, LOOPBACK, Arc::clone(&requests))
+            .start(LOOPBACK, mdns, Arc::clone(&requests))
             .unwrap()
     );
-    assert_eq!(
-        *daemon.browses.borrow(),
-        [CHAN_SERVICE, ARC_SERVICE, DBC_SERVICE]
-    );
-    let rack_arc = record(ARC_SERVICE, "rack", "10.0.0.12", 4440);
-    senders[1].send(rack_arc).unwrap();
-    senders[1]
-        .send(record(ARC_SERVICE, "card", "127.0.0.1", at.port()))
-        .unwrap();
-    senders[2]
-        .send(record(DBC_SERVICE, "card", "127.0.0.1", 4455))
-        .unwrap();
-    // The lookup answers once the read is done; it never blocks.
+    // The lookup answers once the records are in and the read is done; it
+    // never blocks.
     eventually("the card's channel", || {
         let t = Instant::now();
         let found = network.lookup("card", "spare").is_some();
@@ -862,6 +869,10 @@ fn the_network_resolves_channel_records_first_and_reads_a_device_without_them() 
             FPP
         )
     );
+    // Other names of the card, once their own queries' grace is over.
+    t.store(2 * crate::subscribe::instance::GRACE_NS, Ordering::Relaxed);
+    assert_eq!(network.lookup("card", "TX 16"), None, "its query's grace");
+    t.store(3 * crate::subscribe::instance::GRACE_NS, Ordering::Relaxed);
     assert_eq!(network.lookup("card", "TX 16").unwrap().tx_channel_id, 16);
     // One read: the counts, one page of channels, one of names.
     assert_eq!(*got.lock().unwrap(), [0x1000, 0x2000, 0x2010]);
@@ -887,11 +898,21 @@ fn the_network_resolves_channel_records_first_and_reads_a_device_without_them() 
     );
     let c = network.arc.counts();
     assert_eq!((c.reads, c.requests), (1, 3));
-    // A name the card does not list asks again, after the wait (9 s).
+    // A name the card does not list (past its query's grace) asks again,
+    // after the wait (9 s).
     assert_eq!(network.lookup("card", "TX 17"), None);
+    t.store(4 * crate::subscribe::instance::GRACE_NS, Ordering::Relaxed);
+    assert_eq!(network.lookup("card", "TX 17"), None);
+    assert_eq!(network.arc.counts().not_listed, 1);
     std::thread::sleep(Duration::from_millis(100));
     assert_eq!(got.lock().unwrap().len(), 3);
-    drop(senders);
+    // dstack #141: only instances were asked, never a whole service.
+    let asked = asked.lock().unwrap().clone();
+    let has = |n: &str| asked.iter().any(|a| a.eq_ignore_ascii_case(n));
+    assert!(has("tx 3@rack._netaudio-chan._udp.local"), "{asked:?}");
+    assert!(has("card._netaudio-arc._udp.local"), "{asked:?}");
+    assert!(has("card._netaudio-dbc._udp.local"), "{asked:?}");
+    assert!(!asked.iter().any(|a| whole_service(a)), "{asked:?}");
     network.arc.join_within(BOUND);
 }
 
@@ -919,7 +940,10 @@ fn a_dead_device_read_by_the_reader_stays_unresolved_and_is_counted() {
     let std::net::SocketAddr::V4(at) = silent.local_addr().unwrap() else {
         panic!("IPv4")
     };
-    let (daemon, senders) = FakeDaemon::new(&[ARC_SERVICE, DBC_SERVICE]);
+    let (mdns, _) = responder(vec![vec![
+        rec(ARC_SERVICE, "card", "card", LOOPBACK, at.port()),
+        rec(DBC_SERVICE, "card", "card", LOOPBACK, 4455),
+    ]]);
     // The reader's idle wait is longer than the test: the want wakes it.
     let mut arc = ArcDirectory::new(Timing {
         settle_ns: 0,
@@ -929,18 +953,16 @@ fn a_dead_device_read_by_the_reader_stays_unresolved_and_is_counted() {
         fpp: FPP,
     });
     let requests = Arc::new(Requests::default());
-    assert!(arc.start(&daemon, LOOPBACK, Arc::clone(&requests)).unwrap());
-    senders[0]
-        .send(record(ARC_SERVICE, "card", "127.0.0.1", at.port()))
-        .unwrap();
-    senders[1]
-        .send(record(DBC_SERVICE, "card", "127.0.0.1", 4455))
-        .unwrap();
+    assert!(arc.start(LOOPBACK, mdns, Arc::clone(&requests)).unwrap());
+    // The records come by their direct queries (an ARC address lookup asks
+    // for them and wants no read).
+    let records = arc.records();
     eventually("the card's records", || {
-        lock(&arc.shared.book)
-            .records
-            .get("card")
-            .is_some_and(|r| r.arc.is_some() && r.dbc.is_some())
+        records.arc_at("card", LOOPBACK).is_ok()
+            && lock(&arc.shared.book)
+                .records
+                .get("card")
+                .is_some_and(|r| r.dbc.is_some())
     });
     // One lookup and no other: its want alone wakes the reader.
     assert_eq!(arc.lookup("card", "01"), None);
@@ -961,23 +983,20 @@ fn a_dead_device_read_by_the_reader_stays_unresolved_and_is_counted() {
             n: 1
         }]
     );
-    drop(senders);
     arc.join_within(BOUND);
 }
 
 #[test]
 fn dropping_the_directory_ends_its_reader_at_once() {
-    let (daemon, senders) = FakeDaemon::new(&[ARC_SERVICE, DBC_SERVICE]);
+    let (mdns, _) = responder(Vec::new());
     let mut arc = ArcDirectory::new(Timing {
         idle: Duration::from_secs(30),
         ..Timing::default()
     });
     assert!(
-        arc.start(&daemon, LOOPBACK, Arc::new(Requests::default()))
+        arc.start(LOOPBACK, mdns, Arc::new(Requests::default()))
             .unwrap()
     );
-    // The browse threads end with the daemon's events.
-    drop(senders);
     let shared = Arc::downgrade(&arc.shared);
     drop(arc);
     // The reader was asked to stop and woken: nothing holds the directory.
@@ -1043,7 +1062,7 @@ fn an_arc_resolved_device_is_asked_for_no_more_slots_than_its_channels() {
 /// dstack #1: the TX side finds a receiver's ARC by its device name in the
 /// records, and asking marks the directory asked (the daemon starts it).
 #[test]
-fn a_device_s_arc_address_is_found_by_name_and_asks_for_the_browses() {
+fn a_device_s_arc_address_is_found_by_name_and_asks_for_the_queries() {
     let dir = ArcDirectory::new(Timing::default());
     let records = dir.records();
     let no_record = Err(ArcMiss::NoRecord);
@@ -1284,7 +1303,13 @@ fn the_reader_lists_a_device_s_flows_over_its_arc() {
         dev.send_to(&reply, from).unwrap();
         buf[..n].to_vec()
     });
-    let (daemon, senders) = FakeDaemon::new(&[ARC_SERVICE, DBC_SERVICE]);
+    let (mdns, _) = responder(vec![vec![rec(
+        ARC_SERVICE,
+        "mics",
+        "mics",
+        LOOPBACK,
+        at.port(),
+    )]]);
     let mut arc = ArcDirectory::new(Timing {
         settle_ns: 0,
         max_age_ns: MAX_AGE_NS,
@@ -1293,15 +1318,10 @@ fn the_reader_lists_a_device_s_flows_over_its_arc() {
         fpp: FPP,
     });
     let requests = Arc::new(Requests::default());
-    assert!(arc.start(&daemon, LOOPBACK, Arc::clone(&requests)).unwrap());
-    senders[0]
-        .send(record(ARC_SERVICE, "mics", "127.0.0.1", at.port()))
-        .unwrap();
+    assert!(arc.start(LOOPBACK, mdns, Arc::clone(&requests)).unwrap());
+    let records = arc.records();
     eventually("the device's record", || {
-        lock(&arc.shared.book)
-            .records
-            .get("mics")
-            .is_some_and(|r| r.arc.is_some())
+        records.arc_at("mics", LOOPBACK).is_ok()
     });
     let a = peer_channel(2);
     assert_eq!(arc.multicast("mics", "02", &a), MulticastLookup::Unknown);
@@ -1313,7 +1333,6 @@ fn the_reader_lists_a_device_s_flows_over_its_arc() {
         matches!(arc.multicast("mics", "02", &a), MulticastLookup::Found(_))
     });
     let network = Network {
-        chan: Mdns::new(),
         instances: Instances::new(),
         arc,
     };
@@ -1321,7 +1340,6 @@ fn the_reader_lists_a_device_s_flows_over_its_arc() {
         panic!("the network answers from its ARC directory")
     };
     assert_eq!(m.group, ULTIMO_GROUP);
-    drop(senders);
     let mut arc = network.arc;
     arc.join_within(BOUND);
 }
@@ -1425,7 +1443,6 @@ fn the_devices_whose_flows_are_read_are_bounded() {
 
 #[test]
 fn a_flow_read_whose_socket_cannot_open_ends_as_a_failed_list() {
-    let (daemon, senders) = FakeDaemon::new(&[ARC_SERVICE, DBC_SERVICE]);
     let mut arc = ArcDirectory::new(Timing {
         settle_ns: 0,
         max_age_ns: MAX_AGE_NS,
@@ -1434,24 +1451,16 @@ fn a_flow_read_whose_socket_cannot_open_ends_as_a_failed_list() {
         fpp: FPP,
     });
     // Our address is none of this host's: the reader's socket cannot bind.
+    // (The record is the book's own: no queries run.)
     let not_ours = Ipv4Addr::new(192, 0, 2, 1);
     let requests = Arc::new(Requests::default());
-    assert!(arc.start(&daemon, not_ours, Arc::clone(&requests)).unwrap());
-    senders[0]
-        .send(record(ARC_SERVICE, "mics", "127.0.0.1", 4440))
-        .unwrap();
-    eventually("the device's record", || {
-        lock(&arc.shared.book)
-            .records
-            .get("mics")
-            .is_some_and(|r| r.arc.is_some())
-    });
+    arc.start_reader(not_ours, Arc::clone(&requests)).unwrap();
+    lock(&arc.shared.book).apply(&record(ARC_SERVICE, "mics", "127.0.0.1", 4440), 0);
     let a = peer_channel(1);
     assert_eq!(arc.multicast("mics", "01", &a), MulticastLookup::Unknown);
     eventually("the failed list", || {
         arc.multicast("mics", "01", &a) == MulticastLookup::None
     });
     assert_eq!(arc.counts().socket, 1);
-    drop(senders);
     arc.join_within(BOUND);
 }
