@@ -206,39 +206,35 @@ fn channels_group_by_transmitter_and_share_a_slot_per_tx_channel() {
     m.set(6, Some(sub("TX 1", "other-device")));
     let out = m.tick(0, &NONE, &net);
     let r = requests(&out);
-    assert_eq!(r.len(), 2, "one request per transmitter: {out:?}");
+    // dstack #20 (iemmixer, 9.11.2026): a transmitter's flows are asked
+    // together, not 9 s apart: two to the peer (TX 5 does not fit the
+    // first), one to the other.
+    assert_eq!(r.len(), 3, "every flow needed at once: {out:?}");
     assert_eq!(r[0].2.channels, [Some(3), Some(1), Some(2), Some(4)]);
     assert_eq!(r[0].1.ip(), &PEER_IP);
-    assert_eq!(r[1].2.channels, [Some(1), None, None, None]);
-    assert_eq!(r[1].1.ip(), &OTHER_IP);
-    // The two flows take two slots, so two ports.
-    assert_eq!(r[1].0.slot, 1);
-    assert_eq!(r[1].2.rx.port(), 50_001);
-    assert_eq!(r[1].2.rx_flow_name, "2_0");
+    assert_eq!(r[1].2.channels, [Some(5), None, None, None]);
+    assert_eq!(r[1].1.ip(), &PEER_IP);
+    assert_eq!(r[2].2.channels, [Some(1), None, None, None]);
+    assert_eq!(r[2].1.ip(), &OTHER_IP);
+    // Three flows take three slots, so three ports.
+    assert_eq!((r[1].0.slot, r[2].0.slot), (1, 2));
+    assert_eq!(r[2].2.rx.port(), 50_002);
+    assert_eq!(r[2].2.rx_flow_name, "3_0");
     for (rx, slot) in [(0, 0), (1, 0), (2, 1), (3, 2), (4, 3)] {
         assert_eq!(m.rx_route(rx), Some(RxRoute { flow: 0, slot }), "RX {rx}");
     }
-    // TX 5 does not fit the first flow: it waits for the peer's next
-    // request, 9 s after the first.
-    assert_eq!(m.rx_route(5), None);
-    assert_eq!(m.status(5), Some(SubStatus::Unresolved));
-    m.answered(r[0].0, Answer::Granted(handle(0, 1)), 10 * MS);
-    m.answered(r[1].0, Answer::Granted(handle(0, 2)), 10 * MS);
+    assert_eq!(m.rx_route(5), Some(RxRoute { flow: 1, slot: 0 }));
+    for (k, req) in r.iter().enumerate() {
+        m.answered(req.0, Answer::Granted(handle(0, k as u16 + 1)), 10 * MS);
+    }
     let mut heard = NONE;
     let mut t = 0;
     while t < 9 * S {
         t += 100 * MS;
-        heard[0] += 1;
-        heard[1] += 1;
-        let out = m.tick(t, &heard, &net);
-        if t < 9 * S {
-            assert_eq!(out, [], "at {t}");
-        } else {
-            let r = requests(&out);
-            assert_eq!(r.len(), 1, "{out:?}");
-            assert_eq!(r[0].2.channels, [Some(5), None, None, None]);
-            assert_eq!(r[0].0.slot, 2);
+        for h in heard.iter_mut().take(3) {
+            *h += 1;
         }
+        assert_eq!(m.tick(t, &heard, &net), [], "at {t}");
     }
     // A later channel whose TX channel a flow carries already joins it
     // without a request.
@@ -385,14 +381,17 @@ fn a_silent_transmitter_never_has_two_requests_in_flight() {
         assert!(in_flight <= 1, "at {t}");
         if t < 4 * S {
             assert_eq!(m.status(0), Some(SubStatus::InProgress));
-        } else if t < 9 * S {
+        } else if t < 6 * S {
             // Given up after 4 s.
             assert_eq!(m.status(0), Some(SubStatus::TxFail), "at {t}");
         }
         t += 100 * MS;
     }
     let times: Vec<u64> = asked.iter().map(|(t, _)| t / S).collect();
-    assert_eq!(times, [0, 9, 27, 63, 135, 207, 279, 351, 423, 495, 567]);
+    // dstack #20: a request with no answer is asked again 2 s after it was
+    // given up (4 s), three times, then the backoff (72 s after four
+    // failures in a row).
+    assert_eq!(times, [0, 6, 12, 18, 90, 162, 234, 306, 378, 450, 522, 594]);
     // The first request's grant after all: released at once.
     let first = asked[0].1;
     assert_eq!(
@@ -1828,4 +1827,35 @@ fn two_groups_of_one_transmitter_on_one_port_are_joined_only_where_the_socket_te
     m.set(2, Some(sub("TX 3", "peer-device")));
     assert_eq!(m.tick(S / 4, &NONE, &two), []);
     assert_eq!((0..MAX_FLOWS).filter_map(|s| m.rx_plan(s).group).count(), 2);
+}
+
+/// dstack #20: an answer ends the quick retries; a refusal waits the full
+/// 9 s (a refusing transmitter is never asked faster).
+#[test]
+fn a_refusal_after_unanswered_requests_waits_the_full_backoff() {
+    let net = peer_network();
+    let mut m = manager();
+    m.set(0, Some(sub("TX 3", "peer-device")));
+    let first = requests(&m.tick(0, &NONE, &net))[0].0;
+    // Unanswered: given up at 4 s, asked again at 6 s.
+    assert_eq!(m.tick(4 * S, &NONE, &net), []);
+    let second = requests(&m.tick(6 * S, &NONE, &net));
+    assert_eq!(second.len(), 1);
+    let _ = first;
+    // That one is refused: the next waits retry_after(2) = 18 s from it.
+    m.answered(
+        second[0].0,
+        Answer::Refused(status::BAD_REQUEST),
+        6 * S + MS,
+    );
+    let mut t = 6 * S;
+    let mut next = None;
+    while t <= 30 * S {
+        t += 100 * MS;
+        if !requests(&m.tick(t, &NONE, &net)).is_empty() {
+            next = Some(t);
+            break;
+        }
+    }
+    assert_eq!(next, Some(24 * S));
 }
