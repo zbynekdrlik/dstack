@@ -270,3 +270,30 @@ fn a_big_answer_is_split_into_datagrams_with_no_ip_fragments() {
     let got: Vec<String> = ptrs.iter().map(|p| key(p)).collect();
     assert_eq!(got, want, "every channel answered once");
 }
+
+#[test]
+fn an_answer_packs_as_many_channels_as_fit_and_sends_an_oversize_one_alone() {
+    // 64 channels of ~150 bytes each fit in far fewer datagrams than one a
+    // channel: each datagram but the last has no room for the next one.
+    let recs = many(64);
+    let replies = answers(
+        &ask("_netaudio-chan._udp.local", QTYPE::TYPE(TYPE::PTR)),
+        &recs,
+    );
+    assert!(replies.len() <= 64 / 6, "{} datagrams", replies.len());
+    for r in &replies[..replies.len() - 1] {
+        assert!(r.len() > MAX_DATAGRAM / 2, "{} bytes", r.len());
+    }
+    // A channel whose TXT alone passes a datagram still goes out, alone.
+    let mut big = many(2);
+    big[0].txt = (0..12)
+        .map(|k| format!("k{k}={}", "x".repeat(200)))
+        .collect();
+    let replies = answers(
+        &ask("_netaudio-chan._udp.local", QTYPE::TYPE(TYPE::PTR)),
+        &big,
+    );
+    assert_eq!(replies.len(), 2);
+    assert!(replies[0].len() > MAX_DATAGRAM);
+    assert!(replies[1].len() <= MAX_DATAGRAM);
+}
