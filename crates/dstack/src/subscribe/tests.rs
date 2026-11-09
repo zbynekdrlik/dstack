@@ -150,6 +150,7 @@ fn a_subscription_asks_its_transmitter_for_one_flow_of_nchan_slots() {
             block: 32,
             live: false,
             generation: 1,
+            group: None,
         }
     );
     assert_eq!(m.rx_route(0), Some(RxRoute { flow: 0, slot: 0 }));
@@ -172,6 +173,7 @@ fn a_subscription_asks_its_transmitter_for_one_flow_of_nchan_slots() {
             port: 50_000,
             to: *to,
             handle: Some(h),
+            group: None,
             channels: vec![Some(3), None, None, None],
             rx: vec![vec![0], vec![], vec![], vec![]],
             bits: 24,
@@ -769,6 +771,7 @@ fn held() -> Option<Flow> {
         advert: adv(Ipv4Addr::new(10, 0, 0, 99), 1),
         since: 0,
         handle: None,
+        group: None,
         heard: None,
         packets: 0,
     })
@@ -1537,4 +1540,292 @@ fn two_transmitters_on_one_address_get_a_flow_each() {
     for rx in 0..4 {
         assert_eq!(m.status(rx), Some(SubStatus::InProgress), "rx {rx}");
     }
+}
+
+/// A network whose transmitters list multicast flows (dstack #148): the
+/// records of [`Fake`] and, per device, what its flow list says.
+#[derive(Default)]
+struct Shared {
+    records: Fake,
+    multicast: RefCell<HashMap<String, MulticastLookup>>,
+}
+
+impl Shared {
+    fn set(&self, device: &str, m: MulticastLookup) {
+        self.multicast.borrow_mut().insert(device.to_string(), m);
+    }
+}
+
+impl Resolver for Shared {
+    fn lookup(&self, tx_device: &str, tx_channel: &str) -> Option<Advertised> {
+        self.records.lookup(tx_device, tx_channel)
+    }
+
+    fn multicast(&self, tx_device: &str, _: &str, a: &Advertised) -> MulticastLookup {
+        match self.multicast.borrow().get(tx_device) {
+            Some(MulticastLookup::Found(m)) if !m.channels.contains(&a.tx_channel_id) => {
+                MulticastLookup::None
+            }
+            Some(m) => m.clone(),
+            None => MulticastLookup::None,
+        }
+    }
+}
+
+const GROUP: SocketAddrV4 = SocketAddrV4::new(Ipv4Addr::new(239, 255, 0, 1), 4321);
+
+/// The peer's multicast flow of its TX 1 and 2, fpp 32.
+fn mics() -> MulticastLookup {
+    MulticastLookup::Found(Multicast {
+        group: GROUP,
+        channels: vec![1, 2],
+        fpp: 32,
+        bits: 24,
+    })
+}
+
+fn shared_network() -> Shared {
+    let n = Shared::default();
+    for id in 1..=8 {
+        n.records
+            .add("peer-device", &format!("TX {id}"), adv(PEER_IP, id));
+    }
+    n.set("peer-device", mics());
+    n
+}
+
+#[test]
+fn a_channel_a_multicast_flow_carries_joins_it_and_asks_nothing() {
+    let net = shared_network();
+    let mut m = manager();
+    m.set(0, Some(sub("TX 2", "peer-device")));
+    m.set(1, Some(sub("TX 1", "peer-device")));
+    let out = m.tick(0, &NONE, &net);
+    assert_eq!(out, [], "no request for a multicast flow");
+    // One flow for both: the group's slots in its order.
+    let plan = m.rx_plan(0);
+    assert_eq!(plan.group, Some(GROUP));
+    assert_eq!(plan.src, Some(PEER_IP));
+    assert_eq!((plan.nslots, plan.bps, plan.live), (2, 3, false));
+    assert_eq!(m.rx_route(0), Some(RxRoute { flow: 0, slot: 1 }));
+    assert_eq!(m.rx_route(1), Some(RxRoute { flow: 0, slot: 0 }));
+    assert_eq!(m.rx_plan(1), RxPlan::default());
+    let v = m.flow(0).unwrap();
+    assert_eq!((v.group, v.handle, v.fpp), (Some(GROUP), None, 32));
+    assert_eq!(v.channels, vec![Some(1), Some(2)]);
+    // Before audio: in progress; with audio: receiving, multicast.
+    assert_eq!(m.status(0), Some(SubStatus::InProgress));
+    let mut heard = NONE;
+    heard[0] = 5;
+    assert_eq!(m.tick(S / 4, &heard, &net), []);
+    assert_eq!(m.status(0), Some(SubStatus::ReceivingMulticast));
+    assert_eq!(m.status(1), Some(SubStatus::ReceivingMulticast));
+    // It is never given up as a request with no answer.
+    heard[0] = 6;
+    assert_eq!(m.tick(GIVE_UP_NS + S, &heard, &net), []);
+    assert_eq!(m.rx_plan(0).group, Some(GROUP));
+    // Shutdown stops nothing: the flow is the transmitter's.
+    assert_eq!(m.stop_all(), []);
+}
+
+#[test]
+fn a_channel_waits_while_its_transmitter_s_flows_are_read() {
+    let net = shared_network();
+    net.set("peer-device", MulticastLookup::Unknown);
+    let mut m = manager();
+    m.set(0, Some(sub("TX 1", "peer-device")));
+    assert_eq!(m.tick(0, &NONE, &net), []);
+    assert_eq!(m.rx_plan(0), RxPlan::default());
+    // Read: none carries it, so it gets a unicast flow.
+    net.set("peer-device", MulticastLookup::None);
+    let r = requests(&m.tick(S / 4, &NONE, &net));
+    assert_eq!(r.len(), 1);
+    assert_eq!(m.rx_plan(0).group, None);
+}
+
+#[test]
+fn a_unicast_flow_moves_to_a_multicast_flow_that_appears_and_frees_its_slot() {
+    let net = shared_network();
+    net.set("peer-device", MulticastLookup::None);
+    let mut m = manager();
+    m.set(0, Some(sub("TX 1", "peer-device")));
+    let r = requests(&m.tick(0, &NONE, &net));
+    let (flow, to, _) = r[0].clone();
+    let h = handle(0, 9);
+    m.answered(flow, Answer::Granted(h), MS);
+    let mut heard = NONE;
+    heard[0] = 1;
+    assert_eq!(m.tick(S / 4, &heard, &net), []);
+    assert_eq!(m.status(0), Some(SubStatus::Receiving));
+    // The transmitter now lists a multicast flow of TX 1: our unicast flow
+    // is stopped (its slot at the transmitter freed) and the group joined.
+    net.set("peer-device", mics());
+    let out = m.tick(S / 2, &heard, &net);
+    assert_eq!(stops(&out), [(to, h)]);
+    assert_eq!(requests(&out), []);
+    let plan = (0..MAX_FLOWS)
+        .map(|s| m.rx_plan(s))
+        .find(|p| p.group.is_some())
+        .expect("a slot joins the group");
+    assert_eq!(plan.group, Some(GROUP));
+    assert!(!plan.live);
+    // Its flow ends: the channel goes back to a unicast flow.
+    net.set("peer-device", MulticastLookup::None);
+    let out = m.tick(S, &heard, &net);
+    assert_eq!(stops(&out), []);
+    assert!((0..MAX_FLOWS).all(|s| m.rx_plan(s).group.is_none()));
+    let r = requests(&m.tick(S + RETRY_NS, &heard, &net));
+    assert_eq!(r.len(), 1, "a unicast flow again");
+}
+
+#[test]
+fn a_silent_multicast_flow_is_left_and_resolved_again() {
+    let net = shared_network();
+    let mut m = manager();
+    m.set(0, Some(sub("TX 1", "peer-device")));
+    m.tick(0, &NONE, &net);
+    assert_eq!(m.rx_plan(0).group, Some(GROUP));
+    let generation = m.rx_plan(0).generation;
+    // Nothing came by YOUNG_NS: left (no stop), joined again at once.
+    let out = m.tick(YOUNG_NS, &NONE, &net);
+    assert_eq!(out, []);
+    let again = (0..MAX_FLOWS)
+        .map(|s| m.rx_plan(s))
+        .find(|p| p.group.is_some())
+        .unwrap();
+    assert_ne!(again.generation, generation);
+    // A multicast flow no channel uses is left too.
+    m.set(0, None);
+    assert_eq!(m.tick(YOUNG_NS + S / 4, &NONE, &net), []);
+    assert!((0..MAX_FLOWS).all(|s| m.rx_plan(s).group.is_none()));
+}
+
+#[test]
+fn a_multicast_flow_we_cannot_read_is_not_joined() {
+    // Other bits, no frames, too many slots: a unicast flow instead.
+    for bad in [
+        Multicast {
+            group: GROUP,
+            channels: vec![1, 2],
+            fpp: 32,
+            bits: 16,
+        },
+        Multicast {
+            group: GROUP,
+            channels: vec![1, 2],
+            fpp: 0,
+            bits: 24,
+        },
+        Multicast {
+            group: GROUP,
+            channels: (1..=MAX_CHANNELS as u16 + 1).collect(),
+            fpp: 32,
+            bits: 24,
+        },
+        Multicast {
+            group: GROUP,
+            channels: vec![1, 2],
+            fpp: 1000,
+            bits: 24,
+        },
+    ] {
+        let net = shared_network();
+        net.set("peer-device", MulticastLookup::Found(bad.clone()));
+        let mut m = manager();
+        m.set(0, Some(sub("TX 1", "peer-device")));
+        let r = requests(&m.tick(0, &NONE, &net));
+        assert_eq!(r.len(), 1, "{bad:?}");
+        assert_eq!(m.rx_plan(0).group, None, "{bad:?}");
+    }
+}
+
+#[test]
+fn a_moved_group_is_joined_anew() {
+    let net = shared_network();
+    let mut m = manager();
+    m.set(0, Some(sub("TX 1", "peer-device")));
+    m.tick(0, &NONE, &net);
+    let other = SocketAddrV4::new(Ipv4Addr::new(239, 255, 0, 2), 4321);
+    net.set(
+        "peer-device",
+        MulticastLookup::Found(Multicast {
+            group: other,
+            channels: vec![1, 2],
+            fpp: 32,
+            bits: 24,
+        }),
+    );
+    let mut heard = NONE;
+    heard[0] = 1;
+    assert_eq!(m.tick(S / 4, &heard, &net), []);
+    let groups: Vec<_> = (0..MAX_FLOWS).filter_map(|s| m.rx_plan(s).group).collect();
+    assert_eq!(groups, [other]);
+}
+
+#[test]
+fn two_groups_of_one_transmitter_on_one_port_are_joined_only_where_the_socket_tells_them_apart() {
+    let net = shared_network();
+    // Its TX 3 in a second group on the same port.
+    let other = SocketAddrV4::new(Ipv4Addr::new(239, 255, 0, 2), GROUP.port());
+    net.multicast.borrow_mut().clear();
+    let first = Multicast {
+        group: GROUP,
+        channels: vec![1, 2],
+        fpp: 32,
+        bits: 24,
+    };
+    let second = Multicast {
+        group: other,
+        channels: vec![3],
+        fpp: 32,
+        bits: 24,
+    };
+    // A resolver that answers by channel.
+    struct Two(Shared, Multicast, Multicast);
+    impl Resolver for Two {
+        fn lookup(&self, d: &str, c: &str) -> Option<Advertised> {
+            self.0.lookup(d, c)
+        }
+        fn multicast(&self, _: &str, _: &str, a: &Advertised) -> MulticastLookup {
+            let m = if self.1.channels.contains(&a.tx_channel_id) {
+                &self.1
+            } else {
+                &self.2
+            };
+            MulticastLookup::Found(m.clone())
+        }
+    }
+    let two = Two(net, first, second);
+    for port_only in [false, true] {
+        let mut m = manager();
+        m.port_only = port_only;
+        m.set(0, Some(sub("TX 1", "peer-device")));
+        m.tick(0, &NONE, &two);
+        m.set(1, Some(sub("TX 3", "peer-device")));
+        let out = m.tick(S / 4, &NONE, &two);
+        let groups: Vec<_> = (0..MAX_FLOWS).filter_map(|s| m.rx_plan(s).group).collect();
+        if port_only {
+            assert_eq!(groups, [GROUP]);
+            assert_eq!(requests(&out).len(), 1, "TX 3 asked for as unicast");
+        } else {
+            assert_eq!(groups, [GROUP, other]);
+            assert_eq!(requests(&out), []);
+        }
+    }
+    // Another port, or the same group: no clash.
+    let mut m = manager();
+    m.port_only = true;
+    m.set(0, Some(sub("TX 1", "peer-device")));
+    m.set(1, Some(sub("TX 2", "peer-device")));
+    assert_eq!(m.tick(0, &NONE, &two), []);
+    let groups: Vec<_> = (0..MAX_FLOWS).filter_map(|s| m.rx_plan(s).group).collect();
+    assert_eq!(groups, [GROUP], "one flow carries both");
+    let elsewhere = Multicast {
+        group: SocketAddrV4::new(Ipv4Addr::new(239, 255, 0, 2), GROUP.port() + 1),
+        ..two.2.clone()
+    };
+    let two = Two(two.0, two.1, elsewhere);
+    m.set(2, Some(sub("TX 3", "peer-device")));
+    assert_eq!(m.tick(S / 4, &NONE, &two), []);
+    assert_eq!((0..MAX_FLOWS).filter_map(|s| m.rx_plan(s).group).count(), 2);
 }

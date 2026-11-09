@@ -167,6 +167,38 @@ pub fn instance(device: &str, channel: &str) -> String {
 pub trait Resolver {
     /// The record of `tx_channel` on `tx_device`, if one is known now.
     fn lookup(&self, tx_device: &str, tx_channel: &str) -> Option<Advertised>;
+
+    /// A multicast flow `tx_device` sends that carries `tx_channel` (its
+    /// record `a`), as far as is known now (dstack #148). The default knows
+    /// of none: a resolver that cannot list a transmitter's flows answers
+    /// [`MulticastLookup::None`], and the channel gets a unicast flow.
+    fn multicast(&self, tx_device: &str, tx_channel: &str, a: &Advertised) -> MulticastLookup {
+        let _ = (tx_device, tx_channel, a);
+        MulticastLookup::None
+    }
+}
+
+/// A transmitter's multicast flow that carries a channel: where it is sent
+/// and its format, as the transmitter lists it (`crate::arc::flows`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Multicast {
+    /// The group and port.
+    pub group: SocketAddrV4,
+    /// The TX channel id of each of its channel slots.
+    pub channels: Vec<u16>,
+    pub fpp: u16,
+    pub bits: u32,
+}
+
+/// What is known of a channel's multicast flow.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MulticastLookup {
+    /// Its transmitter's flows are being read: ask again (no unicast flow
+    /// is asked for meanwhile, so none takes a transmitter's last slot).
+    Unknown,
+    /// None carries the channel (or its flows cannot be read).
+    None,
+    Found(Multicast),
 }
 
 /// Our own records first, then the second resolver's.
@@ -175,6 +207,15 @@ impl<A: Resolver, B: Resolver> Resolver for (A, B) {
         self.0
             .lookup(tx_device, tx_channel)
             .or_else(|| self.1.lookup(tx_device, tx_channel))
+    }
+
+    /// The resolver that has the channel's record answers.
+    fn multicast(&self, tx_device: &str, tx_channel: &str, a: &Advertised) -> MulticastLookup {
+        if self.0.lookup(tx_device, tx_channel).is_some() {
+            self.0.multicast(tx_device, tx_channel, a)
+        } else {
+            self.1.multicast(tx_device, tx_channel, a)
+        }
     }
 }
 

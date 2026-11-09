@@ -101,6 +101,7 @@ use gaps::{Gap, Gaps};
 
 pub mod client;
 pub mod control;
+pub mod flows;
 pub mod gaps;
 
 /// ARC's UDP port.

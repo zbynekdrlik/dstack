@@ -53,7 +53,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use mio::{Events, Interest, Poll, Token};
-use tracing::info;
+use tracing::{info, warn};
 
 use super::packet::{self, MEDIA_HEADER};
 use super::ring::Ring;
@@ -130,13 +130,17 @@ pub struct RxPlan {
     pub live: bool,
     /// Which flow (a new flow in the slot is a new plan).
     pub generation: u32,
+    /// A multicast flow's group: the slot receives it on a socket of its
+    /// own that joins the group on our address (dstack #148), and sends no
+    /// keepalive. `None`: the slot's own socket, where a unicast flow comes.
+    pub group: Option<SocketAddrV4>,
 }
 
 impl RxPlan {
-    /// The plan as two words (the seqlocked cell's).
-    pub fn words(&self) -> [u64; 2] {
+    /// The plan as three words (the seqlocked cell's).
+    pub fn words(&self) -> [u64; 3] {
         let Some(src) = self.src else {
-            return [0; 2];
+            return [0; 3];
         };
         [
             (u64::from(src.to_bits()) << 32)
@@ -148,11 +152,14 @@ impl RxPlan {
                 + (u64::from(self.generation) << 16)
                 + (u64::from(self.bps) << 8)
                 + u64::from(self.nslots),
+            self.group.map_or(0, |g| {
+                (1 << 63) + (u64::from(g.ip().to_bits()) << 16) + u64::from(g.port())
+            }),
         ]
     }
 
     /// The plan [`RxPlan::words`] wrote.
-    pub fn from_words(w: [u64; 2]) -> RxPlan {
+    pub fn from_words(w: [u64; 3]) -> RxPlan {
         if w[1] >> 63 == 0 {
             return RxPlan::default();
         }
@@ -165,6 +172,8 @@ impl RxPlan {
             block: ((w[1] >> 48) & 0x1ff) as u16,
             live: (w[1] >> 62) & 1 == 1,
             generation: (w[1] >> 16) as u32,
+            group: (w[2] >> 63 == 1)
+                .then(|| SocketAddrV4::new(Ipv4Addr::from_bits((w[2] >> 16) as u32), w[2] as u16)),
         }
     }
 }
@@ -210,6 +219,9 @@ struct RxStats {
     keepalives: AtomicU64,
     keepalive_errors: AtomicU64,
     recv_errors: AtomicU64,
+    /// Multicast groups joined, and joins that failed.
+    joins: AtomicU64,
+    join_errors: AtomicU64,
     max_lateness: AtomicU64,
     /// The largest lateness since the device started, samples.
     lateness_peak: AtomicU64,
@@ -265,6 +277,10 @@ pub struct RxCounts {
     pub keepalives: u64,
     pub keepalive_errors: u64,
     pub recv_errors: u64,
+    /// Multicast groups the slot joined (each a new socket), and the joins
+    /// that failed (the socket, the bind or the membership).
+    pub joins: u64,
+    pub join_errors: u64,
 }
 
 /// The drops of the UDP socket bound to `ip`:`port` in a `/proc/net/udp`
@@ -284,7 +300,7 @@ pub fn udp_drops(table: &str, ip: Ipv4Addr, port: u16) -> Option<u64> {
 #[derive(Debug)]
 pub struct RxShared {
     rate: u32,
-    plans: [Cell<2>; MAX_FLOWS],
+    plans: [Cell<3>; MAX_FLOWS],
     routes: Box<[AtomicU64]>,
     /// Each RX channel's read delay ([`RxPlan::delay`] of its flow), for
     /// the engine's pump.
@@ -295,6 +311,8 @@ pub struct RxShared {
     playout: AtomicU64,
     routes_version: AtomicU32,
     sockets: Box<[UdpSocket]>,
+    /// Our address: the multicast groups are joined on it.
+    ip: Ipv4Addr,
     rings: Arc<[Ring]>,
     lanes: [RxStats; MAX_FLOWS],
     /// Held by [`RxShared::publish`] only (one writer at a time); the RX
@@ -363,6 +381,7 @@ impl RxShared {
             delays: (0..rings.len()).map(|_| AtomicU32::new(0)).collect(),
             routes_version: AtomicU32::new(0),
             sockets,
+            ip,
             rings,
             lanes: std::array::from_fn(|_| RxStats::default()),
             writer: Mutex::new(()),
@@ -487,6 +506,8 @@ impl RxShared {
             keepalives: get(&l.keepalives),
             keepalive_errors: get(&l.keepalive_errors),
             recv_errors: get(&l.recv_errors),
+            joins: get(&l.joins),
+            join_errors: get(&l.join_errors),
         }
     }
 
@@ -636,6 +657,10 @@ pub struct Receiver {
     /// The flow sockets (the shared ones' duplicates, registered with the
     /// poll).
     sockets: Vec<mio::net::UdpSocket>,
+    /// Each slot's multicast socket while its plan names a group, and the
+    /// group: registered with the slot's token, read instead of the slot's
+    /// own socket.
+    joined: Vec<Option<(SocketAddrV4, mio::net::UdpSocket)>>,
     lanes: Vec<Lane>,
     /// The routes' version read last.
     routes_seen: Option<u32>,
@@ -662,6 +687,7 @@ impl Receiver {
             poll,
             events: Events::with_capacity(MAX_FLOWS),
             sockets,
+            joined: (0..MAX_FLOWS).map(|_| None).collect(),
             lanes: (0..MAX_FLOWS).map(|_| Lane::new(channels)).collect(),
             routes_seen: None,
             ready: 0,
@@ -724,12 +750,19 @@ impl Receiver {
     /// wrote them all), which RX channels each slot feeds.
     fn refresh(&mut self) {
         let shared = &*self.shared;
-        for (lane, cell) in self.lanes.iter_mut().zip(&shared.plans) {
+        let mut regrouped = 0u64;
+        for (slot, (lane, cell)) in self.lanes.iter_mut().zip(&shared.plans).enumerate() {
             if lane.seen != Some(cell.version())
                 && let Some((version, w)) = cell.read()
             {
                 let plan = RxPlan::from_words(w);
                 if plan != lane.plan {
+                    // Another group, or a new flow of a group whose join
+                    // failed: (re)joined.
+                    let unjoined = plan.group.is_some() && self.joined[slot].is_none();
+                    if plan.group != lane.plan.group || unjoined {
+                        regrouped |= 1 << slot;
+                    }
                     lane.plan = plan;
                     lane.source = None;
                     lane.heard = None;
@@ -739,6 +772,12 @@ impl Receiver {
                 lane.seen = Some(version);
             }
         }
+        while regrouped != 0 {
+            let slot = regrouped.trailing_zeros() as usize;
+            regrouped &= regrouped - 1;
+            self.regroup(slot);
+        }
+        let shared = &*self.shared;
         let version = shared.routes_version.load(Ordering::Acquire);
         if self.routes_seen == Some(version) {
             return;
@@ -757,22 +796,56 @@ impl Receiver {
         self.routes_seen = Some(version);
     }
 
+    /// Slot `slot`'s plan names another group (or none): the old group's
+    /// socket is closed (which leaves the group), the new group's opened
+    /// and registered. Only on a plan change, never per packet.
+    fn regroup(&mut self, slot: usize) {
+        let want = self.lanes[slot].plan.group;
+        if let Some((group, mut old)) = self.joined[slot].take() {
+            let _ = self.poll.registry().deregister(&mut old);
+            info!(slot = slot + 1, %group, "RX multicast flow: group left");
+        }
+        let Some(group) = want else { return };
+        let stats = &self.shared.lanes[slot];
+        let joined = join(self.shared.ip, group).and_then(|s| {
+            let mut s = mio::net::UdpSocket::from_std(s);
+            self.poll
+                .registry()
+                .register(&mut s, Token(slot), Interest::READABLE)?;
+            Ok(s)
+        });
+        match joined {
+            Ok(s) => {
+                stats.joins.fetch_add(1, Ordering::Relaxed);
+                info!(slot = slot + 1, %group, "RX multicast flow: group joined");
+                self.joined[slot] = Some((group, s));
+            }
+            Err(e) => {
+                stats.join_errors.fetch_add(1, Ordering::Relaxed);
+                warn!(slot = slot + 1, %group, error = %e, "RX multicast flow: the group could not be joined");
+            }
+        }
+    }
+
     /// Reads up to [`DRAIN`] datagrams of flow slot `slot`; `true` when
     /// none is left. The hot path: no allocation, no lock, no log.
     fn receive(&mut self, slot: usize, now_ns: Option<u64>, mono: u64) -> bool {
         let Receiver {
             shared,
             sockets,
+            joined,
             lanes,
             buf,
             frames,
             ..
         } = self;
-        let (Some(socket), Some(lane), Some(stats)) = (
-            sockets.get(slot),
-            lanes.get_mut(slot),
-            shared.lanes.get(slot),
-        ) else {
+        let socket = match joined.get(slot) {
+            Some(Some((_, s))) => Some(s),
+            _ => sockets.get(slot),
+        };
+        let (Some(socket), Some(lane), Some(stats)) =
+            (socket, lanes.get_mut(slot), shared.lanes.get(slot))
+        else {
             return true;
         };
         let rate = shared.rate;
@@ -895,6 +968,40 @@ impl Receiver {
             });
         }
     }
+}
+
+/// Whether [`join`] binds a group's socket to the port only (Windows binds
+/// no multicast address), so it gets every group sent to that port.
+pub const GROUP_BOUND_TO_PORT: bool = cfg!(not(target_os = "linux"));
+
+/// A socket that receives the multicast `group` on our address `ip`:
+/// bound to the group's port (on Linux to the group itself, so it gets no
+/// other group's datagrams to that port; Windows binds no multicast
+/// address), shared with other sockets on it (two of our devices on one PC
+/// receive one group), non-blocking, the receive buffer asked for, and a
+/// member of the group on `ip`'s interface. Dropping it leaves the group.
+pub fn join(ip: Ipv4Addr, group: SocketAddrV4) -> io::Result<UdpSocket> {
+    use socket2::{Domain, Protocol, Socket, Type};
+    if !group.ip().is_multicast() {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "not a multicast group",
+        ));
+    }
+    let s = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
+    s.set_reuse_address(true)?;
+    let at = if GROUP_BOUND_TO_PORT {
+        Ipv4Addr::UNSPECIFIED
+    } else {
+        *group.ip()
+    };
+    s.bind(&SocketAddrV4::new(at, group.port()).into())?;
+    s.join_multicast_v4(group.ip(), &ip)?;
+    s.set_nonblocking(true)?;
+    let s = UdpSocket::from(s);
+    crate::winsock::no_connreset(&s)?;
+    set_recv_buffer(&s, RECV_BUFFER_BYTES);
+    Ok(s)
 }
 
 /// Starts the RX thread: it receives `shared`'s flows on `clock` until

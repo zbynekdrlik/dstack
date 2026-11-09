@@ -54,6 +54,16 @@
 //! packet nor latency (the card's captured pages; netaudio reads neither
 //! from them).
 //!
+//! **TX flow lists** (dstack #148): [`Book::multicast`] answers whether a
+//! multicast flow of a transmitter carries a channel, from the device's
+//! 0x2600 list ([`crate::arc::flows::list_tx_flows`]) read by the same
+//! reader, one exchange, within the same bounds: one read at a time, a list
+//! kept [`Timing::max_age_ns`], the next read [`retry_after`] its failures
+//! after the last. It is asked for every subscribed channel whose device has
+//! a `_netaudio-arc` record, whichever record resolved the channel. A list
+//! that cannot be read (a device that answers no 0x2600, as our own) counts
+//! as one with no multicast flow until the next read.
+//!
 //! Logs name peer ids (the status's), counts and opcodes, never a name or
 //! an address: one info line per directory read, and once a minute at most
 //! the reads, failures and lookups that found nothing ([`Counts`]).
@@ -69,10 +79,14 @@ use mdns_sd::ServiceEvent;
 use tracing::{debug, info};
 
 use super::instance::Instances;
-use super::resolve::{Advertised, Applied, Browse, BrowseError, Mdns, Resolver, lowest_ipv4};
+use super::resolve::{
+    Advertised, Applied, Browse, BrowseError, Mdns, Multicast, MulticastLookup, Resolver,
+    lowest_ipv4,
+};
 use super::retry_after;
 use crate::announce::ARC_SERVICE;
 use crate::arc::client::{Directory, REPLY_TIMEOUT, ReadError, TxChannel, Udp, read_directory};
+use crate::arc::flows::{Flows, TxFlow, list_tx_flows};
 use crate::ctl::Requests;
 use crate::device::DeviceConfig;
 use crate::flows::control::START as DBCP1;
@@ -96,6 +110,11 @@ pub const SETTLE_NS: u64 = 5_000_000_000;
 pub const MAX_AGE_NS: u64 = 60_000_000_000;
 /// The most devices whose records are kept.
 pub const MAX_RECORDS: usize = 256;
+/// How long after the first multicast lookup a device with no
+/// `_netaudio-arc` record yet is waited for ([`Book::multicast`]): the
+/// browse's first answers come within it, so no unicast flow is asked for
+/// at start before a transmitter's multicast flows are known.
+pub const RECORD_GRACE_NS: u64 = 2_000_000_000;
 /// The most devices a lookup asked about (their directories and reads).
 pub const MAX_DEVICES: usize = 64;
 /// The reader looks at least this often at the minute's report (a new
@@ -231,12 +250,33 @@ struct Reads {
     failures: u32,
 }
 
-/// A read to make: the device (its name, case aside), its ARC, and why.
+/// A device's TX flow lists (dstack #148): the last one and when it was
+/// read, and its reads, as [`Reads`] for its channels.
+#[derive(Debug, Default)]
+struct FlowReads {
+    flows: Option<(Vec<TxFlow>, u64)>,
+    state: State,
+    ended: Option<u64>,
+    failures: u32,
+}
+
+/// What a read reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    /// The TX channels (the directory).
+    Channels,
+    /// The TX flows (0x2600), for their multicast flows.
+    Flows,
+}
+
+/// A read to make: the device (its name, case aside), its ARC, why, and
+/// what it reads.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Job {
     pub device: String,
     pub arc: SocketAddrV4,
     pub want: Want,
+    pub kind: Kind,
 }
 
 /// A read's outcome.
@@ -285,6 +325,35 @@ impl Counts {
     pub fn failed(&self) -> u64 {
         self.no_reply + self.refused + self.malformed + self.socket
     }
+
+    /// A read that ended with `e`, counted by why.
+    fn count_error(&mut self, e: ReadError) {
+        match e {
+            ReadError::Timeout { .. } | ReadError::Stopped => self.no_reply += 1,
+            ReadError::Refused { .. } => self.refused += 1,
+            ReadError::Malformed { .. } => self.malformed += 1,
+            ReadError::Io { .. } => self.socket += 1,
+        }
+    }
+}
+
+/// The multicast flow in `flows` that carries `a`'s TX channel at its bits
+/// (a flow with no multicast destination, no channel or more channel
+/// slots than one of our flows takes carries nothing).
+pub fn carried(flows: &[TxFlow], a: &Advertised) -> Option<Multicast> {
+    flows.iter().find_map(|f| {
+        let group = f.destinations.iter().find(|d| d.ip().is_multicast())?;
+        (f.multicast()
+            && u32::from(f.bits) == a.bits
+            && f.channels.contains(&a.tx_channel_id)
+            && f.channels.len() <= crate::media::tx::MAX_CHANNELS)
+            .then(|| Multicast {
+                group: *group,
+                channels: f.channels.clone(),
+                fpp: f.fpp,
+                bits: a.bits,
+            })
+    })
 }
 
 /// The devices' records, directories and reads (see the module).
@@ -293,6 +362,11 @@ pub struct Book {
     timing: Timing,
     records: BTreeMap<String, Records>,
     reads: BTreeMap<String, Reads>,
+    flow_reads: BTreeMap<String, FlowReads>,
+    /// When [`Book::multicast`] was first asked about each device (case
+    /// aside) that had no `_netaudio-arc` record then, at most
+    /// [`MAX_DEVICES`].
+    first_asked: BTreeMap<String, u64>,
     counts: Counts,
     /// Wants registered so far (the reader is woken when it moves).
     wants: u64,
@@ -329,6 +403,8 @@ impl Book {
             timing,
             records: BTreeMap::new(),
             reads: BTreeMap::new(),
+            flow_reads: BTreeMap::new(),
+            first_asked: BTreeMap::new(),
             counts: Counts::default(),
             wants: 0,
         }
@@ -477,18 +553,129 @@ impl Book {
                 device: device.clone(),
                 arc,
                 want,
+                kind: Kind::Channels,
+            });
+        }
+        for (device, r) in &mut self.flow_reads {
+            let State::Wanted(want) = r.state else {
+                continue;
+            };
+            if now
+                < r.ended
+                    .map_or(0, |t| t.saturating_add(retry_after(r.failures)))
+            {
+                continue;
+            }
+            let Some(arc) = self.records.get(device).and_then(|rec| rec.arc) else {
+                r.state = State::Idle;
+                continue;
+            };
+            r.state = State::Reading;
+            return Some(Job {
+                device: device.clone(),
+                arc,
+                want,
+                kind: Kind::Flows,
             });
         }
         None
     }
 
+    /// The multicast flow of `device` (case aside) that carries its TX
+    /// channel `a` at `now`, from its flow list (dstack #148): read within
+    /// [`Timing::max_age_ns`], or the last one while a new read is wanted;
+    /// [`MulticastLookup::Unknown`] while the first read is wanted or runs.
+    /// Only its `_netaudio-arc` record is needed, read at once (no settle:
+    /// the list needs no other record). A device without that record is
+    /// [`MulticastLookup::Unknown`] for [`RECORD_GRACE_NS`] after the first
+    /// multicast lookup (the browse may not have answered yet), then
+    /// [`MulticastLookup::None`]; so is one past [`MAX_DEVICES`].
+    pub fn multicast(&mut self, device: &str, a: &Advertised, now: u64) -> MulticastLookup {
+        let key = device.to_ascii_lowercase();
+        if !self.records.get(&key).is_some_and(|r| r.arc.is_some()) {
+            if self.first_asked.len() >= MAX_DEVICES && !self.first_asked.contains_key(&key) {
+                return MulticastLookup::None;
+            }
+            let first = *self.first_asked.entry(key).or_insert(now);
+            return if now.saturating_sub(first) < RECORD_GRACE_NS {
+                MulticastLookup::Unknown
+            } else {
+                MulticastLookup::None
+            };
+        }
+        if self.flow_reads.len() >= MAX_DEVICES && !self.flow_reads.contains_key(&key) {
+            return MulticastLookup::None;
+        }
+        let max_age = self.timing.max_age_ns;
+        let r = self.flow_reads.entry(key).or_default();
+        let answer = match &r.flows {
+            Some((flows, _)) => {
+                carried(flows, a).map_or(MulticastLookup::None, MulticastLookup::Found)
+            }
+            None => MulticastLookup::Unknown,
+        };
+        let want = match &r.flows {
+            Some((_, at)) if now.saturating_sub(*at) < max_age => return answer,
+            Some(_) => Want::Old,
+            None => Want::Missing,
+        };
+        if r.state == State::Idle {
+            r.state = State::Wanted(want);
+            self.wants += 1;
+        }
+        answer
+    }
+
+    /// The flow list read `job` ended at `now` with `result` after
+    /// `requests` requests. A list that could not be read is a failure (the
+    /// next read waits longer); the last list read stays (a multicast flow
+    /// is not left over one lost reply), and a device never read counts as
+    /// one with no flow until the next read (a device that answers no
+    /// 0x2600 gets unicast flows).
+    pub fn finished_flows(
+        &mut self,
+        job: &Job,
+        result: Result<Flows, ReadError>,
+        requests: usize,
+        now: u64,
+    ) {
+        self.counts.requests += requests as u64;
+        let Some(r) = self.flow_reads.get_mut(&job.device) else {
+            return;
+        };
+        r.state = State::Idle;
+        r.ended = Some(now);
+        match result {
+            Ok(list) => {
+                r.failures = 0;
+                r.flows = Some((list.flows, now));
+            }
+            Err(e) => {
+                self.counts.count_error(e);
+                r.failures = r.failures.saturating_add(1);
+                if r.flows.is_none() {
+                    r.flows = Some((Vec::new(), now));
+                }
+            }
+        }
+    }
+
     /// When the reader should look again: the earliest time a wanted read
     /// may start; `None` with nothing wanted.
     pub fn next_due(&self) -> Option<u64> {
+        let flows = self
+            .flow_reads
+            .values()
+            .filter(|r| matches!(r.state, State::Wanted(_)))
+            .map(|r| {
+                r.ended
+                    .map_or(0, |t| t.saturating_add(retry_after(r.failures)))
+            });
         self.reads
             .values()
             .filter(|r| matches!(r.state, State::Wanted(_)))
             .map(Self::due)
+            .chain(flows)
             .min()
     }
 
@@ -517,12 +704,7 @@ impl Book {
                 r.directory = Some((dir, now));
             }
             Err(e) => {
-                match e {
-                    ReadError::Timeout { .. } | ReadError::Stopped => self.counts.no_reply += 1,
-                    ReadError::Refused { .. } => self.counts.refused += 1,
-                    ReadError::Malformed { .. } => self.counts.malformed += 1,
-                    ReadError::Io { .. } => self.counts.socket += 1,
-                }
+                self.counts.count_error(e);
                 r.failures = r.failures.saturating_add(1);
             }
         }
@@ -726,6 +908,18 @@ impl Resolver for ArcDirectory {
         }
         found
     }
+
+    fn multicast(&self, tx_device: &str, _tx_channel: &str, a: &Advertised) -> MulticastLookup {
+        self.asked.store(true, Ordering::Relaxed);
+        let now = self.shared.now();
+        let mut book = lock(&self.shared.book);
+        let wants = book.wants();
+        let found = book.multicast(tx_device, a, now);
+        if book.wants() != wants {
+            self.shared.wake.notify_all();
+        }
+        found
+    }
 }
 
 /// A browse thread: every event into the book, until the events end.
@@ -750,18 +944,30 @@ fn reader(shared: &Shared, ip: Ipv4Addr, requests: &Requests) {
             requests,
             &shared.stop,
         ) {
+            Ok(mut ex) if job.kind == Kind::Flows => {
+                let result = list_tx_flows(&mut ex);
+                flows_read(shared, &job, result, ex.sent, ex.peer, started);
+                continue;
+            }
             Ok(mut ex) => {
                 let result = read_directory(&mut ex);
                 (result, ex.sent, ex.peer)
             }
-            Err(e) => (
-                Err(ReadError::Io {
-                    op: crate::arc::op::COUNTS,
-                    kind: e.kind(),
-                }),
-                0,
-                0,
-            ),
+            Err(e) => {
+                let err = |op| ReadError::Io { op, kind: e.kind() };
+                if job.kind == Kind::Flows {
+                    flows_read(
+                        shared,
+                        &job,
+                        Err(err(crate::arc::flows::LIST)),
+                        0,
+                        0,
+                        started,
+                    );
+                    continue;
+                }
+                (Err(err(crate::arc::op::COUNTS)), 0, 0)
+            }
         };
         let ms = started.elapsed().as_millis();
         match &result {
@@ -787,6 +993,34 @@ fn reader(shared: &Shared, ip: Ipv4Addr, requests: &Requests) {
             now,
         );
     }
+}
+
+/// A flow list read `job` ended with `result`: logged and kept.
+fn flows_read(
+    shared: &Shared,
+    job: &Job,
+    result: Result<Flows, ReadError>,
+    sent: usize,
+    peer: usize,
+    started: Instant,
+) {
+    let ms = started.elapsed().as_millis();
+    match &result {
+        Ok(list) => info!(
+            peer,
+            flows = list.flows.len(),
+            multicast = list.flows.iter().filter(|f| f.multicast()).count(),
+            unread = list.unread,
+            requests = sent,
+            ms,
+            "a transmitter's TX flows read through its ARC"
+        ),
+        Err(e) => {
+            debug!(peer, requests = sent, ms, error = %e, "an ARC read of a transmitter's TX flows failed")
+        }
+    }
+    let now = shared.now();
+    lock(&shared.book).finished_flows(job, result, sent, now);
 }
 
 /// Waits for the next read (a want, a wait over), looking at the minute's
@@ -889,6 +1123,11 @@ impl Resolver for Network {
                 })
             }
         })
+    }
+
+    /// Read from the transmitter's ARC, whichever record named the channel.
+    fn multicast(&self, tx_device: &str, tx_channel: &str, a: &Advertised) -> MulticastLookup {
+        self.arc.multicast(tx_device, tx_channel, a)
     }
 }
 
