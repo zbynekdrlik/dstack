@@ -1161,15 +1161,14 @@ async fn a_stop_that_has_already_come_ends_the_daemon_after_its_announcement() {
     assert!(media.tx.stopping() && media.rx.stopping());
 }
 
-/// The daemon's browses, in the order it starts them.
-const BROWSES: [&str; 3] = [
-    "browse _netaudio-chan._udp.local.",
-    "browse _netaudio-arc._udp.local.",
-    "browse _netaudio-dbc._udp.local.",
-];
-
+/// dstack #141: a device keeps no browse of a whole mDNS service. A
+/// browse's PTR query makes every Dante device answer with all its records
+/// at once, and mdns-sd refreshes what it learned at 80 % of the records'
+/// TTL on every host that heard the answer, together: a burst every 96 s,
+/// which an UltimoX2 receiver read as late packets. A subscription is
+/// resolved by direct queries of the names it needs.
 #[tokio::test]
-async fn the_daemon_browses_at_the_first_subscription_and_stops_after_any_end() {
+async fn the_daemon_with_a_subscription_starts_no_mdns_browse() {
     let dir = tempfile::tempdir().unwrap();
     let shared = device_in(dir.path());
     {
@@ -1183,17 +1182,10 @@ async fn the_daemon_browses_at_the_first_subscription_and_stops_after_any_end() 
     let mut announcer = Announcer::new(log.clone());
     let lo = loopback().await;
     let media = media_of(&shared);
-    // The control server ends once the browses have started (the channel
-    // records' at the subscription; the peer has none, so its lookup goes
-    // on to the ARC directory, whose browses start at the next tick):
-    // serving ends with its error, and the stop still runs.
-    let watch = log.clone();
+    // Eight ticks: the subscription is looked up, goes past its direct
+    // query (none can start on the tests' address) to the ARC directory.
     let control = async move {
-        let deadline = tokio::time::Instant::now() + BOUND;
-        while !watch.calls().contains(&BROWSES[2].to_string()) {
-            assert!(tokio::time::Instant::now() < deadline, "no browse");
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
+        tokio::time::sleep(TICK * 8).await;
         Err(io::Error::other("the control test's end"))
     };
     let served = tokio::time::timeout(
@@ -1211,18 +1203,10 @@ async fn the_daemon_browses_at_the_first_subscription_and_stops_after_any_end() 
     )
     .await
     .expect("within the bound");
-    let err = served.unwrap_err();
-    assert!(matches!(err, ServeError::Control(_)), "{err}");
-    assert_eq!(
-        err.to_string(),
-        "the control socket stopped: the control test's end"
-    );
+    assert!(matches!(served, Err(ServeError::Control(_))));
     let calls = log.calls();
     let browses: Vec<&String> = calls.iter().filter(|c| c.starts_with("browse")).collect();
-    // Each browse once, the channel records' first.
-    assert_eq!(browses, BROWSES);
-    // The unresolved subscription asked nothing; the threads ended.
-    assert!(media.requests.counts().sent.is_empty());
+    assert!(browses.is_empty(), "{browses:?}");
     assert!(media.tx.stopping() && media.rx.stopping());
 }
 
