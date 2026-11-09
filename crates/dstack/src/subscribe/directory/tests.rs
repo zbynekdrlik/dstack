@@ -1464,3 +1464,17 @@ fn a_flow_read_whose_socket_cannot_open_ends_as_a_failed_list() {
     assert_eq!(arc.counts().socket, 1);
     arc.join_within(BOUND);
 }
+
+#[test]
+fn a_failed_start_is_tried_once_and_starts_nothing() {
+    let mut arc = ArcDirectory::new(Timing::default());
+    assert!(!arc.tried());
+    // Our address is none of this host's: the queries' socket cannot bind.
+    let not_ours = Ipv4Addr::new(192, 0, 2, 1);
+    let mdns = SocketAddrV4::new(LOOPBACK, 9);
+    assert!(
+        arc.start(not_ours, mdns, Arc::new(Requests::default()))
+            .is_err()
+    );
+    assert!(arc.tried() && !arc.started());
+}
