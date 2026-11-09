@@ -810,8 +810,13 @@ fn nothing_is_sent_before_the_clock_is_ready_but_keepalives_are_read() {
     rig.tx.step(None, 0);
     assert!(drain(&rig.rx).is_empty());
     assert_eq!(rig.shared.lane(slot).keepalives, 1);
-    // Ready: the flow starts.
+    // The flow server sees that our clock is not ready (dstack #20).
+    assert!(!rig.shared.clock_ready());
+    // Ready: the flow starts, and the server grants again.
     assert!(!run(&mut rig, 0, 2_000).is_empty());
+    assert!(rig.shared.clock_ready());
+    rig.tx.step(None, 0);
+    assert!(!rig.shared.clock_ready(), "a clock lost again");
 }
 
 #[test]

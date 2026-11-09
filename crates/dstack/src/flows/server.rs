@@ -161,6 +161,7 @@ pub fn handle(
 
 /// [`handle`] behind the peer's bound: a request over it is dropped
 /// unread ([`FlowOutcome::Limited`]); `at` is the bound's clock.
+#[allow(clippy::too_many_arguments)]
 pub fn answer(
     limit: &mut PeerLimit,
     table: &mut TxTable,
@@ -169,11 +170,17 @@ pub fn answer(
     req: &[u8],
     at: Instant,
     now: u64,
+    ready: bool,
 ) -> FlowOutcome {
+    let op = read_u16(req, 6).unwrap_or(0);
     if !limit.allow(at, *from.ip()) {
-        return FlowOutcome::Limited {
-            op: read_u16(req, 6).unwrap_or(0),
-        };
+        return FlowOutcome::Limited { op };
+    }
+    // Before our TX clock is ready no flow is granted: it would stay silent
+    // and the receiver would give it up (dstack #20). Unanswered, the
+    // receiver asks again as for a device not up yet.
+    if !ready && op == control::op::REQUEST {
+        return FlowOutcome::Unanswered { op };
     }
     handle(table, cfg, from, req, now)
 }
@@ -443,7 +450,7 @@ pub async fn serve(
                         let at = Instant::now();
                         let outcome = {
                             let mut c = shared.lock();
-                            let outcome = answer(&mut limit, &mut c.table, &shared.cfg, from, &buf[..n], at, shared.now_ns());
+                            let outcome = answer(&mut limit, &mut c.table, &shared.cfg, from, &buf[..n], at, shared.now_ns(), shared.clock_ready());
                             shared.publish(&c);
                             outcome
                         };

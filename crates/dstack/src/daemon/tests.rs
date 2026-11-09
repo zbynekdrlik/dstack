@@ -1240,7 +1240,11 @@ async fn our_stop_of_a_flow_from_our_own_tx_is_answered_by_our_own_flow_control(
         crate::announce::responder::Responder::start_on(lo.multicast.mdns, false, published)
             .unwrap();
     let mut announcer = Announcer::new(Log::new(usize::MAX));
-    let media = media_of(&shared);
+    // A ready media clock: our TX grants a flow only once it can send it
+    // (dstack #20).
+    let clock = crate::clock::MonoClock::new();
+    clock.set_k(0);
+    let media = media_on(&shared.lock().unwrap(), Arc::new(clock));
     let (stop_tx, stop_rx) = oneshot::channel::<()>();
     let stop = async move {
         stop_rx.await.ok();

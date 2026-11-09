@@ -952,6 +952,8 @@ fn random_datagrams_never_panic_and_every_answer_is_one_of_inferno_s() {
 async fn the_server_answers_the_requester_and_hands_the_flow_to_the_tx_thread() {
     let rings: Arc<[Ring]> = Arc::from(Vec::new());
     let shared = Arc::new(TxShared::new(cfg(), Ipv4Addr::LOCALHOST, rings, 7, &[]).unwrap());
+    // Our TX clock ready (no TX thread here to say so): flows are granted.
+    shared.set_clock_ready(true);
     let sock = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let server = sock.local_addr().unwrap();
     let requests = Arc::new(Requests::default());
