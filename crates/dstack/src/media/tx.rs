@@ -1823,16 +1823,9 @@ pub(crate) fn join_mmcss() -> bool {
 /// MMCSS's task "Pro Audio", NUL-terminated UTF-16 (no allocation: a
 /// media thread joins at its start).
 #[cfg(windows)]
-const MMCSS_TASK: [u16; 10] = {
-    let name = b"Pro Audio\0";
-    let mut out = [0u16; 10];
-    let mut i = 0;
-    while i < name.len() {
-        out[i] = name[i] as u16;
-        i += 1;
-    }
-    out
-};
+const MMCSS_TASK: [u16; 10] = [
+    0x50, 0x72, 0x6f, 0x20, 0x41, 0x75, 0x64, 0x69, 0x6f, 0, // "Pro Audio\0"
+];
 
 /// Elsewhere there is no MMCSS.
 #[cfg(not(windows))]

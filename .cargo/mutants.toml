@@ -104,9 +104,9 @@ exclude_re = [
   # gate's Linux, so its mutants build and cannot fail; CI runs it on Windows.
   "tx.rs.*unthrottle",
   # The MMCSS join (dstack #1): the Windows call is not compiled on the
-  # gate's Linux, whose twin is a constant false (tested); the decision is
-  # `wants_mmcss` and `priority_outcome` (tested).
-  "tx.rs.*replace join_mmcss -> bool with true",
+  # gate's Linux, and its Linux twin is a constant false (a test pins it);
+  # the decision is `wants_mmcss` and `priority_outcome` (tested).
+  "tx.rs.*(replace join_mmcss -> bool|in join_mmcss$)",
   # The media threads' re-pin (dstack #1): the Windows SetThreadAffinityMask
   # call is not compiled on the gate's Linux; its decisions (`outcome`,
   # `one_cpu_mask`), the schedule (RePin::due) and the counting are tested,
