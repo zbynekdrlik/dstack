@@ -1235,10 +1235,10 @@ fn a_device_whose_flows_cannot_be_read_offers_none_and_waits_longer() {
 }
 
 #[test]
-fn a_device_without_an_arc_record_is_waited_for_briefly_then_not_read() {
+fn a_device_without_an_arc_record_is_waited_for_briefly_then_read_at_its_address() {
     let mut book = Book::new(Timing::default());
     let t = 7 * S;
-    // The browse may not have answered yet: unknown for the grace.
+    // Its record's query may not have answered yet: unknown for the grace.
     assert_eq!(
         book.multicast("peer-device", &peer_channel(1), t),
         MulticastLookup::Unknown
@@ -1247,12 +1247,14 @@ fn a_device_without_an_arc_record_is_waited_for_briefly_then_not_read() {
         book.multicast("other", &peer_channel(1), t + RECORD_GRACE_NS - 1),
         MulticastLookup::Unknown
     );
+    // Past it, a read at its channel's address is wanted (dstack #148:
+    // the DT_20 answers no query for its record).
     assert_eq!(
         book.multicast("peer-device", &peer_channel(1), t + RECORD_GRACE_NS),
-        MulticastLookup::None
+        MulticastLookup::Unknown
     );
-    assert_eq!(book.wants(), 0);
-    // A record that comes is read at once, however young.
+    assert_eq!(book.wants(), 1);
+    // A record that comes is read at once, however young, at its address.
     book.apply(
         &record(ARC_SERVICE, "peer-device", "10.0.0.11", 4440),
         t + 3 * S,
@@ -1263,6 +1265,7 @@ fn a_device_without_an_arc_record_is_waited_for_briefly_then_not_read() {
     );
     let job = book.next(t + 3 * S).unwrap();
     assert_eq!(job.kind, Kind::Flows);
+    assert_eq!(job.arc, SocketAddrV4::new(PEER_IP, 4440));
     // Its record gone before the read: the want is dropped.
     let mut book = peer_book();
     book.multicast("peer-device", &peer_channel(1), 0);
@@ -1354,14 +1357,47 @@ fn the_record_grace_runs_from_each_device_s_first_lookup() {
         book.multicast("late", &peer_channel(1), later),
         MulticastLookup::Unknown
     );
+    // Past the grace, a device with no record is read at its flow
+    // control's address on ARC's port (dstack #148, v0.6.56 regression).
     assert_eq!(
         book.multicast("early", &peer_channel(1), later),
-        MulticastLookup::None
+        MulticastLookup::Unknown
     );
     assert_eq!(
         book.multicast("late", &peer_channel(1), later + RECORD_GRACE_NS),
-        MulticastLookup::None
+        MulticastLookup::Unknown
     );
+}
+
+/// dstack #148 (9.11.2026, a v0.6.56 regression): the DT_20 answers no
+/// query for its `_netaudio-arc` instance, only for its channels. With no
+/// record its flow list was never read: band and iem-mixer asked it for
+/// unicast flows beside its multicast one, and band got "No more flows".
+/// Past the record's grace its ARC is read at the channel's flow-control
+/// address on ARC's port.
+#[test]
+fn a_device_without_an_arc_record_has_its_flows_read_at_its_address() {
+    let mut book = Book::new(Timing::default());
+    let a = peer_channel(2);
+    assert_eq!(book.multicast("mics", &a, 0), MulticastLookup::Unknown);
+    assert_eq!(book.next(0), None, "within the grace: no read");
+    let t = RECORD_GRACE_NS;
+    assert_eq!(book.multicast("mics", &a, t), MulticastLookup::Unknown);
+    let job = book.next(t).expect("a read of its flows");
+    assert_eq!(
+        job,
+        Job {
+            device: "mics".into(),
+            arc: SocketAddrV4::new(*DBC.ip(), crate::arc::PORT),
+            want: Want::Missing,
+            kind: Kind::Flows,
+        }
+    );
+    book.finished_flows(&job, Ok(ultimo_flows()), 1, t + MS);
+    assert!(matches!(
+        book.multicast("mics", &a, t + MS),
+        MulticastLookup::Found(_)
+    ));
 }
 
 #[test]
