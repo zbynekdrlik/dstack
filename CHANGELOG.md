@@ -2,6 +2,8 @@
 
 ## 0.6.61 (unreleased)
 
+- Docs (dstack #141, #155): `docs/two-networks.md` says that a host with an input filter on its Dante leg must accept UDP from source port 5353. Direct mDNS queries are answered unicast from the device's port 5353, which conntrack does not tie to the multicast query. dcontroller's guard dropped them, and its listing lost every device after 120 s.
+
 - dtray: `dtray --version` prints `dtray <version>` (the dstack release it was built from), and `--print` starts with that line. The tray's menu shows it already (`dstack <version>`). Each PC's dtray can be checked in one command. New: `Mode::Version`, `version_line`.
 
 ## 0.6.60
