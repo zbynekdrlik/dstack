@@ -1,6 +1,14 @@
 # Changelog
 
-## 0.6.63 (unreleased)
+## 0.6.64 (unreleased)
+
+- Fix (dstack #20, iemmixer and dasio, 9.11.2026): after band's restart, iem-mixer had 15 return channels off for 37 s. Two causes in our RX, and one in our TX:
+  - RX: a transmitter's flows are now requested together, one request per flow the waiting channels need, not one per transmitter per 9 s. The second of band's two flows used to come 9-10 s after the first on every re-make.
+  - RX: a request with no answer is asked again 6 s after it (2 s after it is given up), up to three times in a row (`QUICK_RETRY_NS`, `QUICK_TRIES`), before the 9-72 s backoff. A refusal still backs off at once.
+  - TX: a new-flow request that comes before our TX clock is ready is held for up to 3 s and granted as soon as the clock is ready (`flows::server::Held`, `HOLD`, `MAX_HELD`), so a receiver whose request came a moment early needs no retry. The holding, answering and dropping of a request are logged.
+  No latency change.
+
+## 0.6.63
 
 - Fix (dstack #20, 9.11.2026): a transmitter grants no flow before its media clock is ready. After mbc-snv's restart its clock was ready only after ~80 s (waiting for dsync). Our TX sends nothing before that, yet the flow server granted stream-obs's requests: two silent flows, captured on both sides. The receiver gave each up after 6 s, its retries backed off to 72 s, and the stream program was silent for 2-4 min after every mbc restart. Now a flow request (0x0100) before the TX clock is ready gets no answer, as from a device not up yet, and the receiver asks again. Stops and updates are answered as before. New: `TxShared::clock_ready`, `TxShared::set_clock_ready` (a host or test that steps the TX itself); `flows::server::answer` takes `ready`. No latency change.
 

@@ -20,11 +20,16 @@
 //! flows of our own RX channels only.
 //!
 //! **What bounds our requests (network safety, plan Review Focus 1):** per
-//! transmitter (by address) at most one request in flight, and at most one
-//! per [`RETRY_NS`] (9 s), counted from the last request whatever its
-//! answer; each failure in a row (a refusal, no answer within
-//! [`GIVE_UP_NS`], a flow that stays silent) doubles the wait up to
-//! [`RETRY_MAX_NS`] ([`retry_after`]), and audio received ends the row.
+//! transmitter (by address) one round of requests at a time, one request
+//! for each flow its waiting channels need (dstack #20: band's two flows
+//! were asked 9 s apart), and at most one round per [`RETRY_NS`] (9 s),
+//! counted from the last request whatever its answer; each failure in a
+//! row (a refusal, no answer within [`GIVE_UP_NS`], a flow that stays
+//! silent) doubles the wait up to [`RETRY_MAX_NS`] ([`retry_after`]), and
+//! audio received ends the row. A request with no answer is the one
+//! exception: asked again [`QUICK_RETRY_NS`] after it, [`QUICK_TRIES`] times
+//! in a row, as a transmitter that is starting answers nothing until its
+//! clock is ready (since v0.6.63); then the backoff.
 //! Stops are one datagram per flow we were granted. Nothing here depends on
 //! what a transmitter answers to stay inside these bounds.
 //!
@@ -94,6 +99,12 @@ pub const TICK: std::time::Duration = std::time::Duration::from_nanos(TICK_NS);
 /// The least time between two requests to one transmitter (inferno's 9 s
 /// between resolves).
 pub const RETRY_NS: u64 = 9_000_000_000;
+/// The wait from an unanswered request to the next one (it is given up
+/// after [`GIVE_UP_NS`], so 2 s after that).
+pub const QUICK_RETRY_NS: u64 = 6_000_000_000;
+/// How many unanswered requests in a row are asked again after
+/// [`QUICK_RETRY_NS`] before the backoff.
+pub const QUICK_TRIES: u32 = 3;
 /// The largest fpp a refusal with [`status::FPP_REFUSED`] steps up to:
 /// the most Dante devices advertise ([`crate::announce::FPP_MAX`]).
 pub const FPP_STEP_MAX: u16 = crate::announce::FPP_MAX;
@@ -199,12 +210,15 @@ impl Flow {
 }
 
 /// A transmitter we ask, by address.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 struct Peer {
-    in_flight: Option<FlowId>,
+    /// Its requests not answered yet.
+    in_flight: Vec<FlowId>,
     last_request: Option<u64>,
     /// Failures in a row.
     failures: u32,
+    /// Requests in a row that got no answer at all.
+    unanswered: u32,
 }
 
 /// Where a channel's audio comes from: its flow's slot and channel slot,
@@ -404,10 +418,18 @@ impl Manager {
             self.receive_multicast(rx, &a, &m, now, packets);
         }
         for (to, waiting) in pending {
-            if self.may_request(to, now)
-                && let Some(action) = self.request(&waiting, now, packets)
-            {
+            if !self.may_request(to, now) {
+                continue;
+            }
+            // One request for each flow the waiting channels need: each
+            // routes the channels it carries; the rest go in the next.
+            let mut rest = waiting;
+            while let Some(action) = self.request(&rest, now, packets) {
                 out.push(action);
+                rest.retain(|(rx, _)| self.routes[*rx].is_none());
+                if rest.is_empty() {
+                    break;
+                }
             }
         }
         self.prune(now);
@@ -420,8 +442,9 @@ impl Manager {
     pub fn answered(&mut self, flow: FlowId, answer: Answer, now: u64) -> Vec<Action> {
         self.now = self.now.max(now);
         for peer in self.peers.values_mut() {
-            if peer.in_flight == Some(flow) {
-                peer.in_flight = None;
+            if peer.in_flight.contains(&flow) {
+                peer.in_flight.retain(|f| *f != flow);
+                peer.unanswered = 0;
             }
         }
         let current = self.flows[flow.slot]
@@ -601,6 +624,7 @@ impl Manager {
                     && let Some(peer) = self.peers.get_mut(&f.to)
                 {
                     peer.failures = 0;
+                    peer.unanswered = 0;
                 }
             }
         }
@@ -611,8 +635,12 @@ impl Manager {
         for slot in 0..MAX_FLOWS {
             let Some(f) = &self.flows[slot] else { continue };
             if f.asked() && now.saturating_sub(f.since) >= GIVE_UP_NS {
+                let to = f.to;
                 self.abandon(slot);
                 self.fail(slot, SubStatus::TxFail, now);
+                if let Some(peer) = self.peers.get_mut(&to) {
+                    peer.unanswered = peer.unanswered.saturating_add(1);
+                }
             }
         }
     }
@@ -632,10 +660,8 @@ impl Manager {
             self.abandoned.remove(0);
         }
         self.abandoned.push((id, f.to));
-        if let Some(peer) = self.peers.get_mut(&f.to)
-            && peer.in_flight == Some(id)
-        {
-            peer.in_flight = None;
+        if let Some(peer) = self.peers.get_mut(&f.to) {
+            peer.in_flight.retain(|f| *f != id);
         }
     }
 
@@ -870,9 +896,12 @@ impl Manager {
     /// Whether the transmitter at `ip` may be asked now.
     fn may_request(&self, to: SocketAddrV4, now: u64) -> bool {
         self.peers.get(&to).is_none_or(|p| {
-            p.in_flight.is_none()
-                && p.last_request
-                    .is_none_or(|t| now >= t.saturating_add(retry_after(p.failures)))
+            let wait = if (1..=QUICK_TRIES).contains(&p.unanswered) {
+                QUICK_RETRY_NS
+            } else {
+                retry_after(p.failures)
+            };
+            p.in_flight.is_empty() && p.last_request.is_none_or(|t| now >= t.saturating_add(wait))
         })
     }
 
@@ -947,7 +976,7 @@ impl Manager {
             }
         }
         let peer = self.peers.entry(first.control).or_default();
-        peer.in_flight = Some(id);
+        peer.in_flight.push(id);
         peer.last_request = Some(now);
         Some(Action::Request {
             flow: id,
