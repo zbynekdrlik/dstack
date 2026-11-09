@@ -1738,7 +1738,7 @@ pub const WINDOWS_HIGHEST: i32 = 2;
 /// for real-time, THREAD_PRIORITY_HIGHEST within the process's normal
 /// class for the normal profile (dstack #90: no privilege, nothing
 /// process-wide, no setup asked of the app; the thread then also joins
-/// MMCSS, [`wants_mmcss`]), none at normal.
+/// MMCSS 'Pro Audio' on Windows), none at normal.
 pub fn windows_priority_for(asked: ThreadPriority, priority: i32) -> Option<i32> {
     match asked {
         ThreadPriority::Realtime => Some(windows_thread_priority(priority)),
