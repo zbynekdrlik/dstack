@@ -2,6 +2,8 @@
 
 ## 0.6.78 (unreleased)
 
+- Dependency (dstack #1): dsync-ptp v1.28.1 -> v1.29.0 (dsync#160): the in-process PTP follower measures phase on the delay floor (the Theil-Sen line through the last 10 window minima), not the window median, so a one-sided receive delay (a USB NIC such as mbc's ASIX, late kernel stamps under CPU load) no longer moves it; D is anchored only once the floor holds 3 windows (about 2 more windows at a cold start). No API change; the media clock follows dsync as before.
+
 ## 0.6.77
 
 - Fix (dstack #164, dasio on FOH, 10.11.2026): dsend and dlisten pick free control ports themselves. Started on an address where another Dante device holds Dante's defaults, they take the first free slot: ARC 4440+k, CMC 8800+k, flows 4455+k, process id k (`dstack_endpoint::slots`); dsend on FOH had stopped at "ARC on UDP 4440: Only one usage of each socket address" beside dlisten (slot 0) and band (slot 1). `--ports`/`--process-id` still win; a device named by interface keeps the defaults.
