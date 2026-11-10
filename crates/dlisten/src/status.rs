@@ -6,84 +6,9 @@
 
 use dlink::{RxChannel, SubState};
 
-use crate::fifo::Fifo;
-use crate::player::Stats;
-
-/// One reading of the output side.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Snapshot {
-    /// The FIFO's depth, ms of the network's rate.
-    pub depth_ms: f64,
-    /// The converter's correction, ppm.
-    pub ppm: f64,
-    pub underruns: u64,
-    /// Output frames played.
-    pub played: u64,
-    /// The output's rate, Hz.
-    pub out_rate: u32,
-    /// Network frames dropped on a full FIFO.
-    pub overflows: u64,
-    pub recentres: u64,
-    /// The output waits for the FIFO to fill (silence: no Dante audio yet,
-    /// or a refill after an underrun).
-    pub priming: bool,
-    /// Every channel summed to both speakers (`--mono`).
-    pub mono: bool,
-}
-
-impl Snapshot {
-    /// The reading of `fifo` (at `net_rate`) and the player's `stats`.
-    pub fn read(fifo: &Fifo, stats: &Stats, net_rate: u32) -> Self {
-        Snapshot {
-            depth_ms: fifo.len() as f64 * 1000.0 / f64::from(net_rate.max(1)),
-            ppm: stats.ppm(),
-            underruns: stats.underruns(),
-            played: stats.played(),
-            out_rate: stats.out_rate(),
-            overflows: fifo.overflows(),
-            recentres: stats.recentres(),
-            priming: stats.priming(),
-            mono: stats.mono(),
-        }
-    }
-}
-
-/// The status line: `depth 40.1 ms, +3.2 ppm, 0 underruns, 480000 frames
-/// played at 48000 Hz`, then `, mono` under `--mono`, `, waiting for audio` while priming and the
-/// overflows and re-centres when there are any.
-pub fn line(s: &Snapshot) -> String {
-    let mut text = format!(
-        "depth {:.1} ms, {:+.1} ppm, {} underruns, {} frames played at {} Hz",
-        s.depth_ms, s.ppm, s.underruns, s.played, s.out_rate
-    );
-    if s.mono {
-        text.push_str(", mono");
-    }
-    if s.priming {
-        text.push_str(", waiting for audio");
-    }
-    if s.overflows > 0 {
-        text.push_str(&format!(", {} frames overflowed", s.overflows));
-    }
-    if s.recentres > 0 {
-        text.push_str(&format!(", {} re-centres", s.recentres));
-    }
-    text
-}
-
-/// "warn" while priming or when the underruns grew past `underruns_before`
-/// (the last reading's), else "ok".
-pub fn state(s: &Snapshot, underruns_before: u64) -> &'static str {
-    if s.priming || s.underruns > underruns_before {
-        "warn"
-    } else {
-        "ok"
-    }
-}
-
-/// The most bytes of the app part the device's status carries
-/// (`dstack::ctl::APP_MAX`): a longer one is left out whole.
-pub const APP_MAX: usize = 4096;
+pub use dstack_endpoint::status::{
+    APP_MAX, NAME_MAX, Snapshot, line, state, status_name, with_outputs,
+};
 
 /// Whether audio flows: a channel whose subscription is receiving
 /// (connected) wrote samples since the last reading (`before`, each
@@ -99,23 +24,6 @@ pub fn flowing(before: &[u64], now: &[RxChannel]) -> bool {
 /// The channels' `written` counts, for the next [`flowing`].
 pub fn written(now: &[RxChannel]) -> Vec<u64> {
     now.iter().map(|ch| ch.written).collect()
-}
-
-/// The most bytes of an output's name in the status (and in dtray's
-/// request back): a longer one is cut at a character's edge.
-pub const NAME_MAX: usize = 96;
-
-/// An output's name as the status carries it: each control character a
-/// space, cut to [`NAME_MAX`] bytes at a character's edge.
-pub fn status_name(name: &str) -> String {
-    let mut out = String::new();
-    for c in name.chars() {
-        if out.len() + c.len_utf8() > NAME_MAX {
-            break;
-        }
-        out.push(if c.is_control() { ' ' } else { c });
-    }
-    out
 }
 
 /// What dtray shows of dlisten.
@@ -159,79 +67,31 @@ pub fn short_line(v: &AppView<'_>) -> String {
 /// while it fits.
 pub fn app_status(v: &AppView<'_>) -> String {
     let s = v.snap;
-    let mut outputs = v.outputs.len();
-    let names: Vec<String> = v.outputs.iter().map(|o| status_name(o)).collect();
-    // The list is cut from its end, down to the one playing; past that
-    // (it alone does not fit), to none.
-    let keep = (v.current + 1).min(outputs);
-    loop {
-        let mut obj = serde_json::json!({
-            "line": short_line(v),
-            "state": state(s, v.underruns_before),
-            "flowing": v.flowing,
-            "depth_ms": (s.depth_ms * 10.0).round() / 10.0,
-            "ppm": (s.ppm * 10.0).round() / 10.0,
-            "underruns": s.underruns,
-            "played": s.played,
-            "out_rate": s.out_rate,
-            "output": v.current,
-            "outputs": names[..outputs],
-        });
-        if outputs < v.outputs.len() {
-            obj["outputs_cut"] = serde_json::Value::Bool(true);
-        }
-        let text = obj.to_string();
-        if text.len() <= APP_MAX || outputs == 0 {
-            return text;
-        }
-        outputs = if outputs > keep { outputs - 1 } else { 0 };
-    }
-}
-
-/// The words of a name, single-spaced (a request's words lose their
-/// spacing).
-fn spaced(text: &str) -> String {
-    text.split_ascii_whitespace().collect::<Vec<_>>().join(" ")
+    let base = serde_json::json!({
+        "line": short_line(v),
+        "state": state(s, v.underruns_before),
+        "flowing": v.flowing,
+        "depth_ms": (s.depth_ms * 10.0).round() / 10.0,
+        "ppm": (s.ppm * 10.0).round() / 10.0,
+        "underruns": s.underruns,
+        "played": s.played,
+        "out_rate": s.out_rate,
+    });
+    with_outputs(&base, v.outputs, v.current)
 }
 
 /// The app command dlisten takes (`app output <n> [<name>]`, from dtray's
-/// menu): output `n` of the `outputs` it offers (their status names).
-/// With the name (its [`status_name`]), the list must still have it at `n`:
-/// a list that changed
-/// since dtray read it is refused, never another device chosen. An error
-/// says what it takes.
+/// menu): [`dstack_endpoint::status::parse_command`] for dlisten.
 pub fn parse_command(words: &str, outputs: &[String]) -> Result<usize, String> {
-    let usage = || "dlisten takes: output <n> [<name>]".to_string();
-    let mut parts = words.split_ascii_whitespace();
-    if parts.next() != Some("output") {
-        return Err(usage());
-    }
-    let n = parts.next().ok_or_else(usage)?;
-    let n: usize = n
-        .parse()
-        .map_err(|_| format!("output needs a number, not {n:?}"))?;
-    let name = parts.collect::<Vec<_>>().join(" ");
-    let Some(have) = outputs.get(n) else {
-        return Err(format!("no output {n} (there are {})", outputs.len()));
-    };
-    if !name.is_empty() && spaced(&status_name(have)) != name {
-        return Err(format!(
-            "output {n} is now {have:?}, not {name:?}: the list changed, choose again"
-        ));
-    }
-    Ok(n)
+    dstack_endpoint::status::parse_command("dlisten", words, outputs)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    use std::sync::Arc;
-
     use dlink::SubStatus;
     use dstack::device::Subscription;
-
-    use crate::player::{Player, fifo_for};
 
     fn snap() -> Snapshot {
         Snapshot {
@@ -245,39 +105,6 @@ mod tests {
             priming: false,
             mono: false,
         }
-    }
-
-    #[test]
-    fn the_line_carries_depth_ppm_underruns_frames_and_rate() {
-        assert_eq!(
-            line(&snap()),
-            "depth 40.1 ms, +3.2 ppm, 2 underruns, 480000 frames played at 44100 Hz"
-        );
-        let all = Snapshot {
-            ppm: -12.0,
-            mono: true,
-            priming: true,
-            overflows: 128,
-            recentres: 1,
-            ..snap()
-        };
-        assert_eq!(
-            line(&all),
-            "depth 40.1 ms, -12.0 ppm, 2 underruns, 480000 frames played at 44100 Hz, \
-             mono, waiting for audio, 128 frames overflowed, 1 re-centres"
-        );
-    }
-
-    #[test]
-    fn the_state_warns_while_priming_or_on_new_underruns() {
-        assert_eq!(state(&snap(), 2), "ok");
-        assert_eq!(state(&snap(), 1), "warn");
-        assert_eq!(state(&snap(), 3), "ok");
-        let priming = Snapshot {
-            priming: true,
-            ..snap()
-        };
-        assert_eq!(state(&priming, 2), "warn");
     }
 
     fn names(n: usize) -> Vec<String> {
@@ -439,22 +266,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_status_name_is_one_line_within_its_bound() {
-        assert_eq!(status_name("Line\nOut\t2"), "Line Out 2");
-        assert_eq!(status_name(&"x".repeat(200)).len(), NAME_MAX);
-        let mut edge = "x".repeat(NAME_MAX - 1);
-        edge.push('é');
-        assert_eq!(
-            status_name(&edge).len(),
-            NAME_MAX - 1,
-            "a character is never split"
-        );
-        let mut fits = "x".repeat(NAME_MAX - 2);
-        fits.push('é');
-        assert_eq!(status_name(&fits).len(), NAME_MAX);
-    }
-
     fn ch(status: Option<SubStatus>, written: u64) -> RxChannel {
         RxChannel {
             rx: 1,
@@ -482,33 +293,5 @@ mod tests {
         assert!(flowing(&[], &[ch(rx, 1)]), "a first reading");
         assert!(!flowing(&[], &[]));
         assert_eq!(written(&[ch(None, 4), ch(None, 9)]), [4, 9]);
-    }
-
-    #[test]
-    fn a_reading_takes_the_fifo_and_the_player_s_counts() {
-        let fifo = Arc::new(fifo_for(2, 48_000));
-        fifo.push_with(480, |_, _| 0.0);
-        let player = Player::new(Arc::clone(&fifo), 48_000, 44_100, Arc::default()).unwrap();
-        let s = Snapshot::read(&fifo, &player.stats(), 48_000);
-        assert_eq!(
-            s,
-            Snapshot {
-                depth_ms: 10.0,
-                ppm: 0.0,
-                underruns: 0,
-                played: 0,
-                out_rate: 44_100,
-                overflows: 0,
-                recentres: 0,
-                priming: true,
-                mono: false,
-            }
-        );
-        let player = player.with_mono(true);
-        assert!(Snapshot::read(&fifo, &player.stats(), 48_000).mono);
-        fifo.push_with(24_000, |_, _| 0.0);
-        let full = Snapshot::read(&fifo, &player.stats(), 48_000);
-        assert_eq!(full.overflows, 480);
-        assert_eq!(full.depth_ms, 500.0);
     }
 }

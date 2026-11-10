@@ -313,7 +313,7 @@ dependencies = [
 
 [[package]]
 name = "dlink"
-version = "0.6.74"
+version = "0.6.75"
 dependencies = [
  "dstack",
  "dstack-audio-io",
@@ -325,18 +325,17 @@ dependencies = [
 
 [[package]]
 name = "dlisten"
-version = "0.6.74"
+version = "0.6.75"
 dependencies = [
  "cpal",
  "dlink",
  "dstack",
+ "dstack-endpoint",
  "dstack-resample",
  "dtray",
  "serde_json",
  "tempfile",
- "tokio",
  "tracing",
- "tracing-subscriber",
  "windows-sys 0.61.2",
 ]
 
@@ -347,8 +346,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d8b14ccef22fc6f5a8f4d7d768562a182c04ce9a3b3157b91390b52ddfdf1a76"
 
 [[package]]
+name = "dsend"
+version = "0.6.75"
+dependencies = [
+ "cpal",
+ "dlink",
+ "dstack",
+ "dstack-endpoint",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "dstack"
-version = "0.6.74"
+version = "0.6.75"
 dependencies = [
  "assert_no_alloc",
  "dstack-audio-io",
@@ -372,11 +383,27 @@ dependencies = [
 
 [[package]]
 name = "dstack-audio-io"
-version = "0.6.74"
+version = "0.6.75"
+
+[[package]]
+name = "dstack-endpoint"
+version = "0.6.75"
+dependencies = [
+ "cpal",
+ "dlink",
+ "dstack",
+ "dstack-resample",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "windows-sys 0.61.2",
+]
 
 [[package]]
 name = "dstack-resample"
-version = "0.6.74"
+version = "0.6.75"
 dependencies = [
  "rubato",
 ]
@@ -399,7 +426,7 @@ dependencies = [
 
 [[package]]
 name = "dtray"
-version = "0.6.74"
+version = "0.6.75"
 dependencies = [
  "dstack",
  "glib",

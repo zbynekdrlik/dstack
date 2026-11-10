@@ -5,10 +5,10 @@
 //! process's arguments and environment and passes them in.
 
 use std::ffi::OsString;
-use std::net::Ipv4Addr;
 use std::path::PathBuf;
 
 use dlink::{Config, Place, Ports};
+use dstack_endpoint::cli::{Shared, number, parse_shared, with_shared};
 
 /// The usage text (`--help`, and after a usage error).
 pub const USAGE: &str = "\
@@ -55,8 +55,7 @@ pub const MAX_CHANNELS: usize = 64;
 pub const RATE: u32 = 48_000;
 /// The name's suffix after the host's name.
 pub const SUFFIX: &str = "-dlisten";
-/// The longest Dante device name.
-pub const NAME_MAX: usize = 31;
+pub use dstack_endpoint::cli::{NAME_MAX, parse_ports};
 
 /// The flags that take a value.
 const VALUE_FLAGS: [&str; 11] = [
@@ -100,6 +99,22 @@ pub struct Options {
     pub mono: bool,
 }
 
+impl Options {
+    /// Takes one shared flag's value ([`parse_shared`]).
+    fn set(&mut self, v: Shared) {
+        match v {
+            Shared::Output(t) => self.output = Some(t),
+            Shared::Name(n) => self.name = Some(n),
+            Shared::Rate(r) => self.rate = r,
+            Shared::BudgetMs(ms) => self.budget_ms = Some(ms),
+            Shared::Place(p) => self.place = Some(p),
+            Shared::Ports(p) => self.ports = Some(p),
+            Shared::ProcessId(id) => self.process_id = Some(id),
+            Shared::State(f) => self.state = Some(f),
+        }
+    }
+}
+
 /// What the command line asks for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
@@ -112,11 +127,6 @@ pub enum Command {
     },
     Help,
     Version,
-}
-
-fn number<T: std::str::FromStr>(flag: &str, text: &str) -> Result<T, String> {
-    text.parse()
-        .map_err(|_| format!("{flag} needs a number, not {text:?}"))
 }
 
 /// `<rx>=<channel>@<device>`: the channel may hold `@` (the device's name
@@ -134,20 +144,6 @@ pub fn parse_subscribe(text: &str) -> Result<Subscribe, String> {
         tx_channel: channel.to_string(),
         tx_device: device.to_string(),
     })
-}
-
-/// `<arc>,<cmc>,<flows>`, each a port over 0.
-pub fn parse_ports(text: &str) -> Result<Ports, String> {
-    let bad = || format!("--ports is <arc>,<cmc>,<flows>, not {text:?}");
-    let parts: Vec<u16> = text
-        .split(',')
-        .map(|p| p.trim().parse::<u16>().ok().filter(|&p| p > 0))
-        .collect::<Option<_>>()
-        .ok_or_else(bad)?;
-    match parts[..] {
-        [arc, cmc, flows] => Ok(Ports { arc, cmc, flows }),
-        _ => Err(bad()),
-    }
 }
 
 /// The command line after the program's name.
@@ -200,8 +196,6 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
         }
         let value = it.next().ok_or_else(|| format!("{flag} needs a value"))?;
         match flag {
-            "--output" if value.is_empty() => return Err("--output needs a name".into()),
-            "--output" => o.output = Some(value.clone()),
             "--channels" => {
                 let n: usize = number(flag, value)?;
                 if !(1..=MAX_CHANNELS).contains(&n) {
@@ -209,36 +203,11 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
                 }
                 o.channels = n;
             }
-            "--name" => o.name = Some(value.clone()),
             "--subscribe" => o.subscribe.push(parse_subscribe(value)?),
-            "--rate" => {
-                o.rate = number(flag, value)?;
-                if o.rate == 0 {
-                    return Err("--rate needs a rate over 0 Hz".into());
-                }
-            }
-            "--budget-ms" => {
-                let ms: u64 = number(flag, value)?;
-                if ms == 0 {
-                    return Err("--budget-ms needs a budget over 0 ms".into());
-                }
-                o.budget_ms = Some(ms);
-            }
-            "--ip" | "--iface" if o.place.is_some() => {
-                return Err("give one of --ip and --iface, once".into());
-            }
-            "--ip" => {
-                let ip: Ipv4Addr = value
-                    .parse()
-                    .map_err(|_| format!("--ip needs an IPv4 address, not {value:?}"))?;
-                o.place = Some(Place::Ip(ip));
-            }
-            "--iface" if value.is_empty() => return Err("--iface needs a name".into()),
-            "--iface" => o.place = Some(Place::Iface(value.clone())),
-            "--ports" => o.ports = Some(parse_ports(value)?),
-            "--process-id" => o.process_id = Some(number(flag, value)?),
-            "--state" if value.is_empty() => return Err("--state needs a path".into()),
-            _ => o.state = Some(PathBuf::from(value)),
+            _ => match parse_shared(flag, value, o.place.is_some()) {
+                Some(v) => o.set(v?),
+                None => return Err(format!("unknown argument {flag:?}")),
+            },
         }
     }
     if let Some(s) = o.subscribe.iter().find(|s| s.rx > o.channels) {
@@ -259,15 +228,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
 /// '-' at its ends) and cut so the whole is at most [`NAME_MAX`]; `pc` for
 /// a name with nothing left.
 pub fn default_name(host: &str) -> String {
-    let cleaned: String = host
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect();
-    let room = NAME_MAX - SUFFIX.len();
-    let short: String = cleaned.trim_matches('-').chars().take(room).collect();
-    let short = short.trim_end_matches('-');
-    let host = if short.is_empty() { "pc" } else { short };
-    format!("{host}{SUFFIX}")
+    dstack_endpoint::cli::default_name(host, SUFFIX)
 }
 
 /// The RX channels' names: L and R for two, else `In 1` to `In <n>`.
@@ -292,16 +253,15 @@ pub fn state_path(
     home: Option<OsString>,
     temp: PathBuf,
 ) -> PathBuf {
-    let set = |v: Option<OsString>| v.filter(|v| !v.is_empty()).map(PathBuf::from);
-    let base = if windows {
-        set(local_app_data)
-    } else {
-        set(xdg_state_home).or_else(|| set(home).map(|h| h.join(".local").join("state")))
-    };
-    base.unwrap_or(temp)
-        .join("dstack")
-        .join("dlisten")
-        .join(format!("{name}.toml"))
+    dstack_endpoint::cli::state_path(
+        windows,
+        "dlisten",
+        name,
+        local_app_data,
+        xdg_state_home,
+        home,
+        temp,
+    )
 }
 
 /// The dlink device of a run: `name`, its state in `state`, RX only with
@@ -314,15 +274,7 @@ pub fn link_config(o: &Options, name: &str, state: PathBuf) -> Config {
         .rx(rx_names(o.channels))
         .sample_rate(o.rate)
         .product("dstack", "dlisten");
-    if let Some(ms) = o.budget_ms {
-        c = c.budget_ns(ms.saturating_mul(1_000_000));
-    }
-    if let Some(p) = o.ports {
-        c = c.ports(p);
-    }
-    if let Some(id) = o.process_id {
-        c = c.process_id(id);
-    }
+    c = with_shared(c, o.budget_ms, o.ports, o.process_id);
     for s in &o.subscribe {
         c = c.subscribe(s.rx, s.tx_channel.clone(), s.tx_device.clone());
     }

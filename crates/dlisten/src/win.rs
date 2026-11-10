@@ -7,50 +7,22 @@
 //! The start at logon is the user's Run value, as dtray's
 //! ([`dlisten::autostart`]).
 
-use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
 use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS};
-use windows_sys::Win32::System::Console::{
-    ATTACH_PARENT_PROCESS, AttachConsole, GetStdHandle, STD_ERROR_HANDLE,
-};
 use windows_sys::Win32::System::Registry::{
     HKEY_CURRENT_USER, REG_SZ, RRF_RT_REG_SZ, RegDeleteKeyValueW, RegGetValueW, RegSetKeyValueW,
 };
-use windows_sys::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW};
 
 use dlisten::autostart;
 
 /// The user's key of programs started at logon.
 const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 
-fn wide(s: &str) -> Vec<u16> {
-    s.encode_utf16().chain(Some(0)).collect()
-}
-
-/// Where a failure can be read: whether stderr was handed to us (a script
-/// redirected it), then whether we got the console of the process that
-/// started us (a command line). Neither from Explorer or the Run value
-/// ([`dlisten::alert::shows_box`]).
-pub fn attach_console() -> (bool, bool) {
-    // SAFETY: plain call; reads the handle the process started with.
-    let err = unsafe { GetStdHandle(STD_ERROR_HANDLE) };
-    let has_stderr = !err.is_null() && err != INVALID_HANDLE_VALUE;
-    // SAFETY: plain call; failing (no parent console) changes nothing.
-    let attached = unsafe { AttachConsole(ATTACH_PARENT_PROCESS) } != 0;
-    (attached, has_stderr)
-}
+pub use dstack_endpoint::win::attach_console;
+use dstack_endpoint::win::wide;
 
 /// An error box (a start from Explorer or the Run value has no console).
 pub fn message(text: &str) {
-    let (t, c) = (wide(text), wide("dlisten"));
-    // SAFETY: valid NUL-terminated strings, no owner window.
-    unsafe {
-        MessageBoxW(
-            std::ptr::null_mut(),
-            t.as_ptr(),
-            c.as_ptr(),
-            MB_OK | MB_ICONERROR,
-        )
-    };
+    dstack_endpoint::win::message("dlisten", text);
 }
 
 /// Whether the user's Run value [`autostart::RUN_VALUE_NAME`] is there.

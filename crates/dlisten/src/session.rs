@@ -13,41 +13,21 @@
 //! (cpal's stream stays on the thread that made it).
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use dlink::{Link, Map, Place};
+use dlink::{Link, Map};
 use dlisten::cli::{self, Options};
 use dlisten::feed::Feed;
 use dlisten::fifo::Fifo;
-use dlisten::outputs::{self, Output};
+use dlisten::outputs::{self, Output, Refind};
 use dlisten::player::{Player, Stats, fifo_for};
 use dlisten::settings::{self, Settings};
 use dlisten::status::{self, AppView, Snapshot};
+use dstack_endpoint::host;
 
 use crate::audio;
-
-/// This PC's name (Windows `COMPUTERNAME`, Linux the kernel's hostname).
-fn host_name() -> String {
-    std::env::var("COMPUTERNAME")
-        .ok()
-        .or_else(|| std::fs::read_to_string("/proc/sys/kernel/hostname").ok())
-        .unwrap_or_default()
-        .trim()
-        .to_string()
-}
-
-/// The address of the default route (connecting a UDP socket picks the
-/// route and sends nothing).
-fn routed_ipv4() -> Result<Place, String> {
-    let probe = std::net::UdpSocket::bind("0.0.0.0:0").map_err(|e| e.to_string())?;
-    probe.connect("192.0.2.1:9").map_err(|e| e.to_string())?;
-    match probe.local_addr().map_err(|e| e.to_string())? {
-        std::net::SocketAddr::V4(a) => Ok(Place::Ip(*a.ip())),
-        other => Err(format!("no IPv4 address on the default route ({other})")),
-    }
-}
 
 /// The state file of a run: `--state`, else the user's state folder.
 pub fn state_of(o: &Options, name: &str) -> PathBuf {
@@ -67,7 +47,7 @@ pub fn state_of(o: &Options, name: &str) -> PathBuf {
 pub fn name_of(o: &Options) -> String {
     o.name
         .clone()
-        .unwrap_or_else(|| cli::default_name(&host_name()))
+        .unwrap_or_else(|| cli::default_name(&host::host_name()))
 }
 
 /// A running dlisten (module doc).
@@ -86,6 +66,14 @@ pub struct Session {
     /// and the command hook.
     shown: Arc<Mutex<(Vec<String>, usize)>>,
     settings_file: PathBuf,
+    /// The output must be opened again (its format changed, or the
+    /// default took over) and the last try failed: tried each refresh.
+    replay: bool,
+    /// No output is left (logged once until one comes back).
+    waiting: bool,
+    /// A stream reported an error ([`audio::open`]): opened again at the
+    /// next refresh.
+    failed: Arc<AtomicBool>,
 }
 
 /// What the main thread is asked.
@@ -124,7 +112,7 @@ impl Session {
         let place = match &o.place {
             Some(p) => p.clone(),
             None => {
-                let p = routed_ipv4()?;
+                let p = host::routed_ipv4()?;
                 tracing::info!(
                     place = ?p,
                     "dlisten: no --ip or --iface, so the default route's address (name the Dante NIC with --ip)"
@@ -156,6 +144,9 @@ impl Session {
             playing: None,
             shown: Arc::default(),
             settings_file,
+            replay: false,
+            waiting: false,
+            failed: Arc::default(),
         };
         if let Err(e) = session.play(current) {
             session.stop();
@@ -185,7 +176,7 @@ impl Session {
         // The new stream is opened while the old one plays (a failure
         // leaves the old one playing); the old one stops before the new
         // one starts: the FIFO has one reader.
-        let stream = audio::open(device, &config, player)?;
+        let stream = audio::open(device, &config, player, &self.failed)?;
         let was = self.playing.take().map(|_| self.current);
         match audio::start(stream) {
             Ok(p) => self.playing = Some(p),
@@ -199,6 +190,7 @@ impl Session {
             }
         }
         self.current = index;
+        self.replay = false;
         tracing::info!(
             output = %self.outputs[index].name,
             out_rate,
@@ -267,43 +259,72 @@ impl Session {
         });
     }
 
-    /// Reads the output devices again (one plugged in or out); true when
-    /// the list changed. The one playing keeps playing, found again by
-    /// name.
+    /// Reads the output devices again (one plugged in or out, a format
+    /// changed); true when the list changed. The one playing keeps playing,
+    /// found again by name ([`outputs::refind`]) and opened again when its
+    /// format changed or a stream reported an error; one that is gone falls
+    /// back to the default (else the first); with no output left the old
+    /// list stays.
     pub fn refresh_outputs(&mut self) -> bool {
+        if self.failed.swap(false, Ordering::Relaxed) {
+            self.replay = true;
+        }
         let Ok((devices, outputs)) = audio::outputs() else {
             return false;
         };
         if outputs == self.outputs {
+            // A replay owed (a stream error, a failed opening) takes the
+            // devices just read: a device handle may have been re-created.
+            if self.replay && !self.waiting {
+                self.devices = devices;
+                self.replay = self.replay_current();
+            }
             return false;
         }
-        let playing = self.outputs[self.current].name.clone();
-        let found = outputs.iter().position(|o| o.name == playing);
+        let playing = self.outputs[self.current].clone();
+        let (index, replay) = match outputs::refind(&playing, &outputs) {
+            Refind::Same { index, changed } => (index, changed),
+            Refind::Default(index) => {
+                tracing::warn!(
+                    output = %playing.name,
+                    default = %outputs[index].name,
+                    "dlisten: the output playing is gone: playing on the default (else the first)"
+                );
+                (index, true)
+            }
+            Refind::Gone => {
+                if !self.waiting {
+                    tracing::warn!(output = %playing.name, "dlisten: no output is left: waiting for one");
+                }
+                self.waiting = true;
+                return true;
+            }
+        };
+        self.waiting = false;
         self.devices = devices;
         self.outputs = outputs;
-        match found {
-            Some(i) => {
-                self.current = i;
-                self.show();
-            }
-            None => match outputs::choose(&self.outputs, None, None) {
-                // Its stream is dead: play on the default.
-                Ok((i, _)) => {
-                    tracing::warn!(
-                        output = %playing,
-                        default = %self.outputs[i].name,
-                        "dlisten: the output playing is gone: playing on the default"
-                    );
-                    if let Err(e) = self.play(i) {
-                        tracing::warn!("dlisten: the default output: {e}");
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(output = %playing, "dlisten: the output playing is gone: {e}")
-                }
-            },
+        // The index of the output now in use in the new list (its stream is
+        // the old one until it opens again).
+        self.current = index;
+        self.show();
+        if replay {
+            self.replay = self.replay_current();
         }
         true
+    }
+
+    /// Opens the current output again; true when it failed (to try again).
+    fn replay_current(&mut self) -> bool {
+        match self.play(self.current) {
+            Ok(()) => false,
+            Err(e) => {
+                tracing::warn!(
+                    output = %self.outputs[self.current].name,
+                    "dlisten: the output did not open (tried again in 5 s): {e}"
+                );
+                true
+            }
+        }
     }
 
     /// The status line (the console run's log).

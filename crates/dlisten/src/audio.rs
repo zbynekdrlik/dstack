@@ -6,47 +6,14 @@
 //! ([`dlisten::outputs`]), the conversion and steering
 //! ([`dlisten::player`]), each tested.
 
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use cpal::traits::{DeviceTrait, StreamTrait};
 use cpal::{FromSample, SampleFormat, SizedSample};
-use dlisten::outputs::Output;
 use dlisten::player::Player;
 
-/// The host's output devices, with their names as the library sees them.
-/// An error when the audio system cannot list them.
-pub fn outputs() -> Result<(Vec<cpal::Device>, Vec<Output>), String> {
-    let host = cpal::default_host();
-    let default = host.default_output_device();
-    let devices: Vec<cpal::Device> = host
-        .output_devices()
-        .map_err(|e| {
-            format!(
-                "the audio system ({}) lists no outputs: {e}",
-                host.id().name()
-            )
-        })?
-        .collect();
-    let described = devices
-        .iter()
-        .map(|d| Output {
-            name: d
-                .description()
-                .map_or_else(|e| format!("<unnamed: {e}>"), |n| n.name().to_string()),
-            default: default.as_ref() == Some(d),
-            config: d.default_output_config().map_or_else(
-                |e| format!("no default config: {e}"),
-                |c| {
-                    format!(
-                        "{} Hz, {} ch, {}",
-                        c.sample_rate(),
-                        c.channels(),
-                        c.sample_format()
-                    )
-                },
-            ),
-        })
-        .collect();
-    Ok((devices, described))
-}
+pub use dstack_endpoint::endpoints::{config_of, outputs};
 
 /// A running output stream and its config.
 pub struct Playing {
@@ -54,28 +21,22 @@ pub struct Playing {
     _stream: cpal::Stream,
 }
 
-/// The output's default config: its rate and channels (the player is
-/// made for that rate).
-pub fn config_of(device: &cpal::Device) -> Result<cpal::SupportedStreamConfig, String> {
-    device
-        .default_output_config()
-        .map_err(|e| format!("the output has no default config: {e}"))
-}
-
 /// Opens (does not start) a stream of `player` on `device` at `config`
 /// (its default): the driver's callback will pull the frames, each made
-/// into the driver's sample format.
+/// into the driver's sample format. A stream error (the output lost, its
+/// driver reset) sets `failed`: the session opens the output again.
 pub fn open(
     device: &cpal::Device,
     config: &cpal::SupportedStreamConfig,
     player: Player,
+    failed: &Arc<AtomicBool>,
 ) -> Result<cpal::Stream, String> {
     match config.sample_format() {
-        SampleFormat::F32 => build::<f32>(device, config, player),
-        SampleFormat::I16 => build::<i16>(device, config, player),
-        SampleFormat::I32 => build::<i32>(device, config, player),
-        SampleFormat::U16 => build::<u16>(device, config, player),
-        SampleFormat::F64 => build::<f64>(device, config, player),
+        SampleFormat::F32 => build::<f32>(device, config, player, Arc::clone(failed)),
+        SampleFormat::I16 => build::<i16>(device, config, player, Arc::clone(failed)),
+        SampleFormat::I32 => build::<i32>(device, config, player, Arc::clone(failed)),
+        SampleFormat::U16 => build::<u16>(device, config, player, Arc::clone(failed)),
+        SampleFormat::F64 => build::<f64>(device, config, player, Arc::clone(failed)),
         other => Err(format!(
             "the output's sample format {other} is not supported"
         )),
@@ -94,6 +55,7 @@ fn build<T: SizedSample + FromSample<f32>>(
     device: &cpal::Device,
     config: &cpal::SupportedStreamConfig,
     mut player: Player,
+    failed: Arc<AtomicBool>,
 ) -> Result<cpal::Stream, String> {
     let outputs = usize::from(config.channels());
     device
@@ -103,7 +65,10 @@ fn build<T: SizedSample + FromSample<f32>>(
                 player.fill_with(data, outputs, |x| T::from_sample(x as f32));
             },
             // The driver's own thread: a lost device or a driver error.
-            |e| tracing::warn!("dlisten: the output stream reported: {e}"),
+            move |e| {
+                tracing::warn!("dlisten: the output stream reported: {e}");
+                failed.store(true, Ordering::Relaxed);
+            },
             None,
         )
         .map_err(|e| format!("the output stream could not be opened: {e}"))

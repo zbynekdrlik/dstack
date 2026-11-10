@@ -34,6 +34,12 @@
 //!
 //! [`Player::fill_with`] allocates nothing, takes no lock and makes no
 //! system call: it runs on the audio driver's thread.
+//!
+//! The text above is dlisten's direction. The player only knows the FIFO's
+//! producer (named "the network" here) and its own caller (named "the
+//! output"): dsend (dstack #164) runs it the other way round, the
+//! endpoint's loopback capture writing the FIFO at the endpoint's rate and
+//! the dlink pump calling [`Player::fill_with`] at the network's.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};

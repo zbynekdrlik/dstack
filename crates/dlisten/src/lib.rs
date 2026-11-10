@@ -34,13 +34,11 @@
 //! (`src/main.rs`) is the glue: the command line ([`cli`]), cpal, dlink,
 //! the log and `--autostart` ([`autostart`]).
 
-pub mod alert;
 pub mod autostart;
 pub mod cli;
 pub mod feed;
-pub mod fifo;
-pub mod map;
-pub mod outputs;
-pub mod player;
-pub mod settings;
 pub mod status;
+
+// The endpoint bridge dlisten shares with dsend (dstack #164), under the
+// paths dlisten had.
+pub use dstack_endpoint::{alert, fifo, map, outputs, player, settings};
