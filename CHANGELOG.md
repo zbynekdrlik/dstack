@@ -1,6 +1,8 @@
 # Changelog
 
-## 0.6.71 (unreleased)
+## 0.6.72 (unreleased)
+
+## 0.6.71
 
 - Docs (dstack #155): the Windows firewall rule of the two-network standard is final: profiles on with default Allow, the Dante-leg group `dstack155` (after a measured hour with no change, 10.11.2026). No code change.
 
