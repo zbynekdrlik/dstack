@@ -256,7 +256,7 @@ impl Session {
         self.arrived = now;
         self.since_open = self.since_open.saturating_add(1);
         let failed = self.failed.load(Ordering::Relaxed);
-        if status::reopen_due(failed, self.stalled, self.since_open) {
+        if !self.waiting && status::reopen_due(failed, self.stalled, self.since_open) {
             tracing::warn!(
                 output = %self.outputs[self.current].name,
                 failed,
@@ -264,6 +264,13 @@ impl Session {
                 "dsend: the capture stopped: opening the output again"
             );
             self.since_open = 0;
+            // The devices just read, when the list is the same: a device
+            // handle may have been re-created (a driver reset).
+            if let Ok((devices, outputs)) = audio::outputs()
+                && outputs == self.outputs
+            {
+                self.devices = devices;
+            }
             if let Err(e) = self.capture(self.current) {
                 tracing::warn!("dsend: the output did not open again: {e}");
             }
@@ -329,7 +336,7 @@ impl Session {
                 tracing::warn!(
                     output = %captured.name,
                     default = %outputs[index].name,
-                    "dsend: the output captured is gone: capturing the default"
+                    "dsend: the output captured is gone: capturing the default (else the first)"
                 );
                 (index, true)
             }

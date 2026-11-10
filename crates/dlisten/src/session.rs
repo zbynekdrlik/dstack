@@ -13,7 +13,7 @@
 //! (cpal's stream stays on the thread that made it).
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -71,6 +71,9 @@ pub struct Session {
     replay: bool,
     /// No output is left (logged once until one comes back).
     waiting: bool,
+    /// A stream reported an error ([`audio::open`]): opened again at the
+    /// next refresh.
+    failed: Arc<AtomicBool>,
 }
 
 /// What the main thread is asked.
@@ -143,6 +146,7 @@ impl Session {
             settings_file,
             replay: false,
             waiting: false,
+            failed: Arc::default(),
         };
         if let Err(e) = session.play(current) {
             session.stop();
@@ -172,7 +176,7 @@ impl Session {
         // The new stream is opened while the old one plays (a failure
         // leaves the old one playing); the old one stops before the new
         // one starts: the FIFO has one reader.
-        let stream = audio::open(device, &config, player)?;
+        let stream = audio::open(device, &config, player, &self.failed)?;
         let was = self.playing.take().map(|_| self.current);
         match audio::start(stream) {
             Ok(p) => self.playing = Some(p),
@@ -186,6 +190,7 @@ impl Session {
             }
         }
         self.current = index;
+        self.replay = false;
         tracing::info!(
             output = %self.outputs[index].name,
             out_rate,
@@ -257,16 +262,23 @@ impl Session {
     /// Reads the output devices again (one plugged in or out, a format
     /// changed); true when the list changed. The one playing keeps playing,
     /// found again by name ([`outputs::refind`]) and opened again when its
-    /// format changed; one that is gone falls back to the default; with no
-    /// output left the old list stays.
+    /// format changed or a stream reported an error; one that is gone falls
+    /// back to the default (else the first); with no output left the old
+    /// list stays.
     pub fn refresh_outputs(&mut self) -> bool {
-        if self.replay {
-            self.replay = self.replay_current();
+        if self.failed.swap(false, Ordering::Relaxed) {
+            self.replay = true;
         }
         let Ok((devices, outputs)) = audio::outputs() else {
             return false;
         };
         if outputs == self.outputs {
+            // A replay owed (a stream error, a failed opening) takes the
+            // devices just read: a device handle may have been re-created.
+            if self.replay && !self.waiting {
+                self.devices = devices;
+                self.replay = self.replay_current();
+            }
             return false;
         }
         let playing = self.outputs[self.current].clone();
@@ -276,7 +288,7 @@ impl Session {
                 tracing::warn!(
                     output = %playing.name,
                     default = %outputs[index].name,
-                    "dlisten: the output playing is gone: playing on the default"
+                    "dlisten: the output playing is gone: playing on the default (else the first)"
                 );
                 (index, true)
             }
