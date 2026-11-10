@@ -4,7 +4,7 @@
 
 use tracing::{info, warn};
 
-use super::{Driver, REALTEK_GOOD, Verdict, driver, verdict};
+use super::{Driver, REALTEK_GOOD, Verdict, driver, verdict, virtual_adapter};
 
 /// The verdict for the adapter whose GUID is `adapter` (`{...}`).
 pub fn check(adapter: &str) -> Verdict {
@@ -17,7 +17,8 @@ pub fn check(adapter: &str) -> Verdict {
 /// The driver verdict for the adapter whose GUID is `adapter`, with its
 /// version string.
 pub fn check_driver(adapter: &str) -> (Driver, Option<String>) {
-    match sys::adapter_values(adapter, &["ProviderName", "DriverVersion"]) {
+    match sys::adapter_values(adapter, &["ProviderName", "DriverVersion", "DriverDesc"]) {
+        Some(v) if virtual_adapter(v[2].as_deref()) => (Driver::Virtual, v[1].clone()),
         Some(v) => (driver(v[0].as_deref(), v[1].as_deref()), v[1].clone()),
         None => (Driver::Other, None),
     }
@@ -41,6 +42,10 @@ pub fn report(adapter: &str) {
             version = v.as_deref().unwrap_or(""),
             good = %good,
             "the Dante NIC's Realtek driver was never measured (docs/windows-box.md)"
+        ),
+        (Driver::Virtual, v) => info!(
+            version = v.as_deref().unwrap_or(""),
+            "the Dante leg is a VLAN virtual adapter: its driver is the VLAN layer's, the NIC's own driver is not read (docs/two-networks.md)"
         ),
         (Driver::Other, _) => {}
     }

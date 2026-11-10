@@ -68,9 +68,30 @@ fn the_routed_adapter_s_driver_is_read() {
         panic!("no routed IPv4 address");
     };
     let (_, _, guid) = crate::host::win_nic::of(*local.ip()).unwrap();
-    let v = sys::adapter_values(&guid, &["ProviderName", "DriverVersion"]).unwrap();
+    let v = sys::adapter_values(&guid, &["ProviderName", "DriverVersion", "DriverDesc"]).unwrap();
     assert!(v[0].is_some() && v[1].is_some(), "{v:?}");
     let (verdict, version) = check_driver(&guid);
     assert_eq!(version, v[1]);
-    assert_eq!(verdict, driver(v[0].as_deref(), v[1].as_deref()));
+    let expected = if virtual_adapter(v[2].as_deref()) {
+        Driver::Virtual
+    } else {
+        driver(v[0].as_deref(), v[1].as_deref())
+    };
+    assert_eq!(verdict, expected);
+}
+
+/// dstack #155: the Dante leg on resolume-snv is Realtek's VLAN "Realtek
+/// Virtual Adapter" (driver 10.4.1117.2020), which the measured-driver
+/// check read as an unverified NIC driver.
+#[test]
+fn a_vlan_virtual_adapter_is_told_apart_from_a_nic() {
+    assert!(virtual_adapter(Some("Realtek Virtual Adapter")));
+    assert!(virtual_adapter(Some("Realtek Virtual Adapter #2")));
+    assert!(!virtual_adapter(Some(
+        "Realtek Gaming USB 2.5GbE Family Controller"
+    )));
+    assert!(!virtual_adapter(Some(
+        "Intel(R) Ethernet Controller (2) I225-V"
+    )));
+    assert!(!virtual_adapter(None));
 }

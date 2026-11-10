@@ -2,6 +2,8 @@
 
 ## 0.6.72 (unreleased)
 
+- New (dstack #155): on Windows the device tells a VLAN virtual adapter (Realtek's "Realtek Virtual Adapter", the Dante leg on a one-NIC PC) from a NIC in its driver check and says so at start, instead of calling the VLAN layer's driver (10.4.1117.2020) an unmeasured NIC driver (songplayer, resolume-snv, 10.11.2026). `lso::virtual_adapter`, `lso::Driver::Virtual`. No latency change.
+
 ## 0.6.71
 
 - Docs (dstack #155): the Windows firewall rule of the two-network standard is final: profiles on with default Allow, the Dante-leg group `dstack155` (after a measured hour with no change, 10.11.2026). No code change.
