@@ -2,6 +2,8 @@
 
 ## 0.6.77 (unreleased)
 
+- Dependency (dstack #1): dsync-ptp v1.28.0 -> v1.28.1 (dsync#161): the in-process PTP follower no longer floods the log when its capture adapter disappears (a NIC driver swap or USB re-plug logged ~100 lines a second on iem-snv, 10.11.2026): one WARN, a count at most every 10 s, one INFO on recovery; reads back off 10 ms -> 1 s. No API or latency change.
+
 - Docs (dstack #164): the test playbook records how to check a Windows binary from a release on an MCP box, why Windows-only glue is built `cfg(windows)` (the Linux coverage floor), and that a WASAPI loopback stream reports an xrun when it starts. No code change.
 
 ## 0.6.76 (unreleased)
