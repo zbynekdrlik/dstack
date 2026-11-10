@@ -44,10 +44,12 @@ exclude_globs = [
   "crates/dstack-endpoint/src/host.rs",
   "crates/dstack-endpoint/src/win.rs",
   # dsend's binary glue (dstack #164): the loopback capture and keep-alive
-  # (cpal), the running session (dlink, the network) and main need a sound
-  # card or the process; their decisions are the library's (cli, capture,
-  # source, status: each tested), and it is run by hand on Windows.
+  # (cpal), the run and its session (dlink, the network), Windows only and
+  # not built on the gate's Linux, and main; their decisions are the
+  # library's (cli, capture, source, status: each tested), and it is run by
+  # hand on Windows.
   "crates/dsend/src/main.rs",
+  "crates/dsend/src/run.rs",
   "crates/dsend/src/audio.rs",
   "crates/dsend/src/session.rs",
   # Third-party code (mdns-sd, one dstack change; tests/mdns_ipv4_only.rs).

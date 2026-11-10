@@ -4,32 +4,40 @@
 //! `dsend`: sends a PC's sound into Dante (dstack #164), see the library.
 //! It has no window and no tray of its own: dtray shows it, and its Output
 //! menu sends `app output <n>`. The binary is glue: the command line
-//! ([`dsend::cli`]), the session (`session`: the capture and the dlink
-//! device), the log (stderr and `<state file>.log`) and Ctrl+C. On
+//! ([`dsend::cli`]), and on Windows the run (`run`), the session
+//! (`session`: the capture and the dlink device), the log (stderr and `<state file>.log`) and Ctrl+C. On
 //! Windows it is a GUI-subsystem program: its output goes to the console
 //! it was started from, if any. Exit codes: 0 done, 1 a failure (not
 //! Windows, no output device, the device did not start), 2 a usage error.
 
-use std::fs::File;
 use std::process::ExitCode;
-use std::sync::mpsc::{self, RecvTimeoutError};
-use std::time::Duration;
 
-use dsend::cli::{self, Command, Options};
-use dstack_endpoint::host::{self, init_log};
-use dstack_endpoint::outputs;
+use dsend::cli::{self, Command};
 
-use session::{Event, Session};
-
+// The capture and the session are Windows only (WASAPI loopback): on
+// another OS a run or a list stops at once with the reason
+// (`cli::capture_check`), and they are not built.
+#[cfg(windows)]
 mod audio;
+#[cfg(windows)]
+mod run;
+#[cfg(windows)]
 mod session;
 
-/// How often the main thread wakes (dtray's choices come at once).
-const WAKE: Duration = Duration::from_secs(1);
-/// Every how many wakes the status is logged (10 s).
-const LOG_EVERY: u32 = 10;
-/// Every how many wakes the output devices are read again (5 s).
-const OUTPUTS_EVERY: u32 = 5;
+#[cfg(windows)]
+use run::{list, run};
+
+/// `--list-outputs` off Windows: no output dsend could capture.
+#[cfg(not(windows))]
+fn list() -> Result<(), String> {
+    cli::capture_check(false)
+}
+
+/// A run off Windows: the reason it cannot capture.
+#[cfg(not(windows))]
+fn run(_: &cli::Options) -> Result<(), String> {
+    cli::capture_check(false)
+}
 
 fn main() -> ExitCode {
     #[cfg(windows)]
@@ -77,67 +85,4 @@ fn fail(text: &str, boxed: bool) {
     }
     #[cfg(not(windows))]
     let _ = boxed;
-}
-
-/// `--list-outputs`: only where dsend can capture them.
-fn list() -> Result<(), String> {
-    cli::capture_check(cfg!(windows))?;
-    init_log(None);
-    let (_, described) = audio::outputs()?;
-    println!("{}", outputs::list_text(&described)?);
-    Ok(())
-}
-
-fn run(o: &Options) -> Result<(), String> {
-    // Before anything starts: only Windows can capture an output.
-    cli::capture_check(cfg!(windows))?;
-    let name = session::name_of(o);
-    let state = session::state_of(o, &name);
-    let log = state.with_extension("log");
-    let file = log
-        .parent()
-        .and_then(|d| std::fs::create_dir_all(d).ok())
-        .and_then(|()| File::create(&log).ok());
-    let logged = file.is_some();
-    init_log(file);
-    if logged {
-        tracing::info!(log = %log.display(), "dsend: the log");
-    }
-    let (events, inbox) = mpsc::channel();
-    let mut session = Session::start(o, events.clone())?;
-    host::on_ctrl_c("dsend", move || {
-        let _ = events.send(Event::Stop);
-    })?;
-
-    let mut wakes: u32 = 0;
-    let result = loop {
-        match inbox.recv_timeout(WAKE) {
-            Ok(Event::Stop) => {
-                tracing::info!("dsend: Ctrl+C, stopping");
-                break Ok(());
-            }
-            Ok(Event::Output(n)) => {
-                if let Err(e) = session.choose_output(n) {
-                    tracing::warn!("dsend: the output {n}: {e}");
-                }
-            }
-            Err(RecvTimeoutError::Timeout) => {
-                wakes = wakes.wrapping_add(1);
-                session.watch();
-                if wakes.is_multiple_of(OUTPUTS_EVERY) {
-                    session.refresh_outputs();
-                }
-                if wakes.is_multiple_of(LOG_EVERY) {
-                    tracing::info!("dsend: {}", session.line());
-                }
-                if let Some(why) = session.ended() {
-                    break Err(format!("the Dante device ended: {why}"));
-                }
-            }
-            // The session holds a sender (its command hook): never.
-            Err(RecvTimeoutError::Disconnected) => break Ok(()),
-        }
-    };
-    session.stop();
-    result
 }

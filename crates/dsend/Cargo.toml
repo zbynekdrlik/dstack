@@ -20,12 +20,15 @@ dlink = { path = "../dlink" }
 # The endpoint bridge dsend shares with dlisten (dstack #164): the FIFO, the
 # player, the map, the output's choice, the status and process glue.
 dstack-endpoint = { path = "../dstack-endpoint" }
-# The captured output (WASAPI loopback on Windows), as dlisten's output
-# (RustAudio, Apache-2.0; already in the lockfile).
-cpal = "=0.18.2"
 # The app status's JSON for dtray (already in the lockfile through dstack).
 serde_json = "1.0"
 tracing = "0.1"
+
+[target.'cfg(windows)'.dependencies]
+# The captured output (WASAPI loopback), as dlisten's output (RustAudio,
+# Apache-2.0; already in the lockfile). Windows only: elsewhere dsend
+# refuses to run, and its capture glue is not built.
+cpal = "=0.18.2"
 
 [dev-dependencies]
 # The status's size bound (dstack::ctl::app_object).
