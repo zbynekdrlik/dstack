@@ -13,9 +13,10 @@ use cpal::ErrorKind;
 /// opens the endpoint again: every kind but a glitch (an xrun), a reroute
 /// the stream follows by itself, and a refused real-time promotion.
 pub fn needs_reopen(kind: ErrorKind) -> bool {
-    // As 0.6.75 did: every error opened the endpoint again.
-    let _ = kind;
-    true
+    !matches!(
+        kind,
+        ErrorKind::Xrun | ErrorKind::DeviceChanged | ErrorKind::RealtimeDenied
+    )
 }
 
 #[cfg(test)]
