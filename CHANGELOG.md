@@ -2,6 +2,8 @@
 
 ## 0.6.65 (unreleased)
 
+- Fix (dstack #148): our devices answer ARC 2.8.9's TX flow list (0x2600, start 0x2809) with their flows: each a unicast flow (flags 0x11) to its receiver, with its slot as both ids, its channels, fpp, bits and destination. Since v0.6.54 every dstack receiver reads its transmitters' list once a minute to find multicast flows. Our devices left it unanswered, so each read of one of them waited 1 s and counted as a failed read, and the device asked logged "0x2600 unanswered" about 49 times an hour (band, 9.11.2026). New: `arc::flows::list_reply_body`, `arc::flows::UNICAST`. No latency change.
+
 ## 0.6.64
 
 - Fix (dstack #20, iemmixer and dasio, 9.11.2026): after band's restart, iem-mixer had 15 return channels off for 37 s. Two causes in our RX, and one in our TX:

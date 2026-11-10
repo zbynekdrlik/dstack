@@ -384,6 +384,9 @@ pub fn handle(
         op::RX_CHANNELS => rx_channels(&h, body, state, cfg, live.rx),
         op::RX_RENAME => rename(&h, body, state, cfg, Dir::Rx),
         op::TX_FLOWS => tx_flows(&h, body, cfg, live.tx),
+        // ARC 2.8.9's TX flow list (dstack #148): what every dstack receiver
+        // reads to find a transmitter's multicast flows.
+        flows::LIST if h.start == flows::START_2809 => ok(&flows_2809(cfg, live.tx)),
         op::RX_FLOWS => rx_flows(&h, body, cfg, live.rx),
         op::TX_MULTICAST_CREATE => no_multicast(&h, body, 2),
         op::TX_MULTICAST_DELETE => no_multicast(&h, body, 4),
@@ -628,6 +631,27 @@ fn socket_descriptor(out: &mut Body, at: std::net::SocketAddrV4) {
 /// ours, 8 zeros); then the three names: ours `<flow>_<process>`, the
 /// receiver's device and flow names (cut to [`MAX_REMOTE_NAME`]). A reader
 /// follows the offsets. The page's item is the flow descriptor's offset.
+/// Our TX flows as an ARC 2.8.9 list (0x2600, [`flows::list_reply_body`]):
+/// each a unicast flow to its receiver, its slot (from 1) as both ids.
+fn flows_2809(cfg: &DeviceConfig, tx: &TxTable) -> Vec<u8> {
+    let listed: Vec<flows::TxFlow> = (0..usize::from(MAX_FLOWS))
+        .filter_map(|slot| {
+            let f = tx.flow(slot)?;
+            let id = wire_u16(slot + 1);
+            Some(flows::TxFlow {
+                id,
+                local_id: id,
+                flags: flows::UNICAST,
+                channels: f.channels.iter().map(|c| c.unwrap_or(0)).collect(),
+                fpp: f.fpp,
+                bits: u16::from(cfg.encoding),
+                destinations: vec![f.dest],
+            })
+        })
+        .collect();
+    flows::list_reply_body(&listed)
+}
+
 fn tx_flows(h: &Header, req: &[u8], cfg: &DeviceConfig, tx: &TxTable) -> ArcOutcome {
     page(
         h,
