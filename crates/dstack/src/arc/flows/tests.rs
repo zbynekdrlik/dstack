@@ -388,7 +388,20 @@ fn a_list_we_write_reads_back_as_written() {
             ],
         },
     ];
-    let read = parse_flows(&list_reply_body(&flows)).expect("it reads");
+    let body = list_reply_body(&flows);
+    // Each segment's second byte counts the words from it to its record's
+    // end (the first segment's: the whole record's): 12, 2, 2 + the
+    // destinations, 2 + the channels, 2.
+    let at = usize::from(read_u16(&body, 8).unwrap()) - HEADER_LEN;
+    let words = [12usize, 2, 3, 6, 2];
+    let mut left: usize = words.iter().sum();
+    let mut s = at;
+    for w in words {
+        assert_eq!((usize::from(body[s]), usize::from(body[s + 1])), (w, left));
+        left -= w;
+        s += 2 * w;
+    }
+    let read = parse_flows(&body).expect("it reads");
     assert_eq!(read.unread, 0);
     assert_eq!(read.flows, flows);
     assert_eq!(parse_flows(&list_reply_body(&[])).unwrap().flows, []);

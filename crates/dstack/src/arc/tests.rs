@@ -3003,4 +3003,7 @@ fn the_2_8_9_tx_flow_list_states_our_flows() {
     let mut idle = Dev::new(config());
     let answer = decode(idle.send(&packet));
     assert_eq!(parse_flows(&answer.body).unwrap().flows, []);
+    // 0x2600 under another start code is not that list: unanswered.
+    let other = request(CONTROLLER, 0x5103, LIST, 0, &list_body());
+    assert!(matches!(dev.send(&other), ArcOutcome::Unanswered { .. }));
 }
