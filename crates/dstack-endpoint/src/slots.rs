@@ -51,15 +51,13 @@ pub fn pick(place: &Place, ports: Option<Ports>, id: Option<u16>) -> (Option<Por
     };
     match first_free(|p| binds(*ip, p)) {
         Some((p, k)) => {
-            if k > 0 {
-                tracing::info!(
-                    arc = p.arc,
-                    cmc = p.cmc,
-                    flows = p.flows,
-                    process_id = k,
-                    "another Dante device on this address holds the default ports: this one takes the next free set"
-                );
-            }
+            tracing::info!(
+                arc = p.arc,
+                cmc = p.cmc,
+                flows = p.flows,
+                process_id = k,
+                "the device's control ports: the first set free on its address"
+            );
             (Some(p), Some(k))
         }
         None => (None, None),
