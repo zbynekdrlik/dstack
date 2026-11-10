@@ -394,10 +394,11 @@ fn a_silent_transmitter_never_has_two_requests_in_flight() {
     // ready, which took mbc-snv 37 s after a reboot (dasio, 10.11.2026),
     // and the 18/36/72 s backoff after three tries turned that into a
     // 2 min silence at stream-obs.
-    let every_6_s: Vec<u64> = (0..=99).map(|i| i * 6).collect();
+    let every_6_s: Vec<u64> = (0..=100).map(|i| i * 6).collect();
     assert_eq!(times, every_6_s);
-    // The first request's grant after all: released at once.
-    let first = asked[0].1;
+    // A grant of an earlier request after all (one of the last
+    // MAX_FLOWS given up on): released at once.
+    let first = asked[asked.len() - 2].1;
     assert_eq!(
         m.answered(first, Answer::Granted(handle(0, 9)), t),
         [Action::Stop {

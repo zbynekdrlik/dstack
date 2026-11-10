@@ -2,6 +2,8 @@
 
 ## 0.6.68 (unreleased)
 
+- Fix (dstack #20, dasio and camera-box, 10.11.2026): a transmitter that answers no flow request is asked again every 6 s (`QUICK_RETRY_NS`) for as long as it stays silent, not three times and then the 18/36/72 s backoff. A starting transmitter answers nothing until its media clock is ready: mbc-snv's took 37 s after a reboot, and stream-obs stayed silent 2 min 6 s. `QUICK_TRIES` is removed. A refusal still backs off at once. No latency change.
+
 ## 0.6.67
 
 - Fix (dstack #20, camera-box and dasio, 10.11.2026): a flow request the flow client gets no reply to (`Answer::Failed`) now counts as unanswered and is asked again 6 s after it (`QUICK_RETRY_NS`, up to `QUICK_TRIES`), like a request given up on. It reset the quick retries and took the full backoff: when mbc-snv's NIC restarted, stream-obs asked at 08:32:04Z, mbc was back at 08:32:10Z, and the next request went out only at 08:32:22Z (about 10 s of extra silence). No latency change.

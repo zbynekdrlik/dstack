@@ -27,9 +27,10 @@
 //! row (a refusal, no answer within [`GIVE_UP_NS`], a flow that stays
 //! silent) doubles the wait up to [`RETRY_MAX_NS`] ([`retry_after`]), and
 //! audio received ends the row. A request with no answer is the one
-//! exception: asked again [`QUICK_RETRY_NS`] after it, [`QUICK_TRIES`] times
-//! in a row, as a transmitter that is starting answers nothing until its
-//! clock is ready (since v0.6.63); then the backoff.
+//! exception: asked again [`QUICK_RETRY_NS`] after it for as long as the
+//! transmitter stays silent, as a transmitter that is starting answers
+//! nothing until its clock is ready (since v0.6.63; mbc-snv took 37 s after
+//! a reboot). Any answer ends it; a refusal then backs off.
 //! Stops are one datagram per flow we were granted. Nothing here depends on
 //! what a transmitter answers to stay inside these bounds.
 //!
@@ -102,9 +103,6 @@ pub const RETRY_NS: u64 = 9_000_000_000;
 /// The wait from an unanswered request to the next one (it is given up
 /// after [`GIVE_UP_NS`], so 2 s after that).
 pub const QUICK_RETRY_NS: u64 = 6_000_000_000;
-/// How many unanswered requests in a row are asked again after
-/// [`QUICK_RETRY_NS`] before the backoff.
-pub const QUICK_TRIES: u32 = 3;
 /// The largest fpp a refusal with [`status::FPP_REFUSED`] steps up to:
 /// the most Dante devices advertise ([`crate::announce::FPP_MAX`]).
 pub const FPP_STEP_MAX: u16 = crate::announce::FPP_MAX;
@@ -905,7 +903,7 @@ impl Manager {
     /// Whether the transmitter at `ip` may be asked now.
     fn may_request(&self, to: SocketAddrV4, now: u64) -> bool {
         self.peers.get(&to).is_none_or(|p| {
-            let wait = if (1..=QUICK_TRIES).contains(&p.unanswered) {
+            let wait = if p.unanswered > 0 {
                 QUICK_RETRY_NS
             } else {
                 retry_after(p.failures)
