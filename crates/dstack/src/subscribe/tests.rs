@@ -1859,3 +1859,28 @@ fn a_refusal_after_unanswered_requests_waits_the_full_backoff() {
     }
     assert_eq!(next, Some(24 * S));
 }
+
+/// dstack #20 (camera-box and dasio, 10.11.2026): mbc-snv's NIC restarted;
+/// stream-obs asked for its flow at 08:32:04.2Z, the flow client gave up
+/// with no reply (`Answer::Failed`) and the next request went out only at
+/// 22.4Z, a full 18 s backoff, while mbc was back at 10.6Z. No reply is an
+/// unanswered request, asked again [`QUICK_RETRY_NS`] after it.
+#[test]
+fn a_request_the_client_got_no_reply_to_is_asked_again_quickly() {
+    let net = peer_network();
+    let mut m = manager();
+    m.set(0, Some(sub("TX 3", "peer-device")));
+    let first = requests(&m.tick(0, &NONE, &net))[0].0;
+    // The flow client waits 3 s and reports no reply.
+    m.answered(first, Answer::Failed, 3 * S);
+    let mut t = 3 * S;
+    let mut next = None;
+    while t <= 30 * S {
+        t += 100 * MS;
+        if !requests(&m.tick(t, &NONE, &net)).is_empty() {
+            next = Some(t);
+            break;
+        }
+    }
+    assert_eq!(next, Some(QUICK_RETRY_NS));
+}
