@@ -176,7 +176,7 @@ impl Session {
         tracing::info!(output = %outputs[current].name, "dsend: the output captured");
         let (processor, switch) = source::source(first.player);
         let link = Link::start(
-            &cli::link_config(o, &name, state.clone()),
+            &cli::link_config(&with_free_ports(o, &place), &name, state.clone()),
             &place,
             Map {
                 rx: vec![],
@@ -392,4 +392,13 @@ impl Session {
         self.capturing = None;
         tracing::info!(?stopped, "dsend: stopped");
     }
+}
+
+/// `o` with the control ports and process id [`dstack_endpoint::slots::pick`]
+/// gives on `place` (a free set when another Dante device on the address
+/// holds the defaults; dasio, FOH, 10.11.2026).
+fn with_free_ports(o: &cli::Options, place: &dlink::Place) -> cli::Options {
+    let mut o = o.clone();
+    (o.ports, o.process_id) = dstack_endpoint::slots::pick(place, o.ports, o.process_id);
+    o
 }

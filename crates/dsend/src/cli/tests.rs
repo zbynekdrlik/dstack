@@ -29,7 +29,7 @@ fn no_arguments_run_at_the_defaults() {
         Options {
             name: None,
             output: None,
-            rate: 48_000,
+            rate: 96_000,
             budget_ms: None,
             place: None,
             ports: None,
@@ -170,13 +170,13 @@ fn the_link_config_is_a_tx_only_device_l_and_r_with_the_options() {
         plain,
         Config::new("pc-dsend", &state)
             .tx(["L", "R"])
-            .sample_rate(48_000)
+            .sample_rate(96_000)
             .product("dstack", "dsend")
     );
     let dev = plain.device().unwrap();
     assert!(dev.rx.is_empty(), "TX only");
     assert_eq!(dev.tx, ["L", "R"]);
-    assert_eq!(dev.sample_rate, 48_000);
+    assert_eq!(dev.sample_rate, 96_000);
     let o = run("--rate 96000 --budget-ms 20 --ports 4441,8801,4456 --process-id 3");
     assert_eq!(
         link_config(&o, "n", state.clone()),

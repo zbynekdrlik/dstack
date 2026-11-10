@@ -122,7 +122,7 @@ impl Session {
         };
         let fifo = Arc::new(fifo_for(o.channels, o.rate));
         let link = Link::start(
-            &cli::link_config(o, &name, state.clone()),
+            &cli::link_config(&with_free_ports(o, &place), &name, state.clone()),
             &place,
             Map {
                 rx: (0..o.channels).collect(),
@@ -343,4 +343,13 @@ impl Session {
         let stopped = self.link.stop();
         tracing::info!(?stopped, "dlisten: stopped");
     }
+}
+
+/// `o` with the control ports and process id [`dstack_endpoint::slots::pick`]
+/// gives on `place` (a free set when another Dante device on the address
+/// holds the defaults; dasio, FOH, 10.11.2026).
+fn with_free_ports(o: &cli::Options, place: &dlink::Place) -> cli::Options {
+    let mut o = o.clone();
+    (o.ports, o.process_id) = dstack_endpoint::slots::pick(place, o.ports, o.process_id);
+    o
 }
