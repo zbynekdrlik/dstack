@@ -1,6 +1,8 @@
 # Changelog
 
-## 0.6.64 (unreleased)
+## 0.6.65 (unreleased)
+
+## 0.6.64
 
 - Fix (dstack #20, iemmixer and dasio, 9.11.2026): after band's restart, iem-mixer had 15 return channels off for 37 s. Two causes in our RX, and one in our TX:
   - RX: a transmitter's flows are now requested together, one request per flow the waiting channels need, not one per transmitter per 9 s. The second of band's two flows used to come 9-10 s after the first on every re-make.
