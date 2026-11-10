@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.77 (unreleased)
+
+- Docs (dstack #164): the test playbook records how to check a Windows binary from a release on an MCP box, why Windows-only glue is built `cfg(windows)` (the Linux coverage floor), and that a WASAPI loopback stream reports an xrun when it starts. No code change.
+
 ## 0.6.76 (unreleased)
 
 - Fix (dsend, dstack #164): a loopback xrun no longer reopens the captured output. Seen live with 0.6.75 on a Windows PC: a fresh WASAPI loopback stream reports an xrun (the data-discontinuity flag) on its first packets; dsend took it for a dead stream and reopened the output every 5 s, each new stream reporting another. Only a fault (the device gone, the stream invalidated, a backend error) opens it again now; an xrun, a followed reroute or a refused real-time promotion is logged only (`dstack_endpoint::stream::needs_reopen`, used by dlisten too). No latency change.
