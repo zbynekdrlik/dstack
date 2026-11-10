@@ -9,6 +9,7 @@ use std::net::Ipv4Addr;
 use std::path::PathBuf;
 
 use dlink::{Config, Place, Ports};
+use dstack_endpoint::cli::number;
 
 /// The usage text (`--help`, and after a usage error).
 pub const USAGE: &str = "\
@@ -55,8 +56,7 @@ pub const MAX_CHANNELS: usize = 64;
 pub const RATE: u32 = 48_000;
 /// The name's suffix after the host's name.
 pub const SUFFIX: &str = "-dlisten";
-/// The longest Dante device name.
-pub const NAME_MAX: usize = 31;
+pub use dstack_endpoint::cli::{NAME_MAX, parse_ports};
 
 /// The flags that take a value.
 const VALUE_FLAGS: [&str; 11] = [
@@ -114,11 +114,6 @@ pub enum Command {
     Version,
 }
 
-fn number<T: std::str::FromStr>(flag: &str, text: &str) -> Result<T, String> {
-    text.parse()
-        .map_err(|_| format!("{flag} needs a number, not {text:?}"))
-}
-
 /// `<rx>=<channel>@<device>`: the channel may hold `@` (the device's name
 /// cannot: Dante names are A-Z a-z 0-9 and '-'), so the last `@` splits.
 pub fn parse_subscribe(text: &str) -> Result<Subscribe, String> {
@@ -134,20 +129,6 @@ pub fn parse_subscribe(text: &str) -> Result<Subscribe, String> {
         tx_channel: channel.to_string(),
         tx_device: device.to_string(),
     })
-}
-
-/// `<arc>,<cmc>,<flows>`, each a port over 0.
-pub fn parse_ports(text: &str) -> Result<Ports, String> {
-    let bad = || format!("--ports is <arc>,<cmc>,<flows>, not {text:?}");
-    let parts: Vec<u16> = text
-        .split(',')
-        .map(|p| p.trim().parse::<u16>().ok().filter(|&p| p > 0))
-        .collect::<Option<_>>()
-        .ok_or_else(bad)?;
-    match parts[..] {
-        [arc, cmc, flows] => Ok(Ports { arc, cmc, flows }),
-        _ => Err(bad()),
-    }
 }
 
 /// The command line after the program's name.
@@ -259,15 +240,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
 /// '-' at its ends) and cut so the whole is at most [`NAME_MAX`]; `pc` for
 /// a name with nothing left.
 pub fn default_name(host: &str) -> String {
-    let cleaned: String = host
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect();
-    let room = NAME_MAX - SUFFIX.len();
-    let short: String = cleaned.trim_matches('-').chars().take(room).collect();
-    let short = short.trim_end_matches('-');
-    let host = if short.is_empty() { "pc" } else { short };
-    format!("{host}{SUFFIX}")
+    dstack_endpoint::cli::default_name(host, SUFFIX)
 }
 
 /// The RX channels' names: L and R for two, else `In 1` to `In <n>`.
@@ -292,16 +265,15 @@ pub fn state_path(
     home: Option<OsString>,
     temp: PathBuf,
 ) -> PathBuf {
-    let set = |v: Option<OsString>| v.filter(|v| !v.is_empty()).map(PathBuf::from);
-    let base = if windows {
-        set(local_app_data)
-    } else {
-        set(xdg_state_home).or_else(|| set(home).map(|h| h.join(".local").join("state")))
-    };
-    base.unwrap_or(temp)
-        .join("dstack")
-        .join("dlisten")
-        .join(format!("{name}.toml"))
+    dstack_endpoint::cli::state_path(
+        windows,
+        "dlisten",
+        name,
+        local_app_data,
+        xdg_state_home,
+        home,
+        temp,
+    )
 }
 
 /// The dlink device of a run: `name`, its state in `state`, RX only with

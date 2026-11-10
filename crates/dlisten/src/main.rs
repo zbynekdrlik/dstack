@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use dlisten::cli::{self, Command, Options};
 use dlisten::outputs;
-use tracing_subscriber::fmt::writer::MakeWriterExt;
+use dstack_endpoint::host::{self, init_log};
 
 use session::{Event, Session};
 
@@ -91,24 +91,6 @@ fn fail(text: &str, boxed: bool) {
     let _ = boxed;
 }
 
-/// The log on stderr and in `file` (when it opens), RUST_LOG as the
-/// devices read it, `info` by default.
-fn init_log(file: Option<File>) {
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-    match file {
-        Some(f) => tracing_subscriber::fmt()
-            .with_env_filter(filter)
-            .with_ansi(false)
-            .with_writer(std::io::stderr.and(std::sync::Mutex::new(f)))
-            .init(),
-        None => tracing_subscriber::fmt()
-            .with_env_filter(filter)
-            .with_writer(std::io::stderr)
-            .init(),
-    }
-}
-
 /// `--list-outputs`.
 fn list() -> Result<(), String> {
     init_log(None);
@@ -144,26 +126,9 @@ fn run(o: &Options) -> Result<(), String> {
     let (events, inbox) = mpsc::channel();
     let mut session = Session::start(o, events.clone())?;
 
-    // Ctrl+C on a thread of its own (tokio's signal, as dstack-dev's).
-    std::thread::Builder::new()
-        .name("dlisten-ctrl-c".into())
-        .spawn(move || {
-            let caught = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .map_err(|e| e.to_string())
-                .and_then(|rt| {
-                    rt.block_on(tokio::signal::ctrl_c())
-                        .map_err(|e| e.to_string())
-                });
-            match caught {
-                Ok(()) => {
-                    let _ = events.send(Event::Stop);
-                }
-                Err(e) => tracing::warn!("dlisten: Ctrl+C cannot be caught ({e})"),
-            }
-        })
-        .map_err(|e| format!("the Ctrl+C thread: {e}"))?;
+    host::on_ctrl_c("dlisten", move || {
+        let _ = events.send(Event::Stop);
+    })?;
 
     let mut wakes: u32 = 0;
     let result = loop {

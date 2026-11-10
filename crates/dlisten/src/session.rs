@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use dlink::{Link, Map, Place};
+use dlink::{Link, Map};
 use dlisten::cli::{self, Options};
 use dlisten::feed::Feed;
 use dlisten::fifo::Fifo;
@@ -25,29 +25,9 @@ use dlisten::outputs::{self, Output};
 use dlisten::player::{Player, Stats, fifo_for};
 use dlisten::settings::{self, Settings};
 use dlisten::status::{self, AppView, Snapshot};
+use dstack_endpoint::host;
 
 use crate::audio;
-
-/// This PC's name (Windows `COMPUTERNAME`, Linux the kernel's hostname).
-fn host_name() -> String {
-    std::env::var("COMPUTERNAME")
-        .ok()
-        .or_else(|| std::fs::read_to_string("/proc/sys/kernel/hostname").ok())
-        .unwrap_or_default()
-        .trim()
-        .to_string()
-}
-
-/// The address of the default route (connecting a UDP socket picks the
-/// route and sends nothing).
-fn routed_ipv4() -> Result<Place, String> {
-    let probe = std::net::UdpSocket::bind("0.0.0.0:0").map_err(|e| e.to_string())?;
-    probe.connect("192.0.2.1:9").map_err(|e| e.to_string())?;
-    match probe.local_addr().map_err(|e| e.to_string())? {
-        std::net::SocketAddr::V4(a) => Ok(Place::Ip(*a.ip())),
-        other => Err(format!("no IPv4 address on the default route ({other})")),
-    }
-}
 
 /// The state file of a run: `--state`, else the user's state folder.
 pub fn state_of(o: &Options, name: &str) -> PathBuf {
@@ -67,7 +47,7 @@ pub fn state_of(o: &Options, name: &str) -> PathBuf {
 pub fn name_of(o: &Options) -> String {
     o.name
         .clone()
-        .unwrap_or_else(|| cli::default_name(&host_name()))
+        .unwrap_or_else(|| cli::default_name(&host::host_name()))
 }
 
 /// A running dlisten (module doc).
@@ -124,7 +104,7 @@ impl Session {
         let place = match &o.place {
             Some(p) => p.clone(),
             None => {
-                let p = routed_ipv4()?;
+                let p = host::routed_ipv4()?;
                 tracing::info!(
                     place = ?p,
                     "dlisten: no --ip or --iface, so the default route's address (name the Dante NIC with --ip)"

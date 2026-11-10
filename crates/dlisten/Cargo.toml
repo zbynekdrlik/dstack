@@ -18,6 +18,9 @@ path = "src/main.rs"
 [dependencies]
 dlink = { path = "../dlink" }
 dstack-resample = { path = "../dstack-resample" }
+# The endpoint bridge dlisten shares with dsend (dstack #164): the FIFO, the
+# player, the map, the output's choice, the status and process glue.
+dstack-endpoint = { path = "../dstack-endpoint" }
 # dtray's Run value and autostart entry quoting, for `--autostart`
 # (its library; dlisten has no tray of its own: dtray shows it).
 dtray = { path = "../dtray" }
@@ -28,12 +31,7 @@ dtray = { path = "../dtray" }
 cpal = "=0.18.2"
 # The app status's JSON for dtray (already in the lockfile through dstack).
 serde_json = "1.0"
-# Ctrl+C (already in the lockfile through dstack, with these features).
-tokio = { version = "1", features = ["rt", "signal"] }
 tracing = "0.1"
-# The log on stderr, RUST_LOG as the devices read it (already in the
-# lockfile through dstack).
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
 # Settings files in tests (already in the lockfile).

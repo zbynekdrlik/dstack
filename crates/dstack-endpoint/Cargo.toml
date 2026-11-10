@@ -1,0 +1,31 @@
+[package]
+name = "dstack-endpoint"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+repository.workspace = true
+authors.workspace = true
+description = "A PC's audio endpoint bridged to a dlink device: the lock-free FIFO, the ASRC player (drifting converter steered on the FIFO's depth), the channel map, the endpoint's choice and settings, and the status and command line helpers dlisten and dsend share"
+
+[dependencies]
+dlink = { path = "../dlink" }
+dstack-resample = { path = "../dstack-resample" }
+# The endpoints (WASAPI shared on Windows, ALSA on Linux), as dlisten
+# already used it (RustAudio, Apache-2.0); on Linux it builds against
+# libasound2-dev (CI installs it).
+cpal = "=0.18.2"
+# The app status's JSON for dtray (already in the lockfile through dstack).
+serde_json = "1.0"
+# Ctrl+C (already in the lockfile through dstack, with these features).
+tokio = { version = "1", features = ["rt", "signal"] }
+tracing = "0.1"
+# The log on stderr, RUST_LOG as the devices read it (already in the
+# lockfile through dstack).
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+# Settings files in tests (already in the lockfile).
+tempfile = "3"
+# The status's size bound (dstack::ctl::app_object).
+dstack = { path = "../dstack" }

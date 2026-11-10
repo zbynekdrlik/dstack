@@ -330,13 +330,12 @@ dependencies = [
  "cpal",
  "dlink",
  "dstack",
+ "dstack-endpoint",
  "dstack-resample",
  "dtray",
  "serde_json",
  "tempfile",
- "tokio",
  "tracing",
- "tracing-subscriber",
  "windows-sys 0.61.2",
 ]
 
@@ -373,6 +372,21 @@ dependencies = [
 [[package]]
 name = "dstack-audio-io"
 version = "0.6.75"
+
+[[package]]
+name = "dstack-endpoint"
+version = "0.6.75"
+dependencies = [
+ "cpal",
+ "dlink",
+ "dstack",
+ "dstack-resample",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
 
 [[package]]
 name = "dstack-resample"
