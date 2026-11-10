@@ -1,6 +1,8 @@
 # Changelog
 
-## 0.6.67 (unreleased)
+## 0.6.68 (unreleased)
+
+## 0.6.67
 
 - Fix (dstack #20, camera-box and dasio, 10.11.2026): a flow request the flow client gets no reply to (`Answer::Failed`) now counts as unanswered and is asked again 6 s after it (`QUICK_RETRY_NS`, up to `QUICK_TRIES`), like a request given up on. It reset the quick retries and took the full backoff: when mbc-snv's NIC restarted, stream-obs asked at 08:32:04Z, mbc was back at 08:32:10Z, and the next request went out only at 08:32:22Z (about 10 s of extra silence). No latency change.
 
