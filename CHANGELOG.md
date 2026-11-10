@@ -2,6 +2,9 @@
 
 ## 0.6.77 (unreleased)
 
+- Fix (dstack #164, dasio on FOH, 10.11.2026): dsend and dlisten pick free control ports themselves. Started on an address where another Dante device holds Dante's defaults, they take the first free slot: ARC 4440+k, CMC 8800+k, flows 4455+k, process id k (`dstack_endpoint::slots`); dsend on FOH had stopped at "ARC on UDP 4440: Only one usage of each socket address" beside dlisten (slot 0) and band (slot 1). `--ports`/`--process-id` still win; a device named by interface keeps the defaults.
+- dsend's default network rate is 96 kHz (was 48 kHz), the rate of every Dante device on the site's network; `--rate` sets another.
+
 - Dependency (dstack #1): dsync-ptp v1.28.0 -> v1.28.1 (dsync#161): the in-process PTP follower no longer floods the log when its capture adapter disappears (a NIC driver swap or USB re-plug logged ~100 lines a second on iem-snv, 10.11.2026): one WARN, a count at most every 10 s, one INFO on recovery; reads back off 10 ms -> 1 s. No API or latency change.
 
 - Docs (dstack #164): the test playbook records how to check a Windows binary from a release on an MCP box, why Windows-only glue is built `cfg(windows)` (the Linux coverage floor), and that a WASAPI loopback stream reports an xrun when it starts. No code change.

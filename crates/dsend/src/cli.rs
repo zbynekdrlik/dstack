@@ -23,7 +23,7 @@ the network's rate and clock. Windows only (WASAPI loopback).
   --output <text>             capture the first output whose name holds
                               <text> (any case; default: the default output)
   --name <name>               the device's Dante name (default <host>-dsend)
-  --rate <hz>                 the network's sample rate (default 48000)
+  --rate <hz>                 the network's sample rate (default 96000)
   --budget-ms <ms>            dlink's latency budget (default 15)
   --ip <addr>                 the Dante NIC's address (default: the address
                               of the default route)
@@ -42,7 +42,7 @@ The status is also logged every 10 s, to stderr and to <state file>.log.
 Ctrl+C stops it.";
 
 /// The network's rate unless `--rate`.
-pub const RATE: u32 = 48_000;
+pub const RATE: u32 = 96_000;
 /// The name's suffix after the host's name.
 pub const SUFFIX: &str = "-dsend";
 /// The app's name (its state folder, the command's usage).

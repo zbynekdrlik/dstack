@@ -36,6 +36,7 @@ pub mod map;
 pub mod outputs;
 pub mod player;
 pub mod settings;
+pub mod slots;
 pub mod status;
 pub mod stream;
 #[cfg(windows)]
