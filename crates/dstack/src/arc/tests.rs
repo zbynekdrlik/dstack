@@ -2973,3 +2973,34 @@ fn a_latency_the_config_refuses_is_refused_and_another_form_unanswered() {
     }
     assert_eq!(device, before);
 }
+
+/// dstack #148 (band's log, 9.11.2026): every dstack receiver reads its
+/// transmitters' ARC 2.8.9 TX flow lists (0x2600) once a minute. Our own
+/// devices left it unanswered: each read waited 1 s, and the device asked
+/// logged it. The list states each flow, as `arc::flows::parse_flows`
+/// reads it: a unicast flow to its receiver.
+#[test]
+fn the_2_8_9_tx_flow_list_states_our_flows() {
+    use crate::arc::flows::{LIST, START_2809, list_body, parse_flows};
+    let mut dev = Dev::new(config());
+    let rx_at = SocketAddrV4::new(PEER_IP, 50_000);
+    let req = tx_request("peer-device", "dc-flow", &[Some(1), Some(2)], rx_at);
+    assert_eq!(dev.tx.add(&req, 0).unwrap().0, 0);
+    let packet = request(START_2809, 0x5102, LIST, 0, &list_body());
+    let answer = decode(dev.send(&packet));
+    assert_eq!(answer.header.op2, STATUS_OK);
+    let flows = parse_flows(&answer.body).expect("our list reads");
+    assert_eq!(flows.unread, 0);
+    let [f] = &flows.flows[..] else {
+        panic!("one flow: {flows:?}");
+    };
+    assert_eq!((f.id, f.local_id), (1, 1));
+    assert!(!f.multicast());
+    assert_eq!(f.channels, [1, 2]);
+    assert_eq!(f.destinations, [rx_at]);
+    assert_eq!(f.bits, 24);
+    // No flow: an empty list, still answered.
+    let mut idle = Dev::new(config());
+    let answer = decode(idle.send(&packet));
+    assert_eq!(parse_flows(&answer.body).unwrap().flows, []);
+}
