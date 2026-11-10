@@ -346,6 +346,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d8b14ccef22fc6f5a8f4d7d768562a182c04ce9a3b3157b91390b52ddfdf1a76"
 
 [[package]]
+name = "dsend"
+version = "0.6.75"
+dependencies = [
+ "cpal",
+ "dlink",
+ "dstack",
+ "dstack-endpoint",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "dstack"
 version = "0.6.75"
 dependencies = [
@@ -386,6 +398,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

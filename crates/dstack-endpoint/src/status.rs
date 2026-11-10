@@ -243,8 +243,7 @@ mod tests {
         assert!(kept > 50 && kept < 200, "{kept}");
         assert_eq!(j["outputs_cut"], true);
         assert!(text.len() + outs[kept].len() + 3 > APP_MAX);
-        let j: serde_json::Value =
-            serde_json::from_str(&with_outputs(&base, &outs, 150)).unwrap();
+        let j: serde_json::Value = serde_json::from_str(&with_outputs(&base, &outs, 150)).unwrap();
         assert_eq!(j["outputs"], serde_json::json!([]));
         assert_eq!(j["output"], 150);
     }

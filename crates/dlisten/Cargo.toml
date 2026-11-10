@@ -41,12 +41,9 @@ tempfile = "3"
 dstack = { path = "../dstack" }
 
 [target.'cfg(windows)'.dependencies]
-# The parent console for the command line's output (a GUI-subsystem
-# program has none), the error box, and the autostart's Run value (the
-# version dstack uses).
+# The autostart's Run value (the version dstack uses; the console and the
+# error box are dstack-endpoint's).
 windows-sys = { version = "0.61", features = [
   "Win32_Foundation",
-  "Win32_System_Console",
   "Win32_System_Registry",
-  "Win32_UI_WindowsAndMessaging",
 ] }

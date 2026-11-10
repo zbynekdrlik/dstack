@@ -22,8 +22,9 @@
 //! - [`cli`]: the command line's shared parts (ports, the default name, the
 //!   state file's folder).
 //! - [`alert`]: where a failure the user must see goes (Windows).
-//! - [`endpoints`] and [`host`]: thin glue (cpal's device list, the PC's
-//!   name and routed address, the log, Ctrl+C), run by the binaries.
+//! - [`endpoints`], [`host`] and `win` (Windows only): thin glue (cpal's
+//!   device list, the PC's name and routed address, the log, Ctrl+C, the
+//!   console and the error box), run by the binaries.
 
 pub mod alert;
 pub mod cli;
@@ -35,3 +36,5 @@ pub mod outputs;
 pub mod player;
 pub mod settings;
 pub mod status;
+#[cfg(windows)]
+pub mod win;

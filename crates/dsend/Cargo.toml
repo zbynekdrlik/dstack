@@ -1,0 +1,32 @@
+[package]
+name = "dsend"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+repository.workspace = true
+authors.workspace = true
+description = "Sends a PC's sound into Dante: a Windows output's loopback capture (WASAPI) as two TX channels (L, R) of a dlink device, converted to the network's clock and rate through the ASRC"
+
+[lib]
+name = "dsend"
+
+[[bin]]
+name = "dsend"
+path = "src/main.rs"
+
+[dependencies]
+dlink = { path = "../dlink" }
+# The endpoint bridge dsend shares with dlisten (dstack #164): the FIFO, the
+# player, the map, the output's choice, the status and process glue.
+dstack-endpoint = { path = "../dstack-endpoint" }
+# The captured output (WASAPI loopback on Windows), as dlisten's output
+# (RustAudio, Apache-2.0; already in the lockfile).
+cpal = "=0.18.2"
+# The app status's JSON for dtray (already in the lockfile through dstack).
+serde_json = "1.0"
+tracing = "0.1"
+
+[dev-dependencies]
+# The status's size bound (dstack::ctl::app_object).
+dstack = { path = "../dstack" }

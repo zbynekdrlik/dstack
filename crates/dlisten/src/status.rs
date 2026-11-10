@@ -93,7 +93,6 @@ mod tests {
     use dlink::SubStatus;
     use dstack::device::Subscription;
 
-
     fn snap() -> Snapshot {
         Snapshot {
             depth_ms: 40.06,

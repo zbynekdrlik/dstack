@@ -114,21 +114,40 @@ mod tests {
         assert_eq!(long, "abcdefghijklmnopqrstuvwxy-dsend");
         assert_eq!(long.len(), NAME_MAX);
         // A suffix longer than a name leaves no room, never a panic.
-        assert_eq!(default_name("pc", &"x".repeat(40)), format!("pc{}", "x".repeat(40)));
+        assert_eq!(
+            default_name("pc", &"x".repeat(40)),
+            format!("pc{}", "x".repeat(40))
+        );
     }
 
     #[test]
     fn the_state_file_is_under_the_app_s_folder() {
         let os = |s: &str| Some(OsString::from(s));
         assert_eq!(
-            state_path(true, "dsend", "pc-dsend", os("C:\\L"), None, None, "/t".into()),
+            state_path(
+                true,
+                "dsend",
+                "pc-dsend",
+                os("C:\\L"),
+                None,
+                None,
+                "/t".into()
+            ),
             PathBuf::from("C:\\L")
                 .join("dstack")
                 .join("dsend")
                 .join("pc-dsend.toml")
         );
         assert_eq!(
-            state_path(false, "dsend", "pc-dsend", None, None, os("/h"), "/t".into()),
+            state_path(
+                false,
+                "dsend",
+                "pc-dsend",
+                None,
+                None,
+                os("/h"),
+                "/t".into()
+            ),
             PathBuf::from("/h/.local/state/dstack/dsend/pc-dsend.toml")
         );
     }

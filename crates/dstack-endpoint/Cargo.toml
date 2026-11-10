@@ -29,3 +29,12 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tempfile = "3"
 # The status's size bound (dstack::ctl::app_object).
 dstack = { path = "../dstack" }
+
+[target.'cfg(windows)'.dependencies]
+# The parent console for the command line's output (a GUI-subsystem
+# program has none) and the error box (the version dstack uses).
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_System_Console",
+  "Win32_UI_WindowsAndMessaging",
+] }
