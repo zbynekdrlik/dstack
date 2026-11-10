@@ -1,6 +1,10 @@
 # Changelog
 
-## 0.6.68 (unreleased)
+## 0.6.69 (unreleased)
+
+- Docs (dstack #155, owner 10.11.2026): `docs/two-networks.md` is now the one standard for every PC with a Dante leg: one cable with the LAN untagged and Dante as a tagged VLAN, the legs' settings on Linux (NetworkManager) and Windows (Realtek VLAN driver; Intel has no VLANs on Windows 11), the Dante-leg firewall group, the rules our applications follow (bind and advertise the LAN for non-Dante traffic, dial verified LAN addresses, pin dsync), the order of a change and the checks the rig gates assert. Site values moved to the private site file. No code change.
+
+## 0.6.68
 
 - Fix (dstack #20, dasio and camera-box, 10.11.2026): a transmitter that answers no flow request is asked again every 6 s (`QUICK_RETRY_NS`) for as long as it stays silent, not three times and then the 18/36/72 s backoff. A starting transmitter answers nothing until its media clock is ready: mbc-snv's took 37 s after a reboot, and stream-obs stayed silent 2 min 6 s. `QUICK_TRIES` is removed. A refusal still backs off at once. No latency change.
 

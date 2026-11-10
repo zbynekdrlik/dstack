@@ -1,58 +1,96 @@
-# Two networks on one PC: Dante and the LAN (dstack #155)
+# The two-network standard: Dante and the LAN on one PC (dstack #155)
 
-Every production host that sees both the Dante network and the normal LAN keeps them apart in one fixed way. Then no app reaches anything by chance, and nothing depends on which address a library picks after a restart.
+This is the one procedure for every production PC that touches the Dante network. The owner ruled on 10.11.2026 that no project invents its own: the OS, the VLANs, the firewall and the behaviour of our applications follow this page, and every project points here instead of writing its own variant. dstack owns this page. A project that needs something it does not cover asks dstack, and dstack changes the page.
 
-## The site's facts
+The goal: nothing reaches anything by chance. Which address a library picks after a restart, which NIC enumerates first, or which cable is in which port must never decide whether audio, video or control works.
 
-- Dante is VLAN 70, `10.77.7.0/24`, with the router at `10.77.7.1`. DHCP hands out `.100`–`.200` there. There is no `/23` on it.
-- The LAN is `10.77.8.0/23`, with the router at `10.77.8.1`.
-- The router routes between the two networks with no filter. So an address on either side is reachable from the other, and only the host decides which one is used.
-- The switches give DSCP 56 (PTP) and 46 (audio) strict priority on their way out. They cannot help inside a PC whose one NIC carries everything.
+The site's own values (subnets, VLAN numbers, host names, addresses, switch ports) are not in this public repo; they are in `~/.config/dstack/SITE.md` on dev1. Below, `<dante>` is the Dante VLAN's subnet and `<lan>` is the LAN's.
 
-## The rule for a two-network host
+## 1. Network layout
 
-| | LAN NIC (or the untagged port) | Dante NIC (or the VLAN 70 leg) |
+- Two networks: the Dante VLAN (audio, PTP, Dante control) and the LAN (everything else: NDI, web UIs, remote access, updates, file copies).
+- The router routes between them with no filter. So both addresses of a PC are reachable from the other side, and only the PC and the apps decide which one is used. That is why the rules below exist.
+- The switches give DSCP 56 (PTP) and 46 (audio) strict priority on egress. That cannot help inside a PC whose single queue carries everything, which is why Dante gets its own leg.
+
+## 2. One cable per PC
+
+- **Every PC has exactly one physical NIC in use.** A second NIC only with the owner's explicit approval for that PC (owner, 9.11.2026).
+- **Port:** the LAN untagged and the Dante VLAN tagged on the same cable (the switch port carries both). A PC that is on Dante only today gets the other network as a second VLAN on its cable.
+- The switch side is the network project's (mikrotik); dstack asks for each port and tells it when the PC side is ready.
+- **Every other NIC is disabled in the OS** (onboard ports, Wi-Fi, old USB adapters), not just unplugged. A NIC that comes back by itself takes addresses and routes.
+
+## 3. The two legs on the PC
+
+| | LAN leg (untagged) | Dante leg (VLAN, tagged) |
 |---|---|---|
+| Address | DHCP, a fixed lease on the router | DHCP with a fixed lease, or static when the leg's MAC is not stable (below) |
 | Default route | yes, the only one | none |
 | DNS servers, DNS registration, NetBIOS | yes | none |
-| Route to `10.77.7.0/24` | none in the main table (Linux) | only for sockets bound to its address |
-| What may pass | everything else | Dante, PTP and mDNS-for-Dante only (the ports below), filtered in and out |
-| Discovery (NDI, Bonjour, web UIs) | here only | never |
+| Interface metric | low (automatic) | 900, fixed |
+| File/print sharing, network client | as needed | unbound |
+| Discovery: NDI, Bonjour/mDNS of non-Dante apps, web UIs | here only | never |
+| Traffic | everything else | Dante, PTP and Dante's mDNS only |
 | `.lan` name | its LAN address | none |
 
-**A host with an input filter on its Dante leg must accept UDP from source port 5353.** Our devices and the network listing ask mDNS by direct queries sent to the group (224.0.0.251:5353), and each device answers unicast from its own address and port 5353 to the asker's port. Conntrack does not tie that answer to the multicast query, so a filter that accepts only `ct state established,related` drops every answer. dcontroller's guard did that on 9.11.2026 (3351 packets dropped), and its listing then lost every device after 120 s. In nftables: `udp sport 5353 accept` on the Dante interface. Windows Firewall allows the unicast answer to a multicast query by default.
+**Which leg is tagged.** The default is the LAN untagged and Dante tagged. A Windows PC with a low-latency Dante host (dasio: ASIO, Npcap, interrupt tuning on the physical NIC) keeps **Dante untagged on the physical adapter** and gets the **LAN as the tagged virtual adapter**, so the audio path, its NIC tuning and its stable MAC stay as they are. The table's rows hold for each leg whichever way it is tagged.
 
-The Dante devices (dstack, dasio, dlink apps, iemmixer) bind every socket to the Dante address. That includes their direct mDNS queries since dstack v0.6.56 (no browse) and the network listing since v0.6.58. They need no gateway and no DNS on that leg.
+### Linux (NetworkManager)
 
-### Linux: the model, strih-snv
-
-- The LAN NIC holds the only default route and the DNS.
-- The Dante leg is `enp7s0.70`, VLAN 70 tagged on the same cable. It is `never-default`, and its connected route lives only in policy table 70 (`ip rule add from <dante ip> lookup 70`). The main table has no route to `10.77.7.0/24`, so only sockets bound to the Dante address reach VLAN 70.
-- nftables on the leg:
-  - in: the Dante ports of the host's devices (ARC 4440+, flow control 4455+, info 8700/8702/8708, CMC 8800+, audio 30000+/30100+, mDNS 5353), PTP 224.0.1.129 319/320, and anything else the host needs on purpose;
-  - out: from the Dante address to `10.77.7.0/24` and to 224.0.0.231/.233/.251;
-  - everything else on the leg is dropped.
-- NDI is limited to the LAN in `/etc/ndi` and `~/.ndi` (`networks.ips`, the LAN boxes).
+- The LAN connection holds the only default route and the DNS.
+- The Dante leg is an NM VLAN connection on the same NIC (`<nic>.<vlan>`): `ipv4.never-default yes`, `ipv4.ignore-auto-dns yes`, `ipv6.method disabled`, its connected route in a policy table with a rule `from <dante address> lookup <table>` (the address, not the subnet), so the main table has no route to `<dante>` and only sockets bound to the Dante address use the leg.
+- Load `8021q` and persist it (`/etc/modules-load.d/8021q.conf`); without it NM fails with "Failed to find a compatible device".
+- On a netplan host, NM may rewrite the VLAN's parent to a stale connection UUID: set `vlan.parent` to the active LAN connection's UUID.
+- Route metric 900 on the leg's connection (`ipv4.route-metric 900`), so the numbers match Windows even though the main table has no `<dante>` route.
+- nftables on the Dante leg (dcontroller's `dante-guard` is the reference implementation):
+  - in: `ct state established,related`; IGMP; multicast UDP (PTP, Dante info and heartbeat groups, multicast audio); the Dante ports of the PC's devices (ARC 4440+, flow control 4455+, info 8700/8702/8708, CMC 8800+, audio 30000+/30100+); PTP 319/320; mDNS 5353 and **`udp sport 5353 accept`**; a controller's own receive ports (dcontroller's meter ports 8810–8825); DHCP 68 only on a leg that uses DHCP; IPv6 dropped; everything else dropped;
+  - out: only the PC's Dante programs (by user or program) and PTP 319/320, IGMP, DHCP 67/68, and only to `<dante>` or the groups 224.0.0.231/.233/.251 and the PTP/audio multicast groups; everything else dropped;
+  - a guard that allows only one program out must also allow every Dante device on the PC (a dlink app under another user, for example), with its ports in.
 
 ### Windows
 
-- On the Dante NIC: no default gateway, interface metric 900 (fixed), "Register this connection's addresses in DNS" off, NetBIOS over TCP/IP off, and File and Printer Sharing / Client for Microsoft Networks unbound.
-- Firewall: the Dante NIC's network profile is Public. One rule set admits the Dante ports and PTP on it and blocks every other program's inbound there. An app's outbound on it is blocked unless it is a Dante device.
-- NDI: `C:\ProgramData\NDI\ndi-config.v1.json` lists only the LAN adapter (`adapters.allowed`). Check that the app really loads that runtime: SongPlayer's NDI sender still advertised its Dante address on 9.11.2026 while the file limited it to the LAN.
+- **The NIC must do VLANs in its driver.** Intel's PROSet/ANS VLANs do not exist on Windows 11 and Windows 11 client editions have no LBFO, so an Intel I225/I226 on Windows 11 cannot carry two VLANs without Hyper-V. Use a Realtek NIC (the site's USB 2.5G adapter, RTL8156) with Realtek's **Ethernet Diagnostic Utility** (2.0.8.3 or newer, signed by Realtek), which creates a "Realtek Virtual Adapter" per VLAN. No Hyper-V on production PCs.
+- The base adapter keeps the LAN (untagged); the virtual adapter is the Dante leg. Name it after the VLAN (`Dante70`), not `Dante`: an old adapter may still hold that name.
+- The virtual adapter appears only after one restart of its base adapter, and **it takes a new random MAC at every restart of the base adapter**, so a DHCP reservation cannot follow it: give the Dante leg a **static** address, no gateway, and keep the router's lease for that address only as a reservation so the pool never hands it out.
+- On the Dante leg: interface metric 900, "Register this connection's addresses in DNS" off, NetBIOS off (`NetbiosOptions=2`), File and Printer Sharing, Client for Microsoft Networks, IPv6, LLTD unbound.
+- Set the base NIC's power and offload values with the app's own setup (EEE, green Ethernet, selective suspend, flow control off); they do not apply to the virtual adapter.
+- Changing a static address with `New-NetIPAddress -DefaultGateway` fails on a stored route ("Instance DefaultGateway already exists"); `netsh interface ipv4 set address` changes it in one step.
 
-## Single-NIC hosts
+### Firewall (Windows)
 
-A PC whose only NIC is on VLAN 70 (FOH, mbc, iem-snv, the iem-mixer box, lv1, stream_audio-snv, moderatori-snv, companion-snv in November 2026) carries all its traffic on the Dante network: AbleSet, remote access, updates. Its Dante audio waits in the same NIC queue as that traffic. Only a LAN leg fixes this, either a tagged VLAN on the existing cable or a second NIC; the owner chooses which (dstack #155). Until then, on such a host:
+The production rule so far was "all firewall profiles off" (songplayer #233). The Dante leg needs filtering, so dstack tests (10.11.2026, owner's approval) the firewall on, with **default Allow in and out**, plus one rule group `dstack155` bound only to the Dante leg: block in and out for every non-Dante program on the PC (OBS, Resolume Arena, Bonjour `mDNSResponder.exe`, `svchost.exe`, remote-access tools, scripting runtimes) and all TCP. The Dante devices' processes (an app with dlink or dstack inside, dasio) are never blocked. Firewall rules bound to a removed NIC stay in the store and do nothing; remove them. Until the trial's result is recorded on #155, this section is provisional.
 
-- keep bulk traffic small;
-- turn large send offload off and set the transmit buffers to the minimum (`docs/windows-box.md`);
-- run the Dante devices at their priority.
+## 4. Rules for our applications
 
-Our device warns once a minute when other traffic on its NIC exceeds 100 kB/s.
+These hold in every project's code, so that the PC's layout is a second line of defence, not the only one.
 
-## Checking a host
+- **A Dante device binds every socket to its Dante address** (dstack, dlink apps, dasio, iemmixer do). It needs no gateway and no DNS on that leg. It is configured by its address or its interface, and it reports clearly when no interface holds that address ("no interface of this box holds the address"), retrying by itself.
+- **Dante's own mDNS** is direct queries answered unicast; a filter on the Dante leg must pass UDP from source port 5353 (above).
+- **A non-Dante sender (NDI, web servers, OSC, Bonjour services) binds and advertises the LAN address only.** NDI: `adapters.allowed` in `ndi-config.v1.json` lists only the LAN address. The NDI runtime reads it at its start, and an adapter that appears later can still be announced, and an app that registers through Bonjour announces on every adapter whatever the file says: so the Dante leg's firewall group is the guard on Windows, and **every NDI app is restarted after a PC gets its Dante leg**.
+- **An app that is both a Dante device and a LAN service** (SongPlayer: Dante output in process, web UI and remote control on the LAN) binds its LAN services, and any mDNS it does itself, to the LAN address and 127.0.0.1 only, and its Dante device to the Dante address. Its LAN address is the default-route interface's, never "the lowest private address". The firewall group never carries per-port exceptions for such an app.
+- **A receiver never picks a peer's address by chance.** It dials the peer's LAN address it has verified (presenter#925: NDI by URL address on the LAN), never "whatever the name resolves to first", and it never uses an address in `<dante>` for non-Dante media or control.
+- **Discovery that lists several addresses for one name is filtered by subnet** before use: `<lan>` for everything except Dante.
+- **Every app knows `<dante>` from its configuration**, not only from its own interfaces: a PC without a Dante leg (a dev box, another site) cannot tell `<dante>` from any routed subnet, and the router would carry the connection. The setting is one value per app, `DANTE_SUBNET` (environment) or `dante_subnet` (config file), holding the Dante VLAN's subnet in CIDR; addresses in it are never used for non-Dante traffic.
+- **dsync** is pinned to the Dante leg by name (`system.interface`, dsync 1.27 or newer) on a PC where the grandmaster is also seen on the LAN; without the pin it may follow PTP over the LAN.
 
-1. List the addresses, gateways and metrics (`ip -4 addr`, `ip route`, `ip rule` on Linux; `Get-NetIPConfiguration`, `Get-NetIPInterface` on Windows). There must be exactly one default route, through the LAN.
-2. DNS: `<host>.lan` resolves to the LAN address only. Remove a static record into `10.77.7.x` at the router, unless the host has no LAN leg yet.
-3. Listening sockets: no non-Dante service is reachable on the Dante address (`ss -lntup`, `Get-NetTCPConnection -State Listen` with the firewall rules).
-4. Discovery: NDI and Bonjour advertise the LAN address only, which a passive mDNS listen on the Dante network confirms.
+## 5. Order of a change on one PC
+
+1. dstack plans the PC on #155 and tells, before anything changes: the PC's owning project, presenter (for any PC that sends NDI), and every project with a device or receiver on that PC.
+2. The network project adds the VLAN to the PC's port (the LAN stays as it is, so the PC keeps its connection).
+3. The PC side as in section 3; an unreachable PC needs a watchdog script that restores the LAN binding before anything that can drop it.
+4. Disable the other NICs; the owner removes the hardware.
+5. Restart every app that binds or advertises on the network (NDI senders, Dante apps), so they see the final layout.
+6. Verify (section 6), then record the PC's result on #155.
+
+## 6. Checking a PC (the rig/E2E gates assert this)
+
+1. Exactly one physical NIC up; every other NIC disabled.
+2. Exactly one default route, through the LAN leg.
+3. The Dante leg: its address, no gateway, metric 900, no DNS registration, NetBIOS off, sharing/client unbound (Windows); `never-default`, policy table, no `<dante>` route in the main table (Linux).
+4. `<host>.lan` resolves to the LAN address only.
+5. Nothing non-Dante answers on the Dante address: a TCP connect from another host's Dante leg to the PC's NDI and web ports times out, and the same connect to its LAN address succeeds.
+6. A passive mDNS listen on the Dante VLAN shows the PC's Dante devices and none of its NDI or other services.
+7. The PC's Dante devices have live flows, and its receivers' late counters stay at zero over a soak.
+
+## Single-NIC PCs that are still on Dante only
+
+Until such a PC has its LAN leg, all its traffic shares the Dante queue. Keep bulk traffic small, turn large send offload off and set the transmit buffers to the minimum (`docs/windows-box.md`), and run the Dante devices at their priority. Our device warns once a minute when other traffic on its NIC exceeds 100 kB/s, and at its start when its Dante interface holds a default route.
