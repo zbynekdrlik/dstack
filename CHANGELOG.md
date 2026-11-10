@@ -1,6 +1,10 @@
 # Changelog
 
-## 0.6.70 (unreleased)
+## 0.6.71 (unreleased)
+
+- Docs (dstack #155): the Windows firewall rule of the two-network standard is final: profiles on with default Allow, the Dante-leg group `dstack155` (after a measured hour with no change, 10.11.2026). No code change.
+
+## 0.6.70
 
 - Fix (dstack #20, iemmixer, 10.11.2026): a round of flow requests to one transmitter counts one failure, however many of its flows fail. Each flow counted its own, so band's two flows to iem-mixer doubled the backoff twice per restart: after band restarted at 11:12Z the re-request waited 72 s and the band was silent in the in-ears for 73 s (with v0.6.65; v0.6.67/0.6.68's quick retry covers the no-answer part). No latency change.
 
