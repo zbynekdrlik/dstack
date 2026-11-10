@@ -14,6 +14,7 @@
 //! silence, never as an underrun).
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use cpal::traits::{DeviceTrait, StreamTrait};
 use cpal::{FromSample, SampleFormat, SizedSample};
@@ -29,32 +30,35 @@ pub struct Capturing {
 }
 
 /// Opens and starts the loopback capture of `device` at its mix `config`
-/// into `fifo`, and the silent keep-alive stream on the same output.
+/// into `fifo`, and the silent keep-alive stream on the same output. A
+/// stream error (the output lost, its format changed) sets `failed`: the
+/// session opens the output again ([`dsend::status::reopen_due`]).
 pub fn start(
     device: &cpal::Device,
     config: &cpal::SupportedStreamConfig,
     fifo: Arc<Fifo>,
+    failed: &Arc<AtomicBool>,
 ) -> Result<Capturing, String> {
     let (capture, keep_alive) = match config.sample_format() {
         SampleFormat::F32 => (
-            capture::<f32>(device, config, fifo)?,
-            keep_alive::<f32>(device, config)?,
+            capture::<f32>(device, config, fifo, Arc::clone(failed))?,
+            keep_alive::<f32>(device, config, Arc::clone(failed))?,
         ),
         SampleFormat::I16 => (
-            capture::<i16>(device, config, fifo)?,
-            keep_alive::<i16>(device, config)?,
+            capture::<i16>(device, config, fifo, Arc::clone(failed))?,
+            keep_alive::<i16>(device, config, Arc::clone(failed))?,
         ),
         SampleFormat::I32 => (
-            capture::<i32>(device, config, fifo)?,
-            keep_alive::<i32>(device, config)?,
+            capture::<i32>(device, config, fifo, Arc::clone(failed))?,
+            keep_alive::<i32>(device, config, Arc::clone(failed))?,
         ),
         SampleFormat::U16 => (
-            capture::<u16>(device, config, fifo)?,
-            keep_alive::<u16>(device, config)?,
+            capture::<u16>(device, config, fifo, Arc::clone(failed))?,
+            keep_alive::<u16>(device, config, Arc::clone(failed))?,
         ),
         SampleFormat::F64 => (
-            capture::<f64>(device, config, fifo)?,
-            keep_alive::<f64>(device, config)?,
+            capture::<f64>(device, config, fifo, Arc::clone(failed))?,
+            keep_alive::<f64>(device, config, Arc::clone(failed))?,
         ),
         other => {
             return Err(format!(
@@ -78,6 +82,7 @@ fn capture<T: SizedSample + Send + 'static>(
     device: &cpal::Device,
     config: &cpal::SupportedStreamConfig,
     fifo: Arc<Fifo>,
+    failed: Arc<AtomicBool>,
 ) -> Result<cpal::Stream, String>
 where
     f32: FromSample<T>,
@@ -90,7 +95,10 @@ where
                 push_interleaved(&fifo, data, channels, |x| f64::from(x.to_sample::<f32>()));
             },
             // The driver's own thread: a lost device or a driver error.
-            |e| tracing::warn!("dsend: the loopback capture reported: {e}"),
+            move |e| {
+                tracing::warn!("dsend: the loopback capture reported: {e}");
+                failed.store(true, Ordering::Relaxed);
+            },
             None,
         )
         .map_err(|e| format!("the loopback capture could not be opened: {e}"))
@@ -99,12 +107,16 @@ where
 fn keep_alive<T: SizedSample + Send + 'static>(
     device: &cpal::Device,
     config: &cpal::SupportedStreamConfig,
+    failed: Arc<AtomicBool>,
 ) -> Result<cpal::Stream, String> {
     device
         .build_output_stream::<T, _, _>(
             config.config(),
             |data: &mut [T], _| data.fill(T::EQUILIBRIUM),
-            |e| tracing::warn!("dsend: the keep-alive stream reported: {e}"),
+            move |e| {
+                tracing::warn!("dsend: the keep-alive stream reported: {e}");
+                failed.store(true, Ordering::Relaxed);
+            },
             None,
         )
         .map_err(|e| format!("the keep-alive stream could not be opened: {e}"))

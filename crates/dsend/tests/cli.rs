@@ -59,4 +59,8 @@ fn a_run_off_windows_exits_1_saying_it_needs_windows() {
         "{err}"
     );
     assert!(!dir.exists(), "nothing was started");
+    // Nor are outputs listed that it could never capture.
+    let out = dsend(&["--list-outputs"]);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(text(&out.stderr).contains("run dsend on Windows"));
 }

@@ -5,11 +5,10 @@
 //! them in.
 
 use std::ffi::OsString;
-use std::net::Ipv4Addr;
 use std::path::PathBuf;
 
 use dlink::{Config, Place, Ports};
-use dstack_endpoint::cli::{number, parse_ports};
+use dstack_endpoint::cli::{SHARED_FLAGS, Shared, parse_shared, with_shared};
 
 use crate::source::TX_NAMES;
 
@@ -49,18 +48,8 @@ pub const SUFFIX: &str = "-dsend";
 /// The app's name (its state folder, the command's usage).
 pub const APP: &str = "dsend";
 
-/// The flags that take a value.
-const VALUE_FLAGS: [&str; 9] = [
-    "--output",
-    "--name",
-    "--rate",
-    "--budget-ms",
-    "--ip",
-    "--iface",
-    "--ports",
-    "--process-id",
-    "--state",
-];
+/// The flags that take a value: dsend's are the shared ones.
+const VALUE_FLAGS: [&str; 9] = SHARED_FLAGS;
 
 /// What a run is given.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,6 +63,22 @@ pub struct Options {
     pub ports: Option<Ports>,
     pub process_id: Option<u16>,
     pub state: Option<PathBuf>,
+}
+
+impl Options {
+    /// Takes one shared flag's value ([`parse_shared`]).
+    fn set(&mut self, v: Shared) {
+        match v {
+            Shared::Output(t) => self.output = Some(t),
+            Shared::Name(n) => self.name = Some(n),
+            Shared::Rate(r) => self.rate = r,
+            Shared::BudgetMs(ms) => self.budget_ms = Some(ms),
+            Shared::Place(p) => self.place = Some(p),
+            Shared::Ports(p) => self.ports = Some(p),
+            Shared::ProcessId(id) => self.process_id = Some(id),
+            Shared::State(f) => self.state = Some(f),
+        }
+    }
 }
 
 /// What the command line asks for.
@@ -114,38 +119,9 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             return Err(format!("unknown argument {flag:?}"));
         }
         let value = it.next().ok_or_else(|| format!("{flag} needs a value"))?;
-        match flag {
-            "--output" if value.is_empty() => return Err("--output needs a name".into()),
-            "--output" => o.output = Some(value.clone()),
-            "--name" => o.name = Some(value.clone()),
-            "--rate" => {
-                o.rate = number(flag, value)?;
-                if o.rate == 0 {
-                    return Err("--rate needs a rate over 0 Hz".into());
-                }
-            }
-            "--budget-ms" => {
-                let ms: u64 = number(flag, value)?;
-                if ms == 0 {
-                    return Err("--budget-ms needs a budget over 0 ms".into());
-                }
-                o.budget_ms = Some(ms);
-            }
-            "--ip" | "--iface" if o.place.is_some() => {
-                return Err("give one of --ip and --iface, once".into());
-            }
-            "--ip" => {
-                let ip: Ipv4Addr = value
-                    .parse()
-                    .map_err(|_| format!("--ip needs an IPv4 address, not {value:?}"))?;
-                o.place = Some(Place::Ip(ip));
-            }
-            "--iface" if value.is_empty() => return Err("--iface needs a name".into()),
-            "--iface" => o.place = Some(Place::Iface(value.clone())),
-            "--ports" => o.ports = Some(parse_ports(value)?),
-            "--process-id" => o.process_id = Some(number(flag, value)?),
-            "--state" if value.is_empty() => return Err("--state needs a path".into()),
-            _ => o.state = Some(PathBuf::from(value)),
+        match parse_shared(flag, value, o.place.is_some()) {
+            Some(v) => o.set(v?),
+            None => return Err(format!("unknown argument {flag:?}")),
         }
     }
     Ok(if list {
@@ -209,15 +185,7 @@ pub fn link_config(o: &Options, name: &str, state: PathBuf) -> Config {
         .tx(TX_NAMES)
         .sample_rate(o.rate)
         .product("dstack", APP);
-    if let Some(ms) = o.budget_ms {
-        c = c.budget_ns(ms.saturating_mul(1_000_000));
-    }
-    if let Some(p) = o.ports {
-        c = c.ports(p);
-    }
-    if let Some(id) = o.process_id {
-        c = c.process_id(id);
-    }
+    c = with_shared(c, o.budget_ms, o.ports, o.process_id);
     c
 }
 

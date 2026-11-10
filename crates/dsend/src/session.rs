@@ -14,7 +14,7 @@
 //! that made them) and hands the new player to the pump.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -24,7 +24,7 @@ use dsend::source::{self, Switch, TX_CHANNELS};
 use dsend::status::{self, AppView};
 use dstack_endpoint::fifo::Fifo;
 use dstack_endpoint::host;
-use dstack_endpoint::outputs::{self, Output};
+use dstack_endpoint::outputs::{self, Output, Refind};
 use dstack_endpoint::player::{Player, Stats, fifo_for};
 use dstack_endpoint::settings::{self, Settings};
 use dstack_endpoint::status::Snapshot;
@@ -33,23 +33,12 @@ use crate::audio;
 
 /// The state file of a run: `--state`, else the user's state folder.
 pub fn state_of(o: &Options, name: &str) -> PathBuf {
-    o.state.clone().unwrap_or_else(|| {
-        cli::state_path(
-            cfg!(windows),
-            name,
-            std::env::var_os("LOCALAPPDATA"),
-            std::env::var_os("XDG_STATE_HOME"),
-            std::env::var_os("HOME"),
-            std::env::temp_dir(),
-        )
-    })
+    host::state_file(o.state.as_deref(), cli::APP, name)
 }
 
 /// The device name of a run: `--name`, else `<host>-dsend`.
 pub fn name_of(o: &Options) -> String {
-    o.name
-        .clone()
-        .unwrap_or_else(|| cli::default_name(&host::host_name()))
+    host::device_name(o.name.as_deref(), cli::SUFFIX)
 }
 
 /// What the status thread and the command hook read: the outputs, the one
@@ -59,6 +48,9 @@ struct Shown {
     current: usize,
     fifo: Arc<Fifo>,
     in_rate: u32,
+    /// The FIFO's `arrived` at the status's last reading (0 for a new
+    /// FIFO), for [`status::capturing`].
+    seen: u64,
 }
 
 /// A running dsend (module doc).
@@ -71,6 +63,11 @@ pub struct Session {
     outputs: Vec<Output>,
     current: usize,
     capturing: Option<audio::Capturing>,
+    /// A stream of the capture reported an error ([`audio::start`]).
+    failed: Arc<AtomicBool>,
+    /// The FIFO's `arrived` at the last wake, and the wakes since it grew.
+    arrived: u64,
+    stalled: u32,
     shown: Arc<Mutex<Shown>>,
     settings_file: PathBuf,
 }
@@ -98,14 +95,19 @@ struct Opened {
 
 /// Starts the capture of `device` and makes its player for the network's
 /// `rate`, counting on in `stats`.
-fn open(device: &cpal::Device, rate: u32, stats: &Arc<Stats>) -> Result<Opened, String> {
+fn open(
+    device: &cpal::Device,
+    rate: u32,
+    stats: &Arc<Stats>,
+    failed: &Arc<AtomicBool>,
+) -> Result<Opened, String> {
     let config = audio::config_of(device)?;
     let in_rate = config.sample_rate();
     let channels = config.channels();
     let fifo = Arc::new(fifo_for(usize::from(channels), in_rate));
     let player = Player::new(Arc::clone(&fifo), in_rate, rate, Arc::clone(stats))
         .map_err(|e| format!("the rate conversion {in_rate} to {rate} Hz: {e}"))?;
-    let capturing = audio::start(device, &config, Arc::clone(&fifo))?;
+    let capturing = audio::start(device, &config, Arc::clone(&fifo), failed)?;
     tracing::info!(
         in_rate,
         channels,
@@ -154,7 +156,8 @@ impl Session {
             }
         };
         let stats: Arc<Stats> = Arc::default();
-        let first = open(&devices[current], o.rate, &stats)?;
+        let failed = Arc::new(AtomicBool::new(false));
+        let first = open(&devices[current], o.rate, &stats, &failed)?;
         tracing::info!(output = %outputs[current].name, "dsend: the output captured");
         let (processor, switch) = source::source(first.player);
         let link = Link::start(
@@ -173,6 +176,7 @@ impl Session {
             current,
             fifo: first.fifo,
             in_rate: first.in_rate,
+            seen: 0,
         }));
         let session = Session {
             link,
@@ -183,6 +187,9 @@ impl Session {
             outputs,
             current,
             capturing: Some(first.capturing),
+            failed,
+            arrived: 0,
+            stalled: 0,
             shown,
             settings_file,
         };
@@ -191,23 +198,27 @@ impl Session {
     }
 
     /// Captures output `index` of the list: its capture starts, the pump
-    /// takes its player at the next block, then the old capture stops.
+    /// takes its player at the next block, then the old capture stops. On
+    /// an error the old capture goes on.
     fn capture(&mut self, index: usize) -> Result<(), String> {
         let device = self
             .devices
             .get(index)
             .ok_or_else(|| format!("no output {index}"))?;
-        let opened = open(device, self.rate, &self.stats)?;
-        // Refused (the pump has not taken the last one, or ended): the old
-        // output goes on; the new capture stops as `opened` drops.
+        let opened = open(device, self.rate, &self.stats, &self.failed)?;
+        // Refused (the pump has not taken the last one, or ended): the new
+        // capture stops as `opened` drops.
         self.switch.send(opened.player)?;
         self.capturing = Some(opened.capturing);
+        self.failed.store(false, Ordering::Relaxed);
+        (self.arrived, self.stalled) = (0, 0);
         self.current = index;
         {
             let mut s = lock(&self.shown);
             s.current = index;
             s.fifo = opened.fifo;
             s.in_rate = opened.in_rate;
+            s.seen = 0;
         }
         tracing::info!(
             output = %self.outputs[index].name,
@@ -216,6 +227,32 @@ impl Session {
             "dsend: now capturing this output"
         );
         Ok(())
+    }
+
+    /// Once a wake: frees the players the pump replaced (on this thread,
+    /// not the pump's), and opens the captured output again when a stream
+    /// failed or the capture stalled ([`status::reopen_due`]).
+    pub fn watch(&mut self) {
+        self.switch.collect();
+        let now = lock(&self.shown).fifo.arrived();
+        self.stalled = if now > self.arrived {
+            0
+        } else {
+            self.stalled.saturating_add(1)
+        };
+        self.arrived = now;
+        let failed = self.failed.swap(false, Ordering::Relaxed);
+        if status::reopen_due(failed, self.stalled) {
+            tracing::warn!(
+                output = %self.outputs[self.current].name,
+                failed,
+                stalled_s = self.stalled,
+                "dsend: the capture stopped: opening the output again"
+            );
+            if let Err(e) = self.capture(self.current) {
+                tracing::warn!("dsend: the output did not open again: {e}");
+            }
+        }
     }
 
     /// dtray's choice: captures output `index` and remembers it.
@@ -232,13 +269,13 @@ impl Session {
     /// handed to `events`.
     fn hooks(&self, events: Sender<Event>) {
         let (stats, shown) = (Arc::clone(&self.stats), Arc::clone(&self.shown));
-        let (seen, arrived) = (AtomicU64::new(0), AtomicU64::new(0));
+        let seen = AtomicU64::new(0);
         self.link.set_app_status(move || {
-            let s = lock(&shown);
+            let mut s = lock(&shown);
             let snap = Snapshot::read(&s.fifo, &stats, s.in_rate);
             let before = seen.swap(snap.underruns, Ordering::Relaxed);
             let now = s.fifo.arrived();
-            let capturing = status::capturing(arrived.swap(now, Ordering::Relaxed), now);
+            let capturing = status::capturing(std::mem::replace(&mut s.seen, now), now);
             status::app_status(&AppView {
                 snap: &snap,
                 underruns_before: before,
@@ -258,14 +295,11 @@ impl Session {
         });
     }
 
-    /// Frees the players the pump replaced (on this thread, not the pump's).
-    pub fn collect(&self) {
-        self.switch.collect();
-    }
-
-    /// Reads the output devices again (one plugged in or out); true when
-    /// the list changed. The one captured goes on, found again by name; a
-    /// captured output that is gone falls back to the default.
+    /// Reads the output devices again (one plugged in or out, a format
+    /// changed); true when the list changed. The one captured goes on,
+    /// found again by name ([`outputs::refind`]) and opened again when its
+    /// format changed; one that is gone falls back to the default; with no
+    /// output left the old list stays (and the capture's watch retries).
     pub fn refresh_outputs(&mut self) -> bool {
         let Ok((devices, outputs)) = audio::outputs() else {
             return false;
@@ -273,34 +307,35 @@ impl Session {
         if outputs == self.outputs {
             return false;
         }
-        let captured = self.outputs[self.current].name.clone();
-        let found = outputs.iter().position(|o| o.name == captured);
+        let captured = self.outputs[self.current].clone();
+        let (index, reopen) = match outputs::refind(&captured, &outputs) {
+            Refind::Same { index, changed } => (index, changed),
+            Refind::Default(index) => {
+                tracing::warn!(
+                    output = %captured.name,
+                    default = %outputs[index].name,
+                    "dsend: the output captured is gone: capturing the default"
+                );
+                (index, true)
+            }
+            Refind::Gone => {
+                tracing::warn!(
+                    output = %captured.name,
+                    "dsend: the output captured is gone and there is no default: waiting"
+                );
+                return true;
+            }
+        };
         self.devices = devices;
         self.outputs = outputs;
+        self.current = index;
         {
             let mut s = lock(&self.shown);
             s.names = self.outputs.iter().map(|o| o.name.clone()).collect();
+            s.current = index;
         }
-        match found {
-            Some(i) => {
-                self.current = i;
-                lock(&self.shown).current = i;
-            }
-            None => match outputs::choose(&self.outputs, None, None) {
-                Ok((i, _)) => {
-                    tracing::warn!(
-                        output = %captured,
-                        default = %self.outputs[i].name,
-                        "dsend: the output captured is gone: capturing the default"
-                    );
-                    if let Err(e) = self.capture(i) {
-                        tracing::warn!("dsend: the default output: {e}");
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(output = %captured, "dsend: the output captured is gone: {e}")
-                }
-            },
+        if reopen && let Err(e) = self.capture(index) {
+            tracing::warn!(output = %self.outputs[index].name, "dsend: the output: {e}");
         }
         true
     }
@@ -310,7 +345,9 @@ impl Session {
         let s = lock(&self.shown);
         format!(
             "{} at {} Hz: {}",
-            self.outputs[self.current].name,
+            self.outputs
+                .get(self.current)
+                .map_or("no output", |o| o.name.as_str()),
             s.in_rate,
             status::line(&Snapshot::read(&s.fifo, &self.stats, s.in_rate))
         )

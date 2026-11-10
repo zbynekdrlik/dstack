@@ -20,6 +20,34 @@ pub fn host_name() -> String {
         .to_string()
 }
 
+/// The device name of a run: `name` (`--name`), else this PC's name
+/// with `suffix` ([`crate::cli::default_name`]).
+pub fn device_name(name: Option<&str>, suffix: &str) -> String {
+    name.map_or_else(
+        || crate::cli::default_name(&host_name(), suffix),
+        str::to_string,
+    )
+}
+
+/// The state file of app `app`'s run: `state` (`--state`), else the
+/// user's state folder ([`crate::cli::state_path`]).
+pub fn state_file(state: Option<&std::path::Path>, app: &str, name: &str) -> std::path::PathBuf {
+    state.map_or_else(
+        || {
+            crate::cli::state_path(
+                cfg!(windows),
+                app,
+                name,
+                std::env::var_os("LOCALAPPDATA"),
+                std::env::var_os("XDG_STATE_HOME"),
+                std::env::var_os("HOME"),
+                std::env::temp_dir(),
+            )
+        },
+        std::path::Path::to_path_buf,
+    )
+}
+
 /// The address of the default route (connecting a UDP socket picks the
 /// route and sends nothing).
 pub fn routed_ipv4() -> Result<Place, String> {

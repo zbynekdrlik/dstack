@@ -353,7 +353,13 @@ fn a_block_longer_than_a_chunk_or_with_one_tx_channel_is_filled_whole() {
     // Enough capture for the long block.
     let data = [0.1f32, 0.2].repeat(frames);
     push_interleaved(&s.fifo, &data, 2, f64::from);
+    let played = s.stats.played();
     s.source.process(&mut Block::new(frames, &[], &mut out));
+    assert_eq!(
+        s.stats.played() - played,
+        frames as u64,
+        "exactly the block"
+    );
     assert!(out[frames - 1] != 9.0 && out[2 * frames - 1] != 9.0);
     assert!((out[frames - 1] - 0.1).abs() < 1e-4, "{}", out[frames - 1]);
     assert!((out[2 * frames - 1] - 0.2).abs() < 1e-4);
@@ -367,8 +373,44 @@ fn a_block_longer_than_a_chunk_or_with_one_tx_channel_is_filled_whole() {
 fn a_switch_to_a_pump_that_is_gone_gives_the_player_back() {
     let fifo = Arc::new(fifo_for(2, 48_000));
     let player = || Player::new(Arc::clone(&fifo), 48_000, 48_000, Arc::default()).unwrap();
-    let (source, switch) = source(player());
+    let (source, mut switch) = source(player());
     drop(source);
     assert_eq!(switch.send(player()), Err(GONE));
     assert_eq!(TX_NAMES, ["L", "R"]);
+}
+
+#[test]
+fn every_replaced_player_comes_back_to_be_freed_never_in_the_pump() {
+    let fifo = Arc::new(fifo_for(2, 48_000));
+    let stats: Arc<Stats> = Arc::default();
+    let player = || Player::new(Arc::clone(&fifo), 48_000, 48_000, Arc::clone(&stats)).unwrap();
+    let (mut source, mut switch) = source(player());
+    let mut out = vec![0.0; PUMP_BLOCK * TX_CHANNELS];
+    let mut back = 0;
+    for _ in 0..5 {
+        assert_eq!(switch.send(player()), Ok(()));
+        source.process(&mut Block::new(PUMP_BLOCK, &[], &mut out));
+        // A block with no handover retires nothing.
+        source.process(&mut Block::new(PUMP_BLOCK, &[], &mut out));
+        back += switch.collect();
+    }
+    assert_eq!(back, 5, "each handover's predecessor, on this thread");
+    assert_eq!(switch.pending, 0);
+}
+
+#[test]
+fn a_send_is_refused_while_the_room_back_is_taken() {
+    let fifo = Arc::new(fifo_for(2, 48_000));
+    let player = || Player::new(Arc::clone(&fifo), 48_000, 48_000, Arc::default()).unwrap();
+    let (mut source, mut switch) = source(player());
+    let mut out = vec![0.0; PUMP_BLOCK * TX_CHANNELS];
+    // Players replaced but not yet back (the pump's try_send not run).
+    switch.pending = RETIRED;
+    assert_eq!(switch.send(player()), Err(NOT_TAKEN));
+    switch.pending = RETIRED - 1;
+    assert_eq!(switch.send(player()), Ok(()));
+    assert_eq!(switch.pending, RETIRED);
+    source.process(&mut Block::new(PUMP_BLOCK, &[], &mut out));
+    // One came back: room again.
+    assert_eq!(switch.send(player()), Ok(()));
 }

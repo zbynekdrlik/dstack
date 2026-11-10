@@ -82,9 +82,65 @@ pub fn choose(
     }
 }
 
+/// Where the output in use is found in a newly read list ([`refind`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Refind {
+    /// Still there, at `index`; `changed` when its config (rate, channels,
+    /// format) is not what it was: its stream must be opened again.
+    Same { index: usize, changed: bool },
+    /// Gone: the default output, at this index, takes over.
+    Default(usize),
+    /// Gone, and there is no default (or no output at all).
+    Gone,
+}
+
+/// The output `old` in the new list `now`: by its exact name, else the
+/// default ([`Refind`]).
+pub fn refind(old: &Output, now: &[Output]) -> Refind {
+    match now.iter().position(|o| o.name == old.name) {
+        Some(index) => Refind::Same {
+            index,
+            changed: now[index].config != old.config,
+        },
+        None => pick(now, None).map_or(Refind::Gone, Refind::Default),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_output_in_use_is_found_again_by_name_or_falls_back_to_the_default() {
+        let list = outputs();
+        let phones = list[2].clone();
+        // Moved in the list: found by name, unchanged.
+        let moved = vec![list[2].clone(), list[1].clone()];
+        assert_eq!(
+            refind(&phones, &moved),
+            Refind::Same {
+                index: 0,
+                changed: false
+            }
+        );
+        // Its config changed (another mix format): to be opened again.
+        let mut other = list.clone();
+        other[2].config = "44100 Hz, 2 ch, f32".into();
+        assert_eq!(
+            refind(&phones, &other),
+            Refind::Same {
+                index: 2,
+                changed: true
+            }
+        );
+        // Unplugged: the default takes over.
+        assert_eq!(refind(&phones, &list[..2]), Refind::Default(1));
+        // No default, or nothing at all: gone.
+        let mut none = list[..2].to_vec();
+        none[1].default = false;
+        assert_eq!(refind(&phones, &none), Refind::Gone);
+        assert_eq!(refind(&phones, &[]), Refind::Gone);
+    }
 
     fn outputs() -> Vec<Output> {
         let o = |name: &str, default| Output {

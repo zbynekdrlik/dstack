@@ -21,7 +21,7 @@ use dlink::{Link, Map};
 use dlisten::cli::{self, Options};
 use dlisten::feed::Feed;
 use dlisten::fifo::Fifo;
-use dlisten::outputs::{self, Output};
+use dlisten::outputs::{self, Output, Refind};
 use dlisten::player::{Player, Stats, fifo_for};
 use dlisten::settings::{self, Settings};
 use dlisten::status::{self, AppView, Snapshot};
@@ -31,23 +31,12 @@ use crate::audio;
 
 /// The state file of a run: `--state`, else the user's state folder.
 pub fn state_of(o: &Options, name: &str) -> PathBuf {
-    o.state.clone().unwrap_or_else(|| {
-        cli::state_path(
-            cfg!(windows),
-            name,
-            std::env::var_os("LOCALAPPDATA"),
-            std::env::var_os("XDG_STATE_HOME"),
-            std::env::var_os("HOME"),
-            std::env::temp_dir(),
-        )
-    })
+    host::state_file(o.state.as_deref(), "dlisten", name)
 }
 
 /// The device name of a run: `--name`, else `<host>-dlisten`.
 pub fn name_of(o: &Options) -> String {
-    o.name
-        .clone()
-        .unwrap_or_else(|| cli::default_name(&host::host_name()))
+    host::device_name(o.name.as_deref(), cli::SUFFIX)
 }
 
 /// A running dlisten (module doc).
@@ -247,9 +236,11 @@ impl Session {
         });
     }
 
-    /// Reads the output devices again (one plugged in or out); true when
-    /// the list changed. The one playing keeps playing, found again by
-    /// name.
+    /// Reads the output devices again (one plugged in or out, a format
+    /// changed); true when the list changed. The one playing keeps playing,
+    /// found again by name ([`outputs::refind`]) and opened again when its
+    /// format changed; one that is gone falls back to the default; with no
+    /// output left the old list stays.
     pub fn refresh_outputs(&mut self) -> bool {
         let Ok((devices, outputs)) = audio::outputs() else {
             return false;
@@ -257,31 +248,31 @@ impl Session {
         if outputs == self.outputs {
             return false;
         }
-        let playing = self.outputs[self.current].name.clone();
-        let found = outputs.iter().position(|o| o.name == playing);
+        let playing = self.outputs[self.current].clone();
+        let (index, replay) = match outputs::refind(&playing, &outputs) {
+            Refind::Same { index, changed } => (index, changed),
+            Refind::Default(index) => {
+                tracing::warn!(
+                    output = %playing.name,
+                    default = %outputs[index].name,
+                    "dlisten: the output playing is gone: playing on the default"
+                );
+                (index, true)
+            }
+            Refind::Gone => {
+                tracing::warn!(
+                    output = %playing.name,
+                    "dlisten: the output playing is gone and there is no default: waiting"
+                );
+                return true;
+            }
+        };
         self.devices = devices;
         self.outputs = outputs;
-        match found {
-            Some(i) => {
-                self.current = i;
-                self.show();
-            }
-            None => match outputs::choose(&self.outputs, None, None) {
-                // Its stream is dead: play on the default.
-                Ok((i, _)) => {
-                    tracing::warn!(
-                        output = %playing,
-                        default = %self.outputs[i].name,
-                        "dlisten: the output playing is gone: playing on the default"
-                    );
-                    if let Err(e) = self.play(i) {
-                        tracing::warn!("dlisten: the default output: {e}");
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(output = %playing, "dlisten: the output playing is gone: {e}")
-                }
-            },
+        self.current = index;
+        self.show();
+        if replay && let Err(e) = self.play(index) {
+            tracing::warn!(output = %self.outputs[index].name, "dlisten: the output: {e}");
         }
         true
     }

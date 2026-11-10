@@ -2,6 +2,8 @@
 
 use super::*;
 
+use std::net::Ipv4Addr;
+
 fn args(text: &str) -> Vec<String> {
     text.split_whitespace().map(String::from).collect()
 }

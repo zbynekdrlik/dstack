@@ -33,6 +33,23 @@ pub fn capturing(before: u64, now: u64) -> bool {
     now > before
 }
 
+/// Wakes (seconds) with no captured frame before the output is opened
+/// again: with the keep-alive the capture never pauses, so a stop means a
+/// dead stream (the output re-enumerated, its driver reset).
+pub const STALL_WAKES: u32 = 3;
+/// Wakes between two tries to open a stalled output again.
+pub const RETRY_WAKES: u32 = 5;
+
+/// Whether the main thread opens the captured output again: a stream
+/// reported an error (`failed`), or the capture has been stalled for
+/// [`STALL_WAKES`] wakes (`stalled`), then again every [`RETRY_WAKES`].
+pub fn reopen_due(failed: bool, stalled: u32) -> bool {
+    failed
+        || stalled
+            .checked_sub(STALL_WAKES)
+            .is_some_and(|over| over.is_multiple_of(RETRY_WAKES))
+}
+
 /// dtray's line for dsend: `<output> (48000 Hz): capturing, depth 40.1
 /// ms, 2 underruns`.
 pub fn short_line(v: &AppView<'_>) -> String {
@@ -184,6 +201,14 @@ mod tests {
         assert!(capturing(10, 11));
         assert!(!capturing(10, 10));
         assert!(!capturing(0, 0));
+    }
+
+    #[test]
+    fn a_stream_error_or_a_stalled_capture_opens_the_output_again() {
+        assert!(reopen_due(true, 0), "an error: at once");
+        let due: Vec<u32> = (0..20).filter(|&w| reopen_due(false, w)).collect();
+        assert_eq!(due, [3, 8, 13, 18], "after 3 s, then every 5 s");
+        const _: () = assert!(STALL_WAKES == 3 && RETRY_WAKES == 5);
     }
 
     #[test]

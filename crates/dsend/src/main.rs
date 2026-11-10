@@ -79,8 +79,9 @@ fn fail(text: &str, boxed: bool) {
     let _ = boxed;
 }
 
-/// `--list-outputs`.
+/// `--list-outputs`: only where dsend can capture them.
 fn list() -> Result<(), String> {
+    cli::capture_check(cfg!(windows))?;
     init_log(None);
     let (_, described) = audio::outputs()?;
     println!("{}", outputs::list_text(&described)?);
@@ -122,7 +123,7 @@ fn run(o: &Options) -> Result<(), String> {
             }
             Err(RecvTimeoutError::Timeout) => {
                 wakes = wakes.wrapping_add(1);
-                session.collect();
+                session.watch();
                 if wakes.is_multiple_of(OUTPUTS_EVERY) {
                     session.refresh_outputs();
                 }
