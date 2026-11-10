@@ -1889,3 +1889,34 @@ fn a_request_the_client_got_no_reply_to_is_asked_again_quickly() {
     }
     assert_eq!(next, Some(QUICK_RETRY_NS));
 }
+
+/// dstack #20 (iemmixer, 10.11.2026): band's restart left both of its
+/// flows to iem-mixer silent and then unanswered; each flow counted a
+/// failure of its own, so one round counted twice and the re-request
+/// waited 72 s instead of 9-18 s (band silent in the in-ears 73 s). A
+/// round of flows to one transmitter counts one failure, however many
+/// flows it holds.
+#[test]
+fn two_flows_that_stay_silent_count_one_failure_per_round() {
+    let net = peer_network();
+    let mut m = manager();
+    // Eight channels of 4-channel flows: two flows to one transmitter.
+    for rx in 0..8 {
+        m.set(rx, Some(sub(&format!("TX {}", rx + 1), "peer-device")));
+    }
+    let mut rounds = Vec::new();
+    let mut t = 0;
+    while t <= 60 * S {
+        let out = m.tick(t, &NONE, &net);
+        let asked = requests(&out);
+        if !asked.is_empty() {
+            rounds.push((t / S, asked.len()));
+            for (flow, _, _) in asked {
+                m.answered(flow, Answer::Granted(handle(0, flow.slot as u16 + 1)), t);
+            }
+        }
+        t += 100 * MS;
+    }
+    // As one flow: 9 s after one failure, 18 s after two.
+    assert_eq!(rounds, [(0, 2), (9, 2), (27, 2)]);
+}
