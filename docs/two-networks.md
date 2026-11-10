@@ -75,12 +75,24 @@ These hold in every project's code, so that the PC's layout is a second line of 
 
 ## 5. Order of a change on one PC
 
-1. dstack plans the PC on #155 and tells, before anything changes: the PC's owning project, presenter (for any PC that sends NDI), and every project with a device or receiver on that PC.
+1. dstack plans the PC on #155, the owner approves that PC, and dstack tells, before anything changes: the PC's owning project, presenter (for any PC that sends NDI), and every project with a device or receiver on that PC.
 2. The network project adds the VLAN to the PC's port (the LAN stays as it is, so the PC keeps its connection).
-3. The PC side as in section 3; an unreachable PC needs a watchdog script that restores the LAN binding before anything that can drop it.
+3. The PC side as in section 3, by the safe procedure below.
 4. Disable the other NICs; the owner removes the hardware.
 5. Restart every app that binds or advertises on the network (NDI senders, Dante apps), so they see the final layout.
 6. Verify (section 6), then record the PC's result on #155.
+
+### The safe procedure for a VLAN change on Windows (never cut a PC off)
+
+Two PCs on 10.11.2026 show what goes wrong: on resolume-snv (USB RTL8156, Cx driver) the base adapter kept its untagged leg after a VLAN adapter was added; on iem-snv (PCIe RTL8125, NDIS 10.80) the same step **unbound TCP/IP from the base adapter**, its untagged Dante leg died, the PC answered only on the new VLAN's DHCP address, and a watchdog that pinged the router "over any route" saw it answer through the new leg and never restored anything. Launching the Realtek utility's window from a remote shell also took the remote control away for 4 hours. So:
+
+1. **First on a non-production PC with hands or a console at it**, never first on a production PC; a new NIC model or driver is tried there before any other PC.
+2. **Know a second way in before the change**: the PC's remote control must reach it on the address it will keep, and someone must be able to sit at it (or a console path) for the case where both legs fail.
+3. **A rollback that runs by itself, from the PC's own scheduler**: a scheduled task (not a process started from the remote shell, which can die with it) that, unless a "keep" file appears within a fixed time, deletes the VLAN adapter and restores the saved adapter settings and bindings.
+4. **The rollback tests the exact leg, by its own address**: the untagged leg's address is still on the base adapter, TCP/IP is bound there, and a ping **from that address** to a host on the same subnet answers; and the same for the new leg. A ping "to the router" over any route proves nothing.
+5. **Create the VLAN in the utility through the desktop** (the remote-control GUI tools), never by starting the utility from the remote shell.
+6. **Right after the adapter appears, re-check the base adapter's bindings** (`Get-NetAdapterBinding -ComponentID ms_tcpip`): if the driver unbound them, bind them again at once, or make both legs virtual adapters (an untagged one and the tagged one) and move the base's address onto the untagged adapter.
+7. **Only then write "keep"**; a failure at any step lets the scheduled rollback run.
 
 ## 6. Checking a PC (the rig/E2E gates assert this)
 

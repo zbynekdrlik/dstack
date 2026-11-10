@@ -1,6 +1,10 @@
 # Changelog
 
-## 0.6.73 (unreleased)
+## 0.6.74 (unreleased)
+
+- Docs (dstack #155, owner 10.11.2026): the two-network standard gets the safe procedure for a VLAN change on Windows, from iem-snv's cut-off (the Realtek PCIe driver unbound the base adapter; the watchdog tested the wrong path): non-production PC first, a second way in, a rollback from the scheduler that tests each leg by its own address, the VLAN made through the desktop, the base bindings re-checked. No code change.
+
+## 0.6.73
 
 - Docs (dstack #155): the standard's NDI rule corrected: the NDI 6.3 runtime announces on the Dante leg whatever `adapters.allowed` says; the guard is the leg's TCP block and receivers excluding the Dante subnet, not restarting NDI apps. No code change.
 
