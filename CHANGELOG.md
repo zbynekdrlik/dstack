@@ -2,6 +2,8 @@
 
 ## 0.6.67 (unreleased)
 
+- Fix (dstack #20, camera-box and dasio, 10.11.2026): a flow request the flow client gets no reply to (`Answer::Failed`) now counts as unanswered and is asked again 6 s after it (`QUICK_RETRY_NS`, up to `QUICK_TRIES`), like a request given up on. It reset the quick retries and took the full backoff: when mbc-snv's NIC restarted, stream-obs asked at 08:32:04Z, mbc was back at 08:32:10Z, and the next request went out only at 08:32:22Z (about 10 s of extra silence). No latency change.
+
 ## 0.6.66
 
 - New (dstack #155): the device warns at its start when its Dante interface holds a default route (the PC's other traffic then rides the Dante network and waits in its NIC's queue with our audio): `daemon::gateway_warning`. On Windows the gateway is now read (`GetAdaptersAddresses` with its gateways); before it was always 0.0.0.0, also in our CMC network info. The owner's rule (9.11.2026): one NIC per PC, Dante and the LAN as two VLANs, the LAN holding the only default route (`docs/two-networks.md`). No latency change.
