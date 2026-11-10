@@ -213,10 +213,24 @@ struct Peer {
     /// Its requests not answered yet.
     in_flight: Vec<FlowId>,
     last_request: Option<u64>,
-    /// Failures in a row.
+    /// Failures in a row: rounds, not flows (dstack #20).
     failures: u32,
+    /// The round (its request time) whose failure is counted already.
+    counted: Option<u64>,
     /// Requests in a row that got no answer at all.
     unanswered: u32,
+}
+
+impl Peer {
+    /// A flow of the last round failed: the round counts once, however
+    /// many of its flows fail (iemmixer, 10.11.2026: band's two flows
+    /// counted twice and the re-request waited 72 s).
+    fn count_failure(&mut self) {
+        if self.counted != self.last_request {
+            self.failures += 1;
+            self.counted = self.last_request;
+        }
+    }
 }
 
 /// Where a channel's audio comes from: its flow's slot and channel slot,
@@ -700,7 +714,7 @@ impl Manager {
             };
             out.push(Action::Stop { to: f.to, handle });
             if used && let Some(peer) = self.peers.get_mut(&f.to) {
-                peer.failures += 1;
+                peer.count_failure();
             }
             self.free(slot, now);
         }
@@ -1051,8 +1065,7 @@ impl Manager {
                 *failed = Some(why);
             }
         }
-        let peer = self.peers.entry(to).or_default();
-        peer.failures += 1;
+        self.peers.entry(to).or_default().count_failure();
         self.free(slot, now);
     }
 
