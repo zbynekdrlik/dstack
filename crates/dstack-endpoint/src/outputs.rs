@@ -88,21 +88,23 @@ pub enum Refind {
     /// Still there, at `index`; `changed` when its config (rate, channels,
     /// format) is not what it was: its stream must be opened again.
     Same { index: usize, changed: bool },
-    /// Gone: the default output, at this index, takes over.
+    /// Gone: the default output (the first when none is the default), at
+    /// this index, takes over.
     Default(usize),
-    /// Gone, and there is no default (or no output at all).
+    /// Gone, and the list is empty.
     Gone,
 }
 
 /// The output `old` in the new list `now`: by its exact name, else the
-/// default ([`Refind`]).
+/// default, else the first ([`Refind`]).
 pub fn refind(old: &Output, now: &[Output]) -> Refind {
     match now.iter().position(|o| o.name == old.name) {
         Some(index) => Refind::Same {
             index,
             changed: now[index].config != old.config,
         },
-        None => pick(now, None).map_or(Refind::Gone, Refind::Default),
+        None if now.is_empty() => Refind::Gone,
+        None => Refind::Default(now.iter().position(|o| o.default).unwrap_or(0)),
     }
 }
 
@@ -135,10 +137,10 @@ mod tests {
         );
         // Unplugged: the default takes over.
         assert_eq!(refind(&phones, &list[..2]), Refind::Default(1));
-        // No default, or nothing at all: gone.
+        // No default: the first. Nothing at all: gone.
         let mut none = list[..2].to_vec();
         none[1].default = false;
-        assert_eq!(refind(&phones, &none), Refind::Gone);
+        assert_eq!(refind(&phones, &none), Refind::Default(0));
         assert_eq!(refind(&phones, &[]), Refind::Gone);
     }
 

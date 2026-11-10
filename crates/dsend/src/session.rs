@@ -33,12 +33,23 @@ use crate::audio;
 
 /// The state file of a run: `--state`, else the user's state folder.
 pub fn state_of(o: &Options, name: &str) -> PathBuf {
-    host::state_file(o.state.as_deref(), cli::APP, name)
+    o.state.clone().unwrap_or_else(|| {
+        cli::state_path(
+            cfg!(windows),
+            name,
+            std::env::var_os("LOCALAPPDATA"),
+            std::env::var_os("XDG_STATE_HOME"),
+            std::env::var_os("HOME"),
+            std::env::temp_dir(),
+        )
+    })
 }
 
 /// The device name of a run: `--name`, else `<host>-dsend`.
 pub fn name_of(o: &Options) -> String {
-    host::device_name(o.name.as_deref(), cli::SUFFIX)
+    o.name
+        .clone()
+        .unwrap_or_else(|| cli::default_name(&host::host_name()))
 }
 
 /// What the status thread and the command hook read: the outputs, the one
@@ -65,9 +76,13 @@ pub struct Session {
     capturing: Option<audio::Capturing>,
     /// A stream of the capture reported an error ([`audio::start`]).
     failed: Arc<AtomicBool>,
-    /// The FIFO's `arrived` at the last wake, and the wakes since it grew.
+    /// The FIFO's `arrived` at the last wake, the wakes since it grew and
+    /// the wakes since the output was last opened.
     arrived: u64,
     stalled: u32,
+    since_open: u32,
+    /// No output is left (logged once until one comes back).
+    waiting: bool,
     shown: Arc<Mutex<Shown>>,
     settings_file: PathBuf,
 }
@@ -190,6 +205,8 @@ impl Session {
             failed,
             arrived: 0,
             stalled: 0,
+            since_open: 0,
+            waiting: false,
             shown,
             settings_file,
         };
@@ -211,7 +228,7 @@ impl Session {
         self.switch.send(opened.player)?;
         self.capturing = Some(opened.capturing);
         self.failed.store(false, Ordering::Relaxed);
-        (self.arrived, self.stalled) = (0, 0);
+        (self.arrived, self.stalled, self.since_open) = (0, 0, 0);
         self.current = index;
         {
             let mut s = lock(&self.shown);
@@ -235,20 +252,18 @@ impl Session {
     pub fn watch(&mut self) {
         self.switch.collect();
         let now = lock(&self.shown).fifo.arrived();
-        self.stalled = if now > self.arrived {
-            0
-        } else {
-            self.stalled.saturating_add(1)
-        };
+        self.stalled = status::stalled_after(self.stalled, self.arrived, now);
         self.arrived = now;
-        let failed = self.failed.swap(false, Ordering::Relaxed);
-        if status::reopen_due(failed, self.stalled) {
+        self.since_open = self.since_open.saturating_add(1);
+        let failed = self.failed.load(Ordering::Relaxed);
+        if status::reopen_due(failed, self.stalled, self.since_open) {
             tracing::warn!(
                 output = %self.outputs[self.current].name,
                 failed,
                 stalled_s = self.stalled,
                 "dsend: the capture stopped: opening the output again"
             );
+            self.since_open = 0;
             if let Err(e) = self.capture(self.current) {
                 tracing::warn!("dsend: the output did not open again: {e}");
             }
@@ -319,13 +334,17 @@ impl Session {
                 (index, true)
             }
             Refind::Gone => {
-                tracing::warn!(
-                    output = %captured.name,
-                    "dsend: the output captured is gone and there is no default: waiting"
-                );
+                if !self.waiting {
+                    tracing::warn!(
+                        output = %captured.name,
+                        "dsend: no output is left: waiting for one"
+                    );
+                }
+                self.waiting = true;
                 return true;
             }
         };
+        self.waiting = false;
         self.devices = devices;
         self.outputs = outputs;
         self.current = index;
@@ -335,6 +354,8 @@ impl Session {
             s.current = index;
         }
         if reopen && let Err(e) = self.capture(index) {
+            // The watch tries again (every RETRY_WAKES).
+            self.failed.store(true, Ordering::Relaxed);
             tracing::warn!(output = %self.outputs[index].name, "dsend: the output: {e}");
         }
         true

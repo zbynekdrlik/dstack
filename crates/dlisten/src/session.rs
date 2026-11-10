@@ -31,12 +31,23 @@ use crate::audio;
 
 /// The state file of a run: `--state`, else the user's state folder.
 pub fn state_of(o: &Options, name: &str) -> PathBuf {
-    host::state_file(o.state.as_deref(), "dlisten", name)
+    o.state.clone().unwrap_or_else(|| {
+        cli::state_path(
+            cfg!(windows),
+            name,
+            std::env::var_os("LOCALAPPDATA"),
+            std::env::var_os("XDG_STATE_HOME"),
+            std::env::var_os("HOME"),
+            std::env::temp_dir(),
+        )
+    })
 }
 
 /// The device name of a run: `--name`, else `<host>-dlisten`.
 pub fn name_of(o: &Options) -> String {
-    host::device_name(o.name.as_deref(), cli::SUFFIX)
+    o.name
+        .clone()
+        .unwrap_or_else(|| cli::default_name(&host::host_name()))
 }
 
 /// A running dlisten (module doc).
@@ -55,6 +66,11 @@ pub struct Session {
     /// and the command hook.
     shown: Arc<Mutex<(Vec<String>, usize)>>,
     settings_file: PathBuf,
+    /// The output must be opened again (its format changed, or the
+    /// default took over) and the last try failed: tried each refresh.
+    replay: bool,
+    /// No output is left (logged once until one comes back).
+    waiting: bool,
 }
 
 /// What the main thread is asked.
@@ -125,6 +141,8 @@ impl Session {
             playing: None,
             shown: Arc::default(),
             settings_file,
+            replay: false,
+            waiting: false,
         };
         if let Err(e) = session.play(current) {
             session.stop();
@@ -242,6 +260,9 @@ impl Session {
     /// format changed; one that is gone falls back to the default; with no
     /// output left the old list stays.
     pub fn refresh_outputs(&mut self) -> bool {
+        if self.replay {
+            self.replay = self.replay_current();
+        }
         let Ok((devices, outputs)) = audio::outputs() else {
             return false;
         };
@@ -260,21 +281,38 @@ impl Session {
                 (index, true)
             }
             Refind::Gone => {
-                tracing::warn!(
-                    output = %playing.name,
-                    "dlisten: the output playing is gone and there is no default: waiting"
-                );
+                if !self.waiting {
+                    tracing::warn!(output = %playing.name, "dlisten: no output is left: waiting for one");
+                }
+                self.waiting = true;
                 return true;
             }
         };
+        self.waiting = false;
         self.devices = devices;
         self.outputs = outputs;
+        // The index of the output now in use in the new list (its stream is
+        // the old one until it opens again).
         self.current = index;
         self.show();
-        if replay && let Err(e) = self.play(index) {
-            tracing::warn!(output = %self.outputs[index].name, "dlisten: the output: {e}");
+        if replay {
+            self.replay = self.replay_current();
         }
         true
+    }
+
+    /// Opens the current output again; true when it failed (to try again).
+    fn replay_current(&mut self) -> bool {
+        match self.play(self.current) {
+            Ok(()) => false,
+            Err(e) => {
+                tracing::warn!(
+                    output = %self.outputs[self.current].name,
+                    "dlisten: the output did not open (tried again in 5 s): {e}"
+                );
+                true
+            }
+        }
     }
 
     /// The status line (the console run's log).

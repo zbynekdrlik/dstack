@@ -37,17 +37,27 @@ pub fn capturing(before: u64, now: u64) -> bool {
 /// again: with the keep-alive the capture never pauses, so a stop means a
 /// dead stream (the output re-enumerated, its driver reset).
 pub const STALL_WAKES: u32 = 3;
-/// Wakes between two tries to open a stalled output again.
+/// The fewest wakes between two openings of the output: a stream that
+/// fails again at once is retried every 5 s, never every wake.
 pub const RETRY_WAKES: u32 = 5;
 
+/// The wakes the capture has been stalled for after this one: 0 when its
+/// frames grew (`before` to `now`, [`Fifo::arrived`](dstack_endpoint::fifo::Fifo::arrived)),
+/// else one more than `stalled`.
+pub fn stalled_after(stalled: u32, before: u64, now: u64) -> u32 {
+    if now > before {
+        0
+    } else {
+        stalled.saturating_add(1)
+    }
+}
+
 /// Whether the main thread opens the captured output again: a stream
-/// reported an error (`failed`), or the capture has been stalled for
-/// [`STALL_WAKES`] wakes (`stalled`), then again every [`RETRY_WAKES`].
-pub fn reopen_due(failed: bool, stalled: u32) -> bool {
-    failed
-        || stalled
-            .checked_sub(STALL_WAKES)
-            .is_some_and(|over| over.is_multiple_of(RETRY_WAKES))
+/// reported an error (`failed`) or the capture has been stalled for
+/// [`STALL_WAKES`] wakes (`stalled`), and the last opening is at least
+/// [`RETRY_WAKES`] wakes ago (`since`).
+pub fn reopen_due(failed: bool, stalled: u32, since: u32) -> bool {
+    since >= RETRY_WAKES && (failed || stalled >= STALL_WAKES)
 }
 
 /// dtray's line for dsend: `<output> (48000 Hz): capturing, depth 40.1
@@ -204,11 +214,27 @@ mod tests {
     }
 
     #[test]
-    fn a_stream_error_or_a_stalled_capture_opens_the_output_again() {
-        assert!(reopen_due(true, 0), "an error: at once");
-        let due: Vec<u32> = (0..20).filter(|&w| reopen_due(false, w)).collect();
-        assert_eq!(due, [3, 8, 13, 18], "after 3 s, then every 5 s");
+    fn a_stream_error_or_a_stalled_capture_opens_the_output_again_at_most_every_5_s() {
+        assert!(reopen_due(true, 0, RETRY_WAKES), "an error");
+        assert!(reopen_due(false, STALL_WAKES, RETRY_WAKES), "a stall");
+        assert!(
+            !reopen_due(false, STALL_WAKES - 1, u32::MAX),
+            "not stalled yet"
+        );
+        assert!(
+            !reopen_due(true, 9, RETRY_WAKES - 1),
+            "too soon after the last"
+        );
+        assert!(!reopen_due(false, 0, u32::MAX), "running");
         const _: () = assert!(STALL_WAKES == 3 && RETRY_WAKES == 5);
+    }
+
+    #[test]
+    fn the_stall_counts_wakes_with_no_new_frame() {
+        assert_eq!(stalled_after(4, 10, 11), 0);
+        assert_eq!(stalled_after(4, 10, 10), 5);
+        assert_eq!(stalled_after(0, 0, 0), 1);
+        assert_eq!(stalled_after(u32::MAX, 3, 3), u32::MAX);
     }
 
     #[test]
