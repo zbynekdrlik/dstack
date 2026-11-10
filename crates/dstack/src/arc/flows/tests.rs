@@ -360,3 +360,59 @@ fn a_field_is_never_read_from_the_next_segment() {
     let flows = parse_flows(&d[HEADER_LEN..]).unwrap();
     assert_eq!((flows.unread, flows.flows.len()), (1, 1));
 }
+
+/// dstack #148: the list our own devices answer reads back as written,
+/// several flows, a multicast one and two destinations included.
+#[test]
+fn a_list_we_write_reads_back_as_written() {
+    let flows = vec![
+        TxFlow {
+            id: 1,
+            local_id: 1,
+            flags: UNICAST,
+            channels: vec![1, 2, 0, 4],
+            fpp: 16,
+            bits: 24,
+            destinations: vec![SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 11), 4321)],
+        },
+        TxFlow {
+            id: 2,
+            local_id: 7,
+            flags: MULTICAST,
+            channels: vec![3],
+            fpp: 32,
+            bits: 32,
+            destinations: vec![
+                SocketAddrV4::new(Ipv4Addr::new(239, 255, 0, 2), 4321),
+                SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 12), 4400),
+            ],
+        },
+        // A third: the table's offsets for any count, not only two.
+        TxFlow {
+            id: 3,
+            local_id: 3,
+            flags: UNICAST,
+            channels: vec![8],
+            fpp: 8,
+            bits: 24,
+            destinations: vec![SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 13), 4321)],
+        },
+    ];
+    let body = list_reply_body(&flows);
+    // Each segment's second byte counts the words from it to its record's
+    // end (the first segment's: the whole record's): 12, 2, 2 + the
+    // destinations, 2 + the channels, 2.
+    let at = usize::from(read_u16(&body, 8).unwrap()) - HEADER_LEN;
+    let words = [12usize, 2, 3, 6, 2];
+    let mut left: usize = words.iter().sum();
+    let mut s = at;
+    for w in words {
+        assert_eq!((usize::from(body[s]), usize::from(body[s + 1])), (w, left));
+        left -= w;
+        s += 2 * w;
+    }
+    let read = parse_flows(&body).expect("it reads");
+    assert_eq!(read.unread, 0);
+    assert_eq!(read.flows, flows);
+    assert_eq!(parse_flows(&list_reply_body(&[])).unwrap().flows, []);
+}
