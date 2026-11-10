@@ -1,6 +1,8 @@
 # Changelog
 
-## 0.6.66 (unreleased)
+## 0.6.67 (unreleased)
+
+## 0.6.66
 
 - New (dstack #155): the device warns at its start when its Dante interface holds a default route (the PC's other traffic then rides the Dante network and waits in its NIC's queue with our audio): `daemon::gateway_warning`. On Windows the gateway is now read (`GetAdaptersAddresses` with its gateways); before it was always 0.0.0.0, also in our CMC network info. The owner's rule (9.11.2026): one NIC per PC, Dante and the LAN as two VLANs, the LAN holding the only default route (`docs/two-networks.md`). No latency change.
 
