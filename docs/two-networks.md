@@ -15,7 +15,8 @@ The site's own values (subnets, VLAN numbers, host names, addresses, switch port
 ## 2. One cable per PC
 
 - **Every PC has exactly one physical NIC in use.** A second NIC only with the owner's explicit approval for that PC (owner, 9.11.2026).
-- **Port:** the LAN untagged and the Dante VLAN tagged on the same cable (the switch port carries both). A PC that is on Dante only today gets the other network as a second VLAN on its cable.
+- **Port:** the LAN untagged and the Dante VLAN tagged on the same cable (the switch port carries both).
+- **Which PCs:** only a PC that needs both networks gets the two-leg layout, and **only with the owner's explicit approval for that PC** (owner, 10.11.2026). A PC that is on the Dante network only stays as it is unless the owner decides otherwise for it.
 - The switch side is the network project's (mikrotik); dstack asks for each port and tells it when the PC side is ready.
 - **Every other NIC is disabled in the OS** (onboard ports, Wi-Fi, old USB adapters), not just unplugged. A NIC that comes back by itself takes addresses and routes.
 
