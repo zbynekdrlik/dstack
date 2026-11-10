@@ -67,7 +67,9 @@ fn build<T: SizedSample + FromSample<f32>>(
             // The driver's own thread: a lost device or a driver error.
             move |e| {
                 tracing::warn!("dlisten: the output stream reported: {e}");
-                failed.store(true, Ordering::Relaxed);
+                if dstack_endpoint::stream::needs_reopen(e.kind()) {
+                    failed.store(true, Ordering::Relaxed);
+                }
             },
             None,
         )

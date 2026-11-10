@@ -97,7 +97,9 @@ where
             // The driver's own thread: a lost device or a driver error.
             move |e| {
                 tracing::warn!("dsend: the loopback capture reported: {e}");
-                failed.store(true, Ordering::Relaxed);
+                if dstack_endpoint::stream::needs_reopen(e.kind()) {
+                    failed.store(true, Ordering::Relaxed);
+                }
             },
             None,
         )
@@ -115,7 +117,9 @@ fn keep_alive<T: SizedSample + Send + 'static>(
             |data: &mut [T], _| data.fill(T::EQUILIBRIUM),
             move |e| {
                 tracing::warn!("dsend: the keep-alive stream reported: {e}");
-                failed.store(true, Ordering::Relaxed);
+                if dstack_endpoint::stream::needs_reopen(e.kind()) {
+                    failed.store(true, Ordering::Relaxed);
+                }
             },
             None,
         )
