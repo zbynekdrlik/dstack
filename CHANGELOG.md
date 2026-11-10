@@ -1,6 +1,10 @@
 # Changelog
 
-## 0.6.65 (unreleased)
+## 0.6.66 (unreleased)
+
+- New (dstack #155): the device warns at its start when its Dante interface holds a default route (the PC's other traffic then rides the Dante network and waits in its NIC's queue with our audio): `daemon::gateway_warning`. On Windows the gateway is now read (`GetAdaptersAddresses` with its gateways); before it was always 0.0.0.0, also in our CMC network info. The owner's rule (9.11.2026): one NIC per PC, Dante and the LAN as two VLANs, the LAN holding the only default route (`docs/two-networks.md`). No latency change.
+
+## 0.6.65
 
 - Fix (dstack #148): our devices answer ARC 2.8.9's TX flow list (0x2600, start 0x2809) with their flows: each a unicast flow (flags 0x11) to its receiver, with its slot as both ids, its channels, fpp, bits and destination. Since v0.6.54 every dstack receiver reads its transmitters' list once a minute to find multicast flows. Our devices left it unanswered, so each read of one of them waited 1 s and counted as a failed read, and the device asked logged "0x2600 unanswered" about 49 times an hour (band, 9.11.2026). New: `arc::flows::list_reply_body`, `arc::flows::UNICAST`. No latency change.
 

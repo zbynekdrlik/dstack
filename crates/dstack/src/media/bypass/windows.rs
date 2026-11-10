@@ -60,6 +60,6 @@ pub(crate) fn neighbours() -> Vec<Neighbour> {
 /// The interface index, MAC and name (its adapter GUID) of the adapter
 /// holding `ip`; `None` when none does or its MAC is not 6 bytes.
 pub(crate) fn nic(ip: Ipv4Addr) -> Option<(u32, [u8; 6], String)> {
-    let (mac, _, guid, index) = crate::host::windows::win_nic::of_with_index(ip).ok()?;
+    let (mac, _, guid, index, _) = crate::host::windows::win_nic::of_with_index(ip).ok()?;
     Some((index, super::parse_mac(&mac)?, guid))
 }

@@ -9,7 +9,7 @@ use windows_sys::Win32::NetworkManagement::IpHelper::{GetIfEntry2, MIB_IF_ROW2};
 /// The bytes the adapter holding `ip` has sent; `None` when none holds it
 /// or Windows refuses the read.
 pub fn nic_sent_bytes(ip: Ipv4Addr) -> Option<u64> {
-    let (_, _, _, index) = crate::host::windows::win_nic::of_with_index(ip).ok()?;
+    let (_, _, _, index, _) = crate::host::windows::win_nic::of_with_index(ip).ok()?;
     // SAFETY: a zeroed MIB_IF_ROW2 is a valid input; only InterfaceIndex
     // is read by the call, which fills the rest.
     let mut row: MIB_IF_ROW2 = unsafe { std::mem::zeroed() };

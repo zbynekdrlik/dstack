@@ -475,6 +475,21 @@ pub fn link_speed(text: Option<&str>) -> u16 {
     u16::try_from(mbit.clamp(0, MAX_LINK_SPEED)).unwrap_or(0)
 }
 
+/// The start's warning when the Dante interface holds a default route
+/// (`gateway` not 0.0.0.0; dstack #155): the PC's other traffic then rides
+/// the Dante network and waits in its NIC's queue with our audio. The LAN
+/// belongs on its own VLAN or NIC, which holds the only default route
+/// (`docs/two-networks.md`).
+pub fn gateway_warning(gateway: Ipv4Addr) -> Option<String> {
+    (!gateway.is_unspecified()).then(|| {
+        format!(
+            "the Dante interface holds a default route (gateway {gateway}): the PC's other \
+             traffic rides the Dante network; give the LAN its own VLAN or NIC \
+             (docs/two-networks.md, dstack #155)"
+        )
+    })
+}
+
 /// The interface's default gateway from `/proc/net/route`: the first
 /// default route of `ifa` (destination and mask 0, up, through a gateway)
 /// whose gateway lies in the interface's subnet, as inferno takes the
