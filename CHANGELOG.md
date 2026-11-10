@@ -1,6 +1,8 @@
 # Changelog
 
-## 0.6.69 (unreleased)
+## 0.6.70 (unreleased)
+
+## 0.6.69
 
 - Docs (dstack #155, owner 10.11.2026): `docs/two-networks.md` is now the one standard for every PC with a Dante leg: one cable with the LAN untagged and Dante as a tagged VLAN, the legs' settings on Linux (NetworkManager) and Windows (Realtek VLAN driver; Intel has no VLANs on Windows 11), the Dante-leg firewall group, the rules our applications follow (bind and advertise the LAN for non-Dante traffic, dial verified LAN addresses, pin dsync), the order of a change and the checks the rig gates assert. Site values moved to the private site file. No code change.
 

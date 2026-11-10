@@ -313,7 +313,7 @@ dependencies = [
 
 [[package]]
 name = "dlink"
-version = "0.6.69"
+version = "0.6.70"
 dependencies = [
  "dstack",
  "dstack-audio-io",
@@ -325,7 +325,7 @@ dependencies = [
 
 [[package]]
 name = "dlisten"
-version = "0.6.69"
+version = "0.6.70"
 dependencies = [
  "cpal",
  "dlink",
@@ -348,7 +348,7 @@ checksum = "d8b14ccef22fc6f5a8f4d7d768562a182c04ce9a3b3157b91390b52ddfdf1a76"
 
 [[package]]
 name = "dstack"
-version = "0.6.69"
+version = "0.6.70"
 dependencies = [
  "assert_no_alloc",
  "dstack-audio-io",
@@ -372,11 +372,11 @@ dependencies = [
 
 [[package]]
 name = "dstack-audio-io"
-version = "0.6.69"
+version = "0.6.70"
 
 [[package]]
 name = "dstack-resample"
-version = "0.6.69"
+version = "0.6.70"
 dependencies = [
  "rubato",
 ]
@@ -399,7 +399,7 @@ dependencies = [
 
 [[package]]
 name = "dtray"
-version = "0.6.69"
+version = "0.6.70"
 dependencies = [
  "dstack",
  "glib",
