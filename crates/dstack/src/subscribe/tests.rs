@@ -389,9 +389,13 @@ fn a_silent_transmitter_never_has_two_requests_in_flight() {
     }
     let times: Vec<u64> = asked.iter().map(|(t, _)| t / S).collect();
     // dstack #20: a request with no answer is asked again 2 s after it was
-    // given up (4 s), three times, then the backoff (72 s after four
-    // failures in a row).
-    assert_eq!(times, [0, 6, 12, 18, 90, 162, 234, 306, 378, 450, 522, 594]);
+    // given up (4 s), every 6 s for as long as the transmitter stays
+    // silent: a starting transmitter answers nothing until its clock is
+    // ready, which took mbc-snv 37 s after a reboot (dasio, 10.11.2026),
+    // and the 18/36/72 s backoff after three tries turned that into a
+    // 2 min silence at stream-obs.
+    let every_6_s: Vec<u64> = (0..=99).map(|i| i * 6).collect();
+    assert_eq!(times, every_6_s);
     // The first request's grant after all: released at once.
     let first = asked[0].1;
     assert_eq!(
