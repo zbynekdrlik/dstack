@@ -21,6 +21,7 @@
 //!   `app output <n>` command.
 //! - [`cli`]: the command line's shared parts (ports, the default name, the
 //!   state file's folder).
+//! - [`stream`]: whether a stream's error needs the endpoint opened again.
 //! - [`alert`]: where a failure the user must see goes (Windows).
 //! - [`endpoints`], [`host`] and `win` (Windows only): thin glue (cpal's
 //!   device list, the PC's name and routed address, the log, Ctrl+C, the
@@ -36,5 +37,6 @@ pub mod outputs;
 pub mod player;
 pub mod settings;
 pub mod status;
+pub mod stream;
 #[cfg(windows)]
 pub mod win;
