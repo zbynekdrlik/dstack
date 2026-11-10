@@ -764,6 +764,15 @@ fn the_network_info_is_the_interface_s() {
     assert!(net_info(&eth9, "", Some("1000"), Some(&table)).is_err());
 }
 
+/// dstack #155: a Dante interface that holds a default route is named at
+/// the start; one with none (as a Dante leg should be) is not.
+#[test]
+fn a_default_route_on_the_dante_interface_is_warned() {
+    assert_eq!(gateway_warning(Ipv4Addr::UNSPECIFIED), None);
+    let w = gateway_warning(GATEWAY).expect("a warning");
+    assert!(w.contains("10.0.0.1") && w.contains("two-networks"), "{w}");
+}
+
 #[test]
 fn the_records_point_at_the_device_names_local_host() {
     assert_eq!(host_of("test-device"), "test-device.local.");

@@ -373,6 +373,9 @@ pub fn prepare_config(
         windows_wait = ?crate::clock::wait_mode_for(device.cfg.timing),
         "Dante device starting (no PTP sent)"
     );
+    if let Some(w) = daemon::gateway_warning(net.gateway) {
+        warn!("{w}");
+    }
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

@@ -6,15 +6,17 @@ use super::{HostError, run_failed, setup};
 use crate::daemon::{self, IfAddr};
 use crate::info::NetInfo;
 
-/// On Windows: the MAC and the receive link speed of the adapter holding
-/// the address (`GetAdaptersAddresses`); the gateway is left out (zero).
+/// On Windows: the MAC, the receive link speed and the default gateway
+/// of the adapter holding the address (`GetAdaptersAddresses`).
 pub fn interface_info(ifa: &IfAddr) -> Result<NetInfo, HostError> {
-    let (mac, mbit, adapter) = win_nic::of(ifa.ip).map_err(run_failed)?;
+    let (mac, mbit, adapter, _, gateway) = win_nic::of_with_index(ifa.ip).map_err(run_failed)?;
     // The start line's NIC check (dstack #1): large send offload delays
     // our packets behind other traffic.
     crate::lso::report(&adapter);
     let speed = mbit.map(|m| m.to_string());
-    daemon::net_info(ifa, &mac, speed.as_deref(), None).map_err(setup)
+    let mut net = daemon::net_info(ifa, &mac, speed.as_deref(), None).map_err(setup)?;
+    net.gateway = gateway.unwrap_or(std::net::Ipv4Addr::UNSPECIFIED);
+    Ok(net)
 }
 
 pub(crate) mod win_nic {
@@ -22,20 +24,29 @@ pub(crate) mod win_nic {
 
     use windows_sys::Win32::Foundation::{ERROR_BUFFER_OVERFLOW, NO_ERROR};
     use windows_sys::Win32::NetworkManagement::IpHelper::{
-        GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_DNS_SERVER, GAA_FLAG_SKIP_MULTICAST,
-        GetAdaptersAddresses, IP_ADAPTER_ADDRESSES_LH,
+        GAA_FLAG_INCLUDE_GATEWAYS, GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_DNS_SERVER,
+        GAA_FLAG_SKIP_MULTICAST, GetAdaptersAddresses, IP_ADAPTER_ADDRESSES_LH,
     };
     use windows_sys::Win32::Networking::WinSock::{AF_INET, SOCKADDR_IN};
 
     /// The MAC (`aa:bb:..`), the receive speed in Mbit/s and the GUID
     /// (`{...}`, its registry name) of the adapter that holds `ip`.
+    #[cfg(test)]
     pub fn of(ip: Ipv4Addr) -> Result<(String, Option<u64>, String), String> {
-        of_with_index(ip).map(|(mac, speed, guid, _)| (mac, speed, guid))
+        of_with_index(ip).map(|(mac, speed, guid, _, _)| (mac, speed, guid))
     }
 
-    /// [`of`] and the adapter's interface index.
-    pub fn of_with_index(ip: Ipv4Addr) -> Result<(String, Option<u64>, String, u32), String> {
-        let flags = GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER;
+    /// The adapter's details as [`of`]'s, its interface index, and its
+    /// first IPv4 default gateway (dstack #155: a Dante NIC should hold
+    /// none).
+    #[allow(clippy::type_complexity)]
+    pub fn of_with_index(
+        ip: Ipv4Addr,
+    ) -> Result<(String, Option<u64>, String, u32, Option<Ipv4Addr>), String> {
+        let flags = GAA_FLAG_SKIP_ANYCAST
+            | GAA_FLAG_SKIP_MULTICAST
+            | GAA_FLAG_SKIP_DNS_SERVER
+            | GAA_FLAG_INCLUDE_GATEWAYS;
         let mut len: u32 = 16 * 1024;
         let mut buf: Vec<u64> = Vec::new();
         for _ in 0..4 {
@@ -91,7 +102,22 @@ pub(crate) mod win_nic {
                         };
                         // SAFETY: the IPv4 index of the adapter's header union.
                         let index = unsafe { ad.Anonymous1.Anonymous.IfIndex };
-                        return Ok((mac, speed, guid, index));
+                        let mut gateway = None;
+                        let mut g = ad.FirstGatewayAddress;
+                        while !g.is_null() && gateway.is_none() {
+                            // SAFETY: a node of the adapter's gateway list.
+                            let ga = unsafe { &*g };
+                            let sa = ga.Address.lpSockaddr;
+                            // SAFETY: as for the unicast addresses above.
+                            if !sa.is_null() && unsafe { (*sa).sa_family } == AF_INET {
+                                let sin = unsafe { &*sa.cast::<SOCKADDR_IN>() };
+                                let raw = unsafe { sin.sin_addr.S_un.S_addr };
+                                gateway = Some(Ipv4Addr::from(u32::from_be(raw)))
+                                    .filter(|g| !g.is_unspecified());
+                            }
+                            g = ga.Next;
+                        }
+                        return Ok((mac, speed, guid, index, gateway));
                     }
                 }
                 u = ua.Next;
