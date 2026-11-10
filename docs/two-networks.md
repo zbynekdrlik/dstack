@@ -35,10 +35,14 @@ The site's own values (subnets, VLAN numbers, host names, addresses, switch port
 ### Linux (NetworkManager)
 
 - The LAN connection holds the only default route and the DNS.
-- The Dante leg is an NM VLAN connection on the same NIC (`<nic>.<vlan>`): `ipv4.never-default yes`, `ipv4.ignore-auto-dns yes`, `ipv6.method disabled`, its connected route in a policy table with a rule `from <dante address> lookup <table>`, so the main table has no route to `<dante>` and only sockets bound to the Dante address use the leg.
+- The Dante leg is an NM VLAN connection on the same NIC (`<nic>.<vlan>`): `ipv4.never-default yes`, `ipv4.ignore-auto-dns yes`, `ipv6.method disabled`, its connected route in a policy table with a rule `from <dante address> lookup <table>` (the address, not the subnet), so the main table has no route to `<dante>` and only sockets bound to the Dante address use the leg.
 - Load `8021q` and persist it (`/etc/modules-load.d/8021q.conf`); without it NM fails with "Failed to find a compatible device".
 - On a netplan host, NM may rewrite the VLAN's parent to a stale connection UUID: set `vlan.parent` to the active LAN connection's UUID.
-- nftables on the Dante leg: in, the Dante ports of the PC's devices (ARC 4440+, flow control 4455+, info 8700/8702/8708, CMC 8800+, audio 30000+/30100+, mDNS 5353), PTP 319/320, and **`udp sport 5353 accept`**; out, from the Dante address to `<dante>` and to 224.0.0.231/.233/.251; everything else dropped. A guard that allows only one program's traffic out must also allow every Dante device on the PC (a dlink app under another user, for example).
+- Route metric 900 on the leg's connection (`ipv4.route-metric 900`), so the numbers match Windows even though the main table has no `<dante>` route.
+- nftables on the Dante leg (dcontroller's `dante-guard` is the reference implementation):
+  - in: `ct state established,related`; IGMP; multicast UDP (PTP, Dante info and heartbeat groups, multicast audio); the Dante ports of the PC's devices (ARC 4440+, flow control 4455+, info 8700/8702/8708, CMC 8800+, audio 30000+/30100+); PTP 319/320; mDNS 5353 and **`udp sport 5353 accept`**; a controller's own receive ports (dcontroller's meter ports 8810–8825); DHCP 68 only on a leg that uses DHCP; IPv6 dropped; everything else dropped;
+  - out: only the PC's Dante programs (by user or program) and PTP 319/320, IGMP, DHCP 67/68, and only to `<dante>` or the groups 224.0.0.231/.233/.251 and the PTP/audio multicast groups; everything else dropped;
+  - a guard that allows only one program out must also allow every Dante device on the PC (a dlink app under another user, for example), with its ports in.
 
 ### Windows
 
