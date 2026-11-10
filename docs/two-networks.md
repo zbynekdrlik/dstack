@@ -57,7 +57,7 @@ The site's own values (subnets, VLAN numbers, host names, addresses, switch port
 
 ### Firewall (Windows)
 
-The production rule so far was "all firewall profiles off" (songplayer #233). The Dante leg needs filtering, so dstack tests (10.11.2026, owner's approval) the firewall on, with **default Allow in and out**, plus one rule group `dstack155` bound only to the Dante leg: block in and out for every non-Dante program on the PC (OBS, Resolume Arena, Bonjour `mDNSResponder.exe`, `svchost.exe`, remote-access tools, scripting runtimes) and all TCP. The Dante devices' processes (an app with dlink or dstack inside, dasio) are never blocked. Firewall rules bound to a removed NIC stay in the store and do nothing; remove them. Until the trial's result is recorded on #155, this section is provisional.
+The Windows firewall is **on**, with **default Allow in and out** on every profile, plus one rule group `dstack155` bound only to the Dante leg: block in and out for every non-Dante program on the PC (OBS, Resolume Arena, Bonjour `mDNSResponder.exe`, `svchost.exe`, remote-access tools, scripting runtimes) and all TCP. The Dante devices' processes (an app with dlink or dstack inside, dasio) are never in the group. No other enabled Block rule exists. This replaces the earlier "all profiles off" rule (songplayer #233): on 10.11.2026 an hour with the firewall on against an hour off showed no change in the sender's pump or lateness and none at three receivers (owner's decision, #155). Firewall rules bound to a removed NIC stay in the store and do nothing; remove them. A PC's setup script may recreate the group from this list, never turn the profiles off.
 
 ## 4. Rules for our applications
 
