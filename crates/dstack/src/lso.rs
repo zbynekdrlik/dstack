@@ -53,8 +53,19 @@ pub enum Driver {
     KnownGood,
     /// Another Realtek driver: never measured, neither good nor bad.
     Unverified,
+    /// A VLAN virtual adapter (dstack #155: the Dante leg as a Realtek
+    /// VLAN on the PC's one NIC): its driver is the VLAN layer's, not the
+    /// NIC's, and is not judged.
+    Virtual,
     /// Not a Realtek driver, or not read.
     Other,
+}
+
+/// Whether an adapter's `DriverDesc` names a VLAN virtual adapter, as
+/// Realtek's Ethernet Diagnostic Utility creates one per VLAN ("Realtek
+/// Virtual Adapter", dstack #155).
+pub fn virtual_adapter(description: Option<&str>) -> bool {
+    description.is_some_and(|d| d.to_ascii_lowercase().contains("virtual adapter"))
 }
 
 /// The verdict on an adapter's driver from its `ProviderName` and
