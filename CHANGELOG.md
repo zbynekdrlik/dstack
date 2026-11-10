@@ -1,6 +1,10 @@
 # Changelog
 
-## 0.6.72 (unreleased)
+## 0.6.73 (unreleased)
+
+- Docs (dstack #155): the standard's NDI rule corrected: the NDI 6.3 runtime announces on the Dante leg whatever `adapters.allowed` says; the guard is the leg's TCP block and receivers excluding the Dante subnet, not restarting NDI apps. No code change.
+
+## 0.6.72
 
 - New (dstack #155): on Windows the device tells a VLAN virtual adapter (Realtek's "Realtek Virtual Adapter", the Dante leg on a one-NIC PC) from a NIC in its driver check and says so at start, instead of calling the VLAN layer's driver (10.4.1117.2020) an unmeasured NIC driver (songplayer, resolume-snv, 10.11.2026). `lso::virtual_adapter`, `lso::Driver::Virtual`. No latency change.
 
