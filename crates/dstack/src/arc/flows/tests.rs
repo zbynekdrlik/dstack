@@ -387,6 +387,16 @@ fn a_list_we_write_reads_back_as_written() {
                 SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 12), 4400),
             ],
         },
+        // A third: the table's offsets for any count, not only two.
+        TxFlow {
+            id: 3,
+            local_id: 3,
+            flags: UNICAST,
+            channels: vec![8],
+            fpp: 8,
+            bits: 24,
+            destinations: vec![SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 13), 4321)],
+        },
     ];
     let body = list_reply_body(&flows);
     // Each segment's second byte counts the words from it to its record's
