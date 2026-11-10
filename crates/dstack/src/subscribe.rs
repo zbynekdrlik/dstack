@@ -441,10 +441,19 @@ impl Manager {
     /// stopped at once.
     pub fn answered(&mut self, flow: FlowId, answer: Answer, now: u64) -> Vec<Action> {
         self.now = self.now.max(now);
+        // No reply (or a socket error) is an unanswered request, asked again
+        // quickly like one given up on (dstack #20: a transmitter whose NIC
+        // restarted waited the full backoff, 10.11.2026); any answer ends
+        // the quick retries.
+        let replied = !matches!(answer, Answer::Failed);
         for peer in self.peers.values_mut() {
             if peer.in_flight.contains(&flow) {
                 peer.in_flight.retain(|f| *f != flow);
-                peer.unanswered = 0;
+                peer.unanswered = if replied {
+                    0
+                } else {
+                    peer.unanswered.saturating_add(1)
+                };
             }
         }
         let current = self.flows[flow.slot]
