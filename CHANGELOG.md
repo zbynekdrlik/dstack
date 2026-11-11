@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.81
+
+- Fix (dstack #180, dcontroller#65, 11.11.2026): `discover::Device` has `cmc: Option<SocketAddrV4>`, the address and port of the device's `_netaudio-cmc` record. A device beside another on one PC takes CMC 8800+k (since v0.6.77) and advertises it there, but discovery kept only the record's id, so a controller sent its meter subscription to the PC's 8800, the first device's port: the FOH PC's band and dsend gave no meter frames in dcontroller. A changed CMC port is a `Change::Changed`. API: a code that builds a `discover::Device` sets `cmc` (`None` when no record is read); a meter client starts at `device.cmc`, 8800 only without a record. No latency or behaviour change for a device.
+
 ## 0.6.80
 
 - Docs (dstack #155, owner 11.11.2026): `docs/two-networks.md` applies only on a PC with a Dante leg (a PC that runs a Dante device). Its layout, NIC and driver values, firewall group, dsync pin and §6 checks do not apply to a PC without one, which passes; a project gates every requirement it takes over on the same condition. The NIC values in `docs/windows-box.md` and the single-NIC section ("Transmit Buffers" at the minimum, Large Send Offload off) apply only on the NIC that carries Dante and only where its driver offers the keyword: the setting belongs to the driver, not the chip. No code, API or latency change.

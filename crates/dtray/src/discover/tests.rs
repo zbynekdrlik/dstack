@@ -24,6 +24,7 @@ fn device(name: &str, ip: Ipv4Addr, ctl: Option<&str>) -> Device {
         name: name.to_string(),
         arc: SocketAddrV4::new(ip, 4440),
         dbc: None,
+        cmc: None,
         device_id: None,
         txt,
     }

@@ -91,6 +91,10 @@ pub struct Device {
     pub arc: SocketAddrV4,
     /// Its flow control (`_netaudio-dbc`), when it publishes it.
     pub dbc: Option<SocketAddrV4>,
+    /// Its CMC (UDP 8800 on a Dante device, 8800+k for a device beside
+    /// others on one PC): its `_netaudio-cmc` record's address and port.
+    /// A meter subscription ([`crate::meter`]) goes here (dstack #180).
+    pub cmc: Option<SocketAddrV4>,
     /// Its device id, from its `_netaudio-cmc` record's `id`: the id in its
     /// heartbeat's header ([`crate::latency::Latency::device_id`]).
     pub device_id: Option<[u8; 8]>,
@@ -118,8 +122,8 @@ struct Entry {
     arc: Option<SocketAddrV4>,
     txt: BTreeMap<String, String>,
     dbc: Option<SocketAddrV4>,
-    /// The `_netaudio-cmc` record is read, and its id when it reads.
-    cmc: Option<Option<[u8; 8]>>,
+    /// The `_netaudio-cmc` record's address, and its id when it reads.
+    cmc: Option<(SocketAddrV4, Option<[u8; 8]>)>,
 }
 
 impl Entry {
@@ -128,7 +132,8 @@ impl Entry {
             name: self.name.clone(),
             arc: self.arc?,
             dbc: self.dbc,
-            device_id: self.cmc.flatten(),
+            cmc: self.cmc.map(|(at, _)| at),
+            device_id: self.cmc.and_then(|(_, id)| id),
             txt: self.txt.clone(),
         })
     }
@@ -294,7 +299,7 @@ impl Devices {
             }
             Service::Dbc => entry.dbc = at,
             Service::Cmc => {
-                entry.cmc = at.map(|_| txt().get("id").and_then(|id| parse_device_id(id)));
+                entry.cmc = at.map(|at| (at, txt().get("id").and_then(|id| parse_device_id(id))));
             }
         }
         let after = entry.device();
