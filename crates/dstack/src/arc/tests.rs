@@ -20,12 +20,13 @@ use crate::wire::{HEADER_LEN, Header, MAX_DATAGRAM, read_u16, request, string_at
 
 const TEST_DEVICE: &str = include_str!("../../../../config/test-device.toml");
 
-/// The tests' flows: no TX flow, and a manager that keeps the
-/// subscriptions and resolves none, so every subscribed channel reads
-/// Unresolved (the daemon's are `Running`, `crate::daemon::media`).
+/// The tests' flows: no TX flow until a multicast create makes one, and a
+/// manager that keeps the subscriptions and resolves none, so every
+/// subscribed channel reads Unresolved (the daemon's are `Running`,
+/// `crate::daemon::media`).
 #[derive(Debug)]
 struct NoFlows {
-    tx: TxTable,
+    tx: Mutex<TxTable>,
     rx: Mutex<Manager>,
 }
 
@@ -41,7 +42,7 @@ impl NoFlows {
         rx.load(&device.state.subscriptions);
         rx.changed();
         NoFlows {
-            tx: TxTable::new(0),
+            tx: Mutex::new(TxTable::new(0)),
             rx: Mutex::new(rx),
         }
     }
@@ -49,11 +50,9 @@ impl NoFlows {
 
 impl Flows for NoFlows {
     fn view<R>(&self, f: impl FnOnce(&Live<'_>) -> R) -> R {
+        let tx = self.tx.lock().unwrap_or_else(PoisonError::into_inner);
         let rx = self.rx.lock().unwrap_or_else(PoisonError::into_inner);
-        f(&Live {
-            tx: &self.tx,
-            rx: &rx,
-        })
+        f(&Live { tx: &tx, rx: &rx })
     }
 
     fn subscribe(&self, subs: &[Option<Subscription>]) -> Vec<usize> {
@@ -74,6 +73,11 @@ impl Flows for NoFlows {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .set_latency(ns);
+    }
+
+    fn change_tx<R>(&self, f: impl FnOnce(&mut TxTable, Ipv4Addr) -> R) -> R {
+        let mut tx = self.tx.lock().unwrap_or_else(PoisonError::into_inner);
+        f(&mut tx, OUR_IP)
     }
 }
 
