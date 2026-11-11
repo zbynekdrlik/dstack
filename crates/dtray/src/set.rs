@@ -4,10 +4,10 @@
 //! latency write from the command line, for a PC with no usable display
 //! and for a script that checks it. The device is one [`crate::discover`]
 //! lists on this PC, by name (case-insensitive, exact: [`find`]); the
-//! value is one of its menu's ([`crate::latency::pick`] on the choices
-//! [`menu::shapes_of`] builds from its ARC settings); a value already
-//! configured writes nothing ([`menu::write_needed`]); a write goes through
-//! the same call as a menu click ([`dstack::arc::control::set_latency`]),
+//! value is any in ms inside the range its ARC settings state, not only
+//! one of its menu's (dstack #213: [`crate::latency::pick`]); a value
+//! already configured writes nothing; a write goes through the same call
+//! as a menu click ([`dstack::arc::control::set_latency`]),
 //! and the configured latency read back after it is the verdict
 //! ([`crate::latency::read_back`]).
 //!
@@ -21,7 +21,7 @@ use dstack::arc::control::Settings;
 
 use crate::discover::Local;
 use crate::latency;
-use crate::menu::{self, Known};
+use crate::menu;
 
 /// The device of `devices` named `name`, case-insensitive and exact; the
 /// reason otherwise (none of that name, with the names found; or more than
@@ -56,8 +56,8 @@ pub fn find<'a>(devices: &'a [Local], name: &str) -> Result<&'a Local, String> {
 /// `ms` names (see the module): `read` reads a device's ARC settings,
 /// `write` sets its latency. The line to print when the latency is (or
 /// already was) the value asked; the reason otherwise: no such device, its
-/// settings unreadable, a value it does not offer, the write refused, or a
-/// read-back that is not the value.
+/// settings unreadable, no value or one outside its range, the write
+/// refused, or a read-back that is not the value.
 pub fn latency(
     devices: &[Local],
     name: &str,
@@ -69,12 +69,8 @@ pub fn latency(
     let name = &device.name;
     let before =
         read(device.arc).map_err(|e| format!("{name}: its settings were not read: {e}"))?;
-    let mut known = Known::default();
-    known.record(device.arc, Some(before), 0);
-    let shapes = menu::shapes_of(std::slice::from_ref(device), &known, &[]);
-    let choices: &[latency::Choice] = shapes.first().map_or(&[], |s| &s.choices);
-    let ns = latency::pick(choices, ms).map_err(|e| format!("{name}: {e}"))?;
-    if !menu::write_needed(&shapes, device.arc, ns) {
+    let ns = latency::pick(&before, ms).map_err(|e| format!("{name}: {e}"))?;
+    if before.latency_configured_ns == Some(ns) {
         return Ok(format!(
             "{name}: the latency is already {}; nothing written",
             latency::label(ns)

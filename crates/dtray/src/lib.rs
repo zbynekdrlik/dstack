@@ -121,6 +121,15 @@ pub fn mode_of<I: IntoIterator<Item = String>>(args: I) -> Result<Mode, &'static
     }
 }
 
+/// Whether `mode` (`None`: a usage error) prints to the shell that started
+/// dtray: every command-line mode does, the tray does not. On Windows,
+/// where dtray.exe is a GUI-subsystem program with no console of its own,
+/// such a mode attaches to its parent's console, so its lines and exit
+/// code reach that shell (dstack #213); the tray opens none.
+pub fn wants_console(mode: Option<&Mode>) -> bool {
+    !matches!(mode, Some(Mode::Tray))
+}
+
 /// The name of dtray's value under the user's
 /// `Software\Microsoft\Windows\CurrentVersion\Run` key.
 pub const RUN_VALUE_NAME: &str = "dtray";

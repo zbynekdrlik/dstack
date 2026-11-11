@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use super::{Mode, USAGE, mode_of, run_value, version_line};
+use super::{Mode, USAGE, mode_of, run_value, version_line, wants_console};
 
 fn args(a: &[&str]) -> Vec<String> {
     a.iter().map(|s| s.to_string()).collect()
@@ -112,4 +112,23 @@ fn the_version_line_names_the_dstack_release() {
         format!("dtray {}", env!("CARGO_PKG_VERSION"))
     );
     assert!(USAGE.contains("--version"));
+}
+
+#[test]
+fn every_command_line_mode_takes_the_shell_s_console_the_tray_none() {
+    // dstack #213: on Windows dtray.exe is a GUI-subsystem program; its
+    // command-line modes attach to the console of the shell that started
+    // them, so their lines reach it. The tray opens no console.
+    let wants = |a: &[&str]| wants_console(mode_of(args(a)).as_ref().ok());
+    assert!(!wants(&[]));
+    assert!(wants(&["--print"]));
+    assert!(wants(&["--version"]));
+    assert!(wants(&["--autostart", "on"]));
+    assert!(wants(&["--autostart", "off"]));
+    assert!(wants(&["--set-latency", "dev", "0.333"]));
+    assert!(wants(&["--switch", "Solo", "band"]));
+    // A usage error is printed too.
+    assert!(wants(&["--bogus"]));
+    assert!(!wants_console(Some(&Mode::Tray)));
+    assert!(wants_console(None));
 }
