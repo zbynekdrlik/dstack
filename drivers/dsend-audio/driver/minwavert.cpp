@@ -209,6 +209,8 @@ Arguments:
 --*/
 {
     UNREFERENCED_PARAMETER(PinId);
+    // dsend's one render endpoint: the class handler fills it.
+    UNREFERENCED_PARAMETER(ResultantFormat);
 
     ULONG                   requiredSize;
 
