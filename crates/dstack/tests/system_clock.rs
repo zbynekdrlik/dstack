@@ -757,9 +757,15 @@ fn tx_end_stops_our_rx_and_it_recovers_by_itself() {
     let flow = field(&status, "\"tx\":[{", "flow");
     let ended = flow.map(|f| ctl::answer(&format!("tx-end {f}"), &media));
     let after_end = ctl::answer("status", &media);
-    // Silent for 2 s: InProgress (not connected, to a controller).
+    // Silent for 2 s: InProgress (not connected, to a controller). Our RX
+    // shows it from 2 s of silence until it stops the flow at 6 s of the
+    // flow's age (`subscribe::YOUNG_NS`); the flow is about 0.5 s old at
+    // the tx-end, so that window is about 3 s wide.
     let stopped = wait(BOUND, &|s, _| s == Some(SubStatus::InProgress));
     let at_stop = rx1(&media).1;
+    // No packets while stopped.
+    std::thread::sleep(Duration::from_millis(300));
+    let still = rx1(&media).1;
     // A stopped flow is asked for again within the retry wait (9 s from
     // the last request, a silent flow stopped from 6 s of age): 30 s.
     let recovered = wait(Duration::from_secs(30), &|s, p| {
@@ -779,6 +785,7 @@ fn tx_end_stops_our_rx_and_it_recovers_by_itself() {
         took <= Duration::from_secs(5),
         "RX 1 stopped after {took:?}"
     );
+    assert_eq!(still, at_stop, "RX 1 received while stopped");
     assert!(recovered.is_some(), "RX 1 did not receive again: {last}");
     assert!(last.contains("\"live\":1,"), "a live TX flow again: {last}");
     assert!(

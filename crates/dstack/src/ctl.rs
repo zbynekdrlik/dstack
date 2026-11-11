@@ -32,7 +32,9 @@
 //!   number, from 1) as if its receiver had gone quiet
 //!   ([`crate::media::tx::TxTable::end`]): it sends nothing more, its slot
 //!   is free, and its receiver (ours, subscribed to our own TX, in the E2E)
-//!   stops receiving, then asks for the flow again and receives by itself.
+//!   stops receiving, then asks for the flow again and receives by itself,
+//!   on a new flow (often under another number: its stop frees the slot and
+//!   a new flow takes the next one).
 //!   `error: tx-end: no live TX flow there` for an empty slot or a flow
 //!   expired already; every device but dstack-dev's answers
 //!   `error: tx-end is dstack-dev's only` ([`Media::allow_dev_requests`]).

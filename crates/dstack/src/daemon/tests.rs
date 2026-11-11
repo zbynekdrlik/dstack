@@ -233,6 +233,30 @@ fn the_version_line_names_the_binary_its_version_and_the_build() {
     assert_eq!(build_sha(None), "local");
 }
 
+/// dstack #187: `cli::main`'s grant reaches the device only for dstack's
+/// own binary; an application's device keeps refusing `tx-end`.
+#[test]
+fn only_dstack_s_own_build_grants_its_device_the_dev_requests() {
+    let dir = tempfile::tempdir().unwrap();
+    let theirs = media_on(
+        &super::media::tests::device_at(dir.path()),
+        Arc::new(Unready),
+    );
+    let app = Build {
+        name: "iem-dante-dev",
+        version: "9.8.7",
+        sha: "abc123",
+    };
+    assert!(!app.grant_dev_requests(&theirs));
+    assert!(!theirs.dev_requests());
+    let ours = media_on(
+        &super::media::tests::device_at(dir.path()),
+        Arc::new(Unready),
+    );
+    assert!(Build::OWN.grant_dev_requests(&ours));
+    assert!(ours.dev_requests());
+}
+
 #[test]
 fn the_usage_names_the_binary_that_prints_it() {
     assert!(USAGE.starts_with("usage: dstack-dev --config"));
@@ -240,6 +264,9 @@ fn the_usage_names_the_binary_that_prints_it() {
     assert!(theirs.starts_with("usage: iem-dante-dev --config"));
     assert!(theirs.contains("       iem-dante-dev --version"));
     assert!(!theirs.contains(NAME));
+    // dstack #187: the tx-end line never says the app's binary takes it.
+    assert!(!theirs.contains("iem-dante-dev only"));
+    assert!(theirs.contains("tx-end <flow>             dstack's own dev binary only"));
     assert_eq!(VERSION, env!("CARGO_PKG_VERSION"));
     match option_env!("GITHUB_SHA") {
         Some(sha) => assert_eq!(BUILD, sha),

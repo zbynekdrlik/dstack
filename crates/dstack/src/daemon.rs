@@ -113,6 +113,17 @@ impl Build {
     pub fn dev_requests(&self) -> bool {
         *self == Build::OWN
     }
+
+    /// Lets `media` answer dstack-dev's own control requests when this
+    /// build is dstack's own ([`Build::dev_requests`]); `true` when it did.
+    /// [`cli::main`] calls it before the device starts.
+    pub fn grant_dev_requests(&self, media: &media::Media) -> bool {
+        let granted = self.dev_requests();
+        if granted {
+            media.allow_dev_requests();
+        }
+        granted
+    }
 }
 
 /// [`USAGE`] for the binary called `name`.
@@ -161,11 +172,13 @@ ctl: sends one request to the control socket and prints the answer line:
                             engine's ring, on a channel the engine feeds)
   check <rx> off|counter|sine <hz>
                             which checker reads RX channel rx (from 1)
-  tx-end <flow>             dstack-dev only (a controller's E2E): ends our
+  tx-end <flow>             dstack's own dev binary only, never an
+                            application's (a controller's E2E): ends our
                             live TX flow <flow> (the status's tx flow, from
                             1) as if its receiver had gone quiet; the
                             receiver stops receiving, then asks again and
-                            receives by itself
+                            receives by itself, on a new flow (often under
+                            another number)
 Exit 0 for ok or the status, 1 for an error answer or no socket.
 
 clock: polls dsync's time server on the box (127.0.0.1:31900) n times,
@@ -299,7 +312,7 @@ fn parse_ctl(args: &[String]) -> Result<Command, String> {
         words => (PathBuf::from(crate::ctl::SOCKET), words),
     };
     if words.is_empty() {
-        return Err("ctl: the request is missing (status, source or check)".into());
+        return Err("ctl: the request is missing (status, source, check, app or tx-end)".into());
     }
     Ok(Command::Ctl {
         socket,

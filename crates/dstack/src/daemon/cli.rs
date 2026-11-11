@@ -77,9 +77,7 @@ pub fn main(build: Build) -> ExitCode {
         .and_then(|prepared| {
             // dstack-dev's own requests (`tx-end`, dstack #187), for its
             // own binary only.
-            if build.dev_requests() {
-                prepared.media().allow_dev_requests();
-            }
+            build.grant_dev_requests(&prepared.media());
             prepared.start(Signals::Stop)
         })
         .and_then(Host::wait);
