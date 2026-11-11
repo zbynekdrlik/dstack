@@ -63,8 +63,9 @@ impl TxTable {
     /// `channels` (from 1) in `slot` (from 0): sent to [`multicast_group`],
     /// with the config's `tx_fpp_max` frames a packet (the most its
     /// advertised latency covers) and its encoding. Returns the group.
-    /// Refused, with the reason, for channels that cannot make a flow
-    /// ([`flow_channels`]) and as [`TxTable::add_multicast`] refuses.
+    /// Refused, with the reason, for channels that cannot make a flow (1
+    /// to [`MAX_FLOW_CHANNELS`] of the config's TX channels, each once) and
+    /// as [`TxTable::add_multicast`] refuses.
     pub fn add_own_multicast(
         &mut self,
         cfg: &DeviceConfig,
