@@ -657,6 +657,48 @@ async fn the_driver_s_tick_warns_once_for_a_second_the_pump_restarted() {
     assert!(lines[0].contains("missed=4"), "{log}");
 }
 
+/// dstack #203: the tick's traffic watch reads the neighbours its discovery
+/// lists on our address (each its `status`), never our own endpoint.
+#[tokio::test]
+async fn the_driver_s_tick_reads_our_neighbours_but_never_ourselves() {
+    use crate::traffic::neighbours::tests::{Fake, FakeFinder, ours_at};
+    use std::io::Read;
+    let dir = tempfile::tempdir().unwrap();
+    let device = device_at(dir.path());
+    let media = media_on(&device, Arc::new(Unready));
+    let listen = || {
+        let l = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = l.local_addr().unwrap().port();
+        (l, port)
+    };
+    let (neighbour, neighbour_port) = listen();
+    let (own, own_port) = listen();
+    own.set_nonblocking(true).unwrap();
+    let served = std::thread::spawn(move || {
+        let (mut s, _) = neighbour.accept().unwrap();
+        let mut req = [0u8; 7];
+        s.read_exact(&mut req).unwrap();
+        std::io::Write::write_all(&mut s, b"{\"tx_bytes\":9}\n").unwrap();
+        req
+    });
+    let fake = Arc::new(Mutex::new(Fake {
+        running: true,
+        devices: vec![
+            ours_at("neighbour", media.ip, neighbour_port),
+            ours_at("me", media.ip, own_port),
+        ],
+        ..Fake::default()
+    }));
+    let records = Records::default();
+    let (mut driver, _answers, _changes) = driver_of(&media);
+    driver.set_finder(Box::new(FakeFinder(Arc::clone(&fake))));
+    driver.set_status_port(Some(own_port));
+    driver.tick(&records);
+    assert_eq!(&served.join().unwrap(), b"status\n");
+    let not_asked = own.accept().unwrap_err();
+    assert_eq!(not_asked.kind(), std::io::ErrorKind::WouldBlock);
+}
+
 #[tokio::test]
 async fn the_driver_s_tick_tells_a_reset_pin_once() {
     use crate::media::repin::{PinOutcome, RESET_LINE, note, tests::counter};

@@ -719,9 +719,13 @@ pub async fn serve<R: Registry>(
         queue_waits = announcer.waited(),
         "mDNS records announced"
     );
-    let (identity, network) = {
+    let (identity, network, status_port) = {
         let device = shared.lock().unwrap_or_else(PoisonError::into_inner);
-        (Identity::new(&device.cfg, net), network_of(&device.cfg))
+        (
+            Identity::new(&device.cfg, net),
+            network_of(&device.cfg),
+            device.status_port,
+        )
     };
     let threads = media.spawn_threads().map_err(ServeError::Threads)?;
     let _receivers = receiver_reader(&media, &network, ip).map_err(ServeError::Threads)?;
@@ -732,6 +736,7 @@ pub async fn serve<R: Registry>(
         Client::new(media.ip),
         Arc::clone(&rx_changes),
     );
+    driver.set_status_port(status_port);
     let arc = arc::serve(
         sockets.arc,
         Arc::clone(&shared),

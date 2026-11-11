@@ -475,6 +475,9 @@ pub struct Driver {
     pump: crate::stream::watch::PumpWatch,
     /// Other traffic on our NIC, logged once a minute.
     traffic: crate::traffic::TrafficWatch,
+    /// Our other devices on the PC, whose audio is not other traffic
+    /// (dstack #203).
+    neighbours: crate::traffic::neighbours::Neighbours,
     /// A media thread's CPU pin found lost (another program's process
     /// affinity rule) or refused, each told once.
     pins: crate::media::repin::PinWatch,
@@ -500,6 +503,7 @@ impl Driver {
                 host: crate::media::late::HostWatch::new(),
                 pump: crate::stream::watch::PumpWatch::new(),
                 traffic: crate::traffic::TrafficWatch::new(),
+                neighbours: crate::traffic::neighbours::Neighbours::default(),
                 pins: crate::media::repin::PinWatch::new(),
             },
             back,
@@ -524,11 +528,30 @@ impl Driver {
             &self.media.tx.cfg.name,
             self.media.engine_stats().as_deref(),
         );
-        self.traffic.watch(now, self.media.ip, &self.media.tx, &[]);
+        let ip = self.media.ip;
+        let neighbours = &self.neighbours;
+        let window = self
+            .traffic
+            .watch(now, ip, &self.media.tx, || neighbours.list(ip));
+        self.neighbours.after(now, window.as_ref(), ip);
         self.pins.watch(
             crate::media::repin::pin_resets(),
             crate::media::repin::pin_refusals(),
         );
+    }
+
+    /// Our own local status port ([`crate::ctl::local`]; `None`: none), so
+    /// the traffic watch never counts this device among its neighbours.
+    pub fn set_status_port(&mut self, port: Option<u16>) {
+        self.neighbours.set_own(port);
+    }
+
+    /// The traffic watch's discovery of our other devices (tests: their own
+    /// [`crate::traffic::neighbours::Finder`]); set before
+    /// [`Driver::set_status_port`].
+    #[cfg(test)]
+    pub(crate) fn set_finder(&mut self, finder: Box<dyn crate::traffic::neighbours::Finder>) {
+        self.neighbours = crate::traffic::neighbours::Neighbours::new(finder);
     }
 
     /// The answer to the request of `flow`.

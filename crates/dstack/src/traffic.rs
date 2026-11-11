@@ -27,6 +27,9 @@
 //!   read.
 //! - [`our_devices`] (pure): the warning's text of our devices' part.
 //! - [`read_peers`]: the reads, one deadline for all.
+//! - [`neighbours()`] (pure): our devices on our address in a discovery's
+//!   list; [`mod@neighbours`]: that discovery, run only while the NIC is
+//!   loud.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::{Ipv4Addr, SocketAddr};
@@ -36,6 +39,8 @@ use tracing::warn;
 
 use crate::ctl::probe::{self, ProbeError};
 use crate::media::tx::TxShared;
+
+pub mod neighbours;
 
 /// How often the watch looks, ns.
 pub const EVERY_NS: u64 = 60_000_000_000;
@@ -174,20 +179,21 @@ impl TrafficWatch {
     }
 
     /// [`TrafficWatch::look_with`] on the NIC holding `ip`, `tx`'s audio
-    /// and `peers`' (read within [`PEERS_WAIT`], only when a look is due),
-    /// a rate over [`OTHER_BYTES_PER_S`] logged as a warning with our
-    /// devices' part. The window's traffic, for the caller.
+    /// and the neighbours' that `peers` lists (asked and read within
+    /// [`PEERS_WAIT`] only when a look is due), a rate over
+    /// [`OTHER_BYTES_PER_S`] logged as a warning with our devices' part.
+    /// The window's traffic, for the caller ([`neighbours::Neighbours::after`]).
     pub fn watch(
         &mut self,
         now_ns: u64,
         ip: Ipv4Addr,
         tx: &TxShared,
-        peers: &[Peer],
+        peers: impl FnOnce() -> Vec<Peer>,
     ) -> Option<Traffic> {
         if !self.due(now_ns) {
             return None;
         }
-        let readings: Readings = read_peers(peers, PEERS_WAIT)
+        let readings: Readings = read_peers(&peers(), PEERS_WAIT)
             .into_iter()
             .filter_map(|(name, r)| self.take(&name, r).map(|b| (name, b)))
             .collect();
