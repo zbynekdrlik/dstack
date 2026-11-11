@@ -11,14 +11,17 @@
 //! the XDG autostart entry on Linux; installers call it).
 //! `dtray --set-latency <device> <ms>` runs the same discovery pass, then
 //! the tray menu's latency write for the local device of that name
-//! (case-insensitive) and value (`0.25`, `0.5`, `1`, `2`, `5`, `10`, as
-//! the device offers them), and prints the latency it reads back
+//! (case-insensitive) and value (any in ms inside the range the device
+//! states, to whole ns, such as `0.333334` or `2`; dstack #213), and
+//! prints the latency it reads back
 //! ([`dtray::set`]; every platform). Exit codes: 0 done (for
 //! `--set-latency`: the latency reads back as asked, or already was), 1 a
 //! failure (on Linux also: no desktop to show the tray on; for
-//! `--set-latency`: no such device, its settings unreadable, a value it
-//! does not offer, the write refused or a different read-back), 2 a usage
-//! error or the tray or autostart on a platform without one.
+//! `--set-latency`: no such device, its settings unreadable, no value or
+//! one outside its range, the write refused or a different read-back), 2 a
+//! usage error or the tray or autostart on a platform without one. On
+//! Windows (a GUI-subsystem program) every mode but the tray attaches to
+//! the console of the shell that started it ([`dtray::wants_console`]).
 //!
 //! `dtray --switch <label> <source>` runs the same discovery pass, then
 //! the tray menu's choice of that source on that switch of the PC's
@@ -55,7 +58,12 @@ const PRINT_WAIT: Duration = Duration::from_secs(3);
 const APP_WAIT: Duration = Duration::from_millis(500);
 
 fn main() -> ExitCode {
-    let mode = match dtray::mode_of(std::env::args().skip(1)) {
+    let parsed = dtray::mode_of(std::env::args().skip(1));
+    #[cfg(windows)]
+    if dtray::wants_console(parsed.as_ref().ok()) {
+        win::attach_console();
+    }
+    let mode = match parsed {
         Ok(m) => m,
         Err(usage) => {
             eprintln!("{usage}");

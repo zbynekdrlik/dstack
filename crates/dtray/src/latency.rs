@@ -5,8 +5,9 @@
 //! ([`dstack::arc::control::Settings`]: `latency_min_ns`,
 //! `latency_max_ns`), the configured one checked. The tray menu shows
 //! them and writes a choice with [`dstack::arc::control::set_latency`];
-//! `dtray --set-latency <device> <ms>` takes the same choice from the
-//! command line ([`ns_of_ms`], [`pick`], [`read_back`]; [`crate::set`]).
+//! `dtray --set-latency <device> <ms>` writes the same way from the
+//! command line, any value in ms inside that range, not only the menu's
+//! (dstack #213: [`ns_of_ms`], [`pick`], [`read_back`]; [`crate::set`]).
 
 use dstack::arc::control::Settings;
 
@@ -28,6 +29,11 @@ pub struct Choice {
 /// `ns` as the menu shows it: milliseconds, no trailing zeros
 /// (`0.25 ms`, `1 ms`).
 pub fn label(ns: u32) -> String {
+    label_wide(u64::from(ns))
+}
+
+/// [`label`] of any `u64` of ns (a value asked past a `u32`).
+fn label_wide(ns: u64) -> String {
     let whole = ns / 1_000_000;
     let frac = ns % 1_000_000;
     if frac == 0 {
@@ -55,39 +61,62 @@ pub fn choices(settings: &Settings) -> Vec<Choice> {
         .collect()
 }
 
-/// The value `ms` names, as the menu's labels write it without " ms"
-/// (`0.25`, `0.5`, `1`, `2`, `5`, `10`): one of [`DANTE_NS`], or `None`.
-pub fn ns_of_ms(ms: &str) -> Option<u32> {
-    DANTE_NS
-        .iter()
-        .copied()
-        .find(|&ns| label(ns) == format!("{ms} ms"))
-}
-
-/// The values of `choices` as the command line takes them: `0.5, 1, 2 ms`.
-pub fn offered(choices: &[Choice]) -> String {
-    let values: Vec<String> = choices
-        .iter()
-        .map(|c| c.label.trim_end_matches(" ms").to_string())
-        .collect();
-    format!("{} ms", values.join(", "))
-}
-
-/// The value of `choices` (a device's menu, [`choices`]) that `ms` names;
-/// the reason otherwise: the device names no range, or `ms` is not one of
-/// its values (the error names them).
-pub fn pick(choices: &[Choice], ms: &str) -> Result<u32, String> {
-    if choices.is_empty() {
-        return Err("the device names no latency range; nothing written".to_string());
+/// The latency `ms` names in milliseconds, in ns: ASCII digits, then
+/// optionally a point and more digits (`0.333`, `0.333334`, `2`, `1.0`;
+/// the menu's labels without " ms" name the same values as the menu). Six
+/// decimals are whole ns, the precision [`label`] prints, so a device's
+/// own configured latency can be written back exactly (dstack #213); more
+/// are rounded half up at the seventh. `None` for anything else (a sign,
+/// a space, a unit, `.5`, `1.`) and for a value past a `u64` of ns (one
+/// past a `u32` is a value, outside any device's range: [`pick`]).
+pub fn ns_of_ms(ms: &str) -> Option<u64> {
+    let (whole, frac) = match ms.split_once('.') {
+        Some((whole, frac)) => (whole, Some(frac)),
+        None => (ms, None),
+    };
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    if !digits(whole) || !frac.is_none_or(digits) {
+        return None;
     }
-    ns_of_ms(ms)
-        .filter(|&ns| choices.iter().any(|c| c.ns == ns))
-        .ok_or_else(|| {
-            format!(
-                "{ms} ms is not a latency the device offers ({}); nothing written",
-                offered(choices)
-            )
-        })
+    let frac = frac.unwrap_or("").as_bytes();
+    let digit = |i: usize| frac.get(i).map_or(0, |&b| u64::from(b - b'0'));
+    let part: u64 = NS_OF_DECIMAL
+        .iter()
+        .enumerate()
+        .map(|(i, &weight)| digit(i) * weight)
+        .sum();
+    let round = u64::from(digit(NS_OF_DECIMAL.len()) >= 5);
+    whole
+        .parse::<u64>()
+        .ok()?
+        .checked_mul(1_000_000)?
+        .checked_add(part + round)
+}
+
+/// The ns of a digit at each of the six decimals of a value in ms.
+const NS_OF_DECIMAL: [u64; 6] = [100_000, 10_000, 1000, 100, 10, 1];
+
+/// The latency `ms` names ([`ns_of_ms`]) when it lies in the range the
+/// device states in `settings` (`latency_min_ns` to `latency_max_ns`, both
+/// included: any value there, not only Dante's, dstack #213); the reason
+/// otherwise: the device names no range, `ms` is no value, or it is
+/// outside the range (the error names the range).
+pub fn pick(settings: &Settings, ms: &str) -> Result<u32, String> {
+    let (Some(min), Some(max)) = (settings.latency_min_ns, settings.latency_max_ns) else {
+        return Err("the device names no latency range; nothing written".to_string());
+    };
+    let ns = ns_of_ms(ms).ok_or_else(|| {
+        format!("{ms} is not a latency in ms (such as 0.5 or 0.333); nothing written")
+    })?;
+    match u32::try_from(ns) {
+        Ok(ns) if (min..=max).contains(&ns) => Ok(ns),
+        _ => Err(format!(
+            "{} is outside the latency range the device states ({} to {}); nothing written",
+            label_wide(ns),
+            label(min),
+            label(max)
+        )),
+    }
 }
 
 /// The verdict on a write of `asked` from the configured latency the

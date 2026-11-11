@@ -51,9 +51,11 @@ glib = "=0.18.5"
 
 [target.'cfg(windows)'.dependencies]
 # The message loop and its timer, the single-instance mutex, the clipboard
-# the error box, and the autostart's Run value (the version dstack uses).
+# the error box, the autostart's Run value, and the parent console for the
+# command-line modes' output (the version dstack uses).
 windows-sys = { version = "0.61", features = [
   "Win32_Foundation",
+  "Win32_System_Console",
   "Win32_System_DataExchange",
   "Win32_System_Memory",
   "Win32_System_Ole",
