@@ -16,6 +16,13 @@ const HOLDOVER: View = View {
     anchored: true,
     epoch: 0,
 };
+/// Alive but its anchor lost: a follower in use that the selector leaves
+/// for a ready service (a forced switch; an unlocked but anchored one in
+/// use stays since dstack #188).
+const LOST: View = View {
+    anchored: false,
+    ..HOLDOVER
+};
 /// Locked, but its boot fit not done yet (dsync 1.27.3: 20-60 µs off for
 /// the first 30-70 s without a seed).
 const UNSETTLED: View = View {
@@ -207,9 +214,9 @@ fn the_linked_clock_reads_the_chosen_source_and_moves_its_epoch_on_a_switch() {
     );
     assert_eq!(linked.tick(), Source::Internal);
     assert_ne!(linked.epoch(), e2);
-    // Unlocked again: back to the service, a new epoch.
+    // Its anchor lost: back to the service, a new epoch.
     let e3 = linked.epoch();
-    set(&fake, Some(42_000_000_000), HOLDOVER);
+    set(&fake, Some(42_000_000_000), LOST);
     assert_eq!(linked.tick(), Source::Service);
     assert_ne!(linked.epoch(), e3);
     assert_eq!(linked.source(), Source::Service);
@@ -439,13 +446,13 @@ fn a_seamless_handover_keeps_an_epoch_with_re_anchors_in_it() {
     );
     assert_eq!(linked.tick(), Source::Internal);
     assert_eq!(linked.epoch(), before);
-    // And back: the follower loses its lock, the service agrees.
+    // And back: the follower loses its anchor, the service agrees.
     set(
         &fake,
         service_now(&service),
         View {
             epoch: 9,
-            ..HOLDOVER
+            ..LOST
         },
     );
     assert_eq!(linked.tick(), Source::Service);
@@ -507,7 +514,7 @@ fn a_follower_that_disagrees_waits_then_takes_over_with_a_new_epoch() {
     assert_eq!(linked.tick(), Source::Service, "the wait starts again");
 }
 
-/// A forced switch (the follower in use lost its lock) never waits: a
+/// A forced switch (the follower in use lost its anchor) never waits: a
 /// re-align when the service disagrees (seamless when it agrees: above).
 #[test]
 fn a_forced_switch_that_disagrees_re_aligns_at_once() {
@@ -515,7 +522,7 @@ fn a_forced_switch_that_disagrees_re_aligns_at_once() {
     set(&fake, service_now(&service), ALIVE_LOCKED);
     assert_eq!(linked.tick(), Source::Internal);
     let before = linked.epoch();
-    set(&fake, service_now_plus(&service, 1_000_000), HOLDOVER);
+    set(&fake, service_now_plus(&service, 1_000_000), LOST);
     assert_eq!(linked.tick(), Source::Service);
     assert_ne!(linked.epoch(), before);
 }
@@ -540,7 +547,7 @@ fn the_handover_logs_its_wait_once_and_its_outcome() {
     assert_eq!(log.matches(SEAMLESS_LINE).count(), 1, "{log}");
     assert_eq!(log.matches(WAIT_LINE).count(), 0, "{log}");
     let log = crate::test_log::capture_at(tracing::Level::INFO, || {
-        set(&fake, service_now_plus(&service, 1_000_000), HOLDOVER);
+        set(&fake, service_now_plus(&service, 1_000_000), LOST);
         linked.tick();
     });
     assert_eq!(log.matches(RE_ALIGN_LINE).count(), 1, "{log}");
@@ -756,7 +763,7 @@ fn every_switch_starts_the_wait_count_again() {
     }
     set(&fake, service_now_plus(&service, off), ALIVE_LOCKED);
     assert_eq!(linked.tick(), Source::Internal);
-    set(&fake, service_now_plus(&service, 1_000_000), HOLDOVER);
+    set(&fake, service_now_plus(&service, 1_000_000), LOST);
     assert_eq!(linked.tick(), Source::Service, "forced back");
     set(&fake, service_now_plus(&service, 1_000_000), ALIVE_LOCKED);
     assert_eq!(linked.tick(), Source::Service, "waits again");
@@ -875,7 +882,7 @@ fn the_linked_clock_reports_the_source_s_step_and_none_after_a_re_align() {
     // The service re-anchors while not in use, then a forced switch back
     // that disagrees: a re-align, no step, though the service has one.
     service.set_k(1_001_700_000_000);
-    set(&fake, service_now_plus(&service, 5_000_000), HOLDOVER);
+    set(&fake, service_now_plus(&service, 5_000_000), LOST);
     assert_eq!(linked.tick(), Source::Service);
     assert_eq!(linked.epoch() & 0xffff, 0);
     assert!(service.last_re_anchor().is_some());
