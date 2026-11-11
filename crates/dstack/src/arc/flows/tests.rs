@@ -422,3 +422,35 @@ fn a_list_we_write_reads_back_as_written() {
     let empty = parse_flows(&list_reply_body(&[])).unwrap();
     assert_eq!((empty.slots, empty.flows), (32, vec![]));
 }
+
+/// dstack #148: the delete the DT_20 (UltimoX2 4.2.5.1) took on 11.11.2026:
+/// our request for its test flow in slot 2, its reply status OK with an
+/// empty body (the flow was gone from the next list).
+const ULTIMO_DELETED: &str = "2809000a410026020001";
+
+#[test]
+fn the_delete_is_the_form_the_ultimo_took_and_its_ok_is_accepted() {
+    assert_eq!(
+        delete_body(2).to_vec(),
+        hex("000000000000000100030000000200000000000000000000")
+    );
+    let mut dev = Recorded::new(ULTIMO_DELETED);
+    assert_eq!(delete_multicast(&mut dev, 2), Ok(()));
+    assert_eq!(
+        dev.asked,
+        vec![(START_2809, DELETE, delete_body(2).to_vec())]
+    );
+    assert_eq!(&delete_body(0x0107)[12..14], &[0x01, 0x07]);
+}
+
+#[test]
+fn a_refused_delete_is_an_error() {
+    let mut dev = Recorded::new("2809000a4101260200160000");
+    assert_eq!(
+        delete_multicast(&mut dev, 2),
+        Err(ReadError::Refused {
+            op: DELETE,
+            status: 0x0016
+        })
+    );
+}
