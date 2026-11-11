@@ -554,7 +554,23 @@ pub struct LaneStats {
     /// The oldest packet since the late watch last took it ([`late`]).
     age_peak_ns: AtomicU64,
     over_latency: AtomicU64,
+    /// Of those, the packets the relay thread sent (dstack #177).
+    over_latency_relayed: AtomicU64,
+    /// `u64::MAX` less the shortest time from the last bounded escape's
+    /// start to a packet over its receiver's latency, since the late watch
+    /// last took it; 0: none (dstack #177).
+    since_escape: AtomicU64,
     direct: AtomicU64,
+}
+
+impl LaneStats {
+    /// A packet over its receiver's latency left `ns` after the last
+    /// bounded escape began: kept when it is the shortest since the last
+    /// take ([`TxShared::take_since_escape`]).
+    fn note_since_escape(&self, ns: u64) {
+        self.since_escape
+            .fetch_max(u64::MAX - ns, Ordering::Relaxed);
+    }
 }
 
 /// One slot's counts since the device started (every flow it carried).
@@ -909,6 +925,26 @@ impl TxShared {
             .map_or(0, |l| l.age_peak_ns.swap(0, Ordering::Relaxed))
     }
 
+    /// Slot `slot`'s packets over their receiver's latency that the relay
+    /// thread sent, covering the TX thread's bounded escapes, since the
+    /// device started (dstack #177).
+    pub fn over_latency_relayed(&self, slot: usize) -> u64 {
+        self.lanes
+            .get(slot)
+            .map_or(0, |l| l.over_latency_relayed.load(Ordering::Relaxed))
+    }
+
+    /// The shortest time from the last bounded escape's start to a packet
+    /// of slot `slot` over its receiver's latency, since the last call, ns
+    /// (`None`: no such packet, or no escape before it; dstack #177).
+    pub fn take_since_escape(&self, slot: usize) -> Option<u64> {
+        let kept = self
+            .lanes
+            .get(slot)
+            .map_or(0, |l| l.since_escape.swap(0, Ordering::Relaxed));
+        (kept != 0).then(|| u64::MAX - kept)
+    }
+
     /// Slot `slot`'s counts.
     pub fn lane(&self, slot: usize) -> LaneCounts {
         let Some(l) = self.lanes.get(slot) else {
@@ -1149,6 +1185,10 @@ pub struct Transmitter {
     /// The device's advertised latency, ns: a packet older than this past
     /// its stamp is late at a receiver.
     latency_ns: u64,
+    /// Whether the relay thread holds it, covering a bounded escape.
+    relayed: bool,
+    /// When the last bounded escape began, PTP ns.
+    escaped_ns: Option<u64>,
 }
 
 impl Transmitter {
@@ -1171,6 +1211,8 @@ impl Transmitter {
             max_lag: clock::latency_samples(shared.advertised_latency_ns(), rate),
             margin_ns: shared.cfg.tx_margin_ns,
             latency_ns: shared.advertised_latency_ns(),
+            relayed: false,
+            escaped_ns: None,
             shared,
         }
     }
@@ -1227,14 +1269,18 @@ impl Transmitter {
             return false;
         }
         let (now_ns, epoch) = read();
-        match now_ns {
+        let escapes = match now_ns {
             Some(now_ns) if self.epoch == Some(epoch) => {
                 let now = send_clock(now_ns, self.rate, self.margin_ns);
                 self.send_due(now, now_ns, Instant::now());
                 true
             }
             _ => !defer(),
+        };
+        if escapes && now_ns.is_some() {
+            self.escaped_ns = now_ns;
         }
+        escapes
     }
 
     /// When the next pass is due, PTP ns: the next packet of any flow or
@@ -1325,6 +1371,8 @@ impl Transmitter {
             ip_id,
             batch,
             engine_shift,
+            relayed,
+            escaped_ns,
             ..
         } = self;
         let clock = PassClock {
@@ -1333,6 +1381,8 @@ impl Transmitter {
             rate: *rate,
             margin_ns: *margin_ns,
             latency_ns: *latency_ns,
+            relayed: *relayed,
+            escaped_ns: *escaped_ns,
         };
         let rings: &[Ring] = &shared.rings;
         for (slot, lane) in lanes.iter_mut().enumerate() {
@@ -1698,11 +1748,13 @@ fn run_relay(clock: &dyn PtpClock, relay: &relay::Relay<Transmitter>) {
     #[cfg(any(target_os = "linux", windows))]
     crate::clock::relay_spin();
     relay.serve(|tx, back| {
+        tx.relayed = true;
         loop {
             let anchor = crate::clock::Anchor::of(clock);
             let now = clock.now_ns();
             tx.step(now, anchor);
             if back() {
+                tx.relayed = false;
                 return;
             }
             // At most an escape's length, so a TX thread back from its block
