@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.84
+
+- Fix (dstack #188, dsync#166, iemmixer 6.11.2026): the media clock stays on the in-process follower while it is in use, alive and anchored but unlocked; before, a ready dsync service on the PC took over at once. After a GM handover the follower's core keeps steering on PTP through its few unlocked minutes, while the swap to the service and back cost two re-aligns and took the service's drift (9 ppm there). At a start an unlocked follower still yields to a ready service; a follower that is dead or loses its anchor still hands over. No API change; no latency change for a dlink app.
+- Feature (dstack #190, dcontroller#62): our devices' ARC record carries `dstack_vers=<version>` (`announce::VERSION_KEY`), and `discover::Device::states_flow_slots` says whether a device's 0x2600 list states its real slots: false only for one of ours from before this version (inferno's model id, no version key), whose table echoed the flow count (its limit is 32). A controller then shows "N TX flows" with no max for those.
+
 ## 0.6.83
 
 - Diagnostics (dstack #184, FOH PC 11.11.2026: dsend sent -126 dBFS while its output played a -20 dBFS tone): dsend's and dlisten's 10 s log line ends with `input peak <x> dBFS` (or `input silent`), the largest magnitude their FIFO's producer stored since the last line: for dsend the WASAPI loopback capture, for dlisten the Dante RX. So the log tells whether the capture hands over silence or the level is lost after it. API (dstack-endpoint): `Fifo::take_peak`; `status::Snapshot` has `input_peak: Option<f32>` (`None` from `Snapshot::read`, set by `Snapshot::with_peak`). No latency or behaviour change.

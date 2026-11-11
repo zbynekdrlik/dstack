@@ -603,3 +603,23 @@ fn a_name_is_named_lately_until_the_record_s_age() {
     n.take(&named, 10 + max);
     assert!(n.named_lately(Service::Arc, "card", 10 + max));
 }
+
+/// dstack #190: an old dstack device (inferno's model id, no version key)
+/// wrote its flow count as its slots; every other device states them.
+#[test]
+fn only_an_old_dstack_device_does_not_state_its_flow_slots() {
+    let dev = |txt: &[(&str, &str)]| {
+        let mut d = Devices::default();
+        let Some(Change::Added(dev)) =
+            d.set(Service::Arc, "x", Some(&srv([10, 0, 0, 5], 4440, txt)))
+        else {
+            panic!("listed");
+        };
+        dev
+    };
+    let ours = ("model", "_000000000000000b");
+    assert!(!dev(&[ours, ("mf", "dasio")]).states_flow_slots());
+    assert!(dev(&[ours, ("dstack_vers", "0.6.84")]).states_flow_slots());
+    assert!(dev(&[("model", "_000a000100020003"), ("mf", "Audinate")]).states_flow_slots());
+    assert!(dev(&[]).states_flow_slots(), "no model: not ours");
+}

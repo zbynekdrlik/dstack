@@ -117,6 +117,7 @@ fn the_txt_records_carry_the_rate_encoding_and_latency() {
             "router_info=iem-dante",
             "mf=iemmixer",
             "model=_000000000000000b",
+            concat!("dstack_vers=", env!("CARGO_PKG_VERSION")),
         ]
     );
     assert_eq!(
