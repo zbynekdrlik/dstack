@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.85
+
+- Feature (dstack #148, dcontroller#46): `arc::flows::delete_multicast(call, local_id)` deletes another device's TX flow by its media-local slot (ARC 2.8.9, op 0x2602, `arc::flows::DELETE`, body `delete_body`), so a controller can create, list and delete a shared multicast flow on a transmitter with few slots. Verified live on a UltimoX2 (DT_20, 4.2.5.1, 11.11.2026, owner's OK): a test flow made with `create_multicast` was deleted (status OK, empty reply) and gone from the next list; the flow in use was untouched. No latency change.
+
 ## 0.6.84
 
 - Fix (dstack #188, dsync#166, iemmixer 6.11.2026): the media clock stays on the in-process follower while it is in use, alive and anchored but unlocked; before, a ready dsync service on the PC took over at once. After a GM handover the follower's core keeps steering on PTP through its few unlocked minutes, while the swap to the service and back cost two re-aligns and took the service's drift (9 ppm there). At a start an unlocked follower still yields to a ready service; a follower that is dead or loses its anchor still hands over. No API change; no latency change for a dlink app.

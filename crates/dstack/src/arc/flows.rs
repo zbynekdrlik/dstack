@@ -46,7 +46,12 @@
 //! name got exactly that from a UltimoX2 (8.11.2026). [`create_multicast`]
 //! reads it as [`CreateError::NotCreated`].
 //!
-//! The deletion (0x2602) is not here: no exchange of it was captured.
+//! **The delete** (0x2602, [`delete_multicast`]): a 24-byte body, `0001` at
+//! bytes 6–7, the media type `0003` (audio) at 8–9 and the flow's
+//! media-local id at 12–13, the rest 0 (netaudio's `build_delete_tx_flow`,
+//! segmented). A UltimoX2 (DT_20, 4.2.5.1) answered it with status OK and an
+//! empty body, and its next list no longer held the flow (11.11.2026, live,
+//! with the owner's OK); Dante Controller's own delete was not captured.
 //!
 //! Nothing here asks again, and nothing changes but what the caller names
 //! on the one device it talks to. Whether a device may be changed at all is
@@ -66,6 +71,8 @@ pub const START_2809: u16 = 0x2809;
 pub const LIST: u16 = 0x2600;
 /// A TX flow's creation.
 pub const CREATE: u16 = 0x2601;
+/// A TX flow's deletion.
+pub const DELETE: u16 = 0x2602;
 /// A record's flags: a multicast flow.
 pub const MULTICAST: u32 = 0x0000_0002;
 /// A unicast flow's flags, as a UltimoX2 lists one.
@@ -371,6 +378,28 @@ pub fn create_multicast(
         .into_iter()
         .find(|f| f.local_id == local_id && f.channels == channels && f.multicast())
         .ok_or(CreateError::NotCreated)
+}
+
+/// The delete request's body for the flow in media-local slot `local_id`
+/// (see the module).
+pub fn delete_body(local_id: u16) -> [u8; 24] {
+    let mut body = [0u8; 24];
+    body[6..8].copy_from_slice(&1u16.to_be_bytes());
+    body[8..10].copy_from_slice(&3u16.to_be_bytes());
+    body[12..14].copy_from_slice(&local_id.to_be_bytes());
+    body
+}
+
+/// Deletes the TX flow in media-local slot `local_id` (as
+/// [`list_tx_flows`] names it, [`TxFlow::local_id`]). Status OK is the
+/// device's acceptance; the next [`list_tx_flows`] shows whether the flow
+/// is gone.
+pub fn delete_multicast(c: &mut impl Call, local_id: u16) -> Result<(), ReadError> {
+    let (status, _) = c.call_as(START_2809, DELETE, &delete_body(local_id))?;
+    if status != STATUS_OK {
+        return Err(ReadError::Refused { op: DELETE, status });
+    }
+    Ok(())
 }
 
 #[cfg(test)]
