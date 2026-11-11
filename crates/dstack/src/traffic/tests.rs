@@ -140,6 +140,54 @@ fn a_neighbour_counts_only_when_read_at_both_ends_of_the_window() {
 }
 
 #[test]
+fn neighbours_are_our_other_devices_on_our_address() {
+    use std::collections::BTreeMap;
+    use std::net::SocketAddrV4;
+    // Documentation addresses (RFC 5737) only.
+    let ours = Ipv4Addr::new(192, 0, 2, 10);
+    let other = Ipv4Addr::new(192, 0, 2, 99);
+    let device = |name: &str, ip: Ipv4Addr, ctl: Option<&str>| {
+        let mut txt = BTreeMap::new();
+        if let Some(v) = ctl {
+            txt.insert(crate::announce::STATUS_PORT_KEY.to_string(), v.to_string());
+        }
+        crate::discover::Device {
+            name: name.to_string(),
+            arc: SocketAddrV4::new(ip, 4440),
+            dbc: None,
+            cmc: None,
+            device_id: None,
+            txt,
+        }
+    };
+    let found = [
+        device("zeta", ours, Some("5002")),
+        // This device itself.
+        device("me", ours, Some("5000")),
+        // A foreign Dante device on this address (no status port).
+        device("foreign", ours, None),
+        // Ours on another address (another NIC or PC).
+        device("elsewhere", other, Some("5003")),
+        device("alpha", ours, Some("5001")),
+        device("zeta", ours, Some("5002")),
+    ];
+    let peer = |n: &str, p: u16| (n.to_string(), p);
+    assert_eq!(
+        neighbours(&found, ours, Some(5000)),
+        vec![peer("alpha", 5001), peer("zeta", 5002)]
+    );
+    assert_eq!(
+        neighbours(&found, ours, None),
+        vec![peer("alpha", 5001), peer("me", 5000), peer("zeta", 5002)]
+    );
+    assert_eq!(
+        neighbours(&found, other, Some(5000)),
+        vec![peer("elsewhere", 5003)]
+    );
+    assert!(neighbours(&[], ours, None).is_empty());
+}
+
+#[test]
 fn deltas_keep_the_neighbours_read_twice_whose_counter_did_not_go_back() {
     let before = readings(&[("a", 10), ("b", 20), ("c", 30), ("gone", 1)]);
     let now = readings(&[("a", 10), ("b", 25), ("c", 29), ("new", 7)]);

@@ -204,6 +204,23 @@ impl TrafficWatch {
     }
 }
 
+/// Of `found` (a discovery's list), our neighbours on the NIC holding `ip`:
+/// the dstack devices whose ARC record is at `ip` and names a status port
+/// ([`crate::discover::Device::status_port`]) other than ours, `own` (a
+/// device without a local endpoint passes `None`). Sorted by name, each
+/// once.
+pub fn neighbours(found: &[crate::discover::Device], ip: Ipv4Addr, own: Option<u16>) -> Vec<Peer> {
+    let mut out: Vec<Peer> = found
+        .iter()
+        .filter(|d| *d.arc.ip() == ip)
+        .filter_map(|d| d.status_port().map(|port| (d.name.clone(), port)))
+        .filter(|&(_, port)| Some(port) != own)
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
 /// Each neighbour in `now` also read in `before` with a counter that did
 /// not go back: its name and the bytes between, in name order. One that
 /// appeared, went away or restarted is left out.
