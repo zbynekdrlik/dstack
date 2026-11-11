@@ -489,16 +489,65 @@ pub fn latency_request_body(ns: u32) -> Vec<u8> {
     out
 }
 
-/// The latency a write's body sets (0x1101), when the body is netaudio's
-/// own form ([`latency_request_body`]) with the same value twice; `None`
-/// for any other body.
+/// The latency a write's body sets (0x1101): netaudio's own form
+/// ([`latency_request_body`]) with the same value twice, or Dante
+/// Controller's keyed write of the latency (`keyed_latency`); `None` for
+/// any other body.
 pub fn parse_latency_body(body: &[u8]) -> Option<u32> {
+    netaudio_latency(body).or_else(|| keyed_latency(body))
+}
+
+/// netaudio's latency write: [`LATENCY_SET`], then the latency twice.
+fn netaudio_latency(body: &[u8]) -> Option<u32> {
     let (head, values) = body.split_at_checked(LATENCY_SET.len())?;
     let [a, b]: [[u8; 4]; 2] = [
         values.get(0..4)?.try_into().ok()?,
         values.get(4..8)?.try_into().ok()?,
     ];
     (head == LATENCY_SET && values.len() == 8 && a == b).then(|| u32::from_be_bytes(a))
+}
+
+/// The first byte of a settings write's body, in both forms seen
+/// (netaudio's and Dante Controller's).
+const SETTINGS_WRITE: u8 = 0x05;
+
+/// Dante Controller's settings write (0x1101; captured 12.11.2026, dstack
+/// #216, `tests/fixtures/arc_dc_latency_write.json`): `05, n`, then `n`
+/// pairs `key, offset` (`u16` each), the offset counting from the frame's
+/// first byte to the key's `u32` value; the values come after the pairs
+/// (Dante Controller pads 12 zero bytes between). Each key with its value,
+/// when every pair reads: its offset at or past the pairs' end, on the
+/// frame's 4-byte grid, and its value inside the frame. `None` otherwise.
+fn keyed_write(body: &[u8]) -> Option<Vec<(u16, u32)>> {
+    let (&[tag, n], _) = body.split_first_chunk::<2>()?;
+    if tag != SETTINGS_WRITE {
+        return None;
+    }
+    let n = usize::from(n);
+    let pairs_end = HEADER_LEN + 2 + 4 * n;
+    (0..n)
+        .map(|k| {
+            let key = read_u16(body, 2 + 4 * k)?;
+            let at = usize::from(read_u16(body, 4 + 4 * k)?);
+            if at < pairs_end || at % 4 != 0 {
+                return None;
+            }
+            Some((key, read_u32(body, at.checked_sub(HEADER_LEN)?)?))
+        })
+        .collect()
+}
+
+/// The latency Dante Controller's keyed write sets ([`keyed_write`]): one
+/// or more pairs, every key the latency as configured or in effect
+/// ([`key::LATENCY_CONFIGURED`], [`key::LATENCY_ACTIVE`]), every value
+/// the same.
+fn keyed_latency(body: &[u8]) -> Option<u32> {
+    let pairs = keyed_write(body)?;
+    let &(_, ns) = pairs.first()?;
+    pairs
+        .iter()
+        .all(|&(k, v)| matches!(k, key::LATENCY_CONFIGURED | key::LATENCY_ACTIVE) && v == ns)
+        .then_some(ns)
 }
 
 /// Why a latency write was not confirmed.
