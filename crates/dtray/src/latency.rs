@@ -29,6 +29,11 @@ pub struct Choice {
 /// `ns` as the menu shows it: milliseconds, no trailing zeros
 /// (`0.25 ms`, `1 ms`).
 pub fn label(ns: u32) -> String {
+    label_wide(u64::from(ns))
+}
+
+/// [`label`] of any `u64` of ns (a value asked past a `u32`).
+fn label_wide(ns: u64) -> String {
     let whole = ns / 1_000_000;
     let frac = ns % 1_000_000;
     if frac == 0 {
@@ -60,8 +65,9 @@ pub fn choices(settings: &Settings) -> Vec<Choice> {
 /// up at the fourth decimal): ASCII digits, then optionally a point and
 /// more digits (`0.333`, `2`, `1.0`; the menu's labels without " ms" name
 /// the same values as the menu). `None` for anything else (a sign, a
-/// space, a unit, `.5`, `1.`) and for a value past a `u32` of ns.
-pub fn ns_of_ms(ms: &str) -> Option<u32> {
+/// space, a unit, `.5`, `1.`) and for a value past a `u64` of ns (one
+/// past a `u32` is a value, outside any device's range: [`pick`]).
+pub fn ns_of_ms(ms: &str) -> Option<u64> {
     let (whole, frac) = match ms.split_once('.') {
         Some((whole, frac)) => (whole, Some(frac)),
         None => (ms, None),
@@ -78,7 +84,7 @@ pub fn ns_of_ms(ms: &str) -> Option<u32> {
         .ok()?
         .checked_mul(1000)?
         .checked_add(part)?;
-    u32::try_from(us.checked_mul(1000)?).ok()
+    us.checked_mul(1000)
 }
 
 /// The latency `ms` names ([`ns_of_ms`]) when it lies in the range the
@@ -93,15 +99,14 @@ pub fn pick(settings: &Settings, ms: &str) -> Result<u32, String> {
     let ns = ns_of_ms(ms).ok_or_else(|| {
         format!("{ms} is not a latency in ms (such as 0.5 or 0.333); nothing written")
     })?;
-    if (min..=max).contains(&ns) {
-        Ok(ns)
-    } else {
-        Err(format!(
+    match u32::try_from(ns) {
+        Ok(ns) if (min..=max).contains(&ns) => Ok(ns),
+        _ => Err(format!(
             "{} is outside the latency range the device states ({} to {}); nothing written",
-            label(ns),
+            label_wide(ns),
             label(min),
             label(max)
-        ))
+        )),
     }
 }
 

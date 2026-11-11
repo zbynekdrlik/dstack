@@ -76,11 +76,11 @@ fn no_range_no_choice() {
 
 #[test]
 fn the_command_line_takes_the_menu_s_labels_without_ms() {
-    let named: Vec<Option<u32>> = ["0.25", "0.5", "1", "2", "5", "10"]
+    let named: Vec<Option<u64>> = ["0.25", "0.5", "1", "2", "5", "10"]
         .iter()
         .map(|ms| ns_of_ms(ms))
         .collect();
-    let all: Vec<Option<u32>> = DANTE_NS.iter().map(|&ns| Some(ns)).collect();
+    let all: Vec<Option<u64>> = DANTE_NS.iter().map(|&ns| Some(u64::from(ns))).collect();
     assert_eq!(named, all);
 }
 
@@ -107,10 +107,15 @@ fn the_command_line_takes_any_decimal_ms_rounded_to_whole_us() {
     assert_eq!(ns_of_ms("0.123456789"), Some(123_000));
     assert_eq!(ns_of_ms("0.0005"), Some(1_000));
     assert_eq!(ns_of_ms("0.0004"), Some(0));
-    // The largest value a u32 of ns holds, and one µs past it.
+    // Past a u32 of ns is still a value (outside any range, `pick`); past
+    // a u64 is none.
     assert_eq!(ns_of_ms("4294.967"), Some(4_294_967_000));
-    assert_eq!(ns_of_ms("4294.968"), None);
-    assert_eq!(ns_of_ms("250000"), None);
+    assert_eq!(ns_of_ms("4294.968"), Some(4_294_968_000));
+    assert_eq!(ns_of_ms("250000"), Some(250_000_000_000));
+    assert_eq!(
+        ns_of_ms("18446744073709.551"),
+        Some(18_446_744_073_709_551_000)
+    );
     assert_eq!(ns_of_ms("99999999999999999999999"), None);
 }
 
@@ -142,7 +147,8 @@ fn any_value_inside_the_device_s_range_is_picked_both_ends_included() {
     let s = settings(Some(333_000), Some(10_000_000), Some(1_000_000));
     // Dante's values inside the range, as before (dstack #104).
     for ms in ["0.5", "1", "2", "5", "10"] {
-        assert_eq!(pick(&s, ms), Ok(ns_of_ms(ms).unwrap()), "{ms:?}");
+        let ns = u32::try_from(ns_of_ms(ms).unwrap()).unwrap();
+        assert_eq!(pick(&s, ms), Ok(ns), "{ms:?}");
     }
     // Any other (dstack #213), the ends included.
     assert_eq!(pick(&s, "0.333"), Ok(333_000));
@@ -158,6 +164,20 @@ fn any_value_inside_the_device_s_range_is_picked_both_ends_included() {
     assert_eq!(pick(&s, "0.332"), outside("0.332 ms"));
     assert_eq!(pick(&s, "10.001"), outside("10.001 ms"));
     assert_eq!(pick(&s, "0"), outside("0 ms"));
+    // A value past a u32 of ns is outside too, not junk.
+    assert_eq!(pick(&s, "5000"), outside("5000 ms"));
+    assert_eq!(pick(&s, "4294.9673"), outside("4294.967 ms"));
+    assert_eq!(pick(&s, "4294.968"), outside("4294.968 ms"));
+    let all = settings(Some(0), Some(u32::MAX), None);
+    assert_eq!(pick(&all, "4294.967"), Ok(4_294_967_000));
+    assert_eq!(
+        pick(&all, "4294.968"),
+        Err(
+            "4294.968 ms is outside the latency range the device states \
+             (0 ms to 4294.967295 ms); nothing written"
+                .to_string()
+        )
+    );
     assert_eq!(
         pick(&s, "0,5"),
         Err("0,5 is not a latency in ms (such as 0.5 or 0.333); nothing written".to_string())

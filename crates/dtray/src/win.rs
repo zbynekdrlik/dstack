@@ -47,7 +47,7 @@ fn wide(s: &str) -> Vec<u16> {
 /// (`dstack_endpoint::win::attach_console`).
 pub fn attach_console() {
     // SAFETY: plain call; failing (no parent console: Explorer, the Run
-    // value, Start-Process) changes nothing.
+    // value) changes nothing.
     unsafe { AttachConsole(ATTACH_PARENT_PROCESS) };
 }
 
