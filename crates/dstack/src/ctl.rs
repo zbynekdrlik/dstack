@@ -11,9 +11,9 @@
 //!
 //! - `status`: one JSON line, numbers, keys and a few fixed words
 //!   (`counter`, `sine`, `echo`, `engine`), and the device's own name
-//!   (`name`, dstack #209), never an address ([`status`]); with the
-//!   engine's pump once one is attached, and the app's own part once it
-//!   sets one (`app`, the app's words).
+//!   (`name`, dstack #209), never an address ([`status`](fn@status));
+//!   with the engine's pump once one is attached, and the app's own part
+//!   once it sets one (`app`, the app's words).
 //! - `source <tx> silence|counter|sine <hz> <dbfs>|echo <rx> <samples>|engine`:
 //!   what TX channel `tx` (from 1) sends ([`crate::media::source::Source`]);
 //!   runtime only, every TX channel is silent at start. A sine is at most

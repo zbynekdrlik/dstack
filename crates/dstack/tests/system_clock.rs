@@ -379,6 +379,55 @@ fn a_tx_only_device_serves_a_receiver() {
     assert!(matches!(stopped, host::Stopped::Done), "{stopped:?}");
 }
 
+/// The controller API's label writes (`arc::control` over the ARC client's
+/// UDP exchange) against our own running device: read, rename two channels,
+/// read them back; the device saves them.
+#[test]
+fn arc_control_renames_our_running_device_s_channels() {
+    use dstack::arc::client::{REPLY_TIMEOUT, Udp};
+    use dstack::arc::control::{self, Dir};
+    use std::net::SocketAddrV4;
+    use std::sync::atomic::AtomicU16;
+
+    let _one = ONE_DEVICE.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = tempfile::tempdir().unwrap();
+    let ip = routed_ipv4();
+    let opts = Options {
+        config: config_in(dir.path(), true),
+        place: Place::Ip(ip),
+        control: dir.path().join("control.sock"),
+    };
+    let prepared = host::prepare_with(&opts, &[], ClockSource::System).expect("the device set up");
+    let rx2 = prepared.config().rx[1].clone();
+    let stop = Arc::new(AtomicBool::new(false));
+    let host = prepared
+        .start(Signals::Report(Arc::clone(&stop)))
+        .expect("the device started");
+    let seq = AtomicU16::new(1);
+    let requests = dstack::ctl::Requests::default();
+    let halt = AtomicBool::new(false);
+    let to = SocketAddrV4::new(ip, dstack::arc::PORT);
+    let mut udp = Udp::open(ip, to, &seq, REPLY_TIMEOUT, &requests, &halt).expect("a socket");
+    let before = control::labels(&mut udp);
+    let renamed = control::rename_channel(&mut udp, Dir::Rx, 2, Some("Vox L"))
+        .and_then(|()| control::rename_channel(&mut udp, Dir::Tx, 1, Some("Click")));
+    let after = control::labels(&mut udp);
+    let stopped = host.stop(Duration::from_secs(5));
+    let before = before.expect("the labels read");
+    assert_eq!(before.get(Dir::Rx, 2), Some(rx2.as_str()), "{before:?}");
+    renamed.expect("both channels renamed");
+    let after = after.expect("the labels read back");
+    assert_eq!(after.get(Dir::Rx, 2), Some("Vox L"), "{after:?}");
+    assert_eq!(after.get(Dir::Tx, 1), Some("Click"), "{after:?}");
+    // The device saved the labels in its state file.
+    let saved = std::fs::read_to_string(dir.path().join("state.toml")).unwrap();
+    assert!(
+        saved.contains("Vox L") && saved.contains("Click"),
+        "{saved}"
+    );
+    assert!(matches!(stopped, host::Stopped::Done), "{stopped:?}");
+}
+
 #[test]
 fn discovery_lists_our_running_device_and_its_withdrawal() {
     use dstack::discover::{Change, Discovery};

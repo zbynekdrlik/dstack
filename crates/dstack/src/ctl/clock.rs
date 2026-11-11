@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // Copyright (C) 2026 dstack contributors.
 
-//! The status's `clock` object ([`super::status`]): the media clock's
-//! state, the counts of the source in use, and a linked clock's counts per
-//! source.
+//! The status's `clock` object ([`super::status`](fn@super::status)): the
+//! media clock's state, the counts of the source in use, and a linked
+//! clock's counts per source.
 
 use std::sync::atomic::Ordering;
 

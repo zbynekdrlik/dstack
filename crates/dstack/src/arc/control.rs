@@ -636,4 +636,4 @@ pub fn rx_flows(c: &mut impl Call) -> Result<Vec<RxFlow>, ReadError> {
 }
 
 #[cfg(test)]
-pub(crate) mod tests;
+mod tests;

@@ -110,10 +110,10 @@ impl Json {
 /// - `requests`: `[{port, peer, op, n}]`, every datagram the device
 ///   received (ARC 4440, flow control 4455, info 8700, CMC 8800; `op` as
 ///   [`header_op`](super::header_op) and [`info_op`](super::info_op) read
-///   it); `sent`: `[{peer, op, n}]`, our
-///   RX's flow requests (256) and stops (257), and its ARC reads of
-///   transmitters' channels (4096 once a directory read, 8192 and 8208 once
-///   a page); `uncounted`: past the tables.
+///   it); `sent`: `[{peer, op, n}]`, our RX's flow requests (256) and stops
+///   (257), and its ARC reads of transmitters' channels (4096 once a
+///   directory read, 8192 and 8208 once a page); `uncounted`: past the
+///   tables.
 /// - `tx`: each TX flow slot that has or had a flow: `flow`, `live` (a flow
 ///   that sends), `fpp`, `channels`, `packets`, `send_errors` (packets refused after
 ///   their retries: lost), `send_retries` (packets the NIC refused for a
