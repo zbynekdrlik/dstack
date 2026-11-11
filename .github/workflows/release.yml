@@ -53,7 +53,7 @@ jobs:
           persist-credentials: false
       - name: GTK, AppIndicator and ALSA headers (dtray's Linux tray, dlisten's output)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libayatana-appindicator3-dev libasound2-dev
+        run: scripts/ci-apt-deps.sh
       - run: cargo build --release --locked -p dstack --bin dstack-dev -p dtray --bin dtray -p dlisten --bin dlisten -p dsend --bin dsend
       - name: Name, hash and upload the binaries
         shell: bash

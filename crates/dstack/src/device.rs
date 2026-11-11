@@ -720,6 +720,19 @@ impl Subscription {
     }
 }
 
+/// One of our own multicast TX flows a controller created (ARC 2.8.9's
+/// create, dstack #193), as the state file keeps it (dstack #207): its
+/// slot in the TX table (from 0; the media-local id Dante lists is
+/// `slot + 1`) and its TX channels (from 1). Its group, frames a packet
+/// and encoding follow the address and the config at each start
+/// ([`crate::media::tx::TxTable::add_own_multicast`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SavedMulticast {
+    pub slot: usize,
+    pub channels: Vec<u16>,
+}
+
 /// The names the device lists now: the config's until Dante Controller
 /// renames a channel, then the state file's; and its RX subscriptions.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -748,6 +761,13 @@ pub struct DeviceState {
     /// another latency since wins, and the Controller's value goes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_latency_ns: Option<u64>,
+    /// Our own multicast TX flows a controller created, one per slot in
+    /// slot order (dstack #207): made again at each start, before any
+    /// sends ([`crate::media::tx::TxShared::recreate_multicast`]), as a
+    /// hardware device keeps a created multicast flow across a reboot. A
+    /// file written before has none; none are written as no key.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub multicast: Vec<SavedMulticast>,
     /// The RX channels (from 0) whose subscription is the config's
     /// declared one ([`DeviceState::declare`]), never changed since: a
     /// save leaves them out of the file, so the config keeps declaring
@@ -775,8 +795,25 @@ impl DeviceState {
             subscriptions: Vec::new(),
             latency_ns: None,
             config_latency_ns: None,
+            multicast: Vec::new(),
             declared: BTreeSet::new(),
         }
+    }
+
+    /// A controller created our multicast flow of `channels` in `slot`:
+    /// kept, in place of any saved in that slot.
+    pub fn set_multicast(&mut self, slot: usize, channels: &[u16]) {
+        self.remove_multicast(slot);
+        self.multicast.push(SavedMulticast {
+            slot,
+            channels: channels.to_vec(),
+        });
+        self.multicast.sort_by_key(|f| f.slot);
+    }
+
+    /// A controller deleted our multicast flow in `slot`: no longer kept.
+    pub fn remove_multicast(&mut self, slot: usize) {
+        self.multicast.retain(|f| f.slot != slot);
     }
 
     /// Gives each RX channel `cfg` declares a subscription for

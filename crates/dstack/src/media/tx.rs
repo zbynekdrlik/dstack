@@ -13,7 +13,11 @@
 //!   it, of at most [`MAX_CHANNELS`] slots. A flow without a datagram from
 //!   its receiver for [`KEEPALIVE_TIMEOUT_NS`] expires: it sends nothing
 //!   until an update or a new request for the same destination revives it,
-//!   and its slot is freed when a new destination needs one (inferno).
+//!   and its slot is freed when a new destination needs one (inferno). A
+//!   multicast flow (ARC 2.8.9's create, [`TxTable::add_multicast`], dstack
+//!   #193) goes to a group ([`multicast_group`]) instead: no receiver keeps
+//!   it alive, so it never expires, and only its delete
+//!   ([`TxTable::remove_multicast`]) ends it.
 //! - [`TxShared`]: what the control side and the TX thread share. The
 //!   table sits behind a mutex only the control side takes; the TX thread
 //!   reads each slot's [`Plan`] and each TX channel's [`Source`] from
@@ -188,11 +192,17 @@ pub struct TxFlow {
     pub heard_ns: u64,
     /// No datagram for [`KEEPALIVE_TIMEOUT_NS`]: sends nothing.
     pub expired: bool,
+    /// A multicast flow (ARC 2.8.9's create, dstack #193): `dest` is its
+    /// group, it has no receiver (`rx_host` and `rx_flow_name` empty) and
+    /// never expires; the flow server's handles do not reach it.
+    pub multicast: bool,
 }
 
 /// The TX flows: the control side's table (pure; the times are the
-/// control side's ns, [`TxShared::now_ns`]).
-#[derive(Debug)]
+/// control side's ns, [`TxShared::now_ns`]). A clone is a copy to put
+/// back when a change cannot be kept (a multicast create the state file
+/// could not save, `arc::answer`).
+#[derive(Debug, Clone)]
 pub struct TxTable {
     flows: Vec<Option<TxFlow>>,
     /// The slots it fills: 0 to this (the device's `flow_slots`).
@@ -260,6 +270,7 @@ impl TxTable {
                     cookie,
                     heard_ns: now,
                     expired: false,
+                    multicast: false,
                 });
                 return Ok((slot, control::handle(slot as u32, cookie)));
             }
@@ -274,12 +285,14 @@ impl TxTable {
             .position(|f| f.as_ref().is_some_and(|f| f.dest == dest))
     }
 
-    /// The flow with handle `h`, expired or not.
+    /// The flow with handle `h`, expired or not; never a multicast flow,
+    /// which no receiver asked for (no receiver's handle stops or updates
+    /// it).
     pub fn get(&self, h: &Handle) -> Option<(usize, &TxFlow)> {
         let (slot, cookie) = control::split(h);
         let slot = usize::try_from(slot).ok()?;
         let flow = self.flows.get(slot)?.as_ref()?;
-        (flow.cookie == cookie).then_some((slot, flow))
+        (flow.cookie == cookie && !flow.multicast).then_some((slot, flow))
     }
 
     /// Removes the flow with handle `h` (expired or not); returns its slot,
@@ -322,15 +335,36 @@ impl TxTable {
     pub fn expire(&mut self, now: u64) -> u32 {
         let mut expired = 0u32;
         for (slot, flow) in self.flows.iter_mut().enumerate() {
-            if let Some(flow) = flow
-                .as_mut()
-                .filter(|f| !f.expired && now.saturating_sub(f.heard_ns) >= KEEPALIVE_TIMEOUT_NS)
-            {
+            if let Some(flow) = flow.as_mut().filter(|f| {
+                !f.expired && !f.multicast && now.saturating_sub(f.heard_ns) >= KEEPALIVE_TIMEOUT_NS
+            }) {
                 flow.expired = true;
                 expired += 1 << slot;
             }
         }
         expired
+    }
+
+    /// Ends the live flow in `slot` as if its receiver had gone quiet
+    /// (dstack #187, dstack-dev's `tx-end`): it is expired as [`expire`]
+    /// expires one, so it sends nothing, its slot is free for the next new
+    /// flow, and its receiver's stop is still answered. `false` for an
+    /// empty slot or a flow expired already.
+    ///
+    /// [`expire`]: TxTable::expire
+    pub fn end(&mut self, slot: usize) -> bool {
+        match self
+            .flows
+            .get_mut(slot)
+            .and_then(Option::as_mut)
+            .filter(|f| !f.expired)
+        {
+            Some(flow) => {
+                flow.expired = true;
+                true
+            }
+            None => false,
+        }
     }
 
     /// The flow in `slot`.
@@ -725,16 +759,30 @@ impl TxShared {
         }
         let slots = cfg.flow_slots;
         let mut send_buffer = 0;
+        let mut multicast_refused = None;
         let sockets = (0..slots.min(MAX_FLOWS))
             .map(|_| {
                 let s = UdpSocket::bind(SocketAddrV4::new(ip, 0))?;
                 s.set_nonblocking(true)?;
                 crate::winsock::no_connreset(&s)?;
                 mark(&s)?;
+                // Unicast never depends on it: a refusal leaves multicast
+                // flows (dstack #193) on the routing table's interface.
+                if let Err(e) = multicast_out(&s, ip) {
+                    multicast_refused = Some(e);
+                }
                 send_buffer = set_send_buffer(&s, SEND_BUFFER_BYTES);
                 Ok(s)
             })
             .collect::<io::Result<Box<[UdpSocket]>>>()?;
+        if let Some(e) = multicast_refused {
+            warn!(
+                error = %e,
+                %ip,
+                "the flow sockets' multicast interface and TTL could not be set: \
+                 multicast flows go out on the routing table's interface"
+            );
+        }
         let mut ports = [0; MAX_FLOWS];
         for (port, s) in ports.iter_mut().zip(&sockets) {
             *port = s.local_addr()?.port();
@@ -773,6 +821,11 @@ impl TxShared {
             stop: AtomicBool::new(false),
             base: Instant::now(),
         })
+    }
+
+    /// The device's address: where every flow is sent from.
+    pub fn ip(&self) -> Ipv4Addr {
+        self.ip
     }
 
     /// The control side's lock (never taken by the TX thread).
@@ -843,6 +896,16 @@ impl TxShared {
         }
         self.publish(&c);
         expired
+    }
+
+    /// Ends the live flow in `slot` ([`TxTable::end`]) and hands the plans
+    /// to the TX thread, which sends nothing more for it; `false` for an
+    /// empty slot or a flow expired already (nothing changed).
+    pub fn end_flow(&self, slot: usize) -> bool {
+        let mut c = self.lock();
+        let ended = c.table.end(slot);
+        self.publish(&c);
+        ended
     }
 
     /// Each slot's direct MAC from the neighbour `table` (the text of
@@ -1978,7 +2041,10 @@ pub use retry::{
     SEND_RETRIES, SEND_RETRY_HEADROOM_NS, SEND_RETRY_WAIT_NS, send_retry, transient_refusal,
 };
 
+mod multicast;
 mod receivers;
+use multicast::multicast_out;
+pub use multicast::{MULTICAST_PORT, MULTICAST_TTL, multicast_group};
 
 #[cfg(test)]
 mod tests;

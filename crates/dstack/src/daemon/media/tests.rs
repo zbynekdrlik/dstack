@@ -255,6 +255,23 @@ fn the_media_side_starts_from_the_state_file_s_subscriptions_and_silence() {
     assert_eq!(media.engine(), None);
 }
 
+/// dstack #207: the media side starts with the state file's multicast
+/// flows made again, before any thread sends.
+#[test]
+fn the_media_side_starts_with_the_state_file_s_multicast_flows() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut device = device_at(dir.path());
+    device.state.set_multicast(2, &[3, 4]);
+    let media = media_on(&device, Arc::new(Unready));
+    let c = media.tx.lock();
+    let f = c.table.flow(2).expect("the saved flow in slot 2");
+    assert!(f.multicast);
+    assert_eq!(f.channels, [Some(3), Some(4)]);
+    let group = crate::media::tx::multicast_group(Ipv4Addr::LOCALHOST, device.cfg.process_id, 2);
+    assert_eq!(f.dest, group);
+    assert_eq!(c.table.flows().count(), 1);
+}
+
 #[test]
 fn engine_channels_get_one_engine_ring_each_and_the_rest_none() {
     let dir = tempfile::tempdir().unwrap();

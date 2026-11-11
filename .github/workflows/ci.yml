@@ -27,7 +27,7 @@ jobs:
           persist-credentials: false
       - run: cargo fmt --all --check
       - name: GTK, AppIndicator and ALSA headers (dtray's Linux tray, dlisten's output)
-        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libayatana-appindicator3-dev libasound2-dev
+        run: scripts/ci-apt-deps.sh
       - name: Docs build without warnings (broken or private links)
         run: cargo doc --workspace --no-deps --locked
         env:
@@ -47,7 +47,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: GTK, AppIndicator and ALSA headers (dtray's Linux tray, dlisten's output)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libayatana-appindicator3-dev libasound2-dev
+        run: scripts/ci-apt-deps.sh
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
 
@@ -82,7 +82,7 @@ jobs:
         with:
           tool: cargo-llvm-cov@0.9.1
       - name: GTK, AppIndicator and ALSA headers (dtray's Linux tray, dlisten's output)
-        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libayatana-appindicator3-dev libasound2-dev
+        run: scripts/ci-apt-deps.sh
       - name: Line coverage against the floor (.github/coverage-floor)
         run: |
           set -euo pipefail
@@ -164,7 +164,7 @@ jobs:
         with:
           tool: cargo-mutants@27.1.0,cargo-nextest@0.9.146
       - name: GTK, AppIndicator and ALSA headers (dtray's Linux tray, dlisten's output)
-        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libayatana-appindicator3-dev libasound2-dev
+        run: scripts/ci-apt-deps.sh
       - name: Mutants of the diff
         env:
           NEXTEST_PROFILE: mutants
