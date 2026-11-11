@@ -153,6 +153,29 @@ fn the_cmc_record_gives_the_device_id_its_heartbeat_carries() {
     assert!(d.entries.is_empty());
 }
 
+/// dstack #180: a device beside another on one PC takes CMC 8800+k and
+/// says so in its `_netaudio-cmc` record; a controller sends its meter
+/// start there, not to 8800 (the PC's first device).
+#[test]
+fn the_cmc_record_gives_the_device_s_cmc_address_and_a_new_port_is_a_change() {
+    let mut d = Devices::default();
+    let cmc = |port: u16| srv([10, 0, 0, 30], port, &[("id", "00000a4d071e0001")]);
+    d.set(Service::Arc, "band", Some(&srv([10, 0, 0, 30], 4441, &[])));
+    let Some(Change::Changed(dev)) = d.set(Service::Cmc, "band", Some(&cmc(8801))) else {
+        panic!("changed");
+    };
+    assert_eq!(dev.cmc, Some(at([10, 0, 0, 30], 8801)));
+    let Some(Change::Changed(dev)) = d.set(Service::Cmc, "band", Some(&cmc(8802))) else {
+        panic!("a new CMC port is a change");
+    };
+    assert_eq!(dev.cmc, Some(at([10, 0, 0, 30], 8802)));
+    // The CMC record gone: no CMC address, the device stays.
+    let Some(Change::Changed(dev)) = d.set(Service::Cmc, "band", None) else {
+        panic!("changed");
+    };
+    assert_eq!(dev.cmc, None);
+}
+
 #[test]
 fn a_device_id_is_16_hex_digits() {
     assert_eq!(
