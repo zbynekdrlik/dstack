@@ -793,6 +793,79 @@ fn our_device_creates_lists_sends_and_deletes_a_multicast_flow() {
     assert!(matches!(stopped, host::Stopped::Done), "{stopped:?}");
 }
 
+/// dstack #207: a multicast flow created on our running device survives
+/// the device's restart on the same state file, as on hardware: after the
+/// restart the list states it in its slot with the same channels and
+/// group, and the group receives its packets from our address again.
+#[test]
+fn our_multicast_flow_survives_a_restart_of_the_device() {
+    use dstack::arc::client::{REPLY_TIMEOUT, Udp};
+    use dstack::arc::flows;
+    use std::net::SocketAddrV4;
+    use std::sync::atomic::AtomicU16;
+
+    let _one = ONE_DEVICE.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = tempfile::tempdir().unwrap();
+    let ip = routed_ipv4();
+    let opts = Options {
+        config: config_in(dir.path(), false),
+        place: Place::Ip(ip),
+        control: dir.path().join("control.sock"),
+    };
+    let start = || {
+        let prepared =
+            host::prepare_with(&opts, &[], ClockSource::System).expect("the device set up");
+        let process_id = prepared.config().process_id;
+        let stop = Arc::new(AtomicBool::new(false));
+        let host = prepared
+            .start(Signals::Report(stop))
+            .expect("the device started");
+        (host, process_id)
+    };
+    let seq = AtomicU16::new(1);
+    let requests = dstack::ctl::Requests::default();
+    let halt = AtomicBool::new(false);
+    let to = SocketAddrV4::new(ip, dstack::arc::PORT);
+    let mut udp = Udp::open(ip, to, &seq, REPLY_TIMEOUT, &requests, &halt).expect("a socket");
+    let (first, process_id) = start();
+    let made = flows::create_multicast(&mut udp, 3, &[2, 1], flows::OPTIONS[0]);
+    let first_stop = first.stop(Duration::from_secs(5));
+    let (second, _) = start();
+    let group = dstack::media::tx::multicast_group(ip, process_id, 2);
+    let joined = dstack::media::rx::join(ip, group).expect("the group joined");
+    let listed = flows::list_tx_flows(&mut udp);
+    let mut buf = [0u8; 2048];
+    let mut ours = 0usize;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while ours < 100 && Instant::now() < deadline {
+        match joined.recv_from(&mut buf) {
+            Ok((_, from)) if from.ip() == std::net::IpAddr::V4(ip) => ours += 1,
+            Ok(_) => {}
+            Err(_) => std::thread::sleep(Duration::from_millis(1)),
+        }
+    }
+    let deleted = flows::delete_multicast(&mut udp, 3);
+    let second_stop = second.stop(Duration::from_secs(5));
+    made.expect("the multicast flow created");
+    assert!(matches!(first_stop, host::Stopped::Done), "{first_stop:?}");
+    let listed = listed.expect("our list after the restart");
+    let [f] = &listed.flows[..] else {
+        panic!("one flow listed after the restart: {listed:?}");
+    };
+    assert!(f.multicast(), "{f:?}");
+    assert_eq!((f.local_id, &f.channels[..]), (3, &[2, 1][..]), "{f:?}");
+    assert_eq!(f.destinations, [group]);
+    assert!(
+        ours >= 100,
+        "{ours} packets of our flow on the group in 5 s after the restart"
+    );
+    deleted.expect("the flow deleted");
+    assert!(
+        matches!(second_stop, host::Stopped::Done),
+        "{second_stop:?}"
+    );
+}
+
 /// dstack #187 (dcontroller#46): dstack-dev's `tx-end` ends the TX flow our
 /// own RX 1 receives (subscribed to our own TX 1); RX 1 stops receiving
 /// (InProgress, no packets), then asks for the flow again and receives by

@@ -199,8 +199,10 @@ pub struct TxFlow {
 }
 
 /// The TX flows: the control side's table (pure; the times are the
-/// control side's ns, [`TxShared::now_ns`]).
-#[derive(Debug)]
+/// control side's ns, [`TxShared::now_ns`]). A clone is a copy to put
+/// back when a change cannot be kept (a multicast create the state file
+/// could not save, `arc::answer`).
+#[derive(Debug, Clone)]
 pub struct TxTable {
     flows: Vec<Option<TxFlow>>,
     /// The slots it fills: 0 to this (the device's `flow_slots`).

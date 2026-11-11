@@ -791,6 +791,45 @@ fn a_subscription_survives_a_restart() {
     assert_eq!(back.subscription(0), Some(&sub("TX 2", "peer-device")));
 }
 
+/// dstack #207: our own multicast TX flows a controller created are kept
+/// by slot (from 0) and channels, one per slot, in slot order; a file
+/// without them (every file before) loads with none, and a state without
+/// them writes no `multicast` key.
+#[test]
+fn saved_multicast_flows_survive_a_restart_and_an_older_file_loads_without_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = config_in(dir.path());
+    fs::write(&cfg.state_file, phase_a_state()).unwrap();
+    let mut state = DeviceState::load_or_default(&cfg).unwrap();
+    assert!(state.multicast.is_empty());
+    state.save(&cfg.state_file).unwrap();
+    let text = fs::read_to_string(&cfg.state_file).unwrap();
+    assert!(!text.contains("multicast"), "{text}");
+    let flow = |slot, channels: &[u16]| SavedMulticast {
+        slot,
+        channels: channels.to_vec(),
+    };
+    state.set_multicast(4, &[3, 1]);
+    state.set_multicast(1, &[2]);
+    // A new flow in a slot replaces the one saved there.
+    state.set_multicast(4, &[5]);
+    assert_eq!(state.multicast, [flow(1, &[2]), flow(4, &[5])]);
+    state.save(&cfg.state_file).unwrap();
+    let text = fs::read_to_string(&cfg.state_file).unwrap();
+    assert_eq!(text.matches("[[multicast]]").count(), 2, "{text}");
+    assert!(text.contains("slot = 4\nchannels = [5]\n"), "{text}");
+    assert_eq!(DeviceState::load_or_default(&cfg).unwrap(), state);
+    // A delete drops only its slot; a slot without one changes nothing.
+    state.remove_multicast(4);
+    state.remove_multicast(7);
+    assert_eq!(state.multicast, [flow(1, &[2])]);
+    state.remove_multicast(1);
+    state.save(&cfg.state_file).unwrap();
+    let text = fs::read_to_string(&cfg.state_file).unwrap();
+    assert!(!text.contains("multicast"), "{text}");
+    assert_eq!(DeviceState::load_or_default(&cfg).unwrap(), state);
+}
+
 #[test]
 fn a_wrong_length_list_is_refused() {
     let dir = tempfile::tempdir().unwrap();
