@@ -310,15 +310,16 @@ pub const NO_NAME: &str = "its status carries no name (a stack before dstack #20
 
 /// Whether the status line `status` comes from the device listed as
 /// `name`: its own name is `name`, ASCII case aside (as discovery compares
-/// names). Otherwise why not: another device answered on the port the
-/// listing named (a stale mDNS record whose port another of our devices
-/// holds now), or the line names none ([`NO_NAME`]).
+/// names). Otherwise why not: the line names another name (a stale mDNS
+/// record: the device was renamed since, and its record under the new
+/// name counts, or its port is another device's now), or none
+/// ([`NO_NAME`]).
 pub fn answered_as(name: &str, status: &str) -> Result<(), String> {
     match status_name(status) {
         None => Err(NO_NAME.to_string()),
         Some(own) if own.eq_ignore_ascii_case(name) => Ok(()),
         Some(own) => Err(format!(
-            "its status names another device, {own:?}: the port it was found at is that device's now"
+            "its status names {own:?}, not the device it was listed as (a stale mDNS record: renamed, or its port another device's now)"
         )),
     }
 }
@@ -335,10 +336,9 @@ pub fn reply_bytes(name: &str, read: Result<String, ProbeError>) -> Result<u64, 
 
 /// Each of `peers`' bytes ([`reply_bytes`], under its listed name), read
 /// one after another from 127.0.0.1 within `wait` for all. Each has its
-/// share of the time left
-/// (split with the ones still to read), so a stuck neighbour (one that
-/// accepts and never answers, or a closed port Windows keeps trying) takes
-/// only its own share and the rest are still read.
+/// share of the time left (split with the ones still to read), so a stuck
+/// neighbour (one that accepts and never answers, or a closed port Windows
+/// keeps trying) takes only its own share and the rest are still read.
 pub fn read_peers(peers: &[Peer], wait: Duration) -> Vec<(String, Result<u64, String>)> {
     let deadline = Instant::now() + wait;
     let count = peers.len();
