@@ -19,6 +19,13 @@ pub fn needs_reopen(kind: ErrorKind) -> bool {
     )
 }
 
+/// Whether a stream error of `kind` is a data discontinuity (dstack #198:
+/// WASAPI's flag, cpal's xrun): audio was lost between two packets, which
+/// dsend measures on the next packet.
+pub fn is_discontinuity(kind: ErrorKind) -> bool {
+    matches!(kind, ErrorKind::Xrun)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -40,6 +47,20 @@ mod tests {
             ErrorKind::BackendError,
         ] {
             assert!(needs_reopen(kind), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn only_an_xrun_is_a_discontinuity() {
+        assert!(is_discontinuity(ErrorKind::Xrun));
+        for kind in [
+            ErrorKind::DeviceChanged,
+            ErrorKind::RealtimeDenied,
+            ErrorKind::DeviceNotAvailable,
+            ErrorKind::StreamInvalidated,
+            ErrorKind::BackendError,
+        ] {
+            assert!(!is_discontinuity(kind), "{kind:?}");
         }
     }
 }

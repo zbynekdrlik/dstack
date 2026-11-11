@@ -2554,7 +2554,9 @@ fn only_the_normal_profile_on_windows_joins_mmcss() {
 #[cfg(not(windows))]
 #[test]
 fn off_windows_no_thread_joins_mmcss() {
-    assert!(!join_mmcss());
+    let e = join_mmcss().unwrap_err();
+    assert_eq!(e.kind(), std::io::ErrorKind::Unsupported);
+    assert_eq!(e.to_string(), NO_MMCSS);
 }
 
 #[test]

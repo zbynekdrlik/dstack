@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.88
+
+- Fix (dstack #198, FOH PC 11.11.2026: ~0.5 s dropouts in browser music through dsend while a browser started and dsend ran at BelowNormal): dsend's loopback capture keeps up on a busy desktop whatever its process class. Its capture thread joins MMCSS "Pro Audio" on its first callback (logged once with the task index or the error; the pump, TX and RX threads already did); the loopback buffer asks WASAPI for 250 ms of the mix rate (12000 frames at 48 kHz), so a 200 ms stall loses nothing inside WASAPI; a capture discontinuity is logged with the time since the last good callback and the frames lost in ms. The FIFO and its priming level are unchanged. API: `dstack::media::tx::join_mmcss` is public and returns the MMCSS task index or the OS error; `dstack_endpoint::stream::is_discontinuity`. No dlink latency change.
+
 ## 0.6.87
 
 - Feature (dstack #104): `dtray --set-latency <device> <ms>` runs the tray menu's own latency write without a desktop: the same discovery as `--print`, the device by name (case aside), one of the values it offers (`latency::choices`), `menu::write_needed`, `control::set_latency`, then a read-back; exit 0 only when the configured latency reads back as asked (stdout), errors on stderr with exit 1, usage exit 2. The tray and its ARC call now share `dtray::arc::call`; the tray and `--print` behave as before. No latency change for any device.
