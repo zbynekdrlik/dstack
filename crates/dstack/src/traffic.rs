@@ -18,14 +18,16 @@
 //! others' time). A neighbour counts in a window only when it was read at both of its
 //! ends with a counter that did not go back; one that appeared, went away
 //! or restarted meanwhile stays in the rest for that window. One that does
-//! not answer is left out and warned about once (again only after it
-//! answered).
+//! not answer, or whose status names another device than the one it was
+//! found as (dstack #209: a stale mDNS record whose port another of our
+//! devices holds now), is left out and warned about once (again only after
+//! it answered under its name).
 //!
 //! - [`TrafficWatch::look_with`] (pure, fake times): the window's
 //!   arithmetic, [`Traffic`] per second.
 //! - [`deltas`] (pure): the neighbours read at both ends.
-//! - [`tx_bytes_of`] and [`reply_bytes`] (pure): a neighbour's status line
-//!   read.
+//! - [`tx_bytes_of`], [`status_name`], [`answered_as`] and [`reply_bytes`]
+//!   (pure): a neighbour's status line read.
 //! - [`our_devices`] (pure): the warning's text of our devices' part.
 //! - [`read_peers`]: the reads, one deadline for all.
 //! - [`on_address`] (pure): our devices on our address in a discovery's
@@ -292,14 +294,48 @@ pub fn tx_bytes_of(status: &str) -> Option<u64> {
 /// The reason a status line without `tx_bytes` gives.
 pub const NO_TX_BYTES: &str = "its status carries no tx_bytes (a stack before dstack #203)";
 
-/// A neighbour's status `read` as its bytes, or why there are none.
-pub fn reply_bytes(read: Result<String, ProbeError>) -> Result<u64, String> {
-    let line = read.map_err(|e| e.to_string())?;
-    tx_bytes_of(&line).ok_or_else(|| NO_TX_BYTES.to_string())
+/// The device's name a status line gives (`name`, dstack #209); `None`
+/// when the line is no JSON object or carries no name as a string (a
+/// stack before #209).
+pub fn status_name(status: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(status)
+        .ok()?
+        .get("name")?
+        .as_str()
+        .map(str::to_string)
 }
 
-/// Each of `peers`' bytes ([`reply_bytes`]), read one after another from
-/// 127.0.0.1 within `wait` for all. Each has its share of the time left
+/// The reason a status line without a name gives.
+pub const NO_NAME: &str = "its status carries no name (a stack before dstack #209)";
+
+/// Whether the status line `status` comes from the device listed as
+/// `name`: its own name is `name`, ASCII case aside (as discovery compares
+/// names). Otherwise why not: another device answered on the port the
+/// listing named (a stale mDNS record whose port another of our devices
+/// holds now), or the line names none ([`NO_NAME`]).
+pub fn answered_as(name: &str, status: &str) -> Result<(), String> {
+    match status_name(status) {
+        None => Err(NO_NAME.to_string()),
+        Some(own) if own.eq_ignore_ascii_case(name) => Ok(()),
+        Some(own) => Err(format!(
+            "its status names another device, {own:?}: the port it was found at is that device's now"
+        )),
+    }
+}
+
+/// The status `read` of the neighbour listed as `name` as its bytes, or
+/// why there are none: no line, no `tx_bytes` ([`NO_TX_BYTES`]), or a line
+/// from another device ([`answered_as`]).
+pub fn reply_bytes(name: &str, read: Result<String, ProbeError>) -> Result<u64, String> {
+    let line = read.map_err(|e| e.to_string())?;
+    let bytes = tx_bytes_of(&line).ok_or_else(|| NO_TX_BYTES.to_string())?;
+    answered_as(name, &line)?;
+    Ok(bytes)
+}
+
+/// Each of `peers`' bytes ([`reply_bytes`], under its listed name), read
+/// one after another from 127.0.0.1 within `wait` for all. Each has its
+/// share of the time left
 /// (split with the ones still to read), so a stuck neighbour (one that
 /// accepts and never answers, or a closed port Windows keeps trying) takes
 /// only its own share and the rest are still read.
@@ -315,7 +351,7 @@ pub fn read_peers(peers: &[Peer], wait: Duration) -> Vec<(String, Result<u64, St
             let read = probe::time_left(deadline, Instant::now())
                 .map_err(ProbeError::from)
                 .and_then(|left| probe::status_at(addr, left / still));
-            (name.clone(), reply_bytes(read))
+            (name.clone(), reply_bytes(name, read))
         })
         .collect()
 }

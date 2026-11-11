@@ -233,15 +233,15 @@ fn a_neighbour_s_status_gives_its_tx_bytes() {
     assert_eq!(tx_bytes_of("not json"), None);
     assert_eq!(tx_bytes_of("[1]"), None);
     assert_eq!(
-        reply_bytes(Ok(r#"{"tx_bytes":7,"name":"a"}"#.to_string())),
+        reply_bytes("a", Ok(r#"{"tx_bytes":7,"name":"a"}"#.to_string())),
         Ok(7)
     );
     assert_eq!(
-        reply_bytes(Ok("{}".to_string())),
+        reply_bytes("a", Ok("{}".to_string())),
         Err(NO_TX_BYTES.to_string())
     );
     assert_eq!(
-        reply_bytes(Err(ProbeError::Empty)),
+        reply_bytes("a", Err(ProbeError::Empty)),
         Err("the answer is empty".to_string())
     );
 }
