@@ -18,7 +18,6 @@ Abstract:
 #include "endpoints.h"
 #include "minwavert.h"
 #include "minwavertstream.h"
-#include "micarraywavtable.h"
 
 #define EFFECTS_LIST_COUNT 2
 
@@ -179,8 +178,7 @@ Routine Description:
   The DataRangeIntersection function determines the highest quality 
   intersection of two data ranges.
 
-  This sample just sets the ResultantFormat to be the only supported
-  format for the MicArray endpoint.
+  dsend has one render endpoint: the class handler sets the ResultantFormat.
 
 Arguments:
 
@@ -221,36 +219,6 @@ Arguments:
         return STATUS_NOT_IMPLEMENTED;
     }
 
-    //If called for the mic array pin, set ResultantFormat to be the endpoint's only supported format.
-    //Otherwise, allow the class handler to set ResultantFormat.  
-    if ((this->m_DeviceType) == eMicArrayDevice1)
-    {
-        requiredSize = sizeof(KSDATAFORMAT_WAVEFORMATEXTENSIBLE);
-
-        //
-        // Validate return buffer size, if the request is only for the
-        // size of the resultant structure, return it now before
-        // returning other types of errors.
-        //
-        if (!OutputBufferLength)
-        {
-            *ResultantFormatLength = requiredSize;
-            return STATUS_BUFFER_OVERFLOW;
-        }
-        else if (OutputBufferLength < requiredSize)
-        {
-            return STATUS_BUFFER_TOO_SMALL;
-        }
-
-        //Set ResultantFormat to be the only supported format for the MicArray endpoint. 
-        PKSDATAFORMAT_WAVEFORMATEXTENSIBLE resultantFormat;
-        resultantFormat = (PKSDATAFORMAT_WAVEFORMATEXTENSIBLE)ResultantFormat;
-        *resultantFormat = *MicArrayPinSupportedDeviceFormats;
-        *ResultantFormatLength = requiredSize;
-
-        return STATUS_SUCCESS;
-    }
-    else
     {
         requiredSize = sizeof(KSDATAFORMAT_WAVEFORMATEX);
 

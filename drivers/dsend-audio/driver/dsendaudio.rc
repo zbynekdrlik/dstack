@@ -4,7 +4,7 @@ Copyright (c) Microsoft Corporation All Rights Reserved
 
 Module Name:
 
-    SimpleAudioSample.rc
+    dsendaudio.rc (from the sample's SimpleAudioSample.rc)
 
 Abstract:
 
@@ -16,13 +16,11 @@ Abstract:
 
 #define VER_FILETYPE                VFT_DRV
 #define VER_FILESUBTYPE             VFT2_DRV_SOUND
-#define VER_FILEDESCRIPTION_STR     "Microsoft Virtual Simple Audio Sample Driver"
-#define VER_INTERNALNAME_STR        "SimpleAudioSample.sys"
-#define VER_ORIGINALFILENAME_STR    "SimpleAudioSample.sys"
+#define VER_FILEDESCRIPTION_STR     "dsend virtual audio output (from Microsoft's Simple Audio Sample)"
+#define VER_INTERNALNAME_STR        "dsendaudio.sys"
+#define VER_ORIGINALFILENAME_STR    "dsendaudio.sys"
 
 #define VER_LEGALCOPYRIGHT_YEARS    "2013"
 #define VER_LEGALCOPYRIGHT_STR	    "Copyright (C) Microsoft Corp." VER_LEGALCOPYRIGHT_YEARS
 
 #include "common.ver"
-
-

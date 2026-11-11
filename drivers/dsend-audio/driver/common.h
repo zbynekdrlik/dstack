@@ -123,7 +123,6 @@ Abstract:
 typedef enum
 {
     eSpeakerDevice = 0,
-    eMicArrayDevice1,
     eMaxDeviceType,
 } eDeviceType;
 
@@ -259,11 +258,6 @@ DECLARE_INTERFACE_(IAdapterCommon, IUnknown)
     ) PURE;
     
     STDMETHOD_(PDEVICE_OBJECT,  GetPhysicalDeviceObject)
-    (
-        THIS
-    ) PURE;
-
-    STDMETHOD_(WDFDEVICE,       GetWdfDevice)
     (
         THIS
     ) PURE;

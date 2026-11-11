@@ -16,15 +16,8 @@ Abstract:
 #include <initguid.h>
 #include "definitions.h"
 #include "hw.h"
-#include "savedata.h"
 #include "endpoints.h"
 
-//-----------------------------------------------------------------------------
-// CSaveData statics
-//-----------------------------------------------------------------------------
-
-PSAVEWORKER_PARAM       CSaveData::m_pWorkItems = NULL;
-PDEVICE_OBJECT          CSaveData::m_pDeviceObject = NULL;
 //=============================================================================
 // Classes
 //=============================================================================
@@ -41,7 +34,6 @@ class CAdapterCommon :
         PSERVICEGROUP           m_pServiceGroupWave;
         PDEVICE_OBJECT          m_pDeviceObject;
         PDEVICE_OBJECT          m_pPhysicalDeviceObject;
-        WDFDEVICE               m_WdfDevice;            // Wdf device. 
         DEVICE_POWER_STATE      m_PowerState;  
 
         PCSimpleAudioSampleHW   m_pHW;                  // Virtual Simple Audio Sample HW object
@@ -73,8 +65,6 @@ class CAdapterCommon :
         STDMETHODIMP_(PDEVICE_OBJECT)   GetDeviceObject(void);
         
         STDMETHODIMP_(PDEVICE_OBJECT)   GetPhysicalDeviceObject(void);
-        
-        STDMETHODIMP_(WDFDEVICE)        GetWdfDevice(void);
 
         STDMETHODIMP_(void)     SetWaveServiceGroup
         (   
@@ -376,8 +366,7 @@ Return Value:
     NTSTATUS ntStatus;
 
     //
-    // This sample supports only one instance of this object.
-    // (b/c of CSaveData's static members and Bluetooth HFP logic). 
+    // This driver supports only one instance of this object.
     //
     if (InterlockedCompareExchange(&CAdapterCommon::m_AdapterInstances, 1, 0) != 0)
     {
@@ -436,16 +425,9 @@ Return Value:
         delete m_pHW;
         m_pHW = NULL;
     }
-    
-    CSaveData::DestroyWorkItems();
+
     SAFE_RELEASE(m_pPortClsEtwHelper);
     SAFE_RELEASE(m_pServiceGroupWave);
- 
-    if (m_WdfDevice)
-    {
-        WdfObjectDelete(m_WdfDevice);
-        m_WdfDevice = NULL;
-    }
 
     InterlockedDecrement(&CAdapterCommon::m_AdapterInstances);
     ASSERT(CAdapterCommon::m_AdapterInstances == 0);
@@ -505,34 +487,6 @@ Return Value:
 
 //=============================================================================
 #pragma code_seg("PAGE")
-STDMETHODIMP_(WDFDEVICE)   
-CAdapterCommon::GetWdfDevice
-(
-    void
-)
-/*++
-
-Routine Description:
-
-  Returns the associated WDF miniport device. Note that this is NOT an audio
-  miniport. The WDF miniport device is the WDF device associated with the
-  adapter.
-
-Arguments:
-
-Return Value:
-
-  WDFDEVICE
-
---*/
-{
-    PAGED_CODE();
-    
-    return m_WdfDevice;
-} // GetWdfDevice
-
-//=============================================================================
-#pragma code_seg("PAGE")
 NTSTATUS
 CAdapterCommon::Init
 ( 
@@ -564,7 +518,6 @@ Return Value:
     m_pServiceGroupWave     = NULL;
     m_pDeviceObject         = DeviceObject;
     m_pPhysicalDeviceObject = NULL;
-    m_WdfDevice             = NULL;
     m_PowerState            = PowerDeviceD0;
     m_pHW                   = NULL;
     m_pPortClsEtwHelper     = NULL;
@@ -580,23 +533,6 @@ Return Value:
         DPF(D_ERROR, ("PcGetPhysicalDeviceObject failed, 0x%x", ntStatus)),
         Done);
 
-    //
-    // Create a WDF miniport to represent the adapter. Note that WDF miniports 
-    // are NOT audio miniports. An audio adapter is associated with a single WDF
-    // miniport. This driver uses WDF to simplify the handling of the Bluetooth
-    // SCO HFP Bypass interface.
-    //
-    ntStatus = WdfDeviceMiniportCreate( WdfGetDriver(),
-                                        WDF_NO_OBJECT_ATTRIBUTES,
-                                        DeviceObject,           // FDO
-                                        NULL,                   // Next device.
-                                        NULL,                   // PDO
-                                       &m_WdfDevice);
-    IF_FAILED_ACTION_JUMP(
-        ntStatus,
-        DPF(D_ERROR, ("WdfDeviceMiniportCreate failed, 0x%x", ntStatus)),
-        Done);
-
     // Initialize HW.
     // 
     m_pHW = new (POOL_FLAG_NON_PAGED, SIMPLEAUDIOSAMPLE_POOLTAG)  CSimpleAudioSampleHW;
@@ -609,12 +545,6 @@ Return Value:
     
     m_pHW->MixerReset();
 
-    //
-    // Initialize SaveData class.
-    //
-    CSaveData::SetDeviceObject(DeviceObject);   //device object is needed by CSaveData
-    ntStatus = CSaveData::InitializeWorkItems(DeviceObject);
-    IF_FAILED_JUMP(ntStatus, Done);
 Done:
 
     return ntStatus;

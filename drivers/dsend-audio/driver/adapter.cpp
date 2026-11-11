@@ -44,12 +44,6 @@ StartDevice
 _Dispatch_type_(IRP_MJ_PNP)
 DRIVER_DISPATCH PnpHandler;
 
-//
-// Rendering streams are not saved to a file by default. Use the registry value 
-// DoNotCreateDataFiles (DWORD) = 0 to override this default.
-//
-DWORD g_DoNotCreateDataFiles = 1;  // default is off.
-DWORD g_DisableToneGenerator = 0;  // default is to generate tones.
 UNICODE_STRING g_RegistryPath;      // This is used to store the registry settings path for the driver
 
 //-----------------------------------------------------------------------------
@@ -81,7 +75,7 @@ void DriverUnload
 
 Routine Description:
 
-  Our driver unload routine. This just frees the WDF driver object.
+  Our driver unload routine: the port class unload, then our registry path.
 
 Arguments:
 
@@ -112,13 +106,6 @@ Environment:
         gPCDriverUnloadRoutine(DriverObject);
     }
 
-    //
-    // Unload WDF driver object. 
-    //
-    if (WdfGetDriver() != NULL)
-    {
-        WdfDriverMiniportUnload(WdfGetDriver());
-    }
 Done:
     return;
 }
@@ -166,89 +153,6 @@ NTSTATUS - SUCCESS if able to configure the framework
     return STATUS_SUCCESS;
 }
 
-//=============================================================================
-#pragma code_seg("INIT")
-__drv_requiresIRQL(PASSIVE_LEVEL)
-NTSTATUS
-GetRegistrySettings(
-    _In_ PUNICODE_STRING RegistryPath
-   )
-/*++
-
-Routine Description:
-
-    Initialize Driver Framework settings from the driver
-    specific registry settings under
-
-    \REGISTRY\MACHINE\SYSTEM\ControlSetxxx\Services\<driver>\Parameters
-
-Arguments:
-
-    RegistryPath - Registry path passed to DriverEntry
-
-Returns:
-
-    NTSTATUS - SUCCESS if able to configure the framework
-
---*/
-
-{
-    NTSTATUS                    ntStatus;
-    PDRIVER_OBJECT              DriverObject;
-    HANDLE                      DriverKey;
-    RTL_QUERY_REGISTRY_TABLE    paramTable[] = {
-    // QueryRoutine     Flags                                               Name                     EntryContext             DefaultType                                                    DefaultData              DefaultLength
-        { NULL,   RTL_QUERY_REGISTRY_DIRECT | RTL_QUERY_REGISTRY_TYPECHECK, L"DoNotCreateDataFiles", &g_DoNotCreateDataFiles, (REG_DWORD << RTL_QUERY_REGISTRY_TYPECHECK_SHIFT) | REG_DWORD, &g_DoNotCreateDataFiles, sizeof(ULONG)},
-        { NULL,   RTL_QUERY_REGISTRY_DIRECT | RTL_QUERY_REGISTRY_TYPECHECK, L"DisableToneGenerator", &g_DisableToneGenerator, (REG_DWORD << RTL_QUERY_REGISTRY_TYPECHECK_SHIFT) | REG_DWORD, &g_DisableToneGenerator, sizeof(ULONG)},
-        { NULL,   0,                                                        NULL,                    NULL,                    0,                                                             NULL,                    0}
-    };
-
-    DPF(D_TERSE, ("[GetRegistrySettings]"));
-
-    PAGED_CODE();
-    UNREFERENCED_PARAMETER(RegistryPath);
-
-    DriverObject = WdfDriverWdmGetDriverObject(WdfGetDriver());
-    DriverKey = NULL;
-    ntStatus = IoOpenDriverRegistryKey(DriverObject, 
-                                 DriverRegKeyParameters,
-                                 KEY_READ,
-                                 0,
-                                 &DriverKey);
-
-    if (!NT_SUCCESS(ntStatus))
-    {
-        return ntStatus;
-    }
-
-    ntStatus = RtlQueryRegistryValues(RTL_REGISTRY_HANDLE,
-                                  (PCWSTR) DriverKey,
-                                  &paramTable[0],
-                                  NULL,
-                                  NULL);
-
-    if (!NT_SUCCESS(ntStatus)) 
-    {
-        DPF(D_VERBOSE, ("RtlQueryRegistryValues failed, using default values, 0x%x", ntStatus));
-        //
-        // Don't return error because we will operate with default values.
-        //
-    }
-
-    //
-    // Dump settings.
-    //
-    DPF(D_VERBOSE, ("DoNotCreateDataFiles: %u", g_DoNotCreateDataFiles));
-    DPF(D_VERBOSE, ("DisableToneGenerator: %u", g_DisableToneGenerator));
-
-    if (DriverKey)
-    {
-        ZwClose(DriverKey);
-    }
-
-    return STATUS_SUCCESS;
-}
-
 #pragma code_seg("INIT")
 extern "C" DRIVER_INITIALIZE DriverEntry;
 extern "C" NTSTATUS
@@ -281,7 +185,6 @@ Return Value:
 
 --*/
     NTSTATUS                    ntStatus;
-    WDF_DRIVER_CONFIG           config;
 
     DPF(D_TERSE, ("[DriverEntry]"));
 
@@ -294,36 +197,6 @@ Return Value:
         DPF(D_ERROR, ("Registry path copy error 0x%x", ntStatus)),
         Done);
     
-    WDF_DRIVER_CONFIG_INIT(&config, WDF_NO_EVENT_CALLBACK);
-    //
-    // Set WdfDriverInitNoDispatchOverride flag to tell the framework
-    // not to provide dispatch routines for the driver. In other words,
-    // the framework must not intercept IRPs that the I/O manager has
-    // directed to the driver. In this case, they will be handled by Audio
-    // port driver.
-    //
-    config.DriverInitFlags |= WdfDriverInitNoDispatchOverride;
-    config.DriverPoolTag    = MINADAPTER_POOLTAG;
-
-    ntStatus = WdfDriverCreate(DriverObject,
-                               RegistryPathName,
-                               WDF_NO_OBJECT_ATTRIBUTES,
-                               &config,
-                               WDF_NO_HANDLE);
-    IF_FAILED_ACTION_JUMP(
-        ntStatus,
-        DPF(D_ERROR, ("WdfDriverCreate failed, 0x%x", ntStatus)),
-        Done);
-
-    //
-    // Get registry configuration.
-    //
-    ntStatus = GetRegistrySettings(RegistryPathName);
-    IF_FAILED_ACTION_JUMP(
-        ntStatus,
-        DPF(D_ERROR, ("Registry Configuration error 0x%x", ntStatus)),
-        Done);
-
     //
     // Tell the class driver to initialize the driver.
     //
@@ -355,11 +228,6 @@ Done:
 
     if (!NT_SUCCESS(ntStatus))
     {
-        if (WdfGetDriver() != NULL)
-        {
-            WdfDriverMiniportUnload(WdfGetDriver());
-        }
-
         ReleaseRegistryStringBuffer();
     }
     
@@ -428,31 +296,6 @@ Return Value:
     return ntStatus;
 } // AddDevice
 
-#pragma code_seg()
-NTSTATUS
-_IRQL_requires_max_(DISPATCH_LEVEL)
-PowerControlCallback
-(
-    _In_        LPCGUID PowerControlCode,
-    _In_opt_    PVOID   InBuffer,
-    _In_        SIZE_T  InBufferSize,
-    _Out_writes_bytes_to_(OutBufferSize, *BytesReturned) PVOID OutBuffer,
-    _In_        SIZE_T  OutBufferSize,
-    _Out_opt_   PSIZE_T BytesReturned,
-    _In_opt_    PVOID   Context
-)
-{
-    UNREFERENCED_PARAMETER(PowerControlCode);
-    UNREFERENCED_PARAMETER(InBuffer);
-    UNREFERENCED_PARAMETER(InBufferSize);
-    UNREFERENCED_PARAMETER(OutBuffer);
-    UNREFERENCED_PARAMETER(OutBufferSize);
-    UNREFERENCED_PARAMETER(BytesReturned);
-    UNREFERENCED_PARAMETER(Context);
-    
-    return STATUS_NOT_IMPLEMENTED;
-}
-
 #pragma code_seg("PAGE")
 NTSTATUS 
 InstallEndpointRenderFilters(
@@ -466,11 +309,6 @@ InstallEndpointRenderFilters(
     PUNKNOWN                    unknownTopology         = NULL;
     PUNKNOWN                    unknownWave             = NULL;
     PPORTCLSETWHELPER           pPortClsEtwHelper       = NULL;
-#ifdef _USE_IPortClsRuntimePower
-    PPORTCLSRUNTIMEPOWER        pPortClsRuntimePower    = NULL;
-#endif // _USE_IPortClsRuntimePower
-    PPORTCLSStreamResourceManager pPortClsResMgr        = NULL;
-    PPORTCLSStreamResourceManager2 pPortClsResMgr2      = NULL;
 
     PAGED_CODE();
     
@@ -484,105 +322,13 @@ InstallEndpointRenderFilters(
         &unknownWave,
         NULL, NULL);
 
-    if (unknownWave) // IID_IPortClsEtwHelper and IID_IPortClsRuntimePower interfaces are only exposed on the WaveRT port.
+    if (unknownWave) // IID_IPortClsEtwHelper is only exposed on the WaveRT port.
     {
-        ntStatus = unknownWave->QueryInterface (IID_IPortClsEtwHelper, (PVOID *)&pPortClsEtwHelper);
-        if (NT_SUCCESS(ntStatus))
+        if (NT_SUCCESS(unknownWave->QueryInterface (IID_IPortClsEtwHelper, (PVOID *)&pPortClsEtwHelper)))
         {
             _pAdapterCommon->SetEtwHelper(pPortClsEtwHelper);
             ASSERT(pPortClsEtwHelper != NULL);
             pPortClsEtwHelper->Release();
-        }
-
-#ifdef _USE_IPortClsRuntimePower
-        // Let's get the runtime power interface on PortCls.  
-        ntStatus = unknownWave->QueryInterface(IID_IPortClsRuntimePower, (PVOID *)&pPortClsRuntimePower);
-        if (NT_SUCCESS(ntStatus))
-        {
-            // This interface would typically be stashed away for later use.  Instead,
-            // let's just send an empty control with GUID_NULL.
-            NTSTATUS ntStatusTest =
-                pPortClsRuntimePower->SendPowerControl
-                (
-                    _pDeviceObject,
-                    &GUID_NULL,
-                    NULL,
-                    0,
-                    NULL,
-                    0,
-                    NULL
-                );
-
-            if (NT_SUCCESS(ntStatusTest) || STATUS_NOT_IMPLEMENTED == ntStatusTest || STATUS_NOT_SUPPORTED == ntStatusTest)
-            {
-                ntStatus = pPortClsRuntimePower->RegisterPowerControlCallback(_pDeviceObject, &PowerControlCallback, NULL);
-                if (NT_SUCCESS(ntStatus))
-                {
-                    ntStatus = pPortClsRuntimePower->UnregisterPowerControlCallback(_pDeviceObject);
-                }
-            }
-            else
-            {
-                ntStatus = ntStatusTest;
-            }
-
-            pPortClsRuntimePower->Release();
-        }
-#endif // _USE_IPortClsRuntimePower
-
-        //
-        // Test: add and remove current thread as streaming audio resource.  
-        // In a real driver you should only add interrupts and driver-owned threads 
-        // (i.e., do NOT add the current thread as streaming resource).
-        //
-        // testing IPortClsStreamResourceManager:
-        ntStatus = unknownWave->QueryInterface(IID_IPortClsStreamResourceManager, (PVOID *)&pPortClsResMgr);
-        if (NT_SUCCESS(ntStatus))
-        {
-            PCSTREAMRESOURCE_DESCRIPTOR res;
-            PCSTREAMRESOURCE hRes = NULL;
-            PDEVICE_OBJECT pdo = NULL;
-
-            PcGetPhysicalDeviceObject(_pDeviceObject, &pdo);
-            PCSTREAMRESOURCE_DESCRIPTOR_INIT(&res);
-            res.Pdo = pdo;
-            res.Type = ePcStreamResourceThread;
-            res.Resource.Thread = PsGetCurrentThread();
-            
-            NTSTATUS ntStatusTest = pPortClsResMgr->AddStreamResource(NULL, &res, &hRes);
-            if (NT_SUCCESS(ntStatusTest))
-            {
-                pPortClsResMgr->RemoveStreamResource(hRes);
-                hRes = NULL;
-            }
-
-            pPortClsResMgr->Release();
-            pPortClsResMgr = NULL;
-        }
-        
-        // testing IPortClsStreamResourceManager2:
-        ntStatus = unknownWave->QueryInterface(IID_IPortClsStreamResourceManager2, (PVOID *)&pPortClsResMgr2);
-        if (NT_SUCCESS(ntStatus))
-        {
-            PCSTREAMRESOURCE_DESCRIPTOR res;
-            PCSTREAMRESOURCE hRes = NULL;
-            PDEVICE_OBJECT pdo = NULL;
-
-            PcGetPhysicalDeviceObject(_pDeviceObject, &pdo);
-            PCSTREAMRESOURCE_DESCRIPTOR_INIT(&res);
-            res.Pdo = pdo;
-            res.Type = ePcStreamResourceThread;
-            res.Resource.Thread = PsGetCurrentThread();
-            
-            NTSTATUS ntStatusTest = pPortClsResMgr2->AddStreamResource2(pdo, NULL, &res, &hRes);
-            if (NT_SUCCESS(ntStatusTest))
-            {
-                pPortClsResMgr2->RemoveStreamResource(hRes);
-                hRes = NULL;
-            }
-
-            pPortClsResMgr2->Release();
-            pPortClsResMgr2 = NULL;
         }
     }
 
@@ -611,57 +357,6 @@ InstallAllRenderFilters(
         IF_FAILED_JUMP(ntStatus, Exit);
     }
     
-    ntStatus = STATUS_SUCCESS;
-
-Exit:
-    return ntStatus;
-}
-
-#pragma code_seg("PAGE")
-NTSTATUS
-InstallEndpointCaptureFilters(
-    _In_ PDEVICE_OBJECT     _pDeviceObject,
-    _In_ PIRP               _pIrp,
-    _In_ PADAPTERCOMMON     _pAdapterCommon,
-    _In_ PENDPOINT_MINIPAIR _pAeMiniports
-)
-{
-    NTSTATUS    ntStatus = STATUS_SUCCESS;
-
-    PAGED_CODE();
-
-    UNREFERENCED_PARAMETER(_pDeviceObject);
-
-    ntStatus = _pAdapterCommon->InstallEndpointFilters(
-        _pIrp,
-        _pAeMiniports,
-        NULL,
-        NULL,
-        NULL,
-        NULL, NULL);
-
-    return ntStatus;
-}
-
-#pragma code_seg("PAGE")
-NTSTATUS
-InstallAllCaptureFilters(
-    _In_ PDEVICE_OBJECT _pDeviceObject,
-    _In_ PIRP           _pIrp,
-    _In_ PADAPTERCOMMON _pAdapterCommon
-)
-{
-    NTSTATUS            ntStatus;
-    PENDPOINT_MINIPAIR* ppAeMiniports = g_CaptureEndpoints;
-
-    PAGED_CODE();
-
-    for (ULONG i = 0; i < g_cCaptureEndpoints; ++i, ++ppAeMiniports)
-    {
-        ntStatus = InstallEndpointCaptureFilters(_pDeviceObject, _pIrp, _pAdapterCommon, *ppAeMiniports);
-        IF_FAILED_JUMP(ntStatus, Exit);
-    }
-
     ntStatus = STATUS_SUCCESS;
 
 Exit:
@@ -743,12 +438,6 @@ Return Value:
     // Install wave+topology filters for render devices
     //
     ntStatus = InstallAllRenderFilters(DeviceObject, Irp, pAdapterCommon);
-    IF_FAILED_JUMP(ntStatus, Exit);
-
-    //
-    // Install wave+topology filters for capture devices
-    //
-    ntStatus = InstallAllCaptureFilters(DeviceObject, Irp, pAdapterCommon);
     IF_FAILED_JUMP(ntStatus, Exit);
 
 Exit:

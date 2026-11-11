@@ -18,8 +18,6 @@ Abstract:
 #include <stdunk.h>
 #include <ksdebug.h>
 #include <ntintsafe.h>
-#include <wdf.h>
-#include <wdfminiport.h>
 #include <Ntstrsafe.h>
 #include "NewDelete.h"
 
@@ -27,18 +25,18 @@ Abstract:
 // Defines
 //=============================================================================
 
-// Product Id
-// {836BA6D1-3FF7-4411-8BCD-469553452DCE}
+// Product Id (dsend's own, not the sample's)
+// {667A132E-F4FF-4D2C-AFA9-C93EF3501A82}
 #define STATIC_PID_SIMPLEAUDIOSAMPLE\
-    0x836ba6d1, 0x3ff7, 0x4411, 0x8b, 0xcd, 0x46, 0x95, 0x53, 0x45, 0x2d, 0xce
-DEFINE_GUIDSTRUCT("836BA6D1-3FF7-4411-8BCD-469553452DCE", PID_SIMPLEAUDIOSAMPLE);
+    0x667a132e, 0xf4ff, 0x4d2c, 0xaf, 0xa9, 0xc9, 0x3e, 0xf3, 0x50, 0x1a, 0x82
+DEFINE_GUIDSTRUCT("667A132E-F4FF-4D2C-AFA9-C93EF3501A82", PID_SIMPLEAUDIOSAMPLE);
 #define PID_SIMPLEAUDIOSAMPLE DEFINE_GUIDNAMED(PID_SIMPLEAUDIOSAMPLE)
 
-// Pool tag used for SIMPLEAUDIOSAMPLE allocations
-#define SIMPLEAUDIOSAMPLE_POOLTAG               'SASM'  
+// Pool tag used for dsend's allocations
+#define SIMPLEAUDIOSAMPLE_POOLTAG               'dnsD'
 
 // Debug module name
-#define STR_MODULENAME              "SIMPLEAUDIOSAMPLE: "
+#define STR_MODULENAME              "dsend: "
 
 // Debug utility macros
 #define D_FUNC                      4
@@ -165,8 +163,6 @@ typedef struct _PortClassDeviceContext              // 32       64      Byte off
 //
 // Global settings.
 //
-extern DWORD g_DoNotCreateDataFiles;
-extern DWORD g_DisableBthScoBypass;
 extern UNICODE_STRING g_RegistryPath;
 
 //=============================================================================

@@ -14,14 +14,15 @@ Abstract:
 #ifndef _SIMPLEAUDIOSAMPLE_SPEAKERWAVTABLE_H_
 #define _SIMPLEAUDIOSAMPLE_SPEAKERWAVTABLE_H_
 
-// To keep the code simple assume device supports only 48KHz, 16-bit, stereo (PCM and NON-PCM)
+// dsend: 16-bit stereo at 48 kHz (the default) or 44.1 kHz. The audio
+// engine mixes in float at that rate, and its loopback tap gives dsend the mix.
 
 #define SPEAKER_DEVICE_MAX_CHANNELS                 2       // Max Channels.
 
 #define SPEAKER_HOST_MAX_CHANNELS                   2       // Max Channels.
 #define SPEAKER_HOST_MIN_BITS_PER_SAMPLE            16      // Min Bits Per Sample
 #define SPEAKER_HOST_MAX_BITS_PER_SAMPLE            16      // Max Bits Per Sample
-#define SPEAKER_HOST_MIN_SAMPLE_RATE                48000   // Min Sample Rate
+#define SPEAKER_HOST_MIN_SAMPLE_RATE                44100   // Min Sample Rate
 #define SPEAKER_HOST_MAX_SAMPLE_RATE                48000   // Max Sample Rate
 
 //
@@ -50,6 +51,31 @@ KSDATAFORMAT_WAVEFORMATEXTENSIBLE SpeakerHostPinSupportedDeviceFormats[] =
                 2,
                 48000,
                 192000,
+                4,
+                16,
+                sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX)
+            },
+            16,
+            KSAUDIO_SPEAKER_STEREO,
+            STATICGUIDOF(KSDATAFORMAT_SUBTYPE_PCM)
+        }
+    },
+    { // 1
+        {
+            sizeof(KSDATAFORMAT_WAVEFORMATEXTENSIBLE),
+            0,
+            0,
+            0,
+            STATICGUIDOF(KSDATAFORMAT_TYPE_AUDIO),
+            STATICGUIDOF(KSDATAFORMAT_SUBTYPE_PCM),
+            STATICGUIDOF(KSDATAFORMAT_SPECIFIER_WAVEFORMATEX)
+        },
+        {
+            {
+                WAVE_FORMAT_EXTENSIBLE,
+                2,
+                44100,
+                176400,
                 4,
                 16,
                 sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX)
