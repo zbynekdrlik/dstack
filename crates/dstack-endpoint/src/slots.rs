@@ -31,11 +31,18 @@ pub fn first_free(free: impl Fn(&Ports) -> bool) -> Option<(Ports, u16)> {
     (0..SLOTS).map(slot).find(|(p, _)| free(p))
 }
 
-/// Whether UDP `ports` all bind on `ip` now (the sockets close again).
+/// Whether UDP `ports` are all free for a device on `ip` now
+/// ([`binds_with`] on real sockets, which close again).
 pub fn binds(ip: Ipv4Addr, ports: &Ports) -> bool {
+    binds_with(ip, ports, |at| UdpSocket::bind(at).is_ok())
+}
+
+/// Whether `ports` are all free for a device on `ip`, `try_bind` saying
+/// whether a UDP socket binds at an address and port now.
+pub fn binds_with(ip: Ipv4Addr, ports: &Ports, try_bind: impl Fn(SocketAddrV4) -> bool) -> bool {
     [ports.arc, ports.cmc, ports.flows]
         .iter()
-        .all(|&port| UdpSocket::bind(SocketAddrV4::new(ip, port)).is_ok())
+        .all(|&port| try_bind(SocketAddrV4::new(ip, port)))
 }
 
 /// The ports and process id a device on `place` starts with: the ones
