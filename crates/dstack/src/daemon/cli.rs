@@ -56,7 +56,6 @@ pub fn main(build: Build) -> ExitCode {
         }
         Ok(Command::Clock { seconds }) => return clock(build.name, seconds),
         Ok(Command::Ctl { socket, request }) => return ctl_request(build.name, &socket, &request),
-        Ok(Command::Card(args)) => return card(build.name, &args),
         Ok(Command::Run(opts)) => (opts, host::ClockSource::default()),
         Ok(Command::RunOnService(opts)) => (opts, host::ClockSource::Dsync),
         Ok(Command::RunOnSystemClock(opts)) => (opts, host::ClockSource::System),
@@ -127,83 +126,6 @@ fn clock(name: &str, seconds: u32) -> ExitCode {
         }
         ExitCode::SUCCESS
     })
-}
-
-/// `card`: another device's labels and name (see [`super::card`]).
-fn card(name: &str, args: &[String]) -> ExitCode {
-    use super::card::{self, Verb};
-    use crate::arc::client::{REPLY_TIMEOUT, Udp};
-    use std::net::{Ipv4Addr, SocketAddrV4};
-    use std::sync::atomic::{AtomicBool, AtomicU16};
-
-    let parsed = match card::parse(args) {
-        Ok(c) => c,
-        Err(msg) => {
-            eprintln!("{name} card: {msg}");
-            return ExitCode::from(2);
-        }
-    };
-    let changes = match &parsed.verb {
-        Verb::Write(_) => {
-            let mut text = String::new();
-            if let Err(e) = std::io::Read::read_to_string(&mut std::io::stdin(), &mut text) {
-                eprintln!("{name} card: stdin: {e}");
-                return ExitCode::from(2);
-            }
-            match card::parse_changes(&text) {
-                Ok(c) => c,
-                Err(msg) => {
-                    eprintln!("{name} card: {msg}");
-                    return ExitCode::from(2);
-                }
-            }
-        }
-        _ => Vec::new(),
-    };
-    let seq = AtomicU16::new(1);
-    let requests = crate::ctl::Requests::default();
-    let stop = AtomicBool::new(false);
-    let to = SocketAddrV4::new(parsed.ip, crate::arc::PORT);
-    let mut udp = match Udp::open(
-        Ipv4Addr::UNSPECIFIED,
-        to,
-        &seq,
-        REPLY_TIMEOUT,
-        &requests,
-        &stop,
-    ) {
-        Ok(u) => u,
-        Err(e) => {
-            eprintln!("{name} card: no socket to the card: {e}");
-            return ExitCode::from(1);
-        }
-    };
-    let line = |out: Result<String, serde_json::Error>| {
-        out.unwrap_or_else(|e| format!("{{\"error\":\"{e}\"}}"))
-    };
-    let out = match &parsed.verb {
-        Verb::Read => {
-            card::read(&mut udp, &parsed.expected).map(|o| line(serde_json::to_string(&o)))
-        }
-        Verb::Write(flag) => card::write(&mut udp, &parsed.expected, flag, &changes)
-            .map(|o| line(serde_json::to_string(&o))),
-        Verb::Rename(new) => {
-            card::rename(&mut udp, &parsed.expected, new).map(|o| line(serde_json::to_string(&o)))
-        }
-    };
-    match out {
-        Ok(line) => {
-            if let Err(e) = writeln!(std::io::stdout(), "{line}") {
-                eprintln!("{name} card: stdout: {e}");
-                return ExitCode::from(1);
-            }
-            ExitCode::SUCCESS
-        }
-        Err(card::Refused(why)) => {
-            eprintln!("{name} card: {why}");
-            ExitCode::from(1)
-        }
-    }
 }
 
 /// `ctl`: one request line to the control socket at `path`, its answer

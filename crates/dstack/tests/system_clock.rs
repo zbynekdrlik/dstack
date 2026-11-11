@@ -379,12 +379,13 @@ fn a_tx_only_device_serves_a_receiver() {
     assert!(matches!(stopped, host::Stopped::Done), "{stopped:?}");
 }
 
-/// `card` over the network (the ARC client's UDP exchange) against our own
-/// running device: read, write two labels, read them back.
+/// The controller API's label writes (`arc::control` over the ARC client's
+/// UDP exchange) against our own running device: read, rename two channels,
+/// read them back; the device saves them.
 #[test]
-fn card_reads_and_writes_our_running_device() {
+fn arc_control_renames_our_running_device_s_channels() {
     use dstack::arc::client::{REPLY_TIMEOUT, Udp};
-    use dstack::daemon::card;
+    use dstack::arc::control::{self, Dir};
     use std::net::SocketAddrV4;
     use std::sync::atomic::AtomicU16;
 
@@ -397,7 +398,6 @@ fn card_reads_and_writes_our_running_device() {
         control: dir.path().join("control.sock"),
     };
     let prepared = host::prepare_with(&opts, &[], ClockSource::System).expect("the device set up");
-    let name = prepared.config().name.clone();
     let rx2 = prepared.config().rx[1].clone();
     let stop = Arc::new(AtomicBool::new(false));
     let host = prepared
@@ -408,21 +408,17 @@ fn card_reads_and_writes_our_running_device() {
     let halt = AtomicBool::new(false);
     let to = SocketAddrV4::new(ip, dstack::arc::PORT);
     let mut udp = Udp::open(ip, to, &seq, REPLY_TIMEOUT, &requests, &halt).expect("a socket");
-    let read = card::read(&mut udp, &name);
-    let changes = card::parse_changes(
-        r#"[{"type":"rx","channel":2,"label":"Vox L"},{"type":"tx","channel":1,"label":"Click"}]"#,
-    )
-    .unwrap();
-    let flag = dir.path().join("EVENT-NOW");
-    let written = card::write(&mut udp, &name, &flag, &changes);
+    let before = control::labels(&mut udp);
+    let renamed = control::rename_channel(&mut udp, Dir::Rx, 2, Some("Vox L"))
+        .and_then(|()| control::rename_channel(&mut udp, Dir::Tx, 1, Some("Click")));
+    let after = control::labels(&mut udp);
     let stopped = host.stop(Duration::from_secs(5));
-    let read = read.expect("card read");
-    assert_eq!(read.rx[&2], rx2, "{read:?}");
-    let written = written.expect("card write");
-    assert!(written.error.is_none(), "{written:?}");
-    assert!(written.mismatches.is_empty(), "{written:?}");
-    assert_eq!(written.rx.as_ref().unwrap()[&2], "Vox L");
-    assert_eq!(written.tx.as_ref().unwrap()[&1], "Click");
+    let before = before.expect("the labels read");
+    assert_eq!(before.get(Dir::Rx, 2), Some(rx2.as_str()), "{before:?}");
+    renamed.expect("both channels renamed");
+    let after = after.expect("the labels read back");
+    assert_eq!(after.get(Dir::Rx, 2), Some("Vox L"), "{after:?}");
+    assert_eq!(after.get(Dir::Tx, 1), Some("Click"), "{after:?}");
     // The device saved the labels in its state file.
     let saved = std::fs::read_to_string(dir.path().join("state.toml")).unwrap();
     assert!(

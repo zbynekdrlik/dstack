@@ -54,17 +54,6 @@ fn the_network_asks_arc_resolved_transmitters_for_the_config_s_fpp() {
 }
 
 #[test]
-fn card_first_hands_the_rest_to_the_card_verbs() {
-    assert_eq!(
-        parse_args(&args(&["card", "read", "10.0.0.12", "iem-card"])),
-        Ok(Command::Card(args(&["read", "10.0.0.12", "iem-card"])))
-    );
-    // Only the first word selects card.
-    let got = parse_args(&args(&["--config", "c", "card"])).expect_err("refused");
-    assert!(got.contains("unknown argument \"card\""), "{got}");
-}
-
-#[test]
 fn a_run_takes_the_system_clock_only_when_asked() {
     let base = ["--config", "c", "--iface", "eth9"];
     let with = |extra: &[&str]| {

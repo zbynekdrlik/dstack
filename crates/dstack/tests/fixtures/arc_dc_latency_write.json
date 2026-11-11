@@ -1,0 +1,10 @@
+{
+  "what": "Dante Controller's own latency write (ARC 0x1101, start code 0x2729) to a dstack device whose 0x1102 key table marks 0x8205 and 0x8301 writable: Device Config, latency 10 ms to 5 ms, confirmed. Dante Controller sent it 4 times, unanswered.",
+  "captured": "2026-11-12, dstack #216, pktmon on the controller PC. The device name and the addresses are left out; the frame carries neither.",
+  "requests": {
+    "0x1101": "2729002800c21101000005028205002083010024000000000000000000000000004c4b40004c4b40"
+  },
+  "layout": {
+    "0x1101": "header (10 bytes), then 0x05, the count of pairs (a byte), then each pair: key (u16), the offset from the frame's first byte of its u32 value; then 12 zero bytes and the values, at frame offsets 0x20 and 0x24. Here 0x8205 (the latency as configured) and 0x8301 (in effect), both 0x004c4b40 = 5 000 000 ns. netaudio's write (`control::latency_request_body`) starts 0x05 too, with 4 pairs and two more keys."
+  }
+}

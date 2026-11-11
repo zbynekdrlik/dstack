@@ -31,6 +31,8 @@
 //!   request a choice sends.
 //! - [`switches`]: the PC's source switches: a receiver's RX channels
 //!   moved between the sources a local file names, read back after.
+//! - [`cli`]: the command-line modes, run by the same code in both
+//!   programs (`dtray` and `dtray-cli`).
 //! - [`icon`]: the icon's pixels in a colour.
 //! - [`desktop`]: the Linux desktop's files (the single-instance lock, the
 //!   autostart entry and its text).
@@ -46,13 +48,21 @@
 //!
 //! On Windows `dtray.exe` is a GUI-subsystem program: a console does not
 //! wait for it, and PowerShell's `&` neither waits nor sets
-//! `$LASTEXITCODE`. An installer that runs `--autostart` starts it with
+//! `$LASTEXITCODE` unless it captures the output; in a shell whose output
+//! is a pipe (a remote shell, CI) the lines are lost. The second program,
+//! `dtray-cli` (dstack #218), is a console program on every platform with
+//! the same command-line modes ([`cli`]) and no tray: scripts and
+//! automation call it, `& dtray-cli.exe --set-latency <device> 2` gives
+//! the lines and `$LASTEXITCODE`. Its `--autostart` runs the tray program
+//! beside it ([`cli::tray_program`]), so the start at logon names the tray.
+//! An installer may still start the tray program itself with
 //! `Start-Process dtray.exe -ArgumentList '--autostart','on' -Wait -PassThru`
-//! and reads the returned process's `ExitCode` (dasio's installer).
+//! and read the returned process's `ExitCode` (dasio's installer).
 
 use std::path::Path;
 
 pub mod arc;
+pub mod cli;
 #[cfg(unix)]
 pub mod desktop;
 pub mod discover;
