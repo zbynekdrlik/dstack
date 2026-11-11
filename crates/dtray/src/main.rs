@@ -12,7 +12,7 @@
 //! `dtray --set-latency <device> <ms>` runs the same discovery pass, then
 //! the tray menu's latency write for the local device of that name
 //! (case-insensitive) and value (any in ms inside the range the device
-//! states, rounded to whole µs, such as `0.333` or `2`; dstack #213), and
+//! states, to whole ns, such as `0.333334` or `2`; dstack #213), and
 //! prints the latency it reads back
 //! ([`dtray::set`]; every platform). Exit codes: 0 done (for
 //! `--set-latency`: the latency reads back as asked, or already was), 1 a

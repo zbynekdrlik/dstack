@@ -61,11 +61,13 @@ pub fn choices(settings: &Settings) -> Vec<Choice> {
         .collect()
 }
 
-/// The latency `ms` names in milliseconds, ns, rounded to whole µs (half
-/// up at the fourth decimal): ASCII digits, then optionally a point and
-/// more digits (`0.333`, `2`, `1.0`; the menu's labels without " ms" name
-/// the same values as the menu). `None` for anything else (a sign, a
-/// space, a unit, `.5`, `1.`) and for a value past a `u64` of ns (one
+/// The latency `ms` names in milliseconds, in ns: ASCII digits, then
+/// optionally a point and more digits (`0.333`, `0.333334`, `2`, `1.0`;
+/// the menu's labels without " ms" name the same values as the menu). Six
+/// decimals are whole ns, the precision [`label`] prints, so a device's
+/// own configured latency can be written back exactly (dstack #213); more
+/// are rounded half up at the seventh. `None` for anything else (a sign,
+/// a space, a unit, `.5`, `1.`) and for a value past a `u64` of ns (one
 /// past a `u32` is a value, outside any device's range: [`pick`]).
 pub fn ns_of_ms(ms: &str) -> Option<u64> {
     let (whole, frac) = match ms.split_once('.') {
@@ -78,14 +80,21 @@ pub fn ns_of_ms(ms: &str) -> Option<u64> {
     }
     let frac = frac.unwrap_or("").as_bytes();
     let digit = |i: usize| frac.get(i).map_or(0, |&b| u64::from(b - b'0'));
-    let part = digit(0) * 100 + digit(1) * 10 + digit(2) + u64::from(digit(3) >= 5);
-    let us = whole
+    let part: u64 = NS_OF_DECIMAL
+        .iter()
+        .enumerate()
+        .map(|(i, &weight)| digit(i) * weight)
+        .sum();
+    let round = u64::from(digit(NS_OF_DECIMAL.len()) >= 5);
+    whole
         .parse::<u64>()
         .ok()?
-        .checked_mul(1000)?
-        .checked_add(part)?;
-    us.checked_mul(1000)
+        .checked_mul(1_000_000)?
+        .checked_add(part + round)
 }
+
+/// The ns of a digit at each of the six decimals of a value in ms.
+const NS_OF_DECIMAL: [u64; 6] = [100_000, 10_000, 1000, 100, 10, 1];
 
 /// The latency `ms` names ([`ns_of_ms`]) when it lies in the range the
 /// device states in `settings` (`latency_min_ns` to `latency_max_ns`, both
