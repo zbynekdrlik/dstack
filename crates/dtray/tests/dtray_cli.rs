@@ -130,9 +130,13 @@ fn dtray_cli_is_a_console_program_and_dtray_the_gui_tray() {
 #[test]
 fn powershell_call_operator_reads_the_lines_and_the_exit_code() {
     let exe = env!("CARGO_BIN_EXE_dtray-cli").replace('\'', "''");
+    // Windows PowerShell 5.1 wraps each line a native program writes to
+    // stderr in an ErrorRecord; "$_" is its text alone (Out-String would
+    // add the record's position lines).
     let script = format!(
         "$v = & '{exe}' --version; \"version=$v\"; \"code=$LASTEXITCODE\"; \
-         $u = & '{exe}' --bogus 2>&1 | Out-String; \"usage=$($u.Trim())\"; \"code=$LASTEXITCODE\""
+         $u = (& '{exe}' --bogus 2>&1 | ForEach-Object {{ \"$_\" }}) -join ' '; \
+         \"usage=$u\"; \"code=$LASTEXITCODE\"; exit 0"
     );
     let out = Command::new("powershell.exe")
         .args(["-NoProfile", "-NonInteractive", "-Command", &script])
