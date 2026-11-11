@@ -156,7 +156,7 @@ impl Neighbours {
         self.own = port;
     }
 
-    /// The neighbours on `ip` now ([`super::neighbours`]); none while the
+    /// The neighbours on `ip` now ([`super::neighbours()`]); none while the
     /// discovery does not run.
     pub fn list(&self, ip: Ipv4Addr) -> Vec<Peer> {
         if !self.finder.running() {
