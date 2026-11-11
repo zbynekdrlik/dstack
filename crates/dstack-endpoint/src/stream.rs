@@ -23,9 +23,7 @@ pub fn needs_reopen(kind: ErrorKind) -> bool {
 /// WASAPI's flag, cpal's xrun): audio was lost between two packets, which
 /// dsend measures on the next packet.
 pub fn is_discontinuity(kind: ErrorKind) -> bool {
-    // 0.6.86 told none apart.
-    let _ = kind;
-    false
+    matches!(kind, ErrorKind::Xrun)
 }
 
 #[cfg(test)]

@@ -36,9 +36,7 @@ pub const CAPTURE_BUFFER_MS: u32 = STALL_MS + 50;
 /// shared-mode `Initialize`'s buffer duration; the callback period stays
 /// the engine's).
 pub fn capture_buffer_frames(rate: u32) -> u32 {
-    // 0.6.86 asked no size (cpal's BufferSize::Default: the engine's least).
-    let _ = rate;
-    0
+    (u64::from(rate) * u64::from(CAPTURE_BUFFER_MS)).div_ceil(1000) as u32
 }
 
 /// The capture thread's one-time setup (dstack #198): cpal makes the
@@ -54,17 +52,24 @@ impl ThreadJoin {
     /// On every callback: runs `join` on the first call only and returns
     /// its result then (for the log); `None` on the calls after.
     pub fn first<T>(&mut self, join: impl FnOnce() -> T) -> Option<T> {
-        // 0.6.86: the capture thread joined nothing.
-        let _ = (&mut self.joined, join);
-        None
+        if std::mem::replace(&mut self.joined, true) {
+            return None;
+        }
+        Some(join())
     }
 }
 
 /// The log line of the capture thread's MMCSS join: MMCSS's task index,
 /// or the OS error (the thread then runs at its process's priority).
 pub fn mmcss_line(joined: &std::io::Result<u32>) -> String {
-    let _ = joined;
-    String::new()
+    match joined {
+        Ok(index) => {
+            format!("the loopback capture thread runs in MMCSS Pro Audio (task index {index})")
+        }
+        Err(e) => format!(
+            "MMCSS refused the loopback capture thread ({e}): it runs at its process's priority"
+        ),
+    }
 }
 
 /// A loopback discontinuity measured (dstack #198): between the last good
@@ -86,17 +91,24 @@ pub struct Gap {
 impl Gap {
     /// The frames lost: expected but never delivered.
     pub fn missing(&self) -> u64 {
-        0
+        self.expected.saturating_sub(self.got)
     }
 
     /// The audio lost, ms.
     pub fn missing_ms(&self) -> f64 {
-        0.0
+        self.missing() as f64 * 1000.0 / f64::from(self.rate)
     }
 
     /// The log line.
     pub fn line(&self) -> String {
-        String::new()
+        format!(
+            "a loopback discontinuity: {:.1} ms since the last good callback, \
+             {} frames expected since the last packet, {} got: {:.1} ms lost",
+            self.since_callback_ms,
+            self.expected,
+            self.got,
+            self.missing_ms()
+        )
     }
 }
 
@@ -135,10 +147,23 @@ impl GapWatch {
         wall_ns: u64,
         discontinuity: bool,
     ) -> Option<Gap> {
-        // 0.6.86 measured nothing.
-        let _ = (capture_ns, frames, wall_ns, discontinuity, self.rate);
-        let _ = self.last.map(|p| (p.capture_ns, p.frames, p.wall_ns));
-        None
+        let now = Packet {
+            capture_ns,
+            frames: frames as u64,
+            wall_ns,
+        };
+        let last = self.last.replace(now)?;
+        if !discontinuity {
+            return None;
+        }
+        let span_ns = capture_ns.saturating_sub(last.capture_ns);
+        let expected = (u128::from(span_ns) * u128::from(self.rate) + 500_000_000) / 1_000_000_000;
+        Some(Gap {
+            rate: self.rate,
+            since_callback_ms: wall_ns.saturating_sub(last.wall_ns) as f64 / 1e6,
+            expected: expected as u64,
+            got: last.frames,
+        })
     }
 }
 

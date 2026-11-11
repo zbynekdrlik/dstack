@@ -23,6 +23,12 @@
 //!   runs on the endpoint's clock all the time and an idle output is plain
 //!   silence on Dante. Should the capture stop anyway, the pump sends
 //!   silence, counts the underrun and primes again.
+//! - A busy desktop must not starve the capture, whatever the process's
+//!   priority class (dstack #198): the capture thread joins MMCSS "Pro
+//!   Audio" on its first callback, as dlink's pump and media threads do at
+//!   their start; the loopback buffer rides out a 200 ms stall; a
+//!   discontinuity WASAPI still flags is logged in ms
+//!   ([`capture::GapWatch`]).
 //!
 //! dsend has no window and no tray of its own: dtray shows its status
 //! ([`status::app_status`]: the captured output and its rate, whether the

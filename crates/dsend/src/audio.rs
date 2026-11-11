@@ -12,14 +12,23 @@
 //! second stream renders silence on it: the keep-alive, which keeps the
 //! capture running on the output's clock (an idle output is sent as
 //! silence, never as an underrun).
+//!
+//! A busy desktop must not starve the capture (dstack #198): its thread
+//! joins MMCSS on the first callback, its loopback buffer rides out a
+//! 200 ms stall, and a discontinuity is logged in ms (the decisions are
+//! [`dsend::capture`]'s).
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 
 use cpal::traits::{DeviceTrait, StreamTrait};
-use cpal::{FromSample, SampleFormat, SizedSample};
-use dsend::capture::push_interleaved;
+use cpal::{BufferSize, FromSample, SampleFormat, SizedSample, StreamConfig};
+use dsend::capture::{
+    CAPTURE_BUFFER_MS, GapWatch, ThreadJoin, capture_buffer_frames, mmcss_line, push_interleaved,
+};
 use dstack_endpoint::fifo::Fifo;
+use dstack_endpoint::stream::{is_discontinuity, needs_reopen};
 
 pub use dstack_endpoint::endpoints::{config_of, outputs};
 
@@ -88,22 +97,59 @@ where
     f32: FromSample<T>,
 {
     let channels = usize::from(config.channels());
-    device
+    let rate = config.sample_rate();
+    let frames = capture_buffer_frames(rate);
+    let stream_config = StreamConfig {
+        buffer_size: BufferSize::Fixed(frames),
+        ..config.config()
+    };
+    // Set by the error callback, read by the next packet: both run on
+    // cpal's capture thread, the flag before the packet it concerns.
+    let flagged = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&flagged);
+    let mut join = ThreadJoin::default();
+    let mut gaps = GapWatch::new(rate);
+    let start = Instant::now();
+    let stream = device
         .build_input_stream::<T, _, _>(
-            config.config(),
-            move |data: &[T], _| {
+            stream_config,
+            move |data: &[T], info: &cpal::InputCallbackInfo| {
+                if let Some(joined) = join.first(dstack::media::tx::join_mmcss) {
+                    match &joined {
+                        Ok(_) => tracing::info!("dsend: {}", mmcss_line(&joined)),
+                        Err(_) => tracing::warn!("dsend: {}", mmcss_line(&joined)),
+                    }
+                }
                 push_interleaved(&fifo, data, channels, |x| f64::from(x.to_sample::<f32>()));
+                let packet = data.len().checked_div(channels).unwrap_or(0);
+                if let Some(gap) = gaps.packet(
+                    info.timestamp().capture.as_nanos() as u64,
+                    packet,
+                    start.elapsed().as_nanos() as u64,
+                    flagged.swap(false, Ordering::Relaxed),
+                ) {
+                    tracing::warn!("dsend: {}", gap.line());
+                }
             },
             // The driver's own thread: a lost device or a driver error.
             move |e| {
                 tracing::warn!("dsend: the loopback capture reported: {e}");
-                if dstack_endpoint::stream::needs_reopen(e.kind()) {
+                if is_discontinuity(e.kind()) {
+                    flag.store(true, Ordering::Relaxed);
+                }
+                if needs_reopen(e.kind()) {
                     failed.store(true, Ordering::Relaxed);
                 }
             },
             None,
         )
-        .map_err(|e| format!("the loopback capture could not be opened: {e}"))
+        .map_err(|e| format!("the loopback capture could not be opened: {e}"))?;
+    tracing::info!(
+        frames,
+        ms = CAPTURE_BUFFER_MS,
+        "dsend: the loopback buffer (a stall up to its length loses nothing at WASAPI)"
+    );
+    Ok(stream)
 }
 
 fn keep_alive<T: SizedSample + Send + 'static>(
@@ -117,7 +163,7 @@ fn keep_alive<T: SizedSample + Send + 'static>(
             |data: &mut [T], _| data.fill(T::EQUILIBRIUM),
             move |e| {
                 tracing::warn!("dsend: the keep-alive stream reported: {e}");
-                if dstack_endpoint::stream::needs_reopen(e.kind()) {
+                if needs_reopen(e.kind()) {
                     failed.store(true, Ordering::Relaxed);
                 }
             },
