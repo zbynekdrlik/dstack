@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.89
+
+- Fix (dstack #200, mbc PC 11.11.2026: Dante Controller there read no device): the slot choice (`dstack_endpoint::slots::pick`) takes a port as used also when another program holds it on the wildcard address, as Audinate's ConMon service (Dante Controller, DVS) holds 0.0.0.0:8700/8800. On Windows a socket on the device's own address took ConMon's unicast replies ahead of its wildcard socket; now each slot port is probed on the device's address and on 0.0.0.0, so a device beside ConMon takes slot 1 (4441/8801/4456, process id 1). With nothing else on the PC a device still takes slot 0, and our devices beside each other 0, 1, 2. Only apps that choose their slot with `pick` (dlisten, dsend, an app that calls it) get it; an app that passes fixed ports does not. New: `slots::binds_with` (the probe with an injected bind). No latency change.
+
 ## 0.6.88
 
 - Fix (dstack #198, FOH PC 11.11.2026: ~0.5 s dropouts in browser music through dsend while a browser started and dsend ran at BelowNormal): dsend's loopback capture keeps up on a busy desktop whatever its process class. Its capture thread joins MMCSS "Pro Audio" on its first callback (logged once with the task index or the error; the pump, TX and RX threads already did); the loopback buffer asks WASAPI for 250 ms of the mix rate (12000 frames at 48 kHz), so a 200 ms stall loses nothing inside WASAPI; a capture discontinuity is logged with the time since the last good callback and the frames lost in ms. The FIFO and its priming level are unchanged. API: `dstack::media::tx::join_mmcss` is public and returns the MMCSS task index or the OS error; `dstack_endpoint::stream::is_discontinuity`. No dlink latency change.
