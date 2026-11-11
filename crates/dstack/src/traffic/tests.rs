@@ -232,7 +232,10 @@ fn a_neighbour_s_status_gives_its_tx_bytes() {
     assert_eq!(tx_bytes_of(r#"{"tx_bytes":"1"}"#), None);
     assert_eq!(tx_bytes_of("not json"), None);
     assert_eq!(tx_bytes_of("[1]"), None);
-    assert_eq!(reply_bytes(Ok(r#"{"tx_bytes":7,"name":"a"}"#.to_string())), Ok(7));
+    assert_eq!(
+        reply_bytes(Ok(r#"{"tx_bytes":7,"name":"a"}"#.to_string())),
+        Ok(7)
+    );
     assert_eq!(
         reply_bytes(Ok("{}".to_string())),
         Err(NO_TX_BYTES.to_string())
@@ -310,6 +313,93 @@ fn neighbours_are_read_from_their_local_endpoints_within_one_wait() {
     assert!(reason.starts_with("no answer"), "{got:?}");
 }
 
+/// dstack #209: a neighbour is read only when its reply names the device it
+/// is listed as (case aside, as discovery compares): a stale mDNS record
+/// whose port another of our devices holds now, or a stack before #209, is
+/// left out with the reason.
+#[test]
+fn a_neighbour_is_read_only_when_its_reply_names_it() {
+    let peers = vec![
+        (
+            "a".to_string(),
+            neighbour(Some(r#"{"tx_bytes":1,"name":"a"}"#)),
+        ),
+        (
+            "B".to_string(),
+            neighbour(Some(r#"{"tx_bytes":2,"name":"b"}"#)),
+        ),
+        (
+            "c".to_string(),
+            neighbour(Some(r#"{"tx_bytes":3,"name":"other"}"#)),
+        ),
+        ("d".to_string(), neighbour(Some(r#"{"tx_bytes":4}"#))),
+        (
+            "e".to_string(),
+            neighbour(Some(r#"{"tx_bytes":5,"name":7}"#)),
+        ),
+    ];
+    let got = read_peers(&peers, std::time::Duration::from_secs(5));
+    assert_eq!(got[0], ("a".to_string(), Ok(1)));
+    assert_eq!(got[1], ("B".to_string(), Ok(2)));
+    let reason = |i: usize| got[i].1.clone().unwrap_err();
+    assert!(reason(2).contains("another device"), "{got:?}");
+    assert!(reason(2).contains("\"other\""), "{got:?}");
+    assert!(reason(3).contains("no name"), "{got:?}");
+    assert!(reason(4).contains("no name"), "{got:?}");
+}
+
+/// dstack #209: a neighbour whose reply names another device is left out of
+/// our devices (its audio stays in the rest) and warned about once, until
+/// its reply names it again.
+#[test]
+fn a_neighbour_answering_as_another_device_is_left_out_and_warned_about_once() {
+    crate::test_log::undecided();
+    let mut w = TrafficWatch::new();
+    let peer = |answers_as: &str, bytes: u64| {
+        let line = format!(r#"{{"tx_bytes":{bytes},"name":"{answers_as}"}}"#);
+        vec![("a".to_string(), neighbour(Some(&line)))]
+    };
+    let logs = crate::test_log::capture_warnings(|| {
+        assert_eq!(w.watch(0, || Some(0), 0, || peer("other", 0)), None);
+        // Three looks: the NIC 6 000 000 a minute, all of it the
+        // neighbour's (3 000 000) and the rest.
+        for m in 1..=3u64 {
+            let t = w
+                .watch(
+                    m * 60 * S,
+                    || Some(m * 6_000_000),
+                    0,
+                    || peer("other", m * 3_000_000),
+                )
+                .expect("a minute on");
+            assert!(t.devices.is_empty(), "{t:?}");
+            assert_eq!(t.other, 100_000);
+        }
+    });
+    assert_eq!(logs.matches("could not be read").count(), 1, "{logs}");
+    assert!(logs.contains("another device"), "{logs}");
+    // It names itself again: read, nothing told; another device again:
+    // told again.
+    let logs = crate::test_log::capture_warnings(|| {
+        let _ = w.watch(240 * S, || Some(24_000_000), 0, || peer("a", 12_000_000));
+        let t = w
+            .watch(300 * S, || Some(30_000_000), 0, || peer("A", 15_000_000))
+            .expect("a minute on");
+        assert_eq!(t.devices, vec![("a".to_string(), 50_000)]);
+        assert_eq!(t.other, 50_000);
+    });
+    assert!(!logs.contains("could not be read"), "{logs}");
+    let logs = crate::test_log::capture_warnings(|| {
+        let _ = w.watch(
+            360 * S,
+            || Some(36_000_000),
+            0,
+            || peer("other", 18_000_000),
+        );
+    });
+    assert_eq!(logs.matches("could not be read").count(), 1, "{logs}");
+}
+
 /// A stuck neighbour takes only its share of the wait: the ones after it
 /// are still read (#203 review: one slow device made every other one
 /// unreadable, their audio "other traffic").
@@ -318,7 +408,10 @@ fn a_stuck_neighbour_takes_only_its_share_and_the_rest_are_read() {
     let peers = vec![
         ("stuck".to_string(), neighbour(None)),
         ("slow".to_string(), neighbour(None)),
-        ("a".to_string(), neighbour(Some(r#"{"tx_bytes":1,"name":"a"}"#))),
+        (
+            "a".to_string(),
+            neighbour(Some(r#"{"tx_bytes":1,"name":"a"}"#)),
+        ),
     ];
     let wait = std::time::Duration::from_millis(300);
     let start = std::time::Instant::now();
@@ -365,12 +458,7 @@ fn the_watch_warns_with_our_devices_named_and_escaped() {
         // 60 s: the NIC 30 000 000, ours 6 000 000, the neighbour
         // 12 000 000: 200 000 B/s left.
         let t = w
-            .watch(
-                60 * S,
-                || Some(30_000_000),
-                6_000_000,
-                || peer(12_001_000),
-            )
+            .watch(60 * S, || Some(30_000_000), 6_000_000, || peer(12_001_000))
             .expect("a minute on");
         assert_eq!(t.other, 200_000);
         assert_eq!(t.devices, vec![(name.clone(), 200_000)]);
@@ -410,7 +498,10 @@ fn a_neighbour_s_huge_counter_saturates_the_sums() {
 fn a_restart_starts_the_window_with_the_neighbours_read() {
     let mut w = TrafficWatch::new();
     assert_eq!(w.look_with(0, Some(0), 0, &Readings::new()), None);
-    let peers = vec![("a".to_string(), neighbour(Some(r#"{"tx_bytes":500,"name":"a"}"#)))];
+    let peers = vec![(
+        "a".to_string(),
+        neighbour(Some(r#"{"tx_bytes":500,"name":"a"}"#)),
+    )];
     w.restart(30 * S, 3_000_000, 1_000_000, &peers);
     assert!(!w.due(60 * S), "a minute from the restart");
     // 60 s: the NIC 6 000 000, ours 3 000 000, a 1 200 000.

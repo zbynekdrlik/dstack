@@ -738,6 +738,31 @@ fn a_fresh_device_s_status_is_its_name_and_numbers() {
     );
 }
 
+/// dstack #209: the status names the device as it is now (the name its ARC
+/// record announces), so a local reader (the traffic watch, dtray) can tell
+/// which device answered. A rename shows at the next status; the name is
+/// escaped.
+#[test]
+fn the_status_names_the_device_as_it_is_now() {
+    use crate::arc::{Flows, Running};
+    let dir = tempfile::tempdir().unwrap();
+    let device = device_at(dir.path());
+    let media = media_on(&device, Arc::new(Unready));
+    let name_in = |media: &Media| {
+        let v: serde_json::Value = serde_json::from_str(&status(media)).expect("JSON");
+        v["name"].clone()
+    };
+    assert_eq!(name_in(&media), "test-device");
+    let flows = Running {
+        tx: Arc::clone(&media.tx),
+        rx: Arc::clone(&media.manager),
+    };
+    flows.renamed("renamed-device");
+    assert_eq!(name_in(&media), "renamed-device");
+    flows.renamed("a\"b\\c\n");
+    assert_eq!(name_in(&media), "a\"b\\c\n");
+}
+
 #[test]
 fn the_status_names_the_clock_requests_channels_sources_and_checks() {
     let dir = tempfile::tempdir().unwrap();
