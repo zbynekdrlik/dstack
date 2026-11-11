@@ -48,6 +48,7 @@ The site's own values (subnets, VLAN numbers, host names, addresses, switch port
   - in: `ct state established,related`; IGMP; multicast UDP (PTP, Dante info and heartbeat groups, multicast audio); the Dante ports of the PC's devices (ARC 4440+, flow control 4455+, info 8700/8702/8708, CMC 8800+, audio 30000+/30100+); PTP 319/320; mDNS 5353 and **`udp sport 5353 accept`**; a controller's own receive ports (dcontroller's meter ports 8810–8825); DHCP 68 only on a leg that uses DHCP; IPv6 dropped; everything else dropped;
   - out: only the PC's Dante programs (by user or program) and PTP 319/320, IGMP, DHCP 67/68, and only to `<dante>` or the groups 224.0.0.231/.233/.251 and the PTP/audio multicast groups; everything else dropped;
   - a guard that allows only one program out must also allow every Dante device on the PC (a dlink app under another user, for example), with its ports in.
+  - every Dante app on a guarded PC runs as its own service user (presenter as `presenter`, dcontroller as `dcontroller`), never as the login user: the guard names each by its uid (`meta skuid`), so a uid shared with the login user would let everything that user runs out. A cgroup match is not workable: nft resolves the cgroup at load, and a service restart breaks it (dcontroller#64).
 
 ### Windows
 
