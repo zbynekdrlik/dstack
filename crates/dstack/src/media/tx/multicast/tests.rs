@@ -224,7 +224,11 @@ fn saved_multicast_flows_are_made_again_at_start() {
             ]
         );
     }
-    assert_eq!(shared.plan_dest(1), Some(group(1)), "handed to the TX thread");
+    assert_eq!(
+        shared.plan_dest(1),
+        Some(group(1)),
+        "handed to the TX thread"
+    );
     assert_eq!(shared.plan_dest(5), Some(group(5)));
     assert_eq!(shared.plan_dest(3), None);
     assert_eq!(warnings.matches("not made again").count(), 1, "{warnings}");

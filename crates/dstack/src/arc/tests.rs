@@ -3095,7 +3095,14 @@ fn a_multicast_create_or_delete_is_saved_or_refused_and_undone() {
         (STATUS_ERROR, false, 0)
     );
     assert_eq!(device.state.multicast, saved);
-    assert!(flows.tx.lock().unwrap().flow(1).is_some_and(|f| f.multicast));
+    assert!(
+        flows
+            .tx
+            .lock()
+            .unwrap()
+            .flow(1)
+            .is_some_and(|f| f.multicast)
+    );
     // Nor is a create made.
     let refused = decode(answer(&mut device, &flows, &create(11, 4, &[3])));
     assert_eq!((refused.header.op2, refused.changed), (STATUS_ERROR, false));

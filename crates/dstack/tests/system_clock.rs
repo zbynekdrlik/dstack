@@ -860,7 +860,10 @@ fn our_multicast_flow_survives_a_restart_of_the_device() {
         "{ours} packets of our flow on the group in 5 s after the restart"
     );
     deleted.expect("the flow deleted");
-    assert!(matches!(second_stop, host::Stopped::Done), "{second_stop:?}");
+    assert!(
+        matches!(second_stop, host::Stopped::Done),
+        "{second_stop:?}"
+    );
 }
 
 /// dstack #187 (dcontroller#46): dstack-dev's `tx-end` ends the TX flow our
