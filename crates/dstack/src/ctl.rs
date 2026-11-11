@@ -27,6 +27,17 @@
 //!   `ok`, the app's one-line text, or `error: <reason>`; `error: no app
 //!   command` without a hook. The one request whose answer may carry the
 //!   app's words. The local endpoint takes it too ([`local`]).
+//! - `tx-end <flow>` (dstack #187, dstack-dev only: a controller's E2E,
+//!   dcontroller#46): ends our live TX flow `flow` (the status's `tx` flow
+//!   number, from 1) as if its receiver had gone quiet
+//!   ([`crate::media::tx::TxTable::end`]): it sends nothing more, its slot
+//!   is free, and its receiver (ours, subscribed to our own TX, in the E2E)
+//!   stops receiving, then asks for the flow again and receives by itself,
+//!   on a new flow (often under another number: its stop frees the slot and
+//!   a new flow takes the next one).
+//!   `error: tx-end: no live TX flow there` for an empty slot or a flow
+//!   expired already; every device but dstack-dev's answers
+//!   `error: tx-end is dstack-dev's only` ([`Media::allow_dev_requests`]).
 //!
 //! Anything else is one line `error: <reason>`, the reason a fixed text
 //! (the request is never echoed back). Settings answer `ok`.
@@ -114,9 +125,14 @@ pub enum Request {
     },
     /// The app's own command: the words after `app` ([`app_words`]).
     App,
+    /// dstack-dev's own: our TX flow in slot `slot` (from 0) ends
+    /// ([`Media::allow_dev_requests`]).
+    TxEnd {
+        slot: usize,
+    },
 }
 
-const UNKNOWN: &str = "unknown request: status, source, check or app";
+const UNKNOWN: &str = "unknown request: status, source, check, app or tx-end";
 const APP_USAGE: &str = "app <words>";
 /// The answer without an app command hook.
 pub const NO_APP_COMMAND: &str = "no app command";
@@ -126,6 +142,11 @@ const SOURCE_USAGE: &str =
     "source <tx> silence|counter|sine <hz> <dbfs>|echo <rx> <samples>|engine";
 const NO_ENGINE: &str = "no engine on that channel";
 const CHECK_USAGE: &str = "check <rx> off|counter|sine <hz>";
+const TX_END_USAGE: &str = "tx-end <flow>";
+/// The answer to `tx-end` on a device that is not dstack-dev's.
+pub const TX_END_DEV_ONLY: &str = "tx-end is dstack-dev's only";
+/// The answer to `tx-end` for a slot without a live TX flow.
+pub const NO_LIVE_FLOW: &str = "tx-end: no live TX flow there";
 const HZ: &str = "the sine's frequency must be above 0 and below half the sample rate";
 
 /// Reads a request line within `lim`; the error is a fixed text.
@@ -169,6 +190,10 @@ pub fn parse(line: &str, lim: Limits) -> Result<Request, &'static str> {
             };
             Ok(Request::Check { rx, check })
         }
+        ["tx-end", flow] => Ok(Request::TxEnd {
+            slot: channel(flow, MAX_FLOWS).ok_or("tx-end: no such TX flow (1 to 32)")?,
+        }),
+        ["tx-end", ..] => Err(TX_END_USAGE),
         ["app"] => Err(APP_USAGE),
         ["app", ..] => Ok(Request::App),
         ["source"] => Err(SOURCE_USAGE),
@@ -255,6 +280,20 @@ pub fn answer(line: &str, media: &Media) -> String {
             let answer = app_answer(media.app_command(words));
             info!(words, answer, "app command");
             answer
+        }
+        Ok(Request::TxEnd { slot }) => {
+            if !media.dev_requests() {
+                debug!("tx-end refused: not dstack-dev");
+                return format!("error: {TX_END_DEV_ONLY}");
+            }
+            if !media.tx.end_flow(slot) {
+                return format!("error: {NO_LIVE_FLOW}");
+            }
+            info!(
+                flow = slot + 1,
+                "TX flow ended by the control socket (tx-end): its receiver is to ask again"
+            );
+            "ok".to_string()
         }
         Err(reason) => {
             debug!(reason, "control request refused");

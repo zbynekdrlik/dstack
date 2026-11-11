@@ -343,6 +343,28 @@ impl TxTable {
         expired
     }
 
+    /// Ends the live flow in `slot` as if its receiver had gone quiet
+    /// (dstack #187, dstack-dev's `tx-end`): it is expired as [`expire`]
+    /// expires one, so it sends nothing, its slot is free for the next new
+    /// flow, and its receiver's stop is still answered. `false` for an
+    /// empty slot or a flow expired already.
+    ///
+    /// [`expire`]: TxTable::expire
+    pub fn end(&mut self, slot: usize) -> bool {
+        match self
+            .flows
+            .get_mut(slot)
+            .and_then(Option::as_mut)
+            .filter(|f| !f.expired)
+        {
+            Some(flow) => {
+                flow.expired = true;
+                true
+            }
+            None => false,
+        }
+    }
+
     /// The flow in `slot`.
     pub fn flow(&self, slot: usize) -> Option<&TxFlow> {
         self.flows.get(slot)?.as_ref()
@@ -872,6 +894,16 @@ impl TxShared {
         }
         self.publish(&c);
         expired
+    }
+
+    /// Ends the live flow in `slot` ([`TxTable::end`]) and hands the plans
+    /// to the TX thread, which sends nothing more for it; `false` for an
+    /// empty slot or a flow expired already (nothing changed).
+    pub fn end_flow(&self, slot: usize) -> bool {
+        let mut c = self.lock();
+        let ended = c.table.end(slot);
+        self.publish(&c);
+        ended
     }
 
     /// Each slot's direct MAC from the neighbour `table` (the text of

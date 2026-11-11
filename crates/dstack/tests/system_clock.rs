@@ -792,3 +792,89 @@ fn our_device_creates_lists_sends_and_deletes_a_multicast_flow() {
     assert_eq!(late, 0, "the group is quiet after the delete");
     assert!(matches!(stopped, host::Stopped::Done), "{stopped:?}");
 }
+
+/// dstack #187 (dcontroller#46): dstack-dev's `tx-end` ends the TX flow our
+/// own RX 1 receives (subscribed to our own TX 1); RX 1 stops receiving
+/// (InProgress, no packets), then asks for the flow again and receives by
+/// itself, as from a transmitter that dropped it.
+#[test]
+fn tx_end_stops_our_rx_and_it_recovers_by_itself() {
+    use dstack::daemon::media::Media;
+    use dstack::subscribe::SubStatus;
+
+    let _one = ONE_DEVICE.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = tempfile::tempdir().unwrap();
+    let opts = Options {
+        config: device_in(dir.path()),
+        place: Place::Ip(routed_ipv4()),
+        control: dir.path().join("control.sock"),
+    };
+    let prepared = host::prepare_with(&opts, &[], ClockSource::System).expect("the device set up");
+    let media = prepared.media();
+    // As `daemon::cli::main` does for dstack-dev.
+    media.allow_dev_requests();
+    assert_eq!(ctl::answer("source 1 counter", &media), "ok");
+    let stop = Arc::new(AtomicBool::new(false));
+    let host = prepared
+        .start(Signals::Report(Arc::clone(&stop)))
+        .expect("the device started");
+    let rx1 = |media: &Media| {
+        let c = media.rx_channels().swap_remove(0);
+        (c.status, c.packets)
+    };
+    // How long until `done` holds for RX 1's status and packets, with its
+    // packets then; `None` at the bound (or when the device ended).
+    let wait = |bound: Duration, done: &dyn Fn(Option<SubStatus>, u64) -> bool| {
+        let start = Instant::now();
+        loop {
+            let (status, packets) = rx1(&media);
+            if done(status, packets) {
+                return Some((start.elapsed(), packets));
+            }
+            if start.elapsed() > bound || host.ended().is_some() {
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    let receiving = wait(BOUND, &|s, p| s == Some(SubStatus::Receiving) && p > 0);
+    let status = ctl::answer("status", &media);
+    let flow = field(&status, "\"tx\":[{", "flow");
+    let ended = flow.map(|f| ctl::answer(&format!("tx-end {f}"), &media));
+    let after_end = ctl::answer("status", &media);
+    // Silent for 2 s: InProgress (not connected, to a controller). Our RX
+    // shows it from 2 s of silence until it stops the flow at 6 s of the
+    // flow's age (`subscribe::YOUNG_NS`); the flow is about 0.5 s old at
+    // the tx-end, so that window is about 3 s wide.
+    let stopped = wait(BOUND, &|s, _| s == Some(SubStatus::InProgress));
+    let at_stop = rx1(&media).1;
+    // No packets while stopped.
+    std::thread::sleep(Duration::from_millis(300));
+    let still = rx1(&media).1;
+    // A stopped flow is asked for again within the retry wait (9 s from
+    // the last request, a silent flow stopped from 6 s of age): 30 s.
+    let recovered = wait(Duration::from_secs(30), &|s, p| {
+        s == Some(SubStatus::Receiving) && p > at_stop
+    });
+    let last = ctl::answer("status", &media);
+    let host_stopped = host.stop(Duration::from_secs(5));
+    assert!(receiving.is_some(), "RX 1 never received: {status}");
+    assert_eq!(flow, Some(1), "our one TX flow: {status}");
+    assert_eq!(ended.as_deref(), Some("ok"), "{status}");
+    assert!(
+        after_end.contains("\"tx\":[{\"flow\":1,\"live\":0,"),
+        "{after_end}"
+    );
+    let (took, _) = stopped.unwrap_or_else(|| panic!("RX 1 kept receiving: {after_end}"));
+    assert!(
+        took <= Duration::from_secs(5),
+        "RX 1 stopped after {took:?}"
+    );
+    assert_eq!(still, at_stop, "RX 1 received while stopped");
+    assert!(recovered.is_some(), "RX 1 did not receive again: {last}");
+    assert!(last.contains("\"live\":1,"), "a live TX flow again: {last}");
+    assert!(
+        matches!(host_stopped, host::Stopped::Done),
+        "{host_stopped:?}"
+    );
+}
