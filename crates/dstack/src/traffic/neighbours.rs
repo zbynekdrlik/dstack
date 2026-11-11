@@ -15,16 +15,20 @@
 //! - [`Finder`]: the discovery as the watch uses it; [`DiscoveryFinder`] is
 //!   the real one, a test gives its own.
 //! - [`Neighbours`]: the list for a look ([`Neighbours::list`], empty while
-//!   nothing runs) and the start or stop after it ([`Neighbours::after`]).
+//!   nothing runs), the start or stop after it ([`Neighbours::after`]), and
+//!   the watch's step at each control tick ([`Neighbours::tick`]).
 //!
 //! The first warning of a loud NIC names no neighbour (the discovery starts
-//! after it); the later ones do, once the discovery has listed them.
+//! after it). At the first tick the started discovery lists any, the
+//! watch's window starts again with them read
+//! ([`super::TrafficWatch::restart`]), so the next look has both ends of
+//! each and the next warning names them.
 
 use std::net::Ipv4Addr;
 
 use tracing::{info, warn};
 
-use super::{Peer, Traffic, neighbours, too_much};
+use super::{Peer, Traffic, TrafficWatch, on_address, too_much};
 use crate::discover::{Device, Discovery};
 
 /// How long the discovery keeps running after the last loud look, ns.
@@ -65,7 +69,7 @@ impl Lazy {
 /// The NIC's rest past this device's audio alone: the other traffic and
 /// every neighbour's audio.
 pub fn rest_past_ours(t: &Traffic) -> u64 {
-    t.other + (t.our_devices() - t.ours)
+    t.other.saturating_add(t.our_devices() - t.ours)
 }
 
 /// The discovery as the watch uses it.
@@ -133,6 +137,9 @@ pub struct Neighbours {
     own: Option<u16>,
     /// A failed start was warned about (again only after one started).
     told: bool,
+    /// A discovery started and has not listed a neighbour yet: its first
+    /// list starts the watch's window again ([`Neighbours::tick`]).
+    fresh: bool,
 }
 
 impl Default for Neighbours {
@@ -148,6 +155,7 @@ impl Neighbours {
             lazy: Lazy::default(),
             own: None,
             told: false,
+            fresh: false,
         }
     }
 
@@ -156,13 +164,46 @@ impl Neighbours {
         self.own = port;
     }
 
-    /// The neighbours on `ip` now ([`super::neighbours()`]); none while the
+    /// The neighbours on `ip` now ([`on_address`]); none while the
     /// discovery does not run.
     pub fn list(&self, ip: Ipv4Addr) -> Vec<Peer> {
         if !self.finder.running() {
             return Vec::new();
         }
-        neighbours(&self.finder.devices(), ip, self.own)
+        on_address(&self.finder.devices(), ip, self.own)
+    }
+
+    /// The watch's step at a control tick at `now_ns` on `ip`, with the
+    /// NIC's sent bytes from `nic` and this device's audio bytes `ours`.
+    /// The first tick a started discovery lists a neighbour, the window
+    /// starts again with them read ([`TrafficWatch::restart`]; not while the
+    /// NIC is unread). Otherwise the look ([`TrafficWatch::watch`], with
+    /// [`Neighbours::list`]) and the start or stop after it
+    /// ([`Neighbours::after`]). The window's traffic, when one closed.
+    pub fn tick(
+        &mut self,
+        watch: &mut TrafficWatch,
+        now_ns: u64,
+        ip: Ipv4Addr,
+        nic: impl FnOnce() -> Option<u64>,
+        ours: u64,
+    ) -> Option<Traffic> {
+        if self.fresh {
+            let found = self.list(ip);
+            if !found.is_empty() {
+                let nic = nic()?;
+                self.fresh = false;
+                watch.restart(now_ns, nic, ours, &found);
+                info!(
+                    neighbours = found.len(),
+                    "our other devices on this PC found: the traffic watch's window starts again with their audio"
+                );
+                return None;
+            }
+        }
+        let window = watch.watch(now_ns, nic, ours, || self.list(ip));
+        self.after(now_ns, window.as_ref(), ip);
+        window
     }
 
     /// After a look at `now_ns` that gave `t` (`None`: no window closed,
@@ -175,6 +216,7 @@ impl Neighbours {
             Step::Start => match self.finder.start(ip) {
                 Ok(()) => {
                     self.told = false;
+                    self.fresh = true;
                     info!(
                         "other traffic on the Dante NIC: discovery started to find our other devices on this PC"
                     );

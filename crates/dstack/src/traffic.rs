@@ -10,11 +10,12 @@
 //! answers) is a few kB/s, well under it.
 //!
 //! Our devices' audio (dstack #203): this device's wire bytes
-//! ([`TxShared::bytes_sent`]) and every other dstack device's on the same
+//! ([`crate::media::tx::TxShared::bytes_sent`]) and every other dstack device's on the same
 //! PC, read from its local status endpoint ([`crate::ctl::local`], the
 //! status's `tx_bytes`) through the stack's own client
-//! ([`crate::ctl::probe`]), all of them within [`PEERS_WAIT`] at each look.
-//! A neighbour counts in a window only when it was read at both of its
+//! ([`crate::ctl::probe`]), all of them within [`PEERS_WAIT`] at each look,
+//! each in its share of the time left (a stuck one never takes the
+//! others' time). A neighbour counts in a window only when it was read at both of its
 //! ends with a counter that did not go back; one that appeared, went away
 //! or restarted meanwhile stays in the rest for that window. One that does
 //! not answer is left out and warned about once (again only after it
@@ -27,9 +28,8 @@
 //!   read.
 //! - [`our_devices`] (pure): the warning's text of our devices' part.
 //! - [`read_peers`]: the reads, one deadline for all.
-//! - [`neighbours()`] (pure): our devices on our address in a discovery's
-//!   list; [`mod@neighbours`]: that discovery, run only while the NIC is
-//!   loud.
+//! - [`on_address`] (pure): our devices on our address in a discovery's
+//!   list; [`neighbours`]: that discovery, run only while the NIC is loud.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::{Ipv4Addr, SocketAddr};
@@ -38,7 +38,6 @@ use std::time::{Duration, Instant};
 use tracing::warn;
 
 use crate::ctl::probe::{self, ProbeError};
-use crate::media::tx::TxShared;
 
 pub mod neighbours;
 
@@ -48,8 +47,9 @@ pub const EVERY_NS: u64 = 60_000_000_000;
 pub const OTHER_BYTES_PER_S: u64 = 100_000;
 /// How long reading every neighbour may take at a look, together: the
 /// watch runs on the daemon's control tick, which a stuck neighbour holds
-/// this long at most, once a minute. A healthy one answers within a
-/// millisecond on 127.0.0.1.
+/// this long at most, once a minute (and once more when the discovery has
+/// first listed them, [`TrafficWatch::restart`]). A healthy one answers
+/// within a millisecond on 127.0.0.1.
 pub const PEERS_WAIT: Duration = Duration::from_millis(200);
 
 /// A neighbour on the PC: another dstack device's name and its local
@@ -71,10 +71,17 @@ pub struct Traffic {
 }
 
 impl Traffic {
-    /// Our devices' audio together: this device's and every neighbour's.
+    /// Our devices' audio together: this device's and every neighbour's
+    /// (saturating: a neighbour's counter is its own reply).
     pub fn our_devices(&self) -> u64 {
-        self.ours + self.devices.iter().map(|(_, b)| b).sum::<u64>()
+        sum_onto(self.ours, &self.devices)
     }
+}
+
+/// `start` plus each of `devices`' bytes, saturating: a neighbour's bytes
+/// come from its own reply, which may claim anything.
+fn sum_onto(start: u64, devices: &[(String, u64)]) -> u64 {
+    devices.iter().fold(start, |s, (_, b)| s.saturating_add(*b))
 }
 
 /// A look's counters, kept for the next one.
@@ -148,7 +155,7 @@ impl TrafficWatch {
         let secs = ((now_ns - last.at) / 1_000_000_000).max(1);
         let devices = deltas(&last.peers, peers);
         let mine = ours - last.ours;
-        let all_ours = mine + devices.iter().map(|(_, b)| b).sum::<u64>();
+        let all_ours = sum_onto(mine, &devices);
         let other = (nic - last.nic).saturating_sub(all_ours);
         Some(Traffic {
             other: other / secs,
@@ -178,35 +185,59 @@ impl TrafficWatch {
         }
     }
 
-    /// [`TrafficWatch::look_with`] on the NIC holding `ip`, `tx`'s audio
-    /// and the neighbours' that `peers` lists (asked and read within
-    /// [`PEERS_WAIT`] only when a look is due), a rate over
-    /// [`OTHER_BYTES_PER_S`] logged as a warning with our devices' part.
-    /// The window's traffic, for the caller ([`neighbours::Neighbours::after`]).
+    /// [`TrafficWatch::look_with`] with the NIC's bytes from `nic` and the
+    /// neighbours' that `peers` lists, both asked only when a look is due
+    /// (the neighbours, read within [`PEERS_WAIT`], only once the NIC was
+    /// read: an unread NIC makes no look, and its neighbours are not read at
+    /// every tick meanwhile); a rate over [`OTHER_BYTES_PER_S`] logged as a
+    /// warning with our devices' part. The window's traffic, for the caller
+    /// ([`neighbours::Neighbours::tick`]).
     pub fn watch(
         &mut self,
         now_ns: u64,
-        ip: Ipv4Addr,
-        tx: &TxShared,
+        nic: impl FnOnce() -> Option<u64>,
+        ours: u64,
         peers: impl FnOnce() -> Vec<Peer>,
     ) -> Option<Traffic> {
         if !self.due(now_ns) {
             return None;
         }
-        let readings: Readings = read_peers(&peers(), PEERS_WAIT)
-            .into_iter()
-            .filter_map(|(name, r)| self.take(&name, r).map(|b| (name, b)))
-            .collect();
-        let t = self.look_with(now_ns, nic_sent_bytes(ip), tx.bytes_sent(), &readings)?;
+        let nic = nic()?;
+        let readings = self.read(&peers());
+        let t = self.look_with(now_ns, Some(nic), ours, &readings)?;
         if too_much(t.other) {
             warn!(
                 other_bytes_per_s = t.other,
                 our_devices_bytes_per_s = t.our_devices(),
-                our_devices = %our_devices(&t),
+                our_devices = ?our_devices(&t),
                 "the Dante NIC carries other traffic besides our devices' audio: our audio waits behind it in the NIC's queue (late packets at a receiver); move that traffic to another NIC (docs/windows-box.md, docs/linux-box.md)"
             );
         }
         Some(t)
+    }
+
+    /// Starts the window again at `now_ns`, with the NIC's sent bytes
+    /// `nic`, ours `ours` and `peers` read now (within [`PEERS_WAIT`]): the
+    /// next look, [`EVERY_NS`] on, has both ends of every neighbour read
+    /// here. The discovery's first list asks for it ([`neighbours`]), so the
+    /// warning after the first one names our devices.
+    pub fn restart(&mut self, now_ns: u64, nic: u64, ours: u64, peers: &[Peer]) {
+        let peers = self.read(peers);
+        self.last = Some(Mark {
+            at: now_ns,
+            nic,
+            ours,
+            peers,
+        });
+    }
+
+    /// `peers` read ([`read_peers`] within [`PEERS_WAIT`]), each through
+    /// [`TrafficWatch::take`].
+    fn read(&mut self, peers: &[Peer]) -> Readings {
+        read_peers(peers, PEERS_WAIT)
+            .into_iter()
+            .filter_map(|(name, r)| self.take(&name, r).map(|b| (name, b)))
+            .collect()
     }
 }
 
@@ -215,7 +246,7 @@ impl TrafficWatch {
 /// ([`crate::discover::Device::status_port`]) other than ours, `own` (a
 /// device without a local endpoint passes `None`). Sorted by name, each
 /// once.
-pub fn neighbours(found: &[crate::discover::Device], ip: Ipv4Addr, own: Option<u16>) -> Vec<Peer> {
+pub fn on_address(found: &[crate::discover::Device], ip: Ipv4Addr, own: Option<u16>) -> Vec<Peer> {
     let mut out: Vec<Peer> = found
         .iter()
         .filter(|d| *d.arc.ip() == ip)
@@ -268,17 +299,22 @@ pub fn reply_bytes(read: Result<String, ProbeError>) -> Result<u64, String> {
 }
 
 /// Each of `peers`' bytes ([`reply_bytes`]), read one after another from
-/// 127.0.0.1 within `wait` for all: a neighbour past the deadline is not
-/// read (its reason says so).
+/// 127.0.0.1 within `wait` for all. Each has its share of the time left
+/// (split with the ones still to read), so a stuck neighbour (one that
+/// accepts and never answers, or a closed port Windows keeps trying) takes
+/// only its own share and the rest are still read.
 pub fn read_peers(peers: &[Peer], wait: Duration) -> Vec<(String, Result<u64, String>)> {
     let deadline = Instant::now() + wait;
+    let count = peers.len();
     peers
         .iter()
-        .map(|(name, port)| {
+        .enumerate()
+        .map(|(i, (name, port))| {
             let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, *port));
+            let still = u32::try_from(count - i).unwrap_or(u32::MAX);
             let read = probe::time_left(deadline, Instant::now())
                 .map_err(ProbeError::from)
-                .and_then(|left| probe::status_at(addr, left));
+                .and_then(|left| probe::status_at(addr, left / still));
             (name.clone(), reply_bytes(read))
         })
         .collect()

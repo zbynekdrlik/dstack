@@ -80,7 +80,7 @@ exclude_re = [
   "dtray/src/discover.rs.*Scanner::(new|refresh|devices|readings)",
   # The traffic watch's discovery of our other devices (dstack #203): glue
   # over a real Discovery (mDNS on port 5353, likewise); its decisions
-  # (traffic::neighbours::Lazy, Neighbours, traffic::neighbours) are tested
+  # (traffic::neighbours::Lazy, Neighbours, traffic::on_address) are tested
   # with a test Finder.
   "traffic/neighbours.rs.*DiscoveryFinder>::(start|stop|devices)",
   # The embedding glue and its host paths (no socket, no signal handler):

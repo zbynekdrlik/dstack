@@ -691,12 +691,15 @@ async fn the_driver_s_tick_reads_our_neighbours_but_never_ourselves() {
     let (neighbour, neighbour_port) = listen();
     let (own, own_port) = listen();
     own.set_nonblocking(true).unwrap();
-    let served = std::thread::spawn(move || {
+    // The request, through a channel: a tick that never connects fails the
+    // test in a bounded time instead of hanging it.
+    let (served, request) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
         let (mut s, _) = neighbour.accept().unwrap();
         let mut req = [0u8; 7];
         s.read_exact(&mut req).unwrap();
         std::io::Write::write_all(&mut s, b"{\"tx_bytes\":9}\n").unwrap();
-        req
+        let _ = served.send(req);
     });
     let fake = Arc::new(Mutex::new(Fake {
         running: true,
@@ -710,8 +713,13 @@ async fn the_driver_s_tick_reads_our_neighbours_but_never_ourselves() {
     let (mut driver, _answers, _changes) = driver_of(&media);
     driver.set_finder(Box::new(FakeFinder(Arc::clone(&fake))));
     driver.set_status_port(Some(own_port));
+    // A NIC counter of our own: loopback has none on every OS.
+    driver.set_nic(|_| Some(0));
     driver.tick(&records);
-    assert_eq!(&served.join().unwrap(), b"status\n");
+    let req = request
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("the neighbour asked within the tick");
+    assert_eq!(&req, b"status\n");
     let not_asked = own.accept().unwrap_err();
     assert_eq!(not_asked.kind(), std::io::ErrorKind::WouldBlock);
 }

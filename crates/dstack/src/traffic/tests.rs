@@ -140,7 +140,7 @@ fn a_neighbour_counts_only_when_read_at_both_ends_of_the_window() {
 }
 
 #[test]
-fn neighbours_are_our_other_devices_on_our_address() {
+fn on_address_lists_our_other_devices_on_our_address() {
     use std::collections::BTreeMap;
     use std::net::SocketAddrV4;
     // Documentation addresses (RFC 5737) only.
@@ -173,18 +173,18 @@ fn neighbours_are_our_other_devices_on_our_address() {
     ];
     let peer = |n: &str, p: u16| (n.to_string(), p);
     assert_eq!(
-        neighbours(&found, ours, Some(5000)),
+        on_address(&found, ours, Some(5000)),
         vec![peer("alpha", 5001), peer("zeta", 5002)]
     );
     assert_eq!(
-        neighbours(&found, ours, None),
+        on_address(&found, ours, None),
         vec![peer("alpha", 5001), peer("me", 5000), peer("zeta", 5002)]
     );
     assert_eq!(
-        neighbours(&found, other, Some(5000)),
+        on_address(&found, other, Some(5000)),
         vec![peer("elsewhere", 5003)]
     );
-    assert!(neighbours(&[], ours, None).is_empty());
+    assert!(on_address(&[], ours, None).is_empty());
 }
 
 #[test]
@@ -309,21 +309,118 @@ fn neighbours_are_read_from_their_local_endpoints_within_one_wait() {
     assert!(reason.starts_with("no answer"), "{got:?}");
 }
 
+/// A stuck neighbour takes only its share of the wait: the ones after it
+/// are still read (#203 review: one slow device made every other one
+/// unreadable, their audio "other traffic").
 #[test]
-fn a_stuck_neighbour_spends_the_wait_and_the_rest_are_not_read() {
+fn a_stuck_neighbour_takes_only_its_share_and_the_rest_are_read() {
     let peers = vec![
         ("stuck".to_string(), neighbour(None)),
+        ("slow".to_string(), neighbour(None)),
         ("a".to_string(), neighbour(Some(r#"{"tx_bytes":1}"#))),
     ];
     let wait = std::time::Duration::from_millis(300);
     let start = std::time::Instant::now();
     let got = read_peers(&peers, wait);
     let took = start.elapsed();
-    assert!(took >= wait, "{took:?}");
+    // The first stuck one waits a third, the second half of what is left.
+    assert!(took >= std::time::Duration::from_millis(190), "{took:?}");
     assert!(took < std::time::Duration::from_millis(1500), "{took:?}");
     assert!(got[0].1.is_err(), "{got:?}");
-    let reason = got[1].1.as_ref().unwrap_err();
-    assert!(reason.starts_with("no answer"), "{got:?}");
+    assert!(got[1].1.is_err(), "{got:?}");
+    assert_eq!(got[2], ("a".to_string(), Ok(1)));
     // Nothing to read: nothing waited.
     assert!(read_peers(&[], wait).is_empty());
+}
+
+/// An unread NIC makes no look: the neighbours are not read (at every
+/// control tick while it lasts), and between looks nothing is asked.
+#[test]
+fn the_watch_asks_the_nic_first_and_only_when_a_look_is_due() {
+    let mut w = TrafficWatch::new();
+    let no_peers = || -> Vec<Peer> { panic!("neighbours read for an unread NIC") };
+    assert_eq!(w.watch(0, || None, 0, no_peers), None);
+    assert!(w.due(0), "still due");
+    assert_eq!(w.watch(0, || Some(0), 0, Vec::new), None, "the first look");
+    let asked = || -> Option<u64> { panic!("the NIC asked between looks") };
+    let read = || -> Vec<Peer> { panic!("neighbours read between looks") };
+    assert_eq!(w.watch(EVERY_NS - 1, asked, 0, read), None);
+}
+
+/// The watch's warning names this device and each neighbour, the names
+/// escaped (a name comes from the network's mDNS).
+#[test]
+fn the_watch_warns_with_our_devices_named_and_escaped() {
+    crate::test_log::undecided();
+    let mut w = TrafficWatch::new();
+    let name = "a\nb".to_string();
+    let peer = |line: &'static str| vec![(name.clone(), neighbour(Some(line)))];
+    assert_eq!(
+        w.watch(0, || Some(0), 0, || peer(r#"{"tx_bytes":1000}"#)),
+        None
+    );
+    let logs = crate::test_log::capture_warnings(|| {
+        // 60 s: the NIC 30 000 000, ours 6 000 000, the neighbour
+        // 12 000 000: 200 000 B/s left.
+        let t = w
+            .watch(
+                60 * S,
+                || Some(30_000_000),
+                6_000_000,
+                || peer(r#"{"tx_bytes":12001000}"#),
+            )
+            .expect("a minute on");
+        assert_eq!(t.other, 200_000);
+        assert_eq!(t.devices, vec![(name.clone(), 200_000)]);
+    });
+    assert!(
+        logs.contains(r#"our_devices="this device 100000, a\nb 200000""#),
+        "{logs}"
+    );
+    assert!(!logs.contains("a\nb"), "{logs}");
+    assert!(logs.contains("other_bytes_per_s=200000"), "{logs}");
+    assert!(logs.contains("our_devices_bytes_per_s=300000"), "{logs}");
+}
+
+/// A neighbour's reply may claim anything: its bytes never overflow the
+/// sums (a panic would end the device's control loop).
+#[test]
+fn a_neighbour_s_huge_counter_saturates_the_sums() {
+    let mut w = TrafficWatch::new();
+    assert_eq!(w.look_with(0, Some(0), 0, &readings(&[("a", 0)])), None);
+    let t = w
+        .look_with(60 * S, Some(6_000_000), 600, &readings(&[("a", u64::MAX)]))
+        .unwrap();
+    assert_eq!(t.other, 0);
+    assert_eq!(t.ours, 10);
+    let t = Traffic {
+        other: 100,
+        ours: 7,
+        devices: vec![("a".to_string(), u64::MAX), ("b".to_string(), 3)],
+    };
+    assert_eq!(t.our_devices(), u64::MAX);
+    assert_eq!(neighbours::rest_past_ours(&t), u64::MAX);
+}
+
+/// A restart reads the neighbours and starts the window there: the next
+/// look, a minute on, has both ends of each.
+#[test]
+fn a_restart_starts_the_window_with_the_neighbours_read() {
+    let mut w = TrafficWatch::new();
+    assert_eq!(w.look_with(0, Some(0), 0, &Readings::new()), None);
+    let peers = vec![("a".to_string(), neighbour(Some(r#"{"tx_bytes":500}"#)))];
+    w.restart(30 * S, 3_000_000, 1_000_000, &peers);
+    assert!(!w.due(60 * S), "a minute from the restart");
+    // 60 s: the NIC 6 000 000, ours 3 000 000, a 1 200 000.
+    let t = w
+        .look_with(
+            90 * S,
+            Some(9_000_000),
+            4_000_000,
+            &readings(&[("a", 1_200_500)]),
+        )
+        .unwrap();
+    assert_eq!(t.devices, vec![("a".to_string(), 20_000)]);
+    assert_eq!(t.other, 30_000);
+    assert_eq!(t.ours, 50_000);
 }
