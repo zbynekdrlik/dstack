@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.86
+
+- Feature (dstack #184, owner 11.11.2026): dsend's own Windows render endpoint "dsend", a virtual audio driver in `drivers/dsend-audio/` (derived from Microsoft's simpleaudiosample, MS-PL for that directory only, like dasio's NDIS filter): one speaker endpoint, no capture, the buffer consumed at the real-time rate, 48 or 44.1 kHz 16-bit stereo. Test-signed (WDK test certificate per build) for a PC with test signing on; `scripts/install.ps1` refuses and changes nothing otherwise. Built in CI on windows-2025 (WDK 10.0.28000 from NuGet); release asset `dsend-audio-<tag>-windows-x86_64.zip`. Windows plays into it, dsend captures its loopback and sends it to Dante: the VB-Audio VAIO endpoint dsend used on the FOH PC gave silence.
+- dsend picks an output whose name holds "dsend" when no `--output` or saved choice names one (else the Windows default); dlisten never does. API (dstack-endpoint): `outputs::choose` takes a `Fallback` (`Fallback::Default` or a name, `outputs::DSEND`). No latency change.
+
 ## 0.6.85
 
 - Feature (dstack #148, dcontroller#46): `arc::flows::delete_multicast(call, local_id)` deletes another device's TX flow by its media-local slot (ARC 2.8.9, op 0x2602, `arc::flows::DELETE`, body `delete_body`), so a controller can create, list and delete a shared multicast flow on a transmitter with few slots. Verified live on a UltimoX2 (DT_20, 4.2.5.1, 11.11.2026, owner's OK): a test flow made with `create_multicast` was deleted (status OK, empty reply) and gone from the next list; the flow in use was untouched. No latency change.
