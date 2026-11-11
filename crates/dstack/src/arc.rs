@@ -217,8 +217,21 @@ pub struct Change {
     pub latency: Option<u64>,
     /// Our multicast TX flows changed (ARC 2.8.9's create or delete,
     /// dstack #207): saved, and nothing else to tell (the records and the
-    /// channel-change notification carry no TX flow).
+    /// channel-change notification carry no TX flow). Set alone, never with
+    /// another field ([`Change::TX_FLOWS_ONLY`]).
     pub tx_flows: bool,
+}
+
+impl Change {
+    /// What a multicast create or delete changed: our TX flows alone. The
+    /// server signals it to no one ([`serve`]).
+    pub const TX_FLOWS_ONLY: Change = Change {
+        renamed_rx: Vec::new(),
+        subscriptions: Vec::new(),
+        device_renamed: false,
+        latency: None,
+        tx_flows: true,
+    };
 }
 
 /// What a request comes to.
@@ -227,7 +240,8 @@ pub enum ArcOutcome {
     /// Send this reply; nothing changed.
     Reply(Vec<u8>),
     /// Send this reply; the state changed, so the caller saves it, announces
-    /// the new mDNS records and passes the [`Change`] on.
+    /// the new mDNS records and passes the [`Change`] on (but
+    /// [`Change::TX_FLOWS_ONLY`]: saved, nothing announced).
     Changed(Vec<u8>, Change),
     /// A request inferno leaves unanswered: no reply.
     Unanswered { op1: u16 },
@@ -479,7 +493,12 @@ fn saved(
         ArcOutcome::Changed(bytes, change) => match device.state.save(&device.cfg.state_file) {
             Ok(()) => ArcOutcome::Changed(bytes, change),
             Err(e) => {
-                error!(error = %e, "a change could not be saved: refused and undone");
+                let op1 = header_op(req);
+                error!(
+                    error = %e,
+                    op = format_args!("{op1:#06x}"),
+                    "a change could not be saved: refused and undone"
+                );
                 undo(device);
                 match Header::parse(req) {
                     Ok((h, _)) => ArcOutcome::Reply(reply(&h, STATUS_ERROR, &[])),
@@ -524,8 +543,9 @@ fn set_latency(h: &Header, body: &[u8], device: &mut Device) -> ArcOutcome {
 
 /// The ARC server: answers every datagram on `sock` from the shared device
 /// and the running `flows`. After each saved change but a multicast
-/// flow's ([`Change::tx_flows`]) it signals `changed` (the mDNS announcer
-/// waits on it), hands changed subscriptions to the manager ([`Flows::subscribe`]) and adds the RX channels renamed, whose
+/// flow's ([`Change::TX_FLOWS_ONLY`]) it signals `changed` (the mDNS
+/// announcer waits on it), hands changed subscriptions to the manager
+/// ([`Flows::subscribe`]) and adds the RX channels renamed, whose
 /// subscription changed or whose status moved to `rx_changes` (the info
 /// server's channel-change notification). Ends only with an error
 /// receiving; a reply that cannot be sent is logged and the server goes
@@ -581,7 +601,7 @@ pub async fn serve<F: Flows>(
                 if let Some((bytes, change)) = sent {
                     // The notification is queued before the reply goes, as
                     // inferno sends its own before answering a rename.
-                    if let Some(change) = change.filter(|c| !c.tx_flows) {
+                    if let Some(change) = change.filter(|c| *c != Change::TX_FLOWS_ONLY) {
                         rx_changes.add(
                             change
                                 .renamed_rx

@@ -1741,6 +1741,33 @@ fn a_failed_save_refuses_and_undoes() {
     assert!(!device.cfg.state_file.exists());
 }
 
+/// A latency write the state file cannot take is refused, and the
+/// latency the device runs with stays (respond's undo, #207 review).
+#[test]
+fn a_latency_write_that_cannot_be_saved_is_refused_and_undone() {
+    use super::control::latency_request_body;
+    let dir = tempfile::tempdir().unwrap();
+    let mut device = Device::load(DeviceConfig {
+        state_file: dir.path().join("missing").join("state.toml"),
+        ..config()
+    })
+    .unwrap();
+    let (before, latency) = (device.state.clone(), device.cfg.latency_ns);
+    let write = request(
+        NETAUDIO,
+        4,
+        op::SETTINGS_SET,
+        0,
+        &latency_request_body(2_000_000),
+    );
+    assert_eq!(
+        respond_idle(&mut device, &write),
+        ArcOutcome::Reply(request(NETAUDIO, 4, op::SETTINGS_SET, STATUS_ERROR, &[]))
+    );
+    assert_eq!(device.cfg.latency_ns, latency);
+    assert_eq!(device.state, before);
+}
+
 #[test]
 fn the_tx_flow_list_states_each_flow_by_offsets() {
     // One flow a receiver asked for: TX 1 and TX 2 to 10.0.0.11:50000.

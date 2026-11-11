@@ -15,19 +15,10 @@ use crate::device::{DeviceConfig, DeviceState};
 use crate::media::tx::TxTable;
 use crate::wire::{Header, STATUS_OK, read_u16, reply};
 
-/// What a multicast create or delete changed: our TX flows alone.
-const TX_FLOWS: Change = Change {
-    renamed_rx: Vec::new(),
-    subscriptions: Vec::new(),
-    device_renamed: false,
-    latency: None,
-    tx_flows: true,
-};
-
 /// ARC 2.8.9's multicast create or delete (`h.op1`, see [`super::answer`]) on the
 /// TX table `tx` of the device `cfg` at `ip`, kept in its `state`
 /// ([`DeviceState::multicast`], dstack #207): a flow made or deleted is
-/// [`ArcOutcome::Changed`] ([`Change::tx_flows`] alone), which the
+/// [`ArcOutcome::Changed`] ([`Change::TX_FLOWS_ONLY`]), which the
 /// caller saves before it answers; a refusal changes neither.
 ///
 /// **Create** (0x2601, [`flows::create_body`]'s form, read by
@@ -62,7 +53,7 @@ pub(super) fn answer(
         }
         state.remove_multicast(slot);
         info!(slot, "a multicast TX flow ended (ARC 2.8.9), its save next");
-        return ArcOutcome::Changed(reply(h, STATUS_OK, &[]), TX_FLOWS);
+        return ArcOutcome::Changed(reply(h, STATUS_OK, &[]), Change::TX_FLOWS_ONLY);
     }
     let asked = match flows::parse_flows(body) {
         Some(f) if f.unread == 0 => f.flows,
@@ -100,7 +91,7 @@ pub(super) fn answer(
     };
     ArcOutcome::Changed(
         reply(h, STATUS_OK, &flows::list_reply_body(&[made])),
-        TX_FLOWS,
+        Change::TX_FLOWS_ONLY,
     )
 }
 

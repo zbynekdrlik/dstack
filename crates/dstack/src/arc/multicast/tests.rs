@@ -26,7 +26,7 @@ fn cfg() -> DeviceConfig {
 
 /// The status and body of our answer to `op1` with `body` (start code
 /// 0x2809) on `state` and `tx`, and whether it changed the state
-/// ([`ArcOutcome::Changed`], [`Change::tx_flows`] alone).
+/// ([`ArcOutcome::Changed`], [`Change::TX_FLOWS_ONLY`]).
 fn ask_with(
     state: &mut DeviceState,
     tx: &mut TxTable,
@@ -43,6 +43,7 @@ fn ask_with(
                 ..Change::default()
             };
             assert_eq!(change, flows, "only our TX flows");
+            assert_eq!(change, Change::TX_FLOWS_ONLY);
             (bytes, true)
         }
         other => panic!("not a reply: {other:?}"),
