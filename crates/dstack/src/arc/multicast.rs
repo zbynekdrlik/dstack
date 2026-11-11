@@ -12,7 +12,7 @@ use tracing::info;
 
 use super::{ArcOutcome, flows, refuse};
 use crate::device::DeviceConfig;
-use crate::media::tx::{TxTable, multicast_group};
+use crate::media::tx::TxTable;
 use crate::wire::{Header, STATUS_OK, read_u16, reply};
 
 /// ARC 2.8.9's multicast create or delete (`h.op1`, see [`super::answer`]) on the
@@ -24,8 +24,9 @@ use crate::wire::{Header, STATUS_OK, read_u16, reply};
 /// [`flows::MAX_FLOW_CHANNELS`], each once). The flow takes our
 /// `tx_fpp_max` frames a packet (the most our advertised latency covers;
 /// Dante Controller asks 0, the device's own) and our encoding, and is
-/// sent to [`multicast_group`]. The reply is its record in the list's
-/// form with no destination, as a UltimoX2 answers. Refused
+/// sent to its group ([`TxTable::add_own_multicast`]). The reply is its
+/// record in the list's form with no destination, as a UltimoX2 answers.
+/// Refused
 /// ([`crate::wire::STATUS_ERROR`]), creating nothing: a body that does not read, other
 /// than one multicast record, a slot past ours or in use, channels we do
 /// not have.
@@ -60,17 +61,13 @@ pub(super) fn answer(
     if !f.multicast() {
         return refuse(h, "a create of a unicast flow");
     }
-    if !flow_channels(&f.channels, cfg.tx.len()) {
-        return refuse(h, "a multicast create of channels we do not have");
-    }
     let Some(slot) = usize::from(f.local_id).checked_sub(1) else {
         return refuse(h, "a multicast create in slot 0");
     };
-    let group = multicast_group(ip, cfg.process_id, slot);
-    let bps = cfg.encoding / 8;
-    if let Err(why) = tx.add_multicast(slot, group, &f.channels, cfg.tx_fpp_max, bps) {
-        return refuse(h, why);
-    }
+    let group = match tx.add_own_multicast(cfg, ip, slot, &f.channels) {
+        Ok(group) => group,
+        Err(why) => return refuse(h, why),
+    };
     info!(
         slot,
         %group,
@@ -88,15 +85,6 @@ pub(super) fn answer(
         destinations: Vec::new(),
     };
     ArcOutcome::Reply(reply(h, STATUS_OK, &flows::list_reply_body(&[made])))
-}
-
-/// Whether `channels` can make a flow of a device with `tx` TX channels:
-/// 1 to [`flows::MAX_FLOW_CHANNELS`] of them, each one of ours (from 1)
-/// and each once.
-fn flow_channels(channels: &[u16], tx: usize) -> bool {
-    (1..=flows::MAX_FLOW_CHANNELS).contains(&channels.len())
-        && channels.iter().all(|&c| (1..=tx).contains(&usize::from(c)))
-        && (1..channels.len()).all(|i| !channels[..i].contains(&channels[i]))
 }
 
 #[cfg(test)]

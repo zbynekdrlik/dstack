@@ -11,6 +11,8 @@ use std::io;
 use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
 
 use super::{MAX_FLOWS, TxFlow, TxTable};
+use crate::arc::flows::MAX_FLOW_CHANNELS;
+use crate::device::DeviceConfig;
 
 /// The UDP port of our multicast flows' groups, Dante's.
 pub const MULTICAST_PORT: u16 = 4321;
@@ -45,7 +47,37 @@ pub(super) fn multicast_out(s: &UdpSocket, ip: Ipv4Addr) -> io::Result<()> {
     r.set_multicast_ttl_v4(MULTICAST_TTL)
 }
 
+/// Whether `channels` can make a flow of a device with `tx` TX channels:
+/// 1 to [`MAX_FLOW_CHANNELS`] of them, each one of ours (from 1) and each
+/// once.
+fn flow_channels(channels: &[u16], tx: usize) -> bool {
+    (1..=MAX_FLOW_CHANNELS).contains(&channels.len())
+        && channels.iter().all(|&c| (1..=tx).contains(&usize::from(c)))
+        && (1..channels.len()).all(|i| !channels[..i].contains(&channels[i]))
+}
+
 impl TxTable {
+    /// The device `cfg` at `ip` makes its own multicast flow of TX
+    /// `channels` (from 1) in `slot` (from 0): sent to [`multicast_group`],
+    /// with the config's `tx_fpp_max` frames a packet (the most its
+    /// advertised latency covers) and its encoding. Returns the group.
+    /// Refused, with the reason, for channels that cannot make a flow
+    /// ([`flow_channels`]) and as [`TxTable::add_multicast`] refuses.
+    pub fn add_own_multicast(
+        &mut self,
+        cfg: &DeviceConfig,
+        ip: Ipv4Addr,
+        slot: usize,
+        channels: &[u16],
+    ) -> Result<SocketAddrV4, &'static str> {
+        if !flow_channels(channels, cfg.tx.len()) {
+            return Err("channels the device does not have");
+        }
+        let group = multicast_group(ip, cfg.process_id, slot);
+        self.add_multicast(slot, group, channels, cfg.tx_fpp_max, cfg.encoding / 8)?;
+        Ok(group)
+    }
+
     /// A multicast flow in `slot` (ARC 2.8.9's create, dstack #193) of
     /// our TX `channels` (from 1), sent to `group` with `fpp` frames a
     /// packet and `bps` bytes a sample. Refused, with the reason, for a

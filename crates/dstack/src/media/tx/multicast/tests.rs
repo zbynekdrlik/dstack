@@ -68,6 +68,45 @@ fn a_multicast_flow_takes_its_slot_and_goes_to_its_group() {
 }
 
 #[test]
+fn a_flow_s_channels_are_1_to_8_of_ours_each_once() {
+    assert!(flow_channels(&[1], 1));
+    assert!(flow_channels(&[16, 1, 8], 16));
+    assert!(flow_channels(&[1, 2, 3, 4, 5, 6, 7, 8], 16));
+    assert!(!flow_channels(&[], 16), "none");
+    assert!(!flow_channels(&[1, 2, 3, 4, 5, 6, 7, 8, 9], 16), "nine");
+    assert!(!flow_channels(&[0], 16), "channel 0");
+    assert!(!flow_channels(&[17], 16), "past ours");
+    assert!(!flow_channels(&[1, 2], 1), "past ours");
+    assert!(!flow_channels(&[3, 1, 3], 16), "twice");
+    assert!(!flow_channels(&[1, 1], 16), "twice in a row");
+}
+
+/// The device's own flow (ARC 2.8.9's create and its re-creation at start):
+/// the test device's group, `tx_fpp_max` and 24-bit encoding; channels it
+/// does not have refused, nothing made.
+#[test]
+fn our_own_multicast_flow_takes_the_device_s_group_fpp_and_encoding() {
+    let cfg = DeviceConfig::from_toml(TEST_DEVICE).expect("config/test-device.toml");
+    let mut t = TxTable::new(1);
+    let group = multicast_group(OUR_IP, cfg.process_id, 2);
+    assert_eq!(t.add_own_multicast(&cfg, OUR_IP, 2, &[4, 1]), Ok(group));
+    let f = t.flow(2).expect("the flow in slot 2");
+    assert_eq!(f.dest, group);
+    assert_eq!(f.channels, [Some(4), Some(1)]);
+    assert_eq!((f.fpp, f.bps), (cfg.tx_fpp_max, 3));
+    assert!(f.multicast);
+    assert_eq!(
+        t.add_own_multicast(&cfg, OUR_IP, 3, &[17]),
+        Err("channels the device does not have")
+    );
+    assert_eq!(
+        t.add_own_multicast(&cfg, OUR_IP, 2, &[1]),
+        Err("a slot that holds a flow")
+    );
+    assert_eq!(t.flows().count(), 1, "nothing else made");
+}
+
+#[test]
 fn a_multicast_flow_is_refused_past_the_slots_or_in_a_held_slot() {
     let mut t = TxTable::with_slots(1, 4);
     assert_eq!(

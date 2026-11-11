@@ -8,7 +8,7 @@ use crate::arc::flows::{
 };
 use crate::arc::{MAX_FLOWS, flows_2809, op, tx_flows};
 use crate::flows::control::FlowRequest;
-use crate::media::tx::MULTICAST_PORT;
+use crate::media::tx::{MULTICAST_PORT, multicast_group};
 use crate::wire::{HEADER_LEN, STATUS_ERROR, request};
 
 const TEST_DEVICE: &str = include_str!("../../../../../config/test-device.toml");
@@ -145,20 +145,6 @@ fn a_create_of_a_channel_we_do_not_have_is_refused() {
     assert_eq!(cfg().tx.len(), 16);
     refused(&mut tx, CREATE, &create_body(1, &[1, 17], OPTIONS).unwrap());
     assert_eq!(create(&mut tx, 1, &[16]).0, STATUS_OK);
-}
-
-#[test]
-fn a_flow_s_channels_are_1_to_8_of_ours_each_once() {
-    assert!(flow_channels(&[1], 1));
-    assert!(flow_channels(&[16, 1, 8], 16));
-    assert!(flow_channels(&[1, 2, 3, 4, 5, 6, 7, 8], 16));
-    assert!(!flow_channels(&[], 16), "none");
-    assert!(!flow_channels(&[1, 2, 3, 4, 5, 6, 7, 8, 9], 16), "nine");
-    assert!(!flow_channels(&[0], 16), "channel 0");
-    assert!(!flow_channels(&[17], 16), "past ours");
-    assert!(!flow_channels(&[1, 2], 1), "past ours");
-    assert!(!flow_channels(&[3, 1, 3], 16), "twice");
-    assert!(!flow_channels(&[1, 1], 16), "twice in a row");
 }
 
 #[test]
