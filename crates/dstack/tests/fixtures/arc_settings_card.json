@@ -1,0 +1,13 @@
+{
+  "what": "A Dante card's ARC settings key table (0x1102) and settings values (0x1100), read with Dante Controller's own requests (start code 0x2729). Dante Controller enables the device rename and sends the latency write (0x1101) for this card.",
+  "captured": "2026-11-11, dstack #216, read only: nothing was written to the card. Its name and address are left out.",
+  "card_state": "96 kHz, latency 5 ms",
+  "replies": {
+    "0x1102": "27290088010311020001001f8020000180210003002200030023000300240001806000030062000300630001020100038204000382050003020a0001020b0001021000030211000302120003021300010214000102220003830100038306000183020001832100010310000103110001031200010303000383f00001060100010309000102090001",
+    "0x1100": "272900d4010411000001241f8020009c802100a0002200010023001800240001806000b0006200010063000102010001820400b4820500b8020a0000020b000002100020021100200212003002130020021400200222138c830100bc830600c0830200c4832100c80310002003110010031200300303000283f000cc06010000030900030209000100000000000000000000000000000000000000000001770000000000000000000000000000000000ef450000000f4240004c4b40004c4b40000f4240009af8da001e84800000000500000000"
+  },
+  "layout": {
+    "0x1102": "header (10 bytes), then the key count (u16), then that many pairs: key (u16), access (u16). 0x0003 = read and write, 0x0001 = read only.",
+    "0x1100": "header, then [asked, held] (a byte each), then a pair per asked key: key, value (with the key's top bit set, the value is the packet offset of a u32); 0, 0 for a key the card does not hold. The 36 keys asked are not in the reply; the card holds the 31 of its 0x1102 table, in that order."
+  }
+}

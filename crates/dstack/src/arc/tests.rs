@@ -1,5 +1,7 @@
 use super::*;
 
+mod key_table;
+
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -1276,12 +1278,10 @@ fn the_clock_reply_is_the_fixed_one() {
         answer.body,
         [0x38, 0x00, 0x38, 0xfd, 0x38, 0xfe, 0x38, 0xff]
     );
-    // The two Dante Controller asks inferno answers with zeros.
+    // A settings read without keys gets zeros, as inferno answers it.
+    // (0x1102, the key table, is `key_table`'s: dstack #216.)
     let answer = dev.ask(2, op::ZEROS_1100, &[]);
     assert_eq!((answer.header.op2, answer.body.len()), (STATUS_OK, 110));
-    assert!(answer.body.iter().all(|&b| b == 0));
-    let answer = dev.ask(3, op::ZEROS_1102, &[]);
-    assert_eq!((answer.header.op2, answer.body.len()), (STATUS_OK, 94));
     assert!(answer.body.iter().all(|&b| b == 0));
 }
 
