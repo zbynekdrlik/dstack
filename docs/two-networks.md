@@ -2,6 +2,8 @@
 
 This is the one procedure for every production PC that touches the Dante network. The owner ruled on 10.11.2026 that no project invents its own: the OS, the VLANs, the firewall and the behaviour of our applications follow this page, and every project points here instead of writing its own variant. dstack owns this page. A project that needs something it does not cover asks dstack, and dstack changes the page.
 
+**Scope: only a PC with a Dante leg** (owner, 11.11.2026). Everything on this page applies only on a PC that runs a Dante device (an app with dlink or dstack inside, dasio, iemmixer, Dante Virtual Soundcard, a Dante card) and so has a Dante leg: the layout, the NIC and driver values, the firewall group, dsync's interface pin and the checks in §6. Dante is one audio path among others (ASIO, SoundGrid, VBAN), and the two-leg layout is the preferred layout, not a precondition. A PC without a Dante leg is not checked against this page and passes; a setup script or gate that fails such a PC is wrong. A project that takes a requirement over from here gates it on the same condition, and dstack names the condition with every requirement it hands over.
+
 The goal: nothing reaches anything by chance. Which address a library picks after a restart, which NIC enumerates first, or which cable is in which port must never decide whether audio, video or control works.
 
 The site's own values (subnets, VLAN numbers, host names, addresses, switch ports) are not in this public repo; they are in `~/.config/dstack/SITE.md` on dev1. Below, `<dante>` is the Dante VLAN's subnet and `<lan>` is the LAN's.
@@ -96,6 +98,8 @@ Two PCs on 10.11.2026 show what goes wrong: on resolume-snv (USB RTL8156, Cx dri
 
 ## 6. Checking a PC (the rig/E2E gates assert this)
 
+Only on a PC with a Dante leg; a PC without one skips every item (scope above).
+
 1. Exactly one physical NIC up; every other NIC disabled.
 2. Exactly one default route, through the LAN leg.
 3. The Dante leg: its address, no gateway, metric 900, no DNS registration, NetBIOS off, sharing/client unbound (Windows); `never-default`, policy table, no `<dante>` route in the main table (Linux).
@@ -106,4 +110,4 @@ Two PCs on 10.11.2026 show what goes wrong: on resolume-snv (USB RTL8156, Cx dri
 
 ## Single-NIC PCs that are still on Dante only
 
-Until such a PC has its LAN leg, all its traffic shares the Dante queue. Keep bulk traffic small, turn large send offload off and set the transmit buffers to the minimum (`docs/windows-box.md`), and run the Dante devices at their priority. Our device warns once a minute when other traffic on its NIC exceeds 100 kB/s, and at its start when its Dante interface holds a default route.
+Until such a PC has its LAN leg, all its traffic shares the Dante queue. Keep bulk traffic small, turn large send offload off and set the transmit buffers to the minimum (`docs/windows-box.md`) on the NIC that carries Dante, and only where its driver offers the setting: the keyword and its range belong to the driver, not the chip (two RTL8156 adapters on different drivers differ), so a driver without it passes, and run the Dante devices at their priority. Our device warns once a minute when other traffic on its NIC exceeds 100 kB/s, and at its start when its Dante interface holds a default route.

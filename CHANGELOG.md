@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.80
+
+- Docs (dstack #155, owner 11.11.2026): `docs/two-networks.md` applies only on a PC with a Dante leg (a PC that runs a Dante device). Its layout, NIC and driver values, firewall group, dsync pin and §6 checks do not apply to a PC without one, which passes; a project gates every requirement it takes over on the same condition. The NIC values in `docs/windows-box.md` and the single-NIC section ("Transmit Buffers" at the minimum, Large Send Offload off) apply only on the NIC that carries Dante and only where its driver offers the keyword: the setting belongs to the driver, not the chip. No code, API or latency change.
+
 ## 0.6.79
 
 - Diagnostics (dstack #177, FOH PC 10./11.11.2026): the late watch's line ("TX packets older than the latency their receiver plays at") carries `relayed`, the late packets the relay thread sent while the TX thread blocked its bounded escape, and `since_escape_us`, the shortest time from the last escape's start to a late packet that second (absent before any escape). A pass ~1 ms late on every slot at once shows 2-3 times a day there with `spin_escape_ms` on; the two fields say whether it was the relay's cover or the TX thread's own time. API: `media::late::Late` has the fields `relayed` and `since_escape_ns`; `LateWatch::look` takes one closure returning the new `LateCounts` (was two); new `TxShared::over_latency_relayed` and `TxShared::take_since_escape`. No latency or behaviour change.
