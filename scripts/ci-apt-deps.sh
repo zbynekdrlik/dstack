@@ -11,7 +11,7 @@ set -euo pipefail
 
 PKGS=(libgtk-3-dev libayatana-appindicator3-dev libasound2-dev)
 FALLBACK=http://mirrors.edge.kernel.org/ubuntu/
-APT=(sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15)
+APT=(sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 -o Acquire::ForceIPv4=true)
 
 install() {
     "${APT[@]}" update --error-on=any && "${APT[@]}" install -y "${PKGS[@]}"
