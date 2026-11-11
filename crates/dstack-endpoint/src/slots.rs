@@ -5,7 +5,17 @@
 //! UDP 4440: Only one usage of each socket address" beside dlisten on 4440
 //! and band on 4441). Slot `k` is ARC `4440 + k`, CMC `8800 + k`, flows
 //! `4455 + k` and process id `k`, the numbering the site's devices use; the
-//! first slot whose three ports bind on the address is taken.
+//! first slot whose three ports are free ([`binds_with`]) is taken.
+//!
+//! A port held by another program on the wildcard address is used too
+//! (dstack #200): Audinate's ConMon service (Dante Controller, DVS) holds
+//! 0.0.0.0:8700 and 0.0.0.0:8800 on a Windows PC. Windows lets a socket
+//! bind the PC's address beside it and hands that socket the unicast to
+//! the address first, so a device on 8800 took ConMon's CMC replies and
+//! Dante Controller on the PC read no device. Each port is therefore tried
+//! on the address and then on the wildcard address (no options, the probe
+//! closed before the next): Windows refuses that second bind while a
+//! wildcard socket holds the port, Linux while any socket does.
 
 use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
 
@@ -38,11 +48,15 @@ pub fn binds(ip: Ipv4Addr, ports: &Ports) -> bool {
 }
 
 /// Whether `ports` are all free for a device on `ip`, `try_bind` saying
-/// whether a UDP socket binds at an address and port now.
+/// whether a UDP socket binds at an address and port now: each port binds
+/// on `ip` (no other device of ours holds it) and on the wildcard address
+/// (no other program holds it there, such as Audinate's ConMon; see the
+/// module).
 pub fn binds_with(ip: Ipv4Addr, ports: &Ports, try_bind: impl Fn(SocketAddrV4) -> bool) -> bool {
-    [ports.arc, ports.cmc, ports.flows]
-        .iter()
-        .all(|&port| try_bind(SocketAddrV4::new(ip, port)))
+    [ports.arc, ports.cmc, ports.flows].iter().all(|&port| {
+        try_bind(SocketAddrV4::new(ip, port))
+            && try_bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port))
+    })
 }
 
 /// The ports and process id a device on `place` starts with: the ones
