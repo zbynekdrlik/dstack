@@ -597,8 +597,20 @@ fn value_of<'a>(text: &'a str, key: &str) -> &'a str {
     &text[start..end]
 }
 
-/// The words a status may hold besides numbers: its keys and the fixed
-/// words of sources and checks.
+/// The strings of the status `text` besides the value of its top-level
+/// `name` (dstack #209: the one value that is not a fixed word), which
+/// must be `name`. Only that value is taken out: the name anywhere else
+/// still fails the words check.
+fn words_of(text: &str, name: &str) -> Vec<String> {
+    let mut v: serde_json::Value = serde_json::from_str(text).expect("JSON");
+    let own = v.as_object_mut().expect("an object").remove("name");
+    assert_eq!(own, Some(name.into()), "{text}");
+    strings_of_json(&v.to_string())
+}
+
+/// The words a status may hold besides numbers and the device's `name`
+/// ([`words_of`] takes it out): its keys and the fixed words of sources and
+/// checks.
 const WORDS: &[&str] = &[
     "multicast",
     "joins",
@@ -711,20 +723,46 @@ const WORDS: &[&str] = &[
 ];
 
 #[test]
-fn a_fresh_device_s_status_is_numbers_only() {
+fn a_fresh_device_s_status_is_its_name_and_numbers() {
     let dir = tempfile::tempdir().unwrap();
     let device = device_at(dir.path());
     let media = media_on(&device, Arc::new(Unready));
     let s = status(&media);
-    for word in strings_of_json(&s) {
+    for word in words_of(&s, "test-device") {
         assert!(WORDS.contains(&word.as_str()), "{word:?} in {s}");
     }
     assert_eq!(
         s,
         "{\"clock\":{\"ready\":0,\"epoch\":0,\"polls\":0,\"re_anchors\":0,\"holdovers\":0,\
          \"holdover\":0,\"freq_ppb\":-750,\"source\":\"dsync\"},\"requests\":[],\"sent\":[],\"uncounted\":0,\
-         \"tx\":[],\"tx_bytes\":0,\"rx\":[],\"rx_poll_errors\":0,\"channels\":[],\"sources\":[],\"checks\":[]}"
+         \"tx\":[],\"tx_bytes\":0,\"name\":\"test-device\",\"rx\":[],\"rx_poll_errors\":0,\"channels\":[],\
+         \"sources\":[],\"checks\":[]}"
     );
+}
+
+/// dstack #209: the status names the device as it is now (the name its ARC
+/// record announces), so a local reader (the traffic watch, dtray) can tell
+/// which device answered. A rename shows at the next status; the name is
+/// escaped.
+#[test]
+fn the_status_names_the_device_as_it_is_now() {
+    use crate::arc::{Flows, Running};
+    let dir = tempfile::tempdir().unwrap();
+    let device = device_at(dir.path());
+    let media = media_on(&device, Arc::new(Unready));
+    let name_in = |media: &Media| {
+        let v: serde_json::Value = serde_json::from_str(&status(media)).expect("JSON");
+        v["name"].clone()
+    };
+    assert_eq!(name_in(&media), "test-device");
+    let flows = Running {
+        tx: Arc::clone(&media.tx),
+        rx: Arc::clone(&media.manager),
+    };
+    flows.renamed("renamed-device");
+    assert_eq!(name_in(&media), "renamed-device");
+    flows.renamed("a\"b\\c\n");
+    assert_eq!(name_in(&media), "a\"b\\c\n");
 }
 
 #[test]
@@ -782,7 +820,7 @@ fn the_status_names_the_clock_requests_channels_sources_and_checks() {
     // RX 2's ring was written (a channel listed without a subscription).
     media.rx.rings()[1].write_at(5, &[7, 8]);
     let s = status(&media);
-    for word in strings_of_json(&s) {
+    for word in words_of(&s, "test-device") {
         assert!(WORDS.contains(&word.as_str()), "{word:?} in {s}");
     }
     assert!(
@@ -790,7 +828,8 @@ fn the_status_names_the_clock_requests_channels_sources_and_checks() {
             "{\"clock\":{\"ready\":1,\"epoch\":1,\"polls\":3,\"re_anchors\":1,\"holdovers\":1,\
              \"holdover\":0,\"freq_ppb\":-750,\"source\":\"dsync\"},\
              \"requests\":[{\"port\":4440,\"peer\":1,\"op\":8704,\"n\":1}],\
-             \"sent\":[{\"peer\":1,\"op\":256,\"n\":1}],\"uncounted\":0,\"tx\":[],\"tx_bytes\":0,\"rx\":[],"
+             \"sent\":[{\"peer\":1,\"op\":256,\"n\":1}],\"uncounted\":0,\"tx\":[],\"tx_bytes\":0,\
+             \"name\":\"test-device\",\"rx\":[],"
         ),
         "{s}"
     );
@@ -889,7 +928,7 @@ fn the_status_shows_the_packets_judge_in_ns_numbers_only() {
     );
     media.rx.take_max_lateness(3);
     let s = status(&media);
-    for word in strings_of_json(&s) {
+    for word in words_of(&s, "test-device") {
         assert!(WORDS.contains(&word.as_str()), "{word:?} in {s}");
     }
     // The least: 25 samples, 260 416 ns (the stamp at 999 999 739 584 ns,
@@ -1182,7 +1221,7 @@ fn the_engine_status_is_numbers_only() {
         )
     };
     let s = status(&media);
-    for word in strings_of_json(&s) {
+    for word in words_of(&s, "test-device") {
         assert!(WORDS.contains(&word.as_str()), "{word:?} in {s}");
     }
     assert!(s.ends_with(&engine(v)), "{s}");
@@ -1791,7 +1830,7 @@ fn the_clock_counts_describe_the_source_in_use_and_each_source_apart() {
         Some(300)
     );
     let s = status(&media);
-    for word in strings_of_json(&s) {
+    for word in words_of(&s, "test-device") {
         assert!(WORDS.contains(&word.as_str()), "{word:?} in {s}");
     }
     assert!(

@@ -9,10 +9,11 @@
 //! one line each way ([`session`]);
 //! `iem-dante-dev ctl <request>` is the client.
 //!
-//! - `status`: one JSON line, numbers only: keys and a few fixed words
-//!   (`counter`, `sine`, `echo`, `engine`), never a name or an address
-//!   ([`status`]); with the engine's pump once one is attached, and the
-//!   app's own part once it sets one (`app`, the app's words).
+//! - `status`: one JSON line, numbers, keys and a few fixed words
+//!   (`counter`, `sine`, `echo`, `engine`), and the device's own name
+//!   (`name`, dstack #209), never an address ([`status`]); with the
+//!   engine's pump once one is attached, and the app's own part once it
+//!   sets one (`app`, the app's words).
 //! - `source <tx> silence|counter|sine <hz> <dbfs>|echo <rx> <samples>|engine`:
 //!   what TX channel `tx` (from 1) sends ([`crate::media::source::Source`]);
 //!   runtime only, every TX channel is silent at start. A sine is at most
@@ -600,7 +601,8 @@ impl Checks {
 }
 
 /// A JSON line built in place: keys are ours, values numbers, `null` or
-/// fixed words, so nothing needs escaping.
+/// fixed words, so nothing needs escaping; the one free text (the device's
+/// name, [`Json::text`]) is escaped.
 struct Json {
     out: String,
     /// Nothing written in the open object or array yet.
@@ -662,6 +664,13 @@ impl Json {
         let _ = write!(self.out, "\"{w}\"");
     }
 
+    /// A string value, escaped as JSON (a name comes from a controller's
+    /// rename or the config).
+    fn text(&mut self, key: &str, v: &str) {
+        self.key(key);
+        self.out.push_str(&serde_json::Value::from(v).to_string());
+    }
+
     fn opt(&mut self, key: &str, v: Option<impl Display>) {
         match v {
             Some(v) => self.num(key, v),
@@ -673,9 +682,10 @@ impl Json {
     }
 }
 
-/// The status line: one JSON object, numbers only. Channels and flows are
-/// numbered from 1 (flow `n` is slot `n − 1`); every count is cumulative
-/// since the device started.
+/// The status line: one JSON object, numbers and fixed words, besides the
+/// device's own `name` and the app's part; never an address. Channels and
+/// flows are numbered from 1 (flow `n` is slot `n − 1`); every count is
+/// cumulative since the device started.
 ///
 /// - `clock`: `ready` (0/1), `epoch` (re-anchors the media threads saw),
 ///   `polls`, `re_anchors`, `holdovers` (runs of polls in holdover),
@@ -701,6 +711,11 @@ impl Json {
 ///   [`crate::media::tx::TxShared::bytes_sent`]):
 ///   another device's traffic watch on the same PC subtracts it from the
 ///   NIC's own count (dstack #203, [`crate::traffic`]).
+/// - `name` (dstack #209): the device's name as it is now, the one its ARC
+///   record announces (the config's, or a controller's rename since), as a
+///   JSON string: a local reader can tell which device answered. The
+///   traffic watch counts a neighbour's `tx_bytes` only when this is the
+///   name it found the neighbour under.
 /// - `rx`: each RX flow slot that has or had a flow: `flow`, `granted`,
 ///   `fpp`, `channels`, `latency` (samples), `packets`, `refused`, `stray`,
 ///   `out_of_order`, `gaps` and `gap_frames` (packets that began past the
@@ -742,14 +757,15 @@ impl Json {
 ///   while it returns a JSON object: that object, compact (the cached part:
 ///   the status never calls the hook), with `"stale":true` once the part is
 ///   over [`crate::daemon::media::app::STALE`] old. It is the app's: dtray
-///   reads its `line`, `state` and `stale`; it is the one part that may
-///   carry names.
+///   reads its `line`, `state` and `stale`; beside `name`, it is the one
+///   part that may carry names.
 pub fn status(media: &Media) -> String {
     let mut j = Json::new();
     j.open(None, '{');
     clock_part(&mut j, media);
     requests_part(&mut j, media);
     tx_part(&mut j, media);
+    name_part(&mut j, media);
     rx_part(&mut j, media);
     sources_part(&mut j, media);
     checks_part(&mut j, media);
@@ -770,6 +786,13 @@ pub fn app_object(text: &str) -> Option<String> {
     let v: serde_json::Value = serde_json::from_str(text).ok()?;
     let compact = v.to_string();
     (v.is_object() && compact.len() <= APP_MAX).then_some(compact)
+}
+
+/// The device's name now: our RX manager's host, which follows every
+/// rename ([`crate::arc::Flows::renamed`]).
+fn name_part(j: &mut Json, media: &Media) {
+    let name = lock(&media.manager).host().to_string();
+    j.text("name", &name);
 }
 
 fn app_part(j: &mut Json, media: &Media) {

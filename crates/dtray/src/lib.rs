@@ -2,8 +2,9 @@
 
 //! dtray: one tray icon per PC for every dstack device living there
 //! (dlink apps, dasio, dstack-dev), dstack #104. It reads; it writes only
-//! what its menu chooses: a device's latency, and an app's output (dstack
-//! #139: dlisten; [`output`], sent as the app's own command).
+//! what its menu chooses: a device's latency, an app's output (dstack
+//! #139: dlisten; [`output`], sent as the app's own command), and the RX
+//! subscriptions the PC's switch file names (dstack #210; [`switches`]).
 //!
 //! - [`discover`]: the devices on this PC. mDNS discovery on each of the
 //!   PC's own IPv4 addresses keeps the ARC records that sit on one of them
@@ -28,6 +29,8 @@
 //!   command line.
 //! - [`output`]: an app's Output menu from its status part, and the
 //!   request a choice sends.
+//! - [`switches`]: the PC's source switches: a receiver's RX channels
+//!   moved between the sources a local file names, read back after.
 //! - [`icon`]: the icon's pixels in a colour.
 //! - [`desktop`]: the Linux desktop's files (the single-instance lock, the
 //!   autostart entry and its text).
@@ -37,7 +40,9 @@
 //! start at logon with `dtray --autostart on|off` (Windows and Linux), and
 //! sets a device's latency as its menu does with
 //! `dtray --set-latency <device> <ms>` on every platform (a PC with no
-//! usable display, a script's check; [`set`]).
+//! usable display, a script's check; [`set`]), and chooses a switch's
+//! source as its menu does with `dtray --switch <label> <source>`
+//! ([`switches::set`]).
 //!
 //! On Windows `dtray.exe` is a GUI-subsystem program: a console does not
 //! wait for it, and PowerShell's `&` neither waits nor sets
@@ -59,6 +64,7 @@ pub mod model;
 pub mod output;
 pub use dstack::ctl::probe;
 pub mod set;
+pub mod switches;
 
 /// What the command line asks for.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,6 +81,10 @@ pub enum Mode {
     /// Set the latency of the local device named `device` to the value
     /// `ms` names, as its menu does ([`set::latency()`]).
     SetLatency { device: String, ms: String },
+    /// Choose the source labelled `source` on the switch labelled
+    /// `label` of the PC's switch file, as its menu does
+    /// ([`switches::set`]).
+    Switch { label: String, source: String },
 }
 
 /// dtray's version as one line: the dstack release it was built from
@@ -84,12 +94,12 @@ pub fn version_line() -> String {
 }
 
 /// The usage line.
-pub const USAGE: &str =
-    "usage: dtray [--print | --version | --autostart on|off | --set-latency <device> <ms>]";
+pub const USAGE: &str = "usage: dtray [--print | --version | --autostart on|off | --set-latency <device> <ms> | --switch <label> <source>]";
 
 /// The mode of the arguments after the program's name: none for the tray,
 /// `--print` to print once, `--autostart on` or `off`,
-/// `--set-latency <device> <ms>`; anything else is the usage error.
+/// `--set-latency <device> <ms>`, `--switch <label> <source>`; anything
+/// else is the usage error.
 pub fn mode_of<I: IntoIterator<Item = String>>(args: I) -> Result<Mode, &'static str> {
     let args: Vec<String> = args.into_iter().collect();
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -102,6 +112,10 @@ pub fn mode_of<I: IntoIterator<Item = String>>(args: I) -> Result<Mode, &'static
         ["--set-latency", device, ms] => Ok(Mode::SetLatency {
             device: device.to_string(),
             ms: ms.to_string(),
+        }),
+        ["--switch", label, source] => Ok(Mode::Switch {
+            label: label.to_string(),
+            source: source.to_string(),
         }),
         _ => Err(USAGE),
     }

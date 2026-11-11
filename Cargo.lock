@@ -313,7 +313,7 @@ dependencies = [
 
 [[package]]
 name = "dlink"
-version = "0.6.92"
+version = "0.6.93"
 dependencies = [
  "dstack",
  "dstack-audio-io",
@@ -325,7 +325,7 @@ dependencies = [
 
 [[package]]
 name = "dlisten"
-version = "0.6.92"
+version = "0.6.93"
 dependencies = [
  "cpal",
  "dlink",
@@ -347,7 +347,7 @@ checksum = "d8b14ccef22fc6f5a8f4d7d768562a182c04ce9a3b3157b91390b52ddfdf1a76"
 
 [[package]]
 name = "dsend"
-version = "0.6.92"
+version = "0.6.93"
 dependencies = [
  "cpal",
  "dlink",
@@ -359,7 +359,7 @@ dependencies = [
 
 [[package]]
 name = "dstack"
-version = "0.6.92"
+version = "0.6.93"
 dependencies = [
  "assert_no_alloc",
  "dstack-audio-io",
@@ -383,11 +383,11 @@ dependencies = [
 
 [[package]]
 name = "dstack-audio-io"
-version = "0.6.92"
+version = "0.6.93"
 
 [[package]]
 name = "dstack-endpoint"
-version = "0.6.92"
+version = "0.6.93"
 dependencies = [
  "cpal",
  "dlink",
@@ -403,15 +403,15 @@ dependencies = [
 
 [[package]]
 name = "dstack-resample"
-version = "0.6.92"
+version = "0.6.93"
 dependencies = [
  "rubato",
 ]
 
 [[package]]
 name = "dsync-ptp"
-version = "1.30.1"
-source = "git+https://github.com/zbynekdrlik/dsync?tag=v1.30.1#0096a0aabb7a45fdc4ee274c61fc67c37372a9aa"
+version = "1.32.0"
+source = "git+https://github.com/zbynekdrlik/dsync?tag=v1.32.0#54ceabcf7b3c01925bc3236b6cd0391b7a1e030c"
 dependencies = [
  "anyhow",
  "byteorder",
@@ -426,14 +426,16 @@ dependencies = [
 
 [[package]]
 name = "dtray"
-version = "0.6.92"
+version = "0.6.93"
 dependencies = [
  "dstack",
  "glib",
  "gtk",
+ "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
+ "toml 0.9.12+spec-1.1.0",
  "tracing",
  "tracing-subscriber",
  "tray-icon",
