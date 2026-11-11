@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.82
+
+- Dependency (dstack #1): dsync-ptp v1.29.0 -> v1.30.1 (dsync#160): the follower's late sample is clipped, not held, so two in-process followers on one PC stay within 1 µs of each other (v1.30.0 failed its release on this; its tag has no assets and is skipped). The service-side changes of v1.30.1 (#164: a stale date offset refused at load, READY=1 once the wall clock is placed; the service servo on the delay floor) are dsync's service, not the library. No API change; no latency change for a dlink app.
+
 ## 0.6.81
 
 - Fix (dstack #180, dcontroller#65, 11.11.2026): `discover::Device` has `cmc: Option<SocketAddrV4>`, the address and port of the device's `_netaudio-cmc` record. A device beside another on one PC takes CMC 8800+k (since v0.6.77) and advertises it there, but discovery kept only the record's id, so a controller sent its meter subscription to the PC's 8800, the first device's port: the FOH PC's band and dsend gave no meter frames in dcontroller. A changed CMC port is a `Change::Changed`. API: a code that builds a `discover::Device` sets `cmc` (`None` when no record is read); a meter client starts at `device.cmc`, 8800 only without a record. No latency or behaviour change for a device.
