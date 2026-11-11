@@ -55,26 +55,59 @@ pub fn pick(outputs: &[Output], wanted: Option<&str>) -> Result<usize, String> {
     }
 }
 
+/// The output a binary takes when neither `--output` nor a saved choice
+/// names one ([`choose`]). Each binary states its own: dlisten plays where
+/// Windows plays ([`Fallback::Default`]), dsend captures its own output
+/// ([`DSEND`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fallback {
+    /// The system's default output.
+    Default,
+    /// The first output whose name holds this (any case), else the
+    /// system's default.
+    Prefer(&'static str),
+}
+
+/// dsend's fallback: its own render endpoint (`drivers/dsend-audio`, dstack
+/// #184), which Windows lists as "Speakers (dsend)", over the default, so
+/// dsend never captures the PC's real speakers while its own output exists.
+pub const DSEND: Fallback = Fallback::Prefer("dsend");
+
+/// The output [`Fallback`] gives, and how a note names it.
+fn fall_back(outputs: &[Output], fallback: Fallback) -> Result<(usize, String), String> {
+    if let Fallback::Prefer(part) = fallback {
+        let part = part.to_lowercase();
+        if let Some(i) = outputs
+            .iter()
+            .position(|o| o.name.to_lowercase().contains(&part))
+        {
+            return Ok((i, format!("the output holding {part:?}")));
+        }
+    }
+    pick(outputs, None).map(|i| (i, "the default".to_string()))
+}
+
 /// The output to play on at the start: `--output` (`wanted`) first, then
 /// the one the tray's menu saved (`saved`, by its exact name), then the
-/// default. A saved output that is gone falls back to the default, with
-/// the note to log as the second value.
+/// binary's [`Fallback`]. A saved output that is gone falls back to the
+/// same, with the note to log as the second value.
 pub fn choose(
     outputs: &[Output],
     wanted: Option<&str>,
     saved: Option<&str>,
+    fallback: Fallback,
 ) -> Result<(usize, Option<String>), String> {
     if wanted.is_some() {
         return pick(outputs, wanted).map(|i| (i, None));
     }
     let Some(name) = saved else {
-        return pick(outputs, None).map(|i| (i, None));
+        return fall_back(outputs, fallback).map(|(i, _)| (i, None));
     };
     match outputs.iter().position(|o| o.name == name) {
         Some(i) => Ok((i, None)),
-        None => pick(outputs, None).map(|i| {
+        None => fall_back(outputs, fallback).map(|(i, which)| {
             let note = format!(
-                "the saved output {name:?} is not there: playing on the default, {:?}",
+                "the saved output {name:?} is not there: playing on {which}, {:?}",
                 outputs[i].name
             );
             (i, Some(note))
@@ -193,22 +226,41 @@ mod tests {
     #[test]
     fn the_command_line_wins_over_the_saved_output() {
         assert_eq!(
-            choose(&outputs(), Some("phones"), Some("HDMI Monitor")),
+            choose(
+                &outputs(),
+                Some("phones"),
+                Some("HDMI Monitor"),
+                Fallback::Default
+            ),
             Ok((2, None))
         );
-        assert!(choose(&outputs(), Some("USB"), Some("HDMI Monitor")).is_err());
+        assert!(
+            choose(
+                &outputs(),
+                Some("USB"),
+                Some("HDMI Monitor"),
+                Fallback::Default
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn the_saved_output_is_found_by_its_exact_name() {
-        assert_eq!(choose(&outputs(), None, Some("Headphones")), Ok((2, None)));
-        assert_eq!(choose(&outputs(), None, None), Ok((1, None)));
+        assert_eq!(
+            choose(&outputs(), None, Some("Headphones"), Fallback::Default),
+            Ok((2, None))
+        );
+        assert_eq!(
+            choose(&outputs(), None, None, Fallback::Default),
+            Ok((1, None))
+        );
     }
 
     #[test]
     fn a_saved_output_that_is_gone_falls_back_to_the_default_with_a_note() {
         assert_eq!(
-            choose(&outputs(), None, Some("USB DAC")),
+            choose(&outputs(), None, Some("USB DAC"), Fallback::Default),
             Ok((
                 1,
                 Some(
@@ -219,8 +271,16 @@ mod tests {
             ))
         );
         // Not by part of its name: the saved name is the whole name.
-        assert_eq!(choose(&outputs(), None, Some("Head")).unwrap().0, 1);
-        assert_eq!(choose(&[], None, Some("x")), Err(NONE.to_string()));
+        assert_eq!(
+            choose(&outputs(), None, Some("Head"), Fallback::Default)
+                .unwrap()
+                .0,
+            1
+        );
+        assert_eq!(
+            choose(&[], None, Some("x"), Fallback::Default),
+            Err(NONE.to_string())
+        );
     }
 
     #[test]
@@ -231,6 +291,75 @@ mod tests {
         assert_eq!(
             pick(&none, None),
             Err("no default output (name one with --output)".into())
+        );
+    }
+
+    /// The list with dsend's own output (drivers/dsend-audio) last, not the
+    /// default: Windows still plays on the HDMI monitor.
+    fn with_dsend() -> Vec<Output> {
+        let mut list = outputs();
+        list.push(Output {
+            name: "Speakers (DSEND)".into(),
+            default: false,
+            config: "48000 Hz, 2 ch, f32".into(),
+        });
+        list
+    }
+
+    #[test]
+    fn dsend_takes_its_own_output_over_the_default_unless_one_is_named() {
+        // Nothing named or saved: its own output (any case), not the default.
+        assert_eq!(choose(&with_dsend(), None, None, DSEND), Ok((3, None)));
+        // --output and the saved choice still win.
+        assert_eq!(
+            choose(&with_dsend(), Some("phones"), None, DSEND),
+            Ok((2, None))
+        );
+        assert_eq!(
+            choose(&with_dsend(), None, Some("HDMI Monitor"), DSEND),
+            Ok((1, None))
+        );
+        // A saved output that is gone falls back to dsend's own output too.
+        assert_eq!(
+            choose(&with_dsend(), None, Some("USB DAC"), DSEND),
+            Ok((
+                3,
+                Some(
+                    "the saved output \"USB DAC\" is not there: playing on the output \
+                     holding \"dsend\", \"Speakers (DSEND)\""
+                        .into()
+                )
+            ))
+        );
+    }
+
+    #[test]
+    fn without_its_own_output_dsend_takes_the_default() {
+        assert_eq!(choose(&outputs(), None, None, DSEND), Ok((1, None)));
+        assert_eq!(
+            choose(&outputs(), None, Some("USB DAC"), DSEND)
+                .unwrap()
+                .1
+                .unwrap(),
+            "the saved output \"USB DAC\" is not there: playing on the default, \
+             \"HDMI Monitor\""
+        );
+        assert_eq!(choose(&[], None, None, DSEND), Err(NONE.to_string()));
+    }
+
+    #[test]
+    fn dlisten_never_takes_the_dsend_output_by_default() {
+        // dlisten's fallback is the system default, even when the dsend
+        // output exists (it would play into nothing).
+        assert_eq!(
+            choose(&with_dsend(), None, None, Fallback::Default),
+            Ok((1, None))
+        );
+        assert_eq!(
+            choose(&with_dsend(), None, Some("USB DAC"), Fallback::Default)
+                .unwrap()
+                .0,
+            1
         );
     }
 }

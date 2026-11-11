@@ -21,7 +21,9 @@ the network's rate and clock. Windows only (WASAPI loopback).
 
   --list-outputs              list the outputs and exit
   --output <text>             capture the first output whose name holds
-                              <text> (any case; default: the default output)
+                              <text> (any case; default: the saved choice,
+                              else dsend's own output \"dsend\" when its
+                              driver is installed, else the default output)
   --name <name>               the device's Dante name (default <host>-dsend)
   --rate <hz>                 the network's sample rate (default 96000)
   --budget-ms <ms>            dlink's latency budget (default 15)

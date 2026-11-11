@@ -51,6 +51,25 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
 
+  dsend-audio-driver:
+    # dsend's own Windows render endpoint (drivers/dsend-audio, MS-PL; dstack
+    # #184), built like dasio's NDIS filter: NuGet WDK, 64-bit MSBuild, the
+    # WDK's test signing. The artifact is the installable package.
+    runs-on: windows-2025
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build the driver package
+        shell: pwsh
+        run: .\drivers\dsend-audio\scripts\build.ps1 -Out dsend-audio-package
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dsend-audio-${{ github.sha }}
+          path: dsend-audio-package/
+          if-no-files-found: error
+
   coverage:
     runs-on: ubuntu-24.04
     timeout-minutes: 40
