@@ -19,6 +19,16 @@
 //! `--set-latency`: no such device, its settings unreadable, a value it
 //! does not offer, the write refused or a different read-back), 2 a usage
 //! error or the tray or autostart on a platform without one.
+//!
+//! `dtray --switch <label> <source>` runs the same discovery pass, then
+//! the tray menu's choice of that source on that switch of the PC's
+//! switch file ([`dtray::switches`]: the receiver's listed RX channels
+//! subscribed, then read back), and prints the verdict: 0 when it reads
+//! back on that source (or already was), 1 otherwise (no such switch or
+//! source, the file refused, the receiver not found or not read, a
+//! subscription refused, a different read-back). `--print` also prints
+//! each switch's current source after the devices (a refused switch file
+//! on stderr, and 1).
 
 use std::process::ExitCode;
 use std::time::Duration;
@@ -28,6 +38,7 @@ use dtray::Mode;
 use dtray::discover::Scanner;
 use dtray::expected;
 use dtray::model::{self, Tracker};
+use dtray::switches;
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -56,6 +67,7 @@ fn main() -> ExitCode {
         Mode::Tray => tray(),
         Mode::Autostart(on) => autostart(on),
         Mode::SetLatency { device, ms } => set_latency(&device, &ms),
+        Mode::Switch { label, source } => switch(&label, &source),
         Mode::Version => {
             println!("{}", dtray::version_line());
             ExitCode::SUCCESS
@@ -87,10 +99,23 @@ fn print() -> ExitCode {
     let view = Tracker::default().update_with(&scanner.readings(), &expected);
     println!("{}", dtray::version_line());
     print!("{}", model::print_text(&view));
+    let mut ok = failed.is_empty();
+    match switches::load(&switches::path()) {
+        Ok(all) => {
+            for sw in &all {
+                let now = switches::current(sw, &switches::read_live(&scanner, sw));
+                println!("{}", switches::line(sw, &now));
+            }
+        }
+        Err(e) => {
+            eprintln!("dtray: the switch file: {e}");
+            ok = false;
+        }
+    }
     for f in &failed {
         eprintln!("dtray: {f}");
     }
-    if failed.is_empty() {
+    if ok {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
@@ -120,6 +145,34 @@ fn set_latency(device: &str, ms: &str) -> ExitCode {
             })
         },
     );
+    match outcome {
+        Ok(line) => {
+            println!("dtray: {line}");
+            ExitCode::SUCCESS
+        }
+        Err(reason) => {
+            eprintln!("dtray: {reason}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// One discovery pass, then the menu's choice of the source labelled
+/// `source` on the switch labelled `label` ([`switches::set_live`]): one
+/// line on stdout and 0 when it reads back on that source (or already
+/// was), one line on stderr and 1 otherwise.
+fn switch(label: &str, source: &str) -> ExitCode {
+    init_log();
+    let outcome = switches::load(&switches::path()).and_then(|all| {
+        let sw = switches::find(&all, label)?;
+        let wanted = switches::find_source(sw, source)?;
+        let mut scanner = Scanner::new();
+        for f in scanner.refresh() {
+            eprintln!("dtray: {f}");
+        }
+        std::thread::sleep(PRINT_WAIT);
+        switches::set_live(&scanner, sw, wanted)
+    });
     match outcome {
         Ok(line) => {
             println!("dtray: {line}");

@@ -6,7 +6,7 @@ license.workspace = true
 publish = false
 repository.workspace = true
 authors.workspace = true
-description = "The PC's tray icon for its dstack devices (dlink apps, dasio, dstack-dev, dlisten): clock, subscriptions and late counts; writes only a device's latency (from its menu or `dtray --set-latency`) and an app's output from its menu"
+description = "The PC's tray icon for its dstack devices (dlink apps, dasio, dstack-dev, dlisten): clock, subscriptions and late counts; writes only a device's latency (from its menu or `dtray --set-latency`), an app's output from its menu, and the RX subscriptions a local switch file names (from its menu or `dtray --switch`)"
 
 [lib]
 name = "dtray"
@@ -17,6 +17,10 @@ path = "src/main.rs"
 
 [dependencies]
 dstack = { path = "../dstack" }
+# The switch file (dstack #210), as dstack reads its device config (both
+# already in the lockfile through dstack).
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.9"
 # The status line's JSON (already in the lockfile through dstack).
 serde_json = "1.0"
 # The probe's error (already in the lockfile through dstack).

@@ -110,3 +110,31 @@ dtray (dstack #104) is the one tray for every dstack device on a PC; its device 
 - **What it does:** one discovery pass (3 s, as `dtray --print`), then the local device of that name (case-insensitive, the whole name). `<ms>` is one of the menu's values, `0.25`, `0.5`, `1`, `2`, `5` or `10`, and must be one the device offers (its ARC settings' range). A value already configured writes nothing. Otherwise it writes through the menu's own call (`dstack::arc::control::set_latency`), reads the settings again and compares the configured latency read back.
 - **What it prints:** one line per outcome. On stdout with exit 0: `dtray: <device>: the latency is set to 2 ms; it reads back 2 ms`, or `... the latency is already 2 ms; nothing written`. On stderr with exit 1: no device of that name (with the names found), its settings unreadable, a value it does not offer (with the values it does), the write refused (the device's status), or a read-back that differs. A usage error exits 2.
 - **On Windows** `dtray.exe` is a GUI-subsystem program: run it with `Start-Process dtray.exe -ArgumentList '--set-latency','<device>','2' -Wait -PassThru -RedirectStandardOutput out.txt -RedirectStandardError err.txt` and read the returned process's `ExitCode` and the two files.
+
+## dtray's source switches
+
+A source switch (dstack #210) is a dtray menu item that moves a receiver's RX channels between sources, one source at a time (Dante cannot sum two sources into one RX channel). The receiver may be any device on the network, not only ours. Which receiver, which RX channels and which sources come from a file on the PC, never from the code: the file is the owner's approval's scope, and dtray writes nothing it does not name.
+
+- **The file:** `switches.toml` beside the expected devices' folder, `%ProgramData%\dstack\switches.toml` on Windows, `/etc/dstack/switches.toml` on Linux (`DSTACK_SWITCHES` names another file). No file is no switch. The names below are made up:
+
+  ```toml
+  [[switch]]
+  label = "Solo"                    # the menu item's name
+  device = "Monitor"                # the receiver
+  rx = [1, 2]                       # its RX channels, from 1
+
+  [[switch.sources]]
+  label = "band"
+  device = "Band PC"                # the transmitter
+  channels = ["Mix L", "Mix R"]   # its TX channels, one per RX channel, in order
+
+  [[switch.sources]]
+  label = "master"
+  device = "Master PC"
+  channels = ["Mix L", "Mix R"]
+  ```
+
+  Each switch needs a label (one per file, case aside), a device, its RX channels (each once) and at least one source; each source a label (one per switch), a device and one channel name per RX channel. Device and channel names are 1 to 31 bytes of printable ASCII. Unknown keys are refused. A refused file shows as one line "Switch file: <path>: <reason>" in the menu.
+- **The menu:** a submenu per switch, "<label>: <current source>", with each source as a check item. The current source is read from the receiver (its RX channels, ARC 0x3000) every 10 s: a source is current when every listed RX channel is subscribed to that source's device and channel (names case aside). "other" means the channels are read but on no source of the file (split, elsewhere, or not subscribed); "unread" means the receiver was not found or did not answer, with the reason inside the submenu. The receiver is found by dtray's own discovery on the PC's addresses and reached from the address that found it.
+- **A choice:** reads the receiver; when it is already on that source, nothing is written. Otherwise each listed RX channel is subscribed to the source's channel (ARC 0x3010), in order, stopping at the first refused, and the channels are read back. A read-back on the chosen source shows in the item at once; one that is not, or a refused subscription, shows in an error box, and the receiver is read again a second later.
+- **Without a desktop:** `dtray --switch <label> <source>` runs the same choice after one discovery pass (3 s). On stdout with exit 0: `dtray: Solo: switched to master; it reads back master`, or `dtray: Solo: already master; nothing written`. On stderr with exit 1: no such switch or source (with the labels there are), the file refused, the receiver not found or not read, a subscription refused, or a different read-back. `dtray --print` prints each switch's line after the devices ("Solo: band", "Solo: unread (<reason>)"); a refused file goes to stderr and exits 1. On Windows run it with `Start-Process dtray.exe -ArgumentList '--switch','Solo','master' -Wait -PassThru -RedirectStandardOutput out.txt -RedirectStandardError err.txt`, as `--set-latency`.
