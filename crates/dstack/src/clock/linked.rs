@@ -78,8 +78,11 @@ pub struct View {
 /// The source for a follower in `internal` (none when it did not start),
 /// a service clock that is ready or not, whether the follower was locked
 /// once, and the source in use: the follower when locked, and settled or
-/// already in use or without a ready service; else the service when
-/// ready; else the follower in holdover after a lock; else none.
+/// already in use or without a ready service; the follower in use while
+/// it is unlocked but anchored (dstack #188, dsync#166: its core keeps
+/// steering on PTP through a GM handover; a swap to the service and back
+/// costs two re-aligns and takes the service's drift); else the service
+/// when ready; else the follower in holdover after a lock; else none.
 pub fn choose(
     internal: Option<View>,
     service_ready: bool,
@@ -94,6 +97,7 @@ pub fn choose(
         {
             Source::Internal
         }
+        Some(v) if v.alive && v.anchored && current == Source::Internal => Source::Internal,
         _ if service_ready => Source::Service,
         Some(v) if v.alive && v.anchored && was_locked => Source::Internal,
         _ => Source::None,
