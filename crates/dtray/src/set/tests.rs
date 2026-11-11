@@ -140,9 +140,10 @@ fn a_value_inside_the_range_is_written_both_ends_included() {
         ("3", 3_000_000, "3 ms"),
         ("0.5", 500_000, "0.5 ms"),
         ("5", 5_000_000, "5 ms"),
-        ("4.9999", 5_000_000, "5 ms"),
-        ("0.4999", 500_000, "0.5 ms"),
-        ("0.6667", 667_000, "0.667 ms"),
+        ("4.9999", 4_999_900, "4.9999 ms"),
+        ("4.9999995", 5_000_000, "5 ms"),
+        ("0.4999995", 500_000, "0.5 ms"),
+        ("0.6666667", 666_667, "0.666667 ms"),
     ] {
         let mut asked = Vec::new();
         let r = latency(
@@ -185,6 +186,45 @@ fn a_value_inside_the_range_is_written_both_ends_included() {
 }
 
 #[test]
+fn a_device_s_own_sub_us_latency_is_restored_exactly() {
+    // dstack #213: a device configured at 333334 ns states that as its
+    // minimum; it is set to 1 ms, then back to 0.333334 ms.
+    let own = |configured| Settings {
+        latency_min_ns: Some(333_334),
+        ..settings(Some(configured))
+    };
+    let reads = RefCell::new(vec![own(1_000_000), own(333_334)]);
+    let mut asked = Vec::new();
+    let r = latency(
+        &two(),
+        "Test Dev",
+        "0.333334",
+        |_| Ok(reads.borrow_mut().remove(0)),
+        |_, ns| {
+            asked.push(ns);
+            Ok(own(ns))
+        },
+    );
+    assert_eq!(
+        r,
+        Ok("Test Dev: the latency is set to 0.333334 ms; it reads back 0.333334 ms".to_string())
+    );
+    assert_eq!(asked, vec![333_334]);
+    // Already there: nothing written.
+    let r = latency(
+        &two(),
+        "Test Dev",
+        "0.333334",
+        |_| Ok(own(333_334)),
+        |_, _| -> Result<Settings, String> { panic!("no write for the value already set") },
+    );
+    assert_eq!(
+        r,
+        Ok("Test Dev: the latency is already 0.333334 ms; nothing written".to_string())
+    );
+}
+
+#[test]
 fn a_value_already_configured_that_is_none_of_dante_s_writes_nothing() {
     let r = latency(
         &two(),
@@ -203,7 +243,8 @@ fn a_value_already_configured_that_is_none_of_dante_s_writes_nothing() {
 fn a_value_outside_the_range_or_no_value_writes_nothing() {
     for (ms, shown) in [
         ("0.25", "0.25 ms"),
-        ("0.4994", "0.499 ms"),
+        ("0.4999", "0.4999 ms"),
+        ("0.4999994", "0.499999 ms"),
         ("5.001", "5.001 ms"),
         ("10", "10 ms"),
     ] {

@@ -85,28 +85,33 @@ fn the_command_line_takes_the_menu_s_labels_without_ms() {
 }
 
 #[test]
-fn the_command_line_takes_any_decimal_ms_rounded_to_whole_us() {
-    // dstack #213: a value that is none of Dante's (a dasio test device's 0.333).
+fn the_command_line_takes_any_decimal_ms_to_whole_ns() {
+    // dstack #213: a value that is none of Dante's, and a device's own
+    // configured 333334 ns, restored exactly.
     for (ms, ns) in [
         ("0.333", 333_000),
+        ("0.333334", 333_334),
+        ("0.123456", 123_456),
         ("0", 0),
         ("3", 3_000_000),
         ("1.0", 1_000_000),
         ("0.50", 500_000),
         ("12.345", 12_345_000),
         ("007", 7_000_000),
+        ("0.3334", 333_400),
+        ("0.000001", 1),
     ] {
         assert_eq!(ns_of_ms(ms), Some(ns), "{ms:?}");
     }
-    // Rounded to whole µs at the fourth decimal, half up.
-    assert_eq!(ns_of_ms("0.3334"), Some(333_000));
-    assert_eq!(ns_of_ms("0.3335"), Some(334_000));
-    assert_eq!(ns_of_ms("0.33349"), Some(333_000));
-    assert_eq!(ns_of_ms("0.9995"), Some(1_000_000));
-    assert_eq!(ns_of_ms("1.0009"), Some(1_001_000));
-    assert_eq!(ns_of_ms("0.123456789"), Some(123_000));
-    assert_eq!(ns_of_ms("0.0005"), Some(1_000));
-    assert_eq!(ns_of_ms("0.0004"), Some(0));
+    // Past six decimals: rounded to whole ns at the seventh, half up.
+    assert_eq!(ns_of_ms("0.3333334"), Some(333_333));
+    assert_eq!(ns_of_ms("0.3333335"), Some(333_334));
+    assert_eq!(ns_of_ms("0.33333349"), Some(333_333));
+    assert_eq!(ns_of_ms("0.9999995"), Some(1_000_000));
+    assert_eq!(ns_of_ms("1.0000009"), Some(1_000_001));
+    assert_eq!(ns_of_ms("0.123456789"), Some(123_457));
+    assert_eq!(ns_of_ms("0.0000005"), Some(1));
+    assert_eq!(ns_of_ms("0.0000004"), Some(0));
     // Past a u32 of ns is still a value (outside any range, `pick`); past
     // a u64 is none.
     assert_eq!(ns_of_ms("4294.967"), Some(4_294_967_000));
@@ -166,10 +171,19 @@ fn any_value_inside_the_device_s_range_is_picked_both_ends_included() {
     assert_eq!(pick(&s, "0"), outside("0 ms"));
     // A value past a u32 of ns is outside too, not junk.
     assert_eq!(pick(&s, "5000"), outside("5000 ms"));
-    assert_eq!(pick(&s, "4294.9673"), outside("4294.967 ms"));
+    assert_eq!(pick(&s, "4294.9673"), outside("4294.9673 ms"));
     assert_eq!(pick(&s, "4294.968"), outside("4294.968 ms"));
     let all = settings(Some(0), Some(u32::MAX), None);
     assert_eq!(pick(&all, "4294.967"), Ok(4_294_967_000));
+    assert_eq!(pick(&all, "4294.967295"), Ok(u32::MAX));
+    assert_eq!(
+        pick(&all, "4294.9672955"),
+        Err(
+            "4294.967296 ms is outside the latency range the device states \
+             (0 ms to 4294.967295 ms); nothing written"
+                .to_string()
+        )
+    );
     assert_eq!(
         pick(&all, "4294.968"),
         Err(
@@ -192,6 +206,15 @@ fn any_value_inside_the_device_s_range_is_picked_both_ends_included() {
     );
     assert!(pick(&s, "10").is_err());
     assert_eq!(pick(&s, "0.334"), Ok(334_000));
+    // The ends to the ns (a device's own configured value, dstack #213).
+    assert_eq!(pick(&s, "0.333001"), Ok(333_001));
+    assert_eq!(pick(&s, "9.999999"), Ok(9_999_999));
+    assert_eq!(
+        pick(&s, "9.9999995"),
+        Err("10 ms is outside the latency range the device states \
+             (0.333001 ms to 9.999999 ms); nothing written"
+            .to_string())
+    );
 }
 
 #[test]
