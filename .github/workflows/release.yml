@@ -1,9 +1,11 @@
 name: Release
 
-# A tag v* gets a GitHub release with prebuilt `dstack-dev`, `dtray` and
-# `dlisten` binaries for Linux and Windows, `dsend` for Windows (its capture
-# is WASAPI loopback, dstack #164), dsend's audio output driver as a zip
-# (drivers/dsend-audio, #184), and their sha256 files. dsync's stability gate pins
+# A tag v* gets a GitHub release with prebuilt `dstack-dev`, `dtray`,
+# `dtray-cli` (dtray's command-line modes as a console program for scripts,
+# dstack #218) and `dlisten` binaries for Linux and Windows, `dsend` for
+# Windows (its capture is WASAPI loopback, dstack #164), dsend's audio
+# output driver as a zip (drivers/dsend-audio, #184), and their sha256
+# files. dsync's stability gate pins
 # an exact tag and checks the sha256 (dsync#98), so a dstack change never
 # moves the gate by itself.
 
@@ -29,7 +31,7 @@ jobs:
         run: |
           gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
             || gh release create "$TAG" -R "$GITHUB_REPOSITORY" --verify-tag \
-                 --title "$TAG" --notes "dstack $TAG. CHANGELOG.md has the changes. Prebuilt dstack-dev, dtray, dlisten and dsend (Windows) binaries and the dsend audio driver zip (Windows) with their sha256 below."
+                 --title "$TAG" --notes "dstack $TAG. CHANGELOG.md has the changes. Prebuilt dstack-dev, dtray, dtray-cli, dlisten and dsend (Windows) binaries and the dsend audio driver zip (Windows) with their sha256 below."
 
   binaries:
     needs: release
@@ -40,11 +42,11 @@ jobs:
           - os: ubuntu-24.04
             suffix: linux-x86_64
             exe: ""
-            bins: dstack-dev dtray dlisten
+            bins: dstack-dev dtray dtray-cli dlisten
           - os: windows-2025
             suffix: windows-x86_64
             exe: ".exe"
-            bins: dstack-dev dtray dlisten dsend
+            bins: dstack-dev dtray dtray-cli dlisten dsend
     runs-on: ${{ matrix.os }}
     timeout-minutes: 40
     steps:
@@ -54,7 +56,7 @@ jobs:
       - name: GTK, AppIndicator and ALSA headers (dtray's Linux tray, dlisten's output)
         if: runner.os == 'Linux'
         run: scripts/ci-apt-deps.sh
-      - run: cargo build --release --locked -p dstack --bin dstack-dev -p dtray --bin dtray -p dlisten --bin dlisten -p dsend --bin dsend
+      - run: cargo build --release --locked -p dstack --bin dstack-dev -p dtray --bin dtray --bin dtray-cli -p dlisten --bin dlisten -p dsend --bin dsend
       - name: Name, hash and upload the binaries
         shell: bash
         env:
