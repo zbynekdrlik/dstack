@@ -1,6 +1,6 @@
 {
-  "what": "A Dante card's ARC settings key table (0x1102) and settings values (0x1100), read with Dante Controller's own requests (start code 0x2729). Dante Controller enables the device rename and sends the latency write (0x1101) for this card.",
-  "captured": "2026-11-11, dstack #216, read only: nothing was written to the card. Its name and address are left out.",
+  "what": "A Dante card's ARC settings key table (0x1102) and settings values (0x1100), read with Dante Controller's own requests (start code 0x2729). Dante Controller enables the device rename for this card; a latency write to it was not observed.",
+  "captured": "2026-11-11, dstack #216, read only: nothing was written to the card. Its name and address are left out. The request datagrams were not recorded: 0x1102 was asked under start code 0x2729, 0x1100 with Dante Controller's 36-key read, whose 5 keys the card does not hold are not known.",
   "card_state": "96 kHz, latency 5 ms",
   "replies": {
     "0x1102": "27290088010311020001001f8020000180210003002200030023000300240001806000030062000300630001020100038204000382050003020a0001020b0001021000030211000302120003021300010214000102220003830100038306000183020001832100010310000103110001031200010303000383f00001060100010309000102090001",

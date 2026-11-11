@@ -10,6 +10,7 @@
 use super::*;
 
 use crate::arc::control::{key, parse_settings};
+use crate::arc::flows::tests::hex;
 
 const CARD: &str = include_str!("../../../tests/fixtures/arc_settings_card.json");
 
@@ -21,18 +22,14 @@ const READ_ONLY: u16 = 0x0001;
 /// The card's reply to `op1` from the fixture, the whole datagram.
 fn card_reply(op1: &str) -> Vec<u8> {
     let card: serde_json::Value = serde_json::from_str(CARD).expect("the fixture is JSON");
-    let text = card["replies"][op1]
+    hex(card["replies"][op1]
         .as_str()
-        .expect("the reply is in the fixture");
-    (0..text.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&text[i..i + 2], 16).expect("hex"))
-        .collect()
+        .expect("the reply is in the fixture"))
 }
 
 /// A 0x1102 body, read on its own (not by the code under test): the count
 /// (u16), then that many pairs `key, access` (u16 each), and nothing after.
-fn key_table(body: &[u8]) -> Vec<(u16, u16)> {
+fn parse_key_table(body: &[u8]) -> Vec<(u16, u16)> {
     let n = usize::from(read_u16(body, 0).expect("the count"));
     assert_eq!(
         body.len(),
@@ -70,7 +67,7 @@ fn the_card_s_key_table_reads_as_31_key_access_pairs() {
         (h.start, h.op1, h.op2),
         (CONTROLLER, op::ZEROS_1102, STATUS_OK)
     );
-    let table = key_table(body);
+    let table = parse_key_table(body);
     assert_eq!(table.len(), 31);
     assert_eq!(table[0], (key::SAMPLE_RATE, READ_ONLY));
     assert_eq!(table[30], (0x0209, READ_ONLY));
@@ -93,7 +90,7 @@ fn the_card_s_key_table_reads_as_31_key_access_pairs() {
 /// minimum 1 ms, the maximum 10.156 ms.
 #[test]
 fn the_card_s_settings_read_holds_its_table_s_keys() {
-    let table = key_table(Header::parse(&card_reply("0x1102")).expect("parses").1);
+    let table = parse_key_table(Header::parse(&card_reply("0x1102")).expect("parses").1);
     let reply = card_reply("0x1100");
     let (h, body) = Header::parse(&reply).expect("the card's reply parses");
     assert_eq!((h.op1, h.op2), (op::ZEROS_1100, STATUS_OK));
@@ -126,9 +123,9 @@ fn our_key_table_lists_the_keys_our_settings_read_answers() {
     let mut dev = Dev::new(cfg);
     let reply = decode(dev.send(&request(CONTROLLER, 3, op::ZEROS_1102, 0, &[])));
     assert_eq!(reply.header.op2, STATUS_OK);
-    let table = key_table(&reply.body);
+    let table = parse_key_table(&reply.body);
     // Every key of ours is one the card lists too.
-    let card = key_table(Header::parse(&card_reply("0x1102")).expect("parses").1);
+    let card = parse_key_table(Header::parse(&card_reply("0x1102")).expect("parses").1);
     let mut ours: Vec<u16> = table.iter().map(|&(k, _)| k).collect();
     assert!(ours.iter().all(|k| card.iter().any(|&(c, _)| c == *k)));
     // Asked for every key of the card's table, our settings read holds
@@ -181,7 +178,7 @@ fn a_latency_no_write_can_move_is_read_only_in_our_key_table() {
     assert_eq!(cfg.latency_range(), (1_000_000_000, 1_000_000_000));
     let mut dev = Dev::new(cfg);
     let reply = decode(dev.send(&request(CONTROLLER, 4, op::ZEROS_1102, 0, &[])));
-    let table = key_table(&reply.body);
+    let table = parse_key_table(&reply.body);
     assert_eq!(table.len(), 7);
     assert!(table.iter().all(|&(_, a)| a == READ_ONLY), "{table:x?}");
 }
