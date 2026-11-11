@@ -54,8 +54,10 @@ fn a_bad_argument_is_a_usage_error() {
 }
 
 /// The case dasio met (#218): a refused `--set-latency` prints its reason
-/// to the pipe and exits 1. One discovery pass (3 s); no device of that
-/// name exists anywhere.
+/// to the pipe and exits 1. One discovery pass (3 s, mDNS on this PC's
+/// addresses: the only test here that touches the network); no device of
+/// that name exists anywhere. A discovery error, if any, comes on stderr
+/// before the refusal.
 #[test]
 fn a_refused_set_latency_prints_why_and_exits_1() {
     let name = "dtray-cli-test-no-such-device";
@@ -102,6 +104,28 @@ fn autostart_registers_the_tray_program_beside_it() {
     assert!(!entry.exists(), "the entry is removed");
 }
 
+/// Without the tray program beside it, `dtray-cli --autostart on` writes
+/// nothing and exits 1 with the reason.
+#[cfg(target_os = "linux")]
+#[test]
+fn autostart_without_the_tray_program_beside_it_exits_1() {
+    let dir = tempfile::tempdir().expect("a temporary folder");
+    let alone = dir.path().join("dtray-cli");
+    std::fs::copy(env!("CARGO_BIN_EXE_dtray-cli"), &alone).expect("a copy of dtray-cli");
+    let config = dir.path().join("config");
+    let out = Command::new(&alone)
+        .args(["--autostart", "on"])
+        .env("XDG_CONFIG_HOME", &config)
+        .output()
+        .expect("dtray-cli runs");
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(text(&out.stderr).contains("did not start"), "{out:?}");
+    assert!(
+        !config.join("autostart").join("dtray.desktop").exists(),
+        "nothing is written"
+    );
+}
+
 /// The PE header's Subsystem field of the program at `exe`: 2 for a GUI
 /// program, 3 for a console program.
 #[cfg(windows)]
@@ -123,25 +147,55 @@ fn dtray_cli_is_a_console_program_and_dtray_the_gui_tray() {
     assert_eq!(subsystem(env!("CARGO_BIN_EXE_dtray")), 2, "GUI");
 }
 
-/// The way dasio's automation calls it (#218): PowerShell's call operator
-/// with the output captured. It waits for a console program and sets
-/// `$LASTEXITCODE`; for the GUI-subsystem dtray.exe it did neither.
+/// PowerShell running `script` with its own output in pipes, as a remote
+/// shell or CI runs it: its stdout and stderr.
+#[cfg(windows)]
+fn powershell(script: &str) -> Output {
+    Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .output()
+        .expect("powershell runs")
+}
+
+/// The way dasio's automation calls it (#218): PowerShell's call operator,
+/// the program's output not captured, in a PowerShell whose own output is
+/// a pipe (the remote shell). PowerShell waits for a console program, its
+/// lines reach the pipe and `$LASTEXITCODE` is set; it does not wait for
+/// the GUI-subsystem dtray.exe, whose lines were lost and `$LASTEXITCODE`
+/// left empty there.
 #[cfg(windows)]
 #[test]
-fn powershell_call_operator_reads_the_lines_and_the_exit_code() {
+fn powershell_call_operator_uncaptured_gives_the_lines_and_the_exit_code() {
+    let exe = env!("CARGO_BIN_EXE_dtray-cli").replace('\'', "''");
+    let out = powershell(&format!(
+        "& '{exe}' --version; \"code=$LASTEXITCODE\"; \
+         & '{exe}' --bogus; \"code=$LASTEXITCODE\"; exit 0"
+    ));
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let stdout = text(&out.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    let version = format!("dtray {}", env!("CARGO_PKG_VERSION"));
+    assert_eq!(lines, [version.as_str(), "code=0", "code=2"], "{out:?}");
+    // PowerShell 5.1 may pass a native program's stderr on as its own
+    // error record ("<program> : usage: ..."), so the line is looked for,
+    // not taken as the whole text.
+    assert!(text(&out.stderr).contains("usage: dtray-cli "), "{out:?}");
+}
+
+/// PowerShell's call operator with the output captured into a variable,
+/// the other way a script reads it: the lines and `$LASTEXITCODE`.
+#[cfg(windows)]
+#[test]
+fn powershell_call_operator_captured_gives_the_lines_and_the_exit_code() {
     let exe = env!("CARGO_BIN_EXE_dtray-cli").replace('\'', "''");
     // Windows PowerShell 5.1 wraps each line a native program writes to
     // stderr in an ErrorRecord; "$_" is its text alone (Out-String would
     // add the record's position lines).
-    let script = format!(
+    let out = powershell(&format!(
         "$v = & '{exe}' --version; \"version=$v\"; \"code=$LASTEXITCODE\"; \
          $u = (& '{exe}' --bogus 2>&1 | ForEach-Object {{ \"$_\" }}) -join ' '; \
          \"usage=$u\"; \"code=$LASTEXITCODE\"; exit 0"
-    );
-    let out = Command::new("powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-        .output()
-        .expect("powershell runs");
+    ));
     assert_eq!(out.status.code(), Some(0), "{out:?}");
     let lines: Vec<String> = text(&out.stdout).lines().map(str::to_string).collect();
     assert_eq!(
