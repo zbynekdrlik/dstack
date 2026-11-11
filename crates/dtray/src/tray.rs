@@ -9,7 +9,11 @@
 //! writes it with [`control::set_latency`] through [`dtray::arc::call`]),
 //! a line per expected device not running, and, for an app that offers outputs (dstack #139: dlisten), its Output
 //! list, the one in use checked: choosing one sends `app output <n>` to the
-//! device ([`probe::ask`], [`output::request`]); Copy status (every device's
+//! device ([`probe::ask`], [`output::request`]); a submenu per switch
+//! of the PC's switch file (dstack #210, [`dtray::switches`]: its current
+//! source, read every settings round; choosing a source subscribes the
+//! receiver's listed RX channels and reads them back, an error in a box),
+//! or the file's error; Copy status (every device's
 //! JSON, to the clipboard by the OS's glue), Exit (the tray only; the
 //! devices are other processes and keep running). The decisions (when to
 //! read settings, when to build the menu again, whether a choice writes)
@@ -27,6 +31,7 @@ use dtray::arc;
 use dtray::discover::{self, Local, Reading, Scanner};
 use dtray::menu::{self, Known, Shape};
 use dtray::model::{self, Colour, Tracker, View};
+use dtray::switches::{self, Current, Switch};
 use dtray::{expected, icon, output, probe};
 
 /// What a menu click asks of the OS's glue.
@@ -57,6 +62,8 @@ struct Built {
     choices: Vec<(MenuId, SocketAddrV4, u32)>,
     /// Each output item: the device's ARC and the request choosing it.
     outputs: Vec<(MenuId, SocketAddrV4, usize, String)>,
+    /// Each switch's source item: the switch's and the source's index.
+    switches: Vec<(MenuId, usize, usize)>,
 }
 
 impl Built {
@@ -75,6 +82,10 @@ struct Tick {
     expected: Vec<String>,
 }
 
+/// The switches' part of the menu: each switch's item, or the switch
+/// file's error.
+type SwitchPart = Result<Vec<switches::Item>, String>;
+
 /// The tray icon, its menu and what they show.
 pub struct Tray {
     fixed: Fixed,
@@ -89,6 +100,13 @@ pub struct Tray {
     /// A latency item was clicked: it checked itself, so the next tick
     /// builds the menu again from what the device reads.
     forced: bool,
+    /// The switch file as last read, each switch's current source and
+    /// the tick of that read.
+    switch_file: Result<Vec<Switch>, String>,
+    currents: Vec<Current>,
+    switch_read: Option<u32>,
+    /// The switches' part as built.
+    switch_part: SwitchPart,
     icon: TrayIcon,
 }
 
@@ -108,7 +126,11 @@ impl Tray {
         read_settings(&now.devices, &mut known, 0);
         let first = tracker.update_with(&now.readings, &now.expected);
         let shapes = menu::shapes_of(&now.devices, &known, &now.readings);
-        let (first_menu, built) = build(&fixed, &first, &shapes, now.readings.len())?;
+        // The switches are read from the first tick on: discovery has only
+        // just started.
+        let switch_file = switches::load(&switches::path());
+        let switch_part = part(&switch_file, &[]);
+        let (first_menu, built) = build(&fixed, &first, &shapes, now.readings.len(), &switch_part)?;
         let icon = TrayIconBuilder::new()
             .with_menu(Box::new(first_menu))
             .with_tooltip(&first.tooltip)
@@ -126,6 +148,10 @@ impl Tray {
             built,
             shown: first,
             forced: false,
+            switch_file,
+            currents: Vec::new(),
+            switch_read: None,
+            switch_part,
             icon,
         })
     }
@@ -136,22 +162,29 @@ impl Tray {
         self.now = tick(&mut self.scanner);
         self.ticks = self.ticks.wrapping_add(1);
         read_settings(&self.now.devices, &mut self.known, self.ticks);
+        if switches::due(self.switch_read, self.ticks) {
+            self.read_switches();
+        }
+        let new_part = part(&self.switch_file, &self.currents);
         let v = self
             .tracker
             .update_with(&self.now.readings, &self.now.expected);
         let new_shapes = menu::shapes_of(&self.now.devices, &self.known, &self.now.readings);
         let devices = self.now.readings.len();
-        if menu::needs_rebuild(
-            self.forced,
-            self.built.counts(),
-            &self.shapes,
-            &new_shapes,
-            devices,
-            v.lines.len(),
-        ) {
-            let (m, b) = build(&self.fixed, &v, &new_shapes, devices)?;
+        if new_part != self.switch_part
+            || menu::needs_rebuild(
+                self.forced,
+                self.built.counts(),
+                &self.shapes,
+                &new_shapes,
+                devices,
+                v.lines.len(),
+            )
+        {
+            let (m, b) = build(&self.fixed, &v, &new_shapes, devices, &new_part)?;
             self.built = b;
             self.shapes = new_shapes;
+            self.switch_part = new_part;
             self.forced = false;
             self.icon.set_menu(Some(Box::new(m)));
         } else {
@@ -169,6 +202,20 @@ impl Tray {
         }
         self.shown = v;
         Ok(())
+    }
+
+    /// The switch file read again and each switch's receiver read
+    /// ([`switches::read_live`]) at this tick.
+    fn read_switches(&mut self) {
+        self.switch_file = switches::load(&switches::path());
+        self.currents = match &self.switch_file {
+            Ok(all) => all
+                .iter()
+                .map(|sw| switches::current(sw, &switches::read_live(&self.scanner, sw)))
+                .collect(),
+            Err(_) => Vec::new(),
+        };
+        self.switch_read = Some(self.ticks);
     }
 
     /// The menu clicks since the last call, handled: a latency choice is
@@ -223,6 +270,23 @@ impl Tray {
                         "dtray: the output was not chosen: {err}"
                     )));
                 }
+            } else if let Some(&(_, i, j)) =
+                self.built.switches.iter().find(|(id, _, _)| *id == e.id)
+            {
+                // The item checked itself: the next tick reads the
+                // receiver again and builds the menu from what it reads.
+                self.forced = true;
+                self.switch_read = None;
+                let Ok(all) = &self.switch_file else {
+                    continue;
+                };
+                let Some((sw, wanted)) = all.get(i).and_then(|sw| Some((sw, sw.sources.get(j)?)))
+                else {
+                    continue;
+                };
+                if let Err(err) = switches::set_live(&self.scanner, sw, wanted) {
+                    out.push(Action::Error(format!("dtray: {err}")));
+                }
             }
         }
         out
@@ -271,14 +335,24 @@ fn read_settings(devices: &[Local], known: &mut Known, tick: u32) {
     }
 }
 
+/// The switches' part from the file as read and each switch's current
+/// source.
+fn part(file: &Result<Vec<Switch>, String>, currents: &[Current]) -> SwitchPart {
+    file.as_ref()
+        .map(|all| switches::items(all, currents))
+        .map_err(Clone::clone)
+}
+
 /// The menu: the version, a submenu per device (its line, its latency
-/// values), a line per expected device not running, Copy status, Exit.
-/// `devices` is how many of the view's lines are devices'.
+/// values), a line per expected device not running, a submenu per switch
+/// (or the switch file's error), Copy status, Exit. `devices` is how many
+/// of the view's lines are devices'.
 fn build(
     fixed: &Fixed,
     v: &View,
     shapes: &[Shape],
     devices: usize,
+    switch_part: &SwitchPart,
 ) -> Result<(Menu, Built), String> {
     let menu = Menu::new();
     let e = |r: Result<(), tray_icon::menu::Error>| r.map_err(|e| format!("the menu: {e}"));
@@ -321,6 +395,29 @@ fn build(
         let item = MenuItem::new(text, false, None);
         e(menu.append(&item))?;
         built.missing.push(item);
+    }
+    match switch_part {
+        Ok(items) if items.is_empty() => {}
+        Ok(items) => {
+            e(menu.append(&PredefinedMenuItem::separator()))?;
+            for (i, item) in items.iter().enumerate() {
+                let sub = Submenu::new(&item.text, true);
+                for (j, (label, checked)) in item.sources.iter().enumerate() {
+                    let it = CheckMenuItem::new(label, true, *checked, None);
+                    built.switches.push((it.id().clone(), i, j));
+                    e(sub.append(&it))?;
+                }
+                if let Some(note) = &item.note {
+                    e(sub.append(&PredefinedMenuItem::separator()))?;
+                    e(sub.append(&MenuItem::new(note, false, None)))?;
+                }
+                e(menu.append(&sub))?;
+            }
+        }
+        Err(why) => {
+            e(menu.append(&PredefinedMenuItem::separator()))?;
+            e(menu.append(&MenuItem::new(format!("Switch file: {why}"), false, None)))?;
+        }
     }
     e(menu.append(&PredefinedMenuItem::separator()))?;
     e(menu.append(&fixed.copy))?;

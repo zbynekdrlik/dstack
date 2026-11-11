@@ -67,8 +67,8 @@ exclude_re = [
   "src/bin/dstack-dev.rs.*replace main",
   # dtray's binary: its entry points and its log setup only call the
   # library (mode_of, the model, the probe, set::latency: each tested);
-  # --print and --set-latency are run by hand on dev1.
-  "dtray/src/main.rs.*replace (main|print|tray|autostart|set_latency) -> ExitCode",
+  # --print, --set-latency and --switch are run by hand on dev1.
+  "dtray/src/main.rs.*replace (main|print|tray|autostart|set_latency|switch) -> ExitCode",
   "dtray/src/main.rs.*replace init_log with \\(\\)",
   # The registration folder of this PC: reads the process environment
   # (which a test may not set: every other test shares it); its rule
@@ -77,7 +77,14 @@ exclude_re = [
   # dtray's discovery on the PC's real interfaces (mDNS on port 5353, which
   # a unit test may not hold per mutant); its rules (own_addresses,
   # local_devices, plan) and the probe are tested.
-  "dtray/src/discover.rs.*Scanner::(new|refresh|devices|readings)",
+  "dtray/src/discover.rs.*Scanner::(new|refresh|devices|readings|remote)",
+  # A switch's receiver reached through the real discovery and its ARC
+  # (dstack #210), and this PC's switch file (the process environment, as
+  # devices_dir); their decisions (remote, path_for, parse, current, set,
+  # verdict) are tested, and --switch is run by hand against a dstack-dev
+  # device on dev1.
+  "dtray/src/switches.rs.*(read_live|set_live)",
+  "dtray/src/switches.rs.*replace path -> PathBuf",
   # The traffic watch's discovery of our other devices (dstack #203): glue
   # over a real Discovery (mDNS on port 5353, likewise); its decisions
   # (traffic::neighbours::Lazy, Neighbours, traffic::on_address) are tested

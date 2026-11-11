@@ -7,7 +7,7 @@ use dstack::announce::STATUS_PORT_KEY;
 use dstack::daemon::IfAddr;
 use dstack::discover::Device;
 
-use super::{Local, local_devices, own_addresses, plan, read};
+use super::{Local, Remote, local_devices, own_addresses, plan, read, remote};
 
 // Documentation addresses (RFC 5737) only.
 const OWN: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 10);
@@ -118,4 +118,41 @@ fn read_gives_each_device_s_status_by_name_in_order() {
     assert_eq!(got[1].0, "down");
     assert!(got[1].1.is_err(), "{got:?}");
     assert!(read(&[]).is_empty());
+}
+
+#[test]
+fn a_remote_device_is_found_by_name_with_the_address_that_found_it() {
+    let found = vec![
+        (OWN, vec![device("Here", OWN, Some("5000"))]),
+        (
+            OWN2,
+            vec![
+                device("Elsewhere", OTHER, None),
+                device("Here", OWN, Some("5000")),
+            ],
+        ),
+    ];
+    assert_eq!(
+        remote(&found, "elsewhere"),
+        Ok(Remote {
+            from: OWN2,
+            arc: SocketAddrV4::new(OTHER, 4440),
+        })
+    );
+    // Listed by both: the first address that lists it.
+    assert_eq!(
+        remote(&found, "HERE"),
+        Ok(Remote {
+            from: OWN,
+            arc: SocketAddrV4::new(OWN, 4440),
+        })
+    );
+    for name in ["Elsewhere ", "Else", ""] {
+        assert_eq!(
+            remote(&found, name),
+            Err(format!("the device {name} is not found on the network")),
+            "{name:?}"
+        );
+    }
+    assert!(remote(&[], "Here").is_err());
 }

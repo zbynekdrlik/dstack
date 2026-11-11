@@ -7,6 +7,8 @@
 //!   record sits on one of them and names a local status port.
 //! - [`plan`] (pure): which addresses need a discovery started, and which
 //!   running ones are gone.
+//! - [`remote`] (pure): a device anywhere on the network by name, and the
+//!   own address that found it (a switch's receiver, dstack #210).
 //! - [`Scanner`]: a [`Discovery`] per own address, kept in step with the
 //!   PC's addresses on each [`Scanner::refresh`] (a tray started before the
 //!   network is up finds it later), and the readings of every local device
@@ -82,6 +84,34 @@ pub fn plan(running: &[Ipv4Addr], own: &[Ipv4Addr]) -> (Vec<Ipv4Addr>, Vec<Ipv4A
     (start, stop)
 }
 
+/// A device anywhere on the network (dstack #210: a switch's receiver,
+/// [`crate::switches`]): its ARC, and the PC's own address whose discovery
+/// found it, which an exchange with it is sent from
+/// ([`crate::arc::call_from`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Remote {
+    pub from: Ipv4Addr,
+    pub arc: SocketAddrV4,
+}
+
+/// The device named `name` (case aside, as Dante names compare) in
+/// `found` (each own address with its discovery's list), from the first
+/// address that lists it; the reason when none does.
+pub fn remote(found: &[(Ipv4Addr, Vec<Device>)], name: &str) -> Result<Remote, String> {
+    found
+        .iter()
+        .find_map(|(from, devices)| {
+            devices
+                .iter()
+                .find(|d| d.name.eq_ignore_ascii_case(name))
+                .map(|d| Remote {
+                    from: *from,
+                    arc: d.arc,
+                })
+        })
+        .ok_or_else(|| format!("the device {name} is not found on the network"))
+}
+
 /// A device's reading: its name and its status line, or why there is none.
 pub type Reading = (String, Result<String, String>);
 
@@ -142,6 +172,17 @@ impl Scanner {
         let own: Vec<Ipv4Addr> = self.running.keys().copied().collect();
         let found: Vec<Device> = self.running.values().flat_map(Discovery::devices).collect();
         local_devices(&found, &own)
+    }
+
+    /// The device named `name` anywhere on the networks of the PC's
+    /// addresses ([`remote`]).
+    pub fn remote(&self, name: &str) -> Result<Remote, String> {
+        let found: Vec<(Ipv4Addr, Vec<Device>)> = self
+            .running
+            .iter()
+            .map(|(ip, d)| (*ip, d.devices()))
+            .collect();
+        remote(&found, name)
     }
 
     /// Every local device's status now ([`read`]), by name.

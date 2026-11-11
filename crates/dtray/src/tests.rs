@@ -63,9 +63,25 @@ fn anything_else_is_the_usage() {
         &["--set-latency", "x"],
         &["--set-latency", "x", "1", "2"],
         &["--print", "--set-latency", "x", "1"],
+        &["--switch"],
+        &["--switch", "Solo"],
+        &["--switch", "Solo", "band", "master"],
+        &["--print", "--switch", "Solo", "band"],
     ] {
         assert_eq!(mode_of(args(a)), Err(USAGE), "{a:?}");
     }
+}
+
+#[test]
+fn switch_takes_a_label_and_a_source() {
+    assert_eq!(
+        mode_of(args(&["--switch", "Solo", "master"])),
+        Ok(Mode::Switch {
+            label: "Solo".to_string(),
+            source: "master".to_string()
+        })
+    );
+    assert!(USAGE.contains("--switch <label> <source>"));
 }
 
 #[test]
