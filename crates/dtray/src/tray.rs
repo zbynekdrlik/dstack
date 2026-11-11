@@ -273,10 +273,9 @@ impl Tray {
             } else if let Some(&(_, i, j)) =
                 self.built.switches.iter().find(|(id, _, _)| *id == e.id)
             {
-                // The item checked itself: the next tick reads the
-                // receiver again and builds the menu from what it reads.
+                // The item checked itself: the next tick builds the menu
+                // from what the receiver reads.
                 self.forced = true;
-                self.switch_read = None;
                 let Ok(all) = &self.switch_file else {
                     continue;
                 };
@@ -284,8 +283,18 @@ impl Tray {
                 else {
                     continue;
                 };
-                if let Err(err) = switches::set_live(&self.scanner, sw, wanted) {
-                    out.push(Action::Error(format!("dtray: {err}")));
+                match switches::set_live(&self.scanner, sw, wanted) {
+                    // It read back on the source chosen: shown at once.
+                    Ok(_) => {
+                        if let Some(c) = self.currents.get_mut(i) {
+                            *c = Current::Source(j);
+                        }
+                    }
+                    // Read the receiver again on the next tick.
+                    Err(err) => {
+                        self.switch_read = None;
+                        out.push(Action::Error(format!("dtray: {err}")));
+                    }
                 }
             }
         }

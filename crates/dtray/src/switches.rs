@@ -126,6 +126,24 @@ fn twice<'a>(items: impl IntoIterator<Item = &'a str>) -> Option<&'a str> {
     items.into_iter().find(|i| !seen.insert(i.to_lowercase()))
 }
 
+/// The longest Dante name in bytes (a device's or a channel's): the
+/// subscription request carries the names as they are.
+pub const MAX_NAME: usize = 31;
+
+/// What is wrong with the Dante name `n` (a device's or a channel's), if
+/// anything: empty, longer than [`MAX_NAME`], or not printable ASCII.
+fn name_problem(n: &str) -> Option<String> {
+    if n.trim().is_empty() {
+        Some("empty".to_string())
+    } else if n.len() > MAX_NAME {
+        Some(format!("longer than {MAX_NAME} bytes"))
+    } else if !n.bytes().all(|b| (b' '..=b'~').contains(&b)) {
+        Some("not printable ASCII".to_string())
+    } else {
+        None
+    }
+}
+
 /// What is wrong with one source of switch `sw`, if anything.
 fn check_source(sw: &Switch, s: &Source) -> Result<(), String> {
     let name = &sw.label;
@@ -133,8 +151,8 @@ fn check_source(sw: &Switch, s: &Source) -> Result<(), String> {
         return Err(format!("switch {name}: a source has no label"));
     }
     let at = format!("switch {name}, source {}", s.label);
-    if s.device.trim().is_empty() {
-        return Err(format!("{at}: no device"));
+    if let Some(why) = name_problem(&s.device) {
+        return Err(format!("{at}: the device name is {why}"));
     }
     if s.channels.len() != sw.rx.len() {
         return Err(format!(
@@ -143,8 +161,10 @@ fn check_source(sw: &Switch, s: &Source) -> Result<(), String> {
             sw.rx.len()
         ));
     }
-    if s.channels.iter().any(|c| c.trim().is_empty()) {
-        return Err(format!("{at}: an empty channel name"));
+    for (i, c) in s.channels.iter().enumerate() {
+        if let Some(why) = name_problem(c) {
+            return Err(format!("{at}: channel {} name is {why}", i + 1));
+        }
     }
     Ok(())
 }
@@ -155,8 +175,8 @@ fn check(sw: &Switch) -> Result<(), String> {
     if name.trim().is_empty() {
         return Err("a switch has no label".to_string());
     }
-    if sw.device.trim().is_empty() {
-        return Err(format!("switch {name}: no device"));
+    if let Some(why) = name_problem(&sw.device) {
+        return Err(format!("switch {name}: the device name is {why}"));
     }
     if sw.rx.is_empty() {
         return Err(format!("switch {name}: no RX channel"));
@@ -183,8 +203,9 @@ fn check(sw: &Switch) -> Result<(), String> {
 /// The switches of a file's `text`, checked: each has a label (one per
 /// file, case aside), a receiver, its RX channels (1 up, each once) and a
 /// source or more; each source a label (one per switch), a device and a
-/// channel name per RX channel. Unknown keys are refused. The reason
-/// otherwise.
+/// channel name per RX channel. Device and channel names are 1 to
+/// [`MAX_NAME`] bytes of printable ASCII. Unknown keys are refused. The
+/// reason otherwise.
 pub fn parse(text: &str) -> Result<Vec<Switch>, String> {
     let file: File = toml::from_str(text).map_err(|e| e.message().to_string())?;
     for sw in &file.switch {
@@ -252,18 +273,21 @@ pub enum Current {
 }
 
 /// Whether every RX channel of `sw` is subscribed, in `channels` (the
-/// receiver's 0x3000 read), to `source`'s device and its channel for it.
+/// receiver's 0x3000 read), to `source`'s device and its channel for it;
+/// never for a source without one channel per RX channel ([`parse`]
+/// refuses it, a switch built in code may not).
 pub fn matches(sw: &Switch, source: &Source, channels: &[RxChannel]) -> bool {
-    sw.rx.iter().zip(&source.channels).all(|(rx, tx)| {
-        channels.iter().find(|c| c.channel == *rx).is_some_and(|c| {
-            c.tx_device
-                .as_deref()
-                .is_some_and(|d| d.eq_ignore_ascii_case(&source.device))
-                && c.tx_channel
+    source.channels.len() == sw.rx.len()
+        && sw.rx.iter().zip(&source.channels).all(|(rx, tx)| {
+            channels.iter().find(|c| c.channel == *rx).is_some_and(|c| {
+                c.tx_device
                     .as_deref()
-                    .is_some_and(|t| t.eq_ignore_ascii_case(tx))
+                    .is_some_and(|d| d.eq_ignore_ascii_case(&source.device))
+                    && c.tx_channel
+                        .as_deref()
+                        .is_some_and(|t| t.eq_ignore_ascii_case(tx))
+            })
         })
-    })
 }
 
 /// The source `sw`'s RX channels are on, from the receiver's read: the

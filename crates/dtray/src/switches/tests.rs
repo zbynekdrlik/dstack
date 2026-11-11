@@ -122,7 +122,7 @@ fn a_bad_file_is_refused_with_its_reason() {
         (
             r#"device = "Test Monitor""#,
             r#"device = """#,
-            "switch Solo: no device",
+            "switch Solo: the device name is empty",
         ),
         ("rx = [3, 4]", "rx = []", "switch Solo: no RX channel"),
         (
@@ -143,7 +143,7 @@ fn a_bad_file_is_refused_with_its_reason() {
         (
             r#"device = "Test Band""#,
             r#"device = "  ""#,
-            "switch Solo, source band: no device",
+            "switch Solo, source band: the device name is empty",
         ),
         (
             r#"channels = ["Out L", "Out R"]"#,
@@ -158,7 +158,7 @@ fn a_bad_file_is_refused_with_its_reason() {
         (
             r#"channels = ["Out L", "Out R"]"#,
             r#"channels = ["Out L", ""]"#,
-            "switch Solo, source band: an empty channel name",
+            "switch Solo, source band: channel 2 name is empty",
         ),
         (
             r#"label = "master""#,
@@ -168,6 +168,49 @@ fn a_bad_file_is_refused_with_its_reason() {
     ];
     for (from, to, why) in cases {
         assert_eq!(edited(from, to), Err(why.to_string()), "{to}");
+    }
+    // Names: at most 31 bytes of printable ASCII.
+    let long = "x".repeat(32);
+    let fine = "x".repeat(31);
+    let names = [
+        (
+            r#"device = "Test Monitor""#,
+            format!(r#"device = "{long}""#),
+            "switch Solo: the device name is longer than 31 bytes",
+        ),
+        (
+            r#"device = "Test Master""#,
+            format!(r#"device = "{long}""#),
+            "switch Solo, source master: the device name is longer than 31 bytes",
+        ),
+        (
+            r#""Out R""#,
+            format!(r#""{long}""#),
+            "switch Solo, source band: channel 2 name is longer than 31 bytes",
+        ),
+        (
+            r#""Out L""#,
+            r#""Out\tL""#.to_string(),
+            "switch Solo, source band: channel 1 name is not printable ASCII",
+        ),
+        (
+            r#"device = "Test Monitor""#,
+            "device = \"Mon\u{e9}\"".to_string(),
+            "switch Solo: the device name is not printable ASCII",
+        ),
+    ];
+    for (from, to, why) in names {
+        assert_eq!(edited(from, &to), Err(why.to_string()), "{to}");
+    }
+    for (from, to) in [
+        (
+            r#"device = "Test Monitor""#,
+            format!(r#"device = "{fine}""#),
+        ),
+        (r#""Out R""#, format!(r#""{fine}""#)),
+        (r#""Out L""#, r#"" ~!""#.to_string()),
+    ] {
+        assert!(edited(from, &to).is_ok(), "{to}");
     }
     // No source.
     let none = "[[switch]]\nlabel = \"S\"\ndevice = \"D\"\nrx = [1]\nsources = []\n";
@@ -314,6 +357,13 @@ fn a_device_or_a_channel_alone_does_not_match() {
     ];
     assert!(!matches(&sw, band, &channel_only));
     assert!(matches(&sw, band, &on_band()));
+    // A source built without one channel per RX channel never matches,
+    // even where the channels it has are on.
+    let short = Source {
+        channels: vec!["Out L".to_string()],
+        ..band.clone()
+    };
+    assert!(!matches(&sw, &short, &on_band()));
 }
 
 #[test]
