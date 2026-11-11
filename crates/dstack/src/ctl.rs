@@ -68,6 +68,7 @@ use crate::subscribe::SubStatus;
 use crate::wire::read_u16;
 
 mod clock;
+pub mod probe;
 #[cfg(test)]
 use clock::clock_counts_in_use;
 use clock::clock_part;
@@ -695,6 +696,11 @@ impl Json {
 ///   the edges of `media::tx::LATE_EDGES_NS`: under 0.25, 0.5, 1, 2 and 5
 ///   ms, then 5 ms or more), `late_max_us` and `send_max_us` (the largest lateness and
 ///   the longest single send since the device started: maxima).
+/// - `tx_bytes`: every TX slot's bytes on the wire since the device started
+///   (each datagram plus its Ethernet, IP and UDP headers,
+///   [`crate::media::tx::TxShared::bytes_sent`]):
+///   another device's traffic watch on the same PC subtracts it from the
+///   NIC's own count (dstack #203, [`crate::traffic`]).
 /// - `rx`: each RX flow slot that has or had a flow: `flow`, `granted`,
 ///   `fpp`, `channels`, `latency` (samples), `packets`, `refused`, `stray`,
 ///   `out_of_order`, `gaps` and `gap_frames` (packets that began past the
@@ -825,6 +831,7 @@ fn tx_part(j: &mut Json, media: &Media) {
         j.close('}');
     }
     j.close(']');
+    j.num("tx_bytes", media.tx.bytes_sent());
 }
 
 /// A TX lane's counts as the status shows them (µs for the times).

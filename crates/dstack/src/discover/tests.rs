@@ -623,3 +623,27 @@ fn only_an_old_dstack_device_does_not_state_its_flow_slots() {
     assert!(dev(&[("model", "_000a000100020003"), ("mf", "Audinate")]).states_flow_slots());
     assert!(dev(&[]).states_flow_slots(), "no model: not ours");
 }
+
+/// dstack #104/#203: our devices name their local status port in the ARC
+/// TXT; only a port other than 0 counts.
+#[test]
+fn the_status_port_is_a_port_other_than_0() {
+    let port = |v: Option<&str>| {
+        let mut d = Devices::default();
+        let txt: Vec<(&str, &str)> = v.map(|v| ("dstack_ctl", v)).into_iter().collect();
+        let Some(Change::Added(dev)) =
+            d.set(Service::Arc, "x", Some(&srv([10, 0, 0, 5], 4440, &txt)))
+        else {
+            panic!("listed");
+        };
+        dev.status_port()
+    };
+    assert_eq!(port(Some("41234")), Some(41234));
+    assert_eq!(port(Some("65535")), Some(65535));
+    assert_eq!(port(Some("1")), Some(1));
+    assert_eq!(port(Some("0")), None);
+    assert_eq!(port(Some("65536")), None);
+    assert_eq!(port(Some("x")), None);
+    assert_eq!(port(Some("")), None);
+    assert_eq!(port(None), None);
+}

@@ -78,6 +78,11 @@ exclude_re = [
   # a unit test may not hold per mutant); its rules (own_addresses,
   # local_devices, plan) and the probe are tested.
   "dtray/src/discover.rs.*Scanner::(new|refresh|devices|readings)",
+  # The traffic watch's discovery of our other devices (dstack #203): glue
+  # over a real Discovery (mDNS on port 5353, likewise); its decisions
+  # (traffic::neighbours::Lazy, Neighbours, traffic::on_address) are tested
+  # with a test Finder.
+  "traffic/neighbours.rs.*DiscoveryFinder>::(start|stop|devices)",
   # The embedding glue and its host paths (no socket, no signal handler):
   # tests/embed.rs runs a whole device with them (not per mutant);
   # Timing::of, their one computation, is unit tested.
@@ -141,9 +146,8 @@ exclude_re = [
   "linked.rs.*delete match arm Source::None in Linked::tick",
   # The selector's once-a-second loop (host glue, like serve_device).
   "host.rs.*select_source",
-  # The traffic watch's reads and log line; its rule (`look`, `too_much`,
-  # `name_of`) is tested, the counters' read by a lib test on the real NIC.
-  "traffic.rs.*TrafficWatch::watch",
+  # The NIC counter's read (`TrafficWatch::watch` takes it as a closure and
+  # is tested); `name_of` is tested, the read by a lib test on the real NIC.
   "traffic.rs.*nic_sent_bytes",
   # The poller's log lines (log only) and its wrapper aimed at dsync's port
   # (its body `poll` runs against a stand-in server in the tests).

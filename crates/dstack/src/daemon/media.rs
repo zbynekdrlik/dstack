@@ -477,6 +477,12 @@ pub struct Driver {
     pump: crate::stream::watch::PumpWatch,
     /// Other traffic on our NIC, logged once a minute.
     traffic: crate::traffic::TrafficWatch,
+    /// Our other devices on the PC, whose audio is not other traffic
+    /// (dstack #203).
+    neighbours: crate::traffic::neighbours::Neighbours,
+    /// The NIC's sent bytes on an address ([`crate::traffic::nic_sent_bytes`];
+    /// tests: their own counter).
+    nic: fn(Ipv4Addr) -> Option<u64>,
     /// A media thread's CPU pin found lost (another program's process
     /// affinity rule) or refused, each told once.
     pins: crate::media::repin::PinWatch,
@@ -502,6 +508,8 @@ impl Driver {
                 host: crate::media::late::HostWatch::new(),
                 pump: crate::stream::watch::PumpWatch::new(),
                 traffic: crate::traffic::TrafficWatch::new(),
+                neighbours: crate::traffic::neighbours::Neighbours::default(),
+                nic: crate::traffic::nic_sent_bytes,
                 pins: crate::media::repin::PinWatch::new(),
             },
             back,
@@ -526,11 +534,40 @@ impl Driver {
             &self.media.tx.cfg.name,
             self.media.engine_stats().as_deref(),
         );
-        self.traffic.watch(now, self.media.ip, &self.media.tx);
+        let ip = self.media.ip;
+        let nic = self.nic;
+        self.neighbours.tick(
+            &mut self.traffic,
+            now,
+            ip,
+            || nic(ip),
+            self.media.tx.bytes_sent(),
+        );
         self.pins.watch(
             crate::media::repin::pin_resets(),
             crate::media::repin::pin_refusals(),
         );
+    }
+
+    /// Our own local status port ([`crate::ctl::local`]; `None`: none), so
+    /// the traffic watch never counts this device among its neighbours.
+    pub fn set_status_port(&mut self, port: Option<u16>) {
+        self.neighbours.set_own(port);
+    }
+
+    /// The NIC's sent-bytes counter the traffic watch reads (tests: a fake
+    /// one, the same on every OS).
+    #[cfg(test)]
+    pub(crate) fn set_nic(&mut self, nic: fn(Ipv4Addr) -> Option<u64>) {
+        self.nic = nic;
+    }
+
+    /// The traffic watch's discovery of our other devices (tests: their own
+    /// [`crate::traffic::neighbours::Finder`]); set before
+    /// [`Driver::set_status_port`].
+    #[cfg(test)]
+    pub(crate) fn set_finder(&mut self, finder: Box<dyn crate::traffic::neighbours::Finder>) {
+        self.neighbours = crate::traffic::neighbours::Neighbours::new(finder);
     }
 
     /// The answer to the request of `flow`.

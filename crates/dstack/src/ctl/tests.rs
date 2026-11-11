@@ -632,6 +632,7 @@ const WORDS: &[&str] = &[
     "sent",
     "uncounted",
     "tx",
+    "tx_bytes",
     "flow",
     "live",
     "fpp",
@@ -722,7 +723,7 @@ fn a_fresh_device_s_status_is_numbers_only() {
         s,
         "{\"clock\":{\"ready\":0,\"epoch\":0,\"polls\":0,\"re_anchors\":0,\"holdovers\":0,\
          \"holdover\":0,\"freq_ppb\":-750,\"source\":\"dsync\"},\"requests\":[],\"sent\":[],\"uncounted\":0,\
-         \"tx\":[],\"rx\":[],\"rx_poll_errors\":0,\"channels\":[],\"sources\":[],\"checks\":[]}"
+         \"tx\":[],\"tx_bytes\":0,\"rx\":[],\"rx_poll_errors\":0,\"channels\":[],\"sources\":[],\"checks\":[]}"
     );
 }
 
@@ -789,7 +790,7 @@ fn the_status_names_the_clock_requests_channels_sources_and_checks() {
             "{\"clock\":{\"ready\":1,\"epoch\":1,\"polls\":3,\"re_anchors\":1,\"holdovers\":1,\
              \"holdover\":0,\"freq_ppb\":-750,\"source\":\"dsync\"},\
              \"requests\":[{\"port\":4440,\"peer\":1,\"op\":8704,\"n\":1}],\
-             \"sent\":[{\"peer\":1,\"op\":256,\"n\":1}],\"uncounted\":0,\"tx\":[],\"rx\":[],"
+             \"sent\":[{\"peer\":1,\"op\":256,\"n\":1}],\"uncounted\":0,\"tx\":[],\"tx_bytes\":0,\"rx\":[],"
         ),
         "{s}"
     );
@@ -1515,6 +1516,23 @@ fn a_lane_s_times_show_in_whole_microseconds() {
         "{\"packets\":7,\"send_errors\":0,\"send_retries\":3,\"keepalives\":0,\"rebootstraps\":0,\
          \"holes\":0,\"late_bins\":[0,0,0,0,0,0],\"late_max_us\":204,\"send_max_us\":56,\
          \"age_max_us\":416,\"over_latency\":80,\"receiver_latency_us\":10000,\"direct\":5}"
+    );
+}
+
+/// dstack #203: the status carries every slot's wire bytes, which a
+/// neighbour's traffic watch on the PC reads.
+#[test]
+fn the_status_carries_the_tx_wire_bytes_for_a_neighbour() {
+    let dir = tempfile::tempdir().unwrap();
+    let media = media_on(&device_at(dir.path()), Arc::new(Unready));
+    assert_eq!(crate::traffic::tx_bytes_of(&status(&media)), Some(0));
+    media.tx.count_sent(0, 100);
+    media.tx.count_sent(2, 58);
+    let want = 158 + 2 * crate::media::tx::WIRE_OVERHEAD;
+    assert_eq!(crate::traffic::tx_bytes_of(&status(&media)), Some(want));
+    assert_eq!(
+        crate::traffic::tx_bytes_of(&local::reply("status", &media)),
+        Some(want)
     );
 }
 

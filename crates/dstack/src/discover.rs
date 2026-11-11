@@ -113,6 +113,18 @@ impl Device {
         self.txt.get("model").map(String::as_str) != Some(crate::announce::MODEL_ID)
             || self.txt.contains_key(crate::announce::VERSION_KEY)
     }
+
+    /// The local status port its ARC TXT names
+    /// ([`crate::announce::STATUS_PORT_KEY`], `dstack_ctl=<port>`): only our
+    /// devices carry it. `None` without the key, or with a value that is no
+    /// port (0 included). Its readers: dtray (dstack #104) and a device's
+    /// traffic watch ([`crate::traffic`], dstack #203).
+    pub fn status_port(&self) -> Option<u16> {
+        self.txt
+            .get(crate::announce::STATUS_PORT_KEY)
+            .and_then(|v| v.parse::<u16>().ok())
+            .filter(|&p| p != 0)
+    }
 }
 
 /// What changed for the list.

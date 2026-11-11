@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! One request to a device's local endpoint ([`dstack::ctl::local`]): TCP
+//! One request to a device's local endpoint ([`super::local`]): TCP
 //! to 127.0.0.1 at the port its ARC record names, the request line, the
 //! answer line back, all within one deadline of [`WAIT`]: a stuck or slow
-//! device holds the tray for a second at most. `status` reads it
+//! device holds the reader for a second at most. `status` reads it
 //! ([`status`]); `app <words>` asks the app ([`ask`], dstack #139: an app's
-//! output from its menu).
+//! output from its menu). Its readers: dtray (dstack #104), and a device's
+//! traffic watch reading its neighbours on the PC ([`crate::traffic`],
+//! dstack #203, with a shorter wait of its own through [`status_at`]).
 
 use std::io::{self, ErrorKind, Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpStream};
