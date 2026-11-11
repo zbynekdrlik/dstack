@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.87
+
+- Feature (dstack #104): `dtray --set-latency <device> <ms>` runs the tray menu's own latency write without a desktop: the same discovery as `--print`, the device by name (case aside), one of the values it offers (`latency::choices`), `menu::write_needed`, `control::set_latency`, then a read-back; exit 0 only when the configured latency reads back as asked (stdout), errors on stderr with exit 1, usage exit 2. The tray and its ARC call now share `dtray::arc::call`; the tray and `--print` behave as before. No latency change for any device.
+
 ## 0.6.86
 
 - Feature (dstack #184, owner 11.11.2026): dsend's own Windows render endpoint "dsend", a virtual audio driver in `drivers/dsend-audio/` (derived from Microsoft's simpleaudiosample, MS-PL for that directory only, like dasio's NDIS filter): one speaker endpoint, no capture, the buffer consumed at the real-time rate, 48 or 44.1 kHz 16-bit stereo. Test-signed (WDK test certificate per build) for a PC with test signing on; `scripts/install.ps1` refuses and changes nothing otherwise. Built in CI on windows-2025 (WDK 10.0.28000 from NuGet); release asset `dsend-audio-<tag>-windows-x86_64.zip`. Windows plays into it, dsend captures its loopback and sends it to Dante: the VB-Audio VAIO endpoint dsend used on the FOH PC gave silence.
