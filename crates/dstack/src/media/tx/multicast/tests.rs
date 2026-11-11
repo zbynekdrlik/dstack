@@ -190,3 +190,43 @@ fn the_receiver_latency_reader_skips_a_multicast_flow() {
         [(1, rx, "peer-device".to_string())]
     );
 }
+
+/// dstack #207: at start the device makes each saved multicast flow again,
+/// in its slot, to its group (derived from the address, process id and
+/// slot), and hands the plans to the TX thread; a saved flow it cannot
+/// make (a channel the config no longer has) is left out with a warning,
+/// the others made.
+#[test]
+fn saved_multicast_flows_are_made_again_at_start() {
+    use crate::device::SavedMulticast;
+    let cfg = DeviceConfig::from_toml(TEST_DEVICE).expect("config/test-device.toml");
+    let process_id = cfg.process_id;
+    let shared = TxShared::new(cfg, Ipv4Addr::LOCALHOST, Vec::new().into(), 1, &[]).unwrap();
+    let saved = |slot, channels: &[u16]| SavedMulticast {
+        slot,
+        channels: channels.to_vec(),
+    };
+    crate::test_log::undecided();
+    let warnings = crate::test_log::capture_warnings(|| {
+        shared.recreate_multicast(&[saved(1, &[1, 2]), saved(3, &[17]), saved(5, &[16])]);
+    });
+    let group = |slot| multicast_group(Ipv4Addr::LOCALHOST, process_id, slot);
+    {
+        let c = shared.lock();
+        let made: Vec<_> = (c.table.flows())
+            .map(|(slot, f)| (slot, f.dest, f.channels.clone(), f.multicast))
+            .collect();
+        assert_eq!(
+            made,
+            [
+                (1, group(1), vec![Some(1), Some(2)], true),
+                (5, group(5), vec![Some(16)], true)
+            ]
+        );
+    }
+    assert_eq!(shared.plan_dest(1), Some(group(1)), "handed to the TX thread");
+    assert_eq!(shared.plan_dest(5), Some(group(5)));
+    assert_eq!(shared.plan_dest(3), None);
+    assert_eq!(warnings.matches("not made again").count(), 1, "{warnings}");
+    assert!(warnings.contains("slot=3"), "{warnings}");
+}

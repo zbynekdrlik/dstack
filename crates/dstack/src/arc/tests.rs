@@ -3044,7 +3044,7 @@ fn the_server_answers_the_2_8_9_multicast_create_and_delete_on_the_tx_table() {
         ArcOutcome::Unanswered { op1: DELETE }
     );
     let made = decode(ask(START_2809, CREATE, 0, &create));
-    assert_eq!((made.header.op2, made.changed), (STATUS_OK, false));
+    assert_eq!((made.header.op2, made.changed), (STATUS_OK, true));
     assert_eq!(parse_flows(&made.body).unwrap().flows.len(), 1);
     let list = decode(ask(START_2809, LIST, 0, &list_body()));
     let [f] = &parse_flows(&list.body).unwrap().flows[..] else {
@@ -3059,4 +3059,53 @@ fn the_server_answers_the_2_8_9_multicast_create_and_delete_on_the_tx_table() {
     assert_eq!((gone.header.op2, gone.body.len()), (STATUS_OK, 0));
     let list = decode(ask(START_2809, LIST, 0, &list_body()));
     assert_eq!(parse_flows(&list.body).unwrap().flows, [], "deleted");
+}
+
+/// dstack #207: the server saves a multicast create or delete to the
+/// state file before it answers (a restart makes the flow again); one
+/// that cannot be saved is refused and undone, on the TX table too.
+#[test]
+fn a_multicast_create_or_delete_is_saved_or_refused_and_undone() {
+    use crate::arc::flows::{CREATE, DELETE, START_2809, create_body, delete_body};
+    use crate::device::SavedMulticast;
+    let dir = tempfile::tempdir().unwrap();
+    let mut device = Device::load(config_in(dir.path())).unwrap();
+    let flows = NoFlows::new(&device);
+    let create = |seq, local_id, channels: &[u16]| {
+        let body = create_body(local_id, channels, 0x0001).unwrap();
+        request(START_2809, seq, CREATE, 0, &body)
+    };
+    let made = decode(answer(&mut device, &flows, &create(9, 2, &[1, 2])));
+    assert_eq!((made.header.op2, made.changed), (STATUS_OK, true));
+    let saved = [SavedMulticast {
+        slot: 1,
+        channels: vec![1, 2],
+    }];
+    assert_eq!(device.state.multicast, saved);
+    let back = DeviceState::load_or_default(&device.cfg).unwrap();
+    assert_eq!(back.multicast, saved, "in the state file");
+    // A state file that cannot be written: the delete is refused and the
+    // flow stays, in the state and on the table.
+    let file = device.cfg.state_file.clone();
+    device.cfg.state_file = dir.path().join("missing").join("state.toml");
+    let delete = request(START_2809, 10, DELETE, 0, &delete_body(2));
+    let kept = decode(answer(&mut device, &flows, &delete));
+    assert_eq!(
+        (kept.header.op2, kept.changed, kept.body.len()),
+        (STATUS_ERROR, false, 0)
+    );
+    assert_eq!(device.state.multicast, saved);
+    assert!(flows.tx.lock().unwrap().flow(1).is_some_and(|f| f.multicast));
+    // Nor is a create made.
+    let refused = decode(answer(&mut device, &flows, &create(11, 4, &[3])));
+    assert_eq!((refused.header.op2, refused.changed), (STATUS_ERROR, false));
+    assert_eq!(device.state.multicast, saved);
+    assert_eq!(flows.tx.lock().unwrap().flow(3), None, "nothing made");
+    // Writable again: the delete is saved.
+    device.cfg.state_file = file;
+    let gone = decode(answer(&mut device, &flows, &delete));
+    assert_eq!((gone.header.op2, gone.changed), (STATUS_OK, true));
+    assert_eq!(flows.tx.lock().unwrap().flow(1), None);
+    let back = DeviceState::load_or_default(&device.cfg).unwrap();
+    assert!(back.multicast.is_empty(), "{back:?}");
 }

@@ -6,7 +6,8 @@ use crate::arc::flows::{
     CREATE, DELETE, MULTICAST, START_2809, TxFlow, UNICAST, create_body, delete_body,
     list_reply_body, parse_flows,
 };
-use crate::arc::{MAX_FLOWS, flows_2809, op, tx_flows};
+use crate::arc::{Change, MAX_FLOWS, flows_2809, op, tx_flows};
+use crate::device::{DeviceState, SavedMulticast};
 use crate::flows::control::FlowRequest;
 use crate::media::tx::{MULTICAST_PORT, multicast_group};
 use crate::wire::{HEADER_LEN, STATUS_ERROR, request};
@@ -24,18 +25,34 @@ fn cfg() -> DeviceConfig {
 }
 
 /// The status and body of our answer to `op1` with `body` (start code
-/// 0x2809) on `tx`.
-fn ask(tx: &mut TxTable, op1: u16, body: &[u8]) -> (u16, Vec<u8>) {
+/// 0x2809) on `state` and `tx`, and whether it changed the state
+/// ([`ArcOutcome::Changed`], nothing else in its [`Change`]).
+fn ask_with(
+    state: &mut DeviceState,
+    tx: &mut TxTable,
+    op1: u16,
+    body: &[u8],
+) -> (u16, Vec<u8>, bool) {
     let packet = request(START_2809, 0x4242, op1, 0, body);
     let (h, body) = Header::parse(&packet).expect("our request parses");
-    match answer(&h, body, &cfg(), tx, OUR_IP) {
-        ArcOutcome::Reply(bytes) => {
-            let (r, body) = Header::parse(&bytes).expect("our reply parses");
-            assert_eq!((r.op1, r.seq), (op1, 0x4242));
-            (r.op2, body.to_vec())
+    let (bytes, changed) = match answer(&h, body, state, &cfg(), tx, OUR_IP) {
+        ArcOutcome::Reply(bytes) => (bytes, false),
+        ArcOutcome::Changed(bytes, change) => {
+            assert_eq!(change, Change::default(), "only the state's flows");
+            (bytes, true)
         }
         other => panic!("not a reply: {other:?}"),
-    }
+    };
+    let (r, body) = Header::parse(&bytes).expect("our reply parses");
+    assert_eq!((r.op1, r.seq), (op1, 0x4242));
+    (r.op2, body.to_vec(), changed)
+}
+
+/// [`ask_with`] on a state of its own: the status and body.
+fn ask(tx: &mut TxTable, op1: u16, body: &[u8]) -> (u16, Vec<u8>) {
+    let mut state = DeviceState::from_config(&cfg());
+    let (status, body, _) = ask_with(&mut state, tx, op1, body);
+    (status, body)
 }
 
 /// Dante Controller's create of `channels` in slot `local_id`.
@@ -47,12 +64,19 @@ fn create(tx: &mut TxTable, local_id: u16, channels: &[u16]) -> (u16, Vec<u8>) {
     )
 }
 
-/// A refusal that leaves `tx` as it was.
+/// A refusal that leaves `tx` and the state as they were.
 fn refused(tx: &mut TxTable, op1: u16, body: &[u8]) {
+    let mut state = DeviceState::from_config(&cfg());
+    state.set_multicast(0, &[1]);
+    let saved = state.clone();
     let before: Vec<_> = tx.flows().map(|(s, f)| (s, f.clone())).collect();
-    assert_eq!(ask(tx, op1, body), (STATUS_ERROR, Vec::new()));
+    assert_eq!(
+        ask_with(&mut state, tx, op1, body),
+        (STATUS_ERROR, Vec::new(), false)
+    );
     let after: Vec<_> = tx.flows().map(|(s, f)| (s, f.clone())).collect();
     assert_eq!(after, before, "nothing changed");
+    assert_eq!(state, saved, "the state kept");
 }
 
 /// The flows our 0x2600 list states.
@@ -109,6 +133,42 @@ fn a_delete_ends_the_multicast_flow_with_ok_and_no_body() {
     assert_eq!(tx.flow(0), None);
     // Deleted once: a second delete finds nothing.
     refused(&mut tx, DELETE, &delete_body(1));
+}
+
+/// dstack #207: a create keeps the flow in the device state (its slot and
+/// channels; the group is derived at start), a delete drops it, each a
+/// change for the state file; a refusal changes neither.
+#[test]
+fn a_create_and_a_delete_change_the_saved_multicast_flows() {
+    let mut tx = TxTable::new(1);
+    let mut state = DeviceState::from_config(&cfg());
+    let flow = |slot, channels: &[u16]| SavedMulticast {
+        slot,
+        channels: channels.to_vec(),
+    };
+    let body = |local_id, channels: &[u16]| create_body(local_id, channels, OPTIONS).unwrap();
+    let (status, _, changed) = ask_with(&mut state, &mut tx, CREATE, &body(3, &[2, 5]));
+    assert_eq!((status, changed), (STATUS_OK, true));
+    let (status, _, changed) = ask_with(&mut state, &mut tx, CREATE, &body(1, &[1]));
+    assert_eq!((status, changed), (STATUS_OK, true));
+    assert_eq!(state.multicast, [flow(0, &[1]), flow(2, &[2, 5])]);
+    // A slot in use: refused, the saved flow as it was.
+    assert_eq!(
+        ask_with(&mut state, &mut tx, CREATE, &body(3, &[4])),
+        (STATUS_ERROR, Vec::new(), false)
+    );
+    assert_eq!(state.multicast, [flow(0, &[1]), flow(2, &[2, 5])]);
+    assert_eq!(
+        ask_with(&mut state, &mut tx, DELETE, &delete_body(3)),
+        (STATUS_OK, Vec::new(), true)
+    );
+    assert_eq!(state.multicast, [flow(0, &[1])]);
+    // Deleted once: the second delete is refused and changes nothing.
+    assert_eq!(
+        ask_with(&mut state, &mut tx, DELETE, &delete_body(3)),
+        (STATUS_ERROR, Vec::new(), false)
+    );
+    assert_eq!(state.multicast, [flow(0, &[1])]);
 }
 
 #[test]
