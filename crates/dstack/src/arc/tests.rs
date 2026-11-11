@@ -1,5 +1,6 @@
 use super::*;
 
+mod dc_latency_write;
 mod key_table;
 
 use std::path::Path;
