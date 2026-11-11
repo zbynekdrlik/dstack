@@ -75,8 +75,14 @@ fn a_keyed_write_of_anything_but_the_latency_stays_unanswered() {
         ("values", dc_write_with(|f| f[39] = 0x41)),
         // A value past the frame's end (0x28 is the frame's length).
         ("past", dc_write_with(|f| set_u16(f, 18, 0x0028))),
-        // A value inside the pairs (offset 0x10).
-        ("pairs", dc_write_with(|f| set_u16(f, 18, 0x0010))),
+        // Both values inside the pairs (offset 0x10, so the same value).
+        (
+            "pairs",
+            dc_write_with(|f| {
+                set_u16(f, 14, 0x0010);
+                set_u16(f, 18, 0x0010);
+            }),
+        ),
         // Values off the 4-byte grid: one byte more before them, the
         // offsets 0x21 and 0x25 (equal, in the frame, past the pairs).
         (
