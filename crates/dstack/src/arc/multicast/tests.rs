@@ -192,6 +192,12 @@ fn a_create_that_is_not_one_multicast_record_of_a_real_slot_is_refused() {
     };
     refused(&mut tx, CREATE, &list_reply_body(&[flow(1), flow(2)]));
     refused(&mut tx, CREATE, &list_reply_body(&[]));
+    // One record that reads beside one that does not.
+    let mut half = list_reply_body(&[flow(1), flow(2)]);
+    half[10..12].copy_from_slice(&[0xff, 0xff]);
+    let read = parse_flows(&half).unwrap();
+    assert_eq!((read.flows.len(), read.unread), (1, 1));
+    refused(&mut tx, CREATE, &half);
     // One such record is a create.
     assert_eq!(
         ask(&mut tx, CREATE, &list_reply_body(&[flow(2)])).0,
