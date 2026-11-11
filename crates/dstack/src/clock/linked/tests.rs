@@ -57,9 +57,34 @@ fn a_locked_follower_takes_over_from_a_ready_service_only_once_settled() {
         choose(Some(UNSETTLED), true, true, Source::Internal),
         Source::Internal
     );
-    // Unlocked in use: the service, as before.
+    // dstack #188 (dsync#166): unlocked in use, the follower stays: its core
+    // keeps steering on PTP through a GM handover, while a hand-over to
+    // the service and back costs two re-aligns and took the service's
+    // drift (9 ppm on iemmixer's box, 6.11.2026).
     assert_eq!(
         choose(Some(HOLDOVER), true, true, Source::Internal),
+        Source::Internal
+    );
+    // Not yet in use and unlocked: the ready service, as at a start.
+    assert_eq!(
+        choose(Some(HOLDOVER), true, true, Source::Service),
+        Source::Service
+    );
+    // In use but no longer anchored, or dead: the service.
+    let unanchored = View {
+        anchored: false,
+        ..HOLDOVER
+    };
+    assert_eq!(
+        choose(Some(unanchored), true, true, Source::Internal),
+        Source::Service
+    );
+    let dead = View {
+        alive: false,
+        ..HOLDOVER
+    };
+    assert_eq!(
+        choose(Some(dead), true, true, Source::Internal),
         Source::Service
     );
 }
