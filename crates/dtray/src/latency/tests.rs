@@ -2,7 +2,7 @@
 
 use dstack::arc::control::Settings;
 
-use super::{Choice, DANTE_NS, choices, label, ns_of_ms, read_back};
+use super::{Choice, DANTE_NS, choices, label, ns_of_ms, pick, read_back};
 
 fn settings(min: Option<u32>, max: Option<u32>, configured: Option<u32>) -> Settings {
     Settings {
@@ -122,6 +122,64 @@ fn junk_is_no_value() {
     ] {
         assert_eq!(ns_of_ms(ms), None, "{ms:?}");
     }
+}
+
+#[test]
+fn junk_after_the_point_and_a_huge_whole_part_are_no_value() {
+    for ms in [
+        "1.x",
+        "1.5a",
+        "0. 5",
+        "18446744073709551.999",
+        "18446744073709552",
+    ] {
+        assert_eq!(ns_of_ms(ms), None, "{ms:?}");
+    }
+}
+
+#[test]
+fn any_value_inside_the_device_s_range_is_picked_both_ends_included() {
+    let s = settings(Some(333_000), Some(10_000_000), Some(1_000_000));
+    // Dante's values inside the range, as before (dstack #104).
+    for ms in ["0.5", "1", "2", "5", "10"] {
+        assert_eq!(pick(&s, ms), Ok(ns_of_ms(ms).unwrap()), "{ms:?}");
+    }
+    // Any other (dstack #213), the ends included.
+    assert_eq!(pick(&s, "0.333"), Ok(333_000));
+    assert_eq!(pick(&s, "3"), Ok(3_000_000));
+    assert_eq!(pick(&s, "9.999"), Ok(9_999_000));
+    let outside = |shown: &str| {
+        Err(format!(
+            "{shown} is outside the latency range the device states (0.333 ms to 10 ms); \
+             nothing written"
+        ))
+    };
+    assert_eq!(pick(&s, "0.25"), outside("0.25 ms"));
+    assert_eq!(pick(&s, "0.332"), outside("0.332 ms"));
+    assert_eq!(pick(&s, "10.001"), outside("10.001 ms"));
+    assert_eq!(pick(&s, "0"), outside("0 ms"));
+    assert_eq!(
+        pick(&s, "0,5"),
+        Err("0,5 is not a latency in ms (such as 0.5 or 0.333); nothing written".to_string())
+    );
+    // One ns off an end.
+    let s = settings(Some(333_001), Some(9_999_999), None);
+    assert_eq!(
+        pick(&s, "0.333"),
+        Err("0.333 ms is outside the latency range the device states \
+             (0.333001 ms to 9.999999 ms); nothing written"
+            .to_string())
+    );
+    assert!(pick(&s, "10").is_err());
+    assert_eq!(pick(&s, "0.334"), Ok(334_000));
+}
+
+#[test]
+fn no_range_no_pick() {
+    let none = Err("the device names no latency range; nothing written".to_string());
+    assert_eq!(pick(&settings(None, Some(10_000_000), None), "1"), none);
+    assert_eq!(pick(&settings(Some(250_000), None, None), "1"), none);
+    assert_eq!(pick(&settings(None, None, None), "x"), none);
 }
 
 #[test]
