@@ -103,6 +103,18 @@ pub struct Device {
     pub txt: BTreeMap<String, String>,
 }
 
+impl Device {
+    /// Whether its 0x2600 flow list states its real TX flow slots
+    /// ([`crate::arc::flows::Flows::slots`], dstack #190): every device
+    /// except one of ours from before v0.6.84, which wrote the flow count
+    /// there (its real limit is [`crate::arc::MAX_FLOWS`]). Ours carry
+    /// inferno's model id; since v0.6.84 also [`crate::announce::VERSION_KEY`].
+    pub fn states_flow_slots(&self) -> bool {
+        self.txt.get("model").map(String::as_str) != Some(crate::announce::MODEL_ID)
+            || self.txt.contains_key(crate::announce::VERSION_KEY)
+    }
+}
+
 /// What changed for the list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Change {

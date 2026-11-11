@@ -89,6 +89,11 @@ impl ServiceRecord {
 /// from other Dante devices.
 pub const STATUS_PORT_KEY: &str = "dstack_ctl";
 
+/// The ARC record's TXT key with the stack's version (`dstack_vers=0.6.84`),
+/// since v0.6.84 (dstack #190): a controller tells our devices, and how old
+/// they are, from it ([`crate::discover::Device::states_flow_slots`]).
+pub const VERSION_KEY: &str = "dstack_vers";
+
 /// Adds the local status endpoint's `port` to the ARC record of `recs`.
 pub fn with_status_port(recs: &mut [ServiceRecord], port: u16) {
     for r in recs.iter_mut().filter(|r| r.service == ARC_SERVICE) {
@@ -121,6 +126,7 @@ pub fn records(
         format!("router_info={}", cfg.model),
         mf.clone(),
         model.clone(),
+        format!("{VERSION_KEY}={}", env!("CARGO_PKG_VERSION")),
     ];
     let cmc_txt = vec![
         format!("id={}", hex(&device_id(ip, cfg.process_id))),
