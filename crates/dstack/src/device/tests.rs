@@ -1784,11 +1784,13 @@ fn the_stated_minimum_latency_is_one_the_device_accepts() {
         cfg.with_latency(min)
     );
     assert!(cfg.with_latency(max).is_ok());
-    // A device with no TX channels has no TX floor: the profile's own.
-    let rx_only = DeviceConfig {
-        tx: Vec::new(),
+    // With tx_latency_ns set the channels advertise that, not latency_ns:
+    // the profile's floor is the minimum and a write there holds.
+    let fixed_tx = DeviceConfig {
+        tx_latency_ns: Some(1_000_000),
         ..config()
     };
-    assert!(rx_only.with_latency(rx_only.latency_range().0).is_ok());
-    assert!(rx_only.latency_range().0 <= min);
+    let (fixed_min, _) = fixed_tx.latency_range();
+    assert!(fixed_tx.with_latency(fixed_min).is_ok());
+    assert!(fixed_min < min);
 }
