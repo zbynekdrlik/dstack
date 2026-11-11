@@ -25,7 +25,7 @@
 //! | 0x2010 | TX channels' current names, paged |
 //! | 0x2013 | TX rename |
 //! | 0x2200 | TX flows, [`FLOW_PAGE`] slots a page (inferno's `query_tx_flows`) |
-//! | 0x2201, 0x2202 | create, delete a multicast TX flow: no multicast, refused (inferno's answer when it creates or deletes none) |
+//! | 0x2201, 0x2202 | the older create, delete of a multicast TX flow: refused (inferno's answer when it creates or deletes none); ARC 2.8.9's 0x2601 creates one |
 //! | 0x2600 (start 0x2809) | ARC 2.8.9's TX flow list ([`flows::list_reply_body`]): receivers' flows unicast, ours multicast with their group |
 //! | 0x2601 (start 0x2809) | ARC 2.8.9's multicast create (dstack #193): a multicast flow in the asked slot ([`answer`]); the reply is its record, no destination |
 //! | 0x2602 (start 0x2809) | ARC 2.8.9's delete of a multicast flow: OK, no body |
