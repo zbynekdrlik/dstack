@@ -105,6 +105,10 @@ impl TxFlow {
 /// The records of a list (or a create) reply.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Flows {
+    /// The transmitter's TX flow slots, as the reply's table states
+    /// (`[slots, count]`): an UltimoX2 has 2. A controller shows "flows
+    /// N/slots" with it (dstack #185).
+    pub slots: u16,
     pub flows: Vec<TxFlow>,
     /// The records counted that did not read.
     pub unread: usize,
@@ -140,7 +144,10 @@ pub fn parse_flows(body: &[u8]) -> Option<Flows> {
     if count > slots {
         return None;
     }
-    let mut out = Flows::default();
+    let mut out = Flows {
+        slots: u16::from(body[6]),
+        ..Flows::default()
+    };
     for k in 0..count {
         let at = read_u16(body, 8 + 2 * k)?;
         match usize::from(at)
@@ -173,18 +180,22 @@ fn segments(body: &[u8], at: usize) -> Option<Vec<usize>> {
     Some(out)
 }
 
-/// A 0x2600 reply body listing `flows` (at most 255), in the form
+/// A 0x2600 reply body listing `flows` (at most 255, and the table states
+/// [`super::MAX_FLOWS`] slots, our devices' TX flow slots), in the form
 /// [`parse_flows`] reads: the table, then each record's segment chain
 /// (0: ids, flags, bits; 1: empty; 2: its destinations; 3: its channels;
 /// 4: its frames per packet), then the destinations' descriptors. Our own
 /// devices answer the list with it (dstack #148: every receiver reads
 /// each transmitter's list once a minute; unanswered, each read waited
 /// 1 s and the transmitter logged it).
+// The table's slot count is one byte.
+const _: () = assert!(super::MAX_FLOWS <= 255);
+
 pub fn list_reply_body(flows: &[TxFlow]) -> Vec<u8> {
     let flows = &flows[..flows.len().min(255)];
     let count = flows.len() as u8;
     let mut out = vec![0u8; 6];
-    out.extend([count, count]);
+    out.extend([super::MAX_FLOWS as u8, count]);
     let table = out.len();
     out.resize(table + 2 * flows.len(), 0);
     // The descriptors' offsets are known only after every record.

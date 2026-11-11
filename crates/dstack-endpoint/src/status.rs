@@ -28,6 +28,10 @@ pub struct Snapshot {
     pub priming: bool,
     /// Every channel summed to both speakers (`--mono`).
     pub mono: bool,
+    /// The largest magnitude the FIFO's producer stored since the last
+    /// log line ([`Fifo::take_peak`], set by [`Snapshot::with_peak`]);
+    /// `None` in a reading that leaves it to the log line.
+    pub input_peak: Option<f32>,
 }
 
 impl Snapshot {
@@ -44,7 +48,27 @@ impl Snapshot {
             recentres: stats.recentres(),
             priming: stats.priming(),
             mono: stats.mono(),
+            input_peak: None,
         }
+    }
+
+    /// This reading with the FIFO's input peak taken (the log line's: one
+    /// taker, so the peak covers the time since the last line).
+    #[must_use]
+    pub fn with_peak(self, fifo: &Fifo) -> Self {
+        Snapshot {
+            input_peak: Some(fifo.take_peak()),
+            ..self
+        }
+    }
+}
+
+/// `, input peak -20.0 dBFS`, or `, input silent` for a peak of 0.
+fn peak_text(peak: f32) -> String {
+    if peak > 0.0 {
+        format!(", input peak {:.1} dBFS", 20.0 * f64::from(peak).log10())
+    } else {
+        ", input silent".to_string()
     }
 }
 
@@ -67,6 +91,9 @@ pub fn line(s: &Snapshot) -> String {
     }
     if s.recentres > 0 {
         text.push_str(&format!(", {} re-centres", s.recentres));
+    }
+    if let Some(peak) = s.input_peak {
+        text.push_str(&peak_text(peak));
     }
     text
 }
@@ -180,6 +207,7 @@ mod tests {
             recentres: 0,
             priming: false,
             mono: false,
+            input_peak: None,
         }
     }
 
@@ -202,6 +230,29 @@ mod tests {
             "depth 40.1 ms, -12.0 ppm, 2 underruns, 480000 frames played at 44100 Hz, \
              mono, waiting for audio, 128 frames overflowed, 1 re-centres"
         );
+    }
+
+    /// dstack #184: the log line says what the producer hands over, so a
+    /// capture of silence shows in dsend's own log.
+    #[test]
+    fn the_line_carries_the_input_peak_in_dbfs_or_silence() {
+        let at = |p: f32| {
+            line(&Snapshot {
+                input_peak: Some(p),
+                ..snap()
+            })
+        };
+        let base = line(&snap());
+        assert_eq!(at(0.1), format!("{base}, input peak -20.0 dBFS"));
+        assert_eq!(at(1.0), format!("{base}, input peak 0.0 dBFS"));
+        assert_eq!(at(0.0), format!("{base}, input silent"));
+        assert!(!base.contains("input"));
+        let fifo = Fifo::new(2, 64);
+        fifo.push_with(4, |f, c| if f == 2 && c == 1 { -0.5 } else { 0.25 });
+        let s = Snapshot::read(&fifo, &Stats::default(), 48_000);
+        assert_eq!(s.input_peak, None, "a plain reading leaves the peak");
+        assert_eq!(s.with_peak(&fifo).input_peak, Some(0.5));
+        assert_eq!(s.with_peak(&fifo).input_peak, Some(0.0), "taken once");
     }
 
     #[test]
@@ -312,6 +363,7 @@ mod tests {
                 recentres: 0,
                 priming: true,
                 mono: false,
+                input_peak: None,
             }
         );
         let player = player.with_mono(true);

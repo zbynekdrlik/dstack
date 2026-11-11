@@ -123,3 +123,21 @@ fn a_writer_and_a_reader_on_two_threads_keep_every_frame_in_order() {
     writer.join().unwrap();
     assert_eq!(fifo.overflows(), 0);
 }
+
+/// dstack #184: the peak covers the stored samples since the last take,
+/// either sign; dropped frames and NaN are left out.
+#[test]
+fn the_peak_is_the_largest_magnitude_stored_since_the_last_take() {
+    let fifo = Fifo::new(2, 4);
+    assert_eq!(fifo.take_peak(), 0.0);
+    fifo.push_with(2, |f, c| [[0.25, -0.75], [0.5, f64::NAN]][f][c]);
+    fifo.push_with(1, |_, _| 0.125);
+    assert_eq!(fifo.take_peak(), 0.75);
+    assert_eq!(fifo.take_peak(), 0.0, "taken");
+    // One frame fits (3 of 4 held): the dropped ones are not counted.
+    assert_eq!(
+        fifo.push_with(3, |f, _| if f == 0 { -0.25 } else { 1.0 }),
+        1
+    );
+    assert_eq!(fifo.take_peak(), 0.25);
+}

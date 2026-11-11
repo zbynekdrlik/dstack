@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.83
+
+- Diagnostics (dstack #184, FOH PC 11.11.2026: dsend sent -126 dBFS while its output played a -20 dBFS tone): dsend's and dlisten's 10 s log line ends with `input peak <x> dBFS` (or `input silent`), the largest magnitude their FIFO's producer stored since the last line: for dsend the WASAPI loopback capture, for dlisten the Dante RX. So the log tells whether the capture hands over silence or the level is lost after it. API (dstack-endpoint): `Fifo::take_peak`; `status::Snapshot` has `input_peak: Option<f32>` (`None` from `Snapshot::read`, set by `Snapshot::with_peak`). No latency or behaviour change.
+- Feature (dstack #185, dcontroller#62): `arc::flows::Flows` has `slots: u16`, the transmitter's TX flow slots from the 0x2600 reply's `[slots, count]` (an UltimoX2 states 2), so a controller can show "flows N/max". Our devices' own list reply states their 32 slots (`arc::MAX_FLOWS`) where it stated the count before. API: code that builds a `Flows` sets `slots` (or uses `..Default::default()`).
+
 ## 0.6.82
 
 - Dependency (dstack #1): dsync-ptp v1.29.0 -> v1.30.1 (dsync#160): the follower's late sample is clipped, not held, so two in-process followers on one PC stay within 1 µs of each other (v1.30.0 failed its release on this; its tag has no assets and is skipped). The service-side changes of v1.30.1 (#164: a stale date offset refused at load, READY=1 once the wall clock is placed; the service servo on the delay floor) are dsync's service, not the library. No API change; no latency change for a dlink app.

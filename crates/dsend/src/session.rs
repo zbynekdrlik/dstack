@@ -377,7 +377,7 @@ impl Session {
                 .get(self.current)
                 .map_or("no output", |o| o.name.as_str()),
             s.in_rate,
-            status::line(&Snapshot::read(&s.fifo, &self.stats, s.in_rate))
+            status::line(&Snapshot::read(&s.fifo, &self.stats, s.in_rate).with_peak(&s.fifo))
         )
     }
 
