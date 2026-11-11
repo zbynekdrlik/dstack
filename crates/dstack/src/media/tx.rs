@@ -1042,6 +1042,13 @@ impl TxShared {
             .sum()
     }
 
+    /// Counts a sent packet of `len` datagram bytes on slot `slot`, as the
+    /// TX thread does (other modules' tests: the status's `tx_bytes`).
+    #[cfg(test)]
+    pub(crate) fn count_sent(&self, slot: usize, len: usize) {
+        count_send(&self.lanes[slot], &Ok(false), len);
+    }
+
     /// Where slot `slot`'s audio comes from and its keepalives go.
     pub fn local_addr(&self, slot: usize) -> io::Result<SocketAddr> {
         self.sockets
