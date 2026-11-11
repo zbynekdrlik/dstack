@@ -524,7 +524,7 @@ impl Driver {
             &self.media.tx.cfg.name,
             self.media.engine_stats().as_deref(),
         );
-        self.traffic.watch(now, self.media.ip, &self.media.tx);
+        self.traffic.watch(now, self.media.ip, &self.media.tx, &[]);
         self.pins.watch(
             crate::media::repin::pin_resets(),
             crate::media::repin::pin_refusals(),

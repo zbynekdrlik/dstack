@@ -10,7 +10,9 @@
 //!   and carry the local status port (`dstack_ctl`,
 //!   [`dstack::announce::STATUS_PORT_KEY`]); only our devices have it.
 //! - [`probe`]: one `status` request to a device's local endpoint on
-//!   127.0.0.1 ([`dstack::ctl::local`]), its JSON line back.
+//!   127.0.0.1 ([`dstack::ctl::local`]), its JSON line back: the stack's
+//!   own client ([`dstack::ctl::probe`]), which a device's traffic watch
+//!   also reads its neighbours with (dstack #203).
 //! - [`expected`]: the devices this PC should have, one registration file
 //!   each in a folder its installers write.
 //! - [`model`]: the readings as the tray shows them: a colour, a tooltip
@@ -55,7 +57,7 @@ pub mod latency;
 pub mod menu;
 pub mod model;
 pub mod output;
-pub mod probe;
+pub use dstack::ctl::probe;
 pub mod set;
 
 /// What the command line asks for.
