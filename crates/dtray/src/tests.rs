@@ -28,6 +28,26 @@ fn autostart_takes_on_or_off() {
 }
 
 #[test]
+fn set_latency_takes_a_device_and_a_value() {
+    assert_eq!(
+        mode_of(args(&["--set-latency", "Test Dev", "0.5"])),
+        Ok(Mode::SetLatency {
+            device: "Test Dev".to_string(),
+            ms: "0.5".to_string()
+        })
+    );
+    // The value is checked against the device's offer, not here.
+    assert_eq!(
+        mode_of(args(&["--set-latency", "x", "3"])),
+        Ok(Mode::SetLatency {
+            device: "x".to_string(),
+            ms: "3".to_string()
+        })
+    );
+    assert!(USAGE.contains("--set-latency <device> <ms>"));
+}
+
+#[test]
 fn anything_else_is_the_usage() {
     for a in [
         &["--prin"][..],
@@ -39,6 +59,10 @@ fn anything_else_is_the_usage() {
         &["--autostart", "ON"],
         &["--autostart", "on", "off"],
         &["on"],
+        &["--set-latency"],
+        &["--set-latency", "x"],
+        &["--set-latency", "x", "1", "2"],
+        &["--print", "--set-latency", "x", "1"],
     ] {
         assert_eq!(mode_of(args(a)), Err(USAGE), "{a:?}");
     }

@@ -12,7 +12,8 @@
 //! - [`needs_rebuild`]: whether the menu must be built again, or only its
 //!   texts set.
 //! - [`write_needed`]: whether a latency choice changes anything;
-//!   [`output_needed`] the same for an app's output ([`crate::output`]).
+//!   [`output_needed`] the same for an app's output ([`crate::output`]);
+//!   [`write_failed`] the text of a write that failed.
 
 use std::collections::BTreeMap;
 use std::net::SocketAddrV4;
@@ -144,6 +145,12 @@ pub fn write_needed(shapes: &[Shape], arc: SocketAddrV4, ns: u32) -> bool {
         .filter(|s| s.arc == arc)
         .flat_map(|s| &s.choices)
         .any(|c| c.ns == ns && c.checked)
+}
+
+/// The text of a latency write of `ns` that failed with `err` (the tray's
+/// error box, `dtray --set-latency`'s error line).
+pub fn write_failed(ns: u32, err: &str) -> String {
+    format!("the latency {} was not set: {err}", latency::label(ns))
 }
 
 /// Whether choosing output `index` of the device at `arc` sends

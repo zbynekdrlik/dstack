@@ -8,13 +8,22 @@
 //! loads GTK's libraries), the expected devices
 //! ([`dtray::expected`]) included. `dtray --autostart on|off` sets or
 //! removes the tray's start at the user's logon (the Run value on Windows,
-//! the XDG autostart entry on Linux; installers call it). Exit codes: 0
-//! done, 1 a failure (on Linux also: no desktop to show the tray on), 2 a
-//! usage error or the tray or autostart on a platform without one.
+//! the XDG autostart entry on Linux; installers call it).
+//! `dtray --set-latency <device> <ms>` runs the same discovery pass, then
+//! the tray menu's latency write for the local device of that name
+//! (case-insensitive) and value (`0.25`, `0.5`, `1`, `2`, `5`, `10`, as
+//! the device offers them), and prints the latency it reads back
+//! ([`dtray::set`]; every platform). Exit codes: 0 done (for
+//! `--set-latency`: the latency reads back as asked, or already was), 1 a
+//! failure (on Linux also: no desktop to show the tray on; for
+//! `--set-latency`: no such device, its settings unreadable, a value it
+//! does not offer, the write refused or a different read-back), 2 a usage
+//! error or the tray or autostart on a platform without one.
 
 use std::process::ExitCode;
 use std::time::Duration;
 
+use dstack::arc::control;
 use dtray::Mode;
 use dtray::discover::Scanner;
 use dtray::expected;
@@ -46,6 +55,7 @@ fn main() -> ExitCode {
         Mode::Print => print(),
         Mode::Tray => tray(),
         Mode::Autostart(on) => autostart(on),
+        Mode::SetLatency { device, ms } => set_latency(&device, &ms),
         Mode::Version => {
             println!("{}", dtray::version_line());
             ExitCode::SUCCESS
@@ -53,8 +63,9 @@ fn main() -> ExitCode {
     }
 }
 
-/// One discovery pass, the view on stdout; 1 when discovery did not start.
-fn print() -> ExitCode {
+/// The log on stderr, `RUST_LOG` as the devices read it (warnings by
+/// default).
+fn init_log() {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -62,6 +73,11 @@ fn print() -> ExitCode {
         )
         .with_writer(std::io::stderr)
         .init();
+}
+
+/// One discovery pass, the view on stdout; 1 when discovery did not start.
+fn print() -> ExitCode {
+    init_log();
     let mut scanner = Scanner::new();
     let failed = scanner.refresh();
     std::thread::sleep(PRINT_WAIT);
@@ -78,6 +94,41 @@ fn print() -> ExitCode {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
+    }
+}
+
+/// One discovery pass, then the menu's latency write for the local device
+/// named `device` ([`dtray::set::latency()`], through the ARC as the menu
+/// writes): one line on stdout and 0 when the latency reads back as asked
+/// (or already was), one line on stderr and 1 otherwise.
+fn set_latency(device: &str, ms: &str) -> ExitCode {
+    init_log();
+    let mut scanner = Scanner::new();
+    let failed = scanner.refresh();
+    std::thread::sleep(PRINT_WAIT);
+    for f in &failed {
+        eprintln!("dtray: {f}");
+    }
+    let outcome = dtray::set::latency(
+        &scanner.devices(),
+        device,
+        ms,
+        |arc| dtray::arc::call(arc, |c| control::settings(c).map_err(|e| e.to_string())),
+        |arc, ns| {
+            dtray::arc::call(arc, |c| {
+                control::set_latency(c, ns).map_err(|e| e.to_string())
+            })
+        },
+    );
+    match outcome {
+        Ok(line) => {
+            println!("dtray: {line}");
+            ExitCode::SUCCESS
+        }
+        Err(reason) => {
+            eprintln!("dtray: {reason}");
+            ExitCode::FAILURE
+        }
     }
 }
 

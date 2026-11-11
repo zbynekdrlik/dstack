@@ -102,3 +102,11 @@ dsend sends what Windows plays to Dante by capturing an output's loopback. On a 
 - **dsend's choice:** with no `--output` and no output saved from dtray's menu, dsend captures the output whose name holds "dsend" when there is one (`dstack_endpoint::outputs::DSEND`), else the default output. `--output` and a saved choice still win. dlisten never takes it by default (it would play into nothing).
 - **Formats:** 16-bit stereo at 48 kHz (the default) or 44.1 kHz in shared mode; the engine mixes in float at that rate and its loopback hands dsend the mix.
 - **The check:** a tone played on the endpoint at -20 dBFS reads -20 dBFS on dsend's TX L/R at a Dante receiver (dcontroller's meters), and dsend's log line shows the input peak, not `input silent`.
+
+## dtray's latency write without a desktop
+
+dtray (dstack #104) is the one tray for every dstack device on a PC; its device menu writes a device's latency. `dtray --set-latency <device> <ms>` runs that same write from the command line, for a PC with no usable display (a test PC) and for a script that checks it. It works on every platform; nothing in it needs the tray.
+
+- **What it does:** one discovery pass (3 s, as `dtray --print`), then the local device of that name (case-insensitive, the whole name). `<ms>` is one of the menu's values, `0.25`, `0.5`, `1`, `2`, `5` or `10`, and must be one the device offers (its ARC settings' range). A value already configured writes nothing. Otherwise it writes through the menu's own call (`dstack::arc::control::set_latency`), reads the settings again and compares the configured latency read back.
+- **What it prints:** one line per outcome. On stdout with exit 0: `dtray: <device>: the latency is set to 2 ms; it reads back 2 ms`, or `... the latency is already 2 ms; nothing written`. On stderr with exit 1: no device of that name (with the names found), its settings unreadable, a value it does not offer (with the values it does), the write refused (the device's status), or a read-back that differs. A usage error exits 2.
+- **On Windows** `dtray.exe` is a GUI-subsystem program: run it with `Start-Process dtray.exe -ArgumentList '--set-latency','<device>','2' -Wait -PassThru -RedirectStandardOutput out.txt -RedirectStandardError err.txt` and read the returned process's `ExitCode` and the two files.

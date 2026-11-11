@@ -2,7 +2,7 @@
 
 use dstack::arc::control::Settings;
 
-use super::{Choice, DANTE_NS, choices, label};
+use super::{Choice, DANTE_NS, choices, label, ns_of_ms, offered, pick, read_back};
 
 fn settings(min: Option<u32>, max: Option<u32>, configured: Option<u32>) -> Settings {
     Settings {
@@ -72,4 +72,60 @@ fn no_range_no_choice() {
     assert!(choices(&settings(None, None, None)).is_empty());
     // A range that holds none of the values.
     assert!(choices(&settings(Some(3_000_000), Some(4_000_000), None)).is_empty());
+}
+
+#[test]
+fn the_command_line_takes_the_menu_s_labels_without_ms() {
+    let named: Vec<Option<u32>> = ["0.25", "0.5", "1", "2", "5", "10"]
+        .iter()
+        .map(|ms| ns_of_ms(ms))
+        .collect();
+    let all: Vec<Option<u32>> = DANTE_NS.iter().map(|&ns| Some(ns)).collect();
+    assert_eq!(named, all);
+    for ms in [
+        "", "0", "3", "1.0", ".5", "0.50", "1 ms", "1ms", "250000", "-1", "x",
+    ] {
+        assert_eq!(ns_of_ms(ms), None, "{ms:?}");
+    }
+}
+
+#[test]
+fn a_value_the_device_offers_is_picked_and_any_other_names_the_offer() {
+    let c = choices(&settings(Some(500_000), Some(5_000_000), Some(1_000_000)));
+    assert_eq!(offered(&c), "0.5, 1, 2, 5 ms");
+    assert_eq!(pick(&c, "0.5"), Ok(500_000));
+    assert_eq!(pick(&c, "1"), Ok(1_000_000));
+    assert_eq!(pick(&c, "5"), Ok(5_000_000));
+    // A Dante value outside the device's range, and no value at all.
+    for ms in ["0.25", "10", "3", "1.0"] {
+        assert_eq!(
+            pick(&c, ms),
+            Err(format!(
+                "{ms} ms is not a latency the device offers (0.5, 1, 2, 5 ms); nothing written"
+            )),
+        );
+    }
+    assert_eq!(
+        pick(&[], "1"),
+        Err("the device names no latency range; nothing written".to_string())
+    );
+}
+
+#[test]
+fn the_read_back_is_the_verdict() {
+    assert_eq!(
+        read_back(2_000_000, Some(2_000_000)),
+        Ok("the latency is set to 2 ms; it reads back 2 ms".to_string())
+    );
+    assert_eq!(
+        read_back(2_000_000, Some(1_000_000)),
+        Err("the latency 2 ms was written, but it reads back 1 ms".to_string())
+    );
+    assert_eq!(
+        read_back(2_000_000, None),
+        Err(
+            "the latency 2 ms was written, but the device reads back no configured latency"
+                .to_string()
+        )
+    );
 }
