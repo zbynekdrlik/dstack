@@ -2,7 +2,8 @@ name: Release
 
 # A tag v* gets a GitHub release with prebuilt `dstack-dev`, `dtray` and
 # `dlisten` binaries for Linux and Windows, `dsend` for Windows (its capture
-# is WASAPI loopback, dstack #164), and their sha256 files. dsync's stability gate pins
+# is WASAPI loopback, dstack #164), dsend's audio output driver as a zip
+# (drivers/dsend-audio, #184), and their sha256 files. dsync's stability gate pins
 # an exact tag and checks the sha256 (dsync#98), so a dstack change never
 # moves the gate by itself.
 
@@ -28,7 +29,7 @@ jobs:
         run: |
           gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
             || gh release create "$TAG" -R "$GITHUB_REPOSITORY" --verify-tag \
-                 --title "$TAG" --notes "dstack $TAG. CHANGELOG.md has the changes. Prebuilt dstack-dev, dtray, dlisten and dsend (Windows) binaries with their sha256 below."
+                 --title "$TAG" --notes "dstack $TAG. CHANGELOG.md has the changes. Prebuilt dstack-dev, dtray, dlisten and dsend (Windows) binaries and the dsend audio driver zip (Windows) with their sha256 below."
 
   binaries:
     needs: release
@@ -68,3 +69,35 @@ jobs:
             cat "$name.sha256"
             gh release upload "$TAG" "$name" "$name.sha256" -R "$GITHUB_REPOSITORY" --clobber
           done
+
+  dsend-audio:
+    # dsend's own Windows render endpoint driver (drivers/dsend-audio, MS-PL;
+    # dstack #184): the test-signed package with install.ps1, as a zip.
+    needs: release
+    runs-on: windows-2025
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build the driver package
+        shell: pwsh
+        run: .\drivers\dsend-audio\scripts\build.ps1 -Out dsend-audio-package
+      - name: Zip the package
+        shell: pwsh
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          Compress-Archive -Path dsend-audio-package\* -DestinationPath "dsend-audio-$env:TAG-windows-x86_64.zip"
+      - name: Hash and upload the zip
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          name="dsend-audio-${TAG}-windows-x86_64.zip"
+          sha256sum "$name" > "$name.sha256"
+          cat "$name.sha256"
+          gh release upload "$TAG" "$name" "$name.sha256" -R "$GITHUB_REPOSITORY" --clobber

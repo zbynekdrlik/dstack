@@ -29,7 +29,11 @@
 //! capture runs, the depth, ppm and underruns, and the outputs it offers)
 //! and its Output menu sends `app output <n>`
 //! ([`status::parse_command`]); the choice is kept next to the device's
-//! state file and restored at start, as dlisten's.
+//! state file and restored at start, as dlisten's. With no `--output` and
+//! no saved choice dsend takes its own output, "Speakers (dsend)" from the
+//! dsend-audio driver (`drivers/dsend-audio`, dstack #184), when it exists
+//! ([`dstack_endpoint::outputs::DSEND`]), else the default output; dlisten
+//! never takes it by default.
 //!
 //! The capture is Windows only: Linux has no loopback of an output in
 //! cpal's ALSA host (a monitor source is PulseAudio's or PipeWire's), so
