@@ -29,6 +29,9 @@ tracing = "0.1"
 # Apache-2.0; already in the lockfile). Windows only: elsewhere dsend
 # refuses to run, and its capture glue is not built.
 cpal = "=0.18.2"
+# The capture thread's MMCSS join (dstack #198): the media threads' own call
+# (`dstack::media::tx::join_mmcss`; already built through dlink).
+dstack = { path = "../dstack" }
 
 [dev-dependencies]
 # The status's size bound (dstack::ctl::app_object).

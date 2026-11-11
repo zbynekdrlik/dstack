@@ -1579,7 +1579,7 @@ pub(crate) fn take_priority(thread: &str, priority: i32) {
     let asked =
         crate::clock::thread_priority_for(crate::clock::profile(), crate::clock::Os::current());
     let granted = ask_priority(asked, priority);
-    let mmcss = wants_mmcss(asked) && join_mmcss();
+    let mmcss = wants_mmcss(asked) && join_mmcss().is_ok();
     match priority_outcome(asked, granted, mmcss) {
         Priority::Granted => info!(thread, priority, "runs SCHED_FIFO"),
         Priority::Mmcss => info!(
@@ -1873,11 +1873,14 @@ pub(crate) fn ask_priority(_asked: ThreadPriority, _priority: i32) -> bool {
 }
 
 /// On Windows: the calling thread joins MMCSS's "Pro Audio" task at
-/// AVRT_PRIORITY_HIGH, for the thread's life ([`wants_mmcss`]); `false`
-/// when MMCSS refuses (its service stopped), and the thread keeps its
-/// priority.
+/// AVRT_PRIORITY_HIGH, for the thread's life, and gets MMCSS's task index;
+/// the OS error when MMCSS refuses (its service stopped), and the thread
+/// keeps its priority. The media threads of the normal timing profile
+/// join it at their start (dstack #1); dsend's loopback capture thread
+/// (cpal's) joins it from its first callback (dstack #198). It allocates
+/// nothing.
 #[cfg(windows)]
-pub(crate) fn join_mmcss() -> bool {
+pub fn join_mmcss() -> std::io::Result<u32> {
     use windows_sys::Win32::System::Threading::{
         AVRT_PRIORITY_HIGH, AvSetMmThreadCharacteristicsW, AvSetMmThreadPriority,
     };
@@ -1886,10 +1889,13 @@ pub(crate) fn join_mmcss() -> bool {
     // valid u32 the call writes.
     let handle = unsafe { AvSetMmThreadCharacteristicsW(MMCSS_TASK.as_ptr(), &raw mut index) };
     if handle.is_null() {
-        return false;
+        return Err(std::io::Error::last_os_error());
     }
     // SAFETY: the handle MMCSS just gave this thread.
-    unsafe { AvSetMmThreadPriority(handle, AVRT_PRIORITY_HIGH) != 0 }
+    if unsafe { AvSetMmThreadPriority(handle, AVRT_PRIORITY_HIGH) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(index)
 }
 
 /// MMCSS's task "Pro Audio", NUL-terminated UTF-16 (no allocation: a
@@ -1899,11 +1905,17 @@ const MMCSS_TASK: [u16; 10] = [
     0x50, 0x72, 0x6f, 0x20, 0x41, 0x75, 0x64, 0x69, 0x6f, 0, // "Pro Audio\0"
 ];
 
-/// Elsewhere there is no MMCSS.
+/// Elsewhere there is no MMCSS: always the error [`NO_MMCSS`].
 #[cfg(not(windows))]
-pub(crate) fn join_mmcss() -> bool {
-    false
+pub fn join_mmcss() -> std::io::Result<u32> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        NO_MMCSS,
+    ))
 }
+
+/// [`join_mmcss`]'s error off Windows.
+pub const NO_MMCSS: &str = "no MMCSS on this OS";
 
 /// Pins the calling thread, named `thread` in the log, to `cpu` when the
 /// device config names one (#72 phase F: the pump and the RX/TX threads on
