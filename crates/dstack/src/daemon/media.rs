@@ -39,7 +39,7 @@
 //! taken alone (the app hook runs on its own thread, outside its lock).
 
 use std::net::{IpAddr, Ipv4Addr};
-use std::sync::atomic::AtomicI32;
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -106,6 +106,9 @@ pub struct Media {
     app: app::AppHook,
     /// The app's command hook ([`Media::set_app_command`]).
     app_command: app::CommandHook,
+    /// dstack-dev's own control requests are answered
+    /// ([`Media::allow_dev_requests`]).
+    dev_requests: AtomicBool,
 }
 
 /// One RX channel's state ([`Media::rx_channels`]).
@@ -177,6 +180,7 @@ impl Media {
             levels: Arc::default(),
             app: app::AppHook::default(),
             app_command: app::CommandHook::default(),
+            dev_requests: AtomicBool::new(false),
         })
     }
 
@@ -265,6 +269,21 @@ impl Media {
     /// `None` without a hook.
     pub fn app_command(&self, words: &str) -> Option<Result<String, String>> {
         self.app_command.call(words)
+    }
+
+    /// Answers dstack-dev's own control requests from now (dstack #187):
+    /// `tx-end <flow>`, which ends one of our TX flows for a controller's
+    /// E2E. `daemon::cli::main` calls it for dstack's own binary only
+    /// ([`crate::daemon::Build::dev_requests`]); no application's device
+    /// answers them, and an embedded one has no control socket anyway.
+    pub fn allow_dev_requests(&self) {
+        self.dev_requests.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether dstack-dev's own control requests are answered
+    /// ([`Media::allow_dev_requests`]).
+    pub fn dev_requests(&self) -> bool {
+        self.dev_requests.load(Ordering::Relaxed)
     }
 
     /// Sends this device's TX through the host's `sender` (dstack #1): its

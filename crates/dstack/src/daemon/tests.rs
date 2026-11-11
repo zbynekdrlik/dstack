@@ -225,6 +225,10 @@ fn the_version_line_names_the_binary_its_version_and_the_build() {
         sha: "abc123",
     };
     assert_eq!(app.line(), "iem-dante-dev 9.8.7 abc123");
+    // dstack #187: only dstack's own binary answers dstack-dev's requests.
+    assert!(Build::OWN.dev_requests());
+    assert!(!app.dev_requests());
+    assert!(!Build { name: NAME, ..app }.dev_requests());
     assert_eq!(build_sha(Some("abc123")), "abc123");
     assert_eq!(build_sha(None), "local");
 }

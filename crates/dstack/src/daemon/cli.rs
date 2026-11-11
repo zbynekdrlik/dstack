@@ -74,7 +74,14 @@ pub fn main(build: Build) -> ExitCode {
         .init();
     // The standalone device: no engine channel, the signals end it.
     let ran = host::prepare_with(&opts, &[], source)
-        .and_then(|prepared| prepared.start(Signals::Stop))
+        .and_then(|prepared| {
+            // dstack-dev's own requests (`tx-end`, dstack #187), for its
+            // own binary only.
+            if build.dev_requests() {
+                prepared.media().allow_dev_requests();
+            }
+            prepared.start(Signals::Stop)
+        })
         .and_then(Host::wait);
     match ran {
         Ok(()) => ExitCode::SUCCESS,
