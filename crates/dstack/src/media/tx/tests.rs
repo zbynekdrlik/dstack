@@ -470,6 +470,52 @@ fn packets_a_second_are_rate_over_fpp() {
 
 // ---- the shared state ----
 
+/// dstack #177: a packet over its receiver's latency counts whether the
+/// relay thread sent it, and the shortest time from the last escape's start
+/// to one is kept until it is taken.
+#[test]
+fn a_late_packet_says_whether_the_relay_sent_it_and_how_soon_after_an_escape() {
+    let shared = shared_with(Vec::new());
+    let stats = &shared.lanes[0];
+    let mut c = pass::PassClock {
+        now_ns: 5_000_000_000,
+        pass: Instant::now(),
+        rate: 96_000,
+        margin_ns: 250_000,
+        latency_ns: 1_000_000,
+        relayed: false,
+        escaped_ns: None,
+    };
+    let sent = || pass::Sent {
+        result: Ok(false),
+        retries: 0,
+        took: 0,
+    };
+    let stamp = (c.now_ns - 3_000_000) / 1_000_000 * 96;
+    // The TX thread's own late packet, no escape yet: nothing to note.
+    pass::account(stats, &c, stamp, 16, &sent(), 100, 1_000_000);
+    assert_eq!(shared.over_latency_relayed(0), 0);
+    assert_eq!(shared.take_since_escape(0), None);
+    // Two late packets in a relayed pass 2 ms and 0.5 ms after escapes.
+    c.relayed = true;
+    c.escaped_ns = Some(c.now_ns - 2_000_000);
+    pass::account(stats, &c, stamp, 16, &sent(), 100, 1_000_000);
+    c.escaped_ns = Some(c.now_ns - 500_000);
+    pass::account(stats, &c, stamp, 16, &sent(), 100, 1_000_000);
+    // A packet in time counts neither (stamped ahead: no age).
+    let fresh = (c.now_ns + 50_000_000) / 1_000_000 * 96;
+    pass::account(stats, &c, fresh, 16, &sent(), 100, 1_000_000);
+    assert_eq!(stats.over_latency.load(Ordering::Relaxed), 3);
+    assert_eq!(shared.over_latency_relayed(0), 2);
+    // The shortest: 0.5 ms plus the real time since the pass's clock read.
+    let bound = 500_000 + nanos(c.pass.elapsed());
+    let since = shared.take_since_escape(0).expect("noted");
+    assert!((500_000..=bound).contains(&since), "{since} > {bound}");
+    assert_eq!(shared.take_since_escape(0), None, "taken");
+    assert_eq!(shared.over_latency_relayed(7), 0);
+    assert_eq!(shared.take_since_escape(99), None, "no such slot");
+}
+
 fn shared_with(rings: Vec<Ring>) -> Arc<TxShared> {
     Arc::new(TxShared::new(cfg(), Ipv4Addr::LOCALHOST, rings.into(), 1, &[]).unwrap())
 }
@@ -930,6 +976,37 @@ fn before_wait_escapes_only_when_asked_and_puts_off_a_re_anchored_one() {
     assert!(rig.tx.before_wait(|| (None, 0), || true, || false));
     assert!(drain(&rig.rx).is_empty());
     assert_eq!(rig.shared.lane(slot).rebootstraps, 0);
+}
+
+/// dstack #177: an escape notes when it began (the escape's own clock
+/// read), so a late packet after it can say how long after; a put-off one
+/// and one without a clock leave the last time as it was.
+#[test]
+fn an_escape_notes_when_it_began() {
+    let mut rig = Rig::new(Vec::new());
+    assert!(rig.shared.set_source(0, Source::Counter));
+    rig.flow(vec![Some(1)]);
+    rig.tx.step(Some(T), 0);
+    assert_eq!(rig.tx.escaped_ns, None);
+    assert!(!rig.tx.before_wait(|| (Some(T), 0), || false, || false));
+    assert_eq!(rig.tx.escaped_ns, None, "not asked: no escape");
+    assert!(rig.tx.before_wait(|| (Some(T + MS), 0), || true, || false));
+    assert_eq!(rig.tx.escaped_ns, Some(T + MS));
+    // Re-anchored and put off: no escape, the time kept.
+    assert!(
+        !rig.tx
+            .before_wait(|| (Some(T + 2 * MS), 1), || true, || true)
+    );
+    assert_eq!(rig.tx.escaped_ns, Some(T + MS));
+    // Overdue: it escapes at that read.
+    assert!(
+        rig.tx
+            .before_wait(|| (Some(T + 3 * MS), 1), || true, || false)
+    );
+    assert_eq!(rig.tx.escaped_ns, Some(T + 3 * MS));
+    // No clock: it escapes, with no time to note.
+    assert!(rig.tx.before_wait(|| (None, 0), || true, || false));
+    assert_eq!(rig.tx.escaped_ns, Some(T + 3 * MS));
 }
 
 /// dstack #141: around a bounded escape TX sends no packet before its due

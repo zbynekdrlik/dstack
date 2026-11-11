@@ -3,29 +3,36 @@ use std::cell::RefCell;
 
 const S: u64 = EVERY_NS;
 
-/// Counts and peaks a test sets per slot; a take empties the peak.
+/// Counts and peaks a test sets per slot; a take empties the peak and the
+/// time since an escape.
 struct Lanes {
-    counts: RefCell<[u64; MAX_FLOWS]>,
-    peaks: RefCell<[u64; MAX_FLOWS]>,
+    counts: RefCell<[LateCounts; MAX_FLOWS]>,
 }
 
 impl Lanes {
     fn new() -> Self {
         Lanes {
-            counts: RefCell::new([0; MAX_FLOWS]),
-            peaks: RefCell::new([0; MAX_FLOWS]),
+            counts: RefCell::new([LateCounts::default(); MAX_FLOWS]),
         }
     }
     fn set(&self, slot: usize, count: u64, peak: u64) {
-        self.counts.borrow_mut()[slot] = count;
-        self.peaks.borrow_mut()[slot] = peak;
+        let mut c = self.counts.borrow_mut();
+        c[slot].packets = count;
+        c[slot].age_peak_ns = peak;
+    }
+    fn set_relayed(&self, slot: usize, relayed: u64, since_escape_ns: u64) {
+        let mut c = self.counts.borrow_mut();
+        c[slot].relayed = relayed;
+        c[slot].since_escape_ns = Some(since_escape_ns);
     }
     fn look(&self, w: &mut LateWatch, now: u64) -> Vec<Late> {
-        w.look(
-            now,
-            |s| self.counts.borrow()[s],
-            |s| std::mem::take(&mut self.peaks.borrow_mut()[s]),
-        )
+        w.look(now, |s| {
+            let mut c = self.counts.borrow_mut();
+            let now = c[s];
+            c[s].age_peak_ns = 0;
+            c[s].since_escape_ns = None;
+            now
+        })
     }
 }
 
@@ -51,7 +58,9 @@ fn a_rise_is_reported_once_with_its_second_s_peak() {
         [Late {
             slot: 2,
             packets: 24,
-            age_peak_ns: 17_448_000
+            age_peak_ns: 17_448_000,
+            relayed: 0,
+            since_escape_ns: None
         }]
     );
     // The next second: no rise, nothing (the peak taken was this second's).
@@ -66,14 +75,54 @@ fn a_rise_is_reported_once_with_its_second_s_peak() {
             Late {
                 slot: 2,
                 packets: 6,
-                age_peak_ns: 11_000_000
+                age_peak_ns: 11_000_000,
+                relayed: 0,
+                since_escape_ns: None
             },
             Late {
                 slot: 31,
                 packets: 1,
-                age_peak_ns: 10_001_000
+                age_peak_ns: 10_001_000,
+                relayed: 0,
+                since_escape_ns: None
             }
         ]
+    );
+}
+
+#[test]
+fn a_report_says_how_many_late_packets_the_relay_sent_and_how_soon_after_an_escape() {
+    // dstack #177: a pass ~1 ms late on every slot at once; whose was it?
+    let lanes = Lanes::new();
+    let mut w = LateWatch::new();
+    lanes.set(4, 10, 0);
+    lanes.set_relayed(4, 3, 0);
+    lanes.look(&mut w, 0);
+    // Two late packets, one sent by the relay, 600 us after an escape began.
+    lanes.set(4, 12, 1_088_000);
+    lanes.set_relayed(4, 4, 600_000);
+    assert_eq!(
+        lanes.look(&mut w, S),
+        [Late {
+            slot: 4,
+            packets: 2,
+            age_peak_ns: 1_088_000,
+            relayed: 1,
+            since_escape_ns: Some(600_000),
+        }]
+    );
+    // The TX thread's own late packet a second later: none relayed, and the
+    // time since the escape is that second's, not the last report's.
+    lanes.set(4, 13, 1_016_000);
+    assert_eq!(
+        lanes.look(&mut w, 2 * S),
+        [Late {
+            slot: 4,
+            packets: 1,
+            age_peak_ns: 1_016_000,
+            relayed: 0,
+            since_escape_ns: None,
+        }]
     );
 }
 
@@ -86,16 +135,18 @@ fn the_watch_looks_once_a_second_and_keeps_counts_between() {
     // Ticks inside the second: no look, the peak not taken.
     assert_eq!(lanes.look(&mut w, 10 * S + S / 10), []);
     assert_eq!(lanes.look(&mut w, 11 * S - 1), []);
-    assert_eq!(lanes.peaks.borrow()[0], 2_000_000);
+    assert_eq!(lanes.counts.borrow()[0].age_peak_ns, 2_000_000);
     assert_eq!(
         lanes.look(&mut w, 11 * S),
         [Late {
             slot: 0,
             packets: 4,
-            age_peak_ns: 2_000_000
+            age_peak_ns: 2_000_000,
+            relayed: 0,
+            since_escape_ns: None
         }]
     );
-    assert_eq!(lanes.peaks.borrow()[0], 0, "taken at the look");
+    assert_eq!(lanes.counts.borrow()[0].age_peak_ns, 0, "taken at the look");
 }
 
 #[test]
@@ -114,7 +165,9 @@ fn a_count_that_starts_again_is_no_rise() {
         [Late {
             slot: 1,
             packets: 2,
-            age_peak_ns: 6_000_000
+            age_peak_ns: 6_000_000,
+            relayed: 0,
+            since_escape_ns: None
         }]
     );
 }

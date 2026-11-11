@@ -7,6 +7,8 @@ fn clock() -> PassClock {
         rate: 96_000,
         margin_ns: 250_000,
         latency_ns: 1_000_000,
+        relayed: false,
+        escaped_ns: None,
     }
 }
 

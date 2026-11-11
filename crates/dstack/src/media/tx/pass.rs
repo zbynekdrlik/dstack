@@ -23,6 +23,12 @@ pub(super) struct PassClock {
     pub(super) margin_ns: u64,
     /// The advertised latency, ns.
     pub(super) latency_ns: u64,
+    /// Whether the relay thread runs this pass, covering the TX thread's
+    /// bounded escape (dstack #141).
+    pub(super) relayed: bool,
+    /// When the TX thread's last bounded escape began, PTP ns (`None`: none
+    /// yet).
+    pub(super) escaped_ns: Option<u64>,
 }
 
 impl PassClock {
@@ -100,7 +106,11 @@ pub(super) fn send_timed(
 /// datagram bytes) whose send returned now: how late it left (the pass's
 /// PTP time plus the time since: a thread not scheduled, a send that
 /// blocked, or retries, all make it late), its age past its stamp (what a
-/// receiver measures), the send's time, retries and outcome.
+/// receiver measures), the send's time, retries and outcome. A packet over
+/// its receiver's latency also counts whether the relay thread sent it and
+/// how long after the last bounded escape began it left (dstack #177: a
+/// pass ~1 ms late on every slot at once, a few times a day, says whose
+/// time it was).
 pub(super) fn account(
     stats: &LaneStats,
     clock: &PassClock,
@@ -121,6 +131,12 @@ pub(super) fn account(
         .is_some_and(|t| over_latency(age, t))
     {
         stats.over_latency.fetch_add(1, Ordering::Relaxed);
+        if clock.relayed {
+            stats.over_latency_relayed.fetch_add(1, Ordering::Relaxed);
+        }
+        if let Some(at) = clock.escaped_ns {
+            stats.note_since_escape(left.saturating_sub(at));
+        }
     }
     stats.late[late_bin(late)].fetch_add(1, Ordering::Relaxed);
     stats.late_max_ns.fetch_max(late, Ordering::Relaxed);

@@ -27,12 +27,34 @@ pub struct Late {
     pub packets: u64,
     /// The oldest packet in that time, ns past its stamp.
     pub age_peak_ns: u64,
+    /// Of `packets`, those the relay thread sent while the TX thread blocked
+    /// its bounded escape (dstack #177).
+    pub relayed: u64,
+    /// The shortest time from the last bounded escape's start to one of
+    /// them, ns (`None`: no escape before them).
+    pub since_escape_ns: Option<u64>,
 }
 
-/// The watch's memory: each slot's late count at the last look.
+/// What [`LateWatch::look`] reads of one slot at a look.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LateCounts {
+    /// Packets older than their receiver's latency since the device
+    /// started.
+    pub packets: u64,
+    /// Of them, the relay thread's.
+    pub relayed: u64,
+    /// The oldest packet since the last look, ns past its stamp.
+    pub age_peak_ns: u64,
+    /// The shortest time from an escape's start to a late packet since the
+    /// last look, ns.
+    pub since_escape_ns: Option<u64>,
+}
+
+/// The watch's memory: each slot's late counts at the last look.
 #[derive(Debug, Default)]
 pub struct LateWatch {
     seen: [u64; MAX_FLOWS],
+    seen_relayed: [u64; MAX_FLOWS],
     next_ns: Option<u64>,
 }
 
@@ -40,51 +62,67 @@ impl LateWatch {
     pub const fn new() -> Self {
         LateWatch {
             seen: [0; MAX_FLOWS],
+            seen_relayed: [0; MAX_FLOWS],
             next_ns: None,
         }
     }
 
     /// At `now_ns`, a look once [`EVERY_NS`] has passed since the last
-    /// (the first call only learns the counts): each slot's cumulative late
-    /// count from `count`, and its oldest packet from `take_peak` (taken at
-    /// every look, so a report's peak covers that second only). The slots
+    /// (the first call only learns the counts): each slot's counts from
+    /// `take` (cumulative ones, and the peak and the time since an escape,
+    /// taken at every look so a report covers that second only). The slots
     /// whose count rose; empty between looks.
-    pub fn look(
-        &mut self,
-        now_ns: u64,
-        count: impl Fn(usize) -> u64,
-        take_peak: impl Fn(usize) -> u64,
-    ) -> Vec<Late> {
+    pub fn look(&mut self, now_ns: u64, take: impl Fn(usize) -> LateCounts) -> Vec<Late> {
         if self.next_ns.is_some_and(|next| now_ns < next) {
             return Vec::new();
         }
         let first = self.next_ns.is_none();
         self.next_ns = Some(now_ns.saturating_add(EVERY_NS));
         let mut out = Vec::new();
-        for (slot, seen) in self.seen.iter_mut().enumerate() {
-            let now = count(slot);
-            let peak = take_peak(slot);
-            let rose = now.saturating_sub(*seen);
-            *seen = now;
+        for (slot, (seen, seen_relayed)) in self
+            .seen
+            .iter_mut()
+            .zip(self.seen_relayed.iter_mut())
+            .enumerate()
+        {
+            let now = take(slot);
+            let rose = now.packets.saturating_sub(*seen);
+            let relayed = now.relayed.saturating_sub(*seen_relayed);
+            *seen = now.packets;
+            *seen_relayed = now.relayed;
             if rose > 0 && !first {
                 out.push(Late {
                     slot,
                     packets: rose,
-                    age_peak_ns: peak,
+                    age_peak_ns: now.age_peak_ns,
+                    relayed,
+                    since_escape_ns: now.since_escape_ns,
                 });
             }
         }
         out
     }
 
-    /// [`LateWatch::look`] on `tx`'s flows, each report logged as a warning.
+    /// [`LateWatch::look`] on `tx`'s flows, each report logged as a warning:
+    /// with how many of the packets the relay thread sent and how long after
+    /// the last bounded escape began (`since_escape_us`, absent without
+    /// one), so a late pass reads as the relay's or the TX thread's own
+    /// (dstack #177).
     pub fn watch(&mut self, now_ns: u64, tx: &TxShared) {
-        for late in self.look(now_ns, |s| tx.lane(s).over_latency, |s| tx.take_age_peak(s)) {
+        let take = |s| LateCounts {
+            packets: tx.lane(s).over_latency,
+            relayed: tx.over_latency_relayed(s),
+            age_peak_ns: tx.take_age_peak(s),
+            since_escape_ns: tx.take_since_escape(s),
+        };
+        for late in self.look(now_ns, take) {
             warn!(
                 slot = late.slot,
                 packets = late.packets,
                 age_peak_us = late.age_peak_ns / 1_000,
                 receiver_latency_us = tx.lane(late.slot).receiver_latency_ns / 1_000,
+                relayed = late.relayed,
+                since_escape_us = late.since_escape_ns.map(|ns| ns / 1_000),
                 "TX packets older than the latency their receiver plays at: \
                  it counts them late"
             );

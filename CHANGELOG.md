@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.79
+
+- Diagnostics (dstack #177, FOH PC 10./11.11.2026): the late watch's line ("TX packets older than the latency their receiver plays at") carries `relayed`, the late packets the relay thread sent while the TX thread blocked its bounded escape, and `since_escape_us`, the shortest time from the last escape's start to a late packet that second (absent before any escape). A pass ~1 ms late on every slot at once shows 2-3 times a day there with `spin_escape_ms` on; the two fields say whether it was the relay's cover or the TX thread's own time. API: `media::late::Late` has the fields `relayed` and `since_escape_ns`; `LateWatch::look` takes one closure returning the new `LateCounts` (was two); new `TxShared::over_latency_relayed` and `TxShared::take_since_escape`. No latency or behaviour change.
+
 ## 0.6.78 (unreleased)
 
 - Dependency (dstack #1): dsync-ptp v1.28.1 -> v1.29.0 (dsync#160): the in-process PTP follower measures phase on the delay floor (the Theil-Sen line through the last 10 window minima), not the window median, so a one-sided receive delay (a USB NIC such as mbc's ASIX, late kernel stamps under CPU load) no longer moves it; D is anchored only once the floor holds 3 windows (about 2 more windows at a cold start). No API change; the media clock follows dsync as before.
