@@ -447,14 +447,7 @@ fn a_seamless_handover_keeps_an_epoch_with_re_anchors_in_it() {
     assert_eq!(linked.tick(), Source::Internal);
     assert_eq!(linked.epoch(), before);
     // And back: the follower loses its anchor, the service agrees.
-    set(
-        &fake,
-        service_now(&service),
-        View {
-            epoch: 9,
-            ..LOST
-        },
-    );
+    set(&fake, service_now(&service), View { epoch: 9, ..LOST });
     assert_eq!(linked.tick(), Source::Service);
     assert_eq!(linked.epoch(), before, "seamless back too");
     // The service's next re-anchor is a new epoch.
