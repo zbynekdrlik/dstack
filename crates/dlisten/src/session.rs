@@ -104,8 +104,12 @@ impl Session {
             Settings::default()
         });
         let (devices, outputs) = audio::outputs()?;
-        let (current, note) =
-            outputs::choose(&outputs, o.output.as_deref(), saved.output.as_deref())?;
+        let (current, note) = outputs::choose(
+            &outputs,
+            o.output.as_deref(),
+            saved.output.as_deref(),
+            outputs::Fallback::Default,
+        )?;
         if let Some(note) = note {
             tracing::warn!("dlisten: {note}");
         }
