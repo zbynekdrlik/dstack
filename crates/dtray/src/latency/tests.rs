@@ -86,7 +86,7 @@ fn the_command_line_takes_the_menu_s_labels_without_ms() {
 
 #[test]
 fn the_command_line_takes_any_decimal_ms_rounded_to_whole_us() {
-    // dstack #213: a value that is none of Dante's (dasio-test-1's 0.333).
+    // dstack #213: a value that is none of Dante's (a dasio test device's 0.333).
     for (ms, ns) in [
         ("0.333", 333_000),
         ("0", 0),
