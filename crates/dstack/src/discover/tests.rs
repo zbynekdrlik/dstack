@@ -584,6 +584,48 @@ fn a_goodbye_behind_a_busy_group_s_queue_is_read_within_a_second() {
     discovery.stop().unwrap();
 }
 
+/// A socket of the test's with `queued` datagrams waiting (1, 2, ...),
+/// its read timeout `READ_WAIT`.
+fn queued(queued: u8) -> UdpSocket {
+    let sock = UdpSocket::bind((LOOPBACK, 0)).unwrap();
+    sock.set_read_timeout(Some(READ_WAIT)).unwrap();
+    let to = sock.local_addr().unwrap();
+    let sender = UdpSocket::bind((LOOPBACK, 0)).unwrap();
+    for i in 1..=queued {
+        sender.send_to(&[i, i], to).unwrap();
+    }
+    sock
+}
+
+#[test]
+fn draining_reads_every_queued_datagram_in_order_then_ends_at_the_empty_socket() {
+    let sock = queued(5);
+    let mut buf = [0u8; 64];
+    let mut seen = Vec::new();
+    let read = drain(&sock, &mut buf, Instant::now() + BOUND, |b| {
+        seen.push(b.to_vec());
+    });
+    assert_eq!(read, 5);
+    let want: Vec<Vec<u8>> = (1..=5).map(|i| vec![i, i]).collect();
+    assert_eq!(seen, want);
+    // Nothing queued: one read's wait, nothing taken.
+    let started = Instant::now();
+    assert_eq!(
+        drain(&sock, &mut buf, Instant::now() + BOUND, |_| panic!()),
+        0
+    );
+    assert!(started.elapsed() < BOUND);
+}
+
+#[test]
+fn draining_reads_nothing_once_its_time_is_up() {
+    let sock = queued(3);
+    let mut buf = [0u8; 64];
+    assert_eq!(drain(&sock, &mut buf, Instant::now(), |_| panic!()), 0);
+    // The datagrams are still queued for the next round.
+    assert_eq!(drain(&sock, &mut buf, Instant::now() + BOUND, |_| {}), 3);
+}
+
 #[test]
 fn the_list_follows_with_nobody_listening_for_changes() {
     let (mdns, _) = responder(vec![card()]);
