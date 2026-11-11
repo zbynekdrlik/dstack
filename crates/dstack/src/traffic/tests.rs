@@ -224,7 +224,8 @@ fn our_devices_part_names_this_device_then_each_neighbour() {
 
 #[test]
 fn a_neighbour_s_status_gives_its_tx_bytes() {
-    let status = r#"{"clock":{"ready":1},"tx":[{"flow":1,"packets":3}],"tx_bytes":123456789012,"rx":[]}"#;
+    let status =
+        r#"{"clock":{"ready":1},"tx":[{"flow":1,"packets":3}],"tx_bytes":123456789012,"rx":[]}"#;
     assert_eq!(tx_bytes_of(status), Some(123_456_789_012));
     assert_eq!(tx_bytes_of(r#"{"clock":{"ready":1},"tx":[]}"#), None);
     assert_eq!(tx_bytes_of(r#"{"tx_bytes":-1}"#), None);
