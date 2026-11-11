@@ -3,7 +3,7 @@ use super::*;
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 
-use crate::daemon::media::tests::{BOUND, Unready, device_at, media_on, media_with_engine};
+use crate::daemon::media::tests::{Unready, device_at, media_on, media_with_engine};
 use crate::media::check::CONFIRM;
 
 const LIMITS: Limits = Limits {
@@ -616,6 +616,8 @@ mod socket {
     use std::time::Duration;
 
     use tokio::net::UnixStream;
+
+    use crate::daemon::media::tests::BOUND;
 
     /// Sends `bytes` (then ends its side when `end`), serves the session
     /// (bounded) and reads everything it answered before it closed.
