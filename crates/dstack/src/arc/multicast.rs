@@ -10,13 +10,16 @@ use std::net::Ipv4Addr;
 
 use tracing::info;
 
-use super::{ArcOutcome, flows, refuse};
-use crate::device::DeviceConfig;
-use crate::media::tx::{TxTable, multicast_group};
+use super::{ArcOutcome, Change, flows, refuse};
+use crate::device::{DeviceConfig, DeviceState};
+use crate::media::tx::TxTable;
 use crate::wire::{Header, STATUS_OK, read_u16, reply};
 
 /// ARC 2.8.9's multicast create or delete (`h.op1`, see [`super::answer`]) on the
-/// TX table `tx` of the device `cfg` at `ip`.
+/// TX table `tx` of the device `cfg` at `ip`, kept in its `state`
+/// ([`DeviceState::multicast`], dstack #207): a flow made or deleted is
+/// [`ArcOutcome::Changed`] ([`Change::TX_FLOWS_ONLY`]), which the
+/// caller saves before it answers; a refusal changes neither.
 ///
 /// **Create** (0x2601, [`flows::create_body`]'s form, read by
 /// [`flows::parse_flows`]): one multicast record whose media-local id
@@ -24,11 +27,11 @@ use crate::wire::{Header, STATUS_OK, read_u16, reply};
 /// [`flows::MAX_FLOW_CHANNELS`], each once). The flow takes our
 /// `tx_fpp_max` frames a packet (the most our advertised latency covers;
 /// Dante Controller asks 0, the device's own) and our encoding, and is
-/// sent to [`multicast_group`]. The reply is its record in the list's
-/// form with no destination, as a UltimoX2 answers. Refused
-/// ([`crate::wire::STATUS_ERROR`]), creating nothing: a body that does not read, other
-/// than one multicast record, a slot past ours or in use, channels we do
-/// not have.
+/// sent to its group ([`TxTable::add_own_multicast`]). The reply is its
+/// record in the list's form with no destination, as a UltimoX2 answers.
+/// Refused ([`crate::wire::STATUS_ERROR`]), creating nothing: a body
+/// that does not read, other than one multicast record, a slot past ours
+/// or in use, channels we do not have.
 ///
 /// **Delete** (0x2602, [`flows::delete_body`]'s form): the multicast flow
 /// of the media-local id at body bytes 12–13 goes; OK and an empty body,
@@ -36,6 +39,7 @@ use crate::wire::{Header, STATUS_OK, read_u16, reply};
 pub(super) fn answer(
     h: &Header,
     body: &[u8],
+    state: &mut DeviceState,
     cfg: &DeviceConfig,
     tx: &mut TxTable,
     ip: Ipv4Addr,
@@ -47,8 +51,9 @@ pub(super) fn answer(
         if !tx.remove_multicast(slot) {
             return refuse(h, "a multicast delete of a slot without one");
         }
-        info!(slot, "a multicast TX flow deleted (ARC 2.8.9)");
-        return ArcOutcome::Reply(reply(h, STATUS_OK, &[]));
+        state.remove_multicast(slot);
+        info!(slot, "a multicast TX flow ended (ARC 2.8.9), its save next");
+        return ArcOutcome::Changed(reply(h, STATUS_OK, &[]), Change::TX_FLOWS_ONLY);
     }
     let asked = match flows::parse_flows(body) {
         Some(f) if f.unread == 0 => f.flows,
@@ -60,23 +65,20 @@ pub(super) fn answer(
     if !f.multicast() {
         return refuse(h, "a create of a unicast flow");
     }
-    if !flow_channels(&f.channels, cfg.tx.len()) {
-        return refuse(h, "a multicast create of channels we do not have");
-    }
     let Some(slot) = usize::from(f.local_id).checked_sub(1) else {
         return refuse(h, "a multicast create in slot 0");
     };
-    let group = multicast_group(ip, cfg.process_id, slot);
-    let bps = cfg.encoding / 8;
-    if let Err(why) = tx.add_multicast(slot, group, &f.channels, cfg.tx_fpp_max, bps) {
-        return refuse(h, why);
-    }
+    let group = match tx.add_own_multicast(cfg, ip, slot, &f.channels) {
+        Ok(group) => group,
+        Err(why) => return refuse(h, why),
+    };
+    state.set_multicast(slot, &f.channels);
     info!(
         slot,
         %group,
         channels = f.channels.len(),
         fpp = cfg.tx_fpp_max,
-        "a multicast TX flow created (ARC 2.8.9)"
+        "a multicast TX flow made (ARC 2.8.9), its save next"
     );
     let made = flows::TxFlow {
         id: f.local_id,
@@ -87,16 +89,10 @@ pub(super) fn answer(
         bits: u16::from(cfg.encoding),
         destinations: Vec::new(),
     };
-    ArcOutcome::Reply(reply(h, STATUS_OK, &flows::list_reply_body(&[made])))
-}
-
-/// Whether `channels` can make a flow of a device with `tx` TX channels:
-/// 1 to [`flows::MAX_FLOW_CHANNELS`] of them, each one of ours (from 1)
-/// and each once.
-fn flow_channels(channels: &[u16], tx: usize) -> bool {
-    (1..=flows::MAX_FLOW_CHANNELS).contains(&channels.len())
-        && channels.iter().all(|&c| (1..=tx).contains(&usize::from(c)))
-        && (1..channels.len()).all(|i| !channels[..i].contains(&channels[i]))
+    ArcOutcome::Changed(
+        reply(h, STATUS_OK, &flows::list_reply_body(&[made])),
+        Change::TX_FLOWS_ONLY,
+    )
 }
 
 #[cfg(test)]

@@ -293,6 +293,7 @@ fn subs_changed(rx: &[usize]) -> Change {
         subscriptions: rx.to_vec(),
         device_renamed: false,
         latency: None,
+        tx_flows: false,
     }
 }
 
@@ -1740,6 +1741,33 @@ fn a_failed_save_refuses_and_undoes() {
     assert!(!device.cfg.state_file.exists());
 }
 
+/// A latency write the state file cannot take is refused, and the
+/// latency the device runs with stays (respond's undo, #207 review).
+#[test]
+fn a_latency_write_that_cannot_be_saved_is_refused_and_undone() {
+    use super::control::latency_request_body;
+    let dir = tempfile::tempdir().unwrap();
+    let mut device = Device::load(DeviceConfig {
+        state_file: dir.path().join("missing").join("state.toml"),
+        ..config()
+    })
+    .unwrap();
+    let (before, latency) = (device.state.clone(), device.cfg.latency_ns);
+    let write = request(
+        NETAUDIO,
+        4,
+        op::SETTINGS_SET,
+        0,
+        &latency_request_body(2_000_000),
+    );
+    assert_eq!(
+        respond_idle(&mut device, &write),
+        ArcOutcome::Reply(request(NETAUDIO, 4, op::SETTINGS_SET, STATUS_ERROR, &[]))
+    );
+    assert_eq!(device.cfg.latency_ns, latency);
+    assert_eq!(device.state, before);
+}
+
 #[test]
 fn the_tx_flow_list_states_each_flow_by_offsets() {
     // One flow a receiver asked for: TX 1 and TX 2 to 10.0.0.11:50000.
@@ -2723,6 +2751,40 @@ async fn the_server_saves_a_rename_and_signals_it() {
     s.task.abort();
 }
 
+/// dstack #207: a multicast create is saved but signals nothing (the
+/// records and the channel-change notification carry no TX flow), while
+/// a rename after it still does.
+#[tokio::test]
+async fn the_server_saves_a_multicast_create_without_signalling_it() {
+    use crate::arc::flows::{CREATE, START_2809, create_body};
+    let s = served().await;
+    let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let body = create_body(1, &[1, 2], 0x0001).unwrap();
+    peer.send_to(&request(START_2809, 5, CREATE, 0, &body), s.addr)
+        .await
+        .unwrap();
+    let reply = recv(&peer).await;
+    let (h, _) = Header::parse(&reply).unwrap();
+    assert_eq!((h.seq, h.op2), (5, STATUS_OK));
+    let state_file = s.device.lock().unwrap().cfg.state_file.clone();
+    let saved = std::fs::read_to_string(&state_file).unwrap();
+    assert!(saved.contains("[[multicast]]"), "{saved}");
+    let signalled = tokio::time::timeout(Duration::from_millis(200), s.changed.notified()).await;
+    assert!(signalled.is_err(), "a multicast create signalled a change");
+    assert!(s.rx_changes.is_empty());
+    peer.send_to(
+        &request(CONTROLLER, 6, op::TX_RENAME, 0, &tx_rename(3, b"Mix 3")),
+        s.addr,
+    )
+    .await
+    .unwrap();
+    recv(&peer).await;
+    tokio::time::timeout(Duration::from_secs(5), s.changed.notified())
+        .await
+        .expect("the rename is signalled");
+    s.task.abort();
+}
+
 #[tokio::test]
 async fn the_server_sends_nothing_for_an_opcode_inferno_does_not_answer() {
     let s = served().await;
@@ -2788,6 +2850,7 @@ fn a_device_rename_carries_its_change() {
                 subscriptions: Vec::new(),
                 device_renamed: true,
                 latency: None,
+                tx_flows: false,
             }
         ),
         other => panic!("{other:?}"),
@@ -3044,7 +3107,7 @@ fn the_server_answers_the_2_8_9_multicast_create_and_delete_on_the_tx_table() {
         ArcOutcome::Unanswered { op1: DELETE }
     );
     let made = decode(ask(START_2809, CREATE, 0, &create));
-    assert_eq!((made.header.op2, made.changed), (STATUS_OK, false));
+    assert_eq!((made.header.op2, made.changed), (STATUS_OK, true));
     assert_eq!(parse_flows(&made.body).unwrap().flows.len(), 1);
     let list = decode(ask(START_2809, LIST, 0, &list_body()));
     let [f] = &parse_flows(&list.body).unwrap().flows[..] else {
@@ -3059,4 +3122,60 @@ fn the_server_answers_the_2_8_9_multicast_create_and_delete_on_the_tx_table() {
     assert_eq!((gone.header.op2, gone.body.len()), (STATUS_OK, 0));
     let list = decode(ask(START_2809, LIST, 0, &list_body()));
     assert_eq!(parse_flows(&list.body).unwrap().flows, [], "deleted");
+}
+
+/// dstack #207: the server saves a multicast create or delete to the
+/// state file before it answers (a restart makes the flow again); one
+/// that cannot be saved is refused and undone, on the TX table too.
+#[test]
+fn a_multicast_create_or_delete_is_saved_or_refused_and_undone() {
+    use crate::arc::flows::{CREATE, DELETE, START_2809, create_body, delete_body};
+    use crate::device::SavedMulticast;
+    let dir = tempfile::tempdir().unwrap();
+    let mut device = Device::load(config_in(dir.path())).unwrap();
+    let flows = NoFlows::new(&device);
+    let create = |seq, local_id, channels: &[u16]| {
+        let body = create_body(local_id, channels, 0x0001).unwrap();
+        request(START_2809, seq, CREATE, 0, &body)
+    };
+    let made = decode(answer(&mut device, &flows, &create(9, 2, &[1, 2])));
+    assert_eq!((made.header.op2, made.changed), (STATUS_OK, true));
+    let saved = [SavedMulticast {
+        slot: 1,
+        channels: vec![1, 2],
+    }];
+    assert_eq!(device.state.multicast, saved);
+    let back = DeviceState::load_or_default(&device.cfg).unwrap();
+    assert_eq!(back.multicast, saved, "in the state file");
+    // A state file that cannot be written: the delete is refused and the
+    // flow stays, in the state and on the table.
+    let file = device.cfg.state_file.clone();
+    device.cfg.state_file = dir.path().join("missing").join("state.toml");
+    let delete = request(START_2809, 10, DELETE, 0, &delete_body(2));
+    let kept = decode(answer(&mut device, &flows, &delete));
+    assert_eq!(
+        (kept.header.op2, kept.changed, kept.body.len()),
+        (STATUS_ERROR, false, 0)
+    );
+    assert_eq!(device.state.multicast, saved);
+    assert!(
+        flows
+            .tx
+            .lock()
+            .unwrap()
+            .flow(1)
+            .is_some_and(|f| f.multicast)
+    );
+    // Nor is a create made.
+    let refused = decode(answer(&mut device, &flows, &create(11, 4, &[3])));
+    assert_eq!((refused.header.op2, refused.changed), (STATUS_ERROR, false));
+    assert_eq!(device.state.multicast, saved);
+    assert_eq!(flows.tx.lock().unwrap().flow(3), None, "nothing made");
+    // Writable again: the delete is saved.
+    device.cfg.state_file = file;
+    let gone = decode(answer(&mut device, &flows, &delete));
+    assert_eq!((gone.header.op2, gone.changed), (STATUS_OK, true));
+    assert_eq!(flows.tx.lock().unwrap().flow(1), None);
+    let back = DeviceState::load_or_default(&device.cfg).unwrap();
+    assert!(back.multicast.is_empty(), "{back:?}");
 }

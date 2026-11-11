@@ -68,6 +68,45 @@ fn a_multicast_flow_takes_its_slot_and_goes_to_its_group() {
 }
 
 #[test]
+fn a_flow_s_channels_are_1_to_8_of_ours_each_once() {
+    assert!(flow_channels(&[1], 1));
+    assert!(flow_channels(&[16, 1, 8], 16));
+    assert!(flow_channels(&[1, 2, 3, 4, 5, 6, 7, 8], 16));
+    assert!(!flow_channels(&[], 16), "none");
+    assert!(!flow_channels(&[1, 2, 3, 4, 5, 6, 7, 8, 9], 16), "nine");
+    assert!(!flow_channels(&[0], 16), "channel 0");
+    assert!(!flow_channels(&[17], 16), "past ours");
+    assert!(!flow_channels(&[1, 2], 1), "past ours");
+    assert!(!flow_channels(&[3, 1, 3], 16), "twice");
+    assert!(!flow_channels(&[1, 1], 16), "twice in a row");
+}
+
+/// The device's own flow (ARC 2.8.9's create and its re-creation at start):
+/// the test device's group, `tx_fpp_max` and 24-bit encoding; channels it
+/// does not have refused, nothing made.
+#[test]
+fn our_own_multicast_flow_takes_the_device_s_group_fpp_and_encoding() {
+    let cfg = DeviceConfig::from_toml(TEST_DEVICE).expect("config/test-device.toml");
+    let mut t = TxTable::new(1);
+    let group = multicast_group(OUR_IP, cfg.process_id, 2);
+    assert_eq!(t.add_own_multicast(&cfg, OUR_IP, 2, &[4, 1]), Ok(group));
+    let f = t.flow(2).expect("the flow in slot 2");
+    assert_eq!(f.dest, group);
+    assert_eq!(f.channels, [Some(4), Some(1)]);
+    assert_eq!((f.fpp, f.bps), (cfg.tx_fpp_max, 3));
+    assert!(f.multicast);
+    assert_eq!(
+        t.add_own_multicast(&cfg, OUR_IP, 3, &[17]),
+        Err("channels the device does not have")
+    );
+    assert_eq!(
+        t.add_own_multicast(&cfg, OUR_IP, 2, &[1]),
+        Err("a slot that holds a flow")
+    );
+    assert_eq!(t.flows().count(), 1, "nothing else made");
+}
+
+#[test]
 fn a_multicast_flow_is_refused_past_the_slots_or_in_a_held_slot() {
     let mut t = TxTable::with_slots(1, 4);
     assert_eq!(
@@ -150,4 +189,48 @@ fn the_receiver_latency_reader_skips_a_multicast_flow() {
         shared.receiver_flows(),
         [(1, rx, "peer-device".to_string())]
     );
+}
+
+/// dstack #207: at start the device makes each saved multicast flow again,
+/// in its slot, to its group (derived from the address, process id and
+/// slot), and hands the plans to the TX thread; a saved flow it cannot
+/// make (a channel the config no longer has) is left out with a warning,
+/// the others made.
+#[test]
+fn saved_multicast_flows_are_made_again_at_start() {
+    use crate::device::SavedMulticast;
+    let cfg = DeviceConfig::from_toml(TEST_DEVICE).expect("config/test-device.toml");
+    let process_id = cfg.process_id;
+    let shared = TxShared::new(cfg, Ipv4Addr::LOCALHOST, Vec::new().into(), 1, &[]).unwrap();
+    let saved = |slot, channels: &[u16]| SavedMulticast {
+        slot,
+        channels: channels.to_vec(),
+    };
+    crate::test_log::undecided();
+    let warnings = crate::test_log::capture_warnings(|| {
+        shared.recreate_multicast(&[saved(1, &[1, 2]), saved(3, &[17]), saved(5, &[16])]);
+    });
+    let group = |slot| multicast_group(Ipv4Addr::LOCALHOST, process_id, slot);
+    {
+        let c = shared.lock();
+        let made: Vec<_> = (c.table.flows())
+            .map(|(slot, f)| (slot, f.dest, f.channels.clone(), f.multicast))
+            .collect();
+        assert_eq!(
+            made,
+            [
+                (1, group(1), vec![Some(1), Some(2)], true),
+                (5, group(5), vec![Some(16)], true)
+            ]
+        );
+    }
+    assert_eq!(
+        shared.plan_dest(1),
+        Some(group(1)),
+        "handed to the TX thread"
+    );
+    assert_eq!(shared.plan_dest(5), Some(group(5)));
+    assert_eq!(shared.plan_dest(3), None);
+    assert_eq!(warnings.matches("not made again").count(), 1, "{warnings}");
+    assert!(warnings.contains("slot=3"), "{warnings}");
 }
