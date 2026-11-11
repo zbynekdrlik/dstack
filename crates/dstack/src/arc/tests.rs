@@ -2723,6 +2723,40 @@ async fn the_server_saves_a_rename_and_signals_it() {
     s.task.abort();
 }
 
+/// dstack #207: a multicast create is saved but signals nothing (the
+/// records and the channel-change notification carry no TX flow), while
+/// a rename after it still does.
+#[tokio::test]
+async fn the_server_saves_a_multicast_create_without_signalling_it() {
+    use crate::arc::flows::{CREATE, START_2809, create_body};
+    let s = served().await;
+    let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let body = create_body(1, &[1, 2], 0x0001).unwrap();
+    peer.send_to(&request(START_2809, 5, CREATE, 0, &body), s.addr)
+        .await
+        .unwrap();
+    let reply = recv(&peer).await;
+    let (h, _) = Header::parse(&reply).unwrap();
+    assert_eq!((h.seq, h.op2), (5, STATUS_OK));
+    let state_file = s.device.lock().unwrap().cfg.state_file.clone();
+    let saved = std::fs::read_to_string(&state_file).unwrap();
+    assert!(saved.contains("[[multicast]]"), "{saved}");
+    let signalled = tokio::time::timeout(Duration::from_millis(200), s.changed.notified()).await;
+    assert!(signalled.is_err(), "a multicast create signalled a change");
+    assert!(s.rx_changes.is_empty());
+    peer.send_to(
+        &request(CONTROLLER, 6, op::TX_RENAME, 0, &tx_rename(3, b"Mix 3")),
+        s.addr,
+    )
+    .await
+    .unwrap();
+    recv(&peer).await;
+    tokio::time::timeout(Duration::from_secs(5), s.changed.notified())
+        .await
+        .expect("the rename is signalled");
+    s.task.abort();
+}
+
 #[tokio::test]
 async fn the_server_sends_nothing_for_an_opcode_inferno_does_not_answer() {
     let s = served().await;
