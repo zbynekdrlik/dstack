@@ -632,6 +632,7 @@ const WORDS: &[&str] = &[
     "sent",
     "uncounted",
     "tx",
+    "tx_bytes",
     "flow",
     "live",
     "fpp",
@@ -722,7 +723,7 @@ fn a_fresh_device_s_status_is_numbers_only() {
         s,
         "{\"clock\":{\"ready\":0,\"epoch\":0,\"polls\":0,\"re_anchors\":0,\"holdovers\":0,\
          \"holdover\":0,\"freq_ppb\":-750,\"source\":\"dsync\"},\"requests\":[],\"sent\":[],\"uncounted\":0,\
-         \"tx\":[],\"rx\":[],\"rx_poll_errors\":0,\"channels\":[],\"sources\":[],\"checks\":[]}"
+         \"tx\":[],\"tx_bytes\":0,\"rx\":[],\"rx_poll_errors\":0,\"channels\":[],\"sources\":[],\"checks\":[]}"
     );
 }
 
@@ -789,7 +790,7 @@ fn the_status_names_the_clock_requests_channels_sources_and_checks() {
             "{\"clock\":{\"ready\":1,\"epoch\":1,\"polls\":3,\"re_anchors\":1,\"holdovers\":1,\
              \"holdover\":0,\"freq_ppb\":-750,\"source\":\"dsync\"},\
              \"requests\":[{\"port\":4440,\"peer\":1,\"op\":8704,\"n\":1}],\
-             \"sent\":[{\"peer\":1,\"op\":256,\"n\":1}],\"uncounted\":0,\"tx\":[],\"rx\":[],"
+             \"sent\":[{\"peer\":1,\"op\":256,\"n\":1}],\"uncounted\":0,\"tx\":[],\"tx_bytes\":0,\"rx\":[],"
         ),
         "{s}"
     );
@@ -1003,6 +1004,67 @@ fn answers_set_sources_and_checks_and_refuse_with_a_reason() {
     // Nothing changed by a refusal.
     assert_eq!(media.tx.source(16), None);
     assert_eq!(media.tx.source(1), Some(Source::Silence));
+}
+
+#[test]
+fn tx_end_parses_a_flow_from_1_to_32() {
+    assert_eq!(parsed("tx-end 1"), Ok(Request::TxEnd { slot: 0 }));
+    assert_eq!(parsed(" tx-end\t32 \r"), Ok(Request::TxEnd { slot: 31 }));
+    let no_flow = "tx-end: no such TX flow (1 to 32)";
+    for line in ["tx-end 0", "tx-end 33", "tx-end -1", "tx-end zyxqw"] {
+        assert_eq!(parsed(line), Err(no_flow), "{line:?}");
+    }
+    for line in ["tx-end", "tx-end 1 2", "tx-end  "] {
+        assert_eq!(parsed(line), Err(TX_END_USAGE), "{line:?}");
+    }
+    assert_eq!(parsed("TX-END 1"), Err(UNKNOWN));
+}
+
+/// dstack #187 (dcontroller#46): `tx-end` ends one of our live TX flows on
+/// dstack-dev's device only; any other device refuses it and changes
+/// nothing.
+#[test]
+fn tx_end_ends_a_live_tx_flow_on_dstack_dev_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let media = media_on(&device_at(dir.path()), Arc::new(Unready));
+    let rx_addr = std::net::SocketAddrV4::new(Ipv4Addr::LOCALHOST, 50_000);
+    {
+        let mut c = media.tx.lock();
+        let req = crate::flows::control::FlowRequest {
+            rx_host: "peer-device".into(),
+            rx_flow_name: "1_0".into(),
+            sample_rate: 96_000,
+            bits: 24,
+            channels: vec![Some(1)],
+            fpp: 32,
+            rx: rx_addr,
+        };
+        assert_eq!(c.table.add(&req, 0).unwrap().0, 0);
+        media.tx.publish(&c);
+    }
+    let live = |media: &Media| !media.tx.lock().table.flow(0).unwrap().expired;
+    // Not dstack-dev's device (an application's, the default).
+    assert!(!media.dev_requests());
+    assert_eq!(
+        answer("tx-end 1", &media),
+        format!("error: {TX_END_DEV_ONLY}")
+    );
+    assert!(live(&media));
+    // dstack-dev's.
+    media.allow_dev_requests();
+    assert!(media.dev_requests());
+    assert_eq!(answer("tx-end 2", &media), format!("error: {NO_LIVE_FLOW}"));
+    assert!(live(&media));
+    assert_eq!(answer("tx-end 1", &media), "ok");
+    assert!(!live(&media));
+    assert!(status(&media).contains("\"tx\":[{\"flow\":1,\"live\":0,"));
+    // Ended already.
+    assert_eq!(answer("tx-end 1", &media), format!("error: {NO_LIVE_FLOW}"));
+    // The local endpoint (dtray's) never takes it.
+    assert_eq!(
+        local::reply("tx-end 1", &media),
+        format!("error: {}", local::ONLY_STATUS_AND_APP)
+    );
 }
 
 #[test]
@@ -1454,6 +1516,23 @@ fn a_lane_s_times_show_in_whole_microseconds() {
         "{\"packets\":7,\"send_errors\":0,\"send_retries\":3,\"keepalives\":0,\"rebootstraps\":0,\
          \"holes\":0,\"late_bins\":[0,0,0,0,0,0],\"late_max_us\":204,\"send_max_us\":56,\
          \"age_max_us\":416,\"over_latency\":80,\"receiver_latency_us\":10000,\"direct\":5}"
+    );
+}
+
+/// dstack #203: the status carries every slot's wire bytes, which a
+/// neighbour's traffic watch on the PC reads.
+#[test]
+fn the_status_carries_the_tx_wire_bytes_for_a_neighbour() {
+    let dir = tempfile::tempdir().unwrap();
+    let media = media_on(&device_at(dir.path()), Arc::new(Unready));
+    assert_eq!(crate::traffic::tx_bytes_of(&status(&media)), Some(0));
+    media.tx.count_sent(0, 100);
+    media.tx.count_sent(2, 58);
+    let want = 158 + 2 * crate::media::tx::WIRE_OVERHEAD;
+    assert_eq!(crate::traffic::tx_bytes_of(&status(&media)), Some(want));
+    assert_eq!(
+        crate::traffic::tx_bytes_of(&local::reply("status", &media)),
+        Some(want)
     );
 }
 

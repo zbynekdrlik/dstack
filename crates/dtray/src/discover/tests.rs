@@ -7,7 +7,7 @@ use dstack::announce::STATUS_PORT_KEY;
 use dstack::daemon::IfAddr;
 use dstack::discover::Device;
 
-use super::{Local, local_devices, own_addresses, plan, read, status_port};
+use super::{Local, local_devices, own_addresses, plan, read};
 
 // Documentation addresses (RFC 5737) only.
 const OWN: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 10);
@@ -57,18 +57,6 @@ fn own_addresses_leave_out_loopback_and_repeats() {
     ];
     assert_eq!(own_addresses(&ifs), vec![OWN, OWN2]);
     assert!(own_addresses(&[]).is_empty());
-}
-
-#[test]
-fn the_status_port_is_a_port_other_than_0() {
-    assert_eq!(status_port(&device("a", OWN, Some("41234"))), Some(41234));
-    assert_eq!(status_port(&device("a", OWN, Some("65535"))), Some(65535));
-    assert_eq!(status_port(&device("a", OWN, Some("1"))), Some(1));
-    assert_eq!(status_port(&device("a", OWN, Some("0"))), None);
-    assert_eq!(status_port(&device("a", OWN, Some("65536"))), None);
-    assert_eq!(status_port(&device("a", OWN, Some("x"))), None);
-    assert_eq!(status_port(&device("a", OWN, Some(""))), None);
-    assert_eq!(status_port(&device("a", OWN, None)), None);
 }
 
 #[test]

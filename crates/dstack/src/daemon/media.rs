@@ -39,7 +39,7 @@
 //! taken alone (the app hook runs on its own thread, outside its lock).
 
 use std::net::{IpAddr, Ipv4Addr};
-use std::sync::atomic::AtomicI32;
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -106,6 +106,9 @@ pub struct Media {
     app: app::AppHook,
     /// The app's command hook ([`Media::set_app_command`]).
     app_command: app::CommandHook,
+    /// dstack-dev's own control requests are answered
+    /// ([`Media::allow_dev_requests`]).
+    dev_requests: AtomicBool,
 }
 
 /// One RX channel's state ([`Media::rx_channels`]).
@@ -134,8 +137,9 @@ impl Media {
     /// The audio side of `device` at `ip`: one ring per RX channel, the TX
     /// side (32 sockets on `ip`, cookies from `seed`, every TX channel
     /// silent, an engine ring on each TX channel index in `engine_tx`, from
-    /// 0: the engine's; the standalone device passes none), the RX side (32
-    /// flow sockets on `ip`), and the manager with the state file's
+    /// 0: the engine's; the standalone device passes none; the state file's
+    /// multicast flows made again, [`TxShared::recreate_multicast`]), the
+    /// RX side (32 flow sockets on `ip`), and the manager with the state file's
     /// subscriptions (their statuses the baseline of its first `changed`).
     /// Fails when a socket cannot be bound, or for an `engine_tx` index the
     /// device lacks (`InvalidInput`).
@@ -160,6 +164,7 @@ impl Media {
             cfg.flow_slots,
         )?);
         let tx = Arc::new(TxShared::new(cfg.clone(), ip, rings, seed, engine_tx)?);
+        tx.recreate_multicast(&device.state.multicast);
         let mut manager = Manager::new(cfg, &device.state.name, ip, rx.ports()?);
         manager.load(&device.state.subscriptions);
         manager.changed();
@@ -177,6 +182,7 @@ impl Media {
             levels: Arc::default(),
             app: app::AppHook::default(),
             app_command: app::CommandHook::default(),
+            dev_requests: AtomicBool::new(false),
         })
     }
 
@@ -265,6 +271,21 @@ impl Media {
     /// `None` without a hook.
     pub fn app_command(&self, words: &str) -> Option<Result<String, String>> {
         self.app_command.call(words)
+    }
+
+    /// Answers dstack-dev's own control requests from now (dstack #187):
+    /// `tx-end <flow>`, which ends one of our TX flows for a controller's
+    /// E2E. `daemon::cli::main` calls it for dstack's own binary only
+    /// ([`crate::daemon::Build::dev_requests`]); no application's device
+    /// answers them, and an embedded one has no control socket anyway.
+    pub fn allow_dev_requests(&self) {
+        self.dev_requests.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether dstack-dev's own control requests are answered
+    /// ([`Media::allow_dev_requests`]).
+    pub fn dev_requests(&self) -> bool {
+        self.dev_requests.load(Ordering::Relaxed)
     }
 
     /// Sends this device's TX through the host's `sender` (dstack #1): its
@@ -456,6 +477,9 @@ pub struct Driver {
     pump: crate::stream::watch::PumpWatch,
     /// Other traffic on our NIC, logged once a minute.
     traffic: crate::traffic::TrafficWatch,
+    /// Our other devices on the PC, whose audio is not other traffic
+    /// (dstack #203).
+    neighbours: crate::traffic::neighbours::Neighbours,
     /// A media thread's CPU pin found lost (another program's process
     /// affinity rule) or refused, each told once.
     pins: crate::media::repin::PinWatch,
@@ -481,6 +505,7 @@ impl Driver {
                 host: crate::media::late::HostWatch::new(),
                 pump: crate::stream::watch::PumpWatch::new(),
                 traffic: crate::traffic::TrafficWatch::new(),
+                neighbours: crate::traffic::neighbours::Neighbours::default(),
                 pins: crate::media::repin::PinWatch::new(),
             },
             back,
@@ -505,11 +530,30 @@ impl Driver {
             &self.media.tx.cfg.name,
             self.media.engine_stats().as_deref(),
         );
-        self.traffic.watch(now, self.media.ip, &self.media.tx);
+        let ip = self.media.ip;
+        let neighbours = &self.neighbours;
+        let window = self
+            .traffic
+            .watch(now, ip, &self.media.tx, || neighbours.list(ip));
+        self.neighbours.after(now, window.as_ref(), ip);
         self.pins.watch(
             crate::media::repin::pin_resets(),
             crate::media::repin::pin_refusals(),
         );
+    }
+
+    /// Our own local status port ([`crate::ctl::local`]; `None`: none), so
+    /// the traffic watch never counts this device among its neighbours.
+    pub fn set_status_port(&mut self, port: Option<u16>) {
+        self.neighbours.set_own(port);
+    }
+
+    /// The traffic watch's discovery of our other devices (tests: their own
+    /// [`crate::traffic::neighbours::Finder`]); set before
+    /// [`Driver::set_status_port`].
+    #[cfg(test)]
+    pub(crate) fn set_finder(&mut self, finder: Box<dyn crate::traffic::neighbours::Finder>) {
+        self.neighbours = crate::traffic::neighbours::Neighbours::new(finder);
     }
 
     /// The answer to the request of `flow`.

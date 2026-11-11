@@ -158,6 +158,7 @@ fn a_request_is_answered_with_its_handle_and_the_flow_is_in_the_table() {
                 cookie,
                 heard_ns: 0,
                 expired: false,
+                multicast: false,
             }
         )]
     );

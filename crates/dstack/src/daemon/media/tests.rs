@@ -255,6 +255,23 @@ fn the_media_side_starts_from_the_state_file_s_subscriptions_and_silence() {
     assert_eq!(media.engine(), None);
 }
 
+/// dstack #207: the media side starts with the state file's multicast
+/// flows made again, before any thread sends.
+#[test]
+fn the_media_side_starts_with_the_state_file_s_multicast_flows() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut device = device_at(dir.path());
+    device.state.set_multicast(2, &[3, 4]);
+    let media = media_on(&device, Arc::new(Unready));
+    let c = media.tx.lock();
+    let f = c.table.flow(2).expect("the saved flow in slot 2");
+    assert!(f.multicast);
+    assert_eq!(f.channels, [Some(3), Some(4)]);
+    let group = crate::media::tx::multicast_group(Ipv4Addr::LOCALHOST, device.cfg.process_id, 2);
+    assert_eq!(f.dest, group);
+    assert_eq!(c.table.flows().count(), 1);
+}
+
 #[test]
 fn engine_channels_get_one_engine_ring_each_and_the_rest_none() {
     let dir = tempfile::tempdir().unwrap();
@@ -655,6 +672,48 @@ async fn the_driver_s_tick_warns_once_for_a_second_the_pump_restarted() {
     let lines: Vec<&str> = log.lines().filter(|l| l.contains(PUMP_WARNING)).collect();
     assert_eq!(lines.len(), 1, "{log}");
     assert!(lines[0].contains("missed=4"), "{log}");
+}
+
+/// dstack #203: the tick's traffic watch reads the neighbours its discovery
+/// lists on our address (each its `status`), never our own endpoint.
+#[tokio::test]
+async fn the_driver_s_tick_reads_our_neighbours_but_never_ourselves() {
+    use crate::traffic::neighbours::tests::{Fake, FakeFinder, ours_at};
+    use std::io::Read;
+    let dir = tempfile::tempdir().unwrap();
+    let device = device_at(dir.path());
+    let media = media_on(&device, Arc::new(Unready));
+    let listen = || {
+        let l = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = l.local_addr().unwrap().port();
+        (l, port)
+    };
+    let (neighbour, neighbour_port) = listen();
+    let (own, own_port) = listen();
+    own.set_nonblocking(true).unwrap();
+    let served = std::thread::spawn(move || {
+        let (mut s, _) = neighbour.accept().unwrap();
+        let mut req = [0u8; 7];
+        s.read_exact(&mut req).unwrap();
+        std::io::Write::write_all(&mut s, b"{\"tx_bytes\":9}\n").unwrap();
+        req
+    });
+    let fake = Arc::new(Mutex::new(Fake {
+        running: true,
+        devices: vec![
+            ours_at("neighbour", media.ip, neighbour_port),
+            ours_at("me", media.ip, own_port),
+        ],
+        ..Fake::default()
+    }));
+    let records = Records::default();
+    let (mut driver, _answers, _changes) = driver_of(&media);
+    driver.set_finder(Box::new(FakeFinder(Arc::clone(&fake))));
+    driver.set_status_port(Some(own_port));
+    driver.tick(&records);
+    assert_eq!(&served.join().unwrap(), b"status\n");
+    let not_asked = own.accept().unwrap_err();
+    assert_eq!(not_asked.kind(), std::io::ErrorKind::WouldBlock);
 }
 
 #[tokio::test]

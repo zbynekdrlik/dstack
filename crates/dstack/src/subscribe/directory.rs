@@ -61,8 +61,8 @@
 //! kept [`Timing::max_age_ns`], the next read [`retry_after`] its failures
 //! after the last. It is asked for every subscribed channel whose device has
 //! a `_netaudio-arc` record, whichever record resolved the channel. A list
-//! that cannot be read (a device that answers no 0x2600, as our own) counts
-//! as one with no multicast flow until the next read.
+//! that cannot be read (a device that answers no 0x2600) counts as one
+//! with no multicast flow until the next read.
 //!
 //! Logs name peer ids (the status's), counts and opcodes, never a name or
 //! an address: one info line per directory read, and once a minute at most

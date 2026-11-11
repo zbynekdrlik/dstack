@@ -707,3 +707,247 @@ fn two_devices_share_one_address_each_on_its_own_ports() {
     assert!(matches!(stopped_a, host::Stopped::Done), "{stopped_a:?}");
     assert!(matches!(stopped_b, host::Stopped::Done), "{stopped_b:?}");
 }
+
+/// dstack #193: our ARC client creates a multicast flow on our own running
+/// device (ARC 2.8.9's 0x2601, as dcontroller does), the list states it
+/// with its group, a socket that joins the group receives its packets from
+/// our address, and the delete ends it: the list is empty and the group
+/// quiet.
+#[test]
+fn our_device_creates_lists_sends_and_deletes_a_multicast_flow() {
+    use dstack::arc::client::{REPLY_TIMEOUT, Udp};
+    use dstack::arc::flows;
+    use std::net::SocketAddrV4;
+    use std::sync::atomic::AtomicU16;
+
+    let _one = ONE_DEVICE.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = tempfile::tempdir().unwrap();
+    let ip = routed_ipv4();
+    let opts = Options {
+        config: config_in(dir.path(), false),
+        place: Place::Ip(ip),
+        control: dir.path().join("control.sock"),
+    };
+    let prepared = host::prepare_with(&opts, &[], ClockSource::System).expect("the device set up");
+    let (process_id, fpp) = (prepared.config().process_id, prepared.config().tx_fpp_max);
+    let stop = Arc::new(AtomicBool::new(false));
+    let host = prepared
+        .start(Signals::Report(Arc::clone(&stop)))
+        .expect("the device started");
+    let seq = AtomicU16::new(1);
+    let requests = dstack::ctl::Requests::default();
+    let halt = AtomicBool::new(false);
+    let to = SocketAddrV4::new(ip, dstack::arc::PORT);
+    let mut udp = Udp::open(ip, to, &seq, REPLY_TIMEOUT, &requests, &halt).expect("a socket");
+    let group = dstack::media::tx::multicast_group(ip, process_id, 1);
+    let joined = dstack::media::rx::join(ip, group).expect("the group joined");
+    let made = flows::create_multicast(&mut udp, 2, &[1, 2], flows::OPTIONS[0]);
+    let listed = flows::list_tx_flows(&mut udp);
+    // Packets of our flow: 2 channels of 24 bits, `fpp` frames, from us.
+    let size = 9 + 2 * 3 * usize::from(fpp);
+    let mut buf = [0u8; 2048];
+    let (mut ours, mut sizes) = (0usize, Vec::new());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while ours < 100 && Instant::now() < deadline {
+        match joined.recv_from(&mut buf) {
+            Ok((n, from)) if from.ip() == std::net::IpAddr::V4(ip) => {
+                ours += 1;
+                if sizes.len() < 4 {
+                    sizes.push(n);
+                }
+            }
+            Ok(_) => {}
+            Err(_) => std::thread::sleep(Duration::from_millis(1)),
+        }
+    }
+    let deleted = flows::delete_multicast(&mut udp, 2);
+    let after = flows::list_tx_flows(&mut udp);
+    // Whatever was in flight at the delete arrives within 50 ms; then quiet.
+    std::thread::sleep(Duration::from_millis(50));
+    while joined.recv_from(&mut buf).is_ok() {}
+    std::thread::sleep(Duration::from_millis(300));
+    let mut late = 0usize;
+    while let Ok((_, from)) = joined.recv_from(&mut buf) {
+        late += usize::from(from.ip() == std::net::IpAddr::V4(ip));
+    }
+    let stopped = host.stop(Duration::from_secs(5));
+    let made = made.expect("the multicast flow created");
+    assert!(made.multicast(), "{made:?}");
+    assert_eq!((made.local_id, made.fpp), (2, fpp), "{made:?}");
+    assert_eq!(made.channels, [1, 2]);
+    assert!(made.destinations.is_empty(), "{made:?}");
+    let listed = listed.expect("our list");
+    let [f] = &listed.flows[..] else {
+        panic!("one flow listed: {listed:?}");
+    };
+    assert!(f.multicast(), "{f:?}");
+    assert_eq!(f.destinations, [group]);
+    assert!(
+        ours >= 100,
+        "{ours} packets of our flow on the group in 5 s"
+    );
+    assert!(sizes.iter().all(|&n| n == size), "{sizes:?} != {size}");
+    deleted.expect("the flow deleted");
+    assert_eq!(after.expect("our list").flows, []);
+    assert_eq!(late, 0, "the group is quiet after the delete");
+    assert!(matches!(stopped, host::Stopped::Done), "{stopped:?}");
+}
+
+/// dstack #207: a multicast flow created on our running device survives
+/// the device's restart on the same state file, as on hardware: after the
+/// restart the list states it in its slot with the same channels and
+/// group, and the group receives its packets from our address again.
+#[test]
+fn our_multicast_flow_survives_a_restart_of_the_device() {
+    use dstack::arc::client::{REPLY_TIMEOUT, Udp};
+    use dstack::arc::flows;
+    use std::net::SocketAddrV4;
+    use std::sync::atomic::AtomicU16;
+
+    let _one = ONE_DEVICE.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = tempfile::tempdir().unwrap();
+    let ip = routed_ipv4();
+    let opts = Options {
+        config: config_in(dir.path(), false),
+        place: Place::Ip(ip),
+        control: dir.path().join("control.sock"),
+    };
+    let start = || {
+        let prepared =
+            host::prepare_with(&opts, &[], ClockSource::System).expect("the device set up");
+        let process_id = prepared.config().process_id;
+        let stop = Arc::new(AtomicBool::new(false));
+        let host = prepared
+            .start(Signals::Report(stop))
+            .expect("the device started");
+        (host, process_id)
+    };
+    let seq = AtomicU16::new(1);
+    let requests = dstack::ctl::Requests::default();
+    let halt = AtomicBool::new(false);
+    let to = SocketAddrV4::new(ip, dstack::arc::PORT);
+    let mut udp = Udp::open(ip, to, &seq, REPLY_TIMEOUT, &requests, &halt).expect("a socket");
+    let (first, process_id) = start();
+    let made = flows::create_multicast(&mut udp, 3, &[2, 1], flows::OPTIONS[0]);
+    let first_stop = first.stop(Duration::from_secs(5));
+    let (second, _) = start();
+    let group = dstack::media::tx::multicast_group(ip, process_id, 2);
+    let joined = dstack::media::rx::join(ip, group).expect("the group joined");
+    let listed = flows::list_tx_flows(&mut udp);
+    let mut buf = [0u8; 2048];
+    let mut ours = 0usize;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while ours < 100 && Instant::now() < deadline {
+        match joined.recv_from(&mut buf) {
+            Ok((_, from)) if from.ip() == std::net::IpAddr::V4(ip) => ours += 1,
+            Ok(_) => {}
+            Err(_) => std::thread::sleep(Duration::from_millis(1)),
+        }
+    }
+    let deleted = flows::delete_multicast(&mut udp, 3);
+    let second_stop = second.stop(Duration::from_secs(5));
+    made.expect("the multicast flow created");
+    assert!(matches!(first_stop, host::Stopped::Done), "{first_stop:?}");
+    let listed = listed.expect("our list after the restart");
+    let [f] = &listed.flows[..] else {
+        panic!("one flow listed after the restart: {listed:?}");
+    };
+    assert!(f.multicast(), "{f:?}");
+    assert_eq!((f.local_id, &f.channels[..]), (3, &[2, 1][..]), "{f:?}");
+    assert_eq!(f.destinations, [group]);
+    assert!(
+        ours >= 100,
+        "{ours} packets of our flow on the group in 5 s after the restart"
+    );
+    deleted.expect("the flow deleted");
+    assert!(
+        matches!(second_stop, host::Stopped::Done),
+        "{second_stop:?}"
+    );
+}
+
+/// dstack #187 (dcontroller#46): dstack-dev's `tx-end` ends the TX flow our
+/// own RX 1 receives (subscribed to our own TX 1); RX 1 stops receiving
+/// (InProgress, no packets), then asks for the flow again and receives by
+/// itself, as from a transmitter that dropped it.
+#[test]
+fn tx_end_stops_our_rx_and_it_recovers_by_itself() {
+    use dstack::daemon::media::Media;
+    use dstack::subscribe::SubStatus;
+
+    let _one = ONE_DEVICE.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = tempfile::tempdir().unwrap();
+    let opts = Options {
+        config: device_in(dir.path()),
+        place: Place::Ip(routed_ipv4()),
+        control: dir.path().join("control.sock"),
+    };
+    let prepared = host::prepare_with(&opts, &[], ClockSource::System).expect("the device set up");
+    let media = prepared.media();
+    // As `daemon::cli::main` does for dstack-dev.
+    media.allow_dev_requests();
+    assert_eq!(ctl::answer("source 1 counter", &media), "ok");
+    let stop = Arc::new(AtomicBool::new(false));
+    let host = prepared
+        .start(Signals::Report(Arc::clone(&stop)))
+        .expect("the device started");
+    let rx1 = |media: &Media| {
+        let c = media.rx_channels().swap_remove(0);
+        (c.status, c.packets)
+    };
+    // How long until `done` holds for RX 1's status and packets, with its
+    // packets then; `None` at the bound (or when the device ended).
+    let wait = |bound: Duration, done: &dyn Fn(Option<SubStatus>, u64) -> bool| {
+        let start = Instant::now();
+        loop {
+            let (status, packets) = rx1(&media);
+            if done(status, packets) {
+                return Some((start.elapsed(), packets));
+            }
+            if start.elapsed() > bound || host.ended().is_some() {
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    let receiving = wait(BOUND, &|s, p| s == Some(SubStatus::Receiving) && p > 0);
+    let status = ctl::answer("status", &media);
+    let flow = field(&status, "\"tx\":[{", "flow");
+    let ended = flow.map(|f| ctl::answer(&format!("tx-end {f}"), &media));
+    let after_end = ctl::answer("status", &media);
+    // Silent for 2 s: InProgress (not connected, to a controller). Our RX
+    // shows it from 2 s of silence until it stops the flow at 6 s of the
+    // flow's age (`subscribe::YOUNG_NS`); the flow is about 0.5 s old at
+    // the tx-end, so that window is about 3 s wide.
+    let stopped = wait(BOUND, &|s, _| s == Some(SubStatus::InProgress));
+    let at_stop = rx1(&media).1;
+    // No packets while stopped.
+    std::thread::sleep(Duration::from_millis(300));
+    let still = rx1(&media).1;
+    // A stopped flow is asked for again within the retry wait (9 s from
+    // the last request, a silent flow stopped from 6 s of age): 30 s.
+    let recovered = wait(Duration::from_secs(30), &|s, p| {
+        s == Some(SubStatus::Receiving) && p > at_stop
+    });
+    let last = ctl::answer("status", &media);
+    let host_stopped = host.stop(Duration::from_secs(5));
+    assert!(receiving.is_some(), "RX 1 never received: {status}");
+    assert_eq!(flow, Some(1), "our one TX flow: {status}");
+    assert_eq!(ended.as_deref(), Some("ok"), "{status}");
+    assert!(
+        after_end.contains("\"tx\":[{\"flow\":1,\"live\":0,"),
+        "{after_end}"
+    );
+    let (took, _) = stopped.unwrap_or_else(|| panic!("RX 1 kept receiving: {after_end}"));
+    assert!(
+        took <= Duration::from_secs(5),
+        "RX 1 stopped after {took:?}"
+    );
+    assert_eq!(still, at_stop, "RX 1 received while stopped");
+    assert!(recovered.is_some(), "RX 1 did not receive again: {last}");
+    assert!(last.contains("\"live\":1,"), "a live TX flow again: {last}");
+    assert!(
+        matches!(host_stopped, host::Stopped::Done),
+        "{host_stopped:?}"
+    );
+}

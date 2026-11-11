@@ -105,6 +105,25 @@ impl Build {
     pub fn line(&self) -> String {
         format!("{} {} {}", self.name, self.version, self.sha)
     }
+
+    /// Whether this binary's device answers dstack-dev's own control
+    /// requests (`tx-end`, dstack #187:
+    /// [`media::Media::allow_dev_requests`]): dstack's own binary only,
+    /// never an application's ([`cli::main`] asks).
+    pub fn dev_requests(&self) -> bool {
+        *self == Build::OWN
+    }
+
+    /// Lets `media` answer dstack-dev's own control requests when this
+    /// build is dstack's own ([`Build::dev_requests`]); `true` when it did.
+    /// [`cli::main`] calls it before the device starts.
+    pub fn grant_dev_requests(&self, media: &media::Media) -> bool {
+        let granted = self.dev_requests();
+        if granted {
+            media.allow_dev_requests();
+        }
+        granted
+    }
 }
 
 /// [`USAGE`] for the binary called `name`.
@@ -153,6 +172,13 @@ ctl: sends one request to the control socket and prints the answer line:
                             engine's ring, on a channel the engine feeds)
   check <rx> off|counter|sine <hz>
                             which checker reads RX channel rx (from 1)
+  tx-end <flow>             dstack's own dev binary only, never an
+                            application's (a controller's E2E): ends our
+                            live TX flow <flow> (the status's tx flow, from
+                            1) as if its receiver had gone quiet; the
+                            receiver stops receiving, then asks again and
+                            receives by itself, on a new flow (often under
+                            another number)
 Exit 0 for ok or the status, 1 for an error answer or no socket.
 
 clock: polls dsync's time server on the box (127.0.0.1:31900) n times,
@@ -286,7 +312,7 @@ fn parse_ctl(args: &[String]) -> Result<Command, String> {
         words => (PathBuf::from(crate::ctl::SOCKET), words),
     };
     if words.is_empty() {
-        return Err("ctl: the request is missing (status, source or check)".into());
+        return Err("ctl: the request is missing (status, source, check, app or tx-end)".into());
     }
     Ok(Command::Ctl {
         socket,
@@ -693,9 +719,13 @@ pub async fn serve<R: Registry>(
         queue_waits = announcer.waited(),
         "mDNS records announced"
     );
-    let (identity, network) = {
+    let (identity, network, status_port) = {
         let device = shared.lock().unwrap_or_else(PoisonError::into_inner);
-        (Identity::new(&device.cfg, net), network_of(&device.cfg))
+        (
+            Identity::new(&device.cfg, net),
+            network_of(&device.cfg),
+            device.status_port,
+        )
     };
     let threads = media.spawn_threads().map_err(ServeError::Threads)?;
     let _receivers = receiver_reader(&media, &network, ip).map_err(ServeError::Threads)?;
@@ -706,6 +736,7 @@ pub async fn serve<R: Registry>(
         Client::new(media.ip),
         Arc::clone(&rx_changes),
     );
+    driver.set_status_port(status_port);
     let arc = arc::serve(
         sockets.arc,
         Arc::clone(&shared),

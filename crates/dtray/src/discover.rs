@@ -17,7 +17,6 @@
 use std::collections::BTreeMap;
 use std::net::{Ipv4Addr, SocketAddrV4};
 
-use dstack::announce::STATUS_PORT_KEY;
 use dstack::daemon::IfAddr;
 use dstack::discover::{Device, Discovery};
 use tracing::{debug, info, warn};
@@ -46,25 +45,16 @@ pub fn own_addresses(ifs: &[IfAddr]) -> Vec<Ipv4Addr> {
     out
 }
 
-/// The status port a device's ARC TXT names (`dstack_ctl=<port>`); `None`
-/// without the key, or with a value that is no port (0 included).
-pub fn status_port(device: &Device) -> Option<u16> {
-    device
-        .txt
-        .get(STATUS_PORT_KEY)
-        .and_then(|v| v.parse::<u16>().ok())
-        .filter(|&p| p != 0)
-}
-
 /// Of `found` (every discovery's list), the devices on this PC: an ARC
-/// address in `own` and a status port. Sorted by name, each once (a device
-/// two discoveries both list).
+/// address in `own` and a status port ([`Device::status_port`],
+/// `dstack_ctl`). Sorted by name, each once (a device two discoveries both
+/// list).
 pub fn local_devices(found: &[Device], own: &[Ipv4Addr]) -> Vec<Local> {
     let mut out: Vec<Local> = found
         .iter()
         .filter(|d| own.contains(d.arc.ip()))
         .filter_map(|d| {
-            status_port(d).map(|port| Local {
+            d.status_port().map(|port| Local {
                 name: d.name.clone(),
                 port,
                 arc: d.arc,
