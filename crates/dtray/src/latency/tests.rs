@@ -2,7 +2,7 @@
 
 use dstack::arc::control::Settings;
 
-use super::{Choice, DANTE_NS, choices, label, ns_of_ms, offered, pick, read_back};
+use super::{Choice, DANTE_NS, choices, label, ns_of_ms, read_back};
 
 fn settings(min: Option<u32>, max: Option<u32>, configured: Option<u32>) -> Settings {
     Settings {
@@ -82,33 +82,46 @@ fn the_command_line_takes_the_menu_s_labels_without_ms() {
         .collect();
     let all: Vec<Option<u32>> = DANTE_NS.iter().map(|&ns| Some(ns)).collect();
     assert_eq!(named, all);
-    for ms in [
-        "", "0", "3", "1.0", ".5", "0.50", "1 ms", "1ms", "250000", "-1", "x",
-    ] {
-        assert_eq!(ns_of_ms(ms), None, "{ms:?}");
-    }
 }
 
 #[test]
-fn a_value_the_device_offers_is_picked_and_any_other_names_the_offer() {
-    let c = choices(&settings(Some(500_000), Some(5_000_000), Some(1_000_000)));
-    assert_eq!(offered(&c), "0.5, 1, 2, 5 ms");
-    assert_eq!(pick(&c, "0.5"), Ok(500_000));
-    assert_eq!(pick(&c, "1"), Ok(1_000_000));
-    assert_eq!(pick(&c, "5"), Ok(5_000_000));
-    // A Dante value outside the device's range, and no value at all.
-    for ms in ["0.25", "10", "3", "1.0"] {
-        assert_eq!(
-            pick(&c, ms),
-            Err(format!(
-                "{ms} ms is not a latency the device offers (0.5, 1, 2, 5 ms); nothing written"
-            )),
-        );
+fn the_command_line_takes_any_decimal_ms_rounded_to_whole_us() {
+    // dstack #213: a value that is none of Dante's (dasio-test-1's 0.333).
+    for (ms, ns) in [
+        ("0.333", 333_000),
+        ("0", 0),
+        ("3", 3_000_000),
+        ("1.0", 1_000_000),
+        ("0.50", 500_000),
+        ("12.345", 12_345_000),
+        ("007", 7_000_000),
+    ] {
+        assert_eq!(ns_of_ms(ms), Some(ns), "{ms:?}");
     }
-    assert_eq!(
-        pick(&[], "1"),
-        Err("the device names no latency range; nothing written".to_string())
-    );
+    // Rounded to whole µs at the fourth decimal, half up.
+    assert_eq!(ns_of_ms("0.3334"), Some(333_000));
+    assert_eq!(ns_of_ms("0.3335"), Some(334_000));
+    assert_eq!(ns_of_ms("0.33349"), Some(333_000));
+    assert_eq!(ns_of_ms("0.9995"), Some(1_000_000));
+    assert_eq!(ns_of_ms("1.0009"), Some(1_001_000));
+    assert_eq!(ns_of_ms("0.123456789"), Some(123_000));
+    assert_eq!(ns_of_ms("0.0005"), Some(1_000));
+    assert_eq!(ns_of_ms("0.0004"), Some(0));
+    // The largest value a u32 of ns holds, and one µs past it.
+    assert_eq!(ns_of_ms("4294.967"), Some(4_294_967_000));
+    assert_eq!(ns_of_ms("4294.968"), None);
+    assert_eq!(ns_of_ms("250000"), None);
+    assert_eq!(ns_of_ms("99999999999999999999999"), None);
+}
+
+#[test]
+fn junk_is_no_value() {
+    for ms in [
+        "", ".", ".5", "1.", "1 ms", "1ms", "-1", "+1", "x", "1e3", " 1", "1 ", "1.2.3", "0,5",
+        "0x10", "1_000", "\u{0661}",
+    ] {
+        assert_eq!(ns_of_ms(ms), None, "{ms:?}");
+    }
 }
 
 #[test]

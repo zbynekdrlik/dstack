@@ -134,8 +134,79 @@ fn an_unreadable_device_writes_nothing() {
 }
 
 #[test]
-fn a_value_the_device_does_not_offer_writes_nothing() {
-    for ms in ["0.25", "10", "3"] {
+fn a_value_inside_the_range_is_written_both_ends_included() {
+    // dstack #213: a value that is none of Dante's, and the range's ends.
+    for (ms, ns, shown) in [
+        ("3", 3_000_000, "3 ms"),
+        ("0.5", 500_000, "0.5 ms"),
+        ("5", 5_000_000, "5 ms"),
+        ("4.9999", 5_000_000, "5 ms"),
+        ("0.4999", 500_000, "0.5 ms"),
+        ("0.6667", 667_000, "0.667 ms"),
+    ] {
+        let mut asked = Vec::new();
+        let r = latency(
+            &two(),
+            "Test Dev",
+            ms,
+            |_| Ok(settings(Some(1_000_000))),
+            |arc, ns| {
+                asked.push((arc, ns));
+                Ok(settings(Some(ns)))
+            },
+        );
+        // The second read (after the write) answers as the device would.
+        assert_eq!(asked, vec![(A, ns)], "{ms:?}");
+        assert_eq!(
+            r,
+            Err(format!(
+                "Test Dev: the latency {shown} was written, but it reads back 1 ms"
+            )),
+            "{ms:?}"
+        );
+    }
+    let reads = RefCell::new(vec![settings(Some(1_000_000)), settings(Some(333_000))]);
+    let r = latency(
+        &two(),
+        "Test Dev",
+        "0.333",
+        |_| {
+            Ok(Settings {
+                latency_min_ns: Some(333_000),
+                ..reads.borrow_mut().remove(0)
+            })
+        },
+        |_, ns| Ok(settings(Some(ns))),
+    );
+    assert_eq!(
+        r,
+        Ok("Test Dev: the latency is set to 0.333 ms; it reads back 0.333 ms".to_string())
+    );
+}
+
+#[test]
+fn a_value_already_configured_that_is_none_of_dante_s_writes_nothing() {
+    let r = latency(
+        &two(),
+        "Test Dev",
+        "3.5",
+        |_| Ok(settings(Some(3_500_000))),
+        |_, _| -> Result<Settings, String> { panic!("no write for the value already set") },
+    );
+    assert_eq!(
+        r,
+        Ok("Test Dev: the latency is already 3.5 ms; nothing written".to_string())
+    );
+}
+
+#[test]
+fn a_value_outside_the_range_or_no_value_writes_nothing() {
+    for (ms, shown) in [
+        ("0.25", "0.25 ms"),
+        ("0.4994", "0.499 ms"),
+        ("5.001", "5.001 ms"),
+        ("10", "10 ms"),
+    ] {
         let r = latency(
             &two(),
             "Test Dev",
@@ -146,9 +217,26 @@ fn a_value_the_device_does_not_offer_writes_nothing() {
         assert_eq!(
             r,
             Err(format!(
-                "Test Dev: {ms} ms is not a latency the device offers (0.5, 1, 2, 5 ms); \
-                 nothing written"
-            ))
+                "Test Dev: {shown} is outside the latency range the device states \
+                 (0.5 ms to 5 ms); nothing written"
+            )),
+            "{ms:?}"
+        );
+    }
+    for ms in ["x", "", "1 ms", "-1"] {
+        let r = latency(
+            &two(),
+            "Test Dev",
+            ms,
+            |_| Ok(settings(Some(1_000_000))),
+            |_, _| -> Result<Settings, String> { panic!("no write") },
+        );
+        assert_eq!(
+            r,
+            Err(format!(
+                "Test Dev: {ms} is not a latency in ms (such as 0.5 or 0.333); nothing written"
+            )),
+            "{ms:?}"
         );
     }
     let r = latency(
