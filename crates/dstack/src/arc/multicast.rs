@@ -13,7 +13,7 @@ use tracing::info;
 use super::{ArcOutcome, flows, refuse};
 use crate::device::DeviceConfig;
 use crate::media::tx::{TxTable, multicast_group};
-use crate::wire::{Header, STATUS_ERROR, STATUS_OK, read_u16, reply};
+use crate::wire::{Header, STATUS_OK, read_u16, reply};
 
 /// ARC 2.8.9's multicast create or delete (`h.op1`, see [`super::answer`]) on the
 /// TX table `tx` of the device `cfg` at `ip`.
@@ -26,7 +26,7 @@ use crate::wire::{Header, STATUS_ERROR, STATUS_OK, read_u16, reply};
 /// Dante Controller asks 0, the device's own) and our encoding, and is
 /// sent to [`multicast_group`]. The reply is its record in the list's
 /// form with no destination, as a UltimoX2 answers. Refused
-/// ([`STATUS_ERROR`]), creating nothing: a body that does not read, other
+/// ([`crate::wire::STATUS_ERROR`]), creating nothing: a body that does not read, other
 /// than one multicast record, a slot past ours or in use, channels we do
 /// not have.
 ///
@@ -73,6 +73,7 @@ pub(super) fn answer(
     }
     info!(
         slot,
+        %group,
         channels = f.channels.len(),
         fpp = cfg.tx_fpp_max,
         "a multicast TX flow created (ARC 2.8.9)"

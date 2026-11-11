@@ -659,16 +659,6 @@ fn socket_descriptor(out: &mut Body, at: std::net::SocketAddrV4) {
     out.bytes(&at.ip().octets());
 }
 
-/// 0x2200: the TX flows receivers asked for on 4455, expired ones too
-/// (listed until a new destination takes the slot), by slot. Each flow,
-/// from a multiple of 4: the flow descriptor (flow, `0x11` unicast, our
-/// rate, 0, our encoding, 1, the slots, the socket descriptor's offset,
-/// each slot's TX channel or 0, the names descriptor's offset); at a
-/// multiple of 4 the socket descriptor (the receiver's address); the names
-/// descriptor (`0x0a00, 1`, the receiver's device and flow names, `0x10`,
-/// ours, 8 zeros); then the three names: ours `<flow>_<process>`, the
-/// receiver's device and flow names (cut to [`MAX_REMOTE_NAME`]). A reader
-/// follows the offsets. The page's item is the flow descriptor's offset.
 /// Our TX flows as an ARC 2.8.9 list (0x2600, [`flows::list_reply_body`]):
 /// each a unicast flow to its receiver or a multicast flow to its group
 /// (dstack #193), its slot (from 1) as both ids.
@@ -695,6 +685,17 @@ fn flows_2809(cfg: &DeviceConfig, tx: &TxTable) -> Vec<u8> {
     flows::list_reply_body(&listed)
 }
 
+/// 0x2200: the TX flows receivers asked for on 4455, expired ones too
+/// (listed until a new destination takes the slot), by slot. Each flow,
+/// from a multiple of 4: the flow descriptor (flow, `0x11` unicast or
+/// `0x02` multicast (dstack #193), our rate, 0, our encoding, 1, the
+/// slots, the socket descriptor's offset, each slot's TX channel or 0, the
+/// names descriptor's offset); at a multiple of 4 the socket descriptor
+/// (the receiver's address, a multicast flow's group); the names
+/// descriptor (`0x0a00, 1`, the receiver's device and flow names, `0x10`,
+/// ours, 8 zeros); then the three names: ours `<flow>_<process>`, the
+/// receiver's device and flow names (cut to [`MAX_REMOTE_NAME`]). A reader
+/// follows the offsets. The page's item is the flow descriptor's offset.
 fn tx_flows(h: &Header, req: &[u8], cfg: &DeviceConfig, tx: &TxTable) -> ArcOutcome {
     page(
         h,

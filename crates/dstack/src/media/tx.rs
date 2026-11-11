@@ -736,17 +736,30 @@ impl TxShared {
         }
         let slots = cfg.flow_slots;
         let mut send_buffer = 0;
+        let mut multicast_refused = None;
         let sockets = (0..slots.min(MAX_FLOWS))
             .map(|_| {
                 let s = UdpSocket::bind(SocketAddrV4::new(ip, 0))?;
                 s.set_nonblocking(true)?;
                 crate::winsock::no_connreset(&s)?;
                 mark(&s)?;
-                multicast_out(&s, ip)?;
+                // Unicast never depends on it: a refusal leaves multicast
+                // flows (dstack #193) on the routing table's interface.
+                if let Err(e) = multicast_out(&s, ip) {
+                    multicast_refused = Some(e);
+                }
                 send_buffer = set_send_buffer(&s, SEND_BUFFER_BYTES);
                 Ok(s)
             })
             .collect::<io::Result<Box<[UdpSocket]>>>()?;
+        if let Some(e) = multicast_refused {
+            warn!(
+                error = %e,
+                %ip,
+                "the flow sockets' multicast interface and TTL could not be set: \
+                 multicast flows go out on the routing table's interface"
+            );
+        }
         let mut ports = [0; MAX_FLOWS];
         for (port, s) in ports.iter_mut().zip(&sockets) {
             *port = s.local_addr()?.port();
