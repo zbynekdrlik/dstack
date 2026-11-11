@@ -7,10 +7,12 @@
 //! to the Windows clipboard; an error shows in a message box.
 //!
 //! [`autostart`]: the user's Run value for `dtray --autostart on|off`.
+//! [`attach_console`]: the shell's console for the command-line modes.
 
 use windows_sys::Win32::Foundation::{
     ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, ERROR_SUCCESS, GetLastError, GlobalFree,
 };
+use windows_sys::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole};
 use windows_sys::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
 };
@@ -36,6 +38,17 @@ const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(Some(0)).collect()
+}
+
+/// Attaches to the console of the process that started dtray, when it has
+/// one (cmd, PowerShell), so a command-line mode's stdout and stderr reach
+/// that shell ([`dtray::wants_console`], dstack #213); a handle the caller
+/// already gave (a redirect) is kept. As dlisten and dsend do
+/// (`dstack_endpoint::win::attach_console`).
+pub fn attach_console() {
+    // SAFETY: plain call; failing (no parent console: Explorer, the Run
+    // value, Start-Process) changes nothing.
+    unsafe { AttachConsole(ATTACH_PARENT_PROCESS) };
 }
 
 /// An error box (the tray has no console).
