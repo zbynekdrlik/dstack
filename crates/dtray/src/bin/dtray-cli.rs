@@ -3,10 +3,11 @@
 //! `dtray-cli`: dtray's command-line modes as a console program (dstack
 //! #218), for scripts and automation. `dtray.exe` is a GUI-subsystem
 //! program on Windows: PowerShell's `&` neither waits for it nor sets
-//! `$LASTEXITCODE`, and a capturing shell (a remote shell, CI, a script
-//! with its output in a pipe) reads none of its lines. dtray-cli is a
-//! console program on every platform, so its lines go to the pipes the
-//! caller gave and the shell waits for its exit code.
+//! `$LASTEXITCODE` unless it captures the output, so in a shell whose own
+//! output is a pipe (a remote shell, CI) its lines and exit code are lost.
+//! dtray-cli is a console program on every platform: every shell waits for
+//! it, its lines go to the pipes the caller gave, and its exit code is
+//! read.
 //!
 //! It runs the same modes as dtray, by the same code ([`dtray::cli`]):
 //! `--print`, `--version`, `--set-latency <device> <ms>`,
@@ -43,8 +44,14 @@ fn autostart(on: bool) -> ExitCode {
         }
     };
     match Command::new(&tray).args(cli::autostart_args(on)).status() {
-        Ok(status) => match status.code().and_then(|c| u8::try_from(c).ok()) {
-            Some(code) => ExitCode::from(code),
+        Ok(status) => match status.code() {
+            Some(code) => u8::try_from(code).map(ExitCode::from).unwrap_or_else(|_| {
+                eprintln!(
+                    "dtray-cli: {} --autostart exited with {code}",
+                    tray.display()
+                );
+                ExitCode::FAILURE
+            }),
             None => {
                 eprintln!(
                     "dtray-cli: {} --autostart ended without an exit code ({status})",

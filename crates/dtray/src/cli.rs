@@ -3,8 +3,8 @@
 //! The command-line modes, one implementation for both of dtray's programs
 //! (dstack #218): `dtray` (the tray, a GUI-subsystem program on Windows)
 //! and `dtray-cli` (a console program on every platform, for scripts and
-//! automation: a capturing shell reads its lines and exit code, and
-//! PowerShell's `&` waits for it). Each program parses its arguments with
+//! automation: any shell waits for it and reads its lines and exit code,
+//! PowerShell's `&` too). Each program parses its arguments with
 //! [`crate::mode_of`] and calls [`run`] with its own usage line, its own
 //! tray and its own autostart.
 //!

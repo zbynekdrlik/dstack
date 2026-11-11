@@ -22,9 +22,11 @@
 //! usage error or the tray or autostart on a platform without one. On
 //! Windows (a GUI-subsystem program) every mode but the tray attaches to
 //! the console of the shell that started it ([`dtray::wants_console`]):
-//! an interactive console shows the lines, but a capturing shell reads
-//! neither them nor the exit code, so scripts and automation call
-//! `dtray-cli`, the console program for the same modes (dstack #218).
+//! an interactive console shows the lines, but PowerShell's `&` does not
+//! wait for a GUI-subsystem program unless it captures the output, so in a
+//! shell whose output is a pipe (a remote shell, CI) the lines and the exit
+//! code are lost. Scripts and automation call `dtray-cli`, the console
+//! program for the same modes (dstack #218).
 //! Both programs run the modes by the same code ([`dtray::cli::run`]).
 //!
 //! `dtray --switch <label> <source>` runs the same discovery pass, then

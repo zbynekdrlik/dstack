@@ -16,7 +16,7 @@ name = "dtray"
 path = "src/main.rs"
 
 # The command-line modes as a console program for scripts and automation
-# (dstack #218): a capturing shell reads its lines and exit code.
+# (dstack #218): any shell waits for it and reads its lines and exit code.
 [[bin]]
 name = "dtray-cli"
 path = "src/bin/dtray-cli.rs"

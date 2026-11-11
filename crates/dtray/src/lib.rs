@@ -47,8 +47,9 @@
 //! ([`switches::set`]).
 //!
 //! On Windows `dtray.exe` is a GUI-subsystem program: a console does not
-//! wait for it, PowerShell's `&` neither waits nor sets `$LASTEXITCODE`,
-//! and a capturing shell reads none of its lines. The second program,
+//! wait for it, and PowerShell's `&` neither waits nor sets
+//! `$LASTEXITCODE` unless it captures the output; in a shell whose output
+//! is a pipe (a remote shell, CI) the lines are lost. The second program,
 //! `dtray-cli` (dstack #218), is a console program on every platform with
 //! the same command-line modes ([`cli`]) and no tray: scripts and
 //! automation call it, `& dtray-cli.exe --set-latency <device> 2` gives
