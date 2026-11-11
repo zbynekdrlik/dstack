@@ -25,7 +25,10 @@
 //! | 0x2010 | TX channels' current names, paged |
 //! | 0x2013 | TX rename |
 //! | 0x2200 | TX flows, [`FLOW_PAGE`] slots a page (inferno's `query_tx_flows`) |
-//! | 0x2201, 0x2202 | create, delete a multicast TX flow: no multicast, refused (inferno's answer when it creates or deletes none) |
+//! | 0x2201, 0x2202 | the older create, delete of a multicast TX flow: refused (inferno's answer when it creates or deletes none); ARC 2.8.9's 0x2601 creates one |
+//! | 0x2600 (start 0x2809) | ARC 2.8.9's TX flow list ([`flows::list_reply_body`]): receivers' flows unicast, ours multicast with their group |
+//! | 0x2601 (start 0x2809) | ARC 2.8.9's multicast create (dstack #193): a multicast flow in the asked slot ([`answer`]); the reply is its record, no destination |
+//! | 0x2602 (start 0x2809) | ARC 2.8.9's delete of a multicast flow: OK, no body |
 //! | 0x2204 | status [`STATUS_2320`], no body (the IEM card's answer, captured) |
 //! | 0x2320 | status [`STATUS_2320`], no body (inferno's "???") |
 //! | 0x3000 | RX channels with their names, subscriptions and statuses, paged |
@@ -77,6 +80,7 @@
 //! [`client`]'s: read-only, the same page format.
 
 use std::io;
+use std::net::Ipv4Addr;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -103,6 +107,7 @@ pub mod client;
 pub mod control;
 pub mod flows;
 pub mod gaps;
+mod multicast;
 
 /// ARC's UDP port.
 pub const PORT: u16 = 4440;
@@ -164,8 +169,10 @@ pub const MAX_REMOTE_NAME: usize = 63;
 pub const STATUS_2320: u16 = 0x0030;
 /// A flow's socket descriptor (`0x8002`, port, IPv4 address).
 const SOCKET_DESCRIPTOR: u16 = 0x8002;
-/// A TX flow descriptor's type: unicast (2 is multicast).
+/// A TX flow descriptor's type: unicast.
 const FLOW_UNICAST: u16 = 0x11;
+/// A TX flow descriptor's type: multicast (dstack #193).
+const FLOW_MULTICAST: u16 = 0x02;
 
 /// TX channels per page.
 pub const TX_PAGE: usize = 32;
@@ -181,7 +188,8 @@ pub const MAX_CHANNELS_IN_FLOW: u16 = 8;
 pub const CLOCK_REPLY: [u8; 8] = [0x38, 0x00, 0x38, 0xfd, 0x38, 0xfe, 0x38, 0xff];
 /// The counts' flags byte: bit 4, TX channels can be renamed. Bit 5, TX
 /// multicast, stays clear (inferno sets it): the device creates no
-/// multicast flow (0x2201 refused), so Dante Controller is never offered one.
+/// multicast flow by 0x2201 (refused), so Dante Controller is never offered
+/// one; ARC 2.8.9's create (0x2601, dstack #193) is answered.
 const FLAG_TX_RENAME: u8 = 0x10;
 /// The device names' header (0x1003), before its strings.
 const NAMES_HEADER: usize = 38;
@@ -268,6 +276,10 @@ pub trait Flows: Send + Sync + 'static {
     fn renamed(&self, name: &str);
     /// The device latency is `ns` now (a Dante Controller write).
     fn set_latency(&self, ns: u64);
+    /// Calls `f` with the TX table to change and the device's address (ARC
+    /// 2.8.9's multicast create and delete, dstack #193), then hands the
+    /// table's plans to the TX thread.
+    fn change_tx<R>(&self, f: impl FnOnce(&mut TxTable, Ipv4Addr) -> R) -> R;
 }
 
 /// The daemon's flows (plan Task 7): the TX side's table and the manager.
@@ -307,6 +319,13 @@ impl Flows for Running {
             .set_latency(ns);
         self.tx.set_device_latency(ns);
     }
+
+    fn change_tx<R>(&self, f: impl FnOnce(&mut TxTable, Ipv4Addr) -> R) -> R {
+        let mut control = self.tx.lock();
+        let out = f(&mut control.table, self.tx.ip());
+        self.tx.publish(&control);
+        out
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -327,7 +346,9 @@ impl Dir {
 /// Answers one datagram from `state`, `cfg` and the running flows `live`.
 /// Only a valid rename or a subscription change changes `state` (and is
 /// [`ArcOutcome::Changed`]); this function saves nothing ([`respond`] does)
-/// and tells nobody (the server does).
+/// and tells nobody (the server does). ARC 2.8.9's multicast create and
+/// delete change the TX table, which `live` only reads: [`answer`] answers
+/// them, here they go unanswered.
 pub fn handle(
     state: &mut DeviceState,
     cfg: &DeviceConfig,
@@ -395,6 +416,23 @@ pub fn handle(
         op::RX_UNSUBSCRIBE => unsubscribe(&h, body, state, cfg),
         op::CLOCK => ok(&CLOCK_REPLY),
         _ => unanswered(&h, "an opcode inferno does not answer"),
+    }
+}
+
+/// What the server answers to `req`: ARC 2.8.9's multicast create and
+/// delete (0x2601, 0x2602 under [`flows::START_2809`], dstack #193) with
+/// the TX table to change ([`Flows::change_tx`]), anything else by
+/// [`respond`] with the flows as they are.
+pub fn answer<F: Flows>(device: &mut Device, running: &F, req: &[u8]) -> ArcOutcome {
+    match Header::parse(req) {
+        Ok((h, body))
+            if h.start == flows::START_2809
+                && h.op2 == 0
+                && matches!(h.op1, flows::CREATE | flows::DELETE) =>
+        {
+            running.change_tx(|tx, ip| multicast::answer(&h, body, &device.cfg, tx, ip))
+        }
+        _ => running.view(|live| respond(device, live, req)),
     }
 }
 
@@ -485,7 +523,7 @@ pub async fn serve<F: Flows>(
                 requests.received(PORT, peer.ip(), header_op(&buf[..n]));
                 let (outcome, moved) = {
                     let mut device = shared.lock().unwrap_or_else(PoisonError::into_inner);
-                    let outcome = flows.view(|live| respond(&mut device, live, &buf[..n]));
+                    let outcome = answer(&mut device, flows.as_ref(), &buf[..n]);
                     if let ArcOutcome::Changed(_, c) = &outcome
                         && c.device_renamed
                     {
@@ -621,18 +659,9 @@ fn socket_descriptor(out: &mut Body, at: std::net::SocketAddrV4) {
     out.bytes(&at.ip().octets());
 }
 
-/// 0x2200: the TX flows receivers asked for on 4455, expired ones too
-/// (listed until a new destination takes the slot), by slot. Each flow,
-/// from a multiple of 4: the flow descriptor (flow, `0x11` unicast, our
-/// rate, 0, our encoding, 1, the slots, the socket descriptor's offset,
-/// each slot's TX channel or 0, the names descriptor's offset); at a
-/// multiple of 4 the socket descriptor (the receiver's address); the names
-/// descriptor (`0x0a00, 1`, the receiver's device and flow names, `0x10`,
-/// ours, 8 zeros); then the three names: ours `<flow>_<process>`, the
-/// receiver's device and flow names (cut to [`MAX_REMOTE_NAME`]). A reader
-/// follows the offsets. The page's item is the flow descriptor's offset.
 /// Our TX flows as an ARC 2.8.9 list (0x2600, [`flows::list_reply_body`]):
-/// each a unicast flow to its receiver, its slot (from 1) as both ids.
+/// each a unicast flow to its receiver or a multicast flow to its group
+/// (dstack #193), its slot (from 1) as both ids.
 fn flows_2809(cfg: &DeviceConfig, tx: &TxTable) -> Vec<u8> {
     let listed: Vec<flows::TxFlow> = (0..usize::from(MAX_FLOWS))
         .filter_map(|slot| {
@@ -641,7 +670,11 @@ fn flows_2809(cfg: &DeviceConfig, tx: &TxTable) -> Vec<u8> {
             Some(flows::TxFlow {
                 id,
                 local_id: id,
-                flags: flows::UNICAST,
+                flags: if f.multicast {
+                    flows::MULTICAST
+                } else {
+                    flows::UNICAST
+                },
                 channels: f.channels.iter().map(|c| c.unwrap_or(0)).collect(),
                 fpp: f.fpp,
                 bits: u16::from(cfg.encoding),
@@ -652,6 +685,17 @@ fn flows_2809(cfg: &DeviceConfig, tx: &TxTable) -> Vec<u8> {
     flows::list_reply_body(&listed)
 }
 
+/// 0x2200: the TX flows receivers asked for on 4455, expired ones too
+/// (listed until a new destination takes the slot), by slot. Each flow,
+/// from a multiple of 4: the flow descriptor (flow, `0x11` unicast or
+/// `0x02` multicast (dstack #193), our rate, 0, our encoding, 1, the
+/// slots, the socket descriptor's offset, each slot's TX channel or 0, the
+/// names descriptor's offset); at a multiple of 4 the socket descriptor
+/// (the receiver's address, a multicast flow's group); the names
+/// descriptor (`0x0a00, 1`, the receiver's device and flow names, `0x10`,
+/// ours, 8 zeros); then the three names: ours `<flow>_<process>`, the
+/// receiver's device and flow names (cut to [`MAX_REMOTE_NAME`]). A reader
+/// follows the offsets. The page's item is the flow descriptor's offset.
 fn tx_flows(h: &Header, req: &[u8], cfg: &DeviceConfig, tx: &TxTable) -> ArcOutcome {
     page(
         h,
@@ -664,7 +708,12 @@ fn tx_flows(h: &Header, req: &[u8], cfg: &DeviceConfig, tx: &TxTable) -> ArcOutc
             let id = wire_u16(slot + 1);
             out.align(4);
             let main = out.offset();
-            for field in [id, FLOW_UNICAST] {
+            let kind = if f.multicast {
+                FLOW_MULTICAST
+            } else {
+                FLOW_UNICAST
+            };
+            for field in [id, kind] {
                 out.u16(field);
             }
             out.u32(cfg.sample_rate);

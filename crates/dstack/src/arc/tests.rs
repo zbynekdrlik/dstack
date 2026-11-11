@@ -20,12 +20,13 @@ use crate::wire::{HEADER_LEN, Header, MAX_DATAGRAM, read_u16, request, string_at
 
 const TEST_DEVICE: &str = include_str!("../../../../config/test-device.toml");
 
-/// The tests' flows: no TX flow, and a manager that keeps the
-/// subscriptions and resolves none, so every subscribed channel reads
-/// Unresolved (the daemon's are `Running`, `crate::daemon::media`).
+/// The tests' flows: no TX flow until a multicast create makes one, and a
+/// manager that keeps the subscriptions and resolves none, so every
+/// subscribed channel reads Unresolved (the daemon's are `Running`,
+/// `crate::daemon::media`).
 #[derive(Debug)]
 struct NoFlows {
-    tx: TxTable,
+    tx: Mutex<TxTable>,
     rx: Mutex<Manager>,
 }
 
@@ -41,7 +42,7 @@ impl NoFlows {
         rx.load(&device.state.subscriptions);
         rx.changed();
         NoFlows {
-            tx: TxTable::new(0),
+            tx: Mutex::new(TxTable::new(0)),
             rx: Mutex::new(rx),
         }
     }
@@ -49,11 +50,9 @@ impl NoFlows {
 
 impl Flows for NoFlows {
     fn view<R>(&self, f: impl FnOnce(&Live<'_>) -> R) -> R {
+        let tx = self.tx.lock().unwrap_or_else(PoisonError::into_inner);
         let rx = self.rx.lock().unwrap_or_else(PoisonError::into_inner);
-        f(&Live {
-            tx: &self.tx,
-            rx: &rx,
-        })
+        f(&Live { tx: &tx, rx: &rx })
     }
 
     fn subscribe(&self, subs: &[Option<Subscription>]) -> Vec<usize> {
@@ -74,6 +73,11 @@ impl Flows for NoFlows {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .set_latency(ns);
+    }
+
+    fn change_tx<R>(&self, f: impl FnOnce(&mut TxTable, Ipv4Addr) -> R) -> R {
+        let mut tx = self.tx.lock().unwrap_or_else(PoisonError::into_inner);
+        f(&mut tx, OUR_IP)
     }
 }
 
@@ -3008,4 +3012,51 @@ fn the_2_8_9_tx_flow_list_states_our_flows() {
     // 0x2600 under another start code is not that list: unanswered.
     let other = request(CONTROLLER, 0x5103, LIST, 0, &list_body());
     assert!(matches!(dev.send(&other), ArcOutcome::Unanswered { .. }));
+}
+
+/// dstack #193: the server answers ARC 2.8.9's multicast create and delete
+/// (0x2601, 0x2602 under start code 0x2809, op2 0) on the running flows'
+/// TX table, and the list then reads it; the same opcodes under another
+/// start code or op2 are not those requests and go unanswered.
+#[test]
+fn the_server_answers_the_2_8_9_multicast_create_and_delete_on_the_tx_table() {
+    use crate::arc::flows::{
+        CREATE, DELETE, LIST, START_2809, create_body, delete_body, list_body, parse_flows,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let mut device = Device::load(config_in(dir.path())).unwrap();
+    let process_id = device.cfg.process_id;
+    let flows = NoFlows::new(&device);
+    let mut ask = |start: u16, op1: u16, op2: u16, body: &[u8]| {
+        answer(&mut device, &flows, &request(start, 9, op1, op2, body))
+    };
+    let create = create_body(1, &[1, 2], 0x0001).unwrap();
+    assert_eq!(
+        ask(CONTROLLER, CREATE, 0, &create),
+        ArcOutcome::Unanswered { op1: CREATE }
+    );
+    assert_eq!(
+        ask(START_2809, CREATE, 1, &create),
+        ArcOutcome::Unanswered { op1: CREATE }
+    );
+    assert_eq!(
+        ask(START_2809, DELETE, 1, &delete_body(1)),
+        ArcOutcome::Unanswered { op1: DELETE }
+    );
+    let made = decode(ask(START_2809, CREATE, 0, &create));
+    assert_eq!((made.header.op2, made.changed), (STATUS_OK, false));
+    assert_eq!(parse_flows(&made.body).unwrap().flows.len(), 1);
+    let list = decode(ask(START_2809, LIST, 0, &list_body()));
+    let [f] = &parse_flows(&list.body).unwrap().flows[..] else {
+        panic!("one flow listed");
+    };
+    assert!(f.multicast());
+    assert_eq!(
+        f.destinations,
+        [crate::media::tx::multicast_group(OUR_IP, process_id, 0)]
+    );
+    let gone = decode(ask(START_2809, DELETE, 0, &delete_body(1)));
+    assert_eq!((gone.header.op2, gone.body.len()), (STATUS_OK, 0));
+    let list = decode(ask(START_2809, LIST, 0, &list_body()));
+    assert_eq!(parse_flows(&list.body).unwrap().flows, [], "deleted");
 }

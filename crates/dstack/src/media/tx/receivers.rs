@@ -38,13 +38,14 @@ impl TxShared {
         Plan::from_words(self.plans.get(slot)?.read()?.1).dest
     }
 
-    /// The flows sending now (not expired): each one's slot, receiver and
+    /// The flows sending now to a receiver (not expired, not multicast:
+    /// a group has no device to read): each one's slot, receiver and
     /// receiving device's name, for the receiver latency reader.
     pub fn receiver_flows(&self) -> Vec<(usize, SocketAddrV4, String)> {
         self.lock()
             .table
             .flows()
-            .filter(|(_, f)| !f.expired)
+            .filter(|(_, f)| !f.expired && !f.multicast)
             .map(|(slot, f)| (slot, f.dest, f.rx_host.clone()))
             .collect()
     }

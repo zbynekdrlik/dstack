@@ -707,3 +707,88 @@ fn two_devices_share_one_address_each_on_its_own_ports() {
     assert!(matches!(stopped_a, host::Stopped::Done), "{stopped_a:?}");
     assert!(matches!(stopped_b, host::Stopped::Done), "{stopped_b:?}");
 }
+
+/// dstack #193: our ARC client creates a multicast flow on our own running
+/// device (ARC 2.8.9's 0x2601, as dcontroller does), the list states it
+/// with its group, a socket that joins the group receives its packets from
+/// our address, and the delete ends it: the list is empty and the group
+/// quiet.
+#[test]
+fn our_device_creates_lists_sends_and_deletes_a_multicast_flow() {
+    use dstack::arc::client::{REPLY_TIMEOUT, Udp};
+    use dstack::arc::flows;
+    use std::net::SocketAddrV4;
+    use std::sync::atomic::AtomicU16;
+
+    let _one = ONE_DEVICE.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = tempfile::tempdir().unwrap();
+    let ip = routed_ipv4();
+    let opts = Options {
+        config: config_in(dir.path(), false),
+        place: Place::Ip(ip),
+        control: dir.path().join("control.sock"),
+    };
+    let prepared = host::prepare_with(&opts, &[], ClockSource::System).expect("the device set up");
+    let (process_id, fpp) = (prepared.config().process_id, prepared.config().tx_fpp_max);
+    let stop = Arc::new(AtomicBool::new(false));
+    let host = prepared
+        .start(Signals::Report(Arc::clone(&stop)))
+        .expect("the device started");
+    let seq = AtomicU16::new(1);
+    let requests = dstack::ctl::Requests::default();
+    let halt = AtomicBool::new(false);
+    let to = SocketAddrV4::new(ip, dstack::arc::PORT);
+    let mut udp = Udp::open(ip, to, &seq, REPLY_TIMEOUT, &requests, &halt).expect("a socket");
+    let group = dstack::media::tx::multicast_group(ip, process_id, 1);
+    let joined = dstack::media::rx::join(ip, group).expect("the group joined");
+    let made = flows::create_multicast(&mut udp, 2, &[1, 2], flows::OPTIONS[0]);
+    let listed = flows::list_tx_flows(&mut udp);
+    // Packets of our flow: 2 channels of 24 bits, `fpp` frames, from us.
+    let size = 9 + 2 * 3 * usize::from(fpp);
+    let mut buf = [0u8; 2048];
+    let (mut ours, mut sizes) = (0usize, Vec::new());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while ours < 100 && Instant::now() < deadline {
+        match joined.recv_from(&mut buf) {
+            Ok((n, from)) if from.ip() == std::net::IpAddr::V4(ip) => {
+                ours += 1;
+                if sizes.len() < 4 {
+                    sizes.push(n);
+                }
+            }
+            Ok(_) => {}
+            Err(_) => std::thread::sleep(Duration::from_millis(1)),
+        }
+    }
+    let deleted = flows::delete_multicast(&mut udp, 2);
+    let after = flows::list_tx_flows(&mut udp);
+    // Whatever was in flight at the delete arrives within 50 ms; then quiet.
+    std::thread::sleep(Duration::from_millis(50));
+    while joined.recv_from(&mut buf).is_ok() {}
+    std::thread::sleep(Duration::from_millis(300));
+    let mut late = 0usize;
+    while let Ok((_, from)) = joined.recv_from(&mut buf) {
+        late += usize::from(from.ip() == std::net::IpAddr::V4(ip));
+    }
+    let stopped = host.stop(Duration::from_secs(5));
+    let made = made.expect("the multicast flow created");
+    assert!(made.multicast(), "{made:?}");
+    assert_eq!((made.local_id, made.fpp), (2, fpp), "{made:?}");
+    assert_eq!(made.channels, [1, 2]);
+    assert!(made.destinations.is_empty(), "{made:?}");
+    let listed = listed.expect("our list");
+    let [f] = &listed.flows[..] else {
+        panic!("one flow listed: {listed:?}");
+    };
+    assert!(f.multicast(), "{f:?}");
+    assert_eq!(f.destinations, [group]);
+    assert!(
+        ours >= 100,
+        "{ours} packets of our flow on the group in 5 s"
+    );
+    assert!(sizes.iter().all(|&n| n == size), "{sizes:?} != {size}");
+    deleted.expect("the flow deleted");
+    assert_eq!(after.expect("our list").flows, []);
+    assert_eq!(late, 0, "the group is quiet after the delete");
+    assert!(matches!(stopped, host::Stopped::Done), "{stopped:?}");
+}
