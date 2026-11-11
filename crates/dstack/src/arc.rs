@@ -128,9 +128,10 @@ pub mod op {
     /// it may write (dstack #216; inferno answers 94 zero bytes, which
     /// marks none writable). The name is the opcode's older one.
     pub const ZEROS_1102: u16 = 0x1102;
-    /// A settings write (netaudio's latency set). Our device leaves it
-    /// unanswered, as inferno: its latency is the config's, and a refusal
-    /// once made Dante Controller ask again thousands of times a second.
+    /// A settings write. Our device takes the latency write, netaudio's
+    /// and Dante Controller's (dasio #2, dstack #216), and leaves any other
+    /// unanswered, as inferno: a refusal once made Dante Controller ask
+    /// again thousands of times a second.
     pub const SETTINGS_SET: u16 = 0x1101;
     pub const TX_CHANNELS: u16 = 0x2000;
     pub const TX_NAMES: u16 = 0x2010;
@@ -512,8 +513,9 @@ fn saved(
     }
 }
 
-/// 0x1101, a settings write (dasio #2): netaudio's latency write
-/// ([`control::parse_latency_body`]) sets the device latency when the
+/// 0x1101, a settings write (dasio #2): a latency write, netaudio's or
+/// Dante Controller's keyed one (dstack #216;
+/// [`control::parse_latency_body`]), sets the device latency when the
 /// config's rules hold for it ([`DeviceConfig::with_latency`]): kept in
 /// the state ([`DeviceState::set_latency`]), taken live, answered OK; a
 /// latency they refuse is refused ([`STATUS_ERROR`]). Any other body stays
