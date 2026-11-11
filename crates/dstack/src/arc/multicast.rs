@@ -10,13 +10,16 @@ use std::net::Ipv4Addr;
 
 use tracing::info;
 
-use super::{ArcOutcome, flows, refuse};
-use crate::device::DeviceConfig;
+use super::{ArcOutcome, Change, flows, refuse};
+use crate::device::{DeviceConfig, DeviceState};
 use crate::media::tx::TxTable;
 use crate::wire::{Header, STATUS_OK, read_u16, reply};
 
 /// ARC 2.8.9's multicast create or delete (`h.op1`, see [`super::answer`]) on the
-/// TX table `tx` of the device `cfg` at `ip`.
+/// TX table `tx` of the device `cfg` at `ip`, kept in its `state`
+/// ([`DeviceState::multicast`], dstack #207): a flow made or deleted is
+/// [`ArcOutcome::Changed`] (nothing else in its [`Change`]), which the
+/// caller saves before it answers; a refusal changes neither.
 ///
 /// **Create** (0x2601, [`flows::create_body`]'s form, read by
 /// [`flows::parse_flows`]): one multicast record whose media-local id
@@ -26,10 +29,9 @@ use crate::wire::{Header, STATUS_OK, read_u16, reply};
 /// Dante Controller asks 0, the device's own) and our encoding, and is
 /// sent to its group ([`TxTable::add_own_multicast`]). The reply is its
 /// record in the list's form with no destination, as a UltimoX2 answers.
-/// Refused
-/// ([`crate::wire::STATUS_ERROR`]), creating nothing: a body that does not read, other
-/// than one multicast record, a slot past ours or in use, channels we do
-/// not have.
+/// Refused ([`crate::wire::STATUS_ERROR`]), creating nothing: a body
+/// that does not read, other than one multicast record, a slot past ours
+/// or in use, channels we do not have.
 ///
 /// **Delete** (0x2602, [`flows::delete_body`]'s form): the multicast flow
 /// of the media-local id at body bytes 12–13 goes; OK and an empty body,
@@ -37,6 +39,7 @@ use crate::wire::{Header, STATUS_OK, read_u16, reply};
 pub(super) fn answer(
     h: &Header,
     body: &[u8],
+    state: &mut DeviceState,
     cfg: &DeviceConfig,
     tx: &mut TxTable,
     ip: Ipv4Addr,
@@ -48,8 +51,9 @@ pub(super) fn answer(
         if !tx.remove_multicast(slot) {
             return refuse(h, "a multicast delete of a slot without one");
         }
+        state.remove_multicast(slot);
         info!(slot, "a multicast TX flow deleted (ARC 2.8.9)");
-        return ArcOutcome::Reply(reply(h, STATUS_OK, &[]));
+        return ArcOutcome::Changed(reply(h, STATUS_OK, &[]), Change::default());
     }
     let asked = match flows::parse_flows(body) {
         Some(f) if f.unread == 0 => f.flows,
@@ -68,6 +72,7 @@ pub(super) fn answer(
         Ok(group) => group,
         Err(why) => return refuse(h, why),
     };
+    state.set_multicast(slot, &f.channels);
     info!(
         slot,
         %group,
@@ -84,7 +89,10 @@ pub(super) fn answer(
         bits: u16::from(cfg.encoding),
         destinations: Vec::new(),
     };
-    ArcOutcome::Reply(reply(h, STATUS_OK, &flows::list_reply_body(&[made])))
+    ArcOutcome::Changed(
+        reply(h, STATUS_OK, &flows::list_reply_body(&[made])),
+        Change::default(),
+    )
 }
 
 #[cfg(test)]

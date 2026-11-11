@@ -10,9 +10,11 @@
 use std::io;
 use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
 
-use super::{MAX_FLOWS, TxFlow, TxTable};
+use tracing::{info, warn};
+
+use super::{MAX_FLOWS, TxFlow, TxShared, TxTable};
 use crate::arc::flows::MAX_FLOW_CHANNELS;
-use crate::device::DeviceConfig;
+use crate::device::{DeviceConfig, SavedMulticast};
 
 /// The UDP port of our multicast flows' groups, Dante's.
 pub const MULTICAST_PORT: u16 = 4321;
@@ -121,6 +123,34 @@ impl TxTable {
             self.flows[slot] = None;
         }
         found
+    }
+}
+
+impl TxShared {
+    /// Makes the device's saved multicast flows again (dstack #207, from
+    /// [`crate::device::DeviceState::multicast`]), each in its slot to its
+    /// group ([`TxTable::add_own_multicast`]), and hands the plans to the
+    /// TX thread: called at start, before any thread sends. A saved flow
+    /// that cannot be made (a channel or slot the config no longer has) is
+    /// left out with a warning; it stays in the state file until a
+    /// controller creates another flow in its slot.
+    pub fn recreate_multicast(&self, saved: &[SavedMulticast]) {
+        let mut control = self.lock();
+        for f in saved {
+            match (control.table).add_own_multicast(&self.cfg, self.ip, f.slot, &f.channels) {
+                Ok(group) => info!(
+                    slot = f.slot,
+                    %group,
+                    channels = f.channels.len(),
+                    "a saved multicast TX flow made again"
+                ),
+                Err(why) => warn!(
+                    slot = f.slot,
+                    why, "a saved multicast TX flow not made again: the state file keeps it"
+                ),
+            }
+        }
+        self.publish(&control);
     }
 }
 

@@ -348,7 +348,7 @@ impl Dir {
 /// [`ArcOutcome::Changed`]); this function saves nothing ([`respond`] does)
 /// and tells nobody (the server does). ARC 2.8.9's multicast create and
 /// delete change the TX table, which `live` only reads: [`answer`] answers
-/// them, here they go unanswered.
+/// them (and saves the state's flows), here they go unanswered.
 pub fn handle(
     state: &mut DeviceState,
     cfg: &DeviceConfig,
@@ -421,8 +421,11 @@ pub fn handle(
 
 /// What the server answers to `req`: ARC 2.8.9's multicast create and
 /// delete (0x2601, 0x2602 under [`flows::START_2809`], dstack #193) with
-/// the TX table to change ([`Flows::change_tx`]), anything else by
-/// [`respond`] with the flows as they are.
+/// the TX table to change ([`Flows::change_tx`]), saved to the state file
+/// before it is answered (dstack #207: a restart makes the flow again); a
+/// change that cannot be saved is undone, on the TX table too, and
+/// refused, as [`respond`] does for a rename. Anything else by [`respond`]
+/// with the flows as they are.
 pub fn answer<F: Flows>(device: &mut Device, running: &F, req: &[u8]) -> ArcOutcome {
     match Header::parse(req) {
         Ok((h, body))
@@ -430,7 +433,26 @@ pub fn answer<F: Flows>(device: &mut Device, running: &F, req: &[u8]) -> ArcOutc
                 && h.op2 == 0
                 && matches!(h.op1, flows::CREATE | flows::DELETE) =>
         {
-            running.change_tx(|tx, ip| multicast::answer(&h, body, &device.cfg, tx, ip))
+            running.change_tx(|tx, ip| {
+                let (state, table) = (device.state.clone(), tx.clone());
+                match multicast::answer(&h, body, &mut device.state, &device.cfg, tx, ip) {
+                    ArcOutcome::Changed(bytes, change) => {
+                        match device.state.save(&device.cfg.state_file) {
+                            Ok(()) => ArcOutcome::Changed(bytes, change),
+                            Err(e) => {
+                                error!(
+                                    error = %e,
+                                    "a multicast flow change could not be saved: refused and undone"
+                                );
+                                device.state = state;
+                                *tx = table;
+                                ArcOutcome::Reply(reply(&h, STATUS_ERROR, &[]))
+                            }
+                        }
+                    }
+                    other => other,
+                }
+            })
         }
         _ => running.view(|live| respond(device, live, req)),
     }

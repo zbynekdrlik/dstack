@@ -137,8 +137,9 @@ impl Media {
     /// The audio side of `device` at `ip`: one ring per RX channel, the TX
     /// side (32 sockets on `ip`, cookies from `seed`, every TX channel
     /// silent, an engine ring on each TX channel index in `engine_tx`, from
-    /// 0: the engine's; the standalone device passes none), the RX side (32
-    /// flow sockets on `ip`), and the manager with the state file's
+    /// 0: the engine's; the standalone device passes none; the state file's
+    /// multicast flows made again, [`TxShared::recreate_multicast`]), the
+    /// RX side (32 flow sockets on `ip`), and the manager with the state file's
     /// subscriptions (their statuses the baseline of its first `changed`).
     /// Fails when a socket cannot be bound, or for an `engine_tx` index the
     /// device lacks (`InvalidInput`).
@@ -163,6 +164,7 @@ impl Media {
             cfg.flow_slots,
         )?);
         let tx = Arc::new(TxShared::new(cfg.clone(), ip, rings, seed, engine_tx)?);
+        tx.recreate_multicast(&device.state.multicast);
         let mut manager = Manager::new(cfg, &device.state.name, ip, rx.ports()?);
         manager.load(&device.state.subscriptions);
         manager.changed();
