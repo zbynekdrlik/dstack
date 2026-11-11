@@ -95,7 +95,8 @@ fn a_keyed_write_of_anything_but_the_latency_stays_unanswered() {
         ),
         // The frame cut in the values.
         ("short", dc_write_with(|f| f.truncate(38))),
-        // A count past the pairs the body holds.
+        // A count of 9: the pairs would end at 0x30, past the values'
+        // offsets.
         ("count", dc_write_with(|f| f[11] = 0x09)),
         // No pairs at all.
         ("empty", dc_write_with(|f| f[11] = 0x00)),
@@ -125,4 +126,23 @@ fn a_keyed_write_of_one_latency_key_sets_the_latency() {
     let mut device = Device::load(config_in(dir.path())).unwrap();
     assert!(decode(respond_idle(&mut device, &frame)).changed);
     assert_eq!(device.cfg.latency_ns, 2_000_000);
+}
+
+/// A keyed latency write outside the range the device states is refused,
+/// as netaudio's is, and changes nothing. (Whether Dante Controller ever
+/// offers a value outside the minimum and maximum we state, 0x8306 and
+/// 0x8302, is not known; a refusal tells it the write did not happen.)
+#[test]
+fn a_keyed_latency_write_outside_the_range_is_refused() {
+    // 1 s, past the 296 ms maximum at 96 kHz.
+    let frame = dc_write_with(|f| {
+        f[32..36].copy_from_slice(&1_000_000_000u32.to_be_bytes());
+        f[36..40].copy_from_slice(&1_000_000_000u32.to_be_bytes());
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let mut device = Device::load(config_in(dir.path())).unwrap();
+    let before = device.clone();
+    let answer = decode(respond_idle(&mut device, &frame));
+    assert_eq!((answer.header.op2, answer.changed), (STATUS_ERROR, false));
+    assert_eq!(device, before);
 }

@@ -532,7 +532,7 @@ fn keyed_write(body: &[u8]) -> Option<Vec<(u16, u32)>> {
             if at < pairs_end || at % 4 != 0 {
                 return None;
             }
-            Some((key, read_u32(body, at - HEADER_LEN)?))
+            Some((key, read_u32(body, at.checked_sub(HEADER_LEN)?)?))
         })
         .collect()
 }
