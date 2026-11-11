@@ -597,19 +597,21 @@ fn value_of<'a>(text: &'a str, key: &str) -> &'a str {
     &text[start..end]
 }
 
-/// The strings of the status `text` besides the device's own `name`
-/// (dstack #209): the one value that is not a fixed word.
+/// The strings of the status `text` besides the value of its top-level
+/// `name` (dstack #209: the one value that is not a fixed word), which
+/// must be `name`. Only that value is taken out: the name anywhere else
+/// still fails the words check.
 fn words_of(text: &str, name: &str) -> Vec<String> {
-    strings_of_json(text)
-        .into_iter()
-        .filter(|w| w != name)
-        .collect()
+    let mut v: serde_json::Value = serde_json::from_str(text).expect("JSON");
+    let own = v.as_object_mut().expect("an object").remove("name");
+    assert_eq!(own, Some(name.into()), "{text}");
+    strings_of_json(&v.to_string())
 }
 
-/// The words a status may hold besides numbers and the device's name
-/// ([`words_of`]): its keys and the fixed words of sources and checks.
+/// The words a status may hold besides numbers and the device's `name`
+/// ([`words_of`] takes it out): its keys and the fixed words of sources and
+/// checks.
 const WORDS: &[&str] = &[
-    "name",
     "multicast",
     "joins",
     "join_errors",
