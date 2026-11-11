@@ -623,7 +623,9 @@ fn settings_asks_with_0x2809_and_types_its_errors() {
     let mut own = Own::new();
     let s = settings(&mut own).unwrap();
     assert_eq!(s.latency_active_ns, Some(1_000_000));
-    assert_eq!(s.latency_min_ns, Some(250_000));
+    // The TX floor (dstack #196): 32 frames at 96 kHz + the 250 us margin
+    // + the 50 us send slack; a write below it is refused.
+    assert_eq!(s.latency_min_ns, Some(633_334));
     // An exchange without call_as sends its usual start code; the reply
     // still reads.
     let mut fixed = Fixed(STATUS_OK, unhex(CARD_SETTINGS)[HEADER_LEN..].to_vec());
