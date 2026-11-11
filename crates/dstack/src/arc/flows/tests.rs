@@ -78,6 +78,8 @@ fn the_ultimo_list_reads_its_multicast_and_its_unicast_flow() {
     let mut dev = Recorded::new(ULTIMO_LIST);
     let flows = list_tx_flows(&mut dev).unwrap();
     assert_eq!(flows.unread, 0);
+    // dstack #185: the table's `[slots, count]` is `02 02`, the card's 2 slots.
+    assert_eq!(flows.slots, 2);
     assert_eq!(
         flows.flows,
         vec![
@@ -414,5 +416,9 @@ fn a_list_we_write_reads_back_as_written() {
     let read = parse_flows(&body).expect("it reads");
     assert_eq!(read.unread, 0);
     assert_eq!(read.flows, flows);
-    assert_eq!(parse_flows(&list_reply_body(&[])).unwrap().flows, []);
+    // Our devices state their 32 TX flow slots, whatever the count.
+    assert_eq!(read.slots, 32);
+    assert_eq!(&body[6..8], &[32, 3]);
+    let empty = parse_flows(&list_reply_body(&[])).unwrap();
+    assert_eq!((empty.slots, empty.flows), (32, vec![]));
 }

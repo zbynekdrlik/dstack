@@ -329,7 +329,7 @@ impl Session {
 
     /// The status line (the console run's log).
     pub fn line(&self) -> String {
-        status::line(&Snapshot::read(&self.fifo, &self.stats, self.rate))
+        status::line(&Snapshot::read(&self.fifo, &self.stats, self.rate).with_peak(&self.fifo))
     }
 
     /// Why the device ended by itself, if it did.

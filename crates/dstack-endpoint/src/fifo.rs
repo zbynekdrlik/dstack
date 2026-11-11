@@ -31,6 +31,9 @@ pub struct Fifo {
     arrived: AtomicU64,
     /// Frames dropped on a full FIFO.
     overflows: AtomicU64,
+    /// The largest magnitude stored since the last [`Fifo::take_peak`]
+    /// (`f32` bits; a non-negative `f32`'s bits order as its value).
+    peak: AtomicU32,
 }
 
 impl Fifo {
@@ -48,6 +51,7 @@ impl Fifo {
             read: AtomicU64::new(0),
             arrived: AtomicU64::new(0),
             overflows: AtomicU64::new(0),
+            peak: AtomicU32::new(0),
         }
     }
 
@@ -81,6 +85,13 @@ impl Fifo {
         self.overflows.load(Ordering::Relaxed)
     }
 
+    /// The largest magnitude of the samples stored since the last call
+    /// (dstack #184: a log line shows whether its producer hands over
+    /// silence); 0 when none or only silence.
+    pub fn take_peak(&self) -> f32 {
+        f32::from_bits(self.peak.swap(0, Ordering::Relaxed))
+    }
+
     fn slot(&self, frame: u64) -> usize {
         // The remainder is under `capacity`, a usize.
         (frame % self.capacity as u64) as usize * self.channels
@@ -95,12 +106,17 @@ impl Fifo {
         let read = self.read.load(Ordering::Acquire);
         let held = usize::try_from(written - read).unwrap_or(usize::MAX);
         let n = frames.min(self.capacity.saturating_sub(held));
+        let mut peak = 0.0f32;
         for f in 0..n {
             let at = self.slot(written + f as u64);
             for c in 0..self.channels {
-                self.data[at + c].store((sample(f, c) as f32).to_bits(), Ordering::Relaxed);
+                let s = sample(f, c) as f32;
+                // `max` leaves a NaN out.
+                peak = peak.max(s.abs());
+                self.data[at + c].store(s.to_bits(), Ordering::Relaxed);
             }
         }
+        self.peak.fetch_max(peak.to_bits(), Ordering::Relaxed);
         self.written.store(written + n as u64, Ordering::Release);
         self.overflows
             .fetch_add((frames - n) as u64, Ordering::Relaxed);

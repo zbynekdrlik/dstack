@@ -126,6 +126,7 @@ mod tests {
             recentres: 0,
             priming: false,
             mono: false,
+            input_peak: None,
         }
     }
 
