@@ -105,6 +105,14 @@ impl Build {
     pub fn line(&self) -> String {
         format!("{} {} {}", self.name, self.version, self.sha)
     }
+
+    /// Whether this binary's device answers dstack-dev's own control
+    /// requests (`tx-end`, dstack #187:
+    /// [`media::Media::allow_dev_requests`]): dstack's own binary only,
+    /// never an application's ([`cli::main`] asks).
+    pub fn dev_requests(&self) -> bool {
+        *self == Build::OWN
+    }
 }
 
 /// [`USAGE`] for the binary called `name`.
@@ -153,6 +161,11 @@ ctl: sends one request to the control socket and prints the answer line:
                             engine's ring, on a channel the engine feeds)
   check <rx> off|counter|sine <hz>
                             which checker reads RX channel rx (from 1)
+  tx-end <flow>             dstack-dev only (a controller's E2E): ends our
+                            live TX flow <flow> (the status's tx flow, from
+                            1) as if its receiver had gone quiet; the
+                            receiver stops receiving, then asks again and
+                            receives by itself
 Exit 0 for ok or the status, 1 for an error answer or no socket.
 
 clock: polls dsync's time server on the box (127.0.0.1:31900) n times,

@@ -102,6 +102,50 @@ fn a_datagram_after_expiry_revives_nothing() {
     assert_eq!(t.flow(999), None);
 }
 
+/// dstack #187 (dstack-dev's `tx-end`): a live flow ends as an expired one
+/// does: it sends nothing, its slot is free for the next new flow, its
+/// receiver's datagrams revive nothing and its stop is still answered.
+#[test]
+fn ending_a_flow_expires_it_and_frees_its_slot() {
+    let mut t = TxTable::with_slots(1, 1);
+    let (slot, h) = t.add(&req(peer(4000)), 0).unwrap();
+    assert_ne!(t.plan(slot), Plan::default());
+    assert!(t.end(slot));
+    assert!(t.flow(slot).unwrap().expired);
+    assert_eq!(t.plan(slot), Plan::default());
+    // Ended once: not again; a receiver's datagram keeps it ended.
+    assert!(!t.end(slot));
+    t.keepalive(slot, 5);
+    assert!(t.flow(slot).unwrap().expired);
+    // An empty slot and one past the table end nothing.
+    assert!(!t.end(1));
+    assert!(!t.end(MAX_FLOWS));
+    // Its receiver's stop is answered (the flow is found)...
+    assert_eq!(t.stop(&h), Ok(slot));
+    // ...and, ended again, the one slot goes to the next new receiver.
+    t.add(&req(peer(4000)), 0).unwrap();
+    assert!(t.end(slot));
+    assert_eq!(t.add(&req(peer(4001)), 0).map(|(s, _)| s), Ok(slot));
+    assert_eq!(
+        t.flow(slot).map(|f| (f.dest, f.expired)),
+        Some((peer(4001), false))
+    );
+}
+
+/// The TX side's end: the table's flow ends and the TX thread's plan for
+/// the slot is handed over empty.
+#[test]
+fn end_flow_hands_the_empty_plan_to_the_tx_thread() {
+    let shared = shared_with(Vec::new());
+    let (slot, _) = add(&shared, &req(peer(4000)));
+    assert_ne!(shared.plans[slot].read().unwrap().1, [0; 4]);
+    assert!(shared.end_flow(slot));
+    assert_eq!(shared.plans[slot].read().unwrap().1, [0; 4], "handed over");
+    assert!(shared.lock().table.flow(slot).unwrap().expired);
+    assert!(!shared.end_flow(slot));
+    assert!(!shared.end_flow(slot + 1));
+}
+
 #[test]
 fn slot_of_finds_a_destination_expired_or_not() {
     let mut t = TxTable::new(1);
