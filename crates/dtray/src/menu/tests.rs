@@ -5,7 +5,8 @@ use std::net::{Ipv4Addr, SocketAddrV4};
 use dstack::arc::control::Settings;
 
 use super::{
-    Counts, Known, SETTINGS_EVERY, Shape, needs_rebuild, output_needed, shapes_of, write_needed,
+    Counts, Known, SETTINGS_EVERY, Shape, needs_rebuild, output_needed, shapes_of, write_failed,
+    write_needed,
 };
 use crate::discover::Local;
 use crate::latency::Choice;
@@ -223,4 +224,12 @@ fn a_changed_output_rebuilds_the_menu_and_the_checked_one_sends_nothing() {
     assert!(!output_needed(&shape(0), A, 0));
     assert!(output_needed(&shape(0), A, 1));
     assert!(output_needed(&shape(0), B, 0), "another device");
+}
+
+#[test]
+fn a_failed_write_names_the_value_and_the_reason() {
+    assert_eq!(
+        write_failed(250_000, "no answer"),
+        "the latency 0.25 ms was not set: no answer"
+    );
 }

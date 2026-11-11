@@ -20,7 +20,8 @@ Start from `docs/HANDOVER.md`, then `docs/design/2026-10-30-shared-dstack.md`.
   - Every application carries its own Dante connector in process and appears on the Dante network as a device of its own, under its own name. Several devices on one PC is normal. It receives, and sends when needed. This covers SongPlayer, OBS, the intercom and whatever comes next, on the `normal` timing profile, where about 10 ms is fine. No shared memory, no central device feeding several apps, no relaying between apps.
   - Exception for ASIO hosts (Ableton): dasio, also several instances on one PC.
   - Exception for iemmixer: the lowest-latency tier (gen3, the `low_latency` profile, the kernel fast path).
-- Never change another device's subscriptions without the owner's approval. Tests subscribe our own device to itself.
+- A temporary test change of another Dante device's subscription is the work: do it, log it on the ticket (device, channel, from and to, times), and restore the original right after. Ask no approval question; the owner guards live events and stops the work himself.
+- Never write "needs the owner's approval/decision" into a ticket without asking it in the same turn (❓) or labelling the ticket needs-answer / needs-owner-action.
 - Every message to the owner in Slovak; code, commits and docs in English.
 
 ## Playbook router
