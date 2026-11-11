@@ -551,21 +551,18 @@ fn now_ns(origin: Instant) -> u64 {
 }
 
 /// Reads `sock` while it has datagrams and `until` has not passed, handing
-/// each to `take`: the number read. A read that waits out the socket's
-/// timeout (nothing queued) or fails ends it. A busy group is read as fast
+/// each to `take`. A read that waits out the socket's timeout (nothing
+/// arrived within it) or fails ends it. A busy group is read as fast
 /// as it comes (dstack #206: one datagram a pass read about 20 a second
 /// against dev1's 30, and the kernel dropped the rest, goodbyes among
 /// them).
-fn drain(sock: &UdpSocket, buf: &mut [u8], until: Instant, mut take: impl FnMut(&[u8])) -> usize {
-    let mut read = 0;
+fn drain(sock: &UdpSocket, buf: &mut [u8], until: Instant, mut take: impl FnMut(&[u8])) {
     while !until.saturating_duration_since(Instant::now()).is_zero() {
         let Ok((n, _)) = sock.recv_from(buf) else {
             break;
         };
         take(&buf[..n]);
-        read += 1;
     }
-    read
 }
 
 /// The thread's state.

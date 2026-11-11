@@ -602,18 +602,14 @@ fn draining_reads_every_queued_datagram_in_order_then_ends_at_the_empty_socket()
     let sock = queued(5);
     let mut buf = [0u8; 64];
     let mut seen = Vec::new();
-    let read = drain(&sock, &mut buf, Instant::now() + BOUND, |b| {
+    drain(&sock, &mut buf, Instant::now() + BOUND, |b| {
         seen.push(b.to_vec());
     });
-    assert_eq!(read, 5);
     let want: Vec<Vec<u8>> = (1..=5).map(|i| vec![i, i]).collect();
     assert_eq!(seen, want);
     // Nothing queued: one read's wait, nothing taken.
     let started = Instant::now();
-    assert_eq!(
-        drain(&sock, &mut buf, Instant::now() + BOUND, |_| panic!()),
-        0
-    );
+    drain(&sock, &mut buf, Instant::now() + BOUND, |_| panic!());
     assert!(started.elapsed() < BOUND);
 }
 
@@ -621,9 +617,11 @@ fn draining_reads_every_queued_datagram_in_order_then_ends_at_the_empty_socket()
 fn draining_reads_nothing_once_its_time_is_up() {
     let sock = queued(3);
     let mut buf = [0u8; 64];
-    assert_eq!(drain(&sock, &mut buf, Instant::now(), |_| panic!()), 0);
+    drain(&sock, &mut buf, Instant::now(), |_| panic!());
     // The datagrams are still queued for the next round.
-    assert_eq!(drain(&sock, &mut buf, Instant::now() + BOUND, |_| {}), 3);
+    let mut read = 0;
+    drain(&sock, &mut buf, Instant::now() + BOUND, |_| read += 1);
+    assert_eq!(read, 3);
 }
 
 #[test]
