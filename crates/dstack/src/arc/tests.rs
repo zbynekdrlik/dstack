@@ -293,6 +293,7 @@ fn subs_changed(rx: &[usize]) -> Change {
         subscriptions: rx.to_vec(),
         device_renamed: false,
         latency: None,
+        tx_flows: false,
     }
 }
 
@@ -2822,6 +2823,7 @@ fn a_device_rename_carries_its_change() {
                 subscriptions: Vec::new(),
                 device_renamed: true,
                 latency: None,
+                tx_flows: false,
             }
         ),
         other => panic!("{other:?}"),

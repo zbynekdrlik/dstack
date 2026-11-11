@@ -133,8 +133,9 @@ impl TxShared {
     /// group ([`TxTable::add_own_multicast`]), and hands the plans to the
     /// TX thread: called at start, before any thread sends. A saved flow
     /// that cannot be made (a channel or slot the config no longer has) is
-    /// left out with a warning; it stays in the state file until a
-    /// controller creates another flow in its slot.
+    /// left out with a warning at each start and stays in the state file: a
+    /// controller's create in its slot replaces it, while one in a slot past
+    /// the config's `flow_slots` stays until the file is edited.
     pub fn recreate_multicast(&self, saved: &[SavedMulticast]) {
         let mut control = self.lock();
         for f in saved {

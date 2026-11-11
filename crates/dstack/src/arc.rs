@@ -215,6 +215,10 @@ pub struct Change {
     /// the TX side take it live ([`Flows::set_latency`]) and the records
     /// are announced with it.
     pub latency: Option<u64>,
+    /// Our multicast TX flows changed (ARC 2.8.9's create or delete,
+    /// dstack #207): saved, and nothing else to tell (the records and the
+    /// channel-change notification carry no TX flow).
+    pub tx_flows: bool,
 }
 
 /// What a request comes to.
@@ -435,23 +439,11 @@ pub fn answer<F: Flows>(device: &mut Device, running: &F, req: &[u8]) -> ArcOutc
         {
             running.change_tx(|tx, ip| {
                 let (state, table) = (device.state.clone(), tx.clone());
-                match multicast::answer(&h, body, &mut device.state, &device.cfg, tx, ip) {
-                    ArcOutcome::Changed(bytes, change) => {
-                        match device.state.save(&device.cfg.state_file) {
-                            Ok(()) => ArcOutcome::Changed(bytes, change),
-                            Err(e) => {
-                                error!(
-                                    error = %e,
-                                    "a multicast flow change could not be saved: refused and undone"
-                                );
-                                device.state = state;
-                                *tx = table;
-                                ArcOutcome::Reply(reply(&h, STATUS_ERROR, &[]))
-                            }
-                        }
-                    }
-                    other => other,
-                }
+                let outcome = multicast::answer(&h, body, &mut device.state, &device.cfg, tx, ip);
+                saved(device, req, outcome, |device| {
+                    device.state = state;
+                    *tx = table;
+                })
             })
         }
         _ => running.view(|live| respond(device, live, req)),
@@ -468,13 +460,27 @@ pub fn respond(device: &mut Device, live: &Live<'_>, req: &[u8]) -> ArcOutcome {
         Ok((h, body)) if h.op1 == op::SETTINGS_SET && h.op2 == 0 => set_latency(&h, body, device),
         _ => handle(&mut device.state, &device.cfg, live, req),
     };
+    saved(device, req, outcome, |device| {
+        device.state = before;
+        device.cfg.latency_ns = latency_before;
+    })
+}
+
+/// `outcome` of `req`, a change in it saved to the state file first: one
+/// that cannot be saved is undone by `undo` (whatever it changed: the
+/// state, the latency, the TX table) and refused ([`STATUS_ERROR`]).
+fn saved(
+    device: &mut Device,
+    req: &[u8],
+    outcome: ArcOutcome,
+    undo: impl FnOnce(&mut Device),
+) -> ArcOutcome {
     match outcome {
         ArcOutcome::Changed(bytes, change) => match device.state.save(&device.cfg.state_file) {
             Ok(()) => ArcOutcome::Changed(bytes, change),
             Err(e) => {
                 error!(error = %e, "a change could not be saved: refused and undone");
-                device.state = before;
-                device.cfg.latency_ns = latency_before;
+                undo(device);
                 match Header::parse(req) {
                     Ok((h, _)) => ArcOutcome::Reply(reply(&h, STATUS_ERROR, &[])),
                     Err(_) => ArcOutcome::Ignored,
@@ -517,9 +523,9 @@ fn set_latency(h: &Header, body: &[u8], device: &mut Device) -> ArcOutcome {
 }
 
 /// The ARC server: answers every datagram on `sock` from the shared device
-/// and the running `flows`. After each saved change it signals `changed`
-/// (the mDNS announcer waits on it), hands changed subscriptions to the
-/// manager ([`Flows::subscribe`]) and adds the RX channels renamed, whose
+/// and the running `flows`. After each saved change but a multicast
+/// flow's ([`Change::tx_flows`]) it signals `changed` (the mDNS announcer
+/// waits on it), hands changed subscriptions to the manager ([`Flows::subscribe`]) and adds the RX channels renamed, whose
 /// subscription changed or whose status moved to `rx_changes` (the info
 /// server's channel-change notification). Ends only with an error
 /// receiving; a reply that cannot be sent is logged and the server goes
@@ -575,7 +581,7 @@ pub async fn serve<F: Flows>(
                 if let Some((bytes, change)) = sent {
                     // The notification is queued before the reply goes, as
                     // inferno sends its own before answering a rename.
-                    if let Some(change) = change {
+                    if let Some(change) = change.filter(|c| !c.tx_flows) {
                         rx_changes.add(
                             change
                                 .renamed_rx

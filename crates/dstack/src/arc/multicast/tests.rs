@@ -26,7 +26,7 @@ fn cfg() -> DeviceConfig {
 
 /// The status and body of our answer to `op1` with `body` (start code
 /// 0x2809) on `state` and `tx`, and whether it changed the state
-/// ([`ArcOutcome::Changed`], nothing else in its [`Change`]).
+/// ([`ArcOutcome::Changed`], [`Change::tx_flows`] alone).
 fn ask_with(
     state: &mut DeviceState,
     tx: &mut TxTable,
@@ -38,7 +38,11 @@ fn ask_with(
     let (bytes, changed) = match answer(&h, body, state, &cfg(), tx, OUR_IP) {
         ArcOutcome::Reply(bytes) => (bytes, false),
         ArcOutcome::Changed(bytes, change) => {
-            assert_eq!(change, Change::default(), "only the state's flows");
+            let flows = Change {
+                tx_flows: true,
+                ..Change::default()
+            };
+            assert_eq!(change, flows, "only our TX flows");
             (bytes, true)
         }
         other => panic!("not a reply: {other:?}"),
