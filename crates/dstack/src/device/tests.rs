@@ -1770,3 +1770,27 @@ fn the_cpu_limit_is_the_oss_own() {
     assert_eq!(max_cpu_for(Os::Windows), 64);
     assert_eq!(max_cpu_for(Os::Other), MAX_CPU);
 }
+
+/// dstack #196: the minimum a device states (ARC 0x8306) is a latency its
+/// own write accepts; dtray offered 0.25 ms and the test device refused it
+/// (its TX floor: tx_fpp_max frames + tx_margin_ns + the send slack).
+#[test]
+fn the_stated_minimum_latency_is_one_the_device_accepts() {
+    let cfg = config();
+    let (min, max) = cfg.latency_range();
+    assert!(
+        cfg.with_latency(min).is_ok(),
+        "min {min} refused: {:?}",
+        cfg.with_latency(min)
+    );
+    assert!(cfg.with_latency(max).is_ok());
+    // With tx_latency_ns set the channels advertise that, not latency_ns:
+    // the profile's floor is the minimum and a write there holds.
+    let fixed_tx = DeviceConfig {
+        tx_latency_ns: Some(1_000_000),
+        ..config()
+    };
+    let (fixed_min, _) = fixed_tx.latency_range();
+    assert!(fixed_tx.with_latency(fixed_min).is_ok());
+    assert!(fixed_min < min);
+}
