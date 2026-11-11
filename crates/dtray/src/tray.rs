@@ -5,9 +5,9 @@
 //! OS's event loop: `win.rs`, `linux.rs`) refreshes discovery, reads every
 //! local device and the expected ones, and shows [`Tracker`]'s view. The
 //! menu: a submenu per device (its line; inside, its latency values,
-//! [`latency::choices`], the configured one checked: choosing one writes it
-//! with [`control::set_latency`]), a line per expected device not running,
-//! and, for an app that offers outputs (dstack #139: dlisten), its Output
+//! [`dtray::latency::choices`], the configured one checked: choosing one
+//! writes it with [`control::set_latency`] through [`dtray::arc::call`]),
+//! a line per expected device not running, and, for an app that offers outputs (dstack #139: dlisten), its Output
 //! list, the one in use checked: choosing one sends `app output <n>` to the
 //! device ([`probe::ask`], [`output::request`]); Copy status (every device's
 //! JSON, to the clipboard by the OS's glue), Exit (the tray only; the
@@ -16,25 +16,18 @@
 //! are [`dtray::menu`]'s.
 
 use std::net::SocketAddrV4;
-use std::sync::atomic::{AtomicBool, AtomicU16};
-use std::time::Duration;
 
-use dstack::arc::client::Udp;
 use dstack::arc::control;
-use dstack::ctl::Requests;
 use tray_icon::menu::{
     CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu,
 };
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
+use dtray::arc;
 use dtray::discover::{self, Local, Reading, Scanner};
-use dtray::latency;
 use dtray::menu::{self, Known, Shape};
 use dtray::model::{self, Colour, Tracker, View};
 use dtray::{expected, icon, output, probe};
-
-/// How long an ARC read or write waits for each reply.
-const ARC_WAIT: Duration = Duration::from_millis(300);
 
 /// What a menu click asks of the OS's glue.
 pub enum Action {
@@ -197,13 +190,13 @@ impl Tray {
                 if !menu::write_needed(&self.shapes, arc, ns) {
                     continue;
                 }
-                match arc_call(arc, |c| {
+                match arc::call(arc, |c| {
                     control::set_latency(c, ns).map_err(|e| e.to_string())
                 }) {
                     Ok(s) => self.known.record(arc, Some(s), self.ticks),
                     Err(err) => out.push(Action::Error(format!(
-                        "dtray: the latency {} was not set: {err}",
-                        latency::label(ns)
+                        "dtray: {}",
+                        menu::write_failed(ns, &err)
                     ))),
                 }
             } else if let Some((_, arc, index, request)) =
@@ -267,26 +260,13 @@ fn tick(scanner: &mut Scanner) -> Tick {
     }
 }
 
-/// One exchange with the ARC at `arc`, from the PC's address it sits on.
-fn arc_call<T>(
-    arc: SocketAddrV4,
-    f: impl FnOnce(&mut Udp<'_>) -> Result<T, String>,
-) -> Result<T, String> {
-    let seq = AtomicU16::new(1);
-    let requests = Requests::default();
-    let stop = AtomicBool::new(false);
-    let mut udp = Udp::open(*arc.ip(), arc, &seq, ARC_WAIT, &requests, &stop)
-        .map_err(|e| format!("no socket: {e}"))?;
-    f(&mut udp)
-}
-
 /// Reads the settings of the devices [`Known::due`] names at `tick`; gone
 /// devices are forgotten.
 fn read_settings(devices: &[Local], known: &mut Known, tick: u32) {
     let arcs: Vec<SocketAddrV4> = devices.iter().map(|d| d.arc).collect();
     known.forget_gone(&arcs);
     for arc in known.due(&arcs, tick) {
-        let read = arc_call(arc, |c| control::settings(c).map_err(|e| e.to_string())).ok();
+        let read = arc::call(arc, |c| control::settings(c).map_err(|e| e.to_string())).ok();
         known.record(arc, read, tick);
     }
 }

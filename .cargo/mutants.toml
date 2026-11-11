@@ -65,9 +65,11 @@ exclude_re = [
   # A binary's main only calls the library (`daemon::cli::main`), and a
   # unit test cannot run it.
   "src/bin/dstack-dev.rs.*replace main",
-  # dtray's binary: its entry points only call the library (mode_of, the
-  # model, the probe: each tested); --print is run by hand on dev1.
-  "dtray/src/main.rs.*replace (main|print|tray|autostart) -> ExitCode",
+  # dtray's binary: its entry points and its log setup only call the
+  # library (mode_of, the model, the probe, set::latency: each tested);
+  # --print and --set-latency are run by hand on dev1.
+  "dtray/src/main.rs.*replace (main|print|tray|autostart|set_latency) -> ExitCode",
+  "dtray/src/main.rs.*replace init_log with \\(\\)",
   # The registration folder of this PC: reads the process environment
   # (which a test may not set: every other test shares it); its rule
   # `dir_for` is tested.

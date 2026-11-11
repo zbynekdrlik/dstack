@@ -6,7 +6,7 @@ license.workspace = true
 publish = false
 repository.workspace = true
 authors.workspace = true
-description = "The PC's tray icon for its dstack devices (dlink apps, dasio, dstack-dev, dlisten): clock, subscriptions and late counts; writes only a device's latency and an app's output from its menu"
+description = "The PC's tray icon for its dstack devices (dlink apps, dasio, dstack-dev, dlisten): clock, subscriptions and late counts; writes only a device's latency (from its menu or `dtray --set-latency`) and an app's output from its menu"
 
 [lib]
 name = "dtray"
