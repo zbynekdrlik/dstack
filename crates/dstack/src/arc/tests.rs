@@ -1299,7 +1299,9 @@ fn dante_controller_s_settings_read_gets_our_latency_and_its_range() {
     assert_eq!(s.latency_active_ns, Some(10_000_000));
     // A fixed default (Dante's 1 ms): it never moves with a write.
     assert_eq!(s.latency_default_ns, Some(1_000_000));
-    assert_eq!(s.latency_min_ns, Some(250_000));
+    // The TX floor (dstack #196): 32 frames at 96 kHz + the 250 us margin
+    // + the 50 us send slack; a write below it is refused.
+    assert_eq!(s.latency_min_ns, Some(633_334));
     // Half the 65 536-slot rings less the largest margin and a block, at
     // 96 kHz: 28 416 samples, 296 ms.
     assert_eq!(s.latency_max_ns, Some(296_000_000));
