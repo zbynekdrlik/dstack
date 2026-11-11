@@ -20,7 +20,7 @@
 //! | 0x1002 | the device name |
 //! | 0x1003 | the device names: current, factory, board, revision |
 //! | 0x1100 | keyed (a count and keys: netaudio's start code 0x2809, [`control::settings`], and Dante Controller's 0x27ff with its 19 keys): each key asked, in its order, that we hold (`settings_body`), the latency's default and range included; with no body: zeros, as inferno |
-//! | 0x1102 | zeros, as inferno answers Dante Controller |
+//! | 0x1102 | the settings key table (`key_table`): the keys 0x1100 holds, each with its access; Dante Controller writes only a key marked writable (dstack #216) |
 //! | 0x2000 | TX channels with their default names, paged |
 //! | 0x2010 | TX channels' current names, paged |
 //! | 0x2013 | TX rename |
@@ -124,7 +124,9 @@ pub mod op {
     pub const DEVICE_NAMES: u16 = 0x1003;
     /// Asked by Dante Controller; inferno answers 110 zero bytes.
     pub const ZEROS_1100: u16 = 0x1100;
-    /// Asked by Dante Controller; inferno answers 94 zero bytes.
+    /// The settings key table, asked by Dante Controller: which settings
+    /// it may write (dstack #216; inferno answers 94 zero bytes, which
+    /// marks none writable). The name is the opcode's older one.
     pub const ZEROS_1102: u16 = 0x1102;
     /// A settings write (netaudio's latency set). Our device leaves it
     /// unanswered, as inferno: its latency is the config's, and a refusal
@@ -416,7 +418,7 @@ pub fn handle(
         op::ZEROS_1100 => ok(&settings_body(body, cfg)
             .filter(|_| !body.is_empty())
             .unwrap_or_else(|| vec![0; 110])),
-        op::ZEROS_1102 => ok(&[0; 94]),
+        op::ZEROS_1102 => ok(&key_table(cfg)),
         op::TX_CHANNELS => tx_channels(&h, body, cfg),
         op::TX_NAMES => tx_names(&h, body, state),
         op::TX_RENAME => rename(&h, body, state, cfg, Dir::Tx),
@@ -874,6 +876,50 @@ fn settings_body(body: &[u8], cfg: &DeviceConfig) -> Option<Vec<u8>> {
     }
     pairs.extend_from_slice(&values);
     Some(pairs)
+}
+
+/// A key Dante Controller may write, as the hardware marks it in its
+/// key table (0x1102).
+const KEY_READ_WRITE: u16 = 0x0003;
+/// A key it may only read.
+const KEY_READ_ONLY: u16 = 0x0001;
+
+/// 0x1102, the settings key table (dstack #216): the count (`u16`), then
+/// `key, access` (`u16` each) for each key our settings read holds
+/// ([`control::SETTING_KEYS`] that [`setting`] answers), in that order.
+/// The latency as configured and in effect (0x8205, 0x8301, the keys
+/// netaudio's write sets) is writable when a write can move it
+/// ([`latency_writable`]); every other key is read only. A real card
+/// answers its 31 keys so (`tests/fixtures/arc_settings_card.json`);
+/// with inferno's zeros Dante Controller marked every setting read only,
+/// greyed out the rename and never sent the latency write.
+fn key_table(cfg: &DeviceConfig) -> Vec<u8> {
+    use control::key;
+    let keys: Vec<u16> = control::SETTING_KEYS
+        .into_iter()
+        .filter(|&k| setting(k, cfg).is_some())
+        .collect();
+    let mut out = Body::new();
+    out.u16(keys.len() as u16);
+    for k in keys {
+        let access = match k {
+            key::LATENCY_CONFIGURED | key::LATENCY_ACTIVE if latency_writable(cfg) => {
+                KEY_READ_WRITE
+            }
+            _ => KEY_READ_ONLY,
+        };
+        out.u16(k);
+        out.u16(access);
+    }
+    out.into_vec()
+}
+
+/// Whether a latency write (0x1101) can move the device's latency: the
+/// range it states ([`DeviceConfig::latency_range`]) holds another value
+/// than its own.
+fn latency_writable(cfg: &DeviceConfig) -> bool {
+    let (min, max) = cfg.latency_range();
+    min < max
 }
 
 /// 0x3200: our RX flows a transmitter granted (an asked flow is listed
