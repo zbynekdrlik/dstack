@@ -176,7 +176,7 @@ impl TrafficWatch {
                 if self.unread.insert(name.to_string()) {
                     warn!(
                         device = name,
-                        %reason,
+                        ?reason,
                         "a dstack device on this PC could not be read: its audio counts as other traffic until it is"
                     );
                 }

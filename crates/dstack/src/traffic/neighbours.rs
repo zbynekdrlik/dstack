@@ -19,10 +19,12 @@
 //!   the watch's step at each control tick ([`Neighbours::tick`]).
 //!
 //! The first warning of a loud NIC names no neighbour (the discovery starts
-//! after it). At the first tick the started discovery lists any, the
-//! watch's window starts again with them read
-//! ([`super::TrafficWatch::restart`]), so the next look has both ends of
-//! each and the next warning names them.
+//! after it). At the first tick the started discovery lists any (within
+//! the window after its start, usually seconds), the watch's window starts
+//! again with them read ([`super::TrafficWatch::restart`]; the few seconds
+//! of window before it are dropped), so the next look has both ends of each
+//! and the next warning names them. One listed only later counts from its
+//! second look, like any neighbour that appears.
 
 use std::net::Ipv4Addr;
 
@@ -137,8 +139,9 @@ pub struct Neighbours {
     own: Option<u16>,
     /// A failed start was warned about (again only after one started).
     told: bool,
-    /// A discovery started and has not listed a neighbour yet: its first
-    /// list starts the watch's window again ([`Neighbours::tick`]).
+    /// A discovery started, has not listed a neighbour yet, and the window
+    /// after its start is still open: its first list starts the watch's
+    /// window again ([`Neighbours::tick`]).
     fresh: bool,
 }
 
@@ -175,9 +178,9 @@ impl Neighbours {
 
     /// The watch's step at a control tick at `now_ns` on `ip`, with the
     /// NIC's sent bytes from `nic` and this device's audio bytes `ours`.
-    /// The first tick a started discovery lists a neighbour, the window
-    /// starts again with them read ([`TrafficWatch::restart`]; not while the
-    /// NIC is unread). Otherwise the look ([`TrafficWatch::watch`], with
+    /// The first tick a started discovery lists a neighbour, within the
+    /// window after its start, the window starts again with them read
+    /// ([`TrafficWatch::restart`]; not while the NIC is unread). Otherwise the look ([`TrafficWatch::watch`], with
     /// [`Neighbours::list`]) and the start or stop after it
     /// ([`Neighbours::after`]). The window's traffic, when one closed.
     pub fn tick(
@@ -188,6 +191,12 @@ impl Neighbours {
         nic: impl FnOnce() -> Option<u64>,
         ours: u64,
     ) -> Option<Traffic> {
+        if self.fresh && watch.due(now_ns) {
+            // A minute with nobody listed: the looks go on as they are (a
+            // neighbour found later counts from its second look), and the
+            // list is no longer asked at every tick.
+            self.fresh = false;
+        }
         if self.fresh {
             let found = self.list(ip);
             if !found.is_empty() {

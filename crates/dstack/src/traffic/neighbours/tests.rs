@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::net::{Ipv4Addr, SocketAddrV4};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use super::*;
@@ -204,20 +205,24 @@ fn a_discovery_that_does_not_start_is_tried_at_each_look_and_warned_about_once()
 }
 
 /// An endpoint on 127.0.0.1 answering one connection after another, each
-/// with the next of `bytes` as its `tx_bytes`.
-fn serving(bytes: Vec<u64>) -> u16 {
+/// with the next of `bytes` as its `tx_bytes`; with the count of
+/// connections it took.
+fn serving(bytes: Vec<u64>) -> (u16, Arc<AtomicUsize>) {
     use std::io::{Read, Write};
     let l = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let port = l.local_addr().unwrap().port();
+    let taken = Arc::new(AtomicUsize::new(0));
+    let count = Arc::clone(&taken);
     std::thread::spawn(move || {
         for b in bytes {
             let (mut s, _) = l.accept().unwrap();
+            count.fetch_add(1, Ordering::SeqCst);
             let mut req = [0u8; 7];
             let _ = s.read_exact(&mut req);
             let _ = s.write_all(format!("{{\"tx_bytes\":{b}}}\n").as_bytes());
         }
     });
-    port
+    (port, taken)
 }
 
 /// The warning after the first one of a loud NIC names our devices: the
@@ -229,7 +234,7 @@ fn the_look_after_the_discovery_s_first_list_names_our_devices() {
     crate::test_log::undecided();
     let (mut n, fake) = with_fake();
     let mut w = TrafficWatch::new();
-    fake.lock().unwrap().devices = vec![ours_at("a", IP, serving(vec![1_000, 30_001_000]))];
+    fake.lock().unwrap().devices = vec![ours_at("a", IP, serving(vec![1_000, 30_001_000]).0)];
     assert_eq!(n.tick(&mut w, 0, IP, || Some(0), 0), None, "the first look");
     // A loud minute, nobody listed yet: the discovery starts.
     let t = n
@@ -266,19 +271,45 @@ fn the_window_starts_again_only_with_a_list_and_a_read_nic() {
     assert_eq!(n.tick(&mut w, 0, IP, || Some(0), 0), None);
     assert!(n.tick(&mut w, 60 * S, IP, || Some(60_000_000), 0).is_some());
     assert!(fake.lock().unwrap().running);
-    // Nobody listed: the next look is a minute on, as before.
+    // Nobody listed: nothing.
+    assert_eq!(n.tick(&mut w, 61 * S, IP, || Some(61_000_000), 0), None);
+    // Listed, the NIC unread: no restart, nobody read.
+    let (port, taken) = serving(vec![5]);
+    fake.lock().unwrap().devices = vec![ours_at("a", IP, port)];
+    assert_eq!(n.tick(&mut w, 62 * S, IP, || None, 0), None);
+    assert_eq!(taken.load(Ordering::SeqCst), 0);
+    assert!(w.due(120 * S), "the window from 60 s still runs");
+    // The NIC read: the window starts again here, the neighbour read.
+    assert_eq!(n.tick(&mut w, 63 * S, IP, || Some(63_000_000), 0), None);
+    assert_eq!(taken.load(Ordering::SeqCst), 1);
+    assert!(!w.due(122 * S), "a minute from the restart at 63 s");
+    assert!(w.due(123 * S));
+}
+
+/// Nobody listed within the window after the start: the looks go on as
+/// they are, and one listed later starts no window again (it counts from
+/// its second look).
+#[test]
+fn a_neighbour_listed_after_the_first_window_restarts_nothing() {
+    let (mut n, fake) = with_fake();
+    let mut w = TrafficWatch::new();
+    assert_eq!(n.tick(&mut w, 0, IP, || Some(0), 0), None);
+    assert!(n.tick(&mut w, 60 * S, IP, || Some(60_000_000), 0).is_some());
     assert!(
         n.tick(&mut w, 120 * S, IP, || Some(120_000_000), 0)
             .is_some()
     );
-    // Listed, the NIC unread: nothing yet.
-    fake.lock().unwrap().devices = vec![ours_at("a", IP, serving(vec![5]))];
-    assert_eq!(n.tick(&mut w, 121 * S, IP, || None, 0), None);
-    assert!(!w.due(121 * S), "no restart, no look");
-    // The NIC read: the window starts again here.
-    assert_eq!(n.tick(&mut w, 122 * S, IP, || Some(122_000_000), 0), None);
-    assert!(!w.due(181 * S), "a minute from the restart at 122 s");
-    assert!(w.due(182 * S));
+    let (port, taken) = serving(vec![5]);
+    fake.lock().unwrap().devices = vec![ours_at("a", IP, port)];
+    let asked = || -> Option<u64> { panic!("the NIC asked between looks") };
+    assert_eq!(n.tick(&mut w, 121 * S, IP, asked, 0), None);
+    assert_eq!(taken.load(Ordering::SeqCst), 0);
+    // The next look reads it (one end only: no part of ours yet).
+    let t = n
+        .tick(&mut w, 180 * S, IP, || Some(180_000_000), 0)
+        .expect("a minute on");
+    assert_eq!(taken.load(Ordering::SeqCst), 1);
+    assert!(t.devices.is_empty(), "{t:?}");
 }
 
 /// The real finder lists nothing while it does not run, and a stop of
