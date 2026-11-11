@@ -74,7 +74,11 @@ fn a_multicast_flow_is_refused_past_the_slots_or_in_a_held_slot() {
         t.add_multicast(4, group(), &[1], 32, 3),
         Err("a slot past the device's flow slots")
     );
-    assert_eq!(t.add_multicast(3, group(), &[1], 32, 3), Ok(()), "the last slot");
+    assert_eq!(
+        t.add_multicast(3, group(), &[1], 32, 3),
+        Ok(()),
+        "the last slot"
+    );
     assert_eq!(
         t.add_multicast(3, group(), &[2], 32, 3),
         Err("a slot that holds a flow")

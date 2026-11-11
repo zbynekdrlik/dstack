@@ -3,8 +3,8 @@ use super::*;
 use std::net::SocketAddrV4;
 
 use crate::arc::flows::{
-    CREATE, DELETE, MULTICAST, START_2809, TxFlow, UNICAST, create_body,
-    delete_body, list_reply_body, parse_flows,
+    CREATE, DELETE, MULTICAST, START_2809, TxFlow, UNICAST, create_body, delete_body,
+    list_reply_body, parse_flows,
 };
 use crate::arc::{MAX_FLOWS, flows_2809, op, tx_flows};
 use crate::flows::control::FlowRequest;
@@ -40,7 +40,11 @@ fn ask(tx: &mut TxTable, op1: u16, body: &[u8]) -> (u16, Vec<u8>) {
 
 /// Dante Controller's create of `channels` in slot `local_id`.
 fn create(tx: &mut TxTable, local_id: u16, channels: &[u16]) -> (u16, Vec<u8>) {
-    ask(tx, CREATE, &create_body(local_id, channels, OPTIONS).unwrap())
+    ask(
+        tx,
+        CREATE,
+        &create_body(local_id, channels, OPTIONS).unwrap(),
+    )
 }
 
 /// A refusal that leaves `tx` as it was.
@@ -74,7 +78,7 @@ fn a_create_makes_a_multicast_flow_answered_with_its_record_and_no_destination()
         bits: 24,
         destinations: Vec::new(),
     };
-    assert_eq!(reply.flows, [made.clone()]);
+    assert_eq!(reply.flows, std::slice::from_ref(&made));
     // The list states it in slot 2, with its group.
     let group = multicast_group(OUR_IP, cfg().process_id, 1);
     assert_eq!(group.port(), MULTICAST_PORT);
@@ -96,7 +100,10 @@ fn a_delete_ends_the_multicast_flow_with_ok_and_no_body() {
     let mut tx = TxTable::new(1);
     assert_eq!(create(&mut tx, 1, &[1, 2]).0, STATUS_OK);
     assert_eq!(create(&mut tx, 3, &[4]).0, STATUS_OK);
-    assert_eq!(ask(&mut tx, DELETE, &delete_body(1)), (STATUS_OK, Vec::new()));
+    assert_eq!(
+        ask(&mut tx, DELETE, &delete_body(1)),
+        (STATUS_OK, Vec::new())
+    );
     let left = listed(&tx);
     assert_eq!(left.iter().map(|f| f.local_id).collect::<Vec<_>>(), [3]);
     assert_eq!(tx.flow(0), None);
@@ -123,7 +130,11 @@ fn a_create_in_a_slot_in_use_or_past_ours_is_refused() {
     };
     let (slot, _) = tx.add(&req, 0).unwrap();
     let local_id = u16::try_from(slot + 1).unwrap();
-    refused(&mut tx, CREATE, &create_body(local_id, &[2], OPTIONS).unwrap());
+    refused(
+        &mut tx,
+        CREATE,
+        &create_body(local_id, &[2], OPTIONS).unwrap(),
+    );
     // A delete of it is refused too: it is the receiver's.
     refused(&mut tx, DELETE, &delete_body(local_id));
 }
@@ -182,7 +193,10 @@ fn a_create_that_is_not_one_multicast_record_of_a_real_slot_is_refused() {
     refused(&mut tx, CREATE, &list_reply_body(&[flow(1), flow(2)]));
     refused(&mut tx, CREATE, &list_reply_body(&[]));
     // One such record is a create.
-    assert_eq!(ask(&mut tx, CREATE, &list_reply_body(&[flow(2)])).0, STATUS_OK);
+    assert_eq!(
+        ask(&mut tx, CREATE, &list_reply_body(&[flow(2)])).0,
+        STATUS_OK
+    );
     assert_eq!(create(&mut tx, 1, &[1, 2]).0, STATUS_OK);
 }
 

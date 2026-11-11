@@ -335,8 +335,7 @@ impl TxTable {
         for (slot, flow) in self.flows.iter_mut().enumerate() {
             if let Some(flow) = flow.as_mut().filter(|f| {
                 !f.expired && !f.multicast && now.saturating_sub(f.heard_ns) >= KEEPALIVE_TIMEOUT_NS
-            })
-            {
+            }) {
                 flow.expired = true;
                 expired += 1 << slot;
             }
@@ -2008,10 +2007,10 @@ pub use retry::{
     SEND_RETRIES, SEND_RETRY_HEADROOM_NS, SEND_RETRY_WAIT_NS, send_retry, transient_refusal,
 };
 
-mod receivers;
 mod multicast;
-pub use multicast::{MULTICAST_PORT, MULTICAST_TTL, multicast_group};
+mod receivers;
 use multicast::multicast_out;
+pub use multicast::{MULTICAST_PORT, MULTICAST_TTL, multicast_group};
 
 #[cfg(test)]
 mod tests;

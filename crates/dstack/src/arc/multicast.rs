@@ -95,9 +95,7 @@ pub(super) fn answer(
 /// and each once.
 fn flow_channels(channels: &[u16], tx: usize) -> bool {
     (1..=flows::MAX_FLOW_CHANNELS).contains(&channels.len())
-        && channels
-            .iter()
-            .all(|&c| (1..=tx).contains(&usize::from(c)))
+        && channels.iter().all(|&c| (1..=tx).contains(&usize::from(c)))
         && (1..channels.len()).all(|i| !channels[..i].contains(&channels[i]))
 }
 
