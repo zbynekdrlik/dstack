@@ -541,6 +541,89 @@ fn live_discovery_sweeps_lists_a_device_and_drops_it_at_its_goodbye() {
     assert_eq!(Arc::strong_count(&devices), 1);
 }
 
+/// dstack #206: a busy mDNS group (dev1's LAN carries about 30 datagrams
+/// a second) is read as fast as it comes. A goodbye queued behind 150
+/// others' answers takes the device off the list within a second. The
+/// reader took one datagram per socket a pass, each pass waiting
+/// `READ_WAIT` on the idle sweep socket: about 20 a second, so the queue
+/// grew until the kernel dropped datagrams, the goodbye among them (the
+/// listener's queue at 189 KB, 73 drops, in the whole-device test).
+#[test]
+fn a_goodbye_behind_a_busy_group_s_queue_is_read_within_a_second() {
+    let (mdns, _) = responder(vec![card()]);
+    let group = UdpSocket::bind((LOOPBACK, 0)).unwrap();
+    let group_at = group.local_addr().unwrap();
+    let listener = group.try_clone().unwrap();
+    listener.set_read_timeout(Some(READ_WAIT)).unwrap();
+    let (discovery, changes) = Discovery::start_to(LOOPBACK, mdns, Some(listener)).unwrap();
+    let Change::Added(dev) = changes.recv_timeout(BOUND).unwrap() else {
+        panic!("an addition first");
+    };
+    assert_eq!(dev.name, "Card");
+    // Other hosts' answers fill the group's queue, then the goodbye.
+    let other = response(vec![ptr("_other._udp.local", "Box._other._udp.local", 120)]);
+    let bye = response(vec![ptr(
+        "_netaudio-arc._udp.local",
+        "Card._netaudio-arc._udp.local",
+        0,
+    )]);
+    let sender = UdpSocket::bind((LOOPBACK, 0)).unwrap();
+    for _ in 0..150 {
+        sender.send_to(&other, group_at).unwrap();
+    }
+    sender.send_to(&bye, group_at).unwrap();
+    let sent = Instant::now();
+    loop {
+        let left = Duration::from_secs(1).saturating_sub(sent.elapsed());
+        match changes.recv_timeout(left) {
+            Ok(Change::Removed(name)) => break assert_eq!(name, "Card"),
+            Ok(Change::Changed(_)) => {}
+            other => panic!("the goodbye not read within a second: {other:?}"),
+        }
+    }
+    discovery.stop().unwrap();
+}
+
+/// A socket of the test's with `queued` datagrams waiting (1, 2, ...),
+/// its read timeout `READ_WAIT`.
+fn queued(queued: u8) -> UdpSocket {
+    let sock = UdpSocket::bind((LOOPBACK, 0)).unwrap();
+    sock.set_read_timeout(Some(READ_WAIT)).unwrap();
+    let to = sock.local_addr().unwrap();
+    let sender = UdpSocket::bind((LOOPBACK, 0)).unwrap();
+    for i in 1..=queued {
+        sender.send_to(&[i, i], to).unwrap();
+    }
+    sock
+}
+
+#[test]
+fn draining_reads_every_queued_datagram_in_order_then_ends_at_the_empty_socket() {
+    let sock = queued(5);
+    let mut buf = [0u8; 64];
+    let mut seen = Vec::new();
+    drain(&sock, &mut buf, Instant::now() + BOUND, |b| {
+        seen.push(b.to_vec());
+    });
+    let want: Vec<Vec<u8>> = (1..=5).map(|i| vec![i, i]).collect();
+    assert_eq!(seen, want);
+    // Nothing queued: one read's wait, nothing taken.
+    let started = Instant::now();
+    drain(&sock, &mut buf, Instant::now() + BOUND, |_| panic!());
+    assert!(started.elapsed() < BOUND);
+}
+
+#[test]
+fn draining_reads_nothing_once_its_time_is_up() {
+    let sock = queued(3);
+    let mut buf = [0u8; 64];
+    drain(&sock, &mut buf, Instant::now(), |_| panic!());
+    // The datagrams are still queued for the next round.
+    let mut read = 0;
+    drain(&sock, &mut buf, Instant::now() + BOUND, |_| read += 1);
+    assert_eq!(read, 3);
+}
+
 #[test]
 fn the_list_follows_with_nobody_listening_for_changes() {
     let (mdns, _) = responder(vec![card()]);

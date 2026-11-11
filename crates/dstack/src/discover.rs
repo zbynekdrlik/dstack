@@ -550,6 +550,21 @@ fn now_ns(origin: Instant) -> u64 {
     u64::try_from(origin.elapsed().as_nanos()).unwrap_or(u64::MAX)
 }
 
+/// Reads `sock` while it has datagrams and `until` has not passed, handing
+/// each to `take`. A read that waits out the socket's timeout (nothing
+/// arrived within it) or fails ends it. A busy group is read as fast
+/// as it comes (dstack #206: one datagram a pass read about 20 a second
+/// against dev1's 30, and the kernel dropped the rest, goodbyes among
+/// them).
+fn drain(sock: &UdpSocket, buf: &mut [u8], until: Instant, mut take: impl FnMut(&[u8])) {
+    while !until.saturating_duration_since(Instant::now()).is_zero() {
+        let Ok((n, _)) = sock.recv_from(buf) else {
+            break;
+        };
+        take(&buf[..n]);
+    }
+}
+
 /// The thread's state.
 struct Run {
     sweeper: UdpSocket,
@@ -582,9 +597,9 @@ impl Run {
             let round = Instant::now() + ROUND;
             while !round.saturating_duration_since(Instant::now()).is_zero() {
                 for sock in std::iter::once(&self.sweeper).chain(self.listener.as_ref()) {
-                    if let Ok((n, _)) = sock.recv_from(&mut buf) {
-                        self.take(&buf[..n], &mut names, now_ns(origin));
-                    }
+                    drain(sock, &mut buf, round, |bytes| {
+                        self.take(bytes, &mut names, now_ns(origin));
+                    });
                 }
             }
             self.update(&mut names, now_ns(origin));
