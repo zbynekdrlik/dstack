@@ -65,6 +65,72 @@ fn a_port_held_on_the_address_does_not_bind() {
     assert!(!binds(Ipv4Addr::LOCALHOST, &p));
 }
 
+/// A fake bind refusing `held` (address and port); every other binds.
+fn refusing(held: &[(Ipv4Addr, u16)]) -> impl Fn(SocketAddrV4) -> bool + '_ {
+    move |at| !held.contains(&(*at.ip(), at.port()))
+}
+
+const OURS: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 10);
+const ANY: Ipv4Addr = Ipv4Addr::UNSPECIFIED;
+
+/// dstack #200: Audinate's ConMon service (Dante Controller, DVS) holds
+/// 0.0.0.0:8700 and 0.0.0.0:8800 on a Windows PC. Windows lets a socket
+/// bind the PC's address beside it and hands it the unicast to that
+/// address, so a device on slot 0 took ConMon's CMC replies and Dante
+/// Controller on the PC read no device. A port held on the wildcard
+/// address is used: the slot is skipped.
+#[test]
+fn a_port_held_on_the_wildcard_address_skips_the_slot() {
+    let conmon = [(ANY, 8700), (ANY, 8800)];
+    assert!(!binds_with(OURS, &slot(0).0, refusing(&conmon)));
+    assert_eq!(
+        first_free(|p| binds_with(OURS, p, refusing(&conmon))),
+        Some(slot(1))
+    );
+    // Each of the slot's ports counts, on the wildcard address.
+    for port in [4440, 8800, 4455] {
+        assert!(
+            !binds_with(OURS, &slot(0).0, refusing(&[(ANY, port)])),
+            "{port}"
+        );
+    }
+}
+
+/// Our own devices hold their ports on the address: slots 0, 1, 2... as
+/// before; with nothing held, slot 0 (Dante's defaults).
+#[test]
+fn our_devices_on_the_address_still_count_up_from_slot_0() {
+    assert_eq!(
+        first_free(|p| binds_with(OURS, p, refusing(&[]))),
+        Some(slot(0))
+    );
+    let first = [(OURS, 4440), (OURS, 8800), (OURS, 4455)];
+    assert_eq!(
+        first_free(|p| binds_with(OURS, p, refusing(&first))),
+        Some(slot(1))
+    );
+    // One port of the slot held on the address is enough.
+    assert!(!binds_with(OURS, &slot(0).0, refusing(&[(OURS, 8800)])));
+    // Another address's holder is not ours to avoid.
+    let other = Ipv4Addr::new(192, 0, 2, 11);
+    assert!(binds_with(OURS, &slot(0).0, refusing(&[(other, 8800)])));
+}
+
+/// On the real sockets: a port held on the wildcard address is not free
+/// for the device on loopback either (Linux refuses that bind itself;
+/// Windows needs the wildcard probe).
+#[test]
+fn a_port_held_on_the_wildcard_address_does_not_bind() {
+    let held = UdpSocket::bind(SocketAddrV4::new(ANY, 0)).unwrap();
+    let port = held.local_addr().unwrap().port();
+    let p = Ports {
+        arc: port,
+        cmc: port,
+        flows: port,
+    };
+    assert!(!binds(Ipv4Addr::LOCALHOST, &p));
+}
+
 #[test]
 fn given_ports_win_and_a_named_interface_keeps_the_defaults() {
     let given = slot(5);
