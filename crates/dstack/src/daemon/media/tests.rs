@@ -698,7 +698,7 @@ async fn the_driver_s_tick_reads_our_neighbours_but_never_ourselves() {
         let (mut s, _) = neighbour.accept().unwrap();
         let mut req = [0u8; 7];
         s.read_exact(&mut req).unwrap();
-        std::io::Write::write_all(&mut s, b"{\"tx_bytes\":9}\n").unwrap();
+        std::io::Write::write_all(&mut s, b"{\"tx_bytes\":9,\"name\":\"neighbour\"}\n").unwrap();
         let _ = served.send(req);
     });
     let fake = Arc::new(Mutex::new(Fake {

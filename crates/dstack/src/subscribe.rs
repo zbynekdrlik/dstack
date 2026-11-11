@@ -318,6 +318,12 @@ impl Manager {
         self.host = host.to_string();
     }
 
+    /// Our device's name as it is now ([`Manager::set_host`]): the status
+    /// carries it (dstack #209).
+    pub fn host(&self) -> &str {
+        &self.host
+    }
+
     /// The device latency is `ns` now (Dante Controller set it): every
     /// flow's playout and delay follow from the next plan read
     /// ([`Manager::rx_plan`]).

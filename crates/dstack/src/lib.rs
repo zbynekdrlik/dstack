@@ -48,8 +48,9 @@
 //!   and address, the loop that serves the device and announces it again
 //!   after renames, and the running audio side ([`daemon::media`]: the TX
 //!   and RX threads, our RX's manager driven every 250 ms, the stop).
-//! - [`ctl`]: the local control socket: the status (numbers only), the TX
-//!   test sources and the RX checks, set at runtime; the request counts.
+//! - [`ctl`]: the local control socket: the status (numbers and the
+//!   device's name), the TX test sources and the RX checks, set at
+//!   runtime; the request counts.
 //! - [`stream`] (phase C, plan
 //!   `docs/superpowers/plans/2026-10-26-gen3-phase-c-engine-on-linux.md`):
 //!   the engine's pump on the media clock: it reads the RX rings at the
