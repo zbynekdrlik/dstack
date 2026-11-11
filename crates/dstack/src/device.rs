@@ -293,9 +293,23 @@ impl DeviceConfig {
             TimingProfile::Normal => NORMAL_MIN_LATENCY_NS,
             TimingProfile::LowLatency => LOW_MIN_LATENCY_NS,
         };
+        // A write sets latency_ns, which our TX channels advertise when
+        // tx_latency_ns is left out: then the TX floor bounds it too
+        // (dstack #196: 0.25 ms was stated and refused).
+        let min = match self.tx_latency_ns {
+            None => min.max(self.tx_floor_ns()),
+            Some(_) => min,
+        };
         let rate = u64::from(self.sample_rate.max(1));
         let max = MAX_LATENCY_SAMPLES * 1_000_000_000 / rate;
         (min.min(self.latency_ns), max.max(self.latency_ns))
+    }
+
+    /// The lowest latency our TX channels can advertise: a packet leaves
+    /// `tx_fpp_max` frames + `tx_margin_ns` after its first sample, give or
+    /// take [`TX_SEND_SLACK_NS`].
+    pub fn tx_floor_ns(&self) -> u64 {
+        ns_of(u64::from(self.tx_fpp_max), self.sample_rate) + self.tx_margin_ns + TX_SEND_SLACK_NS
     }
 
     /// The latency our TX channels advertise: `tx_latency_ns`, else
@@ -387,10 +401,7 @@ impl DeviceConfig {
             && (FPP_MIN..=FPP_MAX).contains(&self.tx_fpp_max)
             && self.tx_margin_ns <= MAX_TX_MARGIN_NS
             && (1..=u64::from(u32::MAX)).contains(&advertised)
-            && ns_of(u64::from(self.tx_fpp_max), self.sample_rate)
-                + self.tx_margin_ns
-                + TX_SEND_SLACK_NS
-                > advertised
+            && self.tx_floor_ns() > advertised
         {
             out.push(format!(
                 "tx_latency_ns (latency_ns when it is left out): \
