@@ -52,6 +52,8 @@ function Reset-Fake {
         ExtraLan     = $false
         PingOk       = $true
         NoIpIf       = $false
+        VlanProp     = $true    # the LAN driver exposes the "VLAN ID" property
+        AdapterVlan  = ''       # Get-NetAdapter's VlanID of the LAN adapter
     }
 }
 function Note { param([string]$Verb, [string]$Target) [void]$script:Fake.Calls.Add("$Verb $Target") }
@@ -63,8 +65,8 @@ function Assert-FakeTarget {
 function Get-NetAdapter {
     [CmdletBinding()] param([string]$Name, [switch]$IncludeHidden)
     $all = @(
-        [pscustomobject]@{ Name = $script:Fake.LanName; ifIndex = $script:Fake.LanIndex; Status = $script:Fake.Status },
-        [pscustomobject]@{ Name = $script:Fake.DanteName; ifIndex = $script:Fake.DanteIndex; Status = 'Up' }
+        [pscustomobject]@{ Name = $script:Fake.LanName; ifIndex = $script:Fake.LanIndex; Status = $script:Fake.Status; VlanID = $script:Fake.AdapterVlan },
+        [pscustomobject]@{ Name = $script:Fake.DanteName; ifIndex = $script:Fake.DanteIndex; Status = 'Up'; VlanID = '' }
     )
     if ($script:Fake.ExtraLan) { $all += [pscustomobject]@{ Name = $script:Fake.LanName; ifIndex = 7; Status = 'Up' } }
     if ($Name) { Note 'Get-NetAdapter' $Name; return @($all | Where-Object { $_.Name -eq $Name })[0] }
@@ -81,6 +83,7 @@ function Restart-NetAdapter {
 function Get-NetAdapterAdvancedProperty {
     [CmdletBinding()] param([string]$Name)
     Note 'Get-NetAdapterAdvancedProperty' $Name
+    if (-not $script:Fake.VlanProp) { return }
     [pscustomobject]@{ DisplayName = 'VLAN ID'; RegistryKeyword = 'RegVlanID'; RegistryValue = @($script:Fake.Vlan) }
 }
 function Set-NetAdapterAdvancedProperty {
@@ -129,7 +132,10 @@ function Changes {
 function DanteCalls { @($script:Fake.Calls | Where-Object { $_ -match ' Dante70$' }) }
 Reset-Fake
 
-$good = '{"lanAdapter":"LAN","gateway":"192.0.2.1","danteAdapter":"Dante70","thresholdMinutes":3}'
+$good = '{"lanAdapter":"LAN","gateway":"192.0.2.1","danteAdapter":"Dante70","thresholdMinutes":3,"lanVlanId":0}'
+# The reverse layout (dasio's test PC): Dante is the physical adapter,
+# untagged; the LAN is a VLAN adapter on VLAN 89.
+$reverse = $good.Replace('"lanVlanId":0', '"lanVlanId":89')
 
 # --- counter and threshold
 Check 'a healthy leg resets the counter' {
@@ -195,8 +201,20 @@ Check 'a healthy adapter restarts at most once per gap (a router outage)' {
 
 # --- config
 Check 'a valid config parses, threshold and VLAN display name defaults' {
-    $c = Read-HealConfig -Json '{"lanAdapter":" LAN ","gateway":"192.0.2.1","danteAdapter":"Dante70"}'
-    $c.LanAdapter -eq 'LAN' -and $c.ThresholdMinutes -eq 3 -and $c.VlanDisplayName -eq 'VLAN ID'
+    $c = Read-HealConfig -Json '{"lanAdapter":" LAN ","gateway":"192.0.2.1","danteAdapter":"Dante70","lanVlanId":0}'
+    $c.LanAdapter -eq 'LAN' -and $c.ThresholdMinutes -eq 3 -and $c.VlanDisplayName -eq 'VLAN ID' -and $c.LanVlanId -eq 0
+}
+Check 'the LAN VLAN ID is read (89: a LAN on a VLAN adapter)' {
+    (Read-HealConfig -Json $reverse).LanVlanId -eq 89
+}
+Check 'a config without lanVlanId is refused, naming the key' {
+    Throws { Read-HealConfig -Json '{"lanAdapter":"LAN","gateway":"192.0.2.1","danteAdapter":"Dante70"}' } "*'lanVlanId' is missing*"
+}
+Check 'a lanVlanId that is not a whole number from 0 to 4094 is refused' {
+    $bad = foreach ($v in '4095', '-1', '"89a"', '1.5', '""', 'null') {
+        Throws { Read-HealConfig -Json $good.Replace('"lanVlanId":0', ('"lanVlanId":' + $v)) } "*'lanVlanId'*"
+    }
+    @($bad | Where-Object { -not $_ }).Count -eq 0
 }
 Check 'the configured threshold is read' {
     (Read-HealConfig -Json $good.Replace('"thresholdMinutes":3', '"thresholdMinutes":5')).ThresholdMinutes -eq 5
@@ -229,7 +247,7 @@ Check 'the restart gap counts in UTC' {
 # --- never the Dante adapter
 Check 'the repair plan is the five steps in order, all on the LAN adapter' {
     $p = @(Get-RepairPlan -LanAdapter 'LAN' -DanteAdapter 'Dante70')
-    ($p.Action -join ',') -eq 'Enable,VlanIdEmpty,BindIPv4,Dhcp,Restart' -and
+    ($p.Action -join ',') -eq 'Enable,VlanId,BindIPv4,Dhcp,Restart' -and
     @($p | Where-Object { $_.Target -ne 'LAN' }).Count -eq 0
 }
 Check 'a plan aimed at the Dante adapter is refused' {
@@ -238,7 +256,7 @@ Check 'a plan aimed at the Dante adapter is refused' {
 Check 'a repair step aimed at the Dante adapter is refused before any change' {
     Reset-Fake
     $cfg = Read-HealConfig -Json $good
-    $all = foreach ($a in 'Enable', 'VlanIdEmpty', 'BindIPv4', 'Dhcp', 'Restart') {
+    $all = foreach ($a in 'Enable', 'VlanId', 'BindIPv4', 'Dhcp', 'Restart') {
         Throws { Invoke-RepairStep -Step ([pscustomobject]@{ Action = $a; Target = ' dante70' }) -Config $cfg } '*Dante adapter*'
     }
     @($all | Where-Object { -not $_ }).Count -eq 0 -and $script:Fake.Calls.Count -eq 0
@@ -259,7 +277,11 @@ Check 'the adapters resolve by exact name to two interfaces; a missing Dante ada
 
 # --- each repair step: needed and not needed
 $cfgGood = Read-HealConfig -Json $good
-function Step { param([string]$A) Invoke-RepairStep -Step ([pscustomobject]@{ Action = $A; Target = 'LAN' }) -Config $cfgGood }
+$cfgReverse = Read-HealConfig -Json $reverse
+function Step {
+    param([string]$A, $Cfg = $cfgGood)
+    Invoke-RepairStep -Step ([pscustomobject]@{ Action = $A; Target = 'LAN' }) -Config $Cfg
+}
 Check 'Enable: a disabled adapter is enabled, an enabled one left alone' {
     Reset-Fake; $script:Fake.Status = 'Disabled'
     $a = Step 'Enable'
@@ -267,12 +289,41 @@ Check 'Enable: a disabled adapter is enabled, an enabled one left alone' {
     Reset-Fake; $b = Step 'Enable'
     $a.Changed -and $after -eq 'Up' -and -not $b.Changed -and @(Changes).Count -eq 0
 }
-Check 'VlanIdEmpty: 70 is set to 0; empty and 0 are left alone' {
+Check 'VlanId, lanVlanId 0: 70 is set to 0; empty and 0 are left alone' {
     Reset-Fake; $script:Fake.Vlan = '70'
-    $a = Step 'VlanIdEmpty'; $after = $script:Fake.Vlan
-    Reset-Fake; $b = Step 'VlanIdEmpty'
-    Reset-Fake; $script:Fake.Vlan = '0'; $c = Step 'VlanIdEmpty'
+    $a = Step 'VlanId'; $after = $script:Fake.Vlan
+    Reset-Fake; $b = Step 'VlanId'
+    Reset-Fake; $script:Fake.Vlan = '0'; $c = Step 'VlanId'
     $a.Changed -and $after -eq '0' -and -not $b.Changed -and -not $c.Changed -and @(Changes).Count -eq 0
+}
+Check 'VlanId, lanVlanId 89: 89 is left alone, never set to 0' {
+    Reset-Fake; $script:Fake.Vlan = '89'
+    $a = Step 'VlanId' $cfgReverse
+    -not $a.Changed -and $script:Fake.Vlan -eq '89' -and @(Changes).Count -eq 0
+}
+Check 'VlanId, lanVlanId 89: empty, 0 and 70 are set to 89' {
+    $ok = foreach ($v in '', '0', '70') {
+        Reset-Fake; $script:Fake.Vlan = $v
+        $r = Step 'VlanId' $cfgReverse
+        $r.Changed -and $script:Fake.Vlan -eq '89' -and (@(Changes) -join ';') -eq 'Set-NetAdapterAdvancedProperty LAN'
+    }
+    @($ok | Where-Object { -not $_ }).Count -eq 0
+}
+Check 'VlanId, no VLAN property, lanVlanId 0: nothing to set, nothing changed' {
+    Reset-Fake; $script:Fake.VlanProp = $false
+    $a = Step 'VlanId'
+    -not $a.Changed -and $a.Text -like "*no 'VLAN ID' property*" -and @(Changes).Count -eq 0
+}
+Check 'VlanId, no VLAN property, lanVlanId 89: the mismatch read is logged, nothing guessed' {
+    Reset-Fake; $script:Fake.VlanProp = $false; $script:Fake.AdapterVlan = '0'
+    $a = Step 'VlanId' $cfgReverse
+    Reset-Fake; $script:Fake.VlanProp = $false; $script:Fake.AdapterVlan = ''
+    $b = Step 'VlanId' $cfgReverse
+    Reset-Fake; $script:Fake.VlanProp = $false; $script:Fake.AdapterVlan = '89'
+    $c = Step 'VlanId' $cfgReverse
+    -not $a.Changed -and $a.Text -like "*VLAN mismatch*reads '0'*expects 89*not changed*" -and
+    -not $b.Changed -and $b.Text -like "*VLAN mismatch*reads ''*expects 89*" -and
+    -not $c.Changed -and $c.Text -notlike '*mismatch*' -and $c.Text -like "*VLAN 89*" -and @(Changes).Count -eq 0
 }
 Check 'BindIPv4: an unbound IPv4 is bound, a bound one left alone' {
     Reset-Fake; $script:Fake.Bound = $false
@@ -337,6 +388,29 @@ try {
         $rc -eq 0 -and (StateOf $d).failures -eq 0 -and (LogOf $d) -match 'gateway ok \(down count 2 reset\)' -and
         @(Changes).Count -eq 0
     }
+    Check 'a config without lanVlanId: nothing done, exit 1, the log names the key' {
+        Reset-Fake
+        $d = NewRun 'novlan' '{"lanAdapter":"LAN","gateway":"192.0.2.1","danteAdapter":"Dante70"}' '{"failures":2}'
+        $rc = Invoke-Check -Dir $d
+        $rc -eq 1 -and (LogOf $d) -match "ERROR config: 'lanVlanId' is missing" -and @(Changes).Count -eq 0
+    }
+    Check 'the reverse layout (LAN on VLAN 89): the repair keeps VLAN 89 and never touches the Dante adapter' {
+        Reset-Fake
+        $script:Fake.Status = 'Disabled'; $script:Fake.Vlan = '89'; $script:Fake.Addresses = @()
+        $d = NewRun 'reverse' $reverse '{"failures":2}'
+        $rc = Invoke-Check -Dir $d
+        $ch = @(Changes)
+        $rc -eq 0 -and $script:Fake.Vlan -eq '89' -and
+        ($ch -join ';') -eq 'Enable-NetAdapter LAN;Restart-NetAdapter LAN' -and @(DanteCalls).Count -eq 0
+    }
+    Check 'the reverse layout with the LAN VLAN cleared: the repair sets 89 back' {
+        Reset-Fake
+        $script:Fake.Vlan = ''; $script:Fake.Addresses = @()
+        $d = NewRun 'reverse0' $reverse '{"failures":2}'
+        $rc = Invoke-Check -Dir $d
+        $rc -eq 0 -and $script:Fake.Vlan -eq '89' -and (@(Changes) -contains 'Set-NetAdapterAdvancedProperty LAN') -and
+        (LogOf $d) -match "VlanId: set RegVlanID from '' to 89" -and @(DanteCalls).Count -eq 0
+    }
     Check 'a gateway that does not answer counts 1/3 and changes nothing' {
         Reset-Fake; $script:Fake.PingOk = $false
         $d = NewRun 'down' $good
@@ -373,7 +447,7 @@ try {
         $rc = Invoke-Check -Dir $d
         $ch = @(Changes)
         $rc -eq 1 -and ($ch -contains 'Enable-NetAdapterBinding LAN') -and ($ch -contains 'Restart-NetAdapter LAN') -and
-        (LogOf $d) -match 'VlanIdEmpty: ERROR fake failure' -and @(DanteCalls).Count -eq 0
+        (LogOf $d) -match 'VlanId: ERROR fake failure' -and @(DanteCalls).Count -eq 0
     }
     Check 'the state file round-trips through Save and Read' {
         $f = Join-Path $tmp 'rt.json'
