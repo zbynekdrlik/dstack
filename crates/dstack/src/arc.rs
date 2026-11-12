@@ -44,6 +44,9 @@
 //! 0x3600 (RX flows) are answered in a 2.8.9 card's layouts (`arc/v289.rs`);
 //! everything else as above. 0x1000 there states the device rename (word
 //! 0's 0x0001), without which Dante Controller greys out its Rename.
+//! netaudio's 2.8.9 writes there, 0x3410 (subscribe), 0x3401 (RX rename)
+//! and 0x2438 (TX names), make the change of 0x3010, 0x3001 and 0x2013
+//! through the same functions (`arc/v289/writes.rs`, dstack #220).
 //!
 //! No reply, as from inferno, to any other opcode, to a request whose op2 is not 0, and to a body inferno
 //! fails to read before it answers (0x2201 under 2 bytes, 0x2202 under 4,
@@ -417,8 +420,12 @@ pub fn handle(
     if h.op2 != 0 {
         return unanswered(&h, "op2 is not 0");
     }
-    // ARC 2.8.9's own reads (dstack #216); its other requests are 2.7's.
+    // ARC 2.8.9's own reads (dstack #216) and writes (#220); its other
+    // requests are 2.7's.
     if let Some(outcome) = v289::read(&h, body, state, cfg, live) {
+        return outcome;
+    }
+    if let Some(outcome) = v289::write(&h, body, state, cfg) {
         return outcome;
     }
     let ok = |body: &[u8]| ArcOutcome::Reply(reply(&h, STATUS_OK, body));
@@ -1085,20 +1092,34 @@ fn subscribed(h: &Header, changed: Vec<usize>) -> ArcOutcome {
     )
 }
 
-/// 0x3010 (inferno's `set_channels_subscriptions`): each item subscribes
-/// its RX channel to the TX channel and device its two names say, or, when
-/// either name's offset is 0, unsubscribes it. Channel 0 and channels we do
-/// not have are passed over; names inferno cannot read (an offset inside
-/// the header or past the datagram, bytes that are not UTF-8) change
-/// nothing, and so do names Dante's rules refuse (inferno subscribes to
-/// them; our state file cannot keep them). OK, no body, to every request
-/// inferno can read (also when nothing changed); a cut one gets no reply.
+/// 0x3010 (inferno's `set_channels_subscriptions`): its items, applied
+/// ([`subscribe_items`]). OK, no body, to every request inferno can read
+/// (also when nothing changed); a cut one gets no reply.
 fn subscribe(h: &Header, req: &[u8], state: &mut DeviceState, cfg: &DeviceConfig) -> ArcOutcome {
     let Some(items) = subscription_items(req) else {
         return unanswered(h, "a subscription request whose items are cut");
     };
+    subscribe_items(h, req, &items, state, cfg)
+}
+
+/// Each item (`[RX channel, TX channel name offset, TX device name
+/// offset]`, the offsets into `req`) subscribes its RX channel to the TX
+/// channel and device its two names say, or, when either name's offset is
+/// 0, unsubscribes it. Channel 0 and channels we do not have are passed
+/// over; names inferno cannot read (an offset inside the header or past
+/// the datagram, bytes that are not UTF-8) change nothing, and so do names
+/// Dante's rules refuse (inferno subscribes to them; our state file cannot
+/// keep them). OK, no body, also when nothing changed. 2.7's 0x3010 and
+/// 2.8.9's 0x3410 (`arc/v289/writes.rs`) share it.
+fn subscribe_items(
+    h: &Header,
+    req: &[u8],
+    items: &[[u16; 3]],
+    state: &mut DeviceState,
+    cfg: &DeviceConfig,
+) -> ArcOutcome {
     let mut changed = Vec::new();
-    for [id, channel_at, device_at] in items {
+    for &[id, channel_at, device_at] in items {
         // Channel 0 is passed over here, a channel we do not have where the
         // state refuses it.
         let Some(rx) = usize::from(id).checked_sub(1) else {
@@ -1423,10 +1444,8 @@ fn descriptor(fields: &[u16]) -> Vec<u8> {
 }
 
 /// 0x2013 and 0x3001: `[?, count]`, then `count` items (TX: `0, channel,
-/// name offset`; RX: `channel, name offset`), the names behind them. A
-/// refusal's reason is a debug line only: the refusal is a gap the server's
-/// once-a-minute warning counts, and Dante Controller asks again at once,
-/// so a warning per request would be a flood.
+/// name offset`; RX: `channel, name offset`), the names behind them,
+/// renamed ([`rename_channels`]): OK with `00 00` (TX) or no body (RX).
 fn rename(
     h: &Header,
     req: &[u8],
@@ -1434,27 +1453,72 @@ fn rename(
     cfg: &DeviceConfig,
     dir: Dir,
 ) -> ArcOutcome {
-    let (item, names, defaults) = match dir {
-        Dir::Tx => (6, &mut state.tx, &cfg.tx),
-        Dir::Rx => (4, &mut state.rx, &cfg.rx),
+    let (item, skip) = match dir {
+        Dir::Tx => (6, 2),
+        Dir::Rx => (4, 0),
     };
-    let label = dir.label();
-    let Some(count) = req.get(1).map(|&c| usize::from(c)).filter(|&c| c > 0) else {
-        return refuse(h, "a rename without a channel");
-    };
-    let mut proposed = names.clone();
-    let mut renamed = Vec::with_capacity(count);
+    let count = req.get(1).map_or(0, |&c| usize::from(c));
+    let mut items = Vec::with_capacity(count);
     for k in 0..count {
-        let at = 2 + k * item + if dir == Dir::Tx { 2 } else { 0 };
+        let at = 2 + k * item + skip;
         let (Some(id), Some(offset)) = (read_u16(req, at), read_u16(req, at + 2)) else {
             return refuse(h, "a rename whose items are cut short");
         };
+        items.push((id, offset));
+    }
+    let ok: &[u8] = match dir {
+        Dir::Tx => &[0, 0],
+        Dir::Rx => &[],
+    };
+    match rename_channels(req, &items, state, cfg, dir) {
+        Ok(change) => renamed(h, ok, change),
+        Err(why) => refuse(h, why),
+    }
+}
+
+/// Status OK with `body`; [`ArcOutcome::Changed`] with `change` when a
+/// write changed the state.
+fn renamed(h: &Header, body: &[u8], change: Option<Change>) -> ArcOutcome {
+    let bytes = reply(h, STATUS_OK, body);
+    match change {
+        Some(change) => ArcOutcome::Changed(bytes, change),
+        None => ArcOutcome::Reply(bytes),
+    }
+}
+
+/// Renames `items` (the channel from 1, its name's offset into `req`) in
+/// direction `dir`, all or nothing: the reason when one cannot be made (no
+/// item, no such channel, no name at its offset, a name Dante's rules
+/// refuse, names that would clash), else the change, `None` when every
+/// name was already so. An empty name is the channel's default. A
+/// refusal's reason is a debug line only: the refusal is a gap the server's
+/// once-a-minute warning counts, and Dante Controller asks again at once,
+/// so a warning per request would be a flood. 2.7's 0x2013 and 0x3001 and
+/// 2.8.9's 0x3401 and 0x2438 (`arc/v289/writes.rs`) share it.
+fn rename_channels(
+    req: &[u8],
+    items: &[(u16, u16)],
+    state: &mut DeviceState,
+    cfg: &DeviceConfig,
+    dir: Dir,
+) -> Result<Option<Change>, &'static str> {
+    let (names, defaults) = match dir {
+        Dir::Tx => (&mut state.tx, &cfg.tx),
+        Dir::Rx => (&mut state.rx, &cfg.rx),
+    };
+    let label = dir.label();
+    if items.is_empty() {
+        return Err("a rename without a channel");
+    }
+    let mut proposed = names.clone();
+    let mut renamed = Vec::with_capacity(items.len());
+    for &(id, offset) in items {
         let Some(index) = usize::from(id)
             .checked_sub(1)
             .filter(|&i| i < proposed.len())
         else {
             debug!(dir = label, channel = id, "rename refused: no such channel");
-            return refuse(h, "no such channel");
+            return Err("no such channel");
         };
         let Some(name) = string_at(req, offset) else {
             debug!(
@@ -1462,7 +1526,7 @@ fn rename(
                 channel = id,
                 "rename refused: no name at its offset"
             );
-            return refuse(h, "no name at its offset");
+            return Err("no name at its offset");
         };
         let name = if name.is_empty() {
             defaults[index].as_str()
@@ -1475,7 +1539,7 @@ fn rename(
                 channel = id,
                 "rename refused: not a valid Dante channel name"
             );
-            return refuse(h, "not a valid Dante channel name");
+            return Err("not a valid Dante channel name");
         }
         proposed[index] = name.to_string();
         renamed.push(id);
@@ -1487,14 +1551,10 @@ fn rename(
     );
     if !problems.is_empty() {
         debug!(dir = label, problems = %problems.join("; "), "rename refused");
-        return refuse(h, "the names would clash");
+        return Err("the names would clash");
     }
-    let ok: &[u8] = match dir {
-        Dir::Tx => &[0, 0],
-        Dir::Rx => &[],
-    };
     if proposed == *names {
-        return ArcOutcome::Reply(reply(h, STATUS_OK, ok));
+        return Ok(None);
     }
     // The channel-change notification names the RX channels renamed (inferno
     // also sends one, empty, for a rename that renamed nothing).
@@ -1506,13 +1566,10 @@ fn rename(
     };
     *names = proposed;
     info!(dir = label, channels = ?renamed, "channels renamed");
-    ArcOutcome::Changed(
-        reply(h, STATUS_OK, ok),
-        Change {
-            renamed_rx,
-            ..Change::default()
-        },
-    )
+    Ok(Some(Change {
+        renamed_rx,
+        ..Change::default()
+    }))
 }
 
 #[cfg(test)]
