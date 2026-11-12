@@ -32,7 +32,8 @@ use crate::wire::{Header, STATUS_OK, read_u16, reply};
 /// `tx_fpp_max` frames a packet (the most our advertised latency covers;
 /// Dante Controller asks 0, the device's own) and our encoding, and is
 /// sent to its group ([`TxTable::add_own_multicast`]). The reply is its
-/// record in the list's form with no destination, as a UltimoX2 answers.
+/// record in the list's form with no destination, as a UltimoX2 answers
+/// (`v289::created_body`).
 /// Refused ([`crate::wire::STATUS_ERROR`]), creating nothing: a body
 /// that does not read, other than one multicast record, a slot past ours
 /// or in use, channels we do not have.
@@ -95,17 +96,16 @@ fn create_289(
     if let Err(refused) = make(h, state, cfg, tx, ip, f.local_id, &f.channels) {
         return refused;
     }
-    let made = flows::TxFlow {
+    let made = super::v289::Listed {
         id: f.local_id,
-        local_id: f.local_id,
-        flags: flows::MULTICAST,
-        channels: f.channels.clone(),
+        multicast: true,
+        channels: &f.channels,
         fpp: cfg.tx_fpp_max,
-        bits: u16::from(cfg.encoding),
-        destinations: Vec::new(),
+        destination: None,
+        receiver: None,
     };
     ArcOutcome::Changed(
-        reply(h, STATUS_OK, &flows::list_reply_body(&[made])),
+        reply(h, STATUS_OK, &super::v289::created_body(cfg, &made)),
         Change::TX_FLOWS_ONLY,
     )
 }

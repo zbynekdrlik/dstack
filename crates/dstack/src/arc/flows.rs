@@ -62,7 +62,7 @@ use std::net::{Ipv4Addr, SocketAddrV4};
 
 use super::client::ReadError;
 use super::control::Call;
-use crate::wire::{HEADER_LEN, STATUS_OK, read_u16};
+use crate::wire::{HEADER_LEN, STATUS_MORE, STATUS_OK, read_u16};
 
 /// ARC 2.8.9's start code, which these requests carry (Dante Controller's
 /// and netaudio's).
@@ -138,8 +138,15 @@ pub enum CreateError {
 
 /// The list request's body.
 pub fn list_body() -> [u8; 24] {
+    list_body_from(1)
+}
+
+/// The list request's body from flow `first` (from 1; bytes 10–11),
+/// a 2.8.9 page request.
+pub fn list_body_from(first: u16) -> [u8; 24] {
     let mut body = [0u8; 24];
-    body[6..12].copy_from_slice(&[0, 1, 0, 1, 0, 1]);
+    body[6..10].copy_from_slice(&[0, 1, 0, 1]);
+    body[10..12].copy_from_slice(&first.to_be_bytes());
     body
 }
 
@@ -289,18 +296,59 @@ fn record(body: &[u8], at: usize) -> Option<TxFlow> {
         flags,
         channels,
         fpp: read_u16(frames, 2)?,
-        bits: read_u16(first, 22)?,
+        bits: bits(body, first)?,
         destinations,
     })
 }
 
-/// The device's TX flows (0x2600).
-pub fn list_tx_flows(c: &mut impl Call) -> Result<Flows, ReadError> {
-    let (status, body) = c.call_as(START_2809, LIST, &list_body())?;
-    if status != STATUS_OK {
-        return Err(ReadError::Refused { op: LIST, status });
+/// A record's bits per sample, from its first segment `first`: in a
+/// 2.8.9 device's record (a 40-byte first segment, [`FIRST_SEGMENT`]) the
+/// second `u32` of the format block whose packet offset is at bytes 22–23
+/// (dstack #223), 0 with no format (a create's request); in a dstack
+/// device's before v0.6.98 (24 bytes) bytes 22–23 themselves.
+fn bits(body: &[u8], first: &[u8]) -> Option<u16> {
+    let word = read_u16(first, 22)?;
+    if first.len() < FIRST_SEGMENT || word == 0 {
+        return Some(word);
     }
-    parse_flows(&body).ok_or(ReadError::Malformed { op: LIST })
+    let format = usize::from(word).checked_sub(HEADER_LEN)?;
+    let bits = u32::from_be_bytes(body.get(format + 4..format + 8)?.try_into().ok()?);
+    u16::try_from(bits).ok()
+}
+
+/// The bytes of a 2.8.9 device's first record segment (`14 ..`, 20 words).
+pub const FIRST_SEGMENT: usize = 40;
+
+/// The device's TX flows (0x2600), page by page: a page that says more
+/// follow ([`STATUS_MORE`]) is followed by the one from the flow after its
+/// last (dstack #223: our own list takes several datagrams for many
+/// flows), at most [`super::MAX_FLOWS`] pages. A page that names no flow
+/// past the one it started from, yet says more follow, is malformed.
+pub fn list_tx_flows(c: &mut impl Call) -> Result<Flows, ReadError> {
+    let mut out = Flows::default();
+    let mut first = 1u16;
+    for _ in 0..super::MAX_FLOWS {
+        let (status, body) = c.call_as(START_2809, LIST, &list_body_from(first))?;
+        if status != STATUS_OK && status != STATUS_MORE {
+            return Err(ReadError::Refused { op: LIST, status });
+        }
+        let page = parse_flows(&body).ok_or(ReadError::Malformed { op: LIST })?;
+        let last = page.flows.iter().map(|f| f.local_id).max();
+        out.slots = page.slots;
+        out.unread += page.unread;
+        out.flows.extend(page.flows);
+        if status == STATUS_OK {
+            return Ok(out);
+        }
+        match last
+            .and_then(|l| l.checked_add(1))
+            .filter(|&next| next > first)
+        {
+            Some(next) => first = next,
+            None => break,
+        }
+    }
+    Err(ReadError::Malformed { op: LIST })
 }
 
 /// Dante Controller's create body (see the module) for a multicast flow of

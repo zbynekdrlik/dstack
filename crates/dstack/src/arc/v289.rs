@@ -17,8 +17,8 @@
 //! segmented lists and left the device out of its list (cause not found
 //! yet); the lists are still answered for a controller that asks. Each
 //! read below is answered in the card's layout with our values; the other
-//! requests under 0x2809 (0x1100, 0x1102, 0x2600, 0x3300, 0x2320, 2.7's
-//! writes) are answered as under 2.7 ([`super::handle`]). Dante
+//! requests under 0x2809 (0x1100, 0x1102, 0x3300, 0x2320, 2.7's writes)
+//! are answered as under 2.7 ([`super::handle`]). Dante
 //! Controller keeps 2.7's writes for our devices (0x3010, 0x3001, 0x1001;
 //! #216 Finding 18); netaudio writes with 2.8.9's own, which [`writes`]
 //! answers (#220).
@@ -32,8 +32,9 @@
 //! | 0x2400 | TX channels: number, current and default name, format ([`TX_CHANNELS`]) |
 //! | 0x3400 | RX channels: the same, and the subscription with its status ([`RX_CHANNELS`]) |
 //! | 0x3600 | RX flows: number, format, latency, our address, which RX channel each slot feeds ([`RX_FLOWS`]) |
+//! | 0x2600 | TX flows: number, flags, format, the receiver's names, the destination, each slot's TX channel, frames per packet ([`flows::LIST`], [`tx_flow`]; dstack #223) |
 //!
-//! **Pages** (0x2400, 0x3400, 0x3600): the request body holds, from byte
+//! **Pages** (0x2400, 0x3400, 0x3600, 0x2600): the request body holds, from byte
 //! 6, `1`, the media selector (1, audio), the first item (from 1) and the
 //! last (0: to the end). The reply: 6 zero bytes, `[slots, count]`,
 //! `slots` record offsets (from the datagram's first byte), then the
@@ -45,9 +46,11 @@
 //! **Records** are chains of segments, each starting `[its words, the
 //! words from it to the record's end]`, as the card writes them.
 
+use std::net::SocketAddrV4;
+
 use super::{
     ArcOutcome, DeviceConfig, DeviceState, FLOW_PAGE, Header, Heap, Live, MAX_CHANNELS_IN_FLOW,
-    MAX_FLOWS, Manager, REVISION, RX_PAGE, STATUS_OK, TX_PAGE, common_descriptor, flows,
+    MAX_FLOWS, Manager, REVISION, RX_PAGE, STATUS_OK, TX_PAGE, capped, common_descriptor, flows,
     granted_flow, listed_subscription, op, paged, refuse, reply, stated_latency_ns, wire_u16,
 };
 use crate::device::MAX_NAME;
@@ -130,6 +133,26 @@ pub(super) fn read(
             let slots = usize::from(FLOW_PAGE);
             channel_page(h, body, slots, usize::from(MAX_FLOWS), |slot, out| {
                 rx_flow(slot, cfg, live.rx, out)
+            })
+        }
+        flows::LIST => {
+            let all = usize::from(MAX_FLOWS);
+            channel_page(h, body, all, all, |slot, out| {
+                let f = live.tx.flow(slot)?;
+                let channels: Vec<u16> = f.channels.iter().map(|c| c.unwrap_or(0)).collect();
+                Some(tx_flow(
+                    out,
+                    cfg,
+                    &Listed {
+                        id: wire_u16(slot + 1),
+                        multicast: f.multicast,
+                        channels: &channels,
+                        fpp: f.fpp,
+                        destination: Some(f.dest),
+                        receiver: (!f.multicast)
+                            .then_some((f.rx_host.as_str(), f.rx_flow_name.as_str())),
+                    },
+                ))
             })
         }
         _ => return None,
@@ -394,6 +417,119 @@ fn rx_flow(slot: usize, cfg: &DeviceConfig, manager: &Manager, out: &mut Heap) -
     out.bytes(&manager.ip().octets());
     mapping(out, &f.rx);
     Some(at)
+}
+
+/// One TX flow as a 0x2600 record states it.
+pub(super) struct Listed<'a> {
+    /// The flow (from 1): its id and its media-local id.
+    pub id: u16,
+    pub multicast: bool,
+    /// Each slot's TX channel (from 1), 0 for none.
+    pub channels: &'a [u16],
+    pub fpp: u16,
+    /// Where it is sent: the receiver, or a multicast flow's group; none
+    /// in a create's reply.
+    pub destination: Option<SocketAddrV4>,
+    /// A unicast flow's receiver: its device name and its name of the flow.
+    pub receiver: Option<(&'a str, &'a str)>,
+}
+
+/// A TX flow's record (dstack #223), as a 2.8.9 card, a UltimoX2 and
+/// Dante Controller's adapters write it, in its order: the flow's name
+/// (its number), the format (written once a page: rate, bits, `u32`
+/// each), the record (from a multiple of 4), the destination's socket
+/// descriptor (`08 02`, port, address; from a multiple of 4), then the
+/// receiver's device and flow names. The record's segments: `[14 ..]`
+/// (40 bytes: the flow, 0, audio, the flow again, 0, the flags
+/// ([`flows::UNICAST`] or [`flows::MULTICAST`]), 0, the name's offset, the
+/// format's, 16 zero bytes), `[08 ..]` (0, the receiver's device and flow
+/// names' offsets or 0, 1, 6 zero bytes), `[04 ..]` (`[n, n]` and the
+/// descriptor's offset for `n` destinations, 0), `[3 + slots ..]` (the
+/// slot count, each slot's TX channel, 0), `[02 00]` (frames per packet).
+/// Each segment's second byte is the words from it to the record's end,
+/// but the last one's, 0 as the card writes it. Returns the record's
+/// offset.
+fn tx_flow(out: &mut Heap, cfg: &DeviceConfig, f: &Listed<'_>) -> u16 {
+    let name = out.cstr(&f.id.to_string());
+    let format = out.shared(|b| {
+        b.align(4);
+        let at = b.offset();
+        b.u32(cfg.sample_rate);
+        b.u32(u32::from(cfg.encoding));
+        at
+    });
+    let slots = f.channels.len().min(usize::from(MAX_CHANNELS_IN_FLOW));
+    let words = TX_FLOW_FIXED_WORDS + slots;
+    // The words left from each segment on: the record, then less each
+    // segment's own (the fixed ones 20, 8 and 4).
+    let left = |before: usize| wire_u8(words - before);
+    out.align(4);
+    let at = out.offset();
+    out.bytes(&[0x14, left(0)]);
+    for word in [f.id, 0, MEDIA_AUDIO, f.id, 0] {
+        out.u16(word);
+    }
+    out.u32(if f.multicast {
+        flows::MULTICAST
+    } else {
+        flows::UNICAST
+    });
+    out.u32(0);
+    out.u16(name);
+    out.u16(format);
+    out.zeros(16);
+    out.bytes(&[0x08, left(20)]);
+    let names_at = out.offset() + 2;
+    out.zeros(6);
+    out.u16(1);
+    out.zeros(6);
+    let n = u8::from(f.destination.is_some());
+    out.bytes(&[0x04, left(28), n, n]);
+    let destination_at = out.offset();
+    out.zeros(4);
+    out.bytes(&[wire_u8(3 + slots), left(32)]);
+    out.u16(wire_u16(slots));
+    for &channel in &f.channels[..slots] {
+        out.u16(channel);
+    }
+    out.u16(0);
+    out.bytes(&[0x02, 0x00]);
+    out.u16(f.fpp);
+    if let Some(d) = f.destination {
+        out.align(4);
+        let here = out.offset();
+        out.set_u16(destination_at, here);
+        out.bytes(&[0x08, 0x02]);
+        out.u16(d.port());
+        out.bytes(&d.ip().octets());
+    }
+    if let Some((device, flow)) = f.receiver {
+        let device = out.cstr(capped(device));
+        let flow = out.cstr(capped(flow));
+        out.set_u16(names_at, device);
+        out.set_u16(names_at + 2, flow);
+    }
+    at
+}
+
+/// A TX flow record's words but its slots': 20, 8, 4, 3 and 2.
+const TX_FLOW_FIXED_WORDS: usize = 20 + 8 + 4 + 3 + 2;
+const _: () = assert!(TX_FLOW_FIXED_WORDS + MAX_CHANNELS_IN_FLOW as usize <= 255);
+
+/// A count of at most 255 as one byte (the record's word counts, bounded
+/// by [`TX_FLOW_FIXED_WORDS`]'s assert).
+fn wire_u8(n: usize) -> u8 {
+    u8::try_from(n).unwrap_or(u8::MAX)
+}
+
+/// The body of our answer to a 2.8.9 multicast create (0x2601): the flow
+/// made, as one record of the list's form with no destination (the group
+/// is in the next list), as a UltimoX2 answers.
+pub(super) fn created_body(cfg: &DeviceConfig, f: &Listed<'_>) -> Vec<u8> {
+    super::page_body(PAGE_PREFIX, 1, 1, 2, [f], |f, out| {
+        Some(tx_flow(out, cfg, f).to_be_bytes().to_vec())
+    })
+    .0
 }
 
 /// Which RX channel each of a flow's slots feeds (`slots[s]`: the RX
