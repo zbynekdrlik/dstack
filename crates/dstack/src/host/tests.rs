@@ -207,16 +207,64 @@ fn prepare_refuses_as_the_binary_did_before_anything_is_bound() {
             )
         );
     }
-    // An address no interface holds (yet), an interface not there: exit 1,
-    // which the unit retries; the engine's channels were the device's.
-    for place in [Place::Ip(NOWHERE), Place::Iface("zyxnone0".into())] {
-        let e = prepare(&opts(path.clone(), place.clone()), &[15])
-            .err()
-            .unwrap();
-        let why = run_error(e);
-        assert!(!why.contains("192.0.2"), "no address in {why}");
-    }
+    // An address the Dante network cannot reach (the loopback): exit 1 at
+    // once; the engine's channels were the device's. An address or an
+    // interface not there yet is waited for (dstack #225,
+    // `a_place_that_appears_after_the_start_is_the_device_s`).
+    let e = prepare(&opts(path.clone(), Place::Ip(Ipv4Addr::LOCALHOST)), &[15])
+        .err()
+        .unwrap();
+    let why = run_error(e);
+    assert!(why.contains("loopback"), "{why}");
+    assert!(!why.contains("127.0.0"), "no address in {why}");
     assert!(!dir.path().join("control.sock").exists(), "nothing bound");
+}
+
+// The interface facts come from Linux files (/sys); Windows reads the adapter.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_place_that_appears_after_the_start_is_the_device_s() {
+    // dstack #225: dsend started at logon in the same second the PC got
+    // its Dante address, and failed at once. The address appears here on
+    // the third lookup (on the loopback interface, so the start goes on to
+    // its facts and stops there: no usable MAC, nothing bound).
+    let dir = tempfile::tempdir().unwrap();
+    let (_, cfg) = config_in(dir.path());
+    let lo = |ip| IfAddr {
+        name: "lo".into(),
+        ip,
+        netmask: Ipv4Addr::new(255, 0, 0, 0),
+    };
+    let mut lists = [
+        vec![lo(Ipv4Addr::LOCALHOST)],
+        vec![lo(Ipv4Addr::LOCALHOST)],
+        vec![lo(Ipv4Addr::LOCALHOST), lo(NOWHERE)],
+    ]
+    .into_iter();
+    let (looked, slept) = (std::cell::Cell::new(0), std::cell::Cell::new(0));
+    let control = dir.path().join("control.sock");
+    let e = prepare_on(
+        cfg,
+        &Place::Ip(NOWHERE),
+        Some(&control),
+        &[],
+        ClockSource::System,
+        |place| {
+            daemon::wait_for_interface(
+                place,
+                || {
+                    looked.set(looked.get() + 1);
+                    Ok(lists.next().expect("looked up again after it appeared"))
+                },
+                |_| slept.set(slept.get() + 1),
+            )
+        },
+    )
+    .err()
+    .unwrap();
+    assert_eq!(setup_error(e), "the interface has no usable MAC address");
+    assert_eq!((looked.get(), slept.get()), (3, 2));
+    assert!(!control.exists(), "nothing bound");
 }
 
 // ---- the running device ----

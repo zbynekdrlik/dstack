@@ -733,6 +733,19 @@ pub struct Link {
     device: Embedded,
 }
 
+/// Waits until `place` is there (the address on an interface, or the
+/// interface with its one IPv4 address), as [`Link::start`] does (dstack
+/// #225), for an app that uses the address before the start: dsend and
+/// dlisten probe their free control ports on it. A place refused (an
+/// address the Dante network cannot reach, an interface with several
+/// IPv4 addresses, an interface list that cannot be read) is
+/// [`HostError::Run`] at once.
+pub fn wait_for_place(place: &Place) -> Result<(), HostError> {
+    dstack::daemon::wait_for_interface(place, dstack::host::interfaces, std::thread::sleep)
+        .map(drop)
+        .map_err(HostError::Run)
+}
+
 impl Link {
     /// Starts the device of `config` on `place`, running `processor` every
     /// block on the RX channels `map.rx` into the TX channels `map.tx`.
@@ -740,6 +753,12 @@ impl Link {
     /// and the PC's dsync service otherwise (the owner's rule, dstack #68:
     /// a clock with or without the service, never worse than it). Call it
     /// outside any tokio runtime: the device runs its own.
+    ///
+    /// An address or interface not there yet (the network still coming up
+    /// at boot or logon) is waited for, with no time limit: the call
+    /// returns once it is there, logging the wait once a minute (dstack
+    /// #225). Call it on a thread that may wait. Every other error returns
+    /// at once.
     pub fn start<P: Process + 'static>(
         config: &Config,
         place: &Place,

@@ -3,10 +3,10 @@ use super::*;
 use std::net::SocketAddrV4;
 
 use crate::arc::flows::{
-    CREATE, DELETE, MULTICAST, START_2809, TxFlow, UNICAST, create_body, delete_body,
-    list_reply_body, parse_flows,
+    CREATE, DELETE, LIST, MULTICAST, START_2809, TxFlow, UNICAST, create_body, delete_body,
+    list_body, list_reply_body, parse_flows,
 };
-use crate::arc::{Change, MAX_FLOWS, flows_2809, op, tx_flows};
+use crate::arc::{Change, MAX_FLOWS, op, tx_flows};
 use crate::device::{DeviceState, SavedMulticast};
 use crate::flows::control::FlowRequest;
 use crate::media::tx::{MULTICAST_PORT, multicast_group};
@@ -84,9 +84,24 @@ fn refused(tx: &mut TxTable, op1: u16, body: &[u8]) {
     assert_eq!(state, saved, "the state kept");
 }
 
-/// The flows our 0x2600 list states.
+/// The flows our 0x2600 list states (its first page, as the server
+/// answers a reader's request).
 fn listed(tx: &TxTable) -> Vec<TxFlow> {
-    let flows = parse_flows(&flows_2809(&cfg(), tx)).expect("our list reads");
+    let cfg = cfg();
+    let mut state = DeviceState::from_config(&cfg);
+    let rx = crate::subscribe::Manager::new(
+        &cfg,
+        &cfg.name,
+        Ipv4Addr::UNSPECIFIED,
+        [0; crate::subscribe::MAX_FLOWS],
+    );
+    let live = crate::arc::Live { tx, rx: &rx };
+    let packet = request(START_2809, 0x2600, LIST, 0, &list_body());
+    let bytes = match crate::arc::handle(&mut state, &cfg, &live, &packet) {
+        ArcOutcome::Reply(bytes) => bytes,
+        other => panic!("not a plain reply: {other:?}"),
+    };
+    let flows = parse_flows(&bytes[HEADER_LEN..]).expect("our list reads");
     assert_eq!((flows.slots, flows.unread), (MAX_FLOWS, 0));
     flows.flows
 }

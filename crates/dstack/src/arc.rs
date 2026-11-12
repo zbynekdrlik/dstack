@@ -25,7 +25,7 @@
 //! | 0x2010 | TX channels' current names, paged |
 //! | 0x2013 | TX rename |
 //! | 0x2200 | TX flows, [`FLOW_PAGE`] slots a page (inferno's `query_tx_flows`) |
-//! | 0x2201, 0x2202 | the older create, delete of a multicast TX flow: refused (inferno's answer when it creates or deletes none); ARC 2.8.9's 0x2601 creates one |
+//! | 0x2201, 0x2202 | ARC 2.7's create, delete of a multicast TX flow (Dante Controller's on a device without segmented flows, dstack #222): the flow made in the slot its id names, or ended ([`answer`]); OK, no body. [`handle`] alone, which cannot change the TX table, refuses them as inferno does when it creates or deletes none |
 //! | 0x2600 (start 0x2809) | ARC 2.8.9's TX flow list ([`flows::list_reply_body`]): receivers' flows unicast, ours multicast with their group |
 //! | 0x2601 (start 0x2809) | ARC 2.8.9's multicast create (dstack #193): a multicast flow in the asked slot ([`answer`]); the reply is its record, no destination |
 //! | 0x2602 (start 0x2809) | ARC 2.8.9's delete of a multicast flow: OK, no body |
@@ -212,11 +212,13 @@ pub const MAX_CHANNELS_IN_FLOW: u16 = 8;
 /// The answer to 0x3300. Without it Dante Controller reports a clock
 /// domain mismatch for the device.
 pub const CLOCK_REPLY: [u8; 8] = [0x38, 0x00, 0x38, 0xfd, 0x38, 0xfe, 0x38, 0xff];
-/// The counts' flags byte: bit 4, TX channels can be renamed. Bit 5, TX
-/// multicast, stays clear (inferno sets it): the device creates no
-/// multicast flow by 0x2201 (refused), so Dante Controller is never offered
-/// one; ARC 2.8.9's create (0x2601, dstack #193) is answered.
-const FLAG_TX_RENAME: u8 = 0x10;
+/// The counts' flags byte, inferno's 0x30: bit 4 (0x10), TX channels can
+/// be renamed; bit 5 (0x20), TX multicast flows. With bit 5 Dante
+/// Controller offers Add on the Transmit tab and creates the flow with
+/// 2.7's 0x2201 (or 2.8.9's 0x2601 when segmented flows are stated), which
+/// our devices answer (dstack #193, #222). One literal: the bits joined by
+/// `|` would leave its `^` mutant, which gives the same byte.
+const COUNTS_FLAGS: u8 = 0x30;
 /// An RX channel's flags in both generations' records (0x3000's second
 /// word, 0x3400's flags; a reader sees no change from the generation):
 /// inferno's 6 (netaudio: rename allowed) and 0x0008, netaudio's
@@ -479,7 +481,9 @@ pub fn handle(
 }
 
 /// What the server answers to `req`: ARC 2.8.9's multicast create and
-/// delete (0x2601, 0x2602 under [`flows::START_2809`], dstack #193) with
+/// delete (0x2601, 0x2602 under [`flows::START_2809`], dstack #193) and
+/// ARC 2.7's create and delete (0x2201, 0x2202 under any start code,
+/// dstack #222) with
 /// the TX table to change ([`Flows::change_tx`]), saved to the state file
 /// before it is answered (dstack #207: a restart makes the flow again); a
 /// change that cannot be saved is undone, on the TX table too, and
@@ -488,9 +492,10 @@ pub fn handle(
 pub fn answer<F: Flows>(device: &mut Device, running: &F, req: &[u8]) -> ArcOutcome {
     match Header::parse(req) {
         Ok((h, body))
-            if h.start == flows::START_2809
-                && h.op2 == 0
-                && matches!(h.op1, flows::CREATE | flows::DELETE) =>
+            if h.op2 == 0
+                && (matches!(h.op1, flows::CREATE_27 | flows::DELETE_27)
+                    || h.start == flows::START_2809
+                        && matches!(h.op1, flows::CREATE | flows::DELETE)) =>
         {
             running.change_tx(|tx, ip| {
                 let (state, table) = (device.state.clone(), tx.clone());
@@ -1063,7 +1068,7 @@ fn counts(cfg: &DeviceConfig) -> Vec<u8> {
     let rx = wire_u16(cfg.rx.len());
     let mut out = Body::new();
     out.u8(0);
-    out.u8(FLAG_TX_RENAME);
+    out.u8(COUNTS_FLAGS);
     out.u16(tx);
     out.u16(rx);
     out.u16(4);

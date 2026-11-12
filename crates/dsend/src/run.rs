@@ -5,6 +5,7 @@
 //! watch and the refresh). Glue, run by hand on Windows.
 
 use std::fs::File;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::Duration;
 
@@ -21,6 +22,15 @@ const WAKE: Duration = Duration::from_secs(1);
 const LOG_EVERY: u32 = 10;
 /// Every how many wakes the output devices are read again (5 s).
 const OUTPUTS_EVERY: u32 = 5;
+
+/// Whether the run's log file (`<state file>.log`) opened.
+static LOG_OPEN: AtomicBool = AtomicBool::new(false);
+
+/// Whether the run's log file opened: a failed run then tells its error
+/// there, not in a box (`cli::shows_box`, dstack #225).
+pub fn log_open() -> bool {
+    LOG_OPEN.load(Ordering::Relaxed)
+}
 
 /// `--list-outputs`: only where dsend can capture them.
 pub fn list() -> Result<(), String> {
@@ -39,6 +49,7 @@ pub fn run(o: &Options) -> Result<(), String> {
         .and_then(|d| std::fs::create_dir_all(d).ok())
         .and_then(|()| File::create(&log).ok());
     let logged = file.is_some();
+    LOG_OPEN.store(logged, Ordering::Relaxed);
     init_log(file);
     if logged {
         tracing::info!(log = %log.display(), "dsend: the log");

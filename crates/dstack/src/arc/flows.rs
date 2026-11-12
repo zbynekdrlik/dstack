@@ -25,11 +25,18 @@
 //!
 //! - 0: the flow's global id (bytes 2–3), its media-local id (8–9), its
 //!   flags (12–15, `u32`; [`MULTICAST`] set for a multicast flow, a unicast
-//!   one reads 0x11) and the bits per sample (22–23).
+//!   one reads 0x11) and the bits per sample: in a 2.8.9 device's record
+//!   (a 40-byte first segment) the format block's second `u32`, at the
+//!   packet offset in bytes 22–23 (its name's offset is at 20–21); in a
+//!   dstack device's ([`list_reply_body`], 12 words) bytes 22–23
+//!   themselves (dstack #223).
 //! - 2: the destinations: `[slots, count]`, then `count` offsets, each of
 //!   an 8-byte descriptor `08 02 <port u16> <IPv4>`.
 //! - 3: the channels: their count (2–3), then each TX channel id.
 //! - 4: the frames per packet (2–3).
+//!
+//! The list is paged: a page that says more follow is followed by the one
+//! from the flow after its last ([`list_tx_flows`]).
 //!
 //! A record whose chain does not read (a segment past the record or the
 //! datagram, too few segments, a destination offset past the reply) is left
@@ -62,7 +69,7 @@ use std::net::{Ipv4Addr, SocketAddrV4};
 
 use super::client::ReadError;
 use super::control::Call;
-use crate::wire::{HEADER_LEN, STATUS_OK, read_u16};
+use crate::wire::{HEADER_LEN, STATUS_MORE, STATUS_OK, read_u16};
 
 /// ARC 2.8.9's start code, which these requests carry (Dante Controller's
 /// and netaudio's).
@@ -138,8 +145,15 @@ pub enum CreateError {
 
 /// The list request's body.
 pub fn list_body() -> [u8; 24] {
+    list_body_from(1)
+}
+
+/// The list request's body from flow `first` (from 1; bytes 10–11),
+/// a 2.8.9 page request.
+pub fn list_body_from(first: u16) -> [u8; 24] {
     let mut body = [0u8; 24];
-    body[6..12].copy_from_slice(&[0, 1, 0, 1, 0, 1]);
+    body[6..10].copy_from_slice(&[0, 1, 0, 1]);
+    body[10..12].copy_from_slice(&first.to_be_bytes());
     body
 }
 
@@ -289,18 +303,63 @@ fn record(body: &[u8], at: usize) -> Option<TxFlow> {
         flags,
         channels,
         fpp: read_u16(frames, 2)?,
-        bits: read_u16(first, 22)?,
+        bits: bits(body, first)?,
         destinations,
     })
 }
 
-/// The device's TX flows (0x2600).
-pub fn list_tx_flows(c: &mut impl Call) -> Result<Flows, ReadError> {
-    let (status, body) = c.call_as(START_2809, LIST, &list_body())?;
-    if status != STATUS_OK {
-        return Err(ReadError::Refused { op: LIST, status });
+/// A record's bits per sample, from its first segment `first`: in a
+/// 2.8.9 device's record (a 40-byte first segment, `FIRST_SEGMENT`) the
+/// second `u32` of the format block whose packet offset is at bytes 22–23
+/// (dstack #223), 0 with no format (a create's request); in a dstack
+/// device's ([`list_reply_body`], 24 bytes) bytes 22–23 themselves.
+fn bits(body: &[u8], first: &[u8]) -> Option<u16> {
+    let word = read_u16(first, 22)?;
+    if first.len() < FIRST_SEGMENT || word == 0 {
+        return Some(word);
     }
-    parse_flows(&body).ok_or(ReadError::Malformed { op: LIST })
+    let format = usize::from(word).checked_sub(HEADER_LEN)?;
+    let bits = u32::from_be_bytes(body.get(format + 4..format + 8)?.try_into().ok()?);
+    u16::try_from(bits).ok()
+}
+
+/// The bytes of a 2.8.9 device's first record segment (`14 ..`, 20 words).
+const FIRST_SEGMENT: usize = 40;
+
+/// The device's TX flows (0x2600), page by page: a page that says more
+/// follow ([`STATUS_MORE`]) is followed by the one from the flow after its
+/// last (dstack #223: a device with a long list may page it), at most
+/// [`super::MAX_FLOWS`] pages. A page's flows before the one it was asked
+/// from are left out (already read). A page that names no flow past the
+/// one it was asked from, yet says more follow, is malformed. The first
+/// request is [`list_body`] itself. [`Flows::unread`] adds up every page's records that did not
+/// read (a device that lists one again on its next page counts it twice).
+pub fn list_tx_flows(c: &mut impl Call) -> Result<Flows, ReadError> {
+    let mut out = Flows::default();
+    let mut first = 1u16;
+    for _ in 0..super::MAX_FLOWS {
+        let (status, body) = c.call_as(START_2809, LIST, &list_body_from(first))?;
+        if status != STATUS_OK && status != STATUS_MORE {
+            return Err(ReadError::Refused { op: LIST, status });
+        }
+        let mut page = parse_flows(&body).ok_or(ReadError::Malformed { op: LIST })?;
+        page.flows.retain(|f| f.local_id >= first);
+        let last = page.flows.iter().map(|f| f.local_id).max();
+        out.slots = page.slots;
+        out.unread += page.unread;
+        out.flows.extend(page.flows);
+        if status == STATUS_OK {
+            return Ok(out);
+        }
+        match last
+            .and_then(|l| l.checked_add(1))
+            .filter(|&next| next > first)
+        {
+            Some(next) => first = next,
+            None => break,
+        }
+    }
+    Err(ReadError::Malformed { op: LIST })
 }
 
 /// Dante Controller's create body (see the module) for a multicast flow of
@@ -378,6 +437,77 @@ pub fn create_multicast(
         .into_iter()
         .find(|f| f.local_id == local_id && f.channels == channels && f.multicast())
         .ok_or(CreateError::NotCreated)
+}
+
+/// ARC 2.7's multicast create: Dante Controller's on a device whose
+/// 0x1000 states multicast TX (0x0020) without segmented flows (0x1000),
+/// under start code 0x2809 too (dstack #222); netaudio's legacy encoder
+/// writes the same request under 0x2729.
+pub const CREATE_27: u16 = super::op::TX_MULTICAST_CREATE;
+/// ARC 2.7's multicast delete.
+pub const DELETE_27: u16 = super::op::TX_MULTICAST_DELETE;
+/// A 2.7 flow's type word: multicast (the 2.7 list's second word,
+/// [`super::op::TX_FLOWS`], 0x02 for our multicast flows), the word Dante
+/// Controller's create carries. netaudio 0.4.2's legacy encoder writes it
+/// for a persistent, advertised flow and 0x0010 for one that is neither;
+/// our flows are kept in the state file and listed, so a create with
+/// another word is refused.
+pub const TYPE_MULTICAST_27: u16 = 0x0002;
+
+/// What a 2.7 multicast create (0x2201) asks for.
+///
+/// The body: `[1, 1]`, the record's packet offset, 0. The record: the flow
+/// id (its slot, from 1), its type, the rate (`u32`, 0 for the device's),
+/// 0, the encoding (0 for the device's), 0, the channel count, each slot's
+/// TX channel, then the names block's offset. The names block (frames per
+/// packet, the flow's label) is not read: our flows take the device's
+/// frames per packet and keep no label, as a 2.8.9 create's
+/// ([`create_body`]). Dante Controller asks the device's for all three.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Create27 {
+    /// The flow id: its slot, from 1.
+    pub id: u16,
+    /// The flow's type ([`TYPE_MULTICAST_27`] for a multicast flow).
+    pub kind: u16,
+    /// Hz; 0 for the device's.
+    pub rate: u32,
+    /// Bits per sample; 0 for the device's.
+    pub encoding: u16,
+    /// The TX channel of each slot, in order.
+    pub channels: Vec<u16>,
+}
+
+/// The create a 0x2201 body asks for (see [`Create27`]); `None` when it
+/// holds other than one record or its record does not read.
+pub fn parse_create_27(body: &[u8]) -> Option<Create27> {
+    if *body.get(1)? != 1 {
+        return None;
+    }
+    let at = usize::from(read_u16(body, 2)?).checked_sub(HEADER_LEN)?;
+    let r = body.get(at..)?;
+    let n = usize::from(read_u16(r, 14)?);
+    let channels = (0..n)
+        .map(|i| read_u16(r, 16 + 2 * i))
+        .collect::<Option<Vec<_>>>()?;
+    Some(Create27 {
+        id: read_u16(r, 0)?,
+        kind: read_u16(r, 2)?,
+        rate: u32::from_be_bytes(r.get(4..8)?.try_into().ok()?),
+        encoding: read_u16(r, 10)?,
+        channels,
+    })
+}
+
+/// The flow ids a 2.7 multicast delete (0x2202) names: the body is their
+/// count, 0, then each id (Dante Controller's, captured: one flow; netaudio
+/// 0.4.2's legacy encoder writes the same). `None` for a count of 0 or
+/// ids cut short.
+pub fn parse_delete_27(body: &[u8]) -> Option<Vec<u16>> {
+    let n = usize::from(read_u16(body, 0)?);
+    if n == 0 {
+        return None;
+    }
+    (0..n).map(|i| read_u16(body, 4 + 2 * i)).collect()
 }
 
 /// The delete request's body for the flow in media-local slot `local_id`
