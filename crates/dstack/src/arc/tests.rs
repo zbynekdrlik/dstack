@@ -620,7 +620,7 @@ fn counts_name_32_rx_and_16_tx() {
     assert!(!answer.changed);
     #[rustfmt::skip]
     let want = [
-        0x00, 0x10,             // flags: TX channels can be renamed; no multicast (inferno: 0x30)
+        0x00, 0x30,             // flags: TX channels can be renamed, multicast TX (inferno's 0x30, dstack #222)
         0x00, 0x10, 0x00, 0x20, // 16 TX, 32 RX
         0x00, 0x04, 0x00, 0x08, // 4 (inferno), at most 8 channels in a flow
         0x00, 0x08,             // 8 (inferno)

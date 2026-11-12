@@ -332,7 +332,11 @@ fn our_counts_take_the_card_s_layout_with_our_numbers() {
     // Dante Controller reads the segmented lists and leaves our device out
     // of its list (#216 Finding 17); without it, it reads the 2.7 lists.
     let mut counts_27 = dev.ask(1, op::COUNTS, &[]).body;
-    assert_eq!(counts_27[..2], [0x00, 0x10], "2.7: TX channel rename only");
+    assert_eq!(
+        counts_27[..2],
+        [0x00, 0x30],
+        "2.7: TX channel rename and multicast TX (#222)"
+    );
     counts_27[1] |= 0x01;
     assert_eq!(reply[10..32], counts_27[..22]);
     assert_eq!(reply[10] & 0x10, 0, "no segmented flows");
@@ -686,11 +690,12 @@ fn the_reads_both_generations_share_answer_alike() {
 #[test]
 fn our_2_7_answers_stay_as_they_were() {
     // Our 0x1000 for 2 TX and 2 RX, as Dante Controller read it on
-    // 12.11.2026 under 0x2729.
+    // 12.11.2026 under 0x2729, and with multicast TX (0x0020) stated since
+    // dstack #222.
     let mut dev = Dev::new(config_sized(2, 2));
     #[rustfmt::skip]
     let want = [
-        0x00, 0x10, 0x00, 0x02, 0x00, 0x02, 0x00, 0x04, 0x00, 0x02, 0x00, 0x08,
+        0x00, 0x30, 0x00, 0x02, 0x00, 0x02, 0x00, 0x04, 0x00, 0x02, 0x00, 0x08,
         0x00, 0x20, 0x00, 0x20, 0x00, 0x04, 0x00, 0x01, 0x00, 0x01,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     ];
