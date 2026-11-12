@@ -418,3 +418,19 @@ fn netaudio_s_reset_with_the_name_at_the_datagram_s_end_resets() {
     assert_eq!(head(&reply).4, STATUS_ERROR);
     assert_eq!(change, None);
 }
+
+/// Our RX channels state netaudio's can-subscribe-self bit (0x0008) in
+/// both generations' records: 2.7's 0x3000 (flags, the record's second
+/// word) as 2.8.9's 0x3400 (`v289.rs`'s test). Without it netaudio refuses
+/// a subscription to our own TX before it sends one.
+#[test]
+fn our_2_7_rx_records_state_self_subscription_too() {
+    let mut dev = Dev::new(config_sized(3, 2));
+    let page = dev.ask(3, op::RX_CHANNELS, &page_request(1));
+    assert_eq!((page.body[0], page.body[1]), (3, 3));
+    for k in 0..3 {
+        let at = 2 + 20 * k;
+        assert_eq!(u16_at(&page.body, at), k as u16 + 1, "the channel");
+        assert_eq!(u16_at(&page.body, at + 2), 0x000e, "the flags");
+    }
+}
