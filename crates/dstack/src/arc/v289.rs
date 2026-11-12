@@ -8,14 +8,22 @@
 //! ARC 2.8.9's reads (start code [`flows::START_2809`], dstack #216).
 //! Dante Controller picks the protocol from a device's ARC TXT
 //! (`arcp_vers`, [`super::ARCP_VERSION`]): to a 2.8.9 device it sends
-//! these reads at its start, and only to such a device does it offer the
-//! Rename. Each is answered in the card's layout with our values; the
+//! these reads at its start, and it offers the Rename only to a 2.8.9
+//! device whose 0x1000 states the rename bit ([`COUNTS_RENAME`]; #216
+//! Finding 17). Its 0x1000 also decides which lists it reads: with bit
+//! 0x1000 (segmented flows) 0x2400, 0x3400, 0x2600 and 0x3600, without it
+//! the 2.7 lists (0x2000, 0x3000, 0x2200, 0x3200) under 0x2809. Our
+//! devices leave 0x1000 clear: with it set, Dante Controller read our
+//! segmented lists and left the device out of its list (cause not found
+//! yet). The segmented lists are answered all the same, in the card's
+//! layout, for a controller that asks. Each is answered in the card's
+//! layout with our values; the
 //! other requests under 0x2809 (0x1100, 0x1102, 0x2600, 0x3300, 0x2320,
 //! the writes) are answered as under 2.7 ([`super::handle`]).
 //!
 //! | op1 | answer |
 //! |---|---|
-//! | 0x1000 | the 2.7 counts (word 0 with 0x1000 set), then a media record of (TX, RX) pairs ([`counts`]) |
+//! | 0x1000 | the 2.7 counts (word 0 with the rename bit 0x0001 set), then a media record of (TX, RX) pairs ([`counts`]) |
 //! | 0x1003 | the names in 32-byte fields and a versions record ([`device_names`]) |
 //! | 0x2010 | the 2.7 page of the TX channels whose name is not the default, as the card lists them |
 //! | 0x2204 | TX flow labels: none (start code 0x2801, as both 2.8.9 devices answer) |
@@ -56,8 +64,10 @@ const MEDIA_AUDIO: u16 = 3;
 const AUDIO_SELECTOR: u16 = 1;
 /// The zero bytes before a page's `[slots, count]`.
 const PAGE_PREFIX: usize = 6;
-/// Word 0 of 0x1000 under 2.8.9: the 2.7 flags and this bit (0x1000).
-const COUNTS_FLAG: u8 = 0x10;
+/// 0x1000's first word under 2.8.9: the 2.7 flags and this bit, the
+/// device rename (word 0's 0x0001; Dante Controller greys the Rename
+/// without it).
+const COUNTS_RENAME: u8 = 0x01;
 /// A TX channel's flags, the card's.
 const TX_FLAGS: u32 = 0x0000_0007;
 /// An RX channel's flags, the card's (netaudio: no rename prohibited).
@@ -116,7 +126,7 @@ pub(super) fn read(
     })
 }
 
-/// 0x1000: the 2.7 counts with word 0's 0x1000 set, the media record's
+/// 0x1000: the 2.7 counts with word 0's [`COUNTS_RENAME`], the media record's
 /// offset and a zero word, then the record (`0x1414`, 40 bytes): audio,
 /// then the pairs (1, 1), (TX, RX channels), (2, 2), (TX, RX flows), (2,
 /// 2), (TX, RX channels), (TX, RX channels in a flow), 8 zero bytes. The
@@ -127,7 +137,7 @@ pub(super) fn read(
 /// no flow (the adapter states 0 TX flows).
 fn counts(cfg: &DeviceConfig) -> Vec<u8> {
     let mut words = super::counts(cfg);
-    words[0] |= COUNTS_FLAG;
+    words[1] |= COUNTS_RENAME;
     let mut out = Body::new();
     out.bytes(&words);
     let record = out.offset() + 4;

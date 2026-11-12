@@ -42,7 +42,8 @@
 //! uses for a device announcing [`ARCP_VERSION`], 0x1000, 0x1003, 0x2010,
 //! 0x2204 and the lists 0x2400 (TX channels), 0x3400 (RX channels) and
 //! 0x3600 (RX flows) are answered in a 2.8.9 card's layouts (`arc/v289.rs`);
-//! everything else as above.
+//! everything else as above. 0x1000 there states the device rename (word
+//! 0's 0x0001), without which Dante Controller greys out its Rename.
 //!
 //! No reply, as from inferno, to any other opcode (0x2204 among them), to a request whose op2 is not 0, and to a body inferno
 //! fails to read before it answers (0x2201 under 2 bytes, 0x2202 under 4,
