@@ -380,6 +380,61 @@ pub fn create_multicast(
         .ok_or(CreateError::NotCreated)
 }
 
+/// ARC 2.7's multicast create: Dante Controller's on a device whose
+/// 0x1000 states multicast TX (0x0020) without segmented flows (0x1000),
+/// under start code 0x2809 too (dstack #222); netaudio's legacy encoder
+/// writes the same request under 0x2729.
+pub const CREATE_27: u16 = 0x2201;
+/// ARC 2.7's multicast delete.
+pub const DELETE_27: u16 = 0x2202;
+/// A 2.7 flow's type: multicast (the 2.7 list's second word,
+/// [`super::op::TX_FLOWS`]), the type Dante Controller creates.
+pub const TYPE_MULTICAST_27: u16 = 0x0002;
+
+/// What a 2.7 multicast create (0x2201) asks for.
+///
+/// The body: `[1, 1]`, the record's packet offset, 0. The record: the flow
+/// id (its slot, from 1), its type, the rate (`u32`, 0 for the device's),
+/// 0, the encoding (0 for the device's), 0, the channel count, each slot's
+/// TX channel, then the names block's offset. The names block (frames per
+/// packet, the flow's label) is not read: our flows take the device's
+/// frames per packet and keep no label, as a 2.8.9 create's
+/// ([`create_body`]). Dante Controller asks the device's for all three.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Create27 {
+    /// The flow id: its slot, from 1.
+    pub id: u16,
+    /// The flow's type ([`TYPE_MULTICAST_27`] for a multicast flow).
+    pub kind: u16,
+    /// Hz; 0 for the device's.
+    pub rate: u32,
+    /// Bits per sample; 0 for the device's.
+    pub encoding: u16,
+    /// The TX channel of each slot, in order.
+    pub channels: Vec<u16>,
+}
+
+/// The create a 0x2201 body asks for (see [`Create27`]); `None` when it
+/// holds other than one record or its record does not read.
+pub fn parse_create_27(body: &[u8]) -> Option<Create27> {
+    if *body.get(1)? != 1 {
+        return None;
+    }
+    let at = usize::from(read_u16(body, 2)?).checked_sub(HEADER_LEN)?;
+    let r = body.get(at..)?;
+    let n = usize::from(read_u16(r, 14)?);
+    let channels = (0..n)
+        .map(|i| read_u16(r, 16 + 2 * i))
+        .collect::<Option<Vec<_>>>()?;
+    Some(Create27 {
+        id: read_u16(r, 0)?,
+        kind: read_u16(r, 2)?,
+        rate: u32::from_be_bytes(r.get(4..8)?.try_into().ok()?),
+        encoding: read_u16(r, 10)?,
+        channels,
+    })
+}
+
 /// The delete request's body for the flow in media-local slot `local_id`
 /// (see the module).
 pub fn delete_body(local_id: u16) -> [u8; 24] {

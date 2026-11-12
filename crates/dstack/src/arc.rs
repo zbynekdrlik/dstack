@@ -479,7 +479,8 @@ pub fn handle(
 }
 
 /// What the server answers to `req`: ARC 2.8.9's multicast create and
-/// delete (0x2601, 0x2602 under [`flows::START_2809`], dstack #193) with
+/// delete (0x2601, 0x2602 under [`flows::START_2809`], dstack #193) and
+/// ARC 2.7's create (0x2201 under any start code, dstack #222) with
 /// the TX table to change ([`Flows::change_tx`]), saved to the state file
 /// before it is answered (dstack #207: a restart makes the flow again); a
 /// change that cannot be saved is undone, on the TX table too, and
@@ -488,9 +489,10 @@ pub fn handle(
 pub fn answer<F: Flows>(device: &mut Device, running: &F, req: &[u8]) -> ArcOutcome {
     match Header::parse(req) {
         Ok((h, body))
-            if h.start == flows::START_2809
-                && h.op2 == 0
-                && matches!(h.op1, flows::CREATE | flows::DELETE) =>
+            if h.op2 == 0
+                && (h.op1 == flows::CREATE_27
+                    || h.start == flows::START_2809
+                        && matches!(h.op1, flows::CREATE | flows::DELETE)) =>
         {
             running.change_tx(|tx, ip| {
                 let (state, table) = (device.state.clone(), tx.clone());

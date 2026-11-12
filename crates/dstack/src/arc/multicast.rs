@@ -1,12 +1,16 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // Copyright (C) 2026 dstack contributors.
-// Protocol facts (the create and delete forms, the UltimoX2's answers)
-// as `flows` records them; the code is our own.
+// Protocol facts (the create and delete forms, the UltimoX2's answers,
+// Dante Controller's 2.7 create) as `flows` records them; the code is our
+// own.
 
-//! ARC 2.8.9's multicast create and delete on our own device (0x2601,
-//! 0x2602, dstack #193): what a UltimoX2 answers, on our TX table.
+//! The multicast create and delete on our own device: ARC 2.8.9's (0x2601,
+//! 0x2602, dstack #193), what a UltimoX2 answers, and ARC 2.7's (0x2201,
+//! dstack #222), Dante Controller's on a device without segmented flows.
+//! Both make and end the same flow on our TX table, kept in the same state
+//! ([`make`], [`end`]).
 
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, SocketAddrV4};
 
 use tracing::info;
 
@@ -15,13 +19,13 @@ use crate::device::{DeviceConfig, DeviceState};
 use crate::media::tx::TxTable;
 use crate::wire::{Header, STATUS_OK, read_u16, reply};
 
-/// ARC 2.8.9's multicast create or delete (`h.op1`, see [`super::answer`]) on the
+/// A multicast create or delete (`h.op1`, see [`super::answer`]) on the
 /// TX table `tx` of the device `cfg` at `ip`, kept in its `state`
 /// ([`DeviceState::multicast`], dstack #207): a flow made or deleted is
 /// [`ArcOutcome::Changed`] ([`Change::TX_FLOWS_ONLY`]), which the
 /// caller saves before it answers; a refusal changes neither.
 ///
-/// **Create** (0x2601, [`flows::create_body`]'s form, read by
+/// **2.8.9's create** (0x2601, [`flows::create_body`]'s form, read by
 /// [`flows::parse_flows`]): one multicast record whose media-local id
 /// names the slot (from 1) and whose channels are our TX channels (1 to
 /// [`flows::MAX_FLOW_CHANNELS`], each once). The flow takes our
@@ -33,9 +37,15 @@ use crate::wire::{Header, STATUS_OK, read_u16, reply};
 /// that does not read, other than one multicast record, a slot past ours
 /// or in use, channels we do not have.
 ///
-/// **Delete** (0x2602, [`flows::delete_body`]'s form): the multicast flow
-/// of the media-local id at body bytes 12–13 goes; OK and an empty body,
-/// as a UltimoX2 answers. Refused when that slot holds no multicast flow.
+/// **2.8.9's delete** (0x2602, [`flows::delete_body`]'s form): the
+/// multicast flow of the media-local id at body bytes 12–13 goes; OK and
+/// an empty body, as a UltimoX2 answers. Refused when that slot holds no
+/// multicast flow.
+///
+/// **2.7's create** (0x2201, [`flows::parse_create_27`]): the same flow,
+/// its flow id naming the slot; OK and an empty body. Refused as 2.8.9's,
+/// and for another type than multicast or a rate or encoding other than
+/// ours (0 asks ours).
 pub(super) fn answer(
     h: &Header,
     body: &[u8],
@@ -44,17 +54,27 @@ pub(super) fn answer(
     tx: &mut TxTable,
     ip: Ipv4Addr,
 ) -> ArcOutcome {
-    if h.op1 == flows::DELETE {
-        let Some(slot) = read_u16(body, 12).and_then(|id| usize::from(id).checked_sub(1)) else {
-            return refuse(h, "a multicast delete without its flow");
-        };
-        if !tx.remove_multicast(slot) {
-            return refuse(h, "a multicast delete of a slot without one");
+    match h.op1 {
+        flows::DELETE => {
+            let Some(id) = read_u16(body, 12) else {
+                return refuse(h, "a multicast delete without its flow");
+            };
+            end(h, state, tx, id)
         }
-        state.remove_multicast(slot);
-        info!(slot, "a multicast TX flow ended (ARC 2.8.9), its save next");
-        return ArcOutcome::Changed(reply(h, STATUS_OK, &[]), Change::TX_FLOWS_ONLY);
+        flows::CREATE_27 => create_27(h, body, state, cfg, tx, ip),
+        _ => create_289(h, body, state, cfg, tx, ip),
     }
+}
+
+/// 2.8.9's create (see [`answer`]).
+fn create_289(
+    h: &Header,
+    body: &[u8],
+    state: &mut DeviceState,
+    cfg: &DeviceConfig,
+    tx: &mut TxTable,
+    ip: Ipv4Addr,
+) -> ArcOutcome {
     let asked = match flows::parse_flows(body) {
         Some(f) if f.unread == 0 => f.flows,
         _ => return refuse(h, "a multicast create that does not read"),
@@ -65,21 +85,9 @@ pub(super) fn answer(
     if !f.multicast() {
         return refuse(h, "a create of a unicast flow");
     }
-    let Some(slot) = usize::from(f.local_id).checked_sub(1) else {
-        return refuse(h, "a multicast create in slot 0");
-    };
-    let group = match tx.add_own_multicast(cfg, ip, slot, &f.channels) {
-        Ok(group) => group,
-        Err(why) => return refuse(h, why),
-    };
-    state.set_multicast(slot, &f.channels);
-    info!(
-        slot,
-        %group,
-        channels = f.channels.len(),
-        fpp = cfg.tx_fpp_max,
-        "a multicast TX flow made (ARC 2.8.9), its save next"
-    );
+    if let Err(refused) = make(h, state, cfg, tx, ip, f.local_id, &f.channels) {
+        return refused;
+    }
     let made = flows::TxFlow {
         id: f.local_id,
         local_id: f.local_id,
@@ -93,6 +101,81 @@ pub(super) fn answer(
         reply(h, STATUS_OK, &flows::list_reply_body(&[made])),
         Change::TX_FLOWS_ONLY,
     )
+}
+
+/// 2.7's create (see [`answer`]).
+fn create_27(
+    h: &Header,
+    body: &[u8],
+    state: &mut DeviceState,
+    cfg: &DeviceConfig,
+    tx: &mut TxTable,
+    ip: Ipv4Addr,
+) -> ArcOutcome {
+    let Some(asked) = flows::parse_create_27(body) else {
+        return refuse(h, "a 2.7 multicast create that does not read");
+    };
+    if asked.kind != flows::TYPE_MULTICAST_27 {
+        return refuse(h, "a 2.7 create of another flow type than multicast");
+    }
+    if ![0, cfg.sample_rate].contains(&asked.rate) {
+        return refuse(h, "a 2.7 multicast create at another rate than ours");
+    }
+    if ![0, u16::from(cfg.encoding)].contains(&asked.encoding) {
+        return refuse(h, "a 2.7 multicast create in another encoding than ours");
+    }
+    match make(h, state, cfg, tx, ip, asked.id, &asked.channels) {
+        Ok(_) => ArcOutcome::Changed(reply(h, STATUS_OK, &[]), Change::TX_FLOWS_ONLY),
+        Err(refused) => refused,
+    }
+}
+
+/// Makes our multicast flow of TX `channels` in the slot of flow `id`
+/// (from 1) and keeps it in `state`: its group, or the refusal (slot 0, a
+/// slot past ours or in use, channels we do not have), which changes
+/// nothing.
+fn make(
+    h: &Header,
+    state: &mut DeviceState,
+    cfg: &DeviceConfig,
+    tx: &mut TxTable,
+    ip: Ipv4Addr,
+    id: u16,
+    channels: &[u16],
+) -> Result<SocketAddrV4, ArcOutcome> {
+    let Some(slot) = usize::from(id).checked_sub(1) else {
+        return Err(refuse(h, "a multicast create in slot 0"));
+    };
+    let group = tx
+        .add_own_multicast(cfg, ip, slot, channels)
+        .map_err(|why| refuse(h, why))?;
+    state.set_multicast(slot, channels);
+    info!(
+        op = format_args!("{:#06x}", h.op1),
+        slot,
+        %group,
+        channels = channels.len(),
+        fpp = cfg.tx_fpp_max,
+        "a multicast TX flow made, its save next"
+    );
+    Ok(group)
+}
+
+/// Ends our multicast flow `id` (from 1) and takes it out of `state`: OK
+/// and an empty body, or refused when its slot holds no multicast flow.
+fn end(h: &Header, state: &mut DeviceState, tx: &mut TxTable, id: u16) -> ArcOutcome {
+    let Some(slot) = usize::from(id).checked_sub(1) else {
+        return refuse(h, "a multicast delete without its flow");
+    };
+    if !tx.remove_multicast(slot) {
+        return refuse(h, "a multicast delete of a slot without one");
+    }
+    state.remove_multicast(slot);
+    info!(
+        op = format_args!("{:#06x}", h.op1),
+        slot, "a multicast TX flow ended, its save next"
+    );
+    ArcOutcome::Changed(reply(h, STATUS_OK, &[]), Change::TX_FLOWS_ONLY)
 }
 
 #[cfg(test)]
