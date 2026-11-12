@@ -46,6 +46,9 @@ use crate::wire::{Header, STATUS_OK, read_u16, reply};
 /// its flow id naming the slot; OK and an empty body. Refused as 2.8.9's,
 /// and for another type than multicast or a rate or encoding other than
 /// ours (0 asks ours).
+///
+/// **2.7's delete** (0x2202, [`flows::parse_delete_27`]): the flows it
+/// names go, all or none; OK and an empty body.
 pub(super) fn answer(
     h: &Header,
     body: &[u8],
@@ -59,8 +62,12 @@ pub(super) fn answer(
             let Some(id) = read_u16(body, 12) else {
                 return refuse(h, "a multicast delete without its flow");
             };
-            end(h, state, tx, id)
+            end(h, state, tx, &[id])
         }
+        flows::DELETE_27 => match flows::parse_delete_27(body) {
+            Some(ids) => end(h, state, tx, &ids),
+            None => refuse(h, "a 2.7 multicast delete that does not read"),
+        },
         flows::CREATE_27 => create_27(h, body, state, cfg, tx, ip),
         _ => create_289(h, body, state, cfg, tx, ip),
     }
@@ -161,20 +168,29 @@ fn make(
     Ok(group)
 }
 
-/// Ends our multicast flow `id` (from 1) and takes it out of `state`: OK
-/// and an empty body, or refused when its slot holds no multicast flow.
-fn end(h: &Header, state: &mut DeviceState, tx: &mut TxTable, id: u16) -> ArcOutcome {
-    let Some(slot) = usize::from(id).checked_sub(1) else {
-        return refuse(h, "a multicast delete without its flow");
-    };
-    if !tx.remove_multicast(slot) {
+/// Ends our multicast flows `ids` (from 1) and takes them out of `state`:
+/// OK and an empty body. All or nothing: refused, ending none, when one
+/// of their slots holds no multicast flow.
+fn end(h: &Header, state: &mut DeviceState, tx: &mut TxTable, ids: &[u16]) -> ArcOutcome {
+    let slots: Option<Vec<usize>> = ids
+        .iter()
+        .map(|&id| {
+            usize::from(id)
+                .checked_sub(1)
+                .filter(|&slot| tx.flow(slot).is_some_and(|f| f.multicast))
+        })
+        .collect();
+    let Some(slots) = slots else {
         return refuse(h, "a multicast delete of a slot without one");
+    };
+    for slot in slots {
+        tx.remove_multicast(slot);
+        state.remove_multicast(slot);
+        info!(
+            op = format_args!("{:#06x}", h.op1),
+            slot, "a multicast TX flow ended, its save next"
+        );
     }
-    state.remove_multicast(slot);
-    info!(
-        op = format_args!("{:#06x}", h.op1),
-        slot, "a multicast TX flow ended, its save next"
-    );
     ArcOutcome::Changed(reply(h, STATUS_OK, &[]), Change::TX_FLOWS_ONLY)
 }
 

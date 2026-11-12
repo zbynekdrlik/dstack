@@ -435,6 +435,18 @@ pub fn parse_create_27(body: &[u8]) -> Option<Create27> {
     })
 }
 
+/// The flow ids a 2.7 multicast delete (0x2202) names: the body is their
+/// count, 0, then each id (Dante Controller's, captured: one flow; netaudio
+/// 0.4.2's legacy encoder writes the same). `None` for a count of 0 or
+/// ids cut short.
+pub fn parse_delete_27(body: &[u8]) -> Option<Vec<u16>> {
+    let n = usize::from(read_u16(body, 0)?);
+    if n == 0 {
+        return None;
+    }
+    (0..n).map(|i| read_u16(body, 4 + 2 * i)).collect()
+}
+
 /// The delete request's body for the flow in media-local slot `local_id`
 /// (see the module).
 pub fn delete_body(local_id: u16) -> [u8; 24] {
