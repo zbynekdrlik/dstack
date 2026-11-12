@@ -59,7 +59,8 @@
 //! the state file cannot keep ([`respond`]). A rename is all or nothing:
 //! one invalid name refuses the whole request (inferno renames the valid
 //! ones). An empty name is Dante's reset to the channel's default name
-//! (netaudio's `reset_channel_name` sends one). Every refused or
+//! (netaudio's `reset_channel_name` sends one; since 0.4.2 its name offset
+//! is the datagram's end, with no NUL after it). Every refused or
 //! unanswered request is counted per peer and opcode ([`gaps`]); the server
 //! logs the counts as one warning a minute.
 //!
@@ -1520,7 +1521,10 @@ fn rename_channels(
             debug!(dir = label, channel = id, "rename refused: no such channel");
             return Err("no such channel");
         };
-        let Some(name) = string_at(req, offset) else {
+        // An offset at the datagram's end is an empty name: netaudio 0.4.2's
+        // reset sends no byte after it (dstack #220).
+        let at_end = usize::from(offset) == HEADER_LEN + req.len();
+        let Some(name) = string_at(req, offset).or(at_end.then_some("")) else {
             debug!(
                 dir = label,
                 channel = id,
