@@ -212,11 +212,15 @@ pub const MAX_CHANNELS_IN_FLOW: u16 = 8;
 /// The answer to 0x3300. Without it Dante Controller reports a clock
 /// domain mismatch for the device.
 pub const CLOCK_REPLY: [u8; 8] = [0x38, 0x00, 0x38, 0xfd, 0x38, 0xfe, 0x38, 0xff];
-/// The counts' flags byte: bit 4, TX channels can be renamed. Bit 5, TX
-/// multicast, stays clear (inferno sets it): the device creates no
-/// multicast flow by 0x2201 (refused), so Dante Controller is never offered
-/// one; ARC 2.8.9's create (0x2601, dstack #193) is answered.
+/// The counts' flags byte: bit 4, TX channels can be renamed.
 const FLAG_TX_RENAME: u8 = 0x10;
+/// The counts' flags byte: bit 5, TX multicast flows (inferno sets it).
+/// Dante Controller then offers Add on the Transmit tab and creates the
+/// flow with 2.7's 0x2201 (or 2.8.9's 0x2601 when segmented flows are
+/// stated), which our devices answer (dstack #193, #222).
+const FLAG_TX_MULTICAST: u8 = 0x20;
+/// The counts' flags byte as stated.
+const COUNTS_FLAGS: u8 = FLAG_TX_RENAME | FLAG_TX_MULTICAST;
 /// An RX channel's flags in both generations' records (0x3000's second
 /// word, 0x3400's flags; a reader sees no change from the generation):
 /// inferno's 6 (netaudio: rename allowed) and 0x0008, netaudio's
@@ -1066,7 +1070,7 @@ fn counts(cfg: &DeviceConfig) -> Vec<u8> {
     let rx = wire_u16(cfg.rx.len());
     let mut out = Body::new();
     out.u8(0);
-    out.u8(FLAG_TX_RENAME);
+    out.u8(COUNTS_FLAGS);
     out.u16(tx);
     out.u16(rx);
     out.u16(4);
