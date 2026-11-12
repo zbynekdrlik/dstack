@@ -89,3 +89,25 @@ fn dante_controller_s_2_7_multicast_create_makes_the_flow_it_names() {
     // Dante Controller reads the 2.7 list next: the flow is there, type 2.
     assert_eq!(listed(&mut device, &flows), [(32, 0x0002, vec![1, 2])]);
 }
+
+#[test]
+fn dante_controller_s_2_7_multicast_delete_ends_the_flow_it_names() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut device = Device::load(config_in(dir.path())).unwrap();
+    let flows = NoFlows::new(&device);
+    let (_, made) = answered(answer(&mut device, &flows, &dc("0x2201")));
+    assert_eq!(made, Some(Change::TX_FLOWS_ONLY));
+    let delete = dc("0x2202");
+    let (bytes, change) = answered(answer(&mut device, &flows, &delete));
+    assert_eq!(&bytes[..2], &delete[..2]);
+    assert_eq!((u16_at(&bytes, 4), u16_at(&bytes, 6)), (0x00da, 0x2202));
+    assert_eq!(u16_at(&bytes, 8), STATUS_OK, "deleted, not refused");
+    assert_eq!(bytes.len(), HEADER_LEN, "no body");
+    assert_eq!(change, Some(Change::TX_FLOWS_ONLY));
+    // Gone from the TX table, the state and its file, and from the list.
+    assert_eq!(flows.tx.lock().unwrap().flow(31), None);
+    assert!(device.state.multicast.is_empty());
+    let back = DeviceState::load_or_default(&device.cfg).unwrap();
+    assert!(back.multicast.is_empty(), "{back:?}");
+    assert_eq!(listed(&mut device, &flows), []);
+}
