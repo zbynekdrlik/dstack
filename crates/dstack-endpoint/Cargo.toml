@@ -6,11 +6,10 @@ license.workspace = true
 publish = false
 repository.workspace = true
 authors.workspace = true
-description = "A PC's audio endpoint bridged to a dlink device: the lock-free FIFO, the ASRC player (drifting converter steered on the FIFO's depth), the channel map, the endpoint's choice and settings, and the status and command line helpers dlisten and dsend share"
+description = "A PC's audio endpoint bridged to a dlink device: dlink's bridge (FIFO, ASRC player, channel map) re-exported, the endpoint's choice and settings, and the status and command line helpers dlisten and dsend share"
 
 [dependencies]
 dlink = { path = "../dlink" }
-dstack-resample = { path = "../dstack-resample" }
 # The endpoints (WASAPI shared on Windows, ALSA on Linux), as dlisten
 # already used it (RustAudio, Apache-2.0); on Linux it builds against
 # libasound2-dev (CI installs it).

@@ -12,7 +12,9 @@
 //! its ratio steered by the ASRC controller on the FIFO's depth (about
 //! [`player::TARGET_S`], 40 ms). In dlisten the network writes and the
 //! output callback pulls; in dsend the endpoint's loopback capture writes
-//! and the device's pump pulls.
+//! and the device's pump pulls. The FIFO, the player and the map are
+//! dlink's [`dlink::bridge`] (dstack #241), re-exported here at their old
+//! paths.
 //!
 //! - [`map`]: the producer's channels on the consumer's (L/R, mono on both).
 //! - [`outputs`] and [`settings`]: the endpoint's choice (`--output`, the
@@ -30,14 +32,15 @@
 pub mod alert;
 pub mod cli;
 pub mod endpoints;
-pub mod fifo;
 pub mod host;
-pub mod map;
 pub mod outputs;
-pub mod player;
 pub mod settings;
 pub mod slots;
 pub mod status;
 pub mod stream;
 #[cfg(windows)]
 pub mod win;
+
+// The bridge moved to dlink (dstack #241), so an app embeds it without
+// this crate's cpal, tokio and log setup; its paths here stay.
+pub use dlink::bridge::{fifo, map, player};

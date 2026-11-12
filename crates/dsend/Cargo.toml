@@ -17,8 +17,9 @@ path = "src/main.rs"
 
 [dependencies]
 dlink = { path = "../dlink" }
-# The endpoint bridge dsend shares with dlisten (dstack #164): the FIFO, the
-# player, the map, the output's choice, the status and process glue.
+# The endpoint glue dsend shares with dlisten (dstack #164): the output's
+# choice, the status and process glue, and dlink's bridge (the FIFO, the
+# player, the map; dstack #241) re-exported at its old paths.
 dstack-endpoint = { path = "../dstack-endpoint" }
 # The app status's JSON for dtray (already in the lockfile through dstack).
 serde_json = "1.0"
