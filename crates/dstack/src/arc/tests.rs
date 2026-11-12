@@ -485,7 +485,8 @@ fn decode_page(cfg: &DeviceConfig, op1: u16, answer: &Reply) -> Page {
                 read_u16(body, at + 4).unwrap()
             }
             _ => {
-                assert_eq!(read_u16(body, at + 2), Some(6));
+                // inferno's 6 and netaudio's can-subscribe-self bit (#220).
+                assert_eq!(read_u16(body, at + 2), Some(0x000e));
                 let c = read_u16(body, at + 4).unwrap();
                 assert_eq!(*common.get_or_insert(c), c, "one descriptor per page");
                 let tx_channel = read_u16(body, at + 6).unwrap();
