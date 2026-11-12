@@ -13,7 +13,7 @@
 //! reference, netaudio-core `channel_inventory.rs`), with this file's own
 //! reader of the records, never with the code under test.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::*;
 
@@ -51,22 +51,30 @@ fn next_page(op: &str, selector: u16, first: u16) -> Vec<u8> {
     req
 }
 
+/// A channel's (media type, media-local id), netaudio's identity.
+type Identity = (u16, u16);
+
 /// A page as netaudio reads it: the status and, for each of the `count`
-/// records, (media type, media-local id).
-fn records(p: &[u8], op1: u16) -> (u16, Vec<(u16, u16)>) {
+/// records, its channel number and (media type, media-local id). A
+/// channel number or identity twice in one page is netaudio's refusal.
+fn records(p: &[u8], op1: u16) -> (u16, Vec<(u16, Identity)>) {
     assert!(p.len() <= MAX_DATAGRAM);
     assert_eq!(usize::from(u16_at(p, 2)), p.len(), "the length field");
     assert_eq!((u16_at(p, 0), u16_at(p, 6)), (START_2809, op1));
     let (slots, count) = (usize::from(p[16]), usize::from(p[17]));
     assert!(count <= slots, "{count} records in {slots} slots");
-    let ids = (0..count)
+    let recs: Vec<(u16, Identity)> = (0..count)
         .map(|k| {
             let at = usize::from(u16_at(p, 18 + 2 * k));
-            assert!(u16_at(p, at + 2) > 0, "a channel number");
-            (u16_at(p, at + 6), u16_at(p, at + 8))
+            let number = u16_at(p, at + 2);
+            assert!(number > 0, "a channel number");
+            (number, (u16_at(p, at + 6), u16_at(p, at + 8)))
         })
         .collect();
-    (u16_at(p, 8), ids)
+    let numbers: BTreeSet<u16> = recs.iter().map(|r| r.0).collect();
+    let ids: BTreeSet<Identity> = recs.iter().map(|r| r.1).collect();
+    assert_eq!((numbers.len(), ids.len()), (count, count), "a repeat");
+    (u16_at(p, 8), recs)
 }
 
 /// netaudio's read of the list `op`: page one from the fixture, then while
@@ -75,22 +83,30 @@ fn records(p: &[u8], op1: u16) -> (u16, Vec<(u16, u16)>) {
 /// after the first that adds no record is netaudio's refusal.
 fn netaudio_reads(dev: &mut Dev, op: &str, op1: u16) -> Result<(Vec<u16>, usize), String> {
     let mut seen = BTreeSet::new();
+    // Each channel number's identity, as netaudio keeps it across pages.
+    let mut numbers = BTreeMap::new();
     let mut req = frame(&format!("{op} first"));
     for pages in 1..=256 {
         let reply = sent_bytes(dev.send(&req));
-        let (status, ids) = records(&reply, op1);
-        let added = ids.iter().filter(|id| !seen.contains(*id)).count();
+        let (status, recs) = records(&reply, op1);
+        for &(number, id) in &recs {
+            if *numbers.entry(number).or_insert(id) != id {
+                return Err(format!("{op}: channel {number} with two identities"));
+            }
+        }
+        let added = recs.iter().filter(|(_, id)| !seen.contains(id)).count();
         if pages > 1 && added == 0 {
             return Err(format!("{op}: page {pages} made no progress"));
         }
-        seen.extend(ids.iter().copied());
+        seen.extend(recs.iter().map(|&(_, id)| id));
         if status == STATUS_OK {
             return Ok((seen.iter().map(|&(_, id)| id).collect(), pages));
         }
         assert_eq!(status, STATUS_MORE, "{op}: page {pages}");
-        let media = ids
+        let media = recs
             .last()
             .ok_or(format!("{op}: a partial page {pages} with no record"))?
+            .1
             .0;
         let next = (1..=u16::MAX)
             .find(|id| !seen.contains(&(media, *id)))
@@ -131,15 +147,18 @@ fn netaudio_s_following_page_lists_the_channels_from_its_first() {
     let mut dev = Dev::new(config_sized(64, 64));
     let reply = sent_bytes(dev.send(&frame("0x2400 next")));
     // Channels 33 on, as many as one page holds (T33..T64 take two).
-    let (status, ids) = records(&reply, 0x2400);
+    let (status, recs) = records(&reply, 0x2400);
     assert_eq!(status, STATUS_MORE);
-    assert!(ids.len() > 1, "{ids:?}");
-    let want: Vec<_> = (33..).take(ids.len()).map(|id| (AUDIO, id)).collect();
-    assert_eq!(ids, want);
+    assert!(recs.len() > 1, "{recs:?}");
+    let want: Vec<_> = (33..)
+        .take(recs.len())
+        .map(|id| (id, (AUDIO, id)))
+        .collect();
+    assert_eq!(recs, want);
     assert_eq!(u16_at(&reply, 4), 0x0202, "netaudio's sequence");
     let reply = sent_bytes(dev.send(&frame("0x3400 next")));
-    let (_, ids) = records(&reply, 0x3400);
-    assert_eq!(ids.first(), Some(&(AUDIO, 9)));
+    let (_, recs) = records(&reply, 0x3400);
+    assert_eq!(recs.first(), Some(&(9, (AUDIO, 9))));
 }
 
 #[test]
@@ -173,9 +192,9 @@ fn netaudio_reads_every_page_of_a_16_and_a_64_channel_device() {
                     .unwrap_or_else(|e| panic!("{n} channels, long {long}: {e}"));
                 let all: Vec<u16> = (1..=n as u16).collect();
                 assert_eq!(ids, all, "{op}, {n} channels, long {long}");
-                if n == 64 {
-                    assert!(pages > 1, "{op}: {n} channels in one page");
-                }
+                // Every one of these lists takes several pages (16 TX
+                // channels end a page at the soft limit already).
+                assert!(pages > 1, "{op}: {n} channels, long {long}, one page");
             }
         }
     }
