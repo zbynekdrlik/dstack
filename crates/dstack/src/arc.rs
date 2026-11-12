@@ -1472,16 +1472,36 @@ fn rename(
         let (Some(id), Some(offset)) = (read_u16(req, at), read_u16(req, at + 2)) else {
             return refuse(h, "a rename whose items are cut short");
         };
-        items.push((id, offset));
+        match new_name(req, id, offset, dir) {
+            Ok(name) => items.push((id, name)),
+            Err(why) => return refuse(h, why),
+        }
     }
     let ok: &[u8] = match dir {
         Dir::Tx => &[0, 0],
         Dir::Rx => &[],
     };
-    match rename_channels(req, &items, state, cfg, dir) {
+    match rename_channels(&items, state, cfg, dir) {
         Ok(change) => renamed(h, ok, change),
         Err(why) => refuse(h, why),
     }
+}
+
+/// The new name of channel `id` at packet offset `offset` in `req`; at the
+/// datagram's end an empty name (netaudio 0.4.2's reset sends no byte
+/// after it, dstack #220); else the reason (no name there).
+fn new_name(req: &[u8], id: u16, offset: u16, dir: Dir) -> Result<&str, &'static str> {
+    let at_end = usize::from(offset) == HEADER_LEN + req.len();
+    string_at(req, offset)
+        .or(at_end.then_some(""))
+        .ok_or_else(|| {
+            debug!(
+                dir = dir.label(),
+                channel = id,
+                "rename refused: no name at its offset"
+            );
+            "no name at its offset"
+        })
 }
 
 /// Status OK with `body`; [`ArcOutcome::Changed`] with `change` when a
@@ -1494,18 +1514,17 @@ fn renamed(h: &Header, body: &[u8], change: Option<Change>) -> ArcOutcome {
     }
 }
 
-/// Renames `items` (the channel from 1, its name's offset into `req`) in
-/// direction `dir`, all or nothing: the reason when one cannot be made (no
-/// item, no such channel, no name at its offset, a name Dante's rules
-/// refuse, names that would clash), else the change, `None` when every
-/// name was already so. An empty name is the channel's default. A
+/// Renames `items` (the channel from 1, its new name) in direction `dir`,
+/// all or nothing: the reason when one cannot be made (no item, no such
+/// channel, a name Dante's rules refuse, names that would clash), else the
+/// change, `None` when every name was already so. An empty name is the
+/// channel's default. A
 /// refusal's reason is a debug line only: the refusal is a gap the server's
 /// once-a-minute warning counts, and Dante Controller asks again at once,
 /// so a warning per request would be a flood. 2.7's 0x2013 and 0x3001 and
 /// 2.8.9's 0x3401 and 0x2438 (`arc/v289/writes.rs`) share it.
 fn rename_channels(
-    req: &[u8],
-    items: &[(u16, u16)],
+    items: &[(u16, &str)],
     state: &mut DeviceState,
     cfg: &DeviceConfig,
     dir: Dir,
@@ -1520,24 +1539,13 @@ fn rename_channels(
     }
     let mut proposed = names.clone();
     let mut renamed = Vec::with_capacity(items.len());
-    for &(id, offset) in items {
+    for &(id, name) in items {
         let Some(index) = usize::from(id)
             .checked_sub(1)
             .filter(|&i| i < proposed.len())
         else {
             debug!(dir = label, channel = id, "rename refused: no such channel");
             return Err("no such channel");
-        };
-        // An offset at the datagram's end is an empty name: netaudio 0.4.2's
-        // reset sends no byte after it (dstack #220).
-        let at_end = usize::from(offset) == HEADER_LEN + req.len();
-        let Some(name) = string_at(req, offset).or(at_end.then_some("")) else {
-            debug!(
-                dir = label,
-                channel = id,
-                "rename refused: no name at its offset"
-            );
-            return Err("no name at its offset");
         };
         let name = if name.is_empty() {
             defaults[index].as_str()

@@ -26,7 +26,8 @@
 //! needed to read it) and the record count, then from packet byte 20 the
 //! records: the channel (from 1), the media type (3, audio), the name
 //! offsets (0x3410: the TX channel's and the TX device's, both 0 to
-//! unsubscribe; a rename: the new name's, the name empty for the default).
+//! unsubscribe; a rename: the new name's, the name empty or the offset 0
+//! for the default, as Dante Controller sends it).
 //! A body of another record size, or whose records run past its end, is
 //! refused, changing nothing. A subscription record of another media is
 //! passed over (we have audio channels only), as 0x3010 passes over a
@@ -36,7 +37,7 @@
 use tracing::debug;
 
 use super::super::{
-    ArcOutcome, Dir, Header, refuse, rename_channels, renamed, subscribe_items, wire_u16,
+    ArcOutcome, Dir, Header, new_name, refuse, rename_channels, renamed, subscribe_items, wire_u16,
 };
 use super::{MEDIA_AUDIO, flows};
 use crate::device::{DeviceConfig, DeviceState, MAX_NAME};
@@ -76,8 +77,8 @@ pub(in crate::arc) fn write(
     }
     Some(match h.op1 {
         SUBSCRIBE => subscribe(h, body, state, cfg),
-        RX_RENAME => match name_items(body)
-            .and_then(|items| rename_channels(body, &items, state, cfg, Dir::Rx))
+        RX_RENAME => match name_items(body, Dir::Rx)
+            .and_then(|items| rename_channels(&items, state, cfg, Dir::Rx))
         {
             Ok(change) => renamed(h, &[], change),
             Err(why) => refuse(h, why),
@@ -130,18 +131,18 @@ fn subscribe(h: &Header, body: &[u8], state: &mut DeviceState, cfg: &DeviceConfi
     subscribe_items(h, body, &items, state, cfg)
 }
 
-/// A rename's items, `(channel, the name's offset)`; the reason when the
-/// body does not read or a record is not an audio channel.
-fn name_items(body: &[u8]) -> Result<Vec<(u16, u16)>, &'static str> {
+/// A rename's items, `(channel, its new name)`: a name offset of 0 is the
+/// empty name, the channel's default (Dante Controller's "back to the
+/// default"); the reason when the body does not read, a record is not an
+/// audio channel or there is no name at its offset.
+fn name_items(body: &[u8], dir: Dir) -> Result<Vec<(u16, &str)>, &'static str> {
     records(body, NAME_RECORD)
         .ok_or("a rename that does not read")?
         .iter()
-        .map(|r| {
-            if r[1] == MEDIA_AUDIO {
-                Ok((r[0], r[2]))
-            } else {
-                Err("a rename of a channel that is not audio")
-            }
+        .map(|r| match r[..] {
+            [channel, MEDIA_AUDIO, 0] => Ok((channel, "")),
+            [channel, MEDIA_AUDIO, at] => Ok((channel, new_name(body, channel, at, dir)?)),
+            _ => Err("a rename of a channel that is not audio"),
         })
         .collect()
 }
@@ -151,14 +152,14 @@ fn name_items(body: &[u8]) -> Result<Vec<(u16, u16)>, &'static str> {
 /// request of more than [`MAX_TX_NAMES`] records is refused before any
 /// change: its answer might not fit one datagram.
 fn tx_names(h: &Header, body: &[u8], state: &mut DeviceState, cfg: &DeviceConfig) -> ArcOutcome {
-    let items = match name_items(body) {
+    let items = match name_items(body, Dir::Tx) {
         Ok(items) if items.len() > MAX_TX_NAMES => {
             return refuse(h, "more TX names than one answer holds");
         }
         Ok(items) => items,
         Err(why) => return refuse(h, why),
     };
-    match rename_channels(body, &items, state, cfg, Dir::Tx) {
+    match rename_channels(&items, state, cfg, Dir::Tx) {
         Ok(change) => renamed(h, &names_echo(&items, state), change),
         Err(why) => refuse(h, why),
     }
@@ -167,7 +168,7 @@ fn tx_names(h: &Header, body: &[u8], state: &mut DeviceState, cfg: &DeviceConfig
 /// 0x2438's answer body: 6 zero bytes, `06 00`, `[n, n]`, the `n` records
 /// (channel, audio, the name's offset), then the names. Every item's
 /// channel exists ([`rename_channels`] took them all).
-fn names_echo(items: &[(u16, u16)], state: &DeviceState) -> Vec<u8> {
+fn names_echo(items: &[(u16, &str)], state: &DeviceState) -> Vec<u8> {
     let n = u8::try_from(items.len()).unwrap_or(u8::MAX);
     let mut out = Body::new();
     out.zeros(6);
