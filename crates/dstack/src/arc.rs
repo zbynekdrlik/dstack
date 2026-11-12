@@ -27,7 +27,7 @@
 //! | 0x2200 | TX flows, [`FLOW_PAGE`] slots a page (inferno's `query_tx_flows`) |
 //! | 0x2201, 0x2202 | ARC 2.7's create, delete of a multicast TX flow (Dante Controller's on a device without segmented flows, dstack #222): the flow made in the slot its id names, or ended ([`answer`]); OK, no body. [`handle`] alone, which cannot change the TX table, refuses them as inferno does when it creates or deletes none |
 //! | 0x2600 (start 0x2809) | ARC 2.8.9's TX flow list ([`flows::list_reply_page`]): receivers' flows unicast, ours multicast with their group; paged from the request's first flow, each page one datagram (dstack #227) |
-//! | 0x2601 (start 0x2809) | ARC 2.8.9's multicast create (dstack #193): a multicast flow in the asked slot ([`answer`]); the reply is its record, no destination |
+//! | 0x2601 (start 0x2809) | ARC 2.8.9's multicast create (dstack #193): a multicast flow in the asked slot ([`answer`]); the reply is its record, no destination, in a table of our flow slots (dstack #227) |
 //! | 0x2602 (start 0x2809) | ARC 2.8.9's delete of a multicast flow: OK, no body |
 //! | 0x2204 | status [`STATUS_2320`], no body (the IEM card's answer, captured) |
 //! | 0x2320 | status [`STATUS_2320`], no body (inferno's "???") |
@@ -785,8 +785,7 @@ fn flows_2809(h: &Header, req: &[u8], cfg: &DeviceConfig, tx: &TxTable) -> ArcOu
             })
         })
         .collect();
-    let slots = u8::try_from(flow_slots(cfg)).unwrap_or(u8::MAX);
-    let (body, more) = flows::list_reply_page(slots, &listed);
+    let (body, more) = flows::list_reply_page(table_slots(cfg), &listed);
     let status = if more { STATUS_MORE } else { STATUS_OK };
     ArcOutcome::Reply(reply(h, status, &body))
 }
@@ -1080,6 +1079,12 @@ fn wire_u16(n: usize) -> u16 {
 /// creates a multicast flow in the highest flow it states.
 fn flow_slots(cfg: &DeviceConfig) -> u16 {
     wire_u16(cfg.flow_slots.min(usize::from(MAX_FLOWS)))
+}
+
+/// [`flow_slots`] as a TX flow table states them (one byte: 0x2600's
+/// pages and 0x2601's reply, dstack #227).
+fn table_slots(cfg: &DeviceConfig) -> u8 {
+    u8::try_from(flow_slots(cfg)).unwrap_or(u8::MAX)
 }
 
 /// 0x1000: inferno's layout, with our flow slots ([`flow_slots`]) where

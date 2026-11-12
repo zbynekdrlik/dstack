@@ -14,7 +14,7 @@ use std::net::{Ipv4Addr, SocketAddrV4};
 
 use tracing::info;
 
-use super::{ArcOutcome, Change, flows, refuse};
+use super::{ArcOutcome, Change, flows, refuse, table_slots};
 use crate::device::{DeviceConfig, DeviceState};
 use crate::media::tx::TxTable;
 use crate::wire::{Header, STATUS_OK, read_u16, reply};
@@ -104,10 +104,10 @@ fn create_289(
         bits: u16::from(cfg.encoding),
         destinations: Vec::new(),
     };
-    ArcOutcome::Changed(
-        reply(h, STATUS_OK, &flows::list_reply_body(&[made])),
-        Change::TX_FLOWS_ONLY,
-    )
+    // One record, which always fits a page; its table states our flow
+    // slots, as 0x2600 does (dstack #227).
+    let (record, _) = flows::list_reply_page(table_slots(cfg), &[made]);
+    ArcOutcome::Changed(reply(h, STATUS_OK, &record), Change::TX_FLOWS_ONLY)
 }
 
 /// 2.7's create (see [`answer`]).
