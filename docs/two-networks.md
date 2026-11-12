@@ -58,6 +58,28 @@ The site's own values (subnets, VLAN numbers, host names, addresses, switch port
 - On the Dante leg: interface metric 900, "Register this connection's addresses in DNS" off, NetBIOS off (`NetbiosOptions=2`), File and Printer Sharing, Client for Microsoft Networks, IPv6, LLTD unbound.
 - Set the base NIC's power and offload values with the app's own setup (EEE, green Ethernet, selective suspend, flow control off); they do not apply to the virtual adapter.
 - Changing a static address with `New-NetIPAddress -DefaultGateway` fails on a stored route ("Instance DefaultGateway already exists"); `netsh interface ipv4 set address` changes it in one step.
+- **The vendor VLAN tool never stays running** (dstack #239). One NIC carries both legs (the owner's decision, 12.11.2026: two NICs were left on purpose, for cabling and switches), so the PC must not depend on the tool after setup. Close the Realtek utility (`8169DiagV2.exe`, window "RTDiagLibV2") as soon as the VLAN adapter exists, and hide its shortcuts. A dialog it shows later ("LanSetV6 not found") re-applies its VLAN state when clicked and can cut the LAN leg. Whether it can be uninstalled without losing the VLAN adapter is tested on a non-production PC first.
+- **A USB replug changes the Realtek VLAN adapter's MAC**, as a restart of its base adapter does, and it does not reset the base adapter's settings: a replug is no recovery.
+
+#### The LAN self-heal task (one-NIC PCs)
+
+A headless one-NIC PC has no remote path once its LAN leg fails: its Dante address is closed to TCP. `tools/windows/lan-selfheal.ps1` (Windows PowerShell 5.1) runs as SYSTEM from a scheduled task, "dstack LAN self-heal", every minute and at startup, with no window. Each run pings the LAN gateway (three tries, one second each):
+
+- an answer resets the down-counter and logs "gateway ok";
+- after the threshold (3) of consecutive failed minutes, it puts the LAN adapter back, in order: adapter enabled; the driver's "VLAN ID" property (found by its display name; the keyword is the driver's, `RegVlanID` on the RTL8156's driver) set to 0 when it holds another value; IPv4 (`ms_tcpip`) bound; DHCP on; `Restart-NetAdapter`. Then it counts again, so a LAN still dead is repaired again 3 minutes later. The restart also restarts the VLAN adapter on top of it (a new MAC, its static address unchanged): Dante drops for a few seconds, only after the LAN has been down for 3 minutes.
+
+It never touches the Dante adapter: every step names the LAN adapter, and a guard refuses a step (and a config) that names the Dante adapter or resolves to its interface. It never acts without its config. Each run's decision and each change go to `C:\ProgramData\dstack\lan-selfheal.log`, rotated at 1 MB (one old file, `.log.1`).
+
+The config is the PC's own (site data, never in the repo), `C:\ProgramData\dstack\lan-selfheal.json`:
+
+```json
+{ "lanAdapter": "<LAN adapter name>", "gateway": "<LAN gateway IPv4>",
+  "danteAdapter": "<Dante VLAN adapter name>", "thresholdMinutes": 3 }
+```
+
+Read the gateway with `Get-NetRoute -DestinationPrefix 0.0.0.0/0`. Install from an elevated shell, after writing the config: `powershell -ExecutionPolicy Bypass -File lan-selfheal.ps1 -Mode install`. It checks the config and both adapters, copies the script to `C:\ProgramData\dstack\`, makes that directory writable only by SYSTEM and Administrators, and registers the task. `-Mode uninstall` removes the task and keeps the config and log. Check it with `Get-ScheduledTaskInfo 'dstack LAN self-heal'` (LastTaskResult 0) and the log's "gateway ok" lines. A PC's acceptance test disables its LAN leg on purpose and watches the log repair it.
+
+**12.11.2026 (dstack #239):** the Realtek utility, left running on the SongPlayer PC since its VLAN setup two days earlier, showed "LanSetV6 not found"; a click on OK re-applied its VLAN state and the LAN leg stopped carrying traffic, while Dante kept running. With the LAN gone there was no remote path (no MCP, RustDesk or ssh), a USB replug changed only the VLAN adapter's MAC, and the owner had to bring a monitor and keyboard to re-enable IPv4 on the LAN adapter. dstack then closed the utility.
 
 ### Firewall (Windows)
 
@@ -93,9 +115,10 @@ Two PCs on 10.11.2026 show what goes wrong: on resolume-snv (USB RTL8156, Cx dri
 2. **Know a second way in before the change**: the PC's remote control must reach it on the address it will keep, and someone must be able to sit at it (or a console path) for the case where both legs fail.
 3. **A rollback that runs by itself, from the PC's own scheduler**: a scheduled task (not a process started from the remote shell, which can die with it) that, unless a "keep" file appears within a fixed time, deletes the VLAN adapter and restores the saved adapter settings and bindings.
 4. **The rollback tests the exact leg, by its own address**: the untagged leg's address is still on the base adapter, TCP/IP is bound there, and a ping **from that address** to a host on the same subnet answers; and the same for the new leg. A ping "to the router" over any route proves nothing.
-5. **Create the VLAN in the utility through the desktop** (the remote-control GUI tools), never by starting the utility from the remote shell.
+5. **Create the VLAN in the utility through the desktop** (the remote-control GUI tools), never by starting the utility from the remote shell, and close the utility right after (it never stays running, section 3).
 6. **Right after the adapter appears, re-check the base adapter's bindings** (`Get-NetAdapterBinding -ComponentID ms_tcpip`): if the driver unbound them, bind them again at once, or make both legs virtual adapters (an untagged one and the tagged one) and move the base's address onto the untagged adapter.
 7. **Only then write "keep"**; a failure at any step lets the scheduled rollback run.
+8. **On a one-NIC PC, install the LAN self-heal task** (section 3) once both legs work, and check its log reads "gateway ok".
 
 ## 6. Checking a PC (the rig/E2E gates assert this)
 

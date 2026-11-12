@@ -51,6 +51,19 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
 
+  windows-tools:
+    # The PowerShell tools for Windows PCs (tools/windows, dstack #239), tested
+    # under Windows PowerShell 5.1, the version the PCs run them with.
+    runs-on: windows-2025
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: LAN self-heal tests
+        shell: powershell
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools\windows\tests\lan-selfheal.Tests.ps1
+
   dsend-audio-driver:
     # dsend's own Windows render endpoint (drivers/dsend-audio, MS-PL; dstack
     # #184), built like dasio's NDIS filter: NuGet WDK, 64-bit MSBuild, the

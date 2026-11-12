@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.104
+
+- New tool (dstack #239): `tools/windows/lan-selfheal.ps1`, the LAN self-heal for a one-NIC Windows PC with a Dante VLAN. A scheduled task ("dstack LAN self-heal", SYSTEM, every minute and at startup, no window) pings the LAN gateway from the PC's own config (`C:\ProgramData\dstack\lan-selfheal.json`); after 3 consecutive failed minutes it puts the LAN adapter back (enabled, VLAN ID 0, IPv4 bound, DHCP on, restart). It never touches the Dante adapter and never acts without its config; it logs every run to `lan-selfheal.log` (rotated at 1 MB). `-Mode install` / `-Mode uninstall`. Tested under Windows PowerShell 5.1 in CI's new `windows-tools` job.
+- Docs: docs/two-networks.md, Windows: the vendor VLAN tool never stays running; the self-heal task and its install; a Realtek VLAN adapter's MAC changes on a USB replug; the 12.11.2026 incident. The safe VLAN procedure closes the utility after setup and ends with the self-heal install.
+- No crate change: no API change, no latency change.
+
 ## 0.6.103
 
 - New API (dstack #241, additive): `dlink::bridge`, the bridge between an app's own clock and the device's, moved from dstack-endpoint: `dlink::bridge::{Fifo, Player, Stats, fifo_for}` and the modules `dlink::bridge::{fifo, player, map}` (the player's constants such as `player::TARGET_S`, the channel map). An app on its own clock (OBS's mix) writes the `Fifo` on its audio thread and calls `Player::fill_with` in its `Process`, without dstack-endpoint's cpal (ALSA/WASAPI); `fifo_for` and `Player::new`'s first rate are then the app's (the FIFO's producer), and the FIFO's depth (about 40 ms, up to 80 ms after dropouts) adds to the device's path, as in dsend. dlink gains no dependency (dstack-resample was one already); its tree still holds tokio and tracing-subscriber through dstack itself, as before.
