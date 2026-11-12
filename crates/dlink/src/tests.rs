@@ -201,6 +201,16 @@ impl Process for Quiet {
     fn process(&mut self, _block: &mut Block<'_>) {}
 }
 
+/// A config whose state file is in a folder of its own: the start writes
+/// it (a probe of the folder), and starts sharing a path race each other.
+fn own_state() -> (tempfile::TempDir, Config) {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = Config::new("app-link", dir.path().join("dlink.toml"))
+        .rx(["In 1", "In 2"])
+        .tx(["Out 1", "Out 2"]);
+    (dir, cfg)
+}
+
 /// An address no interface of any box holds (TEST-NET-1, RFC 5737).
 const ABSENT: std::net::Ipv4Addr = std::net::Ipv4Addr::new(192, 0, 2, 77);
 
@@ -225,9 +235,11 @@ fn answer_within(
 #[test]
 fn link_start_on_an_address_not_there_fails_at_once() {
     let bound = dstack::daemon::PLACE_RETRY / 2;
-    let got = answer_within(bound, || {
+    let (dir, cfg) = own_state();
+    let got = answer_within(bound, move || {
+        let _dir = dir;
         Link::start(
-            &config(),
+            &cfg,
             &Place::Ip(ABSENT),
             Map {
                 rx: vec![0],
@@ -257,9 +269,11 @@ fn link_start_until_waits_and_ends_within_a_retry_of_its_stop() {
     let stop = Arc::new(AtomicBool::new(false));
     let theirs = Arc::clone(&stop);
     let (tx, rx) = std::sync::mpsc::channel();
+    let (dir, cfg) = own_state();
     std::thread::spawn(move || {
+        let _dir = dir;
         let got = Link::start_until(
-            &config(),
+            &cfg,
             &Place::Ip(ABSENT),
             Map {
                 rx: vec![0],
@@ -292,9 +306,10 @@ fn link_start_until_waits_and_ends_within_a_retry_of_its_stop() {
 fn link_start_until_with_its_stop_set_ends_at_once() {
     let stop = std::sync::atomic::AtomicBool::new(true);
     let bound = dstack::daemon::PLACE_RETRY / 2;
+    let (_dir, cfg) = own_state();
     let started = std::time::Instant::now();
     let e = Link::start_until(
-        &config(),
+        &cfg,
         &Place::Ip(ABSENT),
         Map {
             rx: vec![0],
