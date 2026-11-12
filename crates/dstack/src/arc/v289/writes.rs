@@ -27,7 +27,8 @@
 //! records: the channel (from 1), the media type (3, audio), the name
 //! offsets (0x3410: the TX channel's and the TX device's, both 0 to
 //! unsubscribe; a rename: the new name's, the name empty or the offset 0
-//! for the default, as Dante Controller sends it).
+//! for the default: Dante Controller sends a TX channel's default as offset
+//! 0 in 0x2438, and 0x3401 takes it alike).
 //! A body of another record size, or whose records run past its end, is
 //! refused, changing nothing. A subscription record of another media is
 //! passed over (we have audio channels only), as 0x3010 passes over a
@@ -36,10 +37,9 @@
 
 use tracing::debug;
 
-use super::super::{
-    ArcOutcome, Dir, Header, new_name, refuse, rename_channels, renamed, subscribe_items, wire_u16,
-};
 use super::{MEDIA_AUDIO, flows};
+use crate::arc::writes::{new_name, rename_channels, renamed, subscribe_items};
+use crate::arc::{ArcOutcome, Dir, Header, refuse, wire_u16};
 use crate::device::{DeviceConfig, DeviceState, MAX_NAME};
 use crate::wire::{Body, HEADER_LEN, MAX_DATAGRAM};
 
@@ -63,6 +63,8 @@ const MAX_TX_NAMES: usize =
     (MAX_DATAGRAM - HEADER_LEN - PREFIX) / (NAME_RECORD as usize + MAX_NAME + 1);
 
 const _: () = assert!(MAX_TX_NAMES == 38);
+// The echo's record count is one byte.
+const _: () = assert!(MAX_TX_NAMES <= u8::MAX as usize);
 
 /// Our answer to `h` when it is one of ARC 2.8.9's writes; `None` for any
 /// other request.
@@ -169,7 +171,8 @@ fn tx_names(h: &Header, body: &[u8], state: &mut DeviceState, cfg: &DeviceConfig
 /// (channel, audio, the name's offset), then the names. Every item's
 /// channel exists ([`rename_channels`] took them all).
 fn names_echo(items: &[(u16, &str)], state: &DeviceState) -> Vec<u8> {
-    let n = u8::try_from(items.len()).unwrap_or(u8::MAX);
+    // At most MAX_TX_NAMES items ([`tx_names`]), which fits a byte.
+    let n = items.len() as u8;
     let mut out = Body::new();
     out.zeros(6);
     out.bytes(&[NAME_RECORD, 0, n, n]);
