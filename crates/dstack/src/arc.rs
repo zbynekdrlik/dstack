@@ -38,6 +38,12 @@
 //! | 0x3200 | RX flows, [`FLOW_PAGE`] slots a page (inferno's `query_rx_flows`) |
 //! | 0x3300 | the fixed 8 bytes that keep Dante Controller from a clock-domain warning |
 //!
+//! Under ARC 2.8.9's start code 0x2809 (dstack #216), which Dante Controller
+//! uses for a device announcing [`ARCP_VERSION`], 0x1000, 0x1003, 0x2010,
+//! 0x2204 and the lists 0x2400 (TX channels), 0x3400 (RX channels) and
+//! 0x3600 (RX flows) are answered in a 2.8.9 card's layouts (`arc/v289.rs`);
+//! everything else as above.
+//!
 //! No reply, as from inferno, to any other opcode (0x2204 among them), to a request whose op2 is not 0, and to a body inferno
 //! fails to read before it answers (0x2201 under 2 bytes, 0x2202 under 4,
 //! 0x3010 whose items are cut, 0x3014 under 6): [`ArcOutcome::Unanswered`].
@@ -108,9 +114,21 @@ pub mod control;
 pub mod flows;
 pub mod gaps;
 mod multicast;
+mod v289;
 
 /// ARC's UDP port.
 pub const PORT: u16 = 4440;
+
+/// The ARC version our devices announce (TXT `arcp_vers`, dstack #216):
+/// 2.8.9, the generation Dante Controller offers the device rename to.
+/// Its reads are in `arc/v289.rs`; a 2.7 request (start code 0x2729, 0x27ff)
+/// gets 2.7's answers as before.
+pub const ARCP_VERSION: &str = "2.8.9";
+/// The router version announced with it (TXT `router_vers`), the 2.8.9
+/// card's; 0x1003 states it too.
+pub const ROUTER_VERSION: &str = "4.3.0";
+/// The revision 0x1003 states after the board name.
+const REVISION: &str = ":705";
 /// How often the server looks whether a minute of [`Gaps`] is to be
 /// reported.
 pub const GAP_CHECK: Duration = Duration::from_secs(1);
@@ -398,6 +416,10 @@ pub fn handle(
     if h.op2 != 0 {
         return unanswered(&h, "op2 is not 0");
     }
+    // ARC 2.8.9's own reads (dstack #216); its other requests are 2.7's.
+    if let Some(outcome) = v289::read(&h, body, state, cfg, live) {
+        return outcome;
+    }
     let ok = |body: &[u8]| ArcOutcome::Reply(reply(&h, STATUS_OK, body));
     match h.op1 {
         op::COUNTS => ok(&counts(cfg)),
@@ -421,7 +443,7 @@ pub fn handle(
             .unwrap_or_else(|| vec![0; 110])),
         op::ZEROS_1102 => ok(&key_table(cfg)),
         op::TX_CHANNELS => tx_channels(&h, body, cfg),
-        op::TX_NAMES => tx_names(&h, body, state),
+        op::TX_NAMES => tx_names(&h, body, state, |_| true),
         op::TX_RENAME => rename(&h, body, state, cfg, Dir::Tx),
         op::RX_CHANNELS => rx_channels(&h, body, state, cfg, live.rx),
         op::RX_RENAME => rename(&h, body, state, cfg, Dir::Rx),
@@ -942,7 +964,7 @@ fn rx_flows(h: &Header, req: &[u8], cfg: &DeviceConfig, rx: &Manager) -> ArcOutc
         2,
         0..usize::from(MAX_FLOWS),
         |slot, out| {
-            let f = rx.flow(slot).filter(|f| f.handle.is_some())?;
+            let f = granted_flow(rx, slot)?;
             let words = if f.rx.is_empty() {
                 1
             } else {
@@ -1171,7 +1193,7 @@ fn device_names(state: &DeviceState, cfg: &DeviceConfig) -> Vec<u8> {
     let name = out.cstr(&state.name);
     let factory = out.cstr(&cfg.name);
     let board = out.cstr(&cfg.model);
-    let revision = out.cstr(":705");
+    let revision = out.cstr(REVISION);
     #[rustfmt::skip]
     let fields: [u16; NAMES_HEADER / 2] = [
         0, 0, 0, board, revision, 0, name, factory, name,
@@ -1249,16 +1271,30 @@ fn page<I>(
     slots: usize,
     item: usize,
     items: impl IntoIterator<Item = I>,
-    mut write: impl FnMut(I, &mut Heap) -> Option<Vec<u8>>,
+    write: impl FnMut(I, &mut Heap) -> Option<Vec<u8>>,
 ) -> ArcOutcome {
     let Some(first) = first_item(req) else {
         return refuse(h, "a page request without its first item");
     };
+    paged(h, 0, first, slots, item, items, write)
+}
+
+/// [`page`]'s reply from item `first` (from 1, not 0), with `prefix` zero
+/// bytes before `[slots, count]` (ARC 2.8.9's pages have 6, [`v289`]).
+fn paged<I>(
+    h: &Header,
+    prefix: usize,
+    first: u16,
+    slots: usize,
+    item: usize,
+    items: impl IntoIterator<Item = I>,
+    mut write: impl FnMut(I, &mut Heap) -> Option<Vec<u8>>,
+) -> ArcOutcome {
     let mut heap = Heap {
         body: Body::new(),
         shared: None,
     };
-    heap.zeros(2 + slots * item);
+    heap.zeros(prefix + 2 + slots * item);
     let mut table: Vec<Vec<u8>> = Vec::with_capacity(slots);
     let mut counted = 0;
     let mut left = items.into_iter().skip(usize::from(first) - 1);
@@ -1280,10 +1316,11 @@ fn page<I>(
         counted += 1;
     };
     let mut body = heap.body.into_vec();
-    body[0] = slots as u8;
-    body[1] = counted as u8;
+    body[prefix] = slots as u8;
+    body[prefix + 1] = counted as u8;
+    let table_at = prefix + 2;
     for (i, descriptor) in table.iter().enumerate() {
-        body[2 + i * item..2 + (i + 1) * item].copy_from_slice(descriptor);
+        body[table_at + i * item..table_at + (i + 1) * item].copy_from_slice(descriptor);
     }
     let status = if more { STATUS_MORE } else { STATUS_OK };
     ArcOutcome::Reply(reply(h, status, &body))
@@ -1299,10 +1336,19 @@ fn tx_channels(h: &Header, req: &[u8], cfg: &DeviceConfig) -> ArcOutcome {
     })
 }
 
-/// 0x2010: each TX channel with its current name.
-fn tx_names(h: &Header, req: &[u8], state: &DeviceState) -> ArcOutcome {
+/// 0x2010: each TX channel `listed` takes (by index) with its current
+/// name: every one under 2.7, the renamed ones under 2.8.9 ([`v289`]).
+fn tx_names(
+    h: &Header,
+    req: &[u8],
+    state: &DeviceState,
+    listed: impl Fn(usize) -> bool,
+) -> ArcOutcome {
     let n = state.tx.len();
     page(h, req, n.min(TX_PAGE), 6, 0..n, |index, out| {
+        if !listed(index) {
+            return None;
+        }
         // A zero word heads the names (written once, before the first).
         out.shared(|b| {
             let at = b.offset();
@@ -1313,6 +1359,12 @@ fn tx_names(h: &Header, req: &[u8], state: &DeviceState) -> ArcOutcome {
         let name = out.cstr(&state.tx[index]);
         Some(descriptor(&[id, id, name]))
     })
+}
+
+/// Our RX flow in `slot` once its transmitter granted it (an asked flow
+/// is listed from its grant), as 0x3200 and ARC 2.8.9's 0x3600 list it.
+fn granted_flow(rx: &Manager, slot: usize) -> Option<crate::subscribe::FlowView> {
+    rx.flow(slot).filter(|f| f.handle.is_some())
 }
 
 /// RX channel `rx`'s subscription as 0x3000 lists it, with its status
