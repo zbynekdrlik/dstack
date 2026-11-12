@@ -30,13 +30,13 @@
 //!   packet offset in bytes 22–23 (its name's offset is at 20–21); in a
 //!   dstack device's before v0.6.98 (12 words) bytes 22–23 themselves
 //!   (dstack #223).
-//!
-//! The list is paged: a page that says more follow is followed by the one
-//! from the flow after its last ([`list_tx_flows`]).
 //! - 2: the destinations: `[slots, count]`, then `count` offsets, each of
 //!   an 8-byte descriptor `08 02 <port u16> <IPv4>`.
 //! - 3: the channels: their count (2–3), then each TX channel id.
 //! - 4: the frames per packet (2–3).
+//!
+//! The list is paged: a page that says more follow is followed by the one
+//! from the flow after its last ([`list_tx_flows`]).
 //!
 //! A record whose chain does not read (a segment past the record or the
 //! datagram, too few segments, a destination offset past the reply) is left
@@ -240,7 +240,7 @@ fn record(body: &[u8], at: usize) -> Option<TxFlow> {
 }
 
 /// A record's bits per sample, from its first segment `first`: in a
-/// 2.8.9 device's record (a 40-byte first segment, [`FIRST_SEGMENT`]) the
+/// 2.8.9 device's record (a 40-byte first segment, `FIRST_SEGMENT`) the
 /// second `u32` of the format block whose packet offset is at bytes 22–23
 /// (dstack #223), 0 with no format (a create's request); in a dstack
 /// device's before v0.6.98 (24 bytes) bytes 22–23 themselves.
@@ -255,13 +255,16 @@ fn bits(body: &[u8], first: &[u8]) -> Option<u16> {
 }
 
 /// The bytes of a 2.8.9 device's first record segment (`14 ..`, 20 words).
-pub const FIRST_SEGMENT: usize = 40;
+const FIRST_SEGMENT: usize = 40;
 
 /// The device's TX flows (0x2600), page by page: a page that says more
 /// follow ([`STATUS_MORE`]) is followed by the one from the flow after its
 /// last (dstack #223: our own list takes several datagrams for many
-/// flows), at most [`super::MAX_FLOWS`] pages. A page that names no flow
-/// past the one it started from, yet says more follow, is malformed.
+/// flows), at most [`super::MAX_FLOWS`] pages. A page's flows before the
+/// one it was asked from are left out (already read). A page that names no
+/// flow past the one it was asked from, yet says more follow, is
+/// malformed. [`Flows::unread`] adds up every page's records that did not
+/// read (a device that lists one again on its next page counts it twice).
 pub fn list_tx_flows(c: &mut impl Call) -> Result<Flows, ReadError> {
     let mut out = Flows::default();
     let mut first = 1u16;
@@ -270,7 +273,8 @@ pub fn list_tx_flows(c: &mut impl Call) -> Result<Flows, ReadError> {
         if status != STATUS_OK && status != STATUS_MORE {
             return Err(ReadError::Refused { op: LIST, status });
         }
-        let page = parse_flows(&body).ok_or(ReadError::Malformed { op: LIST })?;
+        let mut page = parse_flows(&body).ok_or(ReadError::Malformed { op: LIST })?;
+        page.flows.retain(|f| f.local_id >= first);
         let last = page.flows.iter().map(|f| f.local_id).max();
         out.slots = page.slots;
         out.unread += page.unread;

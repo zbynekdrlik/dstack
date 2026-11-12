@@ -148,6 +148,7 @@ pub(super) fn read(
                 Some(tx_flow(
                     out,
                     cfg,
+                    cfg.sample_rate,
                     &Listed {
                         id: wire_u16(slot + 1),
                         multicast: f.multicast,
@@ -443,25 +444,28 @@ pub(super) struct Listed<'a> {
 
 /// A TX flow's record (dstack #223), as a 2.8.9 card, a UltimoX2 and
 /// Dante Controller's adapters write it, in its order: the flow's name
-/// (its number), the format (written once a page: rate, bits, `u32`
-/// each), the record (from a multiple of 4), the destination's socket
+/// (its number), the format (written once a page: `rate`, bits, `u32`
+/// each; a list states our rate, a create's answer 0 as the UltimoX2's),
+/// the record (from a multiple of 4), the destination's socket
 /// descriptor (`08 02`, port, address; from a multiple of 4), then the
 /// receiver's device and flow names. The record's segments: `[14 ..]`
 /// (40 bytes: the flow, 0, audio, the flow again, 0, the flags
 /// ([`flows::UNICAST`] or [`flows::MULTICAST`]), 0, the name's offset, the
-/// format's, 16 zero bytes), `[08 ..]` (0, the receiver's device and flow
+/// format's, a multicast flow's latency in ns (`u32`, our latency as
+/// [`stated_latency_ns`] states it, the UltimoX2's; 0
+/// for a unicast flow, the card's), 12 zero bytes), `[08 ..]` (0, the receiver's device and flow
 /// names' offsets or 0, 1, 6 zero bytes), `[04 ..]` (`[n, n]` and the
 /// descriptor's offset for `n` destinations, 0), `[3 + slots ..]` (the
 /// slot count, each slot's TX channel, 0), `[02 00]` (frames per packet).
 /// Each segment's second byte is the words from it to the record's end,
 /// but the last one's, 0 as the card writes it. Returns the record's
 /// offset.
-fn tx_flow(out: &mut Heap, cfg: &DeviceConfig, f: &Listed<'_>) -> u16 {
+fn tx_flow(out: &mut Heap, cfg: &DeviceConfig, rate: u32, f: &Listed<'_>) -> u16 {
     let name = out.cstr(&f.id.to_string());
     let format = out.shared(|b| {
         b.align(4);
         let at = b.offset();
-        b.u32(cfg.sample_rate);
+        b.u32(rate);
         b.u32(u32::from(cfg.encoding));
         at
     });
@@ -484,7 +488,12 @@ fn tx_flow(out: &mut Heap, cfg: &DeviceConfig, f: &Listed<'_>) -> u16 {
     out.u32(0);
     out.u16(name);
     out.u16(format);
-    out.zeros(16);
+    out.u32(if f.multicast {
+        stated_latency_ns(cfg.latency_ns, cfg.sample_rate)
+    } else {
+        0
+    });
+    out.zeros(12);
     out.bytes(&[0x08, left(20)]);
     let names_at = out.offset() + 2;
     out.zeros(6);
@@ -531,10 +540,10 @@ fn wire_u8(n: usize) -> u8 {
 
 /// The body of our answer to a 2.8.9 multicast create (0x2601): the flow
 /// made, as one record of the list's form with no destination (the group
-/// is in the next list), as a UltimoX2 answers.
+/// is in the next list) and a format of rate 0, as a UltimoX2 answers.
 pub(super) fn created_body(cfg: &DeviceConfig, f: &Listed<'_>) -> Vec<u8> {
     super::page_body(PAGE_PREFIX, 1, 1, 2, [f], |f, out| {
-        Some(tx_flow(out, cfg, f).to_be_bytes().to_vec())
+        Some(tx_flow(out, cfg, 0, f).to_be_bytes().to_vec())
     })
     .0
 }
