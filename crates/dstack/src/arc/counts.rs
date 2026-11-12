@@ -7,7 +7,8 @@
 //! The counts and the names (dstack #227, #231): 0x1000's counts
 //! ([`counts`]) with the device's flow slots ([`flow_slots`],
 //! [`table_slots`]) and 0x1003's names ([`device_names`]), in ARC 2.7's
-//! layouts. ARC 2.8.9's forms (`v289`) build on them.
+//! layouts. ARC 2.8.9's 0x1000 (`v289`) builds on [`counts`] and
+//! [`flow_slots`]; its 0x1003 is its own.
 
 use super::{MAX_CHANNELS_IN_FLOW, MAX_FLOWS, REVISION, wire_u16};
 use crate::device::{DeviceConfig, DeviceState};

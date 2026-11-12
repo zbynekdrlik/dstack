@@ -8,7 +8,8 @@
 //! read ([`settings_body`]), and 0x1102, the settings key table
 //! ([`key_table`]), as the hardware answers them. The dispatcher
 //! ([`super::handle`]) picks the request; this module only builds the
-//! reply.
+//! reply. 0x1101, the latency write, stays with the dispatcher
+//! (`set_latency`): it changes the device.
 
 use super::control;
 use crate::device::DeviceConfig;
