@@ -130,9 +130,12 @@ fn the_fixture_holds_netaudio_s_requests_and_our_empty_reply() {
 fn netaudio_s_following_page_lists_the_channels_from_its_first() {
     let mut dev = Dev::new(config_sized(64, 64));
     let reply = sent_bytes(dev.send(&frame("0x2400 next")));
+    // Channels 33 on, as many as one page holds (T33..T64 take two).
     let (status, ids) = records(&reply, 0x2400);
-    assert_eq!(status, STATUS_OK);
-    assert_eq!(ids, (33..=64).map(|id| (AUDIO, id)).collect::<Vec<_>>());
+    assert_eq!(status, STATUS_MORE);
+    assert!(ids.len() > 1, "{ids:?}");
+    let want: Vec<_> = (33..).take(ids.len()).map(|id| (AUDIO, id)).collect();
+    assert_eq!(ids, want);
     assert_eq!(u16_at(&reply, 4), 0x0202, "netaudio's sequence");
     let reply = sent_bytes(dev.send(&frame("0x3400 next")));
     let (_, ids) = records(&reply, 0x3400);
