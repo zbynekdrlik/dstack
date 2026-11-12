@@ -17,10 +17,11 @@
 //! segmented lists and left the device out of its list (cause not found
 //! yet); the lists are still answered for a controller that asks. Each
 //! read below is answered in the card's layout with our values; the other
-//! requests under 0x2809 (0x1100, 0x1102, 0x2600, 0x3300, 0x2320, the
+//! requests under 0x2809 (0x1100, 0x1102, 0x2600, 0x3300, 0x2320, 2.7's
 //! writes) are answered as under 2.7 ([`super::handle`]). Dante
 //! Controller keeps 2.7's writes for our devices (0x3010, 0x3001, 0x1001;
-//! #216 Finding 18).
+//! #216 Finding 18); netaudio writes with 2.8.9's own, which [`writes`]
+//! answers (#220).
 //!
 //! | op1 | answer |
 //! |---|---|
@@ -52,6 +53,10 @@ use super::{
 use crate::device::MAX_NAME;
 use crate::wire::{Body, read_u16};
 
+mod writes;
+
+pub(super) use writes::write;
+
 /// The TX channels' list.
 pub(super) const TX_CHANNELS: u16 = 0x2400;
 /// The RX channels' list.
@@ -73,10 +78,10 @@ const PAGE_PREFIX: usize = 6;
 const COUNTS_RENAME: u8 = 0x01;
 /// A TX channel's flags, the card's.
 const TX_FLAGS: u32 = 0x0000_0007;
-/// An RX channel's flags, the card's (netaudio: rename allowed, no
-/// subscription to the own device). Our 2.7 RX record states the same 6
-/// (0x3000), so a reader sees no change from the generation.
-const RX_FLAGS: u32 = 0x0000_0006;
+/// An RX channel's flags: the card's 6 (netaudio: rename allowed) and the
+/// can-subscribe-self bit, as our 2.7 record states them
+/// ([`super::RX_CHANNEL_FLAGS`]).
+const RX_FLAGS: u32 = super::RX_CHANNEL_FLAGS as u32;
 /// An RX flow's flags, the card's.
 const RX_FLOW_FLAGS: u32 = 0x0000_0001;
 /// An RX flow's receiver state, the card's for a receiving flow.
