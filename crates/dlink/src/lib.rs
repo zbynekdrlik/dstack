@@ -111,8 +111,9 @@
 //! app writes a [`bridge::Fifo`] (made with [`bridge::fifo_for`]) on its
 //! own audio thread, and its [`Process`] fills the device's block with
 //! [`bridge::Player::fill_with`], which converts from the app's rate and
-//! steers the FIFO's depth (about 40 ms) against the drift ([`bridge`];
-//! dsend's path, dstack #241). Neither side takes a lock or allocates.
+//! steers the FIFO's depth against the drift ([`bridge`]; dsend's path,
+//! dstack #241). Neither side takes a lock or allocates. That depth adds
+//! to the path above: about 40 ms, up to 80 ms after dropouts.
 //!
 //! # Debug builds with a rate converter
 //!

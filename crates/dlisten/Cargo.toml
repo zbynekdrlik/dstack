@@ -17,9 +17,9 @@ path = "src/main.rs"
 
 [dependencies]
 dlink = { path = "../dlink" }
-dstack-resample = { path = "../dstack-resample" }
-# The endpoint bridge dlisten shares with dsend (dstack #164): the FIFO, the
-# player, the map, the output's choice, the status and process glue.
+# The endpoint glue dlisten shares with dsend (dstack #164): the output's
+# choice, the status and process glue, and dlink's bridge (the FIFO, the
+# player, the map; dstack #241) re-exported at its old paths.
 dstack-endpoint = { path = "../dstack-endpoint" }
 # dtray's Run value and autostart entry quoting, for `--autostart`
 # (its library; dlisten has no tray of its own: dtray shows it).

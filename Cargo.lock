@@ -331,7 +331,6 @@ dependencies = [
  "dlink",
  "dstack",
  "dstack-endpoint",
- "dstack-resample",
  "dtray",
  "serde_json",
  "tempfile",
