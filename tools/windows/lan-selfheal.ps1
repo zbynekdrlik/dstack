@@ -5,9 +5,9 @@
 # The PC's one NIC carries both legs, in one of two layouts
 # (docs/two-networks.md):
 #   A. the LAN untagged on the physical (parent) adapter, Dante on a VLAN
-#      adapter (the SongPlayer PC: lanVlanId 0);
-#   B. Dante untagged on the physical adapter, the LAN on a VLAN adapter
-#      (dasio's test PC: lanVlanId 89).
+#      adapter (lanVlanId 0);
+#   B. Dante untagged on the physical adapter, the LAN on a VLAN adapter on
+#      VLAN N (a dasio host: lanVlanId N).
 # If the LAN leg dies (a vendor VLAN tool rewrote an adapter, IPv4 got
 # unbound, the adapter was disabled), a headless PC has no remote path left:
 # the Dante address is closed to TCP by design. This script, run as SYSTEM by

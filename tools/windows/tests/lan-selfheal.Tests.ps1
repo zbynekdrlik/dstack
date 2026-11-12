@@ -134,8 +134,8 @@ Reset-Fake
 
 $good = '{"lanAdapter":"LAN","gateway":"192.0.2.1","danteAdapter":"Dante70","thresholdMinutes":3,"lanVlanId":0}'
 # The reverse layout (dasio's test PC): Dante is the physical adapter,
-# untagged; the LAN is a VLAN adapter on VLAN 89.
-$reverse = $good.Replace('"lanVlanId":0', '"lanVlanId":89')
+# untagged; the LAN is a VLAN adapter on VLAN 123.
+$reverse = $good.Replace('"lanVlanId":0', '"lanVlanId":123')
 
 # --- counter and threshold
 Check 'a healthy leg resets the counter' {
@@ -204,14 +204,14 @@ Check 'a valid config parses, threshold and VLAN display name defaults' {
     $c = Read-HealConfig -Json '{"lanAdapter":" LAN ","gateway":"192.0.2.1","danteAdapter":"Dante70","lanVlanId":0}'
     $c.LanAdapter -eq 'LAN' -and $c.ThresholdMinutes -eq 3 -and $c.VlanDisplayName -eq 'VLAN ID' -and $c.LanVlanId -eq 0
 }
-Check 'the LAN VLAN ID is read (89: a LAN on a VLAN adapter)' {
-    (Read-HealConfig -Json $reverse).LanVlanId -eq 89
+Check 'the LAN VLAN ID is read (123: a LAN on a VLAN adapter)' {
+    (Read-HealConfig -Json $reverse).LanVlanId -eq 123
 }
 Check 'a config without lanVlanId is refused, naming the key' {
     Throws { Read-HealConfig -Json '{"lanAdapter":"LAN","gateway":"192.0.2.1","danteAdapter":"Dante70"}' } "*'lanVlanId' is missing*"
 }
 Check 'a lanVlanId that is not a whole number from 0 to 4094 is refused' {
-    $bad = foreach ($v in '4095', '-1', '"89a"', '1.5', '""', 'null') {
+    $bad = foreach ($v in '4095', '-1', '"123a"', '"123"', '1.5', '""', 'null', 'true') {
         Throws { Read-HealConfig -Json $good.Replace('"lanVlanId":0', ('"lanVlanId":' + $v)) } "*'lanVlanId'*"
     }
     @($bad | Where-Object { -not $_ }).Count -eq 0
@@ -296,16 +296,16 @@ Check 'VlanId, lanVlanId 0: 70 is set to 0; empty and 0 are left alone' {
     Reset-Fake; $script:Fake.Vlan = '0'; $c = Step 'VlanId'
     $a.Changed -and $after -eq '0' -and -not $b.Changed -and -not $c.Changed -and @(Changes).Count -eq 0
 }
-Check 'VlanId, lanVlanId 89: 89 is left alone, never set to 0' {
-    Reset-Fake; $script:Fake.Vlan = '89'
+Check 'VlanId, lanVlanId 123: 123 is left alone, never set to 0' {
+    Reset-Fake; $script:Fake.Vlan = '123'
     $a = Step 'VlanId' $cfgReverse
-    -not $a.Changed -and $script:Fake.Vlan -eq '89' -and @(Changes).Count -eq 0
+    -not $a.Changed -and $script:Fake.Vlan -eq '123' -and @(Changes).Count -eq 0
 }
-Check 'VlanId, lanVlanId 89: empty, 0 and 70 are set to 89' {
+Check 'VlanId, lanVlanId 123: empty, 0 and 70 are set to 123' {
     $ok = foreach ($v in '', '0', '70') {
         Reset-Fake; $script:Fake.Vlan = $v
         $r = Step 'VlanId' $cfgReverse
-        $r.Changed -and $script:Fake.Vlan -eq '89' -and (@(Changes) -join ';') -eq 'Set-NetAdapterAdvancedProperty LAN'
+        $r.Changed -and $script:Fake.Vlan -eq '123' -and (@(Changes) -join ';') -eq 'Set-NetAdapterAdvancedProperty LAN'
     }
     @($ok | Where-Object { -not $_ }).Count -eq 0
 }
@@ -314,16 +314,21 @@ Check 'VlanId, no VLAN property, lanVlanId 0: nothing to set, nothing changed' {
     $a = Step 'VlanId'
     -not $a.Changed -and $a.Text -like "*no 'VLAN ID' property*" -and @(Changes).Count -eq 0
 }
-Check 'VlanId, no VLAN property, lanVlanId 89: the mismatch read is logged, nothing guessed' {
+Check 'VlanId, no VLAN property, lanVlanId 0, the adapter reads 70: the mismatch is logged, nothing changed' {
+    Reset-Fake; $script:Fake.VlanProp = $false; $script:Fake.AdapterVlan = '70'
+    $a = Step 'VlanId'
+    -not $a.Changed -and $a.Text -like "WARN VLAN mismatch*reads '70'*expects 0*not changed*" -and @(Changes).Count -eq 0
+}
+Check 'VlanId, no VLAN property, lanVlanId 123: the mismatch read is logged, nothing guessed' {
     Reset-Fake; $script:Fake.VlanProp = $false; $script:Fake.AdapterVlan = '0'
     $a = Step 'VlanId' $cfgReverse
     Reset-Fake; $script:Fake.VlanProp = $false; $script:Fake.AdapterVlan = ''
     $b = Step 'VlanId' $cfgReverse
-    Reset-Fake; $script:Fake.VlanProp = $false; $script:Fake.AdapterVlan = '89'
+    Reset-Fake; $script:Fake.VlanProp = $false; $script:Fake.AdapterVlan = '123'
     $c = Step 'VlanId' $cfgReverse
-    -not $a.Changed -and $a.Text -like "*VLAN mismatch*reads '0'*expects 89*not changed*" -and
-    -not $b.Changed -and $b.Text -like "*VLAN mismatch*reads ''*expects 89*" -and
-    -not $c.Changed -and $c.Text -notlike '*mismatch*' -and $c.Text -like "*VLAN 89*" -and @(Changes).Count -eq 0
+    -not $a.Changed -and $a.Text -like "*VLAN mismatch*reads '0'*expects 123*not changed*" -and
+    -not $b.Changed -and $b.Text -like "*VLAN mismatch*reads ''*expects 123*" -and
+    -not $c.Changed -and $c.Text -notlike '*mismatch*' -and $c.Text -like "*VLAN 123*" -and @(Changes).Count -eq 0
 }
 Check 'BindIPv4: an unbound IPv4 is bound, a bound one left alone' {
     Reset-Fake; $script:Fake.Bound = $false
@@ -394,22 +399,22 @@ try {
         $rc = Invoke-Check -Dir $d
         $rc -eq 1 -and (LogOf $d) -match "ERROR config: 'lanVlanId' is missing" -and @(Changes).Count -eq 0
     }
-    Check 'the reverse layout (LAN on VLAN 89): the repair keeps VLAN 89 and never touches the Dante adapter' {
+    Check 'the reverse layout (LAN on VLAN 123): the repair keeps VLAN 123 and never touches the Dante adapter' {
         Reset-Fake
-        $script:Fake.Status = 'Disabled'; $script:Fake.Vlan = '89'; $script:Fake.Addresses = @()
+        $script:Fake.Status = 'Disabled'; $script:Fake.Vlan = '123'; $script:Fake.Addresses = @()
         $d = NewRun 'reverse' $reverse '{"failures":2}'
         $rc = Invoke-Check -Dir $d
         $ch = @(Changes)
-        $rc -eq 0 -and $script:Fake.Vlan -eq '89' -and
+        $rc -eq 0 -and $script:Fake.Vlan -eq '123' -and
         ($ch -join ';') -eq 'Enable-NetAdapter LAN;Restart-NetAdapter LAN' -and @(DanteCalls).Count -eq 0
     }
-    Check 'the reverse layout with the LAN VLAN cleared: the repair sets 89 back' {
+    Check 'the reverse layout with the LAN VLAN cleared: the repair sets 123 back' {
         Reset-Fake
         $script:Fake.Vlan = ''; $script:Fake.Addresses = @()
         $d = NewRun 'reverse0' $reverse '{"failures":2}'
         $rc = Invoke-Check -Dir $d
-        $rc -eq 0 -and $script:Fake.Vlan -eq '89' -and (@(Changes) -contains 'Set-NetAdapterAdvancedProperty LAN') -and
-        (LogOf $d) -match "VlanId: set RegVlanID from '' to 89" -and @(DanteCalls).Count -eq 0
+        $rc -eq 0 -and $script:Fake.Vlan -eq '123' -and (@(Changes) -contains 'Set-NetAdapterAdvancedProperty LAN') -and
+        (LogOf $d) -match "VlanId: set RegVlanID from '' to 123" -and @(DanteCalls).Count -eq 0
     }
     Check 'a gateway that does not answer counts 1/3 and changes nothing' {
         Reset-Fake; $script:Fake.PingOk = $false
