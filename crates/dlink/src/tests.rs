@@ -245,6 +245,73 @@ fn link_start_on_an_address_not_there_fails_at_once() {
     }
 }
 
+/// dstack #230: `Link::start_until` waits for an address not there, and
+/// its stop ends the wait within one retry interval, with an error the app
+/// can tell (it set the stop itself).
+#[test]
+fn link_start_until_waits_and_ends_within_a_retry_of_its_stop() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let theirs = Arc::clone(&stop);
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let got = Link::start_until(
+            &config(),
+            &Place::Ip(ABSENT),
+            Map {
+                rx: vec![0],
+                tx: vec![],
+            },
+            Quiet,
+            &theirs,
+        );
+        let _ = tx.send(got);
+    });
+    // Still waiting a while in (`Link::start` answered by now).
+    let waited = rx.recv_timeout(Duration::from_millis(300));
+    assert!(waited.is_err(), "answered before its stop");
+    let stopped_at = Instant::now();
+    stop.store(true, Ordering::Relaxed);
+    // One retry interval, and slack for a loaded runner.
+    let bound = dstack::daemon::PLACE_RETRY + Duration::from_millis(500);
+    match rx.recv_timeout(bound) {
+        Ok(Err(HostError::Run(why))) => {
+            assert_eq!(why, "stopped while waiting for the device's address");
+        }
+        Ok(other) => panic!("{:?}", other.map(drop)),
+        Err(_) => panic!("Link::start_until not stopped {bound:?} after its stop"),
+    }
+    assert!(stopped_at.elapsed() <= bound);
+}
+
+/// A stop set before the start ends it after one look, without a wait.
+#[test]
+fn link_start_until_with_its_stop_set_ends_at_once() {
+    let stop = std::sync::atomic::AtomicBool::new(true);
+    let bound = dstack::daemon::PLACE_RETRY / 2;
+    let started = std::time::Instant::now();
+    let e = Link::start_until(
+        &config(),
+        &Place::Ip(ABSENT),
+        Map {
+            rx: vec![0],
+            tx: vec![],
+        },
+        Quiet,
+        &stop,
+    )
+    .err()
+    .expect("stopped");
+    assert_eq!(
+        e,
+        HostError::Run("stopped while waiting for the device's address".into())
+    );
+    assert!(started.elapsed() < bound, "{:?}", started.elapsed());
+}
+
 #[test]
 fn a_second_device_s_ports_process_id_and_rx_port_base_are_taken() {
     let cfg = config()

@@ -4,6 +4,8 @@
 
 use super::*;
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use crate::test_log::capture_at;
 
 /// A scripted address source: each call answers the next list, a
@@ -135,4 +137,113 @@ fn any_other_refusal_fails_at_once() {
     )
     .unwrap_err();
     assert_eq!(e, "the box's interfaces: no list");
+}
+
+// ---- dstack #230: a start that fails at once, a wait the app stops ----
+
+#[test]
+fn a_start_now_fails_on_a_place_not_there_after_one_look() {
+    let (calls, source) = scripted(appears_after(1));
+    let e = resolve_place(&Place::Ip(IP), PlaceWait::Now, source, |_| {
+        panic!("no sleep")
+    })
+    .unwrap_err();
+    assert_eq!(e, "no interface of this box holds the address");
+    assert_eq!(calls.get(), 1);
+    let (_, source) = scripted(vec![vec![]]);
+    let e = resolve_place(&Place::Iface("eth9".into()), PlaceWait::Now, source, |_| {
+        panic!("no sleep")
+    })
+    .unwrap_err();
+    assert_eq!(e, "no such interface, or it has no IPv4 address");
+    // A place there is taken; a list that cannot be read is an error.
+    let (_, source) = scripted(vec![addrs()]);
+    let got = resolve_place(&Place::Ip(IP), PlaceWait::Now, source, |_| {
+        panic!("no sleep")
+    });
+    assert_eq!(got, Ok(if_addr("eth9", IP, MASK)));
+    let e = resolve_place(
+        &Place::Ip(IP),
+        PlaceWait::Now,
+        || Err(io::Error::other("no list")),
+        |_| panic!("no sleep"),
+    )
+    .unwrap_err();
+    assert_eq!(e, "the box's interfaces: no list");
+}
+
+#[test]
+fn a_start_forever_waits_as_wait_for_interface() {
+    let (calls, source) = scripted(appears_after(2));
+    let slept = Cell::new(0);
+    let got = resolve_place(&Place::Ip(IP), PlaceWait::Forever, source, |_| {
+        slept.set(slept.get() + 1)
+    });
+    assert_eq!(got, Ok(if_addr("eth9", IP, MASK)));
+    assert_eq!((calls.get(), slept.get()), (3, 2));
+}
+
+#[test]
+fn a_stop_set_while_waiting_ends_the_wait_after_the_retry_it_was_set_in() {
+    let stop = AtomicBool::new(false);
+    let (calls, source) = scripted(vec![vec![addrs()[0].clone()]; 3]);
+    let slept = Cell::new(0);
+    let log = capture_at(tracing::Level::INFO, || {
+        let e = resolve_place(&Place::Ip(IP), PlaceWait::Until(&stop), source, |d| {
+            assert_eq!(d, PLACE_RETRY);
+            slept.set(slept.get() + 1);
+            // The app stops the start during the second retry interval.
+            if slept.get() == 2 {
+                stop.store(true, Ordering::Relaxed);
+            }
+        })
+        .unwrap_err();
+        assert_eq!(e, "stopped while waiting for the device's address");
+    });
+    // One look after the interval the stop came in, then no more.
+    assert_eq!((calls.get(), slept.get()), (3, 2));
+    assert!(
+        log.contains("(looked up every second, until the app stops the start)"),
+        "{log}"
+    );
+    let stopped: Vec<&str> = log
+        .lines()
+        .filter(|l| l.contains("stopped while waiting for the device's address"))
+        .collect();
+    assert_eq!(stopped.len(), 1, "{log}");
+    assert!(stopped[0].contains(" INFO "), "{}", stopped[0]);
+    assert!(stopped[0].contains("seconds=2"), "{}", stopped[0]);
+    assert!(!log.contains("10.0.0"), "no address in {log}");
+}
+
+#[test]
+fn a_stop_set_before_the_start_ends_it_after_one_look_and_a_place_there_still_starts() {
+    let stop = AtomicBool::new(true);
+    let (calls, source) = scripted(vec![vec![]]);
+    let e = resolve_place(
+        &Place::Iface("eth9".into()),
+        PlaceWait::Until(&stop),
+        source,
+        |_| panic!("no sleep"),
+    )
+    .unwrap_err();
+    assert_eq!(e, "stopped while waiting for the device's interface");
+    assert_eq!(calls.get(), 1);
+    // The stop ends a wait only: a place there is the device's.
+    let (_, source) = scripted(vec![addrs()]);
+    let got = resolve_place(&Place::Ip(IP), PlaceWait::Until(&stop), source, |_| {
+        panic!("no sleep")
+    });
+    assert_eq!(got, Ok(if_addr("eth9", IP, MASK)));
+    // A refusal fails at once, the stop not set.
+    let idle = AtomicBool::new(false);
+    let (_, source) = scripted(vec![]);
+    let e = resolve_place(
+        &Place::Ip(Ipv4Addr::LOCALHOST),
+        PlaceWait::Until(&idle),
+        source,
+        |_| panic!("no sleep"),
+    )
+    .unwrap_err();
+    assert!(e.contains("loopback"), "{e}");
 }
