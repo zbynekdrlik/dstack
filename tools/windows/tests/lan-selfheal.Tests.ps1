@@ -5,9 +5,11 @@
 #   powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools\windows\tests\lan-selfheal.Tests.ps1
 # A plain assert script, not Pester: the inbox Pester 3.4 and the runner's
 # Pester 5 differ in syntax. Exits 1 if any check fails.
-# Nothing here touches a network adapter: the repair steps are tested only up
-# to the guard, and the run path only with a gateway that answers (loopback)
-# or one that cannot (TEST-NET-1), below the threshold.
+#
+# No real network adapter is touched: the NetAdapter/NetTCPIP cmdlets the
+# script calls are replaced below by functions of the same name (a function
+# wins over a cmdlet), which act on a fake LAN adapter and a fake Dante
+# adapter and record every call with its target.
 
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '..\lan-selfheal.ps1')
@@ -18,21 +20,109 @@ function Check {
     param([string]$Name, [scriptblock]$Body)
     try {
         $ok = & $Body
-        if ($ok -eq $true) { $script:passed++; Write-Host "ok   $Name" }
-        else { $script:failed++; Write-Host "FAIL $Name (got '$ok')" }
+        if ($ok -is [bool] -and $ok) { $script:passed++; Write-Host "ok   $Name" }
+        else {
+            $type = if ($null -eq $ok) { 'null' } else { $ok.GetType().Name }
+            $script:failed++; Write-Host "FAIL $Name (got '$ok', $type)"
+        }
     } catch {
         $script:failed++; Write-Host "FAIL $Name (threw: $($_.Exception.Message))"
     }
 }
 function Throws {
     param([scriptblock]$Body, [string]$Like)
-    try { & $Body | Out-Null; return $false } catch { return ($_.Exception.Message -like $Like) }
+    try { & $Body | Out-Null; return $false } catch { return [bool]($_.Exception.Message -like $Like) }
 }
+
+# --------------------------------------------------- the fake adapters
+function Reset-Fake {
+    $script:Fake = @{
+        Calls        = New-Object System.Collections.ArrayList
+        LanName      = 'LAN'
+        DanteName    = 'Dante70'
+        LanIndex     = 5
+        DanteIndex   = 9
+        Status       = 'Up'
+        Vlan         = ''
+        Bound        = $true
+        Dhcp         = 'Enabled'
+        Addresses    = @('10.0.0.20')
+        RouteIndex   = 5
+        FailStep     = ''
+        ExtraLan     = $false
+    }
+}
+function Note { param([string]$Verb, [string]$Target) [void]$script:Fake.Calls.Add("$Verb $Target") }
+function Assert-FakeTarget {
+    param([string]$Verb, [string]$Target)
+    Note $Verb $Target
+    if ($script:Fake.FailStep -eq $Verb) { throw "fake failure in $Verb" }
+}
+function Get-NetAdapter {
+    [CmdletBinding()] param([string]$Name, [switch]$IncludeHidden)
+    $all = @(
+        [pscustomobject]@{ Name = $script:Fake.LanName; ifIndex = $script:Fake.LanIndex; Status = $script:Fake.Status },
+        [pscustomobject]@{ Name = $script:Fake.DanteName; ifIndex = $script:Fake.DanteIndex; Status = 'Up' }
+    )
+    if ($script:Fake.ExtraLan) { $all += [pscustomobject]@{ Name = $script:Fake.LanName; ifIndex = 7; Status = 'Up' } }
+    if ($Name) { Note 'Get-NetAdapter' $Name; return @($all | Where-Object { $_.Name -eq $Name })[0] }
+    $all
+}
+function Enable-NetAdapter {
+    [CmdletBinding(SupportsShouldProcess)] param([string]$Name)
+    Assert-FakeTarget 'Enable-NetAdapter' $Name; $script:Fake.Status = 'Up'
+}
+function Restart-NetAdapter {
+    [CmdletBinding(SupportsShouldProcess)] param([string]$Name)
+    Assert-FakeTarget 'Restart-NetAdapter' $Name
+}
+function Get-NetAdapterAdvancedProperty {
+    [CmdletBinding()] param([string]$Name)
+    Note 'Get-NetAdapterAdvancedProperty' $Name
+    [pscustomobject]@{ DisplayName = 'VLAN ID'; RegistryKeyword = 'RegVlanID'; RegistryValue = @($script:Fake.Vlan) }
+}
+function Set-NetAdapterAdvancedProperty {
+    [CmdletBinding()] param([string]$Name, [string]$RegistryKeyword, [string]$RegistryValue, [switch]$NoRestart)
+    Assert-FakeTarget 'Set-NetAdapterAdvancedProperty' $Name; $script:Fake.Vlan = $RegistryValue
+}
+function Get-NetAdapterBinding {
+    [CmdletBinding()] param([string]$Name, [string]$ComponentID)
+    Note 'Get-NetAdapterBinding' $Name
+    [pscustomobject]@{ Enabled = $script:Fake.Bound }
+}
+function Enable-NetAdapterBinding {
+    [CmdletBinding()] param([string]$Name, [string]$ComponentID)
+    Assert-FakeTarget 'Enable-NetAdapterBinding' $Name; $script:Fake.Bound = $true
+}
+function Get-NetIPInterface {
+    [CmdletBinding()] param([string]$InterfaceAlias, [string]$AddressFamily)
+    Note 'Get-NetIPInterface' $InterfaceAlias
+    [pscustomobject]@{ Dhcp = $script:Fake.Dhcp }
+}
+function Set-NetIPInterface {
+    [CmdletBinding()] param([string]$InterfaceAlias, [string]$AddressFamily, [string]$Dhcp)
+    Assert-FakeTarget 'Set-NetIPInterface' $InterfaceAlias; $script:Fake.Dhcp = $Dhcp
+}
+function Get-NetIPAddress {
+    [CmdletBinding()] param([int]$InterfaceIndex, [string]$AddressFamily)
+    if ($InterfaceIndex -ne $script:Fake.LanIndex) { return }
+    foreach ($a in $script:Fake.Addresses) { [pscustomobject]@{ IPAddress = $a } }
+}
+function Find-NetRoute {
+    [CmdletBinding()] param([string]$RemoteIPAddress)
+    [pscustomobject]@{ InterfaceIndex = $script:Fake.RouteIndex }
+}
+function Changes {
+    # The calls that change an adapter (not the reads).
+    @($script:Fake.Calls | Where-Object { $_ -match '^(Enable|Set|Restart)-' })
+}
+function DanteCalls { @($script:Fake.Calls | Where-Object { $_ -match ' Dante70$' }) }
+Reset-Fake
 
 $good = '{"lanAdapter":"LAN","gateway":"192.0.2.1","danteAdapter":"Dante70","thresholdMinutes":3}'
 
 # --- counter and threshold
-Check 'a gateway answer resets the counter' {
+Check 'a healthy leg resets the counter' {
     $n = Get-NextState -Failures 2 -GatewayOk $true -Threshold 3
     $n.Failures -eq 0 -and -not $n.Heal -and $n.Previous -eq 2
 }
@@ -45,7 +135,7 @@ Check 'the third consecutive failed minute repairs and restarts the count' {
     $n = Get-NextState -Failures 2 -GatewayOk $false -Threshold 3
     $n.Heal -and $n.Failures -eq 0
 }
-Check 'one answer between failures starts the count again' {
+Check 'one healthy minute between failures starts the count again' {
     $s = 0
     foreach ($ok in $false, $false, $true, $false, $false) {
         $n = Get-NextState -Failures $s -GatewayOk $ok -Threshold 3
@@ -56,6 +146,34 @@ Check 'one answer between failures starts the count again' {
 }
 Check 'a threshold of 1 repairs on the first failed minute' {
     (Get-NextState -Failures 0 -GatewayOk $false -Threshold 1).Heal
+}
+
+# --- the leg's health
+Check 'a healthy leg: lease, route on the LAN, gateway answers' {
+    (Get-LegFault -Addresses @('10.0.0.20') -RouteIfIndex 5 -LanIfIndex 5 -PingOk $true) -eq ''
+}
+Check 'a gateway answer over another leg does not count' {
+    (Get-LegFault -Addresses @('10.0.0.20') -RouteIfIndex 9 -LanIfIndex 5 -PingOk $true) -like '*route*'
+}
+Check 'no address or only APIPA on the LAN adapter is down' {
+    ((Get-LegFault -Addresses @() -RouteIfIndex 5 -LanIfIndex 5 -PingOk $true) -like '*no usable IPv4*') -and
+    ((Get-LegFault -Addresses @('169.254.3.4') -RouteIfIndex 5 -LanIfIndex 5 -PingOk $true) -like '*no usable IPv4*')
+}
+Check 'no gateway answer is down' {
+    (Get-LegFault -Addresses @('10.0.0.20') -RouteIfIndex 5 -LanIfIndex 5 -PingOk $false) -like '*does not answer*'
+}
+
+# --- the restart decision
+Check 'a step that changed something restarts' {
+    (Get-RestartDecision -Changed $true -HasLease $true -MinutesSinceRestart 1 -GapMinutes 30).Restart
+}
+Check 'no lease restarts' {
+    (Get-RestartDecision -Changed $false -HasLease $false -MinutesSinceRestart 1 -GapMinutes 30).Restart
+}
+Check 'a healthy adapter restarts at most once per gap (a router outage)' {
+    -not (Get-RestartDecision -Changed $false -HasLease $true -MinutesSinceRestart 3 -GapMinutes 30).Restart -and
+    (Get-RestartDecision -Changed $false -HasLease $true -MinutesSinceRestart 30 -GapMinutes 30).Restart -and
+    (Get-RestartDecision -Changed $false -HasLease $true -MinutesSinceRestart -1 -GapMinutes 30).Restart
 }
 
 # --- config
@@ -75,8 +193,17 @@ Check 'a gateway that is not IPv4 is refused' {
 Check 'a LAN adapter named as the Dante adapter is refused' {
     Throws { Read-HealConfig -Json $good.Replace('"LAN"', '"dante70"') } '*same adapter*'
 }
+Check 'an adapter name with a wildcard character is refused' {
+    (Throws { Read-HealConfig -Json $good.Replace('"LAN"', '"Ethernet*"') } '*wildcard*') -and
+    (Throws { Read-HealConfig -Json $good.Replace('"Dante70"', '"Realtek [VLAN 70]"') } '*wildcard*')
+}
 Check 'a threshold below 1 is refused' {
     Throws { Read-HealConfig -Json $good.Replace('"thresholdMinutes":3', '"thresholdMinutes":0') } '*thresholdMinutes*'
+}
+Check 'the state file round-trips; a missing one counts from zero' {
+    $s = Read-HealState -Json '{"failures":2,"lastRestart":"2026-11-12T16:20:00.0000000+01:00"}'
+    $z = Read-HealState -Json ''
+    $s.Failures -eq 2 -and $s.LastRestart -is [datetime] -and $z.Failures -eq 0 -and $null -eq $z.LastRestart
 }
 
 # --- never the Dante adapter
@@ -85,24 +212,56 @@ Check 'the repair plan is the five steps in order, all on the LAN adapter' {
     ($p.Action -join ',') -eq 'Enable,VlanIdEmpty,BindIPv4,Dhcp,Restart' -and
     @($p | Where-Object { $_.Target -ne 'LAN' }).Count -eq 0
 }
-Check 'no plan step ever names the Dante adapter' {
-    @(Get-RepairPlan -LanAdapter 'LAN' -DanteAdapter 'Dante70' | Where-Object { $_.Target -ieq 'Dante70' }).Count -eq 0
-}
 Check 'a plan aimed at the Dante adapter is refused' {
     Throws { Get-RepairPlan -LanAdapter 'Dante70' -DanteAdapter 'dante70' } '*Dante adapter*'
 }
 Check 'a repair step aimed at the Dante adapter is refused before any change' {
+    Reset-Fake
     $cfg = Read-HealConfig -Json $good
     $all = foreach ($a in 'Enable', 'VlanIdEmpty', 'BindIPv4', 'Dhcp', 'Restart') {
         Throws { Invoke-RepairStep -Step ([pscustomobject]@{ Action = $a; Target = ' dante70' }) -Config $cfg } '*Dante adapter*'
     }
-    @($all | Where-Object { -not $_ }).Count -eq 0
+    @($all | Where-Object { -not $_ }).Count -eq 0 -and $script:Fake.Calls.Count -eq 0
+}
+Check 'the adapters must resolve by exact name to two interfaces' {
+    $cfg = Read-HealConfig -Json $good
+    Reset-Fake; $script:Fake.DanteIndex = 5
+    $same = Throws { Resolve-HealAdapters -Config $cfg } '*Dante adapter*'
+    Reset-Fake; $script:Fake.DanteName = 'Other'
+    $missing = Throws { Resolve-HealAdapters -Config $cfg } "*0 adapters named 'Dante70'*"
+    Reset-Fake; $script:Fake.ExtraLan = $true
+    $two = Throws { Resolve-HealAdapters -Config $cfg } "*2 adapters named 'LAN'*"
+    $same -and $missing -and $two
 }
 
-# --- VLAN ID
-Check 'an empty or 0 VLAN ID is left alone; any other is reset' {
-    -not (Test-VlanNeedsReset -Value '') -and -not (Test-VlanNeedsReset -Value $null) -and
-    -not (Test-VlanNeedsReset -Value '0') -and (Test-VlanNeedsReset -Value '70') -and (Test-VlanNeedsReset -Value '1')
+# --- each repair step: needed and not needed
+$cfgGood = Read-HealConfig -Json $good
+function Step { param([string]$A) Invoke-RepairStep -Step ([pscustomobject]@{ Action = $A; Target = 'LAN' }) -Config $cfgGood }
+Check 'Enable: a disabled adapter is enabled, an enabled one left alone' {
+    Reset-Fake; $script:Fake.Status = 'Disabled'
+    $a = Step 'Enable'
+    $after = $script:Fake.Status
+    Reset-Fake; $b = Step 'Enable'
+    $a.Changed -and $after -eq 'Up' -and -not $b.Changed -and (Changes).Count -eq 0
+}
+Check 'VlanIdEmpty: 70 is set to 0; empty and 0 are left alone' {
+    Reset-Fake; $script:Fake.Vlan = '70'
+    $a = Step 'VlanIdEmpty'; $after = $script:Fake.Vlan
+    Reset-Fake; $b = Step 'VlanIdEmpty'
+    Reset-Fake; $script:Fake.Vlan = '0'; $c = Step 'VlanIdEmpty'
+    $a.Changed -and $after -eq '0' -and -not $b.Changed -and -not $c.Changed -and (Changes).Count -eq 0
+}
+Check 'BindIPv4: an unbound IPv4 is bound, a bound one left alone' {
+    Reset-Fake; $script:Fake.Bound = $false
+    $a = Step 'BindIPv4'; $after = $script:Fake.Bound
+    Reset-Fake; $b = Step 'BindIPv4'
+    $a.Changed -and $after -and -not $b.Changed -and (Changes).Count -eq 0
+}
+Check 'Dhcp: a static interface gets DHCP, a DHCP one left alone' {
+    Reset-Fake; $script:Fake.Dhcp = 'Disabled'
+    $a = Step 'Dhcp'; $after = $script:Fake.Dhcp
+    Reset-Fake; $b = Step 'Dhcp'
+    $a.Changed -and $after -eq 'Enabled' -and -not $b.Changed -and (Changes).Count -eq 0
 }
 
 # --- log rotation
@@ -111,6 +270,16 @@ Check 'the log rotates at 1 MB' {
 }
 $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("lan-selfheal-test-" + [guid]::NewGuid())
 New-Item -ItemType Directory -Path $tmp | Out-Null
+function NewRun {
+    param([string]$Name, [string]$Config, [string]$State)
+    $d = Join-Path $tmp $Name
+    New-Item -ItemType Directory -Path $d | Out-Null
+    if ($Config) { Set-Content -Path (Join-Path $d 'lan-selfheal.json') -Value $Config }
+    if ($State) { Set-Content -Path (Join-Path $d 'lan-selfheal.state.json') -Value $State }
+    $d
+}
+function LogOf { param([string]$D) Get-Content (Join-Path $D 'lan-selfheal.log') -Raw }
+function StateOf { param([string]$D) Get-Content (Join-Path $D 'lan-selfheal.state.json') -Raw | ConvertFrom-Json }
 try {
     Check 'a full log moves to .1 and a new one starts' {
         $log = Join-Path $tmp 'rot.log'
@@ -120,35 +289,70 @@ try {
         (Get-Content $log -Raw) -match 'after rotation' -and (Get-Item $log).Length -lt 1KB
     }
 
-    # --- the run path, in a scratch directory (no adapter is touched)
+    # --- the run path
     Check 'no config: nothing done, exit 0' {
-        $d = Join-Path $tmp 'noconf'; New-Item -ItemType Directory -Path $d | Out-Null
+        Reset-Fake
+        $d = NewRun 'noconf'
         $rc = Invoke-Check -Dir $d
         $rc -eq 0 -and -not (Test-Path (Join-Path $d 'lan-selfheal.state.json')) -and
-        (Get-Content (Join-Path $d 'lan-selfheal.log') -Raw) -match 'config missing'
+        (LogOf $d) -match 'config missing' -and $script:Fake.Calls.Count -eq 0
     }
     Check 'a broken config: nothing done, exit 1' {
-        $d = Join-Path $tmp 'badconf'; New-Item -ItemType Directory -Path $d | Out-Null
-        Set-Content -Path (Join-Path $d 'lan-selfheal.json') -Value '{"lanAdapter":"LAN"}'
+        Reset-Fake
+        $d = NewRun 'badconf' '{"lanAdapter":"LAN"}'
         $rc = Invoke-Check -Dir $d
-        $rc -eq 1 -and (Get-Content (Join-Path $d 'lan-selfheal.log') -Raw) -match 'ERROR'
+        $rc -eq 1 -and (LogOf $d) -match 'ERROR' -and $script:Fake.Calls.Count -eq 0
     }
-    Check 'a gateway that answers logs "gateway ok" and resets the count' {
-        $d = Join-Path $tmp 'up'; New-Item -ItemType Directory -Path $d | Out-Null
-        Set-Content -Path (Join-Path $d 'lan-selfheal.json') -Value $good.Replace('192.0.2.1', '127.0.0.1')
-        Set-Content -Path (Join-Path $d 'lan-selfheal.state.json') -Value '{"failures":2}'
+    Check 'a healthy leg logs "gateway ok" and resets the count' {
+        Reset-Fake
+        $d = NewRun 'up' $good.Replace('192.0.2.1', '127.0.0.1') '{"failures":2}'
         $rc = Invoke-Check -Dir $d
-        $state = Get-Content (Join-Path $d 'lan-selfheal.state.json') -Raw | ConvertFrom-Json
-        $rc -eq 0 -and $state.failures -eq 0 -and
-        (Get-Content (Join-Path $d 'lan-selfheal.log') -Raw) -match 'gateway ok \(down count 2 reset\)'
+        $rc -eq 0 -and (StateOf $d).failures -eq 0 -and (LogOf $d) -match 'gateway ok \(down count 2 reset\)' -and
+        (Changes).Count -eq 0
     }
-    Check 'a gateway that does not answer counts 1/3 and repairs nothing' {
-        $d = Join-Path $tmp 'down'; New-Item -ItemType Directory -Path $d | Out-Null
-        Set-Content -Path (Join-Path $d 'lan-selfheal.json') -Value $good
+    Check 'a gateway that does not answer counts 1/3 and changes nothing' {
+        Reset-Fake
+        $d = NewRun 'down' $good
         $rc = Invoke-Check -Dir $d
-        $state = Get-Content (Join-Path $d 'lan-selfheal.state.json') -Raw | ConvertFrom-Json
-        $text = Get-Content (Join-Path $d 'lan-selfheal.log') -Raw
-        $rc -eq 0 -and $state.failures -eq 1 -and $text -match 'gateway down 1/3 min' -and $text -notmatch 'repair'
+        $text = LogOf $d
+        $rc -eq 0 -and (StateOf $d).failures -eq 1 -and $text -match 'LAN down 1/3 min: the gateway does not answer' -and
+        $text -notmatch 'repair' -and (Changes).Count -eq 0
+    }
+    Check 'the third failed minute repairs the LAN adapter in order and never the Dante adapter' {
+        Reset-Fake
+        $script:Fake.Status = 'Disabled'; $script:Fake.Vlan = '70'; $script:Fake.Bound = $false
+        $script:Fake.Dhcp = 'Disabled'; $script:Fake.Addresses = @()
+        $d = NewRun 'heal' $good '{"failures":2}'
+        $rc = Invoke-Check -Dir $d
+        $ch = Changes
+        $rc -eq 0 -and ($ch -join ';') -eq ('Enable-NetAdapter LAN;Set-NetAdapterAdvancedProperty LAN;' +
+            'Enable-NetAdapterBinding LAN;Set-NetIPInterface LAN;Restart-NetAdapter LAN') -and
+        (DanteCalls).Count -eq 0 -and (StateOf $d).failures -eq 0 -and (StateOf $d).lastRestart -and
+        (LogOf $d) -match "repairing LAN adapter 'LAN' \(Dante adapter 'Dante70' untouched\)"
+    }
+    Check 'a healthy adapter in a router outage is not restarted again within the gap' {
+        Reset-Fake
+        $recent = (Get-Date).AddMinutes(-3).ToString('o')
+        $d = NewRun 'outage' $good ('{"failures":2,"lastRestart":"' + $recent + '"}')
+        $rc = Invoke-Check -Dir $d
+        $rc -eq 0 -and (Changes).Count -eq 0 -and (LogOf $d) -match 'Restart: skipped, adapter healthy' -and
+        (StateOf $d).lastRestart -eq ([datetime]$recent).ToString('o')
+    }
+    Check 'a failed step does not stop the rest, the run exits 1' {
+        Reset-Fake
+        $script:Fake.Vlan = '70'; $script:Fake.Bound = $false; $script:Fake.FailStep = 'Set-NetAdapterAdvancedProperty'
+        $d = NewRun 'stepfail' $good '{"failures":2}'
+        $rc = Invoke-Check -Dir $d
+        $ch = Changes
+        $rc -eq 1 -and ($ch -contains 'Enable-NetAdapterBinding LAN') -and ($ch -contains 'Restart-NetAdapter LAN') -and
+        (LogOf $d) -match 'VlanIdEmpty: ERROR fake failure' -and (DanteCalls).Count -eq 0
+    }
+    Check 'the Dante adapter on the same interface: no repair at all, exit 1' {
+        Reset-Fake
+        $script:Fake.DanteIndex = 5; $script:Fake.Status = 'Disabled'
+        $d = NewRun 'same' $good '{"failures":2}'
+        $rc = Invoke-Check -Dir $d
+        $rc -eq 1 -and (Changes).Count -eq 0 -and (LogOf $d) -match 'ERROR refused'
     }
 } finally {
     Remove-Item -LiteralPath $tmp -Recurse -Force

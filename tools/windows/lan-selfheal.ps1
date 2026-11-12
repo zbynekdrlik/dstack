@@ -6,17 +6,26 @@
 # a VLAN adapter. If the LAN leg dies (a vendor VLAN tool rewrote the parent,
 # IPv4 got unbound, the adapter was disabled), a headless PC has no remote
 # path left: the Dante address is closed to TCP by design. This script, run
-# as SYSTEM by a scheduled task every minute, pings the LAN gateway; after the
-# configured number of consecutive failed minutes it puts the LAN adapter
-# back: enabled, VLAN ID 0, IPv4 bound, DHCP on, adapter restarted.
+# as SYSTEM by a scheduled task every minute, checks the LAN leg (an IPv4
+# lease on the LAN adapter, the gateway's route through it, the gateway's
+# answer); after the configured number of consecutive failed minutes it puts
+# the LAN adapter back: enabled, VLAN ID 0, IPv4 bound, DHCP on, and a restart
+# of the adapter.
+#
+# The restart also restarts the Dante VLAN adapter on top of it (a few seconds
+# of Dante, a new MAC). So it runs when a step changed something or the LAN
+# adapter holds no lease, and otherwise (a router outage with a healthy
+# adapter) at most once per RestartGapMinutes.
 #
 # It works only from C:\ProgramData\dstack\lan-selfheal.json and never acts
 # without it. It never touches the Dante adapter: every repair step names the
-# LAN adapter, and a guard refuses any step aimed at the Dante adapter.
+# LAN adapter, a guard refuses any step aimed at the Dante adapter, and no
+# repair runs unless both adapters resolve, by exact name, to two different
+# interfaces.
 #
 # Modes:
-#   lan-selfheal.ps1                one check (what the task runs)
-#   lan-selfheal.ps1 -Mode install  copy to C:\ProgramData\dstack and register the task
+#   lan-selfheal.ps1                  one check (what the task runs)
+#   lan-selfheal.ps1 -Mode install    copy to C:\ProgramData\dstack and register the task
 #   lan-selfheal.ps1 -Mode uninstall  remove the task (config and log stay)
 #
 # Config (JSON, site data, never in the repo):
@@ -36,6 +45,7 @@ Set-StrictMode -Version 2.0
 
 $script:TaskName = 'dstack LAN self-heal'
 $script:LogMaxBytes = 1MB
+$script:RestartGapMinutes = 30
 
 # ---------------------------------------------------------------- pure layer
 
@@ -47,6 +57,13 @@ function Read-HealConfig {
         if (-not ($c.PSObject.Properties.Name -contains $k) -or
             [string]::IsNullOrWhiteSpace([string]$c.$k)) {
             throw "config: '$k' is missing or empty"
+        }
+    }
+    foreach ($k in 'lanAdapter', 'danteAdapter') {
+        # The NetAdapter cmdlets read -Name as a wildcard: a name with * ? [ ]
+        # could match the Dante adapter too.
+        if ([System.Management.Automation.WildcardPattern]::ContainsWildcardCharacters([string]$c.$k)) {
+            throw "config: '$k' ('$($c.$k)') holds a wildcard character (* ? [ ]); rename the adapter"
         }
     }
     $ip = $null
@@ -78,7 +95,7 @@ function Read-HealConfig {
 }
 
 function Get-NextState {
-    # The down-counter: a gateway answer resets it; a failed minute adds one;
+    # The down-counter: a healthy leg resets it; a failed minute adds one;
     # reaching the threshold asks for a repair and starts the count again, so
     # a LAN still dead after a repair is repaired again a threshold later.
     param(
@@ -94,6 +111,48 @@ function Get-NextState {
         return [pscustomobject]@{ Failures = 0; Heal = $true; Previous = $Failures }
     }
     [pscustomobject]@{ Failures = $n; Heal = $false; Previous = $Failures }
+}
+
+function Test-UsableIPv4 {
+    # A DHCP lease or static address, not link-local (APIPA, 169.254/16).
+    param([AllowNull()][AllowEmptyCollection()][string[]]$Addresses)
+    @($Addresses | Where-Object { $_ -and $_ -notlike '169.254.*' }).Count -gt 0
+}
+
+function Get-LegFault {
+    # Why the LAN leg is down, or '' when it is healthy. The gateway's answer
+    # counts only when the LAN adapter holds a usable address and the route
+    # to the gateway goes out of the LAN adapter: a reply over another leg
+    # proves nothing (docs/two-networks.md, the safe VLAN procedure).
+    param(
+        [AllowNull()][AllowEmptyCollection()][string[]]$Addresses,
+        [int]$RouteIfIndex,
+        [Parameter(Mandatory)][int]$LanIfIndex,
+        [bool]$PingOk
+    )
+    if (-not (Test-UsableIPv4 -Addresses $Addresses)) { return 'no usable IPv4 address on the LAN adapter' }
+    if ($RouteIfIndex -ne $LanIfIndex) { return "the route to the gateway is not on the LAN adapter (ifIndex $RouteIfIndex, LAN $LanIfIndex)" }
+    if (-not $PingOk) { return 'the gateway does not answer' }
+    ''
+}
+
+function Get-RestartDecision {
+    # The restart drops Dante for a few seconds (the VLAN adapter restarts
+    # with its parent): do it when a step changed something or the adapter
+    # has no lease; when the adapter looks healthy (a router outage, say),
+    # at most once per gap.
+    param(
+        [Parameter(Mandatory)][bool]$Changed,
+        [Parameter(Mandatory)][bool]$HasLease,
+        [Parameter(Mandatory)][double]$MinutesSinceRestart,   # negative: never restarted
+        [Parameter(Mandatory)][int]$GapMinutes
+    )
+    if ($Changed) { return [pscustomobject]@{ Restart = $true; Why = 'a step changed the adapter' } }
+    if (-not $HasLease) { return [pscustomobject]@{ Restart = $true; Why = 'the adapter holds no usable IPv4 address' } }
+    if ($MinutesSinceRestart -lt 0 -or $MinutesSinceRestart -ge $GapMinutes) {
+        return [pscustomobject]@{ Restart = $true; Why = "no restart in the last $GapMinutes min" }
+    }
+    [pscustomobject]@{ Restart = $false; Why = ("adapter healthy, last restart {0:N0} min ago (gap $GapMinutes min)" -f $MinutesSinceRestart) }
 }
 
 function Test-VlanNeedsReset {
@@ -132,6 +191,21 @@ function Test-LogNeedsRotation {
     $Size -ge $Max
 }
 
+function Read-HealState {
+    # The state file's text to { Failures, LastRestart }; a missing or broken
+    # file counts from zero.
+    param([AllowNull()][AllowEmptyString()][string]$Json)
+    $s = [pscustomobject]@{ Failures = 0; LastRestart = $null }
+    if ([string]::IsNullOrWhiteSpace($Json)) { return $s }
+    $o = $Json | ConvertFrom-Json
+    if ($o.PSObject.Properties.Name -contains 'failures') { $s.Failures = [int]$o.failures }
+    if ($o.PSObject.Properties.Name -contains 'lastRestart' -and $o.lastRestart) {
+        $s.LastRestart = [datetime]::Parse([string]$o.lastRestart, [Globalization.CultureInfo]::InvariantCulture,
+            [Globalization.DateTimeStyles]::RoundtripKind)
+    }
+    $s
+}
+
 # --------------------------------------------------------- side-effect layer
 
 function Write-HealLog {
@@ -144,9 +218,37 @@ function Write-HealLog {
     Add-Content -LiteralPath $Path -Value $line -Encoding UTF8
 }
 
+function Save-HealState {
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][int]$Failures, $LastRestart)
+    $lr = $null
+    if ($null -ne $LastRestart) { $lr = ([datetime]$LastRestart).ToString('o') }
+    (@{ failures = $Failures; lastRestart = $lr } | ConvertTo-Json -Compress) |
+        Set-Content -LiteralPath $Path -Encoding ASCII
+}
+
+function Resolve-HealAdapters {
+    # Both adapters by exact name. Fails closed: no LAN adapter, no Dante
+    # adapter, or the two on one interface means no repair at all.
+    param([Parameter(Mandatory)]$Config)
+    $all = @(Get-NetAdapter -IncludeHidden)
+    $lan = @($all | Where-Object { $_.Name -eq $Config.LanAdapter })
+    $dante = @($all | Where-Object { $_.Name -eq $Config.DanteAdapter })
+    if ($lan.Count -ne 1) { throw "refused: $($lan.Count) adapters named '$($Config.LanAdapter)' (need exactly 1)" }
+    if ($dante.Count -ne 1) { throw "refused: $($dante.Count) adapters named '$($Config.DanteAdapter)' (need exactly 1, to keep it out of the repair)" }
+    if ($lan[0].ifIndex -eq $dante[0].ifIndex) {
+        throw "refused: '$($Config.LanAdapter)' is the Dante adapter's interface (ifIndex $($lan[0].ifIndex))"
+    }
+    [pscustomobject]@{ Lan = $lan[0]; Dante = $dante[0] }
+}
+
+function Get-LanIPv4 {
+    param([Parameter(Mandatory)][int]$IfIndex)
+    @(Get-NetIPAddress -InterfaceIndex $IfIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+        ForEach-Object { [string]$_.IPAddress })
+}
+
 function Test-Gateway {
-    # Three pings, one second each: any answer counts. Only the LAN leg routes
-    # to the gateway (the Dante leg has no gateway and another subnet).
+    # Three pings, one second each: any answer counts.
     param([Parameter(Mandatory)][string]$Address)
     $p = New-Object System.Net.NetworkInformation.Ping
     try {
@@ -154,15 +256,32 @@ function Test-Gateway {
             try {
                 if ($p.Send($Address, 1000).Status -eq 'Success') { return $true }
             } catch [System.Net.NetworkInformation.PingException] {
-                # no route (the LAN leg is gone): a failed try, not an error
+                # no route: a failed try, not an error
             }
         }
         $false
     } finally { $p.Dispose() }
 }
 
+function Get-LanLegFault {
+    # Reads the LAN leg's state and returns its fault ('' = healthy).
+    param([Parameter(Mandatory)]$Config, [Parameter(Mandatory)]$Adapters)
+    $lanIndex = [int]$Adapters.Lan.ifIndex
+    $addresses = Get-LanIPv4 -IfIndex $lanIndex
+    $routeIndex = -1
+    $route = @(Find-NetRoute -RemoteIPAddress $Config.Gateway -ErrorAction SilentlyContinue |
+        Where-Object { $_.PSObject.Properties.Name -contains 'InterfaceIndex' })
+    if ($route.Count -gt 0) { $routeIndex = [int]$route[0].InterfaceIndex }
+    $ping = $false
+    if ((Test-UsableIPv4 -Addresses $addresses) -and $routeIndex -eq $lanIndex) {
+        $ping = Test-Gateway -Address $Config.Gateway
+    }
+    Get-LegFault -Addresses $addresses -RouteIfIndex $routeIndex -LanIfIndex $lanIndex -PingOk $ping
+}
+
 function Invoke-RepairStep {
-    # Applies one step if it is needed; returns what it did, for the log.
+    # Applies one of the first four steps if it is needed. Returns
+    # { Changed; Text } for the log. The restart is decided by the caller.
     param(
         [Parameter(Mandatory)]$Step,
         [Parameter(Mandatory)]$Config
@@ -174,54 +293,93 @@ function Invoke-RepairStep {
             $a = Get-NetAdapter -Name $name
             if ($a.Status -eq 'Disabled') {
                 Enable-NetAdapter -Name $name -Confirm:$false
-                return "enabled the adapter (was Disabled)"
+                return [pscustomobject]@{ Changed = $true; Text = 'enabled the adapter (was Disabled)' }
             }
-            return "adapter enabled already ($($a.Status))"
+            return [pscustomobject]@{ Changed = $false; Text = "adapter enabled already ($($a.Status))" }
         }
         'VlanIdEmpty' {
             $p = Get-NetAdapterAdvancedProperty -Name $name |
                 Where-Object { $_.DisplayName -eq $Config.VlanDisplayName } | Select-Object -First 1
-            if ($null -eq $p) { return "no '$($Config.VlanDisplayName)' property on the driver: nothing to reset" }
+            if ($null -eq $p) {
+                return [pscustomobject]@{ Changed = $false; Text = "no '$($Config.VlanDisplayName)' property on the driver: nothing to reset" }
+            }
             $value = [string]($p.RegistryValue -join ',')
             if (Test-VlanNeedsReset -Value $value) {
                 Set-NetAdapterAdvancedProperty -Name $name -RegistryKeyword $p.RegistryKeyword -RegistryValue '0' -NoRestart
-                return "set $($p.RegistryKeyword) from '$value' to 0"
+                return [pscustomobject]@{ Changed = $true; Text = "set $($p.RegistryKeyword) from '$value' to 0" }
             }
-            return "$($p.RegistryKeyword) is '$value' already"
+            return [pscustomobject]@{ Changed = $false; Text = "$($p.RegistryKeyword) is '$value' already" }
         }
         'BindIPv4' {
             $b = Get-NetAdapterBinding -Name $name -ComponentID ms_tcpip
             if (-not $b.Enabled) {
                 Enable-NetAdapterBinding -Name $name -ComponentID ms_tcpip
-                return "bound IPv4 (ms_tcpip was unbound)"
+                return [pscustomobject]@{ Changed = $true; Text = 'bound IPv4 (ms_tcpip was unbound)' }
             }
-            return "IPv4 bound already"
+            return [pscustomobject]@{ Changed = $false; Text = 'IPv4 bound already' }
         }
         'Dhcp' {
-            $i = Get-NetIPInterface -InterfaceAlias $name -AddressFamily IPv4
+            # Right after IPv4 is bound again its interface takes a moment to appear.
+            $i = $null
+            for ($t = 0; $t -lt 10 -and $null -eq $i; $t++) {
+                $i = Get-NetIPInterface -InterfaceAlias $name -AddressFamily IPv4 -ErrorAction SilentlyContinue
+                if ($null -eq $i) { Start-Sleep -Seconds 1 }
+            }
+            if ($null -eq $i) { throw "no IPv4 interface on '$name' after 10 s" }
             if ($i.Dhcp -ne 'Enabled') {
                 Set-NetIPInterface -InterfaceAlias $name -AddressFamily IPv4 -Dhcp Enabled
-                return "turned DHCP on (was $($i.Dhcp))"
+                return [pscustomobject]@{ Changed = $true; Text = "turned DHCP on (was $($i.Dhcp))" }
             }
-            return "DHCP on already"
+            return [pscustomobject]@{ Changed = $false; Text = 'DHCP on already' }
         }
         'Restart' {
             Restart-NetAdapter -Name $name -Confirm:$false
-            return "restarted the adapter"
+            return [pscustomobject]@{ Changed = $true; Text = 'restarted the adapter' }
         }
         default { throw "unknown repair step '$($Step.Action)'" }
     }
 }
 
-function Assert-DistinctAdapters {
-    # The names differ (config check); here the LAN name must also not resolve
-    # to the Dante adapter's interface.
-    param([Parameter(Mandatory)]$Config)
-    $lan = Get-NetAdapter -Name $Config.LanAdapter -IncludeHidden
-    $dante = Get-NetAdapter -Name $Config.DanteAdapter -IncludeHidden -ErrorAction SilentlyContinue
-    if ($null -ne $dante -and $lan.ifIndex -eq $dante.ifIndex) {
-        throw "refused: '$($Config.LanAdapter)' is the Dante adapter's interface"
+function Invoke-Repair {
+    # The repair after the threshold. Returns the exit code; updates
+    # $State.LastRestart when it restarts.
+    param([Parameter(Mandatory)]$Config, [Parameter(Mandatory)]$State, [Parameter(Mandatory)][string]$Log)
+    try {
+        $adapters = Resolve-HealAdapters -Config $Config
+        $plan = @(Get-RepairPlan -LanAdapter $Config.LanAdapter -DanteAdapter $Config.DanteAdapter)
+    } catch {
+        Write-HealLog -Path $Log -Message "ERROR $($_.Exception.Message): no repair"
+        return 1
     }
+    $code = 0
+    $changed = $false
+    foreach ($step in $plan) {
+        try {
+            if ($step.Action -eq 'Restart') {
+                $since = -1.0
+                if ($null -ne $State.LastRestart) { $since = ((Get-Date) - [datetime]$State.LastRestart).TotalMinutes }
+                $lease = Test-UsableIPv4 -Addresses (Get-LanIPv4 -IfIndex ([int]$adapters.Lan.ifIndex))
+                $d = Get-RestartDecision -Changed $changed -HasLease $lease -MinutesSinceRestart $since -GapMinutes $script:RestartGapMinutes
+                if (-not $d.Restart) {
+                    Write-HealLog -Path $Log -Message "  Restart: skipped, $($d.Why)"
+                    continue
+                }
+                $r = Invoke-RepairStep -Step $step -Config $Config
+                $State.LastRestart = Get-Date
+                Write-HealLog -Path $Log -Message "  Restart: $($r.Text) ($($d.Why))"
+                continue
+            }
+            $r = Invoke-RepairStep -Step $step -Config $Config
+            if ($r.Changed) { $changed = $true }
+            Write-HealLog -Path $Log -Message "  $($step.Action): $($r.Text)"
+        } catch {
+            # One failed step does not stop the rest; the run exits non-zero.
+            Write-HealLog -Path $Log -Message "  $($step.Action): ERROR $($_.Exception.Message)"
+            $changed = $true
+            $code = 1
+        }
+    }
+    $code
 }
 
 function Invoke-Check {
@@ -236,48 +394,59 @@ function Invoke-Check {
     }
     try {
         $cfg = Read-HealConfig -Json (Get-Content -LiteralPath $configPath -Raw)
+        $state = Read-HealState -Json $null
+        if (Test-Path -LiteralPath $statePath) {
+            try { $state = Read-HealState -Json (Get-Content -LiteralPath $statePath -Raw) }
+            catch { Write-HealLog -Path $log -Message "state file unreadable, counting from 0: $($_.Exception.Message)" }
+        }
+        $adapters = Resolve-HealAdapters -Config $cfg
+        $fault = Get-LanLegFault -Config $cfg -Adapters $adapters
+        $next = Get-NextState -Failures $state.Failures -GatewayOk ($fault -eq '') -Threshold $cfg.ThresholdMinutes
+        $code = 0
+        if ($fault -eq '') {
+            $note = if ($next.Previous -gt 0) { " (down count $($next.Previous) reset)" } else { '' }
+            Write-HealLog -Path $log -Message "gateway ok$note"
+        } elseif (-not $next.Heal) {
+            Write-HealLog -Path $log -Message "LAN down $($next.Failures)/$($cfg.ThresholdMinutes) min: $fault"
+        } else {
+            Write-HealLog -Path $log -Message ("LAN down {0}/{0} min: {1}; repairing LAN adapter '{2}' (Dante adapter '{3}' untouched)" -f $cfg.ThresholdMinutes, $fault, $cfg.LanAdapter, $cfg.DanteAdapter)
+            $code = Invoke-Repair -Config $cfg -State $state -Log $log
+            Write-HealLog -Path $log -Message "repair done (exit $code)"
+        }
+        Save-HealState -Path $statePath -Failures $next.Failures -LastRestart $state.LastRestart
+        return $code
     } catch {
-        Write-HealLog -Path $log -Message "ERROR $($_.Exception.Message): nothing done"
+        # Anything unexpected: one log line, exit 1, nothing repaired.
+        try { Write-HealLog -Path $log -Message "ERROR $($_.Exception.Message): nothing done" } catch { }
         return 1
     }
-    $failures = 0
-    if (Test-Path -LiteralPath $statePath) {
-        try { $failures = [int](Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json).failures }
-        catch { Write-HealLog -Path $log -Message "state file unreadable, counting from 0: $($_.Exception.Message)" }
-    }
-    $ok = Test-Gateway -Address $cfg.Gateway
-    $next = Get-NextState -Failures $failures -GatewayOk $ok -Threshold $cfg.ThresholdMinutes
-    (@{ failures = $next.Failures } | ConvertTo-Json -Compress) | Set-Content -LiteralPath $statePath -Encoding ASCII
-    if ($ok) {
-        $note = if ($next.Previous -gt 0) { " (down count $($next.Previous) reset)" } else { '' }
-        Write-HealLog -Path $log -Message "gateway ok$note"
-        return 0
-    }
-    if (-not $next.Heal) {
-        Write-HealLog -Path $log -Message "gateway down $($next.Failures)/$($cfg.ThresholdMinutes) min"
-        return 0
-    }
-    Write-HealLog -Path $log -Message ("gateway down {0}/{0} min: repairing LAN adapter '{1}' (Dante adapter '{2}' untouched)" -f $cfg.ThresholdMinutes, $cfg.LanAdapter, $cfg.DanteAdapter)
-    $code = 0
-    try {
-        Assert-DistinctAdapters -Config $cfg
-        $plan = Get-RepairPlan -LanAdapter $cfg.LanAdapter -DanteAdapter $cfg.DanteAdapter
-    } catch {
-        Write-HealLog -Path $log -Message "ERROR $($_.Exception.Message): no repair"
-        return 1
-    }
-    foreach ($step in $plan) {
-        try {
-            $did = Invoke-RepairStep -Step $step -Config $cfg
-            Write-HealLog -Path $log -Message "  $($step.Action): $did"
-        } catch {
-            # One failed step does not stop the rest; the run exits non-zero.
-            Write-HealLog -Path $log -Message "  $($step.Action): ERROR $($_.Exception.Message)"
-            $code = 1
+}
+
+function Set-AdminOnlyAcl {
+    # A script SYSTEM runs must not be writable by anyone else: owner
+    # Administrators, inheritance reset, SYSTEM and Administrators full,
+    # Users read; then read the ACL back and refuse anything else that writes.
+    param([Parameter(Mandatory)][string]$Path)
+    $icacls = Join-Path $env:SystemRoot 'System32\icacls.exe'
+    & $icacls $Path /setowner '*S-1-5-32-544' /T /C /Q | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "icacls /setowner on $Path failed ($LASTEXITCODE)" }
+    & $icacls $Path /reset /T /C /Q | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "icacls /reset on $Path failed ($LASTEXITCODE)" }
+    & $icacls $Path /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-32-545:(OI)(CI)RX' /Q | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "icacls /grant on $Path failed ($LASTEXITCODE)" }
+    $write = [System.Security.AccessControl.FileSystemRights]'Write, Delete, ChangePermissions, TakeOwnership'
+    $allowed = 'S-1-5-18', 'S-1-5-32-544'
+    foreach ($item in @(Get-Item -LiteralPath $Path) + @(Get-ChildItem -LiteralPath $Path -Recurse -Force)) {
+        $acl = Get-Acl -LiteralPath $item.FullName
+        $owner = (New-Object System.Security.Principal.NTAccount($acl.Owner)).Translate([System.Security.Principal.SecurityIdentifier]).Value
+        if ($allowed -notcontains $owner) { throw "ACL check: $($item.FullName) is owned by $($acl.Owner)" }
+        foreach ($ace in $acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])) {
+            if ($ace.AccessControlType -eq 'Allow' -and ($ace.FileSystemRights -band $write) -and
+                $allowed -notcontains $ace.IdentityReference.Value) {
+                throw "ACL check: $($ace.IdentityReference.Value) may write $($item.FullName)"
+            }
         }
     }
-    Write-HealLog -Path $log -Message "repair done (exit $code)"
-    $code
 }
 
 function Install-SelfHeal {
@@ -285,18 +454,16 @@ function Install-SelfHeal {
     $configPath = Join-Path $Dir 'lan-selfheal.json'
     if (-not (Test-Path -LiteralPath $configPath)) { throw "no config at ${configPath}, write it first" }
     $cfg = Read-HealConfig -Json (Get-Content -LiteralPath $configPath -Raw)
-    Get-NetAdapter -Name $cfg.LanAdapter | Out-Null
-    Get-NetAdapter -Name $cfg.DanteAdapter -IncludeHidden | Out-Null
-    Assert-DistinctAdapters -Config $cfg
-    # A script SYSTEM runs must not be writable by ordinary users.
-    & icacls.exe $Dir /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-32-545:(OI)(CI)RX' | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "icacls on $Dir failed ($LASTEXITCODE)" }
+    Resolve-HealAdapters -Config $cfg | Out-Null
+    Set-AdminOnlyAcl -Path $Dir
     $target = Join-Path $Dir 'lan-selfheal.ps1'
     if ((Resolve-Path -LiteralPath $Source).Path -ne $target) {
         Copy-Item -LiteralPath $Source -Destination $target -Force
+        Set-AdminOnlyAcl -Path $Dir
     }
+    $exe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
     $arg = '-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}"' -f $target
-    $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $arg
+    $action = New-ScheduledTaskAction -Execute $exe -Argument $arg
     $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 1)
     $boot = New-ScheduledTaskTrigger -AtStartup
     $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
@@ -304,7 +471,15 @@ function Install-SelfHeal {
         -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 5)
     Register-ScheduledTask -TaskName $script:TaskName -Action $action -Trigger @($trigger, $boot) `
         -Principal $principal -Settings $settings -Force | Out-Null
-    Write-HealLog -Path (Join-Path $Dir 'lan-selfheal.log') -Message "installed: task '$($script:TaskName)' every minute as SYSTEM, script $target"
+    # Read back what was registered.
+    $t = Get-ScheduledTask -TaskName $script:TaskName
+    if ($t.Principal.UserId -notmatch 'SYSTEM$') { throw "install check: the task runs as '$($t.Principal.UserId)', not SYSTEM" }
+    $rep = @($t.Triggers | Where-Object { $_.Repetition -and $_.Repetition.Interval -eq 'PT1M' })
+    if ($rep.Count -ne 1 -or -not [string]::IsNullOrEmpty($rep[0].Repetition.Duration)) {
+        throw 'install check: no trigger repeating every minute without end'
+    }
+    if ($t.Actions[0].Execute -ne $exe -or $t.Actions[0].Arguments -ne $arg) { throw 'install check: the task action differs' }
+    Write-HealLog -Path (Join-Path $Dir 'lan-selfheal.log') -Message "installed: task '$($script:TaskName)' every minute and at startup as SYSTEM, script $target"
     "installed '$($script:TaskName)' ($target)"
 }
 
