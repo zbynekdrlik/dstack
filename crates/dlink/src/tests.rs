@@ -195,6 +195,19 @@ fn a_place_the_dante_network_cannot_reach_is_refused_without_a_wait() {
     }
 }
 
+/// dstack #230: the place of an app given no address or interface (dsend,
+/// dlisten): the default route's address, as the tests' own routed IPv4
+/// (every box that runs the tests has a default route, so no wait here).
+#[test]
+fn the_default_route_s_place_is_the_box_s_routed_ipv4() {
+    let probe = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
+    probe.connect("192.0.2.1:9").unwrap();
+    let std::net::SocketAddr::V4(routed) = probe.local_addr().unwrap() else {
+        panic!("no IPv4 route");
+    };
+    assert_eq!(default_route_place(), Ok(Place::Ip(*routed.ip())));
+}
+
 /// An app's processor that writes nothing (the starts below never run it).
 struct Quiet;
 impl Process for Quiet {

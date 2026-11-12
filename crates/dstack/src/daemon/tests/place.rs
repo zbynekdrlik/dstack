@@ -247,3 +247,75 @@ fn a_stop_set_before_the_start_ends_it_after_one_look_and_a_place_there_still_st
     .unwrap_err();
     assert!(e.contains("loopback"), "{e}");
 }
+
+// ---- dstack #230: the default route's address, waited for ----
+
+#[test]
+fn the_default_route_s_address_is_waited_for_with_the_same_lines() {
+    let mut answers = vec![Ok(None), Ok(None), Ok(Some(IP))].into_iter();
+    let looked = Cell::new(0);
+    let slept = RefCell::new(Vec::new());
+    let log = capture_at(tracing::Level::INFO, || {
+        let got = wait_for_route(
+            || {
+                looked.set(looked.get() + 1);
+                answers.next().expect("looked up again after it came")
+            },
+            |d| slept.borrow_mut().push(d),
+        );
+        assert_eq!(got, Ok(IP));
+    });
+    assert_eq!(looked.get(), 3);
+    assert_eq!(*slept.borrow(), vec![PLACE_RETRY; 2]);
+    let lines: Vec<&str> = log.lines().collect();
+    assert_eq!(lines.len(), 2, "{log}");
+    assert!(lines[0].contains(" WARN "), "{log}");
+    assert!(
+        lines[0].contains(
+            "waiting for the default route's address to appear \
+             (looked up every second, no time limit)"
+        ),
+        "{log}"
+    );
+    assert!(lines[0].contains("minutes=0"), "{log}");
+    assert!(lines[1].contains(" INFO "), "{log}");
+    assert!(
+        lines[1].contains("the default route's address is there now"),
+        "{log}"
+    );
+    assert!(lines[1].contains("seconds=2"), "{log}");
+    assert!(!log.contains("10.0.0"), "no address in {log}");
+}
+
+#[test]
+fn a_default_route_there_is_taken_and_an_error_ends_the_wait() {
+    let got = wait_for_route(|| Ok(Some(OTHER)), |_| panic!("no sleep"));
+    assert_eq!(got, Ok(OTHER));
+    let e = wait_for_route(|| Err("refused".to_string()), |_| panic!("no sleep"));
+    assert_eq!(e, Err("refused".to_string()));
+}
+
+#[test]
+fn a_route_answer_is_the_address_not_yet_or_an_error() {
+    let v4 = |ip: Ipv4Addr| Ok(SocketAddr::V4(SocketAddrV4::new(ip, 40_000)));
+    assert_eq!(route_answer(v4(IP)), Ok(Some(IP)));
+    // An address not given yet, and no route yet: not there.
+    assert_eq!(route_answer(v4(Ipv4Addr::UNSPECIFIED)), Ok(None));
+    for kind in [
+        io::ErrorKind::NetworkUnreachable,
+        io::ErrorKind::HostUnreachable,
+        io::ErrorKind::AddrNotAvailable,
+    ] {
+        assert_eq!(
+            route_answer(Err(io::Error::from(kind))),
+            Ok(None),
+            "{kind:?}"
+        );
+    }
+    // Any other error, and an IPv6 address, fail at once.
+    let e = route_answer(Err(io::Error::other("no socket"))).unwrap_err();
+    assert_eq!(e, "the default route: no socket");
+    let v6 = SocketAddr::new(std::net::Ipv6Addr::LOCALHOST.into(), 9);
+    let e = route_answer(Ok(v6)).unwrap_err();
+    assert!(e.starts_with("no IPv4 address on the default route"), "{e}");
+}
