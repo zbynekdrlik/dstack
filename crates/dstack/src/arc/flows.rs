@@ -374,11 +374,15 @@ pub fn create_multicast(
 /// 0x1000 states multicast TX (0x0020) without segmented flows (0x1000),
 /// under start code 0x2809 too (dstack #222); netaudio's legacy encoder
 /// writes the same request under 0x2729.
-pub const CREATE_27: u16 = 0x2201;
+pub const CREATE_27: u16 = super::op::TX_MULTICAST_CREATE;
 /// ARC 2.7's multicast delete.
-pub const DELETE_27: u16 = 0x2202;
-/// A 2.7 flow's type: multicast (the 2.7 list's second word,
-/// [`super::op::TX_FLOWS`]), the type Dante Controller creates.
+pub const DELETE_27: u16 = super::op::TX_MULTICAST_DELETE;
+/// A 2.7 flow's type word: multicast (the 2.7 list's second word,
+/// [`super::op::TX_FLOWS`], 0x02 for our multicast flows), the word Dante
+/// Controller's create carries. netaudio 0.4.2's legacy encoder writes it
+/// for a persistent, advertised flow and 0x0010 for one that is neither;
+/// our flows are kept in the state file and listed, so a create with
+/// another word is refused.
 pub const TYPE_MULTICAST_27: u16 = 0x0002;
 
 /// What a 2.7 multicast create (0x2201) asks for.

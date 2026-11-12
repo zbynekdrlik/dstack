@@ -237,8 +237,8 @@ fn a_2_7_delete_ends_every_flow_it_names_or_none() {
         assert_eq!(device.state.multicast.len(), 2, "{what}");
         assert_eq!(flows.tx.lock().unwrap().flows().count(), 2, "{what}");
     }
-    // Both named: both end.
-    let both = delete_of(&[0, 2, 0, 0, 0, 32, 0, 3]);
+    // Both named, flow 3 twice: both end.
+    let both = delete_of(&[0, 3, 0, 0, 0, 32, 0, 3, 0, 3]);
     assert_eq!(status(&mut device, &flows, &both), (STATUS_OK, true));
     assert!(device.state.multicast.is_empty());
     assert_eq!(flows.tx.lock().unwrap().flows().count(), 0);

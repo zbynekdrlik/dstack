@@ -17,10 +17,11 @@
 //! Controller reads the lists below and writes with 2.8.9's own. Each
 //! read below is answered in the card's layout with our values; the other
 //! requests under 0x2809 (0x1100, 0x1102, 0x3300, 0x2320, 2.7's writes)
-//! are answered as under 2.7 ([`super::handle`]). Dante
-//! Controller keeps 2.7's writes for our devices (0x3010, 0x3001, 0x1001;
-//! #216 Finding 18); netaudio writes with 2.8.9's own, which [`writes`]
-//! answers (#220).
+//! are answered as under 2.7 ([`super::handle`]). Dante Controller kept
+//! 2.7's writes (0x3010, 0x3001) while 0x1000 was clear (#216 Finding 18);
+//! since #223 it writes with 2.8.9's own (0x3410, 0x3401, 0x2438), as
+//! netaudio does, which [`writes`] answers (#220). The device rename stays
+//! 0x1001 for both.
 //!
 //! | op1 | answer |
 //! |---|---|

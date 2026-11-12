@@ -170,7 +170,7 @@ fn make(
 
 /// Ends our multicast flows `ids` (from 1) and takes them out of `state`:
 /// OK and an empty body. All or nothing: refused, ending none, when one
-/// of their slots holds no multicast flow.
+/// of their slots holds no multicast flow; a flow named twice ends once.
 fn end(h: &Header, state: &mut DeviceState, tx: &mut TxTable, ids: &[u16]) -> ArcOutcome {
     let slots: Option<Vec<usize>> = ids
         .iter()
@@ -180,9 +180,12 @@ fn end(h: &Header, state: &mut DeviceState, tx: &mut TxTable, ids: &[u16]) -> Ar
                 .filter(|&slot| tx.flow(slot).is_some_and(|f| f.multicast))
         })
         .collect();
-    let Some(slots) = slots else {
+    let Some(mut slots) = slots else {
         return refuse(h, "a multicast delete of a slot without one");
     };
+    // A flow named twice ends once.
+    slots.sort_unstable();
+    slots.dedup();
     for slot in slots {
         tx.remove_multicast(slot);
         state.remove_multicast(slot);
