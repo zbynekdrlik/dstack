@@ -328,9 +328,10 @@ fn our_counts_take_the_card_s_layout_with_our_numbers() {
         [(1, 1), (3, 5), (2, 2), (32, 32), (2, 2), (3, 5), (8, 8)]
     );
     // The 2.7 counts lead, word 0 with the rename's 0x0001 set (Dante
-    // Controller offers the rename only then) and without 0x1000: with it
-    // Dante Controller reads the segmented lists and leaves our device out
-    // of its list (#216 Finding 17); without it, it reads the 2.7 lists.
+    // Controller offers the rename only then) and segmented flows' 0x1000
+    // (#223): Dante Controller reads the 2.8.9 lists, 0x2600 in the card's
+    // records since #223 (with #148's records it re-read our device
+    // without end once a TX flow was listed, #220).
     let mut counts_27 = dev.ask(1, op::COUNTS, &[]).body;
     assert_eq!(
         counts_27[..2],
@@ -338,8 +339,8 @@ fn our_counts_take_the_card_s_layout_with_our_numbers() {
         "2.7: TX channel rename and multicast TX (#222)"
     );
     counts_27[1] |= 0x01;
-    assert_eq!(reply[10..32], counts_27[..22]);
-    assert_eq!(reply[10] & 0x10, 0, "no segmented flows");
+    assert_eq!(reply[12..32], counts_27[2..22]);
+    assert_eq!(reply[10..12], [0x10, 0x31], "segmented flows, rename");
     // A device without TX states no TX flows; one without RX no RX flows.
     let mut rx_only = Dev::new(config_sized(5, 0));
     assert_eq!(
