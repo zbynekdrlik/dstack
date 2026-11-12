@@ -14,7 +14,7 @@
 //!
 //! | op1 | answer |
 //! |---|---|
-//! | 0x1000 | counts: TX, RX, the TX and RX flows the device has ([`flow_slots`], dstack #227) |
+//! | 0x1000 | counts: TX, RX, the TX and RX flows the device has (its config's `flow_slots`, at most [`MAX_FLOWS`], dstack #227) |
 //! | 0x1001 | the device's new name (netaudio's `set_name`): OK, no body; saved, |
 //! |        | announced, our own subscriptions to it renamed |
 //! | 0x1002 | the device name |
@@ -182,7 +182,7 @@ pub mod op {
 /// at most 16 a page.
 pub const FLOW_PAGE: u8 = 16;
 /// The most flows each way (inferno's TX and RX `MAX_FLOWS`); a device
-/// has its config's `flow_slots` of them ([`flow_slots`]).
+/// has its config's `flow_slots` of them (dstack #227).
 pub const MAX_FLOWS: u16 = 32;
 /// A page ends once an item has brought the reply to this many bytes, the
 /// header counted (inferno's `PACKET_SIZE_SOFT_LIMIT`).
