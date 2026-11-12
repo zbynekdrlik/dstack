@@ -11,8 +11,9 @@
 //!
 //! - [`prepare`]: the device's setup, nothing served yet: the config and
 //!   its state file (a folder it cannot write is found here), the interface
-//!   and its address (waited for while it is not there, dstack #225), its facts for the network info, the start line, the
-//!   runtime, the four servers' sockets, the media side ([`Media`], with an
+//!   and its address (waited for while it is not there, dstack #225), its
+//!   facts for the network info, the start line, the runtime, the four
+//!   servers' sockets, the media side ([`Media`], with an
 //!   engine ring on each TX channel the engine feeds) and the control
 //!   socket bound. [`Prepared::media`] and [`Prepared::config`] are what the
 //!   engine builds its pump from.
@@ -35,8 +36,9 @@
 //! written) or an interface without a usable MAC, which the unit does not
 //! restart (`RestartPreventExitStatus=2`); 1 for an address the Dante
 //! network cannot reach (an address not there yet is waited for), an
-//! interface with several IPv4 addresses, a MAC file that cannot be read, a socket not bound, serving that
-//! failed or goodbyes not confirmed, which it restarts. Logs name counts,
+//! interface with several IPv4 addresses, a MAC file that cannot be read,
+//! a socket not bound, serving that failed or goodbyes not confirmed,
+//! which it restarts. Logs name counts,
 //! ports and channel numbers, never a name or an address.
 
 use std::fmt::Display;
