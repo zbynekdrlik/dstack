@@ -138,21 +138,21 @@ function Get-LegFault {
 
 function Get-RestartDecision {
     # The restart drops Dante for a few seconds (the VLAN adapter restarts
-    # with its parent): do it when a step changed something or the adapter
-    # has no lease; when the adapter looks healthy (a router outage, say),
-    # at most once per gap.
+    # with its parent): do it when a step changed something; otherwise (a
+    # router or DHCP server outage, with or without a lease) at most once
+    # per gap.
     param(
         [Parameter(Mandatory)][bool]$Changed,
-        [Parameter(Mandatory)][bool]$HasLease,
+        [Parameter(Mandatory)][bool]$HasLease,   # only for the log line
         [Parameter(Mandatory)][double]$MinutesSinceRestart,   # negative: never restarted
         [Parameter(Mandatory)][int]$GapMinutes
     )
     if ($Changed) { return [pscustomobject]@{ Restart = $true; Why = 'a step changed the adapter' } }
-    if (-not $HasLease) { return [pscustomobject]@{ Restart = $true; Why = 'the adapter holds no usable IPv4 address' } }
+    $state = if ($HasLease) { 'adapter healthy' } else { 'adapter without a usable IPv4 address' }
     if ($MinutesSinceRestart -lt 0 -or $MinutesSinceRestart -ge $GapMinutes) {
-        return [pscustomobject]@{ Restart = $true; Why = "no restart in the last $GapMinutes min" }
+        return [pscustomobject]@{ Restart = $true; Why = "$state, no restart in the last $GapMinutes min" }
     }
-    [pscustomobject]@{ Restart = $false; Why = ("adapter healthy, last restart {0:N0} min ago (gap $GapMinutes min)" -f $MinutesSinceRestart) }
+    [pscustomobject]@{ Restart = $false; Why = ("$state, last restart {0:N0} min ago (gap $GapMinutes min)" -f $MinutesSinceRestart) }
 }
 
 function Test-VlanNeedsReset {
@@ -185,6 +185,15 @@ function Get-RepairPlan {
     $steps
 }
 
+function Test-AceGrantsWrite {
+    # True when an allow ACE's mask lets its holder change the directory or
+    # a file in it: write/append data or attributes, delete (also of
+    # children), change permissions, take ownership, or a generic write/all.
+    param([Parameter(Mandatory)][long]$Rights)
+    $write = 0x2 -bor 0x4 -bor 0x10 -bor 0x100 -bor 0x40 -bor 0x10000 -bor 0x40000 -bor 0x80000 -bor 0x40000000 -bor 0x10000000
+    ($Rights -band $write) -ne 0
+}
+
 function Test-LogNeedsRotation {
     # The log rotates once it reaches the size limit (one old file kept, .1).
     param([Parameter(Mandatory)][long]$Size, [Parameter(Mandatory)][long]$Max)
@@ -192,8 +201,8 @@ function Test-LogNeedsRotation {
 }
 
 function Read-HealState {
-    # The state file's text to { Failures, LastRestart }; a missing or broken
-    # file counts from zero.
+    # The state file's text to { Failures, LastRestart (UTC) }; a missing file
+    # counts from zero (a broken one throws; the caller logs it).
     param([AllowNull()][AllowEmptyString()][string]$Json)
     $s = [pscustomobject]@{ Failures = 0; LastRestart = $null }
     if ([string]::IsNullOrWhiteSpace($Json)) { return $s }
@@ -201,7 +210,7 @@ function Read-HealState {
     if ($o.PSObject.Properties.Name -contains 'failures') { $s.Failures = [int]$o.failures }
     if ($o.PSObject.Properties.Name -contains 'lastRestart' -and $o.lastRestart) {
         $s.LastRestart = [datetime]::Parse([string]$o.lastRestart, [Globalization.CultureInfo]::InvariantCulture,
-            [Globalization.DateTimeStyles]::RoundtripKind)
+            [Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime()
     }
     $s
 }
@@ -221,24 +230,29 @@ function Write-HealLog {
 function Save-HealState {
     param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][int]$Failures, $LastRestart)
     $lr = $null
-    if ($null -ne $LastRestart) { $lr = ([datetime]$LastRestart).ToString('o') }
+    if ($null -ne $LastRestart) { $lr = ([datetime]$LastRestart).ToUniversalTime().ToString('o') }
     (@{ failures = $Failures; lastRestart = $lr } | ConvertTo-Json -Compress) |
         Set-Content -LiteralPath $Path -Encoding ASCII
 }
 
 function Resolve-HealAdapters {
-    # Both adapters by exact name. Fails closed: no LAN adapter, no Dante
-    # adapter, or the two on one interface means no repair at all.
+    # Both adapters by exact name. Fails closed when the LAN name is not
+    # exactly one adapter, or when the Dante name is several adapters or the
+    # LAN adapter's own interface. A missing Dante adapter (a vendor tool
+    # removed it, or it hides while its parent is disabled) does not block
+    # the repair: the LAN target is already one exact, wildcard-free name.
     param([Parameter(Mandatory)]$Config)
     $all = @(Get-NetAdapter -IncludeHidden)
     $lan = @($all | Where-Object { $_.Name -eq $Config.LanAdapter })
     $dante = @($all | Where-Object { $_.Name -eq $Config.DanteAdapter })
     if ($lan.Count -ne 1) { throw "refused: $($lan.Count) adapters named '$($Config.LanAdapter)' (need exactly 1)" }
-    if ($dante.Count -ne 1) { throw "refused: $($dante.Count) adapters named '$($Config.DanteAdapter)' (need exactly 1, to keep it out of the repair)" }
-    if ($lan[0].ifIndex -eq $dante[0].ifIndex) {
+    if ($dante.Count -gt 1) { throw "refused: $($dante.Count) adapters named '$($Config.DanteAdapter)' (need at most 1)" }
+    if ($dante.Count -eq 1 -and $lan[0].ifIndex -eq $dante[0].ifIndex) {
         throw "refused: '$($Config.LanAdapter)' is the Dante adapter's interface (ifIndex $($lan[0].ifIndex))"
     }
-    [pscustomobject]@{ Lan = $lan[0]; Dante = $dante[0] }
+    $d = $null
+    if ($dante.Count -eq 1) { $d = $dante[0] }
+    [pscustomobject]@{ Lan = $lan[0]; Dante = $d }
 }
 
 function Get-LanIPv4 {
@@ -357,7 +371,7 @@ function Invoke-Repair {
         try {
             if ($step.Action -eq 'Restart') {
                 $since = -1.0
-                if ($null -ne $State.LastRestart) { $since = ((Get-Date) - [datetime]$State.LastRestart).TotalMinutes }
+                if ($null -ne $State.LastRestart) { $since = ([datetime]::UtcNow - [datetime]$State.LastRestart).TotalMinutes }
                 $lease = Test-UsableIPv4 -Addresses (Get-LanIPv4 -IfIndex ([int]$adapters.Lan.ifIndex))
                 $d = Get-RestartDecision -Changed $changed -HasLease $lease -MinutesSinceRestart $since -GapMinutes $script:RestartGapMinutes
                 if (-not $d.Restart) {
@@ -365,7 +379,7 @@ function Invoke-Repair {
                     continue
                 }
                 $r = Invoke-RepairStep -Step $step -Config $Config
-                $State.LastRestart = Get-Date
+                $State.LastRestart = [datetime]::UtcNow
                 Write-HealLog -Path $Log -Message "  Restart: $($r.Text) ($($d.Why))"
                 continue
             }
@@ -400,6 +414,9 @@ function Invoke-Check {
             catch { Write-HealLog -Path $log -Message "state file unreadable, counting from 0: $($_.Exception.Message)" }
         }
         $adapters = Resolve-HealAdapters -Config $cfg
+        if ($null -eq $adapters.Dante) {
+            Write-HealLog -Path $log -Message "WARN no adapter named '$($cfg.DanteAdapter)': the LAN adapter is checked by its exact name"
+        }
         $fault = Get-LanLegFault -Config $cfg -Adapters $adapters
         $next = Get-NextState -Failures $state.Failures -GatewayOk ($fault -eq '') -Threshold $cfg.ThresholdMinutes
         $code = 0
@@ -413,11 +430,15 @@ function Invoke-Check {
             $code = Invoke-Repair -Config $cfg -State $state -Log $log
             Write-HealLog -Path $log -Message "repair done (exit $code)"
         }
-        Save-HealState -Path $statePath -Failures $next.Failures -LastRestart $state.LastRestart
+        try { Save-HealState -Path $statePath -Failures $next.Failures -LastRestart $state.LastRestart }
+        catch {
+            Write-HealLog -Path $log -Message "ERROR state not saved: $($_.Exception.Message)"
+            $code = 1
+        }
         return $code
     } catch {
-        # Anything unexpected: one log line, exit 1, nothing repaired.
-        try { Write-HealLog -Path $log -Message "ERROR $($_.Exception.Message): nothing done" } catch { }
+        # Anything unexpected before a repair: one log line, exit 1.
+        try { Write-HealLog -Path $log -Message "ERROR $($_.Exception.Message): nothing done" } catch { Write-Error -ErrorAction Continue "lan-selfheal: log not writable: $($_.Exception.Message)" }
         return 1
     }
 }
@@ -427,6 +448,9 @@ function Set-AdminOnlyAcl {
     # Administrators, inheritance reset, SYSTEM and Administrators full,
     # Users read; then read the ACL back and refuse anything else that writes.
     param([Parameter(Mandatory)][string]$Path)
+    if ((Get-Item -LiteralPath $Path -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) {
+        throw "refused: $Path is a junction or link; remove it and create a plain directory"
+    }
     $icacls = Join-Path $env:SystemRoot 'System32\icacls.exe'
     & $icacls $Path /setowner '*S-1-5-32-544' /T /C /Q | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "icacls /setowner on $Path failed ($LASTEXITCODE)" }
@@ -434,14 +458,13 @@ function Set-AdminOnlyAcl {
     if ($LASTEXITCODE -ne 0) { throw "icacls /reset on $Path failed ($LASTEXITCODE)" }
     & $icacls $Path /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-32-545:(OI)(CI)RX' /Q | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "icacls /grant on $Path failed ($LASTEXITCODE)" }
-    $write = [System.Security.AccessControl.FileSystemRights]'Write, Delete, ChangePermissions, TakeOwnership'
     $allowed = 'S-1-5-18', 'S-1-5-32-544'
     foreach ($item in @(Get-Item -LiteralPath $Path) + @(Get-ChildItem -LiteralPath $Path -Recurse -Force)) {
         $acl = Get-Acl -LiteralPath $item.FullName
-        $owner = (New-Object System.Security.Principal.NTAccount($acl.Owner)).Translate([System.Security.Principal.SecurityIdentifier]).Value
+        $owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value
         if ($allowed -notcontains $owner) { throw "ACL check: $($item.FullName) is owned by $($acl.Owner)" }
         foreach ($ace in $acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])) {
-            if ($ace.AccessControlType -eq 'Allow' -and ($ace.FileSystemRights -band $write) -and
+            if ($ace.AccessControlType -eq 'Allow' -and (Test-AceGrantsWrite -Rights ([long]$ace.FileSystemRights)) -and
                 $allowed -notcontains $ace.IdentityReference.Value) {
                 throw "ACL check: $($ace.IdentityReference.Value) may write $($item.FullName)"
             }
