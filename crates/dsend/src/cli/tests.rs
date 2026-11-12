@@ -199,19 +199,29 @@ fn a_run_never_shows_a_box_its_failure_goes_to_the_log() {
     // dstack #225: a logon task starts dsend with no console and no
     // stderr; a failed start stayed on the desktop as a modal box until
     // someone clicked it. A run has no window and logs to its file.
-    let run = parse(&args("--ip 192.0.2.7")).unwrap();
     for (attached, has_stderr) in [(false, false), (true, false), (false, true), (true, true)] {
         assert!(
-            !shows_box(&run, attached, has_stderr),
+            !shows_box(true, true, attached, has_stderr),
             "{attached} {has_stderr}"
         );
     }
-    // A list started from Explorer still tells its failure in a box.
-    let list = parse(&args("--list-outputs")).unwrap();
-    assert!(shows_box(&list, false, false));
-    assert!(!shows_box(&list, true, false), "a command line's console");
+    // A run whose log file could not be opened leaves no other trace on a
+    // start from Explorer or a task: the box tells it.
+    assert!(shows_box(true, false, false, false));
     assert!(
-        !shows_box(&list, false, true),
-        "a script's redirected stderr"
+        !shows_box(true, false, true, false),
+        "a command line's console"
     );
+    // A list started from Explorer still tells its failure in a box.
+    for logged in [false, true] {
+        assert!(shows_box(false, logged, false, false));
+        assert!(
+            !shows_box(false, logged, true, false),
+            "a command line's console"
+        );
+        assert!(
+            !shows_box(false, logged, false, true),
+            "a script's redirected stderr"
+        );
+    }
 }
