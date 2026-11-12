@@ -12,7 +12,6 @@
 - Not changed: dstack-dev, dsend, dlisten and `embed::Embedded` (dasio, iemmixer) keep #225's wait for their `--ip` address or `--iface` interface.
 - New API (dstack): `daemon::PlaceWait { Now, Forever, Until(&AtomicBool) }`, `daemon::wait_for_route`, `host::default_route`, `embed::Embedded::start_waiting`. dlink: `Link::start_until`, `default_route_place`. `daemon::wait_for_interface`, `PLACE_RETRY` and `PLACE_LOG_EVERY` keep their paths (moved to the private `daemon/place.rs`, re-exported); their log lines' target is now `dstack::daemon::place` (a `RUST_LOG` filter on `dstack::daemon` still covers it).
 - No latency change.
-- No latency change.
 
 ## 0.6.98
 
