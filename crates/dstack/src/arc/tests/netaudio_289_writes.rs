@@ -377,3 +377,44 @@ fn a_2809_write_that_ends_with_its_records_reads() {
     ok_without_body(&reply, 0x0105, SUBSCRIBE_2809);
     assert_eq!(change, Some(subs_changed(&[0])));
 }
+
+/// netaudio 0.4.2's reset_channel_name (2.7's 0x3001 and 0x2013 under
+/// 0x27ff) points the name's offset at the datagram's end, with no byte
+/// after it: an empty name, Dante's reset to the channel's default.
+#[test]
+fn netaudio_s_reset_with_the_name_at_the_datagram_s_end_resets() {
+    let mut dev = Dev::new(config());
+    dev.state.rx[0] = "In-1".into();
+    dev.state.tx[1] = "Out-2".into();
+    let rx = frame("0x3001 reset");
+    assert_eq!(
+        usize::from(u16_at(&rx, 14)),
+        rx.len(),
+        "the offset is the end"
+    );
+    let (reply, change) = answered(dev.send(&rx));
+    assert_eq!(
+        head(&reply),
+        (NETAUDIO, 10, 0x0107, op::RX_RENAME, STATUS_OK)
+    );
+    assert_eq!(change, Some(rx_renamed(&[0])));
+    assert_eq!(dev.state.rx[0], dev.cfg.rx[0]);
+    let tx = frame("0x2013 reset");
+    assert_eq!(
+        usize::from(u16_at(&tx, 16)),
+        tx.len(),
+        "the offset is the end"
+    );
+    let (reply, change) = answered(dev.send(&tx));
+    assert_eq!(
+        head(&reply),
+        (NETAUDIO, 12, 0x0108, op::TX_RENAME, STATUS_OK)
+    );
+    assert_eq!(change, Some(Change::default()));
+    assert_eq!(dev.state.tx[1], dev.cfg.tx[1]);
+    // An offset one past the end is still no name: refused.
+    let past = edited("0x3001 reset", |f| f[15] = 0x15);
+    let (reply, change) = answered(dev.send(&past));
+    assert_eq!(head(&reply).4, STATUS_ERROR);
+    assert_eq!(change, None);
+}
