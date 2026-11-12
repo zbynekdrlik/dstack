@@ -13,10 +13,13 @@
 //! - [`pick_interface`]: the interface and its one IPv4 address the device
 //!   serves on, from the box's interface list: ARC, CMC and the info
 //!   server bind the address, the mDNS records point at it and are sent on
-//!   its interface only. [`wait_for_interface`] is the start's: a place
-//!   not there yet (an interface still getting its address at boot or
-//!   logon, dstack #225) is looked up again every second, with no time
-//!   limit, until it is.
+//!   its interface only. A place not there yet (an interface still
+//!   getting its address at boot or logon) is met as the start's
+//!   [`PlaceWait`] says (dstack #225, #230): looked up again every second
+//!   with no time limit ([`wait_for_interface`]: dstack-dev, the embedded
+//!   devices), until the app's stop (dlink's `Link::start_until`), or
+//!   refused at once (dlink's `Link::start`). [`wait_for_route`] waits for
+//!   the default route's address the same way (dsend, dlisten).
 //! - [`net_info`]: what the info server's network info says about that
 //!   interface, from the box's files the host reads (its MAC and speed
 //!   in `/sys/class/net/<iface>/`, the routes in `/proc/net/route`).
@@ -39,6 +42,9 @@
 #[cfg(any(target_os = "linux", windows))]
 pub mod cli;
 pub mod media;
+mod place;
+pub use place::{PLACE_LOG_EVERY, PLACE_RETRY, PlaceWait, wait_for_interface, wait_for_route};
+pub(crate) use place::{resolve_place, route_answer};
 
 use std::future::Future;
 use std::io;
@@ -46,7 +52,6 @@ use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicU16;
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
 
 use tokio::net::UdpSocket;
 use tokio::sync::Notify;
@@ -466,59 +471,6 @@ fn find_interface(place: &Place, addrs: &[IfAddr]) -> Result<Option<IfAddr>, Str
             refuse_unreachable(*ip)?;
             Ok(addrs.iter().find(|a| a.ip == *ip).cloned())
         }
-    }
-}
-
-/// How often [`wait_for_interface`] looks a place up again.
-pub const PLACE_RETRY: Duration = Duration::from_secs(1);
-/// Every how many lookups a wait is logged again: once a minute.
-pub const PLACE_LOG_EVERY: u32 = 60;
-
-/// The device's place as [`pick_interface`] picks it, waited for (dstack
-/// #225): an address no interface holds yet, or an interface not there or
-/// without its IPv4 address yet, is looked up again in `addrs` (the box's
-/// interfaces) after `sleep(PLACE_RETRY)`, with no time limit, so a device
-/// started at boot or logon comes up whenever its network does. The wait
-/// is logged at its start, once a minute and when the place is there,
-/// naming the kind of place, never the address or the interface (P6). Any
-/// other refusal ([`pick_interface`]'s) and an interface list that cannot
-/// be read fail at once.
-pub fn wait_for_interface(
-    place: &Place,
-    mut addrs: impl FnMut() -> io::Result<Vec<IfAddr>>,
-    mut sleep: impl FnMut(Duration),
-) -> Result<IfAddr, String> {
-    let (waiting, what) = match place {
-        Place::Ip(_) => (
-            "waiting for the device's address to appear on an interface \
-             (looked up every second, no time limit)",
-            "the device's address",
-        ),
-        Place::Iface(_) => (
-            "waiting for the device's interface to appear with an IPv4 address \
-             (looked up every second, no time limit)",
-            "the device's interface",
-        ),
-    };
-    // An address the Dante network cannot reach never comes: refused
-    // before any lookup.
-    if let Place::Ip(ip) = place {
-        refuse_unreachable(*ip)?;
-    }
-    let mut tries: u32 = 0;
-    loop {
-        let list = addrs().map_err(|e| format!("the box's interfaces: {e}"))?;
-        if let Some(ifa) = find_interface(place, &list)? {
-            if tries > 0 {
-                info!(seconds = tries, "{what} is there now: the device starts");
-            }
-            return Ok(ifa);
-        }
-        if tries.is_multiple_of(PLACE_LOG_EVERY) {
-            warn!(minutes = tries / PLACE_LOG_EVERY, "{waiting}");
-        }
-        sleep(PLACE_RETRY);
-        tries = tries.saturating_add(1);
     }
 }
 

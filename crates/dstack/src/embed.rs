@@ -36,8 +36,8 @@ use std::time::Duration;
 use dstack_audio_io::Process;
 use tracing::{info, warn};
 
-use crate::daemon::Place;
 use crate::daemon::media::Media;
+use crate::daemon::{Place, PlaceWait};
 use crate::device::DeviceConfig;
 use crate::host::{self, ClockSource, Host, HostError, Signals, Stopped};
 use crate::media::bypass::FrameSender;
@@ -58,6 +58,11 @@ impl Embedded {
     /// block on the RX channels `map.rx` (inputs, from 0) into the TX
     /// channels `map.tx` (outputs). A channel past the device's is
     /// [`HostError::Setup`].
+    ///
+    /// An address or interface not there yet (the network still coming up
+    /// at boot or logon) is waited for with no time limit: the call blocks
+    /// until it is there, logging the wait once a minute (dstack #225). To
+    /// fail at once or stop the wait, use [`Embedded::start_waiting`].
     pub fn start<P: Process + 'static>(
         cfg: DeviceConfig,
         place: &Place,
@@ -90,6 +95,30 @@ impl Embedded {
         source: ClockSource,
         frame_sender: Option<Arc<dyn FrameSender>>,
     ) -> Result<Embedded, HostError> {
+        Self::start_waiting(
+            cfg,
+            place,
+            PlaceWait::Forever,
+            map,
+            processor,
+            source,
+            frame_sender,
+        )
+    }
+
+    /// [`Embedded::start_with_sender`] with a place not there yet met as
+    /// `wait` says (dstack #230): [`PlaceWait::Now`] fails at once,
+    /// [`PlaceWait::Until`] waits until its flag is set; the other starts
+    /// wait for it with no time limit ([`PlaceWait::Forever`]).
+    pub fn start_waiting<P: Process + 'static>(
+        cfg: DeviceConfig,
+        place: &Place,
+        wait: PlaceWait<'_>,
+        map: Map,
+        processor: P,
+        source: ClockSource,
+        frame_sender: Option<Arc<dyn FrameSender>>,
+    ) -> Result<Embedded, HostError> {
         if let Some(&rx) = map.rx.iter().find(|&&rx| rx >= cfg.rx.len()) {
             return Err(HostError::Setup(format!(
                 "the app's RX channel {} is past the device's {} RX channels",
@@ -97,7 +126,7 @@ impl Embedded {
                 cfg.rx.len()
             )));
         }
-        let prepared = host::prepare_config(cfg, place, None, &map.tx, source)?;
+        let prepared = host::prepare_config_waiting(cfg, place, wait, None, &map.tx, source)?;
         // The device as it runs: a latency Dante Controller set holds over
         // the config's, and the RX plays at it.
         let timing = Timing::of(prepared.config());

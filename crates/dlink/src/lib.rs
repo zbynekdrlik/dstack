@@ -153,6 +153,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 pub use dstack::daemon::Place;
@@ -169,6 +170,7 @@ pub use rated::Rated;
 
 use dstack::announce::FPP_MAX;
 use dstack::clock::latency_samples;
+use dstack::daemon::PlaceWait;
 use dstack::device::{NORMAL_MIN_LATENCY_NS, NORMAL_MIN_WORK_MARGIN_NS, TimingProfile};
 use dstack::embed::Embedded;
 use dstack::host::ClockSource;
@@ -734,15 +736,26 @@ pub struct Link {
 }
 
 /// Waits until `place` is there (the address on an interface, or the
-/// interface with its one IPv4 address), as [`Link::start`] does (dstack
-/// #225), for an app that uses the address before the start: dsend and
-/// dlisten probe their free control ports on it. A place refused (an
-/// address the Dante network cannot reach, an interface with several
-/// IPv4 addresses, an interface list that cannot be read) is
-/// [`HostError::Run`] at once.
+/// interface with its one IPv4 address), as [`Link::start_until`] does but
+/// with no stop (dstack #225), for an app that uses the address before the
+/// start: dsend and dlisten probe their free control ports on it, then
+/// call [`Link::start`]. A place refused (an address the Dante network
+/// cannot reach, an interface with several IPv4 addresses, an interface
+/// list that cannot be read) is [`HostError::Run`] at once.
 pub fn wait_for_place(place: &Place) -> Result<(), HostError> {
     dstack::daemon::wait_for_interface(place, dstack::host::interfaces, std::thread::sleep)
         .map(drop)
+        .map_err(HostError::Run)
+}
+
+/// The default route's address as the device's place, for an app given no
+/// address or interface (dsend, dlisten), waited for while the box has no
+/// default route yet (at boot; dstack #230), with no time limit and the
+/// same log lines as [`wait_for_place`]. A socket that cannot be opened and
+/// an IPv6 route are [`HostError::Run`] at once.
+pub fn default_route_place() -> Result<Place, HostError> {
+    dstack::daemon::wait_for_route(dstack::host::default_route, std::thread::sleep)
+        .map(Place::Ip)
         .map_err(HostError::Run)
 }
 
@@ -754,11 +767,12 @@ impl Link {
     /// a clock with or without the service, never worse than it). Call it
     /// outside any tokio runtime: the device runs its own.
     ///
-    /// An address or interface not there yet (the network still coming up
-    /// at boot or logon) is waited for, with no time limit: the call
-    /// returns once it is there, logging the wait once a minute (dstack
-    /// #225). Call it on a thread that may wait. Every other error returns
-    /// at once.
+    /// Every error returns at once, an address or interface not there yet
+    /// too ([`HostError::Run`], "no interface of this box holds the
+    /// address" or "no such interface, or it has no IPv4 address"; dstack
+    /// #230, as up to v0.6.97): an app that retries on its own calls it
+    /// again later. To wait for the place instead (the network still
+    /// coming up at boot or logon), call [`Link::start_until`].
     pub fn start<P: Process + 'static>(
         config: &Config,
         place: &Place,
@@ -768,11 +782,52 @@ impl Link {
         Self::start_on(config, place, map, processor, ClockSource::Linked)
     }
 
+    /// [`Link::start`] that waits for an address or interface not there
+    /// yet (the network still coming up at boot or logon, dstack #225,
+    /// #230) until `stop` is set: it looks the place up every second and
+    /// logs the wait at its start, once a minute and when the place is
+    /// there. Once `stop` is set, the call returns within one second with
+    /// [`HostError::Run`] "stopped while waiting for the device's address"
+    /// (or "... interface"); the app knows the stop is its own. A place
+    /// already there starts the device even with `stop` set. Every other
+    /// error returns at once, as from [`Link::start`].
+    ///
+    /// Call it on the app's own thread (never a UI thread: it blocks while
+    /// it waits), and set `stop` at shutdown or before a rebuild.
+    pub fn start_until<P: Process + 'static>(
+        config: &Config,
+        place: &Place,
+        map: Map,
+        processor: P,
+        stop: &AtomicBool,
+    ) -> Result<Link, HostError> {
+        Self::start_placed(
+            config,
+            place,
+            PlaceWait::Until(stop),
+            map,
+            processor,
+            ClockSource::Linked,
+        )
+    }
+
     /// [`Link::start`] on the clock `source` (`ClockSource::System` is for
     /// tests only).
     pub fn start_on<P: Process + 'static>(
         config: &Config,
         place: &Place,
+        map: Map,
+        processor: P,
+        source: ClockSource,
+    ) -> Result<Link, HostError> {
+        Self::start_placed(config, place, PlaceWait::Now, map, processor, source)
+    }
+
+    /// The start, a place not there yet met as `wait` says.
+    fn start_placed<P: Process + 'static>(
+        config: &Config,
+        place: &Place,
+        wait: PlaceWait<'_>,
         map: Map,
         processor: P,
         source: ClockSource,
@@ -808,9 +863,9 @@ impl Link {
                 outputs,
             )
             .map_err(|e| HostError::Setup(format!("dlink rate conversion: {e}")))?;
-            Embedded::start_with_sender(cfg, place, map, rated, source, sender)?
+            Embedded::start_waiting(cfg, place, wait, map, rated, source, sender)?
         } else {
-            Embedded::start_with_sender(cfg, place, map, processor, source, sender)?
+            Embedded::start_waiting(cfg, place, wait, map, processor, source, sender)?
         };
         Ok(Link { device })
     }

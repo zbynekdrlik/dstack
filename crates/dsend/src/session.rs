@@ -181,6 +181,9 @@ impl Session {
         let (processor, switch) = source::source(first.player);
         let free = with_free_ports(o, &place)
             .map_err(|e| format!("the Dante device {name} did not start: {e}"))?;
+        // The place is there now (`with_free_ports` waited for it, dstack
+        // #225), so `Link::start`, which fails at once on a place not
+        // there (#230), takes it.
         let link = Link::start(
             &cli::link_config(&free, &name, state.clone()),
             &place,
