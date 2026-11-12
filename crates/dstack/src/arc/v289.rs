@@ -145,9 +145,9 @@ pub(super) fn read(
 /// constant pairs are both 2.8.9 devices' (a card, and an adapter with no
 /// TX). The three count pairs read (2, 2) on the card and (0, 2) on the
 /// adapter, as their channels and their flows both do, so which pair is
-/// which is not known: we state channels, flows, channels (2.7 states
-/// `MAX_FLOWS` flows too). A direction with no channel states no flow (the
-/// adapter states 0 TX flows).
+/// which is not known: we state channels, flows, channels (the flows as
+/// 2.7 states them, our [`super::flow_slots`], dstack #227). A direction
+/// with no channel states no flow (the adapter states 0 TX flows).
 fn counts(cfg: &DeviceConfig) -> Vec<u8> {
     let mut words = super::counts(cfg);
     words[1] |= COUNTS_RENAME;
@@ -159,7 +159,13 @@ fn counts(cfg: &DeviceConfig) -> Vec<u8> {
     out.bytes(&[0x14, 0x14]);
     out.u16(MEDIA_AUDIO);
     let (tx, rx) = (wire_u16(cfg.tx.len()), wire_u16(cfg.rx.len()));
-    let flows = |channels: u16| if channels == 0 { 0 } else { MAX_FLOWS };
+    let flows = |channels: u16| {
+        if channels == 0 {
+            0
+        } else {
+            super::flow_slots(cfg)
+        }
+    };
     for (t, r) in [
         (1, 1),
         (tx, rx),

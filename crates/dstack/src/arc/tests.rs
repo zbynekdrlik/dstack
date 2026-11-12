@@ -3,6 +3,7 @@ use super::*;
 mod dc_289_writes;
 mod dc_latency_write;
 mod dc_multicast_27;
+mod flow_slots_227;
 mod key_table;
 mod netaudio_289_writes;
 mod tx_flows_289;
