@@ -81,7 +81,7 @@
 //! `0x8112`, once an item has brought it to [`SOFT_LIMIT`] bytes: that
 //! item's descriptor is written but not counted (inferno), so the next page
 //! starts with it. Every page fits one datagram
-//! ([`MAX_DATAGRAM`]): no item is longer than
+//! ([`MAX_DATAGRAM`](crate::wire::MAX_DATAGRAM)): no item is longer than
 //! 600 bytes (a TX flow's names are cut to [`MAX_REMOTE_NAME`], ours are 31
 //! at most). Logs name opcodes, sequences and channel numbers, never a
 //! name.
@@ -104,21 +104,27 @@ use crate::ctl::{Requests, header_op};
 use crate::device::{Device, DeviceConfig, DeviceState, Subscription, valid_device_name};
 use crate::info::Changes;
 use crate::media::tx::{TxShared, TxTable};
-use crate::subscribe::{Manager, SubStatus};
-use crate::wire::{
-    Body, HEADER_LEN, Header, MAX_DATAGRAM, STATUS_ERROR, STATUS_MORE, STATUS_OK, WireError,
-    read_u16, reply,
-};
+use crate::subscribe::Manager;
+use crate::wire::{Body, Header, STATUS_ERROR, STATUS_MORE, STATUS_OK, WireError, read_u16, reply};
 use gaps::{Gap, Gaps};
 
+mod channels;
 pub mod client;
 pub mod control;
+mod counts;
 pub mod flows;
 pub mod gaps;
 mod multicast;
+mod settings;
 mod v289;
 mod writes;
 
+use channels::{
+    Heap, common_descriptor, granted_flow, listed_subscription, page, paged, rx_channels,
+    tx_channels, tx_names,
+};
+use counts::{counts, device_names, flow_slots, table_slots};
+use settings::{key_table, settings_body};
 use writes::{rename, subscribe, unsubscribe};
 
 /// ARC's UDP port.
@@ -213,13 +219,6 @@ pub const MAX_CHANNELS_IN_FLOW: u16 = 8;
 /// The answer to 0x3300. Without it Dante Controller reports a clock
 /// domain mismatch for the device.
 pub const CLOCK_REPLY: [u8; 8] = [0x38, 0x00, 0x38, 0xfd, 0x38, 0xfe, 0x38, 0xff];
-/// The counts' flags byte, inferno's 0x30: bit 4 (0x10), TX channels can
-/// be renamed; bit 5 (0x20), TX multicast flows. With bit 5 Dante
-/// Controller offers Add on the Transmit tab and creates the flow with
-/// 2.7's 0x2201 (or 2.8.9's 0x2601 when segmented flows are stated), which
-/// our devices answer (dstack #193, #222). One literal: the bits joined by
-/// `|` would leave its `^` mutant, which gives the same byte.
-const COUNTS_FLAGS: u8 = 0x30;
 /// An RX channel's flags in both generations' records (0x3000's second
 /// word, 0x3400's flags; a reader sees no change from the generation):
 /// inferno's 6 (netaudio: rename allowed) and 0x0008, netaudio's
@@ -227,10 +226,6 @@ const COUNTS_FLAGS: u8 = 0x30;
 /// subscription to our own TX, and netaudio refuses to send one without
 /// the bit.
 const RX_CHANNEL_FLAGS: u16 = 0x000e;
-/// The device names' header (0x1003), before its strings.
-const NAMES_HEADER: usize = 38;
-/// The 16-byte descriptor of a page's channels.
-const COMMON_DESCRIPTOR: usize = 16;
 /// A datagram read from the socket; anything longer is cut and so fails
 /// [`Header::parse`].
 const RECV_BUFFER: usize = 2048;
@@ -863,120 +858,6 @@ fn stated_latency_ns(latency_ns: u64, rate: u32) -> u32 {
     u32::try_from(ns).unwrap_or(u32::MAX)
 }
 
-/// The latency default the settings read states: Dante's 1 ms, as the
-/// hardware states it.
-const LATENCY_DEFAULT_NS: u64 = 1_000_000;
-
-/// The most keys one settings reply holds: each takes a pair and a value
-/// (8 bytes), and the count is one byte.
-const SETTINGS_MAX_KEYS: usize = 128;
-const _: () = assert!(HEADER_LEN + 2 + 8 * SETTINGS_MAX_KEYS <= MAX_DATAGRAM);
-
-/// Our value for a settings key (0x1100): the sample rate, no pull-up,
-/// our latency as configured and in effect, a fixed default
-/// ([`LATENCY_DEFAULT_NS`]) and the range
-/// Dante Controller may set ([`DeviceConfig::latency_range`]). Dante
-/// Controller greys its latency control and shows 0.0 ms without the
-/// default and the range (mbc, 2.11.2026); every hardware device answers
-/// them.
-fn setting(key: u16, cfg: &DeviceConfig) -> Option<u32> {
-    use control::key;
-    let ns = |v: u64| u32::try_from(v).unwrap_or(u32::MAX);
-    let (min, max) = cfg.latency_range();
-    match key {
-        key::SAMPLE_RATE => Some(cfg.sample_rate),
-        key::PULLUP => Some(0),
-        key::LATENCY_CONFIGURED | key::LATENCY_ACTIVE => Some(ns(cfg.latency_ns)),
-        // A fixed default (Dante's 1 ms, within our range): it never moves
-        // with a write, which netaudio's write check would read as another
-        // setting changed.
-        key::LATENCY_DEFAULT => Some(ns(LATENCY_DEFAULT_NS.clamp(min, max))),
-        key::LATENCY_MIN => Some(ns(min)),
-        key::LATENCY_MAX => Some(ns(max)),
-        _ => None,
-    }
-}
-
-/// The 0x1100 reply to a keyed request (`body`: a `u16` count, then the
-/// keys), as the hardware answers it: the count twice (a byte each), then
-/// a pair per key in the asked order, `key, offset` for a key we hold (the
-/// offset, from the packet's start, of its `u32` after the pairs) and
-/// `0, key` for one we do not, then the values. `None` when the count
-/// passes the body or [`SETTINGS_MAX_KEYS`].
-fn settings_body(body: &[u8], cfg: &DeviceConfig) -> Option<Vec<u8>> {
-    let n = usize::from(read_u16(body, 0)?);
-    if n > SETTINGS_MAX_KEYS {
-        return None;
-    }
-    let keys: Vec<u16> = (0..n)
-        .map(|k| read_u16(body, 2 + 2 * k))
-        .collect::<Option<_>>()?;
-    let mut pairs = Vec::new();
-    let mut values = Vec::new();
-    pairs.extend_from_slice(&[n as u8, n as u8]);
-    let values_at = HEADER_LEN + 2 + 4 * n;
-    for k in keys {
-        match setting(k, cfg) {
-            Some(v) => {
-                let at = (values_at + values.len()) as u16;
-                pairs.extend_from_slice(&k.to_be_bytes());
-                pairs.extend_from_slice(&at.to_be_bytes());
-                values.extend_from_slice(&v.to_be_bytes());
-            }
-            None => {
-                pairs.extend_from_slice(&[0, 0]);
-                pairs.extend_from_slice(&k.to_be_bytes());
-            }
-        }
-    }
-    pairs.extend_from_slice(&values);
-    Some(pairs)
-}
-
-/// A key Dante Controller may write, as the hardware marks it in its
-/// key table (0x1102).
-const KEY_READ_WRITE: u16 = 0x0003;
-/// A key it may only read.
-const KEY_READ_ONLY: u16 = 0x0001;
-
-/// 0x1102, the settings key table (dstack #216): the count (`u16`), then
-/// `key, access` (`u16` each) for each key our settings read holds
-/// ([`control::SETTING_KEYS`] that [`setting`] answers), in that order.
-/// The latency as configured and in effect (0x8205, 0x8301, the keys
-/// netaudio's write sets) is writable when a write can move it
-/// ([`latency_writable`]); every other key is read only. A real card
-/// answers its 31 keys so (`tests/fixtures/arc_settings_card.json`);
-/// with inferno's zeros Dante Controller marked every setting read only,
-/// greyed out the rename and never sent the latency write.
-fn key_table(cfg: &DeviceConfig) -> Vec<u8> {
-    use control::key;
-    let keys: Vec<u16> = control::SETTING_KEYS
-        .into_iter()
-        .filter(|&k| setting(k, cfg).is_some())
-        .collect();
-    let mut out = Body::new();
-    out.u16(keys.len() as u16);
-    for k in keys {
-        let access = match k {
-            key::LATENCY_CONFIGURED | key::LATENCY_ACTIVE if latency_writable(cfg) => {
-                KEY_READ_WRITE
-            }
-            _ => KEY_READ_ONLY,
-        };
-        out.u16(k);
-        out.u16(access);
-    }
-    out.into_vec()
-}
-
-/// Whether a latency write (0x1101) can move the device's latency: the
-/// range it states ([`DeviceConfig::latency_range`]) holds another value
-/// than its own.
-fn latency_writable(cfg: &DeviceConfig) -> bool {
-    let (min, max) = cfg.latency_range();
-    min < max
-}
-
 /// 0x3200: our RX flows a transmitter granted (an asked flow is listed
 /// once granted), by slot. Each flow, from a multiple of 4: the flow
 /// descriptor (flow, 1, our rate, 0, our encoding, 1, the slots, the words
@@ -1070,280 +951,6 @@ fn no_multicast(h: &Header, req: &[u8], readable: usize) -> ArcOutcome {
 /// fewer channels than that).
 fn wire_u16(n: usize) -> u16 {
     u16::try_from(n).unwrap_or(u16::MAX)
-}
-
-/// The flow slots the device has each way (dstack #227): its config's
-/// `flow_slots` (one value for TX and RX, the sockets each direction
-/// opens), at most [`MAX_FLOWS`], the TX table's own bound
-/// ([`TxTable::with_slots`]). 0x1000 states it, and Dante Controller
-/// creates a multicast flow in the highest flow it states.
-fn flow_slots(cfg: &DeviceConfig) -> u16 {
-    wire_u16(cfg.flow_slots.min(usize::from(MAX_FLOWS)))
-}
-
-/// [`flow_slots`] as a TX flow table states them (one byte: 0x2600's
-/// pages and 0x2601's reply, dstack #227).
-fn table_slots(cfg: &DeviceConfig) -> u8 {
-    u8::try_from(flow_slots(cfg)).unwrap_or(u8::MAX)
-}
-
-/// 0x1000: inferno's layout, with our flow slots ([`flow_slots`]) where
-/// inferno states its 32.
-fn counts(cfg: &DeviceConfig) -> Vec<u8> {
-    let tx = wire_u16(cfg.tx.len());
-    let rx = wire_u16(cfg.rx.len());
-    let mut out = Body::new();
-    out.u8(0);
-    out.u8(COUNTS_FLAGS);
-    out.u16(tx);
-    out.u16(rx);
-    out.u16(4);
-    out.u16(MAX_CHANNELS_IN_FLOW.min(tx));
-    out.u16(8);
-    // The TX and RX flows the device has.
-    out.u16(flow_slots(cfg));
-    out.u16(flow_slots(cfg));
-    out.u16(tx.saturating_add(rx));
-    out.u16(1);
-    out.u16(1);
-    out.zeros(12);
-    out.into_vec()
-}
-
-/// 0x1003: a 38-byte header of offsets and constants, then the current
-/// name, the factory name, the board name and the revision.
-fn device_names(state: &DeviceState, cfg: &DeviceConfig) -> Vec<u8> {
-    let mut out = Body::new();
-    out.zeros(NAMES_HEADER);
-    let name = out.cstr(&state.name);
-    let factory = out.cstr(&cfg.name);
-    let board = out.cstr(&cfg.model);
-    let revision = out.cstr(REVISION);
-    #[rustfmt::skip]
-    let fields: [u16; NAMES_HEADER / 2] = [
-        0, 0, 0, board, revision, 0, name, factory, name,
-        0, 0, 0, 0, 0, 0,
-        0x2729, 0, 0x1102, 0,
-    ];
-    for (i, value) in fields.into_iter().enumerate() {
-        out.set_u16(wire_u16(HEADER_LEN + 2 * i), value);
-    }
-    out.into_vec()
-}
-
-/// The descriptor every channel of a page points at: rate, encoding, PCM
-/// type.
-fn common_descriptor(out: &mut Body, cfg: &DeviceConfig) -> u16 {
-    let at = out.offset();
-    let bits = u16::from(cfg.encoding);
-    out.u32(cfg.sample_rate);
-    out.u8(1);
-    out.u8(1);
-    out.u16(bits);
-    out.u16(0x400);
-    out.u16(bits);
-    out.u16(bits);
-    out.u16(u16::from(PCM_TYPE));
-    debug_assert_eq!(usize::from(out.offset() - at), COMMON_DESCRIPTOR);
-    at
-}
-
-/// What a page's items write behind the descriptor table: their strings
-/// and descriptors, as packet offsets that are final when written (the
-/// table's room is reserved first), and one descriptor every item may
-/// share, written once, where the first item that asks for it stands.
-struct Heap {
-    body: Body,
-    shared: Option<u16>,
-}
-
-impl Heap {
-    /// The shared descriptor's offset, `write` writing it the first time.
-    fn shared(&mut self, write: impl FnOnce(&mut Body) -> u16) -> u16 {
-        match self.shared {
-            Some(at) => at,
-            None => *self.shared.insert(write(&mut self.body)),
-        }
-    }
-}
-
-impl std::ops::Deref for Heap {
-    type Target = Body;
-    fn deref(&self) -> &Body {
-        &self.body
-    }
-}
-
-impl std::ops::DerefMut for Heap {
-    fn deref_mut(&mut self) -> &mut Body {
-        &mut self.body
-    }
-}
-
-/// One page of a list: `[slots, count]`, a table of `slots` descriptors of
-/// `item` bytes (unused ones zero), then the heap they point into. The
-/// request names the page's first item (from 1) in its body's bytes 2–3.
-/// `write` writes one item's strings and descriptors to the heap and
-/// returns its table descriptor, or `None` for an item that is not listed
-/// (an empty flow slot: passed over, taking no room). More follow
-/// (`0x8112`) when an item is left once the table is full, or when an item
-/// has brought the reply to [`SOFT_LIMIT`] bytes: that item stands in the
-/// table but is not counted (Dante Controller asks for it again on the
-/// next page).
-fn page<I>(
-    h: &Header,
-    req: &[u8],
-    slots: usize,
-    item: usize,
-    items: impl IntoIterator<Item = I>,
-    write: impl FnMut(I, &mut Heap) -> Option<Vec<u8>>,
-) -> ArcOutcome {
-    let Some(first) = first_item(req) else {
-        return refuse(h, "a page request without its first item");
-    };
-    paged(h, 0, first, slots, item, items, write)
-}
-
-/// [`page`]'s reply from item `first` (from 1, not 0), with `prefix` zero
-/// bytes before `[slots, count]` (ARC 2.8.9's pages have 6, [`v289`]).
-fn paged<I>(
-    h: &Header,
-    prefix: usize,
-    first: u16,
-    slots: usize,
-    item: usize,
-    items: impl IntoIterator<Item = I>,
-    mut write: impl FnMut(I, &mut Heap) -> Option<Vec<u8>>,
-) -> ArcOutcome {
-    let mut heap = Heap {
-        body: Body::new(),
-        shared: None,
-    };
-    heap.zeros(prefix + 2 + slots * item);
-    let mut table: Vec<Vec<u8>> = Vec::with_capacity(slots);
-    let mut counted = 0;
-    let mut left = items.into_iter().skip(usize::from(first) - 1);
-    let more = loop {
-        let Some(it) = left.next() else {
-            break false;
-        };
-        if table.len() == slots {
-            break true;
-        }
-        let Some(descriptor) = write(it, &mut heap) else {
-            continue;
-        };
-        debug_assert_eq!(descriptor.len(), item);
-        table.push(descriptor);
-        if usize::from(heap.offset()) >= SOFT_LIMIT {
-            break true;
-        }
-        counted += 1;
-    };
-    let mut body = heap.body.into_vec();
-    body[prefix] = slots as u8;
-    body[prefix + 1] = counted as u8;
-    let table_at = prefix + 2;
-    for (i, descriptor) in table.iter().enumerate() {
-        body[table_at + i * item..table_at + (i + 1) * item].copy_from_slice(descriptor);
-    }
-    let status = if more { STATUS_MORE } else { STATUS_OK };
-    ArcOutcome::Reply(reply(h, status, &body))
-}
-
-/// 0x2000: each TX channel with its default name.
-fn tx_channels(h: &Header, req: &[u8], cfg: &DeviceConfig) -> ArcOutcome {
-    let n = cfg.tx.len();
-    page(h, req, n.min(TX_PAGE), 8, 0..n, |index, out| {
-        let common = out.shared(|b| common_descriptor(b, cfg));
-        let name = out.cstr(&cfg.tx[index]);
-        Some(descriptor(&[wire_u16(index + 1), 7, common, name]))
-    })
-}
-
-/// 0x2010: each TX channel `listed` takes (by index) with its current
-/// name: every one under 2.7, the renamed ones under 2.8.9 ([`v289`]).
-fn tx_names(
-    h: &Header,
-    req: &[u8],
-    state: &DeviceState,
-    listed: impl Fn(usize) -> bool,
-) -> ArcOutcome {
-    let n = state.tx.len();
-    page(h, req, n.min(TX_PAGE), 6, 0..n, |index, out| {
-        if !listed(index) {
-            return None;
-        }
-        // A zero word heads the names (written once, before the first).
-        out.shared(|b| {
-            let at = b.offset();
-            b.u32(0);
-            at
-        });
-        let id = wire_u16(index + 1);
-        let name = out.cstr(&state.tx[index]);
-        Some(descriptor(&[id, id, name]))
-    })
-}
-
-/// Our RX flow in `slot` once its transmitter granted it (an asked flow
-/// is listed from its grant), as 0x3200 and ARC 2.8.9's 0x3600 list it.
-fn granted_flow(rx: &Manager, slot: usize) -> Option<crate::subscribe::FlowView> {
-    rx.flow(slot).filter(|f| f.handle.is_some())
-}
-
-/// RX channel `rx`'s subscription as 0x3000 lists it, with its status
-/// code: the manager's status when it holds the same subscription, else
-/// Unresolved (a subscription saved a moment ago, not handed over yet).
-fn listed_subscription<'s>(
-    state: &'s DeviceState,
-    rx: usize,
-    manager: &Manager,
-) -> Option<(&'s Subscription, u32)> {
-    let sub = state.subscription(rx)?;
-    let status = match manager.subscription(rx) {
-        Some(known) if known == sub => manager.status(rx).unwrap_or(SubStatus::Unresolved),
-        _ => SubStatus::Unresolved,
-    };
-    Some((sub, status.code()))
-}
-
-/// 0x3000 (inferno's `get_receive_channels`): each RX channel with, when
-/// subscribed, the TX channel's and the TX device's names and the status
-/// code, then its own name.
-fn rx_channels(
-    h: &Header,
-    req: &[u8],
-    state: &DeviceState,
-    cfg: &DeviceConfig,
-    manager: &Manager,
-) -> ArcOutcome {
-    let n = state.rx.len();
-    page(h, req, n.min(RX_PAGE), 20, 0..n, |index, out| {
-        let common = out.shared(|b| common_descriptor(b, cfg));
-        let (tx_channel, tx_device, status) = match listed_subscription(state, index, manager) {
-            Some((sub, status)) => (out.cstr(&sub.tx_channel), out.cstr(&sub.tx_device), status),
-            None => (0, 0, 0),
-        };
-        let name = out.cstr(&state.rx[index]);
-        let [s0, s1] = [(status >> 16) as u16, status as u16];
-        Some(descriptor(&[
-            wire_u16(index + 1),
-            RX_CHANNEL_FLAGS,
-            common,
-            tx_channel,
-            tx_device,
-            name,
-            s0,
-            s1,
-            0,
-            0,
-        ]))
-    })
-}
-
-fn descriptor(fields: &[u16]) -> Vec<u8> {
-    fields.iter().flat_map(|f| f.to_be_bytes()).collect()
 }
 
 #[cfg(test)]
