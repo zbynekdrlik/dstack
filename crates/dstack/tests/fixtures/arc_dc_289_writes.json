@@ -1,0 +1,32 @@
+{
+  "what": "Dante Controller's own ARC 2.8.9 writes (start code 0x2809) to one of our devices, and our device's answers, with 0x1000's bit 0x1000 (segmented flows) stated, so Dante Controller reads the 2.8.9 lists and writes with 2.8.9's opcodes: a subscription (Device View > Receive, our RX 1 from our TX 1), an RX channel rename and back, a TX channel rename and back to its default, the unsubscribe.",
+  "captured": "2026-11-12, dstack #220, pktmon on the Dante Controller PC, UDP to and from our test device (a lane build whose 0x1000 first word carried 0x1000 by a scratch override, not committed). Only our own device was written to. The device name in the subscription is replaced with a neutral one of the same length (11 characters); nothing else is changed. The answers are our device's, not a card's; Dante Controller showed each change. The answer to \"0x2438 default\" is our device's refusal (0xffff) at the time: Dante Controller then kept showing the old name.",
+  "requests": {
+    "0x3410 set": "2809003500d03410000000000000000008000201000100030024002900000000000000005458203100746573742d6465762d303100",
+    "0x3401": "2809002600dd3401000000000000000006000201000200030020000000000000525820327200",
+    "0x2438": "2809002600e32438000000000000000006000201000200030020000000000000545820327200",
+    "0x2438 default": "2809002000eb2438000000000000000006000201000200030000000000000000",
+    "0x3401 back": "2809002500ef34010000000000000000060002010002000300200000000000005258203200",
+    "0x3410 clear": "2809002400f7341000000000000000000800020100010003000000000000000000000000"
+  },
+  "replies": {
+    "0x3410 set": "2809000a00d034100001",
+    "0x3401": "2809000a00dd34010001",
+    "0x2438": "2809002000e3243800010000000000000600010100020003001a545820327200",
+    "0x2438 default": "2809000a00eb2438ffff",
+    "0x3401 back": "2809000a00ef34010001",
+    "0x3410 clear": "2809000a00f734100001"
+  },
+  "asks": {
+    "0x3410 set": "RX 1 from TX 1 of the device test-dev-01 (our own, renamed here): a page of 2 slots, the second empty",
+    "0x3401": "RX 2 renamed \"RX 2r\" (a page of 2 slots, one record)",
+    "0x2438": "TX 2 renamed \"TX 2r\" (a page of 2 slots, one record)",
+    "0x2438 default": "TX 2 back to its default name: the name's offset is 0, no name sent",
+    "0x3401 back": "RX 2 renamed \"RX 2\" again: Dante Controller sends the name itself for an RX channel",
+    "0x3410 clear": "RX 1 unsubscribed (both name offsets 0)"
+  },
+  "layout": {
+    "all": "netaudio's layouts (arc_netaudio_289_writes.json): 6 zero bytes, the record size and 0, [page slots, record count], the records from packet byte 20, unused slots zero, the strings after the slots. Dante Controller's pages have 2 slots here (our device has 2 RX and 2 TX channels).",
+    "0x2438 default": "a name offset of 0 is the channel's default name (Dante Controller's \"back to the default\")"
+  }
+}

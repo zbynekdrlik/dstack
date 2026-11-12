@@ -1,5 +1,6 @@
 use super::*;
 
+mod dc_289_writes;
 mod dc_latency_write;
 mod key_table;
 mod netaudio_289_writes;
