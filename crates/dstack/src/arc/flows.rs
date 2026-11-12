@@ -201,6 +201,9 @@ fn segments(body: &[u8], at: usize) -> Option<Vec<usize>> {
     Some(out)
 }
 
+// The table's slot count is one byte.
+const _: () = assert!(super::MAX_FLOWS <= 255);
+
 /// A 0x2600 reply body listing `flows` (at most 255, and the table states
 /// [`super::MAX_FLOWS`] slots), in the form [`parse_flows`] reads: the
 /// table, then each record's segment chain (0: ids, flags, bits; 1: empty;
@@ -209,9 +212,6 @@ fn segments(body: &[u8], at: usize) -> Option<Vec<usize>> {
 /// [`list_reply_page`]'s pages of it (dstack #148: every receiver reads
 /// each transmitter's list once a minute; unanswered, each read waited
 /// 1 s and the transmitter logged it) and a create with it.
-// The table's slot count is one byte.
-const _: () = assert!(super::MAX_FLOWS <= 255);
-
 pub fn list_reply_body(flows: &[TxFlow]) -> Vec<u8> {
     reply_body(super::MAX_FLOWS as u8, flows)
 }
@@ -221,21 +221,20 @@ pub fn list_reply_body(flows: &[TxFlow]) -> Vec<u8> {
 /// most of `flows`, from the first, that one datagram
 /// ([`MAX_DATAGRAM`], the header counted) holds, and whether flows are
 /// left for the next page. A reader takes the next page from the flow
-/// after the page's last ([`list_tx_flows`]). One flow always fits: a
-/// record of [`MAX_FLOW_CHANNELS`] channels and one destination takes 68
-/// bytes.
+/// after the page's last ([`list_tx_flows`]). Each page holds at least
+/// one of our own flows: a record of [`MAX_FLOW_CHANNELS`] channels and
+/// one destination takes 68 bytes. A flow too long for a datagram alone
+/// (hundreds of channels or destinations) gives a page of no flow that
+/// says more follow, which [`list_tx_flows`] reads as malformed. At most
+/// 255 flows are taken (the table's count is one byte): pass a page's
+/// worth.
 pub fn list_reply_page(slots: u8, flows: &[TxFlow]) -> (Vec<u8>, bool) {
-    let mut n = flows.len();
-    loop {
-        let body = reply_body(slots, &flows[..n]);
-        if HEADER_LEN + body.len() <= MAX_DATAGRAM {
-            return (body, n < flows.len());
-        }
-        n -= 1;
-    }
+    let fits = |n: usize| HEADER_LEN + reply_body(slots, &flows[..n]).len() <= MAX_DATAGRAM;
+    let n = (0..=flows.len()).rev().find(|&n| fits(n)).unwrap_or(0);
+    (reply_body(slots, &flows[..n]), n < flows.len())
 }
 
-// A page of no flow (its 8 bytes) fits a datagram, so the cut ends.
+// A page of no flow (its 8 bytes) fits a datagram.
 const _: () = assert!(HEADER_LEN + 8 <= MAX_DATAGRAM);
 
 /// [`list_reply_body`] with `slots` in its table.

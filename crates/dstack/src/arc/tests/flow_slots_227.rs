@@ -177,6 +177,28 @@ fn page_one_holds_every_flow_that_fits_a_datagram_to_its_last_byte() {
     assert_eq!((status, ids(&page)), (STATUS_OK, vec![26]));
 }
 
+/// A reader up to v0.6.97 (`list_tx_flows` at that tag, as written
+/// there): one request with its `list_body` (24 bytes, `00 01 00 01 00
+/// 01` at bytes 6-11), and any status but OK refused. The media-local ids
+/// it reads, or the status it refused.
+fn v0_6_97_reader(dev: &mut Dev) -> Result<Vec<u16>, u16> {
+    let mut body = [0u8; 24];
+    body[6..12].copy_from_slice(&[0, 1, 0, 1, 0, 1]);
+    let answer = decode(dev.send(&request(START_2809, 4, LIST, 0, &body)));
+    if answer.header.op2 != STATUS_OK {
+        return Err(answer.header.op2);
+    }
+    Ok(ids(&answer.body))
+}
+
+#[test]
+fn a_v0_6_97_reader_reads_every_flow_that_fits_page_one_and_is_refused_past_it() {
+    let mut fits = with_flows(config(), &[8; 21]);
+    assert_eq!(v0_6_97_reader(&mut fits), Ok((1..=21).collect()));
+    let mut past = with_flows(config(), &[8; 22]);
+    assert_eq!(v0_6_97_reader(&mut past), Err(STATUS_MORE));
+}
+
 #[test]
 fn the_tx_flow_list_states_the_config_s_flow_slots() {
     let mut dev = with_flows(
