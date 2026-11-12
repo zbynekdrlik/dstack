@@ -2,6 +2,7 @@ use super::*;
 
 mod dc_latency_write;
 mod key_table;
+mod v289;
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
