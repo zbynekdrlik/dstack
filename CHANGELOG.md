@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.101
+
+- Feature (dstack #234): the RX thread tells a packet late on the wire from a late wake of its own. On Linux every RX flow socket (the slot sockets and each multicast group's socket) asks the kernel for each datagram's receive time (`SO_TIMESTAMPNS`), and the thread reads it with the datagram (`recvmsg`, one call per datagram as before). A packet's wake delay is the RX pass's time less the kernel's receive time; its lateness on the wire is its lateness at the pass less that delay. New per flow slot: `wire_late`, the packets already later than `late`'s limit (playout + block) when the kernel received them, and the largest wake delay in µs, of the heartbeat's last second and since the device started. A `late_at_read` or `late` with `wire_late` flat and a large wake delay is our RX thread's late wake on a loaded box; a rising `wire_late` is lateness that came over the network.
+- New status JSON keys (each `rx` flow, after `late_at_read`, Linux only): `wire_late`, `wake_delay_us` (the heartbeat's last second), `wake_delay_peak_us` (since the start). Windows reads its flows with `recv_from` as before, with no receive stamp: the keys are absent there (as `socket_drops`), and the counts read 0.
+- New API (additive): `media::rx::RxCounts::{wire_late, wake_delay_peak_us}`, `RxShared::last_wake_delay_us`, `RxShared::stamps` (true when every flow socket stamps its receive times). A consumer that builds an `RxCounts` with a struct literal adds the two fields (or `..Default::default()`). `media::rx::join` and `GROUP_BOUND_TO_PORT` keep their paths (moved to the private `media/rx/socket.rs`, re-exported).
+- No latency change.
+
 ## 0.6.100
 
 - Docs (dstack #217): docs/windows-box.md records the spin_escape trial's result. It stays an opt-in; a stress walker froze the test PC with and without it.

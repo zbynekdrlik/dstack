@@ -20,6 +20,8 @@ exclude_globs = [
   "crates/dstack/src/lso/windows.rs",
   "crates/dstack/src/media/bypass/windows.rs",
   "crates/dstack/src/media/dscp/windows.rs",
+  # The RX receive path off Linux (dstack #234): recv_from with no stamp.
+  "crates/dstack/src/media/rx/socket/other.rs",
   "crates/dstack/src/traffic/windows.rs",
   "crates/dtray/src/win.rs",
   # dtray's tray glue (tray-icon, GTK): it needs a desktop session, which a

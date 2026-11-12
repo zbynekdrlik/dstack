@@ -16,6 +16,14 @@ const DROPS: &str = if cfg!(target_os = "linux") {
     ""
 };
 
+/// The status's receive-stamp fields of a flow that received nothing:
+/// Linux only (dstack #234, `SO_TIMESTAMPNS`).
+const STAMPS_NONE: &str = if cfg!(target_os = "linux") {
+    "\"wire_late\":0,\"wake_delay_us\":0,\"wake_delay_peak_us\":0,"
+} else {
+    ""
+};
+
 /// The status line as JSON, checked by hand: each value is a number,
 /// `null`, an object, an array or a string; returns every string (keys
 /// included). Panics on anything else.
@@ -201,6 +209,9 @@ const WORDS: &[&str] = &[
     "socket_drops",
     "late",
     "late_at_read",
+    "wire_late",
+    "wake_delay_us",
+    "wake_delay_peak_us",
     "unplaced",
     "lateness",
     "lateness_peak",
@@ -454,13 +465,25 @@ fn the_status_shows_the_packets_judge_in_ns_numbers_only() {
     for word in words_of(&s, "test-device") {
         assert!(WORDS.contains(&word.as_str()), "{word:?} in {s}");
     }
+    // The receive-stamp fields (Linux): the wake delays are real time, so
+    // read back; both packets were read after the kernel had them.
+    let stamps = if cfg!(target_os = "linux") {
+        let (wake, peak) = (
+            value_of(&s, "wake_delay_us"),
+            value_of(&s, "wake_delay_peak_us"),
+        );
+        assert!(wake.parse::<u64>().unwrap() <= peak.parse::<u64>().unwrap());
+        format!("\"wire_late\":0,\"wake_delay_us\":{wake},\"wake_delay_peak_us\":{peak},")
+    } else {
+        String::new()
+    };
     // The least: 25 samples, 260 416 ns (the stamp at 999 999 739 584 ns,
     // rounded up); the largest 40 samples.
     assert!(
         s.contains(&format!(
             "\"rx\":[{{\"flow\":4,\"granted\":0,\"multicast\":0,\"fpp\":0,\"channels\":0,\"latency\":0,\
              \"playout\":0,\"delay\":0,\"late_after\":0,\"advertised\":0,\
-             \"below_advertised\":0,\"packets\":2,\"refused\":0,\"stray\":0,\"out_of_order\":0,\"gaps\":1,\"gap_frames\":14,{DROPS}\"late\":0,\"late_at_read\":0,\
+             \"below_advertised\":0,\"packets\":2,\"refused\":0,\"stray\":0,\"out_of_order\":0,\"gaps\":1,\"gap_frames\":14,{DROPS}\"late\":0,\"late_at_read\":0,{stamps}\
              \"unplaced\":0,\"lateness\":40,\"lateness_peak\":40,\"lateness_min_ns\":260416,\"keepalives\":0,\
              \"keepalive_errors\":0,\"recv_errors\":0,\"joins\":0,\"join_errors\":0}}],"
         )),
@@ -528,7 +551,7 @@ fn the_status_lists_the_flows_of_both_sides() {
         s.contains(&format!(
             "\"rx\":[{{\"flow\":1,\"granted\":1,\"multicast\":0,\"fpp\":32,\"channels\":2,\"latency\":96,\
              \"playout\":96,\"delay\":0,\"late_after\":128,\"advertised\":96,\
-             \"below_advertised\":0,\"packets\":0,\"refused\":0,\"stray\":0,\"out_of_order\":0,\"gaps\":0,\"gap_frames\":0,{DROPS}\"late\":0,\"late_at_read\":0,\
+             \"below_advertised\":0,\"packets\":0,\"refused\":0,\"stray\":0,\"out_of_order\":0,\"gaps\":0,\"gap_frames\":0,{DROPS}\"late\":0,\"late_at_read\":0,{STAMPS_NONE}\
              \"unplaced\":0,\"lateness\":0,\"lateness_peak\":0,\"keepalives\":0,\"keepalive_errors\":0,\
              \"recv_errors\":0,\"joins\":0,\"join_errors\":0}}],\"rx_poll_errors\":0,"
         )),
