@@ -14,7 +14,7 @@
 //!
 //! | op1 | answer |
 //! |---|---|
-//! | 0x1000 | counts: TX, RX, inferno's 32 TX and 32 RX flows |
+//! | 0x1000 | counts: TX, RX, the TX and RX flows the device has ([`flow_slots`], dstack #227) |
 //! | 0x1001 | the device's new name (netaudio's `set_name`): OK, no body; saved, |
 //! |        | announced, our own subscriptions to it renamed |
 //! | 0x1002 | the device name |
@@ -26,7 +26,7 @@
 //! | 0x2013 | TX rename |
 //! | 0x2200 | TX flows, [`FLOW_PAGE`] slots a page (inferno's `query_tx_flows`) |
 //! | 0x2201, 0x2202 | ARC 2.7's create, delete of a multicast TX flow (Dante Controller's on a device without segmented flows, dstack #222): the flow made in the slot its id names, or ended ([`answer`]); OK, no body. [`handle`] alone, which cannot change the TX table, refuses them as inferno does when it creates or deletes none |
-//! | 0x2600 (start 0x2809) | ARC 2.8.9's TX flow list ([`flows::list_reply_body`]): receivers' flows unicast, ours multicast with their group |
+//! | 0x2600 (start 0x2809) | ARC 2.8.9's TX flow list ([`flows::list_reply_page`]): receivers' flows unicast, ours multicast with their group; paged from the request's first flow, each page one datagram (dstack #227) |
 //! | 0x2601 (start 0x2809) | ARC 2.8.9's multicast create (dstack #193): a multicast flow in the asked slot ([`answer`]); the reply is its record, no destination |
 //! | 0x2602 (start 0x2809) | ARC 2.8.9's delete of a multicast flow: OK, no body |
 //! | 0x2204 | status [`STATUS_2320`], no body (the IEM card's answer, captured) |
@@ -181,7 +181,8 @@ pub mod op {
 /// The slots of a flow list's page (0x2200, 0x3200): inferno's 32 flows,
 /// at most 16 a page.
 pub const FLOW_PAGE: u8 = 16;
-/// The most flows each way (inferno's TX and RX `MAX_FLOWS`, 0x1000).
+/// The most flows each way (inferno's TX and RX `MAX_FLOWS`); a device
+/// has its config's `flow_slots` of them ([`flow_slots`]).
 pub const MAX_FLOWS: u16 = 32;
 /// A page ends once an item has brought the reply to this many bytes, the
 /// header counted (inferno's `PACKET_SIZE_SOFT_LIMIT`).
@@ -468,7 +469,7 @@ pub fn handle(
         op::TX_FLOWS => tx_flows(&h, body, cfg, live.tx),
         // ARC 2.8.9's TX flow list (dstack #148): what every dstack receiver
         // reads to find a transmitter's multicast flows.
-        flows::LIST if h.start == flows::START_2809 => ok(&flows_2809(cfg, live.tx)),
+        flows::LIST if h.start == flows::START_2809 => flows_2809(&h, body, cfg, live.tx),
         op::RX_FLOWS => rx_flows(&h, body, cfg, live.rx),
         op::TX_MULTICAST_CREATE => no_multicast(&h, body, 2),
         op::TX_MULTICAST_DELETE => no_multicast(&h, body, 4),
@@ -754,11 +755,18 @@ fn socket_descriptor(out: &mut Body, at: std::net::SocketAddrV4) {
     out.bytes(&at.ip().octets());
 }
 
-/// Our TX flows as an ARC 2.8.9 list (0x2600, [`flows::list_reply_body`]):
+/// Our TX flows as an ARC 2.8.9 list (0x2600, [`flows::list_reply_page`]):
 /// each a unicast flow to its receiver or a multicast flow to its group
-/// (dstack #193), its slot (from 1) as both ids.
-fn flows_2809(cfg: &DeviceConfig, tx: &TxTable) -> Vec<u8> {
-    let listed: Vec<flows::TxFlow> = (0..usize::from(MAX_FLOWS))
+/// (dstack #193), its slot (from 1) as both ids. Paged (dstack #227): the
+/// page lists the flows from the one the request names (body bytes 10–11,
+/// [`flows::list_body_from`]; a request without it, or with 0, from flow
+/// 1, as every request was answered before pages) as far as one datagram
+/// holds them, status [`STATUS_MORE`] when flows are left. A reader up to
+/// v0.6.97 asks once, from flow 1, and takes status OK only: it reads our
+/// list while every flow fits page one (21 flows of 8 channels, 24 of 4).
+fn flows_2809(h: &Header, req: &[u8], cfg: &DeviceConfig, tx: &TxTable) -> ArcOutcome {
+    let first = read_u16(req, 10).map_or(1, |f| f.max(1));
+    let listed: Vec<flows::TxFlow> = (usize::from(first) - 1..usize::from(MAX_FLOWS))
         .filter_map(|slot| {
             let f = tx.flow(slot)?;
             let id = wire_u16(slot + 1);
@@ -777,7 +785,10 @@ fn flows_2809(cfg: &DeviceConfig, tx: &TxTable) -> Vec<u8> {
             })
         })
         .collect();
-    flows::list_reply_body(&listed)
+    let slots = u8::try_from(flow_slots(cfg)).unwrap_or(u8::MAX);
+    let (body, more) = flows::list_reply_page(slots, &listed);
+    let status = if more { STATUS_MORE } else { STATUS_OK };
+    ArcOutcome::Reply(reply(h, status, &body))
 }
 
 /// 0x2200: the TX flows receivers asked for on 4455, expired ones too
@@ -1062,7 +1073,17 @@ fn wire_u16(n: usize) -> u16 {
     u16::try_from(n).unwrap_or(u16::MAX)
 }
 
-/// 0x1000: inferno's layout.
+/// The flow slots the device has each way (dstack #227): its config's
+/// `flow_slots` (one value for TX and RX, the sockets each direction
+/// opens), at most [`MAX_FLOWS`], the TX table's own bound
+/// ([`TxTable::with_slots`]). 0x1000 states it, and Dante Controller
+/// creates a multicast flow in the highest flow it states.
+fn flow_slots(cfg: &DeviceConfig) -> u16 {
+    wire_u16(cfg.flow_slots.min(usize::from(MAX_FLOWS)))
+}
+
+/// 0x1000: inferno's layout, with our flow slots ([`flow_slots`]) where
+/// inferno states its 32.
 fn counts(cfg: &DeviceConfig) -> Vec<u8> {
     let tx = wire_u16(cfg.tx.len());
     let rx = wire_u16(cfg.rx.len());
@@ -1074,9 +1095,9 @@ fn counts(cfg: &DeviceConfig) -> Vec<u8> {
     out.u16(4);
     out.u16(MAX_CHANNELS_IN_FLOW.min(tx));
     out.u16(8);
-    // The most TX and RX flows.
-    out.u16(MAX_FLOWS);
-    out.u16(MAX_FLOWS);
+    // The TX and RX flows the device has.
+    out.u16(flow_slots(cfg));
+    out.u16(flow_slots(cfg));
     out.u16(tx.saturating_add(rx));
     out.u16(1);
     out.u16(1);
