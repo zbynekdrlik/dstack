@@ -1,8 +1,9 @@
 //! ARC (UDP 4440): one datagram from anyone on the network, answered from
 //! the synthetic test device's state, its TX table and its RX manager: by
 //! [`arc::handle`], and by the server's own entry [`arc::answer`], which
-//! also takes ARC 2.8.9's multicast create and delete (0x2601, 0x2602,
-//! dstack #193) onto the TX table.
+//! also takes the multicast create and delete onto the TX table: ARC
+//! 2.8.9's (0x2601, 0x2602, dstack #193) and 2.7's (0x2201, 0x2202, dstack
+//! #222).
 #![no_main]
 
 use std::net::Ipv4Addr;

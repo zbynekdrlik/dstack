@@ -13,9 +13,11 @@
 //! Finding 17). Its 0x1000 also decides which lists it reads: with bit
 //! 0x1000 (segmented flows) 0x2400, 0x3400, 0x2600 and 0x3600, without it
 //! the 2.7 lists (0x2000, 0x3000, 0x2200, 0x3200) under 0x2809. Our
-//! devices leave 0x1000 clear: with it set, Dante Controller read our
-//! segmented lists and left the device out of its list (cause not found
-//! yet); the lists are still answered for a controller that asks. Each
+//! devices leave 0x1000 clear (dstack #223): with it, Dante Controller
+//! reads 0x2600, which needs the card's TX flow records, and those would
+//! make dstack receivers up to v0.6.97 drop our multicast flows; with it
+//! clear, Dante Controller works on the 2.7 lists. The 2.8.9 lists are
+//! still answered for a controller that asks. Each
 //! read below is answered in the card's layout with our values; the other
 //! requests under 0x2809 (0x1100, 0x1102, 0x2600, 0x3300, 0x2320, 2.7's
 //! writes) are answered as under 2.7 ([`super::handle`]). Dante
