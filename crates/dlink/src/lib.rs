@@ -24,85 +24,75 @@
 //! iemmixer and dasio, which use `dstack` directly with its `low_latency`
 //! profile.
 //!
-//! # The latency budget
+//! # The latency, in named terms
 //!
-//! The app's latency is 15 ms ([`BUDGET_NS`], [`Config::budget_ns`] sets
-//! another) for each direction's whole path, the work and the Dante
-//! latency together (owner, ROZHODNUTÉ 3.11.2026, dstack #68: 10 ms;
-//! ROZHODNUTÉ 4.11.2026, dstack #1: 15 ms, 10 ms was never meant to push
-//! dlink apps low). dlink chooses the split ([`split`]):
+//! A dlink device's latency is three named terms, each with its value and
+//! who sets it (owner, ROZHODNUTÉ 12.11.2026, dstack #244; it replaces the
+//! single 15 ms budget of dstack #68 and #1):
 //!
-//! - B, the pump's block: 128 frames unless the app sets another
-//!   ([`Config::block`]; dstack #90: a busy video PC preempted the pump for
-//!   several ms at block 32 and normal priority).
-//! - W, the pump's work margin: how late the pump may run. A pump more
-//!   than W behind a block starts its schedule again, and the skipped
-//!   blocks are lost on both sides (`dstack::stream::Blocks`; dstack #1:
-//!   2 ms restarted on a loaded PC). W is 2/5 of the budget (6 ms of 15 ms,
-//!   4 ms of 10 ms; [`work_margin`]), at least the block and 2 ms: at the
-//!   default, room for the 2.7 to 3.6 ms preemptions seen on loaded PCs,
-//!   where a dlink app's threads run unpinned and without real time. On a
-//!   device with TX, W is in the TX path and gives way to keep P's TX
-//!   floor when a smaller budget leaves no room for both. An RX-only
-//!   device's W is in none of its paths (a late block only reaches the app
-//!   later), so it is the whole budget ([`rx_work_margin`]; 15 ms at the
-//!   default, v0.6.32, dstack #1: OBS on a loaded PC was preempted about
-//!   6 ms and restarted at W 6 ms), at no cost to its latency.
-//! - The rate converter's delay each way when the app's rate differs from
-//!   the network's ([`Rated`], [`rated::delay_ns`]).
-//! - P, the device's Dante latency: what the work of the directions the
-//!   device has leaves of the budget (the larger direction's when it has
-//!   both; [`Directions`]), in whole samples. Its floor is
-//!   [`tx_floor_ns`] on a device with TX channels: a TX packet's own age
-//!   when it leaves (the most frames in a packet + the TX margin + 4 ms of
-//!   lateness, 4.58 ms at 96 kHz, 4.92 ms at 48 kHz; dstack #1), and
-//!   [`MIN_LATENCY_NS`] (4 ms) on an RX-only device. The device's RX plays
-//!   out at P and its TX channels advertise it.
+//! - (a) the Dante network latency ([`Config::network_latency_ns`], per
+//!   device): the subscription's latency as Dante Controller shows it (0.25,
+//!   0.5, 1, 2 or 5 ms). 1 ms unless set ([`NETWORK_LATENCY_NS`]).
+//! - (b) the receive buffer ([`Config::receive_buffer_ns`], per device):
+//!   this PC's room for the RX thread's wake and pass, sized from
+//!   measurement (the status's `wake_delay_us`, `wake_delay_peak_us`, and
+//!   the measured `network_latency_*_us`; dstack #234).
+//! - (c) the app hand-off, computed by dlink and stated: on the RX side the
+//!   pump's block B ([`Config::block`], 128 frames unless set; dstack #90)
+//!   plus the rate converter's RX delay ([`Rated`], [`rated::delay_ns`]);
+//!   on the TX side the pump's work margin W plus the converter's TX delay.
 //!
-//! TX (the app's output to a receiver's playout) is W + P, plus the
-//! converter's TX delay; RX (a sample's network stamp to the app's block)
-//! is P + B, plus the converter's RX delay. A receiver set to a longer
-//! latency than P adds the difference; a latency Dante Controller sets on
-//! the device replaces P (it is kept in the state file). At the default
-//! 15 ms and block 128, a device with both directions (and a TX-only one,
-//! whose TX work is the larger in every row), W 6 ms in every row:
+//! The device's Dante latency P = (a) + (b), in whole samples (rounded up).
+//! P is what its RX plays out at, measured from the sender's media-clock
+//! stamp, and what its TX channels advertise (ARC) and Dante Controller
+//! shows. The RX path (a sample's stamp to the app's block) is P + (c) RX;
+//! the TX path (the app's output to a receiver's playout) is (c) TX + P.
+//! [`split`] gives every term ([`Split`]), and the device logs them at its
+//! start, one line each ([`Split::lines`]), never as one lump.
 //!
-//! | Device | App | B | Converter RX / TX | P | TX path | RX path |
-//! |---|---|---|---|---|---|---|
-//! | 48 kHz | 48 kHz | 2.67 ms | none | 9 ms | 15 ms | 11.67 ms |
-//! | 96 kHz | 96 kHz | 1.33 ms | none | 9 ms | 15 ms | 10.33 ms |
-//! | 96 kHz | 48 kHz | 1.33 ms | 0.63 / 0.64 ms | 8.36 ms | 15 ms | 10.32 ms |
-//! | 96 kHz | 44.1 kHz | 1.33 ms | 1.32 / 3.08 ms | 5.92 ms | 14.99 ms | 8.57 ms |
-//! | 48 kHz | 44.1 kHz | 2.67 ms | 2.65 / 3.08 ms | 5.92 ms | 14.99 ms | 11.24 ms |
-//! | 48 kHz | 96 kHz | 2.67 ms | 0.64 / 0.63 ms | 8.38 ms | 15 ms | 11.68 ms |
+//! W is how late the pump may run: a pump more than W behind a block starts
+//! its schedule again, and the skipped blocks are lost on both sides
+//! (`dstack::stream::Blocks`; dstack #1: 2 ms restarted on a loaded PC).
+//! On a device with TX it is in the TX path and 6 ms unless set
+//! ([`WORK_MARGIN_NS`], room for the 2.7 to 3.6 ms preemptions seen on
+//! loaded PCs, where a dlink app's threads run unpinned and without real
+//! time). An RX-only device's W is in none of its paths (a late block only
+//! reaches the app later), so it is 15 ms ([`RX_WORK_MARGIN_NS`]; v0.6.32,
+//! dstack #1: OBS on a loaded PC was preempted about 6 ms). W is at least
+//! the block and 2 ms ([`least_work_margin`]).
 //!
-//! A device with RX channels only sizes P by its RX work alone, so its RX
-//! path takes the whole budget (dstack #1), and its W is the whole 15 ms
-//! (1440 samples at 96 kHz, 720 at 48 kHz; v0.6.32, 6 ms before):
+//! P has a floor: on a device with TX, a TX packet's own age when it leaves
+//! ([`tx_floor_ns`]: the most frames in a packet + the TX margin + 4 ms of
+//! lateness, 4.58 ms at 96 kHz, 4.92 ms at 48 kHz; dstack #1), and
+//! [`MIN_LATENCY_NS`] (4 ms) on an RX-only device. [`Config::device`]
+//! refuses (a) + (b) under it, with the floor named. A latency Dante
+//! Controller sets on the device replaces P (it is kept in the state file).
 //!
-//! | Device | App | P | RX path |
-//! |---|---|---|---|
-//! | 48 kHz | 48 kHz | 12.33 ms | 15 ms |
-//! | 96 kHz | 96 kHz | 13.67 ms | 15 ms |
-//! | 96 kHz | 48 kHz | 13.04 ms | 15 ms |
-//! | 96 kHz | 44.1 kHz | 12.34 ms | 14.99 ms |
-//! | 48 kHz | 44.1 kHz | 9.67 ms | 14.99 ms |
-//! | 48 kHz | 96 kHz | 11.69 ms | 14.99 ms |
+//! ## The defaults keep the latency of v0.6.105
 //!
-//! Block 256 at the default changes only the RX path (W stays 6 ms with
-//! TX, over the block). Every pair of 44.1, 48 and 96 kHz fits 15 ms at every block
-//! of the stack. A larger budget grows W and P together: at 20 ms a 48 kHz
-//! or 96 kHz device gets W 8 ms and P 12 ms, a 48 kHz app on a 96 kHz
-//! device W 8 ms and P 11.36 ms (18.04 ms and W 20 ms RX only).
+//! An app that sets no receive buffer gets the P it had under the old
+//! 15 ms budget ([`REFERENCE_PATH_NS`]): 15 ms less the work of the
+//! directions the device has (the larger direction's when it has both),
+//! at least the floor; its (b) is that P less 1 ms. Setting (a) alone moves
+//! P by the difference: the terms are independent. At block 128, W 6 ms
+//! with TX:
 //!
-//! A smaller budget an app sets may not hold the TX floor: [`Config::device`]
-//! refuses it with the floor named, with the other problems (dstack #1: such
-//! configs ran at P 4 ms before, and played late at a receiver). At 10 ms
-//! those are a 48 kHz device with a 44.1 kHz app at block 128, block 256 on
-//! a 48 or 44.1 kHz device, a 96 kHz device with a 44.1 kHz app at block
-//! 256, and a 44.1 kHz device with a 48 kHz app at block 128. Our TX looped
-//! into our own RX takes the two paths less the one P they share (W + B +
-//! P, plus both converter delays): the whole-device test measures it.
+//! | Device | App | Directions | (a) | (b) | P | (c) RX | (c) TX |
+//! |---|---|---|---|---|---|---|---|
+//! | 48 kHz | 48 kHz | both | 1 ms | 8 ms | 9 ms | 2.67 ms | 6 ms |
+//! | 96 kHz | 96 kHz | both | 1 ms | 8 ms | 9 ms | 1.33 ms | 6 ms |
+//! | 96 kHz | 48 kHz | both | 1 ms | 7.36 ms | 8.36 ms | 1.33 + 0.63 ms | 6 + 0.64 ms |
+//! | 96 kHz | 44.1 kHz | both | 1 ms | 4.92 ms | 5.92 ms | 1.33 + 1.32 ms | 6 + 3.08 ms |
+//! | 48 kHz | 48 kHz | RX | 1 ms | 11.33 ms | 12.33 ms | 2.67 ms | |
+//! | 96 kHz | 96 kHz | RX | 1 ms | 12.67 ms | 13.67 ms | 1.33 ms | |
+//! | 96 kHz | 48 kHz | RX | 1 ms | 12.04 ms | 13.04 ms | 1.33 + 0.63 ms | |
+//!
+//! The last row is OBS on the editing PC: P 13.041666 ms = (a) 1 ms + (b)
+//! 12.041666 ms, RX path 15 ms. A config the old budget could not hold (an
+//! 8 kHz app on a 96 kHz network, whose filters alone take about 19 ms)
+//! now starts at P's floor. Our TX looped into our own RX takes the two
+//! paths less the one P they share ((c) TX + P + (c) RX): the
+//! whole-device test measures it.
 //!
 //! # An app on its own clock
 //!
@@ -190,18 +180,26 @@ use dstack::media::bypass::FrameSender;
 use dstack::media::tx::TX_MARGIN_NS;
 use dstack::stream::{BLOCKS, MAX_WORK_MARGIN};
 
-/// dlink's latency budget unless the app sets one, ns: 15 ms for each
-/// direction's whole path, the work (block, margin, rate conversion) and
-/// the Dante latency together. [`split`] gives the Dante latency what the
-/// work leaves. 10 ms from v0.6.22 (owner, ROZHODNUTÉ 3.11.2026, dstack
-/// #68); 15 ms since v0.6.28 (owner, ROZHODNUTÉ 4.11.2026, dstack #1: 10 ms
-/// was never meant to push dlink apps low). At 15 ms W gets 6 ms, room for
-/// the 2.7 to 3.6 ms preemptions seen on loaded PCs with no CPU pinning
-/// and no real time, and P stays over the TX floor ([`tx_floor_ns`]) for
-/// every rate pair at every block.
-pub const BUDGET_NS: u64 = 15_000_000;
-/// The least Dante latency [`split`] leaves, ns: the normal profile's own
-/// floor (`dstack::device::NORMAL_MIN_LATENCY_NS`, 4 ms), which the device
+/// (a), the Dante network latency unless the app sets one
+/// ([`Config::network_latency_ns`]), ns: 1 ms, Dante's own default for a
+/// gigabit network (dstack #244).
+pub const NETWORK_LATENCY_NS: u64 = 1_000_000;
+/// The path each direction had up to v0.6.105 (the old budget, 15 ms), ns.
+/// It sizes only the DEFAULT receive buffer (b): an app that sets no
+/// [`Config::receive_buffer_ns`] gets the Dante latency it had then, so
+/// nobody's latency moves (dstack #244). It is no key and no limit.
+pub const REFERENCE_PATH_NS: u64 = 15_000_000;
+/// W, the pump's work margin, of a device with TX unless the app sets one
+/// ([`Config::work_margin_ns`]), ns: 6 ms, room for the 2.7 to 3.6 ms
+/// preemptions seen on loaded PCs with no CPU pinning and no real time
+/// (dstack #1; 2/5 of the old 15 ms budget, the same W as up to v0.6.105).
+pub const WORK_MARGIN_NS: u64 = 6_000_000;
+/// W of an RX-only device unless the app sets one, ns: 15 ms (dstack #1,
+/// v0.6.32: W is in none of its paths, and OBS on a loaded PC was
+/// preempted about 6 ms). At most `dstack::stream::MAX_WORK_MARGIN`.
+pub const RX_WORK_MARGIN_NS: u64 = 15_000_000;
+/// The least Dante latency, ns: the normal profile's own floor
+/// (`dstack::device::NORMAL_MIN_LATENCY_NS`, 4 ms), which the device
 /// refuses to go under.
 pub const MIN_LATENCY_NS: u64 = NORMAL_MIN_LATENCY_NS;
 /// How late a TX packet may leave past its due time on the normal profile,
@@ -248,7 +246,9 @@ pub struct Config {
     tx: Vec<String>,
     sample_rate: u32,
     network_rate: Option<u32>,
-    budget_ns: u64,
+    network_latency_ns: Option<u64>,
+    receive_buffer_ns: Option<u64>,
+    work_margin_ns: Option<u64>,
     manufacturer: String,
     model: String,
     ports: Option<Ports>,
@@ -302,7 +302,9 @@ impl Config {
             tx: Vec::new(),
             sample_rate: SAMPLE_RATE,
             network_rate: None,
-            budget_ns: BUDGET_NS,
+            network_latency_ns: None,
+            receive_buffer_ns: None,
+            work_margin_ns: None,
             manufacturer: "dlink".to_string(),
             model: "dlink".to_string(),
             ports: None,
@@ -353,14 +355,47 @@ impl Config {
         self.device_rate() != self.sample_rate
     }
 
-    /// The latency budget, ns ([`BUDGET_NS`] unless set): each direction's
-    /// whole path, the work and the Dante latency together. The Dante
-    /// latency is what the work leaves ([`split`]); a budget that leaves
-    /// under [`MIN_LATENCY_NS`] is refused by [`Config::device`] with the
-    /// other problems.
-    pub fn budget_ns(mut self, ns: u64) -> Self {
-        self.budget_ns = ns;
+    /// (a), the Dante network latency of this device's subscriptions, ns
+    /// ([`NETWORK_LATENCY_NS`], 1 ms, unless set): what Dante Controller
+    /// shows as the latency (0.25, 0.5, 1, 2 or 5 ms; about 1 ms or less on
+    /// a one-switch gigabit VLAN with a hardware sender). The device's
+    /// Dante latency P is this plus the receive buffer ([`split`], dstack
+    /// #244).
+    pub fn network_latency_ns(mut self, ns: u64) -> Self {
+        self.network_latency_ns = Some(ns);
         self
+    }
+
+    /// (b), the receive buffer, ns: this PC's room for the RX thread's wake
+    /// and pass, sized from measurement (the status's `wake_delay_us` and
+    /// `wake_delay_peak_us`; dstack #234, #244). P = (a) + (b). Unset, it is
+    /// what keeps P as it was up to v0.6.105 ([`REFERENCE_PATH_NS`]): the
+    /// default changes no app's latency. A P under its floor
+    /// ([`MIN_LATENCY_NS`], or [`tx_floor_ns`] with TX) is refused by
+    /// [`Config::device`] with the other problems.
+    pub fn receive_buffer_ns(mut self, ns: u64) -> Self {
+        self.receive_buffer_ns = Some(ns);
+        self
+    }
+
+    /// W, the pump's work margin, ns: how late the pump may run before its
+    /// schedule starts again (dstack #1). On a device with TX it is in the
+    /// TX path ([`Split::tx_handoff_ns`]); an RX-only device's W is in none
+    /// of its paths. Unset: [`WORK_MARGIN_NS`] with TX,
+    /// [`RX_WORK_MARGIN_NS`] RX only. One under the block and 2 ms, or over
+    /// `dstack::stream::MAX_WORK_MARGIN`, is refused by [`Config::device`].
+    pub fn work_margin_ns(mut self, ns: u64) -> Self {
+        self.work_margin_ns = Some(ns);
+        self
+    }
+
+    /// The latency terms this config sets ([`Terms`]).
+    pub fn terms(&self) -> Terms {
+        Terms {
+            network_latency_ns: self.network_latency_ns,
+            receive_buffer_ns: self.receive_buffer_ns,
+            work_margin_ns: self.work_margin_ns,
+        }
     }
 
     /// The directions the device has: RX with RX channels, TX with TX
@@ -369,12 +404,13 @@ impl Config {
         Directions::of(!self.rx.is_empty(), !self.tx.is_empty())
     }
 
-    /// How this config splits its budget ([`split`]) for the directions it
-    /// has ([`Config::directions`]): the Dante latency, the pump's margin
-    /// and each direction's path.
+    /// This config's latency in named terms ([`split`]) for the directions
+    /// it has ([`Config::directions`]): the Dante latency and its two
+    /// terms, the app hand-off, the pump's margin and each direction's
+    /// path.
     pub fn split(&self) -> Result<Split, String> {
         split(
-            self.budget_ns,
+            self.terms(),
             self.device_rate(),
             self.sample_rate,
             self.block,
@@ -454,9 +490,9 @@ impl Config {
     }
 
     /// The device config dstack runs: the normal timing profile, the
-    /// app's block ([`BLOCK`] unless set), the Dante latency and the pump's
-    /// margin from the budget's [`split`], 24-bit. Every problem is listed,
-    /// as a config file's would be (a budget the work leaves too little of
+    /// app's block ([`BLOCK`] unless set), the Dante latency P and the
+    /// pump's margin W from the config's [`split`], 24-bit. Every problem is
+    /// listed, as a config file's would be (a latency under its floor
     /// first).
     pub fn device(&self) -> Result<DeviceConfig, Vec<String>> {
         self.checked().map(|(cfg, _)| cfg)
@@ -479,14 +515,15 @@ impl Config {
         }
         t.insert("sample_rate".into(), i64::from(rate).into());
         t.insert("encoding".into(), 24.into());
-        // A budget the work leaves too little of is listed first; the
-        // device is checked at the floor meanwhile, for the other problems.
+        // A latency under its floor (or a margin out of range) is listed
+        // first; the device is checked at the floor and the default margin
+        // meanwhile, for the other problems.
         let split = self.split();
         let (latency_ns, margin) = match &split {
             Ok(s) => (s.latency_ns, s.margin),
             Err(_) => (
                 MIN_LATENCY_NS,
-                work_margin(self.budget_ns, rate, self.block),
+                default_work_margin(rate, self.block, self.directions()),
             ),
         };
         t.insert("latency_ns".into(), to_int(latency_ns).into());
@@ -549,47 +586,22 @@ impl Config {
     }
 }
 
-/// The pump's share of the budget: W is [`WORK_SHARE_NUM`] /
-/// [`WORK_SHARE_DEN`] of it (the owner's 48 kHz example, dstack #1: about
-/// 4 ms of pump margin and 6 ms of Dante latency at 10 ms; 6 ms of 15 ms,
-/// the default since v0.6.28, 1.7 times the longest preemption seen on a
-/// loaded PC, 3.6 ms).
-pub const WORK_SHARE_NUM: u64 = 2;
-/// See [`WORK_SHARE_NUM`].
-pub const WORK_SHARE_DEN: u64 = 5;
-
-/// The pump's margin W before the TX cap of [`split`], samples at `rate`:
-/// [`WORK_SHARE_NUM`] / [`WORK_SHARE_DEN`] of `budget_ns` (so it grows with
-/// the budget), at least [`least_work_margin`], at most
-/// `dstack::stream::MAX_WORK_MARGIN`. W is how late the pump may run: a pump
-/// later than W behind a block starts its schedule again
-/// (`dstack::stream::Blocks`), and the skipped blocks are lost on both
-/// sides (dstack #1, intercom: 2 ms restarted on a loaded PC). A block
-/// outside `stream::BLOCKS` is the block's problem alone: W follows
-/// [`BLOCK`] then.
-pub fn work_margin(budget_ns: u64, rate: u32, block: u64) -> u64 {
-    let share = budget_ns / WORK_SHARE_DEN * WORK_SHARE_NUM;
-    latency_samples(share, rate)
-        .min(MAX_WORK_MARGIN)
-        .max(least_work_margin(rate, block))
-}
-
-/// The pump's margin W of an RX-only device, samples at `rate`: the whole
-/// `budget_ns` (dstack #1, camera-box 4.11.2026: OBS dante-input, RX only
-/// and unpinned, was preempted about 6 ms, right at its W 6 ms, and
-/// re-bootstrapped 19 -> 30 in about 15 minutes), at most
-/// `dstack::stream::MAX_WORK_MARGIN`, at least [`least_work_margin`].
-///
-/// W is in none of an RX-only device's paths: its RX path is P + B + the
-/// converter's RX delay (block k reads the RX rings at its own stamps
-/// whenever the pump runs), and D = B + P + W only stamps the engine's TX
-/// rings, which it does not have. W only says how late the pump may run
-/// before it starts again; a block that late reaches the app that much
-/// later, so the app's own budget bounds it. The stack holds any W up to
-/// `MAX_WORK_MARGIN` beside any P: `dstack::device::MAX_LATENCY_SAMPLES`
-/// keeps it inside half the RX rings (`dstack::media::ring::SLOTS`).
-pub fn rx_work_margin(budget_ns: u64, rate: u32, block: u64) -> u64 {
-    latency_samples(budget_ns, rate)
+/// W of a device that sets none, samples at `rate`: [`WORK_MARGIN_NS`] on a
+/// device with TX, [`RX_WORK_MARGIN_NS`] on an RX-only one (dstack #1,
+/// v0.6.32: W is in none of its paths: its RX path is P + B + the
+/// converter's RX delay, and D = B + P + W only stamps the engine's TX
+/// rings, which it does not have), at most `dstack::stream::MAX_WORK_MARGIN`
+/// (the stack holds any W up to it beside any P:
+/// `dstack::device::MAX_LATENCY_SAMPLES` keeps it inside half the RX rings),
+/// at least [`least_work_margin`]. A block outside `stream::BLOCKS` is the
+/// block's problem alone: W follows [`BLOCK`] then.
+pub fn default_work_margin(rate: u32, block: u64, directions: Directions) -> u64 {
+    let ns = if directions == Directions::Rx {
+        RX_WORK_MARGIN_NS
+    } else {
+        WORK_MARGIN_NS
+    };
+    latency_samples(ns, rate)
         .min(MAX_WORK_MARGIN)
         .max(least_work_margin(rate, block))
 }
@@ -610,20 +622,21 @@ fn valid_block(block: u64) -> u64 {
     }
 }
 
-/// The directions a device has, which size its Dante latency ([`split`]).
+/// The directions a device has, which decide its floor, its default W
+/// and its default receive buffer ([`split`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Directions {
-    /// RX and TX (or no channels at all): the larger direction's work.
+    /// RX and TX (or no channels at all).
     Both,
-    /// RX only (no TX channels): the RX work alone.
+    /// RX only (no TX channels).
     Rx,
-    /// TX only (no RX channels): the TX work alone.
+    /// TX only (no RX channels).
     Tx,
 }
 
 impl Directions {
     /// The directions of a device with RX channels (`rx`) and TX channels
-    /// (`tx`); one with neither splits as [`Directions::Both`].
+    /// (`tx`); one with neither counts as [`Directions::Both`].
     pub fn of(rx: bool, tx: bool) -> Self {
         match (rx, tx) {
             (true, false) => Self::Rx,
@@ -631,51 +644,156 @@ impl Directions {
             _ => Self::Both,
         }
     }
+
+    /// Whether the device has TX channels (or none at all).
+    pub fn has_tx(self) -> bool {
+        self != Self::Rx
+    }
+
+    /// Whether the device has RX channels (or none at all).
+    pub fn has_rx(self) -> bool {
+        self != Self::Tx
+    }
 }
 
-/// How a latency budget splits ([`split`]).
+/// The latency terms an app sets (dstack #244, the owner's ROZHODNUTÉ of
+/// 12.11.2026): [`Config::terms`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Terms {
+    /// (a), the Dante network latency, ns ([`Config::network_latency_ns`]);
+    /// `None` is [`NETWORK_LATENCY_NS`].
+    pub network_latency_ns: Option<u64>,
+    /// (b), the receive buffer, ns ([`Config::receive_buffer_ns`]); `None`
+    /// keeps the Dante latency of v0.6.105.
+    pub receive_buffer_ns: Option<u64>,
+    /// W, the pump's work margin, ns ([`Config::work_margin_ns`]); `None`
+    /// is [`default_work_margin`].
+    pub work_margin_ns: Option<u64>,
+}
+
+impl Default for Terms {
+    /// Nothing set: (a), (b) and W their defaults.
+    fn default() -> Self {
+        Terms {
+            network_latency_ns: None,
+            receive_buffer_ns: None,
+            work_margin_ns: None,
+        }
+    }
+}
+
+/// A device's latency in named terms ([`split`]; dstack #244). Each figure
+/// is ns unless named samples. The Dante latency P = (a) + (b); each path
+/// is P plus that direction's hand-off (c).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Split {
-    /// P, the device's Dante latency, ns: whole samples at the device's
-    /// rate. Its RX plays out at it and its TX channels advertise it.
+    /// (a), the Dante network latency: the app's, else
+    /// [`NETWORK_LATENCY_NS`].
+    pub network_latency_ns: u64,
+    /// (b), the receive buffer: P less (a). The app's, rounded up to make P
+    /// whole samples; else the default that keeps P as in v0.6.105.
+    pub receive_buffer_ns: u64,
+    /// P, the device's Dante latency: (a) + (b), whole samples at the
+    /// device's rate. Its RX plays out at it, measured from the sender's
+    /// media-clock stamp, and its TX channels advertise it (ARC), as Dante
+    /// Controller shows it.
     pub latency_ns: u64,
+    /// B, the pump's block.
+    pub block_ns: u64,
+    /// The rate converter's delay on the RX side (0 without conversion).
+    pub rx_convert_ns: u64,
+    /// The rate converter's delay on the TX side (0 without conversion).
+    pub tx_convert_ns: u64,
+    /// (c) on the RX side, the app hand-off: B + the converter's RX delay.
+    pub rx_handoff_ns: u64,
+    /// (c) on the TX side, the app hand-off: W + the converter's TX delay.
+    pub tx_handoff_ns: u64,
     /// W, the pump's work margin, samples at the device's rate: how late
-    /// its pump may run before it starts again ([`work_margin`], given way
-    /// to P's TX floor on a device with TX; [`rx_work_margin`], the whole
-    /// budget, on an RX-only device).
+    /// its pump may run before it starts again.
     pub margin: u64,
-    /// The app's output to a receiver's playout, ns: W + P, plus the rate
-    /// converter's TX delay when it runs. A receiver set to a longer
-    /// latency than P adds the difference. An RX-only device has no TX
-    /// path: the figure (W, the whole budget, + P + the converter's TX
-    /// delay) then passes the budget.
+    /// W in ns, whole samples.
+    pub work_margin_ns: u64,
+    /// The app's output to a receiver's playout: (c) TX + P. A receiver set
+    /// to a longer latency than P adds the difference. An RX-only device
+    /// has no TX path: the figure then holds its W, which is in no path.
     pub tx_path_ns: u64,
-    /// A sample's network stamp to the app's block, ns: P + B, plus the
-    /// rate converter's RX delay when it runs. A TX-only device has no RX
-    /// path: the figure may then pass the budget.
+    /// A sample's network stamp to the app's block: P + (c) RX. A TX-only
+    /// device has no RX path: the figure is only the arithmetic.
     pub rx_path_ns: u64,
 }
 
-/// Splits a latency budget (dstack #68, the owner's ROZHODNUTÉ of
-/// 3.11.2026): `budget_ns` is each direction's whole path. The pump's
-/// block B (`block` device frames; [`BLOCK`] when it is not one of
-/// `stream::BLOCKS`), its margin W ([`work_margin`]: 2/5 of the budget;
-/// with TX, no more than leaves P its floor after the converter's TX delay,
-/// never under the block and 2 ms; RX only, the whole budget,
-/// [`rx_work_margin`]; dstack #1) and the rate converter's
-/// delays ([`rated::delay_ns`], none when `app_rate` is
-/// `device_rate`) are the work; the Dante latency P is the budget less the
-/// work of the device's `directions` (TX: W + the converter's TX delay; RX:
-/// B + its RX delay; the larger of the two for [`Directions::Both`]), in
-/// whole samples at `device_rate` (dstack #1: an RX-only device no longer
-/// pays for a TX path it never runs).
+impl Split {
+    /// The terms as the device logs them at its start, one line each
+    /// (dstack #244: never one lump): the Dante latency with (a) and (b),
+    /// then the RX hand-off when the device has RX channels and the TX
+    /// hand-off with W when it has TX channels. `set` says which terms the
+    /// app set ((a), (b), W); the others read "default".
+    pub fn lines(&self, directions: Directions, set: Terms) -> Vec<String> {
+        let from = |given: bool| if given { "set" } else { "default" };
+        let mut lines = vec![format!(
+            "Dante latency P {} ms = network latency (a) {} ms ({}) + receive buffer (b) {} ms ({})",
+            ms(self.latency_ns),
+            ms(self.network_latency_ns),
+            from(set.network_latency_ns.is_some()),
+            ms(self.receive_buffer_ns),
+            from(set.receive_buffer_ns.is_some()),
+        )];
+        if directions.has_rx() {
+            lines.push(format!(
+                "RX app hand-off (c) {} ms = block {} ms + converter {} ms; RX path P + (c) {} ms",
+                ms(self.rx_handoff_ns),
+                ms(self.block_ns),
+                ms(self.rx_convert_ns),
+                ms(self.rx_path_ns),
+            ));
+        }
+        if directions.has_tx() {
+            lines.push(format!(
+                "TX app hand-off (c) {} ms = work margin W {} ms ({}) + converter {} ms; TX path (c) + P {} ms",
+                ms(self.tx_handoff_ns),
+                ms(self.work_margin_ns),
+                from(set.work_margin_ns.is_some()),
+                ms(self.tx_convert_ns),
+                ms(self.tx_path_ns),
+            ));
+        }
+        lines
+    }
+}
+
+/// `ns` as ms with up to six decimals, trailing zeros dropped
+/// (13041666 -> "13.041666", 1000000 -> "1").
+pub fn ms(ns: u64) -> String {
+    let (whole, frac) = (ns / 1_000_000, ns % 1_000_000);
+    if frac == 0 {
+        return whole.to_string();
+    }
+    let digits = format!("{frac:06}");
+    format!("{whole}.{}", digits.trim_end_matches('0'))
+}
+
+/// A device's latency in named terms (dstack #244, the owner's ROZHODNUTÉ
+/// of 12.11.2026, replacing the single budget of dstack #68):
 ///
-/// The path each way (`dstack::stream`: block k runs once media time
-/// passes kB + B + P, and its output goes out stamped kB + B + P + W): TX
-/// W + P, RX P + B. A budget that leaves P under [`MIN_LATENCY_NS`], a
-/// device rate of 0 and a rate pair the converter refuses are problems.
+/// - (a) the Dante network latency, `terms.network_latency_ns`;
+/// - (b) the receive buffer, `terms.receive_buffer_ns`: this PC's room for
+///   the RX thread's wake and pass. Unset, it is what keeps P as it was up
+///   to v0.6.105: P at [`REFERENCE_PATH_NS`] less the work of the device's
+///   `directions` (TX: the default W + the converter's TX delay; RX: B +
+///   its RX delay; the larger for [`Directions::Both`]), at least the
+///   floor, less [`NETWORK_LATENCY_NS`];
+/// - P = (a) + (b), rounded up to whole samples at `device_rate`;
+/// - (c) the app hand-off, computed: RX B + the converter's RX delay, TX
+///   W + its TX delay ([`rated::delay_ns`], none when `app_rate` is
+///   `device_rate`); W is `terms.work_margin_ns` or [`default_work_margin`].
+///
+/// The block B is `block` device frames ([`BLOCK`] when it is not one of
+/// `stream::BLOCKS`). P's floor is [`tx_floor_ns`] on a device with TX (a
+/// TX packet's own age) and [`MIN_LATENCY_NS`] RX only. A P under its
+/// floor, a W out of its range, a device rate of 0 and a rate pair the
+/// converter refuses are problems.
 pub fn split(
-    budget_ns: u64,
+    terms: Terms,
     device_rate: u32,
     app_rate: u32,
     block: u64,
@@ -685,56 +803,84 @@ pub fn split(
         return Err("sample_rate: the device's rate is 0 Hz".to_string());
     }
     let b = valid_block(block);
-    let (convert_rx, convert_tx) = rated::delay_ns(
+    let (rx_convert_ns, tx_convert_ns) = rated::delay_ns(
         device_rate,
         app_rate,
         usize::try_from(b).unwrap_or(usize::MAX),
     )
     .map_err(|e| format!("rate conversion: {e}"))?;
     let rate = u128::from(device_rate);
-    let ns = |samples: u64| (u128::from(samples) * 1_000_000_000 / rate) as u64;
-    let samples_in = |ns: u64| (u128::from(ns) * rate / 1_000_000_000) as u64;
-    // W is in the TX path: a device with TX keeps P's TX floor (the
-    // packets' own age, [`tx_floor_ns`]), and W gives way, down to its own
-    // least. The room's last sample is left to P, so P's whole samples
-    // still reach the floor at any rate. An RX-only device's W is in none
-    // of its paths (a late block only comes later): W is the whole budget
-    // ([`rx_work_margin`]), and its P has the profile's floor.
-    let (margin, floor) = if directions == Directions::Rx {
-        (rx_work_margin(budget_ns, device_rate, b), MIN_LATENCY_NS)
+    let ns = |samples: u64| {
+        u64::try_from(u128::from(samples) * 1_000_000_000 / rate).unwrap_or(u64::MAX)
+    };
+    let default_margin = default_work_margin(device_rate, b, directions);
+    let margin = match terms.work_margin_ns {
+        None => default_margin,
+        Some(w) => {
+            let (least, most) = (least_work_margin(device_rate, b), MAX_WORK_MARGIN);
+            let m = latency_samples(w, device_rate);
+            if !(least..=most).contains(&m) {
+                return Err(format!(
+                    "work_margin_ns: {w} is {m} samples at {device_rate} Hz; \
+                     {least} to {most} (the block and 2 ms, the stack's largest margin)"
+                ));
+            }
+            m
+        }
+    };
+    let block_ns = ns(b);
+    let rx_handoff_ns = block_ns + rx_convert_ns;
+    let tx_handoff_ns = ns(margin) + tx_convert_ns;
+    let (floor, why) = if directions == Directions::Rx {
+        (MIN_LATENCY_NS, "the normal profile's floor")
     } else {
-        let floor = tx_floor_ns(device_rate);
-        let room = budget_ns.saturating_sub(convert_tx + floor);
-        let margin = work_margin(budget_ns, device_rate, b)
-            .min(samples_in(room).saturating_sub(1))
-            .max(least_work_margin(device_rate, b));
-        (margin, floor)
+        (
+            tx_floor_ns(device_rate),
+            "a TX packet's own age, dlink::tx_floor_ns",
+        )
     };
-    let tx_work = ns(margin) + convert_tx;
-    let rx_work = ns(b) + convert_rx;
-    let work = match directions {
-        Directions::Both => tx_work.max(rx_work),
-        Directions::Rx => rx_work,
-        Directions::Tx => tx_work,
+    let a = terms.network_latency_ns.unwrap_or(NETWORK_LATENCY_NS);
+    let receive_buffer = match terms.receive_buffer_ns {
+        Some(rb) => rb,
+        None => {
+            // P as up to v0.6.105: the reference path less the work of the
+            // device's directions at the default W, whole samples (rounded
+            // down, as the budget's split did), at least the floor.
+            let tx_work = ns(default_margin) + tx_convert_ns;
+            let work = match directions {
+                Directions::Both => tx_work.max(rx_handoff_ns),
+                Directions::Rx => rx_handoff_ns,
+                Directions::Tx => tx_work,
+            };
+            let reference = ns(
+                (u128::from(REFERENCE_PATH_NS.saturating_sub(work)) * rate / 1_000_000_000) as u64
+            );
+            reference.max(floor).saturating_sub(NETWORK_LATENCY_NS)
+        }
     };
-    let latency_ns = ns(samples_in(budget_ns.saturating_sub(work)));
+    let wanted = a.saturating_add(receive_buffer);
+    // P rounded up to whole samples: never under what the terms ask.
+    let samples = (u128::from(wanted) * rate).div_ceil(1_000_000_000);
+    let latency_ns = ns(u64::try_from(samples).unwrap_or(u64::MAX));
     if latency_ns < floor {
         return Err(format!(
-            "budget_ns: {budget_ns} leaves a Dante latency of {latency_ns} ns after \
-             {work} ns of work (block, margin, rate conversion); at least {floor} \
-             ({})",
-            if directions == Directions::Rx {
-                "the normal profile's floor"
-            } else {
-                "a TX packet's own age, dlink::tx_floor_ns"
-            }
+            "network_latency_ns + receive_buffer_ns: {a} + {receive_buffer} = {wanted} ns \
+             of Dante latency; at least {floor} ({why})"
         ));
     }
     Ok(Split {
+        network_latency_ns: a,
+        receive_buffer_ns: latency_ns - a,
         latency_ns,
+        block_ns,
+        rx_convert_ns,
+        tx_convert_ns,
+        rx_handoff_ns,
+        tx_handoff_ns,
         margin,
-        tx_path_ns: tx_work + latency_ns,
-        rx_path_ns: rx_work + latency_ns,
+        work_margin_ns: ns(margin),
+        tx_path_ns: tx_handoff_ns.saturating_add(latency_ns),
+        rx_path_ns: rx_handoff_ns.saturating_add(latency_ns),
     })
 }
 
@@ -848,16 +994,9 @@ impl Link {
             HostError::Setup(format!("dlink config: {}", problems.join("; ")))
         })?;
         let sender = config.frame_sender.0.clone();
-        tracing::info!(
-            budget_ns = config.budget_ns,
-            latency_ns = s.latency_ns,
-            margin = s.margin,
-            block = cfg.block,
-            tx_path_ns = s.tx_path_ns,
-            rx_path_ns = s.rx_path_ns,
-            directions = ?config.directions(),
-            "dlink: the latency budget's split (the Dante latency is what the work leaves)"
-        );
+        for line in s.lines(config.directions(), config.terms()) {
+            tracing::info!(device = %config.name, "dlink latency: {line}");
+        }
         let device = if config.converts() {
             tracing::info!(
                 device_rate = config.device_rate(),

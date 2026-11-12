@@ -63,7 +63,7 @@ fn drain_into(fifo: &mut VecDeque<f64>, dst: &mut [f64]) -> usize {
 /// The delay each way, ns, from the converters' delays: RX `rx_frames` at
 /// the app's rate, TX `tx_frames` at the device's plus the FIFO's [`PRIME`]
 /// at the app's. The one formula [`Rated::delay_ns`] and [`delay_ns`] use,
-/// so `dlink::split` budgets what the converters really delay.
+/// so `dlink::split` states what the converters really delay.
 fn delays_ns(
     rx_frames: usize,
     tx_frames: usize,
@@ -89,7 +89,7 @@ fn prime_for(tx: &Converter) -> usize {
 }
 
 /// The converters for the device's RX into the app and the app's TX into
-/// the device: [`Converter::low_delay`], whose delay is in the budget
+/// the device: [`Converter::low_delay`], whose delay is in the app hand-off
 /// (dstack #1: the half-band for 2:1 and 1:2).
 fn converters(
     device_rate: u32,

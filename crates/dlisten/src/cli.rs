@@ -8,7 +8,7 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 
 use dlink::{Config, Place, Ports};
-use dstack_endpoint::cli::{Shared, number, parse_shared, with_shared};
+use dstack_endpoint::cli::{Latency, Shared, number, parse_shared, with_shared};
 
 /// The usage text (`--help`, and after a usage error).
 pub const USAGE: &str = "\
@@ -31,7 +31,9 @@ receives, played on the output at its own rate and clock.
                               our own device is changed. A subscription set
                               in Dante Controller wins.
   --rate <hz>                 the network's sample rate (default 48000)
-  --budget-ms <ms>            dlink's latency budget (default 15)
+  --network-latency-ms <ms>   (a) the Dante network latency (default 1)
+  --receive-buffer-ms <ms>    (b) the receive buffer; the Dante latency is
+                              (a) + (b) (default: as before 0.6.106)
   --ip <addr>                 the Dante NIC's address (default: the address
                               of the default route)
   --iface <name>              the Dante NIC by name (instead of --ip)
@@ -58,13 +60,14 @@ pub const SUFFIX: &str = "-dlisten";
 pub use dstack_endpoint::cli::{NAME_MAX, parse_ports};
 
 /// The flags that take a value.
-const VALUE_FLAGS: [&str; 11] = [
+const VALUE_FLAGS: [&str; 12] = [
     "--output",
     "--channels",
     "--name",
     "--subscribe",
     "--rate",
-    "--budget-ms",
+    "--network-latency-ms",
+    "--receive-buffer-ms",
     "--ip",
     "--iface",
     "--ports",
@@ -89,7 +92,8 @@ pub struct Options {
     pub output: Option<String>,
     pub subscribe: Vec<Subscribe>,
     pub rate: u32,
-    pub budget_ms: Option<u64>,
+    /// The latency terms (a) and (b), ns (dstack #244).
+    pub latency: Latency,
     /// None: the default route's address.
     pub place: Option<Place>,
     pub ports: Option<Ports>,
@@ -106,7 +110,8 @@ impl Options {
             Shared::Output(t) => self.output = Some(t),
             Shared::Name(n) => self.name = Some(n),
             Shared::Rate(r) => self.rate = r,
-            Shared::BudgetMs(ms) => self.budget_ms = Some(ms),
+            Shared::NetworkLatencyNs(ns) => self.latency.network_ns = Some(ns),
+            Shared::ReceiveBufferNs(ns) => self.latency.receive_buffer_ns = Some(ns),
             Shared::Place(p) => self.place = Some(p),
             Shared::Ports(p) => self.ports = Some(p),
             Shared::ProcessId(id) => self.process_id = Some(id),
@@ -167,7 +172,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
         output: None,
         subscribe: Vec::new(),
         rate: RATE,
-        budget_ms: None,
+        latency: Latency::default(),
         place: None,
         ports: None,
         process_id: None,
@@ -266,15 +271,16 @@ pub fn state_path(
 
 /// The dlink device of a run: `name`, its state in `state`, RX only with
 /// the options' channels at the network's rate, `dstack`/`dlisten` as
-/// Dante Controller's manufacturer and model, and the budget, ports,
-/// process id and subscriptions the options give (dlink's defaults
-/// otherwise: the 15 ms budget, no real-time setup).
+/// Dante Controller's manufacturer and model, and the latency terms,
+/// ports, process id and subscriptions the options give (dlink's
+/// defaults otherwise: (a) 1 ms, (b) keeping v0.6.105's latency, no
+/// real-time setup).
 pub fn link_config(o: &Options, name: &str, state: PathBuf) -> Config {
     let mut c = Config::new(name, state)
         .rx(rx_names(o.channels))
         .sample_rate(o.rate)
         .product("dstack", "dlisten");
-    c = with_shared(c, o.budget_ms, o.ports, o.process_id);
+    c = with_shared(c, o.latency, o.ports, o.process_id);
     for s in &o.subscribe {
         c = c.subscribe(s.rx, s.tx_channel.clone(), s.tx_device.clone());
     }

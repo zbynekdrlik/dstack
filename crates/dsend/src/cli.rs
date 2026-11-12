@@ -8,7 +8,7 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 
 use dlink::{Config, Place, Ports};
-use dstack_endpoint::cli::{SHARED_FLAGS, Shared, parse_shared, with_shared};
+use dstack_endpoint::cli::{Latency, SHARED_FLAGS, Shared, parse_shared, with_shared};
 
 use crate::source::TX_NAMES;
 
@@ -26,7 +26,9 @@ the network's rate and clock. Windows only (WASAPI loopback).
                               driver is installed, else the default output)
   --name <name>               the device's Dante name (default <host>-dsend)
   --rate <hz>                 the network's sample rate (default 96000)
-  --budget-ms <ms>            dlink's latency budget (default 15)
+  --network-latency-ms <ms>   (a) the Dante network latency (default 1)
+  --receive-buffer-ms <ms>    (b) the receive buffer; the Dante latency is
+                              (a) + (b) (default: as before 0.6.106)
   --ip <addr>                 the Dante NIC's address (default: the address
                               of the default route)
   --iface <name>              the Dante NIC by name (instead of --ip)
@@ -51,7 +53,7 @@ pub const SUFFIX: &str = "-dsend";
 pub const APP: &str = "dsend";
 
 /// The flags that take a value: dsend's are the shared ones.
-const VALUE_FLAGS: [&str; 9] = SHARED_FLAGS;
+const VALUE_FLAGS: [&str; 10] = SHARED_FLAGS;
 
 /// What a run is given.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,7 +61,8 @@ pub struct Options {
     pub name: Option<String>,
     pub output: Option<String>,
     pub rate: u32,
-    pub budget_ms: Option<u64>,
+    /// The latency terms (a) and (b), ns (dstack #244).
+    pub latency: Latency,
     /// None: the default route's address.
     pub place: Option<Place>,
     pub ports: Option<Ports>,
@@ -74,7 +77,8 @@ impl Options {
             Shared::Output(t) => self.output = Some(t),
             Shared::Name(n) => self.name = Some(n),
             Shared::Rate(r) => self.rate = r,
-            Shared::BudgetMs(ms) => self.budget_ms = Some(ms),
+            Shared::NetworkLatencyNs(ns) => self.latency.network_ns = Some(ns),
+            Shared::ReceiveBufferNs(ns) => self.latency.receive_buffer_ns = Some(ns),
             Shared::Place(p) => self.place = Some(p),
             Shared::Ports(p) => self.ports = Some(p),
             Shared::ProcessId(id) => self.process_id = Some(id),
@@ -98,7 +102,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
         name: None,
         output: None,
         rate: RATE,
-        budget_ms: None,
+        latency: Latency::default(),
         place: None,
         ports: None,
         process_id: None,
@@ -190,15 +194,15 @@ pub fn state_path(
 
 /// The dlink device of a run: `name`, its state in `state`, TX only (L and
 /// R) at the network's rate, `dstack`/`dsend` as Dante Controller's
-/// manufacturer and model, and the budget, ports and process id the
-/// options give (dlink's defaults otherwise: the 15 ms budget, no
-/// real-time setup).
+/// manufacturer and model, and the latency terms, ports and process id
+/// the options give (dlink's defaults otherwise: (a) 1 ms, (b) keeping
+/// v0.6.105's latency, no real-time setup).
 pub fn link_config(o: &Options, name: &str, state: PathBuf) -> Config {
     let mut c = Config::new(name, state)
         .tx(TX_NAMES)
         .sample_rate(o.rate)
         .product("dstack", APP);
-    c = with_shared(c, o.budget_ms, o.ports, o.process_id);
+    c = with_shared(c, o.latency, o.ports, o.process_id);
     c
 }
 

@@ -25,7 +25,7 @@
 //!
 //! The bridge adds its FIFO's depth to the device's path: about
 //! [`player::TARGET_S`] (40 ms), up to [`player::CUSHION_MAX_S`] (40 ms)
-//! more after dropouts, on top of the budget's split.
+//! more after dropouts, on top of the device's path (`dlink::split`).
 
 pub mod fifo;
 pub mod map;

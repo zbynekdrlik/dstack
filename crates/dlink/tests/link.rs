@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! dstack #68: a dlink device in the app's process, on the box's routed
-//! address and its own system clock, at dlink's defaults (a 15 ms budget,
+//! address and its own system clock, at dlink's defaults ((a) 1 ms, (b) keeping v0.6.105's P,
 //! the normal profile: no real-time priority, no pinning). A file of its own,
 //! so its process sets the normal profile (one per process). Our device
 //! hears itself (the tests' rule: our device only).
@@ -92,8 +92,8 @@ fn a_dlink_device_runs_the_app_s_processor_at_its_defaults() {
     );
     assert!(pump.media && pump.blocks > 0, "{pump:?}");
     // The pump runs at dlink's timing (48 kHz), as the split says: B 128
-    // (dstack #90) + P 432 (9 ms, what the 15 ms budget leaves after W;
-    // dstack #68, #1) + W 288 (6 ms, 2/5 of the budget).
+    // (dstack #90) + P 432 (9 ms: (a) 1 ms + the default (b) 8 ms; dstack
+    // #244) + W 288 (the default 6 ms).
     let s = config.split().unwrap();
     let p = dstack::clock::latency_samples(s.latency_ns, 48_000);
     assert_eq!((p, s.margin), (432, 288));
@@ -196,15 +196,15 @@ fn a_48_khz_app_runs_a_96_khz_device_through_the_conversion() {
     // The device's block is 128 frames at 96 kHz (dstack #90): the app gets 64
     // at 48 kHz.
     assert_eq!(frames.load(Ordering::Relaxed), 64);
-    // The RX flow runs at 96 kHz: the split's 8.36 ms latency (15 ms less
-    // W's 6 ms share and the half-band's 0.64 ms TX delay, over a TX
-    // packet's own age of 4.58 ms; dstack #68, #1) is 803 samples.
+    // The RX flow runs at 96 kHz: the split's 8.36 ms latency ((a) 1 ms +
+    // the default (b) 7.36 ms, v0.6.105's P, over a TX packet's own age of
+    // 4.58 ms; dstack #1, #244) is 803 samples.
     let s = config.split().unwrap();
     let p = dstack::clock::latency_samples(s.latency_ns, 96_000);
     assert_eq!((p, s.margin), (803, 576));
     assert!(status.contains(&format!("\"latency\":{p}")), "{status}");
-    // The pump runs at the device's 96 kHz: B 128 + P 803 + W 576 (6 ms,
-    // W's whole share).
+    // The pump runs at the device's 96 kHz: B 128 + P 803 + W 576 (the
+    // default 6 ms).
     assert_eq!(
         (pump.playout, pump.offset),
         (p, 128 + p + s.margin),
@@ -414,8 +414,11 @@ fn the_loop_through_our_own_flow_takes_what_the_split_says() {
             .subscribe(1, "Out 1", name);
         let split = config.split().unwrap();
         let want = split.tx_path_ns + split.rx_path_ns - split.latency_ns;
-        // Each path is within the 15 ms budget.
-        assert!(split.tx_path_ns <= dlink::BUDGET_NS && split.rx_path_ns <= dlink::BUDGET_NS);
+        // The defaults keep each path within v0.6.105's 15 ms (dstack #244).
+        assert!(
+            split.tx_path_ns <= dlink::REFERENCE_PATH_NS
+                && split.rx_path_ns <= dlink::REFERENCE_PATH_NS
+        );
         let got = measured_loop(&config, app);
         // The design allows one block; the stamps are exact, so a few app
         // frames (the converter's half-way crossing) is the bound, and a
@@ -485,15 +488,16 @@ impl Process for Napping {
 /// lateness a pump may have before it starts again, had dropped to 2 ms
 /// (half the latency, 5 ms, before), and stayed there at intercom's 20 ms
 /// budget. Both devices' pumps run up to [`NAP`] less a block late now and
-/// then: within their share of the budget, the tone arrives whole (no pump
+/// then: within their margin W, the tone arrives whole (no pump
 /// starts again, no sample off the level), on both the sending and the
-/// receiving side. The test runs a 30 ms budget (W 12 ms; 2 ms before the
-/// fix, whatever the budget): a 4 ms nap then leaves about 9 ms of slack.
+/// receiving side. The test sets W 12 ms on both (dstack #244: W is its
+/// own term; 2 ms before the fix): a 4 ms nap then leaves about 9 ms of
+/// slack.
 /// At 20 ms (W 8 ms) a GitHub runner's own stalls took the 5 ms left and
 /// restarted both pumps at once (v0.6.28 PR CI); real-time lateness is the
 /// hardware gate's (tests.md), the margin's share is what this checks.
 #[test]
-fn a_pump_late_within_its_share_of_the_budget_keeps_the_tone_whole() {
+fn a_pump_late_within_its_margin_keeps_the_tone_whole() {
     let _one = ONE_DEVICE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -502,16 +506,16 @@ fn a_pump_late_within_its_share_of_the_budget_keeps_the_tone_whole() {
     let count = Arc::new(AtomicBool::new(false));
     let good = Arc::new(AtomicU64::new(0));
     let bad = Arc::new(AtomicU64::new(0));
-    let budget = 30_000_000;
+    let margin = 12_000_000;
     let tx_config = Config::new("dlink-late-tx", dir.path().join("tx.toml"))
         .tx(["Out 1"])
         .sample_rate(96_000)
-        .budget_ns(budget);
+        .work_margin_ns(margin);
     let rx_config = Config::new("dlink-late-rx", dir.path().join("rx.toml"))
         .rx(["In 1"])
         .sample_rate(48_000)
         .network_rate(96_000)
-        .budget_ns(budget)
+        .work_margin_ns(margin)
         .ports(Ports {
             arc: 4441,
             cmc: 8801,
@@ -602,10 +606,8 @@ fn a_pump_late_within_its_share_of_the_budget_keeps_the_tone_whole() {
     );
     assert_eq!(bad, 0, "{bad} samples off the tone, {good} on it");
     // The split each device runs (dstack #1), as its pump's playout point
-    // and margin (offset = B + P + W), from `Config::split`: the TX-only
-    // sender's P is the budget less W's 12 ms share, the RX-only receiver's
-    // the budget less its block and the half-band's RX delay, with the
-    // whole budget as its W (30 ms, v0.6.32: in no path of its own).
+    // and margin (offset = B + P + W), from `Config::split`: each P is
+    // (a) + its default (b), each W the 12 ms set (dstack #244).
     let (tx, rx) = pumps;
     for (pump, config) in [(tx, &tx_split), (rx, &rx_split)] {
         let playout = dstack::clock::latency_samples(config.latency_ns, 96_000);
@@ -614,6 +616,6 @@ fn a_pump_late_within_its_share_of_the_budget_keeps_the_tone_whole() {
             (playout, 128 + playout + config.margin),
             "{pump:?}"
         );
-        assert!(config.margin >= 1152, "W at least 12 ms: {config:?}");
+        assert_eq!(config.margin, 1152, "W 12 ms: {config:?}");
     }
 }

@@ -33,7 +33,7 @@ fn no_arguments_run_at_the_defaults() {
             output: None,
             subscribe: vec![],
             rate: 48_000,
-            budget_ms: None,
+            latency: Latency::default(),
             place: None,
             ports: None,
             process_id: None,
@@ -47,7 +47,7 @@ fn no_arguments_run_at_the_defaults() {
 fn every_option_is_read() {
     let o = run(
         "--name foh-listen --channels 4 --output speakers --subscribe 1=Out@tx-a \
-         --subscribe 4=Mix@tx-b --rate 96000 --budget-ms 20 --ip 192.0.2.7 \
+         --subscribe 4=Mix@tx-b --rate 96000 --network-latency-ms 0.5 --receive-buffer-ms 9 --ip 192.0.2.7 \
          --ports 4441,8801,4456 --process-id 3 --state /tmp/x.toml",
     );
     assert_eq!(o.name.as_deref(), Some("foh-listen"));
@@ -69,7 +69,13 @@ fn every_option_is_read() {
         ]
     );
     assert_eq!(o.rate, 96_000);
-    assert_eq!(o.budget_ms, Some(20));
+    assert_eq!(
+        o.latency,
+        Latency {
+            network_ns: Some(500_000),
+            receive_buffer_ns: Some(9_000_000),
+        }
+    );
     assert_eq!(o.place, Some(Place::Ip(Ipv4Addr::new(192, 0, 2, 7))));
     assert_eq!(
         o.ports,
@@ -112,8 +118,8 @@ fn bad_command_lines_say_what_is_wrong() {
     );
     assert_eq!(error("--rate 0"), "--rate needs a rate over 0 Hz");
     assert_eq!(
-        error("--budget-ms 0"),
-        "--budget-ms needs a budget over 0 ms"
+        error("--network-latency-ms 1.x"),
+        "--network-latency-ms needs ms with up to 6 decimals, not \"1.x\""
     );
     assert_eq!(
         error("--ip nowhere"),
@@ -293,7 +299,7 @@ fn the_link_config_is_an_rx_only_device_with_the_options() {
     );
 
     let o = run(
-        "--channels 1 --rate 96000 --budget-ms 20 --ports 4441,8801,4456 \
+        "--channels 1 --rate 96000 --network-latency-ms 0.5 --receive-buffer-ms 9 --ports 4441,8801,4456 \
          --process-id 3 --subscribe 1=Out@tx-a",
     );
     let full = link_config(&o, "n", state.clone());
@@ -303,7 +309,8 @@ fn the_link_config_is_an_rx_only_device_with_the_options() {
             .rx(["In 1"])
             .sample_rate(96_000)
             .product("dstack", "dlisten")
-            .budget_ns(20_000_000)
+            .network_latency_ns(500_000)
+            .receive_buffer_ns(9_000_000)
             .ports(Ports {
                 arc: 4441,
                 cmc: 8801,
