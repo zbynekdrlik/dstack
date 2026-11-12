@@ -42,7 +42,7 @@
 //! ports and channel numbers, never a name or an address.
 
 use std::fmt::Display;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -65,7 +65,7 @@ use crate::clock::{ClockStats, MonoClock, monotonic_ns, poll_dsync, realtime_ns}
 #[cfg(unix)]
 use crate::ctl;
 use crate::daemon::media::{Clock, Media};
-use crate::daemon::{self, BUILD, IfAddr, Options, Place, ServeError, Sockets, VERSION};
+use crate::daemon::{self, BUILD, IfAddr, Options, Place, PlaceWait, ServeError, Sockets, VERSION};
 use crate::device::{Device, DeviceConfig, DeviceState};
 use crate::info::{self, Multicast, NetInfo};
 
@@ -176,6 +176,20 @@ pub fn interfaces() -> std::io::Result<Vec<IfAddr>> {
             if_addrs::IfAddr::V6(_) => None,
         })
         .collect())
+}
+
+/// The default route's address, looked up once (`None` while the box has
+/// no default route yet, or its network is still down or unreachable): a
+/// UDP socket connected to a TEST-NET-1 address picks the route and sends
+/// nothing. An IPv6 route and a socket that cannot be opened are errors.
+pub fn default_route() -> Result<Option<Ipv4Addr>, String> {
+    let probe = std::net::UdpSocket::bind("0.0.0.0:0")
+        .map_err(|e| format!("the default route's probe socket: {e}"))?;
+    daemon::route_answer(
+        probe
+            .connect("192.0.2.1:9")
+            .and_then(|()| probe.local_addr()),
+    )
 }
 
 /// What the info server says about the interface, from its files: the MAC
@@ -331,8 +345,22 @@ pub fn prepare_config(
     engine_tx: &[usize],
     source: ClockSource,
 ) -> Result<Prepared, HostError> {
+    prepare_config_waiting(cfg, place, PlaceWait::Forever, control, engine_tx, source)
+}
+
+/// [`prepare_config`] with a place not there yet met as `wait` says
+/// ([`daemon::resolve_place`], dstack #230): [`PlaceWait::Now`] fails at
+/// once (dlink's `Link::start`).
+pub(crate) fn prepare_config_waiting(
+    cfg: DeviceConfig,
+    place: &Place,
+    wait: PlaceWait<'_>,
+    control: Option<&Path>,
+    engine_tx: &[usize],
+    source: ClockSource,
+) -> Result<Prepared, HostError> {
     prepare_on(cfg, place, control, engine_tx, source, |place| {
-        daemon::wait_for_interface(place, interfaces, std::thread::sleep)
+        daemon::resolve_place(place, wait, interfaces, std::thread::sleep)
     })
 }
 

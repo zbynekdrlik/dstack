@@ -1,5 +1,7 @@
 use super::*;
 
+mod start;
+
 /// The default budget of v0.6.22 to v0.6.27: the split and its TX floor
 /// still hold at it (an app may set it), and its numbers are pinned here.
 const TEN_MS: u64 = 10_000_000;
@@ -181,16 +183,6 @@ fn a_config_the_device_refuses_is_a_setup_error_before_anything_runs() {
             assert!(why.starts_with("dlink config: "), "{why}");
             assert!(why.contains("budget_ns: 1000000 leaves"), "{why}");
         }
-        other => panic!("{other:?}"),
-    }
-}
-
-#[test]
-fn a_place_the_dante_network_cannot_reach_is_refused_without_a_wait() {
-    // dstack #225: the wait an app runs before its own use of the address
-    // (dsend's and dlisten's free ports) refuses as `Link::start` does.
-    match wait_for_place(&Place::Ip(std::net::Ipv4Addr::LOCALHOST)) {
-        Err(HostError::Run(why)) => assert!(why.contains("loopback"), "{why}"),
         other => panic!("{other:?}"),
     }
 }

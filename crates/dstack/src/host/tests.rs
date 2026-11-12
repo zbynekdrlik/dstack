@@ -161,6 +161,23 @@ fn the_box_s_interfaces_include_the_loopback_address() {
     );
 }
 
+/// dstack #230: the default route's address, read as the tests' own
+/// routed IPv4 is (every box that runs the tests has a default route).
+#[test]
+fn the_default_route_s_address_is_the_box_s_routed_ipv4() {
+    let probe = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
+    probe.connect("192.0.2.1:9").unwrap();
+    let std::net::SocketAddr::V4(routed) = probe.local_addr().unwrap() else {
+        panic!("no IPv4 route");
+    };
+    assert_eq!(default_route(), Ok(Some(*routed.ip())));
+    // An oracle apart from the probe: one of the box's interfaces holds it,
+    // and it is not the loopback's.
+    let all = interfaces().unwrap();
+    assert!(all.iter().any(|i| i.ip == *routed.ip()), "{all:?}");
+    assert!(!routed.ip().is_loopback());
+}
+
 // The interface facts come from Linux files (/sys); Windows reads the adapter.
 #[cfg(target_os = "linux")]
 #[test]

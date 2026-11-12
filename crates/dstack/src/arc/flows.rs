@@ -69,7 +69,7 @@ use std::net::{Ipv4Addr, SocketAddrV4};
 
 use super::client::ReadError;
 use super::control::Call;
-use crate::wire::{HEADER_LEN, STATUS_MORE, STATUS_OK, read_u16};
+use crate::wire::{HEADER_LEN, MAX_DATAGRAM, STATUS_MORE, STATUS_OK, read_u16};
 
 /// ARC 2.8.9's start code, which these requests carry (Dante Controller's
 /// and netaudio's).
@@ -201,22 +201,48 @@ fn segments(body: &[u8], at: usize) -> Option<Vec<usize>> {
     Some(out)
 }
 
-/// A 0x2600 reply body listing `flows` (at most 255, and the table states
-/// [`super::MAX_FLOWS`] slots, our devices' TX flow slots), in the form
-/// [`parse_flows`] reads: the table, then each record's segment chain
-/// (0: ids, flags, bits; 1: empty; 2: its destinations; 3: its channels;
-/// 4: its frames per packet), then the destinations' descriptors. Our own
-/// devices answer the list with it (dstack #148: every receiver reads
-/// each transmitter's list once a minute; unanswered, each read waited
-/// 1 s and the transmitter logged it).
 // The table's slot count is one byte.
 const _: () = assert!(super::MAX_FLOWS <= 255);
 
+/// A 0x2600 reply body listing `flows` (at most 255, and the table states
+/// [`super::MAX_FLOWS`] slots), in the form [`parse_flows`] reads: the
+/// table, then each record's segment chain (0: ids, flags, bits; 1: empty;
+/// 2: its destinations; 3: its channels; 4: its frames per packet), then
+/// the destinations' descriptors. Our own devices answer the list with
+/// [`list_reply_page`]'s pages of it (dstack #148: every receiver reads
+/// each transmitter's list once a minute; unanswered, each read waited
+/// 1 s and the transmitter logged it) and a create with it.
 pub fn list_reply_body(flows: &[TxFlow]) -> Vec<u8> {
+    reply_body(super::MAX_FLOWS as u8, flows)
+}
+
+/// One page of a 0x2600 reply (dstack #227): [`list_reply_body`]'s form
+/// with `slots` in its table (the device's TX flow slots), listing the
+/// most of `flows`, from the first, that one datagram
+/// ([`MAX_DATAGRAM`], the header counted) holds, and whether flows are
+/// left for the next page. A reader takes the next page from the flow
+/// after the page's last ([`list_tx_flows`]). Each page holds at least
+/// one of our own flows: a record of [`MAX_FLOW_CHANNELS`] channels and
+/// one destination takes 68 bytes. A flow too long for a datagram alone
+/// (hundreds of channels or destinations) gives a page of no flow that
+/// says more follow, which [`list_tx_flows`] reads as malformed. At most
+/// 255 flows are taken (the table's count is one byte): pass a page's
+/// worth.
+pub fn list_reply_page(slots: u8, flows: &[TxFlow]) -> (Vec<u8>, bool) {
+    let fits = |n: usize| HEADER_LEN + reply_body(slots, &flows[..n]).len() <= MAX_DATAGRAM;
+    let n = (0..=flows.len()).rev().find(|&n| fits(n)).unwrap_or(0);
+    (reply_body(slots, &flows[..n]), n < flows.len())
+}
+
+// A page of no flow (its 8 bytes) fits a datagram.
+const _: () = assert!(HEADER_LEN + 8 <= MAX_DATAGRAM);
+
+/// [`list_reply_body`] with `slots` in its table.
+fn reply_body(slots: u8, flows: &[TxFlow]) -> Vec<u8> {
     let flows = &flows[..flows.len().min(255)];
     let count = flows.len() as u8;
     let mut out = vec![0u8; 6];
-    out.extend([super::MAX_FLOWS as u8, count]);
+    out.extend([slots, count]);
     let table = out.len();
     out.resize(table + 2 * flows.len(), 0);
     // The descriptors' offsets are known only after every record.
