@@ -311,8 +311,14 @@ fn our_counts_take_the_card_s_layout_with_our_numbers() {
         second_pairs,
         [(1, 1), (0, 2), (2, 2), (0, 2), (2, 2), (0, 2), (8, 8)]
     );
+    // Both devices set word 0's 0x1000 (segmented flows, netaudio) and
+    // 0x0001 (the rename, #216 Finding 17).
     for p in [card("replies", "0x1000"), second("0x1000")] {
-        assert_eq!(p[10] & 0x10, 0x10, "word 0's 0x1000 under 2.8.9");
+        assert_eq!(
+            (p[10] & 0x10, p[11] & 0x01),
+            (0x10, 0x01),
+            "word 0 under 2.8.9"
+        );
     }
     // Ours: 3 TX, 5 RX.
     let mut dev = Dev::new(config_sized(5, 3));
@@ -322,10 +328,15 @@ fn our_counts_take_the_card_s_layout_with_our_numbers() {
         pairs(&reply),
         [(1, 1), (3, 5), (2, 2), (32, 32), (2, 2), (3, 5), (8, 8)]
     );
-    // The 2.7 counts lead, word 0 with 0x1000 set.
+    // The 2.7 counts lead, word 0 with the rename's 0x0001 set (Dante
+    // Controller offers the rename only then) and without 0x1000: with it
+    // Dante Controller reads the segmented lists and leaves our device out
+    // of its list (#216 Finding 17); without it, it reads the 2.7 lists.
     let mut counts_27 = dev.ask(1, op::COUNTS, &[]).body;
-    counts_27[0] |= 0x10;
+    assert_eq!(counts_27[..2], [0x00, 0x10], "2.7: TX channel rename only");
+    counts_27[1] |= 0x01;
     assert_eq!(reply[10..32], counts_27[..22]);
+    assert_eq!(reply[10] & 0x10, 0, "no segmented flows");
     // A device without TX states no TX flows; one without RX no RX flows.
     let mut rx_only = Dev::new(config_sized(5, 0));
     assert_eq!(
@@ -705,4 +716,26 @@ fn our_txt_announces_arc_2_8_9_as_our_0x1003_states() {
         (0x0403, 0x2809, 0x0204),
         "router 4.3, ARC 2.8.9, ARC min 0.2.4"
     );
+}
+
+const DC_RENAME: &str = include_str!("../../../tests/fixtures/arc_dc_rename.json");
+
+#[test]
+fn dante_controller_s_rename_under_2809_renames_our_device_and_is_saved() {
+    let f: serde_json::Value = serde_json::from_str(DC_RENAME).expect("the fixture is JSON");
+    let frame = hex(f["requests"]["0x1001"].as_str().expect("the rename"));
+    let want = hex(f["replies"]["0x1001"].as_str().expect("its answer"));
+    assert_eq!(head(&frame).0, START_2809);
+    let dir = tempfile::tempdir().unwrap();
+    let mut device = Device::load(config_in(dir.path())).unwrap();
+    match respond_idle(&mut device, &frame) {
+        ArcOutcome::Changed(bytes, change) => {
+            assert_eq!(bytes, want, "status OK, no body, as our device answered");
+            assert!(change.device_renamed);
+        }
+        other => panic!("not renamed: {other:?}"),
+    }
+    assert_eq!(device.state.name, "test-renamed");
+    let saved = Device::load(device.cfg.clone()).unwrap();
+    assert_eq!(saved.state.name, "test-renamed", "kept across a restart");
 }
