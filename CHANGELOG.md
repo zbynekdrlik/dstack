@@ -1,8 +1,10 @@
 # Changelog
 
-## Unreleased
+## 0.6.100
 
+- Docs (dstack #217): docs/windows-box.md records the spin_escape trial's result. It stays an opt-in; a stress walker froze the test PC with and without it.
 - Internal (dstack #231): `arc.rs` is split. The ARC settings server (0x1100, 0x1102) moved to `arc/settings.rs`, the counts and names replies (0x1000, 0x1003) to `arc/counts.rs`, and the page writer with the channel lists (0x2000, 0x2010, 0x3000) to `arc/channels.rs`. Every reply is byte-identical; no item moved was public, so no path changes. No API change, no latency change.
+- No API change; no latency change.
 
 ## 0.6.99
 
