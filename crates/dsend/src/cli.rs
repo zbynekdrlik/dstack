@@ -149,6 +149,15 @@ pub fn capture_check(windows: bool) -> Result<(), String> {
     }
 }
 
+/// Whether `command`'s failure shows a message box (dstack #225): never
+/// for a run, which has no window and is started headless (a logon task:
+/// no console, no stderr), so its failure goes to stderr and its log
+/// (`<state file>.log`) only; for another command as
+/// [`dstack_endpoint::alert::shows_box`] says (a start from Explorer).
+pub fn shows_box(command: &Command, attached: bool, has_stderr: bool) -> bool {
+    !matches!(command, Command::Run(_)) && dstack_endpoint::alert::shows_box(attached, has_stderr)
+}
+
 /// The default device name for a host named `host`: `<host>-dsend`
 /// ([`dstack_endpoint::cli::default_name`]).
 pub fn default_name(host: &str) -> String {
