@@ -305,3 +305,33 @@ fn the_tx_flow_page_states_a_multicast_flow_s_type_and_group() {
     want.extend(group.ip().octets());
     assert_eq!(body[socket..socket + 8], want);
 }
+
+#[test]
+fn a_create_s_reply_states_the_device_s_flow_slots() {
+    // A device with 4 flow slots (dstack #227): its create reply's table
+    // states 4, as its 0x1000 and its 0x2600 list do, not 32.
+    let cfg = DeviceConfig {
+        flow_slots: 4,
+        ..cfg()
+    };
+    let mut state = DeviceState::from_config(&cfg);
+    let mut tx = TxTable::with_slots(1, 4);
+    let packet = request(
+        START_2809,
+        0x4243,
+        CREATE,
+        0,
+        &create_body(4, &[1, 2], OPTIONS).unwrap(),
+    );
+    let (h, body) = Header::parse(&packet).expect("our request parses");
+    let bytes = match answer(&h, body, &mut state, &cfg, &mut tx, OUR_IP) {
+        ArcOutcome::Changed(bytes, _) => bytes,
+        other => panic!("the create is made: {other:?}"),
+    };
+    let (r, body) = Header::parse(&bytes).expect("our reply parses");
+    assert_eq!(r.op2, STATUS_OK);
+    assert_eq!(body[6], 4, "the table's slots");
+    let reply = parse_flows(body).expect("the reply reads");
+    assert_eq!((reply.slots, reply.flows.len()), (4, 1));
+    assert_eq!(reply.flows[0].local_id, 4);
+}
