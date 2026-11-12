@@ -214,15 +214,13 @@ pub const MAX_CHANNELS_IN_FLOW: u16 = 8;
 /// The answer to 0x3300. Without it Dante Controller reports a clock
 /// domain mismatch for the device.
 pub const CLOCK_REPLY: [u8; 8] = [0x38, 0x00, 0x38, 0xfd, 0x38, 0xfe, 0x38, 0xff];
-/// The counts' flags byte: bit 4, TX channels can be renamed.
-const FLAG_TX_RENAME: u8 = 0x10;
-/// The counts' flags byte: bit 5, TX multicast flows (inferno sets it).
-/// Dante Controller then offers Add on the Transmit tab and creates the
-/// flow with 2.7's 0x2201 (or 2.8.9's 0x2601 when segmented flows are
-/// stated), which our devices answer (dstack #193, #222).
-const FLAG_TX_MULTICAST: u8 = 0x20;
-/// The counts' flags byte as stated.
-const COUNTS_FLAGS: u8 = FLAG_TX_RENAME | FLAG_TX_MULTICAST;
+/// The counts' flags byte, inferno's 0x30: bit 4 (0x10), TX channels can
+/// be renamed; bit 5 (0x20), TX multicast flows. With bit 5 Dante
+/// Controller offers Add on the Transmit tab and creates the flow with
+/// 2.7's 0x2201 (or 2.8.9's 0x2601 when segmented flows are stated), which
+/// our devices answer (dstack #193, #222). One literal: the bits joined by
+/// `|` would leave its `^` mutant, which gives the same byte.
+const COUNTS_FLAGS: u8 = 0x30;
 /// An RX channel's flags in both generations' records (0x3000's second
 /// word, 0x3400's flags; a reader sees no change from the generation):
 /// inferno's 6 (netaudio: rename allowed) and 0x0008, netaudio's
