@@ -111,9 +111,9 @@ fn the_txt_records_carry_the_rate_encoding_and_latency() {
     assert_eq!(
         recs[0].txt,
         [
-            "arcp_vers=2.7.41",
+            "arcp_vers=2.8.9",
             "arcp_min=0.2.4",
-            "router_vers=4.0.2",
+            "router_vers=4.3.0",
             "router_info=iem-dante",
             "mf=iemmixer",
             "model=_000000000000000b",

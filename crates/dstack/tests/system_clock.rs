@@ -462,10 +462,7 @@ fn discovery_lists_our_running_device_and_its_withdrawal() {
     let stopped = host.stop(Duration::from_secs(5));
     assert!(matches!(stopped, host::Stopped::Done), "{stopped:?}");
     assert_eq!(ours.arc, SocketAddrV4::new(ip, dstack::arc::PORT));
-    assert_eq!(
-        ours.txt.get("arcp_vers").map(String::as_str),
-        Some("2.7.41")
-    );
+    assert_eq!(ours.txt.get("arcp_vers").map(String::as_str), Some("2.8.9"));
     assert!(
         ours.txt.contains_key("mf") && ours.txt.contains_key("model"),
         "{ours:?}"
