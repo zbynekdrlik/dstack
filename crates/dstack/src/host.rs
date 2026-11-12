@@ -65,7 +65,7 @@ use crate::clock::{ClockStats, MonoClock, monotonic_ns, poll_dsync, realtime_ns}
 #[cfg(unix)]
 use crate::ctl;
 use crate::daemon::media::{Clock, Media};
-use crate::daemon::{self, BUILD, IfAddr, Options, Place, ServeError, Sockets, VERSION};
+use crate::daemon::{self, BUILD, IfAddr, Options, Place, PlaceWait, ServeError, Sockets, VERSION};
 use crate::device::{Device, DeviceConfig, DeviceState};
 use crate::info::{self, Multicast, NetInfo};
 
@@ -331,8 +331,22 @@ pub fn prepare_config(
     engine_tx: &[usize],
     source: ClockSource,
 ) -> Result<Prepared, HostError> {
+    prepare_config_waiting(cfg, place, PlaceWait::Forever, control, engine_tx, source)
+}
+
+/// [`prepare_config`] with a place not there yet met as `wait` says
+/// ([`daemon::resolve_place`], dstack #230): [`PlaceWait::Now`] fails at
+/// once (dlink's `Link::start`).
+pub fn prepare_config_waiting(
+    cfg: DeviceConfig,
+    place: &Place,
+    wait: PlaceWait,
+    control: Option<&Path>,
+    engine_tx: &[usize],
+    source: ClockSource,
+) -> Result<Prepared, HostError> {
     prepare_on(cfg, place, control, engine_tx, source, |place| {
-        daemon::wait_for_interface(place, interfaces, std::thread::sleep)
+        daemon::resolve_place(place, wait, interfaces, std::thread::sleep)
     })
 }
 

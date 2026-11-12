@@ -169,6 +169,7 @@ pub use rated::Rated;
 
 use dstack::announce::FPP_MAX;
 use dstack::clock::latency_samples;
+use dstack::daemon::PlaceWait;
 use dstack::device::{NORMAL_MIN_LATENCY_NS, NORMAL_MIN_WORK_MARGIN_NS, TimingProfile};
 use dstack::embed::Embedded;
 use dstack::host::ClockSource;
@@ -754,11 +755,11 @@ impl Link {
     /// a clock with or without the service, never worse than it). Call it
     /// outside any tokio runtime: the device runs its own.
     ///
-    /// An address or interface not there yet (the network still coming up
-    /// at boot or logon) is waited for, with no time limit: the call
-    /// returns once it is there, logging the wait once a minute (dstack
-    /// #225). Call it on a thread that may wait. Every other error returns
-    /// at once.
+    /// Every error returns at once, an address or interface not there yet
+    /// too ([`HostError::Run`], "no interface of this box holds the
+    /// address" or "no such interface, or it has no IPv4 address"; dstack
+    /// #230, as up to v0.6.97): an app that retries on its own calls it
+    /// again later.
     pub fn start<P: Process + 'static>(
         config: &Config,
         place: &Place,
@@ -773,6 +774,18 @@ impl Link {
     pub fn start_on<P: Process + 'static>(
         config: &Config,
         place: &Place,
+        map: Map,
+        processor: P,
+        source: ClockSource,
+    ) -> Result<Link, HostError> {
+        Self::start_placed(config, place, PlaceWait::Now, map, processor, source)
+    }
+
+    /// The start, a place not there yet met as `wait` says.
+    fn start_placed<P: Process + 'static>(
+        config: &Config,
+        place: &Place,
+        wait: PlaceWait,
         map: Map,
         processor: P,
         source: ClockSource,
@@ -808,9 +821,9 @@ impl Link {
                 outputs,
             )
             .map_err(|e| HostError::Setup(format!("dlink rate conversion: {e}")))?;
-            Embedded::start_with_sender(cfg, place, map, rated, source, sender)?
+            Embedded::start_waiting(cfg, place, wait, map, rated, source, sender)?
         } else {
-            Embedded::start_with_sender(cfg, place, map, processor, source, sender)?
+            Embedded::start_waiting(cfg, place, wait, map, processor, source, sender)?
         };
         Ok(Link { device })
     }
