@@ -45,7 +45,9 @@ fn listed(device: &mut Device, flows: &NoFlows) -> Vec<(u16, u16, Vec<u16>)> {
         .map(|k| {
             let at = usize::from(u16_at(&bytes, HEADER_LEN + 2 + 2 * k));
             let slots = usize::from(u16_at(&bytes, at + 14));
-            let channels = (0..slots).map(|s| u16_at(&bytes, at + 18 + 2 * s)).collect();
+            let channels = (0..slots)
+                .map(|s| u16_at(&bytes, at + 18 + 2 * s))
+                .collect();
             (u16_at(&bytes, at), u16_at(&bytes, at + 2), channels)
         })
         .collect()
