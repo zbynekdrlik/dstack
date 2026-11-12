@@ -303,6 +303,27 @@ fn subs_changed(rx: &[usize]) -> Change {
     }
 }
 
+/// The big-endian `u16` at `at` in a datagram (the tests' own reader).
+fn u16_at(p: &[u8], at: usize) -> u16 {
+    u16::from_be_bytes([p[at], p[at + 1]])
+}
+
+/// The string at packet offset `at`, up to its NUL (the tests' own reader).
+fn name_at(p: &[u8], at: u16) -> String {
+    let s = &p[usize::from(at)..];
+    let end = s.iter().position(|&b| b == 0).expect("a NUL ends the name");
+    String::from_utf8(s[..end].to_vec()).expect("a name is UTF-8")
+}
+
+/// The reply in `outcome` and the change it made (`None`: no change).
+fn answered(outcome: ArcOutcome) -> (Vec<u8>, Option<Change>) {
+    match outcome {
+        ArcOutcome::Changed(bytes, change) => (bytes, Some(change)),
+        ArcOutcome::Reply(bytes) => (bytes, None),
+        other => panic!("not answered: {other:?}"),
+    }
+}
+
 /// The whole reply datagram, whether the state changed or not.
 fn sent_bytes(outcome: ArcOutcome) -> Vec<u8> {
     match outcome {

@@ -41,17 +41,6 @@ fn edited(name: &str, edit: impl FnOnce(&mut Vec<u8>)) -> Vec<u8> {
     f
 }
 
-fn u16_at(p: &[u8], at: usize) -> u16 {
-    u16::from_be_bytes([p[at], p[at + 1]])
-}
-
-/// The string at packet offset `at`, up to its NUL.
-fn name_at(p: &[u8], at: u16) -> String {
-    let s = &p[usize::from(at)..];
-    let end = s.iter().position(|&b| b == 0).expect("a NUL ends the name");
-    String::from_utf8(s[..end].to_vec()).expect("a name is UTF-8")
-}
-
 /// The reply's header: start code, length, sequence, opcode, status.
 fn head(p: &[u8]) -> (u16, u16, u16, u16, u16) {
     (
@@ -61,15 +50,6 @@ fn head(p: &[u8]) -> (u16, u16, u16, u16, u16) {
         u16_at(p, 6),
         u16_at(p, 8),
     )
-}
-
-/// The reply to `req` and the change it made (`None`: no change).
-fn answered(outcome: ArcOutcome) -> (Vec<u8>, Option<Change>) {
-    match outcome {
-        ArcOutcome::Changed(bytes, change) => (bytes, Some(change)),
-        ArcOutcome::Reply(bytes) => (bytes, None),
-        other => panic!("not answered: {other:?}"),
-    }
 }
 
 /// A reply of status OK and no body to `req`, under 0x2809.
@@ -280,6 +260,10 @@ fn a_2809_write_we_cannot_carry_out_is_refused_and_changes_nothing() {
         ("names none", edited("0x2438", |f| f[19] = 0)),
         // The second record's channel is a video one.
         ("names video", edited("0x2438", |f| f[29] = 2)),
+        // A TX channel we do not have, and channel 0 (the answer names
+        // each record's channel: none may be answered past the device's).
+        ("names missing", edited("0x2438", |f| f[21] = 40)),
+        ("names zero", edited("0x2438", |f| f[21] = 0)),
         // TX 3 to take the name TX 1 takes: the names would clash.
         (
             "names clash",
@@ -422,7 +406,9 @@ fn netaudio_s_reset_with_the_name_at_the_datagram_s_end_resets() {
 /// Our RX channels state netaudio's can-subscribe-self bit (0x0008) in
 /// both generations' records: 2.7's 0x3000 (flags, the record's second
 /// word) as 2.8.9's 0x3400 (`v289.rs`'s test). Without it netaudio refuses
-/// a subscription to our own TX before it sends one.
+/// a subscription to our own TX before it sends one. `decode_page` checks
+/// the same word on every 0x3000 page the other tests read; this is the
+/// explicit pin of the bit, with its reason.
 #[test]
 fn our_2_7_rx_records_state_self_subscription_too() {
     let mut dev = Dev::new(config_sized(3, 2));

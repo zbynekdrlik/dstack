@@ -29,26 +29,6 @@ fn dc(kind: &str, name: &str) -> Vec<u8> {
         .expect("the frame is in the fixture"))
 }
 
-fn u16_at(p: &[u8], at: usize) -> u16 {
-    u16::from_be_bytes([p[at], p[at + 1]])
-}
-
-/// The reply to `req` and the change it made (`None`: no change).
-fn answered(outcome: ArcOutcome) -> (Vec<u8>, Option<Change>) {
-    match outcome {
-        ArcOutcome::Changed(bytes, change) => (bytes, Some(change)),
-        ArcOutcome::Reply(bytes) => (bytes, None),
-        other => panic!("not answered: {other:?}"),
-    }
-}
-
-/// The string at packet offset `at`, up to its NUL.
-fn name_at(p: &[u8], at: u16) -> String {
-    let s = &p[usize::from(at)..];
-    let end = s.iter().position(|&b| b == 0).expect("a NUL ends the name");
-    String::from_utf8(s[..end].to_vec()).expect("a name is UTF-8")
-}
-
 /// Dante Controller's session, replayed on one device: each answer is the
 /// one Dante Controller took from our device, and each change is made.
 #[test]
