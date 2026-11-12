@@ -340,7 +340,7 @@ pub fn prepare_config(
 pub fn prepare_config_waiting(
     cfg: DeviceConfig,
     place: &Place,
-    wait: PlaceWait,
+    wait: PlaceWait<'_>,
     control: Option<&Path>,
     engine_tx: &[usize],
     source: ClockSource,

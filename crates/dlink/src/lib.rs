@@ -153,6 +153,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 pub use dstack::daemon::Place;
@@ -759,7 +760,8 @@ impl Link {
     /// too ([`HostError::Run`], "no interface of this box holds the
     /// address" or "no such interface, or it has no IPv4 address"; dstack
     /// #230, as up to v0.6.97): an app that retries on its own calls it
-    /// again later.
+    /// again later. To wait for the place instead (the network still
+    /// coming up at boot or logon), call [`Link::start_until`].
     pub fn start<P: Process + 'static>(
         config: &Config,
         place: &Place,
@@ -767,6 +769,35 @@ impl Link {
         processor: P,
     ) -> Result<Link, HostError> {
         Self::start_on(config, place, map, processor, ClockSource::Linked)
+    }
+
+    /// [`Link::start`] that waits for an address or interface not there
+    /// yet (the network still coming up at boot or logon, dstack #225,
+    /// #230) until `stop` is set: it looks the place up every second and
+    /// logs the wait at its start, once a minute and when the place is
+    /// there. Once `stop` is set, the call returns within one second with
+    /// [`HostError::Run`] "stopped while waiting for the device's address"
+    /// (or "... interface"); the app knows the stop is its own. A place
+    /// already there starts the device even with `stop` set. Every other
+    /// error returns at once, as from [`Link::start`].
+    ///
+    /// Call it on the app's own thread (never a UI thread: it blocks while
+    /// it waits), and set `stop` at shutdown or before a rebuild.
+    pub fn start_until<P: Process + 'static>(
+        config: &Config,
+        place: &Place,
+        map: Map,
+        processor: P,
+        stop: &AtomicBool,
+    ) -> Result<Link, HostError> {
+        Self::start_placed(
+            config,
+            place,
+            PlaceWait::Until(stop),
+            map,
+            processor,
+            ClockSource::Linked,
+        )
     }
 
     /// [`Link::start`] on the clock `source` (`ClockSource::System` is for
@@ -785,7 +816,7 @@ impl Link {
     fn start_placed<P: Process + 'static>(
         config: &Config,
         place: &Place,
-        wait: PlaceWait,
+        wait: PlaceWait<'_>,
         map: Map,
         processor: P,
         source: ClockSource,

@@ -4,12 +4,15 @@
 //! The device's place while it is not there yet (dstack #225, #230): an
 //! address no interface holds, an interface without its IPv4 address. A
 //! start takes it at once or fails ([`PlaceWait::Now`], dlink's
-//! `Link::start`), or waits for it ([`PlaceWait::Forever`], the device
-//! binaries). A wait looks the place up every [`PLACE_RETRY`] and logs at
-//! its start, once a minute and when the place is there, naming the kind
-//! of place, never the address or the interface (P6).
+//! `Link::start`), waits for it ([`PlaceWait::Forever`], the device
+//! binaries), or waits until the app stops it ([`PlaceWait::Until`],
+//! dlink's `Link::start_until`). A wait looks the place up every
+//! [`PLACE_RETRY`] and logs at its start, once a minute and when the place
+//! is there (or the app stopped it), naming the kind of place, never the
+//! address or the interface (P6).
 
 use std::io;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use tracing::{info, warn};
@@ -22,8 +25,8 @@ pub const PLACE_RETRY: Duration = Duration::from_secs(1);
 pub const PLACE_LOG_EVERY: u32 = 60;
 
 /// How a start meets a place not there yet (dstack #230).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PlaceWait {
+#[derive(Debug, Clone, Copy)]
+pub enum PlaceWait<'a> {
     /// Fails at once with [`pick_interface`]'s error, as every start did
     /// up to v0.6.97: dlink's `Link::start`, whose apps retry and stop on
     /// their own.
@@ -32,20 +35,26 @@ pub enum PlaceWait {
     /// device binaries (dstack-dev, dsend, dlisten) and `embed::Embedded`
     /// (dasio, iemmixer).
     Forever,
+    /// Waits as [`PlaceWait::Forever`] until the flag is set, then fails
+    /// with "stopped while waiting for the device's address" (or "..
+    /// interface") within one [`PLACE_RETRY`] (dlink's `Link::start_until`).
+    /// The flag ends a wait only: a place there is taken even with it set.
+    Until(&'a AtomicBool),
 }
 
 /// The place `wait` gives: [`pick_interface`]'s choice from one look at
 /// `addrs` (the box's interfaces) for [`PlaceWait::Now`], else
-/// [`wait_for_interface`]'s.
+/// [`wait_for_interface`]'s, stopped by [`PlaceWait::Until`]'s flag.
 pub fn resolve_place(
     place: &Place,
-    wait: PlaceWait,
+    wait: PlaceWait<'_>,
     mut addrs: impl FnMut() -> io::Result<Vec<IfAddr>>,
     sleep: impl FnMut(Duration),
 ) -> Result<IfAddr, String> {
     match wait {
         PlaceWait::Now => pick_interface(place, &addrs().map_err(interfaces_unread)?),
-        PlaceWait::Forever => wait_for_interface(place, addrs, sleep),
+        PlaceWait::Forever => wait_on(place, addrs, sleep, None),
+        PlaceWait::Until(stop) => wait_on(place, addrs, sleep, Some(stop)),
     }
 }
 
@@ -58,8 +67,8 @@ fn interfaces_unread(e: io::Error) -> String {
 struct Waited {
     /// What is waited for ("the device's address").
     what: &'static str,
-    /// The wait's line.
-    waiting: &'static str,
+    /// How it comes ("to appear on an interface").
+    comes: &'static str,
 }
 
 impl Waited {
@@ -67,13 +76,11 @@ impl Waited {
         match place {
             Place::Ip(_) => Waited {
                 what: "the device's address",
-                waiting: "waiting for the device's address to appear on an interface \
-                          (looked up every second, no time limit)",
+                comes: "to appear on an interface",
             },
             Place::Iface(_) => Waited {
                 what: "the device's interface",
-                waiting: "waiting for the device's interface to appear with an IPv4 \
-                          address (looked up every second, no time limit)",
+                comes: "to appear with an IPv4 address",
             },
         }
     }
@@ -90,8 +97,18 @@ impl Waited {
 /// be read fail at once.
 pub fn wait_for_interface(
     place: &Place,
+    addrs: impl FnMut() -> io::Result<Vec<IfAddr>>,
+    sleep: impl FnMut(Duration),
+) -> Result<IfAddr, String> {
+    wait_on(place, addrs, sleep, None)
+}
+
+/// [`wait_for_interface`], ended by `stop` when one is given.
+fn wait_on(
+    place: &Place,
     mut addrs: impl FnMut() -> io::Result<Vec<IfAddr>>,
     sleep: impl FnMut(Duration),
+    stop: Option<&AtomicBool>,
 ) -> Result<IfAddr, String> {
     // An address the Dante network cannot reach never comes: refused
     // before any lookup.
@@ -102,17 +119,23 @@ pub fn wait_for_interface(
         &Waited::of(place),
         || find_interface(place, &addrs().map_err(interfaces_unread)?),
         sleep,
+        stop,
     )
 }
 
 /// `lookup` until it finds its thing (`Some`), `sleep(PLACE_RETRY)`
 /// between two looks, logged as `words` says. A lookup's error ends the
-/// wait at once.
+/// wait at once; so does `stop`, once set, after the next look.
 fn wait_until<T>(
     words: &Waited,
     mut lookup: impl FnMut() -> Result<Option<T>, String>,
     mut sleep: impl FnMut(Duration),
+    stop: Option<&AtomicBool>,
 ) -> Result<T, String> {
+    let limit = match stop {
+        Some(_) => "until the app stops the start",
+        None => "no time limit",
+    };
     let mut tries: u32 = 0;
     loop {
         if let Some(found) = lookup()? {
@@ -124,8 +147,16 @@ fn wait_until<T>(
             }
             return Ok(found);
         }
+        if stop.is_some_and(|s| s.load(Ordering::Relaxed)) {
+            let why = format!("stopped while waiting for {}", words.what);
+            info!(seconds = tries, "{why}");
+            return Err(why);
+        }
         if tries.is_multiple_of(PLACE_LOG_EVERY) {
-            warn!(minutes = tries / PLACE_LOG_EVERY, "{}", words.waiting);
+            warn!(
+                minutes = tries / PLACE_LOG_EVERY,
+                "waiting for {} {} (looked up every second, {limit})", words.what, words.comes
+            );
         }
         sleep(PLACE_RETRY);
         tries = tries.saturating_add(1);

@@ -107,7 +107,7 @@ impl Embedded {
     pub fn start_waiting<P: Process + 'static>(
         cfg: DeviceConfig,
         place: &Place,
-        wait: PlaceWait,
+        wait: PlaceWait<'_>,
         map: Map,
         processor: P,
         source: ClockSource,
