@@ -6,11 +6,13 @@
 
 //! The paged channel lists (dstack #231): the page writer ([`page`],
 //! [`paged`], inferno's `serialize_items`) with its [`Heap`] and the
-//! channels' shared descriptor ([`common_descriptor`]), and the 2.7 lists
-//! built on it: 0x2000 ([`tx_channels`]), 0x2010 ([`tx_names`]) and 0x3000
-//! ([`rx_channels`]), with the RX side's grant and subscription reads
-//! ([`granted_flow`], [`listed_subscription`]). The flow lists (0x2200,
-//! 0x3200, in `arc`) and ARC 2.8.9's lists (`v289`) page through it too.
+//! channels' shared descriptor ([`common_descriptor`]), and the lists
+//! built on it: 0x2000 ([`tx_channels`]), 0x2010 ([`tx_names`], under
+//! 2.8.9 too) and 0x3000 ([`rx_channels`], with an RX channel's
+//! subscription as listed, [`listed_subscription`]). [`granted_flow`] is
+//! the RX flow lists' grant read (0x3200 in `arc`, 0x3600 in `v289`). The
+//! flow lists (0x2200, 0x3200) and ARC 2.8.9's lists (`v289`) page through
+//! it too.
 
 use super::{
     ArcOutcome, PCM_TYPE, RX_CHANNEL_FLAGS, RX_PAGE, SOFT_LIMIT, TX_PAGE, first_item, refuse,
