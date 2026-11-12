@@ -46,7 +46,7 @@ Since 0.6.38 (dstack #1) a device may set `spin_escape_ms` (100 to 10000; left o
 
 On Linux the field is accepted and ignored (the start log says so): the wait sleeps on `clock_nanosleep` and never spins.
 
-Open before it can leave the trial: whether the PC stays responsive with a FanControl-like per-CPU worker on the spinners' CPUs.
+Result of the trial (dstack #217, iem-snv, 12.11.2026): it stays an opt-in and does not become the default. A stress walker holds every CPU 1.7 ms a second at Highest priority. Next to a spinning low-latency device it froze the PC with the escape (case A) and also without it (case B on a second run); one case-B run of 60 min stayed clean. The freeze belongs to that walker plus a spinner, not to the escape, and no real program on our PCs behaves like the walker. Do not run such a walker on a PC you cannot power-cycle.
 
 Where the timer wakes on time (the good driver, nothing else on the NIC's DPC CPUs), a tail of 100–300 µs frees those CPUs. Measure before you keep it: TX-late warnings and a receiver's lateness (rxlat) against the default.
 
