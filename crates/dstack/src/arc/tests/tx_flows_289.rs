@@ -18,7 +18,7 @@ use super::*;
 use crate::arc::client::ReadError;
 use crate::arc::control::Call;
 use crate::arc::flows::list_tx_flows;
-use crate::arc::flows::tests::{ULTIMO_LIST, hex};
+use crate::arc::flows::tests::{ULTIMO_CREATED, ULTIMO_LIST, hex};
 
 const CARD: &str = include_str!("../../../tests/fixtures/arc_289_card.json");
 
@@ -44,6 +44,9 @@ struct TxRecord {
     local_id: u16,
     flags: u32,
     name: String,
+    /// First-segment bytes 24-27: the UltimoX2's multicast flows carry its
+    /// latency in ns there, a unicast flow 0.
+    latency: u32,
     rate: u32,
     bits: u32,
     /// The receiver's device and flow names (a unicast flow).
@@ -55,7 +58,8 @@ struct TxRecord {
 
 /// The record at packet offset `at` of the reply `p`: segment 0 (40
 /// bytes: id, 0, media 3, media-local id, 0, flags, 0, the name's offset,
-/// the format's (rate `u32`, bits `u32`), then zeros), 1 (16 bytes: 0, the
+/// the format's (rate `u32`, bits `u32`), the latency (`u32`), then
+/// zeros), 1 (16 bytes: 0, the
 /// receiver's device and flow name offsets, 1, then zeros), 2 (`[slots,
 /// count]`, the destination descriptors' offsets), 3 (the slot count, each
 /// slot's TX channel), 4 (frames per packet).
@@ -99,6 +103,7 @@ fn tx_record(p: &[u8], at: usize) -> TxRecord {
         local_id: u16_at(p, s0 + 8),
         flags: u32_at(p, s0 + 12),
         name: name_at(p, u16_at(p, s0 + 20)),
+        latency: u32_at(p, s0 + 24),
         rate: u32_at(p, format),
         bits: u32_at(p, format + 4),
         receiver,
@@ -150,6 +155,7 @@ fn the_card_s_tx_flows_read_as_the_fixture_states() {
         local_id: id,
         flags: 0x11,
         name: id.to_string(),
+        latency: 0,
         rate: 96_000,
         bits: 24,
         receiver: Some((rx.0.to_string(), rx.1.to_string())),
@@ -200,6 +206,7 @@ fn our_multicast_flow_answers_0x2600_as_the_ultimo_x2_lists_one() {
     let (_, theirs) = tx_list(&ultimo);
     let their = &theirs[0];
     assert_eq!((their.flags, &their.receiver), (0x02, &None));
+    assert_eq!(their.latency, 1_000_000, "its 1 ms");
     let mut dev = Dev::new(config());
     let group = dev
         .tx
@@ -215,6 +222,7 @@ fn our_multicast_flow_answers_0x2600_as_the_ultimo_x2_lists_one() {
             local_id: 5,
             flags: 0x02,
             name: "5".into(),
+            latency: u32::try_from(dev.cfg.latency_ns).unwrap(),
             rate: dev.cfg.sample_rate,
             bits: u32::from(dev.cfg.encoding),
             receiver: None,
@@ -223,6 +231,31 @@ fn our_multicast_flow_answers_0x2600_as_the_ultimo_x2_lists_one() {
             fpp: dev.cfg.tx_fpp_max,
         }]
     );
+}
+
+#[test]
+fn our_answer_to_a_2_8_9_create_is_the_ultimo_x2_s() {
+    // The same create (slot 1, channels 1 and 2) to the UltimoX2 and to us.
+    let theirs = hex(ULTIMO_CREATED);
+    let (their_slots, their_records) = tx_list(&theirs);
+    let dir = tempfile::tempdir().unwrap();
+    let mut device = Device::load(config_in(dir.path())).unwrap();
+    let flows = NoFlows::new(&device);
+    let create = flows::create_body(1, &[1, 2], 1).unwrap();
+    let packet = request(0x2809, 0x5101, flows::CREATE, 0, &create);
+    let (ours, change) = answered(answer(&mut device, &flows, &packet));
+    assert_eq!(change, Some(Change::TX_FLOWS_ONLY));
+    let (slots, records) = tx_list(&ours);
+    assert_eq!((slots, their_slots), (1, 1));
+    // Theirs, but our frames per packet and latency: no destination, a
+    // format of rate 0 and our bits, as the UltimoX2 answers.
+    let want = TxRecord {
+        fpp: device.cfg.tx_fpp_max,
+        latency: u32::try_from(device.cfg.latency_ns).unwrap(),
+        ..their_records[0].clone()
+    };
+    assert_eq!((want.rate, want.bits), (0, 24));
+    assert_eq!(records, [want]);
 }
 
 #[test]
@@ -278,4 +311,123 @@ fn our_receivers_read_every_flow_of_a_full_list_page_by_page() {
     let ids: Vec<u16> = read.flows.iter().map(|f| f.id).collect();
     assert_eq!(ids, (1..=32).collect::<Vec<u16>>(), "each flow once");
     assert!(read.flows.iter().all(|f| f.bits == 24 && !f.multicast()));
+}
+
+/// A device that answers every page with one recorded reply body and
+/// status, and keeps the first item each request asked from.
+struct Stuck {
+    status: u16,
+    body: Vec<u8>,
+    asked: Vec<u16>,
+}
+
+impl Call for Stuck {
+    fn call(&mut self, op1: u16, body: &[u8]) -> Result<(u16, Vec<u8>), ReadError> {
+        self.call_as(0x27ff, op1, body)
+    }
+
+    fn call_as(&mut self, _: u16, _: u16, body: &[u8]) -> Result<(u16, Vec<u8>), ReadError> {
+        self.asked.push(u16_at(body, 10));
+        Ok((self.status, self.body.clone()))
+    }
+}
+
+#[test]
+fn a_list_that_says_more_but_never_moves_on_is_malformed_not_asked_again() {
+    // The card's two flows (ids 1 and 2), always with "more follow": the
+    // second page names no flow past the one it was asked from (3).
+    let list = card("replies", "0x2600");
+    let mut stuck = Stuck {
+        status: crate::wire::STATUS_MORE,
+        body: list[HEADER_LEN..].to_vec(),
+        asked: Vec::new(),
+    };
+    let got = list_tx_flows(&mut stuck);
+    assert!(
+        matches!(got, Err(ReadError::Malformed { op: 0x2600 })),
+        "{got:?}"
+    );
+    assert_eq!(
+        stuck.asked,
+        [1, 3],
+        "from flow 1, then from flow 3, then no more"
+    );
+    // A page with no flow that says more: malformed at once.
+    let mut empty = Stuck {
+        status: crate::wire::STATUS_MORE,
+        body: vec![0, 0, 0, 0, 0, 0, 32, 0],
+        asked: Vec::new(),
+    };
+    assert!(list_tx_flows(&mut empty).is_err());
+    assert_eq!(empty.asked, [1]);
+    // Any status but OK and more: refused.
+    let mut refused = Stuck {
+        status: crate::wire::STATUS_ERROR,
+        body: Vec::new(),
+        asked: Vec::new(),
+    };
+    assert!(matches!(
+        list_tx_flows(&mut refused),
+        Err(ReadError::Refused { op: 0x2600, .. })
+    ));
+}
+
+/// A device that answers its pages in turn: `replies[k]` (status, body)
+/// to the `k`-th request.
+struct Paged {
+    replies: Vec<(u16, Vec<u8>)>,
+    asked: Vec<u16>,
+}
+
+impl Call for Paged {
+    fn call(&mut self, op1: u16, body: &[u8]) -> Result<(u16, Vec<u8>), ReadError> {
+        self.call_as(0x27ff, op1, body)
+    }
+
+    fn call_as(&mut self, _: u16, _: u16, body: &[u8]) -> Result<(u16, Vec<u8>), ReadError> {
+        self.asked.push(u16_at(body, 10));
+        Ok(self.replies[self.asked.len() - 1].clone())
+    }
+}
+
+/// The card's list body with its two records' ids (global and
+/// media-local) set to `ids`.
+fn card_list_of(ids: [u16; 2]) -> Vec<u8> {
+    let mut list = card("replies", "0x2600");
+    for (record, id) in [0x20usize, 0x98].into_iter().zip(ids) {
+        list[record + 2..record + 4].copy_from_slice(&id.to_be_bytes());
+        list[record + 8..record + 10].copy_from_slice(&id.to_be_bytes());
+    }
+    list[HEADER_LEN..].to_vec()
+}
+
+#[test]
+fn a_page_s_flows_before_its_first_are_not_taken_twice_and_unread_ones_add_up() {
+    // Page 1: flows 1 and 2, more follow; page 2 (from 3) lists 2 again
+    // and 3.
+    let mut dev = Paged {
+        replies: vec![
+            (crate::wire::STATUS_MORE, card_list_of([1, 2])),
+            (STATUS_OK, card_list_of([2, 3])),
+        ],
+        asked: Vec::new(),
+    };
+    let read = list_tx_flows(&mut dev).unwrap();
+    assert_eq!(dev.asked, [1, 3]);
+    let ids: Vec<u16> = read.flows.iter().map(|f| f.local_id).collect();
+    assert_eq!(ids, [1, 2, 3], "flow 2 once");
+    // A record that does not read (its destination offset past the reply)
+    // is counted on every page it is on.
+    let mut broken = card_list_of([3, 4]);
+    broken[0x5c - HEADER_LEN..0x5e - HEADER_LEN].copy_from_slice(&0x0400u16.to_be_bytes());
+    let mut dev = Paged {
+        replies: vec![
+            (crate::wire::STATUS_MORE, card_list_of([1, 2])),
+            (STATUS_OK, broken),
+        ],
+        asked: Vec::new(),
+    };
+    let read = list_tx_flows(&mut dev).unwrap();
+    let ids: Vec<u16> = read.flows.iter().map(|f| f.local_id).collect();
+    assert_eq!((ids, read.unread), (vec![1, 2, 4], 1));
 }
