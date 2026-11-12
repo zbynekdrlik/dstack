@@ -13,9 +13,8 @@
 //! Finding 17). Its 0x1000 also decides which lists it reads: with bit
 //! 0x1000 (segmented flows) 0x2400, 0x3400, 0x2600 and 0x3600, without it
 //! the 2.7 lists (0x2000, 0x3000, 0x2200, 0x3200) under 0x2809. Our
-//! devices leave 0x1000 clear: with it set, Dante Controller read our
-//! segmented lists and left the device out of its list (cause not found
-//! yet); the lists are still answered for a controller that asks. Each
+//! devices state 0x1000 ([`COUNTS_SEGMENTED`], dstack #223), so Dante
+//! Controller reads the lists below and writes with 2.8.9's own. Each
 //! read below is answered in the card's layout with our values; the other
 //! requests under 0x2809 (0x1100, 0x1102, 0x3300, 0x2320, 2.7's writes)
 //! are answered as under 2.7 ([`super::handle`]). Dante
@@ -25,7 +24,7 @@
 //!
 //! | op1 | answer |
 //! |---|---|
-//! | 0x1000 | the 2.7 counts (word 0 with the rename bit 0x0001 set), then a media record of (TX, RX) pairs ([`counts`]) |
+//! | 0x1000 | the 2.7 counts (word 0 with segmented flows 0x1000 and the rename bit 0x0001 set), then a media record of (TX, RX) pairs ([`counts`]) |
 //! | 0x1003 | the names in 32-byte fields and a versions record ([`device_names`]) |
 //! | 0x2010 | the 2.7 page of the TX channels whose name is not the default, as the card lists them |
 //! | 0x2204 | TX flow labels: none (start code 0x2801, as both 2.8.9 devices answer) |
@@ -79,6 +78,12 @@ const PAGE_PREFIX: usize = 6;
 /// device rename (word 0's 0x0001; Dante Controller greys the Rename
 /// without it).
 const COUNTS_RENAME: u8 = 0x01;
+/// 0x1000's first word under 2.8.9, its high byte: segmented flows
+/// (0x1000; 2.7's high byte is 0). Dante Controller then reads the 2.8.9
+/// lists (0x2400, 0x3400, 0x2600, 0x3600) and creates and deletes with
+/// 0x2601 and 0x2602 (dstack #223; with #148's 0x2600 records it re-read
+/// our device without end once a TX flow was listed, #220).
+const COUNTS_SEGMENTED: u8 = 0x10;
 /// A TX channel's flags, the card's.
 const TX_FLAGS: u32 = 0x0000_0007;
 /// An RX channel's flags: the card's 6 (netaudio: rename allowed) and the
@@ -159,7 +164,8 @@ pub(super) fn read(
     })
 }
 
-/// 0x1000: the 2.7 counts with word 0's [`COUNTS_RENAME`], the media record's
+/// 0x1000: the 2.7 counts with word 0's [`COUNTS_SEGMENTED`] and
+/// [`COUNTS_RENAME`], the media record's
 /// offset and a zero word, then the record (`0x1414`, 40 bytes): audio,
 /// then the pairs (1, 1), (TX, RX channels), (2, 2), (TX, RX flows), (2,
 /// 2), (TX, RX channels), (TX, RX channels in a flow), 8 zero bytes. The
@@ -171,6 +177,7 @@ pub(super) fn read(
 /// adapter states 0 TX flows).
 fn counts(cfg: &DeviceConfig) -> Vec<u8> {
     let mut words = super::counts(cfg);
+    words[0] = COUNTS_SEGMENTED;
     words[1] |= COUNTS_RENAME;
     let mut out = Body::new();
     out.bytes(&words);

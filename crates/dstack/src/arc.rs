@@ -40,10 +40,12 @@
 //!
 //! Under ARC 2.8.9's start code 0x2809 (dstack #216), which Dante Controller
 //! uses for a device announcing [`ARCP_VERSION`], 0x1000, 0x1003, 0x2010,
-//! 0x2204 and the lists 0x2400 (TX channels), 0x3400 (RX channels) and
-//! 0x3600 (RX flows) are answered in a 2.8.9 card's layouts (`arc/v289.rs`);
+//! 0x2204 and the lists 0x2400 (TX channels), 0x3400 (RX channels), 0x3600
+//! (RX flows) and 0x2600 (TX flows) are answered in a 2.8.9 card's layouts (`arc/v289.rs`);
 //! everything else as above. 0x1000 there states the device rename (word
-//! 0's 0x0001), without which Dante Controller greys out its Rename.
+//! 0's 0x0001), without which Dante Controller greys out its Rename, and
+//! segmented flows (0x1000, dstack #223): Dante Controller then reads the
+//! 2.8.9 lists, 0x2600 (TX flows) among them.
 //! netaudio's 2.8.9 writes there, 0x3410 (subscribe), 0x3401 (RX rename)
 //! and 0x2438 (TX names), make the change of 0x3010, 0x3001 and 0x2013
 //! through the same functions (`arc/v289/writes.rs`, dstack #220).
