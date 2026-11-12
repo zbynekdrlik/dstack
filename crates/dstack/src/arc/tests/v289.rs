@@ -136,6 +136,11 @@ fn channel(p: &[u8], at: usize, rx: bool) -> Channel {
     assert_eq!(p[at + 24..at + 30], [0; 6]);
     assert_eq!(p[at + 32..at + 40], [0; 8]);
     let format = usize::from(u16_at(p, at + 22));
+    assert_eq!(
+        format % 4,
+        0,
+        "the format at a multiple of 4, as the card's"
+    );
     let (mut sub, mut status, mut detail) = (None, 0, 0);
     if rx {
         assert_eq!(p[at + 40..at + 44], [0x06, 0x08, 0, 0]);
@@ -211,6 +216,11 @@ fn rx_flow(p: &[u8], at: usize) -> RxFlow {
     assert_eq!(u16_at(p, map + 4), 0, "no next node");
     assert!(map + 6 + span <= p.len(), "the mapping inside the reply");
     let format = usize::from(u16_at(p, at + 22));
+    assert_eq!(
+        format % 4,
+        0,
+        "the format at a multiple of 4, as the card's"
+    );
     assert!(format + 8 <= at, "the format before the record");
     RxFlow {
         number,
@@ -517,6 +527,17 @@ fn our_rx_flows_answer_0x3600_in_the_card_s_layout() {
             mapping: (1, vec![1, 1, 2, 0]),
         }
     );
+    // A flow that feeds RX 3 and RX 4 only: the mapping starts at RX 3
+    // (TX 4's slot 1 feeds RX 3, TX 3's slot 2 RX 4) and holds 2 bytes.
+    let mut late = Dev::new(config());
+    let subs = [
+        (2, sub("TX 4", "peer-device")),
+        (3, sub("TX 3", "peer-device")),
+    ];
+    receiving(&mut late.rx, &subs, &net);
+    let reply = ours(&mut late, "0x3600");
+    let f = rx_flow(&reply, page_289(&reply).records[0]);
+    assert_eq!((f.slots, f.mapping), (4, (3, vec![1, 2])));
     // A device with no RX flow lists none.
     let mut idle = Dev::new(config());
     let page = page_289(&ours(&mut idle, "0x3600"));
