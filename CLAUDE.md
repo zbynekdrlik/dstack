@@ -27,3 +27,4 @@ Start from `docs/HANDOVER.md`, then `docs/design/2026-10-30-shared-dstack.md`.
 ## Playbook router
 - releases, versions, CHANGELOG, dependencies → `.claude/rules/release.md` (auto-loads on its `paths:`)
 - tests, whole-device tests, the mutation gate → `.claude/rules/tests.md` (auto-loads on its `paths:`)
+- ARC, what Dante Controller decides from our answers, DC checks on mbc → `.claude/rules/arc-dante-controller.md` (auto-loads on its `paths:`)
