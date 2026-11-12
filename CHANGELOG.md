@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Internal (dstack #231): the ARC settings server (0x1100, 0x1102) moved from `arc.rs` to `arc/settings.rs`, and the counts and names replies (0x1000, 0x1003) to `arc/counts.rs`. Every reply is byte-identical; no item moved was public, so no path changes. No API change, no latency change.
+- Internal (dstack #231): `arc.rs` is split. The ARC settings server (0x1100, 0x1102) moved to `arc/settings.rs`, the counts and names replies (0x1000, 0x1003) to `arc/counts.rs`, and the page writer with the channel lists (0x2000, 0x2010, 0x3000) to `arc/channels.rs`. Every reply is byte-identical; no item moved was public, so no path changes. No API change, no latency change.
 
 ## 0.6.99
 
