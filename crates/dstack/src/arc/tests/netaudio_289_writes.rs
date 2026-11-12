@@ -319,3 +319,61 @@ fn the_2809_write_opcodes_are_2809_s_only() {
         );
     }
 }
+
+/// A 0x2438 of `records` (TX channel, name), in netaudio's layout.
+fn tx_names_frame(records: &[(u16, &str)]) -> Vec<u8> {
+    let n = u8::try_from(records.len()).unwrap();
+    let mut body = vec![0, 0, 0, 0, 0, 0, 6, 0, n, n];
+    let mut at = 20 + 6 * records.len();
+    let mut names = Vec::new();
+    for &(channel, name) in records {
+        body.extend_from_slice(&channel.to_be_bytes());
+        body.extend_from_slice(&3u16.to_be_bytes());
+        body.extend_from_slice(&u16::try_from(at).unwrap().to_be_bytes());
+        names.extend_from_slice(name.as_bytes());
+        names.push(0);
+        at += name.len() + 1;
+    }
+    body.extend_from_slice(&names);
+    request(START_2809, 9, TX_NAMES_2809, 0, &body)
+}
+
+/// 38 records are taken, each answered; a 39th is refused before any
+/// change: an answer of 39 records of 31-byte names would not fit one
+/// datagram.
+#[test]
+fn a_2438_takes_at_most_38_records() {
+    let names: Vec<String> = (0..39).map(|k| format!("Name-{k:02}")).collect();
+    let records: Vec<(u16, &str)> = names
+        .iter()
+        .enumerate()
+        .map(|(k, n)| ((k % 16) as u16 + 1, n.as_str()))
+        .collect();
+    let mut dev = Dev::new(config());
+    let (reply, change) = answered(dev.send(&tx_names_frame(&records[..38])));
+    assert_eq!(head(&reply).4, STATUS_OK);
+    assert!(change.is_some());
+    let echoed = tx_names_reply(&reply);
+    assert_eq!(echoed.len(), 38);
+    // Each record carries the name its channel now has: the last one asked.
+    assert_eq!(echoed[0], (1, "Name-32".to_string()));
+    assert_eq!(dev.state.tx[5], "Name-37");
+    let before = dev.state.clone();
+    let (reply, change) = answered(dev.send(&tx_names_frame(&records)));
+    assert_eq!(head(&reply).4, STATUS_ERROR);
+    assert_eq!(change, None);
+    assert_eq!(dev.state, before);
+}
+
+/// A body that ends right after its records reads: the strings may be
+/// elsewhere (here none, an unsubscribe).
+#[test]
+fn a_2809_write_that_ends_with_its_records_reads() {
+    let mut dev = Dev::new(config());
+    dev.state
+        .set_subscription(&dev.cfg, 0, Some(sub("TX 9", "peer-device")));
+    let req = edited("0x3410 clear", |f| f.truncate(28));
+    let (reply, change) = answered(dev.send(&req));
+    ok_without_body(&reply, 0x0105, SUBSCRIBE_2809);
+    assert_eq!(change, Some(subs_changed(&[0])));
+}
