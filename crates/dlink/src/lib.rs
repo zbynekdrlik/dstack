@@ -736,15 +736,26 @@ pub struct Link {
 }
 
 /// Waits until `place` is there (the address on an interface, or the
-/// interface with its one IPv4 address), as [`Link::start`] does (dstack
-/// #225), for an app that uses the address before the start: dsend and
-/// dlisten probe their free control ports on it. A place refused (an
-/// address the Dante network cannot reach, an interface with several
-/// IPv4 addresses, an interface list that cannot be read) is
-/// [`HostError::Run`] at once.
+/// interface with its one IPv4 address), as [`Link::start_until`] does but
+/// with no stop (dstack #225), for an app that uses the address before the
+/// start: dsend and dlisten probe their free control ports on it, then
+/// call [`Link::start`]. A place refused (an address the Dante network
+/// cannot reach, an interface with several IPv4 addresses, an interface
+/// list that cannot be read) is [`HostError::Run`] at once.
 pub fn wait_for_place(place: &Place) -> Result<(), HostError> {
     dstack::daemon::wait_for_interface(place, dstack::host::interfaces, std::thread::sleep)
         .map(drop)
+        .map_err(HostError::Run)
+}
+
+/// The default route's address as the device's place, for an app given no
+/// address or interface (dsend, dlisten), waited for while the box has no
+/// default route yet (at boot; dstack #230), with no time limit and the
+/// same log lines as [`wait_for_place`]. A socket that cannot be opened and
+/// an IPv6 route are [`HostError::Run`] at once.
+pub fn default_route_place() -> Result<Place, HostError> {
+    dstack::daemon::wait_for_route(dstack::host::default_route, std::thread::sleep)
+        .map(Place::Ip)
         .map_err(HostError::Run)
 }
 

@@ -2,7 +2,8 @@
 // Copyright (C) 2026 dstack contributors.
 
 //! The device's place while it is not there yet (dstack #225, #230): an
-//! address no interface holds, an interface without its IPv4 address. A
+//! address no interface holds, an interface without its IPv4 address, the
+//! default route's address on a box with no route yet ([`wait_for_route`]). A
 //! start takes it at once or fails ([`PlaceWait::Now`], dlink's
 //! `Link::start`), waits for it ([`PlaceWait::Forever`], the device
 //! binaries), or waits until the app stops it ([`PlaceWait::Until`],
@@ -12,6 +13,7 @@
 //! address or the interface (P6).
 
 use std::io;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -121,6 +123,48 @@ fn wait_on(
         sleep,
         stop,
     )
+}
+
+/// What a wait for the default route's address logs.
+const ROUTE: Waited = Waited {
+    what: "the default route's address",
+    comes: "to appear",
+};
+
+/// The default route's address (dsend and dlisten given no `--ip` or
+/// `--iface`), waited for as [`wait_for_interface`] waits (dstack #230): a
+/// box at boot has no default route yet. `route` looks it up once
+/// ([`route_answer`]: `None` while it is not there); its error fails at
+/// once.
+pub fn wait_for_route(
+    route: impl FnMut() -> Result<Option<Ipv4Addr>, String>,
+    sleep: impl FnMut(Duration),
+) -> Result<Ipv4Addr, String> {
+    wait_until(&ROUTE, route, sleep, None)
+}
+
+/// The default route's address from a UDP socket's `connect` and
+/// `local_addr` (`connected`): `None` while there is no route (the
+/// network unreachable, the host unreachable, no address to send from)
+/// or no address given yet (0.0.0.0); an IPv6 address and any other error
+/// are refused.
+pub fn route_answer(connected: io::Result<SocketAddr>) -> Result<Option<Ipv4Addr>, String> {
+    match connected {
+        Ok(SocketAddr::V4(a)) if a.ip().is_unspecified() => Ok(None),
+        Ok(SocketAddr::V4(a)) => Ok(Some(*a.ip())),
+        Ok(other) => Err(format!("no IPv4 address on the default route ({other})")),
+        Err(e)
+            if matches!(
+                e.kind(),
+                io::ErrorKind::NetworkUnreachable
+                    | io::ErrorKind::HostUnreachable
+                    | io::ErrorKind::AddrNotAvailable
+            ) =>
+        {
+            Ok(None)
+        }
+        Err(e) => Err(format!("the default route: {e}")),
+    }
 }
 
 /// `lookup` until it finds its thing (`Some`), `sleep(PLACE_RETRY)`

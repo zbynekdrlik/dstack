@@ -40,7 +40,10 @@
 pub mod cli;
 pub mod media;
 mod place;
-pub use place::{PLACE_LOG_EVERY, PLACE_RETRY, PlaceWait, resolve_place, wait_for_interface};
+pub use place::{
+    PLACE_LOG_EVERY, PLACE_RETRY, PlaceWait, resolve_place, route_answer, wait_for_interface,
+    wait_for_route,
+};
 
 use std::future::Future;
 use std::io;
@@ -48,7 +51,6 @@ use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicU16;
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
 
 use tokio::net::UdpSocket;
 use tokio::sync::Notify;

@@ -20,15 +20,11 @@ pub fn host_name() -> String {
         .to_string()
 }
 
-/// The address of the default route (connecting a UDP socket picks the
-/// route and sends nothing).
+/// The address of the default route, waited for while the PC has no
+/// default route yet (at boot or logon; [`dlink::default_route_place`],
+/// dstack #230).
 pub fn routed_ipv4() -> Result<Place, String> {
-    let probe = std::net::UdpSocket::bind("0.0.0.0:0").map_err(|e| e.to_string())?;
-    probe.connect("192.0.2.1:9").map_err(|e| e.to_string())?;
-    match probe.local_addr().map_err(|e| e.to_string())? {
-        std::net::SocketAddr::V4(a) => Ok(Place::Ip(*a.ip())),
-        other => Err(format!("no IPv4 address on the default route ({other})")),
-    }
+    dlink::default_route_place().map_err(|e| e.to_string())
 }
 
 /// The log on stderr and in `file` (when it opens), RUST_LOG as the

@@ -42,7 +42,7 @@
 //! ports and channel numbers, never a name or an address.
 
 use std::fmt::Display;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -176,6 +176,19 @@ pub fn interfaces() -> std::io::Result<Vec<IfAddr>> {
             if_addrs::IfAddr::V6(_) => None,
         })
         .collect())
+}
+
+/// The default route's address, looked up once ([`daemon::route_answer`]:
+/// `None` while the box has no default route yet): a UDP socket connected
+/// to a TEST-NET-1 address picks the route and sends nothing.
+pub fn default_route() -> Result<Option<Ipv4Addr>, String> {
+    let probe = std::net::UdpSocket::bind("0.0.0.0:0")
+        .map_err(|e| format!("the default route's probe socket: {e}"))?;
+    daemon::route_answer(
+        probe
+            .connect("192.0.2.1:9")
+            .and_then(|()| probe.local_addr()),
+    )
 }
 
 /// What the info server says about the interface, from its files: the MAC
