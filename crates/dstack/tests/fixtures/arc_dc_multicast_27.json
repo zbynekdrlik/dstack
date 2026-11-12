@@ -1,0 +1,10 @@
+{
+  "what": "Dante Controller's ARC 2.7 multicast flow create (0x2201) to one of our devices, sent under start code 0x2809 while our 0x1000 states multicast TX (0x0020) and not segmented flows (0x1000): Device View > Transmit > Add, TX 1 and TX 2, Create.",
+  "captured": "2026-11-12 03:41 CET, dstack #220 (session a, `dc220a.pcapng`), pktmon on the Dante Controller PC, UDP to and from our test device (a lane build whose 0x1000 first word carried 0x0020 by a scratch override, not committed). Only our own device was written to. Nothing is changed: the frame holds no name and no address (a flow id, a channel count, channel numbers, offsets). Our device refused it then (0xffff). netaudio 0.4.2's legacy encoder (`create_tx_flow`, flow protocol 0x2729, flow slot 32, channels 1 and 2) writes the same bytes under start code 0x2729.",
+  "requests": {
+    "0x2201": "2809003c00cd220100000101001000000020000200000000000000000000000200010002002800000a00000000000000000000000000000000010000"
+  },
+  "layout": {
+    "0x2201": "body: [1, 1], the record's packet offset (0x0010), 0; the record: the flow id (its slot, from 1; Dante Controller picked 32), the flow type (2, multicast), the rate u32 (0: the device's), 0, the encoding (0: the device's), 0, the channel count, each slot's TX channel, the names block's packet offset, 0; the names block: 0x0a00, 0, 0, 0, frames per packet (0: the device's), the flow's label offset (0: none), 0, 0, 1, 0."
+  }
+}

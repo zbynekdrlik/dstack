@@ -2,6 +2,7 @@ use super::*;
 
 mod dc_289_writes;
 mod dc_latency_write;
+mod dc_multicast_27;
 mod key_table;
 mod netaudio_289_writes;
 mod v289;
