@@ -47,8 +47,8 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use dstack_resample::asrc::{Basis, Controller, Step};
 use dstack_resample::{ConvertError, Converter, Fixed};
 
-use crate::fifo::Fifo;
-use crate::map;
+use super::fifo::Fifo;
+use super::map;
 
 /// The FIFO depth the controller keeps, s: the MVP's latency (the issue's
 /// design: about 40 ms), room for a late pump block and a large driver

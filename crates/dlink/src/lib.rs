@@ -104,6 +104,16 @@
 //! into our own RX takes the two paths less the one P they share (W + B +
 //! P, plus both converter delays): the whole-device test measures it.
 //!
+//! # An app on its own clock
+//!
+//! An app whose audio runs on its own clock (OBS's mix, a sound card)
+//! cannot hand it to the pump block for block: the two clocks drift. The
+//! app writes a [`bridge::Fifo`] (made with [`bridge::fifo_for`]) on its
+//! own audio thread, and its [`Process`] fills the device's block with
+//! [`bridge::Player::fill_with`], which converts from the app's rate and
+//! steers the FIFO's depth (about 40 ms) against the drift ([`bridge`];
+//! dsend's path, dstack #241). Neither side takes a lock or allocates.
+//!
 //! # Debug builds with a rate converter
 //!
 //! A device whose app rate differs from the network's runs the converter
@@ -164,6 +174,7 @@ pub use dstack::stream::Map;
 pub use dstack::subscribe::{SubState, SubStatus};
 pub use dstack_audio_io::{Block, Process};
 
+pub mod bridge;
 pub mod rated;
 
 pub use rated::Rated;

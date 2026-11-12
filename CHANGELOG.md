@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.103
+
+- New API (dstack #241, additive): `dlink::bridge`, the bridge between an app's own clock and the device's, moved from dstack-endpoint: `dlink::bridge::{Fifo, Player, Stats, fifo_for}` and the modules `dlink::bridge::{fifo, player, map}` (the player's constants such as `player::TARGET_S`, the channel map). An app on its own clock (OBS's mix) writes the `Fifo` on its audio thread and calls `Player::fill_with` in its `Process`, without dstack-endpoint's cpal (ALSA/WASAPI). dlink gains no dependency (dstack-resample was one already); its tree still holds tokio and tracing-subscriber through dstack itself, as before.
+- Not changed: dstack-endpoint keeps every path as a re-export (`dstack_endpoint::fifo`, `::player`, `::map`), so dsend, dlisten and their re-exports change nothing; the code and its 31 tests moved unchanged.
+- Docs: dlink's crate docs gain "An app on its own clock"; a unit test pins the split of a device with TX and RX at a 20 ms budget, a 96 kHz network, a 48 kHz app and block 128: W 768 samples (8 ms), P 11.364583 ms, RX path 13.322916 ms, TX path 19.999999 ms.
+- No latency change.
+
 ## 0.6.102
 
 - Fix (dstack #237): netaudio reads our ARC 2.8.9 channel lists (0x2400 TX, 0x3400 RX) in full. netaudio asks the first page with media selector 1 and every following page with the media type of the last record it read (3, audio); we answered selector 3 with an empty page, so netaudio 0.4.2 refused the whole list ("tx/rx channel page rejected ... channel page made no progress") on every device whose list takes more than one page (16 channels already). Now a page request with selector 3 is answered as with selector 1, for 0x2400, 0x3400 and 0x3600, as real 2.8.9 devices answer it; any other selector still gets an empty page. Dante Controller asks with selector 1: its replies are byte-identical. Catalog fixture: `crates/dstack/tests/fixtures/arc_netaudio_289_pages.json` (netaudio's own requests, encoded offline).

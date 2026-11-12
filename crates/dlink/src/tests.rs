@@ -881,3 +881,23 @@ fn the_default_15_ms_fits_every_common_config_with_w_6_ms() {
         }
     }
 }
+
+/// dstack #241 (obs #41): the OBS device with TX and RX at a 20 ms budget,
+/// a 96 kHz network, a 48 kHz app and block 128 splits as obs quoted: W 8 ms
+/// (768 samples), P 11.36 ms (1091 whole samples), RX path P + B + the
+/// half-band's RX delay 13.32 ms, TX path W + P + its TX delay 20 ms (1 ns
+/// under it: P is whole samples, rounded down).
+#[test]
+fn obs_s_device_at_20_ms_splits_as_obs_quoted() {
+    let cfg = config()
+        .sample_rate(48_000)
+        .network_rate(96_000)
+        .budget_ns(20_000_000)
+        .block(128);
+    assert_eq!(cfg.directions(), Directions::Both);
+    let s = cfg.split().unwrap();
+    assert_eq!(s.margin, 768);
+    assert_eq!(s.latency_ns, 11_364_583);
+    assert_eq!(s.rx_path_ns, 13_322_916);
+    assert_eq!(s.tx_path_ns, 19_999_999);
+}
