@@ -78,10 +78,10 @@ const PAGE_PREFIX: usize = 6;
 const COUNTS_RENAME: u8 = 0x01;
 /// A TX channel's flags, the card's.
 const TX_FLAGS: u32 = 0x0000_0007;
-/// An RX channel's flags, the card's (netaudio: rename allowed, no
-/// subscription to the own device). Our 2.7 RX record states the same 6
-/// (0x3000), so a reader sees no change from the generation.
-const RX_FLAGS: u32 = 0x0000_0006;
+/// An RX channel's flags: the card's 6 (netaudio: rename allowed) and the
+/// can-subscribe-self bit, as our 2.7 record states them
+/// ([`super::RX_CHANNEL_FLAGS`]).
+const RX_FLAGS: u32 = super::RX_CHANNEL_FLAGS as u32;
 /// An RX flow's flags, the card's.
 const RX_FLOW_FLAGS: u32 = 0x0000_0001;
 /// An RX flow's receiver state, the card's for a receiving flow.

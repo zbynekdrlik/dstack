@@ -217,6 +217,13 @@ pub const CLOCK_REPLY: [u8; 8] = [0x38, 0x00, 0x38, 0xfd, 0x38, 0xfe, 0x38, 0xff
 /// multicast flow by 0x2201 (refused), so Dante Controller is never offered
 /// one; ARC 2.8.9's create (0x2601, dstack #193) is answered.
 const FLAG_TX_RENAME: u8 = 0x10;
+/// An RX channel's flags in both generations' records (0x3000's second
+/// word, 0x3400's flags; a reader sees no change from the generation):
+/// inferno's 6 (netaudio: rename allowed) and 0x0008, netaudio's
+/// can-subscribe-self bit (dstack #220). Our RX channels take a
+/// subscription to our own TX, and netaudio refuses to send one without
+/// the bit.
+const RX_CHANNEL_FLAGS: u16 = 0x000e;
 /// The device names' header (0x1003), before its strings.
 const NAMES_HEADER: usize = 38;
 /// The 16-byte descriptor of a page's channels.
@@ -1427,7 +1434,7 @@ fn rx_channels(
         let [s0, s1] = [(status >> 16) as u16, status as u16];
         Some(descriptor(&[
             wire_u16(index + 1),
-            6,
+            RX_CHANNEL_FLAGS,
             common,
             tx_channel,
             tx_device,
