@@ -36,7 +36,8 @@
 //! | 0x3600 | RX flows: number, format, latency, our address, which RX channel each slot feeds ([`RX_FLOWS`]) |
 //!
 //! **Pages** (0x2400, 0x3400, 0x3600): the request body holds, from byte
-//! 6, `1`, the media selector (1, audio), the first item (from 1) and the
+//! 6, `1`, the media selector (audio: 1, or 3, the media type, as netaudio
+//! asks every page after the first; #237), the first item (from 1) and the
 //! last (0: to the end). The reply: 6 zero bytes, `[slots, count]`,
 //! `slots` record offsets (from the datagram's first byte), then the
 //! format (written once a page, from a multiple of 4), the strings and the
@@ -70,7 +71,10 @@ pub(super) const RX_FLOWS: u16 = 0x3600;
 const START_2801: u16 = 0x2801;
 /// The media type of an audio channel or flow.
 const MEDIA_AUDIO: u16 = 3;
-/// A page request's media selector for audio.
+/// A page request's media selector for audio, as Dante Controller and
+/// netaudio ask the first page. netaudio asks every following page with
+/// the media type of the last record it read ([`MEDIA_AUDIO`]); real
+/// 2.8.9 devices answer both alike (dstack #237).
 const AUDIO_SELECTOR: u16 = 1;
 /// The zero bytes before a page's `[slots, count]`.
 const PAGE_PREFIX: usize = 6;
@@ -250,7 +254,7 @@ fn channel_page(
     else {
         return refuse(h, "a page request without its first item");
     };
-    if media != AUDIO_SELECTOR {
+    if media != AUDIO_SELECTOR && media != MEDIA_AUDIO {
         return ArcOutcome::Reply(reply(h, STATUS_OK, &[0; PAGE_PREFIX + 2]));
     }
     let end = match read_u16(req, 12).unwrap_or(0) {
