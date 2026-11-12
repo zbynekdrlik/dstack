@@ -1,24 +1,25 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // Copyright (C) 2026 dstack contributors.
 
-//! Our ARC 2.8.9 TX flow list (0x2600 under 0x2809) in the layout real
-//! 2.8.9 devices write (dstack #223): the card's
+//! Reading another device's ARC 2.8.9 TX flow list (0x2600) in the layout
+//! real 2.8.9 devices write (dstack #223): the card's
 //! (`tests/fixtures/arc_289_card.json`), the UltimoX2's and the adapters'
 //! (`arc/flows/tests.rs`) are all `14 27` records with the flow's name and
-//! a format block at offsets. Ours were #148's own chain (a 12-word first
-//! segment), which Dante Controller could not read once it read the
-//! segmented lists (bit 0x1000): it re-read the device without end.
+//! a format block at offsets. Our own devices keep #148's records
+//! ([`flows::list_reply_body`]; the card's would cost dstack receivers up
+//! to v0.6.97 our multicast flows), so this file pins the reader:
+//! [`flows::parse_flows`] takes the bits from the format block and
+//! [`flows::list_tx_flows`] follows a device's pages.
 //!
-//! Replies are read with this file's own record reader, never with the
-//! code under test; [`flows::list_tx_flows`] is the code under test of the
-//! last test (our own receivers' reader, across pages).
+//! The fixtures' records are read with this file's own record reader,
+//! never with the code under test.
 
 use super::*;
 
 use crate::arc::client::ReadError;
 use crate::arc::control::Call;
 use crate::arc::flows::list_tx_flows;
-use crate::arc::flows::tests::{ULTIMO_CREATED, ULTIMO_LIST, hex};
+use crate::arc::flows::tests::{ULTIMO_LIST, hex};
 
 const CARD: &str = include_str!("../../../tests/fixtures/arc_289_card.json");
 
@@ -123,20 +124,6 @@ fn tx_list(p: &[u8]) -> (usize, Vec<TxRecord>) {
     (slots, records)
 }
 
-/// A receiver's request for a flow of our TX `channels` to `rx`, at `fpp`.
-fn asked(
-    host: &str,
-    flow: &str,
-    channels: &[Option<u16>],
-    rx: SocketAddrV4,
-    fpp: u16,
-) -> FlowRequest {
-    FlowRequest {
-        fpp,
-        ..tx_request(host, flow, channels, rx)
-    }
-}
-
 #[test]
 fn the_card_s_tx_flows_read_as_the_fixture_states() {
     let (slots, records) = tx_list(&card("replies", "0x2600"));
@@ -170,92 +157,12 @@ fn the_card_s_tx_flows_read_as_the_fixture_states() {
             unicast(2, ("source-device-a", "2_1"), a, 1),
         ]
     );
-}
-
-/// The card's two flows, made on our device by its receivers' requests
-/// (the same receivers, names, slots and frames per packet).
-fn cards_flows(dev: &mut Dev) {
-    let b = SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 104), 0x381d);
-    let a = SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 30), 0xe0bf);
-    let first = asked("receiver-device-b-01234567", "2", &[Some(2), None], b, 32);
-    let second = asked("source-device-a", "2_1", &[Some(1), None], a, 32);
-    for (slot, req) in [first, second].iter().enumerate() {
-        assert_eq!(dev.tx.add(req, 0).unwrap().0, slot);
-    }
-}
-
-#[test]
-fn our_tx_flows_answer_0x2600_in_the_card_s_layout() {
-    let (_, card_records) = tx_list(&card("replies", "0x2600"));
-    let mut dev = Dev::new(config());
-    cards_flows(&mut dev);
-    let reply = sent_bytes(dev.send(&card("requests", "0x2600")));
-    assert_eq!(u16_at(&reply, 8), STATUS_OK);
-    assert!(reply.len() <= MAX_DATAGRAM);
-    let (slots, records) = tx_list(&reply);
-    // Our slots: the 32 TX flows our 0x1000 states (dstack #190 reads them
-    // as the device's flow slots).
-    assert_eq!(slots, usize::from(MAX_FLOWS));
-    assert_eq!(records, card_records, "the card's records, field by field");
-}
-
-#[test]
-fn our_multicast_flow_answers_0x2600_as_the_ultimo_x2_lists_one() {
-    // The UltimoX2's multicast flow (flags 2): no receiver, its group.
-    let ultimo = hex(ULTIMO_LIST);
-    let (_, theirs) = tx_list(&ultimo);
-    let their = &theirs[0];
-    assert_eq!((their.flags, &their.receiver), (0x02, &None));
-    assert_eq!(their.latency, 1_000_000, "its 1 ms");
-    let mut dev = Dev::new(config());
-    let group = dev
-        .tx
-        .add_own_multicast(&dev.cfg, OUR_IP, 4, &[1, 2])
-        .unwrap();
-    let reply = sent_bytes(dev.send(&card("requests", "0x2600")));
-    let (_, ours) = tx_list(&reply);
-    assert_eq!(
-        ours,
-        [TxRecord {
-            segments: their.segments.clone(),
-            id: 5,
-            local_id: 5,
-            flags: 0x02,
-            name: "5".into(),
-            latency: u32::try_from(dev.cfg.latency_ns).unwrap(),
-            rate: dev.cfg.sample_rate,
-            bits: u32::from(dev.cfg.encoding),
-            receiver: None,
-            destinations: vec![group],
-            channels: vec![1, 2],
-            fpp: dev.cfg.tx_fpp_max,
-        }]
-    );
-}
-
-#[test]
-fn our_answer_to_a_2_8_9_create_is_the_ultimo_x2_s() {
-    // The same create (slot 1, channels 1 and 2) to the UltimoX2 and to us.
-    let theirs = hex(ULTIMO_CREATED);
-    let (their_slots, their_records) = tx_list(&theirs);
-    let dir = tempfile::tempdir().unwrap();
-    let mut device = Device::load(config_in(dir.path())).unwrap();
-    let flows = NoFlows::new(&device);
-    let create = flows::create_body(1, &[1, 2], 1).unwrap();
-    let packet = request(0x2809, 0x5101, flows::CREATE, 0, &create);
-    let (ours, change) = answered(answer(&mut device, &flows, &packet));
-    assert_eq!(change, Some(Change::TX_FLOWS_ONLY));
-    let (slots, records) = tx_list(&ours);
-    assert_eq!((slots, their_slots), (1, 1));
-    // Theirs, but our frames per packet and latency: no destination, a
-    // format of rate 0 and our bits, as the UltimoX2 answers.
-    let want = TxRecord {
-        fpp: device.cfg.tx_fpp_max,
-        latency: u32::try_from(device.cfg.latency_ns).unwrap(),
-        ..their_records[0].clone()
-    };
-    assert_eq!((want.rate, want.bits), (0, 24));
-    assert_eq!(records, [want]);
+    // The UltimoX2's multicast flow: flags 2, its latency (1 ms) at bytes
+    // 24-27 of the first segment, no receiver, its group.
+    let (_, ultimo) = tx_list(&hex(ULTIMO_LIST));
+    let m = &ultimo[0];
+    assert_eq!((m.flags, m.latency, &m.receiver), (0x02, 1_000_000, &None));
+    assert_eq!(m.destinations[0].ip(), &Ipv4Addr::new(239, 255, 0, 1));
 }
 
 #[test]
@@ -268,49 +175,6 @@ fn the_list_reader_takes_the_bits_from_the_format_block() {
     assert_eq!(read.unread, 0);
     let bits: Vec<u16> = read.flows.iter().map(|f| f.bits).collect();
     assert_eq!(bits, [32, 32]);
-}
-
-/// Our own device behind [`Call`]: every request answered by [`handle`],
-/// each reply at most one datagram.
-struct Ours<'a> {
-    dev: &'a mut Dev,
-    pages: usize,
-}
-
-impl Call for Ours<'_> {
-    fn call(&mut self, op1: u16, body: &[u8]) -> Result<(u16, Vec<u8>), ReadError> {
-        self.call_as(0x27ff, op1, body)
-    }
-
-    fn call_as(&mut self, start: u16, op1: u16, body: &[u8]) -> Result<(u16, Vec<u8>), ReadError> {
-        self.pages += 1;
-        let reply = sent_bytes(self.dev.send(&request(start, 1, op1, 0, body)));
-        assert!(reply.len() <= MAX_DATAGRAM, "{} bytes", reply.len());
-        Ok((u16_at(&reply, 8), reply[HEADER_LEN..].to_vec()))
-    }
-}
-
-#[test]
-fn our_receivers_read_every_flow_of_a_full_list_page_by_page() {
-    // 32 unicast flows with names of the longest kind: more than one
-    // datagram holds.
-    let mut dev = Dev::new(config());
-    for k in 0..u16::from(32u8) {
-        let rx = SocketAddrV4::new(PEER_IP, 40_000 + k);
-        let host = format!("receiver-{k:02}-{}", "x".repeat(19));
-        let req = asked(&host, &format!("flow-{k:02}"), &[Some(1 + k % 16)], rx, 16);
-        assert_eq!(dev.tx.add(&req, 0).unwrap().0, usize::from(k));
-    }
-    let mut ours = Ours {
-        dev: &mut dev,
-        pages: 0,
-    };
-    let read = list_tx_flows(&mut ours).expect("the whole list reads");
-    assert!(ours.pages > 1, "several pages");
-    assert_eq!(read.unread, 0);
-    let ids: Vec<u16> = read.flows.iter().map(|f| f.id).collect();
-    assert_eq!(ids, (1..=32).collect::<Vec<u16>>(), "each flow once");
-    assert!(read.flows.iter().all(|f| f.bits == 24 && !f.multicast()));
 }
 
 /// A device that answers every page with one recorded reply body and

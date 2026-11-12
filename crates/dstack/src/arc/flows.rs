@@ -28,8 +28,8 @@
 //!   one reads 0x11) and the bits per sample: in a 2.8.9 device's record
 //!   (a 40-byte first segment) the format block's second `u32`, at the
 //!   packet offset in bytes 22–23 (its name's offset is at 20–21); in a
-//!   dstack device's before v0.6.98 (12 words) bytes 22–23 themselves
-//!   (dstack #223).
+//!   dstack device's ([`list_reply_body`], 12 words) bytes 22–23
+//!   themselves (dstack #223).
 //! - 2: the destinations: `[slots, count]`, then `count` offsets, each of
 //!   an 8-byte descriptor `08 02 <port u16> <IPv4>`.
 //! - 3: the channels: their count (2–3), then each TX channel id.
@@ -201,6 +201,75 @@ fn segments(body: &[u8], at: usize) -> Option<Vec<usize>> {
     Some(out)
 }
 
+/// A 0x2600 reply body listing `flows` (at most 255, and the table states
+/// [`super::MAX_FLOWS`] slots, our devices' TX flow slots), in the form
+/// [`parse_flows`] reads: the table, then each record's segment chain
+/// (0: ids, flags, bits; 1: empty; 2: its destinations; 3: its channels;
+/// 4: its frames per packet), then the destinations' descriptors. Our own
+/// devices answer the list with it (dstack #148: every receiver reads
+/// each transmitter's list once a minute; unanswered, each read waited
+/// 1 s and the transmitter logged it).
+// The table's slot count is one byte.
+const _: () = assert!(super::MAX_FLOWS <= 255);
+
+pub fn list_reply_body(flows: &[TxFlow]) -> Vec<u8> {
+    let flows = &flows[..flows.len().min(255)];
+    let count = flows.len() as u8;
+    let mut out = vec![0u8; 6];
+    out.extend([super::MAX_FLOWS as u8, count]);
+    let table = out.len();
+    out.resize(table + 2 * flows.len(), 0);
+    // The descriptors' offsets are known only after every record.
+    let mut pending: Vec<(usize, SocketAddrV4)> = Vec::new();
+    for (k, f) in flows.iter().enumerate() {
+        let at = out.len();
+        let at_wire = u16::try_from(HEADER_LEN + at).unwrap_or(u16::MAX);
+        out[table + 2 * k..table + 2 * k + 2].copy_from_slice(&at_wire.to_be_bytes());
+        let dests = f.destinations.len().min(255);
+        let chans = f.channels.len().min(255);
+        // Segment lengths in words: 12, 2, 2 + the offsets, 2 + the ids, 2.
+        let words = [12, 2, 2 + dests, 2 + chans, 2];
+        let total: usize = words.iter().sum();
+        let mut left = total;
+        let mut seg = |out: &mut Vec<u8>, w: usize| {
+            out.push(w as u8);
+            out.push(left as u8);
+            left -= w;
+        };
+        seg(&mut out, words[0]);
+        out.extend(f.id.to_be_bytes());
+        out.extend([0; 4]);
+        out.extend(f.local_id.to_be_bytes());
+        out.extend([0; 2]);
+        out.extend(f.flags.to_be_bytes());
+        out.extend([0; 6]);
+        out.extend(f.bits.to_be_bytes());
+        seg(&mut out, words[1]);
+        out.extend([0; 2]);
+        seg(&mut out, words[2]);
+        out.extend([dests as u8, dests as u8]);
+        for d in &f.destinations[..dests] {
+            pending.push((out.len(), *d));
+            out.extend([0; 2]);
+        }
+        seg(&mut out, words[3]);
+        out.extend((chans as u16).to_be_bytes());
+        for c in &f.channels[..chans] {
+            out.extend(c.to_be_bytes());
+        }
+        seg(&mut out, words[4]);
+        out.extend(f.fpp.to_be_bytes());
+    }
+    for (at, d) in pending {
+        let here = u16::try_from(HEADER_LEN + out.len()).unwrap_or(u16::MAX);
+        out[at..at + 2].copy_from_slice(&here.to_be_bytes());
+        out.extend([8, 2]);
+        out.extend(d.port().to_be_bytes());
+        out.extend(d.ip().octets());
+    }
+    out
+}
+
 /// One flow record at body offset `at`.
 fn record(body: &[u8], at: usize) -> Option<TxFlow> {
     let seg = segments(body, at)?;
@@ -243,7 +312,7 @@ fn record(body: &[u8], at: usize) -> Option<TxFlow> {
 /// 2.8.9 device's record (a 40-byte first segment, `FIRST_SEGMENT`) the
 /// second `u32` of the format block whose packet offset is at bytes 22–23
 /// (dstack #223), 0 with no format (a create's request); in a dstack
-/// device's before v0.6.98 (24 bytes) bytes 22–23 themselves.
+/// device's ([`list_reply_body`], 24 bytes) bytes 22–23 themselves.
 fn bits(body: &[u8], first: &[u8]) -> Option<u16> {
     let word = read_u16(first, 22)?;
     if first.len() < FIRST_SEGMENT || word == 0 {
@@ -259,11 +328,11 @@ const FIRST_SEGMENT: usize = 40;
 
 /// The device's TX flows (0x2600), page by page: a page that says more
 /// follow ([`STATUS_MORE`]) is followed by the one from the flow after its
-/// last (dstack #223: our own list takes several datagrams for many
-/// flows), at most [`super::MAX_FLOWS`] pages. A page's flows before the
-/// one it was asked from are left out (already read). A page that names no
-/// flow past the one it was asked from, yet says more follow, is
-/// malformed. [`Flows::unread`] adds up every page's records that did not
+/// last (dstack #223: a device with a long list may page it), at most
+/// [`super::MAX_FLOWS`] pages. A page's flows before the one it was asked
+/// from are left out (already read). A page that names no flow past the
+/// one it was asked from, yet says more follow, is malformed. The first
+/// request is [`list_body`] itself. [`Flows::unread`] adds up every page's records that did not
 /// read (a device that lists one again on its next page counts it twice).
 pub fn list_tx_flows(c: &mut impl Call) -> Result<Flows, ReadError> {
     let mut out = Flows::default();

@@ -7,9 +7,8 @@
 
 //! ARC 2.8.9's writes (start code [`flows::START_2809`], dstack #220), as
 //! netaudio sends them to a device that announces 2.8.9 (it picks them
-//! from `arcp_vers`), and as Dante Controller sends them since our 0x1000
-//! states segmented flows (#223; it kept 2.7's writes while that bit was
-//! clear, #216 Finding 18). Each makes the change of the 2.7 write of its kind,
+//! from `arcp_vers`; Dante Controller keeps 2.7's writes for our devices,
+//! #216 Finding 18). Each makes the change of the 2.7 write of its kind,
 //! through the same function, so both generations change a device alike:
 //!
 //! | op1 | change | answer |

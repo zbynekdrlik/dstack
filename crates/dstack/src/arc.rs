@@ -26,7 +26,7 @@
 //! | 0x2013 | TX rename |
 //! | 0x2200 | TX flows, [`FLOW_PAGE`] slots a page (inferno's `query_tx_flows`) |
 //! | 0x2201, 0x2202 | ARC 2.7's create, delete of a multicast TX flow (Dante Controller's on a device without segmented flows, dstack #222): the flow made in the slot its id names, or ended ([`answer`]); OK, no body. [`handle`] alone, which cannot change the TX table, refuses them as inferno does when it creates or deletes none |
-//! | 0x2600 (start 0x2809) | ARC 2.8.9's TX flow list, in a 2.8.9 card's records (`arc/v289.rs`, dstack #223): receivers' flows unicast, ours multicast with their group |
+//! | 0x2600 (start 0x2809) | ARC 2.8.9's TX flow list ([`flows::list_reply_body`]): receivers' flows unicast, ours multicast with their group |
 //! | 0x2601 (start 0x2809) | ARC 2.8.9's multicast create (dstack #193): a multicast flow in the asked slot ([`answer`]); the reply is its record, no destination |
 //! | 0x2602 (start 0x2809) | ARC 2.8.9's delete of a multicast flow: OK, no body |
 //! | 0x2204 | status [`STATUS_2320`], no body (the IEM card's answer, captured) |
@@ -40,12 +40,10 @@
 //!
 //! Under ARC 2.8.9's start code 0x2809 (dstack #216), which Dante Controller
 //! uses for a device announcing [`ARCP_VERSION`], 0x1000, 0x1003, 0x2010,
-//! 0x2204 and the lists 0x2400 (TX channels), 0x3400 (RX channels), 0x3600
-//! (RX flows) and 0x2600 (TX flows) are answered in a 2.8.9 card's layouts (`arc/v289.rs`);
+//! 0x2204 and the lists 0x2400 (TX channels), 0x3400 (RX channels) and
+//! 0x3600 (RX flows) are answered in a 2.8.9 card's layouts (`arc/v289.rs`);
 //! everything else as above. 0x1000 there states the device rename (word
-//! 0's 0x0001), without which Dante Controller greys out its Rename, and
-//! segmented flows (0x1000, dstack #223): Dante Controller then reads the
-//! 2.8.9 lists, 0x2600 (TX flows) among them.
+//! 0's 0x0001), without which Dante Controller greys out its Rename.
 //! netaudio's 2.8.9 writes there, 0x3410 (subscribe), 0x3401 (RX rename)
 //! and 0x2438 (TX names), make the change of 0x3010, 0x3001 and 0x2013
 //! through the same functions (`arc/v289/writes.rs`, dstack #220).
@@ -468,6 +466,9 @@ pub fn handle(
         op::RX_CHANNELS => rx_channels(&h, body, state, cfg, live.rx),
         op::RX_RENAME => rename(&h, body, state, cfg, Dir::Rx),
         op::TX_FLOWS => tx_flows(&h, body, cfg, live.tx),
+        // ARC 2.8.9's TX flow list (dstack #148): what every dstack receiver
+        // reads to find a transmitter's multicast flows.
+        flows::LIST if h.start == flows::START_2809 => ok(&flows_2809(cfg, live.tx)),
         op::RX_FLOWS => rx_flows(&h, body, cfg, live.rx),
         op::TX_MULTICAST_CREATE => no_multicast(&h, body, 2),
         op::TX_MULTICAST_DELETE => no_multicast(&h, body, 4),
@@ -751,6 +752,32 @@ fn socket_descriptor(out: &mut Body, at: std::net::SocketAddrV4) {
     out.u16(SOCKET_DESCRIPTOR);
     out.u16(at.port());
     out.bytes(&at.ip().octets());
+}
+
+/// Our TX flows as an ARC 2.8.9 list (0x2600, [`flows::list_reply_body`]):
+/// each a unicast flow to its receiver or a multicast flow to its group
+/// (dstack #193), its slot (from 1) as both ids.
+fn flows_2809(cfg: &DeviceConfig, tx: &TxTable) -> Vec<u8> {
+    let listed: Vec<flows::TxFlow> = (0..usize::from(MAX_FLOWS))
+        .filter_map(|slot| {
+            let f = tx.flow(slot)?;
+            let id = wire_u16(slot + 1);
+            Some(flows::TxFlow {
+                id,
+                local_id: id,
+                flags: if f.multicast {
+                    flows::MULTICAST
+                } else {
+                    flows::UNICAST
+                },
+                channels: f.channels.iter().map(|c| c.unwrap_or(0)).collect(),
+                fpp: f.fpp,
+                bits: u16::from(cfg.encoding),
+                destinations: vec![f.dest],
+            })
+        })
+        .collect();
+    flows::list_reply_body(&listed)
 }
 
 /// 0x2200: the TX flows receivers asked for on 4455, expired ones too
@@ -1160,22 +1187,8 @@ fn paged<I>(
     slots: usize,
     item: usize,
     items: impl IntoIterator<Item = I>,
-    write: impl FnMut(I, &mut Heap) -> Option<Vec<u8>>,
-) -> ArcOutcome {
-    let (body, more) = page_body(prefix, first, slots, item, items, write);
-    let status = if more { STATUS_MORE } else { STATUS_OK };
-    ArcOutcome::Reply(reply(h, status, &body))
-}
-
-/// [`paged`]'s body, and whether more items follow.
-fn page_body<I>(
-    prefix: usize,
-    first: u16,
-    slots: usize,
-    item: usize,
-    items: impl IntoIterator<Item = I>,
     mut write: impl FnMut(I, &mut Heap) -> Option<Vec<u8>>,
-) -> (Vec<u8>, bool) {
+) -> ArcOutcome {
     let mut heap = Heap {
         body: Body::new(),
         shared: None,
@@ -1208,7 +1221,8 @@ fn page_body<I>(
     for (i, descriptor) in table.iter().enumerate() {
         body[table_at + i * item..table_at + (i + 1) * item].copy_from_slice(descriptor);
     }
-    (body, more)
+    let status = if more { STATUS_MORE } else { STATUS_OK };
+    ArcOutcome::Reply(reply(h, status, &body))
 }
 
 /// 0x2000: each TX channel with its default name.
