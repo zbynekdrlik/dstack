@@ -462,7 +462,9 @@ fn our_rx_channels_answer_0x3400_in_the_card_s_layout() {
     assert_eq!(got.len(), 3);
     for (k, c) in got.iter().enumerate() {
         assert_eq!(c.number, k as u16 + 1);
-        assert_eq!(c.flags, card_rx[0].flags, "the card's RX flags");
+        // The card's, and netaudio's can-subscribe-self bit (0x0008): our
+        // RX channels take a subscription to our own TX (#220).
+        assert_eq!(c.flags, card_rx[0].flags | 0x0008, "the card's RX flags");
         assert_eq!(c.default, dev.cfg.rx[k]);
         assert_eq!(c.format, our_format(&dev.cfg));
     }
