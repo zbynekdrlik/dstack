@@ -72,8 +72,7 @@ mod socket;
 pub use plan::{RxPlan, RxRoute};
 pub use socket::{GROUP_BOUND_TO_PORT, join};
 use socket::{
-    Received, recv_stamped, set_recv_buffer, stamp_receives, wake_delay_ns, wall_now_ns,
-    wire_lateness,
+    Received, recv_stamped, set_recv_buffer, stamp_receives, wake_delay_ns, wall_now_ns, wire_late,
 };
 
 /// Our RX flow slots (inferno's `MAX_FLOWS`).
@@ -254,8 +253,9 @@ pub struct RxShared {
     stop: AtomicBool,
     base: Instant,
     recv_buffer: usize,
-    /// Every flow socket stamps its receive times (Linux).
-    stamps: bool,
+    /// Every slot socket stamps its receive times (Linux): the passes
+    /// measure wake delays and wire lateness.
+    stamps: AtomicBool,
 }
 
 /// The last of the [`MAX_FLOWS`] ports from `base`, `None` past 65535.
@@ -324,7 +324,7 @@ impl RxShared {
             stop: AtomicBool::new(false),
             base: Instant::now(),
             recv_buffer,
-            stamps,
+            stamps: AtomicBool::new(stamps),
             playout: AtomicU64::new(0),
         })
     }
@@ -512,11 +512,19 @@ impl RxShared {
             .map_or(0, |l| l.last_wake_ns.load(Ordering::Relaxed) / 1_000)
     }
 
-    /// Whether every flow socket stamps its datagrams' receive times, so
+    /// Whether every slot socket stamps its datagrams' receive times, so
     /// `wire_late` and the wake delays are measured (dstack #234: Linux,
-    /// where the kernel takes `SO_TIMESTAMPNS`; false on Windows).
+    /// where the kernel takes `SO_TIMESTAMPNS`; false on Windows). A
+    /// multicast group's socket asks for the stamp too ([`join`]).
     pub fn stamps(&self) -> bool {
-        self.stamps
+        self.stamps.load(Ordering::Relaxed)
+    }
+
+    /// Turns the measuring off as on a box without receive stamps: the
+    /// Windows path's behaviour, for a Linux test.
+    #[cfg(test)]
+    pub(crate) fn set_stamps(&self, on: bool) {
+        self.stamps.store(on, Ordering::Relaxed);
     }
 
     /// The packets' judge of flow slot `slot` (phase D, plan Task 3): the
@@ -683,9 +691,9 @@ impl Receiver {
     /// the thread's clock `mono`: the plans and routes that changed, every
     /// slot with datagrams waiting read, the keepalives due sent.
     /// The wall clock is read once at its start, for the packets' wake
-    /// delays (dstack #234).
+    /// delays (dstack #234), only while the sockets stamp their receives.
     pub fn pass(&mut self, now_ns: Option<u64>, mono: u64) {
-        let wall = wall_now_ns();
+        let wall = self.shared.stamps().then(wall_now_ns).flatten();
         self.refresh();
         let mut ready = self.ready;
         while ready != 0 {
@@ -873,7 +881,7 @@ impl Receiver {
             if lateness > limit {
                 count(&stats.late);
             }
-            if wake.is_some_and(|w| wire_lateness(now_ns, w, pos, rate) > limit) {
+            if wake.is_some_and(|w| wire_late(now_ns, w, pos, rate, limit)) {
                 count(&stats.wire_late);
             }
             let end = pos.saturating_add(nframes as u64);

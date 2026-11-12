@@ -39,6 +39,15 @@ fn the_wire_lateness_is_the_lateness_at_now_less_the_wake() {
     assert_eq!(wire_lateness(5, u64::MAX, P0, RATE), 0);
 }
 
+#[test]
+fn a_packet_is_wire_late_only_past_late_s_limit() {
+    let now = ns_of(P0 + 1_000, RATE);
+    // 1 000 samples late at the pass, a 10 ms wake: 40 on the wire.
+    assert!(!wire_late(now, 10_000_000, P0, RATE, 40));
+    assert!(wire_late(now, 10_000_000, P0, RATE, 39));
+    assert!(!wire_late(now, 20_000_000, P0, RATE, 0));
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn a_timespec_reads_as_ns_since_1970() {
@@ -67,9 +76,22 @@ fn the_wall_clock_is_now() {
 #[test]
 fn only_the_socket_level_ns_stamp_is_the_receive_time() {
     use linux::is_stamp;
-    assert!(is_stamp(libc::SOL_SOCKET, libc::SCM_TIMESTAMPNS));
-    assert!(!is_stamp(libc::SOL_SOCKET, libc::SCM_TIMESTAMPNS + 1));
-    assert!(!is_stamp(libc::IPPROTO_IP, libc::SCM_TIMESTAMPNS));
+    // A cmsghdr (16 bytes on 64-bit Linux) and a timespec (16).
+    let whole = std::mem::size_of::<libc::cmsghdr>() + std::mem::size_of::<libc::timespec>();
+    assert!(is_stamp(libc::SOL_SOCKET, libc::SCM_TIMESTAMPNS, whole));
+    assert!(is_stamp(libc::SOL_SOCKET, libc::SCM_TIMESTAMPNS, whole + 8));
+    // Cut short (a truncated control buffer): no stamp read.
+    assert!(!is_stamp(
+        libc::SOL_SOCKET,
+        libc::SCM_TIMESTAMPNS,
+        whole - 1
+    ));
+    assert!(!is_stamp(
+        libc::SOL_SOCKET,
+        libc::SCM_TIMESTAMPNS + 1,
+        whole
+    ));
+    assert!(!is_stamp(libc::IPPROTO_IP, libc::SCM_TIMESTAMPNS, whole));
 }
 
 #[cfg(target_os = "linux")]
@@ -230,6 +252,21 @@ fn a_multicast_flow_s_packets_carry_their_receive_time_too() {
 #[test]
 fn without_receive_stamps_no_wake_and_no_wire_lateness_are_counted() {
     let (s, mut rx) = receiver(None);
+    assert!(!s.stamps());
+    send(s.local_addr(2).unwrap(), P0);
+    std::thread::sleep(Duration::from_millis(30));
+    let c = pump(&mut rx, 1, ns_of(P0 + u64::from(RATE), RATE));
+    assert_eq!((c.packets, c.late), (1, 1), "{c:?}");
+    assert_eq!((c.wire_late, c.wake_delay_peak_us), (0, 0), "{c:?}");
+    s.take_max_lateness(2);
+    assert_eq!(s.last_wake_delay_us(2), 0);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn with_the_stamps_off_a_linux_pass_measures_as_windows_does() {
+    let (s, mut rx) = receiver(None);
+    s.set_stamps(false);
     assert!(!s.stamps());
     send(s.local_addr(2).unwrap(), P0);
     std::thread::sleep(Duration::from_millis(30));

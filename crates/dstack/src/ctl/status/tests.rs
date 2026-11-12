@@ -494,6 +494,54 @@ fn the_status_shows_the_packets_judge_in_ns_numbers_only() {
 }
 
 #[test]
+fn the_receive_stamp_keys_show_only_while_the_sockets_stamp() {
+    use crate::media::rx::{Receiver, RxPlan};
+    let dir = tempfile::tempdir().unwrap();
+    let device = device_at(dir.path());
+    let media = media_on(&device, Arc::new(ManualClock::new(T)));
+    // One packet on flow slot 1, so the status lists it.
+    let lo = Ipv4Addr::LOCALHOST;
+    let plan = RxPlan {
+        src: Some(lo),
+        bps: 3,
+        nslots: 1,
+        latency: 96,
+        delay: 0,
+        block: 0,
+        live: false,
+        generation: 1,
+        group: None,
+    };
+    media.rx.publish(
+        |slot| if slot == 0 { plan } else { RxPlan::default() },
+        |_| None,
+    );
+    let mut receiver = Receiver::new(Arc::clone(&media.rx)).unwrap();
+    let mut buf = [0u8; 64];
+    let (secs, sub) = crate::clock::stamp(96_000_000, 96_000);
+    let n = crate::media::packet::write(&mut buf, secs, sub, 1, 3, 1, |_, _| 0);
+    std::net::UdpSocket::bind((lo, 0))
+        .unwrap()
+        .send_to(&buf[..n], media.rx.local_addr(0).unwrap())
+        .unwrap();
+    let deadline = std::time::Instant::now() + BOUND;
+    while media.rx.lane(0).packets < 1 {
+        receiver.wait(std::time::Duration::from_millis(20)).unwrap();
+        receiver.pass(Some(T), 0);
+        assert!(std::time::Instant::now() < deadline, "no packet");
+    }
+    assert_eq!(
+        status(&media).contains("\"wake_delay_peak_us\":"),
+        cfg!(target_os = "linux")
+    );
+    media.rx.set_stamps(false);
+    let s = status(&media);
+    for key in ["wire_late", "wake_delay_us", "wake_delay_peak_us"] {
+        assert!(!s.contains(key), "{key} in {s}");
+    }
+}
+
+#[test]
 fn the_status_lists_the_flows_of_both_sides() {
     use crate::flows::control::FlowRequest;
     use crate::subscribe::{Action, Answer};

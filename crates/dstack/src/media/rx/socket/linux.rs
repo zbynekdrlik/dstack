@@ -28,9 +28,12 @@ pub fn stamp_receives(s: &impl AsRawFd) -> bool {
     set == 0
 }
 
-/// Whether a control message of `level` and `kind` is the receive stamp.
-pub fn is_stamp(level: libc::c_int, kind: libc::c_int) -> bool {
-    level == libc::SOL_SOCKET && kind == libc::SCM_TIMESTAMPNS
+/// Whether a control message of `level` and `kind`, `len` bytes with its
+/// header, is a whole receive stamp (a `timespec`).
+pub fn is_stamp(level: libc::c_int, kind: libc::c_int, len: usize) -> bool {
+    // SAFETY: CMSG_LEN is arithmetic on its argument only.
+    let whole = unsafe { libc::CMSG_LEN(size_of::<libc::timespec>() as u32) } as usize;
+    level == libc::SOL_SOCKET && kind == libc::SCM_TIMESTAMPNS && len >= whole
 }
 
 /// The IPv4 sender in `addr` when the kernel wrote `len` bytes of it.
@@ -88,7 +91,7 @@ pub fn recv_stamped(s: &impl AsRawFd, buf: &mut [u8]) -> io::Result<Received> {
     unsafe {
         let mut c = libc::CMSG_FIRSTHDR(&msg);
         while !c.is_null() {
-            if is_stamp((*c).cmsg_level, (*c).cmsg_type) {
+            if is_stamp((*c).cmsg_level, (*c).cmsg_type, (*c).cmsg_len as usize) {
                 let ts: libc::timespec = std::ptr::read_unaligned(libc::CMSG_DATA(c).cast());
                 at_ns = timespec_ns(ts.tv_sec, ts.tv_nsec);
             }

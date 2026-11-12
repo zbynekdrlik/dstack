@@ -14,11 +14,14 @@
 //! wake delay ([`wake_delay_ns`]), and its lateness on the wire is its
 //! lateness at the pass's PTP time less that delay ([`wire_lateness`]).
 //! Only differences of one clock's reads are used, so the wall clock's
-//! offset from PTP does not matter.
+//! offset from PTP does not matter. The kernel stamps in the wall clock
+//! only: a step of it between a receive and the pass reads as a false wake
+//! delay (forward) or as 0 (backward, where the wire lateness is then the
+//! lateness at the pass).
 //!
 //! Windows reads with `recv_from` as before: no stamp, so no wake delay
 //! and no wire lateness are measured there ([`super::RxShared::stamps`] is
-//! false).
+//! false, and the pass reads no wall clock).
 
 use std::io::{self, ErrorKind};
 use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
@@ -59,6 +62,13 @@ pub fn wake_delay_ns(wall_ns: Option<u64>, at_ns: Option<u64>) -> Option<u64> {
 /// (0 for one not yet due then).
 pub fn wire_lateness(now_ns: u64, wake_ns: u64, pos: u64, rate: u32) -> u64 {
     clock::to_samples(now_ns.saturating_sub(wake_ns), rate).saturating_sub(pos)
+}
+
+/// Whether a packet was already late when the kernel received it: its
+/// [`wire_lateness`] past `limit`, the rule `late` uses (the flow's playout
+/// plus the pump's block, samples).
+pub fn wire_late(now_ns: u64, wake_ns: u64, pos: u64, rate: u32, limit: u64) -> bool {
+    wire_lateness(now_ns, wake_ns, pos, rate) > limit
 }
 
 /// The box's wall clock now, ns since 1970 (`None` before 1970).
