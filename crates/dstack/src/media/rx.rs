@@ -33,6 +33,11 @@
 //!   read and since the start, and a packet already late on the wire (by
 //!   `late`'s rule, at the pass's time less its wake delay) counts
 //!   `wire_late`. Windows has no stamp: both stay 0.
+//! - The measured network latency (dstack #244, Linux): each such packet's
+//!   arrival on our PTP clock (the pass's now less its wake delay) less its
+//!   own stamp, as min, p99 and max of each heartbeat second, from a fixed
+//!   histogram of the slot (`rx/netlat.rs`;
+//!   [`RxShared::last_network_latency`]). Windows records none.
 //! - The packets' judge (phase D, plan Task 3): the least lateness of each
 //!   flow slot's placed packets in ns (our clock's now in ns less the
 //!   packet's own stamp in ns), kept until read, so each heartbeat second
@@ -67,8 +72,10 @@ use super::tx::{Cell, MAX_CHANNELS, ns_of, place, take_priority};
 use crate::clock::{self, PtpClock};
 use crate::wire::MAX_DATAGRAM;
 
+mod netlat;
 mod plan;
 mod socket;
+pub use netlat::NetLatency;
 pub use plan::{RxPlan, RxRoute};
 pub use socket::{GROUP_BOUND_TO_PORT, join};
 use socket::{
@@ -152,6 +159,8 @@ struct RxStats {
     wake_peak_ns: AtomicU64,
     /// The packets' judge: the least lateness in ns since the last take.
     min_lateness_ns: Least,
+    /// The measured network latency's window (dstack #244, Linux).
+    network: netlat::Window,
     /// What the last [`RxShared::take_max_lateness`] took of it.
     last_min_lateness_ns: Least,
 }
@@ -484,6 +493,7 @@ impl RxShared {
         self.lanes.get(slot).map_or(0, |l| {
             let wake = l.max_wake_ns.swap(0, Ordering::Relaxed);
             l.last_wake_ns.store(wake, Ordering::Relaxed);
+            l.network.take();
             let least = l.min_lateness_ns.0.swap(NO_LATENESS, Ordering::Relaxed);
             l.last_min_lateness_ns.0.store(least, Ordering::Relaxed);
             let taken = l.max_lateness.swap(0, Ordering::Relaxed);
@@ -510,6 +520,18 @@ impl RxShared {
         self.lanes
             .get(slot)
             .map_or(0, |l| l.last_wake_ns.load(Ordering::Relaxed) / 1_000)
+    }
+
+    /// The measured network latency of flow slot `slot`'s packets in the
+    /// heartbeat's last second (what the last
+    /// [`RxShared::take_max_lateness`] took; dstack #244): the least, the
+    /// 99th percentile and the largest of each packet's arrival (the
+    /// kernel's receive time on our PTP clock) less its own stamp. `None`
+    /// for a second without a stamped packet (always on Windows, where the
+    /// kernel stamps no receive time). The status reads it and takes
+    /// nothing.
+    pub fn last_network_latency(&self, slot: usize) -> Option<NetLatency> {
+        self.lanes.get(slot)?.network.last()
     }
 
     /// Whether every slot socket stamps its datagrams' receive times, so
@@ -881,8 +903,12 @@ impl Receiver {
             if lateness > limit {
                 count(&stats.late);
             }
-            if wake.is_some_and(|w| wire_late(now_ns, w, pos, rate, limit)) {
-                count(&stats.wire_late);
+            if let Some(w) = wake {
+                if wire_late(now_ns, w, pos, rate, limit) {
+                    count(&stats.wire_late);
+                }
+                let network = netlat::network_latency_ns(now_ns, w, ns_of(pos, rate));
+                stats.network.record(network);
             }
             let end = pos.saturating_add(nframes as u64);
             match lane.end {

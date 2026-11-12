@@ -212,6 +212,9 @@ const WORDS: &[&str] = &[
     "wire_late",
     "wake_delay_us",
     "wake_delay_peak_us",
+    "network_latency_min_us",
+    "network_latency_p99_us",
+    "network_latency_max_us",
     "unplaced",
     "lateness",
     "lateness_peak",
@@ -473,7 +476,23 @@ fn the_status_shows_the_packets_judge_in_ns_numbers_only() {
             value_of(&s, "wake_delay_peak_us"),
         );
         assert!(wake.parse::<u64>().unwrap() <= peak.parse::<u64>().unwrap());
-        format!("\"wire_late\":0,\"wake_delay_us\":{wake},\"wake_delay_peak_us\":{peak},")
+        // dstack #244: the measured network latency, each packet's arrival
+        // (the pass's time less its wake delay) less its stamp: at most
+        // the packets' lateness at the pass (40 and 25 samples, 416 and
+        // 260 us), min <= p99 <= max.
+        let net = ["min", "p99", "max"].map(|k| {
+            value_of(&s, &format!("network_latency_{k}_us"))
+                .parse::<u64>()
+                .unwrap()
+        });
+        assert!(net[0] <= 260 && net[2] <= 416, "{net:?}");
+        assert!(net[0] <= net[1] && net[1] <= net[2], "{net:?}");
+        format!(
+            "\"wire_late\":0,\"wake_delay_us\":{wake},\"wake_delay_peak_us\":{peak},\
+             \"network_latency_min_us\":{},\"network_latency_p99_us\":{},\
+             \"network_latency_max_us\":{},",
+            net[0], net[1], net[2]
+        )
     } else {
         String::new()
     };
@@ -534,9 +553,24 @@ fn the_receive_stamp_keys_show_only_while_the_sockets_stamp() {
         status(&media).contains("\"wake_delay_peak_us\":"),
         cfg!(target_os = "linux")
     );
+    // The measured network latency (dstack #244) shows once the heartbeat
+    // took a second with a stamped packet.
+    assert!(!status(&media).contains("network_latency"));
+    media.rx.take_max_lateness(0);
+    assert_eq!(
+        status(&media).contains("\"network_latency_p99_us\":"),
+        cfg!(target_os = "linux")
+    );
     media.rx.set_stamps(false);
     let s = status(&media);
-    for key in ["wire_late", "wake_delay_us", "wake_delay_peak_us"] {
+    for key in [
+        "wire_late",
+        "wake_delay_us",
+        "wake_delay_peak_us",
+        "network_latency_min_us",
+        "network_latency_p99_us",
+        "network_latency_max_us",
+    ] {
         assert!(!s.contains(key), "{key} in {s}");
     }
 }

@@ -145,7 +145,13 @@ impl Json {
 ///   the kernel stamps no receive time: packets already late by `late`'s
 ///   rule when the kernel received them, and the largest wake delay, the RX
 ///   thread's pass time less the kernel's receive time, in µs, of the
-///   heartbeat's last second and since the device started), `unplaced`,
+///   heartbeat's last second and since the device started),
+///   `network_latency_min_us`, `network_latency_p99_us` and
+///   `network_latency_max_us` (dstack #244, Linux only, and only for a
+///   second with a stamped packet: each packet's arrival, the kernel's
+///   receive time on our PTP clock, less its sender's media-clock stamp,
+///   the least, the 99th percentile in 20 µs steps and the largest of the
+///   heartbeat's last second, in µs; absent on Windows), `unplaced`,
 ///   `lateness` (the largest in the heartbeat's last second, samples; the
 ///   status takes nothing),
 ///   `lateness_peak` (the largest since the device started, samples),
@@ -385,6 +391,11 @@ fn rx_part(j: &mut Json, media: &Media) {
             j.num("wire_late", lane.wire_late);
             j.num("wake_delay_us", media.rx.last_wake_delay_us(slot));
             j.num("wake_delay_peak_us", lane.wake_delay_peak_us);
+            if let Some(n) = media.rx.last_network_latency(slot) {
+                j.num("network_latency_min_us", n.min_ns / 1_000);
+                j.num("network_latency_p99_us", n.p99_ns / 1_000);
+                j.num("network_latency_max_us", n.max_ns / 1_000);
+            }
         }
         j.num("unplaced", lane.unplaced);
         j.num("lateness", media.rx.last_lateness(slot));
