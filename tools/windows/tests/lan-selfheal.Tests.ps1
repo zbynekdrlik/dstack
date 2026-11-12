@@ -242,26 +242,26 @@ Check 'Enable: a disabled adapter is enabled, an enabled one left alone' {
     $a = Step 'Enable'
     $after = $script:Fake.Status
     Reset-Fake; $b = Step 'Enable'
-    $a.Changed -and $after -eq 'Up' -and -not $b.Changed -and (Changes).Count -eq 0
+    $a.Changed -and $after -eq 'Up' -and -not $b.Changed -and @(Changes).Count -eq 0
 }
 Check 'VlanIdEmpty: 70 is set to 0; empty and 0 are left alone' {
     Reset-Fake; $script:Fake.Vlan = '70'
     $a = Step 'VlanIdEmpty'; $after = $script:Fake.Vlan
     Reset-Fake; $b = Step 'VlanIdEmpty'
     Reset-Fake; $script:Fake.Vlan = '0'; $c = Step 'VlanIdEmpty'
-    $a.Changed -and $after -eq '0' -and -not $b.Changed -and -not $c.Changed -and (Changes).Count -eq 0
+    $a.Changed -and $after -eq '0' -and -not $b.Changed -and -not $c.Changed -and @(Changes).Count -eq 0
 }
 Check 'BindIPv4: an unbound IPv4 is bound, a bound one left alone' {
     Reset-Fake; $script:Fake.Bound = $false
     $a = Step 'BindIPv4'; $after = $script:Fake.Bound
     Reset-Fake; $b = Step 'BindIPv4'
-    $a.Changed -and $after -and -not $b.Changed -and (Changes).Count -eq 0
+    $a.Changed -and $after -and -not $b.Changed -and @(Changes).Count -eq 0
 }
 Check 'Dhcp: a static interface gets DHCP, a DHCP one left alone' {
     Reset-Fake; $script:Fake.Dhcp = 'Disabled'
     $a = Step 'Dhcp'; $after = $script:Fake.Dhcp
     Reset-Fake; $b = Step 'Dhcp'
-    $a.Changed -and $after -eq 'Enabled' -and -not $b.Changed -and (Changes).Count -eq 0
+    $a.Changed -and $after -eq 'Enabled' -and -not $b.Changed -and @(Changes).Count -eq 0
 }
 
 # --- log rotation
@@ -308,7 +308,7 @@ try {
         $d = NewRun 'up' $good.Replace('192.0.2.1', '127.0.0.1') '{"failures":2}'
         $rc = Invoke-Check -Dir $d
         $rc -eq 0 -and (StateOf $d).failures -eq 0 -and (LogOf $d) -match 'gateway ok \(down count 2 reset\)' -and
-        (Changes).Count -eq 0
+        @(Changes).Count -eq 0
     }
     Check 'a gateway that does not answer counts 1/3 and changes nothing' {
         Reset-Fake
@@ -316,7 +316,7 @@ try {
         $rc = Invoke-Check -Dir $d
         $text = LogOf $d
         $rc -eq 0 -and (StateOf $d).failures -eq 1 -and $text -match 'LAN down 1/3 min: the gateway does not answer' -and
-        $text -notmatch 'repair' -and (Changes).Count -eq 0
+        $text -notmatch 'repair' -and @(Changes).Count -eq 0
     }
     Check 'the third failed minute repairs the LAN adapter in order and never the Dante adapter' {
         Reset-Fake
@@ -324,10 +324,10 @@ try {
         $script:Fake.Dhcp = 'Disabled'; $script:Fake.Addresses = @()
         $d = NewRun 'heal' $good '{"failures":2}'
         $rc = Invoke-Check -Dir $d
-        $ch = Changes
+        $ch = @(Changes)
         $rc -eq 0 -and ($ch -join ';') -eq ('Enable-NetAdapter LAN;Set-NetAdapterAdvancedProperty LAN;' +
             'Enable-NetAdapterBinding LAN;Set-NetIPInterface LAN;Restart-NetAdapter LAN') -and
-        (DanteCalls).Count -eq 0 -and (StateOf $d).failures -eq 0 -and (StateOf $d).lastRestart -and
+        @(DanteCalls).Count -eq 0 -and (StateOf $d).failures -eq 0 -and (StateOf $d).lastRestart -and
         (LogOf $d) -match "repairing LAN adapter 'LAN' \(Dante adapter 'Dante70' untouched\)"
     }
     Check 'a healthy adapter in a router outage is not restarted again within the gap' {
@@ -335,7 +335,7 @@ try {
         $recent = (Get-Date).AddMinutes(-3).ToString('o')
         $d = NewRun 'outage' $good ('{"failures":2,"lastRestart":"' + $recent + '"}')
         $rc = Invoke-Check -Dir $d
-        $rc -eq 0 -and (Changes).Count -eq 0 -and (LogOf $d) -match 'Restart: skipped, adapter healthy' -and
+        $rc -eq 0 -and @(Changes).Count -eq 0 -and (LogOf $d) -match 'Restart: skipped, adapter healthy' -and
         (StateOf $d).lastRestart -eq ([datetime]$recent).ToString('o')
     }
     Check 'a failed step does not stop the rest, the run exits 1' {
@@ -343,16 +343,16 @@ try {
         $script:Fake.Vlan = '70'; $script:Fake.Bound = $false; $script:Fake.FailStep = 'Set-NetAdapterAdvancedProperty'
         $d = NewRun 'stepfail' $good '{"failures":2}'
         $rc = Invoke-Check -Dir $d
-        $ch = Changes
+        $ch = @(Changes)
         $rc -eq 1 -and ($ch -contains 'Enable-NetAdapterBinding LAN') -and ($ch -contains 'Restart-NetAdapter LAN') -and
-        (LogOf $d) -match 'VlanIdEmpty: ERROR fake failure' -and (DanteCalls).Count -eq 0
+        (LogOf $d) -match 'VlanIdEmpty: ERROR fake failure' -and @(DanteCalls).Count -eq 0
     }
     Check 'the Dante adapter on the same interface: no repair at all, exit 1' {
         Reset-Fake
         $script:Fake.DanteIndex = 5; $script:Fake.Status = 'Disabled'
         $d = NewRun 'same' $good '{"failures":2}'
         $rc = Invoke-Check -Dir $d
-        $rc -eq 1 -and (Changes).Count -eq 0 -and (LogOf $d) -match 'ERROR refused'
+        $rc -eq 1 -and @(Changes).Count -eq 0 -and (LogOf $d) -match 'ERROR refused'
     }
 } finally {
     Remove-Item -LiteralPath $tmp -Recurse -Force
