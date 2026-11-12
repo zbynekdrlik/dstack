@@ -740,6 +740,12 @@ impl Link {
     /// and the PC's dsync service otherwise (the owner's rule, dstack #68:
     /// a clock with or without the service, never worse than it). Call it
     /// outside any tokio runtime: the device runs its own.
+    ///
+    /// An address or interface not there yet (the network still coming up
+    /// at boot or logon) is waited for, with no time limit: the call
+    /// returns once it is there, logging the wait once a minute (dstack
+    /// #225). Call it on a thread that may wait. Every other error returns
+    /// at once.
     pub fn start<P: Process + 'static>(
         config: &Config,
         place: &Place,
