@@ -305,6 +305,8 @@ fn a_route_answer_is_the_address_not_yet_or_an_error() {
         io::ErrorKind::NetworkUnreachable,
         io::ErrorKind::HostUnreachable,
         io::ErrorKind::AddrNotAvailable,
+        // An adapter still coming up at logon (WSAENETDOWN, ENETDOWN).
+        io::ErrorKind::NetworkDown,
     ] {
         assert_eq!(
             route_answer(Err(io::Error::from(kind))),

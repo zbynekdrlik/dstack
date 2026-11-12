@@ -171,6 +171,11 @@ fn the_default_route_s_address_is_the_box_s_routed_ipv4() {
         panic!("no IPv4 route");
     };
     assert_eq!(default_route(), Ok(Some(*routed.ip())));
+    // An oracle apart from the probe: one of the box's interfaces holds it,
+    // and it is not the loopback's.
+    let all = interfaces().unwrap();
+    assert!(all.iter().any(|i| i.ip == *routed.ip()), "{all:?}");
+    assert!(!routed.ip().is_loopback());
 }
 
 // The interface facts come from Linux files (/sys); Windows reads the adapter.
