@@ -58,6 +58,11 @@ impl Embedded {
     /// block on the RX channels `map.rx` (inputs, from 0) into the TX
     /// channels `map.tx` (outputs). A channel past the device's is
     /// [`HostError::Setup`].
+    ///
+    /// An address or interface not there yet (the network still coming up
+    /// at boot or logon) is waited for with no time limit: the call blocks
+    /// until it is there, logging the wait once a minute (dstack #225). To
+    /// fail at once or stop the wait, use [`Embedded::start_waiting`].
     pub fn start<P: Process + 'static>(
         cfg: DeviceConfig,
         place: &Place,
@@ -102,8 +107,9 @@ impl Embedded {
     }
 
     /// [`Embedded::start_with_sender`] with a place not there yet met as
-    /// `wait` says ([`host::prepare_config_waiting`], dstack #230); the
-    /// other starts wait for it ([`PlaceWait::Forever`]).
+    /// `wait` says (dstack #230): [`PlaceWait::Now`] fails at once,
+    /// [`PlaceWait::Until`] waits until its flag is set; the other starts
+    /// wait for it with no time limit ([`PlaceWait::Forever`]).
     pub fn start_waiting<P: Process + 'static>(
         cfg: DeviceConfig,
         place: &Place,

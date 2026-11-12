@@ -38,7 +38,7 @@ pub enum PlaceWait<'a> {
     /// (dasio, iemmixer).
     Forever,
     /// Waits as [`PlaceWait::Forever`] until the flag is set, then fails
-    /// with "stopped while waiting for the device's address" (or "..
+    /// with "stopped while waiting for the device's address" (or "...
     /// interface") within one [`PLACE_RETRY`] (dlink's `Link::start_until`).
     /// The flag ends a wait only: a place there is taken even with it set.
     Until(&'a AtomicBool),
@@ -47,7 +47,7 @@ pub enum PlaceWait<'a> {
 /// The place `wait` gives: [`pick_interface`]'s choice from one look at
 /// `addrs` (the box's interfaces) for [`PlaceWait::Now`], else
 /// [`wait_for_interface`]'s, stopped by [`PlaceWait::Until`]'s flag.
-pub fn resolve_place(
+pub(crate) fn resolve_place(
     place: &Place,
     wait: PlaceWait<'_>,
     mut addrs: impl FnMut() -> io::Result<Vec<IfAddr>>,
@@ -133,9 +133,8 @@ const ROUTE: Waited = Waited {
 
 /// The default route's address (dsend and dlisten given no `--ip` or
 /// `--iface`), waited for as [`wait_for_interface`] waits (dstack #230): a
-/// box at boot has no default route yet. `route` looks it up once
-/// ([`route_answer`]: `None` while it is not there); its error fails at
-/// once.
+/// box at boot has no default route yet. `route` looks it up once (`None`
+/// while it is not there: `host::default_route`); its error fails at once.
 pub fn wait_for_route(
     route: impl FnMut() -> Result<Option<Ipv4Addr>, String>,
     sleep: impl FnMut(Duration),
@@ -145,10 +144,10 @@ pub fn wait_for_route(
 
 /// The default route's address from a UDP socket's `connect` and
 /// `local_addr` (`connected`): `None` while there is no route (the
-/// network unreachable, the host unreachable, no address to send from)
-/// or no address given yet (0.0.0.0); an IPv6 address and any other error
-/// are refused.
-pub fn route_answer(connected: io::Result<SocketAddr>) -> Result<Option<Ipv4Addr>, String> {
+/// network unreachable or still down, the host unreachable, no address to
+/// send from) or no address given yet (0.0.0.0); an IPv6 address and any
+/// other error are refused.
+pub(crate) fn route_answer(connected: io::Result<SocketAddr>) -> Result<Option<Ipv4Addr>, String> {
     match connected {
         Ok(SocketAddr::V4(a)) if a.ip().is_unspecified() => Ok(None),
         Ok(SocketAddr::V4(a)) => Ok(Some(*a.ip())),
@@ -159,6 +158,7 @@ pub fn route_answer(connected: io::Result<SocketAddr>) -> Result<Option<Ipv4Addr
                 io::ErrorKind::NetworkUnreachable
                     | io::ErrorKind::HostUnreachable
                     | io::ErrorKind::AddrNotAvailable
+                    | io::ErrorKind::NetworkDown
             ) =>
         {
             Ok(None)

@@ -13,10 +13,13 @@
 //! - [`pick_interface`]: the interface and its one IPv4 address the device
 //!   serves on, from the box's interface list: ARC, CMC and the info
 //!   server bind the address, the mDNS records point at it and are sent on
-//!   its interface only. [`wait_for_interface`] is the start's: a place
-//!   not there yet (an interface still getting its address at boot or
-//!   logon, dstack #225) is looked up again every second, with no time
-//!   limit, until it is.
+//!   its interface only. A place not there yet (an interface still
+//!   getting its address at boot or logon) is met as the start's
+//!   [`PlaceWait`] says (dstack #225, #230): looked up again every second
+//!   with no time limit ([`wait_for_interface`]: dstack-dev, the embedded
+//!   devices), until the app's stop (dlink's `Link::start_until`), or
+//!   refused at once (dlink's `Link::start`). [`wait_for_route`] waits for
+//!   the default route's address the same way (dsend, dlisten).
 //! - [`net_info`]: what the info server's network info says about that
 //!   interface, from the box's files the host reads (its MAC and speed
 //!   in `/sys/class/net/<iface>/`, the routes in `/proc/net/route`).
@@ -40,10 +43,8 @@
 pub mod cli;
 pub mod media;
 mod place;
-pub use place::{
-    PLACE_LOG_EVERY, PLACE_RETRY, PlaceWait, resolve_place, route_answer, wait_for_interface,
-    wait_for_route,
-};
+pub use place::{PLACE_LOG_EVERY, PLACE_RETRY, PlaceWait, wait_for_interface, wait_for_route};
+pub(crate) use place::{resolve_place, route_answer};
 
 use std::future::Future;
 use std::io;

@@ -178,9 +178,10 @@ pub fn interfaces() -> std::io::Result<Vec<IfAddr>> {
         .collect())
 }
 
-/// The default route's address, looked up once ([`daemon::route_answer`]:
-/// `None` while the box has no default route yet): a UDP socket connected
-/// to a TEST-NET-1 address picks the route and sends nothing.
+/// The default route's address, looked up once (`None` while the box has
+/// no default route yet, or its network is still down or unreachable): a
+/// UDP socket connected to a TEST-NET-1 address picks the route and sends
+/// nothing. An IPv6 route and a socket that cannot be opened are errors.
 pub fn default_route() -> Result<Option<Ipv4Addr>, String> {
     let probe = std::net::UdpSocket::bind("0.0.0.0:0")
         .map_err(|e| format!("the default route's probe socket: {e}"))?;
@@ -350,7 +351,7 @@ pub fn prepare_config(
 /// [`prepare_config`] with a place not there yet met as `wait` says
 /// ([`daemon::resolve_place`], dstack #230): [`PlaceWait::Now`] fails at
 /// once (dlink's `Link::start`).
-pub fn prepare_config_waiting(
+pub(crate) fn prepare_config_waiting(
     cfg: DeviceConfig,
     place: &Place,
     wait: PlaceWait<'_>,
