@@ -2,9 +2,10 @@ use super::*;
 
 use std::net::SocketAddrV4;
 
+use crate::arc::flows::tests::list_reply_body;
 use crate::arc::flows::{
     CREATE, DELETE, LIST, MULTICAST, START_2809, TxFlow, UNICAST, create_body, delete_body,
-    list_body, list_reply_body, parse_flows,
+    list_body, parse_flows,
 };
 use crate::arc::{Change, MAX_FLOWS, op, tx_flows};
 use crate::device::{DeviceState, SavedMulticast};
