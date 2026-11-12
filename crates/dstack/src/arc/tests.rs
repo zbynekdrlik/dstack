@@ -1,7 +1,9 @@
 use super::*;
 
+mod dc_289_writes;
 mod dc_latency_write;
 mod key_table;
+mod netaudio_289_writes;
 mod v289;
 
 use std::path::Path;
@@ -301,6 +303,27 @@ fn subs_changed(rx: &[usize]) -> Change {
     }
 }
 
+/// The big-endian `u16` at `at` in a datagram (the tests' own reader).
+fn u16_at(p: &[u8], at: usize) -> u16 {
+    u16::from_be_bytes([p[at], p[at + 1]])
+}
+
+/// The string at packet offset `at`, up to its NUL (the tests' own reader).
+fn name_at(p: &[u8], at: u16) -> String {
+    let s = &p[usize::from(at)..];
+    let end = s.iter().position(|&b| b == 0).expect("a NUL ends the name");
+    String::from_utf8(s[..end].to_vec()).expect("a name is UTF-8")
+}
+
+/// The reply in `outcome` and the change it made (`None`: no change).
+fn answered(outcome: ArcOutcome) -> (Vec<u8>, Option<Change>) {
+    match outcome {
+        ArcOutcome::Changed(bytes, change) => (bytes, Some(change)),
+        ArcOutcome::Reply(bytes) => (bytes, None),
+        other => panic!("not answered: {other:?}"),
+    }
+}
+
 /// The whole reply datagram, whether the state changed or not.
 fn sent_bytes(outcome: ArcOutcome) -> Vec<u8> {
     match outcome {
@@ -484,7 +507,8 @@ fn decode_page(cfg: &DeviceConfig, op1: u16, answer: &Reply) -> Page {
                 read_u16(body, at + 4).unwrap()
             }
             _ => {
-                assert_eq!(read_u16(body, at + 2), Some(6));
+                // inferno's 6 and netaudio's can-subscribe-self bit (#220).
+                assert_eq!(read_u16(body, at + 2), Some(0x000e));
                 let c = read_u16(body, at + 4).unwrap();
                 assert_eq!(*common.get_or_insert(c), c, "one descriptor per page");
                 let tx_channel = read_u16(body, at + 6).unwrap();

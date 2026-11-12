@@ -1,0 +1,30 @@
+{
+  "what": "netaudio's writes to a device that announces ARC 2.8.9 (start code 0x2809), and its channel-name resets (start code 0x27ff).",
+  "recorded": "2026-11-12, dstack #220. Encoded offline with netaudio 0.4.2's own encoders (netaudio.core build_command and plan_subscription_commands, protocol 0x2809), not captured from the network; no device was written to. The names are neutral ones chosen for the fixture; the sequence numbers are set (0x0101 to 0x0108). No reply is recorded: netaudio reads the status word of a 0x3410 or 0x3401 reply only, and the layout netaudio's parser reads for a 0x2438 reply is in \"layout\".",
+  "requests": {
+    "0x3410 set": "2809003001043410000000000000000008000201000100030024002a00000000000000004f75742d31006465762d6100",
+    "0x3410 clear": "280900240105341000000000000000000800020100010003000000000000000000000000",
+    "0x3410 two": "2809012c01063410000000000000000008002002000100030114011a00020003012001260000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004f75742d31006465762d61004f75742d32006465762d6200",
+    "0x3401": "280900220101340100000000000000000600010100020003001a4c6561642d696e00",
+    "0x2438": "2809002c010324380000000000000000060002020001000300200003000300264f75742d31004d69782d4c00",
+    "0x2013": "2809001e01022013000002010000000200180000000000004f75742d3200",
+    "0x3001 reset": "27ff001401073001000002010001001400000000",
+    "0x2013 reset": "27ff00180108201300000201000000020018000000000000"
+  },
+  "asks": {
+    "0x3410 set": "RX 1 from Out-1@dev-a (a page of 2 slots, as for a device with 2 RX channels)",
+    "0x3410 clear": "RX 1 unsubscribed (both name offsets 0)",
+    "0x3410 two": "RX 1 from Out-1@dev-a and RX 2 from Out-2@dev-b (a page of 32 slots, the strings after them)",
+    "0x3401": "RX 2 renamed Lead-in (netaudio's channel name for rx under 0x2809)",
+    "0x2438": "TX 1 named Out-1 and TX 3 named Mix-L (netaudio-core's reconcile_transmitter_channel_names_2809)",
+    "0x2013": "TX 2 renamed Out-2: netaudio's TX rename keeps 2.7's 0x2013 under 0x2809",
+    "0x3001 reset": "RX 1 back to its default name (netaudio's reset_channel_name)",
+    "0x2013 reset": "TX 2 back to its default name (netaudio's reset_channel_name)"
+  },
+  "layout": {
+    "0x3410": "header, then 6 zero bytes, 08 00, [page slots, record count], then from packet byte 20 the records, 8 bytes each: RX channel (from 1), media type (3, audio), TX channel name offset, TX device name offset (both 0: unsubscribe); the strings follow the page's slots.",
+    "0x3401": "header, then 6 zero bytes, 06 00, [1, 1], then from packet byte 20 one record: RX channel, media type 3, the name's offset (26), then the name and its NUL.",
+    "0x2438": "header, then 6 zero bytes, 06 00, [n, n], then from packet byte 20 n records of 6 bytes: TX channel, media type 3, the name's offset; the names after them. netaudio's parse_transmitter_channel_name_reconciliation_2809 reads a reply of status OK with the same body: the records and the names they now carry.",
+    "resets": "2.7's 0x2013 and 0x3001 items; the name offset is the datagram's length, so the name is empty (no NUL is sent): Dante's reset to the channel's default name."
+  }
+}

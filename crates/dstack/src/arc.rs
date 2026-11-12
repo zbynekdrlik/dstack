@@ -44,6 +44,9 @@
 //! 0x3600 (RX flows) are answered in a 2.8.9 card's layouts (`arc/v289.rs`);
 //! everything else as above. 0x1000 there states the device rename (word
 //! 0's 0x0001), without which Dante Controller greys out its Rename.
+//! netaudio's 2.8.9 writes there, 0x3410 (subscribe), 0x3401 (RX rename)
+//! and 0x2438 (TX names), make the change of 0x3010, 0x3001 and 0x2013
+//! through the same functions (`arc/v289/writes.rs`, dstack #220).
 //!
 //! No reply, as from inferno, to any other opcode, to a request whose op2 is not 0, and to a body inferno
 //! fails to read before it answers (0x2201 under 2 bytes, 0x2202 under 4,
@@ -56,7 +59,8 @@
 //! the state file cannot keep ([`respond`]). A rename is all or nothing:
 //! one invalid name refuses the whole request (inferno renames the valid
 //! ones). An empty name is Dante's reset to the channel's default name
-//! (netaudio's `reset_channel_name` sends one). Every refused or
+//! (netaudio's `reset_channel_name` sends one; since 0.4.2 its name offset
+//! is the datagram's end, with no NUL after it). Every refused or
 //! unanswered request is counted per peer and opcode ([`gaps`]); the server
 //! logs the counts as one warning a minute.
 //!
@@ -97,16 +101,13 @@ use tokio::time::MissedTickBehavior;
 use tracing::{debug, error, info, warn};
 
 use crate::ctl::{Requests, header_op};
-use crate::device::{
-    Device, DeviceConfig, DeviceState, Subscription, channel_problems, valid_channel_name,
-    valid_device_name,
-};
+use crate::device::{Device, DeviceConfig, DeviceState, Subscription, valid_device_name};
 use crate::info::Changes;
 use crate::media::tx::{TxShared, TxTable};
 use crate::subscribe::{Manager, SubStatus};
 use crate::wire::{
     Body, HEADER_LEN, Header, MAX_DATAGRAM, STATUS_ERROR, STATUS_MORE, STATUS_OK, WireError,
-    read_u16, reply, string_at,
+    read_u16, reply,
 };
 use gaps::{Gap, Gaps};
 
@@ -116,6 +117,9 @@ pub mod flows;
 pub mod gaps;
 mod multicast;
 mod v289;
+mod writes;
+
+use writes::{rename, subscribe, unsubscribe};
 
 /// ARC's UDP port.
 pub const PORT: u16 = 4440;
@@ -213,6 +217,13 @@ pub const CLOCK_REPLY: [u8; 8] = [0x38, 0x00, 0x38, 0xfd, 0x38, 0xfe, 0x38, 0xff
 /// multicast flow by 0x2201 (refused), so Dante Controller is never offered
 /// one; ARC 2.8.9's create (0x2601, dstack #193) is answered.
 const FLAG_TX_RENAME: u8 = 0x10;
+/// An RX channel's flags in both generations' records (0x3000's second
+/// word, 0x3400's flags; a reader sees no change from the generation):
+/// inferno's 6 (netaudio: rename allowed) and 0x0008, netaudio's
+/// can-subscribe-self bit (dstack #220). Our RX channels take a
+/// subscription to our own TX, and netaudio refuses to send one without
+/// the bit.
+const RX_CHANNEL_FLAGS: u16 = 0x000e;
 /// The device names' header (0x1003), before its strings.
 const NAMES_HEADER: usize = 38;
 /// The 16-byte descriptor of a page's channels.
@@ -417,8 +428,12 @@ pub fn handle(
     if h.op2 != 0 {
         return unanswered(&h, "op2 is not 0");
     }
-    // ARC 2.8.9's own reads (dstack #216); its other requests are 2.7's.
+    // ARC 2.8.9's own reads (dstack #216) and writes (#220); its other
+    // requests are 2.7's.
     if let Some(outcome) = v289::read(&h, body, state, cfg, live) {
+        return outcome;
+    }
+    if let Some(outcome) = v289::write(&h, body, state, cfg) {
         return outcome;
     }
     let ok = |body: &[u8]| ArcOutcome::Reply(reply(&h, STATUS_OK, body));
@@ -1036,128 +1051,6 @@ fn no_multicast(h: &Header, req: &[u8], readable: usize) -> ArcOutcome {
     refuse(h, "no multicast flows")
 }
 
-/// 0x3010's items (6 bytes each: local channel, TX channel name offset,
-/// TX device name offset), read as inferno's `deserialize_items` reads
-/// them: `min(count, len / 6)` items after the first two bytes. `None`
-/// where inferno fails: under 2 bytes, or those items running past the end.
-fn subscription_items(req: &[u8]) -> Option<Vec<[u16; 3]>> {
-    const ITEM: usize = 6;
-    let count = usize::from(*req.get(1)?).min(req.len() / ITEM);
-    let items = req.get(2..)?.get(..count * ITEM)?;
-    let (items, _) = items.as_chunks::<ITEM>();
-    Some(
-        items
-            .iter()
-            .map(|i| {
-                [
-                    u16::from_be_bytes([i[0], i[1]]),
-                    u16::from_be_bytes([i[2], i[3]]),
-                    u16::from_be_bytes([i[4], i[5]]),
-                ]
-            })
-            .collect(),
-    )
-}
-
-/// Sets RX channel `rx`'s subscription to `sub` in `state`; whether it
-/// changed.
-fn set_subscription(
-    state: &mut DeviceState,
-    cfg: &DeviceConfig,
-    rx: usize,
-    sub: Option<Subscription>,
-) -> bool {
-    state.subscription(rx) != sub.as_ref() && state.set_subscription(cfg, rx, sub)
-}
-
-/// OK, no body; [`ArcOutcome::Changed`] when `changed` names a channel.
-fn subscribed(h: &Header, changed: Vec<usize>) -> ArcOutcome {
-    let bytes = reply(h, STATUS_OK, &[]);
-    if changed.is_empty() {
-        return ArcOutcome::Reply(bytes);
-    }
-    ArcOutcome::Changed(
-        bytes,
-        Change {
-            subscriptions: changed,
-            ..Change::default()
-        },
-    )
-}
-
-/// 0x3010 (inferno's `set_channels_subscriptions`): each item subscribes
-/// its RX channel to the TX channel and device its two names say, or, when
-/// either name's offset is 0, unsubscribes it. Channel 0 and channels we do
-/// not have are passed over; names inferno cannot read (an offset inside
-/// the header or past the datagram, bytes that are not UTF-8) change
-/// nothing, and so do names Dante's rules refuse (inferno subscribes to
-/// them; our state file cannot keep them). OK, no body, to every request
-/// inferno can read (also when nothing changed); a cut one gets no reply.
-fn subscribe(h: &Header, req: &[u8], state: &mut DeviceState, cfg: &DeviceConfig) -> ArcOutcome {
-    let Some(items) = subscription_items(req) else {
-        return unanswered(h, "a subscription request whose items are cut");
-    };
-    let mut changed = Vec::new();
-    for [id, channel_at, device_at] in items {
-        // Channel 0 is passed over here, a channel we do not have where the
-        // state refuses it.
-        let Some(rx) = usize::from(id).checked_sub(1) else {
-            continue;
-        };
-        let sub = if channel_at > 0 && device_at > 0 {
-            let (Some(tx_channel), Some(tx_device)) =
-                (string_at(req, channel_at), string_at(req, device_at))
-            else {
-                debug!(channel = id, "subscription whose names cannot be read");
-                continue;
-            };
-            let sub = Subscription {
-                tx_channel: tx_channel.to_string(),
-                tx_device: tx_device.to_string(),
-            };
-            if !sub.is_valid() {
-                info!(
-                    channel = id,
-                    "subscription to a name Dante's rules refuse: not made"
-                );
-                continue;
-            }
-            Some(sub)
-        } else {
-            None
-        };
-        let made = sub.is_some();
-        if set_subscription(state, cfg, rx, sub) && !changed.contains(&rx) {
-            info!(
-                seq = h.seq,
-                channel = id,
-                subscribed = made,
-                "RX subscription changed"
-            );
-            changed.push(rx);
-        }
-    }
-    subscribed(h, changed)
-}
-
-/// 0x3014, netaudio's unsubscribe (`0001 0000 <local channel>`): the
-/// channel unsubscribed; OK, no body, also for channel 0, a channel we do
-/// not have or one not subscribed. Under 6 bytes inferno fails to read it:
-/// no reply.
-fn unsubscribe(h: &Header, req: &[u8], state: &mut DeviceState, cfg: &DeviceConfig) -> ArcOutcome {
-    let Some(channel) = read_u16(req, 4) else {
-        return unanswered(h, "an unsubscribe request without its channel");
-    };
-    // A channel we do not have the state refuses.
-    let changed = usize::from(channel)
-        .checked_sub(1)
-        .filter(|&rx| set_subscription(state, cfg, rx, None));
-    if changed.is_some() {
-        info!(seq = h.seq, channel, "RX unsubscribed");
-    }
-    subscribed(h, changed.into_iter().collect())
-}
-
 /// A count or a channel number as the wire's u16 (the config allows far
 /// fewer channels than that).
 fn wire_u16(n: usize) -> u16 {
@@ -1405,7 +1298,7 @@ fn rx_channels(
         let [s0, s1] = [(status >> 16) as u16, status as u16];
         Some(descriptor(&[
             wire_u16(index + 1),
-            6,
+            RX_CHANNEL_FLAGS,
             common,
             tx_channel,
             tx_device,
@@ -1420,99 +1313,6 @@ fn rx_channels(
 
 fn descriptor(fields: &[u16]) -> Vec<u8> {
     fields.iter().flat_map(|f| f.to_be_bytes()).collect()
-}
-
-/// 0x2013 and 0x3001: `[?, count]`, then `count` items (TX: `0, channel,
-/// name offset`; RX: `channel, name offset`), the names behind them. A
-/// refusal's reason is a debug line only: the refusal is a gap the server's
-/// once-a-minute warning counts, and Dante Controller asks again at once,
-/// so a warning per request would be a flood.
-fn rename(
-    h: &Header,
-    req: &[u8],
-    state: &mut DeviceState,
-    cfg: &DeviceConfig,
-    dir: Dir,
-) -> ArcOutcome {
-    let (item, names, defaults) = match dir {
-        Dir::Tx => (6, &mut state.tx, &cfg.tx),
-        Dir::Rx => (4, &mut state.rx, &cfg.rx),
-    };
-    let label = dir.label();
-    let Some(count) = req.get(1).map(|&c| usize::from(c)).filter(|&c| c > 0) else {
-        return refuse(h, "a rename without a channel");
-    };
-    let mut proposed = names.clone();
-    let mut renamed = Vec::with_capacity(count);
-    for k in 0..count {
-        let at = 2 + k * item + if dir == Dir::Tx { 2 } else { 0 };
-        let (Some(id), Some(offset)) = (read_u16(req, at), read_u16(req, at + 2)) else {
-            return refuse(h, "a rename whose items are cut short");
-        };
-        let Some(index) = usize::from(id)
-            .checked_sub(1)
-            .filter(|&i| i < proposed.len())
-        else {
-            debug!(dir = label, channel = id, "rename refused: no such channel");
-            return refuse(h, "no such channel");
-        };
-        let Some(name) = string_at(req, offset) else {
-            debug!(
-                dir = label,
-                channel = id,
-                "rename refused: no name at its offset"
-            );
-            return refuse(h, "no name at its offset");
-        };
-        let name = if name.is_empty() {
-            defaults[index].as_str()
-        } else {
-            name
-        };
-        if !valid_channel_name(name) {
-            debug!(
-                dir = label,
-                channel = id,
-                "rename refused: not a valid Dante channel name"
-            );
-            return refuse(h, "not a valid Dante channel name");
-        }
-        proposed[index] = name.to_string();
-        renamed.push(id);
-    }
-    let problems = channel_problems(
-        label,
-        &proposed,
-        (dir == Dir::Tx).then_some(defaults.as_slice()),
-    );
-    if !problems.is_empty() {
-        debug!(dir = label, problems = %problems.join("; "), "rename refused");
-        return refuse(h, "the names would clash");
-    }
-    let ok: &[u8] = match dir {
-        Dir::Tx => &[0, 0],
-        Dir::Rx => &[],
-    };
-    if proposed == *names {
-        return ArcOutcome::Reply(reply(h, STATUS_OK, ok));
-    }
-    // The channel-change notification names the RX channels renamed (inferno
-    // also sends one, empty, for a rename that renamed nothing).
-    let renamed_rx = match dir {
-        Dir::Rx => (0..names.len())
-            .filter(|&i| names[i] != proposed[i])
-            .collect(),
-        Dir::Tx => Vec::new(),
-    };
-    *names = proposed;
-    info!(dir = label, channels = ?renamed, "channels renamed");
-    ArcOutcome::Changed(
-        reply(h, STATUS_OK, ok),
-        Change {
-            renamed_rx,
-            ..Change::default()
-        },
-    )
 }
 
 #[cfg(test)]

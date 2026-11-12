@@ -57,19 +57,8 @@ fn asked(op: &str, at: usize, words: &[u16]) -> Vec<u8> {
     req
 }
 
-fn u16_at(p: &[u8], at: usize) -> u16 {
-    u16::from_be_bytes([p[at], p[at + 1]])
-}
-
 fn u32_at(p: &[u8], at: usize) -> u32 {
     u32::from_be_bytes([p[at], p[at + 1], p[at + 2], p[at + 3]])
-}
-
-/// The string at packet offset `at`, up to its NUL.
-fn name_at(p: &[u8], at: u16) -> String {
-    let s = &p[usize::from(at)..];
-    let end = s.iter().position(|&b| b == 0).expect("a NUL ends the name");
-    String::from_utf8(s[..end].to_vec()).expect("a name is UTF-8")
 }
 
 /// The header's start code, sequence, opcode and status.
@@ -462,7 +451,9 @@ fn our_rx_channels_answer_0x3400_in_the_card_s_layout() {
     assert_eq!(got.len(), 3);
     for (k, c) in got.iter().enumerate() {
         assert_eq!(c.number, k as u16 + 1);
-        assert_eq!(c.flags, card_rx[0].flags, "the card's RX flags");
+        // The card's, and netaudio's can-subscribe-self bit (0x0008): our
+        // RX channels take a subscription to our own TX (#220).
+        assert_eq!(c.flags, card_rx[0].flags | 0x0008, "the card's RX flags");
         assert_eq!(c.default, dev.cfg.rx[k]);
         assert_eq!(c.format, our_format(&dev.cfg));
     }
