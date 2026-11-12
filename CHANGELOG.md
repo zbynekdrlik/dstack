@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Internal (dstack #231): `arc.rs` is split. The ARC settings server (0x1100, 0x1102) moved to `arc/settings.rs`, the counts and names replies (0x1000, 0x1003) to `arc/counts.rs`, and the page writer with the channel lists (0x2000, 0x2010, 0x3000) to `arc/channels.rs`. Every reply is byte-identical; no item moved was public, so no path changes. No API change, no latency change.
+
 ## 0.6.99
 
 - Dependency (dstack #226, dsync#166): dsync-ptp v1.32.0 -> v1.33.1. The in-process follower keeps its settled history across a continued grandmaster change: a same-line handover no longer reads settled=0 for ~15 s. dsync's new replay test of a 7 ppm frequency step at a GM change (the field handback from iemmixer) keeps the lock, with worst |e| 64 µs and settled again in ~31-35 s. No API change; no latency change.
