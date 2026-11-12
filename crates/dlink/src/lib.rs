@@ -733,6 +733,19 @@ pub struct Link {
     device: Embedded,
 }
 
+/// Waits until `place` is there (the address on an interface, or the
+/// interface with its one IPv4 address), as [`Link::start`] does (dstack
+/// #225), for an app that uses the address before the start: dsend and
+/// dlisten probe their free control ports on it. A place refused (an
+/// address the Dante network cannot reach, an interface with several
+/// IPv4 addresses, an interface list that cannot be read) is
+/// [`HostError::Run`] at once.
+pub fn wait_for_place(place: &Place) -> Result<(), HostError> {
+    dstack::daemon::wait_for_interface(place, dstack::host::interfaces, std::thread::sleep)
+        .map(drop)
+        .map_err(HostError::Run)
+}
+
 impl Link {
     /// Starts the device of `config` on `place`, running `processor` every
     /// block on the RX channels `map.rx` into the TX channels `map.tx`.

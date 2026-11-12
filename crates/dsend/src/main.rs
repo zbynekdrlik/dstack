@@ -52,7 +52,7 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let boxed = cli::shows_box(&command, attached, has_stderr);
+    let is_run = matches!(command, Command::Run(_));
     let done = match command {
         Command::Help => {
             println!("{}", cli::USAGE);
@@ -69,7 +69,11 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             tracing::error!("dsend: {e}");
-            fail(&e, boxed);
+            #[cfg(windows)]
+            let logged = run::log_open();
+            #[cfg(not(windows))]
+            let logged = false;
+            fail(&e, cli::shows_box(is_run, logged, attached, has_stderr));
             ExitCode::FAILURE
         }
     }
@@ -77,8 +81,8 @@ fn main() -> ExitCode {
 
 /// A failure the user must see: stderr (and the log, `tracing::error!`
 /// above), and a message box when [`cli::shows_box`] says so: never for a
-/// run, which is started headless (a logon task, dstack #225); for
-/// `--list-outputs` when nothing reads stderr (a start from Explorer).
+/// run with its log open, which is started headless (a logon task, dstack
+/// #225); else when nothing reads stderr (a start from Explorer).
 fn fail(text: &str, boxed: bool) {
     eprintln!("dsend: {text}");
     #[cfg(windows)]
