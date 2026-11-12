@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.102
+
+- Fix (dstack #237): netaudio reads our ARC 2.8.9 channel lists (0x2400 TX, 0x3400 RX) in full. netaudio asks the first page with media selector 1 and every following page with the media type of the last record it read (3, audio); we answered selector 3 with an empty page, so netaudio 0.4.2 refused the whole list ("tx/rx channel page rejected ... channel page made no progress") on every device whose list takes more than one page (16 channels already). Now a page request with selector 3 is answered as with selector 1, for 0x2400, 0x3400 and 0x3600, as real 2.8.9 devices answer it; any other selector still gets an empty page. Dante Controller asks with selector 1: its replies are byte-identical. Catalog fixture: `crates/dstack/tests/fixtures/arc_netaudio_289_pages.json` (netaudio's own requests, encoded offline).
+- Not changed (dstack #237): `netaudio device list`'s "Could not reach ... execute channel_count" timeouts. Our devices answer netaudio's channel count (0x1000); the timed-out set changes between runs and includes a real Yamaha card, and each such device answered a direct 0x1000 at once.
+- No API change; no latency change.
+
 ## 0.6.101
 
 - Feature (dstack #234): the RX thread tells a packet late on the wire from a late wake of its own. On Linux every RX flow socket (the slot sockets and each multicast group's socket) asks the kernel for each datagram's receive time (`SO_TIMESTAMPNS`), and the thread reads it with the datagram (`recvmsg`, one call per datagram as before). A packet's wake delay is the RX pass's time less the kernel's receive time; its lateness on the wire is its lateness at the pass less that delay. New per flow slot: `wire_late`, the packets already later than `late`'s limit (playout + block) when the kernel received them, and the largest wake delay in µs, of the heartbeat's last second and since the device started. A `late_at_read` or `late` with `wire_late` flat and a large wake delay is our RX thread's late wake on a loaded box; a rising `wire_late` is lateness that came over the network. The kernel stamps in the wall clock (`CLOCK_REALTIME`) only: a step of it between a receive and the pass reads as a false wake delay (forward) or as none (backward).
