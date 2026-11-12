@@ -63,11 +63,18 @@ The site's own values (subnets, VLAN numbers, host names, addresses, switch port
 
 #### The LAN self-heal task (one-NIC PCs)
 
-A headless one-NIC PC has no remote path once its LAN leg fails: its Dante address is closed to TCP. `tools/windows/lan-selfheal.ps1` (Windows PowerShell 5.1) runs as SYSTEM from a scheduled task, "dstack LAN self-heal", every minute and at startup, with no window. Each run checks the LAN leg itself: the LAN adapter holds a usable IPv4 address (not APIPA), the route to the LAN gateway goes out of the LAN adapter, and the gateway answers a ping (three tries, one second each). A ping answered over another leg proves nothing (section 5).
+A headless one-NIC PC has no remote path once its LAN leg fails: its Dante address is closed to TCP. The task works with both layouts of section 3, and the config says which one the PC has (`lanVlanId`):
+
+| Layout | Physical (base) adapter | VLAN adapter (Realtek Virtual Adapter) | `lanAdapter` | `danteAdapter` | `lanVlanId` |
+|---|---|---|---|---|---|
+| A, the default (the SongPlayer PC) | LAN, untagged | Dante, VLAN 70 | the base adapter | the VLAN adapter | `0` |
+| B, a dasio host (dasio's test PC) | Dante, untagged | LAN, e.g. VLAN 89 | the VLAN adapter | the base adapter | `89` |
+
+`tools/windows/lan-selfheal.ps1` (Windows PowerShell 5.1) runs as SYSTEM from a scheduled task, "dstack LAN self-heal", every minute and at startup, with no window. Each run checks the LAN leg itself: the LAN adapter holds a usable IPv4 address (not APIPA), the route to the LAN gateway goes out of the LAN adapter, and the gateway answers a ping (three tries, one second each). A ping answered over another leg proves nothing (section 5).
 
 - a healthy leg resets the down-counter and logs "gateway ok";
-- after the threshold (3) of consecutive failed minutes, it puts the LAN adapter back, in order: adapter enabled; the driver's "VLAN ID" property (found by its display name; the keyword is the driver's, `RegVlanID` on the RTL8156's driver) set to 0 when it holds another value; IPv4 (`ms_tcpip`) bound; DHCP on; `Restart-NetAdapter`. Then it counts again, so a LAN still dead is repaired again 3 minutes later.
-- the restart also restarts the VLAN adapter on top of it (a new MAC, its static address unchanged): Dante drops for a few seconds. So it restarts when a step changed something, and otherwise (a router, switch or DHCP server outage, with or without a lease) at most once per 30 minutes; the state file keeps the last restart's time (UTC).
+- after the threshold (3) of consecutive failed minutes, it puts the LAN adapter back, in order: adapter enabled; the LAN adapter's VLAN ID set to the config's `lanVlanId` when it holds another value (empty counts as 0), through the LAN driver's own "VLAN ID" property (found by its display name; the keyword is the driver's: `RegVlanID` on the RTL8156's base adapter, `VlanID` on the Realtek Virtual Adapter). A LAN adapter without that property (its VLAN set elsewhere) is not changed: the run logs a "VLAN mismatch" WARN with the VLAN the adapter reads (`Get-NetAdapter`'s `VlanID`) when it differs, and guesses nothing; IPv4 (`ms_tcpip`) bound; DHCP on; `Restart-NetAdapter`. Then it counts again, so a LAN still dead is repaired again 3 minutes later.
+- in layout A the restart also restarts the VLAN adapter on top of it (a new MAC, its static address unchanged): Dante drops for a few seconds. In layout B it restarts only the LAN's VLAN adapter, and Dante on the base adapter is not touched. So it restarts when a step changed something, and otherwise (a router, switch or DHCP server outage, with or without a lease) at most once per 30 minutes; the state file keeps the last restart's time (UTC).
 
 It never touches the Dante adapter: every step names the LAN adapter, a guard refuses a step that names the Dante adapter, the config refuses adapter names with wildcard characters (`* ? [ ]`, which the NetAdapter cmdlets would expand), and no run goes on unless the LAN name is exactly one adapter and the Dante name is not several adapters or the LAN adapter's own interface. A missing Dante adapter (removed by a vendor tool, or hidden while its parent is disabled) only logs a WARN: the LAN adapter is still repaired by its exact name. It never acts without its config. Each run's decision and each change go to `C:\ProgramData\dstack\lan-selfheal.log`, rotated at 1 MB (one old file, `.log.1`); an unexpected error is an ERROR line and exit 1.
 
@@ -75,8 +82,11 @@ The config is the PC's own (site data, never in the repo), `C:\ProgramData\dstac
 
 ```json
 { "lanAdapter": "<LAN adapter name>", "gateway": "<LAN gateway IPv4>",
-  "danteAdapter": "<Dante VLAN adapter name>", "thresholdMinutes": 3 }
+  "danteAdapter": "<Dante adapter name>", "thresholdMinutes": 3,
+  "lanVlanId": 0 }
 ```
+
+`lanVlanId` is required (since 0.6.105): `0` for a LAN untagged on the base adapter (layout A), `N` for a LAN on a VLAN adapter on VLAN N (layout B). A config without it, or with anything but a whole number from 0 to 4094, is refused: the run logs `ERROR config: 'lanVlanId' ...: nothing done` and exits 1, and the install stops. Read the LAN adapter's VLAN with `Get-NetAdapter <name> | Select VlanID` (empty = 0). v0.6.104 had no such key and set VLAN 0 on the LAN adapter in every case, which would cut the LAN in layout B.
 
 Read the gateway with `Get-NetRoute -DestinationPrefix 0.0.0.0/0`. Install from an elevated shell, after writing the config: `powershell -ExecutionPolicy Bypass -File lan-selfheal.ps1 -Mode install`. It checks the config and both adapters, copies the script to `C:\ProgramData\dstack\`, sets that directory's owner to Administrators, resets its ACL to SYSTEM and Administrators full and Users read (and reads every entry back, refusing a junction and any other owner or writer, generic rights included), registers the task, and reads the task back (SYSTEM, every minute without end, the action). `-Mode uninstall` removes the task and keeps the config and log. Check it with `Get-ScheduledTaskInfo 'dstack LAN self-heal'` (LastTaskResult 0) and the log's "gateway ok" lines. A PC's acceptance test disables its LAN leg on purpose and watches the log repair it.
 

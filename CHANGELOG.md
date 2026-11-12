@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.105
+
+- Fix (dstack #239): `tools/windows/lan-selfheal.ps1` assumed the LAN is untagged on the physical adapter and its repair set the LAN adapter's VLAN ID to 0. On a PC with the reverse layout (Dante untagged on the physical adapter, the LAN on a Realtek Virtual Adapter on a VLAN, as on dasio's test PC) that repair would cut the LAN. The config's new required key `lanVlanId` states the LAN adapter's VLAN: `0` for a LAN untagged on the parent adapter, `N` for a LAN on a VLAN adapter. The repair sets exactly that ID, only through the LAN driver's own "VLAN ID" property; a LAN adapter without the property is not changed, and the run logs a "VLAN mismatch" WARN with the VLAN it reads. The Dante adapter is never touched, as before. The repair step is renamed `VlanIdEmpty` to `VlanId` in the log.
+- Breaking for an installed config: a config without `lanVlanId` is refused (`ERROR config: 'lanVlanId' is missing ...: nothing done`, exit 1). Add `"lanVlanId": 0` to the config of a PC whose LAN is the untagged physical adapter before installing 0.6.105's script.
+- Docs: docs/two-networks.md, the self-heal task: the two layouts and their configs.
+- No crate change: no API change, no latency change.
+
 ## 0.6.104
 
 - New tool (dstack #239): `tools/windows/lan-selfheal.ps1`, the LAN self-heal for a one-NIC Windows PC with a Dante VLAN. A scheduled task ("dstack LAN self-heal", SYSTEM, every minute and at startup, no window) checks the LAN leg from the PC's own config (`C:\ProgramData\dstack\lan-selfheal.json`): a usable IPv4 address on the LAN adapter, the gateway's route through it, the gateway's answer. After 3 consecutive failed minutes it puts the LAN adapter back (enabled, VLAN ID 0, IPv4 bound, DHCP on, restart); the restart, which also drops Dante for a few seconds, runs when a step changed something or the adapter has no address, else at most once per 30 min. It never touches the Dante adapter (exact-name resolution, fail closed, no wildcard names) and never acts without its config; it logs every run to `lan-selfheal.log` (rotated at 1 MB). `-Mode install` (admin-only directory ACL, read back; task read back) / `-Mode uninstall`. Tested under Windows PowerShell 5.1 in CI's new `windows-tools` job, with fake adapters for the repair path.
