@@ -2,20 +2,26 @@
 #
 # LAN self-heal for a one-NIC Windows PC with a Dante VLAN (dstack #239).
 #
-# The PC's one NIC carries the LAN untagged (the parent adapter) and Dante as
-# a VLAN adapter. If the LAN leg dies (a vendor VLAN tool rewrote the parent,
-# IPv4 got unbound, the adapter was disabled), a headless PC has no remote
-# path left: the Dante address is closed to TCP by design. This script, run
-# as SYSTEM by a scheduled task every minute, checks the LAN leg (an IPv4
-# lease on the LAN adapter, the gateway's route through it, the gateway's
-# answer); after the configured number of consecutive failed minutes it puts
-# the LAN adapter back: enabled, VLAN ID 0, IPv4 bound, DHCP on, and a restart
-# of the adapter.
+# The PC's one NIC carries both legs, in one of two layouts
+# (docs/two-networks.md):
+#   A. the LAN untagged on the physical (parent) adapter, Dante on a VLAN
+#      adapter (lanVlanId 0);
+#   B. Dante untagged on the physical adapter, the LAN on a VLAN adapter on
+#      VLAN N (a dasio host: lanVlanId N).
+# If the LAN leg dies (a vendor VLAN tool rewrote an adapter, IPv4 got
+# unbound, the adapter was disabled), a headless PC has no remote path left:
+# the Dante address is closed to TCP by design. This script, run as SYSTEM by
+# a scheduled task every minute, checks the LAN leg (an IPv4 lease on the LAN
+# adapter, the gateway's route through it, the gateway's answer); after the
+# configured number of consecutive failed minutes it puts the LAN adapter
+# back: enabled, its VLAN ID the config's lanVlanId (set only through the
+# driver's "VLAN ID" property; without one the mismatch it reads is logged and
+# nothing is guessed), IPv4 bound, DHCP on, and a restart of the adapter.
 #
-# The restart also restarts the Dante VLAN adapter on top of it (a few seconds
-# of Dante, a new MAC). So it runs when a step changed something or the LAN
-# adapter holds no lease, and otherwise (a router outage with a healthy
-# adapter) at most once per RestartGapMinutes.
+# In layout A the restart also restarts the Dante VLAN adapter on top of it (a
+# few seconds of Dante, a new MAC). So it runs when a step changed something
+# or the LAN adapter holds no lease, and otherwise (a router outage with a
+# healthy adapter) at most once per RestartGapMinutes.
 #
 # It works only from C:\ProgramData\dstack\lan-selfheal.json and never acts
 # without it. It never touches the Dante adapter: every repair step names the
@@ -30,7 +36,10 @@
 #
 # Config (JSON, site data, never in the repo):
 #   { "lanAdapter": "<LAN adapter name>", "gateway": "<LAN gateway IPv4>",
-#     "danteAdapter": "<Dante VLAN adapter name>", "thresholdMinutes": 3,
+#     "danteAdapter": "<Dante adapter name>", "thresholdMinutes": 3,
+#     "lanVlanId": 0,                     # required: 0 = the LAN untagged on the
+#                                         # parent adapter, N = the LAN on a VLAN
+#                                         # adapter on VLAN N (1-4094)
 #     "vlanDisplayName": "VLAN ID" }      # optional, the driver's display name
 
 [CmdletBinding()]
@@ -76,6 +85,15 @@ function Read-HealConfig {
         $threshold = [int]$c.thresholdMinutes
     }
     if ($threshold -lt 1) { throw "config: 'thresholdMinutes' must be 1 or more, not $threshold" }
+    # The LAN adapter's VLAN: no default, a wrong guess breaks the LAN (#239).
+    if (-not ($c.PSObject.Properties.Name -contains 'lanVlanId')) {
+        throw ("config: 'lanVlanId' is missing: 0 for a LAN untagged on the parent adapter, " +
+            'N for a LAN on a VLAN adapter on VLAN N')
+    }
+    $v = $c.lanVlanId
+    if (-not ($v -is [int] -or $v -is [long]) -or $v -lt 0 -or $v -gt 4094) {
+        throw "config: 'lanVlanId' must be a whole number from 0 to 4094, not '$v'"
+    }
     $vlanName = 'VLAN ID'
     if ($c.PSObject.Properties.Name -contains 'vlanDisplayName' -and
         -not [string]::IsNullOrWhiteSpace([string]$c.vlanDisplayName)) {
@@ -86,6 +104,7 @@ function Read-HealConfig {
         Gateway          = [string]$c.gateway
         DanteAdapter     = ([string]$c.danteAdapter).Trim()
         ThresholdMinutes = $threshold
+        LanVlanId        = [int]$v
         VlanDisplayName  = $vlanName
     }
     if ($cfg.LanAdapter -ieq $cfg.DanteAdapter) {
@@ -155,11 +174,18 @@ function Get-RestartDecision {
     [pscustomobject]@{ Restart = $false; Why = ("$state, last restart {0:N0} min ago (gap $GapMinutes min)" -f $MinutesSinceRestart) }
 }
 
-function Test-VlanNeedsReset {
-    # The parent adapter carries the LAN untagged: its VLAN ID must be empty or 0.
-    param([AllowNull()][AllowEmptyString()][string]$Value)
-    if ([string]::IsNullOrWhiteSpace($Value)) { return $false }
-    $Value.Trim() -ne '0'
+function Test-VlanNeedsSet {
+    # True when the VLAN ID read from the LAN adapter is not the configured
+    # one. Empty reads as 0 (untagged); anything not a number differs.
+    param(
+        [AllowNull()][AllowEmptyString()][string]$Value,
+        [Parameter(Mandatory)][int]$Expected
+    )
+    $current = 0
+    if (-not [string]::IsNullOrWhiteSpace($Value) -and -not [int]::TryParse($Value.Trim(), [ref]$current)) {
+        return $true
+    }
+    $current -ne $Expected
 }
 
 function Assert-NotDanteTarget {
@@ -178,7 +204,7 @@ function Get-RepairPlan {
         [Parameter(Mandatory)][string]$LanAdapter,
         [Parameter(Mandatory)][string]$DanteAdapter
     )
-    $steps = foreach ($a in 'Enable', 'VlanIdEmpty', 'BindIPv4', 'Dhcp', 'Restart') {
+    $steps = foreach ($a in 'Enable', 'VlanId', 'BindIPv4', 'Dhcp', 'Restart') {
         [pscustomobject]@{ Action = $a; Target = $LanAdapter }
     }
     foreach ($s in $steps) { Assert-NotDanteTarget -Target $s.Target -DanteAdapter $DanteAdapter }
@@ -311,18 +337,30 @@ function Invoke-RepairStep {
             }
             return [pscustomobject]@{ Changed = $false; Text = "adapter enabled already ($($a.Status))" }
         }
-        'VlanIdEmpty' {
+        'VlanId' {
+            # The LAN adapter gets exactly the configured VLAN ID, and only
+            # through its own driver's VLAN property.
+            $want = [int]$Config.LanVlanId
             $p = Get-NetAdapterAdvancedProperty -Name $name |
                 Where-Object { $_.DisplayName -eq $Config.VlanDisplayName } | Select-Object -First 1
             if ($null -eq $p) {
-                return [pscustomobject]@{ Changed = $false; Text = "no '$($Config.VlanDisplayName)' property on the driver: nothing to reset" }
+                # The VLAN lives elsewhere (another tool, a parent's setting):
+                # report what the adapter reads, never guess a fix.
+                $a = Get-NetAdapter -Name $name
+                $read = ''
+                if ($a.PSObject.Properties.Name -contains 'VlanID') { $read = [string]$a.VlanID }
+                $none = "no '$($Config.VlanDisplayName)' property on the driver"
+                if (Test-VlanNeedsSet -Value $read -Expected $want) {
+                    return [pscustomobject]@{ Changed = $false; Text = "WARN VLAN mismatch: $none; the adapter reads '$read', the config expects $want; not changed (no guess)" }
+                }
+                return [pscustomobject]@{ Changed = $false; Text = "${none}; the adapter reads VLAN $want as configured: nothing to set" }
             }
             $value = [string]($p.RegistryValue -join ',')
-            if (Test-VlanNeedsReset -Value $value) {
-                Set-NetAdapterAdvancedProperty -Name $name -RegistryKeyword $p.RegistryKeyword -RegistryValue '0' -NoRestart
-                return [pscustomobject]@{ Changed = $true; Text = "set $($p.RegistryKeyword) from '$value' to 0" }
+            if (Test-VlanNeedsSet -Value $value -Expected $want) {
+                Set-NetAdapterAdvancedProperty -Name $name -RegistryKeyword $p.RegistryKeyword -RegistryValue ([string]$want) -NoRestart
+                return [pscustomobject]@{ Changed = $true; Text = "set $($p.RegistryKeyword) from '$value' to $want" }
             }
-            return [pscustomobject]@{ Changed = $false; Text = "$($p.RegistryKeyword) is '$value' already" }
+            return [pscustomobject]@{ Changed = $false; Text = "$($p.RegistryKeyword) is '$value' already (VLAN $want)" }
         }
         'BindIPv4' {
             $b = Get-NetAdapterBinding -Name $name -ComponentID ms_tcpip
@@ -502,7 +540,7 @@ function Install-SelfHeal {
         throw 'install check: no trigger repeating every minute without end'
     }
     if ($t.Actions[0].Execute -ne $exe -or $t.Actions[0].Arguments -ne $arg) { throw 'install check: the task action differs' }
-    Write-HealLog -Path (Join-Path $Dir 'lan-selfheal.log') -Message "installed: task '$($script:TaskName)' every minute and at startup as SYSTEM, script $target"
+    Write-HealLog -Path (Join-Path $Dir 'lan-selfheal.log') -Message "installed: task '$($script:TaskName)' every minute and at startup as SYSTEM, script $target, LAN adapter '$($cfg.LanAdapter)' on VLAN $($cfg.LanVlanId) (0 = untagged)"
     "installed '$($script:TaskName)' ($target)"
 }
 
