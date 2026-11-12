@@ -45,7 +45,7 @@
 //! everything else as above. 0x1000 there states the device rename (word
 //! 0's 0x0001), without which Dante Controller greys out its Rename.
 //!
-//! No reply, as from inferno, to any other opcode (0x2204 among them), to a request whose op2 is not 0, and to a body inferno
+//! No reply, as from inferno, to any other opcode, to a request whose op2 is not 0, and to a body inferno
 //! fails to read before it answers (0x2201 under 2 bytes, 0x2202 under 4,
 //! 0x3010 whose items are cut, 0x3014 under 6): [`ArcOutcome::Unanswered`].
 //! A datagram that is no request ([`Header::parse`]) is dropped; one whose

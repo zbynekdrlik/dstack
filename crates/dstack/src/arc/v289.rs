@@ -15,11 +15,12 @@
 //! the 2.7 lists (0x2000, 0x3000, 0x2200, 0x3200) under 0x2809. Our
 //! devices leave 0x1000 clear: with it set, Dante Controller read our
 //! segmented lists and left the device out of its list (cause not found
-//! yet). The segmented lists are answered all the same, in the card's
-//! layout, for a controller that asks. Each is answered in the card's
-//! layout with our values; the
-//! other requests under 0x2809 (0x1100, 0x1102, 0x2600, 0x3300, 0x2320,
-//! the writes) are answered as under 2.7 ([`super::handle`]).
+//! yet); the lists are still answered for a controller that asks. Each
+//! read below is answered in the card's layout with our values; the other
+//! requests under 0x2809 (0x1100, 0x1102, 0x2600, 0x3300, 0x2320, the
+//! writes) are answered as under 2.7 ([`super::handle`]). Dante
+//! Controller keeps 2.7's writes for our devices (0x3010, 0x3001, 0x1001;
+//! #216 Finding 18).
 //!
 //! | op1 | answer |
 //! |---|---|
@@ -35,8 +36,9 @@
 //! 6, `1`, the media selector (1, audio), the first item (from 1) and the
 //! last (0: to the end). The reply: 6 zero bytes, `[slots, count]`,
 //! `slots` record offsets (from the datagram's first byte), then the
-//! strings, the format and the records (each from a multiple of 4), paged
-//! as 2.7's ([`super::paged`]). Another media than audio gets an empty
+//! format (written once a page, from a multiple of 4), the strings and the
+//! records (each record from a multiple of 4), paged as 2.7's
+//! ([`super::paged`]). Another media than audio gets an empty
 //! page; a request without its first item is refused.
 //!
 //! **Records** are chains of segments, each starting `[its words, the
@@ -47,6 +49,7 @@ use super::{
     MAX_FLOWS, Manager, REVISION, RX_PAGE, STATUS_OK, TX_PAGE, common_descriptor, flows,
     granted_flow, listed_subscription, op, paged, refuse, reply, stated_latency_ns, wire_u16,
 };
+use crate::device::MAX_NAME;
 use crate::wire::{Body, read_u16};
 
 /// The TX channels' list.
@@ -70,7 +73,9 @@ const PAGE_PREFIX: usize = 6;
 const COUNTS_RENAME: u8 = 0x01;
 /// A TX channel's flags, the card's.
 const TX_FLAGS: u32 = 0x0000_0007;
-/// An RX channel's flags, the card's (netaudio: no rename prohibited).
+/// An RX channel's flags, the card's (netaudio: rename allowed, no
+/// subscription to the own device). Our 2.7 RX record states the same 6
+/// (0x3000), so a reader sees no change from the generation.
 const RX_FLAGS: u32 = 0x0000_0006;
 /// An RX flow's flags, the card's.
 const RX_FLOW_FLAGS: u32 = 0x0000_0001;
@@ -131,10 +136,11 @@ pub(super) fn read(
 /// then the pairs (1, 1), (TX, RX channels), (2, 2), (TX, RX flows), (2,
 /// 2), (TX, RX channels), (TX, RX channels in a flow), 8 zero bytes. The
 /// constant pairs are both 2.8.9 devices' (a card, and an adapter with no
-/// TX). The third count pair reads 0 on the TX side of the adapter and 2 on
-/// the card, as its channels and its flows do: which of the two it states
-/// is not known; we state the channels. A direction with no channel states
-/// no flow (the adapter states 0 TX flows).
+/// TX). The three count pairs read (2, 2) on the card and (0, 2) on the
+/// adapter, as their channels and their flows both do, so which pair is
+/// which is not known: we state channels, flows, channels (2.7 states
+/// `MAX_FLOWS` flows too). A direction with no channel states no flow (the
+/// adapter states 0 TX flows).
 fn counts(cfg: &DeviceConfig) -> Vec<u8> {
     let mut words = super::counts(cfg);
     words[1] |= COUNTS_RENAME;
@@ -190,16 +196,16 @@ fn device_names(state: &DeviceState, cfg: &DeviceConfig) -> Vec<u8> {
     out.into_vec()
 }
 
-/// `s` in a [`NAME_FIELD`]-byte field: at most 31 bytes (cut at a
-/// character's start), then zeros.
+/// `s` in a [`NAME_FIELD`]-byte field: its bytes, at most
+/// [`MAX_NAME`] (a device name holds no more, ASCII only:
+/// `valid_device_name`), then zeros, a NUL at least.
 fn fixed(out: &mut Body, s: &str) {
-    let mut end = s.len().min(NAME_FIELD - 1);
-    while !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    out.bytes(&s.as_bytes()[..end]);
-    out.zeros(NAME_FIELD - end);
+    let name = &s.as_bytes()[..s.len().min(MAX_NAME)];
+    out.bytes(name);
+    out.zeros(NAME_FIELD - name.len());
 }
+
+const _: () = assert!(MAX_NAME < NAME_FIELD);
 
 /// 0x2204, the TX flow labels: we keep none. A page with a slot per TX
 /// flow of a page ([`FLOW_PAGE`], none without TX channels) and no item,
@@ -276,7 +282,10 @@ fn tx_channel(
     cfg: &DeviceConfig,
     out: &mut Heap,
 ) -> Option<u16> {
-    let format = out.shared(|b| common_descriptor(b, cfg));
+    let format = out.shared(|b| {
+        b.align(4);
+        common_descriptor(b, cfg)
+    });
     let name = state.tx.get(index)?;
     let name_at = out.cstr(name);
     let default_at = out.cstr(cfg.tx.get(index).unwrap_or(name));
@@ -304,7 +313,10 @@ fn rx_channel(
     manager: &Manager,
     out: &mut Heap,
 ) -> Option<u16> {
-    let format = out.shared(|b| common_descriptor(b, cfg));
+    let format = out.shared(|b| {
+        b.align(4);
+        common_descriptor(b, cfg)
+    });
     let ((channel_at, device_at), code) = match listed_subscription(state, index, manager) {
         Some((sub, code)) => ((out.cstr(&sub.tx_channel), out.cstr(&sub.tx_device)), code),
         None => ((0, 0), 0),
@@ -342,6 +354,7 @@ fn rx_channel(
 fn rx_flow(slot: usize, cfg: &DeviceConfig, manager: &Manager, out: &mut Heap) -> Option<u16> {
     let f = granted_flow(manager, slot)?;
     let format = out.shared(|b| {
+        b.align(4);
         let at = b.offset();
         b.u32(cfg.sample_rate);
         b.u32(u32::from(cfg.encoding));
