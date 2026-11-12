@@ -27,6 +27,12 @@
 //!   until read; one later than the flow's latency counts `late`, one
 //!   before the end of the last `out_of_order`. Before our clock is ready a
 //!   packet is read and counted but placed nowhere (`unplaced`).
+//! - Wire lateness against the wake (dstack #234, Linux): each datagram
+//!   comes with the kernel's receive time (`rx/socket.rs`), so its wake delay
+//!   (the pass's wall clock less that time) is kept, the largest until
+//!   read and since the start, and a packet already late on the wire (by
+//!   `late`'s rule, at the pass's time less its wake delay) counts
+//!   `wire_late`. Windows has no stamp: both stay 0.
 //! - The packets' judge (phase D, plan Task 3): the least lateness of each
 //!   flow slot's placed packets in ns (our clock's now in ns less the
 //!   packet's own stamp in ns), kept until read, so each heartbeat second
@@ -60,6 +66,14 @@ use super::ring::Ring;
 use super::tx::{Cell, MAX_CHANNELS, ns_of, place, take_priority};
 use crate::clock::{self, PtpClock};
 use crate::wire::MAX_DATAGRAM;
+
+mod plan;
+mod socket;
+pub use plan::{RxPlan, RxRoute};
+pub use socket::{GROUP_BOUND_TO_PORT, join};
+use socket::{
+    Received, recv_stamped, set_recv_buffer, stamp_receives, wake_delay_ns, wall_now_ns, wire_late,
+};
 
 /// Our RX flow slots (inferno's `MAX_FLOWS`).
 pub const MAX_FLOWS: usize = 32;
@@ -106,104 +120,6 @@ const BUFFER: usize = 2048;
 /// taken. A lateness of `u64::MAX` ns (585 years) reads as none too.
 const NO_LATENESS: u64 = u64::MAX;
 
-/// What the RX thread receives in one flow slot.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct RxPlan {
-    /// The transmitter: only its datagrams are this flow's. `None`: no
-    /// flow.
-    pub src: Option<Ipv4Addr>,
-    /// Bytes per sample.
-    pub bps: u8,
-    /// Channel slots per frame.
-    pub nslots: u8,
-    /// The flow's playout point behind media now, samples (P_flow: its
-    /// latency, at least its frames per packet; at most `u16::MAX`).
-    pub latency: u32,
-    /// How much later than the device latency this flow's channels are
-    /// read, samples (P_flow − P; at most `u16::MAX`).
-    pub delay: u16,
-    /// The pump's block, samples: a packet counts late once its first
-    /// frame is later than `latency + block`, the read budget of a block
-    /// whose frames a packet fills (at most 511).
-    pub block: u16,
-    /// Granted by its transmitter: keepalives go out.
-    pub live: bool,
-    /// Which flow (a new flow in the slot is a new plan).
-    pub generation: u32,
-    /// A multicast flow's group: the slot receives it on a socket of its
-    /// own that joins the group on our address (dstack #148), and sends no
-    /// keepalive. `None`: the slot's own socket, where a unicast flow comes.
-    pub group: Option<SocketAddrV4>,
-}
-
-impl RxPlan {
-    /// The plan as three words (the seqlocked cell's).
-    pub fn words(&self) -> [u64; 3] {
-        let Some(src) = self.src else {
-            return [0; 3];
-        };
-        [
-            (u64::from(src.to_bits()) << 32)
-                + (u64::from(self.delay) << 16)
-                + u64::from(self.latency.min(u32::from(u16::MAX))),
-            (1 << 63)
-                + (u64::from(self.live) << 62)
-                + (u64::from(self.block & 0x1ff) << 48)
-                + (u64::from(self.generation) << 16)
-                + (u64::from(self.bps) << 8)
-                + u64::from(self.nslots),
-            self.group.map_or(0, |g| {
-                (1 << 63) + (u64::from(g.ip().to_bits()) << 16) + u64::from(g.port())
-            }),
-        ]
-    }
-
-    /// The plan [`RxPlan::words`] wrote.
-    pub fn from_words(w: [u64; 3]) -> RxPlan {
-        if w[1] >> 63 == 0 {
-            return RxPlan::default();
-        }
-        RxPlan {
-            src: Some(Ipv4Addr::from_bits((w[0] >> 32) as u32)),
-            bps: (w[1] >> 8) as u8,
-            nslots: w[1] as u8,
-            latency: u32::from(w[0] as u16),
-            delay: (w[0] >> 16) as u16,
-            block: ((w[1] >> 48) & 0x1ff) as u16,
-            live: (w[1] >> 62) & 1 == 1,
-            generation: (w[1] >> 16) as u32,
-            group: (w[2] >> 63 == 1)
-                .then(|| SocketAddrV4::new(Ipv4Addr::from_bits((w[2] >> 16) as u32), w[2] as u16)),
-        }
-    }
-}
-
-/// Where an RX channel's samples come from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RxRoute {
-    /// The flow slot.
-    pub flow: usize,
-    /// The channel slot in its frames.
-    pub slot: usize,
-}
-
-impl RxRoute {
-    /// A route as one word, 0 for none.
-    pub fn word(route: Option<RxRoute>) -> u64 {
-        route.map_or(0, |r| {
-            (1 << 63) + ((r.flow as u64 & 0xff) << 8) + (r.slot as u64 & 0xff)
-        })
-    }
-
-    /// The route [`RxRoute::word`] wrote.
-    pub fn from_word(w: u64) -> Option<RxRoute> {
-        (w >> 63 == 1).then_some(RxRoute {
-            flow: ((w >> 8) & 0xff) as usize,
-            slot: (w & 0xff) as usize,
-        })
-    }
-}
-
 /// One flow slot's counts, written by the RX thread.
 #[derive(Debug, Default)]
 struct RxStats {
@@ -215,6 +131,8 @@ struct RxStats {
     gap_frames: AtomicU64,
     late: AtomicU64,
     late_at_read: AtomicU64,
+    /// Packets already late when the kernel received them.
+    wire_late: AtomicU64,
     unplaced: AtomicU64,
     keepalives: AtomicU64,
     keepalive_errors: AtomicU64,
@@ -227,6 +145,11 @@ struct RxStats {
     lateness_peak: AtomicU64,
     /// What the last [`RxShared::take_max_lateness`] took.
     last_lateness: AtomicU64,
+    /// The largest wake delay since the last take, ns, what the last take
+    /// took, and the largest since the device started.
+    max_wake_ns: AtomicU64,
+    last_wake_ns: AtomicU64,
+    wake_peak_ns: AtomicU64,
     /// The packets' judge: the least lateness in ns since the last take.
     min_lateness_ns: Least,
     /// What the last [`RxShared::take_max_lateness`] took of it.
@@ -269,9 +192,17 @@ pub struct RxCounts {
     /// past the playout but within the block counts here, never in `late`
     /// (iemmixer, 5.11.2026).
     pub late_at_read: u64,
+    /// Packets whose first frame was already later than `late`'s limit
+    /// when the kernel received them (dstack #234, Linux; 0 on Windows):
+    /// late on the wire, not by a late RX-thread wake.
+    pub wire_late: u64,
     /// The largest lateness of any packet since the device started,
     /// samples (`lateness` is the last second's only).
     pub lateness_peak: u64,
+    /// The largest wake delay of any packet since the device started, µs:
+    /// the RX pass's time less the kernel's receive time (dstack #234,
+    /// Linux; 0 on Windows).
+    pub wake_delay_peak_us: u64,
     /// Packets read before our clock was ready.
     pub unplaced: u64,
     pub keepalives: u64,
@@ -322,6 +253,9 @@ pub struct RxShared {
     stop: AtomicBool,
     base: Instant,
     recv_buffer: usize,
+    /// Every slot socket stamps its receive times (Linux): the passes
+    /// measure wake delays and wire lateness.
+    stamps: AtomicBool,
 }
 
 /// The last of the [`MAX_FLOWS`] ports from `base`, `None` past 65535.
@@ -374,6 +308,7 @@ impl RxShared {
                 Ok(s)
             })
             .collect::<io::Result<Box<[UdpSocket]>>>()?;
+        let stamps = sockets.iter().all(stamp_receives);
         Ok(RxShared {
             rate,
             plans: std::array::from_fn(|_| Cell::new()),
@@ -389,6 +324,7 @@ impl RxShared {
             stop: AtomicBool::new(false),
             base: Instant::now(),
             recv_buffer,
+            stamps: AtomicBool::new(stamps),
             playout: AtomicU64::new(0),
         })
     }
@@ -501,7 +437,9 @@ impl RxShared {
             gap_frames: get(&l.gap_frames),
             late: get(&l.late),
             late_at_read: get(&l.late_at_read),
+            wire_late: get(&l.wire_late),
             lateness_peak: get(&l.lateness_peak),
+            wake_delay_peak_us: get(&l.wake_peak_ns) / 1_000,
             unplaced: get(&l.unplaced),
             keepalives: get(&l.keepalives),
             keepalive_errors: get(&l.keepalive_errors),
@@ -539,10 +477,13 @@ impl RxShared {
     /// Flow slot `slot`'s largest lateness since the last call, samples
     /// (the heartbeat's 0x8003, plan Task 6); kept for
     /// [`RxShared::last_lateness`]. It also takes the packets' least
-    /// lateness in ns, kept for [`RxShared::last_min_lateness_ns`], so the
-    /// heartbeat's second is both of theirs.
+    /// lateness in ns, kept for [`RxShared::last_min_lateness_ns`], and
+    /// the largest wake delay, kept for [`RxShared::last_wake_delay_us`], so
+    /// the heartbeat's second is all of theirs.
     pub fn take_max_lateness(&self, slot: usize) -> u64 {
         self.lanes.get(slot).map_or(0, |l| {
+            let wake = l.max_wake_ns.swap(0, Ordering::Relaxed);
+            l.last_wake_ns.store(wake, Ordering::Relaxed);
             let least = l.min_lateness_ns.0.swap(NO_LATENESS, Ordering::Relaxed);
             l.last_min_lateness_ns.0.store(least, Ordering::Relaxed);
             let taken = l.max_lateness.swap(0, Ordering::Relaxed);
@@ -558,6 +499,32 @@ impl RxShared {
         self.lanes
             .get(slot)
             .map_or(0, |l| l.last_lateness.load(Ordering::Relaxed))
+    }
+
+    /// The largest wake delay of flow slot `slot`'s packets in the
+    /// heartbeat's last second (what the last [`RxShared::take_max_lateness`]
+    /// took), µs: the RX pass's time less the kernel's receive time (dstack
+    /// #234; 0 without receive stamps). The status reads it and takes
+    /// nothing.
+    pub fn last_wake_delay_us(&self, slot: usize) -> u64 {
+        self.lanes
+            .get(slot)
+            .map_or(0, |l| l.last_wake_ns.load(Ordering::Relaxed) / 1_000)
+    }
+
+    /// Whether every slot socket stamps its datagrams' receive times, so
+    /// `wire_late` and the wake delays are measured (dstack #234: Linux,
+    /// where the kernel takes `SO_TIMESTAMPNS`; false on Windows). A
+    /// multicast group's socket asks for the stamp too ([`join`]).
+    pub fn stamps(&self) -> bool {
+        self.stamps.load(Ordering::Relaxed)
+    }
+
+    /// Turns the measuring off as on a box without receive stamps: the
+    /// Windows path's behaviour, for a Linux test.
+    #[cfg(test)]
+    pub(crate) fn set_stamps(&self, on: bool) {
+        self.stamps.store(on, Ordering::Relaxed);
     }
 
     /// The packets' judge of flow slot `slot` (phase D, plan Task 3): the
@@ -605,15 +572,6 @@ impl RxShared {
     pub fn stopping(&self) -> bool {
         self.stop.load(Ordering::Acquire)
     }
-}
-
-/// Asks for a receive buffer of `bytes` on `s`; returns what the kernel
-/// gave (Linux doubles what it grants, up to its `rmem_max`; 0 when it
-/// cannot say). A refusal leaves the kernel's default.
-fn set_recv_buffer(s: &UdpSocket, bytes: usize) -> usize {
-    let sock = socket2::SockRef::from(s);
-    let _refused = sock.set_recv_buffer_size(bytes);
-    sock.recv_buffer_size().unwrap_or(0)
 }
 
 /// One flow slot as the RX thread sees it.
@@ -732,13 +690,16 @@ impl Receiver {
     /// One pass at PTP time `now_ns` (`None`: our clock is not ready) and
     /// the thread's clock `mono`: the plans and routes that changed, every
     /// slot with datagrams waiting read, the keepalives due sent.
+    /// The wall clock is read once at its start, for the packets' wake
+    /// delays (dstack #234), only while the sockets stamp their receives.
     pub fn pass(&mut self, now_ns: Option<u64>, mono: u64) {
+        let wall = self.shared.stamps().then(wall_now_ns).flatten();
         self.refresh();
         let mut ready = self.ready;
         while ready != 0 {
             let slot = ready.trailing_zeros() as usize;
             ready &= ready - 1;
-            if self.receive(slot, now_ns, mono) {
+            if self.receive(slot, now_ns, mono, wall) {
                 self.ready &= !(1 << slot);
             }
         }
@@ -827,9 +788,10 @@ impl Receiver {
         }
     }
 
-    /// Reads up to [`DRAIN`] datagrams of flow slot `slot`; `true` when
-    /// none is left. The hot path: no allocation, no lock, no log.
-    fn receive(&mut self, slot: usize, now_ns: Option<u64>, mono: u64) -> bool {
+    /// Reads up to [`DRAIN`] datagrams of flow slot `slot`, `wall` the
+    /// pass's wall clock (ns since 1970); `true` when none is left. The hot
+    /// path: no allocation, no lock, no log.
+    fn receive(&mut self, slot: usize, now_ns: Option<u64>, mono: u64, wall: Option<u64>) -> bool {
         let Receiver {
             shared,
             sockets,
@@ -855,8 +817,12 @@ impl Receiver {
             a.fetch_add(1, Ordering::Relaxed);
         };
         for _ in 0..DRAIN {
-            let (n, from) = match socket.recv_from(&mut buf[..]) {
-                Ok((n, SocketAddr::V4(from))) => (n, from),
+            let (n, from, at_ns) = match recv_stamped(socket, &mut buf[..]) {
+                Ok(Received {
+                    len,
+                    from: Some(from),
+                    at_ns,
+                }) => (len, from, at_ns),
                 Ok(_) => {
                     count(&stats.stray);
                     continue;
@@ -893,6 +859,11 @@ impl Receiver {
             count(&stats.packets);
             lane.source = Some(from);
             lane.heard = Some(mono);
+            let wake = wake_delay_ns(wall, at_ns);
+            if let Some(w) = wake {
+                stats.max_wake_ns.fetch_max(w, Ordering::Relaxed);
+                stats.wake_peak_ns.fetch_max(w, Ordering::Relaxed);
+            }
             let Some((now_ns, now)) = now else {
                 count(&stats.unplaced);
                 continue;
@@ -906,8 +877,12 @@ impl Receiver {
                 .min_lateness_ns
                 .0
                 .fetch_min(now_ns.saturating_sub(ns_of(pos, rate)), Ordering::Relaxed);
-            if lateness > u64::from(lane.plan.latency) + u64::from(lane.plan.block) {
+            let limit = u64::from(lane.plan.latency) + u64::from(lane.plan.block);
+            if lateness > limit {
                 count(&stats.late);
+            }
+            if wake.is_some_and(|w| wire_late(now_ns, w, pos, rate, limit)) {
+                count(&stats.wire_late);
             }
             let end = pos.saturating_add(nframes as u64);
             match lane.end {
@@ -968,40 +943,6 @@ impl Receiver {
             });
         }
     }
-}
-
-/// Whether [`join`] binds a group's socket to the port only (Windows binds
-/// no multicast address), so it gets every group sent to that port.
-pub const GROUP_BOUND_TO_PORT: bool = cfg!(not(target_os = "linux"));
-
-/// A socket that receives the multicast `group` on our address `ip`:
-/// bound to the group's port (on Linux to the group itself, so it gets no
-/// other group's datagrams to that port; Windows binds no multicast
-/// address), shared with other sockets on it (two of our devices on one PC
-/// receive one group), non-blocking, the receive buffer asked for, and a
-/// member of the group on `ip`'s interface. Dropping it leaves the group.
-pub fn join(ip: Ipv4Addr, group: SocketAddrV4) -> io::Result<UdpSocket> {
-    use socket2::{Domain, Protocol, Socket, Type};
-    if !group.ip().is_multicast() {
-        return Err(io::Error::new(
-            ErrorKind::InvalidInput,
-            "not a multicast group",
-        ));
-    }
-    let s = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
-    s.set_reuse_address(true)?;
-    let at = if GROUP_BOUND_TO_PORT {
-        Ipv4Addr::UNSPECIFIED
-    } else {
-        *group.ip()
-    };
-    s.bind(&SocketAddrV4::new(at, group.port()).into())?;
-    s.join_multicast_v4(group.ip(), &ip)?;
-    s.set_nonblocking(true)?;
-    let s = UdpSocket::from(s);
-    crate::winsock::no_connreset(&s)?;
-    set_recv_buffer(&s, RECV_BUFFER_BYTES);
-    Ok(s)
 }
 
 /// Starts the RX thread: it receives `shared`'s flows on `clock` until

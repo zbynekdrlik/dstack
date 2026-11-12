@@ -140,8 +140,14 @@ impl Json {
 ///   came), `socket_drops` (Linux: the kernel's drops at the slot's
 ///   socket), `late` (packets past playout + block), `late_at_read`
 ///   (packets with a frame the pump had already read: its channels' holes
-///   and late samples), `unplaced`, `lateness` (the largest in the
-///   heartbeat's last second, samples; the status takes nothing),
+///   and late samples), `wire_late`, `wake_delay_us` and
+///   `wake_delay_peak_us` (dstack #234, Linux only, absent on Windows where
+///   the kernel stamps no receive time: packets already late by `late`'s
+///   rule when the kernel received them, and the largest wake delay, the RX
+///   thread's pass time less the kernel's receive time, in µs, of the
+///   heartbeat's last second and since the device started), `unplaced`,
+///   `lateness` (the largest in the heartbeat's last second, samples; the
+///   status takes nothing),
 ///   `lateness_peak` (the largest since the device started, samples),
 ///   `lateness_min_ns` (the packets' judge, phase D: the least lateness of
 ///   that second in ns, our clock's now less the packets' own stamps; absent
@@ -375,6 +381,11 @@ fn rx_part(j: &mut Json, media: &Media) {
         }
         j.num("late", lane.late);
         j.num("late_at_read", lane.late_at_read);
+        if media.rx.stamps() {
+            j.num("wire_late", lane.wire_late);
+            j.num("wake_delay_us", media.rx.last_wake_delay_us(slot));
+            j.num("wake_delay_peak_us", lane.wake_delay_peak_us);
+        }
         j.num("unplaced", lane.unplaced);
         j.num("lateness", media.rx.last_lateness(slot));
         j.num("lateness_peak", lane.lateness_peak);
