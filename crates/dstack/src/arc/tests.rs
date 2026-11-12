@@ -2,6 +2,7 @@ use super::*;
 
 mod dc_latency_write;
 mod key_table;
+mod netaudio_289_writes;
 mod v289;
 
 use std::path::Path;
