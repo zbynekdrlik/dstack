@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="sk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dasio Settings Mockup</title>
+<style>
+:root{--bg:#eef0f3;--win:#fff;--ink:#1d2330;--mute:#667085;--line:#d7dbe2;--acc:#2563eb;--warn:#b45309;--warnbg:#fff7e6;--ok:#15803d;--note:#f4f6fa}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#14171c;--win:#1e232b;--ink:#e6e9ef;--mute:#9aa3b2;--line:#323a46;--acc:#6ea0ff;--warn:#f0a542;--warnbg:#2c2416;--ok:#4ade80;--note:#232934}}
+:root[data-theme="dark"]{--bg:#14171c;--win:#1e232b;--ink:#e6e9ef;--mute:#9aa3b2;--line:#323a46;--acc:#6ea0ff;--warn:#f0a542;--warnbg:#2c2416;--ok:#4ade80;--note:#232934}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 "Segoe UI",system-ui,sans-serif;padding:24px 16px}
+.wrap{max-width:1100px;margin:0 auto;display:grid;grid-template-columns:minmax(0,620px) minmax(0,1fr);gap:24px}
+@media (max-width:900px){.wrap{grid-template-columns:1fr}}
+h1{font-size:18px;margin:0 0 4px}
+.sub{color:var(--mute);margin:0 0 16px}
+.win{background:var(--win);border:1px solid var(--line);border-radius:8px;box-shadow:0 8px 28px rgba(0,0,0,.18);overflow:hidden}
+.title{display:flex;justify-content:space-between;align-items:center;padding:8px 12px;border-bottom:1px solid var(--line);font-weight:600}
+.title span{color:var(--mute);font-weight:400}
+.tabs{display:flex;gap:2px;padding:8px 12px 0;border-bottom:1px solid var(--line);flex-wrap:wrap}
+.tab{padding:6px 12px;border:1px solid var(--line);border-bottom:none;border-radius:6px 6px 0 0;color:var(--mute);background:var(--note)}
+.tab.on{background:var(--win);color:var(--ink);font-weight:600;margin-bottom:-1px}
+.body{padding:14px 16px}
+.status{display:flex;gap:10px;align-items:center;padding:8px 10px;border-radius:6px;background:var(--note);margin-bottom:14px;flex-wrap:wrap}
+.dot{width:9px;height:9px;border-radius:50%;background:var(--ok);display:inline-block}
+fieldset{border:1px solid var(--line);border-radius:6px;margin:0 0 12px;padding:8px 12px 10px}
+legend{padding:0 6px;color:var(--mute);font-size:12px;text-transform:uppercase;letter-spacing:.04em}
+.row{display:grid;grid-template-columns:170px minmax(0,1fr) 22px;gap:10px;align-items:center;padding:5px 0}
+.row label{color:var(--ink)}
+.ctl{border:1px solid var(--line);border-radius:4px;padding:5px 8px;background:var(--win);display:flex;justify-content:space-between;gap:8px;min-width:0}
+.ctl small{color:var(--mute);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.r{color:var(--warn);font-weight:700;text-align:center}
+.live{color:var(--ok);font-weight:700;text-align:center}
+.cpu{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+.banner{background:var(--warnbg);color:var(--warn);border:1px solid var(--warn);border-radius:6px;padding:8px 10px;margin:4px 0 12px;font-size:13px}
+.foot{display:flex;justify-content:space-between;align-items:center;padding:10px 16px;border-top:1px solid var(--line);gap:10px;flex-wrap:wrap}
+.btn{border:1px solid var(--line);border-radius:5px;padding:6px 14px;background:var(--note)}
+.btn.p{background:var(--acc);border-color:var(--acc);color:#fff;font-weight:600}
+.legend{color:var(--mute);font-size:12px}
+.notes{background:var(--win);border:1px solid var(--line);border-radius:8px;padding:14px 16px}
+.notes h2{font-size:15px;margin:0 0 8px}
+.notes ol{padding-left:20px;margin:0}
+.notes li{margin:0 0 8px}
+.notes b{color:var(--ink)}
+</style>
+</head>
+<body>
+<div class="wrap">
+<div>
+<h1>dtray → dasio Settings (návrh v1)</h1>
+<p class="sub">Okno sa otvorí z menu dtray: <i>band-asio-dante → Settings…</i> Jedna záložka = jedna inštancia dasio.</p>
+<div class="win">
+  <div class="title">dasio Settings <span>dtray 0.6.x</span></div>
+  <div class="tabs"><div class="tab on">band-asio-dante</div><div class="tab">master-asio-dante</div></div>
+  <div class="body">
+    <div class="status"><span class="dot"></span> Running · DAW attached (Ableton Live) · 96 kHz · in 3.67 / out 11.67 ms · clock: dsync LOCK</div>
+
+    <fieldset><legend>Network</legend>
+      <div class="row"><label>Ethernet interface</label><div class="ctl">Ethernet <small>Realtek 2.5GbE · 10.77.7.x · 2.5 Gbps</small></div><div class="r" title="needs restart">↻</div></div>
+    </fieldset>
+
+    <fieldset><legend>Audio</legend>
+      <div class="row"><label>Buffer (block)</label><div class="ctl">256 samples <small>2.67 ms @ 96 kHz</small></div><div class="r">↻</div></div>
+      <div class="row"><label>Dante latency (RX)</label><div class="ctl">2 ms <small>0.25 · 0.5 · 1 · 2 · 5 · 10</small></div><div class="live" title="applies at once">●</div></div>
+      <div class="row"><label>TX latency</label><div class="ctl">1 ms <small>what receivers are offered</small></div><div class="live">●</div></div>
+      <div class="row"><label>Sample rate</label><div class="ctl">96 kHz <small>the network's; read only</small></div><div></div></div>
+    </fieldset>
+
+    <fieldset><legend>Channels</legend>
+      <div class="row"><label>Inputs (Dante RX)</label><div class="ctl">16 <small>2–64 · names kept, new ones "17", "18"…</small></div><div class="r">↻</div></div>
+      <div class="row"><label>Outputs (Dante TX)</label><div class="ctl">16 <small>2–64</small></div><div class="r">↻</div></div>
+    </fieldset>
+
+    <fieldset><legend>CPUs</legend>
+      <div class="cpu">
+        <div class="ctl">Audio pump <small>CPU 4</small></div>
+        <div class="ctl">Send (TX) <small>CPU 6</small></div>
+        <div class="ctl">Receive (RX) <small>CPU 6</small></div>
+      </div>
+      <div class="row" style="grid-template-columns:1fr 22px"><span class="legend">Busy CPUs of the other instance are greyed out in the lists.</span><div class="r">↻</div></div>
+    </fieldset>
+
+    <div class="banner">↻ 2 changes need a restart of band-asio-dante (~5 s of silence). Ableton must release the driver first: Options → Audio → Driver: None, then Apply. dtray waits until it is released.</div>
+  </div>
+  <div class="foot">
+    <span class="legend"><b class="live">●</b> applies at once &nbsp; <b class="r">↻</b> needs a restart</span>
+    <span><span class="btn">Cancel</span> <span class="btn p">Apply and restart</span></span>
+  </div>
+</div>
+</div>
+
+<div class="notes">
+<h2>Čo návrh robí (na schválenie)</h2>
+<ol>
+<li><b>Jedno okno, záložka pre každú inštanciu</b> (band, master). Hore živý stav: beží, či je pripojený Ableton, latencie, stav hodín.</li>
+<li><b>Sieťové rozhranie</b> sa vyberá zo zoznamu kariet s adresou a rýchlosťou, ako v DVS.</li>
+<li><b>Dve značky:</b> ● sa uplatní hneď, bez prerušenia (Dante latencia). ↻ potrebuje reštart inštancie (buffer, kanály, CPU, rozhranie).</li>
+<li><b>Pred reštartom</b> okno povie, koľko zmien čaká a že Ableton musí najprv uvoľniť ovládač. dtray počká, kým ho uvoľní, potom reštartuje a po štarte zo zariadenia overí, že nové hodnoty platia.</li>
+<li><b>Kanály:</b> počet 2–64 každým smerom. Existujúce názvy ostanú, nové dostanú čísla.</li>
+<li><b>CPU:</b> tri zoznamy. CPU, ktoré používa druhá inštancia, sú sivé, aby sa nebili.</li>
+<li><b>Zápis</b> ide do nastavení inštancie (vyžaduje administrátora, Windows sa raz opýta).</li>
+</ol>
+</div>
+</div>
+</body>
+</html>
