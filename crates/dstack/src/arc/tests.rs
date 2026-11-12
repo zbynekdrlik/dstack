@@ -2,6 +2,7 @@ use super::*;
 
 mod dc_latency_write;
 mod key_table;
+mod v289;
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -1496,13 +1497,24 @@ const DC_2204: [u8; 16] = [
 
 #[test]
 fn dante_controller_s_0x2204_is_answered_as_the_iem_card_answers_it() {
-    // The IEM card (a Yamaha Dante card) answered this request, in the same
-    // capture, with status 0x0030 and no body: `2809 000a 0021 2204 0030`.
-    // Left unanswered, Dante Controller asked 3 times (dev1, 31.10.2026).
+    // The IEM card (a Yamaha Dante card, ARC 2.7.41) answered this request,
+    // in the same capture, with status 0x0030 and no body:
+    // `2809 000a 0021 2204 0030`. Left unanswered, Dante Controller asked 3
+    // times (dev1, 31.10.2026). Our devices announce ARC 2.8.9 since dstack
+    // #216 and answer it under 0x2809 as the 2.8.9 card does (start code
+    // 0x2801, no TX flow label, `arc/tests/v289.rs`); under 2.7's start
+    // code still as the IEM card.
     let mut dev = Dev::new(config());
+    let mut dc_2204_27 = DC_2204;
+    dc_2204_27[..2].copy_from_slice(&CONTROLLER.to_be_bytes());
     assert_eq!(
-        reply_bytes(&mut dev, &DC_2204),
-        [0x28, 0x09, 0x00, 0x0a, 0x00, 0x21, 0x22, 0x04, 0x00, 0x30]
+        reply_bytes(&mut dev, &dc_2204_27),
+        [0x27, 0x29, 0x00, 0x0a, 0x00, 0x21, 0x22, 0x04, 0x00, 0x30]
+    );
+    let reply = reply_bytes(&mut dev, &DC_2204);
+    assert_eq!(
+        reply[..HEADER_LEN],
+        [0x28, 0x01, 0x00, 0x2c, 0x00, 0x21, 0x22, 0x04, 0x00, 0x01]
     );
 }
 

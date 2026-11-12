@@ -120,9 +120,9 @@ pub fn records(
     let mf = format!("mf={}", cfg.manufacturer);
     let model = format!("model={MODEL_ID}");
     let arc_txt = vec![
-        "arcp_vers=2.7.41".to_string(),
+        format!("arcp_vers={}", crate::arc::ARCP_VERSION),
         "arcp_min=0.2.4".to_string(),
-        "router_vers=4.0.2".to_string(),
+        format!("router_vers={}", crate::arc::ROUTER_VERSION),
         format!("router_info={}", cfg.model),
         mf.clone(),
         model.clone(),

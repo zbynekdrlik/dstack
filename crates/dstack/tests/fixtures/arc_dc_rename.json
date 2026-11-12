@@ -1,0 +1,13 @@
+{
+  "what": "Dante Controller renaming one of our devices from its Device Config page (Rename Device, Apply, Yes), under ARC 2.8.9 (start code 0x2809), and our device's answer.",
+  "captured": "2026-11-12, dstack #216 Finding 17, pktmon on the Dante Controller PC, UDP 4440. The device was dev1's test device (a lane build whose 0x1000 first word carried 0x0001, the rename bit). The names are replaced with neutral ones of the same length (12 characters, the length field unchanged); nothing else is changed.",
+  "requests": {
+    "0x1001": "2809001700c510010000746573742d72656e616d656400"
+  },
+  "replies": {
+    "0x1001": "2809000a00c510010001"
+  },
+  "layout": {
+    "0x1001": "header (start 0x2809, length, sequence, 0x1001, 0), then the new name and its NUL; netaudio's set_name sends the same body under 0x27ff. The reply is status OK (0x0001) with no body."
+  }
+}
