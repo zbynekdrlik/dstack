@@ -50,6 +50,8 @@ function Reset-Fake {
         RouteIndex   = 5
         FailStep     = ''
         ExtraLan     = $false
+        PingOk       = $true
+        NoIpIf       = $false
     }
 }
 function Note { param([string]$Verb, [string]$Target) [void]$script:Fake.Calls.Add("$Verb $Target") }
@@ -97,6 +99,7 @@ function Enable-NetAdapterBinding {
 function Get-NetIPInterface {
     [CmdletBinding()] param([string]$InterfaceAlias, [string]$AddressFamily)
     Note 'Get-NetIPInterface' $InterfaceAlias
+    if ($script:Fake.NoIpIf) { return }
     [pscustomobject]@{ Dhcp = $script:Fake.Dhcp }
 }
 function Set-NetIPInterface {
@@ -108,6 +111,13 @@ function Get-NetIPAddress {
     if ($InterfaceIndex -ne $script:Fake.LanIndex) { return }
     foreach ($a in $script:Fake.Addresses) { [pscustomobject]@{ IPAddress = $a } }
 }
+function Test-Gateway {
+    # The ping, faked like the cmdlets: no test reaches the network.
+    param([string]$Address)
+    Note 'Test-Gateway' $Address
+    $script:Fake.PingOk
+}
+function Start-Sleep { param([int]$Seconds) }
 function Find-NetRoute {
     [CmdletBinding()] param([string]$RemoteIPAddress)
     [pscustomobject]@{ InterfaceIndex = $script:Fake.RouteIndex }
@@ -167,8 +177,15 @@ Check 'no gateway answer is down' {
 Check 'a step that changed something restarts' {
     (Get-RestartDecision -Changed $true -HasLease $true -MinutesSinceRestart 1 -GapMinutes 30).Restart
 }
-Check 'no lease restarts' {
-    (Get-RestartDecision -Changed $false -HasLease $false -MinutesSinceRestart 1 -GapMinutes 30).Restart
+Check 'no lease restarts, but at most once per gap (a DHCP server outage)' {
+    -not (Get-RestartDecision -Changed $false -HasLease $false -MinutesSinceRestart 3 -GapMinutes 30).Restart -and
+    (Get-RestartDecision -Changed $false -HasLease $false -MinutesSinceRestart -1 -GapMinutes 30).Restart -and
+    (Get-RestartDecision -Changed $false -HasLease $false -MinutesSinceRestart 31 -GapMinutes 30).Restart
+}
+Check 'an ACE writes when it holds a write, delete, owner or generic write bit' {
+    $w = foreach ($m in 0x2, 0x4, 0x10000, 0x40, 0x40000, 0x80000, 0x40000000, 0x10000000, 0x1F01FF) { Test-AceGrantsWrite -Rights $m }
+    $r = foreach ($m in 0x1200A9, 0x120089, 0x80000000) { Test-AceGrantsWrite -Rights $m }
+    @($w | Where-Object { -not $_ }).Count -eq 0 -and @($r | Where-Object { $_ }).Count -eq 0
 }
 Check 'a healthy adapter restarts at most once per gap (a router outage)' {
     -not (Get-RestartDecision -Changed $false -HasLease $true -MinutesSinceRestart 3 -GapMinutes 30).Restart -and
@@ -200,10 +217,13 @@ Check 'an adapter name with a wildcard character is refused' {
 Check 'a threshold below 1 is refused' {
     Throws { Read-HealConfig -Json $good.Replace('"thresholdMinutes":3', '"thresholdMinutes":0') } '*thresholdMinutes*'
 }
-Check 'the state file round-trips; a missing one counts from zero' {
-    $s = Read-HealState -Json '{"failures":2,"lastRestart":"2026-11-12T16:20:00.0000000+01:00"}'
+Check 'a missing state counts from zero' {
     $z = Read-HealState -Json ''
-    $s.Failures -eq 2 -and $s.LastRestart -is [datetime] -and $z.Failures -eq 0 -and $null -eq $z.LastRestart
+    $z.Failures -eq 0 -and $null -eq $z.LastRestart
+}
+Check 'the restart gap counts in UTC' {
+    $s = Read-HealState -Json '{"failures":2,"lastRestart":"2026-11-12T16:20:00.0000000+01:00"}'
+    $s.Failures -eq 2 -and $s.LastRestart.Kind -eq 'Utc' -and $s.LastRestart.Hour -eq 15
 }
 
 # --- never the Dante adapter
@@ -223,15 +243,18 @@ Check 'a repair step aimed at the Dante adapter is refused before any change' {
     }
     @($all | Where-Object { -not $_ }).Count -eq 0 -and $script:Fake.Calls.Count -eq 0
 }
-Check 'the adapters must resolve by exact name to two interfaces' {
+Check 'the adapters resolve by exact name to two interfaces; a missing Dante adapter does not block' {
     $cfg = Read-HealConfig -Json $good
     Reset-Fake; $script:Fake.DanteIndex = 5
     $same = Throws { Resolve-HealAdapters -Config $cfg } '*Dante adapter*'
     Reset-Fake; $script:Fake.DanteName = 'Other'
-    $missing = Throws { Resolve-HealAdapters -Config $cfg } "*0 adapters named 'Dante70'*"
+    $r = Resolve-HealAdapters -Config $cfg
+    $missing = $r.Lan.ifIndex -eq 5 -and $null -eq $r.Dante
     Reset-Fake; $script:Fake.ExtraLan = $true
     $two = Throws { Resolve-HealAdapters -Config $cfg } "*2 adapters named 'LAN'*"
-    $same -and $missing -and $two
+    Reset-Fake; $script:Fake.LanName = 'Gone'
+    $nolan = Throws { Resolve-HealAdapters -Config $cfg } "*0 adapters named 'LAN'*"
+    $same -and $missing -and $two -and $nolan
 }
 
 # --- each repair step: needed and not needed
@@ -256,6 +279,10 @@ Check 'BindIPv4: an unbound IPv4 is bound, a bound one left alone' {
     $a = Step 'BindIPv4'; $after = $script:Fake.Bound
     Reset-Fake; $b = Step 'BindIPv4'
     $a.Changed -and $after -and -not $b.Changed -and @(Changes).Count -eq 0
+}
+Check 'Dhcp: no IPv4 interface after the wait is an error' {
+    Reset-Fake; $script:Fake.NoIpIf = $true
+    Throws { Step 'Dhcp' } "*no IPv4 interface on 'LAN'*"
 }
 Check 'Dhcp: a static interface gets DHCP, a DHCP one left alone' {
     Reset-Fake; $script:Fake.Dhcp = 'Disabled'
@@ -311,7 +338,7 @@ try {
         @(Changes).Count -eq 0
     }
     Check 'a gateway that does not answer counts 1/3 and changes nothing' {
-        Reset-Fake
+        Reset-Fake; $script:Fake.PingOk = $false
         $d = NewRun 'down' $good
         $rc = Invoke-Check -Dir $d
         $text = LogOf $d
@@ -331,21 +358,42 @@ try {
         (LogOf $d) -match "repairing LAN adapter 'LAN' \(Dante adapter 'Dante70' untouched\)"
     }
     Check 'a healthy adapter in a router outage is not restarted again within the gap' {
-        Reset-Fake
-        $recent = (Get-Date).AddMinutes(-3).ToString('o')
+        Reset-Fake; $script:Fake.PingOk = $false
+        $recent = [datetime]::UtcNow.AddMinutes(-3).ToString('o')
         $d = NewRun 'outage' $good ('{"failures":2,"lastRestart":"' + $recent + '"}')
         $rc = Invoke-Check -Dir $d
         $rc -eq 0 -and @(Changes).Count -eq 0 -and (LogOf $d) -match 'Restart: skipped, adapter healthy' -and
-        (StateOf $d).lastRestart -eq ([datetime]$recent).ToString('o')
+        (StateOf $d).lastRestart -eq $recent
     }
     Check 'a failed step does not stop the rest, the run exits 1' {
         Reset-Fake
         $script:Fake.Vlan = '70'; $script:Fake.Bound = $false; $script:Fake.FailStep = 'Set-NetAdapterAdvancedProperty'
+        $script:Fake.PingOk = $false
         $d = NewRun 'stepfail' $good '{"failures":2}'
         $rc = Invoke-Check -Dir $d
         $ch = @(Changes)
         $rc -eq 1 -and ($ch -contains 'Enable-NetAdapterBinding LAN') -and ($ch -contains 'Restart-NetAdapter LAN') -and
         (LogOf $d) -match 'VlanIdEmpty: ERROR fake failure' -and @(DanteCalls).Count -eq 0
+    }
+    Check 'the state file round-trips through Save and Read' {
+        $f = Join-Path $tmp 'rt.json'
+        $t = [datetime]::UtcNow
+        Save-HealState -Path $f -Failures 2 -LastRestart $t
+        $s = Read-HealState -Json (Get-Content $f -Raw)
+        $s.Failures -eq 2 -and $s.LastRestart -eq $t
+    }
+    Check 'a corrupt state file is logged and counts from zero' {
+        Reset-Fake; $script:Fake.PingOk = $false
+        $d = NewRun 'corrupt' $good '{not json'
+        $rc = Invoke-Check -Dir $d
+        $rc -eq 0 -and (LogOf $d) -match 'state file unreadable' -and (StateOf $d).failures -eq 1
+    }
+    Check 'a missing Dante adapter is a warning: the LAN is still repaired, by name' {
+        Reset-Fake; $script:Fake.DanteName = 'Other'; $script:Fake.Status = 'Disabled'; $script:Fake.Addresses = @()
+        $d = NewRun 'nodante' $good '{"failures":2}'
+        $rc = Invoke-Check -Dir $d
+        $ch = @(Changes)
+        $rc -eq 0 -and ($ch -contains 'Enable-NetAdapter LAN') -and (LogOf $d) -match "WARN no adapter named 'Dante70'"
     }
     Check 'the Dante adapter on the same interface: no repair at all, exit 1' {
         Reset-Fake
