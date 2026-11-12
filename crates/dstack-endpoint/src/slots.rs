@@ -85,5 +85,20 @@ pub fn pick(place: &Place, ports: Option<Ports>, id: Option<u16>) -> (Option<Por
     }
 }
 
+/// [`pick`] once `place` is there: `wait` (`dlink::wait_for_place` in the
+/// apps) first, so the slots are probed on the address itself (dstack
+/// #225: probed before an interface held it, every slot failed and the
+/// device kept Dante's defaults beside another device of the PC). The
+/// wait's error is the pick's.
+pub fn pick_when_there(
+    place: &Place,
+    ports: Option<Ports>,
+    id: Option<u16>,
+    wait: impl FnOnce(&Place) -> Result<(), String>,
+) -> Result<(Option<Ports>, Option<u16>), String> {
+    wait(place)?;
+    Ok(pick(place, ports, id))
+}
+
 #[cfg(test)]
 mod tests;

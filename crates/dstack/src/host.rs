@@ -11,8 +11,9 @@
 //!
 //! - [`prepare`]: the device's setup, nothing served yet: the config and
 //!   its state file (a folder it cannot write is found here), the interface
-//!   and its address, its facts for the network info, the start line, the
-//!   runtime, the four servers' sockets, the media side ([`Media`], with an
+//!   and its address (waited for while it is not there, dstack #225), its
+//!   facts for the network info, the start line, the runtime, the four
+//!   servers' sockets, the media side ([`Media`], with an
 //!   engine ring on each TX channel the engine feeds) and the control
 //!   socket bound. [`Prepared::media`] and [`Prepared::config`] are what the
 //!   engine builds its pump from.
@@ -33,9 +34,11 @@
 //! Errors keep the binary's exit codes ([`exit_code`]): 2 for the command
 //! line, the config, the state file (also one whose folder cannot be
 //! written) or an interface without a usable MAC, which the unit does not
-//! restart (`RestartPreventExitStatus=2`); 1 for an address not there
-//! (yet), a MAC file that cannot be read, a socket not bound, serving that
-//! failed or goodbyes not confirmed, which it restarts. Logs name counts,
+//! restart (`RestartPreventExitStatus=2`); 1 for an address the Dante
+//! network cannot reach (an address not there yet is waited for), an
+//! interface with several IPv4 addresses, a MAC file that cannot be read,
+//! a socket not bound, serving that failed or goodbyes not confirmed,
+//! which it restarts. Logs name counts,
 //! ports and channel numbers, never a name or an address.
 
 use std::fmt::Display;
@@ -297,7 +300,7 @@ pub fn prepare(opts: &Options, engine_tx: &[usize]) -> Result<Prepared, HostErro
 /// index (from 0) in `engine_tx` (the standalone device passes none; an
 /// index the device lacks is [`HostError::Setup`]), and the control socket
 /// at `opts.control`. Glue: every decision is [`read_config`]'s,
-/// [`load_device`]'s, [`daemon::pick_interface`]'s, [`interface_info`]'s
+/// [`load_device`]'s, [`daemon::wait_for_interface`]'s, [`interface_info`]'s
 /// and [`Media::new`]'s. The media clock follows `source`
 /// ([`ClockSource::System`] is for tests only).
 pub fn prepare_with(
@@ -317,12 +320,31 @@ pub fn prepare_with(
 /// [`prepare_with`] for a config the caller built (an app hosting the
 /// device: [`crate::embed`]): the control socket at `control`, none with
 /// `None` (Windows has none either way).
+///
+/// The place is waited for while it is not there (an interface still
+/// getting its address at boot or logon, dstack #225): the call returns
+/// only when it is, or on another error ([`daemon::wait_for_interface`]).
 pub fn prepare_config(
     cfg: DeviceConfig,
     place: &Place,
     control: Option<&Path>,
     engine_tx: &[usize],
     source: ClockSource,
+) -> Result<Prepared, HostError> {
+    prepare_on(cfg, place, control, engine_tx, source, |place| {
+        daemon::wait_for_interface(place, interfaces, std::thread::sleep)
+    })
+}
+
+/// [`prepare_config`] with the place resolved by `resolve` (the tests'
+/// scripted address source).
+pub(crate) fn prepare_on(
+    cfg: DeviceConfig,
+    place: &Place,
+    control: Option<&Path>,
+    engine_tx: &[usize],
+    source: ClockSource,
+    resolve: impl FnOnce(&Place) -> Result<IfAddr, String>,
 ) -> Result<Prepared, HostError> {
     let device = load_device(cfg)?;
     // One timing profile per process: the media threads' waits and
@@ -348,10 +370,8 @@ pub fn prepare_config(
             device.cfg.tx.len()
         )));
     }
-    // An address not there may come (an interface still coming up at
-    // boot): exit 1, which the unit retries.
-    let ifa =
-        daemon::pick_interface(place, &interfaces().map_err(run_failed)?).map_err(run_failed)?;
+    // An address not there yet is waited for; a refused one is exit 1.
+    let ifa = resolve(place).map_err(run_failed)?;
     let net = interface_info(&ifa)?;
     info!(
         version = VERSION,

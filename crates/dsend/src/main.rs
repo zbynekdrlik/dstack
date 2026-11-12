@@ -44,7 +44,6 @@ fn main() -> ExitCode {
     let (attached, has_stderr) = dstack_endpoint::win::attach_console();
     #[cfg(not(windows))]
     let (attached, has_stderr) = (true, true);
-    let boxed = dstack_endpoint::alert::shows_box(attached, has_stderr);
     let args: Vec<String> = std::env::args().skip(1).collect();
     let command = match cli::parse(&args) {
         Ok(c) => c,
@@ -53,6 +52,7 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    let is_run = matches!(command, Command::Run(_));
     let done = match command {
         Command::Help => {
             println!("{}", cli::USAGE);
@@ -69,14 +69,20 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             tracing::error!("dsend: {e}");
-            fail(&e, boxed);
+            #[cfg(windows)]
+            let logged = run::log_open();
+            #[cfg(not(windows))]
+            let logged = false;
+            fail(&e, cli::shows_box(is_run, logged, attached, has_stderr));
             ExitCode::FAILURE
         }
     }
 }
 
-/// A failure the user must see: stderr, and a message box when nothing
-/// reads stderr (a Windows start from Explorer).
+/// A failure the user must see: stderr (and the log, `tracing::error!`
+/// above), and a message box when [`cli::shows_box`] says so: never for a
+/// run with its log open, which is started headless (a logon task, dstack
+/// #225); else when nothing reads stderr (a start from Explorer).
 fn fail(text: &str, boxed: bool) {
     eprintln!("dsend: {text}");
     #[cfg(windows)]

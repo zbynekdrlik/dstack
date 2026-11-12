@@ -186,6 +186,16 @@ fn a_config_the_device_refuses_is_a_setup_error_before_anything_runs() {
 }
 
 #[test]
+fn a_place_the_dante_network_cannot_reach_is_refused_without_a_wait() {
+    // dstack #225: the wait an app runs before its own use of the address
+    // (dsend's and dlisten's free ports) refuses as `Link::start` does.
+    match wait_for_place(&Place::Ip(std::net::Ipv4Addr::LOCALHOST)) {
+        Err(HostError::Run(why)) => assert!(why.contains("loopback"), "{why}"),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
 fn a_second_device_s_ports_process_id_and_rx_port_base_are_taken() {
     let cfg = config()
         .ports(Ports {

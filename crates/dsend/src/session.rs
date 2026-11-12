@@ -179,8 +179,10 @@ impl Session {
         let first = open(&devices[current], o.rate, &stats, &failed)?;
         tracing::info!(output = %outputs[current].name, "dsend: the output captured");
         let (processor, switch) = source::source(first.player);
+        let free = with_free_ports(o, &place)
+            .map_err(|e| format!("the Dante device {name} did not start: {e}"))?;
         let link = Link::start(
-            &cli::link_config(&with_free_ports(o, &place), &name, state.clone()),
+            &cli::link_config(&free, &name, state.clone()),
             &place,
             Map {
                 rx: vec![],
@@ -400,9 +402,13 @@ impl Session {
 
 /// `o` with the control ports and process id [`dstack_endpoint::slots::pick`]
 /// gives on `place` (a free set when another Dante device on the address
-/// holds the defaults; dasio, FOH, 10.11.2026).
-fn with_free_ports(o: &cli::Options, place: &dlink::Place) -> cli::Options {
+/// holds the defaults; dasio, FOH, 10.11.2026), once `place` is there
+/// (`pick_when_there`, dstack #225).
+fn with_free_ports(o: &cli::Options, place: &dlink::Place) -> Result<cli::Options, String> {
     let mut o = o.clone();
-    (o.ports, o.process_id) = dstack_endpoint::slots::pick(place, o.ports, o.process_id);
-    o
+    (o.ports, o.process_id) =
+        dstack_endpoint::slots::pick_when_there(place, o.ports, o.process_id, |p| {
+            dlink::wait_for_place(p).map_err(|e| e.to_string())
+        })?;
+    Ok(o)
 }

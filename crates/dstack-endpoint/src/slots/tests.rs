@@ -156,3 +156,33 @@ fn on_an_address_the_first_free_slot_is_picked() {
         assert!(id >= 1, "slot 0's ARC is held");
     }
 }
+
+#[test]
+fn the_place_is_waited_for_before_its_ports_are_probed() {
+    // dstack #225: probed before the address is on an interface, every
+    // slot fails to bind and the device keeps Dante's defaults, beside
+    // another device of the PC once the address is there.
+    let given = slot(5);
+    let place = Place::Ip(Ipv4Addr::LOCALHOST);
+    let waited = std::cell::Cell::new(0);
+    let got = pick_when_there(&place, Some(given.0), Some(5), |p| {
+        assert_eq!(p, &place);
+        waited.set(waited.get() + 1);
+        Ok(())
+    });
+    assert_eq!(got, Ok((Some(given.0), Some(5))));
+    assert_eq!(waited.get(), 1);
+    let iface = Place::Iface("eth1".into());
+    let got = pick_when_there(&iface, None, None, |p| {
+        assert_eq!(p, &iface);
+        waited.set(waited.get() + 1);
+        Ok(())
+    });
+    assert_eq!(got, Ok((None, None)));
+    assert_eq!(waited.get(), 2);
+    // A wait that ends in an error (a place refused) is the pick's.
+    assert_eq!(
+        pick_when_there(&place, None, None, |_| Err("refused".to_string())),
+        Err("refused".to_string())
+    );
+}

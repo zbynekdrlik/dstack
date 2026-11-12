@@ -13,7 +13,10 @@
 //! - [`pick_interface`]: the interface and its one IPv4 address the device
 //!   serves on, from the box's interface list: ARC, CMC and the info
 //!   server bind the address, the mDNS records point at it and are sent on
-//!   its interface only.
+//!   its interface only. [`wait_for_interface`] is the start's: a place
+//!   not there yet (an interface still getting its address at boot or
+//!   logon, dstack #225) is looked up again every second, with no time
+//!   limit, until it is.
 //! - [`net_info`]: what the info server's network info says about that
 //!   interface, from the box's files the host reads (its MAC and speed
 //!   in `/sys/class/net/<iface>/`, the routes in `/proc/net/route`).
@@ -43,6 +46,7 @@ use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicU16;
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
 use tokio::net::UdpSocket;
 use tokio::sync::Notify;
@@ -430,27 +434,92 @@ pub struct IfAddr {
 /// interface holds, and a loopback address are refused (the errors name
 /// neither).
 pub fn pick_interface(place: &Place, addrs: &[IfAddr]) -> Result<IfAddr, String> {
-    let picked = match place {
+    find_interface(place, addrs)?.ok_or_else(|| {
+        match place {
+            Place::Iface(_) => "no such interface, or it has no IPv4 address",
+            Place::Ip(_) => "no interface of this box holds the address",
+        }
+        .to_string()
+    })
+}
+
+/// [`pick_interface`]'s choice, `None` for a place not there (yet): an
+/// interface with no IPv4 address, an address no interface holds. An
+/// unreachable address is refused before it is looked for.
+fn find_interface(place: &Place, addrs: &[IfAddr]) -> Result<Option<IfAddr>, String> {
+    match place {
         Place::Iface(name) => {
             let mine: Vec<&IfAddr> = addrs.iter().filter(|a| &a.name == name).collect();
             match mine[..] {
-                [one] => one,
-                [] => return Err("no such interface, or it has no IPv4 address".into()),
-                _ => {
-                    return Err(format!(
-                        "the interface has {} IPv4 addresses: name one with --ip",
-                        mine.len()
-                    ));
+                [one] => {
+                    refuse_unreachable(one.ip)?;
+                    Ok(Some(one.clone()))
                 }
+                [] => Ok(None),
+                _ => Err(format!(
+                    "the interface has {} IPv4 addresses: name one with --ip",
+                    mine.len()
+                )),
             }
         }
-        Place::Ip(ip) => addrs
-            .iter()
-            .find(|a| a.ip == *ip)
-            .ok_or("no interface of this box holds the address")?,
+        Place::Ip(ip) => {
+            refuse_unreachable(*ip)?;
+            Ok(addrs.iter().find(|a| a.ip == *ip).cloned())
+        }
+    }
+}
+
+/// How often [`wait_for_interface`] looks a place up again.
+pub const PLACE_RETRY: Duration = Duration::from_secs(1);
+/// Every how many lookups a wait is logged again: once a minute.
+pub const PLACE_LOG_EVERY: u32 = 60;
+
+/// The device's place as [`pick_interface`] picks it, waited for (dstack
+/// #225): an address no interface holds yet, or an interface not there or
+/// without its IPv4 address yet, is looked up again in `addrs` (the box's
+/// interfaces) after `sleep(PLACE_RETRY)`, with no time limit, so a device
+/// started at boot or logon comes up whenever its network does. The wait
+/// is logged at its start, once a minute and when the place is there,
+/// naming the kind of place, never the address or the interface (P6). Any
+/// other refusal ([`pick_interface`]'s) and an interface list that cannot
+/// be read fail at once.
+pub fn wait_for_interface(
+    place: &Place,
+    mut addrs: impl FnMut() -> io::Result<Vec<IfAddr>>,
+    mut sleep: impl FnMut(Duration),
+) -> Result<IfAddr, String> {
+    let (waiting, what) = match place {
+        Place::Ip(_) => (
+            "waiting for the device's address to appear on an interface \
+             (looked up every second, no time limit)",
+            "the device's address",
+        ),
+        Place::Iface(_) => (
+            "waiting for the device's interface to appear with an IPv4 address \
+             (looked up every second, no time limit)",
+            "the device's interface",
+        ),
     };
-    refuse_unreachable(picked.ip)?;
-    Ok(picked.clone())
+    // An address the Dante network cannot reach never comes: refused
+    // before any lookup.
+    if let Place::Ip(ip) = place {
+        refuse_unreachable(*ip)?;
+    }
+    let mut tries: u32 = 0;
+    loop {
+        let list = addrs().map_err(|e| format!("the box's interfaces: {e}"))?;
+        if let Some(ifa) = find_interface(place, &list)? {
+            if tries > 0 {
+                info!(seconds = tries, "{what} is there now: the device starts");
+            }
+            return Ok(ifa);
+        }
+        if tries.is_multiple_of(PLACE_LOG_EVERY) {
+            warn!(minutes = tries / PLACE_LOG_EVERY, "{waiting}");
+        }
+        sleep(PLACE_RETRY);
+        tries = tries.saturating_add(1);
+    }
 }
 
 /// The fastest link the network info names, in Mbit/s (inferno's clamp).
