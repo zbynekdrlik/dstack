@@ -195,6 +195,56 @@ fn a_place_the_dante_network_cannot_reach_is_refused_without_a_wait() {
     }
 }
 
+/// An app's processor that writes nothing (the starts below never run it).
+struct Quiet;
+impl Process for Quiet {
+    fn process(&mut self, _block: &mut Block<'_>) {}
+}
+
+/// An address no interface of any box holds (TEST-NET-1, RFC 5737).
+const ABSENT: std::net::Ipv4Addr = std::net::Ipv4Addr::new(192, 0, 2, 77);
+
+/// `start` run on a thread of its own, its answer handed back within
+/// `bound` (`None` when it has not answered by then: a start that waits
+/// stays blocked on its thread, and the test fails instead of hanging).
+fn answer_within(
+    bound: std::time::Duration,
+    start: impl FnOnce() -> Result<Link, HostError> + Send + 'static,
+) -> Option<Result<Link, HostError>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(start());
+    });
+    rx.recv_timeout(bound).ok()
+}
+
+/// dstack #230: `Link::start` fails at once on an address not there, as up
+/// to v0.6.97 (v0.6.98 waited with no limit and no way out, which hung the
+/// apps' own retry and shutdown: songplayer#313, the intercom). Half a
+/// retry interval is the bound: one lookup again would take a whole one.
+#[test]
+fn link_start_on_an_address_not_there_fails_at_once() {
+    let bound = dstack::daemon::PLACE_RETRY / 2;
+    let got = answer_within(bound, || {
+        Link::start(
+            &config(),
+            &Place::Ip(ABSENT),
+            Map {
+                rx: vec![0],
+                tx: vec![],
+            },
+            Quiet,
+        )
+    });
+    match got {
+        Some(Err(HostError::Run(why))) => {
+            assert_eq!(why, "no interface of this box holds the address");
+        }
+        Some(other) => panic!("{:?}", other.map(drop)),
+        None => panic!("Link::start still waiting after {bound:?}"),
+    }
+}
+
 #[test]
 fn a_second_device_s_ports_process_id_and_rx_port_base_are_taken() {
     let cfg = config()
