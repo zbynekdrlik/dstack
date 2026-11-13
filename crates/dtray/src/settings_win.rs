@@ -414,13 +414,19 @@ fn status_text(st: &mut State) -> String {
         let next = r.next(reading.is_ok(), st.busy.is_some(), Instant::now());
         st.restart = next.map(|r| (i, r));
     }
-    let restarting = st.restart.is_some_and(|(i, _)| i == st.cur);
+    let restarting = st
+        .restart
+        .is_some_and(|(i, r)| i == st.cur && r.restarting());
     dasio::shown_status(&reading, restarting)
 }
 
 /// The current tab into the controls (lists, selections, texts).
 fn show_tab(st: &mut State) {
     let h = st.hwnd;
+    // Another tab shown: the restart's mark is not followed any more.
+    if st.restart.is_some_and(|(i, _)| i != st.cur) {
+        st.restart = None;
+    }
     let busy = dasio::busy_cpus(&others(st));
     let tab = &st.tabs[st.cur];
     let (old, new) = match &tab.fields {

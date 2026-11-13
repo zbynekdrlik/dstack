@@ -839,11 +839,14 @@ fn a_restart_lasts_until_the_device_is_back_after_it_went_away() {
     let r = Restart::<std::time::Duration>::started();
     assert_eq!(r.gone, None);
     // The old process still answers (UAC, the helper's write).
+    assert!(!r.restarting());
     let r = r.next(true, true, SEC).expect("still restarting");
-    assert_eq!(r, Restart::started());
+    assert_eq!((r.up, r.gone), (true, None));
+    assert!(!r.restarting());
     // Gone at 3 s.
     let r = r.next(false, true, 3 * SEC).expect("still restarting");
     assert_eq!(r.gone, Some(3 * SEC));
+    assert!(r.restarting());
     // Still gone later, also after the apply ended: the first miss counts.
     let r = r.next(false, true, 9 * SEC).expect("still restarting");
     assert_eq!(r.gone, Some(3 * SEC));
@@ -857,6 +860,7 @@ fn a_restart_lasts_until_the_device_is_back_after_it_went_away() {
 #[test]
 fn a_restart_ends_after_the_wait_from_when_the_device_went_away() {
     let r = Restart {
+        up: true,
         gone: Some(10 * SEC),
     };
     let just = std::time::Duration::from_millis(1);
@@ -874,6 +878,21 @@ fn an_apply_that_ends_with_the_device_never_gone_ends_the_restart() {
     // An instance that was not running and the apply failed: no
     // "Restarting…" either.
     assert_eq!(r.next(false, false, SEC), None);
+}
+
+#[test]
+fn an_instance_down_before_the_apply_shows_its_status_not_restarting() {
+    let r = Restart::<std::time::Duration>::started();
+    // Down while UAC asks: the real status, and a failed apply ends it.
+    let r = r.next(false, true, SEC).expect("the apply runs");
+    assert_eq!(r, Restart::started());
+    assert!(!r.restarting());
+    assert_eq!(r.next(false, false, 2 * SEC), None);
+    // The helper starts it, then a restart takes it away again.
+    let r = r.next(true, true, 2 * SEC).expect("the apply runs");
+    let r = r.next(false, true, 3 * SEC).expect("the apply runs");
+    assert_eq!(r.gone, Some(3 * SEC));
+    assert!(r.restarting());
 }
 
 #[test]

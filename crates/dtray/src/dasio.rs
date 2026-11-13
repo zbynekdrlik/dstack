@@ -558,17 +558,30 @@ pub const RESTART_WAIT: Duration = Duration::from_secs(60);
 
 /// An apply's restart as the status line follows it, from the elevated
 /// helper's start. `T` is the time (`Instant` in the window).
+///
+/// "Restarting…" ([`Restart::restarting`]) needs the device seen up during
+/// the apply and then missed: an instance that was down before the apply
+/// shows its real status (and an apply that fails then ends the restart).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Restart<T> {
-    /// When the device was first missed (`None`: still up, the helper has
-    /// not restarted it yet).
+    /// The device was read during the apply.
+    pub up: bool,
+    /// When it was first missed after that (`None`: not yet).
     pub gone: Option<T>,
 }
 
 impl<T: Copy + Sub<Output = Duration>> Restart<T> {
     /// The helper started.
     pub fn started() -> Self {
-        Restart { gone: None }
+        Restart {
+            up: false,
+            gone: None,
+        }
+    }
+
+    /// Whether the status line says "Restarting…" (the device went away).
+    pub fn restarting(&self) -> bool {
+        self.gone.is_some()
     }
 
     /// The restart after one reading at `now` (`found`: the device's
@@ -578,10 +591,17 @@ impl<T: Copy + Sub<Output = Duration>> Restart<T> {
         match (found, self.gone) {
             // Back after it went away.
             (true, Some(_)) => None,
-            // Still up: the helper has not restarted it yet.
-            (true, None) => applying.then_some(self),
-            // Gone now; an apply that already ended restarts nothing.
-            (false, None) => applying.then_some(Restart { gone: Some(now) }),
+            // Up: the helper has not restarted it yet.
+            (true, None) => applying.then_some(Restart {
+                up: true,
+                gone: None,
+            }),
+            // Missed: gone when it was up; an apply that ended restarts
+            // nothing.
+            (false, None) => applying.then_some(Restart {
+                up: self.up,
+                gone: self.up.then_some(now),
+            }),
             (false, Some(since)) => (now - since < RESTART_WAIT).then_some(self),
         }
     }
