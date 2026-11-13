@@ -423,14 +423,29 @@ fn obs_s_device_at_its_old_20_ms_numbers_in_terms() {
 
 /// v0.6.105's `split` at its default 15 ms budget, kept verbatim (only
 /// renamed) as the reference the defaults must reproduce (dstack #244):
-/// `(P ns, W samples, TX path ns, RX path ns)`, or its refusal.
+/// `(P ns, W samples, TX path ns, RX path ns)`, or its refusal (with the W
+/// it had chosen for a budget refusal). Its own copies of v0.6.105's
+/// `least_work_margin`, `tx_floor_ns` and floors (with their literals), so
+/// a change to the live ones cannot move the reference with them; only
+/// the converter's delays (`rated::delay_ns`) are shared.
 fn v0_6_105_split(
     device_rate: u32,
     app_rate: u32,
     block: u64,
     directions: Directions,
-) -> Result<(u64, u64, u64, u64), String> {
+) -> Result<(u64, u64, u64, u64), (String, u64)> {
     const BUDGET_NS: u64 = 15_000_000;
+    const MIN_LATENCY_NS: u64 = 4_000_000;
+    let least_work_margin = |rate: u32, block: u64| {
+        let b = if [16, 32, 64, 128, 256].contains(&block) {
+            block
+        } else {
+            128
+        };
+        b.max(latency_samples(2_000_000, rate))
+    };
+    // 32 frames (FPP_MAX) + the TX margin 0.25 ms + 4 ms of lateness.
+    let tx_floor_ns = |rate: u32| 32 * 1_000_000_000 / u64::from(rate.max(1)) + 250_000 + 4_000_000;
     let work_margin = |rate: u32, block: u64| {
         latency_samples(BUDGET_NS / 5 * 2, rate)
             .min(MAX_WORK_MARGIN)
@@ -442,16 +457,16 @@ fn v0_6_105_split(
             .max(least_work_margin(rate, block))
     };
     if device_rate == 0 {
-        return Err("sample_rate: the device's rate is 0 Hz".to_string());
+        return Err(("sample_rate: the device's rate is 0 Hz".to_string(), 0));
     }
-    let b = if BLOCKS.contains(&block) {
+    let b = if [16, 32, 64, 128, 256].contains(&block) {
         block
     } else {
-        BLOCK
+        128
     };
     let (convert_rx, convert_tx) =
         rated::delay_ns(device_rate, app_rate, usize::try_from(b).unwrap())
-            .map_err(|e| format!("rate conversion: {e}"))?;
+            .map_err(|e| (format!("rate conversion: {e}"), 0))?;
     let rate = u128::from(device_rate);
     let ns = |samples: u64| (u128::from(samples) * 1_000_000_000 / rate) as u64;
     let samples_in = |ns: u64| (u128::from(ns) * rate / 1_000_000_000) as u64;
@@ -474,7 +489,7 @@ fn v0_6_105_split(
     };
     let latency_ns = ns(samples_in(BUDGET_NS.saturating_sub(work)));
     if latency_ns < floor {
-        return Err(format!("budget_ns: under the floor {floor}"));
+        return Err((format!("budget_ns: under the floor {floor}"), margin));
     }
     Ok((
         latency_ns,
@@ -510,7 +525,7 @@ fn the_defaults_reproduce_v0_6_105_over_the_whole_grid() {
                                 "{at}"
                             );
                         }
-                        Err(e) if e.starts_with("budget_ns") => {
+                        Err((e, w)) if e.starts_with("budget_ns") => {
                             refused_before += 1;
                             let s = new.unwrap_or_else(|e| panic!("{at}: {e}"));
                             let floor = if dir == Rx {
@@ -523,8 +538,13 @@ fn the_defaults_reproduce_v0_6_105_over_the_whole_grid() {
                                 s.latency_ns - floor < 1_000_000_000 / u64::from(dev),
                                 "{at}: {s:?}"
                             );
+                            // The same W as v0.6.105 chose, each path P + its
+                            // hand-off.
+                            assert_eq!(s.margin, w, "{at}: {s:?}");
+                            assert_eq!(s.tx_path_ns, s.tx_handoff_ns + s.latency_ns, "{at}");
+                            assert_eq!(s.rx_path_ns, s.rx_handoff_ns + s.latency_ns, "{at}");
                         }
-                        Err(e) => assert_eq!(new.unwrap_err(), e, "{at}"),
+                        Err((e, _)) => assert_eq!(new.unwrap_err(), e, "{at}"),
                     }
                 }
             }
