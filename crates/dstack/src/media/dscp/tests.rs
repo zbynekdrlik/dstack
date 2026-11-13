@@ -194,3 +194,13 @@ fn windows_marks_a_flow_socket_ef() {
     assert_eq!(qos.last, Some(Verdict::Set));
     qos.mark(0, &socket, None);
 }
+
+/// On Windows the policies are read from the registry (CI's runner has
+/// none, or its own): the read never fails, and each policy has a name.
+#[cfg(windows)]
+#[test]
+fn windows_reads_the_qos_policies() {
+    for p in windows::read_policies() {
+        assert!(!p.name.is_empty());
+    }
+}

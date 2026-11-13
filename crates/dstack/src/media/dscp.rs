@@ -20,7 +20,7 @@
 
 use std::net::{SocketAddrV4, UdpSocket};
 
-use super::tx::MAX_FLOWS;
+use super::tx::{DSCP_EF, MAX_FLOWS};
 
 #[cfg(windows)]
 mod windows;
@@ -115,15 +115,72 @@ pub struct Policy {
 /// UDP audio DSCP 46: its application is `exe` (this program's path), its
 /// DSCP 46, its protocol any or UDP.
 pub fn marking_policy<'a>(policies: &'a [Policy], exe: &str) -> Option<&'a str> {
-    let _ = (policies, exe);
-    None
+    policies
+        .iter()
+        .find(|p| {
+            p.text(&["AppName", "Application Name"])
+                .is_some_and(|app| names_exe(app, exe))
+                && p.number(&["DSCP", "DSCP Value"]) == Some(u32::from(DSCP_EF))
+                && covers_udp(p.value(&["Protocol"]))
+        })
+        .map(|p| p.name.as_str())
+}
+
+impl Policy {
+    /// The first of the values `names` the policy has.
+    fn value(&self, names: &[&str]) -> Option<&PolicyValue> {
+        names
+            .iter()
+            .find_map(|n| self.values.iter().find(|(k, _)| k == n).map(|(_, v)| v))
+    }
+
+    /// That value as text.
+    fn text(&self, names: &[&str]) -> Option<&str> {
+        match self.value(names)? {
+            PolicyValue::Text(s) => Some(s),
+            PolicyValue::Number(_) => None,
+        }
+    }
+
+    /// That value as a number (a DWORD, or text holding one).
+    fn number(&self, names: &[&str]) -> Option<u32> {
+        match self.value(names)? {
+            PolicyValue::Number(n) => Some(*n),
+            PolicyValue::Text(s) => s.trim().parse().ok(),
+        }
+    }
+}
+
+/// Whether a policy's application `app` names `exe`: a full path the
+/// whole path, a bare name the file name; Windows' names ignore case.
+fn names_exe(app: &str, exe: &str) -> bool {
+    let app = app.trim();
+    if app.contains(['\\', '/']) {
+        app.eq_ignore_ascii_case(exe)
+    } else {
+        exe.rsplit(['\\', '/'])
+            .next()
+            .is_some_and(|file| file.eq_ignore_ascii_case(app))
+    }
+}
+
+/// Whether a policy's protocol covers UDP: none set, `*` or UDP in text;
+/// `New-NetQosPolicy`'s numbers 0 (none), 2 (UDP) and 3 (both).
+fn covers_udp(protocol: Option<&PolicyValue>) -> bool {
+    match protocol {
+        None => true,
+        Some(PolicyValue::Number(n)) => matches!(n, 0 | 2 | 3),
+        Some(PolicyValue::Text(s)) => {
+            let s = s.trim();
+            s == "*" || s.eq_ignore_ascii_case("udp")
+        }
+    }
 }
 
 /// The info line that replaces the "unmarked" warning when `policy` (its
 /// name) marks the audio; none: warn.
 pub fn unmarked_note(policy: Option<&str>) -> Option<String> {
-    let _ = policy;
-    None
+    policy.map(|name| format!("TX audio marked DSCP 46 by QoS policy '{name}'"))
 }
 
 /// The marks of the TX flow sockets: each slot's destination as last
