@@ -893,7 +893,8 @@ fn the_rx_thread_receives_until_stopped() {
         &[(0, plan(LOOPBACK, 1, true, 1))],
         &[(0, RxRoute { flow: 0, slot: 0 })],
     );
-    let thread = spawn(clock, Arc::clone(&s), None).unwrap();
+    let scheduling = Arc::new(crate::media::tx::Scheduling::new());
+    let thread = spawn(clock, Arc::clone(&s), None, Arc::clone(&scheduling)).unwrap();
     let t = transmitter(LOOPBACK);
     let p0 = clock::to_samples(start, RATE) - 64;
     t.send_to(&packet_at(p0, 1, 32), slot_addr(&s, 0)).unwrap();
@@ -914,6 +915,10 @@ fn the_rx_thread_receives_until_stopped() {
         std::thread::sleep(Duration::from_millis(5));
     }
     thread.join().unwrap();
+    // dstack #281: the thread recorded what it got of its priority.
+    let threads = scheduling.threads();
+    assert_eq!(threads.len(), 1, "{threads:?}");
+    assert_eq!(threads[0].thread, crate::media::tx::MediaThread::Rx);
 }
 
 #[test]

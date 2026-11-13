@@ -1927,6 +1927,14 @@ fn the_tx_thread_sends_rate_over_fpp_packets_a_second_never_early_and_ends_on_st
     assert_eq!(shared.lane(slot).packets, stamps.len() as u64);
     shared.stop();
     join_within(thread, Duration::from_secs(2));
+    // dstack #281: the TX thread (and its relay, with the escape on)
+    // recorded what it got of its priority.
+    let threads = shared.scheduling().threads();
+    assert_eq!(
+        threads.first().map(|t| t.thread),
+        Some(MediaThread::Tx),
+        "{threads:?}"
+    );
 }
 
 /// dstack #141: while the TX thread blocks its bounded escape, the relay
@@ -1943,7 +1951,7 @@ fn the_relay_thread_sends_the_tx_packets_while_the_tx_thread_blocks() {
     tx.step(Some(T), 0);
     let end = T + 2 * MS;
     let mut tx = std::thread::scope(|scope| {
-        scope.spawn(|| run_relay(clock.as_ref(), &relay));
+        scope.spawn(|| run_relay(clock.as_ref(), &relay, &Scheduling::new()));
         let mut misses = 0;
         let mut blocked = 0;
         let tx = escape_through(
@@ -2649,66 +2657,6 @@ fn a_device_latency_set_live_moves_the_advertised_latency_and_the_late_count() {
         Arc::new(TxShared::new(fixed, Ipv4Addr::LOCALHOST, Vec::new().into(), 1, &[]).unwrap());
     shared.set_device_latency(5_000_000);
     assert_eq!(shared.advertised_latency_ns(), 700_000);
-}
-
-/// dlink (#68): under the normal profile a thread at normal priority is
-/// what was asked, said at info; THREAD_PRIORITY_HIGHEST on Windows
-/// (dstack #90) likewise; a warning only when a raised priority was asked
-/// and refused.
-#[test]
-fn a_thread_s_priority_is_granted_highest_normal_by_profile_or_refused() {
-    use crate::clock::ThreadPriority as Asked;
-    for mmcss in [false, true] {
-        let realtime = priority_outcome(Asked::Realtime, true, mmcss);
-        assert_eq!(realtime, Priority::Granted);
-        let refused = priority_outcome(Asked::Realtime, false, mmcss);
-        assert_eq!(refused, Priority::Refused);
-        assert_eq!(
-            priority_outcome(Asked::Normal, false, mmcss),
-            Priority::Normal
-        );
-        assert_eq!(
-            priority_outcome(Asked::Normal, true, mmcss),
-            Priority::Normal
-        );
-    }
-    assert_eq!(
-        priority_outcome(Asked::Highest, true, false),
-        Priority::Highest
-    );
-    assert_eq!(
-        priority_outcome(Asked::Highest, false, false),
-        Priority::Refused
-    );
-    // dstack #1: in MMCSS, whatever the level beneath it.
-    assert_eq!(
-        priority_outcome(Asked::Highest, true, true),
-        Priority::Mmcss
-    );
-    assert_eq!(
-        priority_outcome(Asked::Highest, false, true),
-        Priority::Mmcss
-    );
-}
-
-/// dstack #1 (songplayer #285): only the normal profile's Windows threads
-/// join MMCSS; the real-time profile is above it, and the normal profile
-/// elsewhere asks nothing.
-#[test]
-fn only_the_normal_profile_on_windows_joins_mmcss() {
-    use crate::clock::ThreadPriority as Asked;
-    assert!(wants_mmcss(Asked::Highest));
-    assert!(!wants_mmcss(Asked::Realtime));
-    assert!(!wants_mmcss(Asked::Normal));
-}
-
-/// No MMCSS off Windows: a thread never claims to have joined it.
-#[cfg(not(windows))]
-#[test]
-fn off_windows_no_thread_joins_mmcss() {
-    let e = join_mmcss().unwrap_err();
-    assert_eq!(e.kind(), std::io::ErrorKind::Unsupported);
-    assert_eq!(e.to_string(), NO_MMCSS);
 }
 
 #[test]

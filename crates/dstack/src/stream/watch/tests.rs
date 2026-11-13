@@ -1,5 +1,5 @@
 use super::*;
-use crate::stream::Timing;
+use crate::stream::{Cause, Timing};
 use crate::test_log::{capture_at, capture_warnings, undecided};
 
 const S: u64 = EVERY_NS;
@@ -42,7 +42,8 @@ fn a_growth_is_reported_once_with_its_deltas() {
         Some(Grew {
             rebootstraps: 1,
             missed: 4,
-            overruns: 1
+            overruns: 1,
+            ..Grew::default()
         })
     );
     assert_eq!(w.look(2 * S, &view(2, 9, 1)), None, "a quiet second");
@@ -66,7 +67,8 @@ fn counts_that_went_down_are_learnt_not_reported() {
         Some(Grew {
             rebootstraps: 1,
             missed: 2,
-            overruns: 0
+            overruns: 0,
+            ..Grew::default()
         })
     );
 }
@@ -90,7 +92,7 @@ fn the_watch_warns_once_for_a_second_whose_counts_grew() {
     let s = stats();
     let mut w = PumpWatch::new();
     assert_eq!(capture_warnings(|| w.watch(0, "d1", Some(&s))), "");
-    s.rebootstrapped(3);
+    s.rebootstrapped(3, Cause::Late);
     s.record(u64::MAX);
     assert_eq!(
         capture_warnings(|| w.watch(S - 1, "d1", Some(&s))),
@@ -126,12 +128,12 @@ fn the_watch_warns_once_for_a_second_whose_counts_grew() {
 fn no_engine_logs_nothing_and_its_first_look_only_learns() {
     undecided();
     let s = stats();
-    s.rebootstrapped(7);
+    s.rebootstrapped(7, Cause::Late);
     let mut w = PumpWatch::new();
     assert_eq!(capture_warnings(|| w.watch(0, "d1", None)), "");
     // The engine attaches later: its first look learns its counts.
     assert_eq!(capture_warnings(|| w.watch(S, "d1", Some(&s))), "");
-    s.rebootstrapped(1);
+    s.rebootstrapped(1, Cause::Late);
     assert!(capture_warnings(|| w.watch(2 * S, "d1", Some(&s))).contains("missed=1"));
 }
 
@@ -143,10 +145,10 @@ fn another_engine_s_counts_are_learnt_not_reported() {
     w.watch(0, "d1", Some(&a));
     // A later attach: the new engine already restarted more than the old
     // one had counted, still nothing (its counts are learnt).
-    b.rebootstrapped(9);
+    b.rebootstrapped(9, Cause::Late);
     assert_eq!(capture_warnings(|| w.watch(S, "d1", Some(&b))), "");
     assert_eq!(capture_warnings(|| w.watch(2 * S, "d1", Some(&b))), "");
-    b.rebootstrapped(2);
+    b.rebootstrapped(2, Cause::Late);
     let log = capture_warnings(|| w.watch(3 * S, "d1", Some(&b)));
     assert!(log.contains("missed=2"), "{log}");
 }
@@ -165,11 +167,11 @@ fn the_warning_s_max_process_us_is_that_second_s() {
     w.watch(0, "d1", Some(&s));
     let line = |w: &mut PumpWatch, at: u64| capture_warnings(|| w.watch(at, "d1", Some(&s)));
     s.record(5_000_000);
-    s.rebootstrapped(1);
+    s.rebootstrapped(1, Cause::Late);
     let log = line(&mut w, S);
     assert!(log.contains("max_process_us=5000 "), "{log}");
     s.record(2_000_000);
-    s.rebootstrapped(1);
+    s.rebootstrapped(1, Cause::Late);
     let log = line(&mut w, 2 * S);
     assert!(log.contains("max_process_us=2000 "), "{log}");
     // A quiet second's longest block (under the 0.67 ms period: no
@@ -177,15 +179,126 @@ fn the_warning_s_max_process_us_is_that_second_s() {
     s.record(600_000);
     assert_eq!(line(&mut w, 3 * S), "");
     s.record(100_000);
-    s.rebootstrapped(1);
+    s.rebootstrapped(1, Cause::Late);
     let log = line(&mut w, 4 * S);
     assert!(log.contains("max_process_us=100 "), "{log}");
     // Between looks nothing is taken: the block counts in the next look.
     s.record(7_000_000);
     assert_eq!(line(&mut w, 5 * S - 1), "");
-    s.rebootstrapped(1);
+    s.rebootstrapped(1, Cause::Late);
     let log = line(&mut w, 5 * S);
     assert!(log.contains("max_process_us=7000 "), "{log}");
     // The status keeps the longest since the start.
     assert_eq!(s.view().max_process_us, 40_000);
+}
+
+/// dstack #281: the warning names the causes of the re-bootstraps that
+/// grew in its second.
+#[test]
+fn the_cause_word_names_each_grown_cause_in_order() {
+    let g = |late, clock_back, reanchor, retime| Grew {
+        late,
+        clock_back,
+        reanchor,
+        retime,
+        ..Grew::default()
+    };
+    assert_eq!(cause_word(&g(0, 0, 0, 0)), "none");
+    assert_eq!(cause_word(&g(2, 0, 0, 0)), "late");
+    assert_eq!(cause_word(&g(0, 1, 0, 0)), "clock_back");
+    assert_eq!(cause_word(&g(0, 0, 1, 0)), "reanchor");
+    assert_eq!(cause_word(&g(0, 0, 0, 1)), "retime");
+    assert_eq!(cause_word(&g(1, 0, 3, 1)), "late+reanchor+retime");
+    assert_eq!(
+        cause_word(&g(1, 1, 1, 1)),
+        "late+clock_back+reanchor+retime"
+    );
+}
+
+#[test]
+fn each_cause_s_growth_is_its_own() {
+    let mut w = PumpWatch::new();
+    let at = |late, clock_back, reanchor, retime| PumpView {
+        rebootstraps: late + clock_back + reanchor + retime,
+        rebootstraps_late: late,
+        rebootstraps_clock_back: clock_back,
+        rebootstraps_reanchor: reanchor,
+        rebootstraps_retime: retime,
+        ..PumpView::default()
+    };
+    assert_eq!(w.look(0, &at(1, 2, 3, 4)), None);
+    assert_eq!(
+        w.look(S, &at(2, 4, 6, 8)),
+        Some(Grew {
+            rebootstraps: 10,
+            late: 1,
+            clock_back: 2,
+            reanchor: 3,
+            retime: 4,
+            ..Grew::default()
+        })
+    );
+}
+
+#[test]
+fn the_warning_names_the_causes_and_that_second_s_latest_wake() {
+    undecided();
+    let s = stats();
+    let mut w = PumpWatch::new();
+    w.watch(0, "d1", Some(&s));
+    // A wake 3.2 ms late before the second: not the line's (taken at the
+    // quiet look).
+    s.wakes().record(3_200_000, true, false, || 1);
+    assert_eq!(capture_warnings(|| w.watch(S, "d1", Some(&s))), "");
+    s.wakes().record(2_500_000, true, true, || 2);
+    s.rebootstrapped(2, Cause::Late);
+    s.rebootstrapped(0, Cause::Retime);
+    let log = capture_warnings(|| w.watch(2 * S, "d1", Some(&s)));
+    for part in ["cause=late+retime", "behind_max_us=2500", "rebootstraps=2"] {
+        assert!(log.contains(part), "{part} in {log}");
+    }
+    // Only overruns: no cause.
+    s.record(u64::MAX);
+    let log = capture_warnings(|| w.watch(3 * S, "d1", Some(&s)));
+    assert!(log.contains("cause=none"), "{log}");
+    assert!(log.contains("behind_max_us=0"), "{log}");
+    assert_eq!(s.view().wake_behind_max_us, 3_200, "the status keeps it");
+}
+
+/// dstack #281: the watch ends the pump's wake minute once a minute (the
+/// status's `wake_behind_minute_max_us`), at quiet looks too.
+#[test]
+fn the_watch_ends_the_wake_minute_every_minute() {
+    const M: u64 = crate::media::late::MINUTE_NS;
+    let s = stats();
+    let mut w = PumpWatch::new();
+    w.watch(0, "d1", Some(&s));
+    s.wakes().record(4_000_000, false, false, || 0);
+    w.watch(M - S, "d1", Some(&s));
+    assert_eq!(s.view().wake_behind_minute_max_us, None, "not a minute yet");
+    w.watch(M, "d1", Some(&s));
+    assert_eq!(s.view().wake_behind_minute_max_us, Some(4_000));
+    s.wakes().record(1_000_000, false, false, || 0);
+    w.watch(M + S, "d1", Some(&s));
+    assert_eq!(
+        s.view().wake_behind_minute_max_us,
+        Some(4_000),
+        "mid-minute"
+    );
+    w.watch(2 * M, "d1", Some(&s));
+    assert_eq!(s.view().wake_behind_minute_max_us, Some(1_000));
+    w.watch(3 * M, "d1", Some(&s));
+    assert_eq!(
+        s.view().wake_behind_minute_max_us,
+        Some(0),
+        "a quiet minute"
+    );
+    // Another engine: its minute starts at its first look.
+    let b = stats();
+    w.watch(3 * M + S, "d1", Some(&b));
+    b.wakes().record(9_000_000, false, false, || 0);
+    w.watch(4 * M, "d1", Some(&b));
+    assert_eq!(b.view().wake_behind_minute_max_us, None, "under its minute");
+    w.watch(4 * M + S, "d1", Some(&b));
+    assert_eq!(b.view().wake_behind_minute_max_us, Some(9_000));
 }

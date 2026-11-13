@@ -164,15 +164,17 @@ exclude_re = [
   # The MMCSS join (dstack #1): the Windows call is not compiled on the
   # gate's Linux, and its Linux twin is a constant error (a test pins it);
   # the decision is `wants_mmcss` and `priority_outcome` (tested).
-  "tx.rs.*(replace join_mmcss -> |in join_mmcss$)",
+  "tx/priority.rs.*(replace join_mmcss -> |in join_mmcss$)",
   # The media threads' re-pin (dstack #1): the Windows SetThreadAffinityMask
   # call is not compiled on the gate's Linux; its decisions (`outcome`,
   # `one_cpu_mask`), the schedule (RePin::due) and the counting are tested,
   # and a Windows test drives it on CI.
   "media/repin.rs.*(replace repin -> |in repin$)",
-  # The OS priority call and its log line; the decision is priority_outcome
-  # (tested), the call is ask_priority (excluded above).
-  "tx.rs.*take_priority",
+  # The OS priority call, its record and its log line; the decision is
+  # priority_outcome (tested), the record is Scheduling's (tested, and each
+  # media thread's start test reads it), the call is ask_priority (excluded
+  # above).
+  "tx/priority.rs.*take_priority",
   # dsync's real follower (dsync-ptp): it binds port 319, which neither CI
   # nor the gate may; the selector's rule (`choose`), `Linked` and `Absorbing`
   # are tested with a fake follower (a fake model for `Absorbing`).

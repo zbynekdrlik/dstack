@@ -42,7 +42,8 @@
 //!   never called again (the backends' crash model).
 //! - [`PumpStats`]: what the engine's status and the control socket read,
 //!   as [`StreamStats`], the stream histograms ([`HistSnapshot`]) and a
-//!   [`PumpView`].
+//!   [`PumpView`]: each re-bootstrap with its [`Cause`], and how late the
+//!   pump woke ([`wake`], dstack #281).
 //! - [`watch::PumpWatch`]: once a second, from the daemon's tick (never
 //!   the pump thread), one warning when re-bootstraps, skipped blocks or
 //!   overruns grew in that second.
@@ -70,7 +71,8 @@ use crate::clock::{PtpClock, to_samples};
 use crate::media::repin::RePin;
 use crate::media::ring::Ring;
 use crate::media::rx::RxShared;
-use crate::media::tx::{DISCONTINUITY, Shift, TxShared, ns_of, place, take_priority};
+use crate::media::tx::{DISCONTINUITY, MediaThread, Shift, TxShared, ns_of, place, take_priority};
+use wake::WakeLateness;
 
 /// The engine's default block, frames: the B = 32 of the RT contract, what
 /// the device's `block` is when the config leaves it out.
@@ -159,9 +161,26 @@ pub enum Due {
     Run { start: u64, late: bool },
     /// Nothing due before media time `until`.
     Wait { until: u64 },
-    /// More than the margin behind, or more than [`DISCONTINUITY`] ahead:
-    /// the schedule started again at now, `skipped` blocks never ran.
-    Rebootstrap { skipped: u64 },
+    /// More than the margin behind, or more than [`DISCONTINUITY`] ahead
+    /// (`cause`, [`Cause::Late`] or [`Cause::ClockBack`]): the schedule
+    /// started again at now, `skipped` blocks never ran.
+    Rebootstrap { skipped: u64, cause: Cause },
+}
+
+/// Why the pump's schedule started again (dstack #281): each re-bootstrap
+/// counts in the total and in its cause's count ([`PumpView`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cause {
+    /// The pump woke more than its margin W behind a block ([`Blocks::next`]).
+    Late,
+    /// The media clock went back more than [`DISCONTINUITY`] ([`Blocks::next`]).
+    ClockBack,
+    /// A clock re-anchor whose step is unknown or off the block grid
+    /// ([`Blocks::re_anchor`]'s [`Shift::Restarted`]).
+    Reanchor,
+    /// The device latency moved (Dante Controller set it): the pump plays at
+    /// the new playout point.
+    Retime,
 }
 
 /// The pump's schedule (pure): the next block's start.
@@ -199,6 +218,7 @@ impl Blocks {
             if due - now > DISCONTINUITY {
                 return Due::Rebootstrap {
                     skipped: self.rebootstrap(now),
+                    cause: Cause::ClockBack,
                 };
             }
             return Due::Wait { until: due };
@@ -207,6 +227,7 @@ impl Blocks {
         if behind > self.timing.margin {
             return Due::Rebootstrap {
                 skipped: self.rebootstrap(now),
+                cause: Cause::Late,
             };
         }
         let start = self.start;
@@ -274,6 +295,16 @@ pub struct PumpStats {
     missed: AtomicU64,
     overruns: AtomicU64,
     rebootstraps: AtomicU64,
+    /// The re-bootstraps by [`Cause`] (dstack #281); they add up to
+    /// `rebootstraps`.
+    rebootstraps_late: AtomicU64,
+    rebootstraps_clock_back: AtomicU64,
+    rebootstraps_reanchor: AtomicU64,
+    rebootstraps_retime: AtomicU64,
+    /// The sample rate, Hz: a lateness in samples as ns.
+    rate: u32,
+    /// How late the pump woke ([`wake`], dstack #281).
+    wakes: WakeLateness,
     max_process_ns: AtomicU64,
     /// The longest block since the pump watch's last look, ns
     /// ([`PumpStats::take_second_max_us`]; dstack #1: the watch's line
@@ -303,6 +334,18 @@ pub struct PumpView {
     pub rebootstraps: u64,
     /// The longest block, whole µs.
     pub max_process_us: u64,
+    /// The re-bootstraps by [`Cause`] (dstack #281): they add up to
+    /// `rebootstraps`.
+    pub rebootstraps_late: u64,
+    pub rebootstraps_clock_back: u64,
+    pub rebootstraps_reanchor: u64,
+    pub rebootstraps_retime: u64,
+    /// The latest wake since the start, whole µs: how far behind its due
+    /// time the oldest block it found due was ([`wake`]).
+    pub wake_behind_max_us: u64,
+    /// The last whole minute's latest wake, whole µs (`None` before the
+    /// pump watch took a minute).
+    pub wake_behind_minute_max_us: Option<u64>,
 }
 
 impl PumpStats {
@@ -325,6 +368,12 @@ impl PumpStats {
             missed: AtomicU64::new(0),
             overruns: AtomicU64::new(0),
             rebootstraps: AtomicU64::new(0),
+            rebootstraps_late: AtomicU64::new(0),
+            rebootstraps_clock_back: AtomicU64::new(0),
+            rebootstraps_reanchor: AtomicU64::new(0),
+            rebootstraps_retime: AtomicU64::new(0),
+            rate,
+            wakes: WakeLateness::new(),
             max_process_ns: AtomicU64::new(0),
             second_max_ns: AtomicU64::new(0),
             fault_ns: AtomicU64::new(0),
@@ -358,10 +407,46 @@ impl PumpStats {
         self.playout.store(timing.playout, Ordering::Relaxed);
     }
 
-    /// A re-bootstrap that skipped `skipped` blocks.
-    pub(crate) fn rebootstrapped(&self, skipped: u64) {
+    /// A re-bootstrap for `cause` that skipped `skipped` blocks: in the
+    /// total and in its cause's count.
+    pub(crate) fn rebootstrapped(&self, skipped: u64, cause: Cause) {
         self.rebootstraps.fetch_add(1, Ordering::Relaxed);
         self.missed.fetch_add(skipped, Ordering::Relaxed);
+        let by_cause = match cause {
+            Cause::Late => &self.rebootstraps_late,
+            Cause::ClockBack => &self.rebootstraps_clock_back,
+            Cause::Reanchor => &self.rebootstraps_reanchor,
+            Cause::Retime => &self.rebootstraps_retime,
+        };
+        by_cause.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A wake on the media clock whose first due answer was `due`, `behind`
+    /// samples after the oldest due block's time (the pump thread): a run
+    /// or a re-bootstrap for lateness is recorded as the wake's lateness
+    /// (late from one block behind, as [`Blocks::next`] counts it); a wait
+    /// (nothing due yet) or a clock gone back is no lateness.
+    fn woke(&self, behind: u64, due: Due) {
+        let rebootstrap = match due {
+            Due::Run { .. } => false,
+            Due::Rebootstrap {
+                cause: Cause::Late, ..
+            } => true,
+            Due::Wait { .. } | Due::Rebootstrap { .. } => return,
+        };
+        let late = behind >= u64::from(self.frames);
+        self.wakes.record(
+            ns_of(behind, self.rate),
+            late,
+            rebootstrap,
+            wake::unix_ms_now,
+        );
+    }
+
+    /// How late the pump woke: the buckets, the recent late wakes
+    /// ([`WakeLateness`]).
+    pub fn wakes(&self) -> &WakeLateness {
+        &self.wakes
     }
 
     /// The processor panicked in a block of `took_ns`: its message and its
@@ -426,6 +511,12 @@ impl PumpStats {
             overruns: self.overruns.load(Ordering::Relaxed),
             rebootstraps: self.rebootstraps.load(Ordering::Relaxed),
             max_process_us: self.max_process_ns.load(Ordering::Relaxed) / 1_000,
+            rebootstraps_late: self.rebootstraps_late.load(Ordering::Relaxed),
+            rebootstraps_clock_back: self.rebootstraps_clock_back.load(Ordering::Relaxed),
+            rebootstraps_reanchor: self.rebootstraps_reanchor.load(Ordering::Relaxed),
+            rebootstraps_retime: self.rebootstraps_retime.load(Ordering::Relaxed),
+            wake_behind_max_us: self.wakes.max_us(),
+            wake_behind_minute_max_us: self.wakes.minute_max_us(),
         }
     }
 }
@@ -529,7 +620,7 @@ impl<P: Process> Pump<P> {
             self.timing.playout = playout;
             self.stats.retimed(self.timing);
             if self.blocks.take().is_some() {
-                self.stats.rebootstrapped(0);
+                self.stats.rebootstrapped(0, Cause::Retime);
             }
         }
         let mut blocks = match self.blocks {
@@ -538,7 +629,7 @@ impl<P: Process> Pump<P> {
                 let shift = step.map(|_| self.engine_shift.wrapping_sub(before));
                 let (outcome, skipped) = b.re_anchor(shift, now);
                 if outcome == Shift::Restarted {
-                    self.stats.rebootstrapped(skipped);
+                    self.stats.rebootstrapped(skipped, Cause::Reanchor);
                 }
                 // The inputs jump when the senders stepped by other than
                 // the shift (a step off the block grid): the processor
@@ -565,8 +656,16 @@ impl<P: Process> Pump<P> {
             }
         };
         self.epoch = Some(anchor.epoch);
+        // The wake's lateness is its first answer's: how far behind the
+        // oldest due block it woke (the blocks after it are a catch-up).
+        let mut first = true;
         let wake = loop {
-            match blocks.next(now) {
+            let behind = now.saturating_sub(blocks.due());
+            let due = blocks.next(now);
+            if std::mem::take(&mut first) {
+                self.stats.woke(behind, due);
+            }
+            match due {
                 Due::Run { start, late } => {
                     if late {
                         self.stats.late.fetch_add(1, Ordering::Relaxed);
@@ -574,8 +673,8 @@ impl<P: Process> Pump<P> {
                     self.block(start);
                 }
                 Due::Wait { until } => break until,
-                Due::Rebootstrap { skipped } => {
-                    self.stats.rebootstrapped(skipped);
+                Due::Rebootstrap { skipped, cause } => {
+                    self.stats.rebootstrapped(skipped, cause);
                     self.discontinuity = true;
                 }
             }
@@ -731,7 +830,7 @@ pub fn spawn<P: Process + 'static>(
 /// and [`free_deadline`]'s): on the media clock while it is ready, paced on
 /// `Instant` deadlines a block apart while it is not.
 fn run<P: Process>(clock: &dyn PtpClock, mut pump: Pump<P>, stop: &AtomicBool) {
-    take_priority("engine pump", ENGINE_PRIORITY);
+    take_priority(MediaThread::Pump, ENGINE_PRIORITY, pump.tx.scheduling());
     place("engine pump", pump.tx.cfg.pump_cpu);
     let rate = pump.tx.cfg.sample_rate;
     // The bounded escape (dstack #1, Windows): only when W covers its block.
@@ -768,6 +867,7 @@ fn run<P: Process>(clock: &dyn PtpClock, mut pump: Pump<P>, stop: &AtomicBool) {
     pump.stats.running.store(false, Ordering::Release);
 }
 
+pub mod wake;
 pub mod watch;
 
 #[cfg(test)]

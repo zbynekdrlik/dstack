@@ -24,16 +24,14 @@ dstack-endpoint = { path = "../dstack-endpoint" }
 # The app status's JSON for dtray (already in the lockfile through dstack).
 serde_json = "1.0"
 tracing = "0.1"
+# The capture thread's MMCSS join (dstack #198) and its error's two kinds
+# (`dstack::media::tx::{join_mmcss, MmcssError}`, dstack #281: the log
+# line, built on every OS); the status's size bound (dstack::ctl::app_object).
+# Already built through dlink.
+dstack = { path = "../dstack" }
 
 [target.'cfg(windows)'.dependencies]
 # The captured output (WASAPI loopback), as dlisten's output (RustAudio,
 # Apache-2.0; already in the lockfile). Windows only: elsewhere dsend
 # refuses to run, and its capture glue is not built.
 cpal = "=0.18.2"
-# The capture thread's MMCSS join (dstack #198): the media threads' own call
-# (`dstack::media::tx::join_mmcss`; already built through dlink).
-dstack = { path = "../dstack" }
-
-[dev-dependencies]
-# The status's size bound (dstack::ctl::app_object).
-dstack = { path = "../dstack" }
