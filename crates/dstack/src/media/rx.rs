@@ -171,7 +171,7 @@ pub struct RxShared {
 }
 
 /// The last of the [`MAX_FLOWS`] ports from `base`, `None` past 65535.
-fn last_port(base: u16) -> Option<u16> {
+pub(crate) fn last_port(base: u16) -> Option<u16> {
     base.checked_add(MAX_FLOWS as u16 - 1)
 }
 

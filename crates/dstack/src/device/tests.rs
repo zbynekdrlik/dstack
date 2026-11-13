@@ -1576,6 +1576,118 @@ fn the_rx_port_base_is_read_and_bounded() {
     }
 }
 
+#[test]
+fn the_tx_port_base_is_read_and_bounded() {
+    assert_eq!(config().tx_port_base, None, "the OS chooses when left out");
+    let cfg = DeviceConfig::from_toml(&config_plus("tx_port_base = 31000")).unwrap();
+    assert_eq!(cfg.tx_port_base, Some(31_000));
+    let refused = |extra: &str| {
+        DeviceConfig::from_toml(&config_plus(extra)).is_err_and(|e| {
+            e.problems
+                .iter()
+                .any(|p| p.starts_with("tx_port_base: 1024 to 65504"))
+        })
+    };
+    for bad in [
+        "tx_port_base = 1023",
+        "tx_port_base = 65505",
+        // Every slot's ARC (4440-4471), flow-control (4455-4486) and CMC
+        // (8800-8831) ports, each at a range edge.
+        "tx_port_base = 4409",
+        "tx_port_base = 4486",
+        "tx_port_base = 8769",
+        "tx_port_base = 8831",
+        // The RX flow ports, at both edges.
+        "rx_port_base = 47000\ntx_port_base = 46969",
+        "rx_port_base = 47000\ntx_port_base = 47031",
+        "rx_port_base = 47000\ntx_port_base = 47000",
+        // The device's own control ports, set outside the slot ranges.
+        "tx_port_base = 47000\narc_port = 47031",
+        "tx_port_base = 47000\ncmc_port = 47000",
+        "tx_port_base = 47000\nflows_port = 47015",
+        // mDNS and the info ports, at the edges.
+        "tx_port_base = 5322",
+        "tx_port_base = 5353",
+        "tx_port_base = 8669",
+        "tx_port_base = 8708",
+    ] {
+        assert!(refused(bad), "{bad}: {:?}", problems(&config_plus(bad)));
+    }
+    for ok in [
+        "tx_port_base = 1024",
+        "tx_port_base = 65504",
+        "tx_port_base = 4408",
+        "tx_port_base = 4487",
+        "tx_port_base = 8768",
+        "tx_port_base = 8832",
+        "rx_port_base = 47000\ntx_port_base = 46968",
+        "rx_port_base = 47000\ntx_port_base = 47032",
+        "tx_port_base = 47000\narc_port = 47032",
+        "tx_port_base = 47000\ncmc_port = 46999",
+        "tx_port_base = 5321",
+        "tx_port_base = 5354",
+        "tx_port_base = 8668",
+        "tx_port_base = 8709",
+    ] {
+        assert!(!refused(ok), "{ok}");
+        assert!(DeviceConfig::from_toml(&config_plus(ok)).is_ok(), "{ok}");
+    }
+    // The line names what the range overlaps.
+    for (extra, clash) in [
+        ("tx_port_base = 1023", "; out of range"),
+        ("tx_port_base = 65505", "; out of range"),
+        (
+            "tx_port_base = 4409",
+            "; 4409-4440 overlaps every slot's ARC ports (4440-4471)",
+        ),
+        (
+            "tx_port_base = 4472",
+            "; 4472-4503 overlaps every slot's flow-control ports (4455-4486)",
+        ),
+        (
+            "tx_port_base = 8831",
+            "; 8831-8862 overlaps every slot's CMC ports (8800-8831)",
+        ),
+        (
+            "tx_port_base = 47000\narc_port = 47031",
+            "; 47000-47031 overlaps the device's ARC port (47031-47031)",
+        ),
+        (
+            "tx_port_base = 47000\ncmc_port = 47000",
+            "overlaps the device's CMC port (47000-47000)",
+        ),
+        (
+            "tx_port_base = 47000\nflows_port = 47015",
+            "overlaps the device's flow-control port (47015-47015)",
+        ),
+        ("tx_port_base = 5353", "overlaps mDNS (5353-5353)"),
+        (
+            "tx_port_base = 8669",
+            "overlaps the info request port (8700-8700)",
+        ),
+        (
+            "tx_port_base = 8708",
+            "overlaps the heartbeat port (8708-8708)",
+        ),
+        (
+            "rx_port_base = 47000\ntx_port_base = 47031",
+            "; 47031-47062 overlaps rx_port_base's ports (47000-47031)",
+        ),
+        // An RX base past 65535 still has its ports up to 65535.
+        (
+            "rx_port_base = 65510\ntx_port_base = 65500",
+            "overlaps rx_port_base's ports (65510-65535)",
+        ),
+    ] {
+        let got = problems(&config_plus(extra));
+        assert!(
+            got.iter()
+                .any(|p| p.starts_with("tx_port_base: ") && p.ends_with(clash)),
+            "{extra}: {got:?}"
+        );
+    }
+}
+
 fn declared(rx: usize, tx_channel: &str, tx_device: &str) -> Declared {
     Declared {
         rx,

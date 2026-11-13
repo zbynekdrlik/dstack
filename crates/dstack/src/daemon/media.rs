@@ -51,7 +51,7 @@ use tracing::{info, warn};
 use crate::arc::Running;
 use crate::clock::{ClockStats, PtpClock, to_samples};
 use crate::ctl::{Checks, Limits, Playout, Requests};
-use crate::device::Device;
+use crate::device::{Device, DeviceConfig};
 use crate::flows::client::Client;
 use crate::flows::control::op;
 use crate::info::{Changes, Sources};
@@ -152,18 +152,36 @@ impl Media {
     ) -> std::io::Result<Media> {
         let cfg = &device.cfg;
         let rings: Arc<[Ring]> = (0..cfg.rx.len()).map(|_| Ring::new()).collect();
-        // The RX side first: its fixed ports (`rx_port_base`) before the
-        // TX sockets' ports the OS chooses, which may lie in that range
-        // (camera-box, strih-snv OBS 5.11.2026: "RX flow port 47217:
-        // Address already in use" on a restart).
-        let rx = Arc::new(RxShared::with_slots(
-            cfg.sample_rate,
-            ip,
-            Arc::clone(&rings),
-            cfg.rx_port_base,
-            cfg.flow_slots,
-        )?);
-        let tx = Arc::new(TxShared::new(cfg.clone(), ip, rings, seed, engine_tx)?);
+        // The side with fixed ports binds first, before the other side's
+        // ports the OS chooses, which may lie in that range (camera-box,
+        // strih-snv OBS 5.11.2026: "RX flow port 47217: Address already in
+        // use" on a restart). The RX side unless only `tx_port_base` is set.
+        let rx_side = || {
+            RxShared::with_slots(
+                cfg.sample_rate,
+                ip,
+                Arc::clone(&rings),
+                cfg.rx_port_base,
+                cfg.flow_slots,
+            )
+            .map(Arc::new)
+        };
+        let tx_side =
+            || TxShared::new(cfg.clone(), ip, Arc::clone(&rings), seed, engine_tx).map(Arc::new);
+        let (rx, tx) = if tx_binds_first(cfg.rx_port_base, cfg.tx_port_base) {
+            let tx = tx_side()?;
+            (rx_side()?, tx)
+        } else {
+            let rx = rx_side()?;
+            (rx, tx_side()?)
+        };
+        for key in unnamed_flow_ports(cfg) {
+            warn!(
+                "{key} unset: the OS chose this device's flow ports, which a Dante-leg \
+                 filter cannot name (docs/two-networks.md; fixed ports by default come \
+                 with dstack #264)"
+            );
+        }
         tx.recreate_multicast(&device.state.multicast);
         let mut manager = Manager::new(cfg, &device.state.name, ip, rx.ports()?);
         manager.load(&device.state.subscriptions);
@@ -659,6 +677,29 @@ impl Driver {
             }
         }
     }
+}
+
+/// The flow-port keys a device left unset while it has channels in that
+/// direction (`rx_port_base`, `tx_port_base`): its flow sockets there take
+/// ports the OS chooses, which no filter rule can name (dstack #262; the
+/// same hit a receiver's RX on 13.11.2026). Warned at start.
+fn unnamed_flow_ports(cfg: &DeviceConfig) -> Vec<&'static str> {
+    let mut keys = Vec::new();
+    if !cfg.rx.is_empty() && cfg.rx_port_base.is_none() {
+        keys.push("rx_port_base");
+    }
+    if !cfg.tx.is_empty() && cfg.tx_port_base.is_none() {
+        keys.push("tx_port_base");
+    }
+    keys
+}
+
+/// Whether the TX flow sockets bind before the RX ones: only when the TX
+/// ports are fixed (`tx_port_base`) and the RX ports are the OS's, so an
+/// RX socket cannot take a fixed TX port (dstack #262). Fixed RX ports
+/// (`rx_port_base`) bind first otherwise, as before.
+fn tx_binds_first(rx_port_base: Option<u16>, tx_port_base: Option<u16>) -> bool {
+    rx_port_base.is_none() && tx_port_base.is_some()
 }
 
 #[cfg(test)]

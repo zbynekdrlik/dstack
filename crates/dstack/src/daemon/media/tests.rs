@@ -755,12 +755,29 @@ async fn the_driver_s_tick_tells_a_reset_pin_once() {
 #[cfg(target_os = "linux")]
 #[test]
 fn the_fixed_rx_ports_are_bound_before_any_port_the_os_chooses() {
+    fixed_ports_bind_first(
+        Ipv4Addr::new(127, 0, 0, 77),
+        300,
+        |cfg, base| cfg.rx_port_base = Some(base),
+        |media| media.rx.ports().unwrap().to_vec(),
+    );
+}
+
+/// Starts a device on `ip` `starts` times, each with a base in the OS's
+/// ephemeral range set by `fix`, and checks that `ports` reads that base's
+/// whole range: the fixed side bound before the other side's OS-chosen
+/// ports, any of which could otherwise have taken one of them.
+#[cfg(target_os = "linux")]
+fn fixed_ports_bind_first(
+    ip: Ipv4Addr,
+    starts: u32,
+    fix: impl Fn(&mut DeviceConfig, u16),
+    ports: impl Fn(&Media) -> Vec<u16>,
+) {
     let range = std::fs::read_to_string("/proc/sys/net/ipv4/ip_local_port_range").unwrap();
     let mut ends = range.split_whitespace().map(|p| p.parse::<u16>().unwrap());
     let (low, high) = (ends.next().unwrap(), ends.next().unwrap());
     assert!(high - low > 1_000, "ephemeral range {low}..{high}");
-    // An address of its own, so no other test's sockets share its ports.
-    let ip = Ipv4Addr::new(127, 0, 0, 77);
     let dir = tempfile::tempdir().unwrap();
     // A base whose ports another process already holds (a socket on every
     // address, dev1's `*:44874`) is the host's, not this start's: skipped.
@@ -770,16 +787,18 @@ fn the_fixed_rx_ports_are_bound_before_any_port_the_os_chooses() {
             .collect();
         held.len() == MAX_FLOWS
     };
-    for k in 0..300u32 {
+    let last_base = high - MAX_FLOWS as u16;
+    for k in 0..starts {
         let mut base = low + u16::try_from(k * 89 % u32::from(high - low - 40)).unwrap();
         while !free(base) {
             base += MAX_FLOWS as u16;
+            assert!(base <= last_base, "start {k}: no free range up to {high}");
         }
-        let cfg = DeviceConfig {
+        let mut cfg = DeviceConfig {
             state_file: dir.path().join("state.toml"),
-            rx_port_base: Some(base),
             ..DeviceConfig::from_toml(TEST_DEVICE).unwrap()
         };
+        fix(&mut cfg, base);
         let device = Device::load(cfg).unwrap();
         let clock = Clock {
             ptp: Arc::new(Unready),
@@ -788,7 +807,100 @@ fn the_fixed_rx_ports_are_bound_before_any_port_the_os_chooses() {
         };
         let media = Media::new(&device, ip, clock, 7, &[])
             .unwrap_or_else(|e| panic!("start {k}, base {base}: {e}"));
-        let ports = media.rx.ports().unwrap();
-        assert_eq!(usize::from(ports[0]), usize::from(base));
+        let got = ports(&media);
+        let want: Vec<u16> = (base..base + MAX_FLOWS as u16).collect();
+        assert_eq!(got, want, "start {k}");
     }
+}
+
+#[test]
+fn the_fixed_side_binds_first_and_rx_unless_only_tx_is_fixed() {
+    assert!(tx_binds_first(None, Some(31_000)));
+    assert!(!tx_binds_first(Some(47_000), Some(31_000)));
+    assert!(!tx_binds_first(Some(47_000), None));
+    assert!(!tx_binds_first(None, None));
+}
+
+/// dstack #262: with only `tx_port_base` set, the TX side binds its fixed
+/// ports before the RX sockets' ports the OS chooses, which may lie in that
+/// range (the mirror of the RX-first order above). 150 starts: about one in
+/// 28 collides when the order is wrong.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_fixed_tx_ports_are_bound_before_any_port_the_os_chooses() {
+    fixed_ports_bind_first(
+        Ipv4Addr::new(127, 0, 0, 78),
+        150,
+        |cfg, base| cfg.tx_port_base = Some(base),
+        |media| media.tx.ports().to_vec(),
+    );
+}
+
+#[test]
+fn a_direction_with_channels_and_no_port_base_is_named() {
+    let cfg = DeviceConfig::from_toml(TEST_DEVICE).unwrap();
+    assert!(!cfg.rx.is_empty() && !cfg.tx.is_empty());
+    assert_eq!(unnamed_flow_ports(&cfg), ["rx_port_base", "tx_port_base"]);
+    let both = DeviceConfig {
+        rx_port_base: Some(47_000),
+        tx_port_base: Some(47_032),
+        ..cfg.clone()
+    };
+    assert!(unnamed_flow_ports(&both).is_empty());
+    let rx_only = DeviceConfig {
+        tx: Vec::new(),
+        ..cfg.clone()
+    };
+    assert_eq!(unnamed_flow_ports(&rx_only), ["rx_port_base"]);
+    let tx_only = DeviceConfig {
+        rx: Vec::new(),
+        rx_port_base: Some(47_000),
+        ..cfg.clone()
+    };
+    assert_eq!(unnamed_flow_ports(&tx_only), ["tx_port_base"]);
+    let tx_fixed = DeviceConfig {
+        tx_port_base: Some(47_032),
+        ..cfg
+    };
+    assert_eq!(unnamed_flow_ports(&tx_fixed), ["rx_port_base"]);
+}
+
+/// The start warns once per unset base, naming the key.
+#[test]
+fn a_start_warns_of_flow_ports_the_os_chose() {
+    let dir = tempfile::tempdir().unwrap();
+    // A started device's warnings, `None` when its ports were taken.
+    let start = |cfg: DeviceConfig| {
+        let device = Device::load(cfg).unwrap();
+        let clock = Clock {
+            ptp: Arc::new(Unready),
+            freq: Arc::default(),
+            stats: Arc::default(),
+        };
+        let mut started = false;
+        let log = crate::test_log::capture_warnings(|| {
+            started = Media::new(&device, Ipv4Addr::new(127, 0, 0, 79), clock, 7, &[]).is_ok();
+        });
+        started.then_some(log)
+    };
+    let cfg = DeviceConfig {
+        state_file: dir.path().join("state.toml"),
+        ..DeviceConfig::from_toml(TEST_DEVICE).unwrap()
+    };
+    let log = start(cfg.clone()).expect("the OS's ports");
+    assert_eq!(log.matches("rx_port_base unset").count(), 1, "{log}");
+    assert_eq!(log.matches("tx_port_base unset").count(), 1, "{log}");
+    // An RX-less device with fixed TX ports: nothing to warn of. A base
+    // whose ports are free on that address, tried until one is.
+    let log = (40_000u16..60_000)
+        .step_by(97)
+        .find_map(|base| {
+            start(DeviceConfig {
+                rx: Vec::new(),
+                tx_port_base: Some(base),
+                ..cfg.clone()
+            })
+        })
+        .expect("32 free ports in a row");
+    assert!(!log.contains("port_base unset"), "{log}");
 }

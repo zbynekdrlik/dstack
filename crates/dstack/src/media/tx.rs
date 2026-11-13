@@ -734,6 +734,28 @@ pub struct TxShared {
     base: Instant,
 }
 
+/// The TX flow ports for the start log: `first-last` when they run in a
+/// row (a `tx_port_base`), else each one.
+fn port_list(ports: &[u16]) -> String {
+    match ports {
+        [] => String::new(),
+        [only] => only.to_string(),
+        [first, ..]
+            if ports
+                .iter()
+                .enumerate()
+                .all(|(i, &p)| usize::from(p) == usize::from(*first) + i) =>
+        {
+            format!("{first}-{}", ports[ports.len() - 1])
+        }
+        _ => ports
+            .iter()
+            .map(u16::to_string)
+            .collect::<Vec<_>>()
+            .join(","),
+    }
+}
+
 impl TxShared {
     /// The shared state of the device `cfg` at `ip`: an empty table
     /// (cookies from `seed`), every TX channel silent, the RX channels'
@@ -758,11 +780,20 @@ impl TxShared {
             ));
         }
         let slots = cfg.flow_slots;
+        let base = cfg.tx_port_base;
+        // Before any bind: a bind in order could fail first on a port
+        // Windows excludes, naming that port instead of the base's range.
+        if base.is_some_and(|b| super::rx::last_port(b).is_none()) {
+            return Err(io::Error::other("tx_port_base: past port 65535"));
+        }
         let mut send_buffer = 0;
         let mut multicast_refused = None;
         let sockets = (0..slots.min(MAX_FLOWS))
-            .map(|_| {
-                let s = UdpSocket::bind(SocketAddrV4::new(ip, 0))?;
+            .map(|slot| {
+                // In range: checked above, before any port is bound.
+                let port = base.map_or(0, |b| b + slot as u16);
+                let s = UdpSocket::bind(SocketAddrV4::new(ip, port))
+                    .map_err(|e| io::Error::new(e.kind(), format!("TX flow port {port}: {e}")))?;
                 s.set_nonblocking(true)?;
                 crate::winsock::no_connreset(&s)?;
                 mark(&s)?;
@@ -787,6 +818,12 @@ impl TxShared {
         for (port, s) in ports.iter_mut().zip(&sockets) {
             *port = s.local_addr()?.port();
         }
+        info!(
+            %ip,
+            ports = %port_list(&ports[..sockets.len()]),
+            fixed = base.is_some(),
+            "TX flow sockets bound"
+        );
         Ok(TxShared {
             send_buffer,
             ports,
@@ -826,6 +863,12 @@ impl TxShared {
     /// The device's address: where every flow is sent from.
     pub fn ip(&self) -> Ipv4Addr {
         self.ip
+    }
+
+    /// Each flow slot's socket's port, one per slot the device opens
+    /// (`tx_port_base + n` when set, dstack #262).
+    pub fn ports(&self) -> &[u16] {
+        &self.ports[..self.sockets.len()]
     }
 
     /// The control side's lock (never taken by the TX thread).

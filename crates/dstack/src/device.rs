@@ -198,6 +198,16 @@ pub struct DeviceConfig {
     /// process's socket may hold one of them, and the device does not start.
     #[serde(default)]
     pub rx_port_base: Option<u16>,
+    /// The first of the TX flow ports (UDP): slot `n` (from 0) sends from
+    /// `tx_port_base + n`, [`crate::media::tx::MAX_FLOWS`] ports, so a
+    /// stateless filter can accept a receiver's keepalives to them (dstack
+    /// #262). Ports the OS chooses when left out. The range must stay clear
+    /// of `rx_port_base`'s, of every slot's ARC, flow-control and CMC ports
+    /// (4440-4471, 4455-4486, 8800-8831), of mDNS 5353 and of the info
+    /// ports 8700/8702/8708; like `rx_port_base`, pick it outside the OS's
+    /// ephemeral range.
+    #[serde(default)]
+    pub tx_port_base: Option<u16>,
     /// RX subscriptions the app declares (`[[subscribe]]`, intercom#5):
     /// at start, an RX channel the state file holds no subscription for
     /// takes its declared one ([`DeviceState::declare`]). One Dante
@@ -493,6 +503,21 @@ impl DeviceConfig {
                     crate::media::rx::MAX_FLOWS
                 ));
             }
+        }
+        if let Some(base) = self.tx_port_base
+            && let Some(clash) = ports::tx_clash(
+                base,
+                self.rx_port_base,
+                [self.arc_port, self.cmc_port, self.flows_port],
+            )
+        {
+            out.push(format!(
+                "tx_port_base: 1024 to {}, its {} ports clear of rx_port_base's ports, \
+                 the device's ARC, CMC and flow-control ports, every slot's \
+                 (4440-4486, 8800-8831), mDNS 5353 and 8700/8702/8708; {clash}",
+                u16::MAX as usize + 1 - crate::media::tx::MAX_FLOWS,
+                crate::media::tx::MAX_FLOWS
+            ));
         }
         if self.state_file.as_os_str().is_empty() {
             out.push("state_file: empty".to_string());
@@ -1314,6 +1339,8 @@ fn redact(message: &str) -> String {
     }
     out
 }
+
+mod ports;
 
 #[cfg(test)]
 mod tests;

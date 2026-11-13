@@ -295,6 +295,25 @@ fn a_second_device_s_ports_process_id_and_rx_port_base_are_taken() {
 }
 
 #[test]
+fn a_tx_port_base_is_taken_and_one_on_the_rx_ports_refused() {
+    let cfg = config()
+        .rx_port_base(40_000)
+        .tx_port_base(40_032)
+        .device()
+        .unwrap();
+    assert_eq!(cfg.tx_port_base, Some(40_032));
+    assert_eq!(config().device().unwrap().tx_port_base, None);
+    for clash in [
+        config().rx_port_base(40_000).tx_port_base(40_031),
+        config().tx_port_base(4456),
+        config().tx_port_base(8800),
+    ] {
+        let p = clash.device().unwrap_err();
+        assert!(p.iter().any(|p| p.starts_with("tx_port_base")), "{p:?}");
+    }
+}
+
+#[test]
 fn declared_subscriptions_reach_the_device_config_in_order() {
     let cfg = config()
         .subscribe(2, "Master", "foh-mix")
