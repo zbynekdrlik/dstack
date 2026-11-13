@@ -180,7 +180,7 @@ impl Gaps {
 
     /// `peer`'s id: its place among the peers seen, from 1; 0 once
     /// [`MAX_PEERS`] have one.
-    fn peer_id(&mut self, peer: IpAddr) -> usize {
+    pub fn peer_id(&mut self, peer: IpAddr) -> usize {
         if let Some(k) = self.peers.iter().position(|&p| p == peer) {
             return k + 1;
         }

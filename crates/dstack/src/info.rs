@@ -93,7 +93,7 @@ use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use tokio::sync::Notify;
-use tracing::{debug, info};
+use tracing::debug;
 
 use crate::cmc::device_id;
 use crate::device::DeviceConfig;
@@ -104,6 +104,7 @@ pub mod client;
 pub mod limit;
 mod server;
 pub mod share;
+pub mod unanswered;
 
 pub use server::{
     Levels, Multicast, Sources, follower_of, serve_info, serve_info_with, serve_member,
@@ -296,6 +297,12 @@ pub struct Request {
     pub seq: u16,
     pub opcode: [u8; 8],
     pub kind: Kind,
+}
+
+/// Whether `datagram` is a request the device never answers (an opcode
+/// it does not know), which the server counts ([`unanswered`]).
+pub fn never_answered(datagram: &[u8]) -> bool {
+    parse_request(datagram).is_some_and(|r| r.kind == Kind::Unknown)
 }
 
 /// The request in `datagram`, `None` when it is shorter than the header.
@@ -742,7 +749,9 @@ impl InfoBuilder {
                 }
             },
             Kind::Unknown | Kind::ChannelChange => {
-                info!(op = %opcode, seq = req.seq, "info request not answered");
+                // The server logs it once per sender and opcode
+                // ([`unanswered`], dstack #273).
+                debug!(op = %opcode, seq = req.seq, "info request not answered");
                 None
             }
         }
