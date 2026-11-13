@@ -383,17 +383,34 @@ fn a_name_is_young_until_answered_or_past_its_grace() {
 fn only_a_running_resolver_keeps_a_young_name_from_arc() {
     let t = Arc::new(std::sync::atomic::AtomicU64::new(S));
     let mut i = Instances::with_clock(Arc::clone(&t));
-    i.lookup(DEVICE, CHANNEL);
-    assert!(!i.young(DEVICE, CHANNEL), "not querying: nothing kept");
+    assert_eq!(
+        i.direct(DEVICE, CHANNEL),
+        Direct::Missing,
+        "not querying: nothing kept"
+    );
+    assert!(i.asked(), "a lookup reached it");
     let responder = UdpSocket::bind("127.0.0.1:0").unwrap();
     let to = match responder.local_addr().unwrap() {
         std::net::SocketAddr::V4(a) => a,
         other => panic!("{other}"),
     };
     i.start_to(Ipv4Addr::LOCALHOST, to).unwrap();
-    assert!(i.young(DEVICE, CHANNEL));
+    assert_eq!(i.direct(DEVICE, CHANNEL), Direct::Waiting);
     t.store(S + GRACE_NS, Ordering::Relaxed);
-    assert!(!i.young(DEVICE, CHANNEL), "past its grace");
+    assert_eq!(i.direct(DEVICE, CHANNEL), Direct::Missing, "past its grace");
+}
+
+#[test]
+fn direct_reads_the_record_or_its_grace_at_one_time() {
+    let mut t = Table::default();
+    assert_eq!(t.direct(DEVICE, CHANNEL, S), Direct::Waiting, "wanted now");
+    assert_eq!(t.direct(DEVICE, CHANNEL, S + GRACE_NS), Direct::Missing);
+    t.due(S + GRACE_NS);
+    assert_eq!(t.answer(&answer(true), S + GRACE_NS), 1);
+    let Direct::Found(a) = t.direct(DEVICE, CHANNEL, S + GRACE_NS) else {
+        panic!("answered")
+    };
+    assert_eq!(Some(a), t.lookup(DEVICE, CHANNEL, S + GRACE_NS));
 }
 
 #[test]

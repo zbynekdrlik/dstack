@@ -566,14 +566,6 @@ impl Drop for Instances {
 }
 
 impl Instances {
-    /// [`Table::young`] at this resolver's time, while its thread runs (a
-    /// resolver that does not query keeps nothing from ARC).
-    pub fn young(&self, tx_device: &str, tx_channel: &str) -> bool {
-        self.started() && lock(&self.table).young(tx_device, tx_channel, self.clock.now())
-    }
-}
-
-impl Instances {
     /// [`Table::direct`] at this resolver's time, under one lock: a channel
     /// is [`Direct::Waiting`] only while the thread runs (a resolver that
     /// does not query keeps nothing from ARC).
