@@ -9,8 +9,9 @@
 #   B. Dante untagged on the physical adapter, the LAN on a VLAN adapter on
 #      VLAN N (a dasio host: lanVlanId N).
 # If the LAN leg dies (a vendor VLAN tool rewrote an adapter, IPv4 got
-# unbound, the adapter was disabled), a headless PC has no remote path left:
-# the Dante address is closed to TCP by design. This script, run as SYSTEM by
+# unbound, the adapter was disabled), a headless PC loses everything it does on
+# the LAN (remote desktop, NDI, web UIs, updates); only ssh and the MCP stay
+# reachable on the Dante address (docs/two-networks.md). This script, run as SYSTEM by
 # a scheduled task every minute, checks the LAN leg (an IPv4 lease on the LAN
 # adapter, the gateway's route through it, the gateway's answer); after the
 # configured number of consecutive failed minutes it puts the LAN adapter
@@ -23,20 +24,14 @@
 # or the LAN adapter holds no lease, and otherwise (a router outage with a
 # healthy adapter) at most once per RestartGapMinutes.
 #
-# Emergency remote path (#239, shape 1; optional, on only with emergencySource):
-# the Dante address is closed to TCP by the dstack155 rule set, so a dead LAN
-# leg leaves no remote path. When the LAN has been down for the threshold, the
-# run also opens TCP emergencyPort on the Dante adapter for emergencySource
-# only: it enables two Block rules of its own (group "dstack emergency": TCP in
-# on the Dante adapter from every address but emergencySource, and from
-# emergencySource on every port but emergencyPort), and only THEN disables the
-# dstack155 rule named by danteBlockRule (explicit Block rules win over Allow
-# rules, so an Allow rule could not open anything). When the gateway answers
-# again it enables the dstack155 rule FIRST, then disables the emergency
-# rules. Every run with the LAN up restores that normal state if it finds
-# anything else, so the path is never open while the LAN is up; the state
-# file records the rule an open disabled, so it is enabled again even after
-# the config's emergency keys were removed or renamed.
+# 0.6.109 also had an emergency path that opened TCP on the Dante adapter while
+# the LAN was down. It is gone (#239: ssh and the MCP are always reachable
+# there now). A config that still carries its keys (emergencySource,
+# emergencyPort, danteBlockRule) is accepted and the keys are logged as
+# ignored. Every run also undoes anything that path may have left: the
+# dstack155 rule it disabled (by the state file's emergencyRule, and by the
+# config's danteBlockRule) is enabled again FIRST, and only then are the
+# "dstack emergency" rules removed.
 #
 # It works only from C:\ProgramData\dstack\lan-selfheal.json and never acts
 # without it. It never touches the Dante adapter: every repair step names the
@@ -55,12 +50,7 @@
 #     "lanVlanId": 0,                     # required: 0 = the LAN untagged on the
 #                                         # parent adapter, N = the LAN on a VLAN
 #                                         # adapter on VLAN N (1-4094)
-#     "vlanDisplayName": "VLAN ID",       # optional, the driver's display name
-#     "emergencySource": "<IPv4>",        # optional: the emergency path's only source
-#                                         # (dev1's Dante address); absent = path off
-#     "emergencyPort": 22,                # optional, default 22 (ssh)
-#     "danteBlockRule": "<display name>" } # required with emergencySource: the
-#                                         # dstack155 rule blocking TCP in on Dante
+#     "vlanDisplayName": "VLAN ID" }      # optional, the driver's display name
 
 [CmdletBinding()]
 param(
@@ -75,8 +65,9 @@ Set-StrictMode -Version 2.0
 $script:TaskName = 'dstack LAN self-heal'
 $script:LogMaxBytes = 1MB
 $script:RestartGapMinutes = 30
-$script:EmergencyGroup = 'dstack emergency'
-$script:EmergencyRuleNames = @('dstack-emergency-block-others', 'dstack-emergency-block-source-ports')
+# The 0.6.109 emergency path, removed in 0.6.111 (#239): what a run cleans up.
+$script:LegacyKeys = @('emergencySource', 'emergencyPort', 'danteBlockRule')
+$script:LegacyRuleNames = @('dstack-emergency-block-others', 'dstack-emergency-block-source-ports')
 
 # ---------------------------------------------------------------- pure layer
 
@@ -121,48 +112,22 @@ function Read-HealConfig {
         -not [string]::IsNullOrWhiteSpace([string]$c.vlanDisplayName)) {
         $vlanName = [string]$c.vlanDisplayName
     }
-    # The emergency path (#239): off unless emergencySource is set.
-    $source = $null
-    $port = 22
-    $blockRule = $null
-    if ($c.PSObject.Properties.Name -contains 'emergencySource' -and
-        -not [string]::IsNullOrWhiteSpace([string]$c.emergencySource)) {
-        $src = $null
-        $text = ([string]$c.emergencySource).Trim()
-        if (-not [System.Net.IPAddress]::TryParse($text, [ref]$src) -or
-            $src.AddressFamily -ne [System.Net.Sockets.AddressFamily]::InterNetwork -or
-            $text -ne $src.ToString() -or $text -eq '0.0.0.0' -or $text -eq '255.255.255.255') {
-            throw "config: 'emergencySource' is not a single IPv4 host address: '$($c.emergencySource)'"
-        }
-        $source = $text
-        if ($c.PSObject.Properties.Name -contains 'emergencyPort') {
-            $p = $c.emergencyPort
-            if (-not ($p -is [int] -or $p -is [long]) -or $p -lt 1 -or $p -gt 65535) {
-                throw "config: 'emergencyPort' must be a whole number from 1 to 65535, not '$p'"
-            }
-            $port = [int]$p
-        }
-        if (-not ($c.PSObject.Properties.Name -contains 'danteBlockRule') -or
-            [string]::IsNullOrWhiteSpace([string]$c.danteBlockRule)) {
-            throw ("config: 'danteBlockRule' is missing or empty: with 'emergencySource' it must name " +
-                "the dstack155 rule that blocks TCP in on the Dante adapter")
-        }
-        $blockRule = ([string]$c.danteBlockRule).Trim()
-        # Get-NetFirewallRule reads -DisplayName as a wildcard.
-        if ([System.Management.Automation.WildcardPattern]::ContainsWildcardCharacters($blockRule)) {
-            throw "config: 'danteBlockRule' ('$blockRule') holds a wildcard character (* ? [ ])"
-        }
+    # The removed emergency path's keys: accepted, ignored, logged (#239).
+    $ignored = @($script:LegacyKeys | Where-Object { $c.PSObject.Properties.Name -contains $_ })
+    $legacyRule = $null
+    if ($c.PSObject.Properties.Name -contains 'danteBlockRule' -and
+        -not [string]::IsNullOrWhiteSpace([string]$c.danteBlockRule)) {
+        $legacyRule = ([string]$c.danteBlockRule).Trim()
     }
     $cfg = [pscustomobject]@{
+        IgnoredKeys      = $ignored
+        LegacyBlockRule  = $legacyRule
         LanAdapter       = ([string]$c.lanAdapter).Trim()
         Gateway          = [string]$c.gateway
         DanteAdapter     = ([string]$c.danteAdapter).Trim()
         ThresholdMinutes = $threshold
         LanVlanId        = [int]$v
         VlanDisplayName  = $vlanName
-        EmergencySource  = $source
-        EmergencyPort    = $port
-        DanteBlockRule   = $blockRule
     }
     if ($cfg.LanAdapter -ieq $cfg.DanteAdapter) {
         throw "config: 'lanAdapter' and 'danteAdapter' are the same adapter ('$($cfg.LanAdapter)')"
@@ -268,60 +233,6 @@ function Get-RepairPlan {
     $steps
 }
 
-function ConvertTo-IPv4Text {
-    param([Parameter(Mandatory)][long]$Value)
-    '{0}.{1}.{2}.{3}' -f (($Value -shr 24) -band 255), (($Value -shr 16) -band 255), (($Value -shr 8) -band 255), ($Value -band 255)
-}
-
-function Get-AddressComplement {
-    # Every remote address but one IPv4 host: the IPv4 ranges below and above
-    # it, and all of IPv6 (the dstack155 rule blocks both families).
-    param([Parameter(Mandatory)][string]$Address)
-    $b = ([System.Net.IPAddress]::Parse($Address)).GetAddressBytes()
-    [long]$n = ([long]$b[0] * 16777216) + ([long]$b[1] * 65536) + ([long]$b[2] * 256) + [long]$b[3]
-    $max = [long]4294967295
-    $out = @()
-    if ($n -gt 0) { $out += '0.0.0.0-' + (ConvertTo-IPv4Text -Value ($n - 1)) }
-    if ($n -lt $max) { $out += (ConvertTo-IPv4Text -Value ($n + 1)) + '-255.255.255.255' }
-    $out += '::-ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff'
-    $out
-}
-
-function Get-PortComplement {
-    # Every TCP port but one.
-    param([Parameter(Mandatory)][int]$Port)
-    $out = @()
-    if ($Port -eq 2) { $out += '1' } elseif ($Port -gt 2) { $out += "1-$($Port - 1)" }
-    if ($Port -eq 65534) { $out += '65535' } elseif ($Port -lt 65534) { $out += "$($Port + 1)-65535" }
-    $out
-}
-
-function Get-EmergencyRuleSpecs {
-    # The two emergency Block rules, by fixed name. Together with the
-    # dstack155 rule disabled they leave exactly one TCP opening on the Dante
-    # adapter: EmergencyPort from EmergencySource.
-    param([Parameter(Mandatory)]$Config)
-    @(
-        [pscustomobject]@{
-            Name          = $script:EmergencyRuleNames[0]
-            DisplayName   = 'dstack emergency: block TCP in on the Dante adapter from every address but the emergency source'
-            RemoteAddress = @(Get-AddressComplement -Address $Config.EmergencySource)
-            LocalPort     = @('Any')
-        },
-        [pscustomobject]@{
-            Name          = $script:EmergencyRuleNames[1]
-            DisplayName   = 'dstack emergency: block TCP in on the Dante adapter from the emergency source on every port but its own'
-            RemoteAddress = @($Config.EmergencySource)
-            LocalPort     = @(Get-PortComplement -Port $Config.EmergencyPort)
-        }
-    )
-}
-
-function Test-RuleEnabled {
-    param([AllowNull()]$Rule)
-    $null -ne $Rule -and [string]$Rule.Enabled -eq 'True'
-}
-
 function Test-AceGrantsWrite {
     # True when an allow ACE's mask lets its holder change the directory or
     # a file in it: write/append data or attributes, delete (also of
@@ -341,11 +252,12 @@ function Read-HealState {
     # The state file's text to { Failures, LastRestart (UTC) }; a missing file
     # counts from zero (a broken one throws; the caller logs it).
     param([AllowNull()][AllowEmptyString()][string]$Json)
-    $s = [pscustomobject]@{ Failures = 0; LastRestart = $null; EmergencyRule = $null }
+    $s = [pscustomobject]@{ Failures = 0; LastRestart = $null; LegacyRule = $null }
     if ([string]::IsNullOrWhiteSpace($Json)) { return $s }
     $o = $Json | ConvertFrom-Json
     if ($o.PSObject.Properties.Name -contains 'failures') { $s.Failures = [int]$o.failures }
-    if ($o.PSObject.Properties.Name -contains 'emergencyRule' -and $o.emergencyRule) { $s.EmergencyRule = [string]$o.emergencyRule }
+    # The dstack155 rule 0.6.109's emergency path disabled (#239).
+    if ($o.PSObject.Properties.Name -contains 'emergencyRule' -and $o.emergencyRule) { $s.LegacyRule = [string]$o.emergencyRule }
     if ($o.PSObject.Properties.Name -contains 'lastRestart' -and $o.lastRestart) {
         $s.LastRestart = [datetime]::Parse([string]$o.lastRestart, [Globalization.CultureInfo]::InvariantCulture,
             [Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime()
@@ -366,12 +278,12 @@ function Write-HealLog {
 }
 
 function Save-HealState {
-    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][int]$Failures, $LastRestart, $EmergencyRule)
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][int]$Failures, $LastRestart, $LegacyRule)
     $lr = $null
     if ($null -ne $LastRestart) { $lr = ([datetime]$LastRestart).ToUniversalTime().ToString('o') }
     $o = @{ failures = $Failures; lastRestart = $lr }
-    # The dstack155 rule an open emergency path disabled (#239).
-    if ($EmergencyRule) { $o.emergencyRule = [string]$EmergencyRule }
+    # Kept until the rule is enabled again, so a later run still finds it.
+    if ($LegacyRule) { $o.emergencyRule = [string]$LegacyRule }
     ($o | ConvertTo-Json -Compress) |
         Set-Content -LiteralPath $Path -Encoding ASCII
 }
@@ -549,176 +461,73 @@ function Invoke-Repair {
     $code
 }
 
-function Resolve-DanteBlockRule {
-    # The dstack155 rule by its exact display name: exactly one inbound TCP
-    # Block rule on the Dante adapter, or the emergency path touches nothing.
-    param([Parameter(Mandatory)]$Config)
-    $r = @(Get-NetFirewallRule -DisplayName $Config.DanteBlockRule -ErrorAction SilentlyContinue |
-        Where-Object { $_.DisplayName -eq $Config.DanteBlockRule })
-    if ($r.Count -ne 1) {
-        throw "refused: $($r.Count) firewall rules named '$($Config.DanteBlockRule)' (need exactly 1)"
-    }
-    $rule = $r[0]
-    if ([string]$rule.Action -ne 'Block' -or [string]$rule.Direction -ne 'Inbound') {
-        throw "refused: firewall rule '$($Config.DanteBlockRule)' is $($rule.Direction) $($rule.Action), not an inbound Block rule"
-    }
-    $proto = [string](Get-NetFirewallPortFilter -AssociatedNetFirewallRule $rule).Protocol
-    if ($proto -ne 'TCP') {
-        throw "refused: firewall rule '$($Config.DanteBlockRule)' filters protocol '$proto', not TCP"
-    }
-    $ifs = @((Get-NetFirewallInterfaceFilter -AssociatedNetFirewallRule $rule).InterfaceAlias)
-    if ($ifs.Count -ne 1 -or [string]$ifs[0] -ne $Config.DanteAdapter) {
-        throw "refused: firewall rule '$($Config.DanteBlockRule)' is bound to '$($ifs -join ',')', not only to '$($Config.DanteAdapter)'"
-    }
-    $rule
+function Test-RuleEnabled {
+    param($Rule)
+    $null -ne $Rule -and [string]$Rule.Enabled -eq 'True'
 }
 
-function Get-FirewallRuleByName {
-    param([Parameter(Mandatory)][string]$Name)
-    @(Get-NetFirewallRule -Name $Name -ErrorAction SilentlyContinue) | Select-Object -First 1
-}
-
-function Enable-BlockRuleChecked {
-    # Enables a dstack155 rule by its Name and reads it back; true if it
-    # changed anything.
-    param([Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][string]$Label, [string]$Hint = '')
-    $r = Get-FirewallRuleByName -Name $Name
-    if ($null -eq $r) { throw "'$Label' is gone$Hint" }
-    if (Test-RuleEnabled -Rule $r) { return $false }
-    Enable-NetFirewallRule -Name $Name | Out-Null
-    if (-not (Test-RuleEnabled -Rule (Get-FirewallRuleByName -Name $Name))) {
-        throw "'$Label' reads disabled after enabling it"
-    }
-    $true
-}
-
-function Open-EmergencyPath {
-    # LAN down for the threshold: the emergency Block rules on FIRST, then the
-    # dstack155 rule off, so the Dante adapter is never open to everyone.
-    # The emergency rules are created or re-scoped only while the dstack155
-    # rule is on. Records the disabled rule's Name in $State. Returns the
-    # exit code.
-    param([Parameter(Mandatory)]$Config, [Parameter(Mandatory)]$State, [Parameter(Mandatory)][string]$Log,
-        [scriptblock]$Persist = {})
-    $label = $Config.DanteBlockRule
-    try {
-        $block = Resolve-DanteBlockRule -Config $Config
-    } catch {
-        Write-HealLog -Path $Log -Message "ERROR emergency path: $($_.Exception.Message); not opened"
-        return 1
-    }
-    $specs = @(Get-EmergencyRuleSpecs -Config $Config)
-    if (-not (Test-RuleEnabled -Rule $block)) {
-        $on = @($specs | Where-Object { Test-RuleEnabled -Rule (Get-FirewallRuleByName -Name $_.Name) })
-        if ($on.Count -eq $specs.Count) {
-            $State.EmergencyRule = [string]$block.Name
-            Write-HealLog -Path $Log -Message "emergency path open already: TCP $($Config.EmergencyPort) on '$($Config.DanteAdapter)' from $($Config.EmergencySource) only"
-            return 0
+function Repair-LegacyEmergency {
+    # Undoes what 0.6.109's emergency path may have left (#239): the dstack155
+    # rule it disabled is enabled again FIRST (found by the state file's rule
+    # id and by the config's danteBlockRule display name), then the two
+    # "dstack emergency" Block rules are removed. If a rule does not come back
+    # on, the emergency rules stay (they only block) and the state keeps the
+    # rule id for the next run. Returns 0, or 1 after an ERROR line.
+    param([Parameter(Mandatory)]$State, [Parameter(Mandatory)][string]$Log, $LegacyBlockRule)
+    $ok = $true
+    $rules = @()
+    if ($State.LegacyRule) {
+        $r = @(Get-NetFirewallRule -Name $State.LegacyRule -ErrorAction SilentlyContinue)
+        if ($r.Count -eq 0) {
+            Write-HealLog -Path $Log -Message "WARN legacy emergency path: rule '$($State.LegacyRule)' from the state file no longer exists; forgotten"
         }
-        # Disabled without both emergency rules on: close the adapter first.
+        $rules += $r
+    }
+    # By the config's name only while an emergency rule is on (the old path
+    # ran): a broad rule someone disabled for another reason stays as it is.
+    $emergencyOn = @($script:LegacyRuleNames | Where-Object {
+            Test-RuleEnabled -Rule @(Get-NetFirewallRule -Name $_ -ErrorAction SilentlyContinue)[0] })
+    if ($LegacyBlockRule -and $emergencyOn.Count -gt 0) {
+        $rules += @(Get-NetFirewallRule -DisplayName $LegacyBlockRule -ErrorAction SilentlyContinue |
+            Where-Object { $_.DisplayName -eq $LegacyBlockRule })
+    }
+    $seen = @{}
+    foreach ($r in $rules) {
+        if ($seen.ContainsKey([string]$r.Name)) { continue }
+        $seen[[string]$r.Name] = $true
+        if (Test-RuleEnabled -Rule $r) { continue }
         try {
-            [void](Enable-BlockRuleChecked -Name $block.Name -Label $label)
-            Write-HealLog -Path $Log -Message "  emergency: enabled '$label' first (it was disabled without the emergency rules)"
+            Enable-NetFirewallRule -Name $r.Name | Out-Null
+            if (-not (Test-RuleEnabled -Rule @(Get-NetFirewallRule -Name $r.Name -ErrorAction SilentlyContinue)[0])) {
+                throw 'it reads back disabled'
+            }
+            Write-HealLog -Path $Log -Message "legacy emergency path: enabled '$($r.DisplayName)' again (left disabled by 0.6.109)"
         } catch {
-            Write-HealLog -Path $Log -Message "ERROR emergency path: $($_.Exception.Message); not opened"
-            return 1
+            Write-HealLog -Path $Log -Message "ERROR legacy emergency path: '$($r.DisplayName)' not enabled again: $($_.Exception.Message); emergency rules kept"
+            $ok = $false
         }
     }
-    try {
-        foreach ($s in $specs) {
-            $scope = @{
-                Direction = 'Inbound'; Action = 'Block'; Protocol = 'TCP'; Profile = 'Any'
-                InterfaceAlias = $Config.DanteAdapter; RemoteAddress = $s.RemoteAddress; LocalPort = $s.LocalPort
-            }
-            if ($null -eq (Get-FirewallRuleByName -Name $s.Name)) {
-                New-NetFirewallRule -Name $s.Name -DisplayName $s.DisplayName -Group $script:EmergencyGroup -Enabled False @scope | Out-Null
-                Write-HealLog -Path $Log -Message "  emergency: created rule '$($s.Name)' (disabled)"
-            } else {
-                # The config's source or port may have changed since it was made.
-                Set-NetFirewallRule -Name $s.Name @scope | Out-Null
-            }
-            if (-not (Test-RuleEnabled -Rule (Get-FirewallRuleByName -Name $s.Name))) {
-                Enable-NetFirewallRule -Name $s.Name | Out-Null
-                if (-not (Test-RuleEnabled -Rule (Get-FirewallRuleByName -Name $s.Name))) {
-                    throw "rule '$($s.Name)' reads disabled after enabling it"
-                }
-                Write-HealLog -Path $Log -Message "  emergency: enabled rule '$($s.Name)'"
-            }
+    if (-not $ok) { return 1 }
+    $State.LegacyRule = $null
+    foreach ($name in $script:LegacyRuleNames) {
+        if (@(Get-NetFirewallRule -Name $name -ErrorAction SilentlyContinue).Count -eq 0) { continue }
+        try {
+            Remove-NetFirewallRule -Name $name | Out-Null
+            Write-HealLog -Path $Log -Message "legacy emergency path: removed rule '$name'"
+        } catch {
+            Write-HealLog -Path $Log -Message "ERROR legacy emergency path: rule '$name' not removed: $($_.Exception.Message)"
+            $ok = $false
         }
-    } catch {
-        Write-HealLog -Path $Log -Message "ERROR emergency path: $($_.Exception.Message); '$label' left enabled, not opened"
-        return 1
     }
-    try {
-        # Recorded and saved before the change, so a run that dies after it
-        # still leaves the record a LAN-up run closes from.
-        $State.EmergencyRule = [string]$block.Name
-        & $Persist
-        Disable-NetFirewallRule -Name $block.Name | Out-Null
-        if (Test-RuleEnabled -Rule (Get-FirewallRuleByName -Name $block.Name)) {
-            throw "'$label' reads enabled after disabling it"
-        }
-    } catch {
-        Write-HealLog -Path $Log -Message "ERROR emergency path: $($_.Exception.Message)"
-        return 1
-    }
-    Write-HealLog -Path $Log -Message ("emergency path open: disabled '{0}'; TCP {1} on '{2}' from {3} only" -f
-        $label, $Config.EmergencyPort, $Config.DanteAdapter, $Config.EmergencySource)
-    0
+    if ($ok) { 0 } else { 1 }
 }
 
-function Close-EmergencyPath {
-    # The LAN is up: the normal state is the dstack155 rule enabled and no
-    # emergency rule enabled. Enables the dstack155 rule FIRST (the one the
-    # config names, and the one a past open recorded, even if the config no
-    # longer names it), then disables the emergency rules. Changes only what
-    # differs, logs each change. Returns the exit code.
-    param([Parameter(Mandatory)]$Config, [Parameter(Mandatory)]$State, [Parameter(Mandatory)][string]$Log)
-    $code = 0
-    $known = @()   # Name -> label of each dstack155 rule to hold enabled
-    if ($null -ne $Config.EmergencySource) {
-        try {
-            $b = Resolve-DanteBlockRule -Config $Config
-            $known += [pscustomobject]@{ Name = [string]$b.Name; Label = $Config.DanteBlockRule; Hint = '' }
-        } catch {
-            Write-HealLog -Path $Log -Message "ERROR emergency path check: $($_.Exception.Message)"
-            $code = 1
-        }
+function Write-IgnoredKeys {
+    param([Parameter(Mandatory)]$Config, [Parameter(Mandatory)][string]$Log)
+    if (@($Config.IgnoredKeys).Count -gt 0) {
+        Write-HealLog -Path $Log -Message ("config: {0} ignored (the emergency path was removed in 0.6.111, #239: ssh and the MCP are reachable on the Dante address); remove them" -f
+            ((@($Config.IgnoredKeys) | ForEach-Object { "'$_'" }) -join ', '))
     }
-    if ($State.EmergencyRule -and -not ($known | Where-Object { $_.Name -eq $State.EmergencyRule })) {
-        $known += [pscustomobject]@{ Name = [string]$State.EmergencyRule; Label = "the rule the emergency path disabled ($($State.EmergencyRule))"
-            Hint = "; if it was deleted on purpose, remove 'emergencyRule' from the state file" }
-    }
-    if ($known.Count -eq 0) { return $code }
-    try {
-        foreach ($k in $known) {
-            if (Enable-BlockRuleChecked -Name $k.Name -Label $k.Label -Hint $k.Hint) {
-                Write-HealLog -Path $Log -Message "LAN up: enabled '$($k.Label)' again (it was disabled)"
-            }
-        }
-    } catch {
-        Write-HealLog -Path $Log -Message "ERROR emergency path check: $($_.Exception.Message); emergency rules left as they are"
-        return 1
-    }
-    if ($code -ne 0) {
-        # The configured rule did not resolve: its state is unknown, so the
-        # emergency rules (Block rules) stay as they are.
-        $State.EmergencyRule = $null
-        return $code
-    }
-    foreach ($name in $script:EmergencyRuleNames) {
-        try {
-            if (Test-RuleEnabled -Rule (Get-FirewallRuleByName -Name $name)) {
-                Disable-NetFirewallRule -Name $name | Out-Null
-                Write-HealLog -Path $Log -Message "LAN up: disabled emergency rule '$name'"
-            }
-        } catch {
-            Write-HealLog -Path $Log -Message "ERROR emergency path check: rule '${name}': $($_.Exception.Message)"
-            $code = 1
-        }
-    }
-    $State.EmergencyRule = $null
-    $code
 }
 
 function Invoke-Check {
@@ -738,6 +547,15 @@ function Invoke-Check {
             try { $state = Read-HealState -Json (Get-Content -LiteralPath $statePath -Raw) }
             catch { Write-HealLog -Path $log -Message "state file unreadable, counting from 0: $($_.Exception.Message)" }
         }
+        Write-IgnoredKeys -Config $cfg -Log $log
+        # Before the LAN check, LAN up or down: a dstack155 rule left
+        # disabled is never left so (#239). Its failure never stops the heal.
+        try {
+            $legacyCode = Repair-LegacyEmergency -State $state -Log $log -LegacyBlockRule $cfg.LegacyBlockRule | Select-Object -Last 1
+        } catch {
+            Write-HealLog -Path $log -Message "ERROR legacy emergency path: $($_.Exception.Message)"
+            $legacyCode = 1
+        }
         $adapters = Resolve-HealAdapters -Config $cfg
         if ($null -eq $adapters.Dante) {
             Write-HealLog -Path $log -Message "WARN no adapter named '$($cfg.DanteAdapter)': the LAN adapter is checked by its exact name"
@@ -748,26 +566,15 @@ function Invoke-Check {
         if ($fault -eq '') {
             $note = if ($next.Previous -gt 0) { " (down count $($next.Previous) reset)" } else { '' }
             Write-HealLog -Path $log -Message "gateway ok$note"
-            if ($null -ne $cfg.EmergencySource -or $state.EmergencyRule) {
-                $e = Close-EmergencyPath -Config $cfg -State $state -Log $log | Select-Object -Last 1
-                if ([int]$e -ne 0) { $code = 1 }
-            }
         } elseif (-not $next.Heal) {
             Write-HealLog -Path $log -Message "LAN down $($next.Failures)/$($cfg.ThresholdMinutes) min: $fault"
         } else {
             Write-HealLog -Path $log -Message ("LAN down {0}/{0} min: {1}; repairing LAN adapter '{2}' (Dante adapter '{3}' untouched)" -f $cfg.ThresholdMinutes, $fault, $cfg.LanAdapter, $cfg.DanteAdapter)
-            # The path opens before the repair: a layout-A restart also
-            # restarts the Dante adapter, which the rules are bound to.
-            $e = 0
-            if ($null -ne $cfg.EmergencySource) {
-                $persist = { Save-HealState -Path $statePath -Failures $next.Failures -LastRestart $state.LastRestart -EmergencyRule $state.EmergencyRule }
-                $e = Open-EmergencyPath -Config $cfg -State $state -Log $log -Persist $persist | Select-Object -Last 1
-            }
             $code = Invoke-Repair -Config $cfg -State $state -Log $log
             Write-HealLog -Path $log -Message "repair done (exit $code)"
-            if ([int]$e -ne 0) { $code = 1 }
         }
-        try { Save-HealState -Path $statePath -Failures $next.Failures -LastRestart $state.LastRestart -EmergencyRule $state.EmergencyRule }
+        if ([int]$legacyCode -ne 0) { $code = 1 }
+        try { Save-HealState -Path $statePath -Failures $next.Failures -LastRestart $state.LastRestart -LegacyRule $state.LegacyRule }
         catch {
             Write-HealLog -Path $log -Message "ERROR state not saved: $($_.Exception.Message)"
             $code = 1
@@ -815,13 +622,8 @@ function Install-SelfHeal {
     if (-not (Test-Path -LiteralPath $configPath)) { throw "no config at ${configPath}, write it first" }
     $cfg = Read-HealConfig -Json (Get-Content -LiteralPath $configPath -Raw)
     Resolve-HealAdapters -Config $cfg | Out-Null
-    $emergency = 'emergency path off (no emergencySource)'
-    if ($null -ne $cfg.EmergencySource) {
-        $b = Resolve-DanteBlockRule -Config $cfg
-        $emergency = ("emergency path: TCP {0} from {1} while the LAN is down, rule '{2}' (enabled: {3})" -f
-            $cfg.EmergencyPort, $cfg.EmergencySource, $cfg.DanteBlockRule, $b.Enabled)
-    }
     Set-AdminOnlyAcl -Path $Dir
+    Write-IgnoredKeys -Config $cfg -Log (Join-Path $Dir 'lan-selfheal.log')
     $target = Join-Path $Dir 'lan-selfheal.ps1'
     if ((Resolve-Path -LiteralPath $Source).Path -ne $target) {
         Copy-Item -LiteralPath $Source -Destination $target -Force
@@ -845,34 +647,30 @@ function Install-SelfHeal {
         throw 'install check: no trigger repeating every minute without end'
     }
     if ($t.Actions[0].Execute -ne $exe -or $t.Actions[0].Arguments -ne $arg) { throw 'install check: the task action differs' }
-    Write-HealLog -Path (Join-Path $Dir 'lan-selfheal.log') -Message "installed: task '$($script:TaskName)' every minute and at startup as SYSTEM, script $target, LAN adapter '$($cfg.LanAdapter)' on VLAN $($cfg.LanVlanId) (0 = untagged); $emergency"
+    Write-HealLog -Path (Join-Path $Dir 'lan-selfheal.log') -Message "installed: task '$($script:TaskName)' every minute and at startup as SYSTEM, script $target, LAN adapter '$($cfg.LanAdapter)' on VLAN $($cfg.LanVlanId) (0 = untagged)"
     "installed '$($script:TaskName)' ($target)"
 }
 
 function Uninstall-SelfHeal {
-    # Closes the emergency path first (the task would never close it again)
-    # and removes its rules; refuses when the dstack155 rule cannot be
-    # enabled again.
     param([Parameter(Mandatory)][string]$Dir)
     $log = Join-Path $Dir 'lan-selfheal.log'
-    $statePath = Join-Path $Dir 'lan-selfheal.state.json'
-    $configPath = Join-Path $Dir 'lan-selfheal.json'
-    $state = Read-HealState -Json $null
-    if (Test-Path -LiteralPath $statePath) { $state = Read-HealState -Json (Get-Content -LiteralPath $statePath -Raw) }
-    $cfg = [pscustomobject]@{ EmergencySource = $null; DanteBlockRule = $null; DanteAdapter = $null }
-    if (Test-Path -LiteralPath $configPath) {
-        try { $cfg = Read-HealConfig -Json (Get-Content -LiteralPath $configPath -Raw) }
-        catch { Write-HealLog -Path $log -Message "uninstall: config unreadable ($($_.Exception.Message)); closing the emergency path from the state file only" }
-    }
-    if ($null -ne $cfg.EmergencySource -or $state.EmergencyRule) {
-        $rc = Close-EmergencyPath -Config $cfg -State $state -Log $log | Select-Object -Last 1
-        if ([int]$rc -ne 0) { throw 'refused: the emergency path could not be closed (see the log); the task stays' }
-        Save-HealState -Path $statePath -Failures $state.Failures -LastRestart $state.LastRestart
-    }
-    foreach ($name in $script:EmergencyRuleNames) {
-        if ($null -ne (Get-FirewallRuleByName -Name $name)) {
-            Remove-NetFirewallRule -Name $name | Out-Null
-            if (Test-Path -LiteralPath $Dir) { Write-HealLog -Path $log -Message "uninstall: removed emergency rule '$name'" }
+    if (Test-Path -LiteralPath $Dir) {
+        # The task never runs again: undo a left-over emergency path now (#239).
+        $state = Read-HealState -Json $null
+        $statePath = Join-Path $Dir 'lan-selfheal.state.json'
+        if (Test-Path -LiteralPath $statePath) {
+            try { $state = Read-HealState -Json (Get-Content -LiteralPath $statePath -Raw) } catch { Write-HealLog -Path $log -Message "uninstall: state file unreadable: $($_.Exception.Message)" }
+        }
+        $legacy = $null
+        $configPath = Join-Path $Dir 'lan-selfheal.json'
+        if (Test-Path -LiteralPath $configPath) {
+            try { $legacy = (Read-HealConfig -Json (Get-Content -LiteralPath $configPath -Raw)).LegacyBlockRule }
+            catch { Write-HealLog -Path $log -Message "uninstall: config unreadable: $($_.Exception.Message)" }
+        }
+        $rc = Repair-LegacyEmergency -State $state -Log $log -LegacyBlockRule $legacy | Select-Object -Last 1
+        if ([int]$rc -ne 0) { throw "uninstall refused: a dstack155 rule left disabled by 0.6.109 did not come back on (see $log)" }
+        if (Test-Path -LiteralPath $statePath) {
+            Save-HealState -Path $statePath -Failures $state.Failures -LastRestart $state.LastRestart -LegacyRule $state.LegacyRule
         }
     }
     if (Get-ScheduledTask -TaskName $script:TaskName -ErrorAction SilentlyContinue) {
