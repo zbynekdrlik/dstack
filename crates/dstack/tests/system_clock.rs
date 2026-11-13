@@ -944,3 +944,72 @@ fn tx_end_stops_our_rx_and_it_recovers_by_itself() {
         "{host_stopped:?}"
     );
 }
+
+/// dstack #264: with no `rx_port_base` / `tx_port_base`, a device binds
+/// fixed flow ports from its slot (its ARC port − 4440): RX on
+/// 29800 + 64k .. +31, TX on the next 32, so one generic Dante-leg filter
+/// accepts every device of ours on any PC. Slot 0 and slot 1 on one
+/// address, each in its own block.
+#[test]
+fn each_device_binds_its_slot_s_fixed_flow_ports() {
+    let _one = ONE_DEVICE.lock().unwrap_or_else(|e| e.into_inner());
+    let ip = routed_ipv4();
+    let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let config_a = device_in(dir_a.path());
+    let config_b = device_in(dir_b.path());
+    let text = std::fs::read_to_string(&config_b)
+        .unwrap()
+        .replace("name = \"test-device\"", "name = \"test-device-b\"")
+        + "\narc_port = 4441\ncmc_port = 8801\nflows_port = 4456\nprocess_id = 1\n";
+    std::fs::write(&config_b, text).unwrap();
+    let prepare = |config: PathBuf, dir: &Path| {
+        let opts = Options {
+            config,
+            place: Place::Ip(ip),
+            control: dir.join("control.sock"),
+        };
+        host::prepare_with(&opts, &[], ClockSource::System).expect("the device set up")
+    };
+    let a = prepare(config_a, dir_a.path());
+    let b = prepare(config_b, dir_b.path());
+    for (prepared, rx_first) in [(&a, 29_800u16), (&b, 29_864)] {
+        let media = prepared.media();
+        let rx = media.rx.ports().expect("the RX flow ports");
+        let tx = media.tx.ports();
+        assert_eq!(rx.len(), 32);
+        assert_eq!(tx.len(), 32);
+        for slot in 0..32u16 {
+            assert_eq!(rx[usize::from(slot)], rx_first + slot, "RX slot {slot}");
+            assert_eq!(
+                tx[usize::from(slot)],
+                rx_first + 32 + slot,
+                "TX slot {slot}"
+            );
+        }
+    }
+}
+
+/// dstack #264: a device whose ARC port is no slot's (4440-4471) and that
+/// names no flow ports has no default block; it refuses to start, naming
+/// the keys and the range, and never takes the OS's ports.
+#[test]
+fn a_device_with_no_slot_and_no_flow_ports_refuses_to_start() {
+    let _one = ONE_DEVICE.lock().unwrap_or_else(|e| e.into_inner());
+    let ip = routed_ipv4();
+    let dir = tempfile::tempdir().unwrap();
+    let config = device_in(dir.path());
+    let text = std::fs::read_to_string(&config).unwrap()
+        + "\narc_port = 4500\ncmc_port = 8900\nflows_port = 4501\n";
+    std::fs::write(&config, text).unwrap();
+    let opts = Options {
+        config,
+        place: Place::Ip(ip),
+        control: dir.path().join("control.sock"),
+    };
+    let e = match host::prepare_with(&opts, &[], ClockSource::System) {
+        Ok(_) => panic!("a device with no slot started on the OS's flow ports"),
+        Err(e) => e.to_string(),
+    };
+    assert!(e.contains("rx_port_base"), "{e}");
+    assert!(e.contains("29800-31847"), "{e}");
+}
