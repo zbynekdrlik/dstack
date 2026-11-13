@@ -249,9 +249,13 @@ function Get-AdapterDescription {
 
 function Assert-NotVirtualTarget {
     # The last guard before Enable-/Restart-NetAdapter: refuses a virtual VLAN
-    # adapter, read fresh by its name.
+    # adapter, read fresh by its name, and fails closed on an adapter whose
+    # description cannot be read.
     param([Parameter(Mandatory)]$Adapter, [Parameter(Mandatory)][string]$Verb)
     $desc = Get-AdapterDescription -Adapter $Adapter
+    if ([string]::IsNullOrWhiteSpace($desc)) {
+        throw "refused: '$($Adapter.Name)' has no readable description, so it may be a virtual VLAN adapter; the self-heal never ${Verb}s one (#239)"
+    }
     if (Test-VirtualVlanAdapter -InterfaceDescription $desc) {
         throw "refused: '$($Adapter.Name)' is a virtual VLAN adapter ('$desc'); the self-heal never ${Verb}s one (it bugchecked a PC, #239)"
     }
@@ -326,7 +330,7 @@ function Save-HealState {
     if ($LegacyRule) { $o.emergencyRule = [string]$LegacyRule }
     $bytes = [System.Text.Encoding]::ASCII.GetBytes(($o | ConvertTo-Json -Compress))
     # Written whole to a temporary file, flushed to the disk, then swapped in:
-    # a crash mid-write (iem-snv's bugcheck left NUL bytes, #239) leaves the
+    # a crash mid-write (the bugcheck on dasio's test PC left NUL bytes, #239) leaves the
     # old file or the new one. A file that is unreadable all the same is
     # logged by Invoke-Check, which counts from 0. ([NullString]: a $null
     # string argument reaches .NET as "" and Replace refuses it.)
@@ -489,7 +493,9 @@ function Invoke-Repair {
     try {
         $adapters = Resolve-HealAdapters -Config $Config
         $desc = Get-AdapterDescription -Adapter $adapters.Lan
-        $virtual = Test-VirtualVlanAdapter -InterfaceDescription $desc
+        # An unreadable description fails closed: repaired as a virtual one.
+        $unknown = [string]::IsNullOrWhiteSpace($desc)
+        $virtual = $unknown -or (Test-VirtualVlanAdapter -InterfaceDescription $desc)
         $plan = @(Get-RepairPlan -LanAdapter $Config.LanAdapter -DanteAdapter $Config.DanteAdapter -LanIsVirtual:$virtual)
     } catch {
         Write-HealLog -Path $Log -Message "ERROR $($_.Exception.Message): no repair"
@@ -499,6 +505,9 @@ function Invoke-Repair {
     $changed = $false
     if ($virtual) {
         # Never cycled (#239). A disabled one cannot be repaired from here.
+        if ($unknown) {
+            Write-HealLog -Path $Log -Message "  WARN the LAN adapter's description is unreadable: repaired as a virtual VLAN adapter (no enable, no restart)"
+        }
         Write-HealLog -Path $Log -Message "  Restart: skipped, the LAN adapter is a virtual VLAN adapter ('$desc'): never disabled, enabled or restarted (#239); a DHCP renew instead"
         if ([string]$adapters.Lan.Status -eq 'Disabled') {
             Write-HealLog -Path $Log -Message "  Enable: WARN the LAN adapter is Disabled and is a virtual VLAN adapter: not enabled (enabling or disabling one bugchecked a PC); enable it by hand"
@@ -524,6 +533,12 @@ function Invoke-Repair {
             $r = Invoke-RepairStep -Step $step -Config $Config
             if ($r.Changed) { $changed = $true }
             Write-HealLog -Path $Log -Message "  $($step.Action): $($r.Text)"
+            if ($virtual -and $step.Action -eq 'VlanId' -and $r.Changed) {
+                # Written with -NoRestart: a driver applies it when the adapter
+                # re-initializes, which the self-heal never does to this one.
+                Write-HealLog -Path $Log -Message "  WARN the VLAN ID was written to a virtual VLAN adapter and may apply only when it re-initializes, which the self-heal never does: reboot the PC if the LAN stays down"
+                $code = 1
+            }
         } catch {
             # One failed step does not stop the rest; the run exits non-zero.
             Write-HealLog -Path $Log -Message "  $($step.Action): ERROR $($_.Exception.Message)"
@@ -721,7 +736,9 @@ function Install-SelfHeal {
     }
     if ($t.Actions[0].Execute -ne $exe -or $t.Actions[0].Arguments -ne $arg) { throw 'install check: the task action differs' }
     $desc = Get-AdapterDescription -Adapter $adapters.Lan
-    $kind = if (Test-VirtualVlanAdapter -InterfaceDescription $desc) { "a virtual VLAN adapter ('$desc'): its repair never restarts it, it renews DHCP" } else { "'$desc': its repair may restart it" }
+    $kind = if ([string]::IsNullOrWhiteSpace($desc)) { 'no readable description: its repair never restarts it, it renews DHCP' }
+        elseif (Test-VirtualVlanAdapter -InterfaceDescription $desc) { "a virtual VLAN adapter ('$desc'): its repair never restarts it, it renews DHCP" }
+        else { "'$desc': its repair may restart it" }
     Write-HealLog -Path (Join-Path $Dir 'lan-selfheal.log') -Message "installed: task '$($script:TaskName)' every minute and at startup as SYSTEM, script $target, LAN adapter '$($cfg.LanAdapter)' on VLAN $($cfg.LanVlanId) (0 = untagged), $kind"
     "installed '$($script:TaskName)' ($target)"
 }
