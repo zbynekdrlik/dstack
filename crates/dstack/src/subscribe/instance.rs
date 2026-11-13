@@ -215,6 +215,18 @@ struct Entry {
     wanted: u64,
 }
 
+/// What a channel's direct query knows at one moment ([`Table::direct`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Direct {
+    /// Its record, fresh.
+    Found(Advertised),
+    /// No record yet, and its query may still answer: within [`GRACE_NS`]
+    /// of its first lookup, while the queries run.
+    Waiting,
+    /// No record, and none is awaited: past its grace, or not queried.
+    Missing,
+}
+
 /// What the thread is to send.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Ask {
@@ -294,6 +306,19 @@ impl Table {
         self.entries
             .get(&key(&instance(tx_device, tx_channel)))
             .is_some_and(|e| e.advert.is_none() && now.saturating_sub(e.first) < GRACE_NS)
+    }
+
+    /// What the direct query of `tx_channel` on `tx_device` knows at `now`,
+    /// read once: its fresh record ([`Table::lookup`], the instance wanted
+    /// as there), else whether it is still [`Table::young`]. Never two
+    /// reads: an answer between them would leave a channel neither found
+    /// nor waiting (dstack #269).
+    pub fn direct(&mut self, tx_device: &str, tx_channel: &str, now: u64) -> Direct {
+        match self.lookup(tx_device, tx_channel, now) {
+            Some(a) => Direct::Found(a),
+            None if self.young(tx_device, tx_channel, now) => Direct::Waiting,
+            None => Direct::Missing,
+        }
     }
 
     /// The queries due at `now` (each counted as asked): an instance wanted
@@ -549,6 +574,18 @@ impl Instances {
 }
 
 impl Instances {
+    /// [`Table::direct`] at this resolver's time, under one lock: a channel
+    /// is [`Direct::Waiting`] only while the thread runs (a resolver that
+    /// does not query keeps nothing from ARC).
+    pub fn direct(&self, tx_device: &str, tx_channel: &str) -> Direct {
+        self.asked.store(true, Ordering::Relaxed);
+        let now = self.clock.now();
+        match lock(&self.table).direct(tx_device, tx_channel, now) {
+            Direct::Waiting if !self.started() => Direct::Missing,
+            d => d,
+        }
+    }
+
     /// `device`'s record of `service` (`_netaudio-arc._udp.local.` or
     /// `_netaudio-dbc._udp.local.`), when one is fresh ([`Table::record`]).
     pub fn record(&self, device: &str, service: &str) -> Option<Srv> {
