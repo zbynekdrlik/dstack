@@ -222,6 +222,7 @@ pub struct Config {
     ports: Option<Ports>,
     process_id: Option<u16>,
     rx_port_base: Option<u16>,
+    tx_port_base: Option<u16>,
     subscribe: Vec<(usize, String, String)>,
     flow_slots: Option<usize>,
     block: u64,
@@ -279,6 +280,7 @@ impl Config {
             ports: None,
             process_id: None,
             rx_port_base: None,
+            tx_port_base: None,
             subscribe: Vec::new(),
             flow_slots: None,
             block: BLOCK,
@@ -438,6 +440,16 @@ impl Config {
         self
     }
 
+    /// The TX flows' ports from `base` (`base` to `base + 31`), for a
+    /// stateless filter that must accept a receiver's keepalives to them
+    /// (dstack #262); the OS picks free ones unless set. Clear of the RX
+    /// flows' ports and of every slot's ARC, flow-control and CMC ports
+    /// (4440-4486, 8800-8831), or the config is refused.
+    pub fn tx_port_base(mut self, base: u16) -> Self {
+        self.tx_port_base = Some(base);
+        self
+    }
+
     /// RX channel `rx` (from 1) receives `tx_channel` of `tx_device`, by
     /// their Dante names (intercom#5). It holds from the first start and
     /// whenever the state file holds no subscription for that channel; one
@@ -541,6 +553,9 @@ impl Config {
         }
         if let Some(base) = self.rx_port_base {
             t.insert("rx_port_base".into(), i64::from(base).into());
+        }
+        if let Some(base) = self.tx_port_base {
+            t.insert("tx_port_base".into(), i64::from(base).into());
         }
         if !self.subscribe.is_empty() {
             let subs: Vec<toml::Value> = self

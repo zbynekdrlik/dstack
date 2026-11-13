@@ -1725,6 +1725,82 @@ fn a_tx_port_base_puts_each_slot_on_its_own_port() {
     }
 }
 
+/// A `tx_port_base` too high for 32 ports is refused before any port is
+/// bound (tests.md: never bind near 65535; Windows excludes some ports),
+/// and a taken port is named.
+#[test]
+fn a_tx_port_base_past_the_last_port_is_refused_and_a_taken_port_named() {
+    let at = |base: u16| {
+        let cfg = DeviceConfig {
+            tx_port_base: Some(base),
+            ..cfg()
+        };
+        TxShared::new(cfg, Ipv4Addr::LOCALHOST, Vec::new().into(), 1, &[])
+    };
+    let Err(err) = at(65_505) else {
+        panic!("a base past 65535 was taken")
+    };
+    assert!(
+        err.to_string().contains("tx_port_base: past port 65535"),
+        "{err}"
+    );
+    // The last base whose ports end at 65535 is not refused for its range
+    // (the bind may still fail on a runner: only the message is checked).
+    if let Err(e) = at(65_504) {
+        assert!(!e.to_string().contains("past port"), "{e}");
+    }
+    let (held, base) = (40_000u16..60_000)
+        .step_by(89)
+        .find_map(|b| Some((at(b).ok()?, b)))
+        .expect("32 free ports in a row on loopback");
+    let Err(err) = at(base) else {
+        panic!("a held base was taken")
+    };
+    assert!(
+        err.to_string().contains(&format!("TX flow port {base}")),
+        "{err}"
+    );
+    drop(held);
+    // Unset: the OS chooses, 32 distinct ports.
+    let free = TxShared::new(cfg(), Ipv4Addr::LOCALHOST, Vec::new().into(), 1, &[]).unwrap();
+    let distinct: std::collections::BTreeSet<_> = free.ports.iter().collect();
+    assert_eq!(distinct.len(), MAX_FLOWS);
+}
+
+#[test]
+fn the_start_log_names_the_tx_ports_as_a_range_or_each_one() {
+    assert_eq!(port_list(&[]), "");
+    assert_eq!(port_list(&[31_000]), "31000");
+    assert_eq!(port_list(&[31_000, 31_001, 31_002]), "31000-31002");
+    assert_eq!(port_list(&[31_000, 31_002]), "31000,31002");
+    assert_eq!(port_list(&[47_533, 52_825, 47_534]), "47533,52825,47534");
+    // A run that starts in a row and breaks later is not a range.
+    assert_eq!(port_list(&[5, 6, 8]), "5,6,8");
+    // At start the bound ports are logged: a base's range.
+    let mut bound = None;
+    let lines = crate::test_log::capture_at(tracing::Level::INFO, || {
+        bound = (40_000u16..60_000).step_by(83).find_map(|b| {
+            let cfg = DeviceConfig {
+                flow_slots: 2,
+                tx_port_base: Some(b),
+                ..cfg()
+            };
+            let s = TxShared::new(cfg, Ipv4Addr::LOCALHOST, Vec::new().into(), 1, &[]).ok()?;
+            Some((s, b))
+        });
+    });
+    let (_held, base) = bound.expect("2 free ports in a row on loopback");
+    let line = lines
+        .lines()
+        .find(|l| l.contains("TX flow sockets bound"))
+        .unwrap_or_else(|| panic!("{lines}"));
+    assert!(
+        line.contains(&format!("ports={base}-{}", base + 1)),
+        "{line}"
+    );
+    assert!(line.contains("fixed=true"), "{line}");
+}
+
 // Linux refuses a send to port 0; Windows sends it.
 #[cfg(target_os = "linux")]
 #[test]

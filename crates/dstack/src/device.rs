@@ -503,11 +503,61 @@ impl DeviceConfig {
                 ));
             }
         }
+        if let Some(base) = self.tx_port_base
+            && !tx_ports_clear(
+                base,
+                self.rx_port_base,
+                [self.arc_port, self.cmc_port, self.flows_port],
+            )
+        {
+            out.push(format!(
+                "tx_port_base: 1024 to {}, its {} ports clear of rx_port_base's ports, \
+                 the ARC, CMC and flow-control ports and every slot's \
+                 (4440-4486, 8800-8831)",
+                u16::MAX as usize + 1 - crate::media::tx::MAX_FLOWS,
+                crate::media::tx::MAX_FLOWS
+            ));
+        }
         if self.state_file.as_os_str().is_empty() {
             out.push("state_file: empty".to_string());
         }
         out
     }
+}
+
+/// Device slots on one address: slot `k` takes ARC 4440+k, flow control
+/// 4455+k and CMC 8800+k (`docs/two-networks.md`'s slot ranges).
+const PORT_SLOTS: u32 = 32;
+
+/// The 32 flow ports from `base`, `None` when they would pass 65535.
+fn flow_ports(base: u16) -> Option<std::ops::RangeInclusive<u32>> {
+    let last = u32::from(base) + crate::media::tx::MAX_FLOWS as u32 - 1;
+    (last <= u32::from(u16::MAX)).then(|| u32::from(base)..=last)
+}
+
+/// Whether `tx_port_base`'s 32 ports from `base` lie in 1024..=65535 and
+/// clear of the RX flow ports (`rx_base`), the device's own control ports
+/// (`own`: ARC, CMC, flow control) and every slot's control range (ARC
+/// 4440-4471, flow control 4455-4486, CMC 8800-8831).
+fn tx_ports_clear(base: u16, rx_base: Option<u16>, own: [u16; 3]) -> bool {
+    let Some(tx) = flow_ports(base).filter(|_| base >= 1024) else {
+        return false;
+    };
+    let overlaps =
+        |r: &std::ops::RangeInclusive<u32>| r.start() <= tx.end() && tx.start() <= r.end();
+    let slot = |first: u16| u32::from(first)..=u32::from(first) + PORT_SLOTS - 1;
+    let mut taken = vec![
+        slot(crate::arc::PORT),
+        slot(crate::flows::control::PORT),
+        slot(crate::cmc::PORT),
+    ];
+    taken.extend(own.map(|p| u32::from(p)..=u32::from(p)));
+    // An RX base past 65535 is refused on its own line; its ports up to
+    // 65535 still count.
+    if let Some(rx) = rx_base {
+        taken.push(u32::from(rx)..=u32::from(rx) + crate::media::rx::MAX_FLOWS as u32 - 1);
+    }
+    !taken.iter().any(overlaps)
 }
 
 fn default_arc_port() -> u16 {

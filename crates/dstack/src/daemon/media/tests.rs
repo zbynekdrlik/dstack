@@ -792,3 +792,59 @@ fn the_fixed_rx_ports_are_bound_before_any_port_the_os_chooses() {
         assert_eq!(usize::from(ports[0]), usize::from(base));
     }
 }
+
+#[test]
+fn the_fixed_side_binds_first_and_rx_unless_only_tx_is_fixed() {
+    assert!(tx_binds_first(None, Some(31_000)));
+    assert!(!tx_binds_first(Some(47_000), Some(31_000)));
+    assert!(!tx_binds_first(Some(47_000), None));
+    assert!(!tx_binds_first(None, None));
+}
+
+/// dstack #262: with only `tx_port_base` set, the TX side binds its fixed
+/// ports before the RX sockets' ports the OS chooses, which may lie in that
+/// range (the mirror of the RX-first order above).
+#[cfg(target_os = "linux")]
+#[test]
+fn the_fixed_tx_ports_are_bound_before_any_port_the_os_chooses() {
+    let range = std::fs::read_to_string("/proc/sys/net/ipv4/ip_local_port_range").unwrap();
+    let mut ends = range.split_whitespace().map(|p| p.parse::<u16>().unwrap());
+    let (low, high) = (ends.next().unwrap(), ends.next().unwrap());
+    assert!(high - low > 1_000, "ephemeral range {low}..{high}");
+    // An address of its own, so no other test's sockets share its ports.
+    let ip = Ipv4Addr::new(127, 0, 0, 78);
+    let dir = tempfile::tempdir().unwrap();
+    // A base whose ports another process already holds is skipped.
+    let free = |base: u16| {
+        let held: Vec<_> = (base..base + MAX_FLOWS as u16)
+            .map_while(|p| std::net::UdpSocket::bind((ip, p)).ok())
+            .collect();
+        held.len() == MAX_FLOWS
+    };
+    for k in 0..300u32 {
+        let mut base = low + u16::try_from(k * 89 % u32::from(high - low - 40)).unwrap();
+        while !free(base) {
+            base += MAX_FLOWS as u16;
+        }
+        let cfg = DeviceConfig {
+            state_file: dir.path().join("state.toml"),
+            tx_port_base: Some(base),
+            ..DeviceConfig::from_toml(TEST_DEVICE).unwrap()
+        };
+        let device = Device::load(cfg).unwrap();
+        let clock = Clock {
+            ptp: Arc::new(Unready),
+            freq: Arc::default(),
+            stats: Arc::default(),
+        };
+        let media = Media::new(&device, ip, clock, 7, &[])
+            .unwrap_or_else(|e| panic!("start {k}, base {base}: {e}"));
+        let ports = media.tx.ports();
+        assert_eq!(ports.len(), MAX_FLOWS);
+        assert_eq!(usize::from(ports[0]), usize::from(base));
+        assert_eq!(
+            usize::from(ports[MAX_FLOWS - 1]),
+            usize::from(base) + MAX_FLOWS - 1
+        );
+    }
+}

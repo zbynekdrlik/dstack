@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.6.116
+
+- New config key `tx_port_base` (dstack #262; dlink: `Config::tx_port_base(base)`): the TX flow sockets take fixed ports, slot `n` on `tx_port_base + n` over the device's flow slots (32 at most), so a stateless Dante-leg filter can accept a receiver's keepalives to them. Unset, the OS chooses the ports as before: no default change. On the stream PC (13.11.2026) the keepalives to ephemeral TX ports were dropped by such a filter, the TX flow expired after 4 s and the receiver asked again every ~9 s.
+  - Refused at start, with the problem line `tx_port_base: 1024 to 65504, its 32 ports clear of rx_port_base's ports, the ARC, CMC and flow-control ports and every slot's (4440-4486, 8800-8831)`: a range below 1024 or past 65535, one that overlaps `rx_port_base`'s 32 ports, the device's own ARC/CMC/flow-control ports, or any slot's ARC (4440-4471), flow-control (4455-4486) or CMC (8800-8831) ports. A taken port is named (`TX flow port N: ...`).
+  - The bound TX ports are logged at start (`TX flow sockets bound ports=<first>-<last> fixed=true`, or each port when the OS chose them).
+  - With only `tx_port_base` set, the TX sockets bind before the RX ones (the RX ports the OS chooses could otherwise take a fixed TX port); a fixed `rx_port_base` still binds first.
+  - New `TxShared::ports()`: each flow slot's socket's port.
+  - `docs/two-networks.md`: a box with TX behind a leg without conntrack sets the key and accepts that range from the Dante subnet.
+- Consumers: additive, nothing to port. `DeviceConfig` has a new public field `tx_port_base` (a full struct literal adds it or `..`; `from_toml` and dlink need nothing). No latency change for any app. Boxes with TX behind a stateless filter (camera-box, presenter, songplayer, obs) can set it once they move to v0.6.116.
+
 ## 0.6.115
 
 - Fix (dstack #239, `tools/windows/lan-selfheal.ps1`): the LAN self-heal never disables, enables or restarts a virtual VLAN adapter. `Disable-NetAdapter` on a Realtek Virtual Adapter (driver 10.4.1117.2020) bugchecked dasio's test PC, and the repair's `Restart-NetAdapter` (a disable plus an enable) would have done the same on a layout-B PC, whose LAN adapter is that virtual adapter. A pure `Test-VirtualVlanAdapter` reads the LAN adapter's `InterfaceDescription` ("Realtek Virtual Adapter", or one naming a VLAN or a vendor's virtual adapter); for such an adapter the repair is the VLAN ID (`-NoRestart`), the IPv4 binding, DHCP, then `RenewDHCPLease` on that adapter (by interface index), and the log says the restart was skipped. A disabled virtual LAN adapter is a WARN and exit 1, never enabled. A VLAN ID the repair had to write to a virtual adapter (`-NoRestart`) may apply only when the adapter re-initializes: a WARN (reboot the PC if the LAN stays down) and exit 1. A LAN adapter whose description cannot be read fails closed: repaired like a virtual one, with a WARN. The Enable and Restart steps also refuse a virtual or undescribed adapter themselves. Layout A (the LAN on the physical base adapter) keeps its restart, as tested on the SongPlayer PC.
