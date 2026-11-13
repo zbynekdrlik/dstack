@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.123
+
+- **Fix (dstack #274): our ARC flow lists carry a flow socket descriptor and the frames per packet as a real Dante device writes them.** A socket descriptor (each TX flow's receiver or group in 0x2200, our address in 0x3200) starts with its length and address family, `08 02` (8 bytes, IPv4), as an ARC 2.7 card (Yamaha AIC128-D) writes it and netaudio reads it. We wrote `80 02` (copied from inferno's ARC server), which netaudio reads as a 128-byte descriptor in 0x2200 and refuses in 0x3200. The 0x2200 names descriptor's word at +8 is now the flow's frames per packet (the card states 4, 16 or 32 per flow); it was a fixed 0x10.
+  - `arc::flows::v27::list_tx_flows_27` still reads `80 02`, so a reader on this version lists an older dstack device's flows.
+  - No public API change.
+- **No latency change** for any app.
+- Consumers: move the stack version; nothing to port.
+
 ## 0.6.122
 
 - **Fix (dstack #273): an info request the device does not answer no longer logs a line per request.** Bitfocus Companion's Dante module asks every device info opcode 0x100a once a second; no Audinate device answers it, and dstack keeps not answering it. Each request was one INFO line (`info request not answered`), about 86 000 a day per device.
