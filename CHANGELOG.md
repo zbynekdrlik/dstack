@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.108
+
+- Fix (dstack #246): the settings window's banner area showed its orange background with no text (seen on Windows with v0.6.107). It is the window's background until a change needs a restart, as in the mockup.
+- No API change, no latency change.
+
 ## 0.6.107
 
 - New (dstack #246, owner-approved mockup v1, `docs/mockups/dtray-dasio-settings-v1.html`): dtray's dasio settings window on Windows. One window, a tab per dasio instance found on the PC (`%ProgramData%\dasio\instance-N\device.toml`, service `dasio-N`), a live status line on top (from the device's status: the app's line and the clock). Opened from the tray menu's new "dasio settings…" (shown when the PC had an instance at the tray's start) or alone with `dtray --settings`.
