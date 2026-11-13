@@ -190,3 +190,51 @@ fn the_minute_watch_tells_reorders_and_the_loss_watch_stays_quiet() {
     );
     assert_eq!(info(&mut || minute.watch(2 * MINUTE_NS, &s, named)), "");
 }
+
+/// The playout point counts the flow's block too: a hole is lost at its
+/// end plus latency plus block, not at latency alone.
+#[test]
+fn a_hole_is_lost_at_the_latency_plus_the_block() {
+    let s = shared(1);
+    let mut rx = Receiver::new(Arc::clone(&s)).unwrap();
+    let mut p = plan(LOOPBACK, 1, true, 1);
+    p.latency = 192;
+    p.block = 32;
+    publish(&s, &[(0, p)], &[(0, RxRoute { flow: 0, slot: 0 })]);
+    let t = transmitter(LOOPBACK);
+    let p0 = 1_000_000_000u64;
+    for k in [0, 1, 3] {
+        t.send_to(&packet_at(p0 + 32 * k, 1, 32), slot_addr(&s, 0))
+            .unwrap();
+    }
+    pump(&mut rx, 0, 3, Some(ns_of(p0 + 130, RATE)), 0);
+    rx.pass(Some(ns_of(p0 + 96 + 192 + 32 - 1, RATE)), 0);
+    assert_eq!(s.lane(0).gaps, 0, "a sample before latency + block");
+    rx.pass(Some(ns_of(p0 + 96 + 192 + 32, RATE)), 0);
+    assert_eq!((s.lane(0).gaps, s.lane(0).gap_frames), (1, 32));
+}
+
+/// A filler that comes after its hole fell behind the playout is late:
+/// the hole is a gap, the filler no reorder (dstack #278 review).
+#[test]
+fn a_filler_after_the_playout_is_late_and_its_hole_a_gap() {
+    let (s, mut rx, t) = rig(192);
+    let p0 = 1_000_000_000u64;
+    for k in [0, 1, 3] {
+        t.send_to(&packet_at(p0 + 32 * k, 1, 32), slot_addr(&s, 0))
+            .unwrap();
+    }
+    pump(&mut rx, 0, 3, Some(ns_of(p0 + 130, RATE)), 0);
+    assert_eq!(s.lane(0).gaps, 0);
+    // Packet 2 comes once the pump read past its frames, in the same pass
+    // that first sees that time.
+    t.send_to(&packet_at(p0 + 64, 1, 32), slot_addr(&s, 0))
+        .unwrap();
+    pump(&mut rx, 0, 4, Some(ns_of(p0 + 96 + 192 + 10, RATE)), 0);
+    let c = s.lane(0);
+    assert_eq!(
+        (c.gaps, c.gap_frames, c.reordered, c.late, c.out_of_order),
+        (1, 32, 0, 1, 1),
+        "{c:?}"
+    );
+}

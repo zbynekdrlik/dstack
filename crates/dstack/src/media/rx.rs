@@ -84,12 +84,13 @@ use crate::wire::MAX_DATAGRAM;
 
 mod counts;
 mod holes;
+mod lane;
 mod netlat;
 mod plan;
 mod wake;
 pub use counts::RxCounts;
 use counts::{NO_LATENESS, RxStats, source_of, source_word};
-use holes::{Holes, Lost};
+use lane::{Lane, count_lost};
 mod socket;
 pub use netlat::NetLatency;
 pub use plan::{RxPlan, RxRoute};
@@ -543,48 +544,6 @@ impl RxShared {
     }
 }
 
-/// One flow slot as the RX thread sees it.
-#[derive(Debug)]
-struct Lane {
-    /// The plan cell's version read last.
-    seen: Option<u32>,
-    plan: RxPlan,
-    /// (channel slot, RX channel) for each RX channel routed here;
-    /// allocated for every RX channel, so a rebuild never allocates.
-    targets: Vec<(usize, usize)>,
-    /// Where the flow's audio comes from: the keepalives' destination.
-    source: Option<SocketAddrV4>,
-    /// When its last packet came (the thread's clock, ns).
-    heard: Option<u64>,
-    next_keepalive: Option<u64>,
-    /// The end of the furthest packet so far, samples.
-    end: Option<u64>,
-    /// The runs of frames before `end` that no packet has filled yet
-    /// (dstack #278): a gap only once lost ([`Holes`]).
-    holes: Holes,
-}
-
-impl Lane {
-    fn new(channels: usize) -> Self {
-        Lane {
-            seen: None,
-            plan: RxPlan::default(),
-            targets: Vec::with_capacity(channels),
-            source: None,
-            heard: None,
-            next_keepalive: None,
-            end: None,
-            holes: Holes::default(),
-        }
-    }
-}
-
-/// Holes given up as lost, counted as gaps of their frames.
-fn count_lost(stats: &RxStats, lost: Lost) {
-    stats.gaps.fetch_add(lost.holes, Ordering::Relaxed);
-    stats.gap_frames.fetch_add(lost.frames, Ordering::Relaxed);
-}
-
 /// The RX thread's state: everything it needs, allocated before its loop.
 #[derive(Debug)]
 pub struct Receiver {
@@ -674,6 +633,7 @@ impl Receiver {
     pub fn pass(&mut self, now_ns: Option<u64>, mono: u64) {
         let wall = self.shared.stamps().then(wall_now_ns).flatten();
         self.refresh();
+        self.expire(now_ns);
         let mut ready = self.ready;
         while ready != 0 {
             let slot = ready.trailing_zeros() as usize;
@@ -682,16 +642,19 @@ impl Receiver {
                 self.ready &= !(1 << slot);
             }
         }
-        if let Some(ns) = now_ns {
-            self.expire(clock::to_samples(ns, self.shared.rate));
-        }
+        // Holes behind the playout are lost before and after the reads: a
+        // packet for a hole the pump already read is late, no reorder.
+        self.expire(now_ns);
         self.keepalives(mono);
     }
 
-    /// At our clock's `now` (samples), each flow's holes wholly behind its
-    /// playout point (its latency and block before `now`) are lost: the
-    /// pump has read past them (dstack #278).
-    fn expire(&mut self, now: u64) {
+    /// At PTP time `now_ns` (`None`: our clock is not ready, nothing to
+    /// do), each flow's holes wholly behind its playout point (its latency
+    /// and block before now) are lost: the pump has read past them (dstack
+    /// #278).
+    fn expire(&mut self, now_ns: Option<u64>) {
+        let Some(ns) = now_ns else { return };
+        let now = clock::to_samples(ns, self.shared.rate);
         for (lane, stats) in self.lanes.iter_mut().zip(self.shared.lanes.iter()) {
             let limit = u64::from(lane.plan.latency) + u64::from(lane.plan.block);
             count_lost(stats, lane.holes.expire(now.saturating_sub(limit)));
@@ -867,7 +830,6 @@ impl Receiver {
             if let Some(w) = wake {
                 stats.max_wake_ns.fetch_max(w, Ordering::Relaxed);
                 stats.wake_peak_ns.fetch_max(w, Ordering::Relaxed);
-                stats.wake_minute.record(w);
             }
             let Some((now_ns, now)) = now else {
                 count(&stats.unplaced);
@@ -883,7 +845,8 @@ impl Receiver {
                 .0
                 .fetch_min(now_ns.saturating_sub(ns_of(pos, rate)), Ordering::Relaxed);
             let limit = u64::from(lane.plan.latency) + u64::from(lane.plan.block);
-            if lateness > limit {
+            let late = lateness > limit;
+            if late {
                 count(&stats.late);
             }
             if let Some(w) = wake {
@@ -893,27 +856,19 @@ impl Receiver {
                 let network = netlat::network_latency_ns(now_ns, w, ns_of(pos, rate));
                 stats.network.record(network);
                 stats.network_minute.record(network);
+                // The minute's two windows hold the same packets.
+                stats.wake_minute.record(w);
             }
             let end = pos.saturating_add(nframes as u64);
-            // dstack #278: a jump past the end opens a hole, a gap only
-            // once lost; a packet before the end that fills a hole is a
-            // reorder.
-            match lane.end {
-                Some(e) if pos < e => {
-                    count(&stats.out_of_order);
-                    let (filled, lost) = lane.holes.fill(pos, end);
-                    if filled {
-                        count(&stats.reordered);
-                    }
-                    count_lost(stats, lost);
-                    lane.end = Some(e.max(end));
-                }
-                Some(e) if pos > e => {
-                    count_lost(stats, lane.holes.open(e, pos));
-                    lane.end = Some(end);
-                }
-                _ => lane.end = Some(end),
+            // dstack #278: holes, reorders and gaps.
+            let placed = holes::place(&mut lane.end, &mut lane.holes, pos, end, !late);
+            if placed.out_of_order {
+                count(&stats.out_of_order);
             }
+            if placed.reordered {
+                count(&stats.reordered);
+            }
+            count_lost(stats, placed.lost);
             let mut read_before = false;
             for &(s, rx) in &lane.targets {
                 if s < nslots

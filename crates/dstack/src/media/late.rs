@@ -400,7 +400,7 @@ pub const MINUTE_NS: u64 = 60_000_000_000;
 /// The RX side's minute watch: once a minute, each flow whose packets came
 /// reordered (overtaken on the way, each filling its hole) gets one INFO
 /// line, apart from the loss watch's warning: a reordering link shows
-/// without a loss alarm (dstack #278). And each flow with stamped packets
+/// without a loss alarm (dstack #278). And each flow with stamped, placed packets
 /// (Linux) gets one INFO line of its minute's wake delay and network
 /// latency, the only way to read them from an app without a status socket
 /// (dstack #234: OBS's dante-input).

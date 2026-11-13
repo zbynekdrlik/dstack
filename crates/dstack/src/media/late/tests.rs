@@ -318,6 +318,7 @@ fn an_empty_peer_name_reads_a_dash() {
 #[test]
 fn the_rx_minute_watch_gives_each_minute_s_reorders() {
     use super::{MINUTE_NS, RxMinute};
+    use crate::media::rx::MAX_FLOWS;
     let counts = RefCell::new([0u64; MAX_FLOWS]);
     let mut w = RxMinute::default();
     let look = |w: &mut RxMinute, now| w.look(now, |s| counts.borrow()[s]);

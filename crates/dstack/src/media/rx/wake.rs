@@ -12,7 +12,9 @@
 //! RX thread records one `fetch_add` and one `fetch_max` per packet: no
 //! allocation, no lock. A take ([`Window::take`]) zeroes each bucket as it
 //! reads it; a packet recorded meanwhile counts in this window or the
-//! next, never in both. Windows has no receive stamp: nothing is recorded
+//! next, never in both, though its largest may land in the other window
+//! than its count (which can only lower this window's top figures by that
+//! one packet's). Windows has no receive stamp: nothing is recorded
 //! there.
 
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};

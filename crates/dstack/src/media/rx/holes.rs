@@ -139,5 +139,47 @@ impl Holes {
     }
 }
 
+/// What a packet did to its flow's holes ([`place`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Placed {
+    /// It began before the end of the furthest packet so far.
+    pub out_of_order: bool,
+    /// It filled (part of) an open hole in time: overtaken, not lost.
+    pub reordered: bool,
+    /// Holes given up to make room.
+    pub lost: Lost,
+}
+
+/// A packet of `start..end` (samples) arrived, `in_time` when it was not
+/// past its flow's playout plus block (not `late`); `furthest` is the end
+/// of the furthest packet so far, moved on by it. A jump past `furthest`
+/// opens a hole; a packet before it fills what it covers, a reorder only
+/// in time (a late one's frames were read already: lost, counted `late`).
+/// The flow's first packet opens nothing.
+pub fn place(
+    furthest: &mut Option<u64>,
+    holes: &mut Holes,
+    start: u64,
+    end: u64,
+    in_time: bool,
+) -> Placed {
+    let mut placed = Placed::default();
+    match *furthest {
+        Some(e) if start < e => {
+            placed.out_of_order = true;
+            let (filled, lost) = holes.fill(start, end);
+            placed.reordered = filled && in_time;
+            placed.lost = lost;
+            *furthest = Some(e.max(end));
+        }
+        Some(e) => {
+            placed.lost = holes.open(e, start);
+            *furthest = Some(end);
+        }
+        None => *furthest = Some(end),
+    }
+    placed
+}
+
 #[cfg(test)]
 mod tests;

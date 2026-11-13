@@ -115,3 +115,68 @@ fn a_clear_loses_every_open_hole() {
     assert!(h.open_holes().is_empty());
     assert_eq!(h.clear(), Lost::default());
 }
+
+#[test]
+fn a_flow_s_first_packet_opens_nothing_and_a_contiguous_one_neither() {
+    let (mut end, mut h) = (None, Holes::default());
+    assert_eq!(place(&mut end, &mut h, 100, 132, true), Placed::default());
+    assert_eq!(end, Some(132));
+    assert_eq!(place(&mut end, &mut h, 132, 164, true), Placed::default());
+    assert_eq!((end, h.open_holes().len()), (Some(164), 0));
+}
+
+#[test]
+fn a_jump_opens_a_hole_and_its_filler_in_time_is_a_reorder() {
+    let (mut end, mut h) = (Some(64), Holes::default());
+    assert_eq!(place(&mut end, &mut h, 96, 128, true), Placed::default());
+    assert_eq!((end, h.open_holes()), (Some(128), &[(64, 96)][..]));
+    let placed = place(&mut end, &mut h, 64, 96, true);
+    assert_eq!(
+        placed,
+        Placed {
+            out_of_order: true,
+            reordered: true,
+            lost: Lost::default()
+        }
+    );
+    assert_eq!((end, h.open_holes().len()), (Some(128), 0));
+    // A repeat: out of order, no reorder, the end kept.
+    let placed = place(&mut end, &mut h, 64, 96, true);
+    assert_eq!((placed.out_of_order, placed.reordered), (true, false));
+    assert_eq!(end, Some(128));
+}
+
+/// A filler past the playout (late): its frames were read already, so it
+/// is no reorder ("not lost" would be wrong), though the hole closes.
+#[test]
+fn a_late_filler_is_no_reorder() {
+    let (mut end, mut h) = (Some(64), Holes::default());
+    place(&mut end, &mut h, 96, 128, true);
+    let placed = place(&mut end, &mut h, 64, 96, false);
+    assert_eq!((placed.out_of_order, placed.reordered), (true, false));
+    assert!(h.open_holes().is_empty());
+}
+
+/// A packet that begins before the end and reaches past it moves the end.
+#[test]
+fn an_overlap_past_the_end_moves_it_on() {
+    let (mut end, mut h) = (Some(64), Holes::default());
+    let placed = place(&mut end, &mut h, 60, 92, true);
+    assert_eq!((placed.out_of_order, placed.reordered), (true, false));
+    assert_eq!(end, Some(92));
+}
+
+/// A full set: the jump that opens a 17th hole loses the oldest.
+#[test]
+fn a_jump_into_a_full_set_loses_the_oldest() {
+    let (mut end, mut h) = (Some(0), Holes::default());
+    for k in 0..=HOLES as u64 {
+        let p = place(&mut end, &mut h, 64 * k + 32, 64 * k + 64, true);
+        let want = if k == HOLES as u64 {
+            lost(1, 32)
+        } else {
+            Lost::default()
+        };
+        assert_eq!(p.lost, want, "{k}");
+    }
+}
