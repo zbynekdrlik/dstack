@@ -23,6 +23,9 @@ exclude_globs = [
   # The RX receive path off Linux (dstack #234): recv_from with no stamp.
   "crates/dstack/src/media/rx/socket/other.rs",
   "crates/dstack/src/traffic/windows.rs",
+  # The shared registry read (dstack #256): its decisions are lso's and
+  # media::dscp's (each tested); Windows CI reads a test key with it.
+  "crates/dstack/src/winreg.rs",
   "crates/dtray/src/win.rs",
   # dtray's dasio settings window and its Windows calls (dstack #246): the
   # window, the adapters, the elevated start and the SCM restart; their

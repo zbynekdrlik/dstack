@@ -7,18 +7,17 @@ use std::net::{SocketAddrV4, UdpSocket};
 use std::os::windows::io::AsRawSocket;
 
 use tracing::{debug, info, warn};
-use windows_sys::Win32::Foundation::{GetLastError, HANDLE};
+use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, GetLastError, HANDLE};
 use windows_sys::Win32::NetworkManagement::QoS::{
     QOS_NON_ADAPTIVE_FLOW, QOS_VERSION, QOSAddSocketToFlow, QOSCloseHandle, QOSCreateHandle,
     QOSRemoveSocketFromFlow, QOSSetFlow, QOSSetOutgoingDSCPValue, QOSTrafficTypeAudioVideo,
 };
 use windows_sys::Win32::Networking::WinSock::{AF_INET, SOCKADDR, SOCKADDR_IN};
 
-use super::{
-    POLICY_KEY, POLICY_VALUES, Policy, PolicyValue, Verdict, marking_policy, unmarked_note, verdict,
-};
+use super::{POLICY_KEY, Policy, PolicyValue, Verdict, marking_policy, unmarked_note, verdict};
 use crate::media::tx::DSCP_EF;
 use crate::media::tx::MAX_FLOWS;
+use crate::winreg;
 
 /// The QoS2 handle and each slot's flow.
 #[derive(Debug)]
@@ -170,7 +169,7 @@ fn policy_note() -> Option<String> {
             return None;
         }
     };
-    let policies = read_policies();
+    let policies = read_policies(winreg::HKEY_LOCAL_MACHINE, POLICY_KEY);
     debug!(
         count = policies.len(),
         exe, "QoS policies read from HKLM\\{POLICY_KEY}"
@@ -178,101 +177,46 @@ fn policy_note() -> Option<String> {
     unmarked_note(marking_policy(&policies, &exe))
 }
 
-/// The QoS policies under HKLM\[`POLICY_KEY`], with their
-/// [`POLICY_VALUES`]; none when the key is absent (no policy).
-pub(super) fn read_policies() -> Vec<Policy> {
-    use windows_sys::Win32::System::Registry::{
-        HKEY, HKEY_LOCAL_MACHINE, KEY_READ, RegCloseKey, RegEnumKeyExW, RegOpenKeyExW,
-    };
-    let key = wide(POLICY_KEY);
-    let mut root: HKEY = std::ptr::null_mut();
-    // SAFETY: a NUL-terminated key name and a writable handle.
-    if unsafe { RegOpenKeyExW(HKEY_LOCAL_MACHINE, key.as_ptr(), 0, KEY_READ, &mut root) } != 0 {
-        return Vec::new();
-    }
-    let mut policies = Vec::new();
-    for index in 0u32.. {
-        // A key name holds 255 characters at most.
-        let mut name = [0u16; 256];
-        let mut len = name.len() as u32;
-        // SAFETY: an open key; `name` holds `len` characters; the rest out
-        // pointers are null (not wanted).
-        let r = unsafe {
-            RegEnumKeyExW(
-                root,
-                index,
-                name.as_mut_ptr(),
-                &mut len,
-                std::ptr::null(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            )
-        };
-        if r != 0 {
-            break;
+/// The QoS policies under `root`\\`path` (HKLM\\[`POLICY_KEY`]), each with
+/// its string and DWORD values; none when the key is absent (no policy).
+pub(super) fn read_policies(root: winreg::HKEY, path: &str) -> Vec<Policy> {
+    let key = match winreg::Key::open(root, path) {
+        Ok(key) => key,
+        Err(ERROR_FILE_NOT_FOUND) => return Vec::new(),
+        Err(code) => {
+            debug!(code, path, "QoS policies unread: the key does not open");
+            return Vec::new();
         }
-        let sub = &name[..(len as usize).min(name.len())];
-        let values = POLICY_VALUES
-            .iter()
-            .filter_map(|v| read_value(root, sub, v).map(|x| ((*v).to_string(), x)))
-            .collect();
-        policies.push(Policy {
-            name: String::from_utf16_lossy(sub),
-            values,
-        });
-    }
-    // SAFETY: the key this function opened.
-    unsafe { RegCloseKey(root) };
-    policies
-}
-
-/// The string or DWORD value `value` of `root`'s subkey `sub`.
-fn read_value(
-    root: windows_sys::Win32::System::Registry::HKEY,
-    sub: &[u16],
-    value: &str,
-) -> Option<PolicyValue> {
-    use windows_sys::Win32::System::Registry::{
-        REG_DWORD, REG_SZ, RRF_RT_REG_DWORD, RRF_RT_REG_SZ, RegGetValueW,
     };
-    let sub: Vec<u16> = sub.iter().copied().chain(std::iter::once(0)).collect();
-    let v = wide(value);
-    let mut buf = [0u16; 512];
-    let mut len = (buf.len() * 2) as u32;
-    let mut kind = 0u32;
-    // SAFETY: an open key, NUL-terminated names, `buf` is `len` writable
-    // bytes, `kind` writable.
-    let r = unsafe {
-        RegGetValueW(
-            root,
-            sub.as_ptr(),
-            v.as_ptr(),
-            RRF_RT_REG_SZ | RRF_RT_REG_DWORD,
-            &mut kind,
-            buf.as_mut_ptr().cast(),
-            &mut len,
-        )
-    };
-    if r != 0 {
-        return None;
+    let (names, error) = key.subkeys();
+    if let Some(code) = error {
+        debug!(
+            code,
+            path,
+            read = names.len(),
+            "QoS policies: listing stopped"
+        );
     }
-    match kind {
-        REG_DWORD => Some(PolicyValue::Number(
-            u32::from(buf[0]) | (u32::from(buf[1]) << 16),
-        )),
-        REG_SZ => {
-            let n = (len as usize / 2).min(buf.len());
-            Some(PolicyValue::Text(
-                String::from_utf16_lossy(&buf[..n])
-                    .trim_end_matches('\0')
-                    .to_string(),
-            ))
-        }
-        _ => None,
-    }
-}
-
-fn wide(s: &str) -> Vec<u16> {
-    s.encode_utf16().chain(std::iter::once(0)).collect()
+    names
+        .into_iter()
+        .filter_map(|name| match key.values(&name) {
+            Ok(values) => Some(Policy {
+                values: values
+                    .into_iter()
+                    .map(|(k, v)| {
+                        let v = match v {
+                            winreg::Value::Text(s) => PolicyValue::Text(s),
+                            winreg::Value::Number(n) => PolicyValue::Number(n),
+                        };
+                        (k, v)
+                    })
+                    .collect(),
+                name,
+            }),
+            Err(code) => {
+                debug!(code, policy = %name, "QoS policy unread");
+                None
+            }
+        })
+        .collect()
 }

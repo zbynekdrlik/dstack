@@ -43,7 +43,7 @@ fn text(s: &str) -> PolicyValue {
     PolicyValue::Text(s.into())
 }
 
-const EXE: &str = r"C:\Program Files\dasio\dsend.exe";
+const EXE: &str = r"C:\Apps\tx\dsend.exe";
 
 /// `New-NetQosPolicy`'s form (Version 2.0: DWORDs, protocol 2 = UDP).
 fn netqos(name: &str, app: &str, dscp: u32, protocol: Option<u32>) -> Policy {
@@ -73,20 +73,15 @@ fn gpedit(name: &str, app: &str, dscp: &str, protocol: &str) -> Policy {
 fn a_policy_for_this_exe_with_dscp_46_marks_the_audio() {
     // UDP (2), both (3), none (0) and no protocol value all cover UDP.
     for protocol in [Some(2), Some(3), Some(0), None] {
-        let p = [netqos("dasio-dsend", "dsend.exe", 46, protocol)];
-        assert_eq!(marking_policy(&p, EXE), Some("dasio-dsend"), "{protocol:?}");
+        let p = [netqos("audio-tx", "dsend.exe", 46, protocol)];
+        assert_eq!(marking_policy(&p, EXE), Some("audio-tx"), "{protocol:?}");
     }
     for protocol in ["*", "UDP", "udp"] {
         let p = [gpedit("audio", "DSEND.EXE", "46", protocol)];
         assert_eq!(marking_policy(&p, EXE), Some("audio"), "{protocol}");
     }
     // A full path names this exe too, in any case.
-    let p = [netqos(
-        "path",
-        r"c:\program files\dasio\DSEND.exe",
-        46,
-        Some(2),
-    )];
+    let p = [netqos("path", r"c:\apps\TX\DSEND.exe", 46, Some(2))];
     assert_eq!(marking_policy(&p, EXE), Some("path"));
     // The first matching policy is named.
     let p = [
@@ -152,10 +147,56 @@ fn another_program_dscp_or_protocol_still_warns() {
 }
 
 #[test]
+fn a_condition_that_narrows_the_policy_still_warns() {
+    let with = |k: &str, v: PolicyValue| {
+        let mut p = netqos("p", "dsend.exe", 46, Some(2));
+        p.values.push((k.into(), v));
+        [p]
+    };
+    let n = PolicyValue::Number;
+    // A port, an address, a profile not all of them, or one we do not know.
+    for (k, v) in [
+        ("DstPortLow", n(14336)),
+        ("RemotePort", text("5004")),
+        ("Remote IP", text("10.0.0.0")),
+        ("NetProfile", n(2)),
+        ("Something New", n(0)),
+    ] {
+        assert_eq!(marking_policy(&with(k, v.clone()), EXE), None, "{k}");
+    }
+    // Neutral: the form, the order, the throttle, all profiles, a `*`.
+    for (k, v) in [
+        ("Version", text("2.0")),
+        ("Precedence", n(127)),
+        ("Throttle Rate", text("-1")),
+        ("ThrottleRate", n(0)),
+        ("NetProfile", n(7)),
+        ("Local Port", text("*")),
+        ("Remote IP", text(" ")),
+        ("version", text("1.0")),
+    ] {
+        assert_eq!(marking_policy(&with(k, v.clone()), EXE), Some("p"), "{k}");
+    }
+    // The group policy editor's full form, every unused condition `*`.
+    let mut p = gpedit("gp", "dsend.exe", "46", "UDP");
+    for k in [
+        "Local Port",
+        "Local IP",
+        "Local IP Prefix Length",
+        "Remote Port",
+        "Remote IP",
+        "Remote IP Prefix Length",
+    ] {
+        p.values.push((k.into(), text("*")));
+    }
+    assert_eq!(marking_policy(&[p], EXE), Some("gp"));
+}
+
+#[test]
 fn a_marking_policy_turns_the_warning_into_an_info_line() {
     assert_eq!(
-        unmarked_note(Some("dasio-dsend")).as_deref(),
-        Some("TX audio marked DSCP 46 by QoS policy 'dasio-dsend'")
+        unmarked_note(Some("audio-tx")).as_deref(),
+        Some("TX audio marked DSCP 46 by QoS policy 'audio-tx'")
     );
     assert_eq!(unmarked_note(None), None);
 }
@@ -195,12 +236,106 @@ fn windows_marks_a_flow_socket_ef() {
     qos.mark(0, &socket, None);
 }
 
-/// On Windows the policies are read from the registry (CI's runner has
-/// none, or its own): the read never fails, and each policy has a name.
+/// On Windows the policies are read from the registry: both value types,
+/// as `New-NetQosPolicy` writes them, under a temporary HKCU key (the
+/// test may not write HKLM), removed after.
 #[cfg(windows)]
 #[test]
 fn windows_reads_the_qos_policies() {
-    for p in windows::read_policies() {
-        assert!(!p.name.is_empty());
+    use crate::winreg::wide;
+    use windows_sys::Win32::System::Registry::{
+        HKEY, HKEY_CURRENT_USER, REG_DWORD, REG_SZ, RegCloseKey, RegCreateKeyExW, RegDeleteTreeW,
+        RegSetValueExW,
+    };
+
+    fn set(key: HKEY, name: &str, kind: u32, data: &[u8]) {
+        let name = wide(name);
+        // SAFETY: an open key, a NUL-terminated name, `data` readable.
+        let r = unsafe {
+            RegSetValueExW(
+                key,
+                name.as_ptr(),
+                0,
+                kind,
+                data.as_ptr(),
+                data.len() as u32,
+            )
+        };
+        assert_eq!(r, 0, "set a test value");
     }
+    fn text(s: &str) -> Vec<u8> {
+        wide(s).iter().flat_map(|w| w.to_le_bytes()).collect()
+    }
+    fn create(path: &str) -> HKEY {
+        let path = wide(path);
+        let mut key: HKEY = std::ptr::null_mut();
+        // SAFETY: a NUL-terminated path and a writable handle; the rest
+        // default (null).
+        let r = unsafe {
+            RegCreateKeyExW(
+                HKEY_CURRENT_USER,
+                path.as_ptr(),
+                0,
+                std::ptr::null(),
+                0,
+                windows_sys::Win32::System::Registry::KEY_ALL_ACCESS,
+                std::ptr::null(),
+                &mut key,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(r, 0, "create a test key");
+        key
+    }
+
+    let root = format!(r"Software\dstack-test-qos-{}", std::process::id());
+    let exe = std::env::current_exe().unwrap();
+    let file = exe.file_name().unwrap().to_string_lossy().into_owned();
+
+    let k = create(&format!(r"{root}\audio-tx"));
+    set(k, "Version", REG_SZ, &text("2.0"));
+    set(k, "AppName", REG_SZ, &text(&file));
+    set(k, "DSCP", REG_DWORD, &46u32.to_le_bytes());
+    set(k, "Protocol", REG_DWORD, &2u32.to_le_bytes());
+    set(k, "NetProfile", REG_DWORD, &7u32.to_le_bytes());
+    // SAFETY: the key opened above.
+    unsafe { RegCloseKey(k) };
+    let k = create(&format!(r"{root}\by-port"));
+    set(k, "AppName", REG_SZ, &text(&file));
+    set(k, "DSCP", REG_DWORD, &46u32.to_le_bytes());
+    set(k, "DstPortLow", REG_DWORD, &4321u32.to_le_bytes());
+    // SAFETY: the key opened above.
+    unsafe { RegCloseKey(k) };
+
+    let mut policies = windows::read_policies(HKEY_CURRENT_USER, &root);
+    let path = wide(&root);
+    // SAFETY: a NUL-terminated path under HKCU this test created.
+    unsafe { RegDeleteTreeW(HKEY_CURRENT_USER, path.as_ptr()) };
+
+    policies.sort_by(|a, b| a.name.cmp(&b.name));
+    assert_eq!(policies.len(), 2);
+    let (tx, port) = (&policies[0], &policies[1]);
+    assert_eq!(tx.name, "audio-tx");
+    assert!(
+        tx.values
+            .contains(&("DSCP".into(), PolicyValue::Number(46)))
+    );
+    assert!(
+        tx.values
+            .contains(&("AppName".into(), PolicyValue::Text(file.clone())))
+    );
+    assert!(
+        tx.values
+            .contains(&("Version".into(), PolicyValue::Text("2.0".into())))
+    );
+    assert!(
+        port.values
+            .contains(&("DstPortLow".into(), PolicyValue::Number(4321)))
+    );
+    // The port-bound one never counts, whichever order the registry lists.
+    let exe = exe.to_string_lossy();
+    assert_eq!(marking_policy(&policies, &exe), Some("audio-tx"));
+    assert_eq!(marking_policy(&policies[1..], &exe), None);
+    // The machine's own policies read without failing.
+    let _ = windows::read_policies(crate::winreg::HKEY_LOCAL_MACHINE, POLICY_KEY);
 }
