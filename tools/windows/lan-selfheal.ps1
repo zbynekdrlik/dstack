@@ -581,9 +581,9 @@ function Get-FirewallRuleByName {
 function Enable-BlockRuleChecked {
     # Enables a dstack155 rule by its Name and reads it back; true if it
     # changed anything.
-    param([Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][string]$Label)
+    param([Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][string]$Label, [string]$Hint = '')
     $r = Get-FirewallRuleByName -Name $Name
-    if ($null -eq $r) { throw "the rule '$Label' ($Name) is gone" }
+    if ($null -eq $r) { throw "'$Label' is gone$Hint" }
     if (Test-RuleEnabled -Rule $r) { return $false }
     Enable-NetFirewallRule -Name $Name | Out-Null
     if (-not (Test-RuleEnabled -Rule (Get-FirewallRuleByName -Name $Name))) {
@@ -679,19 +679,20 @@ function Close-EmergencyPath {
     if ($null -ne $Config.EmergencySource) {
         try {
             $b = Resolve-DanteBlockRule -Config $Config
-            $known += [pscustomobject]@{ Name = [string]$b.Name; Label = $Config.DanteBlockRule }
+            $known += [pscustomobject]@{ Name = [string]$b.Name; Label = $Config.DanteBlockRule; Hint = '' }
         } catch {
             Write-HealLog -Path $Log -Message "ERROR emergency path check: $($_.Exception.Message)"
             $code = 1
         }
     }
     if ($State.EmergencyRule -and -not ($known | Where-Object { $_.Name -eq $State.EmergencyRule })) {
-        $known += [pscustomobject]@{ Name = [string]$State.EmergencyRule; Label = "the rule the emergency path disabled ($($State.EmergencyRule); if it was deleted on purpose, remove 'emergencyRule' from the state file)" }
+        $known += [pscustomobject]@{ Name = [string]$State.EmergencyRule; Label = "the rule the emergency path disabled ($($State.EmergencyRule))"
+            Hint = "; if it was deleted on purpose, remove 'emergencyRule' from the state file" }
     }
     if ($known.Count -eq 0) { return $code }
     try {
         foreach ($k in $known) {
-            if (Enable-BlockRuleChecked -Name $k.Name -Label $k.Label) {
+            if (Enable-BlockRuleChecked -Name $k.Name -Label $k.Label -Hint $k.Hint) {
                 Write-HealLog -Path $Log -Message "LAN up: enabled '$($k.Label)' again (it was disabled)"
             }
         }
