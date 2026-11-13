@@ -7,6 +7,7 @@ use crate::wire::tests::Rng;
 
 mod reorder;
 mod source;
+mod start;
 
 const RATE: u32 = 96_000;
 const MS: u64 = 1_000_000;

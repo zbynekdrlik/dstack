@@ -340,3 +340,32 @@ fn the_rx_minute_watch_gives_each_minute_s_reorders() {
     let (_, rose) = look(&mut w, 5 + 2 * MINUTE_NS).unwrap();
     assert_eq!(rose, [0; MAX_FLOWS]);
 }
+
+/// dstack #234: the holes line's counts are each a minute's rise, never
+/// below 0 (a channel routed away takes its counts along); the engine's
+/// re-bootstraps too.
+#[test]
+fn the_rx_minute_watch_gives_each_flow_s_hole_rises() {
+    use super::{HoleCounts, RxMinute};
+    use crate::media::rx::MAX_FLOWS;
+    let at = |holes, written_late, rx_late| HoleCounts {
+        holes,
+        written_late,
+        rx_late,
+    };
+    assert_eq!(at(10, 7, 3).since(at(4, 2, 1)), at(6, 5, 2));
+    assert_eq!(at(1, 1, 1).since(at(4, 2, 3)), at(0, 0, 0));
+    let mut w = RxMinute::new();
+    assert_eq!(w.holes_rose(3, at(10, 7, 3)), at(10, 7, 3));
+    assert_eq!(w.holes_rose(3, at(15, 8, 3)), at(5, 1, 0));
+    assert_eq!(
+        w.holes_rose(4, at(2, 0, 0)),
+        at(2, 0, 0),
+        "each slot its own"
+    );
+    assert_eq!(w.holes_rose(MAX_FLOWS, at(2, 2, 2)), HoleCounts::default());
+    assert_eq!(w.rebootstraps_rose(4), 4);
+    assert_eq!(w.rebootstraps_rose(6), 2);
+    assert_eq!(w.rebootstraps_rose(1), 0, "an engine attached anew");
+    assert_eq!(w.rebootstraps_rose(3), 2);
+}

@@ -438,3 +438,94 @@ fn an_unwritten_slot_reads_as_a_hole_in_the_last_lap() {
     assert_eq!(ring.read_at(last, &mut out).holes, 2);
     assert_eq!(out, [0, 0]);
 }
+
+/// dstack #234: a hole before the flow's first sample is a start hole, not
+/// a hole: read before any write, or at a position before the least one
+/// stored since the build or the last restart.
+#[test]
+fn a_hole_before_the_flow_s_first_sample_is_a_start_hole() {
+    let start = |n| Read {
+        holes: 0,
+        start_holes: n,
+    };
+    let holes = |n| Read {
+        holes: n,
+        start_holes: 0,
+    };
+    let ring = Ring::new();
+    assert_eq!(read(&ring, T, N), (vec![0; N], start(N)));
+    // The flow's first packet stamps T + 2N; the stamps before it never
+    // come.
+    ring.write_at(T + 2 * N as u64, &packet(T + 2 * N as u64));
+    assert_eq!(read(&ring, T + N as u64, N).1, start(N));
+    assert_eq!(
+        read(&ring, T + 2 * N as u64, N),
+        (packet(T + 2 * N as u64), Read::default())
+    );
+    // A missing packet after it: a hole.
+    ring.write_at(T + 4 * N as u64, &packet(T + 4 * N as u64));
+    let r = read(&ring, T + 3 * N as u64, 2 * N).1;
+    assert_eq!(r, holes(N));
+    assert_eq!(r.all_holes(), N);
+    let c = ring.counters();
+    assert_eq!((c.holes, c.start_holes), (N as u64, 2 * N as u64));
+    // A new flow: start holes again until its first sample, and before it.
+    ring.restart();
+    assert_eq!(read(&ring, T + 5 * N as u64, N).1, start(N));
+    // Its packets come reordered: the least position stored counts.
+    ring.write_at(T + 9 * N as u64, &packet(T + 9 * N as u64));
+    ring.write_at(T + 8 * N as u64, &packet(T + 8 * N as u64));
+    assert_eq!(read(&ring, T + 7 * N as u64, N).1, start(N));
+    assert_eq!(read(&ring, T + 8 * N as u64, 2 * N).1, Read::default());
+    assert_eq!(read(&ring, T + 10 * N as u64, N).1, holes(N));
+    // A late write stores nothing: it moves no start.
+    ring.restart();
+    assert_eq!(ring.write_at(T, &packet(T)).late, N);
+    assert_eq!(read(&ring, T + 11 * N as u64, N).1, start(N));
+}
+
+/// The engine's output rings start at their first put; an empty put is
+/// none.
+#[test]
+fn a_put_starts_the_ring_and_an_empty_put_does_not() {
+    let ring = Ring::new();
+    ring.put_at(T + N as u64, &packet(T + N as u64));
+    ring.put_at(T, &[]);
+    let r = read(&ring, T, 2 * N + 1).1;
+    assert_eq!((r.start_holes, r.holes), (N, 1));
+    // A put before the first lowers it.
+    ring.put_at(T - 1, &[5]);
+    assert_eq!(read(&ring, T - 1, 1), (vec![5], Read::default()));
+}
+
+/// Counts add field by field (a flow's channels).
+#[test]
+fn counters_add_field_by_field() {
+    let mut a = Counters {
+        written: 1,
+        holes: 2,
+        late: 3,
+        duplicate: 4,
+        early: 5,
+        start_holes: 6,
+    };
+    a += Counters {
+        written: 10,
+        holes: 20,
+        late: 30,
+        duplicate: 40,
+        early: 50,
+        start_holes: 60,
+    };
+    assert_eq!(
+        a,
+        Counters {
+            written: 11,
+            holes: 22,
+            late: 33,
+            duplicate: 44,
+            early: 55,
+            start_holes: 66,
+        }
+    );
+}
