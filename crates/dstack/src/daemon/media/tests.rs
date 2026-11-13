@@ -19,6 +19,8 @@ use crate::subscribe::SubStatus;
 use crate::subscribe::resolve::Advertised;
 use crate::wire::{Header, reply};
 
+mod names;
+
 pub(crate) const TEST_DEVICE: &str = include_str!("../../../../../config/test-device.toml");
 /// Every wait's bound, so a mutant that hangs fails fast.
 pub(crate) const BOUND: Duration = Duration::from_secs(5);

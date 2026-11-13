@@ -65,34 +65,60 @@ pub fn capture_warnings(f: impl FnOnce()) -> String {
 
 /// The lines at `level` and above `f` logs on this thread, as text.
 pub fn capture_at(level: tracing::Level, f: impl FnOnce()) -> String {
-    use std::sync::{Arc, Mutex};
-    #[derive(Clone)]
-    struct Sink(Arc<Mutex<Vec<u8>>>);
-    impl std::io::Write for Sink {
-        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
-            self.0
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .extend_from_slice(b);
-            Ok(b.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
+    let captured = Captured::start(level);
+    f();
+    captured.text()
+}
+
+/// The lines at a level and above logged on this thread while it lives:
+/// [`capture_at`]'s guard form, for async code its closure cannot await
+/// (a current-thread runtime runs the spawned tasks on this thread too).
+pub struct Captured {
+    sink: Sink,
+    _guard: tracing::subscriber::DefaultGuard,
+}
+
+#[derive(Clone)]
+struct Sink(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for Sink {
+    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .extend_from_slice(b);
+        Ok(b.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Captured {
+    /// Captures the lines at `level` and above from now on.
+    pub fn start(level: tracing::Level) -> Captured {
+        let sink = Sink(std::sync::Arc::default());
+        let out = sink.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || out.clone())
+            .with_ansi(false)
+            .with_max_level(level)
+            .finish();
+        undecided();
+        Captured {
+            sink,
+            _guard: tracing::subscriber::set_default(subscriber),
         }
     }
-    let sink = Sink(Arc::default());
-    let out = sink.clone();
-    let subscriber = tracing_subscriber::fmt()
-        .with_writer(move || out.clone())
-        .with_ansi(false)
-        .with_max_level(level)
-        .finish();
-    undecided();
-    tracing::subscriber::with_default(subscriber, f);
-    let bytes = sink
-        .0
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone();
-    String::from_utf8(bytes).unwrap_or_default()
+
+    /// What was captured so far, as text.
+    pub fn text(&self) -> String {
+        let bytes = self
+            .sink
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        String::from_utf8(bytes).unwrap_or_default()
+    }
 }

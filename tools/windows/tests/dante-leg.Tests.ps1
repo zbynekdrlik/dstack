@@ -237,10 +237,18 @@ foreach ($f in 'Get-NetAdapter', 'Get-NetFirewallProfile', 'New-NetFirewallRule'
 $script:Group = "dstack-test-dante-leg-$PID"
 try {
     Check 'the real firewall reads the group back as created (disabled, on the runner adapter)' {
-        $adapter = @(Get-NetAdapter -Physical | Where-Object { $_.Status -eq 'Up' })[0]
-        if ($null -eq $adapter) { $adapter = @(Get-NetAdapter | Where-Object { $_.Status -eq 'Up' })[0] }
-        $out = Install-DanteLeg -Interface $adapter.Name -Enabled 'False'
-        $problems = @(Get-GroupProblems -Interface $adapter.Name -Enabled 'False')
+        # An alias the firewall binds: a connected IPv4 interface. The first
+        # physical adapter that is Up can be one the IP stack (and so the
+        # firewall) does not know on some runner images ("The specified
+        # interface was not found on the system", main CI of v0.6.117).
+        # The tool also wants a visible adapter of that name (Assert-Adapter).
+        $up = @(Get-NetAdapter | Where-Object { $_.Status -eq 'Up' } | ForEach-Object { $_.Name })
+        $found = @(Get-NetIPInterface -AddressFamily IPv4 -ConnectionState Connected |
+            Where-Object { $_.InterfaceAlias -notlike 'Loopback*' -and $up -contains $_.InterfaceAlias })
+        if ($found.Count -eq 0) { throw 'no connected IPv4 interface on the runner' }
+        $alias = $found[0].InterfaceAlias
+        $out = Install-DanteLeg -Interface $alias -Enabled 'False'
+        $problems = @(Get-GroupProblems -Interface $alias -Enabled 'False')
         foreach ($line in @($out) + $problems) { Write-Host "     $line" }
         $problems.Count -eq 0 -and @(Get-NetFirewallRule -Group $script:Group).Count -eq 10 -and
         @(Get-NetFirewallRule -Group $script:Group | Where-Object { "$($_.Enabled)" -ne 'False' }).Count -eq 0

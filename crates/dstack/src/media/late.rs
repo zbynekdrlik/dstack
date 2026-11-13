@@ -116,7 +116,16 @@ impl LateWatch {
             since_escape_ns: tx.take_since_escape(s),
         };
         for late in self.look(now_ns, take) {
+            // The flow's other end (dstack #266), read here on the watch's
+            // thread, never by the TX thread; a multicast flow has no one
+            // receiver (`-`), its `dest` is the group.
+            let (receiver, dest) = tx.lock().table.flow(late.slot).map_or_else(
+                || (String::from("-"), String::from("-")),
+                |f| (named(&f.rx_host), f.dest.to_string()),
+            );
             warn!(
+                receiver = %receiver,
+                dest = %dest,
                 slot = late.slot,
                 packets = late.packets,
                 age_peak_us = late.age_peak_ns / 1_000,
@@ -127,6 +136,16 @@ impl LateWatch {
                  it counts them late"
             );
         }
+    }
+}
+
+/// A peer's name for a log line (dstack #266): `-` for an empty one (a
+/// multicast flow's receiver, a subscription without a device).
+pub(crate) fn named(name: &str) -> String {
+    if name.is_empty() {
+        String::from("-")
+    } else {
+        name.to_owned()
     }
 }
 
@@ -346,8 +365,11 @@ impl RxWatch {
         out
     }
 
-    /// [`RxWatch::look`] on `rx`'s flows, each loss logged as a warning.
-    pub fn watch(&mut self, now_ns: u64, rx: &RxShared) {
+    /// [`RxWatch::look`] on `rx`'s flows, each loss logged as a warning
+    /// that names the flow's transmitter (dstack #266): its Dante name from
+    /// `device` (the slot's flow's, read only for a slot that lost packets)
+    /// and the address its audio came from; `-` for either unknown.
+    pub fn watch(&mut self, now_ns: u64, rx: &RxShared, device: impl Fn(usize) -> Option<String>) {
         if self.next_ns.is_some_and(|next| now_ns < next) {
             return;
         }
@@ -358,7 +380,13 @@ impl RxWatch {
             (lane.gaps, lane.gap_frames, d)
         };
         for loss in self.look(now_ns, counts) {
+            let name = device(loss.slot).map_or_else(|| String::from("-"), |d| named(&d));
+            let source = rx
+                .source(loss.slot)
+                .map_or_else(|| String::from("-"), |s| s.to_string());
             warn!(
+                device = %name,
+                source = %source,
                 slot = loss.slot,
                 gaps = loss.gaps,
                 frames = loss.frames,

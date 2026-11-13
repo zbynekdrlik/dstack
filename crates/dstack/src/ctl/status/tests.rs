@@ -194,6 +194,7 @@ const WORDS: &[&str] = &[
     "receiver_latency_us",
     "direct",
     "rx",
+    "device",
     "granted",
     "latency",
     "playout",
@@ -465,8 +466,13 @@ fn the_status_shows_the_packets_judge_in_ns_numbers_only() {
     );
     media.rx.take_max_lateness(3);
     let s = status(&media);
+    // dstack #266: the transmitter's address is the one string value.
+    let source = sender.local_addr().unwrap().to_string();
     for word in words_of(&s, "test-device") {
-        assert!(WORDS.contains(&word.as_str()), "{word:?} in {s}");
+        assert!(
+            WORDS.contains(&word.as_str()) || word == source,
+            "{word:?} in {s}"
+        );
     }
     // The receive-stamp fields (Linux): the wake delays are real time, so
     // read back; both packets were read after the kernel had them.
@@ -500,7 +506,7 @@ fn the_status_shows_the_packets_judge_in_ns_numbers_only() {
     // rounded up); the largest 40 samples.
     assert!(
         s.contains(&format!(
-            "\"rx\":[{{\"flow\":4,\"granted\":0,\"multicast\":0,\"fpp\":0,\"channels\":0,\"latency\":0,\
+            "\"rx\":[{{\"flow\":4,\"source\":\"{source}\",\"granted\":0,\"multicast\":0,\"fpp\":0,\"channels\":0,\"latency\":0,\
              \"playout\":0,\"delay\":0,\"late_after\":0,\"advertised\":0,\
              \"below_advertised\":0,\"packets\":2,\"refused\":0,\"stray\":0,\"out_of_order\":0,\"gaps\":1,\"gap_frames\":14,{DROPS}\"late\":0,\"late_at_read\":0,{stamps}\
              \"unplaced\":0,\"lateness\":40,\"lateness_peak\":40,\"lateness_min_ns\":260416,\"keepalives\":0,\
@@ -631,7 +637,7 @@ fn the_status_lists_the_flows_of_both_sides() {
     );
     assert!(
         s.contains(&format!(
-            "\"rx\":[{{\"flow\":1,\"granted\":1,\"multicast\":0,\"fpp\":32,\"channels\":2,\"latency\":96,\
+            "\"rx\":[{{\"flow\":1,\"device\":\"peer-device\",\"granted\":1,\"multicast\":0,\"fpp\":32,\"channels\":2,\"latency\":96,\
              \"playout\":96,\"delay\":0,\"late_after\":128,\"advertised\":96,\
              \"below_advertised\":0,\"packets\":0,\"refused\":0,\"stray\":0,\"out_of_order\":0,\"gaps\":0,\"gap_frames\":0,{DROPS}\"late\":0,\"late_at_read\":0,{STAMPS_NONE}\
              \"unplaced\":0,\"lateness\":0,\"lateness_peak\":0,\"keepalives\":0,\"keepalive_errors\":0,\

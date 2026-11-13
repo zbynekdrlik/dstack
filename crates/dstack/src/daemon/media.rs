@@ -38,7 +38,8 @@
 //! then the manager); the checks' lock, the engine's and the app hook's are
 //! taken alone (the app hook runs on its own thread, outside its lock).
 
-use std::net::{IpAddr, Ipv4Addr};
+use std::collections::HashMap;
+use std::net::{IpAddr, Ipv4Addr, SocketAddrV4};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
@@ -501,6 +502,10 @@ pub struct Driver {
     /// A media thread's CPU pin found lost (another program's process
     /// affinity rule) or refused, each told once.
     pins: crate::media::repin::PinWatch,
+    /// Each transmitter's Dante name by its flow control address, as our
+    /// last request to it named it: a stop's log line names the device
+    /// after its flow is gone from the manager (dstack #266).
+    names: HashMap<SocketAddrV4, String>,
 }
 
 impl Driver {
@@ -526,6 +531,7 @@ impl Driver {
                 neighbours: crate::traffic::neighbours::Neighbours::default(),
                 nic: crate::traffic::nic_sent_bytes,
                 pins: crate::media::repin::PinWatch::new(),
+                names: HashMap::new(),
             },
             back,
         )
@@ -541,7 +547,10 @@ impl Driver {
         self.act(actions);
         self.media.step_checks();
         self.late.watch(now, &self.media.tx);
-        self.loss.watch(now, &self.media.rx);
+        let manager = &self.media.manager;
+        self.loss.watch(now, &self.media.rx, |slot| {
+            lock(manager).flow_device(slot).map(str::to_owned)
+        });
         self.sends.watch(now, &self.media.tx);
         self.host.watch(now, &self.media.tx);
         self.pump.watch(
@@ -587,14 +596,20 @@ impl Driver {
 
     /// The answer to the request of `flow`.
     pub fn answered(&mut self, flow: FlowId, answer: Answer) {
+        let device = self.device_of(flow);
         match answer {
-            Answer::Granted(_) => info!(flow = flow.slot + 1, "RX flow granted"),
+            Answer::Granted(_) => info!(device = %device, flow = flow.slot + 1, "RX flow granted"),
             Answer::Refused(status) => info!(
+                device = %device,
                 flow = flow.slot + 1,
                 status = format_args!("{status:#06x}"),
                 "RX flow refused"
             ),
-            Answer::Failed => info!(flow = flow.slot + 1, "RX flow request had no answer"),
+            Answer::Failed => info!(
+                device = %device,
+                flow = flow.slot + 1,
+                "RX flow request had no answer"
+            ),
         }
         let now = self.media.rx.now_ns();
         let actions = self.with_manager(|m| m.answered(flow, answer, now));
@@ -636,6 +651,16 @@ impl Driver {
         actions
     }
 
+    /// The transmitter's Dante name of `flow` while the manager holds it
+    /// (dstack #266); `-` once another flow took its slot or none is there.
+    fn device_of(&self, flow: FlowId) -> String {
+        let m = lock(&self.media.manager);
+        m.flow(flow.slot).filter(|v| v.id == flow).map_or_else(
+            || String::from("-"),
+            |v| crate::media::late::named(&v.device),
+        )
+    }
+
     /// Sends the manager's datagrams, one task each; finished tasks are
     /// reaped.
     fn act(&mut self, actions: Vec<Action>) {
@@ -645,7 +670,11 @@ impl Driver {
             match action {
                 Action::Request { flow, to, req } => {
                     let peer = self.media.requests.sent(IpAddr::V4(*to.ip()), op::REQUEST);
+                    let device = self.device_of(flow);
+                    self.names.insert(to, device.clone());
                     info!(
+                        device = %device,
+                        %to,
                         peer,
                         flow = flow.slot + 1,
                         channels = req.channels.len(),
@@ -663,11 +692,12 @@ impl Driver {
                 }
                 Action::Stop { to, handle } => {
                     let peer = self.media.requests.sent(IpAddr::V4(*to.ip()), op::STOP);
-                    info!(peer, "RX flow stop sent");
+                    let device = self.names.get(&to).map_or("-", String::as_str).to_owned();
+                    info!(device = %device, %to, peer, "RX flow stop sent");
                     let client = Arc::clone(&self.client);
                     self.stops.spawn(async move {
                         if let Err(e) = client.stop_flow(to, &handle).await {
-                            warn!(peer, error = %e, "an RX flow stop was not answered");
+                            warn!(device = %device, %to, peer, error = %e, "an RX flow stop was not answered");
                         }
                     });
                 }
