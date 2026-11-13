@@ -276,7 +276,8 @@ function Write-Outcome {
 # one goes, so a failure part way leaves the old filter in place (the rules
 # made so far are removed again). Output: report lines, the exit code last.
 function Install-DanteLeg {
-    param([Parameter(Mandatory)][string]$Interface, [string[]]$Remove = @(), [string]$Enabled = 'True')
+    # Not Mandatory: an empty name reaches Assert-Adapter, which names the switch.
+    param([string]$Interface = '', [string[]]$Remove = @(), [string]$Enabled = 'True')
     Assert-Adapter -Interface $Interface
     $before = @(Get-NetFirewallRule -Group $script:Group -ErrorAction SilentlyContinue)
     $made = New-Object System.Collections.ArrayList
@@ -310,7 +311,7 @@ function Install-DanteLeg {
 # Whether the group on the PC is exactly the script's: report lines, the
 # exit code last.
 function Test-DanteLeg {
-    param([Parameter(Mandatory)][string]$Interface)
+    param([string]$Interface = '')
     Assert-Adapter -Interface $Interface
     $problems = @(Get-GroupProblems -Interface $Interface) + @(Get-ProfileProblems)
     Write-Outcome -Problems $problems -Done "group '$($script:Group)' on '$Interface': as this script installs it"

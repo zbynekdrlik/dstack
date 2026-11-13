@@ -199,12 +199,13 @@ Check 'a firewall profile that is off fails the install and the check, the rules
     $out = Install-DanteLeg -Interface 'Dante70'
     $check = Test-DanteLeg -Interface 'Dante70'
     $script:ProfilesOff = @()
-    (Last $out) -eq 1 -and (Last $check) -eq 1 -and $script:Store.Count -eq 10 -and
+    (Last $out) -eq 1 -and (Last $check) -eq 1 -and @(Get-NetFirewallRule -Group $script:Group).Count -eq 10 -and
     (@($out) -join "`n") -match "profile 'Public' is off"
 }
 Check 'no adapter, one not there, or a wildcard name is refused before anything changes' {
     $before = $script:Store.Count
-    (Throws { Install-DanteLeg -Interface '' } '*InterfaceAlias*') -and
+    (Throws { Install-DanteLeg -Interface '' } '*-InterfaceAlias <the Dante adapter> is required*') -and
+    (Throws { Test-DanteLeg -Interface '' } '*-InterfaceAlias <the Dante adapter> is required*') -and
     (Throws { Install-DanteLeg -Interface 'Nope' } "*no network adapter named 'Nope'*") -and
     (Throws { Install-DanteLeg -Interface 'Dante*' } '*wildcard*') -and
     (Throws { Install-DanteLeg -Interface 'Dante[7]0' } '*wildcard*') -and
