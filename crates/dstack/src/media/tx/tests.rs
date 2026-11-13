@@ -647,7 +647,11 @@ fn engine_is_refused_for_a_channel_without_an_engine_ring() {
     shared.engine_ring(1).unwrap().put_at(T, &[5 << 8]);
     let mut got = [0; 1];
     assert_eq!(
-        shared.engine_ring(15).unwrap().read_at(T, &mut got).holes,
+        shared
+            .engine_ring(15)
+            .unwrap()
+            .read_at(T, &mut got)
+            .all_holes(),
         1
     );
     // The standalone device has none.

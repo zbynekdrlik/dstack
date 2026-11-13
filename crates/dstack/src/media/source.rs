@@ -51,7 +51,8 @@ pub enum Source {
 /// What one fill found.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Fill {
-    /// Echo samples the ring did not hold (sent as silence).
+    /// Echo samples the ring did not hold (sent as silence): the ring's
+    /// holes and start holes alike.
     pub holes: usize,
 }
 
@@ -89,7 +90,7 @@ impl Source {
                 let at = stamp.checked_sub(u64::from(offset));
                 return match (rings.get(rx), at) {
                     (Some(ring), Some(at)) => Fill {
-                        holes: ring.read_at(at, out).holes,
+                        holes: ring.read_at(at, out).all_holes(),
                     },
                     // No such RX channel, or a position before time began.
                     _ => {
@@ -101,7 +102,7 @@ impl Source {
             Source::Engine => {
                 return match own {
                     Some(ring) => Fill {
-                        holes: ring.read_at(stamp, out).holes,
+                        holes: ring.read_at(stamp, out).all_holes(),
                     },
                     // A channel without an engine ring (refused by
                     // `TxShared::set_source`): all silence, all holes.

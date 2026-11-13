@@ -293,7 +293,7 @@ fn the_minute_watch_logs_each_flow_s_wake_and_network_latency() {
     send(s.local_addr(2).unwrap(), P0);
     pump(&mut rx, 1, ns_of(P0 + 100, RATE));
     assert_eq!(s.last_wake_minute(2), None, "before any look");
-    assert_eq!(info(&mut || minute.watch(0, &s, named)), "");
+    assert_eq!(info(&mut || minute.watch(0, &s, None, named)), "");
     assert_eq!(s.last_wake_minute(2).is_some(), s.stamps());
     // The minute: one packet that sat 30 ms in its socket, one read at once.
     send(s.local_addr(2).unwrap(), P0 + 16);
@@ -301,7 +301,7 @@ fn the_minute_watch_logs_each_flow_s_wake_and_network_latency() {
     pump(&mut rx, 2, ns_of(P0 + 100, RATE));
     send(s.local_addr(2).unwrap(), P0 + 32);
     pump(&mut rx, 3, ns_of(P0 + 100, RATE));
-    let log = info(&mut || minute.watch(MINUTE_NS, &s, named));
+    let log = info(&mut || minute.watch(MINUTE_NS, &s, None, named));
     if !s.stamps() {
         assert_eq!(log, "", "no stamps, no timing");
         assert_eq!(s.last_wake_minute(2), None);
@@ -346,7 +346,10 @@ fn the_minute_watch_logs_each_flow_s_wake_and_network_latency() {
     assert!(net[0] <= net[1] && net[1] <= net[2], "{log}");
     assert_eq!(s.last_wake_minute(2), Some([wake[0], wake[1], wake[2]]));
     // A minute without packets: no line, and the status shows none.
-    assert_eq!(info(&mut || minute.watch(2 * MINUTE_NS, &s, named)), "");
+    assert_eq!(
+        info(&mut || minute.watch(2 * MINUTE_NS, &s, None, named)),
+        ""
+    );
     assert_eq!(s.last_wake_minute(2), None);
 }
 

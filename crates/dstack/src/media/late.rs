@@ -403,11 +403,41 @@ pub const MINUTE_NS: u64 = 60_000_000_000;
 /// without a loss alarm (dstack #278). And each flow with stamped, placed packets
 /// (Linux) gets one INFO line of its minute's wake delay and network
 /// latency, the only way to read them from an app without a status socket
-/// (dstack #234: OBS's dante-input).
+/// (dstack #234: OBS's dante-input), now with each packet's write delay
+/// too. And each flow whose channels' rings read holes in the minute gets
+/// one INFO line of the minute's holes, written-late samples, late packets
+/// and the engine's re-bootstraps (dstack #234): each stall gets its
+/// minute, where the status has only totals.
 #[derive(Debug)]
 pub struct RxMinute {
     reordered: [u64; RX_FLOWS],
+    holes: [HoleCounts; RX_FLOWS],
+    rebootstraps: u64,
     next_ns: Option<u64>,
+}
+
+/// One RX flow's hole counts (dstack #234): cumulative at a look, a
+/// minute's rise in a line.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HoleCounts {
+    /// Samples its channels' rings read as holes (start holes not).
+    pub holes: u64,
+    /// Samples its channels' rings refused as written late.
+    pub written_late: u64,
+    /// Its packets past the playout plus the block (`late`).
+    pub rx_late: u64,
+}
+
+impl HoleCounts {
+    /// The rise from `before` to `self`, each count at least 0 (a channel
+    /// routed away takes its counts along).
+    pub fn since(self, before: HoleCounts) -> HoleCounts {
+        HoleCounts {
+            holes: self.holes.saturating_sub(before.holes),
+            written_late: self.written_late.saturating_sub(before.written_late),
+            rx_late: self.rx_late.saturating_sub(before.rx_late),
+        }
+    }
 }
 
 impl Default for RxMinute {
@@ -420,6 +450,12 @@ impl RxMinute {
     pub const fn new() -> Self {
         RxMinute {
             reordered: [0; RX_FLOWS],
+            holes: [HoleCounts {
+                holes: 0,
+                written_late: 0,
+                rx_late: 0,
+            }; RX_FLOWS],
+            rebootstraps: 0,
             next_ns: None,
         }
     }
@@ -447,19 +483,70 @@ impl RxMinute {
         Some((first, rose))
     }
 
+    /// At a look, flow slot `slot`'s cumulative hole counts `now`: their
+    /// rise since the last look (kept for the next).
+    pub fn holes_rose(&mut self, slot: usize, now: HoleCounts) -> HoleCounts {
+        let Some(seen) = self.holes.get_mut(slot) else {
+            return HoleCounts::default();
+        };
+        let rose = now.since(*seen);
+        *seen = now;
+        rose
+    }
+
+    /// At a look, the engine's cumulative re-bootstraps `now` (0 without
+    /// an engine): their rise since the last look (kept for the next).
+    pub fn rebootstraps_rose(&mut self, now: u64) -> u64 {
+        let rose = now.saturating_sub(self.rebootstraps);
+        self.rebootstraps = now;
+        rose
+    }
+
     /// [`RxMinute::look`] on `rx`'s flows: at each look every slot's
     /// minute is taken ([`RxShared::take_minute`]; the first look's only
     /// starts the next minute clean), and each flow's reorders and timing
     /// of the minute logged at INFO with its transmitter, as the loss
     /// watch names it (`device` is read only for a slot with a line).
-    pub fn watch(&mut self, now_ns: u64, rx: &RxShared, device: impl Fn(usize) -> Option<String>) {
+    /// `rebootstraps` is the engine's cumulative count (`None`: no engine
+    /// attached, read as 0), on each holes line as the device's rise.
+    pub fn watch(
+        &mut self,
+        now_ns: u64,
+        rx: &RxShared,
+        rebootstraps: Option<u64>,
+        device: impl Fn(usize) -> Option<String>,
+    ) {
         let Some((first, rose)) = self.look(now_ns, |s| rx.lane(s).reordered) else {
             return;
         };
+        let rebootstraps = self.rebootstraps_rose(rebootstraps.unwrap_or(0));
         for (slot, &reordered) in rose.iter().enumerate() {
             let timing = rx.take_minute(slot);
+            let write = rx.take_write_minute(slot);
+            let rings = rx.flow_rings(slot);
+            let holes = self.holes_rose(
+                slot,
+                HoleCounts {
+                    holes: rings.holes,
+                    written_late: rings.late,
+                    rx_late: rx.lane(slot).late,
+                },
+            );
             if first {
                 continue;
+            }
+            if holes.holes > 0 {
+                let (name, source) = transmitter(rx, slot, &device);
+                info!(
+                    device = %name,
+                    source = %source,
+                    slot,
+                    holes = holes.holes,
+                    written_late = holes.written_late,
+                    rx_late = holes.rx_late,
+                    rebootstraps,
+                    "RX holes in the last minute"
+                );
             }
             if reordered > 0 {
                 let (name, source) = transmitter(rx, slot, &device);
@@ -482,6 +569,8 @@ impl RxMinute {
                     wake_delay_p99_us = wake.p99_us,
                     wake_delay_p999_us = wake.p999_us,
                     wake_delay_max_us = wake.max_us,
+                    write_delay_p999_us = write.map_or(0, |w| w.p999_us),
+                    write_delay_max_us = write.map_or(0, |w| w.max_us),
                     network_latency_min_us = net.min_us,
                     network_latency_p99_us = net.p99_us,
                     network_latency_max_us = net.max_us,

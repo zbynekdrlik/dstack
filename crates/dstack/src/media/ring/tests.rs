@@ -114,7 +114,13 @@ fn samples_land_at_their_stamps() {
         .flat_map(|&s| packet(s))
         .collect();
     assert_eq!(got, want);
-    assert_eq!(r, Read { holes: 0 });
+    assert_eq!(
+        r,
+        Read {
+            holes: 0,
+            start_holes: 0
+        }
+    );
     // A read may start anywhere.
     let (got, _) = read(&ring, T + 30, 4);
     assert_eq!(got, want[30..34]);
@@ -136,24 +142,40 @@ fn a_missing_packet_reads_as_a_hole() {
     assert_eq!(&got[..N], &packet(T)[..]);
     assert!(got[N..2 * N].iter().all(|&v| v == 0), "the hole reads 0");
     assert_eq!(&got[2 * N..], &packet(T + 64)[..]);
-    assert_eq!(r, Read { holes: N });
-    // A ring nobody wrote: all holes, wherever it is read.
+    assert_eq!(
+        r,
+        Read {
+            holes: N,
+            start_holes: 0
+        }
+    );
+    // A ring nobody wrote: all start holes (dstack #234), wherever it is
+    // read.
     let empty = Ring::new();
     for pos in [0, 1 << 47, T, (1 << 48) + 5] {
         assert_eq!(
             read(&empty, pos, 8),
-            (vec![0; 8], Read { holes: 8 }),
+            (
+                vec![0; 8],
+                Read {
+                    holes: 0,
+                    start_holes: 8
+                }
+            ),
             "{pos}"
         );
     }
     assert_eq!(ring.counters().holes, N as u64);
-    assert_eq!(empty.counters().holes, 32);
+    assert_eq!(
+        (empty.counters().holes, empty.counters().start_holes),
+        (0, 32)
+    );
 }
 
 #[test]
 fn a_packet_behind_the_reader_is_late_not_written() {
     let ring = Ring::new();
-    assert_eq!(read(&ring, T, N).1, Read { holes: N });
+    assert_eq!(read(&ring, T, N).1.all_holes(), N);
     // The reader has passed T..T+32: those samples are late.
     assert_eq!(
         ring.write_at(T, &packet(T)),
@@ -162,7 +184,7 @@ fn a_packet_behind_the_reader_is_late_not_written() {
             ..Write::default()
         }
     );
-    assert_eq!(read(&ring, T, N).1, Read { holes: N }, "never written");
+    assert_eq!(read(&ring, T, N).1.all_holes(), N, "never written");
     // A packet across the reader: its first half late, the rest written.
     let w = ring.write_at(T + 16, &packet(T + 16));
     assert_eq!(
@@ -263,7 +285,16 @@ fn a_wrapped_slot_never_reads_stale() {
     let ring = Ring::new();
     ring.write_at(T, &packet(T));
     ring.write_at(T + lap, &packet(T + lap));
-    assert_eq!(read(&ring, T, N), (vec![0; N], Read { holes: N }));
+    assert_eq!(
+        read(&ring, T, N),
+        (
+            vec![0; N],
+            Read {
+                holes: N,
+                start_holes: 0
+            }
+        )
+    );
     assert_eq!(read(&ring, T + lap, N).0, packet(T + lap));
     // Laps far apart too (the lap is the position's bits 16..47).
     let ring = Ring::new();
@@ -277,7 +308,13 @@ fn a_wrapped_slot_never_reads_stale() {
     ring.write_at(T, &[-256, i32::MIN, 0, i32::MAX]);
     assert_eq!(
         read(&ring, T, 4),
-        (vec![-256, i32::MIN, 0, i32::MAX], Read { holes: 0 })
+        (
+            vec![-256, i32::MIN, 0, i32::MAX],
+            Read {
+                holes: 0,
+                start_holes: 0
+            }
+        )
     );
 }
 
@@ -287,7 +324,7 @@ fn a_wrapped_slot_never_reads_stale() {
 #[test]
 fn put_at_stores_behind_and_far_ahead_of_the_reader() {
     let ring = Ring::new();
-    assert_eq!(read(&ring, T, N).1, Read { holes: N });
+    assert_eq!(read(&ring, T, N).1.all_holes(), N);
     // Behind the reader (write_at would call it late) and over the slots
     // the reader is at: stored.
     ring.put_at(T - 100, &packet(T - 100));
@@ -301,7 +338,7 @@ fn put_at_stores_behind_and_far_ahead_of_the_reader() {
     assert_eq!(ring.write_at(T + N as u64, &packet(T + 32)), written(N));
     let c = ring.counters();
     assert_eq!(
-        (c.written, c.late, c.early, c.duplicate, c.holes),
+        (c.written, c.late, c.early, c.duplicate, c.start_holes),
         (4 * N as u64 + 2, 0, 0, 0, N as u64),
         "{c:?}"
     );
@@ -334,7 +371,7 @@ fn a_write_the_reader_overtakes_counts_the_overtaken_samples_late() {
         // a write has no early check, and a reader thread a runner starts
         // late would find samples a later lap overwrote (holes, neither
         // late nor early). Those READ positions count as holes.
-        let primed = ring.read_at(T - READ as u64, &mut [0i32; READ]).holes as u64;
+        let primed = ring.read_at(T - READ as u64, &mut [0i32; READ]).all_holes() as u64;
         let started = Arc::new(AtomicU64::new(T));
         let done = Arc::new(AtomicBool::new(false));
         let reader = {
@@ -350,7 +387,7 @@ fn a_write_the_reader_overtakes_counts_the_overtaken_samples_late() {
                         || done.load(Ordering::Acquire)
                     {
                         let r = ring.read_at(pos, &mut out);
-                        delivered += (READ - r.holes) as u64;
+                        delivered += (READ - r.all_holes()) as u64;
                         pos += READ as u64;
                     } else {
                         std::hint::spin_loop();
@@ -372,8 +409,10 @@ fn a_write_the_reader_overtakes_counts_the_overtaken_samples_late() {
         // A writer a whole ring ahead of a slow reader (a runner's thread
         // start) stores nothing: early, a hole too.
         assert_eq!(c.written + c.late + c.early, total, "{c:?}");
+        // A read of the first block before its write stored a sample finds
+        // start holes (dstack #234); they count as the late samples too.
         assert_eq!(
-            c.holes - primed,
+            c.holes + c.start_holes - primed,
             c.late + c.early,
             "every hole is a late or early sample: {c:?}"
         );
@@ -435,7 +474,7 @@ fn an_unwritten_slot_reads_as_a_hole_in_the_last_lap() {
     let ring = Ring::new();
     let last = ((1u64 << 31) - 1) * SLOTS as u64;
     let mut out = [7i32; 2];
-    assert_eq!(ring.read_at(last, &mut out).holes, 2);
+    assert_eq!(ring.read_at(last, &mut out).all_holes(), 2);
     assert_eq!(out, [0, 0]);
 }
 

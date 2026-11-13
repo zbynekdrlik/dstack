@@ -16,6 +16,10 @@
 //! than its count (which can only lower this window's top figures by that
 //! one packet's). Windows has no receive stamp: nothing is recorded
 //! there.
+//!
+//! The same window holds each packet's write delay (dstack #234: the
+//! kernel's receive time to the end of its ring writes), which also
+//! catches a stall inside a pass, after its start.
 
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
@@ -70,6 +74,8 @@ pub struct Window {
     /// The last take's percentiles in one word (`netlat::pack_us`: p50,
     /// p99, p99.9), [`NONE`] after a window with no packet.
     last: AtomicU64,
+    /// The last take's largest, µs, [`NONE`] after a window with no packet.
+    last_max_us: AtomicU64,
 }
 
 impl Default for Window {
@@ -78,6 +84,7 @@ impl Default for Window {
             counts: std::array::from_fn(|_| AtomicU32::new(0)),
             max_ns: AtomicU64::new(0),
             last: AtomicU64::new(NONE),
+            last_max_us: AtomicU64::new(NONE),
         }
     }
 }
@@ -101,6 +108,8 @@ impl Window {
             netlat::pack_us([w.p50_us, w.p99_us, w.p999_us].map(|us| us * 1_000))
         });
         self.last.store(last, Ordering::Relaxed);
+        self.last_max_us
+            .store(taken.map_or(NONE, |w| w.max_us), Ordering::Relaxed);
         taken
     }
 
@@ -109,6 +118,12 @@ impl Window {
     pub fn last(&self) -> Option<[u64; 3]> {
         let word = self.last.load(Ordering::Relaxed);
         (word != NONE).then(|| netlat::unpack_us(word))
+    }
+
+    /// The last window's largest, µs; `None` for a window without a
+    /// packet (or before the first take).
+    pub fn last_max_us(&self) -> Option<u64> {
+        Some(self.last_max_us.load(Ordering::Relaxed)).filter(|&us| us != NONE)
     }
 }
 

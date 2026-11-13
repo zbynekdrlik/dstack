@@ -484,7 +484,8 @@ pub struct Driver {
     late: crate::media::late::LateWatch,
     /// Our RX flows' missing packets, logged once a second.
     loss: crate::media::late::RxWatch,
-    /// Our RX flows' reordered packets, logged once a minute (dstack #278).
+    /// Our RX flows' reordered packets (dstack #278), timing and holes
+    /// (dstack #234), logged once a minute.
     minute: crate::media::late::RxMinute,
     /// Our TX flows' failed sends, logged once a second with the OS error.
     sends: crate::media::late::SendWatch,
@@ -554,9 +555,11 @@ impl Driver {
         self.loss.watch(now, &self.media.rx, |slot| {
             lock(manager).flow_device(slot).map(str::to_owned)
         });
-        self.minute.watch(now, &self.media.rx, |slot| {
-            lock(manager).flow_device(slot).map(str::to_owned)
-        });
+        let rebootstraps = self.media.engine_stats().map(|p| p.view().rebootstraps);
+        self.minute
+            .watch(now, &self.media.rx, rebootstraps, |slot| {
+                lock(manager).flow_device(slot).map(str::to_owned)
+            });
         self.sends.watch(now, &self.media.tx);
         self.host.watch(now, &self.media.tx);
         self.pump.watch(

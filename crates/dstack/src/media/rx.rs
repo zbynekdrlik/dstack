@@ -47,7 +47,15 @@
 //! - The minute (dstack #234, Linux): the wake delays (`rx/wake.rs`) and
 //!   network latencies of each slot in windows the RX minute watch takes
 //!   once a minute ([`RxShared::take_minute`]) and logs, for apps without
-//!   a status socket.
+//!   a status socket; and each packet's write delay (the kernel's receive
+//!   time to the end of its ring writes, one more wall-clock read per
+//!   stamped packet), which also sees a stall inside a pass
+//!   ([`RxShared::take_write_minute`]).
+//! - Start holes (dstack #234): a publish of a new flow in a slot (another
+//!   transmitter or generation, `new_flow`), or of a channel routed
+//!   anew, restarts the channel's ring ([`Ring::restart`]), so the holes
+//!   read before that flow's first sample count apart from a running
+//!   flow's ([`RxShared::flow_rings`]).
 //! - The packets' judge (phase D, plan Task 3): the least lateness of each
 //!   flow slot's placed packets in ns (our clock's now in ns less the
 //!   packet's own stamp in ns), kept until read, so each heartbeat second
@@ -77,7 +85,7 @@ use mio::{Events, Interest, Poll, Token};
 use tracing::{info, warn};
 
 use super::packet::{self, MEDIA_HEADER};
-use super::ring::Ring;
+use super::ring::{Counters, Ring};
 use super::tx::{Cell, MAX_CHANNELS, ns_of, place, take_priority};
 use crate::clock::{self, PtpClock};
 use crate::wire::MAX_DATAGRAM;
@@ -85,6 +93,7 @@ use crate::wire::MAX_DATAGRAM;
 mod counts;
 mod holes;
 mod lane;
+mod minute;
 mod netlat;
 mod plan;
 mod wake;
@@ -93,6 +102,7 @@ use counts::{NO_LATENESS, RxStats, source_of, source_word};
 use lane::{Lane, count_lost};
 mod socket;
 pub use netlat::NetLatency;
+use plan::new_flow;
 pub use plan::{RxPlan, RxRoute};
 pub use socket::{GROUP_BOUND_TO_PORT, join};
 use socket::{
@@ -276,11 +286,17 @@ impl RxShared {
             }
         }
         let mut delays = [0u16; MAX_FLOWS];
+        // dstack #234: the slots whose flow is new; their rings restart.
+        let mut fresh = 0u64;
         for (slot, cell) in self.plans.iter().enumerate() {
             let p = plan(slot);
             delays[slot] = p.delay;
             let w = p.words();
-            if cell.peek() != w {
+            let had = cell.peek();
+            if had != w {
+                if new_flow(RxPlan::from_words(had), p) {
+                    fresh |= 1 << slot;
+                }
                 cell.write(w);
             }
         }
@@ -289,8 +305,18 @@ impl RxShared {
             cell.store(u32::from(delay.unwrap_or(0)), Ordering::Relaxed);
         }
         for (rx, cell) in self.routes.iter().enumerate() {
-            let want = RxRoute::word(route(rx));
-            if want != cell.load(Ordering::Relaxed) {
+            let r = route(rx);
+            let want = RxRoute::word(r);
+            let joins = want != cell.load(Ordering::Relaxed);
+            // Before the route is stored, so the pump never reads the new
+            // flow's ring unrestarted.
+            if let Some(r) = r
+                && (joins || fresh.checked_shr(r.flow as u32).is_some_and(|f| f & 1 == 1))
+                && let Some(ring) = self.rings.get(rx)
+            {
+                ring.restart();
+            }
+            if joins {
                 cell.store(want, Ordering::Release);
                 changed = true;
             }
@@ -460,26 +486,6 @@ impl RxShared {
     /// nothing.
     pub fn last_network_latency(&self, slot: usize) -> Option<NetLatency> {
         self.lanes.get(slot)?.network.last()
-    }
-
-    /// Ends flow slot `slot`'s minute (dstack #234; the RX minute watch,
-    /// once a minute): its packets' wake delays and network latencies
-    /// since the last call, each `None` for no stamped packet (always on
-    /// Windows). The status keeps showing the wake percentiles taken
-    /// ([`RxShared::last_wake_minute`]).
-    pub fn take_minute(&self, slot: usize) -> (Option<WakeDelay>, Option<NetLatency>) {
-        self.lanes.get(slot).map_or((None, None), |l| {
-            (l.wake_minute.take(), l.network_minute.take())
-        })
-    }
-
-    /// The 50th, 99th and 99.9th percentile of flow slot `slot`'s wake
-    /// delays in the minute [`RxShared::take_minute`] took last (the first
-    /// from the start, shorter), µs; `None` before the first take or for a
-    /// minute without a stamped packet.
-    /// The status reads it and takes nothing.
-    pub fn last_wake_minute(&self, slot: usize) -> Option<[u64; 3]> {
-        self.lanes.get(slot)?.wake_minute.last()
     }
 
     /// Whether every slot socket stamps its datagrams' receive times, so
@@ -879,6 +885,13 @@ impl Receiver {
             }
             if read_before {
                 count(&stats.late_at_read);
+            }
+            // dstack #234: the kernel's receive time to the writes' end
+            // (one more wall-clock read, only for a stamped packet).
+            if wake.is_some()
+                && let Some(delay) = wake_delay_ns(wall_now_ns(), at_ns)
+            {
+                stats.write_minute.record(delay);
             }
         }
         false

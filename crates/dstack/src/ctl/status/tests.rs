@@ -211,6 +211,9 @@ const WORDS: &[&str] = &[
     "socket_drops",
     "late",
     "late_at_read",
+    "start_holes",
+    "write_delay_p999_us",
+    "write_delay_max_us",
     "wire_late",
     "wake_delay_us",
     "wake_delay_peak_us",
@@ -375,14 +378,15 @@ fn the_status_names_the_clock_requests_channels_sources_and_checks() {
         ),
         "{s}"
     );
-    // RX 1 read by its check (holes), RX 2 written, RX 3 subscribed
-    // (Unresolved's code); the rest untouched and left out.
+    // RX 1 read by its check (start holes: nothing written, dstack #234),
+    // RX 2 written, RX 3 subscribed (Unresolved's code); the rest untouched
+    // and left out.
     assert!(
         s.contains(
             "\"channels\":[\
-             {\"rx\":1,\"status\":0,\"written\":0,\"holes\":100,\"late\":0,\"duplicate\":0,\"early\":0},\
-             {\"rx\":2,\"status\":0,\"written\":2,\"holes\":0,\"late\":0,\"duplicate\":0,\"early\":0},\
-             {\"rx\":3,\"status\":1,\"written\":0,\"holes\":0,\"late\":0,\"duplicate\":0,\"early\":0}]"
+             {\"rx\":1,\"status\":0,\"written\":0,\"holes\":0,\"late\":0,\"duplicate\":0,\"early\":0,\"start_holes\":100},\
+             {\"rx\":2,\"status\":0,\"written\":2,\"holes\":0,\"late\":0,\"duplicate\":0,\"early\":0,\"start_holes\":0},\
+             {\"rx\":3,\"status\":1,\"written\":0,\"holes\":0,\"late\":0,\"duplicate\":0,\"early\":0,\"start_holes\":0}]"
         ),
         "{s}"
     );
@@ -513,7 +517,7 @@ fn the_status_shows_the_packets_judge_in_ns_numbers_only() {
         s.contains(&format!(
             "\"rx\":[{{\"flow\":4,\"source\":\"{source}\",\"granted\":0,\"multicast\":0,\"fpp\":0,\"channels\":0,\"latency\":0,\
              \"playout\":0,\"delay\":0,\"late_after\":0,\"advertised\":0,\
-             \"below_advertised\":0,\"packets\":2,\"refused\":0,\"stray\":0,\"out_of_order\":0,\"reordered\":0,\"gaps\":0,\"gap_frames\":0,{DROPS}\"late\":0,\"late_at_read\":0,{stamps}\
+             \"below_advertised\":0,\"packets\":2,\"refused\":0,\"stray\":0,\"out_of_order\":0,\"reordered\":0,\"gaps\":0,\"gap_frames\":0,{DROPS}\"late\":0,\"late_at_read\":0,\"start_holes\":0,{stamps}\
              \"unplaced\":0,\"lateness\":40,\"lateness_peak\":40,\"lateness_min_ns\":260416,\"keepalives\":0,\
              \"keepalive_errors\":0,\"recv_errors\":0,\"joins\":0,\"join_errors\":0}}],"
         )),
@@ -582,6 +586,17 @@ fn the_receive_stamp_keys_show_only_while_the_sockets_stamp() {
         cfg!(target_os = "linux"),
         "{s}"
     );
+    // The write delays (dstack #234) likewise, after the wake percentiles.
+    assert!(!s.contains("write_delay"), "{s}");
+    media.rx.take_write_minute(0);
+    let s = status(&media);
+    assert_eq!(
+        s.contains("\"wake_delay_p999_us\":")
+            && s.contains("\"write_delay_p999_us\":")
+            && s.contains("\"write_delay_max_us\":"),
+        cfg!(target_os = "linux"),
+        "{s}"
+    );
     for word in words_of(&s, "test-device") {
         assert!(
             WORDS.contains(&word.as_str()) || word.starts_with("127.0.0.1:"),
@@ -597,6 +612,8 @@ fn the_receive_stamp_keys_show_only_while_the_sockets_stamp() {
         "wake_delay_p50_us",
         "wake_delay_p99_us",
         "wake_delay_p999_us",
+        "write_delay_p999_us",
+        "write_delay_max_us",
         "network_latency_min_us",
         "network_latency_p99_us",
         "network_latency_max_us",
@@ -663,7 +680,7 @@ fn the_status_lists_the_flows_of_both_sides() {
         s.contains(&format!(
             "\"rx\":[{{\"flow\":1,\"device\":\"peer-device\",\"granted\":1,\"multicast\":0,\"fpp\":32,\"channels\":2,\"latency\":96,\
              \"playout\":96,\"delay\":0,\"late_after\":128,\"advertised\":96,\
-             \"below_advertised\":0,\"packets\":0,\"refused\":0,\"stray\":0,\"out_of_order\":0,\"reordered\":0,\"gaps\":0,\"gap_frames\":0,{DROPS}\"late\":0,\"late_at_read\":0,{STAMPS_NONE}\
+             \"below_advertised\":0,\"packets\":0,\"refused\":0,\"stray\":0,\"out_of_order\":0,\"reordered\":0,\"gaps\":0,\"gap_frames\":0,{DROPS}\"late\":0,\"late_at_read\":0,\"start_holes\":0,{STAMPS_NONE}\
              \"unplaced\":0,\"lateness\":0,\"lateness_peak\":0,\"keepalives\":0,\"keepalive_errors\":0,\
              \"recv_errors\":0,\"joins\":0,\"join_errors\":0}}],\"rx_poll_errors\":0,"
         )),
