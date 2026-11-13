@@ -12,7 +12,7 @@ use crate::ctl::Sent;
 use crate::device::{DeviceConfig, DeviceState, Subscription};
 use crate::flows::control::FlowRequest;
 use crate::media::tx::TxTable;
-use crate::subscribe::resolve::Own;
+use crate::subscribe::resolve::{Multicast, Own};
 use crate::subscribe::{Action, MAX_FLOWS, Manager};
 
 mod arc27;

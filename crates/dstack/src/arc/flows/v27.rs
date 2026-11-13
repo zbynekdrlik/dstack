@@ -26,11 +26,16 @@
 //! 32 across its flows, each a value a Dante receiver asks for (evidence,
 //! not proof); 0 when the record has no names descriptor.
 //!
-//! **Pages:** a page that says more follow ([`STATUS_MORE`]) is followed by
-//! the page from the flow after it (`first + count`: our own 0x2200 leaves
-//! an item that did not fit uncounted and lists it again); one that says
-//! more follow but counts none is malformed. A page of status OK ends the
-//! list.
+//! **Pages:** the request's first item is a flow id (a slot, from 1: our
+//! own 0x2200 passes over empty slots without counting them, and leaves an
+//! item that did not fit uncounted). A page that says more follow
+//! ([`STATUS_MORE`]) is followed by the page from the flow after its
+//! highest id; its flows below the one asked from are left out (already
+//! read). One that says more follow but names no flow past the one asked
+//! from is malformed. A page of status OK ends the list. The channel
+//! lists' pager ([`client`](super::super::client)'s `read_list`) is not
+//! used: it counts items rather than ids, needs the total up front and
+//! counts no unread record.
 //!
 //! A record that does not read (a field past the reply, a socket offset
 //! that is not a descriptor) is left out and counted ([`Flows::unread`]).
@@ -71,7 +76,7 @@ fn record(body: &[u8], at: usize) -> Option<TxFlow> {
     let encoding = word(5)?;
     let sockets = usize::from(word(6)?);
     let slots = usize::from(word(7)?);
-    let mut destinations = Vec::with_capacity(sockets);
+    let mut destinations = Vec::new();
     for i in 0..sockets {
         let o = word(8 + i)?;
         if o != 0 {
@@ -125,16 +130,21 @@ pub fn list_tx_flows_27(c: &mut impl Call) -> Result<Flows, ReadError> {
                 status,
             });
         }
-        let (count, flows) = page(&body).ok_or(ReadError::Malformed { op: LIST_27 })?;
+        let (count, mut flows) = page(&body).ok_or(ReadError::Malformed { op: LIST_27 })?;
         out.unread += count - flows.len();
+        flows.retain(|f| f.id >= first);
+        let last = flows.iter().map(|f| f.id).max();
         out.flows.extend(flows);
         if status == STATUS_OK {
             return Ok(out);
         }
-        if count == 0 {
-            break;
+        match last
+            .and_then(|l| l.checked_add(1))
+            .filter(|&next| next > first)
+        {
+            Some(next) => first = next,
+            None => break,
         }
-        first = first.saturating_add(count as u16);
     }
     Err(ReadError::Malformed { op: LIST_27 })
 }

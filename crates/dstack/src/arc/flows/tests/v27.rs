@@ -82,7 +82,7 @@ fn the_card_s_page_reads_as_its_three_flows() {
 }
 
 #[test]
-fn a_page_saying_more_is_followed_from_the_flow_after_its_count() {
+fn a_page_saying_more_is_followed_from_the_flow_after_its_highest_id() {
     // Page 1 counts flows 1 and 2 and says more; page 2 holds flow 3.
     let one = edited(|d| status_count(d, STATUS_MORE, 2));
     let two = edited(|d| {
@@ -94,6 +94,23 @@ fn a_page_saying_more_is_followed_from_the_flow_after_its_count() {
     assert_eq!(flows.flows, card_flows());
     let firsts: Vec<&[u8]> = card.asked.iter().map(|a| &a.2[2..4]).collect();
     assert_eq!(firsts, vec![&[0, 1][..], &[0, 3][..]]);
+    // Flow 1 holds slot 5 (a gap before it): page 2 asks from 6, and a
+    // page 2 that lists flow 2 again (below 6) takes only flow 3.
+    let one = edited(|d| {
+        status_count(d, STATUS_MORE, 1);
+        set_u16(d, REC[0], 5);
+    });
+    let two = edited(|d| {
+        status_count(d, STATUS_OK, 2);
+        set_u16(d, 12, REC[1] as u16);
+        set_u16(d, 14, REC[2] as u16);
+        set_u16(d, REC[2], 6);
+    });
+    let mut card = Scripted::new(&[&one, &two]);
+    let flows = list_tx_flows_27(&mut card).unwrap();
+    let ids: Vec<u16> = flows.flows.iter().map(|f| f.id).collect();
+    assert_eq!(ids, vec![5, 6]);
+    assert_eq!(&card.asked[1].2[2..4], &[0, 6]);
 }
 
 #[test]
@@ -105,15 +122,32 @@ fn a_page_saying_more_with_no_flow_or_without_end_is_malformed() {
         Err(ReadError::Malformed { op: 0x2200 })
     );
     assert_eq!(card.asked.len(), 1);
-    // Pages that always say more end after MAX_PAGES requests.
+    // A page saying more that names no flow past the one asked from.
     let more = edited(|d| status_count(d, STATUS_MORE, 1));
     let mut card = Scripted::new(&[&more]);
     assert_eq!(
         list_tx_flows_27(&mut card),
         Err(ReadError::Malformed { op: 0x2200 })
     );
+    let firsts: Vec<&[u8]> = card.asked.iter().map(|a| &a.2[2..4]).collect();
+    assert_eq!(firsts, vec![&[0, 1][..], &[0, 2][..]]);
+    // Pages that always say more, each one flow further, end after
+    // MAX_PAGES requests.
+    let pages: Vec<String> = (1..=40u16)
+        .map(|id| {
+            edited(|d| {
+                status_count(d, STATUS_MORE, 1);
+                set_u16(d, REC[0], id);
+            })
+        })
+        .collect();
+    let pages: Vec<&str> = pages.iter().map(String::as_str).collect();
+    let mut card = Scripted::new(&pages);
+    assert_eq!(
+        list_tx_flows_27(&mut card),
+        Err(ReadError::Malformed { op: 0x2200 })
+    );
     assert_eq!(card.asked.len(), crate::arc::client::MAX_PAGES);
-    assert_eq!(&card.asked[2].2[2..4], &[0, 3]);
 }
 
 #[test]
