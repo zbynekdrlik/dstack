@@ -54,6 +54,11 @@ function Reset-Fake {
         NoIpIf       = $false
         VlanProp     = $true    # the LAN driver exposes the "VLAN ID" property
         AdapterVlan  = ''       # Get-NetAdapter's VlanID of the LAN adapter
+        # The LAN adapter's InterfaceDescription: a physical USB NIC (layout
+        # A) by default; 'Realtek Virtual Adapter' is layout B (#239).
+        LanDesc      = 'Realtek USB 2.5GbE Family Controller'
+        NoRestart    = $null    # -NoRestart of the last Set-NetAdapterAdvancedProperty
+        RenewRc      = 0        # RenewDHCPLease's ReturnValue
         # The firewall store (0.6.109's legacy cleanup, #239): rules by Name.
         Fw           = New-Object System.Collections.ArrayList
         FwStuck      = ''       # a rule Name that stays disabled when enabled
@@ -101,10 +106,10 @@ function Assert-FakeTarget {
 function Get-NetAdapter {
     [CmdletBinding()] param([string]$Name, [switch]$IncludeHidden)
     $all = @(
-        [pscustomobject]@{ Name = $script:Fake.LanName; ifIndex = $script:Fake.LanIndex; Status = $script:Fake.Status; VlanID = $script:Fake.AdapterVlan },
-        [pscustomobject]@{ Name = $script:Fake.DanteName; ifIndex = $script:Fake.DanteIndex; Status = 'Up'; VlanID = '' }
+        [pscustomobject]@{ Name = $script:Fake.LanName; ifIndex = $script:Fake.LanIndex; Status = $script:Fake.Status; VlanID = $script:Fake.AdapterVlan; InterfaceDescription = $script:Fake.LanDesc },
+        [pscustomobject]@{ Name = $script:Fake.DanteName; ifIndex = $script:Fake.DanteIndex; Status = 'Up'; VlanID = ''; InterfaceDescription = 'Realtek Gaming 2.5GbE Family Controller' }
     )
-    if ($script:Fake.ExtraLan) { $all += [pscustomobject]@{ Name = $script:Fake.LanName; ifIndex = 7; Status = 'Up' } }
+    if ($script:Fake.ExtraLan) { $all += [pscustomobject]@{ Name = $script:Fake.LanName; ifIndex = 7; Status = 'Up'; InterfaceDescription = 'x' } }
     if ($Name) { Note 'Get-NetAdapter' $Name; return @($all | Where-Object { $_.Name -eq $Name })[0] }
     $all
 }
@@ -116,6 +121,21 @@ function Restart-NetAdapter {
     [CmdletBinding(SupportsShouldProcess)] param([string]$Name)
     Assert-FakeTarget 'Restart-NetAdapter' $Name
 }
+function Disable-NetAdapter {
+    [CmdletBinding(SupportsShouldProcess)] param([string]$Name)
+    Assert-FakeTarget 'Disable-NetAdapter' $Name; $script:Fake.Status = 'Disabled'
+}
+function Get-CimInstance {
+    [CmdletBinding()] param([string]$ClassName, [string]$Filter)
+    Note 'Get-CimInstance' "$ClassName $Filter"
+    [pscustomobject]@{ Fake = 'Win32_NetworkAdapterConfiguration'; Filter = $Filter }
+}
+function Invoke-CimMethod {
+    [CmdletBinding()] param($InputObject, [string]$MethodName)
+    # Recorded as 'Invoke-CimMethod <method> <the filter it was read by>'.
+    Assert-FakeTarget 'Invoke-CimMethod' "$MethodName $($InputObject.Filter)"
+    [pscustomobject]@{ ReturnValue = $script:Fake.RenewRc }
+}
 function Get-NetAdapterAdvancedProperty {
     [CmdletBinding()] param([string]$Name)
     Note 'Get-NetAdapterAdvancedProperty' $Name
@@ -125,6 +145,7 @@ function Get-NetAdapterAdvancedProperty {
 function Set-NetAdapterAdvancedProperty {
     [CmdletBinding()] param([string]$Name, [string]$RegistryKeyword, [string]$RegistryValue, [switch]$NoRestart)
     Assert-FakeTarget 'Set-NetAdapterAdvancedProperty' $Name; $script:Fake.Vlan = $RegistryValue
+    $script:Fake.NoRestart = [bool]$NoRestart
 }
 function Get-NetAdapterBinding {
     [CmdletBinding()] param([string]$Name, [string]$ComponentID)
@@ -163,8 +184,11 @@ function Find-NetRoute {
 }
 function Changes {
     # The calls that change an adapter (not the reads).
-    @($script:Fake.Calls | Where-Object { $_ -match '^(Enable|Set|Restart)-' })
+    @($script:Fake.Calls | Where-Object { $_ -match '^(Enable|Disable|Set|Restart|Invoke)-' })
 }
+# Any call that cycles an adapter (the bugcheck trigger on a Realtek Virtual Adapter, #239).
+function Cycles { @($script:Fake.Calls | Where-Object { $_ -match '^(Enable|Disable|Restart)-NetAdapter ' }) }
+$virtualDesc = 'Realtek Virtual Adapter #2'
 function DanteCalls { @($script:Fake.Calls | Where-Object { $_ -match ' Dante70$' }) }
 Reset-Fake
 
@@ -286,13 +310,40 @@ Check 'the repair plan is the five steps in order, all on the LAN adapter' {
     ($p.Action -join ',') -eq 'Enable,VlanId,BindIPv4,Dhcp,Restart' -and
     @($p | Where-Object { $_.Target -ne 'LAN' }).Count -eq 0
 }
+# --- never cycle a virtual VLAN adapter (#239: it bugchecked a PC)
+Check 'a Realtek Virtual Adapter or any VLAN adapter is virtual' {
+    (Test-VirtualVlanAdapter -InterfaceDescription 'Realtek Virtual Adapter') -and
+    (Test-VirtualVlanAdapter -InterfaceDescription 'Realtek Virtual Adapter #3') -and
+    (Test-VirtualVlanAdapter -InterfaceDescription 'realtek virtual adapter') -and
+    (Test-VirtualVlanAdapter -InterfaceDescription 'Intel(R) Ethernet Connection I219-V - VLAN : VLAN89') -and
+    (Test-VirtualVlanAdapter -InterfaceDescription 'Intel(R) Advanced Network Services Virtual Adapter')
+}
+Check 'a physical NIC, an empty or a missing description is not virtual' {
+    -not (Test-VirtualVlanAdapter -InterfaceDescription 'Realtek USB 2.5GbE Family Controller') -and
+    -not (Test-VirtualVlanAdapter -InterfaceDescription 'Realtek Gaming 2.5GbE Family Controller') -and
+    -not (Test-VirtualVlanAdapter -InterfaceDescription 'Intel(R) Ethernet Controller I225-V') -and
+    -not (Test-VirtualVlanAdapter -InterfaceDescription '') -and
+    -not (Test-VirtualVlanAdapter -InterfaceDescription $null)
+}
+Check 'the plan for a virtual LAN adapter has no Enable and no Restart, a DHCP renew instead' {
+    $p = @(Get-RepairPlan -LanAdapter 'LAN' -DanteAdapter 'Dante70' -LanIsVirtual)
+    ($p.Action -join ',') -eq 'VlanId,BindIPv4,Dhcp,Renew' -and @($p | Where-Object { $_.Target -ne 'LAN' }).Count -eq 0
+}
+Check 'Enable and Restart on a virtual adapter are refused before any change' {
+    Reset-Fake; $script:Fake.LanDesc = $virtualDesc; $script:Fake.Status = 'Disabled'
+    $cfg = Read-HealConfig -Json $good
+    $all = foreach ($a in 'Enable', 'Restart') {
+        Throws { Invoke-RepairStep -Step ([pscustomobject]@{ Action = $a; Target = 'LAN' }) -Config $cfg } '*virtual VLAN adapter*'
+    }
+    @($all | Where-Object { -not $_ }).Count -eq 0 -and @(Cycles).Count -eq 0
+}
 Check 'a plan aimed at the Dante adapter is refused' {
     Throws { Get-RepairPlan -LanAdapter 'Dante70' -DanteAdapter 'dante70' } '*Dante adapter*'
 }
 Check 'a repair step aimed at the Dante adapter is refused before any change' {
     Reset-Fake
     $cfg = Read-HealConfig -Json $good
-    $all = foreach ($a in 'Enable', 'VlanId', 'BindIPv4', 'Dhcp', 'Restart') {
+    $all = foreach ($a in 'Enable', 'VlanId', 'BindIPv4', 'Dhcp', 'Restart', 'Renew') {
         Throws { Invoke-RepairStep -Step ([pscustomobject]@{ Action = $a; Target = ' dante70' }) -Config $cfg } '*Dante adapter*'
     }
     @($all | Where-Object { -not $_ }).Count -eq 0 -and $script:Fake.Calls.Count -eq 0
@@ -381,6 +432,17 @@ Check 'Dhcp: a static interface gets DHCP, a DHCP one left alone' {
     $a = Step 'Dhcp'; $after = $script:Fake.Dhcp
     Reset-Fake; $b = Step 'Dhcp'
     $a.Changed -and $after -eq 'Enabled' -and -not $b.Changed -and @(Changes).Count -eq 0
+}
+
+Check 'Renew: renews the DHCP lease of the LAN adapter, by its interface index' {
+    Reset-Fake
+    $r = Step 'Renew'
+    $r.Changed -and ($script:Fake.Calls -contains 'Invoke-CimMethod RenewDHCPLease InterfaceIndex = 5') -and
+    @(Cycles).Count -eq 0
+}
+Check 'Renew: a failed renew is an error naming its code' {
+    Reset-Fake; $script:Fake.RenewRc = 83
+    Throws { Step 'Renew' } '*RenewDHCPLease returned 83*'
 }
 
 # --- log rotation
@@ -551,12 +613,42 @@ try {
     }
     Check 'the reverse layout (LAN on VLAN 123): the repair keeps VLAN 123 and never touches the Dante adapter' {
         Reset-Fake
-        $script:Fake.Status = 'Disabled'; $script:Fake.Vlan = '123'; $script:Fake.Addresses = @()
+        $script:Fake.LanDesc = $virtualDesc; $script:Fake.Vlan = '123'; $script:Fake.Addresses = @()
         $d = NewRun 'reverse' $reverse '{"failures":2}'
         $rc = Invoke-Check -Dir $d
         $ch = @(Changes)
         $rc -eq 0 -and $script:Fake.Vlan -eq '123' -and
-        ($ch -join ';') -eq 'Enable-NetAdapter LAN;Restart-NetAdapter LAN' -and @(DanteCalls).Count -eq 0
+        ($ch -join ';') -eq 'Invoke-CimMethod RenewDHCPLease InterfaceIndex = 5' -and @(DanteCalls).Count -eq 0
+    }
+    Check 'layout B (a Realtek Virtual Adapter as the LAN): the repair never disables, enables or restarts it' {
+        Reset-Fake
+        $script:Fake.LanDesc = $virtualDesc; $script:Fake.Vlan = ''; $script:Fake.Bound = $false
+        $script:Fake.Dhcp = 'Disabled'; $script:Fake.Addresses = @()
+        $d = NewRun 'layoutb' $reverse '{"failures":2}'
+        $rc = Invoke-Check -Dir $d
+        $ch = @(Changes)
+        $text = LogOf $d
+        $rc -eq 0 -and @(Cycles).Count -eq 0 -and
+        ($ch -join ';') -eq ('Set-NetAdapterAdvancedProperty LAN;Enable-NetAdapterBinding LAN;' +
+            'Set-NetIPInterface LAN;Invoke-CimMethod RenewDHCPLease InterfaceIndex = 5') -and
+        $script:Fake.NoRestart -eq $true -and $script:Fake.Vlan -eq '123' -and @(DanteCalls).Count -eq 0 -and
+        $text -match "Restart: skipped, the LAN adapter is a virtual VLAN adapter \('Realtek Virtual Adapter #2'\)" -and
+        $text -match 'Renew: renewed the DHCP lease' -and -not (StateOf $d).lastRestart
+    }
+    Check 'layout B, the virtual LAN adapter disabled: never enabled, a WARN, the other steps run, exit 1' {
+        Reset-Fake
+        $script:Fake.LanDesc = $virtualDesc; $script:Fake.Status = 'Disabled'; $script:Fake.Vlan = '123'; $script:Fake.Addresses = @()
+        $d = NewRun 'layoutbdis' $reverse '{"failures":2}'
+        $rc = Invoke-Check -Dir $d
+        $rc -eq 1 -and @(Cycles).Count -eq 0 -and $script:Fake.Status -eq 'Disabled' -and
+        (LogOf $d) -match 'WARN the LAN adapter is Disabled and is a virtual VLAN adapter: not enabled' -and
+        (@(Changes) -contains 'Invoke-CimMethod RenewDHCPLease InterfaceIndex = 5')
+    }
+    Check 'layout B in a router outage: no restart ever, the renew runs each repair' {
+        Reset-Fake; $script:Fake.LanDesc = $virtualDesc; $script:Fake.Vlan = '123'; $script:Fake.PingOk = $false
+        $d = NewRun 'layoutbout' $reverse '{"failures":2}'
+        $rc = Invoke-Check -Dir $d
+        $rc -eq 0 -and @(Cycles).Count -eq 0 -and (@(Changes) -join ';') -eq 'Invoke-CimMethod RenewDHCPLease InterfaceIndex = 5'
     }
     Check 'the reverse layout with the LAN VLAN cleared: the repair sets 123 back' {
         Reset-Fake
@@ -616,6 +708,23 @@ try {
         $d = NewRun 'corrupt' $good '{not json'
         $rc = Invoke-Check -Dir $d
         $rc -eq 0 -and (LogOf $d) -match 'state file unreadable' -and (StateOf $d).failures -eq 1
+    }
+    Check 'a state file of NUL bytes (a crash mid-write) is logged and counts from zero' {
+        Reset-Fake; $script:Fake.PingOk = $false
+        $d = NewRun 'nul' $good
+        [System.IO.File]::WriteAllBytes((Join-Path $d 'lan-selfheal.state.json'), (New-Object byte[] 24))
+        $rc = Invoke-Check -Dir $d
+        $rc -eq 0 -and (LogOf $d) -match 'state file unreadable, counting from 0' -and (StateOf $d).failures -eq 1
+    }
+    Check 'the state is written whole through a temporary file: an old file is replaced, no temporary left' {
+        $d = NewRun 'atomic' $good
+        $f = Join-Path $d 'lan-selfheal.state.json'
+        [System.IO.File]::WriteAllBytes($f, (New-Object byte[] 400))
+        Save-HealState -Path $f -Failures 1 -LastRestart $null
+        $bytes = [System.IO.File]::ReadAllBytes($f)
+        $s = Read-HealState -Json (Get-Content $f -Raw)
+        $s.Failures -eq 1 -and @($bytes | Where-Object { $_ -eq 0 }).Count -eq 0 -and
+        @(Get-ChildItem -LiteralPath $d -Filter '*.tmp').Count -eq 0
     }
     Check 'a missing Dante adapter is a warning: the LAN is still repaired, by name' {
         Reset-Fake; $script:Fake.DanteName = 'Other'; $script:Fake.Status = 'Disabled'; $script:Fake.Addresses = @()
