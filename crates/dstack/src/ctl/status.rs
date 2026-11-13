@@ -152,6 +152,12 @@ impl Json {
 ///   rule when the kernel received them, and the largest wake delay, the RX
 ///   thread's pass time less the kernel's receive time, in µs, of the
 ///   heartbeat's last second and since the device started),
+///   `wake_delay_p50_us`, `wake_delay_p99_us` and `wake_delay_p999_us`
+///   (dstack #234, Linux only: the wake delay's 50th, 99th and 99.9th
+///   percentile over the minute the RX minute watch took last (the first
+///   from the device's start, shorter), the upper edge of its 50 µs
+///   bucket; absent before the first take and for a minute without a
+///   stamped packet; the watch logs the same once a minute),
 ///   `network_latency_min_us`, `network_latency_p99_us` and
 ///   `network_latency_max_us` (dstack #244, Linux only, and only for a
 ///   second with a stamped packet: each packet's arrival, the kernel's
@@ -410,6 +416,11 @@ fn rx_part(j: &mut Json, media: &Media) {
             j.num("wire_late", lane.wire_late);
             j.num("wake_delay_us", media.rx.last_wake_delay_us(slot));
             j.num("wake_delay_peak_us", lane.wake_delay_peak_us);
+            if let Some([p50, p99, p999]) = media.rx.last_wake_minute(slot) {
+                j.num("wake_delay_p50_us", p50);
+                j.num("wake_delay_p99_us", p99);
+                j.num("wake_delay_p999_us", p999);
+            }
             if let Some(n) = media.rx.last_network_latency(slot) {
                 j.num("network_latency_min_us", n.min_us);
                 j.num("network_latency_p99_us", n.p99_us);

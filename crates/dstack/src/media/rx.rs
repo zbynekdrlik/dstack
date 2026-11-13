@@ -44,6 +44,10 @@
 //!   own stamp, as min, p99 and max of each heartbeat second, from a fixed
 //!   histogram of the slot (`rx/netlat.rs`;
 //!   [`RxShared::last_network_latency`]). Windows records none.
+//! - The minute (dstack #234, Linux): the wake delays (`rx/wake.rs`) and
+//!   network latencies of each slot in windows the RX minute watch takes
+//!   once a minute ([`RxShared::take_minute`]) and logs, for apps without
+//!   a status socket.
 //! - The packets' judge (phase D, plan Task 3): the least lateness of each
 //!   flow slot's placed packets in ns (our clock's now in ns less the
 //!   packet's own stamp in ns), kept until read, so each heartbeat second
@@ -82,6 +86,7 @@ mod counts;
 mod holes;
 mod netlat;
 mod plan;
+mod wake;
 pub use counts::RxCounts;
 use counts::{NO_LATENESS, RxStats, source_of, source_word};
 use holes::{Holes, Lost};
@@ -92,6 +97,7 @@ pub use socket::{GROUP_BOUND_TO_PORT, join};
 use socket::{
     Received, recv_stamped, set_recv_buffer, stamp_receives, wake_delay_ns, wall_now_ns, wire_late,
 };
+pub use wake::WakeDelay;
 
 /// Our RX flow slots (inferno's `MAX_FLOWS`).
 pub const MAX_FLOWS: usize = 32;
@@ -165,7 +171,9 @@ pub struct RxShared {
     /// Our address: the multicast groups are joined on it.
     ip: Ipv4Addr,
     rings: Arc<[Ring]>,
-    lanes: [RxStats; MAX_FLOWS],
+    /// One per flow slot ([`MAX_FLOWS`]), on the heap: each holds its
+    /// histograms (about 5 KB, dstack #234), too much for a stack in all.
+    lanes: Box<[RxStats]>,
     /// Held by [`RxShared::publish`] only (one writer at a time); the RX
     /// thread never takes it.
     writer: Mutex<()>,
@@ -238,7 +246,7 @@ impl RxShared {
             sockets,
             ip,
             rings,
-            lanes: std::array::from_fn(|_| RxStats::default()),
+            lanes: (0..MAX_FLOWS).map(|_| RxStats::default()).collect(),
             writer: Mutex::new(()),
             poll_errors: AtomicU64::new(0),
             stop: AtomicBool::new(false),
@@ -451,6 +459,26 @@ impl RxShared {
     /// nothing.
     pub fn last_network_latency(&self, slot: usize) -> Option<NetLatency> {
         self.lanes.get(slot)?.network.last()
+    }
+
+    /// Ends flow slot `slot`'s minute (dstack #234; the RX minute watch,
+    /// once a minute): its packets' wake delays and network latencies
+    /// since the last call, each `None` for no stamped packet (always on
+    /// Windows). The status keeps showing the wake percentiles taken
+    /// ([`RxShared::last_wake_minute`]).
+    pub fn take_minute(&self, slot: usize) -> (Option<WakeDelay>, Option<NetLatency>) {
+        self.lanes.get(slot).map_or((None, None), |l| {
+            (l.wake_minute.take(), l.network_minute.take())
+        })
+    }
+
+    /// The 50th, 99th and 99.9th percentile of flow slot `slot`'s wake
+    /// delays in the minute [`RxShared::take_minute`] took last (the first
+    /// from the start, shorter), µs; `None` before the first take or for a
+    /// minute without a stamped packet.
+    /// The status reads it and takes nothing.
+    pub fn last_wake_minute(&self, slot: usize) -> Option<[u64; 3]> {
+        self.lanes.get(slot)?.wake_minute.last()
     }
 
     /// Whether every slot socket stamps its datagrams' receive times, so
@@ -839,6 +867,7 @@ impl Receiver {
             if let Some(w) = wake {
                 stats.max_wake_ns.fetch_max(w, Ordering::Relaxed);
                 stats.wake_peak_ns.fetch_max(w, Ordering::Relaxed);
+                stats.wake_minute.record(w);
             }
             let Some((now_ns, now)) = now else {
                 count(&stats.unplaced);
@@ -863,6 +892,7 @@ impl Receiver {
                 }
                 let network = netlat::network_latency_ns(now_ns, w, ns_of(pos, rate));
                 stats.network.record(network);
+                stats.network_minute.record(network);
             }
             let end = pos.saturating_add(nframes as u64);
             // dstack #278: a jump past the end opens a hole, a gap only

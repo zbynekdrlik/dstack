@@ -214,6 +214,9 @@ const WORDS: &[&str] = &[
     "wire_late",
     "wake_delay_us",
     "wake_delay_peak_us",
+    "wake_delay_p50_us",
+    "wake_delay_p99_us",
+    "wake_delay_p999_us",
     "network_latency_min_us",
     "network_latency_p99_us",
     "network_latency_max_us",
@@ -569,12 +572,31 @@ fn the_receive_stamp_keys_show_only_while_the_sockets_stamp() {
         status(&media).contains("\"network_latency_p99_us\":"),
         cfg!(target_os = "linux")
     );
+    // The wake percentiles (dstack #234) show once the RX minute watch
+    // took a minute with a stamped packet, numbers only.
+    assert!(!status(&media).contains("wake_delay_p50_us"));
+    media.rx.take_minute(0);
+    let s = status(&media);
+    assert_eq!(
+        s.contains("\"wake_delay_p50_us\":") && s.contains("\"wake_delay_p999_us\":"),
+        cfg!(target_os = "linux"),
+        "{s}"
+    );
+    for word in words_of(&s, "test-device") {
+        assert!(
+            WORDS.contains(&word.as_str()) || word.starts_with("127.0.0.1:"),
+            "{word:?} in {s}"
+        );
+    }
     media.rx.set_stamps(false);
     let s = status(&media);
     for key in [
         "wire_late",
         "wake_delay_us",
         "wake_delay_peak_us",
+        "wake_delay_p50_us",
+        "wake_delay_p99_us",
+        "wake_delay_p999_us",
         "network_latency_min_us",
         "network_latency_p99_us",
         "network_latency_max_us",

@@ -171,8 +171,11 @@ fn the_minute_watch_tells_reorders_and_the_loss_watch_stays_quiet() {
     assert_eq!((s.lane(0).out_of_order, s.lane(0).reordered), (2, 1));
     assert_eq!(info(&mut || loss.watch(EVERY_NS, &s, named)), "");
     assert_eq!(info(&mut || minute.watch(MINUTE_NS - 1, &s, named)), "");
-    let log = info(&mut || minute.watch(MINUTE_NS, &s, named));
-    assert_eq!(log.lines().count(), 1, "{log}");
+    let all = info(&mut || minute.watch(MINUTE_NS, &s, named));
+    // The minute's timing line (dstack #234, Linux) comes beside it.
+    let lines: Vec<&str> = all.lines().filter(|l| l.contains("reordered")).collect();
+    assert_eq!(lines.len(), 1, "{all}");
+    let log = lines[0];
     assert!(log.contains(" INFO "), "{log}");
     assert!(
         log.contains(&format!(

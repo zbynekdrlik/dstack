@@ -7,7 +7,7 @@
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::sync::atomic::AtomicU64;
 
-use super::netlat;
+use super::{netlat, wake};
 
 /// A least lateness that holds none: no packet placed since it was last
 /// taken. A lateness of `u64::MAX` ns (585 years) reads as none too.
@@ -51,6 +51,10 @@ pub(super) struct RxStats {
     pub(super) network: netlat::Window,
     /// What the last [`RxShared::take_max_lateness`] took of it.
     pub(super) last_min_lateness_ns: Least,
+    /// The minute's wake delays and network latencies (dstack #234,
+    /// Linux), taken by [`RxShared::take_minute`].
+    pub(super) wake_minute: wake::Window,
+    pub(super) network_minute: netlat::Window,
     /// Where the flow's audio comes from, as [`source_word`] packs it (0:
     /// none yet): the RX thread writes it only when it changes (dstack
     /// #266), the status and the loss watch read it.

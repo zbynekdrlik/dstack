@@ -397,10 +397,13 @@ impl RxWatch {
 /// How often the RX minute watch looks, ns.
 pub const MINUTE_NS: u64 = 60_000_000_000;
 
-/// The RX side's minute watch (dstack #278): once a minute, each flow whose
-/// packets came reordered (overtaken on the way, each filling its hole)
-/// gets one INFO line, apart from the loss watch's warning: a reordering
-/// link shows without a loss alarm.
+/// The RX side's minute watch: once a minute, each flow whose packets came
+/// reordered (overtaken on the way, each filling its hole) gets one INFO
+/// line, apart from the loss watch's warning: a reordering link shows
+/// without a loss alarm (dstack #278). And each flow with stamped packets
+/// (Linux) gets one INFO line of its minute's wake delay and network
+/// latency, the only way to read them from an app without a status socket
+/// (dstack #234: OBS's dante-input).
 #[derive(Debug)]
 pub struct RxMinute {
     reordered: [u64; RX_FLOWS],
@@ -444,28 +447,47 @@ impl RxMinute {
         Some((first, rose))
     }
 
-    /// [`RxMinute::look`] on `rx`'s flows, each flow's reorders of the
-    /// minute logged at INFO with its transmitter, as the loss watch names
-    /// it (`device` is read only for a slot with a line).
+    /// [`RxMinute::look`] on `rx`'s flows: at each look every slot's
+    /// minute is taken ([`RxShared::take_minute`]; the first look's only
+    /// starts the next minute clean), and each flow's reorders and timing
+    /// of the minute logged at INFO with its transmitter, as the loss
+    /// watch names it (`device` is read only for a slot with a line).
     pub fn watch(&mut self, now_ns: u64, rx: &RxShared, device: impl Fn(usize) -> Option<String>) {
         let Some((first, rose)) = self.look(now_ns, |s| rx.lane(s).reordered) else {
             return;
         };
-        if first {
-            return;
-        }
         for (slot, &reordered) in rose.iter().enumerate() {
-            if reordered == 0 {
+            let timing = rx.take_minute(slot);
+            if first {
                 continue;
             }
-            let (name, source) = transmitter(rx, slot, &device);
-            info!(
-                device = %name,
-                source = %source,
-                slot,
-                reordered,
-                "RX packets reordered on the way in the last minute, not lost: each filled its hole"
-            );
+            if reordered > 0 {
+                let (name, source) = transmitter(rx, slot, &device);
+                info!(
+                    device = %name,
+                    source = %source,
+                    slot,
+                    reordered,
+                    "RX packets reordered on the way in the last minute, not lost: each filled its hole"
+                );
+            }
+            if let (Some(wake), Some(net)) = timing {
+                let (name, source) = transmitter(rx, slot, &device);
+                info!(
+                    device = %name,
+                    source = %source,
+                    slot,
+                    packets = wake.packets,
+                    wake_delay_p50_us = wake.p50_us,
+                    wake_delay_p99_us = wake.p99_us,
+                    wake_delay_p999_us = wake.p999_us,
+                    wake_delay_max_us = wake.max_us,
+                    network_latency_min_us = net.min_us,
+                    network_latency_p99_us = net.p99_us,
+                    network_latency_max_us = net.max_us,
+                    "RX flow timing in the last minute: the RX thread's wake delay and the measured network latency"
+                );
+            }
         }
     }
 }
