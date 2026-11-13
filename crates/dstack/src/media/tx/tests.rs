@@ -1697,6 +1697,34 @@ fn the_devices_tx_margin_sets_when_a_packet_leaves_and_its_latency_the_lag() {
     assert_eq!(w, ns_of(stamp_of(&sent[0]) + FPP, RATE) + 30_000);
 }
 
+/// dstack #262: a stateless filter names the TX flow ports, so with a
+/// `tx_port_base` slot `n`'s socket is on `tx_port_base + n`, every slot
+/// the device opens.
+#[test]
+fn a_tx_port_base_puts_each_slot_on_its_own_port() {
+    let at = |base: u16| {
+        let cfg = DeviceConfig {
+            tx_port_base: Some(base),
+            ..cfg()
+        };
+        TxShared::new(cfg, Ipv4Addr::LOCALHOST, Vec::new().into(), 1, &[])
+    };
+    // A base whose 32 ports are free on loopback: tried until one is.
+    let (shared, base) = (40_000u16..60_000)
+        .step_by(97)
+        .find_map(|b| Some((at(b).ok()?, b)))
+        .expect("32 free ports in a row on loopback");
+    assert_eq!(shared.sockets.len(), MAX_FLOWS);
+    for (slot, s) in shared.sockets.iter().enumerate() {
+        assert_eq!(
+            usize::from(s.local_addr().unwrap().port()),
+            usize::from(base) + slot,
+            "slot {slot}"
+        );
+        assert_eq!(usize::from(shared.ports[slot]), usize::from(base) + slot);
+    }
+}
+
 // Linux refuses a send to port 0; Windows sends it.
 #[cfg(target_os = "linux")]
 #[test]

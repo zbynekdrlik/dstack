@@ -198,6 +198,15 @@ pub struct DeviceConfig {
     /// process's socket may hold one of them, and the device does not start.
     #[serde(default)]
     pub rx_port_base: Option<u16>,
+    /// The first of the TX flow ports (UDP): slot `n` (from 0) sends from
+    /// `tx_port_base + n`, [`crate::media::tx::MAX_FLOWS`] ports, so a
+    /// stateless filter can accept a receiver's keepalives to them (dstack
+    /// #262). Ports the OS chooses when left out. The range must stay clear
+    /// of `rx_port_base`'s and of every slot's ARC, flow-control and CMC
+    /// ports (4440-4471, 4455-4486, 8800-8831); like `rx_port_base`, pick
+    /// it outside the OS's ephemeral range.
+    #[serde(default)]
+    pub tx_port_base: Option<u16>,
     /// RX subscriptions the app declares (`[[subscribe]]`, intercom#5):
     /// at start, an RX channel the state file holds no subscription for
     /// takes its declared one ([`DeviceState::declare`]). One Dante
