@@ -4,6 +4,8 @@ use super::*;
 
 use std::net::Ipv4Addr;
 
+use dstack_endpoint::cli::WASAPI_PERIOD_NS;
+
 fn args(text: &str) -> Vec<String> {
     text.split_whitespace().map(String::from).collect()
 }
@@ -53,6 +55,7 @@ fn every_option_is_read() {
         Latency {
             network_ns: Some(500_000),
             receive_buffer_ns: Some(9_000_000),
+            app_buffer_ns: None,
         }
     );
     assert_eq!(o.place, Some(Place::Ip(Ipv4Addr::new(192, 0, 2, 7))));
@@ -178,6 +181,7 @@ fn the_link_config_is_a_tx_only_device_l_and_r_with_the_options() {
             .tx(["L", "R"])
             .sample_rate(96_000)
             .product("dstack", "dsend")
+            .app_buffer(WASAPI_PERIOD_NS, None)
     );
     let dev = plain.device().unwrap();
     assert!(dev.rx.is_empty(), "TX only");
@@ -200,7 +204,29 @@ fn the_link_config_is_a_tx_only_device_l_and_r_with_the_options() {
                 flows: 4456
             })
             .process_id(3)
+            .app_buffer(WASAPI_PERIOD_NS, None)
     );
+}
+
+/// dstack #247: dsend's FIFO target is WASAPI's 10 ms period and one pump
+/// block at the network's rate (11.333 ms at 96 kHz, was a fixed 40 ms),
+/// and `--app-buffer-ms` sets it as given.
+#[test]
+fn the_app_buffer_is_the_wasapi_period_and_a_block_or_the_flag() {
+    let state = PathBuf::from("/tmp/s.toml");
+    let plain = link_config(&run(""), "pc-dsend", state.clone());
+    let b = plain.bridge_buffer().unwrap();
+    assert_eq!((b.chunk_ns(), b.block_ns()), (10_000_000, 1_333_333));
+    assert_eq!(b.target_ns(), 11_333_333);
+    let at_48k = link_config(&run("--rate 48000"), "pc-dsend", state.clone());
+    assert_eq!(at_48k.bridge_buffer().unwrap().target_ns(), 12_666_667);
+    let set = link_config(&run("--app-buffer-ms 40"), "pc-dsend", state);
+    assert_eq!(set.bridge_buffer().unwrap().target_ns(), 40_000_000);
+    assert_eq!(
+        run("--app-buffer-ms 40").latency.app_buffer_ns,
+        Some(40_000_000)
+    );
+    assert!(parse(&args("--app-buffer-ms 200")).is_err());
 }
 
 #[test]

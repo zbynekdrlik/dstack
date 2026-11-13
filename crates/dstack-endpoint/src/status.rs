@@ -13,6 +13,8 @@ use crate::player::Stats;
 pub struct Snapshot {
     /// The FIFO's depth, ms of its producer's rate.
     pub depth_ms: f64,
+    /// The depth the player keeps, ms: the app buffer (dstack #247).
+    pub target_ms: f64,
     /// The converter's correction, ppm.
     pub ppm: f64,
     pub underruns: u64,
@@ -40,6 +42,7 @@ impl Snapshot {
     pub fn read(fifo: &Fifo, stats: &Stats, fifo_rate: u32) -> Self {
         Snapshot {
             depth_ms: fifo.len() as f64 * 1000.0 / f64::from(fifo_rate.max(1)),
+            target_ms: stats.target_ms(),
             ppm: stats.ppm(),
             underruns: stats.underruns(),
             played: stats.played(),
@@ -72,13 +75,14 @@ fn peak_text(peak: f32) -> String {
     }
 }
 
-/// The status line: `depth 40.1 ms, +3.2 ppm, 0 underruns, 480000 frames
-/// played at 48000 Hz`, then `, mono` under `--mono`, `, waiting for audio` while priming and the
+/// The status line: `depth 11.9 ms of 11.3 ms, +3.2 ppm, 0 underruns,
+/// 480000 frames played at 48000 Hz` (the live depth of its target, the
+/// app buffer, dstack #247; the underruns are the dropouts), then `, mono` under `--mono`, `, waiting for audio` while priming and the
 /// overflows and re-centres when there are any.
 pub fn line(s: &Snapshot) -> String {
     let mut text = format!(
-        "depth {:.1} ms, {:+.1} ppm, {} underruns, {} frames played at {} Hz",
-        s.depth_ms, s.ppm, s.underruns, s.played, s.out_rate
+        "depth {:.1} ms of {:.1} ms, {:+.1} ppm, {} underruns, {} frames played at {} Hz",
+        s.depth_ms, s.target_ms, s.ppm, s.underruns, s.played, s.out_rate
     );
     if s.mono {
         text.push_str(", mono");
@@ -199,6 +203,7 @@ mod tests {
     fn snap() -> Snapshot {
         Snapshot {
             depth_ms: 40.06,
+            target_ms: 22.666666,
             ppm: 3.24,
             underruns: 2,
             played: 480_000,
@@ -215,7 +220,7 @@ mod tests {
     fn the_line_carries_depth_ppm_underruns_frames_and_rate() {
         assert_eq!(
             line(&snap()),
-            "depth 40.1 ms, +3.2 ppm, 2 underruns, 480000 frames played at 44100 Hz"
+            "depth 40.1 ms of 22.7 ms, +3.2 ppm, 2 underruns, 480000 frames played at 44100 Hz"
         );
         let all = Snapshot {
             ppm: -12.0,
@@ -227,7 +232,7 @@ mod tests {
         };
         assert_eq!(
             line(&all),
-            "depth 40.1 ms, -12.0 ppm, 2 underruns, 480000 frames played at 44100 Hz, \
+            "depth 40.1 ms of 22.7 ms, -12.0 ppm, 2 underruns, 480000 frames played at 44100 Hz, \
              mono, waiting for audio, 128 frames overflowed, 1 re-centres"
         );
     }
@@ -349,12 +354,15 @@ mod tests {
     fn a_reading_takes_the_fifo_and_the_player_s_counts() {
         let fifo = Arc::new(fifo_for(2, 48_000));
         fifo.push_with(480, |_, _| 0.0);
-        let player = Player::new(Arc::clone(&fifo), 48_000, 44_100, Arc::default()).unwrap();
+        let buffer = dlink::bridge::AppBuffer::new(10_000_000, 1_333_333);
+        let player =
+            Player::new(Arc::clone(&fifo), 48_000, 44_100, buffer, Arc::default()).unwrap();
         let s = Snapshot::read(&fifo, &player.stats(), 48_000);
         assert_eq!(
             s,
             Snapshot {
                 depth_ms: 10.0,
+                target_ms: 11.333333,
                 ppm: 0.0,
                 underruns: 0,
                 played: 0,

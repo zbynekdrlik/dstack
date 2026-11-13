@@ -9,8 +9,9 @@
 //! its own crystal, often at another rate. One side writes a lock-free
 //! [`fifo::Fifo`] on its clock; the other pulls through the
 //! [`player::Player`] on its own: `dstack-resample`'s drifting converter,
-//! its ratio steered by the ASRC controller on the FIFO's depth (about
-//! [`player::TARGET_S`], 40 ms). In dlisten the network writes and the
+//! its ratio steered by the ASRC controller on the FIFO's depth at the
+//! device's app buffer (dstack #247: [`cli::WASAPI_PERIOD_NS`] and one pump
+//! block, about 11.3 ms at 96 kHz, or `--app-buffer-ms`). In dlisten the network writes and the
 //! output callback pulls; in dsend the endpoint's loopback capture writes
 //! and the device's pump pulls. The FIFO, the player and the map are
 //! dlink's [`dlink::bridge`] (dstack #241), re-exported here at their old

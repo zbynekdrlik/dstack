@@ -34,6 +34,10 @@ receives, played on the output at its own rate and clock.
   --network-latency-ms <ms>   (a) the Dante network latency (default 1)
   --receive-buffer-ms <ms>    (b) the receive buffer; the Dante latency is
                               (a) + (b) (default: as before 0.6.106)
+  --app-buffer-ms <ms>        the buffer between the network and the
+                              output, 1 to 150 (default: the output's
+                              10 ms WASAPI period + one pump block, 12.67
+                              at 48000 Hz; was 40 before 0.6.112)
   --ip <addr>                 the Dante NIC's address (default: the address
                               of the default route)
   --iface <name>              the Dante NIC by name (instead of --ip)
@@ -60,7 +64,7 @@ pub const SUFFIX: &str = "-dlisten";
 pub use dstack_endpoint::cli::{NAME_MAX, parse_ports};
 
 /// The flags that take a value.
-const VALUE_FLAGS: [&str; 12] = [
+const VALUE_FLAGS: [&str; 13] = [
     "--output",
     "--channels",
     "--name",
@@ -68,6 +72,7 @@ const VALUE_FLAGS: [&str; 12] = [
     "--rate",
     "--network-latency-ms",
     "--receive-buffer-ms",
+    "--app-buffer-ms",
     "--ip",
     "--iface",
     "--ports",
@@ -92,7 +97,8 @@ pub struct Options {
     pub output: Option<String>,
     pub subscribe: Vec<Subscribe>,
     pub rate: u32,
-    /// The latency terms (a) and (b), ns (dstack #244).
+    /// The latency terms (a) and (b) and the app buffer, ns (dstack #244,
+    /// #247).
     pub latency: Latency,
     /// None: the default route's address.
     pub place: Option<Place>,
@@ -112,6 +118,7 @@ impl Options {
             Shared::Rate(r) => self.rate = r,
             Shared::NetworkLatencyNs(ns) => self.latency.network_ns = Some(ns),
             Shared::ReceiveBufferNs(ns) => self.latency.receive_buffer_ns = Some(ns),
+            Shared::AppBufferNs(ns) => self.latency.app_buffer_ns = Some(ns),
             Shared::Place(p) => self.place = Some(p),
             Shared::Ports(p) => self.ports = Some(p),
             Shared::ProcessId(id) => self.process_id = Some(id),

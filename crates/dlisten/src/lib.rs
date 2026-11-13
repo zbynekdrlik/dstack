@@ -14,8 +14,9 @@
 //! - The output callback (cpal: WASAPI shared on Windows, ALSA on Linux,
 //!   at the output's own default rate) pulls through the [`player::Player`]:
 //!   `dstack-resample`'s adjustable converter, its ratio steered by the
-//!   ASRC controller (SongPlayer's laws) on the FIFO's depth, about
-//!   [`player::TARGET_S`] (40 ms).
+//!   ASRC controller (SongPlayer's laws) on the FIFO's depth, kept at the
+//!   app buffer (dstack #247): the output's 10 ms WASAPI period and one
+//!   pump block, 12.667 ms at 48 kHz, or `--app-buffer-ms`.
 //! - [`map`] puts our channels on the output's: L/R on the first two, a
 //!   mono source on both.
 //!

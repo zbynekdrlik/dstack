@@ -8,6 +8,7 @@ use std::ffi::OsString;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
 
+use dlink::bridge::{MAX_APP_BUFFER_NS, MIN_APP_BUFFER_NS};
 use dlink::{Config, Place, Ports};
 
 /// The longest Dante device name.
@@ -94,12 +95,13 @@ pub fn state_path(
 }
 
 /// The flags with a value both apps take ([`parse_shared`]).
-pub const SHARED_FLAGS: [&str; 10] = [
+pub const SHARED_FLAGS: [&str; 11] = [
     "--output",
     "--name",
     "--rate",
     "--network-latency-ms",
     "--receive-buffer-ms",
+    "--app-buffer-ms",
     "--ip",
     "--iface",
     "--ports",
@@ -120,6 +122,9 @@ pub enum Shared {
     NetworkLatencyNs(u64),
     /// `--receive-buffer-ms <ms>`: (b), dlink's receive buffer, ns.
     ReceiveBufferNs(u64),
+    /// `--app-buffer-ms <ms>`: the bridge FIFO's target, ns (dstack #247),
+    /// within `dlink::bridge::MIN_APP_BUFFER_NS` to `MAX_APP_BUFFER_NS`.
+    AppBufferNs(u64),
     /// `--ip <addr>` or `--iface <name>`: the Dante NIC.
     Place(Place),
     /// `--ports <arc>,<cmc>,<flows>`.
@@ -144,6 +149,17 @@ pub fn parse_shared(flag: &str, value: &str, placed: bool) -> Option<Result<Shar
         }),
         "--network-latency-ms" => latency_ms(flag, value).map(Shared::NetworkLatencyNs),
         "--receive-buffer-ms" => latency_ms(flag, value).map(Shared::ReceiveBufferNs),
+        "--app-buffer-ms" => latency_ms(flag, value).and_then(|ns| {
+            if (MIN_APP_BUFFER_NS..=MAX_APP_BUFFER_NS).contains(&ns) {
+                Ok(Shared::AppBufferNs(ns))
+            } else {
+                Err(format!(
+                    "--app-buffer-ms needs {} to {} ms, not {value}",
+                    dlink::ms(MIN_APP_BUFFER_NS),
+                    dlink::ms(MAX_APP_BUFFER_NS)
+                ))
+            }
+        }),
         "--ip" | "--iface" if placed => Err("give one of --ip and --iface, once".to_string()),
         "--ip" => value
             .parse::<Ipv4Addr>()
@@ -160,19 +176,29 @@ pub fn parse_shared(flag: &str, value: &str, placed: bool) -> Option<Result<Shar
     Some(shared)
 }
 
-/// The latency terms the shared options set, ns (dstack #244): `None`
-/// keeps dlink's default.
+/// The latency terms the shared options set, ns (dstack #244, #247):
+/// `None` keeps the default.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Latency {
     /// (a), `--network-latency-ms`.
     pub network_ns: Option<u64>,
     /// (b), `--receive-buffer-ms`.
     pub receive_buffer_ns: Option<u64>,
+    /// The bridge FIFO's target, `--app-buffer-ms` (dstack #247).
+    pub app_buffer_ns: Option<u64>,
 }
+
+/// The chunk dsend and dlisten hand the bridge at once, ns (dstack #247):
+/// WASAPI's shared-mode period, 10 ms (the engine's default; cpal exposes
+/// no period, and dsend's loopback and dlisten's output both run on it).
+/// Their app buffer's default is this and one pump block.
+pub const WASAPI_PERIOD_NS: u64 = 10_000_000;
 
 /// The device config `c` with the shared options: the latency terms, the
 /// ports and the process id when given (dlink's defaults otherwise: (a)
-/// 1 ms, (b) keeping v0.6.105's latency, no real-time setup).
+/// 1 ms, (b) keeping v0.6.105's latency, no real-time setup), and the
+/// bridge's app buffer: [`WASAPI_PERIOD_NS`] as the chunk, and
+/// `--app-buffer-ms` when given (dstack #247).
 pub fn with_shared(
     mut c: Config,
     latency: Latency,
@@ -185,6 +211,7 @@ pub fn with_shared(
     if let Some(ns) = latency.receive_buffer_ns {
         c = c.receive_buffer_ns(ns);
     }
+    c = c.app_buffer(WASAPI_PERIOD_NS, latency.app_buffer_ns);
     if let Some(p) = ports {
         c = c.ports(p);
     }
@@ -232,6 +259,22 @@ mod tests {
             Err("--receive-buffer-ms needs ms with up to 6 decimals, not \"x\"".into())
         );
         assert_eq!(
+            shared("--app-buffer-ms", "40"),
+            Ok(Shared::AppBufferNs(40_000_000))
+        );
+        assert_eq!(
+            shared("--app-buffer-ms", "11.5"),
+            Ok(Shared::AppBufferNs(11_500_000))
+        );
+        assert_eq!(
+            shared("--app-buffer-ms", "0.5"),
+            Err("--app-buffer-ms needs 1 to 150 ms, not 0.5".into())
+        );
+        assert_eq!(
+            shared("--app-buffer-ms", "151"),
+            Err("--app-buffer-ms needs 1 to 150 ms, not 151".into())
+        );
+        assert_eq!(
             shared("--ip", "192.0.2.7"),
             Ok(Shared::Place(Place::Ip(Ipv4Addr::new(192, 0, 2, 7))))
         );
@@ -266,8 +309,10 @@ mod tests {
 
     #[test]
     fn the_shared_options_go_into_the_device_config() {
-        let c = || Config::new("n", "/s.toml");
-        assert_eq!(with_shared(c(), Latency::default(), None, None), c());
+        let bare = || Config::new("n", "/s.toml");
+        // The WASAPI chunk always, the configured buffer when given.
+        let c = || bare().app_buffer(WASAPI_PERIOD_NS, None);
+        assert_eq!(with_shared(bare(), Latency::default(), None, None), c());
         let ports = Ports {
             arc: 1,
             cmc: 2,
@@ -276,9 +321,10 @@ mod tests {
         let both = Latency {
             network_ns: Some(500_000),
             receive_buffer_ns: Some(3_000_000),
+            app_buffer_ns: None,
         };
         assert_eq!(
-            with_shared(c(), both, Some(ports), Some(3)),
+            with_shared(bare(), both, Some(ports), Some(3)),
             c().network_latency_ns(500_000)
                 .receive_buffer_ns(3_000_000)
                 .ports(ports)
@@ -290,7 +336,7 @@ mod tests {
             ..Latency::default()
         };
         assert_eq!(
-            with_shared(c(), a, None, None),
+            with_shared(bare(), a, None, None),
             c().network_latency_ns(2_000_000)
         );
         let b = Latency {
@@ -298,9 +344,19 @@ mod tests {
             ..Latency::default()
         };
         assert_eq!(
-            with_shared(c(), b, None, None),
+            with_shared(bare(), b, None, None),
             c().receive_buffer_ns(4_000_000)
         );
+        let buffered = Latency {
+            app_buffer_ns: Some(40_000_000),
+            ..Latency::default()
+        };
+        let config = with_shared(bare(), buffered, None, None);
+        assert_eq!(
+            config,
+            bare().app_buffer(WASAPI_PERIOD_NS, Some(40_000_000))
+        );
+        assert_eq!(config.bridge_buffer().unwrap().target_ns(), 40_000_000);
     }
 
     #[test]

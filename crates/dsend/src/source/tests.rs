@@ -5,13 +5,21 @@ use super::*;
 use std::f64::consts::TAU;
 use std::sync::Arc;
 
+use dlink::bridge::{AppBuffer, chunk_ns};
+use dstack_endpoint::cli::WASAPI_PERIOD_NS;
 use dstack_endpoint::fifo::Fifo;
-use dstack_endpoint::player::{Stats, TARGET_S, fifo_for};
+use dstack_endpoint::player::{Stats, fifo_for};
 
 use crate::capture::push_interleaved;
 
 /// The pump's block (dlink's default).
 const PUMP_BLOCK: usize = 128;
+
+/// dsend's default app buffer (dstack #247): WASAPI's 10 ms period and one
+/// pump block at the network's `net_rate`.
+fn buffer(net_rate: u32) -> AppBuffer {
+    AppBuffer::new(WASAPI_PERIOD_NS, chunk_ns(PUMP_BLOCK as u64, net_rate))
+}
 
 /// The captured output and the network as two clocks: the capture hands
 /// packets of 10 ms (WASAPI shared) at its rate, `drift_ppm` fast on true
@@ -49,10 +57,26 @@ fn tone(frame: u64, c: usize, rate: f64) -> f64 {
 
 impl Sim {
     fn new(cap_rate: u32, net_rate: u32, drift_ppm: f64, channels: usize) -> Self {
+        Self::with(buffer(net_rate), cap_rate, net_rate, drift_ppm, channels)
+    }
+
+    fn with(
+        buffer: AppBuffer,
+        cap_rate: u32,
+        net_rate: u32,
+        drift_ppm: f64,
+        channels: usize,
+    ) -> Self {
         let fifo = Arc::new(fifo_for(channels, cap_rate));
         let stats: Arc<Stats> = Arc::default();
-        let player = Player::new(Arc::clone(&fifo), cap_rate, net_rate, Arc::clone(&stats))
-            .expect("the player");
+        let player = Player::new(
+            Arc::clone(&fifo),
+            cap_rate,
+            net_rate,
+            buffer,
+            Arc::clone(&stats),
+        )
+        .expect("the player");
         let (source, switch) = source(player);
         Sim {
             fifo,
@@ -145,15 +169,15 @@ fn frequency(x: &[f64], rate: f64) -> f64 {
     (ups.len() - 1) as f64 * rate / (last - first)
 }
 
-/// The issue's test: a captured output ±200 ppm off the network over four
-/// simulated minutes. The depth settles at the target, the controller
-/// follows the drift (a capture fast by +d gives more frames than the
-/// network takes: −d ppm, less output per input), and after the priming
-/// there is no underrun and no overflow.
-fn drifting(drift: f64) {
+/// The issue's test: a captured output off the network over four
+/// simulated minutes at the app buffer `buffer`. The depth settles at the
+/// target, the controller follows the drift (a capture fast by +d gives
+/// more frames than the network takes: −d ppm, less output per input), and
+/// after the priming there is no underrun and no overflow.
+fn drifting(drift: f64, buffer: AppBuffer) {
     // One channel (a mono output on both TX channels): the clocks are the
     // test, the converter costs per channel.
-    let mut s = Sim::new(48_000, 48_000, drift, 1);
+    let mut s = Sim::with(buffer, 48_000, 48_000, drift, 1);
     s.run(210.0);
     s.depth_ms();
     s.run(30.0);
@@ -173,7 +197,7 @@ fn drifting(drift: f64) {
     assert_eq!(s.fifo.overflows(), 0, "{drift}: no overflow");
     assert!(!stats.priming(), "{drift}: sending");
     assert!(
-        (depth - TARGET_S * 1000.0).abs() < 3.0,
+        (depth - stats.target_ms()).abs() < 3.0,
         "{drift}: depth {depth} ms"
     );
     assert!(
@@ -190,14 +214,29 @@ fn drifting(drift: f64) {
     assert!(rms(&l) > 0.3 && rms(&r) > 0.3, "both channels send");
 }
 
+/// dsend's default target (dstack #247: 10 ms + a block, was 40 ms) holds
+/// a capture ±100 ppm off.
 #[test]
-fn a_capture_200_ppm_fast_holds_the_target_with_no_underrun_or_overrun() {
-    drifting(200.0);
+fn a_capture_100_ppm_fast_holds_the_default_target_with_no_underrun_or_overrun() {
+    drifting(100.0, buffer(48_000));
 }
 
 #[test]
-fn a_capture_200_ppm_slow_holds_the_target_with_no_underrun_or_overrun() {
-    drifting(-200.0);
+fn a_capture_100_ppm_slow_holds_the_default_target_with_no_underrun_or_overrun() {
+    drifting(-100.0, buffer(48_000));
+}
+
+/// ±200 ppm needs `--app-buffer-ms 20`: the correction moves 5 ppm a
+/// second at most (inaudibly), so it reaches 200 ppm after 40 s and the
+/// depth gives about 6 ms meanwhile, more than the default leaves.
+#[test]
+fn a_capture_200_ppm_fast_holds_a_20_ms_target_with_no_underrun_or_overrun() {
+    drifting(200.0, buffer(48_000).set(Some(20_000_000)));
+}
+
+#[test]
+fn a_capture_200_ppm_slow_holds_a_20_ms_target_with_no_underrun_or_overrun() {
+    drifting(-200.0, buffer(48_000).set(Some(20_000_000)));
 }
 
 /// The captured output at another rate than the network: the capture's
@@ -317,10 +356,24 @@ fn another_output_s_player_takes_over_at_the_next_block() {
     let before = s.stats.played();
     // The new output: 44.1 kHz, mono, a constant 0.25.
     let fifo = Arc::new(fifo_for(1, 44_100));
-    let next = Player::new(Arc::clone(&fifo), 44_100, 48_000, Arc::clone(&s.stats)).unwrap();
+    let next = Player::new(
+        Arc::clone(&fifo),
+        44_100,
+        48_000,
+        buffer(48_000),
+        Arc::clone(&s.stats),
+    )
+    .unwrap();
     assert_eq!(s.switch.send(next), Ok(()));
     // The pump has not taken it: another is refused, never queued.
-    let spare = Player::new(Arc::clone(&fifo), 44_100, 48_000, Arc::clone(&s.stats)).unwrap();
+    let spare = Player::new(
+        Arc::clone(&fifo),
+        44_100,
+        48_000,
+        buffer(48_000),
+        Arc::clone(&s.stats),
+    )
+    .unwrap();
     assert_eq!(s.switch.send(spare), Err(NOT_TAKEN));
     assert_eq!(s.switch.collect(), 0, "nothing replaced yet");
     s.fifo = fifo;
@@ -345,7 +398,9 @@ fn another_output_s_player_takes_over_at_the_next_block() {
 
 #[test]
 fn a_block_longer_than_a_chunk_or_with_one_tx_channel_is_filled_whole() {
-    let mut s = Sim::new(48_000, 48_000, 0.0, 2);
+    // A 49 ms block on top of its capture: a 40 ms target keeps that under
+    // the excess the player skips (twice the target over it).
+    let mut s = Sim::with(buffer(48_000).set(Some(40_000_000)), 48_000, 48_000, 0.0, 2);
     s.signal = level;
     s.run(2.0);
     let frames = CHUNK * 2 + 300;
@@ -372,7 +427,16 @@ fn a_block_longer_than_a_chunk_or_with_one_tx_channel_is_filled_whole() {
 #[test]
 fn a_switch_to_a_pump_that_is_gone_gives_the_player_back() {
     let fifo = Arc::new(fifo_for(2, 48_000));
-    let player = || Player::new(Arc::clone(&fifo), 48_000, 48_000, Arc::default()).unwrap();
+    let player = || {
+        Player::new(
+            Arc::clone(&fifo),
+            48_000,
+            48_000,
+            buffer(48_000),
+            Arc::default(),
+        )
+        .unwrap()
+    };
     let (source, mut switch) = source(player());
     drop(source);
     assert_eq!(switch.send(player()), Err(GONE));
@@ -383,7 +447,16 @@ fn a_switch_to_a_pump_that_is_gone_gives_the_player_back() {
 fn every_replaced_player_comes_back_to_be_freed_never_in_the_pump() {
     let fifo = Arc::new(fifo_for(2, 48_000));
     let stats: Arc<Stats> = Arc::default();
-    let player = || Player::new(Arc::clone(&fifo), 48_000, 48_000, Arc::clone(&stats)).unwrap();
+    let player = || {
+        Player::new(
+            Arc::clone(&fifo),
+            48_000,
+            48_000,
+            buffer(48_000),
+            Arc::clone(&stats),
+        )
+        .unwrap()
+    };
     let (mut source, mut switch) = source(player());
     let mut out = vec![0.0; PUMP_BLOCK * TX_CHANNELS];
     let mut back = 0;
@@ -401,7 +474,16 @@ fn every_replaced_player_comes_back_to_be_freed_never_in_the_pump() {
 #[test]
 fn a_send_is_refused_while_the_room_back_is_taken() {
     let fifo = Arc::new(fifo_for(2, 48_000));
-    let player = || Player::new(Arc::clone(&fifo), 48_000, 48_000, Arc::default()).unwrap();
+    let player = || {
+        Player::new(
+            Arc::clone(&fifo),
+            48_000,
+            48_000,
+            buffer(48_000),
+            Arc::default(),
+        )
+        .unwrap()
+    };
     let (mut source, mut switch) = source(player());
     let mut out = vec![0.0; PUMP_BLOCK * TX_CHANNELS];
     // Players replaced but not yet back (the pump's try_send not run).
