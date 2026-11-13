@@ -305,3 +305,10 @@ fn the_host_watch_reports_refused_batches_once_a_second() {
     assert_eq!(w.look(3 * S + 1, 12), None, "the next look is a second on");
     assert_eq!(w.look(4 * S, 12), Some(2));
 }
+
+/// dstack #266: an empty peer name reads `-` in a line, any other as is.
+#[test]
+fn an_empty_peer_name_reads_a_dash() {
+    assert_eq!(named(""), "-");
+    assert_eq!(named("FOH-Card"), "FOH-Card");
+}

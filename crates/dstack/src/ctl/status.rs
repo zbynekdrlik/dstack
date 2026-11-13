@@ -133,8 +133,12 @@ impl Json {
 ///   JSON string: a local reader can tell which device answered. The
 ///   traffic watch counts a neighbour's `tx_bytes` only when this is the
 ///   name it found the neighbour under.
-/// - `rx`: each RX flow slot that has or had a flow: `flow`, `granted`,
-///   `fpp`, `channels`, `latency` (samples), `packets`, `refused`, `stray`,
+/// - `rx`: each RX flow slot that has or had a flow: `flow`, `device`
+///   (dstack #266: the transmitter's Dante name as the subscription that
+///   asked for the flow writes it; absent for a slot without a flow now),
+///   `source` (the transmitter's `address:port` its flow's last packet came
+///   from; absent before a packet and after the slot's flow changed),
+///   `granted`, `fpp`, `channels`, `latency` (samples), `packets`, `refused`, `stray`,
 ///   `out_of_order`, `gaps` and `gap_frames` (packets that began past the
 ///   end of the one before, and the frames skipped: packets that never
 ///   came), `socket_drops` (Linux: the kernel's drops at the slot's
@@ -329,6 +333,8 @@ struct RxFlow {
     advertised: u64,
     /// The playout is below it (the owner's per-device override).
     below_advertised: bool,
+    /// The transmitter's Dante device name (dstack #266).
+    device: String,
 }
 
 fn rx_part(j: &mut Json, media: &Media) {
@@ -351,6 +357,7 @@ fn rx_part(j: &mut Json, media: &Media) {
                             late_after: u64::from(plan.latency) + u64::from(plan.block),
                             advertised: latency_samples(f.advertised_ns, media.tx.cfg.sample_rate),
                             below_advertised: f.below_advertised,
+                            device: f.device,
                         }
                     })
                 })
@@ -365,9 +372,16 @@ fn rx_part(j: &mut Json, media: &Media) {
         if flow.is_none() && lane == RxCounts::default() {
             continue;
         }
+        let named = flow.is_some();
         let f = flow.unwrap_or_default();
         j.open(None, '{');
         j.num("flow", slot + 1);
+        if named {
+            j.text("device", &f.device);
+        }
+        if let Some(source) = media.rx.source(slot) {
+            j.text("source", &source.to_string());
+        }
         j.flag("granted", f.granted);
         j.flag("multicast", f.multicast);
         j.num("fpp", f.fpp);

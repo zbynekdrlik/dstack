@@ -5,6 +5,8 @@ use crate::media::packet::write;
 use crate::media::tx::ns_of;
 use crate::wire::tests::Rng;
 
+mod source;
+
 const RATE: u32 = 96_000;
 const MS: u64 = 1_000_000;
 const LOOPBACK: Ipv4Addr = Ipv4Addr::LOCALHOST;
@@ -826,12 +828,18 @@ fn a_new_flow_in_the_slot_starts_afresh() {
         .unwrap();
     pump(&mut rx, 0, 1, now, 0);
     assert!(rx.lanes[0].source.is_some());
+    assert_eq!(
+        s.source(0),
+        Some(v4(&t)),
+        "dstack #266: the status reads it"
+    );
     // The next flow (another generation): no source, no keepalive, no
     // order to keep, until its own audio.
     publish(&s, &[(0, plan(LOOPBACK, 1, true, 2))], &[]);
     rx.pass(now, 250 * MS);
     assert_eq!(keepalives(&t), 0);
     assert_eq!(rx.lanes[0].source, None);
+    assert_eq!(s.source(0), None);
     t.send_to(&packet_at(4_000, 1, 8), slot_addr(&s, 0))
         .unwrap();
     pump(&mut rx, 0, 2, now, 300 * MS);
@@ -1104,26 +1112,31 @@ fn the_loss_watch_logs_a_gap_on_a_real_flow() {
     let p0 = 1_000_000_000u64;
     let now = ns_of(p0 + 1_000, RATE);
     let mut watch = RxWatch::new();
-    assert_eq!(logged_warnings(|| watch.watch(0, &s)), "");
+    // dstack #266: the transmitter's name, as the manager would give it.
+    let named = |slot: usize| (slot == 0).then(|| "FOH-Card".to_string());
+    assert_eq!(logged_warnings(|| watch.watch(0, &s, named)), "");
     for k in [0, 2] {
         t.send_to(&packet_at(p0 + 32 * k, 1, 32), slot_addr(&s, 0))
             .unwrap();
     }
     pump(&mut rx, 0, 2, Some(now), 0);
     assert_eq!(
-        logged_warnings(|| watch.watch(EVERY_NS - 1, &s)),
+        logged_warnings(|| watch.watch(EVERY_NS - 1, &s, named)),
         "",
         "inside the second"
     );
-    let log = logged_warnings(|| watch.watch(EVERY_NS, &s));
+    let log = logged_warnings(|| watch.watch(EVERY_NS, &s, named));
     assert_eq!(log.lines().count(), 1, "{log}");
     assert!(log.contains(" WARN "), "{log}");
     assert!(
-        log.contains("slot=0 gaps=1 frames=32 socket_drops=0"),
+        log.contains(&format!(
+            "device=FOH-Card source={} slot=0 gaps=1 frames=32 socket_drops=0",
+            v4(&t)
+        )),
         "{log}"
     );
     assert!(log.contains("never reached our socket"), "{log}");
-    assert_eq!(logged_warnings(|| watch.watch(2 * EVERY_NS, &s)), "");
+    assert_eq!(logged_warnings(|| watch.watch(2 * EVERY_NS, &s, named)), "");
 }
 
 /// What `f` logs at WARN or above on this thread, as text.
@@ -1367,4 +1380,12 @@ fn a_failed_join_is_tried_again_with_the_slot_s_next_flow() {
     publish(&s, &[(0, p(2))], &[]);
     rx.pass(None, 0);
     assert_eq!((s.lane(0).joins, s.lane(0).join_errors), (1, 1));
+}
+
+/// A socket's IPv4 address.
+fn v4(socket: &UdpSocket) -> SocketAddrV4 {
+    match socket.local_addr().unwrap() {
+        SocketAddr::V4(a) => a,
+        SocketAddr::V6(a) => panic!("not IPv4: {a}"),
+    }
 }

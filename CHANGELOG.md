@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.6.118
+
+- **New (dstack #266, asked by dasio): RX flows name their transmitter.** On mbc, slots 12, 14 and 15 lost packets together in short bursts and the lines named only the slot (0-based) and a peer index.
+  - Status `rx[]`, two new keys: `device`, the transmitter's Dante name as the subscription that asked for the flow writes it (absent for a slot without a flow now), and `source`, the transmitter's `address:port` the flow's last packet came from (absent before a packet and after the slot's flow changed).
+  - The loss warning names both next to the slot: `RX packets missing from a flow: ... never reached our socket device=<name> source=<address:port> slot=12 gaps=... frames=... socket_drops=...` (`-` when unknown).
+  - The late-packet line names the flow's other end, its receiver: `TX packets older than the latency their receiver plays at ... receiver=<name> dest=<address:port> slot=...` (`receiver=-` for a multicast flow, whose `dest` is the group).
+  - `RX flow requested`, `RX flow granted` / `refused` / `request had no answer`, `RX flow stop sent` and `an RX flow stop was not answered` add `device` (and `to`, the transmitter's flow-control address, on the request and the stop lines). An answer to a flow no longer in its slot reads `device=-`.
+  - The RX thread stays allocation-free: it publishes the source in one atomic per slot, written only when it changes; names are read on the watch and status threads only.
+  - New public API: `RxShared::source(slot)`, `FlowView::device`, `Manager::flow_device(slot)`. `RxWatch::watch` takes a third argument, the slot's device name (`Fn(usize) -> Option<String>`); `FlowView` has a new public field (a struct literal adds it).
+- **No latency change** for any app: diagnostics only.
+- Consumers: move the stack version; nothing to port for an app that uses dlink or the daemon. A reader of the status JSON gets two additive keys.
+
 ## 0.6.117
 
 - **Behaviour change (dstack #264, the owner's decision of 13.11.2026): fixed flow ports by default.** Every device binds its RX and TX flow sockets on fixed ports from its slot (its ARC port - 4440, the slot it already picks; up to 32 on one address): RX on `29800 + 64k` .. +31, TX on the next 32, all inside one dstack flow range **29800-31847**. Before, an unset `rx_port_base` / `tx_port_base` meant ports the OS chose (ephemeral), which no filter can name. So any number of our apps on one PC (dasio, dlink apps, dlisten, dsend) are accepted by one generic Dante-leg filter, with no per-device edit.

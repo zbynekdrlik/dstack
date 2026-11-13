@@ -76,7 +76,7 @@ mod counts;
 mod netlat;
 mod plan;
 pub use counts::RxCounts;
-use counts::{NO_LATENESS, RxStats};
+use counts::{NO_LATENESS, RxStats, source_of, source_word};
 mod socket;
 pub use netlat::NetLatency;
 pub use plan::{RxPlan, RxRoute};
@@ -359,6 +359,13 @@ impl RxShared {
             joins: get(&l.joins),
             join_errors: get(&l.join_errors),
         }
+    }
+
+    /// Where flow slot `slot`'s audio comes from: its transmitter's address
+    /// and port as the last packet came (dstack #266); `None` before a
+    /// packet of its flow, and after its plan changed.
+    pub fn source(&self, slot: usize) -> Option<SocketAddrV4> {
+        source_of(self.lanes.get(slot)?.source.load(Ordering::Relaxed))
     }
 
     /// Each flow slot's datagrams the kernel dropped at its socket (a full
@@ -651,6 +658,9 @@ impl Receiver {
                     }
                     lane.plan = plan;
                     lane.source = None;
+                    if let Some(stats) = shared.lanes.get(slot) {
+                        stats.source.store(0, Ordering::Relaxed);
+                    }
                     lane.heard = None;
                     lane.next_keepalive = None;
                     lane.end = None;
@@ -782,7 +792,12 @@ impl Receiver {
                 continue;
             };
             count(&stats.packets);
-            lane.source = Some(from);
+            if lane.source != Some(from) {
+                stats
+                    .source
+                    .store(source_word(Some(from)), Ordering::Relaxed);
+                lane.source = Some(from);
+            }
             lane.heard = Some(mono);
             let wake = wake_delay_ns(wall, at_ns);
             if let Some(w) = wake {

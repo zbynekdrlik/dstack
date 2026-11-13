@@ -4,6 +4,7 @@
 //! A flow slot's counts: the atomics the RX thread writes ([`RxStats`]) and
 //! the copy the control side reads ([`RxCounts`]).
 
+use std::net::{Ipv4Addr, SocketAddrV4};
 use std::sync::atomic::AtomicU64;
 
 use super::netlat;
@@ -48,6 +49,26 @@ pub(super) struct RxStats {
     pub(super) network: netlat::Window,
     /// What the last [`RxShared::take_max_lateness`] took of it.
     pub(super) last_min_lateness_ns: Least,
+    /// Where the flow's audio comes from, as [`source_word`] packs it (0:
+    /// none yet): the RX thread writes it only when it changes (dstack
+    /// #266), the status and the loss watch read it.
+    pub(super) source: AtomicU64,
+}
+
+/// `source` packed in one word for [`RxStats::source`]: a set byte, the
+/// IPv4 address and the port; 0 for none.
+pub(super) fn source_word(source: Option<SocketAddrV4>) -> u64 {
+    source.map_or(0, |s| {
+        let [a, b, c, d] = s.ip().octets();
+        let [p0, p1] = s.port().to_be_bytes();
+        u64::from_be_bytes([0, 1, a, b, c, d, p0, p1])
+    })
+}
+
+/// The address a [`source_word`] holds.
+pub(super) fn source_of(word: u64) -> Option<SocketAddrV4> {
+    let [_, set, a, b, c, d, p0, p1] = word.to_be_bytes();
+    (set == 1).then(|| SocketAddrV4::new(Ipv4Addr::new(a, b, c, d), u16::from_be_bytes([p0, p1])))
 }
 
 /// An atomic least, ns: [`NO_LATENESS`] until a value is put in

@@ -2586,7 +2586,8 @@ fn the_late_watch_logs_a_flow_s_late_packets_with_their_peak() {
     assert!(log.contains(" WARN "), "{log}");
     assert!(
         log.contains(&format!(
-            "slot={slot} packets={} age_peak_us={} receiver_latency_us=250",
+            "receiver=peer-device dest={} slot={slot} packets={} age_peak_us={} receiver_latency_us=250",
+            v4(&rig.rx),
             lane.over_latency,
             lane.age_max_ns / 1_000
         )),

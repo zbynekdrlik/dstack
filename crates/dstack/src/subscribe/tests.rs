@@ -181,9 +181,28 @@ fn a_subscription_asks_its_transmitter_for_one_flow_of_nchan_slots() {
             latency_ns: 2_000_000,
             advertised_ns: 2_000_000,
             below_advertised: false,
+            device: "peer-device".into(),
         }
     );
     assert_eq!(m.flow(1), None);
+    assert_eq!(m.flow_device(0), Some("peer-device"));
+    assert_eq!(m.flow_device(1), None);
+    assert_eq!(m.flow_device(MAX_FLOWS), None, "no such slot");
+}
+
+/// dstack #266: a flow names its transmitter as the subscription writes
+/// it (Dante names are case-blind; the status and logs keep the case).
+#[test]
+fn a_flow_names_its_transmitter_as_the_subscription_writes_it() {
+    let net = Fake::default();
+    net.add("FOH-Card", "TX 2", adv(PEER_IP, 2));
+    let mut m = manager();
+    assert!(m.set(0, Some(sub("TX 2", "FOH-Card"))));
+    let reqs = requests(&m.tick(0, &NONE, &net));
+    assert_eq!(reqs.len(), 1, "one flow asked for");
+    let slot = reqs[0].0.slot;
+    assert_eq!(m.flow_device(slot), Some("FOH-Card"));
+    assert_eq!(m.flow(slot).map(|v| v.device), Some("FOH-Card".to_string()));
 }
 
 #[test]
@@ -771,6 +790,7 @@ fn held() -> Option<Flow> {
         fpp: 16,
         latency_ns: 1_000_000,
         device: "held-device".to_string(),
+        name: "held-device".to_string(),
         advertised_ns: 1_000_000,
         advert: adv(Ipv4Addr::new(10, 0, 0, 99), 1),
         since: 0,

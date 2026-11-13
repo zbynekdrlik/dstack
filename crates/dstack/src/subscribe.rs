@@ -185,6 +185,9 @@ struct Flow {
     /// latency (0 when it advertises none).
     device: String,
     advertised_ns: u64,
+    /// The transmitter's device name as the subscription writes it, for
+    /// the status and the logs (dstack #266).
+    name: String,
     /// The record it was asked for from (a changed record restarts it).
     advert: Advertised,
     /// When it was asked for.
@@ -266,6 +269,9 @@ pub struct FlowView {
     /// Its playout is below that, by the device config's
     /// `playout_override` (the owner's approval).
     pub below_advertised: bool,
+    /// The transmitter's Dante device name, as the subscription that asked
+    /// for the flow writes it (dstack #266).
+    pub device: String,
 }
 
 /// Our RX subscriptions and their flows.
@@ -636,7 +642,14 @@ impl Manager {
             latency_ns: f.latency_ns,
             advertised_ns: f.advertised_ns,
             below_advertised: self.read_at(f).0 < latency_samples(f.advertised_ns, self.rate),
+            device: f.name.clone(),
         })
+    }
+
+    /// The transmitter's Dante device name of the flow in flow slot `slot`
+    /// (dstack #266), as [`FlowView::device`]; `None` for an empty slot.
+    pub fn flow_device(&self, slot: usize) -> Option<&str> {
+        Some(self.flows.get(slot)?.as_ref()?.name.as_str())
     }
 
     /// Flows whose slot received packets since the last look heard them
@@ -883,6 +896,9 @@ impl Manager {
             device: self.subs[rx]
                 .as_ref()
                 .map_or_else(String::new, |s| s.tx_device.to_ascii_lowercase()),
+            name: self.subs[rx]
+                .as_ref()
+                .map_or_else(String::new, |s| s.tx_device.clone()),
             advertised_ns: a.latency_ns,
             advert: *a,
             since: now,
@@ -989,6 +1005,10 @@ impl Manager {
                 .first()
                 .and_then(|(rx, _)| self.subs.get(*rx)?.as_ref())
                 .map_or_else(String::new, |s| s.tx_device.to_ascii_lowercase()),
+            name: waiting
+                .first()
+                .and_then(|(rx, _)| self.subs.get(*rx)?.as_ref())
+                .map_or_else(String::new, |s| s.tx_device.clone()),
             advertised_ns: first.latency_ns,
             advert: first,
             since: now,
