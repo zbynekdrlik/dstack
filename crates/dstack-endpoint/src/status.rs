@@ -77,7 +77,8 @@ fn peak_text(peak: f32) -> String {
 
 /// The status line: `depth 11.9 ms of 11.3 ms, +3.2 ppm, 0 underruns,
 /// 480000 frames played at 48000 Hz` (the live depth of its target, the
-/// app buffer, dstack #247; the underruns are the dropouts), then `, mono` under `--mono`, `, waiting for audio` while priming and the
+/// app buffer, dstack #247; the underruns are the dropouts), then
+/// `, mono` under `--mono`, `, waiting for audio` while priming and the
 /// overflows and re-centres when there are any.
 pub fn line(s: &Snapshot) -> String {
     let mut text = format!(

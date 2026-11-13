@@ -35,9 +35,11 @@ receives, played on the output at its own rate and clock.
   --receive-buffer-ms <ms>    (b) the receive buffer; the Dante latency is
                               (a) + (b) (default: as before 0.6.106)
   --app-buffer-ms <ms>        the buffer between the network and the
-                              output, 1 to 150 (default: the output's
-                              10 ms WASAPI period + one pump block, 12.67
-                              at 48000 Hz; was 40 before 0.6.112)
+                              output, 1 to 150 (default: a 10 ms output
+                              period, WASAPI's, assumed, + one pump block,
+                              12.67 at 48000 Hz; was 40 before 0.6.112);
+                              a longer period (ALSA) needs at least half
+                              of it + a block
   --ip <addr>                 the Dante NIC's address (default: the address
                               of the default route)
   --iface <name>              the Dante NIC by name (instead of --ip)

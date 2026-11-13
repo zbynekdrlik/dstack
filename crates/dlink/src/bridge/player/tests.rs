@@ -179,10 +179,11 @@ fn an_output_100_ppm_slow_keeps_the_default_target_with_no_underrun() {
     drifting(-100.0, buffer(48_000));
 }
 
-/// ±200 ppm needs a larger app buffer (dstack #247): the correction may
-/// move only 5 ppm a second (inaudibly), so reaching 200 ppm takes 40 s and
-/// costs about 6 ms of depth meanwhile, more than the default's 10 ms
-/// chunk leaves over the floor. 20 ms holds it.
+/// ±200 ppm at a larger app buffer (dstack #247): the correction may move
+/// only 5 ppm a second (inaudibly), so reaching 200 ppm takes 40 s and
+/// costs about 4 to 6 ms of depth meanwhile. At the default an output
+/// 200 ppm fast drops out once or twice at the start (the slow one holds);
+/// 20 ms holds both.
 #[test]
 fn an_output_200_ppm_fast_keeps_a_20_ms_target_with_no_underrun() {
     drifting(200.0, buffer(48_000).set(Some(20_000_000)));
@@ -379,7 +380,12 @@ fn a_configured_app_buffer_is_the_target_verbatim() {
 fn the_floor_and_the_excess_follow_the_target() {
     assert_eq!(floor_s(0.040), FLOOR_S);
     assert!((floor_s(0.011_333) - 0.011_333 / 4.0).abs() < 1e-15);
-    assert_eq!(hard_excess_s(0.0226), 0.0452);
+    assert_eq!(hard_excess_s(0.0226, 0.0213), 0.0452);
+    // A target set under the chunk: twice the chunk, at most twice the
+    // largest target.
+    assert_eq!(hard_excess_s(0.002, 0.010), 0.020);
+    assert_eq!(hard_excess_s(0.150, 0.010), 0.300);
+    assert_eq!(hard_excess_s(0.010, 0.200), 0.300);
 }
 
 /// Audio that came before the output ran is skipped at the start, not

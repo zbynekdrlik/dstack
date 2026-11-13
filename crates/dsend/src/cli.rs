@@ -31,8 +31,9 @@ the network's rate and clock. Windows only (WASAPI loopback).
                               (a) + (b) (default: as before 0.6.106)
   --app-buffer-ms <ms>        the buffer between the captured output and
                               the network, 1 to 150 (default: WASAPI's
-                              10 ms period + one pump block, 11.33 at
-                              96000 Hz; was 40 before 0.6.112)
+                              10 ms period, assumed, + one pump block,
+                              11.33 at 96000 Hz; was 40 before 0.6.112);
+                              under half the period + a block drops out
   --ip <addr>                 the Dante NIC's address (default: the address
                               of the default route)
   --iface <name>              the Dante NIC by name (instead of --ip)

@@ -8,9 +8,10 @@
 //!   stage, equal rates too) gives [`BLOCK`] output frames a call from the
 //!   input frames it asks for. A callback of any size is served from that
 //!   block, so the converter's call size never follows the driver's.
-//! - **Steering:** [`dstack_resample::asrc::Controller`] (SongPlayer's laws) keeps the
-//!   FIFO's depth at its target, the device's [`AppBuffer`] (dstack #247:
-//!   the app's chunk and one pump block, or the value the app set), by leaving the converter's ratio a few ppm
+//! - **Steering:** [`dstack_resample::asrc::Controller`] (SongPlayer's
+//!   laws) keeps the FIFO's depth at its target, the device's
+//!   [`AppBuffer`] (dstack #247: the app's chunk and one pump block, or
+//!   the value the app set), by leaving the converter's ratio a few ppm
 //!   off nominal. The controller was written for the mirror topology (the
 //!   converter writes the buffer, the other clock reads it): here the
 //!   network writes and the converter reads. So the rate point is fed
@@ -19,7 +20,9 @@
 //!   / its rate): a network fast by +d ppm fits as −d ppm, less output per
 //!   input, which is the change that drains it.
 //! - **Priming:** at the start and after an underrun the output plays
-//!   silence until the FIFO holds the target, then starts from there; an
+//!   silence until the FIFO holds the target and half the wider swing (the
+//!   output's callback or the app's chunk; in dlisten the chunk is the
+//!   output's callback, so it counts once), then starts from there; an
 //!   excess at that moment is skipped.
 //! - **Underruns:** a block whose input is not there plays silence, counts
 //!   in [`Stats`] and primes again to the same target. The target never
@@ -70,11 +73,16 @@ pub fn floor_s(target_s: f64) -> f64 {
 }
 
 /// How far over the target the depth may go before the excess is skipped
-/// back to the target, s: twice the target (a burst of late chunks, never
-/// the half chunk a chunked producer swings over it). A deficit never
+/// back to the target, s: twice the target, and at least twice the app's
+/// chunk `chunk_s` (a target set under the chunk still primes half a
+/// chunk over it and then takes a whole chunk at once), at most twice
+/// [`MAX_APP_BUFFER_NS`] (so the FIFO holds it). A burst of late chunks
+/// is skipped; the swing of a chunked producer never is. A deficit never
 /// reaches it: under the target the floor decides.
-pub fn hard_excess_s(target_s: f64) -> f64 {
-    2.0 * target_s
+pub fn hard_excess_s(target_s: f64, chunk_s: f64) -> f64 {
+    (2.0 * target_s)
+        .max(2.0 * chunk_s)
+        .min(2.0 * (MAX_APP_BUFFER_NS as f64 / 1e9))
 }
 
 /// The FIFO for `channels` channels at the network's `net_rate`
@@ -190,19 +198,21 @@ pub struct Player {
     stats: Arc<Stats>,
 }
 
-/// The controller at `target_s`, its floor and excess from it
-/// ([`floor_s`], [`hard_excess_s`]) and no cushion (dstack #247), its calm zone the default
-/// ([`dstack_resample::asrc::CALM_ZONE_MS`]): SongPlayer widens it to half a callback
+/// The controller at `buffer`'s target, its floor and excess from it
+/// ([`floor_s`], [`hard_excess_s`]) and no cushion (dstack #247), its
+/// calm zone the default ([`dstack_resample::asrc::CALM_ZONE_MS`]):
+/// SongPlayer widens it to half a callback
 /// because it reads the depth once a callback, so the read's phase in the
 /// sawtooth wanders. We read it after every block, several times a
 /// callback, and the controller's 1 s window mean averages the sawtooth
 /// out; a wide zone would only leave a larger offset to the slow level
 /// loop.
-fn controller(target_s: f64) -> Controller {
+fn controller(buffer: &AppBuffer) -> Controller {
+    let target_s = buffer.target_s();
     Controller::new(
         target_s,
         floor_s(target_s),
-        hard_excess_s(target_s),
+        hard_excess_s(target_s, buffer.chunk_s()),
         Basis::Arrival,
     )
 }
@@ -225,16 +235,13 @@ impl Player {
         stats.priming.store(true, Ordering::Relaxed);
         stats.out_rate.store(out_rate, Ordering::Relaxed);
         let target_s = buffer.target_s();
-        stats.target_ns.store(
-            buffer
-                .target_ns()
-                .clamp(super::buffer::MIN_APP_BUFFER_NS, MAX_APP_BUFFER_NS),
-            Ordering::Relaxed,
-        );
+        stats
+            .target_ns
+            .store(buffer.clamped_ns(), Ordering::Relaxed);
         Ok(Player {
             fifo,
             conv,
-            ctl: controller(target_s),
+            ctl: controller(&buffer),
             net_rate,
             out_rate,
             input,

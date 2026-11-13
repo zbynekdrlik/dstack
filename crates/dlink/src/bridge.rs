@@ -15,8 +15,10 @@
 //! with [`fifo_for`] at its own rate (the FIFO's producer), writes it on
 //! its own audio thread with [`Fifo::push_with`], and in its
 //! [`Process`](crate::Process) fills the device's TX block with
-//! [`Player::fill_with`], made with [`Player::new`] for the app's rate and
-//! the device's and the device's [`AppBuffer`] (`crate::Config::bridge_buffer`). The names come from dlisten's direction: in this API
+//! [`Player::fill_with`], made with [`Player::new`] for the app's rate,
+//! the device's and the device's [`AppBuffer`]
+//! (`crate::Config::bridge_buffer`). The names come from dlisten's
+//! direction: in this API
 //! `net_rate` is the rate of the FIFO's producer (here the app) and
 //! `out_rate` the caller's (here the device). [`Stats`] carries the
 //! player's counts to a status thread. Neither call takes a lock,

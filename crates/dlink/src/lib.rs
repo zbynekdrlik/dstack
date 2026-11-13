@@ -700,6 +700,9 @@ impl Link {
         }
         if let Some(buffer) = config.bridge_buffer() {
             tracing::info!(device = %config.name, "dlink latency: {}", buffer.line());
+            if let Some(short) = buffer.short() {
+                tracing::warn!(device = %config.name, "dlink: {short}");
+            }
         }
         let device = if config.converts() {
             tracing::info!(

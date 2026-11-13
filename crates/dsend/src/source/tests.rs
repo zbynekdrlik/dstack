@@ -226,9 +226,10 @@ fn a_capture_100_ppm_slow_holds_the_default_target_with_no_underrun_or_overrun()
     drifting(-100.0, buffer(48_000));
 }
 
-/// ±200 ppm needs `--app-buffer-ms 20`: the correction moves 5 ppm a
-/// second at most (inaudibly), so it reaches 200 ppm after 40 s and the
-/// depth gives about 6 ms meanwhile, more than the default leaves.
+/// ±200 ppm at `--app-buffer-ms 20`: the correction moves 5 ppm a second
+/// at most (inaudibly), so it reaches 200 ppm after 40 s and the depth
+/// gives about 4 to 6 ms meanwhile. At the default a capture 200 ppm slow
+/// drops out once at the start (the fast one holds); 20 ms holds both.
 #[test]
 fn a_capture_200_ppm_fast_holds_a_20_ms_target_with_no_underrun_or_overrun() {
     drifting(200.0, buffer(48_000).set(Some(20_000_000)));

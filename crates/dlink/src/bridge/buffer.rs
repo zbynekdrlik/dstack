@@ -19,8 +19,9 @@
 
 use crate::latency::ms;
 
-/// The least configured target, ns: under a millisecond the FIFO holds
-/// less than the converter's own call at any rate.
+/// The least target the device takes, ns. It is a sanity bound, not a
+/// working value: a target only holds when it covers half the app's chunk
+/// and a block over the floor ([`AppBuffer::short`], warned at the start).
 pub const MIN_APP_BUFFER_NS: u64 = 1_000_000;
 /// The largest target, ns: the player re-centres an excess of twice the
 /// target ([`super::player::hard_excess_s`]), so three targets must fit in
@@ -93,7 +94,37 @@ impl AppBuffer {
     /// (a target the device refused never reaches a player; this only
     /// keeps a direct caller's out-of-range value from breaking the FIFO).
     pub fn target_s(&self) -> f64 {
-        self.target_ns().clamp(MIN_APP_BUFFER_NS, MAX_APP_BUFFER_NS) as f64 / 1e9
+        self.clamped_ns() as f64 / 1e9
+    }
+
+    /// The target, ns, within [`MIN_APP_BUFFER_NS`] to [`MAX_APP_BUFFER_NS`]
+    /// (what a player keeps, [`AppBuffer::target_s`]).
+    pub fn clamped_ns(&self) -> u64 {
+        self.target_ns().clamp(MIN_APP_BUFFER_NS, MAX_APP_BUFFER_NS)
+    }
+
+    /// The chunk, s.
+    pub fn chunk_s(&self) -> f64 {
+        self.chunk_ns as f64 / 1e9
+    }
+
+    /// Why a configured target is too small to hold, if it is: a chunked
+    /// producer's depth swings half a chunk under the target, and the
+    /// converter takes a block's input, so a target under half the chunk
+    /// plus one block drops out every chunk. The device warns at its start
+    /// ([`super::player::floor_s`] then gives the rest). A default target
+    /// (a whole chunk and a block) never is.
+    pub fn short(&self) -> Option<String> {
+        let least = self.chunk_ns / 2 + self.block_ns;
+        let set = self.set_ns?;
+        (set < least).then(|| {
+            format!(
+                "app buffer {} ms is under half the app chunk + one pump block ({} ms): \
+                 expect a dropout every chunk",
+                ms(set),
+                ms(least)
+            )
+        })
     }
 
     /// Why the target cannot be used, if it cannot: outside
@@ -194,6 +225,26 @@ mod tests {
         assert!(big.problem().is_some());
         assert!((big.target_s() - 0.150).abs() < 1e-12);
         assert!((b.set(Some(0)).target_s() - 0.001).abs() < 1e-12);
+    }
+
+    /// A set target under half the chunk plus a block is warned at the
+    /// start; at it, or the default, is not.
+    #[test]
+    fn a_target_under_half_the_chunk_and_a_block_is_short() {
+        let b = AppBuffer::new(10_000_000, 1_333_333);
+        assert_eq!(b.short(), None, "the default");
+        assert_eq!(b.set(Some(6_333_333)).short(), None, "at the bound");
+        assert_eq!(
+            b.set(Some(6_333_332)).short().as_deref(),
+            Some(
+                "app buffer 6.333332 ms is under half the app chunk + one pump block \
+                 (6.333333 ms): expect a dropout every chunk"
+            )
+        );
+        assert_eq!(b.set(Some(5_000_001)).clamped_ns(), 5_000_001);
+        assert_eq!(b.set(Some(0)).clamped_ns(), MIN_APP_BUFFER_NS);
+        assert_eq!(b.set(Some(u64::MAX)).clamped_ns(), MAX_APP_BUFFER_NS);
+        assert_eq!(b.chunk_s(), 0.010);
     }
 
     #[test]
