@@ -637,7 +637,8 @@ try {
         $rc = Invoke-Check -Dir $d
         $ch = @(Changes)
         $text = LogOf $d
-        $rc -eq 0 -and @(Cycles).Count -eq 0 -and
+        # Exit 1: the repair wrote the VLAN ID to a virtual adapter (its WARN, tested below).
+        $rc -eq 1 -and @(Cycles).Count -eq 0 -and
         ($ch -join ';') -eq ('Set-NetAdapterAdvancedProperty LAN;Enable-NetAdapterBinding LAN;' +
             'Set-NetIPInterface LAN;Invoke-CimMethod RenewDHCPLease InterfaceIndex = 5') -and
         $script:Fake.NoRestart -eq $true -and $script:Fake.Vlan -eq '123' -and @(DanteCalls).Count -eq 0 -and
