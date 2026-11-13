@@ -15,6 +15,7 @@ use crate::media::tx::TxTable;
 use crate::subscribe::resolve::Own;
 use crate::subscribe::{Action, MAX_FLOWS, Manager};
 
+mod arc27;
 mod record_race;
 
 const TEST_DEVICE: &str = include_str!("../../../../../config/test-device.toml");
