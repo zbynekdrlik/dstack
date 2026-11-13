@@ -37,7 +37,10 @@
 //!   position before the least packet start written since, stored or late
 //!   (the stamps before the flow's first packet, which never come).
 //!   Counted `start_holes`, so a gate on `holes` sees only the holes of a
-//!   running flow. A write wholly early starts nothing.
+//!   running flow. A write wholly early starts nothing. Known limit: a new
+//!   flow from the same transmitter whose old packets still arrive is
+//!   started by them (the RX thread cannot tell the two apart), so its
+//!   first gap counts as holes.
 //! - The largest magnitude stored is kept until [`Ring::take_peak`] (the
 //!   heartbeat's peaks, once a second): one atomic per write.
 //!

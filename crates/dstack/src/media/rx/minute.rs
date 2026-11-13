@@ -6,6 +6,7 @@
 //! takes once a minute (`media/late.rs`), and the ring counts of the RX
 //! channels a slot feeds.
 
+use std::sync::PoisonError;
 use std::sync::atomic::Ordering;
 
 use super::{Counters, NetLatency, RxRoute, RxShared, WakeDelay};
@@ -53,6 +54,14 @@ impl RxShared {
             }
         }
         sum
+    }
+
+    /// Every RX channel's route, read under the publish's lock: never a
+    /// route a publish has cleared on its way to the new one (the RX
+    /// minute watch, once a minute; dstack #234).
+    pub fn routes_settled(&self) -> Vec<Option<RxRoute>> {
+        let _writer = self.writer.lock().unwrap_or_else(PoisonError::into_inner);
+        (0..self.routes.len()).map(|rx| self.route(rx)).collect()
     }
 
     /// Where RX channel `rx` (from 0) is routed now (its route atomic,

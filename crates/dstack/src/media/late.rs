@@ -524,8 +524,11 @@ impl RxMinute {
             return;
         };
         let rebootstraps = self.rebootstraps_rose(rebootstraps.unwrap_or(0));
-        let rings: Vec<_> = (0..rx.rings().len())
-            .map(|r| (rx.route(r).map(|r| r.flow), rx.rings()[r].counters()))
+        let rings: Vec<_> = rx
+            .routes_settled()
+            .into_iter()
+            .zip(rx.rings().iter())
+            .map(|(route, ring)| (route.map(|r| r.flow), ring.counters()))
             .collect();
         let holes = self.holes_rose(&rings, |s| rx.lane(s).late);
         for (slot, (&reordered, holes)) in rose.iter().zip(holes).enumerate() {
