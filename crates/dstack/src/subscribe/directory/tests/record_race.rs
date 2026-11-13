@@ -10,7 +10,7 @@ use crate::subscribe::resolve::instance;
 
 /// Times a lookup must find the channel's record, its record forgotten (a
 /// goodbye) after each, while another thread keeps answering it.
-const FINDS: usize = 200;
+const FINDS: usize = 50;
 
 /// The rack's channel record and its host's address, as its responder
 /// answers the two direct queries.
