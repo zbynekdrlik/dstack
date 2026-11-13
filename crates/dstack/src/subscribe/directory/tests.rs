@@ -164,6 +164,7 @@ fn many_lookups_of_one_device_make_one_read() {
             arc: SocketAddrV4::new(PEER_IP, 4440),
             want: Want::Missing,
             kind: Kind::Channels,
+            form: ListForm::V289,
         }
     );
     // While it runs: no second read, no want.
@@ -505,6 +506,7 @@ fn a_failed_read_counts_why() {
         arc: DBC,
         want: Want::Missing,
         kind: Kind::Channels,
+        form: ListForm::V289,
     };
     book.finished(&job, done(card(), 3), t);
     assert_eq!(book.counts().requests, 13);
@@ -1172,6 +1174,7 @@ fn a_device_s_flows_are_read_once_and_name_the_multicast_flow_of_a_channel() {
             arc: SocketAddrV4::new(PEER_IP, 4440),
             want: Want::Missing,
             kind: Kind::Flows,
+            form: ListForm::V289,
         }
     );
     // While it runs, still unknown, and no second read.
@@ -1180,7 +1183,7 @@ fn a_device_s_flows_are_read_once_and_name_the_multicast_flow_of_a_channel() {
         MulticastLookup::Unknown
     );
     assert_eq!(book.next(t), None);
-    book.finished_flows(&job, Ok(ultimo_flows()), 1, t + MS);
+    book.finished_flows(&job, Ok((ultimo_flows(), ListForm::V289)), 1, t + MS);
     assert_eq!(book.counts().requests, 1);
     let found = MulticastLookup::Found(Multicast {
         group: ULTIMO_GROUP,
@@ -1394,9 +1397,10 @@ fn a_device_without_an_arc_record_has_its_flows_read_at_its_address() {
             arc: SocketAddrV4::new(*DBC.ip(), crate::arc::PORT),
             want: Want::Missing,
             kind: Kind::Flows,
+            form: ListForm::V289,
         }
     );
-    book.finished_flows(&job, Ok(ultimo_flows()), 1, t + MS);
+    book.finished_flows(&job, Ok((ultimo_flows(), ListForm::V289)), 1, t + MS);
     assert!(matches!(
         book.multicast("mics", &a, t + MS),
         MulticastLookup::Found(_)
@@ -1408,7 +1412,7 @@ fn a_failed_flow_list_read_keeps_the_last_list() {
     let mut book = peer_book();
     book.multicast("peer-device", &peer_channel(1), MS);
     let job = book.next(MS).unwrap();
-    book.finished_flows(&job, Ok(ultimo_flows()), 1, MS);
+    book.finished_flows(&job, Ok((ultimo_flows(), ListForm::V289)), 1, MS);
     let old = MS + MAX_AGE_NS;
     book.multicast("peer-device", &peer_channel(1), old);
     let job = book.next(old).unwrap();
@@ -1444,7 +1448,7 @@ fn a_fresh_flow_list_asks_for_no_new_read() {
     let mut book = peer_book();
     book.multicast("peer-device", &peer_channel(1), MS);
     let job = book.next(MS).unwrap();
-    book.finished_flows(&job, Ok(ultimo_flows()), 1, MS);
+    book.finished_flows(&job, Ok((ultimo_flows(), ListForm::V289)), 1, MS);
     let wants = book.wants();
     for t in [MS, MAX_AGE_NS] {
         book.multicast("peer-device", &peer_channel(1), t);

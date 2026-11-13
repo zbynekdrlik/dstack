@@ -2,6 +2,8 @@ use super::*;
 
 use crate::wire::STATUS_ERROR;
 
+mod v27;
+
 /// Hex to bytes.
 pub(crate) fn hex(s: &str) -> Vec<u8> {
     (0..s.len())
@@ -79,6 +81,41 @@ impl Recorded {
             reply: hex(datagram),
             asked: Vec::new(),
         }
+    }
+}
+
+/// A device that answers its calls with recorded datagrams, one after
+/// another (the last one again once they run out), and keeps what it was
+/// asked: (start code, op, body).
+pub(crate) struct Scripted {
+    replies: Vec<Vec<u8>>,
+    pub(crate) asked: Vec<(u16, u16, Vec<u8>)>,
+}
+
+impl Scripted {
+    pub(crate) fn new(datagrams: &[&str]) -> Self {
+        Scripted {
+            replies: datagrams.iter().map(|d| hex(d)).collect(),
+            asked: Vec::new(),
+        }
+    }
+
+    /// The ops asked, in order.
+    pub(crate) fn ops(&self) -> Vec<u16> {
+        self.asked.iter().map(|a| a.1).collect()
+    }
+}
+
+impl Call for Scripted {
+    fn call(&mut self, op1: u16, body: &[u8]) -> Result<(u16, Vec<u8>), ReadError> {
+        self.call_as(0x27ff, op1, body)
+    }
+
+    fn call_as(&mut self, start: u16, op1: u16, body: &[u8]) -> Result<(u16, Vec<u8>), ReadError> {
+        let k = self.asked.len().min(self.replies.len() - 1);
+        self.asked.push((start, op1, body.to_vec()));
+        let d = &self.replies[k];
+        Ok((u16::from_be_bytes([d[8], d[9]]), d[HEADER_LEN..].to_vec()))
     }
 }
 
