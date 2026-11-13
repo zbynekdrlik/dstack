@@ -56,11 +56,12 @@ function Reset-Fake {
         AdapterVlan  = ''       # Get-NetAdapter's VlanID of the LAN adapter
         Rules        = [ordered]@{}   # firewall rules by Name
         StuckRule    = ''             # a rule Enable-NetFirewallRule leaves disabled
+        StuckOff     = ''             # a rule Disable-NetFirewallRule leaves enabled
     }
     # The dstack155 rule that blocks TCP in on the Dante adapter (#239).
     $script:Fake.Rules['{dante-tcp-in}'] = [pscustomobject]@{
         Name = '{dante-tcp-in}'; DisplayName = 'Dante70: block TCP Inbound'; Enabled = 'True'
-        Action = 'Block'; Direction = 'Inbound'; Group = 'dstack155'
+        Action = 'Block'; Direction = 'Inbound'; Group = 'dstack155'; Protocol = 'TCP'; InterfaceAlias = 'Dante70'
     }
 }
 function Note { param([string]$Verb, [string]$Target) [void]$script:Fake.Calls.Add("$Verb $Target") }
@@ -169,7 +170,15 @@ function Enable-NetFirewallRule {
 function Disable-NetFirewallRule {
     [CmdletBinding()] param([string]$Name)
     Assert-FakeTarget 'Disable-NetFirewallRule' $Name
-    $script:Fake.Rules[$Name].Enabled = 'False'
+    if ($script:Fake.StuckOff -ne $Name) { $script:Fake.Rules[$Name].Enabled = 'False' }
+}
+function Get-NetFirewallPortFilter {
+    [CmdletBinding()] param($AssociatedNetFirewallRule)
+    [pscustomobject]@{ Protocol = $AssociatedNetFirewallRule.Protocol }
+}
+function Get-NetFirewallInterfaceFilter {
+    [CmdletBinding()] param($AssociatedNetFirewallRule)
+    [pscustomobject]@{ InterfaceAlias = $AssociatedNetFirewallRule.InterfaceAlias }
 }
 function FwCalls { @($script:Fake.Calls | Where-Object { $_ -match 'NetFirewallRule ' }) }
 function FwChanges { @($script:Fake.Calls | Where-Object { $_ -match '^(New|Set|Enable|Disable)-NetFirewallRule ' }) }
@@ -554,6 +563,14 @@ try {
         $s = Read-HealState -Json (Get-Content $f -Raw)
         $s.Failures -eq 2 -and $s.LastRestart -eq $t
     }
+    Check 'the state file round-trips the emergency rule, and leaves it out when none' {
+        $f = Join-Path $tmp 'rt2.json'
+        Save-HealState -Path $f -Failures 0 -LastRestart $null -EmergencyRule '{x}'
+        $a = (Read-HealState -Json (Get-Content $f -Raw)).EmergencyRule
+        Save-HealState -Path $f -Failures 0 -LastRestart $null
+        $a -eq '{x}' -and $null -eq (Read-HealState -Json (Get-Content $f -Raw)).EmergencyRule -and
+        (Get-Content $f -Raw) -notmatch 'emergencyRule'
+    }
     Check 'a corrupt state file is logged and counts from zero' {
         Reset-Fake; $script:Fake.PingOk = $false
         $d = NewRun 'corrupt' $good '{not json'
@@ -609,6 +626,57 @@ try {
         $rc = Invoke-Check -Dir $d
         $rc -eq 1 -and (RuleOn '{dante-tcp-in}') -and (IndexOf 'Disable-NetFirewallRule {dante-tcp-in}') -lt 0
     }
+    Check 'emergency: a dstack155 rule that does not disable is an error, exit 1' {
+        Reset-Fake; $script:Fake.PingOk = $false; $script:Fake.StuckOff = '{dante-tcp-in}'
+        $d = NewRun 'emstuckoff' $emerg '{"failures":2}'
+        $rc = Invoke-Check -Dir $d
+        $rc -eq 1 -and (RuleOn '{dante-tcp-in}') -and
+        (LogOf $d) -match "ERROR emergency path: 'Dante70: block TCP Inbound' reads enabled after disabling it"
+    }
+    Check 'emergency: a dstack155 rule disabled without the emergency rules is enabled first, then the path opens in order' {
+        Reset-Fake; $script:Fake.PingOk = $false; $script:Fake.Rules['{dante-tcp-in}'].Enabled = 'False'
+        $d = NewRun 'emhalf' $emerg '{"failures":2}'
+        $rc = Invoke-Check -Dir $d
+        $on = IndexOf 'Enable-NetFirewallRule {dante-tcp-in}'; $new = IndexOf "New-NetFirewallRule $others"
+        $off = IndexOf 'Disable-NetFirewallRule {dante-tcp-in}'; $b = IndexOf "Enable-NetFirewallRule $ports"
+        $rc -eq 0 -and $on -ge 0 -and $new -gt $on -and $off -gt $b -and -not (RuleOn '{dante-tcp-in}') -and
+        (LogOf $d) -match "emergency: enabled 'Dante70: block TCP Inbound' first"
+    }
+    Check 'emergency: a changed port re-scopes the rules while the dstack155 rule is still on' {
+        Reset-Fake; $script:Fake.PingOk = $false
+        $d = NewRun 'emrescope' $emerg '{"failures":2}'
+        $null = Invoke-Check -Dir $d
+        $script:Fake.PingOk = $true; $null = Invoke-Check -Dir $d
+        Set-Content -Path (Join-Path $d 'lan-selfheal.json') -Value $emerg.Replace('"emergencySource"', '"emergencyPort":2222,"emergencySource"')
+        Set-Content -Path (Join-Path $d 'lan-selfheal.state.json') -Value '{"failures":2}'
+        $script:Fake.PingOk = $false; $script:Fake.Calls.Clear()
+        $rc = Invoke-Check -Dir $d
+        $set = IndexOf "Set-NetFirewallRule $ports"; $off = IndexOf 'Disable-NetFirewallRule {dante-tcp-in}'
+        $rc -eq 0 -and $set -ge 0 -and $off -gt $set -and
+        ($script:Fake.Rules[$ports].LocalPort -join ',') -eq '1-2221,2223-65535' -and (RuleOn $ports)
+    }
+    Check 'emergency: keys removed from the config while open, the LAN up closes it from the state file' {
+        Reset-Fake; $script:Fake.PingOk = $false
+        $d = NewRun 'emgone' $emerg '{"failures":2}'
+        $null = Invoke-Check -Dir $d
+        Set-Content -Path (Join-Path $d 'lan-selfheal.json') -Value $good
+        $script:Fake.PingOk = $true; $script:Fake.Calls.Clear()
+        $rc = Invoke-Check -Dir $d
+        $on = IndexOf 'Enable-NetFirewallRule {dante-tcp-in}'; $a = IndexOf "Disable-NetFirewallRule $others"
+        $rc -eq 0 -and $on -ge 0 -and $a -gt $on -and (RuleOn '{dante-tcp-in}') -and -not (RuleOn $others) -and
+        -not (RuleOn $ports) -and -not ((StateOf $d).PSObject.Properties.Name -contains 'emergencyRule')
+    }
+    Check 'emergency: a danteBlockRule on another protocol or interface is refused' {
+        Reset-Fake; $script:Fake.PingOk = $false; $script:Fake.Rules['{dante-tcp-in}'].Protocol = 'Any'
+        $d = NewRun 'emproto' $emerg '{"failures":2}'
+        $rc1 = Invoke-Check -Dir $d
+        $t1 = LogOf $d
+        Reset-Fake; $script:Fake.PingOk = $false; $script:Fake.Rules['{dante-tcp-in}'].InterfaceAlias = @('Dante70', 'LAN')
+        $d2 = NewRun 'emif' $emerg '{"failures":2}'
+        $rc2 = Invoke-Check -Dir $d2
+        $rc1 -eq 1 -and $t1 -match "filters protocol 'Any', not TCP" -and $rc2 -eq 1 -and
+        (LogOf $d2) -match "is bound to 'Dante70,LAN', not only to 'Dante70'" -and @(FwChanges).Count -eq 0
+    }
     Check 'emergency: below the threshold nothing is opened' {
         Reset-Fake; $script:Fake.PingOk = $false
         $d = NewRun 'embelow' $emerg
@@ -623,8 +691,8 @@ try {
         $script:Fake.Calls.Clear()
         $rc = Invoke-Check -Dir $d
         $rc -eq 0 -and -not (RuleOn '{dante-tcp-in}') -and (RuleOn $others) -and (RuleOn $ports) -and
-        @($script:Fake.Calls | Where-Object { $_ -match '^(New|Enable|Disable)-NetFirewallRule ' }).Count -eq 0 -and
-        (LogOf $d) -match 'emergency path open already'
+        @(FwChanges).Count -eq 0 -and (LogOf $d) -match 'emergency path open already' -and
+        (StateOf $d).emergencyRule -eq '{dante-tcp-in}'
     }
     Check 'emergency: the close order is the dstack155 rule on first, then the emergency rules off' {
         Reset-Fake; $script:Fake.PingOk = $false
