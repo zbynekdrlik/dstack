@@ -377,7 +377,7 @@ fn rx_part(j: &mut Json, media: &Media) {
         j.open(None, '{');
         j.num("flow", slot + 1);
         if named {
-            j.text("device", &f.device);
+            j.text("device", &crate::media::late::named(&f.device));
         }
         if let Some(source) = media.rx.source(slot) {
             j.text("source", &source.to_string());

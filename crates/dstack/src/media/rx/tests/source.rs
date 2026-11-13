@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// Copyright (C) 2026 dstack contributors.
+
 //! dstack #266: an RX flow names its transmitter (the source address the
 //! RX thread publishes, and the loss watch's line).
 

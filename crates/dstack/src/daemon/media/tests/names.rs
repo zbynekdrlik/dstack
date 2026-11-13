@@ -1,50 +1,12 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// Copyright (C) 2026 dstack contributors.
+
 //! dstack #266: the driver's lines name an RX flow's transmitter (its Dante
 //! name and address): the request, the answer, the stop, and the tick's loss
 //! warning.
 
 use super::*;
-
-/// The lines at INFO and above logged on this thread while the guard lives
-/// (async code, which [`crate::test_log::capture_at`]'s closure cannot
-/// await).
-struct Captured {
-    buf: Arc<Mutex<Vec<u8>>>,
-    _guard: tracing::subscriber::DefaultGuard,
-}
-
-#[derive(Clone)]
-struct Sink(Arc<Mutex<Vec<u8>>>);
-
-impl std::io::Write for Sink {
-    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
-        lock(&self.0).extend_from_slice(b);
-        Ok(b.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-impl Captured {
-    fn start() -> Captured {
-        crate::test_log::undecided();
-        let buf = Arc::new(Mutex::new(Vec::new()));
-        let sink = Sink(Arc::clone(&buf));
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer(move || sink.clone())
-            .with_ansi(false)
-            .with_max_level(tracing::Level::INFO)
-            .finish();
-        Captured {
-            buf,
-            _guard: tracing::subscriber::set_default(subscriber),
-        }
-    }
-
-    fn text(&self) -> String {
-        String::from_utf8(lock(&self.buf).clone()).unwrap()
-    }
-}
+use crate::test_log::Captured;
 
 /// The one line of `log` with `msg`.
 fn line_with<'a>(log: &'a str, msg: &str) -> &'a str {
@@ -63,7 +25,7 @@ async fn the_driver_s_lines_name_the_flow_s_transmitter() {
     let records = Records::default().with("FOH-Card", "TX 2", advert(t.addr, 2));
     lock(&media.manager).set(4, Some(sub("TX 2", "FOH-Card")));
     let (mut driver, mut answers, _changes) = driver_of(&media);
-    let log = Captured::start();
+    let log = Captured::start(tracing::Level::INFO);
     driver.tick(&records);
     answer_next(&mut driver, &mut answers).await;
     let slot = flow_slots(&media)[0];
@@ -144,7 +106,7 @@ async fn an_answer_to_a_flow_gone_from_its_slot_names_no_device() {
         slot: flow.slot,
         generation: flow.generation.wrapping_add(1),
     };
-    let log = Captured::start();
+    let log = Captured::start(tracing::Level::INFO);
     driver.answered(stale, Answer::Failed);
     driver.answered(flow, answer);
     let text = log.text();

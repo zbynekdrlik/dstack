@@ -181,8 +181,8 @@ struct Flow {
     bits: u32,
     fpp: u16,
     latency_ns: u64,
-    /// The transmitter's device name (case aside) and its advertised
-    /// latency (0 when it advertises none).
+    /// The transmitter's device name, lower-case (the `playout_override`
+    /// key), and its advertised latency (0 when it advertises none).
     device: String,
     advertised_ns: u64,
     /// The transmitter's device name as the subscription writes it, for
@@ -886,6 +886,9 @@ impl Manager {
             group = %m.group,
             "RX multicast flow: a transmitter's multicast flow is received"
         );
+        let name = self.subs[rx]
+            .as_ref()
+            .map_or_else(String::new, |s| s.tx_device.clone());
         self.flows[slot] = Some(Flow {
             generation: id.generation,
             to: a.control,
@@ -893,12 +896,8 @@ impl Manager {
             bits: m.bits,
             fpp: m.fpp,
             latency_ns: a.latency_ns.max(self.latency_ns),
-            device: self.subs[rx]
-                .as_ref()
-                .map_or_else(String::new, |s| s.tx_device.to_ascii_lowercase()),
-            name: self.subs[rx]
-                .as_ref()
-                .map_or_else(String::new, |s| s.tx_device.clone()),
+            device: name.to_ascii_lowercase(),
+            name,
             advertised_ns: a.latency_ns,
             advert: *a,
             since: now,
@@ -994,6 +993,10 @@ impl Manager {
             slot,
             generation: self.generation,
         };
+        let name = waiting
+            .first()
+            .and_then(|(rx, _)| self.subs.get(*rx)?.as_ref())
+            .map_or_else(String::new, |s| s.tx_device.clone());
         self.flows[slot] = Some(Flow {
             generation: id.generation,
             to: first.control,
@@ -1001,14 +1004,8 @@ impl Manager {
             bits: first.bits,
             fpp,
             latency_ns,
-            device: waiting
-                .first()
-                .and_then(|(rx, _)| self.subs.get(*rx)?.as_ref())
-                .map_or_else(String::new, |s| s.tx_device.to_ascii_lowercase()),
-            name: waiting
-                .first()
-                .and_then(|(rx, _)| self.subs.get(*rx)?.as_ref())
-                .map_or_else(String::new, |s| s.tx_device.clone()),
+            device: name.to_ascii_lowercase(),
+            name,
             advertised_ns: first.latency_ns,
             advert: first,
             since: now,
