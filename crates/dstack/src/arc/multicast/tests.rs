@@ -300,7 +300,7 @@ fn the_tx_flow_page_states_a_multicast_flow_s_type_and_group() {
     assert_eq!(read_u16(body, main + 2), Some(0x02), "multicast");
     let socket = usize::from(read_u16(body, main + 16).unwrap()) - HEADER_LEN;
     let group = multicast_group(OUR_IP, cfg().process_id, 0);
-    let mut want = vec![0x80, 0x02];
+    let mut want = vec![0x08, 0x02];
     want.extend(group.port().to_be_bytes());
     want.extend(group.ip().octets());
     assert_eq!(body[socket..socket + 8], want);

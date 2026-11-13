@@ -1,6 +1,6 @@
 //! Our own 0x2200 read back by the ARC 2.7 reader (dstack #271,
 //! [`flows::v27::list_tx_flows_27`]): every flow once, across pages and an
-//! empty slot, with our writer's socket tag (`80 02`).
+//! empty slot, with our writer's socket tag (`08 02` since v0.6.123, dstack #274).
 
 use super::*;
 
