@@ -328,12 +328,13 @@ function Save-HealState {
     # Written whole to a temporary file, flushed to the disk, then swapped in:
     # a crash mid-write (iem-snv's bugcheck left NUL bytes, #239) leaves the
     # old file or the new one. A file that is unreadable all the same is
-    # logged by Invoke-Check, which counts from 0.
+    # logged by Invoke-Check, which counts from 0. ([NullString]: a $null
+    # string argument reaches .NET as "" and Replace refuses it.)
     $tmp = "$Path.tmp"
     $fs = New-Object System.IO.FileStream($tmp, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write,
         [System.IO.FileShare]::None, 4096, [System.IO.FileOptions]::WriteThrough)
     try { $fs.Write($bytes, 0, $bytes.Length); $fs.Flush($true) } finally { $fs.Dispose() }
-    if (Test-Path -LiteralPath $Path) { [System.IO.File]::Replace($tmp, $Path, $null) }
+    if (Test-Path -LiteralPath $Path) { [System.IO.File]::Replace($tmp, $Path, [NullString]::Value) }
     else { [System.IO.File]::Move($tmp, $Path) }
 }
 
