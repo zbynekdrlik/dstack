@@ -12,7 +12,7 @@
 
 use tracing::{info, warn};
 
-use super::rx::RxShared;
+use super::rx::{MAX_FLOWS as RX_FLOWS, RxShared};
 use super::tx::{MAX_FLOWS, TxShared};
 
 /// How often the watch looks, ns.
@@ -380,10 +380,7 @@ impl RxWatch {
             (lane.gaps, lane.gap_frames, d)
         };
         for loss in self.look(now_ns, counts) {
-            let name = device(loss.slot).map_or_else(|| String::from("-"), |d| named(&d));
-            let source = rx
-                .source(loss.slot)
-                .map_or_else(|| String::from("-"), |s| s.to_string());
+            let (name, source) = transmitter(rx, loss.slot, &device);
             warn!(
                 device = %name,
                 source = %source,
@@ -395,6 +392,96 @@ impl RxWatch {
             );
         }
     }
+}
+
+/// How often the RX minute watch looks, ns.
+pub const MINUTE_NS: u64 = 60_000_000_000;
+
+/// The RX side's minute watch (dstack #278): once a minute, each flow whose
+/// packets came reordered (overtaken on the way, each filling its hole)
+/// gets one INFO line, apart from the loss watch's warning: a reordering
+/// link shows without a loss alarm.
+#[derive(Debug)]
+pub struct RxMinute {
+    reordered: [u64; RX_FLOWS],
+    next_ns: Option<u64>,
+}
+
+impl Default for RxMinute {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl RxMinute {
+    pub const fn new() -> Self {
+        RxMinute {
+            reordered: [0; RX_FLOWS],
+            next_ns: None,
+        }
+    }
+
+    /// At `now_ns`, a look once [`MINUTE_NS`] has passed (the first only
+    /// learns): each slot's cumulative reordered packets from `reordered`.
+    /// `Some` with each slot's rise at a look after the first, `None`
+    /// otherwise; `first` tells the first look.
+    pub fn look(
+        &mut self,
+        now_ns: u64,
+        reordered: impl Fn(usize) -> u64,
+    ) -> Option<(bool, [u64; RX_FLOWS])> {
+        if self.next_ns.is_some_and(|next| now_ns < next) {
+            return None;
+        }
+        let first = self.next_ns.is_none();
+        self.next_ns = Some(now_ns.saturating_add(MINUTE_NS));
+        let rose = std::array::from_fn(|slot| {
+            let now = reordered(slot);
+            let rose = now.saturating_sub(self.reordered[slot]);
+            self.reordered[slot] = now;
+            rose
+        });
+        Some((first, rose))
+    }
+
+    /// [`RxMinute::look`] on `rx`'s flows, each flow's reorders of the
+    /// minute logged at INFO with its transmitter, as the loss watch names
+    /// it (`device` is read only for a slot with a line).
+    pub fn watch(&mut self, now_ns: u64, rx: &RxShared, device: impl Fn(usize) -> Option<String>) {
+        let Some((first, rose)) = self.look(now_ns, |s| rx.lane(s).reordered) else {
+            return;
+        };
+        if first {
+            return;
+        }
+        for (slot, &reordered) in rose.iter().enumerate() {
+            if reordered == 0 {
+                continue;
+            }
+            let (name, source) = transmitter(rx, slot, &device);
+            info!(
+                device = %name,
+                source = %source,
+                slot,
+                reordered,
+                "RX packets reordered on the way in the last minute, not lost: each filled its hole"
+            );
+        }
+    }
+}
+
+/// Slot `slot`'s transmitter as the RX lines name it: its Dante name from
+/// `device` and the address its audio came from; `-` for either unknown.
+fn transmitter(
+    rx: &RxShared,
+    slot: usize,
+    device: &impl Fn(usize) -> Option<String>,
+) -> (String, String) {
+    let name = device(slot).map_or_else(|| String::from("-"), |d| named(&d));
+    let source = rx
+        .source(slot)
+        .map_or_else(|| String::from("-"), |s| s.to_string());
+    (name, source)
 }
 
 #[cfg(test)]

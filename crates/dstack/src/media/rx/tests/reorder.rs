@@ -88,3 +88,102 @@ fn a_real_hole_still_counts_once_it_is_behind_the_playout() {
     rx.pass(Some(ns_of(p0 + 1_000, RATE)), 0);
     assert_eq!((s.lane(0).gaps, s.lane(0).gap_frames), (1, 32));
 }
+
+/// A packet that fills a hole is reordered; a repeat of a packet already
+/// placed is out of order but no reorder.
+#[test]
+fn a_filled_hole_counts_reordered_and_a_repeat_does_not() {
+    let (s, mut rx, t) = rig(96_000);
+    let p0 = 1_000_000_000u64;
+    for k in [0, 2, 1, 1, 0] {
+        t.send_to(&packet_at(p0 + 32 * k, 1, 32), slot_addr(&s, 0))
+            .unwrap();
+    }
+    pump(&mut rx, 0, 5, Some(ns_of(p0 + 200, RATE)), 0);
+    let c = s.lane(0);
+    assert_eq!(
+        (c.out_of_order, c.reordered, c.gaps, c.gap_frames),
+        (3, 1, 0, 0),
+        "{c:?}"
+    );
+}
+
+/// A part of a hole a reordered packet left open still counts once behind
+/// the playout point, with only its own frames.
+#[test]
+fn what_a_reordered_packet_left_of_a_hole_is_lost_alone() {
+    let (s, mut rx, t) = rig(192);
+    let p0 = 1_000_000_000u64;
+    // 0, then 3 (64 frames missing), then 1: frames 64..96 stay open.
+    for k in [0, 3, 1] {
+        t.send_to(&packet_at(p0 + 32 * k, 1, 32), slot_addr(&s, 0))
+            .unwrap();
+    }
+    pump(&mut rx, 0, 3, Some(ns_of(p0 + 130, RATE)), 0);
+    assert_eq!((s.lane(0).reordered, s.lane(0).gaps), (1, 0));
+    rx.pass(Some(ns_of(p0 + 96 + 192, RATE)), 0);
+    let c = s.lane(0);
+    assert_eq!((c.gaps, c.gap_frames), (1, 32), "{c:?}");
+}
+
+/// A new flow in the slot: the old flow's open holes never fill, so they
+/// are lost.
+#[test]
+fn a_new_flow_loses_the_old_flow_s_open_holes() {
+    let (s, mut rx, t) = rig(96_000);
+    let p0 = 1_000_000_000u64;
+    for k in [0, 2] {
+        t.send_to(&packet_at(p0 + 32 * k, 1, 32), slot_addr(&s, 0))
+            .unwrap();
+    }
+    pump(&mut rx, 0, 2, Some(ns_of(p0 + 100, RATE)), 0);
+    assert_eq!(s.lane(0).gaps, 0);
+    publish(
+        &s,
+        &[(0, plan(LOOPBACK, 1, true, 2))],
+        &[(0, RxRoute { flow: 0, slot: 0 })],
+    );
+    rx.pass(Some(ns_of(p0 + 100, RATE)), 0);
+    let c = s.lane(0);
+    assert_eq!((c.gaps, c.gap_frames), (1, 32), "{c:?}");
+}
+
+/// The minute watch names a reordering flow at INFO, "not lost", and the
+/// loss watch stays quiet (dstack #278).
+#[test]
+fn the_minute_watch_tells_reorders_and_the_loss_watch_stays_quiet() {
+    use crate::media::late::{EVERY_NS, MINUTE_NS, RxMinute, RxWatch};
+    let (s, mut rx, t) = rig(96_000);
+    let p0 = 1_000_000_000u64;
+    let named = |slot: usize| (slot == 0).then(|| "FOH-Card".to_string());
+    let mut minute = RxMinute::new();
+    let mut loss = RxWatch::new();
+    let info = |f: &mut dyn FnMut()| crate::test_log::capture_at(tracing::Level::INFO, f);
+    assert_eq!(info(&mut || minute.watch(0, &s, named)), "");
+    loss.watch(0, &s, named);
+    for k in overtaken(8, 3) {
+        t.send_to(&packet_at(p0 + 32 * k, 1, 32), slot_addr(&s, 0))
+            .unwrap();
+    }
+    pump(&mut rx, 0, 8, Some(ns_of(p0 + 300, RATE)), 0);
+    // The flow's first packet (1) opens no hole before it, so 0 is out of
+    // order but no reorder; 4 filled its hole.
+    assert_eq!((s.lane(0).out_of_order, s.lane(0).reordered), (2, 1));
+    assert_eq!(info(&mut || loss.watch(EVERY_NS, &s, named)), "");
+    assert_eq!(info(&mut || minute.watch(MINUTE_NS - 1, &s, named)), "");
+    let log = info(&mut || minute.watch(MINUTE_NS, &s, named));
+    assert_eq!(log.lines().count(), 1, "{log}");
+    assert!(log.contains(" INFO "), "{log}");
+    assert!(
+        log.contains(&format!(
+            "device=FOH-Card source={} slot=0 reordered=1",
+            v4(&t)
+        )),
+        "{log}"
+    );
+    assert!(
+        log.contains("reordered on the way in the last minute, not lost"),
+        "{log}"
+    );
+    assert_eq!(info(&mut || minute.watch(2 * MINUTE_NS, &s, named)), "");
+}

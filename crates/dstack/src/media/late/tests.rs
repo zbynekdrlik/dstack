@@ -312,3 +312,30 @@ fn an_empty_peer_name_reads_a_dash() {
     assert_eq!(named(""), "-");
     assert_eq!(named("FOH-Card"), "FOH-Card");
 }
+
+/// dstack #278: the RX minute watch learns at its first look and then
+/// gives each slot's reorders of the minute, once a minute.
+#[test]
+fn the_rx_minute_watch_gives_each_minute_s_reorders() {
+    use super::{MINUTE_NS, RxMinute};
+    let counts = RefCell::new([0u64; MAX_FLOWS]);
+    let mut w = RxMinute::default();
+    let look = |w: &mut RxMinute, now| w.look(now, |s| counts.borrow()[s]);
+    counts.borrow_mut()[2] = 7;
+    let (first, rose) = look(&mut w, 5).unwrap();
+    assert!(first);
+    assert_eq!(rose[2], 7, "the first look learns all");
+    counts.borrow_mut()[2] = 10;
+    counts.borrow_mut()[31] = 1;
+    assert_eq!(look(&mut w, 5 + MINUTE_NS - 1), None, "inside the minute");
+    let (first, rose) = look(&mut w, 5 + MINUTE_NS).unwrap();
+    assert!(!first);
+    let mut want = [0u64; MAX_FLOWS];
+    want[2] = 3;
+    want[31] = 1;
+    assert_eq!(rose, want);
+    // A count read back lower is no reorder.
+    counts.borrow_mut()[2] = 0;
+    let (_, rose) = look(&mut w, 5 + 2 * MINUTE_NS).unwrap();
+    assert_eq!(rose, [0; MAX_FLOWS]);
+}

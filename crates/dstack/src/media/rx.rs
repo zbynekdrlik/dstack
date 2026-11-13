@@ -27,6 +27,12 @@
 //!   until read; one later than the flow's latency counts `late`, one
 //!   before the end of the last `out_of_order`. Before our clock is ready a
 //!   packet is read and counted but placed nowhere (`unplaced`).
+//! - Holes, reorders and gaps (dstack #278, `rx/holes.rs`): a packet that
+//!   begins past the furthest end opens a hole; one that lands in an open
+//!   hole fills it and counts `reordered` (overtaken on the way, not lost).
+//!   A hole counts as a gap (`gaps`, `gap_frames`) only once it is wholly
+//!   behind the flow's playout point (each pass looks), the oldest of 16
+//!   when another opens, or when the slot's flow changes.
 //! - Wire lateness against the wake (dstack #234, Linux): each datagram
 //!   comes with the kernel's receive time (`rx/socket.rs`), so its wake delay
 //!   (the pass's wall clock less that time) is kept, the largest until
@@ -73,10 +79,12 @@ use crate::clock::{self, PtpClock};
 use crate::wire::MAX_DATAGRAM;
 
 mod counts;
+mod holes;
 mod netlat;
 mod plan;
 pub use counts::RxCounts;
 use counts::{NO_LATENESS, RxStats, source_of, source_word};
+use holes::{Holes, Lost};
 mod socket;
 pub use netlat::NetLatency;
 pub use plan::{RxPlan, RxRoute};
@@ -345,6 +353,7 @@ impl RxShared {
             refused: get(&l.refused),
             stray: get(&l.stray),
             out_of_order: get(&l.out_of_order),
+            reordered: get(&l.reordered),
             gaps: get(&l.gaps),
             gap_frames: get(&l.gap_frames),
             late: get(&l.late),
@@ -522,6 +531,9 @@ struct Lane {
     next_keepalive: Option<u64>,
     /// The end of the furthest packet so far, samples.
     end: Option<u64>,
+    /// The runs of frames before `end` that no packet has filled yet
+    /// (dstack #278): a gap only once lost ([`Holes`]).
+    holes: Holes,
 }
 
 impl Lane {
@@ -534,8 +546,15 @@ impl Lane {
             heard: None,
             next_keepalive: None,
             end: None,
+            holes: Holes::default(),
         }
     }
+}
+
+/// Holes given up as lost, counted as gaps of their frames.
+fn count_lost(stats: &RxStats, lost: Lost) {
+    stats.gaps.fetch_add(lost.holes, Ordering::Relaxed);
+    stats.gap_frames.fetch_add(lost.frames, Ordering::Relaxed);
 }
 
 /// The RX thread's state: everything it needs, allocated before its loop.
@@ -635,7 +654,20 @@ impl Receiver {
                 self.ready &= !(1 << slot);
             }
         }
+        if let Some(ns) = now_ns {
+            self.expire(clock::to_samples(ns, self.shared.rate));
+        }
         self.keepalives(mono);
+    }
+
+    /// At our clock's `now` (samples), each flow's holes wholly behind its
+    /// playout point (its latency and block before `now`) are lost: the
+    /// pump has read past them (dstack #278).
+    fn expire(&mut self, now: u64) {
+        for (lane, stats) in self.lanes.iter_mut().zip(self.shared.lanes.iter()) {
+            let limit = u64::from(lane.plan.latency) + u64::from(lane.plan.block);
+            count_lost(stats, lane.holes.expire(now.saturating_sub(limit)));
+        }
     }
 
     /// Reads the plans that changed (a new one resets its slot) and, after
@@ -664,6 +696,10 @@ impl Receiver {
                     lane.heard = None;
                     lane.next_keepalive = None;
                     lane.end = None;
+                    // The old flow's open holes never fill now.
+                    if let Some(stats) = shared.lanes.get(slot) {
+                        count_lost(stats, lane.holes.clear());
+                    }
                 }
                 lane.seen = Some(version);
             }
@@ -829,14 +865,21 @@ impl Receiver {
                 stats.network.record(network);
             }
             let end = pos.saturating_add(nframes as u64);
+            // dstack #278: a jump past the end opens a hole, a gap only
+            // once lost; a packet before the end that fills a hole is a
+            // reorder.
             match lane.end {
                 Some(e) if pos < e => {
                     count(&stats.out_of_order);
+                    let (filled, lost) = lane.holes.fill(pos, end);
+                    if filled {
+                        count(&stats.reordered);
+                    }
+                    count_lost(stats, lost);
                     lane.end = Some(e.max(end));
                 }
                 Some(e) if pos > e => {
-                    count(&stats.gaps);
-                    stats.gap_frames.fetch_add(pos - e, Ordering::Relaxed);
+                    count_lost(stats, lane.holes.open(e, pos));
                     lane.end = Some(end);
                 }
                 _ => lane.end = Some(end),

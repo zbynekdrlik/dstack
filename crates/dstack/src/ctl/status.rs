@@ -139,9 +139,11 @@ impl Json {
 ///   `source` (the transmitter's `address:port` its flow's last packet came
 ///   from; absent before a packet and after the slot's flow changed),
 ///   `granted`, `fpp`, `channels`, `latency` (samples), `packets`, `refused`, `stray`,
-///   `out_of_order`, `gaps` and `gap_frames` (packets that began past the
-///   end of the one before, and the frames skipped: packets that never
-///   came), `socket_drops` (Linux: the kernel's drops at the slot's
+///   `out_of_order` (packets that began before the end of an earlier one),
+///   `reordered` (of them, those that filled an open hole: overtaken on
+///   the way, not lost; dstack #278), `gaps` and `gap_frames` (runs of
+///   frames that never came: a hole no packet filled before it fell
+///   behind the playout point, and their frames), `socket_drops` (Linux: the kernel's drops at the slot's
 ///   socket), `late` (packets past playout + block), `late_at_read`
 ///   (packets with a frame the pump had already read: its channels' holes
 ///   and late samples), `wire_late`, `wake_delay_us` and
@@ -396,6 +398,7 @@ fn rx_part(j: &mut Json, media: &Media) {
         j.num("refused", lane.refused);
         j.num("stray", lane.stray);
         j.num("out_of_order", lane.out_of_order);
+        j.num("reordered", lane.reordered);
         j.num("gaps", lane.gaps);
         j.num("gap_frames", lane.gap_frames);
         if let Some(drops) = drops {
