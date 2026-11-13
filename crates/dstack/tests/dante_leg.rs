@@ -226,30 +226,45 @@ fn nft_chain(file: &str, name: &str) -> Vec<String> {
         .collect()
 }
 
-/// Every non-comment line outside the chains: the table head and its
-/// idempotent delete, nothing else.
+/// Every non-comment line of the notrack file outside its two chain
+/// bodies: the table, its idempotent delete, the table's definition and
+/// its closing brace, nothing else (no include, no define, no added rule).
 #[test]
 fn the_notrack_ruleset_is_one_idempotent_table_with_no_include() {
-    let code: Vec<&str> = NOTRACK
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty() && !l.starts_with('#'))
-        .collect();
+    let mut outside = Vec::new();
+    let mut in_chain = false;
+    for line in NOTRACK.lines().map(str::trim) {
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with("chain ") {
+            in_chain = true;
+        } else if in_chain && line == "}" {
+            in_chain = false;
+        } else if !in_chain {
+            outside.push(line);
+        }
+    }
     assert_eq!(
-        &code[..3],
+        outside,
         [
             "table inet dstack_dante_leg_notrack",
             "delete table inet dstack_dante_leg_notrack",
             "table inet dstack_dante_leg_notrack {",
+            "}",
         ],
-        "create, delete, then define the table, so a reload replaces it"
+        "create, delete, then define the one table, so a reload replaces it"
     );
-    assert_eq!(code.iter().filter(|l| l.starts_with("table ")).count(), 2);
-    assert_eq!(code.iter().filter(|l| l.starts_with("chain ")).count(), 2);
-    assert!(!NOTRACK.contains("include"), "no include");
-    assert!(!NOTRACK.contains("define "), "the leg comes from -D only");
-    // The main filter's table is a different one and keeps no raw chain:
-    // the notrack table is loaded only on a PC with no NAT.
+    assert_eq!(
+        NOTRACK
+            .lines()
+            .filter(|l| l.trim().starts_with("chain "))
+            .count(),
+        2,
+        "raw_pre and raw_out only"
+    );
+    // The main filter keeps no raw chain: the notrack table is loaded only
+    // on a PC with no NAT and no other stateful firewall.
     assert!(!NFT.contains("notrack"), "dante-leg.nft stays NAT-safe");
     assert!(!NFT.contains("priority raw"));
 }

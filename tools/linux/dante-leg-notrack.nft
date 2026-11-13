@@ -5,12 +5,18 @@
 # companion of dante-leg.nft: identical on every PC that loads it, never
 # edited per device.
 #
-# LOAD IT ONLY ON A PC THAT NATS NOTHING: no Docker, no libvirt, no
-# masquerade, snat or dnat in `nft list ruleset`. An untracked packet
-# cannot be NATed, and the replies to a masqueraded flow come in on the
-# LAN NIC addressed to the host, so this table would leave them
-# unmapped and cut the containers off. A PC with NAT tracks every flow
-# for its NAT anyway, so the table would save it nothing.
+# LOAD IT ONLY ON A PC WITH NO NAT AND NO OTHER STATEFUL FIREWALL: no
+# Docker, no libvirt, no masquerade, snat or dnat in `nft list ruleset`,
+# and ufw / firewalld inactive. An untracked packet is never NATed (a
+# container's packet entering on its bridge would leave unmasqueraded,
+# and a reply would never be mapped back), and a stateful rule on another
+# NIC sees its own replies as untracked, not established (ufw's default
+# deny then drops them). A PC with NAT tracks every flow for it anyway,
+# so the table would save it nothing.
+#
+# Asymmetric routing: a TCP connection that comes in on another NIC and
+# answers out of the leg is untracked on the way in, so its answer is
+# new and invalid on the leg and dante-leg.nft's out chain drops it.
 #
 # Why: dante-leg.nft is stateful (`ct state established,related`), and
 # the first stateful rule in a network namespace makes conntrack track
@@ -28,7 +34,7 @@
 #
 # Load (as root) with the same interface as dante-leg.nft:
 #   nft -D dante_leg=<iface> -f /etc/dstack/dante-leg-notrack.nft
-# A load without -D fails ("undefined variable"), and nothing changes.
+# A load without -D fails ("unknown identifier"), and nothing changes.
 # Loading again replaces the table in one transaction (idempotent).
 # The chains are checked by crates/dstack/tests/dante_leg.rs.
 

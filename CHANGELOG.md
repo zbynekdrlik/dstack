@@ -3,7 +3,8 @@
 ## 0.6.119
 
 - **New (dstack #264, asked by camera-box): `tools/linux/dante-leg-notrack.nft`, conntrack only on the Dante leg.** `dante-leg.nft` is stateful, so conntrack tracked every flow in the network namespace, on every NIC, multi-Gb/s NDI and JPEG XS included. The new file holds one table, `inet dstack_dante_leg_notrack`, with two chains at raw priority: `iifname != $dante_leg notrack` (prerouting) and `oifname != $dante_leg notrack` (output). Load it after `dante-leg.nft` with the same `-D dante_leg=<iface>`; a load without `-D` fails, a reload replaces the table.
-  - **Only on a PC that NATs nothing** (camera-box's stream and editing PCs). Never on a PC with Docker, libvirt or any masquerade/snat/dnat rule: an untracked reply to a NATed flow is never mapped back. `dante-leg.nft` itself is unchanged.
+  - **Only on a PC with no NAT and no other stateful firewall** (camera-box's stream and editing PCs). Never on a PC with Docker, libvirt or any masquerade/snat/dnat rule (an untracked packet is never NATed), nor with ufw or firewalld active (their `established` rules see the PC's own replies as untracked). `dante-leg.nft` itself is unchanged except for its header's error text (`unknown identifier`).
+  - CI loads the new file in a private network namespace: it reloads idempotently, refuses a load without `-D`, untracks loopback and keeps a dummy leg tracked.
   - `oifname` in the output hook is reliable: the kernel picks the route before the hook runs, so no `fib` lookup is needed.
 - **No latency change** for any app; no code change.
 - Consumers: nothing to port. camera-box loads the new file on its stream and editing PCs (docs/two-networks.md).
