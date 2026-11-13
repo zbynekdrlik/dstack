@@ -425,9 +425,10 @@ fn obs_s_device_at_its_old_20_ms_numbers_in_terms() {
 /// renamed) as the reference the defaults must reproduce (dstack #244):
 /// `(P ns, W samples, TX path ns, RX path ns)`, or its refusal (with the W
 /// it had chosen for a budget refusal). Its own copies of v0.6.105's
-/// `least_work_margin`, `tx_floor_ns` and floors (with their literals), so
-/// a change to the live ones cannot move the reference with them; only
-/// the converter's delays (`rated::delay_ns`) are shared.
+/// `least_work_margin`, `tx_floor_ns`, `MAX_WORK_MARGIN` (4096) and floors
+/// (with their literals), so a change to the live ones cannot move the
+/// reference with them; only the converter's delays (`rated::delay_ns`)
+/// are shared.
 fn v0_6_105_split(
     device_rate: u32,
     app_rate: u32,
@@ -448,12 +449,12 @@ fn v0_6_105_split(
     let tx_floor_ns = |rate: u32| 32 * 1_000_000_000 / u64::from(rate.max(1)) + 250_000 + 4_000_000;
     let work_margin = |rate: u32, block: u64| {
         latency_samples(BUDGET_NS / 5 * 2, rate)
-            .min(MAX_WORK_MARGIN)
+            .min(4096)
             .max(least_work_margin(rate, block))
     };
     let rx_work_margin = |rate: u32, block: u64| {
         latency_samples(BUDGET_NS, rate)
-            .min(MAX_WORK_MARGIN)
+            .min(4096)
             .max(least_work_margin(rate, block))
     };
     if device_rate == 0 {

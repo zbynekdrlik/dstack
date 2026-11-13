@@ -12,7 +12,9 @@
 //! largest), one `fetch_add` and a `fetch_min`/`fetch_max` per packet: no
 //! allocation, no lock. The heartbeat's take ([`Window::take`]) zeroes each
 //! bucket as it reads it; a packet recorded meanwhile counts in this window
-//! or the next, never in both.
+//! or the next, never in both. Its least or largest value may still land
+//! in the other window than its count, which only widens that window's
+//! min or max by one packet's figure.
 //!
 //! The figure is the packet's age when the kernel received it, measured
 //! from its first frame: the network's transit plus the sender's own part
