@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.115
+
+- Fix (dstack #239, `tools/windows/lan-selfheal.ps1`): the LAN self-heal never disables, enables or restarts a virtual VLAN adapter. `Disable-NetAdapter` on a Realtek Virtual Adapter (driver 10.4.1117.2020) bugchecked dasio's test PC, and the repair's `Restart-NetAdapter` (a disable plus an enable) would have done the same on a layout-B PC, whose LAN adapter is that virtual adapter. A pure `Test-VirtualVlanAdapter` reads the LAN adapter's `InterfaceDescription` ("Realtek Virtual Adapter", or one naming a VLAN or a vendor's virtual adapter); for such an adapter the repair is the VLAN ID (`-NoRestart`), the IPv4 binding, DHCP, then `RenewDHCPLease` on that adapter (by interface index), and the log says the restart was skipped. A disabled virtual LAN adapter is a WARN and exit 1, never enabled. The Enable and Restart steps also refuse a virtual adapter themselves. Layout A (the LAN on the physical base adapter) keeps its restart, as tested on the SongPlayer PC.
+- Change (lan-selfheal): the state file is written to a `.tmp` file with write-through and swapped in (`File.Replace`), so a crash leaves the old or the new file; one that is unreadable all the same (NUL bytes) is still logged and counted from 0, now tested. The install's log line names the kind of LAN adapter.
+- Installed PCs: re-run `-Mode install` with the new script; the config is unchanged (no new key). dasio reinstalls it on its test PC (layout B).
+- No crate change: no API change, no latency change for any app.
+
 ## 0.6.114
 
 - New crate `dstack-asio` (dstack #243, the owner's ROZHODNUTÉ of 13.11.2026): the ASIO host for our apps, lifted from SongPlayer's ASIO output (songplayer #233, #229) so SongPlayer and dasio's coming bridge instance run one host. A local ASIO driver is opened as a host with azo 0.4.0 (pure-Rust COM ASIO host, MIT, no Steinberg SDK; SongPlayer's pin), its rate, buffer and sample types read and never set, and every buffer switch runs the app's `dstack_audio_io::Process` (the pump's contract): the inputs read decoded to channel-major `f64`, the app's outputs encoded into the chosen driver outputs, every other output zeroed. The encode is SongPlayer's formula (an `f32` widened to `f64` writes SongPlayer's bytes, pinned against its constants written out). A panicking `Process` plays silence from then on, is counted once (`faults`) and closes the run.
