@@ -575,16 +575,25 @@ impl<T: Copy + Sub<Output = Duration>> Restart<T> {
     /// status was read; `applying`: the apply still runs); `None` when it
     /// is over.
     pub fn next(self, found: bool, applying: bool, now: T) -> Option<Self> {
-        let _ = (found, applying, now);
-        None
+        match (found, self.gone) {
+            // Back after it went away.
+            (true, Some(_)) => None,
+            // Still up: the helper has not restarted it yet.
+            (true, None) => applying.then_some(self),
+            // Gone now; an apply that already ended restarts nothing.
+            (false, None) => applying.then_some(Restart { gone: Some(now) }),
+            (false, Some(since)) => (now - since < RESTART_WAIT).then_some(self),
+        }
     }
 }
 
 /// The status line of a tab: "Restarting…" while its device is missing
 /// during a restart, else [`status_line`].
 pub fn shown_status(status: &Result<String, String>, restarting: bool) -> String {
-    let _ = restarting;
-    status_line(status)
+    match status {
+        Err(_) if restarting => "Restarting…".to_string(),
+        _ => status_line(status),
+    }
 }
 
 /// The app part's field `key` of a status line.
