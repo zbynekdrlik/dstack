@@ -1744,11 +1744,10 @@ fn a_tx_port_base_past_the_last_port_is_refused_and_a_taken_port_named() {
         err.to_string().contains("tx_port_base: past port 65535"),
         "{err}"
     );
-    // The last base whose ports end at 65535 is not refused for its range
-    // (the bind may still fail on a runner: only the message is checked).
-    if let Err(e) = at(65_504) {
-        assert!(!e.to_string().contains("past port"), "{e}");
-    }
+    // The last base whose ports end at 65535 passes the range check (pure:
+    // tests.md, never bind near 65535).
+    assert_eq!(crate::media::rx::last_port(65_504), Some(65_535));
+    assert_eq!(crate::media::rx::last_port(65_505), None);
     let (held, base) = (40_000u16..60_000)
         .step_by(89)
         .find_map(|b| Some((at(b).ok()?, b)))

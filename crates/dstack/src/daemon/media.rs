@@ -51,7 +51,7 @@ use tracing::{info, warn};
 use crate::arc::Running;
 use crate::clock::{ClockStats, PtpClock, to_samples};
 use crate::ctl::{Checks, Limits, Playout, Requests};
-use crate::device::Device;
+use crate::device::{Device, DeviceConfig};
 use crate::flows::client::Client;
 use crate::flows::control::op;
 use crate::info::{Changes, Sources};
@@ -175,6 +175,13 @@ impl Media {
             let rx = rx_side()?;
             (rx, tx_side()?)
         };
+        for key in unnamed_flow_ports(cfg) {
+            warn!(
+                "{key} unset: the OS chose this device's flow ports, which a Dante-leg \
+                 filter cannot name; behind one, set {key} and accept its 32 ports \
+                 (docs/two-networks.md)"
+            );
+        }
         tx.recreate_multicast(&device.state.multicast);
         let mut manager = Manager::new(cfg, &device.state.name, ip, rx.ports()?);
         manager.load(&device.state.subscriptions);
@@ -670,6 +677,21 @@ impl Driver {
             }
         }
     }
+}
+
+/// The flow-port keys a device left unset while it has channels in that
+/// direction (`rx_port_base`, `tx_port_base`): its flow sockets there take
+/// ports the OS chooses, which no filter rule can name (dstack #262; the
+/// same hit a receiver's RX on 13.11.2026). Warned at start.
+fn unnamed_flow_ports(cfg: &DeviceConfig) -> Vec<&'static str> {
+    let mut keys = Vec::new();
+    if !cfg.rx.is_empty() && cfg.rx_port_base.is_none() {
+        keys.push("rx_port_base");
+    }
+    if !cfg.tx.is_empty() && cfg.tx_port_base.is_none() {
+        keys.push("tx_port_base");
+    }
+    keys
 }
 
 /// Whether the TX flow sockets bind before the RX ones: only when the TX
