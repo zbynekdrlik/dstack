@@ -14,12 +14,12 @@ use std::net::SocketAddrV4;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use dstack::arc::control;
 use dtray::dasio::apply::{self, Ops};
 use dtray::dasio::choices::{self, Adapter, Choice};
-use dtray::dasio::{self, Fields, Instance, ReadBack};
+use dtray::dasio::{self, Fields, Instance, ReadBack, Restart};
 use dtray::discover::{self, Local, Reading, Scanner};
 use windows_sys::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::DeleteObject;
@@ -141,6 +141,8 @@ struct State {
     shown_status: String,
     /// The running apply: its tab's index and its progress.
     busy: Option<(usize, Receiver<Progress>)>,
+    /// An apply's restart the status line follows: its tab's index.
+    restart: Option<(usize, Restart<Instant>)>,
     /// `dtray --settings`: the window is the program, its close ends it.
     standalone: bool,
 }
@@ -336,6 +338,7 @@ fn create(devices: Vec<Local>, readings: Vec<Reading>, standalone: bool) -> Resu
             devices,
             readings,
             shown_status: String::new(),
+            restart: None,
             busy: None,
             standalone,
         })
@@ -390,8 +393,9 @@ fn others(st: &State) -> Vec<Fields> {
         .collect()
 }
 
-/// The current tab's status line.
-fn status_text(st: &State) -> String {
+/// The current tab's status line ("Restarting…" while an apply's restart
+/// keeps its device away: [`Restart`]).
+fn status_text(st: &mut State) -> String {
     let Some(tab) = st.tabs.get(st.cur) else {
         return String::new();
     };
@@ -404,12 +408,25 @@ fn status_text(st: &State) -> String {
         .find(|(n, _)| n.eq_ignore_ascii_case(&old.name))
         .map(|(_, r)| r.clone())
         .unwrap_or_else(|| Err("not found on this PC".to_string()));
-    dasio::status_line(&reading)
+    if let Some((i, r)) = st.restart
+        && i == st.cur
+    {
+        let next = r.next(reading.is_ok(), st.busy.is_some(), Instant::now());
+        st.restart = next.map(|r| (i, r));
+    }
+    let restarting = st
+        .restart
+        .is_some_and(|(i, r)| i == st.cur && r.restarting());
+    dasio::shown_status(&reading, restarting)
 }
 
 /// The current tab into the controls (lists, selections, texts).
 fn show_tab(st: &mut State) {
     let h = st.hwnd;
+    // Another tab shown: the restart's mark is not followed any more.
+    if st.restart.is_some_and(|(i, _)| i != st.cur) {
+        st.restart = None;
+    }
     let busy = dasio::busy_cpus(&others(st));
     let tab = &st.tabs[st.cur];
     let (old, new) = match &tab.fields {
@@ -649,13 +666,22 @@ fn start_apply(st: &mut State) {
 fn progress(st: &mut State) {
     let h = st.hwnd;
     let mut done = None;
+    let mut restart = false;
     if let Some((_, rx)) = &st.busy {
         while let Ok(p) = rx.try_recv() {
             match p {
-                Progress::Say(s) => set_text(h, ID_RESULT, &s),
+                Progress::Say(s) => {
+                    if s == apply::RESTART_STEP {
+                        restart = true;
+                    }
+                    set_text(h, ID_RESULT, &s);
+                }
                 Progress::Done(out) => done = Some(out),
             }
         }
+    }
+    if restart && let Some((i, _)) = st.busy {
+        st.restart = Some((i, Restart::started()));
     }
     if let Some(out) = done {
         let applied = st.busy.take().map_or(st.cur, |(i, _)| i);

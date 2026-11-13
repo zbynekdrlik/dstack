@@ -831,3 +831,79 @@ fn install_refuses_a_linked_folder() {
     // The same instance through its real folder is written.
     assert!(install(root.path(), 1, CONFIG_TEXT).is_ok());
 }
+
+const SEC: std::time::Duration = std::time::Duration::from_secs(1);
+
+#[test]
+fn a_restart_lasts_until_the_device_is_back_after_it_went_away() {
+    let r = Restart::<std::time::Duration>::started();
+    assert_eq!(r.gone, None);
+    // The old process still answers (UAC, the helper's write).
+    assert!(!r.restarting());
+    let r = r.next(true, true, SEC).expect("still restarting");
+    assert_eq!((r.up, r.gone), (true, None));
+    assert!(!r.restarting());
+    // Gone at 3 s.
+    let r = r.next(false, true, 3 * SEC).expect("still restarting");
+    assert_eq!(r.gone, Some(3 * SEC));
+    assert!(r.restarting());
+    // Still gone later, also after the apply ended: the first miss counts.
+    let r = r.next(false, true, 9 * SEC).expect("still restarting");
+    assert_eq!(r.gone, Some(3 * SEC));
+    let r = r.next(false, false, 20 * SEC).expect("still restarting");
+    assert_eq!(r.gone, Some(3 * SEC));
+    // Back.
+    assert_eq!(r.next(true, false, 23 * SEC), None);
+    assert_eq!(r.next(true, true, 23 * SEC), None);
+}
+
+#[test]
+fn a_restart_ends_after_the_wait_from_when_the_device_went_away() {
+    let r = Restart {
+        up: true,
+        gone: Some(10 * SEC),
+    };
+    let just = std::time::Duration::from_millis(1);
+    assert_eq!(r.next(false, true, 10 * SEC + RESTART_WAIT - just), Some(r));
+    assert_eq!(r.next(false, true, 10 * SEC + RESTART_WAIT), None);
+    assert_eq!(r.next(false, false, 10 * SEC + RESTART_WAIT), None);
+    assert_eq!(RESTART_WAIT, 60 * SEC);
+}
+
+#[test]
+fn an_apply_that_ends_with_the_device_never_gone_ends_the_restart() {
+    let r = Restart::<std::time::Duration>::started();
+    // Declined UAC, a refused file: the device stayed up.
+    assert_eq!(r.next(true, false, SEC), None);
+    // An instance that was not running and the apply failed: no
+    // "Restarting…" either.
+    assert_eq!(r.next(false, false, SEC), None);
+}
+
+#[test]
+fn an_instance_down_before_the_apply_shows_its_status_not_restarting() {
+    let r = Restart::<std::time::Duration>::started();
+    // Down while UAC asks: the real status, and a failed apply ends it.
+    let r = r.next(false, true, SEC).expect("the apply runs");
+    assert_eq!(r, Restart::started());
+    assert!(!r.restarting());
+    assert_eq!(r.next(false, false, 2 * SEC), None);
+    // The helper starts it, then a restart takes it away again.
+    let r = r.next(true, true, 2 * SEC).expect("the apply runs");
+    let r = r.next(false, true, 3 * SEC).expect("the apply runs");
+    assert_eq!(r.gone, Some(3 * SEC));
+    assert!(r.restarting());
+}
+
+#[test]
+fn the_status_says_restarting_only_while_the_device_is_missing() {
+    let missing = Err("not found on this PC".to_string());
+    assert_eq!(shown_status(&missing, true), "Restarting…");
+    assert_eq!(
+        shown_status(&missing, false),
+        "Not running (not found on this PC)"
+    );
+    let up = Ok(STATUS.to_string());
+    assert_eq!(shown_status(&up, true), status_line(&up));
+    assert_eq!(shown_status(&up, false), status_line(&up));
+}

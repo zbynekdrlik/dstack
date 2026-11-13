@@ -28,6 +28,11 @@ pub trait Ops {
     fn read_back(&mut self) -> ReadBack;
 }
 
+/// The step's text said right before the elevated helper starts: the
+/// window starts following the restart there ([`super::Restart`]).
+pub const RESTART_STEP: &str =
+    "Writing the settings and restarting the instance (Windows asks for administrator rights)…";
+
 /// How many polls the DAW gets to release the driver (10 minutes).
 pub const RELEASE_POLLS: u32 = 600;
 /// How many polls the restarted device gets to state every value.
@@ -98,9 +103,7 @@ pub fn run(
             wait_release(ops, &mut say, plan.latency.is_some())?;
         }
 
-        say(
-            "Writing the settings and restarting the instance (Windows asks for administrator rights)…",
-        );
+        say(RESTART_STEP);
         ops.install(config)?;
         say("Restarted; reading the values back…");
     }

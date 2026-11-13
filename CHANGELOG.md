@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.110
+
+- Fix (dstack #246, field test on a dasio PC): the settings window's interface list no longer offers adapters that cannot carry Dante: Windows' loopback pseudo-interface (127.0.0.1) and an adapter with only a link-local (169.254/16) or unspecified address. An instance's configured interface stays in the list when the live list lacks it, marked "(no Dante address)" for an adapter left out and "(not found)" when the PC has no adapter of that name, so a rename never changes the setting silently. An adapter's text shows its first Dante-capable address.
+- Fix (dstack #246): during an apply's restart (about 20 s) the window's status line says "Restarting…" instead of "Not running (not found on this PC)": from the elevated helper's start until the device answers again after it went away, at most `dasio::RESTART_WAIT` (60 s) from when it went away; then the real reason shows. It needs the device seen up during the apply and then missed: an instance that was not running before the apply shows its real status, and an apply that ends with the device never gone shows the status at once.
+- New: `dtray::dasio::Restart::restarting`.
+- New: `dtray::dasio::choices::carries_dante`, `dtray::dasio::Restart`, `dtray::dasio::shown_status`, `dtray::dasio::RESTART_WAIT`, `dtray::dasio::apply::RESTART_STEP`.
+- No dstack or dlink API change, no latency change.
+
 ## 0.6.109
 
 - New (dstack #239): an emergency remote path in the Windows LAN self-heal task (`tools/windows/lan-selfheal.ps1`, docs/two-networks.md section 3). With the optional config key `emergencySource` (one IPv4 host, the admin machine's Dante address), a LAN leg down for the threshold also opens TCP `emergencyPort` (default 22) on the Dante adapter for that host only: the task enables two Block rules of its own (group `dstack emergency`, created on first use: TCP in on the Dante adapter from every other address, and from `emergencySource` on every other port), and only then disables the `dstack155` rule named by `danteBlockRule`. When the gateway answers again it enables that rule first, then disables the emergency rules, and every run with the LAN up restores that state. `danteBlockRule` is required with `emergencySource`; a name that is not exactly one inbound Block rule is refused and logged. Without `emergencySource` nothing changes and no firewall rule is read.

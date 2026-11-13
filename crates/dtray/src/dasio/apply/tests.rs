@@ -258,3 +258,25 @@ fn an_unread_status_is_no_release() {
     );
     assert!(!f.log.iter().any(|l| l.starts_with("install")));
 }
+
+#[test]
+fn a_restart_says_its_step_before_the_helper_and_none_without_one() {
+    let mut said = Vec::new();
+    let mut f = Fake::default();
+    assert!(
+        run(&plan(None, true, false), &want(), &mut f, |s| said
+            .push(s.to_string()))
+        .is_ok()
+    );
+    assert_eq!(said[0], RESTART_STEP);
+    assert_eq!(said.len(), 2);
+    let mut live = Vec::new();
+    let mut f = Fake::default();
+    assert!(
+        run(&plan(Some(2_000_000), false, false), &want(), &mut f, |s| {
+            live.push(s.to_string())
+        })
+        .is_ok()
+    );
+    assert!(!live.iter().any(|s| s == RESTART_STEP));
+}

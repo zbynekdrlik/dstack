@@ -150,14 +150,28 @@ pub struct Adapter {
     pub mbit: Option<u64>,
 }
 
+/// Whether `ip` can carry Dante: not loopback (Windows' "Loopback
+/// Pseudo-Interface 1"), not link-local (169.254/16, an adapter without a
+/// DHCP answer) and not unspecified.
+pub fn carries_dante(ip: Ipv4Addr) -> bool {
+    !ip.is_loopback() && !ip.is_link_local() && !ip.is_unspecified()
+}
+
+/// Whether `a` has an address that can carry Dante ([`carries_dante`]).
+fn usable(a: &Adapter) -> bool {
+    a.addresses.iter().any(|&ip| carries_dante(ip))
+}
+
 /// An adapter as the list shows it: the alias, then its description, its
-/// IPv4 address and its speed where known.
+/// IPv4 address (the first that can carry Dante, else the first) and its
+/// speed where known.
 pub fn adapter_text(a: &Adapter) -> String {
     let mut parts = vec![a.alias.clone()];
     if !a.description.is_empty() {
         parts.push(a.description.clone());
     }
-    if let Some(ip) = a.addresses.first() {
+    let shown = a.addresses.iter().find(|&&ip| carries_dante(ip));
+    if let Some(ip) = shown.or(a.addresses.first()) {
         parts.push(ip.to_string());
     }
     match a.mbit {
@@ -180,8 +194,11 @@ pub fn alias_of(adapters: &[Adapter], ip: Ipv4Addr) -> Option<String> {
 /// The interface list: first the config's own choice when it names none
 /// (`None`: the service's install flag; with the alias of the adapter
 /// the device runs on, `running`, when known), then every adapter with an
-/// IPv4 address, and the configured alias when no adapter has it (shown
-/// as not found: dasio logs "no such interface").
+/// IPv4 address that can carry Dante ([`carries_dante`]: no loopback, no
+/// link-local only), and the configured alias when the list lacks it,
+/// marked, so the setting never changes silently: "(no Dante address)"
+/// for an adapter left out, "(not found)" when the PC has none of that
+/// name (dasio logs "no such interface").
 pub fn interfaces(
     adapters: &[Adapter],
     configured: Option<&str>,
@@ -195,16 +212,18 @@ pub fn interfaces(
         };
         out.push(choice(None, text));
     }
-    for a in adapters.iter().filter(|a| !a.addresses.is_empty()) {
+    for a in adapters.iter().filter(|a| usable(a)) {
         out.push(choice(Some(a.alias.clone()), adapter_text(a)));
     }
     if let Some(alias) = configured
         && !out.iter().any(|c| c.value.as_deref() == Some(alias))
     {
-        out.push(choice(
-            Some(alias.to_string()),
-            format!("{alias} (not found)"),
-        ));
+        let why = if adapters.iter().any(|a| a.alias == alias) {
+            "no Dante address"
+        } else {
+            "not found"
+        };
+        out.push(choice(Some(alias.to_string()), format!("{alias} ({why})")));
     }
     out
 }
