@@ -200,8 +200,13 @@ pub const SOFT_LIMIT: usize = 800;
 pub const MAX_REMOTE_NAME: usize = 63;
 /// inferno's status for 0x2320 ("???" in its source).
 pub const STATUS_2320: u16 = 0x0030;
-/// A flow's socket descriptor (`0x8002`, port, IPv4 address).
-const SOCKET_DESCRIPTOR: u16 = 0x8002;
+/// A flow socket descriptor's first word: its length in bytes (8) and
+/// its address family (2, IPv4), then the port and the IPv4 address. A
+/// real ARC 2.7 card writes `08 02`, netaudio reads the two bytes so, and
+/// inferno's own flow request writes it (dstack #274; up to v0.6.122 we
+/// wrote inferno's ARC server's `0x8002`, which netaudio reads as a
+/// 128-byte descriptor).
+const SOCKET_DESCRIPTOR: u16 = 0x0802;
 /// A TX flow descriptor's type: unicast.
 const FLOW_UNICAST: u16 = 0x11;
 /// A TX flow descriptor's type: multicast (dstack #193).
@@ -742,8 +747,8 @@ fn capped(s: &str) -> &str {
     &s[..end]
 }
 
-/// A flow socket descriptor: `0x8002`, the port, the IPv4 address
-/// (inferno's `DestinationSocketDescriptor`).
+/// A flow socket descriptor: `08 02` ([`SOCKET_DESCRIPTOR`]), the port,
+/// the IPv4 address.
 fn socket_descriptor(out: &mut Body, at: std::net::SocketAddrV4) {
     out.u16(SOCKET_DESCRIPTOR);
     out.u16(at.port());
@@ -792,9 +797,11 @@ fn flows_2809(h: &Header, req: &[u8], cfg: &DeviceConfig, tx: &TxTable) -> ArcOu
 /// slots, the socket descriptor's offset, each slot's TX channel or 0, the
 /// names descriptor's offset); at a multiple of 4 the socket descriptor
 /// (the receiver's address, a multicast flow's group); the names
-/// descriptor (`0x0a00, 1`, the receiver's device and flow names, `0x10`,
-/// ours, 8 zeros); then the three names: ours `<flow>_<process>`, the
-/// receiver's device and flow names (cut to [`MAX_REMOTE_NAME`]). A reader
+/// descriptor (`0x0a00, 1`, the receiver's device and flow names, the
+/// flow's frames per packet (dstack #274: a real 2.7 card states each
+/// flow's; we wrote a fixed 0x10 up to v0.6.122), ours, 8 zeros); then
+/// the three names: ours `<flow>_<process>`, the receiver's device and
+/// flow names (cut to [`MAX_REMOTE_NAME`]). A reader
 /// follows the offsets. The page's item is the flow descriptor's offset.
 fn tx_flows(h: &Header, req: &[u8], cfg: &DeviceConfig, tx: &TxTable) -> ArcOutcome {
     page(
@@ -837,7 +844,7 @@ fn tx_flows(h: &Header, req: &[u8], cfg: &DeviceConfig, tx: &TxTable) -> ArcOutc
             out.zeros(20);
             out.set_u16(names, 0x0a00);
             out.set_u16(names + 2, 1);
-            out.set_u16(names + 8, 0x10);
+            out.set_u16(names + 8, f.fpp);
             let local = out.cstr(&format!("{id}_{}", cfg.process_id));
             let host = out.cstr(capped(&f.rx_host));
             let name = out.cstr(capped(&f.rx_flow_name));

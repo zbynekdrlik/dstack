@@ -20,8 +20,9 @@
 //! count N of socket descriptor offsets, the channel slots S, the N
 //! socket offsets (0 for an unused one), the S slots' TX channels (0 for
 //! an empty slot), the names descriptor's offset. A socket descriptor is
-//! `08 02 <port u16> <IPv4>` (the card's; our own writer, `arc::tx_flows`,
-//! writes `80 02`, inferno's, and is read too). The names descriptor's word
+//! `08 02 <port u16> <IPv4>` (the card's, and our own writer's,
+//! `arc::tx_flows`, since v0.6.123; up to v0.6.122 it wrote `80 02`,
+//! inferno's, which is read too). The names descriptor's word
 //! at bytes 8–9 is the flow's frames per packet: the card's read 4, 16 and
 //! 32 across its flows, each a value a Dante receiver asks for (evidence,
 //! not proof); 0 when the record has no names descriptor.
@@ -50,8 +51,8 @@ use crate::wire::{HEADER_LEN, STATUS_MORE, STATUS_OK, read_u16};
 /// ARC 2.7's TX flow list.
 pub const LIST_27: u16 = super::super::op::TX_FLOWS;
 
-/// The socket descriptor tags read: the card's (`08 02`) and inferno's,
-/// which our own 0x2200 writes (`80 02`).
+/// The socket descriptor tags read: the card's (`08 02`, ours since
+/// v0.6.123) and inferno's (`80 02`, ours up to v0.6.122, dstack #274).
 const SOCKET_TAGS: [[u8; 2]; 2] = [[0x08, 0x02], [0x80, 0x02]];
 
 /// One page of a 0x2200 reply body: its count and the records that read;
