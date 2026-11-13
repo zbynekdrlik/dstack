@@ -95,22 +95,19 @@ fn a_verdict_is_0_done_or_1_refused() {
 }
 
 #[test]
-fn dasio_apply_runs_here_refuses_a_bad_instance_and_leaves_its_verdict() {
+fn dasio_apply_runs_here_and_refuses_a_bad_instance() {
     let dir = tempfile::tempdir().expect("a temp dir");
-    let file = dir.path().join("new.toml");
     let mode = Mode::DasioApply {
         instance: "x".into(),
-        file: file.display().to_string(),
+        file: dir.path().join("new.toml").display().to_string(),
     };
     assert_eq!(
         run(Some(mode), CLI_USAGE, no_tray, no_autostart),
         ExitCode::FAILURE
     );
-    let verdict = std::fs::read_to_string(crate::dasio::result_path(&file)).expect("a verdict");
-    assert_eq!(
-        crate::dasio::parse_result(&verdict),
-        Err("instance: x is not an instance number".to_string())
-    );
+    // Nothing is left beside the staged file (the verdict goes to the
+    // instance's own folder only).
+    assert_eq!(std::fs::read_dir(dir.path()).expect("list").count(), 0);
 }
 
 #[test]

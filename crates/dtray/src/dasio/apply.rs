@@ -42,6 +42,43 @@ pub fn complete(want: &Fields, back: &ReadBack) -> bool {
         && (want.iface.is_none() || back.iface.is_some())
 }
 
+/// Waits until the device's status says the DAW released the driver
+/// (`daw_attached: false`). Only that reading lets the restart go on: a
+/// DAW still attached, or a status not read (the device not found, not
+/// answering, or not stating it), keeps waiting, at most
+/// [`RELEASE_POLLS`]; then the reason, which says whether the live RX
+/// latency was already `set`.
+fn wait_release(ops: &mut impl Ops, say: &mut impl FnMut(&str), set: bool) -> Result<(), String> {
+    let mut polls = 0;
+    loop {
+        let now = ops.daw_attached();
+        if now == Some(false) {
+            return Ok(());
+        }
+        if polls == 0 {
+            say(
+                "Waiting for the DAW to release the driver (Ableton: Options → Audio → Driver: None, then Apply)…",
+            );
+        }
+        if polls == RELEASE_POLLS {
+            let why = match now {
+                Some(_) => "the DAW did not release the driver within 10 minutes",
+                None => {
+                    "the device's status did not say for 10 minutes whether the DAW holds the driver"
+                }
+            };
+            let done = if set {
+                "the RX latency was set, the file was not written"
+            } else {
+                "nothing written"
+            };
+            return Err(format!("{why}; {done}"));
+        }
+        ops.wait();
+        polls += 1;
+    }
+}
+
 /// Runs `plan` (for the values `want`) on `ops`, each step's text given
 /// to `say`: the verdict line, or the reason it stopped (which says what
 /// was already done).
@@ -58,23 +95,9 @@ pub fn run(
     }
     if let Some(config) = &plan.config {
         if plan.release {
-            let mut polls = 0;
-            while ops.daw_attached() == Some(true) {
-                if polls == 0 {
-                    say(
-                        "Waiting for the DAW to release the driver (Ableton: Options → Audio → Driver: None, then Apply)…",
-                    );
-                }
-                if polls == RELEASE_POLLS {
-                    return Err(
-                        "the DAW did not release the driver within 10 minutes; nothing written"
-                            .to_string(),
-                    );
-                }
-                ops.wait();
-                polls += 1;
-            }
+            wait_release(ops, &mut say, plan.latency.is_some())?;
         }
+
         say(
             "Writing the settings and restarting the instance (Windows asks for administrator rights)…",
         );

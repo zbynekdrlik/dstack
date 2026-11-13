@@ -107,7 +107,7 @@ fn adapter(alias: &str, ip: Option<[u8; 4]>, mbit: Option<u64>) -> Adapter {
     Adapter {
         alias: alias.into(),
         description: format!("{alias} card"),
-        ipv4: ip.map(Ipv4Addr::from),
+        addresses: ip.map(Ipv4Addr::from).into_iter().collect(),
         mbit,
     }
 }
@@ -142,6 +142,14 @@ fn the_alias_of_an_address_is_its_adapter_s() {
         Some("B")
     );
     assert_eq!(alias_of(&all, Ipv4Addr::new(10, 0, 0, 3)), None);
+    // A device on an adapter's second address.
+    let mut two = adapter("C", Some([10, 0, 0, 4]), None);
+    two.addresses.push(Ipv4Addr::new(10, 0, 0, 5));
+    assert_eq!(adapter_text(&two), "C · C card · 10.0.0.4");
+    assert_eq!(
+        alias_of(&[two], Ipv4Addr::new(10, 0, 0, 5)).as_deref(),
+        Some("C")
+    );
 }
 
 #[test]

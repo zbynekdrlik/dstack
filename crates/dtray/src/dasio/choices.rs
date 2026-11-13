@@ -144,7 +144,8 @@ pub struct Adapter {
     /// Windows' interface alias (Get-NetAdapter Name), what `iface` names.
     pub alias: String,
     pub description: String,
-    pub ipv4: Option<Ipv4Addr>,
+    /// Its IPv4 addresses, the first first.
+    pub addresses: Vec<Ipv4Addr>,
     /// The receive link speed, Mbit/s.
     pub mbit: Option<u64>,
 }
@@ -156,7 +157,7 @@ pub fn adapter_text(a: &Adapter) -> String {
     if !a.description.is_empty() {
         parts.push(a.description.clone());
     }
-    if let Some(ip) = a.ipv4 {
+    if let Some(ip) = a.addresses.first() {
         parts.push(ip.to_string());
     }
     match a.mbit {
@@ -168,11 +169,12 @@ pub fn adapter_text(a: &Adapter) -> String {
     parts.join(" · ")
 }
 
-/// The alias of the adapter of `adapters` holding `ip`.
+/// The alias of the adapter of `adapters` holding `ip` (any of its
+/// addresses).
 pub fn alias_of(adapters: &[Adapter], ip: Ipv4Addr) -> Option<String> {
     adapters
         .iter()
-        .find(|a| a.ipv4 == Some(ip))
+        .find(|a| a.addresses.contains(&ip))
         .map(|a| a.alias.clone())
 }
 
@@ -194,7 +196,7 @@ pub fn interfaces(
         };
         out.push(choice(None, text));
     }
-    for a in adapters.iter().filter(|a| a.ipv4.is_some()) {
+    for a in adapters.iter().filter(|a| !a.addresses.is_empty()) {
         out.push(choice(Some(a.alias.clone()), adapter_text(a)));
     }
     if let Some(alias) = configured

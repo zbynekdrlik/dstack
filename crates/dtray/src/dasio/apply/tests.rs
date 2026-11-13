@@ -31,6 +31,8 @@ fn good() -> ReadBack {
 #[derive(Default)]
 struct Fake {
     held: u32,
+    /// The status does not say (`None`) for this many reads.
+    unknown: u32,
     silent: u32,
     back: Option<ReadBack>,
     latency_err: bool,
@@ -49,6 +51,10 @@ impl Ops for Fake {
     }
     fn daw_attached(&mut self) -> Option<bool> {
         self.log.push("daw".into());
+        if self.unknown > 0 {
+            self.unknown -= 1;
+            return None;
+        }
         Some(self.held > 0)
     }
     fn wait(&mut self) {
@@ -225,4 +231,30 @@ fn complete_needs_every_value_and_the_interface_only_when_asked() {
     let mut b = good();
     b.iface = Some("E".into());
     assert!(complete(&iface, &b));
+}
+
+#[test]
+fn an_unread_status_is_no_release() {
+    // Two reads say nothing, then the DAW is gone: the install waits.
+    let mut f = Fake {
+        unknown: 2,
+        ..Fake::default()
+    };
+    assert!(run(&plan(None, true, true), &want(), &mut f, |_| {}).is_ok());
+    assert_eq!(
+        f.log,
+        ["daw", "wait", "daw", "wait", "daw", "install text", "read"]
+    );
+    // A status that never says writes nothing, and says so.
+    let mut f = Fake {
+        unknown: u32::MAX,
+        ..Fake::default()
+    };
+    let err = run(&plan(Some(1), true, true), &want(), &mut f, |_| {}).expect_err("unknown");
+    assert_eq!(
+        err,
+        "the device's status did not say for 10 minutes whether the DAW holds the driver; \
+         the RX latency was set, the file was not written"
+    );
+    assert!(!f.log.iter().any(|l| l.starts_with("install")));
 }

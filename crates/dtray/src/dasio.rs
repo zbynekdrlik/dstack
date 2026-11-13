@@ -480,7 +480,8 @@ pub struct Plan {
 
 /// The apply of `new` over `old` (the window's starting point: the
 /// instance's config `text` as read, its RX latency the device's own), on
-/// a PC with `cpus` CPUs while the other instances pin `busy`: the live
+/// a PC with `cpus` CPUs while the other instances pin `busy` (only a
+/// picker that changed is checked: [`changed_cpus`]): the live
 /// latency write, and for any restart change the new file (with the
 /// file's own RX latency: that one is the live write's) and whether the
 /// DAW must release the driver. The reason when nothing changed, a CPU is
@@ -496,7 +497,7 @@ pub fn plan(
     if changed.is_empty() {
         return Err("nothing changed".into());
     }
-    let problems = cpu_problems(&new.cpus, busy, cpus);
+    let problems = cpu_problems(&changed_cpus(&old.cpus, &new.cpus), busy, cpus);
     if !problems.is_empty() {
         return Err(problems.join("; "));
     }
@@ -619,18 +620,28 @@ pub fn verify(want: &Fields, back: &ReadBack) -> Result<String, String> {
     ))
 }
 
-/// The elevated helper's write: `text` checked as a config ([`Fields::read`])
-/// and written as instance `number`'s [`CONFIG`] under `root` (the folder
-/// must exist with a config already: the helper creates no instance),
-/// through [`STAGED`] renamed over it, so a reader never sees half a file.
-/// The written path; the reason otherwise.
+/// The elevated helper's write: `text` written as instance `number`'s
+/// [`CONFIG`] under `root`, through [`STAGED`] renamed over it, so a reader
+/// never sees half a file. The folder must exist with a config already
+/// (the helper creates no instance), and `text` must be that config with
+/// only the window's fields changed: [`edit`] of the current file with
+/// `text`'s fields must give `text` exactly. So a staged file swapped by
+/// another program of the user (the staged copy sits in the user's
+/// folder) can change nothing the window cannot, such as the state
+/// file's path. The written path; the reason otherwise.
 pub fn install(root: &Path, number: u32, text: &str) -> Result<PathBuf, String> {
     let dir = root.join(format!("{INSTANCE_PREFIX}{number}"));
     let target = dir.join(CONFIG);
-    if !target.is_file() {
-        return Err(format!("{} does not exist", target.display()));
+    let current =
+        std::fs::read_to_string(&target).map_err(|e| format!("{}: {e}", target.display()))?;
+    let want = Fields::read(text).map_err(|e| format!("the new config is refused: {e}"))?;
+    let rebuilt = edit(&current, &want).map_err(|e| format!("the new config is refused: {e}"))?;
+    if rebuilt != text {
+        return Err(
+            "the new config changes more than the settings window's fields; nothing written"
+                .to_string(),
+        );
     }
-    Fields::read(text).map_err(|e| format!("the new config is refused: {e}"))?;
     let staged = dir.join(STAGED);
     std::fs::write(&staged, text).map_err(|e| format!("{}: {e}", staged.display()))?;
     std::fs::rename(&staged, &target).map_err(|e| {
@@ -674,13 +685,15 @@ pub fn apply_staged(
     ))
 }
 
-/// Where the helper leaves its verdict for the window: beside the staged
-/// file, `.result` added (the elevated helper's console is not the
-/// window's).
-pub fn result_path(staged: &Path) -> PathBuf {
-    let mut name = staged.as_os_str().to_owned();
-    name.push(".result");
-    PathBuf::from(name)
+/// The helper's verdict file in an instance's folder: the window reads
+/// it after the helper ends (the elevated helper's console is not the
+/// window's). The folder is the admin's, so no other program of the user
+/// can redirect the elevated write.
+pub const RESULT: &str = "dtray-apply.result";
+
+/// The verdict file of instance `number` under `root`.
+pub fn result_path(root: &Path, number: u32) -> PathBuf {
+    root.join(format!("{INSTANCE_PREFIX}{number}")).join(RESULT)
 }
 
 /// The verdict file's text: `ok` or `error`, then the line.
@@ -705,6 +718,44 @@ pub fn parse_result(text: &str) -> Result<String, String> {
 /// and the staged file in double quotes (a path with spaces).
 pub fn helper_params(instance: u32, staged: &Path) -> String {
     format!("--dasio-apply {instance} \"{}\"", staged.display())
+}
+
+/// Whether the program at `exe` may be started as administrator: only
+/// from under `program_files` (an admin-only folder: dasio's installer
+/// puts dtray in `%ProgramFiles%\dasio`), compared without case as
+/// Windows does. A copy anywhere the user can write could be replaced by
+/// another program of the user and then run elevated. The reason when
+/// not.
+pub fn may_elevate(exe: &Path, program_files: Option<&Path>) -> Result<(), String> {
+    let Some(base) = program_files.filter(|p| !p.as_os_str().is_empty()) else {
+        return Err("the Program Files folder is not known; nothing is changed".to_string());
+    };
+    let lower = |p: &Path| -> Vec<String> {
+        p.components()
+            .map(|c| c.as_os_str().to_string_lossy().to_lowercase())
+            .collect()
+    };
+    let (e, b) = (lower(exe), lower(base));
+    if e.len() > b.len() && e.starts_with(&b) {
+        Ok(())
+    } else {
+        Err(format!(
+            "settings are changed only by a dtray installed under {} (this one runs from {})",
+            base.display(),
+            exe.display()
+        ))
+    }
+}
+
+/// Of `new`, the CPU pickers that differ from `old`; the others `None`
+/// (a pin the file already has is not this apply's to refuse).
+pub fn changed_cpus(old: &Cpus, new: &Cpus) -> Cpus {
+    let pick = |o: Option<usize>, n: Option<usize>| if o == n { None } else { n };
+    Cpus {
+        pump: pick(old.pump, new.pump),
+        io: pick(old.io, new.io),
+        rx: pick(old.rx, new.rx),
+    }
 }
 
 pub mod apply;

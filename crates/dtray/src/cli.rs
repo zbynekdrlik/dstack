@@ -86,17 +86,22 @@ pub fn run(
 }
 
 /// The settings window's elevated helper: [`dasio::apply_staged`] on
-/// this PC's dasio folder, its verdict printed and left beside the staged
-/// file for the window ([`dasio::result_path`]; a verdict that cannot be
+/// this PC's dasio folder, its verdict printed and left in the instance's
+/// folder for the window ([`dasio::result_path`]; a verdict that cannot be
 /// left there is said on stderr).
 fn dasio_apply(instance: &str, file: &Path) -> ExitCode {
-    let outcome = dasio::apply_staged(&dasio::root(), instance, file, dasio::service::restart);
-    let result = dasio::result_path(file);
-    if let Err(e) = std::fs::write(&result, dasio::result_text(&outcome)) {
-        eprintln!(
-            "dtray: the verdict for the window ({}): {e}",
-            result.display()
-        );
+    let root = dasio::root();
+    let result = dasio::instance_arg(instance)
+        .ok()
+        .map(|n| dasio::result_path(&root, n));
+    if let Some(r) = &result {
+        let _ = std::fs::remove_file(r);
+    }
+    let outcome = dasio::apply_staged(&root, instance, file, dasio::service::restart);
+    if let Some(r) = &result
+        && let Err(e) = std::fs::write(r, dasio::result_text(&outcome))
+    {
+        eprintln!("dtray: the verdict for the window ({}): {e}", r.display());
     }
     verdict(outcome)
 }

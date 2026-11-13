@@ -134,7 +134,7 @@ pub fn run() -> Result<(), String> {
             tray.tick()?;
             let (devices, readings) = tray.last_tick();
             crate::settings_win::feed(devices, readings);
-        } else {
+        } else if !crate::settings_win::dialog_message(&msg) {
             // SAFETY: a message GetMessageW filled.
             unsafe {
                 TranslateMessage(&msg);

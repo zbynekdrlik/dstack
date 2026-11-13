@@ -61,7 +61,7 @@ fn main() -> ExitCode {
         win::attach_console();
     }
     #[cfg(windows)]
-    if parsed == Ok(dtray::Mode::Settings) {
+    if let Ok(dtray::Mode::Settings) = parsed {
         return settings();
     }
     dtray::cli::run(parsed.ok(), dtray::USAGE, tray, autostart)

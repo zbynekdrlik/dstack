@@ -480,10 +480,18 @@ fn a_plan_refuses_no_change_a_busy_cpu_and_a_bad_file() {
         plan(CONFIG_TEXT, &fields(), &new, &BTreeSet::from([3]), 8),
         Err("Receive (RX) CPU: CPU 3 is another instance's".to_string())
     );
-    // CPUs already pinned by the config are also checked against the PC.
+    // A pin the config already has is not this apply's to refuse: a
+    // buffer change on a PC of 4 CPUs (the config pins CPU 6) goes on.
     let mut small = fields();
     small.block = 128;
-    assert!(plan(CONFIG_TEXT, &fields(), &small, &BTreeSet::new(), 4).is_err());
+    assert!(plan(CONFIG_TEXT, &fields(), &small, &BTreeSet::from([6]), 4).is_ok());
+    // A changed picker past the PC is refused.
+    let mut far = fields();
+    far.cpus.pump = Some(9);
+    assert_eq!(
+        plan(CONFIG_TEXT, &fields(), &far, &BTreeSet::new(), 8),
+        Err("Audio pump CPU: CPU 9, this PC has CPUs 0 to 7".to_string())
+    );
     let mut cpu = fields();
     cpu.cpus.rx = Some(1);
     assert!(plan("name = ", &fields(), &cpu, &BTreeSet::new(), 8).is_err());
@@ -594,12 +602,18 @@ fn every_mismatch_and_every_value_not_read_is_listed() {
     );
 }
 
-#[test]
-fn install_writes_a_valid_config_into_an_existing_instance() {
+/// A root with instance 1 holding [`CONFIG_TEXT`].
+fn one_instance() -> (tempfile::TempDir, PathBuf) {
     let root = tempfile::tempdir().expect("a temp dir");
     let dir = root.path().join("instance-1");
     std::fs::create_dir(&dir).expect("a folder");
-    std::fs::write(dir.join(CONFIG), "old").expect("a config");
+    std::fs::write(dir.join(CONFIG), CONFIG_TEXT).expect("a config");
+    (root, dir)
+}
+
+#[test]
+fn install_writes_the_window_s_edit_into_an_existing_instance() {
+    let (root, dir) = one_instance();
     let mut new = fields();
     new.block = 64;
     let text = edit(CONFIG_TEXT, &new).expect("the edit");
@@ -613,20 +627,42 @@ fn install_writes_a_valid_config_into_an_existing_instance() {
 
 #[test]
 fn install_refuses_a_bad_config_and_a_missing_instance() {
-    let root = tempfile::tempdir().expect("a temp dir");
-    let dir = root.path().join("instance-1");
-    std::fs::create_dir(&dir).expect("a folder");
-    std::fs::write(dir.join(CONFIG), "old").expect("a config");
+    let (root, dir) = one_instance();
     let err = install(root.path(), 1, "name = ").expect_err("bad");
     assert!(err.starts_with("the new config is refused: "), "{err}");
     assert_eq!(
         std::fs::read_to_string(dir.join(CONFIG)).expect("read"),
-        "old"
+        CONFIG_TEXT
     );
     assert!(!dir.join(STAGED).exists());
     let missing = install(root.path(), 2, CONFIG_TEXT).expect_err("missing");
-    assert!(missing.ends_with("does not exist"), "{missing}");
+    assert!(missing.contains("instance-2"), "{missing}");
     assert!(!root.path().join("instance-2").exists());
+}
+
+#[test]
+fn install_refuses_a_file_that_changes_more_than_the_window_s_fields() {
+    let (root, dir) = one_instance();
+    // A swapped staged file: a valid config that moves the state file.
+    let swapped = CONFIG_TEXT.replace("instance-1/state.toml", "elsewhere/state.toml");
+    assert_eq!(
+        install(root.path(), 1, &swapped),
+        Err(
+            "the new config changes more than the settings window's fields; nothing written"
+                .to_string()
+        )
+    );
+    // Its comments changed too: refused the same way.
+    let comment = CONFIG_TEXT.replace("# band instance (test)", "# other");
+    assert!(install(root.path(), 1, &comment).is_err());
+    // Another device name is refused by the edit itself.
+    let named = CONFIG_TEXT.replace("\"test-asio\"", "\"other\"");
+    let err = install(root.path(), 1, &named).expect_err("name");
+    assert!(err.starts_with("the new config is refused: "), "{err}");
+    assert_eq!(
+        std::fs::read_to_string(dir.join(CONFIG)).expect("read"),
+        CONFIG_TEXT
+    );
 }
 
 #[test]
@@ -704,10 +740,12 @@ fn the_helper_restarts_nothing_when_it_writes_nothing() {
 }
 
 #[test]
-fn the_verdict_file_sits_beside_the_staged_file_and_reads_back() {
+fn the_verdict_file_sits_in_the_instance_s_folder_and_reads_back() {
     assert_eq!(
-        result_path(Path::new("/t/new.toml")),
-        PathBuf::from("/t/new.toml.result")
+        result_path(Path::new("/d"), 2),
+        Path::new("/d")
+            .join("instance-2")
+            .join("dtray-apply.result")
     );
     for outcome in [Ok("done".to_string()), Err("refused\nhere".to_string())] {
         assert_eq!(parse_result(&result_text(&outcome)), outcome);
@@ -727,4 +765,53 @@ fn the_helper_s_parameters_quote_the_file() {
         helper_params(2, Path::new("C:/Users/A B/new.toml")),
         "--dasio-apply 2 \"C:/Users/A B/new.toml\""
     );
+}
+
+#[test]
+fn only_a_dtray_under_program_files_may_elevate() {
+    let pf = Path::new("C:/Program Files");
+    assert_eq!(
+        may_elevate(Path::new("C:/Program Files/dasio/dtray.exe"), Some(pf)),
+        Ok(())
+    );
+    assert_eq!(
+        may_elevate(Path::new("c:/program files/DASIO/dtray.exe"), Some(pf)),
+        Ok(())
+    );
+    let err = may_elevate(Path::new("C:/Users/a/dtray.exe"), Some(pf)).expect_err("user");
+    assert_eq!(
+        err,
+        "settings are changed only by a dtray installed under C:/Program Files \
+         (this one runs from C:/Users/a/dtray.exe)"
+    );
+    // The folder itself and a look-alike prefix are not inside it.
+    assert!(may_elevate(pf, Some(pf)).is_err());
+    assert!(may_elevate(Path::new("C:/Program Files2/dtray.exe"), Some(pf)).is_err());
+    assert!(may_elevate(Path::new("C:/x.exe"), None).is_err());
+    assert!(may_elevate(Path::new("C:/x.exe"), Some(Path::new(""))).is_err());
+}
+
+#[test]
+fn only_the_changed_cpu_pickers_are_checked() {
+    let old = Cpus {
+        pump: Some(1),
+        io: Some(2),
+        rx: None,
+    };
+    let new = Cpus {
+        pump: Some(1),
+        io: Some(3),
+        rx: Some(4),
+    };
+    assert_eq!(
+        changed_cpus(&old, &new),
+        Cpus {
+            pump: None,
+            io: Some(3),
+            rx: Some(4)
+        }
+    );
+    assert_eq!(changed_cpus(&old, &old), Cpus::default());
+    let any = Cpus { pump: None, ..old };
+    assert_eq!(changed_cpus(&old, &any), Cpus::default());
 }

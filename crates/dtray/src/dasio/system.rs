@@ -17,6 +17,9 @@ use windows_sys::Win32::NetworkManagement::IpHelper::{
     IP_ADAPTER_ADDRESSES_LH,
 };
 use windows_sys::Win32::Networking::WinSock::{AF_INET, SOCKADDR_IN};
+use windows_sys::Win32::System::Com::{
+    COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx,
+};
 use windows_sys::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject};
 use windows_sys::Win32::UI::Shell::{SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW};
 use windows_sys::Win32::UI::WindowsAndMessaging::SW_HIDE;
@@ -44,8 +47,8 @@ unsafe fn text_of(p: *const u16) -> String {
     String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(p, n) })
 }
 
-/// The PC's network adapters (IPv4 view): alias, description, first IPv4
-/// address and receive speed.
+/// The PC's network adapters (IPv4 view): alias, description, IPv4
+/// addresses and receive speed.
 pub fn adapters() -> Result<Vec<Adapter>, String> {
     let flags = GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER;
     let mut len: u32 = 16 * 1024;
@@ -79,9 +82,9 @@ pub fn adapters() -> Result<Vec<Adapter>, String> {
     while !a.is_null() {
         // SAFETY: a node of the list the call built inside `buf`.
         let ad = unsafe { &*a };
-        let mut ipv4 = None;
+        let mut addresses = Vec::new();
         let mut u = ad.FirstUnicastAddress;
-        while !u.is_null() && ipv4.is_none() {
+        while !u.is_null() {
             // SAFETY: a node of the adapter's unicast list.
             let ua = unsafe { &*u };
             let sa = ua.Address.lpSockaddr;
@@ -91,7 +94,7 @@ pub fn adapters() -> Result<Vec<Adapter>, String> {
                 let sin = unsafe { &*sa.cast::<SOCKADDR_IN>() };
                 // SAFETY: the IPv4 member of an AF_INET address.
                 let raw = unsafe { sin.sin_addr.S_un.S_addr };
-                ipv4 = Some(Ipv4Addr::from(u32::from_be(raw)));
+                addresses.push(Ipv4Addr::from(u32::from_be(raw)));
             }
             u = ua.Next;
         }
@@ -102,7 +105,7 @@ pub fn adapters() -> Result<Vec<Adapter>, String> {
             alias: unsafe { text_of(ad.FriendlyName) },
             // SAFETY: as above.
             description: unsafe { text_of(ad.Description) },
-            ipv4,
+            addresses,
             mbit,
         });
         a = ad.Next;
@@ -110,11 +113,24 @@ pub fn adapters() -> Result<Vec<Adapter>, String> {
     Ok(out)
 }
 
-/// Runs `exe` with `params` as administrator (Windows asks once: UAC),
-/// hidden, and waits for it at most `wait`: its exit code; the reason
-/// when it did not start (declined: "administrator rights were not
-/// given") or did not end in time.
-pub fn run_elevated(exe: &std::path::Path, params: &str, wait: Duration) -> Result<u32, String> {
+/// Runs `exe` with `params` as administrator (Windows asks once: UAC,
+/// in front of the window `owner`), hidden, and waits for it at most
+/// `wait`: its exit code; the reason when it did not start (declined:
+/// "administrator rights were not given") or did not end in time. COM is
+/// set up on the calling thread first, as `ShellExecuteExW` asks.
+pub fn run_elevated(
+    exe: &std::path::Path,
+    params: &str,
+    wait: Duration,
+    owner: windows_sys::Win32::Foundation::HWND,
+) -> Result<u32, String> {
+    // SAFETY: plain call; a second call on the thread is harmless (S_FALSE).
+    unsafe {
+        CoInitializeEx(
+            std::ptr::null(),
+            (COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) as u32,
+        )
+    };
     let verb = wide("runas");
     let file = wide(&exe.display().to_string());
     let params = wide(params);
@@ -122,6 +138,7 @@ pub fn run_elevated(exe: &std::path::Path, params: &str, wait: Duration) -> Resu
     let mut info: SHELLEXECUTEINFOW = unsafe { std::mem::zeroed() };
     info.cbSize = std::mem::size_of::<SHELLEXECUTEINFOW>() as u32;
     info.fMask = SEE_MASK_NOCLOSEPROCESS;
+    info.hwnd = owner;
     info.lpVerb = verb.as_ptr();
     info.lpFile = file.as_ptr();
     info.lpParameters = params.as_ptr();

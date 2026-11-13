@@ -12,6 +12,7 @@
 use std::cell::{Cell, RefCell};
 use std::net::SocketAddrV4;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::Duration;
 
@@ -21,6 +22,7 @@ use dtray::dasio::choices::{self, Adapter, Choice};
 use dtray::dasio::{self, Fields, Instance, ReadBack};
 use dtray::discover::{self, Local, Reading, Scanner};
 use windows_sys::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows_sys::Win32::Graphics::Gdi::DeleteObject;
 use windows_sys::Win32::Graphics::Gdi::{
     COLOR_GRAYTEXT, COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT, COLOR_WINDOW, COLOR_WINDOWTEXT,
     CreateFontIndirectW, CreateSolidBrush, DT_SINGLELINE, DT_VCENTER, DrawTextW, FillRect,
@@ -33,6 +35,7 @@ use windows_sys::Win32::UI::Controls::{
     NMHDR, ODS_SELECTED, TCIF_TEXT, TCITEMW, TCM_GETCURSEL, TCM_INSERTITEMW, TCN_SELCHANGE,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
+use windows_sys::Win32::UI::WindowsAndMessaging::IsDialogMessageW;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     BS_DEFPUSHBUTTON, BS_GROUPBOX, BS_PUSHBUTTON, CB_ADDSTRING, CB_GETCURSEL, CB_GETITEMDATA,
     CB_GETLBTEXT, CB_GETLBTEXTLEN, CB_RESETCONTENT, CB_SETCURSEL, CB_SETITEMDATA, CBN_SELCHANGE,
@@ -46,6 +49,14 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WS_OVERLAPPED, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
 };
 
+mod controls;
+mod ops;
+mod paint;
+
+use controls::*;
+use ops::WinOps;
+use paint::*;
+
 /// A static's styles (`SS_LEFT`, `SS_NOPREFIX`: an `&` shows as itself).
 const SS_LEFT: u32 = 0;
 const SS_NOPREFIX: u32 = 0x80;
@@ -54,6 +65,8 @@ const SS_NOPREFIX: u32 = 0x80;
 const CLASS: &str = "dtray-dasio-settings";
 /// The worker's progress is waiting in the channel.
 const WM_PROGRESS: u32 = 0x8000 + 46; // WM_APP + #246
+/// Esc in a window that `IsDialogMessageW` handles (`IDCANCEL`).
+const IDCANCEL_ID: usize = 2;
 /// The standalone window's discovery timer.
 const TIMER: usize = 1;
 
@@ -82,18 +95,6 @@ const ID_RESTART: usize = 160;
 /// The client area.
 const WIDTH: i32 = 640;
 const HEIGHT: i32 = 580;
-
-fn wide(s: &str) -> Vec<u16> {
-    s.encode_utf16().chain(Some(0)).collect()
-}
-
-const fn rgb(r: u8, g: u8, b: u8) -> COLORREF {
-    r as u32 | (g as u32) << 8 | (b as u32) << 16
-}
-
-const WARN: COLORREF = rgb(0xb4, 0x53, 0x09);
-const WARN_BG: COLORREF = rgb(0xff, 0xf7, 0xe6);
-const OK: COLORREF = rgb(0x15, 0x80, 0x3d);
 
 /// What the worker sends back.
 enum Progress {
@@ -138,14 +139,14 @@ struct State {
     devices: Vec<Local>,
     readings: Vec<Reading>,
     shown_status: String,
-    busy: Option<Receiver<Progress>>,
+    /// The running apply: its tab's index and its progress.
+    busy: Option<(usize, Receiver<Progress>)>,
     /// `dtray --settings`: the window is the program, its close ends it.
     standalone: bool,
 }
 
 thread_local! {
     static STATE: RefCell<Option<State>> = const { RefCell::new(None) };
-    static WARN_BRUSH: Cell<HBRUSH> = const { Cell::new(std::ptr::null_mut()) };
 }
 
 /// The window's handle when it is open.
@@ -193,14 +194,17 @@ pub fn run_standalone() -> Result<(), String> {
     let devices = scanner.devices();
     let readings = discover::read(&devices);
     create(devices, readings, true)?;
-    // SAFETY: a thread timer, no window, no callback.
-    unsafe { SetTimer(std::ptr::null_mut(), TIMER, 1000, None) };
+    // SAFETY: a thread timer, no window, no callback; its id is the one
+    // returned (a thread timer's own).
+    let timer = unsafe { SetTimer(std::ptr::null_mut(), TIMER, 1000, None) };
     // SAFETY: plain data.
     let mut msg: MSG = unsafe { std::mem::zeroed() };
     loop {
         // SAFETY: a valid MSG; all of this thread's messages.
         let got = unsafe { GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) };
         if got == 0 || got == -1 {
+            // SAFETY: the timer set above.
+            unsafe { KillTimer(std::ptr::null_mut(), timer) };
             return Ok(());
         }
         if msg.message == WM_TIMER && msg.hwnd.is_null() {
@@ -208,6 +212,9 @@ pub fn run_standalone() -> Result<(), String> {
             let devices = scanner.devices();
             let readings = discover::read(&devices);
             feed(&devices, &readings);
+            continue;
+        }
+        if dialog_message(&msg) {
             continue;
         }
         // SAFETY: a message GetMessageW filled.
@@ -218,20 +225,20 @@ pub fn run_standalone() -> Result<(), String> {
     }
 }
 
-/// The message font (Segoe UI on current Windows).
-fn message_font() -> HFONT {
-    // SAFETY: plain data.
-    let mut m: NONCLIENTMETRICSW = unsafe { std::mem::zeroed() };
-    m.cbSize = std::mem::size_of::<NONCLIENTMETRICSW>() as u32;
-    // SAFETY: a sized, writable structure.
-    let ok =
-        unsafe { SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, m.cbSize, (&raw mut m).cast(), 0) };
-    if ok == 0 {
-        return std::ptr::null_mut();
+/// The window's keyboard handling (Tab between the controls, Esc): `true`
+/// when the message was the window's and is handled. The tray's loop
+/// calls it too.
+pub fn dialog_message(msg: &MSG) -> bool {
+    match open_hwnd() {
+        // SAFETY: our window and a message GetMessageW filled.
+        Some(h) => unsafe { IsDialogMessageW(h, msg) != 0 },
+        None => false,
     }
-    // SAFETY: the font the system returned.
-    unsafe { CreateFontIndirectW(&m.lfMessageFont) }
 }
+
+/// An apply runs (process-wide: a window closed and opened again while
+/// its worker runs starts no second one on the same files).
+static APPLYING: AtomicBool = AtomicBool::new(false);
 
 /// The tabs of this PC's instances: each config read, the device's own
 /// latency and range read through its ARC when it runs.
@@ -362,193 +369,6 @@ fn create(devices: Vec<Local>, readings: Vec<Reading>, standalone: bool) -> Resu
         SetForegroundWindow(hwnd);
     }
     Ok(())
-}
-
-/// A child control.
-fn control(
-    parent: HWND,
-    font: HFONT,
-    class: &str,
-    text: &str,
-    style: u32,
-    id: usize,
-    r: (i32, i32, i32, i32),
-) -> HWND {
-    let (c, t) = (wide(class), wide(text));
-    // SAFETY: valid strings; the id travels in the menu handle's place.
-    let h = unsafe {
-        CreateWindowExW(
-            0,
-            c.as_ptr(),
-            t.as_ptr(),
-            WS_CHILD | WS_VISIBLE | style,
-            r.0,
-            r.1,
-            r.2,
-            r.3,
-            parent,
-            id as _,
-            GetModuleHandleW(std::ptr::null()),
-            std::ptr::null(),
-        )
-    };
-    if !font.is_null() {
-        // SAFETY: a control and a font handle.
-        unsafe { SendMessageW(h, WM_SETFONT, font as WPARAM, 1) };
-    }
-    h
-}
-
-fn item(parent: HWND, id: usize) -> HWND {
-    // SAFETY: plain call.
-    unsafe { windows_sys::Win32::UI::WindowsAndMessaging::GetDlgItem(parent, id as i32) }
-}
-
-fn set_text(parent: HWND, id: usize, text: &str) {
-    let w = wide(text);
-    // SAFETY: a valid string.
-    unsafe { SetWindowTextW(item(parent, id), w.as_ptr()) };
-}
-
-/// Builds every control (WM_CREATE).
-fn build(h: HWND, font: HFONT, tabs: &[Tab]) {
-    let st =
-        |text: &str, id: usize, r| control(h, font, "STATIC", text, SS_LEFT | SS_NOPREFIX, id, r);
-    let group = |text: &str, r| control(h, font, "BUTTON", text, BS_GROUPBOX as u32, 0, r);
-    let combo = |id: usize, r: (i32, i32, i32, i32), owner: bool| {
-        let extra = if owner {
-            (CBS_OWNERDRAWFIXED | CBS_HASSTRINGS) as u32
-        } else {
-            0
-        };
-        control(
-            h,
-            font,
-            "COMBOBOX",
-            "",
-            CBS_DROPDOWNLIST as u32 | WS_VSCROLL | WS_TABSTOP | extra,
-            id,
-            (r.0, r.1, r.2, 320),
-        )
-    };
-    let tab = control(
-        h,
-        font,
-        "SysTabControl32",
-        "",
-        WS_CLIPCHILDREN,
-        ID_TAB,
-        (8, 8, WIDTH - 16, 26),
-    );
-    for (i, t) in tabs.iter().enumerate() {
-        let name = match &t.fields {
-            Ok((old, _)) => old.name.clone(),
-            Err(_) => t.inst.service(),
-        };
-        let mut w = wide(&name);
-        // SAFETY: plain data.
-        let mut ti: TCITEMW = unsafe { std::mem::zeroed() };
-        ti.mask = TCIF_TEXT;
-        ti.pszText = w.as_mut_ptr();
-        // SAFETY: a tab control and a filled item.
-        unsafe { SendMessageW(tab, TCM_INSERTITEMW, i, (&raw const ti) as LPARAM) };
-    }
-    st("", ID_STATUS, (16, 42, WIDTH - 32, 20));
-    let label_x = 28;
-    let ctl_x = 200;
-    let ctl_w = 380;
-    let mark_x = 592;
-    let row = |y: i32, text: &str, id: usize, mark: usize, glyph: &str| {
-        st(text, 0, (label_x, y + 3, 168, 20));
-        combo(id, (ctl_x, y, ctl_w, 0), false);
-        if !glyph.is_empty() {
-            st(glyph, mark, (mark_x, y + 3, 20, 20));
-        }
-    };
-    group("Network", (16, 68, WIDTH - 32, 52));
-    row(88, "Ethernet interface", ID_IFACE, ID_RESTART, "↻");
-    group("Audio", (16, 126, WIDTH - 32, 132));
-    row(146, "Buffer (block)", ID_BLOCK, ID_RESTART + 1, "↻");
-    row(174, "Dante latency (RX)", ID_RXLAT, ID_LIVE, "●");
-    row(202, "TX latency", ID_TXLAT, ID_RESTART + 2, "↻");
-    st("Sample rate", 0, (label_x, 233, 168, 20));
-    st("", ID_RATE, (ctl_x + 4, 233, ctl_w, 20));
-    group("Channels", (16, 264, WIDTH - 32, 80));
-    row(284, "Inputs (Dante RX)", ID_IN, ID_RESTART + 3, "↻");
-    row(312, "Outputs (Dante TX)", ID_OUT, ID_RESTART + 4, "↻");
-    group("CPUs", (16, 350, WIDTH - 32, 92));
-    let cw = 180;
-    for (i, (text, id)) in [
-        ("Audio pump", ID_PUMP),
-        ("Send (TX)", ID_IO),
-        ("Receive (RX)", ID_RXCPU),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let x = 28 + i as i32 * (cw + 16);
-        st(text, 0, (x, 368, cw, 18));
-        combo(id, (x, 388, cw, 0), true);
-    }
-    st(
-        "Busy CPUs of the other instance are greyed out in the lists.",
-        0,
-        (28, 418, 540, 18),
-    );
-    st("↻", ID_RESTART + 5, (mark_x, 418, 20, 20));
-    st("", ID_BANNER, (16, 450, WIDTH - 32, 44));
-    st("", ID_RESULT, (16, 498, WIDTH - 32, 36));
-    st(
-        "●  applies at once      ↻  needs a restart",
-        0,
-        (16, 548, 300, 20),
-    );
-    control(
-        h,
-        font,
-        "BUTTON",
-        "Cancel",
-        BS_PUSHBUTTON as u32 | WS_TABSTOP,
-        ID_CANCEL,
-        (404, 542, 90, 28),
-    );
-    control(
-        h,
-        font,
-        "BUTTON",
-        "Apply and restart",
-        BS_DEFPUSHBUTTON as u32 | WS_TABSTOP,
-        ID_APPLY,
-        (502, 542, 122, 28),
-    );
-}
-
-/// Fills `id`'s combo box with `list`, `selected` chosen; the greyed
-/// entries carry item data 1 (the owner-drawn CPU lists).
-fn fill<T>(h: HWND, id: usize, list: &[Choice<T>], selected: usize) {
-    let c = item(h, id);
-    // SAFETY: a combo box of ours; the strings outlive each call.
-    unsafe {
-        SendMessageW(c, CB_RESETCONTENT, 0, 0);
-        for (i, ch) in list.iter().enumerate() {
-            let w = wide(&ch.text);
-            SendMessageW(c, CB_ADDSTRING, 0, w.as_ptr() as LPARAM);
-            SendMessageW(c, CB_SETITEMDATA, i, isize::from(ch.greyed));
-        }
-        SendMessageW(c, CB_SETCURSEL, selected, 0);
-    }
-}
-
-/// The selected index of `id`'s combo box (0 when none).
-fn selected(h: HWND, id: usize) -> usize {
-    // SAFETY: a combo box of ours.
-    let i = unsafe { SendMessageW(item(h, id), CB_GETCURSEL, 0, 0) };
-    usize::try_from(i).unwrap_or(0)
-}
-
-fn enable(h: HWND, id: usize, on: bool) {
-    // SAFETY: a control of ours.
-    unsafe { EnableWindow(item(h, id), i32::from(on)) };
 }
 
 const COMBOS: [usize; 9] = [
@@ -740,7 +560,11 @@ fn refresh(st: &State) {
             "Apply"
         },
     );
-    let problems = dasio::cpu_problems(&new.cpus, &dasio::busy_cpus(&others(st)), st.cpu_count);
+    let problems = dasio::cpu_problems(
+        &dasio::changed_cpus(&old.cpus, &new.cpus),
+        &dasio::busy_cpus(&others(st)),
+        st.cpu_count,
+    );
     let ok = !changed.is_empty() && problems.is_empty() && st.busy.is_none();
     enable(h, ID_APPLY, ok);
     if st.busy.is_none() {
@@ -763,6 +587,14 @@ fn start_apply(st: &mut State) {
             return;
         }
     };
+    if APPLYING.swap(true, Ordering::AcqRel) {
+        set_text(
+            h,
+            ID_RESULT,
+            "An apply is still running; wait for it to end.",
+        );
+        return;
+    }
     let (tx, rx) = mpsc::channel();
     let mut ops = WinOps {
         name: new.name.clone(),
@@ -770,14 +602,16 @@ fn start_apply(st: &mut State) {
         devices: st.devices.clone(),
         scanner: None,
         adapters: st.adapters.clone(),
+        owner: h as isize,
     };
     let want = new.clone();
     let hwnd = h as isize;
-    st.busy = Some(rx);
+    st.busy = Some((st.cur, rx));
     for id in COMBOS {
         enable(h, id, false);
     }
     enable(h, ID_APPLY, false);
+    enable(h, ID_TAB, false);
     let spawned = std::thread::Builder::new()
         .name("dtray-dasio-apply".into())
         .spawn(move || {
@@ -790,12 +624,15 @@ fn start_apply(st: &mut State) {
             let out = apply::run(&plan, &want, &mut ops, |s| {
                 post(Progress::Say(s.to_string()), &tx)
             });
+            APPLYING.store(false, Ordering::Release);
             post(Progress::Done(out), &tx);
         });
     if let Err(e) = spawned {
+        APPLYING.store(false, Ordering::Release);
         st.busy = None;
-        set_text(h, ID_RESULT, &format!("the apply did not start: {e}"));
+        enable(h, ID_TAB, true);
         show_tab(st);
+        set_text(h, ID_RESULT, &format!("the apply did not start: {e}"));
     }
 }
 
@@ -803,7 +640,7 @@ fn start_apply(st: &mut State) {
 fn progress(st: &mut State) {
     let h = st.hwnd;
     let mut done = None;
-    if let Some(rx) = &st.busy {
+    if let Some((_, rx)) = &st.busy {
         while let Ok(p) = rx.try_recv() {
             match p {
                 Progress::Say(s) => set_text(h, ID_RESULT, &s),
@@ -812,194 +649,37 @@ fn progress(st: &mut State) {
         }
     }
     if let Some(out) = done {
-        st.busy = None;
+        let applied = st.busy.take().map_or(st.cur, |(i, _)| i);
+        enable(h, ID_TAB, true);
         let text = match &out {
             Ok(line) => line.clone(),
             Err(e) => format!("Not applied: {e}"),
         };
         // The tab again from the file and the device, as they are now.
-        let inst = st.tabs[st.cur].inst.clone();
-        st.tabs[st.cur] = load_tab(inst, &st.devices);
+        let inst = st.tabs[applied].inst.clone();
+        st.tabs[applied] = load_tab(inst, &st.devices);
+        st.cur = applied;
         show_tab(st);
         set_text(h, ID_RESULT, &text);
     }
 }
 
-/// The apply's real steps.
-struct WinOps {
-    name: String,
-    number: u32,
-    /// The tray's devices at the apply's start.
-    devices: Vec<Local>,
-    /// After the restart: a discovery of its own (the device may come
-    /// back on other ports).
-    scanner: Option<Scanner>,
-    adapters: Vec<Adapter>,
-}
-
-impl WinOps {
-    fn device(&self) -> Option<Local> {
-        let now = self.scanner.as_ref().map(Scanner::devices);
-        let list = now.as_deref().unwrap_or(&self.devices);
-        device_of(list, &self.name).cloned()
-    }
-
-    fn arc_call<T>(
-        arc: SocketAddrV4,
-        f: impl FnOnce(&mut dstack::arc::client::Udp<'_>) -> Result<T, String>,
-    ) -> Result<T, String> {
-        dtray::arc::call(arc, f)
-    }
-}
-
-impl Ops for WinOps {
-    fn set_latency(&mut self, ns: u32) -> Result<(), String> {
-        let d = self
-            .device()
-            .ok_or_else(|| format!("{} is not running", self.name))?;
-        Self::arc_call(d.arc, |c| {
-            control::set_latency(c, ns).map_err(|e| e.to_string())
-        })
-        .map(|_| ())
-    }
-
-    fn daw_attached(&mut self) -> Option<bool> {
-        let d = self.device()?;
-        dasio::daw_attached(&dtray::probe::status(d.port).ok()?)
-    }
-
-    fn wait(&mut self) {
-        std::thread::sleep(Duration::from_secs(1));
-    }
-
-    fn install(&mut self, config: &str) -> Result<String, String> {
-        let staged: PathBuf = std::env::temp_dir().join(format!(
-            "dtray-dasio-{}-{}.toml",
-            self.number,
-            std::process::id()
-        ));
-        std::fs::write(&staged, config).map_err(|e| format!("{}: {e}", staged.display()))?;
-        let result = dasio::result_path(&staged);
-        let _ = std::fs::remove_file(&result);
-        let exe = std::env::current_exe()
-            .map_err(|e| format!("the program's path: {e}"))?
-            .with_file_name("dtray-cli.exe");
-        let ran = dasio::system::run_elevated(
-            &exe,
-            &dasio::helper_params(self.number, &staged),
-            Duration::from_secs(180),
+/// Esc, Cancel or the close box: the window closes, unless an apply runs
+/// (it ends with a restart and its read-back; the window shows them).
+fn close(h: HWND) {
+    let running = STATE.with(|s| {
+        s.try_borrow()
+            .map_or(true, |s| s.as_ref().is_some_and(|st| st.busy.is_some()))
+    });
+    if running {
+        set_text(
+            h,
+            ID_RESULT,
+            "An apply is running; the window can close when it ends.",
         );
-        let verdict = std::fs::read_to_string(&result).ok();
-        let _ = std::fs::remove_file(&staged);
-        let _ = std::fs::remove_file(&result);
-        let code = ran?;
-        match verdict {
-            Some(text) => dasio::parse_result(&text),
-            None => Err(format!(
-                "the helper ended with code {code} and left no verdict"
-            )),
-        }?;
-        // Find the restarted device afresh.
-        let mut scanner = Scanner::new();
-        let _ = scanner.refresh();
-        self.scanner = Some(scanner);
-        Ok("written".into())
-    }
-
-    fn read_back(&mut self) -> ReadBack {
-        let Some(d) = self.device() else {
-            return ReadBack::default();
-        };
-        let status = dtray::probe::status(d.port).ok();
-        let labels = Self::arc_call(d.arc, |c| control::labels(c).map_err(|e| e.to_string())).ok();
-        let settings =
-            Self::arc_call(d.arc, |c| control::settings(c).map_err(|e| e.to_string())).ok();
-        if let Ok(a) = dasio::system::adapters() {
-            self.adapters = a;
-        }
-        ReadBack {
-            block: status.as_deref().and_then(dasio::status_block),
-            rx: labels.as_ref().map(|l| l.rx_count),
-            tx: labels.as_ref().map(|l| l.tx_count),
-            latency_ns: settings
-                .and_then(|s| s.latency_configured_ns)
-                .map(u64::from),
-            iface: choices::alias_of(&self.adapters, *d.arc.ip()),
-        }
-    }
-}
-
-/// An owner-drawn CPU list's entry: grey for another instance's CPU
-/// (item data 1). Stateless: it may run while the state is borrowed.
-fn draw_item(d: &DRAWITEMSTRUCT) {
-    let hdc: HDC = d.hDC;
-    let selected = d.itemState & ODS_SELECTED != 0;
-    // SAFETY: the system colours and the DC the system gave.
-    unsafe {
-        let bg = if selected {
-            COLOR_HIGHLIGHT
-        } else {
-            COLOR_WINDOW
-        };
-        FillRect(hdc, &d.rcItem, GetSysColorBrush(bg));
-        if d.itemID == u32::MAX {
-            return;
-        }
-        let combo = d.hwndItem;
-        let len = SendMessageW(combo, CB_GETLBTEXTLEN, d.itemID as usize, 0);
-        let mut buf = vec![0u16; usize::try_from(len).unwrap_or(0) + 1];
-        SendMessageW(
-            combo,
-            CB_GETLBTEXT,
-            d.itemID as usize,
-            buf.as_mut_ptr() as LPARAM,
-        );
-        let greyed = SendMessageW(combo, CB_GETITEMDATA, d.itemID as usize, 0) == 1;
-        let fg = if selected {
-            COLOR_HIGHLIGHTTEXT
-        } else if greyed {
-            COLOR_GRAYTEXT
-        } else {
-            COLOR_WINDOWTEXT
-        };
-        SetTextColor(hdc, GetSysColor(fg));
-        SetBkMode(hdc, TRANSPARENT as i32);
-        let mut r: RECT = d.rcItem;
-        r.left += 4;
-        let n = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
-        DrawTextW(
-            hdc,
-            buf.as_ptr(),
-            n as i32,
-            &mut r,
-            DT_SINGLELINE | DT_VCENTER,
-        );
-    }
-}
-
-/// The colours of the markers and the banner (stateless, as
-/// [`draw_item`]).
-fn static_colour(hdc: HDC, id: usize) -> HBRUSH {
-    // SAFETY: the DC the system gave; system brushes and our one brush.
-    unsafe {
-        if id == ID_BANNER {
-            SetTextColor(hdc, WARN);
-            SetBkColor(hdc, WARN_BG);
-            let b = WARN_BRUSH.with(|c| {
-                if c.get().is_null() {
-                    c.set(CreateSolidBrush(WARN_BG));
-                }
-                c.get()
-            });
-            return b;
-        }
-        if id == ID_LIVE {
-            SetTextColor(hdc, OK);
-        } else if (ID_RESTART..ID_RESTART + 10).contains(&id) {
-            SetTextColor(hdc, WARN);
-        }
-        SetBkColor(hdc, GetSysColor(COLOR_WINDOW));
-        GetSysColorBrush(COLOR_WINDOW)
+    } else {
+        // SAFETY: our window.
+        unsafe { DestroyWindow(h) };
     }
 }
 
@@ -1066,10 +746,7 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             let id = wp & 0xffff;
             let code = (wp >> 16) as u32;
             match id {
-                ID_CANCEL if code == 0 => {
-                    // SAFETY: our window.
-                    unsafe { DestroyWindow(h) };
-                }
+                ID_CANCEL | IDCANCEL_ID if code == 0 => close(h),
                 ID_APPLY if code == 0 => {
                     with_state(start_apply);
                 }
@@ -1088,22 +765,23 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             0
         }
         WM_CLOSE => {
-            // SAFETY: our window.
-            unsafe { DestroyWindow(h) };
+            close(h);
             0
         }
         WM_DESTROY => {
-            let standalone = STATE.with(|s| {
-                let mut s = s.borrow_mut();
-                let standalone = s.as_ref().is_some_and(|st| st.standalone);
-                *s = None;
-                standalone
+            let gone = STATE.with(|s| {
+                let mut s = s.try_borrow_mut().ok()?;
+                let st = s.take()?;
+                Some((st.standalone, st.font))
             });
-            if standalone {
-                // SAFETY: plain calls.
-                unsafe {
-                    KillTimer(std::ptr::null_mut(), TIMER);
-                    PostQuitMessage(0);
+            if let Some((standalone, font)) = gone {
+                if !font.is_null() {
+                    // SAFETY: the font this window created.
+                    unsafe { DeleteObject(font) };
+                }
+                if standalone {
+                    // SAFETY: plain call.
+                    unsafe { PostQuitMessage(0) };
                 }
             }
             0

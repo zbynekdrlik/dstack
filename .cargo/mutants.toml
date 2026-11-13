@@ -29,6 +29,7 @@ exclude_globs = [
   # decisions are dtray::dasio's (choices, plan, apply::run, verify,
   # apply_staged: each tested), and the window is run by hand on Windows.
   "crates/dtray/src/settings_win.rs",
+  "crates/dtray/src/settings_win/**",
   "crates/dtray/src/dasio/system.rs",
   "crates/dtray/src/dasio/service/windows.rs",
   # dtray's tray glue (tray-icon, GTK): it needs a desktop session, which a

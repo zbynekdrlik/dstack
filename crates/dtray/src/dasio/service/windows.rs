@@ -7,12 +7,14 @@
 
 use std::time::{Duration, Instant};
 
-use windows_sys::Win32::Foundation::{ERROR_SERVICE_NOT_ACTIVE, GetLastError};
+use windows_sys::Win32::Foundation::{
+    ERROR_SERVICE_CANNOT_ACCEPT_CTRL, ERROR_SERVICE_NOT_ACTIVE, GetLastError,
+};
 use windows_sys::Win32::System::Services::{
     CloseServiceHandle, ControlService, OpenSCManagerW, OpenServiceW, QueryServiceStatus,
     SC_HANDLE, SC_MANAGER_CONNECT, SERVICE_CONTROL_STOP, SERVICE_QUERY_STATUS, SERVICE_RUNNING,
-    SERVICE_START, SERVICE_STATUS, SERVICE_STATUS_CURRENT_STATE, SERVICE_STOP, SERVICE_STOPPED,
-    StartServiceW,
+    SERVICE_START, SERVICE_START_PENDING, SERVICE_STATUS, SERVICE_STATUS_CURRENT_STATE,
+    SERVICE_STOP, SERVICE_STOPPED, StartServiceW,
 };
 
 /// How long the stop and the start each may take.
@@ -78,8 +80,9 @@ fn wait_for(svc: &Handle, want: SERVICE_STATUS_CURRENT_STATE) -> Result<(), Stri
     }
 }
 
-/// Stops the service `name` (one already stopped is fine) and starts it
-/// again; the reason otherwise.
+/// Stops the service `name` (one already stopped, or stopping, is fine;
+/// one still starting is let start first) and starts it again; the reason
+/// otherwise.
 pub fn restart(name: &str) -> Result<(), String> {
     // SAFETY: the local SCM, connect access only.
     let scm = unsafe { OpenSCManagerW(std::ptr::null(), std::ptr::null(), SC_MANAGER_CONNECT) };
@@ -100,13 +103,20 @@ pub fn restart(name: &str) -> Result<(), String> {
         return Err(last_error(&format!("opening the service {name}")));
     }
     let svc = Handle(svc);
+    // A service still starting takes no stop: let it start first.
+    if status(&svc)?.dwCurrentState == SERVICE_START_PENDING {
+        // A start that fails leaves it stopped, which is fine here.
+        let _ = wait_for(&svc, SERVICE_RUNNING);
+    }
     // SAFETY: SERVICE_STATUS is plain data.
     let mut st: SERVICE_STATUS = unsafe { std::mem::zeroed() };
     // SAFETY: a valid handle with SERVICE_STOP and a writable status.
     if unsafe { ControlService(svc.0, SERVICE_CONTROL_STOP, &mut st) } == 0 {
         // SAFETY: plain call, right after the failed one.
         let code = unsafe { GetLastError() };
-        if code != ERROR_SERVICE_NOT_ACTIVE {
+        // Stopped already, or already stopping: the wait below sees it
+        // through.
+        if code != ERROR_SERVICE_NOT_ACTIVE && code != ERROR_SERVICE_CANNOT_ACCEPT_CTRL {
             return Err(format!("stopping {name} failed (error {code})"));
         }
     }
