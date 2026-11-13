@@ -1340,7 +1340,7 @@ fn redact(message: &str) -> String {
     out
 }
 
-mod ports;
+pub mod ports;
 
 #[cfg(test)]
 mod tests;

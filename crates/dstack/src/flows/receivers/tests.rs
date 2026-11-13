@@ -396,3 +396,50 @@ fn the_reader_thread_reads_with_its_stop_and_ends_when_dropped() {
         std::thread::sleep(Duration::from_millis(1));
     }
 }
+
+/// dstack #264: the reader holds the TX side, whose fixed flow ports a
+/// device started again in the same process binds next. Its drop ends the
+/// thread before it returns, even in the middle of a long idle wait.
+#[test]
+fn dropping_the_reader_releases_the_tx_side_at_once() {
+    let (tx, records, _dir, _slot) = rig("127.0.0.2");
+    let (read_once, reads) = std::sync::mpsc::channel();
+    let reader = spawn(
+        Arc::clone(&tx),
+        records,
+        Duration::from_secs(3600),
+        move |_, _| {
+            let _ = read_once.send(());
+            Ok(at(10_000_000))
+        },
+    )
+    .unwrap();
+    // In its idle wait after the first look.
+    reads
+        .recv_timeout(Duration::from_secs(5))
+        .expect("one read");
+    std::thread::sleep(Duration::from_millis(20));
+    let started = Instant::now();
+    drop(reader);
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(
+        Arc::strong_count(&tx),
+        1,
+        "the thread still holds the TX side"
+    );
+}
+
+/// The idle wait lasts its time while not stopped, and none when stopped.
+#[test]
+fn the_idle_wait_lasts_its_time_unless_stopped() {
+    let started = Instant::now();
+    idle_until_stopped(Duration::from_millis(30), &AtomicBool::new(false));
+    assert!(started.elapsed() >= Duration::from_millis(30));
+    let started = Instant::now();
+    idle_until_stopped(Duration::from_secs(3600), &AtomicBool::new(true));
+    assert!(started.elapsed() < Duration::from_secs(1));
+}

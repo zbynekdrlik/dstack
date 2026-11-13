@@ -254,12 +254,33 @@ pub fn look(
 #[derive(Debug)]
 pub struct Reader {
     stop: Arc<AtomicBool>,
-    _thread: JoinHandle<()>,
+    thread: Option<JoinHandle<()>>,
 }
 
 impl Drop for Reader {
+    /// Stops the thread and waits for it (at most one read's reply
+    /// timeout): it holds the TX side, whose fixed flow ports a device
+    /// started again in the same process binds next (dstack #264; with
+    /// the OS's ports a held socket went unseen).
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            thread.thread().unpark();
+            let _ended = thread.join();
+        }
+    }
+}
+
+/// Waits `idle`, ending early when `stop` is set (the reader's drop
+/// unparks the thread).
+fn idle_until_stopped(idle: Duration, stop: &AtomicBool) {
+    let start = Instant::now();
+    while !stop.load(Ordering::Relaxed) {
+        let left = idle.saturating_sub(start.elapsed());
+        if left.is_zero() {
+            return;
+        }
+        std::thread::park_timeout(left);
     }
 }
 
@@ -283,12 +304,12 @@ pub fn spawn(
             while !ends.load(Ordering::Relaxed) {
                 let now = u64::try_from(origin.elapsed().as_nanos()).unwrap_or(u64::MAX);
                 look(&mut reads, &tx, &records, now, &ends, |at| read(at, &ends));
-                std::thread::sleep(idle);
+                idle_until_stopped(idle, &ends);
             }
         })?;
     Ok(Reader {
         stop,
-        _thread: thread,
+        thread: Some(thread),
     })
 }
 
