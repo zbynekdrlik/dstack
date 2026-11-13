@@ -12,6 +12,15 @@ use crate::subscribe::resolve::instance;
 /// goodbye) after each, while another thread keeps answering it.
 const FINDS: usize = 50;
 
+/// Sets its flag when dropped.
+struct StopOnDrop<'a>(&'a std::sync::atomic::AtomicBool);
+
+impl Drop for StopOnDrop<'_> {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+}
+
 /// The rack's channel record and its host's address, as its responder
 /// answers the two direct queries.
 fn rack_answers() -> Vec<Vec<u8>> {
@@ -62,6 +71,9 @@ fn a_record_answered_during_the_lookup_never_sends_the_channel_to_the_arc() {
     // The answers landed around lookups this many times (the race run).
     let mut found = 0;
     std::thread::scope(|s| {
+        // However the loop below ends (a panic too), the answering thread
+        // stops, so the scope's join never hangs.
+        let _stop = StopOnDrop(&stop);
         // The answers arrive at any moment, as the query thread's do.
         s.spawn(|| {
             while !stop.load(Ordering::Relaxed) {
@@ -75,14 +87,12 @@ fn a_record_answered_during_the_lookup_never_sends_the_channel_to_the_arc() {
         while found < FINDS {
             round += 1;
             if Instant::now() > deadline {
-                stop.store(true, Ordering::Relaxed);
                 panic!("a lookup found the record only {found} times");
             }
             // Within the grace (the clock stays at 0): the record, or
             // nothing while its query may still answer.
             let hit = network.lookup("rack", "TX 3").is_some();
             if network.arc.asked() {
-                stop.store(true, Ordering::Relaxed);
                 panic!("round {round}: the ARC was asked for a channel whose record was answering");
             }
             if hit {
@@ -92,6 +102,5 @@ fn a_record_answered_during_the_lookup_never_sends_the_channel_to_the_arc() {
                 network.instances.forget("TX 3@rack", CHAN_SERVICE);
             }
         }
-        stop.store(true, Ordering::Relaxed);
     });
 }
