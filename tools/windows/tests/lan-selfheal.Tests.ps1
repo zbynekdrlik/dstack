@@ -711,7 +711,7 @@ try {
     }
     Check 'a state file of NUL bytes (a crash mid-write) is logged and counts from zero' {
         Reset-Fake; $script:Fake.PingOk = $false
-        $d = NewRun 'nul' $good
+        $d = NewRun 'nulstate' $good
         [System.IO.File]::WriteAllBytes((Join-Path $d 'lan-selfheal.state.json'), (New-Object byte[] 24))
         $rc = Invoke-Check -Dir $d
         $rc -eq 0 -and (LogOf $d) -match 'state file unreadable, counting from 0' -and (StateOf $d).failures -eq 1
