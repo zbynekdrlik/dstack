@@ -337,6 +337,14 @@ Check 'Enable and Restart on a virtual adapter are refused before any change' {
     }
     @($all | Where-Object { -not $_ }).Count -eq 0 -and @(Cycles).Count -eq 0
 }
+Check 'an adapter with no description is never cycled either (fail closed)' {
+    Reset-Fake; $script:Fake.LanDesc = ''; $script:Fake.Status = 'Disabled'
+    $cfg = Read-HealConfig -Json $good
+    $all = foreach ($a in 'Enable', 'Restart') {
+        Throws { Invoke-RepairStep -Step ([pscustomobject]@{ Action = $a; Target = 'LAN' }) -Config $cfg } '*description*'
+    }
+    @($all | Where-Object { -not $_ }).Count -eq 0 -and @(Cycles).Count -eq 0
+}
 Check 'a plan aimed at the Dante adapter is refused' {
     Throws { Get-RepairPlan -LanAdapter 'Dante70' -DanteAdapter 'dante70' } '*Dante adapter*'
 }
@@ -437,7 +445,8 @@ Check 'Dhcp: a static interface gets DHCP, a DHCP one left alone' {
 Check 'Renew: renews the DHCP lease of the LAN adapter, by its interface index' {
     Reset-Fake
     $r = Step 'Renew'
-    $r.Changed -and ($script:Fake.Calls -contains 'Invoke-CimMethod RenewDHCPLease InterfaceIndex = 5') -and
+    $r.Changed -and ($script:Fake.Calls -contains 'Get-CimInstance Win32_NetworkAdapterConfiguration InterfaceIndex = 5') -and
+    ($script:Fake.Calls -contains 'Invoke-CimMethod RenewDHCPLease InterfaceIndex = 5') -and
     @(Cycles).Count -eq 0
 }
 Check 'Renew: a failed renew is an error naming its code' {
@@ -635,6 +644,23 @@ try {
         $text -match "Restart: skipped, the LAN adapter is a virtual VLAN adapter \('Realtek Virtual Adapter #2'\)" -and
         $text -match 'Renew: renewed the DHCP lease' -and -not (StateOf $d).lastRestart
     }
+    Check 'layout B, a VLAN ID written to the virtual adapter: a WARN that it applies only at a re-initialization, exit 1' {
+        Reset-Fake
+        $script:Fake.LanDesc = $virtualDesc; $script:Fake.Vlan = '70'; $script:Fake.Addresses = @()
+        $d = NewRun 'layoutbvlan' $reverse '{"failures":2}'
+        $rc = Invoke-Check -Dir $d
+        $rc -eq 1 -and @(Cycles).Count -eq 0 -and $script:Fake.Vlan -eq '123' -and
+        (LogOf $d) -match 'WARN the VLAN ID was written to a virtual VLAN adapter.*reboot'
+    }
+    Check 'an unreadable LAN adapter description: repaired like a virtual adapter, never cycled, a WARN' {
+        Reset-Fake
+        $script:Fake.LanDesc = ''; $script:Fake.Addresses = @()
+        $d = NewRun 'nodesc' $good '{"failures":2}'
+        $rc = Invoke-Check -Dir $d
+        $rc -eq 0 -and @(Cycles).Count -eq 0 -and
+        (@(Changes) -join ';') -eq 'Invoke-CimMethod RenewDHCPLease InterfaceIndex = 5' -and
+        (LogOf $d) -match "WARN the LAN adapter's description is unreadable"
+    }
     Check 'layout B, the virtual LAN adapter disabled: never enabled, a WARN, the other steps run, exit 1' {
         Reset-Fake
         $script:Fake.LanDesc = $virtualDesc; $script:Fake.Status = 'Disabled'; $script:Fake.Vlan = '123'; $script:Fake.Addresses = @()
@@ -720,6 +746,8 @@ try {
         $d = NewRun 'atomic' $good
         $f = Join-Path $d 'lan-selfheal.state.json'
         [System.IO.File]::WriteAllBytes($f, (New-Object byte[] 400))
+        # A temporary file a crash left behind is overwritten and swapped in.
+        [System.IO.File]::WriteAllBytes("$f.tmp", (New-Object byte[] 50))
         Save-HealState -Path $f -Failures 1 -LastRestart $null
         $bytes = [System.IO.File]::ReadAllBytes($f)
         $s = Read-HealState -Json (Get-Content $f -Raw)
