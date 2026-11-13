@@ -8,8 +8,8 @@ use crate::announce::responder::answers;
 use crate::subscribe::instance::{host_query, query};
 use crate::subscribe::resolve::instance;
 
-/// Lookups of one channel, its record forgotten (a goodbye) after each one,
-/// while another thread keeps answering it.
+/// Lookups of one channel while another thread keeps answering it, its
+/// record forgotten (a goodbye) each time a lookup found it.
 const ROUNDS: usize = 20_000;
 
 /// The rack's channel record and its host's address, as its responder
@@ -72,15 +72,20 @@ fn a_record_answered_during_the_lookup_never_sends_the_channel_to_the_arc() {
         for round in 0..ROUNDS {
             // Within the grace (the clock stays at 0): the record, or
             // nothing while its query may still answer.
-            found += usize::from(network.lookup("rack", "TX 3").is_some());
+            let hit = network.lookup("rack", "TX 3").is_some();
             if network.arc.asked() {
                 stop.store(true, Ordering::Relaxed);
                 panic!("round {round}: the ARC was asked for a channel whose record was answering");
             }
-            network.instances.forget("TX 3@rack", CHAN_SERVICE);
+            if hit {
+                // The next lookup starts the channel over, so answers keep
+                // landing around lookups.
+                found += 1;
+                network.instances.forget("TX 3@rack", CHAN_SERVICE);
+            }
         }
         stop.store(true, Ordering::Relaxed);
     });
-    // The answers did land during the lookups (the race was run).
-    assert!(found > 0, "no lookup found the record");
+    // The answers did land between lookups, many times (the race was run).
+    assert!(found > 100, "a lookup found the record {found} times");
 }
