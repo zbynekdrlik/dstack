@@ -27,6 +27,12 @@
 //!   until read; one later than the flow's latency counts `late`, one
 //!   before the end of the last `out_of_order`. Before our clock is ready a
 //!   packet is read and counted but placed nowhere (`unplaced`).
+//! - Holes, reorders and gaps (dstack #278, `rx/holes.rs`): a packet that
+//!   begins past the furthest end opens a hole; one that lands in an open
+//!   hole fills it and counts `reordered` (overtaken on the way, not lost).
+//!   A hole counts as a gap (`gaps`, `gap_frames`) only once it is wholly
+//!   behind the flow's playout point (each pass looks), the oldest of 16
+//!   when another opens, or when the slot's flow changes.
 //! - Wire lateness against the wake (dstack #234, Linux): each datagram
 //!   comes with the kernel's receive time (`rx/socket.rs`), so its wake delay
 //!   (the pass's wall clock less that time) is kept, the largest until
@@ -38,6 +44,10 @@
 //!   own stamp, as min, p99 and max of each heartbeat second, from a fixed
 //!   histogram of the slot (`rx/netlat.rs`;
 //!   [`RxShared::last_network_latency`]). Windows records none.
+//! - The minute (dstack #234, Linux): the wake delays (`rx/wake.rs`) and
+//!   network latencies of each slot in windows the RX minute watch takes
+//!   once a minute ([`RxShared::take_minute`]) and logs, for apps without
+//!   a status socket.
 //! - The packets' judge (phase D, plan Task 3): the least lateness of each
 //!   flow slot's placed packets in ns (our clock's now in ns less the
 //!   packet's own stamp in ns), kept until read, so each heartbeat second
@@ -73,10 +83,14 @@ use crate::clock::{self, PtpClock};
 use crate::wire::MAX_DATAGRAM;
 
 mod counts;
+mod holes;
+mod lane;
 mod netlat;
 mod plan;
+mod wake;
 pub use counts::RxCounts;
 use counts::{NO_LATENESS, RxStats, source_of, source_word};
+use lane::{Lane, count_lost};
 mod socket;
 pub use netlat::NetLatency;
 pub use plan::{RxPlan, RxRoute};
@@ -84,6 +98,7 @@ pub use socket::{GROUP_BOUND_TO_PORT, join};
 use socket::{
     Received, recv_stamped, set_recv_buffer, stamp_receives, wake_delay_ns, wall_now_ns, wire_late,
 };
+pub use wake::WakeDelay;
 
 /// Our RX flow slots (inferno's `MAX_FLOWS`).
 pub const MAX_FLOWS: usize = 32;
@@ -157,7 +172,9 @@ pub struct RxShared {
     /// Our address: the multicast groups are joined on it.
     ip: Ipv4Addr,
     rings: Arc<[Ring]>,
-    lanes: [RxStats; MAX_FLOWS],
+    /// One per flow slot ([`MAX_FLOWS`]), on the heap: each holds its
+    /// histograms (about 5 KB, dstack #234), too much for a stack in all.
+    lanes: Box<[RxStats]>,
     /// Held by [`RxShared::publish`] only (one writer at a time); the RX
     /// thread never takes it.
     writer: Mutex<()>,
@@ -230,7 +247,7 @@ impl RxShared {
             sockets,
             ip,
             rings,
-            lanes: std::array::from_fn(|_| RxStats::default()),
+            lanes: (0..MAX_FLOWS).map(|_| RxStats::default()).collect(),
             writer: Mutex::new(()),
             poll_errors: AtomicU64::new(0),
             stop: AtomicBool::new(false),
@@ -345,6 +362,7 @@ impl RxShared {
             refused: get(&l.refused),
             stray: get(&l.stray),
             out_of_order: get(&l.out_of_order),
+            reordered: get(&l.reordered),
             gaps: get(&l.gaps),
             gap_frames: get(&l.gap_frames),
             late: get(&l.late),
@@ -444,6 +462,26 @@ impl RxShared {
         self.lanes.get(slot)?.network.last()
     }
 
+    /// Ends flow slot `slot`'s minute (dstack #234; the RX minute watch,
+    /// once a minute): its packets' wake delays and network latencies
+    /// since the last call, each `None` for no stamped packet (always on
+    /// Windows). The status keeps showing the wake percentiles taken
+    /// ([`RxShared::last_wake_minute`]).
+    pub fn take_minute(&self, slot: usize) -> (Option<WakeDelay>, Option<NetLatency>) {
+        self.lanes.get(slot).map_or((None, None), |l| {
+            (l.wake_minute.take(), l.network_minute.take())
+        })
+    }
+
+    /// The 50th, 99th and 99.9th percentile of flow slot `slot`'s wake
+    /// delays in the minute [`RxShared::take_minute`] took last (the first
+    /// from the start, shorter), µs; `None` before the first take or for a
+    /// minute without a stamped packet.
+    /// The status reads it and takes nothing.
+    pub fn last_wake_minute(&self, slot: usize) -> Option<[u64; 3]> {
+        self.lanes.get(slot)?.wake_minute.last()
+    }
+
     /// Whether every slot socket stamps its datagrams' receive times, so
     /// `wire_late` and the wake delays are measured (dstack #234: Linux,
     /// where the kernel takes `SO_TIMESTAMPNS`; false on Windows). A
@@ -503,38 +541,6 @@ impl RxShared {
 
     pub fn stopping(&self) -> bool {
         self.stop.load(Ordering::Acquire)
-    }
-}
-
-/// One flow slot as the RX thread sees it.
-#[derive(Debug)]
-struct Lane {
-    /// The plan cell's version read last.
-    seen: Option<u32>,
-    plan: RxPlan,
-    /// (channel slot, RX channel) for each RX channel routed here;
-    /// allocated for every RX channel, so a rebuild never allocates.
-    targets: Vec<(usize, usize)>,
-    /// Where the flow's audio comes from: the keepalives' destination.
-    source: Option<SocketAddrV4>,
-    /// When its last packet came (the thread's clock, ns).
-    heard: Option<u64>,
-    next_keepalive: Option<u64>,
-    /// The end of the furthest packet so far, samples.
-    end: Option<u64>,
-}
-
-impl Lane {
-    fn new(channels: usize) -> Self {
-        Lane {
-            seen: None,
-            plan: RxPlan::default(),
-            targets: Vec::with_capacity(channels),
-            source: None,
-            heard: None,
-            next_keepalive: None,
-            end: None,
-        }
     }
 }
 
@@ -627,6 +633,7 @@ impl Receiver {
     pub fn pass(&mut self, now_ns: Option<u64>, mono: u64) {
         let wall = self.shared.stamps().then(wall_now_ns).flatten();
         self.refresh();
+        self.expire(now_ns);
         let mut ready = self.ready;
         while ready != 0 {
             let slot = ready.trailing_zeros() as usize;
@@ -635,7 +642,23 @@ impl Receiver {
                 self.ready &= !(1 << slot);
             }
         }
+        // Holes behind the playout are lost before and after the reads: a
+        // packet for a hole the pump already read is late, no reorder.
+        self.expire(now_ns);
         self.keepalives(mono);
+    }
+
+    /// At PTP time `now_ns` (`None`: our clock is not ready, nothing to
+    /// do), each flow's holes wholly behind its playout point (its latency
+    /// and block before now) are lost: the pump has read past them (dstack
+    /// #278).
+    fn expire(&mut self, now_ns: Option<u64>) {
+        let Some(ns) = now_ns else { return };
+        let now = clock::to_samples(ns, self.shared.rate);
+        for (lane, stats) in self.lanes.iter_mut().zip(self.shared.lanes.iter()) {
+            let limit = u64::from(lane.plan.latency) + u64::from(lane.plan.block);
+            count_lost(stats, lane.holes.expire(now.saturating_sub(limit)));
+        }
     }
 
     /// Reads the plans that changed (a new one resets its slot) and, after
@@ -664,6 +687,10 @@ impl Receiver {
                     lane.heard = None;
                     lane.next_keepalive = None;
                     lane.end = None;
+                    // The old flow's open holes never fill now.
+                    if let Some(stats) = shared.lanes.get(slot) {
+                        count_lost(stats, lane.holes.clear());
+                    }
                 }
                 lane.seen = Some(version);
             }
@@ -818,7 +845,8 @@ impl Receiver {
                 .0
                 .fetch_min(now_ns.saturating_sub(ns_of(pos, rate)), Ordering::Relaxed);
             let limit = u64::from(lane.plan.latency) + u64::from(lane.plan.block);
-            if lateness > limit {
+            let late = lateness > limit;
+            if late {
                 count(&stats.late);
             }
             if let Some(w) = wake {
@@ -827,20 +855,20 @@ impl Receiver {
                 }
                 let network = netlat::network_latency_ns(now_ns, w, ns_of(pos, rate));
                 stats.network.record(network);
+                stats.network_minute.record(network);
+                // The minute's two windows hold the same packets.
+                stats.wake_minute.record(w);
             }
             let end = pos.saturating_add(nframes as u64);
-            match lane.end {
-                Some(e) if pos < e => {
-                    count(&stats.out_of_order);
-                    lane.end = Some(e.max(end));
-                }
-                Some(e) if pos > e => {
-                    count(&stats.gaps);
-                    stats.gap_frames.fetch_add(pos - e, Ordering::Relaxed);
-                    lane.end = Some(end);
-                }
-                _ => lane.end = Some(end),
+            // dstack #278: holes, reorders and gaps.
+            let placed = holes::place(&mut lane.end, &mut lane.holes, pos, end, !late);
+            if placed.out_of_order {
+                count(&stats.out_of_order);
             }
+            if placed.reordered {
+                count(&stats.reordered);
+            }
+            count_lost(stats, placed.lost);
             let mut read_before = false;
             for &(s, rx) in &lane.targets {
                 if s < nslots

@@ -7,7 +7,7 @@
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::sync::atomic::AtomicU64;
 
-use super::netlat;
+use super::{netlat, wake};
 
 /// A least lateness that holds none: no packet placed since it was last
 /// taken. A lateness of `u64::MAX` ns (585 years) reads as none too.
@@ -20,6 +20,8 @@ pub(super) struct RxStats {
     pub(super) refused: AtomicU64,
     pub(super) stray: AtomicU64,
     pub(super) out_of_order: AtomicU64,
+    /// Packets that filled an open hole (dstack #278).
+    pub(super) reordered: AtomicU64,
     pub(super) gaps: AtomicU64,
     pub(super) gap_frames: AtomicU64,
     pub(super) late: AtomicU64,
@@ -49,6 +51,10 @@ pub(super) struct RxStats {
     pub(super) network: netlat::Window,
     /// What the last [`RxShared::take_max_lateness`] took of it.
     pub(super) last_min_lateness_ns: Least,
+    /// The minute's wake delays and network latencies (dstack #234,
+    /// Linux), taken by [`RxShared::take_minute`].
+    pub(super) wake_minute: wake::Window,
+    pub(super) network_minute: netlat::Window,
     /// Where the flow's audio comes from, as [`source_word`] packs it (0:
     /// none yet): the RX thread writes it only when it changes (dstack
     /// #266), the status and the loss watch read it.
@@ -92,12 +98,20 @@ pub struct RxCounts {
     pub refused: u64,
     /// Datagrams from another address, or to a slot without a flow.
     pub stray: u64,
-    /// Packets that began before the end of an earlier one.
+    /// Packets that began before the end of an earlier one: the reordered
+    /// ones and any repeat or overlap.
     pub out_of_order: u64,
-    /// Packets that began past the end of the one before: frames that never
-    /// came (Dante packets have no sequence number; the stamps are it).
+    /// Packets that filled (part of) an open hole: overtaken on the way,
+    /// not lost (dstack #278).
+    pub reordered: u64,
+    /// Runs of frames that never came (Dante packets have no sequence
+    /// number; the stamps are it): a hole past the end of the furthest
+    /// packet that no packet filled before it was wholly behind the
+    /// playout point (the flow's latency plus the block), before 16 newer
+    /// holes opened, or before the slot's flow changed (dstack #278; until
+    /// v0.6.124 every jump counted at once, a reorder too).
     pub gaps: u64,
-    /// The frames those gaps skipped.
+    /// The frames of those runs.
     pub gap_frames: u64,
     /// Packets whose first frame was later than the flow's playout plus
     /// the pump's block: the most a block's read can wait.

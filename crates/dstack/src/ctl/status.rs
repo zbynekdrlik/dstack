@@ -139,9 +139,11 @@ impl Json {
 ///   `source` (the transmitter's `address:port` its flow's last packet came
 ///   from; absent before a packet and after the slot's flow changed),
 ///   `granted`, `fpp`, `channels`, `latency` (samples), `packets`, `refused`, `stray`,
-///   `out_of_order`, `gaps` and `gap_frames` (packets that began past the
-///   end of the one before, and the frames skipped: packets that never
-///   came), `socket_drops` (Linux: the kernel's drops at the slot's
+///   `out_of_order` (packets that began before the end of an earlier one),
+///   `reordered` (of them, those that filled an open hole: overtaken on
+///   the way, not lost; dstack #278), `gaps` and `gap_frames` (runs of
+///   frames that never came: a hole no packet filled before it fell
+///   behind the playout point, and their frames), `socket_drops` (Linux: the kernel's drops at the slot's
 ///   socket), `late` (packets past playout + block), `late_at_read`
 ///   (packets with a frame the pump had already read: its channels' holes
 ///   and late samples), `wire_late`, `wake_delay_us` and
@@ -150,6 +152,12 @@ impl Json {
 ///   rule when the kernel received them, and the largest wake delay, the RX
 ///   thread's pass time less the kernel's receive time, in µs, of the
 ///   heartbeat's last second and since the device started),
+///   `wake_delay_p50_us`, `wake_delay_p99_us` and `wake_delay_p999_us`
+///   (dstack #234, Linux only: the wake delay's 50th, 99th and 99.9th
+///   percentile over the minute the RX minute watch took last (the first
+///   from the device's start, shorter), the upper edge of its 50 µs
+///   bucket; absent before the first take and for a minute without a
+///   stamped packet; the watch logs the same once a minute),
 ///   `network_latency_min_us`, `network_latency_p99_us` and
 ///   `network_latency_max_us` (dstack #244, Linux only, and only for a
 ///   second with a stamped packet: each packet's arrival, the kernel's
@@ -396,6 +404,7 @@ fn rx_part(j: &mut Json, media: &Media) {
         j.num("refused", lane.refused);
         j.num("stray", lane.stray);
         j.num("out_of_order", lane.out_of_order);
+        j.num("reordered", lane.reordered);
         j.num("gaps", lane.gaps);
         j.num("gap_frames", lane.gap_frames);
         if let Some(drops) = drops {
@@ -407,6 +416,11 @@ fn rx_part(j: &mut Json, media: &Media) {
             j.num("wire_late", lane.wire_late);
             j.num("wake_delay_us", media.rx.last_wake_delay_us(slot));
             j.num("wake_delay_peak_us", lane.wake_delay_peak_us);
+            if let Some([p50, p99, p999]) = media.rx.last_wake_minute(slot) {
+                j.num("wake_delay_p50_us", p50);
+                j.num("wake_delay_p99_us", p99);
+                j.num("wake_delay_p999_us", p999);
+            }
             if let Some(n) = media.rx.last_network_latency(slot) {
                 j.num("network_latency_min_us", n.min_us);
                 j.num("network_latency_p99_us", n.p99_us);

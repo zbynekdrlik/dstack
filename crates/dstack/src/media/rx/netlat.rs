@@ -62,46 +62,73 @@ pub struct NetLatency {
 /// atomic, so a reader never mixes two windows' figures.
 pub const MAX_US: u64 = (1 << 21) - 1;
 
+/// Three figures of `ns` values as µs in one word: the first in the low
+/// 21 bits, then the second, then the third, each at most `MAX_US`
+/// (2.1 s), so a reader never mixes two windows' figures.
+pub fn pack_us([a, b, c]: [u64; 3]) -> u64 {
+    let us = |ns: u64| (ns / 1_000).min(MAX_US);
+    // Disjoint fields, so `+` is the same as `|` (tests.md: `|` leaves
+    // an equivalent `^` mutant); 63 bits, no overflow.
+    us(a) + (us(b) << 21) + (us(c) << 42)
+}
+
+/// The three figures [`pack_us`] put in `word`, µs.
+pub fn unpack_us(word: u64) -> [u64; 3] {
+    [word & MAX_US, (word >> 21) & MAX_US, (word >> 42) & MAX_US]
+}
+
 impl NetLatency {
-    /// The three figures of `ns` values as µs in one word: min in the low
-    /// 21 bits, then p99, then max, each at most `MAX_US` (2.1 s).
+    /// The three figures of `ns` values as µs in one word (`pack_us`:
+    /// min, p99, max).
     pub fn pack(min_ns: u64, p99_ns: u64, max_ns: u64) -> u64 {
-        let us = |ns: u64| (ns / 1_000).min(MAX_US);
-        // Disjoint fields, so `+` is the same as `|` (tests.md: `|` leaves
-        // an equivalent `^` mutant); 63 bits, no overflow.
-        us(min_ns) + (us(p99_ns) << 21) + (us(max_ns) << 42)
+        pack_us([min_ns, p99_ns, max_ns])
     }
 
     /// The figures `NetLatency::pack` put in `word`.
     pub fn unpack(word: u64) -> Self {
+        let [min_us, p99_us, max_us] = unpack_us(word);
         NetLatency {
-            min_us: word & MAX_US,
-            p99_us: (word >> 21) & MAX_US,
-            max_us: (word >> 42) & MAX_US,
+            min_us,
+            p99_us,
+            max_us,
         }
     }
 }
 
-/// The 99th percentile of a window's `counts` (one per bucket, the last
-/// one past them) whose least is `min_ns` and largest `max_ns`: the upper
-/// edge of the bucket that holds the packet at 99 % (by rank, rounded up),
-/// within `min_ns..=max_ns`; `max_ns` when that packet is past the buckets.
-/// `None` for no packet.
-pub fn p99(counts: &[u32], min_ns: u64, max_ns: u64) -> Option<u64> {
+/// The quantile `per_mille`/1000 of a histogram's `counts` (one per
+/// bucket of `bucket_ns`, the last one past them) whose least is `min_ns`
+/// and largest `max_ns`: the upper edge of the bucket that holds the
+/// packet at that rank (rounded up), within `min_ns..=max_ns`; `max_ns`
+/// when that packet is past the buckets. `None` for no packet. Shared by
+/// the network latency and the wake delay (`rx/wake.rs`).
+pub fn quantile(
+    counts: &[u32],
+    bucket_ns: u64,
+    per_mille: u64,
+    min_ns: u64,
+    max_ns: u64,
+) -> Option<u64> {
     let total: u64 = counts.iter().map(|&c| u64::from(c)).sum();
     if total == 0 {
         return None;
     }
-    let rank = (total * 99).div_ceil(100);
+    let rank = (total * per_mille).div_ceil(1_000);
     let mut seen = 0;
-    for (b, &c) in counts.iter().enumerate().take(BUCKETS) {
+    for (b, &c) in counts.iter().enumerate().take(counts.len() - 1) {
         seen += u64::from(c);
         if seen >= rank {
-            let edge = (b as u64 + 1) * BUCKET_NS;
+            let edge = (b as u64 + 1) * bucket_ns;
             return Some(edge.clamp(min_ns, max_ns.max(min_ns)));
         }
     }
     Some(max_ns)
+}
+
+/// The 99th percentile of a window's `counts` (one per bucket, the last
+/// one past them) whose least is `min_ns` and largest `max_ns`
+/// ([`quantile`] at 990/1000 over [`BUCKET_NS`] buckets).
+pub fn p99(counts: &[u32], min_ns: u64, max_ns: u64) -> Option<u64> {
+    quantile(counts, BUCKET_NS, 990, min_ns, max_ns)
 }
 
 /// One flow slot's window: written by the RX thread, taken once a second.
@@ -135,8 +162,8 @@ impl Window {
     }
 
     /// Ends the window: its figures become the last ones
-    /// ([`Window::last`]) and the next window starts empty.
-    pub fn take(&self) {
+    /// ([`Window::last`]), returned too, and the next window starts empty.
+    pub fn take(&self) -> Option<NetLatency> {
         let counts: [u32; BUCKETS + 1] =
             std::array::from_fn(|b| self.counts[b].swap(0, Ordering::Relaxed));
         let min = self.min_ns.swap(NONE, Ordering::Relaxed);
@@ -146,6 +173,7 @@ impl Window {
             _ => NONE,
         };
         self.last.store(last, Ordering::Relaxed);
+        (last != NONE).then(|| NetLatency::unpack(last))
     }
 
     /// The last window's figures; `None` for a window without a packet.

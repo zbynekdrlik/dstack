@@ -45,6 +45,8 @@ async fn the_driver_s_lines_name_the_flow_s_transmitter() {
         receiver.wait(Duration::from_millis(10)).unwrap();
         receiver.pass(Some(T), media.rx.now_ns());
     }
+    // A second on, the hole is behind the playout: a gap (dstack #278).
+    receiver.pass(Some(T + 1_000_000_000), media.rx.now_ns());
     assert_eq!(media.rx.lane(slot).gaps, 1);
     std::thread::sleep(Duration::from_millis(1_010));
     driver.tick(&records);

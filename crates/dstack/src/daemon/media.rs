@@ -484,6 +484,8 @@ pub struct Driver {
     late: crate::media::late::LateWatch,
     /// Our RX flows' missing packets, logged once a second.
     loss: crate::media::late::RxWatch,
+    /// Our RX flows' reordered packets, logged once a minute (dstack #278).
+    minute: crate::media::late::RxMinute,
     /// Our TX flows' failed sends, logged once a second with the OS error.
     sends: crate::media::late::SendWatch,
     /// The host frame sender's refused batches, logged once a second.
@@ -524,6 +526,7 @@ impl Driver {
                 stops: JoinSet::new(),
                 late: crate::media::late::LateWatch::new(),
                 loss: crate::media::late::RxWatch::new(),
+                minute: crate::media::late::RxMinute::new(),
                 sends: crate::media::late::SendWatch::new(),
                 host: crate::media::late::HostWatch::new(),
                 pump: crate::stream::watch::PumpWatch::new(),
@@ -538,8 +541,8 @@ impl Driver {
     }
 
     /// One round of the manager now, with the channel records `resolver`
-    /// knows; then the checks' round and the late, loss, send, host, pump,
-    /// traffic and pin watches.
+    /// knows; then the checks' round and the late, loss, RX minute, send,
+    /// host, pump, traffic and pin watches.
     pub fn tick(&mut self, resolver: &dyn Resolver) {
         let now = self.media.rx.now_ns();
         let packets = self.media.rx.packets();
@@ -549,6 +552,9 @@ impl Driver {
         self.late.watch(now, &self.media.tx);
         let manager = &self.media.manager;
         self.loss.watch(now, &self.media.rx, |slot| {
+            lock(manager).flow_device(slot).map(str::to_owned)
+        });
+        self.minute.watch(now, &self.media.rx, |slot| {
             lock(manager).flow_device(slot).map(str::to_owned)
         });
         self.sends.watch(now, &self.media.tx);

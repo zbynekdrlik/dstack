@@ -131,3 +131,31 @@ fn the_three_figures_pack_into_one_word_and_back() {
     let lone = NetLatency::unpack(NetLatency::pack(0, u64::MAX, 0));
     assert_eq!((lone.min_us, lone.p99_us, lone.max_us), (0, MAX_US, 0));
 }
+
+/// The shared quantile (dstack #234): any rank of any bucket width, the
+/// rank rounded up; the window's take returns what it keeps.
+#[test]
+fn a_quantile_is_the_upper_edge_of_its_rank_s_bucket() {
+    // 101 packets of 10 us buckets: 50 in bucket 0, 51 in bucket 3.
+    let mut c = [0u32; 6];
+    c[0] = 50;
+    c[3] = 51;
+    // Rank 51 (50.5 rounded up) is in bucket 3; a floor would give 0.
+    assert_eq!(quantile(&c, 10_000, 500, 0, 39_000), Some(39_000));
+    assert_eq!(quantile(&c, 10_000, 400, 0, 39_000), Some(10_000));
+    assert_eq!(quantile(&c, 10_000, 1_000, 0, 99_000), Some(40_000));
+    // Only the last count is past the buckets.
+    let past = [0, 0, 1];
+    assert_eq!(quantile(&past, 10_000, 500, 0, 77_000), Some(77_000));
+    assert_eq!(quantile(&[0, 0, 0], 10_000, 500, 0, 0), None);
+    let w = Window::default();
+    w.record(350_000);
+    assert_eq!(w.take(), w.last());
+    assert_eq!(w.take(), None);
+}
+
+#[test]
+fn three_figures_pack_into_one_word_in_their_order() {
+    assert_eq!(pack_us([1_000, 2_000, 3_000]), 1 + (2 << 21) + (3 << 42));
+    assert_eq!(unpack_us(pack_us([5_000, 6_000, 7_999])), [5, 6, 7]);
+}

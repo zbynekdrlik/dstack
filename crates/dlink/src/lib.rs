@@ -35,8 +35,11 @@
 //!   0.5, 1, 2 or 5 ms). 1 ms unless set ([`NETWORK_LATENCY_NS`]).
 //! - (b) the receive buffer ([`Config::receive_buffer_ns`], per device):
 //!   this PC's room for the RX thread's wake and pass, sized from
-//!   measurement (the status's `wake_delay_us`, `wake_delay_peak_us`, and
-//!   the measured `network_latency_*_us`; dstack #234).
+//!   measurement (the status's `wake_delay_us`, `wake_delay_peak_us`,
+//!   `wake_delay_p50/p99/p999_us`, and the measured `network_latency_*_us`;
+//!   dstack #234). An app without a status socket reads the same from the
+//!   once-a-minute INFO line `RX flow timing in the last minute` per RX
+//!   flow (wake p50/p99/p99.9/max, network latency min/p99/max).
 //! - (c) the app hand-off, computed by dlink and stated: on the RX side the
 //!   pump's block B ([`Config::block`], 128 frames unless set; dstack #90)
 //!   plus the rate converter's RX delay ([`Rated`], [`rated::delay_ns`]);

@@ -276,3 +276,88 @@ fn with_the_stamps_off_a_linux_pass_measures_as_windows_does() {
     s.take_max_lateness(2);
     assert_eq!(s.last_wake_delay_us(2), 0);
 }
+
+/// dstack #234: once a minute each flow with stamped packets gets one INFO
+/// line of its minute's wake delay (p50, p99, p99.9, largest) and network
+/// latency (least, p99, largest), and the status's wake percentiles follow
+/// the last whole minute. Without stamps (Windows) neither exists.
+#[test]
+fn the_minute_watch_logs_each_flow_s_wake_and_network_latency() {
+    use crate::media::late::{MINUTE_NS, RxMinute};
+    let (s, mut rx) = receiver(None);
+    let named = |slot: usize| (slot == 2).then(|| "FOH-Card".to_string());
+    let info = |f: &mut dyn FnMut()| crate::test_log::capture_at(tracing::Level::INFO, f);
+    let mut minute = RxMinute::new();
+    // A packet before the first look: that first (shorter) minute is
+    // taken, not logged; the status shows it.
+    send(s.local_addr(2).unwrap(), P0);
+    pump(&mut rx, 1, ns_of(P0 + 100, RATE));
+    assert_eq!(s.last_wake_minute(2), None, "before any look");
+    assert_eq!(info(&mut || minute.watch(0, &s, named)), "");
+    assert_eq!(s.last_wake_minute(2).is_some(), s.stamps());
+    // The minute: one packet that sat 30 ms in its socket, one read at once.
+    send(s.local_addr(2).unwrap(), P0 + 16);
+    std::thread::sleep(Duration::from_millis(30));
+    pump(&mut rx, 2, ns_of(P0 + 100, RATE));
+    send(s.local_addr(2).unwrap(), P0 + 32);
+    pump(&mut rx, 3, ns_of(P0 + 100, RATE));
+    let log = info(&mut || minute.watch(MINUTE_NS, &s, named));
+    if !s.stamps() {
+        assert_eq!(log, "", "no stamps, no timing");
+        assert_eq!(s.last_wake_minute(2), None);
+        return;
+    }
+    assert_eq!(log.lines().count(), 1, "{log}");
+    assert!(log.contains(" INFO "), "{log}");
+    assert!(log.contains("RX flow timing in the last minute"), "{log}");
+    assert!(
+        log.contains("device=FOH-Card source=127.0.0.1:") && log.contains(" slot=2 packets=2 "),
+        "{log}"
+    );
+    let field = |name: &str| -> u64 {
+        let at = log
+            .find(&format!(" {name}="))
+            .unwrap_or_else(|| panic!("{name}: {log}"));
+        let rest = &log[at + name.len() + 2..];
+        rest.split(|c: char| !c.is_ascii_digit())
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap()
+    };
+    let wake = [
+        field("wake_delay_p50_us"),
+        field("wake_delay_p99_us"),
+        field("wake_delay_p999_us"),
+        field("wake_delay_max_us"),
+    ];
+    // Two packets: the 50th percentile is the quick one, the rest the
+    // 30 ms one.
+    assert!(wake[0] < 30_000, "{log}");
+    assert!(
+        wake[1] >= 30_000 && wake[1] == wake[2] && wake[2] == wake[3],
+        "{log}"
+    );
+    let net = [
+        field("network_latency_min_us"),
+        field("network_latency_p99_us"),
+        field("network_latency_max_us"),
+    ];
+    assert!(net[0] <= net[1] && net[1] <= net[2], "{log}");
+    assert_eq!(s.last_wake_minute(2), Some([wake[0], wake[1], wake[2]]));
+    // A minute without packets: no line, and the status shows none.
+    assert_eq!(info(&mut || minute.watch(2 * MINUTE_NS, &s, named)), "");
+    assert_eq!(s.last_wake_minute(2), None);
+}
+
+/// With the stamps off on Linux (as on Windows), the minute holds nothing.
+#[test]
+fn without_stamps_the_minute_has_no_timing() {
+    let (s, mut rx) = receiver(None);
+    s.set_stamps(false);
+    send(s.local_addr(2).unwrap(), P0);
+    pump(&mut rx, 1, ns_of(P0 + 100, RATE));
+    assert_eq!(s.take_minute(2), (None, None));
+    assert_eq!(s.take_minute(crate::media::rx::MAX_FLOWS), (None, None));
+    assert_eq!(s.last_wake_minute(crate::media::rx::MAX_FLOWS), None);
+}

@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.6.125
+
+- **Fix (dstack #278): a reordered RX packet is counted as reordered, not lost.** A packet whose stamp jumped past the end of the furthest one counted a gap at once; the overtaken packet arriving next was placed (the audio complete) but the gap stayed counted, and the loss watch warned `RX packets missing from a flow: ... never reached our socket`. stream-snv's two wire captures (13.11.2026: ~1.8 M packets each, 0 missing, ~3000 reorders up to 6 deep) showed only reorders.
+  - A jump now opens a hole. A packet landing in an open hole fills it and counts the new `reordered`. A hole counts in `gaps`/`gap_frames` only once it is wholly behind the flow's playout point (latency + block), when it is the oldest of 16 open holes and another opens, or when the slot's flow changes. A real loss is therefore counted up to latency + block later than before; the loss warning follows it.
+  - `out_of_order` still counts every packet that begins before the furthest end (reorders and repeats). A packet that fills a hole only after the pump read past it is `late`, not `reordered`, and the hole stays a gap (holes behind the playout are given up before and after each pass's reads).
+  - Status `rx[]`: new key `reordered` after `out_of_order`.
+  - New INFO line once a minute per flow with reorders, beside the loss warning: `RX packets reordered on the way in the last minute, not lost: each filled its hole device=<name> source=<address:port> slot=<slot from 0> reordered=<count>`.
+  - API: `media::rx::RxCounts` has a new public field `reordered` (a struct literal adds it); `media::late::RxMinute` and `media::late::MINUTE_NS` are new.
+- **Feature (dstack #234): the RX wake delay's distribution and the network latency, per minute, in the log and the status.** A dlink app without a status socket (OBS's dante-input) could not read either.
+  - Each RX flow slot keeps a one-minute wake-delay histogram (50 µs buckets to 25.6 ms, plus the exact largest) and a one-minute network-latency window, both of the same packets: stamped (Linux, where the kernel stamps the receive time; nothing on Windows) and placed (our clock ready).
+  - New INFO line once a minute per RX flow with stamped packets: `RX flow timing in the last minute: the RX thread's wake delay and the measured network latency device=<name> source=<address:port> slot=<slot from 0> packets=<n> wake_delay_p50_us=<us> wake_delay_p99_us=<us> wake_delay_p999_us=<us> wake_delay_max_us=<us> network_latency_min_us=<us> network_latency_p99_us=<us> network_latency_max_us=<us>`. Percentiles are the upper edge of the bucket at that rank (50 µs for the wake, 20 µs for the network), at most the largest. The first minute after the start is shorter and not logged.
+  - Status `rx[]` (Linux): new keys `wake_delay_p50_us`, `wake_delay_p99_us`, `wake_delay_p999_us` after `wake_delay_peak_us`, the minute taken last; absent before it and for a minute without a stamped packet.
+  - API: `media::rx::WakeDelay`, `RxShared::take_minute`, `RxShared::last_wake_minute` are new. The RX flow slots' counters live on the heap now (each slot's histograms are ~5 KB).
+- **No latency change** for any app (counters, logs and status only).
+- Consumers: move the stack version. camera-box: the loss gate now sees reorders as `reordered`, not `gaps`; read the timing line on strih-obs. An app that builds `RxCounts` literals adds `reordered` (none known).
+
 ## 0.6.124
 
 - **Docs (dstack #264, #195).** `docs/two-networks.md`: how to read ufw's state before loading `dante-leg-notrack.nft` (`ufw status` or `ENABLED=` in `/etc/ufw/ufw.conf`, never `systemctl is-active ufw`), and how to tell an RSTP topology change from loss on a PC (several transmitters' flows losing ~40 ms at once on every receiver, multicast PTP intact, zero switch drop counters).
