@@ -24,6 +24,13 @@
 # or the LAN adapter holds no lease, and otherwise (a router outage with a
 # healthy adapter) at most once per RestartGapMinutes.
 #
+# A virtual VLAN adapter (a "Realtek Virtual Adapter", the LAN in layout B) is
+# NEVER disabled, enabled or restarted: Disable-NetAdapter on one (driver
+# 10.4.1117.2020) bugchecked a PC (#239), and Restart-NetAdapter is a disable
+# plus an enable. On such a LAN adapter the repair sets only the VLAN ID (with
+# -NoRestart), the IPv4 binding and DHCP, then renews its DHCP lease; the
+# skipped restart is logged, and a disabled one is reported, never enabled.
+#
 # 0.6.109 also had an emergency path that opened TCP on the Dante adapter while
 # the LAN was down. It is gone (#239: ssh and the MCP are always reachable
 # there now). A config that still carries its keys (emergencySource,
@@ -220,13 +227,46 @@ function Assert-NotDanteTarget {
     }
 }
 
+function Test-VirtualVlanAdapter {
+    # True when an adapter's InterfaceDescription marks it as a virtual VLAN
+    # adapter: a "Realtek Virtual Adapter" (the Realtek diagnostic utility's
+    # VLAN adapter, '... #2' and so on) or any adapter that names a VLAN or a
+    # virtual adapter of a vendor's teaming/VLAN service (Intel ANS). Such an
+    # adapter is never disabled, enabled or restarted (#239: a bugcheck).
+    param([AllowNull()][AllowEmptyString()][string]$InterfaceDescription)
+    if ([string]::IsNullOrWhiteSpace($InterfaceDescription)) { return $false }
+    $InterfaceDescription -match '(?i)\bvirtual adapter\b|\bVLAN\b'
+}
+
+function Get-AdapterDescription {
+    # An adapter object's InterfaceDescription, '' when it has none.
+    param($Adapter)
+    if ($null -ne $Adapter -and $Adapter.PSObject.Properties.Name -contains 'InterfaceDescription') {
+        return [string]$Adapter.InterfaceDescription
+    }
+    ''
+}
+
+function Assert-NotVirtualTarget {
+    # The last guard before Enable-/Restart-NetAdapter: refuses a virtual VLAN
+    # adapter, read fresh by its name.
+    param([Parameter(Mandatory)]$Adapter, [Parameter(Mandatory)][string]$Verb)
+    $desc = Get-AdapterDescription -Adapter $Adapter
+    if (Test-VirtualVlanAdapter -InterfaceDescription $desc) {
+        throw "refused: '$($Adapter.Name)' is a virtual VLAN adapter ('$desc'); the self-heal never ${Verb}s one (it bugchecked a PC, #239)"
+    }
+}
+
 function Get-RepairPlan {
-    # The ordered repair steps, each aimed at the LAN adapter only.
+    # The ordered repair steps, each aimed at the LAN adapter only. A virtual
+    # VLAN adapter gets no Enable and no Restart: a DHCP renew instead.
     param(
         [Parameter(Mandatory)][string]$LanAdapter,
-        [Parameter(Mandatory)][string]$DanteAdapter
+        [Parameter(Mandatory)][string]$DanteAdapter,
+        [switch]$LanIsVirtual
     )
-    $steps = foreach ($a in 'Enable', 'VlanId', 'BindIPv4', 'Dhcp', 'Restart') {
+    $actions = if ($LanIsVirtual) { 'VlanId', 'BindIPv4', 'Dhcp', 'Renew' } else { 'Enable', 'VlanId', 'BindIPv4', 'Dhcp', 'Restart' }
+    $steps = foreach ($a in $actions) {
         [pscustomobject]@{ Action = $a; Target = $LanAdapter }
     }
     foreach ($s in $steps) { Assert-NotDanteTarget -Target $s.Target -DanteAdapter $DanteAdapter }
@@ -284,8 +324,17 @@ function Save-HealState {
     $o = @{ failures = $Failures; lastRestart = $lr }
     # Kept until the rule is enabled again, so a later run still finds it.
     if ($LegacyRule) { $o.emergencyRule = [string]$LegacyRule }
-    ($o | ConvertTo-Json -Compress) |
-        Set-Content -LiteralPath $Path -Encoding ASCII
+    $bytes = [System.Text.Encoding]::ASCII.GetBytes(($o | ConvertTo-Json -Compress))
+    # Written whole to a temporary file, flushed to the disk, then swapped in:
+    # a crash mid-write (iem-snv's bugcheck left NUL bytes, #239) leaves the
+    # old file or the new one. A file that is unreadable all the same is
+    # logged by Invoke-Check, which counts from 0.
+    $tmp = "$Path.tmp"
+    $fs = New-Object System.IO.FileStream($tmp, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write,
+        [System.IO.FileShare]::None, 4096, [System.IO.FileOptions]::WriteThrough)
+    try { $fs.Write($bytes, 0, $bytes.Length); $fs.Flush($true) } finally { $fs.Dispose() }
+    if (Test-Path -LiteralPath $Path) { [System.IO.File]::Replace($tmp, $Path, $null) }
+    else { [System.IO.File]::Move($tmp, $Path) }
 }
 
 function Resolve-HealAdapters {
@@ -359,6 +408,7 @@ function Invoke-RepairStep {
         'Enable' {
             $a = Get-NetAdapter -Name $name
             if ($a.Status -eq 'Disabled') {
+                Assert-NotVirtualTarget -Adapter $a -Verb 'enable'
                 Enable-NetAdapter -Name $name -Confirm:$false
                 return [pscustomobject]@{ Changed = $true; Text = 'enabled the adapter (was Disabled)' }
             }
@@ -412,8 +462,20 @@ function Invoke-RepairStep {
             return [pscustomobject]@{ Changed = $false; Text = 'DHCP on already' }
         }
         'Restart' {
+            Assert-NotVirtualTarget -Adapter (Get-NetAdapter -Name $name) -Verb 'restart'
             Restart-NetAdapter -Name $name -Confirm:$false
             return [pscustomobject]@{ Changed = $true; Text = 'restarted the adapter' }
+        }
+        'Renew' {
+            # A virtual VLAN adapter's kick instead of a restart: a DHCP renew
+            # of this adapter only, found by its interface index.
+            $idx = [int](Get-NetAdapter -Name $name).ifIndex
+            $c = @(Get-CimInstance -ClassName Win32_NetworkAdapterConfiguration -Filter "InterfaceIndex = $idx")
+            if ($c.Count -ne 1) { throw "$($c.Count) adapter configurations for interface index $idx (need exactly 1)" }
+            $rv = [int](Invoke-CimMethod -InputObject $c[0] -MethodName RenewDHCPLease).ReturnValue
+            # 0 = done, 1 = done, a reboot completes it; anything else failed.
+            if ($rv -ne 0 -and $rv -ne 1) { throw "RenewDHCPLease returned $rv" }
+            return [pscustomobject]@{ Changed = $true; Text = "renewed the DHCP lease (interface index $idx, code $rv)" }
         }
         default { throw "unknown repair step '$($Step.Action)'" }
     }
@@ -425,13 +487,23 @@ function Invoke-Repair {
     param([Parameter(Mandatory)]$Config, [Parameter(Mandatory)]$State, [Parameter(Mandatory)][string]$Log)
     try {
         $adapters = Resolve-HealAdapters -Config $Config
-        $plan = @(Get-RepairPlan -LanAdapter $Config.LanAdapter -DanteAdapter $Config.DanteAdapter)
+        $desc = Get-AdapterDescription -Adapter $adapters.Lan
+        $virtual = Test-VirtualVlanAdapter -InterfaceDescription $desc
+        $plan = @(Get-RepairPlan -LanAdapter $Config.LanAdapter -DanteAdapter $Config.DanteAdapter -LanIsVirtual:$virtual)
     } catch {
         Write-HealLog -Path $Log -Message "ERROR $($_.Exception.Message): no repair"
         return 1
     }
     $code = 0
     $changed = $false
+    if ($virtual) {
+        # Never cycled (#239). A disabled one cannot be repaired from here.
+        Write-HealLog -Path $Log -Message "  Restart: skipped, the LAN adapter is a virtual VLAN adapter ('$desc'): never disabled, enabled or restarted (#239); a DHCP renew instead"
+        if ([string]$adapters.Lan.Status -eq 'Disabled') {
+            Write-HealLog -Path $Log -Message "  Enable: WARN the LAN adapter is Disabled and is a virtual VLAN adapter: not enabled (enabling or disabling one bugchecked a PC); enable it by hand"
+            $code = 1
+        }
+    }
     foreach ($step in $plan) {
         try {
             if ($step.Action -eq 'Restart') {
@@ -621,7 +693,7 @@ function Install-SelfHeal {
     $configPath = Join-Path $Dir 'lan-selfheal.json'
     if (-not (Test-Path -LiteralPath $configPath)) { throw "no config at ${configPath}, write it first" }
     $cfg = Read-HealConfig -Json (Get-Content -LiteralPath $configPath -Raw)
-    Resolve-HealAdapters -Config $cfg | Out-Null
+    $adapters = Resolve-HealAdapters -Config $cfg
     Set-AdminOnlyAcl -Path $Dir
     Write-IgnoredKeys -Config $cfg -Log (Join-Path $Dir 'lan-selfheal.log')
     $target = Join-Path $Dir 'lan-selfheal.ps1'
@@ -647,7 +719,9 @@ function Install-SelfHeal {
         throw 'install check: no trigger repeating every minute without end'
     }
     if ($t.Actions[0].Execute -ne $exe -or $t.Actions[0].Arguments -ne $arg) { throw 'install check: the task action differs' }
-    Write-HealLog -Path (Join-Path $Dir 'lan-selfheal.log') -Message "installed: task '$($script:TaskName)' every minute and at startup as SYSTEM, script $target, LAN adapter '$($cfg.LanAdapter)' on VLAN $($cfg.LanVlanId) (0 = untagged)"
+    $desc = Get-AdapterDescription -Adapter $adapters.Lan
+    $kind = if (Test-VirtualVlanAdapter -InterfaceDescription $desc) { "a virtual VLAN adapter ('$desc'): its repair never restarts it, it renews DHCP" } else { "'$desc': its repair may restart it" }
+    Write-HealLog -Path (Join-Path $Dir 'lan-selfheal.log') -Message "installed: task '$($script:TaskName)' every minute and at startup as SYSTEM, script $target, LAN adapter '$($cfg.LanAdapter)' on VLAN $($cfg.LanVlanId) (0 = untagged), $kind"
     "installed '$($script:TaskName)' ($target)"
 }
 
