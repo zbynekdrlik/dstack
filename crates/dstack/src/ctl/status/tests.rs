@@ -546,9 +546,10 @@ fn the_receive_stamp_keys_show_only_while_the_sockets_stamp() {
         generation: 1,
         group: None,
     };
+    // RX 1 fed by it: a write delay needs a ring write (dstack #234).
     media.rx.publish(
         |slot| if slot == 0 { plan } else { RxPlan::default() },
-        |_| None,
+        |rx| (rx == 0).then_some(crate::media::rx::RxRoute { flow: 0, slot: 0 }),
     );
     let mut receiver = Receiver::new(Arc::clone(&media.rx)).unwrap();
     let mut buf = [0u8; 64];

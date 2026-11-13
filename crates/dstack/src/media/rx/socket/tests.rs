@@ -413,10 +413,32 @@ fn the_minute_line_carries_each_packet_s_write_delay() {
     // A minute without packets: no write delay.
     minute.watch(2 * MINUTE_NS, &s, None, |_| None);
     assert_eq!(s.last_write_minute(2), None);
-    // With the stamps off nothing is recorded.
-    s.set_stamps(false);
+    // A packet that reaches no ring (its slot feeds no channel) has a wake
+    // delay but no write delay.
+    let plan = RxPlan {
+        src: Some(LOOPBACK),
+        bps: 3,
+        nslots: 1,
+        latency: LATENCY,
+        delay: 0,
+        block: 0,
+        live: false,
+        generation: 1,
+        group: None,
+    };
+    s.publish(
+        |slot| if slot == 2 { plan } else { RxPlan::default() },
+        |_| None,
+    );
     send(s.local_addr(2).unwrap(), P0 + 32);
     pump(&mut rx, 3, ns_of(P0 + 100, RATE));
+    let (wake, _) = s.take_minute(2);
+    assert_eq!(wake.map(|w| w.packets), Some(1));
+    assert_eq!(s.take_write_minute(2), None);
+    // With the stamps off nothing is recorded.
+    s.set_stamps(false);
+    send(s.local_addr(2).unwrap(), P0 + 48);
+    pump(&mut rx, 4, ns_of(P0 + 100, RATE));
     assert_eq!(s.take_write_minute(2), None);
     assert_eq!(s.take_write_minute(crate::media::rx::MAX_FLOWS), None);
     assert_eq!(s.last_write_minute(crate::media::rx::MAX_FLOWS), None);

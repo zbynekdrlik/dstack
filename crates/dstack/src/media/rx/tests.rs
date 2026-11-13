@@ -469,7 +469,7 @@ fn a_channel_slot_the_flow_does_not_have_is_never_read() {
     pump(&mut rx, 0, 1, now, 0);
     let mut got = [0i32; 16];
     assert_eq!(s.rings()[0].read_at(10_000, &mut got).holes, 0);
-    assert_eq!(s.rings()[1].read_at(10_000, &mut got).all_holes(), 16);
+    assert_eq!(s.rings()[1].read_at(10_000, &mut got).start_holes, 16);
 }
 
 #[test]
@@ -635,7 +635,7 @@ fn only_the_flow_s_transmitter_counts() {
     assert_eq!(s.lane(0).packets, 0);
     assert_eq!(s.lane(1).stray, 1);
     let mut got = [0i32; 4];
-    assert_eq!(s.rings()[0].read_at(base, &mut got).all_holes(), 4);
+    assert_eq!(s.rings()[0].read_at(base, &mut got).start_holes, 4);
     // Neither gets a keepalive.
     for mono in (0..=1_000).step_by(10) {
         rx.pass(Some(now), mono * MS);
@@ -812,7 +812,7 @@ fn nothing_is_placed_before_the_clock_is_ready() {
     let c = s.lane(0);
     assert_eq!((c.packets, c.unplaced), (1, 1));
     let mut got = [0i32; 8];
-    assert_eq!(s.rings()[0].read_at(5_000, &mut got).all_holes(), 8);
+    assert_eq!(s.rings()[0].read_at(5_000, &mut got).start_holes, 8);
     assert_eq!(s.take_max_lateness(0), 0);
     // Its audio still keeps the flow alive.
     rx.pass(None, 250 * MS);
@@ -1195,7 +1195,7 @@ fn a_packet_the_ring_refuses_as_read_counts_late_at_read_on_its_flow() {
     );
     // The reader has read up to p0 + 100.
     let mut out = [0i32; 100];
-    assert_eq!(s.rings()[0].read_at(p0, &mut out).all_holes(), 100);
+    assert_eq!(s.rings()[0].read_at(p0, &mut out).start_holes, 100);
     let t = transmitter(LOOPBACK);
     let now = ns_of(p0 + 150, RATE);
     // 60 samples late, below the flow's 192: its first frames were read.

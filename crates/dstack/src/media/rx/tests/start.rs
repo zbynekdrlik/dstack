@@ -73,6 +73,7 @@ fn a_publish_restarts_the_rings_a_new_flow_feeds() {
     assert_eq!(read(&s, 0, T + 64), holes(N));
     // Slot 1's flow is new: its channel restarts.
     assert_eq!(read(&s, 1, T + 64), start_holes(N));
+    s.rings()[1].write_at(T + 80, &[1 << 8; N]);
     // Another flow in slot 0: its channel restarts, with no route change.
     publish(
         &s,
@@ -80,6 +81,7 @@ fn a_publish_restarts_the_rings_a_new_flow_feeds() {
         &routes,
     );
     assert_eq!(read(&s, 0, T + 80), start_holes(N));
+    assert_eq!(read(&s, 1, T + 96), holes(N), "slot 1's flow is not new");
     s.rings()[0].write_at(T + 112, &[1 << 8; N]);
     assert_eq!(read(&s, 0, T + 96), start_holes(N));
     assert_eq!(read(&s, 0, T + 128), holes(N));
@@ -97,6 +99,71 @@ fn a_publish_restarts_the_rings_a_new_flow_feeds() {
     );
     assert_eq!(read(&s, 2, T + 32), start_holes(N));
     assert_eq!(read(&s, 0, T + 144), holes(N), "its route did not change");
+}
+
+/// The RX thread, the rings' writer, restarts a new flow's rings itself at
+/// its next pass: an old flow's packet it wrote after the publish's
+/// restart (with its old routes, before that pass) would start the new
+/// flow early, and its reads before the new flow's first sample would
+/// count as holes.
+#[test]
+fn the_rx_thread_restarts_a_new_flow_s_rings_before_it_writes() {
+    let s = shared(2);
+    let mut rx = Receiver::new(Arc::clone(&s)).unwrap();
+    let src = Ipv4Addr::new(10, 0, 0, 1);
+    publish(
+        &s,
+        &[(0, plan(src, 1, true, 1))],
+        &[(0, RxRoute { flow: 0, slot: 0 })],
+    );
+    rx.pass(None, 0);
+    // Another flow in slot 0; the thread, not yet past its refresh,
+    // writes an old packet.
+    publish(
+        &s,
+        &[(0, plan(src, 1, true, 2))],
+        &[(0, RxRoute { flow: 0, slot: 0 })],
+    );
+    s.rings()[0].write_at(T, &[1 << 8; N]);
+    rx.pass(None, 0);
+    assert_eq!(read(&s, 0, T + 16), start_holes(N));
+    // A pass with nothing new restarts nothing.
+    s.rings()[0].write_at(T + 64, &[1 << 8; N]);
+    rx.pass(None, 0);
+    assert_eq!(read(&s, 0, T + 80), holes(N));
+    // RX 2 routed in: its old write before the thread's pass is undone too.
+    publish(
+        &s,
+        &[(0, plan(src, 1, true, 2))],
+        &[
+            (0, RxRoute { flow: 0, slot: 0 }),
+            (1, RxRoute { flow: 0, slot: 0 }),
+        ],
+    );
+    s.rings()[1].write_at(T, &[1 << 8; N]);
+    rx.pass(None, 0);
+    assert_eq!(read(&s, 1, T + 16), start_holes(N));
+    assert_eq!(read(&s, 0, T + 96), holes(N), "RX 1's route did not change");
+    // Unrouted, then routed back: a restart again.
+    s.rings()[1].write_at(T + 32, &[1 << 8; N]);
+    publish(
+        &s,
+        &[(0, plan(src, 1, true, 2))],
+        &[(0, RxRoute { flow: 0, slot: 0 })],
+    );
+    rx.pass(None, 0);
+    assert_eq!(read(&s, 1, T + 48), holes(N), "an unrouted ring is left");
+    publish(
+        &s,
+        &[(0, plan(src, 1, true, 2))],
+        &[
+            (0, RxRoute { flow: 0, slot: 0 }),
+            (1, RxRoute { flow: 0, slot: 0 }),
+        ],
+    );
+    s.rings()[1].write_at(T + 32, &[1 << 8; N]);
+    rx.pass(None, 0);
+    assert_eq!(read(&s, 1, T + 64), start_holes(N));
 }
 
 /// A flow's ring counts are its routed channels' rings, summed.
@@ -219,4 +286,35 @@ fn the_minute_watch_logs_each_flow_s_holes_with_their_minute() {
         ),
         "{log}"
     );
+}
+
+/// A channel routed into a flow brings none of its past holes into that
+/// flow's minute: no holes line for them.
+#[test]
+fn a_channel_routed_in_brings_no_old_holes_to_the_minute() {
+    use crate::media::late::{MINUTE_NS, RxMinute};
+    let s = shared(2);
+    let routes = |both: bool| {
+        let mut r = vec![(0, RxRoute { flow: 0, slot: 0 })];
+        if both {
+            r.push((1, RxRoute { flow: 0, slot: 1 }));
+        }
+        r
+    };
+    publish(&s, &[(0, plan(LOOPBACK, 2, true, 1))], &routes(false));
+    // RX 2, unrouted, read holes (a check or the echo).
+    s.rings()[1].write_at(T, &[1 << 8; N]);
+    s.rings()[1].read_at(T + 16, &mut [0i32; 300]);
+    assert_eq!(s.rings()[1].counters().holes, 300);
+    let info = |f: &mut dyn FnMut()| crate::test_log::capture_at(tracing::Level::INFO, f);
+    let mut minute = RxMinute::new();
+    assert_eq!(info(&mut || minute.watch(0, &s, None, |_| None)), "");
+    publish(&s, &[(0, plan(LOOPBACK, 2, true, 1))], &routes(true));
+    let log = info(&mut || minute.watch(MINUTE_NS, &s, None, |_| None));
+    assert!(!log.contains("RX holes"), "{log}");
+    // Its own holes after the move are the flow's.
+    s.rings()[1].write_at(T + 400, &[1 << 8; N]);
+    s.rings()[1].read_at(T + 416, &mut [0i32; 7]);
+    let log = info(&mut || minute.watch(2 * MINUTE_NS, &s, None, |_| None));
+    assert!(log.contains(" slot=0 holes=7 "), "{log}");
 }

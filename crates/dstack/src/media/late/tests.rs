@@ -341,29 +341,60 @@ fn the_rx_minute_watch_gives_each_minute_s_reorders() {
     assert_eq!(rose, [0; MAX_FLOWS]);
 }
 
-/// dstack #234: the holes line's counts are each a minute's rise, never
-/// below 0 (a channel routed away takes its counts along); the engine's
-/// re-bootstraps too.
+/// dstack #234: the holes line's counts are each a minute's rise of the
+/// channels routed to the flow now, each ring's own rise (a channel routed
+/// in brings none of its past), never below 0; the engine's re-bootstraps
+/// too.
 #[test]
 fn the_rx_minute_watch_gives_each_flow_s_hole_rises() {
     use super::{HoleCounts, RxMinute};
-    use crate::media::rx::MAX_FLOWS;
+    use crate::media::ring::Counters;
+    let ring = |holes, late| Counters {
+        holes,
+        late,
+        written: 1_000,
+        duplicate: 9,
+        early: 8,
+        start_holes: 77,
+    };
     let at = |holes, written_late, rx_late| HoleCounts {
         holes,
         written_late,
         rx_late,
     };
-    assert_eq!(at(10, 7, 3).since(at(4, 2, 1)), at(6, 5, 2));
-    assert_eq!(at(1, 1, 1).since(at(4, 2, 3)), at(0, 0, 0));
+    let late = RefCell::new([0u64; 32]);
     let mut w = RxMinute::new();
-    assert_eq!(w.holes_rose(3, at(10, 7, 3)), at(10, 7, 3));
-    assert_eq!(w.holes_rose(3, at(15, 8, 3)), at(5, 1, 0));
-    assert_eq!(
-        w.holes_rose(4, at(2, 0, 0)),
-        at(2, 0, 0),
-        "each slot its own"
+    // RX 1 and 2 feed slot 3, RX 3 slot 4, RX 4 none.
+    late.borrow_mut()[3] = 2;
+    let rose = w.holes_rose(
+        &[
+            (Some(3), ring(10, 7)),
+            (Some(3), ring(1, 1)),
+            (Some(4), ring(2, 0)),
+            (None, ring(50, 50)),
+        ],
+        |s| late.borrow()[s],
     );
-    assert_eq!(w.holes_rose(MAX_FLOWS, at(2, 2, 2)), HoleCounts::default());
+    assert_eq!(
+        (rose[3], rose[4], rose[0]),
+        (at(11, 8, 2), at(2, 0, 0), at(0, 0, 0))
+    );
+    // RX 2 moves to slot 4 with its past: only its rise counts there.
+    late.borrow_mut()[3] = 5;
+    let rose = w.holes_rose(
+        &[
+            (Some(3), ring(15, 8)),
+            (Some(4), ring(4, 3)),
+            (Some(4), ring(2, 0)),
+            (Some(4), ring(60, 50)),
+        ],
+        |s| late.borrow()[s],
+    );
+    assert_eq!((rose[3], rose[4]), (at(5, 1, 3), at(3 + 10, 2, 0)));
+    // A count that fell rises by 0; a channel past the slots counts nowhere.
+    let rose = w.holes_rose(&[(Some(3), ring(1, 1)), (Some(99), ring(500, 5))], |_| 0);
+    assert_eq!(rose[3], at(0, 0, 0));
+    assert!(rose.iter().all(|r| *r == at(0, 0, 0)), "{rose:?}");
     assert_eq!(w.rebootstraps_rose(4), 4);
     assert_eq!(w.rebootstraps_rose(6), 2);
     assert_eq!(w.rebootstraps_rose(1), 0, "an engine attached anew");

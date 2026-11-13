@@ -393,7 +393,7 @@ fn the_rx_thread_s_passes_do_not_allocate() {
         );
         assert_eq!(got[FPP - 1], ((FPP as i32) << 8) * sign);
     }
-    assert_eq!(shared.rings()[3].read_at(T, &mut got).all_holes(), FPP);
+    assert_eq!(shared.rings()[3].read_at(T, &mut got).start_holes, FPP);
     let mut buf = [0u8; 16];
     assert_eq!(transmitter.recv(&mut buf).unwrap(), 2);
 }

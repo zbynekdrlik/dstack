@@ -175,7 +175,7 @@ fn a_missing_packet_reads_as_a_hole() {
 #[test]
 fn a_packet_behind_the_reader_is_late_not_written() {
     let ring = Ring::new();
-    assert_eq!(read(&ring, T, N).1.all_holes(), N);
+    assert_eq!(read(&ring, T, N).1.start_holes, N);
     // The reader has passed T..T+32: those samples are late.
     assert_eq!(
         ring.write_at(T, &packet(T)),
@@ -184,7 +184,15 @@ fn a_packet_behind_the_reader_is_late_not_written() {
             ..Write::default()
         }
     );
-    assert_eq!(read(&ring, T, N).1.all_holes(), N, "never written");
+    // Never written, but the late packet started the flow: holes now.
+    assert_eq!(
+        read(&ring, T, N).1,
+        Read {
+            holes: N,
+            start_holes: 0
+        },
+        "never written"
+    );
     // A packet across the reader: its first half late, the rest written.
     let w = ring.write_at(T + 16, &packet(T + 16));
     assert_eq!(
@@ -324,7 +332,7 @@ fn a_wrapped_slot_never_reads_stale() {
 #[test]
 fn put_at_stores_behind_and_far_ahead_of_the_reader() {
     let ring = Ring::new();
-    assert_eq!(read(&ring, T, N).1.all_holes(), N);
+    assert_eq!(read(&ring, T, N).1.start_holes, N);
     // Behind the reader (write_at would call it late) and over the slots
     // the reader is at: stored.
     ring.put_at(T - 100, &packet(T - 100));
@@ -474,7 +482,7 @@ fn an_unwritten_slot_reads_as_a_hole_in_the_last_lap() {
     let ring = Ring::new();
     let last = ((1u64 << 31) - 1) * SLOTS as u64;
     let mut out = [7i32; 2];
-    assert_eq!(ring.read_at(last, &mut out).all_holes(), 2);
+    assert_eq!(ring.read_at(last, &mut out).start_holes, 2);
     assert_eq!(out, [0, 0]);
 }
 
@@ -517,10 +525,34 @@ fn a_hole_before_the_flow_s_first_sample_is_a_start_hole() {
     assert_eq!(read(&ring, T + 7 * N as u64, N).1, start(N));
     assert_eq!(read(&ring, T + 8 * N as u64, 2 * N).1, Read::default());
     assert_eq!(read(&ring, T + 10 * N as u64, N).1, holes(N));
-    // A late write stores nothing: it moves no start.
+    // A packet whose samples all came late still starts the flow: its
+    // packets come, the reader was ahead (a flow late from its start counts
+    // holes, not start holes).
     ring.restart();
     assert_eq!(ring.write_at(T, &packet(T)).late, N);
-    assert_eq!(read(&ring, T + 11 * N as u64, N).1, start(N));
+    assert_eq!(read(&ring, T + 11 * N as u64, N).1, holes(N));
+    // A write wholly early (a stamp far in the future) starts nothing; one
+    // partly early does.
+    ring.restart();
+    let far = T + 12 * N as u64 + SLOTS as u64;
+    assert_eq!(ring.write_at(far, &packet(far)).early, N);
+    assert_eq!(read(&ring, T + 12 * N as u64, N).1, start(N));
+    // The reader's end is T + 13N: the last sample a whole ring past it is
+    // early, the rest written.
+    ring.restart();
+    let reader = T + 13 * N as u64;
+    let partly = reader + SLOTS as u64 - (N as u64 - 1);
+    let w = ring.write_at(partly, &packet(partly));
+    assert_eq!((w.written, w.early), (N - 1, 1));
+    assert_eq!(read(&ring, reader, N).1, start(N), "before its start");
+    // An empty write starts nothing either.
+    ring.restart();
+    ring.write_at(T, &[]);
+    assert_eq!(
+        read(&ring, T + 14 * N as u64, N).1,
+        start(N),
+        "an empty write"
+    );
 }
 
 /// The engine's output rings start at their first put; an empty put is
