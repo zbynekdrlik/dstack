@@ -178,9 +178,15 @@ impl Gaps {
         })
     }
 
+    /// The address of the peer with id `id` (from 1); `None` for 0 or an
+    /// id not given.
+    pub(crate) fn peer(&self, id: usize) -> Option<IpAddr> {
+        self.peers.get(id.checked_sub(1)?).copied()
+    }
+
     /// `peer`'s id: its place among the peers seen, from 1; 0 once
     /// [`MAX_PEERS`] have one.
-    fn peer_id(&mut self, peer: IpAddr) -> usize {
+    pub(crate) fn peer_id(&mut self, peer: IpAddr) -> usize {
         if let Some(k) = self.peers.iter().position(|&p| p == peer) {
             return k + 1;
         }

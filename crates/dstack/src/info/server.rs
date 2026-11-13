@@ -21,9 +21,10 @@ use tokio::time::MissedTickBehavior;
 use tracing::{debug, info, warn};
 
 use super::limit::{self, Limit};
+use super::unanswered::Unanswered;
 use super::{
     Beat, Changes, Follower, HEARTBEAT_EVERY, HEARTBEAT_GROUP, HEARTBEAT_PORT, INFO_GROUP,
-    INFO_PORT, InfoBuilder, RECV_BUFFER, REQUEST_PORT, Records, peak_byte, share,
+    INFO_PORT, InfoBuilder, RECV_BUFFER, REQUEST_PORT, Records, never_answered, peak_byte, share,
 };
 use crate::clock::{ClockStats, PtpClock};
 use crate::ctl::{Requests, info_op};
@@ -222,6 +223,7 @@ pub async fn serve_info_with(
     let mut check = tokio::time::interval(limit::CHECK);
     check.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut bound = Limit::default();
+    let mut unanswered = Unanswered::new();
     let mut buf = vec![0u8; RECV_BUFFER];
     loop {
         tokio::select! {
@@ -229,8 +231,12 @@ pub async fn serve_info_with(
                 let (n, peer) = got?;
                 requests.received(REQUEST_PORT, peer.ip(), info_op(&buf[..n]));
                 mc.set_clock(beat.clock());
-                if let Some(packet) = mc.answer_within(&mut bound, Instant::now(), &buf[..n]) {
-                    send(&sock, &packet, to.info).await;
+                match mc.answer_within(&mut bound, Instant::now(), &buf[..n]) {
+                    Some(packet) => send(&sock, &packet, to.info).await,
+                    None if never_answered(&buf[..n]) => {
+                        unanswered.record(Instant::now(), peer.ip(), &buf[..n]);
+                    }
+                    None => {}
                 }
                 if let Some(share) = &share {
                     let relay = share::Msg::Request(buf[..n].to_vec()).encode();
@@ -272,6 +278,7 @@ pub async fn serve_info_with(
                 if let Some(packet) = mc.notify_within(&mut bound, Instant::now(), &changes) {
                     send(&sock, &packet, to.info).await;
                 }
+                unanswered.flush(Instant::now());
                 if let Some(report) = bound.flush(Instant::now()) {
                     warn!(
                         dropped = report.total(),

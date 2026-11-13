@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.6.122
+
+- **Fix (dstack #273): an info request the device does not answer no longer logs a line per request.** Bitfocus Companion's Dante module asks every device info opcode 0x100a once a second; no Audinate device answers it, and dstack keeps not answering it. Each request was one INFO line (`info request not answered`), about 86 000 a day per device.
+  - Now the first unanswered request of each (sender, opcode) is logged once at INFO: `info request not answered (told once per sender and opcode, then counted a minute) op=<8-byte opcode> peer=<id> from=<address>`. Every request is counted, and once a minute the counts are one INFO line: `info requests not answered in a minute (peer id, opcode) requests=60 counts=peer 1 0x100a unanswered 60 peers=1=<address>` (ARC's gap report form, with each named peer's address). At most 256 (sender, opcode) pairs get a first line; all are counted, and a full set is cleared at the next minute's report so a new asker is named again. A pair is keyed on the opcode's bytes 26-27.
+  - `InfoBuilder::answer` logs its own "not answered" line at debug now.
+  - No public API change.
+- **No latency change** for any app.
+- Consumers: move the stack version; nothing to port.
+
 ## 0.6.121
 
 - **Fix (dstack #271): an ARC 2.7 transmitter's TX flows are read.** A Yamaha AIC128-D (Audinate DCM, `arcp_vers` 2.7.41) answers the 2.8.9 TX flow list (0x2600, start code 0x2809) with status 0x0030 (op unknown). The ARC directory asked it every minute, counted `refused=1` in its minute report, and never knew the card's flows, so a multicast flow on such a card could not be found.

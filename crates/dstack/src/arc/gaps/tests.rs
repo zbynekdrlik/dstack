@@ -258,3 +258,16 @@ fn every_gap_reads_as_its_word() {
          peer 2 0x0101 misframed 2, peer 3 0x0102 limited 1"
     );
 }
+
+#[test]
+fn a_peer_id_names_its_address() {
+    let mut gaps = Gaps::new(WINDOW);
+    let a: IpAddr = "192.0.2.1".parse().unwrap();
+    let b: IpAddr = "192.0.2.2".parse().unwrap();
+    assert_eq!(
+        (gaps.peer_id(a), gaps.peer_id(b), gaps.peer_id(a)),
+        (1, 2, 1)
+    );
+    assert_eq!((gaps.peer(1), gaps.peer(2)), (Some(a), Some(b)));
+    assert_eq!((gaps.peer(0), gaps.peer(3)), (None, None));
+}
