@@ -178,8 +178,8 @@ impl Media {
         for key in unnamed_flow_ports(cfg) {
             warn!(
                 "{key} unset: the OS chose this device's flow ports, which a Dante-leg \
-                 filter cannot name; behind one, set {key} and accept its 32 ports \
-                 (docs/two-networks.md)"
+                 filter cannot name (docs/two-networks.md; fixed ports by default come \
+                 with dstack #264)"
             );
         }
         tx.recreate_multicast(&device.state.multicast);

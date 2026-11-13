@@ -7,9 +7,9 @@
   - The bound TX ports are logged at start (`TX flow sockets bound ports=<first>-<last> fixed=true`, or each port when the OS chose them).
   - With only `tx_port_base` set, the TX sockets bind before the RX ones (the RX ports the OS chooses could otherwise take a fixed TX port); a fixed `rx_port_base` still binds first.
   - New `TxShared::ports()`: each flow slot's socket's port.
-  - New WARN at start, once per direction that has channels and no fixed base: `rx_port_base unset: the OS chose this device's flow ports, which a Dante-leg filter cannot name; ...` (and the same for `tx_port_base`). The same failure hit a receiver's RX side on 13.11.2026 (its RX flow ports ephemeral, the filter accepting 30000-30199 only, the audio dropped). A device without a filter can ignore it.
-  - `docs/two-networks.md`: every device on a leg that drops unlisted new UDP must set `rx_port_base` and, with TX, `tx_port_base`, and the filter accepts exactly those ranges from the Dante subnet; the reference guard's "in" list names them.
-- Consumers: additive, nothing to port. `DeviceConfig` has a new public field `tx_port_base` (a full struct literal adds it or `..`; `from_toml` and dlink need nothing). No latency change for any app. Boxes with TX behind such a filter (camera-box, presenter, songplayer, obs) can set it once they move to v0.6.116.
+  - New WARN at start, once per direction that has channels and no fixed base: `rx_port_base unset: the OS chose this device's flow ports, which a Dante-leg filter cannot name (...)` (and the same for `tx_port_base`). The same failure hit a receiver's RX side on 13.11.2026 (its RX flow ports ephemeral, the filter accepting 30000-30199 only, the audio dropped). A device without such a filter can ignore it.
+  - `docs/two-networks.md`: why a filter cannot name the OS's flow ports and conntrack does not cover them, and the two keys as the interim fix. The standard comes with dstack #264: fixed flow ports by default per device slot inside one dstack range, and one generic Dante-leg filter for every PC.
+- Consumers: additive, nothing to port. `DeviceConfig` has a new public field `tx_port_base` (a full struct literal adds it or `..`; `from_toml` and dlink need nothing). No latency change for any app. Fixed ports by default (no key to set) and the generic filter follow in dstack #264.
 
 ## 0.6.115
 
