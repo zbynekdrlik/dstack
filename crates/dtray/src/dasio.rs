@@ -67,9 +67,15 @@ pub fn root_for(program_data: Option<OsString>) -> PathBuf {
         .join(DIR)
 }
 
-/// This PC's dasio folder ([`root_for`] with `%ProgramData%`).
+/// This PC's dasio folder ([`root_for`] with the ProgramData folder: on
+/// Windows the system's known folder, not the environment, which a
+/// program of the user could point elsewhere for the elevated helper).
 pub fn root() -> PathBuf {
-    root_for(std::env::var_os("ProgramData"))
+    #[cfg(windows)]
+    let program_data = system::program_data();
+    #[cfg(not(windows))]
+    let program_data = std::env::var_os("ProgramData");
+    root_for(program_data)
 }
 
 /// One dasio instance on this PC.
@@ -631,6 +637,13 @@ pub fn verify(want: &Fields, back: &ReadBack) -> Result<String, String> {
 /// file's path. The written path; the reason otherwise.
 pub fn install(root: &Path, number: u32, text: &str) -> Result<PathBuf, String> {
     let dir = root.join(format!("{INSTANCE_PREFIX}{number}"));
+    // A link (a junction on Windows) could aim the admin's writes at
+    // another folder: refused.
+    for d in [root, dir.as_path()] {
+        if std::fs::symlink_metadata(d).is_ok_and(|m| m.file_type().is_symlink()) {
+            return Err(format!("{} is a link; nothing written", d.display()));
+        }
+    }
     let target = dir.join(CONFIG);
     let current =
         std::fs::read_to_string(&target).map_err(|e| format!("{}: {e}", target.display()))?;

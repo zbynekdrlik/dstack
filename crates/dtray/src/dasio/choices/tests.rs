@@ -101,6 +101,10 @@ fn cpus_list_any_then_each_cpu_the_busy_greyed() {
     let past = cpus(2, &BTreeSet::new(), Some(5));
     assert_eq!(texts(&past), ["Any", "CPU 0", "CPU 1", "CPU 5"]);
     assert_eq!(cpus(2, &BTreeSet::new(), Some(1)).len(), 3);
+    assert_eq!(
+        texts(&cpus(2, &BTreeSet::new(), Some(2))),
+        ["Any", "CPU 0", "CPU 1", "CPU 2"]
+    );
 }
 
 fn adapter(alias: &str, ip: Option<[u8; 4]>, mbit: Option<u64>) -> Adapter {
@@ -125,6 +129,10 @@ fn an_adapter_shows_its_alias_card_address_and_speed() {
     assert_eq!(
         adapter_text(&adapter("E", None, Some(100))),
         "E · E card · 100 Mbps"
+    );
+    assert_eq!(
+        adapter_text(&adapter("E", None, Some(999))),
+        "E · E card · 999 Mbps"
     );
     let mut bare = adapter("E", None, None);
     bare.description.clear();

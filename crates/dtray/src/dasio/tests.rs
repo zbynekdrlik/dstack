@@ -815,3 +815,19 @@ fn only_the_changed_cpu_pickers_are_checked() {
     let any = Cpus { pump: None, ..old };
     assert_eq!(changed_cpus(&old, &any), Cpus::default());
 }
+
+#[cfg(unix)]
+#[test]
+fn install_refuses_a_linked_folder() {
+    let (root, dir) = one_instance();
+    let linked = tempfile::tempdir().expect("a temp dir");
+    std::os::unix::fs::symlink(&dir, linked.path().join("instance-2")).expect("a link");
+    let err = install(linked.path(), 2, CONFIG_TEXT).expect_err("linked");
+    assert!(err.ends_with("is a link; nothing written"), "{err}");
+    let root_link = linked.path().join("root");
+    std::os::unix::fs::symlink(root.path(), &root_link).expect("a link");
+    let err = install(&root_link, 1, CONFIG_TEXT).expect_err("linked root");
+    assert!(err.ends_with("is a link; nothing written"), "{err}");
+    // The same instance through its real folder is written.
+    assert!(install(root.path(), 1, CONFIG_TEXT).is_ok());
+}

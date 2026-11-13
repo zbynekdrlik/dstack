@@ -17,6 +17,8 @@ pub(super) struct WinOps {
     pub(super) adapters: Vec<Adapter>,
     /// The window the UAC prompt opens in front of.
     pub(super) owner: isize,
+    /// The helper did not end in time: it may still be running.
+    pub(super) helper_running: bool,
 }
 
 /// The new config in a file of its own in the user's temp folder (a new
@@ -79,7 +81,7 @@ impl Ops for WinOps {
         let exe = std::env::current_exe()
             .map_err(|e| format!("the program's path: {e}"))?
             .with_file_name("dtray-cli.exe");
-        let program_files = std::env::var_os("ProgramFiles").map(PathBuf::from);
+        let program_files = dasio::system::program_files().map(PathBuf::from);
         dasio::may_elevate(&exe, program_files.as_deref())?;
         let staged = stage(self.number, config)?;
         let ran = dasio::system::run_elevated(
@@ -89,11 +91,29 @@ impl Ops for WinOps {
             self.owner as HWND,
         );
         let _ = std::fs::remove_file(&staged);
-        let code = ran?;
+        let code = match ran {
+            Ok(code) => code,
+            Err(e) if e.starts_with("the helper did not end") => {
+                // It may still write and restart: no other apply until
+                // dtray restarts (the worker keeps the guard).
+                self.helper_running = true;
+                return Err(format!(
+                    "{e}; it may still be writing and restarting, so wait before the next apply"
+                ));
+            }
+            Err(e) => return Err(e),
+        };
         // The helper's verdict, in the instance's (admin-only) folder.
         let result = dasio::result_path(&dasio::root(), self.number);
         match std::fs::read_to_string(&result) {
-            Ok(text) => dasio::parse_result(&text)?,
+            // A verdict counts only with the helper's own exit code.
+            Ok(text) => match (code, dasio::parse_result(&text)) {
+                (0, Ok(line)) => line,
+                (_, Err(e)) => return Err(e),
+                (_, Ok(_)) => {
+                    return Err(format!("the helper ended with code {code}"));
+                }
+            },
             Err(_) => {
                 return Err(format!(
                     "the helper ended with code {code} and left no verdict"

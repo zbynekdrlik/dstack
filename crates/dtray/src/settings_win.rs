@@ -236,6 +236,11 @@ pub fn dialog_message(msg: &MSG) -> bool {
     }
 }
 
+/// Whether an apply runs (the tray's Exit waits for it).
+pub fn applying() -> bool {
+    APPLYING.load(Ordering::Acquire)
+}
+
 /// An apply runs (process-wide: a window closed and opened again while
 /// its worker runs starts no second one on the same files).
 static APPLYING: AtomicBool = AtomicBool::new(false);
@@ -603,6 +608,7 @@ fn start_apply(st: &mut State) {
         scanner: None,
         adapters: st.adapters.clone(),
         owner: h as isize,
+        helper_running: false,
     };
     let want = new.clone();
     let hwnd = h as isize;
@@ -624,7 +630,10 @@ fn start_apply(st: &mut State) {
             let out = apply::run(&plan, &want, &mut ops, |s| {
                 post(Progress::Say(s.to_string()), &tx)
             });
-            APPLYING.store(false, Ordering::Release);
+            // A helper still running keeps the guard until dtray ends.
+            if !ops.helper_running {
+                APPLYING.store(false, Ordering::Release);
+            }
             post(Progress::Done(out), &tx);
         });
     if let Err(e) = spawned {

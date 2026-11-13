@@ -161,7 +161,6 @@ pub fn adapter_text(a: &Adapter) -> String {
         parts.push(ip.to_string());
     }
     match a.mbit {
-        Some(m) if m >= 1000 && m.is_multiple_of(1000) => parts.push(format!("{} Gbps", m / 1000)),
         Some(m) if m >= 1000 => parts.push(format!("{} Gbps", m as f64 / 1000.0)),
         Some(m) => parts.push(format!("{m} Mbps")),
         None => {}

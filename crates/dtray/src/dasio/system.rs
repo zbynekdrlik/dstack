@@ -25,6 +25,32 @@ use windows_sys::Win32::UI::Shell::{SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, 
 use windows_sys::Win32::UI::WindowsAndMessaging::SW_HIDE;
 
 use super::choices::Adapter;
+use windows_sys::Win32::System::Com::CoTaskMemFree;
+use windows_sys::Win32::UI::Shell::{
+    FOLDERID_ProgramData, FOLDERID_ProgramFiles, SHGetKnownFolderPath,
+};
+
+/// A known folder's path (the system's, never the environment's).
+fn known_folder(id: &windows_sys::core::GUID) -> Option<std::ffi::OsString> {
+    let mut p: *mut u16 = std::ptr::null_mut();
+    // SAFETY: a valid id; the path is the shell's until freed below.
+    let hr = unsafe { SHGetKnownFolderPath(id, 0, std::ptr::null_mut(), &mut p) };
+    // SAFETY: a NUL-terminated string from the call (or null).
+    let text = (hr >= 0).then(|| unsafe { text_of(p) });
+    // SAFETY: the shell's allocation; null is fine.
+    unsafe { CoTaskMemFree(p.cast()) };
+    text.filter(|t| !t.is_empty()).map(Into::into)
+}
+
+/// The ProgramData folder.
+pub fn program_data() -> Option<std::ffi::OsString> {
+    known_folder(&FOLDERID_ProgramData)
+}
+
+/// The (64-bit) Program Files folder.
+pub fn program_files() -> Option<std::ffi::OsString> {
+    known_folder(&FOLDERID_ProgramFiles)
+}
 
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(Some(0)).collect()

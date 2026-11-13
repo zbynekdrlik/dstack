@@ -143,6 +143,9 @@ pub fn run() -> Result<(), String> {
         }
         for action in tray.menu_events() {
             match action {
+                Action::Exit if crate::settings_win::applying() => {
+                    message("dtray: a dasio settings apply is running; exit when it has ended.");
+                }
                 Action::Exit => return Ok(()),
                 Action::Copy(text) => {
                     if let Err(err) = copy(&text) {
