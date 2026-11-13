@@ -191,21 +191,21 @@ pub struct DeviceConfig {
     #[serde(default)]
     pub process_id: u16,
     /// The first of the RX flow ports (UDP): slot `n` (from 0) receives on
-    /// `rx_port_base + n`, [`crate::media::rx::MAX_FLOWS`] ports, so a
-    /// firewall can name them (camera-box's nft table, dstack #20). Ports
-    /// the OS chooses when left out. Pick a base outside the OS's ephemeral
-    /// range (Linux 32768-60999, Windows 49152-65535): there any other
-    /// process's socket may hold one of them, and the device does not start.
+    /// `rx_port_base + n`, [`crate::media::rx::MAX_FLOWS`] ports. Left out,
+    /// the device takes its slot's block in the dstack flow range (dstack
+    /// #264, [`ports::flow_bases`]): RX on 29800 + 64k, k its ARC port -
+    /// 4440, which the generic Dante-leg filter accepts on every PC. A
+    /// device with an ARC port outside 4440-4471 must set both bases. A
+    /// base whose ports leave 29800-31847 is a start WARN.
     #[serde(default)]
     pub rx_port_base: Option<u16>,
     /// The first of the TX flow ports (UDP): slot `n` (from 0) sends from
     /// `tx_port_base + n`, [`crate::media::tx::MAX_FLOWS`] ports, so a
-    /// stateless filter can accept a receiver's keepalives to them (dstack
-    /// #262). Ports the OS chooses when left out. The range must stay clear
-    /// of `rx_port_base`'s, of every slot's ARC, flow-control and CMC ports
-    /// (4440-4471, 4455-4486, 8800-8831), of mDNS 5353 and of the info
-    /// ports 8700/8702/8708; like `rx_port_base`, pick it outside the OS's
-    /// ephemeral range.
+    /// receiver's keepalives reach a port a filter names (dstack #262).
+    /// Left out, the slot's TX block: its RX block + 32 (dstack #264). The
+    /// range must stay clear of `rx_port_base`'s, of every slot's ARC,
+    /// flow-control and CMC ports (4440-4471, 4455-4486, 8800-8831), of
+    /// mDNS 5353 and of the info ports 8700/8702/8708.
     #[serde(default)]
     pub tx_port_base: Option<u16>,
     /// RX subscriptions the app declares (`[[subscribe]]`, intercom#5):

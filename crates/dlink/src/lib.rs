@@ -433,18 +433,21 @@ impl Config {
         self
     }
 
-    /// The RX flows' ports from `base` (`base` to `base + 31`), for a
-    /// firewall that names them; the OS picks free ones unless set.
+    /// The RX flows' ports from `base` (`base` to `base + 31`). Unset, the
+    /// device takes its slot's block in the dstack flow range 29800-31847
+    /// (RX 29800 + 64k, k = the ARC port - 4440; dstack #264), which the
+    /// generic Dante-leg filter accepts: set it only to move the ports, and
+    /// keep them inside that range (a start WARN otherwise).
     pub fn rx_port_base(mut self, base: u16) -> Self {
         self.rx_port_base = Some(base);
         self
     }
 
-    /// The TX flows' ports from `base` (`base` to `base + 31`), for a
-    /// stateless filter that must accept a receiver's keepalives to them
-    /// (dstack #262); the OS picks free ones unless set. Clear of the RX
-    /// flows' ports and of every slot's ARC, flow-control and CMC ports
-    /// (4440-4486, 8800-8831), or the config is refused.
+    /// The TX flows' ports from `base` (`base` to `base + 31`). Unset, the
+    /// device takes its slot's TX block (its RX block + 32, dstack #264).
+    /// Clear of the RX flows' ports and of every slot's ARC, flow-control
+    /// and CMC ports (4440-4486, 8800-8831), or the config is refused;
+    /// outside 29800-31847 a start WARN.
     pub fn tx_port_base(mut self, base: u16) -> Self {
         self.tx_port_base = Some(base);
         self
