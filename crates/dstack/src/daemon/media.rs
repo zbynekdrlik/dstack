@@ -51,7 +51,7 @@ use tracing::{info, warn};
 use crate::arc::Running;
 use crate::clock::{ClockStats, PtpClock, to_samples};
 use crate::ctl::{Checks, Limits, Playout, Requests};
-use crate::device::{Device, DeviceConfig};
+use crate::device::Device;
 use crate::flows::client::Client;
 use crate::flows::control::op;
 use crate::info::{Changes, Sources};
@@ -142,7 +142,11 @@ impl Media {
     /// RX side (32 flow sockets on `ip`), and the manager with the state file's
     /// subscriptions (their statuses the baseline of its first `changed`).
     /// Fails when a socket cannot be bound, or for an `engine_tx` index the
-    /// device lacks (`InvalidInput`).
+    /// device lacks (`InvalidInput`). The flow sockets bind the config's
+    /// `rx_port_base` / `tx_port_base`; a device the host starts always has
+    /// both (its slot's block by default, `host::prepare_on`, dstack #264),
+    /// and only a test that builds the media side itself leaves one unset,
+    /// for ports the OS chooses.
     pub fn new(
         device: &Device,
         ip: Ipv4Addr,
@@ -175,13 +179,6 @@ impl Media {
             let rx = rx_side()?;
             (rx, tx_side()?)
         };
-        for key in unnamed_flow_ports(cfg) {
-            warn!(
-                "{key} unset: the OS chose this device's flow ports, which a Dante-leg \
-                 filter cannot name (docs/two-networks.md; fixed ports by default come \
-                 with dstack #264)"
-            );
-        }
         tx.recreate_multicast(&device.state.multicast);
         let mut manager = Manager::new(cfg, &device.state.name, ip, rx.ports()?);
         manager.load(&device.state.subscriptions);
@@ -677,21 +674,6 @@ impl Driver {
             }
         }
     }
-}
-
-/// The flow-port keys a device left unset while it has channels in that
-/// direction (`rx_port_base`, `tx_port_base`): its flow sockets there take
-/// ports the OS chooses, which no filter rule can name (dstack #262; the
-/// same hit a receiver's RX on 13.11.2026). Warned at start.
-fn unnamed_flow_ports(cfg: &DeviceConfig) -> Vec<&'static str> {
-    let mut keys = Vec::new();
-    if !cfg.rx.is_empty() && cfg.rx_port_base.is_none() {
-        keys.push("rx_port_base");
-    }
-    if !cfg.tx.is_empty() && cfg.tx_port_base.is_none() {
-        keys.push("tx_port_base");
-    }
-    keys
 }
 
 /// Whether the TX flow sockets bind before the RX ones: only when the TX
