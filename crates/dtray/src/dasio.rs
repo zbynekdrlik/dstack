@@ -25,13 +25,17 @@
 //! - [`plan`]: what an apply does (the live write, the new file, whether
 //!   the DAW must release the driver first).
 //! - [`banner`], [`status_line`], [`daw_attached`], [`verify`]: the
-//!   window's texts and the apply's checks against the device's status.
+//!   window's texts and the apply's checks against the device's status;
+//!   [`Restart`] and [`shown_status`]: "Restarting…" while an apply's
+//!   restart keeps the device away.
 //! - [`install`]: the elevated helper's write of a new file into an
 //!   instance's folder.
 
 use std::collections::BTreeSet;
 use std::ffi::OsString;
+use std::ops::Sub;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use dstack::device::DeviceConfig;
 use serde_json::Value;
@@ -545,6 +549,42 @@ pub fn status_line(status: &Result<String, String>) -> String {
     let ready = if s.ready { "ready" } else { "not ready" };
     out.push_str(&format!(" · clock: {source} {ready}"));
     out
+}
+
+/// How long the status line keeps saying "Restarting…" after the device
+/// went away during an apply's restart (dasio takes about 20 s); then the
+/// real reason shows.
+pub const RESTART_WAIT: Duration = Duration::from_secs(60);
+
+/// An apply's restart as the status line follows it, from the elevated
+/// helper's start. `T` is the time (`Instant` in the window).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Restart<T> {
+    /// When the device was first missed (`None`: still up, the helper has
+    /// not restarted it yet).
+    pub gone: Option<T>,
+}
+
+impl<T: Copy + Sub<Output = Duration>> Restart<T> {
+    /// The helper started.
+    pub fn started() -> Self {
+        Restart { gone: None }
+    }
+
+    /// The restart after one reading at `now` (`found`: the device's
+    /// status was read; `applying`: the apply still runs); `None` when it
+    /// is over.
+    pub fn next(self, found: bool, applying: bool, now: T) -> Option<Self> {
+        let _ = (found, applying, now);
+        None
+    }
+}
+
+/// The status line of a tab: "Restarting…" while its device is missing
+/// during a restart, else [`status_line`].
+pub fn shown_status(status: &Result<String, String>, restarting: bool) -> String {
+    let _ = restarting;
+    status_line(status)
 }
 
 /// The app part's field `key` of a status line.

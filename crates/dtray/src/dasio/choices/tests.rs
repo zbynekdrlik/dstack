@@ -187,3 +187,71 @@ fn the_interfaces_offer_the_installed_one_the_adapters_and_a_missing_alias() {
     assert_eq!(gone[2].text, "Old (not found)");
     assert_eq!(gone[2].value.as_deref(), Some("Old"));
 }
+
+#[test]
+fn an_address_carries_dante_unless_loopback_link_local_or_unspecified() {
+    for ip in [
+        [10, 0, 0, 1],
+        [192, 168, 1, 2],
+        [126, 255, 255, 255],
+        [128, 0, 0, 1],
+        [169, 253, 255, 255],
+        [169, 255, 0, 1],
+        [0, 0, 0, 1],
+    ] {
+        assert!(carries_dante(Ipv4Addr::from(ip)), "{ip:?}");
+    }
+    for ip in [
+        [127, 0, 0, 1],
+        [127, 255, 255, 254],
+        [169, 254, 0, 1],
+        [169, 254, 255, 255],
+        [0, 0, 0, 0],
+    ] {
+        assert!(!carries_dante(Ipv4Addr::from(ip)), "{ip:?}");
+    }
+}
+
+#[test]
+fn the_interfaces_leave_out_loopback_and_link_local_only_adapters() {
+    let all = [
+        adapter("Loopback Pseudo-Interface 1", Some([127, 0, 0, 1]), None),
+        adapter("APIPA", Some([169, 254, 3, 4]), None),
+        adapter("Zero", Some([0, 0, 0, 0]), None),
+        adapter("A", Some([10, 0, 0, 1]), None),
+    ];
+    assert_eq!(
+        texts(&interfaces(&all, None, None)),
+        ["As installed", "A · A card · 10.0.0.1"]
+    );
+    // A configured adapter the list leaves out stays, marked: a rename or
+    // a lost DHCP lease never changes the setting silently.
+    let set = interfaces(&all, Some("APIPA"), None);
+    assert_eq!(
+        texts(&set),
+        ["A · A card · 10.0.0.1", "APIPA (no Dante address)"]
+    );
+    assert_eq!(set[1].value.as_deref(), Some("APIPA"));
+    assert_eq!(index_of(&set, &Some("APIPA".to_string())), 1);
+    let gone = interfaces(&all, Some("Old"), None);
+    assert_eq!(texts(&gone), ["A · A card · 10.0.0.1", "Old (not found)"]);
+}
+
+#[test]
+fn an_adapter_shows_its_dante_address_before_a_link_local_one() {
+    let a = Adapter {
+        alias: "B".into(),
+        description: String::new(),
+        addresses: vec![Ipv4Addr::new(169, 254, 1, 1), Ipv4Addr::new(10, 0, 0, 5)],
+        mbit: None,
+    };
+    assert_eq!(adapter_text(&a), "B · 10.0.0.5");
+    assert_eq!(texts(&interfaces(&[a], Some("B"), None)), ["B · 10.0.0.5"]);
+    let only = Adapter {
+        alias: "C".into(),
+        description: String::new(),
+        addresses: vec![Ipv4Addr::new(169, 254, 1, 1)],
+        mbit: None,
+    };
+    assert_eq!(adapter_text(&only), "C · 169.254.1.1");
+}

@@ -150,6 +150,14 @@ pub struct Adapter {
     pub mbit: Option<u64>,
 }
 
+/// Whether `ip` can carry Dante: not loopback (Windows' "Loopback
+/// Pseudo-Interface 1"), not link-local (169.254/16, an adapter without a
+/// DHCP answer) and not unspecified.
+pub fn carries_dante(ip: Ipv4Addr) -> bool {
+    let _ = ip;
+    true
+}
+
 /// An adapter as the list shows it: the alias, then its description, its
 /// IPv4 address and its speed where known.
 pub fn adapter_text(a: &Adapter) -> String {
