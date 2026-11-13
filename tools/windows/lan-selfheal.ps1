@@ -483,7 +483,11 @@ function Repair-LegacyEmergency {
         }
         $rules += $r
     }
-    if ($LegacyBlockRule) {
+    # By the config's name only while an emergency rule is on (the old path
+    # ran): a broad rule someone disabled for another reason stays as it is.
+    $emergencyOn = @($script:LegacyRuleNames | Where-Object {
+            Test-RuleEnabled -Rule @(Get-NetFirewallRule -Name $_ -ErrorAction SilentlyContinue)[0] })
+    if ($LegacyBlockRule -and $emergencyOn.Count -gt 0) {
         $rules += @(Get-NetFirewallRule -DisplayName $LegacyBlockRule -ErrorAction SilentlyContinue |
             Where-Object { $_.DisplayName -eq $LegacyBlockRule })
     }
@@ -544,9 +548,14 @@ function Invoke-Check {
             catch { Write-HealLog -Path $log -Message "state file unreadable, counting from 0: $($_.Exception.Message)" }
         }
         Write-IgnoredKeys -Config $cfg -Log $log
-        # Before anything that can throw: a dstack155 rule left disabled is
-        # never left so (#239).
-        $legacyCode = Repair-LegacyEmergency -State $state -Log $log -LegacyBlockRule $cfg.LegacyBlockRule | Select-Object -Last 1
+        # Before the LAN check, LAN up or down: a dstack155 rule left
+        # disabled is never left so (#239). Its failure never stops the heal.
+        try {
+            $legacyCode = Repair-LegacyEmergency -State $state -Log $log -LegacyBlockRule $cfg.LegacyBlockRule | Select-Object -Last 1
+        } catch {
+            Write-HealLog -Path $log -Message "ERROR legacy emergency path: $($_.Exception.Message)"
+            $legacyCode = 1
+        }
         $adapters = Resolve-HealAdapters -Config $cfg
         if ($null -eq $adapters.Dante) {
             Write-HealLog -Path $log -Message "WARN no adapter named '$($cfg.DanteAdapter)': the LAN adapter is checked by its exact name"

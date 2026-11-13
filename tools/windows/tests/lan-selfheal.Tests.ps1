@@ -57,6 +57,7 @@ function Reset-Fake {
         # The firewall store (0.6.109's legacy cleanup, #239): rules by Name.
         Fw           = New-Object System.Collections.ArrayList
         FwStuck      = ''       # a rule Name that stays disabled when enabled
+        FwThrow      = ''       # 'Get' or 'Enable': that firewall cmdlet throws
     }
 }
 function Add-FakeRule {
@@ -65,12 +66,14 @@ function Add-FakeRule {
 }
 function Get-NetFirewallRule {
     [CmdletBinding()] param([string]$Name, [string]$DisplayName)
+    if ($script:Fake.FwThrow -eq 'Get') { throw 'fake CIM failure in Get-NetFirewallRule' }
     if ($Name) { return @($script:Fake.Fw | Where-Object { $_.Name -eq $Name }) }
     @($script:Fake.Fw | Where-Object { $_.DisplayName -like $DisplayName })
 }
 function Enable-NetFirewallRule {
     [CmdletBinding()] param([string]$Name)
     Note 'Enable-NetFirewallRule' $Name
+    if ($script:Fake.FwThrow -eq 'Enable') { throw 'fake failure in Enable-NetFirewallRule' }
     if ($script:Fake.FwStuck -eq $Name) { return }
     @($script:Fake.Fw | Where-Object { $_.Name -eq $Name }) | ForEach-Object { $_.Enabled = 'True' }
 }
@@ -477,6 +480,34 @@ try {
         $d = NewRun 'legacynone' $legacyCfg
         $rc = Invoke-Check -Dir $d
         $rc -eq 0 -and @($script:Fake.Calls | Where-Object { $_ -match '^(Enable|Remove)-NetFirewallRule' }).Count -eq 0
+    }
+    Check 'a broad rule disabled with no emergency rule on is not enabled by the config name' {
+        Reset-Fake; Add-FakeRule '{blk}' 'Dante70: block TCP Inbound' 'False'
+        $d = NewRun 'legacyunrelated' $legacyCfg
+        $rc = Invoke-Check -Dir $d
+        $rc -eq 0 -and (FwState) -eq '{blk}=False' -and @(FwCalls).Count -eq 0
+    }
+    Check 'an Enable that throws: ERROR, emergency rules kept, exit 1, the LAN still checked' {
+        Reset-Fake; Legacy; $script:Fake.FwThrow = 'Enable'
+        $d = NewRun 'legacythrow' $good '{"failures":0,"emergencyRule":"{blk}"}'
+        $rc = Invoke-Check -Dir $d
+        $rc -eq 1 -and @($script:Fake.Fw).Count -eq 3 -and (LogOf $d) -match "ERROR legacy emergency path: 'Dante70: block TCP Inbound' not enabled again" -and
+        (LogOf $d) -match 'gateway ok'
+    }
+    Check 'a firewall read that throws never stops the LAN repair' {
+        Reset-Fake; $script:Fake.FwThrow = 'Get'; $script:Fake.Status = 'Disabled'; $script:Fake.Addresses = @()
+        $d = NewRun 'legacyget' $good '{"failures":2,"emergencyRule":"{blk}"}'
+        $rc = Invoke-Check -Dir $d
+        $rc -eq 1 -and (@(Changes) -contains 'Enable-NetAdapter LAN') -and (LogOf $d) -match 'ERROR legacy emergency path: fake CIM failure' -and
+        (StateOf $d).emergencyRule -eq '{blk}'
+    }
+    Check 'the ignored-keys line (also written at install) names each key' {
+        Reset-Fake
+        $d = NewRun 'legacyignored' $null
+        Write-IgnoredKeys -Config (Read-HealConfig -Json $legacyCfg) -Log (Join-Path $d 'lan-selfheal.log')
+        Write-IgnoredKeys -Config (Read-HealConfig -Json $good) -Log (Join-Path $d 'lan-selfheal.log')
+        @((LogOf $d) -split "`n" | Where-Object { $_ -match 'ignored' }).Count -eq 1 -and
+        (LogOf $d) -match "'emergencySource', 'emergencyPort', 'danteBlockRule' ignored"
     }
     Check 'uninstall enables a left-disabled rule and removes the emergency rules' {
         Reset-Fake; Legacy
