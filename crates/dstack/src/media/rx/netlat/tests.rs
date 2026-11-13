@@ -83,9 +83,9 @@ fn a_window_takes_min_p99_and_max_and_starts_again_empty() {
     assert_eq!(
         w.last(),
         Some(NetLatency {
-            min_ns: 350_000,
-            p99_ns: 420_000,
-            max_ns: 2_500_000,
+            min_us: 350,
+            p99_us: 420,
+            max_us: 2_500,
         })
     );
     // The next window is its own: one packet at 5.2 ms (past the buckets).
@@ -94,12 +94,40 @@ fn a_window_takes_min_p99_and_max_and_starts_again_empty() {
     assert_eq!(
         w.last(),
         Some(NetLatency {
-            min_ns: 5_200_000,
-            p99_ns: 5_200_000,
-            max_ns: 5_200_000,
+            min_us: 5_200,
+            p99_us: 5_200,
+            max_us: 5_200,
         })
     );
     // A second without a packet has none.
     w.take();
     assert_eq!(w.last(), None);
+}
+
+/// dstack #244 (review): a window's three figures go in one word, so a
+/// status read never mixes two windows; each is µs, at most 2.1 s.
+#[test]
+fn the_three_figures_pack_into_one_word_and_back() {
+    let n = NetLatency::unpack(NetLatency::pack(350_999, 420_000, 2_500_001));
+    assert_eq!(
+        n,
+        NetLatency {
+            min_us: 350,
+            p99_us: 420,
+            max_us: 2_500,
+        }
+    );
+    assert_eq!(NetLatency::pack(1_000, 0, 0), 1);
+    assert_eq!(NetLatency::pack(0, 1_000, 0), 1 << 21);
+    assert_eq!(NetLatency::pack(0, 0, 1_000), 1 << 42);
+    // Past 2.1 s each is held at MAX_US, never into its neighbour.
+    assert_eq!(MAX_US, 2_097_151);
+    let big = NetLatency::unpack(NetLatency::pack(u64::MAX, u64::MAX, u64::MAX));
+    assert_eq!(
+        (big.min_us, big.p99_us, big.max_us),
+        (MAX_US, MAX_US, MAX_US)
+    );
+    assert_ne!(NetLatency::pack(u64::MAX, u64::MAX, u64::MAX), NONE);
+    let lone = NetLatency::unpack(NetLatency::pack(0, u64::MAX, 0));
+    assert_eq!((lone.min_us, lone.p99_us, lone.max_us), (0, MAX_US, 0));
 }

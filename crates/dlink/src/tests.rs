@@ -1,5 +1,7 @@
 use super::*;
 
+use dstack::clock::latency_samples;
+
 mod start;
 mod terms;
 

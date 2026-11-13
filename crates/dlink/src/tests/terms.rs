@@ -6,6 +6,7 @@
 use super::*;
 
 use Directions::{Both, Rx, Tx};
+use dstack::stream::{BLOCKS, MAX_WORK_MARGIN};
 
 fn rx_only(name: &str, app: u32, net: u32) -> Config {
     Config::new(name, "/tmp/never-written.toml")
@@ -418,4 +419,174 @@ fn obs_s_device_at_its_old_20_ms_numbers_in_terms() {
     assert_eq!(s.latency_ns, 11_364_583);
     assert_eq!(s.rx_path_ns, 13_322_916);
     assert_eq!(s.tx_path_ns, 19_999_999);
+}
+
+/// v0.6.105's `split` at its default 15 ms budget, kept verbatim (only
+/// renamed) as the reference the defaults must reproduce (dstack #244):
+/// `(P ns, W samples, TX path ns, RX path ns)`, or its refusal.
+fn v0_6_105_split(
+    device_rate: u32,
+    app_rate: u32,
+    block: u64,
+    directions: Directions,
+) -> Result<(u64, u64, u64, u64), String> {
+    const BUDGET_NS: u64 = 15_000_000;
+    let work_margin = |rate: u32, block: u64| {
+        latency_samples(BUDGET_NS / 5 * 2, rate)
+            .min(MAX_WORK_MARGIN)
+            .max(least_work_margin(rate, block))
+    };
+    let rx_work_margin = |rate: u32, block: u64| {
+        latency_samples(BUDGET_NS, rate)
+            .min(MAX_WORK_MARGIN)
+            .max(least_work_margin(rate, block))
+    };
+    if device_rate == 0 {
+        return Err("sample_rate: the device's rate is 0 Hz".to_string());
+    }
+    let b = if BLOCKS.contains(&block) {
+        block
+    } else {
+        BLOCK
+    };
+    let (convert_rx, convert_tx) =
+        rated::delay_ns(device_rate, app_rate, usize::try_from(b).unwrap())
+            .map_err(|e| format!("rate conversion: {e}"))?;
+    let rate = u128::from(device_rate);
+    let ns = |samples: u64| (u128::from(samples) * 1_000_000_000 / rate) as u64;
+    let samples_in = |ns: u64| (u128::from(ns) * rate / 1_000_000_000) as u64;
+    let (margin, floor) = if directions == Directions::Rx {
+        (rx_work_margin(device_rate, b), MIN_LATENCY_NS)
+    } else {
+        let floor = tx_floor_ns(device_rate);
+        let room = BUDGET_NS.saturating_sub(convert_tx + floor);
+        let margin = work_margin(device_rate, b)
+            .min(samples_in(room).saturating_sub(1))
+            .max(least_work_margin(device_rate, b));
+        (margin, floor)
+    };
+    let tx_work = ns(margin) + convert_tx;
+    let rx_work = ns(b) + convert_rx;
+    let work = match directions {
+        Directions::Both => tx_work.max(rx_work),
+        Directions::Rx => rx_work,
+        Directions::Tx => tx_work,
+    };
+    let latency_ns = ns(samples_in(BUDGET_NS.saturating_sub(work)));
+    if latency_ns < floor {
+        return Err(format!("budget_ns: under the floor {floor}"));
+    }
+    Ok((
+        latency_ns,
+        margin,
+        tx_work + latency_ns,
+        rx_work + latency_ns,
+    ))
+}
+
+/// dstack #244 (review): the defaults reproduce v0.6.105 exactly, P, W
+/// and both paths, over every device rate of the site and the PCs, the
+/// app rates around them, every block and all three directions; W gives
+/// way to P's TX floor where the old budget made it. A config v0.6.105
+/// refused for its budget now starts at P's floor, with the same W.
+#[test]
+fn the_defaults_reproduce_v0_6_105_over_the_whole_grid() {
+    let mut refused_before = 0;
+    for dev in [44_100, 48_000, 88_200, 96_000] {
+        for app in [
+            8_000, 11_025, 16_000, 22_050, 24_000, 32_000, 44_100, 48_000, 88_200, 96_000, 176_400,
+            192_000,
+        ] {
+            for block in BLOCKS {
+                for dir in [Both, Rx, Tx] {
+                    let at = format!("{dev} {app} {block} {dir:?}");
+                    let new = split(Terms::default(), dev, app, block, dir);
+                    match v0_6_105_split(dev, app, block, dir) {
+                        Ok((p, w, tx, rx)) => {
+                            let s = new.unwrap_or_else(|e| panic!("{at}: {e}"));
+                            assert_eq!(
+                                (s.latency_ns, s.margin, s.tx_path_ns, s.rx_path_ns),
+                                (p, w, tx, rx),
+                                "{at}"
+                            );
+                        }
+                        Err(e) if e.starts_with("budget_ns") => {
+                            refused_before += 1;
+                            let s = new.unwrap_or_else(|e| panic!("{at}: {e}"));
+                            let floor = if dir == Rx {
+                                MIN_LATENCY_NS
+                            } else {
+                                tx_floor_ns(dev)
+                            };
+                            assert!(s.latency_ns >= floor, "{at}: {s:?}");
+                            assert!(
+                                s.latency_ns - floor < 1_000_000_000 / u64::from(dev),
+                                "{at}: {s:?}"
+                            );
+                        }
+                        Err(e) => assert_eq!(new.unwrap_err(), e, "{at}"),
+                    }
+                }
+            }
+        }
+    }
+    // The grid holds such configs (8, 11.025 and 16 kHz apps, for one).
+    assert!(refused_before > 0);
+}
+
+/// dstack #244 (review): an app that sets only (a), under the default 1 ms,
+/// on a config whose default P sits one sample over the TX floor (a
+/// 22.05 kHz app on a 96 kHz network: W gives way, P 4.59375 ms, (b)
+/// 3.59375 ms) moves P down with it only to the floor: the default (b)
+/// grows there, never refused for a (b) the app did not set.
+#[test]
+fn a_small_network_latency_alone_never_takes_the_default_p_under_its_floor() {
+    let d = split(Terms::default(), 96_000, 22_050, 128, Both).unwrap();
+    assert_eq!((d.latency_ns, d.receive_buffer_ns), (4_593_750, 3_593_750));
+    for (a, p) in [
+        (0, 4_583_333),
+        (250_000, 4_583_333),
+        (989_583, 4_583_333),
+        (999_999, 4_593_750),
+    ] {
+        let t = Terms {
+            network_latency_ns: Some(a),
+            ..Terms::default()
+        };
+        let s = split(t, 96_000, 22_050, 128, Both).unwrap();
+        assert_eq!(s.latency_ns, p, "{a}");
+        assert_eq!(s.network_latency_ns + s.receive_buffer_ns, s.latency_ns);
+    }
+    // Over 1 ms it moves P by the difference.
+    let t = Terms {
+        network_latency_ns: Some(2_000_000),
+        ..Terms::default()
+    };
+    assert_eq!(
+        split(t, 96_000, 22_050, 128, Both).unwrap().latency_ns,
+        5_593_750
+    );
+}
+
+/// dstack #244 (review): a (b) the app set off a whole sample is logged as
+/// set and rounded, so the line never hides the rounding.
+#[test]
+fn a_receive_buffer_off_a_whole_sample_is_logged_as_rounded_up() {
+    let c = Config::new("rx", "/tmp/never-written.toml")
+        .rx(["In"])
+        .receive_buffer_ns(3_000_001);
+    assert_eq!(
+        c.split().unwrap().lines(c.directions(), c.terms())[0],
+        "Dante latency P 4.020833 ms = network latency (a) 1 ms (default) + receive buffer \
+         (b) 3.020833 ms (set 3.000001 ms, rounded up to whole samples)"
+    );
+    // On a whole sample it reads "set".
+    let whole = c.clone().receive_buffer_ns(3_000_000);
+    assert!(
+        whole
+            .split()
+            .unwrap()
+            .lines(whole.directions(), whole.terms())[0]
+            .ends_with("(b) 3 ms (set)")
+    );
 }

@@ -14,8 +14,13 @@
 //! bucket as it reads it; a packet recorded meanwhile counts in this window
 //! or the next, never in both.
 //!
-//! Only differences of one clock's reads go into the arrival (as for
-//! `wire_late`), so the wall clock's offset from PTP does not matter.
+//! The figure is the packet's age when the kernel received it, measured
+//! from its first frame: the network's transit plus the sender's own part
+//! (the packet's frames, which exist only once its last frame does, and
+//! how late the sender sent it). It is an upper bound on the transit, the
+//! figure to set (a) and (b) against. Only differences of one clock's
+//! reads go into the arrival (as for `wire_late`), so the wall clock's
+//! offset from PTP does not matter.
 //! Windows has no receive stamp: nothing is recorded there.
 
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -42,12 +47,37 @@ pub fn bucket(ns: u64) -> usize {
     usize::try_from(ns / BUCKET_NS).map_or(BUCKETS, |b| b.min(BUCKETS))
 }
 
-/// One window's least, 99th percentile and largest network latency, ns.
+/// One window's least, 99th percentile and largest network latency, µs
+/// (each at most 2.1 s, `MAX_US`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NetLatency {
-    pub min_ns: u64,
-    pub p99_ns: u64,
-    pub max_ns: u64,
+    pub min_us: u64,
+    pub p99_us: u64,
+    pub max_us: u64,
+}
+
+/// The largest figure a window keeps, µs (21 bits, 2.1 s): three fit one
+/// atomic, so a reader never mixes two windows' figures.
+pub const MAX_US: u64 = (1 << 21) - 1;
+
+impl NetLatency {
+    /// The three figures of `ns` values as µs in one word: min in the low
+    /// 21 bits, then p99, then max, each at most `MAX_US` (2.1 s).
+    pub fn pack(min_ns: u64, p99_ns: u64, max_ns: u64) -> u64 {
+        let us = |ns: u64| (ns / 1_000).min(MAX_US);
+        // Disjoint fields, so `+` is the same as `|` (tests.md: `|` leaves
+        // an equivalent `^` mutant); 63 bits, no overflow.
+        us(min_ns) + (us(p99_ns) << 21) + (us(max_ns) << 42)
+    }
+
+    /// The figures `NetLatency::pack` put in `word`.
+    pub fn unpack(word: u64) -> Self {
+        NetLatency {
+            min_us: word & MAX_US,
+            p99_us: (word >> 21) & MAX_US,
+            max_us: (word >> 42) & MAX_US,
+        }
+    }
 }
 
 /// The 99th percentile of a window's `counts` (one per bucket, the last
@@ -78,11 +108,9 @@ pub struct Window {
     counts: [AtomicU32; BUCKETS + 1],
     min_ns: AtomicU64,
     max_ns: AtomicU64,
-    /// The last take's figures; `last_min_ns` is [`NONE`] after a window
-    /// with no packet.
-    last_min_ns: AtomicU64,
-    last_p99_ns: AtomicU64,
-    last_max_ns: AtomicU64,
+    /// The last take's figures in one word (`NetLatency::pack`); [`NONE`]
+    /// after a window with no packet.
+    last: AtomicU64,
 }
 
 impl Default for Window {
@@ -91,9 +119,7 @@ impl Default for Window {
             counts: std::array::from_fn(|_| AtomicU32::new(0)),
             min_ns: AtomicU64::new(NONE),
             max_ns: AtomicU64::new(0),
-            last_min_ns: AtomicU64::new(NONE),
-            last_p99_ns: AtomicU64::new(0),
-            last_max_ns: AtomicU64::new(0),
+            last: AtomicU64::new(NONE),
         }
     }
 }
@@ -113,24 +139,17 @@ impl Window {
             std::array::from_fn(|b| self.counts[b].swap(0, Ordering::Relaxed));
         let min = self.min_ns.swap(NONE, Ordering::Relaxed);
         let max = self.max_ns.swap(0, Ordering::Relaxed);
-        match p99(&counts, min, max) {
-            Some(p) if min != NONE => {
-                self.last_p99_ns.store(p, Ordering::Relaxed);
-                self.last_max_ns.store(max, Ordering::Relaxed);
-                self.last_min_ns.store(min, Ordering::Relaxed);
-            }
-            _ => self.last_min_ns.store(NONE, Ordering::Relaxed),
-        }
+        let last = match p99(&counts, min, max) {
+            Some(p) if min != NONE => NetLatency::pack(min, p, max),
+            _ => NONE,
+        };
+        self.last.store(last, Ordering::Relaxed);
     }
 
     /// The last window's figures; `None` for a window without a packet.
     pub fn last(&self) -> Option<NetLatency> {
-        let min_ns = self.last_min_ns.load(Ordering::Relaxed);
-        (min_ns != NONE).then(|| NetLatency {
-            min_ns,
-            p99_ns: self.last_p99_ns.load(Ordering::Relaxed),
-            max_ns: self.last_max_ns.load(Ordering::Relaxed),
-        })
+        let word = self.last.load(Ordering::Relaxed);
+        (word != NONE).then(|| NetLatency::unpack(word))
     }
 }
 
