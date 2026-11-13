@@ -104,7 +104,7 @@ pub mod client;
 pub mod limit;
 mod server;
 pub mod share;
-pub mod unanswered;
+pub(crate) mod unanswered;
 
 pub use server::{
     Levels, Multicast, Sources, follower_of, serve_info, serve_info_with, serve_member,
@@ -301,7 +301,7 @@ pub struct Request {
 
 /// Whether `datagram` is a request the device never answers (an opcode
 /// it does not know), which the server counts ([`unanswered`]).
-pub fn never_answered(datagram: &[u8]) -> bool {
+pub(crate) fn never_answered(datagram: &[u8]) -> bool {
     parse_request(datagram).is_some_and(|r| r.kind == Kind::Unknown)
 }
 

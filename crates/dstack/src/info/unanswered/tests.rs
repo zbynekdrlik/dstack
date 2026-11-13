@@ -53,6 +53,10 @@ fn a_sender_s_opcode_is_told_once_then_counted_in_one_line_a_minute() {
     assert_eq!(minute.len(), 1, "{text}");
     assert!(minute[0].contains("requests=7"), "{text}");
     assert!(
+        minute[0].contains("peers=1=192.0.2.13,2=192.0.2.14"),
+        "{text}"
+    );
+    assert!(
         minute[0].contains(
             "peer 1 0x100a unanswered 5, peer 1 0x0099 unanswered 1, peer 2 0x100a unanswered 1"
         ),
@@ -66,11 +70,18 @@ fn a_sender_s_opcode_is_told_once_then_counted_in_one_line_a_minute() {
             u.record(later, A, &op(0x100a));
         }
         u.record(later + WINDOW, A, &op(0x100a));
+        // A new pair after the window: the window's line comes first.
+        u.record(later + WINDOW, B, &op(0x0099));
     });
-    assert!(lines(&text, FIRST).is_empty(), "{text}");
     let minute = lines(&text, MINUTE);
     assert_eq!(minute.len(), 1, "{text}");
     assert!(minute[0].contains("requests=3"), "{text}");
+    assert!(minute[0].contains("peers=1=192.0.2.13"), "{text}");
+    let first = lines(&text, FIRST);
+    assert_eq!(first.len(), 1, "{text}");
+    assert!(first[0].contains("op=0734009900000000 peer=2"), "{text}");
+    let at = |what: &str| text.find(what).unwrap();
+    assert!(at(MINUTE) < at(FIRST), "{text}");
 }
 
 #[test]
@@ -88,6 +99,28 @@ fn at_most_max_told_pairs_get_a_line_of_their_own() {
     let text = capture_at(tracing::Level::INFO, || u.flush(t + WINDOW));
     let want = format!("requests={}", MAX_TOLD + extra);
     assert!(lines(&text, MINUTE)[0].contains(&want), "{text}");
+    // That report cleared the full set: an old pair and a new one are
+    // told again.
+    let text = capture_at(tracing::Level::INFO, || {
+        u.record(t + WINDOW, A, &op(0));
+        u.record(t + WINDOW, B, &op(0));
+    });
+    assert_eq!(lines(&text, FIRST).len(), 2, "{text}");
+}
+
+#[test]
+fn a_report_of_a_set_not_full_keeps_it() {
+    let t = Instant::now();
+    let mut u = Unanswered::new();
+    for n in 0..MAX_TOLD - 1 {
+        u.record(t, A, &op(u16::try_from(n).unwrap()));
+    }
+    let text = capture_at(tracing::Level::INFO, || {
+        u.flush(t + WINDOW);
+        u.record(t + WINDOW, A, &op(0));
+    });
+    assert_eq!(lines(&text, MINUTE).len(), 1, "{text}");
+    assert!(lines(&text, FIRST).is_empty(), "{text}");
 }
 
 #[test]
