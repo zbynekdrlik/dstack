@@ -5,6 +5,7 @@ use crate::media::packet::write;
 use crate::media::tx::ns_of;
 use crate::wire::tests::Rng;
 
+mod reorder;
 mod source;
 
 const RATE: u32 = 96_000;
