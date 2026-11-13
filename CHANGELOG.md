@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.109
+
+- New (dstack #239): an emergency remote path in the Windows LAN self-heal task (`tools/windows/lan-selfheal.ps1`, docs/two-networks.md section 3). With the optional config key `emergencySource` (one IPv4 host, the admin machine's Dante address), a LAN leg down for the threshold also opens TCP `emergencyPort` (default 22) on the Dante adapter for that host only: the task enables two Block rules of its own (group `dstack emergency`, created on first use: TCP in on the Dante adapter from every other address, and from `emergencySource` on every other port), and only then disables the `dstack155` rule named by `danteBlockRule`. When the gateway answers again it enables that rule first, then disables the emergency rules, and every run with the LAN up restores that state. `danteBlockRule` is required with `emergencySource`; a name that is not exactly one inbound Block rule is refused and logged. Without `emergencySource` nothing changes and no firewall rule is read.
+- No Rust API change, no latency change.
+
 ## 0.6.108
 
 - Fix (dstack #246): the settings window's banner area showed its orange background with no text (seen on Windows with v0.6.107). It is the window's background until a change needs a restart, as in the mockup.
