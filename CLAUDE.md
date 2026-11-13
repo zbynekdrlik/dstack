@@ -2,7 +2,7 @@
 
 The one Dante expert project. All Dante code lives here: discovery, ARC, CMC, flows, media TX/RX, clock client, health. Applications depend on a tagged release by Cargo git tag; nobody keeps a copy or a local patch.
 
-Repo `zbynekdrlik/dstack` (renamed from dante-stack on 31.10.2026). Crates (v0.5.0, #68): `dstack` (the stack), `dstack-audio-io` (the engine-agnostic audio API), binary `dstack-dev`; consumers write `git = "https://github.com/zbynekdrlik/dstack"`. `dlink` is the part an application embeds (#68).
+Repo `zbynekdrlik/dstack` (renamed from dante-stack on 31.10.2026). Crates (v0.5.0, #68): `dstack` (the stack), `dstack-audio-io` (the engine-agnostic audio API), binary `dstack-dev`; consumers write `git = "https://github.com/zbynekdrlik/dstack"`. `dlink` is the part an application embeds (#68). `dstack-asio` hosts a local ASIO driver and bridges it to Dante (#243).
 
 - Names (owner 2.11.2026, #68): no "dante" in our project, crate, binary or thread names (dstack, dasio, dlink). The protocol stays "Dante" in docs and comments.
 - dlink needs no low latency (owner 2.11 and 4.11.2026): its default latency is the old 15 ms budget's (10 ms was never a cap; since v0.6.106, #244, set in named terms: network latency + receive buffer), and it never asks an application for real-time setup or CPU-core pinning (rtprio, SCHED_FIFO, special timers, affinity). Very low latency is only iemmixer (`low_latency`, gen3) and dasio (ASIO).
@@ -28,5 +28,6 @@ Start from `docs/HANDOVER.md`, then `docs/design/2026-10-30-shared-dstack.md`.
 - releases, versions, CHANGELOG, dependencies → `.claude/rules/release.md` (auto-loads on its `paths:`)
 - tests, whole-device tests, the mutation gate → `.claude/rules/tests.md` (auto-loads on its `paths:`)
 - Windows PCs' network legs, the vendor VLAN tool, the LAN self-heal task, PowerShell tools → `.claude/rules/windows-pcs.md` (auto-loads on its `paths:`)
+- the ASIO host and the Dante <-> ASIO bridge → `.claude/rules/asio.md` (auto-loads on its `paths:`)
 - ARC, what Dante Controller decides from our answers, DC checks on mbc → `.claude/rules/arc-dante-controller.md` (auto-loads on its `paths:`)
 - the app-clock bridge (FIFO target, priming, drift) → `.claude/rules/bridge.md` (auto-loads on its `paths:`)

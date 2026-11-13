@@ -120,3 +120,8 @@ version = "1.0.150"
 
 [dev-dependencies.test-log]
 version = "0.2.21"
+
+# dstack: its own workspace root, so cargo never searches above it (a checkout
+# nested in another dstack checkout, such as a git worktree, found that
+# workspace and refused this excluded path).
+[workspace]
