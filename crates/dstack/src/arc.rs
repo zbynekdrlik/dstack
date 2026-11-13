@@ -799,8 +799,9 @@ fn flows_2809(h: &Header, req: &[u8], cfg: &DeviceConfig, tx: &TxTable) -> ArcOu
 /// (the receiver's address, a multicast flow's group); the names
 /// descriptor (`0x0a00, 1`, the receiver's device and flow names, the
 /// flow's frames per packet (dstack #274: a real 2.7 card states each
-/// flow's; we wrote a fixed 0x10 up to v0.6.122), ours, 8 zeros); then the three names: ours `<flow>_<process>`, the
-/// receiver's device and flow names (cut to [`MAX_REMOTE_NAME`]). A reader
+/// flow's; we wrote a fixed 0x10 up to v0.6.122), ours, 8 zeros); then
+/// the three names: ours `<flow>_<process>`, the receiver's device and
+/// flow names (cut to [`MAX_REMOTE_NAME`]). A reader
 /// follows the offsets. The page's item is the flow descriptor's offset.
 fn tx_flows(h: &Header, req: &[u8], cfg: &DeviceConfig, tx: &TxTable) -> ArcOutcome {
     page(

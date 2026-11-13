@@ -22,7 +22,7 @@ fn card_record_1() -> ([u8; 2], [u8; 4]) {
 
 /// The u16 at body offset `at`.
 fn word(body: &[u8], at: usize) -> usize {
-    usize::from(u16::from_be_bytes([body[at], body[at + 1]]))
+    usize::from(read_u16(body, at).unwrap())
 }
 
 #[test]
