@@ -35,7 +35,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::arc::client::ReadError;
 use crate::arc::control::Settings;
@@ -258,15 +258,19 @@ pub struct Reader {
 }
 
 impl Drop for Reader {
-    /// Stops the thread and waits for it (at most one read's reply
-    /// timeout): it holds the TX side, whose fixed flow ports a device
-    /// started again in the same process binds next (dstack #264; with
-    /// the OS's ports a held socket went unseen).
+    /// Stops the thread and waits for it: it holds the TX side, whose
+    /// fixed flow ports a device started again in the same process binds
+    /// next (dstack #264; with the OS's ports a held socket went unseen).
+    /// The wait is at most one read's reply timeout (1 s), on the caller's
+    /// thread: the device's serving ends with it, at the stop only. A
+    /// thread that panicked is logged.
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
         if let Some(thread) = self.thread.take() {
             thread.thread().unpark();
-            let _ended = thread.join();
+            if thread.join().is_err() {
+                warn!("the receivers' latency reader had panicked");
+            }
         }
     }
 }

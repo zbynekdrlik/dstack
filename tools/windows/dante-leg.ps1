@@ -14,12 +14,14 @@
 #     13.11.2026, #239); TCP out, except to remote 22 and 8092 (an admin host
 #     reaching another PC). A reply on an accepted connection is not filtered:
 #     the firewall is stateful.
-#   - UDP in, except to Dante's standard ports and the dstack flow range, to
-#     Dante's multicast groups, and from remote port 5353 (mDNS answers) or 67
-#     (a DHCP server).
-#   - UDP in and out of Windows' own and Bonjour's mDNS hosts (svchost.exe,
+#   - UDP in, except to Dante's ports (Audinate's published ones and the
+#     dstack flow range) and to Dante's multicast groups; on the OS's
+#     ephemeral ports (49152-65535) only from remote port 5353 (the unicast
+#     mDNS answers to a query sent to the group).
+#   - UDP in and out of Windows' own services' host and Bonjour's mDNS host
+#     (svchost.exe: mDNS, LLMNR, SSDP, WS-Discovery, the DHCP client;
 #     mDNSResponder.exe), so no non-Dante service announces or answers on the
-#     Dante leg.
+#     Dante leg. The Dante leg's address is static (docs/two-networks.md).
 # IGMP and ICMP are not filtered (no rule names them).
 #
 # Modes (from an elevated Windows PowerShell 5.1):
@@ -49,18 +51,22 @@ Set-StrictMode -Version 2.0
 
 $script:Group = 'dstack Dante leg'
 
-# Dante's standard ports and the dstack flow range: PTP 319/320, every slot's
-# ARC 4440-4471 and flow control 4455-4486, mDNS 5353, the info ports
-# 8700-8708 (8702/8708 groups), every slot's CMC 8800-8831, and the dstack
-# flow range (slot k: RX 29800+64k..+31, TX the next 32).
-$script:DanteUdpPorts = @('319-320', '4440-4486', '5353', '8700-8708', '8800-8831', '29800-31847')
+# Dante's ports and the dstack flow range: PTP 319/320, multicast audio 4321,
+# every slot's ARC 4440-4471 and flow control 4455-4486 (Audinate's 4440,
+# 4444, 4455 inside), mDNS 5353, the info ports 8700-8708 (8702/8708
+# groups), every slot's CMC 8800-8831, Audinate's unicast audio 14336-14591
+# (Dante Virtual Soundcard), and the dstack flow range (slot k: RX
+# 29800+64k..+31, TX the next 32).
+$script:DanteUdpPorts = @('319-320', '4321', '4440-4486', '5353', '8700-8708', '8800-8831', '14336-14591', '29800-31847')
 # Dante's multicast groups: link-local, PTP's 224.0.1.129-132, multicast audio.
 $script:DanteGroups = @('224.0.0.0-224.0.0.255', '224.0.1.129-224.0.1.132', '239.0.0.0-239.255.255.255')
 # Remote access on the Dante address (owner, 13.11.2026, #239).
 $script:RemoteTcpPorts = @('22', '8092')
-# Remote source ports whose UDP is let in: mDNS answers, a DHCP server.
-$script:UdpSourcePorts = @('67', '5353')
-# Non-Dante programs that announce or answer mDNS on every adapter.
+# The OS's ephemeral ports, and the remote port whose UDP may reach them
+# unasked: a device's unicast mDNS answer to a query sent to the group.
+$script:EphemeralPorts = @('49152-65535')
+$script:MdnsSourcePorts = @('5353')
+# Non-Dante programs that announce or answer on every adapter.
 $script:MdnsPrograms = @(
     '%SystemRoot%\System32\svchost.exe',
     '%ProgramFiles%\Bonjour\mDNSResponder.exe',
@@ -145,11 +151,20 @@ function Get-DanteLegRules {
             Direction   = 'Outbound'; Protocol = 'TCP'
             RemotePort  = Get-PortComplement -Ports $script:RemoteTcpPorts
         })
+    # The rules' conditions are ANDed, so two: every port but Dante's and
+    # the ephemeral ones from anywhere, the ephemeral ones from anything but
+    # remote port 5353.
     [void]$rules.Add([ordered]@{
             DisplayName  = "$($script:Group): UDP in"
             Direction    = 'Inbound'; Protocol = 'UDP'
-            LocalPort    = Get-PortComplement -Ports $script:DanteUdpPorts
-            RemotePort   = Get-PortComplement -Ports $script:UdpSourcePorts
+            LocalPort    = Get-PortComplement -Ports (@($script:DanteUdpPorts) + @($script:EphemeralPorts))
+            LocalAddress = Get-AddressComplement -Ranges $script:DanteGroups
+        })
+    [void]$rules.Add([ordered]@{
+            DisplayName  = "$($script:Group): UDP in, ephemeral ports"
+            Direction    = 'Inbound'; Protocol = 'UDP'
+            LocalPort    = $script:EphemeralPorts
+            RemotePort   = Get-PortComplement -Ports $script:MdnsSourcePorts
             LocalAddress = Get-AddressComplement -Ranges $script:DanteGroups
         })
     foreach ($program in $script:MdnsPrograms) {
@@ -232,7 +247,7 @@ function Get-GroupProblems {
 
 # A firewall profile that is off, one line each: the group does nothing there.
 function Get-ProfileProblems {
-    @(Get-NetFirewallProfile | Where-Object { "$($_.Enabled)" -ne 'True' } | ForEach-Object {
+    @(Get-NetFirewallProfile -PolicyStore ActiveStore | Where-Object { "$($_.Enabled)" -ne 'True' } | ForEach-Object {
             "the firewall profile '$($_.Name)' is off: the group does nothing there"
         })
 }
@@ -240,7 +255,9 @@ function Get-ProfileProblems {
 function Assert-Adapter {
     param([string]$Interface)
     if ($Interface -eq '') { throw '-InterfaceAlias <the Dante adapter> is required' }
-    $adapter = @(Get-NetAdapter -Name $Interface -ErrorAction SilentlyContinue)
+    # The cmdlets read * ? [ as wildcards: such a name could match several.
+    if ($Interface -match '[\*\?\[\]]') { throw "an adapter name with a wildcard character: '$Interface'" }
+    $adapter = @(Get-NetAdapter | Where-Object { $_.Name -eq $Interface })
     if ($adapter.Count -ne 1) { throw "no network adapter named '$Interface'" }
 }
 
@@ -254,23 +271,37 @@ function Write-Outcome {
     0
 }
 
-# Removes the groups $Remove and the script's own, then creates the group on
-# $Interface and reads it back. Output: report lines, the exit code last.
+# Creates the group on $Interface, then removes the rules it held before and
+# the groups $Remove, then reads it back. The new rules exist before any old
+# one goes, so a failure part way leaves the old filter in place (the rules
+# made so far are removed again). Output: report lines, the exit code last.
 function Install-DanteLeg {
     param([Parameter(Mandatory)][string]$Interface, [string[]]$Remove = @(), [string]$Enabled = 'True')
     Assert-Adapter -Interface $Interface
-    foreach ($old in @($Remove) + @($script:Group)) {
+    $before = @(Get-NetFirewallRule -Group $script:Group -ErrorAction SilentlyContinue)
+    $made = New-Object System.Collections.ArrayList
+    try {
+        foreach ($rule in Get-DanteLegRules) {
+            $params = @{}
+            foreach ($k in $rule.Keys) { $params[$k] = $rule[$k] }
+            $new = New-NetFirewallRule @params -Group $script:Group -Action Block -Enabled $Enabled `
+                -Profile Any -InterfaceAlias $Interface
+            [void]$made.Add($new)
+        }
+    } catch {
+        foreach ($r in $made) { $r | Remove-NetFirewallRule }
+        throw "the group was not created ($($_.Exception.Message)); the PC's rules are as before"
+    }
+    if ($before.Count -gt 0) {
+        $before | Remove-NetFirewallRule
+        "replaced the group's $($before.Count) earlier rules"
+    }
+    foreach ($old in @($Remove)) {
         $rules = @(Get-NetFirewallRule -Group $old -ErrorAction SilentlyContinue)
         if ($rules.Count -gt 0) {
             $rules | Remove-NetFirewallRule
             "removed group '$old' ($($rules.Count) rules)"
         }
-    }
-    foreach ($rule in Get-DanteLegRules) {
-        $params = @{}
-        foreach ($k in $rule.Keys) { $params[$k] = $rule[$k] }
-        New-NetFirewallRule @params -Group $script:Group -Action Block -Enabled $Enabled -Profile Any `
-            -InterfaceAlias $Interface | Out-Null
     }
     $problems = @(Get-GroupProblems -Interface $Interface -Enabled $Enabled) + @(Get-ProfileProblems)
     Write-Outcome -Problems $problems -Done "installed group '$($script:Group)' on '$Interface' ($(@(Get-DanteLegRules).Count) rules, read back)"

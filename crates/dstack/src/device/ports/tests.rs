@@ -39,19 +39,49 @@ fn unset_bases_are_the_slot_s_and_warn_nothing() {
 
 #[test]
 fn a_configured_base_wins_and_the_other_is_the_slot_s() {
+    // The device's own block, set by hand: no warning.
+    let b = flow_bases(Some(29_800), None, 4440).unwrap();
+    assert_eq!((b.rx, b.tx, b.slot), (29_800, 29_832, Some(0)));
+    assert!(b.warnings.is_empty(), "{:?}", b.warnings);
+    let b = flow_bases(None, Some(29_896), 4441).unwrap();
+    assert_eq!((b.rx, b.tx), (29_864, 29_896));
+    assert!(b.warnings.is_empty(), "{:?}", b.warnings);
+}
+
+#[test]
+fn a_configured_base_on_another_slot_s_block_is_warned() {
+    // A base set before #264 (30000) on a slot-0 device: slot 3's ports.
     let b = flow_bases(Some(30_000), None, 4440).unwrap();
-    assert_eq!((b.rx, b.tx, b.slot), (30_000, 29_832, Some(0)));
-    assert!(b.warnings.is_empty());
-    let b = flow_bases(None, Some(30_100), 4440).unwrap();
-    assert_eq!((b.rx, b.tx), (29_800, 30_100));
-    assert!(b.warnings.is_empty());
+    assert_eq!((b.rx, b.tx), (30_000, 29_832));
+    assert_eq!(
+        b.warnings,
+        [
+            "rx_port_base: its ports 30000-30031 are another slot's block, not this device's \
+          own (29800-29831); a device of ours in that slot on this address cannot start: \
+          remove the key, the default is the device's own block (docs/two-networks.md)"
+        ]
+    );
+    let b = flow_bases(None, Some(29_833), 4440).unwrap();
+    assert_eq!(b.warnings.len(), 1);
+    assert!(b.warnings[0].starts_with("tx_port_base: its ports 29833-29864 are another"));
+    // No slot: no own block to compare with.
+    let b = flow_bases(Some(30_000), Some(30_032), 5000).unwrap();
+    assert!(b.warnings.is_empty(), "{:?}", b.warnings);
+}
+
+#[test]
+#[should_panic(expected = "slot 32 past the 32 slots")]
+fn a_slot_past_the_last_has_no_block() {
+    let _ = slot_bases(PORT_SLOTS);
 }
 
 #[test]
 fn a_configured_block_leaving_the_range_at_either_end_is_warned() {
-    // Inside at both ends: no warning.
-    let inside = flow_bases(Some(FLOW_PORT_FIRST), Some(FLOW_PORT_LAST - 31), 4440).unwrap();
-    assert!(inside.warnings.is_empty(), "{:?}", inside.warnings);
+    // Inside at both ends (slot 0's RX, slot 31's TX): no warning.
+    let first = flow_bases(Some(FLOW_PORT_FIRST), None, 4440).unwrap();
+    assert!(first.warnings.is_empty(), "{:?}", first.warnings);
+    let last = flow_bases(None, Some(FLOW_PORT_LAST - 31), 4471).unwrap();
+    assert!(last.warnings.is_empty(), "{:?}", last.warnings);
     // One port below the first.
     let below = flow_bases(Some(FLOW_PORT_FIRST - 1), None, 4441).unwrap();
     assert_eq!(below.warnings.len(), 1);

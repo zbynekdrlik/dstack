@@ -375,7 +375,9 @@ fn fix_flow_ports(cfg: &mut DeviceConfig) -> Result<(), HostError> {
     for line in &bases.warnings {
         warn!("{line}");
     }
-    let last = |base: u16| u32::from(base) + crate::media::rx::MAX_FLOWS as u32 - 1;
+    // In range: flow_bases refuses blocks that overlap, and a configured
+    // base past 65535 is refused by the config's own check before this.
+    let last = |base: u16| crate::media::rx::last_port(base).unwrap_or(u16::MAX);
     info!(
         slot = ?bases.slot,
         rx_ports = format!("{}-{}", bases.rx, last(bases.rx)),

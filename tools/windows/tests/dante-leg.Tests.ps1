@@ -48,7 +48,8 @@ Check 'the TCP exception leaves ssh and the MCP open, as the dstack155 rule did'
 }
 Check 'the Dante UDP ports complement covers every other port' {
     Same (Get-PortComplement -Ports $script:DanteUdpPorts) @(
-        '1-318', '321-4439', '4487-5352', '5354-8699', '8709-8799', '8832-29799', '31848-65535')
+        '1-318', '321-4320', '4322-4439', '4487-5352', '5354-8699', '8709-8799', '8832-14335',
+        '14592-29799', '31848-65535')
 }
 Check 'overlapping and unsorted ranges merge, and the ends 1 and 65535 are kept' {
     (Same (Get-PortComplement -Ports @('10-20', '1', '15-30', '65535')) @('2-9', '31-65534')) -and
@@ -73,12 +74,21 @@ Check 'IPv4 numbers convert both ways at the ends' {
     ((ConvertFrom-IPv4Number 4294967295) -eq '255.255.255.255') -and
     ((ConvertFrom-IPv4Number (ConvertTo-IPv4Number '224.0.1.129')) -eq '224.0.1.129')
 }
-Check 'the group is nine Block rules: TCP in, TCP out, UDP in, and the mDNS hosts both ways' {
+Check 'the group is ten Block rules: TCP in and out, UDP in twice, the mDNS hosts both ways' {
     $rules = Get-DanteLegRules
     $names = @($rules | ForEach-Object { $_.DisplayName })
-    $rules.Count -eq 9 -and @($names | Select-Object -Unique).Count -eq 9 -and
+    $rules.Count -eq 10 -and @($names | Select-Object -Unique).Count -eq 10 -and
     @($rules | Where-Object { $_.Contains('Program') }).Count -eq 6 -and
-    @($rules | Where-Object { $_.Protocol -eq 'UDP' -and $_.Direction -eq 'Inbound' -and $_.Contains('LocalAddress') }).Count -eq 1
+    @($rules | Where-Object { $_.Protocol -eq 'UDP' -and $_.Direction -eq 'Inbound' -and $_.Contains('LocalAddress') }).Count -eq 2
+}
+Check 'UDP in: every port but Dante''s and the ephemeral ones, from anywhere' {
+    $r = @(Get-DanteLegRules | Where-Object { $_.DisplayName -like '*: UDP in' })[0]
+    (Same $r.LocalPort @('1-318', '321-4320', '4322-4439', '4487-5352', '5354-8699', '8709-8799',
+            '8832-14335', '14592-29799', '31848-49151')) -and -not $r.Contains('RemotePort')
+}
+Check 'UDP in on the ephemeral ports: from anything but remote port 5353' {
+    $r = @(Get-DanteLegRules | Where-Object { $_.DisplayName -like '*ephemeral ports' })[0]
+    (Same $r.LocalPort @('49152-65535')) -and (Same $r.RemotePort @('1-5352', '5354-65535'))
 }
 
 # --------------------------------------------------- the fake firewall
@@ -86,12 +96,15 @@ function Reset-Fake {
     $script:Store = New-Object System.Collections.ArrayList
     $script:Adapters = @('Dante70', 'LAN')
     $script:ProfilesOff = @()
+    $script:FailAt = 0
+    $script:Made = 0
 }
 function Get-NetAdapter {
-    param([string]$Name, $ErrorAction)
-    $script:Adapters | Where-Object { $_ -eq $Name } | ForEach-Object { [pscustomobject]@{ Name = $_ } }
+    $script:Adapters | ForEach-Object { [pscustomobject]@{ Name = $_ } }
 }
 function Get-NetFirewallProfile {
+    param([string]$PolicyStore)
+    if ($PolicyStore -ne 'ActiveStore') { throw "the profiles read from '$PolicyStore', not the active store" }
     'Domain', 'Private', 'Public' | ForEach-Object {
         [pscustomobject]@{ Name = $_; Enabled = if ($script:ProfilesOff -contains $_) { 'False' } else { 'True' } }
     }
@@ -99,13 +112,17 @@ function Get-NetFirewallProfile {
 function New-NetFirewallRule {
     param($DisplayName, $Direction, $Protocol, $LocalPort, $RemotePort, $LocalAddress, $Program,
         $Group, $Action, $Enabled, $Profile, $InterfaceAlias)
+    if ($script:FailAt -gt 0 -and $script:Made + 1 -eq $script:FailAt) { throw 'refused by the fake' }
+    $script:Made++
     $or = { param($v) if ($null -eq $v) { 'Any' } else { $v } }
-    [void]$script:Store.Add([pscustomobject]@{
-            DisplayName = $DisplayName; Group = $Group; Direction = $Direction; Action = $Action
-            Enabled = "$Enabled"; Protocol = $Protocol; LocalPort = (& $or $LocalPort)
-            RemotePort = (& $or $RemotePort); LocalAddress = (& $or $LocalAddress)
-            Program = (& $or $Program); InterfaceAlias = @($InterfaceAlias)
-        })
+    $rule = [pscustomobject]@{
+        Name = [guid]::NewGuid().ToString(); DisplayName = $DisplayName; Group = $Group
+        Direction = $Direction; Action = $Action; Enabled = "$Enabled"; Protocol = $Protocol
+        LocalPort = (& $or $LocalPort); RemotePort = (& $or $RemotePort)
+        LocalAddress = (& $or $LocalAddress); Program = (& $or $Program); InterfaceAlias = @($InterfaceAlias)
+    }
+    [void]$script:Store.Add($rule)
+    $rule
 }
 function Get-NetFirewallRule {
     param([string]$Group, $ErrorAction)
@@ -134,7 +151,7 @@ function Get-NetFirewallInterfaceFilter {
 function Old-Rule {
     param([string]$Group, [string]$Name)
     [void]$script:Store.Add([pscustomobject]@{
-            DisplayName = $Name; Group = $Group; Direction = 'Inbound'; Action = 'Block'; Enabled = 'True'
+            Name = [guid]::NewGuid().ToString(); DisplayName = $Name; Group = $Group; Direction = 'Inbound'; Action = 'Block'; Enabled = 'True'
             Protocol = 'TCP'; LocalPort = 'Any'; RemotePort = 'Any'; LocalAddress = 'Any'; Program = 'Any'
             InterfaceAlias = @('Dante70')
         })
@@ -142,14 +159,14 @@ function Old-Rule {
 function Last { param([object[]]$Out) [int](@($Out) | Select-Object -Last 1) }
 
 Reset-Fake
-Check 'install creates the nine rules on the Dante adapter and reads them back' {
+Check 'install creates the ten rules on the Dante adapter and reads them back' {
     $out = Install-DanteLeg -Interface 'Dante70'
-    (Last $out) -eq 0 -and $script:Store.Count -eq 9 -and
+    (Last $out) -eq 0 -and $script:Store.Count -eq 10 -and
     @($script:Store | Where-Object { (@($_.InterfaceAlias) -join ',') -ne 'Dante70' -or $_.Action -ne 'Block' }).Count -eq 0
 }
-Check 'a second install replaces the group: still nine rules, check passes' {
+Check 'a second install replaces the group: still ten rules, check passes' {
     $out = Install-DanteLeg -Interface 'Dante70'
-    (Last $out) -eq 0 -and $script:Store.Count -eq 9 -and (Last (Test-DanteLeg -Interface 'Dante70')) -eq 0
+    (Last $out) -eq 0 -and $script:Store.Count -eq 10 -and (Last (Test-DanteLeg -Interface 'Dante70')) -eq 0
 }
 Check '-RemoveGroup removes the per-box group and leaves other groups' {
     Old-Rule -Group 'dstack155' -Name 'old tcp in'
@@ -182,14 +199,26 @@ Check 'a firewall profile that is off fails the install and the check, the rules
     $out = Install-DanteLeg -Interface 'Dante70'
     $check = Test-DanteLeg -Interface 'Dante70'
     $script:ProfilesOff = @()
-    (Last $out) -eq 1 -and (Last $check) -eq 1 -and $script:Store.Count -eq 9 -and
+    (Last $out) -eq 1 -and (Last $check) -eq 1 -and $script:Store.Count -eq 10 -and
     (@($out) -join "`n") -match "profile 'Public' is off"
 }
-Check 'no adapter, or one not there, is refused before anything changes' {
+Check 'no adapter, one not there, or a wildcard name is refused before anything changes' {
     $before = $script:Store.Count
     (Throws { Install-DanteLeg -Interface '' } '*InterfaceAlias*') -and
     (Throws { Install-DanteLeg -Interface 'Nope' } "*no network adapter named 'Nope'*") -and
+    (Throws { Install-DanteLeg -Interface 'Dante*' } '*wildcard*') -and
+    (Throws { Install-DanteLeg -Interface 'Dante[7]0' } '*wildcard*') -and
     $script:Store.Count -eq $before
+}
+Check 'a rule refused part way leaves the earlier group and the per-box group as they were' {
+    Reset-Fake
+    [void](Install-DanteLeg -Interface 'Dante70')
+    Old-Rule -Group 'dstack155' -Name 'old tcp in'
+    $names = @($script:Store | ForEach-Object { $_.Name }) -join ','
+    $script:Made = 0; $script:FailAt = 4
+    $threw = Throws { Install-DanteLeg -Interface 'Dante70' -Remove @('dstack155') } '*not created*rules are as before*'
+    $script:FailAt = 0
+    $threw -and (@($script:Store | ForEach-Object { $_.Name }) -join ',') -eq $names
 }
 Check 'uninstall removes only the group' {
     Old-Rule -Group 'someone else' -Name 'theirs 2'
@@ -212,7 +241,7 @@ try {
         $out = Install-DanteLeg -Interface $adapter.Name -Enabled 'False'
         $problems = @(Get-GroupProblems -Interface $adapter.Name -Enabled 'False')
         foreach ($line in @($out) + $problems) { Write-Host "     $line" }
-        $problems.Count -eq 0 -and @(Get-NetFirewallRule -Group $script:Group).Count -eq 9 -and
+        $problems.Count -eq 0 -and @(Get-NetFirewallRule -Group $script:Group).Count -eq 10 -and
         @(Get-NetFirewallRule -Group $script:Group | Where-Object { "$($_.Enabled)" -ne 'False' }).Count -eq 0
     }
 } finally {

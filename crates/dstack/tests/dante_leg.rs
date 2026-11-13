@@ -94,6 +94,9 @@ fn every_bound_port() -> Vec<(String, u16)> {
     let mut all = vec![
         ("PTP event".to_string(), 319),
         ("PTP general".to_string(), 320),
+        ("Audinate's multicast audio".to_string(), 4321),
+        ("Audinate's unicast audio, first".to_string(), 14336),
+        ("Audinate's unicast audio, last".to_string(), 14591),
         ("mDNS".to_string(), dstack::announce::responder::PORT),
     ];
     for p in dstack::info::REQUEST_PORT..=8708 {
@@ -122,8 +125,8 @@ fn both_rulesets_accept_every_port_any_device_slot_can_bind() {
     let linux = ports(&nft_set("dante_udp"));
     let windows = ports(&ps1_list("DanteUdpPorts"));
     let all = every_bound_port();
-    // 32 slots: 3 control ports and 64 flow ports each, and the standard ones.
-    assert_eq!(all.len(), 3 + 9 + 2 + 32 * (3 + 64));
+    // 32 slots: 3 control ports and 64 flow ports each, and Dante's own ones.
+    assert_eq!(all.len(), 6 + 9 + 2 + 32 * (3 + 64));
     for (what, p) in &all {
         assert!(accepts(&linux, p), "dante-leg.nft drops {what} (UDP {p})");
         assert!(
@@ -170,10 +173,12 @@ fn both_rulesets_carry_the_same_sets() {
         addresses(&ps1_list("DanteGroups")),
         "the Dante groups"
     );
-    // mDNS answers (from 5353) and a DHCP server's (from 67) are let in.
-    assert!(NFT.contains("udp sport 5353 accept"));
+    // mDNS answers (from 5353) reach only the OS's ephemeral ports; a DHCP
+    // server's answer reaches 68 (Linux; the Windows Dante leg is static).
+    assert!(NFT.contains("udp sport 5353 udp dport 32768-60999 accept"));
     assert!(NFT.contains("udp sport 67 udp dport 68 accept"));
-    assert_eq!(ps1_list("UdpSourcePorts"), ["67", "5353"]);
+    assert_eq!(ps1_list("MdnsSourcePorts"), ["5353"]);
+    assert_eq!(ps1_list("EphemeralPorts"), ["49152-65535"]);
 }
 
 #[test]

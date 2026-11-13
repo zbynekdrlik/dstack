@@ -46,6 +46,7 @@ pub fn slot_of(arc_port: u16) -> Option<u16> {
 
 /// Slot `k`'s default RX and TX flow port bases, `k` below [`PORT_SLOTS`].
 pub fn slot_bases(k: u16) -> (u16, u16) {
+    debug_assert!(k < PORT_SLOTS, "slot {k} past the {PORT_SLOTS} slots");
     let rx = FLOW_PORT_FIRST + k * SLOT_STRIDE;
     (rx, rx + TX_OFFSET)
 }
@@ -94,30 +95,53 @@ pub fn flow_bases(rx: Option<u16>, tx: Option<u16>, arc_port: u16) -> Result<Flo
             tx_ports.end()
         ));
     }
-    let range = u32::from(FLOW_PORT_FIRST)..=u32::from(FLOW_PORT_LAST);
     let warnings = [
-        ("rx_port_base", rx, rx_ports),
-        ("tx_port_base", tx, tx_ports),
+        ("rx_port_base", rx, rx_ports, default.map(|d| d.0)),
+        ("tx_port_base", tx, tx_ports, default.map(|d| d.1)),
     ]
     .into_iter()
-    .filter(|(_, set, ports)| {
-        set.is_some() && !(range.contains(ports.start()) && range.contains(ports.end()))
-    })
-    .map(|(key, _, ports)| {
-        format!(
-            "{key}: its ports {}-{} leave the dstack flow range \
-                 {FLOW_PORT_FIRST}-{FLOW_PORT_LAST}, which the generic Dante-leg filter \
-                 accepts; a PC with that filter drops them (docs/two-networks.md)",
-            ports.start(),
-            ports.end()
-        )
-    })
+    .filter_map(|(key, set, ports, own)| configured_warning(key, set?, ports, own))
     .collect();
     Ok(FlowBases {
         rx: rx_base,
         tx: tx_base,
         slot,
         warnings,
+    })
+}
+
+/// The start WARN for a configured base `set` of `key` (its `ports`), or
+/// `None`: ports that leave the dstack range (the generic filter drops
+/// them), or ports inside it that are not the device's own slot block
+/// (`own`): another device of ours in that slot on this address could not
+/// bind its block (the bases set before #264, 30000 and 30100, lie on
+/// slots 3 to 5).
+fn configured_warning(
+    key: &str,
+    set: u16,
+    ports: RangeInclusive<u32>,
+    own: Option<u16>,
+) -> Option<String> {
+    let range = u32::from(FLOW_PORT_FIRST)..=u32::from(FLOW_PORT_LAST);
+    if !(range.contains(ports.start()) && range.contains(ports.end())) {
+        return Some(format!(
+            "{key}: its ports {}-{} leave the dstack flow range \
+             {FLOW_PORT_FIRST}-{FLOW_PORT_LAST}, which the generic Dante-leg filter \
+             accepts; a PC with that filter drops them (docs/two-networks.md)",
+            ports.start(),
+            ports.end()
+        ));
+    }
+    let own = own?;
+    (own != set).then(|| {
+        format!(
+            "{key}: its ports {}-{} are another slot's block, not this device's own \
+             ({own}-{}); a device of ours in that slot on this address cannot start: remove \
+             the key, the default is the device's own block (docs/two-networks.md)",
+            ports.start(),
+            ports.end(),
+            u32::from(own) + MAX_FLOWS as u32 - 1
+        )
     })
 }
 

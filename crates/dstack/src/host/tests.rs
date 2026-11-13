@@ -437,12 +437,12 @@ fn a_device_takes_its_slot_s_flow_ports_and_logs_them() {
 fn a_configured_base_wins_and_one_outside_the_range_is_warned() {
     let dir = tempfile::tempdir().unwrap();
     let (_, mut cfg) = config_in(dir.path());
-    cfg.rx_port_base = Some(30_000);
+    cfg.rx_port_base = Some(29_800);
     cfg.tx_port_base = Some(47_000);
     let log = crate::test_log::capture_warnings(|| fix_flow_ports(&mut cfg).unwrap());
     assert_eq!(
         (cfg.rx_port_base, cfg.tx_port_base),
-        (Some(30_000), Some(47_000))
+        (Some(29_800), Some(47_000))
     );
     assert!(
         log.contains("tx_port_base: its ports 47000-47031 leave"),
