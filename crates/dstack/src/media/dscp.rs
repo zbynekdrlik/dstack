@@ -20,7 +20,7 @@
 
 use std::net::{SocketAddrV4, UdpSocket};
 
-use super::tx::MAX_FLOWS;
+use super::tx::{DSCP_EF, MAX_FLOWS};
 
 #[cfg(windows)]
 mod windows;
@@ -72,6 +72,149 @@ pub fn verdict(error: Option<u32>) -> Verdict {
         Some(ERROR_ACCESS_DENIED) => Verdict::NotAdmin,
         Some(code) => Verdict::Failed(code),
     }
+}
+
+/// The registry key under `HKEY_LOCAL_MACHINE` that holds the PC's
+/// Policy-based QoS rules, one subkey each: both the local group policy
+/// editor and `New-NetQosPolicy` write there, and `Get-NetQosPolicy` lists
+/// them from it (dstack #256).
+pub const POLICY_KEY: &str = r"SOFTWARE\Policies\Microsoft\Windows\QoS";
+
+/// One value of a QoS policy's registry key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PolicyValue {
+    /// A string (REG_SZ).
+    Text(String),
+    /// A number (REG_DWORD).
+    Number(u32),
+}
+
+/// One QoS policy as read from the registry: its key's name and its
+/// string and DWORD values.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Policy {
+    /// The policy's name (its key).
+    pub name: String,
+    /// Its values, by name.
+    pub values: Vec<(String, PolicyValue)>,
+}
+
+/// The name of the first policy in `policies` that marks this program's
+/// UDP audio DSCP 46: its application is `exe` (this program's path), its
+/// DSCP 46, its protocol any or UDP, and no other condition narrows it
+/// (a port, an address, a network profile: such a policy may miss the
+/// Dante flows, so it does not count and the warning stays).
+///
+/// The `New-NetQosPolicy` form (Version 2.0) writes `AppName`, `DSCP` and
+/// `Protocol` (DWORDs but the name; protocol 0 none, 1 TCP, 2 UDP,
+/// 3 both); the group policy editor's form (Version 1.0) writes
+/// `Application Name`, `DSCP Value` and `Protocol` (`*`, `TCP`, `UDP`) as
+/// text, with `*` for a condition it does not use. A policy for all
+/// programs (no application, or `*`) is not counted: the warning errs
+/// toward telling.
+pub fn marking_policy<'a>(policies: &'a [Policy], exe: &str) -> Option<&'a str> {
+    policies
+        .iter()
+        .find(|p| {
+            p.text(&["AppName", "Application Name"])
+                .is_some_and(|app| names_exe(app, exe))
+                && p.number(&["DSCP", "DSCP Value"]) == Some(u32::from(DSCP_EF))
+                && covers_udp(p.value(&["Protocol"]))
+                && !p.values.iter().any(|(k, v)| narrows(k, v))
+        })
+        .map(|p| p.name.as_str())
+}
+
+impl Policy {
+    /// The first of the values `names` the policy has.
+    fn value(&self, names: &[&str]) -> Option<&PolicyValue> {
+        names
+            .iter()
+            .find_map(|n| self.values.iter().find(|(k, _)| k == n).map(|(_, v)| v))
+    }
+
+    /// That value as text.
+    fn text(&self, names: &[&str]) -> Option<&str> {
+        match self.value(names)? {
+            PolicyValue::Text(s) => Some(s),
+            PolicyValue::Number(_) => None,
+        }
+    }
+
+    /// That value as a number (a DWORD, or text holding one).
+    fn number(&self, names: &[&str]) -> Option<u32> {
+        match self.value(names)? {
+            PolicyValue::Number(n) => Some(*n),
+            PolicyValue::Text(s) => s.trim().parse().ok(),
+        }
+    }
+}
+
+/// Whether a policy's application `app` names `exe`: a full path the
+/// whole path, a bare name the file name; Windows' names ignore case.
+fn names_exe(app: &str, exe: &str) -> bool {
+    let app = app.trim();
+    if app.contains(['\\', '/']) {
+        app.eq_ignore_ascii_case(exe)
+    } else {
+        exe.rsplit(['\\', '/'])
+            .next()
+            .is_some_and(|file| file.eq_ignore_ascii_case(app))
+    }
+}
+
+/// The values of a policy that never narrow which traffic it marks: its
+/// form, its order, its throttle, and what [`marking_policy`] checks.
+const NEUTRAL_VALUES: [&str; 9] = [
+    "Version",
+    "Precedence",
+    "Throttle Rate",
+    "ThrottleRate",
+    "AppName",
+    "Application Name",
+    "DSCP",
+    "DSCP Value",
+    "Protocol",
+];
+
+/// `New-NetQosPolicy`'s `NetProfile` for every network profile (domain,
+/// private, public).
+const ALL_PROFILES: u32 = 7;
+
+/// Whether the policy value `name` = `value` narrows the traffic it marks
+/// below "this program's UDP": a condition (a port, an address, a URL)
+/// other than the group policy editor's `*`, or a network profile other
+/// than all of them. A value we do not know narrows, so the warning stays.
+fn narrows(name: &str, value: &PolicyValue) -> bool {
+    if NEUTRAL_VALUES.iter().any(|n| n.eq_ignore_ascii_case(name)) {
+        return false;
+    }
+    match value {
+        PolicyValue::Number(n) => !(name.eq_ignore_ascii_case("NetProfile") && *n == ALL_PROFILES),
+        PolicyValue::Text(s) => {
+            let s = s.trim();
+            !(s.is_empty() || s == "*")
+        }
+    }
+}
+
+/// Whether a policy's protocol covers UDP: none set, `*` or UDP in text;
+/// `New-NetQosPolicy`'s numbers 0 (none), 2 (UDP) and 3 (both).
+fn covers_udp(protocol: Option<&PolicyValue>) -> bool {
+    match protocol {
+        None => true,
+        Some(PolicyValue::Number(n)) => matches!(n, 0 | 2 | 3),
+        Some(PolicyValue::Text(s)) => {
+            let s = s.trim();
+            s == "*" || s.eq_ignore_ascii_case("udp")
+        }
+    }
+}
+
+/// The info line that replaces the "unmarked" warning when `policy` (its
+/// name) marks the audio; none: warn.
+pub fn unmarked_note(policy: Option<&str>) -> Option<String> {
+    policy.map(|name| format!("TX audio marked DSCP 46 by QoS policy '{name}'"))
 }
 
 /// The marks of the TX flow sockets: each slot's destination as last

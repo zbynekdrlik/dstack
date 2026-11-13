@@ -95,6 +95,8 @@ pub mod meter;
 pub mod qdisc;
 pub mod stream;
 pub mod subscribe;
+#[cfg(windows)]
+pub(crate) mod winreg;
 
 #[cfg(test)]
 mod test_log;

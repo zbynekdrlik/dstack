@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.113
+
+- Fix (dstack #256): on Windows the warning "TX audio leaves unmarked (DSCP 0)" (no QoS2 handle, or a process that is not an administrator) no longer fires when a Policy-based QoS rule marks the program's audio. The device reads the machine's policies from the registry (`HKLM\SOFTWARE\Policies\Microsoft\Windows\QoS\<name>`, where `New-NetQosPolicy` and the group policy editor write them and `Get-NetQosPolicy` lists them), never through PowerShell. A policy counts when its application is this executable (`AppName` or `Application Name`: the file name, or its full path, in any case), its DSCP is 46 (`DSCP` or `DSCP Value`), its protocol any or UDP, and no other condition narrows it (a port, an address or a network profile other than all; the group policy editor's `*` does not narrow). Then the device logs the info line `TX audio marked DSCP 46 by QoS policy '<name>'`. A policy for another program, another DSCP, TCP only, a narrowing condition, or all programs still warns, and so does a per-user policy (HKCU, not read). Applies to every dstack device on Windows (dsend, dlisten, dasio's service).
+- New: `media::dscp::{Policy, PolicyValue, marking_policy, unmarked_note, POLICY_KEY}`. The Windows registry reads of `lso` and `media::dscp` share one internal module.
+- No dlink API change, no latency change.
+
 ## 0.6.112
 
 - Change (dstack #247, the owner's ROZHODNUTÉ of 13.11.2026): the bridge FIFO's target (`dlink::bridge`) is a fixed device term, `app_buffer_ns`, no longer a fixed 40 ms. Its default is a constant per app: the app's known fixed chunk plus one pump block at the device's rate. A value the app configures wins, is used as given (1 to 150 ms) and never changes by itself. The device logs it at its start beside dstack #244's terms: `dlink latency: app buffer (bridge FIFO target) 22.666666 ms = app chunk 21.333333 ms + pump block 1.333333 ms (default)`, or `(set; default ...)`.

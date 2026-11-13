@@ -6,17 +6,18 @@
 use std::net::{SocketAddrV4, UdpSocket};
 use std::os::windows::io::AsRawSocket;
 
-use tracing::{info, warn};
-use windows_sys::Win32::Foundation::{GetLastError, HANDLE};
+use tracing::{debug, info, warn};
+use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, GetLastError, HANDLE};
 use windows_sys::Win32::NetworkManagement::QoS::{
     QOS_NON_ADAPTIVE_FLOW, QOS_VERSION, QOSAddSocketToFlow, QOSCloseHandle, QOSCreateHandle,
     QOSRemoveSocketFromFlow, QOSSetFlow, QOSSetOutgoingDSCPValue, QOSTrafficTypeAudioVideo,
 };
 use windows_sys::Win32::Networking::WinSock::{AF_INET, SOCKADDR, SOCKADDR_IN};
 
-use super::{Verdict, verdict};
+use super::{POLICY_KEY, Policy, PolicyValue, Verdict, marking_policy, unmarked_note, verdict};
 use crate::media::tx::DSCP_EF;
 use crate::media::tx::MAX_FLOWS;
+use crate::winreg;
 
 /// The QoS2 handle and each slot's flow.
 #[derive(Debug)]
@@ -46,10 +47,14 @@ impl Qos {
         if !ok {
             // SAFETY: no precondition.
             let code = unsafe { GetLastError() };
-            warn!(
-                code,
-                "TX audio leaves unmarked (DSCP 0): no QoS2 handle (is the qWave service there?); a QoS policy for this program with DSCP 46 marks it instead (docs/windows-box.md)"
-            );
+            if let Some(note) = policy_note() {
+                info!(code, "{note}");
+            } else {
+                warn!(
+                    code,
+                    "TX audio leaves unmarked (DSCP 0): no QoS2 handle (is the qWave service there?); a QoS policy for this program with DSCP 46 marks it instead (docs/windows-box.md)"
+                );
+            }
         }
         Qos {
             handle: if ok { handle as usize } else { 0 },
@@ -129,9 +134,13 @@ impl Qos {
             }
             Verdict::NotAdmin if !self.told_refused => {
                 self.told_refused = true;
-                warn!(
-                    "TX audio leaves unmarked (DSCP 0): Windows sets a DSCP only for an administrator process; run as a service or admin, or add a QoS policy for this program with DSCP 46 (docs/windows-box.md)"
-                );
+                if let Some(note) = policy_note() {
+                    info!("{note}");
+                } else {
+                    warn!(
+                        "TX audio leaves unmarked (DSCP 0): Windows sets a DSCP only for an administrator process; run as a service or admin, or add a QoS policy for this program with DSCP 46 (docs/windows-box.md)"
+                    );
+                }
             }
             Verdict::Failed(code) => {
                 warn!(slot, %dest, code, "TX flow left unmarked: QOSSetFlow failed");
@@ -148,4 +157,66 @@ impl Drop for Qos {
             unsafe { QOSCloseHandle(self.handle as HANDLE) };
         }
     }
+}
+
+/// The info line when a QoS policy marks this program's audio DSCP 46
+/// (dstack #256); none: the caller warns.
+fn policy_note() -> Option<String> {
+    let exe = match std::env::current_exe() {
+        Ok(path) => path.to_string_lossy().into_owned(),
+        Err(e) => {
+            debug!(error = %e, "this program's path unread: QoS policies not checked");
+            return None;
+        }
+    };
+    let policies = read_policies(winreg::HKEY_LOCAL_MACHINE, POLICY_KEY);
+    debug!(
+        count = policies.len(),
+        exe, "QoS policies read from HKLM\\{POLICY_KEY}"
+    );
+    unmarked_note(marking_policy(&policies, &exe))
+}
+
+/// The QoS policies under `root`\\`path` (HKLM\\[`POLICY_KEY`]), each with
+/// its string and DWORD values; none when the key is absent (no policy).
+pub(super) fn read_policies(root: winreg::HKEY, path: &str) -> Vec<Policy> {
+    let key = match winreg::Key::open(root, path) {
+        Ok(key) => key,
+        Err(ERROR_FILE_NOT_FOUND) => return Vec::new(),
+        Err(code) => {
+            debug!(code, path, "QoS policies unread: the key does not open");
+            return Vec::new();
+        }
+    };
+    let (names, error) = key.subkeys();
+    if let Some(code) = error {
+        debug!(
+            code,
+            path,
+            read = names.len(),
+            "QoS policies: listing stopped"
+        );
+    }
+    names
+        .into_iter()
+        .filter_map(|name| match key.values(&name) {
+            Ok(values) => Some(Policy {
+                values: values
+                    .into_iter()
+                    .map(|(k, v)| {
+                        let v = match v {
+                            winreg::Value::Text(s) => PolicyValue::Text(s),
+                            winreg::Value::Number(n) => PolicyValue::Number(n),
+                        };
+                        (k, v)
+                    })
+                    .collect(),
+                name,
+            }),
+            Err(code) => {
+                debug!(code, policy = %name, "QoS policy unread");
+                None
+            }
+        })
+        .collect()
 }

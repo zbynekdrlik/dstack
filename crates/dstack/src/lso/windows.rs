@@ -59,43 +59,13 @@ pub fn report(adapter: &str) {
 }
 
 pub(crate) mod sys {
-    use windows_sys::Win32::System::Registry::{HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ, RegGetValueW};
-
     /// The network adapters' class key.
     const CLASS: &str =
         r"SYSTEM\CurrentControlSet\Control\Class\{4d36e972-e325-11ce-bfc1-08002be10318}";
 
-    fn wide(s: &str) -> Vec<u16> {
-        s.encode_utf16().chain(std::iter::once(0)).collect()
-    }
-
     /// A string value of HKLM\`key`, `None` when absent.
     fn read(key: &str, value: &str) -> Option<String> {
-        let (k, v) = (wide(key), wide(value));
-        let mut buf = [0u16; 128];
-        let mut len = (buf.len() * 2) as u32;
-        // SAFETY: valid NUL-terminated key and value names; `buf` is `len`
-        // writable bytes; no type out.
-        let r = unsafe {
-            RegGetValueW(
-                HKEY_LOCAL_MACHINE,
-                k.as_ptr(),
-                v.as_ptr(),
-                RRF_RT_REG_SZ,
-                std::ptr::null_mut(),
-                buf.as_mut_ptr().cast(),
-                &mut len,
-            )
-        };
-        if r != 0 {
-            return None;
-        }
-        let n = (len as usize / 2).min(buf.len());
-        Some(
-            String::from_utf16_lossy(&buf[..n])
-                .trim_end_matches('\0')
-                .to_string(),
-        )
+        crate::winreg::read_sz(key, value)
     }
 
     /// The `*LsoV2IPv4` and `*LsoV1IPv4` values of the adapter whose

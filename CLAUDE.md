@@ -29,3 +29,4 @@ Start from `docs/HANDOVER.md`, then `docs/design/2026-10-30-shared-dstack.md`.
 - tests, whole-device tests, the mutation gate → `.claude/rules/tests.md` (auto-loads on its `paths:`)
 - Windows PCs' network legs, the vendor VLAN tool, the LAN self-heal task, PowerShell tools → `.claude/rules/windows-pcs.md` (auto-loads on its `paths:`)
 - ARC, what Dante Controller decides from our answers, DC checks on mbc → `.claude/rules/arc-dante-controller.md` (auto-loads on its `paths:`)
+- the app-clock bridge (FIFO target, priming, drift) → `.claude/rules/bridge.md` (auto-loads on its `paths:`)
