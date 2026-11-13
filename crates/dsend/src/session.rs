@@ -13,11 +13,12 @@
 //! main thread, which owns the streams (cpal's streams stay on the thread
 //! that made them) and hands the new player to the pump.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, PoisonError};
 
+use dlink::bridge::AppBuffer;
 use dlink::{Link, Map};
 use dsend::cli::{self, Options};
 use dsend::source::{self, Switch, TX_CHANNELS};
@@ -52,6 +53,14 @@ pub fn name_of(o: &Options) -> String {
         .unwrap_or_else(|| cli::default_name(&host::host_name()))
 }
 
+/// The app buffer of a run (dstack #247): the WASAPI period and one pump
+/// block, or `--app-buffer-ms`, as the device logs it at its start.
+fn buffer_of(o: &Options, name: &str, state: &Path) -> Result<AppBuffer, String> {
+    cli::link_config(o, name, state.to_path_buf())
+        .bridge_buffer()
+        .ok_or_else(|| "dsend: the device config states no app buffer".to_string())
+}
+
 /// What the status thread and the command hook read: the outputs, the one
 /// captured, its FIFO and rate.
 struct Shown {
@@ -70,6 +79,8 @@ pub struct Session {
     switch: Switch,
     stats: Arc<Stats>,
     rate: u32,
+    /// The app buffer the players keep (dstack #247).
+    buffer: AppBuffer,
     devices: Vec<cpal::Device>,
     outputs: Vec<Output>,
     current: usize,
@@ -109,10 +120,12 @@ struct Opened {
 }
 
 /// Starts the capture of `device` and makes its player for the network's
-/// `rate`, counting on in `stats`.
+/// `rate` at the device's app buffer `buffer` (dstack #247), counting on in
+/// `stats`.
 fn open(
     device: &cpal::Device,
     rate: u32,
+    buffer: AppBuffer,
     stats: &Arc<Stats>,
     failed: &Arc<AtomicBool>,
 ) -> Result<Opened, String> {
@@ -120,7 +133,7 @@ fn open(
     let in_rate = config.sample_rate();
     let channels = config.channels();
     let fifo = Arc::new(fifo_for(usize::from(channels), in_rate));
-    let player = Player::new(Arc::clone(&fifo), in_rate, rate, Arc::clone(stats))
+    let player = Player::new(Arc::clone(&fifo), in_rate, rate, buffer, Arc::clone(stats))
         .map_err(|e| format!("the rate conversion {in_rate} to {rate} Hz: {e}"))?;
     let capturing = audio::start(device, &config, Arc::clone(&fifo), failed)?;
     tracing::info!(
@@ -176,7 +189,8 @@ impl Session {
         };
         let stats: Arc<Stats> = Arc::default();
         let failed = Arc::new(AtomicBool::new(false));
-        let first = open(&devices[current], o.rate, &stats, &failed)?;
+        let buffer = buffer_of(o, &name, &state)?;
+        let first = open(&devices[current], o.rate, buffer, &stats, &failed)?;
         tracing::info!(output = %outputs[current].name, "dsend: the output captured");
         let (processor, switch) = source::source(first.player);
         let free = with_free_ports(o, &place)
@@ -207,6 +221,7 @@ impl Session {
             switch,
             stats,
             rate: o.rate,
+            buffer,
             devices,
             outputs,
             current,
@@ -231,7 +246,7 @@ impl Session {
             .devices
             .get(index)
             .ok_or_else(|| format!("no output {index}"))?;
-        let opened = open(device, self.rate, &self.stats, &self.failed)?;
+        let opened = open(device, self.rate, self.buffer, &self.stats, &self.failed)?;
         // Refused (the pump has not taken the last one, or ended): the new
         // capture stops as `opened` drops.
         self.switch.send(opened.player)?;

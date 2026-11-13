@@ -108,7 +108,10 @@
 //! [`bridge::Player::fill_with`], which converts from the app's rate and
 //! steers the FIFO's depth against the drift ([`bridge`]; dsend's path,
 //! dstack #241). Neither side takes a lock or allocates. That depth adds
-//! to the path above: about 40 ms, up to 80 ms after dropouts.
+//! to the path above: the app buffer, a fixed term the app states with
+//! [`Config::app_buffer`] (its chunk, and a configured value that wins;
+//! dstack #247) and the device logs at its start; [`Config::bridge_buffer`]
+//! gives it to the [`bridge::Player`].
 //!
 //! # Debug builds with a rate converter
 //!
@@ -211,6 +214,9 @@ pub struct Config {
     network_latency_ns: Option<u64>,
     receive_buffer_ns: Option<u64>,
     work_margin_ns: Option<u64>,
+    /// The bridge app's chunk and its configured app buffer, ns (dstack
+    /// #247).
+    app_buffer: Option<(u64, Option<u64>)>,
     manufacturer: String,
     model: String,
     ports: Option<Ports>,
@@ -267,6 +273,7 @@ impl Config {
             network_latency_ns: None,
             receive_buffer_ns: None,
             work_margin_ns: None,
+            app_buffer: None,
             manufacturer: "dlink".to_string(),
             model: "dlink".to_string(),
             ports: None,
@@ -349,6 +356,28 @@ impl Config {
     pub fn work_margin_ns(mut self, ns: u64) -> Self {
         self.work_margin_ns = Some(ns);
         self
+    }
+
+    /// An app on its own clock that bridges through [`bridge::Player`]
+    /// (dstack #247): its fixed chunk, ns (the frames it hands or takes at
+    /// once, [`bridge::chunk_ns`]: OBS 1024 frames at 48 kHz, an ASIO
+    /// bridge its ASIO buffer, dsend and dlisten their WASAPI period), and
+    /// the app buffer it configured, if any. The FIFO's target is that value,
+    /// else the chunk and one pump block ([`bridge::AppBuffer`]); the device
+    /// logs it at its start beside the other terms, and refuses one outside
+    /// [`bridge::MIN_APP_BUFFER_NS`] to [`bridge::MAX_APP_BUFFER_NS`].
+    pub fn app_buffer(mut self, chunk_ns: u64, set_ns: Option<u64>) -> Self {
+        self.app_buffer = Some((chunk_ns, set_ns));
+        self
+    }
+
+    /// The bridge FIFO's target of this device ([`Config::app_buffer`]),
+    /// its pump block at the device's rate; `None` for an app that stated
+    /// none (it does not bridge). Pass it to [`bridge::Player::new`].
+    pub fn bridge_buffer(&self) -> Option<bridge::AppBuffer> {
+        let (chunk, set) = self.app_buffer?;
+        let block_ns = bridge::chunk_ns(self.block, self.device_rate());
+        Some(bridge::AppBuffer::new(chunk, block_ns).set(set))
     }
 
     /// The latency terms this config sets ([`Terms`]).
@@ -533,7 +562,7 @@ impl Config {
         t.insert("rx".into(), self.rx.clone().into());
         t.insert("tx".into(), self.tx.clone().into());
         let text = toml::to_string(&t).map_err(|e| vec![e.to_string()])?;
-        match (split, DeviceConfig::from_toml(&text)) {
+        let checked = match (split, DeviceConfig::from_toml(&text)) {
             (Ok(s), Ok(cfg)) => {
                 debug_assert_eq!(cfg.timing, TimingProfile::Normal);
                 Ok((cfg, s))
@@ -544,6 +573,14 @@ impl Config {
             // listed once, as the device words it.
             (Err(_), Err(e)) if rate == 0 => Err(e.problems),
             (Err(p), Err(e)) => Err(std::iter::once(p).chain(e.problems).collect()),
+        };
+        match (checked, self.bridge_buffer().and_then(|b| b.problem())) {
+            (checked, None) => checked,
+            (Ok(_), Some(p)) => Err(vec![p]),
+            (Err(mut problems), Some(p)) => {
+                problems.push(p);
+                Err(problems)
+            }
         }
     }
 }
@@ -660,6 +697,12 @@ impl Link {
         let sender = config.frame_sender.0.clone();
         for line in s.lines(config.directions(), config.terms()) {
             tracing::info!(device = %config.name, "dlink latency: {line}");
+        }
+        if let Some(buffer) = config.bridge_buffer() {
+            tracing::info!(device = %config.name, "dlink latency: {}", buffer.line());
+            if let Some(short) = buffer.short() {
+                tracing::warn!(device = %config.name, "dlink: {short}");
+            }
         }
         let device = if config.converts() {
             tracing::info!(

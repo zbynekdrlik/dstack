@@ -96,6 +96,7 @@ mod tests {
     fn snap() -> Snapshot {
         Snapshot {
             depth_ms: 40.06,
+            target_ms: 11.333333,
             ppm: 3.24,
             underruns: 2,
             played: 480_000,

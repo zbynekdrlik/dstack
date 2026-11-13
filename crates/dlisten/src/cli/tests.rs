@@ -4,6 +4,8 @@ use super::*;
 
 use std::net::Ipv4Addr;
 
+use dstack_endpoint::cli::WASAPI_PERIOD_NS;
+
 fn args(text: &str) -> Vec<String> {
     text.split_whitespace().map(String::from).collect()
 }
@@ -74,6 +76,7 @@ fn every_option_is_read() {
         Latency {
             network_ns: Some(500_000),
             receive_buffer_ns: Some(9_000_000),
+            app_buffer_ns: None,
         }
     );
     assert_eq!(o.place, Some(Place::Ip(Ipv4Addr::new(192, 0, 2, 7))));
@@ -289,6 +292,7 @@ fn the_link_config_is_an_rx_only_device_with_the_options() {
             .rx(["L", "R"])
             .sample_rate(48_000)
             .product("dstack", "dlisten")
+            .app_buffer(WASAPI_PERIOD_NS, None)
     );
     let dev = plain.device().unwrap();
     assert!(dev.tx.is_empty(), "RX only");
@@ -318,7 +322,21 @@ fn the_link_config_is_an_rx_only_device_with_the_options() {
             })
             .process_id(3)
             .subscribe(1, "Out", "tx-a")
+            .app_buffer(WASAPI_PERIOD_NS, None)
     );
+}
+
+/// dstack #247: dlisten's FIFO target is its output's 10 ms WASAPI period
+/// and one pump block at the network's rate (12.667 ms at 48 kHz, was a
+/// fixed 40 ms), and `--app-buffer-ms` sets it as given.
+#[test]
+fn the_app_buffer_is_the_wasapi_period_and_a_block_or_the_flag() {
+    let state = PathBuf::from("/tmp/s.toml");
+    let plain = link_config(&run(""), "pc-dlisten", state.clone());
+    assert_eq!(plain.bridge_buffer().unwrap().target_ns(), 12_666_667);
+    let set = link_config(&run("--app-buffer-ms 25.5"), "pc-dlisten", state);
+    assert_eq!(set.bridge_buffer().unwrap().target_ns(), 25_500_000);
+    assert!(parse(&args("--app-buffer-ms 0")).is_err());
 }
 
 #[test]

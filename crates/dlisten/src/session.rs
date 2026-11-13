@@ -17,6 +17,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, PoisonError};
 
+use dlink::bridge::AppBuffer;
 use dlink::{Link, Map};
 use dlisten::cli::{self, Options};
 use dlisten::feed::Feed;
@@ -56,6 +57,8 @@ pub struct Session {
     fifo: Arc<Fifo>,
     stats: Arc<Stats>,
     rate: u32,
+    /// The app buffer the players keep (dstack #247).
+    buffer: AppBuffer,
     /// `--mono` ([`dlisten::map::source_mono`]).
     mono: bool,
     devices: Vec<cpal::Device>,
@@ -125,6 +128,11 @@ impl Session {
             }
         };
         let fifo = Arc::new(fifo_for(o.channels, o.rate));
+        // The app buffer (dstack #247): the output's WASAPI period and one
+        // pump block, or `--app-buffer-ms`, as the device logs it.
+        let buffer = cli::link_config(o, &name, state.clone())
+            .bridge_buffer()
+            .ok_or_else(|| "dlisten: the device config states no app buffer".to_string())?;
         let free = with_free_ports(o, &place)
             .map_err(|e| format!("the Dante device {name} did not start: {e}"))?;
         // The place is there now (`with_free_ports` waited for it, dstack
@@ -146,6 +154,7 @@ impl Session {
             fifo,
             stats: Arc::default(),
             rate: o.rate,
+            buffer,
             mono: o.mono,
             devices,
             outputs,
@@ -178,6 +187,7 @@ impl Session {
             Arc::clone(&self.fifo),
             self.rate,
             out_rate,
+            self.buffer,
             Arc::clone(&self.stats),
         )
         .map_err(|e| format!("the rate conversion {} to {out_rate} Hz: {e}", self.rate))?

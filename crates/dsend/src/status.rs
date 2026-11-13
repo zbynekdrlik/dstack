@@ -118,6 +118,7 @@ mod tests {
     fn snap() -> Snapshot {
         Snapshot {
             depth_ms: 40.06,
+            target_ms: 11.333333,
             ppm: -3.24,
             underruns: 2,
             played: 480_000,
@@ -250,6 +251,6 @@ mod tests {
 
     #[test]
     fn the_log_line_is_the_shared_one() {
-        assert!(line(&snap()).starts_with("depth 40.1 ms, -3.2 ppm, 2 underruns"));
+        assert!(line(&snap()).starts_with("depth 40.1 ms of 11.3 ms, -3.2 ppm, 2 underruns"));
     }
 }

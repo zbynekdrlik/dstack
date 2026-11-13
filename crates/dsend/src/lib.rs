@@ -14,7 +14,9 @@
 //! - A dlink device (`<host>-dsend`, TX only, 2 channels L and R) whose
 //!   pump pulls every block through the [`dstack_endpoint::player::Player`]
 //!   ([`source::Source`]): `dstack-resample`'s drifting converter, its ratio
-//!   steered by the ASRC controller on the FIFO's depth, about 40 ms.
+//!   steered by the ASRC controller on the FIFO's depth, kept at the app
+//!   buffer (dstack #247): WASAPI's 10 ms period and one pump block,
+//!   11.333 ms at 96 kHz, or `--app-buffer-ms`.
 //! - [`dstack_endpoint::map`] puts the endpoint's channels on ours: L/R
 //!   from the first two (a 5.1 or 7.1 endpoint's front pair), a mono
 //!   endpoint on both.
