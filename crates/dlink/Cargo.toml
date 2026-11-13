@@ -6,7 +6,7 @@ license.workspace = true
 publish = false
 repository.workspace = true
 authors.workspace = true
-description = "The Dante device an application embeds (OBS, SongPlayer, the intercom): a 15 ms latency budget, no real-time setup asked of the app"
+description = "The Dante device an application embeds (OBS, SongPlayer, the intercom): its latency in named terms (network latency + receive buffer), no real-time setup asked of the app"
 
 [dependencies]
 dstack = { path = "../dstack" }

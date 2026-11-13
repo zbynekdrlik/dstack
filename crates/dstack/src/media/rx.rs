@@ -33,6 +33,11 @@
 //!   read and since the start, and a packet already late on the wire (by
 //!   `late`'s rule, at the pass's time less its wake delay) counts
 //!   `wire_late`. Windows has no stamp: both stay 0.
+//! - The measured network latency (dstack #244, Linux): each such packet's
+//!   arrival on our PTP clock (the pass's now less its wake delay) less its
+//!   own stamp, as min, p99 and max of each heartbeat second, from a fixed
+//!   histogram of the slot (`rx/netlat.rs`;
+//!   [`RxShared::last_network_latency`]). Windows records none.
 //! - The packets' judge (phase D, plan Task 3): the least lateness of each
 //!   flow slot's placed packets in ns (our clock's now in ns less the
 //!   packet's own stamp in ns), kept until read, so each heartbeat second
@@ -67,8 +72,13 @@ use super::tx::{Cell, MAX_CHANNELS, ns_of, place, take_priority};
 use crate::clock::{self, PtpClock};
 use crate::wire::MAX_DATAGRAM;
 
+mod counts;
+mod netlat;
 mod plan;
+pub use counts::RxCounts;
+use counts::{NO_LATENESS, RxStats};
 mod socket;
+pub use netlat::NetLatency;
 pub use plan::{RxPlan, RxRoute};
 pub use socket::{GROUP_BOUND_TO_PORT, join};
 use socket::{
@@ -115,104 +125,6 @@ pub const RX_PRIORITY: i32 = 44;
 const FRAMES_MAX: usize = (MAX_DATAGRAM - MEDIA_HEADER) / 2;
 /// A datagram read; one longer than [`MAX_DATAGRAM`] is refused.
 const BUFFER: usize = 2048;
-
-/// A least lateness that holds none: no packet placed since it was last
-/// taken. A lateness of `u64::MAX` ns (585 years) reads as none too.
-const NO_LATENESS: u64 = u64::MAX;
-
-/// One flow slot's counts, written by the RX thread.
-#[derive(Debug, Default)]
-struct RxStats {
-    packets: AtomicU64,
-    refused: AtomicU64,
-    stray: AtomicU64,
-    out_of_order: AtomicU64,
-    gaps: AtomicU64,
-    gap_frames: AtomicU64,
-    late: AtomicU64,
-    late_at_read: AtomicU64,
-    /// Packets already late when the kernel received them.
-    wire_late: AtomicU64,
-    unplaced: AtomicU64,
-    keepalives: AtomicU64,
-    keepalive_errors: AtomicU64,
-    recv_errors: AtomicU64,
-    /// Multicast groups joined, and joins that failed.
-    joins: AtomicU64,
-    join_errors: AtomicU64,
-    max_lateness: AtomicU64,
-    /// The largest lateness since the device started, samples.
-    lateness_peak: AtomicU64,
-    /// What the last [`RxShared::take_max_lateness`] took.
-    last_lateness: AtomicU64,
-    /// The largest wake delay since the last take, ns, what the last take
-    /// took, and the largest since the device started.
-    max_wake_ns: AtomicU64,
-    last_wake_ns: AtomicU64,
-    wake_peak_ns: AtomicU64,
-    /// The packets' judge: the least lateness in ns since the last take.
-    min_lateness_ns: Least,
-    /// What the last [`RxShared::take_max_lateness`] took of it.
-    last_min_lateness_ns: Least,
-}
-
-/// An atomic least, ns: [`NO_LATENESS`] until a value is put in
-/// (`fetch_min`, one per placed packet).
-#[derive(Debug)]
-struct Least(AtomicU64);
-
-impl Default for Least {
-    fn default() -> Self {
-        Least(AtomicU64::new(NO_LATENESS))
-    }
-}
-
-/// One flow slot's counts since the device started (every flow it held).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct RxCounts {
-    /// Well-formed packets from the flow's transmitter.
-    pub packets: u64,
-    /// Datagrams from the transmitter that were no packet of the flow
-    /// (shorter than the header, longer than a datagram, no whole frame).
-    pub refused: u64,
-    /// Datagrams from another address, or to a slot without a flow.
-    pub stray: u64,
-    /// Packets that began before the end of an earlier one.
-    pub out_of_order: u64,
-    /// Packets that began past the end of the one before: frames that never
-    /// came (Dante packets have no sequence number; the stamps are it).
-    pub gaps: u64,
-    /// The frames those gaps skipped.
-    pub gap_frames: u64,
-    /// Packets whose first frame was later than the flow's playout plus
-    /// the pump's block: the most a block's read can wait.
-    pub late: u64,
-    /// Packets with a frame the pump had already read (a ring refused it
-    /// late): what its channels count as holes and late samples. A packet
-    /// past the playout but within the block counts here, never in `late`
-    /// (iemmixer, 5.11.2026).
-    pub late_at_read: u64,
-    /// Packets whose first frame was already later than `late`'s limit
-    /// when the kernel received them (dstack #234, Linux; 0 on Windows):
-    /// late on the wire, not by a late RX-thread wake.
-    pub wire_late: u64,
-    /// The largest lateness of any packet since the device started,
-    /// samples (`lateness` is the last second's only).
-    pub lateness_peak: u64,
-    /// The largest wake delay of any packet since the device started, µs:
-    /// the RX pass's time less the kernel's receive time (dstack #234,
-    /// Linux; 0 on Windows).
-    pub wake_delay_peak_us: u64,
-    /// Packets read before our clock was ready.
-    pub unplaced: u64,
-    pub keepalives: u64,
-    pub keepalive_errors: u64,
-    pub recv_errors: u64,
-    /// Multicast groups the slot joined (each a new socket), and the joins
-    /// that failed (the socket, the bind or the membership).
-    pub joins: u64,
-    pub join_errors: u64,
-}
 
 /// The drops of the UDP socket bound to `ip`:`port` in a `/proc/net/udp`
 /// table: its last column. The local address is the address's bytes in
@@ -484,6 +396,7 @@ impl RxShared {
         self.lanes.get(slot).map_or(0, |l| {
             let wake = l.max_wake_ns.swap(0, Ordering::Relaxed);
             l.last_wake_ns.store(wake, Ordering::Relaxed);
+            l.network.take();
             let least = l.min_lateness_ns.0.swap(NO_LATENESS, Ordering::Relaxed);
             l.last_min_lateness_ns.0.store(least, Ordering::Relaxed);
             let taken = l.max_lateness.swap(0, Ordering::Relaxed);
@@ -510,6 +423,18 @@ impl RxShared {
         self.lanes
             .get(slot)
             .map_or(0, |l| l.last_wake_ns.load(Ordering::Relaxed) / 1_000)
+    }
+
+    /// The measured network latency of flow slot `slot`'s packets in the
+    /// heartbeat's last second (what the last
+    /// [`RxShared::take_max_lateness`] took; dstack #244): the least, the
+    /// 99th percentile and the largest of each packet's arrival (the
+    /// kernel's receive time on our PTP clock) less its own stamp. `None`
+    /// for a second without a stamped packet (always on Windows, where the
+    /// kernel stamps no receive time). The status reads it and takes
+    /// nothing.
+    pub fn last_network_latency(&self, slot: usize) -> Option<NetLatency> {
+        self.lanes.get(slot)?.network.last()
     }
 
     /// Whether every slot socket stamps its datagrams' receive times, so
@@ -881,8 +806,12 @@ impl Receiver {
             if lateness > limit {
                 count(&stats.late);
             }
-            if wake.is_some_and(|w| wire_late(now_ns, w, pos, rate, limit)) {
-                count(&stats.wire_late);
+            if let Some(w) = wake {
+                if wire_late(now_ns, w, pos, rate, limit) {
+                    count(&stats.wire_late);
+                }
+                let network = netlat::network_latency_ns(now_ns, w, ns_of(pos, rate));
+                stats.network.record(network);
             }
             let end = pos.saturating_add(nframes as u64);
             match lane.end {

@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.6.106
+
+- Breaking (dstack #244, owner ROZHODNUTÉ 12.11.2026): a dlink device's latency is three named terms, not one budget. Each term is logged at the device's start, one line each.
+  - (a) the Dante network latency, `dlink::Config::network_latency_ns` (per device; 1 ms unless set, `dlink::NETWORK_LATENCY_NS`).
+  - (b) the receive buffer, `dlink::Config::receive_buffer_ns`: this PC's room for the RX thread's wake and pass, sized from measurement.
+  - (c) the app hand-off, computed and stated: RX = block + the converter's RX delay; TX = W + the converter's TX delay.
+  - The device's Dante latency P (what ARC advertises and Dante Controller shows) = (a) + (b), rounded up to whole samples. Its floors stay: `dlink::tx_floor_ns` with TX, 4 ms RX only; a sum under the floor is refused.
+  - W, the pump's work margin, is a term of its own: `dlink::Config::work_margin_ns`, 6 ms with TX and 15 ms RX only unless set (`WORK_MARGIN_NS`, `RX_WORK_MARGIN_NS`). Unset on a device with TX, it still gives way to P's TX floor where the old 15 ms left no room for both (a long converter TX delay), exactly as before. A W the app sets never gives way.
+- Removed: `dlink::Config::budget_ns`, `dlink::BUDGET_NS`, `dlink::work_margin`, `dlink::rx_work_margin`, `dlink::WORK_SHARE_NUM` and `WORK_SHARE_DEN`.
+- Changed: `dlink::split` takes `dlink::Terms` (the three optional terms) in place of the budget. Its refusal now starts `network_latency_ns + receive_buffer_ns:` or `work_margin_ns:` (was `budget_ns:`).
+- New: `dlink::Split` names every term: `network_latency_ns`, `receive_buffer_ns`, `latency_ns` (P), `block_ns`, `rx_convert_ns`, `tx_convert_ns`, `rx_handoff_ns`, `tx_handoff_ns`, `margin`, `work_margin_ns`, `tx_path_ns`, `rx_path_ns`.
+- New: `Split::lines`, `Config::terms`, `dlink::default_work_margin`, `dlink::REFERENCE_PATH_NS`, `dlink::ms`, `Directions::has_rx`/`has_tx`.
+- No latency change for an app that sets no receive buffer: the defaults keep P, W and both paths exactly as in 0.6.105 for every config 0.6.105 accepted (the old 15 ms split; `REFERENCE_PATH_NS` sizes only this default), with (a) 1 ms. A unit test runs 0.6.105's split verbatim against the new one over 4 device rates, 12 app rates (8 to 192 kHz), every block and all three directions. OBS on the editing PC (RX only, 96 kHz network, 48 kHz app, block 128) stays P 13.041666 ms, now stated as (a) 1 ms + (b) 12.041666 ms, (c) 1.333333 + 0.625 ms, RX path 14.999999 ms. A device with both directions at 48/48 kHz stays P 9 ms = 1 + 8 ms.
+- Latency change, for configs 0.6.105 refused only: a config the old 15 ms could not hold now starts at P's floor (4.583333 ms with TX at 96 kHz, 4.916666 ms at 48 kHz; 4 ms RX only) instead of being refused. These are the 8, 11.025 and 16 kHz apps (up to about 19 ms of filters), and 22.05 or 32 kHz apps on a 44.1 or 48 kHz device.
+- Setting only (a) moves P by its difference from 1 ms, and never under P's floor (the default (b) grows there).
+- New status fields (dstack #244, Linux): `network_latency_min_us`, `network_latency_p99_us` and `network_latency_max_us` per `rx` flow slot, next to `wake_delay_us`.
+  - What they measure: each packet's arrival (the kernel's receive time on our PTP clock) less its sender's media-clock stamp (its first frame), over the heartbeat's last second. That is the transit plus the sender's own part (the packet's frames and how late it sent them): an upper bound on the transit.
+  - How: p99 in 20 µs steps, min and max exact (each read in µs, at most 2.1 s), from a fixed histogram per slot with no allocation on the RX thread. The three are stored as one word, so a read never mixes two seconds.
+  - They are absent for a second without a stamped packet, and on Windows (no kernel receive stamp). `dstack::media::rx::RxShared::last_network_latency`, `NetLatency`.
+- dsend and dlisten: `--budget-ms` is gone; `--network-latency-ms <ms>` and `--receive-buffer-ms <ms>` take ms with up to 6 decimals (0.25). `dstack_endpoint::cli::with_shared` takes a `Latency` (the two terms) in place of the budget.
+- What each consumer changes:
+  - camera-box (OBS dante-input on the editing PC): its dante-input TOML sets no latency, so nothing changes and P stays 13.041666 ms. To size (b) from measurement, set the receive buffer once obs's dante-input takes the new keys.
+  - obs (`plugins/dante-input/ffi/src/config.rs`): replace `latency_ms` (fed to `Config::budget_ns`) with `network_latency_ms` → `Config::network_latency_ns` and `receive_buffer_ms` → `Config::receive_buffer_ns`, both optional. Drop `DEFAULT_LATENCY_MS = dlink::BUDGET_NS / 1_000_000` and the 4..=100 check of the budget. `InputConfig::split` maps the refusal prefix `network_latency_ns + receive_buffer_ns:` instead of `budget_ns:`.
+  - intercom (`hub/src/dlink_leg.rs`): replace `[dlink] latency_ms` (fed to `Config::budget_ns`, default `dlink::BUDGET_NS`) with optional `network_latency_ms` and `receive_buffer_ms` → `Config::network_latency_ns` and `Config::receive_buffer_ns`. `/api/state`'s `latency_ms` (the budget) becomes the split's terms, and the tests that compare with `dlink::BUDGET_NS` read `Config::split` or `dlink::REFERENCE_PATH_NS`.
+  - songplayer (`crates/sp-server/src/playback/dante_device.rs`): `.split().map_or(dlink::BUDGET_NS, |s| s.tx_path_ns)` loses its fallback constant: use `dlink::REFERENCE_PATH_NS` (or handle the error). No latency change: the TX path stays as before at the defaults.
+  - presenter (`crates/presenter-server/src/listen/dante/tests.rs`): `split.rx_path_ns <= dlink::BUDGET_NS` becomes `<= dlink::REFERENCE_PATH_NS`.
+  - dsend and dlisten users: `--budget-ms N` becomes `--network-latency-ms` and `--receive-buffer-ms`.
+
 ## 0.6.105
 
 - Fix (dstack #239): `tools/windows/lan-selfheal.ps1` assumed the LAN is untagged on the physical adapter and its repair set the LAN adapter's VLAN ID to 0. On a PC with the reverse layout (Dante untagged on the physical adapter, the LAN on a Realtek Virtual Adapter on a VLAN, as on dasio's test PC) that repair would cut the LAN. The config's new required key `lanVlanId` states the LAN adapter's VLAN: `0` for a LAN untagged on the parent adapter, `N` for a LAN on a VLAN adapter. The repair sets exactly that ID, only through the LAN driver's own "VLAN ID" property; a LAN adapter without the property is not changed, and the run logs a "VLAN mismatch" WARN with the VLAN it reads. The Dante adapter is never touched, as before. The repair step is renamed `VlanIdEmpty` to `VlanId` in the log.
