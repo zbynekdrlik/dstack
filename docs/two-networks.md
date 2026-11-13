@@ -104,6 +104,8 @@ The Windows firewall is **on**, with **default Allow in and out** on every profi
 - the TCP-in rule blocks local ports `1-21`, `23-8091` and `8093-65535` only (`Set-NetFirewallRule -LocalPort '1-21','23-8091','8093-65535'`); the TCP-out rule stays whole (a reply on an accepted connection is not filtered by it, the firewall is stateful);
 - the inbound rule of the program that serves the MCP (the remoteos server runs as `python.exe`, a scripting runtime) blocks UDP only (`-Protocol UDP`), since an all-protocol program rule would also block TCP 8092; its TCP in is the TCP-in rule's job. Its outbound rule stays. `sshd.exe` is its own process and is in no program rule.
 
+A script that recreates the group keeps both exemptions (dstack #254, remoteos-mcp#96: remoteos set them on the SongPlayer PC). An Allow rule for 22 or 8092 on the Dante leg (remoteos's `OpenSSH on the Dante leg`) is harmless but opens nothing by itself: the default is Allow, and only the narrowed Block rules make the ports reachable.
+
 The Dante devices' processes (an app with dlink or dstack inside, dasio) are never in the group. No other enabled Block rule exists. This replaces the earlier "all profiles off" rule (songplayer #233): on 10.11.2026 an hour with the firewall on against an hour off showed no change in the sender's pump or lateness and none at three receivers (owner's decision, #155). Firewall rules bound to a removed NIC stay in the store and do nothing; remove them. A PC's setup script may recreate the group from this list, never turn the profiles off.
 
 ## 4. Rules for our applications
