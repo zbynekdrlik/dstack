@@ -428,7 +428,11 @@ fn fill(r: &Rig, rx: usize, from: u64, n: u64, value: impl Fn(u64) -> i32) {
 /// TX channel `tx`'s engine ring at `from` for `n`, and its holes.
 fn engine_at(r: &Rig, tx: usize, from: u64, n: usize) -> (Vec<i32>, usize) {
     let mut out = vec![0x5555_5500; n];
-    let holes = r.tx.engine_ring(tx).unwrap().read_at(from, &mut out).holes;
+    let holes =
+        r.tx.engine_ring(tx)
+            .unwrap()
+            .read_at(from, &mut out)
+            .all_holes();
     (out, holes)
 }
 
@@ -534,9 +538,11 @@ fn an_unrouted_rx_channel_is_silence_and_counts_no_hole() {
         0,
         "RX 2's reader never moved"
     );
-    // A routed channel with no audio is silence too, its holes counted.
+    // A routed channel with no audio is silence too, its holes counted:
+    // as start holes, before its flow's first sample (dstack #234).
     assert_eq!(engine_at(&r, 2, first + D, n), (vec![0; n], 0));
-    assert_eq!(r.rx.rings()[2].counters().holes, n as u64);
+    assert_eq!(r.rx.rings()[2].counters().start_holes, n as u64);
+    assert_eq!(r.rx.rings()[2].counters().holes, 0);
     assert_eq!(r.rx.rings()[0].counters().holes, 0);
 }
 

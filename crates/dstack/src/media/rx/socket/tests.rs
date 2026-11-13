@@ -293,7 +293,7 @@ fn the_minute_watch_logs_each_flow_s_wake_and_network_latency() {
     send(s.local_addr(2).unwrap(), P0);
     pump(&mut rx, 1, ns_of(P0 + 100, RATE));
     assert_eq!(s.last_wake_minute(2), None, "before any look");
-    assert_eq!(info(&mut || minute.watch(0, &s, named)), "");
+    assert_eq!(info(&mut || minute.watch(0, &s, None, named)), "");
     assert_eq!(s.last_wake_minute(2).is_some(), s.stamps());
     // The minute: one packet that sat 30 ms in its socket, one read at once.
     send(s.local_addr(2).unwrap(), P0 + 16);
@@ -301,7 +301,7 @@ fn the_minute_watch_logs_each_flow_s_wake_and_network_latency() {
     pump(&mut rx, 2, ns_of(P0 + 100, RATE));
     send(s.local_addr(2).unwrap(), P0 + 32);
     pump(&mut rx, 3, ns_of(P0 + 100, RATE));
-    let log = info(&mut || minute.watch(MINUTE_NS, &s, named));
+    let log = info(&mut || minute.watch(MINUTE_NS, &s, None, named));
     if !s.stamps() {
         assert_eq!(log, "", "no stamps, no timing");
         assert_eq!(s.last_wake_minute(2), None);
@@ -346,7 +346,10 @@ fn the_minute_watch_logs_each_flow_s_wake_and_network_latency() {
     assert!(net[0] <= net[1] && net[1] <= net[2], "{log}");
     assert_eq!(s.last_wake_minute(2), Some([wake[0], wake[1], wake[2]]));
     // A minute without packets: no line, and the status shows none.
-    assert_eq!(info(&mut || minute.watch(2 * MINUTE_NS, &s, named)), "");
+    assert_eq!(
+        info(&mut || minute.watch(2 * MINUTE_NS, &s, None, named)),
+        ""
+    );
     assert_eq!(s.last_wake_minute(2), None);
 }
 
@@ -360,4 +363,83 @@ fn without_stamps_the_minute_has_no_timing() {
     assert_eq!(s.take_minute(2), (None, None));
     assert_eq!(s.take_minute(crate::media::rx::MAX_FLOWS), (None, None));
     assert_eq!(s.last_wake_minute(crate::media::rx::MAX_FLOWS), None);
+}
+
+/// dstack #234: each stamped packet's write delay (the kernel's receive
+/// time to the end of its ring writes) is in the minute line beside the
+/// wake delay, as its 99.9th percentile and largest, and in the status's
+/// last minute; never under the wake delay of the same packets. Without
+/// stamps there is none.
+#[test]
+fn the_minute_line_carries_each_packet_s_write_delay() {
+    use crate::media::late::{MINUTE_NS, RxMinute};
+    let (s, mut rx) = receiver(None);
+    let info = |f: &mut dyn FnMut()| crate::test_log::capture_at(tracing::Level::INFO, f);
+    let mut minute = RxMinute::new();
+    assert_eq!(info(&mut || minute.watch(0, &s, None, |_| None)), "");
+    assert_eq!(s.last_write_minute(2), None, "an empty first minute");
+    send(s.local_addr(2).unwrap(), P0);
+    std::thread::sleep(Duration::from_millis(30));
+    pump(&mut rx, 1, ns_of(P0 + 100, RATE));
+    send(s.local_addr(2).unwrap(), P0 + 16);
+    pump(&mut rx, 2, ns_of(P0 + 100, RATE));
+    let log = info(&mut || minute.watch(MINUTE_NS, &s, None, |_| None));
+    if !s.stamps() {
+        assert_eq!(s.last_write_minute(2), None);
+        return;
+    }
+    let field = |name: &str| -> u64 {
+        let at = log
+            .find(&format!(" {name}="))
+            .unwrap_or_else(|| panic!("{name}: {log}"));
+        log[at + name.len() + 2..]
+            .split(|c: char| !c.is_ascii_digit())
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap()
+    };
+    let (p999, max) = (field("write_delay_p999_us"), field("write_delay_max_us"));
+    assert!(log.contains(" wake_delay_max_us="), "{log}");
+    assert!(max >= 30_000 && p999 == max, "{log}");
+    assert!(max >= field("wake_delay_max_us"), "{log}");
+    assert!(
+        log.find(" wake_delay_max_us=").unwrap() < log.find(" write_delay_p999_us=").unwrap()
+            && log.find(" write_delay_max_us=").unwrap()
+                < log.find(" network_latency_min_us=").unwrap(),
+        "beside the wake delay: {log}"
+    );
+    assert_eq!(s.last_write_minute(2), Some([p999, max]));
+    // A minute without packets: no write delay.
+    minute.watch(2 * MINUTE_NS, &s, None, |_| None);
+    assert_eq!(s.last_write_minute(2), None);
+    // A packet that reaches no ring (its slot feeds no channel) has a wake
+    // delay but no write delay.
+    let plan = RxPlan {
+        src: Some(LOOPBACK),
+        bps: 3,
+        nslots: 1,
+        latency: LATENCY,
+        delay: 0,
+        block: 0,
+        live: false,
+        generation: 1,
+        group: None,
+    };
+    s.publish(
+        |slot| if slot == 2 { plan } else { RxPlan::default() },
+        |_| None,
+    );
+    send(s.local_addr(2).unwrap(), P0 + 32);
+    pump(&mut rx, 3, ns_of(P0 + 100, RATE));
+    let (wake, _) = s.take_minute(2);
+    assert_eq!(wake.map(|w| w.packets), Some(1));
+    assert_eq!(s.take_write_minute(2), None);
+    // With the stamps off nothing is recorded.
+    s.set_stamps(false);
+    send(s.local_addr(2).unwrap(), P0 + 48);
+    pump(&mut rx, 4, ns_of(P0 + 100, RATE));
+    assert_eq!(s.take_write_minute(2), None);
+    assert_eq!(s.take_write_minute(crate::media::rx::MAX_FLOWS), None);
+    assert_eq!(s.last_write_minute(crate::media::rx::MAX_FLOWS), None);
 }

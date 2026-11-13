@@ -114,7 +114,13 @@ fn samples_land_at_their_stamps() {
         .flat_map(|&s| packet(s))
         .collect();
     assert_eq!(got, want);
-    assert_eq!(r, Read { holes: 0 });
+    assert_eq!(
+        r,
+        Read {
+            holes: 0,
+            start_holes: 0
+        }
+    );
     // A read may start anywhere.
     let (got, _) = read(&ring, T + 30, 4);
     assert_eq!(got, want[30..34]);
@@ -136,24 +142,40 @@ fn a_missing_packet_reads_as_a_hole() {
     assert_eq!(&got[..N], &packet(T)[..]);
     assert!(got[N..2 * N].iter().all(|&v| v == 0), "the hole reads 0");
     assert_eq!(&got[2 * N..], &packet(T + 64)[..]);
-    assert_eq!(r, Read { holes: N });
-    // A ring nobody wrote: all holes, wherever it is read.
+    assert_eq!(
+        r,
+        Read {
+            holes: N,
+            start_holes: 0
+        }
+    );
+    // A ring nobody wrote: all start holes (dstack #234), wherever it is
+    // read.
     let empty = Ring::new();
     for pos in [0, 1 << 47, T, (1 << 48) + 5] {
         assert_eq!(
             read(&empty, pos, 8),
-            (vec![0; 8], Read { holes: 8 }),
+            (
+                vec![0; 8],
+                Read {
+                    holes: 0,
+                    start_holes: 8
+                }
+            ),
             "{pos}"
         );
     }
     assert_eq!(ring.counters().holes, N as u64);
-    assert_eq!(empty.counters().holes, 32);
+    assert_eq!(
+        (empty.counters().holes, empty.counters().start_holes),
+        (0, 32)
+    );
 }
 
 #[test]
 fn a_packet_behind_the_reader_is_late_not_written() {
     let ring = Ring::new();
-    assert_eq!(read(&ring, T, N).1, Read { holes: N });
+    assert_eq!(read(&ring, T, N).1.start_holes, N);
     // The reader has passed T..T+32: those samples are late.
     assert_eq!(
         ring.write_at(T, &packet(T)),
@@ -162,7 +184,15 @@ fn a_packet_behind_the_reader_is_late_not_written() {
             ..Write::default()
         }
     );
-    assert_eq!(read(&ring, T, N).1, Read { holes: N }, "never written");
+    // Never written, but the late packet started the flow: holes now.
+    assert_eq!(
+        read(&ring, T, N).1,
+        Read {
+            holes: N,
+            start_holes: 0
+        },
+        "never written"
+    );
     // A packet across the reader: its first half late, the rest written.
     let w = ring.write_at(T + 16, &packet(T + 16));
     assert_eq!(
@@ -263,7 +293,16 @@ fn a_wrapped_slot_never_reads_stale() {
     let ring = Ring::new();
     ring.write_at(T, &packet(T));
     ring.write_at(T + lap, &packet(T + lap));
-    assert_eq!(read(&ring, T, N), (vec![0; N], Read { holes: N }));
+    assert_eq!(
+        read(&ring, T, N),
+        (
+            vec![0; N],
+            Read {
+                holes: N,
+                start_holes: 0
+            }
+        )
+    );
     assert_eq!(read(&ring, T + lap, N).0, packet(T + lap));
     // Laps far apart too (the lap is the position's bits 16..47).
     let ring = Ring::new();
@@ -277,7 +316,13 @@ fn a_wrapped_slot_never_reads_stale() {
     ring.write_at(T, &[-256, i32::MIN, 0, i32::MAX]);
     assert_eq!(
         read(&ring, T, 4),
-        (vec![-256, i32::MIN, 0, i32::MAX], Read { holes: 0 })
+        (
+            vec![-256, i32::MIN, 0, i32::MAX],
+            Read {
+                holes: 0,
+                start_holes: 0
+            }
+        )
     );
 }
 
@@ -287,7 +332,7 @@ fn a_wrapped_slot_never_reads_stale() {
 #[test]
 fn put_at_stores_behind_and_far_ahead_of_the_reader() {
     let ring = Ring::new();
-    assert_eq!(read(&ring, T, N).1, Read { holes: N });
+    assert_eq!(read(&ring, T, N).1.start_holes, N);
     // Behind the reader (write_at would call it late) and over the slots
     // the reader is at: stored.
     ring.put_at(T - 100, &packet(T - 100));
@@ -301,7 +346,7 @@ fn put_at_stores_behind_and_far_ahead_of_the_reader() {
     assert_eq!(ring.write_at(T + N as u64, &packet(T + 32)), written(N));
     let c = ring.counters();
     assert_eq!(
-        (c.written, c.late, c.early, c.duplicate, c.holes),
+        (c.written, c.late, c.early, c.duplicate, c.start_holes),
         (4 * N as u64 + 2, 0, 0, 0, N as u64),
         "{c:?}"
     );
@@ -334,7 +379,7 @@ fn a_write_the_reader_overtakes_counts_the_overtaken_samples_late() {
         // a write has no early check, and a reader thread a runner starts
         // late would find samples a later lap overwrote (holes, neither
         // late nor early). Those READ positions count as holes.
-        let primed = ring.read_at(T - READ as u64, &mut [0i32; READ]).holes as u64;
+        let primed = ring.read_at(T - READ as u64, &mut [0i32; READ]).all_holes() as u64;
         let started = Arc::new(AtomicU64::new(T));
         let done = Arc::new(AtomicBool::new(false));
         let reader = {
@@ -350,7 +395,7 @@ fn a_write_the_reader_overtakes_counts_the_overtaken_samples_late() {
                         || done.load(Ordering::Acquire)
                     {
                         let r = ring.read_at(pos, &mut out);
-                        delivered += (READ - r.holes) as u64;
+                        delivered += (READ - r.all_holes()) as u64;
                         pos += READ as u64;
                     } else {
                         std::hint::spin_loop();
@@ -372,8 +417,10 @@ fn a_write_the_reader_overtakes_counts_the_overtaken_samples_late() {
         // A writer a whole ring ahead of a slow reader (a runner's thread
         // start) stores nothing: early, a hole too.
         assert_eq!(c.written + c.late + c.early, total, "{c:?}");
+        // A read of the first block before its write stored a sample finds
+        // start holes (dstack #234); they count as the late samples too.
         assert_eq!(
-            c.holes - primed,
+            c.holes + c.start_holes - primed,
             c.late + c.early,
             "every hole is a late or early sample: {c:?}"
         );
@@ -435,6 +482,121 @@ fn an_unwritten_slot_reads_as_a_hole_in_the_last_lap() {
     let ring = Ring::new();
     let last = ((1u64 << 31) - 1) * SLOTS as u64;
     let mut out = [7i32; 2];
-    assert_eq!(ring.read_at(last, &mut out).holes, 2);
+    assert_eq!(ring.read_at(last, &mut out).start_holes, 2);
     assert_eq!(out, [0, 0]);
+}
+
+/// dstack #234: a hole before the flow's first sample is a start hole, not
+/// a hole: read before any write, or at a position before the least one
+/// stored since the build or the last restart.
+#[test]
+fn a_hole_before_the_flow_s_first_sample_is_a_start_hole() {
+    let start = |n| Read {
+        holes: 0,
+        start_holes: n,
+    };
+    let holes = |n| Read {
+        holes: n,
+        start_holes: 0,
+    };
+    let ring = Ring::new();
+    assert_eq!(read(&ring, T, N), (vec![0; N], start(N)));
+    // The flow's first packet stamps T + 2N; the stamps before it never
+    // come.
+    ring.write_at(T + 2 * N as u64, &packet(T + 2 * N as u64));
+    assert_eq!(read(&ring, T + N as u64, N).1, start(N));
+    assert_eq!(
+        read(&ring, T + 2 * N as u64, N),
+        (packet(T + 2 * N as u64), Read::default())
+    );
+    // A missing packet after it: a hole.
+    ring.write_at(T + 4 * N as u64, &packet(T + 4 * N as u64));
+    let r = read(&ring, T + 3 * N as u64, 2 * N).1;
+    assert_eq!(r, holes(N));
+    assert_eq!(r.all_holes(), N);
+    let c = ring.counters();
+    assert_eq!((c.holes, c.start_holes), (N as u64, 2 * N as u64));
+    // A new flow: start holes again until its first sample, and before it.
+    ring.restart();
+    assert_eq!(read(&ring, T + 5 * N as u64, N).1, start(N));
+    // Its packets come reordered: the least position stored counts.
+    ring.write_at(T + 9 * N as u64, &packet(T + 9 * N as u64));
+    ring.write_at(T + 8 * N as u64, &packet(T + 8 * N as u64));
+    assert_eq!(read(&ring, T + 7 * N as u64, N).1, start(N));
+    assert_eq!(read(&ring, T + 8 * N as u64, 2 * N).1, Read::default());
+    assert_eq!(read(&ring, T + 10 * N as u64, N).1, holes(N));
+    // A packet whose samples all came late still starts the flow: its
+    // packets come, the reader was ahead (a flow late from its start counts
+    // holes, not start holes).
+    ring.restart();
+    assert_eq!(ring.write_at(T, &packet(T)).late, N);
+    assert_eq!(read(&ring, T + 11 * N as u64, N).1, holes(N));
+    // A write wholly early (a stamp far in the future) starts nothing; one
+    // partly early does.
+    ring.restart();
+    let far = T + 12 * N as u64 + SLOTS as u64;
+    assert_eq!(ring.write_at(far, &packet(far)).early, N);
+    assert_eq!(read(&ring, T + 12 * N as u64, N).1, start(N));
+    // The reader's end is T + 13N: the last sample a whole ring past it is
+    // early, the rest written.
+    ring.restart();
+    let reader = T + 13 * N as u64;
+    let partly = reader + SLOTS as u64 - (N as u64 - 1);
+    let w = ring.write_at(partly, &packet(partly));
+    assert_eq!((w.written, w.early), (N - 1, 1));
+    assert_eq!(read(&ring, reader, N).1, start(N), "before its start");
+    // An empty write starts nothing either.
+    ring.restart();
+    ring.write_at(T, &[]);
+    assert_eq!(
+        read(&ring, T + 14 * N as u64, N).1,
+        start(N),
+        "an empty write"
+    );
+}
+
+/// The engine's output rings start at their first put; an empty put is
+/// none.
+#[test]
+fn a_put_starts_the_ring_and_an_empty_put_does_not() {
+    let ring = Ring::new();
+    ring.put_at(T + N as u64, &packet(T + N as u64));
+    ring.put_at(T, &[]);
+    let r = read(&ring, T, 2 * N + 1).1;
+    assert_eq!((r.start_holes, r.holes), (N, 1));
+    // A put before the first lowers it.
+    ring.put_at(T - 1, &[5]);
+    assert_eq!(read(&ring, T - 1, 1), (vec![5], Read::default()));
+}
+
+/// Counts add field by field (a flow's channels).
+#[test]
+fn counters_add_field_by_field() {
+    let mut a = Counters {
+        written: 1,
+        holes: 2,
+        late: 3,
+        duplicate: 4,
+        early: 5,
+        start_holes: 6,
+    };
+    a += Counters {
+        written: 10,
+        holes: 20,
+        late: 30,
+        duplicate: 40,
+        early: 50,
+        start_holes: 60,
+    };
+    assert_eq!(
+        a,
+        Counters {
+            written: 11,
+            holes: 22,
+            late: 33,
+            duplicate: 44,
+            early: 55,
+            start_holes: 66,
+        }
+    );
 }

@@ -107,3 +107,12 @@ impl RxRoute {
         })
     }
 }
+
+/// Whether plan `now` is another flow than `had` in its slot (another
+/// transmitter or another flow of the manager's, its generation): its RX
+/// channels' rings restart (dstack #234), so the holes read before its
+/// first packet are start holes. A plan change of the same flow (granted,
+/// a latency) is none.
+pub(crate) fn new_flow(had: RxPlan, now: RxPlan) -> bool {
+    now.src.is_some() && (had.src != now.src || had.generation != now.generation)
+}

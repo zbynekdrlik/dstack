@@ -146,7 +146,10 @@ impl Json {
 ///   behind the playout point, and their frames), `socket_drops` (Linux: the kernel's drops at the slot's
 ///   socket), `late` (packets past playout + block), `late_at_read`
 ///   (packets with a frame the pump had already read: its channels' holes
-///   and late samples), `wire_late`, `wake_delay_us` and
+///   and late samples), `start_holes` (dstack #234: the holes the pump read
+///   before the flow's first sample, in the rings of the channels routed
+///   to the slot now, summed; not in any `holes`), `wire_late`,
+///   `wake_delay_us` and
 ///   `wake_delay_peak_us` (dstack #234, Linux only, absent on Windows where
 ///   the kernel stamps no receive time: packets already late by `late`'s
 ///   rule when the kernel received them, and the largest wake delay, the RX
@@ -158,6 +161,11 @@ impl Json {
 ///   from the device's start, shorter), the upper edge of its 50 µs
 ///   bucket; absent before the first take and for a minute without a
 ///   stamped packet; the watch logs the same once a minute),
+///   `write_delay_p999_us` and `write_delay_max_us` (dstack #234, Linux
+///   only: the 99.9th percentile and the largest of each packet's write
+///   delay, the kernel's receive time to the end of its ring writes, which
+///   also catches a stall inside an RX pass, over the same minute; absent
+///   as the wake percentiles are),
 ///   `network_latency_min_us`, `network_latency_p99_us` and
 ///   `network_latency_max_us` (dstack #244, Linux only, and only for a
 ///   second with a stamped packet: each packet's arrival, the kernel's
@@ -179,7 +187,10 @@ impl Json {
 /// - `channels`: each RX channel subscribed or whose ring counted anything
 ///   (written, or read by the echo or a check): `rx`, `status`
 ///   (ARC 0x3000's code, 0 without a subscription), its ring's `written`,
-///   `holes`, `late`, `duplicate`, `early` (samples).
+///   `holes`, `late`, `duplicate`, `early`, `start_holes` (samples; a
+///   hole read before the flow's first sample, after the device's start or
+///   the channel's move to another flow, is a start hole, not a hole:
+///   dstack #234).
 /// - `sources`: each TX channel that is not silent: `tx`, `source`
 ///   (`counter`, `sine` with `hz` and `dbfs`, `echo` with `rx` and
 ///   `offset`).
@@ -412,6 +423,7 @@ fn rx_part(j: &mut Json, media: &Media) {
         }
         j.num("late", lane.late);
         j.num("late_at_read", lane.late_at_read);
+        j.num("start_holes", media.rx.flow_rings(slot).start_holes);
         if media.rx.stamps() {
             j.num("wire_late", lane.wire_late);
             j.num("wake_delay_us", media.rx.last_wake_delay_us(slot));
@@ -420,6 +432,10 @@ fn rx_part(j: &mut Json, media: &Media) {
                 j.num("wake_delay_p50_us", p50);
                 j.num("wake_delay_p99_us", p99);
                 j.num("wake_delay_p999_us", p999);
+            }
+            if let Some([p999, max]) = media.rx.last_write_minute(slot) {
+                j.num("write_delay_p999_us", p999);
+                j.num("write_delay_max_us", max);
             }
             if let Some(n) = media.rx.last_network_latency(slot) {
                 j.num("network_latency_min_us", n.min_us);
@@ -456,6 +472,7 @@ fn rx_part(j: &mut Json, media: &Media) {
         j.num("late", c.late);
         j.num("duplicate", c.duplicate);
         j.num("early", c.early);
+        j.num("start_holes", c.start_holes);
         j.close('}');
     }
     j.close(']');

@@ -55,6 +55,10 @@ pub(super) struct RxStats {
     /// Linux), taken by [`RxShared::take_minute`].
     pub(super) wake_minute: wake::Window,
     pub(super) network_minute: netlat::Window,
+    /// The minute's write delays (dstack #234, Linux): each stamped,
+    /// placed packet's kernel receive time to its ring writes' end, taken
+    /// by [`RxShared::take_write_minute`].
+    pub(super) write_minute: wake::Window,
     /// Where the flow's audio comes from, as [`source_word`] packs it (0:
     /// none yet): the RX thread writes it only when it changes (dstack
     /// #266), the status and the loss watch read it.

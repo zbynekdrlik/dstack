@@ -82,3 +82,17 @@ fn a_window_takes_its_figures_keeps_them_and_starts_again_empty() {
     assert_eq!(w.take(), None);
     assert_eq!(w.last(), None);
 }
+
+/// dstack #234: a window keeps its last largest for the status (the write
+/// delay's), none before the first take and after an empty window.
+#[test]
+fn a_window_keeps_its_last_largest() {
+    let w = Window::default();
+    assert_eq!(w.last_max_us(), None, "before the first take");
+    w.record(120 * US);
+    w.record(9_000 * US);
+    w.take();
+    assert_eq!(w.last_max_us(), Some(9_000));
+    w.take();
+    assert_eq!(w.last_max_us(), None, "an empty window");
+}
