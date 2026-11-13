@@ -413,3 +413,54 @@ async fn the_local_endpoint_s_port_is_the_device_s() {
 fn the_default_clock_is_the_in_process_follower_linked_to_the_service() {
     assert_eq!(ClockSource::default(), ClockSource::Linked);
 }
+
+// ---- the flow ports (dstack #264) ----
+
+#[test]
+fn a_device_takes_its_slot_s_flow_ports_and_logs_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_, mut cfg) = config_in(dir.path());
+    cfg.arc_port = 4442;
+    let log = crate::test_log::capture_at(tracing::Level::INFO, || {
+        fix_flow_ports(&mut cfg).unwrap();
+    });
+    assert_eq!(
+        (cfg.rx_port_base, cfg.tx_port_base),
+        (Some(29_928), Some(29_960))
+    );
+    assert!(log.contains("slot=Some(2)"), "{log}");
+    assert!(log.contains("rx_ports=\"29928-29959\""), "{log}");
+    assert!(log.contains("tx_ports=\"29960-29991\""), "{log}");
+}
+
+#[test]
+fn a_configured_base_wins_and_one_outside_the_range_is_warned() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_, mut cfg) = config_in(dir.path());
+    cfg.rx_port_base = Some(30_000);
+    cfg.tx_port_base = Some(47_000);
+    let log = crate::test_log::capture_warnings(|| fix_flow_ports(&mut cfg).unwrap());
+    assert_eq!(
+        (cfg.rx_port_base, cfg.tx_port_base),
+        (Some(30_000), Some(47_000))
+    );
+    assert!(
+        log.contains("tx_port_base: its ports 47000-47031 leave"),
+        "{log}"
+    );
+    assert!(!log.contains("rx_port_base"), "{log}");
+}
+
+#[test]
+fn a_device_with_no_slot_and_a_base_unset_is_a_setup_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_, mut cfg) = config_in(dir.path());
+    cfg.arc_port = 5000;
+    cfg.rx_port_base = Some(30_000);
+    let e = setup_error(fix_flow_ports(&mut cfg).unwrap_err());
+    assert!(
+        e.starts_with("tx_port_base: unset, and the ARC port 5000"),
+        "{e}"
+    );
+    assert_eq!(cfg.tx_port_base, None, "nothing set");
+}

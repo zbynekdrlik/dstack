@@ -175,3 +175,6 @@ pub(super) fn tx_clash(base: u16, rx_base: Option<u16>, own: [u16; 3]) -> Option
 
 // The TX side bounds its range with the RX side's `last_port`: one count.
 const _: () = assert!(MAX_FLOWS == crate::media::tx::MAX_FLOWS);
+
+#[cfg(test)]
+mod tests;
