@@ -25,4 +25,9 @@ LICENSE-APACHE and LICENSE-MIT), copied unchanged except:
   routed only for its own address) answered from its LAN address, through
   the router (dstack #155, 9.11.2026; `crates/dstack/tests/mdns_reply_source.rs`).
 
+- `Cargo.toml`: an empty `[workspace]` table, so cargo never searches above
+  this crate (a dstack checkout nested in another one, such as a git
+  worktree, found the outer workspace and refused this excluded path; dstack
+  #239). Build-neutral: the lockfile does not change.
+
 Drop this copy when upstream offers all three.
