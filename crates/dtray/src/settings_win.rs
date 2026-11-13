@@ -732,7 +732,7 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             // SAFETY: plain call on the child the system names.
             let id =
                 unsafe { windows_sys::Win32::UI::WindowsAndMessaging::GetDlgCtrlID(lp as HWND) };
-            static_colour(wp as HDC, usize::try_from(id).unwrap_or(0)) as LRESULT
+            static_colour(wp as HDC, lp as HWND, usize::try_from(id).unwrap_or(0)) as LRESULT
         }
         WM_NOTIFY => {
             // SAFETY: the system's header for this message.

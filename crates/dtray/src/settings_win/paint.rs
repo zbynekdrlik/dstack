@@ -7,6 +7,8 @@
 use windows_sys::Win32::Graphics::Gdi::{COLOR_BTNFACE, DrawFocusRect};
 use windows_sys::Win32::UI::Controls::{ODS_DISABLED, ODS_FOCUS};
 
+use windows_sys::Win32::UI::WindowsAndMessaging::GetWindowTextLengthW;
+
 use super::*;
 
 thread_local! {
@@ -77,10 +79,13 @@ pub(super) fn draw_item(d: &DRAWITEMSTRUCT) {
 
 /// The colours of the markers and the banner (stateless, as
 /// [`draw_item`]).
-pub(super) fn static_colour(hdc: HDC, id: usize) -> HBRUSH {
-    // SAFETY: the DC the system gave; system brushes and our one brush.
+pub(super) fn static_colour(hdc: HDC, ctl: HWND, id: usize) -> HBRUSH {
+    // SAFETY: the DC and control the system gave; system brushes and our
+    // one brush.
     unsafe {
-        if id == ID_BANNER {
+        // The banner's colours only while it says something (empty, it is
+        // the window's background, as the mockup).
+        if id == ID_BANNER && GetWindowTextLengthW(ctl) > 0 {
             SetTextColor(hdc, WARN);
             SetBkColor(hdc, WARN_BG);
             let b = WARN_BRUSH.with(|c| {
