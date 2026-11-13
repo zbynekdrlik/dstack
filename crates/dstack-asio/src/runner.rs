@@ -221,6 +221,8 @@ impl<D: Device> Runner<D> {
                 });
             }
             ClockStep::StartsWaiting => {
+                // A proving card that stops ticking reads NoClock: both are
+                // calm waits, and the 60 s reopen proves it again.
                 self.waiting_for_clock = true;
                 warn!(
                     driver = %self.driver,

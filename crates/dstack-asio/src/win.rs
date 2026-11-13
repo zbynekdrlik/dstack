@@ -644,8 +644,9 @@ mod tests {
     use crate::device::Inputs;
 
     /// A driver no PC registers: refused as not found, the device holds
-    /// nothing after, and a second open says the same (the hold and the
-    /// COM apartment come back on the error path). Windows CI runs it.
+    /// nothing after, and a second open says the same (the hold comes back
+    /// on the error path; no driver is loaded, so a real driver's COM path
+    /// is `asio-probe`'s check). Windows CI runs it.
     #[test]
     fn an_unregistered_driver_is_not_found_and_leaves_nothing_held() {
         let name = format!("dstack-test-{}", std::process::id());

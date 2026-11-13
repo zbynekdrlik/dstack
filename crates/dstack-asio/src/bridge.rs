@@ -25,7 +25,10 @@
 //! `DanteSide` through `dlink::bridge`'s [`Switch`] (dsend's handover) and
 //! given back the same way to be freed off the pump's thread. Until the
 //! first open the pump's side plays a player on an empty FIFO (priming:
-//! silence). Neither `process` allocates or makes a system call, and
+//! silence), so `from_asio_stats` reads priming at a 1 ms target until the
+//! driver's first open. The switch keeps one handover in flight: while the
+//! pump does not run (the Dante device restarting), a second driver open is
+//! refused and the runner retries it after its backoff. Neither `process` allocates or makes a system call, and
 //! neither waits on a lock (the switch's bounded channel never blocks).
 
 use std::sync::Arc;
