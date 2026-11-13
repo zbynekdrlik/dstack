@@ -50,7 +50,9 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, MSG, PM_REMOVE, PeekMessageW, TranslateMessage,
 };
 
-use crate::device::{Channels, Device, Opened, Started, admit_buffer, check_channels, one_sample};
+use crate::device::{
+    Channels, Device, Opened, Started, admit_buffer, admit_outputs, check_channels, resolve_inputs,
+};
 use crate::engine::{Counters, Engine};
 use crate::hold::{DriverHold, DriverHolds};
 use crate::state::{
@@ -326,7 +328,6 @@ pub struct WinDevice {
     /// after the release (kept for good when the device is parked).
     hold: Option<DriverHold<'static>>,
     driver: Option<SafeHandle>,
-    channels: Channels,
     opened: Option<Opened>,
     slot: Option<usize>,
     stream: *mut Stream,
@@ -348,7 +349,6 @@ impl WinDevice {
         Self {
             hold: None,
             driver: None,
-            channels: Channels::default(),
             opened: None,
             slot: None,
             stream: ptr::null_mut(),
@@ -393,15 +393,19 @@ impl WinDevice {
         let driver_inputs = u32::try_from(counts.in_).unwrap_or(0);
         let driver_outputs = u32::try_from(counts.out).unwrap_or(0);
         check_channels(channels, driver_inputs, driver_outputs)?;
-        let output_codes = Self::codes(driver, false, 0..counts.out.max(0))?;
-        let input_codes = Self::codes(driver, true, channels.inputs.iter().map(|&c| c as c_long))?;
+        let output_sample = admit_outputs(&Self::codes(driver, false, 0..counts.out.max(0))?)?;
+        let (inputs, input_sample) = resolve_inputs(&channels.inputs, driver_inputs, |list| {
+            Self::codes(driver, true, list.iter().map(|&c| c as c_long))
+        })?;
         Ok(Opened {
             rate,
             buffer_frames: admit_buffer(size.preferred)?,
             driver_inputs,
             driver_outputs,
-            input_sample: one_sample(&input_codes, "input")?,
-            output_sample: one_sample(&output_codes, "output")?,
+            inputs,
+            outputs: channels.outputs.clone(),
+            input_sample,
+            output_sample,
         })
     }
 }
@@ -453,13 +457,12 @@ impl Device for WinDevice {
         let opened = Self::read(&driver, channels)?;
         self.hold = Some(hold);
         self.driver = Some(driver);
-        self.channels = channels.clone();
-        self.opened = Some(opened);
+        self.opened = Some(opened.clone());
         Ok(opened)
     }
 
     fn start(&mut self, engine: Engine) -> Result<Started, Reason> {
-        let (Some(driver), Some(opened)) = (self.driver.as_ref(), self.opened) else {
+        let (Some(driver), Some(opened)) = (self.driver.as_ref(), self.opened.clone()) else {
             return Err(Reason::Failed("start before open".into()));
         };
         let slot = (0..SLOTS_COUNT)
@@ -481,7 +484,7 @@ impl Device for WinDevice {
                 input: false,
                 index,
             })
-            .chain(self.channels.inputs.iter().map(|&c| ChannelId {
+            .chain(opened.inputs.iter().map(|&c| ChannelId {
                 input: true,
                 index: c as c_long,
             }));
@@ -493,7 +496,7 @@ impl Device for WinDevice {
         let mut outputs: Vec<[*mut c_void; 2]> = created.collect();
         let inputs = outputs.split_off(outs.min(outputs.len()));
         self.buffers_created = true;
-        let output_bytes = frames * opened.output_sample.map_or(0, |s| s.bytes());
+        let output_bytes = frames * opened.output_sample.bytes();
         let input_bytes = frames * opened.input_sample.map_or(0, |s| s.bytes());
         for half in outputs.iter().flatten().filter(|p| !p.is_null()) {
             // SAFETY: a fresh half-buffer of `output_bytes`; no callback runs
@@ -632,5 +635,37 @@ impl Drop for WinDevice {
             // may load a second instance of it.
             hold.park();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::device::Inputs;
+
+    /// A driver no PC registers: refused as not found, the device holds
+    /// nothing after, and a second open says the same (the hold and the
+    /// COM apartment come back on the error path). Windows CI runs it.
+    #[test]
+    fn an_unregistered_driver_is_not_found_and_leaves_nothing_held() {
+        let name = format!("dstack-test-{}", std::process::id());
+        let channels = Channels {
+            inputs: Inputs::Exact(vec![]),
+            outputs: vec![0],
+        };
+        let mut device = WinDevice::new();
+        for _ in 0..2 {
+            match device.open(&name, &channels) {
+                Err(Reason::NotFound { present }) => {
+                    assert!(!present.contains(&name));
+                }
+                other => panic!("{other:?}"),
+            }
+            assert!(!HELD.is_held(&name), "the hold came back");
+        }
+        assert_eq!(device.poll(), DeviceEvents::default());
+        assert_eq!(device.consumed_frames(), 0);
+        device.close();
+        assert!(drivers().is_ok());
     }
 }

@@ -47,7 +47,7 @@ pub mod state;
 #[cfg(windows)]
 pub mod win;
 
-pub use device::{Channels, Device, Opened, Started, Unsupported};
+pub use device::{Channels, Device, Inputs, Opened, Started, Unsupported};
 pub use dstack_audio_io::{Block, Process};
 pub use engine::{Counters, Engine};
 pub use format::Sample;

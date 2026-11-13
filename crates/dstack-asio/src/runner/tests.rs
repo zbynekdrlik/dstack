@@ -35,8 +35,10 @@ fn opened() -> Opened {
         buffer_frames: 256,
         driver_inputs: 2,
         driver_outputs: 2,
+        inputs: vec![0],
+        outputs: vec![1],
         input_sample: Some(Sample::Int32),
-        output_sample: Some(Sample::Int32),
+        output_sample: Sample::Int32,
     }
 }
 
@@ -115,7 +117,7 @@ fn rig_with(make_fails: bool) -> Rig {
         }
     });
     let channels = Channels {
-        inputs: vec![0],
+        inputs: crate::device::Inputs::Exact(vec![0]),
         outputs: vec![1],
     };
     let runner = Runner::new(FakeDevice(Rc::clone(&fake)), "Card", channels, make);
@@ -303,9 +305,21 @@ fn a_driver_with_no_clock_waits_calmly_and_reopens_every_60_s() {
         (s.state, s.reason.clone()),
         (RunState::Waiting, Some(Reason::NoClock))
     );
-    // It ticks: the clock arrived.
-    r.tick(1, 256);
-    r.runner.step(61 * S);
+    // A burst of callbacks at the reopen is no clock: the run's first step
+    // takes it as its tick base.
+    r.tick(2, 512);
+    r.runner.step(60 * S + POLL_NS);
+    assert_eq!(r.status().reason, Some(Reason::NoClock));
+    r.runner.step(63 * S);
+    let s = r.status();
+    assert_eq!(
+        (s.state, s.reason.clone()),
+        (RunState::Waiting, Some(Reason::NoClock))
+    );
+    assert_eq!(s.resets, 0, "never read as a stall");
+    // It ticks from there: the clock arrived.
+    r.tick(3, 768);
+    r.runner.step(64 * S);
     let s = r.status();
     assert_eq!((s.state, s.reason), (RunState::Running, None));
 }
@@ -315,6 +329,8 @@ fn a_driver_that_stops_ticking_for_2_s_is_a_stall() {
     let mut r = rig();
     r.runner.step(0);
     r.tick(5, 1280);
+    r.runner.step(POLL_NS);
+    r.tick(6, 1536);
     r.runner.step(S);
     r.runner.step(S + STALL_NS - 1);
     assert_eq!(r.status().state, RunState::Running);
@@ -373,60 +389,130 @@ fn changed_latencies_are_read_again() {
     assert_eq!((s.input_latency_frames, s.output_latency_frames), (7, 9));
 }
 
-/// The driver takes `per_s` frames a second (its reported rate is 96 kHz),
-/// stepped every 50 ms from the open; the first time a step leaves it
-/// running no longer.
-fn run_at(r: &mut Rig, per_s: f64, until: i64) -> Option<i64> {
+/// The driver taking `per_s` frames a second (its reported rate is 96 kHz),
+/// stepped every 50 ms from `from` until `until`, its count going on from
+/// `consumed`; the first step after which `stop` holds.
+fn drive(
+    r: &mut Rig,
+    per_s: f64,
+    (from, until): (i64, i64),
+    consumed: &mut f64,
+    stop: impl Fn(&Status) -> bool,
+) -> Option<i64> {
     let step = 50_000_000;
-    let mut at = 0;
-    r.runner.step(0);
+    let mut at = from;
     while at < until {
         at += step;
-        let consumed = (per_s * at as f64 / 1e9) as u64;
-        r.tick(consumed / 256 + 1, consumed);
+        *consumed += per_s * step as f64 / 1e9;
+        let c = *consumed as u64;
+        r.tick(c / 256 + 1, c);
         r.runner.step(at);
-        if r.status().state != RunState::Running {
+        if stop(&r.status()) {
             return Some(at);
         }
     }
     None
 }
 
+/// SoundGrid with its network off: ~2.9 % more than its rate.
+const OFF: f64 = 96_000.0 * 1.029;
+
 #[test]
-fn a_card_far_off_its_rate_waits_60_s_calmly() {
+fn a_card_far_off_its_rate_is_proven_silently_and_runs_once_on_its_rate() {
     let window = rate_window_ns(256, 96_000.0);
     let mut r = rig();
-    // SoundGrid with its network off: ~2.9 % more than its rate.
-    let at = run_at(&mut r, 96_000.0 * 1.029, 60 * S).expect("off rate");
-    // The windows start after a quarter second (5 steps of 50 ms: 0.25 s)
-    // and two must close off.
-    assert_eq!(at, 250_000_000 + 2 * window);
+    r.runner.step(0);
+    let mut c = 0.0;
+    let off = |s: &Status| s.reason == Some(Reason::ClockOffRate);
+    let at = drive(&mut r, OFF, (0, 60 * S), &mut c, off).expect("off rate");
+    // The tick base is the first step (0.05 s), the windows start a quarter
+    // second of audio later (0.3 s) and two must close off.
+    assert_eq!(at, 300_000_000 + 2 * window);
     let s = r.status();
     assert_eq!(
-        (s.state, s.reason.clone()),
-        (RunState::Waiting, Some(Reason::ClockOffRate))
+        (s.state, s.clock_waits, s.resets),
+        (RunState::Waiting, 1, 0)
     );
-    assert_eq!((s.clock_waits, s.resets), (1, 0));
-    r.runner.step(at + 1);
-    assert_eq!(r.status().retry_in_s, Some(60.0 - 1e-9));
+    assert_eq!(r.fake.borrow().closes, 1);
+    // Opened again at once, proving: the app's Process is not made.
+    r.runner.step(at);
+    assert_eq!((r.opens(), r.made.load(Ordering::SeqCst)), (2, 1));
+    assert_eq!(r.status().reason, Some(Reason::ClockOffRate));
+    // Still off: one window is the verdict, but the run stays open (silent)
+    // until 60 s after its open, then opens again at once.
+    let mut c = 0.0;
+    let reopened = |_: &Status| false;
+    // The last step 50 ms before the 60 s.
+    let last = at + 60 * S - 50_000_000;
+    assert_eq!(drive(&mut r, OFF, (at, last - 1), &mut c, reopened), None);
+    assert_eq!(
+        (r.fake.borrow().closes, r.status().state),
+        (1, RunState::Waiting)
+    );
     r.runner.step(at + 60 * S - 1);
-    assert_eq!(r.opens(), 1);
+    assert_eq!(r.fake.borrow().closes, 1);
     r.runner.step(at + 60 * S);
-    assert_eq!(r.opens(), 2);
+    assert_eq!(r.fake.borrow().closes, 2);
+    assert_eq!(r.status().clock_waits, 2);
+    r.runner.step(at + 60 * S);
+    assert_eq!((r.opens(), r.made.load(Ordering::SeqCst)), (3, 1));
+    // On its rate now: one plausible window ends the wait, and the driver is
+    // opened again with the app's Process.
+    let mut c = 0.0;
+    let back = at + 60 * S;
+    let runs = |s: &Status| s.state == RunState::Running;
+    let ran = drive(&mut r, 96_000.0, (back, back + 30 * S), &mut c, runs).expect("runs");
+    assert_eq!(r.made.load(Ordering::SeqCst), 2);
+    assert_eq!(r.status().reason, None);
+    assert!(ran >= back + window, "{ran}");
+    assert_eq!(r.status().resets, 0);
+}
+
+#[test]
+fn an_open_at_another_rate_ends_the_proving() {
+    let mut r = rig();
+    r.runner.step(0);
+    let mut c = 0.0;
+    let off = |s: &Status| s.reason == Some(Reason::ClockOffRate);
+    let at = drive(&mut r, OFF, (0, 60 * S), &mut c, off).expect("off rate");
+    let mut other = opened();
+    other.rate = 48_000.0;
+    r.fake.borrow_mut().opens.push_back(Ok(other));
+    r.runner.step(at);
+    assert_eq!(
+        r.made.load(Ordering::SeqCst),
+        2,
+        "a fresh open runs the app"
+    );
+    assert_eq!(r.status().state, RunState::Running);
 }
 
 #[test]
 fn a_card_on_its_rate_runs_on() {
     let mut r = rig();
-    assert_eq!(run_at(&mut r, 96_000.0 * 1.000_3, 40 * S), None);
+    r.runner.step(0);
+    let mut c = 0.0;
+    let stopped = |s: &Status| s.state != RunState::Running;
+    assert_eq!(
+        drive(&mut r, 96_000.0 * 1.000_3, (0, 40 * S), &mut c, stopped),
+        None
+    );
     assert_eq!(r.fake.borrow().closes, 0);
 }
 
 #[test]
-fn the_thread_loop_releases_the_driver_when_stopped() {
+fn the_thread_loop_steps_until_stopped_and_releases_the_driver() {
     let r = rig();
     let fake = Rc::clone(&r.fake);
-    let stop = AtomicBool::new(true);
+    let stop = Arc::new(AtomicBool::new(false));
+    let s = Arc::clone(&stop);
+    let stopper = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(100));
+        s.store(true, Ordering::Relaxed);
+    });
     r.runner.run(&stop);
-    assert_eq!((fake.borrow().opened, fake.borrow().closes), (0, 1));
+    stopper.join().unwrap();
+    let f = fake.borrow();
+    assert_eq!((f.opened, f.started), (1, 1), "it opened and ran");
+    assert_eq!(f.closes, 1, "and released the driver once stopped");
 }

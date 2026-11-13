@@ -12,9 +12,11 @@
 //! logs or makes a system call: every buffer is made in [`Engine::new`].
 //!
 //! A `Process` that panics is caught at this boundary: that block and every
-//! later one play silence (the app's state may be broken), counted in
-//! [`Counters::faults`]; the runner closes the driver for it and starts a
-//! fresh `Process` after the backoff.
+//! later one play silence (the app's state may be broken), the panic counted
+//! once in [`Counters::faults`]; the runner closes the driver for it and
+//! starts a fresh `Process` after the backoff. Only that fault path leaves
+//! the rules above: the default panic hook prints (and allocates) on the
+//! driver's thread.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
@@ -22,7 +24,7 @@ use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 
 use dstack_audio_io::{Block, Process};
 
-use crate::device::{Channels, Opened};
+use crate::device::Opened;
 use crate::format::Sample;
 use crate::state::{GapKind, callback_gap_kind, frames_to_ns};
 
@@ -71,7 +73,7 @@ impl Counters {
         self.consumed.load(Ordering::Relaxed)
     }
 
-    /// Buffer switches whose `Process` panicked (silence played).
+    /// Panics of the app's `Process` (0 or 1: it is never called again).
     pub fn faults(&self) -> u64 {
         self.faults.load(Ordering::Relaxed)
     }
@@ -118,7 +120,7 @@ pub struct Engine {
     process: Box<dyn Process>,
     frames: usize,
     input_sample: Option<Sample>,
-    output_sample: Option<Sample>,
+    output_sample: Sample,
     /// The used inputs, channel-major.
     input: Vec<f64>,
     /// The app's outputs, channel-major.
@@ -133,12 +135,12 @@ pub struct Engine {
 }
 
 impl Engine {
-    /// The buffer switch of a driver opened as `opened`, using `channels`,
-    /// running `process`.
-    pub fn new(process: Box<dyn Process>, opened: &Opened, channels: &Channels) -> Self {
+    /// The buffer switch of a driver opened as `opened` (its inputs read
+    /// and outputs used), running `process`.
+    pub fn new(process: Box<dyn Process>, opened: &Opened) -> Self {
         let frames = opened.buffer_frames as usize;
         let mut output_of = vec![None; opened.driver_outputs as usize];
-        for (i, &c) in channels.outputs.iter().enumerate() {
+        for (i, &c) in opened.outputs.iter().enumerate() {
             if let Some(slot) = output_of.get_mut(c as usize) {
                 *slot = Some(i);
             }
@@ -148,8 +150,8 @@ impl Engine {
             frames,
             input_sample: opened.input_sample,
             output_sample: opened.output_sample,
-            input: vec![0.0; channels.inputs.len() * frames],
-            output: vec![0.0; channels.outputs.len() * frames],
+            input: vec![0.0; opened.inputs.len() * frames],
+            output: vec![0.0; opened.outputs.len() * frames],
             output_of,
             first: true,
             faulted: false,
@@ -223,10 +225,8 @@ impl Engine {
             if ran.is_err() {
                 *faulted = true;
                 output.fill(0.0);
+                counters.faults.fetch_add(1, Ordering::Relaxed);
             }
-        }
-        if *faulted {
-            counters.faults.fetch_add(1, Ordering::Relaxed);
         }
         counters
             .consumed
@@ -237,15 +237,11 @@ impl Engine {
     /// Driver output `ch`'s half-buffer `bytes`: the app's output mapped to
     /// it, or silence.
     pub fn encode_output(&self, ch: usize, bytes: &mut [u8]) {
-        let Some(sample) = self.output_sample else {
-            bytes.fill(0);
-            return;
-        };
         let src = match self.output_of.get(ch).copied().flatten() {
             Some(o) => &self.output[o * self.frames..(o + 1) * self.frames],
             None => &[][..],
         };
-        sample.encode(src, bytes);
+        self.output_sample.encode(src, bytes);
     }
 }
 

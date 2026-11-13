@@ -6,7 +6,7 @@ use dstack_audio_io::{Block, Process};
 #[test]
 fn the_channels_must_exist_and_be_used_once() {
     let ch = |inputs: &[u32], outputs: &[u32]| Channels {
-        inputs: inputs.to_vec(),
+        inputs: Inputs::Exact(inputs.to_vec()),
         outputs: outputs.to_vec(),
     };
     assert_eq!(check_channels(&ch(&[0, 7], &[0, 1, 63]), 8, 64), Ok(()));
@@ -89,9 +89,11 @@ fn off_windows_no_engine_starts() {
         buffer_frames: 64,
         driver_inputs: 0,
         driver_outputs: 2,
+        inputs: vec![],
+        outputs: vec![],
         input_sample: None,
-        output_sample: Some(Sample::Int32),
+        output_sample: Sample::Int32,
     };
-    let engine = Engine::new(Box::new(Nothing), &opened, &Channels::default());
+    let engine = Engine::new(Box::new(Nothing), &opened);
     assert_eq!(Unsupported.start(engine), Err(Reason::WindowsOnly));
 }

@@ -32,14 +32,16 @@ impl Process for Gain {
     }
 }
 
-fn opened(frames: u32, outputs: u32) -> Opened {
+fn opened(frames: u32, outputs: u32, inputs: &[u32], used: &[u32]) -> Opened {
     Opened {
         rate: 48_000.0,
         buffer_frames: frames,
         driver_inputs: 4,
         driver_outputs: outputs,
+        inputs: inputs.to_vec(),
+        outputs: used.to_vec(),
         input_sample: Some(Sample::Int16),
-        output_sample: Some(Sample::Int16),
+        output_sample: Sample::Int16,
     }
 }
 
@@ -66,12 +68,8 @@ fn i16s(v: &[u8]) -> Vec<i16> {
 fn inputs_go_through_the_app_to_the_mapped_outputs_and_the_rest_is_silent() {
     // Driver inputs 2 and 0 are the app's 0 and 1; its outputs 0 and 1 go
     // to driver outputs 3 and 1.
-    let channels = Channels {
-        inputs: vec![2, 0],
-        outputs: vec![3, 1],
-    };
     let (p, blocks, restarts) = gain(None);
-    let mut e = Engine::new(p, &opened(3, 4), &channels);
+    let mut e = Engine::new(p, &opened(3, 4, &[2, 0], &[3, 1]));
     assert_eq!((e.frames(), e.inputs(), e.driver_outputs()), (3, 2, 4));
     let a: Vec<u8> = [1000i16, 2000, 3000]
         .iter()
@@ -128,39 +126,29 @@ fn inputs_go_through_the_app_to_the_mapped_outputs_and_the_rest_is_silent() {
 }
 
 #[test]
-fn a_driver_with_no_outputs_or_no_inputs_writes_silence_and_reads_nothing() {
-    let mut o = opened(2, 2);
-    o.output_sample = None;
+fn inputs_with_no_readable_type_read_as_silence() {
+    let mut o = opened(2, 1, &[0], &[0]);
     o.input_sample = None;
-    let channels = Channels {
-        inputs: vec![0],
-        outputs: vec![0],
-    };
     let (p, _, _) = gain(None);
-    let mut e = Engine::new(p, &o, &channels);
+    let mut e = Engine::new(p, &o);
     e.decode_input(0, &[0xFF; 4]);
     e.run();
     let mut buf = vec![0xAAu8; 4];
     e.encode_output(0, &mut buf);
-    assert_eq!(buf, vec![0; 4]);
+    assert_eq!(i16s(&buf), vec![0, 0], "input 0 (silence) x 2");
 }
 
 #[test]
 fn a_panicking_app_plays_silence_from_then_on_and_is_counted() {
-    let channels = Channels {
-        inputs: vec![],
-        outputs: vec![0],
-    };
     let (p, blocks, _) = gain(Some(1));
-    let mut e = Engine::new(p, &opened(2, 1), &channels);
+    let mut e = Engine::new(p, &opened(2, 1, &[], &[0]));
     let mut buf = vec![0u8; 4];
     e.run();
     e.encode_output(0, &mut buf);
     assert_eq!(i16s(&buf), vec![8192, 8192], "2 / 8 with no input");
-    let hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(|_| {}));
+    // The default hook prints the panic (the global hook is never swapped:
+    // tests run in parallel).
     e.run();
-    std::panic::set_hook(hook);
     e.encode_output(0, &mut buf);
     assert_eq!(i16s(&buf), vec![0, 0], "the panicking block is silence");
     e.run();
@@ -168,14 +156,18 @@ fn a_panicking_app_plays_silence_from_then_on_and_is_counted() {
     assert_eq!(i16s(&buf), vec![0, 0], "and every later one");
     assert_eq!(blocks.load(Ordering::SeqCst), 2, "never called again");
     let c = e.counters();
-    assert_eq!((c.callbacks(), c.faults()), (3, 2));
+    assert_eq!(
+        (c.callbacks(), c.faults()),
+        (3, 1),
+        "the panic counted once"
+    );
 }
 
 #[test]
 fn each_callback_is_timed_against_the_period() {
     // 48 frames at 48 kHz: a period of 1 ms.
     let (p, _, _) = gain(None);
-    let e = Engine::new(p, &opened(48, 1), &Channels::default());
+    let e = Engine::new(p, &opened(48, 1, &[], &[]));
     let c = e.counters();
     e.note_callback(10_000_000);
     assert_eq!(c.take_gap_max_ns(), 0, "the first switch has no gap");

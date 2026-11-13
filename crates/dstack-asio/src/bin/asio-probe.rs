@@ -21,6 +21,7 @@ mod probe {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
+    use dstack_asio::device::Inputs;
     use dstack_asio::{Block, Channels, Process, RunState, Runner, Status};
 
     /// Silence out, the inputs' peak in (f64 bits).
@@ -62,7 +63,7 @@ mod probe {
             driver: None,
             seconds: 10,
             channels: Channels {
-                inputs: vec![],
+                inputs: Inputs::Exact(vec![]),
                 outputs: vec![0, 1],
             },
         };
@@ -75,7 +76,7 @@ mod probe {
                     a.seconds = value()?.parse().map_err(|_| "--seconds: a whole number")?;
                 }
                 "--outputs" => a.channels.outputs = channels(&value()?)?,
-                "--inputs" => a.channels.inputs = channels(&value()?)?,
+                "--inputs" => a.channels.inputs = Inputs::Exact(channels(&value()?)?),
                 "--version" => {
                     println!("asio-probe {}", env!("CARGO_PKG_VERSION"));
                     std::process::exit(0);
@@ -161,7 +162,7 @@ mod probe {
             let s = s.lock().unwrap().clone();
             println!("{}", line(&s, f64::from_bits(peak.load(Ordering::Relaxed))));
             ran |= s.state == RunState::Running && s.callbacks > 0;
-            ok &= s.faults == 0;
+            ok &= s.faults == 0 && s.resets == 0;
         }
         stop.store(true, Ordering::Relaxed);
         let joined = worker.join().is_ok();

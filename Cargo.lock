@@ -410,6 +410,7 @@ dependencies = [
  "azo",
  "dlink",
  "dstack-audio-io",
+ "serde",
  "tracing",
  "windows-sys 0.61.2",
 ]

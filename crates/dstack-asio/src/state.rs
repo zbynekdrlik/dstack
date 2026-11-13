@@ -67,8 +67,11 @@ pub fn failures_after_close(failures: u32, ran_ns: i64) -> u32 {
     }
 }
 
-/// Why a host's driver is not running.
+/// Why a host's driver is not running (with the `serde` feature: the same
+/// shape SongPlayer's `asio_state::Reason` sends over its host pipe, less
+/// its own `HostDown`).
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Reason {
     /// No registered driver has that name; the ones present.
     NotFound { present: Vec<String> },
@@ -165,6 +168,7 @@ impl std::fmt::Display for Reason {
 
 /// What the driver said since the last poll (counted by its callbacks).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct DeviceEvents {
     pub reset: bool,
     pub resync: bool,
@@ -185,8 +189,8 @@ pub struct DeviceEvents {
     /// Buffer switches that came [`GapKind::Fast`] (a catch-up burst), since
     /// the start (monotonic).
     pub fast_callbacks: u64,
-    /// Buffer switches whose `Process` panicked (silence played), since the
-    /// start (monotonic).
+    /// Panics of the app's `Process` since the start (it plays silence from
+    /// then on).
     pub faults: u64,
 }
 

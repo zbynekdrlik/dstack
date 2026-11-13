@@ -17,15 +17,27 @@ fn spec(to_asio: usize, from_asio: usize) -> Spec {
     }
 }
 
-fn opened(rate: f64, buffer_frames: u32) -> Opened {
+/// A driver opened at `rate` and `buffer_frames` with `outputs` channels
+/// to ASIO and `inputs` from it.
+fn opened_with(rate: f64, buffer_frames: u32, outputs: usize, inputs: usize) -> Opened {
     Opened {
         rate,
         buffer_frames,
         driver_inputs: 2,
         driver_outputs: 2,
+        inputs: (0..inputs as u32).collect(),
+        outputs: (0..outputs as u32).collect(),
         input_sample: Some(Sample::Int32),
-        output_sample: Some(Sample::Int32),
+        output_sample: Sample::Int32,
     }
+}
+
+fn opened(rate: f64, buffer_frames: u32) -> Opened {
+    opened_with(rate, buffer_frames, 1, 1)
+}
+
+fn bridge(spec: Spec) -> Bridge {
+    Bridge::new(spec).expect("a bridge")
 }
 
 /// dstack #247 for an ASIO bridge: the target is the ASIO buffer + one pump
@@ -33,7 +45,7 @@ fn opened(rate: f64, buffer_frames: u32) -> Opened {
 /// the configured value verbatim.
 #[test]
 fn the_fifo_target_is_the_asio_buffer_and_one_pump_block_or_the_set_value() {
-    let b = Bridge::new(spec(1, 1));
+    let b = bridge(spec(1, 1));
     let t = b.app_buffer(&opened(96_000.0, 256));
     assert_eq!(
         (t.chunk_ns(), t.block_ns(), t.target_ns()),
@@ -43,16 +55,14 @@ fn the_fifo_target_is_the_asio_buffer_and_one_pump_block_or_the_set_value() {
     assert_eq!(t.target_ns(), 21_333_333 + 1_333_333);
     let mut s = spec(1, 1);
     s.app_buffer_ns = Some(7_000_000);
-    let b = Bridge::new(s);
+    let b = bridge(s);
     assert_eq!(b.spec(), s);
     assert_eq!(b.app_buffer(&opened(96_000.0, 256)).target_ns(), 7_000_000);
     s.app_buffer_ns = Some(400_000_000);
-    let b = Bridge::new(s);
-    assert_eq!(
-        b.asio_side(&opened(96_000.0, 256)).err(),
-        b.app_buffer(&opened(96_000.0, 256)).problem()
-    );
-    assert!(b.asio_side(&opened(96_000.0, 256)).is_err());
+    let mut b = bridge(s);
+    let problem = b.app_buffer(&opened(96_000.0, 256)).problem();
+    assert!(problem.is_some());
+    assert_eq!(b.asio_side(&opened(96_000.0, 256)).err(), problem);
 }
 
 /// A sine at `hz` and `rate`, frame `n`.
@@ -94,7 +104,7 @@ struct Sim {
 
 impl Sim {
     fn new(drift: f64, buffer: usize, app_buffer_ns: Option<u64>) -> Self {
-        let mut bridge = Bridge::new(Spec {
+        let mut bridge = bridge(Spec {
             app_buffer_ns,
             ..spec(1, 1)
         });
@@ -220,8 +230,8 @@ fn both_ways(drift: f64, set: Option<u64>) {
 /// At the default 4 ms a card ±50 ppm off holds both ways (a crystal's
 /// usual spread). The correction moves only 5 ppm a second (inaudibly) and
 /// the rate fit locks after 60 s, so at ±100 ppm the default drops out
-/// twice in the first seconds, in the direction whose consumer is the
-/// faster clock (measured, dstack #243); a set 5 ms holds ±100 ppm.
+/// twice in its first 80 s, in the direction whose consumer is the faster
+/// clock (pinned below); a set 5 ms holds ±100 ppm.
 #[test]
 fn a_card_50_ppm_fast_runs_both_ways_at_the_default_target() {
     both_ways(50.0, None);
@@ -242,55 +252,99 @@ fn a_card_100_ppm_slow_runs_both_ways_at_a_5_ms_target() {
     both_ways(-100.0, Some(5_000_000));
 }
 
+/// The default holds ±100 ppm only once the correction caught up: it drops
+/// out at most twice in the first 80 s (measured: at about 27 s and 67 s,
+/// while the correction slews 5 ppm/s and the rate fit locks), in the
+/// direction whose consumer is the faster clock, and never after.
+fn drops_at_most_twice_at_the_start(drift: f64) {
+    let mut s = Sim::new(drift, 256, None);
+    s.run(80.0, 1e9);
+    let to = s.bridge.to_asio_stats();
+    let from = s.bridge.from_asio_stats();
+    let early = to.underruns() + from.underruns();
+    s.run(100.0, 1e9);
+    println!("drift {drift} ppm at the default: {early} dropouts in the first 80 s");
+    assert!(early <= 2, "{early}");
+    assert_eq!(
+        to.underruns() + from.underruns(),
+        early,
+        "none after the lock"
+    );
+}
+
+#[test]
+fn a_card_100_ppm_fast_drops_out_at_most_twice_at_the_default_then_holds() {
+    drops_at_most_twice_at_the_start(100.0);
+}
+
+#[test]
+fn a_card_100_ppm_slow_drops_out_at_most_twice_at_the_default_then_holds() {
+    drops_at_most_twice_at_the_start(-100.0);
+}
+
 /// A reopen makes a new driver side; the pump's side takes the new
 /// from-ASIO player at its next block and gives the old one back to be
-/// freed.
+/// freed. Before any open the pump's side plays silence.
 #[test]
 fn a_reopen_hands_the_pump_a_new_player_and_frees_the_old() {
-    let mut bridge = Bridge::new(spec(2, 2));
+    let mut bridge = bridge(spec(2, 2));
     let mut dante = bridge.dante_side().unwrap();
-    let input = vec![0.0; 2 * 128];
+    let input = vec![0.5; 2 * 128];
     let mut output = vec![1.0; 2 * 128];
     dante.process(&mut Block::new(128, &input, &mut output));
     assert!(output.iter().all(|&x| x == 0.0), "no driver yet: silence");
-    assert!(dante.player.is_none());
-    let _first = bridge.asio_side(&opened(96_000.0, 256)).unwrap();
+    assert_eq!(bridge.from_asio_stats().underruns(), 0);
+    assert_eq!(bridge.to_asio_fifo().unwrap().len(), 128, "RX went in");
+    let _first = bridge.asio_side(&opened_with(96_000.0, 256, 2, 2)).unwrap();
     dante.process(&mut Block::new(128, &input, &mut output));
-    assert!(dante.player.is_some());
-    assert_eq!(bridge.collect(), 0);
-    let _second = bridge.asio_side(&opened(48_000.0, 512)).unwrap();
+    assert_eq!(bridge.collect(), 1, "the idle player came back");
+    let _second = bridge.asio_side(&opened_with(48_000.0, 512, 2, 2)).unwrap();
     dante.process(&mut Block::new(128, &input, &mut output));
     assert_eq!(bridge.collect(), 1, "the first player came back");
     assert_eq!(bridge.to_asio_fifo().unwrap().channels(), 2);
 }
 
-/// The handover is bounded: a pump that never runs takes no player, and a
-/// fifth open in a row is refused rather than queued without end.
+/// The handover is dlink's switch: a pump that has not taken the last
+/// player refuses the next open rather than queue it, and a pump that is
+/// gone refuses every one.
 #[test]
-fn opens_with_no_pump_running_are_refused_after_the_handover_fills() {
-    let bridge = Bridge::new(spec(1, 1));
-    for _ in 0..HANDOVERS {
-        assert!(bridge.asio_side(&opened(96_000.0, 256)).is_ok());
-    }
+fn an_open_the_pump_has_not_taken_is_refused() {
+    let mut b = bridge(spec(1, 1));
+    let _dante = b.dante_side();
+    assert!(b.asio_side(&opened(96_000.0, 256)).is_ok());
     assert_eq!(
-        bridge.asio_side(&opened(96_000.0, 256)).err().as_deref(),
-        Some("the pump has not taken the last players (is the Dante device running?)")
+        b.asio_side(&opened(96_000.0, 256)).err().as_deref(),
+        Some(dlink::bridge::switch::NOT_TAKEN)
     );
-    let mut bridge = Bridge::new(spec(1, 1));
-    drop(bridge.dante_side());
+    let mut b = bridge(spec(1, 1));
+    drop(b.dante_side());
     assert_eq!(
-        bridge.asio_side(&opened(96_000.0, 256)).err().as_deref(),
-        Some("the pump's side is gone")
+        b.asio_side(&opened(96_000.0, 256)).err().as_deref(),
+        Some(dlink::bridge::switch::GONE)
     );
+}
+
+/// The open's channels must be the spec's counts.
+#[test]
+fn an_open_with_other_channel_counts_is_refused() {
+    let mut b = bridge(spec(2, 1));
+    assert_eq!(
+        b.asio_side(&opened_with(96_000.0, 256, 1, 1))
+            .err()
+            .as_deref(),
+        Some("the driver's channels (1 out, 1 in) are not the bridge's (2 to ASIO, 1 from ASIO)")
+    );
+    assert!(b.asio_side(&opened_with(96_000.0, 256, 2, 0)).is_err());
+    assert!(b.asio_side(&opened_with(96_000.0, 256, 2, 1)).is_ok());
 }
 
 /// A one-way bridge: no FIFO, no player and silence on the unused side.
 #[test]
 fn a_one_way_bridge_has_nothing_the_other_way() {
-    let mut bridge = Bridge::new(spec(0, 1));
-    assert!(bridge.to_asio_fifo().is_none());
-    let mut dante = bridge.dante_side().unwrap();
-    let mut asio = bridge.asio_side(&opened(96_000.0, 64)).unwrap();
+    let mut b = bridge(spec(0, 1));
+    assert!(b.to_asio_fifo().is_none());
+    let mut dante = b.dante_side().unwrap();
+    let mut asio = b.asio_side(&opened_with(96_000.0, 64, 0, 1)).unwrap();
     assert!(asio.player.is_none());
     let input = vec![0.25; 64];
     let mut output = vec![1.0; 64];
@@ -304,7 +358,13 @@ fn a_one_way_bridge_has_nothing_the_other_way() {
     let mut out = vec![1.0; 128];
     dante.process(&mut Block::new(128, &[], &mut out));
     assert!(out.iter().all(|&x| x == 0.0), "still priming: silence");
-    let bridge = Bridge::new(spec(1, 0));
-    let asio = bridge.asio_side(&opened(96_000.0, 64)).unwrap();
+    assert_eq!(b.collect(), 1);
+    let mut b = bridge(spec(1, 0));
+    let asio = b.asio_side(&opened_with(96_000.0, 64, 1, 0)).unwrap();
     assert!(asio.from_asio.is_none() && asio.player.is_some());
+    assert_eq!(b.collect(), 0, "no switch: nothing to free");
+    let mut dante = b.dante_side().unwrap();
+    let mut out = vec![1.0; 128];
+    dante.process(&mut Block::new(128, &[0.5; 128], &mut out));
+    assert!(out.iter().all(|&x| x == 0.0), "no TX from ASIO: silence");
 }

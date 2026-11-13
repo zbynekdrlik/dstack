@@ -22,22 +22,21 @@
 //! The pump's side lives as long as the device; the driver's side is made
 //! anew at every open ([`Bridge::asio_side`], from the rate and buffer the
 //! open read), and so is the from-ASIO player, handed to the running
-//! `DanteSide` through a bounded channel and given back the same way to be
-//! freed off the pump's thread ([`Bridge::collect`]). Neither `process`
-//! allocates, locks or makes a system call.
+//! `DanteSide` through `dlink::bridge`'s [`Switch`] (dsend's handover) and
+//! given back the same way to be freed off the pump's thread. Until the
+//! first open the pump's side plays a player on an empty FIFO (priming:
+//! silence). Neither `process` allocates or makes a system call, and
+//! neither waits on a lock (the switch's bounded channel never blocks).
 
 use std::sync::Arc;
-use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, TrySendError, sync_channel};
 
-use dlink::bridge::{AppBuffer, Fifo, Player, Stats, buffer, fifo_for};
+use dlink::bridge::{AppBuffer, Fifo, Player, Stats, Switch, Taker, chunk_ns, fifo_for, switch};
 use dstack_audio_io::{Block, Process};
 
 use crate::device::Opened;
 
 /// Frames a side converts at once (its interleaved scratch).
 const CHUNK: usize = 256;
-/// Players in flight between the bridge and the pump's side, each way.
-const HANDOVERS: usize = 4;
 
 /// What a bridge carries (a dasio bridge instance's settings).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -61,33 +60,48 @@ pub struct Bridge {
     to_asio: Option<Arc<Fifo>>,
     to_stats: Arc<Stats>,
     from_stats: Arc<Stats>,
-    handover: SyncSender<Player>,
-    retired: Receiver<Player>,
+    switch: Option<Switch<Player>>,
     dante: Option<DanteSide>,
 }
 
 impl Bridge {
-    pub fn new(spec: Spec) -> Self {
-        let (handover, incoming) = sync_channel(HANDOVERS);
-        let (retire, retired) = sync_channel(HANDOVERS);
+    /// A bridge for `spec`; an error only for a rate the converter refuses.
+    pub fn new(spec: Spec) -> Result<Self, String> {
         let to_asio = (spec.to_asio > 0).then(|| Arc::new(fifo_for(spec.to_asio, spec.dante_rate)));
+        let from_stats = Arc::new(Stats::default());
+        let (from_asio, switch) = if spec.from_asio > 0 {
+            // Until the driver's first open: a FIFO nobody writes, so the
+            // player primes (silence) and counts no underrun.
+            let idle = Arc::new(fifo_for(spec.from_asio, spec.dante_rate));
+            let buffer = AppBuffer::new(0, chunk_ns(u64::from(spec.block_frames), spec.dante_rate))
+                .set(Some(dlink::bridge::MIN_APP_BUFFER_NS));
+            let first = Player::new(
+                idle,
+                spec.dante_rate,
+                spec.dante_rate,
+                buffer,
+                Arc::clone(&from_stats),
+            )
+            .map_err(|e| e.to_string())?;
+            let (taker, switch) = switch();
+            (Some((first, taker)), Some(switch))
+        } else {
+            (None, None)
+        };
         let dante = DanteSide {
             to_asio: to_asio.clone(),
-            player: None,
+            from_asio,
             outputs: spec.from_asio,
-            incoming,
-            retire,
             scratch: vec![0.0; CHUNK * spec.from_asio],
         };
-        Bridge {
+        Ok(Bridge {
             spec,
             to_asio,
             to_stats: Arc::new(Stats::default()),
-            from_stats: Arc::new(Stats::default()),
-            handover,
-            retired,
+            from_stats,
+            switch,
             dante: Some(dante),
-        }
+        })
     }
 
     pub fn spec(&self) -> Spec {
@@ -104,17 +118,26 @@ impl Bridge {
     pub fn app_buffer(&self, opened: &Opened) -> AppBuffer {
         let rate = opened.rate.round() as u32;
         AppBuffer::new(
-            buffer::chunk_ns(u64::from(opened.buffer_frames), rate),
-            buffer::chunk_ns(u64::from(self.spec.block_frames), self.spec.dante_rate),
+            chunk_ns(u64::from(opened.buffer_frames), rate),
+            chunk_ns(u64::from(self.spec.block_frames), self.spec.dante_rate),
         )
         .set(self.spec.app_buffer_ns)
     }
 
-    /// The driver's side for a driver opened as `opened` (its rate and
-    /// buffer), and the from-ASIO player handed to the pump's side. Frees
-    /// the players the pump gave back first.
-    pub fn asio_side(&self, opened: &Opened) -> Result<AsioSide, String> {
-        self.collect();
+    /// The driver's side for a driver opened as `opened` (its rate, buffer
+    /// and channels), and the from-ASIO player handed to the pump's side.
+    /// Refused when the open's channels are not the spec's counts.
+    pub fn asio_side(&mut self, opened: &Opened) -> Result<AsioSide, String> {
+        if (opened.outputs.len(), opened.inputs.len()) != (self.spec.to_asio, self.spec.from_asio) {
+            return Err(format!(
+                "the driver's channels ({} out, {} in) are not the bridge's ({} to ASIO, {} from \
+                 ASIO)",
+                opened.outputs.len(),
+                opened.inputs.len(),
+                self.spec.to_asio,
+                self.spec.from_asio
+            ));
+        }
         let buffer = self.app_buffer(opened);
         if let Some(problem) = buffer.problem() {
             return Err(problem);
@@ -134,24 +157,19 @@ impl Bridge {
             ),
             None => None,
         };
-        let from_asio =
-            (self.spec.from_asio > 0).then(|| Arc::new(fifo_for(self.spec.from_asio, rate)));
-        if let Some(fifo) = &from_asio {
+        let mut from_asio = None;
+        if let Some(switch) = &mut self.switch {
+            let fifo = Arc::new(fifo_for(self.spec.from_asio, rate));
             let p = Player::new(
-                Arc::clone(fifo),
+                Arc::clone(&fifo),
                 rate,
                 dante,
                 buffer,
                 Arc::clone(&self.from_stats),
             )
             .map_err(|e| e.to_string())?;
-            self.handover.try_send(p).map_err(|e| match e {
-                TrySendError::Full(_) => {
-                    "the pump has not taken the last players (is the Dante device running?)"
-                        .to_string()
-                }
-                TrySendError::Disconnected(_) => "the pump's side is gone".to_string(),
-            })?;
+            switch.send(p)?;
+            from_asio = Some(fifo);
         }
         Ok(AsioSide {
             player,
@@ -162,12 +180,8 @@ impl Bridge {
     }
 
     /// Frees the players the pump's side gave back; returns how many.
-    pub fn collect(&self) -> usize {
-        let mut n = 0;
-        while self.retired.try_recv().is_ok() {
-            n += 1;
-        }
-        n
+    pub fn collect(&mut self) -> usize {
+        self.switch.as_mut().map_or(0, Switch::collect)
     }
 
     /// The Dante -> ASIO player's counts (depth target, ppm, underruns).
@@ -215,39 +229,22 @@ fn feed(fifo: &Fifo, block: &Block<'_>) {
 /// The pump's side: RX into the to-ASIO FIFO, the from-ASIO player into TX.
 pub struct DanteSide {
     to_asio: Option<Arc<Fifo>>,
-    player: Option<Player>,
+    /// The from-ASIO player and its handover's end.
+    from_asio: Option<(Player, Taker<Player>)>,
     outputs: usize,
-    incoming: Receiver<Player>,
-    retire: SyncSender<Player>,
     scratch: Vec<f64>,
-}
-
-impl DanteSide {
-    /// Takes the player of the driver's latest open, if one came; the one it
-    /// replaces goes back to be freed.
-    fn take_next(&mut self) {
-        match self.incoming.try_recv() {
-            Ok(next) => {
-                if let Some(old) = self.player.replace(next) {
-                    // At most HANDOVERS players are ever in flight, so the
-                    // channel has room; a full one keeps (leaks) nothing:
-                    // the player drops here.
-                    let _ = self.retire.try_send(old);
-                }
-            }
-            Err(TryRecvError::Empty | TryRecvError::Disconnected) => {}
-        }
-    }
 }
 
 impl Process for DanteSide {
     fn process(&mut self, block: &mut Block<'_>) {
-        self.take_next();
         if let Some(fifo) = &self.to_asio {
             feed(fifo, block);
         }
-        match &mut self.player {
-            Some(p) => play(p, block, self.outputs, &mut self.scratch),
+        match &mut self.from_asio {
+            Some((player, taker)) => {
+                taker.take(player);
+                play(player, block, self.outputs, &mut self.scratch);
+            }
             None => block.zero_outputs(),
         }
     }

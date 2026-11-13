@@ -15,9 +15,16 @@
 //!   parked driver is never opened again.
 //! - **No clock:** a driver that does not tick waits calmly from 2 s after
 //!   the open and is opened again every 60 s (no backoff, no reset).
-//! - **Off rate:** two 10 s windows in a row more than 1 % off the reported
-//!   rate close the run as [`Reason::ClockOffRate`] and open it again after
-//!   60 s (no backoff, no reset: a calm wait, like no clock).
+//! - **Off rate** (songplayer #229): two 10 s windows in a row more than 1 %
+//!   off the reported rate stop the run (one WARN per episode) and open the
+//!   driver again at once to PROVE its rate silently: the app's `Process`
+//!   does not run (the driver plays silence), the status reads waiting
+//!   [`Reason::ClockOffRate`], one window within 1 % ends the wait (the
+//!   driver is opened again with the app's `Process`), and a card still off
+//!   60 s after the open is opened again at once to go on proving. An open
+//!   at another rate or buffer than the one found off is a fresh open.
+//! - **Ticks** count from the run's first step: a burst of callbacks at the
+//!   open is no clock and no rate.
 //!
 //! [`Runner::step`] is pure over its `now` (ns on a monotonic clock) and the
 //! [`Device`]; [`Runner::run`] is the thread loop around it. The app reads
@@ -90,6 +97,31 @@ struct Run {
     opened_at: i64,
     stall: StallWatch,
     rate: RateWatch,
+    /// The frames taken at the run's first step: ticks count from there.
+    tick_base: Option<u64>,
+    /// A silent run proving the card's rate (module doc).
+    proving: bool,
+}
+
+/// A close that is no fault: no backoff, no reset.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Calm {
+    /// No clock 60 s after the open: open again at once, still waiting.
+    NoClock,
+    /// The card is off its rate: open again at once, silently proving.
+    OffRate,
+    /// A proving run found the rate within 1 %: open again at once with the
+    /// app's `Process`.
+    Proven,
+}
+
+/// What a proving run plays: nothing.
+struct Silence;
+
+impl Process for Silence {
+    fn process(&mut self, block: &mut dstack_audio_io::Block<'_>) {
+        block.zero_outputs();
+    }
 }
 
 enum State {
@@ -110,6 +142,8 @@ pub struct Runner<D: Device> {
     state: State,
     failures: u32,
     waiting_for_clock: bool,
+    /// The rate and buffer the card was found off its rate at.
+    off_rate: Option<(u32, u32)>,
 }
 
 fn lock(m: &Mutex<Status>) -> MutexGuard<'_, Status> {
@@ -134,6 +168,7 @@ impl<D: Device> Runner<D> {
             state: State::Closed { retry_at: i64::MIN },
             failures: 0,
             waiting_for_clock: false,
+            off_rate: None,
         }
     }
 
@@ -165,22 +200,24 @@ impl<D: Device> Runner<D> {
         };
         let ev = self.device.poll();
         let consumed = self.device.consumed_frames();
-        let opened = run.opened;
-        let clock = clock_step(
-            ev.callbacks,
-            true,
-            self.waiting_for_clock,
-            now - run.opened_at,
-        );
-        let mut close = None;
+        let primed = run.tick_base.is_some();
+        let base = *run.tick_base.get_or_insert(consumed);
+        let ticks = consumed.saturating_sub(base);
+        let since_open = now - run.opened_at;
+        let (rate, buffer) = (run.opened.rate, run.opened.buffer_frames);
+        let proving = run.proving;
+        let clock = clock_step(ticks, primed, self.waiting_for_clock, since_open);
+        let mut calm = None;
         match clock {
             ClockStep::Ticking | ClockStep::Quiet => {}
             ClockStep::ClockArrived => {
                 self.waiting_for_clock = false;
-                info!(driver = %self.driver, "asio: the driver gives a clock now");
+                info!(driver = %self.driver, proving, "asio: the driver gives a clock now");
                 update(&self.status, |s| {
-                    s.state = RunState::Running;
-                    s.reason = None;
+                    if !proving {
+                        s.state = RunState::Running;
+                        s.reason = None;
+                    }
                 });
             }
             ClockStep::StartsWaiting => {
@@ -195,22 +232,36 @@ impl<D: Device> Runner<D> {
                     s.retry_in_s = None;
                 });
             }
-            ClockStep::Reopen => close = Some(Reason::NoClock),
+            ClockStep::Reopen => calm = Some(Calm::NoClock),
         }
         let ticking = matches!(clock, ClockStep::Ticking | ClockStep::ClockArrived);
-        if close.is_none() && ticking && rate_settled(consumed, opened.rate) {
-            let driver = (opened.rate, opened.buffer_frames);
+        if calm.is_none() && proving && since_open >= NO_CLOCK_REOPEN_NS {
+            calm = Some(Calm::OffRate);
+        }
+        if calm.is_none() && ticking && rate_settled(ticks, rate) {
+            let driver = (rate, buffer);
+            let strikes = if proving { 1 } else { OFF_RATE_STRIKES_PLAYING };
             run.rate.track(consumed, now, driver);
-            if let RateStep::OffRate { ppm } =
-                run.rate
-                    .step(consumed, now, driver, OFF_RATE_STRIKES_PLAYING)
-            {
-                warn!(
-                    driver = %self.driver,
-                    ppm,
-                    "asio: the card takes audio more than 1 % off its driver's rate - no usable clock; opened again in 60 s"
-                );
-                close = Some(Reason::ClockOffRate);
+            match run.rate.step(consumed, now, driver, strikes) {
+                RateStep::Measuring => {}
+                RateStep::Plausible => {
+                    if proving {
+                        info!(driver = %self.driver, "asio: the card takes audio at its driver's rate - running");
+                        self.off_rate = None;
+                        calm = Some(Calm::Proven);
+                    }
+                }
+                RateStep::OffRate { ppm } => {
+                    if !proving {
+                        warn!(
+                            driver = %self.driver,
+                            ppm,
+                            "asio: the card takes audio more than 1 % off its driver's rate - no usable clock; the driver plays silence and is opened again every 60 s until it is on its rate (e.g. Waves SoundGrid with its network off)"
+                        );
+                        self.off_rate = Some((rate.round() as u32, buffer));
+                        calm = Some(Calm::OffRate);
+                    }
+                }
             }
         }
         if ev.latencies_changed {
@@ -226,16 +277,13 @@ impl<D: Device> Runner<D> {
                 s.output_latency_frames = l.output_latency_frames;
             });
         }
-        let close = close
-            .or_else(|| close_reason(&ev, opened.rate))
-            .or_else(|| {
-                if ev.faults > 0 {
-                    Some(Reason::Failed("the app's audio callback panicked".into()))
-                } else {
-                    (ticking && run.stall.stalled(ev.callbacks, now)).then_some(Reason::Stalled)
-                }
-            });
-        let ran = now - run.opened_at;
+        let fault = close_reason(&ev, rate).or_else(|| {
+            if ev.faults > 0 {
+                Some(Reason::Failed("the app's audio callback panicked".into()))
+            } else {
+                (ticking && run.stall.stalled(ev.callbacks, now)).then_some(Reason::Stalled)
+            }
+        });
         update(&self.status, |s| {
             s.callbacks = ev.callbacks;
             s.late_callbacks = ev.late_callbacks;
@@ -245,8 +293,10 @@ impl<D: Device> Runner<D> {
             s.gap_max_ms = ev.callback_gap_max_ns as f64 / 1e6;
             s.resyncs += u64::from(ev.resync);
         });
-        if let Some(reason) = close {
-            self.close(now, reason, ran);
+        match (fault, calm) {
+            (Some(reason), _) => self.close(now, reason, since_open),
+            (None, Some(c)) => self.calm_close(now, c),
+            (None, None) => {}
         }
         POLL_NS
     }
@@ -261,38 +311,53 @@ impl<D: Device> Runner<D> {
                 return;
             }
         };
-        let started = (self.make)(&opened)
-            .map_err(|e| Reason::Failed(format!("the app refused the driver: {e}")))
-            .and_then(|p| self.device.start(Engine::new(p, &opened, &self.channels)));
+        let this = (opened.rate.round() as u32, opened.buffer_frames);
+        if self.off_rate.is_some_and(|off| off != this) {
+            // Another rate or buffer (SoundGrid's network back): fresh.
+            self.off_rate = None;
+        }
+        let proving = self.off_rate.is_some();
+        let process = if proving {
+            Ok(Box::new(Silence) as Box<dyn Process>)
+        } else {
+            (self.make)(&opened)
+                .map_err(|e| Reason::Failed(format!("the app refused the driver: {e}")))
+        };
+        let started = process.and_then(|p| self.device.start(Engine::new(p, &opened)));
         match started {
             Ok(l) => {
-                let waiting = self.waiting_for_clock;
+                let waiting = self.waiting_for_clock || proving;
                 if waiting {
-                    debug!(driver = %self.driver, "asio: opened the driver again - still waiting for its clock");
+                    debug!(driver = %self.driver, proving, "asio: opened the driver again - still waiting for a usable clock");
                 } else {
                     info!(
                         driver = %self.driver,
                         rate = opened.rate,
                         buffer_frames = opened.buffer_frames,
-                        inputs = self.channels.inputs.len(),
-                        outputs = self.channels.outputs.len(),
+                        inputs = opened.inputs.len(),
+                        outputs = opened.outputs.len(),
                         input_latency_frames = l.input_latency_frames,
                         output_latency_frames = l.output_latency_frames,
                         "asio: the driver runs (its rate, buffer and sample types are the driver's own)"
                     );
                 }
+                let reason = if proving {
+                    Some(Reason::ClockOffRate)
+                } else {
+                    self.waiting_for_clock.then_some(Reason::NoClock)
+                };
                 update(&self.status, |s| {
                     s.state = if waiting {
                         RunState::Waiting
                     } else {
                         RunState::Running
                     };
-                    s.reason = waiting.then_some(Reason::NoClock);
+                    s.reason = reason;
                     s.retry_in_s = None;
-                    s.rate = opened.rate.round() as u32;
+                    s.rate = this.0;
                     s.buffer_frames = opened.buffer_frames;
                     s.input_sample = opened.input_sample.map(|x| x.name());
-                    s.output_sample = opened.output_sample.map(|x| x.name());
+                    s.output_sample = Some(opened.output_sample.name());
                     s.input_latency_frames = l.input_latency_frames;
                     s.output_latency_frames = l.output_latency_frames;
                 });
@@ -301,6 +366,8 @@ impl<D: Device> Runner<D> {
                     opened_at: now,
                     stall: StallWatch::default(),
                     rate: RateWatch::default(),
+                    tick_base: None,
+                    proving,
                 });
             }
             Err(reason) => {
@@ -311,33 +378,35 @@ impl<D: Device> Runner<D> {
         }
     }
 
-    /// Close the run for `reason`: a calm reopen for a driver without a
-    /// usable clock, else a reset with the backoff.
-    fn close(&mut self, now: i64, reason: Reason, ran: i64) {
-        match reason {
-            Reason::NoClock | Reason::ClockOffRate => {
-                // Still waiting: the reopen keeps reading waiting.
-                let off = reason == Reason::ClockOffRate;
-                self.waiting_for_clock = !off;
-                update(&self.status, |s| {
-                    s.clock_waits += 1;
-                    s.state = RunState::Waiting;
-                    s.reason = Some(reason);
-                });
-                debug!(driver = %self.driver, off, "asio: no usable clock - closing the driver to open it again");
-                self.device.close();
-                let retry_at = if off { now + NO_CLOCK_REOPEN_NS } else { now };
-                self.state = State::Closed { retry_at };
-            }
-            reason => {
-                self.failures = failures_after_close(self.failures, ran);
-                update(&self.status, |s| s.resets += 1);
-                // Waiting is shown before the device closes: a vanished
-                // driver can block its stop or release for seconds.
-                self.wait(now, reason, "asio: closing the driver");
-                self.device.close();
-            }
+    /// Close the run to open it again at once, no fault (no backoff, no
+    /// reset): a driver without a usable clock, or one just proven.
+    fn calm_close(&mut self, now: i64, calm: Calm) {
+        self.waiting_for_clock = calm == Calm::NoClock;
+        let reason = match calm {
+            Calm::NoClock => Some(Reason::NoClock),
+            Calm::OffRate => Some(Reason::ClockOffRate),
+            Calm::Proven => None,
+        };
+        if let Some(reason) = reason {
+            update(&self.status, |s| {
+                s.clock_waits += 1;
+                s.state = RunState::Waiting;
+                s.reason = Some(reason);
+            });
         }
+        debug!(driver = %self.driver, ?calm, "asio: closing the driver to open it again");
+        self.device.close();
+        self.state = State::Closed { retry_at: now };
+    }
+
+    /// Close the run for `reason` (a fault): a reset with the backoff.
+    fn close(&mut self, now: i64, reason: Reason, ran: i64) {
+        self.failures = failures_after_close(self.failures, ran);
+        update(&self.status, |s| s.resets += 1);
+        // Waiting is shown before the device closes: a vanished driver can
+        // block its stop or release for seconds.
+        self.wait(now, reason, "asio: closing the driver");
+        self.device.close();
     }
 
     fn wait(&mut self, now: i64, reason: Reason, what: &str) {

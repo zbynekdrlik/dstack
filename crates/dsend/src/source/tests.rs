@@ -469,31 +469,5 @@ fn every_replaced_player_comes_back_to_be_freed_never_in_the_pump() {
         back += switch.collect();
     }
     assert_eq!(back, 5, "each handover's predecessor, on this thread");
-    assert_eq!(switch.pending, 0);
-}
-
-#[test]
-fn a_send_is_refused_while_the_room_back_is_taken() {
-    let fifo = Arc::new(fifo_for(2, 48_000));
-    let player = || {
-        Player::new(
-            Arc::clone(&fifo),
-            48_000,
-            48_000,
-            buffer(48_000),
-            Arc::default(),
-        )
-        .unwrap()
-    };
-    let (mut source, mut switch) = source(player());
-    let mut out = vec![0.0; PUMP_BLOCK * TX_CHANNELS];
-    // Players replaced but not yet back (the pump's try_send not run).
-    switch.pending = RETIRED;
-    assert_eq!(switch.send(player()), Err(NOT_TAKEN));
-    switch.pending = RETIRED - 1;
-    assert_eq!(switch.send(player()), Ok(()));
-    assert_eq!(switch.pending, RETIRED);
-    source.process(&mut Block::new(PUMP_BLOCK, &[], &mut out));
-    // One came back: room again.
-    assert_eq!(switch.send(player()), Ok(()));
+    assert_eq!(switch.pending(), 0);
 }

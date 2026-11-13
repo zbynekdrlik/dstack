@@ -15,6 +15,13 @@ dstack-audio-io = { path = "../dstack-audio-io" }
 dlink = { path = "../dlink" }
 # Already in the lockfile through dstack.
 tracing = "0.1"
+# `Reason` and `DeviceEvents` over a pipe (SongPlayer's ASIO host process
+# sends them whole), behind the `serde` feature; in the lockfile through
+# dstack.
+serde = { version = "1", features = ["derive"], optional = true }
+
+[features]
+serde = ["dep:serde"]
 
 [target.'cfg(windows)'.dependencies]
 # The ASIO host: azo, a pure-Rust COM ASIO host (MIT, no Steinberg SDK, no
