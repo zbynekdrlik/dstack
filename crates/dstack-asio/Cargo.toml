@@ -1,0 +1,31 @@
+[package]
+name = "dstack-asio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+repository.workspace = true
+authors.workspace = true
+description = "The ASIO host for our apps (dstack #243): a local ASIO driver opened as a host, its buffer switch running the app's Process, and the two sides of a Dante <-> ASIO bridge on dlink::bridge. Windows glue over azo; every decision pure and tested on Linux."
+
+[dependencies]
+# The callback contract the driver's buffer switch runs (Process, Block).
+dstack-audio-io = { path = "../dstack-audio-io" }
+# The bridge's clock crossing: Fifo, Player, AppBuffer (dstack #247).
+dlink = { path = "../dlink" }
+# Already in the lockfile through dstack.
+tracing = "0.1"
+
+[target.'cfg(windows)'.dependencies]
+# The ASIO host: azo, a pure-Rust COM ASIO host (MIT, no Steinberg SDK, no
+# LLVM), SongPlayer's pin (its #233 lane 3) so one azo serves both. Without
+# its default `host` feature (a oneshot-based helper thread we do not use).
+azo = { version = "=0.4.0", default-features = false }
+windows-sys = { version = "0.61", features = [
+    # The worker's COM apartment (CoInitializeEx / CoUninitialize) for the
+    # driver's life.
+    "Win32_System_Com",
+    # The worker pumps the driver's window messages (PeekMessageW,
+    # TranslateMessage, DispatchMessageW).
+    "Win32_UI_WindowsAndMessaging",
+] }

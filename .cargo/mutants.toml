@@ -65,6 +65,14 @@ exclude_globs = [
   "crates/dsend/src/run.rs",
   "crates/dsend/src/audio.rs",
   "crates/dsend/src/session.rs",
+  # dstack-asio's Windows glue (dstack #243): the azo driver calls, the
+  # static callback slots, the COM apartment and the message pump; every
+  # decision is the crate's pure modules (format, state, device, engine,
+  # runner, bridge: each tested), and Windows CI builds it.
+  "crates/dstack-asio/src/win.rs",
+  # Its hand-run probe binary (lists the drivers, runs one for N seconds):
+  # glue over the library's Runner and Status, run by hand on Windows.
+  "crates/dstack-asio/src/bin/asio-probe.rs",
   # Third-party code (mdns-sd, one dstack change; tests/mdns_ipv4_only.rs).
   "vendor/**",
 ]
