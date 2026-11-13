@@ -92,11 +92,38 @@ The config is the PC's own (site data, never in the repo), `C:\ProgramData\dstac
 
 Read the gateway with `Get-NetRoute -DestinationPrefix 0.0.0.0/0`. Install from an elevated shell, after writing the config: `powershell -ExecutionPolicy Bypass -File lan-selfheal.ps1 -Mode install`. It checks the config and both adapters, copies the script to `C:\ProgramData\dstack\`, sets that directory's owner to Administrators, resets its ACL to SYSTEM and Administrators full and Users read (and reads every entry back, refusing a junction and any other owner or writer, generic rights included), registers the task, and reads the task back (SYSTEM, every minute without end, the action). `-Mode uninstall` removes the task and keeps the config and log. Check it with `Get-ScheduledTaskInfo 'dstack LAN self-heal'` (LastTaskResult 0) and the log's "gateway ok" lines. A PC's acceptance test disables its LAN leg on purpose and watches the log repair it.
 
+#### The emergency remote path (optional, since 0.6.109)
+
+With the LAN leg dead the PC can still be reached on its Dante address, from one host only, while the LAN is down. It is on when the config has `emergencySource`:
+
+```json
+  "emergencySource": "<dev1's Dante address>",
+  "emergencyPort": 22,
+  "danteBlockRule": "<the dstack155 rule's display name, e.g. Dante70: block TCP Inbound>"
+```
+
+- `emergencySource`: one IPv4 host, the admin machine's Dante address (dev1's address on its Dante VLAN interface). Without it the path is off and the task never reads or changes a firewall rule.
+- `emergencyPort`: the one TCP port opened, default 22 (sshd, key auth).
+- `danteBlockRule`: the exact display name of the `dstack155` rule that blocks all TCP in on the Dante adapter. Required with `emergencySource`; a config without it is refused (`ERROR config: 'danteBlockRule' ...`, exit 1, the install stops). At run time a name that is not exactly one inbound Block rule is refused and logged, and nothing is opened.
+
+Windows evaluates explicit Block rules before Allow rules, so an Allow rule cannot open a port the `dstack155` TCP block covers (only an IPsec-authenticated "override block rules" Allow could). The path therefore swaps the block for a narrower one:
+
+- **Open** (the LAN down for the threshold, after the repair): the task enables two Block rules of its own, group `dstack emergency`, created on first use with fixed names: `dstack-emergency-block-others` (TCP in on the Dante adapter from every address but `emergencySource`, IPv6 included) and `dstack-emergency-block-source-ports` (TCP in on the Dante adapter from `emergencySource` on every port but `emergencyPort`). It reads both back as enabled, and only **then** disables the `danteBlockRule` rule. If a rule cannot be created or enabled, the `dstack155` rule stays on. There is never a moment with the Dante adapter open to everyone.
+- **Close** (the gateway answers again): it enables the `danteBlockRule` rule **first** and reads it back, then disables the emergency rules. If the `dstack155` rule does not come back on, the emergency rules stay on.
+- **Every run with the LAN up** restores that normal state: the `dstack155` rule enabled, no emergency rule enabled. Every change is a log line (`emergency: ...`, `emergency path open: ...`, `LAN up: ...`).
+
+Using it from dev1 (the LAN leg of the PC dead): `ssh -b <dev1's Dante address> <admin user>@<the PC's Dante address>`. The source bind matters: dev1's routes send traffic for the Dante subnet out through the LAN gateway with its LAN address, which the PC cannot answer while its LAN leg is dead (its Dante leg has no gateway, section 6.3). Two parts are airuleset's (dev1's firewall and the fleet's keys), both requested:
+
+- dev1's nftables (`dante-guard`, chain `out`) drops all TCP out of its Dante interface; it needs `ip daddr <Dante subnet> tcp dport 22 accept` before that drop;
+- the PC's `administrators_authorized_keys` needs the key of the account that runs the emergency ssh on dev1.
+
+The path is not proven by a LAN-down test yet; that test is a run the owner times.
+
 **12.11.2026 (dstack #239):** the Realtek utility, left running on the SongPlayer PC since its VLAN setup two days earlier, showed "LanSetV6 not found"; a click on OK re-applied its VLAN state and the LAN leg stopped carrying traffic, while Dante kept running. With the LAN gone there was no remote path (no MCP, RustDesk or ssh), a USB replug changed only the VLAN adapter's MAC, and the owner had to bring a monitor and keyboard to re-enable IPv4 on the LAN adapter. dstack then closed the utility.
 
 ### Firewall (Windows)
 
-The Windows firewall is **on**, with **default Allow in and out** on every profile, plus one rule group `dstack155` bound only to the Dante leg: block in and out for every non-Dante program on the PC (OBS, Resolume Arena, Bonjour `mDNSResponder.exe`, `svchost.exe`, remote-access tools, scripting runtimes) and all TCP. The Dante devices' processes (an app with dlink or dstack inside, dasio) are never in the group. No other enabled Block rule exists. This replaces the earlier "all profiles off" rule (songplayer #233): on 10.11.2026 an hour with the firewall on against an hour off showed no change in the sender's pump or lateness and none at three receivers (owner's decision, #155). Firewall rules bound to a removed NIC stay in the store and do nothing; remove them. A PC's setup script may recreate the group from this list, never turn the profiles off.
+The Windows firewall is **on**, with **default Allow in and out** on every profile, plus one rule group `dstack155` bound only to the Dante leg: block in and out for every non-Dante program on the PC (OBS, Resolume Arena, Bonjour `mDNSResponder.exe`, `svchost.exe`, remote-access tools, scripting runtimes) and all TCP. The Dante devices' processes (an app with dlink or dstack inside, dasio) are never in the group. No other enabled Block rule exists, except the two `dstack emergency` rules the LAN self-heal task enables while the LAN leg is down (section 3, the emergency remote path), with the group's TCP-in rule disabled for that time. This replaces the earlier "all profiles off" rule (songplayer #233): on 10.11.2026 an hour with the firewall on against an hour off showed no change in the sender's pump or lateness and none at three receivers (owner's decision, #155). Firewall rules bound to a removed NIC stay in the store and do nothing; remove them. A PC's setup script may recreate the group from this list, never turn the profiles off.
 
 ## 4. Rules for our applications
 
