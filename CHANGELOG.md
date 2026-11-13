@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.111
+
+- Change (dstack #239, owner's decision 13.11.2026): the two-network standard (docs/two-networks.md) allows inbound TCP 22 (ssh) and 8092 (the remoteos MCP) on the Dante leg, from anywhere, on Windows and Linux; everything else non-Dante stays blocked there. On Windows the `dstack155` TCP-in rule blocks every TCP port but 22 and 8092, and the MCP runtime's program rule (`python.exe`) blocks UDP in only. Check 6.5 now expects 22 and 8092 to answer on the Dante address and every other port not to. PCs to change: the TCP-in rule's `LocalPort` and the `python.exe` inbound rule's protocol; Linux PCs: accept TCP 22 and 8092 in on the Dante leg (and their replies out).
+- Removed (dstack #239): lan-selfheal's emergency remote path (0.6.109, `emergencySource`, `emergencyPort`, `danteBlockRule`, group `dstack emergency`). The LAN self-heal itself is unchanged. A config that still has those keys is accepted and the keys are logged as ignored; remove them. Every run (and `-Mode uninstall`) enables a `dstack155` rule the old path left disabled, then removes the two `dstack emergency` rules; if the rule does not come back on it keeps them, logs an ERROR and exits 1. Install the new script over 0.6.109 with `-Mode install`.
+- No dstack or dlink API change, no latency change.
+
 ## 0.6.110
 
 - Fix (dstack #246, field test on a dasio PC): the settings window's interface list no longer offers adapters that cannot carry Dante: Windows' loopback pseudo-interface (127.0.0.1) and an adapter with only a link-local (169.254/16) or unspecified address. An instance's configured interface stays in the list when the live list lacks it, marked "(no Dante address)" for an adapter left out and "(not found)" when the PC has no adapter of that name, so a rename never changes the setting silently. An adapter's text shows its first Dante-capable address.
