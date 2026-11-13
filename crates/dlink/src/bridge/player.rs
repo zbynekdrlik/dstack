@@ -9,7 +9,8 @@
 //!   input frames it asks for. A callback of any size is served from that
 //!   block, so the converter's call size never follows the driver's.
 //! - **Steering:** [`dstack_resample::asrc::Controller`] (SongPlayer's laws) keeps the
-//!   FIFO's depth at [`TARGET_S`] by leaving the converter's ratio a few ppm
+//!   FIFO's depth at its target, the device's [`AppBuffer`] (dstack #247:
+//!   the app's chunk and one pump block, or the value the app set), by leaving the converter's ratio a few ppm
 //!   off nominal. The controller was written for the mirror topology (the
 //!   converter writes the buffer, the other clock reads it): here the
 //!   network writes and the converter reads. So the rate point is fed
@@ -18,19 +19,17 @@
 //!   / its rate): a network fast by +d ppm fits as −d ppm, less output per
 //!   input, which is the change that drains it.
 //! - **Priming:** at the start and after an underrun the output plays
-//!   silence until the FIFO holds the target (plus the cushion below), then
-//!   starts from there; an excess at that moment is skipped.
-//! - **Underruns:** a block whose input is not there plays silence and
-//!   counts in [`Stats`]. Each underrun raises the cushion the next priming
-//!   fills by [`CUSHION_STEP_S`], up to [`CUSHION_MAX_S`]: a PC whose pump
-//!   comes late gets more margin, and the controller keeps that excess as
-//!   its cushion (`with_cushion_max_s`, `played_silence`) instead of braking
-//!   it away at once. Every [`CUSHION_DECAY_S`] with no dropout it steps
-//!   down again.
+//!   silence until the FIFO holds the target, then starts from there; an
+//!   excess at that moment is skipped.
+//! - **Underruns:** a block whose input is not there plays silence, counts
+//!   in [`Stats`] and primes again to the same target. The target never
+//!   grows after a dropout (dstack #247: the automatic cushion of up to
+//!   +40 ms is gone): the latency stays the stated term, and a PC that
+//!   needs more sets a larger [`AppBuffer`].
 //! - **Re-centre:** a depth the controller cannot steer back (under
-//!   [`FLOOR_S`] or more than [`HARD_EXCESS_S`] off) skips an excess; a
-//!   deficit is a dropout like an underrun (counted, refilled with a
-//!   larger cushion): the audio breaks either way.
+//!   [`floor_s`] or more than [`hard_excess_s`] over the target) skips the
+//!   excess back to the target; a deficit is a dropout like an underrun
+//!   (counted, refilled to the target): the audio breaks either way.
 //!
 //! [`Player::fill_with`] allocates nothing, takes no lock and makes no
 //! system call: it runs on the audio driver's thread.
@@ -47,38 +46,36 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use dstack_resample::asrc::{Basis, Controller, Step};
 use dstack_resample::{ConvertError, Converter, Fixed};
 
+use super::buffer::{AppBuffer, MAX_APP_BUFFER_NS};
 use super::fifo::Fifo;
 use super::map;
 
-/// The FIFO depth the controller keeps, s: the MVP's latency (the issue's
-/// design: about 40 ms), room for a late pump block and a large driver
-/// callback.
-pub const TARGET_S: f64 = 0.040;
-/// A depth under this re-primes, s.
+/// The highest floor, s: a depth under the floor re-primes.
 pub const FLOOR_S: f64 = 0.005;
-/// A depth more than this off the target re-centres, s (over the target
-/// plus the largest cushion).
-pub const HARD_EXCESS_S: f64 = 0.060;
-/// The cushion each underrun adds to the next priming, s.
-pub const CUSHION_STEP_S: f64 = 0.010;
-/// The most cushion steps: the largest cushion is this many
-/// [`CUSHION_STEP_S`].
-pub const CUSHION_STEPS: u32 = 4;
-/// The largest cushion, s.
-pub const CUSHION_MAX_S: f64 = 0.040;
-/// After this long playing with no dropout, the cushion steps down one
-/// [`CUSHION_STEP_S`], s: a PC whose pump was late once does not keep the
-/// largest latency for good.
-pub const CUSHION_DECAY_S: f64 = 60.0;
-/// The FIFO's size, s of the network's rate: the target, the cushion and
-/// the excess with room to spare.
+/// The FIFO's size, s of the network's rate: the largest target and its
+/// excess ([`hard_excess_s`]) with room to spare.
 pub const FIFO_S: f64 = 0.5;
 /// The converter's output frames a call.
 pub const BLOCK: usize = 128;
 
-const _: () = assert!(CUSHION_STEPS as f64 * CUSHION_STEP_S == CUSHION_MAX_S);
-const _: () = assert!(TARGET_S + CUSHION_MAX_S < TARGET_S + HARD_EXCESS_S);
-const _: () = assert!(TARGET_S + HARD_EXCESS_S < FIFO_S);
+const _: () = assert!(3.0 * (MAX_APP_BUFFER_NS as f64 / 1e9) < FIFO_S);
+
+/// The floor for a target of `target_s`, s: [`FLOOR_S`], at most a quarter
+/// of the target. A chunked producer's depth swings half a chunk under the
+/// target (dsend: 10 ms packets around 11.3 ms reach 6.3 ms), so a 5 ms
+/// floor would already re-prime (a dropout) for a packet 1.4 ms late; the
+/// FIFO itself still serves the block until it is empty.
+pub fn floor_s(target_s: f64) -> f64 {
+    FLOOR_S.min(target_s / 4.0)
+}
+
+/// How far over the target the depth may go before the excess is skipped
+/// back to the target, s: twice the target (a burst of late chunks, never
+/// the half chunk a chunked producer swings over it). A deficit never
+/// reaches it: under the target the floor decides.
+pub fn hard_excess_s(target_s: f64) -> f64 {
+    2.0 * target_s
+}
 
 /// The FIFO for `channels` channels at the network's `net_rate`
 /// ([`FIFO_S`]).
@@ -98,6 +95,8 @@ fn frames_of(seconds: f64, rate: u32) -> usize {
 pub struct Stats {
     /// The current output's rate, Hz.
     out_rate: AtomicU32,
+    /// The FIFO's target, ns ([`AppBuffer::target_ns`]).
+    target_ns: AtomicU64,
     underruns: AtomicU64,
     played: AtomicU64,
     recentres: AtomicU64,
@@ -135,6 +134,11 @@ impl Stats {
         f64::from_bits(self.ppm.load(Ordering::Relaxed))
     }
 
+    /// The FIFO's target, ms (the device's [`AppBuffer`]).
+    pub fn target_ms(&self) -> f64 {
+        self.target_ns.load(Ordering::Relaxed) as f64 / 1e6
+    }
+
     /// The current output's rate, Hz.
     pub fn out_rate(&self) -> u32 {
         self.out_rate.load(Ordering::Relaxed)
@@ -168,11 +172,11 @@ pub struct Player {
     pos: usize,
     /// The last callback's frames, in input frames.
     callback_in: usize,
+    /// The app's chunk ([`AppBuffer::chunk_ns`]), in input frames.
+    chunk_in: usize,
     state: State,
-    /// The cushion the next priming fills, in [`CUSHION_STEP_S`].
-    steps: u32,
-    /// The output frame (`made`) of the last dropout or cushion step down.
-    calm_since: u64,
+    /// The FIFO's target, s ([`AppBuffer::target_s`]).
+    target_s: f64,
     /// Output frames made (blocks, silence too): the output's clock.
     made: u64,
     /// Input frames converted.
@@ -186,25 +190,33 @@ pub struct Player {
     stats: Arc<Stats>,
 }
 
-/// The controller at our target, its calm zone the default
+/// The controller at `target_s`, its floor and excess from it
+/// ([`floor_s`], [`hard_excess_s`]) and no cushion (dstack #247), its calm zone the default
 /// ([`dstack_resample::asrc::CALM_ZONE_MS`]): SongPlayer widens it to half a callback
 /// because it reads the depth once a callback, so the read's phase in the
 /// sawtooth wanders. We read it after every block, several times a
 /// callback, and the controller's 1 s window mean averages the sawtooth
 /// out; a wide zone would only leave a larger offset to the slow level
 /// loop.
-fn controller() -> Controller {
-    Controller::new(TARGET_S, FLOOR_S, HARD_EXCESS_S, Basis::Arrival)
-        .with_cushion_max_s(CUSHION_MAX_S)
+fn controller(target_s: f64) -> Controller {
+    Controller::new(
+        target_s,
+        floor_s(target_s),
+        hard_excess_s(target_s),
+        Basis::Arrival,
+    )
 }
 
 impl Player {
     /// A player reading `fifo` (the network's `net_rate`) for an output at
-    /// `out_rate`, counting on in `stats` (from its counts so far).
+    /// `out_rate`, keeping the FIFO at `buffer`'s target (dstack #247: the
+    /// app's chunk and one pump block, or the value it set), counting on in
+    /// `stats` (from its counts so far).
     pub fn new(
         fifo: Arc<Fifo>,
         net_rate: u32,
         out_rate: u32,
+        buffer: AppBuffer,
         stats: Arc<Stats>,
     ) -> Result<Self, ConvertError> {
         let channels = fifo.channels();
@@ -212,19 +224,26 @@ impl Player {
         let input = vec![0.0; conv.input_frames_max() * channels];
         stats.priming.store(true, Ordering::Relaxed);
         stats.out_rate.store(out_rate, Ordering::Relaxed);
+        let target_s = buffer.target_s();
+        stats.target_ns.store(
+            buffer
+                .target_ns()
+                .clamp(super::buffer::MIN_APP_BUFFER_NS, MAX_APP_BUFFER_NS),
+            Ordering::Relaxed,
+        );
         Ok(Player {
             fifo,
             conv,
-            ctl: controller(),
+            ctl: controller(target_s),
             net_rate,
             out_rate,
             input,
             block: vec![0.0; BLOCK * channels],
             pos: BLOCK,
             callback_in: 0,
-            state: State::Priming(frames_of(TARGET_S, net_rate)),
-            steps: 0,
-            calm_since: 0,
+            chunk_in: frames_of(buffer.chunk_ns() as f64 / 1e9, net_rate),
+            state: State::Priming(frames_of(target_s, net_rate)),
+            target_s,
             made: 0,
             consumed: 0,
             underruns: stats.underruns(),
@@ -300,7 +319,14 @@ impl Player {
             // callback it reads half a callback (and a block) under the
             // depth at the callback's start: start that much over the
             // level, so its reads begin at the level, not a callback under.
-            let level = level + (self.callback_in + self.conv.input_frames_next()) / 2;
+            // A chunked producer (dsend's 10 ms packets, OBS's 1024-frame
+            // ticks) makes the same sawtooth from the other side: the
+            // priming ends just after a chunk landed, and the depth falls a
+            // whole chunk before the next one (dstack #247: at a target of
+            // a chunk and a block, that start alone took the depth under
+            // the floor). The wider of the two swings is the one to centre.
+            let swing = self.callback_in.max(self.chunk_in);
+            let level = level + (swing + self.conv.input_frames_next()) / 2;
             let held = self.fifo.len();
             if held < level {
                 self.block.fill(0.0);
@@ -331,47 +357,28 @@ impl Player {
             self.block.fill(0.0);
         }
         self.consumed += need as u64;
-        self.calm_down();
         self.steer();
     }
 
-    /// The block's input was not there: silence, counted, and the next
-    /// priming fills more (module doc).
+    /// The block's input was not there: silence, counted, and primed again
+    /// to the target (module doc).
     fn underrun(&mut self) {
         self.block.fill(0.0);
         self.dropout();
     }
 
     /// The audio breaks (an underrun, or a depth under the floor that only
-    /// a refill mends): counted as an underrun, and the next priming fills
-    /// a larger cushion (module doc).
+    /// a refill mends): counted as an underrun, and the output primes to
+    /// the same target again, never more (dstack #247).
     fn dropout(&mut self) {
         self.underruns += 1;
-        self.steps = (self.steps + 1).min(CUSHION_STEPS);
-        self.calm_since = self.made;
-        let extra_s = self.extra_s();
-        // The controller keeps the extra as its cushion: restart drops the
-        // old one and the silence count, the first count is the start and
-        // the second adds the extra.
         self.ctl.restart();
-        self.ctl.played_silence(0.0);
-        self.ctl.played_silence(extra_s);
-        self.state = State::Priming(frames_of(TARGET_S + extra_s, self.net_rate));
+        self.state = State::Priming(frames_of(self.target_s, self.net_rate));
     }
 
-    /// The cushion the next priming fills, s.
-    fn extra_s(&self) -> f64 {
-        f64::from(self.steps) * CUSHION_STEP_S
-    }
-
-    /// One step down of the cushion after [`CUSHION_DECAY_S`] with no
-    /// dropout.
-    fn calm_down(&mut self) {
-        let calm = frames_of(CUSHION_DECAY_S, self.out_rate) as u64;
-        if self.steps > 0 && self.made - self.calm_since >= calm {
-            self.steps -= 1;
-            self.calm_since = self.made;
-        }
+    /// The FIFO's target, s.
+    pub fn target_s(&self) -> f64 {
+        self.target_s
     }
 
     /// One observation after a converted block, and its answer.

@@ -2,6 +2,7 @@ use super::*;
 
 use dstack::clock::latency_samples;
 
+mod app_buffer;
 mod start;
 mod terms;
 

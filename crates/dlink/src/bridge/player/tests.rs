@@ -4,6 +4,8 @@ use super::*;
 
 use std::f64::consts::TAU;
 
+use crate::bridge::chunk_ns;
+
 /// The network and the output as two clocks (the issue's test plan): the
 /// pump pushes blocks of 128 frames at the network's rate on true time;
 /// the output takes `callback` frames at its own rate, `drift_ppm` fast on
@@ -36,10 +38,44 @@ struct Sim {
 
 const PUMP_BLOCK: usize = 128;
 
+/// dlisten's default (dstack #247): its 10 ms WASAPI callback and one pump
+/// block at the network's rate.
+fn buffer(net_rate: u32) -> AppBuffer {
+    AppBuffer::new(10_000_000, chunk_ns(PUMP_BLOCK as u64, net_rate))
+}
+
+/// [`buffer`]'s target at 48 kHz, frames: 10 ms + 128 frames.
+const TARGET_48K: usize = 480 + 128;
+
 impl Sim {
     fn new(net_rate: u32, out_rate: u32, drift_ppm: f64, channels: usize, outputs: usize) -> Self {
+        Self::with(
+            buffer(net_rate),
+            net_rate,
+            out_rate,
+            drift_ppm,
+            channels,
+            outputs,
+        )
+    }
+
+    fn with(
+        buffer: AppBuffer,
+        net_rate: u32,
+        out_rate: u32,
+        drift_ppm: f64,
+        channels: usize,
+        outputs: usize,
+    ) -> Self {
         let fifo = Arc::new(fifo_for(channels, net_rate));
-        let player = Player::new(Arc::clone(&fifo), net_rate, out_rate, Arc::default()).unwrap();
+        let player = Player::new(
+            Arc::clone(&fifo),
+            net_rate,
+            out_rate,
+            buffer,
+            Arc::default(),
+        )
+        .unwrap();
         // A WASAPI shared callback: 10 ms.
         let callback = out_rate as usize / 100;
         Sim {
@@ -128,24 +164,39 @@ fn frequency(x: &[f64], rate: f64) -> f64 {
     (ups.len() - 1) as f64 * rate / (last - first)
 }
 
-/// (a) An output crystal ±200 ppm off the network's at equal rates over
-/// four simulated minutes: the depth settles at the target, the controller
-/// follows the drift (an output fast by +d takes more frames: +d ppm, more
-/// output per input), no underrun after the priming, no overflow.
+/// (a) An output crystal ±100 ppm off the network's at equal rates over
+/// four simulated minutes at dlisten's default target (10 ms + a block):
+/// the depth settles at the target, the controller follows the drift (an
+/// output fast by +d takes more frames: +d ppm, more output per input), no
+/// underrun after the priming, no overflow.
 #[test]
-fn an_output_200_ppm_fast_keeps_the_fifo_at_its_target_with_no_underrun() {
-    drifting(200.0);
+fn an_output_100_ppm_fast_keeps_the_default_target_with_no_underrun() {
+    drifting(100.0, buffer(48_000));
 }
 
 #[test]
-fn an_output_200_ppm_slow_keeps_the_fifo_at_its_target_with_no_underrun() {
-    drifting(-200.0);
+fn an_output_100_ppm_slow_keeps_the_default_target_with_no_underrun() {
+    drifting(-100.0, buffer(48_000));
 }
 
-fn drifting(drift: f64) {
+/// ±200 ppm needs a larger app buffer (dstack #247): the correction may
+/// move only 5 ppm a second (inaudibly), so reaching 200 ppm takes 40 s and
+/// costs about 6 ms of depth meanwhile, more than the default's 10 ms
+/// chunk leaves over the floor. 20 ms holds it.
+#[test]
+fn an_output_200_ppm_fast_keeps_a_20_ms_target_with_no_underrun() {
+    drifting(200.0, buffer(48_000).set(Some(20_000_000)));
+}
+
+#[test]
+fn an_output_200_ppm_slow_keeps_a_20_ms_target_with_no_underrun() {
+    drifting(-200.0, buffer(48_000).set(Some(20_000_000)));
+}
+
+fn drifting(drift: f64, buffer: AppBuffer) {
     {
         // One channel: the clocks are the test, the converter costs per channel.
-        let mut s = Sim::new(48_000, 48_000, drift, 1, 1);
+        let mut s = Sim::with(buffer, 48_000, 48_000, drift, 1, 1);
         s.run(210.0);
         s.depth_ms();
         s.run(30.0);
@@ -167,9 +218,10 @@ fn drifting(drift: f64) {
         // The mean over the callback's sawtooth reads a little over the
         // controller's own reads (after each block); near, not exact.
         assert!(
-            (depth - TARGET_S * 1000.0).abs() < 2.5,
+            (depth - s.player.target_s() * 1000.0).abs() < 2.5,
             "{drift}: depth {depth} ms"
         );
+        assert!((stats.target_ms() - buffer.target_ns() as f64 / 1e6).abs() < 1e-9);
         assert!(
             (s.player.ctl.rate_ppm() - drift).abs() < 1.0,
             "{drift}: rate fit {} ppm",
@@ -249,7 +301,7 @@ fn a_stopped_pump_plays_silence_counts_underruns_and_recovers() {
     s.run(5.0);
     assert_eq!(s.player.stats().underruns(), 0);
     s.pumping = false;
-    // The FIFO's 40 ms drain, then silence.
+    // The FIFO's 12.7 ms drain, then silence.
     s.run(0.2);
     let quiet = s.record(2.0, 0);
     let stats = s.player.stats();
@@ -271,13 +323,14 @@ fn a_stopped_pump_plays_silence_counts_underruns_and_recovers() {
     assert!(stats.played() > played);
 }
 
-/// Each underrun primes 10 ms more than the last, up to 40 ms over the
-/// target, and the controller keeps that excess as its cushion.
+/// No growth after a dropout (dstack #247): each underrun primes to the
+/// same target, the count goes up, and once playing again the depth sits
+/// at the target, not over it.
 #[test]
-fn each_underrun_primes_a_larger_cushion_up_to_its_cap() {
+fn a_dropout_is_counted_and_never_grows_the_target() {
     let mut s = Sim::new(48_000, 48_000, 0.0, 1, 1);
     let mut levels = Vec::new();
-    for _ in 0..6 {
+    for n in 1..=6 {
         s.run(1.0);
         s.pumping = false;
         s.run(0.2);
@@ -285,23 +338,48 @@ fn each_underrun_primes_a_larger_cushion_up_to_its_cap() {
             panic!("primes after the underrun")
         };
         levels.push(level);
-        assert!(
-            (s.player.ctl.cushion_s() - s.player.extra_s()).abs() < 1e-12,
-            "cushion {} for extra {}",
-            s.player.ctl.cushion_s(),
-            s.player.extra_s()
-        );
+        assert_eq!(s.player.stats().underruns(), n);
+        assert_eq!(s.player.ctl.cushion_s(), 0.0, "no cushion");
         s.pumping = true;
     }
-    // 48 frames a ms: 40 ms + 10, 20, 30, 40, then the cap.
-    assert_eq!(levels, [2400, 2880, 3360, 3840, 3840, 3840]);
-    assert_eq!(s.player.stats().underruns(), 6);
-    // Once playing, the cushion holds the depth over the target.
-    s.run(0.5);
+    assert_eq!(levels, [TARGET_48K; 6]);
+    assert!((s.player.target_s() - 0.012_666_667).abs() < 1e-9);
+    s.run(30.0);
     s.depth_ms();
-    s.run(2.0);
+    s.run(10.0);
     let depth = s.depth_ms();
-    assert!(depth > 60.0, "the cushion is kept: {depth} ms");
+    assert!(
+        (depth - s.player.target_s() * 1000.0).abs() < 2.5,
+        "back at the target, not over it: {depth} ms"
+    );
+    assert_eq!(s.player.stats().underruns(), 6);
+    assert!((s.player.stats().target_ms() - 12.666_667).abs() < 1e-3);
+}
+
+/// A configured app buffer is the target as given (dstack #247): a 40 ms
+/// one keeps the depth at 40 ms, whatever the chunk.
+#[test]
+fn a_configured_app_buffer_is_the_target_verbatim() {
+    let set = buffer(48_000).set(Some(40_000_000));
+    let mut s = Sim::with(set, 48_000, 48_000, 0.0, 1, 1);
+    assert_eq!(s.player.target_s(), 0.040);
+    assert_eq!(s.player.state, State::Priming(1920));
+    s.run(5.0);
+    s.depth_ms();
+    s.run(5.0);
+    let depth = s.depth_ms();
+    assert!((depth - 40.0).abs() < 2.5, "depth {depth} ms");
+    assert_eq!(s.player.stats().target_ms(), 40.0);
+    assert_eq!(s.player.stats().underruns(), 0);
+}
+
+/// The floor and the excess follow the target: a quarter of it (at most
+/// 5 ms) and twice it.
+#[test]
+fn the_floor_and_the_excess_follow_the_target() {
+    assert_eq!(floor_s(0.040), FLOOR_S);
+    assert!((floor_s(0.011_333) - 0.011_333 / 4.0).abs() < 1e-15);
+    assert_eq!(hard_excess_s(0.0226), 0.0452);
 }
 
 /// Audio that came before the output ran is skipped at the start, not
@@ -310,15 +388,23 @@ fn each_underrun_primes_a_larger_cushion_up_to_its_cap() {
 fn an_excess_at_the_start_is_skipped_to_the_target() {
     let fifo = Arc::new(fifo_for(1, 48_000));
     fifo.push_with(9600, |_, _| 0.25); // 200 ms
-    let mut player = Player::new(Arc::clone(&fifo), 48_000, 48_000, Arc::default()).unwrap();
+    let mut player = Player::new(
+        Arc::clone(&fifo),
+        48_000,
+        48_000,
+        buffer(48_000),
+        Arc::default(),
+    )
+    .unwrap();
     let mut out = [0.0f32; 1];
     player.fill_with(&mut out, 1, |x| x as f32);
     assert!(!player.stats().priming());
-    // 40 ms and half the callback and the block (the reads' sawtooth),
-    // less the first block's input.
+    // The target and half the chunk (10 ms, wider than the one-frame
+    // callback) and the block (the reads' sawtooth), less the first
+    // block's input.
     let need = player.consumed() as usize;
     assert!(need > 0);
-    assert_eq!(fifo.len(), 1920 + need.div_ceil(2) - need);
+    assert_eq!(fifo.len(), TARGET_48K + (480 + need) / 2 - need);
 }
 
 /// A sudden excess past the hard bound (a burst of late blocks) is
@@ -336,7 +422,7 @@ fn a_burst_past_the_excess_bound_is_skipped_and_counted() {
     s.run(1.0);
     let depth = s.depth_ms();
     assert!(
-        (depth - 40.0).abs() < 6.0,
+        (depth - s.player.target_s() * 1000.0).abs() < 6.0,
         "back near the target: {depth} ms"
     );
 }
@@ -345,7 +431,15 @@ fn a_burst_past_the_excess_bound_is_skipped_and_counted() {
 /// re-centre and as an underrun (the audio breaks for the refill).
 #[test]
 fn a_depth_under_the_floor_primes_again() {
-    let mut s = Sim::new(48_000, 48_000, 0.0, 1, 1);
+    // A 40 ms target: its floor is the 5 ms one.
+    let mut s = Sim::with(
+        buffer(48_000).set(Some(40_000_000)),
+        48_000,
+        48_000,
+        0.0,
+        1,
+        1,
+    );
     s.run(5.0);
     // Leave 3 ms: under the 5 ms floor, over a block's input.
     let held = s.fifo.len();
@@ -355,7 +449,11 @@ fn a_depth_under_the_floor_primes_again() {
     let stats = s.player.stats();
     assert_eq!(stats.recentres(), 1);
     assert_eq!(stats.underruns(), 1, "a refill is a dropout");
-    assert_eq!(s.player.state, State::Priming(2400), "with a 10 ms cushion");
+    assert_eq!(
+        s.player.state,
+        State::Priming(1920),
+        "to the target, no cushion"
+    );
     assert!(stats.priming());
 }
 
@@ -391,8 +489,8 @@ fn the_player_maps_our_channels_onto_the_output() {
 #[test]
 fn no_output_channels_or_a_rate_of_zero_are_refused_without_a_panic() {
     let fifo = Arc::new(fifo_for(2, 48_000));
-    assert!(Player::new(Arc::clone(&fifo), 0, 48_000, Arc::default()).is_err());
-    let mut player = Player::new(fifo, 48_000, 48_000, Arc::default()).unwrap();
+    assert!(Player::new(Arc::clone(&fifo), 0, 48_000, buffer(48_000), Arc::default()).is_err());
+    let mut player = Player::new(fifo, 48_000, 48_000, buffer(48_000), Arc::default()).unwrap();
     let mut out = [1.0f64; 4];
     player.fill_with(&mut out, 0, |x| x);
     assert_eq!(out, [1.0; 4]);
@@ -419,7 +517,14 @@ fn a_new_player_counts_on_in_the_same_stats() {
     let stats = s.player.stats();
     let (played, underruns, recentres) = (stats.played(), stats.underruns(), stats.recentres());
     assert!(played > 0 && underruns > 0 && recentres > 0);
-    let mut next = Player::new(Arc::clone(&s.fifo), 48_000, 44_100, stats.clone()).unwrap();
+    let mut next = Player::new(
+        Arc::clone(&s.fifo),
+        48_000,
+        44_100,
+        buffer(48_000),
+        stats.clone(),
+    )
+    .unwrap();
     assert_eq!(stats.out_rate(), 44_100);
     assert!(stats.priming());
     let mut out = [0.0f64; 441];
@@ -435,10 +540,17 @@ fn a_new_player_counts_on_in_the_same_stats() {
 fn priming_ends_at_exactly_the_level() {
     for (short, primed) in [(1, false), (0, true)] {
         let fifo = Arc::new(fifo_for(1, 48_000));
-        let mut player = Player::new(Arc::clone(&fifo), 48_000, 48_000, Arc::default()).unwrap();
+        let mut player = Player::new(
+            Arc::clone(&fifo),
+            48_000,
+            48_000,
+            buffer(48_000),
+            Arc::default(),
+        )
+        .unwrap();
         let need = player.conv.input_frames_next();
-        // One frame a callback: half of it rounds with the block.
-        let level = 1920 + need.div_ceil(2);
+        // One frame a callback: the 10 ms chunk is the wider swing.
+        let level = TARGET_48K + (480 + need) / 2;
         fifo.push_with(level - short, |_, _| 0.25);
         let mut out = [0.0f64; 1];
         player.fill_with(&mut out, 1, |x| x);
@@ -447,35 +559,6 @@ fn priming_ends_at_exactly_the_level() {
         assert_eq!(player.consumed(), taken);
         assert_eq!(fifo.len() as u64, (level - short) as u64 - taken);
     }
-}
-
-/// The cushion steps down every minute with no dropout, to none.
-#[test]
-fn the_cushion_steps_down_after_a_calm_minute() {
-    let mut s = Sim::new(48_000, 48_000, 0.0, 1, 1);
-    for _ in 0..2 {
-        s.run(1.0);
-        s.pumping = false;
-        s.run(0.2);
-        s.pumping = true;
-    }
-    assert_eq!(s.player.steps, 2);
-    let since = s.player.calm_since;
-    // Just under a minute: no step yet.
-    s.run(CUSHION_DECAY_S - 1.0);
-    assert_eq!(s.player.steps, 2);
-    s.run(2.0);
-    assert_eq!(s.player.steps, 1, "one step a calm minute");
-    assert!(s.player.calm_since >= since + 60 * 48_000);
-    s.run(CUSHION_DECAY_S);
-    assert_eq!(s.player.steps, 0);
-    s.run(CUSHION_DECAY_S);
-    assert_eq!(s.player.steps, 0, "never under none");
-    assert_eq!(s.player.stats().underruns(), 2);
-    // The next dropout primes one step again.
-    s.pumping = false;
-    s.run(0.2);
-    assert_eq!(s.player.state, State::Priming(2400));
 }
 
 /// A FIFO emptied at once (no depth under the floor first): the block
@@ -496,7 +579,7 @@ fn a_block_with_no_input_plays_silence_and_primes() {
     let stats = s.player.stats();
     assert_eq!(stats.underruns(), 1);
     assert_eq!(stats.recentres(), 0, "an underrun, not a re-centre");
-    assert_eq!(s.player.state, State::Priming(2400));
+    assert_eq!(s.player.state, State::Priming(TARGET_48K));
 }
 
 #[test]
@@ -506,6 +589,7 @@ fn under_mono_both_speakers_play_the_sum_of_our_channels() {
         Arc::new(fifo_for(2, 48_000)),
         48_000,
         48_000,
+        buffer(48_000),
         Arc::default(),
     );
     let player = std::mem::replace(&mut s.player, stand_in.unwrap());
