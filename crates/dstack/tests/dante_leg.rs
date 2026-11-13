@@ -208,3 +208,72 @@ fn both_rulesets_accept_dante_s_groups() {
         );
     }
 }
+
+const NOTRACK: &str = include_str!("../../../tools/linux/dante-leg-notrack.nft");
+
+/// The statements of the nft chain `name` in `file`, comments and blank
+/// lines dropped, as written.
+fn nft_chain(file: &str, name: &str) -> Vec<String> {
+    let start = file
+        .find(&format!("chain {name} {{"))
+        .unwrap_or_else(|| panic!("no chain {name}"));
+    let body = &file[start + format!("chain {name} {{").len()..];
+    let body = &body[..body.find('}').expect("the chain's end")];
+    body.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(String::from)
+        .collect()
+}
+
+/// Every non-comment line outside the chains: the table head and its
+/// idempotent delete, nothing else.
+#[test]
+fn the_notrack_ruleset_is_one_idempotent_table_with_no_include() {
+    let code: Vec<&str> = NOTRACK
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .collect();
+    assert_eq!(
+        &code[..3],
+        [
+            "table inet dstack_dante_leg_notrack",
+            "delete table inet dstack_dante_leg_notrack",
+            "table inet dstack_dante_leg_notrack {",
+        ],
+        "create, delete, then define the table, so a reload replaces it"
+    );
+    assert_eq!(code.iter().filter(|l| l.starts_with("table ")).count(), 2);
+    assert_eq!(code.iter().filter(|l| l.starts_with("chain ")).count(), 2);
+    assert!(!NOTRACK.contains("include"), "no include");
+    assert!(!NOTRACK.contains("define "), "the leg comes from -D only");
+    // The main filter's table is a different one and keeps no raw chain:
+    // the notrack table is loaded only on a PC with no NAT.
+    assert!(!NFT.contains("notrack"), "dante-leg.nft stays NAT-safe");
+    assert!(!NFT.contains("priority raw"));
+}
+
+/// Both chains run before conntrack and untrack exactly the packets not
+/// on the leg: everything on the leg stays tracked for dante-leg.nft's
+/// `ct state` rules.
+#[test]
+fn the_notrack_chains_exempt_exactly_the_non_leg_interfaces() {
+    assert_eq!(
+        nft_chain(NOTRACK, "raw_pre"),
+        [
+            "type filter hook prerouting priority raw; policy accept;",
+            "iifname != $dante_leg notrack",
+        ]
+    );
+    assert_eq!(
+        nft_chain(NOTRACK, "raw_out"),
+        [
+            "type filter hook output priority raw; policy accept;",
+            "oifname != $dante_leg notrack",
+        ]
+    );
+    // The leg's name is the same variable the main filter tests.
+    assert!(NFT.contains("iifname != $dante_leg accept"));
+    assert!(NFT.contains("oifname != $dante_leg accept"));
+}
