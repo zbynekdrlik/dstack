@@ -132,6 +132,8 @@ pub fn run() -> Result<(), String> {
         }
         if msg.message == WM_TIMER && msg.hwnd.is_null() {
             tray.tick()?;
+            let (devices, readings) = tray.last_tick();
+            crate::settings_win::feed(devices, readings);
         } else {
             // SAFETY: a message GetMessageW filled.
             unsafe {
@@ -148,6 +150,12 @@ pub fn run() -> Result<(), String> {
                     }
                 }
                 Action::Error(err) => message(&err),
+                Action::Settings => {
+                    let (devices, readings) = tray.last_tick();
+                    if let Err(err) = crate::settings_win::open(devices, readings) {
+                        message(&format!("dtray: {err}"));
+                    }
+                }
             }
         }
     }

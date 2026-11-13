@@ -13,6 +13,8 @@ fn no_argument_is_the_tray_and_print_prints() {
     assert_eq!(mode_of(args(&[])), Ok(Mode::Tray));
     assert_eq!(mode_of(args(&["--print"])), Ok(Mode::Print));
     assert_eq!(mode_of(args(&["--version"])), Ok(Mode::Version));
+    assert_eq!(mode_of(args(&["--settings"])), Ok(Mode::Settings));
+    assert!(USAGE.contains("--settings"));
 }
 
 #[test]
@@ -45,6 +47,19 @@ fn set_latency_takes_a_device_and_a_value() {
         })
     );
     assert!(USAGE.contains("--set-latency <device> <ms>"));
+}
+
+#[test]
+fn dasio_apply_takes_an_instance_and_a_file() {
+    assert_eq!(
+        mode_of(args(&["--dasio-apply", "2", "C:/t/new.toml"])),
+        Ok(Mode::DasioApply {
+            instance: "2".to_string(),
+            file: "C:/t/new.toml".to_string()
+        })
+    );
+    assert!(USAGE.contains("--dasio-apply <instance> <file>"));
+    assert_eq!(mode_of(args(&["--dasio-apply", "2"])), Err(USAGE));
 }
 
 #[test]
@@ -130,5 +145,7 @@ fn every_command_line_mode_takes_the_shell_s_console_the_tray_none() {
     // A usage error is printed too.
     assert!(wants(&["--bogus"]));
     assert!(!wants_console(Some(&Mode::Tray)));
+    assert!(!wants_console(Some(&Mode::Settings)));
+    assert!(!wants(&["--settings"]));
     assert!(wants_console(None));
 }

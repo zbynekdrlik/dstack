@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.6.107
+
+- New (dstack #246, owner-approved mockup v1, `docs/mockups/dtray-dasio-settings-v1.html`): dtray's dasio settings window on Windows. One window, a tab per dasio instance found on the PC (`%ProgramData%\dasio\instance-N\device.toml`, service `dasio-N`), a live status line on top (from the device's status: the app's line and the clock). Opened from the tray menu's new "dasio settings…" (shown when the PC has an instance) or alone with `dtray --settings`.
+  - Fields: Ethernet interface (the PC's adapters; written as `iface = "<alias>"`, dasio#101), buffer (`block`), Dante RX latency (`latency_ns` through the device's ARC, at once, as `dtray --set-latency` writes it), TX latency (`tx_latency_ns`), sample rate (read only), inputs and outputs 2 to 64 (the `rx`/`tx` name lists: existing names kept, new channels named by their number), three CPU pickers (`pump_cpu`, `io_cpu`, `rx_cpu`; the other instance's CPUs greyed and refused).
+  - ● marks the RX latency (applies at once), ↻ the fields that need a restart of the service. The TX latency is ↻: dstack has no live path for a fixed `tx_latency_ns` (receivers read it when they subscribe, dasio reports it to the DAW at its start); asked on #246.
+  - A banner counts the restart changes. When the buffer or a channel count changes (the shared memory's layout), it says the DAW must release the driver, and the apply waits until the device's status says `daw_attached: false` (at most 10 minutes; nothing is written otherwise). A restart of the same shape does not wait.
+  - "Apply and restart" writes the config through an elevated helper (Windows asks once: UAC), `dtray-cli --dasio-apply <instance> <file>`: it checks the new text as dasio reads it, writes `device.toml` atomically (a staged file renamed over it) and restarts `dasio-N` through the Service Control Manager. Only the changed keys are rewritten (`toml_edit`): the file's comments, order and other keys stay. The window then reads the device back (block from the status, channel counts and RX latency from its ARC, the adapter holding its address) and shows the verdict or each mismatch. The CPUs and the TX latency are written but not reported by the device.
+- New: `dtray::dasio` (the window's logic, pure and tested: `Fields`, `edit`, `resize`, `changes`, `Field::kind`, `banner`, `busy_cpus`, `cpu_problems`, `plan`, `status_line`, `daw_attached`, `verify`, `install`, `apply_staged`; `dasio::choices`, `dasio::apply`), `dtray::Mode::Settings` and `Mode::DasioApply`, `dtray::cli::verdict`, `dtray::latency::label_wide` (now public).
+- New dependency: `toml_edit` 0.25.17 (dtray only). The lockfile moves `toml_parser` to 1.1.5 and `toml_writer` to 1.1.3, which dstack's `toml` also uses; `toml_datetime` 1.1.2 is added.
+- No change for other consumers: no dstack or dlink API change, no latency change.
+
 ## 0.6.106
 
 - Breaking (dstack #244, owner ROZHODNUTÉ 12.11.2026): a dlink device's latency is three named terms, not one budget. Each term is logged at the device's start, one line each.
