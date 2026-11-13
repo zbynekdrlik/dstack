@@ -80,7 +80,7 @@ use std::time::{Duration, Instant};
 use mdns_sd::ServiceEvent;
 use tracing::{debug, info};
 
-use super::instance::Instances;
+use super::instance::{Direct, Instances};
 use super::resolve::{Advertised, Applied, Multicast, MulticastLookup, Resolver};
 use super::retry_after;
 use crate::announce::ARC_SERVICE;
@@ -1166,14 +1166,13 @@ pub struct Network {
 
 impl Resolver for Network {
     fn lookup(&self, tx_device: &str, tx_channel: &str) -> Option<Advertised> {
-        self.instances.lookup(tx_device, tx_channel).or_else(|| {
-            if self.instances.young(tx_device, tx_channel) {
-                // Its direct query may still answer: no ARC yet.
-                None
-            } else {
-                self.arc.lookup(tx_device, tx_channel)
-            }
-        })
+        // One read of the record and its grace (dstack #269).
+        match self.instances.direct(tx_device, tx_channel) {
+            Direct::Found(a) => Some(a),
+            // Its direct query may still answer: no ARC yet.
+            Direct::Waiting => None,
+            Direct::Missing => self.arc.lookup(tx_device, tx_channel),
+        }
     }
 
     /// Read from the transmitter's ARC, whichever record named the channel.

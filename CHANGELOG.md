@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.6.120
+
+- **Fix (dstack #269): a channel whose record answered during a lookup no longer goes to the ARC directory.** The network resolver read a channel's record and its query's grace in two separate locks of the instance table. An answer landing between the two made that lookup find no record and no grace, so it asked the ARC directory: `arc.asked()` turned true, the daemon started the ARC directory's threads even where every transmitter publishes channel records, and one ARC read (3 requests) went to a transmitter that needed none. The subscription itself resolved one tick later from the record; no wrong flow, no audio effect. Found as a test that failed once on CI (`the_network_asks_each_channel_s_record_and_reads_a_device_without_them`, v0.6.119's tag run).
+  - `Table::direct` / `Instances::direct` read both under one lock at one time and return `Direct::Found(Advertised)`, `Direct::Waiting` or `Direct::Missing`; `Network::lookup` matches on it.
+  - API: `Instances::young` is removed (its one caller was `Network::lookup`; reading the grace apart from the record is what raced). New: `Instances::direct`, `Table::direct`, `subscribe::instance::Direct`.
+  - New test `directory/tests/record_race.rs`: another thread keeps answering a channel while the test looks it up, forgetting its record after each find. Without the fix it fails within the first rounds (40 of 40 runs, idle, one CPU and load ~36).
+- **No latency change** for any app.
+- Consumers: move the stack version; nothing to port unless an app called `Instances::young` (none known).
+
 ## 0.6.119
 
 - **New (dstack #264, asked by camera-box): `tools/linux/dante-leg-notrack.nft`, conntrack only on the Dante leg.** `dante-leg.nft` is stateful, so conntrack tracked every flow in the network namespace, on every NIC, multi-Gb/s NDI and JPEG XS included. The new file holds one table, `inet dstack_dante_leg_notrack`, with two chains at raw priority: `iifname != $dante_leg notrack` (prerouting) and `oifname != $dante_leg notrack` (output). Load it after `dante-leg.nft` with the same `-D dante_leg=<iface>`; a load without `-D` fails, a reload replaces the table.
