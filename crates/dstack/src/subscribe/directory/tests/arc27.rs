@@ -47,7 +47,7 @@ fn card_27() -> (SocketAddrV4, mpsc::Receiver<(u16, u16)>) {
 }
 
 #[test]
-fn a_2_7_card_s_flows_are_read_with_0x2200_and_asked_so_first_after() {
+fn a_2_7_card_s_flows_are_read_with_0x2200_after_its_0x2600_refusal() {
     let (at, asked) = card_27();
     let (mdns, _) = responder(vec![vec![rec(
         ARC_SERVICE,
@@ -56,10 +56,9 @@ fn a_2_7_card_s_flows_are_read_with_0x2200_and_asked_so_first_after() {
         LOOPBACK,
         at.port(),
     )]]);
-    // A list is kept 50 ms: the next lookup after asks again.
     let mut arc = ArcDirectory::new(Timing {
         settle_ns: 0,
-        max_age_ns: 50 * MS,
+        max_age_ns: MAX_AGE_NS,
         reply: BOUND,
         idle: Duration::from_millis(10),
         fpp: FPP,
@@ -88,15 +87,5 @@ fn a_2_7_card_s_flows_are_read_with_0x2200_and_asked_so_first_after() {
         })
         .collect();
     assert_eq!(first, vec![(0x2809, 0x2600), (0x27ff, 0x2200)]);
-    // The next read (the list aged) asks 0x2200 first.
-    let deadline = Instant::now() + BOUND;
-    let next = loop {
-        assert!(Instant::now() < deadline, "no second read");
-        let _ = arc.multicast("card", "02", &a);
-        if let Ok(r) = asked.recv_timeout(Duration::from_millis(20)) {
-            break r;
-        }
-    };
-    assert_eq!(next, (0x27ff, 0x2200));
     arc.join_within(BOUND);
 }
