@@ -598,7 +598,8 @@ function Open-EmergencyPath {
     # The emergency rules are created or re-scoped only while the dstack155
     # rule is on. Records the disabled rule's Name in $State. Returns the
     # exit code.
-    param([Parameter(Mandatory)]$Config, [Parameter(Mandatory)]$State, [Parameter(Mandatory)][string]$Log)
+    param([Parameter(Mandatory)]$Config, [Parameter(Mandatory)]$State, [Parameter(Mandatory)][string]$Log,
+        [scriptblock]$Persist = {})
     $label = $Config.DanteBlockRule
     try {
         $block = Resolve-DanteBlockRule -Config $Config
@@ -649,8 +650,10 @@ function Open-EmergencyPath {
         return 1
     }
     try {
-        # Recorded before the change, so a run that dies half-way still closes it.
+        # Recorded and saved before the change, so a run that dies after it
+        # still leaves the record a LAN-up run closes from.
         $State.EmergencyRule = [string]$block.Name
+        & $Persist
         Disable-NetFirewallRule -Name $block.Name | Out-Null
         if (Test-RuleEnabled -Rule (Get-FirewallRuleByName -Name $block.Name)) {
             throw "'$label' reads enabled after disabling it"
@@ -683,7 +686,7 @@ function Close-EmergencyPath {
         }
     }
     if ($State.EmergencyRule -and -not ($known | Where-Object { $_.Name -eq $State.EmergencyRule })) {
-        $known += [pscustomobject]@{ Name = [string]$State.EmergencyRule; Label = "the rule the emergency path disabled ($($State.EmergencyRule))" }
+        $known += [pscustomobject]@{ Name = [string]$State.EmergencyRule; Label = "the rule the emergency path disabled ($($State.EmergencyRule); if it was deleted on purpose, remove 'emergencyRule' from the state file)" }
     }
     if ($known.Count -eq 0) { return $code }
     try {
@@ -756,7 +759,8 @@ function Invoke-Check {
             # restarts the Dante adapter, which the rules are bound to.
             $e = 0
             if ($null -ne $cfg.EmergencySource) {
-                $e = Open-EmergencyPath -Config $cfg -State $state -Log $log | Select-Object -Last 1
+                $persist = { Save-HealState -Path $statePath -Failures $next.Failures -LastRestart $state.LastRestart -EmergencyRule $state.EmergencyRule }
+                $e = Open-EmergencyPath -Config $cfg -State $state -Log $log -Persist $persist | Select-Object -Last 1
             }
             $code = Invoke-Repair -Config $cfg -State $state -Log $log
             Write-HealLog -Path $log -Message "repair done (exit $code)"
@@ -845,7 +849,31 @@ function Install-SelfHeal {
 }
 
 function Uninstall-SelfHeal {
+    # Closes the emergency path first (the task would never close it again)
+    # and removes its rules; refuses when the dstack155 rule cannot be
+    # enabled again.
     param([Parameter(Mandatory)][string]$Dir)
+    $log = Join-Path $Dir 'lan-selfheal.log'
+    $statePath = Join-Path $Dir 'lan-selfheal.state.json'
+    $configPath = Join-Path $Dir 'lan-selfheal.json'
+    $state = Read-HealState -Json $null
+    if (Test-Path -LiteralPath $statePath) { $state = Read-HealState -Json (Get-Content -LiteralPath $statePath -Raw) }
+    $cfg = [pscustomobject]@{ EmergencySource = $null; DanteBlockRule = $null; DanteAdapter = $null }
+    if (Test-Path -LiteralPath $configPath) {
+        try { $cfg = Read-HealConfig -Json (Get-Content -LiteralPath $configPath -Raw) }
+        catch { Write-HealLog -Path $log -Message "uninstall: config unreadable ($($_.Exception.Message)); closing the emergency path from the state file only" }
+    }
+    if ($null -ne $cfg.EmergencySource -or $state.EmergencyRule) {
+        $rc = Close-EmergencyPath -Config $cfg -State $state -Log $log | Select-Object -Last 1
+        if ([int]$rc -ne 0) { throw 'refused: the emergency path could not be closed (see the log); the task stays' }
+        Save-HealState -Path $statePath -Failures $state.Failures -LastRestart $state.LastRestart
+    }
+    foreach ($name in $script:EmergencyRuleNames) {
+        if ($null -ne (Get-FirewallRuleByName -Name $name)) {
+            Remove-NetFirewallRule -Name $name | Out-Null
+            if (Test-Path -LiteralPath $Dir) { Write-HealLog -Path $log -Message "uninstall: removed emergency rule '$name'" }
+        }
+    }
     if (Get-ScheduledTask -TaskName $script:TaskName -ErrorAction SilentlyContinue) {
         Unregister-ScheduledTask -TaskName $script:TaskName -Confirm:$false
     }
