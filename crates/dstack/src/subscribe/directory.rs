@@ -56,13 +56,16 @@
 //!
 //! **TX flow lists** (dstack #148): [`Book::multicast`] answers whether a
 //! multicast flow of a transmitter carries a channel, from the device's
-//! 0x2600 list ([`crate::arc::flows::list_tx_flows`]) read by the same
+//! TX flow list ([`crate::arc::flows::read_tx_flows`]: 2.8.9's 0x2600, or
+//! 2.7's 0x2200 for a device that refuses 0x2600 as unknown, then asked
+//! first for that device, dstack #271) read by the same
 //! reader, one exchange, within the same bounds: one read at a time, a list
 //! kept [`Timing::max_age_ns`], the next read [`retry_after`] its failures
 //! after the last. It is asked for every subscribed channel whose device has
 //! a `_netaudio-arc` record, whichever record resolved the channel. A list
-//! that cannot be read (a device that answers no 0x2600) counts as one
-//! with no multicast flow until the next read.
+//! that cannot be read (a device that answers neither list) counts as one
+//! with no multicast flow until the next read; a device's first refusal is
+//! logged at info, later ones at debug.
 //!
 //! Logs name peer ids (the status's), counts and opcodes, never a name or
 //! an address: one info line per directory read, and once a minute at most
@@ -81,16 +84,20 @@ use mdns_sd::ServiceEvent;
 use tracing::{debug, info};
 
 use super::instance::{Direct, Instances};
-use super::resolve::{Advertised, Applied, Multicast, MulticastLookup, Resolver};
+use super::resolve::{Advertised, Applied, MulticastLookup, Resolver};
 use super::retry_after;
 use crate::announce::ARC_SERVICE;
 use crate::arc::client::{Directory, REPLY_TIMEOUT, ReadError, TxChannel, Udp, read_directory};
-use crate::arc::flows::{Flows, TxFlow, list_tx_flows};
+use crate::arc::flows::{Flows, ListForm, TxFlow, read_tx_flows};
 use crate::ctl::Requests;
 use crate::device::DeviceConfig;
 use crate::flows::control::START as DBCP1;
 
 pub use crate::arc::client::MAX_PAGES;
+
+mod flows;
+pub use flows::carried;
+use flows::flows_read;
 
 /// A Dante device's flow-control record (UDP 4455).
 pub const DBC_SERVICE: &str = "_netaudio-dbc._udp.local.";
@@ -257,6 +264,10 @@ struct FlowReads {
     state: State,
     ended: Option<u64>,
     failures: u32,
+    /// The list form the device last answered, asked first (dstack #271).
+    form: ListForm,
+    /// A refusal was logged at info (once per device).
+    refusal_told: bool,
 }
 
 /// What a read reads.
@@ -276,6 +287,9 @@ pub struct Job {
     pub arc: SocketAddrV4,
     pub want: Want,
     pub kind: Kind,
+    /// The TX flow list form asked first ([`Kind::Flows`]; the default
+    /// for a channel read).
+    pub form: ListForm,
 }
 
 /// A read's outcome.
@@ -334,25 +348,6 @@ impl Counts {
             ReadError::Io { .. } => self.socket += 1,
         }
     }
-}
-
-/// The multicast flow in `flows` that carries `a`'s TX channel at its bits
-/// (a flow with no multicast destination, no channel or more channel
-/// slots than one of our flows takes carries nothing).
-pub fn carried(flows: &[TxFlow], a: &Advertised) -> Option<Multicast> {
-    flows.iter().find_map(|f| {
-        let group = f.destinations.iter().find(|d| d.ip().is_multicast())?;
-        (f.multicast()
-            && u32::from(f.bits) == a.bits
-            && f.channels.contains(&a.tx_channel_id)
-            && f.channels.len() <= crate::media::tx::MAX_CHANNELS)
-            .then(|| Multicast {
-                group: *group,
-                channels: f.channels.clone(),
-                fpp: f.fpp,
-                bits: a.bits,
-            })
-    })
 }
 
 /// The devices' records, directories and reads (see the module).
@@ -583,6 +578,7 @@ impl Book {
                 arc,
                 want,
                 kind: Kind::Channels,
+                form: ListForm::default(),
             });
         }
         for (device, r) in &mut self.flow_reads {
@@ -606,6 +602,7 @@ impl Book {
                 arc,
                 want,
                 kind: Kind::Flows,
+                form: r.form,
             });
         }
         None
@@ -664,31 +661,41 @@ impl Book {
     /// next read waits longer); the last list read stays (a multicast flow
     /// is not left over one lost reply), and a device never read counts as
     /// one with no flow until the next read (a device that answers no
-    /// 0x2600 gets unicast flows).
+    /// list gets unicast flows). The form that answered is asked first
+    /// next time (dstack #271). True when the read was refused and the
+    /// device had no refusal told yet: the reader logs that one at info,
+    /// later ones at debug.
     pub fn finished_flows(
         &mut self,
         job: &Job,
-        result: Result<Flows, ReadError>,
+        result: Result<(Flows, ListForm), ReadError>,
         requests: usize,
         now: u64,
-    ) {
+    ) -> bool {
         self.counts.requests += requests as u64;
         let Some(r) = self.flow_reads.get_mut(&job.device) else {
-            return;
+            return false;
         };
         r.state = State::Idle;
         r.ended = Some(now);
         match result {
-            Ok(list) => {
+            Ok((list, form)) => {
                 r.failures = 0;
+                r.form = form;
                 r.flows = Some((list.flows, now));
+                false
             }
             Err(e) => {
+                let tell = matches!(e, ReadError::Refused { .. }) && !r.refusal_told;
+                if tell {
+                    r.refusal_told = true;
+                }
                 self.counts.count_error(e);
                 r.failures = r.failures.saturating_add(1);
                 if r.flows.is_none() {
                     r.flows = Some((Vec::new(), now));
                 }
+                tell
             }
         }
     }
@@ -1004,7 +1011,7 @@ fn reader(shared: &Shared, ip: Ipv4Addr, requests: &Requests) {
             &shared.stop,
         ) {
             Ok(mut ex) if job.kind == Kind::Flows => {
-                let result = list_tx_flows(&mut ex);
+                let result = read_tx_flows(&mut ex, job.form);
                 flows_read(shared, &job, result, ex.sent, ex.peer, started);
                 continue;
             }
@@ -1015,14 +1022,7 @@ fn reader(shared: &Shared, ip: Ipv4Addr, requests: &Requests) {
             Err(e) => {
                 let err = |op| ReadError::Io { op, kind: e.kind() };
                 if job.kind == Kind::Flows {
-                    flows_read(
-                        shared,
-                        &job,
-                        Err(err(crate::arc::flows::LIST)),
-                        0,
-                        0,
-                        started,
-                    );
+                    flows_read(shared, &job, Err(err(job.form.op())), 0, 0, started);
                     continue;
                 }
                 (Err(err(crate::arc::op::COUNTS)), 0, 0)
@@ -1052,34 +1052,6 @@ fn reader(shared: &Shared, ip: Ipv4Addr, requests: &Requests) {
             now,
         );
     }
-}
-
-/// A flow list read `job` ended with `result`: logged and kept.
-fn flows_read(
-    shared: &Shared,
-    job: &Job,
-    result: Result<Flows, ReadError>,
-    sent: usize,
-    peer: usize,
-    started: Instant,
-) {
-    let ms = started.elapsed().as_millis();
-    match &result {
-        Ok(list) => info!(
-            peer,
-            flows = list.flows.len(),
-            multicast = list.flows.iter().filter(|f| f.multicast()).count(),
-            unread = list.unread,
-            requests = sent,
-            ms,
-            "a transmitter's TX flows read through its ARC"
-        ),
-        Err(e) => {
-            debug!(peer, requests = sent, ms, error = %e, "an ARC read of a transmitter's TX flows failed")
-        }
-    }
-    let now = shared.now();
-    lock(&shared.book).finished_flows(job, result, sent, now);
 }
 
 /// Waits for the next read (a want, a wait over), looking at the minute's

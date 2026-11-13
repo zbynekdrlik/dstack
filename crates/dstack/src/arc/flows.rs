@@ -60,6 +60,12 @@
 //! empty body, and its next list no longer held the flow (11.11.2026, live,
 //! with the owner's OK); Dante Controller's own delete was not captured.
 //!
+//! **A device that speaks ARC 2.7 only** (dstack #271: a Yamaha AIC128-D,
+//! `arcp_vers` 2.7.41) answers 0x2600 with status [`STATUS_UNKNOWN_OP`]
+//! and lists its flows with 2.7's 0x2200 ([`v27`]). [`read_tx_flows`]
+//! asks the form a caller remembers for the device and, on that refusal,
+//! the other; it returns the form that answered ([`ListForm`]).
+//!
 //! Nothing here asks again, and nothing changes but what the caller names
 //! on the one device it talks to. Whether a device may be changed at all is
 //! the application's call (the owner's rule: no foreign device without the
@@ -91,6 +97,59 @@ pub const MAX_FLOW_CHANNELS: usize = 8;
 /// the AES3 adapter's).
 pub const OPTIONS: [u16; 2] = [0x0001, 0x0071];
 
+/// The status a device answers an opcode it does not know: a 2.7 card's
+/// for 0x2600 (dstack #271), inferno's for 0x2320.
+pub const STATUS_UNKNOWN_OP: u16 = super::STATUS_2320;
+
+/// Which TX flow list a device answers: ARC 2.8.9's 0x2600 ([`LIST`]) or
+/// ARC 2.7's 0x2200 ([`v27::LIST_27`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ListForm {
+    /// 0x2600 under start code 0x2809 (tried first on a device not read
+    /// yet).
+    #[default]
+    V289,
+    /// 0x2200 under start code 0x27ff.
+    V27,
+}
+
+impl ListForm {
+    /// The other form.
+    pub fn other(self) -> ListForm {
+        match self {
+            ListForm::V289 => ListForm::V27,
+            ListForm::V27 => ListForm::V289,
+        }
+    }
+
+    /// Its list's opcode.
+    pub fn op(self) -> u16 {
+        match self {
+            ListForm::V289 => LIST,
+            ListForm::V27 => v27::LIST_27,
+        }
+    }
+}
+
+/// The device's TX flows in `form` first: when that list is refused with
+/// [`STATUS_UNKNOWN_OP`] (the device does not know it), the other form's
+/// (dstack #271). Returns the flows and the form that answered, which the
+/// caller asks first next time; any other error, or the other form's own
+/// error, is the read's.
+pub fn read_tx_flows(c: &mut impl Call, form: ListForm) -> Result<(Flows, ListForm), ReadError> {
+    let list = |c: &mut _, form| match form {
+        ListForm::V289 => list_tx_flows(c),
+        ListForm::V27 => v27::list_tx_flows_27(c),
+    };
+    match list(c, form) {
+        Err(ReadError::Refused {
+            status: STATUS_UNKNOWN_OP,
+            ..
+        }) => list(c, form.other()).map(|f| (f, form.other())),
+        r => r.map(|f| (f, form)),
+    }
+}
+
 /// One TX flow as the device lists it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TxFlow {
@@ -121,7 +180,8 @@ impl TxFlow {
 pub struct Flows {
     /// The transmitter's TX flow slots, as the reply's table states
     /// (`[slots, count]`): an UltimoX2 has 2. A controller shows "flows
-    /// N/slots" with it (dstack #185).
+    /// N/slots" with it (dstack #185). 0 for an ARC 2.7 list
+    /// ([`v27::list_tx_flows_27`]), whose table states a page's slots.
     pub slots: u16,
     pub flows: Vec<TxFlow>,
     /// The records counted that did not read.
@@ -557,6 +617,8 @@ pub fn delete_multicast(c: &mut impl Call, local_id: u16) -> Result<(), ReadErro
     }
     Ok(())
 }
+
+pub mod v27;
 
 #[cfg(test)]
 pub(crate) mod tests;

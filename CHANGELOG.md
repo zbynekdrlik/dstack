@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.6.121
+
+- **Fix (dstack #271): an ARC 2.7 transmitter's TX flows are read.** A Yamaha AIC128-D (Audinate DCM, `arcp_vers` 2.7.41) answers the 2.8.9 TX flow list (0x2600, start code 0x2809) with status 0x0030 (op unknown). The ARC directory asked it every minute, counted `refused=1` in its minute report, and never knew the card's flows, so a multicast flow on such a card could not be found.
+  - The directory now asks ARC 2.7's 0x2200 (start code 0x27ff, the usual page request, 16 flows a page, paged by flow id as 0x2600) when 0x2600 is refused with 0x0030, and asks that form first for the device from then on (and back to 0x2600 if 0x2200 is ever refused the same way). The flows read into the same `Flows`/`TxFlow`; the multicast lookup works as for a 2.8.9 device. A 2.7 list's `Flows::slots` is 0 (its table states a page's slots, not the device's).
+  - A device's first refused flow read is logged at info (`a transmitter refused our TX flow list read (told once per device)`, with the peer and the error); later ones stay at debug. The success line `a transmitter's TX flows read through its ARC` names the list's `op`.
+  - New public API: `arc::flows::read_tx_flows(c, form)`, `arc::flows::ListForm` (`V289`, `V27`), `arc::flows::STATUS_UNKNOWN_OP`, module `arc::flows::v27` (`list_tx_flows_27`, `LIST_27`). `subscribe::directory::Job` has a new public field `form` (a struct literal adds it); `Book::finished_flows` takes `Result<(Flows, ListForm), ReadError>` and returns whether to log the refusal at info.
+- **No latency change** for any app.
+- Consumers: move the stack version; nothing to port unless an app built `directory::Job` literals or called `Book::finished_flows` (none known). dcontroller may use `read_tx_flows` instead of `list_tx_flows` to list a 2.7 device's flows.
+
 ## 0.6.120
 
 - **Fix (dstack #269): a channel whose record answered during a lookup no longer goes to the ARC directory.** The network resolver read a channel's record and its query's grace in two separate locks of the instance table. An answer landing between the two made that lookup find no record and no grace, so it asked the ARC directory: `arc.asked()` turned true, the daemon started the ARC directory's threads even where every transmitter publishes channel records, and one ARC read (3 requests) went to a transmitter that needed none. The subscription itself resolved one tick later from the record; no wrong flow, no audio effect. Found as a test that failed once on CI (`the_network_asks_each_channel_s_record_and_reads_a_device_without_them`, v0.6.119's tag run).

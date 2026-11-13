@@ -2,6 +2,8 @@ use super::*;
 
 use crate::wire::STATUS_ERROR;
 
+mod v27;
+
 /// Hex to bytes.
 pub(crate) fn hex(s: &str) -> Vec<u8> {
     (0..s.len())
@@ -16,6 +18,27 @@ pub(crate) fn hex(s: &str) -> Vec<u8> {
 /// address and its name are replaced (TEST-NET, a synthetic name of the
 /// same length).
 pub(crate) const ULTIMO_LIST: &str = "280900e851022600000100000000000002020020007c31000001770000000018142700010000000300010000000000020000000000160018000f424000000000000000000000000008130000000000000001000000000000040b01010070000005070002000100020000020000200000080210e1efff000132000000142700020000000300020000000000110000000000780018000000000000000000000000000000000813000000d400e40001000000000000040b010100cc0000050700020002000100000200002000000802e014c000021e746573742d72656365697665722d3100325f3100";
+
+/// An ARC 2.7 card's 0x2200 page (dstack #271), synthetic in the layout a
+/// Yamaha AIC128-D (Audinate DCM, `arcp_vers` 2.7.41) answered live on
+/// 13.11.2026 (the capture, with its names and addresses, stays private):
+/// `[slots 16, count 3]`, the records' offsets, then each record from a
+/// multiple of 4: flow id, type (0x0011 unicast, 0x0002 multicast), rate
+/// 96000, 0, encoding 24, the socket offsets' count, the channel slots,
+/// the socket offsets (0 unused), each slot's TX channel (0 empty), the
+/// names descriptor's offset; at a multiple of 4 each socket descriptor
+/// `08 02 <port> <IPv4>`; the names descriptor (`0a00 0001`, the
+/// receiver's device and flow names' offsets, the frames per packet, our
+/// name's offset, 8 zeros), then the names. Flow 1 unicast of TX 25 and 26
+/// to 192.0.2.10:30125 at 16 frames; flow 2 multicast of TX 1 and 2 to
+/// 239.69.0.2:4321 at 16; flow 3 unicast of TX 3 to 192.0.2.11:14343 with
+/// a second, unused socket offset (as the card's two-address records), at
+/// 4 frames. Status OK: the whole list.
+pub(crate) const CARD_27_PAGE: &str = "27ff00ff0001220000011003002c007800b000000000000000000000000000000000000000000000000000000001001100017700000000180001000400480019001a000000000050080275adc000020a0a000001006600700010006400000000000000003100746573742d72782d3100666c6f772d610000000200020001770000000018000100020090000100020098080210e1ef4500020a00000100ae00af001000ac0000000000000000320000000003001100017700000000180002000400d00000000300000000000000d8000008023807c000020b0a00000100ee00f8000400ec00000000000000003300746573742d72782d3200666c6f772d6200";
+
+/// The same card's answer to our 0x2600 under start code 0x2809, as
+/// captured: status 0x0030 and no body (ARC 2.7 has no such list).
+pub(crate) const CARD_2600_REFUSED: &str = "2809000a710126000030";
 
 /// Our create sent to that UltimoX2 (media-local id 1, channels 1 and 2)
 /// and its reply: the flow it made.
@@ -58,6 +81,41 @@ impl Recorded {
             reply: hex(datagram),
             asked: Vec::new(),
         }
+    }
+}
+
+/// A device that answers its calls with recorded datagrams, one after
+/// another (the last one again once they run out), and keeps what it was
+/// asked: (start code, op, body).
+pub(crate) struct Scripted {
+    replies: Vec<Vec<u8>>,
+    pub(crate) asked: Vec<(u16, u16, Vec<u8>)>,
+}
+
+impl Scripted {
+    pub(crate) fn new(datagrams: &[&str]) -> Self {
+        Scripted {
+            replies: datagrams.iter().map(|d| hex(d)).collect(),
+            asked: Vec::new(),
+        }
+    }
+
+    /// The ops asked, in order.
+    pub(crate) fn ops(&self) -> Vec<u16> {
+        self.asked.iter().map(|a| a.1).collect()
+    }
+}
+
+impl Call for Scripted {
+    fn call(&mut self, op1: u16, body: &[u8]) -> Result<(u16, Vec<u8>), ReadError> {
+        self.call_as(0x27ff, op1, body)
+    }
+
+    fn call_as(&mut self, start: u16, op1: u16, body: &[u8]) -> Result<(u16, Vec<u8>), ReadError> {
+        let k = self.asked.len().min(self.replies.len() - 1);
+        self.asked.push((start, op1, body.to_vec()));
+        let d = &self.replies[k];
+        Ok((u16::from_be_bytes([d[8], d[9]]), d[HEADER_LEN..].to_vec()))
     }
 }
 
