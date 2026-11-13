@@ -1,6 +1,17 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! The fixed flow-port ranges a config may ask for (`tx_port_base`, dstack
-//! #262): which ports they must stay clear of, as pure functions.
+//! The flow ports of a device, as pure functions: the fixed block each
+//! device slot takes by default inside one dstack range (dstack #264), and
+//! which ports a configured `tx_port_base` must stay clear of (dstack #262).
+//!
+//! Slot `k` (the device's ARC port − 4440, the slot
+//! `dstack_endpoint::slots::pick` chose) receives on
+//! `FLOW_PORT_FIRST + k·SLOT_STRIDE` .. +31 and sends from the next 32
+//! ports. The range 29800-31847 lies below every OS's ephemeral ports
+//! (Linux 32768-60999, Windows 49152-65535) and below dsync's 31900/31910,
+//! which it holds on the wildcard address on every PC; it holds the bases
+//! configured before #264 (30000, 30100). The generic Dante-leg filter
+//! (`tools/linux/dante-leg.nft`, `tools/windows/dante-leg.ps1`) accepts
+//! exactly this range, so every device of ours on any PC is accepted.
 
 use std::ops::RangeInclusive;
 
@@ -8,7 +19,131 @@ use crate::media::rx::{MAX_FLOWS, last_port};
 
 /// Device slots on one address: slot `k` takes ARC 4440+k, flow control
 /// 4455+k and CMC 8800+k (`docs/two-networks.md`'s slot ranges).
-const PORT_SLOTS: u16 = 32;
+pub const PORT_SLOTS: u16 = 32;
+
+/// The first port of the dstack flow range: slot 0's first RX port.
+pub const FLOW_PORT_FIRST: u16 = 29_800;
+
+/// The ports each slot takes: its RX block, then its TX block.
+pub const SLOT_STRIDE: u16 = 2 * MAX_FLOWS as u16;
+
+/// Where a slot's TX block starts, from its RX block's first port.
+pub const TX_OFFSET: u16 = MAX_FLOWS as u16;
+
+/// The last port of the dstack flow range (31847).
+pub const FLOW_PORT_LAST: u16 = FLOW_PORT_FIRST + PORT_SLOTS * SLOT_STRIDE - 1;
+
+// The range stays below Linux's ephemeral ports (32768) and dsync's 31900.
+const _: () = assert!(FLOW_PORT_LAST < 31_900);
+
+/// The device slot of an ARC port (`arc::PORT + k`, `k` below
+/// [`PORT_SLOTS`]), `None` for any other port.
+pub fn slot_of(arc_port: u16) -> Option<u16> {
+    arc_port
+        .checked_sub(crate::arc::PORT)
+        .filter(|&k| k < PORT_SLOTS)
+}
+
+/// Slot `k`'s default RX and TX flow port bases, `k` below [`PORT_SLOTS`].
+pub fn slot_bases(k: u16) -> (u16, u16) {
+    debug_assert!(k < PORT_SLOTS, "slot {k} past the {PORT_SLOTS} slots");
+    let rx = FLOW_PORT_FIRST + k * SLOT_STRIDE;
+    (rx, rx + TX_OFFSET)
+}
+
+/// A device's flow port bases as it binds them ([`flow_bases`]), and the
+/// start WARNs they give.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FlowBases {
+    pub rx: u16,
+    pub tx: u16,
+    /// The device's slot, `None` for an ARC port outside every slot's.
+    pub slot: Option<u16>,
+    pub warnings: Vec<String>,
+}
+
+/// The flow port bases of a device with ARC port `arc_port`: a configured
+/// base (`rx`, `tx`) wins, an unset one is its slot's ([`slot_bases`]).
+/// A configured base whose ports leave the dstack range is a WARN (the
+/// generic filter drops them). Refused: an unset base with no slot (the
+/// device never takes the OS's ports), and RX and TX blocks that overlap.
+pub fn flow_bases(rx: Option<u16>, tx: Option<u16>, arc_port: u16) -> Result<FlowBases, String> {
+    let slot = slot_of(arc_port);
+    let default = slot.map(slot_bases);
+    let pick = |set: Option<u16>, key: &str, side: fn((u16, u16)) -> u16| {
+        set.or(default.map(side)).ok_or_else(|| {
+            format!(
+                "{key}: unset, and the ARC port {arc_port} is no device slot's ({}-{}), so the \
+                 flow ports have no default; set rx_port_base and tx_port_base inside the \
+                 dstack flow range {FLOW_PORT_FIRST}-{FLOW_PORT_LAST} (docs/two-networks.md)",
+                crate::arc::PORT,
+                crate::arc::PORT + PORT_SLOTS - 1
+            )
+        })
+    };
+    let rx_base = pick(rx, "rx_port_base", |b| b.0)?;
+    let tx_base = pick(tx, "tx_port_base", |b| b.1)?;
+    let block = |base: u16| u32::from(base)..=u32::from(base) + MAX_FLOWS as u32 - 1;
+    let (rx_ports, tx_ports) = (block(rx_base), block(tx_base));
+    if rx_ports.start() <= tx_ports.end() && tx_ports.start() <= rx_ports.end() {
+        return Err(format!(
+            "the RX flow ports {}-{} overlap the TX flow ports {}-{}: set rx_port_base and \
+             tx_port_base {MAX_FLOWS} ports apart",
+            rx_ports.start(),
+            rx_ports.end(),
+            tx_ports.start(),
+            tx_ports.end()
+        ));
+    }
+    let warnings = [
+        ("rx_port_base", rx, rx_ports, default.map(|d| d.0)),
+        ("tx_port_base", tx, tx_ports, default.map(|d| d.1)),
+    ]
+    .into_iter()
+    .filter_map(|(key, set, ports, own)| configured_warning(key, set?, ports, own))
+    .collect();
+    Ok(FlowBases {
+        rx: rx_base,
+        tx: tx_base,
+        slot,
+        warnings,
+    })
+}
+
+/// The start WARN for a configured base `set` of `key` (its `ports`), or
+/// `None`: ports that leave the dstack range (the generic filter drops
+/// them), or ports inside it that are not the device's own slot block
+/// (`own`): another device of ours in that slot on this address could not
+/// bind its block (the bases set before #264, 30000 and 30100, lie on
+/// slots 3 to 5).
+fn configured_warning(
+    key: &str,
+    set: u16,
+    ports: RangeInclusive<u32>,
+    own: Option<u16>,
+) -> Option<String> {
+    let range = u32::from(FLOW_PORT_FIRST)..=u32::from(FLOW_PORT_LAST);
+    if !(range.contains(ports.start()) && range.contains(ports.end())) {
+        return Some(format!(
+            "{key}: its ports {}-{} leave the dstack flow range \
+             {FLOW_PORT_FIRST}-{FLOW_PORT_LAST}, which the generic Dante-leg filter \
+             accepts; a PC with that filter drops them (docs/two-networks.md)",
+            ports.start(),
+            ports.end()
+        ));
+    }
+    let own = own?;
+    (own != set).then(|| {
+        format!(
+            "{key}: its ports {}-{} are another slot's block, not this device's own \
+             ({own}-{}); a device of ours in that slot on this address cannot start: remove \
+             the key, the default is the device's own block (docs/two-networks.md)",
+            ports.start(),
+            ports.end(),
+            u32::from(own) + MAX_FLOWS as u32 - 1
+        )
+    })
+}
 
 /// The [`MAX_FLOWS`] flow ports from `base`, `None` when they would pass
 /// 65535.
@@ -64,3 +199,6 @@ pub(super) fn tx_clash(base: u16, rx_base: Option<u16>, own: [u16; 3]) -> Option
 
 // The TX side bounds its range with the RX side's `last_port`: one count.
 const _: () = assert!(MAX_FLOWS == crate::media::tx::MAX_FLOWS);
+
+#[cfg(test)]
+mod tests;

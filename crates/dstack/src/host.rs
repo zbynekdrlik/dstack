@@ -364,6 +364,31 @@ pub(crate) fn prepare_config_waiting(
     })
 }
 
+/// Sets the device's flow port bases as it binds them (dstack #264): a
+/// configured base wins, an unset one is its slot's fixed block in the
+/// dstack range ([`crate::device::ports::flow_bases`]); never the OS's
+/// ports. Logs the ports and each WARN; a device with no slot and a base
+/// unset, or RX and TX blocks that overlap, is [`HostError::Setup`].
+fn fix_flow_ports(cfg: &mut DeviceConfig) -> Result<(), HostError> {
+    let bases = crate::device::ports::flow_bases(cfg.rx_port_base, cfg.tx_port_base, cfg.arc_port)
+        .map_err(setup)?;
+    for line in &bases.warnings {
+        warn!("{line}");
+    }
+    // In range: flow_bases refuses blocks that overlap, and a configured
+    // base past 65535 is refused by the config's own check before this.
+    let last = |base: u16| crate::media::rx::last_port(base).unwrap_or(u16::MAX);
+    info!(
+        slot = ?bases.slot,
+        rx_ports = format!("{}-{}", bases.rx, last(bases.rx)),
+        tx_ports = format!("{}-{}", bases.tx, last(bases.tx)),
+        "the device's flow ports: fixed, its slot's block in the dstack range unless configured"
+    );
+    cfg.rx_port_base = Some(bases.rx);
+    cfg.tx_port_base = Some(bases.tx);
+    Ok(())
+}
+
 /// [`prepare_config`] with the place resolved by `resolve` (the tests'
 /// scripted address source).
 pub(crate) fn prepare_on(
@@ -374,7 +399,8 @@ pub(crate) fn prepare_on(
     source: ClockSource,
     resolve: impl FnOnce(&Place) -> Result<IfAddr, String>,
 ) -> Result<Prepared, HostError> {
-    let device = load_device(cfg)?;
+    let mut device = load_device(cfg)?;
+    fix_flow_ports(&mut device.cfg)?;
     // One timing profile per process: the media threads' waits and
     // priorities read it.
     if !crate::clock::set_profile(device.cfg.timing) {

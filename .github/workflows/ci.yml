@@ -63,6 +63,25 @@ jobs:
       - name: LAN self-heal tests
         shell: powershell
         run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools\windows\tests\lan-selfheal.Tests.ps1
+      - name: Dante-leg firewall group tests (dstack #264)
+        shell: powershell
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools\windows\tests\dante-leg.Tests.ps1
+
+  linux-tools:
+    # The generic Dante-leg nftables ruleset (tools/linux, dstack #264), loaded
+    # for real in a private network namespace (the runner's own rules are not
+    # touched). Its port sets are checked against the code by the test job
+    # (crates/dstack/tests/dante_leg.rs).
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: nftables
+        run: command -v nft || (sudo apt-get update && sudo apt-get install -y nftables)
+      - name: Dante-leg ruleset loads, reloads and refuses a load without its interface
+        run: sudo bash tools/linux/tests/dante-leg.test.sh
 
   dsend-audio-driver:
     # dsend's own Windows render endpoint (drivers/dsend-audio, MS-PL; dstack
