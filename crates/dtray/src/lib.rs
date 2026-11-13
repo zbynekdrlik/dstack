@@ -33,6 +33,12 @@
 //!   moved between the sources a local file names, read back after.
 //! - [`cli`]: the command-line modes, run by the same code in both
 //!   programs (`dtray` and `dtray-cli`).
+//! - [`dasio`]: dasio's instance settings (dstack #246): the settings
+//!   window's lists, changes, plan, apply steps and verdict, the config
+//!   edit that keeps the file's comments, and the elevated helper's write
+//!   (`dtray-cli --dasio-apply`). The window itself is the binary's
+//!   Windows glue (`dtray --settings`, or "dasio settings…" in the tray's
+//!   menu).
 //! - [`icon`]: the icon's pixels in a colour.
 //! - [`desktop`]: the Linux desktop's files (the single-instance lock, the
 //!   autostart entry and its text).
@@ -63,6 +69,7 @@ use std::path::Path;
 
 pub mod arc;
 pub mod cli;
+pub mod dasio;
 #[cfg(unix)]
 pub mod desktop;
 pub mod discover;
@@ -95,6 +102,13 @@ pub enum Mode {
     /// `label` of the PC's switch file, as its menu does
     /// ([`switches::set`]).
     Switch { label: String, source: String },
+    /// The dasio settings window alone, without the tray (dstack #246;
+    /// Windows, dtray only).
+    Settings,
+    /// The settings window's elevated helper (dstack #246): write the
+    /// config file `file` (a staged copy) as dasio instance `instance`'s
+    /// and restart its service ([`dasio::apply_staged`]).
+    DasioApply { instance: String, file: String },
 }
 
 /// dtray's version as one line: the dstack release it was built from
@@ -104,11 +118,13 @@ pub fn version_line() -> String {
 }
 
 /// The usage line.
-pub const USAGE: &str = "usage: dtray [--print | --version | --autostart on|off | --set-latency <device> <ms> | --switch <label> <source>]";
+pub const USAGE: &str = "usage: dtray [--print | --version | --settings | --autostart on|off | --set-latency <device> <ms> | --switch <label> <source> | --dasio-apply <instance> <file>]";
 
 /// The mode of the arguments after the program's name: none for the tray,
-/// `--print` to print once, `--autostart on` or `off`,
-/// `--set-latency <device> <ms>`, `--switch <label> <source>`; anything
+/// `--print` to print once, `--settings` for the dasio settings window,
+/// `--autostart on` or `off`,
+/// `--set-latency <device> <ms>`, `--switch <label> <source>`,
+/// `--dasio-apply <instance> <file>`; anything
 /// else is the usage error.
 pub fn mode_of<I: IntoIterator<Item = String>>(args: I) -> Result<Mode, &'static str> {
     let args: Vec<String> = args.into_iter().collect();
@@ -117,6 +133,7 @@ pub fn mode_of<I: IntoIterator<Item = String>>(args: I) -> Result<Mode, &'static
         [] => Ok(Mode::Tray),
         ["--print"] => Ok(Mode::Print),
         ["--version"] => Ok(Mode::Version),
+        ["--settings"] => Ok(Mode::Settings),
         ["--autostart", "on"] => Ok(Mode::Autostart(true)),
         ["--autostart", "off"] => Ok(Mode::Autostart(false)),
         ["--set-latency", device, ms] => Ok(Mode::SetLatency {
@@ -127,6 +144,10 @@ pub fn mode_of<I: IntoIterator<Item = String>>(args: I) -> Result<Mode, &'static
             label: label.to_string(),
             source: source.to_string(),
         }),
+        ["--dasio-apply", instance, file] => Ok(Mode::DasioApply {
+            instance: instance.to_string(),
+            file: file.to_string(),
+        }),
         _ => Err(USAGE),
     }
 }
@@ -135,9 +156,10 @@ pub fn mode_of<I: IntoIterator<Item = String>>(args: I) -> Result<Mode, &'static
 /// dtray: every command-line mode does, the tray does not. On Windows,
 /// where dtray.exe is a GUI-subsystem program with no console of its own,
 /// such a mode attaches to its parent's console, so its lines and exit
-/// code reach that shell (dstack #213); the tray opens none.
+/// code reach that shell (dstack #213); the tray and the settings window
+/// open none.
 pub fn wants_console(mode: Option<&Mode>) -> bool {
-    !matches!(mode, Some(Mode::Tray))
+    !matches!(mode, Some(Mode::Tray | Mode::Settings))
 }
 
 /// The name of dtray's value under the user's

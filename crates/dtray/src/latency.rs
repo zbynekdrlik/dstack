@@ -33,7 +33,7 @@ pub fn label(ns: u32) -> String {
 }
 
 /// [`label`] of any `u64` of ns (a value asked past a `u32`).
-fn label_wide(ns: u64) -> String {
+pub fn label_wide(ns: u64) -> String {
     let whole = ns / 1_000_000;
     let frac = ns % 1_000_000;
     if frac == 0 {

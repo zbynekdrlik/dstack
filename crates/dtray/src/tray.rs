@@ -42,11 +42,16 @@ pub enum Action {
     Copy(String),
     /// Show this error.
     Error(String),
+    /// Open the dasio settings window (Windows, dstack #246).
+    #[cfg(windows)]
+    Settings,
 }
 
 /// The menu's fixed items.
 struct Fixed {
     version: MenuItem,
+    /// "dasio settings…", when the PC has a dasio instance (Windows).
+    settings: Option<MenuItem>,
     copy: MenuItem,
     exit: MenuItem,
 }
@@ -116,6 +121,8 @@ impl Tray {
     pub fn start() -> Result<Tray, String> {
         let fixed = Fixed {
             version: MenuItem::new(format!("dstack {}", env!("CARGO_PKG_VERSION")), false, None),
+            settings: (cfg!(windows) && !dtray::dasio::instances(&dtray::dasio::root()).is_empty())
+                .then(|| MenuItem::new("dasio settings…", true, None)),
             copy: MenuItem::new("Copy status", true, None),
             exit: MenuItem::new("Exit (the devices keep running)", true, None),
         };
@@ -218,6 +225,13 @@ impl Tray {
         self.switch_read = Some(self.ticks);
     }
 
+    /// The local devices and their readings of the last tick (the
+    /// settings window's status line, Windows).
+    #[cfg(windows)]
+    pub fn last_tick(&self) -> (&[Local], &[Reading]) {
+        (&self.now.devices, &self.now.readings)
+    }
+
     /// The menu clicks since the last call, handled: a latency choice is
     /// written here; Exit, Copy status and a failed write are left to the
     /// OS's glue.
@@ -228,6 +242,14 @@ impl Tray {
                 // Clicks after Exit write nothing.
                 out.push(Action::Exit);
                 break;
+            } else if self
+                .fixed
+                .settings
+                .as_ref()
+                .is_some_and(|s| e.id == *s.id())
+            {
+                #[cfg(windows)]
+                out.push(Action::Settings);
             } else if e.id == *self.fixed.copy.id() {
                 out.push(Action::Copy(model::copy_json(&self.now.readings)));
             } else if let Some(&(_, arc, ns)) =
@@ -429,6 +451,9 @@ fn build(
         }
     }
     e(menu.append(&PredefinedMenuItem::separator()))?;
+    if let Some(settings) = &fixed.settings {
+        e(menu.append(settings))?;
+    }
     e(menu.append(&fixed.copy))?;
     e(menu.append(&fixed.exit))?;
     Ok((menu, built))

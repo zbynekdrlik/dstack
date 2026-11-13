@@ -24,6 +24,14 @@ exclude_globs = [
   "crates/dstack/src/media/rx/socket/other.rs",
   "crates/dstack/src/traffic/windows.rs",
   "crates/dtray/src/win.rs",
+  # dtray's dasio settings window and its Windows calls (dstack #246): the
+  # window, the adapters, the elevated start and the SCM restart; their
+  # decisions are dtray::dasio's (choices, plan, apply::run, verify,
+  # apply_staged: each tested), and the window is run by hand on Windows.
+  "crates/dtray/src/settings_win.rs",
+  "crates/dtray/src/settings_win/**",
+  "crates/dtray/src/dasio/system.rs",
+  "crates/dtray/src/dasio/service/windows.rs",
   # dtray's tray glue (tray-icon, GTK): it needs a desktop session, which a
   # unit test has not; its decisions are the library's (menu, model,
   # desktop: each tested), and it is run by hand on a desktop.
@@ -81,6 +89,9 @@ exclude_re = [
   # (which a test may not set: every other test shares it); its rule
   # `dir_for` is tested.
   "dtray/src/expected.rs.*replace devices_dir -> PathBuf",
+  # This PC's dasio folder, the same (dstack #246); its rule `root_for` is
+  # tested.
+  "dtray/src/dasio.rs.*replace root -> PathBuf",
   # dtray's discovery on the PC's real interfaces (mDNS on port 5353, which
   # a unit test may not hold per mutant); its rules (own_addresses,
   # local_devices, plan) and the probe are tested.

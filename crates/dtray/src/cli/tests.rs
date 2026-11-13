@@ -63,6 +63,7 @@ fn the_cli_usage_needs_a_mode_and_lists_every_one() {
         "--autostart on|off",
         "--set-latency <device> <ms>",
         "--switch <label> <source>",
+        "--dasio-apply <instance> <file>",
     ] {
         assert!(CLI_USAGE.contains(mode), "{mode}");
     }
@@ -85,4 +86,35 @@ fn the_autostart_arguments_are_dtray_s_own_mode() {
         let args = autostart_args(on).map(String::from);
         assert_eq!(crate::mode_of(args), Ok(Mode::Autostart(on)));
     }
+}
+
+#[test]
+fn a_verdict_is_0_done_or_1_refused() {
+    assert_eq!(verdict(Ok("done".into())), ExitCode::SUCCESS);
+    assert_eq!(verdict(Err("no".into())), ExitCode::FAILURE);
+}
+
+#[test]
+fn dasio_apply_runs_here_and_refuses_a_bad_instance() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let mode = Mode::DasioApply {
+        instance: "x".into(),
+        file: dir.path().join("new.toml").display().to_string(),
+    };
+    assert_eq!(
+        run(Some(mode), CLI_USAGE, no_tray, no_autostart),
+        ExitCode::FAILURE
+    );
+    // Nothing is left beside the staged file (the verdict goes to the
+    // instance's own folder only).
+    assert_eq!(std::fs::read_dir(dir.path()).expect("list").count(), 0);
+}
+
+#[test]
+fn the_settings_window_is_not_a_command_line_mode() {
+    assert_eq!(
+        run(Some(Mode::Settings), CLI_USAGE, no_tray, no_autostart),
+        ExitCode::from(2)
+    );
+    assert!(SETTINGS_ELSEWHERE.contains("dtray --settings"));
 }

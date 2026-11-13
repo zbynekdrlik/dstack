@@ -17,6 +17,10 @@
 //!   menu's latency write ([`crate::set::latency()`]).
 //! - `--switch <label> <source>`: the same discovery pass, then the tray
 //!   menu's choice of that source ([`switches::set_live`]).
+//! - `--dasio-apply <instance> <file>`: the settings window's elevated
+//!   helper (dstack #246, [`dasio::apply_staged`]): the staged config
+//!   written as that dasio instance's, its service restarted. The window
+//!   starts it with Windows' "run as administrator"; it is not for scripts.
 //!
 //! Exit codes: 0 done, 1 a failure, 2 a usage error.
 
@@ -27,6 +31,7 @@ use std::time::Duration;
 use dstack::arc::control;
 
 use crate::Mode;
+use crate::dasio;
 use crate::discover::Scanner;
 use crate::expected;
 use crate::model::{self, Tracker};
@@ -40,9 +45,14 @@ pub const PRINT_WAIT: Duration = Duration::from_secs(3);
 /// and the read before that has no app part yet (dstack #104 step 5).
 pub const APP_WAIT: Duration = Duration::from_millis(500);
 
+/// Why `--settings` does not run here: the window is the tray program's
+/// on Windows (`dtray.exe --settings`).
+pub const SETTINGS_ELSEWHERE: &str =
+    "the dasio settings window opens with `dtray --settings` on Windows (or from the tray's menu)";
+
 /// `dtray-cli`'s usage line: every mode needs an argument (it runs no
 /// tray).
-pub const CLI_USAGE: &str = "usage: dtray-cli --print | --version | --autostart on|off | --set-latency <device> <ms> | --switch <label> <source>";
+pub const CLI_USAGE: &str = "usage: dtray-cli --print | --version | --autostart on|off | --set-latency <device> <ms> | --switch <label> <source> | --dasio-apply <instance> <file>";
 
 /// Runs `mode` (`None`: the arguments were a usage error, `usage` goes to
 /// stderr and the exit code is 2). The tray and the autostart are the
@@ -67,6 +77,47 @@ pub fn run(
         Some(Mode::Print) => print(),
         Some(Mode::SetLatency { device, ms }) => set_latency(&device, &ms),
         Some(Mode::Switch { label, source }) => switch(&label, &source),
+        Some(Mode::DasioApply { instance, file }) => dasio_apply(&instance, Path::new(&file)),
+        Some(Mode::Settings) => {
+            eprintln!("dtray: {SETTINGS_ELSEWHERE}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+/// The settings window's elevated helper: [`dasio::apply_staged`] on
+/// this PC's dasio folder, its verdict printed and left in the instance's
+/// folder for the window ([`dasio::result_path`]; a verdict that cannot be
+/// left there is said on stderr).
+fn dasio_apply(instance: &str, file: &Path) -> ExitCode {
+    let root = dasio::root();
+    let result = dasio::instance_arg(instance)
+        .ok()
+        .map(|n| dasio::result_path(&root, n));
+    if let Some(r) = &result {
+        let _ = std::fs::remove_file(r);
+    }
+    let outcome = dasio::apply_staged(&root, instance, file, dasio::service::restart);
+    if let Some(r) = &result
+        && let Err(e) = std::fs::write(r, dasio::result_text(&outcome))
+    {
+        eprintln!("dtray: the verdict for the window ({}): {e}", r.display());
+    }
+    verdict(outcome)
+}
+
+/// A mode's outcome: its line on stdout and 0, or its reason on stderr
+/// and 1.
+pub fn verdict(outcome: Result<String, String>) -> ExitCode {
+    match outcome {
+        Ok(line) => {
+            println!("dtray: {line}");
+            ExitCode::SUCCESS
+        }
+        Err(reason) => {
+            eprintln!("dtray: {reason}");
+            ExitCode::FAILURE
+        }
     }
 }
 

@@ -29,6 +29,10 @@
 //! program for the same modes (dstack #218).
 //! Both programs run the modes by the same code ([`dtray::cli::run`]).
 //!
+//! `dtray --settings` (Windows) opens the dasio settings window alone, as
+//! the tray menu's "dasio settings…" does (dstack #246: one tab per dasio
+//! instance; [`dtray::dasio`]).
+//!
 //! `dtray --switch <label> <source>` runs the same discovery pass, then
 //! the tray menu's choice of that source on that switch of the PC's
 //! switch file ([`dtray::switches`]: the receiver's listed RX channels
@@ -43,6 +47,8 @@ use std::process::ExitCode;
 
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(windows)]
+mod settings_win;
 #[cfg(any(windows, target_os = "linux"))]
 mod tray;
 #[cfg(windows)]
@@ -54,12 +60,29 @@ fn main() -> ExitCode {
     if dtray::wants_console(parsed.as_ref().ok()) {
         win::attach_console();
     }
+    #[cfg(windows)]
+    if let Ok(dtray::Mode::Settings) = parsed {
+        return settings();
+    }
     dtray::cli::run(parsed.ok(), dtray::USAGE, tray, autostart)
 }
 
 #[cfg(windows)]
 fn tray() -> ExitCode {
     match win::run() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            win::message(&format!("dtray: {e}"));
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `dtray --settings`: the dasio settings window alone (dstack #246); an
+/// error in a box, 1.
+#[cfg(windows)]
+fn settings() -> ExitCode {
+    match settings_win::run_standalone() {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             win::message(&format!("dtray: {e}"));
