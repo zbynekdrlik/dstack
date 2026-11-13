@@ -8,7 +8,7 @@
 #
 # Load (as root), naming the PC's Dante-leg interface:
 #   nft -D dante_leg=<iface> -f /etc/dstack/dante-leg.nft
-# A load without -D fails ("undefined variable"), and nothing changes.
+# A load without -D fails ("unknown identifier"), and nothing changes.
 # Loading again replaces the table in one transaction (idempotent).
 #
 # The port sets are read by crates/dstack/tests/dante_leg.rs, which checks

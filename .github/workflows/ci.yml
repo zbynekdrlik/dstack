@@ -80,7 +80,7 @@ jobs:
           persist-credentials: false
       - name: nftables
         run: command -v nft || (sudo apt-get update && sudo apt-get install -y nftables)
-      - name: Dante-leg ruleset loads, reloads and refuses a load without its interface
+      - name: Dante-leg rulesets load, reload, refuse a load without the interface, untrack only off the leg
         run: sudo bash tools/linux/tests/dante-leg.test.sh
 
   dsend-audio-driver:
