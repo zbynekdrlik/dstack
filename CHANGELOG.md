@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.124
+
+- **Docs (dstack #264, #195).** `docs/two-networks.md`: how to read ufw's state before loading `dante-leg-notrack.nft` (`ufw status` or `ENABLED=` in `/etc/ufw/ufw.conf`, never `systemctl is-active ufw`), and how to tell an RSTP topology change from loss on a PC (several transmitters' flows losing ~40 ms at once on every receiver, multicast PTP intact, zero switch drop counters).
+- **No code change, no latency change.** Consumers: nothing to do.
+
 ## 0.6.123
 
 - **Fix (dstack #274): our ARC flow lists carry a flow socket descriptor and the frames per packet as a real Dante device writes them.** A socket descriptor (each TX flow's receiver or group in 0x2200, our address in 0x3200) starts with its length and address family, `08 02` (8 bytes, IPv4), as an ARC 2.7 card (Yamaha AIC128-D) writes it and netaudio reads it. We wrote `80 02` (copied from inferno's ARC server), which netaudio reads as a 128-byte descriptor in 0x2200 and refuses in 0x3200. The 0x2200 names descriptor's word at +8 is now the flow's frames per packet (the card states 4, 16 or 32 per flow); it was a fixed 0x10.
