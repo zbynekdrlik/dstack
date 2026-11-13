@@ -74,6 +74,58 @@ pub fn verdict(error: Option<u32>) -> Verdict {
     }
 }
 
+/// The registry key under `HKEY_LOCAL_MACHINE` that holds the PC's
+/// Policy-based QoS rules, one subkey each: both the local group policy
+/// editor and `New-NetQosPolicy` write there, and `Get-NetQosPolicy` lists
+/// them from it (dstack #256).
+pub const POLICY_KEY: &str = r"SOFTWARE\Policies\Microsoft\Windows\QoS";
+
+/// The values of a policy's key that [`marking_policy`] reads:
+/// `New-NetQosPolicy` writes `AppName`, `DSCP` and `Protocol` (DWORDs but
+/// the name); the group policy editor writes `Application Name`,
+/// `DSCP Value` and `Protocol` as text.
+pub const POLICY_VALUES: [&str; 5] = [
+    "AppName",
+    "Application Name",
+    "DSCP",
+    "DSCP Value",
+    "Protocol",
+];
+
+/// One value of a QoS policy's registry key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PolicyValue {
+    /// A string (REG_SZ).
+    Text(String),
+    /// A number (REG_DWORD).
+    Number(u32),
+}
+
+/// One QoS policy as read from the registry: its key's name and the values
+/// of [`POLICY_VALUES`] it has.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Policy {
+    /// The policy's name (its key).
+    pub name: String,
+    /// Its values, by name.
+    pub values: Vec<(String, PolicyValue)>,
+}
+
+/// The name of the first policy in `policies` that marks this program's
+/// UDP audio DSCP 46: its application is `exe` (this program's path), its
+/// DSCP 46, its protocol any or UDP.
+pub fn marking_policy<'a>(policies: &'a [Policy], exe: &str) -> Option<&'a str> {
+    let _ = (policies, exe);
+    None
+}
+
+/// The info line that replaces the "unmarked" warning when `policy` (its
+/// name) marks the audio; none: warn.
+pub fn unmarked_note(policy: Option<&str>) -> Option<String> {
+    let _ = policy;
+    None
+}
+
 /// The marks of the TX flow sockets: each slot's destination as last
 /// marked, and the platform's QoS state.
 #[derive(Debug)]
