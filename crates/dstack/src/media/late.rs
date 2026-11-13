@@ -12,6 +12,7 @@
 
 use tracing::{info, warn};
 
+use super::ring::Counters;
 use super::rx::{MAX_FLOWS as RX_FLOWS, RxShared};
 use super::tx::{MAX_FLOWS, TxShared};
 
@@ -411,13 +412,14 @@ pub const MINUTE_NS: u64 = 60_000_000_000;
 #[derive(Debug)]
 pub struct RxMinute {
     reordered: [u64; RX_FLOWS],
-    holes: [HoleCounts; RX_FLOWS],
+    /// Each RX channel's ring counts at the last look.
+    rings: Vec<Counters>,
+    rx_late: [u64; RX_FLOWS],
     rebootstraps: u64,
     next_ns: Option<u64>,
 }
 
-/// One RX flow's hole counts (dstack #234): cumulative at a look, a
-/// minute's rise in a line.
+/// One RX flow's hole counts of a minute (dstack #234): its holes line.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct HoleCounts {
     /// Samples its channels' rings read as holes (start holes not).
@@ -426,18 +428,6 @@ pub struct HoleCounts {
     pub written_late: u64,
     /// Its packets past the playout plus the block (`late`).
     pub rx_late: u64,
-}
-
-impl HoleCounts {
-    /// The rise from `before` to `self`, each count at least 0 (a channel
-    /// routed away takes its counts along).
-    pub fn since(self, before: HoleCounts) -> HoleCounts {
-        HoleCounts {
-            holes: self.holes.saturating_sub(before.holes),
-            written_late: self.written_late.saturating_sub(before.written_late),
-            rx_late: self.rx_late.saturating_sub(before.rx_late),
-        }
-    }
 }
 
 impl Default for RxMinute {
@@ -450,11 +440,8 @@ impl RxMinute {
     pub const fn new() -> Self {
         RxMinute {
             reordered: [0; RX_FLOWS],
-            holes: [HoleCounts {
-                holes: 0,
-                written_late: 0,
-                rx_late: 0,
-            }; RX_FLOWS],
+            rings: Vec::new(),
+            rx_late: [0; RX_FLOWS],
             rebootstraps: 0,
             next_ns: None,
         }
@@ -483,15 +470,32 @@ impl RxMinute {
         Some((first, rose))
     }
 
-    /// At a look, flow slot `slot`'s cumulative hole counts `now`: their
-    /// rise since the last look (kept for the next).
-    pub fn holes_rose(&mut self, slot: usize, now: HoleCounts) -> HoleCounts {
-        let Some(seen) = self.holes.get_mut(slot) else {
-            return HoleCounts::default();
-        };
-        let rose = now.since(*seen);
-        *seen = now;
-        rose
+    /// At a look, each RX channel's flow slot now and its ring's
+    /// cumulative counts (`rings`), and each slot's cumulative late packets
+    /// (`rx_late`): each slot's rise since the last look (kept for the
+    /// next). A slot's holes and written-late samples are its channels'
+    /// rings' own rises, so a channel routed in brings none of its past;
+    /// a count that fell (a ring of a rebuilt device) rises by 0.
+    pub fn holes_rose(
+        &mut self,
+        rings: &[(Option<usize>, Counters)],
+        rx_late: impl Fn(usize) -> u64,
+    ) -> [HoleCounts; RX_FLOWS] {
+        self.rings.resize(rings.len(), Counters::default());
+        let mut out = [HoleCounts::default(); RX_FLOWS];
+        for (&(slot, now), seen) in rings.iter().zip(self.rings.iter_mut()) {
+            if let Some(o) = slot.and_then(|s| out.get_mut(s)) {
+                o.holes += now.holes.saturating_sub(seen.holes);
+                o.written_late += now.late.saturating_sub(seen.late);
+            }
+            *seen = now;
+        }
+        for (slot, (o, seen)) in out.iter_mut().zip(self.rx_late.iter_mut()).enumerate() {
+            let now = rx_late(slot);
+            o.rx_late = now.saturating_sub(*seen);
+            *seen = now;
+        }
+        out
     }
 
     /// At a look, the engine's cumulative re-bootstraps `now` (0 without
@@ -520,18 +524,13 @@ impl RxMinute {
             return;
         };
         let rebootstraps = self.rebootstraps_rose(rebootstraps.unwrap_or(0));
-        for (slot, &reordered) in rose.iter().enumerate() {
+        let rings: Vec<_> = (0..rx.rings().len())
+            .map(|r| (rx.route(r).map(|r| r.flow), rx.rings()[r].counters()))
+            .collect();
+        let holes = self.holes_rose(&rings, |s| rx.lane(s).late);
+        for (slot, (&reordered, holes)) in rose.iter().zip(holes).enumerate() {
             let timing = rx.take_minute(slot);
             let write = rx.take_write_minute(slot);
-            let rings = rx.flow_rings(slot);
-            let holes = self.holes_rose(
-                slot,
-                HoleCounts {
-                    holes: rings.holes,
-                    written_late: rings.late,
-                    rx_late: rx.lane(slot).late,
-                },
-            );
             if first {
                 continue;
             }

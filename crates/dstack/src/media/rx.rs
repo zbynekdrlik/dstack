@@ -55,7 +55,10 @@
 //!   transmitter or generation, `new_flow`), or of a channel routed
 //!   anew, restarts the channel's ring ([`Ring::restart`]), so the holes
 //!   read before that flow's first sample count apart from a running
-//!   flow's ([`RxShared::flow_rings`]).
+//!   flow's ([`RxShared::flow_rings`]). The publish restarts it before the
+//!   route is stored (for the reader), the thread again at its next
+//!   refresh, before it writes (an old flow's packet written in between
+//!   would start it early).
 //! - The packets' judge (phase D, plan Task 3): the least lateness of each
 //!   flow slot's placed packets in ns (our clock's now in ns less the
 //!   packet's own stamp in ns), kept until read, so each heartbeat second
@@ -77,7 +80,7 @@
 use std::io::{self, ErrorKind};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -96,6 +99,7 @@ mod lane;
 mod minute;
 mod netlat;
 mod plan;
+mod publish;
 mod wake;
 pub use counts::RxCounts;
 use counts::{NO_LATENESS, RxStats, source_of, source_word};
@@ -266,64 +270,6 @@ impl RxShared {
             stamps: AtomicBool::new(stamps),
             playout: AtomicU64::new(0),
         })
-    }
-
-    /// Hands the flow slots' plans and the RX channels' routes to the RX
-    /// thread (what changed). Routes that leave a flow go first and routes
-    /// that join one last, so no channel ever reads another flow's samples.
-    pub fn publish(
-        &self,
-        plan: impl Fn(usize) -> RxPlan,
-        route: impl Fn(usize) -> Option<RxRoute>,
-    ) {
-        let _writer = self.writer.lock().unwrap_or_else(PoisonError::into_inner);
-        let mut changed = false;
-        for (rx, cell) in self.routes.iter().enumerate() {
-            let have = cell.load(Ordering::Relaxed);
-            if have != 0 && have != RxRoute::word(route(rx)) {
-                cell.store(0, Ordering::Release);
-                changed = true;
-            }
-        }
-        let mut delays = [0u16; MAX_FLOWS];
-        // dstack #234: the slots whose flow is new; their rings restart.
-        let mut fresh = 0u64;
-        for (slot, cell) in self.plans.iter().enumerate() {
-            let p = plan(slot);
-            delays[slot] = p.delay;
-            let w = p.words();
-            let had = cell.peek();
-            if had != w {
-                if new_flow(RxPlan::from_words(had), p) {
-                    fresh |= 1 << slot;
-                }
-                cell.write(w);
-            }
-        }
-        for (rx, cell) in self.delays.iter().enumerate() {
-            let delay = route(rx).and_then(|r| delays.get(r.flow).copied());
-            cell.store(u32::from(delay.unwrap_or(0)), Ordering::Relaxed);
-        }
-        for (rx, cell) in self.routes.iter().enumerate() {
-            let r = route(rx);
-            let want = RxRoute::word(r);
-            let joins = want != cell.load(Ordering::Relaxed);
-            // Before the route is stored, so the pump never reads the new
-            // flow's ring unrestarted.
-            if let Some(r) = r
-                && (joins || fresh.checked_shr(r.flow as u32).is_some_and(|f| f & 1 == 1))
-                && let Some(ring) = self.rings.get(rx)
-            {
-                ring.restart();
-            }
-            if joins {
-                cell.store(want, Ordering::Release);
-                changed = true;
-            }
-        }
-        if changed {
-            self.routes_version.fetch_add(1, Ordering::Release);
-        }
     }
 
     /// The device latency is `ns`: the pump's playout point is its whole
@@ -566,6 +512,8 @@ pub struct Receiver {
     lanes: Vec<Lane>,
     /// The routes' version read last.
     routes_seen: Option<u32>,
+    /// Each RX channel's route word the last [`Receiver::refresh`] read.
+    routes_had: Vec<u64>,
     /// Slots with datagrams waiting, one bit each.
     ready: u32,
     buf: Box<[u8; BUFFER]>,
@@ -592,6 +540,7 @@ impl Receiver {
             joined: (0..MAX_FLOWS).map(|_| None).collect(),
             lanes: (0..MAX_FLOWS).map(|_| Lane::new(channels)).collect(),
             routes_seen: None,
+            routes_had: vec![0; channels],
             ready: 0,
             buf: Box::new([0; BUFFER]),
             frames: Box::new([[0; FRAMES_MAX]; MAX_CHANNELS]),
@@ -667,12 +616,14 @@ impl Receiver {
         }
     }
 
-    /// Reads the plans that changed (a new one resets its slot) and, after
-    /// the routes changed (their version moves once [`RxShared::publish`]
-    /// wrote them all), which RX channels each slot feeds.
+    /// Reads the plans that changed (a new one resets its slot, a new flow
+    /// restarts its rings: dstack #234) and the routes
+    /// ([`Receiver::retarget`]).
     fn refresh(&mut self) {
         let shared = &*self.shared;
         let mut regrouped = 0u64;
+        // dstack #234: the slots whose flow is new; their rings restart.
+        let mut fresh = [false; MAX_FLOWS];
         for (slot, (lane, cell)) in self.lanes.iter_mut().zip(&shared.plans).enumerate() {
             if lane.seen != Some(cell.version())
                 && let Some((version, w)) = cell.read()
@@ -685,6 +636,7 @@ impl Receiver {
                     if plan.group != lane.plan.group || unjoined {
                         regrouped |= 1 << slot;
                     }
+                    fresh[slot] = new_flow(lane.plan, plan);
                     lane.plan = plan;
                     lane.source = None;
                     if let Some(stats) = shared.lanes.get(slot) {
@@ -706,6 +658,21 @@ impl Receiver {
             regrouped &= regrouped - 1;
             self.regroup(slot);
         }
+        self.retarget();
+        // The writer restarts the rings of a new flow itself, before this
+        // pass writes: a restart of the publish's alone would be undone by
+        // the old flow's packets written meanwhile (dstack #234).
+        for (lane, _) in self.lanes.iter().zip(fresh).filter(|(_, f)| *f) {
+            for &(_, rx) in &lane.targets {
+                self.shared.rings[rx].restart();
+            }
+        }
+    }
+
+    /// After the routes changed (their version moves once
+    /// [`RxShared::publish`] wrote them all), which RX channels each slot
+    /// feeds; a channel routed anew restarts its ring (dstack #234).
+    fn retarget(&mut self) {
         let shared = &*self.shared;
         let version = shared.routes_version.load(Ordering::Acquire);
         if self.routes_seen == Some(version) {
@@ -714,13 +681,18 @@ impl Receiver {
         for lane in &mut self.lanes {
             lane.targets.clear();
         }
-        for (rx, cell) in shared.routes.iter().enumerate() {
-            if let Some(r) = RxRoute::from_word(cell.load(Ordering::Acquire))
+        for (rx, (cell, had)) in shared.routes.iter().zip(&mut self.routes_had).enumerate() {
+            let word = cell.load(Ordering::Acquire);
+            if let Some(r) = RxRoute::from_word(word)
                 && r.slot < MAX_CHANNELS
                 && let Some(lane) = self.lanes.get_mut(r.flow)
             {
                 lane.targets.push((r.slot, rx));
+                if *had != word {
+                    shared.rings[rx].restart();
+                }
             }
+            *had = word;
         }
         self.routes_seen = Some(version);
     }
@@ -876,19 +848,23 @@ impl Receiver {
             }
             count_lost(stats, placed.lost);
             let mut read_before = false;
+            let mut wrote = false;
             for &(s, rx) in &lane.targets {
                 if s < nslots
                     && let Some(ring) = rings.get(rx)
                 {
                     read_before |= ring.write_at(pos, &frames[s][..nframes]).late > 0;
+                    wrote = true;
                 }
             }
             if read_before {
                 count(&stats.late_at_read);
             }
             // dstack #234: the kernel's receive time to the writes' end
-            // (one more wall-clock read, only for a stamped packet).
-            if wake.is_some()
+            // (one more wall-clock read, only for a stamped packet that
+            // reached a ring).
+            if wrote
+                && wake.is_some()
                 && let Some(delay) = wake_delay_ns(wall_now_ns(), at_ns)
             {
                 stats.write_minute.record(delay);

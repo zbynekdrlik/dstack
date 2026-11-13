@@ -555,7 +555,7 @@ impl Driver {
         self.loss.watch(now, &self.media.rx, |slot| {
             lock(manager).flow_device(slot).map(str::to_owned)
         });
-        let rebootstraps = self.media.engine_stats().map(|p| p.view().rebootstraps);
+        let rebootstraps = self.media.engine().map(|v| v.rebootstraps);
         self.minute
             .watch(now, &self.media.rx, rebootstraps, |slot| {
                 lock(manager).flow_device(slot).map(str::to_owned)

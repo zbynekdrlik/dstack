@@ -47,12 +47,18 @@ impl RxShared {
     /// takes its counts along.
     pub fn flow_rings(&self, slot: usize) -> Counters {
         let mut sum = Counters::default();
-        for (ring, route) in self.rings.iter().zip(self.routes.iter()) {
-            if RxRoute::from_word(route.load(Ordering::Relaxed)).is_some_and(|r| r.flow == slot) {
+        for (rx, ring) in self.rings.iter().enumerate() {
+            if self.route(rx).is_some_and(|r| r.flow == slot) {
                 sum += ring.counters();
             }
         }
         sum
+    }
+
+    /// Where RX channel `rx` (from 0) is routed now (its route atomic,
+    /// `Relaxed`); `None` for no route or no such channel.
+    pub fn route(&self, rx: usize) -> Option<RxRoute> {
+        RxRoute::from_word(self.routes.get(rx)?.load(Ordering::Relaxed))
     }
 
     /// The 50th, 99th and 99.9th percentile of flow slot `slot`'s wake

@@ -34,9 +34,10 @@
 //! - A hole before the flow's first sample (dstack #234) is a start hole,
 //!   not a hole: one read before any write since the ring was built or
 //!   [`Ring::restart`]ed (its RX channel routed to another flow), or at a
-//!   position before the first one written since (the stamps before the
-//!   flow's first packet, which never come). Counted `start_holes`, so a
-//!   gate on `holes` sees only the holes of a running flow.
+//!   position before the least packet start written since, stored or late
+//!   (the stamps before the flow's first packet, which never come).
+//!   Counted `start_holes`, so a gate on `holes` sees only the holes of a
+//!   running flow. A write wholly early starts nothing.
 //! - The largest magnitude stored is kept until [`Ring::take_peak`] (the
 //!   heartbeat's peaks, once a second): one atomic per write.
 //!
@@ -108,8 +109,8 @@ pub struct Ring {
     slots: Box<[AtomicU64]>,
     /// The end of the furthest read (0: none yet).
     read_end: AtomicU64,
-    /// The least position stored since the build or the last restart
-    /// ([`NOT_STARTED`]: none yet).
+    /// The least packet start written (stored or late) since the build or
+    /// the last restart ([`NOT_STARTED`]: none yet).
     first: AtomicU64,
     written: AtomicU64,
     holes: AtomicU64,
@@ -147,8 +148,6 @@ impl Ring {
     /// Stores `samples` at positions `pos`, `pos + 1`, …
     pub fn write_at(&self, pos: u64, samples: &[i32]) -> Write {
         let reader = self.read_end.load(Ordering::Relaxed);
-        let started = self.first.load(Ordering::Relaxed);
-        let mut first = started;
         let mut w = Write::default();
         let mut peak = 0;
         for (i, &sample) in samples.iter().enumerate() {
@@ -180,14 +179,16 @@ impl Ring {
                 } else {
                     w.written += 1;
                 }
-                first = first.min(p);
                 peak = peak.max(sample.unsigned_abs());
             }
         }
-        // Only when this write lowered it: a restart meanwhile (the
-        // control side's) is never undone by a store of the old value.
-        if first < started {
-            self.first.fetch_min(first, Ordering::Relaxed);
+        // The flow has started at this packet's first position, stored or
+        // late (its packets came, the reader was ahead), unless the whole
+        // write was early (a stamp far in the future). `fetch_min`: a
+        // restart meanwhile (the control side's) is never undone by a
+        // store of an older value.
+        if w.early < samples.len() {
+            self.first.fetch_min(pos, Ordering::Relaxed);
         }
         self.peak.fetch_max(peak, Ordering::Relaxed);
         self.written.fetch_add(w.written as u64, Ordering::Relaxed);
