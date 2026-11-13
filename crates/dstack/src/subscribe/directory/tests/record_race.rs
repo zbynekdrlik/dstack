@@ -8,9 +8,9 @@ use crate::announce::responder::answers;
 use crate::subscribe::instance::{host_query, query};
 use crate::subscribe::resolve::instance;
 
-/// Lookups of one channel while another thread keeps answering it, its
-/// record forgotten (a goodbye) each time a lookup found it.
-const ROUNDS: usize = 20_000;
+/// Times a lookup must find the channel's record, its record forgotten (a
+/// goodbye) after each, while another thread keeps answering it.
+const FINDS: usize = 200;
 
 /// The rack's channel record and its host's address, as its responder
 /// answers the two direct queries.
@@ -59,6 +59,7 @@ fn a_record_answered_during_the_lookup_never_sends_the_channel_to_the_arc() {
     let datagrams = rack_answers();
     let network = &network;
     let stop = std::sync::atomic::AtomicBool::new(false);
+    // The answers landed around lookups this many times (the race run).
     let mut found = 0;
     std::thread::scope(|s| {
         // The answers arrive at any moment, as the query thread's do.
@@ -69,7 +70,14 @@ fn a_record_answered_during_the_lookup_never_sends_the_channel_to_the_arc() {
                 }
             }
         });
-        for round in 0..ROUNDS {
+        let deadline = Instant::now() + BOUND;
+        let mut round = 0;
+        while found < FINDS {
+            round += 1;
+            if Instant::now() > deadline {
+                stop.store(true, Ordering::Relaxed);
+                panic!("a lookup found the record only {found} times");
+            }
             // Within the grace (the clock stays at 0): the record, or
             // nothing while its query may still answer.
             let hit = network.lookup("rack", "TX 3").is_some();
@@ -86,6 +94,4 @@ fn a_record_answered_during_the_lookup_never_sends_the_channel_to_the_arc() {
         }
         stop.store(true, Ordering::Relaxed);
     });
-    // The answers did land between lookups, many times (the race was run).
-    assert!(found > 100, "a lookup found the record {found} times");
 }
