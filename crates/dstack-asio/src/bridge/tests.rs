@@ -368,3 +368,25 @@ fn a_one_way_bridge_has_nothing_the_other_way() {
     dante.process(&mut Block::new(128, &[0.5; 128], &mut out));
     assert!(out.iter().all(|&x| x == 0.0), "no TX from ASIO: silence");
 }
+
+/// Each piece of a block longer than a chunk passes its own start, so a
+/// whole block never resyncs the player; a block the engine skipped does,
+/// once (dstack #303).
+#[test]
+fn a_skipped_block_resyncs_the_player_and_its_pieces_never_do() {
+    let mut b = bridge(spec(1, 1));
+    let mut dante = b.dante_side().unwrap();
+    let _asio = b.asio_side(&opened_with(96_000.0, 256, 1, 1)).unwrap();
+    let block = 3 * CHUNK;
+    let input = vec![0.5; block];
+    let mut output = vec![0.0; block];
+    let mut start = 1_000_000;
+    for _ in 0..4 {
+        dante.process(&mut Block::new(block, &input, &mut output).at(start));
+        start += block as u64;
+    }
+    assert_eq!(b.from_asio_stats().resyncs(), 0, "pieces of whole blocks");
+    start += 8 * 128;
+    dante.process(&mut Block::new(block, &input, &mut output).at(start));
+    assert_eq!(b.from_asio_stats().resyncs(), 1, "the skip");
+}

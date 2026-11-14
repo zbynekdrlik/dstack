@@ -23,7 +23,20 @@
 //!   silence until the FIFO holds the target and half the wider swing (the
 //!   output's callback or the app's chunk; in dlisten the chunk is the
 //!   output's callback, so it counts once), then starts from there; an
-//!   excess at that moment is skipped.
+//!   excess at that moment is skipped. A chunked producer (its chunk wider
+//!   than the output's callback: OBS's 1024-frame ticks) is followed on its
+//!   own schedule (`player::writer`, dstack #303): a re-prime that ends mid-cycle
+//!   (after a stalled writer's catch-up burst) starts at the depth whose
+//!   mean over the writer's sawtooth is the target, not at the top of a
+//!   sawtooth that the next tick lifts by a whole chunk more. Before that
+//!   change every such re-prime left the mean up to a chunk over the
+//!   target, and the controller's braking drained it at up to -70 ppm.
+//! - **Resync:** a caller that names each block's start
+//!   ([`Player::fill_at`]) and skips blocks (the pump's rebootstrap, #302)
+//!   re-primes once to the target (the excess the producer wrote meanwhile
+//!   is skipped), counted in [`Stats::resyncs`], and the output's clock
+//!   counts the skipped time, so the rate fit sees no step. Before, the
+//!   excess was drained by the ratio: -200 ppm for about a minute.
 //! - **Underruns:** a block whose input is not there plays silence, counts
 //!   in [`Stats`] and primes again to the same target. The target never
 //!   grows after a dropout (dstack #247: the automatic cushion of up to
@@ -53,6 +66,10 @@ use super::buffer::{AppBuffer, MAX_APP_BUFFER_NS};
 use super::fifo::Fifo;
 use super::map;
 
+mod writer;
+
+use writer::Writer;
+
 /// The highest floor, s: a depth under the floor re-primes.
 pub const FLOOR_S: f64 = 0.005;
 /// The FIFO's size, s of the network's rate: the largest target and its
@@ -60,6 +77,10 @@ pub const FLOOR_S: f64 = 0.005;
 pub const FIFO_S: f64 = 0.5;
 /// The converter's output frames a call.
 pub const BLOCK: usize = 128;
+/// How far the offset and level loops may move the ratio from the locked
+/// rate fit, ppm (dstack #303, the main's decision of 14.11): a depth
+/// offset a re-prime leaves drains slowly instead of ramping.
+pub const LEVEL_BOUND_PPM: f64 = 20.0;
 
 const _: () = assert!(3.0 * (MAX_APP_BUFFER_NS as f64 / 1e9) < FIFO_S);
 
@@ -108,6 +129,7 @@ pub struct Stats {
     underruns: AtomicU64,
     played: AtomicU64,
     recentres: AtomicU64,
+    resyncs: AtomicU64,
     /// The converter's correction, ppm (`f64` bits).
     ppm: AtomicU64,
     priming: AtomicBool,
@@ -135,6 +157,13 @@ impl Stats {
     /// deficit refilled, which also counts as an underrun).
     pub fn recentres(&self) -> u64 {
         self.recentres.load(Ordering::Relaxed)
+    }
+
+    /// Re-primes after the caller skipped blocks ([`Player::fill_at`]: a
+    /// block that did not start where the last one ended, the pump's
+    /// rebootstrap); an app publishes it as `tx_resyncs` (dstack #303).
+    pub fn resyncs(&self) -> u64 {
+        self.resyncs.load(Ordering::Relaxed)
     }
 
     /// The converter's correction, ppm.
@@ -193,6 +222,20 @@ pub struct Player {
     played: u64,
     /// The re-centres of the players before this one.
     recentres_before: u64,
+    resyncs: u64,
+    /// The producer's schedule ([`writer`]), followed when its chunk is
+    /// wider than the output's callback.
+    writer: Writer,
+    /// The FIFO's arrivals at the last look (a change is a write).
+    arrived: u64,
+    /// Output frames of the caller's blocks that never came (a skip,
+    /// [`Player::fill_at`]): the output's clock counts them.
+    skipped: u64,
+    /// Where the caller's next block starts, if it names its starts.
+    next_start: Option<u64>,
+    /// The output's position at the frame being made, frames (played,
+    /// within the current call).
+    at: u64,
     /// `--mono`: every channel summed to both speakers ([`map::source_mono`]).
     mono: bool,
     stats: Arc<Stats>,
@@ -206,7 +249,8 @@ pub struct Player {
 /// sawtooth wanders. We read it after every block, several times a
 /// callback, and the controller's 1 s window mean averages the sawtooth
 /// out; a wide zone would only leave a larger offset to the slow level
-/// loop.
+/// loop. Once the rate fit is locked, the offset and level loops move the
+/// ratio at most [`LEVEL_BOUND_PPM`] from the fitted rate (dstack #303).
 fn controller(buffer: &AppBuffer) -> Controller {
     let target_s = buffer.target_s();
     Controller::new(
@@ -215,6 +259,7 @@ fn controller(buffer: &AppBuffer) -> Controller {
         hard_excess_s(target_s, buffer.chunk_s()),
         Basis::Arrival,
     )
+    .with_level_bound_ppm(LEVEL_BOUND_PPM)
 }
 
 impl Player {
@@ -232,6 +277,8 @@ impl Player {
         let channels = fifo.channels();
         let conv = Converter::drifting(net_rate, out_rate, channels, BLOCK, Fixed::Output)?;
         let input = vec![0.0; conv.input_frames_max() * channels];
+        let arrived = fifo.arrived();
+        let chunk_in = frames_of(buffer.chunk_ns() as f64 / 1e9, net_rate);
         stats.priming.store(true, Ordering::Relaxed);
         stats.out_rate.store(out_rate, Ordering::Relaxed);
         let target_s = buffer.target_s();
@@ -248,7 +295,7 @@ impl Player {
             block: vec![0.0; BLOCK * channels],
             pos: BLOCK,
             callback_in: 0,
-            chunk_in: frames_of(buffer.chunk_ns() as f64 / 1e9, net_rate),
+            chunk_in,
             state: State::Priming(frames_of(target_s, net_rate)),
             target_s,
             made: 0,
@@ -256,6 +303,12 @@ impl Player {
             underruns: stats.underruns(),
             played: stats.played(),
             recentres_before: stats.recentres(),
+            resyncs: stats.resyncs(),
+            writer: Writer::new(chunk_in, net_rate),
+            arrived,
+            skipped: 0,
+            next_start: None,
+            at: 0,
             mono: false,
             stats,
         })
@@ -281,13 +334,39 @@ impl Player {
     /// Fills an interleaved output buffer of `outputs` channels, each
     /// sample made from an `f64` by `to` (the driver's sample format).
     pub fn fill_with<T>(&mut self, out: &mut [T], outputs: usize, to: impl Fn(f64) -> T) {
+        self.fill_at(None, out, outputs, to);
+    }
+
+    /// [`Player::fill_with`] for a block that starts at `start` on the
+    /// caller's clock, output frames (a dlink [`crate::Process`]: its
+    /// [`crate::Block::start`]). A block that does not start where the last
+    /// one ended (the pump skipped blocks, #302) resyncs the player: one
+    /// re-prime to the target, counted in [`Stats::resyncs`] (module doc).
+    /// A caller that fills one block in pieces passes each piece's own
+    /// start (the block's start + the frames before it), or every piece
+    /// after the first resyncs.
+    pub fn fill_at<T>(
+        &mut self,
+        start: Option<u64>,
+        out: &mut [T],
+        outputs: usize,
+        to: impl Fn(f64) -> T,
+    ) {
         let Some(frames) = out.len().checked_div(outputs) else {
             return;
         };
+        if let (Some(start), Some(expected)) = (start, self.next_start)
+            && start != expected
+        {
+            self.resync(start.saturating_sub(expected));
+        }
+        self.next_start = start.map(|s| s.saturating_add(frames as u64));
         self.callback_in = frames_of(frames as f64 / f64::from(self.out_rate), self.net_rate);
+        self.look(self.played);
         let inputs = self.fifo.channels();
-        for frame in out.chunks_exact_mut(outputs) {
+        for (f, frame) in out.chunks_exact_mut(outputs).enumerate() {
             if self.pos == BLOCK {
+                self.at = self.played + f as u64;
                 self.next_block();
             }
             for (o, slot) in frame.iter_mut().enumerate() {
@@ -312,9 +391,54 @@ impl Player {
             self.recentres_before + self.ctl.recentres(),
             Ordering::Relaxed,
         );
+        s.resyncs.store(self.resyncs, Ordering::Relaxed);
         s.ppm.store(self.ctl.ppm().to_bits(), Ordering::Relaxed);
         s.priming
             .store(matches!(self.state, State::Priming(_)), Ordering::Relaxed);
+    }
+
+    /// A write the producer made since the last look, seen at the output's
+    /// frame `frames`, goes to its schedule ([`Writer::wrote`]).
+    fn look(&mut self, frames: u64) {
+        let arrived = self.fifo.arrived();
+        if arrived != self.arrived {
+            self.arrived = arrived;
+            let now_s = self.clock_s(frames);
+            self.writer.wrote(now_s, arrived);
+        }
+    }
+
+    /// The output's clock at its frame `frames` (played), s: the caller's
+    /// skipped blocks counted ([`Player::fill_at`]).
+    fn clock_s(&self, frames: u64) -> f64 {
+        (frames + self.skipped) as f64 / f64::from(self.out_rate)
+    }
+
+    /// The caller skipped `frames` of its blocks (or its schedule started
+    /// again: 0): one re-prime to the target, counted; the output's clock
+    /// counts the skipped time, so the rate fit and the writer's schedule
+    /// see none of it. Not an underrun: the producer wrote meanwhile, so
+    /// the re-prime only skips what came while the output was not called.
+    fn resync(&mut self, frames: u64) {
+        self.skipped += frames;
+        self.resyncs += 1;
+        self.ctl.restart();
+        self.state = State::Priming(frames_of(self.target_s, self.net_rate));
+    }
+
+    /// The depth to start from, input frames, when the priming ends now
+    /// with the producer writing `chunk` frames a cycle and its next write
+    /// `until_next` from now, frames, the target `target` and the
+    /// converter's call `need`: the controller's reads (one after each
+    /// call) then average the target over the writer's cycle, as when the
+    /// priming ends right after a write (`until_next` = `chunk`: the
+    /// target and half of both). A perfectly regular writer whose chunk is
+    /// whole calls keeps the reads at one phase against its writes, which
+    /// can leave their mean up to a call off; a real writer's jitter (OBS:
+    /// ±2 ms) spreads the phase, and rounding the distance to whole calls
+    /// measured worse in the soak (dstack #303), so it is taken as it is.
+    fn phased_level(target: usize, chunk: usize, until_next: usize, need: usize) -> usize {
+        (target + until_next + need / 2).saturating_sub(chunk / 2)
     }
 
     /// The next [`BLOCK`] output frames into `block`.
@@ -333,8 +457,26 @@ impl Player {
             // a chunk and a block, that start alone took the depth under
             // the floor). The wider of the two swings is the one to centre.
             let swing = self.callback_in.max(self.chunk_in);
-            let level = level + (swing + self.conv.input_frames_next()) / 2;
+            let need = self.conv.input_frames_next();
+            // A chunked producer on its own schedule: the depth whose mean
+            // is the target at this moment of its cycle (module doc).
+            let now_s = self.clock_s(self.at);
+            // The depth first, then the schedule: a write since the call's
+            // start (the producer's own thread) is in both, and one landing
+            // between the two reads is in the schedule only, so the start
+            // errs a chunk high (drained by the bounded level loop), never a
+            // chunk low (a dropout).
             let held = self.fifo.len();
+            self.look(self.at);
+            let level = match self.writer.until_next(now_s, self.arrived) {
+                Some(until_next) if self.chunk_in > self.callback_in => Self::phased_level(
+                    level,
+                    self.chunk_in,
+                    frames_of(until_next, self.net_rate),
+                    need,
+                ),
+                _ => level + (swing + need) / 2,
+            };
             if held < level {
                 self.block.fill(0.0);
                 return;
@@ -390,7 +532,7 @@ impl Player {
 
     /// One observation after a converted block, and its answer.
     fn steer(&mut self) {
-        let now_s = self.made as f64 / f64::from(self.out_rate);
+        let now_s = (self.made + self.skipped) as f64 / f64::from(self.out_rate);
         let net = f64::from(self.net_rate);
         let depth_s = self.fifo.len() as f64 / net;
         let produced_s = self.fifo.arrived() as f64 / net;
@@ -417,3 +559,6 @@ impl Player {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod resync_tests;

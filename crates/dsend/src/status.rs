@@ -125,6 +125,7 @@ mod tests {
             out_rate: 48_000,
             overflows: 0,
             recentres: 0,
+            resyncs: 0,
             priming: false,
             mono: false,
             input_peak: None,

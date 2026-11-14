@@ -25,6 +25,9 @@ pub struct Snapshot {
     /// Producer frames dropped on a full FIFO.
     pub overflows: u64,
     pub recentres: u64,
+    /// Re-primes after the pump skipped blocks ([`Stats::resyncs`],
+    /// dstack #303).
+    pub resyncs: u64,
     /// The consumer waits for the FIFO to fill (silence: no audio yet, or a
     /// refill after an underrun).
     pub priming: bool,
@@ -49,6 +52,7 @@ impl Snapshot {
             out_rate: stats.out_rate(),
             overflows: fifo.overflows(),
             recentres: stats.recentres(),
+            resyncs: stats.resyncs(),
             priming: stats.priming(),
             mono: stats.mono(),
             input_peak: None,
@@ -79,7 +83,7 @@ fn peak_text(peak: f32) -> String {
 /// 480000 frames played at 48000 Hz` (the live depth of its target, the
 /// app buffer, dstack #247; the underruns are the dropouts), then
 /// `, mono` under `--mono`, `, waiting for audio` while priming and the
-/// overflows and re-centres when there are any.
+/// overflows, re-centres and resyncs when there are any.
 pub fn line(s: &Snapshot) -> String {
     let mut text = format!(
         "depth {:.1} ms of {:.1} ms, {:+.1} ppm, {} underruns, {} frames played at {} Hz",
@@ -96,6 +100,9 @@ pub fn line(s: &Snapshot) -> String {
     }
     if s.recentres > 0 {
         text.push_str(&format!(", {} re-centres", s.recentres));
+    }
+    if s.resyncs > 0 {
+        text.push_str(&format!(", {} resyncs", s.resyncs));
     }
     if let Some(peak) = s.input_peak {
         text.push_str(&peak_text(peak));
@@ -211,6 +218,7 @@ mod tests {
             out_rate: 44_100,
             overflows: 0,
             recentres: 0,
+            resyncs: 0,
             priming: false,
             mono: false,
             input_peak: None,
@@ -229,6 +237,7 @@ mod tests {
             priming: true,
             overflows: 128,
             recentres: 1,
+            resyncs: 0,
             ..snap()
         };
         assert_eq!(
@@ -236,6 +245,34 @@ mod tests {
             "depth 40.1 ms of 22.7 ms, -12.0 ppm, 2 underruns, 480000 frames played at 44100 Hz, \
              mono, waiting for audio, 128 frames overflowed, 1 re-centres"
         );
+    }
+
+    /// dstack #303: the resyncs are read from the player and named in the
+    /// line when there are any.
+    #[test]
+    fn the_resyncs_are_read_and_named_when_there_are_any() {
+        let base = line(&snap());
+        assert!(!base.contains("resync"));
+        assert_eq!(
+            line(&Snapshot {
+                resyncs: 3,
+                ..snap()
+            }),
+            format!("{base}, 3 resyncs")
+        );
+        let fifo = Arc::new(fifo_for(1, 48_000));
+        let mut player = Player::new(
+            Arc::clone(&fifo),
+            48_000,
+            48_000,
+            dlink::bridge::AppBuffer::new(10_000_000, 2_666_667),
+            Arc::default(),
+        )
+        .unwrap();
+        let mut out = [0.0f64; 64];
+        player.fill_at(Some(0), &mut out, 1, |x| x);
+        player.fill_at(Some(1000), &mut out, 1, |x| x);
+        assert_eq!(Snapshot::read(&fifo, &player.stats(), 48_000).resyncs, 1);
     }
 
     /// dstack #184: the log line says what the producer hands over, so a
@@ -370,6 +407,7 @@ mod tests {
                 out_rate: 44_100,
                 overflows: 0,
                 recentres: 0,
+                resyncs: 0,
                 priming: true,
                 mono: false,
                 input_peak: None,
