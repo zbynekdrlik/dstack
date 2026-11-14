@@ -309,7 +309,9 @@ const STOP_POLL: Duration = Duration::from_millis(200);
 /// recorder keeps one listener per network instead of a socket per device
 /// and window. Dropping it stops the thread (within about 0.2 s) and
 /// waits for it; the channel then closes. The thread also ends when the
-/// receiver is dropped, or on a socket error, which it logs.
+/// receiver is dropped, or on a socket error, which it logs. The group is
+/// joined again after an interface change ([`crate::membership`], dstack
+/// #282).
 #[derive(Debug)]
 pub struct Listener {
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -333,7 +335,16 @@ impl Listener {
             .spawn(move || {
                 tracing::info!(%our, "latency listener: heartbeats on the group");
                 let mut buf = [0u8; 2048];
+                let mut membership = crate::membership::Membership::new(our);
                 while !halt.load(Ordering::Relaxed) {
+                    // dstack #282: the group joined again after an
+                    // interface change.
+                    membership.keep(
+                        std::time::Instant::now(),
+                        crate::membership::links,
+                        HEARTBEAT_GROUP,
+                        || crate::membership::rejoin(&sock, HEARTBEAT_GROUP, our),
+                    );
                     if !hand_on(sock.recv_from(&mut buf), &buf, &tx) {
                         return;
                     }

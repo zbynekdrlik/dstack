@@ -297,3 +297,142 @@ fn an_answer_packs_as_many_channels_as_fit_and_sends_an_oversize_one_alone() {
     assert!(replies[0].len() > MAX_DATAGRAM);
     assert!(replies[1].len() <= MAX_DATAGRAM);
 }
+
+#[test]
+fn an_announcement_carries_each_service_type_s_ptr_with_its_records() {
+    let all = announcement(&recs());
+    assert_eq!(all.len(), 1, "two records fit one datagram");
+    let (answers, more) = records_of(&all[0]);
+    assert_eq!(
+        answers,
+        [
+            ("_netaudio-arc._udp.local".to_string(), TYPE::PTR),
+            ("_netaudio-chan._udp.local".to_string(), TYPE::PTR),
+        ]
+    );
+    let arc = "test-device._netaudio-arc._udp.local".to_string();
+    let chan = "TX 1@test-device._netaudio-chan._udp.local".to_string();
+    assert_eq!(
+        more,
+        [
+            (arc.clone(), TYPE::SRV),
+            (arc, TYPE::TXT),
+            (chan.clone(), TYPE::SRV),
+            (chan, TYPE::TXT),
+            ("test-device.local".to_string(), TYPE::A),
+        ]
+    );
+    // A service type named by several records is asked once: each
+    // instance's PTR comes once.
+    let mut twice = recs();
+    twice.push(ServiceRecord {
+        instance: "TX 2@test-device".to_string(),
+        ..twice[1].clone()
+    });
+    let (answers, _) = records_of(&announcement(&twice)[0]);
+    assert_eq!(answers.len(), 3, "{answers:?}");
+    assert!(announcement(&[]).is_empty());
+}
+
+fn lo_at(index: u32) -> Vec<crate::membership::Link> {
+    vec![crate::membership::Link {
+        name: "lo".to_string(),
+        ip: Ipv4Addr::LOCALHOST,
+        index: Some(index),
+    }]
+}
+
+/// Asks `query` at `at` until answered (at most 5 s): the answer.
+fn answered(client: &UdpSocket, query: &[u8], at: SocketAddrV4) -> Vec<u8> {
+    let mut buf = [0u8; 1500];
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        client.send_to(query, at).unwrap();
+        if let Ok((n, _)) = client.recv_from(&mut buf) {
+            return buf[..n].to_vec();
+        }
+        assert!(std::time::Instant::now() < deadline, "never answered");
+    }
+}
+
+#[test]
+fn after_an_address_re_add_the_responder_rejoins_announces_and_answers_again() {
+    let published = Arc::new(Mutex::new(recs()));
+    let port = UdpSocket::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let at = SocketAddrV4::new(Ipv4Addr::LOCALHOST, port);
+    let listener = UdpSocket::bind("127.0.0.1:0").unwrap();
+    listener
+        .set_read_timeout(Some(Duration::from_millis(200)))
+        .unwrap();
+    let SocketAddr::V4(announce_to) = listener.local_addr().unwrap() else {
+        panic!("bound on IPv4");
+    };
+    let list = Arc::new(Mutex::new(lo_at(26)));
+    // The reads that found the address gone.
+    let gone_reads = Arc::new(AtomicU64::new(0));
+    let read = {
+        let (list, gone_reads) = (Arc::clone(&list), Arc::clone(&gone_reads));
+        move || {
+            let now = list.lock().unwrap().clone();
+            if now.is_empty() {
+                gone_reads.fetch_add(1, Ordering::Relaxed);
+            }
+            Ok(now)
+        }
+    };
+    let every = Duration::from_millis(20);
+    let r = Responder::start_watched(
+        at,
+        false,
+        Arc::clone(&published),
+        Watch {
+            read: Box::new(read),
+            every,
+            announce_to,
+        },
+    )
+    .unwrap();
+    let client = UdpSocket::bind("127.0.0.1:0").unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_millis(200)))
+        .unwrap();
+    let query = ask("_netaudio-arc._udp.local", QTYPE::TYPE(TYPE::PTR));
+    let (answers, _) = records_of(&answered(&client, &query, at));
+    assert_eq!(answers.len(), 1);
+    // Several looks with nothing changed: no rejoin, no announcement.
+    std::thread::sleep(every * 10);
+    assert_eq!(r.rejoins(), 0);
+    let mut buf = [0u8; 1500];
+    assert!(listener.recv_from(&mut buf).is_err(), "announced unasked");
+    // The address removed, then added again on another index.
+    list.lock().unwrap().clear();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while gone_reads.load(Ordering::Relaxed) < 2 {
+        assert!(std::time::Instant::now() < deadline, "the list never read");
+        std::thread::sleep(every);
+    }
+    assert_eq!(r.rejoins(), 0, "nothing to join on while it is gone");
+    *list.lock().unwrap() = lo_at(19);
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let n = loop {
+        if let Ok((n, _)) = listener.recv_from(&mut buf) {
+            break n;
+        }
+        assert!(std::time::Instant::now() < deadline, "never announced");
+    };
+    let (answers, _) = records_of(&buf[..n]);
+    assert_eq!(answers.len(), 2, "every service type: {answers:?}");
+    assert_eq!(r.rejoins(), 1);
+    // The new socket answers queries again.
+    let (answers, _) = records_of(&answered(&client, &query, at));
+    assert_eq!(
+        answers,
+        [("_netaudio-arc._udp.local".to_string(), TYPE::PTR)]
+    );
+    std::thread::sleep(every * 10);
+    assert_eq!(r.rejoins(), 1, "one change, one rejoin");
+}

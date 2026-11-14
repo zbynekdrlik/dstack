@@ -100,6 +100,7 @@ mod minute;
 mod netlat;
 mod plan;
 mod publish;
+mod rejoin;
 mod wake;
 pub use counts::RxCounts;
 use counts::{NO_LATENESS, RxStats, source_of, source_word};
@@ -182,6 +183,12 @@ pub struct RxShared {
     /// it ([`RxShared::playout`]).
     playout: AtomicU64,
     routes_version: AtomicU32,
+    /// Moves once per [`RxShared::rejoin_groups`]: the RX thread joins
+    /// every slot's group again when it sees it move (dstack #282).
+    rejoins: AtomicU32,
+    /// After the RX thread acted on a rejoin: a slot's group could not be
+    /// joined (the daemon asks again; [`RxShared::take_groups_missing`]).
+    groups_missing: AtomicBool,
     sockets: Box<[UdpSocket]>,
     /// Our address: the multicast groups are joined on it.
     ip: Ipv4Addr,
@@ -258,6 +265,8 @@ impl RxShared {
             routes: (0..rings.len()).map(|_| AtomicU64::new(0)).collect(),
             delays: (0..rings.len()).map(|_| AtomicU32::new(0)).collect(),
             routes_version: AtomicU32::new(0),
+            rejoins: AtomicU32::new(0),
+            groups_missing: AtomicBool::new(false),
             sockets,
             ip,
             rings,
@@ -512,6 +521,8 @@ pub struct Receiver {
     lanes: Vec<Lane>,
     /// The routes' version read last.
     routes_seen: Option<u32>,
+    /// [`RxShared::rejoin_groups`]'s count acted on last.
+    rejoins_seen: u32,
     /// Each RX channel's route word the last [`Receiver::refresh`] read.
     routes_had: Vec<u64>,
     /// Slots with datagrams waiting, one bit each.
@@ -540,6 +551,7 @@ impl Receiver {
             joined: (0..MAX_FLOWS).map(|_| None).collect(),
             lanes: (0..MAX_FLOWS).map(|_| Lane::new(channels)).collect(),
             routes_seen: None,
+            rejoins_seen: shared.rejoins.load(Ordering::Acquire),
             routes_had: vec![0; channels],
             ready: 0,
             buf: Box::new([0; BUFFER]),
@@ -653,10 +665,17 @@ impl Receiver {
                 lane.seen = Some(version);
             }
         }
+        // dstack #282: an interface change asked every slot's group joined
+        // again (the membership went with the address).
+        let rejoin = self.rejoins_asked();
+        regrouped |= rejoin.unwrap_or(0);
         while regrouped != 0 {
             let slot = regrouped.trailing_zeros() as usize;
             regrouped &= regrouped - 1;
             self.regroup(slot);
+        }
+        if rejoin.is_some() {
+            self.tell_missing();
         }
         self.retarget();
         // The writer restarts the rings of a new flow itself, before this
@@ -697,9 +716,10 @@ impl Receiver {
         self.routes_seen = Some(version);
     }
 
-    /// Slot `slot`'s plan names another group (or none): the old group's
-    /// socket is closed (which leaves the group), the new group's opened
-    /// and registered. Only on a plan change, never per packet.
+    /// Slot `slot`'s plan names another group (or none), or a rejoin was
+    /// asked (dstack #282): the old group's socket is closed (which leaves
+    /// the group), the new group's opened and registered. Only on a plan
+    /// change or a rejoin, never per packet.
     fn regroup(&mut self, slot: usize) {
         let want = self.lanes[slot].plan.group;
         if let Some((group, mut old)) = self.joined[slot].take() {
