@@ -227,7 +227,9 @@ impl Json {
 ///   cause, `rebootstraps_late` (more than W behind), `rebootstraps_clock_back`
 ///   (the clock went back), `rebootstraps_reanchor` (a re-anchor off the
 ///   block grid), `rebootstraps_retime` (a new device latency), adding up
-///   to `rebootstraps`; how late the pump woke ([`crate::stream::wake`]):
+///   to `rebootstraps`; `play_at_rejected` (dstack #295: torn pair reads
+///   of the media and the app's clock the blocks' play-time filter
+///   rejected, [`crate::stream::app_offset`]); how late the pump woke ([`crate::stream::wake`]):
 ///   `wake_behind_max_us` (since the start), `wake_behind_minute_max_us`
 ///   (the last whole minute, absent before the first), `wake_behind_buckets`
 ///   (8 counts: under 0.5, 1, 2, 5, 10, 20, 50 ms, and 50 ms or more),
@@ -656,6 +658,7 @@ fn engine_part(j: &mut Json, media: &Media) {
     j.num("rebootstraps_clock_back", v.rebootstraps_clock_back);
     j.num("rebootstraps_reanchor", v.rebootstraps_reanchor);
     j.num("rebootstraps_retime", v.rebootstraps_retime);
+    j.num("play_at_rejected", v.play_at_rejected);
     j.num("wake_behind_max_us", v.wake_behind_max_us);
     if let Some(us) = v.wake_behind_minute_max_us {
         j.num("wake_behind_minute_max_us", us);

@@ -127,9 +127,12 @@
 //! places the audio at one fixed latency at every start, whatever the
 //! phase between the first block and the app's tick (a restart of OBS
 //! moved it by one 1024-frame tick, 21.3 ms, before). The pump reads the
-//! media and the app's clock back to back at each wake, so `play_at`
-//! follows their drift; a clock re-anchor moves the blocks' media starts
-//! by its step and leaves `play_at` running on in the app's clock.
+//! app's clock, the media clock and the app's clock again at each wake and
+//! filters their offset (dstack #295 step 2: a read torn by a preemption is
+//! rejected, the drift followed at most 100 ppm, a real step taken after 3
+//! wakes with a warning), so `play_at` follows their drift and never jumps
+//! on a torn read; a clock re-anchor moves the blocks' media starts by its
+//! step and leaves `play_at` running on in the app's clock.
 //! `play_at` is `None` while the device has no media clock.
 //!
 //! # Debug builds with a rate converter

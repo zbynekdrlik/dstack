@@ -18,10 +18,13 @@
 //! only overruns grew) and that second's latest wake (`behind_max_us`,
 //! [`super::wake`], dstack #281). Every [`MINUTE_NS`] the watch also ends
 //! the pump's wake minute ([`super::wake::WakeLateness::take_minute`]),
-//! which the status shows.
+//! which the status shows, and logs one info line ([`REJECTED_LINE`]) when
+//! the play-time filter rejected torn clock pairs in that minute
+//! (`play_at_rejected`, [`super::app_offset`], dstack #295).
 
-use tracing::warn;
+use tracing::{info, warn};
 
+use super::app_offset::REJECTED_LINE;
 use super::{PumpStats, PumpView};
 use crate::media::late::{EVERY_NS, MINUTE_NS};
 
@@ -77,6 +80,8 @@ pub struct PumpWatch {
     /// The address of the engine's counts at the last watch: another
     /// engine (a later attach) is learnt afresh.
     engine: usize,
+    /// The engine's `play_at_rejected` when the minute started.
+    rejected: u64,
 }
 
 impl PumpWatch {
@@ -94,6 +99,7 @@ impl PumpWatch {
             next_ns: None,
             minute_ns: None,
             engine: 0,
+            rejected: 0,
         }
     }
 
@@ -154,7 +160,8 @@ impl PumpWatch {
     /// wake (both taken at every look, a quiet one too; the largest since
     /// the start stay in the pump's view), with the causes of the
     /// re-bootstraps that grew (`cause`, [`cause_word`]). Every
-    /// [`MINUTE_NS`] a look ends the pump's wake minute. Counts from
+    /// [`MINUTE_NS`] a look ends the pump's wake minute, with one info line
+    /// ([`REJECTED_LINE`]) when play-time pairs were rejected in it. Counts from
     /// another engine than the last watch's (a later attach) are only
     /// learnt, as a first look.
     pub fn watch(&mut self, now_ns: u64, device: &str, stats: Option<&PumpStats>) {
@@ -173,8 +180,21 @@ impl PumpWatch {
         // wake afresh.
         let second_max_us = stats.take_second_max_us();
         let behind_max_us = stats.wakes().take_second_max_us();
+        let first_minute = self.minute_ns.is_none();
         if self.minute_ends(now_ns) {
             stats.wakes().take_minute();
+            let rejected = view.play_at_rejected.saturating_sub(self.rejected);
+            if rejected > 0 {
+                info!(
+                    device,
+                    rejected,
+                    total = view.play_at_rejected,
+                    "{REJECTED_LINE}"
+                );
+            }
+            self.rejected = view.play_at_rejected;
+        } else if first_minute {
+            self.rejected = view.play_at_rejected;
         }
         let Some(grew) = grew else {
             return;

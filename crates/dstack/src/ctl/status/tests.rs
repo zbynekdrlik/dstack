@@ -272,6 +272,7 @@ const WORDS: &[&str] = &[
     "rebootstraps_clock_back",
     "rebootstraps_reanchor",
     "rebootstraps_retime",
+    "play_at_rejected",
     "wake_behind_max_us",
     "wake_behind_minute_max_us",
     "wake_behind_buckets",
@@ -825,7 +826,7 @@ fn the_status_has_no_engine_until_one_is_attached() {
             "{},\"engine\":{{\"media\":0,\"offset\":224,\"playout\":96,\"blocks\":0,\
              \"late\":0,\"missed\":0,\"overruns\":0,\"rebootstraps\":0,\"max_process_us\":0,\
              \"rebootstraps_late\":0,\"rebootstraps_clock_back\":0,\"rebootstraps_reanchor\":0,\
-             \"rebootstraps_retime\":0,\"wake_behind_max_us\":0,\
+             \"rebootstraps_retime\":0,\"play_at_rejected\":0,\"wake_behind_max_us\":0,\
              \"wake_behind_buckets\":[0,0,0,0,0,0,0,0],\"late_wakes\":0,\"late_wakes_recent\":[],\
              \"threads\":[]}}}}",
             before.strip_suffix('}').unwrap()

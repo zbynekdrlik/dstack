@@ -302,3 +302,50 @@ fn the_watch_ends_the_wake_minute_every_minute() {
     w.watch(4 * M + S, "d1", Some(&b));
     assert_eq!(b.view().wake_behind_minute_max_us, Some(9_000));
 }
+
+/// dstack #295 step 2: one info line a minute in which the play-time
+/// filter rejected pairs, with that minute's count; none in a quiet one.
+#[test]
+fn the_watch_logs_the_rejected_play_time_pairs_once_a_minute() {
+    use std::sync::atomic::Ordering;
+    const M: u64 = crate::media::late::MINUTE_NS;
+    undecided();
+    let s = stats();
+    let mut w = PumpWatch::new();
+    // Rejects from before the watch started are learnt.
+    s.play_at_rejected.store(4, Ordering::Relaxed);
+    let info = |w: &mut PumpWatch, at: u64, s: &PumpStats| {
+        capture_at(tracing::Level::INFO, || w.watch(at, "d1", Some(s)))
+    };
+    assert!(!info(&mut w, 0, &s).contains(REJECTED_LINE));
+    s.play_at_rejected.store(7, Ordering::Relaxed);
+    assert!(
+        !info(&mut w, M - S, &s).contains(REJECTED_LINE),
+        "mid-minute"
+    );
+    let log = info(&mut w, M, &s);
+    assert_eq!(log.matches(REJECTED_LINE).count(), 1, "{log}");
+    assert!(
+        log.contains("rejected=3") && log.contains("total=7"),
+        "{log}"
+    );
+    assert!(log.contains("d1"), "{log}");
+    let log = info(&mut w, 2 * M, &s);
+    assert!(!log.contains(REJECTED_LINE), "a quiet minute: {log}");
+    s.play_at_rejected.store(8, Ordering::Relaxed);
+    let log = info(&mut w, 3 * M, &s);
+    assert!(
+        log.contains("rejected=1") && log.contains("total=8"),
+        "{log}"
+    );
+    // Another engine: its count is learnt at its first look.
+    let b = stats();
+    b.play_at_rejected.store(50, Ordering::Relaxed);
+    assert!(!info(&mut w, 3 * M + S, &b).contains(REJECTED_LINE));
+    b.play_at_rejected.store(51, Ordering::Relaxed);
+    let log = info(&mut w, 4 * M + S, &b);
+    assert!(
+        log.contains("rejected=1") && log.contains("total=51"),
+        "{log}"
+    );
+}
