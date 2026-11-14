@@ -134,13 +134,13 @@ fn no_pair_read_or_free_pacing_gives_no_play_time() {
 }
 
 #[test]
-fn a_clock_not_ready_reads_no_app_time_and_keeps_the_offset() {
+fn a_clock_not_ready_gives_no_pair_and_keeps_the_offset() {
     let mut r = pump();
     let clock = ManualClock::new(ns_of(T, RATE));
     clock.set_ready(false);
-    let now = r.pump.read_clocks(&clock, || {
-        panic!("the app clock is read only with media now")
-    });
+    // The pair is read app, media, app (dstack #295 step 2): the app's
+    // clock may be read before media is known, and is then dropped.
+    let now = r.pump.read_clocks(&clock, || 123);
     assert_eq!(now, None);
     clock.set_ready(true);
     assert_eq!(r.pump.read_clocks(&clock, || APP0), Some(ns_of(T, RATE)));
@@ -205,11 +205,14 @@ fn the_pump_thread_stamps_each_media_block_in_the_app_s_real_clock() {
     let after = crate::clock::app_monotonic_ns();
     let stamps = stamps.lock().unwrap().clone();
     assert!(stamps.len() >= 31, "{stamps:?}");
-    // Each block is stamped from a pair read at its wake: at or before
-    // the app's clock there, and within the 10 ms of media time run.
+    // The test drives its media clock 10 ms ahead in far less real time,
+    // which no real pair of clocks does, so the play-time filter (dstack
+    // #295 step 2) keeps an early pair's offset: each block is stamped
+    // from a pair read on the app's real clock between `before` and
+    // `after`, plus at most the 10 ms of media time run.
     for s in &stamps {
         let s = s.expect("a media block has a play time");
-        assert!(s <= after && s >= before - 10 * MS, "{before} {s} {after}");
+        assert!(s >= before && s <= after + 10 * MS, "{before} {s} {after}");
     }
 }
 
