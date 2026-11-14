@@ -1608,11 +1608,17 @@ fn mics() -> MulticastLookup {
     })
 }
 
+/// The peer's records, offering up to 32 frames a packet: a unicast flow
+/// would carry as many frames as its multicast flow ([`mics`]), so the
+/// multicast flow is preferred (dstack #297).
 fn shared_network() -> Shared {
     let n = Shared::default();
     for id in 1..=8 {
-        n.records
-            .add("peer-device", &format!("TX {id}"), adv(PEER_IP, id));
+        let a = Advertised {
+            fpp_max: 32,
+            ..adv(PEER_IP, id)
+        };
+        n.records.add("peer-device", &format!("TX {id}"), a);
     }
     n.set("peer-device", mics());
     n
