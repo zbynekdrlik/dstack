@@ -7,10 +7,11 @@
 # any check fails.
 #
 # Three parts: the complement arithmetic (pure); install, reinstall, check and
-# uninstall against fake firewall cmdlets (functions of the same name win over
-# the cmdlets); and the group created for real on the runner's adapter, but
-# DISABLED and under a test group name, read back with the real cmdlets (the
-# shapes the firewall gives back), then removed. The real part needs an
+# uninstall against fake firewall and QoS cmdlets (functions of the same name
+# win over the cmdlets); and the group created for real on the runner's
+# adapter, but DISABLED and under a test group name, and the mDNS cap (#288)
+# under a test policy name, read back with the real cmdlets (the shapes the
+# firewall and QoS give back), then removed. The real part needs an
 # elevated shell, which the CI runner is; elsewhere it fails, never skips.
 # The port sets themselves are checked against the code by
 # crates/dstack/tests/dante_leg.rs.
@@ -98,6 +99,37 @@ function Reset-Fake {
     $script:ProfilesOff = @()
     $script:FailAt = 0
     $script:Made = 0
+    $script:Qos = New-Object System.Collections.ArrayList
+    $script:PacerOff = @()
+}
+function Get-NetQosPolicy {
+    param([string]$Name, $ErrorAction)
+    @($script:Qos | Where-Object { $_.Name -eq $Name })
+}
+function New-NetQosPolicy {
+    param($Name, $IPProtocolMatchCondition, $IPDstPrefixMatchCondition, $IPDstPortMatchCondition,
+        $ThrottleRateActionBitsPerSecond, $NetworkProfile)
+    # The real cmdlet gives a /32 prefix back as the bare address.
+    $p = [pscustomobject]@{
+        Name = $Name; IPProtocolMatchCondition = $IPProtocolMatchCondition
+        IPDstPrefixMatchCondition = ($IPDstPrefixMatchCondition -replace '/32$', '')
+        IPDstPortStartMatchCondition = $IPDstPortMatchCondition; IPDstPortEndMatchCondition = $IPDstPortMatchCondition
+        ThrottleRateAction = $ThrottleRateActionBitsPerSecond; NetworkProfile = $NetworkProfile
+    }
+    [void]$script:Qos.Add($p)
+    $p
+}
+function Remove-NetQosPolicy {
+    param([string]$Name, [bool]$Confirm)
+    if ($Confirm) { throw 'Remove-NetQosPolicy would ask' }
+    @($script:Qos | Where-Object { $_.Name -eq $Name }) | ForEach-Object { $script:Qos.Remove($_) }
+}
+function Get-NetAdapterBinding {
+    param([string]$Name, [string]$ComponentID, $ErrorAction)
+    if ($ComponentID -ne 'ms_pacer') { throw "binding '$ComponentID' asked, not ms_pacer" }
+    if ($script:Adapters -contains $Name) {
+        [pscustomobject]@{ Name = $Name; ComponentID = $ComponentID; Enabled = -not ($script:PacerOff -contains $Name) }
+    }
 }
 function Get-NetAdapter {
     $script:Adapters | ForEach-Object { [pscustomobject]@{ Name = $_ } }
@@ -194,6 +226,40 @@ Check 'check fails on a disabled rule, an extra rule and another adapter' {
     $other = Last (Test-DanteLeg -Interface 'LAN')
     $disabled -eq 1 -and $extra -eq 1 -and $other -eq 1
 }
+Check 'install creates one mDNS cap: UDP to 224.0.0.251:5353 at 200 kbit/s on every profile' {
+    Reset-Fake
+    $out = Install-DanteLeg -Interface 'Dante70'
+    $again = Install-DanteLeg -Interface 'Dante70'
+    $p = @($script:Qos)
+    (Last $out) -eq 0 -and (Last $again) -eq 0 -and $p.Count -eq 1 -and $p[0].Name -eq 'dstack Dante leg mDNS cap' -and
+    $p[0].IPProtocolMatchCondition -eq 'UDP' -and $p[0].IPDstPrefixMatchCondition -eq '224.0.0.251' -and
+    $p[0].IPDstPortStartMatchCondition -eq 5353 -and $p[0].ThrottleRateAction -eq 200000 -and
+    $p[0].NetworkProfile -eq 'All' -and (@($out) -join "`n") -match 'mDNS cap.*224\.0\.0\.251:5353 at 200000 bit/s'
+}
+Check 'check fails on a missing cap, a changed rate and a second cap of the name, naming it' {
+    $script:Qos.Clear()
+    $missing = Test-DanteLeg -Interface 'Dante70'
+    [void](Install-DanteLeg -Interface 'Dante70')
+    $script:Qos[0].ThrottleRateAction = 10000000
+    $rate = Test-DanteLeg -Interface 'Dante70'
+    [void](Install-DanteLeg -Interface 'Dante70')
+    [void]$script:Qos.Add($script:Qos[0])
+    $two = Last (Test-DanteLeg -Interface 'Dante70')
+    [void](Install-DanteLeg -Interface 'Dante70')
+    (Last $missing) -eq 1 -and (@($missing) -join "`n") -match "mDNS cap.*: 0 QoS policies" -and
+    (Last $rate) -eq 1 -and (@($rate) -join "`n") -match "rate=10000000\|.*not '.*rate=200000\|" -and
+    $two -eq 1 -and (Last (Test-DanteLeg -Interface 'Dante70')) -eq 0
+}
+Check 'the QoS Packet Scheduler off on the Dante adapter fails the install and the check' {
+    $script:PacerOff = @('Dante70')
+    $out = Install-DanteLeg -Interface 'Dante70'
+    $check = Test-DanteLeg -Interface 'Dante70'
+    $script:PacerOff = @('LAN')
+    $lanOff = Last (Test-DanteLeg -Interface 'Dante70')
+    $script:PacerOff = @()
+    (Last $out) -eq 1 -and (Last $check) -eq 1 -and $lanOff -eq 0 -and
+    (@($check) -join "`n") -match "ms_pacer\) is not enabled on 'Dante70'"
+}
 Check 'a firewall profile that is off fails the install and the check, the rules stay' {
     $script:ProfilesOff = @('Public')
     $out = Install-DanteLeg -Interface 'Dante70'
@@ -221,20 +287,25 @@ Check 'a rule refused part way leaves the earlier group and the per-box group as
     $script:FailAt = 0
     $threw -and (@($script:Store | ForEach-Object { $_.Name }) -join ',') -eq $names
 }
-Check 'uninstall removes only the group' {
+Check 'uninstall removes only the group and the mDNS cap' {
     Old-Rule -Group 'someone else' -Name 'theirs 2'
+    [void](New-NetQosPolicy -Name 'someone else''s policy')
     $n = @($script:Store | Where-Object { $_.Group -ne $script:Group }).Count
+    $capsBefore = @(Get-NetQosPolicy -Name $script:MdnsCap).Count
     $out = Uninstall-DanteLeg
-    (Last $out) -eq 0 -and $script:Store.Count -eq $n
+    (Last $out) -eq 0 -and $script:Store.Count -eq $n -and $capsBefore -eq 1 -and
+    ((@($script:Qos | ForEach-Object { $_.Name }) -join ',') -eq 'someone else''s policy')
 }
 
 # ------------------------------------------- the real firewall, disabled
 foreach ($f in 'Get-NetAdapter', 'Get-NetFirewallProfile', 'New-NetFirewallRule', 'Get-NetFirewallRule',
     'Remove-NetFirewallRule', 'Get-NetFirewallPortFilter', 'Get-NetFirewallAddressFilter',
-    'Get-NetFirewallApplicationFilter', 'Get-NetFirewallInterfaceFilter') {
+    'Get-NetFirewallApplicationFilter', 'Get-NetFirewallInterfaceFilter', 'Get-NetQosPolicy',
+    'New-NetQosPolicy', 'Remove-NetQosPolicy', 'Get-NetAdapterBinding') {
     Remove-Item -Path "Function:\$f"
 }
 $script:Group = "dstack-test-dante-leg-$PID"
+$script:MdnsCap = "dstack-test-mdns-cap-$PID"
 try {
     Check 'the real firewall reads the group back as created (disabled, on the runner adapter)' {
         # An alias the firewall binds: a connected IPv4 interface. The first
@@ -248,16 +319,28 @@ try {
         if ($found.Count -eq 0) { throw 'no connected IPv4 interface on the runner' }
         $alias = $found[0].InterfaceAlias
         $out = Install-DanteLeg -Interface $alias -Enabled 'False'
-        $problems = @(Get-GroupProblems -Interface $alias -Enabled 'False')
+        $problems = @(Get-GroupProblems -Interface $alias -Enabled 'False') + @(Get-MdnsCapProblems)
         foreach ($line in @($out) + $problems) { Write-Host "     $line" }
         $problems.Count -eq 0 -and @(Get-NetFirewallRule -Group $script:Group).Count -eq 10 -and
+        @(Get-NetQosPolicy -Name $script:MdnsCap).Count -eq 1 -and
         @(Get-NetFirewallRule -Group $script:Group | Where-Object { "$($_.Enabled)" -ne 'False' }).Count -eq 0
+    }
+    Check 'the real QoS store: a changed cap is found, uninstall removes the cap' {
+        Set-NetQosPolicy -Name $script:MdnsCap -ThrottleRateActionBitsPerSecond 400000 -Confirm:$false
+        $changed = @(Get-MdnsCapProblems)
+        $out = Uninstall-DanteLeg
+        $changed.Count -eq 1 -and $changed[0] -match 'rate=400000' -and (Last $out) -eq 0 -and
+        @(Get-NetQosPolicy -Name $script:MdnsCap -ErrorAction SilentlyContinue).Count -eq 0
     }
 } finally {
     Get-NetFirewallRule -Group $script:Group -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+    if (@(Get-NetQosPolicy -Name $script:MdnsCap -ErrorAction SilentlyContinue).Count -gt 0) {
+        Remove-NetQosPolicy -Name $script:MdnsCap -Confirm:$false
+    }
 }
-Check 'the test group is gone from the runner' {
-    @(Get-NetFirewallRule -Group $script:Group -ErrorAction SilentlyContinue).Count -eq 0
+Check 'the test group and the test cap are gone from the runner' {
+    @(Get-NetFirewallRule -Group $script:Group -ErrorAction SilentlyContinue).Count -eq 0 -and
+    @(Get-NetQosPolicy -Name $script:MdnsCap -ErrorAction SilentlyContinue).Count -eq 0
 }
 
 Write-Host "$($script:passed) passed, $($script:failed) failed"
