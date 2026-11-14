@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.6.128
+
+- **Fix (dstack #282): multicast groups are joined again after an interface change.** On Windows an address removed and added again (`netsh ... set address`), seen with a new interface index too, drops a socket's group membership, and nothing joined it again: the device kept running and unicast ARC kept answering, but its mDNS answers from the device's address stopped, browsers lost it, and a receiver whose flow ended could not find it again (a two-leg PC, 14.11.2026).
+  - New module `membership` (re-exported as `host::Membership`, `host::Link`, `host::links`): a watch per joined address reads the interface list (name, address, index) every 2 s and asks a rejoin when the address comes back after it was gone, or its index changes. Another adapter coming and going changes nothing.
+  - The mDNS responder (Windows) opens its socket again, joined anew, and sends an unsolicited announcement of every published record (`announce::responder::announcement`), so browsers learn the device at once. Discovery (dtray's local list) and the latency listener leave and join their group again on the same socket. RX multicast flows: the daemon's tick asks the RX thread (`RxShared::rejoin_groups`), which at its next pass closes each slot's group socket and opens a new one, joined (its `RX multicast flow: group joined` line per slot); a join that fails there is reported (`RxShared::take_groups_missing`) and asked again at the next look. The info client opens a socket per request, so it needed nothing.
+  - Known limit: a removal and re-add on the same interface index within one 2 s look is not seen (Windows lists the address again only after its duplicate-address check).
+  - New INFO line at each rejoin: `multicast group re-joined after an interface change interface=<name> old_index=<n> new_index=<n> group=<group>` (for the RX flows `group=every RX multicast flow (joined by the RX thread)`, logged when the RX thread is asked); a failed rejoin warns (`multicast group not re-joined after an interface change; tried again`) and is tried at the next look. The responder adds INFO `mDNS records announced again from the device's address sent=<n> count=<n>`.
+  - API (additive): `membership::{Membership, Link, Rejoin, links, rejoin, EVERY}`, `announce::responder::{announcement, Watch}`, `Responder::start_watched`, `Responder::rejoins`, `RxShared::rejoin_groups`, `RxShared::take_groups_missing`. `Responder::start_on` keeps its signature (no watch).
+- **No latency change** for any app (one interface-list read every 2 s per watch, off the RX hot path).
+- Consumers: move the stack version. dasio, SongPlayer, OBS, the intercom and dtray keep advertising and receiving across an address re-add on a two-leg PC.
+
 ## 0.6.127
 
 - **Feature (dstack #281): why the engine pump re-bootstrapped, how late it woke, and what each media thread got of its priority.** SongPlayer's native Dante device logged one `engine pump lost or overran blocks this second ... rebootstraps=1 missed=5` (13.11.2026, MMCSS HIGH), and nothing could tell whether the pump was starved (and for how long), the clock stepped, or MMCSS dropped the thread.

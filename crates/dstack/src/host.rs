@@ -163,6 +163,10 @@ pub fn load_device(cfg: DeviceConfig) -> Result<Device, HostError> {
     Device::load(cfg).map_err(setup)
 }
 
+/// The watch that keeps a socket's multicast group joined across an
+/// interface change (dstack #282): see [`crate::membership`].
+pub use crate::membership::{Link, Membership, links};
+
 /// The box's IPv4 addresses, by interface.
 pub fn interfaces() -> std::io::Result<Vec<IfAddr>> {
     Ok(if_addrs::get_if_addrs()?

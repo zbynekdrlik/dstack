@@ -61,6 +61,9 @@
 //!   (`host::prepare`), its serving on a thread of its own
 //!   (`host::Prepared::start`) and its bounded stop (`host::Host::stop`);
 //!   `iem-dante-dev` and the engine host it the same way.
+//! - [`membership`]: a socket's multicast group joined again after its
+//!   address's interface changes (an address removed and added again, a
+//!   new interface index; dstack #282).
 //! - [`health`]: the device's health as an application reads it: one
 //!   control-socket status line (`health::parse_status`,
 //!   `health::read_status`) and the device's own reasons from two reads
@@ -91,6 +94,7 @@ pub mod info;
 pub mod latency;
 pub mod lso;
 pub mod media;
+pub mod membership;
 pub mod meter;
 pub mod qdisc;
 pub mod stream;
