@@ -1190,6 +1190,7 @@ fn a_device_s_flows_are_read_once_and_name_the_multicast_flow_of_a_channel() {
         channels: vec![1, 2],
         fpp: 32,
         bits: 24,
+        free_slots: Some(0),
     });
     assert_eq!(
         book.multicast("peer-device", &peer_channel(2), t + MS),
@@ -1281,19 +1282,39 @@ fn a_device_without_an_arc_record_is_waited_for_briefly_then_read_at_its_address
 
 #[test]
 fn a_flow_with_no_multicast_group_or_too_many_slots_carries_nothing() {
-    let mut f = ultimo_flows().flows;
+    let mut f = ultimo_flows();
     let a = peer_channel(1);
     assert!(carried(&f, &a).is_some());
-    f[0].destinations = vec![SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 1), 4321)];
+    f.flows[0].destinations = vec![SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 1), 4321)];
     assert_eq!(carried(&f, &a), None);
-    let mut f = ultimo_flows().flows;
-    f[0].flags = 0x11;
+    let mut f = ultimo_flows();
+    f.flows[0].flags = 0x11;
     assert_eq!(carried(&f, &a), None);
-    let mut f = ultimo_flows().flows;
-    f[0].channels = (1..=crate::media::tx::MAX_CHANNELS as u16 + 1).collect();
+    let mut f = ultimo_flows();
+    f.flows[0].channels = (1..=crate::media::tx::MAX_CHANNELS as u16 + 1).collect();
     assert_eq!(carried(&f, &a), None);
-    f[0].channels = (1..=crate::media::tx::MAX_CHANNELS as u16).collect();
+    f.flows[0].channels = (1..=crate::media::tx::MAX_CHANNELS as u16).collect();
     assert!(carried(&f, &a).is_some());
+}
+
+/// dstack #297: a multicast flow names the transmitter's free TX flow
+/// slots, its slots less its flows (the captured UltimoX2 list: 2 slots, 2
+/// flows, none free); never below none, unknown when the list names no slot
+/// count (ARC 2.7).
+#[test]
+fn a_carried_multicast_flow_names_the_transmitter_s_free_slots() {
+    let a = peer_channel(1);
+    let free = |list: &Flows| carried(list, &a).map(|m| m.free_slots);
+    let mut f = ultimo_flows();
+    assert_eq!((f.slots, f.flows.len()), (2, 2));
+    assert_eq!(free(&f), Some(Some(0)));
+    f.slots = 3;
+    assert_eq!(free(&f), Some(Some(1)));
+    f.slots = 2;
+    f.flows.push(f.flows[0].clone());
+    assert_eq!(free(&f), Some(Some(0)), "never below none");
+    f.slots = 0;
+    assert_eq!(free(&f), Some(None));
 }
 
 #[test]

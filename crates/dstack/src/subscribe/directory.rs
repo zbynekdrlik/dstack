@@ -88,7 +88,7 @@ use super::resolve::{Advertised, Applied, MulticastLookup, Resolver};
 use super::retry_after;
 use crate::announce::ARC_SERVICE;
 use crate::arc::client::{Directory, REPLY_TIMEOUT, ReadError, TxChannel, Udp, read_directory};
-use crate::arc::flows::{Flows, ListForm, TxFlow, read_tx_flows};
+use crate::arc::flows::{Flows, ListForm, read_tx_flows};
 use crate::ctl::Requests;
 use crate::device::DeviceConfig;
 use crate::flows::control::START as DBCP1;
@@ -260,7 +260,7 @@ struct Reads {
 /// read, and its reads, as [`Reads`] for its channels.
 #[derive(Debug, Default)]
 struct FlowReads {
-    flows: Option<(Vec<TxFlow>, u64)>,
+    flows: Option<(Flows, u64)>,
     state: State,
     ended: Option<u64>,
     failures: u32,
@@ -682,7 +682,7 @@ impl Book {
             Ok((list, form)) => {
                 r.failures = 0;
                 r.form = form;
-                r.flows = Some((list.flows, now));
+                r.flows = Some((list, now));
                 false
             }
             Err(e) => {
@@ -693,7 +693,7 @@ impl Book {
                 self.counts.count_error(e);
                 r.failures = r.failures.saturating_add(1);
                 if r.flows.is_none() {
-                    r.flows = Some((Vec::new(), now));
+                    r.flows = Some((Flows::default(), now));
                 }
                 tell
             }
