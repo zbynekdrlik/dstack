@@ -101,6 +101,7 @@ function Reset-Fake {
     $script:Made = 0
     $script:Qos = New-Object System.Collections.ArrayList
     $script:PacerOff = @()
+    $script:NoPacer = @()
 }
 function Get-NetQosPolicy {
     param([string]$Name, $ErrorAction)
@@ -127,7 +128,7 @@ function Remove-NetQosPolicy {
 function Get-NetAdapterBinding {
     param([string]$Name, [string]$ComponentID, $ErrorAction)
     if ($ComponentID -ne 'ms_pacer') { throw "binding '$ComponentID' asked, not ms_pacer" }
-    if ($script:Adapters -contains $Name) {
+    if ($script:Adapters -contains $Name -and -not ($script:NoPacer -contains $Name)) {
         [pscustomobject]@{ Name = $Name; ComponentID = $ComponentID; Enabled = -not ($script:PacerOff -contains $Name) }
     }
 }
@@ -257,8 +258,11 @@ Check 'the QoS Packet Scheduler off on the Dante adapter fails the install and t
     $script:PacerOff = @('LAN')
     $lanOff = Last (Test-DanteLeg -Interface 'Dante70')
     $script:PacerOff = @()
-    (Last $out) -eq 1 -and (Last $check) -eq 1 -and $lanOff -eq 0 -and
-    (@($check) -join "`n") -match "ms_pacer\) is not enabled on 'Dante70'"
+    $script:NoPacer = @('Dante70')
+    $none = Last (Test-DanteLeg -Interface 'Dante70')
+    $script:NoPacer = @()
+    (Last $out) -eq 1 -and (Last $check) -eq 1 -and $lanOff -eq 0 -and $none -eq 0 -and
+    (@($check) -join "`n") -match "ms_pacer\) is off on 'Dante70'"
 }
 Check 'a firewall profile that is off fails the install and the check, the rules stay' {
     $script:ProfilesOff = @('Public')

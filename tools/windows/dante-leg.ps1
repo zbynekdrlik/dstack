@@ -29,9 +29,12 @@
 # 224.0.0.251:5353 to 200 kbit/s (about 50 datagrams/s of 500 bytes; normal
 # mDNS out is 5/s at most), so no program on the PC floods the Dante VLAN even
 # with no switch cap. A QoS policy has no adapter condition: the cap holds on
-# every adapter (only the Dante leg carries much mDNS on our PCs). It acts
-# only where the QoS Packet Scheduler (ms_pacer) is bound, which the check
-# reads on the Dante adapter.
+# every adapter (only the Dante leg carries much mDNS on our PCs). The QoS
+# Packet Scheduler (ms_pacer) applies it: the check fails when the Dante
+# adapter has that binding switched off. A Realtek Virtual Adapter (a VLAN
+# leg) has no such binding; the base adapter's applies the cap there
+# (measured 14.11.2026: 600 datagrams through such a leg left at 46/s under a
+# 200 kbit/s policy, against all at once without it).
 #
 # Modes (from an elevated Windows PowerShell 5.1):
 #   dante-leg.ps1 -InterfaceAlias <Dante adapter> [-RemoveGroup dstack155]
@@ -300,12 +303,15 @@ function Get-MdnsCapProblems {
     @()
 }
 
-# The QoS Packet Scheduler off on the Dante adapter: the cap does nothing there.
+# The QoS Packet Scheduler switched off on the Dante adapter: the cap does
+# nothing there. No binding at all (a VLAN adapter) is no problem: the base
+# adapter's scheduler applies it.
 function Get-PacerProblems {
     param([Parameter(Mandatory)][string]$Interface)
-    $b = @(Get-NetAdapterBinding -Name $Interface -ComponentID ms_pacer -ErrorAction SilentlyContinue)
-    if ($b.Count -ne 1 -or "$($b[0].Enabled)" -ne 'True') {
-        return @("the QoS Packet Scheduler (ms_pacer) is not enabled on '$Interface': the mDNS cap does nothing there")
+    $off = @(Get-NetAdapterBinding -Name $Interface -ComponentID ms_pacer -ErrorAction SilentlyContinue |
+        Where-Object { "$($_.Enabled)" -ne 'True' })
+    if ($off.Count -gt 0) {
+        return @("the QoS Packet Scheduler (ms_pacer) is off on '$Interface': the mDNS cap does nothing there")
     }
     @()
 }
