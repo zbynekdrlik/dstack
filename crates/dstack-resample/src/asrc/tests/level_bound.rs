@@ -24,8 +24,22 @@ fn settling_needs_the_lock_and_an_error_within_the_calm_zone_and_stays() {
     assert!(settled(true, false, 9.0, 1.0));
 }
 
+/// Settled at 80 ppm, then the fit flushed (a stall): with no rate to bound
+/// around, the laws follow the drift unbounded until it locks again.
 #[test]
-fn a_bound_below_zero_is_none_at_all() {
+fn a_flushed_fit_lifts_the_bound_until_it_locks_again() {
+    let mut s = Sim::new(80.0, 0.010);
+    s.c = s.c.with_level_bound_ppm(20.0);
+    assert_eq!(s.run(300.0), 0);
+    assert!(s.c.settled && s.c.locked());
+    s.c.rate.flush();
+    s.run(30.0);
+    assert!(s.c.settled && !s.c.locked());
+    assert!(s.c.ppm() > 40.0, "follows the drift: {} ppm", s.c.ppm());
+}
+
+#[test]
+fn a_bound_below_zero_is_zero() {
     let c = Controller::new(0.010, 0.002, 0.050, Basis::Arrival).with_level_bound_ppm(-5.0);
     assert_eq!(c.level_bound_ppm, Some(0.0));
     let c = Controller::new(0.010, 0.002, 0.050, Basis::Arrival);

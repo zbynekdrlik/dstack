@@ -63,7 +63,10 @@ impl Process for Source {
         while done < frames {
             let n = (frames - done).min(CHUNK);
             let buf = &mut self.scratch[..n * TX_CHANNELS];
-            self.player.fill_with(buf, TX_CHANNELS, |x| x);
+            // Each piece's own start: a block the pump skipped resyncs the
+            // player once (dstack #303), a piece of the same block never.
+            let start = block.start().map(|s| s + done as u64);
+            self.player.fill_at(start, buf, TX_CHANNELS, |x| x);
             for c in 0..TX_CHANNELS {
                 // A channel the block lacks (fewer TX mapped) is skipped.
                 let out = block.output(c);

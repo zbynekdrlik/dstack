@@ -104,9 +104,54 @@ fn a_count_that_jumps_more_than_a_chunk_is_a_burst() {
 fn an_overdue_chunk_is_due_now_and_never_more_than_a_period_away() {
     let mut w = writer();
     w.wrote(1.0, 960);
-    assert_eq!(w.until_next(1.03, 960), Some(0.0));
+    // Overdue within the tolerance (5 ms): now.
+    assert_eq!(w.until_next(1.024, 960), Some(0.0));
+    assert_eq!(w.until_next(1.025 - 1e-9, 960), Some(0.0));
+    // Overdue past it: the writer is off its schedule, nothing known.
+    assert_eq!(w.until_next(1.025 + 1e-9, 960), None);
+    assert_eq!(w.until_next(1.03, 960), None);
     // A count ahead of the schedule (an early write) waits one period.
     assert!(close(w.until_next(1.0, 2880).unwrap(), P));
+}
+
+/// One write late on its own (a short stall) moves nothing; the next on
+/// time pulls as before.
+#[test]
+fn one_late_write_alone_leaves_the_schedule() {
+    let mut w = writer();
+    w.wrote(1.0, 960);
+    w.wrote(1.03, 1920);
+    assert!(close(w.due_s(1920).unwrap(), 1.02));
+    w.wrote(1.041, 2880);
+    assert!(close(w.due_s(2880).unwrap(), 1.04 + GAIN * 0.001));
+}
+
+/// A capture that stopped and started again (dsend): two writes in a row
+/// 30 ms late by the same error move the line onto the second; two late
+/// by errors apart do not.
+#[test]
+fn two_writes_off_by_the_same_error_are_a_new_schedule() {
+    let mut w = writer();
+    w.wrote(1.0, 960);
+    w.wrote(1.05, 1920);
+    w.wrote(1.0702, 2880);
+    assert!(
+        close(w.due_s(2880).unwrap(), 1.0702),
+        "moved onto the second"
+    );
+    assert!(close(w.until_next(1.0702, 2880).unwrap(), P));
+    let mut w = writer();
+    w.wrote(1.0, 960);
+    w.wrote(1.05, 1920);
+    w.wrote(1.080, 2880);
+    assert!(close(w.due_s(2880).unwrap(), 1.04), "40 ms after 30 ms: no");
+    // A write on time between them clears the first.
+    let mut w = writer();
+    w.wrote(1.0, 960);
+    w.wrote(1.05, 1920);
+    w.wrote(1.04, 2880);
+    w.wrote(1.09, 3840);
+    assert!(close(w.due_s(3840).unwrap(), 1.06), "not in a row");
 }
 
 #[test]

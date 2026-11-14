@@ -211,7 +211,10 @@ fn play(player: &mut Player, block: &mut Block<'_>, outputs: usize, scratch: &mu
     while done < frames {
         let n = (frames - done).min(CHUNK);
         let buf = &mut scratch[..n * outputs];
-        player.fill_with(buf, outputs, |x| x);
+        // Each piece's own start: a block the engine skipped resyncs the
+        // player once (dstack #303), a piece of the same block never.
+        let start = block.start().map(|s| s + done as u64);
+        player.fill_at(start, buf, outputs, |x| x);
         for c in 0..outputs {
             // A channel the block lacks is skipped.
             for (f, slot) in block.output(c).iter_mut().skip(done).take(n).enumerate() {

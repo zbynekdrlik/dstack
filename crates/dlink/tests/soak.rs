@@ -26,9 +26,10 @@
 //!   event). One case is an irregular writer (dstack #303 design v2): the
 //!   app's thread stalls 10 to 25 ms now and then and catches up in a
 //!   burst, the real-time run's failure at load ~51 made deterministic.
-//! - **Real time** (one minute of wall time): the same path on the pump's
-//!   own thread ([`stream::spawn`]) on the box's monotonic clock, the app on
-//!   the test's thread at real 1024-frame ticks.
+//! - **Real time** (one minute of wall time): `tests/soak_real_time.rs`,
+//!   its own test binary, so these cases never load the box under it.
+//!
+//! The path itself is `soak/harness.rs`, shared by both.
 //!
 //! **The release gate** is the simulated cases, the tests named `gate_*`
 //! (`.github/workflows/release.yml` runs them before a tag's release).
@@ -40,35 +41,17 @@
 //! bridge under the field's 2 to 8 ms late wakes is the one criterion not
 //! asserted, by name ([`Wakes::Field`], dstack #307).
 
-use std::f64::consts::TAU;
-use std::sync::{Arc, Mutex, PoisonError};
+#[path = "soak/harness.rs"]
+mod harness;
 
-use dlink::bridge::{self, AppBuffer, Fifo, Player, Stats};
-use dlink::{Block, Config, Map, Process, Rated};
+use std::sync::PoisonError;
+
 use dstack::clock::{Anchor, ManualClock, PtpClock, to_samples};
-use dstack::media::ring::Ring;
-use dstack::media::rx::RxShared;
-use dstack::media::tx::{TxShared, ns_of};
-use dstack::stream::{Blocks, Pump, PumpStats, PumpView, Timing};
+use dstack::media::tx::ns_of;
+use dstack::stream::{Blocks, PumpView};
 
-/// The app's rate and the device's (stream-snv: OBS at 48 kHz, the site's
-/// 96 kHz network).
-const APP_RATE: u32 = 48_000;
-const DEVICE_RATE: u32 = 96_000;
-/// The device's block (dlink's default) and the app block it makes.
-const BLOCK: u64 = 128;
-const APP_BLOCK: u64 = 64;
-/// OBS's audio tick, app frames.
-const CHUNK: usize = 1024;
-/// The channels each way (OBS's program L/R; the RX pair).
-const CHANNELS: usize = 2;
-/// W: inside it the 8 ms late wakes the owner named (#304).
-const W_NS: u64 = 9_000_000;
-/// The media clock's start (1000 s) and the app clock's reading there.
-const T0: u64 = 1_000_000_000_000;
-const APP0: i64 = 7_000_000_000;
-const SECOND: u64 = 1_000_000_000;
-const MS: u64 = 1_000_000;
+use harness::*;
+
 /// A case's simulated time.
 const SOAK_NS: u64 = 600 * SECOND;
 /// The tail over which the correction must have settled.
@@ -167,232 +150,6 @@ enum Writer {
     /// The same, stalling now and then (`STALL_*`), each stall followed by
     /// a catch-up burst of the ticks it held.
     Stalling,
-}
-
-/// One app block as the app saw it: its start (app frames) and play time.
-type Mark = (Option<u64>, Option<i64>);
-
-/// The app's processor at its own rate (inside [`Rated`]): OBS's
-/// dante-input shape.
-struct App {
-    /// The TX bridge: the app's own writes, converted to the device's
-    /// clock.
-    tx: Player,
-    /// Interleaved TX frames of one block.
-    out: Vec<f64>,
-    /// The RX bridge's FIFO (the app's own player reads it).
-    rx: Arc<Fifo>,
-    /// Each block's start and play time, for the test.
-    marks: Arc<Mutex<Vec<Mark>>>,
-}
-
-impl Process for App {
-    fn process(&mut self, block: &mut Block<'_>) {
-        let frames = block.frames();
-        let out = &mut self.out[..frames * CHANNELS];
-        self.tx.fill_at(block.start(), out, CHANNELS, |x| x);
-        for c in 0..CHANNELS {
-            for (f, y) in block.output(c).iter_mut().enumerate() {
-                *y = out[f * CHANNELS + c];
-            }
-        }
-        let input = [block.input(0), block.input(1)];
-        self.rx.push_with(frames, |f, c| input[c][f]);
-        self.marks
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push((block.start(), block.play_at()));
-    }
-}
-
-/// The device's config: stream-snv's shape (#303).
-fn config(dir: &std::path::Path) -> Config {
-    Config::new("soak", dir.join("state.toml"))
-        .rx(["In L", "In R"])
-        .tx(["Out L", "Out R"])
-        .sample_rate(APP_RATE)
-        .network_rate(DEVICE_RATE)
-        .work_margin_ns(W_NS)
-        .flow_slots(1)
-        .app_buffer(bridge::chunk_ns(CHUNK as u64, APP_RATE), None)
-}
-
-/// The path, built as dlink builds it: the pump, and the app's ends of
-/// its bridges.
-struct Path {
-    pump: Pump<Rated<App>>,
-    ends: Ends,
-}
-
-/// The app's ends of the bridges and the counts the test reads.
-struct Ends {
-    pump_stats: Arc<PumpStats>,
-    timing: Timing,
-    /// The app's TX writes.
-    tx_fifo: Arc<Fifo>,
-    tx_stats: Arc<Stats>,
-    /// The app's RX reads.
-    rx_player: Player,
-    rx_stats: Arc<Stats>,
-    marks: Arc<Mutex<Vec<Mark>>>,
-    _dir: tempfile::TempDir,
-}
-
-fn path() -> Path {
-    let dir = tempfile::tempdir().unwrap();
-    let config = config(dir.path());
-    let cfg = config.device().expect("the soak's config");
-    let buffer: AppBuffer = config.bridge_buffer().expect("an app buffer");
-    let timing = Timing::of(&cfg);
-    assert_eq!(timing.block, BLOCK);
-    assert_eq!(timing.margin, to_samples(W_NS, DEVICE_RATE));
-
-    let tx_fifo = Arc::new(bridge::fifo_for(CHANNELS, APP_RATE));
-    let tx_stats = Arc::new(Stats::default());
-    let tx = Player::new(
-        Arc::clone(&tx_fifo),
-        APP_RATE,
-        APP_RATE,
-        buffer,
-        Arc::clone(&tx_stats),
-    )
-    .unwrap();
-    let rx_fifo = Arc::new(bridge::fifo_for(CHANNELS, APP_RATE));
-    let rx_stats = Arc::new(Stats::default());
-    let rx_player = Player::new(
-        Arc::clone(&rx_fifo),
-        APP_RATE,
-        APP_RATE,
-        buffer,
-        Arc::clone(&rx_stats),
-    )
-    .unwrap();
-    let marks = Arc::new(Mutex::new(Vec::new()));
-    let app = App {
-        tx,
-        out: vec![0.0; 4 * CHUNK * CHANNELS],
-        rx: rx_fifo,
-        marks: Arc::clone(&marks),
-    };
-    let rated = Rated::new(
-        app,
-        DEVICE_RATE,
-        APP_RATE,
-        BLOCK as usize,
-        CHANNELS,
-        CHANNELS,
-    )
-    .unwrap();
-
-    let rings: Arc<[Ring]> = (0..cfg.rx.len()).map(|_| Ring::new()).collect();
-    let rx = Arc::new(
-        RxShared::with_slots(
-            DEVICE_RATE,
-            std::net::Ipv4Addr::LOCALHOST,
-            Arc::clone(&rings),
-            None,
-            1,
-        )
-        .unwrap(),
-    );
-    let tx_shared = Arc::new(
-        TxShared::new(
-            cfg.clone(),
-            std::net::Ipv4Addr::LOCALHOST,
-            rings,
-            1,
-            &[0, 1],
-        )
-        .unwrap(),
-    );
-    let pump_stats = Arc::new(PumpStats::new(timing, DEVICE_RATE));
-    let pump = Pump::new(
-        rated,
-        Map {
-            rx: vec![0, 1],
-            tx: vec![0, 1],
-        },
-        timing,
-        24,
-        rx,
-        tx_shared,
-        Arc::clone(&pump_stats),
-    );
-    Path {
-        pump,
-        ends: Ends {
-            pump_stats,
-            timing,
-            tx_fifo,
-            tx_stats,
-            rx_player,
-            rx_stats,
-            marks,
-            _dir: dir,
-        },
-    }
-}
-
-/// The app's tick: `CHUNK` frames of a 1 kHz tone written to TX, `CHUNK`
-/// frames read from RX.
-struct Ticker {
-    written: u64,
-    rx_out: Vec<f64>,
-}
-
-impl Ticker {
-    fn new() -> Self {
-        Ticker {
-            written: 0,
-            rx_out: vec![0.0; CHUNK * CHANNELS],
-        }
-    }
-
-    fn tick(&mut self, p: &mut Ends) {
-        let at = self.written;
-        p.tx_fifo.push_with(CHUNK, |f, _| {
-            0.25 * (TAU * 1000.0 * (at + f as u64) as f64 / f64::from(APP_RATE)).sin()
-        });
-        self.written += CHUNK as u64;
-        p.rx_player.fill_with(&mut self.rx_out, CHANNELS, |x| x);
-    }
-}
-
-/// The bridges' counts at one moment.
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct Counts {
-    at_ns: u64,
-    tx_underruns: u64,
-    tx_recentres: u64,
-    rx_underruns: u64,
-    rx_recentres: u64,
-    tx_ppm: f64,
-    rx_ppm: f64,
-}
-
-impl Counts {
-    fn of(p: &Ends, at_ns: u64) -> Self {
-        Counts {
-            at_ns,
-            tx_underruns: p.tx_stats.underruns(),
-            tx_recentres: p.tx_stats.recentres(),
-            rx_underruns: p.rx_stats.underruns(),
-            rx_recentres: p.rx_stats.recentres(),
-            tx_ppm: p.tx_stats.ppm(),
-            rx_ppm: p.rx_stats.ppm(),
-        }
-    }
-
-    /// The TX side's gap counters (dropouts and re-centres; a floor deficit
-    /// counts in both, so only a change of the sum is read, as one gap).
-    fn tx_sum(&self) -> u64 {
-        self.tx_underruns + self.tx_recentres
-    }
-
-    /// The RX side's.
-    fn rx_sum(&self) -> u64 {
-        self.rx_underruns + self.rx_recentres
-    }
 }
 
 /// The gaps in `at` (media times) within [from, to].
@@ -655,7 +412,8 @@ impl Soak {
     /// - every play time on the app's clock within 1 µs of a constant
     ///   offset, every step one block within 1 µs (none off by 1 ms);
     /// - the fault case: one rebootstrap of 8 blocks, at most one gap per
-    ///   side at it, then the same criteria from 30 s after it.
+    ///   side at it, one TX resync (dstack #303), then the same criteria
+    ///   from 30 s after it; every other case no resync.
     fn check(&self) {
         let label = self.label();
         let rx_judged = self.wakes == Wakes::Short;
@@ -691,6 +449,11 @@ impl Soak {
             self.step_err_max <= PLAY_AT_TOL_NS,
             "{label}: a play time step {} ns off its blocks",
             self.step_err_max
+        );
+        assert_eq!(
+            last.tx_resyncs,
+            u64::from(self.fault),
+            "{label}: TX resyncs (one at the fault's skip, none else)"
         );
         // The criteria hold from `from` (priming, or 30 s after the fault).
         let from = if self.fault {
@@ -918,65 +681,4 @@ fn the_median_ignores_a_spike_and_follows_a_ramp() {
     assert_eq!(median(&mut spike), 6.0);
     let mut ramp = [6.0, -20.0, -40.0, -60.0];
     assert_eq!(median(&mut ramp), -30.0);
-}
-
-/// One minute of real time: the pump on its own thread on the box's
-/// monotonic clock, the app on this thread at real ticks. Real wakes are
-/// what the simulation cannot model; zero TX dropouts after priming, and
-/// an RX gap only where the pump itself restarted (a runner's late thread).
-/// Not in the release gate (no `gate_` name): on a shared runner it
-/// measures the runner's load (the main's decision on #304).
-#[cfg(any(target_os = "linux", windows))]
-#[test]
-fn one_minute_in_real_time() {
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::time::{Duration, Instant};
-
-    use dstack::clock::MonoClock;
-
-    const REAL: Duration = Duration::from_secs(60);
-    let Path { pump, ends: mut p } = path();
-    let clock = Arc::new(MonoClock::new());
-    clock.set_k(0);
-    let stop = Arc::new(AtomicBool::new(false));
-    let thread = dstack::stream::spawn(
-        Arc::clone(&clock) as Arc<dyn PtpClock>,
-        pump,
-        Arc::clone(&stop),
-    )
-    .unwrap();
-    let period = Duration::from_secs_f64(CHUNK as f64 / f64::from(APP_RATE));
-    let mut ticker = Ticker::new();
-    let start = Instant::now();
-    let mut deadline = start;
-    let mut primed: Option<(Counts, PumpView)> = None;
-    while start.elapsed() < REAL {
-        ticker.tick(&mut p);
-        if primed.is_none() && !p.tx_stats.priming() && !p.rx_stats.priming() {
-            primed = Some((Counts::of(&p, T0), p.pump_stats.view()));
-        }
-        deadline += period;
-        std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
-    }
-    stop.store(true, Ordering::SeqCst);
-    let ended = Instant::now() + Duration::from_secs(5);
-    while !thread.is_finished() {
-        assert!(Instant::now() < ended, "the pump thread did not end");
-        std::thread::sleep(Duration::from_millis(1));
-    }
-    thread.join().unwrap();
-    let (primed, view0) = primed.expect("both bridges primed");
-    let last = Counts::of(&p, T0);
-    let view = p.pump_stats.view();
-    let restarts = view.rebootstraps - view0.rebootstraps;
-    assert_eq!(
-        last.tx_underruns - primed.tx_underruns,
-        0,
-        "TX dropouts after priming: {primed:?} {last:?} {view:?}"
-    );
-    assert!(
-        last.rx_underruns - primed.rx_underruns <= restarts,
-        "RX dropouts past the pump's own restarts ({restarts}): {primed:?} {last:?} {view:?}"
-    );
-    assert!(view.blocks > 40_000, "{view:?}");
 }

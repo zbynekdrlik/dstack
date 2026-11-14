@@ -108,7 +108,9 @@
 //! cannot hand it to the pump block for block: the two clocks drift. The
 //! app writes a [`bridge::Fifo`] (made with [`bridge::fifo_for`]) on its
 //! own audio thread, and its [`Process`] fills the device's block with
-//! [`bridge::Player::fill_with`], which converts from the app's rate and
+//! [`bridge::Player::fill_at`] (`block.start()` as the start, so a block
+//! the pump skipped resyncs the player once; dstack #303), which converts
+//! from the app's rate and
 //! steers the FIFO's depth against the drift ([`bridge`]; dsend's path,
 //! dstack #241). Neither side takes a lock or allocates. That depth adds
 //! to the path above: the app buffer, a fixed term the app states with

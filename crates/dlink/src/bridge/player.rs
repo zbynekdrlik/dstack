@@ -25,7 +25,7 @@
 //!   output's callback, so it counts once), then starts from there; an
 //!   excess at that moment is skipped. A chunked producer (its chunk wider
 //!   than the output's callback: OBS's 1024-frame ticks) is followed on its
-//!   own schedule ([`writer`], dstack #303): a re-prime that ends mid-cycle
+//!   own schedule (`player::writer`, dstack #303): a re-prime that ends mid-cycle
 //!   (after a stalled writer's catch-up burst) starts at the depth whose
 //!   mean over the writer's sawtooth is the target, not at the top of a
 //!   sawtooth that the next tick lifts by a whole chunk more. Before that
@@ -66,7 +66,7 @@ use super::buffer::{AppBuffer, MAX_APP_BUFFER_NS};
 use super::fifo::Fifo;
 use super::map;
 
-pub mod writer;
+mod writer;
 
 use writer::Writer;
 
@@ -342,6 +342,9 @@ impl Player {
     /// [`crate::Block::start`]). A block that does not start where the last
     /// one ended (the pump skipped blocks, #302) resyncs the player: one
     /// re-prime to the target, counted in [`Stats::resyncs`] (module doc).
+    /// A caller that fills one block in pieces passes each piece's own
+    /// start (the block's start + the frames before it), or every piece
+    /// after the first resyncs.
     pub fn fill_at<T>(
         &mut self,
         start: Option<u64>,
@@ -357,14 +360,9 @@ impl Player {
         {
             self.resync(start.saturating_sub(expected));
         }
-        self.next_start = start.map(|s| s + frames as u64);
+        self.next_start = start.map(|s| s.saturating_add(frames as u64));
         self.callback_in = frames_of(frames as f64 / f64::from(self.out_rate), self.net_rate);
-        let arrived = self.fifo.arrived();
-        if arrived != self.arrived {
-            self.arrived = arrived;
-            let now_s = self.clock_s(self.played);
-            self.writer.wrote(now_s, arrived);
-        }
+        self.look(self.played);
         let inputs = self.fifo.channels();
         for (f, frame) in out.chunks_exact_mut(outputs).enumerate() {
             if self.pos == BLOCK {
@@ -397,6 +395,17 @@ impl Player {
         s.ppm.store(self.ctl.ppm().to_bits(), Ordering::Relaxed);
         s.priming
             .store(matches!(self.state, State::Priming(_)), Ordering::Relaxed);
+    }
+
+    /// A write the producer made since the last look, seen at the output's
+    /// frame `frames`, goes to its schedule ([`Writer::wrote`]).
+    fn look(&mut self, frames: u64) {
+        let arrived = self.fifo.arrived();
+        if arrived != self.arrived {
+            self.arrived = arrived;
+            let now_s = self.clock_s(frames);
+            self.writer.wrote(now_s, arrived);
+        }
     }
 
     /// The output's clock at its frame `frames` (played), s: the caller's
@@ -452,6 +461,13 @@ impl Player {
             // A chunked producer on its own schedule: the depth whose mean
             // is the target at this moment of its cycle (module doc).
             let now_s = self.clock_s(self.at);
+            // The depth first, then the schedule: a write since the call's
+            // start (the producer's own thread) is in both, and one landing
+            // between the two reads is in the schedule only, so the start
+            // errs a chunk high (drained by the bounded level loop), never a
+            // chunk low (a dropout).
+            let held = self.fifo.len();
+            self.look(self.at);
             let level = match self.writer.until_next(now_s, self.arrived) {
                 Some(until_next) if self.chunk_in > self.callback_in => Self::phased_level(
                     level,
@@ -461,7 +477,6 @@ impl Player {
                 ),
                 _ => level + (swing + need) / 2,
             };
-            let held = self.fifo.len();
             if held < level {
                 self.block.fill(0.0);
                 return;

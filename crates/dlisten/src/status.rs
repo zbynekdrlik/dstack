@@ -103,6 +103,7 @@ mod tests {
             out_rate: 44_100,
             overflows: 0,
             recentres: 0,
+            resyncs: 0,
             priming: false,
             mono: false,
             input_peak: None,

@@ -433,7 +433,9 @@ impl Controller {
     /// instead of ramping the ratio to -70 .. -200 ppm. Until then the laws
     /// are unbounded: before the lock the braking itself follows the drift
     /// (200 ppm off holds about 5 ms of offset at the lock), and that
-    /// start-up offset drains as before. Default: no bound.
+    /// start-up offset drains as before. While a stall has flushed the fit
+    /// (no rate until it locks again) the laws are unbounded too. Default:
+    /// no bound.
     pub fn with_level_bound_ppm(mut self, ppm: f64) -> Self {
         self.level_bound_ppm = Some(ppm.max(0.0));
         self
@@ -635,7 +637,13 @@ impl Controller {
         let base = rate + braking + self.bias_ppm;
         let pi = self.level.update(err_ms, dt_s, base);
         self.settled = settled(self.settled, self.rate.locked(), band_err_ms, self.calm_ms);
-        let level = bounded_level_ppm(braking + pi, self.level_bound_ppm, self.settled);
+        // A fit flushed by a stall is no rate to bound around: the laws
+        // follow the drift again until it locks again.
+        let level = bounded_level_ppm(
+            braking + pi,
+            self.level_bound_ppm,
+            self.settled && self.rate.locked(),
+        );
         let target = (rate + self.bias_ppm + level).clamp(-MAX_PPM, MAX_PPM);
         self.applied_ppm = slew(self.applied_ppm, target, dt_s);
         Step::Hold(self.applied_ppm)
