@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.6.131
+
+- **Feature (dstack #288 step 2): Linux caps the Dante leg's own mDNS queries at 10/s.** The 0.6.129 cap counted queries and answers together at 50/s, so #285's querier (about 40 queries/s) stayed under it while every device's answers to it loaded the VLAN. Owner decision of 14.11.2026: queries get a cap of their own.
+  - `tools/linux/dante-leg.nft`, chain `out`, a new rule before the 50/s one: `udp dport 5353 ip daddr 224.0.0.251 @th,80,1 0 limit rate over 10/second burst 50 packets counter drop`. `@th,80,1` is the DNS QR bit (0: a query); `nft list` shows it as `@th,80,8 & 0x80 == 0x0`. Answers (QR 1) never meet it and keep the 50/s cap with its burst of 200, so a responder's answer bursts (up to 28 in 100 ms measured) pass.
+  - Read what each cap dropped with `nft list chain inet dstack_dante_leg out | grep 'limit rate over'`: the `10/second` line counts dropped queries, the `50/second` line the rest. Reload the file on every Linux PC with the filter (`nft -D dante_leg=<iface> -f /etc/dstack/dante-leg.nft`).
+  - Windows unchanged: its QoS policy (200 kbit/s on all mDNS out) cannot match a payload bit, and a lower throttle would delay answer bursts.
+  - Tests: the netns harness sends real DNS headers; a querier at 40/s for 6 s is capped to about 10/s (105 of 240 passed), an answer burst of 30 in 100 ms passes whole while the query cap is spent, and the 50/s flood is now made of answers.
+- **No latency change** for any app (the filter touches mDNS only).
+- Consumers: nothing to change; the filter is rolled out per PC.
+
 ## 0.6.130
 
 - **Feature (dstack #292, requested by dasio#106): dtray's dasio settings window opens and edits a bridge instance.** dasio 0.1.83 makes an instance a bridge to a local ASIO driver with a `[bridge]` table in its `device.toml` (`driver`, `to_asio`, `from_asio`, optional `app_buffer_ns`); the window refused that file ("Settings not readable", unknown field), because it took out only `iface` before reading the rest as a dstack `DeviceConfig`.
