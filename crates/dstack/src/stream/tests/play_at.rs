@@ -27,6 +27,10 @@ fn the_play_time_is_start_plus_playout_plus_block_less_the_offset() {
     );
     // A media time past i64 reads as i64::MAX.
     assert_eq!(play_at_ns(u64::MAX / 2, TIMING, RATE, 5), i64::MAX - 5);
+    // Saturating, never wrapping.
+    assert_eq!(play_at_ns(u64::MAX / 2, TIMING, RATE, -5), i64::MAX);
+    assert_eq!(play_at_ns(0, TIMING, RATE, i64::MAX), 1_333_334 - i64::MAX);
+    assert_eq!(play_at_ns(0, TIMING, RATE, i64::MIN), i64::MAX);
 }
 
 /// The rig's pump stepped on `clock` with an app clock that runs with it

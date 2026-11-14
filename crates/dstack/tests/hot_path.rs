@@ -401,8 +401,14 @@ fn the_rx_thread_s_passes_do_not_allocate() {
 /// Output j is input j (the first 24 of 32), through a stack buffer.
 struct Copy;
 
+/// The pump's blocks that carried a play time (dstack #295).
+static STAMPED: AtomicU64 = AtomicU64::new(0);
+
 impl Process for Copy {
     fn process(&mut self, block: &mut Block<'_>) {
+        if block.play_at().is_some() {
+            STAMPED.fetch_add(1, Ordering::Relaxed);
+        }
         let mut x = [0.0f64; BLOCK as usize];
         for ch in 0..block.outputs() {
             x.copy_from_slice(block.input(ch));
@@ -487,10 +493,15 @@ fn the_engine_pump_and_its_tx_passes_do_not_allocate() {
     let mut transmitter = Transmitter::new(Arc::clone(&tx));
     let start = ns_of(T, RATE);
     let mut now = T;
+    let media = clock::ManualClock::new(start);
     reset_violation_count();
     assert_no_alloc(|| {
-        // 300 blocks, one a media step, waking where the pump asks.
+        // 300 blocks, one a media step, waking where the pump asks; each
+        // wake reads the media and the app's clock first, as the pump
+        // thread does (dstack #295), so every block carries a play time.
         for _ in 0..300 {
+            clock::PtpClock::sleep_until(&media, ns_of(now, RATE));
+            pump.read_clocks(&media, clock::app_monotonic_ns);
             now = pump.media(now, 0);
         }
         // 100 ms of TX passes 250 µs apart over what the pump wrote, with
@@ -506,6 +517,7 @@ fn the_engine_pump_and_its_tx_passes_do_not_allocate() {
     assert_eq!(violation_count(), 0, "the pump or the TX passes allocated");
     let v = stats.view();
     assert_eq!((v.blocks, v.late, v.rebootstraps), (300, 0, 0), "{v:?}");
+    assert_eq!(STAMPED.load(Ordering::Relaxed), 300, "every block stamped");
     let (la, lb) = (tx.lane(0), tx.lane(1));
     assert_eq!(la.rebootstraps + lb.rebootstraps, 0, "{la:?} {lb:?}");
     assert!((295..=300).contains(&la.packets), "{la:?}");

@@ -1055,6 +1055,10 @@ fn the_app_offset_is_media_less_app() {
     // A media time past i64 reads as i64::MAX.
     assert_eq!(app_offset_ns(u64::MAX, 0), i64::MAX);
     assert_eq!(app_offset_ns(u64::MAX, 1), i64::MAX - 1);
+    // Saturating, never wrapping, at both ends.
+    assert_eq!(app_offset_ns(u64::MAX, -1), i64::MAX);
+    assert_eq!(app_offset_ns(0, i64::MIN), i64::MAX);
+    assert_eq!(app_offset_ns(0, i64::MAX), -i64::MAX);
 }
 
 /// dstack #295: on Linux the app's clock is `CLOCK_MONOTONIC`, the clock
@@ -1100,4 +1104,12 @@ fn the_app_clock_is_raw_qpc_on_windows() {
     let after = read();
     assert!(before <= app && app <= after, "{before} {app} {after}");
     assert!(before > 0);
+    // Never the steered clock: before its first poll that reads the wall
+    // (ns since 1970), after it QPC through a model fitted to the wall;
+    // either is decades past the raw counter's time since boot.
+    let steered = sys::monotonic_ns();
+    assert!(
+        steered - app > 10 * 365 * 86_400 * 1_000_000_000,
+        "{steered} {app}"
+    );
 }

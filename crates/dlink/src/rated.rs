@@ -152,7 +152,11 @@ pub struct Rated<P> {
     /// TX FIFO runs dry, frames (shared with the app's status).
     dry: Arc<AtomicU64>,
     /// The RX converter's delay, ns ([`Rated::delay_ns`]'s RX): the app's
-    /// block plays that much after the device's ([`Block::play_at`]).
+    /// block plays that much after the device's ([`Block::play_at`]). At a
+    /// ratio whose app blocks vary in size (44.1 kHz on 96 kHz: 58 or 59
+    /// frames), an app block's first sample sits up to one app sample off
+    /// its device block's start; the play time follows the device's blocks
+    /// and never drifts from them.
     rx_delay_ns: i64,
 }
 

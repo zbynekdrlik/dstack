@@ -824,12 +824,13 @@ impl<P: Process> Pump<P> {
 /// `rate`) in the app's clock, ns (dstack #295): `start + P + B`, its
 /// first sample's stamp plus the device's RX path P + (c) ((c) = B without
 /// a converter; the block's due time), as a media time, less `offset_ns`
-/// (the media clock less the app's, [`crate::clock::app_offset_ns`]).
+/// (the media clock less the app's, at a pair read back to back:
+/// [`Pump::read_clocks`]).
 pub fn play_at_ns(start: u64, timing: Timing, rate: u32, offset_ns: i64) -> i64 {
     let media = ns_of(start + timing.playout + timing.block, rate);
     i64::try_from(media)
         .unwrap_or(i64::MAX)
-        .wrapping_sub(offset_ns)
+        .saturating_sub(offset_ns)
 }
 
 /// Whether a pump moved by `shift` (`None`: not moved) reads its inputs
