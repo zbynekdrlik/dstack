@@ -205,7 +205,21 @@ impl Json {
 ///   pacing itself), `offset` (D) and `playout` (P) in samples, `blocks`,
 ///   `late`, `missed` (blocks skipped by re-bootstraps), `overruns` (blocks
 ///   longer than one period), `rebootstraps`, `max_process_us`
-///   ([`crate::stream::PumpView`]).
+///   ([`crate::stream::PumpView`]); dstack #281: the re-bootstraps by
+///   cause, `rebootstraps_late` (more than W behind), `rebootstraps_clock_back`
+///   (the clock went back), `rebootstraps_reanchor` (a re-anchor off the
+///   block grid), `rebootstraps_retime` (a new device latency), adding up
+///   to `rebootstraps`; how late the pump woke ([`crate::stream::wake`]):
+///   `wake_behind_max_us` (since the start), `wake_behind_minute_max_us`
+///   (the last whole minute, absent before the first), `wake_behind_buckets`
+///   (8 counts: under 0.5, 1, 2, 5, 10, 20, 50 ms, and 50 ms or more),
+///   `late_wakes` (wakes one block or more behind), `late_wakes_recent`
+///   (the last 32 of them, oldest first: `unix_ms` UTC, `behind_us`,
+///   `rebootstrap` 0/1); `threads`: each media thread that took its
+///   priority, `thread` (`pump`, `tx`, `tx_relay`, `rx`), `scheduling`
+///   (`mmcss_high`, `mmcss_joined_priority_refused`, `highest`,
+///   `sched_fifo`, `realtime` (Windows), `normal`, `refused`) and
+///   `mmcss_task` (MMCSS's task index, null outside MMCSS).
 /// - `app` (dstack #104), only once the app set a hook
 ///   ([`Media::set_app_status`]), its thread's first call returned, and
 ///   while it returns a JSON object: that object, compact (the cached part:
@@ -542,7 +556,11 @@ fn checks_part(j: &mut Json, media: &Media) {
 }
 
 fn engine_part(j: &mut Json, media: &Media) {
-    let Some(v) = media.engine() else { return };
+    // One read of the attached engine: its view and its wakes agree.
+    let Some(stats) = media.engine_stats() else {
+        return;
+    };
+    let v = stats.view();
     j.open(Some("engine"), '{');
     j.flag("media", v.media);
     j.num("offset", v.offset);
@@ -553,7 +571,51 @@ fn engine_part(j: &mut Json, media: &Media) {
     j.num("overruns", v.overruns);
     j.num("rebootstraps", v.rebootstraps);
     j.num("max_process_us", v.max_process_us);
+    j.num("rebootstraps_late", v.rebootstraps_late);
+    j.num("rebootstraps_clock_back", v.rebootstraps_clock_back);
+    j.num("rebootstraps_reanchor", v.rebootstraps_reanchor);
+    j.num("rebootstraps_retime", v.rebootstraps_retime);
+    j.num("wake_behind_max_us", v.wake_behind_max_us);
+    if let Some(us) = v.wake_behind_minute_max_us {
+        j.num("wake_behind_minute_max_us", us);
+    }
+    wakes_part(j, stats.wakes());
+    threads_part(j, &media.tx.scheduling().threads());
     j.close('}');
+}
+
+/// The pump's wake lateness (dstack #281): the buckets, the late wakes'
+/// count and the last of them.
+fn wakes_part(j: &mut Json, wakes: &crate::stream::wake::WakeLateness) {
+    j.open(Some("wake_behind_buckets"), '[');
+    for n in wakes.buckets() {
+        j.item(n);
+    }
+    j.close(']');
+    j.num("late_wakes", wakes.late_wakes());
+    j.open(Some("late_wakes_recent"), '[');
+    for w in wakes.recent() {
+        j.open(None, '{');
+        j.num("unix_ms", w.unix_ms);
+        j.num("behind_us", w.behind_us);
+        j.flag("rebootstrap", w.rebootstrap);
+        j.close('}');
+    }
+    j.close(']');
+}
+
+/// The media threads' scheduling (dstack #281), each that took its
+/// priority: `thread`, `scheduling`, `mmcss_task` (null outside MMCSS).
+fn threads_part(j: &mut Json, threads: &[crate::media::tx::Scheduled]) {
+    j.open(Some("threads"), '[');
+    for t in threads {
+        j.open(None, '{');
+        j.word("thread", t.thread.word());
+        j.word("scheduling", t.outcome.word(crate::clock::Os::current()));
+        j.opt("mmcss_task", t.mmcss_task);
+        j.close('}');
+    }
+    j.close(']');
 }
 
 #[cfg(test)]

@@ -20,6 +20,7 @@
 //! - A discontinuity WASAPI still flags is measured on the packets'
 //!   capture times ([`GapWatch`]) and logged in ms ([`Gap::line`]).
 
+use dstack::media::tx::MmcssError;
 use dstack_endpoint::fifo::Fifo;
 
 /// The capture thread's stall that loses nothing at WASAPI, ms (dstack
@@ -59,15 +60,22 @@ impl ThreadJoin {
     }
 }
 
-/// The log line of the capture thread's MMCSS join: MMCSS's task index,
-/// or the OS error (the thread then runs at its process's priority).
-pub fn mmcss_line(joined: &std::io::Result<u32>) -> String {
+/// The log line of the capture thread's MMCSS join: MMCSS's task index;
+/// the OS error of a refused join (the thread then runs at its process's
+/// priority); or the task index and the OS error when it joined but its
+/// AVRT_PRIORITY_HIGH was refused (dstack #281: in MMCSS at the task's
+/// default priority).
+pub fn mmcss_line(joined: &Result<u32, MmcssError>) -> String {
     match joined {
         Ok(index) => {
             format!("the loopback capture thread runs in MMCSS Pro Audio (task index {index})")
         }
-        Err(e) => format!(
+        Err(MmcssError::Join(e)) => format!(
             "MMCSS refused the loopback capture thread ({e}): it runs at its process's priority"
+        ),
+        Err(MmcssError::Priority { index, error }) => format!(
+            "the loopback capture thread runs in MMCSS Pro Audio (task index {index}), \
+             but AVRT_PRIORITY_HIGH was refused ({error}): it runs at the task's default priority"
         ),
     }
 }
@@ -286,9 +294,19 @@ mod tests {
         );
         let refused = std::io::Error::other("the service is stopped");
         assert_eq!(
-            mmcss_line(&Err(refused)),
+            mmcss_line(&Err(MmcssError::Join(refused))),
             "MMCSS refused the loopback capture thread (the service is stopped): \
              it runs at its process's priority"
+        );
+        let priority = MmcssError::Priority {
+            index: 5,
+            error: std::io::Error::other("access denied"),
+        };
+        assert_eq!(
+            mmcss_line(&Err(priority)),
+            "the loopback capture thread runs in MMCSS Pro Audio (task index 5), \
+             but AVRT_PRIORITY_HIGH was refused (access denied): \
+             it runs at the task's default priority"
         );
     }
 

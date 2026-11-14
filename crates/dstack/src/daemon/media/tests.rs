@@ -668,12 +668,13 @@ async fn the_driver_s_tick_warns_once_for_a_second_the_pump_restarted() {
     let records = Records::default();
     let (mut driver, _answers, _changes) = driver_of(&media);
     driver.tick(&records);
-    stats.rebootstrapped(4);
+    stats.rebootstrapped(4, crate::stream::Cause::Late);
     std::thread::sleep(Duration::from_millis(1_010));
     let log = capture_warnings(|| driver.tick(&records));
     let lines: Vec<&str> = log.lines().filter(|l| l.contains(PUMP_WARNING)).collect();
     assert_eq!(lines.len(), 1, "{log}");
     assert!(lines[0].contains("missed=4"), "{log}");
+    assert!(lines[0].contains("cause=late"), "{log}");
 }
 
 /// dstack #203: the tick's traffic watch reads the neighbours its discovery

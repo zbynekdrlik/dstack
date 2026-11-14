@@ -425,6 +425,7 @@ impl Media {
             Arc::clone(&self.clock),
             Arc::clone(&self.rx),
             self.tx.cfg.rx_thread_cpu(),
+            Arc::clone(self.tx.scheduling()),
         ) {
             Ok(rx) => Ok(Threads { tx, rx }),
             Err(e) => {

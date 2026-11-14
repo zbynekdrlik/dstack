@@ -12,11 +12,18 @@
 //! only `overruns` grown, blocks took longer than their period (an
 //! unoptimised converter in a debug build, dstack #1). A gap without the
 //! line is the network or the RX/TX path.
+//!
+//! The line names the re-bootstraps' causes (`cause`, [`cause_word`]:
+//! `late`, `clock_back`, `reanchor`, `retime`, joined by `+`; `none` when
+//! only overruns grew) and that second's latest wake (`behind_max_us`,
+//! [`super::wake`], dstack #281). Every [`MINUTE_NS`] the watch also ends
+//! the pump's wake minute ([`super::wake::WakeLateness::take_minute`]),
+//! which the status shows.
 
 use tracing::warn;
 
 use super::{PumpStats, PumpView};
-use crate::media::late::EVERY_NS;
+use crate::media::late::{EVERY_NS, MINUTE_NS};
 
 /// The text of the pump watch's warning: the line a consumer greps for.
 pub const PUMP_WARNING: &str = "engine pump lost or overran blocks this second";
@@ -31,6 +38,32 @@ pub struct Grew {
     pub missed: u64,
     /// Blocks that took longer than one period.
     pub overruns: u64,
+    /// The re-bootstraps by cause ([`super::Cause`], dstack #281).
+    pub late: u64,
+    pub clock_back: u64,
+    pub reanchor: u64,
+    pub retime: u64,
+}
+
+/// The causes of the re-bootstraps that grew, as the warning names them:
+/// `late`, `clock_back`, `reanchor`, `retime` in that order, joined by `+`;
+/// `none` when none grew (only overruns).
+pub fn cause_word(grew: &Grew) -> String {
+    let words: Vec<&str> = [
+        (grew.late, "late"),
+        (grew.clock_back, "clock_back"),
+        (grew.reanchor, "reanchor"),
+        (grew.retime, "retime"),
+    ]
+    .into_iter()
+    .filter(|&(n, _)| n > 0)
+    .map(|(_, word)| word)
+    .collect();
+    if words.is_empty() {
+        "none".to_string()
+    } else {
+        words.join("+")
+    }
 }
 
 /// The watch's memory: the counts at the last look.
@@ -38,6 +71,9 @@ pub struct Grew {
 pub struct PumpWatch {
     seen: Grew,
     next_ns: Option<u64>,
+    /// When the pump's wake minute ends next (`None`: the next look starts
+    /// one).
+    minute_ns: Option<u64>,
     /// The address of the engine's counts at the last watch: another
     /// engine (a later attach) is learnt afresh.
     engine: usize,
@@ -50,8 +86,13 @@ impl PumpWatch {
                 rebootstraps: 0,
                 missed: 0,
                 overruns: 0,
+                late: 0,
+                clock_back: 0,
+                reanchor: 0,
+                retime: 0,
             },
             next_ns: None,
+            minute_ns: None,
             engine: 0,
         }
     }
@@ -72,25 +113,48 @@ impl PumpWatch {
         }
         let first = self.next_ns.is_none();
         self.next_ns = Some(now_ns.saturating_add(EVERY_NS));
-        let grew = Grew {
-            rebootstraps: view.rebootstraps.saturating_sub(self.seen.rebootstraps),
-            missed: view.missed.saturating_sub(self.seen.missed),
-            overruns: view.overruns.saturating_sub(self.seen.overruns),
-        };
-        self.seen = Grew {
+        let now = Grew {
             rebootstraps: view.rebootstraps,
             missed: view.missed,
             overruns: view.overruns,
+            late: view.rebootstraps_late,
+            clock_back: view.rebootstraps_clock_back,
+            reanchor: view.rebootstraps_reanchor,
+            retime: view.rebootstraps_retime,
+        };
+        let seen = std::mem::replace(&mut self.seen, now);
+        let grew = Grew {
+            rebootstraps: now.rebootstraps.saturating_sub(seen.rebootstraps),
+            missed: now.missed.saturating_sub(seen.missed),
+            overruns: now.overruns.saturating_sub(seen.overruns),
+            late: now.late.saturating_sub(seen.late),
+            clock_back: now.clock_back.saturating_sub(seen.clock_back),
+            reanchor: now.reanchor.saturating_sub(seen.reanchor),
+            retime: now.retime.saturating_sub(seen.retime),
         };
         let any = grew.rebootstraps > 0 || grew.missed > 0 || grew.overruns > 0;
         Some((any && !first).then_some(grew))
     }
 
+    /// Whether the pump's wake minute ends at this look at `now_ns`: once
+    /// [`MINUTE_NS`] has passed since the minute started (the first look
+    /// starts one).
+    fn minute_ends(&mut self, now_ns: u64) -> bool {
+        let ends = self.minute_ns.is_some_and(|end| now_ns >= end);
+        if ends || self.minute_ns.is_none() {
+            self.minute_ns = Some(now_ns.saturating_add(MINUTE_NS));
+        }
+        ends
+    }
+
     /// [`PumpWatch::look`] on the engine `stats` of the device `device`
     /// (`None` before an engine is attached: nothing), a growth logged as
     /// one warning ([`PUMP_WARNING`]) whose `max_process_us` is that
-    /// second's longest block (taken at every look, a quiet one too; the
-    /// longest since the start stays in the pump's view). Counts from
+    /// second's longest block and `behind_max_us` that second's latest
+    /// wake (both taken at every look, a quiet one too; the largest since
+    /// the start stay in the pump's view), with the causes of the
+    /// re-bootstraps that grew (`cause`, [`cause_word`]). Every
+    /// [`MINUTE_NS`] a look ends the pump's wake minute. Counts from
     /// another engine than the last watch's (a later attach) are only
     /// learnt, as a first look.
     pub fn watch(&mut self, now_ns: u64, device: &str, stats: Option<&PumpStats>) {
@@ -99,13 +163,19 @@ impl PumpWatch {
         if engine != self.engine {
             self.engine = engine;
             self.next_ns = None;
+            self.minute_ns = None;
         }
         let view = stats.view();
         let Some(grew) = self.looked(now_ns, &view) else {
             return;
         };
-        // Every look starts the next second's longest block afresh.
+        // Every look starts the next second's longest block and latest
+        // wake afresh.
         let second_max_us = stats.take_second_max_us();
+        let behind_max_us = stats.wakes().take_second_max_us();
+        if self.minute_ends(now_ns) {
+            stats.wakes().take_minute();
+        }
         let Some(grew) = grew else {
             return;
         };
@@ -121,6 +191,8 @@ impl PumpWatch {
             margin = timing.margin,
             playout = timing.playout,
             offset = timing.offset(),
+            cause = %cause_word(&grew),
+            behind_max_us,
             "{PUMP_WARNING}"
         );
     }
