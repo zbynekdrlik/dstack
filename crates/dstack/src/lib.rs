@@ -91,6 +91,7 @@ pub mod info;
 pub mod latency;
 pub mod lso;
 pub mod media;
+pub mod membership;
 pub mod meter;
 pub mod qdisc;
 pub mod stream;
