@@ -209,6 +209,7 @@ pub use latency::{
 };
 pub use rated::Rated;
 
+use dstack::clock::TestClockPpm;
 use dstack::daemon::PlaceWait;
 use dstack::device::TimingProfile;
 use dstack::embed::Embedded;
@@ -251,6 +252,7 @@ pub struct Config {
     flow_slots: Option<usize>,
     block: u64,
     frame_sender: Sender,
+    test_clock_ppm: Option<TestClockPpm>,
 }
 
 /// The host's frame sender in a [`Config`] (compared by identity).
@@ -309,6 +311,7 @@ impl Config {
             flow_slots: None,
             block: BLOCK,
             frame_sender: Sender::default(),
+            test_clock_ppm: None,
         }
     }
 
@@ -519,6 +522,29 @@ impl Config {
         self
     }
 
+    /// TEST ONLY (dstack #305): the device runs on the TEST system clock
+    /// ([`Clock::System`], this machine's own clock, no PTP network) with
+    /// `ppm` of skew against the machine's monotonic clock, so the app's
+    /// clock and the media clock drift as in the field (about 6 ppm) on a CI
+    /// runner with no grandmaster. [`Link::start`] and [`Link::start_until`]
+    /// then start on the system clock; [`Link::start_on`] with any other
+    /// clock refuses it. -1000 to 1000 ppm; logged as a warning at start.
+    /// The device's config carries it as `test_clock_ppm`.
+    pub fn test_clock_ppm(mut self, ppm: f64) -> Self {
+        self.test_clock_ppm = Some(TestClockPpm(ppm));
+        self
+    }
+
+    /// The clock [`Link::start`] and [`Link::start_until`] start on: the
+    /// TEST system clock with a [`Config::test_clock_ppm`], else `usual`.
+    pub fn clock(&self, usual: ClockSource) -> ClockSource {
+        if self.test_clock_ppm.is_some() {
+            ClockSource::System
+        } else {
+            usual
+        }
+    }
+
     /// The device config dstack runs: the normal timing profile, the
     /// app's block ([`BLOCK`] unless set), the Dante latency P and the
     /// pump's margin W from the config's [`split`], 24-bit. Every problem is
@@ -601,6 +627,9 @@ impl Config {
                 .collect();
             t.insert("subscribe".into(), subs.into());
         }
+        if let Some(ppm) = self.test_clock_ppm {
+            t.insert("test_clock_ppm".into(), ppm.0.into());
+        }
         t.insert("rx".into(), self.rx.clone().into());
         t.insert("tx".into(), self.tx.clone().into());
         let text = toml::to_string(&t).map_err(|e| vec![e.to_string()])?;
@@ -680,7 +709,13 @@ impl Link {
         map: Map,
         processor: P,
     ) -> Result<Link, HostError> {
-        Self::start_on(config, place, map, processor, ClockSource::Linked)
+        Self::start_on(
+            config,
+            place,
+            map,
+            processor,
+            config.clock(ClockSource::Linked),
+        )
     }
 
     /// [`Link::start`] that waits for an address or interface not there
@@ -708,12 +743,13 @@ impl Link {
             PlaceWait::Until(stop),
             map,
             processor,
-            ClockSource::Linked,
+            config.clock(ClockSource::Linked),
         )
     }
 
     /// [`Link::start`] on the clock `source` (`ClockSource::System` is for
-    /// tests only).
+    /// tests only; a [`Config::test_clock_ppm`] needs it, any other source
+    /// refuses to start with it).
     pub fn start_on<P: Process + 'static>(
         config: &Config,
         place: &Place,

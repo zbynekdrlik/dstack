@@ -224,6 +224,12 @@ pub struct DeviceConfig {
     /// suspected of lengthening a WFP receive DPC (dstack #1, dasio#1).
     #[serde(default = "default_flow_slots")]
     pub flow_slots: usize,
+    /// TEST ONLY (dstack #305): the TEST system clock's skew, ppm, -1000 to
+    /// 1000 ([`crate::clock::skewed`]). Only with the system clock
+    /// (`host::ClockSource::System`, `--clock system`): any other source
+    /// refuses to start with it. Logged as a warning at start.
+    #[serde(default)]
+    pub test_clock_ppm: Option<crate::clock::TestClockPpm>,
     /// Where the state ([`DeviceState`]) is kept.
     pub state_file: PathBuf,
 }
@@ -401,6 +407,7 @@ impl DeviceConfig {
         if !(FPP_MIN..=FPP_MAX).contains(&self.tx_fpp_max) {
             out.push(format!("tx_fpp_max: {FPP_MIN} to {FPP_MAX}"));
         }
+        out.extend(self.test_clock_ppm.and_then(|ppm| ppm.problem()));
         if self
             .arc_rx_fpp
             .is_some_and(|f| !(FPP_MIN..=FPP_MAX).contains(&f))

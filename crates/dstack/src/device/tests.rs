@@ -1865,6 +1865,22 @@ fn flow_slots_default_to_every_slot_and_are_checked() {
     }
 }
 
+/// dstack #305: the TEST clock's skew, a number (an integer too), off when
+/// left out, refused past ±1000 ppm.
+#[test]
+fn the_test_clock_skew_is_taken_and_checked() {
+    use crate::clock::TestClockPpm;
+    assert_eq!(config().test_clock_ppm, None);
+    for (text, ppm) in [("6", 6.0), ("-6.5", -6.5), ("1000", 1000.0)] {
+        let cfg = DeviceConfig::from_toml(&format!("test_clock_ppm = {text}\n{TEST_DEVICE}"))
+            .unwrap_or_else(|e| panic!("{text}: {e}"));
+        assert_eq!(cfg.test_clock_ppm, Some(TestClockPpm(ppm)), "{text}");
+    }
+    let e = DeviceConfig::from_toml(&format!("test_clock_ppm = 1000.5\n{TEST_DEVICE}"))
+        .expect_err("past 1000 ppm");
+    assert_eq!(e.problems, ["test_clock_ppm: a number from -1000 to 1000"]);
+}
+
 #[test]
 fn the_spin_tail_is_taken_and_checked() {
     let text = format!("{TEST_DEVICE}\nspin_tail_ns = 200000\n");

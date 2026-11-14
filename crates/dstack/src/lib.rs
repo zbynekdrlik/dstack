@@ -96,6 +96,8 @@ pub mod lso;
 pub mod media;
 pub mod membership;
 pub mod meter;
+#[cfg(any(target_os = "linux", windows))]
+pub mod peer;
 pub mod qdisc;
 pub mod stream;
 pub mod subscribe;

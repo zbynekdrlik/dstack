@@ -403,6 +403,9 @@ pub(crate) fn prepare_on(
     source: ClockSource,
     resolve: impl FnOnce(&Place) -> Result<IfAddr, String>,
 ) -> Result<Prepared, HostError> {
+    if let Some(problem) = crate::clock::skewed::test_clock_refusal(source, cfg.test_clock_ppm) {
+        return Err(setup(problem));
+    }
     let mut device = load_device(cfg)?;
     fix_flow_ports(&mut device.cfg)?;
     // One timing profile per process: the media threads' waits and
@@ -481,25 +484,20 @@ pub(crate) fn prepare_on(
         let (internal, keep) = crate::clock::linked::start_internal(&ifa.name, seed);
         Arc::new(Linked::new(internal, Arc::clone(&mono), keep))
     });
-    let ptp: Arc<dyn crate::clock::PtpClock> = match &linked {
-        Some(l) => l.clone(),
-        None => mono.clone(),
-    };
+    let stats = Arc::new(ClockStats::default());
+    let ptp = crate::clock::skewed::media_ptp(
+        source,
+        device.cfg.test_clock_ppm,
+        linked.clone().map(|l| l as Arc<dyn crate::clock::PtpClock>),
+        &mono,
+        &stats,
+        (monotonic_ns(), realtime_ns()),
+    );
     let clock = Clock {
         ptp,
         freq: Arc::new(AtomicI32::new(0)),
-        stats: Arc::new(ClockStats::default()),
+        stats,
     };
-    if source == ClockSource::System {
-        // Test only: PTP time is this machine's clock from now on.
-        let k_ns = realtime_ns() - monotonic_ns();
-        mono.set_k(k_ns);
-        clock.stats.mark_system();
-        warn!(
-            "media clock: the TEST system clock; PTP time is this machine's clock, not the \
-             network's: never for a real Dante network"
-        );
-    }
     let media = Media::new(&device, net.ip, clock, seed(), engine_tx)
         .map_err(|e| run_failed(format!("the flow sockets: {e}")))?;
     #[cfg(unix)]

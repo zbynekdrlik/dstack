@@ -265,3 +265,39 @@ fn a_re_prime_after_a_stall_starts_on_the_producer_s_schedule() {
         "mean depth {after} ms after the re-prime, {before} ms before"
     );
 }
+
+/// A block start after blocks with none (free pacing, no media clock)
+/// resyncs once: the schedule the starts name came back on another clock
+/// (dstack #303 follow-up). Today the `None` forgot the last start, so the
+/// return to the media clock never resynced. Its frames were played, so
+/// no time is skipped.
+#[test]
+fn a_start_after_a_block_without_one_resyncs_once() {
+    let mut s = Obs::new();
+    s.run(2.0);
+    let mut out = vec![0.0; CALL];
+    s.produce();
+    s.player.fill_at(None, &mut out, 1, |x| x);
+    s.frames += CALL as u64;
+    s.call();
+    assert_eq!(s.player.stats().resyncs(), 1);
+    assert_eq!(s.player.skipped, 0);
+    // Contiguous starts after it: no other resync.
+    s.run(1.0);
+    assert_eq!(s.player.stats().resyncs(), 1);
+}
+
+/// Blocks without a start before the first one with a start never resync:
+/// nothing was interrupted.
+#[test]
+fn a_first_start_after_blocks_without_one_does_not_resync() {
+    let mut s = Obs::new();
+    let mut out = vec![0.0; CALL];
+    for _ in 0..10 {
+        s.produce();
+        s.player.fill_at(None, &mut out, 1, |x| x);
+        s.frames += CALL as u64;
+    }
+    s.run(1.0);
+    assert_eq!(s.player.stats().resyncs(), 0);
+}
