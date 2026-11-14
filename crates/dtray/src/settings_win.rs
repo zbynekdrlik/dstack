@@ -7,7 +7,8 @@
 //! thread of the tray's message loop (or of its own loop for
 //! `dtray --settings`); an apply runs on a worker thread
 //! ([`dtray::dasio::apply::run`] with [`WinOps`]) and posts its progress
-//! back. Outside the mutation gate, as `win.rs`.
+//! back. A bridge instance's tab adds its ASIO bridge group
+//! (`bridge.rs`, dstack #292). Outside the mutation gate, as `win.rs`.
 
 use std::cell::{Cell, RefCell};
 use std::net::SocketAddrV4;
@@ -40,15 +41,16 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     BS_DEFPUSHBUTTON, BS_GROUPBOX, BS_PUSHBUTTON, CB_ADDSTRING, CB_GETCURSEL, CB_GETITEMDATA,
     CB_GETLBTEXT, CB_GETLBTEXTLEN, CB_RESETCONTENT, CB_SETCURSEL, CB_SETITEMDATA, CBN_SELCHANGE,
     CBS_DROPDOWNLIST, CBS_HASSTRINGS, CBS_OWNERDRAWFIXED, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT,
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW, IDC_ARROW,
-    KillTimer, LoadCursorW, MSG, NONCLIENTMETRICSW, PostMessageW, PostQuitMessage, RegisterClassW,
-    SPI_GETNONCLIENTMETRICS, SW_SHOW, SendMessageW, SetForegroundWindow, SetTimer, SetWindowTextW,
-    ShowWindow, SystemParametersInfoW, TranslateMessage, WM_CLOSE, WM_COMMAND, WM_CREATE,
-    WM_CTLCOLORBTN, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DRAWITEM, WM_MEASUREITEM, WM_NOTIFY,
-    WM_SETFONT, WM_TIMER, WNDCLASSW, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN, WS_MINIMIZEBOX,
-    WS_OVERLAPPED, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, EN_CHANGE, GetMessageW,
+    IDC_ARROW, KillTimer, LoadCursorW, MSG, NONCLIENTMETRICSW, PostMessageW, PostQuitMessage,
+    RegisterClassW, SPI_GETNONCLIENTMETRICS, SW_SHOW, SendMessageW, SetForegroundWindow, SetTimer,
+    SetWindowTextW, ShowWindow, SystemParametersInfoW, TranslateMessage, WM_CLOSE, WM_COMMAND,
+    WM_CREATE, WM_CTLCOLORBTN, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DRAWITEM, WM_MEASUREITEM,
+    WM_NOTIFY, WM_SETFONT, WM_TIMER, WNDCLASSW, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN,
+    WS_MINIMIZEBOX, WS_OVERLAPPED, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
 };
 
+mod bridge;
 mod controls;
 mod ops;
 mod paint;
@@ -83,8 +85,18 @@ const ID_OUT: usize = 116;
 const ID_PUMP: usize = 117;
 const ID_IO: usize = 118;
 const ID_RXCPU: usize = 119;
+/// A bridge instance's group (dstack #292).
+const ID_DRIVER: usize = 120;
+const ID_TOASIO: usize = 121;
+const ID_FROMASIO: usize = 122;
+const ID_APPBUF: usize = 123;
+const ID_BRIDGE_GROUP: usize = 124;
+/// The group's labels and its hint (6 ids).
+const ID_BRIDGE_LABEL: usize = 170;
 const ID_BANNER: usize = 130;
 const ID_RESULT: usize = 131;
+/// The legend under the banner.
+const ID_LEGEND: usize = 132;
 const ID_CANCEL: usize = 140;
 const ID_APPLY: usize = 141;
 /// The ● marker (applies at once).
@@ -112,6 +124,9 @@ struct Tab {
     fields: Result<(Fields, Fields), String>,
     /// The device's latency range (ARC), when it was read.
     range: Option<(u64, u64)>,
+    /// Why the bridge group's texts give no bridge (a map or the app
+    /// buffer that is not a number), while they do not.
+    bridge_error: Option<String>,
 }
 
 /// The lists the controls show for the current tab.
@@ -126,6 +141,8 @@ struct Lists {
     pump: Vec<Choice<Option<usize>>>,
     io: Vec<Choice<Option<usize>>>,
     rx: Vec<Choice<Option<usize>>>,
+    /// A bridge instance's ASIO drivers.
+    driver: Vec<Choice<String>>,
 }
 
 struct State {
@@ -135,6 +152,9 @@ struct State {
     cur: usize,
     lists: Lists,
     adapters: Vec<Adapter>,
+    /// The PC's ASIO drivers (a bridge instance's list), or why they
+    /// could not be read.
+    asio: Result<Vec<String>, String>,
     cpu_count: usize,
     devices: Vec<Local>,
     readings: Vec<Reading>,
@@ -272,6 +292,7 @@ fn load_tab(inst: Instance, devices: &[Local]) -> Tab {
         text,
         fields,
         range: None,
+        bridge_error: None,
     };
     if let Ok((old, new)) = &mut tab.fields
         && let Some(d) = device_of(devices, &old.name)
@@ -334,6 +355,7 @@ fn create(devices: Vec<Local>, readings: Vec<Reading>, standalone: bool) -> Resu
             cur: 0,
             lists: Lists::default(),
             adapters,
+            asio: dstack_asio::drivers(),
             cpu_count,
             devices,
             readings,
@@ -379,9 +401,18 @@ fn create(devices: Vec<Local>, readings: Vec<Reading>, standalone: bool) -> Resu
     Ok(())
 }
 
-const COMBOS: [usize; 9] = [
-    ID_IFACE, ID_BLOCK, ID_RXLAT, ID_TXLAT, ID_IN, ID_OUT, ID_PUMP, ID_IO, ID_RXCPU,
+const COMBOS: [usize; 10] = [
+    ID_IFACE, ID_BLOCK, ID_RXLAT, ID_TXLAT, ID_IN, ID_OUT, ID_PUMP, ID_IO, ID_RXCPU, ID_DRIVER,
 ];
+/// The bridge group's edits.
+const EDITS: [usize; 3] = [ID_TOASIO, ID_FROMASIO, ID_APPBUF];
+
+/// The combo boxes and edits on or off.
+fn enable_all(h: HWND, on: bool) {
+    for id in COMBOS.into_iter().chain(EDITS) {
+        enable(h, id, on);
+    }
+}
 
 /// The other instances' fields (their files as read).
 fn others(st: &State) -> Vec<Fields> {
@@ -428,14 +459,18 @@ fn show_tab(st: &mut State) {
         st.restart = None;
     }
     let busy = dasio::busy_cpus(&others(st));
+    // The fields show the tab's choices: a bridge text not yet a number is
+    // dropped for them.
+    st.tabs[st.cur].bridge_error = None;
     let tab = &st.tabs[st.cur];
     let (old, new) = match &tab.fields {
         Ok(f) => f.clone(),
         Err(e) => {
             for id in COMBOS {
                 fill::<u8>(h, id, &[], 0);
-                enable(h, id, false);
             }
+            enable_all(h, false);
+            bridge::show(h, false);
             enable(h, ID_APPLY, false);
             set_text(h, ID_RATE, "");
             set_text(h, ID_BANNER, "");
@@ -459,6 +494,11 @@ fn show_tab(st: &mut State) {
         pump: choices::cpus(st.cpu_count, &busy, old.cpus.pump),
         io: choices::cpus(st.cpu_count, &busy, old.cpus.io),
         rx: choices::cpus(st.cpu_count, &busy, old.cpus.rx),
+        driver: old
+            .bridge
+            .as_ref()
+            .map(|b| choices::drivers(&st.asio, &b.driver))
+            .unwrap_or_default(),
     };
     fill(
         h,
@@ -504,10 +544,13 @@ fn show_tab(st: &mut State) {
     );
     fill(h, ID_IO, &l.io, choices::index_of(&l.io, &new.cpus.io));
     fill(h, ID_RXCPU, &l.rx, choices::index_of(&l.rx, &new.cpus.rx));
-    st.lists = l;
-    for id in COMBOS {
-        enable(h, id, st.busy.is_none());
+    match &new.bridge {
+        Some(b) => bridge::fill_values(h, &l.driver, b),
+        None => fill::<u8>(h, ID_DRIVER, &[], 0),
     }
+    bridge::show(h, new.bridge.is_some());
+    st.lists = l;
+    enable_all(h, st.busy.is_none());
     set_text(
         h,
         ID_RATE,
@@ -526,9 +569,21 @@ fn show_tab(st: &mut State) {
 fn read_controls(st: &mut State) {
     let h = st.hwnd;
     let l = &st.lists;
-    let Some(Ok((old, new))) = st.tabs.get_mut(st.cur).map(|t| t.fields.as_mut()) else {
+    let Some(tab) = st.tabs.get_mut(st.cur) else {
         return;
     };
+    let Ok((old, new)) = tab.fields.as_mut() else {
+        return;
+    };
+    if new.bridge.is_some() {
+        match bridge::read(h, &l.driver) {
+            Ok(b) => {
+                new.bridge = Some(b);
+                tab.bridge_error = None;
+            }
+            Err(e) => tab.bridge_error = Some(e),
+        }
+    }
     let pick = |id: usize| selected(h, id);
     if let Some(c) = l.iface.get(pick(ID_IFACE)) {
         new.iface = c.value.clone();
@@ -562,7 +617,10 @@ fn read_controls(st: &mut State) {
 /// The banner, the button and the check of the current choices.
 fn refresh(st: &State) {
     let h = st.hwnd;
-    let Some(Ok((old, new))) = st.tabs.get(st.cur).map(|t| t.fields.as_ref()) else {
+    let Some(tab) = st.tabs.get(st.cur) else {
+        return;
+    };
+    let Ok((old, new)) = &tab.fields else {
         return;
     };
     let changed = dasio::changes(old, new);
@@ -582,11 +640,15 @@ fn refresh(st: &State) {
             "Apply"
         },
     );
-    let problems = dasio::cpu_problems(
+    let mut problems = dasio::cpu_problems(
         &dasio::changed_cpus(&old.cpus, &new.cpus),
         &dasio::busy_cpus(&others(st)),
         st.cpu_count,
     );
+    problems.extend(tab.bridge_error.clone());
+    if tab.bridge_error.is_none() {
+        problems.extend(dasio::bridge_problems(new));
+    }
     let ok = !changed.is_empty() && problems.is_empty() && st.busy.is_none();
     enable(h, ID_APPLY, ok);
     if st.busy.is_none() {
@@ -602,6 +664,10 @@ fn start_apply(st: &mut State) {
     let Ok((old, new)) = &tab.fields else {
         return;
     };
+    if let Some(e) = &tab.bridge_error {
+        set_text(h, ID_RESULT, e);
+        return;
+    }
     let plan = match dasio::plan(&tab.text, old, new, &busy, st.cpu_count) {
         Ok(p) => p,
         Err(e) => {
@@ -630,9 +696,7 @@ fn start_apply(st: &mut State) {
     let want = new.clone();
     let hwnd = h as isize;
     st.busy = Some((st.cur, rx));
-    for id in COMBOS {
-        enable(h, id, false);
-    }
+    enable_all(h, false);
     enable(h, ID_APPLY, false);
     enable(h, ID_TAB, false);
     let spawned = std::thread::Builder::new()
@@ -785,7 +849,9 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                 ID_APPLY if code == 0 => {
                     with_state(start_apply);
                 }
-                _ if code == CBN_SELCHANGE && COMBOS.contains(&id) => {
+                _ if (code == CBN_SELCHANGE && COMBOS.contains(&id))
+                    || (code == EN_CHANGE && EDITS.contains(&id)) =>
+                {
                     with_state(|st| {
                         read_controls(st);
                         refresh(st);

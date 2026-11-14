@@ -40,8 +40,12 @@ pub const READ_POLLS: u32 = 60;
 
 /// Whether `back` states every value [`verify`] checks for `want`.
 pub fn complete(want: &Fields, back: &ReadBack) -> bool {
-    back.block.is_some()
-        && back.rx.is_some()
+    // A bridge instance states its driver, not its block ([`verify`]).
+    let kind = match &want.bridge {
+        None => back.block.is_some(),
+        Some(_) => back.driver.is_some(),
+    };
+    kind && back.rx.is_some()
         && back.tx.is_some()
         && back.latency_ns.is_some()
         && (want.iface.is_none() || back.iface.is_some())

@@ -156,12 +156,21 @@ pub(super) fn build(h: HWND, font: HFONT, tabs: &[Tab]) {
         (28, 418, 540, 18),
     );
     st("↻", ID_RESTART + 5, (mark_x, 418, 20, 20));
-    st("", ID_BANNER, (16, 450, WIDTH - 32, 44));
-    st("", ID_RESULT, (16, 498, WIDTH - 32, 36));
+    // A bridge instance's group, under the CPUs (hidden on a DAW
+    // instance's tab), before the controls under it in the Tab order.
+    bridge::build(h, font);
+    let at = |id: usize| {
+        bridge::BELOW
+            .iter()
+            .find(|(i, _)| *i == id)
+            .map_or((0, 0, 0, 0), |(_, r)| *r)
+    };
+    st("", ID_BANNER, at(ID_BANNER));
+    st("", ID_RESULT, at(ID_RESULT));
     st(
         "●  applies at once      ↻  needs a restart",
-        0,
-        (16, 548, 300, 20),
+        ID_LEGEND,
+        at(ID_LEGEND),
     );
     control(
         h,
@@ -170,7 +179,7 @@ pub(super) fn build(h: HWND, font: HFONT, tabs: &[Tab]) {
         "Cancel",
         BS_PUSHBUTTON as u32 | WS_TABSTOP,
         ID_CANCEL,
-        (404, 542, 90, 28),
+        at(ID_CANCEL),
     );
     control(
         h,
@@ -179,7 +188,7 @@ pub(super) fn build(h: HWND, font: HFONT, tabs: &[Tab]) {
         "Apply and restart",
         BS_DEFPUSHBUTTON as u32 | WS_TABSTOP,
         ID_APPLY,
-        (502, 542, 122, 28),
+        at(ID_APPLY),
     );
 }
 

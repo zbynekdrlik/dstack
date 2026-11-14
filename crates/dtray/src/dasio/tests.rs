@@ -547,6 +547,7 @@ fn back_of(f: &Fields) -> ReadBack {
         tx: Some(f.tx.len()),
         latency_ns: Some(f.latency_ns),
         iface: f.iface.clone(),
+        driver: None,
     }
 }
 
@@ -578,6 +579,7 @@ fn every_mismatch_and_every_value_not_read_is_listed() {
         tx: None,
         latency_ns: Some(1_000_000),
         iface: Some("Ethernet".into()),
+        driver: None,
     };
     assert_eq!(
         verify(&f, &back),
