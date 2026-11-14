@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- **Release gate (dstack #304): the soak.** A tag gets its release only after `crates/dlink/tests/soak.rs`'s `gate_*` cases pass (`release.yml`'s `soak` job): dlink's whole app path in OBS's shape (48 kHz app on a 96 kHz device, TX and RX bridges, `Block::play_at`) for 10 simulated minutes a case, with the app clock ±6 ppm off, the pump waking up to 8 ms late, one rebootstrap, and an irregular writer (10-25 ms stalls with catch-up bursts). It fails on a TX dropout or re-centre after priming (an irregular writer: any gap away from a stall, or two at one), a TX correction whose 30 s median leaves ±(drift + 2) ppm, or a play time off the app's clock. The RX bridge under the field's 2-8 ms late wakes is not judged until dstack #307 (an owner latency decision); a case with wakes under 1 ms judges it strictly. No API change, no latency change.
+- The gate fails on today's `bridge::Player` (dstack #303: the TX correction swings to about -200 ppm after a rebootstrap and -50 .. +47 ppm under an irregular writer); the Player fix comes before the next tag.
+
 ## 0.6.134
 
 - Internal: subscribe split into modules; no behaviour or API change; no latency change. (`crates/dstack/src/subscribe.rs`, 1204 lines, keeps the types and the public lifecycle; the RX publication, the resolving and requesting, and the flow-slot bookkeeping move verbatim into `subscribe/publish.rs`, `subscribe/request.rs` and `subscribe/slots.rs`; `subscribe::fpp_for` stays at its path. dstack #300.)
