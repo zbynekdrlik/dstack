@@ -147,7 +147,7 @@ queries_capped() {
 # 10/s, so about 105 of 240 pass.
 queries="$(send 192.0.2.1 5353 240 query 40)"
 [ "$queries" -ge 80 ] || fail "the query flood passed $queries of 240, under the burst and 10/s"
-[ "$queries" -le 135 ] || fail "the query flood passed $queries of 240: queries not capped at 10/s"
+[ "$queries" -le 130 ] || fail "the query flood passed $queries of 240: queries not capped at 10/s"
 [ "$(queries_capped)" = "$((240 - queries))" ] ||
     fail "the query cap's counter $(queries_capped) is not the $((240 - queries)) dropped"
 [ "$(capped)" = "0" ] || fail "the 50/s cap dropped queries under it"
