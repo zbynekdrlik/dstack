@@ -98,6 +98,13 @@ const STALL_GAP_GRACE_NS: u64 = 100 * MS;
 /// (the main's decision on #304: a one-second spike is allowed, a ramp is
 /// not).
 const MEDIAN_SECONDS: usize = 30;
+/// An irregular writer's band over the drift, ppm (the main's decision on
+/// #303, 14.11): at OBS's 22.67 ms target a stall over about 12 ms empties
+/// the FIFO whatever the player does, and each such gap re-primes; the
+/// level loop then drains what the re-prime leaves within its 20 ppm bound
+/// around the rate (`bridge::player::LEVEL_BOUND_PPM`). A ramp past that
+/// (today's -50 .. +47 ppm before #303) still fails.
+const STALL_BAND_PPM: f64 = 20.0;
 
 const _: () = assert!(FAULT_LATE_NS > W_NS);
 const _: () = assert!(FAULT_AT_NS + RESETTLE_NS + SETTLED_NS <= SOAK_NS);
@@ -643,7 +650,8 @@ impl Soak {
     /// - no RX dropout, judged under [`Wakes::Short`] (the RX bridge under
     ///   the field's late wakes is dstack #307's, not judged here);
     /// - the TX correction's 30 s median within ±(drift + 2) ppm over the
-    ///   last 5 min (a one-second spike passes, a ramp fails);
+    ///   last 5 min (a one-second spike passes, a ramp fails); for an
+    ///   irregular writer ±(drift + [`STALL_BAND_PPM`]);
     /// - every play time on the app's clock within 1 µs of a constant
     ///   offset, every step one block within 1 µs (none off by 1 ms);
     /// - the fault case: one rebootstrap of 8 blocks, at most one gap per
@@ -751,7 +759,11 @@ impl Soak {
                 (from.at_ns - T0) / SECOND
             );
         }
-        let band = self.drift_ppm.abs() + 2.0;
+        let band = self.drift_ppm.abs()
+            + match self.writer {
+                Writer::Ticks => 2.0,
+                Writer::Stalling => STALL_BAND_PPM,
+            };
         assert!(!medians.is_empty(), "{label}: no settled seconds");
         for &(at, m) in &medians {
             assert!(
