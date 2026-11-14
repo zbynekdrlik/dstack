@@ -33,3 +33,4 @@ Start from `docs/HANDOVER.md`, then `docs/design/2026-10-30-shared-dstack.md`.
 - ARC, what Dante Controller decides from our answers, DC checks on mbc → `.claude/rules/arc-dante-controller.md` (auto-loads on its `paths:`)
 - the app-clock bridge (FIFO target, priming, drift) → `.claude/rules/bridge.md` (auto-loads on its `paths:`)
 - RX counters, the ring, the minute lines, status keys → `.claude/rules/rx-counters.md` (auto-loads on its `paths:`)
+- multicast sockets, keeping a group joined across an interface change → `.claude/rules/multicast.md` (auto-loads on its `paths:`)
