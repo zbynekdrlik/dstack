@@ -2,6 +2,9 @@
 paths:
   - "crates/dstack/src/subscribe.rs"
   - "crates/dstack/src/subscribe/coarse.rs"
+  - "crates/dstack/src/subscribe/publish.rs"
+  - "crates/dstack/src/subscribe/request.rs"
+  - "crates/dstack/src/subscribe/slots.rs"
   - "crates/dstack/src/subscribe/tests.rs"
   - "crates/dstack/src/subscribe/tests/**"
   - "crates/dstack/src/subscribe/directory/flows.rs"

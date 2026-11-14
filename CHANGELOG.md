@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.134
+
+- Internal: subscribe split into modules; no behaviour or API change; no latency change. (`crates/dstack/src/subscribe.rs`, 1204 lines, keeps the types and the public lifecycle; the RX publication, the resolving and requesting, and the flow-slot bookkeeping move verbatim into `subscribe/publish.rs`, `subscribe/request.rs` and `subscribe/slots.rs`; `subscribe::fpp_for` stays at its path. dstack #300.)
+- Consumers: nothing to port; move the stack version when convenient.
+
 ## 0.6.133
 
 - **Feature (dstack #297, requested by iemmixer#122): an opted-in device takes its own unicast flow over a coarser multicast flow.** A low-latency receiver (`arc_rx_fpp = 4`) received a transmitter's 32-frame multicast flow: 0.33 ms of packet time before the first sample left, so a vocal landed at 1.33 ms against a 1 ms limit.
