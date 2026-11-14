@@ -5,7 +5,9 @@ use std::collections::BTreeSet;
 use dlink::bridge::{MAX_APP_BUFFER_NS, MIN_APP_BUFFER_NS};
 
 use super::*;
-use crate::dasio::{Field, Fields, Kind, ReadBack, changes, edit, plan, status_driver, verify};
+use crate::dasio::{
+    Field, Fields, Kind, ReadBack, changes, edit, install, plan, status_driver, verify,
+};
 
 /// A DAW-kind instance config (made-up names), 4 RX and 2 TX channels.
 const DAW: &str = r#"# test instance
@@ -154,28 +156,85 @@ fn a_file_without_a_bridge_gets_none_added() {
 }
 
 #[test]
-fn write_adds_a_table_and_takes_it_out() {
-    let mut doc: DocumentMut = DAW.parse().expect("toml");
-    write(&mut doc, None, Some(&bridge())).expect("written");
-    let added = doc.to_string();
-    assert_eq!(Fields::read(&added).expect("reads").bridge, Some(bridge()));
-    assert!(added.contains("[bridge]\n"), "{added}");
-    let mut doc: DocumentMut = text().parse().expect("toml");
-    write(&mut doc, Some(&bridge()), None).expect("written");
-    assert_eq!(Fields::read(&doc.to_string()).expect("reads").bridge, None);
-    // A bridge key of another shape is not written over.
-    let mut doc: DocumentMut = format!("{DAW}bridge = 3\n").parse().expect("toml");
+fn the_instance_s_kind_is_not_changed_here() {
+    // A DAW instance made a bridge, and a bridge made a DAW instance: the
+    // window never does either, so the elevated helper refuses both.
+    let mut to_bridge = Fields::read(DAW).expect("reads");
+    to_bridge.bridge = Some(bridge());
     assert_eq!(
-        write(&mut doc, None, Some(&bridge())),
-        Err("bridge: not a table".to_string())
+        edit(DAW, &to_bridge),
+        Err("the instance's kind (DAW or bridge) is not changed here".to_string())
     );
+    let mut to_daw = fields();
+    to_daw.bridge = None;
+    assert_eq!(
+        edit(&text(), &to_daw),
+        Err("the instance's kind (DAW or bridge) is not changed here".to_string())
+    );
+    let root = tempfile::tempdir().expect("a temp dir");
+    let dir = root.path().join("instance-1");
+    std::fs::create_dir(&dir).expect("a folder");
+    for (current, staged) in [(DAW.to_string(), text()), (text(), DAW.to_string())] {
+        std::fs::write(dir.join(crate::dasio::CONFIG), &current).expect("a config");
+        let err = install(root.path(), 1, &staged).expect_err("refused");
+        assert_eq!(
+            err,
+            "the new config is refused: the instance's kind (DAW or bridge) is not changed here"
+        );
+        let kept = std::fs::read_to_string(dir.join(crate::dasio::CONFIG)).expect("reads");
+        assert_eq!(kept, current);
+    }
+    // An edited bridge is the window's to write: the helper takes it.
+    std::fs::write(dir.join(crate::dasio::CONFIG), text()).expect("a config");
+    let mut edited = fields();
+    edited.bridge.as_mut().expect("a bridge").driver = "Other ASIO".into();
+    let out = edit(&text(), &edited).expect("the edit");
+    install(root.path(), 1, &out).expect("installed");
+    assert_eq!(
+        std::fs::read_to_string(dir.join(crate::dasio::CONFIG)).expect("reads"),
+        out
+    );
+}
+
+#[test]
+fn write_changes_only_the_keys_that_differ() {
+    let mut doc: DocumentMut = text().parse().expect("toml");
+    write(&mut doc, &bridge(), &bridge()).expect("written");
+    assert_eq!(doc.to_string(), text());
+    // A document without the table is left as it is (the edit's read-back
+    // then refuses it).
+    let mut daw: DocumentMut = DAW.parse().expect("toml");
+    let mut other = bridge();
+    other.driver = "X".into();
+    write(&mut daw, &bridge(), &other).expect("written");
+    assert_eq!(daw.to_string(), DAW);
     let mut big = bridge();
     big.app_buffer_ns = Some(u64::MAX);
     let mut doc: DocumentMut = text().parse().expect("toml");
     assert_eq!(
-        write(&mut doc, Some(&bridge()), Some(&big)),
+        write(&mut doc, &bridge(), &big),
         Err(format!("app_buffer_ns: {} is too large", u64::MAX))
     );
+}
+
+#[test]
+fn an_inline_bridge_table_is_edited_in_place() {
+    let inline = format!("{DAW}bridge = {{ driver = \"D\", to_asio = [1, 2, 3, 4] }}\n");
+    let mut new = Fields::read(&inline).expect("reads");
+    let b = new.bridge.as_mut().expect("a bridge");
+    b.driver = "E".into();
+    b.from_asio = vec![1, 2];
+    b.app_buffer_ns = Some(4_000_000);
+    let out = edit(&inline, &new).expect("the edit");
+    assert_eq!(Fields::read(&out).expect("reads"), new);
+    let line = out
+        .lines()
+        .find(|l| l.starts_with("bridge = {"))
+        .expect("still an inline table");
+    assert!(line.contains("driver = \"E\""), "{out}");
+    assert!(line.contains("from_asio = [1, 2]"), "{out}");
+    assert!(line.contains("app_buffer_ns = 4000000"), "{out}");
+    assert!(!out.contains("[bridge]"), "{out}");
 }
 
 #[test]

@@ -40,7 +40,7 @@ use std::time::Duration;
 
 use dstack::device::DeviceConfig;
 use serde_json::Value;
-use toml_edit::{Array, DocumentMut, Item, Value as TomlValue};
+use toml_edit::{Array, DocumentMut, Item, TableLike, Value as TomlValue};
 
 pub use bridge::Bridge;
 
@@ -228,29 +228,38 @@ fn one_line(s: &str) -> String {
     s.lines().next().unwrap_or_default().trim().to_string()
 }
 
-/// `key` set to `v` in `doc`, the value's own decor (a comment after it on
-/// its line) kept when the key was there.
-fn set_value(doc: &mut DocumentMut, key: &str, v: TomlValue) {
+/// `key` set to `v` in `t` (the document's root, or a table such as
+/// `[bridge]`): replaced in place when the key was there, so the key's own
+/// comment lines and the value's decor (a comment after it on its line)
+/// stay.
+fn set_value(t: &mut dyn TableLike, key: &str, v: TomlValue) {
     let mut v = v;
-    if let Some(old) = doc.get(key).and_then(Item::as_value) {
-        *v.decor_mut() = old.decor().clone();
+    match t.get_mut(key) {
+        Some(item) => {
+            if let Some(old) = item.as_value() {
+                *v.decor_mut() = old.decor().clone();
+            }
+            *item = Item::Value(v);
+        }
+        None => {
+            t.insert(key, Item::Value(v));
+        }
     }
-    doc[key] = Item::Value(v);
 }
 
-/// `key` set to `n` (an integer) in `doc`.
-fn set_int(doc: &mut DocumentMut, key: &str, n: u64) -> Result<(), String> {
+/// `key` set to `n` (an integer) in `t`.
+fn set_int(t: &mut dyn TableLike, key: &str, n: u64) -> Result<(), String> {
     let n = i64::try_from(n).map_err(|_| format!("{key}: {n} is too large"))?;
-    set_value(doc, key, TomlValue::from(n));
+    set_value(t, key, TomlValue::from(n));
     Ok(())
 }
 
 /// `key` set to `n`, or taken out for `None` (the config's default).
-fn set_opt(doc: &mut DocumentMut, key: &str, n: Option<u64>) -> Result<(), String> {
+fn set_opt(t: &mut dyn TableLike, key: &str, n: Option<u64>) -> Result<(), String> {
     match n {
-        Some(n) => set_int(doc, key, n),
+        Some(n) => set_int(t, key, n),
         None => {
-            doc.remove(key);
+            t.remove(key);
             Ok(())
         }
     }
@@ -270,8 +279,10 @@ fn name_array(names: &[String]) -> Array {
 
 /// The config `text` with the fields that differ between `text`'s own and
 /// `new` written (every other key, the comments and the order kept); the
-/// result is read again and must give `new` exactly. The name and the
-/// sample rate are not the window's to change.
+/// result is read again and must give `new` exactly. The name, the
+/// sample rate and the instance's kind (a `[bridge]` table or none) are
+/// not the window's to change: the elevated helper takes only what this
+/// writes ([`install`]).
 pub fn edit(text: &str, new: &Fields) -> Result<String, String> {
     let old = Fields::read(text)?;
     if new.name != old.name {
@@ -280,42 +291,52 @@ pub fn edit(text: &str, new: &Fields) -> Result<String, String> {
     if new.sample_rate != old.sample_rate {
         return Err("the sample rate is the network's, not changed here".into());
     }
+    if new.bridge.is_some() != old.bridge.is_some() {
+        return Err("the instance's kind (DAW or bridge) is not changed here".into());
+    }
     let mut doc = parse_doc(text)?;
     if new.iface != old.iface {
         match &new.iface {
-            Some(alias) => set_value(&mut doc, IFACE_KEY, TomlValue::from(alias.as_str())),
+            Some(alias) => set_value(
+                doc.as_table_mut(),
+                IFACE_KEY,
+                TomlValue::from(alias.as_str()),
+            ),
             None => {
                 doc.remove(IFACE_KEY);
             }
         }
     }
-    if new.bridge != old.bridge {
-        bridge::write(&mut doc, old.bridge.as_ref(), new.bridge.as_ref())?;
+    if let (Some(o), Some(n)) = (&old.bridge, &new.bridge)
+        && o != n
+    {
+        bridge::write(&mut doc, o, n)?;
     }
+    let root = doc.as_table_mut();
     if new.block != old.block {
-        set_int(&mut doc, "block", new.block)?;
+        set_int(root, "block", new.block)?;
     }
     if new.latency_ns != old.latency_ns {
-        set_int(&mut doc, "latency_ns", new.latency_ns)?;
+        set_int(root, "latency_ns", new.latency_ns)?;
     }
     if new.tx_latency_ns != old.tx_latency_ns {
-        set_opt(&mut doc, "tx_latency_ns", new.tx_latency_ns)?;
+        set_opt(root, "tx_latency_ns", new.tx_latency_ns)?;
     }
     if new.rx != old.rx {
-        set_value(&mut doc, "rx", TomlValue::Array(name_array(&new.rx)));
+        set_value(root, "rx", TomlValue::Array(name_array(&new.rx)));
     }
     if new.tx != old.tx {
-        set_value(&mut doc, "tx", TomlValue::Array(name_array(&new.tx)));
+        set_value(root, "tx", TomlValue::Array(name_array(&new.tx)));
     }
     let to_u64 = |c: Option<usize>| c.map(|c| c as u64);
     if new.cpus.pump != old.cpus.pump {
-        set_opt(&mut doc, "pump_cpu", to_u64(new.cpus.pump))?;
+        set_opt(root, "pump_cpu", to_u64(new.cpus.pump))?;
     }
     if new.cpus.io != old.cpus.io {
-        set_opt(&mut doc, "io_cpu", to_u64(new.cpus.io))?;
+        set_opt(root, "io_cpu", to_u64(new.cpus.io))?;
     }
     if new.cpus.rx != old.cpus.rx {
-        set_opt(&mut doc, "rx_cpu", to_u64(new.cpus.rx))?;
+        set_opt(root, "rx_cpu", to_u64(new.cpus.rx))?;
     }
     let out = doc.to_string();
     let back = Fields::read(&out).map_err(|e| format!("the new settings are refused: {e}"))?;

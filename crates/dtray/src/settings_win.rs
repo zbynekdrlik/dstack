@@ -497,7 +497,7 @@ fn show_tab(st: &mut State) {
         driver: old
             .bridge
             .as_ref()
-            .map(|b| bridge::drivers(&st.asio, &b.driver))
+            .map(|b| choices::drivers(&st.asio, &b.driver))
             .unwrap_or_default(),
     };
     fill(

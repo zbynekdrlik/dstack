@@ -258,7 +258,7 @@ fn an_adapter_shows_its_dante_address_before_a_link_local_one() {
 
 #[test]
 fn the_drivers_are_the_pc_s_and_a_missing_configured_one_is_marked() {
-    let installed: Vec<String> = ["A ASIO", "B ASIO"].map(String::from).to_vec();
+    let installed = Ok(["A ASIO", "B ASIO"].map(String::from).to_vec());
     let list = drivers(&installed, "B ASIO");
     assert_eq!(texts(&list), ["A ASIO", "B ASIO"]);
     assert_eq!(index_of(&list, &"B ASIO".to_string()), 1);
@@ -267,5 +267,20 @@ fn the_drivers_are_the_pc_s_and_a_missing_configured_one_is_marked() {
     assert_eq!(gone[2].value, "C ASIO");
     assert!(!gone[2].greyed);
     // No driver on the PC (or off Windows): the configured one alone.
-    assert_eq!(texts(&drivers(&[], "D")), ["D (not installed)"]);
+    assert_eq!(texts(&drivers(&Ok(Vec::new()), "D")), ["D (not installed)"]);
+    // An empty driver: no name to show, the apply refuses it.
+    let empty = drivers(&installed, " ");
+    assert_eq!(texts(&empty), ["A ASIO", "B ASIO", "(none chosen)"]);
+    assert_eq!(empty[2].value, " ");
+}
+
+#[test]
+fn a_driver_list_not_read_keeps_the_configured_driver_with_the_reason() {
+    let list = drivers(&Err("access denied".into()), "D");
+    assert_eq!(
+        texts(&list),
+        ["D (the PC's driver list is not readable: access denied)"]
+    );
+    assert_eq!(list[0].value, "D");
+    assert_eq!(texts(&drivers(&Err("x".into()), "")), ["(none chosen)"]);
 }

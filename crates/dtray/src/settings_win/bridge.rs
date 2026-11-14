@@ -4,7 +4,9 @@
 //! channel maps and the app buffer, shown only on a bridge instance's tab
 //! (the window grows by [`GROUP_H`] and the controls under it move down).
 //! Every decision is [`dtray::dasio::bridge`]'s and
-//! [`dtray::dasio::choices::drivers`]'s.
+//! [`dtray::dasio::choices::drivers`]'s. A tab switch shows the tab's
+//! last valid bridge again: text typed there that was not yet a number
+//! (the reason under the fields) is dropped.
 
 use dtray::dasio::bridge as pure;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -129,22 +131,6 @@ pub(super) fn show(h: HWND, on: bool) {
             SWP_NOMOVE | SWP_NOZORDER,
         )
     };
-}
-
-/// The driver list of `current` from the PC's drivers (`installed`, or
-/// why they could not be read).
-pub(super) fn drivers(
-    installed: &Result<Vec<String>, String>,
-    current: &str,
-) -> Vec<Choice<String>> {
-    match installed {
-        Ok(list) => choices::drivers(list, current),
-        Err(e) => vec![Choice {
-            value: current.to_string(),
-            text: format!("{current} (the PC's driver list is not readable: {e})"),
-            greyed: false,
-        }],
-    }
 }
 
 /// The group's values into its controls.

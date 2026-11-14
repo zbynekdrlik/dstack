@@ -229,20 +229,28 @@ pub fn interfaces(
 }
 
 /// A bridge instance's ASIO drivers (dstack #292): each driver
-/// registered on the PC (`installed`, `dstack_asio::drivers`), and the
-/// configured one when the PC has none of that name, marked "(not
-/// installed)", so the setting never changes silently (dasio waits for
-/// the driver then).
-pub fn drivers(installed: &[String], current: &str) -> Vec<Choice<String>> {
-    let mut out: Vec<Choice<String>> = installed
-        .iter()
-        .map(|d| choice(d.clone(), d.clone()))
-        .collect();
-    if !installed.iter().any(|d| d == current) {
-        out.push(choice(
-            current.to_string(),
-            format!("{current} (not installed)"),
-        ));
+/// registered on the PC (`installed`, `dstack_asio::drivers`, or why it
+/// could not be read), and the configured one when the PC has none of
+/// that name, marked, so the setting never changes silently (dasio waits
+/// for the driver then): "(not installed)", "(the PC's driver list is not
+/// readable: …)", or "(none chosen)" for an empty one, which the apply
+/// refuses ([`super::Bridge::problems`]).
+pub fn drivers(installed: &Result<Vec<String>, String>, current: &str) -> Vec<Choice<String>> {
+    let (list, why) = match installed {
+        Ok(list) => (list.as_slice(), "not installed".to_string()),
+        Err(e) => (
+            &[][..],
+            format!("the PC's driver list is not readable: {e}"),
+        ),
+    };
+    let mut out: Vec<Choice<String>> = list.iter().map(|d| choice(d.clone(), d.clone())).collect();
+    if !list.iter().any(|d| d == current) {
+        let text = if current.trim().is_empty() {
+            "(none chosen)".to_string()
+        } else {
+            format!("{current} ({why})")
+        };
+        out.push(choice(current.to_string(), text));
     }
     out
 }

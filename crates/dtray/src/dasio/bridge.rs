@@ -18,13 +18,16 @@
 //! is what dasio refuses at its start (no driver, a channel 0 or twice, a
 //! map's length against the channel counts, the app buffer's range). The
 //! window opens a file with such problems, so it can be fixed there, and
-//! refuses to apply one ([`super::plan`]). [`write`](fn@write) puts the table back
-//! into the file's text, the comments and other keys kept.
+//! refuses to apply one ([`super::plan`]). [`write`](fn@write) puts an
+//! edited table back into the file's text, the comments and other keys
+//! kept; the window never adds or takes out the table.
 
 use std::collections::BTreeSet;
 
 use serde::Deserialize;
-use toml_edit::{Array, DocumentMut, Item, Table, TableLike, Value as TomlValue};
+use toml_edit::{Array, DocumentMut, Item, Value as TomlValue};
+
+use super::{set_opt, set_value};
 
 use dlink::bridge::AppBuffer;
 
@@ -211,69 +214,32 @@ pub fn from_texts(
     }
 }
 
-/// `key` set to `v` in `t`: replaced in place when the key was there, so
-/// the key's own comment lines and the value's (a comment after it on its
-/// line) stay.
-fn set(t: &mut dyn TableLike, key: &str, v: TomlValue) {
-    let mut v = v;
-    match t.get_mut(key) {
-        Some(item) => {
-            if let Some(old) = item.as_value() {
-                *v.decor_mut() = old.decor().clone();
-            }
-            *item = Item::Value(v);
-        }
-        None => {
-            t.insert(key, Item::Value(v));
-        }
-    }
-}
-
 /// A map as an inline TOML array (`[1, 2]`, as dasio's configs write it).
 fn array(list: &[u32]) -> Array {
     list.iter().map(|&c| i64::from(c)).collect()
 }
 
-/// `doc` (a config's whole text) with the `[bridge]` table at `new`: only
-/// the keys that differ from `old` written (the others, their comments and
-/// order kept), the table added when the file had none and taken out for
-/// `None`.
-pub fn write(
-    doc: &mut DocumentMut,
-    old: Option<&Bridge>,
-    new: Option<&Bridge>,
-) -> Result<(), String> {
-    let Some(new) = new else {
-        doc.remove(KEY);
+/// `doc` (a config's whole text) with its `[bridge]` table moved from
+/// `old` to `new`: only the keys that differ written (the others, their
+/// comments and order kept). The window never adds or takes out the table
+/// (an instance's kind is not its to change: [`super::edit`]).
+pub fn write(doc: &mut DocumentMut, old: &Bridge, new: &Bridge) -> Result<(), String> {
+    // `old` was read from this table ([`parse`] takes only a table), so it
+    // is one; were it not, the edit's read-back refuses the result.
+    let Some(t) = doc.get_mut(KEY).and_then(Item::as_table_like_mut) else {
         return Ok(());
     };
-    if doc.get(KEY).is_none() {
-        doc.insert(KEY, Item::Table(Table::new()));
+    if old.driver != new.driver {
+        set_value(t, "driver", TomlValue::from(new.driver.as_str()));
     }
-    let t = doc
-        .get_mut(KEY)
-        .and_then(Item::as_table_like_mut)
-        .ok_or_else(|| format!("{KEY}: not a table"))?;
-    if old.map(|o| &o.driver) != Some(&new.driver) {
-        set(t, "driver", TomlValue::from(new.driver.as_str()));
+    if old.to_asio != new.to_asio {
+        set_value(t, "to_asio", TomlValue::Array(array(&new.to_asio)));
     }
-    if old.map(|o| &o.to_asio) != Some(&new.to_asio) {
-        set(t, "to_asio", TomlValue::Array(array(&new.to_asio)));
+    if old.from_asio != new.from_asio {
+        set_value(t, "from_asio", TomlValue::Array(array(&new.from_asio)));
     }
-    if old.map(|o| &o.from_asio) != Some(&new.from_asio) {
-        set(t, "from_asio", TomlValue::Array(array(&new.from_asio)));
-    }
-    if old.map(|o| o.app_buffer_ns) != Some(new.app_buffer_ns) {
-        match new.app_buffer_ns {
-            Some(ns) => {
-                let ns =
-                    i64::try_from(ns).map_err(|_| format!("app_buffer_ns: {ns} is too large"))?;
-                set(t, "app_buffer_ns", TomlValue::from(ns));
-            }
-            None => {
-                t.remove("app_buffer_ns");
-            }
-        }
+    if old.app_buffer_ns != new.app_buffer_ns {
+        set_opt(t, "app_buffer_ns", new.app_buffer_ns)?;
     }
     Ok(())
 }
