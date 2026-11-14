@@ -611,3 +611,38 @@ fn a_receive_buffer_off_a_whole_sample_is_logged_as_rounded_up() {
             .ends_with("(b) 3 ms (set)")
     );
 }
+
+/// dstack #295: a block's play time is its media start + the RX path the
+/// device logs, P + (c): the pump stamps `start + P + B`, and `Rated` adds
+/// the RX converter's delay (within 1 ns: the split's terms are whole ns).
+/// OBS on the editing PC: 15 ms.
+#[test]
+fn a_block_s_play_time_is_its_start_plus_the_logged_rx_path() {
+    use dstack::stream::{Timing, play_at_ns};
+    for c in [
+        rx_only("obs", 48_000, 96_000),
+        rx_only("rx-48", 48_000, 48_000),
+        rx_only("rx-96", 96_000, 96_000),
+        rx_only("rx-cd", 44_100, 96_000),
+        config().sample_rate(48_000).network_rate(96_000),
+    ] {
+        let cfg = c.device().unwrap();
+        let s = c.split().unwrap();
+        let rate = cfg.sample_rate;
+        let t = Timing::of(&cfg);
+        let (rx, _) = crate::rated::delay_ns(rate, c.sample_rate, t.block as usize).unwrap();
+        assert_eq!(rx, s.rx_convert_ns, "{}", cfg.name);
+        // A start on the whole-ns grid of the rate (one second of samples).
+        let start = u64::from(rate) * 7;
+        let at = play_at_ns(start, t, rate, 0) + rx as i64 - 7_000_000_000;
+        let path = s.rx_path_ns as i64;
+        assert!((at - path).abs() <= 1, "{}: {at} vs {path}", cfg.name);
+    }
+    let obs = rx_only("obs", 48_000, 96_000);
+    let t = Timing::of(&obs.device().unwrap());
+    // P 1252 + B 128 samples at 96 kHz is 14.375 ms on the sample grid;
+    // the split's figures are whole ns each, rounded down (P 13 041 666 +
+    // B 1 333 333), so its RX path reads 1 ns under it.
+    assert_eq!(play_at_ns(0, t, 96_000, 0) + 625_000, 15_000_000);
+    assert_eq!(obs.split().unwrap().rx_path_ns, 14_999_999);
+}

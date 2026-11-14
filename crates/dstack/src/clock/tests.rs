@@ -1028,3 +1028,76 @@ fn a_pump_out_of_the_escape_says_so_and_the_escape_is_on_while_set() {
     set_spin_escape_ms(None);
     assert!(!escape_on());
 }
+
+/// dstack #295: QPC ticks as ns the way OBS's `os_gettime_ns` makes them on
+/// Windows: ticks · 10⁹ / frequency, rounded down, no steer model.
+#[test]
+fn qpc_ticks_are_ns_rounded_down_with_no_model() {
+    // The usual 10 MHz QPC: 100 ns a tick.
+    assert_eq!(qpc_ns_of(12_345_678_901, 10_000_000), 1_234_567_890_100);
+    // The old ACPI PM timer's frequency: 5 s and one tick (279.37 ns).
+    assert_eq!(qpc_ns_of(5 * 3_579_545 + 1, 3_579_545), 5_000_000_279);
+    // Past i64 in the product (a month of a 3.6 MHz counter · 10⁹).
+    let month = 30 * 86_400 * 3_579_545_i64;
+    assert_eq!(qpc_ns_of(month, 3_579_545), 30 * 86_400 * 1_000_000_000);
+    // No frequency reads as 1 tick a second.
+    assert_eq!(qpc_ns_of(7, 0), 7_000_000_000);
+    assert_eq!(qpc_ns_of(7, -3), 7_000_000_000);
+    assert_eq!(qpc_ns_of(0, 10_000_000), 0);
+}
+
+/// dstack #295: the media clock less the app's, from one pair.
+#[test]
+fn the_app_offset_is_media_less_app() {
+    assert_eq!(app_offset_ns(5_000, 2_000), 3_000);
+    assert_eq!(app_offset_ns(1_000, 3_000), -2_000);
+    assert_eq!(app_offset_ns(1_000, -3_000), 4_000);
+    // A media time past i64 reads as i64::MAX.
+    assert_eq!(app_offset_ns(u64::MAX, 0), i64::MAX);
+    assert_eq!(app_offset_ns(u64::MAX, 1), i64::MAX - 1);
+}
+
+/// dstack #295: on Linux the app's clock is `CLOCK_MONOTONIC`, the clock
+/// OBS's `os_gettime_ns` reads there.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_app_clock_is_clock_monotonic_on_linux() {
+    let read = || {
+        let mut ts = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // SAFETY: a valid, writable timespec.
+        unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
+        ts.tv_sec * 1_000_000_000 + ts.tv_nsec
+    };
+    let before = read();
+    let app = app_monotonic_ns();
+    let after = read();
+    assert!(before <= app && app <= after, "{before} {app} {after}");
+    assert!(before > 0);
+}
+
+/// dstack #295: on Windows the app's clock is raw QPC in ns (OBS's
+/// `os_gettime_ns`), never the steered clock the media clock reads.
+#[cfg(windows)]
+#[test]
+fn the_app_clock_is_raw_qpc_on_windows() {
+    use windows_sys::Win32::System::Performance::{
+        QueryPerformanceCounter, QueryPerformanceFrequency,
+    };
+    let mut freq = 0i64;
+    // SAFETY: a valid, writable i64.
+    unsafe { QueryPerformanceFrequency(&mut freq) };
+    let read = || {
+        let mut t = 0i64;
+        // SAFETY: a valid, writable i64.
+        unsafe { QueryPerformanceCounter(&mut t) };
+        qpc_ns_of(t, freq)
+    };
+    let before = read();
+    let app = app_monotonic_ns();
+    let after = read();
+    assert!(before <= app && app <= after, "{before} {app} {after}");
+    assert!(before > 0);
+}

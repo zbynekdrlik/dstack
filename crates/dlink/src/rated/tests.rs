@@ -6,6 +6,7 @@ use std::f64::consts::PI;
 struct Probe {
     frames: Vec<usize>,
     starts: Vec<Option<u64>>,
+    play_ats: Vec<Option<i64>>,
     heard: Vec<f64>,
     level: f64,
     resets: u32,
@@ -16,6 +17,7 @@ impl Probe {
         Probe {
             frames: Vec::new(),
             starts: Vec::new(),
+            play_ats: Vec::new(),
             heard: Vec::new(),
             level,
             resets: 0,
@@ -27,6 +29,7 @@ impl Process for Probe {
     fn process(&mut self, block: &mut Block<'_>) {
         self.frames.push(block.frames());
         self.starts.push(block.start());
+        self.play_ats.push(block.play_at());
         self.heard.extend_from_slice(block.input(0));
         for c in 0..block.outputs() {
             block.output(c).fill(self.level);
@@ -339,4 +342,31 @@ fn the_delay_before_the_start_is_the_running_rated_s() {
     let (rx, tx) = delay_ns(96_000, 44_100, 128).unwrap();
     assert_eq!((rx / 10_000, tx / 10_000), (131, 307));
     assert!(delay_ns(96_000, 0, 128).is_err());
+}
+
+/// dstack #295: the app's block plays the RX converter's delay after the
+/// device's block, so the app sees P + (c) with (c) = B + that delay, as
+/// `dlink::split` states and the device logs it.
+#[test]
+fn the_app_s_block_plays_the_rx_converter_s_delay_after_the_device_s() {
+    for (dev, app) in [(96_000u32, 48_000u32), (96_000, 44_100), (48_000, 96_000)] {
+        let mut r = Rated::new(Probe::new(0.0), dev, app, 128, 1, 1).unwrap();
+        let rx = r.delay_ns().0 as i64;
+        assert!(rx > 0, "{dev} -> {app}");
+        let (i, mut o) = ([0.0; 128], [0.0; 128]);
+        r.process(&mut Block::new(128, &i, &mut o).at(0).played_at(5_000_000));
+        r.process(&mut Block::new(128, &i, &mut o).at(128).played_at(-9));
+        r.process(&mut Block::new(128, &i, &mut o).at(256));
+        r.process(&mut Block::new(128, &i, &mut o).at(384).played_at(i64::MAX - 1));
+        assert_eq!(
+            r.inner.play_ats,
+            [Some(5_000_000 + rx), Some(rx - 9), None, Some(i64::MAX)],
+            "{dev} -> {app}"
+        );
+    }
+    // 48 kHz on 96 kHz: the half-band's 0.625 ms, split's (c) less B.
+    let mut r = Rated::new(Probe::new(0.0), 96_000, 48_000, 128, 1, 1).unwrap();
+    let (i, mut o) = ([0.0; 128], [0.0; 128]);
+    r.process(&mut Block::new(128, &i, &mut o).at(0).played_at(0));
+    assert_eq!(r.inner.play_ats, [Some(625_000)]);
 }

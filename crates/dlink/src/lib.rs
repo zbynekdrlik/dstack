@@ -116,6 +116,22 @@
 //! dstack #247) and the device logs at its start; [`Config::bridge_buffer`]
 //! gives it to the [`bridge::Player`].
 //!
+//! The RX side, an app that takes the device's blocks and hands them to
+//! its own clock (OBS's dante-input), stamps each block it pushes with
+//! [`Block::play_at`] (dstack #295): the block's media start + the RX path
+//! P + (c) the device logs, in the app's monotonic clock (Linux's
+//! `CLOCK_MONOTONIC`, Windows' raw QPC in ns: OBS's `os_gettime_ns`;
+//! [`dstack::clock::app_monotonic_ns`]). For OBS that is
+//! `obs_source_output_audio`'s `timestamp`. Stamped by the block's
+//! `play_at` rather than by the time it is pushed, the app's own buffering
+//! places the audio at one fixed latency at every start, whatever the
+//! phase between the first block and the app's tick (a restart of OBS
+//! moved it by one 1024-frame tick, 21.3 ms, before). The pump reads the
+//! media and the app's clock back to back at each wake, so `play_at`
+//! follows their drift; a clock re-anchor moves the blocks' media starts
+//! by its step and leaves `play_at` running on in the app's clock.
+//! `play_at` is `None` while the device has no media clock.
+//!
 //! # Debug builds with a rate converter
 //!
 //! A device whose app rate differs from the network's runs the converter

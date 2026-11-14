@@ -529,6 +529,24 @@ pub fn to_samples(ptp_ns: u64, rate: u32) -> u64 {
     (u128::from(ptp_ns) * u128::from(rate.max(1)) / 1_000_000_000) as u64
 }
 
+/// QPC's `ticks` at `frequency` ticks a second as ns, rounded down (a
+/// frequency of 0 or less reads as 1): the conversion OBS's
+/// `os_gettime_ns` makes on Windows (`util_mul_div64(ticks, 10^9, freq)`),
+/// with no steer model, so [`app_monotonic_ns`] is the app's clock there
+/// (dstack #295). `i128`, so a counter's whole range never overflows.
+pub fn qpc_ns_of(ticks: i64, frequency: i64) -> i64 {
+    (i128::from(ticks) * 1_000_000_000 / i128::from(frequency.max(1))) as i64
+}
+
+/// The media clock less the app's, ns, from a pair read back to back:
+/// `media_ns` (the media clock) and `app_ns` ([`app_monotonic_ns`]). A
+/// media time minus it is that time in the app's clock (dstack #295).
+pub fn app_offset_ns(media_ns: u64, app_ns: i64) -> i64 {
+    i64::try_from(media_ns)
+        .unwrap_or(i64::MAX)
+        .wrapping_sub(app_ns)
+}
+
 /// A latency of `ns` at `rate` in whole samples, the nearest (a latency
 /// is set in ns and stands for whole samples: 333 333 ns is 32 at 96 kHz,
 /// where [`to_samples`] gives 31). A rate of 0 reads as 1.
@@ -620,6 +638,12 @@ pub fn escape_on() -> bool {
     SPIN_ESCAPE.load(Ordering::Relaxed) != 0
 }
 
+/// The app's monotonic clock, ns (dstack #295): Linux's `CLOCK_MONOTONIC`,
+/// Windows' raw QPC ([`qpc_ns_of`], no steer model, unlike the media
+/// clock's own monotonic there): the clock an app such as OBS stamps its
+/// audio with (`os_gettime_ns`). [`dstack_audio_io::Block::play_at`] is in it.
+#[cfg(any(target_os = "linux", windows))]
+pub use sys::app_monotonic_ns;
 #[cfg(any(target_os = "linux", windows))]
 pub use sys::{allow_escape, ask_escape, block_escape, defer_escape, relay_spin};
 

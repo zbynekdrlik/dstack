@@ -379,6 +379,8 @@ struct Copy {
     loudest: f64,
     /// Each block's media start ([`Block::start`]).
     starts: Vec<Option<u64>>,
+    /// Each block's play time ([`Block::play_at`], dstack #295).
+    play_ats: Vec<Option<i64>>,
 }
 
 impl Process for Copy {
@@ -386,6 +388,7 @@ impl Process for Copy {
         self.calls += 1;
         self.log.push('p');
         self.starts.push(block.start());
+        self.play_ats.push(block.play_at());
         for ch in 0..block.inputs().min(block.outputs()) {
             let input = block.input(ch).to_vec();
             self.loudest = input.iter().fold(self.loudest, |m, x| m.max(x.abs()));
@@ -1660,3 +1663,4 @@ fn a_seamless_handover_step_neither_rebootstraps_nor_loses_a_block() {
 }
 
 mod causes;
+mod play_at;
