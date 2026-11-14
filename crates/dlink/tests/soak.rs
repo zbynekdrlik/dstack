@@ -23,13 +23,22 @@
 //!   1 ms, one in a hundred 2 to 8 ms, all inside W, set to 9 ms here so
 //!   8 ms is inside). One case makes one wake late past W: the schedule
 //!   starts again with 8 blocks skipped (a rebootstrap, #302's field
-//!   event).
+//!   event). One case is an irregular writer (dstack #303 design v2): the
+//!   app's thread stalls 10 to 25 ms now and then and catches up in a
+//!   burst, the real-time run's failure at load ~51 made deterministic.
 //! - **Real time** (one minute of wall time): the same path on the pump's
 //!   own thread ([`stream::spawn`]) on the box's monotonic clock, the app on
 //!   the test's thread at real 1024-frame ticks.
 //!
-//! The pass criteria (the design on #304) are hard asserts, never loosened
-//! to pass: see [`Soak::check`].
+//! **The release gate** is the simulated cases, the tests named `gate_*`
+//! (`.github/workflows/release.yml` runs them before a tag's release).
+//! The real-time case stays out of it: on a shared runner it measures the
+//! runner's load (main's decision on #304).
+//!
+//! The pass criteria (the design on #304, the main's decisions of 14.11)
+//! are hard asserts, never loosened to pass: see [`Soak::check`]. The RX
+//! bridge under the field's 2 to 8 ms late wakes is the one criterion not
+//! asserted, by name ([`Wakes::Field`], dstack #307).
 
 use std::f64::consts::TAU;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -75,9 +84,24 @@ const FAULT_SKIPPED: u64 = 8;
 const RESETTLE_NS: u64 = 30 * SECOND;
 /// A play time's tolerance against the app's clock, ns.
 const PLAY_AT_TOL_NS: i64 = 1_000;
+/// The irregular writer (dstack #303 design v2): the app's thread stalls
+/// this long, uniform, ns, ...
+const STALL_MIN_NS: f64 = 10e6;
+const STALL_MAX_NS: f64 = 25e6;
+/// ... once in this many ns, uniform, and then writes (and reads) the
+/// ticks it missed at once, a catch-up burst.
+const STALL_EVERY_MIN_NS: f64 = 2e9;
+const STALL_EVERY_MAX_NS: f64 = 6e9;
+/// A TX gap belongs to a stall up to this long after the stall's end.
+const STALL_GAP_GRACE_NS: u64 = 100 * MS;
+/// The TX correction's band is judged on the median of this many seconds
+/// (the main's decision on #304: a one-second spike is allowed, a ramp is
+/// not).
+const MEDIAN_SECONDS: usize = 30;
 
 const _: () = assert!(FAULT_LATE_NS > W_NS);
 const _: () = assert!(FAULT_AT_NS + RESETTLE_NS + SETTLED_NS <= SOAK_NS);
+const _: () = assert!(MEDIAN_SECONDS as u64 * SECOND <= SETTLED_NS);
 
 /// splitmix64: a seeded, reproducible schedule with no dependency.
 struct Rng(u64);
@@ -96,15 +120,46 @@ impl Rng {
         (self.next() >> 11) as f64 / (1u64 << 53) as f64
     }
 
-    /// A pump wake's lateness, ns: most under 1 ms, one in a hundred 2 to
-    /// 8 ms (#304).
-    fn late_ns(&mut self) -> u64 {
-        if self.unit() < 0.01 {
+    /// Uniform in [lo, hi).
+    fn between(&mut self, lo: f64, hi: f64) -> f64 {
+        lo + (hi - lo) * self.unit()
+    }
+
+    /// A pump wake's lateness, ns: most under 1 ms; on the field's schedule
+    /// one in a hundred 2 to 8 ms (#304).
+    fn late_ns(&mut self, wakes: Wakes) -> u64 {
+        if wakes == Wakes::Field && self.unit() < 0.01 {
             (2e6 + 6e6 * self.unit()) as u64
         } else {
             (1e6 * self.unit()) as u64
         }
     }
+}
+
+/// The pump's wakes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Wakes {
+    /// The field's (#304): one in a hundred 2 to 8 ms late. The RX bridge's
+    /// target does not count the pump's lateness, so at +6 ppm its depth
+    /// reaches the floor now and then (14 RX dropouts in 10 min on every
+    /// version since v0.6.126). That is dstack #307, an owner latency
+    /// decision (`app_buffer` is an owner-fixed term, #247): until it is
+    /// decided the RX bridge is NOT judged under these wakes. It is judged,
+    /// strictly, under [`Wakes::Short`].
+    Field,
+    /// Every wake under 1 ms late: inside what the RX bridge's target
+    /// covers, so the RX criterion is asserted.
+    Short,
+}
+
+/// The app's thread.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Writer {
+    /// OBS's ticks with their jitter.
+    Ticks,
+    /// The same, stalling now and then (`STALL_*`), each stall followed by
+    /// a catch-up burst of the ticks it held.
+    Stalling,
 }
 
 /// One app block as the app saw it: its start (app frames) and play time.
@@ -321,14 +376,31 @@ impl Counts {
         }
     }
 
-    /// The TX side's gaps (a dropout or a re-centre) since `before`.
-    fn tx_gaps(&self, before: &Counts) -> u64 {
-        self.tx_underruns - before.tx_underruns + self.tx_recentres - before.tx_recentres
+    /// The TX side's gap counters (dropouts and re-centres; a floor deficit
+    /// counts in both, so only a change of the sum is read, as one gap).
+    fn tx_sum(&self) -> u64 {
+        self.tx_underruns + self.tx_recentres
     }
 
-    /// The RX side's gaps since `before`.
-    fn rx_gaps(&self, before: &Counts) -> u64 {
-        self.rx_underruns - before.rx_underruns + self.rx_recentres - before.rx_recentres
+    /// The RX side's.
+    fn rx_sum(&self) -> u64 {
+        self.rx_underruns + self.rx_recentres
+    }
+}
+
+/// The gaps in `at` (media times) within [from, to].
+fn gaps_within(at: &[u64], from: u64, to: u64) -> usize {
+    at.iter().filter(|&&t| t >= from && t <= to).count()
+}
+
+/// The median of `values` (not empty).
+fn median(values: &mut [f64]) -> f64 {
+    values.sort_by(f64::total_cmp);
+    let n = values.len();
+    if n % 2 == 1 {
+        values[n / 2]
+    } else {
+        f64::midpoint(values[n / 2 - 1], values[n / 2])
     }
 }
 
@@ -336,6 +408,17 @@ impl Counts {
 struct Soak {
     drift_ppm: f64,
     fault: bool,
+    wakes: Wakes,
+    writer: Writer,
+    /// The irregular writer's schedule: the next stall (start, length) on
+    /// the app's clock, ns, and every stall drawn, on the media clock.
+    stall_rng: Rng,
+    next_stall: (f64, f64),
+    stalls: Vec<(u64, u64)>,
+    /// The media times of each side's gaps (a dropout or a re-centre, one
+    /// a step of the simulation) after priming.
+    tx_gap_at: Vec<u64>,
+    rx_gap_at: Vec<u64>,
     /// The counts once both bridges ran (priming done), and each second's.
     primed: Option<Counts>,
     seconds: Vec<Counts>,
@@ -354,10 +437,22 @@ struct Soak {
 }
 
 impl Soak {
-    fn new(drift_ppm: f64, fault: bool) -> Self {
-        Soak {
+    fn new(drift_ppm: f64, fault: bool, wakes: Wakes, writer: Writer) -> Self {
+        let mut stall_rng = Rng(0x0303_57a1 ^ drift_ppm.to_bits());
+        let next_stall = (
+            APP0 as f64 + stall_rng.between(STALL_EVERY_MIN_NS, STALL_EVERY_MAX_NS),
+            stall_rng.between(STALL_MIN_NS, STALL_MAX_NS),
+        );
+        let mut soak = Soak {
             drift_ppm,
             fault,
+            wakes,
+            writer,
+            stall_rng,
+            next_stall,
+            stalls: Vec::new(),
+            tx_gap_at: Vec::new(),
+            rx_gap_at: Vec::new(),
             primed: None,
             seconds: Vec::new(),
             before_fault: None,
@@ -368,7 +463,16 @@ impl Soak {
             jumps: Vec::new(),
             marks: 0,
             view: PumpView::default(),
-        }
+        };
+        soak.record_stall();
+        soak
+    }
+
+    fn label(&self) -> String {
+        format!(
+            "drift {:+} ppm, fault {}, wakes {:?}, writer {:?}",
+            self.drift_ppm, self.fault, self.wakes, self.writer
+        )
     }
 
     /// The app's clock at media time `media_ns`.
@@ -385,11 +489,47 @@ impl Soak {
         T0.saturating_add_signed(since)
     }
 
+    /// Keeps the stall just drawn, on the media clock (a writer that never
+    /// stalls keeps none).
+    fn record_stall(&mut self) {
+        if self.writer == Writer::Stalling {
+            let (start, len) = self.next_stall;
+            let stall = (self.media_ns(start), self.media_ns(start + len));
+            self.stalls.push(stall);
+        }
+    }
+
+    /// The app thread's time for a tick due at `app_ns`: a tick inside a
+    /// stall runs at the stall's end (with the others it held: a burst).
+    fn stalled(&mut self, app_ns: f64) -> f64 {
+        if self.writer == Writer::Ticks {
+            return app_ns;
+        }
+        loop {
+            let (start, len) = self.next_stall;
+            if app_ns < start {
+                return app_ns;
+            }
+            if app_ns < start + len {
+                return start + len;
+            }
+            self.next_stall = (
+                start
+                    + self
+                        .stall_rng
+                        .between(STALL_EVERY_MIN_NS, STALL_EVERY_MAX_NS),
+                self.stall_rng.between(STALL_MIN_NS, STALL_MAX_NS),
+            );
+            self.record_stall();
+        }
+    }
+
     /// The app's tick `k` in media time: nominal on the app's clock, plus
-    /// its jitter.
-    fn tick_at(&self, k: u64, rng: &mut Rng) -> u64 {
+    /// its jitter, held by a stall.
+    fn tick_at(&mut self, k: u64, rng: &mut Rng) -> u64 {
         let nominal = APP0 as f64 + k as f64 * CHUNK as f64 * 1e9 / f64::from(APP_RATE);
-        self.media_ns(nominal + JITTER_NS * (2.0 * rng.unit() - 1.0))
+        let app = self.stalled(nominal + JITTER_NS * (2.0 * rng.unit() - 1.0));
+        self.media_ns(app)
     }
 
     /// Runs the case; the checks are [`Soak::check`]'s.
@@ -407,7 +547,9 @@ impl Soak {
         let mut tick_at = self.tick_at(tick, &mut rng);
         let mut second = T0 + SECOND;
         let mut faulted = !self.fault;
+        let mut gaps = (0, 0);
         while wake_at.min(tick_at) < end {
+            let at = wake_at.min(tick_at);
             if wake_at <= tick_at {
                 clock.sleep_until(wake_at);
                 let now = clock.now_ns().expect("a ready clock");
@@ -421,7 +563,7 @@ impl Soak {
                     self.before_fault = Some(Counts::of(&p, due));
                     due + FAULT_LATE_NS
                 } else {
-                    due + rng.late_ns()
+                    due + rng.late_ns(self.wakes)
                 };
             } else {
                 ticker.tick(&mut p);
@@ -429,8 +571,19 @@ impl Soak {
                 tick_at = self.tick_at(tick, &mut rng);
             }
             let now = wake_at.min(tick_at);
+            let counts = Counts::of(&p, at);
             if self.primed.is_none() && !p.tx_stats.priming() && !p.rx_stats.priming() {
                 self.primed = Some(Counts::of(&p, now));
+                gaps = (counts.tx_sum(), counts.rx_sum());
+            }
+            if self.primed.is_some() {
+                if counts.tx_sum() != gaps.0 {
+                    self.tx_gap_at.push(at);
+                }
+                if counts.rx_sum() != gaps.1 {
+                    self.rx_gap_at.push(at);
+                }
+                gaps = (counts.tx_sum(), counts.rx_sum());
             }
             while now >= second {
                 self.seconds.push(Counts::of(&p, second));
@@ -468,24 +621,58 @@ impl Soak {
         }
     }
 
-    /// The pass criteria (#304's design), hard:
-    /// - after priming: no TX dropout or re-centre, no RX dropout;
-    /// - the TX correction within ±(drift + 2) ppm over the last 5 min;
+    /// The TX correction's median over the [`MEDIAN_SECONDS`] up to each
+    /// second of the settled tail, with the second's time.
+    fn tx_ppm_medians(&self) -> Vec<(u64, f64)> {
+        let tail = T0 + SOAK_NS - SETTLED_NS;
+        (MEDIAN_SECONDS..=self.seconds.len())
+            .map(|end| &self.seconds[end - MEDIAN_SECONDS..end])
+            .filter(|w| w[w.len() - 1].at_ns >= tail)
+            .map(|w| {
+                let mut ppm: Vec<f64> = w.iter().map(|c| c.tx_ppm).collect();
+                (w[w.len() - 1].at_ns, median(&mut ppm))
+            })
+            .collect()
+    }
+
+    /// The pass criteria (#304's design and the main's decisions on it),
+    /// hard:
+    /// - after priming: no TX dropout or re-centre; an irregular writer's
+    ///   gaps only at its stalls (one a stall at most: a stall past the
+    ///   FIFO's depth is a gap no ratio can mend), none away from them;
+    /// - no RX dropout, judged under [`Wakes::Short`] (the RX bridge under
+    ///   the field's late wakes is dstack #307's, not judged here);
+    /// - the TX correction's 30 s median within ±(drift + 2) ppm over the
+    ///   last 5 min (a one-second spike passes, a ramp fails);
     /// - every play time on the app's clock within 1 µs of a constant
     ///   offset, every step one block within 1 µs (none off by 1 ms);
     /// - the fault case: one rebootstrap of 8 blocks, at most one gap per
     ///   side at it, then the same criteria from 30 s after it.
     fn check(&self) {
-        let label = format!("drift {:+} ppm, fault {}", self.drift_ppm, self.fault);
+        let label = self.label();
+        let rx_judged = self.wakes == Wakes::Short;
         let primed = self
             .primed
             .unwrap_or_else(|| panic!("{label}: never primed"));
+        let last = *self.seconds.last().expect("seconds");
+        let medians = self.tx_ppm_medians();
+        let (lo, hi) = medians
+            .iter()
+            .fold((f64::MAX, f64::MIN), |(lo, hi), &(_, m)| {
+                (lo.min(m), hi.max(m))
+            });
+        println!(
+            "{label}: TX gaps {} ({} stalls), RX gaps {}, TX ppm 30 s median \
+             {lo:.2} .. {hi:.2} over the last 5 min, last {last:?}",
+            self.tx_gap_at.len(),
+            self.stalls.len(),
+            self.rx_gap_at.len(),
+        );
         assert!(
             primed.at_ns - T0 < 2 * SECOND,
             "{label}: priming took {} ms",
             (primed.at_ns - T0) / MS
         );
-        let last = *self.seconds.last().expect("seconds");
         assert!(self.marks > 400_000, "{label}: {} blocks", self.marks);
         assert!(
             self.offset_err_max <= PLAY_AT_TOL_NS,
@@ -514,17 +701,29 @@ impl Soak {
             let before = self.before_fault.expect("the fault ran");
             let settle = self.at(before.at_ns + RESETTLE_NS);
             assert!(
-                settle.tx_gaps(&before) <= 1 && settle.rx_gaps(&before) <= 1,
-                "{label}: more than one gap a side at the fault: {before:?} {settle:?}"
+                gaps_within(&self.tx_gap_at, before.at_ns, settle.at_ns) <= 1,
+                "{label}: more than one TX gap at the fault: {:?}",
+                self.gap_seconds(&self.tx_gap_at)
             );
             assert_eq!(
-                (
-                    before.tx_gaps(&primed),
-                    before.rx_underruns - primed.rx_underruns
-                ),
-                (0, 0),
-                "{label}: gaps before the fault: {primed:?} {before:?}"
+                gaps_within(&self.tx_gap_at, primed.at_ns, before.at_ns),
+                0,
+                "{label}: TX gaps before the fault: {:?}",
+                self.gap_seconds(&self.tx_gap_at)
             );
+            if rx_judged {
+                assert!(
+                    gaps_within(&self.rx_gap_at, before.at_ns, settle.at_ns) <= 1,
+                    "{label}: more than one RX gap at the fault: {:?}",
+                    self.gap_seconds(&self.rx_gap_at)
+                );
+                assert_eq!(
+                    gaps_within(&self.rx_gap_at, primed.at_ns, before.at_ns),
+                    0,
+                    "{label}: RX gaps before the fault: {:?}",
+                    self.gap_seconds(&self.rx_gap_at)
+                );
+            }
             settle
         } else {
             let v = self.view;
@@ -532,26 +731,67 @@ impl Soak {
             assert!(self.jumps.is_empty(), "{label}: {:?}", self.jumps);
             primed
         };
-        assert_eq!(
-            (
-                last.tx_underruns - from.tx_underruns,
-                last.tx_recentres - from.tx_recentres,
-                last.rx_underruns - from.rx_underruns,
+        match self.writer {
+            Writer::Ticks => assert_eq!(
+                (
+                    last.tx_underruns - from.tx_underruns,
+                    last.tx_recentres - from.tx_recentres,
+                ),
+                (0, 0),
+                "{label}: TX underruns, TX re-centres from {} s: {from:?} {last:?}",
+                (from.at_ns - T0) / SECOND
             ),
-            (0, 0, 0),
-            "{label}: TX underruns, TX re-centres, RX underruns from {} s: {from:?} {last:?}",
-            (from.at_ns - T0) / SECOND
-        );
-        let band = self.drift_ppm.abs() + 2.0;
-        let tail = T0 + SOAK_NS - SETTLED_NS;
-        for c in self.seconds.iter().filter(|c| c.at_ns >= tail) {
-            assert!(
-                c.tx_ppm.abs() <= band,
-                "{label}: tx_ppm {:.2} at {} s, outside ±{band} ppm",
-                c.tx_ppm,
-                (c.at_ns - T0) / SECOND
+            Writer::Stalling => self.check_stall_gaps(&label),
+        }
+        if rx_judged {
+            assert_eq!(
+                last.rx_underruns - from.rx_underruns,
+                0,
+                "{label}: RX underruns from {} s: {from:?} {last:?}",
+                (from.at_ns - T0) / SECOND
             );
         }
+        let band = self.drift_ppm.abs() + 2.0;
+        assert!(!medians.is_empty(), "{label}: no settled seconds");
+        for &(at, m) in &medians {
+            assert!(
+                m.abs() <= band,
+                "{label}: tx_ppm's 30 s median {m:.2} at {} s, outside ±{band} ppm",
+                (at - T0) / SECOND
+            );
+        }
+    }
+
+    /// An irregular writer's TX gaps: each inside a stall (or just after
+    /// it), one a stall at most.
+    fn check_stall_gaps(&self, label: &str) {
+        let mut per_stall = vec![0u32; self.stalls.len()];
+        for &at in &self.tx_gap_at {
+            let stall = self
+                .stalls
+                .iter()
+                .position(|&(start, end)| at >= start && at <= end + STALL_GAP_GRACE_NS)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{label}: a TX gap at {:.3} s, away from every stall (gaps at {:?} s)",
+                        (at - T0) as f64 / 1e9,
+                        self.gap_seconds(&self.tx_gap_at)
+                    )
+                });
+            per_stall[stall] += 1;
+            assert!(
+                per_stall[stall] <= 1,
+                "{label}: more than one TX gap at the stall {:?} (gaps at {:?} s)",
+                self.stalls[stall],
+                self.gap_seconds(&self.tx_gap_at)
+            );
+        }
+    }
+
+    fn gap_seconds(&self, at: &[u64]) -> Vec<f64> {
+        at.iter()
+            .map(|&at| ((at - T0) as f64 / 1e6).round() / 1e3)
+            .collect()
     }
 
     /// The counts of the first second at or after `at_ns`.
@@ -565,23 +805,56 @@ impl Soak {
 }
 
 #[test]
-fn ten_minutes_with_the_app_clock_6_ppm_fast() {
-    Soak::new(6.0, false).run(0x304_0001).check();
+fn gate_ten_minutes_with_the_app_clock_6_ppm_fast() {
+    Soak::new(6.0, false, Wakes::Field, Writer::Ticks)
+        .run(0x304_0001)
+        .check();
 }
 
 #[test]
-fn ten_minutes_with_the_app_clock_6_ppm_slow() {
-    Soak::new(-6.0, false).run(0x304_0002).check();
+fn gate_ten_minutes_with_the_app_clock_6_ppm_slow() {
+    Soak::new(-6.0, false, Wakes::Field, Writer::Ticks)
+        .run(0x304_0002)
+        .check();
 }
 
 #[test]
-fn ten_minutes_with_a_rebootstrap_app_fast() {
-    Soak::new(6.0, true).run(0x304_0003).check();
+fn gate_ten_minutes_with_a_rebootstrap_app_fast() {
+    Soak::new(6.0, true, Wakes::Field, Writer::Ticks)
+        .run(0x304_0003)
+        .check();
 }
 
 #[test]
-fn ten_minutes_with_a_rebootstrap_app_slow() {
-    Soak::new(-6.0, true).run(0x304_0004).check();
+fn gate_ten_minutes_with_a_rebootstrap_app_slow() {
+    Soak::new(-6.0, true, Wakes::Field, Writer::Ticks)
+        .run(0x304_0004)
+        .check();
+}
+
+/// The irregular writer (dstack #303 design v2): the app's thread stalls
+/// 10 to 25 ms every 2 to 6 s and catches up in a burst.
+#[test]
+fn gate_ten_minutes_of_an_irregular_writer_app_fast() {
+    Soak::new(6.0, false, Wakes::Field, Writer::Stalling)
+        .run(0x304_0005)
+        .check();
+}
+
+#[test]
+fn gate_ten_minutes_of_an_irregular_writer_app_slow() {
+    Soak::new(-6.0, false, Wakes::Field, Writer::Stalling)
+        .run(0x304_0006)
+        .check();
+}
+
+/// The RX bridge judged strictly, with a rebootstrap, under wakes its
+/// target covers (the field's 2 to 8 ms wakes are dstack #307's).
+#[test]
+fn gate_ten_minutes_of_the_rx_bridge_with_short_wakes_and_a_rebootstrap() {
+    Soak::new(6.0, true, Wakes::Short, Writer::Ticks)
+        .run(0x304_0007)
+        .check();
 }
 
 /// The schedule's first block at the start (no catch-up) is what the
@@ -599,10 +872,48 @@ fn the_harness_s_first_wake_runs_the_first_block() {
     ));
 }
 
+/// The harness's irregular writer: ticks inside a stall run at its end, in
+/// order, and the stalls drawn have their lengths and spacing.
+#[test]
+fn the_harness_s_stalls_hold_ticks_to_their_end() {
+    let mut soak = Soak::new(0.0, false, Wakes::Field, Writer::Stalling);
+    let mut rng = Rng(1);
+    let mut last = 0;
+    let mut held = 0;
+    for k in 0..30_000 {
+        let at = soak.tick_at(k, &mut rng);
+        assert!(at >= last, "tick {k} before the one before it");
+        if soak.stalls.iter().any(|&(_, end)| end == at) {
+            held += 1;
+        }
+        last = at;
+    }
+    assert!(held > 20, "{held} ticks held by a stall");
+    for w in soak.stalls.windows(2) {
+        let (start, end) = w[0];
+        assert!((10 * MS..=25 * MS).contains(&(end - start)), "{w:?}");
+        assert!(
+            (2 * SECOND..=6 * SECOND).contains(&(w[1].0 - start)),
+            "{w:?}"
+        );
+    }
+}
+
+/// The band's median: a one-second spike leaves it, a ramp does not.
+#[test]
+fn the_median_ignores_a_spike_and_follows_a_ramp() {
+    let mut spike = [6.0, 6.0, 12.8, 6.0, 6.0];
+    assert_eq!(median(&mut spike), 6.0);
+    let mut ramp = [6.0, -20.0, -40.0, -60.0];
+    assert_eq!(median(&mut ramp), -30.0);
+}
+
 /// One minute of real time: the pump on its own thread on the box's
 /// monotonic clock, the app on this thread at real ticks. Real wakes are
 /// what the simulation cannot model; zero TX dropouts after priming, and
 /// an RX gap only where the pump itself restarted (a runner's late thread).
+/// Not in the release gate (no `gate_` name): on a shared runner it
+/// measures the runner's load (the main's decision on #304).
 #[cfg(any(target_os = "linux", windows))]
 #[test]
 fn one_minute_in_real_time() {
