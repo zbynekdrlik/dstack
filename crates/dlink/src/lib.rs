@@ -524,8 +524,9 @@ impl Config {
 
     /// TEST ONLY (dstack #305): the device runs on the TEST system clock
     /// ([`Clock::System`], this machine's own clock, no PTP network) with
-    /// `ppm` of skew against the machine's monotonic clock, so the app's
-    /// clock and the media clock drift as in the field (about 6 ppm) on a CI
+    /// `ppm` of skew against the app's clock
+    /// (`dstack::clock::app_monotonic_ns`), so the app's clock and the
+    /// media clock drift as in the field (about 6 ppm) on a CI
     /// runner with no grandmaster. [`Link::start`] and [`Link::start_until`]
     /// then start on the system clock; [`Link::start_on`] with any other
     /// clock refuses it. -1000 to 1000 ppm; logged as a warning at start.

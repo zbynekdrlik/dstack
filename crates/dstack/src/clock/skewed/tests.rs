@@ -104,13 +104,13 @@ fn a_sleep_target_past_the_monotonic_range_saturates() {
     assert_eq!(unskewed_ns(0, i64::MIN / 2, 0, u64::MAX), i64::MAX);
 }
 
-/// The wiring on the real monotonic clock: ready at once, epoch 0, and its
-/// time runs `ppm` off the monotonic clock (1000 ppm: 0.1 ms over 0.1 s,
+/// The wiring on the real app's clock: ready at once, epoch 0, and its
+/// time runs `ppm` off the app's clock (Windows CI runs it against raw QPC) (1000 ppm: 0.1 ms over 0.1 s,
 /// far above the reads' own spread).
 #[cfg(any(target_os = "linux", windows))]
 #[test]
 fn the_skewed_clock_reads_the_monotonic_clock_with_its_skew() {
-    use crate::clock::{PtpClock, monotonic_ns};
+    use crate::clock::{PtpClock, app_monotonic_ns as monotonic_ns};
     let base = monotonic_ns();
     let clock = SkewedClock::new(base, 0, TestClockPpm(1000.0));
     assert_eq!(clock.epoch(), 0);
@@ -143,11 +143,11 @@ fn the_skewed_clock_reads_the_monotonic_clock_with_its_skew() {
 #[cfg(any(target_os = "linux", windows))]
 #[test]
 fn the_host_s_ptp_side_follows_the_source_and_the_skew() {
-    use crate::clock::{ClockStats, ManualClock, MonoClock, PtpClock, monotonic_ns};
+    use crate::clock::{ClockStats, ManualClock, MonoClock, PtpClock, app_monotonic_ns};
     use crate::host::ClockSource;
     use std::sync::Arc;
     let same = |a: &Arc<dyn PtpClock>, b: *const ()| Arc::as_ptr(a) as *const () == b;
-    let reads = (5 * S, 1_700_000_000 * S);
+    let reads = (5 * S, 6 * S, 1_700_000_000 * S);
 
     let linked: Arc<dyn PtpClock> = Arc::new(ManualClock::new(7));
     let (mono, stats) = (Arc::new(MonoClock::new()), ClockStats::default());
@@ -170,23 +170,24 @@ fn the_host_s_ptp_side_follows_the_source_and_the_skew() {
     assert!(same(&got, Arc::as_ptr(&mono) as *const ()));
     assert_eq!(
         (mono.k_ns(), stats.is_system()),
-        (Some(reads.1 - reads.0), true)
+        (Some(reads.2 - reads.0), true)
     );
 
-    // Skewed: 1000 ppm from a base 100 s back reads 0.1 s ahead of the
-    // unskewed clock now.
+    // Skewed: 1000 ppm on the app's clock from a base 100 s back reads
+    // 0.1 s ahead of that clock + its k (3 s) now; the monotonic clock is
+    // anchored at its own read.
     let (mono, stats) = (Arc::new(MonoClock::new()), ClockStats::default());
-    let base = monotonic_ns() - 100 * S;
+    let base = app_monotonic_ns() - 100 * S;
     let got = media_ptp(
         ClockSource::System,
         Some(TestClockPpm(1000.0)),
         None,
         &mono,
         &stats,
-        (base, base + 3 * S),
+        (base - 7 * S, base, base + 3 * S),
     );
     assert!(!same(&got, Arc::as_ptr(&mono) as *const ()));
-    assert_eq!((mono.k_ns(), stats.is_system()), (Some(3 * S), true));
-    let ahead = got.now_ns().unwrap() as i64 - mono.now_ns().unwrap() as i64;
+    assert_eq!((mono.k_ns(), stats.is_system()), (Some(10 * S), true));
+    let ahead = got.now_ns().unwrap() as i64 - (app_monotonic_ns() + 3 * S);
     assert!((ahead - S / 10).abs() < 1_000_000, "{ahead} ns ahead");
 }

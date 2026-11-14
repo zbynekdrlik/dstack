@@ -491,7 +491,11 @@ pub(crate) fn prepare_on(
         linked.clone().map(|l| l as Arc<dyn crate::clock::PtpClock>),
         &mono,
         &stats,
-        (monotonic_ns(), realtime_ns()),
+        (
+            monotonic_ns(),
+            crate::clock::app_monotonic_ns(),
+            realtime_ns(),
+        ),
     );
     let clock = Clock {
         ptp,

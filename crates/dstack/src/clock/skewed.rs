@@ -9,9 +9,13 @@
 //! ASRC and dlink's TX Player see real drift, and two processes on one
 //! runner drift against each other.
 //!
-//! PTP ns = `base + k + (m - base) × (1 + ppm × 10⁻⁶)`, `m` the monotonic
-//! clock, `base` its read at the start and `k` the system clock's offset
-//! (realtime − monotonic at the start, as the unskewed clock). The fields
+//! PTP ns = `base + k + (m - base) × (1 + ppm × 10⁻⁶)`, `m` the app's
+//! clock ([`super::app_monotonic_ns`]: Linux `CLOCK_MONOTONIC`, Windows raw
+//! QPC), `base` its read at the start and `k` the system clock's offset
+//! (realtime − the app's clock at the start). The skew is against the app's
+//! clock on both systems: on Windows the media threads' own monotonic clock
+//! is a steer model that ran 66 ppm off raw QPC on a CI runner (dstack #305,
+//! windows-2025), which a skew on it would have added. The fields
 //! never change after the start: a read takes no lock and no atomic.
 //! The arithmetic is in parts per 10¹² ([`TestClockPpm::ppt`]) and `i128`.
 
@@ -71,7 +75,7 @@ impl TestClockPpm {
     }
 }
 
-/// The skewed time at monotonic `m_ns`: `base + k + (m - base) × (1 + ppt
+/// The skewed time at the app's clock `m_ns`: `base + k + (m - base) × (1 + ppt
 /// × 10⁻¹²)`, the skew's part rounded toward minus infinity. `None` when
 /// it falls outside `u64` (before the epoch: a clock not ready).
 pub fn skewed_ns(base_ns: i64, k_ns: i64, ppt: i64, m_ns: i64) -> Option<u64> {
@@ -80,7 +84,7 @@ pub fn skewed_ns(base_ns: i64, k_ns: i64, ppt: i64, m_ns: i64) -> Option<u64> {
     u64::try_from(i128::from(m_ns) + i128::from(k_ns) + skew).ok()
 }
 
-/// The first monotonic time whose [`skewed_ns`] is at least `ptp_ns`
+/// The first app clock time whose [`skewed_ns`] is at least `ptp_ns`
 /// (the time the skewed clock's `sleep_until` sleeps to), saturating at
 /// `i64::MAX`.
 pub fn unskewed_ns(base_ns: i64, k_ns: i64, ppt: i64, ptp_ns: u64) -> i64 {
@@ -104,8 +108,8 @@ pub struct SkewedClock {
 
 #[cfg(any(target_os = "linux", windows))]
 impl SkewedClock {
-    /// The clock from monotonic `base_ns` on, at `k_ns` (PTP − monotonic
-    /// there) and `ppm` off the monotonic clock.
+    /// The clock from the app's clock `base_ns` on, at `k_ns` (PTP − the
+    /// app's clock there) and `ppm` off the app's clock.
     pub fn new(base_ns: i64, k_ns: i64, ppm: TestClockPpm) -> Self {
         SkewedClock {
             base_ns,
@@ -118,11 +122,16 @@ impl SkewedClock {
 #[cfg(any(target_os = "linux", windows))]
 impl PtpClock for SkewedClock {
     fn now_ns(&self) -> Option<u64> {
-        skewed_ns(self.base_ns, self.k_ns, self.ppt, super::monotonic_ns())
+        skewed_ns(self.base_ns, self.k_ns, self.ppt, super::app_monotonic_ns())
     }
 
     fn sleep_until(&self, ptp_ns: u64) {
-        super::sys::sleep_until_monotonic(unskewed_ns(self.base_ns, self.k_ns, self.ppt, ptp_ns));
+        // The wait on the app's clock, slept on the media threads' own
+        // monotonic clock (the same on Linux; a few ppm apart on Windows,
+        // which a caller's next read of the time absorbs).
+        let wait = unskewed_ns(self.base_ns, self.k_ns, self.ppt, ptp_ns)
+            .saturating_sub(super::app_monotonic_ns());
+        super::sys::sleep_until_monotonic(super::monotonic_ns().saturating_add(wait.max(0)));
     }
 
     fn epoch(&self) -> u32 {
@@ -145,8 +154,9 @@ pub fn test_clock_refusal(source: ClockSource, ppm: Option<TestClockPpm>) -> Opt
     })
 }
 
-/// The media clock's PTP side as the host starts it, with the monotonic
-/// and system clocks read at the start (`(monotonic, realtime)`, ns):
+/// The media clock's PTP side as the host starts it, with the clocks read
+/// at the start (`(monotonic, app, realtime)`, ns; the app's clock is the
+/// skewed clock's base):
 /// `linked` when there is one (dsync's follower); on the TEST system clock
 /// `source`, `mono` anchored at this machine's clock (k = realtime −
 /// monotonic) and `stats` marked, skewed by `ppm` when set (a WARN each);
@@ -158,7 +168,7 @@ pub fn media_ptp(
     linked: Option<Arc<dyn PtpClock>>,
     mono: &Arc<super::MonoClock>,
     stats: &super::ClockStats,
-    (base_ns, realtime_ns): (i64, i64),
+    (base_ns, app_ns, realtime_ns): (i64, i64, i64),
 ) -> Arc<dyn PtpClock> {
     if let Some(l) = linked {
         return l;
@@ -181,7 +191,7 @@ pub fn media_ptp(
                  (test_clock_ppm): a drift for tests, never for a real Dante network",
                 ppm.0
             );
-            Arc::new(SkewedClock::new(base_ns, k_ns, ppm))
+            Arc::new(SkewedClock::new(app_ns, realtime_ns - app_ns, ppm))
         }
         None => Arc::clone(mono) as Arc<dyn PtpClock>,
     }
