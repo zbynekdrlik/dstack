@@ -944,7 +944,8 @@ fn run<P: Process>(clock: &dyn PtpClock, mut pump: Pump<P>, stop: &AtomicBool) {
         pin.keep(pump.tx.now_ns());
         // The epoch before the time (`crate::media::tx::shift`).
         let anchor = crate::clock::Anchor::of(clock);
-        // Media now and the app's clock read back to back (dstack #295).
+        // The app's clock, media now and the app's clock again, back to
+        // back (dstack #295).
         #[cfg(any(target_os = "linux", windows))]
         let now = pump.read_clocks(clock, crate::clock::app_monotonic_ns);
         #[cfg(not(any(target_os = "linux", windows)))]

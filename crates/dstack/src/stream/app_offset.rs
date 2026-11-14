@@ -31,7 +31,11 @@
 pub const REJECT_NS: u64 = 50_000;
 
 /// The most the filtered offset follows a pair, as ppm of the app time
-/// since the last followed pair.
+/// since the last followed pair. The bound is rounded down to whole ns
+/// each wake ([`slew_max_ns`]) and the fraction is not carried, so the
+/// rate followed is a little under it: 99 ppm at 333 µs wakes (96 kHz,
+/// 32 frames), 96 ppm at 83 µs; the real rate gap (about 6 ppm) is far
+/// below either.
 pub const SLEW_PPM: i64 = 100;
 
 /// Wakes in a row whose pairs read alike (within [`REJECT_NS`] of each

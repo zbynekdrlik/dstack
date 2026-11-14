@@ -214,6 +214,19 @@ fn the_pump_thread_stamps_each_media_block_in_the_app_s_real_clock() {
         let s = s.expect("a media block has a play time");
         assert!(s >= before && s <= after + 10 * MS, "{before} {s} {after}");
     }
+    // The first block is stamped from the first pair, read between
+    // `before` and `after`; every later one a block after it (a pair
+    // followed moves it by at most the slew bound, 33 ns a wake), so no
+    // stamp runs ahead of the media time run.
+    let first = stamps[0].expect("a media block has a play time");
+    assert!(
+        first >= before && first <= after,
+        "{before} {first} {after}"
+    );
+    for w in stamps.windows(2) {
+        let gap = w[1].unwrap() - w[0].unwrap();
+        assert!((333_333 - 34..=333_334).contains(&gap), "{w:?}");
+    }
 }
 
 // ---- the filtered offset (dstack #295 step 2) ----
@@ -342,7 +355,7 @@ fn an_offset_change_under_the_rejection_bound_is_slewed_at_100_ppm() {
 }
 
 #[test]
-fn a_torn_pair_is_counted_and_a_taken_step_is_not() {
+fn a_torn_pair_is_counted_and_a_step_counts_only_its_held_wakes() {
     let mut r = pump();
     let clock = ManualClock::new(ns_of(T, RATE));
     let mut app = APP0;
