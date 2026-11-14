@@ -19,7 +19,11 @@
 //!   records the announcer published last ([`super::Announcer::published`]).
 //!   Started on Windows only (`host`): Linux sends from the device's
 //!   address already, and a socket bound to a unicast address receives no
-//!   multicast there.
+//!   multicast there. Its [`Watch`] reads the interface list every 2 s
+//!   (dstack #282): after the address is added again, or moves to another
+//!   interface index, the socket is opened and joined again and every
+//!   record is announced ([`announcement`]), so browsers find the device
+//!   at once.
 //!
 //! mdns-sd keeps announcing, answering and browsing; Dante Controller then
 //! gets our answers twice, once from the device's address. Logs carry
@@ -27,16 +31,17 @@
 
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use simple_dns::rdata::{A, PTR, RData, SRV, TXT};
 use simple_dns::{CLASS, Name, Packet, QTYPE, ResourceRecord, TYPE};
-use tracing::{debug, trace};
+use tracing::{debug, info, trace};
 
 use super::ServiceRecord;
+use crate::membership::{Link, Membership};
 
 /// mDNS's group and port.
 pub const GROUP: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 251);
@@ -246,52 +251,140 @@ fn a(rec: &ServiceRecord) -> ResourceRecord<'_> {
     rr
 }
 
+/// The unsolicited announcement of every record in `recs`: the answer to
+/// a PTR query of each service type they name (in order, each type once),
+/// in datagrams as [`answers`] packs them; empty for no records. Sent after
+/// a rejoin (dstack #282), so browsers learn the device again at once
+/// rather than at their next query.
+pub fn announcement(recs: &[ServiceRecord]) -> Vec<Vec<u8>> {
+    let mut types: Vec<&str> = Vec::new();
+    for rec in recs {
+        if !types.contains(&rec.service) {
+            types.push(rec.service);
+        }
+    }
+    let mut query = Packet::new_query(0);
+    for ty in &types {
+        query.questions.push(simple_dns::Question::new(
+            dns(ty),
+            QTYPE::TYPE(TYPE::PTR),
+            simple_dns::QCLASS::CLASS(CLASS::IN),
+            false,
+        ));
+    }
+    match query.build_bytes_vec() {
+        Ok(bytes) => answers(&bytes, recs),
+        Err(e) => {
+            debug!(%e, "the announcement's query could not be built");
+            Vec::new()
+        }
+    }
+}
+
+/// The interface watch of a [`Responder`] (dstack #282): when its address
+/// is added again or moves to another interface index, the socket is
+/// opened again (bound and joined anew) and the records announced.
+pub struct Watch {
+    /// The interface list ([`crate::membership::links`]; tests: their own).
+    pub read: Box<dyn FnMut() -> io::Result<Vec<Link>> + Send>,
+    /// How often the list is read ([`crate::membership::EVERY`]).
+    pub every: Duration,
+    /// Where the announcement goes: the mDNS group (a test: its socket).
+    pub announce_to: SocketAddrV4,
+}
+
 /// Our records answered from the device's address (see the module).
 #[derive(Debug)]
 pub struct Responder {
     stop: Arc<AtomicBool>,
+    rejoins: Arc<AtomicU64>,
     thread: Option<JoinHandle<()>>,
+}
+
+/// The socket on `at`, joined to the group there with `multicast`.
+fn open(at: SocketAddrV4, multicast: bool) -> io::Result<UdpSocket> {
+    let sock = socket2::Socket::new(
+        socket2::Domain::IPV4,
+        socket2::Type::DGRAM,
+        Some(socket2::Protocol::UDP),
+    )?;
+    sock.set_reuse_address(true)?;
+    sock.bind(&at.into())?;
+    if multicast {
+        sock.join_multicast_v4(&GROUP, at.ip())?;
+        sock.set_multicast_if_v4(at.ip())?;
+        sock.set_multicast_ttl_v4(255)?;
+    }
+    let sock: UdpSocket = sock.into();
+    sock.set_read_timeout(Some(WAIT))?;
+    Ok(sock)
 }
 
 impl Responder {
     /// The socket on `ip`:5353, joined to the group there, and the thread
-    /// answering from `published`.
+    /// answering from `published`; joined again after an interface change
+    /// (dstack #282).
     pub fn start(ip: Ipv4Addr, published: Arc<Mutex<Vec<ServiceRecord>>>) -> io::Result<Self> {
-        Self::start_on(SocketAddrV4::new(ip, PORT), true, published)
+        let watch = Watch {
+            read: Box::new(crate::membership::links),
+            every: crate::membership::EVERY,
+            announce_to: SocketAddrV4::new(GROUP, PORT),
+        };
+        Self::start_watched(SocketAddrV4::new(ip, PORT), true, published, watch)
     }
 
     /// [`Responder::start`] on `at`, joined to the group only with
-    /// `multicast` (a test's unicast responder on loopback).
+    /// `multicast` (a test's unicast responder on loopback), with no
+    /// interface watch.
     pub fn start_on(
         at: SocketAddrV4,
         multicast: bool,
         published: Arc<Mutex<Vec<ServiceRecord>>>,
     ) -> io::Result<Self> {
-        let sock = socket2::Socket::new(
-            socket2::Domain::IPV4,
-            socket2::Type::DGRAM,
-            Some(socket2::Protocol::UDP),
-        )?;
-        sock.set_reuse_address(true)?;
-        sock.bind(&at.into())?;
-        if multicast {
-            sock.join_multicast_v4(&GROUP, at.ip())?;
-            sock.set_multicast_if_v4(at.ip())?;
-            sock.set_multicast_ttl_v4(255)?;
-        }
-        let sock: UdpSocket = sock.into();
-        sock.set_read_timeout(Some(WAIT))?;
+        Self::spawn(at, multicast, published, None)
+    }
+
+    /// [`Responder::start_on`] with the interface watch `watch`.
+    pub fn start_watched(
+        at: SocketAddrV4,
+        multicast: bool,
+        published: Arc<Mutex<Vec<ServiceRecord>>>,
+        watch: Watch,
+    ) -> io::Result<Self> {
+        Self::spawn(at, multicast, published, Some(watch))
+    }
+
+    fn spawn(
+        at: SocketAddrV4,
+        multicast: bool,
+        published: Arc<Mutex<Vec<ServiceRecord>>>,
+        watch: Option<Watch>,
+    ) -> io::Result<Self> {
+        let sock = open(at, multicast)?;
         let stop = Arc::new(AtomicBool::new(false));
+        let rejoins = Arc::new(AtomicU64::new(0));
         let thread = {
-            let stop = Arc::clone(&stop);
+            let server = Server {
+                at,
+                multicast,
+                published,
+                stop: Arc::clone(&stop),
+                rejoins: Arc::clone(&rejoins),
+            };
             std::thread::Builder::new()
                 .name("dstack-mdns-own".to_string())
-                .spawn(move || serve(&sock, &published, &stop))?
+                .spawn(move || server.serve(sock, watch))?
         };
         Ok(Responder {
             stop,
+            rejoins,
             thread: Some(thread),
         })
+    }
+
+    /// How often its socket was joined again after an interface change.
+    pub fn rejoins(&self) -> u64 {
+        self.rejoins.load(Ordering::Relaxed)
     }
 }
 
@@ -312,27 +405,82 @@ impl Drop for Responder {
     }
 }
 
-/// The thread: each query answered, until the stop.
-fn serve(sock: &UdpSocket, published: &Mutex<Vec<ServiceRecord>>, stop: &AtomicBool) {
-    let mut buf = vec![0u8; 9000];
-    while !stop.load(Ordering::Relaxed) {
-        let (n, from) = match sock.recv_from(&mut buf) {
-            Ok((n, SocketAddr::V4(from))) => (n, from),
-            Ok(_) => continue,
-            Err(e) => {
-                trace!(kind = ?e.kind(), "no mDNS query this wait");
-                continue;
+/// What the responder's thread keeps.
+struct Server {
+    at: SocketAddrV4,
+    multicast: bool,
+    published: Arc<Mutex<Vec<ServiceRecord>>>,
+    stop: Arc<AtomicBool>,
+    rejoins: Arc<AtomicU64>,
+}
+
+impl Server {
+    /// The thread: each query answered, until the stop; with a watch, the
+    /// socket opened again and the records announced after an interface
+    /// change (a socket that cannot be opened keeps the old one, and the
+    /// next look tries again).
+    fn serve(&self, mut sock: UdpSocket, mut watch: Option<Watch>) {
+        let mut membership = watch
+            .as_ref()
+            .map(|w| Membership::every(*self.at.ip(), w.every));
+        let mut buf = vec![0u8; 9000];
+        while !self.stop.load(Ordering::Relaxed) {
+            if let (Some(w), Some(m)) = (watch.as_mut(), membership.as_mut()) {
+                let reopen = || -> io::Result<()> {
+                    sock = open(self.at, self.multicast)?;
+                    self.rejoins.fetch_add(1, Ordering::Relaxed);
+                    self.announce(&sock, w.announce_to);
+                    Ok(())
+                };
+                m.keep(Instant::now(), &mut w.read, GROUP, reopen);
             }
-        };
-        let replies = {
-            let recs = published.lock().unwrap_or_else(PoisonError::into_inner);
-            answers(&buf[..n], &recs)
-        };
-        for r in replies {
-            if let Err(e) = sock.send_to(&r, reply_to(from)) {
-                debug!(%e, "mDNS answer from the device's address not sent");
+            let (n, from) = match sock.recv_from(&mut buf) {
+                Ok((n, SocketAddr::V4(from))) => (n, from),
+                Ok(_) => continue,
+                Err(e) => {
+                    trace!(kind = ?e.kind(), "no mDNS query this wait");
+                    continue;
+                }
+            };
+            let replies = {
+                let recs = self
+                    .published
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
+                answers(&buf[..n], &recs)
+            };
+            for r in replies {
+                if let Err(e) = sock.send_to(&r, reply_to(from)) {
+                    debug!(%e, "mDNS answer from the device's address not sent");
+                }
             }
         }
+    }
+
+    /// Our published records announced to `to` from `sock`.
+    fn announce(&self, sock: &UdpSocket, to: SocketAddrV4) {
+        let datagrams = {
+            let recs = self
+                .published
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            announcement(&recs)
+        };
+        let count = datagrams.len();
+        let sent = datagrams
+            .iter()
+            .filter(|d| match sock.send_to(d, to) {
+                Ok(_) => true,
+                Err(e) => {
+                    debug!(%e, "an mDNS announcement datagram not sent");
+                    false
+                }
+            })
+            .count();
+        info!(
+            sent,
+            count, "mDNS records announced again from the device's address"
+        );
     }
 }
 

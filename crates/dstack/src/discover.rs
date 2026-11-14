@@ -18,7 +18,9 @@
 //! - **Listening**: the mDNS group's traffic on the interface, as a
 //!   passive member (nothing sent from it): announcements, goodbyes and
 //!   others' answers. A device that answers no PTR query (a wireless mic
-//!   receiver, dstack #1) is still heard when it announces.
+//!   receiver, dstack #1) is still heard when it announces. The group is
+//!   joined again after an interface change ([`crate::membership`], dstack
+//!   #282).
 //! - **Each instance's record** ([`crate::subscribe::instance`]): SRV,
 //!   TXT and the target's A by direct legacy unicast queries, asked again
 //!   before the answer is [`crate::subscribe::instance::MAX_AGE_NS`] old;
@@ -54,6 +56,7 @@ use simple_dns::{CLASS, Name, Packet, QCLASS, QTYPE, Question, TYPE};
 use tracing::{debug, info, trace, warn};
 
 use crate::announce::{ARC_SERVICE, CMC_SERVICE};
+use crate::membership::{Membership, links, rejoin};
 use crate::subscribe::directory::DBC_SERVICE;
 use crate::subscribe::instance::{Instances, MDNS, Srv};
 
@@ -491,6 +494,7 @@ impl Discovery {
         let stop = Arc::new(AtomicBool::new(false));
         let (tx, rx) = mpsc::channel();
         let run = Run {
+            ip,
             sweeper,
             listener,
             mdns,
@@ -567,6 +571,8 @@ fn drain(sock: &UdpSocket, buf: &mut [u8], until: Instant, mut take: impl FnMut(
 
 /// The thread's state.
 struct Run {
+    /// Our address: the group is joined on its interface.
+    ip: Ipv4Addr,
     sweeper: UdpSocket,
     listener: Option<UdpSocket>,
     mdns: SocketAddrV4,
@@ -585,7 +591,14 @@ impl Run {
         let mut next_sweep = Duration::ZERO;
         let mut id: u16 = 0;
         let mut buf = vec![0u8; 9000];
+        let mut membership = Membership::new(self.ip);
         while !self.stop.load(Ordering::Relaxed) {
+            // dstack #282: the group joined again after an interface change.
+            if let Some(listener) = &self.listener {
+                membership.keep(Instant::now(), links, MDNS, || {
+                    rejoin(listener, *MDNS.ip(), self.ip)
+                });
+            }
             if origin.elapsed() >= next_sweep {
                 id = id.wrapping_add(1);
                 if let Err(e) = self.sweeper.send_to(&sweep_query(id), self.mdns) {

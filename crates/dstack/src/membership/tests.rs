@@ -179,7 +179,12 @@ fn keep_rejoins_on_a_change_and_logs_it_at_info() {
             rejoined.set(rejoined.get() + 1);
             Ok(())
         };
-        assert!(m.keep(t0 + Duration::from_millis(10), || Ok(two_legs(19)), group, rejoin));
+        assert!(m.keep(
+            t0 + Duration::from_millis(10),
+            || Ok(two_legs(19)),
+            group,
+            rejoin
+        ));
     });
     assert_eq!(rejoined.get(), 1);
     assert!(
@@ -192,7 +197,12 @@ fn keep_rejoins_on_a_change_and_logs_it_at_info() {
     assert!(text.contains("group=224.0.0.251:5353"), "{text}");
     // Nothing changed since: no rejoin, no line.
     let text = crate::test_log::capture_at(Level::INFO, || {
-        assert!(!m.keep(t0 + Duration::from_millis(20), || Ok(two_legs(19)), group, no_rejoin));
+        assert!(!m.keep(
+            t0 + Duration::from_millis(20),
+            || Ok(two_legs(19)),
+            group,
+            no_rejoin
+        ));
     });
     assert!(text.is_empty(), "{text}");
 }
@@ -205,7 +215,12 @@ fn keep_warns_on_a_failed_rejoin_and_tries_again_at_the_next_period() {
     assert!(!m.keep(t0, || Ok(two_legs(26)), "RX multicast flows", || Ok(())));
     let text = crate::test_log::capture_warnings(|| {
         let failing = || Err(io::Error::other("no such interface"));
-        assert!(!m.keep(t0 + every, || Ok(two_legs(19)), "RX multicast flows", failing));
+        assert!(!m.keep(
+            t0 + every,
+            || Ok(two_legs(19)),
+            "RX multicast flows",
+            failing
+        ));
     });
     assert!(text.contains("multicast group not re-joined"), "{text}");
     assert!(text.contains("no such interface"), "{text}");
@@ -215,7 +230,12 @@ fn keep_warns_on_a_failed_rejoin_and_tries_again_at_the_next_period() {
         rejoined.set(true);
         Ok(())
     };
-    assert!(m.keep(t0 + every * 2, || Ok(two_legs(19)), "RX multicast flows", rejoin));
+    assert!(m.keep(
+        t0 + every * 2,
+        || Ok(two_legs(19)),
+        "RX multicast flows",
+        rejoin
+    ));
     assert!(rejoined.get());
 }
 
@@ -264,7 +284,9 @@ fn rejoin_keeps_receiving_the_group() {
         .send_to(b"after the rejoin", SocketAddrV4::new(group, port))
         .unwrap();
     let mut buf = [0u8; 64];
-    let (n, _) = sock.recv_from(&mut buf).expect("the group, after the rejoin");
+    let (n, _) = sock
+        .recv_from(&mut buf)
+        .expect("the group, after the rejoin");
     assert_eq!(&buf[..n], b"after the rejoin");
 }
 

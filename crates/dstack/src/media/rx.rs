@@ -182,6 +182,9 @@ pub struct RxShared {
     /// it ([`RxShared::playout`]).
     playout: AtomicU64,
     routes_version: AtomicU32,
+    /// Moves once per [`RxShared::rejoin_groups`]: the RX thread joins
+    /// every slot's group again when it sees it move (dstack #282).
+    rejoins: AtomicU32,
     sockets: Box<[UdpSocket]>,
     /// Our address: the multicast groups are joined on it.
     ip: Ipv4Addr,
@@ -258,6 +261,7 @@ impl RxShared {
             routes: (0..rings.len()).map(|_| AtomicU64::new(0)).collect(),
             delays: (0..rings.len()).map(|_| AtomicU32::new(0)).collect(),
             routes_version: AtomicU32::new(0),
+            rejoins: AtomicU32::new(0),
             sockets,
             ip,
             rings,
@@ -270,6 +274,13 @@ impl RxShared {
             stamps: AtomicBool::new(stamps),
             playout: AtomicU64::new(0),
         })
+    }
+
+    /// Our address's interface changed (dstack #282, from the daemon's
+    /// [`crate::membership::Membership`]): the RX thread's next pass joins
+    /// every slot's group again on it.
+    pub fn rejoin_groups(&self) {
+        self.rejoins.fetch_add(1, Ordering::Release);
     }
 
     /// The device latency is `ns`: the pump's playout point is its whole
@@ -512,6 +523,8 @@ pub struct Receiver {
     lanes: Vec<Lane>,
     /// The routes' version read last.
     routes_seen: Option<u32>,
+    /// [`RxShared::rejoin_groups`]'s count acted on last.
+    rejoins_seen: u32,
     /// Each RX channel's route word the last [`Receiver::refresh`] read.
     routes_had: Vec<u64>,
     /// Slots with datagrams waiting, one bit each.
@@ -540,6 +553,7 @@ impl Receiver {
             joined: (0..MAX_FLOWS).map(|_| None).collect(),
             lanes: (0..MAX_FLOWS).map(|_| Lane::new(channels)).collect(),
             routes_seen: None,
+            rejoins_seen: shared.rejoins.load(Ordering::Acquire),
             routes_had: vec![0; channels],
             ready: 0,
             buf: Box::new([0; BUFFER]),
@@ -651,6 +665,17 @@ impl Receiver {
                     }
                 }
                 lane.seen = Some(version);
+            }
+        }
+        // dstack #282: an interface change asked every slot's group joined
+        // again (the membership went with the address).
+        let asked = shared.rejoins.load(Ordering::Acquire);
+        if asked != self.rejoins_seen {
+            self.rejoins_seen = asked;
+            for (slot, lane) in self.lanes.iter().enumerate() {
+                if lane.plan.group.is_some() {
+                    regrouped |= 1 << slot;
+                }
             }
         }
         while regrouped != 0 {

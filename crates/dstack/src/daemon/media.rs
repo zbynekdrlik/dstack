@@ -509,6 +509,9 @@ pub struct Driver {
     /// last request to it named it: a stop's log line names the device
     /// after its flow is gone from the manager (dstack #266).
     names: HashMap<SocketAddrV4, String>,
+    /// Our address's interface, for the RX multicast flows' groups: joined
+    /// again after a change (dstack #282).
+    membership: crate::membership::Membership,
 }
 
 impl Driver {
@@ -517,6 +520,7 @@ impl Driver {
     /// answers come back.
     pub fn new(media: Arc<Media>, client: Client, changes: Arc<Changes>) -> (Driver, Answers) {
         let (answers, back) = mpsc::unbounded_channel();
+        let membership = crate::membership::Membership::new(media.ip);
         (
             Driver {
                 media,
@@ -536,6 +540,7 @@ impl Driver {
                 nic: crate::traffic::nic_sent_bytes,
                 pins: crate::media::repin::PinWatch::new(),
                 names: HashMap::new(),
+                membership,
             },
             back,
         )
@@ -543,7 +548,9 @@ impl Driver {
 
     /// One round of the manager now, with the channel records `resolver`
     /// knows; then the checks' round and the late, loss, RX minute, send,
-    /// host, pump, traffic and pin watches.
+    /// host, pump, traffic and pin watches, and the interface watch that
+    /// joins the RX multicast flows' groups again after a change (dstack
+    /// #282).
     pub fn tick(&mut self, resolver: &dyn Resolver) {
         let now = self.media.rx.now_ns();
         let packets = self.media.rx.packets();
@@ -579,6 +586,16 @@ impl Driver {
         self.pins.watch(
             crate::media::repin::pin_resets(),
             crate::media::repin::pin_refusals(),
+        );
+        let rx = &self.media.rx;
+        self.membership.keep(
+            std::time::Instant::now(),
+            crate::membership::links,
+            "every RX multicast flow",
+            || {
+                rx.rejoin_groups();
+                Ok(())
+            },
         );
     }
 

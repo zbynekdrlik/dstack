@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- **Fix (dstack #282): multicast groups are joined again after an interface change.** On Windows an address removed and added again (`netsh ... set address`), seen with a new interface index too, drops a socket's group membership, and nothing joined it again: the device kept running and unicast ARC kept answering, but its mDNS answers from the device's address stopped, browsers lost it, and a receiver whose flow ended could not find it again (a two-leg PC, 14.11.2026).
+  - New module `membership` (re-exported as `host::Membership`, `host::Link`, `host::links`): a watch per joined address reads the interface list (name, address, index) every 2 s and asks a rejoin when the address comes back after it was gone, or its index changes. Another adapter coming and going changes nothing.
+  - The mDNS responder (Windows) opens its socket again, joined anew, and sends an unsolicited announcement of every published record (`announce::responder::announcement`), so browsers learn the device at once. Discovery (dtray's local list) and the latency listener leave and join their group again on the same socket. RX multicast flows: the daemon's tick asks the RX thread (`RxShared::rejoin_groups`), which joins every slot's group again at its next pass. The info client opens a socket per request, so it needed nothing.
+  - New INFO line at each rejoin: `multicast group re-joined after an interface change interface=<name> old_index=<n> new_index=<n> group=<group>`; a failed rejoin warns (`multicast group not re-joined after an interface change; tried again`) and is tried at the next look. The responder adds INFO `mDNS records announced again from the device's address sent=<n> count=<n>`.
+  - API (additive): `membership::{Membership, Link, Rejoin, links, rejoin, EVERY}`, `announce::responder::{announcement, Watch}`, `Responder::start_watched`, `Responder::rejoins`, `RxShared::rejoin_groups`. `Responder::start_on` keeps its signature (no watch).
+- **No latency change** for any app (one interface-list read every 2 s per watch, off the RX hot path).
+- Consumers: move the stack version. dasio, SongPlayer, OBS, the intercom and dtray keep advertising and receiving across an address re-add on a two-leg PC.
+
 ## 0.6.126
 
 - **Feature (dstack #234): start holes apart from holes, the packets' write delay, and a minute line for each flow's holes.** On the editing PC's OBS device (13.11.2026) the holes were a start burst (3324 in the first 26 s, before any packet) and a few RX stalls an hour, yet the counters are lifetime totals and the wake delay (kernel stamp to the pass start) misses a stall inside a pass.
