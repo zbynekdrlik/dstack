@@ -91,3 +91,50 @@ packets() {
 [ "$(packets leg_untracked)" = "0" ] || fail "the leg was untracked"
 
 echo "dante-leg-notrack.nft: loads, reloads idempotently, refuses a load without the interface, untracks only off the leg"
+
+# The mDNS cap (dstack #288) on the dummy leg: the host's own mDNS to the
+# group passes up to the burst (200) and 50/s, past that it is dropped and
+# counted; other UDP to the group and mDNS off the leg are never capped.
+# A drop in the output hook fails the send (EPERM), so the sender counts
+# what passed.
+ip route add 224.0.0.0/4 dev dl0
+nft -D dante_leg=dl0 -f "$rules"
+send() { # <from address> <port> <datagrams>: prints how many were sent
+    python3 - "$@" <<'PY'
+import socket, sys
+src, port, n = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.bind((src, 0))
+s.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(src))
+s.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 0)
+sent = 0
+for _ in range(n):
+    try:
+        s.sendto(b"\0" * 100, ("224.0.0.251", port))
+        sent += 1
+    except PermissionError:
+        pass
+print(sent)
+PY
+}
+capped() {
+    nft list chain inet dstack_dante_leg out |
+        sed -n 's/.*limit rate over 50\/second burst 200 packets counter packets \([0-9]*\).*/\1/p'
+}
+[ "$(capped)" = "0" ] || fail "the mDNS cap rule is missing or counted before any send"
+[ "$(send 192.0.2.1 5353 20)" = "20" ] || fail "normal mDNS announces on the leg were dropped"
+[ "$(capped)" = "0" ] || fail "the mDNS cap dropped normal announces"
+flood="$(send 192.0.2.1 5353 3000)"
+[ "$flood" -ge 180 ] || fail "the flood passed $flood mDNS datagrams, under the burst"
+[ "$flood" -le 1000 ] || fail "the flood passed $flood of 3000 mDNS datagrams: not capped"
+[ "$(capped)" = "$((3000 - flood))" ] || fail "the cap's counter $(capped) is not the $((3000 - flood)) dropped"
+[ "$(send 192.0.2.1 5354 3000)" = "3000" ] || fail "UDP to the group on another port was capped"
+# Another NIC (TEST-NET-2); the sender's IP_MULTICAST_IF picks it.
+ip link add dl1 type dummy
+ip addr add 198.51.100.1/24 dev dl1
+ip link set dl1 up
+[ "$(send 198.51.100.1 5353 3000)" = "3000" ] || fail "mDNS off the leg was capped"
+sleep 1
+[ "$(send 192.0.2.1 5353 5)" = "5" ] || fail "mDNS announces a second after a flood were dropped"
+
+echo "dante-leg.nft: the leg's own mDNS out is capped (flood dropped and counted), announces and other traffic pass"

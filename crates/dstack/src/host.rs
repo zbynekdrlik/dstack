@@ -601,6 +601,12 @@ impl Prepared {
             let _withdrawn = goodbye(&mdns);
             return Err(run_failed(format!("the mDNS interface: {e}")));
         }
+        // dstack #289: who sends how much mDNS on the leg, one meter per
+        // process and address; the device runs on without it (logged).
+        match crate::discover::senders::Meter::shared(net.ip) {
+            Ok(meter) => media.set_mdns_meter(meter),
+            Err(e) => warn!(%e, "the mDNS meter is not started: no mDNS senders in the status"),
+        }
         let control = Arc::new(Control::default());
         #[cfg(windows)]
         let net_ip = net.ip;

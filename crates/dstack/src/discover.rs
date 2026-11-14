@@ -39,8 +39,15 @@
 //! [`Discovery::devices`] for the list now and a channel of every
 //! [`Change`] for a live list. [`Discovery::stop`] ends them.
 //!
-//! It only listens and asks mDNS; it sends nothing to any device. Logs
-//! carry counts and events, never a name or an address.
+//! It only listens and asks mDNS; it sends nothing to any device. Its logs
+//! carry counts and events, never a name or an address ([`senders`] names
+//! the mDNS senders' addresses: that is its purpose).
+//!
+//! [`senders`]: who sends how much mDNS on the leg (dstack #289), each
+//! device's status and a minute line; its own passive listener, one per
+//! process and address (a device runs a [`Discovery`] only now and then,
+//! `traffic::neighbours`, so the meter does not ride on it; it also never
+//! counts a [`Discovery`]'s datagrams, which are the same group's).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
@@ -672,6 +679,8 @@ impl Run {
         let _listened = self.tx.send(change);
     }
 }
+
+pub mod senders;
 
 #[cfg(test)]
 mod tests;

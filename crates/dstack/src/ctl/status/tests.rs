@@ -289,6 +289,10 @@ const WORDS: &[&str] = &[
     "mmcss_high",
     "mmcss_joined_priority_refused",
     "normal",
+    "mdns",
+    "per_s",
+    "top",
+    "over_cap",
 ];
 
 #[test]
@@ -1111,3 +1115,4 @@ fn the_clock_counts_describe_the_source_in_use_and_each_source_apart() {
 }
 
 mod engine;
+mod mdns;

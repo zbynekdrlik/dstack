@@ -110,6 +110,9 @@ pub struct Media {
     /// dstack-dev's own control requests are answered
     /// ([`Media::allow_dev_requests`]).
     dev_requests: AtomicBool,
+    /// The process's mDNS meter on our address ([`Media::set_mdns_meter`],
+    /// dstack #289): the status shows its last minute.
+    mdns: Mutex<Option<Arc<crate::discover::senders::Meter>>>,
 }
 
 /// One RX channel's state ([`Media::rx_channels`]).
@@ -199,6 +202,7 @@ impl Media {
             app: app::AppHook::default(),
             app_command: app::CommandHook::default(),
             dev_requests: AtomicBool::new(false),
+            mdns: Mutex::new(None),
         })
     }
 
@@ -261,6 +265,19 @@ impl Media {
     /// rest of the status, the part may carry names: it is the app's.
     pub fn set_app_status(&self, f: impl Fn() -> String + Send + Sync + 'static) {
         self.app.set(Arc::new(f));
+    }
+
+    /// Holds the process's mDNS meter on our address (dstack #289, the
+    /// host sets it at the start): the status's `mdns` shows its last
+    /// minute, and the meter runs while a device holds it.
+    pub fn set_mdns_meter(&self, meter: Arc<crate::discover::senders::Meter>) {
+        *lock(&self.mdns) = Some(meter);
+    }
+
+    /// The mDNS meter's last minute, when a meter is held and a minute
+    /// closed.
+    pub fn mdns_minute(&self) -> Option<crate::discover::senders::Minute> {
+        lock(&self.mdns).as_ref().and_then(|m| m.last())
     }
 
     /// Sets the app's command hook (dstack #139): a control request
