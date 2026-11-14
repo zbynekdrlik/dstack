@@ -89,7 +89,7 @@ use tracing::{info, warn};
 
 use super::packet::{self, MEDIA_HEADER};
 use super::ring::{Counters, Ring};
-use super::tx::{Cell, MAX_CHANNELS, ns_of, place, take_priority};
+use super::tx::{Cell, MAX_CHANNELS, MediaThread, Scheduling, ns_of, place, take_priority};
 use crate::clock::{self, PtpClock};
 use crate::wire::MAX_DATAGRAM;
 
@@ -907,16 +907,18 @@ impl Receiver {
 }
 
 /// Starts the RX thread: it receives `shared`'s flows on `clock` until
-/// [`RxShared::stop`].
+/// [`RxShared::stop`], and records its scheduling in `scheduling` (the
+/// device's, [`super::tx::TxShared::scheduling`]).
 pub fn spawn(
     clock: Arc<dyn PtpClock>,
     shared: Arc<RxShared>,
     cpu: Option<usize>,
+    scheduling: Arc<Scheduling>,
 ) -> io::Result<JoinHandle<()>> {
     let rx = Receiver::new(Arc::clone(&shared))?;
     std::thread::Builder::new()
         .name("dstack-rx".to_string())
-        .spawn(move || run(clock.as_ref(), &shared, rx, cpu))
+        .spawn(move || run(clock.as_ref(), &shared, rx, cpu, &scheduling))
 }
 
 /// What a failed wait means for the RX thread: an interrupt (a signal) is
@@ -932,8 +934,14 @@ fn failed_wait(shared: &RxShared, e: &io::Error) -> bool {
 
 /// The RX thread's loop (glue: every decision is [`Receiver`]'s and
 /// [`failed_wait`]'s).
-fn run(clock: &dyn PtpClock, shared: &RxShared, mut rx: Receiver, cpu: Option<usize>) {
-    take_priority("RX thread", RX_PRIORITY);
+fn run(
+    clock: &dyn PtpClock,
+    shared: &RxShared,
+    mut rx: Receiver,
+    cpu: Option<usize>,
+    scheduling: &Scheduling,
+) {
+    take_priority(MediaThread::Rx, RX_PRIORITY, scheduling);
     place("RX thread", cpu);
     info!(
         bytes = shared.recv_buffer(),

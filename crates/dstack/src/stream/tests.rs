@@ -197,7 +197,13 @@ fn a_pump_behind_more_than_its_margin_rebootstraps_once_and_counts_the_skipped_b
     // start is the first due at or after now.
     let mut b = fresh;
     let now = due + WORK_MARGIN + 1;
-    assert_eq!(b.next(now), Due::Rebootstrap { skipped: 4 });
+    assert_eq!(
+        b.next(now),
+        Due::Rebootstrap {
+            skipped: 4,
+            cause: Cause::Late
+        }
+    );
     assert_eq!(b.start(), start + 4 * B);
     assert_eq!(b.next(now), Due::Wait { until: due + 4 * B }, "once");
     assert_eq!(
@@ -209,7 +215,13 @@ fn a_pump_behind_more_than_its_margin_rebootstraps_once_and_counts_the_skipped_b
     );
     // Far behind: 10 000 samples skip ⌈10 000 / 32⌉ blocks.
     let mut b = fresh;
-    assert_eq!(b.next(due + 10_000), Due::Rebootstrap { skipped: 313 });
+    assert_eq!(
+        b.next(due + 10_000),
+        Due::Rebootstrap {
+            skipped: 313,
+            cause: Cause::Late
+        }
+    );
     assert_eq!(b.start(), start + 313 * B);
     assert!(matches!(b.next(due + 10_000), Due::Wait { .. }));
     // Another start: the skipped count is the distance in blocks.
@@ -229,7 +241,13 @@ fn a_schedule_far_ahead_rebootstraps() {
     // One sample more: the schedule starts again at now, nothing skipped.
     let now = due - DISCONTINUITY - 1;
     let mut b = fresh;
-    assert_eq!(b.next(now), Due::Rebootstrap { skipped: 0 });
+    assert_eq!(
+        b.next(now),
+        Due::Rebootstrap {
+            skipped: 0,
+            cause: Cause::ClockBack
+        }
+    );
     assert_eq!(b, Blocks::bootstrap(now, TIMING));
     assert!(b.due() >= now && b.due() < now + B);
     assert!(matches!(b.next(now), Due::Wait { .. }));
@@ -304,7 +322,13 @@ fn at_block_16_a_block_is_due_at_start_plus_16_plus_playout_and_late_from_16_beh
     // skipped.
     let mut b = fresh;
     let now = due + W16 + 1;
-    assert_eq!(b.next(now), Due::Rebootstrap { skipped: 2 });
+    assert_eq!(
+        b.next(now),
+        Due::Rebootstrap {
+            skipped: 2,
+            cause: Cause::Late
+        }
+    );
     assert_eq!(b.start(), start + 2 * B16);
     assert_eq!(
         b.next(now),
@@ -315,7 +339,13 @@ fn at_block_16_a_block_is_due_at_start_plus_16_plus_playout_and_late_from_16_beh
     );
     // Far behind: 10 000 samples skip 10 000 / 16 blocks.
     let mut b = fresh;
-    assert_eq!(b.next(due + 10_000), Due::Rebootstrap { skipped: 625 });
+    assert_eq!(
+        b.next(due + 10_000),
+        Due::Rebootstrap {
+            skipped: 625,
+            cause: Cause::Late
+        }
+    );
     assert_eq!(b.start(), start + 625 * B16);
 }
 
@@ -932,8 +962,8 @@ fn stream_stats_map_every_count() {
     s.record(333_333);
     s.record(333_334);
     s.record(5_000_999);
-    s.rebootstrapped(4);
-    s.rebootstrapped(0);
+    s.rebootstrapped(4, Cause::Late);
+    s.rebootstrapped(0, Cause::Retime);
     s.late.fetch_add(7, Ordering::Relaxed);
     s.media.store(true, Ordering::Relaxed);
     s.running.store(true, Ordering::Relaxed);
@@ -966,6 +996,9 @@ fn stream_stats_map_every_count() {
             overruns: 2,
             rebootstraps: 2,
             max_process_us: 5_000,
+            rebootstraps_late: 1,
+            rebootstraps_retime: 1,
+            ..PumpView::default()
         }
     );
     s.fault("boom".to_string(), 0);
@@ -1137,6 +1170,10 @@ fn the_pump_thread_follows_the_media_clock_paces_itself_while_it_is_not_ready_an
     clock.run_to(t0 + 10_000_000);
     let v = stats.view();
     assert!(v.media, "{v:?}");
+    // dstack #281: the thread recorded what it got of its priority.
+    let threads = tx.scheduling().threads();
+    assert_eq!(threads.len(), 1, "{threads:?}");
+    assert_eq!(threads[0].thread, MediaThread::Pump);
     assert_eq!((v.blocks, v.late, v.rebootstraps), (31, 0, 0), "{v:?}");
     let first = Blocks::bootstrap(T, TIMING).start();
     let mut out = vec![0; 31 * B as usize];
@@ -1621,3 +1658,5 @@ fn a_seamless_handover_step_neither_rebootstraps_nor_loses_a_block() {
         }
     }
 }
+
+mod causes;

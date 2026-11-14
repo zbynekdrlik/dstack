@@ -730,6 +730,10 @@ pub struct TxShared {
     /// device latency Dante Controller sets when the config gives no
     /// `tx_latency_ns` ([`TxShared::set_device_latency`]).
     advertised_ns: AtomicU64,
+    /// The device's media threads' scheduling (dstack #281): the TX and
+    /// relay threads and the pump record here, the RX thread through its
+    /// own handle ([`TxShared::scheduling`]).
+    scheduling: Arc<Scheduling>,
     stop: AtomicBool,
     base: Instant,
 }
@@ -825,6 +829,7 @@ impl TxShared {
             "TX flow sockets bound"
         );
         Ok(TxShared {
+            scheduling: Arc::new(Scheduling::new()),
             send_buffer,
             ports,
             ip,
@@ -1002,6 +1007,12 @@ impl TxShared {
         }
         cell.write(source_words(source));
         true
+    }
+
+    /// The device's media threads' scheduling (dstack #281): what each
+    /// thread got of its priority; the RX thread is handed it at its spawn.
+    pub fn scheduling(&self) -> &Arc<Scheduling> {
+        &self.scheduling
     }
 
     /// TX channel `tx`'s engine ring (from 0; phase C): what the engine's
@@ -1641,82 +1652,6 @@ pub fn spawn(clock: Arc<dyn PtpClock>, shared: Arc<TxShared>) -> io::Result<Join
         .spawn(move || run(clock.as_ref(), shared))
 }
 
-/// What a media thread got of the priority its profile asks.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Priority {
-    /// Real-time priority, as asked.
-    Granted,
-    /// THREAD_PRIORITY_HIGHEST, as the normal profile asks on Windows
-    /// (dstack #90), outside MMCSS (it refused).
-    Highest,
-    /// The normal profile on Windows in MMCSS "Pro Audio" at
-    /// AVRT_PRIORITY_HIGH (dstack #1), HIGHEST beneath it.
-    Mmcss,
-    /// Normal priority, as the normal profile asks elsewhere (dlink on
-    /// Linux).
-    Normal,
-    /// A raised priority asked and refused: the thread runs at normal.
-    Refused,
-}
-
-/// The outcome for a thread that asked `asked`, whose ask succeeded
-/// (`granted`) and which joined MMCSS (`mmcss`, asked only with
-/// [`ThreadPriority::Highest`], [`wants_mmcss`]).
-pub(crate) fn priority_outcome(asked: ThreadPriority, granted: bool, mmcss: bool) -> Priority {
-    match (asked, granted, mmcss) {
-        (ThreadPriority::Normal, _, _) => Priority::Normal,
-        (ThreadPriority::Realtime, true, _) => Priority::Granted,
-        (ThreadPriority::Highest, _, true) => Priority::Mmcss,
-        (ThreadPriority::Highest, true, false) => Priority::Highest,
-        (_, false, _) => Priority::Refused,
-    }
-}
-
-/// Whether a media thread that asks `asked` also joins MMCSS "Pro Audio"
-/// (dstack #1, songplayer #285): the normal profile on Windows
-/// ([`ThreadPriority::Highest`]). Its THREAD_PRIORITY_HIGHEST is base 10 in
-/// the app's normal class, under an app's own MMCSS audio threads (the
-/// realtime band), which left SongPlayer's pump off the CPU for 22 to 41 ms
-/// under load (pump misses: silence in the in-ears). MMCSS asks no
-/// privilege and keeps its share of the CPU for the rest of the system.
-/// The real-time profile (dasio, iemmixer) is above MMCSS already.
-pub(crate) fn wants_mmcss(asked: ThreadPriority) -> bool {
-    asked == ThreadPriority::Highest
-}
-
-/// Asks the priority for the calling media thread named `thread` (its
-/// profile's on this OS, [`crate::clock::thread_priority_for`], through
-/// [`ask_priority`]) and logs what it got: info when it is what was asked,
-/// a warning when a raised priority was refused (the thread runs on).
-pub(crate) fn take_priority(thread: &str, priority: i32) {
-    let asked =
-        crate::clock::thread_priority_for(crate::clock::profile(), crate::clock::Os::current());
-    let granted = ask_priority(asked, priority);
-    let mmcss = wants_mmcss(asked) && join_mmcss().is_ok();
-    match priority_outcome(asked, granted, mmcss) {
-        Priority::Granted => info!(thread, priority, "runs SCHED_FIFO"),
-        Priority::Mmcss => info!(
-            thread,
-            "runs in MMCSS Pro Audio at AVRT_PRIORITY_HIGH (the normal timing profile on Windows)"
-        ),
-        Priority::Highest => warn!(
-            thread,
-            error = %std::io::Error::last_os_error(),
-            "MMCSS refused: runs at THREAD_PRIORITY_HIGHEST (the normal timing profile on Windows)"
-        ),
-        Priority::Normal => info!(
-            thread,
-            "runs at normal priority (the normal timing profile)"
-        ),
-        Priority::Refused => warn!(
-            thread,
-            asked = ?asked,
-            priority,
-            "the asked priority was refused: runs at normal priority"
-        ),
-    }
-}
-
 /// How long the TX thread waits for its relay thread to take over before
 /// it puts its escape off (dstack #141): its packets due meanwhile wait
 /// that long.
@@ -1732,7 +1667,7 @@ fn run(clock: &dyn PtpClock, shared: Arc<TxShared>) {
 /// [`run`] with the bounded escape on (`escape`, `clock::escape_on`) or
 /// off: only with it on does a relay thread start.
 fn run_with(clock: &dyn PtpClock, shared: Arc<TxShared>, escape: bool) {
-    take_priority("TX thread", TX_PRIORITY);
+    take_priority(MediaThread::Tx, TX_PRIORITY, &shared.scheduling);
     place("TX thread", shared.cfg.io_cpu);
     info!(
         bytes = shared.send_buffer(),
@@ -1754,7 +1689,7 @@ fn run_with(clock: &dyn PtpClock, shared: Arc<TxShared>, escape: bool) {
     std::thread::scope(|scope| {
         let started = std::thread::Builder::new()
             .name("dstack-tx-relay".to_string())
-            .spawn_scoped(scope, || run_relay(clock, &relay));
+            .spawn_scoped(scope, || run_relay(clock, &relay, &shared.scheduling));
         match started {
             Ok(_) => {
                 info!(
@@ -1856,8 +1791,8 @@ fn escape_through(
 
 /// The relay thread's loop: while it covers, the TX thread's passes at
 /// their times, spinning without an escape (dstack #141).
-fn run_relay(clock: &dyn PtpClock, relay: &relay::Relay<Transmitter>) {
-    take_priority("TX relay thread", TX_PRIORITY);
+fn run_relay(clock: &dyn PtpClock, relay: &relay::Relay<Transmitter>, scheduling: &Scheduling) {
+    take_priority(MediaThread::TxRelay, TX_PRIORITY, scheduling);
     #[cfg(any(target_os = "linux", windows))]
     crate::clock::relay_spin();
     relay.serve(|tx, back| {
@@ -1985,51 +1920,6 @@ pub(crate) fn ask_priority(_asked: ThreadPriority, _priority: i32) -> bool {
     false
 }
 
-/// On Windows: the calling thread joins MMCSS's "Pro Audio" task at
-/// AVRT_PRIORITY_HIGH, for the thread's life, and gets MMCSS's task index;
-/// the OS error when MMCSS refuses (its service stopped), and the thread
-/// keeps its priority. The media threads of the normal timing profile
-/// join it at their start (dstack #1); dsend's loopback capture thread
-/// (cpal's) joins it from its first callback (dstack #198). It allocates
-/// nothing.
-#[cfg(windows)]
-pub fn join_mmcss() -> std::io::Result<u32> {
-    use windows_sys::Win32::System::Threading::{
-        AVRT_PRIORITY_HIGH, AvSetMmThreadCharacteristicsW, AvSetMmThreadPriority,
-    };
-    let mut index = 0u32;
-    // SAFETY: `MMCSS_TASK` is a NUL-terminated UTF-16 string; `index` is a
-    // valid u32 the call writes.
-    let handle = unsafe { AvSetMmThreadCharacteristicsW(MMCSS_TASK.as_ptr(), &raw mut index) };
-    if handle.is_null() {
-        return Err(std::io::Error::last_os_error());
-    }
-    // SAFETY: the handle MMCSS just gave this thread.
-    if unsafe { AvSetMmThreadPriority(handle, AVRT_PRIORITY_HIGH) } == 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    Ok(index)
-}
-
-/// MMCSS's task "Pro Audio", NUL-terminated UTF-16 (no allocation: a
-/// media thread joins at its start).
-#[cfg(windows)]
-const MMCSS_TASK: [u16; 10] = [
-    0x50, 0x72, 0x6f, 0x20, 0x41, 0x75, 0x64, 0x69, 0x6f, 0, // "Pro Audio\0"
-];
-
-/// Elsewhere there is no MMCSS: always the error [`NO_MMCSS`].
-#[cfg(not(windows))]
-pub fn join_mmcss() -> std::io::Result<u32> {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        NO_MMCSS,
-    ))
-}
-
-/// [`join_mmcss`]'s error off Windows.
-pub const NO_MMCSS: &str = "no MMCSS on this OS";
-
 /// Pins the calling thread, named `thread` in the log, to `cpu` when the
 /// device config names one (#72 phase F: the pump and the RX/TX threads on
 /// isolated cores); a refusal (no such CPU) leaves it where it was.
@@ -2079,7 +1969,12 @@ pub(crate) fn pin_to_cpu(_cpu: usize) -> bool {
     false
 }
 
+mod priority;
 pub mod relay;
+pub(crate) use priority::take_priority;
+pub use priority::{
+    MediaThread, MmcssError, NO_MMCSS, Priority, Scheduled, Scheduling, join_mmcss,
+};
 pub mod shift;
 pub use shift::{EngineLine, Shift};
 pub mod host;

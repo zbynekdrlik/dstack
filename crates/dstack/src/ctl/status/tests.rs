@@ -265,6 +265,30 @@ const WORDS: &[&str] = &[
     "missed",
     "overruns",
     "max_process_us",
+    "rebootstraps_late",
+    "rebootstraps_clock_back",
+    "rebootstraps_reanchor",
+    "rebootstraps_retime",
+    "wake_behind_max_us",
+    "wake_behind_minute_max_us",
+    "wake_behind_buckets",
+    "late_wakes",
+    "late_wakes_recent",
+    "unix_ms",
+    "behind_us",
+    "rebootstrap",
+    "threads",
+    "thread",
+    "scheduling",
+    "mmcss_task",
+    "pump",
+    "tx_relay",
+    "sched_fifo",
+    "realtime",
+    "highest",
+    "mmcss_high",
+    "mmcss_joined_priority_refused",
+    "normal",
 ];
 
 #[test]
@@ -722,7 +746,11 @@ fn the_status_has_no_engine_until_one_is_attached() {
         after,
         format!(
             "{},\"engine\":{{\"media\":0,\"offset\":224,\"playout\":96,\"blocks\":0,\
-             \"late\":0,\"missed\":0,\"overruns\":0,\"rebootstraps\":0,\"max_process_us\":0}}}}",
+             \"late\":0,\"missed\":0,\"overruns\":0,\"rebootstraps\":0,\"max_process_us\":0,\
+             \"rebootstraps_late\":0,\"rebootstraps_clock_back\":0,\"rebootstraps_reanchor\":0,\
+             \"rebootstraps_retime\":0,\"wake_behind_max_us\":0,\
+             \"wake_behind_buckets\":[0,0,0,0,0,0,0,0],\"late_wakes\":0,\"late_wakes_recent\":[],\
+             \"threads\":[]}}}}",
             before.strip_suffix('}').unwrap()
         )
     );
@@ -762,7 +790,7 @@ fn the_engine_status_is_numbers_only() {
         format!(
             "\"engine\":{{\"media\":{},\"offset\":224,\"playout\":96,\"blocks\":{},\
              \"late\":{},\"missed\":{},\"overruns\":{},\"rebootstraps\":{},\
-             \"max_process_us\":{}}}}}",
+             \"max_process_us\":{},\"rebootstraps_late\":1,",
             u8::from(v.media),
             v.blocks,
             v.late,
@@ -776,13 +804,13 @@ fn the_engine_status_is_numbers_only() {
     for word in words_of(&s, "test-device") {
         assert!(WORDS.contains(&word.as_str()), "{word:?} in {s}");
     }
-    assert!(s.ends_with(&engine(v)), "{s}");
+    assert!(s.contains(&engine(v)), "{s}");
     // Pacing itself (the clock not ready): `media` 0, one more block.
     pump.free();
     let paced = stats.view();
     assert!(!paced.media && paced.blocks == v.blocks + 1, "{paced:?}");
     let s = status(&media);
-    assert!(s.ends_with(&engine(paced)), "{s}");
+    assert!(s.contains(&engine(paced)), "{s}");
 }
 
 #[test]
@@ -1081,3 +1109,5 @@ fn the_clock_counts_describe_the_source_in_use_and_each_source_apart() {
     assert!(s.contains("\"service\":{\"polls\":2,"), "{s}");
     assert!(!s.contains("\"follower\""), "{s}");
 }
+
+mod engine;
