@@ -319,6 +319,10 @@ pub struct PumpStats {
     /// Pair reads the play-time filter rejected ([`app_offset`], dstack
     /// #295).
     play_at_rejected: AtomicU64,
+    /// Blocks whose play time moved over [`play_at::STEP_NS`] off their
+    /// media time, and the largest deviation, ns (dstack #305).
+    play_at_steps: AtomicU64,
+    play_at_max_dev_ns: AtomicU64,
 }
 
 /// The pump's numbers for the device's control socket (numbers only).
@@ -354,6 +358,11 @@ pub struct PumpView {
     /// Pair reads of the media and the app's clock that the play-time
     /// filter rejected as torn ([`app_offset`], dstack #295).
     pub play_at_rejected: u64,
+    /// Blocks whose play time moved more than [`play_at::STEP_NS`] off the
+    /// media time since the block before ([`play_at`], dstack #305).
+    pub play_at_steps: u64,
+    /// The largest such deviation since the start, whole µs.
+    pub play_at_max_dev_us: u64,
 }
 
 impl PumpStats {
@@ -387,6 +396,8 @@ impl PumpStats {
             fault: Mutex::new(None),
             hists: StreamHists::new(period),
             play_at_rejected: AtomicU64::new(0),
+            play_at_steps: AtomicU64::new(0),
+            play_at_max_dev_ns: AtomicU64::new(0),
         }
     }
 
@@ -529,6 +540,8 @@ impl PumpStats {
             wake_behind_max_us: self.wakes.max_us(),
             wake_behind_minute_max_us: self.wakes.minute_max_us(),
             play_at_rejected: self.play_at_rejected.load(Ordering::Relaxed),
+            play_at_steps: self.play_at_steps.load(Ordering::Relaxed),
+            play_at_max_dev_us: self.play_at_max_dev_ns.load(Ordering::Relaxed) / 1_000,
         }
     }
 }
@@ -574,6 +587,9 @@ pub struct Pump<P: Process> {
     /// filter: its offset and app time. [`Pump::media`] gives it, after
     /// the wake's epoch (a re-anchor's step moves the offset).
     pair: Option<(i64, i64)>,
+    /// The last block's play time, for the next one's deviation
+    /// ([`play_at`], dstack #305).
+    played: play_at::Track,
 }
 
 impl<P: Process> Pump<P> {
@@ -610,6 +626,7 @@ impl<P: Process> Pump<P> {
             last_entry: None,
             app: OffsetFilter::new(),
             pair: None,
+            played: play_at::Track::default(),
         }
     }
 
@@ -788,6 +805,9 @@ impl<P: Process> Pump<P> {
             .app
             .offset()
             .map(|offset| play_at_ns(start, self.timing, rate, offset));
+        if let Some(dev) = self.played.next(start, play_at, rate) {
+            self.stats.play_at_moved(dev);
+        }
         let fault = self.run_processor(Some(start), play_at);
         let at =
             (start + self.timing.offset()).wrapping_add_signed(self.engine_shift.wrapping_neg());
@@ -966,6 +986,7 @@ fn run<P: Process>(clock: &dyn PtpClock, mut pump: Pump<P>, stop: &AtomicBool) {
 }
 
 pub mod app_offset;
+pub mod play_at;
 pub mod wake;
 pub mod watch;
 

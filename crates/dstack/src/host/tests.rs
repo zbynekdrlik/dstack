@@ -178,6 +178,52 @@ fn the_default_route_s_address_is_the_box_s_routed_ipv4() {
     assert!(!routed.ip().is_loopback());
 }
 
+/// dstack #305: the TEST clock skew starts only on the TEST system clock;
+/// any other source refuses it (exit 2) before the place is looked at.
+#[test]
+fn a_test_clock_skew_is_refused_with_any_source_but_the_system_clock() {
+    use crate::clock::TestClockPpm;
+    let ppm = Some(TestClockPpm(6.0));
+    assert_eq!(test_clock_refusal(ClockSource::System, ppm), None);
+    for source in [ClockSource::Dsync, ClockSource::Linked, ClockSource::System] {
+        assert_eq!(test_clock_refusal(source, None), None, "{source:?}");
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let (_, plain) = config_in(dir.path());
+    let cfg = DeviceConfig {
+        test_clock_ppm: ppm,
+        ..plain
+    };
+    for source in [ClockSource::Dsync, ClockSource::Linked] {
+        let why = test_clock_refusal(source, ppm).expect("refused");
+        assert_eq!(
+            why,
+            format!(
+                "test_clock_ppm 6 is for the TEST system clock only (--clock system, dlink's \
+                 Config::test_clock_ppm), not the {source:?} clock"
+            )
+        );
+        let e = prepare_on(cfg.clone(), &Place::Ip(NOWHERE), None, &[], source, |_| {
+            panic!("the place looked at")
+        })
+        .err()
+        .unwrap();
+        assert_eq!(setup_error(e), why);
+    }
+    // On the system clock it goes on to the place.
+    let e = prepare_on(
+        cfg,
+        &Place::Ip(NOWHERE),
+        None,
+        &[],
+        ClockSource::System,
+        |_| Err("not there".into()),
+    )
+    .err()
+    .unwrap();
+    assert_eq!(run_error(e), "not there");
+}
+
 // The interface facts come from Linux files (/sys); Windows reads the adapter.
 #[cfg(target_os = "linux")]
 #[test]

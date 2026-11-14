@@ -5,6 +5,7 @@ use dstack::clock::latency_samples;
 mod app_buffer;
 mod start;
 mod terms;
+mod test_clock;
 
 fn config() -> Config {
     Config::new("app-link", "/tmp/never-written.toml")

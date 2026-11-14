@@ -419,3 +419,23 @@ fn a_re_anchor_of_unknown_step_starts_the_filter_afresh() {
     r.pump.media(to_samples(later, RATE), 1);
     assert_eq!(r.stats.view().play_at_rejected, 1);
 }
+
+/// dstack #305: the pump checks each play time against its media time. A
+/// constant offset moves it one block a block (no step, a deviation under
+/// 1 µs); an app clock that steps 2 ms is taken by the filter after
+/// [`app_offset::STEP_WAKES`] wakes, and the play time moves 2 ms off its
+/// media time once: one step (1999 µs: the blocks' media times round to
+/// whole ns).
+#[test]
+fn the_pump_counts_a_play_time_step_and_its_deviation() {
+    let mut r = pump();
+    let clock = ManualClock::new(ns_of(T, RATE));
+    let mut app = APP0;
+    step(&mut r, &clock, &mut app, 30);
+    let v = r.stats.view();
+    assert_eq!((v.play_at_steps, v.play_at_max_dev_us), (0, 0), "{v:?}");
+    app += 2 * MS;
+    step(&mut r, &clock, &mut app, 30);
+    let v = r.stats.view();
+    assert_eq!((v.play_at_steps, v.play_at_max_dev_us), (1, 1_999), "{v:?}");
+}

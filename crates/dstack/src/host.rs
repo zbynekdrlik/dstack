@@ -125,6 +125,23 @@ pub enum ClockSource {
     System,
 }
 
+/// Why a device with the TEST clock skew `ppm` (dstack #305) cannot start
+/// on `source`: the skew is the TEST system clock's only, so any other
+/// source refuses it (`None`: no skew, or the system clock).
+pub fn test_clock_refusal(
+    source: ClockSource,
+    ppm: Option<crate::clock::TestClockPpm>,
+) -> Option<String> {
+    let ppm = ppm?;
+    (source != ClockSource::System).then(|| {
+        format!(
+            "test_clock_ppm {} is for the TEST system clock only (--clock system, \
+             dlink's Config::test_clock_ppm), not the {source:?} clock",
+            ppm.0
+        )
+    })
+}
+
 /// What SIGTERM and SIGINT do while the device serves.
 #[derive(Debug, Clone)]
 pub enum Signals {
@@ -403,6 +420,9 @@ pub(crate) fn prepare_on(
     source: ClockSource,
     resolve: impl FnOnce(&Place) -> Result<IfAddr, String>,
 ) -> Result<Prepared, HostError> {
+    if let Some(problem) = test_clock_refusal(source, cfg.test_clock_ppm) {
+        return Err(setup(problem));
+    }
     let mut device = load_device(cfg)?;
     fix_flow_ports(&mut device.cfg)?;
     // One timing profile per process: the media threads' waits and
@@ -481,9 +501,32 @@ pub(crate) fn prepare_on(
         let (internal, keep) = crate::clock::linked::start_internal(&ifa.name, seed);
         Arc::new(Linked::new(internal, Arc::clone(&mono), keep))
     });
-    let ptp: Arc<dyn crate::clock::PtpClock> = match &linked {
-        Some(l) => l.clone(),
-        None => mono.clone(),
+    // The TEST system clock (with its TEST skew, dstack #305): PTP time is
+    // this machine's clock from now on.
+    let skewed = if source == ClockSource::System {
+        let base_ns = monotonic_ns();
+        let k_ns = realtime_ns() - base_ns;
+        mono.set_k(k_ns);
+        warn!(
+            "media clock: the TEST system clock; PTP time is this machine's clock, not the \
+             network's: never for a real Dante network"
+        );
+        device.cfg.test_clock_ppm.map(|ppm| {
+            warn!(
+                test_clock_ppm = ppm.0,
+                "media clock: the TEST system clock runs {} ppm off this machine's clock \
+                 (test_clock_ppm): a drift for tests, never for a real Dante network",
+                ppm.0
+            );
+            Arc::new(crate::clock::SkewedClock::new(base_ns, k_ns, ppm))
+        })
+    } else {
+        None
+    };
+    let ptp: Arc<dyn crate::clock::PtpClock> = match (&linked, skewed) {
+        (Some(l), _) => l.clone(),
+        (None, Some(s)) => s,
+        (None, None) => mono.clone(),
     };
     let clock = Clock {
         ptp,
@@ -491,14 +534,7 @@ pub(crate) fn prepare_on(
         stats: Arc::new(ClockStats::default()),
     };
     if source == ClockSource::System {
-        // Test only: PTP time is this machine's clock from now on.
-        let k_ns = realtime_ns() - monotonic_ns();
-        mono.set_k(k_ns);
         clock.stats.mark_system();
-        warn!(
-            "media clock: the TEST system clock; PTP time is this machine's clock, not the \
-             network's: never for a real Dante network"
-        );
     }
     let media = Media::new(&device, net.ip, clock, seed(), engine_tx)
         .map_err(|e| run_failed(format!("the flow sockets: {e}")))?;
