@@ -1946,3 +1946,5 @@ fn two_flows_that_stay_silent_count_one_failure_per_round() {
     // As one flow: 9 s after one failure, 18 s after two.
     assert_eq!(rounds, [(0, 2), (9, 2), (27, 2)]);
 }
+
+mod coarse_multicast;
