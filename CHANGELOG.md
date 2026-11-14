@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.130
 
 - **Feature (dstack #292, requested by dasio#106): dtray's dasio settings window opens and edits a bridge instance.** dasio 0.1.83 makes an instance a bridge to a local ASIO driver with a `[bridge]` table in its `device.toml` (`driver`, `to_asio`, `from_asio`, optional `app_buffer_ns`); the window refused that file ("Settings not readable", unknown field), because it took out only `iface` before reading the rest as a dstack `DeviceConfig`.
   - The window now takes `[bridge]` out the same way (dasio's own key) and reads it with dasio's schema: unknown keys and wrong types are refused, so a typo is caught as dstack's keys are. Apply writes it back; only the keys that changed are rewritten, the table's comments and other keys stay (a standard or an inline table). The window never adds or removes the table: an instance's kind (DAW or bridge) is not changed there, and the elevated helper refuses a staged file that changes it.
