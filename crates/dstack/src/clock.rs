@@ -37,6 +37,7 @@
 
 pub mod dsyx;
 pub mod escape;
+pub mod skewed;
 pub mod steer;
 
 use crate::device::TimingProfile;
@@ -53,6 +54,9 @@ pub use escape::{
     SPIN_ESCAPE_MIN_MS, TIMER_LATE_NS, pump_escape_line, pump_may_escape, spin_escape_line,
     spin_escape_of,
 };
+#[cfg(any(target_os = "linux", windows))]
+pub use skewed::SkewedClock;
+pub use skewed::{MAX_TEST_CLOCK_PPM, TestClockPpm};
 
 /// Two readings whose k differ by at most this agree (20 µs: far above
 /// dsync's reply jitter, two clock reads microseconds apart, and below

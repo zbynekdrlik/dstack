@@ -39,14 +39,14 @@ fn the_default_route_s_place_is_the_box_s_routed_ipv4() {
 }
 
 /// An app's processor that writes nothing (the starts below never run it).
-struct Quiet;
+pub(super) struct Quiet;
 impl Process for Quiet {
     fn process(&mut self, _block: &mut Block<'_>) {}
 }
 
 /// A config whose state file is in a folder of its own: the start writes
 /// it (a probe of the folder), and starts sharing a path race each other.
-fn own_state() -> (tempfile::TempDir, Config) {
+pub(super) fn own_state() -> (tempfile::TempDir, Config) {
     let dir = tempfile::tempdir().unwrap();
     let cfg = Config::new("app-link", dir.path().join("dlink.toml"))
         .rx(["In 1", "In 2"])
@@ -55,14 +55,14 @@ fn own_state() -> (tempfile::TempDir, Config) {
 }
 
 /// An address no interface of any box holds (TEST-NET-1, RFC 5737).
-const ABSENT: std::net::Ipv4Addr = std::net::Ipv4Addr::new(192, 0, 2, 77);
+pub(super) const ABSENT: std::net::Ipv4Addr = std::net::Ipv4Addr::new(192, 0, 2, 77);
 
 /// How long a start that does not wait may take to answer: a start that
 /// waits never does.
 const ANSWERS: Duration = Duration::from_secs(5);
 
 /// One RX channel, no TX.
-fn rx_only() -> Map {
+pub(super) fn rx_only() -> Map {
     Map {
         rx: vec![0],
         tx: vec![],

@@ -231,8 +231,9 @@ pub struct Player {
     /// Output frames of the caller's blocks that never came (a skip,
     /// [`Player::fill_at`]): the output's clock counts them.
     skipped: u64,
-    /// Where the caller's next block starts, if it names its starts.
-    next_start: Option<u64>,
+    /// Where the caller's next block starts, if it names its starts; a
+    /// block without one after it leaves [`Next::Interrupted`].
+    next_start: Option<Next>,
     /// The output's position at the frame being made, frames (played,
     /// within the current call).
     at: u64,
@@ -342,6 +343,8 @@ impl Player {
     /// [`crate::Block::start`]). A block that does not start where the last
     /// one ended (the pump skipped blocks, #302) resyncs the player: one
     /// re-prime to the target, counted in [`Stats::resyncs`] (module doc).
+    /// So does the first start after blocks with none (free pacing: the
+    /// device had no media clock) that followed one with a start.
     /// A caller that fills one block in pieces passes each piece's own
     /// start (the block's start + the frames before it), or every piece
     /// after the first resyncs.
@@ -355,12 +358,19 @@ impl Player {
         let Some(frames) = out.len().checked_div(outputs) else {
             return;
         };
-        if let (Some(start), Some(expected)) = (start, self.next_start)
-            && start != expected
-        {
-            self.resync(start.saturating_sub(expected));
+        match (start, self.next_start) {
+            (Some(start), Some(Next::At(expected))) if start != expected => {
+                self.resync(start.saturating_sub(expected));
+            }
+            // Back on the starts after blocks with none: its frames were
+            // played, so the re-prime skips no time.
+            (Some(_), Some(Next::Interrupted)) => self.resync(0),
+            _ => {}
         }
-        self.next_start = start.map(|s| s.saturating_add(frames as u64));
+        self.next_start = match start {
+            Some(s) => Some(Next::At(s.saturating_add(frames as u64))),
+            None => self.next_start.map(|_| Next::Interrupted),
+        };
         self.callback_in = frames_of(frames as f64 / f64::from(self.out_rate), self.net_rate);
         self.look(self.played);
         let inputs = self.fifo.channels();
@@ -555,6 +565,16 @@ impl Player {
         // Within the converter's room by the controller's own bound.
         let _ = self.conv.set_ppm(ppm);
     }
+}
+
+/// Where the caller's next block starts ([`Player::fill_at`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Next {
+    /// At this output frame of the caller's clock.
+    At(u64),
+    /// Blocks without a start came after one with a start: the next start
+    /// resyncs.
+    Interrupted,
 }
 
 #[cfg(test)]

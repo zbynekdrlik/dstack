@@ -83,6 +83,22 @@ jobs:
       - name: Dante-leg rulesets load, reload, refuse a load without the interface, untrack only off the leg
         run: sudo bash tools/linux/tests/dante-leg.test.sh
 
+  ci-peer:
+    # docs/ci-peer.md's recipe for an application's CI (dstack #305): two
+    # `dstack-dev peer` devices on a dummy interface, each on the TEST system
+    # clock with its own skew, each receiving the other's tone, gated as the
+    # doc says.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo build --release --locked -p dstack --bin dstack-dev
+      - name: Two peers on a dummy interface hear each other whole
+        run: sudo bash tools/linux/tests/ci-peer.test.sh target/release/dstack-dev
+
   dsend-audio-driver:
     # dsend's own Windows render endpoint (drivers/dsend-audio, MS-PL; dstack
     # #184), built like dasio's NDIS filter: NuGet WDK, 64-bit MSBuild, the
@@ -172,8 +188,10 @@ jobs:
           done
 
   mutation:
-    # Mutants of the PR's own diff only (.cargo/mutants.toml), 8 shards of at
-    # most 20 minutes (4 overran with dlisten's 380 mutants, dstack #139); a
+    # Mutants of the PR's own diff only (.cargo/mutants.toml), 16 shards of at
+    # most 20 minutes (4 overran with dlisten's 380 mutants, dstack #139; 8
+    # overran with #305's 322, 40 a shard at about a minute each with two at
+    # once: .config/nextest.toml also runs the slow tests last); a
     # mutant the tests miss fails the PR (kill it with an assertion). An overrun is a setup bug: shard more or narrow, never a
     # longer timeout.
     if: github.event_name == 'pull_request'
@@ -183,7 +201,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

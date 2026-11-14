@@ -124,6 +124,12 @@ exclude_re = [
   # Timing::of, their one computation, is unit tested.
   "embed.rs",
   "host.rs.*(prepare_config|Watch::new|Watch::stop)",
+  # The CI test peer's device and process glue (dstack #305): the device
+  # start and stop, its status read, main and the signal loop; their
+  # decisions (args::parse, device_config, Tones, tone::ToneCheck,
+  # status_json, write_status, play_at_ppm) are unit tested, and
+  # tests/peer.rs runs two peers and the binary (not per mutant).
+  "peer.rs.*(Peer::(start|media|shared|status|ended|stop)|replace main|run_until_signal)",
   # The media side's per-RX-channel read for apps: glue over the manager
   # and the rings (each tested); crates/dlink/tests/link.rs reads it from a
   # running device (not per mutant).
