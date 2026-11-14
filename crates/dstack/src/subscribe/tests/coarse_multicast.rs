@@ -367,7 +367,7 @@ fn a_full_list_of_kept_transmitters_asks_none_and_grows_no_further() {
     // Full: nothing is asked.
     let net = fine_network();
     let mut m = manager();
-    for i in 0..MAX_FPP_FLOORS {
+    for i in 0..crate::subscribe::coarse::MAX_KEPT {
         m.multicast_kept
             .insert(SocketAddrV4::new(Ipv4Addr::new(10, 1, 0, i as u8), 4455));
     }
@@ -380,12 +380,12 @@ fn a_full_list_of_kept_transmitters_asks_none_and_grows_no_further() {
     // nothing past it.
     let (mut m, out, _) = joined(&net);
     let (flow, _, _) = requests(&out)[0].clone();
-    for i in 0..MAX_FPP_FLOORS {
+    for i in 0..crate::subscribe::coarse::MAX_KEPT {
         m.multicast_kept
             .insert(SocketAddrV4::new(Ipv4Addr::new(10, 1, 0, i as u8), 4455));
     }
     m.answered(flow, Answer::Refused(status::TOO_MANY_TX_FLOWS), S / 2);
-    assert_eq!(m.multicast_kept.len(), MAX_FPP_FLOORS);
+    assert_eq!(m.multicast_kept.len(), crate::subscribe::coarse::MAX_KEPT);
     assert_eq!(m.rx_route(0), Some(RxRoute { flow: 0, slot: 0 }));
 }
 
@@ -464,4 +464,168 @@ fn a_device_on_the_default_config_stays_on_the_coarser_multicast_flow() {
     let out = m.tick(S / 2, &heard, &net);
     assert_eq!(stops(&out), [(to, h)]);
     assert!(group_slot(&m).is_some());
+}
+
+/// A second channel subscribed while the unicast flow is granted but has
+/// delivered nothing joins the multicast flow, never the silent unicast
+/// flow; both move once it delivers.
+#[test]
+fn a_channel_subscribed_before_the_unicast_flow_delivers_joins_the_multicast_flow() {
+    let net = fine_network();
+    let (mut m, out, mut heard) = joined(&net);
+    let (flow, _, _) = requests(&out)[0].clone();
+    m.answered(flow, Answer::Granted(handle(0, 4)), S / 2);
+    // Asked, then granted: a new channel of TX 1 joins the multicast flow.
+    m.set(1, Some(sub("TX 1", "peer-device")));
+    heard[0] = 2;
+    m.tick(S, &heard, &net);
+    assert_eq!(m.rx_route(1), Some(RxRoute { flow: 0, slot: 0 }));
+    heard[flow.slot] = 1;
+    heard[0] = 3;
+    m.tick(S + S / 4, &heard, &net);
+    let on = |slot| {
+        Some(RxRoute {
+            flow: flow.slot,
+            slot,
+        })
+    };
+    assert_eq!((m.rx_route(0), m.rx_route(1)), (on(0), on(0)));
+}
+
+/// Packets in the unicast flow's slot before its grant (a stray sender)
+/// move nothing: only a granted flow that delivers takes the channels.
+#[test]
+fn packets_before_the_grant_move_nothing() {
+    let net = fine_network();
+    let (mut m, out, mut heard) = joined(&net);
+    let (flow, _, _) = requests(&out)[0].clone();
+    heard[flow.slot] = 5;
+    heard[0] = 2;
+    m.tick(S / 2, &heard, &net);
+    assert_eq!(m.rx_route(0), Some(RxRoute { flow: 0, slot: 0 }));
+    m.answered(flow, Answer::Granted(handle(0, 4)), S / 2);
+    heard[flow.slot] = 6;
+    m.tick(S, &heard, &net);
+    assert_eq!(m.rx_route(0).unwrap().flow, flow.slot);
+}
+
+/// Rule 3, no other side effect: the transmitter's counts and request wait
+/// are left as they were, so another channel of it that needs its own
+/// unicast flow is asked at once, and an unanswered request counts nothing.
+#[test]
+fn the_request_and_its_failure_leave_the_transmitter_s_wait_and_counts_alone() {
+    let net = fine_network();
+    let (mut m, out, mut heard) = joined(&net);
+    let to = SocketAddrV4::new(PEER_IP, 4455);
+    let (flow, _, _) = requests(&out)[0].clone();
+    assert_eq!(m.peers[&to].last_request, None);
+    m.answered(flow, Answer::Failed, S / 2);
+    let p = &m.peers[&to];
+    assert_eq!((p.unanswered, p.failures, p.in_flight.len()), (0, 0, 0));
+    // TX 5 is in no multicast flow: its own flow is asked at the next tick.
+    m.set(1, Some(sub("TX 5", "peer-device")));
+    heard[0] = 2;
+    let r = requests(&m.tick(S, &heard, &net));
+    assert_eq!(r.len(), 1);
+    assert_eq!(r[0].2.channels[0], Some(5));
+    // A late answer for a given-up request counts nothing either.
+    let (mut m, out, mut heard) = joined(&net);
+    let (flow, _, _) = requests(&out)[0].clone();
+    heard[0] = 2;
+    m.tick(S / 4 + GIVE_UP_NS, &heard, &net);
+    assert_eq!(m.answered(flow, Answer::Failed, 10 * S), []);
+    assert_eq!(m.peers.get(&to).map_or(0, |p| p.unanswered), 0);
+}
+
+/// A transmitter in its request wait (a failed request of another channel)
+/// is asked only after the wait.
+#[test]
+fn the_request_waits_for_the_transmitter_s_retry_wait() {
+    let net = fine_network();
+    net.set("peer-device", mics_free(Some(1)));
+    let mut m = manager();
+    // TX 5 (no multicast) asked and refused at 0: the next request waits.
+    m.set(1, Some(sub("TX 5", "peer-device")));
+    let (flow, _, _) = requests(&m.tick(0, &NONE, &net))[0].clone();
+    m.answered(flow, Answer::Refused(status::SAMPLE_RATE_MISMATCH), MS);
+    m.set(1, None);
+    m.set(0, Some(sub("TX 1", "peer-device")));
+    m.tick(S / 4, &NONE, &net);
+    let g = group_slot(&m).expect("joined");
+    let mut heard = NONE;
+    let mut asked = Vec::new();
+    for t in 2..60 {
+        heard[g] = t;
+        for r in requests(&m.tick(t * S / 4, &heard, &net)) {
+            asked.push((t * S / 4, r));
+        }
+    }
+    assert_eq!(asked.len(), 1, "{asked:?}");
+    assert!(asked[0].0 >= retry_after(1), "{}", asked[0].0);
+    assert!(asked[0].0 < retry_after(1) + S / 2, "{}", asked[0].0);
+}
+
+/// A record that changed to another rate after the join (the multicast
+/// flow keeps it routed) is never asked for its own unicast flow.
+#[test]
+fn a_record_at_another_rate_asks_nothing() {
+    let net = fine_network();
+    let mut m = manager();
+    m.set(0, Some(sub("TX 1", "peer-device")));
+    m.tick(0, &NONE, &net);
+    let a = net.records.lookup("peer-device", "TX 1").unwrap();
+    net.records
+        .add("peer-device", "TX 1", Advertised { rate: 48_000, ..a });
+    let mut heard = NONE;
+    heard[0] = 1;
+    assert_eq!(requests(&m.tick(S / 4, &heard, &net)), []);
+    assert_eq!(m.rx_route(0), Some(RxRoute { flow: 0, slot: 0 }));
+}
+
+/// The move is said once, and a refusal's line names both fpps.
+#[test]
+fn the_move_is_said_once_and_a_refusal_names_both_fpps() {
+    let net = fine_network();
+    let text = crate::test_log::capture_at(tracing::Level::INFO, || {
+        let (mut m, out, mut heard) = joined(&net);
+        let (flow, _, _) = requests(&out)[0].clone();
+        m.answered(flow, Answer::Granted(handle(0, 7)), S / 2);
+        for t in 1..10 {
+            heard[flow.slot] = t;
+            heard[0] = 1 + t;
+            m.tick(S / 2 + t * S / 4, &heard, &net);
+        }
+    });
+    assert_eq!(
+        text.matches("its channels leave the multicast flow")
+            .count(),
+        1,
+        "{text}"
+    );
+    let text = crate::test_log::capture_at(tracing::Level::INFO, || {
+        let (mut m, out, _) = joined(&net);
+        let (flow, _, _) = requests(&out)[0].clone();
+        m.answered(flow, Answer::Refused(status::TOO_MANY_TX_FLOWS), S / 2);
+    });
+    let line = text
+        .lines()
+        .find(|l| l.contains("our own unicast flow was refused"))
+        .expect(&text);
+    assert!(line.contains("multicast_fpp=32"), "{line}");
+    assert!(line.contains("our_fpp=4"), "{line}");
+}
+
+/// Its channels unsubscribed while the unicast flow is asked: the flow
+/// ends with nothing refused, so the transmitter is not kept on its
+/// multicast flow.
+#[test]
+fn an_unsubscribed_channel_s_unicast_flow_ends_without_keeping_the_multicast() {
+    let net = fine_network();
+    let (mut m, out, _) = joined(&net);
+    let (flow, _, _) = requests(&out)[0].clone();
+    m.set(0, None);
+    m.tick(S / 2, &NONE, &net);
+    m.answered(flow, Answer::Refused(status::TOO_MANY_TX_FLOWS), S);
+    assert!(m.multicast_kept.is_empty());
+    assert_eq!(m.rx_plan(flow.slot), RxPlan::default());
 }

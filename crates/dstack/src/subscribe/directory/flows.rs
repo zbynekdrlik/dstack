@@ -17,9 +17,10 @@ use crate::subscribe::resolve::{Advertised, Multicast};
 /// (a flow with no multicast destination, no channel or more channel
 /// slots than one of our flows takes carries nothing), with the
 /// transmitter's free TX flow slots: its slots less its flows, unknown for
-/// a list that names no slot count.
+/// a list that names no slot count or holds a record that did not read (a
+/// flow we cannot see may hold a slot).
 pub fn carried(list: &Flows, a: &Advertised) -> Option<Multicast> {
-    let free_slots = (list.slots > 0).then(|| {
+    let free_slots = (list.slots > 0 && list.unread == 0).then(|| {
         let used = u16::try_from(list.flows.len()).unwrap_or(u16::MAX);
         list.slots.saturating_sub(used)
     });

@@ -1300,7 +1300,7 @@ fn a_flow_with_no_multicast_group_or_too_many_slots_carries_nothing() {
 /// dstack #297: a multicast flow names the transmitter's free TX flow
 /// slots, its slots less its flows (the captured UltimoX2 list: 2 slots, 2
 /// flows, none free); never below none, unknown when the list names no slot
-/// count (ARC 2.7).
+/// count (ARC 2.7) or holds a record that did not read.
 #[test]
 fn a_carried_multicast_flow_names_the_transmitter_s_free_slots() {
     let a = peer_channel(1);
@@ -1314,6 +1314,11 @@ fn a_carried_multicast_flow_names_the_transmitter_s_free_slots() {
     f.flows.push(f.flows[0].clone());
     assert_eq!(free(&f), Some(Some(0)), "never below none");
     f.slots = 0;
+    assert_eq!(free(&f), Some(None));
+    // A record that did not read may hold a slot: unknown.
+    let mut f = ultimo_flows();
+    f.slots = 3;
+    f.unread = 1;
     assert_eq!(free(&f), Some(None));
 }
 
