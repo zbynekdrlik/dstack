@@ -99,7 +99,7 @@ impl Json {
 }
 
 /// The status line: one JSON object, numbers and fixed words, besides the
-/// device's own `name` and the app's part; never an address. Channels and
+/// device's own `name` and the app's part; the only addresses are the RX `source`s and the mDNS senders (`mdns`). Channels and
 /// flows are numbered from 1 (flow `n` is slot `n − 1`); every count is
 /// cumulative since the device started.
 ///
@@ -220,6 +220,12 @@ impl Json {
 ///   (`mmcss_high`, `mmcss_joined_priority_refused`, `highest`,
 ///   `sched_fifo`, `realtime` (Windows), `normal`, `refused`) and
 ///   `mmcss_task` (MMCSS's task index, null outside MMCSS).
+/// - `mdns` (dstack #289), once the process's mDNS meter on the device's
+///   address closed a minute ([`crate::discover::senders`]): `per_s` (every
+///   datagram to the mDNS group that minute, a second), `top` (the loudest
+///   5 sources, loudest first: `source` (an IPv4 address) and `per_s`),
+///   `over_cap` (every source over 50 a second averaged over the minute,
+///   the same shape).
 /// - `app` (dstack #104), only once the app set a hook
 ///   ([`Media::set_app_status`]), its thread's first call returned, and
 ///   while it returns a JSON object: that object, compact (the cached part:
@@ -238,9 +244,30 @@ pub fn status(media: &Media) -> String {
     sources_part(&mut j, media);
     checks_part(&mut j, media);
     engine_part(&mut j, media);
+    mdns_part(&mut j, media);
     app_part(&mut j, media);
     j.close('}');
     j.out
+}
+
+/// The mDNS meter's last minute (see [`status`]).
+fn mdns_part(j: &mut Json, media: &Media) {
+    let Some(m) = media.mdns_minute() else {
+        return;
+    };
+    j.open(Some("mdns"), '{');
+    j.num("per_s", format_args!("{:.1}", m.per_s(m.total)));
+    for (key, rates) in [("top", &m.top), ("over_cap", &m.over_cap)] {
+        j.open(Some(key), '[');
+        for r in rates {
+            j.open(None, '{');
+            j.text("source", &r.source.to_string());
+            j.num("per_s", format_args!("{:.1}", m.per_s(r.packets)));
+            j.close('}');
+        }
+        j.close(']');
+    }
+    j.close('}');
 }
 
 /// The longest app part the status carries, bytes of compact JSON: a
