@@ -183,7 +183,7 @@ impl Process for App {
     fn process(&mut self, block: &mut Block<'_>) {
         let frames = block.frames();
         let out = &mut self.out[..frames * CHANNELS];
-        self.tx.fill_with(out, CHANNELS, |x| x);
+        self.tx.fill_at(block.start(), out, CHANNELS, |x| x);
         for c in 0..CHANNELS {
             for (f, y) in block.output(c).iter_mut().enumerate() {
                 *y = out[f * CHANNELS + c];
