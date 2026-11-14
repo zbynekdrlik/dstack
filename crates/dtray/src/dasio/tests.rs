@@ -337,14 +337,14 @@ fn changes_list_each_changed_field_in_order() {
 
 #[test]
 fn the_banner_counts_the_restart_changes() {
-    assert_eq!(banner("band", 0, true), None);
-    let one = banner("band", 1, false).expect("a banner");
+    assert_eq!(banner("band", 0, Daw::Releases), None);
+    let one = banner("band", 1, Daw::Keeps).expect("a banner");
     assert_eq!(
         one,
         "↻ 1 change needs a restart of band (~5 s of silence). \
          The DAW may keep the driver (the buffer and the channel counts stay)."
     );
-    let two = banner("band", 2, true).expect("a banner");
+    let two = banner("band", 2, Daw::Releases).expect("a banner");
     assert!(
         two.starts_with("↻ 2 changes need a restart of band "),
         "{two}"

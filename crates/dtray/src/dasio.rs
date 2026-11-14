@@ -479,25 +479,50 @@ pub fn restarts(changes: &[Field]) -> usize {
     changes.iter().filter(|f| f.kind() == Kind::Restart).count()
 }
 
+/// What a restart asks of the DAW that holds the instance's driver.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Daw {
+    /// The shared memory keeps its shape: the DAW may keep the driver.
+    Keeps,
+    /// A change reshapes the driver's shared memory (the block or the
+    /// channel counts): the DAW must release the driver first.
+    Releases,
+    /// A bridge instance hosts a local ASIO driver itself: no DAW holds
+    /// a dasio driver, and none is waited for.
+    Absent,
+}
+
+/// What the restart of `new` with the changes `changed` asks of the DAW
+/// (dasio's rule: a restart of the same shape is fine with the DAW open).
+pub fn daw(new: &Fields, changed: &[Field]) -> Daw {
+    if new.bridge.is_some() {
+        Daw::Absent
+    } else if changed.iter().any(|f| f.reshapes()) {
+        Daw::Releases
+    } else {
+        Daw::Keeps
+    }
+}
+
 /// The banner over the buttons: how many changes need a restart of
-/// `name`, and, when one of them `reshapes` the driver's shared memory,
-/// that the DAW must release the driver first (dasio's rule: a restart of
-/// the same shape is fine with the DAW open); `None` with none.
-pub fn banner(name: &str, restarts: usize, reshapes: bool) -> Option<String> {
+/// `name`, and what that asks of the DAW ([`daw`]); `None` with none.
+pub fn banner(name: &str, restarts: usize, daw: Daw) -> Option<String> {
     let what = match restarts {
         0 => return None,
         1 => "1 change needs".to_string(),
         n => format!("{n} changes need"),
     };
-    let daw = if reshapes {
-        "The DAW must release the driver first (Ableton: Options → Audio → Driver: None, \
-         then Apply). dtray waits until it is released."
-    } else {
-        "The DAW may keep the driver (the buffer and the channel counts stay)."
-    };
-    Some(format!(
-        "↻ {what} a restart of {name} (~5 s of silence). {daw}"
-    ))
+    let restart = format!("↻ {what} a restart of {name} (~5 s of silence).");
+    Some(match daw {
+        Daw::Releases => format!(
+            "{restart} The DAW must release the driver first (Ableton: Options → Audio → \
+             Driver: None, then Apply). dtray waits until it is released."
+        ),
+        Daw::Keeps => format!(
+            "{restart} The DAW may keep the driver (the buffer and the channel counts stay)."
+        ),
+        Daw::Absent => restart,
+    })
 }
 
 /// The CPUs `others` (the other instances) pin, each once.
@@ -565,7 +590,9 @@ pub struct Plan {
 /// latency write, and for any restart change the new file (with the
 /// file's own RX latency: that one is the live write's) and whether the
 /// DAW must release the driver. The reason when nothing changed, a CPU is
-/// refused or the file is.
+/// refused or the file is. A bridge dasio would refuse
+/// ([`bridge_problems`]) refuses every Apply, a live latency write alone
+/// too: the file stays broken until it is fixed, in this same window.
 pub fn plan(
     text: &str,
     old: &Fields,
@@ -597,7 +624,7 @@ pub fn plan(
     Ok(Plan {
         latency,
         config,
-        release: changed.iter().any(|f| f.reshapes()),
+        release: daw(new, &changed) == Daw::Releases,
     })
 }
 

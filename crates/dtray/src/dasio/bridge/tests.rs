@@ -6,7 +6,8 @@ use dlink::bridge::{MAX_APP_BUFFER_NS, MIN_APP_BUFFER_NS};
 
 use super::*;
 use crate::dasio::{
-    Field, Fields, Kind, ReadBack, changes, edit, install, plan, status_driver, verify,
+    Daw, Field, Fields, Kind, ReadBack, banner, changes, daw, edit, install, plan, status_driver,
+    verify,
 };
 
 /// A DAW-kind instance config (made-up names), 4 RX and 2 TX channels.
@@ -377,6 +378,40 @@ fn the_bridge_fields_are_changes_that_need_a_restart() {
     assert_eq!(Field::ToAsio.label(), "Dante RX to driver outputs");
     assert_eq!(Field::FromAsio.label(), "Driver inputs to Dante TX");
     assert_eq!(Field::AppBuffer.label(), "App buffer");
+}
+
+#[test]
+fn a_bridge_s_restart_waits_for_no_daw() {
+    let old = fields();
+    // A reshape: two more RX channels, the map grown with them.
+    let mut new = old.clone();
+    new.rx.extend(["In 5".to_string(), "In 6".to_string()]);
+    new.bridge.as_mut().expect("a bridge").to_asio = vec![1, 2, 3, 4, 7, 8];
+    let changed = changes(&old, &new);
+    assert!(changed.iter().any(|f| f.reshapes()), "{changed:?}");
+    assert_eq!(daw(&new, &changed), Daw::Absent);
+    let p = plan(&text(), &old, &new, &BTreeSet::new(), 8).expect("a plan");
+    assert!(!p.release);
+    assert!(p.config.is_some());
+    // The same reshape on the DAW kind still waits for the release.
+    let mut daw_old = old.clone();
+    daw_old.bridge = None;
+    let mut daw_new = new.clone();
+    daw_new.bridge = None;
+    let changed = changes(&daw_old, &daw_new);
+    assert_eq!(daw(&daw_new, &changed), Daw::Releases);
+    assert_eq!(daw(&daw_old, &[Field::Block]), Daw::Releases);
+    assert_eq!(daw(&daw_old, &[Field::Driver]), Daw::Keeps);
+    assert_eq!(daw(&old, &[Field::Driver]), Daw::Absent);
+}
+
+#[test]
+fn a_bridge_s_banner_names_no_daw() {
+    assert_eq!(
+        banner("test-bridge", 1, Daw::Absent).as_deref(),
+        Some("↻ 1 change needs a restart of test-bridge (~5 s of silence).")
+    );
+    assert_eq!(banner("test-bridge", 0, Daw::Absent), None);
 }
 
 fn back(f: &Fields) -> ReadBack {

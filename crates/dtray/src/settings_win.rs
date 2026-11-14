@@ -625,11 +625,10 @@ fn refresh(st: &State) {
     };
     let changed = dasio::changes(old, new);
     let restarts = dasio::restarts(&changed);
-    let reshapes = changed.iter().any(|f| f.reshapes());
     set_text(
         h,
         ID_BANNER,
-        &dasio::banner(&old.name, restarts, reshapes).unwrap_or_default(),
+        &dasio::banner(&old.name, restarts, dasio::daw(new, &changed)).unwrap_or_default(),
     );
     set_text(
         h,
