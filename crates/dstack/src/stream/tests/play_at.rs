@@ -212,3 +212,128 @@ fn the_pump_thread_stamps_each_media_block_in_the_app_s_real_clock() {
         assert!(s <= after && s >= before - 10 * MS, "{before} {s} {after}");
     }
 }
+
+// ---- the filtered offset (dstack #295 step 2) ----
+
+/// [`step`] with a fake app clock that runs `ppm` slower than the media
+/// clock, and whose pair read at wake `i` is skewed by `skew(i)` ns (a
+/// positive skew reads the app's clock that much early: the pair's offset
+/// reads that much more, as a preemption between the two reads makes it).
+fn wakes(
+    r: &mut Rig,
+    clock: &ManualClock,
+    app_ns: &mut i64,
+    n: usize,
+    ppm: i64,
+    skew: impl Fn(usize) -> i64,
+) {
+    let t0 = clock.now_ns().expect("a ready clock");
+    let app0 = *app_ns;
+    for i in 0..n {
+        let now = r.pump.read_clocks(clock, || *app_ns - skew(i));
+        let now = now.expect("a ready clock");
+        let wake = r.pump.media(to_samples(now, RATE), Anchor::of(clock));
+        let to = ns_of(wake, RATE);
+        assert!(to > now, "a wake ahead of now: {to} at {now}");
+        clock.sleep_until(to);
+        let run = (to - t0) as i64;
+        *app_ns = app0 + run - run * ppm / 1_000_000;
+    }
+}
+
+/// The play times the rig's processor saw, all of a media block.
+fn play_ats(r: &Rig) -> Vec<i64> {
+    r.pump
+        .processor
+        .play_ats
+        .iter()
+        .map(|a| a.expect("a media block has a play time"))
+        .collect()
+}
+
+/// The text of the pump's warning on a stepped offset.
+const STEPPED: &str = "play_at: the media clock's offset from the app's clock stepped";
+
+#[test]
+fn a_torn_pair_read_on_one_wake_leaves_the_play_time_continuous() {
+    // strih-snv 14.11: one wake's pair read 2 ms apart (a preemption
+    // between the two reads), the next clean again.
+    let mut r = pump();
+    let clock = ManualClock::new(ns_of(T, RATE));
+    let mut app = APP0;
+    wakes(&mut r, &clock, &mut app, 12, 0, |i| {
+        if i == 6 { 2 * MS } else { 0 }
+    });
+    let at = play_ats(&r);
+    assert_eq!(at.len(), 12, "{at:?}");
+    for w in at.windows(2) {
+        assert!((333_333..=333_334).contains(&(w[1] - w[0])), "{at:?}");
+    }
+    assert_eq!(at[0], APP0);
+}
+
+#[test]
+fn a_steady_6_ppm_drift_is_followed_with_no_jump() {
+    // The app's clock ~6 ppm off the media clock (stream-snv): 6 us a
+    // second, about 2 ns a block. Three seconds of blocks.
+    let mut r = pump();
+    let clock = ManualClock::new(ns_of(T, RATE));
+    let mut app = APP0;
+    wakes(&mut r, &clock, &mut app, 9_000, 6, |_| 0);
+    let at = play_ats(&r);
+    // One block in the app's clock: 333 333.3 ns less 6 ppm (2 ns).
+    for w in at.windows(2) {
+        assert!((333_329..=333_334).contains(&(w[1] - w[0])), "{:?}", w);
+    }
+    // At the end the play time is on the app's clock: the last block was
+    // due at the last wake, read with the app's clock there.
+    let drift = (at[at.len() - 1] - at[0]) - 8_999 * 1_000_000 / 3;
+    assert!((-20_000..=-16_000).contains(&drift), "{drift}");
+}
+
+#[test]
+fn a_persistent_1_ms_step_is_taken_on_its_third_wake_with_a_warning() {
+    let mut r = pump();
+    let clock = ManualClock::new(ns_of(T, RATE));
+    let mut app = APP0;
+    let warned = crate::test_log::capture_warnings(|| {
+        wakes(
+            &mut r,
+            &clock,
+            &mut app,
+            12,
+            0,
+            |i| if i >= 6 { MS } else { 0 },
+        );
+    });
+    let at = play_ats(&r);
+    let gaps: Vec<i64> = at.windows(2).map(|w| w[1] - w[0]).collect();
+    // Wakes 6 and 7 read the step and are held; wake 8 takes it.
+    for (i, g) in gaps.iter().enumerate() {
+        if i == 7 {
+            assert!((333_333 - MS..=333_334 - MS).contains(g), "{gaps:?}");
+        } else {
+            assert!((333_333..=333_334).contains(g), "{gaps:?}");
+        }
+    }
+    assert_eq!(warned.matches(STEPPED).count(), 1, "{warned}");
+}
+
+#[test]
+fn an_offset_change_under_the_rejection_bound_is_slewed_at_100_ppm() {
+    // A 40 us change (under the 50 us rejection bound) is no step: the
+    // play time moves toward it by at most 100 ppm of each wake's time
+    // (33 ns a block), never at once.
+    let mut r = pump();
+    let clock = ManualClock::new(ns_of(T, RATE));
+    let mut app = APP0;
+    wakes(&mut r, &clock, &mut app, 2_000, 0, |i| {
+        if i >= 6 { 40_000 } else { 0 }
+    });
+    let at = play_ats(&r);
+    for w in at.windows(2) {
+        assert!((333_333 - 34..=333_334).contains(&(w[1] - w[0])), "{:?}", w);
+    }
+    // 1 200 blocks at 33 ns each make the 40 us: by the end it is all in.
+    assert_eq!(at[1_999] - at[0], 1_999 * 1_000_000 / 3 + 1 - 40_000);
+}
