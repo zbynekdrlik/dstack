@@ -292,6 +292,24 @@ pub fn band_error_ms(err_ms: f64, cushion_ms: f64) -> f64 {
     err_ms.max(0.0) - (-err_ms - cushion_ms).max(0.0)
 }
 
+/// The offset's braking and the level loop's P + I together, `level_ppm`,
+/// within ±`bound` once the controller has `settled`
+/// ([`Controller::with_level_bound_ppm`]); unbounded without a bound or
+/// before.
+pub fn bounded_level_ppm(level_ppm: f64, bound: Option<f64>, settled: bool) -> f64 {
+    match bound {
+        Some(bound) if settled => level_ppm.clamp(-bound, bound),
+        _ => level_ppm,
+    }
+}
+
+/// Whether a controller has settled: once its rate fit is `locked` and a
+/// window's error `band_err_ms` is within the calm zone `calm_ms`, it
+/// stays settled (`was`).
+pub fn settled(was: bool, locked: bool, band_err_ms: f64, calm_ms: f64) -> bool {
+    was || (locked && band_err_ms.abs() <= calm_ms)
+}
+
 /// What the caller does after an observation.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Step {
@@ -340,6 +358,12 @@ pub struct Controller {
     /// The last window's mean error outside the band, ms (positive: later).
     offset_ms: f64,
     stalls: u64,
+    /// [`Controller::with_level_bound_ppm`]: the bound on the level and
+    /// offset loops' sum around the locked rate, ppm.
+    level_bound_ppm: Option<f64>,
+    /// [`settled`]: the rate fit locked and a window's error came within
+    /// the calm zone once.
+    settled: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -382,6 +406,8 @@ impl Controller {
             prime_next: false,
             offset_ms: 0.0,
             stalls: 0,
+            level_bound_ppm: None,
+            settled: false,
         }
     }
 
@@ -396,6 +422,22 @@ impl Controller {
     /// gives it from the consumer's callback period).
     pub fn with_calm_zone_ms(mut self, ms: f64) -> Self {
         self.calm_ms = ms.max(0.0);
+        self
+    }
+
+    /// Once settled (the rate fit locked and a window's error within the
+    /// calm zone once, [`settled`]), the offset's braking and the level
+    /// loop's P + I together move the correction at most `ppm` from the
+    /// fitted rate (dstack #303): an offset the depth is left with later (a
+    /// re-prime out of a chunked producer's phase, a skip) drains slowly
+    /// instead of ramping the ratio to -70 .. -200 ppm. Until then the laws
+    /// are unbounded: before the lock the braking itself follows the drift
+    /// (200 ppm off holds about 5 ms of offset at the lock), and that
+    /// start-up offset drains as before. While a stall has flushed the fit
+    /// (no rate until it locks again) the laws are unbounded too. Default:
+    /// no bound.
+    pub fn with_level_bound_ppm(mut self, ppm: f64) -> Self {
+        self.level_bound_ppm = Some(ppm.max(0.0));
         self
     }
 
@@ -590,9 +632,19 @@ impl Controller {
         }
         let band_err_ms = band_error_ms(err_ms, self.cushion_s * 1000.0);
         self.offset_ms = -band_err_ms;
-        let base = self.rate.rate_ppm() + braking_ppm(band_err_ms, self.calm_ms) + self.bias_ppm;
+        let rate = self.rate.rate_ppm();
+        let braking = braking_ppm(band_err_ms, self.calm_ms);
+        let base = rate + braking + self.bias_ppm;
         let pi = self.level.update(err_ms, dt_s, base);
-        let target = (base + pi).clamp(-MAX_PPM, MAX_PPM);
+        self.settled = settled(self.settled, self.rate.locked(), band_err_ms, self.calm_ms);
+        // A fit flushed by a stall is no rate to bound around: the laws
+        // follow the drift again until it locks again.
+        let level = bounded_level_ppm(
+            braking + pi,
+            self.level_bound_ppm,
+            self.settled && self.rate.locked(),
+        );
+        let target = (rate + self.bias_ppm + level).clamp(-MAX_PPM, MAX_PPM);
         self.applied_ppm = slew(self.applied_ppm, target, dt_s);
         Step::Hold(self.applied_ppm)
     }

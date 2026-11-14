@@ -7,7 +7,8 @@ name: Release
 # output driver as a zip (drivers/dsend-audio, #184), and their sha256
 # files. dsync's stability gate pins
 # an exact tag and checks the sha256 (dsync#98), so a dstack change never
-# moves the gate by itself.
+# moves the gate by itself. The soak job (dstack #304) runs first: a tag
+# whose soak fails gets no release.
 
 on:
   push:
@@ -20,7 +21,25 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  soak:
+    # The release gate (dstack #304): dlink's whole app path in OBS's shape
+    # for 10 simulated minutes a case (the app clock ±6 ppm off, the pump
+    # waking late, a rebootstrap, an irregular writer), the `gate_*` tests
+    # of crates/dlink/tests/soak.rs. A failure blocks the release: no
+    # release, no binaries, so no consumer can pin the tag's assets. The
+    # 60 s real-time case is not in the gate (it measures a shared
+    # runner's load).
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo test -p dlink --test soak --locked -- gate_
+
   release:
+    needs: soak
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:

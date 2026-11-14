@@ -471,3 +471,25 @@ fn every_replaced_player_comes_back_to_be_freed_never_in_the_pump() {
     assert_eq!(back, 5, "each handover's predecessor, on this thread");
     assert_eq!(switch.pending(), 0);
 }
+
+/// Each piece of a block longer than a chunk passes its own start, so a
+/// whole block never resyncs the player; a block the pump skipped does,
+/// once (dstack #303).
+#[test]
+fn a_skipped_block_resyncs_the_player_and_its_pieces_never_do() {
+    let mut s = Sim::new(48_000, 48_000, 0.0, 2);
+    s.run(1.0);
+    let block = 2 * CHUNK + 100;
+    let mut out = vec![0.0; block * TX_CHANNELS];
+    let mut start = 1_000_000;
+    for _ in 0..4 {
+        s.source
+            .process(&mut Block::new(block, &[], &mut out).at(start));
+        start += block as u64;
+    }
+    assert_eq!(s.stats.resyncs(), 0, "pieces of whole blocks");
+    start += 8 * 128;
+    s.source
+        .process(&mut Block::new(block, &[], &mut out).at(start));
+    assert_eq!(s.stats.resyncs(), 1, "the skip");
+}
