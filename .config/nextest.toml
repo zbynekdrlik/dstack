@@ -9,3 +9,27 @@ fail-fast = { max-fail = 1, terminate = "immediate" }
 # fail-fast ends the run), instead of holding the mutant to cargo-mutants'
 # own timeout.
 slow-timeout = { period = "10s", terminate-after = 2, grace-period = "2s" }
+
+# The slow tests last (dstack #305): a mutant is caught by its first failing
+# test, and on a CI mutation shard (4 vCPUs, two mutants at once) the
+# multi-second simulations scheduled ahead of the unit tests held a mutant
+# caught only by a later unit test (`dstack peer::...`, test 1342 of 2079)
+# past cargo-mutants' 60 s: every such mutant timed out and two shards ran
+# out of their 20 minutes. Run every test that takes seconds after the rest.
+[[profile.mutants.overrides]]
+filter = '''
+    test(/_ppm_(fast|slow)_/)
+    | test(/^bridge::tests::a_card_/)
+    | test(/^tests::terms::the_defaults_reproduce/)
+    | test(/^source::tests::a_(44_1|48)_khz_output_is_sent/)
+    | test(/^bridge::player::resync_tests::(a_skipped_block_start|without_the_starts)/)
+    | test(/^daemon::media::tests::the_fixed_(rx|tx)_ports_are_bound/)
+    | test(/^meter::tests::a_meter_renews/)
+    | test(/^rated::tests::the_tx_fifo_never_runs_dry/)
+    | test(/^bridge::player::tests::a_96_khz_network_plays/)
+    | test(/^ctl::status::tests::an_app_part_that_is_no_object/)
+    | test(/^cmc::tests::our_server_sends_meter_frames/)
+    | test(/^daemon::media::app::tests::a_hook_that_(stalls|panics)/)
+    | test(/^status::tests::a_cut_list_keeps_the_one_playing/)
+'''
+priority = -50

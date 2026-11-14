@@ -188,8 +188,10 @@ jobs:
           done
 
   mutation:
-    # Mutants of the PR's own diff only (.cargo/mutants.toml), 8 shards of at
-    # most 20 minutes (4 overran with dlisten's 380 mutants, dstack #139); a
+    # Mutants of the PR's own diff only (.cargo/mutants.toml), 16 shards of at
+    # most 20 minutes (4 overran with dlisten's 380 mutants, dstack #139; 8
+    # overran with #305's 322, 40 a shard at about a minute each with two at
+    # once: .config/nextest.toml also runs the slow tests last); a
     # mutant the tests miss fails the PR (kill it with an assertion). An overrun is a setup bug: shard more or narrow, never a
     # longer timeout.
     if: github.event_name == 'pull_request'
@@ -199,7 +201,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
