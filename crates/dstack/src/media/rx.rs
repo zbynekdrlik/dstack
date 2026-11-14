@@ -100,6 +100,7 @@ mod minute;
 mod netlat;
 mod plan;
 mod publish;
+mod rejoin;
 mod wake;
 pub use counts::RxCounts;
 use counts::{NO_LATENESS, RxStats, source_of, source_word};
@@ -278,20 +279,6 @@ impl RxShared {
             stamps: AtomicBool::new(stamps),
             playout: AtomicU64::new(0),
         })
-    }
-
-    /// Our address's interface changed (dstack #282, from the daemon's
-    /// [`crate::membership::Membership`]): the RX thread's next pass joins
-    /// every slot's group again on it.
-    pub fn rejoin_groups(&self) {
-        self.rejoins.fetch_add(1, Ordering::Release);
-    }
-
-    /// Whether the RX thread, acting on the last [`RxShared::rejoin_groups`],
-    /// left a slot's group unjoined (its join failed); told once, so the
-    /// daemon asks again at its next look (dstack #282).
-    pub fn take_groups_missing(&self) -> bool {
-        self.groups_missing.swap(false, Ordering::AcqRel)
     }
 
     /// The device latency is `ns`: the pump's playout point is its whole
@@ -680,28 +667,15 @@ impl Receiver {
         }
         // dstack #282: an interface change asked every slot's group joined
         // again (the membership went with the address).
-        let asked = shared.rejoins.load(Ordering::Acquire);
-        let rejoin = asked != self.rejoins_seen;
-        if rejoin {
-            self.rejoins_seen = asked;
-            for (slot, lane) in self.lanes.iter().enumerate() {
-                if lane.plan.group.is_some() {
-                    regrouped |= 1 << slot;
-                }
-            }
-        }
+        let rejoin = self.rejoins_asked();
+        regrouped |= rejoin.unwrap_or(0);
         while regrouped != 0 {
             let slot = regrouped.trailing_zeros() as usize;
             regrouped &= regrouped - 1;
             self.regroup(slot);
         }
-        if rejoin {
-            let missing = self
-                .lanes
-                .iter()
-                .zip(&self.joined)
-                .any(|(lane, joined)| lane.plan.group.is_some() && joined.is_none());
-            self.shared.groups_missing.store(missing, Ordering::Release);
+        if rejoin.is_some() {
+            self.tell_missing();
         }
         self.retarget();
         // The writer restarts the rings of a new flow itself, before this
