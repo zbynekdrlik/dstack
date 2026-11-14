@@ -255,3 +255,17 @@ fn an_adapter_shows_its_dante_address_before_a_link_local_one() {
     };
     assert_eq!(adapter_text(&only), "C · 169.254.1.1");
 }
+
+#[test]
+fn the_drivers_are_the_pc_s_and_a_missing_configured_one_is_marked() {
+    let installed: Vec<String> = ["A ASIO", "B ASIO"].map(String::from).to_vec();
+    let list = drivers(&installed, "B ASIO");
+    assert_eq!(texts(&list), ["A ASIO", "B ASIO"]);
+    assert_eq!(index_of(&list, &"B ASIO".to_string()), 1);
+    let gone = drivers(&installed, "C ASIO");
+    assert_eq!(texts(&gone), ["A ASIO", "B ASIO", "C ASIO (not installed)"]);
+    assert_eq!(gone[2].value, "C ASIO");
+    assert!(!gone[2].greyed);
+    // No driver on the PC (or off Windows): the configured one alone.
+    assert_eq!(texts(&drivers(&[], "D")), ["D (not installed)"]);
+}

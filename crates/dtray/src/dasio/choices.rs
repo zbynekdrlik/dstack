@@ -228,5 +228,24 @@ pub fn interfaces(
     out
 }
 
+/// A bridge instance's ASIO drivers (dstack #292): each driver
+/// registered on the PC (`installed`, `dstack_asio::drivers`), and the
+/// configured one when the PC has none of that name, marked "(not
+/// installed)", so the setting never changes silently (dasio waits for
+/// the driver then).
+pub fn drivers(installed: &[String], current: &str) -> Vec<Choice<String>> {
+    let mut out: Vec<Choice<String>> = installed
+        .iter()
+        .map(|d| choice(d.clone(), d.clone()))
+        .collect();
+    if !installed.iter().any(|d| d == current) {
+        out.push(choice(
+            current.to_string(),
+            format!("{current} (not installed)"),
+        ));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests;

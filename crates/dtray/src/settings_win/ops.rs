@@ -147,6 +147,7 @@ impl Ops for WinOps {
                 .and_then(|s| s.latency_configured_ns)
                 .map(u64::from),
             iface: choices::alias_of(&self.adapters, *d.arc.ip()),
+            driver: status.as_deref().and_then(dasio::status_driver),
         }
     }
 }
