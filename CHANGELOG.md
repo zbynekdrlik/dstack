@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.128
 
 - **Fix (dstack #282): multicast groups are joined again after an interface change.** On Windows an address removed and added again (`netsh ... set address`), seen with a new interface index too, drops a socket's group membership, and nothing joined it again: the device kept running and unicast ARC kept answering, but its mDNS answers from the device's address stopped, browsers lost it, and a receiver whose flow ended could not find it again (a two-leg PC, 14.11.2026).
   - New module `membership` (re-exported as `host::Membership`, `host::Link`, `host::links`): a watch per joined address reads the interface list (name, address, index) every 2 s and asks a rejoin when the address comes back after it was gone, or its index changes. Another adapter coming and going changes nothing.
