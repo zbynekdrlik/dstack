@@ -10,14 +10,21 @@ use tracing::{debug, info};
 
 use super::{Job, Shared, lock};
 use crate::arc::client::ReadError;
-use crate::arc::flows::{Flows, ListForm, TxFlow};
+use crate::arc::flows::{Flows, ListForm};
 use crate::subscribe::resolve::{Advertised, Multicast};
 
-/// The multicast flow in `flows` that carries `a`'s TX channel at its bits
+/// The multicast flow in `list` that carries `a`'s TX channel at its bits
 /// (a flow with no multicast destination, no channel or more channel
-/// slots than one of our flows takes carries nothing).
-pub fn carried(flows: &[TxFlow], a: &Advertised) -> Option<Multicast> {
-    flows.iter().find_map(|f| {
+/// slots than one of our flows takes carries nothing), with the
+/// transmitter's free TX flow slots: its slots less its flows, unknown for
+/// a list that names no slot count or holds a record that did not read (a
+/// flow we cannot see may hold a slot).
+pub fn carried(list: &Flows, a: &Advertised) -> Option<Multicast> {
+    let free_slots = (list.slots > 0 && list.unread == 0).then(|| {
+        let used = u16::try_from(list.flows.len()).unwrap_or(u16::MAX);
+        list.slots.saturating_sub(used)
+    });
+    list.flows.iter().find_map(|f| {
         let group = f.destinations.iter().find(|d| d.ip().is_multicast())?;
         (f.multicast()
             && u32::from(f.bits) == a.bits
@@ -28,6 +35,7 @@ pub fn carried(flows: &[TxFlow], a: &Advertised) -> Option<Multicast> {
                 channels: f.channels.clone(),
                 fpp: f.fpp,
                 bits: a.bits,
+                free_slots,
             })
     })
 }

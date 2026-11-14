@@ -71,6 +71,17 @@ impl Json {
         let _ = write!(self.out, "{v}");
     }
 
+    /// An array item, `null` for `None`.
+    fn opt_item(&mut self, v: Option<impl Display>) {
+        match v {
+            Some(v) => self.item(v),
+            None => {
+                self.comma();
+                self.out.push_str("null");
+            }
+        }
+    }
+
     pub(super) fn flag(&mut self, key: &str, v: bool) {
         self.num(key, u8::from(v));
     }
@@ -115,8 +126,12 @@ impl Json {
 ///   (257), and its ARC reads of transmitters' channels (4096 once a
 ///   directory read, 8192 and 8208 once a page); `uncounted`: past the
 ///   tables.
-/// - `tx`: each TX flow slot that has or had a flow: `flow`, `live` (a flow
-///   that sends), `fpp`, `channels`, `packets`, `send_errors` (packets refused after
+/// - `tx`: each TX flow slot that has or had a flow: `flow`, `receiver`
+///   (dstack #298: the receiving device's Dante name as its flow request
+///   named it; absent for a multicast flow and a slot without a flow now),
+///   `live` (a flow that sends), `fpp`, `channels`, `tx_channels` (dstack
+///   #298: our TX channel, from 1, of each of the flow's slots in flow
+///   order, `null` for an empty slot; absent without a flow), `packets`, `send_errors` (packets refused after
 ///   their retries: lost), `send_retries` (packets the NIC refused for a
 ///   moment that went out on a retry, `media::tx::send_retry`), `keepalives`,
 ///   `rebootstraps`, `holes` (echo samples the ring did not hold),
@@ -139,7 +154,9 @@ impl Json {
 ///   asked for the flow writes it; absent for a slot without a flow now),
 ///   `source` (the transmitter's `address:port` its flow's last packet came
 ///   from; absent before a packet and after the slot's flow changed),
-///   `granted`, `fpp`, `channels`, `latency` (samples), `packets`, `refused`, `stray`,
+///   `granted`, `fpp`, `channels`, `rx_channels` (dstack #298: our RX
+///   channels, from 1, the flow feeds, in flow order: each channel slot's
+///   in turn; absent for a slot without a flow now), `latency` (samples), `packets`, `refused`, `stray`,
 ///   `out_of_order` (packets that began before the end of an earlier one),
 ///   `reordered` (of them, those that filled an open hole: overtaken on
 ///   the way, not lost; dstack #278), `gaps` and `gap_frames` (runs of
@@ -323,14 +340,29 @@ fn requests_part(j: &mut Json, media: &Media) {
     j.num("uncounted", r.uncounted);
 }
 
+/// A TX flow as the status shows it.
+struct TxRow {
+    fpp: u16,
+    /// Our TX channel (from 1) of each slot, in flow order; `None` for an
+    /// empty slot.
+    channels: Vec<Option<u16>>,
+    expired: bool,
+    /// The receiving device's Dante name, as its request named it (dstack
+    /// #298); empty for a multicast flow, which has no one receiver.
+    receiver: String,
+}
+
 fn tx_part(j: &mut Json, media: &Media) {
-    let flows: Vec<Option<(u16, usize, bool)>> = {
+    let flows: Vec<Option<TxRow>> = {
         let c = media.tx.lock();
         (0..MAX_FLOWS)
             .map(|s| {
-                c.table
-                    .flow(s)
-                    .map(|f| (f.fpp, f.channels.len(), f.expired))
+                c.table.flow(s).map(|f| TxRow {
+                    fpp: f.fpp,
+                    channels: f.channels.clone(),
+                    expired: f.expired,
+                    receiver: f.rx_host.clone(),
+                })
             })
             .collect()
     };
@@ -340,12 +372,22 @@ fn tx_part(j: &mut Json, media: &Media) {
         if flow.is_none() && lane == LaneCounts::default() {
             continue;
         }
-        let (fpp, channels, expired) = flow.unwrap_or((0, 0, true));
         j.open(None, '{');
         j.num("flow", slot + 1);
-        j.flag("live", !expired);
-        j.num("fpp", fpp);
-        j.num("channels", channels);
+        let receiver = flow.as_ref().map_or("", |f| f.receiver.as_str());
+        if !receiver.is_empty() {
+            j.text("receiver", receiver);
+        }
+        j.flag("live", flow.as_ref().is_some_and(|f| !f.expired));
+        j.num("fpp", flow.as_ref().map_or(0, |f| f.fpp));
+        j.num("channels", flow.as_ref().map_or(0, |f| f.channels.len()));
+        if let Some(f) = &flow {
+            j.open(Some("tx_channels"), '[');
+            for c in &f.channels {
+                j.opt_item(*c);
+            }
+            j.close(']');
+        }
         lane_fields(j, &lane);
         j.close('}');
     }
@@ -396,6 +438,9 @@ struct RxFlow {
     below_advertised: bool,
     /// The transmitter's Dante device name (dstack #266).
     device: String,
+    /// Our RX channels (from 0) the flow feeds, in flow order: each
+    /// channel slot's in turn (dstack #298).
+    rx: Vec<usize>,
 }
 
 fn rx_part(j: &mut Json, media: &Media) {
@@ -419,6 +464,7 @@ fn rx_part(j: &mut Json, media: &Media) {
                             advertised: latency_samples(f.advertised_ns, media.tx.cfg.sample_rate),
                             below_advertised: f.below_advertised,
                             device: f.device,
+                            rx: f.rx.concat(),
                         }
                     })
                 })
@@ -447,6 +493,13 @@ fn rx_part(j: &mut Json, media: &Media) {
         j.flag("multicast", f.multicast);
         j.num("fpp", f.fpp);
         j.num("channels", f.channels);
+        if named {
+            j.open(Some("rx_channels"), '[');
+            for rx in &f.rx {
+                j.item(rx + 1);
+            }
+            j.close(']');
+        }
         j.num("latency", f.latency);
         j.num("playout", f.playout);
         j.num("delay", f.delay);

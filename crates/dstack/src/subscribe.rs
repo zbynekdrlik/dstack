@@ -65,16 +65,30 @@
 //! silent is resolved again. We never create, change or end another
 //! device's multicast flow here.
 //!
+//! **A coarser multicast flow** (dstack #297, `subscribe/coarse.rs`): on a
+//! device whose config sets `arc_rx_fpp` (the opt-in; a device on the
+//! default keeps every multicast flow as above), a multicast flow is
+//! preferred only when its fpp is at most what our own unicast flow from
+//! that transmitter would carry ([`fpp_for`], the transmitter's step).
+//! A channel on a multicast flow with more frames a packet asks for its
+//! own unicast flow, only while the transmitter's flow list shows a free
+//! TX flow slot, and keeps the multicast flow until the unicast flow
+//! delivers (make-before-break); a refusal, no answer or no free slot
+//! keeps the multicast flow for that transmitter while the manager lives,
+//! with no other side effect. A unicast flow never moves to a coarser
+//! multicast flow.
+//!
 //! The RX thread learns the flows through [`Manager::rx_plan`] and
 //! [`Manager::rx_route`] (handed over by `RxShared::publish`). Times are the
 //! control side's ns.
 
+mod coarse;
 pub mod directory;
 pub mod instance;
 pub mod resolve;
 pub mod sub_status;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::{Ipv4Addr, SocketAddrV4};
 
 use tracing::{info, warn};
@@ -201,6 +215,9 @@ struct Flow {
     heard: Option<u64>,
     /// The slot's packet count when last looked at.
     packets: u64,
+    /// Asked for channels that receive a coarser multicast flow (dstack
+    /// #297): they move to it once it delivers, never before.
+    upgrade: bool,
 }
 
 impl Flow {
@@ -310,8 +327,19 @@ pub struct Manager {
     /// smaller one with [`status::FPP_REFUSED`] (at most [`MAX_FPP_FLOORS`]
     /// transmitters; kept while the manager lives).
     fpp_floor: BTreeMap<SocketAddrV4, u16>,
-    /// Requests given up on: a grant that comes after all is stopped.
-    abandoned: Vec<(FlowId, SocketAddrV4)>,
+    /// Requests given up on: a grant that comes after all is stopped. The
+    /// flag marks one asked for channels on a multicast flow (dstack #297),
+    /// whose answer changes nothing else.
+    abandoned: Vec<(FlowId, SocketAddrV4, bool)>,
+    /// Transmitters whose channels stay on their multicast flow: our own
+    /// unicast flow was refused, never answered or silent, or they showed
+    /// no free TX flow slot (dstack #297; at most `coarse::MAX_KEPT`, kept
+    /// while the manager lives).
+    multicast_kept: BTreeSet<SocketAddrV4>,
+    /// The device config sets `arc_rx_fpp`: it opts in to its own unicast
+    /// flow over a coarser multicast flow (dstack #297); left out, every
+    /// multicast flow that carries a channel is preferred, as before.
+    own_unicast: bool,
     /// The statuses [`Manager::changed`] reported last.
     reported: Vec<Option<SubStatus>>,
     /// The last tick's time.
@@ -369,6 +397,8 @@ impl Manager {
             peers: BTreeMap::new(),
             fpp_floor: BTreeMap::new(),
             abandoned: Vec::new(),
+            multicast_kept: BTreeSet::new(),
+            own_unicast: cfg.arc_rx_fpp.is_some(),
             reported: vec![None; n],
             port_only: crate::media::rx::GROUP_BOUND_TO_PORT,
             now: 0,
@@ -429,6 +459,7 @@ impl Manager {
         let mut out = Vec::new();
         self.hear(now, packets);
         self.give_up(now);
+        self.promote();
         // Channels whose subscription changed leave their flow.
         for (route, sub) in self.routes.iter_mut().zip(&self.subs) {
             if route.as_ref().is_some_and(|r| Some(&r.sub) != sub.as_ref()) {
@@ -448,7 +479,7 @@ impl Manager {
             // One request for each flow the waiting channels need: each
             // routes the channels it carries; the rest go in the next.
             let mut rest = waiting;
-            while let Some(action) = self.request(&rest, now, packets) {
+            while let Some(action) = self.request(&rest, now, packets, false) {
                 out.push(action);
                 rest.retain(|(rx, _)| self.routes[*rx].is_none());
                 if rest.is_empty() {
@@ -456,6 +487,7 @@ impl Manager {
                 }
             }
         }
+        self.upgrade(resolver, now, packets, &mut out);
         self.prune(now);
         out
     }
@@ -470,9 +502,18 @@ impl Manager {
         // restarted waited the full backoff, 10.11.2026); any answer ends
         // the quick retries.
         let replied = !matches!(answer, Answer::Failed);
+        // A flow for channels on a multicast flow (dstack #297): its answer
+        // touches no count of its transmitter's.
+        let upgrade = self.flows[flow.slot]
+            .as_ref()
+            .is_some_and(|f| f.generation == flow.generation && f.upgrade)
+            || self.abandoned.iter().any(|(id, _, u)| *id == flow && *u);
         for peer in self.peers.values_mut() {
             if peer.in_flight.contains(&flow) {
                 peer.in_flight.retain(|f| *f != flow);
+                if upgrade {
+                    continue;
+                }
                 peer.unanswered = if replied {
                     0
                 } else {
@@ -484,12 +525,16 @@ impl Manager {
             .as_ref()
             .is_some_and(|f| f.generation == flow.generation && f.asked());
         if !current {
-            let stale = self.abandoned.iter().position(|(id, _)| *id == flow);
+            let stale = self.abandoned.iter().position(|(id, _, _)| *id == flow);
             let to = stale.map(|at| self.abandoned.remove(at).1);
             return match (answer, to) {
                 (Answer::Granted(handle), Some(to)) => vec![Action::Stop { to, handle }],
                 _ => Vec::new(),
             };
+        }
+        if self.flows[flow.slot].as_ref().is_some_and(|f| f.upgrade) {
+            self.upgrade_answered(flow.slot, answer, now);
+            return Vec::new();
         }
         match answer {
             Answer::Granted(handle) => {
@@ -676,6 +721,11 @@ impl Manager {
             let Some(f) = &self.flows[slot] else { continue };
             if f.asked() && now.saturating_sub(f.since) >= GIVE_UP_NS {
                 let to = f.to;
+                if f.upgrade {
+                    self.abandon(slot);
+                    self.upgrade_failed(slot, "its request got no answer", now);
+                    continue;
+                }
                 self.abandon(slot);
                 self.fail(slot, SubStatus::TxFail, now);
                 if let Some(peer) = self.peers.get_mut(&to) {
@@ -699,7 +749,7 @@ impl Manager {
         if self.abandoned.len() >= MAX_FLOWS {
             self.abandoned.remove(0);
         }
-        self.abandoned.push((id, f.to));
+        self.abandoned.push((id, f.to, f.upgrade));
         if let Some(peer) = self.peers.get_mut(&f.to) {
             peer.in_flight.retain(|f| *f != id);
         }
@@ -713,10 +763,19 @@ impl Manager {
             if f.asked() {
                 continue;
             }
-            let used = self.routes.iter().flatten().any(|r| r.flow.slot == slot);
+            let used = f.upgrade || self.routes.iter().flatten().any(|r| r.flow.slot == slot);
             let silent = f.heard.is_none_or(|h| now.saturating_sub(h) >= SILENT_NS)
                 && now.saturating_sub(f.since) >= YOUNG_NS;
             if used && !silent {
+                continue;
+            }
+            if f.upgrade {
+                // Granted, never delivered: stopped, its channels stay on
+                // the multicast flow.
+                if let Some(handle) = f.handle {
+                    out.push(Action::Stop { to: f.to, handle });
+                }
+                self.upgrade_failed(slot, "it delivered nothing", now);
                 continue;
             }
             // A multicast flow is left (its socket closed), never stopped:
@@ -760,9 +819,8 @@ impl Manager {
             let moves = match (&shared, f.group) {
                 // A multicast flow carries it now: it leaves its unicast flow
                 // (a transmitter slot freed) for that one.
-                (MulticastLookup::Found(m), None) => {
-                    fits(m, &now).then_some("a multicast flow carries it now, it moves there")
-                }
+                (MulticastLookup::Found(m), None) => (fits(m, &now) && !self.coarser(m.fpp, &now))
+                    .then_some("a multicast flow carries it now, it moves there"),
                 // Its multicast flow is gone, or moved.
                 (MulticastLookup::None, Some(_)) => Some("its multicast flow is gone"),
                 (MulticastLookup::Found(m), Some(g)) if m.group != g => {
@@ -883,6 +941,7 @@ impl Manager {
             slot = slot + 1,
             channels = slots.len(),
             fpp = m.fpp,
+            our_fpp = self.unicast_fpp(a).unwrap_or(0),
             group = %m.group,
             "RX multicast flow: a transmitter's multicast flow is received"
         );
@@ -905,6 +964,7 @@ impl Manager {
             group: Some(m.group),
             heard: None,
             packets: packets[slot],
+            upgrade: false,
         });
         if let Some(at) = at {
             self.route(rx, id, at);
@@ -915,7 +975,7 @@ impl Manager {
     /// channel slot.
     fn carrying(&self, a: &Advertised) -> Option<(FlowId, usize)> {
         self.flows.iter().enumerate().find_map(|(slot, f)| {
-            let f = f.as_ref().filter(|f| f.to == a.control)?;
+            let f = f.as_ref().filter(|f| f.to == a.control && !f.upgrade)?;
             let at = f.slots.iter().position(|&s| s == Some(a.tx_channel_id))?;
             Some((
                 FlowId {
@@ -956,27 +1016,20 @@ impl Manager {
         waiting: &[(usize, Advertised)],
         now: u64,
         packets: &[u64; MAX_FLOWS],
+        upgrade: bool,
     ) -> Option<Action> {
         let first = waiting.first()?.1;
         let format = |a: &Advertised| (a.nchan, a.bits, a.dbcp1);
         if waiting.iter().any(|(_, a)| format(a) != format(&first)) {
             return None;
         }
-        let n = usize::from(first.nchan)
-            .min(MAX_CHANNELS)
-            .min(self.subs.len());
-        let Some(fpp) = fpp_for(&first, n) else {
+        let n = self.flow_slots(&first);
+        let Some(fpp) = self.unicast_fpp(&first) else {
             for (rx, _) in waiting {
                 self.failed[*rx] = Some(SubStatus::TxFail);
             }
             return None;
         };
-        // A transmitter that refused a smaller fpp (0x0314) gets its step;
-        // a step always fits a datagram (the `const` assertion at FPP_STEP_MAX).
-        let fpp = self
-            .fpp_floor
-            .get(&first.control)
-            .map_or(fpp, |&floor| floor.max(fpp));
         let slot = self.free_slot()?;
         // Each TX channel once, in RX order; the first n fill the slots, the
         // rest wait for the next flow.
@@ -1013,8 +1066,11 @@ impl Manager {
             group: None,
             heard: None,
             packets: packets[slot],
+            upgrade,
         });
-        for (rx, a) in waiting {
+        // A flow for channels on a multicast flow takes them once it
+        // delivers ([`Manager::promote`]).
+        for (rx, a) in waiting.iter().filter(|_| !upgrade) {
             if let Some(at) = ids.iter().position(|&s| s == Some(a.tx_channel_id)) {
                 self.route(*rx, id, at);
             }

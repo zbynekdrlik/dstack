@@ -562,7 +562,9 @@ fn tx_end_ends_a_live_tx_flow_on_dstack_dev_only() {
     assert!(live(&media));
     assert_eq!(answer("tx-end 1", &media), "ok");
     assert!(!live(&media));
-    assert!(status(&media).contains("\"tx\":[{\"flow\":1,\"live\":0,"));
+    assert!(
+        status(&media).contains("\"tx\":[{\"flow\":1,\"receiver\":\"peer-device\",\"live\":0,")
+    );
     // Ended already.
     assert_eq!(answer("tx-end 1", &media), format!("error: {NO_LIVE_FLOW}"));
     // The local endpoint (dtray's) never takes it.

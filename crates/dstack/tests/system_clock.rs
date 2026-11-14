@@ -926,9 +926,21 @@ fn tx_end_stops_our_rx_and_it_recovers_by_itself() {
     let host_stopped = host.stop(Duration::from_secs(5));
     assert!(receiving.is_some(), "RX 1 never received: {status}");
     assert_eq!(flow, Some(1), "our one TX flow: {status}");
+    // dstack #298: our TX flow names its receiver (our own device, its
+    // name as it asked) and carries our TX 1; our RX flow feeds our RX 1.
+    let v: serde_json::Value = serde_json::from_str(&status).expect("status JSON");
+    assert_eq!(v["tx"][0]["receiver"], v["name"], "{status}");
+    assert_eq!(v["tx"][0]["tx_channels"][0], 1, "{status}");
+    assert_eq!(
+        v["rx"][0]["rx_channels"],
+        serde_json::json!([1]),
+        "{status}"
+    );
     assert_eq!(ended.as_deref(), Some("ok"), "{status}");
-    assert!(
-        after_end.contains("\"tx\":[{\"flow\":1,\"live\":0,"),
+    let tx_after: serde_json::Value = serde_json::from_str(&after_end).expect("status JSON");
+    assert_eq!(
+        (&tx_after["tx"][0]["flow"], &tx_after["tx"][0]["live"]),
+        (&serde_json::json!(1), &serde_json::json!(0)),
         "{after_end}"
     );
     let (took, _) = stopped.unwrap_or_else(|| panic!("RX 1 kept receiving: {after_end}"));

@@ -798,6 +798,7 @@ fn held() -> Option<Flow> {
         group: None,
         heard: None,
         packets: 0,
+        upgrade: false,
     })
 }
 
@@ -1605,9 +1606,13 @@ fn mics() -> MulticastLookup {
         channels: vec![1, 2],
         fpp: 32,
         bits: 24,
+        free_slots: Some(1),
     })
 }
 
+/// The peer's records (16 frames a packet at most) and its multicast flow
+/// of 32 ([`mics`]). [`manager`]'s config leaves `arc_rx_fpp` out, so the
+/// coarser multicast flow is preferred as before dstack #297.
 fn shared_network() -> Shared {
     let n = Shared::default();
     for id in 1..=8 {
@@ -1733,24 +1738,28 @@ fn a_multicast_flow_we_cannot_read_is_not_joined() {
             channels: vec![1, 2],
             fpp: 32,
             bits: 16,
+            free_slots: Some(1),
         },
         Multicast {
             group: GROUP,
             channels: vec![1, 2],
             fpp: 0,
             bits: 24,
+            free_slots: Some(1),
         },
         Multicast {
             group: GROUP,
             channels: (1..=MAX_CHANNELS as u16 + 1).collect(),
             fpp: 32,
             bits: 24,
+            free_slots: Some(1),
         },
         Multicast {
             group: GROUP,
             channels: vec![1, 2],
             fpp: 1000,
             bits: 24,
+            free_slots: Some(1),
         },
     ] {
         let net = shared_network();
@@ -1777,6 +1786,7 @@ fn a_moved_group_is_joined_anew() {
             channels: vec![1, 2],
             fpp: 32,
             bits: 24,
+            free_slots: Some(1),
         }),
     );
     let mut heard = NONE;
@@ -1797,12 +1807,14 @@ fn two_groups_of_one_transmitter_on_one_port_are_joined_only_where_the_socket_te
         channels: vec![1, 2],
         fpp: 32,
         bits: 24,
+        free_slots: Some(1),
     };
     let second = Multicast {
         group: other,
         channels: vec![3],
         fpp: 32,
         bits: 24,
+        free_slots: Some(1),
     };
     // A resolver that answers by channel.
     struct Two(Shared, Multicast, Multicast);
@@ -1940,3 +1952,5 @@ fn two_flows_that_stay_silent_count_one_failure_per_round() {
     // As one flow: 9 s after one failure, 18 s after two.
     assert_eq!(rounds, [(0, 2), (9, 2), (27, 2)]);
 }
+
+mod coarse_multicast;

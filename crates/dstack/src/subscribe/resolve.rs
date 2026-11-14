@@ -178,6 +178,10 @@ pub struct Multicast {
     pub channels: Vec<u16>,
     pub fpp: u16,
     pub bits: u32,
+    /// The transmitter's TX flow slots not in use, as its flow list states
+    /// them (dstack #297: our own unicast flow takes only a free one);
+    /// `None` when the list names no slot count (an ARC 2.7 list).
+    pub free_slots: Option<u16>,
 }
 
 /// What is known of a channel's multicast flow.
