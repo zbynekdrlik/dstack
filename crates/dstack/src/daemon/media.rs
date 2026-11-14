@@ -588,10 +588,14 @@ impl Driver {
             crate::media::repin::pin_refusals(),
         );
         let rx = &self.media.rx;
+        // A rejoin the RX thread could not complete is asked again.
+        if rx.take_groups_missing() {
+            self.membership.failed();
+        }
         self.membership.keep(
             std::time::Instant::now(),
             crate::membership::links,
-            "every RX multicast flow",
+            "every RX multicast flow (joined by the RX thread)",
             || {
                 rx.rejoin_groups();
                 Ok(())

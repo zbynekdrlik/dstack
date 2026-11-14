@@ -5,6 +5,7 @@ use crate::media::packet::write;
 use crate::media::tx::ns_of;
 use crate::wire::tests::Rng;
 
+mod rejoin;
 mod reorder;
 mod source;
 mod start;
@@ -1299,87 +1300,6 @@ fn a_slot_whose_plan_names_a_group_joins_it_and_receives_its_flow() {
     rx.pass(None, 0);
     assert_eq!(read_of(s.lane(3)), 2, "{:?}", s.lane(3));
     assert_eq!(s.lane(3).joins, 1);
-}
-
-/// dstack #282: an interface change asks every slot with a group to join
-/// it again (the membership went with the address); a slot without one
-/// joins nothing.
-#[test]
-fn a_rejoin_asked_joins_every_slot_s_group_again_once() {
-    let group = SocketAddrV4::new(Ipv4Addr::new(239, 255, 77, 3), free_port());
-    let s = shared(2);
-    let mut rx = Receiver::new(Arc::clone(&s)).unwrap();
-    let multicast = RxPlan {
-        group: Some(group),
-        ..plan(LOOPBACK, 2, false, 1)
-    };
-    publish(
-        &s,
-        &[(3, multicast), (1, plan(LOOPBACK, 2, false, 1))],
-        &[
-            (0, RxRoute { flow: 3, slot: 0 }),
-            (1, RxRoute { flow: 3, slot: 1 }),
-        ],
-    );
-    rx.pass(None, 0);
-    assert_eq!((s.lane(3).joins, s.lane(3).join_errors), (1, 0));
-    // Nothing asked: no join.
-    rx.pass(None, 0);
-    assert_eq!(s.lane(3).joins, 1);
-    s.rejoin_groups();
-    rx.pass(None, 0);
-    assert_eq!((s.lane(3).joins, s.lane(3).join_errors), (2, 0));
-    assert_eq!(s.lane(1).joins, 0, "a slot with no group joins none");
-    // Asked once, done once.
-    rx.pass(None, 0);
-    assert_eq!(s.lane(3).joins, 2);
-    // Twice more: joined twice more.
-    s.rejoin_groups();
-    rx.pass(None, 0);
-    s.rejoin_groups();
-    rx.pass(None, 0);
-    assert_eq!(s.lane(3).joins, 4);
-    // The rejoined socket receives the flow.
-    let t = multicast_transmitter();
-    let p0 = 10 * 365 * 86_400 * u64::from(RATE);
-    for k in 0..2 {
-        t.send_to(&packet_at(p0 + 32 * k, 2, 32), group).unwrap();
-    }
-    pump(&mut rx, 3, 2, Some(ns_of(p0 + 100, RATE)), 0);
-    let c = s.lane(3);
-    assert_eq!((c.packets, c.stray), (2, 0), "{c:?}");
-}
-
-/// A rejoin asked in the pass where a slot's plan names a new group: the
-/// new group is joined once (the two asks are one join).
-#[test]
-fn a_rejoin_asked_with_a_new_group_joins_the_new_group_once() {
-    let first = SocketAddrV4::new(Ipv4Addr::new(239, 255, 77, 4), free_port());
-    let second = SocketAddrV4::new(Ipv4Addr::new(239, 255, 77, 5), free_port());
-    let s = shared(2);
-    let mut rx = Receiver::new(Arc::clone(&s)).unwrap();
-    let at = |group, generation| RxPlan {
-        group: Some(group),
-        ..plan(LOOPBACK, 2, false, generation)
-    };
-    let routes = [
-        (0, RxRoute { flow: 3, slot: 0 }),
-        (1, RxRoute { flow: 3, slot: 1 }),
-    ];
-    publish(&s, &[(3, at(first, 1))], &routes);
-    rx.pass(None, 0);
-    assert_eq!(s.lane(3).joins, 1);
-    publish(&s, &[(3, at(second, 2))], &routes);
-    s.rejoin_groups();
-    rx.pass(None, 0);
-    assert_eq!((s.lane(3).joins, s.lane(3).join_errors), (2, 0));
-    let t = multicast_transmitter();
-    let p0 = 10 * 365 * 86_400 * u64::from(RATE);
-    for k in 0..2 {
-        t.send_to(&packet_at(p0 + 32 * k, 2, 32), second).unwrap();
-    }
-    pump(&mut rx, 3, 2, Some(ns_of(p0 + 100, RATE)), 0);
-    assert_eq!(s.lane(3).packets, 2, "{:?}", s.lane(3));
 }
 
 #[test]

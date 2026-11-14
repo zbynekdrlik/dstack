@@ -21,6 +21,12 @@
 //!   a failed rejoin is logged and asked again at the next poll.
 //! - [`rejoin`]: leaves and joins a group again on the same socket.
 //!
+//! Known limit: a change is seen only by a read that finds the address
+//! gone, or on another index. An address removed and added again on the
+//! same index between two reads (under [`EVERY`]) is not seen; on Windows
+//! the address is listed again only once its duplicate-address check is
+//! done (`if_addrs` lists preferred addresses only), which narrows it.
+//!
 //! Each socket owner keeps its own [`Membership`] and calls `keep` from its
 //! own loop (the mDNS responder, discovery, the latency listener, the
 //! daemon's tick for the RX flows). `host` re-exports it as

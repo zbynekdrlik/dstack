@@ -372,9 +372,17 @@ fn after_an_address_re_add_the_responder_rejoins_announces_and_answers_again() {
         panic!("bound on IPv4");
     };
     let list = Arc::new(Mutex::new(lo_at(26)));
+    // The reads that found the address gone.
+    let gone_reads = Arc::new(AtomicU64::new(0));
     let read = {
-        let list = Arc::clone(&list);
-        move || Ok(list.lock().unwrap().clone())
+        let (list, gone_reads) = (Arc::clone(&list), Arc::clone(&gone_reads));
+        move || {
+            let now = list.lock().unwrap().clone();
+            if now.is_empty() {
+                gone_reads.fetch_add(1, Ordering::Relaxed);
+            }
+            Ok(now)
+        }
     };
     let every = Duration::from_millis(20);
     let r = Responder::start_watched(
@@ -402,7 +410,11 @@ fn after_an_address_re_add_the_responder_rejoins_announces_and_answers_again() {
     assert!(listener.recv_from(&mut buf).is_err(), "announced unasked");
     // The address removed, then added again on another index.
     list.lock().unwrap().clear();
-    std::thread::sleep(every * 10);
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while gone_reads.load(Ordering::Relaxed) < 2 {
+        assert!(std::time::Instant::now() < deadline, "the list never read");
+        std::thread::sleep(every);
+    }
     assert_eq!(r.rejoins(), 0, "nothing to join on while it is gone");
     *list.lock().unwrap() = lo_at(19);
     let deadline = std::time::Instant::now() + Duration::from_secs(5);

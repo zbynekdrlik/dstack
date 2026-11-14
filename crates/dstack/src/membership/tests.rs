@@ -16,22 +16,22 @@ fn link(name: &str, ip: Ipv4Addr, index: Option<u32>) -> Link {
     }
 }
 
-/// A two-leg PC: the Dante leg at index `dante`, a VLAN adapter beside it.
+/// A two-leg PC: the Dante leg at index `dante`, a second adapter beside it.
 fn two_legs(dante: u32) -> Vec<Link> {
     vec![
-        link("Ethernet 3", OURS, Some(dante)),
-        link("LAN89", Ipv4Addr::new(10, 0, 9, 171), Some(27)),
+        link("Ethernet", OURS, Some(dante)),
+        link("LAN", Ipv4Addr::new(198, 51, 100, 171), Some(27)),
     ]
 }
 
-/// The VLAN adapter only: the Dante leg's address is gone.
+/// The second adapter only: the Dante leg's address is gone.
 fn without_ours() -> Vec<Link> {
-    vec![link("LAN89", Ipv4Addr::new(10, 0, 9, 171), Some(27))]
+    vec![link("LAN", Ipv4Addr::new(198, 51, 100, 171), Some(27))]
 }
 
 fn rejoin_of(old: Option<u32>, new: Option<u32>) -> Option<Rejoin> {
     Some(Rejoin {
-        interface: "Ethernet 3".to_string(),
+        interface: "Ethernet".to_string(),
         old_index: old,
         new_index: new,
     })
@@ -73,12 +73,12 @@ fn an_index_change_with_the_address_kept_asks_a_rejoin() {
 #[test]
 fn another_adapter_coming_and_going_asks_no_rejoin() {
     let mut m = Membership::new(OURS);
-    let alone = vec![link("Ethernet 3", OURS, Some(26))];
+    let alone = vec![link("Ethernet", OURS, Some(26))];
     assert_eq!(m.look(&alone), None);
-    // The VLAN adapter appears unbound, then with a DHCP address.
+    // The second adapter appears with a link-local address, then its own.
     let unbound = vec![
-        link("Ethernet 3", OURS, Some(26)),
-        link("LAN89", Ipv4Addr::new(169, 254, 3, 9), Some(27)),
+        link("Ethernet", OURS, Some(26)),
+        link("LAN", Ipv4Addr::new(169, 254, 1, 1), Some(27)),
     ];
     assert_eq!(m.look(&unbound), None);
     assert_eq!(m.look(&two_legs(26)), None);
@@ -191,7 +191,7 @@ fn keep_rejoins_on_a_change_and_logs_it_at_info() {
         text.contains("multicast group re-joined after an interface change"),
         "{text}"
     );
-    assert!(text.contains("interface=Ethernet 3"), "{text}");
+    assert!(text.contains("interface=Ethernet"), "{text}");
     assert!(text.contains("old_index=26"), "{text}");
     assert!(text.contains("new_index=19"), "{text}");
     assert!(text.contains("group=224.0.0.251:5353"), "{text}");
