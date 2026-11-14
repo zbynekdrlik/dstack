@@ -18,19 +18,27 @@
 //!   cap` per source over the cap.
 //! - [`Meter`]: the process's passive listener on one address (one per
 //!   process and address, shared by every device there; its own thread,
-//!   nothing sent) and the last minute for the devices' status.
+//!   nothing sent) and the last minute for the devices' status. It counts
+//!   the group as joined on that address's interface only: Linux is told
+//!   so (`IP_MULTICAST_ALL` off; it would hand over every membership of the
+//!   host), and Windows delivers by the socket's own membership (checked
+//!   on a two-leg PC, 14.11.2026: 20 s, every source on the Dante subnet,
+//!   none from the LAN's mDNS). On Windows the socket is bound to the
+//!   wildcard address (`discover`'s group listener), so it may also take
+//!   a unicast datagram to port 5353 meant for another wildcard socket
+//!   there, as a [`super::Discovery`] does; mDNS answers go to the group.
 
 use std::collections::HashMap;
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use tracing::{debug, info, trace, warn};
 
-use crate::membership::{Membership, links, rejoin};
+use crate::membership::{Link, Membership, links, rejoin};
 use crate::subscribe::instance::MDNS;
 
 /// Sources counted at most in a minute.
@@ -213,7 +221,15 @@ static METERS: Mutex<Vec<(Ipv4Addr, Weak<Meter>)>> = Mutex::new(Vec::new());
 pub struct Meter {
     last: Arc<Mutex<Option<Minute>>>,
     stop: Arc<AtomicBool>,
+    rejoins: Arc<AtomicU64>,
     thread: Option<JoinHandle<()>>,
+}
+
+/// How the meter's socket keeps its group (dstack #282): the watch of the
+/// address and the interface list it reads ([`links`]; a test: its own).
+pub struct MeterWatch {
+    pub membership: Membership,
+    pub read: Box<dyn FnMut() -> io::Result<Vec<Link>> + Send>,
 }
 
 /// The meter's socket's receive wait (it looks at the stop between two).
@@ -226,15 +242,24 @@ impl Meter {
     /// again after an interface change, dstack #282). One per process
     /// and address, so its lines are logged once whatever the devices.
     pub fn shared(ip: Ipv4Addr) -> io::Result<Arc<Meter>> {
-        Meter::shared_with(ip, || {
-            let sock = super::group_listener(ip)?;
-            // Only the group as joined on this socket's interface: Linux
-            // otherwise hands it every membership of the host (the LAN's).
-            #[cfg(target_os = "linux")]
-            socket2::SockRef::from(&sock).set_multicast_all_v4(false)?;
-            sock.set_read_timeout(Some(WAIT))?;
-            Meter::start(sock, Some(Membership::new(ip)), ip, MINUTE_NS)
-        })
+        Meter::shared_with(ip, || Meter::open(ip, MINUTE_NS))
+    }
+
+    /// A new meter listening to the mDNS group on the interface with the
+    /// address `ip`, in minutes of `minute_ns` ([`Meter::shared`]'s, not
+    /// registered).
+    pub fn open(ip: Ipv4Addr, minute_ns: u64) -> io::Result<Meter> {
+        let sock = super::group_listener(ip)?;
+        // Only the group as joined on this socket's interface: Linux
+        // otherwise hands it every membership of the host (the LAN's).
+        #[cfg(target_os = "linux")]
+        socket2::SockRef::from(&sock).set_multicast_all_v4(false)?;
+        sock.set_read_timeout(Some(WAIT))?;
+        let watch = MeterWatch {
+            membership: Membership::new(ip),
+            read: Box::new(links),
+        };
+        Meter::start(sock, Some(watch), ip, minute_ns)
     }
 
     /// [`Meter::shared`] with the meter `open` makes when none runs on `ip`.
@@ -258,22 +283,24 @@ impl Meter {
     }
 
     /// A meter counting what `sock` receives, in minutes of `minute_ns`,
-    /// its group kept by `membership` on `ip` when there is one.
+    /// its mDNS group membership on `ip` kept by `watch` when there is one.
     pub fn start(
         sock: UdpSocket,
-        membership: Option<Membership>,
+        watch: Option<MeterWatch>,
         ip: Ipv4Addr,
         minute_ns: u64,
     ) -> io::Result<Meter> {
         let last = Arc::new(Mutex::new(None));
         let stop = Arc::new(AtomicBool::new(false));
+        let rejoins = Arc::new(AtomicU64::new(0));
         let run = Run {
             sock,
-            membership,
+            watch,
             ip,
             minute_ns,
             last: Arc::clone(&last),
             stop: Arc::clone(&stop),
+            rejoins: Arc::clone(&rejoins),
         };
         let thread = std::thread::Builder::new()
             .name("dstack-mdns-meter".to_string())
@@ -281,8 +308,15 @@ impl Meter {
         Ok(Meter {
             last,
             stop,
+            rejoins,
             thread: Some(thread),
         })
+    }
+
+    /// How often its socket joined the group again after an interface
+    /// change.
+    pub fn rejoins(&self) -> u64 {
+        self.rejoins.load(Ordering::Relaxed)
     }
 
     /// The last closed minute (`None` before the first).
@@ -296,6 +330,7 @@ impl Meter {
         Meter {
             last: Arc::new(Mutex::new(minute)),
             stop: Arc::new(AtomicBool::new(true)),
+            rejoins: Arc::default(),
             thread: None,
         }
     }
@@ -314,11 +349,12 @@ impl Drop for Meter {
 /// The meter's thread.
 struct Run {
     sock: UdpSocket,
-    membership: Option<Membership>,
+    watch: Option<MeterWatch>,
     ip: Ipv4Addr,
     minute_ns: u64,
     last: Arc<Mutex<Option<Minute>>>,
     stop: Arc<AtomicBool>,
+    rejoins: Arc<AtomicU64>,
 }
 
 impl Run {
@@ -328,9 +364,13 @@ impl Run {
         let mut senders = Senders::new(now());
         let mut buf = vec![0u8; 9000];
         while !self.stop.load(Ordering::Relaxed) {
-            if let Some(m) = self.membership.as_mut() {
+            if let Some(w) = self.watch.as_mut() {
                 let (sock, ip) = (&self.sock, self.ip);
-                m.keep(Instant::now(), links, MDNS, || rejoin(sock, *MDNS.ip(), ip));
+                if w.membership.keep(Instant::now(), &mut w.read, MDNS, || {
+                    rejoin(sock, *MDNS.ip(), ip)
+                }) {
+                    self.rejoins.fetch_add(1, Ordering::Relaxed);
+                }
             }
             match self.sock.recv_from(&mut buf) {
                 Ok((_, SocketAddr::V4(from))) => senders.count(*from.ip()),

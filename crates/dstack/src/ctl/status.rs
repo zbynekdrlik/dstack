@@ -99,9 +99,10 @@ impl Json {
 }
 
 /// The status line: one JSON object, numbers and fixed words, besides the
-/// device's own `name` and the app's part; the only addresses are the RX `source`s and the mDNS senders (`mdns`). Channels and
-/// flows are numbered from 1 (flow `n` is slot `n − 1`); every count is
-/// cumulative since the device started.
+/// device's own `name` and the app's part; the only addresses are the RX
+/// `source`s and the mDNS senders (`mdns`). Channels and flows are
+/// numbered from 1 (flow `n` is slot `n − 1`); every count is cumulative
+/// since the device started.
 ///
 /// - `clock`: `ready` (0/1), `epoch` (re-anchors the media threads saw),
 ///   `polls`, `re_anchors`, `holdovers` (runs of polls in holdover),

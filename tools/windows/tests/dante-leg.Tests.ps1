@@ -102,6 +102,7 @@ function Reset-Fake {
     $script:Qos = New-Object System.Collections.ArrayList
     $script:PacerOff = @()
     $script:NoPacer = @()
+    $script:QosRefused = $false
 }
 function Get-NetQosPolicy {
     param([string]$Name, $ErrorAction)
@@ -110,6 +111,7 @@ function Get-NetQosPolicy {
 function New-NetQosPolicy {
     param($Name, $IPProtocolMatchCondition, $IPDstPrefixMatchCondition, $IPDstPortMatchCondition,
         $ThrottleRateActionBitsPerSecond, $NetworkProfile)
+    if ($script:QosRefused) { throw 'refused by the fake' }
     # The real cmdlet gives a /32 prefix back as the bare address.
     $p = [pscustomobject]@{
         Name = $Name; IPProtocolMatchCondition = $IPProtocolMatchCondition
@@ -238,6 +240,8 @@ Check 'install creates one mDNS cap: UDP to 224.0.0.251:5353 at 200 kbit/s on ev
     $p[0].NetworkProfile -eq 'All' -and (@($out) -join "`n") -match 'mDNS cap.*224\.0\.0\.251:5353 at 200000 bit/s'
 }
 Check 'check fails on a missing cap, a changed rate and a second cap of the name, naming it' {
+    Reset-Fake
+    [void](Install-DanteLeg -Interface 'Dante70')
     $script:Qos.Clear()
     $missing = Test-DanteLeg -Interface 'Dante70'
     [void](Install-DanteLeg -Interface 'Dante70')
@@ -263,6 +267,15 @@ Check 'the QoS Packet Scheduler off on the Dante adapter fails the install and t
     $script:NoPacer = @()
     (Last $out) -eq 1 -and (Last $check) -eq 1 -and $lanOff -eq 0 -and $none -eq 0 -and
     (@($check) -join "`n") -match "ms_pacer\) is off on 'Dante70'"
+}
+Check 'a refused mDNS cap fails the install before the firewall group changes' {
+    Reset-Fake
+    [void](Install-DanteLeg -Interface 'Dante70')
+    $names = @($script:Store | ForEach-Object { $_.Name }) -join ','
+    $script:QosRefused = $true
+    $threw = Throws { Install-DanteLeg -Interface 'Dante70' } "*mDNS cap 'dstack Dante leg mDNS cap' was not created*"
+    $script:QosRefused = $false
+    $threw -and (@($script:Store | ForEach-Object { $_.Name }) -join ',') -eq $names
 }
 Check 'a firewall profile that is off fails the install and the check, the rules stay' {
     $script:ProfilesOff = @('Public')

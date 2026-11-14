@@ -278,3 +278,73 @@ fn one_meter_per_address_in_a_process_ending_with_its_last_holder() {
     assert_eq!(opened, 4);
     drop(after);
 }
+
+/// dstack #282: the meter's group is joined again after its address came
+/// back (an injected interface list; its reads are counted).
+#[test]
+fn the_meter_joins_its_group_again_after_an_interface_change() {
+    use std::sync::atomic::AtomicUsize;
+    let sock = loopback();
+    let ip = Ipv4Addr::LOCALHOST;
+    let reads = Arc::new(AtomicUsize::new(0));
+    let read = {
+        let reads = Arc::clone(&reads);
+        move || {
+            let n = reads.fetch_add(1, Ordering::Relaxed);
+            let at = |index| Link {
+                name: "lo".to_string(),
+                ip,
+                index: Some(index),
+            };
+            // Up, gone, then back on another index, and so on.
+            Ok(match n {
+                0 => vec![at(1)],
+                1 => vec![],
+                _ => vec![at(2)],
+            })
+        }
+    };
+    let watch = MeterWatch {
+        membership: Membership::every(ip, Duration::from_millis(1)),
+        read: Box::new(read),
+    };
+    let meter = Meter::start(sock, Some(watch), ip, MINUTE_NS).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while reads.load(Ordering::Relaxed) < 5 {
+        assert!(Instant::now() < deadline, "the list was not read");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(meter.rejoins(), 1);
+}
+
+/// The real socket on the routed address: datagrams to the mDNS group from
+/// our own address are counted under it.
+#[test]
+fn the_meter_s_socket_counts_the_mdns_group_on_its_address() {
+    let ip = match UdpSocket::bind("0.0.0.0:0")
+        .and_then(|s| s.connect("192.0.2.1:9").map(|()| s))
+        .and_then(|s| s.local_addr())
+    {
+        Ok(SocketAddr::V4(a)) => *a.ip(),
+        other => panic!("no routed IPv4 address: {other:?}"),
+    };
+    let meter = Meter::open(ip, 300_000_000).unwrap();
+    let from = UdpSocket::bind((ip, 0)).unwrap();
+    socket2::SockRef::from(&from)
+        .set_multicast_if_v4(&ip)
+        .unwrap();
+    // An mDNS header with no questions or records: nothing to answer.
+    let empty = [0u8; 12];
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        from.send_to(&empty, MDNS).unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        if meter
+            .last()
+            .is_some_and(|m| m.top.iter().any(|r| r.source == ip))
+        {
+            break;
+        }
+        assert!(Instant::now() < deadline, "our datagrams were not counted");
+    }
+}

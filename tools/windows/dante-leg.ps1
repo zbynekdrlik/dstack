@@ -26,10 +26,13 @@
 #
 # The host's own mDNS out is capped (dstack #288): Windows Firewall cannot
 # limit a rate, so a QoS policy, "dstack Dante leg mDNS cap", throttles UDP to
-# 224.0.0.251:5353 to 200 kbit/s (about 50 datagrams/s of 500 bytes; normal
-# mDNS out is 5/s at most), so no program on the PC floods the Dante VLAN even
-# with no switch cap. A QoS policy has no adapter condition: the cap holds on
-# every adapter (only the Dante leg carries much mDNS on our PCs). The QoS
+# 224.0.0.251:5353 to 200 kbit/s, so no program on the PC floods the Dante
+# VLAN even with no switch cap. Unlike Linux's cap (50 datagrams/s, dropped
+# past a burst of 200, on the Dante leg only) it counts bits and queues:
+# about 50 datagrams/s of 500 bytes, 250/s of small queries (100 bytes on the
+# wire), and a sender past it waits instead of losing datagrams. A QoS policy
+# has no adapter condition: the cap holds on every adapter (only the Dante
+# leg carries much mDNS on our PCs). The QoS
 # Packet Scheduler (ms_pacer) applies it: the check fails when the Dante
 # adapter has that binding switched off. A Realtek Virtual Adapter (a VLAN
 # leg) has no such binding; the base adapter's applies the cap there
@@ -215,14 +218,14 @@ function Get-MdnsCapPolicy {
 
 # What the cap must read back as (Get-NetQosPolicy's fields), one line.
 function Format-QosShape {
-    param([string]$Protocol, [string]$DstPrefix, [string]$PortStart, [string]$PortEnd, [string]$Rate, [string]$Profile)
-    'proto={0}|dst={1}|ports={2}-{3}|rate={4}|profile={5}' -f $Protocol, $DstPrefix, $PortStart, $PortEnd, $Rate, $Profile
+    param([string]$Protocol, [string]$DstPrefix, [string]$PortStart, [string]$PortEnd, [string]$Rate, [string]$NetProfile)
+    'proto={0}|dst={1}|ports={2}-{3}|rate={4}|profile={5}' -f $Protocol, $DstPrefix, $PortStart, $PortEnd, $Rate, $NetProfile
 }
 
 function Get-ExpectedQosShape {
     # Get-NetQosPolicy gives a /32 prefix back as the bare address.
     Format-QosShape -Protocol 'UDP' -DstPrefix $script:MdnsGroup -PortStart "$($script:MdnsPort)" `
-        -PortEnd "$($script:MdnsPort)" -Rate "$($script:MdnsCapBitsPerSecond)" -Profile 'All'
+        -PortEnd "$($script:MdnsPort)" -Rate "$($script:MdnsCapBitsPerSecond)" -NetProfile 'All'
 }
 
 # What a rule on the PC must read back as: its filters, in the form
@@ -297,7 +300,7 @@ function Get-MdnsCapProblems {
     $p = $found[0]
     $have = Format-QosShape -Protocol "$($p.IPProtocolMatchCondition)" -DstPrefix "$($p.IPDstPrefixMatchCondition)" `
         -PortStart "$($p.IPDstPortStartMatchCondition)" -PortEnd "$($p.IPDstPortEndMatchCondition)" `
-        -Rate "$($p.ThrottleRateAction)" -Profile "$($p.NetworkProfile)"
+        -Rate "$($p.ThrottleRateAction)" -NetProfile "$($p.NetworkProfile)"
     $want = Get-ExpectedQosShape
     if ($have -ne $want) { return @("the mDNS cap '$($script:MdnsCap)': reads '$have', not '$want'") }
     @()
@@ -355,14 +358,16 @@ function Write-Outcome {
     0
 }
 
-# Creates the group on $Interface, then removes the rules it held before and
-# the groups $Remove, then reads it back. The new rules exist before any old
+# Creates the mDNS cap again, then the group on $Interface, then removes the
+# rules it held before and the groups $Remove, then reads both back. The new rules exist before any old
 # one goes, so a failure part way leaves the old filter in place (the rules
 # made so far are removed again). Output: report lines, the exit code last.
 function Install-DanteLeg {
     # Not Mandatory: an empty name reaches Assert-Adapter, which names the switch.
     param([string]$Interface = '', [string[]]$Remove = @(), [string]$Enabled = 'True')
     Assert-Adapter -Interface $Interface
+    # The cap first: a refused cap leaves the firewall group as it was.
+    Install-MdnsCap
     $before = @(Get-NetFirewallRule -Group $script:Group -ErrorAction SilentlyContinue)
     $made = New-Object System.Collections.ArrayList
     try {
@@ -388,7 +393,6 @@ function Install-DanteLeg {
             "removed group '$old' ($($rules.Count) rules)"
         }
     }
-    Install-MdnsCap
     $problems = @(Get-GroupProblems -Interface $Interface -Enabled $Enabled) + @(Get-MdnsCapProblems) +
     @(Get-PacerProblems -Interface $Interface) + @(Get-ProfileProblems)
     Write-Outcome -Problems $problems -Done "installed group '$($script:Group)' on '$Interface' ($(@(Get-DanteLegRules).Count) rules) and the mDNS cap, read back"
