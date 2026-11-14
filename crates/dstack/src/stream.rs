@@ -294,9 +294,8 @@ pub struct PumpStats {
     late: AtomicU64,
     missed: AtomicU64,
     overruns: AtomicU64,
-    rebootstraps: AtomicU64,
-    /// The re-bootstraps by [`Cause`] (dstack #281); they add up to
-    /// `rebootstraps`.
+    /// The re-bootstraps by [`Cause`] (dstack #281); their sum is the
+    /// total, so a reader's total and causes always agree.
     rebootstraps_late: AtomicU64,
     rebootstraps_clock_back: AtomicU64,
     rebootstraps_reanchor: AtomicU64,
@@ -367,7 +366,6 @@ impl PumpStats {
             late: AtomicU64::new(0),
             missed: AtomicU64::new(0),
             overruns: AtomicU64::new(0),
-            rebootstraps: AtomicU64::new(0),
             rebootstraps_late: AtomicU64::new(0),
             rebootstraps_clock_back: AtomicU64::new(0),
             rebootstraps_reanchor: AtomicU64::new(0),
@@ -407,10 +405,9 @@ impl PumpStats {
         self.playout.store(timing.playout, Ordering::Relaxed);
     }
 
-    /// A re-bootstrap for `cause` that skipped `skipped` blocks: in the
-    /// total and in its cause's count.
+    /// A re-bootstrap for `cause` that skipped `skipped` blocks: counted
+    /// in its cause's count (the total is their sum).
     pub(crate) fn rebootstrapped(&self, skipped: u64, cause: Cause) {
-        self.rebootstraps.fetch_add(1, Ordering::Relaxed);
         self.missed.fetch_add(skipped, Ordering::Relaxed);
         let by_cause = match cause {
             Cause::Late => &self.rebootstraps_late,
@@ -468,7 +465,7 @@ impl PumpStats {
             late: self.late.load(Ordering::Relaxed),
             missed: self.missed.load(Ordering::Relaxed),
             overruns: self.overruns.load(Ordering::Relaxed),
-            resets: self.rebootstraps.load(Ordering::Relaxed),
+            resets: self.view().rebootstraps,
             faulted,
             running: self.running.load(Ordering::Acquire),
             max_process_ns: self.max_process_ns.load(Ordering::Relaxed),
@@ -501,6 +498,10 @@ impl PumpStats {
 
     /// The numbers the device's control socket shows.
     pub fn view(&self) -> PumpView {
+        let late = self.rebootstraps_late.load(Ordering::Relaxed);
+        let clock_back = self.rebootstraps_clock_back.load(Ordering::Relaxed);
+        let reanchor = self.rebootstraps_reanchor.load(Ordering::Relaxed);
+        let retime = self.rebootstraps_retime.load(Ordering::Relaxed);
         PumpView {
             media: self.media.load(Ordering::Relaxed),
             offset: self.offset.load(Ordering::Relaxed),
@@ -509,12 +510,12 @@ impl PumpStats {
             late: self.late.load(Ordering::Relaxed),
             missed: self.missed.load(Ordering::Relaxed),
             overruns: self.overruns.load(Ordering::Relaxed),
-            rebootstraps: self.rebootstraps.load(Ordering::Relaxed),
+            rebootstraps: late + clock_back + reanchor + retime,
             max_process_us: self.max_process_ns.load(Ordering::Relaxed) / 1_000,
-            rebootstraps_late: self.rebootstraps_late.load(Ordering::Relaxed),
-            rebootstraps_clock_back: self.rebootstraps_clock_back.load(Ordering::Relaxed),
-            rebootstraps_reanchor: self.rebootstraps_reanchor.load(Ordering::Relaxed),
-            rebootstraps_retime: self.rebootstraps_retime.load(Ordering::Relaxed),
+            rebootstraps_late: late,
+            rebootstraps_clock_back: clock_back,
+            rebootstraps_reanchor: reanchor,
+            rebootstraps_retime: retime,
             wake_behind_max_us: self.wakes.max_us(),
             wake_behind_minute_max_us: self.wakes.minute_max_us(),
         }

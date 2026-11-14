@@ -105,3 +105,13 @@ fn a_late_rebootstrap_is_a_late_wake_and_a_clock_gone_back_is_none() {
     assert_eq!(wakes(&r), 2, "a clock gone back is no wake lateness");
     assert_eq!(r.stats.wakes().late_wakes(), 1);
 }
+
+#[test]
+fn a_wake_exactly_one_block_behind_is_late_and_one_sample_less_is_not() {
+    let (mut r, w) = started();
+    let w = r.pump.media(w + B - 1, 0);
+    assert_eq!(r.stats.wakes().late_wakes(), 0, "a sample under a block");
+    r.pump.media(w + B, 0);
+    assert_eq!(r.stats.wakes().late_wakes(), 1, "exactly a block");
+    assert_eq!(r.stats.view().late, 1, "as the block's own late count");
+}

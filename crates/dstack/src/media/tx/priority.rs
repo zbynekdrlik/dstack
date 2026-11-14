@@ -250,7 +250,11 @@ pub(crate) fn take_priority(thread: MediaThread, priority: i32, scheduling: &Sch
     let error = joined.as_ref().and_then(|j| j.as_ref().err());
     let thread = thread.log_name();
     match outcome {
-        Priority::Granted => info!(thread, priority, "runs SCHED_FIFO"),
+        // Windows' real-time grant is a thread priority, not a scheduler.
+        Priority::Granted => match Os::current() {
+            Os::Other => info!(thread, priority, "runs SCHED_FIFO"),
+            Os::Windows => info!(thread, priority, "runs at the real-time thread priority"),
+        },
         Priority::Mmcss => info!(
             thread,
             mmcss_task = ?task,
