@@ -685,14 +685,19 @@ impl<P: Process> Pump<P> {
                 .engine_line
                 .shift_at(anchor, rate, self.timing.block);
             // A re-anchor moves the media clock, so the offset, by its
-            // step (and the blocks' media start with it).
-            // The play-time check starts afresh: the blocks' starts moved
-            // with the media clock, the play times did not.
+            // step (and the blocks' media start with it, and the play-time
+            // check's last start by the shift; an unknown step starts it
+            // afresh).
             if let Some(from) = self.epoch {
-                self.played = play_at::Track::default();
                 match anchor.step_from(from) {
-                    Some(step_ns) => self.app.shift(step_ns),
-                    None => self.app.restart(),
+                    Some(step_ns) => {
+                        self.app.shift(step_ns);
+                        self.played.shift(self.engine_shift.wrapping_sub(before));
+                    }
+                    None => {
+                        self.app.restart();
+                        self.played = play_at::Track::default();
+                    }
                 }
             }
         }

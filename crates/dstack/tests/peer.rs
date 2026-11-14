@@ -62,11 +62,14 @@ struct Counts {
 
 impl Counts {
     fn of(p: &Peer) -> Counts {
+        // The gaps first: a cause counted after them is still in the
+        // window, never a gap without its cause.
+        let gaps = p.shared().rx[0].view().gaps;
         let v: serde_json::Value = serde_json::from_str(&p.status()).unwrap();
         let num = |x: &serde_json::Value| x.as_u64().unwrap_or_else(|| panic!("a count: {x}"));
         let pump = p.media().engine().expect("the pump");
         Counts {
-            gaps: p.shared().rx[0].view().gaps,
+            gaps,
             holes: num(&v["device"]["channels"][0]["holes"]),
             tx_restarts: num(&v["device"]["tx"][0]["rebootstraps"]),
             pump_restarts: pump.rebootstraps,
@@ -100,11 +103,11 @@ fn wait_for(bound: Duration, mut done: impl FnMut() -> bool) -> bool {
 /// The design's whole-device test: two devices at +40 and -30 ppm, each
 /// receiving the other's tone (a 70 ppm drift between them: 0.7 ms over the
 /// test's 10 s, well inside the 10 ms latency). Counted after both lock
-/// and settle: no tone gap without a counted cause (a restart of the
-/// sender's TX schedule or of a pump, or a ring hole: dev1 loaded by
-/// another account's job restarted a TX schedule once and the check saw
-/// it), no play-time step; each device's play times run at its own skew
-/// against the app's clock.
+/// and settle: no ring hole, no tone gap without a counted restart of the
+/// sender's TX schedule or of a pump, and at most one such restart (dev1
+/// at load 46 from another account's job restarted a TX schedule once and
+/// the check saw it); no play-time step; each device's play times run at
+/// its own skew against the app's clock.
 #[test]
 fn two_peers_at_different_skews_hear_each_other_s_tone_whole() {
     let _one = ONE_DEVICE
@@ -162,14 +165,16 @@ fn two_peers_at_different_skews_hear_each_other_s_tone_whole() {
     let rise = |i: usize| after[i].minus(&before[i]);
     for (me, other) in [(0, 1), (1, 0)] {
         let (mine, theirs) = (rise(me), rise(other));
-        // Every gap has a counted cause: the sender's TX schedule or pump
-        // restarting (a loaded box: another account's job), our pump
-        // restarting or our ring's holes. On a quiet box all are 0.
-        let causes = theirs.tx_restarts + theirs.pump_restarts + mine.pump_restarts + mine.holes;
+        // No ring hole, and a gap only with a counted restart of the
+        // sender's TX schedule or a pump (a loaded box: another account's
+        // job), at most one in the window. On a quiet box all are 0.
+        let restarts = theirs.tx_restarts + theirs.pump_restarts + mine.pump_restarts;
         assert!(
-            mine.gaps <= causes,
-            "peer {me}: {} tone gaps, {causes} counted causes ({mine:?}, sender {theirs:?}): {}",
+            mine.gaps <= restarts && restarts <= 1 && mine.holes == 0,
+            "peer {me}: {} tone gaps, {restarts} counted restarts (at most one, each gap \
+             one's), {} ring holes ({mine:?}, sender {theirs:?}): {}",
             mine.gaps,
+            mine.holes,
             status[me]
         );
         assert!(mine.blocks > 0, "{mine:?}");

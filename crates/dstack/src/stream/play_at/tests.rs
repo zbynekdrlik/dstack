@@ -59,3 +59,15 @@ fn the_pump_counts_a_step_over_one_ms_and_keeps_the_largest_deviation() {
     let v = stats.view();
     assert_eq!((v.play_at_steps, v.play_at_max_dev_us), (2, 2_500));
 }
+
+#[test]
+fn a_shift_moves_the_last_start() {
+    let mut t = Track::default();
+    t.shift(1_000);
+    assert_eq!(t.next(0, Some(0), 48_000), None, "nothing to shift before");
+    t.shift(48_000);
+    // One block after the shifted start, one block of play time: 0.
+    assert_eq!(t.next(48_048, Some(1_000_000), 48_000), Some(0));
+    t.shift(-48);
+    assert_eq!(t.next(48_048, Some(2_000_000), 48_000), Some(0));
+}

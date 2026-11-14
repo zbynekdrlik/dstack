@@ -403,13 +403,16 @@ fn run_until_signal(peer: &Peer, status: &Path) -> Result<(), String> {
                     _ = term.recv() => (),
                     _ = int.recv() => (),
                 }
+                Ok::<(), String>(())
             };
             #[cfg(not(unix))]
             let signalled = async {
-                let _ = (&mut ctrl_c).await;
+                (&mut ctrl_c)
+                    .await
+                    .map_err(|e| format!("dstack-dev peer: Ctrl+C: {e}"))
             };
             tokio::select! {
-                () = signalled => return Ok(()),
+                got = signalled => return got,
                 _ = tick.tick() => {
                     if let Some(why) = peer.ended() {
                         return Err(format!("dstack-dev peer: the device ended: {why}"));

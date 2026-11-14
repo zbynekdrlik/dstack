@@ -453,3 +453,20 @@ fn a_re_anchor_is_no_play_time_step() {
     let v = r.stats.view();
     assert_eq!((v.play_at_steps, v.play_at_max_dev_us), (0, 0), "{v:?}");
 }
+
+/// A re-anchor off the block grid (1.6 s and 150 µs): the start moves by
+/// the shift on the grid, the offset by the whole step, so the play time
+/// moves by the rest (the 150 µs less the shift's rounding) once: a
+/// deviation, under a step. The check runs on across the re-anchor.
+#[test]
+fn a_re_anchor_off_the_grid_moves_the_play_time_by_its_rest() {
+    let mut r = pump();
+    let clock = ManualClock::new(ns_of(T, RATE));
+    let mut app = APP0;
+    step(&mut r, &clock, &mut app, 9);
+    clock.re_anchor(1_600_150_000);
+    step(&mut r, &clock, &mut app, 9);
+    let v = r.stats.view();
+    assert_eq!(v.play_at_steps, 0, "{v:?}");
+    assert!((100..=200).contains(&v.play_at_max_dev_us), "{v:?}");
+}

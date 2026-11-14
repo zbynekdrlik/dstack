@@ -82,12 +82,12 @@ kill -INT "$PEER"; wait "$PEER"   # exit 0 after the goodbyes
 ## The status (rewritten once a second)
 
 ```json
-{"peer": {"name": "ci-peer", "version": "0.6.137", "test_clock_ppm": -6.0,
+{"peer": {"name": "ci-peer", "version": "0.6.137", "test_clock_ppm": 6.0,
           "tx": [{"channel": "TX 1", "tone_hz": 1000}],
           "rx": [{"channel": "RX 1", "from": "obs-ci:Out 1", "locked": true,
                   "tone_hz": 1000.0, "level_dbfs": -6.02,
                   "samples": 2880000, "tone_gaps": 0}],
-          "blocks": 22500, "play_at_ppm": -6.0},
+          "blocks": 22500, "play_at_ppm": 6.0},
  "device": { ... the device's own status, as `dstack-dev ctl status` ... }}
 ```
 

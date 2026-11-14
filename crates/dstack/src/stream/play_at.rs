@@ -38,9 +38,7 @@ pub struct Track {
 impl Track {
     /// The block at media sample `start`, played at `at` (app ns; `None`:
     /// no play time, no pair read yet, which forgets the last block): its
-    /// deviation from the last block with one, `None` for the first. The
-    /// pump starts a fresh track on a re-anchor (its starts move with the
-    /// media clock, its play times do not).
+    /// deviation from the last block with one, `None` for the first.
     pub fn next(&mut self, start: u64, at: Option<i64>, rate: u32) -> Option<u64> {
         let Some(at) = at else {
             self.last = None;
@@ -48,6 +46,16 @@ impl Track {
         };
         let before = self.last.replace((start, at))?;
         Some(deviation_ns(before, (start, at), rate))
+    }
+
+    /// A re-anchor moved the blocks' starts by `samples` (the pump's shift)
+    /// and not their play times: the last start moves with them, so a
+    /// step on the block grid is no deviation and the rest of one off it
+    /// is.
+    pub fn shift(&mut self, samples: i64) {
+        if let Some((start, _)) = self.last.as_mut() {
+            *start = start.wrapping_add_signed(samples);
+        }
     }
 }
 
