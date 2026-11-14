@@ -44,6 +44,8 @@
 //!   as [`StreamStats`], the stream histograms ([`HistSnapshot`]) and a
 //!   [`PumpView`]: each re-bootstrap with its [`Cause`], and how late the
 //!   pump woke ([`wake`], dstack #281).
+//! - [`app_offset`]: the media clock's offset from the app's clock that
+//!   stamps each block's play time, filtered (dstack #295).
 //! - [`watch::PumpWatch`]: once a second, from the daemon's tick (never
 //!   the pump thread), one warning when re-bootstraps, skipped blocks or
 //!   overruns grew in that second.
@@ -72,6 +74,7 @@ use crate::media::repin::RePin;
 use crate::media::ring::Ring;
 use crate::media::rx::RxShared;
 use crate::media::tx::{DISCONTINUITY, MediaThread, Shift, TxShared, ns_of, place, take_priority};
+use app_offset::{OffsetFilter, Outcome};
 use wake::WakeLateness;
 
 /// The engine's default block, frames: the B = 32 of the RT contract, what
@@ -313,6 +316,9 @@ pub struct PumpStats {
     fault_ns: AtomicU64,
     fault: Mutex<Option<String>>,
     hists: StreamHists,
+    /// Pair reads the play-time filter rejected ([`app_offset`], dstack
+    /// #295).
+    play_at_rejected: AtomicU64,
 }
 
 /// The pump's numbers for the device's control socket (numbers only).
@@ -345,6 +351,9 @@ pub struct PumpView {
     /// The last whole minute's latest wake, whole µs (`None` before the
     /// pump watch took a minute).
     pub wake_behind_minute_max_us: Option<u64>,
+    /// Pair reads of the media and the app's clock that the play-time
+    /// filter rejected as torn ([`app_offset`], dstack #295).
+    pub play_at_rejected: u64,
 }
 
 impl PumpStats {
@@ -377,6 +386,7 @@ impl PumpStats {
             fault_ns: AtomicU64::new(0),
             fault: Mutex::new(None),
             hists: StreamHists::new(period),
+            play_at_rejected: AtomicU64::new(0),
         }
     }
 
@@ -518,6 +528,7 @@ impl PumpStats {
             rebootstraps_retime: retime,
             wake_behind_max_us: self.wakes.max_us(),
             wake_behind_minute_max_us: self.wakes.minute_max_us(),
+            play_at_rejected: self.play_at_rejected.load(Ordering::Relaxed),
         }
     }
 }
@@ -556,9 +567,13 @@ pub struct Pump<P: Process> {
     faulted: bool,
     /// The last block's start, for the interval histogram.
     last_entry: Option<Instant>,
-    /// The media clock less the app's, ns, at the last pair read
-    /// ([`Pump::read_clocks`]); `None` before one (no block's play time).
-    app_offset: Option<i64>,
+    /// The media clock less the app's, filtered ([`app_offset`], dstack
+    /// #295): no offset before the first pair read (no block's play time).
+    app: OffsetFilter,
+    /// The last pair read ([`Pump::read_clocks`]) not yet given to the
+    /// filter: its offset and app time. [`Pump::media`] gives it, after
+    /// the wake's epoch (a re-anchor's step moves the offset).
+    pair: Option<(i64, i64)>,
 }
 
 impl<P: Process> Pump<P> {
@@ -593,23 +608,45 @@ impl<P: Process> Pump<P> {
             discontinuity: false,
             faulted: false,
             last_entry: None,
-            app_offset: None,
+            app: OffsetFilter::new(),
+            pair: None,
         }
     }
 
-    /// Reads media now on `clock` and the app's clock (`app_ns`,
-    /// [`crate::clock::app_monotonic_ns`] on the pump thread) back to back
-    /// and keeps their offset for the blocks' play times ([`play_at_ns`],
-    /// dstack #295); returns media now, `None` while the clock is not ready
-    /// (the app's clock is then not read, and the offset is kept).
+    /// Reads the app's clock (`app_ns`, [`crate::clock::app_monotonic_ns`]
+    /// on the pump thread), media now on `clock` and the app's clock again,
+    /// back to back, and keeps the pair ([`app_offset::pair_offset`]: media
+    /// with the app reads' midpoint) for the next [`Pump::media`], which
+    /// gives it to the blocks' play-time filter ([`play_at_ns`], dstack
+    /// #295); returns media now, `None` while the clock is not ready (the
+    /// app's clock is then read once, the pair dropped and the offset
+    /// kept).
     pub fn read_clocks(
         &mut self,
         clock: &dyn PtpClock,
-        app_ns: impl FnOnce() -> i64,
+        mut app_ns: impl FnMut() -> i64,
     ) -> Option<u64> {
+        let before = app_ns();
         let now = clock.now_ns()?;
-        self.app_offset = Some(crate::clock::app_offset_ns(now, app_ns()));
+        self.pair = Some(app_offset::pair_offset(before, now, app_ns()));
         Some(now)
+    }
+
+    /// The wake's pair (if one was read) through the play-time filter at
+    /// the wake's epoch: a rejected pair counted, a step warned.
+    fn filter_pair(&mut self) {
+        let Some((raw, app_ns)) = self.pair.take() else {
+            return;
+        };
+        match self.app.update(raw, app_ns) {
+            Outcome::Rejected => {
+                self.stats.play_at_rejected.fetch_add(1, Ordering::Relaxed);
+            }
+            Outcome::Stepped { by_ns } => {
+                tracing::warn!(by_ns, "{}", app_offset::STEP_LINE);
+            }
+            Outcome::First | Outcome::Followed => {}
+        }
     }
 
     /// Every block due at media sample time `now` with the clock at
@@ -630,7 +667,16 @@ impl<P: Process> Pump<P> {
                 .tx
                 .engine_line
                 .shift_at(anchor, rate, self.timing.block);
+            // A re-anchor moves the media clock, so the offset, by its
+            // step (and the blocks' media start with it).
+            if let Some(from) = self.epoch {
+                match anchor.step_from(from) {
+                    Some(step_ns) => self.app.shift(step_ns),
+                    None => self.app.restart(),
+                }
+            }
         }
+        self.filter_pair();
         self.stats.media.store(true, Ordering::Relaxed);
         // The device latency the RX delays are planned against moved (Dante
         // Controller set it): play at it, the schedule started again.
@@ -739,7 +785,8 @@ impl<P: Process> Pump<P> {
         }
         let rate = self.tx.cfg.sample_rate;
         let play_at = self
-            .app_offset
+            .app
+            .offset()
             .map(|offset| play_at_ns(start, self.timing, rate, offset));
         let fault = self.run_processor(Some(start), play_at);
         let at =
@@ -824,8 +871,8 @@ impl<P: Process> Pump<P> {
 /// `rate`) in the app's clock, ns (dstack #295): `start + P + B`, its
 /// first sample's stamp plus the device's RX path P + (c) ((c) = B without
 /// a converter; the block's due time), as a media time, less `offset_ns`
-/// (the media clock less the app's, at a pair read back to back:
-/// [`Pump::read_clocks`]).
+/// (the media clock less the app's, from the pairs read back to back,
+/// filtered: [`Pump::read_clocks`], [`app_offset`]).
 pub fn play_at_ns(start: u64, timing: Timing, rate: u32, offset_ns: i64) -> i64 {
     let media = ns_of(start + timing.playout + timing.block, rate);
     i64::try_from(media)
@@ -917,6 +964,7 @@ fn run<P: Process>(clock: &dyn PtpClock, mut pump: Pump<P>, stop: &AtomicBool) {
     pump.stats.running.store(false, Ordering::Release);
 }
 
+pub mod app_offset;
 pub mod wake;
 pub mod watch;
 

@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.6.135
+
+- **Fix (dstack #295 step 2, field: strih-snv 14.11.2026): `Block::play_at` no longer jumps on a torn clock read.** The pump read the media clock and the app's clock once per wake with no real-time priority (`normal` profile), so a preemption between the two reads moved one wake's offset by the preempted time: paired `play_at` jumps of ±1.3 to 2.3 ms that cancelled within 3 to 5 ms, about every 15 minutes, on v0.6.132.
+  - The pair is now read app, media, app, and the media read is paired with the midpoint of the two app reads (`stream::app_offset::pair_offset`).
+  - The offset is filtered (`stream::app_offset::OffsetFilter`): the first pair is taken; after it a pair more than 50 µs off the filtered offset is rejected (the offset kept), and a closer one is followed by at most 100 ppm of the app time since the last followed pair, so the real drift (about 6 ppm) is followed with no jump. A change over 50 µs read alike on 3 wakes in a row is a real clock step: taken on the third, with a WARN. A media re-anchor moves the offset by its known step (an unknown step starts the filter afresh), so `play_at` runs on through it as in 0.6.132.
+  - Status: the `engine` part gains `play_at_rejected` (pairs rejected as torn, since the start), after `rebootstraps_retime`; `stream::PumpView` gains the field `play_at_rejected` (a `PumpView` literal adds it or `..Default::default()`).
+  - New log lines: INFO once a minute in which pairs were rejected, `play_at: torn clock pair reads rejected in the last minute` (`device`, `rejected` in that minute, `total`); WARN on a step taken, `play_at: the media clock's offset from the app's clock stepped` (`by_ns`).
+  - API: `stream::Pump::read_clocks(clock, app_ns)` takes `app_ns: impl FnMut() -> i64` (it reads the app's clock twice; a closure or `clock::app_monotonic_ns` passes as before), and the pair it reads stamps blocks from the next `Pump::media` on (as the pump thread and a pump driven by hand call them). `Block::play_at`'s meaning is unchanged. New: `stream::app_offset` (`OffsetFilter`, `Outcome`, `pair_offset`, `slew_max_ns`, the bounds and the two line texts).
+- **No latency change**: one more app clock read per pump wake and a few integer operations; P, (c), W and the app buffer are as in 0.6.134.
+- Consumers: obs, camera-box: move the stack version; camera-box's field check (A/V offset across restarts, no ±2 ms play_at pairs on strih-snv) follows. intercom, songplayer, presenter, dasio, iemmixer: move the stack version only.
+
 ## 0.6.134
 
 - Internal: subscribe split into modules; no behaviour or API change; no latency change. (`crates/dstack/src/subscribe.rs`, 1204 lines, keeps the types and the public lifecycle; the RX publication, the resolving and requesting, and the flow-slot bookkeeping move verbatim into `subscribe/publish.rs`, `subscribe/request.rs` and `subscribe/slots.rs`; `subscribe::fpp_for` stays at its path. dstack #300.)

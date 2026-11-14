@@ -36,7 +36,8 @@ fn the_engine_status_names_the_causes_the_wakes_and_the_threads() {
         assert!(WORDS.contains(&word.as_str()), "{word:?} in {s}");
     }
     let os_free = "\"max_process_us\":0,\"rebootstraps_late\":1,\"rebootstraps_clock_back\":2,\
-         \"rebootstraps_reanchor\":3,\"rebootstraps_retime\":1,\"wake_behind_max_us\":12345,\
+         \"rebootstraps_reanchor\":3,\"rebootstraps_retime\":1,\"play_at_rejected\":0,\
+         \"wake_behind_max_us\":12345,\
          \"wake_behind_minute_max_us\":12345,\"wake_behind_buckets\":[1,1,0,0,0,1,0,0],\
          \"late_wakes\":2,\"late_wakes_recent\":[\
          {\"unix_ms\":1794000000123,\"behind_us\":12345,\"rebootstrap\":1},\

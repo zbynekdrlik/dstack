@@ -340,3 +340,69 @@ fn an_offset_change_under_the_rejection_bound_is_slewed_at_100_ppm() {
     // 1 200 blocks at 33 ns each make the 40 us: by the end it is all in.
     assert_eq!(at[1_999] - at[0], 1_999 * 1_000_000 / 3 + 1 - 40_000);
 }
+
+#[test]
+fn a_torn_pair_is_counted_and_a_taken_step_is_not() {
+    let mut r = pump();
+    let clock = ManualClock::new(ns_of(T, RATE));
+    let mut app = APP0;
+    wakes(&mut r, &clock, &mut app, 12, 0, |i| match i {
+        3 => 2 * MS,
+        5 => -MS,
+        _ => 0,
+    });
+    assert_eq!(r.stats.view().play_at_rejected, 2);
+    // A step: its first two wakes rejected, the third taken.
+    wakes(
+        &mut r,
+        &clock,
+        &mut app,
+        6,
+        0,
+        |i| if i >= 1 { MS } else { 0 },
+    );
+    assert_eq!(r.stats.view().play_at_rejected, 4);
+    assert_eq!(r.stats.stream_stats().resets, 0);
+}
+
+#[test]
+fn the_pair_is_media_less_the_app_reads_midpoint() {
+    let mut r = pump();
+    let clock = ManualClock::new(ns_of(T, RATE));
+    let mut reads = [APP0, APP0 + 4_000].into_iter();
+    let now = r.pump.read_clocks(&clock, || reads.next().unwrap());
+    assert_eq!(now, Some(ns_of(T, RATE)));
+    r.pump.media(T, 0);
+    let mid = APP0 + 2_000;
+    assert_eq!(r.pump.app.offset(), Some(ns_of(T, RATE) as i64 - mid));
+    assert_eq!(r.pump.processor.play_ats, [Some(mid)]);
+}
+
+#[test]
+fn a_re_anchor_of_unknown_step_starts_the_filter_afresh() {
+    // A new epoch whose step the clock does not know (a source switch):
+    // the offset moved by an unknown amount, so the next pair is taken.
+    let mut r = pump();
+    let clock = ManualClock::new(ns_of(T, RATE));
+    let t0 = ns_of(T, RATE);
+    assert!(r.pump.read_clocks(&clock, || APP0).is_some());
+    let wake = r.pump.media(T, 0);
+    clock.sleep_until(ns_of(wake, RATE));
+    let now = clock.now_ns().unwrap();
+    let app = APP0 + (now - t0) as i64 - 3 * MS;
+    assert!(r.pump.read_clocks(&clock, || app).is_some());
+    r.pump.media(to_samples(now, RATE), 1);
+    assert_eq!(r.pump.app.offset(), Some(now as i64 - app));
+    assert_eq!(r.stats.view().play_at_rejected, 0);
+    // The same epoch again: a 3 ms pair is rejected.
+    let wake = r.pump.blocks.unwrap().due();
+    clock.sleep_until(ns_of(wake, RATE));
+    let later = clock.now_ns().unwrap();
+    assert!(
+        r.pump
+            .read_clocks(&clock, || app + (later - now) as i64 + 3 * MS)
+            .is_some()
+    );
+    r.pump.media(to_samples(later, RATE), 1);
+    assert_eq!(r.stats.view().play_at_rejected, 1);
+}
