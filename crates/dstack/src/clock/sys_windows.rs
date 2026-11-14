@@ -58,7 +58,13 @@ fn qpc_ns() -> i64 {
     let mut t = 0i64;
     // SAFETY: a valid, writable i64.
     unsafe { QueryPerformanceCounter(&mut t) };
-    (i128::from(t) * 1_000_000_000 / i128::from(qpc_frequency())) as i64
+    super::qpc_ns_of(t, qpc_frequency())
+}
+
+/// The app's clock (`clock::app_monotonic_ns`, dstack #295): raw QPC in
+/// ns, never through the steer model, as OBS's `os_gettime_ns` reads it.
+pub fn app_monotonic_ns() -> i64 {
+    qpc_ns()
 }
 
 /// The steered clock's model: written by [`observe`] (under [`STEER`]),

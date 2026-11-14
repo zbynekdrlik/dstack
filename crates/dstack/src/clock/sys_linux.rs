@@ -17,6 +17,12 @@ pub fn monotonic_ns() -> i64 {
     read(libc::CLOCK_MONOTONIC)
 }
 
+/// The app's clock (`clock::app_monotonic_ns`, dstack #295): Linux's
+/// `CLOCK_MONOTONIC`, the clock the media clock's own monotonic reads too.
+pub fn app_monotonic_ns() -> i64 {
+    read(libc::CLOCK_MONOTONIC)
+}
+
 /// A poll's wall reading: Linux's monotonic clock needs no model (the
 /// kernel steers it and no step moves it), so this is the clock now.
 pub fn observe(_wall: i64) -> i64 {

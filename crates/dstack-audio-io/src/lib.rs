@@ -26,6 +26,7 @@ pub struct Block<'a> {
     input: &'a [f64],
     output: &'a mut [f64],
     start: Option<u64>,
+    play_at: Option<i64>,
 }
 
 impl<'a> Block<'a> {
@@ -37,6 +38,7 @@ impl<'a> Block<'a> {
             input,
             output,
             start: None,
+            play_at: None,
         }
     }
 
@@ -46,6 +48,28 @@ impl<'a> Block<'a> {
             start: Some(start),
             ..self
         }
+    }
+
+    /// This block with its play time `ns` ([`Block::play_at`]).
+    pub fn played_at(self, ns: i64) -> Self {
+        Self {
+            play_at: Some(ns),
+            ..self
+        }
+    }
+
+    /// The local monotonic time, ns, at which the block's first sample is
+    /// handed to the app at the device's stated RX path: its media start +
+    /// P (the device latency) + (c) (the hand-off: the block, plus a rate
+    /// converter's RX delay in dlink), in the app's clock: Linux's
+    /// `CLOCK_MONOTONIC`, Windows' raw QPC in ns (the clock OBS's
+    /// `os_gettime_ns` reads; dstack #295). Consecutive blocks are a
+    /// block's duration apart while the clocks run together, so an app on
+    /// its own clock that stamps each block with it gets one fixed latency
+    /// at every start, whenever it pushes the block. `None` for a block
+    /// with no media time.
+    pub fn play_at(&self) -> Option<i64> {
+        self.play_at
     }
 
     /// The media sample time of the block's first input sample, when the
@@ -200,6 +224,16 @@ mod tests {
         assert_eq!(Block::new(2, &[1.0, 2.0], &mut out).start(), None);
         let b = Block::new(2, &[1.0, 2.0], &mut out).at(4_800);
         assert_eq!((b.start(), b.frames(), b.inputs()), (Some(4_800), 2, 1));
+    }
+
+    #[test]
+    fn a_block_has_a_play_time_only_when_given_one() {
+        let mut out = [0.0; 2];
+        assert_eq!(Block::new(2, &[1.0, 2.0], &mut out).play_at(), None);
+        let b = Block::new(2, &[1.0, 2.0], &mut out).at(4_800).played_at(-7);
+        assert_eq!((b.start(), b.play_at()), (Some(4_800), Some(-7)));
+        let b = Block::new(2, &[1.0, 2.0], &mut out).played_at(1_234_567_890_123);
+        assert_eq!((b.start(), b.play_at()), (None, Some(1_234_567_890_123)));
     }
 
     #[test]

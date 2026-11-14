@@ -151,6 +151,13 @@ pub struct Rated<P> {
     prime: usize,
     /// TX FIFO runs dry, frames (shared with the app's status).
     dry: Arc<AtomicU64>,
+    /// The RX converter's delay, ns ([`Rated::delay_ns`]'s RX): the app's
+    /// block plays that much after the device's ([`Block::play_at`]). At a
+    /// ratio whose app blocks vary in size (44.1 kHz on 96 kHz: 58 or 59
+    /// frames), an app block's first sample sits up to one app sample off
+    /// its device block's start; the play time follows the device's blocks
+    /// and never drifts from them.
+    rx_delay_ns: i64,
 }
 
 impl<P: Process> Rated<P> {
@@ -166,6 +173,13 @@ impl<P: Process> Rated<P> {
     ) -> Result<Self, ConvertError> {
         let (rx, tx) = converters(device_rate, app_rate, block, inputs.max(1), outputs.max(1))?;
         let prime = prime_for(&tx);
+        let (rx_delay, _) = delays_ns(
+            rx.delay_frames(),
+            tx.delay_frames(),
+            prime,
+            device_rate,
+            app_rate,
+        );
         let rx_room = rx.output_frames_max();
         let fifo_room = 4 * (rx_room + tx.input_frames_max() + PRIME);
         let mut fifo: Vec<VecDeque<f64>> = (0..outputs)
@@ -192,6 +206,7 @@ impl<P: Process> Rated<P> {
             rates: (device_rate, app_rate),
             prime,
             dry: Arc::new(AtomicU64::new(0)),
+            rx_delay_ns: i64::try_from(rx_delay).unwrap_or(i64::MAX),
         })
     }
 
@@ -261,6 +276,11 @@ impl<P: Process> Process for Rated<P> {
             );
             if let Some(s) = app_start {
                 app = app.at(s);
+            }
+            // The device's play time + the RX converter's delay: the
+            // app's block plays at P + (c) as `split` states it (#295).
+            if let Some(at) = block.play_at() {
+                app = app.played_at(at.saturating_add(self.rx_delay_ns));
             }
             self.inner.process(&mut app);
         }

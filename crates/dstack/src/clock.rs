@@ -620,6 +620,8 @@ pub fn escape_on() -> bool {
     SPIN_ESCAPE.load(Ordering::Relaxed) != 0
 }
 
+mod app;
+pub use app::*;
 #[cfg(any(target_os = "linux", windows))]
 pub use sys::{allow_escape, ask_escape, block_escape, defer_escape, relay_spin};
 

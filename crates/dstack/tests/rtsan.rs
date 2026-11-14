@@ -31,8 +31,14 @@ const PROBE: &str = "DSTACK_RTSAN_PROBE";
 /// Output j is input j, through a stack buffer.
 struct Copy;
 
+/// The pump's blocks that carried a play time (dstack #295).
+static STAMPED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 impl Process for Copy {
     fn process(&mut self, block: &mut Block<'_>) {
+        if block.play_at().is_some() {
+            STAMPED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         let mut x = [0.0f64; BLOCK as usize];
         for ch in 0..block.outputs() {
             x.copy_from_slice(block.input(ch));
@@ -81,11 +87,20 @@ fn the_pump_block_is_realtime_safe() {
     };
     let mut pump = Pump::new(Copy, map, timing, 24, rx, tx, Arc::clone(&stats));
     let mut now = T;
+    // A pair read first (dstack #295), so each block computes its play
+    // time inside the real-time part.
+    let media = dstack::clock::ManualClock::new(dstack::media::tx::ns_of(T, RATE));
+    assert!(pump.read_clocks(&media, || 7_000_000_000).is_some());
     for _ in 0..300 {
         now = pump.media(now, 0);
     }
     let v = stats.view();
     assert_eq!((v.blocks, v.late, v.rebootstraps), (300, 0, 0), "{v:?}");
+    assert_eq!(
+        STAMPED.load(std::sync::atomic::Ordering::Relaxed),
+        300,
+        "every block stamped"
+    );
     let total = |h: &[(u32, u64)]| h.iter().map(|e| e.1).sum::<u64>();
     assert_eq!(
         total(&stats.histograms().process),

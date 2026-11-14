@@ -556,6 +556,9 @@ pub struct Pump<P: Process> {
     faulted: bool,
     /// The last block's start, for the interval histogram.
     last_entry: Option<Instant>,
+    /// The media clock less the app's, ns, at the last pair read
+    /// ([`Pump::read_clocks`]); `None` before one (no block's play time).
+    app_offset: Option<i64>,
 }
 
 impl<P: Process> Pump<P> {
@@ -590,7 +593,23 @@ impl<P: Process> Pump<P> {
             discontinuity: false,
             faulted: false,
             last_entry: None,
+            app_offset: None,
         }
+    }
+
+    /// Reads media now on `clock` and the app's clock (`app_ns`,
+    /// [`crate::clock::app_monotonic_ns`] on the pump thread) back to back
+    /// and keeps their offset for the blocks' play times ([`play_at_ns`],
+    /// dstack #295); returns media now, `None` while the clock is not ready
+    /// (the app's clock is then not read, and the offset is kept).
+    pub fn read_clocks(
+        &mut self,
+        clock: &dyn PtpClock,
+        app_ns: impl FnOnce() -> i64,
+    ) -> Option<u64> {
+        let now = clock.now_ns()?;
+        self.app_offset = Some(crate::clock::app_offset_ns(now, app_ns()));
+        Some(now)
     }
 
     /// Every block due at media sample time `now` with the clock at
@@ -692,7 +711,7 @@ impl<P: Process> Pump<P> {
         self.blocks = None;
         let entry = self.enter();
         self.input.fill(0.0);
-        let fault = self.run_processor(None);
+        let fault = self.run_processor(None, None);
         self.leave(entry, fault);
     }
 
@@ -718,7 +737,11 @@ impl<P: Process> Pump<P> {
                 None => chan.fill(0.0),
             }
         }
-        let fault = self.run_processor(Some(start));
+        let rate = self.tx.cfg.sample_rate;
+        let play_at = self
+            .app_offset
+            .map(|offset| play_at_ns(start, self.timing, rate, offset));
+        let fault = self.run_processor(Some(start), play_at);
         let at =
             (start + self.timing.offset()).wrapping_add_signed(self.engine_shift.wrapping_neg());
         for (chan, &tx) in self.output.chunks_exact(self.frames).zip(&self.map.tx) {
@@ -758,8 +781,13 @@ impl<P: Process> Pump<P> {
     /// zeroes the outputs and is returned; from then on the processor is
     /// never called again and the outputs stay zero.
     /// The block carries its media `start` ([`Block::start`]; `None` while
-    /// free pacing).
-    fn run_processor(&mut self, start: Option<u64>) -> Option<Box<dyn Any + Send>> {
+    /// free pacing) and its `play_at` ([`Block::play_at`]; `None` while
+    /// free pacing or before the first pair read).
+    fn run_processor(
+        &mut self,
+        start: Option<u64>,
+        play_at: Option<i64>,
+    ) -> Option<Box<dyn Any + Send>> {
         self.output.fill(0.0);
         if self.faulted {
             return None;
@@ -776,17 +804,33 @@ impl<P: Process> Pump<P> {
             if discontinuity {
                 processor.discontinuity();
             }
-            let block = Block::new(*frames, input, output);
-            processor.process(&mut match start {
-                Some(at) => block.at(at),
-                None => block,
-            });
+            let mut block = Block::new(*frames, input, output);
+            if let Some(at) = start {
+                block = block.at(at);
+            }
+            if let Some(ns) = play_at {
+                block = block.played_at(ns);
+            }
+            processor.process(&mut block);
         }));
         let payload = caught.err()?;
         self.output.fill(0.0);
         self.faulted = true;
         Some(payload)
     }
+}
+
+/// The play time of the block whose inputs start at `start` (samples at
+/// `rate`) in the app's clock, ns (dstack #295): `start + P + B`, its
+/// first sample's stamp plus the device's RX path P + (c) ((c) = B without
+/// a converter; the block's due time), as a media time, less `offset_ns`
+/// (the media clock less the app's, at a pair read back to back:
+/// [`Pump::read_clocks`]).
+pub fn play_at_ns(start: u64, timing: Timing, rate: u32, offset_ns: i64) -> i64 {
+    let media = ns_of(start + timing.playout + timing.block, rate);
+    i64::try_from(media)
+        .unwrap_or(i64::MAX)
+        .saturating_sub(offset_ns)
 }
 
 /// Whether a pump moved by `shift` (`None`: not moved) reads its inputs
@@ -853,7 +897,12 @@ fn run<P: Process>(clock: &dyn PtpClock, mut pump: Pump<P>, stop: &AtomicBool) {
         pin.keep(pump.tx.now_ns());
         // The epoch before the time (`crate::media::tx::shift`).
         let anchor = crate::clock::Anchor::of(clock);
-        if let Some(now_ns) = clock.now_ns() {
+        // Media now and the app's clock read back to back (dstack #295).
+        #[cfg(any(target_os = "linux", windows))]
+        let now = pump.read_clocks(clock, crate::clock::app_monotonic_ns);
+        #[cfg(not(any(target_os = "linux", windows)))]
+        let now = clock.now_ns();
+        if let Some(now_ns) = now {
             deadline = None;
             let wake = pump.media(to_samples(now_ns, rate), anchor);
             clock.sleep_until(ns_of(wake, rate));

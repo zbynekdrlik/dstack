@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.6.132
+
+- **Feature (dstack #295, requested by camera-box#1527): each block's play time in the app's own clock.** Across one OBS restart the stream's A/V offset moved by one OBS audio tick (about 21 ms): dante-input stamped audio by push time, so OBS placed the first block at a phase set by the bridge's sawtooth against its 1024-frame tick. A block now carries the time it plays, in the clock apps stamp with.
+  - `dstack_audio_io::Block::play_at() -> Option<i64>`: the local monotonic time, ns, at which the block's first sample is handed to the app at the device's stated RX path, its media start + P + (c), in the app's clock (Linux `CLOCK_MONOTONIC`, Windows raw QPC in ns: OBS's `os_gettime_ns`). `None` without media time (free pacing). Set with `Block::played_at(ns)`; `Block::new` and `Block::at` are unchanged.
+  - The engine pump reads the media clock and the app's clock back to back at each wake (`stream::Pump::read_clocks`) and stamps each block `play_at = media time of (start + P + B) - (media now - app now)` (`stream::play_at_ns`). dlink's `Rated` (an app at another rate than the network) adds its RX converter's delay, so a dlink app's `play_at` is its start + P + (c), the RX path the device logs (`RX app hand-off (c) ...; RX path P + (c) ...`).
+  - With the clocks running together, consecutive blocks' `play_at` are one block apart; a clock re-anchor steps the blocks' media `start` and leaves `play_at` running on in the app's clock.
+  - API (additive): `Block::play_at`, `Block::played_at`, `clock::app_monotonic_ns()` (Linux and Windows; on Windows raw QPC ticks as ns, rounded down as `os_gettime_ns` does, never the steer model the media clock's own monotonic uses there), `stream::play_at_ns(start, timing, rate, offset_ns)`, `stream::Pump::read_clocks(clock, app_ns)` (a `Pump` driven by hand, as in iemmixer's tests, stamps no play time until it is called).
+  - At a converter ratio whose app blocks vary in size (44.1 kHz on 96 kHz), an app block's first sample sits up to one app sample (22.7 µs) off the stamp; the stamps follow the device's blocks and never drift.
+- **No latency change** for any app: two clock reads per pump wake (no lock, no allocation) and one field per block; P, (c), W and the app buffer are as in 0.6.131.
+- Consumers: obs (dante-input): stamp each block pushed to OBS with `block.play_at()` as `obs_source_output_audio`'s `timestamp` (fall back to `os_gettime_ns()` while it is `None`); camera-box then checks the A/V offset is the same across 3 OBS restarts. camera-box, intercom, songplayer, presenter, dasio, iemmixer: move the stack version only (the field is additive).
+
 ## 0.6.131
 
 - **Feature (dstack #288 step 2): Linux caps the Dante leg's own mDNS queries at 10/s.** The 0.6.129 cap counted queries and answers together at 50/s, so #285's querier (about 40 queries/s) stayed under it while every device's answers to it loaded the VLAN. Owner decision of 14.11.2026: queries get a cap of their own.
