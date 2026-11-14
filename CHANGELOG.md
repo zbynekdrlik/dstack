@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- **Feature (dstack #292, requested by dasio#106): dtray's dasio settings window opens and edits a bridge instance.** dasio 0.1.83 makes an instance a bridge to a local ASIO driver with a `[bridge]` table in its `device.toml` (`driver`, `to_asio`, `from_asio`, optional `app_buffer_ns`); the window refused that file ("Settings not readable", unknown field), because it took out only `iface` before reading the rest as a dstack `DeviceConfig`.
+  - The window now takes `[bridge]` out the same way (dasio's own key) and reads it with dasio's schema: unknown keys and wrong types are refused, so a typo is caught as dstack's keys are. Apply writes it back; only the keys that changed are rewritten, the table's comments and other keys stay. A file without `[bridge]` never gets one.
+  - A bridge instance's tab gets an "ASIO bridge" group: the driver from the PC's registered ASIO drivers (`dstack_asio::drivers`; a configured driver the PC does not have stays listed as "(not installed)"), the two channel maps as comma-separated 1-based lists (`1, 2, 3`), and the app buffer in ms (empty: dstack's default). Each needs a restart (↻).
+  - Apply is refused, with the reason under the fields, for what dasio refuses at its start: no driver, a channel 0 or given twice, a map whose length is not the instance's RX (`to_asio`) or TX (`from_asio`) channel count, no channel at all, or an app buffer outside dlink's 1 to 150 ms. Changing the Inputs or Outputs count therefore asks for the matching map too. The window still opens such a file, so it can be fixed there.
+  - The read-back after an apply checks a bridge instance by its status's `app.driver` (its status has no `block`); the done line says the buffer, the maps and the app buffer are in the file.
+  - API (dtray, additive): `dasio::bridge` (`Bridge`, `KEY`, `parse`, `write`, `from_texts`, `map_text`, `parse_map`, `buffer_text`, `parse_buffer`, the labels), `Fields::bridge`, `Field::{Driver, ToAsio, FromAsio, AppBuffer}`, `ReadBack::driver`, `dasio::{bridge_problems, status_driver}`, `choices::drivers`. dtray now depends on dlink (all OSes) and dstack-asio (Windows).
+- **No latency change** for any app (dtray only).
+- Consumers: dasio: move the stack version; dtray then opens and edits bridge instances.
+
 ## 0.6.129
 
 - **Feature (dstack #288): each host caps its own mDNS out on the Dante leg.** The generic filters (#264) shaped only which traffic may cross the leg, never how much; one program on a filtered PC could still flood 224.0.0.251:5353 (#285: about 40/s from one module), and every host on the VLAN takes it.
