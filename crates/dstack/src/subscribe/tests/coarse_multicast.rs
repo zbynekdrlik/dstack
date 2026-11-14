@@ -8,6 +8,16 @@
 
 use super::*;
 
+/// A device that opts in: its config sets `arc_rx_fpp` (the main's
+/// decision on #297). Shadows the default-config [`super::manager`].
+fn manager() -> Manager {
+    let cfg = DeviceConfig {
+        arc_rx_fpp: Some(4),
+        ..cfg()
+    };
+    Manager::new(&cfg, "test-device", OUR_IP, ports())
+}
+
 /// A low-latency receiver's view of the peer: its records ask 4 frames a
 /// packet (an ARC-read transmitter at `arc_rx_fpp = 4`), its multicast
 /// flow of TX 1 and 2 sends 32 ([`mics`]).
@@ -418,4 +428,40 @@ fn another_transmitter_s_multicast_flow_is_left_alone() {
     assert_eq!(m.rx_route(0).unwrap().flow, flow.slot);
     let groups: Vec<_> = (0..MAX_FLOWS).filter_map(|s| m.rx_plan(s).group).collect();
     assert_eq!(groups, [other]);
+}
+
+/// The main's decision on #297: a device whose config leaves `arc_rx_fpp`
+/// out (the band's FOH/PA feed among them) keeps today's behaviour on the
+/// same network: it stays on the coarser multicast flow and asks nothing,
+/// and its unicast flow moves to a multicast flow that appears.
+#[test]
+fn a_device_on_the_default_config_stays_on_the_coarser_multicast_flow() {
+    let net = fine_network();
+    let mut m = super::manager();
+    assert_eq!(cfg().arc_rx_fpp, None, "the test device leaves it out");
+    m.set(0, Some(sub("TX 1", "peer-device")));
+    let mut all = m.tick(0, &NONE, &net);
+    let mut heard = NONE;
+    for t in 1..100 {
+        heard[0] = t;
+        all.extend(m.tick(t * S / 4, &heard, &net));
+    }
+    assert_eq!(all, []);
+    assert_eq!(m.rx_route(0), Some(RxRoute { flow: 0, slot: 0 }));
+    assert_eq!(m.status(0), Some(SubStatus::ReceivingMulticast));
+    // On a unicast flow when the multicast flow appears: it moves there.
+    let net = fine_network();
+    net.set("peer-device", MulticastLookup::None);
+    let mut m = super::manager();
+    m.set(0, Some(sub("TX 1", "peer-device")));
+    let (flow, to, _) = requests(&m.tick(0, &NONE, &net))[0].clone();
+    let h = handle(0, 9);
+    m.answered(flow, Answer::Granted(h), MS);
+    heard = NONE;
+    heard[flow.slot] = 1;
+    m.tick(S / 4, &heard, &net);
+    net.set("peer-device", mics());
+    let out = m.tick(S / 2, &heard, &net);
+    assert_eq!(stops(&out), [(to, h)]);
+    assert!(group_slot(&m).is_some());
 }

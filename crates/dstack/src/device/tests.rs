@@ -79,8 +79,8 @@ fn a_config_reads_the_test_device() {
     assert_eq!(cfg.tx_margin_ns, 250_000);
     assert_eq!(cfg.tx_fpp_max, 32);
     assert_eq!(
-        cfg.arc_rx_fpp, 16,
-        "an ARC-resolved transmitter is asked for 16"
+        cfg.arc_rx_fpp, None,
+        "left out: an ARC-resolved transmitter is asked for 16"
     );
     assert_eq!(
         (cfg.pump_cpu, cfg.io_cpu, cfg.rx_cpu),
@@ -381,7 +381,7 @@ fn the_fpp_asked_of_an_arc_resolved_transmitter_is_read() {
     // #72 phase F: fewer frames a packet than the card's guessed 16.
     let text = config_with("latency_ns =", "latency_ns = 1000000\narc_rx_fpp = 4");
     let cfg = DeviceConfig::from_toml(&text).unwrap();
-    assert_eq!(cfg.arc_rx_fpp, 4);
+    assert_eq!(cfg.arc_rx_fpp, Some(4));
     assert_eq!(cfg.tx_fpp_max, 32, "the TX side's own");
 }
 

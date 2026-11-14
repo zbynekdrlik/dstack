@@ -134,7 +134,7 @@ fn a_device_config_s_timing_asks_its_arc_rx_fpp() {
     assert_eq!(Timing::default().fpp, FPP);
     assert_eq!(Timing::of(&cfg()), Timing::default(), "16 when left out");
     let cfg = DeviceConfig {
-        arc_rx_fpp: 4,
+        arc_rx_fpp: Some(4),
         ..cfg()
     };
     assert_eq!(
@@ -678,7 +678,7 @@ fn the_manager_asks_an_arc_resolved_transmitter_for_the_config_s_arc_rx_fpp() {
     // #72 phase F: fewer frames a packet than the card's guessed 16, so its
     // packets leave it sooner.
     let cfg = DeviceConfig {
-        arc_rx_fpp: 4,
+        arc_rx_fpp: Some(4),
         ..cfg()
     };
     let (to, req, m) = manager_asks_the_card(&cfg, Timing::of(&cfg));

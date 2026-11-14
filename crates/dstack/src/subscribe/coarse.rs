@@ -5,7 +5,9 @@
 //!
 //! A transmitter's multicast flow costs a receiver its frames a packet in
 //! packet time before the first sample can leave (32 frames at 96 kHz:
-//! 0.33 ms). A channel whose multicast flow has more frames a packet than
+//! 0.33 ms). Only a device whose config sets `arc_rx_fpp` opts in (the
+//! main's decision on #297): a device on the default, the band's FOH/PA
+//! feed among them, sees no change. A channel whose multicast flow has more frames a packet than
 //! our own unicast flow from that transmitter would carry ([`fpp_for`], the
 //! transmitter's fpp step) asks for that unicast flow. The owner's rules
 //! (14.11.2026: the multicast flow feeds the PA too, "extrémne opatrne"):
@@ -49,9 +51,10 @@ impl Manager {
     }
 
     /// Whether the multicast flow `m` has more frames a packet than our own
-    /// unicast flow for `a` would carry.
+    /// unicast flow for `a` would carry, on a device that opts in (its
+    /// config sets `arc_rx_fpp`); never on one that does not.
     pub(super) fn coarser(&self, m: &Multicast, a: &Advertised) -> bool {
-        self.unicast_fpp(a).is_some_and(|ours| m.fpp > ours)
+        self.own_unicast && self.unicast_fpp(a).is_some_and(|ours| m.fpp > ours)
     }
 
     /// Whether the channels of the transmitter at `to` stay on its

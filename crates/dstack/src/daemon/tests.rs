@@ -42,7 +42,7 @@ fn run(config: &str, place: Place) -> Command {
 #[test]
 fn the_network_asks_arc_resolved_transmitters_for_the_config_s_fpp() {
     let cfg = DeviceConfig {
-        arc_rx_fpp: 4,
+        arc_rx_fpp: Some(4),
         ..DeviceConfig::from_toml(TEST_DEVICE).expect("config/test-device.toml")
     };
     assert_eq!(network_of(&cfg).arc.timing().fpp, 4);

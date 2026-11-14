@@ -161,7 +161,7 @@ impl Timing {
     /// ARC-resolved transmitter (its `arc_rx_fpp`).
     pub fn of(cfg: &DeviceConfig) -> Self {
         Timing {
-            fpp: cfg.arc_rx_fpp,
+            fpp: cfg.arc_rx_fpp.unwrap_or(FPP),
             ..Timing::default()
         }
     }

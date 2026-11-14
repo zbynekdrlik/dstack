@@ -44,7 +44,6 @@ use tracing::{info, warn};
 use crate::announce::{FPP_MAX, FPP_MIN};
 use crate::media::tx::{TX_MARGIN_NS, ns_of};
 use crate::stream::{BLOCK, BLOCKS, MAX_WORK_MARGIN, WORK_MARGIN};
-use crate::subscribe::directory;
 
 /// The longest device or channel name, in bytes: Dante Controller ignores a
 /// device with a longer name (inferno's `device_info.rs`), and Dante's
@@ -137,11 +136,14 @@ pub struct DeviceConfig {
     /// The frames per packet our RX asks of a transmitter read through its
     /// ARC (the band's stage devices: they publish no `_netaudio-chan`
     /// record, so nothing names their fpp): [`FPP_MIN`] to [`FPP_MAX`],
-    /// [`directory::FPP`] when left out. A packet leaves its transmitter
+    /// [`crate::subscribe::directory::FPP`] when left out. A packet leaves its transmitter
     /// only after its last frame, so fewer frames cut the RX lateness
-    /// (#72 phase F).
-    #[serde(default = "default_arc_rx_fpp")]
-    pub arc_rx_fpp: u16,
+    /// (#72 phase F). Set, it also opts the device in to its own unicast
+    /// flow over a transmitter's multicast flow with more frames a packet
+    /// than its unicast flow would carry (dstack #297); left out, a
+    /// multicast flow that carries the channel is always preferred.
+    #[serde(default)]
+    pub arc_rx_fpp: Option<u16>,
     /// The CPU the engine pump runs on (#72 phase F: an isolated core of
     /// its own), below [`MAX_CPU`]; anywhere the kernel puts it when left
     /// out.
@@ -399,7 +401,10 @@ impl DeviceConfig {
         if !(FPP_MIN..=FPP_MAX).contains(&self.tx_fpp_max) {
             out.push(format!("tx_fpp_max: {FPP_MIN} to {FPP_MAX}"));
         }
-        if !(FPP_MIN..=FPP_MAX).contains(&self.arc_rx_fpp) {
+        if self
+            .arc_rx_fpp
+            .is_some_and(|f| !(FPP_MIN..=FPP_MAX).contains(&f))
+        {
             out.push(format!("arc_rx_fpp: {FPP_MIN} to {FPP_MAX}"));
         }
         // A receiver plays our audio the advertised latency after its stamp;
@@ -556,10 +561,6 @@ fn default_tx_margin_ns() -> u64 {
 
 fn default_tx_fpp_max() -> u16 {
     FPP_MAX
-}
-
-fn default_arc_rx_fpp() -> u16 {
-    directory::FPP
 }
 
 /// The largest `tx_margin_ns` a config may set (1 ms).

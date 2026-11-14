@@ -65,9 +65,11 @@
 //! silent is resolved again. We never create, change or end another
 //! device's multicast flow here.
 //!
-//! **A coarser multicast flow** (dstack #297, `subscribe/coarse.rs`): a multicast flow
-//! is preferred only when its fpp is at most what our own unicast flow
-//! from that transmitter would carry ([`fpp_for`], the transmitter's step).
+//! **A coarser multicast flow** (dstack #297, `subscribe/coarse.rs`): on a
+//! device whose config sets `arc_rx_fpp` (the opt-in; a device on the
+//! default keeps every multicast flow as above), a multicast flow is
+//! preferred only when its fpp is at most what our own unicast flow from
+//! that transmitter would carry ([`fpp_for`], the transmitter's step).
 //! A channel on a multicast flow with more frames a packet asks for its
 //! own unicast flow, only while the transmitter's flow list shows a free
 //! TX flow slot, and keeps the multicast flow until the unicast flow
@@ -332,6 +334,10 @@ pub struct Manager {
     /// no free TX flow slot (dstack #297; at most [`MAX_FPP_FLOORS`], kept
     /// while the manager lives).
     multicast_kept: BTreeSet<SocketAddrV4>,
+    /// The device config sets `arc_rx_fpp`: it opts in to its own unicast
+    /// flow over a coarser multicast flow (dstack #297); left out, every
+    /// multicast flow that carries a channel is preferred, as before.
+    own_unicast: bool,
     /// The statuses [`Manager::changed`] reported last.
     reported: Vec<Option<SubStatus>>,
     /// The last tick's time.
@@ -390,6 +396,7 @@ impl Manager {
             fpp_floor: BTreeMap::new(),
             abandoned: Vec::new(),
             multicast_kept: BTreeSet::new(),
+            own_unicast: cfg.arc_rx_fpp.is_some(),
             reported: vec![None; n],
             port_only: crate::media::rx::GROUP_BOUND_TO_PORT,
             now: 0,
