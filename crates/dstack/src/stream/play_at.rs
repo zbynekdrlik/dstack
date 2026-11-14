@@ -37,9 +37,10 @@ pub struct Track {
 
 impl Track {
     /// The block at media sample `start`, played at `at` (app ns; `None`:
-    /// no play time, free pacing or no pair read yet, which forgets the
-    /// last block): its deviation from the last block with one, `None` for
-    /// the first.
+    /// no play time, no pair read yet, which forgets the last block): its
+    /// deviation from the last block with one, `None` for the first. The
+    /// pump starts a fresh track on a re-anchor (its starts move with the
+    /// media clock, its play times do not).
     pub fn next(&mut self, start: u64, at: Option<i64>, rate: u32) -> Option<u64> {
         let Some(at) = at else {
             self.last = None;

@@ -183,6 +183,7 @@ fn the_default_route_s_address_is_the_box_s_routed_ipv4() {
 #[test]
 fn a_test_clock_skew_is_refused_with_any_source_but_the_system_clock() {
     use crate::clock::TestClockPpm;
+    use crate::clock::skewed::test_clock_refusal;
     let ppm = Some(TestClockPpm(6.0));
     assert_eq!(test_clock_refusal(ClockSource::System, ppm), None);
     for source in [ClockSource::Dsync, ClockSource::Linked, ClockSource::System] {

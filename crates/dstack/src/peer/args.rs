@@ -18,8 +18,9 @@ usage: dstack-dev peer (--iface <if> | --ip <ipv4>) --name <device> --status <pa
 
 A TEST Dante device on the system clock (no PTP network: CI), dstack #305.
   --tx <n>              TX channels \"TX 1\".. (default: one per --tone-hz)
-  --tone-hz <hz,...>    each TX channel's sine, whole Hz, -6 dBFS (200 Hz or
-                        over keeps the RX check's margin)
+  --tone-hz <hz,...>    the TX channels' sines, whole Hz, -6 dBFS: one each,
+                        or one for every channel (200 Hz or over keeps the
+                        RX check's margin)
   --rx-from <dev>:<ch>  RX channels \"RX 1\".., subscribed to these TX
                         channels of <dev> (names as Dante lists them)
   --test-clock-ppm <p>  the media clock runs <p> ppm off this machine's
@@ -142,13 +143,16 @@ pub fn parse(args: &[String]) -> Result<Parsed, String> {
     let place = place.ok_or("--iface or --ip is missing")?;
     let name = name.ok_or("--name is missing")?;
     let status = status.ok_or("--status is missing")?;
-    if let Some(n) = tx
-        && n != tones.len()
-    {
-        return Err(format!(
-            "--tx {n}: --tone-hz gives {} tones, one per TX channel",
-            tones.len()
-        ));
+    // `--tx n` with one tone: every channel sends it; with several: one
+    // a channel.
+    match (tx, tones.len()) {
+        (Some(n), 1) => tones = vec![tones[0]; n],
+        (Some(n), len) if n != len => {
+            return Err(format!(
+                "--tx {n}: --tone-hz gives {len} tones: one for every channel, or one each"
+            ));
+        }
+        _ => {}
     }
     if tones.iter().any(|&hz| u64::from(hz) * 2 >= u64::from(rate)) {
         return Err(format!("--tone-hz: each under half the rate ({rate} Hz)"));

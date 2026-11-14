@@ -98,8 +98,12 @@ fn each_refusal_names_its_flag() {
         ("--process-id -1", "--process-id -1: a number"),
         ("--bogus 1", "--bogus: not a peer option"),
         (
-            "--tx 2 --tone-hz 440",
-            "--tx 2: --tone-hz gives 1 tones, one per TX channel",
+            "--tx 3 --tone-hz 440,880",
+            "--tx 3: --tone-hz gives 2 tones: one for every channel, or one each",
+        ),
+        (
+            "--tx 1",
+            "--tx 1: --tone-hz gives 0 tones: one for every channel, or one each",
         ),
         (
             "--tone-hz 24000",
@@ -122,6 +126,11 @@ fn the_tones_under_half_the_rate_and_their_count_agree() {
     assert_eq!(a.tones, [23_999]);
     let a = run("--ip 10.0.0.2 --name p --status /s --tx 0");
     assert!(a.tones.is_empty());
+    // One tone for every channel.
+    let a = run("--ip 10.0.0.2 --name p --status /s --tx 3 --tone-hz 997");
+    assert_eq!(a.tones, [997, 997, 997]);
+    let a = run("--ip 10.0.0.2 --name p --status /s --tx 2 --tone-hz 440,880");
+    assert_eq!(a.tones, [440, 880]);
     let a = run("--ip 10.0.0.2 --name p --status /s --tone-hz 30000 --rate 96000");
     assert_eq!(a.tones, [30_000]);
 }

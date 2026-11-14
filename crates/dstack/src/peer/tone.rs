@@ -19,6 +19,12 @@
 //! level drop) is bad. A run of bad samples is one gap (`tone_gaps`); it
 //! ends after [`CLEAR`] good samples in a row.
 //!
+//! Why not [`crate::media::check::SineCheck`] (the HIL sine check): it
+//! needs the frequency up front (the peer hears whatever tone the app
+//! sends), and it leaves a silence blind with a discontinuity at each of
+//! its edges and passes a fade; a CI gate wants one count a dropout and a
+//! level drop counted. The two share only the recurrence.
+//!
 //! The threshold is a quarter of the smallest residual a one-sample skip
 //! leaves, `A·(1 − c)` (`2A·sin²(ω/2)`): 1.1e-3 for a 1 kHz tone at -6 dBFS
 //! at 48 kHz, far above 24-bit quantization (1.2e-7). A lower tone gives a
@@ -187,8 +193,10 @@ impl ToneCheck {
         if let (Some(f), 2) = (self.fit, self.seen) {
             let [mut p2, mut p1] = self.before;
             for &s in x {
-                let bad = residual(s, p1, p2, f.c).abs() > f.threshold
-                    || invariant(s, p1, f.c) < f.energy / 4.0;
+                // Written so a NaN sample is bad: no comparison holds.
+                let good = residual(s, p1, p2, f.c).abs() <= f.threshold
+                    && invariant(s, p1, f.c) >= f.energy / 4.0;
+                let bad = !good;
                 self.judge(bad);
                 (p2, p1) = (p1, s);
             }

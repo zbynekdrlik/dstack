@@ -5,7 +5,7 @@ intercom, any app) can gate its release on a real Dante exchange in CI, with
 no Dante network and no grandmaster: `dstack-dev peer` is a second Dante
 device on the runner. It sends a tone the app receives, receives the app's
 TX, and writes a JSON status the job gates on. Both devices run on the TEST
-system clock, each skewed by its own `test_clock_ppm`, so the app's play
+system clock, skewed by the same `test_clock_ppm`, so the app's play
 times, its ASRC and the TX Player see real drift (the field has about 6 ppm).
 
 `dstack-dev` is in every release's assets:
@@ -53,7 +53,7 @@ play-time filter follows a rate gap up to about 100 ppm.
 ```bash
 ./dstack-dev peer --iface dante0 --name ci-peer \
   --tone-hz 1000 --rx-from obs-ci:Out\ 1 \
-  --test-clock-ppm -6 \
+  --test-clock-ppm 6 \
   --ports 4441,8801,4456 --process-id 1 \
   --status "$RUNNER_TEMP/peer.json" &
 PEER=$!
@@ -66,9 +66,15 @@ kill -INT "$PEER"; wait "$PEER"   # exit 0 after the goodbyes
   check's margin), under half the rate.
 - `--rx-from <device>:<channel,...>`: one RX channel per name, subscribed to
   that TX channel of the app's device.
-- `--test-clock-ppm <ppm>`: the peer's own skew. Give the app and the peer
-  different skews (+6 and -6: 12 ppm between them, 43 ms an hour against the
-  10 ms latency: keep a run under about 30 minutes, or the skews closer).
+- `--test-clock-ppm <ppm>`: the peer's skew. Give it the app's skew: both
+  devices then keep one network time (as PTP gives in the field), and both
+  run that many ppm off the machine's clock, the drift the app's play times,
+  ASRC and TX Player meet. Each skewed clock counts from its own start, so
+  two started `t` apart differ by a constant `t × ppm` (a minute at 6 ppm:
+  0.36 ms, as a path delay). Different skews make the devices drift apart:
+  the receiver's margin (about 8 ms of a 10 ms latency) is gone after
+  margin / Δppm (11 minutes at 12 ppm apart), so only a short run takes them
+  (dstack's own two-device test runs 10 s at 70 ppm apart).
 - `--rate` (48000), `--latency-ms` (10), `--state` (`<status>.state.toml`).
 - `dstack-dev peer --help` lists them. Exit 2 for the command line or the
   config, 1 when the device fails or the status cannot be written.
@@ -120,7 +126,10 @@ The peer (`peer.json`):
 
 The app (its dlink status, `Link::status()`, and its own bridge counters):
 
-- TX: `tx_underruns` and `recentres` rise 0 after priming; `tx_ppm`
-  settled within ±(the skew between the two + 2) ppm;
+- TX (the app's dlink `bridge::Stats` of its TX player: `underruns()`,
+  `recentres()`, `resyncs()`, `ppm()`, which the app publishes in its own
+  status, obs as `tx_underruns` and its kin): underruns and
+  re-centres rise 0 after priming; the correction settled within ±(the skew
+  + 2) ppm;
 - RX: the bridge's underruns rise 0, `channels[]` `holes` / `late` rise 0;
 - `engine.play_at_steps` 0 and `play_at_max_dev_us` under 1000.

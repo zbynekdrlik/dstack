@@ -15,7 +15,17 @@
 //! never change after the start: a read takes no lock and no atomic.
 //! The arithmetic is in parts per 10¹² ([`TestClockPpm::ppt`]) and `i128`.
 
+#[cfg(any(target_os = "linux", windows))]
+use std::sync::Arc;
+
 use serde::Deserialize;
+#[cfg(any(target_os = "linux", windows))]
+use tracing::warn;
+
+#[cfg(any(target_os = "linux", windows))]
+use super::PtpClock;
+#[cfg(any(target_os = "linux", windows))]
+use crate::host::ClockSource;
 
 /// The largest skew a test clock takes, ppm either way: far beyond a real
 /// clock's (Dante's ±100 ppm pull-in), small enough that no stamp
@@ -106,7 +116,7 @@ impl SkewedClock {
 }
 
 #[cfg(any(target_os = "linux", windows))]
-impl super::PtpClock for SkewedClock {
+impl PtpClock for SkewedClock {
     fn now_ns(&self) -> Option<u64> {
         skewed_ns(self.base_ns, self.k_ns, self.ppt, super::monotonic_ns())
     }
@@ -117,6 +127,63 @@ impl super::PtpClock for SkewedClock {
 
     fn epoch(&self) -> u32 {
         0
+    }
+}
+
+/// Why a device with the TEST clock skew `ppm` cannot start on `source`:
+/// the skew is the TEST system clock's only, so any other source refuses
+/// it (`None`: no skew, or the system clock).
+#[cfg(any(target_os = "linux", windows))]
+pub fn test_clock_refusal(source: ClockSource, ppm: Option<TestClockPpm>) -> Option<String> {
+    let ppm = ppm?;
+    (source != ClockSource::System).then(|| {
+        format!(
+            "test_clock_ppm {} is for the TEST system clock only (--clock system, \
+             dlink's Config::test_clock_ppm), not the {source:?} clock",
+            ppm.0
+        )
+    })
+}
+
+/// The media clock's PTP side as the host starts it, with the monotonic
+/// and system clocks read at the start (`(monotonic, realtime)`, ns):
+/// `linked` when there is one (dsync's follower); on the TEST system clock
+/// `source`, `mono` anchored at this machine's clock (k = realtime −
+/// monotonic) and `stats` marked, skewed by `ppm` when set (a WARN each);
+/// otherwise `mono` as it is (dsync's poller anchors it).
+#[cfg(any(target_os = "linux", windows))]
+pub fn media_ptp(
+    source: ClockSource,
+    ppm: Option<TestClockPpm>,
+    linked: Option<Arc<dyn PtpClock>>,
+    mono: &Arc<super::MonoClock>,
+    stats: &super::ClockStats,
+    (base_ns, realtime_ns): (i64, i64),
+) -> Arc<dyn PtpClock> {
+    if let Some(l) = linked {
+        return l;
+    }
+    if source != ClockSource::System {
+        return Arc::clone(mono) as Arc<dyn PtpClock>;
+    }
+    let k_ns = realtime_ns - base_ns;
+    mono.set_k(k_ns);
+    stats.mark_system();
+    warn!(
+        "media clock: the TEST system clock; PTP time is this machine's clock, not the \
+         network's: never for a real Dante network"
+    );
+    match ppm {
+        Some(ppm) => {
+            warn!(
+                test_clock_ppm = ppm.0,
+                "media clock: the TEST system clock runs {} ppm off this machine's clock \
+                 (test_clock_ppm): a drift for tests, never for a real Dante network",
+                ppm.0
+            );
+            Arc::new(SkewedClock::new(base_ns, k_ns, ppm))
+        }
+        None => Arc::clone(mono) as Arc<dyn PtpClock>,
     }
 }
 

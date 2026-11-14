@@ -135,3 +135,58 @@ fn the_skewed_clock_reads_the_monotonic_clock_with_its_skew() {
     clock.sleep_until(target);
     assert!(clock.now_ns().unwrap() >= target);
 }
+
+/// The PTP side the host starts (dstack #305): the linked clock wins; the
+/// system clock anchors the monotonic clock at this machine's time, marks
+/// the stats and skews when asked; dsync's leaves the monotonic clock to its
+/// poller.
+#[cfg(any(target_os = "linux", windows))]
+#[test]
+fn the_host_s_ptp_side_follows_the_source_and_the_skew() {
+    use crate::clock::{ClockStats, ManualClock, MonoClock, PtpClock, monotonic_ns};
+    use crate::host::ClockSource;
+    use std::sync::Arc;
+    let same = |a: &Arc<dyn PtpClock>, b: *const ()| Arc::as_ptr(a) as *const () == b;
+    let reads = (5 * S, 1_700_000_000 * S);
+
+    let linked: Arc<dyn PtpClock> = Arc::new(ManualClock::new(7));
+    let (mono, stats) = (Arc::new(MonoClock::new()), ClockStats::default());
+    let got = media_ptp(
+        ClockSource::Linked,
+        None,
+        Some(Arc::clone(&linked)),
+        &mono,
+        &stats,
+        reads,
+    );
+    assert!(same(&got, Arc::as_ptr(&linked) as *const ()));
+    assert_eq!((mono.k_ns(), stats.is_system()), (None, false));
+
+    let got = media_ptp(ClockSource::Dsync, None, None, &mono, &stats, reads);
+    assert!(same(&got, Arc::as_ptr(&mono) as *const ()));
+    assert_eq!((mono.k_ns(), stats.is_system()), (None, false));
+
+    let got = media_ptp(ClockSource::System, None, None, &mono, &stats, reads);
+    assert!(same(&got, Arc::as_ptr(&mono) as *const ()));
+    assert_eq!(
+        (mono.k_ns(), stats.is_system()),
+        (Some(reads.1 - reads.0), true)
+    );
+
+    // Skewed: 1000 ppm from a base 100 s back reads 0.1 s ahead of the
+    // unskewed clock now.
+    let (mono, stats) = (Arc::new(MonoClock::new()), ClockStats::default());
+    let base = monotonic_ns() - 100 * S;
+    let got = media_ptp(
+        ClockSource::System,
+        Some(TestClockPpm(1000.0)),
+        None,
+        &mono,
+        &stats,
+        (base, base + 3 * S),
+    );
+    assert!(!same(&got, Arc::as_ptr(&mono) as *const ()));
+    assert_eq!((mono.k_ns(), stats.is_system()), (Some(3 * S), true));
+    let ahead = got.now_ns().unwrap() as i64 - mono.now_ns().unwrap() as i64;
+    assert!((ahead - S / 10).abs() < 1_000_000, "{ahead} ns ahead");
+}

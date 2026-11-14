@@ -439,3 +439,17 @@ fn the_pump_counts_a_play_time_step_and_its_deviation() {
     let v = r.stats.view();
     assert_eq!((v.play_at_steps, v.play_at_max_dev_us), (1, 1_999), "{v:?}");
 }
+
+/// A re-anchor moves the blocks' starts by its step and not their play
+/// times: no play-time step is counted (dstack #305).
+#[test]
+fn a_re_anchor_is_no_play_time_step() {
+    let mut r = pump();
+    let clock = ManualClock::new(ns_of(T, RATE));
+    let mut app = APP0;
+    step(&mut r, &clock, &mut app, 9);
+    clock.re_anchor(1_600_000_000);
+    step(&mut r, &clock, &mut app, 9);
+    let v = r.stats.view();
+    assert_eq!((v.play_at_steps, v.play_at_max_dev_us), (0, 0), "{v:?}");
+}

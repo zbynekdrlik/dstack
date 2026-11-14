@@ -165,3 +165,29 @@ fn the_status_file_is_written_whole() {
     assert!(!dir.path().join("s.json.tmp").exists());
     assert!(write_status(&dir.path().join("none/s.json"), "x").is_err());
 }
+
+/// A start off the last block's end (a pump restart) starts the play-time
+/// rate afresh: the jump is not read as a rate.
+#[test]
+fn a_start_jump_starts_the_play_time_rate_afresh() {
+    let mut p = Tones::new(vec![1000], 0, 48_000);
+    let shared = p.shared();
+    let frames = 128u64;
+    let input: Vec<f64> = Vec::new();
+    let mut out = vec![0.0; frames as usize];
+    let mut run = |p: &mut Tones, from: u64, at0: i64, blocks: u64| {
+        for b in 0..blocks {
+            let start = from + b * frames;
+            let at = at0 + ((b * frames) as f64 * 1e9 / 48_000.0 / 1.00001) as i64;
+            let mut block = Block::new(frames as usize, &input, &mut out)
+                .at(start)
+                .played_at(at);
+            p.process(&mut block);
+        }
+    };
+    run(&mut p, 0, 0, 50);
+    // One second of media time skipped, the play times going on.
+    run(&mut p, 50 * frames + 48_000, 134_000_000, 50);
+    let ppm = f64::from_bits(shared.play_at_ppm.load(Ordering::Relaxed));
+    assert!((ppm - 10.0).abs() < 0.1, "{ppm}");
+}

@@ -134,6 +134,8 @@ pub struct Tones {
     checks: Vec<ToneCheck>,
     samples: u64,
     first: Option<(u64, i64)>,
+    /// Where the next block starts on the media grid.
+    next: Option<u64>,
     shared: Arc<Shared>,
 }
 
@@ -150,6 +152,7 @@ impl Tones {
             checks: vec![ToneCheck::default(); rx],
             samples: 0,
             first: None,
+            next: None,
             shared: Arc::new(shared),
         }
     }
@@ -177,6 +180,11 @@ impl Process for Tones {
             for (i, y) in block.output(ch).iter_mut().enumerate() {
                 *y = tone::tone_at(start + i as u64, hz, self.rate);
             }
+        }
+        // A start off the last block's end (a pump restart, a re-anchor)
+        // starts the play-time rate afresh.
+        if self.next.replace(start + frames as u64) != Some(start) {
+            self.first = None;
         }
         if let Some(at) = block.play_at() {
             let first = *self.first.get_or_insert((start, at));
@@ -369,18 +377,39 @@ fn run_until_signal(peer: &Peer, status: &Path) -> Result<(), String> {
         .build()
         .map_err(|e| format!("dstack-dev peer: no runtime: {e}"))?;
     rt.block_on(async {
+        // Both signals' listeners are made once, before the loop: a signal
+        // that comes while the status is written is kept for the next
+        // select, never lost.
         #[cfg(unix)]
-        let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .map_err(|e| format!("dstack-dev peer: SIGTERM: {e}"))?;
+        let (mut term, mut int) = {
+            use tokio::signal::unix::{SignalKind, signal};
+            let listen = |kind: SignalKind, name: &str| {
+                signal(kind).map_err(|e| format!("dstack-dev peer: {name}: {e}"))
+            };
+            (
+                listen(SignalKind::terminate(), "SIGTERM")?,
+                listen(SignalKind::interrupt(), "SIGINT")?,
+            )
+        };
+        #[cfg(not(unix))]
+        let ctrl_c = tokio::signal::ctrl_c();
+        #[cfg(not(unix))]
+        tokio::pin!(ctrl_c);
         let mut tick = tokio::time::interval(Duration::from_secs(1));
         loop {
             #[cfg(unix)]
-            let term_signal = term.recv();
+            let signalled = async {
+                tokio::select! {
+                    _ = term.recv() => (),
+                    _ = int.recv() => (),
+                }
+            };
             #[cfg(not(unix))]
-            let term_signal = std::future::pending::<Option<()>>();
+            let signalled = async {
+                let _ = (&mut ctrl_c).await;
+            };
             tokio::select! {
-                _ = tokio::signal::ctrl_c() => return Ok(()),
-                _ = term_signal => return Ok(()),
+                () = signalled => return Ok(()),
                 _ = tick.tick() => {
                     if let Some(why) = peer.ended() {
                         return Err(format!("dstack-dev peer: the device ended: {why}"));

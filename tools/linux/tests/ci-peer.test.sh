@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: MIT OR Apache-2.0
 # dstack #305: docs/ci-peer.md's recipe, as an application's CI runs it: a
-# dummy interface, two `dstack-dev peer` devices on its one address (each
-# on the TEST system clock with its own skew), each receiving the other's
+# dummy interface, two `dstack-dev peer` devices on its one address (both
+# on the TEST system clock, skewed 6 ppm as the doc says), each receiving the other's
 # tone. Gated as the doc says: after a settle, no tone gap, no RX hole, no
 # pump restart, no play-time step, and each peer's play_at_ppm at its skew.
 # Run as root (the interface); the binary is $1 (default target/release).
@@ -28,7 +28,7 @@ ip route add 224.0.0.0/4 dev "$IF"
   --status "$DIR/a.json" 2>"$DIR/a.log" &
 A=$!
 "$BIN" peer --iface "$IF" --name ci-peer-b --tone-hz 440 \
-  --rx-from "ci-peer-a:TX 1" --test-clock-ppm -6 \
+  --rx-from "ci-peer-a:TX 1" --test-clock-ppm 6 \
   --ports 4441,8801,4456 --process-id 1 \
   --status "$DIR/b.json" 2>"$DIR/b.log" &
 B=$!

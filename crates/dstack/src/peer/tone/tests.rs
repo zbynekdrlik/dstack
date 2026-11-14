@@ -177,3 +177,12 @@ fn the_counts_publish_to_the_status() {
         "{v:?}"
     );
 }
+
+#[test]
+fn a_nan_sample_is_a_gap() {
+    let mut x = tone(0, 40 * BLOCK, 1000);
+    x[20 * BLOCK + 5] = f64::NAN;
+    let mut check = ToneCheck::default();
+    feed(&mut check, &x);
+    assert_eq!(check.gaps(), 1);
+}
