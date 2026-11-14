@@ -612,3 +612,5 @@ fn under_mono_both_speakers_play_the_sum_of_our_channels() {
         rms(&s.out)
     );
 }
+
+mod resync;
