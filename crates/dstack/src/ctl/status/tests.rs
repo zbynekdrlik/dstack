@@ -193,6 +193,9 @@ const WORDS: &[&str] = &[
     "over_latency",
     "receiver_latency_us",
     "direct",
+    "receiver",
+    "tx_channels",
+    "rx_channels",
     "rx",
     "device",
     "granted",
@@ -698,7 +701,8 @@ fn the_status_lists_the_flows_of_both_sides() {
     let s = status(&media);
     assert!(
         s.contains(
-            "\"tx\":[{\"flow\":1,\"live\":1,\"fpp\":32,\"channels\":3,\"packets\":0,\
+            "\"tx\":[{\"flow\":1,\"receiver\":\"peer-device\",\"live\":1,\"fpp\":32,\"channels\":3,\
+             \"tx_channels\":[1,2,null],\"packets\":0,\
              \"send_errors\":0,\"send_retries\":0,\"keepalives\":0,\"rebootstraps\":0,\
              \"holes\":0,\"late_bins\":[0,0,0,0,0,0],\"late_max_us\":0,\"send_max_us\":0,\
              \"age_max_us\":0,\"over_latency\":0,\"receiver_latency_us\":0,\"direct\":0}]"
@@ -707,7 +711,7 @@ fn the_status_lists_the_flows_of_both_sides() {
     );
     assert!(
         s.contains(&format!(
-            "\"rx\":[{{\"flow\":1,\"device\":\"peer-device\",\"granted\":1,\"multicast\":0,\"fpp\":32,\"channels\":2,\"latency\":96,\
+            "\"rx\":[{{\"flow\":1,\"device\":\"peer-device\",\"granted\":1,\"multicast\":0,\"fpp\":32,\"channels\":2,\"rx_channels\":[1],\"latency\":96,\
              \"playout\":96,\"delay\":0,\"late_after\":128,\"advertised\":96,\
              \"below_advertised\":0,\"packets\":0,\"refused\":0,\"stray\":0,\"out_of_order\":0,\"reordered\":0,\"gaps\":0,\"gap_frames\":0,{DROPS}\"late\":0,\"late_at_read\":0,\"start_holes\":0,{STAMPS_NONE}\
              \"unplaced\":0,\"lateness\":0,\"lateness_peak\":0,\"keepalives\":0,\"keepalive_errors\":0,\
@@ -719,7 +723,76 @@ fn the_status_lists_the_flows_of_both_sides() {
     assert!(s.contains("{\"rx\":1,\"status\":8,"), "{s}");
     // An expired TX flow is listed, not live.
     media.tx.lock().table.expire(10_000_000_000);
-    assert!(status(&media).contains("\"tx\":[{\"flow\":1,\"live\":0,"));
+    assert!(
+        status(&media).contains("\"tx\":[{\"flow\":1,\"receiver\":\"peer-device\",\"live\":0,")
+    );
+}
+
+/// dstack #298: a TX flow names its receiver and our TX channels in flow
+/// order, an RX flow our RX channels in flow order: each channel slot's in
+/// turn, every RX channel a slot feeds. A multicast TX flow has no one
+/// receiver, so `receiver` is absent (never an empty string); a slot
+/// without a flow lists no channels.
+#[test]
+fn flows_name_their_receiver_and_our_channels() {
+    use crate::flows::control::FlowRequest;
+    use crate::subscribe::{Action, Answer};
+    let dir = tempfile::tempdir().unwrap();
+    let mut device = device_at(dir.path());
+    let cfg = device.cfg.clone();
+    // RX 1 and 3 take its TX 2, RX 2 its TX 1: the flow's slots are TX 2,
+    // TX 1 (RX order), so our RX channels read 1, 3, then 2.
+    for (rx, tx) in [(0, "TX 2"), (1, "TX 1"), (2, "TX 2")] {
+        device
+            .state
+            .set_subscription(&cfg, rx, Some(sub(tx, "rx-peer")));
+    }
+    let media = media_on(&device, Arc::new(Unready));
+    {
+        let mut c = media.tx.lock();
+        let req = FlowRequest {
+            rx_host: "made-up-receiver".into(),
+            rx_flow_name: "1_0".into(),
+            sample_rate: 96_000,
+            bits: 24,
+            channels: vec![None, Some(4), Some(2)],
+            fpp: 16,
+            rx: std::net::SocketAddrV4::new(Ipv4Addr::LOCALHOST, 50_000),
+        };
+        assert_eq!(c.table.add(&req, 0).unwrap().0, 0);
+        let group = std::net::SocketAddrV4::new(Ipv4Addr::new(239, 255, 0, 9), 4321);
+        c.table.add_multicast(1, group, &[3, 1], 16, 3).unwrap();
+    }
+    {
+        let mut m = lock(&media.manager);
+        let addr = std::net::SocketAddrV4::new(Ipv4Addr::LOCALHOST, 4455);
+        let records = crate::daemon::media::tests::Records::default()
+            .with(
+                "rx-peer",
+                "TX 1",
+                crate::daemon::media::tests::advert(addr, 1),
+            )
+            .with(
+                "rx-peer",
+                "TX 2",
+                crate::daemon::media::tests::advert(addr, 2),
+            );
+        let actions = m.tick(1, &media.rx.packets(), &records);
+        let Some(Action::Request { flow, .. }) = actions.first() else {
+            panic!("{actions:?}");
+        };
+        m.answered(*flow, Answer::Granted([0; 6]), 2);
+    }
+    let v: serde_json::Value = serde_json::from_str(&status(&media)).expect("JSON");
+    let tx = v["tx"].as_array().unwrap();
+    assert_eq!(tx.len(), 2, "{v}");
+    assert_eq!(tx[0]["receiver"], "made-up-receiver");
+    assert_eq!(tx[0]["tx_channels"], serde_json::json!([null, 4, 2]));
+    assert!(tx[1].get("receiver").is_none(), "{v}");
+    assert_eq!(tx[1]["tx_channels"], serde_json::json!([3, 1]));
+    let rx = v["rx"].as_array().unwrap();
+    assert_eq!(rx.len(), 1, "{v}");
+    assert_eq!(rx[0]["rx_channels"], serde_json::json!([1, 3, 2]));
 }
 
 /// A processor that leaves its outputs silent.
