@@ -461,7 +461,9 @@ dependencies = [
 name = "dtray"
 version = "0.6.129"
 dependencies = [
+ "dlink",
  "dstack",
+ "dstack-asio",
  "glib",
  "gtk",
  "serde",

@@ -9,7 +9,8 @@
 //! ([`root`]) holding its `device.toml`; its Windows service is `dasio-N`
 //! ([`Instance::service`]). dasio reads the file as dstack's
 //! [`DeviceConfig`] after taking out its own `iface` key (the Windows
-//! interface alias the device binds to, dasio#101), so [`Fields::read`]
+//! interface alias the device binds to, dasio#101) and its `[bridge]`
+//! table (a bridge instance, dasio#106: [`bridge`]), so [`Fields::read`]
 //! does the same.
 //!
 //! - [`Fields`]: what the window shows and edits; [`edit`] writes a change
@@ -39,7 +40,9 @@ use std::time::Duration;
 
 use dstack::device::DeviceConfig;
 use serde_json::Value;
-use toml_edit::{Array, DocumentMut, Item, Value as TomlValue};
+use toml_edit::{Array, DocumentMut, Item, TableLike, Value as TomlValue};
+
+pub use bridge::Bridge;
 
 use crate::latency;
 use crate::model;
@@ -174,12 +177,14 @@ pub struct Fields {
     pub rx: Vec<String>,
     pub tx: Vec<String>,
     pub cpus: Cpus,
+    /// A bridge instance's `[bridge]` table; `None` for the DAW kind.
+    pub bridge: Option<Bridge>,
 }
 
 impl Fields {
     /// The fields of a config's text, checked as dasio reads it: the
-    /// `iface` key (a string) taken out, the rest a valid
-    /// [`DeviceConfig`]; the reason otherwise.
+    /// `iface` key (a string) and the `[bridge]` table ([`bridge::parse`])
+    /// taken out, the rest a valid [`DeviceConfig`]; the reason otherwise.
     pub fn read(text: &str) -> Result<Fields, String> {
         let mut doc = parse_doc(text)?;
         let iface = match doc.remove(IFACE_KEY) {
@@ -190,6 +195,7 @@ impl Fields {
                     .to_string(),
             ),
         };
+        let bridge = doc.remove(bridge::KEY).map(bridge::parse).transpose()?;
         let cfg = DeviceConfig::from_toml(&doc.to_string()).map_err(|e| e.problems.join("; "))?;
         Ok(Fields {
             name: cfg.name,
@@ -205,6 +211,7 @@ impl Fields {
                 io: cfg.io_cpu,
                 rx: cfg.rx_cpu,
             },
+            bridge,
         })
     }
 }
@@ -221,29 +228,38 @@ fn one_line(s: &str) -> String {
     s.lines().next().unwrap_or_default().trim().to_string()
 }
 
-/// `key` set to `v` in `doc`, the value's own decor (a comment after it on
-/// its line) kept when the key was there.
-fn set_value(doc: &mut DocumentMut, key: &str, v: TomlValue) {
+/// `key` set to `v` in `t` (the document's root, or a table such as
+/// `[bridge]`): replaced in place when the key was there, so the key's own
+/// comment lines and the value's decor (a comment after it on its line)
+/// stay.
+fn set_value(t: &mut dyn TableLike, key: &str, v: TomlValue) {
     let mut v = v;
-    if let Some(old) = doc.get(key).and_then(Item::as_value) {
-        *v.decor_mut() = old.decor().clone();
+    match t.get_mut(key) {
+        Some(item) => {
+            if let Some(old) = item.as_value() {
+                *v.decor_mut() = old.decor().clone();
+            }
+            *item = Item::Value(v);
+        }
+        None => {
+            t.insert(key, Item::Value(v));
+        }
     }
-    doc[key] = Item::Value(v);
 }
 
-/// `key` set to `n` (an integer) in `doc`.
-fn set_int(doc: &mut DocumentMut, key: &str, n: u64) -> Result<(), String> {
+/// `key` set to `n` (an integer) in `t`.
+fn set_int(t: &mut dyn TableLike, key: &str, n: u64) -> Result<(), String> {
     let n = i64::try_from(n).map_err(|_| format!("{key}: {n} is too large"))?;
-    set_value(doc, key, TomlValue::from(n));
+    set_value(t, key, TomlValue::from(n));
     Ok(())
 }
 
 /// `key` set to `n`, or taken out for `None` (the config's default).
-fn set_opt(doc: &mut DocumentMut, key: &str, n: Option<u64>) -> Result<(), String> {
+fn set_opt(t: &mut dyn TableLike, key: &str, n: Option<u64>) -> Result<(), String> {
     match n {
-        Some(n) => set_int(doc, key, n),
+        Some(n) => set_int(t, key, n),
         None => {
-            doc.remove(key);
+            t.remove(key);
             Ok(())
         }
     }
@@ -263,8 +279,10 @@ fn name_array(names: &[String]) -> Array {
 
 /// The config `text` with the fields that differ between `text`'s own and
 /// `new` written (every other key, the comments and the order kept); the
-/// result is read again and must give `new` exactly. The name and the
-/// sample rate are not the window's to change.
+/// result is read again and must give `new` exactly. The name, the
+/// sample rate and the instance's kind (a `[bridge]` table or none) are
+/// not the window's to change: the elevated helper takes only what this
+/// writes ([`install`]).
 pub fn edit(text: &str, new: &Fields) -> Result<String, String> {
     let old = Fields::read(text)?;
     if new.name != old.name {
@@ -273,39 +291,52 @@ pub fn edit(text: &str, new: &Fields) -> Result<String, String> {
     if new.sample_rate != old.sample_rate {
         return Err("the sample rate is the network's, not changed here".into());
     }
+    if new.bridge.is_some() != old.bridge.is_some() {
+        return Err("the instance's kind (DAW or bridge) is not changed here".into());
+    }
     let mut doc = parse_doc(text)?;
     if new.iface != old.iface {
         match &new.iface {
-            Some(alias) => set_value(&mut doc, IFACE_KEY, TomlValue::from(alias.as_str())),
+            Some(alias) => set_value(
+                doc.as_table_mut(),
+                IFACE_KEY,
+                TomlValue::from(alias.as_str()),
+            ),
             None => {
                 doc.remove(IFACE_KEY);
             }
         }
     }
+    if let (Some(o), Some(n)) = (&old.bridge, &new.bridge)
+        && o != n
+    {
+        bridge::write(&mut doc, o, n)?;
+    }
+    let root = doc.as_table_mut();
     if new.block != old.block {
-        set_int(&mut doc, "block", new.block)?;
+        set_int(root, "block", new.block)?;
     }
     if new.latency_ns != old.latency_ns {
-        set_int(&mut doc, "latency_ns", new.latency_ns)?;
+        set_int(root, "latency_ns", new.latency_ns)?;
     }
     if new.tx_latency_ns != old.tx_latency_ns {
-        set_opt(&mut doc, "tx_latency_ns", new.tx_latency_ns)?;
+        set_opt(root, "tx_latency_ns", new.tx_latency_ns)?;
     }
     if new.rx != old.rx {
-        set_value(&mut doc, "rx", TomlValue::Array(name_array(&new.rx)));
+        set_value(root, "rx", TomlValue::Array(name_array(&new.rx)));
     }
     if new.tx != old.tx {
-        set_value(&mut doc, "tx", TomlValue::Array(name_array(&new.tx)));
+        set_value(root, "tx", TomlValue::Array(name_array(&new.tx)));
     }
     let to_u64 = |c: Option<usize>| c.map(|c| c as u64);
     if new.cpus.pump != old.cpus.pump {
-        set_opt(&mut doc, "pump_cpu", to_u64(new.cpus.pump))?;
+        set_opt(root, "pump_cpu", to_u64(new.cpus.pump))?;
     }
     if new.cpus.io != old.cpus.io {
-        set_opt(&mut doc, "io_cpu", to_u64(new.cpus.io))?;
+        set_opt(root, "io_cpu", to_u64(new.cpus.io))?;
     }
     if new.cpus.rx != old.cpus.rx {
-        set_opt(&mut doc, "rx_cpu", to_u64(new.cpus.rx))?;
+        set_opt(root, "rx_cpu", to_u64(new.cpus.rx))?;
     }
     let out = doc.to_string();
     let back = Fields::read(&out).map_err(|e| format!("the new settings are refused: {e}"))?;
@@ -347,6 +378,11 @@ pub enum Field {
     PumpCpu,
     IoCpu,
     RxCpu,
+    /// A bridge instance's driver, maps and app buffer.
+    Driver,
+    ToAsio,
+    FromAsio,
+    AppBuffer,
 }
 
 /// When a change takes effect.
@@ -383,6 +419,10 @@ impl Field {
             Field::PumpCpu => "Audio pump CPU",
             Field::IoCpu => "Send (TX) CPU",
             Field::RxCpu => "Receive (RX) CPU",
+            Field::Driver => bridge::DRIVER,
+            Field::ToAsio => bridge::TO_ASIO,
+            Field::FromAsio => bridge::FROM_ASIO,
+            Field::AppBuffer => bridge::APP_BUFFER,
         }
     }
 
@@ -392,6 +432,11 @@ impl Field {
     pub fn reshapes(self) -> bool {
         matches!(self, Field::Block | Field::Inputs | Field::Outputs)
     }
+}
+
+/// One part of `f`'s bridge (`None` without one).
+fn of<'a, T>(f: &'a Fields, part: impl Fn(&'a Bridge) -> &'a T) -> Option<&'a T> {
+    f.bridge.as_ref().map(part)
 }
 
 /// The fields that differ between `old` and `new`, in the window's order.
@@ -406,6 +451,22 @@ pub fn changes(old: &Fields, new: &Fields) -> Vec<Field> {
         (Field::PumpCpu, old.cpus.pump != new.cpus.pump),
         (Field::IoCpu, old.cpus.io != new.cpus.io),
         (Field::RxCpu, old.cpus.rx != new.cpus.rx),
+        (
+            Field::Driver,
+            of(old, |b| &b.driver) != of(new, |b| &b.driver),
+        ),
+        (
+            Field::ToAsio,
+            of(old, |b| &b.to_asio) != of(new, |b| &b.to_asio),
+        ),
+        (
+            Field::FromAsio,
+            of(old, |b| &b.from_asio) != of(new, |b| &b.from_asio),
+        ),
+        (
+            Field::AppBuffer,
+            of(old, |b| &b.app_buffer_ns) != of(new, |b| &b.app_buffer_ns),
+        ),
     ];
     pairs
         .into_iter()
@@ -418,25 +479,50 @@ pub fn restarts(changes: &[Field]) -> usize {
     changes.iter().filter(|f| f.kind() == Kind::Restart).count()
 }
 
+/// What a restart asks of the DAW that holds the instance's driver.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Daw {
+    /// The shared memory keeps its shape: the DAW may keep the driver.
+    Keeps,
+    /// A change reshapes the driver's shared memory (the block or the
+    /// channel counts): the DAW must release the driver first.
+    Releases,
+    /// A bridge instance hosts a local ASIO driver itself: no DAW holds
+    /// a dasio driver, and none is waited for.
+    Absent,
+}
+
+/// What the restart of `new` with the changes `changed` asks of the DAW
+/// (dasio's rule: a restart of the same shape is fine with the DAW open).
+pub fn daw(new: &Fields, changed: &[Field]) -> Daw {
+    if new.bridge.is_some() {
+        Daw::Absent
+    } else if changed.iter().any(|f| f.reshapes()) {
+        Daw::Releases
+    } else {
+        Daw::Keeps
+    }
+}
+
 /// The banner over the buttons: how many changes need a restart of
-/// `name`, and, when one of them `reshapes` the driver's shared memory,
-/// that the DAW must release the driver first (dasio's rule: a restart of
-/// the same shape is fine with the DAW open); `None` with none.
-pub fn banner(name: &str, restarts: usize, reshapes: bool) -> Option<String> {
+/// `name`, and what that asks of the DAW ([`daw`]); `None` with none.
+pub fn banner(name: &str, restarts: usize, daw: Daw) -> Option<String> {
     let what = match restarts {
         0 => return None,
         1 => "1 change needs".to_string(),
         n => format!("{n} changes need"),
     };
-    let daw = if reshapes {
-        "The DAW must release the driver first (Ableton: Options → Audio → Driver: None, \
-         then Apply). dtray waits until it is released."
-    } else {
-        "The DAW may keep the driver (the buffer and the channel counts stay)."
-    };
-    Some(format!(
-        "↻ {what} a restart of {name} (~5 s of silence). {daw}"
-    ))
+    let restart = format!("↻ {what} a restart of {name} (~5 s of silence).");
+    Some(match daw {
+        Daw::Releases => format!(
+            "{restart} The DAW must release the driver first (Ableton: Options → Audio → \
+             Driver: None, then Apply). dtray waits until it is released."
+        ),
+        Daw::Keeps => format!(
+            "{restart} The DAW may keep the driver (the buffer and the channel counts stay)."
+        ),
+        Daw::Absent => restart,
+    })
 }
 
 /// The CPUs `others` (the other instances) pin, each once.
@@ -477,6 +563,15 @@ pub fn cpu_problems(cpus: &Cpus, busy: &BTreeSet<usize>, count: usize) -> Vec<St
     .collect()
 }
 
+/// Why dasio would refuse `f`'s bridge ([`Bridge::problems`] at its
+/// channel counts); empty for the DAW kind.
+pub fn bridge_problems(f: &Fields) -> Vec<String> {
+    f.bridge
+        .as_ref()
+        .map(|b| b.problems(f.rx.len(), f.tx.len()))
+        .unwrap_or_default()
+}
+
 /// What one apply does.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Plan {
@@ -495,7 +590,9 @@ pub struct Plan {
 /// latency write, and for any restart change the new file (with the
 /// file's own RX latency: that one is the live write's) and whether the
 /// DAW must release the driver. The reason when nothing changed, a CPU is
-/// refused or the file is.
+/// refused or the file is. A bridge dasio would refuse
+/// ([`bridge_problems`]) refuses every Apply, a live latency write alone
+/// too: the file stays broken until it is fixed, in this same window.
 pub fn plan(
     text: &str,
     old: &Fields,
@@ -507,7 +604,8 @@ pub fn plan(
     if changed.is_empty() {
         return Err("nothing changed".into());
     }
-    let problems = cpu_problems(&changed_cpus(&old.cpus, &new.cpus), busy, cpus);
+    let mut problems = cpu_problems(&changed_cpus(&old.cpus, &new.cpus), busy, cpus);
+    problems.extend(bridge_problems(new));
     if !problems.is_empty() {
         return Err(problems.join("; "));
     }
@@ -526,7 +624,7 @@ pub fn plan(
     Ok(Plan {
         latency,
         config,
-        release: changed.iter().any(|f| f.reshapes()),
+        release: daw(new, &changed) == Daw::Releases,
     })
 }
 
@@ -640,6 +738,8 @@ pub struct ReadBack {
     pub latency_ns: Option<u64>,
     /// The alias of the adapter holding its address.
     pub iface: Option<String>,
+    /// A bridge instance's driver (`app.driver` of its status).
+    pub driver: Option<String>,
 }
 
 /// The block of a status line's app part.
@@ -647,10 +747,18 @@ pub fn status_block(status: &str) -> Option<u64> {
     app_field(status, "block")?.as_u64()
 }
 
+/// A bridge instance's driver from a status line's app part.
+pub fn status_driver(status: &str) -> Option<String> {
+    Some(app_field(status, "driver")?.as_str()?.to_string())
+}
+
 /// The verdict on `back` against what was applied (`want`): the line to
 /// show when every value read reads as applied, the mismatches otherwise
 /// (a value not read is one). The CPUs and the TX latency are written but
-/// not reported by the device, which the line says.
+/// not reported by the device, which the line says. A bridge instance's
+/// status states its driver and no block (dasio's `bridge_json`): its
+/// driver is checked instead, and the line says the buffer and the maps
+/// are in the file.
 pub fn verify(want: &Fields, back: &ReadBack) -> Result<String, String> {
     let mut wrong = Vec::new();
     let mut check = |what: &str, want: String, got: Option<String>| match got {
@@ -658,11 +766,14 @@ pub fn verify(want: &Fields, back: &ReadBack) -> Result<String, String> {
         Some(g) => wrong.push(format!("{what}: {want} applied, {g} read back")),
         None => wrong.push(format!("{what}: not read back")),
     };
-    check(
-        "Buffer",
-        want.block.to_string(),
-        back.block.map(|b| b.to_string()),
-    );
+    match &want.bridge {
+        None => check(
+            "Buffer",
+            want.block.to_string(),
+            back.block.map(|b| b.to_string()),
+        ),
+        Some(b) => check(bridge::DRIVER, b.driver.clone(), back.driver.clone()),
+    }
     check(
         "Inputs",
         want.rx.len().to_string(),
@@ -683,6 +794,18 @@ pub fn verify(want: &Fields, back: &ReadBack) -> Result<String, String> {
     }
     if !wrong.is_empty() {
         return Err(wrong.join("; "));
+    }
+    if let Some(b) = &want.bridge {
+        return Ok(format!(
+            "Applied: {} runs as a bridge to \"{}\", {} in / {} out, RX latency {}. \
+             Buffer, channel maps, app buffer, CPUs and TX latency are in the file \
+             (the device does not report them).",
+            want.name,
+            b.driver,
+            want.rx.len(),
+            want.tx.len(),
+            latency::label_wide(want.latency_ns),
+        ));
     }
     Ok(format!(
         "Applied: {} runs with buffer {}, {} in / {} out, RX latency {}. \
@@ -841,6 +964,7 @@ pub fn changed_cpus(old: &Cpus, new: &Cpus) -> Cpus {
 }
 
 pub mod apply;
+pub mod bridge;
 pub mod choices;
 pub mod service;
 #[cfg(windows)]

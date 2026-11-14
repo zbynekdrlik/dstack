@@ -13,6 +13,7 @@ fn want() -> Fields {
         rx: vec!["1".into(), "2".into()],
         tx: vec!["1".into(), "2".into()],
         cpus: Default::default(),
+        bridge: None,
     }
 }
 
@@ -23,6 +24,7 @@ fn good() -> ReadBack {
         tx: Some(2),
         latency_ns: Some(2_000_000),
         iface: None,
+        driver: None,
     }
 }
 
@@ -231,6 +233,31 @@ fn complete_needs_every_value_and_the_interface_only_when_asked() {
     let mut b = good();
     b.iface = Some("E".into());
     assert!(complete(&iface, &b));
+}
+
+/// A bridge instance's status states its driver and no block (dasio's
+/// `bridge_json`, dstack #292).
+#[test]
+fn a_bridge_is_complete_with_its_driver_and_no_block() {
+    let mut w = want();
+    w.bridge = Some(crate::dasio::Bridge {
+        driver: "D".into(),
+        to_asio: vec![1, 2],
+        from_asio: vec![1, 2],
+        app_buffer_ns: None,
+    });
+    let mut b = good();
+    b.block = None;
+    assert!(!complete(&w, &b));
+    b.driver = Some("D".into());
+    assert!(complete(&w, &b));
+    b.rx = None;
+    assert!(!complete(&w, &b));
+    // The DAW kind still needs its block, a driver or not.
+    let mut daw = good();
+    daw.block = None;
+    daw.driver = Some("D".into());
+    assert!(!complete(&want(), &daw));
 }
 
 #[test]
