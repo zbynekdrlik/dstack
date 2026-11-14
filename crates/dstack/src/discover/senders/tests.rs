@@ -222,7 +222,9 @@ fn the_meter_names_a_flooding_source_in_its_last_minute() {
     assert_eq!(named.top[1].source, Ipv4Addr::new(127, 0, 0, 3));
     assert_eq!(named.over_cap[0].source, Ipv4Addr::new(127, 0, 0, 2));
     assert!(named.ns >= 300_000_000);
+    // Its drop ends the thread, which closes the socket: the port is free.
     drop(meter);
+    UdpSocket::bind(to).expect("the meter's socket closed with its thread");
 }
 
 #[test]
@@ -256,7 +258,15 @@ fn one_meter_per_address_in_a_process_ending_with_its_last_holder() {
     })
     .unwrap();
     assert_eq!(opened, 3);
-    drop((again, other));
+    // The new one is found again (the ended one's entry is not).
+    let found = Meter::shared_with(ip, || {
+        opened += 1;
+        Ok(Meter::holding(None))
+    })
+    .unwrap();
+    assert!(Arc::ptr_eq(&again, &found));
+    assert_eq!(opened, 3);
+    drop((again, found, other));
     // An open that fails is the caller's error, and nothing is kept.
     let refused = Meter::shared_with(ip, || Err(io::Error::other("no socket")));
     assert!(refused.is_err());
