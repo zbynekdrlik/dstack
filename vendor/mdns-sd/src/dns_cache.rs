@@ -181,6 +181,7 @@ impl DnsCache {
     /// verify the `instance`.
     ///
     /// If `expire_at` is not None, the resource records' expire time will be updated.
+    #[cfg(test)] // dstack #319: answer-only daemon (DSTACK.md)
     pub(crate) fn service_verify_queries(
         &mut self,
         instance: &str,
@@ -443,6 +444,7 @@ impl DnsCache {
 
     /// Removes all records of a service type: PTR, SRV, TXT records and any ADDR records
     /// that are not referenced by any SRV record.
+    #[cfg(test)] // dstack #319: answer-only daemon (DSTACK.md)
     pub(crate) fn remove_service_type(&mut self, ty_domain: &str) {
         let Some(ptr_records) = self.ptr.get_mut(ty_domain) else {
             return;

@@ -50,8 +50,10 @@ use if_addrs::{IfAddr, Interface};
 use mio::{event::Source, net::UdpSocket as MioUdpSocket, Interest, Poll, Registry, Token};
 use socket2::Domain;
 use socket_pktinfo::PktInfoUdpSocket;
+#[cfg(test)]
+use std::cmp;
 use std::{
-    cmp::{self, Reverse},
+    cmp::Reverse,
     collections::{BinaryHeap, HashMap, HashSet},
     fmt, io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6, UdpSocket},
@@ -68,10 +70,6 @@ pub const SERVICE_NAME_LEN_MAX_DEFAULT: u8 = 15;
 /// The default interval for checking IP changes automatically.
 pub const IP_CHECK_INTERVAL_IN_SECS_DEFAULT: u32 = 5;
 
-/// The default time out for [ServiceDaemon::verify] is 10 seconds, per
-/// [RFC 6762 section 10.4](https://datatracker.ietf.org/doc/html/rfc6762#section-10.4)
-pub const VERIFY_TIMEOUT_DEFAULT: Duration = Duration::from_secs(10);
-
 /// The smallest value accepted by [`ServiceDaemon::set_max_packet_size`].
 pub(crate) const MIN_MAX_PACKET_SIZE: usize = 512;
 
@@ -86,6 +84,7 @@ const LOOPBACK_V4: Ipv4Addr = Ipv4Addr::new(127, 0, 0, 1);
 ///
 /// flume does not preallocate, so unused capacity has no cost. If a receiver falls too far
 /// behind and the channel fills, the subscription is closed (see those APIs).
+#[cfg(test)] // dstack #319: answer-only daemon (DSTACK.md)
 const EVENT_CHANNEL_CAPACITY: usize = 1000;
 
 /// The first fast-path follow-up resolve query fires this soon after an
@@ -135,7 +134,9 @@ const SHARED_RESPONSE_DELAY_MAX_MILLIS: u64 = 50;
 /// 20-120 ms.
 ///
 /// Like the responder delay above, we use a shorter 10-50 ms window.
+#[cfg(test)] // dstack #319: answer-only daemon (DSTACK.md)
 const INITIAL_QUERY_DELAY_MIN_MILLIS: u64 = 10;
+#[cfg(test)] // dstack #319: answer-only daemon (DSTACK.md)
 const INITIAL_QUERY_DELAY_MAX_MILLIS: u64 = 50;
 
 /// The smallest gap between the wall clock and `Instant` that is taken as the
@@ -171,7 +172,9 @@ enum Counter {
     RegisterResend,
     Unregister,
     UnregisterResend,
+    #[cfg(test)]
     Browse,
+    #[cfg(test)]
     ResolveHostname,
     Respond,
     CacheRefreshPTR,
@@ -198,7 +201,9 @@ impl fmt::Display for Counter {
             Self::RegisterResend => write!(f, "register-resend"),
             Self::Unregister => write!(f, "unregister"),
             Self::UnregisterResend => write!(f, "unregister-resend"),
+            #[cfg(test)]
             Self::Browse => write!(f, "browse"),
+            #[cfg(test)]
             Self::ResolveHostname => write!(f, "resolve-hostname"),
             Self::Respond => write!(f, "respond"),
             Self::CacheRefreshPTR => write!(f, "cache-refresh-ptr"),
@@ -447,6 +452,7 @@ impl ServiceDaemon {
     /// Returns [`Error::Again`] if the daemon's command queue is full.
     ///
     /// Returns [`Error::DaemonShutdown`] if the daemon thread has already exited.
+    #[cfg(test)] // dstack #319: answer-only daemon (DSTACK.md)
     pub fn browse(&self, service_type: &str) -> Result<Receiver<ServiceEvent>> {
         check_domain_suffix(service_type)?;
 
@@ -470,6 +476,7 @@ impl ServiceDaemon {
     /// # Errors
     ///
     /// Same error conditions as [`browse`](Self::browse).
+    #[cfg(test)] // dstack #319: answer-only daemon (DSTACK.md)
     pub fn browse_cache(&self, service_type: &str) -> Result<Receiver<ServiceEvent>> {
         check_domain_suffix(service_type)?;
 
@@ -485,6 +492,7 @@ impl ServiceDaemon {
     /// Returns [`Error::Again`] if the daemon's command queue is full.
     ///
     /// Returns [`Error::DaemonShutdown`] if the daemon thread has already exited.
+    #[cfg(test)] // dstack #319: answer-only daemon (DSTACK.md)
     pub fn stop_browse(&self, ty_domain: &str) -> Result<()> {
         self.send_cmd(Command::StopBrowse(ty_domain.to_string()))
     }
@@ -511,6 +519,7 @@ impl ServiceDaemon {
     /// Returns [`Error::Again`] if the daemon's command queue is full.
     ///
     /// Returns [`Error::DaemonShutdown`] if the daemon thread has already exited.
+    #[cfg(test)] // dstack #319: answer-only daemon (DSTACK.md)
     pub fn resolve_hostname(
         &self,
         hostname: &str,
@@ -532,6 +541,7 @@ impl ServiceDaemon {
     /// # Errors
     ///
     /// Same error conditions as [`stop_browse`](Self::stop_browse).
+    #[cfg(test)] // dstack #319: answer-only daemon (DSTACK.md)
     pub fn stop_resolve_hostname(&self, hostname: &str) -> Result<()> {
         self.send_cmd(Command::StopResolveHostname(hostname.to_string()))
     }
@@ -755,7 +765,7 @@ impl ServiceDaemon {
 
     /// If `accept` is true, accept and cache all responses, even if there is no active querier
     /// for a given service type. This is useful / necessary when doing cache-only browsing. See
-    /// [browse_cache](Self::browse_cache).
+    /// `browse_cache` (dstack #319: only in the crate's own tests).
     ///
     /// If `accept` is false (default), accept only responses matching queries that we have initiated.
     ///
@@ -829,7 +839,7 @@ impl ServiceDaemon {
     ///
     /// This call will issue queries for a service instance's SRV record and Address records.
     ///
-    /// For `timeout`, most users should use [VERIFY_TIMEOUT_DEFAULT]
+    /// For `timeout`, most users should use 10 seconds (RFC 6762 §10.4)
     /// unless there is a reason not to follow RFC.
     ///
     /// If no response is received within `timeout`, the current resource
@@ -843,6 +853,7 @@ impl ServiceDaemon {
     /// Returns [`Error::Again`] if the daemon's command queue is full.
     ///
     /// Returns [`Error::DaemonShutdown`] if the daemon thread has already exited.
+    #[cfg(test)] // dstack #319: answer-only daemon (DSTACK.md)
     pub fn verify(&self, instance_fullname: String, timeout: Duration) -> Result<()> {
         self.send_cmd(Command::Verify(instance_fullname, timeout))
     }
@@ -1484,12 +1495,21 @@ impl Zeroconf {
     }
 
     fn clear_service_retransmissions(&mut self, ty_domain: &str) {
+        // dstack #319: no Browse command outside the crate's own tests.
+        #[cfg(test)]
         self.retransmissions
             .retain(|r| !matches!(&r.command, Command::Browse(t, _, _, _) if t == ty_domain));
+        #[cfg(not(test))]
+        let _ = ty_domain;
     }
 
     fn clear_hostname_retransmissions(&mut self, hostname: &str) {
+        // dstack #319: no ResolveHostname command outside the crate's own tests.
+        #[cfg(not(test))]
+        let _ = hostname;
+        #[cfg(test)]
         let key = hostname.to_lowercase();
+        #[cfg(test)]
         self.retransmissions.retain(|r| {
             !matches!(
                 &r.command,
@@ -1514,12 +1534,14 @@ impl Zeroconf {
         entry
     }
 
+    #[cfg(test)] // dstack #319: answer-only daemon (DSTACK.md)
     fn service_live(&self, ty_domain: &str, sender: &Sender<ServiceEvent>) -> bool {
         self.service_queriers
             .get(ty_domain)
             .is_some_and(|s| s.same_channel(sender))
     }
 
+    #[cfg(test)] // dstack #319: answer-only daemon (DSTACK.md)
     fn hostname_live(&self, hostname: &str, sender: &Sender<HostnameResolutionEvent>) -> bool {
         self.hostname_resolvers
             .get(&hostname.to_lowercase())
@@ -2722,6 +2744,7 @@ impl Zeroconf {
     /// Binds a channel `listener` to querying mDNS hostnames.
     ///
     /// If there is already a `listener`, it will be updated, i.e. overwritten.
+    #[cfg(test)] // dstack #319: answer-only daemon (DSTACK.md)
     fn add_hostname_resolver(
         &mut self,
         hostname: String,
@@ -2965,6 +2988,7 @@ impl Zeroconf {
     /// This is meant to be driven by the browse retransmission cycle so a
     /// pending instance keeps being queried for as long as the browse is
     /// active.
+    #[cfg(test)] // dstack #319: answer-only daemon (DSTACK.md)
     fn query_unresolved_instances(&mut self, ty_domain: &str) {
         let now = Instant::now();
         let mut instances = Vec::new();
@@ -2985,6 +3009,7 @@ impl Zeroconf {
 
     /// Checks if `ty_domain` has records in the cache. If yes, sends the
     /// cached records via `sender`.
+    #[cfg(test)] // dstack #319: answer-only daemon (DSTACK.md)
     fn query_cache_for_service(
         &mut self,
         ty_domain: &str,
@@ -3054,6 +3079,7 @@ impl Zeroconf {
 
     /// Checks if `hostname` has records in the cache. If yes, sends the
     /// cached records via `sender`.
+    #[cfg(test)] // dstack #319: answer-only daemon (DSTACK.md)
     fn query_cache_for_hostname(
         &mut self,
         hostname: &str,
@@ -3930,10 +3956,12 @@ impl Zeroconf {
     fn exec_command(&mut self, command: Command, repeating: bool) {
         trace!("exec_command: {:?} repeating: {}", &command, repeating);
         match command {
+            #[cfg(test)]
             Command::Browse(ty, next_delay, cache_only, listener) => {
                 self.exec_command_browse(repeating, ty, next_delay, cache_only, listener);
             }
 
+            #[cfg(test)]
             Command::ResolveHostname(hostname, next_delay, listener, timeout) => {
                 self.exec_command_resolve_hostname(
                     repeating, hostname, next_delay, listener, timeout,
@@ -3964,8 +3992,10 @@ impl Zeroconf {
                 self.exec_command_unregister_resend(packet, if_index, is_ipv4);
             }
 
+            #[cfg(test)]
             Command::StopBrowse(ty_domain) => self.exec_command_stop_browse(ty_domain),
 
+            #[cfg(test)]
             Command::StopResolveHostname(hostname) => {
                 self.exec_command_stop_resolve_hostname(hostname.to_lowercase())
             }
@@ -3997,6 +4027,7 @@ impl Zeroconf {
                 }
             }
 
+            #[cfg(test)]
             Command::Verify(instance_fullname, timeout) => {
                 self.exec_command_verify(instance_fullname, timeout, repeating);
             }
@@ -4061,6 +4092,7 @@ impl Zeroconf {
         }
     }
 
+    #[cfg(test)] // dstack #319: answer-only daemon (DSTACK.md)
     fn exec_command_browse(
         &mut self,
         repeating: bool,
@@ -4138,6 +4170,7 @@ impl Zeroconf {
         self.add_retransmission(next_time, Command::Browse(ty, delay, cache_only, listener));
     }
 
+    #[cfg(test)] // dstack #319: answer-only daemon (DSTACK.md)
     fn exec_command_resolve_hostname(
         &mut self,
         repeating: bool,
@@ -4318,6 +4351,7 @@ impl Zeroconf {
         self.increase_counter(Counter::UnregisterResend, 1);
     }
 
+    #[cfg(test)] // dstack #319: answer-only daemon (DSTACK.md)
     fn exec_command_stop_browse(&mut self, ty_domain: String) {
         match self.remove_service_subscription(&ty_domain) {
             None => debug!("StopBrowse: cannot find querier for {}", &ty_domain),
@@ -4334,6 +4368,7 @@ impl Zeroconf {
         }
     }
 
+    #[cfg(test)] // dstack #319: answer-only daemon (DSTACK.md)
     fn exec_command_stop_resolve_hostname(&mut self, hostname: String) {
         if let Some((sender, _timeout)) = self.remove_hostname_subscription(&hostname) {
             trace!("StopResolve: removed queryer for {}", &hostname);
@@ -4388,6 +4423,7 @@ impl Zeroconf {
         Ok(())
     }
 
+    #[cfg(test)] // dstack #319: answer-only daemon (DSTACK.md)
     fn exec_command_verify(&mut self, instance: String, timeout: Duration, repeating: bool) {
         /*
         RFC 6762 section 10.4:
@@ -4738,9 +4774,11 @@ pub struct DnsNameChange {
 #[derive(Debug)]
 enum Command {
     /// Browsing for a service type (ty_domain, next_time_delay_in_seconds, channel::sender)
+    #[cfg(test)]
     Browse(String, u32, bool, Sender<ServiceEvent>),
 
     /// Resolve a hostname to IP addresses.
+    #[cfg(test)]
     ResolveHostname(String, u32, Sender<HostnameResolutionEvent>, Option<u64>), // (hostname, next_time_delay_in_seconds, sender, timeout_in_milliseconds)
 
     /// Register a service
@@ -4756,9 +4794,11 @@ enum Command {
     UnregisterResend(Vec<u8>, u32, bool), // (packet content, if_index, is_ipv4)
 
     /// Stop browsing a service type
+    #[cfg(test)]
     StopBrowse(String), // (ty_domain)
 
     /// Stop resolving a hostname
+    #[cfg(test)]
     StopResolveHostname(String), // (hostname)
 
     /// Send query to resolve a service instance.
@@ -4782,6 +4822,7 @@ enum Command {
     ///
     /// The intention is to check if a service name or IP address still valid
     /// before its TTL expires.
+    #[cfg(test)]
     Verify(String, Duration),
 
     /// Invalidate some interface addresses.
@@ -4793,7 +4834,9 @@ enum Command {
 impl fmt::Display for Command {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            #[cfg(test)]
             Self::Browse(_, _, _, _) => write!(f, "Command Browse"),
+            #[cfg(test)]
             Self::ResolveHostname(_, _, _, _) => write!(f, "Command ResolveHostname"),
             Self::Exit(_) => write!(f, "Command Exit"),
             Self::GetStatus(_) => write!(f, "Command GetStatus"),
@@ -4803,11 +4846,14 @@ impl fmt::Display for Command {
             Self::RegisterResend(_, _) => write!(f, "Command RegisterResend"),
             Self::SetOption(_) => write!(f, "Command SetOption"),
             Self::GetOption(_) => write!(f, "Command GetOption"),
+            #[cfg(test)]
             Self::StopBrowse(_) => write!(f, "Command StopBrowse"),
+            #[cfg(test)]
             Self::StopResolveHostname(_) => write!(f, "Command StopResolveHostname"),
             Self::Unregister(_, _) => write!(f, "Command Unregister"),
             Self::UnregisterResend(_, _, _) => write!(f, "Command UnregisterResend"),
             Self::Resolve(_, _) => write!(f, "Command Resolve"),
+            #[cfg(test)]
             Self::Verify(_, _) => write!(f, "Command VerifyResource"),
             Self::InvalidIntfAddrs(_) => write!(f, "Command InvalidIntfAddrs"),
         }
