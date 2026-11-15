@@ -38,8 +38,9 @@ use dstack_audio_io::{Block, Process};
 
 use crate::device::Opened;
 
-/// Frames the pump's side converts at once (its interleaved scratch); the
-/// driver's side converts its whole buffer at once ([`Bridge::asio_side`]).
+/// Frames a side converts at once at least (its interleaved scratch): the
+/// pump's side a whole pump block, the driver's side its whole buffer
+/// ([`Bridge::asio_side`]), when wider.
 const CHUNK: usize = 256;
 
 /// What a bridge carries (a dasio bridge instance's settings).
@@ -98,7 +99,9 @@ impl Bridge {
             to_asio: to_asio.clone(),
             from_asio,
             outputs: spec.from_asio,
-            scratch: vec![0.0; CHUNK * spec.from_asio],
+            // A pump block wider than a piece would prime the from-ASIO
+            // player for a piece (dstack #317): one call a block.
+            scratch: vec![0.0; CHUNK.max(spec.block_frames as usize) * spec.from_asio],
         };
         Ok(Bridge {
             spec,
