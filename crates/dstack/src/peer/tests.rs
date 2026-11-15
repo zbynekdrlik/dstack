@@ -225,6 +225,7 @@ fn a_tone_break_logs_one_line() {
         "dstack-dev peer: a tone break",
         "rx_channel=2",
         "gaps=1",
+        "kind=silence",
     ] {
         assert!(line.contains(want), "{want}: {line}");
     }
