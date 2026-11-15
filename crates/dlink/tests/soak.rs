@@ -108,6 +108,11 @@ const MEDIAN_SECONDS: usize = 30;
 /// around the rate (`bridge::player::LEVEL_BOUND_PPM`). A ramp past that
 /// (today's -50 .. +47 ppm before #303) still fails.
 const STALL_BAND_PPM: f64 = 20.0;
+/// A TX tone break belongs to a counted event (an underrun, a re-centre or
+/// a resync) at most this long before it: the event's silence or skip
+/// reaches the output within the converter's delay and the app's block
+/// (dstack #303).
+const TONE_GRACE_NS: u64 = 20 * MS;
 
 const _: () = assert!(FAULT_LATE_NS > W_NS);
 const _: () = assert!(FAULT_AT_NS + RESETTLE_NS + SETTLED_NS <= SOAK_NS);
@@ -188,6 +193,26 @@ fn gaps_within(at: &[u64], from: u64, to: u64) -> usize {
     at.iter().filter(|&&t| t >= from && t <= to).count()
 }
 
+/// The breaks in `breaks` (media times, in order) that no counted event in
+/// `counted` (media times, in order) accounts for: each break takes the
+/// earliest event not yet taken within `grace` before it (or at it), one
+/// event a break.
+fn unaccounted(breaks: &[u64], counted: &[u64], grace: u64) -> Vec<u64> {
+    let mut next = 0;
+    let mut left = Vec::new();
+    for &at in breaks {
+        while next < counted.len() && counted[next] + grace < at {
+            next += 1;
+        }
+        if next < counted.len() && counted[next] <= at {
+            next += 1;
+        } else {
+            left.push(at);
+        }
+    }
+    left
+}
+
 /// The median of `values` (not empty).
 fn median(values: &mut [f64]) -> f64 {
     values.sort_by(f64::total_cmp);
@@ -214,6 +239,13 @@ struct Soak {
     /// a step of the simulation) after priming.
     tx_gap_at: Vec<u64>,
     rx_gap_at: Vec<u64>,
+    /// From the TX bridge's first primed step on (settle time included,
+    /// dstack #303): the media times of each TX tone break and of each
+    /// counted TX event (an underrun, a re-centre or a resync), one entry
+    /// a count.
+    tx_primed: Option<Counts>,
+    tone_break_at: Vec<u64>,
+    tx_counted_at: Vec<u64>,
     /// The counts once both bridges ran (priming done), and each second's.
     primed: Option<Counts>,
     seconds: Vec<Counts>,
@@ -248,6 +280,9 @@ impl Soak {
             stalls: Vec::new(),
             tx_gap_at: Vec::new(),
             rx_gap_at: Vec::new(),
+            tx_primed: None,
+            tone_break_at: Vec::new(),
+            tx_counted_at: Vec::new(),
             primed: None,
             seconds: Vec::new(),
             before_fault: None,
@@ -356,6 +391,7 @@ impl Soak {
         let mut second = T0 + SECOND;
         let mut faulted = !self.fault;
         let mut gaps = (0, 0);
+        let mut tx_last: Option<Counts> = None;
         while wake_at.min(tick_at) < end {
             let at = wake_at.min(tick_at);
             if wake_at <= tick_at {
@@ -382,6 +418,20 @@ impl Soak {
             }
             let now = wake_at.min(tick_at);
             let counts = Counts::of(&p, at);
+            if self.tx_primed.is_none() && !p.tx_stats.priming() {
+                self.tx_primed = Some(counts);
+            }
+            if let Some(last) = tx_last {
+                let breaks = counts.tx_tone_gaps - last.tx_tone_gaps;
+                let counted = counts.tx_events() - last.tx_events();
+                self.tone_break_at
+                    .extend(std::iter::repeat_n(at, breaks as usize));
+                self.tx_counted_at
+                    .extend(std::iter::repeat_n(at, counted as usize));
+            }
+            if self.tx_primed.is_some() {
+                tx_last = Some(counts);
+            }
             if self.primed.is_none() && !p.tx_stats.priming() && !p.rx_stats.priming() {
                 self.primed = Some(Counts::of(&p, now));
                 gaps = (counts.tx_sum(), counts.rx_sum());
@@ -447,8 +497,10 @@ impl Soak {
 
     /// The pass criteria (#304's design and the main's decisions on it),
     /// hard:
-    /// - after priming: every TX tone gap counted (an underrun, a re-centre
-    ///   or a resync each), so with none counted, no tone gap at all;
+    /// - from the TX bridge's first primed step (settle time and a fault's
+    ///   30 s included): every TX tone break accounted for by its own
+    ///   counted event (an underrun, a re-centre or a resync) at most
+    ///   [`TONE_GRACE_NS`] before it, so with none counted, no break at all;
     /// - after priming: no TX dropout or re-centre; an irregular writer's
     ///   gaps only at its stalls (one a stall at most: a stall past the
     ///   FIFO's depth is a gap no ratio can mend), none away from them;
@@ -476,10 +528,12 @@ impl Soak {
                 (lo.min(m), hi.max(m))
             });
         println!(
-            "{label}: TX gaps {} ({} stalls), RX gaps {}, TX ppm 30 s median \
-             {lo:.2} .. {hi:.2} over the last 5 min, last {last:?}",
+            "{label}: TX gaps {} ({} stalls), TX tone breaks {} (events {}), RX gaps {}, \
+             TX ppm 30 s median {lo:.2} .. {hi:.2} over the last 5 min, last {last:?}",
             self.tx_gap_at.len(),
             self.stalls.len(),
+            self.tone_break_at.len(),
+            self.tx_counted_at.len(),
             self.rx_gap_at.len(),
         );
         assert!(
@@ -552,12 +606,21 @@ impl Soak {
         };
         // Every discontinuity of the TX output is counted (dstack #303,
         // obs's v0.6.140 soak: its peer heard 2 tone gaps while dante-input
-        // counted none): an underrun, a re-centre or a resync for each.
-        let tone_gaps = last.tx_tone_gaps - primed.tx_tone_gaps;
-        let counted = (last.tx_sum() + last.tx_resyncs) - (primed.tx_sum() + primed.tx_resyncs);
+        // counted none), each by its own event (an underrun, a re-centre or
+        // a resync) just before it, from the TX bridge's first primed step
+        // on: the settle time and a fault's 30 s too, never only the judged
+        // window (obs's 24 ms break 14 s into a stream, before lock).
+        let tx_primed = self
+            .tx_primed
+            .unwrap_or_else(|| panic!("{label}: TX never primed"));
+        let uncounted = unaccounted(&self.tone_break_at, &self.tx_counted_at, TONE_GRACE_NS);
         assert!(
-            tone_gaps <= counted,
-            "{label}: {tone_gaps} TX tone gaps, {counted} counted: {primed:?} {last:?}"
+            uncounted.is_empty(),
+            "{label}: TX tone breaks no counted event accounts for at {:?} s \
+             (breaks at {:?} s, events at {:?} s): {tx_primed:?} {last:?}",
+            self.gap_seconds(&uncounted),
+            self.gap_seconds(&self.tone_break_at),
+            self.gap_seconds(&self.tx_counted_at),
         );
         match self.writer {
             Writer::Ticks | Writer::LatePass | Writer::Steady => assert_eq!(
@@ -771,4 +834,29 @@ fn the_median_ignores_a_spike_and_follows_a_ramp() {
     assert_eq!(median(&mut spike), 6.0);
     let mut ramp = [6.0, -20.0, -40.0, -60.0];
     assert_eq!(median(&mut ramp), -30.0);
+}
+
+/// Each tone break takes one counted event at or up to the grace before
+/// it; an event after the break, too early, or already taken leaves it
+/// unaccounted (dstack #303).
+#[test]
+fn each_tone_break_takes_its_own_event_just_before_it() {
+    let g = 20;
+    assert_eq!(unaccounted(&[], &[], g), Vec::<u64>::new());
+    assert_eq!(unaccounted(&[100], &[100], g), Vec::<u64>::new(), "same step");
+    assert_eq!(unaccounted(&[100], &[80], g), Vec::<u64>::new(), "the grace");
+    assert_eq!(unaccounted(&[100], &[79], g), [100], "too early");
+    assert_eq!(unaccounted(&[100], &[101], g), [100], "after it");
+    assert_eq!(unaccounted(&[100, 105], &[90], g), [105], "one event a break");
+    assert_eq!(
+        unaccounted(&[100, 105], &[90, 100], g),
+        Vec::<u64>::new(),
+        "two events, two breaks"
+    );
+    assert_eq!(
+        unaccounted(&[10, 500], &[5, 1000], g),
+        [500],
+        "an event elsewhere covers nothing"
+    );
+    assert_eq!(unaccounted(&[], &[5], g), Vec::<u64>::new(), "events alone");
 }

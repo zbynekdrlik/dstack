@@ -320,6 +320,12 @@ impl Counts {
         self.tx_underruns + self.tx_recentres
     }
 
+    /// Every counted TX event a tone break may come from: the gap
+    /// counters and the resyncs.
+    pub(crate) fn tx_events(&self) -> u64 {
+        self.tx_sum() + self.tx_resyncs
+    }
+
     /// The RX side's.
     pub(crate) fn rx_sum(&self) -> u64 {
         self.rx_underruns + self.rx_recentres
