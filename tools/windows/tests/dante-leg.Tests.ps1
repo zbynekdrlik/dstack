@@ -403,6 +403,8 @@ foreach ($f in 'Get-NetAdapter', 'Get-NetFirewallProfile', 'New-NetFirewallRule'
 }
 $script:Group = "dstack-test-dante-leg-$PID"
 $script:MdnsCap = "dstack-test-mdns-cap-$PID"
+# Set by the first real check once it found the runner's adapter.
+$script:RunnerAlias = ''
 try {
     Check 'the real firewall reads the group back as created (disabled, on the runner adapter)' {
         # An alias the firewall binds: a connected IPv4 interface. The first
@@ -432,6 +434,7 @@ try {
     }
     Check 'the real QoS store: the one-leg cap alone installs, reads back and goes, no rule made' {
         $alias = $script:RunnerAlias
+        if ($alias -eq '') { throw 'no runner adapter: the first real check did not find one' }
         $out = Install-MdnsCapOnly -Interface $alias
         $again = Install-MdnsCapOnly -Interface $alias
         $problems = @(Get-MdnsCapProblems)
