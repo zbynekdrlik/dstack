@@ -216,10 +216,78 @@ fn a_dropout_ends_as_one_break_of_its_length() {
     let mut check = ToneCheck::default();
     let mut ended = Vec::new();
     for b in x.chunks(BLOCK) {
-        check.block_with(b, |len, gaps| ended.push((len, gaps)));
+        check.block_with(b, |len, gaps, kind| ended.push((len, gaps, kind)));
     }
     assert_eq!(ended.len(), 1, "{ended:?}");
-    let (len, gaps) = ended[0];
+    let (len, gaps, kind) = ended[0];
     assert!((300..=304).contains(&len), "{len}");
     assert_eq!(gaps, 1);
+    assert_eq!(kind, GapKind::Silence);
+}
+
+/// The kinds of `x`'s gaps, fed in blocks of [`BLOCK`].
+fn kinds(x: &[f64]) -> Vec<GapKind> {
+    let mut check = ToneCheck::default();
+    let mut ended = Vec::new();
+    for b in x.chunks(BLOCK) {
+        check.block_with(b, |_, _, kind| ended.push(kind));
+    }
+    ended
+}
+
+/// dstack #303: a gap says what broke it, so a reader tells an app's own
+/// silence (obs's 24 ms breaks: OBS left the source out of a mix tick)
+/// from a stack skip at once.
+#[test]
+fn a_gap_says_whether_the_energy_dropped_or_a_sample_was_out_of_place() {
+    for hz in [440, 1000] {
+        let x = tone(0, 100 * BLOCK, hz);
+        // Silence of each length from 3 samples (two zero pairs inside it),
+        // and a level drop to 0.1.
+        for len in [3, 4, 16, 300, 2304] {
+            let mut y = tone(0, 100 * BLOCK + len, hz);
+            y[40 * BLOCK..40 * BLOCK + len].fill(0.0);
+            assert_eq!(kinds(&y), [GapKind::Silence], "{hz} Hz, {len} silent");
+        }
+        let mut quiet = x.clone();
+        for v in &mut quiet[40 * BLOCK..41 * BLOCK] {
+            *v *= 0.1;
+        }
+        assert_eq!(kinds(&quiet)[0], GapKind::Silence, "{hz} Hz, a level drop");
+        // A sample out of place, at every phase of the period.
+        for at in 40 * BLOCK..40 * BLOCK + 110 {
+            let mut skip = x.clone();
+            skip.remove(at);
+            assert_eq!(kinds(&skip), [GapKind::Misplaced], "{hz} Hz, skip at {at}");
+            let mut repeat = x.clone();
+            repeat.insert(at, x[at]);
+            assert_eq!(
+                kinds(&repeat),
+                [GapKind::Misplaced],
+                "{hz} Hz, repeat at {at}"
+            );
+            // The tone jumps 2300 samples ahead (about obs's break; not a
+            // whole number of either tone's periods).
+            let jump = [&x[..at], &tone(at as u64 + 2300, 50 * BLOCK, hz)[..]].concat();
+            assert_eq!(kinds(&jump), [GapKind::Misplaced], "{hz} Hz, jump at {at}");
+        }
+    }
+}
+
+#[test]
+fn a_gap_kind_is_silence_from_two_quiet_samples() {
+    assert_eq!(GapKind::of(0), GapKind::Misplaced);
+    assert_eq!(GapKind::of(1), GapKind::Misplaced);
+    assert_eq!(GapKind::of(SILENT_PAIRS), GapKind::Silence);
+    assert_eq!(GapKind::of(u32::MAX), GapKind::Silence);
+    assert_eq!(GapKind::Silence.to_string(), "silence");
+    assert_eq!(GapKind::Misplaced.to_string(), "misplaced");
+}
+
+/// A NaN sample is a gap of a sample out of place, not silence.
+#[test]
+fn a_nan_sample_is_misplaced() {
+    let mut x = tone(0, 100 * BLOCK, 1000);
+    x[40 * BLOCK + 5] = f64::NAN;
+    assert_eq!(kinds(&x), [GapKind::Misplaced]);
 }

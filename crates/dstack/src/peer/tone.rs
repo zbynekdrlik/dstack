@@ -18,8 +18,15 @@
 //! sin²ω, whatever the phase) under a quarter of the tone's (silence, a
 //! level drop) is bad. A run of bad samples is one gap (`tone_gaps`); it
 //! ends after [`CLEAR`] good samples in a row, and then its length (first
-//! bad sample to last) goes to [`ToneCheck::block_with`]'s caller (the
-//! peer logs one line a break, dstack #303).
+//! bad sample to last) and its [`GapKind`] go to [`ToneCheck::block_with`]'s
+//! caller (the peer logs one line a break, dstack #303).
+//!
+//! The kind tells the two causes apart (dstack #303: obs's 24 ms breaks
+//! were silence in OBS's mix, not a stack skip): a sample out of place
+//! (a skip, a repeat, a jump) breaks the recurrence at one pair of samples
+//! and leaves the energy of at most one pair under the quarter, so a gap
+//! with [`SILENT_PAIRS`] or more such samples is [`GapKind::Silence`]
+//! (energy dropped), any other [`GapKind::Misplaced`].
 //!
 //! Why not [`crate::media::check::SineCheck`] (the HIL sine check): it
 //! needs the frequency up front (the peer hears whatever tone the app
@@ -38,6 +45,48 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 pub const LEVEL: f64 = 0.5;
 /// Good samples in a row that end a gap.
 pub const CLEAR: u32 = 16;
+/// Samples of a gap with the energy under a quarter of the tone's that
+/// make it a [`GapKind::Silence`]: one sample out of place leaves at most
+/// one such sample (its one pair), a silence of n samples at least n - 1
+/// (every pair inside it), so any silence of 3 samples or more.
+pub const SILENT_PAIRS: u32 = 2;
+
+/// What broke a gap (module doc).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GapKind {
+    /// The tone's energy dropped (silence, a level drop): the audio was
+    /// not there.
+    Silence,
+    /// The energy held but a sample was out of place (a skip, a repeat,
+    /// a jump).
+    Misplaced,
+}
+
+impl GapKind {
+    /// The kind of a gap whose samples had the energy under a quarter of
+    /// the tone's `quiet` times.
+    pub fn of(quiet: u32) -> GapKind {
+        if quiet >= SILENT_PAIRS {
+            GapKind::Silence
+        } else {
+            GapKind::Misplaced
+        }
+    }
+
+    /// `silence` or `misplaced`, the WARN's `kind`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            GapKind::Silence => "silence",
+            GapKind::Misplaced => "misplaced",
+        }
+    }
+}
+
+impl std::fmt::Display for GapKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 /// The least amplitude a received tone is locked on (-60 dBFS).
 pub const MIN_AMPLITUDE: f64 = 1e-3;
 /// The highest |cos ω| a tone may have: under it, the tone is neither DC
@@ -177,6 +226,8 @@ pub struct ToneCheck {
     good_run: u32,
     /// Samples since the open gap's first bad one, the good run included.
     gap_len: u64,
+    /// The open gap's bad samples whose energy was under the quarter.
+    gap_quiet: u32,
     gaps: u64,
 }
 
@@ -194,22 +245,27 @@ impl ToneCheck {
     /// One block of the channel's samples: judged against the last clean
     /// block's fit, then fitted.
     pub fn block(&mut self, x: &[f64]) {
-        self.block_with(x, |_, _| {});
+        self.block_with(x, |_, _, _| {});
     }
 
-    /// [`ToneCheck::block`], calling `ended(samples, gaps)` for each gap
-    /// that ends in the block: its length, first bad sample to last, and
-    /// the gaps so far.
-    pub fn block_with(&mut self, x: &[f64], mut ended: impl FnMut(u64, u64)) {
+    /// [`ToneCheck::block`], calling `ended(samples, gaps, kind)` for each
+    /// gap that ends in the block: its length, first bad sample to last,
+    /// the gaps so far and what broke it.
+    pub fn block_with(&mut self, x: &[f64], mut ended: impl FnMut(u64, u64, GapKind)) {
         if let (Some(f), 2) = (self.fit, self.seen) {
             let [mut p2, mut p1] = self.before;
             for &s in x {
+                let energy = invariant(s, p1, f.c);
                 // Written so a NaN sample is bad: no comparison holds.
                 let good = residual(s, p1, p2, f.c).abs() <= f.threshold
-                    && invariant(s, p1, f.c) >= f.energy / 4.0;
+                    && energy >= f.energy / 4.0;
                 let bad = !good;
                 if let Some(len) = self.judge(bad) {
-                    ended(len, self.gaps);
+                    ended(len, self.gaps, GapKind::of(self.gap_quiet));
+                }
+                // A NaN is no energy drop: misplaced.
+                if bad && energy < f.energy / 4.0 {
+                    self.gap_quiet = self.gap_quiet.saturating_add(1);
                 }
                 (p2, p1) = (p1, s);
             }
@@ -237,6 +293,7 @@ impl ToneCheck {
                 self.in_gap = true;
                 self.gaps += 1;
                 self.gap_len = 0;
+                self.gap_quiet = 0;
             }
         } else {
             self.good_run = self.good_run.saturating_add(1);
