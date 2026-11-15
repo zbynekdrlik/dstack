@@ -12,8 +12,9 @@
 # unbound, the adapter was disabled), a headless PC loses everything it does on
 # the LAN (remote desktop, NDI, web UIs, updates); only ssh and the MCP stay
 # reachable on the Dante address (docs/two-networks.md). This script, run as SYSTEM by
-# a scheduled task every minute, checks the LAN leg (an IPv4 lease on the LAN
-# adapter, the gateway's route through it, the gateway's answer); after the
+# a scheduled task as one long-lived loop, checks the LAN leg once a minute (an
+# IPv4 lease on the LAN adapter, the gateway's route through it, the gateway's
+# answer); after the
 # configured number of consecutive failed minutes it puts the LAN adapter
 # back: enabled, its VLAN ID the config's lanVlanId (set only through the
 # driver's "VLAN ID" property; without one the mismatch it reads is logged and
@@ -46,10 +47,22 @@
 # repair runs unless both adapters resolve, by exact name, to two different
 # interfaces.
 #
+# One loop, not a process a minute (#312): a new powershell.exe each minute
+# imported the NetAdapter/NetTCPIP modules and ran CIM queries (~1.6 s CPU,
+# ~0.5 s more in WmiPrvSE, measured on iem-snv), and that stall made a
+# small-margin audio pump on the same PC wake late. The task now starts one
+# process at boot, at BelowNormal priority, that sleeps 60 s between checks.
+# A healthy minute costs only .NET reads (the adapter's status and IPv4
+# addresses, the route's source address, one ping): no CIM, no WMI. Only a
+# failed quick check runs the full check (the CIM reads, the down-counter, the
+# repair, the legacy cleanup), unchanged.
+#
 # Modes:
-#   lan-selfheal.ps1                  one check (what the task runs)
-#   lan-selfheal.ps1 -Mode install    copy to C:\ProgramData\dstack and register the task
-#   lan-selfheal.ps1 -Mode uninstall  remove the task (config and log stay)
+#   lan-selfheal.ps1                  one full check (a manual run)
+#   lan-selfheal.ps1 -Mode loop       the long-lived checker the task runs
+#   lan-selfheal.ps1 -Mode install    copy to C:\ProgramData\dstack, register the task (an
+#                                     existing per-minute task is replaced) and start it
+#   lan-selfheal.ps1 -Mode uninstall  stop and remove the task (config and log stay)
 #
 # Config (JSON, site data, never in the repo):
 #   { "lanAdapter": "<LAN adapter name>", "gateway": "<LAN gateway IPv4>",
@@ -61,7 +74,7 @@
 
 [CmdletBinding()]
 param(
-    [ValidateSet('run', 'install', 'uninstall')]
+    [ValidateSet('run', 'loop', 'install', 'uninstall')]
     [string]$Mode = 'run',
     [string]$Dir = 'C:\ProgramData\dstack'
 )
@@ -72,6 +85,10 @@ Set-StrictMode -Version 2.0
 $script:TaskName = 'dstack LAN self-heal'
 $script:LogMaxBytes = 1MB
 $script:RestartGapMinutes = 30
+# The loop (#312): one check a minute; the task's watchdog trigger restarts a
+# dead loop (IgnoreNew: no process while the loop runs).
+$script:LoopSeconds = 60
+$script:WatchdogMinutes = 5
 # The 0.6.109 emergency path, removed in 0.6.111 (#239): what a run cleans up.
 $script:LegacyKeys = @('emergencySource', 'emergencyPort', 'danteBlockRule')
 $script:LegacyRuleNames = @('dstack-emergency-block-others', 'dstack-emergency-block-source-ports')
@@ -307,6 +324,60 @@ function Read-HealState {
             [Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime()
     }
     $s
+}
+
+function Get-QuickFault {
+    # The loop's quick check (#312), from .NET reads only: why the LAN leg
+    # looks down, or '' when it looks healthy. The same conditions as
+    # Get-LegFault, with the route read as the source address the route to the
+    # gateway takes (it is the LAN's when it is one of the LAN adapter's
+    # addresses). A fault here only sends the minute to the full check.
+    param(
+        [Parameter(Mandatory)][int]$Count,
+        [Parameter(Mandatory)][bool]$Up,
+        [AllowNull()][AllowEmptyCollection()][string[]]$Addresses,
+        [AllowNull()][AllowEmptyString()][string]$RouteSource,
+        [bool]$PingOk
+    )
+    if ($Count -ne 1) { return "$Count interfaces named as the LAN adapter (need exactly 1)" }
+    if (-not $Up) { return 'the LAN adapter is not up' }
+    if (-not (Test-UsableIPv4 -Addresses $Addresses)) { return 'no usable IPv4 address on the LAN adapter' }
+    if ([string]::IsNullOrEmpty($RouteSource) -or @($Addresses) -notcontains $RouteSource) {
+        return "the route to the gateway is not on the LAN adapter (source address '$RouteSource')"
+    }
+    if (-not $PingOk) { return 'the gateway does not answer' }
+    ''
+}
+
+function Test-LoopTaskShape {
+    # What the registered task must be (#312), '' when it is: SYSTEM, the
+    # loop's command line, started at boot, a watchdog trigger every
+    # WatchdogMinutes with no end, no per-minute trigger, no time limit,
+    # IgnoreNew (the watchdog never starts a second loop), restart on
+    # failure, BelowNormal priority (7).
+    param([Parameter(Mandatory)]$Task, [Parameter(Mandatory)][string]$Execute, [Parameter(Mandatory)][string]$Argument)
+    if ([string]$Task.Principal.UserId -notmatch 'SYSTEM$') { return "the task runs as '$($Task.Principal.UserId)', not SYSTEM" }
+    $acts = @($Task.Actions)
+    if ($acts.Count -ne 1 -or $acts[0].Execute -ne $Execute -or $acts[0].Arguments -ne $Argument) {
+        return 'the task action is not the loop (-Mode loop)'
+    }
+    $triggers = @($Task.Triggers)
+    $perMinute = @($triggers | Where-Object { $_.Repetition -and $_.Repetition.Interval -eq 'PT1M' })
+    if ($perMinute.Count -gt 0) { return 'a trigger still starts the task every minute' }
+    $boot = @($triggers | Where-Object { $_.CimClass.CimClassName -eq 'MSFT_TaskBootTrigger' })
+    if ($boot.Count -ne 1) { return "$($boot.Count) start-up triggers (need 1)" }
+    $want = 'PT{0}M' -f $script:WatchdogMinutes
+    $dog = @($triggers | Where-Object { $_.Repetition -and $_.Repetition.Interval -eq $want })
+    if ($dog.Count -ne 1 -or -not [string]::IsNullOrEmpty($dog[0].Repetition.Duration)) {
+        return "no watchdog trigger repeating every $($script:WatchdogMinutes) min without end"
+    }
+    if ($triggers.Count -ne 2) { return "$($triggers.Count) triggers (need the start-up one and the watchdog)" }
+    $s = $Task.Settings
+    if ([string]$s.ExecutionTimeLimit -ne 'PT0S') { return "the task has a time limit ($($s.ExecutionTimeLimit)): the loop would be stopped" }
+    if ([string]$s.MultipleInstances -ne 'IgnoreNew') { return "MultipleInstances is $($s.MultipleInstances), not IgnoreNew" }
+    if ([int]$s.Priority -ne 7) { return "the task priority is $($s.Priority), not 7 (BelowNormal)" }
+    if ([int]$s.RestartCount -lt 1) { return 'no restart on failure' }
+    ''
 }
 
 # --------------------------------------------------------- side-effect layer
@@ -675,6 +746,126 @@ function Invoke-Check {
     }
 }
 
+function Read-QuickLan {
+    # The LAN adapter by exact name from .NET (no CIM): how many interfaces
+    # carry the name, whether it is up, its IPv4 addresses. A disabled adapter
+    # is not listed (count 0).
+    param([Parameter(Mandatory)][string]$Name)
+    $nic = @([System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces() | Where-Object { $_.Name -eq $Name })
+    if ($nic.Count -ne 1) { return [pscustomobject]@{ Count = $nic.Count; Up = $false; Addresses = @() } }
+    $v4 = [System.Net.Sockets.AddressFamily]::InterNetwork
+    $addresses = @($nic[0].GetIPProperties().UnicastAddresses |
+        Where-Object { $_.Address.AddressFamily -eq $v4 } | ForEach-Object { $_.Address.ToString() })
+    [pscustomobject]@{
+        Count     = 1
+        Up        = ($nic[0].OperationalStatus -eq [System.Net.NetworkInformation.OperationalStatus]::Up)
+        Addresses = $addresses
+    }
+}
+
+function Get-RouteSourceAddress {
+    # The source address Windows picks for the gateway: a UDP socket's
+    # connect only looks the route up, it sends nothing. '' with no route.
+    param([Parameter(Mandatory)][string]$Gateway)
+    $sock = New-Object System.Net.Sockets.Socket([System.Net.Sockets.AddressFamily]::InterNetwork,
+        [System.Net.Sockets.SocketType]::Dgram, [System.Net.Sockets.ProtocolType]::Udp)
+    try {
+        $sock.Connect([System.Net.IPAddress]::Parse($Gateway), 9)
+        return ([System.Net.IPEndPoint]$sock.LocalEndPoint).Address.ToString()
+    } catch {
+        # no route to the gateway: a fault, which the full check reads again
+        return ''
+    } finally { $sock.Dispose() }
+}
+
+function Get-QuickLegFault {
+    # The quick check of one minute: .NET reads and at most one ping burst.
+    param([Parameter(Mandatory)]$Config)
+    $lan = Read-QuickLan -Name $Config.LanAdapter
+    $source = ''
+    $ping = $false
+    if ($lan.Count -eq 1 -and $lan.Up -and (Test-UsableIPv4 -Addresses $lan.Addresses)) {
+        $source = Get-RouteSourceAddress -Gateway $Config.Gateway
+        if ($source -and @($lan.Addresses) -contains $source) { $ping = Test-Gateway -Address $Config.Gateway }
+    }
+    Get-QuickFault -Count $lan.Count -Up $lan.Up -Addresses $lan.Addresses -RouteSource $source -PingOk $ping
+}
+
+function New-LoopState {
+    # NeedFull: the next minute runs the full check. True at the start (the
+    # legacy cleanup and the Dante-adapter warning run once per loop start).
+    [pscustomobject]@{ NeedFull = $true }
+}
+
+function Invoke-LoopIteration {
+    # One minute of the loop (#312). A healthy quick check logs "gateway ok"
+    # and touches nothing else; anything else runs Invoke-Check unchanged
+    # (the CIM reads, the down-counter, the repair). After a full check that
+    # was not clean (exit 1, or a down count above 0) the next minute is a
+    # full check too, so the count runs and resets exactly as before.
+    # Returns the minute's exit code.
+    param([Parameter(Mandatory)][string]$Dir, [Parameter(Mandatory)]$Loop)
+    $configPath = Join-Path $Dir 'lan-selfheal.json'
+    $statePath = Join-Path $Dir 'lan-selfheal.state.json'
+    $log = Join-Path $Dir 'lan-selfheal.log'
+    if (-not $Loop.NeedFull -and (Test-Path -LiteralPath $configPath)) {
+        try {
+            $quick = Get-QuickLegFault -Config (Read-HealConfig -Json (Get-Content -LiteralPath $configPath -Raw))
+        } catch {
+            $quick = "quick check failed: $($_.Exception.Message)"
+        }
+        if ($quick -eq '') {
+            Write-HealLog -Path $log -Message 'gateway ok'
+            return 0
+        }
+        Write-HealLog -Path $log -Message "quick check: ${quick}; full check"
+    }
+    $code = [int](Invoke-Check -Dir $Dir | Select-Object -Last 1)
+    $failures = 0
+    if (Test-Path -LiteralPath $statePath) {
+        try { $failures = (Read-HealState -Json (Get-Content -LiteralPath $statePath -Raw)).Failures }
+        catch { $failures = 1 }
+    }
+    $Loop.NeedFull = ($code -ne 0) -or ($failures -gt 0)
+    $code
+}
+
+function Set-LoopPriority {
+    # BelowNormal: the loop's CPU never preempts an audio thread (#312).
+    param([Parameter(Mandatory)]$Process)
+    $Process.PriorityClass = [System.Diagnostics.ProcessPriorityClass]::BelowNormal
+}
+
+function Invoke-Loop {
+    # The task's long-lived checker (#312): one check every LoopSeconds, for
+    # ever (MaxIterations 0). An iteration's error is logged and the next
+    # minute is a full check; the loop itself never stops on one.
+    param(
+        [Parameter(Mandatory)][string]$Dir,
+        [int]$MaxIterations = 0,
+        [int]$IntervalSeconds = $script:LoopSeconds,
+        $Process = [System.Diagnostics.Process]::GetCurrentProcess()
+    )
+    $log = Join-Path $Dir 'lan-selfheal.log'
+    Set-LoopPriority -Process $Process
+    if (Test-Path -LiteralPath $Dir) {
+        Write-HealLog -Path $log -Message "loop started: pid $($Process.Id), priority $($Process.PriorityClass), a check every $IntervalSeconds s"
+    }
+    $loop = New-LoopState
+    $n = 0
+    while ($MaxIterations -le 0 -or $n -lt $MaxIterations) {
+        try {
+            [void](Invoke-LoopIteration -Dir $Dir -Loop $loop)
+        } catch {
+            $loop.NeedFull = $true
+            try { Write-HealLog -Path $log -Message "ERROR loop: $($_.Exception.Message)" }
+            catch { Write-Error -ErrorAction Continue "lan-selfheal: log not writable: $($_.Exception.Message)" }
+        }
+        $n++
+        if ($MaxIterations -le 0 -or $n -lt $MaxIterations) { Start-Sleep -Seconds $IntervalSeconds }
+    }
+}
+
 function Set-AdminOnlyAcl {
     # A script SYSTEM runs must not be writable by anyone else: owner
     # Administrators, inheritance reset, SYSTEM and Administrators full,
@@ -718,29 +909,39 @@ function Install-SelfHeal {
         Set-AdminOnlyAcl -Path $Dir
     }
     $exe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-    $arg = '-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}"' -f $target
+    $arg = '-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" -Mode loop' -f $target
     $action = New-ScheduledTaskAction -Execute $exe -Argument $arg
-    $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 1)
+    # One loop from boot (#312), no per-minute start. Restart-on-failure covers
+    # a start that fails; the watchdog trigger covers a loop that died later
+    # (IgnoreNew: while the loop runs it starts nothing).
     $boot = New-ScheduledTaskTrigger -AtStartup
+    $watchdog = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes $script:WatchdogMinutes)
     $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
     $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
-        -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 5)
-    Register-ScheduledTask -TaskName $script:TaskName -Action $action -Trigger @($trigger, $boot) `
+        -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) `
+        -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -Priority 7
+    # An installed task (the per-minute one before #312, or a running loop of
+    # an older copy) is stopped first, then replaced by name: one task, the
+    # new script loaded.
+    $old = Get-ScheduledTask -TaskName $script:TaskName -ErrorAction SilentlyContinue
+    if ($old) {
+        $was = @($old.Triggers | ForEach-Object {
+                if ($_.Repetition -and $_.Repetition.Interval) { "every $($_.Repetition.Interval)" } else { [string]$_.CimClass.CimClassName } }) -join ', '
+        Stop-ScheduledTask -TaskName $script:TaskName
+        Write-HealLog -Path (Join-Path $Dir 'lan-selfheal.log') -Message "install: stopped and replacing the existing task (triggers: $was)"
+    }
+    Register-ScheduledTask -TaskName $script:TaskName -Action $action -Trigger @($boot, $watchdog) `
         -Principal $principal -Settings $settings -Force | Out-Null
     # Read back what was registered.
-    $t = Get-ScheduledTask -TaskName $script:TaskName
-    if ($t.Principal.UserId -notmatch 'SYSTEM$') { throw "install check: the task runs as '$($t.Principal.UserId)', not SYSTEM" }
-    $rep = @($t.Triggers | Where-Object { $_.Repetition -and $_.Repetition.Interval -eq 'PT1M' })
-    if ($rep.Count -ne 1 -or -not [string]::IsNullOrEmpty($rep[0].Repetition.Duration)) {
-        throw 'install check: no trigger repeating every minute without end'
-    }
-    if ($t.Actions[0].Execute -ne $exe -or $t.Actions[0].Arguments -ne $arg) { throw 'install check: the task action differs' }
+    $problem = Test-LoopTaskShape -Task (Get-ScheduledTask -TaskName $script:TaskName) -Execute $exe -Argument $arg
+    if ($problem) { throw "install check: $problem" }
+    Start-ScheduledTask -TaskName $script:TaskName
     $desc = Get-AdapterDescription -Adapter $adapters.Lan
     $kind = if ([string]::IsNullOrWhiteSpace($desc)) { 'no readable description: its repair never restarts it, it renews DHCP' }
         elseif (Test-VirtualVlanAdapter -InterfaceDescription $desc) { "a virtual VLAN adapter ('$desc'): its repair never restarts it, it renews DHCP" }
         else { "'$desc': its repair may restart it" }
-    Write-HealLog -Path (Join-Path $Dir 'lan-selfheal.log') -Message "installed: task '$($script:TaskName)' every minute and at startup as SYSTEM, script $target, LAN adapter '$($cfg.LanAdapter)' on VLAN $($cfg.LanVlanId) (0 = untagged), $kind"
-    "installed '$($script:TaskName)' ($target)"
+    Write-HealLog -Path (Join-Path $Dir 'lan-selfheal.log') -Message "installed: task '$($script:TaskName)' as SYSTEM, one loop from start-up (a check every $($script:LoopSeconds) s, BelowNormal, watchdog every $($script:WatchdogMinutes) min), started now, script $target, LAN adapter '$($cfg.LanAdapter)' on VLAN $($cfg.LanVlanId) (0 = untagged), $kind"
+    "installed '$($script:TaskName)' ($target, -Mode loop, started)"
 }
 
 function Uninstall-SelfHeal {
@@ -766,6 +967,8 @@ function Uninstall-SelfHeal {
         }
     }
     if (Get-ScheduledTask -TaskName $script:TaskName -ErrorAction SilentlyContinue) {
+        # The loop runs until stopped (#312).
+        Stop-ScheduledTask -TaskName $script:TaskName
         Unregister-ScheduledTask -TaskName $script:TaskName -Confirm:$false
     }
     if (Test-Path -LiteralPath $Dir) {
@@ -784,6 +987,10 @@ if ($MyInvocation.InvocationName -ne '.') {
             $rc = Invoke-Check -Dir $Dir
             $code = [int]($rc | Select-Object -Last 1)
             exit $code
+        }
+        'loop' {
+            Invoke-Loop -Dir $Dir
+            exit 1   # never reached: the loop runs until the task is stopped
         }
         'install' { Install-SelfHeal -Dir $Dir -Source $PSCommandPath }
         'uninstall' { Uninstall-SelfHeal -Dir $Dir }
