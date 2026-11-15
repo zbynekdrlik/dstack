@@ -14,7 +14,8 @@
 //! An RX gap the same (dstack #304): the app reads RX at its tick, and a
 //! held tick reads two ticks' worth back to back and can find the ring dry,
 //! which the player does not own; at a tick on time only where the pump
-//! itself restarted.
+//! itself restarted. The dry read of a hold is at the owed tick the loop runs
+//! at once after it, so the tick after a late one counts as held too.
 
 #[path = "soak/harness.rs"]
 mod harness;
@@ -45,21 +46,31 @@ struct Tick {
     rx: u64,
 }
 
-/// The RX dropouts at ticks on time (under [`LATE_TICK`] late): the run
-/// may have only as many as the pump's own restarts (dstack #304: a held
-/// app tick may cost one, as for TX).
-fn rx_on_time(ticks: &[Tick]) -> u64 {
-    ticks
+/// Whether tick `i` is held or catches up after a held one: it or the
+/// tick before it ran at least [`LATE_TICK`] late. The app reads RX at its
+/// tick; after a hold the loop runs the owed tick at once, reading two
+/// ticks' worth back to back, and that catch-up read is the one that can
+/// find the ring dry (its own lateness is the hold less a period).
+fn held(ticks: &[Tick], i: usize) -> bool {
+    ticks[i.saturating_sub(1)..=i]
         .iter()
-        .filter(|t| t.late < LATE_TICK)
-        .map(|t| t.rx)
+        .any(|t| t.late >= LATE_TICK)
+}
+
+/// The RX dropouts at ticks neither held nor catching up ([`held`]): the
+/// run may have only as many as the pump's own restarts (dstack #304: a
+/// held app tick may cost one, as for TX).
+fn rx_on_time(ticks: &[Tick]) -> u64 {
+    (0..ticks.len())
+        .filter(|&i| !held(ticks, i))
+        .map(|i| ticks[i].rx)
         .sum()
 }
 
-/// The first late tick with more than one RX dropout, if any: a held tick
-/// may cost one, as for TX.
+/// The first held or catching-up tick ([`held`]) with more than one RX
+/// dropout, if any: a hold may cost one a tick.
 fn rx_twice_late(ticks: &[Tick]) -> Option<usize> {
-    ticks.iter().position(|t| t.late >= LATE_TICK && t.rx > 1)
+    (0..ticks.len()).find(|&i| held(ticks, i) && ticks[i].rx > 1)
 }
 
 /// The TX gaps a run of ticks may have: each at a tick at least
@@ -91,9 +102,21 @@ fn an_rx_dropout_counts_against_the_restarts_only_at_a_tick_on_time() {
     };
     assert_eq!(rx_on_time(&[t(LATE_TICK, 1), t(on_time, 0)]), 0);
     assert_eq!(rx_on_time(&[t(on_time, 1), t(just_under, 2)]), 3);
-    assert_eq!(rx_on_time(&[t(LATE_TICK, 2), t(on_time, 1)]), 1);
-    assert_eq!(rx_twice_late(&[t(LATE_TICK, 1), t(on_time, 2)]), None);
+    // The catch-up tick after a held one reads two ticks' worth: allowed.
+    assert_eq!(rx_on_time(&[t(LATE_TICK, 0), t(on_time, 1)]), 0);
+    // Two ticks after it: on time again.
+    assert_eq!(
+        rx_on_time(&[t(LATE_TICK, 0), t(on_time, 0), t(on_time, 1)]),
+        1
+    );
+    assert_eq!(rx_on_time(&[t(just_under, 0), t(on_time, 1)]), 1);
+    assert_eq!(rx_twice_late(&[t(LATE_TICK, 1), t(on_time, 1)]), None);
+    assert_eq!(rx_twice_late(&[t(LATE_TICK, 1), t(on_time, 2)]), Some(1));
     assert_eq!(rx_twice_late(&[t(on_time, 0), t(LATE_TICK, 2)]), Some(1));
+    assert_eq!(
+        rx_twice_late(&[t(LATE_TICK, 0), t(on_time, 0), t(on_time, 2)]),
+        None
+    );
     assert_eq!(rx_twice_late(&[t(just_under, 2), t(LATE_TICK, 1)]), None);
 }
 
