@@ -127,6 +127,19 @@ The projects and their PCs:
 - **dasio** (its test PC, FOH and its Dante Controller PC, Windows): dasio moves its stack version and runs `dante-leg.ps1` on its PCs itself (dstack does no Windows OS work there); iemmixer moves its stack version the same way.
 - **dev1** (Linux, via airuleset): replace dev1's `dante_guard` table with `dante-leg.nft` (its out chain keeps TCP 22 and 8092 to other PCs' Dante addresses for the admin role).
 
+### Which file fits which PC (dstack #288)
+
+The full filter assumes the Dante leg is not the PC's LAN: its drop/Block rules (TCP, IPv6, non-Dante UDP, Windows' service host and Bonjour) would cut a one-leg PC's LAN, tunnels, web UIs, updates and DHCP. A one-leg PC (its only NIC or adapter carries both Dante and its LAN; the iemmixer box, the FOH PC) takes the mDNS cap only, so no program on it floods the Dante VLAN with mDNS (the owner's rule, #286/#288) while its LAN stays open.
+
+| The PC | Linux | Windows |
+|---|---|---|
+| A separate Dante leg (its own VLAN adapter or NIC, the LAN elsewhere) | the full set: `dante-leg.nft` (`-D dante_leg=<iface>`), plus `dante-leg-notrack.nft` where section 3 allows it | the full set: `dante-leg.ps1 -InterfaceAlias <Dante adapter>` (the group and the mDNS cap) |
+| One leg: Dante and the LAN on the same NIC or adapter | the cap only: `nft -f /etc/dstack/dante-mdns-cap.nft` (no `-D`; table `inet dstack_mdns_cap`) | the cap only: `dante-leg.ps1 -Mode mdns-cap -InterfaceAlias <the adapter>` |
+
+- `dante-mdns-cap.nft` is one output chain, policy accept, holding only `dante-leg.nft`'s two mDNS caps byte for byte (queries 10/s past a burst of 50, all mDNS to 224.0.0.251:5353 50/s past a burst of 200; `crates/dstack/tests/dante_leg.rs` keeps them identical). Copy it to `/etc/dstack/dante-mdns-cap.nft` and load it at boot, like the full set (no `-D`, so no interface to wait for). It names no interface, so the caps hold on every interface; a reload replaces the table, and it can sit beside `dante-leg.nft`'s table. What it dropped: `nft list chain inet dstack_mdns_cap out | grep 'limit rate over'`.
+- `-Mode mdns-cap` creates only the QoS policy `dstack Dante leg mDNS cap` (200 kbit/s, the same as the full install's) and checks the adapter's QoS Packet Scheduler binding; it never creates, reads or removes a firewall rule. Running it again is idempotent. `-Mode mdns-cap-check -InterfaceAlias <the adapter>` exits 0 when the cap is the script's and the binding is on; `-Mode mdns-cap-remove` removes the cap only (on a PC with the full group, use `-Mode uninstall`).
+- Section 6, item 5 on a one-leg PC: `nft list table inet dstack_mdns_cap` on Linux, `dante-leg.ps1 -Mode mdns-cap-check -InterfaceAlias <the adapter>` exits 0 on Windows. Items 2, 3, 6 and 7 do not apply: the one adapter holds the Dante address, the gateway and the LAN, and nothing is blocked on it.
+
 ## 4. Rules for our applications
 
 These hold in every project's code, so that the PC's layout is a second line of defence, not the only one.
@@ -170,7 +183,7 @@ Only on a PC with a Dante leg; a PC without one skips every item (scope above).
 2. Exactly one default route, through the LAN leg.
 3. The Dante leg: its address, no gateway, metric 900, no DNS registration, NetBIOS off, sharing/client unbound (Windows); `never-default`, policy table, no `<dante>` route in the main table (Linux).
 4. `<host>.lan` resolves to the LAN address only.
-5. The generic Dante-leg filter is loaded: `nft list table inet dstack_dante_leg` on Linux, `dante-leg.ps1 -Mode check -InterfaceAlias <Dante adapter>` exits 0 on Windows, and no per-box rule is left.
+5. The generic Dante-leg filter is loaded: `nft list table inet dstack_dante_leg` on Linux, `dante-leg.ps1 -Mode check -InterfaceAlias <Dante adapter>` exits 0 on Windows, and no per-box rule is left (a one-leg PC: the mDNS cap only, see "Which file fits which PC").
 6. Nothing non-Dante answers on the Dante address but ssh and the MCP: a TCP connect from another host's Dante leg to the PC's TCP 22 and 8092 succeeds, to its NDI and web ports (and any other port, e.g. 445) times out, and the same connect to its LAN address succeeds.
 7. A passive mDNS listen on the Dante VLAN shows the PC's Dante devices and none of its NDI or other services.
 8. The PC's Dante devices have live flows, and its receivers' late counters stay at zero over a soak.

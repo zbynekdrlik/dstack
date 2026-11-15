@@ -292,3 +292,69 @@ fn the_notrack_chains_exempt_exactly_the_non_leg_interfaces() {
     assert!(NFT.contains("iifname != $dante_leg accept"));
     assert!(NFT.contains("oifname != $dante_leg accept"));
 }
+
+const MDNS_CAP: &str = include_str!("../../../tools/linux/dante-mdns-cap.nft");
+
+/// The rule lines of `file` that cap a rate, as written (indent included;
+/// comments that name the rule left out).
+fn rate_caps(file: &str) -> Vec<&str> {
+    file.lines()
+        .filter(|l| !l.trim_start().starts_with('#') && l.contains("limit rate over"))
+        .collect()
+}
+
+/// The one-leg cap file (#288) carries dante-leg.nft's two mDNS caps byte
+/// for byte, in the same order, so the caps cannot drift apart.
+#[test]
+fn the_mdns_cap_ruleset_carries_the_dante_leg_caps_byte_for_byte() {
+    let leg = rate_caps(NFT);
+    assert_eq!(
+        leg.len(),
+        2,
+        "dante-leg.nft: the query cap and the 50/s cap"
+    );
+    assert_eq!(rate_caps(MDNS_CAP), leg);
+}
+
+/// The one-leg cap file is one idempotent table with one output chain,
+/// policy accept, holding only the two caps: no input chain, no other
+/// drop, no interface to name, so it never cuts a one-leg PC's LAN.
+#[test]
+fn the_mdns_cap_ruleset_is_one_table_of_the_two_caps_only() {
+    let mut outside = Vec::new();
+    let mut in_chain = false;
+    for line in MDNS_CAP.lines().map(str::trim) {
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with("chain ") {
+            in_chain = true;
+        } else if in_chain && line == "}" {
+            in_chain = false;
+        } else if !in_chain {
+            outside.push(line);
+        }
+    }
+    assert_eq!(
+        outside,
+        [
+            "table inet dstack_mdns_cap",
+            "delete table inet dstack_mdns_cap",
+            "table inet dstack_mdns_cap {",
+            "}",
+        ],
+        "create, delete, then define the one table, so a reload replaces it"
+    );
+    assert_eq!(
+        MDNS_CAP
+            .lines()
+            .filter(|l| l.trim().starts_with("chain "))
+            .count(),
+        1,
+        "the output chain only"
+    );
+    let mut want = vec!["type filter hook output priority filter; policy accept;".to_string()];
+    want.extend(rate_caps(NFT).iter().map(|l| l.trim().to_string()));
+    assert_eq!(nft_chain(MDNS_CAP, "out"), want);
+    assert!(!MDNS_CAP.contains("$dante_leg"), "no interface to name");
+}
