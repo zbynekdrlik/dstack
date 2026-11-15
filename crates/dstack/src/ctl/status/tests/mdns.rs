@@ -4,6 +4,7 @@
 //! The status's `mdns` part (dstack #289).
 
 use super::*;
+use crate::discover::senders::browsers::Browser;
 use crate::discover::senders::{Meter, Minute, Rate};
 
 /// The last minute of the process's mDNS meter: the total a second, the
@@ -30,6 +31,18 @@ fn the_status_shows_the_mdns_meter_s_last_minute() {
         total: 7206,
         top: vec![flood, quiet],
         over_cap: vec![flood],
+        browsers: vec![
+            Browser {
+                source: Ipv4Addr::new(192, 0, 2, 7),
+                period_ns: 96_200_000_000,
+                warn: true,
+            },
+            Browser {
+                source: Ipv4Addr::new(192, 0, 2, 9),
+                period_ns: 95_940_000_000,
+                warn: false,
+            },
+        ],
     }))));
     let s = status(&media);
     for word in words_of(&s, "test-device") {
@@ -42,7 +55,8 @@ fn the_status_shows_the_mdns_meter_s_last_minute() {
         s.contains(
             "\"mdns\":{\"per_s\":120.1,\"top\":[{\"source\":\"192.0.2.66\",\"per_s\":120.0},\
              {\"source\":\"192.0.2.1\",\"per_s\":0.1}],\"over_cap\":[{\"source\":\"192.0.2.66\",\
-             \"per_s\":120.0}]}"
+             \"per_s\":120.0}],\"browsers\":[{\"source\":\"192.0.2.7\",\"period_s\":96.2},\
+             {\"source\":\"192.0.2.9\",\"period_s\":95.9}]}"
         ),
         "{s}"
     );

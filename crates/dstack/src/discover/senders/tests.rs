@@ -75,6 +75,7 @@ fn a_minute_is_loud_over_ten_a_second_in_all() {
         total,
         top: vec![],
         over_cap: vec![],
+        browsers: vec![],
     };
     assert!(!minute(600).loud());
     assert!(minute(601).loud());
@@ -200,7 +201,14 @@ fn loopback() -> UdpSocket {
 fn the_meter_names_a_flooding_source_in_its_last_minute() {
     let sock = loopback();
     let to = sock.local_addr().unwrap();
-    let meter = Meter::start(sock, None, Ipv4Addr::LOCALHOST, 300_000_000).unwrap();
+    let meter = Meter::start(
+        sock,
+        None,
+        Ipv4Addr::LOCALHOST,
+        300_000_000,
+        Browsers::default(),
+    )
+    .unwrap();
     assert_eq!(meter.last(), None);
     let flood = UdpSocket::bind("127.0.0.2:0").unwrap();
     let quiet = UdpSocket::bind("127.0.0.3:0").unwrap();
@@ -225,6 +233,93 @@ fn the_meter_names_a_flooding_source_in_its_last_minute() {
     // Its drop ends the thread, which closes the socket: the port is free.
     drop(meter);
     UdpSocket::bind(to).expect("the meter's socket closed with its thread");
+}
+
+/// dstack #319: a host refreshing Dante records every 96 s gets one WARN
+/// naming it while it is marked to warn; a listed host not marked, none.
+#[test]
+fn a_browsing_host_is_warned_about_by_name_when_marked() {
+    crate::test_log::undecided();
+    let mut m = Senders::new(0).roll(MINUTE_NS).unwrap();
+    m.browsers = vec![
+        Browser {
+            source: a(7),
+            period_ns: 96_200_000_000,
+            warn: true,
+        },
+        Browser {
+            source: a(9),
+            period_ns: 96_000_000_000,
+            warn: false,
+        },
+    ];
+    let warns = crate::test_log::capture_warnings(|| report(&m));
+    assert_eq!(
+        warns
+            .matches("an mDNS host refreshes Dante records every 96 s")
+            .count(),
+        1,
+        "{warns}"
+    );
+    assert!(warns.contains("source=192.0.2.7"), "{warns}");
+    assert!(warns.contains("period_s=96.2"), "{warns}");
+    assert!(!warns.contains("192.0.2.9"), "{warns}");
+    m.browsers[0].warn = false;
+    let none = crate::test_log::capture_warnings(|| report(&m));
+    assert_eq!(none, "");
+}
+
+/// A query with a question under `_netaudio-arc` (dstack #319).
+fn arc_query() -> Vec<u8> {
+    let mut q = vec![0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0];
+    for label in ["_netaudio-arc", "_udp", "local"] {
+        q.push(label.len() as u8);
+        q.extend_from_slice(label.as_bytes());
+    }
+    q.extend_from_slice(&[0, 0, 12, 0, 1]);
+    q
+}
+
+/// The wiring (dstack #319): the meter names a host whose Dante queries
+/// from port 5353 come on the cycle (here 250 ms ± 80 ms, minutes of
+/// 200 ms), and not one sending the same from another port.
+#[test]
+fn the_meter_names_a_host_refreshing_dante_records_on_the_cycle() {
+    let sock = loopback();
+    let to = sock.local_addr().unwrap();
+    let cycle = Browsers::with_cycle(250_000_000, 80_000_000, 20_000_000);
+    let meter = Meter::start(sock, None, Ipv4Addr::LOCALHOST, 200_000_000, cycle).unwrap();
+    let browser = {
+        let s = socket2::Socket::new(
+            socket2::Domain::IPV4,
+            socket2::Type::DGRAM,
+            Some(socket2::Protocol::UDP),
+        )
+        .unwrap();
+        s.set_reuse_address(true).unwrap();
+        s.bind(&SocketAddr::from((Ipv4Addr::new(127, 0, 0, 4), 5353)).into())
+            .unwrap();
+        UdpSocket::from(s)
+    };
+    let other_port = UdpSocket::bind("127.0.0.5:0").unwrap();
+    let q = arc_query();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let named = loop {
+        browser.send_to(&q, to).unwrap();
+        other_port.send_to(&q, to).unwrap();
+        std::thread::sleep(Duration::from_millis(250));
+        if let Some(m) = meter.last()
+            && !m.browsers.is_empty()
+        {
+            break m;
+        }
+        assert!(Instant::now() < deadline, "no host named");
+    };
+    assert_eq!(named.browsers.len(), 1, "{:?}", named.browsers);
+    assert_eq!(named.browsers[0].source, Ipv4Addr::new(127, 0, 0, 4));
+    assert!(named.browsers[0].warn);
+    let p = named.browsers[0].period_ns;
+    assert!((170_000_000..=330_000_000).contains(&p), "{p}");
 }
 
 #[test]
@@ -308,7 +403,7 @@ fn the_meter_joins_its_group_again_after_an_interface_change() {
         membership: Membership::every(ip, Duration::from_millis(1)),
         read: Box::new(read),
     };
-    let meter = Meter::start(sock, Some(watch), ip, MINUTE_NS).unwrap();
+    let meter = Meter::start(sock, Some(watch), ip, MINUTE_NS, Browsers::default()).unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
     while reads.load(Ordering::Relaxed) < 5 {
         assert!(Instant::now() < deadline, "the list was not read");

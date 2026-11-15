@@ -248,7 +248,10 @@ impl Json {
 ///   datagram to the mDNS group that minute, a second), `top` (the loudest
 ///   5 sources, loudest first: `source` (an IPv4 address) and `per_s`),
 ///   `over_cap` (every source over 50 a second averaged over the minute,
-///   the same shape).
+///   the same shape), `browsers` (dstack #319: every host seen lately
+///   sending Dante queries from port 5353 on the 96 s refresh cycle of a
+///   standing browse, by address: `source` and `period_s`, its measured
+///   cycle).
 /// - `app` (dstack #104), only once the app set a hook
 ///   ([`Media::set_app_status`]), its thread's first call returned, and
 ///   while it returns a JSON object: that object, compact (the cached part:
@@ -290,6 +293,17 @@ fn mdns_part(j: &mut Json, media: &Media) {
         }
         j.close(']');
     }
+    j.open(Some("browsers"), '[');
+    for b in &m.browsers {
+        j.open(None, '{');
+        j.text("source", &b.source.to_string());
+        j.num(
+            "period_s",
+            format_args!("{:.1}", b.period_ns as f64 / 1_000_000_000.0),
+        );
+        j.close('}');
+    }
+    j.close(']');
     j.close('}');
 }
 
