@@ -415,6 +415,40 @@ fn an_answer_states_the_version_of_each_dstack_arc_record() {
     assert_eq!(arc_versions(&p.build_bytes_vec().unwrap()).len(), 1);
 }
 
+/// dstack #319: an ARC record without `dstack_vers` (Dante hardware) is
+/// read too, with no version.
+#[test]
+fn an_answer_lists_every_arc_record_with_its_version_if_any() {
+    let answer = datagram(
+        true,
+        vec![
+            txt(
+                "Alpha._netaudio-arc._udp.local",
+                &["mf=x", "dstack_vers=0.6.20"],
+            ),
+            txt(
+                "Card._netaudio-arc._udp.local",
+                &["arcp_vers=2.8.9", "router_info=x"],
+            ),
+            txt("Card._netaudio-cmc._udp.local", &["mf=x"]),
+        ],
+    );
+    assert_eq!(
+        arc_records(&answer),
+        vec![
+            ("Alpha".to_string(), Some("0.6.20".to_string())),
+            ("Card".to_string(), None),
+        ]
+    );
+    assert!(
+        arc_records(&datagram(
+            false,
+            vec![txt("Card._netaudio-arc._udp.local", &["x=y"])]
+        ))
+        .is_empty()
+    );
+}
+
 #[test]
 fn a_query_s_known_answers_and_what_does_not_read_state_nothing() {
     let query = datagram(

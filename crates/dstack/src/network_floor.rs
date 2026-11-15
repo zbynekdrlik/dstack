@@ -403,13 +403,15 @@ pub fn warn_devices(devices: &[Device]) {
     }
 }
 
-/// The dstack versions an mDNS datagram's `_netaudio-arc` TXT records
-/// state: each device's name and the [`crate::announce::VERSION_KEY`]
-/// value. Responses only: a query's known answers are the asker's, not the
-/// device's (dstack #141). Empty for anything else. The meter calls it for
-/// every datagram it hears, so a query is refused by its header's QR bit
-/// (the top bit of byte 2) before any parse: a query storm costs no parse.
-pub fn arc_versions(bytes: &[u8]) -> Vec<(String, String)> {
+/// The `_netaudio-arc` TXT records an mDNS datagram carries: each
+/// device's name and its [`crate::announce::VERSION_KEY`] value, `None`
+/// for a record without the key (a Dante device that is not ours, such as
+/// an Audinate module: dstack #319 reads that too). Responses only: a
+/// query's known answers are the asker's, not the device's (dstack #141).
+/// Empty for anything else. The meter calls it for every datagram it
+/// hears, so a query is refused by its header's QR bit (the top bit of
+/// byte 2) before any parse: a query storm costs no parse.
+pub fn arc_records(bytes: &[u8]) -> Vec<(String, Option<String>)> {
     if !bytes.get(2).is_some_and(|&flags| flags >= 0x80) {
         return Vec::new();
     }
@@ -424,11 +426,23 @@ pub fn arc_versions(bytes: &[u8]) -> Vec<(String, String)> {
         let Some((Service::Arc, name)) = record_of(&rr.name.to_string()) else {
             continue;
         };
-        if let Some(Some(v)) = txt.attributes().remove(crate::announce::VERSION_KEY) {
-            out.push((name, v));
-        }
+        let version = txt
+            .attributes()
+            .remove(crate::announce::VERSION_KEY)
+            .flatten();
+        out.push((name, version));
     }
     out
+}
+
+/// The dstack versions an mDNS datagram's `_netaudio-arc` TXT records
+/// state ([`arc_records`] with the key): each device's name and the
+/// [`crate::announce::VERSION_KEY`] value.
+pub fn arc_versions(bytes: &[u8]) -> Vec<(String, String)> {
+    arc_records(bytes)
+        .into_iter()
+        .filter_map(|(name, version)| Some((name, version?)))
+        .collect()
 }
 
 /// A status request's client: its name (1 to [`MAX_CLIENT_NAME`] bytes of
