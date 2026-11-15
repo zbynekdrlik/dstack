@@ -74,6 +74,7 @@ impl Sim {
             cap_rate,
             net_rate,
             buffer,
+            buffer.chunk_ns(),
             Arc::clone(&stats),
         )
         .expect("the player");
@@ -362,6 +363,7 @@ fn another_output_s_player_takes_over_at_the_next_block() {
         44_100,
         48_000,
         buffer(48_000),
+        buffer(48_000).chunk_ns(),
         Arc::clone(&s.stats),
     )
     .unwrap();
@@ -372,6 +374,7 @@ fn another_output_s_player_takes_over_at_the_next_block() {
         44_100,
         48_000,
         buffer(48_000),
+        buffer(48_000).chunk_ns(),
         Arc::clone(&s.stats),
     )
     .unwrap();
@@ -434,6 +437,7 @@ fn a_switch_to_a_pump_that_is_gone_gives_the_player_back() {
             48_000,
             48_000,
             buffer(48_000),
+            buffer(48_000).chunk_ns(),
             Arc::default(),
         )
         .unwrap()
@@ -454,6 +458,7 @@ fn every_replaced_player_comes_back_to_be_freed_never_in_the_pump() {
             48_000,
             48_000,
             buffer(48_000),
+            buffer(48_000).chunk_ns(),
             Arc::clone(&stats),
         )
         .unwrap()

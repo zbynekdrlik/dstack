@@ -50,7 +50,15 @@ impl Obs {
         let read = Arc::clone(&clock_ns);
         let fifo =
             Arc::new(fifo_for(1, RATE).with_clock(Arc::new(move || read.load(Ordering::Relaxed))));
-        let player = Player::new(Arc::clone(&fifo), RATE, RATE, buffer(), Arc::default()).unwrap();
+        let player = Player::new(
+            Arc::clone(&fifo),
+            RATE,
+            RATE,
+            buffer(),
+            buffer().chunk_ns(),
+            Arc::default(),
+        )
+        .unwrap();
         Obs {
             fifo,
             clock_ns,
@@ -222,7 +230,15 @@ fn a_new_player_counts_on_its_stats_resyncs() {
     s.call();
     let stats = s.player.stats();
     assert_eq!(stats.resyncs(), 1);
-    let mut next = Player::new(Arc::clone(&s.fifo), RATE, RATE, buffer(), stats).unwrap();
+    let mut next = Player::new(
+        Arc::clone(&s.fifo),
+        RATE,
+        RATE,
+        buffer(),
+        buffer().chunk_ns(),
+        stats,
+    )
+    .unwrap();
     let mut out = vec![0.0; CALL];
     next.fill_at(Some(0), &mut out, 1, |x| x);
     next.fill_at(Some(5 * CALL as u64), &mut out, 1, |x| x);
@@ -316,4 +332,24 @@ fn a_first_start_after_blocks_without_one_does_not_resync() {
     }
     s.run(1.0);
     assert_eq!(s.player.stats().resyncs(), 0);
+}
+
+/// dstack #317: the phased start is never under one output call's take
+/// (the call and the converter's need), whatever the schedule says; over
+/// it, it is the phased level unchanged.
+#[test]
+fn the_phased_start_never_falls_under_one_call() {
+    // A schedule that says "due now" for a short target: the level would
+    // be 0 (32 + 0 + 64 - 512 saturates); the call and its need instead.
+    assert_eq!(Player::phased_start(32, 1024, 0, 128, 557), 557 + 128);
+    // The phased level 608 (1088 + 32 - 512) against a floor one frame
+    // under it, at it and one frame over it.
+    assert_eq!(Player::phased_start(1088, 1024, 0, 64, 543), 608);
+    assert_eq!(Player::phased_start(1088, 1024, 0, 64, 544), 608);
+    assert_eq!(Player::phased_start(1088, 1024, 0, 64, 545), 609);
+    // The phased level unchanged above the floor.
+    assert_eq!(
+        Player::phased_start(1088, 1024, 288, 64, 128),
+        Player::phased_level(1088, 1024, 288, 64)
+    );
 }

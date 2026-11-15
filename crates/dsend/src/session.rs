@@ -133,8 +133,16 @@ fn open(
     let in_rate = config.sample_rate();
     let channels = config.channels();
     let fifo = Arc::new(fifo_for(usize::from(channels), in_rate));
-    let player = Player::new(Arc::clone(&fifo), in_rate, rate, buffer, Arc::clone(stats))
-        .map_err(|e| format!("the rate conversion {in_rate} to {rate} Hz: {e}"))?;
+    let player = Player::new(
+        Arc::clone(&fifo),
+        in_rate,
+        rate,
+        buffer,
+        // The capture writes the FIFO, its packet at a time.
+        buffer.chunk_ns(),
+        Arc::clone(stats),
+    )
+    .map_err(|e| format!("the rate conversion {in_rate} to {rate} Hz: {e}"))?;
     let capturing = audio::start(device, &config, Arc::clone(&fifo), failed)?;
     tracing::info!(
         in_rate,

@@ -266,6 +266,7 @@ mod tests {
             48_000,
             48_000,
             dlink::bridge::AppBuffer::new(10_000_000, 2_666_667),
+            10_000_000,
             Arc::default(),
         )
         .unwrap();
@@ -393,8 +394,15 @@ mod tests {
         let fifo = Arc::new(fifo_for(2, 48_000));
         fifo.push_with(480, |_, _| 0.0);
         let buffer = dlink::bridge::AppBuffer::new(10_000_000, 1_333_333);
-        let player =
-            Player::new(Arc::clone(&fifo), 48_000, 44_100, buffer, Arc::default()).unwrap();
+        let player = Player::new(
+            Arc::clone(&fifo),
+            48_000,
+            44_100,
+            buffer,
+            buffer.chunk_ns(),
+            Arc::default(),
+        )
+        .unwrap();
         let s = Snapshot::read(&fifo, &player.stats(), 48_000);
         assert_eq!(
             s,

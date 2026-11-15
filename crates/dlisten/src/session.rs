@@ -188,6 +188,8 @@ impl Session {
             self.rate,
             out_rate,
             self.buffer,
+            // The pump writes the FIFO, a block at a time (dstack #317).
+            self.buffer.block_ns(),
             Arc::clone(&self.stats),
         )
         .map_err(|e| format!("the rate conversion {} to {out_rate} Hz: {e}", self.rate))?

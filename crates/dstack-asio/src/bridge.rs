@@ -83,6 +83,8 @@ impl Bridge {
                 spec.dante_rate,
                 spec.dante_rate,
                 buffer,
+                // Nobody writes it.
+                0,
                 Arc::clone(&from_stats),
             )
             .map_err(|e| e.to_string())?;
@@ -147,6 +149,7 @@ impl Bridge {
         }
         let rate = opened.rate.round() as u32;
         let dante = self.spec.dante_rate;
+        let block_ns = buffer.block_ns();
         let player = match &self.to_asio {
             Some(fifo) => Some(
                 Player::new(
@@ -154,6 +157,9 @@ impl Bridge {
                     dante,
                     rate,
                     buffer,
+                    // The pump writes the to-ASIO FIFO, a block at a time,
+                    // not the driver's buffer (dstack #317).
+                    block_ns,
                     Arc::clone(&self.to_stats),
                 )
                 .map_err(|e| e.to_string())?,
@@ -168,6 +174,8 @@ impl Bridge {
                 rate,
                 dante,
                 buffer,
+                // The driver writes the from-ASIO FIFO, its buffer at once.
+                buffer.chunk_ns(),
                 Arc::clone(&self.from_stats),
             )
             .map_err(|e| e.to_string())?;

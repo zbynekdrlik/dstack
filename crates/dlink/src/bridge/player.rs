@@ -221,7 +221,8 @@ pub struct Player {
     pos: usize,
     /// The last callback's frames, in input frames.
     callback_in: usize,
-    /// The app's chunk ([`AppBuffer::chunk_ns`]), in input frames.
+    /// The producer's chunk ([`Player::new`]'s `producer_chunk_ns`), in
+    /// input frames.
     chunk_in: usize,
     state: State,
     /// The FIFO's target, s ([`AppBuffer::target_s`]).
@@ -287,18 +288,31 @@ impl Player {
     /// `out_rate`, keeping the FIFO at `buffer`'s target (dstack #247: the
     /// app's chunk and one pump block, or the value it set), counting on in
     /// `stats` (from its counts so far).
+    ///
+    /// `producer_chunk_ns` is what the FIFO's producer writes at once, ns
+    /// (see [`super::chunk_ns`]), on its own and apart from the target's
+    /// terms (dstack #317): an app that writes its tick (OBS's TX: its
+    /// 1024 frames, [`AppBuffer::chunk_ns`]), a capture its packet (dsend),
+    /// an ASIO driver its buffer (dstack-asio from ASIO), and the dlink pump
+    /// its block ([`AppBuffer::block_ns`]: dlisten, dstack-asio to ASIO).
+    /// A producer whose chunk is wider than the output's call is followed on
+    /// its own schedule (module doc); taking the target's chunk for a
+    /// pump-fed player followed a schedule the pump does not keep, and
+    /// after a rebootstrap re-primed under one callback's take on every
+    /// callback (dasio's ASIO bridge, 15.11.2026).
     pub fn new(
         fifo: Arc<Fifo>,
         net_rate: u32,
         out_rate: u32,
         buffer: AppBuffer,
+        producer_chunk_ns: u64,
         stats: Arc<Stats>,
     ) -> Result<Self, ConvertError> {
         let channels = fifo.channels();
         let conv = Converter::drifting(net_rate, out_rate, channels, BLOCK, Fixed::Output)?;
         let input = vec![0.0; conv.input_frames_max() * channels];
         let arrived = fifo.arrived();
-        let chunk_in = frames_of(buffer.chunk_ns() as f64 / 1e9, net_rate);
+        let chunk_in = frames_of(producer_chunk_ns as f64 / 1e9, net_rate);
         stats.priming.store(true, Ordering::Relaxed);
         stats.out_rate.store(out_rate, Ordering::Relaxed);
         let target_s = buffer.target_s();
@@ -501,6 +515,25 @@ impl Player {
         (target + until_next + need / 2).saturating_sub(chunk / 2)
     }
 
+    /// [`Player::phased_level`], never under one output call's take: the
+    /// output's call `call` and the converter's `need`, input frames
+    /// (dstack #317). A producer modelled wider than it writes (dasio's
+    /// to-ASIO player took the ASIO buffer for the pump's block), or a
+    /// schedule it no longer keeps, re-primed under one call's take, so
+    /// every call ran dry and re-primed there again, for minutes. The
+    /// floor is the call, not the target: a sawtooth's bottom is under the
+    /// target by design (half a chunk), and a floor at the target would put
+    /// the mean up to half a chunk over it again (dstack #303).
+    fn phased_start(
+        target: usize,
+        chunk: usize,
+        until_next: usize,
+        need: usize,
+        call: usize,
+    ) -> usize {
+        Self::phased_level(target, chunk, until_next, need).max(call + need)
+    }
+
     /// The next [`BLOCK`] output frames into `block`.
     fn next_block(&mut self) {
         self.pos = 0;
@@ -529,11 +562,12 @@ impl Player {
             self.look(self.at);
             let now_s = self.schedule_s(self.at);
             let level = match self.writer.until_next(now_s, self.arrived) {
-                Some(until_next) if self.chunk_in > self.callback_in => Self::phased_level(
+                Some(until_next) if self.chunk_in > self.callback_in => Self::phased_start(
                     level,
                     self.chunk_in,
                     frames_of(until_next, self.net_rate),
                     need,
+                    self.callback_in,
                 ),
                 _ => level + (swing + need) / 2,
             } + if self.writer_on_line {

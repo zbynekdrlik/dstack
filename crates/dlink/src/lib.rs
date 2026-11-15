@@ -402,7 +402,10 @@ impl Config {
 
     /// The bridge FIFO's target of this device ([`Config::app_buffer`]),
     /// its pump block at the device's rate; `None` for an app that stated
-    /// none (it does not bridge). Pass it to [`bridge::Player::new`].
+    /// none (it does not bridge). Pass it to [`bridge::Player::new`], with
+    /// the producer's chunk: the app's own for a FIFO the app writes (TX,
+    /// [`bridge::AppBuffer::chunk_ns`]), the pump's block for one the pump
+    /// writes (RX, [`bridge::AppBuffer::block_ns`]).
     pub fn bridge_buffer(&self) -> Option<bridge::AppBuffer> {
         let (chunk, set) = self.app_buffer?;
         let block_ns = bridge::chunk_ns(self.block, self.device_rate());
