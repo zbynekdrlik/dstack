@@ -58,14 +58,14 @@ fn a_version_reads_as_three_numbers_with_any_suffix_ignored() {
 #[test]
 fn a_binary_below_the_floor_is_listed_and_one_upgraded_is_taken_off() {
     let mut g = Guard::default();
-    assert_eq!(g.see(Kind::Peer, "FOH", AT, NEW, 1), None);
+    assert_eq!(g.see(Kind::Peer, "Alpha", AT, NEW, 1), None);
     assert!(g.list(1).is_empty());
-    let b = g.see(Kind::Peer, "FOH", AT, OLD, 5).expect("below");
+    let b = g.see(Kind::Peer, "Alpha", AT, OLD, 5).expect("below");
     assert_eq!(
         b,
         Below {
             kind: Kind::Peer,
-            name: "FOH".to_string(),
+            name: "Alpha".to_string(),
             address: AT,
             version: OLD,
             seen_ns: 5,
@@ -73,18 +73,18 @@ fn a_binary_below_the_floor_is_listed_and_one_upgraded_is_taken_off() {
     );
     assert_eq!(g.list(6), vec![b]);
     // The same peer, its name in another case: one entry, renewed.
-    g.see(Kind::Peer, "foh", AT, OLD, 9);
+    g.see(Kind::Peer, "alpha", AT, OLD, 9);
     assert_eq!(g.list(10).len(), 1);
     assert_eq!(g.list(10)[0].seen_ns, 9);
     // Upgraded: gone at once.
-    assert_eq!(g.see(Kind::Peer, "FOH", AT, NEW, 11), None);
+    assert_eq!(g.see(Kind::Peer, "Alpha", AT, NEW, 11), None);
     assert!(g.list(12).is_empty());
 }
 
 #[test]
 fn a_binary_below_the_floor_stays_listed_for_an_hour_after_it_was_seen() {
     let mut g = Guard::default();
-    g.see(Kind::Peer, "FOH", AT, OLD, 1_000);
+    g.see(Kind::Peer, "Alpha", AT, OLD, 1_000);
     assert_eq!(g.list(1_000 + HOUR_NS - 1).len(), 1);
     assert!(g.list(1_000 + HOUR_NS).is_empty());
 }
@@ -157,15 +157,15 @@ fn below(name: &str) -> Below {
 #[test]
 fn a_binary_is_warned_about_once_an_hour() {
     let mut w = Warned::default();
-    let b = below("FOH");
+    let b = below("Alpha");
     assert!(w.due(&b, 1_000));
     assert!(!w.due(&b, 1_001));
     assert!(!w.due(&b, 1_000 + HOUR_NS - 1));
     assert!(w.due(&b, 1_000 + HOUR_NS));
     assert!(!w.due(&b, 1_000 + HOUR_NS + 1));
     // Another binary, or the same name in another kind, is its own.
-    assert!(w.due(&below("mbc"), 1_002));
-    let mut client = below("FOH");
+    assert!(w.due(&below("Beta"), 1_002));
+    let mut client = below("Alpha");
     client.kind = Kind::Client;
     client.address = None;
     assert!(w.due(&client, 1_002));
@@ -242,6 +242,22 @@ fn a_client_below_the_floor_is_warned_about_as_local() {
     assert!(text.contains("address=local"), "{text}");
 }
 
+/// A peer's name comes from any responder on the leg: a line break in it
+/// is logged escaped, so it cannot forge a line of its own.
+#[test]
+fn a_peer_s_name_is_logged_escaped() {
+    let b = Below {
+        kind: Kind::Peer,
+        name: "floor-test-inj\nWARN forged".to_string(),
+        address: AT,
+        version: OLD,
+        seen_ns: 0,
+    };
+    let text = crate::test_log::capture_warnings(|| warn_below(&b));
+    assert!(text.contains("floor-test-inj\\nWARN forged"), "{text}");
+    assert_eq!(text.lines().count(), 1, "{text}");
+}
+
 fn device(name: &str, txt: &[(&str, &str)]) -> Device {
     Device {
         name: name.to_string(),
@@ -314,24 +330,27 @@ fn an_answer_states_the_version_of_each_dstack_arc_record() {
         true,
         vec![
             txt(
-                "FOH._netaudio-arc._udp.local",
+                "Alpha._netaudio-arc._udp.local",
                 &["mf=x", "dstack_vers=0.6.20"],
             ),
             txt("Card._netaudio-arc._udp.local", &["mf=Audinate"]),
-            txt("FOH._netaudio-cmc._udp.local", &["dstack_vers=0.6.1"]),
-            txt("mbc._netaudio-arc._udp.local", &["dstack_vers=0.6.144"]),
+            txt("Alpha._netaudio-cmc._udp.local", &["dstack_vers=0.6.1"]),
+            txt("Beta._netaudio-arc._udp.local", &["dstack_vers=0.6.144"]),
         ],
     );
     assert_eq!(
         arc_versions(&answer),
         vec![
-            ("FOH".to_string(), "0.6.20".to_string()),
-            ("mbc".to_string(), "0.6.144".to_string()),
+            ("Alpha".to_string(), "0.6.20".to_string()),
+            ("Beta".to_string(), "0.6.144".to_string()),
         ]
     );
     // The additional records count too.
     let mut p = Packet::new_reply(0);
-    p.additional_records = vec![txt("FOH._netaudio-arc._udp.local", &["dstack_vers=0.6.20"])];
+    p.additional_records = vec![txt(
+        "Alpha._netaudio-arc._udp.local",
+        &["dstack_vers=0.6.20"],
+    )];
     assert_eq!(arc_versions(&p.build_bytes_vec().unwrap()).len(), 1);
 }
 
@@ -339,14 +358,31 @@ fn an_answer_states_the_version_of_each_dstack_arc_record() {
 fn a_query_s_known_answers_and_what_does_not_read_state_nothing() {
     let query = datagram(
         false,
-        vec![txt("FOH._netaudio-arc._udp.local", &["dstack_vers=0.6.20"])],
+        vec![txt(
+            "Alpha._netaudio-arc._udp.local",
+            &["dstack_vers=0.6.20"],
+        )],
     );
     assert!(arc_versions(&query).is_empty());
     assert!(arc_versions(b"no dns").is_empty());
+    assert!(arc_versions(&[0x00, 0x00]).is_empty());
+    // The QR bit alone (byte 2 exactly 0x80) is a response; one bit under
+    // it is a query, whatever the rest says.
+    let mut reply = datagram(
+        true,
+        vec![txt(
+            "Alpha._netaudio-arc._udp.local",
+            &["dstack_vers=0.6.20"],
+        )],
+    );
+    reply[2] = 0x80;
+    assert_eq!(arc_versions(&reply).len(), 1);
+    reply[2] = 0x7f;
+    assert!(arc_versions(&reply).is_empty());
     // A key with no value is no version.
     let bare = datagram(
         true,
-        vec![txt("FOH._netaudio-arc._udp.local", &["dstack_vers"])],
+        vec![txt("Alpha._netaudio-arc._udp.local", &["dstack_vers"])],
     );
     assert!(arc_versions(&bare).is_empty());
 }

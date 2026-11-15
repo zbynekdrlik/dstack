@@ -22,8 +22,11 @@
 //!   ([`crate::discover::senders::Meter`], [`arc_versions`]), and a
 //!   [`crate::discover::Discovery`] checks each device it lists or sees
 //!   change, and its whole list at each sweep ([`below_of`],
-//!   [`crate::discover::Discovery::below_floor`]). A device with no such key is not ours and is
-//!   never named.
+//!   [`crate::discover::Discovery::below_floor`]). A device with no such
+//!   key is not ours and is never named. The meter names a peer at the
+//!   address its answer came from (a responder answers for itself in
+//!   mDNS), Discovery at its ARC address: on a multi-homed sender the two
+//!   may differ, and a process running both may warn twice an hour.
 //! - Local clients: dtray and dtray-cli send `status <name> <version>` to
 //!   a device's local endpoint ([`crate::ctl::probe::status_as`]); the
 //!   device lists its clients ([`Clients`]) and checks them alike.
@@ -32,8 +35,10 @@
 //!   process that sees one peer two ways warns once), with its kind
 //!   (`peer` or `client`), name, address (a peer's) and version, and the
 //!   floor. The device's status lists them under `network.below_floor`
-//!   ([`crate::ctl::status`](fn@crate::ctl::status)); dcontroller relays
-//!   either as an alarm.
+//!   ([`crate::ctl::status`](fn@crate::ctl::status)): the two places
+//!   dcontroller reads to relay an alarm (its own change, asked of it
+//!   separately). The name is logged escaped (`?`): a peer's name comes
+//!   from any responder on the leg.
 //!
 //! A binary below the floor that states no version (anything before
 //! v0.6.84 as a peer, any client before this release) is not seen here:
@@ -107,7 +112,9 @@ pub const HOUR_NS: u64 = 3_600_000_000_000;
 pub const MAX_BELOW: usize = 64;
 /// Local clients a device lists at most (the same rule).
 pub const MAX_CLIENTS: usize = 16;
-/// Binaries [`Warned`] remembers at most (the same rule).
+/// Binaries [`Warned`] remembers at most: when full, those warned over an
+/// hour ago are dropped, and while all are younger a newcomer is not
+/// warned about (it is still listed in the status).
 pub const MAX_WARNED: usize = 256;
 /// The longest client name a status request may carry, bytes.
 pub const MAX_CLIENT_NAME: usize = 32;
@@ -304,7 +311,7 @@ pub fn warn_below(b: &Below) {
     }
     warn!(
         kind = b.kind.word(),
-        name = %b.name,
+        name = ?b.name,
         address = %b.address.map_or_else(|| "local".to_string(), |a| a.to_string()),
         version = %b.version,
         floor = %NETWORK_FLOOR,
@@ -358,14 +365,16 @@ pub fn warn_devices(devices: &[Device]) {
 /// The dstack versions an mDNS datagram's `_netaudio-arc` TXT records
 /// state: each device's name and the [`crate::announce::VERSION_KEY`]
 /// value. Responses only: a query's known answers are the asker's, not the
-/// device's (dstack #141). Empty for anything else.
+/// device's (dstack #141). Empty for anything else. The meter calls it for
+/// every datagram it hears, so a query is refused by its header's QR bit
+/// (the top bit of byte 2) before any parse: a query storm costs no parse.
 pub fn arc_versions(bytes: &[u8]) -> Vec<(String, String)> {
+    if !bytes.get(2).is_some_and(|&flags| flags >= 0x80) {
+        return Vec::new();
+    }
     let Ok(packet) = Packet::parse(bytes) else {
         return Vec::new();
     };
-    if !packet.has_flags(simple_dns::PacketFlag::RESPONSE) {
-        return Vec::new();
-    }
     let mut out = Vec::new();
     for rr in packet.answers.iter().chain(&packet.additional_records) {
         let RData::TXT(txt) = &rr.rdata else {
