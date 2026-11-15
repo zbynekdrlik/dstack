@@ -672,7 +672,11 @@ fn a_converter_error_plays_silence_and_is_counted() {
     assert_eq!(s.player.stats().convert_errors(), 2, "one a block");
     s.player.conv = good;
     s.player.fill_with(&mut block, 1, |x| x);
-    assert_eq!(s.player.stats().convert_errors(), 2, "none once it converts");
+    assert_eq!(
+        s.player.stats().convert_errors(),
+        2,
+        "none once it converts"
+    );
     let stats = s.player.stats();
     let mut next = Player::new(
         Arc::clone(&s.fifo),

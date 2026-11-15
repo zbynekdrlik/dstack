@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- **Counted (#303): a converter error in the bridge Player.** A block the converter refused played as silence with no count. `dlink::bridge::Stats::convert_errors()` now counts each such block (a later player on the same `Stats` counts on); the shared status `dstack_endpoint::status::Snapshot` gains `convert_errors` (the status line adds `, N convert errors` when there are any), and dsend's and dlisten's app status JSON gain `"convert_errors"`. It never happens with the sizes the converter gives the player; an app that publishes its bridge counters (obs: `tx_underruns` and its kin) may publish it beside them.
+  - API: `Snapshot` (all fields public) has a new field `convert_errors`: code that builds a `Snapshot` literal adds `convert_errors: 0` (in this repo: tests only).
+- **Test (#303): the soak gate ties every TX tone break to its own counted event.** From the TX bridge's first primed step on (the settle time and a fault's 30 s included, never only the judged window), each break of the TX output's tone needs an underrun, a re-centre or a resync at most 20 ms before it, one event a break; before, the two totals were compared from the moment both bridges primed. The judged window stays for the `tx_ppm` band. All 11 gate cases pass unchanged.
+- **Test peer (#303): `dstack-dev peer`'s tone-break WARN carries `kind`.** `kind=silence` when the tone's energy dropped (the audio was not there, e.g. silence in the app's own mix: obs's 24 ms breaks of 15.11.2026), `kind=misplaced` when a sample was out of place (a skip, a repeat, a jump). API change: `peer::tone::ToneCheck::block_with`'s callback takes a third argument, the new `peer::tone::GapKind` (`of`, `as_str`, `Display`; `SILENT_PAIRS`).
+- **No latency change** for any device or dlink app: P, (c), W and the app buffer (the bridge target) are as in 0.6.144.
+- Consumers: obs (dante-input TX) may publish `stats.convert_errors()` with its TX counters and read the peer WARN's `kind` in its soak; dsend, dlisten: nothing to port. intercom, songplayer, camera-box, presenter, dasio, iemmixer: move the stack version; nothing to port.
+
 ## 0.6.144
 
 - **Fix (#317, dasio, field 15.11.2026): an ASIO bridge no longer runs dry on every callback after a pump rebootstrap.** dstack-asio's Dante -> ASIO player took the ASIO buffer (512 frames at 44.1 kHz: 1115 frames at 96 kHz) as its producer's chunk, but the pump writes that FIFO 32 frames a block. So every re-prime followed a 512-frame writer schedule that does not exist; after a rebootstrap that skipped 38 pump blocks (12.7 ms) the schedule said "due now", the re-prime ended under one callback's take, and every callback ran dry and re-primed there again (`to_asio_underruns` +864 every 10 s for 2.5 minutes, 86/s). In a bridge simulation of that shape: 2583 underruns in 30 s before, 1 after (card ±20 ppm).

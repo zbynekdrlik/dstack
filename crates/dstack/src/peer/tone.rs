@@ -257,8 +257,8 @@ impl ToneCheck {
             for &s in x {
                 let energy = invariant(s, p1, f.c);
                 // Written so a NaN sample is bad: no comparison holds.
-                let good = residual(s, p1, p2, f.c).abs() <= f.threshold
-                    && energy >= f.energy / 4.0;
+                let good =
+                    residual(s, p1, p2, f.c).abs() <= f.threshold && energy >= f.energy / 4.0;
                 let bad = !good;
                 if let Some(len) = self.judge(bad) {
                     ended(len, self.gaps, GapKind::of(self.gap_quiet));

@@ -843,11 +843,23 @@ fn the_median_ignores_a_spike_and_follows_a_ramp() {
 fn each_tone_break_takes_its_own_event_just_before_it() {
     let g = 20;
     assert_eq!(unaccounted(&[], &[], g), Vec::<u64>::new());
-    assert_eq!(unaccounted(&[100], &[100], g), Vec::<u64>::new(), "same step");
-    assert_eq!(unaccounted(&[100], &[80], g), Vec::<u64>::new(), "the grace");
+    assert_eq!(
+        unaccounted(&[100], &[100], g),
+        Vec::<u64>::new(),
+        "same step"
+    );
+    assert_eq!(
+        unaccounted(&[100], &[80], g),
+        Vec::<u64>::new(),
+        "the grace"
+    );
     assert_eq!(unaccounted(&[100], &[79], g), [100], "too early");
     assert_eq!(unaccounted(&[100], &[101], g), [100], "after it");
-    assert_eq!(unaccounted(&[100, 105], &[90], g), [105], "one event a break");
+    assert_eq!(
+        unaccounted(&[100, 105], &[90], g),
+        [105],
+        "one event a break"
+    );
     assert_eq!(
         unaccounted(&[100, 105], &[90, 100], g),
         Vec::<u64>::new(),
