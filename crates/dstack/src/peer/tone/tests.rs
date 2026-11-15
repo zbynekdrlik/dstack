@@ -186,3 +186,40 @@ fn a_nan_sample_is_a_gap() {
     feed(&mut check, &x);
     assert_eq!(check.gaps(), 1);
 }
+
+/// dstack #303: a gap's end hands its length (first bad sample to last)
+/// and the count to the caller, once.
+#[test]
+fn a_gap_s_end_hands_its_length_on_once() {
+    let mut check = ToneCheck::default();
+    assert_eq!(check.judge(false), None, "no gap open");
+    assert_eq!(check.judge(true), None);
+    assert_eq!(check.judge(false), None);
+    assert_eq!(check.judge(true), None);
+    for _ in 0..CLEAR - 1 {
+        assert_eq!(check.judge(false), None);
+    }
+    assert_eq!(check.judge(false), Some(3), "bad, good, bad");
+    assert_eq!(check.judge(false), None, "ended once");
+    assert_eq!(check.judge(true), None);
+    for _ in 0..CLEAR - 1 {
+        check.judge(false);
+    }
+    assert_eq!(check.judge(false), Some(1));
+    assert_eq!(check.gaps(), 2);
+}
+
+#[test]
+fn a_dropout_ends_as_one_break_of_its_length() {
+    let mut x = tone(0, 100 * BLOCK, 440);
+    x[40 * BLOCK..40 * BLOCK + 300].fill(0.0);
+    let mut check = ToneCheck::default();
+    let mut ended = Vec::new();
+    for b in x.chunks(BLOCK) {
+        check.block_with(b, |len, gaps| ended.push((len, gaps)));
+    }
+    assert_eq!(ended.len(), 1, "{ended:?}");
+    let (len, gaps) = ended[0];
+    assert!((300..=304).contains(&len), "{len}");
+    assert_eq!(gaps, 1);
+}
