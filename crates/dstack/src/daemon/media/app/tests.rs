@@ -122,6 +122,35 @@ fn the_hook_is_called_only_when_the_status_is_read() {
     assert!(started.elapsed() >= REFRESH, "{:?}", started.elapsed());
 }
 
+/// dstack #317 (dasio, field 15.11.2026): an app that logs its status once
+/// every 5 minutes read a part made at its previous read, stale and 5
+/// minutes old: `to_asio_underruns: 0` in the middle of a storm that had
+/// passed 900. A part read after a quiet spell is at most a refresh old,
+/// never stale, and carries the counter as it is now.
+#[test]
+fn a_part_read_after_a_quiet_spell_is_fresh() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let n = Arc::clone(&calls);
+    let hook = AppHook::default();
+    hook.set(Arc::new(move || {
+        format!(r#"{{"n":{}}}"#, n.fetch_add(1, Ordering::Relaxed) + 1)
+    }));
+    assert_eq!(
+        read_until(&hook, Option::is_some).as_deref(),
+        Some(r#"{"n":1}"#)
+    );
+    // Quiet past the old read window (5 s) and the stale age (3 s) after it.
+    std::thread::sleep(Duration::from_secs(9));
+    let got = hook.read().expect("a part");
+    let v: serde_json::Value = serde_json::from_str(&got).unwrap();
+    assert_eq!(v.get("stale"), None, "{got}");
+    let n = v["n"].as_u64().unwrap();
+    assert!(
+        n >= 5,
+        "a part about a refresh old, not the last read's: {got}"
+    );
+}
+
 #[test]
 fn a_hook_that_stalls_never_delays_the_status_which_turns_stale() {
     crate::test_log::undecided();
