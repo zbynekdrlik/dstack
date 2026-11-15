@@ -124,6 +124,18 @@ The peer (`peer.json`):
 - `device.engine.rebootstraps` rise 0, `play_at_steps` 0;
 - `peer.play_at_ppm` within ±2 of the peer's `test_clock_ppm`.
 
+A CI runner is a shared VM: now and then its host does not run it for a
+few ms, and a pump that wakes more than its margin late (6 ms on the normal
+profile) re-bootstraps; the other device hears that as a tone gap. dstack's
+own job tells such a runner stall from a defect with a witness, a third
+process with no dstack code (`tools/linux/tests/ci_peer_gate.py witness`,
+a 1 ms sleep loop logging every wake 2 ms or more late): a window whose
+rise is only re-bootstraps, each inside a stall the witness saw too, is
+measured again (at most 3 windows); any other rise fails. A defect in the
+pump stalls only its own process, never the witness (main CI of 0.6.138:
+both peers woke 4-6 ms late at the same milliseconds, two separate
+processes).
+
 The app (its dlink status, `Link::status()`, and its own bridge counters):
 
 - TX (the app's dlink `bridge::Stats` of its TX player: `underruns()`,

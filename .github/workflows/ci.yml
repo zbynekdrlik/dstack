@@ -95,6 +95,8 @@ jobs:
         with:
           persist-credentials: false
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: The gate's runner-stall witness, its own tests
+        run: python3 -m unittest tools/linux/tests/ci_peer_gate_test.py
       - run: cargo build --release --locked -p dstack --bin dstack-dev
       - name: Two peers on a dummy interface hear each other whole
         run: sudo bash tools/linux/tests/ci-peer.test.sh target/release/dstack-dev
