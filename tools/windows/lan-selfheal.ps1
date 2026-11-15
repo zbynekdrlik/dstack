@@ -36,7 +36,8 @@
 # the LAN was down. It is gone (#239: ssh and the MCP are always reachable
 # there now). A config that still carries its keys (emergencySource,
 # emergencyPort, danteBlockRule) is accepted and the keys are logged as
-# ignored. Every run also undoes anything that path may have left: the
+# ignored. Every full check (the loop's first minute, every minute after a
+# failed quick check, a manual run) also undoes anything that path may have left: the
 # dstack155 rule it disabled (by the state file's emergencyRule, and by the
 # config's danteBlockRule) is enabled again FIRST, and only then are the
 # "dstack emergency" rules removed.
@@ -89,6 +90,9 @@ $script:RestartGapMinutes = 30
 # dead loop (IgnoreNew: no process while the loop runs).
 $script:LoopSeconds = 60
 $script:WatchdogMinutes = 5
+# Quick faults the full check then finds healthy, in a row, before one WARN:
+# such a PC runs the CIM reads every minute again (the #312 stall).
+$script:DisagreeWarnMinutes = 3
 # The 0.6.109 emergency path, removed in 0.6.111 (#239): what a run cleans up.
 $script:LegacyKeys = @('emergencySource', 'emergencyPort', 'danteBlockRule')
 $script:LegacyRuleNames = @('dstack-emergency-block-others', 'dstack-emergency-block-source-ports')
@@ -793,8 +797,11 @@ function Get-QuickLegFault {
 
 function New-LoopState {
     # NeedFull: the next minute runs the full check. True at the start (the
-    # legacy cleanup and the Dante-adapter warning run once per loop start).
-    [pscustomobject]@{ NeedFull = $true }
+    # legacy cleanup, the Dante-adapter warning and Resolve-HealAdapters'
+    # refusals run once per loop start, then only on a failed quick check: a
+    # healthy minute reads no adapter list, so it raises none of them).
+    # Disagree: quick faults in a row that the full check found healthy.
+    [pscustomobject]@{ NeedFull = $true; Disagree = 0 }
 }
 
 function Invoke-LoopIteration {
@@ -815,11 +822,16 @@ function Invoke-LoopIteration {
             $quick = "quick check failed: $($_.Exception.Message)"
         }
         if ($quick -eq '') {
-            Write-HealLog -Path $log -Message 'gateway ok'
+            $Loop.Disagree = 0
+            # A log that cannot be written must not turn healthy minutes into
+            # full checks: the leg is fine, so the minute is.
+            try { Write-HealLog -Path $log -Message 'gateway ok' }
+            catch { Write-Error -ErrorAction Continue "lan-selfheal: log not writable: $($_.Exception.Message)" }
             return 0
         }
         Write-HealLog -Path $log -Message "quick check: ${quick}; full check"
     }
+    $wasQuick = -not $Loop.NeedFull
     $code = [int](Invoke-Check -Dir $Dir | Select-Object -Last 1)
     $failures = 0
     if (Test-Path -LiteralPath $statePath) {
@@ -827,6 +839,18 @@ function Invoke-LoopIteration {
         catch { $failures = 1 }
     }
     $Loop.NeedFull = ($code -ne 0) -or ($failures -gt 0)
+    if ($wasQuick -and -not $Loop.NeedFull -and (Test-Path -LiteralPath $configPath)) {
+        # The quick check saw a fault, the full check none: logged once when
+        # it keeps happening (each such minute runs the CIM reads).
+        $Loop.Disagree++
+        if ($Loop.Disagree -eq $script:DisagreeWarnMinutes) {
+            Write-HealLog -Path $log -Message ("WARN the quick check found a fault and the full check none, $($script:DisagreeWarnMinutes) " +
+                "minutes in a row: each such minute runs the CIM reads again (#312); check that .NET lists the LAN adapter " +
+                "under its config name (NetworkInterface.Name) with its IPv4 address")
+        }
+    } elseif (-not $Loop.NeedFull) {
+        $Loop.Disagree = 0
+    }
     $code
 }
 
@@ -934,7 +958,11 @@ function Install-SelfHeal {
         -Principal $principal -Settings $settings -Force | Out-Null
     # Read back what was registered.
     $problem = Test-LoopTaskShape -Task (Get-ScheduledTask -TaskName $script:TaskName) -Execute $exe -Argument $arg
-    if ($problem) { throw "install check: $problem" }
+    if ($problem) {
+        # Registered but wrong: disabled, so its watchdog never starts it.
+        Disable-ScheduledTask -TaskName $script:TaskName | Out-Null
+        throw "install check: $problem (the task is registered but disabled; fix and install again)"
+    }
     Start-ScheduledTask -TaskName $script:TaskName
     $desc = Get-AdapterDescription -Adapter $adapters.Lan
     $kind = if ([string]::IsNullOrWhiteSpace($desc)) { 'no readable description: its repair never restarts it, it renews DHCP' }
@@ -947,6 +975,9 @@ function Install-SelfHeal {
 function Uninstall-SelfHeal {
     param([Parameter(Mandatory)][string]$Dir)
     $log = Join-Path $Dir 'lan-selfheal.log'
+    $task = Get-ScheduledTask -TaskName $script:TaskName -ErrorAction SilentlyContinue
+    # The loop first (#312): it must not write the state file during the cleanup.
+    if ($task) { Stop-ScheduledTask -TaskName $script:TaskName }
     if (Test-Path -LiteralPath $Dir) {
         # The task never runs again: undo a left-over emergency path now (#239).
         $state = Read-HealState -Json $null
@@ -966,11 +997,7 @@ function Uninstall-SelfHeal {
             Save-HealState -Path $statePath -Failures $state.Failures -LastRestart $state.LastRestart -LegacyRule $state.LegacyRule
         }
     }
-    if (Get-ScheduledTask -TaskName $script:TaskName -ErrorAction SilentlyContinue) {
-        # The loop runs until stopped (#312).
-        Stop-ScheduledTask -TaskName $script:TaskName
-        Unregister-ScheduledTask -TaskName $script:TaskName -Confirm:$false
-    }
+    if ($task) { Unregister-ScheduledTask -TaskName $script:TaskName -Confirm:$false }
     if (Test-Path -LiteralPath $Dir) {
         Write-HealLog -Path (Join-Path $Dir 'lan-selfheal.log') -Message "uninstalled: task '$($script:TaskName)' removed"
     }

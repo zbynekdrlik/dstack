@@ -100,6 +100,7 @@ function Remove-NetFirewallRule {
 function Get-ScheduledTask { [CmdletBinding()] param([string]$TaskName) $script:Fake.Task }
 function Stop-ScheduledTask { [CmdletBinding()] param([string]$TaskName) Note 'Stop-ScheduledTask' $TaskName }
 function Start-ScheduledTask { [CmdletBinding()] param([string]$TaskName) Note 'Start-ScheduledTask' $TaskName }
+function Disable-ScheduledTask { [CmdletBinding()] param([string]$TaskName) Note 'Disable-ScheduledTask' $TaskName }
 function Unregister-ScheduledTask {
     [CmdletBinding(SupportsShouldProcess)] param([string]$TaskName)
     Note 'Unregister-ScheduledTask' $TaskName; $script:Fake.Task = $null
@@ -850,10 +851,12 @@ try {
     Check 'the real .NET readers: loopback is one interface, up, 127.0.0.1, and the route to it starts there' {
         $nic = [System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces() |
             Where-Object { $_.NetworkInterfaceType -eq 'Loopback' } | Select-Object -First 1
+        Reset-Fake
         $q = & $realReadQuickLan -Name $nic.Name
         $none = & $realReadQuickLan -Name 'no adapter is called this 312'
         $q.Count -eq 1 -and $q.Up -and (@($q.Addresses) -contains '127.0.0.1') -and
-        (& $realRouteSource -Gateway '127.0.0.1') -eq '127.0.0.1' -and $none.Count -eq 0 -and -not $none.Up
+        (& $realRouteSource -Gateway '127.0.0.1') -eq '127.0.0.1' -and $none.Count -eq 0 -and -not $none.Up -and
+        @(CimReads).Count -eq 0   # the real readers call no NetAdapter/NetTCPIP cmdlet (the fakes record any)
     }
     Check 'the loop priority is BelowNormal' {
         $p = [pscustomobject]@{ Id = 42; PriorityClass = 'Normal' }
@@ -995,7 +998,7 @@ try {
         $old.Settings.RestartCount = 999
         $oldAction -and $perMinute -and $limit -and $restart -and (Test-LoopTaskShape -Task $old -Execute $exe -Argument $arg) -eq ''
     }
-    Check 'install refuses a registered task of the wrong shape and does not start it' {
+    Check 'install refuses a registered task of the wrong shape: disabled (the watchdog never starts it), not started' {
         Reset-Fake
         $d = NewRun 'badshape' $good
         function New-ScheduledTaskSettingsSet {
@@ -1003,8 +1006,8 @@ try {
                 [string]$MultipleInstances, [timespan]$ExecutionTimeLimit, [int]$RestartCount, [timespan]$RestartInterval, [int]$Priority = 7)
             [pscustomobject]@{ ExecutionTimeLimit = 'PT72H'; MultipleInstances = $MultipleInstances; Priority = $Priority; RestartCount = $RestartCount }
         }
-        (Throws { Install-SelfHeal -Dir $d -Source $source } '*install check*time limit*') -and
-        -not ($script:Fake.Calls -contains 'Start-ScheduledTask dstack LAN self-heal')
+        (Throws { Install-SelfHeal -Dir $d -Source $source } '*install check*time limit*registered but disabled*') -and
+        (& $taskCalls) -eq 'Register-ScheduledTask dstack LAN self-heal;Disable-ScheduledTask dstack LAN self-heal'
     }
     Check 'uninstall stops the running loop, then removes the task' {
         Reset-Fake
@@ -1012,7 +1015,39 @@ try {
         [void](Install-SelfHeal -Dir $d -Source $source)
         $script:Fake.Calls.Clear()
         [void](Uninstall-SelfHeal -Dir $d)
-        (& $taskCalls) -eq 'Stop-ScheduledTask dstack LAN self-heal;Unregister-ScheduledTask dstack LAN self-heal' -and $null -eq $script:Fake.Task
+        $calls = @($script:Fake.Calls)
+        $stop = [array]::IndexOf($calls, 'Stop-ScheduledTask dstack LAN self-heal')
+        $firstRead = @(0..($calls.Count - 1) | Where-Object { $calls[$_] -like 'FwRead*' })[0]
+        (& $taskCalls) -eq 'Stop-ScheduledTask dstack LAN self-heal;Unregister-ScheduledTask dstack LAN self-heal' -and
+        $null -eq $script:Fake.Task -and $stop -ge 0 -and $stop -lt $firstRead   # stopped before the cleanup runs
+    }
+    Check 'an iteration that throws: an ERROR line, the next minute a full check, the loop goes on' {
+        Reset-Fake
+        $d = NewRun 'loopthrow' $good
+        $script:checks = 0
+        function Invoke-Check { param([string]$Dir) $script:checks++; if ($script:checks -eq 1) { throw 'fake failure' }; 0 }
+        $p = [pscustomobject]@{ Id = 42; PriorityClass = 'Normal' }
+        Invoke-Loop -Dir $d -MaxIterations 2 -IntervalSeconds 0 -Process $p
+        # minute 1 (full) threw; minute 2 is a full check again, not a quick one
+        $script:checks -eq 2 -and (LogOf $d) -match 'ERROR loop: fake failure' -and -not ($script:Fake.Calls -contains 'Read-QuickLan LAN')
+    }
+    Check 'a quick fault the full check finds healthy, 3 minutes in a row: one WARN, the count resets on a healthy quick minute' {
+        Reset-Fake; $script:Fake.RouteSource = '10.70.0.5'
+        $d = NewRun 'loopdisagree' $good
+        $loop = New-LoopState; $loop.NeedFull = $false
+        foreach ($i in 1..4) { [void](Invoke-LoopIteration -Dir $d -Loop $loop) }
+        $warns = @((LogOf $d) -split "`n" | Where-Object { $_ -match 'WARN the quick check found a fault and the full check none, 3 minutes' }).Count
+        $script:Fake.RouteSource = '10.0.0.20'
+        [void](Invoke-LoopIteration -Dir $d -Loop $loop)
+        $warns -eq 1 -and $loop.Disagree -eq 0
+    }
+    Check 'a healthy quick minute whose log write fails is still healthy (no fall-back to full checks)' {
+        Reset-Fake
+        $d = NewRun 'lognowrite' $good
+        function Write-HealLog { param([string]$Path, [string]$Message) throw 'disk full' }
+        $loop = New-LoopState; $loop.NeedFull = $false
+        $rc = Invoke-LoopIteration -Dir $d -Loop $loop 2>$null
+        $rc -eq 0 -and -not $loop.NeedFull -and @(CimReads).Count -eq 0
     }
 } finally {
     Remove-Item -LiteralPath $tmp -Recurse -Force
