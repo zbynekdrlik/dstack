@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.140
+
+- **Fix (Refs #303, field 15.11.2026: OBS on a stream PC): a TX writer late inside its app's pass no longer breaks the audio.** OBS runs a mix's outputs one after another on its audio thread, and a slow output ahead of dante-input's TX tap (an NDI output, ~10 ms) made the write land up to ~10 ms after its tick. The bridge `Player` re-centred any depth under its floor (min(5 ms, target/4)) as a dropout: ~22 ms of silence at OBS's 22.67 ms target, counted as an underrun and a re-centre (`tx_underruns` = `tx_recentres`, about 0.8/s in the field), while the FIFO still held audio and the write was on its way. The floor is gone: a deficit is a dropout only when the FIFO cannot serve the converter's next call (a real underrun, re-primed to the same target as before). An excess past the bound is still skipped. `recentres` now counts excess skips only.
+  - The soak gate has two new cases in that shape (`gate_ten_minutes_of_a_late_audio_pass_app_fast`/`_slow`: one tick in 40 written 7.5-10.3 ms late): 98 and 174 TX gaps in 10 simulated minutes before, none now; all 9 gate cases pass.
+  - API (removed): `dlink::bridge::player::FLOOR_S` and `dlink::bridge::player::floor_s` (no consumer used them).
+- **No latency change** for any device or dlink app: P, (c), W and the app buffer (the bridge target) are as in 0.6.139.
+- Consumers: obs (dante-input TX), intercom, songplayer, camera-box, presenter, dasio: move the stack version; nothing to port.
+
 ## 0.6.139
 
 - **CI (Refs #305): the `ci-peer` gate tells a runner stall from a pump defect.** Main CI of 0.6.138 failed once: both peers' pumps (two separate processes) woke 4-6 ms late at the same milliseconds, one past the normal profile's 6 ms margin, and re-bootstrapped. The gate now runs a witness process with no dstack code (`tools/linux/tests/ci_peer_gate.py`); a window that rose is measured again (at most 3 windows, each void one a warning on the run) only when every re-bootstrap in it was a late wake inside a stall the witness saw too (other counters may rise with it: the other peer hears the restart); a rise without a re-bootstrap, any other cause, or an unwitnessed one fails. `docs/ci-peer.md` says how an application's CI can use the same witness.
