@@ -7,7 +7,7 @@
 use super::*;
 
 use crate::announce::{ARC_SERVICE, OLD_CLIENT_KEY};
-use crate::network_floor::Version;
+use crate::network_floor::{NETWORK_FLOOR, Version};
 
 /// The announced ARC record's `dstack_old_client` entry, if any.
 fn announced(published: &Mutex<Vec<ServiceRecord>>) -> Option<String> {
@@ -68,11 +68,11 @@ async fn an_old_local_client_is_announced_once_and_taken_off_once_upgraded() {
             Some("dstack_old_client=0.6.20")
         );
         // A current client beside it changes nothing.
-        asker.client_asked("dtray-cli", Version::new(0, 6, 146));
+        asker.client_asked("dtray-cli", NETWORK_FLOOR);
         tokio::time::sleep(TICK * 4).await;
         assert_eq!(arc_registrations(&watch), 2, "once per change");
         // Upgraded under its name: the key goes, in one announcement.
-        asker.client_asked("dtray", Version::new(0, 6, 146));
+        asker.client_asked("dtray", NETWORK_FLOOR);
         until("the key withdrawn", || announced(&seen).is_none()).await;
         tokio::time::sleep(TICK * 4).await;
         assert_eq!(arc_registrations(&watch), 3, "once per change");
@@ -94,8 +94,9 @@ async fn an_old_local_client_is_announced_once_and_taken_off_once_upgraded() {
     .await
     .expect("within the bound");
     assert!(matches!(served, Err(ServeError::Control(_))), "{served:?}");
-    // Only the ARC record changed: the others were registered once.
+    // The 19 records once, then the ARC record twice more: nothing else
+    // was registered again.
     let calls = log.calls();
-    assert_eq!(calls.len(), 3 + 16 + 2, "{calls:?}");
+    assert_eq!(calls.len(), 19 + 2, "{calls:?}");
     assert!(calls.iter().all(|c| !c.starts_with('-')), "{calls:?}");
 }

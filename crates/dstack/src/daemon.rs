@@ -812,6 +812,7 @@ pub async fn serve<R: Registry>(
                     match announce_device(&shared, announcer, ip, old_client) {
                         Ok(n) => info!(
                             records = n,
+                            queue_waits = announcer.waited(),
                             old_client = %old_client.map_or_else(|| "none".to_string(), |v| v.to_string()),
                             "mDNS records announced again: the local client below the network floor changed"
                         ),
