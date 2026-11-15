@@ -175,9 +175,10 @@ fn name_and_cpu(pid: u32) -> (String, Option<u64>) {
 }
 
 /// The processes holding the most TCP and UDP endpoints on `ip`
-/// ([`super::processes::rank`]), with their names and CPU (dstack #195).
-pub fn processes_on(ip: Ipv4Addr) -> Vec<super::processes::Process> {
-    super::processes::rank(owners_on(ip))
+/// ([`super::processes::rank`], pid 0 and this process skipped), with
+/// their names and CPU (dstack #195). Always read on Windows.
+pub fn processes_on(ip: Ipv4Addr) -> Option<Vec<super::processes::Process>> {
+    let list = super::processes::rank(owners_on(ip), &super::processes::skipped())
         .into_iter()
         .map(|(pid, endpoints)| {
             let (name, cpu_ms) = name_and_cpu(pid);
@@ -188,5 +189,6 @@ pub fn processes_on(ip: Ipv4Addr) -> Vec<super::processes::Process> {
                 cpu_ms,
             }
         })
-        .collect()
+        .collect();
+    Some(list)
 }

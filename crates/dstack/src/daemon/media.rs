@@ -609,7 +609,7 @@ impl Driver {
         let window = self
             .neighbours
             .tick(&mut self.traffic, now, ip, || nic(ip), ours);
-        self.record(now, window.as_ref());
+        self.record(now, window.as_ref(), ours);
         self.pins.watch(
             crate::media::repin::pin_resets(),
             crate::media::repin::pin_refusals(),
@@ -630,22 +630,25 @@ impl Driver {
         );
     }
 
-    /// The traffic recorder's step at `now` (dstack #195): the traffic
-    /// watch's last `window` gives the neighbours' audio; a sample once a
-    /// second; and at the first refusal of a burst (the TX slots' flags,
-    /// [`crate::media::tx::TxShared::take_refused`]) one WARN with the
+    /// The traffic recorder's step at `now`, this device's audio bytes
+    /// `ours` (dstack #195): the traffic watch's last `window` gives the
+    /// neighbours' audio; a sample once a second; and at the first refusal
+    /// of a burst (the TX slots' flags,
+    /// [`crate::media::tx::TxShared::take_refused`]) a sample of the part
+    /// second that held it, then one WARN with the
     /// refused slots, the record ([`crate::traffic::recorder::Recorder::report`]:
     /// per second the NIC's sent bytes, this device's audio, the other
     /// traffic, this process's and the machine's CPU) and the processes
     /// holding the most endpoints on our address (Windows).
-    fn record(&mut self, now: u64, window: Option<&crate::traffic::Traffic>) {
+    fn record(&mut self, now: u64, window: Option<&crate::traffic::Traffic>, ours: u64) {
         self.recorder.after_window(window);
         let ip = self.media.ip;
         let (nic, cpu) = (self.nic, self.cpu);
-        self.recorder
-            .record(now, || nic(ip), self.media.tx.bytes_sent(), cpu);
+        self.recorder.record(now, || nic(ip), ours, cpu);
         let slots = self.media.tx.take_refused();
         if self.recorder.refused(now, !slots.is_empty()) {
+            // The part second that held the refusal ends the record.
+            self.recorder.record_now(now, || nic(ip), ours, cpu);
             warn!(
                 slots = ?slots,
                 seconds = %self.recorder.report(),

@@ -894,3 +894,32 @@ async fn the_driver_s_tick_dumps_the_traffic_record_once_a_burst_of_refusals() {
     });
     assert_eq!(log.lines().filter(|l| l.contains(DUMP)).count(), 0, "{log}");
 }
+
+/// dstack #195: a refusal early in a sample second still ends the dump's
+/// record with that part second (the dump takes its own sample).
+#[tokio::test]
+async fn the_dump_ends_with_the_part_second_of_the_refusal() {
+    use crate::test_log::{capture_warnings, undecided};
+    const DUMP: &str = "NIC refused sends: the last 30 s of traffic";
+    undecided();
+    let dir = tempfile::tempdir().unwrap();
+    let device = device_at(dir.path());
+    let media = media_on(&device, Arc::new(Unready));
+    let records = Records::default();
+    let (mut driver, _answers, _changes) = driver_of(&media);
+    driver.set_nic(|_| Some(0));
+    driver.set_recorder_reads(|| None, |_| String::from("x"));
+    driver.tick(&records);
+    std::thread::sleep(Duration::from_millis(1_010));
+    driver.tick(&records);
+    // 300 ms into the next second: no sample due, yet the dump has two.
+    std::thread::sleep(Duration::from_millis(300));
+    media.tx.note_refused(2);
+    let log = capture_warnings(|| driver.tick(&records));
+    let line = log.lines().find(|l| l.contains(DUMP)).expect(&log);
+    assert!(line.contains("slots=[3]"), "{log}");
+    assert!(
+        line.contains("seconds=-0s nic=0 ours=0 other=0 cpu=?%/?%; -0s nic=0"),
+        "{log}"
+    );
+}

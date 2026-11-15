@@ -55,9 +55,13 @@ pub fn times() -> Option<CpuTimes> {
 #[cfg(windows)]
 pub use super::windows::cpu_times as times;
 
-/// The CPU times now; none on this OS.
 #[cfg(not(any(target_os = "linux", windows)))]
-pub fn times() -> Option<CpuTimes> {
+pub use unread_times as times;
+
+/// The CPU times now; none on this OS (dstack builds for Linux and Windows;
+/// excluded from the gate, which never compiles it).
+#[cfg(not(any(target_os = "linux", windows)))]
+pub fn unread_times() -> Option<CpuTimes> {
     None
 }
 

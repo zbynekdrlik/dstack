@@ -222,3 +222,52 @@ fn a_closed_window_sets_the_neighbours_and_none_keeps_them() {
     r.after_window(Some(&alone));
     assert_eq!(r.neighbours(), 0);
 }
+
+#[test]
+fn a_burst_that_never_goes_quiet_is_dumped_again_each_minute() {
+    let mut r = Recorder::new();
+    // A refusal every 5 s for 3 minutes: a dump at 0, then one at each
+    // full minute since the last dump.
+    let dumps: Vec<u64> = (0..=36)
+        .map(|i| i * 5 * S)
+        .filter(|&t| r.refused(t, true))
+        .collect();
+    assert_eq!(dumps, vec![0, 60 * S, 120 * S, 180 * S]);
+    // Just under a minute after the last dump, with no quiet 10 s
+    // between: none; at the minute: one.
+    let mut r = Recorder::new();
+    assert!(r.refused(S, true));
+    for i in 1..=11 {
+        assert!(!r.refused(S + i * 5 * S, true), "{i}");
+    }
+    assert!(!r.refused(S + REDUMP_NS - 1, true));
+    assert!(r.refused(S + REDUMP_NS, true));
+}
+
+#[test]
+fn a_dump_s_own_sample_covers_the_part_second_of_the_refusal() {
+    let mut r = Recorder::new();
+    // Before any sample: it only starts the record.
+    r.record_now(0, || Some(0), 0, || cpu(0, 0, 0));
+    assert_eq!(r.seconds().count(), 0);
+    r.record(S, || Some(1_000), 100, || cpu(10, 10, 100));
+    assert_eq!(r.seconds().count(), 1);
+    // A refusal 300 ms after the sample: a part second, at its own rate.
+    r.record_now(S + 300_000_000, || Some(1_300), 130, || cpu(13, 40, 130));
+    let last = r.seconds().last().copied().unwrap();
+    assert_eq!(last.at_ns, S + 300_000_000);
+    assert_eq!((last.nic, last.ours), (Some(1_000), 100));
+    assert_eq!((last.process_cpu, last.system_cpu), (Some(10), Some(100)));
+    // Again at the same moment: nothing new, nothing read.
+    r.record_now(
+        S + 300_000_000,
+        || panic!("the NIC read twice at one moment"),
+        130,
+        || panic!("the CPU read twice at one moment"),
+    );
+    assert_eq!(r.seconds().count(), 2);
+    // The next due sample counts from the dump's own.
+    assert!(!r.due(2 * S));
+    r.record(S + 1_300_000_000, || Some(2_300), 230, || cpu(23, 50, 230));
+    assert_eq!(r.seconds().count(), 3);
+}

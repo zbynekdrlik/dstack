@@ -12,8 +12,10 @@
 //! thread of its own and nothing on the media path. The TX thread only
 //! raises a slot's flag on a refusal ([`crate::media::tx::nic_refusal`]);
 //! the control tick takes the flags and, at the first refusal of a burst
-//! ([`Recorder::refused`]: none in the [`BURST_QUIET_NS`] before), logs one
-//! WARN `NIC refused sends: the last 30 s of traffic` with
+//! ([`Recorder::refused`]: none in the [`BURST_QUIET_NS`] before; once a
+//! [`REDUMP_NS`] in a burst that never goes quiet), takes a sample of the
+//! part second that held the refusal ([`Recorder::record_now`]) and logs
+//! one WARN `NIC refused sends: the last 30 s of traffic` with
 //! [`Recorder::report`]: per second, the NIC's bytes, ours, the other
 //! traffic and the CPU. So the next refusal names its cause: our traffic,
 //! other traffic or a CPU stall. A dump every second would bury the real
@@ -36,6 +38,9 @@ pub const SAMPLE_NS: u64 = 1_000_000_000;
 /// A refusal after this long without one starts a new burst, which is
 /// dumped; ns.
 pub const BURST_QUIET_NS: u64 = 10_000_000_000;
+/// A burst that never goes quiet is dumped again this long after its last
+/// dump, ns.
+pub const REDUMP_NS: u64 = 60_000_000_000;
 
 /// The CPU times at a moment, all in one unit (Linux: clock ticks; Windows:
 /// 100 ns): this process's (user + kernel), the whole machine's busy time
@@ -81,6 +86,7 @@ pub struct Recorder {
     seconds: VecDeque<Second>,
     neighbours: u64,
     last_refusal: Option<u64>,
+    last_dump: Option<u64>,
 }
 
 impl Recorder {
@@ -127,9 +133,34 @@ impl Recorder {
         ours: u64,
         cpu: impl FnOnce() -> Option<CpuTimes>,
     ) {
-        if !self.due(now_ns) {
-            return;
+        if self.due(now_ns) {
+            self.sample(now_ns, nic, ours, cpu);
         }
+    }
+
+    /// [`Recorder::record`] now, due or not, unless a sample was taken at
+    /// `now_ns` already: a dump's own sample, so the record ends with the
+    /// part second that held the refusal (its rate over its own span).
+    pub fn record_now(
+        &mut self,
+        now_ns: u64,
+        nic: impl FnOnce() -> Option<u64>,
+        ours: u64,
+        cpu: impl FnOnce() -> Option<CpuTimes>,
+    ) {
+        if self.last.is_none_or(|m| m.at < now_ns) {
+            self.sample(now_ns, nic, ours, cpu);
+        }
+    }
+
+    /// The sample itself (see [`Recorder::record`]).
+    fn sample(
+        &mut self,
+        now_ns: u64,
+        nic: impl FnOnce() -> Option<u64>,
+        ours: u64,
+        cpu: impl FnOnce() -> Option<CpuTimes>,
+    ) {
         let mark = Mark {
             at: now_ns,
             nic: nic(),
@@ -139,7 +170,7 @@ impl Recorder {
         let Some(last) = self.last.replace(mark) else {
             return;
         };
-        let span = now_ns - last.at;
+        let span = now_ns.saturating_sub(last.at);
         let nic = mark
             .nic
             .zip(last.nic)
@@ -169,18 +200,22 @@ impl Recorder {
     }
 
     /// At `now_ns`, with a refusal seen since the last tick or not: whether
-    /// to dump, i.e. it is the first refusal of a burst (none in the
-    /// [`BURST_QUIET_NS`] before it). A burst that goes on over many ticks
-    /// is dumped once.
+    /// to dump: the first refusal of a burst (none in the
+    /// [`BURST_QUIET_NS`] before it), and in a burst that never goes quiet
+    /// (a refusal every few seconds) again once [`REDUMP_NS`] has passed
+    /// since the last dump, so a cause that changes is still named. A burst
+    /// over many ticks is dumped once.
     pub fn refused(&mut self, now_ns: u64, refused: bool) -> bool {
         if !refused {
             return false;
         }
-        let new_burst = self
-            .last_refusal
-            .is_none_or(|at| now_ns.saturating_sub(at) >= BURST_QUIET_NS);
+        let since = |at: Option<u64>, ns: u64| at.is_none_or(|at| now_ns.saturating_sub(at) >= ns);
+        let dump = since(self.last_refusal, BURST_QUIET_NS) || since(self.last_dump, REDUMP_NS);
         self.last_refusal = Some(now_ns);
-        new_burst
+        if dump {
+            self.last_dump = Some(now_ns);
+        }
+        dump
     }
 
     /// The record as the dump shows it, oldest first, `; ` between seconds:
