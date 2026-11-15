@@ -611,12 +611,14 @@ pub enum ServeError {
     Announce(#[from] AnnounceError),
 }
 
-/// Makes the device's records as they are now the announced set; returns
-/// how many there are.
+/// Makes the device's records as they are now the announced set, the ARC
+/// record naming `old_client` ([`crate::announce::with_old_client`], dstack
+/// #323); returns how many there are.
 pub fn announce_device<R: Registry>(
     shared: &Mutex<Device>,
     announcer: &mut Announcer<R>,
     ip: Ipv4Addr,
+    old_client: Option<crate::network_floor::Version>,
 ) -> Result<usize, AnnounceError> {
     let recs = {
         let device = shared.lock().unwrap_or_else(PoisonError::into_inner);
@@ -624,6 +626,7 @@ pub fn announce_device<R: Registry>(
         if let Some(port) = device.status_port {
             crate::announce::with_status_port(&mut recs, port);
         }
+        crate::announce::with_old_client(&mut recs, old_client);
         recs
     };
     announcer.announce(&recs)?;
@@ -696,7 +699,9 @@ fn receiver_reader(
 /// [`Network`], whose record queries and reader start once a lookup
 /// reached them), serves `control` (the control socket's server, the
 /// host's [`crate::ctl::serve_control`]), and announces again after every
-/// rename the ARC server saved. A failed announcement, a server
+/// rename the ARC server saved and whenever the lowest local client below
+/// the network floor changes (dstack #323, [`Media::old_client`], read
+/// every [`TICK`]). A failed announcement, a server
 /// that stops, or threads that do not start end it with an error (the
 /// service restarts the daemon; the state file holds every saved rename and
 /// subscription). Whatever ended it, every RX flow is then stopped at its
@@ -719,7 +724,10 @@ pub async fn serve<R: Registry>(
     let ip = net.ip;
     let mdns = multicast.mdns;
     let changed = Arc::new(Notify::new());
-    let n = announce_device(&shared, announcer, ip)?;
+    // The local client below the network floor the ARC record names (dstack
+    // #323): read at every tick, announced again only when it changes.
+    let mut old_client = media.old_client();
+    let n = announce_device(&shared, announcer, ip, old_client)?;
     info!(
         records = n,
         queue_waits = announcer.waited(),
@@ -786,7 +794,8 @@ pub async fn serve<R: Registry>(
             ended = &mut control => break Err(ServeError::Control(ended_error(ended))),
             () = changed.notified() => {
                 own_stale = true;
-                match announce_device(&shared, announcer, ip) {
+                old_client = media.old_client();
+                match announce_device(&shared, announcer, ip, old_client) {
                     Ok(n) => info!(
                         records = n,
                         queue_waits = announcer.waited(),
@@ -797,6 +806,18 @@ pub async fn serve<R: Registry>(
             }
             Some((flow, answer)) = answers.recv() => driver.answered(flow, answer),
             _ = tick.tick() => {
+                let now_old = media.old_client();
+                if now_old != old_client {
+                    old_client = now_old;
+                    match announce_device(&shared, announcer, ip, old_client) {
+                        Ok(n) => info!(
+                            records = n,
+                            old_client = %old_client.map_or_else(|| "none".to_string(), |v| v.to_string()),
+                            "mDNS records announced again: the local client below the network floor changed"
+                        ),
+                        Err(e) => break Err(e.into()),
+                    }
+                }
                 if own_stale {
                     let device = shared.lock().unwrap_or_else(PoisonError::into_inner);
                     resolver.0 = Own::new(&device.state, &device.cfg, ip);

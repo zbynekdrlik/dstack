@@ -57,6 +57,7 @@ use mdns_sd::{ServiceDaemon, ServiceInfo, TxtProperty};
 use crate::arc::{MAX_CHANNELS_IN_FLOW, PCM_TYPE};
 use crate::cmc::device_id;
 use crate::device::{DeviceConfig, DeviceState};
+use crate::network_floor::Version;
 pub use crate::subscribe::directory::DBC_SERVICE;
 
 pub const ARC_SERVICE: &str = "_netaudio-arc._udp.local.";
@@ -121,6 +122,25 @@ pub const STATUS_PORT_KEY: &str = "dstack_ctl";
 /// since v0.6.84 (dstack #190): a controller tells our devices, and how old
 /// they are, from it ([`crate::discover::Device::states_flow_slots`]).
 pub const VERSION_KEY: &str = "dstack_vers";
+
+/// The ARC record's TXT key naming a local client of the device's status
+/// endpoint below the network floor (`dstack_old_client=0.6.20`, dstack
+/// #323): the lowest such version among the clients that asked within the
+/// hour ([`crate::network_floor::Clients::lowest_below_floor`]). Absent
+/// while there is none, so the records are then as before. A controller
+/// reads it through [`crate::discover::Discovery::below_floor`].
+pub const OLD_CLIENT_KEY: &str = "dstack_old_client";
+
+/// Adds `old_client` ([`OLD_CLIENT_KEY`]) to the ARC record of `recs`;
+/// `None` adds nothing.
+pub fn with_old_client(recs: &mut [ServiceRecord], old_client: Option<Version>) {
+    let Some(version) = old_client else {
+        return;
+    };
+    for r in recs.iter_mut().filter(|r| r.service == ARC_SERVICE) {
+        r.txt.push(format!("{OLD_CLIENT_KEY}={version}"));
+    }
+}
 
 /// Adds the local status endpoint's `port` to the ARC record of `recs`.
 pub fn with_status_port(recs: &mut [ServiceRecord], port: u16) {

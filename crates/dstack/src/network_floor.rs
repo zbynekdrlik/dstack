@@ -30,6 +30,14 @@
 //! - Local clients: dtray and dtray-cli send `status <name> <version>` to
 //!   a device's local endpoint ([`crate::ctl::probe::status_as`]); the
 //!   device lists its clients ([`Clients`]) and checks them alike.
+//! - Local clients on the network (dstack #323): while a local client
+//!   below the floor asked within [`HOUR_NS`], the device's ARC record
+//!   carries [`crate::announce::OLD_CLIENT_KEY`] with the lowest such
+//!   version ([`Clients::lowest_below_floor`]), and is announced again
+//!   once each time that changes (`daemon::serve`'s tick). A
+//!   [`crate::discover::Discovery`] lists it ([`below_of`]) as a client
+//!   named by the device, at its ARC address: the client itself sits on
+//!   the PC that answers there.
 //! - [`check`]: one WARN `a dstack device below the network floor` per
 //!   binary per [`HOUR_NS`] in a process ([`Warned`], process-wide, so a
 //!   process that sees one peer two ways warns once), with its kind
@@ -142,9 +150,11 @@ impl Kind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Below {
     pub kind: Kind,
-    /// A peer's Dante name, or a client's own name.
+    /// A peer's Dante name, a local client's own name, or, for a client
+    /// a device announces (dstack #323), that device's Dante name.
     pub name: String,
-    /// A peer's address (none for a local client).
+    /// A peer's address, or the address of the device that announces a
+    /// client (none for a device's own local client).
     pub address: Option<Ipv4Addr>,
     pub version: Version,
     /// When it was last seen, ns ([`now_ns`]'s clock).
@@ -257,9 +267,28 @@ impl Clients {
     /// Every client that asked within [`HOUR_NS`] before `now_ns`; older
     /// ones are dropped.
     pub fn list(&mut self, now_ns: u64) -> Vec<Client> {
+        self.expire(now_ns);
+        self.by_name.values().cloned().collect()
+    }
+
+    /// The lowest version below the floor of the clients that asked within
+    /// [`HOUR_NS`] before `now_ns` (older ones are dropped); `None` when
+    /// none is below. What the device announces under
+    /// [`crate::announce::OLD_CLIENT_KEY`] (dstack #323).
+    pub fn lowest_below_floor(&mut self, now_ns: u64) -> Option<Version> {
+        self.expire(now_ns);
+        self.by_name
+            .values()
+            .map(|c| c.version)
+            .filter(|v| v.below_floor())
+            .min()
+    }
+
+    /// Drops the clients that last asked [`HOUR_NS`] or more before
+    /// `now_ns`.
+    fn expire(&mut self, now_ns: u64) {
         self.by_name
             .retain(|_, c| now_ns.saturating_sub(c.seen_ns) < HOUR_NS);
-        self.by_name.values().cloned().collect()
     }
 }
 
@@ -337,22 +366,34 @@ pub fn check(guard: &Mutex<Guard>, kind: Kind, name: &str, address: Option<Ipv4A
 }
 
 /// The devices of `devices` that state a dstack version below the floor
-/// ([`crate::announce::VERSION_KEY`]), as peers at their ARC address, seen
-/// at `now_ns`. A device without the key is not ours: never named.
+/// ([`crate::announce::VERSION_KEY`]), as peers at their ARC address, and
+/// those that announce a local client below it
+/// ([`crate::announce::OLD_CLIENT_KEY`], dstack #323), as clients named by
+/// the device at its ARC address, all seen at `now_ns`. A device without
+/// the keys is not ours: never named. A value that does not read, or is
+/// not below this build's floor, names nothing.
 pub fn below_of(devices: &[Device], now_ns: u64) -> Vec<Below> {
-    devices
-        .iter()
-        .filter_map(|d| {
-            let version = Version::parse(d.txt.get(crate::announce::VERSION_KEY)?)?;
-            version.below_floor().then(|| Below {
-                kind: Kind::Peer,
-                name: d.name.clone(),
-                address: Some(*d.arc.ip()),
-                version,
-                seen_ns: now_ns,
-            })
-        })
-        .collect()
+    let mut out = Vec::new();
+    for d in devices {
+        for (kind, key) in [
+            (Kind::Peer, crate::announce::VERSION_KEY),
+            (Kind::Client, crate::announce::OLD_CLIENT_KEY),
+        ] {
+            let Some(version) = d.txt.get(key).and_then(|t| Version::parse(t)) else {
+                continue;
+            };
+            if version.below_floor() {
+                out.push(Below {
+                    kind,
+                    name: d.name.clone(),
+                    address: Some(*d.arc.ip()),
+                    version,
+                    seen_ns: now_ns,
+                });
+            }
+        }
+    }
+    out
 }
 
 /// Warns ([`warn_below`]) about each device of `devices` below the floor.

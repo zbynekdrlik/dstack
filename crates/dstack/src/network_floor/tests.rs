@@ -144,6 +144,31 @@ fn clients_are_listed_by_name_for_an_hour_and_bounded() {
     assert!(!names.contains(&"c0".to_string()));
 }
 
+/// dstack #323: what the ARC record names is the lowest client version
+/// below the floor among the clients of the last hour; none without one.
+#[test]
+fn the_lowest_client_below_the_floor_is_named_for_an_hour() {
+    let mut c = Clients::default();
+    assert_eq!(c.lowest_below_floor(0), None);
+    c.see("dtray-cli", NEW, 5);
+    c.see("at-floor", NETWORK_FLOOR, 5);
+    assert_eq!(c.lowest_below_floor(6), None, "none below the floor");
+    c.see("dtray", OLD, 10);
+    let later = Version::new(0, 6, 40);
+    c.see("other", later, 20);
+    assert_eq!(c.lowest_below_floor(21), Some(OLD));
+    // The hour runs from each client's last request.
+    assert_eq!(c.lowest_below_floor(10 + HOUR_NS - 1), Some(OLD));
+    assert_eq!(c.lowest_below_floor(10 + HOUR_NS), Some(later));
+    assert_eq!(c.lowest_below_floor(20 + HOUR_NS), None);
+    assert!(c.list(20 + HOUR_NS).is_empty(), "expired ones are dropped");
+    // Upgraded under its name: gone at once.
+    c.see("dtray", OLD, 30 + HOUR_NS);
+    assert_eq!(c.lowest_below_floor(31 + HOUR_NS), Some(OLD));
+    c.see("DTRAY", NEW, 32 + HOUR_NS);
+    assert_eq!(c.lowest_below_floor(33 + HOUR_NS), None);
+}
+
 fn below(name: &str) -> Below {
     Below {
         kind: Kind::Peer,
@@ -303,6 +328,42 @@ fn of_the_listed_devices_only_ours_below_the_floor_are_named() {
         "{text}"
     );
     assert!(text.contains("floor-test-listed"), "{text}");
+}
+
+/// dstack #323: a device's announced old local client is named as a client
+/// by the device, at its ARC address; a value that does not read or is not
+/// below the floor names nothing.
+#[test]
+fn a_device_s_announced_old_client_is_named_as_a_client_at_its_address() {
+    let at = Some(Ipv4Addr::new(192, 0, 2, 9));
+    let devices = [
+        device(
+            "beside-dtray",
+            &[("dstack_vers", "0.6.146"), ("dstack_old_client", "0.6.20")],
+        ),
+        device(
+            "both-old",
+            &[("dstack_vers", "0.6.30"), ("dstack_old_client", "0.6.20")],
+        ),
+        device("at-floor", &[("dstack_old_client", "0.6.58")]),
+        device("junk", &[("dstack_old_client", "x")]),
+        device("clean", &[("dstack_vers", "0.6.146")]),
+    ];
+    let below = |kind, name: &str, version| Below {
+        kind,
+        name: name.to_string(),
+        address: at,
+        version,
+        seen_ns: 7,
+    };
+    assert_eq!(
+        below_of(&devices, 7),
+        vec![
+            below(Kind::Client, "beside-dtray", OLD),
+            below(Kind::Peer, "both-old", Version::new(0, 6, 30)),
+            below(Kind::Client, "both-old", OLD),
+        ]
+    );
 }
 
 /// An mDNS datagram of `records`, a response or a query.
