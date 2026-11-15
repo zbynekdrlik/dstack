@@ -28,8 +28,8 @@ use harness::*;
 /// A tick this late (the app's thread held: the runner's load) may cost
 /// one TX gap: at OBS's 22.67 ms target the sawtooth's bottom is about
 /// 12 ms; with no floor (dstack #303) only lateness that empties the FIFO
-/// before the converter's call (about 9 ms) gaps, so 5 ms stays a safe
-/// margin under it.
+/// before the converter's call (about 10.5 ms: the 12 ms bottom less one
+/// call's input) gaps, so 5 ms stays a safe margin under it.
 const LATE_TICK: Duration = Duration::from_millis(5);
 
 /// What one tick saw: its lateness past its due time and whether a TX gap

@@ -541,6 +541,8 @@ impl Player {
                 // Only an excess re-centres (a floor of 0: no depth is under
                 // it, and a deficit is at most the target, under the
                 // excess bound), so `by_s` is the excess to skip, negative.
+                // `Prime` never comes: the controller is made without
+                // `with_priming` (the player primes itself, `State::Priming`).
                 self.fifo.skip(frames_of(-by_s, self.net_rate));
                 // The audio jumps: the filter's history is no longer its
                 // past.
