@@ -77,6 +77,21 @@ const STALL_EVERY_MIN_NS: f64 = 2e9;
 const STALL_EVERY_MAX_NS: f64 = 6e9;
 /// A TX gap belongs to a stall up to this long after the stall's end.
 const STALL_GAP_GRACE_NS: u64 = 100 * MS;
+/// OBS's audio pass with an output before the TX tap (dstack #303, field
+/// 15.11.2026 on stream-snv: obs v0.4.39, dlink v0.6.137): OBS calls a
+/// mix's outputs in turn on its audio thread, and an NDI output's audio
+/// call took up to 10.1 ms (OBS's `out_cb_max_ms`; the pass up to 10.3 ms)
+/// while the thread's own ticks stayed regular (gap at most 21.4 ms). The
+/// TX write lands that late after its tick: this many ns usually, ...
+const PASS_MIN_NS: f64 = 0.1e6;
+const PASS_MAX_NS: f64 = 1e6;
+/// ... and one tick in this many as late as the field's slow output call
+/// (about 0.8 TX gaps a second at 46.9 ticks a second).
+const PASS_SLOW_ONE_IN: f64 = 40.0;
+const PASS_SLOW_MIN_NS: f64 = 7.5e6;
+const PASS_SLOW_MAX_NS: f64 = 10.3e6;
+/// The field's tick jitter under that pass (OBS's `wake_late_max_ms`).
+const PASS_JITTER_NS: f64 = 0.4e6;
 /// The TX correction's band is judged on the median of this many seconds
 /// (the main's decision on #304: a one-second spike is allowed, a ramp is
 /// not).
@@ -150,6 +165,11 @@ enum Writer {
     /// The same, stalling now and then (`STALL_*`), each stall followed by
     /// a catch-up burst of the ticks it held.
     Stalling,
+    /// Regular ticks whose write lands late in OBS's audio pass (`PASS_*`):
+    /// another output's call before the TX tap, up to 10.3 ms now and then.
+    /// The FIFO never runs dry (the sawtooth's bottom is about 12 ms), so
+    /// no gap is allowed.
+    LatePass,
 }
 
 /// The gaps in `at` (media times) within [from, to].
@@ -292,6 +312,15 @@ impl Soak {
     /// its jitter, held by a stall.
     fn tick_at(&mut self, k: u64, rng: &mut Rng) -> u64 {
         let nominal = APP0 as f64 + k as f64 * CHUNK as f64 * 1e9 / f64::from(APP_RATE);
+        if self.writer == Writer::LatePass {
+            let jitter = PASS_JITTER_NS * (2.0 * rng.unit() - 1.0);
+            let pass = if rng.unit() < 1.0 / PASS_SLOW_ONE_IN {
+                rng.between(PASS_SLOW_MIN_NS, PASS_SLOW_MAX_NS)
+            } else {
+                rng.between(PASS_MIN_NS, PASS_MAX_NS)
+            };
+            return self.media_ns(nominal + jitter + pass);
+        }
         let app = self.stalled(nominal + JITTER_NS * (2.0 * rng.unit() - 1.0));
         self.media_ns(app)
     }
@@ -503,7 +532,7 @@ impl Soak {
             primed
         };
         match self.writer {
-            Writer::Ticks => assert_eq!(
+            Writer::Ticks | Writer::LatePass => assert_eq!(
                 (
                     last.tx_underruns - from.tx_underruns,
                     last.tx_recentres - from.tx_recentres,
@@ -524,7 +553,7 @@ impl Soak {
         }
         let band = self.drift_ppm.abs()
             + match self.writer {
-                Writer::Ticks => 2.0,
+                Writer::Ticks | Writer::LatePass => 2.0,
                 Writer::Stalling => STALL_BAND_PPM,
             };
         assert!(!medians.is_empty(), "{label}: no settled seconds");
@@ -620,6 +649,22 @@ fn gate_ten_minutes_of_an_irregular_writer_app_fast() {
 fn gate_ten_minutes_of_an_irregular_writer_app_slow() {
     Soak::new(-6.0, false, Wakes::Field, Writer::Stalling)
         .run(0x304_0006)
+        .check();
+}
+
+/// OBS's audio pass with a slow output before the TX tap (dstack #303,
+/// stream-snv 15.11.2026: about 0.8 TX gaps a second from the start).
+#[test]
+fn gate_ten_minutes_of_a_late_audio_pass_app_fast() {
+    Soak::new(6.0, false, Wakes::Field, Writer::LatePass)
+        .run(0x304_0008)
+        .check();
+}
+
+#[test]
+fn gate_ten_minutes_of_a_late_audio_pass_app_slow() {
+    Soak::new(-6.0, false, Wakes::Field, Writer::LatePass)
+        .run(0x304_0009)
         .check();
 }
 
