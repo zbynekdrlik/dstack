@@ -725,6 +725,25 @@ fn a_config_parse_error_names_a_schema_key() {
 }
 
 #[test]
+fn a_typed_key_holding_a_backtick_stays_cut_whole() {
+    // serde backticks a typed key raw, so a backtick inside it must not
+    // close the span and print the rest of the key.
+    for key in [
+        "\"zyxq`zyxw\"",
+        "\"zyxq`, expected `state_file`, `zyxw\"",
+        "'zyxq\\'",
+    ] {
+        let found = problems(&format!("{TEST_DEVICE}\n{key} = 1\n"));
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(!found[0].contains("zyx"), "{key}: {found:?}");
+        assert!(found[0].contains("`state_file`"), "{key}: {found:?}");
+    }
+    let found = problems(&format!("{TEST_DEVICE}\ntiming = \"zyxq`zyxw\"\n"));
+    assert!(!found[0].contains("zyx"), "{found:?}");
+    assert!(found[0].contains("`low_latency`"), "{found:?}");
+}
+
+#[test]
 fn a_quoted_value_stays_cut_even_when_it_reads_as_a_key() {
     let found = problems(&config_with(
         "sample_rate =",
