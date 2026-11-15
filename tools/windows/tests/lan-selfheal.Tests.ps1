@@ -13,6 +13,10 @@
 
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '..\lan-selfheal.ps1')
+# The loop's .NET readers (#312), kept before the fakes below replace them:
+# they are tested for real on the runner's loopback interface.
+$realReadQuickLan = ${function:Read-QuickLan}
+$realRouteSource = ${function:Get-RouteSourceAddress}
 
 $script:failed = 0
 $script:passed = 0
@@ -63,6 +67,10 @@ function Reset-Fake {
         Fw           = New-Object System.Collections.ArrayList
         FwStuck      = ''       # a rule Name that stays disabled when enabled
         FwThrow      = ''       # 'Get' or 'Enable': that firewall cmdlet throws
+        # The loop's quick check (#312): the .NET view of the LAN adapter.
+        QuickCount   = 1        # interfaces carrying the LAN adapter's name
+        RouteSource  = '10.0.0.20'   # the source address of the route to the gateway
+        Task         = $null    # the registered scheduled task
     }
 }
 function Add-FakeRule {
@@ -71,6 +79,7 @@ function Add-FakeRule {
 }
 function Get-NetFirewallRule {
     [CmdletBinding()] param([string]$Name, [string]$DisplayName)
+    Note 'FwRead' "$Name$DisplayName"   # not 'NetFirewallRule': FwCalls counts the changes
     if ($script:Fake.FwThrow -eq 'Get') { throw 'fake CIM failure in Get-NetFirewallRule' }
     if ($Name) { return @($script:Fake.Fw | Where-Object { $_.Name -eq $Name }) }
     @($script:Fake.Fw | Where-Object { $_.DisplayName -like $DisplayName })
@@ -87,7 +96,49 @@ function Remove-NetFirewallRule {
     Note 'Remove-NetFirewallRule' $Name
     foreach ($r in @($script:Fake.Fw | Where-Object { $_.Name -eq $Name })) { $script:Fake.Fw.Remove($r) }
 }
-function Get-ScheduledTask { [CmdletBinding()] param([string]$TaskName) $null }
+# The Task Scheduler cmdlets: one fake task store (#312).
+function Get-ScheduledTask { [CmdletBinding()] param([string]$TaskName) $script:Fake.Task }
+function Stop-ScheduledTask { [CmdletBinding()] param([string]$TaskName) Note 'Stop-ScheduledTask' $TaskName }
+function Start-ScheduledTask { [CmdletBinding()] param([string]$TaskName) Note 'Start-ScheduledTask' $TaskName }
+function Disable-ScheduledTask { [CmdletBinding()] param([string]$TaskName) Note 'Disable-ScheduledTask' $TaskName }
+function Unregister-ScheduledTask {
+    [CmdletBinding(SupportsShouldProcess)] param([string]$TaskName)
+    Note 'Unregister-ScheduledTask' $TaskName; $script:Fake.Task = $null
+}
+function Register-ScheduledTask {
+    [CmdletBinding()] param([string]$TaskName, $Action, $Trigger, $Principal, $Settings, [switch]$Force)
+    Note 'Register-ScheduledTask' $TaskName
+    $script:Fake.Task = [pscustomobject]@{ TaskName = $TaskName; Actions = @($Action); Triggers = @($Trigger); Principal = $Principal; Settings = $Settings }
+}
+function New-ScheduledTaskAction { [CmdletBinding()] param([string]$Execute, [string]$Argument) [pscustomobject]@{ Execute = $Execute; Arguments = $Argument } }
+function New-ScheduledTaskPrincipal { [CmdletBinding()] param([string]$UserId, [string]$LogonType, [string]$RunLevel) [pscustomobject]@{ UserId = $UserId } }
+function FakeTrigger {
+    param([string]$Class, $Interval)
+    [pscustomobject]@{ CimClass = [pscustomobject]@{ CimClassName = $Class }; Repetition = [pscustomobject]@{ Interval = $Interval; Duration = $null } }
+}
+function New-ScheduledTaskTrigger {
+    [CmdletBinding()] param([switch]$AtStartup, [switch]$Once, $At, [timespan]$RepetitionInterval)
+    if ($AtStartup) { return FakeTrigger 'MSFT_TaskBootTrigger' $null }
+    FakeTrigger 'MSFT_TaskTimeTrigger' ('PT{0}M' -f [int]$RepetitionInterval.TotalMinutes)
+}
+function New-ScheduledTaskSettingsSet {
+    [CmdletBinding()] param([switch]$AllowStartIfOnBatteries, [switch]$DontStopIfGoingOnBatteries, [switch]$StartWhenAvailable,
+        [string]$MultipleInstances, [timespan]$ExecutionTimeLimit, [int]$RestartCount, [timespan]$RestartInterval, [int]$Priority = 7)
+    $limit = if ($ExecutionTimeLimit.TotalSeconds -eq 0) { 'PT0S' } else { 'PT{0}M' -f [int]$ExecutionTimeLimit.TotalMinutes }
+    [pscustomobject]@{ ExecutionTimeLimit = $limit; MultipleInstances = $MultipleInstances; Priority = $Priority; RestartCount = $RestartCount }
+}
+function Set-AdminOnlyAcl { param([string]$Path) Note 'Set-AdminOnlyAcl' $Path }
+function Old-Task {
+    # The task as installed before #312: a new process every minute.
+    param([string]$Exe, [string]$Target)
+    [pscustomobject]@{
+        TaskName  = 'dstack LAN self-heal'
+        Actions   = @([pscustomobject]@{ Execute = $Exe; Arguments = ('-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}"' -f $Target) })
+        Triggers  = @((FakeTrigger 'MSFT_TaskTimeTrigger' 'PT1M'), (FakeTrigger 'MSFT_TaskBootTrigger' $null))
+        Principal = [pscustomobject]@{ UserId = 'SYSTEM' }
+        Settings  = [pscustomobject]@{ ExecutionTimeLimit = 'PT5M'; MultipleInstances = 'IgnoreNew'; Priority = 7; RestartCount = 0 }
+    }
+}
 function FwCalls { @($script:Fake.Calls | Where-Object { $_ -match 'NetFirewallRule ' }) }
 function Legacy {
     # What 0.6.109 left after an emergency path that never closed: the
@@ -168,6 +219,7 @@ function Set-NetIPInterface {
 }
 function Get-NetIPAddress {
     [CmdletBinding()] param([int]$InterfaceIndex, [string]$AddressFamily)
+    Note 'Get-NetIPAddress' $InterfaceIndex
     if ($InterfaceIndex -ne $script:Fake.LanIndex) { return }
     foreach ($a in $script:Fake.Addresses) { [pscustomobject]@{ IPAddress = $a } }
 }
@@ -180,7 +232,21 @@ function Test-Gateway {
 function Start-Sleep { param([int]$Seconds) }
 function Find-NetRoute {
     [CmdletBinding()] param([string]$RemoteIPAddress)
+    Note 'Find-NetRoute' $RemoteIPAddress
     [pscustomobject]@{ InterfaceIndex = $script:Fake.RouteIndex }
+}
+# The loop's .NET reads (#312), faked on the same adapter: a disabled adapter
+# is not listed by .NET.
+function Read-QuickLan {
+    param([string]$Name)
+    Note 'Read-QuickLan' $Name
+    $count = if ($script:Fake.Status -eq 'Disabled') { 0 } else { $script:Fake.QuickCount }
+    [pscustomobject]@{ Count = $count; Up = ($count -eq 1 -and $script:Fake.Status -eq 'Up'); Addresses = @($script:Fake.Addresses) }
+}
+function Get-RouteSourceAddress { param([string]$Gateway) Note 'Get-RouteSourceAddress' $Gateway; $script:Fake.RouteSource }
+# Every read through CIM/WMI (the stall of #312): none on a healthy loop minute.
+function CimReads {
+    @($script:Fake.Calls | Where-Object { $_ -match '^(Get-NetAdapter|Get-NetIPAddress|Find-NetRoute|Get-NetFirewallRule|Get-CimInstance|Get-NetAdapterAdvancedProperty|Get-NetAdapterBinding|Get-NetIPInterface|FwRead) ' })
 }
 function Changes {
     # The calls that change an adapter (not the reads).
@@ -768,6 +834,220 @@ try {
         $d = NewRun 'same' $good '{"failures":2}'
         $rc = Invoke-Check -Dir $d
         $rc -eq 1 -and @(Changes).Count -eq 0 -and (LogOf $d) -match 'ERROR refused'
+    }
+
+    # --- the loop (#312): a quick .NET check a minute, the full check only on a fault
+    Check 'the quick check: healthy only with one interface, up, a usable address, the route from it, an answer' {
+        (Get-QuickFault -Count 1 -Up $true -Addresses @('10.0.0.20') -RouteSource '10.0.0.20' -PingOk $true) -eq '' -and
+        (Get-QuickFault -Count 0 -Up $false -Addresses @() -RouteSource '' -PingOk $false) -like '0 interfaces*' -and
+        (Get-QuickFault -Count 2 -Up $true -Addresses @('10.0.0.20') -RouteSource '10.0.0.20' -PingOk $true) -like '2 interfaces*' -and
+        (Get-QuickFault -Count 1 -Up $false -Addresses @('10.0.0.20') -RouteSource '10.0.0.20' -PingOk $true) -like '*not up*' -and
+        (Get-QuickFault -Count 1 -Up $true -Addresses @('169.254.3.4') -RouteSource '169.254.3.4' -PingOk $true) -like '*no usable IPv4*' -and
+        (Get-QuickFault -Count 1 -Up $true -Addresses @() -RouteSource '' -PingOk $true) -like '*no usable IPv4*' -and
+        (Get-QuickFault -Count 1 -Up $true -Addresses @('10.0.0.20') -RouteSource '10.70.0.5' -PingOk $true) -like "*route*not on the LAN*'10.70.0.5'*" -and
+        (Get-QuickFault -Count 1 -Up $true -Addresses @('10.0.0.20') -RouteSource '' -PingOk $true) -like '*route*not on the LAN*' -and
+        (Get-QuickFault -Count 1 -Up $true -Addresses @('10.0.0.20') -RouteSource '10.0.0.20' -PingOk $false) -like '*does not answer*'
+    }
+    Check 'the real .NET readers: loopback is one interface, up, 127.0.0.1, and the route to it starts there' {
+        $nic = [System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces() |
+            Where-Object { $_.NetworkInterfaceType -eq 'Loopback' } | Select-Object -First 1
+        Reset-Fake
+        $q = & $realReadQuickLan -Name $nic.Name
+        $none = & $realReadQuickLan -Name 'no adapter is called this 312'
+        $q.Count -eq 1 -and $q.Up -and (@($q.Addresses) -contains '127.0.0.1') -and
+        (& $realRouteSource -Gateway '127.0.0.1') -eq '127.0.0.1' -and $none.Count -eq 0 -and -not $none.Up -and
+        @(CimReads).Count -eq 0   # the real readers call no NetAdapter/NetTCPIP cmdlet (the fakes record any)
+    }
+    Check 'the loop priority is BelowNormal' {
+        $p = [pscustomobject]@{ Id = 42; PriorityClass = 'Normal' }
+        Set-LoopPriority -Process $p
+        [string]$p.PriorityClass -eq 'BelowNormal'
+    }
+    Check 'the loop sets BelowNormal, logs its start and runs its iterations' {
+        Reset-Fake
+        $d = NewRun 'loopstart' $good
+        $p = [pscustomobject]@{ Id = 42; PriorityClass = 'Normal' }
+        Invoke-Loop -Dir $d -MaxIterations 2 -IntervalSeconds 0 -Process $p
+        $l = LogOf $d
+        [string]$p.PriorityClass -eq 'BelowNormal' -and $l -match 'loop started: pid 42, priority BelowNormal' -and
+        @(($l -split "`n") | Where-Object { $_ -match 'gateway ok' }).Count -eq 2
+    }
+    Check 'the first loop minute is the full check (legacy cleanup, CIM); a clean one makes the next minutes quick' {
+        Reset-Fake; Legacy
+        $d = NewRun 'loopfirst' $good '{"failures":0,"emergencyRule":"{blk}"}'
+        $loop = New-LoopState
+        $rc = Invoke-LoopIteration -Dir $d -Loop $loop
+        $full = @(CimReads).Count
+        $rc -eq 0 -and $full -gt 0 -and (FwState) -eq '{blk}=True' -and -not $loop.NeedFull
+    }
+    Check 'a healthy loop minute: "gateway ok", no CIM or WMI read, no change, the state file untouched' {
+        Reset-Fake
+        $d = NewRun 'loopquick' $good '{"failures":0}'
+        $before = Get-Content (Join-Path $d 'lan-selfheal.state.json') -Raw
+        $loop = New-LoopState; $loop.NeedFull = $false
+        $rc = Invoke-LoopIteration -Dir $d -Loop $loop
+        $rc -eq 0 -and @(CimReads).Count -eq 0 -and @(Changes).Count -eq 0 -and
+        ($script:Fake.Calls -contains 'Read-QuickLan LAN') -and ($script:Fake.Calls -contains 'Test-Gateway 192.0.2.1') -and
+        (LogOf $d) -match 'gateway ok' -and (Get-Content (Join-Path $d 'lan-selfheal.state.json') -Raw) -eq $before -and
+        -not $loop.NeedFull
+    }
+    Check 'the quick check never pings over another leg (the route starts elsewhere)' {
+        Reset-Fake; $script:Fake.RouteSource = '10.70.0.5'
+        $d = NewRun 'loopother' $good
+        $loop = New-LoopState; $loop.NeedFull = $false
+        [void](Invoke-LoopIteration -Dir $d -Loop $loop)
+        # one ping: the full check's (its fake route is on the LAN), none from the quick check
+        @($script:Fake.Calls | Where-Object { $_ -like 'Test-Gateway*' }).Count -eq 1 -and
+        (LogOf $d) -match "quick check: the route to the gateway is not on the LAN adapter \(source address '10.70.0.5'\); full check"
+    }
+    Check 'the gateway down 3 minutes in the loop: the full check counts 1/3, 2/3, then repairs, never the Dante adapter' {
+        Reset-Fake; $script:Fake.PingOk = $false
+        $d = NewRun 'loopdown' $good '{"failures":0}'
+        $loop = New-LoopState; $loop.NeedFull = $false
+        $rcs = foreach ($i in 1..3) { Invoke-LoopIteration -Dir $d -Loop $loop }
+        $l = LogOf $d
+        (@($rcs) -join ',') -eq '0,0,0' -and $l -match 'quick check: the gateway does not answer; full check' -and
+        $l -match 'LAN down 1/3 min' -and $l -match 'LAN down 2/3 min' -and $l -match "repairing LAN adapter 'LAN'" -and
+        (@(Changes) -join ';') -eq 'Restart-NetAdapter LAN' -and @(DanteCalls).Count -eq 0 -and
+        (StateOf $d).failures -eq 0 -and $loop.NeedFull -eq $false
+    }
+    Check 'a disabled LAN adapter in the loop: 3 failed minutes, then enabled by the repair' {
+        Reset-Fake; $script:Fake.Status = 'Disabled'; $script:Fake.Addresses = @()
+        $d = NewRun 'loopdisabled' $good
+        $loop = New-LoopState; $loop.NeedFull = $false
+        foreach ($i in 1..3) { [void](Invoke-LoopIteration -Dir $d -Loop $loop) }
+        (@(Changes) -contains 'Enable-NetAdapter LAN') -and (LogOf $d) -match 'quick check: 0 interfaces named as the LAN adapter'
+    }
+    Check 'after a failed minute the healthy minute is a full check, which resets the count; then quick again' {
+        Reset-Fake; $script:Fake.PingOk = $false
+        $d = NewRun 'loopreset' $good
+        $loop = New-LoopState; $loop.NeedFull = $false
+        [void](Invoke-LoopIteration -Dir $d -Loop $loop)
+        $afterFail = $loop.NeedFull
+        $script:Fake.PingOk = $true
+        [void](Invoke-LoopIteration -Dir $d -Loop $loop)
+        $reset = (LogOf $d) -match 'gateway ok \(down count 1 reset\)'
+        $script:Fake.Calls.Clear()
+        [void](Invoke-LoopIteration -Dir $d -Loop $loop)
+        $afterFail -and $reset -and -not $loop.NeedFull -and @(CimReads).Count -eq 0 -and (StateOf $d).failures -eq 0
+    }
+    Check 'a full check that exits 1 keeps the loop on full checks' {
+        Reset-Fake; $script:Fake.DanteIndex = 5
+        $d = NewRun 'loopbad' $good
+        $loop = New-LoopState
+        $rc = Invoke-LoopIteration -Dir $d -Loop $loop
+        $rc -eq 1 -and $loop.NeedFull
+    }
+    Check 'no config in the loop: the full check logs it, nothing is touched' {
+        Reset-Fake
+        $d = NewRun 'loopnoconf'
+        $loop = New-LoopState; $loop.NeedFull = $false
+        $rc = Invoke-LoopIteration -Dir $d -Loop $loop
+        $rc -eq 0 -and (LogOf $d) -match 'config missing' -and (LogOf $d) -notmatch 'quick check' -and $script:Fake.Calls.Count -eq 0
+    }
+
+    # --- install (#312): the per-minute task becomes the loop task
+    $exe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $source = Join-Path $PSScriptRoot '..\lan-selfheal.ps1'
+    $taskCalls = { @($script:Fake.Calls | Where-Object { $_ -match 'ScheduledTask ' }) -join ';' }
+    Check 'install replaces the per-minute task: stopped, one loop task at start-up with a watchdog, started' {
+        Reset-Fake
+        $d = NewRun 'install' $good
+        $target = Join-Path $d 'lan-selfheal.ps1'
+        $script:Fake.Task = Old-Task -Exe $exe -Target $target
+        $out = Install-SelfHeal -Dir $d -Source $source
+        $t = $script:Fake.Task
+        $intervals = @($t.Triggers | ForEach-Object { [string]$_.Repetition.Interval })
+        (& $taskCalls) -eq 'Stop-ScheduledTask dstack LAN self-heal;Register-ScheduledTask dstack LAN self-heal;Start-ScheduledTask dstack LAN self-heal' -and
+        $t.Actions[0].Arguments -like ('*-File "' + $target + '" -Mode loop') -and
+        ($intervals -notcontains 'PT1M') -and ($intervals -contains 'PT5M') -and
+        @($t.Triggers | Where-Object { $_.CimClass.CimClassName -eq 'MSFT_TaskBootTrigger' }).Count -eq 1 -and
+        $t.Settings.ExecutionTimeLimit -eq 'PT0S' -and $t.Settings.Priority -eq 7 -and $t.Settings.RestartCount -gt 0 -and
+        (Test-LoopTaskShape -Task $t -Execute $exe -Argument $t.Actions[0].Arguments) -eq '' -and
+        (Test-Path $target) -and "$out" -match 'Mode loop' -and
+        (LogOf $d) -match 'install: stopped and replacing the existing task \(triggers: every PT1M, MSFT_TaskBootTrigger\)'
+    }
+    Check 'install again is idempotent: the same one task, stopped and started again' {
+        Reset-Fake
+        $d = NewRun 'reinstall' $good
+        [void](Install-SelfHeal -Dir $d -Source $source)
+        $first = $script:Fake.Task
+        $script:Fake.Calls.Clear()
+        [void](Install-SelfHeal -Dir $d -Source $source)
+        $t = $script:Fake.Task
+        (& $taskCalls) -eq 'Stop-ScheduledTask dstack LAN self-heal;Register-ScheduledTask dstack LAN self-heal;Start-ScheduledTask dstack LAN self-heal' -and
+        $t.Actions[0].Arguments -eq $first.Actions[0].Arguments -and @($t.Triggers).Count -eq 2
+    }
+    Check 'a fresh install registers and starts the task without a stop' {
+        Reset-Fake
+        $d = NewRun 'freshinstall' $good
+        [void](Install-SelfHeal -Dir $d -Source $source)
+        (& $taskCalls) -eq 'Register-ScheduledTask dstack LAN self-heal;Start-ScheduledTask dstack LAN self-heal'
+    }
+    Check 'the task shape check refuses the old per-minute task, a time limit and no restart' {
+        $target = 'C:\x\lan-selfheal.ps1'
+        $arg = '-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" -Mode loop' -f $target
+        $old = Old-Task -Exe $exe -Target $target
+        $oldAction = (Test-LoopTaskShape -Task $old -Execute $exe -Argument $arg) -like '*not the loop*'
+        $old.Actions[0].Arguments = $arg
+        $perMinute = (Test-LoopTaskShape -Task $old -Execute $exe -Argument $arg) -like '*every minute*'
+        $old.Triggers = @((FakeTrigger 'MSFT_TaskBootTrigger' $null), (FakeTrigger 'MSFT_TaskTimeTrigger' 'PT5M'))
+        $limit = (Test-LoopTaskShape -Task $old -Execute $exe -Argument $arg) -like '*time limit*'
+        $old.Settings.ExecutionTimeLimit = 'PT0S'
+        $restart = (Test-LoopTaskShape -Task $old -Execute $exe -Argument $arg) -like '*restart on failure*'
+        $old.Settings.RestartCount = 999
+        $oldAction -and $perMinute -and $limit -and $restart -and (Test-LoopTaskShape -Task $old -Execute $exe -Argument $arg) -eq ''
+    }
+    Check 'install refuses a registered task of the wrong shape: disabled (the watchdog never starts it), not started' {
+        Reset-Fake
+        $d = NewRun 'badshape' $good
+        function New-ScheduledTaskSettingsSet {
+            [CmdletBinding()] param([switch]$AllowStartIfOnBatteries, [switch]$DontStopIfGoingOnBatteries, [switch]$StartWhenAvailable,
+                [string]$MultipleInstances, [timespan]$ExecutionTimeLimit, [int]$RestartCount, [timespan]$RestartInterval, [int]$Priority = 7)
+            [pscustomobject]@{ ExecutionTimeLimit = 'PT72H'; MultipleInstances = $MultipleInstances; Priority = $Priority; RestartCount = $RestartCount }
+        }
+        (Throws { Install-SelfHeal -Dir $d -Source $source } '*install check*time limit*registered but disabled*') -and
+        (& $taskCalls) -eq 'Register-ScheduledTask dstack LAN self-heal;Disable-ScheduledTask dstack LAN self-heal'
+    }
+    Check 'uninstall stops the running loop, then removes the task' {
+        Reset-Fake
+        $d = NewRun 'uninstallloop' $good
+        [void](Install-SelfHeal -Dir $d -Source $source)
+        $script:Fake.Calls.Clear()
+        [void](Uninstall-SelfHeal -Dir $d)
+        $calls = @($script:Fake.Calls)
+        $stop = [array]::IndexOf($calls, 'Stop-ScheduledTask dstack LAN self-heal')
+        $firstRead = @(0..($calls.Count - 1) | Where-Object { $calls[$_] -like 'FwRead*' })[0]
+        (& $taskCalls) -eq 'Stop-ScheduledTask dstack LAN self-heal;Unregister-ScheduledTask dstack LAN self-heal' -and
+        $null -eq $script:Fake.Task -and $stop -ge 0 -and $stop -lt $firstRead   # stopped before the cleanup runs
+    }
+    Check 'an iteration that throws: an ERROR line, the next minute a full check, the loop goes on' {
+        Reset-Fake
+        $d = NewRun 'loopthrow' $good
+        $script:checks = 0
+        function Invoke-Check { param([string]$Dir) $script:checks++; if ($script:checks -eq 1) { throw 'fake failure' }; 0 }
+        $p = [pscustomobject]@{ Id = 42; PriorityClass = 'Normal' }
+        Invoke-Loop -Dir $d -MaxIterations 2 -IntervalSeconds 0 -Process $p
+        # minute 1 (full) threw; minute 2 is a full check again, not a quick one
+        $script:checks -eq 2 -and (LogOf $d) -match 'ERROR loop: fake failure' -and -not ($script:Fake.Calls -contains 'Read-QuickLan LAN')
+    }
+    Check 'a quick fault the full check finds healthy, 3 minutes in a row: one WARN, the count resets on a healthy quick minute' {
+        Reset-Fake; $script:Fake.RouteSource = '10.70.0.5'
+        $d = NewRun 'loopdisagree' $good
+        $loop = New-LoopState; $loop.NeedFull = $false
+        foreach ($i in 1..4) { [void](Invoke-LoopIteration -Dir $d -Loop $loop) }
+        $warns = @((LogOf $d) -split "`n" | Where-Object { $_ -match 'WARN the quick check found a fault and the full check none, 3 minutes' }).Count
+        $script:Fake.RouteSource = '10.0.0.20'
+        [void](Invoke-LoopIteration -Dir $d -Loop $loop)
+        $warns -eq 1 -and $loop.Disagree -eq 0
+    }
+    Check 'a healthy quick minute whose log write fails is still healthy (no fall-back to full checks)' {
+        Reset-Fake
+        $d = NewRun 'lognowrite' $good
+        function Write-HealLog { param([string]$Path, [string]$Message) throw 'disk full' }
+        $loop = New-LoopState; $loop.NeedFull = $false
+        $rc = Invoke-LoopIteration -Dir $d -Loop $loop 2>$null
+        $rc -eq 0 -and -not $loop.NeedFull -and @(CimReads).Count -eq 0
     }
 } finally {
     Remove-Item -LiteralPath $tmp -Recurse -Force
