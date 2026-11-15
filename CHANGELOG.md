@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.145
 
 - **Feature (#321, field 15.11.2026, #319): the network floor, a version guard for every dstack binary on the network.** A 3.11 dtray (about v0.6.20, still with the standing mDNS browses that #141 later removed) ran 12 days on two PCs and nothing noticed. Now:
   - `dstack::NETWORK_FLOOR` (`network_floor::Version` 0.6.58, the first build with no standing browse in any binary) is the lowest dstack version allowed on the network. A release that fixes a network-wide defect raises it.
