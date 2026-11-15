@@ -64,6 +64,7 @@ fn sent() -> Sent {
         result: Ok(false),
         retries: 0,
         took: 0,
+        refused: false,
     }
 }
 
@@ -80,4 +81,57 @@ fn an_old_packet_counts_over_latency_only_with_a_known_receiver_latency() {
     assert_eq!(stats.over_latency.load(Ordering::Relaxed), 0, "at 10 ms");
     account(&stats, &c, stamp, 16, &sent(), 100, 1_000_000);
     assert_eq!(stats.over_latency.load(Ordering::Relaxed), 1, "at 1 ms");
+}
+
+/// The NIC's no-buffers code on this OS (dstack #195).
+fn nobufs() -> i32 {
+    if cfg!(windows) { 10055 } else { 105 }
+}
+
+/// dstack #195: a try the NIC refused marks the send, a retry that
+/// recovered it too; a would-block or a clean send does not.
+#[test]
+fn a_send_the_nic_refused_is_marked_even_when_a_retry_recovered_it() {
+    let c = clock();
+    let stamp = c.now_ns / 1_000_000 * 96;
+    let mut tries = 0;
+    let out = send_timed(&c, stamp, 16, || {
+        tries += 1;
+        if tries == 1 {
+            Err(io::Error::from_raw_os_error(nobufs()))
+        } else {
+            Ok(false)
+        }
+    });
+    assert!(out.refused, "{out:?}");
+    // Refused to the end: marked.
+    let out = send_timed(&c, stamp, 16, || {
+        Err(io::Error::from_raw_os_error(nobufs()))
+    });
+    assert!(out.refused && out.result.is_err(), "{out:?}");
+    // A would-block, a lasting error, a clean send: not marked.
+    let would_block = if cfg!(windows) { 10035 } else { 11 };
+    for code in [would_block, 10054, 111] {
+        let out = send_timed(&c, stamp, 16, || Err(io::Error::from_raw_os_error(code)));
+        assert!(!out.refused, "{code}: {out:?}");
+    }
+    let out = send_timed(&c, stamp, 16, || Ok(true));
+    assert!(!out.refused, "{out:?}");
+}
+
+/// dstack #195: the lane's flag is raised by a refused send's account,
+/// and only by one.
+#[test]
+fn a_refused_send_raises_its_lane_s_flag() {
+    let c = clock();
+    let stamp = (c.now_ns - 3_000_000) / 1_000_000 * 96;
+    let stats = LaneStats::default();
+    account(&stats, &c, stamp, 16, &sent(), 100, 0);
+    assert!(!stats.refused.load(Ordering::Relaxed));
+    let refused = Sent {
+        refused: true,
+        ..sent()
+    };
+    account(&stats, &c, stamp, 16, &refused, 100, 0);
+    assert!(stats.refused.load(Ordering::Relaxed));
 }

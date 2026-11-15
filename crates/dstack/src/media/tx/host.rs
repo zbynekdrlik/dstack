@@ -22,7 +22,9 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
-use super::{Control, DSCP_EF, MAX_FLOWS, PassClock, Sent, TxShared, account, nanos, send_timed};
+use super::{
+    Control, DSCP_EF, MAX_FLOWS, PassClock, Sent, TxShared, account, nanos, nic_refusal, send_timed,
+};
 use crate::media::bypass::{self, ETHERNET_HEADER, FRAME_HEADROOM, FrameSender};
 use crate::wire::MAX_DATAGRAM;
 
@@ -311,6 +313,12 @@ impl Batch {
                 .host_error
                 .store(e.raw_os_error().unwrap_or(-1), Ordering::Relaxed);
             shared.host_refused.fetch_add(1, Ordering::Relaxed);
+            // The NIC's own refusal (dstack #195): every slot in the batch.
+            if nic_refusal(crate::clock::Os::current(), e.raw_os_error()) {
+                for (q, _) in queued.iter().take(len) {
+                    shared.lanes[q.slot].note_refused();
+                }
+            }
         }
         // The frames taken first: they left with the call, before any
         // fallback send.
@@ -318,6 +326,7 @@ impl Batch {
             result: Ok(true),
             retries: 0,
             took,
+            refused: false,
         };
         for ((q, n), _) in queued.iter().zip(sent.iter()).filter(|(_, s)| **s) {
             let receiver_ns = shared.receiver_latency_ns(q.slot, q.dest);

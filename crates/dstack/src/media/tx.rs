@@ -595,6 +595,9 @@ pub struct LaneStats {
     /// last took it; 0: none (dstack #177).
     since_escape: AtomicU64,
     direct: AtomicU64,
+    /// The NIC refused a send of this slot since the control side last
+    /// took it (`refused.rs`, dstack #195).
+    refused: AtomicBool,
 }
 
 impl LaneStats {
@@ -1981,9 +1984,11 @@ pub mod host;
 pub use host::{HostNic, TxPath};
 mod pass;
 use pass::{PassClock, Sent, account, send_timed};
+mod refused;
 mod retry;
 pub use retry::{
-    SEND_RETRIES, SEND_RETRY_HEADROOM_NS, SEND_RETRY_WAIT_NS, send_retry, transient_refusal,
+    SEND_RETRIES, SEND_RETRY_HEADROOM_NS, SEND_RETRY_WAIT_NS, nic_refusal, send_retry,
+    transient_refusal,
 };
 
 mod multicast;

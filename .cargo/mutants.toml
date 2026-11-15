@@ -193,6 +193,10 @@ exclude_re = [
   # The NIC counter's read (`TrafficWatch::watch` takes it as a closure and
   # is tested); `name_of` is tested, the read by a lib test on the real NIC.
   "traffic.rs.*nic_sent_bytes",
+  # The recorder's CPU read on an OS dstack does not build for (dstack
+  # #195): never compiled on the gate's Linux; Linux's and Windows's reads
+  # are tested.
+  "traffic/cpu.rs.*unread_times",
   # The poller's log lines (log only) and its wrapper aimed at dsync's port
   # (its body `poll` runs against a stand-in server in the tests).
   "clock.rs.*os::log_event",

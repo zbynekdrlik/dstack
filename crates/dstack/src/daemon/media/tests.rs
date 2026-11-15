@@ -838,3 +838,88 @@ fn the_fixed_tx_ports_are_bound_before_any_port_the_os_chooses() {
         |media| media.tx.ports().to_vec(),
     );
 }
+
+/// dstack #195: the driver's tick records the NIC's traffic each second
+/// and, at the first refusal of a burst, logs the record once with the
+/// refused slots and the processes on our address; a refusal within the
+/// burst's quiet time does not log it again.
+#[tokio::test]
+async fn the_driver_s_tick_dumps_the_traffic_record_once_a_burst_of_refusals() {
+    use crate::test_log::{capture_warnings, undecided};
+    use crate::traffic::recorder::CpuTimes;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    const DUMP: &str = "NIC refused sends: the last 30 s of traffic";
+    static CPU: AtomicU64 = AtomicU64::new(0);
+    undecided();
+    let dir = tempfile::tempdir().unwrap();
+    let device = device_at(dir.path());
+    let media = media_on(&device, Arc::new(Unready));
+    let records = Records::default();
+    let (mut driver, _answers, _changes) = driver_of(&media);
+    // A NIC counter of our own: loopback has none on every OS. The CPU
+    // moves 1000 a read, 250 of it busy, 50 of it ours.
+    driver.set_nic(|_| Some(0));
+    driver.set_recorder_reads(
+        || {
+            let n = CPU.fetch_add(1, Ordering::Relaxed);
+            Some(CpuTimes {
+                process: n * 50,
+                busy: n * 250,
+                total: n * 1_000,
+            })
+        },
+        |_| String::from("web.exe(12) endpoints=40 cpu_ms=3500"),
+    );
+    driver.tick(&records);
+    std::thread::sleep(Duration::from_millis(1_010));
+    media.tx.note_refused(0);
+    media.tx.note_refused(3);
+    let log = capture_warnings(|| driver.tick(&records));
+    let lines: Vec<&str> = log.lines().filter(|l| l.contains(DUMP)).collect();
+    assert_eq!(lines.len(), 1, "{log}");
+    assert!(lines[0].contains("slots=[1, 4]"), "{log}");
+    assert!(
+        lines[0].contains("seconds=-0s nic=0 ours=0 other=0 cpu=5%/25%"),
+        "{log}"
+    );
+    assert!(
+        lines[0].contains("processes=web.exe(12) endpoints=40"),
+        "{log}"
+    );
+    // The flags were taken; the burst goes on: no second dump.
+    media.tx.note_refused(0);
+    let log = capture_warnings(|| {
+        driver.tick(&records);
+        driver.tick(&records);
+    });
+    assert_eq!(log.lines().filter(|l| l.contains(DUMP)).count(), 0, "{log}");
+}
+
+/// dstack #195: a refusal early in a sample second still ends the dump's
+/// record with that part second (the dump takes its own sample).
+#[tokio::test]
+async fn the_dump_ends_with_the_part_second_of_the_refusal() {
+    use crate::test_log::{capture_warnings, undecided};
+    const DUMP: &str = "NIC refused sends: the last 30 s of traffic";
+    undecided();
+    let dir = tempfile::tempdir().unwrap();
+    let device = device_at(dir.path());
+    let media = media_on(&device, Arc::new(Unready));
+    let records = Records::default();
+    let (mut driver, _answers, _changes) = driver_of(&media);
+    driver.set_nic(|_| Some(0));
+    driver.set_recorder_reads(|| None, |_| String::from("x"));
+    driver.tick(&records);
+    std::thread::sleep(Duration::from_millis(1_010));
+    driver.tick(&records);
+    // 300 ms into the next second: no sample due, yet the dump has two.
+    std::thread::sleep(Duration::from_millis(300));
+    media.tx.note_refused(2);
+    let log = capture_warnings(|| driver.tick(&records));
+    let line = log.lines().find(|l| l.contains(DUMP)).expect(&log);
+    assert!(line.contains("slots=[3]"), "{log}");
+    assert!(
+        line.contains("seconds=-0s nic=0 ours=0 other=0 cpu=?%/?%; -0s nic=0"),
+        "{log}"
+    );
+}
