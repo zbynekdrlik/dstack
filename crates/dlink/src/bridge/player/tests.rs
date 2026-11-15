@@ -374,12 +374,12 @@ fn a_configured_app_buffer_is_the_target_verbatim() {
     assert_eq!(s.player.stats().underruns(), 0);
 }
 
-/// The floor and the excess follow the target: a quarter of it (at most
-/// 5 ms) and twice it.
+/// The excess bound follows the target: twice it, and at least twice the
+/// chunk. There is no floor (dstack #303): a deficit is a dropout only when
+/// the FIFO cannot serve the converter's call
+/// (`a_low_depth_that_still_serves_the_call_plays_on`).
 #[test]
-fn the_floor_and_the_excess_follow_the_target() {
-    assert_eq!(floor_s(0.040), FLOOR_S);
-    assert!((floor_s(0.011_333) - 0.011_333 / 4.0).abs() < 1e-15);
+fn the_excess_follows_the_target() {
     assert_eq!(hard_excess_s(0.0226, 0.0213), 0.0452);
     // A target set under the chunk: twice the chunk, at most twice the
     // largest target.
@@ -433,11 +433,15 @@ fn a_burst_past_the_excess_bound_is_skipped_and_counted() {
     );
 }
 
-/// A depth under the floor with data still coming re-primes, counted as a
-/// re-centre and as an underrun (the audio breaks for the refill).
+/// A low depth that still serves the converter's call plays on (dstack
+/// #303): no re-centre, no dropout. A writer late inside its app's pass
+/// (OBS's NDI output ahead of dlink's TX tap, ~10 ms) took the depth under
+/// the old 5 ms floor while the FIFO still held audio, and the floor's
+/// re-prime made a whole target of silence out of it. Only the call the
+/// FIFO cannot serve is a dropout: counted as an underrun (not as a
+/// re-centre), and primed to the same target, no cushion (dstack #247).
 #[test]
-fn a_depth_under_the_floor_primes_again() {
-    // A 40 ms target: its floor is the 5 ms one.
+fn a_low_depth_that_still_serves_the_call_plays_on() {
     let mut s = Sim::with(
         buffer(48_000).set(Some(40_000_000)),
         48_000,
@@ -447,14 +451,35 @@ fn a_depth_under_the_floor_primes_again() {
         1,
     );
     s.run(5.0);
-    // Leave 3 ms: under the 5 ms floor, over a block's input.
+    // Hand out the rest of the current block: the next fill starts one.
+    let rest = BLOCK - s.player.pos;
+    let mut out = vec![0.0; rest];
+    s.player.fill_with(&mut out, 1, |x| x);
+    // Leave 3 ms: under the old 5 ms floor, over a block's input.
     let held = s.fifo.len();
     s.fifo.skip(held - 144);
-    let mut out = vec![0.0; BLOCK];
+    let need = s.player.conv.input_frames_next();
+    assert!(need <= 144, "a call's input fits: {need}");
+    let mut out = vec![9.0; BLOCK];
     s.player.fill_with(&mut out, 1, |x| x);
     let stats = s.player.stats();
-    assert_eq!(stats.recentres(), 1);
-    assert_eq!(stats.underruns(), 1, "a refill is a dropout");
+    assert_eq!(stats.recentres(), 0, "no floor");
+    assert_eq!(stats.underruns(), 0, "the call was served");
+    assert_eq!(s.player.state, State::Running);
+    assert!(!stats.priming());
+    assert!(out.iter().any(|&x| x != 0.0), "audio, not silence");
+    assert_eq!(s.fifo.len(), 144 - need);
+    // No more input: the call the FIFO cannot serve is the dropout.
+    let mut n = 0;
+    while s.player.state == State::Running {
+        let mut out = vec![9.0; BLOCK];
+        s.player.fill_with(&mut out, 1, |x| x);
+        n += 1;
+        assert!(n < 10, "the FIFO runs dry within a few calls");
+    }
+    let stats = s.player.stats();
+    assert_eq!(stats.underruns(), 1, "a real underrun is a dropout");
+    assert_eq!(stats.recentres(), 0, "an underrun, not a re-centre");
     assert_eq!(
         s.player.state,
         State::Priming(1920),
@@ -518,11 +543,17 @@ fn a_new_player_counts_on_in_the_same_stats() {
     s.pumping = false;
     s.run(0.2);
     s.pumping = true;
+    // Playing again, then a burst past the excess bound: an underrun (the
+    // stop) and a re-centre (the burst) to count on from. The deficit
+    // re-centre of the floor is gone (dstack #303).
+    s.run(1.0);
     s.fifo.push_with(4800, |_, _| 0.0);
     s.run(0.5);
     let stats = s.player.stats();
     let (played, underruns, recentres) = (stats.played(), stats.underruns(), stats.recentres());
-    assert!(played > 0 && underruns > 0 && recentres > 0);
+    assert!(played > 0, "played {played}");
+    assert_eq!(underruns, 1, "the stop");
+    assert_eq!(recentres, 1, "the burst");
     let mut next = Player::new(
         Arc::clone(&s.fifo),
         48_000,
@@ -567,7 +598,7 @@ fn priming_ends_at_exactly_the_level() {
     }
 }
 
-/// A FIFO emptied at once (no depth under the floor first): the block
+/// A FIFO emptied at once: the block
 /// whose input is not there plays silence, counted, and the output primes.
 #[test]
 fn a_block_with_no_input_plays_silence_and_primes() {

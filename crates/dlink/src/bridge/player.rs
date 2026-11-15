@@ -42,10 +42,15 @@
 //!   grows after a dropout (dstack #247: the automatic cushion of up to
 //!   +40 ms is gone): the latency stays the stated term, and a PC that
 //!   needs more sets a larger [`AppBuffer`].
-//! - **Re-centre:** a depth the controller cannot steer back (under
-//!   [`floor_s`] or more than [`hard_excess_s`] over the target) skips the
-//!   excess back to the target; a deficit is a dropout like an underrun
-//!   (counted, refilled to the target): the audio breaks either way.
+//! - **Re-centre:** a depth more than [`hard_excess_s`] over the target
+//!   (a burst the controller cannot steer back) skips the excess back to
+//!   the target. A deficit has no floor (dstack #303): it is a dropout only
+//!   when the FIFO cannot serve the converter's next call (an underrun).
+//!   A writer late inside its app's pass (OBS's NDI output ahead of
+//!   dlink's TX tap, ~10 ms) took the depth under the old floor
+//!   (min(5 ms, target/4)) while the FIFO still held audio and the write
+//!   was on its way, and the floor's re-prime made a whole target of
+//!   silence out of it.
 //!
 //! [`Player::fill_with`] allocates nothing, takes no lock and makes no
 //! system call: it runs on the audio driver's thread.
@@ -70,8 +75,6 @@ mod writer;
 
 use writer::Writer;
 
-/// The highest floor, s: a depth under the floor re-primes.
-pub const FLOOR_S: f64 = 0.005;
 /// The FIFO's size, s of the network's rate: the largest target and its
 /// excess ([`hard_excess_s`]) with room to spare.
 pub const FIFO_S: f64 = 0.5;
@@ -84,22 +87,13 @@ pub const LEVEL_BOUND_PPM: f64 = 20.0;
 
 const _: () = assert!(3.0 * (MAX_APP_BUFFER_NS as f64 / 1e9) < FIFO_S);
 
-/// The floor for a target of `target_s`, s: [`FLOOR_S`], at most a quarter
-/// of the target. A chunked producer's depth swings half a chunk under the
-/// target (dsend: 10 ms packets around 11.3 ms reach 6.3 ms), so a 5 ms
-/// floor would already re-prime (a dropout) for a packet 1.4 ms late; the
-/// FIFO itself still serves the block until it is empty.
-pub fn floor_s(target_s: f64) -> f64 {
-    FLOOR_S.min(target_s / 4.0)
-}
-
 /// How far over the target the depth may go before the excess is skipped
 /// back to the target, s: twice the target, and at least twice the app's
 /// chunk `chunk_s` (a target set under the chunk still primes half a
 /// chunk over it and then takes a whole chunk at once), at most twice
 /// [`MAX_APP_BUFFER_NS`] (so the FIFO holds it). A burst of late chunks
 /// is skipped; the swing of a chunked producer never is. A deficit never
-/// reaches it: under the target the floor decides.
+/// reaches it: under the target only an underrun breaks the audio.
 pub fn hard_excess_s(target_s: f64, chunk_s: f64) -> f64 {
     (2.0 * target_s)
         .max(2.0 * chunk_s)
@@ -242,8 +236,9 @@ pub struct Player {
     stats: Arc<Stats>,
 }
 
-/// The controller at `buffer`'s target, its floor and excess from it
-/// ([`floor_s`], [`hard_excess_s`]) and no cushion (dstack #247), its
+/// The controller at `buffer`'s target, no floor (dstack #303: a deficit
+/// is a dropout only when the FIFO cannot serve a call), its excess from
+/// the target ([`hard_excess_s`]) and no cushion (dstack #247), its
 /// calm zone the default ([`dstack_resample::asrc::CALM_ZONE_MS`]):
 /// SongPlayer widens it to half a callback
 /// because it reads the depth once a callback, so the read's phase in the
@@ -256,7 +251,7 @@ fn controller(buffer: &AppBuffer) -> Controller {
     let target_s = buffer.target_s();
     Controller::new(
         target_s,
-        floor_s(target_s),
+        0.0,
         hard_excess_s(target_s, buffer.chunk_s()),
         Basis::Arrival,
     )
@@ -464,8 +459,8 @@ impl Player {
             // ticks) makes the same sawtooth from the other side: the
             // priming ends just after a chunk landed, and the depth falls a
             // whole chunk before the next one (dstack #247: at a target of
-            // a chunk and a block, that start alone took the depth under
-            // the floor). The wider of the two swings is the one to centre.
+            // a chunk and a block, that start alone took the depth down to
+            // a dropout). The wider of the two swings is the one to centre.
             let swing = self.callback_in.max(self.chunk_in);
             let need = self.conv.input_frames_next();
             // A chunked producer on its own schedule: the depth whose mean
@@ -519,17 +514,11 @@ impl Player {
         self.steer();
     }
 
-    /// The block's input was not there: silence, counted, and primed again
-    /// to the target (module doc).
+    /// The block's input was not there, the one dropout (dstack #303: no
+    /// floor): silence, counted as an underrun, and the output primes to
+    /// the same target again, never more (dstack #247).
     fn underrun(&mut self) {
         self.block.fill(0.0);
-        self.dropout();
-    }
-
-    /// The audio breaks (an underrun, or a depth under the floor that only
-    /// a refill mends): counted as an underrun, and the output primes to
-    /// the same target again, never more (dstack #247).
-    fn dropout(&mut self) {
         self.underruns += 1;
         self.ctl.restart();
         self.state = State::Priming(frames_of(self.target_s, self.net_rate));
@@ -549,16 +538,15 @@ impl Player {
         let ppm = match self.ctl.observe(now_s, depth_s, 2.0 * now_s - produced_s) {
             Step::Hold(ppm) => ppm,
             Step::Recentre { by_s, ppm } | Step::Prime { by_s, ppm } => {
-                // A re-centre is never at 0 (it is past the floor or the
-                // excess): the sign alone tells a deficit from an excess.
-                if by_s.is_sign_negative() {
-                    self.fifo.skip(frames_of(-by_s, self.net_rate));
-                    // The audio jumps: the filter's history is no longer
-                    // its past.
-                    self.conv.reset();
-                } else {
-                    self.dropout();
-                }
+                // Only an excess re-centres (a floor of 0: no depth is under
+                // it, and a deficit is at most the target, under the
+                // excess bound), so `by_s` is the excess to skip, negative.
+                // `Prime` never comes: the controller is made without
+                // `with_priming` (the player primes itself, `State::Priming`).
+                self.fifo.skip(frames_of(-by_s, self.net_rate));
+                // The audio jumps: the filter's history is no longer its
+                // past.
+                self.conv.reset();
                 ppm
             }
         };
