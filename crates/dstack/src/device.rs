@@ -1305,8 +1305,10 @@ fn sync_dir(_path: &Path) -> io::Result<()> {
 
 /// The config schema's own words: every key of [`DeviceConfig`] and of its
 /// `[[subscribe]]` table ([`Declared`]), and the [`TimingProfile`] names.
-/// They are public, so a parse error may name them ([`redact`]); a test
-/// reads serde's own lists and keeps this one equal to them.
+/// They are public, so a parse error may name them ([`redact`]), also when
+/// a typed value happens to equal one (`timing = "rx"`). A test reads
+/// serde's own lists and keeps this one equal to them: a new nested
+/// `deny_unknown_fields` table or enum joins that test too.
 /// `playout_override`'s keys are channel names (site data) and never here.
 const CONFIG_KEYS: &[&str] = &[
     "name",
@@ -1367,42 +1369,58 @@ fn parse_problem(text: &str, e: &toml::de::Error, keys: &[&str]) -> String {
 }
 
 /// `message` with every quoted span, `"..."` or `` `...` ``, cut to its
-/// quote marks around an ellipsis; inside a span a backslash escapes the next
-/// character, and an unclosed span runs to the end. serde quotes the
-/// offending value and toml backticks a key. A backticked span that is
-/// exactly one of `keys` stays whole: serde backticks a missing or expected
-/// key too, and those are our own schema's words.
+/// quote marks around an ellipsis, but for a backticked span that is exactly
+/// one of `keys` (our schema's words: serde backticks a missing or expected
+/// key too). serde quotes a value Debug-escaped, so inside `"..."` a
+/// backslash escapes the next character. It backticks a key raw: a typed
+/// key may hold a backtick itself, so the message's first backticked span
+/// (the only one serde fills with typed text: `unknown field`, `unknown
+/// variant`) runs to the last `` `, expected `` or else the last backtick,
+/// and a key holding `` ` `` can never split it. An unclosed span runs to
+/// the end.
 fn redact(message: &str, keys: &[&str]) -> String {
     let mut out = String::new();
-    let mut open: Option<char> = None;
-    let mut held = String::new();
-    let mut escaped = false;
-    for c in message.chars() {
-        match open {
-            None if c == '"' || c == '`' => {
-                open = Some(c);
-                held.clear();
+    let mut rest = message;
+    let mut first_tick = true;
+    while let Some(at) = rest.find(['"', '`']) {
+        out.push_str(&rest[..at]);
+        let body = &rest[at + 1..];
+        let (q, end) = if rest[at..].starts_with('"') {
+            ('"', closing_quote(body))
+        } else if first_tick {
+            first_tick = false;
+            ('`', body.rfind("`, expected ").or_else(|| body.rfind('`')))
+        } else {
+            ('`', body.find('`'))
+        };
+        match end {
+            Some(end) => {
+                out.push_str(&quoted(q, &body[..end], keys));
+                rest = &body[end + 1..];
             }
-            None => out.push(c),
-            Some(_) if escaped => {
-                escaped = false;
-                held.push(c);
+            None => {
+                out.push_str(&quoted(q, "", keys));
+                rest = "";
             }
-            Some(_) if c == '\\' => {
-                escaped = true;
-                held.push(c);
-            }
-            Some(q) if c == q => {
-                out.push_str(&quoted(q, &held, keys));
-                open = None;
-            }
-            Some(_) => held.push(c),
         }
     }
-    if let Some(q) = open {
-        out.push_str(&quoted(q, "", keys));
-    }
+    out.push_str(rest);
     out
+}
+
+/// Where the `"..."` span `body` (past its opening quote) closes: its first
+/// quote that no backslash escapes.
+fn closing_quote(body: &str) -> Option<usize> {
+    let mut escaped = false;
+    for (at, c) in body.char_indices() {
+        match c {
+            _ if escaped => escaped = false,
+            '\\' => escaped = true,
+            '"' => return Some(at),
+            _ => {}
+        }
+    }
+    None
 }
 
 /// One quoted span as [`redact`] writes it: whole when it is a backticked
