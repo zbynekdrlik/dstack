@@ -101,7 +101,7 @@ kill -INT "$PEER"; wait "$PEER"   # exit 0 after the goodbyes
   `gaps` and `kind`): `kind=silence` when the tone's energy dropped (the
   audio was not there: silence in the app's own mix, a dropout),
   `kind=misplaced` when it held but a sample was out of place (a skip, a
-  repeat, a jump).
+  repeat, a jump; also a smaller gain step or a NaN sample).
 - `play_at_ppm`: the peer's media clock against its app clock as its blocks'
   play times show it: its own `test_clock_ppm`, a check the skew is live.
 - `device.engine.play_at_steps` / `play_at_max_dev_us` (dstack #305, every
@@ -152,9 +152,9 @@ error); `ci-peer.test.sh` shows the loop.
 The app (its dlink status, `Link::status()`, and its own bridge counters):
 
 - TX (the app's dlink `bridge::Stats` of its TX player: `underruns()`,
-  `recentres()`, `resyncs()`, `convert_errors()`, `ppm()`, which the app publishes in its own
-  status, obs as `tx_underruns` and its kin): underruns and
-  re-centres rise 0 after priming, converter errors rise 0; the correction settled within ±(the skew
-  + 2) ppm;
+  `recentres()`, `resyncs()`, `convert_errors()`, `ppm()`, which the app
+  publishes in its own status, obs as `tx_underruns` and its kin):
+  underruns and re-centres rise 0 after priming, converter errors rise 0;
+  the correction settled within ±(the skew + 2) ppm;
 - RX: the bridge's underruns rise 0, `channels[]` `holes` / `late` rise 0;
 - `engine.play_at_steps` 0 and `play_at_max_dev_us` under 1000.

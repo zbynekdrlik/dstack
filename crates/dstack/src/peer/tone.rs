@@ -58,7 +58,8 @@ pub enum GapKind {
     /// not there.
     Silence,
     /// The energy held but a sample was out of place (a skip, a repeat,
-    /// a jump).
+    /// a jump), a gain step that kept over a quarter of the energy, or a
+    /// NaN sample.
     Misplaced,
 }
 

@@ -109,10 +109,13 @@ const MEDIAN_SECONDS: usize = 30;
 /// (today's -50 .. +47 ppm before #303) still fails.
 const STALL_BAND_PPM: f64 = 20.0;
 /// A TX tone break belongs to a counted event (an underrun, a re-centre or
-/// a resync) at most this long before it: the event's silence or skip
-/// reaches the output within the converter's delay and the app's block
-/// (dstack #303).
+/// a resync) at most this long before it (dstack #303): the player counts
+/// inside the `fill_at` whose block the tone check then reads, so the
+/// event never comes after its break; the break may show one wake step
+/// later (the converter's delay spills the silence or skip into the next
+/// block), and the longest step is W plus the fault's lateness.
 const TONE_GRACE_NS: u64 = 20 * MS;
+const _: () = assert!(TONE_GRACE_NS >= W_NS + FAULT_LATE_NS);
 
 const _: () = assert!(FAULT_LATE_NS > W_NS);
 const _: () = assert!(FAULT_AT_NS + RESETTLE_NS + SETTLED_NS <= SOAK_NS);
@@ -246,6 +249,8 @@ struct Soak {
     tx_primed: Option<Counts>,
     tone_break_at: Vec<u64>,
     tx_counted_at: Vec<u64>,
+    /// The TX tone check locked on the tone (at the end of the run).
+    tx_tone_locked: bool,
     /// The counts once both bridges ran (priming done), and each second's.
     primed: Option<Counts>,
     seconds: Vec<Counts>,
@@ -283,6 +288,7 @@ impl Soak {
             tx_primed: None,
             tone_break_at: Vec::new(),
             tx_counted_at: Vec::new(),
+            tx_tone_locked: false,
             primed: None,
             seconds: Vec::new(),
             before_fault: None,
@@ -421,7 +427,9 @@ impl Soak {
             if self.tx_primed.is_none() && !p.tx_stats.priming() {
                 self.tx_primed = Some(counts);
             }
-            if let Some(last) = tx_last {
+            // The first primed step's own changes too (against the step
+            // before it).
+            if let (Some(_), Some(last)) = (self.tx_primed, tx_last) {
                 let breaks = counts.tx_tone_gaps - last.tx_tone_gaps;
                 let counted = counts.tx_events() - last.tx_events();
                 self.tone_break_at
@@ -429,9 +437,7 @@ impl Soak {
                 self.tx_counted_at
                     .extend(std::iter::repeat_n(at, counted as usize));
             }
-            if self.tx_primed.is_some() {
-                tx_last = Some(counts);
-            }
+            tx_last = Some(counts);
             if self.primed.is_none() && !p.tx_stats.priming() && !p.rx_stats.priming() {
                 self.primed = Some(Counts::of(&p, now));
                 gaps = (counts.tx_sum(), counts.rx_sum());
@@ -451,6 +457,7 @@ impl Soak {
             }
         }
         self.view = p.pump_stats.view();
+        self.tx_tone_locked = p.tx_tone_locked.load(std::sync::atomic::Ordering::Relaxed);
         self
     }
 
@@ -613,6 +620,19 @@ impl Soak {
         let tx_primed = self
             .tx_primed
             .unwrap_or_else(|| panic!("{label}: TX never primed"));
+        // The check is live: it locked on the TX tone (no lock judges no
+        // sample and finds no break), and a fault's skip is heard as a
+        // break, matched below.
+        assert!(
+            self.tx_tone_locked,
+            "{label}: the TX tone check never locked"
+        );
+        if self.fault {
+            assert!(
+                !self.tone_break_at.is_empty(),
+                "{label}: the fault's skip made no TX tone break"
+            );
+        }
         let uncounted = unaccounted(&self.tone_break_at, &self.tx_counted_at, TONE_GRACE_NS);
         assert!(
             uncounted.is_empty(),
