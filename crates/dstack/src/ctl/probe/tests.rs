@@ -6,7 +6,10 @@ use std::net::{Ipv4Addr, SocketAddr, TcpListener};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use super::{MAX_ANSWER, ProbeError, REQUEST, ask, line_of, status, status_at, time_left};
+use super::{
+    MAX_ANSWER, ProbeError, REQUEST, ask, client_request, line_of, status, status_as, status_at,
+    time_left,
+};
 
 /// The size tests' deadline: a megabyte through a coverage-instrumented
 /// build takes longer than the probe's own [`super::WAIT`]; they test the
@@ -225,4 +228,61 @@ fn asks_an_app_and_reads_its_answer() {
         other => panic!("{other:?}"),
     }
     handle.join().unwrap();
+}
+
+/// An endpoint taking `answers.len()` connections in turn: each request
+/// line read, then its answer written. The thread returns the requests.
+fn lines_endpoint(answers: Vec<&'static [u8]>) -> (u16, JoinHandle<Vec<String>>) {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind 127.0.0.1");
+    let port = listener.local_addr().expect("its address").port();
+    let handle = thread::spawn(move || {
+        let mut requests = Vec::new();
+        for answer in answers {
+            let (mut s, _) = listener.accept().expect("a connection");
+            let mut line = Vec::new();
+            let mut b = [0u8; 1];
+            while s.read(&mut b).expect("the request") == 1 && b[0] != b'\n' {
+                line.push(b[0]);
+            }
+            requests.push(String::from_utf8(line).expect("text"));
+            s.write_all(answer).expect("the answer");
+        }
+        requests
+    });
+    (port, handle)
+}
+
+/// dstack #321: a local client states its name and this build's version.
+#[test]
+fn a_client_s_status_request_names_it_and_the_build_s_version() {
+    assert_eq!(
+        client_request("dtray"),
+        format!("status dtray {}\n", env!("CARGO_PKG_VERSION"))
+    );
+    let (port, server) = lines_endpoint(vec![b"{\"clock\":{}}\n"]);
+    assert_eq!(status_as(port, "dtray").unwrap(), "{\"clock\":{}}");
+    assert_eq!(
+        server.join().unwrap(),
+        vec![client_request("dtray").trim_end().to_string()]
+    );
+}
+
+/// dstack #321: a device from before the client field refuses it; the
+/// client asks again with a bare `status` and reads the answer. Another
+/// failure is not asked again.
+#[test]
+fn a_device_that_refuses_the_client_field_is_asked_with_a_bare_status() {
+    let (port, server) = lines_endpoint(vec![
+        b"error: this endpoint answers status and app only\n",
+        b"{\"clock\":{}}\n",
+    ]);
+    assert_eq!(status_as(port, "dtray").unwrap(), "{\"clock\":{}}");
+    let requests = server.join().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(requests[0].starts_with("status dtray "), "{requests:?}");
+    assert_eq!(requests[1], "status");
+    // An empty answer is no refusal: one request only.
+    let (port, server) = lines_endpoint(vec![b"\n"]);
+    assert!(matches!(status_as(port, "dtray"), Err(ProbeError::Empty)));
+    assert_eq!(server.join().unwrap().len(), 1);
 }

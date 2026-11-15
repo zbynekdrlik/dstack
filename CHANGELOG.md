@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- **Feature (#321, field 15.11.2026, #319): the network floor, a version guard for every dstack binary on the network.** A 3.11 dtray (about v0.6.20, still with the standing mDNS browses that #141 later removed) ran 12 days on two PCs and nothing noticed. Now:
+  - `dstack::NETWORK_FLOOR` (`network_floor::Version` 0.6.58, the first build with no standing browse in any binary) is the lowest dstack version allowed on the network. A release that fixes a network-wide defect raises it.
+  - Peers: every device's mDNS meter reads the `dstack_vers` TXT of each `_netaudio-arc` answer it hears, and `discover::Discovery` (dcontroller, dtray) checks each device it lists. A dstack device below the floor is warned about once an hour per process: WARN `a dstack device below the network floor: upgrade it` with `kind="peer"`, `name`, `address`, `version`, `floor`. A device without `dstack_vers` is not ours and is never named (so a peer is seen from v0.6.84 on, the first with the key).
+  - Local clients: the local status endpoint takes `status <name> <version>` besides a bare `status` (anything else past `status` is refused). dtray and dtray-cli state themselves (`dtray`, `dtray-cli`) and ask again with a bare `status` when an older device refuses it, so a new dtray still reads an old device. A client below the floor gets the same WARN with `kind="client"`, `address=local`.
+  - Status: a new `network` object, present once the process's meter runs or a client stated itself: `floor`, `below_floor` (`kind` `peer` with `name`, `address`, `version`; `kind` `client` with `name`, `version`; seen within the hour) and `clients` (`name`, `version`, within the hour). The status may now carry peer names and addresses there.
+  - API (additive): module `network_floor` (`Version`, `NETWORK_FLOOR`, `Kind`, `Below`, `Guard`, `Clients`, `Client`, `Warned`, `check`, `warn_below`, `below_of`, `warn_devices`, `arc_versions`, `client_of`, `now_ns`, `HOUR_NS`), `Discovery::below_floor`, `senders::Meter::below_floor`, `ctl::status_request`, `ctl::StatusClient`, `ctl::BAD_CLIENT`, `ctl::probe::{status_as, status_from, client_request}`, `Media::{client_asked, clients, peers_below_floor}`, `dtray::{client, set_client}`.
+  - For dcontroller (its own change, asked of it separately): the WARN line and each device's status `network.below_floor` are what it reads to relay an alarm. The peer name in the WARN is logged escaped (`name="..."`).
+- **No latency change** for any device or dlink app. Consumers: move the stack version; nothing to port.
+
 ## 0.6.144
 
 - **Fix (#317, dasio, field 15.11.2026): an ASIO bridge no longer runs dry on every callback after a pump rebootstrap.** dstack-asio's Dante -> ASIO player took the ASIO buffer (512 frames at 44.1 kHz: 1115 frames at 96 kHz) as its producer's chunk, but the pump writes that FIFO 32 frames a block. So every re-prime followed a 512-frame writer schedule that does not exist; after a rebootstrap that skipped 38 pump blocks (12.7 ms) the schedule said "due now", the re-prime ended under one callback's take, and every callback ran dry and re-primed there again (`to_asio_underruns` +864 every 10 s for 2.5 minutes, 86/s). In a bridge simulation of that shape: 2583 underruns in 30 s before, 1 after (card ±20 ppm).

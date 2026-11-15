@@ -8,6 +8,7 @@ use dstack::daemon::IfAddr;
 use dstack::discover::Device;
 
 use super::{Local, Remote, local_devices, own_addresses, plan, read, remote};
+use crate::probe;
 
 // Documentation addresses (RFC 5737) only.
 const OWN: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 10);
@@ -101,9 +102,14 @@ fn read_gives_each_device_s_status_by_name_in_order() {
     let port = listener.local_addr().expect("addr").port();
     let server = std::thread::spawn(move || {
         let (mut s, _) = listener.accept().expect("a connection");
-        let mut buf = [0u8; 16];
-        let _ = s.read(&mut buf);
+        // dstack #321: the whole request line, which names this client.
+        let mut line = Vec::new();
+        let mut b = [0u8; 1];
+        while s.read(&mut b).expect("the request") == 1 && b[0] != b'\n' {
+            line.push(b[0]);
+        }
         s.write_all(b"{\"clock\":{}}\n").expect("the answer");
+        String::from_utf8(line).expect("text")
     });
     // A port nothing listens on: a listener bound and dropped.
     let closed = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
@@ -112,7 +118,15 @@ fn read_gives_each_device_s_status_by_name_in_order() {
         .expect("addr")
         .port();
     let got = read(&[local("up", port, OWN), local("down", closed, OWN)]);
-    server.join().expect("the server");
+    // The program's client name: dtray's default, or the name another test
+    // of this binary sets (`the_client_name_is_the_one_set_first`).
+    let request = server.join().expect("the server");
+    assert!(
+        ["dtray", "dtray-test"]
+            .iter()
+            .any(|c| request == probe::client_request(c).trim_end()),
+        "{request:?}"
+    );
     assert_eq!(got.len(), 2);
     assert_eq!(got[0], ("up".to_string(), Ok("{\"clock\":{}}".to_string())));
     assert_eq!(got[1].0, "down");

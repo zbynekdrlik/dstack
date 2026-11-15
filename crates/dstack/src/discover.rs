@@ -39,8 +39,13 @@
 //! [`Discovery::devices`] for the list now and a channel of every
 //! [`Change`] for a live list. [`Discovery::stop`] ends them.
 //!
+//! Each device that states a dstack version below the network floor is
+//! warned about ([`crate::network_floor`], dstack #321) and listed by
+//! [`Discovery::below_floor`].
+//!
 //! It only listens and asks mDNS; it sends nothing to any device. Its logs
-//! carry counts and events, never a name or an address ([`senders`] names
+//! carry counts and events, never a name or an address (the network
+//! floor's warning names the stale binary: that is its purpose) ([`senders`] names
 //! the mDNS senders' addresses: that is its purpose).
 //!
 //! [`senders`]: who sends how much mDNS on the leg (dstack #289), each
@@ -530,6 +535,14 @@ impl Discovery {
         lock(&self.devices).list()
     }
 
+    /// The devices listed now that state a dstack version below the
+    /// network floor (dstack #321, [`crate::network_floor::below_of`]).
+    /// The thread warns about each once an hour: when it is listed or
+    /// changes, and at each sweep.
+    pub fn below_floor(&self) -> Vec<crate::network_floor::Below> {
+        crate::network_floor::below_of(&self.devices(), crate::network_floor::now_ns())
+    }
+
     /// Ends the thread, waiting at most [`STOP_WAIT`].
     pub fn stop(mut self) -> Result<(), DiscoverError> {
         self.stop.store(true, Ordering::Relaxed);
@@ -611,6 +624,9 @@ impl Run {
                 if let Err(e) = self.sweeper.send_to(&sweep_query(id), self.mdns) {
                     debug!(%e, "discovery: a sweep not sent");
                 }
+                // dstack #321: the whole list against the network floor.
+                let listed = lock(&self.devices).list();
+                crate::network_floor::warn_devices(&listed);
                 let seed = u64::try_from(origin.elapsed().as_nanos()).unwrap_or(0);
                 next_sweep = origin.elapsed() + sweep_after(seed);
             }
@@ -676,6 +692,9 @@ impl Run {
             },
             "discovery: a device"
         );
+        if let Change::Added(d) | Change::Changed(d) = &change {
+            crate::network_floor::warn_devices(std::slice::from_ref(d));
+        }
         let _listened = self.tx.send(change);
     }
 }

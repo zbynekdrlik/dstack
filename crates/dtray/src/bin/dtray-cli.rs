@@ -24,6 +24,8 @@ use std::process::{Command, ExitCode};
 use dtray::cli;
 
 fn main() -> ExitCode {
+    // dstack #321: a device lists this program by its own name.
+    dtray::set_client("dtray-cli");
     let mode = dtray::mode_of(std::env::args().skip(1)).ok();
     cli::run(
         mode,

@@ -939,3 +939,5 @@ fn an_app_command_goes_to_the_hook_and_a_panic_is_an_error() {
     media.set_app_command(|_| Ok("second".into()));
     assert_eq!(answer("app x", &media), "second");
 }
+
+mod network;

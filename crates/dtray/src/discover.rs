@@ -191,12 +191,14 @@ impl Scanner {
     }
 }
 
-/// Each of `devices`' status now ([`probe::status`]), by name, in order.
+/// Each of `devices`' status now, asked as this program's client
+/// ([`probe::status_as`], [`crate::client`]: dstack #321), by name, in
+/// order.
 pub fn read(devices: &[Local]) -> Vec<Reading> {
     devices
         .iter()
         .map(|d| {
-            let r = probe::status(d.port).map_err(|e| e.to_string());
+            let r = probe::status_as(d.port, crate::client()).map_err(|e| e.to_string());
             (d.name.clone(), r)
         })
         .collect()
