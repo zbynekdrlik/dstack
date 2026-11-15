@@ -33,8 +33,14 @@
 //! source that announced `_netaudio-arc` records without `dstack_vers`
 //! within [`HARDWARE_NS`], and none with it, is such hardware and never
 //! named ([`Browsers::arc_from`], fed from the records the meter already
-//! reads for the network floor). Every other source still is: a PC, a
-//! stale dtray, a dstack device that states its version.
+//! reads for the network floor). A PC that hosts a Dante device that is not
+//! ours (Dante Virtual Soundcard, Dante Via) answers the same way and
+//! counts as hardware too. Every other source still is named: a PC with
+//! no such device, a stale dtray, a dstack device that states its version.
+//! The marks live in memory and come only from answers the meter hears (a
+//! multicast question asks them: Dante Controller, other Dante hardware):
+//! a meter started less than a chain after the last such answer may name
+//! the hardware until one comes.
 
 use std::collections::{HashMap, VecDeque};
 use std::net::Ipv4Addr;
