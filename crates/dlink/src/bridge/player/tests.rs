@@ -641,6 +641,53 @@ fn a_block_with_no_input_plays_silence_and_primes() {
     assert_eq!(s.player.state, State::Priming(TARGET_48K));
 }
 
+/// dstack #303: a converter error plays its block as silence and is
+/// counted (`Stats::convert_errors`), never silent in the counts; the
+/// output runs on (no re-prime), and a later player on the same stats
+/// counts on from it.
+#[test]
+fn a_converter_error_plays_silence_and_is_counted() {
+    let mut s = Sim::new(48_000, 48_000, 0.0, 1, 1);
+    s.run(2.0);
+    // Hand out the rest of the current block: the next fill starts one.
+    let rest = BLOCK - s.player.pos;
+    let mut out = vec![0.0f64; rest];
+    s.player.fill_with(&mut out, 1, |x| x);
+    // A converter for two channels on a one-channel player: its process
+    // refuses the player's one-channel buffers (the injected error).
+    let good = std::mem::replace(
+        &mut s.player.conv,
+        Converter::drifting(48_000, 48_000, 2, BLOCK, Fixed::Output).unwrap(),
+    );
+    let consumed = s.player.consumed();
+    let mut block = vec![9.0f64; BLOCK];
+    s.player.fill_with(&mut block, 1, |x| x);
+    assert!(block.iter().all(|&x| x == 0.0), "silence");
+    let stats = s.player.stats();
+    assert_eq!(stats.convert_errors(), 1);
+    assert_eq!(stats.underruns(), 0, "a converter error, not an underrun");
+    assert_eq!(s.player.state, State::Running, "no re-prime");
+    assert!(s.player.consumed() > consumed, "its input is taken");
+    s.player.fill_with(&mut block, 1, |x| x);
+    assert_eq!(s.player.stats().convert_errors(), 2, "one a block");
+    s.player.conv = good;
+    s.player.fill_with(&mut block, 1, |x| x);
+    assert_eq!(s.player.stats().convert_errors(), 2, "none once it converts");
+    let stats = s.player.stats();
+    let mut next = Player::new(
+        Arc::clone(&s.fifo),
+        48_000,
+        48_000,
+        buffer(48_000),
+        buffer(48_000).chunk_ns(),
+        Arc::clone(&stats),
+    )
+    .unwrap();
+    let mut out = vec![0.0f64; 64];
+    next.fill_with(&mut out, 1, |x| x);
+    assert_eq!(stats.convert_errors(), 2, "the next player counts on");
+}
+
 #[test]
 fn under_mono_both_speakers_play_the_sum_of_our_channels() {
     let mut s = Sim::new(48_000, 48_000, 0.0, 2, 2);
