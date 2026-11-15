@@ -7,3 +7,4 @@
 /mutants.out.old
 /drivers/dsend-audio/driver/packages/
 /drivers/dsend-audio/driver/x64/
+__pycache__/

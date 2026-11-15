@@ -12,12 +12,17 @@ sleeps 1 ms in a loop and logs every wake at least WITNESS_MIN_US late.
 `witness <file>`: run the witness, one line `<unix_ms> <late_us>` per late
 wake (unix_ms at the wake, after the stall).
 
-`void <witness file> <from_ms> <to_ms> <peer>=<rise>:<status.json> ...`:
-exit 0 when a measuring window whose counts rose is VOID (the runner
-stalled us), 1 when the rise stands (a failure), with the reason on
-stdout. Void only when at least one peer re-bootstrapped in the window,
-each peer's recent late wakes hold at least its rebootstrap rise inside the
-window, and every such re-bootstrap overlaps a stall the witness saw.
+`void <witness file> <from_ms> <to_ms> <peer>=<rise>,<late rise>:<status.json> ...`
+(`rise` the peer's `engine.rebootstraps` rise, `late rise` its
+`engine.rebootstraps_late` rise): exit 0 when a measuring window whose
+counts rose is VOID (the runner stalled us), 1 when the rise stands (a
+failure), 2 for a usage or read error, with the reason on stdout. Void
+only when at least one peer re-bootstrapped in the window, every
+re-bootstrap was a late wake (no clock-back, re-anchor or re-time), each
+peer's recent late wakes hold at least its late rise inside the window,
+and every such re-bootstrap overlaps a stall the witness saw. Other
+counters (tone gaps, holes, late packets) may rise with it: a peer's
+restart is heard as a gap by the other.
 """
 
 import json
@@ -35,14 +40,21 @@ SLACK_MS = 2
 STATUS_AGE_MS = 1500
 
 
+def step(sleep, monotonic_ns):
+    """One sleep of the witness: how late it woke, us, when at least
+    WITNESS_MIN_US late, else None."""
+    before = monotonic_ns()
+    sleep(WITNESS_SLEEP_US / 1e6)
+    late_us = (monotonic_ns() - before) // 1000 - WITNESS_SLEEP_US
+    return late_us if late_us >= WITNESS_MIN_US else None
+
+
 def witness(path):
     """Log every wake of a 1 ms sleep loop at least WITNESS_MIN_US late."""
     with open(path, "a", encoding="ascii") as out:
         while True:
-            before = time.monotonic_ns()
-            time.sleep(WITNESS_SLEEP_US / 1e6)
-            late_us = (time.monotonic_ns() - before) // 1000 - WITNESS_SLEEP_US
-            if late_us >= WITNESS_MIN_US:
+            late_us = step(time.sleep, time.monotonic_ns)
+            if late_us is not None:
                 out.write(f"{time.time_ns() // 1_000_000} {late_us}\n")
                 out.flush()
 
@@ -76,13 +88,15 @@ def witnessed(interval, seen):
 
 def void(seen, from_ms, to_ms, peers):
     """(void, reason) for a window whose counts rose: `peers` maps a name
-    to (its rebootstrap rise, its status)."""
-    if not any(rise > 0 for rise, _ in peers.values()):
+    to (its rebootstrap rise, its late rebootstrap rise, its status)."""
+    if not any(rise > 0 for rise, _, _ in peers.values()):
         return False, "no peer re-bootstrapped: the rise is not a runner stall"
-    for name, (rise, status) in peers.items():
+    for name, (rise, late, status) in peers.items():
+        if rise != late:
+            return False, f"{name}: {rise - late} of {rise} re-bootstraps were not late wakes"
         found = rebootstraps(status, from_ms, to_ms)
-        if len(found) < rise:
-            return False, f"{name}: {rise} re-bootstraps rose, {len(found)} in its recent late wakes"
+        if len(found) < late:
+            return False, f"{name}: {late} re-bootstraps rose, {len(found)} in its recent late wakes"
         for interval in found:
             if not witnessed(interval, seen):
                 return False, f"{name}: re-bootstrap at {interval[1]} ms not seen by the witness"
@@ -100,9 +114,10 @@ def main(argv):
         peers = {}
         for arg in argv[5:]:
             name, rest = arg.split("=", 1)
-            rise, path = rest.split(":", 1)
+            rises, path = rest.split(":", 1)
+            rise, late = rises.split(",")
             with open(path, encoding="utf-8") as f:
-                peers[name] = (int(rise), json.load(f))
+                peers[name] = (int(rise), int(late), json.load(f))
         is_void, reason = void(seen, from_ms, to_ms, peers)
         print(reason)
         return 0 if is_void else 1
@@ -111,4 +126,10 @@ def main(argv):
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv))
+    try:
+        CODE = main(sys.argv)
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        # A read or usage error is never "the rise stands" (exit 1).
+        print(f"gate error: {e!r}")
+        CODE = 2
+    sys.exit(CODE)

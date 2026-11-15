@@ -6,8 +6,10 @@
 # tone. Gated as the doc says: after a settle, no tone gap, no RX hole, no
 # pump restart, no play-time step, and each peer's play_at_ppm at its skew.
 # A runner stall is told from a defect by a witness process with no dstack
-# code (ci_peer_gate.py): a window whose rise is only re-bootstraps the
-# witness saw stall too is measured again, at most WINDOWS times.
+# code (ci_peer_gate.py): a window that rose, where every re-bootstrap was a
+# late wake inside a stall the witness saw too, is measured again, at most
+# WINDOWS times (other counters may rise with it: a restart is heard as a
+# gap by the other peer). A void window is a warning on the run.
 # Run as root (the interface); the binary is $1 (default target/release).
 set -euo pipefail
 
@@ -63,10 +65,15 @@ counts() {
   jq -c '[.peer.rx[0].tone_gaps,
           ([.device.channels[] | .holes + .late] | add // 0),
           ([.device.rx[] | .gaps + .late + .socket_drops] | add // 0),
-          .device.engine.rebootstraps]' "$DIR/$1.json"
+          .device.engine.rebootstraps,
+          .device.engine.rebootstraps_late]' "$DIR/$1.json"
 }
-# The rebootstrap rise between two counts.
-rise() { echo $(( $(jq '.[3]' <<<"$2") - $(jq '.[3]' <<<"$1") )); }
+# A peer's `void` argument: its rebootstrap and late rebootstrap rises
+# between counts $2 and $3, its status.
+peer_arg() {
+  echo "$1=$(( $(jq '.[3]' <<<"$3") - $(jq '.[3]' <<<"$2") )),$(( $(jq '.[4]' <<<"$3") - $(jq '.[4]' <<<"$2") )):$DIR/$1.json"
+}
+witness_alive() { kill -0 "$W" 2>/dev/null || fail "the stall witness died"; }
 now_ms() { date +%s%3N; }
 sleep 5
 for window in $(seq 1 "$WINDOWS"); do
@@ -75,15 +82,20 @@ for window in $(seq 1 "$WINDOWS"); do
   T1=$(now_ms); A1=$(counts a); B1=$(counts b)
   echo "window $window: a: $A0 -> $A1; b: $B0 -> $B1"
   [ "$A0" = "$A1" ] && [ "$B0" = "$B1" ] && break
-  if why=$(python3 "$GATE" void "$DIR/witness.txt" "$T0" "$T1" \
-      "a=$(rise "$A0" "$A1"):$DIR/a.json" "b=$(rise "$B0" "$B1"):$DIR/b.json"); then
-    echo "window $window void (the runner stalled): $why"
+  witness_alive
+  rc=0
+  why=$(python3 "$GATE" void "$DIR/witness.txt" "$T0" "$T1" \
+    "$(peer_arg a "$A0" "$A1")" "$(peer_arg b "$B0" "$B1")") || rc=$?
+  if [ "$rc" = 0 ]; then
+    echo "::warning title=ci-peer window $window void::the runner stalled: $why;" \
+      "witness stalls: $(awk -v a="$T0" -v b="$T1" '$1 >= a && $1 <= b' "$DIR/witness.txt" | tr '\n' ' ')"
     [ "$window" -lt "$WINDOWS" ] || fail "the runner stalled in all $WINDOWS windows"
     continue
   fi
+  [ "$rc" = 1 ] || fail "the stall gate itself failed (exit $rc): $why"
   echo "the rise stands: $why"
-  [ "$A0" = "$A1" ] || fail "peer a: [tone_gaps, channel holes+late, flow gaps+late+drops, rebootstraps] rose $A0 -> $A1"
-  fail "peer b: [tone_gaps, channel holes+late, flow gaps+late+drops, rebootstraps] rose $B0 -> $B1"
+  [ "$A0" = "$A1" ] || fail "peer a: [tone_gaps, channel holes+late, flow gaps+late+drops, rebootstraps, of them late] rose $A0 -> $A1"
+  fail "peer b: [tone_gaps, channel holes+late, flow gaps+late+drops, rebootstraps, of them late] rose $B0 -> $B1"
 done
 for p in a b; do
   jq -e '.device.engine.play_at_steps == 0' "$DIR/$p.json" >/dev/null || fail "$p: play_at_steps"
@@ -94,6 +106,7 @@ done
 jq -e '(.peer.rx[0].tone_hz - 440 | fabs) < 0.1' "$DIR/a.json" >/dev/null || fail "a heard no 440 Hz"
 jq -e '(.peer.rx[0].tone_hz - 1000 | fabs) < 0.1' "$DIR/b.json" >/dev/null || fail "b heard no 1000 Hz"
 
+witness_alive
 PIDS=""
 kill "$W"
 kill -INT "$A" "$B"
