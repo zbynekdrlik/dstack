@@ -38,7 +38,8 @@ use dstack_audio_io::{Block, Process};
 
 use crate::device::Opened;
 
-/// Frames a side converts at once (its interleaved scratch).
+/// Frames the pump's side converts at once (its interleaved scratch); the
+/// driver's side converts its whole buffer at once ([`Bridge::asio_side`]).
 const CHUNK: usize = 256;
 
 /// What a bridge carries (a dasio bridge instance's settings).
@@ -182,11 +183,15 @@ impl Bridge {
             switch.send(p)?;
             from_asio = Some(fifo);
         }
+        // The whole buffer in one call: the player primes for the take of
+        // one callback, and pieces of it would count half a buffer when the
+        // driver takes the whole one back to back (dstack #317).
+        let frames = CHUNK.max(opened.buffer_frames as usize);
         Ok(AsioSide {
             player,
             outputs: self.spec.to_asio,
             from_asio,
-            scratch: vec![0.0; CHUNK * self.spec.to_asio],
+            scratch: vec![0.0; frames * self.spec.to_asio],
         })
     }
 
@@ -212,12 +217,14 @@ impl Bridge {
 }
 
 /// The player's output for `frames` frames into the block's first
-/// `outputs` channels, through `scratch` (interleaved, [`CHUNK`] frames).
+/// `outputs` channels, through `scratch` (interleaved, `outputs` > 0): in
+/// pieces of the frames `scratch` holds.
 fn play(player: &mut Player, block: &mut Block<'_>, outputs: usize, scratch: &mut [f64]) {
     let frames = block.frames();
+    let piece = scratch.len() / outputs;
     let mut done = 0;
     while done < frames {
-        let n = (frames - done).min(CHUNK);
+        let n = (frames - done).min(piece);
         let buf = &mut scratch[..n * outputs];
         // Each piece's own start: a block the engine skipped resyncs the
         // player once (dstack #303), a piece of the same block never.

@@ -21,8 +21,12 @@
 //!   input, which is the change that drains it.
 //! - **Priming:** at the start and after an underrun the output plays
 //!   silence until the FIFO holds the target and half the wider swing (the
-//!   output's callback or the app's chunk; in dlisten the chunk is the
-//!   output's callback, so it counts once), then starts from there; an
+//!   output's callback or the producer's chunk, [`Player::new`]; a
+//!   pump-fed player (dlisten, dstack-asio to ASIO) has the pump's block
+//!   for its chunk, so the callback is the swing. The callback is the
+//!   frames of one fill call: a caller that fills one callback in pieces
+//!   primes for a piece, so dstack-asio fills the driver's whole buffer at
+//!   once, dstack #317), then starts from there; an
 //!   excess at that moment is skipped. A chunked producer (its chunk wider
 //!   than the output's callback: OBS's 1024-frame ticks) is followed on its
 //!   own schedule (`player::writer`, dstack #303): a re-prime that ends mid-cycle
