@@ -837,11 +837,11 @@ impl Link {
     /// `"state":"warn"`, red on `"state":"error"`. A later call replaces the
     /// hook.
     ///
-    /// `f` runs on a thread of its own, at most once a second and only
-    /// while the status is read; the status carries its last answer, with
-    /// `"stale":true` once that is over 3 s old (dtray: orange). A slow `f`
-    /// never delays the device. Never call [`Link::status`] from `f`: each
-    /// call counts as a read and keeps `f` called for good.
+    /// `f` runs on a thread of its own, once a second whether the status is
+    /// read or not (dstack #317); the status carries its last answer, with
+    /// `"stale":true` once that is over 3 s old (`f` has not returned:
+    /// dtray shows orange). A slow `f` never delays the device. Never call
+    /// [`Link::status`] from `f`.
     pub fn set_app_status(&self, f: impl Fn() -> String + Send + Sync + 'static) {
         self.device.media().set_app_status(f);
     }

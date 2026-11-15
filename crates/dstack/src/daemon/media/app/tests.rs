@@ -46,36 +46,23 @@ fn counted(n: &Arc<AtomicUsize>, text: &'static str) -> AppStatus {
     })
 }
 
+/// The thread calls the hook once a refresh, read or not (dstack #317:
+/// before, only while a status was read within 5 s, so a reader that reads
+/// rarely got the part of its last read, stale).
 #[test]
-fn the_thread_calls_only_while_read_and_at_most_once_a_refresh() {
+fn the_thread_calls_at_most_once_a_refresh_read_or_not() {
     let t0 = Instant::now();
     let s = Duration::from_millis;
-    // Never read, or read a window ago: nothing to do.
-    assert_eq!(next(t0, None, None), Next::Idle);
-    assert_eq!(next(t0 + READ_WINDOW, Some(t0), None), Next::Idle);
-    assert_eq!(
-        next(t0 + READ_WINDOW + s(1), Some(t0), Some(t0)),
-        Next::Idle
-    );
-    // Read within the window: the first call at once.
-    assert_eq!(next(t0 + READ_WINDOW - s(1), Some(t0), None), Next::Call);
-    assert_eq!(next(t0, Some(t0), None), Next::Call);
+    // The first call at once.
+    assert_eq!(next(t0, None), Next::Call);
     // Then once the part is a refresh old, waiting out the rest before.
-    assert_eq!(
-        next(t0 + s(300), Some(t0), Some(t0)),
-        Next::Wait(REFRESH - s(300))
-    );
-    assert_eq!(next(t0, Some(t0), Some(t0)), Next::Wait(REFRESH));
-    assert_eq!(next(t0 + REFRESH, Some(t0), Some(t0)), Next::Call);
-    assert_eq!(
-        next(t0 + REFRESH + s(1), Some(t0 + s(10)), Some(t0)),
-        Next::Call
-    );
-    // A read or a part from a clock "after now" counts as now.
-    assert_eq!(
-        next(t0, Some(t0 + s(5)), Some(t0 + s(5))),
-        Next::Wait(REFRESH)
-    );
+    assert_eq!(next(t0 + s(300), Some(t0)), Next::Wait(REFRESH - s(300)));
+    assert_eq!(next(t0, Some(t0)), Next::Wait(REFRESH));
+    assert_eq!(next(t0 + REFRESH - s(1), Some(t0)), Next::Wait(s(1)));
+    assert_eq!(next(t0 + REFRESH, Some(t0)), Next::Call);
+    assert_eq!(next(t0 + REFRESH + s(1), Some(t0)), Next::Call);
+    // A part from a clock "after now" counts as now.
+    assert_eq!(next(t0, Some(t0 + s(5))), Next::Wait(REFRESH));
 }
 
 #[test]
@@ -101,25 +88,17 @@ fn a_part_is_stale_past_three_seconds_and_says_so() {
 }
 
 #[test]
-fn the_hook_is_called_only_when_the_status_is_read() {
+fn the_hook_is_called_once_a_refresh_read_or_not() {
     let calls = Arc::new(AtomicUsize::new(0));
     let hook = AppHook::default();
     assert_eq!(hook.read(), None, "no hook");
-    hook.set(counted(&calls, r#"{"state":"ok"}"#));
-    std::thread::sleep(Duration::from_millis(1200));
-    assert_eq!(calls.load(Ordering::Relaxed), 0, "nobody read");
-    // The first read has no part yet; the thread calls the hook for it.
     let started = Instant::now();
-    assert_eq!(hook.read(), None);
+    hook.set(counted(&calls, r#"{"state":"ok"}"#));
+    // Unread: the first call at once, the next after a refresh.
     count_reaches(&calls, 1);
-    assert_eq!(
-        read_until(&hook, Option::is_some).as_deref(),
-        Some(r#"{"state":"ok"}"#)
-    );
-    // Within the read window it keeps refreshing, unread: not before a
-    // refresh, and again after one.
     count_reaches(&calls, 2);
     assert!(started.elapsed() >= REFRESH, "{:?}", started.elapsed());
+    assert_eq!(hook.read().as_deref(), Some(r#"{"state":"ok"}"#));
 }
 
 /// dstack #317 (dasio, field 15.11.2026): an app that logs its status once

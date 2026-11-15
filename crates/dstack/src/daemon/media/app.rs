@@ -5,9 +5,12 @@
 //! #104 step 5).
 //!
 //! - [`AppHook::set`] stores the app's hook and starts, once, the
-//!   `dstack-app-status` thread. That thread calls the hook when its last
-//!   part is [`REFRESH`] old or older and someone read the status within
-//!   [`READ_WINDOW`] ([`next`]): nobody reading means no calls.
+//!   `dstack-app-status` thread. That thread calls the hook whenever its
+//!   last part is [`REFRESH`] old or older ([`next`]), read or not (dstack
+//!   #317): a status read once every 5 minutes (dasio's log) got the part
+//!   made right after the read before it, stale and 5 minutes old, and
+//!   showed a counter that had risen by hundreds as 0. Only a hook that
+//!   has not returned for [`STALE`] leaves a stale part now.
 //! - [`AppHook::read`] (the status request) returns the cached part and
 //!   never calls the hook, so a slow hook never delays the device's ARC,
 //!   CMC or status answers. A part older than [`STALE`] carries
@@ -28,8 +31,6 @@ use tracing::{info, warn};
 
 /// How often the thread calls the hook at most.
 pub const REFRESH: Duration = Duration::from_secs(1);
-/// The thread calls the hook only while a status was read within this.
-pub const READ_WINDOW: Duration = Duration::from_secs(5);
 /// A part older than this carries `"stale":true`.
 pub const STALE: Duration = Duration::from_secs(3);
 
@@ -43,20 +44,11 @@ pub enum Next {
     Call,
     /// Wait this long (or until woken), then decide again.
     Wait(Duration),
-    /// Nobody reads: wait until woken (a read, a new hook, the stop).
-    Idle,
 }
 
-/// The thread's decision at `now`, given the last status read (`read`) and
-/// when the last part was stored (`at`, `None` before the first call of
-/// this hook).
-pub fn next(now: Instant, read: Option<Instant>, at: Option<Instant>) -> Next {
-    let Some(read) = read else {
-        return Next::Idle;
-    };
-    if now.saturating_duration_since(read) >= READ_WINDOW {
-        return Next::Idle;
-    }
+/// The thread's decision at `now`, given when the hook's last call ended
+/// (`at`, `None` before the first call of this hook).
+pub fn next(now: Instant, at: Option<Instant>) -> Next {
     match at {
         Some(at) if now.saturating_duration_since(at) < REFRESH => {
             Next::Wait(REFRESH - now.saturating_duration_since(at))
@@ -97,8 +89,6 @@ struct State {
     called: Option<Instant>,
     /// The hook panicked (since it was set).
     panicked: bool,
-    /// The last status read.
-    read: Option<Instant>,
     /// The thread is inside a call of the hook.
     calling: bool,
     /// The thread was started.
@@ -170,17 +160,14 @@ impl AppHook {
     /// than [`STALE`]; `None` without a hook, before the hook's first call
     /// returned, or when its text was no JSON object within
     /// [`crate::ctl::APP_MAX`] bytes (warned the first time for each hook).
-    /// Never calls the hook: it counts as a read, which keeps the thread
-    /// calling it ([`next`]).
+    /// Never calls the hook (the thread does, once a [`REFRESH`]).
     pub fn read(&self) -> Option<String> {
         let now = Instant::now();
         let (part, calling, panicked) = {
-            let mut s = lock(&self.shared.state);
+            let s = lock(&self.shared.state);
             s.hook.as_ref()?;
-            s.read = Some(now);
             (s.part.clone(), s.calling, s.panicked)
         };
-        self.shared.wake.notify_all();
         // Warned here, on the reader's thread, like the other warnings.
         if panicked && !self.panic_warned.swap(true, Ordering::Relaxed) {
             warn!(
@@ -221,8 +208,13 @@ impl Drop for AppHook {
 fn run(shared: &Shared) {
     let mut s = lock(&shared.state);
     while !s.stop {
-        match (next(Instant::now(), s.read, s.called), s.hook.clone()) {
-            (Next::Call, Some(hook)) => {
+        let Some(hook) = s.hook.clone() else {
+            // No hook yet: wait for one (or the stop).
+            s = shared.wake.wait(s).unwrap_or_else(PoisonError::into_inner);
+            continue;
+        };
+        match next(Instant::now(), s.called) {
+            Next::Call => {
                 let generation = s.generation;
                 s.calling = true;
                 drop(s);
@@ -239,14 +231,13 @@ fn run(shared: &Shared) {
                     Err(_) => s.panicked = true,
                 }
             }
-            (Next::Wait(d), _) => {
+            Next::Wait(d) => {
                 s = shared
                     .wake
                     .wait_timeout(s, d)
                     .unwrap_or_else(PoisonError::into_inner)
                     .0;
             }
-            _ => s = shared.wake.wait(s).unwrap_or_else(PoisonError::into_inner),
         }
     }
 }
