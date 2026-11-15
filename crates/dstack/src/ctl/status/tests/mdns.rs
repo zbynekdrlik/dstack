@@ -34,7 +34,9 @@ fn the_status_shows_the_mdns_meter_s_last_minute() {
     let s = status(&media);
     for word in words_of(&s, "test-device") {
         assert!(
-            WORDS.contains(&word.as_str()) || word.parse::<Ipv4Addr>().is_ok(),
+            WORDS.contains(&word.as_str())
+                || word.parse::<Ipv4Addr>().is_ok()
+                || word == crate::NETWORK_FLOOR.to_string(),
             "{word:?} in {s}"
         );
     }

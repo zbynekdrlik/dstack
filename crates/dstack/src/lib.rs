@@ -69,6 +69,10 @@
 //!   `health::read_status`) and the device's own reasons from two reads
 //!   (`health::device_reasons`); an application builds its box verdict on
 //!   them.
+//! - [`network_floor`] (dstack #321): the lowest dstack version allowed on
+//!   the network ([`NETWORK_FLOOR`]), and the check of every dstack peer
+//!   and local client against it (a WARN per binary per hour, the status's
+//!   `network.below_floor`).
 //!
 //! The device answers for itself only: it never sends a command that
 //! changes another Dante device.
@@ -96,6 +100,7 @@ pub mod lso;
 pub mod media;
 pub mod membership;
 pub mod meter;
+pub mod network_floor;
 #[cfg(any(target_os = "linux", windows))]
 pub mod peer;
 pub mod qdisc;
@@ -109,3 +114,5 @@ mod test_log;
 pub mod traffic;
 pub mod winsock;
 pub mod wire;
+
+pub use network_floor::NETWORK_FLOOR;

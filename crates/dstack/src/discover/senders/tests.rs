@@ -348,3 +348,46 @@ fn the_meter_s_socket_counts_the_mdns_group_on_its_address() {
         assert!(Instant::now() < deadline, "our datagrams were not counted");
     }
 }
+
+/// dstack #321: the meter reads the dstack version of each ARC record it
+/// hears and keeps the peers below the network floor, with the address
+/// the answer came from; a current one is not kept.
+#[test]
+fn the_meter_keeps_the_peers_it_hears_below_the_network_floor() {
+    use simple_dns::rdata::{RData, TXT};
+    use simple_dns::{CLASS, Name, Packet, ResourceRecord};
+    let answer = |name: &'static str, vers: &'static str| {
+        let mut p = Packet::new_reply(0);
+        let txt = TXT::new().with_string(vers).unwrap();
+        p.answers = vec![ResourceRecord::new(
+            Name::new_unchecked(name),
+            CLASS::IN,
+            120,
+            RData::TXT(txt),
+        )];
+        p.build_bytes_vec().unwrap()
+    };
+    let sock = loopback();
+    let to = sock.local_addr().unwrap();
+    let meter = Meter::start(sock, None, Ipv4Addr::LOCALHOST, MINUTE_NS).unwrap();
+    assert!(meter.below_floor().is_empty());
+    let peer = UdpSocket::bind("127.0.0.4:0").unwrap();
+    let old = answer("meter-old._netaudio-arc._udp.local", "dstack_vers=0.6.20");
+    let new = answer("meter-new._netaudio-arc._udp.local", "dstack_vers=0.6.144");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let listed = loop {
+        peer.send_to(&new, to).unwrap();
+        peer.send_to(&old, to).unwrap();
+        std::thread::sleep(Duration::from_millis(10));
+        let listed = meter.below_floor();
+        if !listed.is_empty() {
+            break listed;
+        }
+        assert!(Instant::now() < deadline, "the old peer never listed");
+    };
+    assert_eq!(listed.len(), 1, "{listed:?}");
+    assert_eq!(listed[0].name, "meter-old");
+    assert_eq!(listed[0].kind, Kind::Peer);
+    assert_eq!(listed[0].address, Some(Ipv4Addr::new(127, 0, 0, 4)));
+    assert_eq!(listed[0].version, network_floor::Version::new(0, 6, 20));
+}

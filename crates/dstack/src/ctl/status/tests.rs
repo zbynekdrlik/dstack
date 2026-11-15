@@ -299,6 +299,14 @@ const WORDS: &[&str] = &[
     "per_s",
     "top",
     "over_cap",
+    "network",
+    "floor",
+    "below_floor",
+    "clients",
+    "kind",
+    "client",
+    "address",
+    "version",
 ];
 
 #[test]
@@ -1192,3 +1200,4 @@ fn the_clock_counts_describe_the_source_in_use_and_each_source_apart() {
 
 mod engine;
 mod mdns;
+mod network;

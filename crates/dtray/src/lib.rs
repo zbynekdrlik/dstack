@@ -117,6 +117,21 @@ pub fn version_line() -> String {
     format!("dtray {}", env!("CARGO_PKG_VERSION"))
 }
 
+/// The client name this program states in its status requests (dstack
+/// #321, [`probe::status_as`]): `dtray` unless the program set another
+/// ([`set_client`]).
+pub fn client() -> &'static str {
+    CLIENT.get().copied().unwrap_or("dtray")
+}
+
+/// Sets the client name of [`client`], once, before the first read
+/// (dtray-cli states `dtray-cli`); a later call changes nothing.
+pub fn set_client(name: &'static str) {
+    let _first = CLIENT.set(name);
+}
+
+static CLIENT: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+
 /// The usage line.
 pub const USAGE: &str = "usage: dtray [--print | --version | --settings | --autostart on|off | --set-latency <device> <ms> | --switch <label> <source> | --dasio-apply <instance> <file>]";
 

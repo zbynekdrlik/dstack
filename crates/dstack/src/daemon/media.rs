@@ -113,6 +113,9 @@ pub struct Media {
     /// The process's mDNS meter on our address ([`Media::set_mdns_meter`],
     /// dstack #289): the status shows its last minute.
     mdns: Mutex<Option<Arc<crate::discover::senders::Meter>>>,
+    /// The local clients of the status endpoint, with their versions
+    /// ([`Media::client_asked`], dstack #321).
+    clients: Mutex<crate::network_floor::Clients>,
 }
 
 /// One RX channel's state ([`Media::rx_channels`]).
@@ -203,6 +206,7 @@ impl Media {
             app_command: app::CommandHook::default(),
             dev_requests: AtomicBool::new(false),
             mdns: Mutex::new(None),
+            clients: Mutex::default(),
         })
     }
 
@@ -278,6 +282,35 @@ impl Media {
     /// closed.
     pub fn mdns_minute(&self) -> Option<crate::discover::senders::Minute> {
         lock(&self.mdns).as_ref().and_then(|m| m.last())
+    }
+
+    /// The dstack peers below the network floor the process's mDNS meter
+    /// heard within the hour (dstack #321); `None` without a meter.
+    pub fn peers_below_floor(&self) -> Option<Vec<crate::network_floor::Below>> {
+        lock(&self.mdns).as_ref().map(|m| m.below_floor())
+    }
+
+    /// A local client of the status endpoint asked, stating its `name` and
+    /// `version` (dstack #321: dtray, dtray-cli): listed in the status, and
+    /// warned about once an hour when it is below the network floor
+    /// ([`crate::network_floor::warn_below`]).
+    pub fn client_asked(&self, name: &str, version: crate::network_floor::Version) {
+        let now = crate::network_floor::now_ns();
+        lock(&self.clients).see(name, version, now);
+        if version.below_floor() {
+            crate::network_floor::warn_below(&crate::network_floor::Below {
+                kind: crate::network_floor::Kind::Client,
+                name: name.to_string(),
+                address: None,
+                version,
+                seen_ns: now,
+            });
+        }
+    }
+
+    /// The local clients that asked within the hour.
+    pub fn clients(&self) -> Vec<crate::network_floor::Client> {
+        lock(&self.clients).list(crate::network_floor::now_ns())
     }
 
     /// Sets the app's command hook (dstack #139): a control request

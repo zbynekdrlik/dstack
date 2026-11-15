@@ -70,7 +70,7 @@ impl Ops for WinOps {
 
     fn daw_attached(&mut self) -> Option<bool> {
         let d = self.device()?;
-        dasio::daw_attached(&dtray::probe::status(d.port).ok()?)
+        dasio::daw_attached(&dtray::probe::status_as(d.port, dtray::client()).ok()?)
     }
 
     fn wait(&mut self) {
@@ -132,7 +132,7 @@ impl Ops for WinOps {
         let Some(d) = self.device() else {
             return ReadBack::default();
         };
-        let status = dtray::probe::status(d.port).ok();
+        let status = dtray::probe::status_as(d.port, dtray::client()).ok();
         let labels = Self::arc_call(d.arc, |c| control::labels(c).map_err(|e| e.to_string())).ok();
         let settings =
             Self::arc_call(d.arc, |c| control::settings(c).map_err(|e| e.to_string())).ok();

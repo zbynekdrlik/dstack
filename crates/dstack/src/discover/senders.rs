@@ -27,6 +27,10 @@
 //!   wildcard address (`discover`'s group listener), so it may also take
 //!   a unicast datagram to port 5353 meant for another wildcard socket
 //!   there, as a [`super::Discovery`] does; mDNS answers go to the group.
+//! - The network floor (dstack #321): the meter also reads the dstack
+//!   version in every `_netaudio-arc` TXT it hears
+//!   ([`crate::network_floor::arc_versions`]) and keeps the peers below the
+//!   floor ([`Meter::below_floor`]); [`crate::network_floor::check`] warns.
 
 use std::collections::HashMap;
 use std::io;
@@ -39,6 +43,7 @@ use std::time::{Duration, Instant};
 use tracing::{debug, info, trace, warn};
 
 use crate::membership::{Link, Membership, links, rejoin};
+use crate::network_floor::{self, Below, Guard, Kind};
 use crate::subscribe::instance::MDNS;
 
 /// Sources counted at most in a minute.
@@ -220,6 +225,7 @@ static METERS: Mutex<Vec<(Ipv4Addr, Weak<Meter>)>> = Mutex::new(Vec::new());
 #[derive(Debug)]
 pub struct Meter {
     last: Arc<Mutex<Option<Minute>>>,
+    floor: Arc<Mutex<Guard>>,
     stop: Arc<AtomicBool>,
     rejoins: Arc<AtomicU64>,
     thread: Option<JoinHandle<()>>,
@@ -291,6 +297,7 @@ impl Meter {
         minute_ns: u64,
     ) -> io::Result<Meter> {
         let last = Arc::new(Mutex::new(None));
+        let floor = Arc::new(Mutex::new(Guard::default()));
         let stop = Arc::new(AtomicBool::new(false));
         let rejoins = Arc::new(AtomicU64::new(0));
         let run = Run {
@@ -299,6 +306,7 @@ impl Meter {
             ip,
             minute_ns,
             last: Arc::clone(&last),
+            floor: Arc::clone(&floor),
             stop: Arc::clone(&stop),
             rejoins: Arc::clone(&rejoins),
         };
@@ -307,6 +315,7 @@ impl Meter {
             .spawn(move || run.run())?;
         Ok(Meter {
             last,
+            floor,
             stop,
             rejoins,
             thread: Some(thread),
@@ -324,11 +333,24 @@ impl Meter {
         lock(&self.last).clone()
     }
 
+    /// The dstack peers below the network floor it heard within the last
+    /// hour (dstack #321, [`crate::network_floor::Guard::list`]).
+    pub fn below_floor(&self) -> Vec<Below> {
+        lock(&self.floor).list(network_floor::now_ns())
+    }
+
     /// A meter with no thread whose last minute is `minute` (a status test).
     #[cfg(test)]
     pub(crate) fn holding(minute: Option<Minute>) -> Meter {
+        Meter::holding_floor(minute, Guard::default())
+    }
+
+    /// [`Meter::holding`] with the peers below the floor of `floor`.
+    #[cfg(test)]
+    pub(crate) fn holding_floor(minute: Option<Minute>, floor: Guard) -> Meter {
         Meter {
             last: Arc::new(Mutex::new(minute)),
+            floor: Arc::new(Mutex::new(floor)),
             stop: Arc::new(AtomicBool::new(true)),
             rejoins: Arc::default(),
             thread: None,
@@ -353,6 +375,7 @@ struct Run {
     ip: Ipv4Addr,
     minute_ns: u64,
     last: Arc<Mutex<Option<Minute>>>,
+    floor: Arc<Mutex<Guard>>,
     stop: Arc<AtomicBool>,
     rejoins: Arc<AtomicU64>,
 }
@@ -373,7 +396,10 @@ impl Run {
                 }
             }
             match self.sock.recv_from(&mut buf) {
-                Ok((_, SocketAddr::V4(from))) => senders.count(*from.ip()),
+                Ok((n, SocketAddr::V4(from))) => {
+                    senders.count(*from.ip());
+                    self.versions(&buf[..n], *from.ip());
+                }
                 Ok(_) => {}
                 Err(e) => trace!(kind = ?e.kind(), "mDNS meter: nothing this wait"),
             }
@@ -381,6 +407,14 @@ impl Run {
                 report(&minute);
                 *lock(&self.last) = Some(minute);
             }
+        }
+    }
+
+    /// The dstack versions datagram `bytes` from `from` states, checked
+    /// against the network floor (dstack #321).
+    fn versions(&self, bytes: &[u8], from: Ipv4Addr) {
+        for (name, version) in network_floor::arc_versions(bytes) {
+            network_floor::check(&self.floor, Kind::Peer, &name, Some(from), &version);
         }
     }
 }
