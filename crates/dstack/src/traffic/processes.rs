@@ -141,35 +141,49 @@ mod tests {
         assert_eq!(on_address(std::net::Ipv4Addr::LOCALHOST), NOT_READ);
     }
 
-    /// The real read: a child process holding a UDP socket on 127.0.0.1
-    /// is listed with its name (Windows CI; this process is skipped).
+    /// The real read: a child process holding 30 UDP sockets on an
+    /// address no other program uses (127.77.0.1: Windows answers on all
+    /// of 127.0.0.0/8) is listed with its name (Windows CI; this process
+    /// is skipped). The child says `ready` once every socket is bound and
+    /// holds them until its stdin closes, so the one read meets them bound:
+    /// no wait races its start. Before (v0.6.138) the test polled 127.0.0.1
+    /// for 20 s while the child started, and on a loaded runner the child
+    /// was not listed in that time (main CI, 15.11.2026); on 127.0.0.1 five
+    /// busier programs could also push it out of the top five.
     #[cfg(windows)]
     #[test]
     fn on_windows_a_process_with_a_socket_on_the_address_is_named() {
+        use std::io::BufRead;
+        use std::process::Stdio;
+        let ip = std::net::Ipv4Addr::new(127, 77, 0, 1);
         let mut child = std::process::Command::new("powershell.exe")
             .args([
                 "-NoProfile",
+                "-NonInteractive",
                 "-Command",
-                "$s = 1..30 | % { [System.Net.Sockets.UdpClient]::new([System.Net.IPEndPoint]::new([System.Net.IPAddress]::Loopback, 0)) }; Start-Sleep 30",
+                "$a = [System.Net.IPAddress]::new([byte[]](127, 77, 0, 1)); \
+                 $s = 1..30 | % { [System.Net.Sockets.UdpClient]::new([System.Net.IPEndPoint]::new($a, 0)) }; \
+                 [Console]::Out.WriteLine('ready'); [Console]::Out.Flush(); \
+                 [void][Console]::In.ReadToEnd()",
             ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
             .spawn()
             .unwrap();
         let pid = child.id();
-        let start = std::time::Instant::now();
-        let found = loop {
-            let found = read(std::net::Ipv4Addr::LOCALHOST).expect("read on Windows");
-            if found.iter().any(|p| p.pid == pid) || start.elapsed().as_secs() > 20 {
-                break found;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(200));
-        };
-        let _ = child.kill();
-        let _ = child.wait();
+        let mut line = String::new();
+        std::io::BufReader::new(child.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let found = read(ip).expect("read on Windows");
+        drop(child.stdin.take());
+        let status = child.wait().unwrap();
+        assert_eq!(line.trim(), "ready", "the child's sockets ({status})");
         let p = found
             .iter()
             .find(|p| p.pid == pid)
-            .expect("the child listed");
-        assert!(p.endpoints >= 30, "{p:?}");
+            .unwrap_or_else(|| panic!("the child {pid} not listed: {found:?}"));
+        assert_eq!(p.endpoints, 30, "{p:?}");
         assert!(p.name.eq_ignore_ascii_case("powershell.exe"), "{p:?}");
         assert!(p.cpu_ms.is_some(), "{p:?}");
         assert!(
