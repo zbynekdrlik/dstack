@@ -737,10 +737,77 @@ fn a_quoted_value_stays_cut_even_when_it_reads_as_a_key() {
 
 #[test]
 fn redact_keeps_the_quote_marks_and_drops_what_they_hold() {
-    assert_eq!(redact("a \"b\" c `d` e"), "a \"\u{2026}\" c `\u{2026}` e");
-    assert_eq!(redact("x \"a\\\"b\" y"), "x \"\u{2026}\" y");
-    assert_eq!(redact("open \"never closed"), "open \"\u{2026}\"");
-    assert_eq!(redact("plain"), "plain");
+    assert_eq!(
+        redact("a \"b\" c `d` e", &[]),
+        "a \"\u{2026}\" c `\u{2026}` e"
+    );
+    assert_eq!(redact("x \"a\\\"b\" y", &[]), "x \"\u{2026}\" y");
+    assert_eq!(redact("open \"never closed", &[]), "open \"\u{2026}\"");
+    assert_eq!(redact("plain", &[]), "plain");
+}
+
+#[test]
+fn redact_keeps_a_backticked_key_whole_and_cuts_the_rest() {
+    let keys = &["state_file", "rx"];
+    assert_eq!(
+        redact("missing field `state_file`", keys),
+        "missing field `state_file`"
+    );
+    assert_eq!(
+        redact("unknown field `state_flie`, expected `rx` or `tx`", keys),
+        "unknown field `\u{2026}`, expected `rx` or `\u{2026}`"
+    );
+    // A quoted value stays cut even when its text is a key.
+    assert_eq!(redact("got \"rx\" here", keys), "got \"\u{2026}\" here");
+    // A span is compared as written: an escape keeps its backslash.
+    assert_eq!(redact("`r\\x`", keys), "`\u{2026}`");
+    // An unclosed span is cut, even when what it holds is a key.
+    assert_eq!(redact("open `rx", keys), "open `\u{2026}`");
+}
+
+/// The backticked names after "expected" in serde's own message.
+fn expected_names(message: &str) -> Vec<String> {
+    let at = message
+        .find("expected")
+        .unwrap_or_else(|| panic!("no expected list in {message:?}"));
+    message[at..]
+        .split('`')
+        .skip(1)
+        .step_by(2)
+        .map(str::to_string)
+        .collect()
+}
+
+#[test]
+fn the_config_keys_are_the_schema_s_serde_keys() {
+    #[derive(Debug, Deserialize)]
+    #[allow(dead_code)]
+    struct Timing {
+        timing: TimingProfile,
+    }
+    let config = toml::from_str::<DeviceConfig>("zz = 1").unwrap_err();
+    let declared = toml::from_str::<Declared>("zz = 1").unwrap_err();
+    let timing = toml::from_str::<Timing>("timing = \"zz\"").unwrap_err();
+    let mut serde_keys: Vec<String> = [config, declared, timing]
+        .iter()
+        .flat_map(|e| expected_names(e.message()))
+        .collect();
+    assert!(
+        serde_keys.contains(&"state_file".to_string()),
+        "{serde_keys:?}"
+    );
+    assert!(
+        serde_keys.contains(&"tx_device".to_string()),
+        "{serde_keys:?}"
+    );
+    assert!(serde_keys.contains(&"normal".to_string()), "{serde_keys:?}");
+    serde_keys.sort();
+    serde_keys.dedup();
+    let mut ours: Vec<String> = CONFIG_KEYS.iter().map(|k| k.to_string()).collect();
+    ours.sort();
+    ours.dedup();
+    assert_eq!(ours.len(), CONFIG_KEYS.len(), "a key is listed twice");
+    assert_eq!(ours, serde_keys);
 }
 
 // ---- RX subscriptions (phase B, plan Task 5) ----

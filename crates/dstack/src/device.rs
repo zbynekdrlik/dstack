@@ -272,7 +272,7 @@ impl DeviceConfig {
     /// Parses and checks a config; every problem is listed together.
     pub fn from_toml(text: &str) -> Result<Self, ConfigError> {
         let cfg: DeviceConfig = toml::from_str(text).map_err(|e| ConfigError {
-            problems: vec![parse_problem(text, &e)],
+            problems: vec![parse_problem(text, &e, CONFIG_KEYS)],
         })?;
         let problems = cfg.problems();
         if problems.is_empty() {
@@ -1014,7 +1014,7 @@ impl DeviceState {
             )
         };
         let mut state: Self =
-            toml::from_str(&text).map_err(|e| invalid(parse_problem(&text, &e)))?;
+            toml::from_str(&text).map_err(|e| invalid(parse_problem(&text, &e, &[])))?;
         // The file lists the subscribed channels up to the highest; the
         // state holds one entry per RX channel.
         if !state.subscriptions.is_empty() {
@@ -1303,11 +1303,55 @@ fn sync_dir(_path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// A parse error as a line number and the message with every quoted span
-/// dropped ([`redact`]): toml's own rendering shows the line, and neither it
-/// nor a quoted value (a name, a misspelt key) may reach a log.
-fn parse_problem(text: &str, e: &toml::de::Error) -> String {
-    let message = redact(e.message());
+/// The config schema's own words: every key of [`DeviceConfig`] and of its
+/// `[[subscribe]]` table ([`Declared`]), and the [`TimingProfile`] names.
+/// They are public, so a parse error may name them ([`redact`]); a test
+/// reads serde's own lists and keeps this one equal to them.
+/// `playout_override`'s keys are channel names (site data) and never here.
+const CONFIG_KEYS: &[&str] = &[
+    "name",
+    "manufacturer",
+    "model",
+    "rx",
+    "tx",
+    "sample_rate",
+    "encoding",
+    "latency_ns",
+    "block",
+    "work_margin",
+    "tx_latency_ns",
+    "tx_margin_ns",
+    "spin_tail_ns",
+    "spin_escape_ms",
+    "tx_fpp_max",
+    "arc_rx_fpp",
+    "pump_cpu",
+    "io_cpu",
+    "rx_cpu",
+    "playout_override",
+    "timing",
+    "arc_port",
+    "cmc_port",
+    "flows_port",
+    "process_id",
+    "rx_port_base",
+    "tx_port_base",
+    "subscribe",
+    "flow_slots",
+    "test_clock_ppm",
+    "state_file",
+    "tx_channel",
+    "tx_device",
+    "low_latency",
+    "normal",
+];
+
+/// A parse error as a line number and the message redacted ([`redact`])
+/// but for the backticked words in `keys`: toml's own rendering shows the
+/// line, and neither it nor a quoted value (a name, a misspelt key) may
+/// reach a log, while a key of our own schema is public (#313).
+fn parse_problem(text: &str, e: &toml::de::Error, keys: &[&str]) -> String {
+    let message = redact(e.message(), keys);
     match e.span() {
         Some(span) => {
             let end = span.start.min(text.len());
@@ -1325,27 +1369,50 @@ fn parse_problem(text: &str, e: &toml::de::Error) -> String {
 /// `message` with every quoted span, `"..."` or `` `...` ``, cut to its
 /// quote marks around an ellipsis; inside a span a backslash escapes the next
 /// character, and an unclosed span runs to the end. serde quotes the
-/// offending value and toml backticks a key.
-fn redact(message: &str) -> String {
+/// offending value and toml backticks a key. A backticked span that is
+/// exactly one of `keys` stays whole: serde backticks a missing or expected
+/// key too, and those are our own schema's words.
+fn redact(message: &str, keys: &[&str]) -> String {
     let mut out = String::new();
     let mut open: Option<char> = None;
+    let mut held = String::new();
     let mut escaped = false;
     for c in message.chars() {
         match open {
             None if c == '"' || c == '`' => {
-                out.push(c);
-                out.push('\u{2026}');
-                out.push(c);
                 open = Some(c);
+                held.clear();
             }
             None => out.push(c),
-            Some(_) if escaped => escaped = false,
-            Some(_) if c == '\\' => escaped = true,
-            Some(q) if c == q => open = None,
-            Some(_) => {}
+            Some(_) if escaped => {
+                escaped = false;
+                held.push(c);
+            }
+            Some(_) if c == '\\' => {
+                escaped = true;
+                held.push(c);
+            }
+            Some(q) if c == q => {
+                out.push_str(&quoted(q, &held, keys));
+                open = None;
+            }
+            Some(_) => held.push(c),
         }
     }
+    if let Some(q) = open {
+        out.push_str(&quoted(q, "", keys));
+    }
     out
+}
+
+/// One quoted span as [`redact`] writes it: whole when it is a backticked
+/// key in `keys`, else its quote marks around an ellipsis.
+fn quoted(q: char, held: &str, keys: &[&str]) -> String {
+    if q == '`' && keys.contains(&held) {
+        format!("`{held}`")
+    } else {
+        format!("{q}\u{2026}{q}")
+    }
 }
 
 pub mod ports;
