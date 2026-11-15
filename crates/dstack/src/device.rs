@@ -1308,7 +1308,10 @@ fn sync_dir(_path: &Path) -> io::Result<()> {
 /// They are public, so a parse error may name them ([`redact`]), also when
 /// a typed value happens to equal one (`timing = "rx"`). A test reads
 /// serde's own lists and keeps this one equal to them: a new nested
-/// `deny_unknown_fields` table or enum joins that test too.
+/// `deny_unknown_fields` table or enum joins that test too. A struct-variant
+/// enum must not join the config as it is: toml lists its unexpected keys
+/// raw and unquoted (`unexpected keys in table: ...`), which [`redact`]
+/// cannot cut.
 /// `playout_override`'s keys are channel names (site data) and never here.
 const CONFIG_KEYS: &[&str] = &[
     "name",
@@ -1374,8 +1377,8 @@ fn parse_problem(text: &str, e: &toml::de::Error, keys: &[&str]) -> String {
 /// key too). serde quotes a value Debug-escaped, so inside `"..."` a
 /// backslash escapes the next character. It backticks a key raw: a typed
 /// key may hold a backtick itself, so the message's first backticked span
-/// (the only one serde fills with typed text: `unknown field`, `unknown
-/// variant`) runs to the last `` `, expected `` or else the last backtick,
+/// (where serde puts typed text: an unknown field or variant, an integer, a
+/// float) runs to the last `` `, expected `` or else the last backtick,
 /// and a key holding `` ` `` can never split it. An unclosed span runs to
 /// the end.
 fn redact(message: &str, keys: &[&str]) -> String {

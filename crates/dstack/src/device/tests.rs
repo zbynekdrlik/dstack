@@ -741,6 +741,16 @@ fn a_typed_key_holding_a_backtick_stays_cut_whole() {
     let found = problems(&format!("{TEST_DEVICE}\ntiming = \"zyxq`zyxw\"\n"));
     assert!(!found[0].contains("zyx"), "{found:?}");
     assert!(found[0].contains("`low_latency`"), "{found:?}");
+    let found = problems(&format!(
+        "{TEST_DEVICE}\ntiming = {{ \"zyxq`, expected `normal`, `zyxw\" = 1 }}\n"
+    ));
+    assert!(!found[0].contains("zyx"), "{found:?}");
+    assert!(found[0].contains("`low_latency`"), "{found:?}");
+    let found = problems(&format!(
+        "{TEST_DEVICE}\n[[subscribe]]\nrx = 1\n\"zyx`, expected `rx`, `zyxw\" = 1\n"
+    ));
+    assert!(!found[0].contains("zyx"), "{found:?}");
+    assert!(found[0].contains("`tx_channel`"), "{found:?}");
 }
 
 #[test]
