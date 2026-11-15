@@ -243,3 +243,25 @@ fn only_a_dante_query_from_port_5353_counts() {
     assert!(b.times_of(a(2)).is_empty());
     assert!(b.times_of(a(3)).is_empty());
 }
+
+/// dstack #319, field 16.11.2026: Dante hardware (an Audinate module)
+/// refreshes its own cache every 96 s, which is normal Dante behaviour. A
+/// source that announces `_netaudio-arc` records with no `dstack_vers` is
+/// such hardware and never named; a host with no records, or one whose ARC
+/// record states `dstack_vers`, still is.
+#[test]
+fn dante_hardware_on_the_cycle_is_not_named_and_any_other_host_is() {
+    let mut b = Browsers::default();
+    let (hardware, pc, ours) = (a(103), a(20), a(30));
+    // The hardware answers with its ARC record (no dstack_vers) before its
+    // chain is complete; the dstack device states its version.
+    b.arc_from(hardware, false, 50 * S);
+    b.arc_from(ours, true, 50 * S);
+    for k in 0..4 {
+        for host in [hardware, pc, ours] {
+            b.query(host, k * CYCLE_NS);
+        }
+    }
+    let named: Vec<Ipv4Addr> = b.take(3 * CYCLE_NS).iter().map(|x| x.source).collect();
+    assert_eq!(named, vec![pc, ours]);
+}
