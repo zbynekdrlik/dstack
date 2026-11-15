@@ -17,6 +17,7 @@ use dstack::clock::to_samples;
 use dstack::media::ring::Ring;
 use dstack::media::rx::RxShared;
 use dstack::media::tx::TxShared;
+use dstack::peer::tone::ToneCheck;
 use dstack::stream::{Pump, PumpStats, Timing};
 
 /// The app's rate and the device's (stream-snv: OBS at 48 kHz, the site's
@@ -53,6 +54,12 @@ pub(crate) struct App {
     pub(crate) rx: Arc<Fifo>,
     /// Each block's start and play time, for the test.
     pub(crate) marks: Arc<Mutex<Vec<Mark>>>,
+    /// The TX output's left channel, checked for continuity as a receiver
+    /// hears it (the peer's tone check, dstack #305): any discontinuity,
+    /// counted by the player or not.
+    pub(crate) tx_tone: ToneCheck,
+    pub(crate) tx_left: Vec<f64>,
+    pub(crate) tx_tone_gaps: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl Process for App {
@@ -60,6 +67,12 @@ impl Process for App {
         let frames = block.frames();
         let out = &mut self.out[..frames * CHANNELS];
         self.tx.fill_at(block.start(), out, CHANNELS, |x| x);
+        for (f, y) in self.tx_left[..frames].iter_mut().enumerate() {
+            *y = out[f * CHANNELS];
+        }
+        self.tx_tone.block(&self.tx_left[..frames]);
+        self.tx_tone_gaps
+            .store(self.tx_tone.gaps(), std::sync::atomic::Ordering::Relaxed);
         for c in 0..CHANNELS {
             for (f, y) in block.output(c).iter_mut().enumerate() {
                 *y = out[f * CHANNELS + c];
@@ -104,6 +117,8 @@ pub(crate) struct Ends {
     pub(crate) rx_player: Player,
     pub(crate) rx_stats: Arc<Stats>,
     pub(crate) marks: Arc<Mutex<Vec<Mark>>>,
+    /// The TX output's tone gaps ([`App::tx_tone`]).
+    pub(crate) tx_tone_gaps: Arc<std::sync::atomic::AtomicU64>,
     pub(crate) _dir: tempfile::TempDir,
 }
 
@@ -137,7 +152,11 @@ pub(crate) fn path() -> Path {
     )
     .unwrap();
     let marks = Arc::new(Mutex::new(Vec::new()));
+    let tx_tone_gaps = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let app = App {
+        tx_tone: ToneCheck::default(),
+        tx_left: vec![0.0; 4 * CHUNK],
+        tx_tone_gaps: Arc::clone(&tx_tone_gaps),
         tx,
         out: vec![0.0; 4 * CHUNK * CHANNELS],
         rx: rx_fifo,
@@ -197,6 +216,7 @@ pub(crate) fn path() -> Path {
             rx_player,
             rx_stats,
             marks,
+            tx_tone_gaps,
             _dir: dir,
         },
     }
@@ -239,6 +259,8 @@ pub(crate) struct Counts {
     pub(crate) rx_recentres: u64,
     pub(crate) tx_ppm: f64,
     pub(crate) rx_ppm: f64,
+    /// The TX output's tone gaps, counted or not ([`App::tx_tone`]).
+    pub(crate) tx_tone_gaps: u64,
 }
 
 impl Counts {
@@ -252,6 +274,7 @@ impl Counts {
             rx_recentres: p.rx_stats.recentres(),
             tx_ppm: p.tx_stats.ppm(),
             rx_ppm: p.rx_stats.ppm(),
+            tx_tone_gaps: p.tx_tone_gaps.load(std::sync::atomic::Ordering::Relaxed),
         }
     }
 
