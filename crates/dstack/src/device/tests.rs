@@ -700,11 +700,143 @@ fn a_config_parse_error_gives_a_line_and_no_value() {
 }
 
 #[test]
+fn a_config_parse_error_names_a_schema_key() {
+    // dasio, 15.11.2026: a config without `state_file` read
+    // "missing field `…`" and the operator could not tell which.
+    let found = problems(&config_with("state_file =", ""));
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].contains("missing field `state_file`"), "{found:?}");
+
+    let found = problems(&format!(
+        "{TEST_DEVICE}\n[[subscribe]]\nrx = 1\nzyxqkey = 1\n"
+    ));
+    assert!(found[0].contains("unknown field `\u{2026}`"), "{found:?}");
+    assert!(found[0].contains("`tx_device`"), "{found:?}");
+    assert!(!found[0].contains("zyxq"), "{found:?}");
+
+    let found = problems(&format!("{TEST_DEVICE}\nstate_flie = 1\n"));
+    assert!(found[0].contains("unknown field `\u{2026}`"), "{found:?}");
+    assert!(found[0].contains("`state_file`"), "{found:?}");
+    assert!(!found[0].contains("flie"), "{found:?}");
+
+    let found = problems(&format!("{TEST_DEVICE}\ntiming = \"zyxqprofile\"\n"));
+    assert!(found[0].contains("`low_latency`"), "{found:?}");
+    assert!(!found[0].contains("zyxq"), "{found:?}");
+}
+
+#[test]
+fn a_typed_key_holding_a_backtick_stays_cut_whole() {
+    // serde backticks a typed key raw, so a backtick inside it must not
+    // close the span and print the rest of the key.
+    for key in [
+        "\"zyxq`zyxw\"",
+        "\"zyxq`, expected `state_file`, `zyxw\"",
+        "'zyxq\\'",
+    ] {
+        let found = problems(&format!("{TEST_DEVICE}\n{key} = 1\n"));
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(!found[0].contains("zyx"), "{key}: {found:?}");
+        assert!(found[0].contains("`state_file`"), "{key}: {found:?}");
+    }
+    let found = problems(&format!("{TEST_DEVICE}\ntiming = \"zyxq`zyxw\"\n"));
+    assert!(!found[0].contains("zyx"), "{found:?}");
+    assert!(found[0].contains("`low_latency`"), "{found:?}");
+    let found = problems(&format!(
+        "{TEST_DEVICE}\ntiming = {{ \"zyxq`, expected `normal`, `zyxw\" = 1 }}\n"
+    ));
+    assert!(!found[0].contains("zyx"), "{found:?}");
+    assert!(found[0].contains("`low_latency`"), "{found:?}");
+    let found = problems(&format!(
+        "{TEST_DEVICE}\n[[subscribe]]\nrx = 1\n\"zyx`, expected `rx`, `zyxw\" = 1\n"
+    ));
+    assert!(!found[0].contains("zyx"), "{found:?}");
+    assert!(found[0].contains("`tx_channel`"), "{found:?}");
+}
+
+#[test]
+fn a_quoted_value_stays_cut_even_when_it_reads_as_a_key() {
+    let found = problems(&config_with(
+        "sample_rate =",
+        "sample_rate = \"state_file\"",
+    ));
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].contains("\"\u{2026}\""), "{found:?}");
+    assert!(!found[0].contains("state_file"), "{found:?}");
+}
+
+#[test]
 fn redact_keeps_the_quote_marks_and_drops_what_they_hold() {
-    assert_eq!(redact("a \"b\" c `d` e"), "a \"\u{2026}\" c `\u{2026}` e");
-    assert_eq!(redact("x \"a\\\"b\" y"), "x \"\u{2026}\" y");
-    assert_eq!(redact("open \"never closed"), "open \"\u{2026}\"");
-    assert_eq!(redact("plain"), "plain");
+    assert_eq!(
+        redact("a \"b\" c `d` e", &[]),
+        "a \"\u{2026}\" c `\u{2026}` e"
+    );
+    assert_eq!(redact("x \"a\\\"b\" y", &[]), "x \"\u{2026}\" y");
+    assert_eq!(redact("open \"never closed", &[]), "open \"\u{2026}\"");
+    assert_eq!(redact("plain", &[]), "plain");
+}
+
+#[test]
+fn redact_keeps_a_backticked_key_whole_and_cuts_the_rest() {
+    let keys = &["state_file", "rx"];
+    assert_eq!(
+        redact("missing field `state_file`", keys),
+        "missing field `state_file`"
+    );
+    assert_eq!(
+        redact("unknown field `state_flie`, expected `rx` or `tx`", keys),
+        "unknown field `\u{2026}`, expected `rx` or `\u{2026}`"
+    );
+    // A quoted value stays cut even when its text is a key.
+    assert_eq!(redact("got \"rx\" here", keys), "got \"\u{2026}\" here");
+    // A span is compared as written: an escape keeps its backslash.
+    assert_eq!(redact("`r\\x`", keys), "`\u{2026}`");
+    // An unclosed span is cut, even when what it holds is a key.
+    assert_eq!(redact("open `rx", keys), "open `\u{2026}`");
+}
+
+/// The backticked names after "expected" in serde's own message.
+fn expected_names(message: &str) -> Vec<String> {
+    let at = message
+        .find("expected")
+        .unwrap_or_else(|| panic!("no expected list in {message:?}"));
+    message[at..]
+        .split('`')
+        .skip(1)
+        .step_by(2)
+        .map(str::to_string)
+        .collect()
+}
+
+#[test]
+fn the_config_keys_are_the_schema_s_serde_keys() {
+    #[derive(Debug, Deserialize)]
+    #[allow(dead_code)]
+    struct Timing {
+        timing: TimingProfile,
+    }
+    let config = toml::from_str::<DeviceConfig>("zz = 1").unwrap_err();
+    let declared = toml::from_str::<Declared>("zz = 1").unwrap_err();
+    let timing = toml::from_str::<Timing>("timing = \"zz\"").unwrap_err();
+    let mut serde_keys: Vec<String> = [config, declared, timing]
+        .iter()
+        .flat_map(|e| expected_names(e.message()))
+        .collect();
+    assert!(
+        serde_keys.contains(&"state_file".to_string()),
+        "{serde_keys:?}"
+    );
+    assert!(
+        serde_keys.contains(&"tx_device".to_string()),
+        "{serde_keys:?}"
+    );
+    assert!(serde_keys.contains(&"normal".to_string()), "{serde_keys:?}");
+    serde_keys.sort();
+    serde_keys.dedup();
+    let mut ours: Vec<String> = CONFIG_KEYS.iter().map(|k| k.to_string()).collect();
+    ours.sort();
+    ours.dedup();
+    assert_eq!(ours.len(), CONFIG_KEYS.len(), "a key is listed twice");
+    assert_eq!(ours, serde_keys);
 }
 
 // ---- RX subscriptions (phase B, plan Task 5) ----
