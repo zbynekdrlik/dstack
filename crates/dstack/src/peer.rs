@@ -28,7 +28,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use dstack_audio_io::{Block, Process};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::clock::TestClockPpm;
 use crate::daemon::PlaceWait;
@@ -127,6 +127,23 @@ pub fn play_at_ppm(first: (u64, i64), last: (u64, i64), rate: u32) -> Option<f64
     (played > 0.0).then(|| (media / played - 1.0) * 1e6)
 }
 
+/// One WARN for a tone break that ended on RX channel `ch` (0-based; the
+/// line names `RX ch+1`, as the status does): its length, `samples` at
+/// `rate` and ms, and the channel's breaks so far, `gaps` (dstack #303:
+/// an app's CI times each break against its own events; the status only
+/// carries the count). Logged on the pump thread when the break ends.
+fn tone_break(ch: usize, samples: u64, rate: u32, gaps: u64) {
+    let ms = samples as f64 * 1e3 / f64::from(rate.max(1));
+    warn!(
+        target: "dstack::peer::tone",
+        rx_channel = ch + 1,
+        samples,
+        ms,
+        gaps,
+        "dstack-dev peer: a tone break"
+    );
+}
+
 /// The peer's processor: the TX tones out, the RX tones checked.
 pub struct Tones {
     tones: Vec<u32>,
@@ -165,8 +182,11 @@ impl Tones {
 impl Process for Tones {
     fn process(&mut self, block: &mut Block<'_>) {
         let frames = block.frames();
+        let rate = self.rate;
         for (ch, check) in self.checks.iter_mut().enumerate() {
-            check.block(block.input(ch));
+            check.block_with(block.input(ch), |samples, gaps| {
+                tone_break(ch, samples, rate, gaps);
+            });
         }
         self.samples += frames as u64;
         for (check, out) in self.checks.iter().zip(self.shared.rx.iter()) {

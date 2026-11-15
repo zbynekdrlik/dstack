@@ -37,6 +37,22 @@
 //!   is skipped), counted in [`Stats::resyncs`], and the output's clock
 //!   counts the skipped time, so the rate fit sees no step. Before, the
 //!   excess was drained by the ratio: -200 ppm for about a minute.
+//! - **The producer's line** (dstack #303): a caller that names its block
+//!   starts ([`Player::fill_at`], a dlink [`crate::Process`]) is steered on
+//!   the depth against the line through the producer's writes, not on the
+//!   FIFO's depth sampled after each converter call: the frames at the
+//!   last write ([`Fifo::last_write`], stamped on the FIFO's clock) plus
+//!   the time since it at the nominal rate, at most one mean write ahead,
+//!   less half the mean write (the sawtooth's mean). A chunked writer
+//!   (OBS's 1024 frames) and the converter's calls (128 frames) are on
+//!   commensurate grids: with a steady writer, which samples fall after a
+//!   write stays fixed until the write instant drifts across a call, every
+//!   ~444 s at 6 ppm, so the sampled mean and rate point held still, then
+//!   stepped by a call's share (2.67 ms), and the braking pinned the level
+//!   bound. Writer jitter dithered it away, which hid it from a jittering
+//!   test writer. The line moves continuously at any jitter, zero too.
+//!   [`Player::fill_with`] (dlisten's output callback) keeps the sampled
+//!   depth and reads no clock.
 //! - **Underruns:** a block whose input is not there plays silence, counts
 //!   in [`Stats`] and primes again to the same target. The target never
 //!   grows after a dropout (dstack #247: the automatic cushion of up to
@@ -53,7 +69,9 @@
 //!   silence out of it.
 //!
 //! [`Player::fill_with`] allocates nothing, takes no lock and makes no
-//! system call: it runs on the audio driver's thread.
+//! system call: it runs on the audio driver's thread. [`Player::fill_at`]
+//! with a start reads the FIFO's clock once a converter call (the app's
+//! clock: vDSO `clock_gettime` on Linux, QPC on Windows), nothing more.
 //!
 //! The text above is dlisten's direction. The player only knows the FIFO's
 //! producer (named "the network" here) and its own caller (named "the
@@ -68,7 +86,7 @@ use dstack_resample::asrc::{Basis, Controller, Step};
 use dstack_resample::{ConvertError, Converter, Fixed};
 
 use super::buffer::{AppBuffer, MAX_APP_BUFFER_NS};
-use super::fifo::Fifo;
+use super::fifo::{Fifo, Stamp};
 use super::map;
 
 mod writer;
@@ -233,6 +251,12 @@ pub struct Player {
     at: u64,
     /// `--mono`: every channel summed to both speakers ([`map::source_mono`]).
     mono: bool,
+    /// The current call named its start: steer on the producer's line.
+    on_line: bool,
+    /// The writer's schedule is on the FIFO's clock ([`Player::look`]).
+    writer_on_line: bool,
+    /// The last stamp read ([`Fifo::last_write`]).
+    stamp: Option<Stamp>,
     stats: Arc<Stats>,
 }
 
@@ -306,6 +330,9 @@ impl Player {
             next_start: None,
             at: 0,
             mono: false,
+            on_line: false,
+            writer_on_line: false,
+            stamp: None,
             stats,
         })
     }
@@ -362,6 +389,7 @@ impl Player {
             (Some(_), Some(Next::Interrupted)) => self.resync(0),
             _ => {}
         }
+        self.on_line = start.is_some();
         self.next_start = match start {
             Some(s) => Some(Next::At(s.saturating_add(frames as u64))),
             None => self.next_start.map(|_| Next::Interrupted),
@@ -402,14 +430,41 @@ impl Player {
             .store(matches!(self.state, State::Priming(_)), Ordering::Relaxed);
     }
 
-    /// A write the producer made since the last look, seen at the output's
-    /// frame `frames`, goes to its schedule ([`Writer::wrote`]).
+    /// A write the producer made since the last look goes to its schedule
+    /// ([`Writer::wrote`]): on the producer's line at its stamp (the
+    /// FIFO's clock, dstack #303), else seen at the output's frame
+    /// `frames` (the output's clock). A change of clock starts the
+    /// schedule again.
     fn look(&mut self, frames: u64) {
-        let arrived = self.fifo.arrived();
+        let fresh = self.on_line.then(|| self.fifo.last_write()).flatten();
+        if fresh.is_some() {
+            self.stamp = fresh;
+        }
+        // On the line once a write was stamped; a stamp read that met a
+        // write in progress on every try changes nothing.
+        let on_line = self.on_line && self.stamp.is_some();
+        if on_line != self.writer_on_line {
+            self.writer = Writer::new(self.chunk_in, self.net_rate);
+            self.writer_on_line = on_line;
+        }
+        let (at_s, arrived) = match (on_line, fresh) {
+            (true, Some(stamp)) => (stamp.at_ns as f64 / 1e9, stamp.arrived),
+            (true, None) => return,
+            (false, _) => (self.clock_s(frames), self.fifo.arrived()),
+        };
         if arrived != self.arrived {
             self.arrived = arrived;
-            let now_s = self.clock_s(frames);
-            self.writer.wrote(now_s, arrived);
+            self.writer.wrote(at_s, arrived);
+        }
+    }
+
+    /// The schedule's clock now, s ([`Player::look`]): the FIFO's on the
+    /// producer's line, else the output's at its frame `frames`.
+    fn schedule_s(&self, frames: u64) -> f64 {
+        if self.writer_on_line {
+            self.fifo.now_ns() as f64 / 1e9
+        } else {
+            self.clock_s(frames)
         }
     }
 
@@ -465,7 +520,6 @@ impl Player {
             let need = self.conv.input_frames_next();
             // A chunked producer on its own schedule: the depth whose mean
             // is the target at this moment of its cycle (module doc).
-            let now_s = self.clock_s(self.at);
             // The depth first, then the schedule: a write since the call's
             // start (the producer's own thread) is in both, and one landing
             // between the two reads is in the schedule only, so the start
@@ -473,6 +527,7 @@ impl Player {
             // chunk low (a dropout).
             let held = self.fifo.len();
             self.look(self.at);
+            let now_s = self.schedule_s(self.at);
             let level = match self.writer.until_next(now_s, self.arrived) {
                 Some(until_next) if self.chunk_in > self.callback_in => Self::phased_level(
                     level,
@@ -481,6 +536,15 @@ impl Player {
                     need,
                 ),
                 _ => level + (swing + need) / 2,
+            } + if self.writer_on_line {
+                // On the producer's line the first observation comes
+                // after this call's take and the line holds through the
+                // call: half a call more, a whole call over the level in
+                // all, where the sampled reads average half a call
+                // (dstack #303).
+                need / 2
+            } else {
+                0
             };
             if held < level {
                 self.block.fill(0.0);
@@ -529,12 +593,43 @@ impl Player {
         self.target_s
     }
 
+    /// The depth and the producer's count, frames: on the producer's line
+    /// for a caller that names its starts and once a write was stamped
+    /// (module doc), else the FIFO's own.
+    /// `None` when the stamp read met a write in progress on every try
+    /// after one was stamped: that one observation is skipped, never taken
+    /// in the other measure (the sampled depth is up to half a write off
+    /// the line).
+    fn observed(&mut self) -> Option<(f64, f64)> {
+        let sampled = (self.fifo.len() as f64, self.fifo.arrived() as f64);
+        if !self.on_line {
+            return Some(sampled);
+        }
+        match self.fifo.last_write() {
+            Some(stamp) => {
+                self.stamp = Some(stamp);
+                Some(producer_line(
+                    stamp,
+                    self.fifo.now_ns(),
+                    f64::from(self.net_rate),
+                    self.fifo.read_frames(),
+                ))
+            }
+            None if self.stamp.is_some() => None,
+            // No write yet.
+            None => Some(sampled),
+        }
+    }
+
     /// One observation after a converted block, and its answer.
     fn steer(&mut self) {
         let now_s = (self.made + self.skipped) as f64 / f64::from(self.out_rate);
         let net = f64::from(self.net_rate);
-        let depth_s = self.fifo.len() as f64 / net;
-        let produced_s = self.fifo.arrived() as f64 / net;
+        let Some((depth, produced)) = self.observed() else {
+            return;
+        };
+        let depth_s = depth / net;
+        let produced_s = produced / net;
         let ppm = match self.ctl.observe(now_s, depth_s, 2.0 * now_s - produced_s) {
             Step::Hold(ppm) => ppm,
             Step::Recentre { by_s, ppm } | Step::Prime { by_s, ppm } => {
@@ -555,6 +650,26 @@ impl Player {
     }
 }
 
+/// The depth and the producer's count on the producer's line at `now_ns`
+/// (module doc), frames: `stamp` the last write, `rate` the producer's
+/// nominal rate, `read` the reader's position. The time since the write
+/// counts from 0 (a write stamped after `now_ns` was read) to one mean
+/// write's period: a late write holds the line where it was due, so the
+/// depth falls with the reads until it comes, and a stopped writer never
+/// shows an excess. The mean write stands for the producer's cycle: one
+/// push a cycle (OBS's tick, dsend's capture packet, an ASIO callback). A
+/// producer that pushed one cycle in several pieces back to back would
+/// halve it, and the line would saturate halfway through the cycle.
+fn producer_line(stamp: Stamp, now_ns: i64, rate: f64, read: u64) -> (f64, f64) {
+    let mean = stamp.mean_write();
+    let elapsed_s = (now_ns.saturating_sub(stamp.at_ns) as f64 / 1e9).clamp(0.0, mean / rate);
+    let ahead = elapsed_s * rate - mean / 2.0;
+    (
+        stamp.written as f64 - read as f64 + ahead,
+        stamp.arrived as f64 + ahead,
+    )
+}
+
 /// Where the caller's next block starts ([`Player::fill_at`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Next {
@@ -570,3 +685,6 @@ mod tests;
 
 #[cfg(test)]
 mod resync_tests;
+
+#[cfg(test)]
+mod line_tests;

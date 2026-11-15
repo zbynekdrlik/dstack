@@ -52,12 +52,25 @@
 # The script never changes the firewall profiles; a profile that is off is
 # reported (exit 1): the group does nothing there.
 #
+# The cap alone, for a one-leg PC (#288): a PC whose one adapter is both its
+# Dante leg and its LAN (a Dante-subnet address with the gateway) cannot take
+# the group, whose Block rules would cut its LAN. These modes create, check
+# or remove only the QoS policy above; they never create, change, read or
+# remove a firewall rule (the firewall profiles are not read either):
+#   dante-leg.ps1 -Mode mdns-cap -InterfaceAlias <the one adapter>
+#       the cap removed and created again (idempotent) and read back; the
+#       adapter's QoS Packet Scheduler binding is checked
+#   dante-leg.ps1 -Mode mdns-cap-check -InterfaceAlias <the one adapter>
+#       exit 0 when the cap is exactly this script's and the binding is on
+#   dante-leg.ps1 -Mode mdns-cap-remove
+#       removes the cap only (on a PC with the group, use uninstall)
+#
 # The sets are read by crates/dstack/tests/dante_leg.rs, which checks them
 # against the ports the code binds: change both together.
 
 [CmdletBinding()]
 param(
-    [ValidateSet('install', 'check', 'uninstall')]
+    [ValidateSet('install', 'check', 'uninstall', 'mdns-cap', 'mdns-cap-check', 'mdns-cap-remove')]
     [string]$Mode = 'install',
     [string]$InterfaceAlias = '',
     [string[]]$RemoveGroup = @()
@@ -408,13 +421,40 @@ function Test-DanteLeg {
     Write-Outcome -Problems $problems -Done "group '$($script:Group)' on '$Interface' and the mDNS cap: as this script installs them"
 }
 
+# Removes the mDNS cap (none there is no error): one report line.
+function Remove-MdnsCap {
+    $caps = @(Get-NetQosPolicy -Name $script:MdnsCap -ErrorAction SilentlyContinue)
+    if ($caps.Count -gt 0) { Remove-NetQosPolicy -Name $script:MdnsCap -Confirm:$false }
+    "removed the mDNS cap '$($script:MdnsCap)' ($($caps.Count) policies)"
+}
+
 function Uninstall-DanteLeg {
     $rules = @(Get-NetFirewallRule -Group $script:Group -ErrorAction SilentlyContinue)
     if ($rules.Count -gt 0) { $rules | Remove-NetFirewallRule }
     "removed group '$($script:Group)' ($($rules.Count) rules)"
-    $caps = @(Get-NetQosPolicy -Name $script:MdnsCap -ErrorAction SilentlyContinue)
-    if ($caps.Count -gt 0) { Remove-NetQosPolicy -Name $script:MdnsCap -Confirm:$false }
-    "removed the mDNS cap '$($script:MdnsCap)' ($($caps.Count) policies)"
+    Remove-MdnsCap
+    0
+}
+
+# The one-leg PC's cap alone (#288): no firewall cmdlet is called. Output:
+# report lines, the exit code last.
+function Install-MdnsCapOnly {
+    param([string]$Interface = '')
+    Assert-Adapter -Interface $Interface
+    Install-MdnsCap
+    $problems = @(Get-MdnsCapProblems) + @(Get-PacerProblems -Interface $Interface)
+    Write-Outcome -Problems $problems -Done "installed the mDNS cap alone for '$Interface', read back (no firewall rule touched)"
+}
+
+function Test-MdnsCapOnly {
+    param([string]$Interface = '')
+    Assert-Adapter -Interface $Interface
+    $problems = @(Get-MdnsCapProblems) + @(Get-PacerProblems -Interface $Interface)
+    Write-Outcome -Problems $problems -Done "the mDNS cap for '$Interface': as this script installs it"
+}
+
+function Uninstall-MdnsCapOnly {
+    Remove-MdnsCap
     0
 }
 
@@ -426,6 +466,9 @@ if ($MyInvocation.InvocationName -ne '.') {
         'install' { Install-DanteLeg -Interface $InterfaceAlias -Remove $RemoveGroup }
         'check' { Test-DanteLeg -Interface $InterfaceAlias }
         'uninstall' { Uninstall-DanteLeg }
+        'mdns-cap' { Install-MdnsCapOnly -Interface $InterfaceAlias }
+        'mdns-cap-check' { Test-MdnsCapOnly -Interface $InterfaceAlias }
+        'mdns-cap-remove' { Uninstall-MdnsCapOnly }
     }
     # Only the last value is the exit code; the lines before it are the report.
     $lines = @($out)

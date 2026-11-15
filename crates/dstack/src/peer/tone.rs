@@ -17,7 +17,9 @@
 //! the sine's energy invariant `x[n]² + x[n−1]² − 2c·x[n]·x[n−1]` (= A²
 //! sin²ω, whatever the phase) under a quarter of the tone's (silence, a
 //! level drop) is bad. A run of bad samples is one gap (`tone_gaps`); it
-//! ends after [`CLEAR`] good samples in a row.
+//! ends after [`CLEAR`] good samples in a row, and then its length (first
+//! bad sample to last) goes to [`ToneCheck::block_with`]'s caller (the
+//! peer logs one line a break, dstack #303).
 //!
 //! Why not [`crate::media::check::SineCheck`] (the HIL sine check): it
 //! needs the frequency up front (the peer hears whatever tone the app
@@ -173,6 +175,8 @@ pub struct ToneCheck {
     fit: Option<Fit>,
     in_gap: bool,
     good_run: u32,
+    /// Samples since the open gap's first bad one, the good run included.
+    gap_len: u64,
     gaps: u64,
 }
 
@@ -190,6 +194,13 @@ impl ToneCheck {
     /// One block of the channel's samples: judged against the last clean
     /// block's fit, then fitted.
     pub fn block(&mut self, x: &[f64]) {
+        self.block_with(x, |_, _| {});
+    }
+
+    /// [`ToneCheck::block`], calling `ended(samples, gaps)` for each gap
+    /// that ends in the block: its length, first bad sample to last, and
+    /// the gaps so far.
+    pub fn block_with(&mut self, x: &[f64], mut ended: impl FnMut(u64, u64)) {
         if let (Some(f), 2) = (self.fit, self.seen) {
             let [mut p2, mut p1] = self.before;
             for &s in x {
@@ -197,7 +208,9 @@ impl ToneCheck {
                 let good = residual(s, p1, p2, f.c).abs() <= f.threshold
                     && invariant(s, p1, f.c) >= f.energy / 4.0;
                 let bad = !good;
-                self.judge(bad);
+                if let Some(len) = self.judge(bad) {
+                    ended(len, self.gaps);
+                }
                 (p2, p1) = (p1, s);
             }
         }
@@ -216,19 +229,26 @@ impl ToneCheck {
         };
     }
 
-    fn judge(&mut self, bad: bool) {
+    /// One sample judged; the length of the gap it ends, if it ends one.
+    fn judge(&mut self, bad: bool) -> Option<u64> {
         if bad {
             self.good_run = 0;
             if !self.in_gap {
                 self.in_gap = true;
                 self.gaps += 1;
+                self.gap_len = 0;
             }
         } else {
-            self.good_run += 1;
-            if self.good_run >= CLEAR {
-                self.in_gap = false;
-            }
+            self.good_run = self.good_run.saturating_add(1);
         }
+        if !self.in_gap {
+            return None;
+        }
+        self.gap_len += 1;
+        (self.good_run >= CLEAR).then(|| {
+            self.in_gap = false;
+            self.gap_len - u64::from(CLEAR)
+        })
     }
 
     /// Publishes the counts to `out` with the channel's `samples` so far
