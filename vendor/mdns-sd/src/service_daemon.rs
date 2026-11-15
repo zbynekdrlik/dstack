@@ -177,8 +177,11 @@ enum Counter {
     #[cfg(test)]
     ResolveHostname,
     Respond,
+    #[cfg(test)]
     CacheRefreshPTR,
+    #[cfg(test)]
     CacheRefreshSrvTxt,
+    #[cfg(test)]
     CacheRefreshAddr,
     KnownAnswerSuppression,
     CachedPTR,
@@ -206,8 +209,11 @@ impl fmt::Display for Counter {
             #[cfg(test)]
             Self::ResolveHostname => write!(f, "resolve-hostname"),
             Self::Respond => write!(f, "respond"),
+            #[cfg(test)]
             Self::CacheRefreshPTR => write!(f, "cache-refresh-ptr"),
+            #[cfg(test)]
             Self::CacheRefreshSrvTxt => write!(f, "cache-refresh-srv-txt"),
+            #[cfg(test)]
             Self::CacheRefreshAddr => write!(f, "cache-refresh-addr"),
             Self::KnownAnswerSuppression => write!(f, "known-answer-suppression"),
             Self::CachedPTR => write!(f, "cached-ptr"),
@@ -1796,21 +1802,26 @@ impl Zeroconf {
                 }
             }
 
-            // Refresh cached service records with active queriers
-            self.refresh_active_services();
+            // dstack #319: the refresh passes run only in the crate's own
+            // tests, where a browse or hostname resolve can exist.
+            #[cfg(test)]
+            {
+                // Refresh cached service records with active queriers
+                self.refresh_active_services();
 
-            // Refresh cached A/AAAA records with active queriers
-            let mut query_count = 0;
-            for (hostname, _sender) in self.hostname_resolvers.iter() {
-                for (hostname, ip_addr) in
-                    self.cache.refresh_due_hostname_resolutions(hostname).iter()
-                {
-                    self.send_query(hostname, ip_address_rr_type(&ip_addr.to_ip_addr()));
-                    query_count += 1;
+                // Refresh cached A/AAAA records with active queriers
+                let mut query_count = 0;
+                for (hostname, _sender) in self.hostname_resolvers.iter() {
+                    for (hostname, ip_addr) in
+                        self.cache.refresh_due_hostname_resolutions(hostname).iter()
+                    {
+                        self.send_query(hostname, ip_address_rr_type(&ip_addr.to_ip_addr()));
+                        query_count += 1;
+                    }
                 }
-            }
 
-            self.increase_counter(Counter::CacheRefreshAddr, query_count);
+                self.increase_counter(Counter::CacheRefreshAddr, query_count);
+            }
 
             // check and evict expired records in our cache
             let now = Instant::now();
@@ -2398,6 +2409,8 @@ impl Zeroconf {
         // This avoids known-answer suppression (RFC 6762 Section 7.1) that
         // would cause the responder to suppress its response, preventing
         // address records from being attributed to the new interface.
+        // dstack #319: only the crate's own tests browse.
+        #[cfg(test)]
         if let Some(my_intf) = self.my_intfs.get(&if_index) {
             for ty in self.service_queriers.keys() {
                 self.send_query_on_intf(ty, RRType::PTR, my_intf);
@@ -2760,6 +2773,7 @@ impl Zeroconf {
     }
 
     /// Sends a multicast query for `name` with `qtype`.
+    #[cfg(test)] // dstack #319: answer-only daemon (DSTACK.md)
     fn send_query(&self, name: &str, qtype: RRType) {
         self.send_query_vec(&[(name, qtype)]);
     }
@@ -2768,6 +2782,7 @@ impl Zeroconf {
     ///
     /// Used when a new interface is added so the responder won't suppress
     /// its response due to known-answer suppression (RFC 6762 Section 7.1).
+    #[cfg(test)] // dstack #319: answer-only daemon (DSTACK.md)
     fn send_query_on_intf(&self, name: &str, qtype: RRType, intf: &MyIntf) {
         let mut out = DnsOutgoing::new(FLAGS_QR_QUERY);
         out.add_question(name, qtype);
@@ -4473,6 +4488,7 @@ impl Zeroconf {
     /// are asked together, and their answers re-arm them together. FOH's two
     /// device processes sent about 60 queries each every 96 s, and the
     /// answers made a burst of over 500 packets.
+    #[cfg(test)] // dstack #319: answer-only daemon (DSTACK.md)
     fn refresh_active_services(&mut self) {
         let mut query_ptr_count = 0;
         let mut query_srv_count = 0;

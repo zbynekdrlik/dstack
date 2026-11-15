@@ -24,8 +24,11 @@
 //! own. This replaces `mdns_refresh.rs` (dstack #1), which drove the
 //! refresh pass through `browse`, now gone.
 //!
-//! The test's names carry a per-process token and a type of its own, so a
-//! process elsewhere on the box (another account's device) never mixes in.
+//! The test's names carry a per-process token and a type of its own, so
+//! another account's device on the box never mixes in. A program on the
+//! box that browses every type (`avahi-browse -a`) would ask about them
+//! from the same address and fail the test: that one names itself in the
+//! failure (its questions).
 
 #![cfg(target_os = "linux")]
 
@@ -203,9 +206,7 @@ fn the_daemon_sends_no_query_of_its_own_in_five_scaled_minutes() {
     let ty: &'static str = Box::leak(format!("_{token}._udp.local.").into_boxed_str());
     let net = network(ip);
     let lookup = UdpSocket::bind(SocketAddrV4::new(ip, 0)).unwrap();
-    lookup
-        .set_read_timeout(Some(Duration::from_millis(20)))
-        .unwrap();
+    lookup.set_nonblocking(true).unwrap();
 
     // The device's daemon, as host.rs sets it up.
     let daemon = ServiceDaemon::new().expect("the mDNS daemon");
@@ -266,25 +267,28 @@ fn the_daemon_sends_no_query_of_its_own_in_five_scaled_minutes() {
             id = id.wrapping_add(1);
             asked_at = Some(Instant::now());
         }
-        if let Ok((n, from)) = lookup.recv_from(&mut buf)
-            && from == std::net::SocketAddr::V4(ours_at)
-            && n >= 12
-            && buf[2] & 0x80 != 0
-        {
-            unicast_answers += 1;
+        // Drain both sockets each pass (dev1's group is busy): a datagram
+        // the kernel dropped would be a query never checked.
+        while let Ok((n, from)) = lookup.recv_from(&mut buf) {
+            if from == std::net::SocketAddr::V4(ours_at) && n >= 12 && buf[2] & 0x80 != 0 {
+                unicast_answers += 1;
+            }
         }
-        let Ok((n, from)) = net.recv_from(&mut buf) else {
-            continue;
-        };
-        let msg = &buf[..n];
-        let about_us = msg.windows(token.len()).any(|w| w == token.as_bytes());
-        if n < 12 || from != std::net::SocketAddr::V4(ours_at) || !about_us || mine.contains(msg) {
-            continue;
-        }
-        match classify(msg, &own) {
-            Sent::Answer => answers += 1,
-            Sent::Probe => probes += 1,
-            Sent::Query(qs) => queries.push(qs),
+        while let Ok((n, from)) = net.recv_from(&mut buf) {
+            let msg = &buf[..n];
+            let about_us = msg.windows(token.len()).any(|w| w == token.as_bytes());
+            if n < 12
+                || from != std::net::SocketAddr::V4(ours_at)
+                || !about_us
+                || mine.contains(msg)
+            {
+                continue;
+            }
+            match classify(msg, &own) {
+                Sent::Answer => answers += 1,
+                Sent::Probe => probes += 1,
+                Sent::Query(qs) => queries.push(qs),
+            }
         }
     }
     let _ = daemon.shutdown();

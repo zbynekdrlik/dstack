@@ -15,14 +15,18 @@
 //! - [`netaudio_query`] (pure): a datagram is such a query: a query (no
 //!   answer, no probe: no authority section) with a question under a
 //!   `_netaudio-*` service type.
-//! - [`cycle`] (pure): the times a host sent them end in [`CYCLES`]
-//!   intervals each [`CYCLE_NS`] ± [`TOLERANCE_NS`].
+//! - [`cycle`] (pure): the times a host sent them end in a chain of
+//!   [`CYCLES`] intervals each [`CYCLE_NS`] ± [`TOLERANCE_NS`], each point
+//!   a refresh after a quiet time (other queries may come between).
 //! - [`Browsers`] (pure, fake times): the times per host (a query within
 //!   [`SAME_BURST_NS`] of the last is the same refresh), the hosts whose
-//!   cycle was seen lately, and once an hour per host the warning.
+//!   cycle was seen lately, and once an hour per host the warning (a host
+//!   forgotten, past [`MAX_HOSTS`] or unheard for 4 cycles, starts again).
 //!
 //! A host with Bonjour browsing Dante (Dante Controller's PC) refreshes the
-//! same way and is named too: its queries make the same burst.
+//! same way, but at 80-82 % of the TTL (RFC 6762 §5.2), 96-98.4 s: it is
+//! named only while three of its intervals in a row fall within the
+//! tolerance.
 
 use std::collections::{HashMap, VecDeque};
 use std::net::Ipv4Addr;
@@ -78,14 +82,29 @@ pub fn netaudio_query(bytes: &[u8]) -> bool {
 
 /// The time `times` (oldest first) started a chain of [`CYCLES`] intervals
 /// of `cycle_ns` ± `tolerance_ns` that ends at its last time; `None`
-/// without one.
+/// without one. Each point of the chain starts a refresh: the host sent
+/// nothing in the `cycle_ns /` [`QUIET_PARTS`] before it (the first time
+/// kept counts as one). A host that queries every few seconds is no
+/// browser on the cycle, though some of its times are 96 s apart.
 pub fn cycle(times: &[u64], cycle_ns: u64, tolerance_ns: u64) -> Option<u64> {
     let last = times.len().checked_sub(1)?;
     chain(times, last, CYCLES, cycle_ns, tolerance_ns)
 }
 
+/// The part of a cycle a refresh is quiet before (12 s of 96 s).
+pub const QUIET_PARTS: u64 = 8;
+
+/// `times[at]` follows the time before it by at least `quiet_ns`.
+fn quiet_before(times: &[u64], at: usize, quiet_ns: u64) -> bool {
+    at.checked_sub(1)
+        .is_none_or(|p| times[at] - times[p] >= quiet_ns)
+}
+
 /// The start of a chain of `left` intervals back from `times[at]`.
 fn chain(times: &[u64], at: usize, left: usize, cycle_ns: u64, tolerance_ns: u64) -> Option<u64> {
+    if !quiet_before(times, at, cycle_ns / QUIET_PARTS) {
+        return None;
+    }
     if left == 0 {
         return Some(times[at]);
     }

@@ -501,6 +501,7 @@ impl DnsCache {
 
     /// Checks refresh due for PTR records of `ty_domain`.
     /// Returns all updated refresh time.
+    #[cfg(test)] // dstack #319: answer-only daemon (DSTACK.md)
     pub(crate) fn refresh_due_ptr(&mut self, ty_domain: &str, early: bool) -> HashSet<Instant> {
         let now = Instant::now();
 
@@ -517,6 +518,7 @@ impl DnsCache {
     /// 1. the map of instance names together with RRType(s) that are due for refresh
     ///    its SRV or TXT records.
     /// 2. the set of new timers that are due for refresh.
+    #[cfg(test)] // dstack #319: answer-only daemon (DSTACK.md)
     pub(crate) fn refresh_due_srv_txt(
         &mut self,
         ty_domain: &str,
@@ -582,6 +584,7 @@ impl DnsCache {
 
     /// Returns the set of `host`, where refreshing the A / AAAA records is due
     /// for a `ty_domain`.
+    #[cfg(test)] // dstack #319: answer-only daemon (DSTACK.md)
     pub(crate) fn refresh_due_hosts(
         &mut self,
         ty_domain: &str,
@@ -645,6 +648,7 @@ impl DnsCache {
     /// Returns the set of A/AAAA records that are due for refresh for a `hostname`.
     ///
     /// For these records, their refresh time will be updated so that they will not refresh again.
+    #[cfg(test)] // dstack #319: answer-only daemon (DSTACK.md)
     pub(crate) fn refresh_due_hostname_resolutions(
         &mut self,
         hostname: &str,

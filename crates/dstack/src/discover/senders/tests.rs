@@ -304,22 +304,29 @@ fn the_meter_names_a_host_refreshing_dante_records_on_the_cycle() {
     let other_port = UdpSocket::bind("127.0.0.5:0").unwrap();
     let q = arc_query();
     let deadline = Instant::now() + Duration::from_secs(10);
-    let named = loop {
+    // Every minute seen that named a host (a later minute lists it again,
+    // not warned: look between the sends).
+    let mut seen: Vec<Minute> = Vec::new();
+    while seen.is_empty() || !seen.iter().any(|m| m.browsers.iter().any(|b| b.warn)) {
         browser.send_to(&q, to).unwrap();
         other_port.send_to(&q, to).unwrap();
-        std::thread::sleep(Duration::from_millis(250));
-        if let Some(m) = meter.last()
-            && !m.browsers.is_empty()
-        {
-            break m;
+        for _ in 0..25 {
+            std::thread::sleep(Duration::from_millis(10));
+            if let Some(m) = meter.last()
+                && !m.browsers.is_empty()
+                && seen.last() != Some(&m)
+            {
+                seen.push(m);
+            }
         }
-        assert!(Instant::now() < deadline, "no host named");
-    };
-    assert_eq!(named.browsers.len(), 1, "{:?}", named.browsers);
-    assert_eq!(named.browsers[0].source, Ipv4Addr::new(127, 0, 0, 4));
-    assert!(named.browsers[0].warn);
-    let p = named.browsers[0].period_ns;
-    assert!((170_000_000..=330_000_000).contains(&p), "{p}");
+        assert!(Instant::now() < deadline, "no host named: {seen:?}");
+    }
+    for m in &seen {
+        assert_eq!(m.browsers.len(), 1, "{:?}", m.browsers);
+        assert_eq!(m.browsers[0].source, Ipv4Addr::new(127, 0, 0, 4));
+        let p = m.browsers[0].period_ns;
+        assert!((170_000_000..=330_000_000).contains(&p), "{p}");
+    }
 }
 
 #[test]

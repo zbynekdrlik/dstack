@@ -23,11 +23,15 @@ LICENSE-APACHE and LICENSE-MIT), copied unchanged except:
   `Command` variants, handlers and the helpers only they reach
   (`query_cache_for_*`, `add_hostname_resolver`, `service_verify_queries`,
   `remove_service_type`, ...) are `#[cfg(test)]`: they exist for the
-  crate's own unit tests and in no build of a dependent. With no browser
-  and no hostname resolver the refresh passes (`refresh_active_services`,
-  the A/AAAA refresh in `run`) and the resolve retries have nothing to
-  ask, so the daemon sends no query of its own (probes for its own names
-  aside, RFC 6762 §8.1). An old dtray with standing browses refreshed
+  crate's own unit tests and in no build of a dependent. So are the
+  refresh passes themselves (`refresh_active_services`, the A/AAAA refresh
+  in `run`, the cache's `refresh_due_*`, their counters), the browse
+  queries `add_interface` sends on a new interface, and `send_query` /
+  `send_query_on_intf`. With no browser the resolve retries
+  (`Command::Resolve`, reached only through `service_queriers`) have
+  nothing to ask, so the daemon sends no query of its own (probes for its
+  own names aside, RFC 6762 §8.1). `crates/dstack/src/announce.rs` holds
+  `compile_fail` doctests that lock the removed calls out. An old dtray with standing browses refreshed
   every learned `_netaudio-arc` record every 96 s (80 % of 120 s); every
   Dante host answered in the same second and receivers counted late
   packets (dstack #319, 15.11.2026; `crates/dstack/tests/mdns_answer_only.rs`).

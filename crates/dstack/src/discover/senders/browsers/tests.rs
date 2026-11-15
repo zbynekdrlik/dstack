@@ -131,8 +131,42 @@ fn a_host_is_named_with_its_measured_cycle_and_warned_once_an_hour() {
         assert_eq!(listed.len(), 1, "at {s}");
         assert_eq!(listed[0].warn, s >= 290.0 + 3600.0, "at {s}");
     }
-    let warned_at = s;
-    assert!(b.take(t(warned_at + 1.0)).iter().all(|x| !x.warn));
+    let warned_at = t(s);
+    assert!(b.take(warned_at + S).iter().all(|x| !x.warn));
+    // The hour to the ns: not a ns before, at the hour exactly.
+    let mut q = warned_at;
+    while q + CYCLE_NS < warned_at + WARN_EVERY_NS {
+        q += CYCLE_NS;
+        b.query(a(7), q);
+    }
+    let before = b.take(warned_at + WARN_EVERY_NS - 1);
+    assert_eq!(before.len(), 1);
+    assert!(!before[0].warn);
+    let at_hour = b.take(warned_at + WARN_EVERY_NS);
+    assert_eq!(at_hour.len(), 1);
+    assert!(at_hour[0].warn);
+}
+
+#[test]
+fn a_host_querying_every_few_seconds_is_no_browser_on_the_cycle() {
+    let c = |t: &[u64]| cycle(t, CYCLE_NS, TOLERANCE_NS);
+    // Every 4 s for 400 s: many times are 96 s apart, none after a quiet
+    // time.
+    let dense: Vec<u64> = (0..=100).map(|k| 4 * k * S).collect();
+    assert_eq!(c(&dense), None);
+    // Each point needs 12 s (96 / 8) of quiet before it, exactly.
+    let quiet = |gap: u64| {
+        let mut v = Vec::new();
+        for k in 0..4 {
+            v.push(k * CYCLE_NS + 20 * S - gap);
+            v.push(k * CYCLE_NS + 20 * S);
+        }
+        v
+    };
+    assert_eq!(c(&quiet(12 * S)), Some(20 * S));
+    assert_eq!(c(&quiet(12 * S - 1)), None);
+    // The first time kept counts as a refresh.
+    assert_eq!(c(&[0, CYCLE_NS, 2 * CYCLE_NS, 3 * CYCLE_NS]), Some(0));
 }
 
 #[test]
