@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- **Feature (#321, field 15.11.2026, #319): the network floor, a version guard for every dstack binary on the network.** A 3.11 dtray (about v0.6.20, with the standing mDNS browses #141 removed) ran 12 days on two PCs and nothing noticed. Now:
+  - `dstack::NETWORK_FLOOR` (`network_floor::Version` 0.6.58, the first build with no standing browse in any binary) is the lowest dstack version allowed on the network. A release that fixes a network-wide defect raises it.
+  - Peers: every device's mDNS meter reads the `dstack_vers` TXT of each `_netaudio-arc` answer it hears, and `discover::Discovery` (dcontroller, dtray) checks each device it lists. A dstack device below the floor is warned about once an hour per process: WARN `a dstack device below the network floor: upgrade it` with `kind="peer"`, `name`, `address`, `version`, `floor`. A device without `dstack_vers` is not ours and is never named (so a peer is seen from v0.6.84 on, the first with the key).
+  - Local clients: the local status endpoint takes `status <name> <version>` besides a bare `status` (anything else past `status` is refused). dtray and dtray-cli state themselves (`dtray`, `dtray-cli`) and ask again with a bare `status` when an older device refuses it, so a new dtray still reads an old device. A client below the floor gets the same WARN with `kind="client"`, `address=local`.
+  - Status: a new `network` object, present once the process's meter runs or a client stated itself: `floor`, `below_floor` (`kind` `peer` with `name`, `address`, `version`; `kind` `client` with `name`, `version`; seen within the hour) and `clients` (`name`, `version`, within the hour). The status may now carry peer names and addresses there.
+  - API (additive): module `network_floor` (`Version`, `NETWORK_FLOOR`, `Kind`, `Below`, `Guard`, `Clients`, `Client`, `Warned`, `check`, `warn_below`, `below_of`, `warn_devices`, `arc_versions`, `client_of`, `now_ns`, `HOUR_NS`), `Discovery::below_floor`, `senders::Meter::below_floor`, `ctl::status_request`, `ctl::StatusClient`, `ctl::BAD_CLIENT`, `ctl::probe::{status_as, status_from, client_request}`, `Media::{client_asked, clients, peers_below_floor}`, `dtray::{client, set_client}`.
+  - dcontroller relays it as an alarm: the WARN line and each device's status `network.below_floor`.
+- **No latency change** for any device or dlink app. Consumers: move the stack version; nothing to port.
+
 ## 0.6.143
 
 - **Fix (Refs #303, obs's soak gate on 0.6.140): the TX bridge's level loop holds its rate under a steady app writer.** `Player::steer` read the FIFO's depth after each converter call (every 128 frames); OBS writes 1024 frames a tick, so the reads fell on a grid commensurate with the writes. With a writer as regular as OBS on an idle box (push gaps 21.34 to 21.42 ms), which reads came after a write stayed fixed until the write instant drifted across one read (~444 s at 6 ppm): the depth and the rate point held still (the rate fit locked at ~0 ppm under a 6 ppm skew), then stepped 2.67 ms and the braking pinned the ±20 ppm bound (obs: `tx_ppm` 0 for 2 min, then up to 39.7 ppm, two ramps 450 s apart). Writer jitter hid it, which is why the soak gate (±2 ms jitter) missed it; it fails the same way on 0.6.137's player.
