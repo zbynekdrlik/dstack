@@ -700,6 +700,42 @@ fn a_config_parse_error_gives_a_line_and_no_value() {
 }
 
 #[test]
+fn a_config_parse_error_names_a_schema_key() {
+    // dasio, 15.11.2026: a config without `state_file` read
+    // "missing field `…`" and the operator could not tell which.
+    let found = problems(&config_with("state_file =", ""));
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].contains("missing field `state_file`"), "{found:?}");
+
+    let found = problems(&format!(
+        "{TEST_DEVICE}\n[[subscribe]]\nrx = 1\nzyxqkey = 1\n"
+    ));
+    assert!(found[0].contains("unknown field `\u{2026}`"), "{found:?}");
+    assert!(found[0].contains("`tx_device`"), "{found:?}");
+    assert!(!found[0].contains("zyxq"), "{found:?}");
+
+    let found = problems(&format!("{TEST_DEVICE}\nstate_flie = 1\n"));
+    assert!(found[0].contains("unknown field `\u{2026}`"), "{found:?}");
+    assert!(found[0].contains("`state_file`"), "{found:?}");
+    assert!(!found[0].contains("flie"), "{found:?}");
+
+    let found = problems(&format!("{TEST_DEVICE}\ntiming = \"zyxqprofile\"\n"));
+    assert!(found[0].contains("`low_latency`"), "{found:?}");
+    assert!(!found[0].contains("zyxq"), "{found:?}");
+}
+
+#[test]
+fn a_quoted_value_stays_cut_even_when_it_reads_as_a_key() {
+    let found = problems(&config_with(
+        "sample_rate =",
+        "sample_rate = \"state_file\"",
+    ));
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].contains("\"\u{2026}\""), "{found:?}");
+    assert!(!found[0].contains("state_file"), "{found:?}");
+}
+
+#[test]
 fn redact_keeps_the_quote_marks_and_drops_what_they_hold() {
     assert_eq!(redact("a \"b\" c `d` e"), "a \"\u{2026}\" c `\u{2026}` e");
     assert_eq!(redact("x \"a\\\"b\" y"), "x \"\u{2026}\" y");
