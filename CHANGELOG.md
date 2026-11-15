@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.139
+
+- **CI (Refs #305): the `ci-peer` gate tells a runner stall from a pump defect.** Main CI of 0.6.138 failed once: both peers' pumps (two separate processes) woke 4-6 ms late at the same milliseconds, one past the normal profile's 6 ms margin, and re-bootstrapped. The gate now runs a witness process with no dstack code (`tools/linux/tests/ci_peer_gate.py`); a window whose rise is only re-bootstraps the witness saw stall too is measured again (at most 3 windows), any other rise fails. `docs/ci-peer.md` says how an application's CI can do the same.
+- **Test (Refs #195): the Windows process-read test waits for its child's sockets.** Its powershell child prints `ready` once its 30 UDP sockets are bound (on 127.77.0.1, which no other program uses) and holds them until its stdin closes; before, the test polled for 20 s and on a loaded runner did not see the child.
+- No library or API change. **No latency change** for any device or dlink app.
+- Consumers: nothing to do; moving the stack version is optional.
+
 ## 0.6.138
 
 - **Feature (Refs #195, field: the FOH PC 15.11.2026): a send refusal now names its cause.** The NIC refused every TX slot's sends for about 100 ms (WSAENOBUFS) during a service and nothing recorded what filled its send path. Each device now keeps the last 30 s of its NIC's traffic, second by second, on the control side's tick (`traffic::recorder::Recorder`: the NIC's sent bytes, this device's audio, the other traffic past our devices' audio, this process's and the machine's CPU; `traffic::cpu`), and at the first refusal of a burst (WSAENOBUFS 10055 / ENOBUFS 105, `media::tx::nic_refusal`, after 10 s without one; once a minute in a burst that never goes quiet) takes a sample of the part second that held it and logs one WARN:
