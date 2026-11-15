@@ -598,7 +598,7 @@ fn priming_ends_at_exactly_the_level() {
     }
 }
 
-/// A FIFO emptied at once (no depth under the floor first): the block
+/// A FIFO emptied at once: the block
 /// whose input is not there plays silence, counted, and the output primes.
 #[test]
 fn a_block_with_no_input_plays_silence_and_primes() {

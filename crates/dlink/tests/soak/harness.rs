@@ -255,8 +255,9 @@ impl Counts {
         }
     }
 
-    /// The TX side's gap counters (dropouts and re-centres; a floor deficit
-    /// counts in both, so only a change of the sum is read, as one gap).
+    /// The TX side's gap counters (dropouts and excess re-centres; up to
+    /// v0.6.139 a floor deficit counted in both, so only a change of the
+    /// sum is read, as one gap).
     pub(crate) fn tx_sum(&self) -> u64 {
         self.tx_underruns + self.tx_recentres
     }

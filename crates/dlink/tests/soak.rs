@@ -146,8 +146,9 @@ impl Rng {
 enum Wakes {
     /// The field's (#304): one in a hundred 2 to 8 ms late. The RX bridge's
     /// target does not count the pump's lateness, so at +6 ppm its depth
-    /// reaches the floor now and then (14 RX dropouts in 10 min on every
-    /// version since v0.6.126). That is dstack #307, an owner latency
+    /// drops out now and then (14 RX dropouts in 10 min on every version
+    /// since v0.6.126, then under the floor; the floor is gone since
+    /// v0.6.140, #303). That is dstack #307, an owner latency
     /// decision (`app_buffer` is an owner-fixed term, #247): until it is
     /// decided the RX bridge is NOT judged under these wakes. It is judged,
     /// strictly, under [`Wakes::Short`].

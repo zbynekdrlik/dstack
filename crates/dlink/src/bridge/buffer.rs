@@ -21,7 +21,7 @@ use crate::latency::ms;
 
 /// The least target the device takes, ns. It is a sanity bound, not a
 /// working value: a target only holds when it covers half the app's chunk
-/// and a block over the floor ([`AppBuffer::short`], warned at the start).
+/// and a block ([`AppBuffer::short`], warned at the start).
 pub const MIN_APP_BUFFER_NS: u64 = 1_000_000;
 /// The largest target, ns: the player re-centres an excess of twice the
 /// target ([`super::player::hard_excess_s`]), so three targets must fit in
@@ -112,7 +112,7 @@ impl AppBuffer {
     /// producer's depth swings half a chunk under the target, and the
     /// converter takes a block's input, so a target under half the chunk
     /// plus one block drops out every chunk. The device warns at its start
-    /// ([`super::player::floor_s`] then gives the rest). A default target
+    /// (the FIFO runs dry before the next chunk). A default target
     /// (a whole chunk and a block) never is.
     pub fn short(&self) -> Option<String> {
         let least = self.chunk_ns / 2 + self.block_ns;
