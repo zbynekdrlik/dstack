@@ -2,7 +2,7 @@
 
 ## 0.6.142
 
-- **Fix (#313, dasio 15.11.2026): a device config error names the field.** A `device.toml` without `state_file` read ``device config: line 1: missing field `…` ``, and the operator could not tell which field. A parse error now keeps a backticked word when it is exactly a key of the config schema (`DeviceConfig`, its `[[subscribe]]` table, the `timing` names): ``missing field `state_file` ``, and an unknown key's "expected one of" list. Every quoted value and every other backticked word (a misspelt key may hold a device or channel name) is still cut to `…`. The state file's parse errors are unchanged.
+- **Fix (#313, dasio 15.11.2026): a device config error names the field.** A `device.toml` without `state_file` read ``device config: line 1: missing field `…` ``, and the operator could not tell which field. A parse error now keeps a backticked word when it is exactly a key of the config schema (`DeviceConfig`, its `[[subscribe]]` table, the `timing` names): ``missing field `state_file` ``, and an unknown key's "expected one of" list. Every quoted value and every other backticked word (a misspelt key may hold a device or channel name) is still cut to `…`. A misspelt key holding a backtick is now cut whole (before, the part after its backtick reached the log). The state file's parse errors keep cutting every backticked word.
 - No API change. **No latency change** for any device or dlink app.
 - Consumers (dasio, dlisten, dsend, OBS, intercom, songplayer, camera-box, presenter): nothing to port; move the stack version to show the field's name.
 
