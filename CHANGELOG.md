@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- **Feature (Refs #288, field 15.11.2026): the mDNS cap alone for a one-leg PC.** A PC whose one NIC carries both Dante and its LAN (the iemmixer box, the FOH PC) cannot take the full Dante-leg filter: its drop/Block rules cut the LAN. It now takes the cap on its own mDNS out only:
+  - Linux: `tools/linux/dante-mdns-cap.nft`, its own table `inet dstack_mdns_cap` (one output chain, policy accept, no interface to name), holding `dante-leg.nft`'s two caps byte for byte (queries 10/s past a burst of 50, all mDNS 50/s past a burst of 200; a test keeps them identical). Load: `nft -f /etc/dstack/dante-mdns-cap.nft`.
+  - Windows: `dante-leg.ps1 -Mode mdns-cap -InterfaceAlias <the adapter>` (and `mdns-cap-check`, `mdns-cap-remove`) create, check or remove only the QoS policy `dstack Dante leg mDNS cap` (200 kbit/s) and check the adapter's QoS Packet Scheduler binding; no firewall rule is created, read or removed. Idempotent.
+  - `docs/two-networks.md`: "Which file fits which PC" (a separate Dante leg: the full set; a one-leg PC: the cap only).
+- No library or API change. **No latency change** for any device or dlink app.
+- Consumers: nothing to port. iemmixer and dasio (the FOH PC) load the cap on their one-leg PCs themselves.
+
 ## 0.6.141
 
 - **Fix (#312, field: iem-snv 15.11.2026): the LAN self-heal no longer stalls the PC every minute.** Its scheduled task started a new `powershell.exe` each minute; the NetAdapter/NetTCPIP/firewall module imports and CIM queries took ~2.4 s and ~1.6 s CPU (plus ~0.5 s in WmiPrvSE), and an audio device's pump on that PC woke late at exactly those seconds (:37-:41). `tools/windows/lan-selfheal.ps1 -Mode loop` is now one long-lived process from startup, at BelowNormal priority: each minute a quick check with .NET only (the LAN adapter's status and IPv4 addresses, the route's source address, one ping), no CIM or WMI. Only a failed quick check runs the full check, the down-counter and the repair, unchanged (never the Dante adapter, never a cycle of a virtual VLAN adapter, the threshold, the restart gap, the 0.6.109 cleanup). `-Mode install` stops and replaces the per-minute task (a start-up trigger, a 5-minute watchdog trigger with `IgnoreNew`, no time limit, restart on failure) and starts the loop; installing again is idempotent; `-Mode uninstall` stops the loop and removes the task.

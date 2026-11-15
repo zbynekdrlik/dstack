@@ -6,13 +6,16 @@
 # job): it loads, a second load replaces it (one table, the same rules), a
 # load without the interface fails and leaves the loaded table as it was.
 # The same for dante-leg-notrack.nft, which must also untrack every packet
-# not on the leg and leave the leg's packets tracked.
+# not on the leg and leave the leg's packets tracked. And dante-mdns-cap.nft
+# (the one-leg PC's cap only, #288): it loads with no interface, reloads,
+# sits beside dante-leg.nft, and caps mDNS out on any interface.
 # The port sets themselves are checked by crates/dstack/tests/dante_leg.rs.
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
 rules="$here/../dante-leg.nft"
 notrack="$here/../dante-leg-notrack.nft"
+mdns_cap="$here/../dante-mdns-cap.nft"
 
 if [ "${1:-}" != "--inside" ]; then
     exec unshare --net bash "$0" --inside
@@ -176,3 +179,46 @@ sleep 1
 [ "$(send 192.0.2.1 5353 5 answer)" = "5" ] || fail "mDNS announces a second after a flood were dropped"
 
 echo "dante-leg.nft: the leg's own mDNS out is capped (flood dropped and counted), announces and other traffic pass"
+
+# The one-leg PC's cap only (dante-mdns-cap.nft, #288): no interface to
+# name, its own table (beside dante-leg.nft's), the same two caps on every
+# interface. dante-leg.nft's table is removed after the side-by-side check,
+# so only this table's caps count what follows.
+nft -f "$mdns_cap"
+first="$(nft list table inet dstack_mdns_cap)"
+nft -f "$mdns_cap"
+second="$(nft list table inet dstack_mdns_cap)"
+[ "$first" = "$second" ] || fail "a second load changed the mDNS cap table"
+tables="$(nft list tables | grep -cx 'table inet dstack_mdns_cap' || true)"
+[ "$tables" = "1" ] || fail "expected one dstack_mdns_cap table, got $tables"
+nft list tables | grep -qx 'table inet dstack_dante_leg' || fail "the mDNS cap load removed dante-leg.nft's table"
+nft delete table inet dstack_dante_leg
+cap_counter() { # <rate>/<burst> text of the rule: prints its counter's packets
+    nft list chain inet dstack_mdns_cap out |
+        sed -n "s/.*limit rate over $1 packets counter packets \([0-9]*\).*/\1/p"
+}
+nft -f "$mdns_cap"
+[ "$(cap_counter '10\/second burst 50')" = "0" ] || fail "the one-leg query cap is missing or counted before any send"
+[ "$(cap_counter '50\/second burst 200')" = "0" ] || fail "the one-leg cap is missing or counted before any send"
+# On the second NIC (dl1): with no leg condition, the cap holds there too.
+[ "$(send 198.51.100.1 5353 20 answer)" = "20" ] || fail "normal mDNS announces were dropped by the one-leg cap"
+[ "$(send 198.51.100.1 5353 5 query)" = "5" ] || fail "normal mDNS queries were dropped by the one-leg cap"
+queries="$(send 198.51.100.1 5353 240 query 40)"
+[ "$queries" -ge 80 ] || fail "one-leg: the query flood passed $queries of 240, under the burst and 10/s"
+[ "$queries" -le 130 ] || fail "one-leg: the query flood passed $queries of 240: queries not capped at 10/s"
+[ "$(cap_counter '10\/second burst 50')" = "$((240 - queries))" ] ||
+    fail "one-leg: the query cap's counter is not the $((240 - queries)) dropped"
+[ "$(send 198.51.100.1 5353 30 answer 300)" = "30" ] || fail "one-leg: an answer burst was dropped"
+[ "$(cap_counter '50\/second burst 200')" = "0" ] || fail "one-leg: the 50/s cap dropped queries or an answer burst under it"
+nft -f "$mdns_cap"
+flood="$(send 198.51.100.1 5353 3000 answer)"
+[ "$flood" -ge 180 ] || fail "one-leg: the flood passed $flood mDNS datagrams, under the burst"
+[ "$flood" -le 1000 ] || fail "one-leg: the flood passed $flood of 3000 mDNS datagrams: not capped"
+[ "$(cap_counter '50\/second burst 200')" = "$((3000 - flood))" ] ||
+    fail "one-leg: the cap's counter is not the $((3000 - flood)) dropped"
+[ "$(send 198.51.100.1 5354 3000 query)" = "3000" ] || fail "one-leg: UDP to the group on another port was capped"
+# And on the other NIC (dl0) the same caps, from a fresh load.
+nft -f "$mdns_cap"
+[ "$(send 192.0.2.1 5353 3000 answer)" -le 1000 ] || fail "one-leg: mDNS on dl0 was not capped"
+
+echo "dante-mdns-cap.nft: loads with no interface, reloads idempotently, sits beside dante-leg.nft, caps queries ($queries of 240 at 40/s passed) and all mDNS ($flood of 3000 passed) on every interface, other UDP passes"

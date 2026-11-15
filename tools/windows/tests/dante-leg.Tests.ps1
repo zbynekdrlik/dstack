@@ -11,7 +11,9 @@
 # win over the cmdlets); and the group created for real on the runner's
 # adapter, but DISABLED and under a test group name, and the mDNS cap (#288)
 # under a test policy name, read back with the real cmdlets (the shapes the
-# firewall and QoS give back), then removed. The real part needs an
+# firewall and QoS give back), then removed. The one-leg modes (mdns-cap,
+# mdns-cap-check, mdns-cap-remove; #288) run against fakes that throw on any
+# firewall cmdlet, and for real against the QoS store. The real part needs an
 # elevated shell, which the CI runner is; elsewhere it fails, never skips.
 # The port sets themselves are checked against the code by
 # crates/dstack/tests/dante_leg.rs.
@@ -103,6 +105,12 @@ function Reset-Fake {
     $script:PacerOff = @()
     $script:NoPacer = @()
     $script:QosRefused = $false
+    $script:NoFirewall = $false
+}
+# The one-leg modes (#288) must call no firewall cmdlet: with the flag set,
+# every fake firewall cmdlet throws.
+function Assert-FirewallAllowed {
+    if ($script:NoFirewall) { throw 'a firewall cmdlet was called' }
 }
 function Get-NetQosPolicy {
     param([string]$Name, $ErrorAction)
@@ -139,6 +147,7 @@ function Get-NetAdapter {
 }
 function Get-NetFirewallProfile {
     param([string]$PolicyStore)
+    Assert-FirewallAllowed
     if ($PolicyStore -ne 'ActiveStore') { throw "the profiles read from '$PolicyStore', not the active store" }
     'Domain', 'Private', 'Public' | ForEach-Object {
         [pscustomobject]@{ Name = $_; Enabled = if ($script:ProfilesOff -contains $_) { 'False' } else { 'True' } }
@@ -147,6 +156,7 @@ function Get-NetFirewallProfile {
 function New-NetFirewallRule {
     param($DisplayName, $Direction, $Protocol, $LocalPort, $RemotePort, $LocalAddress, $Program,
         $Group, $Action, $Enabled, $Profile, $InterfaceAlias)
+    Assert-FirewallAllowed
     if ($script:FailAt -gt 0 -and $script:Made + 1 -eq $script:FailAt) { throw 'refused by the fake' }
     $script:Made++
     $or = { param($v) if ($null -eq $v) { 'Any' } else { $v } }
@@ -161,27 +171,28 @@ function New-NetFirewallRule {
 }
 function Get-NetFirewallRule {
     param([string]$Group, $ErrorAction)
+    Assert-FirewallAllowed
     @($script:Store | Where-Object { $_.Group -eq $Group })
 }
 function Remove-NetFirewallRule {
     param([Parameter(ValueFromPipeline)]$InputObject)
-    process { $script:Store.Remove($InputObject) }
+    process { Assert-FirewallAllowed; $script:Store.Remove($InputObject) }
 }
 function Get-NetFirewallPortFilter {
     param([Parameter(ValueFromPipeline)]$InputObject)
-    process { [pscustomobject]@{ Protocol = $InputObject.Protocol; LocalPort = $InputObject.LocalPort; RemotePort = $InputObject.RemotePort } }
+    process { Assert-FirewallAllowed; [pscustomobject]@{ Protocol = $InputObject.Protocol; LocalPort = $InputObject.LocalPort; RemotePort = $InputObject.RemotePort } }
 }
 function Get-NetFirewallAddressFilter {
     param([Parameter(ValueFromPipeline)]$InputObject)
-    process { [pscustomobject]@{ LocalAddress = $InputObject.LocalAddress } }
+    process { Assert-FirewallAllowed; [pscustomobject]@{ LocalAddress = $InputObject.LocalAddress } }
 }
 function Get-NetFirewallApplicationFilter {
     param([Parameter(ValueFromPipeline)]$InputObject)
-    process { [pscustomobject]@{ Program = $InputObject.Program } }
+    process { Assert-FirewallAllowed; [pscustomobject]@{ Program = $InputObject.Program } }
 }
 function Get-NetFirewallInterfaceFilter {
     param([Parameter(ValueFromPipeline)]$InputObject)
-    process { [pscustomobject]@{ InterfaceAlias = $InputObject.InterfaceAlias } }
+    process { Assert-FirewallAllowed; [pscustomobject]@{ InterfaceAlias = $InputObject.InterfaceAlias } }
 }
 function Old-Rule {
     param([string]$Group, [string]$Name)
@@ -314,6 +325,75 @@ Check 'uninstall removes only the group and the mDNS cap' {
     ((@($script:Qos | ForEach-Object { $_.Name }) -join ',') -eq 'someone else''s policy')
 }
 
+# ------------------------------- the one-leg PC's cap alone (#288)
+Check 'mdns-cap: the cap alone, twice gives one, no firewall cmdlet called' {
+    Reset-Fake
+    Old-Rule -Group 'someone else' -Name 'theirs'
+    $script:NoFirewall = $true
+    $out = Install-MdnsCapOnly -Interface 'Dante70'
+    $again = Install-MdnsCapOnly -Interface 'Dante70'
+    $check = Test-MdnsCapOnly -Interface 'Dante70'
+    $script:NoFirewall = $false
+    $p = @($script:Qos)
+    (Last $out) -eq 0 -and (Last $again) -eq 0 -and (Last $check) -eq 0 -and $p.Count -eq 1 -and
+    $p[0].Name -eq 'dstack Dante leg mDNS cap' -and $p[0].IPDstPrefixMatchCondition -eq '224.0.0.251' -and
+    $p[0].IPDstPortStartMatchCondition -eq 5353 -and $p[0].ThrottleRateAction -eq 200000 -and
+    $script:Store.Count -eq 1 -and $script:Made -eq 0 -and
+    (@($out) -join "`n") -match 'mDNS cap.*224\.0\.0\.251:5353 at 200000 bit/s' -and
+    (@($out) -join "`n") -match "cap alone for 'Dante70'"
+}
+Check 'mdns-cap-check fails on a missing or changed cap and on ms_pacer off, not on no binding' {
+    Reset-Fake
+    $script:NoFirewall = $true
+    $missing = Test-MdnsCapOnly -Interface 'Dante70'
+    [void](Install-MdnsCapOnly -Interface 'Dante70')
+    $script:Qos[0].ThrottleRateAction = 10000000
+    $rate = Test-MdnsCapOnly -Interface 'Dante70'
+    [void](Install-MdnsCapOnly -Interface 'Dante70')
+    $script:PacerOff = @('Dante70')
+    $install = Install-MdnsCapOnly -Interface 'Dante70'
+    $pacer = Test-MdnsCapOnly -Interface 'Dante70'
+    $script:PacerOff = @()
+    $script:NoPacer = @('Dante70')
+    $vlan = Last (Test-MdnsCapOnly -Interface 'Dante70')
+    $script:NoFirewall = $false
+    (Last $missing) -eq 1 -and (@($missing) -join "`n") -match 'mDNS cap.*: 0 QoS policies' -and
+    (Last $rate) -eq 1 -and (@($rate) -join "`n") -match 'rate=10000000\|' -and
+    (Last $install) -eq 1 -and (Last $pacer) -eq 1 -and (@($pacer) -join "`n") -match "ms_pacer\) is off on 'Dante70'" -and
+    $vlan -eq 0
+}
+Check 'mdns-cap-remove removes the cap only, twice is fine, no firewall cmdlet called' {
+    Reset-Fake
+    [void](Install-DanteLeg -Interface 'Dante70')
+    [void](New-NetQosPolicy -Name 'someone else''s policy')
+    $rules = $script:Store.Count
+    $script:NoFirewall = $true
+    $out = Uninstall-MdnsCapOnly
+    $again = Uninstall-MdnsCapOnly
+    $script:NoFirewall = $false
+    (Last $out) -eq 0 -and (Last $again) -eq 0 -and $rules -eq 10 -and $script:Store.Count -eq 10 -and
+    ((@($script:Qos | ForEach-Object { $_.Name }) -join ',') -eq 'someone else''s policy') -and
+    (@($out) -join "`n") -match "removed the mDNS cap.*\(1 policies\)" -and
+    (@($again) -join "`n") -match '\(0 policies\)'
+}
+Check 'mdns-cap: no adapter, one not there or a wildcard is refused before the cap changes' {
+    Reset-Fake
+    $script:NoFirewall = $true
+    $ok = (Throws { Install-MdnsCapOnly -Interface '' } '*-InterfaceAlias <the Dante adapter> is required*') -and
+    (Throws { Test-MdnsCapOnly -Interface '' } '*-InterfaceAlias <the Dante adapter> is required*') -and
+    (Throws { Install-MdnsCapOnly -Interface 'Nope' } "*no network adapter named 'Nope'*") -and
+    (Throws { Install-MdnsCapOnly -Interface 'Dante*' } '*wildcard*')
+    $script:NoFirewall = $false
+    $ok -and $script:Qos.Count -eq 0
+}
+Check 'the fake firewall refuses a call while the one-leg flag is set (the guard works)' {
+    Reset-Fake
+    $script:NoFirewall = $true
+    $threw = Throws { Install-DanteLeg -Interface 'Dante70' } '*a firewall cmdlet was called*'
+    $script:NoFirewall = $false
+    $threw
+}
+
 # ------------------------------------------- the real firewall, disabled
 foreach ($f in 'Get-NetAdapter', 'Get-NetFirewallProfile', 'New-NetFirewallRule', 'Get-NetFirewallRule',
     'Remove-NetFirewallRule', 'Get-NetFirewallPortFilter', 'Get-NetFirewallAddressFilter',
@@ -335,6 +415,7 @@ try {
             Where-Object { $_.InterfaceAlias -notlike 'Loopback*' -and $up -contains $_.InterfaceAlias })
         if ($found.Count -eq 0) { throw 'no connected IPv4 interface on the runner' }
         $alias = $found[0].InterfaceAlias
+        $script:RunnerAlias = $alias
         $out = Install-DanteLeg -Interface $alias -Enabled 'False'
         $problems = @(Get-GroupProblems -Interface $alias -Enabled 'False') + @(Get-MdnsCapProblems)
         foreach ($line in @($out) + $problems) { Write-Host "     $line" }
@@ -348,6 +429,22 @@ try {
         $out = Uninstall-DanteLeg
         $changed.Count -eq 1 -and $changed[0] -match 'rate=400000' -and (Last $out) -eq 0 -and
         @(Get-NetQosPolicy -Name $script:MdnsCap -ErrorAction SilentlyContinue).Count -eq 0
+    }
+    Check 'the real QoS store: the one-leg cap alone installs, reads back and goes, no rule made' {
+        $alias = $script:RunnerAlias
+        $out = Install-MdnsCapOnly -Interface $alias
+        $again = Install-MdnsCapOnly -Interface $alias
+        $problems = @(Get-MdnsCapProblems)
+        # The runner adapter's own ms_pacer binding decides the exit code.
+        $pacer = [int](@(Get-PacerProblems -Interface $alias).Count -gt 0)
+        $check = Test-MdnsCapOnly -Interface $alias
+        $caps = @(Get-NetQosPolicy -Name $script:MdnsCap -ErrorAction SilentlyContinue).Count
+        foreach ($line in @($out) + @($check) + $problems) { Write-Host "     $line" }
+        $removed = Uninstall-MdnsCapOnly
+        $problems.Count -eq 0 -and $caps -eq 1 -and (Last $out) -eq $pacer -and (Last $again) -eq $pacer -and
+        (Last $check) -eq $pacer -and (Last $removed) -eq 0 -and
+        @(Get-NetQosPolicy -Name $script:MdnsCap -ErrorAction SilentlyContinue).Count -eq 0 -and
+        @(Get-NetFirewallRule -Group $script:Group -ErrorAction SilentlyContinue).Count -eq 0
     }
 } finally {
     Get-NetFirewallRule -Group $script:Group -ErrorAction SilentlyContinue | Remove-NetFirewallRule
