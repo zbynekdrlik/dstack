@@ -56,6 +56,12 @@ fn rx_on_time(ticks: &[Tick]) -> u64 {
         .sum()
 }
 
+/// The first late tick with more than one RX dropout, if any: a held tick
+/// may cost one, as for TX.
+fn rx_twice_late(ticks: &[Tick]) -> Option<usize> {
+    ticks.iter().position(|t| t.late >= LATE_TICK && t.rx > 1)
+}
+
 /// The TX gaps a run of ticks may have: each at a tick at least
 /// [`LATE_TICK`] late. Returns the first tick that broke it, if any.
 fn gap_on_time(ticks: &[Tick]) -> Option<usize> {
@@ -86,6 +92,9 @@ fn an_rx_dropout_counts_against_the_restarts_only_at_a_tick_on_time() {
     assert_eq!(rx_on_time(&[t(LATE_TICK, 1), t(on_time, 0)]), 0);
     assert_eq!(rx_on_time(&[t(on_time, 1), t(just_under, 2)]), 3);
     assert_eq!(rx_on_time(&[t(LATE_TICK, 2), t(on_time, 1)]), 1);
+    assert_eq!(rx_twice_late(&[t(LATE_TICK, 1), t(on_time, 2)]), None);
+    assert_eq!(rx_twice_late(&[t(on_time, 0), t(LATE_TICK, 2)]), Some(1));
+    assert_eq!(rx_twice_late(&[t(just_under, 2), t(LATE_TICK, 1)]), None);
 }
 
 #[cfg(any(target_os = "linux", windows))]
@@ -154,6 +163,12 @@ fn one_minute_in_real_time() {
         panic!(
             "a TX gap at tick {i}, {:?} late (under {LATE_TICK:?}): {primed:?} {last:?} {view:?}",
             ticks[i].late
+        );
+    }
+    if let Some(i) = rx_twice_late(&ticks) {
+        panic!(
+            "{} RX dropouts at tick {i}, {:?} late: {primed:?} {last:?} {view:?}",
+            ticks[i].rx, ticks[i].late
         );
     }
     let rx_late = last.rx_underruns - primed.rx_underruns - rx_on_time(&ticks);
