@@ -104,6 +104,16 @@ def void(seen, from_ms, to_ms, peers):
 
 
 def main(argv):
+    """The command line: its exit code. Any error reading the input is 2,
+    never 1 ("the rise stands")."""
+    try:
+        return run(argv)
+    except Exception as e:  # noqa: BLE001 — every error is reported as exit 2
+        print(f"gate error: {e!r}")
+        return 2
+
+
+def run(argv):
     if len(argv) == 3 and argv[1] == "witness":
         witness(argv[2])
         return 0
@@ -126,10 +136,4 @@ def main(argv):
 
 
 if __name__ == "__main__":
-    try:
-        CODE = main(sys.argv)
-    except (OSError, ValueError, KeyError, TypeError) as e:
-        # A read or usage error is never "the rise stands" (exit 1).
-        print(f"gate error: {e!r}")
-        CODE = 2
-    sys.exit(CODE)
+    sys.exit(main(sys.argv))

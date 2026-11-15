@@ -88,7 +88,7 @@ for window in $(seq 1 "$WINDOWS"); do
     "$(peer_arg a "$A0" "$A1")" "$(peer_arg b "$B0" "$B1")") || rc=$?
   if [ "$rc" = 0 ]; then
     echo "::warning title=ci-peer window $window void::the runner stalled: $why;" \
-      "witness stalls: $(awk -v a="$T0" -v b="$T1" '$1 >= a && $1 <= b' "$DIR/witness.txt" | tr '\n' ' ')"
+      "witness stalls (from 1.5 s before, ci_peer_gate.STATUS_AGE_MS): $(awk -v a="$((T0 - 1500))" -v b="$T1" '$1 >= a && $1 <= b' "$DIR/witness.txt" | tr '\n' ' ')"
     [ "$window" -lt "$WINDOWS" ] || fail "the runner stalled in all $WINDOWS windows"
     continue
   fi

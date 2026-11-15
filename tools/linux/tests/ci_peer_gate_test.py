@@ -135,6 +135,12 @@ class Main(unittest.TestCase):
             self.assertEqual(gate.main(args + [f"b=0,0:{b}"]), 1)
             self.assertEqual(gate.main(args + [f"b=1,0:{b}"]), 1)
             self.assertEqual(gate.main(["gate"]), 2)
+            # A status of another shape or a missing file is an error, 2.
+            with open(b, "w", encoding="utf-8") as f:
+                json.dump({"device": {"engine": {"late_wakes_recent": None}}}, f)
+            self.assertEqual(gate.main(args + [f"b=1,1:{b}"]), 2)
+            self.assertEqual(gate.main(args + [f"b=1,1:{d}/none.json"]), 2)
+            self.assertEqual(gate.main(args + [f"b=x,1:{b}"]), 2)
 
 
 if __name__ == "__main__":
