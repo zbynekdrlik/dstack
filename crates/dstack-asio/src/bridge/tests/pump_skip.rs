@@ -114,3 +114,25 @@ fn a_pump_skip_of_38_blocks_is_one_reprime_to_asio_card_fast() {
 fn a_pump_skip_of_38_blocks_is_one_reprime_to_asio_card_slow() {
     one_skip_is_one_reprime(-20.0);
 }
+
+/// The to-ASIO player's priming counts the driver's whole buffer, though
+/// the side fills it in pieces: a prime half a buffer low (the piece's
+/// width) left the controller to drain the offset, +95 ppm 20 s in at no
+/// drift at all (review of dstack #317). At no drift the correction stays
+/// within a few ppm of 0 through the first 30 s.
+#[test]
+fn the_to_asio_player_primes_for_the_whole_asio_buffer() {
+    let mut s = PumpSim::new(0.0);
+    let stats = s.bridge.to_asio_stats();
+    let mut worst: f64 = 0.0;
+    for second in 1..=30 {
+        s.run(f64::from(second), None);
+        worst = worst.max(stats.ppm().abs());
+    }
+    println!("no drift: worst |ppm| {worst:.2} in the first 30 s");
+    assert_eq!(stats.underruns(), 0);
+    assert!(
+        worst < 5.0,
+        "the correction reached {worst} ppm at no drift"
+    );
+}
