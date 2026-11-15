@@ -6,6 +6,8 @@
 
 use super::*;
 
+use std::sync::atomic::AtomicI64;
+
 use crate::bridge::chunk_ns;
 
 const RATE: u32 = 48_000;
@@ -23,6 +25,9 @@ fn buffer() -> AppBuffer {
 /// player is called every 64 frames with the block's start.
 struct Obs {
     fifo: Arc<Fifo>,
+    /// The simulated clock the FIFO stamps on and the player reads, ns:
+    /// the caller's frames (dstack #303, [`Fifo::with_clock`]).
+    clock_ns: Arc<AtomicI64>,
     player: Player,
     /// The caller's frames so far (its clock) and the producer's.
     frames: u64,
@@ -41,10 +46,14 @@ struct Obs {
 
 impl Obs {
     fn new() -> Self {
-        let fifo = Arc::new(fifo_for(1, RATE));
+        let clock_ns = Arc::new(AtomicI64::new(0));
+        let read = Arc::clone(&clock_ns);
+        let fifo =
+            Arc::new(fifo_for(1, RATE).with_clock(Arc::new(move || read.load(Ordering::Relaxed))));
         let player = Player::new(Arc::clone(&fifo), RATE, RATE, buffer(), Arc::default()).unwrap();
         Obs {
             fifo,
+            clock_ns,
             player,
             frames: 0,
             written: 0,
@@ -61,6 +70,7 @@ impl Obs {
     /// (after a stall: the chunks it owes, at once), each write up to 2 ms
     /// either side of its tick (OBS's jitter, a fixed seed).
     fn produce(&mut self) {
+        self.tick_clock();
         while self.writing && self.written + CHUNK as u64 + JITTER <= self.frames + self.jitter {
             self.fifo.push_with(CHUNK, |_, _| 0.25);
             self.written += CHUNK as u64;
@@ -69,6 +79,12 @@ impl Obs {
             self.seed ^= self.seed << 17;
             self.jitter = self.seed % (2 * JITTER + 1);
         }
+    }
+
+    /// The simulated clock at the caller's frames.
+    fn tick_clock(&self) {
+        let ns = (self.frames as f64 * 1e9 / f64::from(RATE)).round() as i64;
+        self.clock_ns.store(ns, Ordering::Relaxed);
     }
 
     /// One call at the caller's clock.

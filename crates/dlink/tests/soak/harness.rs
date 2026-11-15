@@ -9,6 +9,7 @@
 #![allow(dead_code)]
 
 use std::f64::consts::TAU;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use dlink::bridge::{self, AppBuffer, Fifo, Player, Stats};
@@ -17,6 +18,7 @@ use dstack::clock::to_samples;
 use dstack::media::ring::Ring;
 use dstack::media::rx::RxShared;
 use dstack::media::tx::TxShared;
+use dstack::peer::tone::ToneCheck;
 use dstack::stream::{Pump, PumpStats, Timing};
 
 /// The app's rate and the device's (stream-snv: OBS at 48 kHz, the site's
@@ -53,6 +55,12 @@ pub(crate) struct App {
     pub(crate) rx: Arc<Fifo>,
     /// Each block's start and play time, for the test.
     pub(crate) marks: Arc<Mutex<Vec<Mark>>>,
+    /// The TX output's left channel, checked for continuity as a receiver
+    /// hears it (the peer's tone check, dstack #305): any discontinuity,
+    /// counted by the player or not.
+    pub(crate) tx_tone: ToneCheck,
+    pub(crate) tx_left: Vec<f64>,
+    pub(crate) tx_tone_gaps: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl Process for App {
@@ -60,6 +68,12 @@ impl Process for App {
         let frames = block.frames();
         let out = &mut self.out[..frames * CHANNELS];
         self.tx.fill_at(block.start(), out, CHANNELS, |x| x);
+        for (f, y) in self.tx_left[..frames].iter_mut().enumerate() {
+            *y = out[f * CHANNELS];
+        }
+        self.tx_tone.block(&self.tx_left[..frames]);
+        self.tx_tone_gaps
+            .store(self.tx_tone.gaps(), std::sync::atomic::Ordering::Relaxed);
         for c in 0..CHANNELS {
             for (f, y) in block.output(c).iter_mut().enumerate() {
                 *y = out[f * CHANNELS + c];
@@ -104,10 +118,34 @@ pub(crate) struct Ends {
     pub(crate) rx_player: Player,
     pub(crate) rx_stats: Arc<Stats>,
     pub(crate) marks: Arc<Mutex<Vec<Mark>>>,
+    /// The TX output's tone gaps ([`App::tx_tone`]).
+    pub(crate) tx_tone_gaps: Arc<std::sync::atomic::AtomicU64>,
+    /// The app's clock the TX FIFO stamps its writes on and its player
+    /// reads ([`Fifo::with_clock`], dstack #303), ns: set by a simulation
+    /// before each event ([`simulated_path`]); unused on the real clock.
+    pub(crate) app_ns: Arc<AtomicI64>,
     pub(crate) _dir: tempfile::TempDir,
 }
 
+impl Ends {
+    /// The app's clock reads `ns` from now on (a simulated path).
+    pub(crate) fn set_app_ns(&self, ns: i64) {
+        self.app_ns.store(ns, Ordering::Relaxed);
+    }
+}
+
+/// The path on the box's real clocks (the real-time case).
 pub(crate) fn path() -> Path {
+    path_on(false)
+}
+
+/// The path whose TX FIFO stamps on the simulated app clock
+/// ([`Ends::set_app_ns`]).
+pub(crate) fn simulated_path() -> Path {
+    path_on(true)
+}
+
+fn path_on(simulated: bool) -> Path {
     let dir = tempfile::tempdir().unwrap();
     let config = config(dir.path());
     let cfg = config.device().expect("the soak's config");
@@ -116,7 +154,14 @@ pub(crate) fn path() -> Path {
     assert_eq!(timing.block, BLOCK);
     assert_eq!(timing.margin, to_samples(W_NS, DEVICE_RATE));
 
-    let tx_fifo = Arc::new(bridge::fifo_for(CHANNELS, APP_RATE));
+    let app_ns = Arc::new(AtomicI64::new(APP0));
+    let tx_fifo = bridge::fifo_for(CHANNELS, APP_RATE);
+    let tx_fifo = Arc::new(if simulated {
+        let app_ns = Arc::clone(&app_ns);
+        tx_fifo.with_clock(Arc::new(move || app_ns.load(Ordering::Relaxed)))
+    } else {
+        tx_fifo
+    });
     let tx_stats = Arc::new(Stats::default());
     let tx = Player::new(
         Arc::clone(&tx_fifo),
@@ -137,7 +182,11 @@ pub(crate) fn path() -> Path {
     )
     .unwrap();
     let marks = Arc::new(Mutex::new(Vec::new()));
+    let tx_tone_gaps = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let app = App {
+        tx_tone: ToneCheck::default(),
+        tx_left: vec![0.0; 4 * CHUNK],
+        tx_tone_gaps: Arc::clone(&tx_tone_gaps),
         tx,
         out: vec![0.0; 4 * CHUNK * CHANNELS],
         rx: rx_fifo,
@@ -197,6 +246,8 @@ pub(crate) fn path() -> Path {
             rx_player,
             rx_stats,
             marks,
+            tx_tone_gaps,
+            app_ns,
             _dir: dir,
         },
     }
@@ -239,6 +290,8 @@ pub(crate) struct Counts {
     pub(crate) rx_recentres: u64,
     pub(crate) tx_ppm: f64,
     pub(crate) rx_ppm: f64,
+    /// The TX output's tone gaps, counted or not ([`App::tx_tone`]).
+    pub(crate) tx_tone_gaps: u64,
 }
 
 impl Counts {
@@ -252,6 +305,7 @@ impl Counts {
             rx_recentres: p.rx_stats.recentres(),
             tx_ppm: p.tx_stats.ppm(),
             rx_ppm: p.rx_stats.ppm(),
+            tx_tone_gaps: p.tx_tone_gaps.load(std::sync::atomic::Ordering::Relaxed),
         }
     }
 

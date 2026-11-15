@@ -191,3 +191,52 @@ fn a_start_jump_starts_the_play_time_rate_afresh() {
     let ppm = f64::from_bits(shared.play_at_ppm.load(Ordering::Relaxed));
     assert!((ppm - 10.0).abs() < 0.1, "{ppm}");
 }
+
+/// dstack #303: a counted tone break logs exactly one WARN, with its RX
+/// channel, length and the count.
+#[test]
+fn a_tone_break_logs_one_line() {
+    crate::test_log::undecided();
+    let mut p = Tones::new(vec![], 2, 48_000);
+    let frames = 128;
+    let mut out = vec![0.0; 0];
+    let text = crate::test_log::capture_warnings(|| {
+        for b in 0..100u64 {
+            let start = b * frames as u64;
+            let tone: Vec<f64> = (0..frames as u64)
+                .map(|i| tone::tone_at(start + i, 440, 48_000))
+                .collect();
+            // RX 2 drops 4 blocks (512 samples) out at block 40.
+            let dropped = if (40..44).contains(&b) {
+                vec![0.0; frames]
+            } else {
+                tone.clone()
+            };
+            let input = [tone, dropped].concat();
+            let mut block = Block::new(frames, &input, &mut out).at(start);
+            p.process(&mut block);
+        }
+    });
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 1, "{text}");
+    let line = lines[0];
+    for want in [
+        "dstack::peer::tone",
+        "dstack-dev peer: a tone break",
+        "rx_channel=2",
+        "gaps=1",
+    ] {
+        assert!(line.contains(want), "{want}: {line}");
+    }
+    let samples: u64 = line
+        .split("samples=")
+        .nth(1)
+        .and_then(|r| r.split_whitespace().next())
+        .and_then(|n| n.parse().ok())
+        .unwrap_or_else(|| panic!("{line}"));
+    assert!((512..=516).contains(&samples), "{line}");
+    assert!(
+        line.contains(&format!("ms={}", samples as f64 / 48.0)),
+        "{line}"
+    );
+}
