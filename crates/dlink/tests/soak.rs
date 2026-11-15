@@ -345,7 +345,7 @@ impl Soak {
         let Path {
             mut pump,
             ends: mut p,
-        } = path();
+        } = simulated_path();
         let mut rng = Rng(seed);
         let mut ticker = Ticker::new();
         let clock = ManualClock::new(T0);
@@ -362,6 +362,7 @@ impl Soak {
                 clock.sleep_until(wake_at);
                 let now = clock.now_ns().expect("a ready clock");
                 let app = self.app_ns(now);
+                p.set_app_ns(app);
                 let now = pump.read_clocks(&clock, || app).expect("a ready clock");
                 let wake = pump.media(to_samples(now, DEVICE_RATE), Anchor::of(&clock));
                 self.take_marks(&p);
@@ -374,6 +375,7 @@ impl Soak {
                     due + rng.late_ns(self.wakes)
                 };
             } else {
+                p.set_app_ns(self.app_ns(tick_at));
                 ticker.tick(&mut p);
                 tick += 1;
                 tick_at = self.tick_at(tick, &mut rng);

@@ -44,6 +44,6 @@ pub mod player;
 pub mod switch;
 
 pub use buffer::{AppBuffer, MAX_APP_BUFFER_NS, MIN_APP_BUFFER_NS, chunk_ns};
-pub use fifo::Fifo;
+pub use fifo::{Clock, Fifo, Stamp};
 pub use player::{Player, Stats, fifo_for};
 pub use switch::{Switch, Taker, switch};

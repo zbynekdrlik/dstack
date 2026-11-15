@@ -14,8 +14,54 @@
 //! A full FIFO drops the frames that do not fit (the newest) and counts
 //! them in [`Fifo::overflows`]: the reader's position is never moved by the
 //! writer, which would race it.
+//!
+//! **Write stamps** (dstack #303): each write records when it came, on the
+//! FIFO's [`Clock`] (the app's clock, [`dstack::clock::app_monotonic_ns`];
+//! a simulation sets its own with [`Fifo::with_clock`]), with the counts it
+//! brought ([`Stamp`]). The player measures its depth against the line
+//! through the writes ([`super::player`]), not against a sample of the
+//! sawtooth a chunked writer makes. The stamp is a seqlock of four words:
+//! no allocation and no lock on either side; a reader that meets a write
+//! in progress tries again a few times, then goes without.
 
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering, fence};
+
+/// The clock a [`Fifo`] stamps its writes on and its reader reads, ns:
+/// the app's clock ([`dstack::clock::app_monotonic_ns`]) unless set.
+pub type Clock = Arc<dyn Fn() -> i64 + Send + Sync>;
+
+/// A FIFO's last write ([`Fifo::last_write`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Stamp {
+    /// When it came, ns of the FIFO's [`Clock`].
+    pub at_ns: i64,
+    /// The frames written (stored) up to and with it.
+    pub written: u64,
+    /// The frames offered up to and with it, dropped ones too.
+    pub arrived: u64,
+    /// The writes so far, it included (each of at least one frame).
+    pub writes: u64,
+}
+
+impl Stamp {
+    /// The frames a write offered, on average.
+    pub fn mean_write(&self) -> f64 {
+        self.arrived as f64 / self.writes.max(1) as f64
+    }
+}
+
+/// How often a reader tries the stamp while a write is in progress.
+const STAMP_TRIES: usize = 4;
+
+/// The clock's name in `Debug`.
+struct ClockName(Clock);
+
+impl std::fmt::Debug for ClockName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Clock")
+    }
+}
 
 /// The FIFO (module doc).
 #[derive(Debug)]
@@ -34,6 +80,14 @@ pub struct Fifo {
     /// The largest magnitude stored since the last [`Fifo::take_peak`]
     /// (`f32` bits; a non-negative `f32`'s bits order as its value).
     peak: AtomicU32,
+    /// The last write's [`Stamp`], behind a sequence word: odd while the
+    /// writer changes it.
+    stamp_seq: AtomicU64,
+    stamp_at: AtomicU64,
+    stamp_written: AtomicU64,
+    stamp_arrived: AtomicU64,
+    stamp_writes: AtomicU64,
+    clock: ClockName,
 }
 
 impl Fifo {
@@ -52,7 +106,65 @@ impl Fifo {
             arrived: AtomicU64::new(0),
             overflows: AtomicU64::new(0),
             peak: AtomicU32::new(0),
+            stamp_seq: AtomicU64::new(0),
+            stamp_at: AtomicU64::new(0),
+            stamp_written: AtomicU64::new(0),
+            stamp_arrived: AtomicU64::new(0),
+            stamp_writes: AtomicU64::new(0),
+            clock: ClockName(Arc::new(dstack::clock::app_monotonic_ns)),
         }
+    }
+
+    /// The same FIFO stamping its writes on `clock` (a simulation's time;
+    /// module doc). Set it before the first write.
+    pub fn with_clock(mut self, clock: Clock) -> Self {
+        self.clock = ClockName(clock);
+        self
+    }
+
+    /// The FIFO's clock now, ns.
+    pub fn now_ns(&self) -> i64 {
+        (self.clock.0)()
+    }
+
+    /// The last write's stamp: `None` before the first write, or when a
+    /// write was in progress on every try (module doc).
+    pub fn last_write(&self) -> Option<Stamp> {
+        for _ in 0..STAMP_TRIES {
+            let seq = self.stamp_seq.load(Ordering::Acquire);
+            let stamp = Stamp {
+                at_ns: self.stamp_at.load(Ordering::Relaxed) as i64,
+                written: self.stamp_written.load(Ordering::Relaxed),
+                arrived: self.stamp_arrived.load(Ordering::Relaxed),
+                writes: self.stamp_writes.load(Ordering::Relaxed),
+            };
+            fence(Ordering::Acquire);
+            if seq.is_multiple_of(2) && self.stamp_seq.load(Ordering::Relaxed) == seq {
+                return (stamp.writes > 0).then_some(stamp);
+            }
+            std::hint::spin_loop();
+        }
+        None
+    }
+
+    /// The frames read or skipped so far (the reader's position).
+    pub fn read_frames(&self) -> u64 {
+        self.read.load(Ordering::Acquire)
+    }
+
+    /// The writer: records a write, now, that brings the stored count to
+    /// `written` and the offered one to `arrived` (module doc). Called
+    /// before `written` is published, so a reader that took a frame of this
+    /// write sees its stamp too.
+    fn stamp(&self, written: u64, arrived: u64) {
+        let at = self.now_ns();
+        self.stamp_seq.fetch_add(1, Ordering::Relaxed);
+        fence(Ordering::Release);
+        self.stamp_at.store(at as u64, Ordering::Relaxed);
+        self.stamp_written.store(written, Ordering::Relaxed);
+        self.stamp_arrived.store(arrived, Ordering::Relaxed);
+        self.stamp_writes.fetch_add(1, Ordering::Relaxed);
+        self.stamp_seq.fetch_add(1, Ordering::Release);
     }
 
     pub fn channels(&self) -> usize {
@@ -98,10 +210,11 @@ impl Fifo {
     }
 
     /// The producer: writes `frames` frames, channel `c` of frame `f` being
-    /// `sample(f, c)`, as many as fit (the rest is dropped and counted).
-    /// Returns the frames written. Only one thread may write.
+    /// `sample(f, c)`, as many as fit (the rest is dropped and counted),
+    /// stamped on the FIFO's clock (module doc). Returns the frames
+    /// written. Only one thread may write.
     pub fn push_with(&self, frames: usize, sample: impl Fn(usize, usize) -> f64) -> usize {
-        self.arrived.fetch_add(frames as u64, Ordering::Relaxed);
+        let arrived = self.arrived.fetch_add(frames as u64, Ordering::Relaxed) + frames as u64;
         let written = self.written.load(Ordering::Relaxed);
         let read = self.read.load(Ordering::Acquire);
         let held = usize::try_from(written - read).unwrap_or(usize::MAX);
@@ -117,6 +230,9 @@ impl Fifo {
             }
         }
         self.peak.fetch_max(peak.to_bits(), Ordering::Relaxed);
+        if frames > 0 {
+            self.stamp(written + n as u64, arrived);
+        }
         self.written.store(written + n as u64, Ordering::Release);
         self.overflows
             .fetch_add((frames - n) as u64, Ordering::Relaxed);
@@ -153,3 +269,6 @@ impl Fifo {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod stamp_tests;

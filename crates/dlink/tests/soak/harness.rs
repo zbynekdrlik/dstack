@@ -9,6 +9,7 @@
 #![allow(dead_code)]
 
 use std::f64::consts::TAU;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use dlink::bridge::{self, AppBuffer, Fifo, Player, Stats};
@@ -119,10 +120,32 @@ pub(crate) struct Ends {
     pub(crate) marks: Arc<Mutex<Vec<Mark>>>,
     /// The TX output's tone gaps ([`App::tx_tone`]).
     pub(crate) tx_tone_gaps: Arc<std::sync::atomic::AtomicU64>,
+    /// The app's clock the TX FIFO stamps its writes on and its player
+    /// reads ([`Fifo::with_clock`], dstack #303), ns: set by a simulation
+    /// before each event ([`simulated_path`]); unused on the real clock.
+    pub(crate) app_ns: Arc<AtomicI64>,
     pub(crate) _dir: tempfile::TempDir,
 }
 
+impl Ends {
+    /// The app's clock reads `ns` from now on (a simulated path).
+    pub(crate) fn set_app_ns(&self, ns: i64) {
+        self.app_ns.store(ns, Ordering::Relaxed);
+    }
+}
+
+/// The path on the box's real clocks (the real-time case).
 pub(crate) fn path() -> Path {
+    path_on(false)
+}
+
+/// The path whose TX FIFO stamps on the simulated app clock
+/// ([`Ends::set_app_ns`]).
+pub(crate) fn simulated_path() -> Path {
+    path_on(true)
+}
+
+fn path_on(simulated: bool) -> Path {
     let dir = tempfile::tempdir().unwrap();
     let config = config(dir.path());
     let cfg = config.device().expect("the soak's config");
@@ -131,7 +154,14 @@ pub(crate) fn path() -> Path {
     assert_eq!(timing.block, BLOCK);
     assert_eq!(timing.margin, to_samples(W_NS, DEVICE_RATE));
 
-    let tx_fifo = Arc::new(bridge::fifo_for(CHANNELS, APP_RATE));
+    let app_ns = Arc::new(AtomicI64::new(APP0));
+    let tx_fifo = bridge::fifo_for(CHANNELS, APP_RATE);
+    let tx_fifo = Arc::new(if simulated {
+        let app_ns = Arc::clone(&app_ns);
+        tx_fifo.with_clock(Arc::new(move || app_ns.load(Ordering::Relaxed)))
+    } else {
+        tx_fifo
+    });
     let tx_stats = Arc::new(Stats::default());
     let tx = Player::new(
         Arc::clone(&tx_fifo),
@@ -217,6 +247,7 @@ pub(crate) fn path() -> Path {
             rx_stats,
             marks,
             tx_tone_gaps,
+            app_ns,
             _dir: dir,
         },
     }

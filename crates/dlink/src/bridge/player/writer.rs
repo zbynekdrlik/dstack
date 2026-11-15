@@ -26,8 +26,10 @@
 //!   another schedule now), [`Writer::until_next`] says nothing, and the
 //!   player primes as it does for any producer.
 //!
-//! Pure: times are seconds on the player's clock, counts are the FIFO's
-//! arrivals, both given by the caller.
+//! Pure: times are seconds on the clock the player gives (the FIFO's,
+//! each write at its stamp, for a caller on the producer's line, dstack
+//! #303; else the output's, each write when the player saw it), counts are
+//! the FIFO's arrivals.
 
 /// How much of its error a write on time moves the schedule.
 pub const GAIN: f64 = 0.1;
