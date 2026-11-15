@@ -26,6 +26,21 @@ fn only_a_transient_refusal_is_retried() {
     }
 }
 
+/// dstack #195: only the NIC's own refusal (no buffers) raises the flag.
+#[test]
+fn only_no_buffers_is_the_nic_s_refusal() {
+    use crate::clock::Os;
+    assert!(nic_refusal(Os::Windows, Some(10055)));
+    assert!(nic_refusal(Os::Other, Some(105)));
+    assert!(!nic_refusal(Os::Windows, Some(105)));
+    assert!(!nic_refusal(Os::Other, Some(10055)));
+    // Would-block, no memory, other errors, none: never.
+    for code in [Some(10035), Some(11), Some(12), Some(10054), Some(0), None] {
+        assert!(!nic_refusal(Os::Windows, code), "{code:?}");
+        assert!(!nic_refusal(Os::Other, code), "{code:?}");
+    }
+}
+
 #[test]
 fn a_refused_send_is_retried_a_few_times_within_the_flows_latency() {
     use crate::clock::Os;

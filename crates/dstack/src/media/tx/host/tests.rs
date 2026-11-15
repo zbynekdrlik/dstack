@@ -331,6 +331,33 @@ fn a_batch_refused_whole_goes_through_the_udp_socket_and_is_counted() {
     assert_eq!(shared.host_refusals(), (calls, 10055));
 }
 
+/// dstack #195: a batch the NIC refused (no buffers, this OS's code)
+/// raises its slots' flags; another refusal code does not.
+#[test]
+fn a_batch_the_nic_refused_raises_its_slots_flags() {
+    let (nobufs, other_os) = if cfg!(windows) {
+        (10055, 105)
+    } else {
+        (105, 10055)
+    };
+    let shared = shared();
+    let (_a, at_a) = receiver(RESOLVED);
+    let slot = flow(&shared, at_a, 32);
+    let rec = host(&shared, Take::Refuse(other_os));
+    let mut tx = Transmitter::new(Arc::clone(&shared));
+    run(&mut tx, &shared, &rec, slot, 2);
+    assert!(!rec.calls().is_empty());
+    assert_eq!(shared.take_refused(), Vec::<usize>::new());
+    let refused = self::shared();
+    let (_b, at_b) = receiver(RESOLVED);
+    let slot = flow(&refused, at_b, 32);
+    let rec = host(&refused, Take::Refuse(nobufs));
+    let mut tx = Transmitter::new(Arc::clone(&refused));
+    run(&mut tx, &refused, &rec, slot, 2);
+    assert!(!rec.calls().is_empty());
+    assert_eq!(refused.take_refused(), vec![slot + 1]);
+}
+
 /// A refusal without an OS code reads -1, as a lane's `last_os_error`.
 #[test]
 fn a_refusal_without_an_os_code_reads_minus_one() {

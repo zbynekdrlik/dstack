@@ -32,6 +32,9 @@
 //! - [`read_peers`]: the reads, one deadline for all.
 //! - [`on_address`] (pure): our devices on our address in a discovery's
 //!   list; [`neighbours`]: that discovery, run only while the NIC is loud.
+//! - [`recorder`]: the last 30 s of the NIC's traffic and the CPU, second
+//!   by second, dumped once when the NIC refuses our sends (dstack #195),
+//!   with [`cpu`]'s times and, on Windows, [`processes`] on the address.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::{Ipv4Addr, SocketAddr};
@@ -41,7 +44,10 @@ use tracing::warn;
 
 use crate::ctl::probe::{self, ProbeError};
 
+pub mod cpu;
 pub mod neighbours;
+pub mod processes;
+pub mod recorder;
 
 /// How often the watch looks, ns.
 pub const EVERY_NS: u64 = 60_000_000_000;

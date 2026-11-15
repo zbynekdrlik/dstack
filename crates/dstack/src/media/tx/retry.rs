@@ -36,6 +36,20 @@ pub fn transient_refusal(os: crate::clock::Os, code: i32) -> bool {
     }
 }
 
+/// Whether the raw OS error `code` of a failed send on `os` (`None`: the
+/// error has none) is the NIC's own refusal: its transmit path out of
+/// buffers, WSAENOBUFS (10055) on Windows, ENOBUFS (105) elsewhere (Linux's
+/// number). A socket's would-block is not one. Such a refusal raises the
+/// lane's flag, and the control side dumps the traffic recorder once a
+/// burst ([`crate::traffic::recorder`], dstack #195).
+pub fn nic_refusal(os: crate::clock::Os, code: Option<i32>) -> bool {
+    let nobufs = match os {
+        crate::clock::Os::Windows => 10055,
+        crate::clock::Os::Other => 105,
+    };
+    code == Some(nobufs)
+}
+
 /// The wait before sending again a packet whose send failed with the raw
 /// OS error `code` (`None`: the error has none), after `attempt` retries,
 /// `age_ns` past its stamp now, on a flow whose latency floor is

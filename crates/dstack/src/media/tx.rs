@@ -595,9 +595,18 @@ pub struct LaneStats {
     /// last took it; 0: none (dstack #177).
     since_escape: AtomicU64,
     direct: AtomicU64,
+    /// The NIC refused a send of this slot since the control side last
+    /// took it ([`TxShared::take_refused`], dstack #195).
+    refused: AtomicBool,
 }
 
 impl LaneStats {
+    /// The NIC refused a send of this slot (dstack #195): the flag only,
+    /// no allocation or lock (the TX thread's hot path).
+    fn note_refused(&self) {
+        self.refused.store(true, Ordering::Relaxed);
+    }
+
     /// A packet over its receiver's latency left `ns` after the last
     /// bounded escape began: kept when it is the shortest since the last
     /// take ([`TxShared::take_since_escape`]).
@@ -1062,6 +1071,18 @@ impl TxShared {
         (kept != 0).then(|| u64::MAX - kept)
     }
 
+    /// The slots (1-based, as the logs name them) whose sends the NIC
+    /// refused since the last call ([`nic_refusal`], dstack #195);
+    /// each flag cleared. The control side's.
+    pub fn take_refused(&self) -> Vec<usize> {
+        self.lanes
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.refused.swap(false, Ordering::Relaxed))
+            .map(|(slot, _)| slot + 1)
+            .collect()
+    }
+
     /// Slot `slot`'s counts.
     pub fn lane(&self, slot: usize) -> LaneCounts {
         let Some(l) = self.lanes.get(slot) else {
@@ -1094,6 +1115,13 @@ impl TxShared {
             .iter()
             .map(|l| l.bytes.load(Ordering::Relaxed))
             .sum()
+    }
+
+    /// Raises slot `slot`'s refusal flag, as a send the NIC refused does
+    /// (other modules' tests: the traffic recorder's dump, dstack #195).
+    #[cfg(test)]
+    pub(crate) fn note_refused(&self, slot: usize) {
+        self.lanes[slot].note_refused();
     }
 
     /// Counts a sent packet of `len` datagram bytes on slot `slot`, as the
@@ -1983,7 +2011,8 @@ mod pass;
 use pass::{PassClock, Sent, account, send_timed};
 mod retry;
 pub use retry::{
-    SEND_RETRIES, SEND_RETRY_HEADROOM_NS, SEND_RETRY_WAIT_NS, send_retry, transient_refusal,
+    SEND_RETRIES, SEND_RETRY_HEADROOM_NS, SEND_RETRY_WAIT_NS, nic_refusal, send_retry,
+    transient_refusal,
 };
 
 mod multicast;

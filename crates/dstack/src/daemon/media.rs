@@ -520,6 +520,14 @@ pub struct Driver {
     /// The NIC's sent bytes on an address ([`crate::traffic::nic_sent_bytes`];
     /// tests: their own counter).
     nic: fn(Ipv4Addr) -> Option<u64>,
+    /// The last 30 s of the NIC's traffic and the CPU, dumped once a burst
+    /// of send refusals (dstack #195).
+    recorder: crate::traffic::recorder::Recorder,
+    /// The CPU times the recorder samples ([`crate::traffic::cpu::times`]).
+    cpu: fn() -> Option<crate::traffic::recorder::CpuTimes>,
+    /// The processes on our address a dump names
+    /// ([`crate::traffic::processes::on_address`]; tests: their own).
+    processes: fn(Ipv4Addr) -> String,
     /// A media thread's CPU pin found lost (another program's process
     /// affinity rule) or refused, each told once.
     pins: crate::media::repin::PinWatch,
@@ -556,6 +564,9 @@ impl Driver {
                 traffic: crate::traffic::TrafficWatch::new(),
                 neighbours: crate::traffic::neighbours::Neighbours::default(),
                 nic: crate::traffic::nic_sent_bytes,
+                recorder: crate::traffic::recorder::Recorder::new(),
+                cpu: crate::traffic::cpu::times,
+                processes: crate::traffic::processes::on_address,
                 pins: crate::media::repin::PinWatch::new(),
                 names: HashMap::new(),
                 membership,
@@ -566,9 +577,9 @@ impl Driver {
 
     /// One round of the manager now, with the channel records `resolver`
     /// knows; then the checks' round and the late, loss, RX minute, send,
-    /// host, pump, traffic and pin watches, and the interface watch that
-    /// joins the RX multicast flows' groups again after a change (dstack
-    /// #282).
+    /// host, pump, traffic and pin watches, the traffic recorder and its
+    /// dump at a refusal (dstack #195), and the interface watch that joins
+    /// the RX multicast flows' groups again after a change (dstack #282).
     pub fn tick(&mut self, resolver: &dyn Resolver) {
         let now = self.media.rx.now_ns();
         let packets = self.media.rx.packets();
@@ -594,13 +605,11 @@ impl Driver {
         );
         let ip = self.media.ip;
         let nic = self.nic;
-        self.neighbours.tick(
-            &mut self.traffic,
-            now,
-            ip,
-            || nic(ip),
-            self.media.tx.bytes_sent(),
-        );
+        let ours = self.media.tx.bytes_sent();
+        let window = self
+            .neighbours
+            .tick(&mut self.traffic, now, ip, || nic(ip), ours);
+        self.record(now, window.as_ref());
         self.pins.watch(
             crate::media::repin::pin_resets(),
             crate::media::repin::pin_refusals(),
@@ -621,6 +630,31 @@ impl Driver {
         );
     }
 
+    /// The traffic recorder's step at `now` (dstack #195): the traffic
+    /// watch's last `window` gives the neighbours' audio; a sample once a
+    /// second; and at the first refusal of a burst (the TX slots' flags,
+    /// [`crate::media::tx::TxShared::take_refused`]) one WARN with the
+    /// refused slots, the record ([`crate::traffic::recorder::Recorder::report`]:
+    /// per second the NIC's sent bytes, this device's audio, the other
+    /// traffic, this process's and the machine's CPU) and the processes
+    /// holding the most endpoints on our address (Windows).
+    fn record(&mut self, now: u64, window: Option<&crate::traffic::Traffic>) {
+        self.recorder.after_window(window);
+        let ip = self.media.ip;
+        let (nic, cpu) = (self.nic, self.cpu);
+        self.recorder
+            .record(now, || nic(ip), self.media.tx.bytes_sent(), cpu);
+        let slots = self.media.tx.take_refused();
+        if self.recorder.refused(now, !slots.is_empty()) {
+            warn!(
+                slots = ?slots,
+                seconds = %self.recorder.report(),
+                processes = %(self.processes)(ip),
+                "NIC refused sends: the last 30 s of traffic"
+            );
+        }
+    }
+
     /// Our own local status port ([`crate::ctl::local`]; `None`: none), so
     /// the traffic watch never counts this device among its neighbours.
     pub fn set_status_port(&mut self, port: Option<u16>) {
@@ -632,6 +666,18 @@ impl Driver {
     #[cfg(test)]
     pub(crate) fn set_nic(&mut self, nic: fn(Ipv4Addr) -> Option<u64>) {
         self.nic = nic;
+    }
+
+    /// The recorder's CPU read and the dump's process read (tests: fakes,
+    /// the same on every OS).
+    #[cfg(test)]
+    pub(crate) fn set_recorder_reads(
+        &mut self,
+        cpu: fn() -> Option<crate::traffic::recorder::CpuTimes>,
+        processes: fn(Ipv4Addr) -> String,
+    ) {
+        self.cpu = cpu;
+        self.processes = processes;
     }
 
     /// The traffic watch's discovery of our other devices (tests: their own

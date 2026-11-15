@@ -534,6 +534,7 @@ fn a_late_packet_says_whether_the_relay_sent_it_and_how_soon_after_an_escape() {
         result: Ok(false),
         retries: 0,
         took: 0,
+        refused: false,
     };
     let stamp = (c.now_ns - 3_000_000) / 1_000_000 * 96;
     // The TX thread's own late packet, no escape yet: nothing to note.
@@ -2506,6 +2507,18 @@ fn a_send_counts_a_packet_a_direct_one_or_an_error() {
     count_send(&stats, &Err(io::Error::from_raw_os_error(10055)), 50);
     assert_eq!(stats.last_os_error.load(Ordering::Relaxed), 10055);
     assert_eq!(stats.send_errors.load(Ordering::Relaxed), 2);
+}
+
+/// dstack #195: the control side takes the refused slots, 1-based, once.
+#[test]
+fn the_refused_slots_are_taken_once() {
+    let shared = shared_with(Vec::new());
+    assert_eq!(shared.take_refused(), Vec::<usize>::new());
+    shared.note_refused(2);
+    shared.note_refused(5);
+    shared.note_refused(5);
+    assert_eq!(shared.take_refused(), vec![3, 6]);
+    assert_eq!(shared.take_refused(), Vec::<usize>::new());
 }
 
 /// dstack #1: the packets sent on a retry reach the lane's counts.

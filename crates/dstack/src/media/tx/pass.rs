@@ -8,7 +8,7 @@ use std::io;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
-use super::retry::{count_retried, send_with_retries, spin_for};
+use super::retry::{count_retried, nic_refusal, send_with_retries, spin_for};
 use super::{LaneStats, count_send, flow_latency_ns, late_bin, nanos, ns_of, over_latency};
 
 /// A TX pass's clock and the device's timing: what a packet's send and its
@@ -64,17 +64,21 @@ impl PassClock {
 
 /// One packet's send: its outcome (`Ok(true)`: it went direct, past the
 /// qdisc or through the host sender), the retries made, and the longest
-/// single try, ns.
+/// single try, ns; and whether any try was the NIC's own refusal
+/// ([`nic_refusal`], dstack #195), a retry that recovered it too.
 #[derive(Debug)]
 pub(super) struct Sent {
     pub(super) result: io::Result<bool>,
     pub(super) retries: u32,
     pub(super) took: u64,
+    pub(super) refused: bool,
 }
 
 /// Sends the packet stamped `stamp` of a flow of `fpp`-frame packets with
 /// `send`, again while the NIC refuses it for a moment and it can still
-/// arrive in time (dstack #1, [`send_with_retries`]), each try timed.
+/// arrive in time (dstack #1, [`send_with_retries`]), each try timed and
+/// checked for the NIC's refusal ([`nic_refusal`]). No allocation: the TX
+/// thread's hot path.
 pub(super) fn send_timed(
     clock: &PassClock,
     stamp: u64,
@@ -82,15 +86,20 @@ pub(super) fn send_timed(
     mut send: impl FnMut() -> io::Result<bool>,
 ) -> Sent {
     let stamp_ns = ns_of(stamp, clock.rate);
+    let os = crate::clock::Os::current();
     let mut took = 0;
+    let mut refused = false;
     let (result, retries) = send_with_retries(
-        crate::clock::Os::current(),
+        os,
         clock.floor(fpp),
         || clock.now().saturating_sub(stamp_ns),
         || {
             let sent_at = Instant::now();
             let sent = send();
             took = took.max(nanos(sent_at.elapsed()));
+            refused |= sent
+                .as_ref()
+                .is_err_and(|e| nic_refusal(os, e.raw_os_error()));
             sent
         },
         spin_for,
@@ -99,6 +108,7 @@ pub(super) fn send_timed(
         result,
         retries,
         took,
+        refused,
     }
 }
 
@@ -110,7 +120,8 @@ pub(super) fn send_timed(
 /// its receiver's latency also counts whether the relay thread sent it and
 /// how long after the last bounded escape began it left (dstack #177: a
 /// pass ~1 ms late on every slot at once, a few times a day, says whose
-/// time it was).
+/// time it was). A send the NIC refused raises the lane's refusal flag
+/// ([`LaneStats::note_refused`], dstack #195).
 pub(super) fn account(
     stats: &LaneStats,
     clock: &PassClock,
@@ -143,6 +154,9 @@ pub(super) fn account(
     stats.send_max_ns.fetch_max(sent.took, Ordering::Relaxed);
     count_retried(stats, &sent.result, sent.retries);
     count_send(stats, &sent.result, n);
+    if sent.refused {
+        stats.note_refused();
+    }
 }
 
 #[cfg(test)]

@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.6.138
+
+- **Feature (Refs #195, field: the FOH PC 15.11.2026): a send refusal now names its cause.** The NIC refused every TX slot's sends for about 100 ms (WSAENOBUFS) during a service and nothing recorded what filled its send path. Each device now keeps the last 30 s of its NIC's traffic, second by second, on the control side's tick (`traffic::recorder::Recorder`: the NIC's sent bytes, this device's audio, the other traffic past our devices' audio, this process's and the machine's CPU; `traffic::cpu`), and at the first refusal of a burst (WSAENOBUFS 10055 / ENOBUFS 105, `media::tx::nic_refusal`, after 10 s without one) logs one WARN:
+  `NIC refused sends: the last 30 s of traffic slots=[1, 2, ...] seconds=-29s nic=<B/s> ours=<B/s> other=<B/s> cpu=<process>%/<machine>%; ...; -0s ... processes=<name>(<pid>) endpoints=<n> cpu_ms=<ms>, ...`
+  On Windows `processes` lists the 5 processes holding the most TCP and UDP endpoints on the Dante NIC's address (IP Helper, read once a burst off the media path; `traffic::processes`); elsewhere it reads "not read on this OS". The TX thread only raises a per-slot flag (an atomic; no allocation, no lock), also for a refusal a retry recovered. `docs/windows-box.md` says how to read the line.
+- API (additive): `media::tx::nic_refusal`, `TxShared::take_refused`, the `traffic::recorder`, `traffic::cpu` and `traffic::processes` modules.
+- **No latency change** for any device or dlink app: P, (c), W and the app buffer are as in 0.6.137.
+- Consumers: dasio (FOH), camera-box, obs, intercom, songplayer, presenter, iemmixer: move the stack version; nothing to port.
+
 ## 0.6.137
 
 - **Feature (dstack #305, requested by obs#57): a Dante peer and a drifting test clock for an application's CI.** A CI runner has no Dante network and no grandmaster; obs's release gate needs a peer to exchange audio with and the field's drift. `docs/ci-peer.md` is the recipe (a dummy interface, the counters to gate on).
