@@ -18,8 +18,10 @@
 //! [`Player::fill_at`] (the block's start, so a block the pump skipped
 //! resyncs the player once, counted in [`Stats::resyncs`]; dstack #303),
 //! made with [`Player::new`] for the app's rate,
-//! the device's and the device's [`AppBuffer`]
-//! (`crate::Config::bridge_buffer`). The names come from dlisten's
+//! the device's, the device's [`AppBuffer`]
+//! (`crate::Config::bridge_buffer`) and what the app writes at once (its
+//! tick: [`AppBuffer::chunk_ns`]; dstack #317: a FIFO the pump writes
+//! passes [`AppBuffer::block_ns`]). The names come from dlisten's
 //! direction: in this API
 //! `net_rate` is the rate of the FIFO's producer (here the app) and
 //! `out_rate` the caller's (here the device). [`Stats`] carries the

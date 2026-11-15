@@ -244,19 +244,18 @@ impl Media {
     ///
     /// `f` runs on a thread of its own (`dstack-app-status`, started at the
     /// first call, ended with the `Media`), never inside a status request:
-    /// at most once every [`app::REFRESH`], and only while the status is
-    /// read (a read within [`app::READ_WINDOW`]). The status carries the
+    /// once every [`app::REFRESH`], read or not (dstack #317). The status
+    /// carries the
     /// last part `f` returned, so a slow `f` never delays the device's ARC,
     /// CMC or status answers; a part older than [`app::STALE`] carries
     /// `"stale":true` (dtray shows it orange), and a hook still running then
-    /// is warned once. The first status after the hook is set (or after a
-    /// pause in reading) has no part yet or a stale one; the thread calls
-    /// `f` at once for it. A panic in `f` keeps the last part (warned once;
+    /// is warned once. The first status after the hook is set may have no
+    /// part yet; the thread calls `f` at once. A panic in `f` keeps the
+    /// last part (warned once;
     /// `f` is called again at the next refresh). A hook replaced while its
     /// call stalls holds the thread: the new one runs once that call
     /// returns. `f` makes no status request of its own
-    /// ([`crate::ctl::status`], `Link::status`): each counts as a read and
-    /// would keep `f` called once a second for good.
+    /// ([`crate::ctl::status`], `Link::status`).
     ///
     /// dtray reads three keys of it: `line`, a short text shown after the
     /// device's own line, `state`, `"ok"`, `"warn"` (orange) or `"error"`

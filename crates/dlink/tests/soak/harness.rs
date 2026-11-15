@@ -168,6 +168,8 @@ fn path_on(simulated: bool) -> Path {
         APP_RATE,
         APP_RATE,
         buffer,
+        // The app writes the TX FIFO, its tick at a time.
+        buffer.chunk_ns(),
         Arc::clone(&tx_stats),
     )
     .unwrap();
@@ -178,6 +180,8 @@ fn path_on(simulated: bool) -> Path {
         APP_RATE,
         APP_RATE,
         buffer,
+        // The pump writes the RX FIFO, a block at a time (dstack #317).
+        buffer.block_ns(),
         Arc::clone(&rx_stats),
     )
     .unwrap();

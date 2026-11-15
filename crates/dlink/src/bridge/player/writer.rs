@@ -77,7 +77,10 @@ impl Writer {
     /// A write seen at `t_s` that brought the count to `written` (module
     /// doc).
     pub fn wrote(&mut self, t_s: f64, written: u64) {
-        let burst = written.saturating_sub(self.last) as f64 > self.chunk;
+        // A count past a chunk by more than the tolerance (dstack #317): a
+        // reader that looks once a callback sees a small writer's writes of
+        // a whole period at once, a chunk and a few frames.
+        let burst = written.saturating_sub(self.last) as f64 > self.chunk * (1.0 + TOLERANCE);
         self.last = written;
         let Some(due) = self.due_s(written) else {
             self.t0 = Some(t_s - written as f64 / self.rate);

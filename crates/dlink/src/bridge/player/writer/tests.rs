@@ -166,3 +166,20 @@ fn a_drifting_writer_is_followed() {
     let lag = w.due_s(3000 * 960).unwrap() - (t - P * (1.0 - 200e-6));
     assert!(lag.abs() < 0.0001, "{lag}");
 }
+
+/// dstack #317: a count up by a chunk and up to the tolerance more is a
+/// write on its schedule, not a burst (a reader that looks once a callback
+/// sees a small writer's period at once: 35 pump blocks of 32 frames against
+/// a 1115-frame chunk); past that it is a burst and moves nothing.
+#[test]
+fn a_count_up_to_a_chunk_and_the_tolerance_is_no_burst() {
+    for (more, pulled) in [(1152, true), (1200, true), (1201, false), (1248, false)] {
+        let mut w = writer();
+        w.wrote(1.0, 960);
+        let written = 960 + more;
+        let due = w.due_s(written).unwrap();
+        w.wrote(due + 0.002, written);
+        let want = if pulled { due + GAIN * 0.002 } else { due };
+        assert!(close(w.due_s(written).unwrap(), want), "{more} {pulled}");
+    }
+}

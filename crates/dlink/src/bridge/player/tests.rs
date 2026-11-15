@@ -73,6 +73,7 @@ impl Sim {
             net_rate,
             out_rate,
             buffer,
+            buffer.chunk_ns(),
             Arc::default(),
         )
         .unwrap();
@@ -399,6 +400,7 @@ fn an_excess_at_the_start_is_skipped_to_the_target() {
         48_000,
         48_000,
         buffer(48_000),
+        buffer(48_000).chunk_ns(),
         Arc::default(),
     )
     .unwrap();
@@ -520,8 +522,26 @@ fn the_player_maps_our_channels_onto_the_output() {
 #[test]
 fn no_output_channels_or_a_rate_of_zero_are_refused_without_a_panic() {
     let fifo = Arc::new(fifo_for(2, 48_000));
-    assert!(Player::new(Arc::clone(&fifo), 0, 48_000, buffer(48_000), Arc::default()).is_err());
-    let mut player = Player::new(fifo, 48_000, 48_000, buffer(48_000), Arc::default()).unwrap();
+    assert!(
+        Player::new(
+            Arc::clone(&fifo),
+            0,
+            48_000,
+            buffer(48_000),
+            buffer(48_000).chunk_ns(),
+            Arc::default()
+        )
+        .is_err()
+    );
+    let mut player = Player::new(
+        fifo,
+        48_000,
+        48_000,
+        buffer(48_000),
+        buffer(48_000).chunk_ns(),
+        Arc::default(),
+    )
+    .unwrap();
     let mut out = [1.0f64; 4];
     player.fill_with(&mut out, 0, |x| x);
     assert_eq!(out, [1.0; 4]);
@@ -559,6 +579,7 @@ fn a_new_player_counts_on_in_the_same_stats() {
         48_000,
         44_100,
         buffer(48_000),
+        buffer(48_000).chunk_ns(),
         stats.clone(),
     )
     .unwrap();
@@ -582,6 +603,7 @@ fn priming_ends_at_exactly_the_level() {
             48_000,
             48_000,
             buffer(48_000),
+            buffer(48_000).chunk_ns(),
             Arc::default(),
         )
         .unwrap();
@@ -627,6 +649,7 @@ fn under_mono_both_speakers_play_the_sum_of_our_channels() {
         48_000,
         48_000,
         buffer(48_000),
+        buffer(48_000).chunk_ns(),
         Arc::default(),
     );
     let player = std::mem::replace(&mut s.player, stand_in.unwrap());

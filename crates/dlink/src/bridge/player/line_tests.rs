@@ -78,7 +78,15 @@ impl Steady {
         let fifo =
             Arc::new(fifo_for(1, RATE).with_clock(Arc::new(move || read.load(Ordering::Relaxed))));
         let buffer = AppBuffer::new(chunk_ns(CHUNK as u64, RATE), chunk_ns(128, 96_000));
-        let player = Player::new(Arc::clone(&fifo), RATE, RATE, buffer, Arc::default()).unwrap();
+        let player = Player::new(
+            Arc::clone(&fifo),
+            RATE,
+            RATE,
+            buffer,
+            buffer.chunk_ns(),
+            Arc::default(),
+        )
+        .unwrap();
         Steady {
             now,
             fifo,
@@ -172,7 +180,15 @@ fn only_a_caller_naming_its_starts_reads_the_clock() {
         fifo_for(1, RATE).with_clock(Arc::new(move || count.fetch_add(1, Ordering::Relaxed))),
     );
     let buffer = AppBuffer::new(chunk_ns(CHUNK as u64, RATE), chunk_ns(128, 96_000));
-    let mut player = Player::new(Arc::clone(&fifo), RATE, RATE, buffer, Arc::default()).unwrap();
+    let mut player = Player::new(
+        Arc::clone(&fifo),
+        RATE,
+        RATE,
+        buffer,
+        buffer.chunk_ns(),
+        Arc::default(),
+    )
+    .unwrap();
     let mut out = vec![0.0; CALL];
     // A write every 16 calls (1024 frames), two ahead.
     let mut pushed = 0;
