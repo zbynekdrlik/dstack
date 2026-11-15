@@ -92,6 +92,11 @@ const PASS_SLOW_MIN_NS: f64 = 7.5e6;
 const PASS_SLOW_MAX_NS: f64 = 10.3e6;
 /// The field's tick jitter under that pass (OBS's `wake_late_max_ms`).
 const PASS_JITTER_NS: f64 = 0.4e6;
+/// OBS's ticks on an idle box (obs's soak gate on dlink v0.6.140, CI run
+/// 43733406564, 15.11.2026: `tx_push_gap_max_us` 21 342 to 21 424 in every
+/// 10 s status but one): each side, ns. A writer this regular keeps its
+/// write instants at one phase of the pump's 64-frame reads for minutes.
+const STEADY_JITTER_NS: f64 = 0.05e6;
 /// The TX correction's band is judged on the median of this many seconds
 /// (the main's decision on #304: a one-second spike is allowed, a ramp is
 /// not).
@@ -171,6 +176,11 @@ enum Writer {
     /// The FIFO never runs dry (the sawtooth's bottom is about 12 ms), so
     /// no gap is allowed.
     LatePass,
+    /// Regular ticks with almost no jitter (`STEADY_JITTER_NS`): OBS's
+    /// audio thread on an idle box (obs's soak gate on dlink v0.6.140,
+    /// 15.11.2026: push gaps 21.34 to 21.42 ms). The FIFO never runs dry,
+    /// so no gap is allowed.
+    Steady,
 }
 
 /// The gaps in `at` (media times) within [from, to].
@@ -322,6 +332,10 @@ impl Soak {
             };
             return self.media_ns(nominal + jitter + pass);
         }
+        if self.writer == Writer::Steady {
+            let jitter = STEADY_JITTER_NS * (2.0 * rng.unit() - 1.0);
+            return self.media_ns(nominal + jitter);
+        }
         let app = self.stalled(nominal + JITTER_NS * (2.0 * rng.unit() - 1.0));
         self.media_ns(app)
     }
@@ -431,6 +445,8 @@ impl Soak {
 
     /// The pass criteria (#304's design and the main's decisions on it),
     /// hard:
+    /// - after priming: every TX tone gap counted (an underrun, a re-centre
+    ///   or a resync each), so with none counted, no tone gap at all;
     /// - after priming: no TX dropout or re-centre; an irregular writer's
     ///   gaps only at its stalls (one a stall at most: a stall past the
     ///   FIFO's depth is a gap no ratio can mend), none away from them;
@@ -532,8 +548,17 @@ impl Soak {
             assert!(self.jumps.is_empty(), "{label}: {:?}", self.jumps);
             primed
         };
+        // Every discontinuity of the TX output is counted (dstack #303,
+        // obs's v0.6.140 soak: its peer heard 2 tone gaps while dante-input
+        // counted none): an underrun, a re-centre or a resync for each.
+        let tone_gaps = last.tx_tone_gaps - primed.tx_tone_gaps;
+        let counted = (last.tx_sum() + last.tx_resyncs) - (primed.tx_sum() + primed.tx_resyncs);
+        assert!(
+            tone_gaps <= counted,
+            "{label}: {tone_gaps} TX tone gaps, {counted} counted: {primed:?} {last:?}"
+        );
         match self.writer {
-            Writer::Ticks | Writer::LatePass => assert_eq!(
+            Writer::Ticks | Writer::LatePass | Writer::Steady => assert_eq!(
                 (
                     last.tx_underruns - from.tx_underruns,
                     last.tx_recentres - from.tx_recentres,
@@ -554,7 +579,7 @@ impl Soak {
         }
         let band = self.drift_ppm.abs()
             + match self.writer {
-                Writer::Ticks | Writer::LatePass => 2.0,
+                Writer::Ticks | Writer::LatePass | Writer::Steady => 2.0,
                 Writer::Stalling => STALL_BAND_PPM,
             };
         assert!(!medians.is_empty(), "{label}: no settled seconds");
@@ -666,6 +691,23 @@ fn gate_ten_minutes_of_a_late_audio_pass_app_fast() {
 fn gate_ten_minutes_of_a_late_audio_pass_app_slow() {
     Soak::new(-6.0, false, Wakes::Field, Writer::LatePass)
         .run(0x304_0009)
+        .check();
+}
+
+/// OBS's audio thread on an idle box (dstack #303, obs's soak gate on dlink
+/// v0.6.140, 15.11.2026: tx_ppm held 0.0 for 2 min under a 6 ppm skew,
+/// then 15 to 39.7 ppm, and a last-minute median of 22.2 against ±8).
+#[test]
+fn gate_ten_minutes_of_a_steady_writer_app_fast() {
+    Soak::new(6.0, false, Wakes::Field, Writer::Steady)
+        .run(0x304_000a)
+        .check();
+}
+
+#[test]
+fn gate_ten_minutes_of_a_steady_writer_app_slow() {
+    Soak::new(-6.0, false, Wakes::Field, Writer::Steady)
+        .run(0x304_000b)
         .check();
 }
 
