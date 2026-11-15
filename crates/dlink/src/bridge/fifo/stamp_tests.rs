@@ -64,9 +64,9 @@ fn a_stamp_in_progress_is_not_read() {
     let (fifo, _) = clocked(1, 8);
     fifo.push_with(2, |_, _| 0.5);
     assert!(fifo.last_write().is_some());
-    fifo.stamp_seq.fetch_add(1, Ordering::Relaxed);
+    fifo.hold_stamp(true);
     assert_eq!(fifo.last_write(), None);
-    fifo.stamp_seq.fetch_add(1, Ordering::Relaxed);
+    fifo.hold_stamp(false);
     assert_eq!(fifo.last_write().map(|s| s.written), Some(2));
 }
 

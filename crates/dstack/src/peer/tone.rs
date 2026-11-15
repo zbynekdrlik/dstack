@@ -239,7 +239,7 @@ impl ToneCheck {
                 self.gap_len = 0;
             }
         } else {
-            self.good_run += 1;
+            self.good_run = self.good_run.saturating_add(1);
         }
         if !self.in_gap {
             return None;

@@ -22,7 +22,9 @@
 //! through the writes ([`super::player`]), not against a sample of the
 //! sawtooth a chunked writer makes. The stamp is a seqlock of four words:
 //! no allocation and no lock on either side; a reader that meets a write
-//! in progress tries again a few times, then goes without.
+//! in progress tries again a few times, then goes without. Every push reads
+//! the clock once, whether or not its reader uses the stamp (dlisten's
+//! output callback does not).
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering, fence};
@@ -45,7 +47,7 @@ pub struct Stamp {
 }
 
 impl Stamp {
-    /// The frames a write offered, on average.
+    /// The frames a write offered, on average over the FIFO's life.
     pub fn mean_write(&self) -> f64 {
         self.arrived as f64 / self.writes.max(1) as f64
     }
@@ -116,7 +118,8 @@ impl Fifo {
     }
 
     /// The same FIFO stamping its writes on `clock` (a simulation's time;
-    /// module doc). Set it before the first write.
+    /// module doc). Set it before the first write: a stamp taken on the
+    /// clock before would read as a time on this one.
     pub fn with_clock(mut self, clock: Clock) -> Self {
         self.clock = ClockName(clock);
         self
@@ -158,13 +161,34 @@ impl Fifo {
     /// write sees its stamp too.
     fn stamp(&self, written: u64, arrived: u64) {
         let at = self.now_ns();
-        self.stamp_seq.fetch_add(1, Ordering::Relaxed);
-        fence(Ordering::Release);
+        self.stamp_open();
         self.stamp_at.store(at as u64, Ordering::Relaxed);
         self.stamp_written.store(written, Ordering::Relaxed);
         self.stamp_arrived.store(arrived, Ordering::Relaxed);
         self.stamp_writes.fetch_add(1, Ordering::Relaxed);
+        self.stamp_close();
+    }
+
+    /// The writer starts changing the stamp: the sequence word goes odd.
+    fn stamp_open(&self) {
+        self.stamp_seq.fetch_add(1, Ordering::Relaxed);
+        fence(Ordering::Release);
+    }
+
+    /// The writer is done: the sequence word goes even, publishing it.
+    fn stamp_close(&self) {
         self.stamp_seq.fetch_add(1, Ordering::Release);
+    }
+
+    /// A test holds a stamp change open (`true`) as a preempted writer
+    /// would, or closes it.
+    #[cfg(test)]
+    pub(crate) fn hold_stamp(&self, open: bool) {
+        if open {
+            self.stamp_open();
+        } else {
+            self.stamp_close();
+        }
     }
 
     pub fn channels(&self) -> usize {

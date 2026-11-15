@@ -255,6 +255,8 @@ pub struct Player {
     on_line: bool,
     /// The writer's schedule is on the FIFO's clock ([`Player::look`]).
     writer_on_line: bool,
+    /// The last stamp read ([`Fifo::last_write`]).
+    stamp: Option<Stamp>,
     stats: Arc<Stats>,
 }
 
@@ -330,6 +332,7 @@ impl Player {
             mono: false,
             on_line: false,
             writer_on_line: false,
+            stamp: None,
             stats,
         })
     }
@@ -433,15 +436,21 @@ impl Player {
     /// `frames` (the output's clock). A change of clock starts the
     /// schedule again.
     fn look(&mut self, frames: u64) {
-        let stamp = self.on_line.then(|| self.fifo.last_write()).flatten();
-        let on_line = stamp.is_some();
+        let fresh = self.on_line.then(|| self.fifo.last_write()).flatten();
+        if fresh.is_some() {
+            self.stamp = fresh;
+        }
+        // On the line once a write was stamped; a stamp read that met a
+        // write in progress on every try changes nothing.
+        let on_line = self.on_line && self.stamp.is_some();
         if on_line != self.writer_on_line {
             self.writer = Writer::new(self.chunk_in, self.net_rate);
             self.writer_on_line = on_line;
         }
-        let (at_s, arrived) = match stamp {
-            Some(stamp) => (stamp.at_ns as f64 / 1e9, stamp.arrived),
-            None => (self.clock_s(frames), self.fifo.arrived()),
+        let (at_s, arrived) = match (on_line, fresh) {
+            (true, Some(stamp)) => (stamp.at_ns as f64 / 1e9, stamp.arrived),
+            (true, None) => return,
+            (false, _) => (self.clock_s(frames), self.fifo.arrived()),
         };
         if arrived != self.arrived {
             self.arrived = arrived;
@@ -529,9 +538,10 @@ impl Player {
                 _ => level + (swing + need) / 2,
             } + if self.writer_on_line {
                 // On the producer's line the first observation comes
-                // after this call's take, and the line holds through the
-                // call: start a whole call over, where the sampled reads
-                // average half a call (dstack #303).
+                // after this call's take and the line holds through the
+                // call: half a call more, a whole call over the level in
+                // all, where the sampled reads average half a call
+                // (dstack #303).
                 need / 2
             } else {
                 0
@@ -586,29 +596,38 @@ impl Player {
     /// The depth and the producer's count, frames: on the producer's line
     /// for a caller that names its starts and once a write was stamped
     /// (module doc), else the FIFO's own.
-    fn observed(&self) -> (f64, f64) {
-        self.line()
-            .unwrap_or_else(|| (self.fifo.len() as f64, self.fifo.arrived() as f64))
-    }
-
-    /// The depth and the producer's count on the producer's line, frames,
-    /// for a caller that names its starts once a write was stamped (module
-    /// doc).
-    fn line(&self) -> Option<(f64, f64)> {
-        let stamp = self.on_line.then(|| self.fifo.last_write()).flatten()?;
-        Some(producer_line(
-            stamp,
-            self.fifo.now_ns(),
-            f64::from(self.net_rate),
-            self.fifo.read_frames(),
-        ))
+    /// `None` when the stamp read met a write in progress on every try
+    /// after one was stamped: that one observation is skipped, never taken
+    /// in the other measure (the sampled depth is up to half a write off
+    /// the line).
+    fn observed(&mut self) -> Option<(f64, f64)> {
+        let sampled = (self.fifo.len() as f64, self.fifo.arrived() as f64);
+        if !self.on_line {
+            return Some(sampled);
+        }
+        match self.fifo.last_write() {
+            Some(stamp) => {
+                self.stamp = Some(stamp);
+                Some(producer_line(
+                    stamp,
+                    self.fifo.now_ns(),
+                    f64::from(self.net_rate),
+                    self.fifo.read_frames(),
+                ))
+            }
+            None if self.stamp.is_some() => None,
+            // No write yet.
+            None => Some(sampled),
+        }
     }
 
     /// One observation after a converted block, and its answer.
     fn steer(&mut self) {
         let now_s = (self.made + self.skipped) as f64 / f64::from(self.out_rate);
         let net = f64::from(self.net_rate);
-        let (depth, produced) = self.observed();
+        let Some((depth, produced)) = self.observed() else {
+            return;
+        };
         let depth_s = depth / net;
         let produced_s = produced / net;
         let ppm = match self.ctl.observe(now_s, depth_s, 2.0 * now_s - produced_s) {
@@ -637,7 +656,10 @@ impl Player {
 /// counts from 0 (a write stamped after `now_ns` was read) to one mean
 /// write's period: a late write holds the line where it was due, so the
 /// depth falls with the reads until it comes, and a stopped writer never
-/// shows an excess.
+/// shows an excess. The mean write stands for the producer's cycle: one
+/// push a cycle (OBS's tick, dsend's capture packet, an ASIO callback). A
+/// producer that pushed one cycle in several pieces back to back would
+/// halve it, and the line would saturate halfway through the cycle.
 fn producer_line(stamp: Stamp, now_ns: i64, rate: f64, read: u64) -> (f64, f64) {
     let mean = stamp.mean_write();
     let elapsed_s = (now_ns.saturating_sub(stamp.at_ns) as f64 / 1e9).clamp(0.0, mean / rate);
