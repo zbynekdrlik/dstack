@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.142
+
+- **Fix (#313, dasio 15.11.2026): a device config error names the field.** A `device.toml` without `state_file` read ``device config: line 1: missing field `…` ``, and the operator could not tell which field. A parse error now keeps a backticked word when it is exactly a key of the config schema (`DeviceConfig`, its `[[subscribe]]` table, the `timing` names): ``missing field `state_file` ``, and an unknown key's "expected one of" list. Every quoted value and every other backticked word (a misspelt key may hold a device or channel name) is still cut to `…`. The state file's parse errors are unchanged.
+- No API change. **No latency change** for any device or dlink app.
+- Consumers (dasio, dlisten, dsend, OBS, intercom, songplayer, camera-box, presenter): nothing to port; move the stack version to show the field's name.
+
 ## 0.6.141
 
 - **Fix (#312, field: iem-snv 15.11.2026): the LAN self-heal no longer stalls the PC every minute.** Its scheduled task started a new `powershell.exe` each minute; the NetAdapter/NetTCPIP/firewall module imports and CIM queries took ~2.4 s and ~1.6 s CPU (plus ~0.5 s in WmiPrvSE), and an audio device's pump on that PC woke late at exactly those seconds (:37-:41). `tools/windows/lan-selfheal.ps1 -Mode loop` is now one long-lived process from startup, at BelowNormal priority: each minute a quick check with .NET only (the LAN adapter's status and IPv4 addresses, the route's source address, one ping), no CIM or WMI. Only a failed quick check runs the full check, the down-counter and the repair, unchanged (never the Dante adapter, never a cycle of a virtual VLAN adapter, the threshold, the restart gap, the 0.6.109 cleanup). `-Mode install` stops and replaces the per-minute task (a start-up trigger, a 5-minute watchdog trigger with `IgnoreNew`, no time limit, restart on failure) and starts the loop; installing again is idempotent; `-Mode uninstall` stops the loop and removes the task.
