@@ -14,8 +14,12 @@
 //!   and every source over [`CAP_PER_S`]; [`Minute::loud`] says whether
 //!   its line is worth logging (over [`LINE_FLOOR_PER_S`] in all).
 //! - [`report`]: the minute's lines: INFO `mDNS senders in the last
-//!   minute` (only a loud minute) and a WARN `an mDNS sender is over the
-//!   cap` per source over the cap.
+//!   minute` (only a loud minute), a WARN `an mDNS sender is over the
+//!   cap` per source over the cap, and a WARN `an mDNS host refreshes
+//!   Dante records every 96 s` per [`browsers::Browser`] (dstack #319),
+//!   once an hour per host.
+//! - [`browsers`]: the hosts that refresh Dante records on the 96 s cycle
+//!   of a standing browse, from the queries the meter hears.
 //! - [`Meter`]: the process's passive listener on one address (one per
 //!   process and address, shared by every device there; its own thread,
 //!   nothing sent) and the last minute for the devices' status. It counts
@@ -45,6 +49,10 @@ use tracing::{debug, info, trace, warn};
 use crate::membership::{Link, Membership, links, rejoin};
 use crate::network_floor::{self, Below, Guard, Kind};
 use crate::subscribe::instance::MDNS;
+
+pub mod browsers;
+
+use browsers::{Browser, Browsers};
 
 /// Sources counted at most in a minute.
 pub const MAX_SOURCES: usize = 256;
@@ -78,6 +86,9 @@ pub struct Minute {
     pub top: Vec<Rate>,
     /// Every source over [`CAP_PER_S`], loudest first.
     pub over_cap: Vec<Rate>,
+    /// The hosts refreshing Dante records on the 96 s cycle, by address
+    /// ([`browsers`]; set by the meter at the roll).
+    pub browsers: Vec<Browser>,
 }
 
 /// `packets` in `ns` over `per_s` a second: `packets / ns > per_s / 1e9`.
@@ -187,6 +198,7 @@ impl Senders {
             total: self.total,
             top: rates,
             over_cap,
+            browsers: Vec::new(),
         };
         self.start_ns = now_ns;
         self.total = 0;
@@ -209,6 +221,14 @@ pub fn report(m: &Minute) {
             per_s = format_args!("{:.1}", m.per_s(r.packets)),
             cap_per_s = CAP_PER_S,
             "an mDNS sender is over the cap"
+        );
+    }
+    for b in m.browsers.iter().filter(|b| b.warn) {
+        warn!(
+            source = %b.source,
+            period_s = format_args!("{:.1}", b.period_ns as f64 / 1e9),
+            "an mDNS host refreshes Dante records every 96 s: a program there \
+             browses Dante, and every Dante host answers it at once (dstack #319)"
         );
     }
 }
@@ -265,7 +285,7 @@ impl Meter {
             membership: Membership::new(ip),
             read: Box::new(links),
         };
-        Meter::start(sock, Some(watch), ip, minute_ns)
+        Meter::start(sock, Some(watch), ip, minute_ns, Browsers::default())
     }
 
     /// [`Meter::shared`] with the meter `open` makes when none runs on `ip`.
@@ -289,12 +309,14 @@ impl Meter {
     }
 
     /// A meter counting what `sock` receives, in minutes of `minute_ns`,
-    /// its mDNS group membership on `ip` kept by `watch` when there is one.
+    /// its mDNS group membership on `ip` kept by `watch` when there is one,
+    /// the 96 s refreshes looked for by `browsers`.
     pub fn start(
         sock: UdpSocket,
         watch: Option<MeterWatch>,
         ip: Ipv4Addr,
         minute_ns: u64,
+        browsers: Browsers,
     ) -> io::Result<Meter> {
         let last = Arc::new(Mutex::new(None));
         let floor = Arc::new(Mutex::new(Guard::default()));
@@ -305,6 +327,7 @@ impl Meter {
             watch,
             ip,
             minute_ns,
+            browsers,
             last: Arc::clone(&last),
             floor: Arc::clone(&floor),
             stop: Arc::clone(&stop),
@@ -374,6 +397,7 @@ struct Run {
     watch: Option<MeterWatch>,
     ip: Ipv4Addr,
     minute_ns: u64,
+    browsers: Browsers,
     last: Arc<Mutex<Option<Minute>>>,
     floor: Arc<Mutex<Guard>>,
     stop: Arc<AtomicBool>,
@@ -398,12 +422,15 @@ impl Run {
             match self.sock.recv_from(&mut buf) {
                 Ok((n, SocketAddr::V4(from))) => {
                     senders.count(*from.ip());
-                    self.versions(&buf[..n], *from.ip());
+                    let bytes = buf.get(..n).unwrap_or_default();
+                    self.versions(bytes, *from.ip());
+                    self.browsers.heard(*from.ip(), from.port(), bytes, now());
                 }
                 Ok(_) => {}
                 Err(e) => trace!(kind = ?e.kind(), "mDNS meter: nothing this wait"),
             }
-            if let Some(minute) = senders.roll_after(now(), self.minute_ns) {
+            if let Some(mut minute) = senders.roll_after(now(), self.minute_ns) {
+                minute.browsers = self.browsers.take(now());
                 report(&minute);
                 *lock(&self.last) = Some(minute);
             }

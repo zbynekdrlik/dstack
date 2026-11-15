@@ -299,6 +299,8 @@ const WORDS: &[&str] = &[
     "per_s",
     "top",
     "over_cap",
+    "browsers",
+    "period_s",
     "network",
     "floor",
     "below_floor",

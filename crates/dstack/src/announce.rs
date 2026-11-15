@@ -18,6 +18,34 @@
 //! [`records`] is pure: the full set for a device. [`Announcer`] hands it to
 //! the mDNS daemon, withdrawing the records that are gone before it
 //! registers the new ones and sending nothing that did not change.
+//!
+//! The daemon answers and announces only (dstack #319,
+//! `vendor/mdns-sd/DSTACK.md`): it has no browse, so it never refreshes
+//! what it hears. It registers our records:
+//!
+//! ```no_run
+//! let daemon = mdns_sd::ServiceDaemon::new().unwrap();
+//! let info = mdns_sd::ServiceInfo::new(
+//!     "_x._udp.local.", "a", "a.local.", "192.0.2.1", 4440, None,
+//! );
+//! daemon.register(info.unwrap()).unwrap();
+//! ```
+//!
+//! and no build can ask it to query (each of these fails to compile):
+//!
+//! ```compile_fail
+//! mdns_sd::ServiceDaemon::new().unwrap().browse("_x._udp.local.");
+//! ```
+//! ```compile_fail
+//! mdns_sd::ServiceDaemon::new().unwrap().browse_cache("_x._udp.local.");
+//! ```
+//! ```compile_fail
+//! mdns_sd::ServiceDaemon::new().unwrap().resolve_hostname("a.local.", None);
+//! ```
+//! ```compile_fail
+//! let d = mdns_sd::ServiceDaemon::new().unwrap();
+//! d.verify("a._x._udp.local.".into(), std::time::Duration::from_secs(10));
+//! ```
 
 use std::collections::{BTreeMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr};
