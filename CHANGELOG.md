@@ -7,8 +7,14 @@
   - The soak gate has two new cases (`gate_ten_minutes_of_a_steady_writer_app_fast`/`_slow`, ticks within ±0.05 ms): before, the TX correction's 30 s median ran -20.26..-5.79 and -0.84..12.71 ppm; now -5.68..-5.33 and 5.88..5.95. Every gate case also checks that each TX tone gap is a counted underrun, re-centre or resync.
   - API (additive): `dlink::bridge::Clock`, `dlink::bridge::Stamp`, `Fifo::with_clock`, `Fifo::now_ns`, `Fifo::last_write`, `Fifo::read_frames`. A test that drives a TX player on simulated time gives its FIFO that clock with `with_clock`.
 - **Test peer (Refs #303): `dstack-dev peer` logs each tone break.** One WARN when a counted RX tone break ends, target `dstack::peer::tone`, message `dstack-dev peer: a tone break`, fields `rx_channel` (1-based, the status's `RX n`), `samples` and `ms` (first bad sample to last) and `gaps` (the channel's count so far), so an app's CI can time each break against its own events. The status JSON is unchanged. API (additive): `peer::tone::ToneCheck::block_with`.
-- **No latency change** for any device or dlink app: P, (c), W and the app buffer (the bridge target) are as in 0.6.141. No producer API change: obs, dsend, the intercom and dstack-asio keep calling `push_with` and `fill_at`.
+- **No latency change** for any device or dlink app: P, (c), W and the app buffer (the bridge target) are as in 0.6.142. No producer API change: obs, dsend, the intercom and dstack-asio keep calling `push_with` and `fill_at`.
 - Consumers: obs (dante-input TX), intercom, songplayer, camera-box, presenter, dasio: move the stack version; nothing to port.
+
+## 0.6.142
+
+- **Fix (#313, dasio 15.11.2026): a device config error names the field.** A `device.toml` without `state_file` read ``device config: line 1: missing field `…` ``, and the operator could not tell which field. A parse error now keeps a backticked word when it is exactly a key of the config schema (`DeviceConfig`, its `[[subscribe]]` table, the `timing` names): ``missing field `state_file` ``, and an unknown key's "expected one of" list. Every quoted value and every other backticked word (a misspelt key may hold a device or channel name) is still cut to `…`. A misspelt key holding a backtick is now cut whole (before, the part after its backtick reached the log). The state file's parse errors keep cutting every backticked word.
+- No API change. **No latency change** for any device or dlink app.
+- Consumers (dasio, dlisten, dsend, OBS, intercom, songplayer, camera-box, presenter): nothing to port; move the stack version to show the field's name.
 
 ## 0.6.141
 
