@@ -38,7 +38,7 @@ use crate::embed::Embedded;
 use crate::host::{self, ClockSource, HostError, Stopped};
 use crate::stream::Map;
 use args::{Parsed, PeerArgs};
-use tone::{RxTone, ToneCheck};
+use tone::{GapKind, RxTone, ToneCheck};
 
 /// How long the stop waits for the goodbyes.
 pub const STOP_WAIT: Duration = Duration::from_secs(5);
@@ -129,10 +129,13 @@ pub fn play_at_ppm(first: (u64, i64), last: (u64, i64), rate: u32) -> Option<f64
 
 /// One WARN for a tone break that ended on RX channel `ch` (0-based; the
 /// line names `RX ch+1`, as the status does): its length, `samples` at
-/// `rate` and ms, and the channel's breaks so far, `gaps` (dstack #303:
+/// `rate` and ms, the channel's breaks so far, `gaps` (dstack #303:
 /// an app's CI times each break against its own events; the status only
-/// carries the count). Logged on the pump thread when the break ends.
-fn tone_break(ch: usize, samples: u64, rate: u32, gaps: u64) {
+/// carries the count), and its `kind`: `silence` (the energy dropped: the
+/// audio was not there, e.g. silence in the app's own mix) or `misplaced`
+/// (a sample out of place: a skip, a repeat). Logged on the pump thread
+/// when the break ends.
+fn tone_break(ch: usize, samples: u64, rate: u32, gaps: u64, kind: GapKind) {
     let ms = samples as f64 * 1e3 / f64::from(rate.max(1));
     warn!(
         target: "dstack::peer::tone",
@@ -140,6 +143,7 @@ fn tone_break(ch: usize, samples: u64, rate: u32, gaps: u64) {
         samples,
         ms,
         gaps,
+        kind = %kind,
         "dstack-dev peer: a tone break"
     );
 }
@@ -184,8 +188,8 @@ impl Process for Tones {
         let frames = block.frames();
         let rate = self.rate;
         for (ch, check) in self.checks.iter_mut().enumerate() {
-            check.block_with(block.input(ch), |samples, gaps| {
-                tone_break(ch, samples, rate, gaps);
+            check.block_with(block.input(ch), |samples, gaps, kind| {
+                tone_break(ch, samples, rate, gaps, kind);
             });
         }
         self.samples += frames as u64;

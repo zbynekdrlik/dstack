@@ -5,7 +5,9 @@
 //! answer line back, all within one deadline of [`WAIT`]: a stuck or slow
 //! device holds the reader for a second at most. `status` reads it
 //! ([`status`]); `app <words>` asks the app ([`ask`], dstack #139: an app's
-//! output from its menu). Its readers: dtray (dstack #104), and a device's
+//! output from its menu); [`status_as`] reads it as a named local client
+//! (dstack #321: `status <name> <version>`, the device lists it and checks
+//! it against the network floor). Its readers: dtray (dstack #104), and a device's
 //! traffic watch reading its neighbours on the PC ([`crate::traffic`],
 //! dstack #203, with a shorter wait of its own through [`status_at`]).
 
@@ -41,6 +43,36 @@ pub enum ProbeError {
 /// 127.0.0.1, within [`WAIT`].
 pub fn status(port: u16) -> Result<String, ProbeError> {
     status_at(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port).into(), WAIT)
+}
+
+/// The status line of the device whose local endpoint is at `port` on
+/// 127.0.0.1, within [`WAIT`], asked as the local client `client` (dstack
+/// #321: dtray, dtray-cli), which states its name and this build's dstack
+/// version ([`status_from`]).
+pub fn status_as(port: u16, client: &str) -> Result<String, ProbeError> {
+    status_from(
+        SocketAddrV4::new(Ipv4Addr::LOCALHOST, port).into(),
+        client,
+        WAIT,
+    )
+}
+
+/// The status request of the local client `client`: `status <client>
+/// <version>` with this build's dstack version, its newline included.
+pub fn client_request(client: &str) -> String {
+    format!("status {client} {}\n", env!("CARGO_PKG_VERSION"))
+}
+
+/// The status line of the endpoint at `addr`, asked as the local client
+/// `client` ([`client_request`]); a device that refuses it (one from
+/// before dstack #321 answers only a bare `status`; a client name it does
+/// not take) is asked again with a bare `status`. Each exchange within
+/// `wait`.
+pub fn status_from(addr: SocketAddr, client: &str, wait: Duration) -> Result<String, ProbeError> {
+    match ask_at(addr, client_request(client).as_bytes(), wait) {
+        Err(ProbeError::Refused(_)) => status_at(addr, wait),
+        other => other,
+    }
 }
 
 /// The answer of the device whose local endpoint is at `port` to the

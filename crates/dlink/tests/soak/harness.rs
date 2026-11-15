@@ -61,6 +61,8 @@ pub(crate) struct App {
     pub(crate) tx_tone: ToneCheck,
     pub(crate) tx_left: Vec<f64>,
     pub(crate) tx_tone_gaps: Arc<std::sync::atomic::AtomicU64>,
+    /// The tone check has locked on the TX tone ([`ToneCheck::fit`]).
+    pub(crate) tx_tone_locked: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Process for App {
@@ -74,6 +76,10 @@ impl Process for App {
         self.tx_tone.block(&self.tx_left[..frames]);
         self.tx_tone_gaps
             .store(self.tx_tone.gaps(), std::sync::atomic::Ordering::Relaxed);
+        self.tx_tone_locked.store(
+            self.tx_tone.fit().is_some(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
         for c in 0..CHANNELS {
             for (f, y) in block.output(c).iter_mut().enumerate() {
                 *y = out[f * CHANNELS + c];
@@ -120,6 +126,7 @@ pub(crate) struct Ends {
     pub(crate) marks: Arc<Mutex<Vec<Mark>>>,
     /// The TX output's tone gaps ([`App::tx_tone`]).
     pub(crate) tx_tone_gaps: Arc<std::sync::atomic::AtomicU64>,
+    pub(crate) tx_tone_locked: Arc<std::sync::atomic::AtomicBool>,
     /// The app's clock the TX FIFO stamps its writes on and its player
     /// reads ([`Fifo::with_clock`], dstack #303), ns: set by a simulation
     /// before each event ([`simulated_path`]); unused on the real clock.
@@ -187,7 +194,9 @@ fn path_on(simulated: bool) -> Path {
     .unwrap();
     let marks = Arc::new(Mutex::new(Vec::new()));
     let tx_tone_gaps = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let tx_tone_locked = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let app = App {
+        tx_tone_locked: Arc::clone(&tx_tone_locked),
         tx_tone: ToneCheck::default(),
         tx_left: vec![0.0; 4 * CHUNK],
         tx_tone_gaps: Arc::clone(&tx_tone_gaps),
@@ -251,6 +260,7 @@ fn path_on(simulated: bool) -> Path {
             rx_stats,
             marks,
             tx_tone_gaps,
+            tx_tone_locked,
             app_ns,
             _dir: dir,
         },
@@ -318,6 +328,13 @@ impl Counts {
     /// sum is read, as one gap).
     pub(crate) fn tx_sum(&self) -> u64 {
         self.tx_underruns + self.tx_recentres
+    }
+
+    /// Every counted TX event a tone break may come from: the gap
+    /// counters and the resyncs. Not the converter errors, on purpose: one
+    /// must never happen, so its break stays unaccounted and fails the gate.
+    pub(crate) fn tx_events(&self) -> u64 {
+        self.tx_sum() + self.tx_resyncs
     }
 
     /// The RX side's.

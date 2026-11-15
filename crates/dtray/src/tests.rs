@@ -129,6 +129,17 @@ fn the_version_line_names_the_dstack_release() {
     assert!(USAGE.contains("--version"));
 }
 
+/// dstack #321: the client name a program states in its status requests
+/// is the one it set first (dtray-cli's); a later set changes nothing.
+/// The only test that sets it: the process's name is set once.
+#[test]
+fn the_client_name_is_the_one_set_first() {
+    super::set_client("dtray-test");
+    assert_eq!(super::client(), "dtray-test");
+    super::set_client("another");
+    assert_eq!(super::client(), "dtray-test");
+}
+
 #[test]
 fn every_command_line_mode_takes_the_shell_s_console_the_tray_none() {
     // dstack #213: on Windows dtray.exe is a GUI-subsystem program; its

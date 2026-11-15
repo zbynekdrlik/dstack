@@ -14,6 +14,7 @@ use crate::media::ring::Counters;
 use crate::media::rx::RxCounts;
 use crate::media::source::Source;
 use crate::media::tx::{LaneCounts, MAX_FLOWS};
+use crate::network_floor::{Kind, NETWORK_FLOOR};
 use crate::subscribe::SubStatus;
 
 /// A JSON line built in place: keys are ours, values numbers, `null` or
@@ -110,8 +111,10 @@ impl Json {
 }
 
 /// The status line: one JSON object, numbers and fixed words, besides the
-/// device's own `name` and the app's part; the only addresses are the RX
-/// `source`s and the mDNS senders (`mdns`). Channels and flows are
+/// device's own `name`, the app's part and the binaries below the network
+/// floor (`network`, their names and versions); the only addresses are
+/// the RX `source`s, the mDNS senders (`mdns`) and the peers below the
+/// floor (`network`). Channels and flows are
 /// numbered from 1 (flow `n` is slot `n − 1`); every count is cumulative
 /// since the device started.
 ///
@@ -248,7 +251,20 @@ impl Json {
 ///   datagram to the mDNS group that minute, a second), `top` (the loudest
 ///   5 sources, loudest first: `source` (an IPv4 address) and `per_s`),
 ///   `over_cap` (every source over 50 a second averaged over the minute,
-///   the same shape).
+///   the same shape), `browsers` (dstack #319: every host seen lately
+///   sending Dante queries from port 5353 on the 96 s refresh cycle of a
+///   standing browse, by address: `source` and `period_s`, its measured
+///   cycle).
+/// - `network` (dstack #321), once the process's mDNS meter runs or a
+///   local client stated its version ([`crate::network_floor`]): `floor`
+///   (the lowest dstack version allowed on the network, `"0.6.58"`),
+///   `below_floor` (every dstack binary below it seen within the hour:
+///   `kind` `peer`, a device on the network the meter heard, with its Dante
+///   `name`, `address` and `version`; or `client`, a local client of this
+///   status endpoint, with its `name` and `version`), `clients` (every
+///   local client that stated itself within the hour: `name`, `version`).
+///   A WARN `a dstack device below the network floor` goes with each, once
+///   an hour.
 /// - `app` (dstack #104), only once the app set a hook
 ///   ([`Media::set_app_status`]), its thread's first call returned, and
 ///   while it returns a JSON object: that object, compact (the cached part:
@@ -268,9 +284,50 @@ pub fn status(media: &Media) -> String {
     checks_part(&mut j, media);
     engine_part(&mut j, media);
     mdns_part(&mut j, media);
+    network_part(&mut j, media);
     app_part(&mut j, media);
     j.close('}');
     j.out
+}
+
+/// The network floor's part (dstack #321, see [`status`]).
+fn network_part(j: &mut Json, media: &Media) {
+    let clients = media.clients();
+    let peers = media.peers_below_floor();
+    if peers.is_none() && clients.is_empty() {
+        return;
+    }
+    let below_clients = clients
+        .iter()
+        .filter(|c| c.version.below_floor())
+        .map(|c| (Kind::Client, c.name.as_str(), None, c.version));
+    let below_peers = peers
+        .iter()
+        .flatten()
+        .map(|b| (b.kind, b.name.as_str(), b.address, b.version));
+    j.open(Some("network"), '{');
+    j.text("floor", &NETWORK_FLOOR.to_string());
+    j.open(Some("below_floor"), '[');
+    for (kind, name, address, version) in below_peers.chain(below_clients) {
+        j.open(None, '{');
+        j.word("kind", kind.word());
+        j.text("name", name);
+        if let Some(a) = address {
+            j.text("address", &a.to_string());
+        }
+        j.text("version", &version.to_string());
+        j.close('}');
+    }
+    j.close(']');
+    j.open(Some("clients"), '[');
+    for c in &clients {
+        j.open(None, '{');
+        j.text("name", &c.name);
+        j.text("version", &c.version.to_string());
+        j.close('}');
+    }
+    j.close(']');
+    j.close('}');
 }
 
 /// The mDNS meter's last minute (see [`status`]).
@@ -290,6 +347,17 @@ fn mdns_part(j: &mut Json, media: &Media) {
         }
         j.close(']');
     }
+    j.open(Some("browsers"), '[');
+    for b in &m.browsers {
+        j.open(None, '{');
+        j.text("source", &b.source.to_string());
+        j.num(
+            "period_s",
+            format_args!("{:.1}", b.period_ns as f64 / 1_000_000_000.0),
+        );
+        j.close('}');
+    }
+    j.close(']');
     j.close('}');
 }
 

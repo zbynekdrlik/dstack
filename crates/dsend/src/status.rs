@@ -97,6 +97,7 @@ pub fn app_status(v: &AppView<'_>) -> String {
         "depth_ms": (s.depth_ms * 10.0).round() / 10.0,
         "ppm": (s.ppm * 10.0).round() / 10.0,
         "underruns": s.underruns,
+        "convert_errors": s.convert_errors,
         "played": s.played,
         "in_rate": v.in_rate,
         "out_rate": s.out_rate,
@@ -126,6 +127,7 @@ mod tests {
             overflows: 0,
             recentres: 0,
             resyncs: 0,
+            convert_errors: 3,
             priming: false,
             mono: false,
             input_peak: None,
@@ -159,6 +161,7 @@ mod tests {
         assert_eq!(j["depth_ms"], 40.1);
         assert_eq!(j["ppm"], -3.2);
         assert_eq!(j["underruns"], 2);
+        assert_eq!(j["convert_errors"], 3, "dstack #303");
         assert_eq!(j["played"], 480_000);
         assert_eq!(j["in_rate"], 44_100);
         assert_eq!(j["out_rate"], 48_000);

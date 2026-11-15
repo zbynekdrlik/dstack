@@ -28,6 +28,9 @@ pub struct Snapshot {
     /// Re-primes after the pump skipped blocks ([`Stats::resyncs`],
     /// dstack #303).
     pub resyncs: u64,
+    /// Blocks played as silence because the converter refused them
+    /// ([`Stats::convert_errors`], dstack #303).
+    pub convert_errors: u64,
     /// The consumer waits for the FIFO to fill (silence: no audio yet, or a
     /// refill after an underrun).
     pub priming: bool,
@@ -53,6 +56,7 @@ impl Snapshot {
             overflows: fifo.overflows(),
             recentres: stats.recentres(),
             resyncs: stats.resyncs(),
+            convert_errors: stats.convert_errors(),
             priming: stats.priming(),
             mono: stats.mono(),
             input_peak: None,
@@ -83,7 +87,7 @@ fn peak_text(peak: f32) -> String {
 /// 480000 frames played at 48000 Hz` (the live depth of its target, the
 /// app buffer, dstack #247; the underruns are the dropouts), then
 /// `, mono` under `--mono`, `, waiting for audio` while priming and the
-/// overflows, re-centres and resyncs when there are any.
+/// overflows, re-centres, resyncs and converter errors when there are any.
 pub fn line(s: &Snapshot) -> String {
     let mut text = format!(
         "depth {:.1} ms of {:.1} ms, {:+.1} ppm, {} underruns, {} frames played at {} Hz",
@@ -103,6 +107,9 @@ pub fn line(s: &Snapshot) -> String {
     }
     if s.resyncs > 0 {
         text.push_str(&format!(", {} resyncs", s.resyncs));
+    }
+    if s.convert_errors > 0 {
+        text.push_str(&format!(", {} convert errors", s.convert_errors));
     }
     if let Some(peak) = s.input_peak {
         text.push_str(&peak_text(peak));
@@ -219,6 +226,7 @@ mod tests {
             overflows: 0,
             recentres: 0,
             resyncs: 0,
+            convert_errors: 0,
             priming: false,
             mono: false,
             input_peak: None,
@@ -238,6 +246,7 @@ mod tests {
             overflows: 128,
             recentres: 1,
             resyncs: 0,
+            convert_errors: 0,
             ..snap()
         };
         assert_eq!(
@@ -245,6 +254,24 @@ mod tests {
             "depth 40.1 ms of 22.7 ms, -12.0 ppm, 2 underruns, 480000 frames played at 44100 Hz, \
              mono, waiting for audio, 128 frames overflowed, 1 re-centres"
         );
+    }
+
+    /// dstack #303: the converter errors are named in the line when there
+    /// are any.
+    #[test]
+    fn the_converter_errors_are_named_when_there_are_any() {
+        let base = line(&snap());
+        assert!(!base.contains("convert"));
+        assert_eq!(
+            line(&Snapshot {
+                convert_errors: 1,
+                ..snap()
+            }),
+            format!("{base}, 1 convert errors")
+        );
+        let stats = Stats::default();
+        let fifo = fifo_for(1, 48_000);
+        assert_eq!(Snapshot::read(&fifo, &stats, 48_000).convert_errors, 0);
     }
 
     /// dstack #303: the resyncs are read from the player and named in the
@@ -416,6 +443,7 @@ mod tests {
                 overflows: 0,
                 recentres: 0,
                 resyncs: 0,
+                convert_errors: 0,
                 priming: true,
                 mono: false,
                 input_peak: None,

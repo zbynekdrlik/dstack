@@ -5,18 +5,11 @@
 //! [`flume`](https://crates.io/crates/flume) channel. The channel supports
 //! both `recv()` and `recv_async()`.
 //!
-//! For example, a client querying (browsing) a service behaves like this:
-//!```text
-//!  Client       <channel>       mDNS daemon thread
-//!    |                             | starts its run-loop.
-//!    |       --- Browse -->        |
-//!    |                             | detects services
-//!    |                             | finds service instance A
-//!    |       <-- Found A --        |
-//!    |           ...               | resolves service A
-//!    |       <-- Resolved A --     |
-//!    |           ...               |
-//!```
+//! dstack #319: in this vendored copy the daemon is a responder only.
+//! `browse`, `browse_cache`, `resolve_hostname`, `verify` and their `stop_*`
+//! exist only in the crate's own unit tests (`cfg(test)`), so no build can
+//! make the daemon query, cache-refresh or re-confirm records (see DSTACK.md).
+//!
 //! All commands in the public API are sent to the daemon using the unblocking `try_send()`
 //! so that the caller can use it with both sync and async code, with no dependency on any
 //! particular async runtimes.
@@ -24,46 +17,9 @@
 //! # Usage
 //!
 //! The user starts with creating a daemon by calling [`ServiceDaemon::new()`].
-//! Then as a mDNS querier, the user would call [`browse`](`ServiceDaemon::browse`) to
-//! search for services, and/or as a mDNS responder, call [`register`](`ServiceDaemon::register`)
+//! Then as a mDNS responder, the user calls [`register`](`ServiceDaemon::register`)
 //! to publish (i.e. announce) its own service. And, the daemon type can be cloned and passed
 //! around between threads.
-//!
-//! The user can also call [`resolve_hostname`](`ServiceDaemon::resolve_hostname`) to
-//! resolve a hostname to IP addresses using mDNS, regardless if the host publishes a service name.
-//!
-//! ## Example: a client querying for a service type.
-//!
-//! ```rust
-//! use mdns_sd::{ServiceDaemon, ServiceEvent};
-//!
-//! // Create a daemon
-//! let mdns = ServiceDaemon::new().expect("Failed to create daemon");
-//!
-//! // Browse for a service type.
-//! let service_type = "_mdns-sd-my-test._udp.local.";
-//! let receiver = mdns.browse(service_type).expect("Failed to browse");
-//!
-//! // Receive the browse events in sync or async. Here is
-//! // an example of using a thread. Users can call `receiver.recv_async().await`
-//! // if running in async environment.
-//! std::thread::spawn(move || {
-//!     while let Ok(event) = receiver.recv() {
-//!         match event {
-//!             ServiceEvent::ServiceResolved(resolved) => {
-//!                 println!("Resolved a new service: {}", resolved.fullname);
-//!             }
-//!             other_event => {
-//!                 println!("Received other event: {:?}", &other_event);
-//!             }
-//!         }
-//!     }
-//! });
-//!
-//! // Gracefully shutdown the daemon.
-//! std::thread::sleep(std::time::Duration::from_secs(1));
-//! mdns.shutdown().unwrap();
-//! ```
 //!
 //! ## Example: a server publishs a service and responds to queries. Use `monitor()` to
 //! receive events from the daemon, especially errors.
@@ -189,7 +145,7 @@ pub use service_daemon::send_from_v4;
 pub use service_daemon::{
     DaemonEvent, DaemonStatus, DnsNameChange, HostnameResolutionEvent, IfKind, IfPredicate,
     Metrics, ServiceDaemon, ServiceEvent, UnregisterStatus, IP_CHECK_INTERVAL_IN_SECS_DEFAULT,
-    MDNS_PORT, SERVICE_NAME_LEN_MAX_DEFAULT, VERIFY_TIMEOUT_DEFAULT,
+    MDNS_PORT, SERVICE_NAME_LEN_MAX_DEFAULT,
 };
 pub use service_info::{
     AsIpAddrs, IntoTxtProperties, ResolvedService, ServiceInfo, TxtProperties, TxtProperty,

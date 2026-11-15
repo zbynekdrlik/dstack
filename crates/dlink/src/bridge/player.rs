@@ -146,6 +146,7 @@ pub struct Stats {
     played: AtomicU64,
     recentres: AtomicU64,
     resyncs: AtomicU64,
+    convert_errors: AtomicU64,
     /// The converter's correction, ppm (`f64` bits).
     ppm: AtomicU64,
     priming: AtomicBool,
@@ -180,6 +181,13 @@ impl Stats {
     /// rebootstrap); an app publishes it as `tx_resyncs` (dstack #303).
     pub fn resyncs(&self) -> u64 {
         self.resyncs.load(Ordering::Relaxed)
+    }
+
+    /// Blocks played as silence because the converter refused them (never
+    /// with the sizes it gave the player; counted so it is never silent,
+    /// dstack #303); an app publishes it as `convert_errors`.
+    pub fn convert_errors(&self) -> u64 {
+        self.convert_errors.load(Ordering::Relaxed)
     }
 
     /// The converter's correction, ppm.
@@ -240,6 +248,7 @@ pub struct Player {
     /// The re-centres of the players before this one.
     recentres_before: u64,
     resyncs: u64,
+    convert_errors: u64,
     /// The producer's schedule ([`writer`]), followed when its chunk is
     /// wider than the output's callback.
     writer: Writer,
@@ -342,6 +351,7 @@ impl Player {
             played: stats.played(),
             recentres_before: stats.recentres(),
             resyncs: stats.resyncs(),
+            convert_errors: stats.convert_errors(),
             writer: Writer::new(chunk_in, net_rate),
             arrived,
             skipped: 0,
@@ -443,6 +453,8 @@ impl Player {
             Ordering::Relaxed,
         );
         s.resyncs.store(self.resyncs, Ordering::Relaxed);
+        s.convert_errors
+            .store(self.convert_errors, Ordering::Relaxed);
         s.ppm.store(self.ctl.ppm().to_bits(), Ordering::Relaxed);
         s.priming
             .store(matches!(self.state, State::Priming(_)), Ordering::Relaxed);
@@ -609,8 +621,9 @@ impl Player {
             .is_err()
         {
             // Never with the sizes the converter gave; silence, not a panic
-            // on the driver's thread.
+            // on the driver's thread, and counted (dstack #303).
             self.block.fill(0.0);
+            self.convert_errors += 1;
         }
         self.consumed += need as u64;
         self.steer();

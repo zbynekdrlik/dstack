@@ -595,9 +595,37 @@ impl Checks {
     }
 }
 
+/// The local endpoint's refusal of a status request that names no valid
+/// client (dstack #321).
+pub const BAD_CLIENT: &str = "status takes nothing more, or a client's name and dstack version";
+
+/// A status request's client: its name and dstack version.
+pub type StatusClient = (String, crate::network_floor::Version);
+
+/// A local endpoint's status request (dstack #321): `None` for a line that
+/// is no status request; `Ok(None)` for a bare `status`; `Ok(Some(..))`
+/// for `status <name> <version>` with a valid client
+/// ([`crate::network_floor::client_of`]); [`BAD_CLIENT`] otherwise.
+pub fn status_request(line: &str) -> Option<Result<Option<StatusClient>, &'static str>> {
+    let mut words = line.split_ascii_whitespace();
+    if words.next() != Some("status") {
+        return None;
+    }
+    Some(match (words.next(), words.next(), words.next()) {
+        (None, _, _) => Ok(None),
+        (Some(name), Some(version), None) => crate::network_floor::client_of(name, version)
+            .map(Some)
+            .ok_or(BAD_CLIENT),
+        _ => Err(BAD_CLIENT),
+    })
+}
+
 /// The status endpoint for local readers (dtray, dstack #104): TCP on
 /// 127.0.0.1 at a port the OS picks, announced in the device's ARC record
-/// (`dstack_ctl`). It answers `status`, and `app <words>` (dstack #139: the
+/// (`dstack_ctl`). It answers `status`, also as `status <name> <version>`
+/// (dstack #321: the client states its own name and dstack version, which
+/// the status lists under `network.clients` and checks against the network
+/// floor, [`status_request`]), and `app <words>` (dstack #139: the
 /// app's own command, such as dlisten's output, which dtray's menu sends;
 /// [`answer`]). The test requests (`source`, `check`) stay on the
 /// Unix socket, so nothing on the PC changes the device's audio through
@@ -610,7 +638,7 @@ pub mod local {
 
     use tokio::net::{TcpListener, TcpStream};
 
-    use super::{answer, status};
+    use super::{answer, status, status_request};
     use crate::daemon::media::Media;
 
     /// How long a connection may take to send its request, and its answer
@@ -621,8 +649,16 @@ pub mod local {
 
     /// The answer line to `line` (without its newline).
     pub fn reply(line: &str, media: &Media) -> String {
-        if line.trim() == "status" {
-            status(media)
+        if let Some(asked) = status_request(line) {
+            match asked {
+                Ok(client) => {
+                    if let Some((name, version)) = client {
+                        media.client_asked(&name, version);
+                    }
+                    status(media)
+                }
+                Err(reason) => format!("error: {reason}"),
+            }
         } else if line.split_ascii_whitespace().next() == Some("app") {
             answer(line, media)
         } else {

@@ -730,3 +730,29 @@ fn the_status_port_is_a_port_other_than_0() {
     assert_eq!(port(Some("")), None);
     assert_eq!(port(None), None);
 }
+
+/// dstack #321: a listed device of ours below the network floor is named
+/// by `below_floor`; a current one and a device that is not ours are not.
+#[test]
+fn discovery_names_the_listed_dstack_devices_below_the_network_floor() {
+    let device = |name: &str, txt: &[&str]| {
+        vec![
+            rec(ARC_SERVICE, name, 4440, txt),
+            rec(DBC_SERVICE, name, 4455, &[]),
+            rec(CMC_SERVICE, name, 8800, &["id=00000a4d070b0000"]),
+        ]
+    };
+    let (mdns, _) = responder(vec![
+        device("Old", &["dstack_vers=0.6.20"]),
+        device("New", &["dstack_vers=0.6.144"]),
+        card(),
+    ]);
+    let (discovery, _changes) = Discovery::start_to(LOOPBACK, mdns, None).unwrap();
+    eventually("all three listed", || discovery.devices().len() == 3);
+    let below = discovery.below_floor();
+    assert_eq!(below.len(), 1, "{below:?}");
+    assert_eq!(below[0].name, "Old");
+    assert_eq!(below[0].address, Some(LOOPBACK));
+    assert_eq!(below[0].version.to_string(), "0.6.20");
+    discovery.stop().unwrap();
+}
