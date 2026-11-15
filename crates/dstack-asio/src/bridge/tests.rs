@@ -390,3 +390,5 @@ fn a_skipped_block_resyncs_the_player_and_its_pieces_never_do() {
     dante.process(&mut Block::new(block, &input, &mut output).at(start));
     assert_eq!(b.from_asio_stats().resyncs(), 1, "the skip");
 }
+
+mod pump_skip;
