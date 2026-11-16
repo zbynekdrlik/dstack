@@ -90,8 +90,13 @@ fn run<P: Process>(clock: &dyn PtpClock, mut pump: Pump<P>, stop: &AtomicBool) {
         let now = clock.now_ns();
         if let Some(now_ns) = now {
             deadline = None;
+            let epoch = anchor.epoch;
             let wake = pump.media(to_samples(now_ns, rate), anchor);
-            clock.sleep_until(ns_of(wake, rate));
+            let target = ns_of(wake, rate);
+            // The clock just before the sleep: how late it returns is the
+            // next media step's to record (dstack #354).
+            pump.sleeping(target, clock.now_ns(), epoch);
+            clock.sleep_until(target);
         } else {
             pump.free();
             let now = Instant::now();

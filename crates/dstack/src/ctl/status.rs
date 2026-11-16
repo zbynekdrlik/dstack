@@ -262,7 +262,13 @@ impl Json {
 ///   had already sent as silence, most often a block that woke within W
 ///   but ended past the TX's slack); how late the pump woke ([`crate::stream::wake`]):
 ///   `wake_behind_max_us` (since the start), `wake_behind_minute_max_us`
-///   (the last whole minute, absent before the first), `wake_behind_buckets`
+///   (the last whole minute, absent before the first); the lost time split
+///   by cause since the start ([`crate::stream::split`], dstack #354):
+///   `oversleep_max_us` (the latest sleep's return past its target),
+///   `drain_max_us` and `drain_max_datagrams` (the longest socket drain
+///   before a block, the most datagrams one drain read), `max_process_cpu_us`
+///   (the largest block's thread CPU time; absent where unmeasured, off
+///   Linux); `wake_behind_buckets`
 ///   (8 counts: under 0.5, 1, 2, 5, 10, 20, 50 ms, and 50 ms or more),
 ///   `late_wakes` (wakes one block or more behind), `late_wakes_recent`
 ///   (the last 32 of them, oldest first: `unix_ms` UTC, `behind_us`,
@@ -773,6 +779,12 @@ fn engine_part(j: &mut Json, media: &Media) {
     j.num("wake_behind_max_us", v.wake_behind_max_us);
     if let Some(us) = v.wake_behind_minute_max_us {
         j.num("wake_behind_minute_max_us", us);
+    }
+    j.num("oversleep_max_us", v.oversleep_max_us);
+    j.num("drain_max_us", v.drain_max_us);
+    j.num("drain_max_datagrams", v.drain_max_datagrams);
+    if let Some(us) = v.max_process_cpu_us {
+        j.num("max_process_cpu_us", us);
     }
     wakes_part(j, stats.wakes());
     threads_part(j, &media.tx.scheduling().threads());

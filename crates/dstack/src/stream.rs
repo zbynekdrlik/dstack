@@ -41,14 +41,17 @@
 //!   its outputs dropped, while the clock is not ready, so commands, meters
 //!   and the engine's status keep flowing and nothing is sent.
 //!   [`Pump::block`] is the real-time part (I7: no allocation, lock, log or
-//!   system call but the clock read; `tests/hot_path.rs`, rtsan): `process`
+//!   system call but the clock reads: the time and, on Linux, the thread's
+//!   CPU time ([`split`], dstack #354); `tests/hot_path.rs`, rtsan): `process`
 //!   inside `catch_unwind`, a panic zeroes the block and the processor is
 //!   never called again (the backends' crash model).
 //! - [`PumpStats`]: what the engine's status and the control socket read,
 //!   as [`dstack_audio_io::StreamStats`], the stream histograms
 //!   ([`dstack_audio_io::hist::HistSnapshot`]) and a
-//!   [`PumpView`]: each re-bootstrap with its [`Cause`], and how late the
-//!   pump woke ([`wake`], dstack #281).
+//!   [`PumpView`]: each re-bootstrap with its [`Cause`], how late the
+//!   pump woke ([`wake`], dstack #281), and where its lost time went
+//!   ([`split`], dstack #354: the sleep's oversleep, the drain, the
+//!   blocks' CPU time).
 //! - [`app_offset`]: the media clock's offset from the app's clock that
 //!   stamps each block's play time, filtered (dstack #295).
 //! - [`watch::PumpWatch`]: once a second, from the daemon's tick (never
@@ -337,6 +340,11 @@ pub struct Pump<P: Process> {
     /// drain's packet judge (finer than a sample); taken by the next
     /// [`Pump::media`] at that time.
     read_ns: Option<u64>,
+    /// The sleep the thread asked for after the last media step: its
+    /// target and the clock when it asked, ns, and the clock's epoch then
+    /// ([`Pump::sleeping`], dstack #354); taken by the next
+    /// [`Pump::media`].
+    asleep: Option<(u64, u64, u32)>,
 }
 
 impl<P: Process> Pump<P> {
@@ -382,6 +390,7 @@ impl<P: Process> Pump<P> {
             played: play_at::Track::default(),
             intake,
             read_ns: None,
+            asleep: None,
         }
     }
 
@@ -392,11 +401,25 @@ impl<P: Process> Pump<P> {
     }
 
     /// Drains the RX flow sockets into the rings while the pump writes
-    /// them, at PTP time `now_ns` (`None`: the clock is not ready).
+    /// them, at PTP time `now_ns` (`None`: the clock is not ready); the
+    /// drain's own time and datagrams recorded (dstack #354).
     fn drain(&mut self, now_ns: Option<u64>) {
         if let Some(intake) = &mut self.intake {
+            let began = Instant::now();
             intake.drain_into_rings(now_ns);
+            let datagrams = u64::try_from(intake.datagrams()).unwrap_or(u64::MAX);
+            self.stats.drained(nanos(began.elapsed()), datagrams);
         }
+    }
+
+    /// The thread sleeps until media time `target_ns`, asked at `asked_ns`
+    /// (the media clock read just before the sleep; `None`: not read) with
+    /// the clock at `epoch`: the next [`Pump::media`] at the same epoch
+    /// records how late the sleep returned ([`split::oversleep_ns`], dstack
+    /// #354). A wait the thread asked for a time already past records
+    /// nothing (its lateness is the blocks' and drains' before it).
+    pub fn sleeping(&mut self, target_ns: u64, asked_ns: Option<u64>, epoch: u32) {
+        self.asleep = asked_ns.map(|asked| (target_ns, asked, epoch));
     }
 
     /// Reads the app's clock (`app_ns`, [`crate::clock::app_monotonic_ns`]
@@ -455,6 +478,14 @@ impl<P: Process> Pump<P> {
             .take()
             .filter(|&ns| to_samples(ns, rate) == now)
             .unwrap_or_else(|| ns_of(now, rate));
+        // How late the sleep before this wake returned (dstack #354): on the
+        // epoch it was asked on (a new one moved the clock).
+        if let Some((target, asked, epoch)) = self.asleep.take()
+            && epoch == anchor.epoch
+            && let Some(late) = split::oversleep_ns(target, asked, drain_ns)
+        {
+            self.stats.overslept(late);
+        }
         let before = self.engine_shift;
         if self.epoch != Some(anchor.epoch) {
             self.engine_shift = self
@@ -558,6 +589,7 @@ impl<P: Process> Pump<P> {
     pub fn free(&mut self) {
         self.stats.media.store(false, Ordering::Relaxed);
         self.blocks = None;
+        self.asleep = None;
         // Packets keep coming: read (counted unplaced), never left to fill
         // their sockets.
         self.drain(None);
@@ -615,8 +647,10 @@ impl<P: Process> Pump<P> {
         self.leave(entry, fault);
     }
 
-    /// A block's start: the interval since the last one's.
-    fn enter(&mut self) -> Instant {
+    /// A block's start: the interval since the last one's; its time and
+    /// the thread's CPU time then ([`split::thread_cpu_ns`], dstack #354).
+    fn enter(&mut self) -> (Instant, Option<u64>) {
+        let cpu = split::thread_cpu_ns();
         let now = Instant::now();
         if let Some(before) = self.last_entry.replace(now) {
             self.stats
@@ -624,12 +658,16 @@ impl<P: Process> Pump<P> {
                 .interval
                 .record(nanos(now.saturating_duration_since(before)));
         }
-        now
+        (now, cpu)
     }
 
-    /// A block's end: its own time recorded, and a fault after it.
-    fn leave(&mut self, entry: Instant, fault: Option<Box<dyn Any + Send>>) {
-        let took = nanos(entry.elapsed());
+    /// A block's end: its own time and thread CPU time recorded, and a
+    /// fault after it.
+    fn leave(&mut self, entry: (Instant, Option<u64>), fault: Option<Box<dyn Any + Send>>) {
+        let took = nanos(entry.0.elapsed());
+        if let Some(cpu) = split::cpu_between(entry.1, split::thread_cpu_ns()) {
+            self.stats.record_cpu(cpu);
+        }
         self.stats.record(took);
         if let Some(payload) = fault {
             self.stats.fault(panic_message(&*payload), took);
@@ -703,8 +741,9 @@ pub fn inputs_jump(step_ns: i64, rate: u32, shift: Option<i64>) -> bool {
 
 pub mod app_offset;
 pub mod play_at;
+pub mod split;
 mod stats;
-pub use stats::{PumpStats, PumpView};
+pub use stats::{PumpStats, PumpView, SecondSplit};
 mod thread;
 pub use thread::{free_deadline, spawn};
 pub mod wake;
