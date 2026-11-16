@@ -196,16 +196,28 @@ fn the_app_s_look_drains_while_no_switch_pulls() {
     assert_eq!(stats.idle_drains(), 2);
 }
 
-/// A pull that reads another channel count than the to-ASIO FIFO holds
-/// would write past its scratch in the driver's callback: `RxPull::new`
-/// refuses it, so no such pull reaches the bridge. A pull handed over after
-/// the driver's first open would leave that run's player on the pump's
-/// block (dstack #317): refused.
+/// A pull handed over after the driver's first open would leave that run's
+/// player on the pump's block (dstack #317): refused. An open that failed
+/// made no player, so a pull after it is taken. (A pull of another width
+/// than its FIFO never reaches the bridge: `RxPull::new` refuses it, pinned
+/// in dlink.)
 #[test]
-fn a_pull_of_another_width_or_after_the_first_open_is_refused() {
-    let b = Bridge::new(spec(2, 0)).unwrap();
+fn a_pull_after_the_first_open_is_refused_after_a_failed_one_taken() {
+    let mut b = Bridge::new(spec(1, 1)).unwrap();
+    drop(b.dante_side());
+    let both = Opened {
+        driver_inputs: 1,
+        inputs: vec![0],
+        input_sample: Some(Sample::Int32),
+        ..driver()
+    };
+    assert_eq!(
+        b.asio_side(&both).err().as_deref(),
+        Some(dlink::bridge::switch::GONE),
+        "no pump to take the from-ASIO player: the open fails"
+    );
     let fifo = b.to_asio_fifo().unwrap();
-    assert!(rig(&fifo).pull.is_none(), "one RX channel for two");
+    assert_eq!(b.pull_to_asio(rig(&fifo).pull.take().unwrap()), Ok(()));
     let mut b = Bridge::new(spec(1, 0)).unwrap();
     let fifo = b.to_asio_fifo().unwrap();
     let _asio = b.asio_side(&driver()).unwrap();

@@ -221,9 +221,9 @@ impl Bridge {
     /// The look at the to-ASIO pull ([`Bridge::pull_to_asio`]), from the
     /// app's own loop on a steady period (about every 250 ms; never the
     /// pump or the driver's callback). The period must be longer than the
-    /// driver's buffer period (at most about 150 ms: the bridge's largest
-    /// target), or a driver that runs reads as stopped between two
-    /// switches and the drain restarts its read. While no driver side pulls (no
+    /// driver's buffer period (under 150 ms at the default target; a set
+    /// app buffer admits a longer one), or a driver that runs reads as
+    /// stopped between two switches and the drain restarts its read. While no driver side pulls (no
     /// driver open: closed, the reopen backoff, a stalled driver), it
     /// drains the flow sockets itself (`RxPull::drain_idle`), so the flow
     /// stays heard and the device keeps it; a buffer switch that pulls
