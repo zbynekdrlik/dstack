@@ -11,7 +11,7 @@ use tracing::{info, warn};
 use super::resolve::{Advertised, Multicast, MulticastLookup, Resolver};
 use super::{
     Action, FPP_STEP_MAX, Flow, FlowId, MAX_FLOWS, MAX_FPP_FLOORS, Manager, QUICK_RETRY_NS, Route,
-    SubStatus, retry_after,
+    SubStatus, flow_latency, retry_after,
 };
 use crate::flows::control::FlowRequest;
 use crate::media::packet::MEDIA_HEADER;
@@ -175,7 +175,7 @@ impl Manager {
             slots,
             bits: m.bits,
             fpp: m.fpp,
-            latency_ns: a.latency_ns.max(self.latency_ns),
+            latency_ns: flow_latency(a.latency_ns, self.latency_ns),
             device: name.to_ascii_lowercase(),
             name,
             advertised_ns: a.latency_ns,
@@ -261,7 +261,7 @@ impl Manager {
             }
         }
         ids.resize(n, None);
-        let latency_ns = first.latency_ns.max(self.latency_ns);
+        let latency_ns = flow_latency(first.latency_ns, self.latency_ns);
         self.generation = self.generation.wrapping_add(1);
         let id = FlowId {
             slot,

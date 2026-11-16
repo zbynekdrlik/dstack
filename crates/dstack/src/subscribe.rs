@@ -147,6 +147,14 @@ pub fn retry_after(failures: u32) -> u64 {
     (RETRY_NS << failures.saturating_sub(1).min(3)).min(RETRY_MAX_NS)
 }
 
+/// A flow's latency at the device latency `device_ns`: its transmitter's
+/// advertised latency (`advertised_ns`, 0 for none) or ours, the larger.
+/// A new flow takes it at its request, a running one at a latency write
+/// (dstack #352).
+fn flow_latency(advertised_ns: u64, device_ns: u64) -> u64 {
+    advertised_ns.max(device_ns)
+}
+
 /// One flow: its slot and which of the slot's flows it is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FlowId {
@@ -365,10 +373,24 @@ impl Manager {
     }
 
     /// The device latency is `ns` now (Dante Controller set it): every
-    /// flow's playout and delay follow from the next plan read
-    /// ([`Manager::rx_plan`]).
+    /// running flow takes it as a new flow would ([`flow_latency`]),
+    /// so the flow list states it and each flow's playout and delay follow
+    /// from the next plan read ([`Manager::rx_plan`]), with the same flow
+    /// (dstack #352). Nothing goes to a transmitter: a flow request carries
+    /// no latency. The audio jumps once by the change (a lower latency
+    /// skips that much, a higher one reads it again).
     pub fn set_latency(&mut self, ns: u64) {
+        let was = self.latency_ns;
         self.latency_ns = ns;
+        for f in self.flows.iter_mut().flatten() {
+            f.latency_ns = flow_latency(f.advertised_ns, ns);
+        }
+        tracing::info!(
+            from_ns = was,
+            latency_ns = ns,
+            flows = self.flows.iter().flatten().count(),
+            "RX flows take the new device latency"
+        );
     }
 
     /// The device latency the flows are planned with, ns.
