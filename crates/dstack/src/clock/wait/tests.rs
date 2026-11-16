@@ -71,6 +71,7 @@ fn plan(spin_tail_ns: i64, escape: bool) -> Plan {
         escape_block_ns: 500_000,
         no_yield_ns: 0,
         give_cap_ns: i64::MAX,
+        give_on_timer: false,
     }
 }
 
