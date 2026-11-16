@@ -1,0 +1,419 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
+//! Which thread lost the real-time soak's audio (dstack #339): the test's
+//! app thread (its tick writes the TX FIFO and reads the RX FIFO) or the
+//! pump (it reads the TX FIFO and writes the RX FIFO), each not run long
+//! enough by the box to lose it, or neither: then the loss is ours. A run
+//! that lost audio fails either way; the verdict only says whether a rerun
+//! can pass.
+//!
+//! What each thread can cost, from the bridges' design (`bridge::player`):
+//! - A TX underrun: the TX FIFO ran dry between the depth read at the
+//!   tick's start and the tick's write. The pump runs on the app's clock
+//!   (module doc of `soak_real_time.rs`), so it never takes frames ahead of
+//!   real time: the FIFO's depth runs dry no earlier than its depth less
+//!   one converter call ([`CALL_MS`]) after the read, unless the pump
+//!   already owed blocks at the read (a backlog it then catches up at
+//!   once). So the app's write must have landed that late, the pump's
+//!   backlog at the read counted in.
+//! - A TX re-centre: the pump was not run while the app kept writing, until
+//!   the depth passed the target by the player's hard excess.
+//! - An RX dropout: the pump was not run long enough to leave less than a
+//!   tick's read in the RX FIFO (the depth before a read normally holds a
+//!   tick and some spare: the run's median less [`CHUNK`]).
+//!
+//! A pump stall is read from its late wakes (the pump records each wake one
+//! block or more behind its due time, with its wall time): it was not run
+//! from at most `behind` before the wake until the wake. The app thread's
+//! hold is where its write landed (`Fifo::last_write`, the app's clock)
+//! against the tick's start. Evidence shows a thread was late (not run, or
+//! blocked), not why: a stack lock that blocks the pump reads like the box.
+
+use std::collections::BTreeSet;
+use std::fmt::Write as _;
+
+use super::harness::{APP_RATE, CHUNK};
+use super::{LATE_TICK, Tick, held};
+
+/// One converter call of the TX player, ms (`dlink::bridge::player::BLOCK`
+/// output frames, at the app's rate on both sides).
+pub(crate) const CALL_MS: f64 = dlink::bridge::player::BLOCK as f64 * 1e3 / APP_RATE as f64;
+/// The app's tick, ms.
+pub(crate) const CHUNK_MS: f64 = CHUNK as f64 * 1e3 / APP_RATE as f64;
+/// The slack of a comparison in ms: the wall time of a late wake is whole
+/// ms, and the converter's call varies by its ratio.
+pub(crate) const SLACK_MS: f64 = 1.0;
+
+/// One late pump wake: its wall time (whole ms since the Unix epoch), how
+/// far behind its due time it was (µs), and whether the pump restarted.
+pub(crate) type Wake = (u64, u64, bool);
+
+/// The pump's late wakes, merged as the test's ticks see them: the status
+/// keeps the last 32 only.
+#[derive(Debug, Default)]
+pub(crate) struct Wakes {
+    pub(crate) seen: BTreeSet<Wake>,
+    /// The count the last merge read (`WakeLateness::late_wakes`).
+    pub(crate) count: u64,
+    /// Late wakes that left the status's list before a merge read them.
+    pub(crate) lost: u64,
+}
+
+impl Wakes {
+    /// Merges the pump's late wakes: `count` since the start, `recent` the
+    /// ones the status keeps (`keeps` of them at most).
+    pub(crate) fn merge(&mut self, count: u64, recent: impl Iterator<Item = Wake>, keeps: u64) {
+        if count > self.count {
+            self.lost += (count - self.count).saturating_sub(keeps);
+            self.count = count;
+            self.seen.extend(recent);
+        }
+    }
+
+    /// The stalls (wall ms: start, end) that overlap `from..=to` (ms).
+    fn stalls(&self, from: f64, to: f64) -> impl Iterator<Item = (f64, f64, &Wake)> {
+        self.seen.iter().filter_map(move |w| {
+            let end = w.0 as f64;
+            let start = end - w.1 as f64 / 1e3;
+            (start <= to + SLACK_MS && end + SLACK_MS >= from).then_some((start, end, w))
+        })
+    }
+}
+
+/// What a loss needed and what the threads did around it.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Loss {
+    pub(crate) tick: usize,
+    pub(crate) what: &'static str,
+    /// The thread that explains it, if any.
+    pub(crate) runner: Option<String>,
+    /// The threads' record around it, shown either way.
+    pub(crate) around: String,
+}
+
+/// The TX re-centre's stall: the depth before the tick's write `depth_ms`
+/// plus the tick it writes must pass the target `target_ms` by the excess
+/// `excess_ms` (`bridge::player::hard_excess_s`).
+pub(crate) fn recentre_stall_ms(target_ms: f64, excess_ms: f64, depth_ms: f64) -> f64 {
+    target_ms + excess_ms - (depth_ms + CHUNK_MS)
+}
+
+/// The losses the run's rules do not allow (`gap_on_time`, `rx_twice_late`,
+/// and the RX dropouts at ticks on time past `restarts`), each judged.
+/// `rx_median_ms` is the RX FIFO's usual depth before a read; `target_ms`
+/// and `excess_ms` the TX bridge's.
+pub(crate) fn losses(
+    ticks: &[Tick],
+    wakes: &Wakes,
+    restarts: u64,
+    target_ms: f64,
+    excess_ms: f64,
+) -> Vec<Loss> {
+    let rx_median_ms = median(ticks.iter().map(|t| t.rx_depth_ms));
+    let on_time_rx: u64 = (0..ticks.len())
+        .filter(|&i| !held(ticks, i))
+        .map(|i| ticks[i].rx)
+        .sum();
+    let mut out = Vec::new();
+    for (i, t) in ticks.iter().enumerate() {
+        let from = if i == 0 {
+            t.top_ms
+        } else {
+            ticks[i - 1].end_ms
+        } as f64;
+        let to = t.end_ms as f64;
+        if t.gap && t.late < LATE_TICK {
+            let (what, runner) = if t.underrun {
+                ("TX underrun", tx_underrun(t, wakes))
+            } else {
+                let need = recentre_stall_ms(target_ms, excess_ms, t.tx_depth_ms);
+                ("TX re-centre", pump_stall(wakes, from, to, need))
+            };
+            out.push(Loss {
+                tick: i,
+                what,
+                runner,
+                around: around(t, wakes, from, to),
+            });
+        }
+        let judged = if held(ticks, i) {
+            t.rx > 1
+        } else {
+            t.rx > 0 && on_time_rx > restarts
+        };
+        if judged {
+            let need = rx_median_ms - CHUNK_MS;
+            out.push(Loss {
+                tick: i,
+                what: "RX dropout",
+                runner: pump_stall(wakes, from, to, need),
+                around: around(t, wakes, from, to),
+            });
+        }
+    }
+    out
+}
+
+/// A TX underrun's thread: the app's write landed past the dry point of the
+/// depth read before it, the pump's backlog at that read counted in.
+fn tx_underrun(t: &Tick, wakes: &Wakes) -> Option<String> {
+    let top = t.top_ms as f64;
+    let backlog = wakes
+        .stalls(top, top)
+        .map(|(start, end, _)| (top - start).clamp(0.0, end - start))
+        .fold(0.0, f64::max);
+    let dry = t.tx_depth_ms - CALL_MS;
+    (t.wrote_ms + backlog + SLACK_MS >= dry).then(|| {
+        format!(
+            "the app's write landed {:.2} ms after the tick's start ({:.2} ms after its due \
+             time){}, past the {:.2} ms the TX FIFO held less one call",
+            t.wrote_ms,
+            t.wrote_ms + t.late.as_secs_f64() * 1e3,
+            if backlog > 0.0 {
+                format!(" with the pump {backlog:.2} ms behind at the start")
+            } else {
+                String::new()
+            },
+            t.tx_depth_ms
+        )
+    })
+}
+
+/// A pump stall overlapping `from..=to` (wall ms) of at least `need_ms`, or
+/// a pump restart there.
+fn pump_stall(wakes: &Wakes, from: f64, to: f64, need_ms: f64) -> Option<String> {
+    wakes
+        .stalls(from, to)
+        .find(|(start, end, w)| w.2 || end - start + SLACK_MS >= need_ms)
+        .map(|(start, end, w)| {
+            format!(
+                "the pump was not run for {:.2} ms (a late wake {} us behind at {}{}), \
+                 {:.2} ms would lose it",
+                end - start,
+                w.1,
+                w.0,
+                if w.2 { ", restarted" } else { "" },
+                need_ms
+            )
+        })
+}
+
+/// The threads' record around a loss: the pump's late wakes and its counts
+/// at that tick, and the app's tick.
+fn around(t: &Tick, wakes: &Wakes, from: f64, to: f64) -> String {
+    let mut s = format!(
+        "app: tick {:.2} ms late, write landed {:.2} ms after its start, TX depth before it \
+         {:.2} ms, RX depth {:.2} ms; pump: late wakes [",
+        t.late.as_secs_f64() * 1e3,
+        t.wrote_ms,
+        t.tx_depth_ms,
+        t.rx_depth_ms
+    );
+    // A wider window than the evidence's: what led up to it.
+    for (start, end, w) in wakes.stalls(from - 60.0, to + 60.0) {
+        let _ = write!(s, "{:.0}..{:.0} ({} us), ", start, end, w.1);
+    }
+    let _ = write!(
+        s,
+        "] in {from:.0}..{to:.0}, at this tick: overruns +{}, writes_after_send +{}, blocks \
+         over two periods +{}, longest block so far {} us",
+        t.overruns, t.after_send, t.long_blocks, t.max_process_us
+    );
+    s
+}
+
+/// The verdict line over `losses`: RUNNER when every one has a thread the
+/// box did not run long enough, else OURS.
+pub(crate) fn verdict(losses: &[Loss], lost_wakes: u64) -> String {
+    let mut s = String::new();
+    let unexplained = losses.iter().filter(|l| l.runner.is_none()).count();
+    let _ = if losses.is_empty() {
+        write!(s, "VERDICT NO LOSS")
+    } else if unexplained == 0 {
+        write!(
+            s,
+            "VERDICT RUNNER: every loss ({}) had a thread the box did not run long enough; \
+             rerun",
+            losses.len()
+        )
+    } else {
+        write!(
+            s,
+            "VERDICT OURS: {unexplained} of {} losses with no thread late enough to lose them",
+            losses.len()
+        )
+    };
+    let _ = write!(s, " ({lost_wakes} pump late wakes lost from the status)");
+    for l in losses {
+        let _ = write!(
+            s,
+            "\n- tick {} {}: {}\n  {}",
+            l.tick,
+            l.what,
+            l.runner.as_deref().unwrap_or("no thread late enough"),
+            l.around
+        );
+    }
+    s
+}
+
+/// The median of `values` (0 when empty).
+pub(crate) fn median(values: impl Iterator<Item = f64>) -> f64 {
+    let mut v: Vec<f64> = values.collect();
+    v.sort_by(f64::total_cmp);
+    v.get(v.len() / 2).copied().unwrap_or(0.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+
+    /// A tick on time at wall ms `at`, its TX depth 12 ms and RX 33 ms.
+    fn tick(at: u64) -> Tick {
+        Tick {
+            late: Duration::from_micros(500),
+            top_ms: at,
+            end_ms: at + 1,
+            wrote_ms: 0.05,
+            tx_depth_ms: 12.0,
+            rx_depth_ms: 33.0,
+            ..Tick::default()
+        }
+    }
+
+    /// Ticks every 21 ms from wall ms 1000, the last one `last`.
+    fn run(last: Tick) -> Vec<Tick> {
+        let mut ticks: Vec<Tick> = (0..9).map(|i| tick(1000 + 21 * i)).collect();
+        ticks.push(Tick {
+            top_ms: 1189,
+            end_ms: 1190,
+            ..last
+        });
+        ticks
+    }
+
+    fn wakes(seen: &[Wake]) -> Wakes {
+        Wakes {
+            seen: seen.iter().copied().collect(),
+            ..Wakes::default()
+        }
+    }
+
+    fn judge(ticks: &[Tick], wakes: &Wakes) -> Vec<Loss> {
+        losses(ticks, wakes, 0, 22.67, 45.33)
+    }
+
+    #[test]
+    fn a_tx_underrun_is_the_app_s_only_when_its_write_landed_past_the_dry_point() {
+        let gap = |wrote_ms| Tick {
+            gap: true,
+            underrun: true,
+            wrote_ms,
+            ..tick(0)
+        };
+        // Dry no earlier than 12 - 2.67 = 9.33 ms after the start, with 1 ms of slack.
+        let late = judge(&run(gap(8.4)), &Wakes::default());
+        assert_eq!(late.len(), 1);
+        assert_eq!(late[0].what, "TX underrun");
+        assert!(
+            late[0]
+                .runner
+                .as_deref()
+                .unwrap()
+                .contains("landed 8.40 ms")
+        );
+        let on_time = judge(&run(gap(8.3)), &Wakes::default());
+        assert_eq!(on_time[0].runner, None);
+        assert!(verdict(&on_time, 0).starts_with("VERDICT OURS: 1 of 1"));
+        // The pump 5 ms behind at the start (a stall 1184..1192) took it.
+        let backlog = judge(&run(gap(4.0)), &wakes(&[(1192, 8_000, false)]));
+        assert!(
+            backlog[0]
+                .runner
+                .as_deref()
+                .unwrap()
+                .contains("5.00 ms behind")
+        );
+        // A pump stall after the start leaves the FIFO fuller: no help.
+        let after = judge(&run(gap(4.0)), &wakes(&[(1199, 8_000, false)]));
+        assert_eq!(after[0].runner, None);
+    }
+
+    #[test]
+    fn a_gap_at_a_late_tick_is_not_judged() {
+        let late = Tick {
+            gap: true,
+            underrun: true,
+            late: LATE_TICK,
+            ..tick(0)
+        };
+        assert!(judge(&run(late), &Wakes::default()).is_empty());
+        assert!(verdict(&[], 0).starts_with("VERDICT NO LOSS"));
+    }
+
+    #[test]
+    fn an_rx_dropout_is_the_pump_s_only_with_a_stall_past_the_read_s_room() {
+        let drop = Tick { rx: 1, ..tick(0) };
+        // The room: the median 33 ms less the tick's 21.33 ms = 11.67 ms.
+        let long = judge(&run(drop), &wakes(&[(1186, 10_700, false)]));
+        assert_eq!(long.len(), 1);
+        assert_eq!(long[0].what, "RX dropout");
+        assert!(long[0].runner.as_deref().unwrap().contains("10.70 ms"));
+        assert!(verdict(&long, 0).starts_with("VERDICT RUNNER: every loss (1)"));
+        let short = judge(&run(drop), &wakes(&[(1186, 10_600, false)]));
+        assert_eq!(short[0].runner, None);
+        // Outside the tick's window (after the previous tick's counts).
+        let before = judge(&run(drop), &wakes(&[(1150, 20_000, false)]));
+        assert_eq!(before[0].runner, None);
+        // A restart there explains it whatever its length.
+        let restart = judge(&run(drop), &wakes(&[(1186, 2_000, true)]));
+        assert!(restart[0].runner.as_deref().unwrap().contains("restarted"));
+        // As many dropouts on time as restarts: none judged.
+        assert!(losses(&run(drop), &Wakes::default(), 1, 22.67, 45.33).is_empty());
+    }
+
+    #[test]
+    fn a_held_tick_is_judged_from_its_second_rx_dropout() {
+        let held = Tick {
+            rx: 1,
+            late: LATE_TICK,
+            ..tick(0)
+        };
+        assert!(judge(&run(held), &Wakes::default()).is_empty());
+        let twice = judge(&run(Tick { rx: 2, ..held }), &Wakes::default());
+        assert_eq!(twice.len(), 1);
+    }
+
+    #[test]
+    fn a_tx_re_centre_needs_the_pump_stalled_past_the_excess() {
+        // 22.67 + 45.33 - (12 + 21.33) = 34.67 ms.
+        assert!((recentre_stall_ms(22.67, 45.33, 12.0) - 34.67).abs() < 0.01);
+        let gap = Tick {
+            gap: true,
+            ..tick(0)
+        };
+        let long = judge(&run(gap), &wakes(&[(1189, 33_700, false)]));
+        assert_eq!(long[0].what, "TX re-centre");
+        assert!(long[0].runner.is_some());
+        let short = judge(&run(gap), &wakes(&[(1189, 33_600, false)]));
+        assert_eq!(short[0].runner, None);
+    }
+
+    #[test]
+    fn the_merge_keeps_every_wake_and_counts_those_the_status_dropped() {
+        let mut w = Wakes::default();
+        w.merge(2, [(1, 10, false), (2, 20, false)].into_iter(), 32);
+        w.merge(2, [(9, 90, false)].into_iter(), 32);
+        assert_eq!(w.seen.len(), 2, "no new count, no merge");
+        w.merge(40, [(3, 30, false)].into_iter(), 32);
+        assert_eq!((w.seen.len(), w.lost, w.count), (3, 6, 40));
+    }
+
+    #[test]
+    fn the_median_takes_the_middle() {
+        assert_eq!(median([3.0, 1.0, 2.0].into_iter()), 2.0);
+        assert_eq!(median(std::iter::empty()), 0.0);
+    }
+}
