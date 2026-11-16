@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.158
 
 - **Fix (#351, dasio#120): a Windows media spin no longer yields in the last 500 µs before its due time.** The low-latency wait's spin called `SwitchToThread` on every turn up to the due time, and SwitchToThread hands the CPU to any ready thread on it, lower priority included, for the rest of that thread's slice. On dsg a process start had Windows Defender (priority 6-8) keep the pump's CPU 1416, 682 and 381 µs within 3 ms; a pump woken more than its W late re-bootstraps (dsg: W 96 at 96 kHz, 1 ms), so the pump re-bootstrapped (`cause=late`) about 10 times an hour. Now (`clock::wait::until`):
   - a spin turn with 500 µs or less to go pauses (`PAUSE`) and never yields, so a yield's victim makes the wake late by its slice less 500 µs at most: up to W + 500 µs (1.5 ms at dsg, the trace's 1416 µs included) a pump loses nothing. Before those 500 µs the spin yields on every turn, as before. dsg's pump (333 µs a period) waits less than 500 µs every time, so it no longer yields in its waits at all, except as below.
