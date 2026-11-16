@@ -9,7 +9,7 @@ use super::*;
 /// The traces' plan: the shipped 50 ms spin tail (`clock::SPIN_TAIL_NS`)
 /// and cap, no escape, a no-yield tail of 250 µs (the shipped one is
 /// pinned below), the capped give on the timer.
-fn shipped() -> Plan {
+fn traced() -> Plan {
     Plan {
         spin_tail_ns: 50_000_000,
         escape: false,
@@ -25,10 +25,10 @@ fn shipped() -> Plan {
 /// (250 µs here) or less left pauses; the turns before still yield. Each
 /// read moves the clock 50 µs.
 #[test]
-fn no_turn_yields_in_the_last_250_us() {
+fn no_turn_yields_inside_the_no_yield_tail() {
     let mut os = Fake::at(0, 50_000);
     let mut gives = Gives::new();
-    until(&mut os, 600_000, shipped(), &mut gives);
+    until(&mut os, 600_000, traced(), &mut gives);
     // The spin's reads at 50..=300 µs leave 550..=300 µs: yields; at
     // 350 µs exactly 250 µs left: a pause, and every turn after.
     let mut want = vec![Ev::Yield; 6];
@@ -44,7 +44,7 @@ fn a_long_wait_blocks_to_its_tail_and_yields_before_the_no_yield_tail() {
     let mut os = Fake::at(0, 100_000);
     let plan = Plan {
         spin_tail_ns: 1_000_000,
-        ..shipped()
+        ..traced()
     };
     let mut gives = Gives::new();
     until(&mut os, 2_000_000, plan, &mut gives);
@@ -70,7 +70,7 @@ fn a_wait_that_would_end_a_cap_past_the_last_give_goes_on_the_timer() {
     let mut os = Fake::at(0, 10_000);
     let mut gives = Gives::new();
     gives.gave(110_000 - GIVE_CAP_NS);
-    until(&mut os, 100_000, shipped(), &mut gives);
+    until(&mut os, 100_000, traced(), &mut gives);
     assert_eq!(os.log, [Ev::Block(90_000)]);
     assert_eq!(gives.last, Some(110_000), "the block is a give");
 
@@ -80,7 +80,7 @@ fn a_wait_that_would_end_a_cap_past_the_last_give_goes_on_the_timer() {
     gives.gave(110_000 - GIVE_CAP_NS);
     let plan = Plan {
         give_on_timer: false,
-        ..shipped()
+        ..traced()
     };
     until(&mut os, 100_000, plan, &mut gives);
     let mut want = vec![Ev::Yield];
@@ -92,7 +92,7 @@ fn a_wait_that_would_end_a_cap_past_the_last_give_goes_on_the_timer() {
     let mut os = Fake::at(0, 10_000);
     let mut gives = Gives::new();
     gives.gave(110_000 - GIVE_CAP_NS + 1);
-    until(&mut os, 100_000, shipped(), &mut gives);
+    until(&mut os, 100_000, traced(), &mut gives);
     assert_eq!(os.log, [Ev::Pause; 9]);
     assert_eq!(
         gives.last,
@@ -108,7 +108,7 @@ fn a_wait_with_turns_before_the_tail_yields_instead_of_blocking() {
     let mut os = Fake::at(0, 100_000);
     let mut gives = Gives::new();
     gives.gave(-50_000_000);
-    until(&mut os, 400_000, shipped(), &mut gives);
+    until(&mut os, 400_000, traced(), &mut gives);
     assert_eq!(os.log, [Ev::Yield, Ev::Pause, Ev::Pause]);
     assert_eq!(gives.last, Some(200_000));
 }
@@ -124,19 +124,19 @@ fn every_give_restarts_the_count_on_the_apps_clock() {
     let mut gives = Gives::new();
     gives.gave(os.app_offset - 50_000_000);
     // A yield at 200 µs (the app's clock less its offset): the last give.
-    until(&mut os, 400_000, shipped(), &mut gives);
+    until(&mut os, 400_000, traced(), &mut gives);
     assert_eq!(os.log, [Ev::Yield, Ev::Pause, Ev::Pause]);
     assert_eq!(gives.last, Some(os.app_offset + 200_000));
     // A wait inside the tail ending 9.6 ms after that yield: spun.
     os.now = 9_500_000;
     os.log.clear();
-    until(&mut os, 9_700_000, shipped(), &mut gives);
+    until(&mut os, 9_700_000, traced(), &mut gives);
     assert_eq!(os.log, [Ev::Pause]);
     // One ending 10 ms after it (its first look at 10.1 ms, 100 µs
     // left): on the timer.
     os.now = 9_900_000;
     os.log.clear();
-    until(&mut os, 10_100_000, shipped(), &mut gives);
+    until(&mut os, 10_100_000, traced(), &mut gives);
     assert_eq!(os.log, [Ev::Block(100_000)]);
 
     // The timer to the tail gives: a spin right after it is not capped.
@@ -145,7 +145,7 @@ fn every_give_restarts_the_count_on_the_apps_clock() {
     gives.gave(-50_000_000);
     let plan = Plan {
         spin_tail_ns: 200_000,
-        ..shipped()
+        ..traced()
     };
     until(&mut os, 1_000_000, plan, &mut gives);
     assert_eq!(os.log, [Ev::Block(800_000), Ev::Pause]);
@@ -158,7 +158,7 @@ fn every_give_restarts_the_count_on_the_apps_clock() {
     gives.gave(-50_000_000);
     let plan = Plan {
         escape: true,
-        ..shipped()
+        ..traced()
     };
     until(&mut os, 700_000, plan, &mut gives);
     assert_eq!(os.log, [Ev::Escape, Ev::Block(500_000), Ev::Pause]);
@@ -167,7 +167,7 @@ fn every_give_restarts_the_count_on_the_apps_clock() {
     // A fresh thread's first look starts the count: no block.
     let mut os = Fake::at(0, 100_000);
     let mut gives = Gives::new();
-    until(&mut os, 200_000, shipped(), &mut gives);
+    until(&mut os, 200_000, traced(), &mut gives);
     assert_eq!(os.log, [Ev::Pause]);
     assert_eq!(gives.last, Some(200_000));
 }
@@ -182,7 +182,7 @@ fn the_escape_spin_is_not_capped() {
     gives.gave(-50_000_000);
     let plan = Plan {
         escape: true,
-        ..shipped()
+        ..traced()
     };
     until(&mut os, 400_000, plan, &mut gives);
     assert_eq!(os.log, [Ev::Escape, Ev::Pause, Ev::Pause, Ev::Pause]);

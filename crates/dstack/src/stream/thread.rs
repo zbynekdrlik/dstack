@@ -63,6 +63,10 @@ fn run<P: Process>(clock: &dyn PtpClock, mut pump: Pump<P>, stop: &AtomicBool) {
     // W absorbs the timer's late wake, else a yield.
     #[cfg(any(target_os = "linux", windows))]
     crate::clock::give_on_timer(crate::clock::pump_gives_on_timer(pump.timing.margin, rate));
+    #[cfg(windows)]
+    if let crate::clock::WaitMode::Spin = crate::clock::wait_mode() {
+        tracing::info!("{}", crate::clock::pump_give_line(pump.timing.margin, rate));
+    }
     if let Some(line) = crate::clock::pump_escape_line(
         crate::clock::escape_on(),
         escapes,

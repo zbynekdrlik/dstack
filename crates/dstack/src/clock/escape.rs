@@ -56,6 +56,27 @@ pub fn pump_gives_on_timer(margin: u64, rate: u32) -> bool {
     margin.saturating_mul(1_000_000_000) / u64::from(rate) >= TIMER_LATE_NS
 }
 
+/// The start line naming an engine pump's capped give
+/// ([`pump_gives_on_timer`]), W in µs.
+pub fn pump_give_line(margin: u64, rate: u32) -> String {
+    let w_us = margin
+        .saturating_mul(1_000_000)
+        .checked_div(u64::from(rate))
+        .unwrap_or(0);
+    let late_us = TIMER_LATE_NS / 1_000;
+    if pump_gives_on_timer(margin, rate) {
+        format!(
+            "the engine pump's capped give (dstack #351) is a timer wait: its W ({w_us} µs) absorbs \
+             the timer's late wake ({late_us} µs)"
+        )
+    } else {
+        format!(
+            "the engine pump's capped give (dstack #351) is a yield: its W ({w_us} µs) is under the \
+             timer's late wake ({late_us} µs)"
+        )
+    }
+}
+
 /// The start line of an engine pump that stays out of the bounded escape
 /// (the escape is on and [`pump_may_escape`] says no); `None` otherwise.
 pub fn pump_escape_line(escape_on: bool, escapes: bool, margin: u64, block: u64) -> Option<String> {

@@ -1007,11 +1007,31 @@ fn a_pump_gives_on_the_timer_only_when_its_margin_covers_the_late_wake() {
     assert!(!pump_gives_on_timer(96, 96_000), "dsg");
     assert!(!pump_gives_on_timer(109, 96_000), "1.135 ms");
     assert!(pump_gives_on_timer(110, 96_000), "1.146 ms");
+    // 100 kHz: exactly TIMER_LATE_NS, a wake late by W is tolerated
+    // (`behind > margin` re-bootstraps).
+    assert!(pump_gives_on_timer(114, 100_000));
+    assert!(!pump_gives_on_timer(113, 100_000));
     assert!(pump_gives_on_timer(384, 96_000), "FOH master");
     // 48 kHz: 54.72 samples.
     assert!(!pump_gives_on_timer(54, 48_000));
     assert!(pump_gives_on_timer(55, 48_000));
     assert!(!pump_gives_on_timer(1_000, 0), "no rate");
+}
+
+/// dstack #351: the pump's start line names its capped give, for a soak's
+/// and a field PC's log.
+#[test]
+fn the_pump_s_start_line_names_its_capped_give() {
+    assert_eq!(
+        pump_give_line(96, 96_000),
+        "the engine pump's capped give (dstack #351) is a yield: its W (1000 µs) is under the \
+         timer's late wake (1140 µs)"
+    );
+    assert_eq!(
+        pump_give_line(384, 96_000),
+        "the engine pump's capped give (dstack #351) is a timer wait: its W (4000 µs) absorbs \
+         the timer's late wake (1140 µs)"
+    );
 }
 
 #[test]

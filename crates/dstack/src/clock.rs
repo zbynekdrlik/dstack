@@ -53,8 +53,8 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 pub use dsyx::{DateState, Reading};
 pub use escape::{
     ESCAPE_BLOCK_NS, ESCAPE_DEFER_MAX_NS, ESCAPE_MAX_NS, EscapeState, SPIN_ESCAPE_MAX_MS,
-    SPIN_ESCAPE_MIN_MS, TIMER_LATE_NS, pump_escape_line, pump_gives_on_timer, pump_may_escape,
-    spin_escape_line, spin_escape_of,
+    SPIN_ESCAPE_MIN_MS, TIMER_LATE_NS, pump_escape_line, pump_give_line, pump_gives_on_timer,
+    pump_may_escape, spin_escape_line, spin_escape_of,
 };
 #[cfg(any(target_os = "linux", windows))]
 pub use skewed::SkewedClock;

@@ -394,18 +394,24 @@ mod tests {
 
     /// A busy LOWEST-priority thread pinned to CPU 0 while `f` runs on this
     /// thread, pinned there at TIME_CRITICAL; `f`'s result and how many
-    /// turns the busy thread ran meanwhile.
+    /// turns the busy thread ran meanwhile. This thread stays pinned (libtest
+    /// ends it with the test); the busy thread stops even when `f` panics.
     fn beside_a_busy_lower_thread<T>(f: impl FnOnce() -> T) -> (T, u64) {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
         use windows_sys::Win32::System::Threading::{
             GetCurrentThread, SetThreadAffinityMask, SetThreadPriority,
         };
-        /// THREAD_PRIORITY_TIME_CRITICAL, THREAD_PRIORITY_LOWEST and
-        /// THREAD_PRIORITY_NORMAL.
+        /// THREAD_PRIORITY_TIME_CRITICAL and THREAD_PRIORITY_LOWEST.
         const TIME_CRITICAL: i32 = 15;
         const LOWEST: i32 = -2;
-        const NORMAL: i32 = 0;
+        /// Stops the busy thread when dropped.
+        struct Stop(Arc<AtomicBool>);
+        impl Drop for Stop {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Relaxed);
+            }
+        }
         /// CPU 0 only.
         const CPU0: usize = 1;
         let _one = CPU0_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -416,10 +422,10 @@ mod tests {
                 assert_ne!(SetThreadPriority(GetCurrentThread(), priority), 0);
             }
         };
-        let stop = Arc::new(AtomicBool::new(false));
+        let stop = Stop(Arc::new(AtomicBool::new(false)));
         let turns = Arc::new(AtomicU64::new(0));
         let busy = {
-            let (stop, turns) = (Arc::clone(&stop), Arc::clone(&turns));
+            let (stop, turns) = (Arc::clone(&stop.0), Arc::clone(&turns));
             std::thread::spawn(move || {
                 pin(LOWEST);
                 while !stop.load(Ordering::Relaxed) {
@@ -434,12 +440,7 @@ mod tests {
         let before = turns.load(Ordering::Relaxed);
         let out = f();
         let ran = turns.load(Ordering::Relaxed) - before;
-        stop.store(true, Ordering::Relaxed);
-        // SAFETY: the calling thread's pseudo handle; all CPUs again.
-        unsafe {
-            SetThreadPriority(GetCurrentThread(), NORMAL);
-            SetThreadAffinityMask(GetCurrentThread(), usize::MAX);
-        }
+        drop(stop);
         busy.join().unwrap();
         (out, ran)
     }
