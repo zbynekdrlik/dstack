@@ -69,4 +69,15 @@ impl RxShared {
             self.routes_version.fetch_add(1, Ordering::Release);
         }
     }
+
+    /// Flow slot `slot`'s playout point as last published, samples
+    /// (dstack #342, [`RxPlan::latency`]: the flow's latency, at least its
+    /// frames per packet; a packet counts late past it plus the reader's
+    /// step); `None` for a slot without a flow, past the slots, or while
+    /// a publish writes the slot (read again).
+    pub fn flow_playout(&self, slot: usize) -> Option<u32> {
+        let (_, words) = self.plans.get(slot)?.read()?;
+        let plan = RxPlan::from_words(words);
+        plan.src.map(|_| plan.latency)
+    }
 }

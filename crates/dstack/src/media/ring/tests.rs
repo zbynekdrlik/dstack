@@ -360,6 +360,45 @@ fn put_at_stores_behind_and_far_ahead_of_the_reader() {
     assert_eq!(ring.counters().written, 4 * N as u64 + 2);
 }
 
+/// dstack #346: `put_at` returns how many of its positions the reader had
+/// already read as holes (the TX thread sent them as silence): only this
+/// position's read-empty mark counts, never a slot that was never read,
+/// one holding a sample, or another lap's mark. It stores them all the
+/// same, and the ring's counters do not change.
+#[test]
+fn put_at_returns_the_positions_the_reader_already_read_as_holes() {
+    let ring = Ring::new();
+    // Never read: nothing after a read.
+    assert_eq!(ring.put_at(T, &packet(T)), 0);
+    // The reader read T + 32 .. T + 48 as holes; the put covers 8 of them
+    // and 8 positions past the read.
+    let (_, r) = read(&ring, T + N as u64, 16);
+    assert_eq!(r.all_holes(), 16);
+    assert_eq!(ring.put_at(T + 40, &packet(T + 40)[..16]), 8);
+    // Written over a stored sample (the same put again, or the read of a
+    // sample it found): nothing.
+    assert_eq!(ring.put_at(T, &packet(T)), 0);
+    let (_, r) = read(&ring, T + 48, 8);
+    assert_eq!(r, Read::default(), "the put's own positions");
+    assert_eq!(ring.put_at(T + 48, &packet(T + 48)[..8]), 0);
+    // A whole ring later the same slots hold the old lap's samples and
+    // marks: the old lap's mark at T + 32 is not this lap's.
+    let next = T + SLOTS as u64;
+    assert_eq!(ring.put_at(next + N as u64, &packet(next + 32)[..8]), 0);
+    // The marked positions were stored all the same: a later read finds
+    // them.
+    assert_eq!(
+        read(&ring, T + 40, 8),
+        (packet(T + 40)[..8].to_vec(), Read::default())
+    );
+    let c = ring.counters();
+    assert_eq!(
+        (c.written, c.late, c.holes, c.start_holes),
+        (2 * N as u64 + 16 + 8 + 8, 0, 16, 0),
+        "{c:?}"
+    );
+}
+
 /// obs (camera-box#1485): the RX thread and the reader on one CPU. A
 /// write whose positions the reader passes while the write runs must
 /// count them late, not written: each position the writer gives is

@@ -25,6 +25,10 @@ fn the_engine_status_names_the_causes_the_wakes_and_the_threads() {
     stats.rebootstrapped(0, Cause::Retime);
     // dstack #305: one play-time step of 1.5 ms.
     stats.play_at_moved(1_500_000);
+    // dstack #346: three blocks written after the TX sent their stamps.
+    stats.wrote_after_send();
+    stats.wrote_after_send();
+    stats.wrote_after_send();
     let wakes = stats.wakes();
     wakes.record(100_000, false, false, || 0);
     wakes.record(12_345_678, true, true, || 1_794_000_000_123);
@@ -39,7 +43,7 @@ fn the_engine_status_names_the_causes_the_wakes_and_the_threads() {
     }
     let os_free = "\"max_process_us\":0,\"rebootstraps_late\":1,\"rebootstraps_clock_back\":2,\
          \"rebootstraps_reanchor\":3,\"rebootstraps_retime\":1,\"play_at_rejected\":0,\
-         \"play_at_steps\":1,\"play_at_max_dev_us\":1500,\"wake_behind_max_us\":12345,\
+         \"play_at_steps\":1,\"play_at_max_dev_us\":1500,\"writes_after_send\":3,\"wake_behind_max_us\":12345,\
          \"wake_behind_minute_max_us\":12345,\"wake_behind_buckets\":[1,1,0,0,0,1,0,0],\
          \"late_wakes\":2,\"late_wakes_recent\":[\
          {\"unix_ms\":1794000000123,\"behind_us\":12345,\"rebootstrap\":1},\

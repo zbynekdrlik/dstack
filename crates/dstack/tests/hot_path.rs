@@ -384,6 +384,10 @@ fn the_rx_thread_s_passes_do_not_allocate() {
         shared.last_min_lateness_ns(0),
         Some(now - ns_of(T + 32 * 299, RATE))
     );
+    // dstack #342: every placed packet's age summed and counted inside the
+    // passes too.
+    assert_eq!(c.lateness_count, 300);
+    assert_eq!(shared.last_lateness_mean_ns(0).map(|ns| ns > 0), Some(true));
     assert_eq!(c.keepalives, 1);
     let mut got = [0i32; FPP];
     for (ring, sign) in [(0, 1), (1, -1), (2, 1)] {

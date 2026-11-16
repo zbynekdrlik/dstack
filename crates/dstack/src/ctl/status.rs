@@ -200,7 +200,14 @@ impl Json {
 ///   `lateness_peak` (the largest since the device started, samples),
 ///   `lateness_min_ns` (the packets' judge, phase D: the least lateness of
 ///   that second in ns, our clock's now less the packets' own stamps; absent
-///   for a second without a placed packet), `keepalives`,
+///   for a second without a placed packet), `lateness_mean_ns` (dstack
+///   #342, information only: the mean of the same packets' ages in that
+///   second, ns, rounded down; absent as `lateness_min_ns` is),
+///   `lateness_sum_ns` and `lateness_count` (the placed packets' ages
+///   summed, ns, and counted since the device started: a reader diffs two
+///   reads for the mean between them; an age past 4.29 s counts as 4.29 s,
+///   and the sum wraps only after 2^32 packets at that cap),
+///   `keepalives`,
 ///   `keepalive_errors`, `recv_errors`, `multicast` (a transmitter's
 ///   multicast flow the slot joined: no request, no keepalive), `joins` and
 ///   `join_errors` (its multicast groups joined, and the joins that
@@ -235,7 +242,10 @@ impl Json {
 ///   rejected, [`crate::stream::app_offset`]); `play_at_steps` (dstack
 ///   #305: blocks whose play time moved over 1 ms off their media time
 ///   since the block before) and `play_at_max_dev_us` (the largest such
-///   deviation since the start, [`crate::stream::play_at`]); how late the pump woke ([`crate::stream::wake`]):
+///   deviation since the start, [`crate::stream::play_at`]);
+///   `writes_after_send` (dstack #346: blocks with an output the TX thread
+///   had already sent as silence, most often a block that woke within W
+///   but ended past the TX's slack); how late the pump woke ([`crate::stream::wake`]):
 ///   `wake_behind_max_us` (since the start), `wake_behind_minute_max_us`
 ///   (the last whole minute, absent before the first), `wake_behind_buckets`
 ///   (8 counts: under 0.5, 1, 2, 5, 10, 20, 50 ms, and 50 ms or more),
@@ -617,6 +627,11 @@ fn rx_part(j: &mut Json, media: &Media) {
         if let Some(ns) = media.rx.last_min_lateness_ns(slot) {
             j.num("lateness_min_ns", ns);
         }
+        if let Some(ns) = media.rx.last_lateness_mean_ns(slot) {
+            j.num("lateness_mean_ns", ns);
+        }
+        j.num("lateness_sum_ns", lane.lateness_sum_ns);
+        j.num("lateness_count", lane.lateness_count);
         j.num("keepalives", lane.keepalives);
         j.num("keepalive_errors", lane.keepalive_errors);
         j.num("recv_errors", lane.recv_errors);
@@ -732,6 +747,7 @@ fn engine_part(j: &mut Json, media: &Media) {
     j.num("play_at_rejected", v.play_at_rejected);
     j.num("play_at_steps", v.play_at_steps);
     j.num("play_at_max_dev_us", v.play_at_max_dev_us);
+    j.num("writes_after_send", v.writes_after_send);
     j.num("wake_behind_max_us", v.wake_behind_max_us);
     if let Some(us) = v.wake_behind_minute_max_us {
         j.num("wake_behind_minute_max_us", us);

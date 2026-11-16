@@ -8,11 +8,6 @@ use crate::media::rx::intake::{PUMP_DRAIN, discard, pick};
 /// Ten years of a grandmaster's uptime, as a position.
 const P0: u64 = 10 * 365 * 86_400 * RATE as u64;
 
-/// Waits until a datagram sent is in its socket (or group's) for a read.
-fn settle() {
-    std::thread::sleep(Duration::from_millis(30));
-}
-
 #[test]
 fn the_first_claim_of_the_rings_holds_for_good() {
     // The pump first: the RX thread then never writes, and a second pump
