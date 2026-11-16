@@ -6,20 +6,24 @@
 
 use super::*;
 
-/// The shipped plan: a 50 ms spin tail (`clock::SPIN_TAIL_NS`), no escape.
+/// The traces' plan: the shipped 50 ms spin tail (`clock::SPIN_TAIL_NS`)
+/// and cap, no escape, a no-yield tail of 250 µs (the shipped one is
+/// pinned below), the capped give on the timer.
 fn shipped() -> Plan {
     Plan {
         spin_tail_ns: 50_000_000,
         escape: false,
         escape_block_ns: 500_000,
-        no_yield_ns: NO_YIELD_NS,
+        no_yield_ns: 250_000,
         give_cap_ns: GIVE_CAP_NS,
+        give_on_timer: true,
     }
 }
 
 /// dasio's trace on dsg (#351): the pump yielded right up to its due time
-/// and Defender kept its CPU 1.4 ms. Now each turn with 250 µs or less left
-/// pauses; the turns before still yield. Each read moves the clock 50 µs.
+/// and Defender kept its CPU 1.4 ms. Now each turn with the no-yield tail
+/// (250 µs here) or less left pauses; the turns before still yield. Each
+/// read moves the clock 50 µs.
 #[test]
 fn no_turn_yields_in_the_last_250_us() {
     let mut os = Fake::at(0, 50_000);
@@ -54,9 +58,10 @@ fn a_long_wait_blocks_to_its_tail_and_yields_before_the_no_yield_tail() {
 }
 
 /// A wait that starts inside the no-yield tail would give nothing: when it
-/// ends a cap or more after the thread's last give it goes on the timer for
-/// its whole length (the timer's expiry preempts a lower priority at once,
-/// a bounded late wake); a nanosecond short of the cap it spins, pausing.
+/// ends a cap or more after the thread's last give it gives at its first
+/// turn: the timer for its whole length (a pump whose W absorbs the
+/// timer's late wake), else one yield, then pauses; a nanosecond short of
+/// the cap it spins, pausing.
 #[test]
 fn a_wait_that_would_end_a_cap_past_the_last_give_goes_on_the_timer() {
     // Each read moves the clock 10 µs: the spin's first read at 10 µs
@@ -68,6 +73,20 @@ fn a_wait_that_would_end_a_cap_past_the_last_give_goes_on_the_timer() {
     until(&mut os, 100_000, shipped(), &mut gives);
     assert_eq!(os.log, [Ev::Block(90_000)]);
     assert_eq!(gives.last, Some(110_000), "the block is a give");
+
+    // The capped give of any other thread: one yield, then pauses.
+    let mut os = Fake::at(0, 10_000);
+    let mut gives = Gives::new();
+    gives.gave(110_000 - GIVE_CAP_NS);
+    let plan = Plan {
+        give_on_timer: false,
+        ..shipped()
+    };
+    until(&mut os, 100_000, plan, &mut gives);
+    let mut want = vec![Ev::Yield];
+    want.extend([Ev::Pause; 8]);
+    assert_eq!(os.log, want);
+    assert_eq!(gives.last, Some(20_000), "the yield is a give");
 
     // One nanosecond short of the cap: the spin, all pauses.
     let mut os = Fake::at(0, 10_000);
@@ -169,18 +188,20 @@ fn the_escape_spin_is_not_capped() {
     assert_eq!(os.log, [Ev::Escape, Ev::Pause, Ev::Pause, Ev::Pause]);
 }
 
-/// The shipped numbers (#351): the no-yield tail leaves a yield in every
-/// period of the tightest pump (block 32 at 96 kHz, 333 µs) and keeps the
-/// trace's longest Defender slice (1416 µs) under that pump's budget (W 96
-/// and block 32 at 96 kHz, 1.333 ms); the capped block's late wake fits it
-/// too; the cap is under one Windows clock interval (15.625 ms).
+/// The shipped numbers (#351): a pump re-bootstraps past W late
+/// (`stream::Blocks::next`), and dsg's (W 96, block 32 at 96 kHz: 1 ms,
+/// 333 µs a period) loses nothing to the trace's longest Defender slice
+/// (1416 µs) taken at the no-yield tail; every wait of that pump starts
+/// inside the tail; it yields as its capped give (the timer's late wake,
+/// 1.14 ms, is over its W); the cap is 30 periods of it and under one
+/// Windows clock interval (15.625 ms).
 #[test]
-fn the_shipped_numbers_fit_the_tightest_pump() {
-    const BUDGET_NS: i64 = 128 * 1_000_000_000 / 96_000;
+fn the_shipped_numbers_fit_dsgs_pump() {
+    const W_NS: i64 = 96 * 1_000_000_000 / 96_000;
     const PERIOD_NS: i64 = 32 * 1_000_000_000 / 96_000;
-    const _: () = assert!(NO_YIELD_NS < PERIOD_NS);
-    const _: () = assert!(1_416_000 - NO_YIELD_NS < BUDGET_NS);
-    const _: () = assert!((crate::clock::TIMER_LATE_NS as i64) < BUDGET_NS);
+    const _: () = assert!(1_416_000 - NO_YIELD_NS <= W_NS);
+    const _: () = assert!(PERIOD_NS < NO_YIELD_NS);
     const _: () = assert!(GIVE_CAP_NS > 30 * PERIOD_NS && GIVE_CAP_NS < 15_625_000);
-    assert_eq!((NO_YIELD_NS, GIVE_CAP_NS), (250_000, 10_000_000));
+    assert!(!crate::clock::pump_gives_on_timer(96, 96_000));
+    assert_eq!((NO_YIELD_NS, GIVE_CAP_NS), (500_000, 10_000_000));
 }

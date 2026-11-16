@@ -998,6 +998,22 @@ fn no_wait_escapes_on_linux() {
 /// escape. Woken up to `ESCAPE_MAX_NS` after its last run, a pump is behind by
 /// up to `ESCAPE_MAX_NS` less one block, so it takes the escape's block only
 /// when W covers that; FOH's pumps (W 384 and 512 at 96 kHz) do.
+/// dstack #351: a pump gives on the timer (its late wake up to
+/// `TIMER_LATE_NS`, 1.14 ms) only when W covers it, else it yields: dsg's W
+/// (96 at 96 kHz, 1 ms) does not.
+#[test]
+fn a_pump_gives_on_the_timer_only_when_its_margin_covers_the_late_wake() {
+    // 96 kHz: TIMER_LATE_NS is 109.44 samples.
+    assert!(!pump_gives_on_timer(96, 96_000), "dsg");
+    assert!(!pump_gives_on_timer(109, 96_000), "1.135 ms");
+    assert!(pump_gives_on_timer(110, 96_000), "1.146 ms");
+    assert!(pump_gives_on_timer(384, 96_000), "FOH master");
+    // 48 kHz: 54.72 samples.
+    assert!(!pump_gives_on_timer(54, 48_000));
+    assert!(pump_gives_on_timer(55, 48_000));
+    assert!(!pump_gives_on_timer(1_000, 0), "no rate");
+}
+
 #[test]
 fn a_pump_takes_the_escape_only_when_its_margin_covers_the_block() {
     // 96 kHz: ESCAPE_MAX_NS (2.14 ms) is 205.44 samples.

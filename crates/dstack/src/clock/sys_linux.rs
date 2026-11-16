@@ -70,6 +70,10 @@ pub fn ask_escape() -> bool {
 /// on Linux, whose wait never spins.
 pub fn allow_escape(_allowed: bool) {}
 
+/// Makes this thread's capped give a timer wait (dstack #351): nothing on
+/// Linux, whose wait never spins.
+pub fn give_on_timer(_on: bool) {}
+
 /// Puts off this thread's armed escape (dstack #1): nothing is ever armed
 /// on Linux, so never.
 pub fn defer_escape() -> bool {
