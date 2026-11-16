@@ -108,7 +108,7 @@ fn pump(dante: &mut impl Process) {
     dante.process(&mut Block::new(128, &input, &mut output));
 }
 
-/// dasio#120 (dsg): a driver calling 128 frames at 96 kHz hands blocks
+/// dasio#120: a driver calling 128 frames at 96 kHz hands blocks
 /// whose first sample is one call (1.333 ms) old; the pump taking them
 /// 0.2 ms later reads 1.533 ms, and a receiver needs that + one pump block.
 #[test]
@@ -175,7 +175,7 @@ fn the_oldest_untaken_hand_over_is_the_one_aged() {
 }
 
 /// A bridge with nothing from ASIO measures nothing: its driver's side
-/// hands no blocks.
+/// marks no hand-over.
 #[test]
 fn a_bridge_with_nothing_from_asio_has_no_age() {
     let (t, clock) = fake();
@@ -185,6 +185,11 @@ fn a_bridge_with_nothing_from_asio_has_no_age() {
     let mut dante = bridge.dante_side().unwrap();
     let mut asio = bridge.asio_side(&opened(96_000.0, 128, 1, 0)).unwrap();
     callback(&mut asio, 128);
+    assert_eq!(
+        bridge.from_asio_age().pending.load(Ordering::Relaxed),
+        NONE,
+        "no hand-over marked"
+    );
     t.store(1_000_000, Ordering::Relaxed);
     pump(&mut dante);
     assert_eq!(bridge.from_asio_age().report(), None);

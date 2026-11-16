@@ -18,6 +18,15 @@
 //! never sees a late packet from this path ([`BlockAge::report`]); a
 //! status loop checks the TX flows' known receiver latencies against it
 //! once an hour ([`BlockAge::warn_low_receivers`]).
+//!
+//! The age counts the driver's call and the wait for the pump's next
+//! block (the design of dstack #325). It leaves out the from-ASIO FIFO's
+//! own depth (the bridge target, [`dlink::bridge::AppBuffer`]): that is the
+//! bridge's delay between the two clocks, set by the target, not a
+//! property of the driver's calls.
+//!
+//! The status's three loads are not one snapshot: a read in the instant
+//! the pump rolls the window can show the new window's max alone once.
 
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 
@@ -32,20 +41,22 @@ const HOUR_NS: i64 = 3_600_000_000_000;
 const NONE: i64 = i64::MIN;
 
 /// The ages' max over windows of a minute: the window running since
-/// `start` and the one before it (single writer; module doc).
+/// `start` and the one before it (single writer; module doc). A start of
+/// `NONE` (before the first age) is minutes in the past to the saturating
+/// arithmetic, so it needs no case of its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Window {
-    /// The current window's start, ns (`i64::MIN` before the first age).
-    pub start: i64,
+pub(crate) struct Window {
+    /// The current window's start, ns (`NONE` before the first age).
+    pub(crate) start: i64,
     /// The current window's max, ns.
-    pub max: u64,
+    pub(crate) max: u64,
     /// The window before it's max, ns (0 when that window had no ages).
-    pub prev: u64,
+    pub(crate) prev: u64,
 }
 
 impl Window {
     /// No age yet.
-    pub const fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Window {
             start: NONE,
             max: 0,
@@ -56,9 +67,9 @@ impl Window {
     /// An age of `age_ns` taken at `now`: a window a minute old closes (its
     /// max becomes the previous one's, or 0 when it closed over a minute
     /// ago) and the next starts at `now`.
-    pub fn record(&mut self, now: i64, age_ns: u64) {
-        if self.start == NONE || now.saturating_sub(self.start) >= MINUTE_NS {
-            self.prev = if self.start != NONE && now.saturating_sub(self.start) < 2 * MINUTE_NS {
+    pub(crate) fn record(&mut self, now: i64, age_ns: u64) {
+        if now.saturating_sub(self.start) >= MINUTE_NS {
+            self.prev = if now.saturating_sub(self.start) < 2 * MINUTE_NS {
                 self.max
             } else {
                 0
@@ -70,12 +81,10 @@ impl Window {
         }
     }
 
-    /// The max over the last minute (one to two) at `now`: `None` when no
-    /// age came within it.
-    pub fn max_at(&self, now: i64) -> Option<u64> {
-        if self.start == NONE {
-            return None;
-        }
+    /// The max over the last minute (one to two) at `now`: `None` once no
+    /// age came for one to two minutes (two minutes after the window's
+    /// start), or never.
+    pub(crate) fn max_at(&self, now: i64) -> Option<u64> {
         let since = now.saturating_sub(self.start);
         if since < MINUTE_NS {
             Some(self.max.max(self.prev))
@@ -190,8 +199,9 @@ impl BlockAge {
         }
     }
 
-    /// The status's values (module doc), `None` while no block was taken
-    /// within the last minute (no driver, or not yet).
+    /// The status's values (module doc): `None` before the first take, and
+    /// once no block was taken for one to two minutes (no driver, or a
+    /// closed one).
     pub fn report(&self) -> Option<AgeReport> {
         let max = self.window().max_at((self.clock)())?;
         Some(AgeReport {
@@ -210,8 +220,8 @@ impl BlockAge {
         let report = self.report()?;
         let text = low_receivers_text(report, receivers)?;
         let now = (self.clock)();
-        let last = self.warned.load(Ordering::Relaxed);
-        if last != NONE && now.saturating_sub(last) < HOUR_NS {
+        // `NONE` (no warning yet) is hours in the past to the saturation.
+        if now.saturating_sub(self.warned.load(Ordering::Relaxed)) < HOUR_NS {
             return None;
         }
         self.warned.store(now, Ordering::Relaxed);

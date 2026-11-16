@@ -46,7 +46,7 @@ use dstack_audio_io::{Block, Process};
 use crate::device::Opened;
 
 mod age;
-pub use age::{AgeReport, BlockAge, Window, low_receivers_text};
+pub use age::{AgeReport, BlockAge, low_receivers_text};
 
 /// Frames a side converts at once at least (its interleaved scratch): the
 /// pump's side a whole pump block, the driver's side its whole buffer

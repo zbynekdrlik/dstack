@@ -88,7 +88,7 @@ pub fn spin_escape_line(configured_ms: Option<u64>, os: Os) -> Option<String> {
 /// next wait escapes. Kept per thread.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct EscapeState {
-    /// Monotonic ns of the last escape (or of the first look).
+    /// The app clock's ns of the last escape, or of the first look (dstack #328).
     last: Option<i64>,
     /// The thread asks before its waits ([`EscapeState::ask`]): its waits
     /// escape only when it was told so.
