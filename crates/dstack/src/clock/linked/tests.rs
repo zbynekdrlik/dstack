@@ -136,12 +136,38 @@ fn a_switch_changes_the_epoch_s_high_half_and_a_re_anchor_its_low_half() {
     assert_ne!(epoch_of(1, 1), epoch_of(2, 0));
 }
 
+/// A follower's time in [`Fake`]: a fixed time, or the service's own
+/// clock moved by an offset, read when the selector reads the follower.
+#[derive(Clone)]
+enum Time {
+    At(Option<i64>),
+    OnService(Arc<MonoClock>, i64),
+}
+
+impl From<Option<i64>> for Time {
+    fn from(t: Option<i64>) -> Time {
+        Time::At(t)
+    }
+}
+
 /// A follower the test drives.
-struct Fake(Mutex<(Option<i64>, View)>);
+struct Fake(Mutex<(Time, View)>);
 
 impl Follow for Arc<Fake> {
+    /// A follower on the service's clock runs with it: the time between
+    /// `set` and the selector's reads (a preempted test thread, a step of
+    /// the wall a bare `MonoClock` reads on Windows) never moves the offset
+    /// the selector measures (v0.6.151's tag CI on windows-2025). A wall
+    /// step between the selector's own reads (microseconds apart) still
+    /// counts, as it would for a real follower.
     fn now_ns(&self) -> Option<i64> {
-        self.0.lock().unwrap().0
+        let time = self.0.lock().unwrap().0.clone();
+        match time {
+            Time::At(t) => t,
+            Time::OnService(service, offset_ns) => service
+                .now_ns()
+                .map(|t| i64::try_from(t).unwrap() + offset_ns),
+        }
     }
     fn view(&self) -> View {
         self.0.lock().unwrap().1
@@ -168,13 +194,13 @@ impl Follow for Arc<Fake> {
     }
 }
 
-fn set(f: &Fake, now: Option<i64>, view: View) {
-    *f.0.lock().unwrap() = (now, view);
+fn set(f: &Fake, now: impl Into<Time>, view: View) {
+    *f.0.lock().unwrap() = (now.into(), view);
 }
 
 #[test]
 fn the_linked_clock_reads_the_chosen_source_and_moves_its_epoch_on_a_switch() {
-    let fake = Arc::new(Fake(Mutex::new((None, View::default()))));
+    let fake = Arc::new(Fake(Mutex::new((Time::At(None), View::default()))));
     let service = Arc::new(MonoClock::new());
     let linked = Linked::new(
         Some(Box::new(Arc::clone(&fake))),
@@ -249,7 +275,7 @@ fn without_a_follower_the_linked_clock_is_the_service_s() {
 
 #[test]
 fn a_sleep_on_the_follower_s_time_returns_at_its_target() {
-    let fake = Arc::new(Fake(Mutex::new((None, View::default()))));
+    let fake = Arc::new(Fake(Mutex::new((Time::At(None), View::default()))));
     let service = Arc::new(MonoClock::new());
     let linked = Linked::new(Some(Box::new(Arc::clone(&fake))), service, None);
     set(&fake, Some(1_000_000_000), ALIVE_LOCKED);
@@ -280,7 +306,7 @@ fn the_follower_starts_with_its_keeper_or_not_at_all() {
 /// not settled, takes the follower once settled, and keeps it after.
 #[test]
 fn the_linked_clock_waits_for_a_settled_follower_while_the_service_is_ready() {
-    let fake = Arc::new(Fake(Mutex::new((None, View::default()))));
+    let fake = Arc::new(Fake(Mutex::new((Time::At(None), View::default()))));
     let service = Arc::new(MonoClock::new());
     let linked = Linked::new(
         Some(Box::new(Arc::clone(&fake))),
@@ -331,7 +357,7 @@ fn the_seed_is_the_word_of_a_locked_settled_service() {
 /// anchored but never locked is not taken when the service goes away.
 #[test]
 fn a_follower_never_locked_is_not_taken_in_holdover() {
-    let fake = Arc::new(Fake(Mutex::new((Some(7), HOLDOVER))));
+    let fake = Arc::new(Fake(Mutex::new((Time::At(Some(7)), HOLDOVER))));
     let service = Arc::new(MonoClock::new());
     let linked = Linked::new(Some(Box::new(Arc::clone(&fake))), service, None);
     assert_eq!(linked.tick(), Source::None);
@@ -373,19 +399,19 @@ fn a_follower_that_did_not_start_says_why_in_a_word() {
     );
 }
 
-/// The service's time now, as the follower's type.
-fn service_now(service: &MonoClock) -> Option<i64> {
-    service.now_ns().map(|t| i64::try_from(t).unwrap())
+/// The service's time, as the follower's: it runs with the service.
+fn service_now(service: &Arc<MonoClock>) -> Time {
+    service_now_plus(service, 0)
 }
 
-/// The service's time now moved by `offset_ns`.
-fn service_now_plus(service: &MonoClock, offset_ns: i64) -> Option<i64> {
-    service_now(service).map(|t| t + offset_ns)
+/// The service's time moved by `offset_ns`, running with the service.
+fn service_now_plus(service: &Arc<MonoClock>, offset_ns: i64) -> Time {
+    Time::OnService(Arc::clone(service), offset_ns)
 }
 
 /// A linked clock on a ready service with a fake follower.
 fn linked_on_service() -> (Arc<Fake>, Arc<MonoClock>, Linked) {
-    let fake = Arc::new(Fake(Mutex::new((None, View::default()))));
+    let fake = Arc::new(Fake(Mutex::new((Time::At(None), View::default()))));
     let service = Arc::new(MonoClock::new());
     let linked = Linked::new(
         Some(Box::new(Arc::clone(&fake))),
@@ -461,10 +487,10 @@ fn a_seamless_handover_keeps_an_epoch_with_re_anchors_in_it() {
 /// the wait takes over seamlessly.
 #[test]
 fn a_follower_that_disagrees_waits_then_takes_over_with_a_new_epoch() {
-    // Drifting apart 1 ms a round: never progress, whatever the gap
-    // between `set` and the selector's reads (the fake's time is fixed at
-    // `set`; v0.6.42's coverage run: a constant 1 ms offset read 5 µs nearer
-    // once under the instrumentation, and the wait went on).
+    // Drifting apart 1 ms a round: never progress, whatever the jitter of
+    // the selector's reads (v0.6.42's coverage run: a constant 1 ms offset
+    // read 5 µs nearer once under the instrumentation, and the wait went
+    // on).
     let (fake, service, linked) = linked_on_service();
     let before = linked.epoch();
     let mut off = 1_000_000;
@@ -499,12 +525,17 @@ fn a_follower_that_disagrees_waits_then_takes_over_with_a_new_epoch() {
     }
     set(&fake, service_now_plus(&service, off), UNSETTLED);
     assert_eq!(linked.tick(), Source::Service);
-    set(
-        &fake,
-        service_now_plus(&service, off + 1_000_000),
-        ALIVE_LOCKED,
-    );
-    assert_eq!(linked.tick(), Source::Service, "the wait starts again");
+    // A whole wait less one round again: without the reset of the count
+    // and the mark the second round would re-align.
+    for round in 0..HANDOVER_WAIT - 1 {
+        off += 1_000_000;
+        set(&fake, service_now_plus(&service, off), ALIVE_LOCKED);
+        assert_eq!(
+            linked.tick(),
+            Source::Service,
+            "the wait starts again, round {round}"
+        );
+    }
 }
 
 /// A forced switch (the follower in use lost its anchor) never waits: a
@@ -518,6 +549,22 @@ fn a_forced_switch_that_disagrees_re_aligns_at_once() {
     set(&fake, service_now_plus(&service, 1_000_000), LOST);
     assert_eq!(linked.tick(), Source::Service);
     assert_ne!(linked.epoch(), before);
+}
+
+/// The fake follower's time runs with the service's: a tick that comes long
+/// after `set` still sees the two agree. The v0.6.151 tag CI on
+/// windows-2025 failed `a_forced_switch_that_disagrees_re_aligns_at_once`
+/// at its first seamless takeover: the fake held the service's time read at
+/// `set` while the service ran on, so any gap over [`HANDOVER_NS`] before
+/// the selector's reads (a preempted test thread, or a step of the wall
+/// clock a bare `MonoClock` reads on Windows before a poll) read as
+/// disagreement.
+#[test]
+fn a_follower_set_to_the_service_s_time_still_agrees_after_a_pause() {
+    let (fake, service, linked) = linked_on_service();
+    set(&fake, service_now(&service), ALIVE_LOCKED);
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    assert_eq!(linked.tick(), Source::Internal);
 }
 
 /// The first round's waits are logged once, with the offset; a seamless
@@ -639,7 +686,7 @@ fn the_linked_clock_reads_the_follower_s_counts() {
 #[test]
 fn the_first_source_and_no_source_log_their_own_lines() {
     crate::test_log::undecided();
-    let fake = Arc::new(Fake(Mutex::new((None, View::default()))));
+    let fake = Arc::new(Fake(Mutex::new((Time::At(None), View::default()))));
     let service = Arc::new(MonoClock::new());
     let linked = Linked::new(Some(Box::new(Arc::clone(&fake))), service, None);
     let log = crate::test_log::capture_at(tracing::Level::INFO, || {

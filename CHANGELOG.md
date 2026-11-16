@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.152
+
+- **Test fix (#328, the v0.6.151 tag CI on windows-2025): the linked clock's handover tests no longer depend on the time between setting the fake follower and the selector's round.** The tests' fake follower held a fixed time (the service's, read when the test set it) while the service kept running, so a gap over the 30 us handover tolerance (a preempted test thread, or a wall-clock step, which a bare `MonoClock` reads on Windows before a poll) read as disagreement and failed `a_forced_switch_that_disagrees_re_aligns_at_once`. The fake now runs on the service's clock. No library change, no API change.
+- **No latency change** for any device or dlink app: P, (c), W and the app buffer (the bridge target) are as in 0.6.151.
+- Consumers: nothing to port; moving the stack version is optional.
+
 ## 0.6.151
 
 - **Fix (#325, dasio's field reading of 16.11.2026): the ASIO bridge's receiver figure is the TX packets' measured age, not the modelled block age.** 0.6.149's `from_asio_min_receiver_latency_us` modelled the from-ASIO block age (call period + hand-over wait) + one pump block: 2222 us on a field PC (128 frames at 96 kHz) while the bridge's TX packets peaked at 1003-1397 us past their stamps, so its WARN would have named clean 2 ms receivers. Now the figure comes from the TX side's own measure of every packet it sends (its age past its first sample's media stamp, what a receiver judges):
