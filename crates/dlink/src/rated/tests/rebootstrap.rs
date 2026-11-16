@@ -31,46 +31,97 @@ impl Process for Pulse {
 const N: usize = 128;
 /// The loop back through the network, device frames (50 ms at 96 kHz).
 const LOOP: u64 = 4_800;
-/// The impulse's app frame.
-const AT: u64 = 2_000;
 /// The first start: 896 * 147 / 320 = 411.6, not a whole app frame.
 const FIRST: u64 = 7 * N as u64;
+
+/// A device rate, an app rate and the device's block.
+#[derive(Debug, Clone, Copy)]
+struct Pair {
+    device: u32,
+    app: u32,
+    block: usize,
+}
+
+/// 44.1 kHz on 96 kHz with 128-frame blocks: dasio's case.
+const CD: Pair = Pair {
+    device: 96_000,
+    app: 44_100,
+    block: N,
+};
+
+/// Pairs whose whole app frames lie further apart than #341's 40 silent
+/// blocks reached (dstack #343): the 48 kHz family on a 44.1 kHz family
+/// device (147 device frames), 22.05 kHz on 192 kHz with 16-frame blocks
+/// (1280) and 11.025 kHz on 192 kHz with 32-frame blocks (2560).
+const FAR: [Pair; 5] = [
+    Pair {
+        device: 44_100,
+        app: 48_000,
+        block: N,
+    },
+    Pair {
+        device: 88_200,
+        app: 48_000,
+        block: 64,
+    },
+    Pair {
+        device: 176_400,
+        app: 96_000,
+        block: 32,
+    },
+    Pair {
+        device: 192_000,
+        app: 22_050,
+        block: 16,
+    },
+    Pair {
+        device: 192_000,
+        app: 11_025,
+        block: 32,
+    },
+];
 
 /// Runs a device whose output comes back to its input `LOOP` frames later;
 /// with `restart = Some(gap)` the pump re-bootstraps once while the impulse
 /// is in the network, `gap` blocks later than the next block (a stall).
 /// Returns the impulse's round trip in app frames, from its peak with a
 /// parabola through its neighbours.
-fn round_trip(fixed: bool, first: u64, restart: Option<u64>) -> f64 {
-    let app = Pulse {
-        at: AT,
+fn round_trip(pair: Pair, fixed: bool, first: u64, restart: Option<u64>) -> f64 {
+    let Pair { device, app, block } = pair;
+    let n = block as u64;
+    // The impulse leaves about 4 400 device frames in.
+    let at = 4_400 * u64::from(app) / u64::from(device);
+    let pulse = Pulse {
+        at,
         heard: Vec::new(),
     };
     let mut r = if fixed {
-        Rated::with_fixed_app_block(app, 96_000, 44_100, N, 1, 2)
+        Rated::with_fixed_app_block(pulse, device, app, block, 1, 2)
     } else {
-        Rated::new(app, 96_000, 44_100, N, 1, 2)
+        Rated::new(pulse, device, app, block, 1, 2)
     }
     .unwrap();
-    let mut net = vec![0.0; 16_000];
-    // Well after the impulse left the TX converter, well before it is back.
-    let stall = AT * 96_000 / 44_100 + 1_500;
+    let mut net = vec![0.0; 24_000];
+    // Well after the impulse left the TX converter (its delay is 2.3 ms
+    // at 11.025 kHz), well before it is back.
+    let tx_delay = r.delay_ns().1 * u64::from(device) / 1_000_000_000;
+    let stall = at * u64::from(device) / u64::from(app) + tx_delay + 1_000;
     let mut pending = restart;
     let mut s = first;
-    while s < 14_000 {
+    while s < 20_000 {
         if s >= stall
             && let Some(gap) = pending.take()
         {
             r.discontinuity();
-            s += gap * N as u64;
+            s += gap * n;
         }
-        let input: Vec<f64> = (s..s + N as u64)
+        let input: Vec<f64> = (s..s + n)
             .map(|t| t.checked_sub(LOOP).map_or(0.0, |t| net[t as usize]))
             .collect();
-        let mut out = vec![0.0; 2 * N];
-        r.process(&mut Block::new(N, &input, &mut out).at(s));
-        net[s as usize..s as usize + N].copy_from_slice(&out[..N]);
-        s += N as u64;
+        let mut out = vec![0.0; 2 * block];
+        r.process(&mut Block::new(block, &input, &mut out).at(s));
+        net[s as usize..(s + n) as usize].copy_from_slice(&out[..block]);
+        s += n;
     }
     let heard = &r.inner.heard;
     let peak = (1..heard.len() - 1)
@@ -80,46 +131,111 @@ fn round_trip(fixed: bool, first: u64, restart: Option<u64>) -> f64 {
     assert_eq!(
         heard[peak + 1].0,
         heard[peak - 1].0 + 2,
-        "a gap at the peak"
+        "{pair:?}: a gap at the peak"
     );
+    assert!(y1.abs() > 0.3, "{pair:?}: the impulse never came back");
     let shift = 0.5 * (y0 - y2) / (y0 - 2.0 * y1 + y2);
-    heard[peak].0 as f64 + shift - AT as f64
+    heard[peak].0 as f64 + shift - at as f64
 }
 
+/// An app that leaves its outputs silent.
+struct Quiet;
+
+impl Process for Quiet {
+    fn process(&mut self, _: &mut Block<'_>) {}
+}
+
+/// A `Rated`'s timeline at the next block: the next app label `J`, the app
+/// frames the TX converter has taken (`prime + J - held - TX FIFO`), the
+/// fixed app block's RX FIFO count, and the TX converter's next input (its
+/// phase). Checks on the way that every channel's FIFOs agree and that the
+/// RX FIFO holds `J mod A`.
+fn timeline(r: &Rated<Quiet>) -> (u64, u64, u64, usize) {
+    let (_, j) = r.next.expect("a next label");
+    let depth = r.fifo[0].len() as u64;
+    assert!(r.fifo.iter().all(|f| f.len() as u64 == depth));
+    let held = r.reblock.as_ref().map_or(0, |rb| {
+        assert!(rb.fifo.iter().all(|f| f.len() == rb.held));
+        assert_eq!(rb.held as u64, j % rb.frames as u64);
+        rb.held as u64
+    });
+    let taken = r.prime as u64 + j - held - depth;
+    (j, taken, held, r.tx.input_frames_next())
+}
+
+/// A restart at any start leaves the timeline of a `Rated` that ran silence
+/// from device frame 0, before that start's block and after it (whose RX
+/// frames show the RX converter's phase), on both paths, over more than
+/// two ratio periods (dstack #343). The TX side must match exactly. The
+/// RX side's next label may differ by one frame where `(s - 2) * app /
+/// device` is whole: there the core's float `floor` may leave that frame
+/// to the next call, which delays when it comes, not where it sits.
 #[test]
-fn a_restart_leads_with_the_blocks_back_to_a_whole_app_frame() {
-    // 44.1 kHz on 96 kHz: a whole app frame every 320 device frames.
-    for (start, lead) in [
-        (0u64, 0u64),
-        (128, 1),
-        (256, 2),
-        (640, 0),
-        (896, 2),
-        (1_152, 4),
-    ] {
-        assert_eq!(lead_blocks(start, 128, 96_000, 44_100), lead, "{start}");
+fn a_restart_holds_the_timeline_of_a_run_from_frame_0() {
+    for pair in [CD].into_iter().chain(FAR) {
+        let Pair { device, app, block } = pair;
+        let n = block as u64;
+        for fixed in [false, true] {
+            let make = || {
+                if fixed {
+                    Rated::with_fixed_app_block(Quiet, device, app, block, 2, 2)
+                } else {
+                    Rated::new(Quiet, device, app, block, 2, 2)
+                }
+                .unwrap()
+            };
+            let (mut whole, mut restarted) = (make(), make());
+            let silence = vec![0.0; 2 * block];
+            let mut out = vec![0.0; 2 * block];
+            let (p_dev, _) = restarted.rx.period();
+            let end = (2 * p_dev + 5 * n).max(40 * n);
+            // The whole run's first block (its own restart, at frame 0).
+            whole.process(&mut Block::new(block, &silence, &mut out).at(0));
+            let mut s = n;
+            let mut exact = 0;
+            while s < end {
+                restarted.discontinuity();
+                restarted.restart_at(s);
+                restarted.restart = false;
+                for when in ["before", "after"] {
+                    let (want, got) = (timeline(&whole), timeline(&restarted));
+                    let at = format!("{pair:?}, fixed {fixed}, {when} the block at {s}");
+                    assert_eq!((got.1, got.3), (want.1, want.3), "{at}: TX");
+                    if got.0 == want.0 {
+                        exact += 1;
+                    } else {
+                        let edge = s - 2 + u64::from(when == "after") * n;
+                        assert!(got.0.abs_diff(want.0) == 1, "{at}: {got:?} {want:?}");
+                        assert_eq!(edge * u64::from(app) % u64::from(device), 0, "{at}");
+                    }
+                    if when == "before" {
+                        for r in [&mut whole, &mut restarted] {
+                            r.process(&mut Block::new(block, &silence, &mut out).at(s));
+                        }
+                    }
+                }
+                s += n;
+            }
+            assert!(exact > 70, "{pair:?}, fixed {fixed}: {exact}");
+        }
     }
-    // Off the block grid no start back is whole: the old label stays.
-    assert_eq!(lead_blocks(1_000, 32, 96_000, 44_100), 0);
-    // A whole ratio needs none.
-    assert_eq!(lead_blocks(128, 128, 96_000, 48_000), 0);
-    assert_eq!(lead_blocks(4_800, 128, 48_000, 96_000), 0);
-    // 22.05 kHz on 96 kHz at 16 frames: 39 blocks, within MAX_LEAD.
-    assert_eq!(lead_blocks(39 * 16, 16, 96_000, 22_050), 39);
-    // 32 kHz on a 44.1 kHz device (a whole app frame every 441 device
-    // frames) would need 440 blocks: past MAX_LEAD, the old label.
-    assert_eq!(lead_blocks(440 * 128, 128, 44_100, 32_000), 0);
-    assert_eq!(lead_blocks(441 * 128, 128, 44_100, 32_000), 0);
-    assert_eq!(lead_blocks(442 * 128, 128, 44_100, 32_000), 1);
-    // 44.1 kHz on 48 kHz: every 160 device frames.
-    assert_eq!(lead_blocks(4 * 128, 128, 48_000, 44_100), 4);
-    // At most MAX_LEAD blocks (one-frame blocks, a made-up rate whose
-    // period is 96000 frames).
-    assert_eq!(lead_blocks(MAX_LEAD, 1, 96_000, 44_099), MAX_LEAD);
-    assert_eq!(lead_blocks(MAX_LEAD + 1, 1, 96_000, 44_099), 0);
-    assert_eq!(gcd(96_000, 44_100), 300);
-    assert_eq!(gcd(44_100, 96_000), 300);
-    assert_eq!(gcd(7, 0), 7);
+}
+
+/// Off the block grid too (the pump never starts there): the next app
+/// label is the RX core's count for `s` silent inputs, `floor((s - 2) *
+/// 147 / 320)` at 44.1 kHz on 96 kHz, as on the grid.
+#[test]
+fn a_restart_off_the_block_grid_is_labelled_as_a_run_from_frame_0() {
+    let mut r = Rated::new(Quiet, 96_000, 44_100, N, 1, 1).unwrap();
+    for s in [7u64, 135, 1_031, 640 + 7] {
+        r.discontinuity();
+        r.restart_at(s);
+        let (dev, label) = r.next.unwrap();
+        assert_eq!(dev, s);
+        // The RX core gives floor((s - 2) * 147 / 320) frames for s inputs
+        // (dstack-resample's `skip_silence`).
+        assert_eq!(label, (s - 2) * 147 / 320, "{s}");
+    }
 }
 
 #[test]
@@ -136,12 +252,12 @@ fn a_device_frame_at_the_app_s_rate_is_exact() {
 #[test]
 fn an_impulse_comes_back_after_the_same_app_samples_across_a_re_bootstrap() {
     for fixed in [false, true] {
-        let want = round_trip(fixed, FIRST, None);
+        let want = round_trip(CD, fixed, FIRST, None);
         // Gaps of 0 to 4 blocks put the new start on every app phase the
         // 128-frame grid has at 44.1 kHz (5: 640 device frames are 294
         // app frames).
         for gap in 0..5 {
-            let got = round_trip(fixed, FIRST, Some(gap));
+            let got = round_trip(CD, fixed, FIRST, Some(gap));
             assert_eq!(
                 got.round(),
                 want.round(),
@@ -161,14 +277,57 @@ fn an_impulse_comes_back_after_the_same_app_samples_across_a_re_bootstrap() {
 #[test]
 fn an_impulse_comes_back_after_the_same_app_samples_from_any_first_start() {
     for fixed in [false, true] {
-        let want = round_trip(fixed, FIRST, None);
+        let want = round_trip(CD, fixed, FIRST, None);
         // Leads of 0, 1, 3 and 4 blocks (FIRST's is 2).
         for first in [640, 768, 1_024, 1_152] {
-            let got = round_trip(fixed, first, None);
+            let got = round_trip(CD, fixed, first, None);
             assert!(
                 (got - want).abs() < 0.01,
                 "fixed {fixed}, first {first}: {got} app frames, not {want}"
             );
+        }
+    }
+}
+
+/// The pairs whose whole app frames lie far apart (dstack #343): an
+/// impulse that crosses a re-bootstrap comes back after the same app
+/// samples as one that does not, wherever the new start lands.
+#[test]
+fn an_impulse_comes_back_after_the_same_app_samples_across_a_re_bootstrap_at_any_rate() {
+    for pair in FAR {
+        let first = 7 * pair.block as u64;
+        for fixed in [false, true] {
+            let want = round_trip(pair, fixed, first, None);
+            // Stalls of up to 2 000 device frames, so the new start lands
+            // across a whole period of 1 280 or 2 560 frames too.
+            for frames in [0, 300, 700, 1_100, 1_500, 2_000] {
+                let gap = frames / pair.block as u64;
+                let got = round_trip(pair, fixed, first, Some(gap));
+                assert!(
+                    (got - want).abs() < 0.01,
+                    "{pair:?}, fixed {fixed}, gap {gap}: {got} app frames, not {want}"
+                );
+            }
+        }
+    }
+}
+
+/// The same pairs from several first starts, with no re-bootstrap (an
+/// impulse sent after a restart goes out through the restarted TX
+/// converter).
+#[test]
+fn an_impulse_comes_back_after_the_same_app_samples_from_any_first_start_at_any_rate() {
+    for pair in FAR {
+        let n = pair.block as u64;
+        for fixed in [false, true] {
+            let want = round_trip(pair, fixed, 7 * n, None);
+            for first in [3 * n, 5 * n, 8 * n, 11 * n] {
+                let got = round_trip(pair, fixed, first, None);
+                assert!(
+                    (got - want).abs() < 0.01,
+                    "{pair:?}, fixed {fixed}, first {first}: {got} app frames, not {want}"
+                );
+            }
         }
     }
 }

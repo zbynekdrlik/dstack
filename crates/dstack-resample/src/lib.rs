@@ -25,7 +25,7 @@
 
 use rubato::audioadapter_buffers::direct::SequentialSlice;
 use rubato::{
-    Adjustable, Async, FixedAsync, Indexing, Resampler, SincInterpolationParameters,
+    Adjustable, Async, FixedAsync, Indexing, Resampler, Resizable, SincInterpolationParameters,
     SincInterpolationType, WindowFunction,
 };
 
@@ -59,6 +59,17 @@ pub const ROOM_PPM: f64 = 1000.0;
 const MAX_RELATIVE: f64 = 1.001_1;
 const _: () = assert!(asrc::MAX_PPM < ROOM_PPM);
 const _: () = assert!(1.0 + ROOM_PPM * 1e-6 < MAX_RELATIVE);
+
+/// The fixed-side frames after a reset from which the sinc core's counts
+/// and phase repeat with the ratio's period ([`Converter::skip_silence`]).
+const SKIP_WARM: u64 = 2;
+
+fn gcd(mut a: u64, mut b: u64) -> u64 {
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    a
+}
 
 /// Which side of a converter has a fixed block size.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -140,6 +151,9 @@ pub struct Converter {
     /// Whether the filter's history is silence: new or just reset, and
     /// no call since but [`Converter::skip_silence`].
     silent: bool,
+    /// Whether [`Converter::set_ppm`] ran since the start or the last
+    /// reset (the ratio may have left its nominal value).
+    adjusted: bool,
     channels: usize,
     block: usize,
     fixed: Fixed,
@@ -197,6 +211,7 @@ impl Converter {
         Ok(Converter {
             engine: Engine::Half(Box::new(HalfBand::new(step, channels, max_in))),
             silent: true,
+            adjusted: false,
             channels,
             block,
             fixed,
@@ -249,6 +264,7 @@ impl Converter {
         Ok(Converter {
             engine,
             silent: true,
+            adjusted: false,
             channels,
             block,
             fixed,
@@ -377,64 +393,122 @@ impl Converter {
             ));
         };
         let ppm = ppm.clamp(-ROOM_PPM, ROOM_PPM);
+        self.adjusted = true;
         stage
             .set_resample_ratio_relative(1.0 + ppm * 1e-6, true)
             .map_err(|e| ConvertError::Core(e.to_string()))
     }
 
-    /// As [`Converter::process`] with `frames_in` frames of silence,
-    /// with no filter work and nothing written (dstack #341; the core only
-    /// moves its buffers and steps its index): the converter's phase
-    /// moves on as that call's would, and its history stays silent. Valid
-    /// only while the history is silence (new or just reset, and no
-    /// [`Converter::process`] since), else an error and nothing moves.
-    /// `input` and `output` are only sized as for [`Converter::process`];
-    /// neither is read or written. A copy or a half-band step has no phase
-    /// between its frames: its skip only counts.
+    /// Puts a converter whose history is silence where `frames` frames of
+    /// silence on its [`Fixed`] side would (input frames for a fixed
+    /// input, output frames for a fixed output), as calls of silence whose
+    /// fixed-side frames add up to `frames`, however they are split; returns
+    /// the input frames those calls take and the output frames they give,
+    /// in all (dstack #341, #343). Nothing is written and no filter runs.
+    ///
+    /// Valid only while the history is silence (new or just reset, no
+    /// [`Converter::process`] since) at the nominal ratio (no
+    /// [`Converter::set_ppm`] since), else an error and nothing moves. A
+    /// copy only counts; a half-band step counts whole steps (an odd count
+    /// on its 2:1 side is refused: its phase is the step's). `input` and
+    /// `output` are scratch sized as for [`Converter::process`] at its
+    /// largest ([`Converter::input_frames_max`] and
+    /// [`Converter::output_frames_max`] frames a channel); neither is read
+    /// or written. An error of the core resets the converter.
+    ///
+    /// The sinc stage's counts and phase repeat with the ratio's period
+    /// ([`Converter::period`]) from its second fixed-side frame on: the
+    /// core's output `j` sits at input `j / r - (TAPS - 1)` after a reset
+    /// (`r` the ratio) and needs `TAPS + 1` input frames past it, so a
+    /// fixed input gives `floor((T - 2) * r)` frames for `T` and a fixed
+    /// output takes `ceil(J / r + 1)` for `J`. So it runs only
+    /// `frames mod period` of them (one period more when that is under 2),
+    /// in calls of at most one block with no channel active (rubato's
+    /// channel mask: its index steps, its buffers move), and adds the
+    /// whole periods. That costs `ceil(rest / block)` calls of a few us
+    /// each (rubato moves each channel's 512-sample history per call).
     pub fn skip_silence(
         &mut self,
+        frames: u64,
         input: &[f64],
-        frames_in: usize,
         output: &mut [f64],
-        out_frames: usize,
-    ) -> Result<(usize, usize), ConvertError> {
-        if !self.silent {
+    ) -> Result<(u64, u64), ConvertError> {
+        if !self.silent || self.adjusted {
             return Err(ConvertError::Invalid(
-                "a skip after audio: the history is not silent".into(),
+                "a skip after audio or a ratio change: the history is not silence".into(),
             ));
         }
-        let channels = self.channels;
+        let (fixed, block, channels) = (self.fixed, self.block, self.channels);
+        let (p_in, p_out) = self.period();
+        let (p_fixed, p_other) = match fixed {
+            Fixed::Input => (p_in, p_out),
+            Fixed::Output => (p_out, p_in),
+        };
+        let counts = |fixed_side: u64, other: u64| match fixed {
+            Fixed::Input => (fixed_side, other),
+            Fixed::Output => (other, fixed_side),
+        };
         match &mut self.engine {
-            Engine::Sinc(stage, none) => {
-                let core = |e: &dyn std::fmt::Display| ConvertError::Core(e.to_string());
-                let i = SequentialSlice::new(input, channels, frames_in).map_err(|e| core(&e))?;
-                let mut o =
-                    SequentialSlice::new_mut(output, channels, out_frames).map_err(|e| core(&e))?;
-                stage
-                    .process_into_buffer(&i, &mut o, Some(none))
-                    .map_err(|e| core(&e))
-            }
-            Engine::Copy | Engine::Half(_) => {
-                let (next, made) = match &self.engine {
-                    Engine::Half(h) => (
-                        half_input(self.fixed, h.step(), self.block),
-                        h.output_frames(frames_in),
-                    ),
-                    _ => (self.block, frames_in),
-                };
-                if frames_in != next || made > out_frames {
+            Engine::Copy => Ok((frames, frames)),
+            Engine::Half(_) => {
+                // The 2:1 side moves two frames a step, the 1:2 side one.
+                if p_fixed == 2 && !frames.is_multiple_of(2) {
                     return Err(ConvertError::Invalid(format!(
-                        "a skip of {frames_in} frames into room for {out_frames}"
+                        "a half-band skip of {frames} frames: not whole steps"
                     )));
                 }
-                Ok((frames_in, made))
+                Ok(counts(frames, frames / p_fixed * p_other))
+            }
+            Engine::Sinc(stage, none) => {
+                let mut run = frames % p_fixed;
+                while run < SKIP_WARM && run + p_fixed <= frames {
+                    run += p_fixed;
+                }
+                let whole = (frames - run) / p_fixed;
+                let out_frames = output.len() / channels;
+                let mut stepped = (0u64, 0u64);
+                let mut left = run;
+                let core = |e: &dyn std::fmt::Display| ConvertError::Core(e.to_string());
+                let mut step = || -> Result<(), ConvertError> {
+                    while left > 0 {
+                        let chunk = usize::try_from(left).map_or(block, |l| l.min(block));
+                        stage.set_chunk_size(chunk).map_err(|e| core(&e))?;
+                        let fin = stage.input_frames_next();
+                        let i = SequentialSlice::new(input, channels, fin).map_err(|e| core(&e))?;
+                        let mut o = SequentialSlice::new_mut(&mut output[..], channels, out_frames)
+                            .map_err(|e| core(&e))?;
+                        let (taken, given) = stage
+                            .process_into_buffer(&i, &mut o, Some(none))
+                            .map_err(|e| core(&e))?;
+                        stepped.0 += taken as u64;
+                        stepped.1 += given as u64;
+                        left -= chunk as u64;
+                    }
+                    stage.set_chunk_size(block).map_err(|e| core(&e))
+                };
+                if let Err(e) = step() {
+                    self.reset();
+                    return Err(e);
+                }
+                let (w_in, w_out) = counts(whole * p_fixed, whole * p_other);
+                Ok((stepped.0 + w_in, stepped.1 + w_out))
             }
         }
+    }
+
+    /// The ratio's period, (input frames, output frames): the fewest whole
+    /// frames on both sides at once (`from / gcd`, `to / gcd`; 320 and 147
+    /// for 96 to 44.1 kHz).
+    pub fn period(&self) -> (u64, u64) {
+        let (from, to) = (u64::from(self.from), u64::from(self.to));
+        let g = gcd(from, to);
+        (from / g, to / g)
     }
 
     /// Forgets the filter's history (after a gap in the audio).
     pub fn reset(&mut self) {
         self.silent = true;
+        self.adjusted = false;
         match &mut self.engine {
             Engine::Copy => {}
             Engine::Sinc(s, _) => s.reset(),
