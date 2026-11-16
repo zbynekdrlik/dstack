@@ -8,20 +8,21 @@
 //! Both run on the app's clock ([`dstack::clock::app_monotonic_ns`]: Linux
 //! `CLOCK_MONOTONIC`, Windows raw QPC), which the ticks (`Instant`) and the
 //! TX FIFO's write stamps read too: the pump's media clock is a
-//! [`SkewedClock`] at 0 ppm on it. A bare `MonoClock` that no poller ever
-//! fed reads the wall on Windows (`clock::monotonic_ns` before the steer
-//! model's first poll is `realtime_ns`), which the runner's time service
-//! adjusts under the test (dstack #305 measured the wall-fed model 66 ppm off
-//! QPC on windows-2025; a run here read the RX bridge at -38.9 ppm). A
-//! forward step of the pump's clock makes the pump run that much audio at
-//! once: the TX FIFO loses that depth until the level loop gives it back
-//! (about 1.2 ms a minute at its 20 ppm bound), counted only as a late pump
-//! wake. Three such
-//! steps of 3 ms took the depth before a write from 14.1 to 3.5 ms on dev1,
-//! and the main run of v0.6.146 gapped at a tick 2.7 ms late with three
-//! late pump wakes (at most 3.7 ms). Clock drift and steps between the
-//! pump and the app are the simulated gate's (its drift cases); here they
-//! would only hide the player behind the runner's clock.
+//! [`SkewedClock`] at 0 ppm on it. Its waits still sleep on the media
+//! threads' own clock, but a wall step there only moves a wake: the time
+//! each wake reads is the app's. A bare `MonoClock` that no poller ever fed
+//! reads the wall on Windows (`clock::monotonic_ns` before the steer model's
+//! first poll is `realtime_ns`), which the runner's time service adjusts
+//! under the test (dstack #305 measured the wall-fed model 66 ppm off QPC on
+//! windows-2025; a run here read the RX bridge at -38.9 ppm). A forward step
+//! of the pump's clock makes the pump run that much audio at once: the TX
+//! FIFO loses that depth until the level loop gives it back (about 1.2 ms a
+//! minute at its 20 ppm bound), counted only as a late pump wake. Three
+//! such steps of 3 ms took the depth before a write from 14.1 to 3.5 ms on
+//! dev1, and the main run of v0.6.146 gapped at a tick 2.7 ms late with
+//! three late pump wakes (at most 3.7 ms). Clock drift and steps between
+//! the pump and the app are the simulated gate's (its drift cases); here
+//! they would only hide the player behind the runner's clock.
 //!
 //! Not in the release gate (no `gate_` name, and its own binary, so the
 //! simulated cases never load the box under it): on a shared runner the
