@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.156
 
 - **Feature (#342, dasio#128): each RX flow slot's mean packet age, and its playout point, for an information line.** The owner wants dtray to show each RX flow's MEAN delivery latency next to its peaks, as information only. dstack kept only the least and the largest of a placed packet's age (our PTP now less its own stamp, the judge's `lateness_min_ns` figure), so no mean could be formed. Every ring writer now adds each placed packet's age to a running sum and count per slot: the RX thread's pass, the pump's drain and an app's drain, all in the one function they place through. This costs two relaxed `fetch_add` a packet, with no allocation and no lock. Two edge rules apply. A packet stamped after our now counts 0. An age past 4.29 s counts as 4.29 s, so the sum wraps only after 2^32 packets at that cap (16 days at 3000 packets a second). A reader diffs modulo 2^64; `lateness_mean_ns_since` does.
   - API (additive, dstack):
@@ -13,10 +13,14 @@
     - `lateness_mean_ns`: the last second's mean, ns. It is absent for a second without a placed packet, as `lateness_min_ns` is.
     - `lateness_sum_ns` and `lateness_count`: since the start. Diff two reads for the mean between them.
     - `playout` was already there.
+- **Fix (#346): a pump block whose outputs come after the TX thread sent them now counts on the pump.** The pump judges only its wake against W; a block that woke within W but ended past the TX thread's slack (W + fpp + the TX margin from its due time: its work, a preemption) was written after the TX read its stamps, so the TX sent the block as silence (its lane's `holes`) while the pump counted no late wake, re-bootstrap or skipped block: a gap on the receivers that the pump's own counters did not show (the likely cause of #339's `peer.rs` case 1). The engine ring now tells its writer: `Ring::put_at` stores with an atomic swap and returns how many of its positions the reader had already read as holes (decided by the same compare-and-swap the reader marks them with, so exact both ways); the pump counts each block with any such sample, whatever the cause (also the first block after a lower device latency or a re-anchor, when it lands on stamps already sent; then beside that re-bootstrap). It shows as `PumpView::writes_after_send`, the engine status key `engine.writes_after_send`, and in the pump watch's warning (`engine pump lost or overran blocks this second`, new field `writes_after_send`; a second where only it grew now warns too, with `cause=none`). The ring's counters (`written`, `holes`, `late`, ...) are unchanged, and so is what is sent.
+  - API (additive, dstack): `PumpView::writes_after_send`, `watch::Grew::writes_after_send` (a consumer building a `Grew` or `PumpView` with a struct literal adds it or uses `..Default::default()`), the status key. API change (dstack): `media::ring::Ring::put_at` returns `usize` (was `()`); a caller that ignores it compiles as before.
+  - The pump's real-time part gains one atomic swap per output sample (was a store) and a relaxed add on such a block: no allocation, lock or system call.
 - **No latency change** for any device or dlink app: P, (c), W and the app buffer are as in 0.6.155. Nothing reads the new figures to decide anything.
 - Consumers:
   - dasio keeps each slot's `RxCounts` from its 10 s look. It shows `lateness_mean_ns_since(&previous)` next to its peaks (`lateness_peak`, `last_lateness`, `last_min_lateness_ns`), and `flow_playout(slot)` as the latency the age must stay under. It still never calls `take_max_lateness`.
   - obs, camera-box, intercom, songplayer, presenter, iemmixer, dlisten and dsend move the stack version; nothing to port.
+  - #346: nothing to port. A status reader may show `engine.writes_after_send` beside the TX lane's `holes`.
 
 ## 0.6.155
 

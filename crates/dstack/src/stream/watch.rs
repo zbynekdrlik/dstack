@@ -2,25 +2,33 @@
 // Copyright (C) 2026 dstack contributors.
 
 //! The pump watch (dstack #1, intercom 4.11.2026): once a second, when the
-//! engine's pump re-bootstrapped, skipped blocks or overran in that second,
+//! engine's pump re-bootstrapped, skipped blocks, overran or wrote a block
+//! after the TX thread sent its stamps (dstack #346) in that second,
 //! one warning line with the device, the counts that grew, that second's
 //! longest block and the pump's timing (B, W, P, D). The pump only counts
 //! ([`super::PumpStats`]); this runs on the daemon's tick, never on the
 //! real-time pump thread, and never logs per event. A gap in an app's RX or
 //! a TX hole in the same second as this line with `rebootstraps` or
 //! `missed` grown is the pump falling more than W behind its block; with
+//! `writes_after_send` grown, the TX thread sent a block's stamps as
+//! silence before the block wrote them (dstack #346): alone, most often a
+//! block that woke within W but ended past the TX thread's slack (W, fpp
+//! and the TX margin from its due time), with no re-bootstrap; beside a
+//! `retime` or `reanchor`, the first block on the new timing landing on
+//! stamps already sent; with
 //! only `overruns` grown, blocks took longer than their period (an
 //! unoptimised converter in a debug build, dstack #1). A gap without the
 //! line is the network or the RX/TX path.
 //!
 //! The line names the re-bootstraps' causes (`cause`, [`cause_word`]:
 //! `late`, `clock_back`, `reanchor`, `retime`, joined by `+`; `none` when
-//! only overruns grew) and that second's latest wake (`behind_max_us`,
-//! [`super::wake`], dstack #281). Every [`MINUTE_NS`] the watch also ends
-//! the pump's wake minute ([`super::wake::WakeLateness::take_minute`]),
-//! which the status shows, and logs one info line ([`REJECTED_LINE`]) when
-//! the play-time filter rejected torn clock pairs in that minute
-//! (`play_at_rejected`, [`super::app_offset`], dstack #295).
+//! only overruns or `writes_after_send` grew) and that second's latest
+//! wake (`behind_max_us`, [`super::wake`], dstack #281). Every
+//! [`MINUTE_NS`] the watch also ends the pump's wake minute
+//! ([`super::wake::WakeLateness::take_minute`]), which the status shows,
+//! and logs one info line ([`REJECTED_LINE`]) when the play-time filter
+//! rejected torn clock pairs in that minute (`play_at_rejected`,
+//! [`super::app_offset`], dstack #295).
 
 use tracing::{info, warn};
 
@@ -46,11 +54,15 @@ pub struct Grew {
     pub clock_back: u64,
     pub reanchor: u64,
     pub retime: u64,
+    /// Blocks written after the TX thread sent their stamps as silence
+    /// (dstack #346, [`PumpView::writes_after_send`]): lost on the TX
+    /// side, with no re-bootstrap.
+    pub writes_after_send: u64,
 }
 
 /// The causes of the re-bootstraps that grew, as the warning names them:
 /// `late`, `clock_back`, `reanchor`, `retime` in that order, joined by `+`;
-/// `none` when none grew (only overruns).
+/// `none` when none grew (only overruns or `writes_after_send`).
 pub fn cause_word(grew: &Grew) -> String {
     let words: Vec<&str> = [
         (grew.late, "late"),
@@ -95,6 +107,7 @@ impl PumpWatch {
                 clock_back: 0,
                 reanchor: 0,
                 retime: 0,
+                writes_after_send: 0,
             },
             next_ns: None,
             minute_ns: None,
@@ -127,6 +140,7 @@ impl PumpWatch {
             clock_back: view.rebootstraps_clock_back,
             reanchor: view.rebootstraps_reanchor,
             retime: view.rebootstraps_retime,
+            writes_after_send: view.writes_after_send,
         };
         let seen = std::mem::replace(&mut self.seen, now);
         let grew = Grew {
@@ -137,8 +151,12 @@ impl PumpWatch {
             clock_back: now.clock_back.saturating_sub(seen.clock_back),
             reanchor: now.reanchor.saturating_sub(seen.reanchor),
             retime: now.retime.saturating_sub(seen.retime),
+            writes_after_send: now.writes_after_send.saturating_sub(seen.writes_after_send),
         };
-        let any = grew.rebootstraps > 0 || grew.missed > 0 || grew.overruns > 0;
+        let any = grew.rebootstraps > 0
+            || grew.missed > 0
+            || grew.overruns > 0
+            || grew.writes_after_send > 0;
         Some((any && !first).then_some(grew))
     }
 
@@ -205,6 +223,7 @@ impl PumpWatch {
             rebootstraps = grew.rebootstraps,
             missed = grew.missed,
             overruns = grew.overruns,
+            writes_after_send = grew.writes_after_send,
             max_process_us = second_max_us,
             media = view.media,
             block = timing.block,

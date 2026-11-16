@@ -349,3 +349,44 @@ fn the_watch_logs_the_rejected_play_time_pairs_once_a_minute() {
         "{log}"
     );
 }
+
+/// dstack #346: a block written after the TX thread sent its stamps is
+/// lost with no re-bootstrap; a second where only that grew still warns,
+/// with its count and no cause.
+#[test]
+fn a_block_written_after_its_send_alone_warns_with_its_count() {
+    undecided();
+    let mut w = PumpWatch::new();
+    let at = |n| PumpView {
+        writes_after_send: n,
+        ..PumpView::default()
+    };
+    assert_eq!(w.look(0, &at(2)), None, "learnt");
+    assert_eq!(
+        w.look(S, &at(5)),
+        Some(Grew {
+            writes_after_send: 3,
+            ..Grew::default()
+        })
+    );
+    assert_eq!(w.look(2 * S, &at(5)), None, "a quiet second");
+    let s = stats();
+    let mut w = PumpWatch::new();
+    w.watch(0, "d1", Some(&s));
+    s.wrote_after_send();
+    s.wrote_after_send();
+    let log = capture_warnings(|| w.watch(S, "d1", Some(&s)));
+    assert_eq!(log.lines().count(), 1, "{log}");
+    for part in [
+        PUMP_WARNING,
+        "writes_after_send=2",
+        "rebootstraps=0",
+        "missed=0",
+        "overruns=0",
+        "cause=none",
+    ] {
+        assert!(log.contains(part), "{part} in {log}");
+    }
+    assert_eq!(s.view().writes_after_send, 2, "the status keeps it");
+    assert_eq!(capture_warnings(|| w.watch(2 * S, "d1", Some(&s))), "");
+}
