@@ -463,14 +463,7 @@ fn push_record(out: &mut Vec<u8>, seq: u16, kind: u16, payload: &[u8]) {
     // reader walks to the next record by the first (dstack #345; an
     // UltimoX2 with 2 RX channels writes its peaks record as 28 and 16).
     let padded = payload.len().next_multiple_of(4);
-    let head = [
-        word(12 + padded),
-        kind,
-        4,
-        word(padded),
-        seq,
-        0,
-    ];
+    let head = [word(12 + padded), kind, 4, word(padded), seq, 0];
     out.extend(head.iter().flat_map(|f| f.to_be_bytes()));
     out.extend_from_slice(payload);
     out.resize(out.len().next_multiple_of(4), 0);
