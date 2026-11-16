@@ -9,9 +9,9 @@
 //! slot, [`LEAD`] ahead of its media time, the RX thread and the engine's
 //! pump run on the media clock, and the RX thread is stalled [`STALL`] at
 //! random moments (`stall_thread`), past the time a packet waits in its
-//! socket before its read (the lead plus the 8 ms receive slack). In the
-//! normal profile the pump drains the flow
-//! sockets itself, so no sample is late and none is a hole; in the
+//! socket before its read (the lead, the 8 ms receive slack and a block:
+//! 57 ms). In the normal profile the pump drains the flow sockets itself,
+//! so no sample is late and none is a hole; in the
 //! low-latency profile (the RX thread writes, on real-time priority in the
 //! field) the same stalls land samples behind the reader, which proves the
 //! stalls bite.
@@ -63,11 +63,18 @@ const RUN: Duration = Duration::from_secs(3);
 /// runner left the sender unrun for 16-35 ms (windows-2025), which a 4 ms
 /// lead turned into holes. The ring stores a write up to its `SLOTS`
 /// (65536 samples) ahead of the reader, so every early packet is kept
-/// (`early` stays 0, asserted).
+/// (`early` stays 0, asserted). The normal-profile test therefore catches
+/// only an RX writer later than the lead plus the slack and a block (57 ms,
+/// was 13 ms): the RX thread's [`STALL`] is past it, which the low-latency
+/// control proves; a pump that drains late by less goes unseen here.
 const LEAD: u64 = 2304;
-// The stall stays at least 10 ms past that wait.
-const _: () =
-    assert!((LEAD + PLAYOUT + BLOCK) * 1000 / RATE as u64 + 10 <= STALL.as_millis() as u64);
+// The stall stays at least 10 ms past that wait (the control's margin), in
+// samples so nothing rounds.
+const _: () = assert!(
+    LEAD + PLAYOUT + BLOCK + RATE as u64 / 100 <= STALL.as_millis() as u64 * RATE as u64 / 1000
+);
+// Every early packet fits the ring ahead of its reader.
+const _: () = assert!(LEAD + PLAYOUT + BLOCK < dstack::media::ring::SLOTS as u64);
 
 /// The sample the sender sends at position `pos` (left-justified 24 bit):
 /// the position mod 65535, plus one, so no sample is 0, which a hole reads.
