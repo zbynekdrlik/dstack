@@ -9,6 +9,7 @@
 //! its status written. A file of its own: its devices set the `normal`
 //! timing profile (one per process).
 
+use std::collections::BTreeSet;
 use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
 use std::path::Path;
 
@@ -18,9 +19,11 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use dstack::clock;
+use dstack::daemon::media::Media;
 use dstack::host::Stopped;
 use dstack::peer::args::{self, Parsed, PeerArgs};
 use dstack::peer::{Peer, Shared};
+use dstack::stream::PumpStats;
 
 /// Held by each test that runs a device: they bind the Dante ports on the
 /// routed address.
@@ -67,6 +70,9 @@ struct Counts {
     tx_holes: u64,
     /// The RX channel ring's late samples (written after their read).
     ring_late: u64,
+    /// The pump's blocks with an output the TX thread had already sent
+    /// as silence (dstack #346, `writes_after_send`).
+    after_send: u64,
 }
 
 impl Counts {
@@ -85,6 +91,7 @@ impl Counts {
             blocks: pump.blocks,
             tx_holes: num(&v["device"]["tx"][0]["holes"]),
             ring_late: num(&v["device"]["channels"][0]["late"]),
+            after_send: pump.writes_after_send,
         }
     }
 
@@ -97,6 +104,7 @@ impl Counts {
             blocks: self.blocks - before.blocks,
             tx_holes: self.tx_holes - before.tx_holes,
             ring_late: self.ring_late - before.ring_late,
+            after_send: self.after_send - before.after_send,
         }
     }
 }
@@ -115,6 +123,140 @@ struct Stall {
     gap_us: u64,
 }
 
+/// A sender thread the witness watches (dstack #339): the TX thread (its
+/// lane's packets) or the pump (its blocks).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Thread {
+    Tx,
+    Pump,
+}
+
+/// A time a sender thread did nothing while the witness ran: its count
+/// stayed flat for `silent_us` (µs of the app's clock), and the witness saw
+/// it rise again at `end_ms` (ms since the Unix epoch).
+#[derive(Debug, Clone, Copy)]
+struct Silence {
+    peer: usize,
+    thread: Thread,
+    end_ms: u64,
+    silent_us: u64,
+}
+
+impl Silence {
+    /// The least silence of its thread that can lose audio, µs.
+    fn loss_us(&self) -> u64 {
+        match self.thread {
+            Thread::Tx => TX_LOSS_US,
+            Thread::Pump => PUMP_LOSS_US,
+        }
+    }
+}
+
+/// A count a thread raises while it runs (the TX lane's packets, the
+/// pump's blocks), as the witness's passes see it.
+#[derive(Debug, Clone, Copy)]
+struct Progress {
+    count: u64,
+    /// The pass that saw it rise last (ns, the app's clock).
+    rose_ns: u64,
+    /// The last pass since then that saw it flat.
+    flat_ns: Option<u64>,
+}
+
+impl Progress {
+    fn new(count: u64, now_ns: u64) -> Progress {
+        Progress {
+            count,
+            rose_ns: now_ns,
+            flat_ns: None,
+        }
+    }
+
+    /// A pass at `now_ns` reads `count`. When it rose after passes that saw
+    /// it flat: the silence the witness saw, µs, from the rise before to
+    /// the last flat pass. A lower bound of the thread's own silence that
+    /// never holds the witness's own gap into the rising pass, so a stall
+    /// of the whole process reads as the witness's stall, never as a
+    /// thread's silence.
+    fn look(&mut self, count: u64, now_ns: u64) -> Option<u64> {
+        if count == self.count {
+            self.flat_ns = Some(now_ns);
+            return None;
+        }
+        let silent = self
+            .flat_ns
+            .take()
+            .map(|flat| flat.saturating_sub(self.rose_ns) / 1_000);
+        self.count = count;
+        self.rose_ns = now_ns;
+        silent
+    }
+}
+
+/// One peer's threads as the witness watches them.
+struct Sender {
+    media: Arc<Media>,
+    pump: Arc<PumpStats>,
+    tx: Progress,
+    blocks: Progress,
+    /// The pump's late wakes at the last merge.
+    late_wakes: u64,
+    /// `writes_after_send` at the last pass.
+    after_send: u64,
+}
+
+impl Sender {
+    fn new(media: Arc<Media>, now_ns: u64) -> Sender {
+        let pump = media.engine_stats().expect("the pump");
+        let view = pump.view();
+        Sender {
+            tx: Progress::new(media.tx.lane(0).packets, now_ns),
+            blocks: Progress::new(view.blocks, now_ns),
+            late_wakes: pump.wakes().late_wakes(),
+            after_send: view.writes_after_send,
+            media,
+            pump,
+        }
+    }
+
+    /// One pass of the witness at `now_ns`: peer `peer`'s silences that
+    /// ended, its `writes_after_send` rise and its new late wakes, into
+    /// `seen`.
+    fn look(&mut self, peer: usize, now_ns: u64, seen: &mut Seen) {
+        let view = self.pump.view();
+        let at = unix_ms();
+        let progress = [
+            (Thread::Tx, &mut self.tx, self.media.tx.lane(0).packets),
+            (Thread::Pump, &mut self.blocks, view.blocks),
+        ];
+        for (thread, p, count) in progress {
+            if let Some(silent_us) = p.look(count, now_ns)
+                && silent_us >= Witness::STALL_NS / 1_000
+            {
+                seen.silences.push(Silence {
+                    peer,
+                    thread,
+                    end_ms: at,
+                    silent_us,
+                });
+            }
+        }
+        if view.writes_after_send > self.after_send {
+            self.after_send = view.writes_after_send;
+            seen.after_send[peer].push(at);
+        }
+        // The status keeps the last 32 late wakes only: merge them as they
+        // come, so a busy window keeps every one.
+        let late = self.pump.wakes().late_wakes();
+        if late > self.late_wakes {
+            self.late_wakes = late;
+            for w in self.pump.wakes().recent() {
+                seen.late_wakes[peer].insert((w.unix_ms, w.behind_us));
+            }
+        }
+    }
+}
+
 /// What the witness saw over the counted window (dstack #339).
 #[derive(Debug, Default)]
 struct Seen {
@@ -123,12 +265,23 @@ struct Seen {
     largest: Option<Stall>,
     /// When each peer's tone-gap count rose (ms since the Unix epoch).
     rises: [Vec<u64>; 2],
+    /// The peers' TX threads' and pumps' silences over
+    /// [`Witness::STALL_NS`] while the witness ran.
+    silences: Vec<Silence>,
+    /// Each peer's pump late wakes, `(unix_ms, behind_us)`.
+    late_wakes: [BTreeSet<(u64, u64)>; 2],
+    /// When each peer's `writes_after_send` rose (ms since the Unix epoch).
+    after_send: [Vec<u64>; 2],
 }
 
 /// A thread at the test's own priority that sleeps 1 ms at a time on the
 /// app's clock ([`clock::app_monotonic_ns`]) and keeps every pass gap over
-/// [`Witness::STALL_NS`] (the runner did not run it) and when each peer's
-/// tone-gap count rose: a failure names the stall before a gap, or none.
+/// [`Witness::STALL_NS`] (the runner did not run it), when each peer's
+/// tone-gap count rose, and each peer's own threads (dstack #339): its TX
+/// thread's and its pump's silences while the witness ran (a runner can
+/// leave one thread unrun while it runs another), the pump's late wakes
+/// and its `writes_after_send`. A failure names the stall or silence
+/// before a gap, or none.
 struct Witness {
     stop: Arc<AtomicBool>,
     thread: JoinHandle<Seen>,
@@ -138,14 +291,18 @@ impl Witness {
     /// A pass gap over this is a stall: the 1 ms sleep plus 1 ms.
     const STALL_NS: u64 = 2_000_000;
 
-    fn start(peers: [Arc<Shared>; 2]) -> Witness {
+    fn start(peers: [(Arc<Shared>, Arc<Media>); 2]) -> Witness {
         let stop = Arc::new(AtomicBool::new(false));
         let stopped = Arc::clone(&stop);
         let thread = std::thread::spawn(move || {
-            let gaps = |i: usize| peers[i].rx[0].view().gaps;
+            let [(a, media_a), (b, media_b)] = peers;
+            let tones = [a, b];
+            let gaps = |i: usize| tones[i].rx[0].view().gaps;
             let mut seen = Seen::default();
             let mut counted = [gaps(0), gaps(1)];
             let mut last = clock::app_monotonic_ns();
+            let first = u64::try_from(last).unwrap_or(0);
+            let mut senders = [Sender::new(media_a, first), Sender::new(media_b, first)];
             while !stopped.load(Ordering::Acquire) {
                 std::thread::sleep(Duration::from_millis(1));
                 let now = clock::app_monotonic_ns();
@@ -160,6 +317,10 @@ impl Witness {
                 }
                 if gap_ns > Witness::STALL_NS {
                     seen.stalls.push(stall);
+                }
+                let now_ns = u64::try_from(now).unwrap_or(0);
+                for (peer, s) in senders.iter_mut().enumerate() {
+                    s.look(peer, now_ns, &mut seen);
                 }
                 for (i, count) in counted.iter_mut().enumerate() {
                     let now = gaps(i);
@@ -185,6 +346,24 @@ impl Witness {
 /// and counted once it ends (the check's clear run, a block or two).
 const CAUSE_WINDOW_MS: u64 = 60;
 
+/// Whether a thread not run for `us` until `end_ms` can be the cause of a
+/// gap counted at `at` (ms since the Unix epoch): it began at or before
+/// the count and ended at most [`CAUSE_WINDOW_MS`] before it. It may end
+/// after the count: a TX thread stalled past the latency leaves a gap the
+/// receiver counts while the sender is still not run (dev1, load ~45: a
+/// 14.3 ms TX silence ended 3 ms after its gap was counted).
+fn cause_of(at: u64, end_ms: u64, us: u64) -> bool {
+    end_ms.saturating_sub(us.div_ceil(1_000)) <= at && at <= end_ms + CAUSE_WINDOW_MS
+}
+
+/// `end_ms` against a count at `at`, for the message.
+fn when(at: u64, end_ms: u64) -> String {
+    match end_ms.checked_sub(at) {
+        Some(after) => format!("ended {after} ms after"),
+        None => format!("ended {} ms before", at - end_ms),
+    }
+}
+
 /// The least scheduling gap that can lose audio here, µs: a pump that
 /// woke this late plus its block's work ends past W (6 ms), fpp (0.67 ms)
 /// and the TX margin (0.25 ms) together and leaves TX holes; less is inside
@@ -192,26 +371,32 @@ const CAUSE_WINDOW_MS: u64 = 60;
 /// is this plus 1 ms).
 const LOSS_GAP_US: u64 = 5_000;
 
-/// A peer status's recent pump late wakes, `(unix_ms, behind_us)`.
-fn late_wakes(status: &str) -> Vec<(u64, u64)> {
-    let v: serde_json::Value = serde_json::from_str(status).unwrap();
-    v["device"]["engine"]["late_wakes_recent"]
-        .as_array()
-        .map(|a| {
-            a.iter()
-                .filter_map(|w| Some((w["unix_ms"].as_u64()?, w["behind_us"].as_u64()?)))
-                .collect()
-        })
-        .unwrap_or_default()
-}
+/// The peers' pump block, µs (`dstack::peer`'s 128 frames at 48 kHz).
+const BLOCK_US: u64 = 128 * 1_000_000 / 48_000;
+
+/// The least pump silence that can lose audio, µs: its blocks end a block
+/// apart, so a pump that woke [`LOSS_GAP_US`] late ended none for a block
+/// and that.
+const PUMP_LOSS_US: u64 = BLOCK_US + LOSS_GAP_US;
+
+/// The least TX thread silence that can lose audio, µs: a packet that
+/// leaves about this late past its due reaches the receiver past its
+/// latency (10 ms, less fpp 0.67 ms and the TX margin 0.25 ms), and one
+/// over the latency late restarts the TX schedule; the witness can see a
+/// silence up to a pass (1 ms) short.
+const TX_LOSS_US: u64 = 10_000 - 1_000 - 1_000;
 
 /// Peer `me`'s failure message (dstack #339): the verdict, each gap's
-/// time with the scheduling gaps that ended before it (the witness's
-/// stalls, either pump's late wakes), the counts and both peers'
-/// statuses. `RUNNER` when the loss has a counted cause (the sender's TX
-/// holes or TX restart, either pump's restart) and every gap a scheduling
-/// gap of at least [`LOSS_GAP_US`] before it; else `OURS`: a loss nothing
-/// counted, or one no long enough stall precedes, is the stack's. Too
+/// time with the evidence around it ([`cause_of`]), the counts, what the
+/// witness saw of the threads and both peers' statuses. Evidence is a
+/// thread not run long enough to lose audio: the witness's own stall
+/// (the whole process), a peer's TX thread or pump silent while the
+/// witness ran ([`TX_LOSS_US`], [`PUMP_LOSS_US`]), or a pump late wake
+/// ([`LOSS_GAP_US`]); either peer's, since the receiver's pump restart is
+/// a counted cause too. `RUNNER` when the loss has a counted cause (the
+/// sender's TX holes, TX restart or `writes_after_send`, either pump's
+/// restart) and evidence at every gap; else `OURS`: a loss nothing
+/// counted, or one with no thread not run at it, is the stack's. Too
 /// many restarts with no loss is `NO LOSS`.
 fn verdict(
     me: usize,
@@ -222,10 +407,12 @@ fn verdict(
     status: &[String; 2],
 ) -> String {
     let other = 1 - me;
-    let wakes = [late_wakes(&status[0]), late_wakes(&status[1])];
-    let before = |at: u64, end: u64| end <= at && at - end <= CAUSE_WINDOW_MS;
-    let caused =
-        theirs.tx_holes + theirs.tx_restarts + theirs.pump_restarts + mine.pump_restarts > 0;
+    let caused = theirs.tx_holes
+        + theirs.tx_restarts
+        + theirs.after_send
+        + theirs.pump_restarts
+        + mine.pump_restarts
+        > 0;
     let mut explained = 0;
     let gaps: Vec<String> = seen.rises[me]
         .iter()
@@ -233,17 +420,30 @@ fn verdict(
             let mut stalls: Vec<String> = seen
                 .stalls
                 .iter()
-                .filter(|s| s.gap_us >= LOSS_GAP_US + 1_000 && before(at, s.end_ms))
-                .map(|s| format!("witness {} us, {} ms before", s.gap_us, at - s.end_ms))
+                .filter(|s| s.gap_us >= LOSS_GAP_US + 1_000 && cause_of(at, s.end_ms, s.gap_us))
+                .map(|s| format!("witness {} us, {}", s.gap_us, when(at, s.end_ms)))
                 .collect();
-            for (peer, w) in wakes.iter().enumerate() {
+            for s in seen
+                .silences
+                .iter()
+                .filter(|s| s.silent_us >= s.loss_us() && cause_of(at, s.end_ms, s.silent_us))
+            {
+                stalls.push(format!(
+                    "peer {}'s {:?} thread silent {} us, {}",
+                    s.peer,
+                    s.thread,
+                    s.silent_us,
+                    when(at, s.end_ms)
+                ));
+            }
+            for (peer, w) in seen.late_wakes.iter().enumerate() {
                 for &(end, us) in w
                     .iter()
-                    .filter(|&&(end, us)| us >= LOSS_GAP_US && before(at, end))
+                    .filter(|&&(end, us)| us >= LOSS_GAP_US && cause_of(at, end, us))
                 {
                     stalls.push(format!(
-                        "peer {peer}'s pump {us} us behind, {} ms before",
-                        at - end
+                        "peer {peer}'s pump {us} us behind, {}",
+                        when(at, end)
                     ));
                 }
             }
@@ -266,12 +466,36 @@ fn verdict(
     } else {
         "OURS: a loss with no counted cause, or with no thread not run long enough before it"
     };
+    let since =
+        |ms: &[u64]| -> Vec<u64> { ms.iter().map(|t| t.saturating_sub(started_ms)).collect() };
+    let silences: Vec<String> = seen
+        .silences
+        .iter()
+        .map(|s| {
+            format!(
+                "peer {} {:?} {} us at +{} ms",
+                s.peer,
+                s.thread,
+                s.silent_us,
+                s.end_ms.saturating_sub(started_ms)
+            )
+        })
+        .collect();
     format!(
         "{verdict}\npeer {me}: {mine:?}\nsender (peer {other}): {theirs:?}\n{gaps:?}\n\
-         witness: {} stalls over {} us, largest {:?}\npeer {me} status: {}\npeer {other} status: {}",
+         witness: {} stalls over {} us, largest {:?}\n\
+         threads silent over {} us while the witness ran: {silences:?}\n\
+         writes_after_send rose at (ms after the start): peer 0 {:?}, peer 1 {:?}\n\
+         pump late wakes seen: peer 0 {}, peer 1 {}\n\
+         peer {me} status: {}\npeer {other} status: {}",
         seen.stalls.len(),
         Witness::STALL_NS / 1_000,
         seen.largest,
+        Witness::STALL_NS / 1_000,
+        since(&seen.after_send[0]),
+        since(&seen.after_send[1]),
+        seen.late_wakes[0].len(),
+        seen.late_wakes[1].len(),
         status[me],
         status[other]
     )
@@ -287,6 +511,43 @@ fn wait_for(bound: Duration, mut done: impl FnMut() -> bool) -> bool {
         std::thread::sleep(Duration::from_millis(50));
     }
     true
+}
+
+/// The witness's silence of a thread (dstack #339) runs from its rise
+/// before to the last pass that saw it flat: none for a count that rose
+/// each pass, and never the witness's own gap into the rising pass.
+#[test]
+fn a_thread_s_silence_is_what_the_witness_saw_flat() {
+    let ms = |m: u64| m * 1_000_000;
+    let mut p = Progress::new(10, 0);
+    assert_eq!(p.look(11, ms(1)), None);
+    assert_eq!(p.look(12, ms(2)), None);
+    assert_eq!(p.look(12, ms(3)), None);
+    assert_eq!(p.look(12, ms(11)), None);
+    // Flat from the rise at 2 ms to the pass at 11 ms; the witness itself
+    // was not run from 11 to 40 ms, which is not the thread's.
+    assert_eq!(p.look(13, ms(40)), Some(9_000));
+    assert_eq!(p.look(14, ms(41)), None);
+    assert_eq!(p.look(14, ms(42)), None);
+    assert_eq!(p.look(15, ms(43)), Some(1_000));
+}
+
+/// A thread not run is a gap's cause when it began at or before the count
+/// and ended at most the window before it (dstack #339).
+#[test]
+fn a_cause_began_by_the_count_and_ended_within_the_window() {
+    let at = 1_000_000;
+    // Ended within the window before, at its edge, and past it.
+    assert!(cause_of(at, at - CAUSE_WINDOW_MS, 6_000));
+    assert!(!cause_of(at, at - CAUSE_WINDOW_MS - 1, 6_000));
+    // Began before the count and ended after it (a TX thread still stalled).
+    assert!(cause_of(at, at + 3, 14_300));
+    assert!(cause_of(at, at + 15, 15_000));
+    // Began after the count: not its cause (a part of a ms rounds up).
+    assert!(!cause_of(at, at + 15, 14_000));
+    assert!(cause_of(at, at + 15, 14_001));
+    assert_eq!(when(at, at + 3), "ended 3 ms after");
+    assert_eq!(when(at, at - 7), "ended 7 ms before");
 }
 
 /// The design's whole-device test: two devices at +40 and -30 ppm, each
@@ -339,7 +600,10 @@ fn two_peers_at_different_skews_hear_each_other_s_tone_whole() {
     std::thread::sleep(Duration::from_secs(1));
     // dstack #339: a thread of the test's own that sees the runner stall,
     // and when each gap is counted, for the failure's verdict.
-    let witness = Witness::start([Arc::clone(a.shared()), Arc::clone(b.shared())]);
+    let witness = Witness::start([
+        (Arc::clone(a.shared()), Arc::clone(a.media())),
+        (Arc::clone(b.shared()), Arc::clone(b.media())),
+    ]);
     let started_ms = unix_ms();
     let before = [Counts::of(&a), Counts::of(&b)];
     std::thread::sleep(Duration::from_secs(8));
