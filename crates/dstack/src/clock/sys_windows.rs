@@ -320,7 +320,10 @@ impl super::wait::WaitOs for Os {
         // (Sleep(0) is no shelter: on windows-2025 a lower-priority thread
         // ran 21 million turns in 0.3 s of a Sleep(0) spin, and the waits
         // went 3 ms late), and its block once a period lets lower
-        // priorities run. Which turn is `wait::until`'s decision.
+        // priorities run. Which turn is `wait::until`'s decision: since
+        // dstack #351 no yield in the last `wait::NO_YIELD_NS` (Defender kept
+        // dsg's pump's CPU 1.4 ms after a late yield), with a timer wait at
+        // least every `wait::GIVE_CAP_NS` so lower priorities still run.
         match turn {
             super::wait::Turn::Yield => std::thread::yield_now(),
             super::wait::Turn::Pause => std::hint::spin_loop(),

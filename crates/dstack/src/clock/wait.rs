@@ -85,31 +85,55 @@ impl Gives {
     pub(crate) fn gave(&mut self, app_now: i64) {
         self.last = Some(app_now);
     }
+
+    /// Whether a wait with `left` to go at `app_now` that gives nothing
+    /// would end `cap` or more after the last give; the first look only
+    /// starts the count (as `EscapeState`'s).
+    fn owed(&mut self, app_now: i64, left: i64, cap: i64) -> bool {
+        match self.last {
+            None => {
+                self.last = Some(app_now);
+                false
+            }
+            Some(last) => app_now.saturating_sub(last).saturating_add(left) >= cap,
+        }
+    }
 }
 
 /// Waits until `os`'s clock reaches `target`: the escape's block when it is
-/// due, the timer for all but the spin tail, then the spin.
+/// due, the timer for all but the spin tail, then the spin: it yields
+/// until [`Plan::no_yield_ns`] before `target` and pauses from there
+/// (dstack #351), and goes on the timer instead when it would give nothing
+/// for [`Plan::give_cap_ns`] ([`Gives::owed`]). Under the bounded escape
+/// it pauses throughout, uncapped (the escape's block is its give).
 pub(crate) fn until(os: &mut impl WaitOs, target: i64, plan: Plan, gives: &mut Gives) {
-    let _ = (plan.no_yield_ns, plan.give_cap_ns);
     if plan.escape && os.take_escape() {
         os.block_for(plan.escape_block_ns);
+        gives.gave(os.app_ns());
     }
     let left = target.saturating_sub(os.now_ns());
     if left > plan.spin_tail_ns {
         os.block_for(left - plan.spin_tail_ns);
+        gives.gave(os.app_ns());
     }
     if plan.spin_tail_ns == 0 {
         return;
     }
-    while target > os.now_ns() {
-        let turn = if plan.escape {
-            Turn::Pause
-        } else {
-            Turn::Yield
-        };
-        os.spin_turn(turn);
-        if turn == Turn::Yield {
+    loop {
+        let left = target.saturating_sub(os.now_ns());
+        if left <= 0 {
+            return;
+        }
+        if plan.escape {
+            os.spin_turn(Turn::Pause);
+        } else if left > plan.no_yield_ns {
+            os.spin_turn(Turn::Yield);
             gives.gave(os.app_ns());
+        } else if gives.owed(os.app_ns(), left, plan.give_cap_ns) {
+            os.block_for(left);
+            gives.gave(os.app_ns());
+        } else {
+            os.spin_turn(Turn::Pause);
         }
     }
 }
