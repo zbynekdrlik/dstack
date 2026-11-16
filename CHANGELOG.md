@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- **Fix (#328): the TEST system clock runs on the app's clock on Windows too.** A device on `ClockSource::System` (`--clock system`, dlink's test clock, the CI peers) with no `test_clock_ppm` ran on `clock::monotonic_ns`, which on Windows is the wall clock until dsync's poller updates it, and no poller runs on that source: the device followed the runner's time service (steps and slew, 66 ppm off QPC on windows-2025, #305). `skewed::media_ptp` now always gives that source a `SkewedClock` on `clock::app_monotonic_ns` (raw QPC on Windows, `CLOCK_MONOTONIC` on Linux), at 0 ppm when no skew is set. Linux is unchanged (the same clock). Production clocks (dsync, linked) are untouched.
+- **No latency change** for any device or dlink app.
+- Consumers: nothing to port; a Windows test on the system clock (obs, dasio, songplayer CI) gets a stable clock when it moves the stack version.
+
 ## 0.6.147
 
 - **Test fix (#304): the real-time soak case runs its pump on the app's clock.** `crates/dlink/tests/soak_real_time.rs` gave the pump a bare `MonoClock` that no poller ever fed; on Windows that reads the wall clock (`clock::monotonic_ns` before the steer model's first poll), which the CI runner's time service adjusts under the test, while the app's ticks and the TX FIFO's write stamps read raw QPC. A forward step of the pump's clock runs that much audio at once and the TX FIFO loses the depth, so main CI of 0.6.146 (and a dev run of 0.6.143) gapped at a tick only 2.2-2.7 ms late. The pump now runs on `SkewedClock` at 0 ppm on `clock::app_monotonic_ns`, the clock the ticks read; a gap failure also lists the five ticks before it with the TX FIFO's depth. No stack code changed.
