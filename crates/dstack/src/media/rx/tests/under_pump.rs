@@ -40,6 +40,33 @@ fn the_first_claim_of_the_rings_holds_for_good() {
 }
 
 #[test]
+fn the_app_s_claim_of_the_rings_holds_against_the_pump_and_the_thread() {
+    // dstack #307: the app first; neither the pump nor the RX thread
+    // writes, and a second app claim gets nothing.
+    let s = shared(1);
+    assert!(!s.app_writes());
+    assert!(s.app_intake().is_some());
+    assert!(s.app_writes());
+    assert!(!s.pump_writes());
+    assert!(s.app_intake().is_none(), "one writer");
+    assert!(s.pump_intake().is_none());
+    let rx = Receiver::new(Arc::clone(&s)).unwrap();
+    assert!(rx.intake.is_none());
+    assert!(s.app_writes());
+    // The pump first: the app gets nothing.
+    let s = shared(1);
+    assert!(s.pump_intake().is_some());
+    assert!(s.app_intake().is_none());
+    assert!(!s.app_writes());
+    // The RX thread first: likewise.
+    let s = shared(1);
+    let rx = Receiver::new(Arc::clone(&s)).unwrap();
+    assert!(rx.intake.is_some());
+    assert!(s.app_intake().is_none());
+    assert!(!s.app_writes());
+}
+
+#[test]
 fn the_pump_reads_a_slot_s_own_socket_or_its_group_s_when_it_is_the_plan_s() {
     let a = SocketAddrV4::new(Ipv4Addr::new(239, 1, 2, 3), 4321);
     let b = SocketAddrV4::new(Ipv4Addr::new(239, 1, 2, 4), 4321);

@@ -20,7 +20,10 @@
 //!   an engine pump; the engine's pump in the normal profile, which drains
 //!   the flow sockets itself just before it reads each block
 //!   ([`RxShared::pump_intake`]), so a helper thread the scheduler leaves
-//!   behind can no longer write samples behind the reader. Chosen once at
+//!   behind can no longer write samples behind the reader; or the app's
+//!   own consumer (dstack #307, [`RxShared::app_intake`]: an output
+//!   callback that drains and reads the rings by position itself, dlink's
+//!   `bridge::RxPull`). Chosen once at
 //!   the start; the RX thread then keeps the groups' joins, the keepalives
 //!   and the rejoins, and polls no flow socket. What follows about reading
 //!   and placing a packet is the writer's, whichever thread runs it.
@@ -228,7 +231,8 @@ pub struct RxShared {
     /// stalls before its next pass ([`RxShared::stall_thread`]; 0: none).
     stall_until: AtomicU64,
     /// Who writes the rings (dstack #326): [`WRITER_UNSET`] until the
-    /// engine's pump ([`RxShared::pump_intake`]) or the RX thread
+    /// engine's pump ([`RxShared::pump_intake`]), the app
+    /// ([`RxShared::app_intake`], dstack #307) or the RX thread
     /// ([`Receiver::new`]) claims it, once for the device's life.
     ring_writer: AtomicU8,
     /// Each slot's group socket for the writer, by its handle.
@@ -244,6 +248,8 @@ const WRITER_UNSET: u8 = 0;
 const WRITER_THREAD: u8 = 1;
 /// The engine's pump writes them ([`RxShared::pump_intake`]).
 const WRITER_PUMP: u8 = 2;
+/// The app's consumer writes them ([`RxShared::app_intake`], dstack #307).
+const WRITER_APP: u8 = 3;
 
 /// The last of the [`MAX_FLOWS`] ports from `base`, `None` past 65535.
 pub(crate) fn last_port(base: u16) -> Option<u16> {
@@ -339,9 +345,33 @@ impl RxShared {
     }
 
     /// Whether the engine's pump writes the rings ([`RxShared::pump_intake`]);
-    /// else the RX thread does.
+    /// else the RX thread or the app does.
     pub fn pump_writes(&self) -> bool {
         self.ring_writer.load(Ordering::Acquire) == WRITER_PUMP
+    }
+
+    /// The app claims the rings' writes (dstack #307): the [`Intake`] the
+    /// thread with the deadline (an output callback, dlink's
+    /// `bridge::RxPull`) drains just before it reads the rings by
+    /// position, so neither the pump's lateness nor a helper thread's
+    /// stands between a packet in its socket and the read. Claimed before
+    /// the pump and the RX thread (`embed::Embedded::start_pulling`); `None`
+    /// when one of them claimed first, and nothing changes.
+    pub fn app_intake(self: &Arc<Self>) -> Option<Intake> {
+        self.ring_writer
+            .compare_exchange(
+                WRITER_UNSET,
+                WRITER_APP,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .ok()
+            .map(|_| Intake::new(Arc::clone(self)))
+    }
+
+    /// Whether the app writes the rings ([`RxShared::app_intake`]).
+    pub fn app_writes(&self) -> bool {
+        self.ring_writer.load(Ordering::Acquire) == WRITER_APP
     }
 
     /// The RX thread claims the rings' writes: `true` when it is the first
@@ -955,6 +985,8 @@ fn run(
         asked = RECV_BUFFER_BYTES,
         // dstack #326: who writes the rings, the pump or this thread.
         pump_writes = shared.pump_writes(),
+        // dstack #307: or the app's consumer (an RX bridge it pulls).
+        app_writes = shared.app_writes(),
         "RX flow sockets' receive buffer"
     );
     let mut pin = super::repin::RePin::new(cpu);

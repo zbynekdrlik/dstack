@@ -184,6 +184,10 @@
 //! link.stop();
 //! ```
 
+// The rtsan CI job (nightly, `--cfg iem_rtsan`) marks the RX pull's ring
+// read (`bridge::pull`) as a real-time context (dstack #307).
+#![cfg_attr(iem_rtsan, feature(sanitize))]
+
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -215,6 +219,7 @@ use dstack::device::TimingProfile;
 use dstack::embed::Embedded;
 use dstack::host::ClockSource;
 use dstack::media::bypass::FrameSender;
+use dstack::media::rx::Intake;
 
 /// The sample rate unless the app sets one.
 pub const SAMPLE_RATE: u32 = 48_000;
@@ -722,6 +727,75 @@ impl Link {
         )
     }
 
+    /// [`Link::start`] whose RX channels `map.rx` reach the app through
+    /// the bridge `fifo`, pulled by the app's own thread with the deadline
+    /// (an output callback; dstack #307): the [`bridge::RxPull`] it
+    /// returns drains the flow sockets into the RX rings and reads them by
+    /// position, at the media clock's now less the device's latency P (the
+    /// pump's playout point), into `fifo` (FIFO channel `i` is RX channel
+    /// `map.rx[i]`, at [`Config::device_rate`]: make it with
+    /// [`bridge::fifo_for`]). Call [`bridge::RxPull::pull`] at the top of
+    /// each callback, before [`bridge::Player::fill_with`]. The pump runs
+    /// `processor` every block on no RX inputs (they are the app's now)
+    /// and the TX channels `map.tx`, so a late pump no longer empties the
+    /// bridge, with the same latency (the bridge's target unchanged).
+    ///
+    /// A FIFO whose channels are not `map.rx`'s or an RX channel past the
+    /// device's is [`HostError::Setup`]; every other error as
+    /// [`Link::start`].
+    pub fn start_pulling<P: Process + 'static>(
+        config: &Config,
+        place: &Place,
+        map: Map,
+        processor: P,
+        fifo: Arc<bridge::Fifo>,
+    ) -> Result<(Link, bridge::RxPull), HostError> {
+        Self::start_pulling_on(
+            config,
+            place,
+            map,
+            processor,
+            fifo,
+            config.clock(ClockSource::Linked),
+        )
+    }
+
+    /// [`Link::start_pulling`] on the clock `source` (as [`Link::start_on`]).
+    pub fn start_pulling_on<P: Process + 'static>(
+        config: &Config,
+        place: &Place,
+        map: Map,
+        processor: P,
+        fifo: Arc<bridge::Fifo>,
+        source: ClockSource,
+    ) -> Result<(Link, bridge::RxPull), HostError> {
+        bridge::pull::check(&map.rx, config.rx.len(), fifo.channels()).map_err(HostError::Setup)?;
+        let pump = Map {
+            rx: Vec::new(),
+            tx: map.tx,
+        };
+        let (link, intake) =
+            Self::start_device(config, place, PlaceWait::Now, pump, processor, source, true)?;
+        let Some(intake) = intake else {
+            let stopped = link.stop();
+            return Err(HostError::Setup(format!(
+                "dlink: no RX intake for the app ({stopped:?})"
+            )));
+        };
+        let playout = link.device.timing().playout;
+        let media = link.media();
+        let pull = bridge::RxPull::new(
+            intake,
+            Arc::clone(&media.clock),
+            Arc::clone(&media.rx),
+            map.rx,
+            fifo,
+            playout,
+            config.device_rate(),
+        );
+        Ok((link, pull))
+    }
+
     /// [`Link::start`] that waits for an address or interface not there
     /// yet (the network still coming up at boot or logon, dstack #225,
     /// #230) until `stop` is set: it looks the place up every second and
@@ -773,6 +847,21 @@ impl Link {
         processor: P,
         source: ClockSource,
     ) -> Result<Link, HostError> {
+        Self::start_device(config, place, wait, map, processor, source, false).map(|(link, _)| link)
+    }
+
+    /// The start, a place not there yet met as `wait` says, the RX rings'
+    /// writer handed to the app when `pull` asks for it
+    /// ([`Embedded::start_pulling`]).
+    fn start_device<P: Process + 'static>(
+        config: &Config,
+        place: &Place,
+        wait: PlaceWait<'_>,
+        map: Map,
+        processor: P,
+        source: ClockSource,
+        pull: bool,
+    ) -> Result<(Link, Option<Intake>), HostError> {
         let (cfg, s) = config.checked().map_err(|problems| {
             HostError::Setup(format!("dlink config: {}", problems.join("; ")))
         })?;
@@ -786,7 +875,7 @@ impl Link {
                 tracing::warn!(device = %config.name, "dlink: {short}");
             }
         }
-        let device = if config.converts() {
+        let (device, intake) = if config.converts() {
             tracing::info!(
                 device_rate = config.device_rate(),
                 app_rate = config.sample_rate,
@@ -803,11 +892,11 @@ impl Link {
                 outputs,
             )
             .map_err(|e| HostError::Setup(format!("dlink rate conversion: {e}")))?;
-            Embedded::start_waiting(cfg, place, wait, map, rated, source, sender)?
+            embed(cfg, place, wait, map, rated, source, sender, pull)?
         } else {
-            Embedded::start_waiting(cfg, place, wait, map, processor, source, sender)?
+            embed(cfg, place, wait, map, processor, source, sender, pull)?
         };
-        Ok(Link { device })
+        Ok((Link { device }, intake))
     }
 
     /// The device's media side: the pump's and the flows' counts.
@@ -875,6 +964,28 @@ impl Link {
 }
 
 pub use dstack::host::ClockSource as Clock;
+
+/// The embedded device of `cfg`, with the RX rings' writer for the app
+/// when `pull` asks for it ([`Link::start_pulling`]).
+#[allow(clippy::too_many_arguments)]
+fn embed<P: Process + 'static>(
+    cfg: DeviceConfig,
+    place: &Place,
+    wait: PlaceWait<'_>,
+    map: Map,
+    processor: P,
+    source: ClockSource,
+    sender: Option<Arc<dyn FrameSender>>,
+    pull: bool,
+) -> Result<(Embedded, Option<Intake>), HostError> {
+    if pull {
+        Embedded::start_pulling(cfg, place, wait, map, processor, source, sender)
+            .map(|(device, intake)| (device, Some(intake)))
+    } else {
+        Embedded::start_waiting(cfg, place, wait, map, processor, source, sender)
+            .map(|device| (device, None))
+    }
+}
 
 #[cfg(test)]
 mod tests;

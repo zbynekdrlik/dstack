@@ -41,6 +41,7 @@ use crate::daemon::{Place, PlaceWait};
 use crate::device::DeviceConfig;
 use crate::host::{self, ClockSource, Host, HostError, Signals, Stopped};
 use crate::media::bypass::FrameSender;
+use crate::media::rx::Intake;
 use crate::media::source::Source;
 use crate::stream::{self, Map, Pump, PumpStats, Timing};
 
@@ -51,6 +52,7 @@ pub struct Embedded {
     media: Arc<Media>,
     stop: Arc<AtomicBool>,
     pump: Option<JoinHandle<()>>,
+    timing: Timing,
 }
 
 impl Embedded {
@@ -119,6 +121,71 @@ impl Embedded {
         source: ClockSource,
         frame_sender: Option<Arc<dyn FrameSender>>,
     ) -> Result<Embedded, HostError> {
+        let (device, _) = Self::launch(
+            cfg,
+            place,
+            wait,
+            map,
+            processor,
+            source,
+            frame_sender,
+            false,
+        )?;
+        Ok(device)
+    }
+
+    /// [`Embedded::start_waiting`] whose app reads the RX rings itself
+    /// (dstack #307): the RX rings' writer ([`Intake`], claimed with
+    /// [`crate::media::rx::RxShared::app_intake`] before the pump and the
+    /// RX thread start, so neither writes them) comes back to the app,
+    /// which drains it on the thread with the deadline just before it
+    /// reads the rings by position (dlink's `bridge::RxPull`). The pump
+    /// still runs `processor` every block on `map` (give it no RX inputs:
+    /// the rings are read where the app drains them).
+    #[allow(clippy::too_many_arguments)]
+    pub fn start_pulling<P: Process + 'static>(
+        cfg: DeviceConfig,
+        place: &Place,
+        wait: PlaceWait<'_>,
+        map: Map,
+        processor: P,
+        source: ClockSource,
+        frame_sender: Option<Arc<dyn FrameSender>>,
+    ) -> Result<(Embedded, Intake), HostError> {
+        match Self::launch(
+            cfg,
+            place,
+            wait,
+            map,
+            processor,
+            source,
+            frame_sender,
+            true,
+        )? {
+            (device, Some(intake)) => Ok((device, intake)),
+            (device, None) => {
+                let stopped = device.stop(STOP_WAIT);
+                warn!(?stopped, "the embedded device stopped: no RX intake");
+                Err(HostError::Setup(
+                    "the RX rings already have a writer: the app cannot pull them".to_string(),
+                ))
+            }
+        }
+    }
+
+    /// The start: the device, its pump, and the RX rings' writer for the
+    /// app when `pull` asks for it ([`Embedded::start_pulling`]).
+    #[allow(clippy::too_many_arguments)]
+    fn launch<P: Process + 'static>(
+        cfg: DeviceConfig,
+        place: &Place,
+        wait: PlaceWait<'_>,
+        map: Map,
+        processor: P,
+        source: ClockSource,
+        frame_sender: Option<Arc<dyn FrameSender>>,
+        pull: bool,
+    ) -> Result<(Embedded, Option<Intake>), HostError> {
         if let Some(&rx) = map.rx.iter().find(|&&rx| rx >= cfg.rx.len()) {
             return Err(HostError::Setup(format!(
                 "the app's RX channel {} is past the device's {} RX channels",
@@ -144,6 +211,9 @@ impl Embedded {
         }
         let stats = Arc::new(PumpStats::new(timing, rate));
         media.attach_engine(Arc::clone(&stats));
+        // dstack #307: the app's claim comes before the pump's (here) and
+        // the RX thread's (at the host's start).
+        let intake = if pull { media.rx.app_intake() } else { None };
         let pump = Pump::new(
             processor,
             map,
@@ -170,14 +240,26 @@ impl Embedded {
             block = timing.block,
             playout = timing.playout,
             margin = timing.margin,
+            app_reads_rx = intake.is_some(),
             "embedded device serving, its pump running"
         );
-        Ok(Embedded {
-            host,
-            media,
-            stop,
-            pump: Some(pump),
-        })
+        Ok((
+            Embedded {
+                host,
+                media,
+                stop,
+                pump: Some(pump),
+                timing,
+            },
+            intake,
+        ))
+    }
+
+    /// The pump's timing at the start ([`Timing::of`] the device as it
+    /// runs); a latency Dante Controller sets later moves the playout
+    /// point ([`crate::media::rx::RxShared::playout`]).
+    pub fn timing(&self) -> Timing {
+        self.timing
     }
 
     /// The device's media side: its status for the app (the pump's
