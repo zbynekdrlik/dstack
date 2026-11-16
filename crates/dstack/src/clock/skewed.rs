@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // Copyright (C) 2026 dstack contributors.
 
-//! TEST ONLY: the system clock with a skew (dstack #305). A CI runner has no
+//! TEST ONLY: the system clock with a skew (dstack #305), and without one
+//! (0 ppm on the same clock, dstack #328). A CI runner has no
 //! grandmaster, so the TEST system clock (`host::ClockSource::System`) runs
 //! at the machine's own rate: 0 ppm against an app's clock, while the field
 //! has about 6 ppm. With a `test_clock_ppm` the media clock runs that many
-//! ppm off the local monotonic clock from its start, so play_at, an app's
+//! ppm off the app's clock from its start, so play_at, an app's
 //! ASRC and dlink's TX Player see real drift, and two processes on one
 //! runner drift against each other.
 //!
@@ -42,7 +43,7 @@ const PPT_PER_PPM: f64 = 1_000_000.0;
 const TERA: i128 = 1_000_000_000_000;
 
 /// A test clock's skew, ppm (the config's `test_clock_ppm`): positive runs
-/// the media clock fast against the monotonic clock. Compared by its bits
+/// the media clock fast against the app's clock. Compared by its bits
 /// so configs stay `Eq`.
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(transparent)]
@@ -156,11 +157,15 @@ pub fn test_clock_refusal(source: ClockSource, ppm: Option<TestClockPpm>) -> Opt
 
 /// The media clock's PTP side as the host starts it, with the clocks read
 /// at the start (`(monotonic, app, realtime)`, ns; the app's clock is the
-/// skewed clock's base):
+/// test clock's base):
 /// `linked` when there is one (dsync's follower); on the TEST system clock
-/// `source`, `mono` anchored at this machine's clock (k = realtime −
-/// monotonic) and `stats` marked, skewed by `ppm` when set (a WARN each);
-/// otherwise `mono` as it is (dsync's poller anchors it).
+/// `source`, a [`SkewedClock`] on the app's clock at this machine's time
+/// (k = realtime − app), skewed by `ppm` when set (0 when not), with `mono`
+/// still anchored as before (k = realtime − monotonic; nothing reads it on
+/// this source) and `stats` marked (a WARN each). Never `mono` itself there: on Windows its monotonic clock is the
+/// wall clock until dsync's poller updates it, and no poller runs on this
+/// source (dstack #328). Otherwise `mono` as it is (dsync's poller anchors
+/// it).
 #[cfg(any(target_os = "linux", windows))]
 pub fn media_ptp(
     source: ClockSource,
@@ -183,18 +188,21 @@ pub fn media_ptp(
         "media clock: the TEST system clock; PTP time is this machine's clock, not the \
          network's: never for a real Dante network"
     );
-    match ppm {
-        Some(ppm) => {
-            warn!(
-                test_clock_ppm = ppm.0,
-                "media clock: the TEST system clock runs {} ppm off this machine's clock \
-                 (test_clock_ppm): a drift for tests, never for a real Dante network",
-                ppm.0
-            );
-            Arc::new(SkewedClock::new(app_ns, realtime_ns - app_ns, ppm))
-        }
-        None => Arc::clone(mono) as Arc<dyn PtpClock>,
+    if let Some(ppm) = ppm {
+        warn!(
+            test_clock_ppm = ppm.0,
+            "media clock: the TEST system clock runs {} ppm off this machine's clock \
+             (test_clock_ppm): a drift for tests, never for a real Dante network",
+            ppm.0
+        );
     }
+    // On the app's clock, skew or not (dstack #328): on Windows the
+    // monotonic clock is the wall until a poll, and none runs here.
+    Arc::new(SkewedClock::new(
+        app_ns,
+        realtime_ns - app_ns,
+        ppm.unwrap_or(TestClockPpm(0.0)),
+    ))
 }
 
 #[cfg(test)]

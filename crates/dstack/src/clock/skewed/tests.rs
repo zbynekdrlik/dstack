@@ -166,8 +166,10 @@ fn the_host_s_ptp_side_follows_the_source_and_the_skew() {
     assert!(same(&got, Arc::as_ptr(&mono) as *const ()));
     assert_eq!((mono.k_ns(), stats.is_system()), (None, false));
 
+    // The TEST system clock is never the monotonic clock itself, skew or
+    // not (dstack #328): on Windows that clock is the wall until a poll.
     let got = media_ptp(ClockSource::System, None, None, &mono, &stats, reads);
-    assert!(same(&got, Arc::as_ptr(&mono) as *const ()));
+    assert!(!same(&got, Arc::as_ptr(&mono) as *const ()));
     assert_eq!(
         (mono.k_ns(), stats.is_system()),
         (Some(reads.2 - reads.0), true)
@@ -190,4 +192,89 @@ fn the_host_s_ptp_side_follows_the_source_and_the_skew() {
     assert_eq!((mono.k_ns(), stats.is_system()), (Some(10 * S), true));
     let ahead = got.now_ns().unwrap() as i64 - (app_monotonic_ns() + 3 * S);
     assert!((ahead - S / 10).abs() < 1_000_000, "{ahead} ns ahead");
+}
+
+/// The TEST system clock with no skew runs on the app's clock (dstack
+/// #328): on Windows the media threads' monotonic clock is the wall clock
+/// until a poll (none runs on this source), so a clock on it followed the
+/// wall's steps and slew. Here the start's "monotonic" read is the wall,
+/// as there, and stepped 3 s away from the realtime read: the clock still
+/// reads the app's clock + (realtime - app) at the start.
+#[cfg(any(target_os = "linux", windows))]
+#[test]
+fn the_test_system_clock_without_a_skew_runs_on_the_app_s_clock() {
+    use crate::clock::{ClockStats, MonoClock, app_monotonic_ns};
+    use crate::host::ClockSource;
+    use std::sync::Arc;
+    let (mono, stats) = (Arc::new(MonoClock::new()), ClockStats::default());
+    let app = app_monotonic_ns();
+    let wall = 1_700_000_000 * S;
+    let got = media_ptp(
+        ClockSource::System,
+        None,
+        None,
+        &mono,
+        &stats,
+        (wall + 3 * S, app, wall),
+    );
+    assert_eq!((got.epoch(), got.last_re_anchor()), (0, None));
+    let before = app_monotonic_ns();
+    let now = got.now_ns().expect("ready") as i64;
+    let after = app_monotonic_ns();
+    let k = wall - app;
+    assert!(
+        before + k <= now && now <= after + k,
+        "{now} not in {}..{}",
+        before + k,
+        after + k
+    );
+}
+
+/// On Windows the TEST system clock tracks raw QPC (the app's clock)
+/// within 1 ppm over 10 s (dstack #328): the wall clock it ran on before
+/// was 66 ppm off QPC on windows-2025 (#305). It fails on that bug only
+/// where the wall runs more than 1 ppm off QPC (the CI runner); the
+/// deterministic guard is `the_test_system_clock_without_a_skew_runs_on_the_app_s_clock`.
+#[cfg(windows)]
+#[test]
+fn the_test_system_clock_tracks_qpc_on_windows() {
+    use crate::clock::realtime_ns;
+    use crate::clock::{ClockStats, MonoClock, PtpClock, app_monotonic_ns, monotonic_ns};
+    use crate::host::ClockSource;
+    use std::sync::Arc;
+    /// The clock less the app's clock, from a read bracketed by app reads
+    /// at most 2 µs apart (retried until it is; the offset is exact to
+    /// half that span).
+    fn offset(clock: &dyn PtpClock) -> i64 {
+        for _ in 0..10_000 {
+            let a = app_monotonic_ns();
+            let p = clock.now_ns().expect("ready") as i64;
+            let b = app_monotonic_ns();
+            if b - a <= 2_000 {
+                return p - (a + b) / 2;
+            }
+        }
+        panic!("no app read pair 2 us apart in 10000 tries");
+    }
+    let (mono, stats) = (Arc::new(MonoClock::new()), ClockStats::default());
+    let got = media_ptp(
+        ClockSource::System,
+        None,
+        None,
+        &mono,
+        &stats,
+        (monotonic_ns(), app_monotonic_ns(), realtime_ns()),
+    );
+    let o0 = offset(got.as_ref());
+    let t0 = app_monotonic_ns();
+    std::thread::sleep(std::time::Duration::from_secs(10));
+    let o1 = offset(got.as_ref());
+    let elapsed = app_monotonic_ns() - t0;
+    // 1 ppm of the elapsed time + the two reads' half spans.
+    let allowed = elapsed / 1_000_000 + 2_000;
+    assert!(
+        (o1 - o0).abs() <= allowed,
+        "drifted {} ns off QPC over {elapsed} ns (allowed {allowed})",
+        o1 - o0
+    );
 }
