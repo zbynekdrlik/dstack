@@ -15,7 +15,11 @@
 //!   one converter call ([`CALL_MS`]) after the read, unless the pump
 //!   already owed blocks at the read (a backlog it then catches up at
 //!   once). So the app's write must have landed that late, the pump's
-//!   backlog at the read counted in.
+//!   backlog at the read counted in. And the depth read must be the usual
+//!   one (at least the run's median less a call: the sawtooth's bottom
+//!   moves by a call with the calls' phase): a FIFO already short before
+//!   an on-time tick lost a write or gave frames it never had, which no
+//!   thread's lateness explains.
 //! - A TX re-centre: the pump was not run while the app kept writing, until
 //!   the depth passed the target by the player's hard excess.
 //! - An RX dropout: the pump was not run long enough to leave less than a
@@ -99,9 +103,9 @@ pub(crate) fn recentre_stall_ms(target_ms: f64, excess_ms: f64, depth_ms: f64) -
 }
 
 /// The losses the run's rules do not allow (`gap_on_time`, `rx_twice_late`,
-/// and the RX dropouts at ticks on time past `restarts`), each judged.
-/// `rx_median_ms` is the RX FIFO's usual depth before a read; `target_ms`
-/// and `excess_ms` the TX bridge's.
+/// and the RX dropouts at ticks on time past `restarts`), each judged
+/// against the run's usual depths (the medians before a write and a read);
+/// `target_ms` and `excess_ms` are the TX bridge's.
 pub(crate) fn losses(
     ticks: &[Tick],
     wakes: &Wakes,
@@ -110,6 +114,7 @@ pub(crate) fn losses(
     excess_ms: f64,
 ) -> Vec<Loss> {
     let rx_median_ms = median(ticks.iter().map(|t| t.rx_depth_ms));
+    let tx_median_ms = median(ticks.iter().map(|t| t.tx_depth_ms));
     let on_time_rx: u64 = (0..ticks.len())
         .filter(|&i| !held(ticks, i))
         .map(|i| ticks[i].rx)
@@ -124,7 +129,7 @@ pub(crate) fn losses(
         let to = t.end_ms as f64;
         if t.gap && t.late < LATE_TICK {
             let (what, runner) = if t.underrun {
-                ("TX underrun", tx_underrun(t, wakes))
+                ("TX underrun", tx_underrun(t, wakes, tx_median_ms))
             } else {
                 let need = recentre_stall_ms(target_ms, excess_ms, t.tx_depth_ms);
                 ("TX re-centre", pump_stall(wakes, from, to, need))
@@ -133,7 +138,10 @@ pub(crate) fn losses(
                 tick: i,
                 what,
                 runner,
-                around: around(t, wakes, from, to),
+                around: format!(
+                    "{} (the run's usual TX depth {tx_median_ms:.2} ms)",
+                    around(t, wakes, from, to)
+                ),
             });
         }
         let judged = if held(ticks, i) {
@@ -155,8 +163,12 @@ pub(crate) fn losses(
 }
 
 /// A TX underrun's thread: the app's write landed past the dry point of the
-/// depth read before it, the pump's backlog at that read counted in.
-fn tx_underrun(t: &Tick, wakes: &Wakes) -> Option<String> {
+/// depth read before it, the pump's backlog at that read counted in, and
+/// that depth was the usual one (`median_ms`, the run's, less a call).
+fn tx_underrun(t: &Tick, wakes: &Wakes, median_ms: f64) -> Option<String> {
+    if t.tx_depth_ms + CALL_MS + SLACK_MS < median_ms {
+        return None;
+    }
     let top = t.top_ms as f64;
     let backlog = wakes
         .stalls(top, top)
@@ -336,6 +348,26 @@ mod tests {
                 .unwrap()
                 .contains("5.00 ms behind")
         );
+        // A FIFO already short before an on-time write: no thread explains it
+        // (a lost write), however early its dry point.
+        let short = Tick {
+            tx_depth_ms: 1.2,
+            ..gap(0.05)
+        };
+        let lost = judge(&run(short), &Wakes::default());
+        assert_eq!(lost[0].runner, None);
+        assert!(lost[0].around.contains("usual TX depth 12.00 ms"));
+        // A call under the usual depth (the calls' phase) is still usual.
+        let phase = Tick {
+            tx_depth_ms: 8.34,
+            ..gap(4.7)
+        };
+        assert!(judge(&run(phase), &Wakes::default())[0].runner.is_some());
+        let under = Tick {
+            tx_depth_ms: 8.32,
+            ..gap(4.7)
+        };
+        assert_eq!(judge(&run(under), &Wakes::default())[0].runner, None);
         // A pump stall after the start leaves the FIFO fuller: no help.
         let after = judge(&run(gap(4.0)), &wakes(&[(1199, 8_000, false)]));
         assert_eq!(after[0].runner, None);
