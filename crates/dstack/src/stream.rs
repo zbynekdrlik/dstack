@@ -24,7 +24,11 @@
 //!   the packet stamped kB + D leaves at kB + D + fpp + the TX margin
 //!   (the device's `tx_margin_ns`, 250 µs by default), so a block
 //!   that ends within W of its due time is always in time, whatever either
-//!   side's fpp.
+//!   side's fpp. The pump judges only its wake against W: a block that
+//!   woke within W but ends later than that (its work, a preemption) is
+//!   written after the TX thread sent its stamps as silence, counted in
+//!   the TX lane's `holes` and as the pump's
+//!   [`PumpView::writes_after_send`] (dstack #346).
 //! - [`Blocks`] (pure) says what is due: a block, a wait, or a
 //!   re-bootstrap when the pump is more than W behind (the skipped blocks'
 //!   stamps go out as silence, counted as TX holes) or more than
@@ -330,6 +334,9 @@ pub struct PumpStats {
     /// media time, and the largest deviation, ns (dstack #305).
     play_at_steps: AtomicU64,
     play_at_max_dev_ns: AtomicU64,
+    /// Blocks with an output the TX thread had already sent as silence
+    /// (dstack #346, [`PumpView::writes_after_send`]).
+    writes_after_send: AtomicU64,
 }
 
 /// The pump's numbers for the device's control socket (numbers only).
@@ -371,7 +378,10 @@ pub struct PumpView {
     /// The largest such deviation since the start, whole µs.
     pub play_at_max_dev_us: u64,
     /// Blocks with an output the TX thread had already sent as silence
-    /// (dstack #346).
+    /// (dstack #346): it read some of the block's stamps before the block
+    /// wrote them ([`Ring::put_at`]), so they went out as its lane's
+    /// `holes`. A block that woke within W (no re-bootstrap, no skipped
+    /// block) but ended past W + fpp + the TX margin of its due time.
     pub writes_after_send: u64,
 }
 
@@ -408,6 +418,7 @@ impl PumpStats {
             play_at_rejected: AtomicU64::new(0),
             play_at_steps: AtomicU64::new(0),
             play_at_max_dev_ns: AtomicU64::new(0),
+            writes_after_send: AtomicU64::new(0),
         }
     }
 
@@ -474,6 +485,12 @@ impl PumpStats {
             rebootstrap,
             wake::unix_ms_now,
         );
+    }
+
+    /// A block with an output the TX thread had already sent as silence
+    /// (the pump thread; dstack #346, [`PumpView::writes_after_send`]).
+    pub(crate) fn wrote_after_send(&self) {
+        self.writes_after_send.fetch_add(1, Ordering::Relaxed);
     }
 
     /// How late the pump woke: the buckets, the recent late wakes
@@ -560,7 +577,7 @@ impl PumpStats {
             play_at_rejected: self.play_at_rejected.load(Ordering::Relaxed),
             play_at_steps: self.play_at_steps.load(Ordering::Relaxed),
             play_at_max_dev_us: self.play_at_max_dev_ns.load(Ordering::Relaxed) / 1_000,
-            writes_after_send: 0,
+            writes_after_send: self.writes_after_send.load(Ordering::Relaxed),
         }
     }
 }
@@ -879,13 +896,17 @@ impl<P: Process> Pump<P> {
         let fault = self.run_processor(Some(start), play_at);
         let at =
             (start + self.timing.offset()).wrapping_add_signed(self.engine_shift.wrapping_neg());
+        let mut after_send = 0;
         for (chan, &tx) in self.output.chunks_exact(self.frames).zip(&self.map.tx) {
             if let Some(ring) = self.tx.engine_ring(tx) {
                 for (q, &y) in self.samples.iter_mut().zip(chan) {
                     *q = quantize(y, self.bits);
                 }
-                ring.put_at(at, &self.samples);
+                after_send += ring.put_at(at, &self.samples);
             }
+        }
+        if after_send > 0 {
+            self.stats.wrote_after_send();
         }
         self.leave(entry, fault);
     }

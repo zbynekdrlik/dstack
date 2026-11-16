@@ -235,7 +235,10 @@ impl Json {
 ///   rejected, [`crate::stream::app_offset`]); `play_at_steps` (dstack
 ///   #305: blocks whose play time moved over 1 ms off their media time
 ///   since the block before) and `play_at_max_dev_us` (the largest such
-///   deviation since the start, [`crate::stream::play_at`]); how late the pump woke ([`crate::stream::wake`]):
+///   deviation since the start, [`crate::stream::play_at`]);
+///   `writes_after_send` (dstack #346: blocks with an output the TX thread
+///   had already sent as silence, a block that woke within W but ended
+///   past the TX's slack); how late the pump woke ([`crate::stream::wake`]):
 ///   `wake_behind_max_us` (since the start), `wake_behind_minute_max_us`
 ///   (the last whole minute, absent before the first), `wake_behind_buckets`
 ///   (8 counts: under 0.5, 1, 2, 5, 10, 20, 50 ms, and 50 ms or more),
@@ -732,6 +735,7 @@ fn engine_part(j: &mut Json, media: &Media) {
     j.num("play_at_rejected", v.play_at_rejected);
     j.num("play_at_steps", v.play_at_steps);
     j.num("play_at_max_dev_us", v.play_at_max_dev_us);
+    j.num("writes_after_send", v.writes_after_send);
     j.num("wake_behind_max_us", v.wake_behind_max_us);
     if let Some(us) = v.wake_behind_minute_max_us {
         j.num("wake_behind_minute_max_us", us);

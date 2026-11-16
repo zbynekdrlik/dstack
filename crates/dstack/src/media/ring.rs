@@ -206,17 +206,27 @@ impl Ring {
     /// reader did: no late or early check, and the reader's end never
     /// moves; counts them `written` only. The engine's output rings (phase
     /// C, [`crate::stream`]): a block written after the TX thread read its
-    /// stamps shows as TX holes, never here.
-    pub fn put_at(&self, pos: u64, samples: &[i32]) {
+    /// stamps shows as TX holes, never in these counters.
+    ///
+    /// Returns how many of the positions the reader had already read as
+    /// holes (the slot held this position's read-empty mark): stored all
+    /// the same, but sent as silence (dstack #346; the pump counts them,
+    /// [`crate::stream::PumpView::writes_after_send`]). The swap and the
+    /// reader's compare-and-swap decide it exactly: a read that marks the
+    /// slot before the swap is counted, one after it reads the sample.
+    pub fn put_at(&self, pos: u64, samples: &[i32]) -> usize {
+        let mut after_read = 0;
         for (i, &sample) in samples.iter().enumerate() {
             let p = pos.wrapping_add(i as u64);
-            self.slot(p).store(word(p, sample), Ordering::Relaxed);
+            let held = self.slot(p).swap(word(p, sample), Ordering::Relaxed);
+            after_read += usize::from(held == read_empty(p));
         }
         if !samples.is_empty() {
             self.first.fetch_min(pos, Ordering::Relaxed);
         }
         self.written
             .fetch_add(samples.len() as u64, Ordering::Relaxed);
+        after_read
     }
 
     /// Reads positions `pos`, `pos + 1`, … into `out`, a hole as 0.
