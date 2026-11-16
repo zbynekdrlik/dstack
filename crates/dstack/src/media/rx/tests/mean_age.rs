@@ -41,6 +41,10 @@ const AGES: [u64; 3] = [1, 2, 6];
 /// `place(now, n)` places what waits at PTP time `now` (`None`: the clock
 /// not ready), `n` the datagrams slot 0 has read once it is done.
 fn check_aged(s: &RxShared, place: &mut dyn FnMut(Option<u64>, u64)) {
+    // Synthetic times against the kernel's real receive stamps: the
+    // arrival is the age at the read only without a stamp (dstack #350;
+    // the stamped arrival is `arrival.rs`'s).
+    s.set_stamps(false);
     let t = transmitter(LOOPBACK);
     // A packet read before our clock is ready is not placed: no age.
     send_aged(s, &t, &[4]);

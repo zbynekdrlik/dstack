@@ -377,13 +377,19 @@ fn the_rx_thread_s_passes_do_not_allocate() {
     assert_eq!(violation_count(), 0, "the RX passes allocated");
     let c = shared.lane(0);
     assert_eq!((c.packets, c.refused, c.stray), (300, 0, 0), "{c:?}");
-    // The packets' judge ran inside the passes: the least lateness in ns is
-    // the last packet's.
-    assert_eq!(shared.take_max_lateness(0), 32 * 300 + 64);
-    assert_eq!(
-        shared.last_min_lateness_ns(0),
-        Some(now - ns_of(T + 32 * 299, RATE))
-    );
+    // The packets' judge ran inside the passes. dstack #350: on a box with
+    // kernel receive stamps (Linux) each age is the one at the arrival, the
+    // age at the pass less its real wake, so the figures are bounded by the
+    // ages at the pass; the arrival ages and the read waits add up to them
+    // exactly.
+    let at_pass: u64 = (0..300u64).map(|k| now - ns_of(T + 32 * k, RATE)).sum();
+    assert_eq!(c.lateness_sum_ns + c.read_wait_sum_ns, at_pass, "{c:?}");
+    assert_eq!(c.read_wait_count, 300);
+    let peak = shared.take_max_lateness(0);
+    let waited = c.read_wait_peak_us * u64::from(RATE) / 1_000_000 + 1;
+    assert!(peak <= 32 * 300 + 64 && peak + waited >= 32 * 300 + 64, "{peak} {c:?}");
+    let least = shared.last_min_lateness_ns(0).unwrap();
+    assert!(least <= now - ns_of(T + 32 * 299, RATE), "{least}");
     // dstack #342: every placed packet's age summed and counted inside the
     // passes too.
     assert_eq!(c.lateness_count, 300);

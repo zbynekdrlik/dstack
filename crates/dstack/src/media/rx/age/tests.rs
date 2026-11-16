@@ -73,3 +73,39 @@ fn each_take_keeps_the_mean_of_its_own_second() {
     a.take();
     assert_eq!(a.last_mean_ns(), Some(0));
 }
+
+const MS: u64 = 1_000_000;
+
+#[test]
+fn a_kernel_stamp_gives_the_arrival_age_exactly() {
+    // dstack #350: 10 ms at the read, 3 ms of it waited after the kernel
+    // had it: 7 ms, whatever the bracket says.
+    assert_eq!(
+        arrival_age_ns(10 * MS, Some(3 * MS), Some(5 * MS), MS),
+        7 * MS
+    );
+    assert_eq!(arrival_age_ns(10 * MS, Some(3 * MS), None, MS), 7 * MS);
+    // A wake of the whole age: arrived at its stamp, 0.
+    assert_eq!(arrival_age_ns(MS, Some(MS), None, MS / 2), 0);
+    // A wake past the age (the wall clock stepped forward) is no arrival:
+    // the bracket decides, else the age at the read.
+    assert_eq!(arrival_age_ns(MS, Some(MS + 1), None, MS / 2), MS);
+    assert_eq!(
+        arrival_age_ns(10 * MS, Some(20 * MS), Some(2 * MS), 4 * MS),
+        8 * MS
+    );
+}
+
+#[test]
+fn without_a_stamp_two_reads_bracket_the_arrival() {
+    // The newest packet's age at the read bounds the read's shared delay.
+    assert_eq!(arrival_age_ns(10 * MS, None, Some(10 * MS), MS / 2), MS / 2);
+    // A packet already 8 ms old at the read before (10 at this read, the
+    // reads 2 ms apart): at least 8 ms, more than the newest's 4.
+    assert_eq!(arrival_age_ns(10 * MS, None, Some(2 * MS), 4 * MS), 8 * MS);
+    // The bracket's floor under 0 (reads further apart than the packet
+    // is old): the newest's.
+    assert_eq!(arrival_age_ns(MS, None, Some(20 * MS), MS / 4), MS / 4);
+    // No bracket and no stamp: the age at the read.
+    assert_eq!(arrival_age_ns(10 * MS, None, None, MS), 10 * MS);
+}
