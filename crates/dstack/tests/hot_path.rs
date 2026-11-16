@@ -387,7 +387,10 @@ fn the_rx_thread_s_passes_do_not_allocate() {
     assert_eq!(c.read_wait_count, 300);
     let peak = shared.take_max_lateness(0);
     let waited = c.read_wait_peak_us * u64::from(RATE) / 1_000_000 + 1;
-    assert!(peak <= 32 * 300 + 64 && peak + waited >= 32 * 300 + 64, "{peak} {c:?}");
+    assert!(
+        peak <= 32 * 300 + 64 && peak + waited >= 32 * 300 + 64,
+        "{peak} {c:?}"
+    );
     let least = shared.last_min_lateness_ns(0).unwrap();
     assert!(least <= now - ns_of(T + 32 * 299, RATE), "{least}");
     // dstack #342: every placed packet's age summed and counted inside the
