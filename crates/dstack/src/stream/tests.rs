@@ -1666,3 +1666,37 @@ fn a_seamless_handover_step_neither_rebootstraps_nor_loses_a_block() {
 mod causes;
 mod drain;
 mod play_at;
+
+/// dstack #332: a reader (the status, dasio's shm probe) never sees
+/// skipped blocks whose re-bootstrap cause is not counted yet. A writer
+/// re-bootstraps one block at a time while a reader takes views: every
+/// view's `missed` is covered by its causes.
+#[test]
+fn a_view_never_shows_blocks_before_their_cause() {
+    use std::sync::atomic::AtomicBool;
+    let stats = Arc::new(PumpStats::new(TIMING, RATE));
+    let done = Arc::new(AtomicBool::new(false));
+    let writer = {
+        let stats = Arc::clone(&stats);
+        let done = Arc::clone(&done);
+        std::thread::spawn(move || {
+            for _ in 0..2_000_000 {
+                stats.rebootstrapped(1, Cause::Late);
+            }
+            done.store(true, std::sync::atomic::Ordering::SeqCst);
+        })
+    };
+    let mut views = 0u64;
+    while !done.load(std::sync::atomic::Ordering::SeqCst) {
+        let v = stats.view();
+        assert!(
+            v.missed <= v.rebootstraps_late,
+            "view {views}: {} blocks missed, {} late re-bootstraps",
+            v.missed,
+            v.rebootstraps_late
+        );
+        views += 1;
+    }
+    writer.join().unwrap();
+    assert!(views > 0);
+}
