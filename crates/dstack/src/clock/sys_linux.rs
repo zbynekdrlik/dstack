@@ -53,6 +53,12 @@ pub fn sleep_until_monotonic(target: i64) {
     };
 }
 
+/// Sleeps until the app's clock reaches `target` ns: on Linux the app's
+/// clock is `CLOCK_MONOTONIC` too (dstack #328).
+pub fn sleep_until_app(target: i64) {
+    sleep_until_monotonic(target);
+}
+
 /// Whether this thread's next wait makes a bounded escape (dstack #1):
 /// never on Linux, where the wait sleeps on `clock_nanosleep` and never
 /// spins (`spin_escape_ms` is Windows only).

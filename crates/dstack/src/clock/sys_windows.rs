@@ -156,7 +156,19 @@ impl Drop for Timer {
 /// Sleeps until [`monotonic_ns`] reaches `target`: the timer for all but
 /// the last spin tail (`super::SPIN_TAIL`), then a spin.
 pub fn sleep_until_monotonic(target: i64) {
-    sleep_until_in(target, super::wait_mode(), escape_period());
+    sleep_until_in(target, monotonic_ns, super::wait_mode(), escape_period());
+}
+
+/// Sleeps until the app's clock ([`app_monotonic_ns`], raw QPC) reaches
+/// `target`, the same wait on it (dstack #328: the test clock's deadline is
+/// on the app's clock, and the steered clock is the wall until a poll).
+pub fn sleep_until_app(target: i64) {
+    sleep_until_in(
+        target,
+        app_monotonic_ns,
+        super::wait_mode(),
+        escape_period(),
+    );
 }
 
 /// The process's bounded-escape period, ns (0: off; `super::SPIN_ESCAPE`).
@@ -195,7 +207,7 @@ pub fn ask_escape() -> bool {
     }
     ESCAPE.with(|e| {
         let mut s = e.get();
-        let go = s.ask(monotonic_ns(), period);
+        let go = s.ask(app_monotonic_ns(), period);
         e.set(s);
         go
     })
@@ -208,7 +220,7 @@ pub fn defer_escape() -> bool {
     let period = escape_period();
     ESCAPE.with(|e| {
         let mut s = e.get();
-        let put_off = s.defer(monotonic_ns(), period);
+        let put_off = s.defer(app_monotonic_ns(), period);
         e.set(s);
         put_off
     })
@@ -220,7 +232,7 @@ pub fn block_escape() -> bool {
     let period = escape_period();
     let go = ESCAPE.with(|e| {
         let mut s = e.get();
-        let go = s.take(monotonic_ns(), period);
+        let go = s.take(app_monotonic_ns(), period);
         e.set(s);
         go
     });
@@ -257,61 +269,80 @@ fn block_for(ns: i64) {
     }
 }
 
-/// [`sleep_until_monotonic`] in the wait `mode`, with a bounded escape
-/// every `escape_ns` (0: none; the spin wait only).
-fn sleep_until_in(target: i64, mode: super::WaitMode, escape_ns: u64) {
-    let escape = mode == super::WaitMode::Spin && escape_ns != 0 && ALLOWED.with(|a| a.get());
-    // The bounded escape (dstack #1, `spin_escape_ms`): once a period the
-    // thread blocks one timer tick, whatever its deadline. The timer's
-    // expiry preempts a lower priority at once, so per-CPU system work
-    // that must run on this CPU gets it each period, and the spin below
-    // needs no SwitchToThread. TX's relay thread covers its block
-    // (`block_escape`, dstack #141); a pump's W absorbs the block.
-    if escape {
-        let go = ESCAPE.with(|e| {
+/// The wait's OS on the clock `now` (raw QPC or the steered clock).
+struct Os {
+    now: fn() -> i64,
+    escape_ns: u64,
+}
+
+impl super::wait::WaitOs for Os {
+    fn now_ns(&mut self) -> i64 {
+        (self.now)()
+    }
+
+    fn take_escape(&mut self) -> bool {
+        let escape_ns = self.escape_ns;
+        ESCAPE.with(|e| {
             let mut s = e.get();
-            let go = s.take(monotonic_ns(), escape_ns);
+            let go = s.take(app_monotonic_ns(), escape_ns);
             e.set(s);
             go
-        });
-        if go {
-            block_for(super::ESCAPE_BLOCK_NS as i64);
-        }
+        })
     }
-    let left = target - monotonic_ns();
-    // The timer mode (problem A's measurement): the whole wait on the
-    // timer, no core spun.
-    let tail = super::SPIN_TAIL.load(std::sync::atomic::Ordering::Relaxed);
-    let spin = i64::try_from(super::spin_tail_for(mode, tail)).unwrap_or(i64::MAX);
-    if left > spin {
-        block_for(left - spin);
+
+    fn block_for(&mut self, ns: i64) {
+        block_for(ns);
     }
-    // The spin yields, on every thread (dstack #1). SwitchToThread
-    // (`std::thread::yield_now`) lets ANY ready thread on the CPU run,
-    // lower priority included, for the rest of its slice: on the FOH PC
-    // (5.11.2026) a priority-10 thread kept the band TX thread's CPU for
-    // 1.66 ms and the TX schedule started again. Every other spin froze a
-    // Windows PC: Sleep(0) in v0.6.28 (why is not known: on windows-2025 a
-    // Sleep(0) spin does let a lower priority run), and the no-yield spin
-    // of pinned threads in v0.6.34/35 (FOH, 5.11.2026: per-CPU system work
-    // that must run on that exact CPU never ran).
-    // Without a CPU of its own it also starves its neighbours (v0.6.34 on
-    // dasio's runner). Never make this spin starve lower priorities. The
-    // bounded escape (above, off by default, a trial) is the one exception:
-    // its spin does not yield at all between the blocks (Sleep(0) is no
-    // shelter: on windows-2025 a lower-priority thread ran 21 million turns
-    // in 0.3 s of a Sleep(0) spin, and the waits went 3 ms late), and its
-    // block once a period lets lower priorities run.
-    if spin == 0 {
-        return;
-    }
-    while monotonic_ns() < target {
+
+    fn spin_turn(&mut self, escape: bool) {
+        // The spin yields, on every thread (dstack #1). SwitchToThread
+        // (`std::thread::yield_now`) lets ANY ready thread on the CPU run,
+        // lower priority included, for the rest of its slice: on the FOH
+        // PC (5.11.2026) a priority-10 thread kept the band TX thread's CPU
+        // for 1.66 ms and the TX schedule started again. Every other spin
+        // froze a Windows PC: Sleep(0) in v0.6.28 (why is not known: on
+        // windows-2025 a Sleep(0) spin does let a lower priority run), and
+        // the no-yield spin of pinned threads in v0.6.34/35 (FOH, 5.11.2026:
+        // per-CPU system work that must run on that exact CPU never ran).
+        // Without a CPU of its own it also starves its neighbours (v0.6.34
+        // on dasio's runner). Never make this spin starve lower priorities.
+        // The bounded escape (off by default, a trial) is the one
+        // exception: its spin does not yield at all between the blocks
+        // (Sleep(0) is no shelter: on windows-2025 a lower-priority thread
+        // ran 21 million turns in 0.3 s of a Sleep(0) spin, and the waits
+        // went 3 ms late), and its block once a period lets lower
+        // priorities run.
         if escape {
             std::hint::spin_loop();
         } else {
             std::thread::yield_now();
         }
     }
+}
+
+/// A wait until the clock `now` reaches `target` in the wait `mode`, with a
+/// bounded escape every `escape_ns` (0: none; the spin wait only).
+fn sleep_until_in(target: i64, now: fn() -> i64, mode: super::WaitMode, escape_ns: u64) {
+    // The bounded escape (dstack #1, `spin_escape_ms`): once a period the
+    // thread blocks one timer tick, whatever its deadline. The timer's
+    // expiry preempts a lower priority at once, so per-CPU system work
+    // that must run on this CPU gets it each period, and the spin needs
+    // no SwitchToThread. TX's relay thread covers its block
+    // (`block_escape`, dstack #141); a pump's W absorbs the block.
+    let escape = mode == super::WaitMode::Spin && escape_ns != 0 && ALLOWED.with(|a| a.get());
+    // The timer mode (problem A's measurement): the whole wait on the
+    // timer, no core spun.
+    let tail = super::SPIN_TAIL.load(std::sync::atomic::Ordering::Relaxed);
+    let spin = i64::try_from(super::spin_tail_for(mode, tail)).unwrap_or(i64::MAX);
+    super::wait::until(
+        &mut Os { now, escape_ns },
+        target,
+        super::wait::Plan {
+            spin_tail_ns: spin,
+            escape,
+            escape_block_ns: super::ESCAPE_BLOCK_NS as i64,
+        },
+    );
 }
 
 #[cfg(test)]
@@ -326,7 +357,7 @@ mod tests {
         let mut late: Vec<i64> = (0..200)
             .map(|_| {
                 let target = monotonic_ns() + 1_000_000;
-                sleep_until_in(target, super::super::WaitMode::Timer, 0);
+                sleep_until_in(target, monotonic_ns, super::super::WaitMode::Timer, 0);
                 monotonic_ns() - target
             })
             .collect();
@@ -338,6 +369,33 @@ mod tests {
             late[late.len() * 9 / 10],
             late[late.len() - 1]
         );
+    }
+
+    /// The test clock's waits (dstack #328): a wait on the app's clock
+    /// (raw QPC) ends on it, never before its target, in both wait modes,
+    /// whatever the wall clock (the media threads' monotonic clock until a
+    /// poll) does meanwhile. Before, the deadline was on the wall.
+    #[test]
+    fn a_wait_on_the_app_clock_never_ends_before_its_target_on_it() {
+        for mode in [super::super::WaitMode::Spin, super::super::WaitMode::Timer] {
+            let mut late: Vec<i64> = (0..100)
+                .map(|_| {
+                    let target = app_monotonic_ns() + 1_000_000;
+                    sleep_until_in(target, app_monotonic_ns, mode, 0);
+                    app_monotonic_ns() - target
+                })
+                .collect();
+            late.sort_unstable();
+            assert!(late[0] >= 0, "{mode:?}: ended {} ns early", -late[0]);
+            assert!(
+                late[late.len() / 2] < 1_000_000,
+                "{mode:?}: median late {} ns",
+                late[late.len() / 2]
+            );
+        }
+        let target = app_monotonic_ns() + 2_000_000;
+        sleep_until_app(target);
+        assert!(app_monotonic_ns() >= target);
     }
 
     /// FOH froze (5.11.2026, ~04:48Z) right after dasio rolled v0.6.35:
@@ -382,7 +440,12 @@ mod tests {
         pin(TIME_CRITICAL);
         let before = turns.load(Ordering::Relaxed);
         for _ in 0..100 {
-            sleep_until_in(monotonic_ns() + 300_000, super::super::WaitMode::Spin, 0);
+            sleep_until_in(
+                monotonic_ns() + 300_000,
+                monotonic_ns,
+                super::super::WaitMode::Spin,
+                0,
+            );
         }
         let ran = turns.load(Ordering::Relaxed) - before;
         stop.store(true, Ordering::Relaxed);
@@ -444,7 +507,12 @@ mod tests {
             let mut late = Vec::with_capacity(1_000);
             while monotonic_ns() < end {
                 let target = monotonic_ns() + 300_000;
-                sleep_until_in(target, super::super::WaitMode::Spin, 10_000_000_000);
+                sleep_until_in(
+                    target,
+                    monotonic_ns,
+                    super::super::WaitMode::Spin,
+                    10_000_000_000,
+                );
                 late.push(monotonic_ns() - target);
             }
             late.sort_unstable();
@@ -455,7 +523,12 @@ mod tests {
         let mut late = Vec::with_capacity(4_000);
         while monotonic_ns() < end {
             let target = monotonic_ns() + 300_000;
-            sleep_until_in(target, super::super::WaitMode::Spin, PERIOD_NS);
+            sleep_until_in(
+                target,
+                monotonic_ns,
+                super::super::WaitMode::Spin,
+                PERIOD_NS,
+            );
             late.push(monotonic_ns() - target);
         }
         let ran = turns.load(Ordering::Relaxed) - before;

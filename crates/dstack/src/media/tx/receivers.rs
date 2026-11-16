@@ -49,6 +49,19 @@ impl TxShared {
             .map(|(slot, f)| (slot, f.dest, f.rx_host.clone()))
             .collect()
     }
+
+    /// Each flow sending now to a receiver (as [`receiver_flows`]): the
+    /// receiving device's name and its stated latency, ns (0: unknown).
+    /// For an app that checks what it sends against its receivers (the
+    /// ASIO bridge's from-ASIO block age, dstack #325).
+    ///
+    /// [`receiver_flows`]: TxShared::receiver_flows
+    pub fn receiver_latencies(&self) -> Vec<(String, u64)> {
+        self.receiver_flows()
+            .into_iter()
+            .map(|(slot, dest, name)| (name, self.receiver_latency_ns(slot, dest)))
+            .collect()
+    }
 }
 
 /// `dest` as one word for [`TxShared::receiver_latency_ns`]: its address,
