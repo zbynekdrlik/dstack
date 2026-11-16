@@ -6,8 +6,8 @@
 //! model.
 //!
 //! Both run on the app's clock ([`dstack::clock::app_monotonic_ns`]: Linux
-//! `CLOCK_MONOTONIC`, Windows raw QPC), which the ticks (`Instant`) and the
-//! TX FIFO's write stamps read too: the pump's media clock is a
+//! `CLOCK_MONOTONIC`, Windows raw QPC), which the ticks and the TX FIFO's
+//! write stamps read too: the pump's media clock is a
 //! [`SkewedClock`] at 0 ppm on it. Its waits still sleep on the media
 //! threads' own clock, but a wall step there only moves a wake: the time
 //! each wake reads is the app's. A bare `MonoClock` that no poller ever fed
@@ -59,7 +59,6 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use dlink::bridge::player::hard_excess_s;
 use dstack::clock::{PtpClock, SkewedClock, TestClockPpm, app_monotonic_ns};
-use dstack::stream::wake::RECENT;
 use dstack::stream::{PumpStats, PumpView};
 
 use harness::*;
@@ -81,14 +80,19 @@ struct Tick {
     late: Duration,
     gap: bool,
     rx: u64,
-    /// The TX gap was an underrun (else a re-centre).
+    /// The TX gap held an underrun, a re-centre or both.
     underrun: bool,
-    /// The wall time at the tick's start and after its counts, whole ms
-    /// since the Unix epoch (the clock of the pump's late wakes).
+    recentre: bool,
+    /// The wall time at the tick's start, at its TX depth read and after its
+    /// counts, whole ms since the Unix epoch (the clock of the pump's late
+    /// wakes).
     top_ms: u64,
+    depth_at_ms: u64,
     end_ms: u64,
-    /// Where the tick's TX write landed after its start, ms of the app's
-    /// clock (`Fifo::last_write`).
+    /// The TX depth read after the tick's start, and where the tick's TX
+    /// write landed after that read, ms of the app's clock
+    /// (`Fifo::last_write`).
+    depth_after_ms: f64,
     wrote_ms: f64,
     /// The TX FIFO's depth before the write and the RX FIFO's before the
     /// read, ms.
@@ -234,9 +238,11 @@ fn one_minute_in_real_time() {
         // The FIFOs' depths before the write and the read: the TX
         // sawtooth's bottom and the RX read's room.
         let tx_depth_ms = ms(p.tx_fifo.len());
+        let depth_at = app_monotonic_ns();
+        let depth_at_ms = unix_ms();
         let rx_depth_ms = ms(p.rx_fifo.len());
         ticker.tick(&mut p);
-        let wrote = p.tx_fifo.last_write().map_or(top, |w| w.at_ns);
+        let wrote = p.tx_fifo.last_write().map_or(depth_at, |w| w.at_ns);
         let counts = Counts::of(&p, T0);
         let view = p.pump_stats.view();
         let long = long_blocks(&p.pump_stats);
@@ -246,7 +252,6 @@ fn one_minute_in_real_time() {
             w.recent()
                 .into_iter()
                 .map(|w| (w.unix_ms, w.behind_us, w.rebootstrap)),
-            RECENT as u64,
         );
         if primed.is_none() && !p.tx_stats.priming() && !p.rx_stats.priming() {
             primed = Some((counts, view));
@@ -259,9 +264,12 @@ fn one_minute_in_real_time() {
                 gap: counts.tx_sum() != was.tx_sum(),
                 rx: counts.rx_underruns - was.rx_underruns,
                 underrun: counts.tx_underruns != was.tx_underruns,
+                recentre: counts.tx_recentres != was.tx_recentres,
                 top_ms,
+                depth_at_ms,
                 end_ms: unix_ms(),
-                wrote_ms: (wrote - top) as f64 / 1e6,
+                depth_after_ms: (depth_at - top) as f64 / 1e6,
+                wrote_ms: (wrote - depth_at) as f64 / 1e6,
                 tx_depth_ms,
                 rx_depth_ms,
                 overruns: view.overruns - was_view.overruns,
@@ -300,7 +308,7 @@ fn one_minute_in_real_time() {
     let target_ms = p.buffer.target_s() * 1e3;
     let excess_ms = hard_excess_s(p.buffer.target_s(), p.buffer.chunk_s()) * 1e3;
     let judged = losses(&ticks, &wakes, restarts, target_ms, excess_ms);
-    let verdict = verdict(&judged, wakes.lost);
+    let verdict = verdict(&judged, wakes.lost());
     if let Some(i) = gap_on_time(&ticks) {
         let from = i.saturating_sub(5);
         let before: Vec<String> = (from..=i)

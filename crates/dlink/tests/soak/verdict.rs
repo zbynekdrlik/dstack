@@ -24,14 +24,22 @@
 //!   the depth passed the target by the player's hard excess.
 //! - An RX dropout: the pump was not run long enough to leave less than a
 //!   tick's read in the RX FIFO (the depth before a read normally holds a
-//!   tick and some spare: the run's median less [`CHUNK`]).
+//!   tick and some spare: the run's median less [`CHUNK`]). The pump only
+//!   adds to that FIFO, so a dropout whose depth before the read covered
+//!   the read (a tick and a call) no pump stall explains.
+//! - A pump restart (a wake more than W late) explains an RX dropout, never
+//!   a TX re-centre: its skipped blocks make the TX player resync to the
+//!   target (counted apart, `resyncs`), which takes the excess away.
 //!
 //! A pump stall is read from its late wakes (the pump records each wake one
 //! block or more behind its due time, with its wall time): it was not run
 //! from at most `behind` before the wake until the wake. The app thread's
 //! hold is where its write landed (`Fifo::last_write`, the app's clock)
-//! against the tick's start. Evidence shows a thread was late (not run, or
-//! blocked), not why: a stack lock that blocks the pump reads like the box.
+//! against the moment the depth before it was read. Evidence shows a thread
+//! was late (not run, or blocked), not why: a stack lock that blocks the
+//! pump reads like the box. The rules lean to OURS: a pump lag under one
+//! block (1.33 ms) is never recorded as a late wake, so an app hold within
+//! about that much plus [`SLACK_MS`] of the dry point can read OURS.
 
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
@@ -59,19 +67,23 @@ pub(crate) struct Wakes {
     pub(crate) seen: BTreeSet<Wake>,
     /// The count the last merge read (`WakeLateness::late_wakes`).
     pub(crate) count: u64,
-    /// Late wakes that left the status's list before a merge read them.
-    pub(crate) lost: u64,
 }
 
 impl Wakes {
     /// Merges the pump's late wakes: `count` since the start, `recent` the
-    /// ones the status keeps (`keeps` of them at most).
-    pub(crate) fn merge(&mut self, count: u64, recent: impl Iterator<Item = Wake>, keeps: u64) {
+    /// ones the status keeps.
+    pub(crate) fn merge(&mut self, count: u64, recent: impl Iterator<Item = Wake>) {
         if count > self.count {
-            self.lost += (count - self.count).saturating_sub(keeps);
             self.count = count;
             self.seen.extend(recent);
         }
+    }
+
+    /// The late wakes no merge saw: left the status's list between two
+    /// merges, or skipped while the pump wrote their slot (about: two
+    /// wakes alike in all three fields count as one).
+    pub(crate) fn lost(&self) -> u64 {
+        self.count.saturating_sub(self.seen.len() as u64)
     }
 
     /// The stalls (wall ms: start, end) that overlap `from..=to` (ms).
@@ -127,13 +139,15 @@ pub(crate) fn losses(
             ticks[i - 1].end_ms
         } as f64;
         let to = t.end_ms as f64;
-        if t.gap && t.late < LATE_TICK {
-            let (what, runner) = if t.underrun {
-                ("TX underrun", tx_underrun(t, wakes, tx_median_ms))
-            } else {
+        let on_time = t.late < LATE_TICK;
+        let tx = [
+            (on_time && t.underrun).then(|| ("TX underrun", tx_underrun(t, wakes, tx_median_ms))),
+            (on_time && t.recentre).then(|| {
                 let need = recentre_stall_ms(target_ms, excess_ms, t.tx_depth_ms);
-                ("TX re-centre", pump_stall(wakes, from, to, need))
-            };
+                ("TX re-centre", pump_stall(wakes, from, to, need, false))
+            }),
+        ];
+        for (what, runner) in tx.into_iter().flatten() {
             out.push(Loss {
                 tick: i,
                 what,
@@ -151,10 +165,12 @@ pub(crate) fn losses(
         };
         if judged {
             let need = rx_median_ms - CHUNK_MS;
+            // A read the FIFO covered: the pump only adds to it.
+            let covered = t.rx_depth_ms >= CHUNK_MS + CALL_MS + SLACK_MS;
             out.push(Loss {
                 tick: i,
                 what: "RX dropout",
-                runner: pump_stall(wakes, from, to, need),
+                runner: pump_stall(wakes, from, to, need, true).filter(|_| !covered),
                 around: around(t, wakes, from, to),
             });
         }
@@ -169,7 +185,7 @@ fn tx_underrun(t: &Tick, wakes: &Wakes, median_ms: f64) -> Option<String> {
     if t.tx_depth_ms + CALL_MS + SLACK_MS < median_ms {
         return None;
     }
-    let top = t.top_ms as f64;
+    let top = t.depth_at_ms as f64;
     let backlog = wakes
         .stalls(top, top)
         .map(|(start, end, _)| (top - start).clamp(0.0, end - start))
@@ -177,12 +193,12 @@ fn tx_underrun(t: &Tick, wakes: &Wakes, median_ms: f64) -> Option<String> {
     let dry = t.tx_depth_ms - CALL_MS;
     (t.wrote_ms + backlog + SLACK_MS >= dry).then(|| {
         format!(
-            "the app's write landed {:.2} ms after the tick's start ({:.2} ms after its due \
+            "the app's write landed {:.2} ms after the depth read ({:.2} ms after its due \
              time){}, past the {:.2} ms the TX FIFO held less one call",
             t.wrote_ms,
-            t.wrote_ms + t.late.as_secs_f64() * 1e3,
+            t.wrote_ms + t.depth_after_ms + t.late.as_secs_f64() * 1e3,
             if backlog > 0.0 {
-                format!(" with the pump {backlog:.2} ms behind at the start")
+                format!(" with the pump {backlog:.2} ms behind at the read")
             } else {
                 String::new()
             },
@@ -192,11 +208,11 @@ fn tx_underrun(t: &Tick, wakes: &Wakes, median_ms: f64) -> Option<String> {
 }
 
 /// A pump stall overlapping `from..=to` (wall ms) of at least `need_ms`, or
-/// a pump restart there.
-fn pump_stall(wakes: &Wakes, from: f64, to: f64, need_ms: f64) -> Option<String> {
+/// a pump restart there when `restart` explains the loss.
+fn pump_stall(wakes: &Wakes, from: f64, to: f64, need_ms: f64, restart: bool) -> Option<String> {
     wakes
         .stalls(from, to)
-        .find(|(start, end, w)| w.2 || end - start + SLACK_MS >= need_ms)
+        .find(|(start, end, w)| (restart && w.2) || end - start + SLACK_MS >= need_ms)
         .map(|(start, end, w)| {
             format!(
                 "the pump was not run for {:.2} ms (a late wake {} us behind at {}{}), \
@@ -214,7 +230,7 @@ fn pump_stall(wakes: &Wakes, from: f64, to: f64, need_ms: f64) -> Option<String>
 /// at that tick, and the app's tick.
 fn around(t: &Tick, wakes: &Wakes, from: f64, to: f64) -> String {
     let mut s = format!(
-        "app: tick {:.2} ms late, write landed {:.2} ms after its start, TX depth before it \
+        "app: tick {:.2} ms late, write landed {:.2} ms after the depth read, TX depth before it \
          {:.2} ms, RX depth {:.2} ms; pump: late wakes [",
         t.late.as_secs_f64() * 1e3,
         t.wrote_ms,
@@ -287,6 +303,7 @@ mod tests {
         Tick {
             late: Duration::from_micros(500),
             top_ms: at,
+            depth_at_ms: at,
             end_ms: at + 1,
             wrote_ms: 0.05,
             tx_depth_ms: 12.0,
@@ -300,6 +317,7 @@ mod tests {
         let mut ticks: Vec<Tick> = (0..9).map(|i| tick(1000 + 21 * i)).collect();
         ticks.push(Tick {
             top_ms: 1189,
+            depth_at_ms: 1189,
             end_ms: 1190,
             ..last
         });
@@ -325,7 +343,8 @@ mod tests {
             wrote_ms,
             ..tick(0)
         };
-        // Dry no earlier than 12 - 2.67 = 9.33 ms after the start, with 1 ms of slack.
+        // Dry no earlier than 12 - 2.67 = 9.33 ms after the depth read, with 1 ms
+        // of slack.
         let late = judge(&run(gap(8.4)), &Wakes::default());
         assert_eq!(late.len(), 1);
         assert_eq!(late[0].what, "TX underrun");
@@ -339,14 +358,14 @@ mod tests {
         let on_time = judge(&run(gap(8.3)), &Wakes::default());
         assert_eq!(on_time[0].runner, None);
         assert!(verdict(&on_time, 0).starts_with("VERDICT OURS: 1 of 1"));
-        // The pump 5 ms behind at the start (a stall 1184..1192) took it.
+        // The pump 5 ms behind at the read (a stall 1184..1192) took it.
         let backlog = judge(&run(gap(4.0)), &wakes(&[(1192, 8_000, false)]));
         assert!(
             backlog[0]
                 .runner
                 .as_deref()
                 .unwrap()
-                .contains("5.00 ms behind")
+                .contains("5.00 ms behind at the read")
         );
         // A FIFO already short before an on-time write: no thread explains it
         // (a lost write), however early its dry point.
@@ -368,7 +387,7 @@ mod tests {
             ..gap(4.7)
         };
         assert_eq!(judge(&run(under), &Wakes::default())[0].runner, None);
-        // A pump stall after the start leaves the FIFO fuller: no help.
+        // A pump stall after the read leaves the FIFO fuller: no help.
         let after = judge(&run(gap(4.0)), &wakes(&[(1199, 8_000, false)]));
         assert_eq!(after[0].runner, None);
     }
@@ -378,6 +397,7 @@ mod tests {
         let late = Tick {
             gap: true,
             underrun: true,
+            recentre: true,
             late: LATE_TICK,
             ..tick(0)
         };
@@ -387,7 +407,12 @@ mod tests {
 
     #[test]
     fn an_rx_dropout_is_the_pump_s_only_with_a_stall_past_the_read_s_room() {
-        let drop = Tick { rx: 1, ..tick(0) };
+        // A read the FIFO could not cover (20 ms before a 21.33 ms read).
+        let drop = Tick {
+            rx: 1,
+            rx_depth_ms: 20.0,
+            ..tick(0)
+        };
         // The room: the median 33 ms less the tick's 21.33 ms = 11.67 ms.
         let long = judge(&run(drop), &wakes(&[(1186, 10_700, false)]));
         assert_eq!(long.len(), 1);
@@ -402,6 +427,15 @@ mod tests {
         // A restart there explains it whatever its length.
         let restart = judge(&run(drop), &wakes(&[(1186, 2_000, true)]));
         assert!(restart[0].runner.as_deref().unwrap().contains("restarted"));
+        // A read the FIFO covered (a tick and a call and the slack, 25 ms):
+        // the pump only adds to it, so no stall explains the dropout.
+        let covered = |rx_depth_ms| Tick {
+            rx_depth_ms,
+            ..drop
+        };
+        let stall = wakes(&[(1186, 12_000, true)]);
+        assert_eq!(judge(&run(covered(25.01)), &stall)[0].runner, None);
+        assert!(judge(&run(covered(24.99)), &stall)[0].runner.is_some());
         // As many dropouts on time as restarts: none judged.
         assert!(losses(&run(drop), &Wakes::default(), 1, 22.67, 45.33).is_empty());
     }
@@ -424,6 +458,7 @@ mod tests {
         assert!((recentre_stall_ms(22.67, 45.33, 12.0) - 34.67).abs() < 0.01);
         let gap = Tick {
             gap: true,
+            recentre: true,
             ..tick(0)
         };
         let long = judge(&run(gap), &wakes(&[(1189, 33_700, false)]));
@@ -431,16 +466,31 @@ mod tests {
         assert!(long[0].runner.is_some());
         let short = judge(&run(gap), &wakes(&[(1189, 33_600, false)]));
         assert_eq!(short[0].runner, None);
+        // A restart resyncs the TX player to its target: no re-centre.
+        let restart = judge(&run(gap), &wakes(&[(1189, 9_500, true)]));
+        assert_eq!(restart[0].runner, None);
+        // An underrun and a re-centre between two ticks: both judged.
+        let both = judge(
+            &run(Tick {
+                underrun: true,
+                ..gap
+            }),
+            &Wakes::default(),
+        );
+        let what: Vec<_> = both.iter().map(|l| l.what).collect();
+        assert_eq!(what, ["TX underrun", "TX re-centre"]);
     }
 
     #[test]
     fn the_merge_keeps_every_wake_and_counts_those_the_status_dropped() {
         let mut w = Wakes::default();
-        w.merge(2, [(1, 10, false), (2, 20, false)].into_iter(), 32);
-        w.merge(2, [(9, 90, false)].into_iter(), 32);
+        w.merge(2, [(1, 10, false), (2, 20, false)].into_iter());
+        w.merge(2, [(9, 90, false)].into_iter());
         assert_eq!(w.seen.len(), 2, "no new count, no merge");
-        w.merge(40, [(3, 30, false)].into_iter(), 32);
-        assert_eq!((w.seen.len(), w.lost, w.count), (3, 6, 40));
+        assert_eq!(w.lost(), 0);
+        // The status's list again, one new wake in it: 37 never seen.
+        w.merge(40, [(2, 20, false), (3, 30, false)].into_iter());
+        assert_eq!((w.seen.len(), w.lost(), w.count), (3, 37, 40));
     }
 
     #[test]
