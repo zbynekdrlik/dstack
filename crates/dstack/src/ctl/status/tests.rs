@@ -286,6 +286,10 @@ const WORDS: &[&str] = &[
     "writes_after_send",
     "wake_behind_max_us",
     "wake_behind_minute_max_us",
+    "oversleep_max_us",
+    "drain_max_us",
+    "drain_max_datagrams",
+    "max_process_cpu_us",
     "wake_behind_buckets",
     "late_wakes",
     "late_wakes_recent",
@@ -865,6 +869,7 @@ fn the_status_has_no_engine_until_one_is_attached() {
              \"late\":0,\"missed\":0,\"overruns\":0,\"rebootstraps\":0,\"max_process_us\":0,\
              \"rebootstraps_late\":0,\"rebootstraps_clock_back\":0,\"rebootstraps_reanchor\":0,\
              \"rebootstraps_retime\":0,\"play_at_rejected\":0,\"play_at_steps\":0,\"play_at_max_dev_us\":0,\"writes_after_send\":0,\"wake_behind_max_us\":0,\
+             \"oversleep_max_us\":0,\"drain_max_us\":0,\"drain_max_datagrams\":0,\
              \"wake_behind_buckets\":[0,0,0,0,0,0,0,0],\"late_wakes\":0,\"late_wakes_recent\":[],\
              \"threads\":[]}}}}",
             before.strip_suffix('}').unwrap()

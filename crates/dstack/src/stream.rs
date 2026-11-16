@@ -47,8 +47,10 @@
 //! - [`PumpStats`]: what the engine's status and the control socket read,
 //!   as [`dstack_audio_io::StreamStats`], the stream histograms
 //!   ([`dstack_audio_io::hist::HistSnapshot`]) and a
-//!   [`PumpView`]: each re-bootstrap with its [`Cause`], and how late the
-//!   pump woke ([`wake`], dstack #281).
+//!   [`PumpView`]: each re-bootstrap with its [`Cause`], how late the
+//!   pump woke ([`wake`], dstack #281), and where its lost time went
+//!   ([`split`], dstack #354: the sleep's oversleep, the drain, the
+//!   blocks' CPU time).
 //! - [`app_offset`]: the media clock's offset from the app's clock that
 //!   stamps each block's play time, filtered (dstack #295).
 //! - [`watch::PumpWatch`]: once a second, from the daemon's tick (never
@@ -392,10 +394,14 @@ impl<P: Process> Pump<P> {
     }
 
     /// Drains the RX flow sockets into the rings while the pump writes
-    /// them, at PTP time `now_ns` (`None`: the clock is not ready).
+    /// them, at PTP time `now_ns` (`None`: the clock is not ready); the
+    /// drain's own time and datagrams recorded (dstack #354).
     fn drain(&mut self, now_ns: Option<u64>) {
         if let Some(intake) = &mut self.intake {
+            let began = Instant::now();
             intake.drain_into_rings(now_ns);
+            let datagrams = u64::try_from(intake.datagrams()).unwrap_or(u64::MAX);
+            self.stats.drained(nanos(began.elapsed()), datagrams);
         }
     }
 
@@ -539,7 +545,7 @@ impl<P: Process> Pump<P> {
                         self.stats.late.fetch_add(1, Ordering::Relaxed);
                     }
                     self.drain(Some(drain_ns));
-                    self.block(start);
+                    self.cpu_timed(|pump| pump.block(start));
                 }
                 Due::Wait { until } => break until,
                 Due::Rebootstrap { skipped, cause } => {
@@ -561,10 +567,23 @@ impl<P: Process> Pump<P> {
         // Packets keep coming: read (counted unplaced), never left to fill
         // their sockets.
         self.drain(None);
-        let entry = self.enter();
-        self.input.fill(0.0);
-        let fault = self.run_processor(None, None);
-        self.leave(entry, fault);
+        self.cpu_timed(|pump| {
+            let entry = pump.enter();
+            pump.input.fill(0.0);
+            let fault = pump.run_processor(None, None);
+            pump.leave(entry, fault);
+        });
+    }
+
+    /// Runs `block` (one block) and records the thread's CPU time over it
+    /// ([`split::thread_cpu_ns`], dstack #354): read outside
+    /// [`Pump::block`], as on Linux it is a system call (no vDSO).
+    fn cpu_timed(&mut self, block: impl FnOnce(&mut Self)) {
+        let before = split::thread_cpu_ns();
+        block(self);
+        if let Some(cpu) = split::cpu_between(before, split::thread_cpu_ns()) {
+            self.stats.record_cpu(cpu);
+        }
     }
 
     /// The block whose inputs are stamped `start`…`start + B − 1` (the
@@ -703,8 +722,9 @@ pub fn inputs_jump(step_ns: i64, rate: u32, shift: Option<i64>) -> bool {
 
 pub mod app_offset;
 pub mod play_at;
+pub mod split;
 mod stats;
-pub use stats::{PumpStats, PumpView};
+pub use stats::{PumpStats, PumpView, SecondSplit};
 mod thread;
 pub use thread::{free_deadline, spawn};
 pub mod wake;

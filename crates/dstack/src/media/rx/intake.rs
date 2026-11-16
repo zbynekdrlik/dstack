@@ -117,6 +117,9 @@ pub struct Intake {
     /// The packets one slot's read placed, for their arrival ages once the
     /// read is done ([`record_arrivals`], dstack #350).
     seen: Box<[Seen; PUMP_DRAIN]>,
+    /// The datagrams the last drain read, every one (placed or not; dstack
+    /// #354, [`Intake::datagrams`]).
+    datagrams: usize,
 }
 
 /// A packet placed by a read: its first frame and its wake delay (the
@@ -143,6 +146,7 @@ impl Intake {
             last_drain: None,
             gap: None,
             seen: Box::new([Seen::default(); PUMP_DRAIN]),
+            datagrams: 0,
         }
     }
 
@@ -166,6 +170,7 @@ impl Intake {
     /// left empty (`false`: a slot hit [`PUMP_DRAIN`] and has more; the
     /// pump drains it again at its next block, an idle drain at once).
     pub fn drain_into_rings(&mut self, now_ns: Option<u64>) -> bool {
+        self.datagrams = 0;
         if self.app {
             let now = now_ns.map(|ns| clock::to_samples(ns, self.shared.rate));
             self.gap = since(self.last_drain, now);
@@ -195,13 +200,21 @@ impl Intake {
             };
             let read = |buf: &mut [u8]| recv_handle(handle, buf);
             if fresh && let Some(stats) = self.shared.lanes.get(slot) {
-                discard(stats, &mut self.buf[..], PUMP_DRAIN, read);
+                self.datagrams += discard(stats, &mut self.buf[..], PUMP_DRAIN, read);
             }
             emptied &= self.receive(slot, (now_ns, mono, wall), handle, PUMP_DRAIN, read);
         }
         self.expire(now_ns);
         self.shared.handles.ack(moves);
         emptied
+    }
+
+    /// The datagrams the last [`Intake::drain_into_rings`] (or the RX
+    /// thread's last pass) read from its sockets, every one (placed, stray,
+    /// refused, or emptied from a new flow's slot): the drain's work
+    /// (dstack #354).
+    pub fn datagrams(&self) -> usize {
+        self.datagrams
     }
 
     /// The RX thread's part of its pass, for the slots in `ready` (one bit
@@ -217,6 +230,7 @@ impl Intake {
         joined: &[Option<(SocketAddrV4, mio::net::UdpSocket)>],
     ) -> u32 {
         let now_ns = at.0;
+        self.datagrams = 0;
         let moves = self.shared.handles.moves();
         self.refresh();
         self.expire(now_ns);
@@ -346,6 +360,7 @@ impl Intake {
             frames,
             gap,
             seen,
+            datagrams,
             ..
         } = self;
         let (Some(lane), Some(stats)) = (lanes.get_mut(slot), shared.lanes.get(slot)) else {
@@ -367,7 +382,11 @@ impl Intake {
         let mut done = false;
         let mut emptied = false;
         for _ in 0..cap {
-            let (n, from, at_ns) = match read(&mut buf[..]) {
+            let received = read(&mut buf[..]);
+            if received.is_ok() {
+                *datagrams += 1;
+            }
+            let (n, from, at_ns) = match received {
                 Ok(Received {
                     len,
                     from: Some(from),

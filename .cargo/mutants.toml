@@ -197,6 +197,9 @@ exclude_re = [
   # #195): never compiled on the gate's Linux; Linux's and Windows's reads
   # are tested.
   "traffic/cpu.rs.*unread_times",
+  # The pump's thread CPU read off Linux (dstack #354): never compiled on
+  # the gate's Linux; the Linux read and its arithmetic are tested.
+  "stream/split.rs.*unmeasured_thread_cpu",
   # The poller's log lines (log only) and its wrapper aimed at dsync's port
   # (its body `poll` runs against a stand-in server in the tests).
   "clock.rs.*os::log_event",

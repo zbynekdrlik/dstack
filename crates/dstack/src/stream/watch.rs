@@ -23,7 +23,13 @@
 //! The line names the re-bootstraps' causes (`cause`, [`cause_word`]:
 //! `late`, `clock_back`, `reanchor`, `retime`, joined by `+`; `none` when
 //! only overruns or `writes_after_send` grew) and that second's latest
-//! wake (`behind_max_us`, [`super::wake`], dstack #281). Every
+//! wake (`behind_max_us`, [`super::wake`], dstack #281), split by cause
+//! (dstack #354, [`super::split`]): that second's latest sleep return past
+//! its target (`oversleep_max_us`: near `behind_max_us`, the scheduler ran
+//! the thread late), longest socket drain and most datagrams one drain read
+//! (`drain_max_us`, `drain_max_datagrams`) and largest block's thread CPU
+//! time (`max_process_cpu_us`, `-` where unmeasured: far under
+//! `max_process_us`, the block was not run in its middle). Every
 //! [`MINUTE_NS`] the watch also ends the pump's wake minute
 //! ([`super::wake::WakeLateness::take_minute`]), which the status shows,
 //! and logs one info line ([`REJECTED_LINE`]) when the play-time filter
@@ -33,7 +39,7 @@
 use tracing::{info, warn};
 
 use super::app_offset::REJECTED_LINE;
-use super::{PumpStats, PumpView};
+use super::{PumpStats, PumpView, SecondSplit};
 use crate::media::late::{EVERY_NS, MINUTE_NS};
 
 /// The text of the pump watch's warning: the line a consumer greps for.
@@ -79,6 +85,12 @@ pub fn cause_word(grew: &Grew) -> String {
     } else {
         words.join("+")
     }
+}
+
+/// A block's thread CPU time as the warning shows it: whole µs, `-` where
+/// unmeasured (dstack #354).
+pub fn cpu_word(us: Option<u64>) -> String {
+    us.map_or_else(|| "-".to_string(), |us| us.to_string())
 }
 
 /// The watch's memory: the counts at the last look.
@@ -198,6 +210,7 @@ impl PumpWatch {
         // wake afresh.
         let second_max_us = stats.take_second_max_us();
         let behind_max_us = stats.wakes().take_second_max_us();
+        let split: SecondSplit = stats.take_second_split();
         let first_minute = self.minute_ns.is_none();
         if self.minute_ends(now_ns) {
             stats.wakes().take_minute();
@@ -232,6 +245,10 @@ impl PumpWatch {
             offset = timing.offset(),
             cause = %cause_word(&grew),
             behind_max_us,
+            oversleep_max_us = split.oversleep_us,
+            drain_max_us = split.drain_us,
+            drain_max_datagrams = split.drain_datagrams,
+            max_process_cpu_us = %cpu_word(split.process_cpu_us),
             "{PUMP_WARNING}"
         );
     }

@@ -90,8 +90,16 @@ fn run<P: Process>(clock: &dyn PtpClock, mut pump: Pump<P>, stop: &AtomicBool) {
         let now = clock.now_ns();
         if let Some(now_ns) = now {
             deadline = None;
+            let epoch = anchor.epoch;
             let wake = pump.media(to_samples(now_ns, rate), anchor);
-            clock.sleep_until(ns_of(wake, rate));
+            let target = ns_of(wake, rate);
+            // How late the sleep returns, read right around it (dstack
+            // #354), on one epoch (a re-anchor moved the clock).
+            let asked = clock.now_ns();
+            clock.sleep_until(target);
+            let woke = clock.now_ns();
+            let same = crate::clock::Anchor::of(clock).epoch == epoch;
+            pump.stats.slept(target, asked, woke, same);
         } else {
             pump.free();
             let now = Instant::now();
