@@ -55,11 +55,13 @@
 //! media time labels the app's frames `start * app_rate / device_rate`.
 //! At a ratio that does not divide the block that is seldom whole, so a
 //! restart (the first block, or the first after a discontinuity: a pump
-//! re-bootstrap) begins the converters at the latest earlier block start
-//! that is a whole app frame, through silent blocks that call no app and
-//! send nothing (their phase steps need no filter work). An impulse that
-//! crosses a re-bootstrap therefore comes back after the same app samples
-//! as one that does not. No delay changes.
+//! re-bootstrap) puts both converters, the FIFOs and the next app label
+//! where a `Rated` that ran silence from device frame 0 (a whole app
+//! frame) would have them at that start ([`Converter::skip_silence`], no
+//! filter work; dstack #343: at any rate pair and any start, in a few
+//! calls of the converter's core for the rest of one ratio period). An
+//! impulse that crosses a re-bootstrap therefore comes back after the same
+//! app samples as one that does not. No delay changes.
 //!
 //! `process` allocates nothing: every buffer is sized at the start.
 
@@ -119,44 +121,6 @@ fn prime_for(tx: &Converter) -> usize {
 fn fixed_app_frames(device_rate: u32, app_rate: u32, block: usize) -> usize {
     let frames = (block as u64 * u64::from(app_rate)).div_ceil(u64::from(device_rate.max(1)));
     usize::try_from(frames).unwrap_or(usize::MAX)
-}
-
-/// The most silent blocks a restart runs before its first block
-/// ([`lead_blocks`]), which bounds a restart's added work: a silent block
-/// costs about 4 us with 2 channels and 7 us with 16 (dev1, release; the
-/// converters' buffers move, no filter runs), so 40 add at most about
-/// 0.3 ms to the restart's block. It covers every app from 16 to 192 kHz
-/// on a 48 or 96 kHz device at every block size (44.1 kHz on 96 kHz: at
-/// most 4 at 128 frames, 19 at 16; 22.05 kHz on 96 kHz at 16 frames: 39),
-/// and on a 192 kHz one but 22.05 kHz at 16 frames. Longer periods keep
-/// the old label, a fraction of an app frame off at each restart: an app
-/// of the 48 kHz family (16, 24, 32, 48, 96, 192 kHz) on a device of the
-/// 44.1 kHz family (whole app frames 147 or 441 device frames apart: up to
-/// 146 or 440 blocks), 22.05 kHz on 192 kHz at 16 frames, and 11.025 kHz.
-const MAX_LEAD: u64 = 40;
-
-fn gcd(mut a: u64, mut b: u64) -> u64 {
-    while b != 0 {
-        (a, b) = (b, a % b);
-    }
-    a
-}
-
-/// The silent blocks a restart at device frame `start` runs first (dstack
-/// #341): the fewest `m` for which `start - m * block` is a whole app frame
-/// (`(start - m * block) * app_rate` divisible by `device_rate`), within
-/// [`MAX_LEAD`] and not before frame 0; else 0 (a start off the block grid,
-/// where no such anchor exists, or a longer period).
-fn lead_blocks(start: u64, block: usize, device_rate: u32, app_rate: u32) -> u64 {
-    let (dev, app) = (u64::from(device_rate), u64::from(app_rate));
-    // The device frames between whole app frames.
-    // Both rates are a converter's, which refuses 0.
-    let period = dev / gcd(dev, app);
-    let n = block as u64;
-    (0..=MAX_LEAD)
-        .take_while(|m| m * n <= start)
-        .find(|m| (start - m * n).is_multiple_of(period))
-        .unwrap_or(0)
 }
 
 /// Device frame `start` at the app's rate, rounded down (exact integers:
@@ -267,8 +231,8 @@ pub struct Rated<P> {
     fifo: Vec<VecDeque<f64>>,
     /// The TX converter's input, channel-major at its next frames.
     tx_in: Vec<f64>,
-    /// The device's start of the last block and the app's.
-    last: Option<(u64, u64, usize)>,
+    /// The device start the next block follows on at, and its app start.
+    next: Option<(u64, u64)>,
     /// The device's rate and the app's, Hz.
     rates: (u32, u32),
     /// The silence the TX FIFO starts with, app frames ([`prime_for`]).
@@ -289,9 +253,9 @@ pub struct Rated<P> {
     /// block only.
     reblock: Option<Reblock>,
     /// The converters start again at the next block (new, or after a
-    /// discontinuity): when it has a media time, it runs [`lead_blocks`]
-    /// silent blocks first (dstack #341); without one the converters run
-    /// that block as before and no lead follows.
+    /// discontinuity): when it has a media time, they step to it first
+    /// ([`Rated::restart_at`], dstack #341, #343); without one they run
+    /// that block from their reset as before.
     restart: bool,
 }
 
@@ -389,7 +353,7 @@ impl<P: Process> Rated<P> {
             fifo,
             rx,
             tx,
-            last: None,
+            next: None,
             rates: (device_rate, app_rate),
             prime,
             dry: Arc::new(AtomicU64::new(0)),
@@ -427,12 +391,12 @@ impl<P: Process> Rated<P> {
         Arc::clone(&self.dry)
     }
 
-    /// The app's start for a device block at `start`: the last one's plus
-    /// its frames when the device's blocks follow on, else the device's
-    /// start at the app's rate.
+    /// The app's start for a device block at `start`: the one the last
+    /// block or a restart left when the device's blocks follow on, else
+    /// the device's start at the app's rate.
     fn app_start(&self, start: u64) -> u64 {
-        match self.last {
-            Some((dev, app, frames)) if dev + self.block as u64 == start => app + frames as u64,
+        match self.next {
+            Some((dev, app)) if dev == start => app,
             _ => app_frame(start, self.rates.0, self.rates.1),
         }
     }
@@ -446,20 +410,11 @@ impl<P: Process> Process for Rated<P> {
             return;
         }
         let n = self.block;
-        // A restart (dstack #341): the converters' first frame sits at the
-        // first block's start, which at a ratio that does not divide the
-        // block is seldom a whole app frame, and the app's frames would be
-        // labelled up to one frame early, a different fraction at each
-        // restart. Start them instead at the latest earlier block start
-        // that is a whole app frame, as if the device and a silent app had
-        // run from there: silent blocks, no app call, no device output.
+        // A restart (dstack #341, #343): see [`Rated::restart_at`].
         if std::mem::take(&mut self.restart)
             && let Some(s) = block.start()
         {
-            let lead = lead_blocks(s, n, self.rates.0, self.rates.1);
-            for m in (1..=lead).rev() {
-                self.silent_block(s - m * n as u64);
-            }
+            self.restart_at(s);
         }
         // RX: the device's block in, about n * ratio app frames out.
         let room = self.rx.output_frames_max();
@@ -485,7 +440,9 @@ impl<P: Process> Process for Rated<P> {
         let play_at = block
             .play_at()
             .map(|at| at.saturating_add(self.rx_delay_ns));
-        self.last = start.zip(app_start).map(|(s, a)| (s, a, k));
+        self.next = start
+            .zip(app_start)
+            .map(|(s, a)| (s.saturating_add(n as u64), a.saturating_add(k as u64)));
         let Some(rb) = self.reblock.as_mut() else {
             for c in 0..self.inputs {
                 self.app_in[c * k..(c + 1) * k]
@@ -549,7 +506,7 @@ impl<P: Process> Process for Rated<P> {
             }
             rb.held = 0;
         }
-        self.last = None;
+        self.next = None;
         self.restart = true;
         self.inner.discontinuity();
     }
@@ -586,48 +543,47 @@ fn call_app<P: Process>(
 }
 
 impl<P: Process> Rated<P> {
-    /// A silent device block at `at` before a restart's first block
-    /// (dstack #341): the converters' phases move on as for a block of
-    /// silence (no filter work: their history is silent, as after a reset),
-    /// the app's frames are silence into the TX FIFO (through the fixed app
-    /// block's RX FIFO and its call cadence, with no call), and the TX
-    /// side takes its frames for a device block that is not sent.
-    fn silent_block(&mut self, at: u64) {
-        let n = self.block;
-        let room = self.rx.output_frames_max();
-        let lanes = self.inputs.max(1);
-        let k = self
-            .rx
-            .skip_silence(&self.staged[..lanes * n], n, &mut self.rx_out, room)
-            .map_or(0, |(_, made)| made);
-        self.last = Some((at, self.app_start(at), k));
-        let made = match self.reblock.as_mut() {
-            None => k,
-            Some(rb) => {
-                for fifo in &mut rb.fifo {
-                    fifo.extend(std::iter::repeat_n(0.0, k));
-                }
-                if rb.take(k).is_none() {
-                    0
-                } else {
-                    for fifo in &mut rb.fifo {
-                        fifo.drain(..rb.frames);
-                    }
-                    rb.frames
-                }
-            }
+    /// Starts the converters at device frame `s` (the first block with a
+    /// media time after `new` or a discontinuity; dstack #341, #343) as if
+    /// the device and a silent app had run from device frame 0, which is a
+    /// whole app frame: every app frame of the new run is then labelled
+    /// exactly, on RX and TX alike, wherever `s` lands.
+    ///
+    /// Each converter steps its phase to `s` ([`Converter::skip_silence`],
+    /// no filter work): RX gives `j` app frames for the device's `s`, TX
+    /// takes `i` app frames for them. The rest of that run's state follows
+    /// from those counts: the next app frame is `j`, a fixed app block's RX
+    /// FIFO holds `j mod A` frames (the app took every whole `A` of them),
+    /// and the TX FIFO holds the prime plus what the app made, less what TX
+    /// took. All of it is silence. A skip that is refused (a half-band step
+    /// at an odd start, which the pump never makes) leaves the reset state
+    /// and the start's floor label, as before #341.
+    fn restart_at(&mut self, s: u64) {
+        let rx = self.rx.skip_silence(s, &self.staged, &mut self.rx_out);
+        let tx = self.tx.skip_silence(s, &self.tx_in, &mut self.tx_out);
+        let (Ok((_, j)), Ok((i, _))) = (rx, tx) else {
+            self.rx.reset();
+            self.tx.reset();
+            return;
         };
-        for fifo in &mut self.fifo {
-            fifo.extend(std::iter::repeat_n(0.0, made));
+        let held = self.reblock.as_ref().map_or(0, |rb| j % rb.frames as u64);
+        if let Some(rb) = self.reblock.as_mut() {
+            rb.held = held as usize;
+            for f in &mut rb.fifo {
+                f.clear();
+                f.extend(std::iter::repeat_n(0.0, rb.held));
+            }
         }
-        let need = self.take_tx();
-        // The block is not sent: the skip's frame count is all it gives.
-        // With no TX channel the converter has one silent channel, which
-        // `send` never runs, so its skip is valid too.
-        let lanes = self.outputs.max(1);
-        let _ = self
-            .tx
-            .skip_silence(&self.tx_in[..lanes * need], need, &mut self.tx_out, n);
+        // In i128: j and i are near each other, each up to u64::MAX. A run
+        // from frame 0 never runs the FIFO dry (the prime covers the
+        // ratio's frame-to-frame variation), so the depth is never below 0.
+        let depth = self.prime as i128 + i128::from(j) - i128::from(held) - i128::from(i);
+        let have = usize::try_from(depth).unwrap_or(0);
+        for f in &mut self.fifo {
+            f.clear();
+            f.extend(std::iter::repeat_n(0.0, have));
+        }
+        self.next = Some((s, j));
     }
 
     /// The TX converter's next input out of the FIFO into `tx_in`, a dry

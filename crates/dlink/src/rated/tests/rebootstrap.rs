@@ -138,40 +138,104 @@ fn round_trip(pair: Pair, fixed: bool, first: u64, restart: Option<u64>) -> f64 
     heard[peak].0 as f64 + shift - at as f64
 }
 
+/// An app that leaves its outputs silent.
+struct Quiet;
+
+impl Process for Quiet {
+    fn process(&mut self, _: &mut Block<'_>) {}
+}
+
+/// A `Rated`'s timeline at the next block: the next app label `J`, the app
+/// frames the TX converter has taken (`prime + J - held - TX FIFO`), the
+/// fixed app block's RX FIFO count, and the TX converter's next input (its
+/// phase). Checks on the way that every channel's FIFOs agree and that the
+/// RX FIFO holds `J mod A`.
+fn timeline(r: &Rated<Quiet>) -> (u64, u64, u64, usize) {
+    let (_, j) = r.next.expect("a next label");
+    let depth = r.fifo[0].len() as u64;
+    assert!(r.fifo.iter().all(|f| f.len() as u64 == depth));
+    let held = r.reblock.as_ref().map_or(0, |rb| {
+        assert!(rb.fifo.iter().all(|f| f.len() == rb.held));
+        assert_eq!(rb.held as u64, j % rb.frames as u64);
+        rb.held as u64
+    });
+    let taken = r.prime as u64 + j - held - depth;
+    (j, taken, held, r.tx.input_frames_next())
+}
+
+/// A restart at any start leaves the timeline of a `Rated` that ran silence
+/// from device frame 0, before that start's block and after it (whose RX
+/// frames show the RX converter's phase), on both paths, over more than
+/// two ratio periods (dstack #343). The TX side must match exactly. The
+/// RX side's next label may differ by one frame where `(s - 2) * app /
+/// device` is whole: there the core's float `floor` may leave that frame
+/// to the next call, which delays when it comes, not where it sits.
 #[test]
-fn a_restart_leads_with_the_blocks_back_to_a_whole_app_frame() {
-    // 44.1 kHz on 96 kHz: a whole app frame every 320 device frames.
-    for (start, lead) in [
-        (0u64, 0u64),
-        (128, 1),
-        (256, 2),
-        (640, 0),
-        (896, 2),
-        (1_152, 4),
-    ] {
-        assert_eq!(lead_blocks(start, 128, 96_000, 44_100), lead, "{start}");
+fn a_restart_holds_the_timeline_of_a_run_from_frame_0() {
+    for pair in [CD].into_iter().chain(FAR) {
+        let Pair { device, app, block } = pair;
+        let n = block as u64;
+        for fixed in [false, true] {
+            let make = || {
+                if fixed {
+                    Rated::with_fixed_app_block(Quiet, device, app, block, 2, 2)
+                } else {
+                    Rated::new(Quiet, device, app, block, 2, 2)
+                }
+                .unwrap()
+            };
+            let (mut whole, mut restarted) = (make(), make());
+            let silence = vec![0.0; 2 * block];
+            let mut out = vec![0.0; 2 * block];
+            let (p_dev, _) = restarted.rx.period();
+            let end = (2 * p_dev + 5 * n).max(40 * n);
+            // The whole run's first block (its own restart, at frame 0).
+            whole.process(&mut Block::new(block, &silence, &mut out).at(0));
+            let mut s = n;
+            let mut exact = 0;
+            while s < end {
+                restarted.discontinuity();
+                restarted.restart_at(s);
+                restarted.restart = false;
+                for when in ["before", "after"] {
+                    let (want, got) = (timeline(&whole), timeline(&restarted));
+                    let at = format!("{pair:?}, fixed {fixed}, {when} the block at {s}");
+                    assert_eq!((got.1, got.3), (want.1, want.3), "{at}: TX");
+                    if got.0 == want.0 {
+                        exact += 1;
+                    } else {
+                        let edge = s - 2 + u64::from(when == "after") * n;
+                        assert!(got.0.abs_diff(want.0) == 1, "{at}: {got:?} {want:?}");
+                        assert_eq!(edge * u64::from(app) % u64::from(device), 0, "{at}");
+                    }
+                    if when == "before" {
+                        for r in [&mut whole, &mut restarted] {
+                            r.process(&mut Block::new(block, &silence, &mut out).at(s));
+                        }
+                    }
+                }
+                s += n;
+            }
+            assert!(exact > 70, "{pair:?}, fixed {fixed}: {exact}");
+        }
     }
-    // Off the block grid no start back is whole: the old label stays.
-    assert_eq!(lead_blocks(1_000, 32, 96_000, 44_100), 0);
-    // A whole ratio needs none.
-    assert_eq!(lead_blocks(128, 128, 96_000, 48_000), 0);
-    assert_eq!(lead_blocks(4_800, 128, 48_000, 96_000), 0);
-    // 22.05 kHz on 96 kHz at 16 frames: 39 blocks, within MAX_LEAD.
-    assert_eq!(lead_blocks(39 * 16, 16, 96_000, 22_050), 39);
-    // 32 kHz on a 44.1 kHz device (a whole app frame every 441 device
-    // frames) would need 440 blocks: past MAX_LEAD, the old label.
-    assert_eq!(lead_blocks(440 * 128, 128, 44_100, 32_000), 0);
-    assert_eq!(lead_blocks(441 * 128, 128, 44_100, 32_000), 0);
-    assert_eq!(lead_blocks(442 * 128, 128, 44_100, 32_000), 1);
-    // 44.1 kHz on 48 kHz: every 160 device frames.
-    assert_eq!(lead_blocks(4 * 128, 128, 48_000, 44_100), 4);
-    // At most MAX_LEAD blocks (one-frame blocks, a made-up rate whose
-    // period is 96000 frames).
-    assert_eq!(lead_blocks(MAX_LEAD, 1, 96_000, 44_099), MAX_LEAD);
-    assert_eq!(lead_blocks(MAX_LEAD + 1, 1, 96_000, 44_099), 0);
-    assert_eq!(gcd(96_000, 44_100), 300);
-    assert_eq!(gcd(44_100, 96_000), 300);
-    assert_eq!(gcd(7, 0), 7);
+}
+
+/// Off the block grid too (the pump never starts there): the next app
+/// label is the RX core's count for `s` silent inputs, `floor((s - 2) *
+/// 147 / 320)` at 44.1 kHz on 96 kHz, as on the grid.
+#[test]
+fn a_restart_off_the_block_grid_is_labelled_as_a_run_from_frame_0() {
+    let mut r = Rated::new(Quiet, 96_000, 44_100, N, 1, 1).unwrap();
+    for s in [7u64, 135, 1_031, 640 + 7] {
+        r.discontinuity();
+        r.restart_at(s);
+        let (dev, label) = r.next.unwrap();
+        assert_eq!(dev, s);
+        // The RX core gives floor((s - 2) * 147 / 320) frames for s inputs
+        // (dstack-resample's `skip_silence`).
+        assert_eq!(label, (s - 2) * 147 / 320, "{s}");
+    }
 }
 
 #[test]
