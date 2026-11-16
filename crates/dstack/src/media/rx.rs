@@ -520,9 +520,16 @@ impl RxShared {
         self.lanes.get(slot)?.network.last()
     }
 
-    #[allow(missing_docs)]
+    /// The device's measured network latency for an app's status (dstack
+    /// #325, the ASIO bridge's receiver figure): the largest p99 of any
+    /// flow slot's last second ([`RxShared::last_network_latency`]), ns;
+    /// `None` while no slot measured one (always on Windows).
     pub fn network_p99_ns(&self) -> Option<u64> {
-        None
+        self.lanes
+            .iter()
+            .filter_map(|l| l.network.last())
+            .map(|n| n.p99_us * 1_000)
+            .max()
     }
 
     /// Whether every slot socket stamps its datagrams' receive times, so

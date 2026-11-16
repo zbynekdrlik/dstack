@@ -137,6 +137,7 @@ pub(super) fn account(
     let age = left.saturating_sub(ns_of(stamp, clock.rate));
     stats.age_max_ns.fetch_max(age, Ordering::Relaxed);
     stats.age_peak_ns.fetch_max(age, Ordering::Relaxed);
+    stats.age_app_peak_ns.fetch_max(age, Ordering::Relaxed);
     if clock
         .late_threshold(fpp, receiver_ns)
         .is_some_and(|t| over_latency(age, t))

@@ -587,6 +587,10 @@ pub struct LaneStats {
     age_max_ns: AtomicU64,
     /// The oldest packet since the late watch last took it ([`late`]).
     age_peak_ns: AtomicU64,
+    /// The oldest packet since an app's status last took it
+    /// ([`TxShared::take_app_view`], dstack #325): its own, so neither take
+    /// starves the other.
+    age_app_peak_ns: AtomicU64,
     over_latency: AtomicU64,
     /// Of those, the packets the relay thread sent (dstack #177).
     over_latency_relayed: AtomicU64,

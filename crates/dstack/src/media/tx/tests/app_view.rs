@@ -50,7 +50,8 @@ fn the_app_view_keeps_its_own_age_peak_beside_the_late_watch() {
     // The app's take left the late watch's peak alone too.
     // The next packet, one packet's time on (a jump past the latency
     // would start the schedule again and send none).
-    rig.tx.step(Some(first_due_ns(T) + ns_of(FPP, RATE) + 50_000), 0);
+    rig.tx
+        .step(Some(first_due_ns(T) + ns_of(FPP, RATE) + 50_000), 0);
     let peak = rig.shared.take_app_view().age_peak_ns;
     assert!(peak > 0);
     assert_eq!(rig.shared.take_age_peak(slot), peak);
