@@ -1,41 +1,54 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! The from-ASIO block age (dstack #325, dasio#120): how old the oldest
-//! sample of a driver's block is when the pump takes it for TX. The driver
-//! hands a whole call's inputs at once, so its first sample is already one
-//! call period old (128 frames at 96 kHz: 1.333 ms) at the hand-over; the
-//! wait until the pump's next block adds to it. A receiver whose latency is
-//! under that age (plus the pump's block) can get late packets from us,
-//! whatever the rest of the path does.
+//! The bridge's from-ASIO figures for its status (dstack #325, dasio#120).
 //!
-//! The driver's side records each callback (its period, and the hand-over's
-//! time while the pump has not taken an earlier one); the pump's side,
-//! when it plays the from-ASIO player, takes the oldest untaken hand-over
-//! and records its age. Both on the app's clock, atomics only: no
-//! allocation, no lock, no system call beyond the clock's read. The
-//! status reads the current age, the max over the last minute (one to two
-//! minutes: two windows of one) and the smallest receiver latency that
-//! never sees a late packet from this path ([`BlockAge::report`]); a
-//! status loop checks the TX flows' known receiver latencies against it
-//! once an hour ([`BlockAge::warn_low_receivers`]).
+//! **The receiver figure is measured on the TX side.** A receiver judges
+//! each packet by its age past its first sample's media stamp, and the TX
+//! side measures exactly that for every packet it sends
+//! ([`dstack::media::tx::TxShared::take_app_view`]). The status loop hands
+//! that view to [`BlockAge::look`]: the max of the oldest packet over the
+//! last minute is the packet age, and that + the network (the device's
+//! measured network latency p99, [`dstack::media::rx::RxShared::network_p99_ns`],
+//! or [`NETWORK_ALLOWANCE_NS`] while none is measured) is the smallest
+//! receiver latency that never sees a late packet from this bridge
+//! ([`AgeReport::min_receiver_latency_us`]). A bridge instance's TX is all
+//! the bridge's, so every TX lane counts. The once-an-hour warning comes
+//! only from a receiver's own judgement: a flow's late count (packets over
+//! the latency its receiver states, the TX side's `over_latency`) rising.
 //!
-//! The age counts the driver's call and the wait for the pump's next
-//! block (the design of dstack #325). It leaves out the from-ASIO FIFO's
-//! own depth (the bridge target, [`dlink::bridge::AppBuffer`]): that is the
-//! bridge's delay between the two clocks, set by the target, not a
-//! property of the driver's calls.
+//! **The block age is a diagnostic, not a receiver threshold.** It models
+//! how old the oldest sample of a driver's block is at the pump's take: a
+//! driver hands a whole call's inputs at once, so its first sample is one
+//! call period old at the hand-over (128 frames at 96 kHz: 1.333 ms), and
+//! the wait for the pump's next block adds to it. dasio's field reading
+//! (16.11.2026) showed it above the packets' real ages (1.9 ms modelled,
+//! 1.0-1.4 ms measured): a packet's stamp is not the capture time, so the
+//! model does not say what a receiver sees. The driver's side records each
+//! callback (its period, and the hand-over's time while the pump has not
+//! taken an earlier one); the pump's side, when it plays the from-ASIO
+//! player, takes the oldest untaken hand-over and records its age. Both on
+//! the app's clock, atomics only: no allocation, no lock, no system call
+//! beyond the clock's read. It leaves out the from-ASIO FIFO's own depth
+//! (the bridge target, [`dlink::bridge::AppBuffer`]).
 //!
-//! The status's three loads are not one snapshot: a read in the instant
-//! the pump rolls the window can show the new window's max alone once.
+//! Each max covers the last minute (one to two minutes: two windows of
+//! one). The status's loads are not one snapshot: a read in the instant a
+//! window rolls can show the new window's max alone once.
 
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::{Mutex, PoisonError};
 
 use dlink::bridge::Clock;
+use dstack::media::tx::{AppView, MAX_FLOWS, ReceiverLateness};
 use tracing::warn;
 
 /// A window of the max, ns.
 const MINUTE_NS: i64 = 60_000_000_000;
-/// The least time between two warnings about low receivers, ns.
+/// The network's share of a receiver's latency while the device measures
+/// none (Windows; no RX flow), ns: what [`AgeReport::min_receiver_latency_us`]
+/// adds to the packet age.
+pub const NETWORK_ALLOWANCE_NS: u64 = 200_000;
+/// The least time between two warnings about late receivers, ns.
 const HOUR_NS: i64 = 3_600_000_000_000;
 /// No time (no hand-over pending, no window, no warning yet).
 const NONE: i64 = i64::MIN;
@@ -105,47 +118,94 @@ impl Default for Window {
 /// What the status shows ([`BlockAge::report`]), µs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AgeReport {
-    /// The last block's age at the pump's take (`from_asio_block_age_us`).
-    pub block_age_us: u64,
-    /// The max over the last minute (`from_asio_block_age_max_us`).
-    pub block_age_max_us: u64,
-    /// The max + one pump block: the smallest receiver latency that never
-    /// sees a late packet from this path
+    /// The last block's modelled age at the pump's take
+    /// (`from_asio_block_age_us`, a diagnostic); `None` while no block was
+    /// taken for one to two minutes.
+    pub block_age_us: Option<u64>,
+    /// Its max over the last minute (`from_asio_block_age_max_us`).
+    pub block_age_max_us: Option<u64>,
+    /// The oldest TX packet past its stamp over the last minute
+    /// (`from_asio_packet_age_us`); `None` while no packet was seen for one
+    /// to two minutes.
+    pub packet_age_us: Option<u64>,
+    /// The packet age + the network: the smallest receiver latency that
+    /// never sees a late packet from this bridge
     /// (`from_asio_min_receiver_latency_us`).
-    pub min_receiver_latency_us: u64,
+    pub min_receiver_latency_us: Option<u64>,
+}
+
+/// A [`Window`] in three atomics (one writer: the pump's side for the
+/// block age, the status loop for the packet age).
+struct Shared {
+    start: AtomicI64,
+    max: AtomicU64,
+    prev: AtomicU64,
+}
+
+impl Shared {
+    const fn new() -> Self {
+        Shared {
+            start: AtomicI64::new(NONE),
+            max: AtomicU64::new(0),
+            prev: AtomicU64::new(0),
+        }
+    }
+
+    fn load(&self) -> Window {
+        Window {
+            start: self.start.load(Ordering::Relaxed),
+            max: self.max.load(Ordering::Relaxed),
+            prev: self.prev.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Records `age_ns` at `now` (the writer's side).
+    fn record(&self, now: i64, age_ns: u64) {
+        let mut w = self.load();
+        w.record(now, age_ns);
+        self.max.store(w.max, Ordering::Relaxed);
+        self.prev.store(w.prev, Ordering::Relaxed);
+        self.start.store(w.start, Ordering::Relaxed);
+    }
 }
 
 /// The from-ASIO block age's shared state (module doc).
 pub struct BlockAge {
     clock: Clock,
-    /// The pump's block, ns at the Dante rate.
-    block_ns: u64,
     /// The latest callback's period, ns.
     period_ns: AtomicU64,
     /// The oldest hand-over the pump has not taken, ns (`NONE`: none).
     pending: AtomicI64,
-    /// The last age, ns.
+    /// The last block age, ns.
     last_ns: AtomicU64,
-    /// The [`Window`]'s three fields (the pump's side writes them).
-    start: AtomicI64,
-    max: AtomicU64,
-    prev: AtomicU64,
-    /// The last warning about low receivers, ns (`NONE`: none yet).
+    /// The block ages' window (the pump's side writes it).
+    blocks: Shared,
+    /// The TX packet ages' window (the status loop's [`BlockAge::look`]).
+    packets: Shared,
+    /// The network's share at the last look, ns.
+    network_ns: AtomicU64,
+    /// The receivers' late counts and the rises not warned yet; its lock
+    /// also keeps [`BlockAge::look`] to one caller at a time.
+    late: Mutex<Late>,
+    /// The last warning about late receivers, ns (`NONE`: none yet).
     warned: AtomicI64,
 }
 
 impl BlockAge {
-    /// The age of a bridge whose pump block is `block_ns`, on `clock`.
-    pub fn new(block_ns: u64, clock: Clock) -> Self {
+    /// A bridge's figures on `clock`.
+    pub fn new(clock: Clock) -> Self {
         BlockAge {
             clock,
-            block_ns,
             period_ns: AtomicU64::new(0),
             pending: AtomicI64::new(NONE),
             last_ns: AtomicU64::new(0),
-            start: AtomicI64::new(NONE),
-            max: AtomicU64::new(0),
-            prev: AtomicU64::new(0),
+            blocks: Shared::new(),
+            packets: Shared::new(),
+            network_ns: AtomicU64::new(NETWORK_ALLOWANCE_NS),
+            late: Mutex::new(Late {
+                seen: [None; MAX_FLOWS],
+                pending: Vec::new(),
+            }),
             warned: AtomicI64::new(NONE),
         }
     }
@@ -174,72 +234,123 @@ impl BlockAge {
         let now = (self.clock)();
         let wait = u64::try_from(now.saturating_sub(at)).unwrap_or(0);
         let age = self.period_ns.load(Ordering::Relaxed).saturating_add(wait);
-        let mut w = self.window();
-        w.record(now, age);
+        self.blocks.record(now, age);
         self.last_ns.store(age, Ordering::Relaxed);
-        self.max.store(w.max, Ordering::Relaxed);
-        self.prev.store(w.prev, Ordering::Relaxed);
-        self.start.store(w.start, Ordering::Relaxed);
     }
 
-    fn window(&self) -> Window {
-        Window {
-            start: self.start.load(Ordering::Relaxed),
-            max: self.max.load(Ordering::Relaxed),
-            prev: self.prev.load(Ordering::Relaxed),
-        }
-    }
-
-    /// The status's values (module doc): `None` before the first take, and
-    /// once no block was taken for one to two minutes (no driver, or a
-    /// closed one).
-    pub fn report(&self) -> Option<AgeReport> {
-        let max = self.window().max_at((self.clock)())?;
-        Some(AgeReport {
-            block_age_us: self.last_ns.load(Ordering::Relaxed) / 1_000,
-            block_age_max_us: max / 1_000,
-            min_receiver_latency_us: max.saturating_add(self.block_ns) / 1_000,
-        })
-    }
-
-    /// Checks the TX flows' receivers (each one's name and stated latency,
-    /// ns; 0: unknown, [`dstack::media::tx::TxShared::receiver_latencies`])
-    /// against the smallest receiver latency this path serves, and warns
-    /// at most once an hour when a known one is below it. Returns the
-    /// warning it logged. Call it from a status loop, not the pump.
-    pub fn warn_low_receivers(&self, receivers: &[(String, u64)]) -> Option<String> {
-        let report = self.report()?;
-        let text = low_receivers_text(report, receivers)?;
+    /// The status loop's look at the TX side (module doc): `view` from
+    /// [`dstack::media::tx::TxShared::take_app_view`], `network_p99_ns`
+    /// from [`dstack::media::rx::RxShared::network_p99_ns`]. Records the
+    /// view's packet age (none without a packet) and warns, at most once an
+    /// hour, about every receiver whose late count rose since the last
+    /// warning (a slot's first look only learns its count; a rise inside
+    /// the hour waits for the next warning, summed). The warning names each
+    /// receiver at the latency it states (the TX side counts against that,
+    /// or our own advertised latency when it is higher). Returns the
+    /// warning it logged. Call it from a status loop (about once a second),
+    /// never the pump: the view locks the TX table. Calls are serialised.
+    pub fn look(&self, view: &AppView, network_p99_ns: Option<u64>) -> Option<String> {
+        let mut late = self.late.lock().unwrap_or_else(PoisonError::into_inner);
         let now = (self.clock)();
+        self.network_ns.store(
+            network_p99_ns.unwrap_or(NETWORK_ALLOWANCE_NS),
+            Ordering::Relaxed,
+        );
+        if view.age_peak_ns != 0 {
+            self.packets.record(now, view.age_peak_ns);
+        }
+        late.add(&view.receivers);
         // `NONE` (no warning yet) is hours in the past to the saturation.
-        if now.saturating_sub(self.warned.load(Ordering::Relaxed)) < HOUR_NS {
+        if late.pending.is_empty()
+            || now.saturating_sub(self.warned.load(Ordering::Relaxed)) < HOUR_NS
+        {
             return None;
         }
         self.warned.store(now, Ordering::Relaxed);
+        let text = late_text(&late.pending, self.report_at(now));
+        late.pending.clear();
         warn!("{text}");
         Some(text)
     }
+
+    /// The status's values (module doc): `None` while neither a block was
+    /// taken nor a packet seen for one to two minutes (no driver, or a
+    /// closed one, and no TX).
+    pub fn report(&self) -> Option<AgeReport> {
+        self.report_at((self.clock)())
+    }
+
+    fn report_at(&self, now: i64) -> Option<AgeReport> {
+        let block = self.blocks.load().max_at(now);
+        let packet = self.packets.load().max_at(now);
+        if block.is_none() && packet.is_none() {
+            return None;
+        }
+        let network = self.network_ns.load(Ordering::Relaxed);
+        Some(AgeReport {
+            block_age_us: block.map(|_| self.last_ns.load(Ordering::Relaxed) / 1_000),
+            block_age_max_us: block.map(|m| m / 1_000),
+            packet_age_us: packet.map(|p| p / 1_000),
+            min_receiver_latency_us: packet.map(|p| p.saturating_add(network) / 1_000),
+        })
+    }
 }
 
-/// The warning for the `receivers` (name, stated latency ns) whose known
-/// latency is below `report`'s smallest serving one; `None` when none is.
-pub fn low_receivers_text(report: AgeReport, receivers: &[(String, u64)]) -> Option<String> {
-    let need_ns = report.min_receiver_latency_us * 1_000;
-    let low: Vec<String> = receivers
+/// [`BlockAge::look`]'s memory of the receivers' late counts.
+struct Late {
+    /// Each slot's late count at the last look (`None`: not seen yet).
+    seen: [Option<u64>; MAX_FLOWS],
+    /// The receivers whose count rose since the last warning, each as last
+    /// seen with the rises summed.
+    pending: Vec<(ReceiverLateness, u64)>,
+}
+
+impl Late {
+    /// The `receivers`' counts: each rise since the last look goes to
+    /// `pending`; every count is kept for the next look.
+    fn add(&mut self, receivers: &[ReceiverLateness]) {
+        for r in receivers {
+            let Some(last) = self.seen.get_mut(r.slot) else {
+                continue;
+            };
+            let Some(was) = last.replace(r.over_latency) else {
+                continue;
+            };
+            let rose = r.over_latency.saturating_sub(was);
+            if rose == 0 {
+                continue;
+            }
+            match self.pending.iter_mut().find(|(p, _)| p.slot == r.slot) {
+                Some((p, n)) => {
+                    *p = r.clone();
+                    *n += rose;
+                }
+                None => self.pending.push((r.clone(), rose)),
+            }
+        }
+    }
+}
+
+/// The warning for the receivers whose late count `rose` (each with its
+/// rise), with the packet age and receiver figure of `report` when known.
+fn late_text(rose: &[(ReceiverLateness, u64)], report: Option<AgeReport>) -> String {
+    let who: Vec<String> = rose
         .iter()
-        .filter(|(_, ns)| *ns != 0 && *ns < need_ns)
-        .map(|(name, ns)| format!("{name} at {} us", ns / 1_000))
+        .map(|(r, n)| format!("{} at {} us ({n} late)", r.receiver, r.latency_ns / 1_000))
         .collect();
-    (!low.is_empty()).then(|| {
-        format!(
-            "asio bridge: a receiver's latency is below the from-ASIO block age: {}; the driver's \
-             blocks are up to {} us old at the pump's take, so a receiver needs at least {} us \
-             (set it higher, or a smaller ASIO buffer)",
-            low.join(", "),
-            report.block_age_max_us,
-            report.min_receiver_latency_us
-        )
-    })
+    let mut text = format!(
+        "asio bridge: a receiver counted our TX packets late: {}",
+        who.join(", ")
+    );
+    if let Some((Some(age), Some(need))) =
+        report.map(|r| (r.packet_age_us, r.min_receiver_latency_us))
+    {
+        text.push_str(&format!(
+            "; our packets were up to {age} us old past their stamps in the last minute, so \
+             a receiver needs at least {need} us"
+        ));
+    }
+    text
 }
 
 #[cfg(test)]

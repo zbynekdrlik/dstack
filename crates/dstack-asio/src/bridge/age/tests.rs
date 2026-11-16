@@ -9,6 +9,7 @@ use super::*;
 use crate::bridge::{Bridge, Spec};
 use crate::device::Opened;
 use crate::format::Sample;
+use dstack::media::tx::{AppView, ReceiverLateness};
 
 const M: i64 = MINUTE_NS;
 /// 128 frames at 96 kHz, ns.
@@ -130,26 +131,32 @@ fn a_128_frame_call_at_96k_is_at_least_one_call_old_at_the_pump_s_take() {
     t.store(5_200_000, Ordering::Relaxed);
     pump(&mut dante);
     let want = CALL_128_96K + 200_000;
+    // The modelled block age only (a diagnostic): no TX view yet, so no
+    // packet age and no receiver figure (dstack #325's field reading).
     assert_eq!(
         age.report(),
         Some(AgeReport {
-            block_age_us: want / 1_000,
-            block_age_max_us: want / 1_000,
-            min_receiver_latency_us: (want + CALL_128_96K) / 1_000,
+            block_age_us: Some(want / 1_000),
+            block_age_max_us: Some(want / 1_000),
+            packet_age_us: None,
+            min_receiver_latency_us: None,
         })
     );
-    assert!(age.report().unwrap().block_age_us >= 1_333);
+    assert!(age.report().unwrap().block_age_us >= Some(1_333));
     // The next take with no new callback changes nothing.
     t.store(5_300_000, Ordering::Relaxed);
     pump(&mut dante);
-    assert_eq!(age.report().unwrap().block_age_us, want / 1_000);
+    assert_eq!(age.report().unwrap().block_age_us, Some(want / 1_000));
     // A quick take of the next block: the current falls, the max holds.
     t.store(6_000_000, Ordering::Relaxed);
     callback(&mut asio, 128);
     t.store(6_010_000, Ordering::Relaxed);
     pump(&mut dante);
     let r = age.report().unwrap();
-    assert_eq!((r.block_age_us, r.block_age_max_us), (1_343, want / 1_000));
+    assert_eq!(
+        (r.block_age_us, r.block_age_max_us),
+        (Some(1_343), Some(want / 1_000))
+    );
     // Two minutes without a take: nothing to show.
     t.store(6_010_000 + 2 * M, Ordering::Relaxed);
     assert_eq!(age.report(), None);
@@ -160,18 +167,18 @@ fn a_128_frame_call_at_96k_is_at_least_one_call_old_at_the_pump_s_take() {
 #[test]
 fn the_oldest_untaken_hand_over_is_the_one_aged() {
     let (t, clock) = fake();
-    let age = BlockAge::new(CALL_128_96K, clock);
+    let age = BlockAge::new(clock);
     age.handed(128, 96_000);
     t.store(1_333_333, Ordering::Relaxed);
     age.handed(128, 96_000);
     t.store(1_500_000, Ordering::Relaxed);
     age.taken();
-    assert_eq!(age.report().unwrap().block_age_us, 2_833);
+    assert_eq!(age.report().unwrap().block_age_us, Some(2_833));
     // A rate of 0 reads as 1 Hz (never a division by zero).
     age.handed(1, 0);
     t.store(1_600_000, Ordering::Relaxed);
     age.taken();
-    assert_eq!(age.report().unwrap().block_age_us, 1_000_100);
+    assert_eq!(age.report().unwrap().block_age_us, Some(1_000_100));
 }
 
 /// A bridge with nothing from ASIO measures nothing: its driver's side
@@ -196,57 +203,119 @@ fn a_bridge_with_nothing_from_asio_has_no_age() {
     assert_eq!(Bridge::new(spec()).unwrap().from_asio_age().report(), None);
 }
 
-fn receivers() -> Vec<(String, u64)> {
-    vec![
-        ("unknown".to_string(), 0),
-        ("low".to_string(), 1_000_000),
-        ("exact".to_string(), 2_866_000),
-        ("roomy".to_string(), 5_000_000),
-    ]
-}
-
-/// The warning names each known receiver below the smallest serving
-/// latency (2866 us here), never an unknown one or one at it.
-#[test]
-fn the_warning_names_the_known_receivers_below_the_age() {
-    let report = AgeReport {
-        block_age_us: 1_533,
-        block_age_max_us: 1_533,
-        min_receiver_latency_us: 2_866,
+/// The TX view's receivers: a 2 ms one and a 5 ms one, with their late
+/// counts so far.
+fn view(peak_ns: u64, two: u64, five: u64) -> AppView {
+    let rx = |slot, name: &str, latency_ns, over_latency| ReceiverLateness {
+        slot,
+        receiver: name.to_string(),
+        latency_ns,
+        over_latency,
     };
-    let text = low_receivers_text(report, &receivers()).expect("one low");
-    assert!(text.contains("low at 1000 us"), "{text}");
-    assert!(text.contains("at least 2866 us"), "{text}");
-    assert!(text.contains("up to 1533 us"), "{text}");
-    for name in ["unknown", "exact", "roomy"] {
-        assert!(!text.contains(name), "{name}: {text}");
+    AppView {
+        age_peak_ns: peak_ns,
+        receivers: vec![
+            rx(1, "dvs-two", 2_000_000, two),
+            rx(4, "card-five", 5_000_000, five),
+        ],
     }
-    let mut two = receivers();
-    two.push(("low2".to_string(), 2_865_999));
-    let text = low_receivers_text(report, &two).unwrap();
-    assert!(text.contains("low at 1000 us, low2 at 2865 us"), "{text}");
-    assert_eq!(low_receivers_text(report, &receivers()[2..]), None);
 }
 
-/// Once an hour at most, and only while there is an age to check against.
+/// dstack #325, dasio's field reading (16.11.2026): a 128-frame driver at
+/// 96 kHz modelled 1.9 ms of block age, while the bridge's TX packets
+/// peaked at 1.4 ms past their stamps and the 2 ms receivers counted
+/// nothing late. The receiver figure is the packets' age + the network
+/// (200 us while none is measured), not the model, and a 2 ms receiver
+/// that counts nothing late is never warned.
 #[test]
-fn the_low_receiver_warning_comes_once_an_hour() {
+fn the_receiver_figure_is_the_tx_packet_age_not_the_modelled_block_age() {
     let (t, clock) = fake();
-    let age = BlockAge::new(CALL_128_96K, clock);
-    assert_eq!(age.warn_low_receivers(&receivers()), None, "no age yet");
+    let age = BlockAge::new(clock);
     age.handed(128, 96_000);
-    t.store(200_000, Ordering::Relaxed);
+    t.store(566_667, Ordering::Relaxed);
     age.taken();
-    assert!(age.warn_low_receivers(&receivers()).is_some());
-    for _ in 0..3 {
-        assert_eq!(age.warn_low_receivers(&receivers()), None);
+    assert_eq!(age.look(&view(1_400_000, 0, 0), None), None, "first look");
+    assert_eq!(
+        age.report(),
+        Some(AgeReport {
+            block_age_us: Some(1_900),
+            block_age_max_us: Some(1_900),
+            packet_age_us: Some(1_400),
+            min_receiver_latency_us: Some(1_600),
+        })
+    );
+    // A measured network replaces the 200 us allowance.
+    t.store(1_000_000_000, Ordering::Relaxed);
+    assert_eq!(age.look(&view(1_003_000, 0, 0), Some(350_000)), None);
+    let r = age.report().unwrap();
+    assert_eq!(r.packet_age_us, Some(1_400), "the minute's max");
+    assert_eq!(r.min_receiver_latency_us, Some(1_750));
+    // The 2 ms receiver stays clean past the hour: never warned.
+    t.store(HOUR_NS + 2, Ordering::Relaxed);
+    assert_eq!(age.look(&view(1_397_000, 0, 0), None), None);
+    assert_eq!(age.report().unwrap().min_receiver_latency_us, Some(1_597));
+}
+
+/// The warning comes only from a receiver's own late count rising (the
+/// TX side's `over_latency`), naming it and its latency, at most once an
+/// hour; the first look only learns the counts, and a rise inside the hour
+/// is held for the next warning, never lost.
+#[test]
+fn a_receiver_that_counts_packets_late_is_warned_at_most_once_an_hour() {
+    let (t, clock) = fake();
+    let age = BlockAge::new(clock);
+    assert_eq!(age.look(&view(900_000, 5, 0), None), None, "learns 5");
+    assert_eq!(age.look(&view(900_000, 5, 0), None), None, "no rise");
+    let text = age.look(&view(900_000, 7, 0), None).expect("a rise");
+    assert!(text.contains("dvs-two at 2000 us (2 late)"), "{text}");
+    assert!(text.contains("up to 900 us old"), "{text}");
+    assert!(text.contains("at least 1100 us"), "{text}");
+    assert!(!text.contains("card-five"), "{text}");
+    for over in 8..11 {
+        assert_eq!(age.look(&view(900_000, over, 0), None), None, "{over}");
     }
-    // Keep the age current past the hour.
-    t.store(200_000 + HOUR_NS - 1, Ordering::Relaxed);
-    age.handed(128, 96_000);
-    age.taken();
-    assert_eq!(age.warn_low_receivers(&receivers()), None, "a ns short");
-    t.store(200_000 + HOUR_NS, Ordering::Relaxed);
-    assert!(age.warn_low_receivers(&receivers()).is_some());
-    assert_eq!(age.warn_low_receivers(&receivers()[2..]), None, "none low");
+    t.store(HOUR_NS - 1, Ordering::Relaxed);
+    assert_eq!(age.look(&view(0, 11, 1), None), None, "a ns short");
+    // The hour's rises were kept, summed: warned without a new one.
+    t.store(HOUR_NS, Ordering::Relaxed);
+    let text = age.look(&view(0, 11, 1), None).expect("the held rises");
+    assert!(
+        text.contains("dvs-two at 2000 us (4 late), card-five at 5000 us (1 late)"),
+        "{text}"
+    );
+    // No packet age known (the window empty): the text says only who.
+    assert!(!text.contains("old"), "{text}");
+    assert_eq!(age.look(&view(0, 12, 3), None), None, "held again");
+    t.store(2 * HOUR_NS, Ordering::Relaxed);
+    let text = age.look(&view(0, 12, 3), None).expect("an hour on");
+    assert!(
+        text.contains("dvs-two at 2000 us (1 late), card-five at 5000 us (2 late)"),
+        "{text}"
+    );
+    t.store(3 * HOUR_NS, Ordering::Relaxed);
+    assert_eq!(age.look(&view(0, 12, 3), None), None, "nothing new");
+}
+
+/// A view without a packet records no age; the packet age lasts one to
+/// two minutes like the block age, and a report stands on either.
+#[test]
+fn the_packet_age_needs_a_packet_and_lasts_two_minutes() {
+    let (t, clock) = fake();
+    let age = BlockAge::new(clock);
+    age.look(&AppView::default(), Some(100_000));
+    assert_eq!(age.report(), None, "no packet, no block");
+    age.look(&view(1_200_000, 0, 0), Some(100_000));
+    assert_eq!(
+        age.report(),
+        Some(AgeReport {
+            block_age_us: None,
+            block_age_max_us: None,
+            packet_age_us: Some(1_200),
+            min_receiver_latency_us: Some(1_300),
+        })
+    );
+    t.store(2 * M - 1, Ordering::Relaxed);
+    assert_eq!(age.report().unwrap().packet_age_us, Some(1_200));
+    t.store(2 * M, Ordering::Relaxed);
+    assert_eq!(age.report(), None);
 }

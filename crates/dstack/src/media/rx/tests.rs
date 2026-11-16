@@ -8,6 +8,7 @@ use crate::media::packet::write;
 use crate::media::tx::ns_of;
 use crate::wire::tests::Rng;
 
+mod network_p99;
 mod rejoin;
 mod reorder;
 mod source;

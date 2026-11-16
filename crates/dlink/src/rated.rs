@@ -465,8 +465,8 @@ impl<P: Process> Process for Rated<P> {
     }
 }
 
-/// Calls the app with `frames` frames of `app_in` at `(start, play_at)`
-/// and puts its output into the TX FIFO.
+/// Calls the app with `frames` frames of `app_in` at `(start, play_at)`,
+/// its outputs zeroed first, and puts its output into the TX FIFO.
 fn call_app<P: Process>(
     inner: &mut P,
     (app_in, app_out): (&[f64], &mut [f64]),
@@ -475,6 +475,9 @@ fn call_app<P: Process>(
     (start, play_at): (Option<u64>, Option<i64>),
     fifo: &mut [VecDeque<f64>],
 ) {
+    // Silence where the app writes nothing, as the pump gives it (dstack
+    // #335): never the previous block again.
+    app_out[..outputs * frames].fill(0.0);
     let mut app = Block::new(
         frames,
         &app_in[..inputs * frames],

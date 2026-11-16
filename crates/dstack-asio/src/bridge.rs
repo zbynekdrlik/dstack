@@ -31,10 +31,12 @@
 //! refused and the runner retries it after its backoff. Neither `process` allocates or makes a system call, and
 //! neither waits on a lock (the switch's bounded channel never blocks).
 //!
-//! The from-ASIO side also measures its blocks' age at the pump's take
-//! ([`BlockAge`], dstack #325): the driver's side records each hand-over,
-//! the pump's side its take, so the status can check a receiver's latency
-//! against it ([`Bridge::from_asio_age`]).
+//! The from-ASIO side's status figures ([`BlockAge`], dstack #325): the
+//! TX packets' age and the smallest receiver latency it serves, from the
+//! TX side's own measure, and a warning when a receiver counts our packets
+//! late ([`BlockAge::look`] from the status loop); and, as a diagnostic,
+//! its blocks' modelled age at the pump's take (the driver's side records
+//! each hand-over, the pump's side its take; [`Bridge::from_asio_age`]).
 
 use std::sync::Arc;
 
@@ -46,7 +48,7 @@ use dstack_audio_io::{Block, Process};
 use crate::device::Opened;
 
 mod age;
-pub use age::{AgeReport, BlockAge, low_receivers_text};
+pub use age::{AgeReport, BlockAge, NETWORK_ALLOWANCE_NS};
 
 /// Frames a side converts at once at least (its interleaved scratch): the
 /// pump's side a whole pump block, the driver's side its whole buffer
@@ -89,10 +91,7 @@ impl Bridge {
     /// [`Bridge::new`] with the from-ASIO block age ([`BlockAge`]) on
     /// `clock` (a simulation's time; the app's clock in [`Bridge::new`]).
     pub fn with_clock(spec: Spec, clock: Clock) -> Result<Self, String> {
-        let age = Arc::new(BlockAge::new(
-            chunk_ns(u64::from(spec.block_frames), spec.dante_rate),
-            clock,
-        ));
+        let age = Arc::new(BlockAge::new(clock));
         let to_asio = (spec.to_asio > 0).then(|| Arc::new(fifo_for(spec.to_asio, spec.dante_rate)));
         let from_stats = Arc::new(Stats::default());
         let (from_asio, switch) = if spec.from_asio > 0 {
@@ -238,8 +237,8 @@ impl Bridge {
         Arc::clone(&self.from_stats)
     }
 
-    /// The from-ASIO block age (dstack #325): [`BlockAge::report`] for the
-    /// status, [`BlockAge::warn_low_receivers`] from its loop.
+    /// The from-ASIO figures (dstack #325): [`BlockAge::report`] for the
+    /// status, [`BlockAge::look`] from its loop.
     pub fn from_asio_age(&self) -> Arc<BlockAge> {
         Arc::clone(&self.age)
     }
