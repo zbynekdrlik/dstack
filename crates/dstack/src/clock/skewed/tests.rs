@@ -232,7 +232,9 @@ fn the_test_system_clock_without_a_skew_runs_on_the_app_s_clock() {
 
 /// On Windows the TEST system clock tracks raw QPC (the app's clock)
 /// within 1 ppm over 10 s (dstack #328): the wall clock it ran on before
-/// was 66 ppm off QPC on windows-2025 (#305).
+/// was 66 ppm off QPC on windows-2025 (#305). It fails on that bug only
+/// where the wall runs more than 1 ppm off QPC (the CI runner); the
+/// deterministic guard is `the_test_system_clock_without_a_skew_runs_on_the_app_s_clock`.
 #[cfg(windows)]
 #[test]
 fn the_test_system_clock_tracks_qpc_on_windows() {

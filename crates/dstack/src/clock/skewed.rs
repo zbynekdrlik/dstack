@@ -6,7 +6,7 @@
 //! grandmaster, so the TEST system clock (`host::ClockSource::System`) runs
 //! at the machine's own rate: 0 ppm against an app's clock, while the field
 //! has about 6 ppm. With a `test_clock_ppm` the media clock runs that many
-//! ppm off the local monotonic clock from its start, so play_at, an app's
+//! ppm off the app's clock from its start, so play_at, an app's
 //! ASRC and dlink's TX Player see real drift, and two processes on one
 //! runner drift against each other.
 //!
@@ -43,7 +43,7 @@ const PPT_PER_PPM: f64 = 1_000_000.0;
 const TERA: i128 = 1_000_000_000_000;
 
 /// A test clock's skew, ppm (the config's `test_clock_ppm`): positive runs
-/// the media clock fast against the monotonic clock. Compared by its bits
+/// the media clock fast against the app's clock. Compared by its bits
 /// so configs stay `Eq`.
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(transparent)]
@@ -161,8 +161,8 @@ pub fn test_clock_refusal(source: ClockSource, ppm: Option<TestClockPpm>) -> Opt
 /// `linked` when there is one (dsync's follower); on the TEST system clock
 /// `source`, a [`SkewedClock`] on the app's clock at this machine's time
 /// (k = realtime − app), skewed by `ppm` when set (0 when not), with `mono`
-/// anchored too (k = realtime − monotonic) and `stats` marked (a WARN
-/// each). Never `mono` itself there: on Windows its monotonic clock is the
+/// still anchored as before (k = realtime − monotonic; nothing reads it on
+/// this source) and `stats` marked (a WARN each). Never `mono` itself there: on Windows its monotonic clock is the
 /// wall clock until dsync's poller updates it, and no poller runs on this
 /// source (dstack #328). Otherwise `mono` as it is (dsync's poller anchors
 /// it).
