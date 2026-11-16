@@ -62,7 +62,8 @@ fn the_rx_pull_is_realtime_safe() {
         Arc::clone(&fifo),
         P,
         RATE,
-    );
+    )
+    .expect("the pull");
     let sender = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let dest = rx.local_addr(0).unwrap();
     let mut packet = [0u8; 1500];

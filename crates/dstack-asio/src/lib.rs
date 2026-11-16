@@ -18,14 +18,18 @@
 //!   decode the used inputs into channel-major `f64`, run the app's
 //!   `Process`, encode its outputs into the chosen driver outputs and zero
 //!   the rest ([`format`](mod@format), SongPlayer's exact encode). It allocates nothing,
-//!   takes no lock, logs nothing and makes no system call; a panicking
-//!   `Process` plays silence and is counted.
+//!   takes no lock, logs nothing and makes no system call of its own (a
+//!   pulled bridge's driver side adds its RX pull's clock read and
+//!   non-blocking socket reads, dstack #307); a panicking `Process` plays
+//!   silence and is counted.
 //! - **The lifecycle** ([`Runner`], decisions in [`state`]): reopen backoff
 //!   2 / 10 / 30 / 60 s; close on a reset, a rate change, a stall; a driver
 //!   with no clock or one far off its reported rate is a calm wait.
 //! - **The bridge** ([`bridge`]): Dante -> ASIO and ASIO -> Dante, each
 //!   through `dlink::bridge`'s FIFO and ASRC player at the #247 app buffer
-//!   (the ASIO buffer + one pump block by default).
+//!   (the ASIO buffer + one pump block by default); Dante -> ASIO pulled by
+//!   the driver's buffer switch itself (dstack #307,
+//!   [`Bridge::pull_to_asio`](bridge::Bridge::pull_to_asio)).
 //!
 //! Everything but the Windows glue (`win`, Windows only: the azo device,
 //! the static callback slots, parking, the driver list) is pure and tested
@@ -36,6 +40,11 @@
 //! makes the driver resync (SongPlayer measured it, songplayer #233), which
 //! is why SongPlayer hosts its ASIO outputs in a separate process that
 //! spawns nothing.
+
+// The rtsan CI job (nightly, `--cfg iem_rtsan`) marks the driver side's
+// buffer switch after its RX pull (`bridge::AsioSide`) as a real-time
+// context (dstack #307).
+#![cfg_attr(iem_rtsan, feature(sanitize))]
 
 pub mod bridge;
 pub mod device;

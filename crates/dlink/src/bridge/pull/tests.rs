@@ -111,7 +111,8 @@ fn rig(delay: u16) -> Rig {
         Arc::clone(&fifo),
         P,
         RATE,
-    );
+    )
+    .expect("the pull");
     Rig {
         rings,
         rx,
@@ -321,3 +322,39 @@ fn the_device_s_published_latency_moves_the_playout_point() {
     r.clock.sleep_until(ns_of(T + P + 20, RATE));
     assert_eq!(r.pull.pull(), 16);
 }
+
+/// A pull of `channels` into a FIFO of `fifo` channels, on a device of two
+/// RX channels: its channels, or why `RxPull::new` refused it.
+fn fit(channels: Vec<usize>, fifo: usize) -> Result<Vec<usize>, String> {
+    let rings: Arc<[Ring]> = (0..2).map(|_| Ring::new()).collect::<Vec<_>>().into();
+    let rx = Arc::new(RxShared::new(RATE, Ipv4Addr::LOCALHOST, rings).unwrap());
+    let pull = RxPull::new(
+        rx.app_intake().expect("the app's claim"),
+        Arc::new(ManualClock::new(0)) as Arc<dyn PtpClock>,
+        rx,
+        channels,
+        Arc::new(super::super::fifo_for(fifo, RATE)),
+        P,
+        RATE,
+    )?;
+    Ok(pull.channels().to_vec())
+}
+
+/// A pull whose FIFO has not one channel per RX channel read would index
+/// past its scratch at its first read (on the consumer's thread with the
+/// deadline): `RxPull::new` refuses it, and an RX channel past the
+/// device's.
+#[test]
+fn a_pull_that_does_not_fit_its_fifo_or_device_is_refused() {
+    assert_eq!(
+        fit(vec![0], 2),
+        Err("the bridge FIFO has 2 channels for 1 RX channels".to_string())
+    );
+    assert_eq!(
+        fit(vec![0, 2], 2),
+        Err("the app's RX channel 3 is past the device's 2 RX channels".to_string())
+    );
+    assert_eq!(fit(vec![1, 0], 2), Ok(vec![1, 0]));
+}
+
+mod shared;

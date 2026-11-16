@@ -408,11 +408,13 @@ dependencies = [
 name = "dstack-asio"
 version = "0.6.155"
 dependencies = [
+ "assert_no_alloc",
  "azo",
  "dlink",
  "dstack",
  "dstack-audio-io",
  "serde",
+ "tempfile",
  "tracing",
  "windows-sys 0.61.2",
 ]

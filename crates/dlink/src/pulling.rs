@@ -147,7 +147,9 @@ impl Link {
         )?;
         let playout = link.device.timing().playout;
         let media = link.media();
-        let pull = bridge::RxPull::new(
+        // Checked before the start (above): refused here only if the device
+        // has fewer RX rings than its config's channels, never seen.
+        match bridge::RxPull::new(
             intake,
             Arc::clone(&media.clock),
             Arc::clone(&media.rx),
@@ -155,7 +157,13 @@ impl Link {
             fifo,
             playout,
             config.device_rate(),
-        );
-        Ok((link, pull))
+        ) {
+            Ok(pull) => Ok((link, pull)),
+            Err(e) => {
+                let stopped = link.stop();
+                tracing::warn!(?stopped, "the pulling device stopped: {e}");
+                Err(HostError::Setup(e))
+            }
+        }
     }
 }
