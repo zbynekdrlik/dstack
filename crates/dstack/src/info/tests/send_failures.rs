@@ -12,9 +12,15 @@ use std::time::Instant;
 use crate::info::sendwatch::REOPEN_AT;
 use crate::test_log::Captured;
 
-/// Where a send always fails on Linux: the broadcast address without
-/// `SO_BROADCAST` (EACCES, os error 13), as each send failed on dsg.
+/// Where a send always fails: the broadcast address without
+/// `SO_BROADCAST` (EACCES, os error 13; WSAEACCES, 10013 on Windows), as
+/// each send failed on dsg.
 const REFUSED: &str = "255.255.255.255:9";
+const REFUSED_ERROR: &str = if cfg!(windows) {
+    "os error 10013"
+} else {
+    "os error 13"
+};
 
 #[tokio::test]
 async fn a_sustained_send_failure_is_one_warning_not_one_a_packet() {
@@ -37,10 +43,15 @@ async fn a_sustained_send_failure_is_one_warning_not_one_a_packet() {
     assert!(!task.is_finished(), "the server goes on: {:?}", task.await);
     task.abort();
     let text = log.text();
-    let warnings = text.lines().filter(|l| l.contains("WARN")).count();
+    // The sends' warnings only: on Windows the loopback address may refuse
+    // the multicast interface's re-naming, a warning of its own.
+    let warnings = text
+        .lines()
+        .filter(|l| l.contains("WARN") && l.contains("could not be sent"))
+        .count();
     assert_eq!(warnings, 1, "one warning, not one a packet:\n{text}");
     assert!(
-        text.contains("os error 13"),
+        text.contains(REFUSED_ERROR),
         "the OS error is named:\n{text}"
     );
 }
