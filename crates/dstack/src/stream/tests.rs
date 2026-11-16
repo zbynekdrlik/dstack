@@ -1663,6 +1663,7 @@ fn a_seamless_handover_step_neither_rebootstraps_nor_loses_a_block() {
     }
 }
 
+mod after_send;
 mod causes;
 mod drain;
 mod play_at;

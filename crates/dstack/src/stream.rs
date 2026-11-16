@@ -370,6 +370,9 @@ pub struct PumpView {
     pub play_at_steps: u64,
     /// The largest such deviation since the start, whole µs.
     pub play_at_max_dev_us: u64,
+    /// Blocks with an output the TX thread had already sent as silence
+    /// (dstack #346).
+    pub writes_after_send: u64,
 }
 
 impl PumpStats {
@@ -557,6 +560,7 @@ impl PumpStats {
             play_at_rejected: self.play_at_rejected.load(Ordering::Relaxed),
             play_at_steps: self.play_at_steps.load(Ordering::Relaxed),
             play_at_max_dev_us: self.play_at_max_dev_ns.load(Ordering::Relaxed) / 1_000,
+            writes_after_send: 0,
         }
     }
 }
