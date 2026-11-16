@@ -93,7 +93,8 @@ fn the_driver_s_switch_with_its_pull_allocates_nothing() {
         bridge.to_asio_fifo().unwrap(),
         P,
         RATE,
-    );
+    )
+    .expect("the pull");
     let stats = pull.stats();
     bridge.pull_to_asio(pull).unwrap();
     let opened = Opened {

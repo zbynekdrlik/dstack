@@ -22,7 +22,7 @@ const P: u64 = 96;
 
 /// A device's RX side of one channel, routed to flow slot 0 (a flow from
 /// 127.0.0.1), with the app's claim on its rings and a clock at media now
-/// `T + P`; its pull writes `fifo`.
+/// `T + P`; its pull writes `fifo` (`None`: `RxPull::new` refused it).
 struct Rig {
     rx: Arc<RxShared>,
     clock: Arc<ManualClock>,
@@ -57,12 +57,9 @@ fn rig(fifo: &Arc<Fifo>) -> Rig {
         Arc::clone(fifo),
         P,
         NET,
-    );
-    Rig {
-        rx,
-        clock,
-        pull: Some(pull),
-    }
+    )
+    .ok();
+    Rig { rx, clock, pull }
 }
 
 /// Sends flow slot 0 a packet of `frames` frames stamped `at`, each sample
@@ -200,20 +197,15 @@ fn the_app_s_look_drains_while_no_switch_pulls() {
 }
 
 /// A pull that reads another channel count than the to-ASIO FIFO holds
-/// would write past its scratch in the driver's callback; a pull handed
-/// over after the driver's first open would leave that run's player on the
-/// pump's block (dstack #317). Both are refused.
+/// would write past its scratch in the driver's callback: `RxPull::new`
+/// refuses it, so no such pull reaches the bridge. A pull handed over after
+/// the driver's first open would leave that run's player on the pump's
+/// block (dstack #317): refused.
 #[test]
 fn a_pull_of_another_width_or_after_the_first_open_is_refused() {
-    let mut b = Bridge::new(spec(2, 0)).unwrap();
+    let b = Bridge::new(spec(2, 0)).unwrap();
     let fifo = b.to_asio_fifo().unwrap();
-    let mut r = rig(&fifo);
-    let narrow = r.pull.take().unwrap();
-    assert_eq!(narrow.channels(), &[0]);
-    assert_eq!(
-        b.pull_to_asio(narrow),
-        Err("the pull reads 1 RX channels for the bridge's 2 to ASIO".to_string())
-    );
+    assert!(rig(&fifo).pull.is_none(), "one RX channel for two");
     let mut b = Bridge::new(spec(1, 0)).unwrap();
     let fifo = b.to_asio_fifo().unwrap();
     let _asio = b.asio_side(&driver()).unwrap();

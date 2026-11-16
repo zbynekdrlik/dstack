@@ -198,23 +198,15 @@ impl Bridge {
     /// while the bridge runs.
     ///
     /// Refused for a bridge with no to-ASIO channels, a pull of another
-    /// FIFO or of another channel count (its read would write past its
-    /// scratch in the driver's callback), a pull after the driver's first
-    /// open (that run's player was made for the pump's block, dstack #317),
-    /// or a second pull.
+    /// FIFO (a pull of the FIFO's own width is `RxPull::new`'s rule), a
+    /// pull after the driver's first open (that run's player was made for
+    /// the pump's block, dstack #317), or a second pull.
     pub fn pull_to_asio(&mut self, pull: RxPull) -> Result<(), String> {
         let Some(fifo) = &self.to_asio else {
             return Err("the bridge has no channel to ASIO to pull".to_string());
         };
         if !Arc::ptr_eq(fifo, pull.fifo()) {
             return Err("the pull writes another FIFO than the bridge's to-ASIO one".to_string());
-        }
-        if pull.channels().len() != fifo.channels() {
-            return Err(format!(
-                "the pull reads {} RX channels for the bridge's {} to ASIO",
-                pull.channels().len(),
-                fifo.channels()
-            ));
         }
         if self.opened {
             return Err(
@@ -228,7 +220,10 @@ impl Bridge {
 
     /// The look at the to-ASIO pull ([`Bridge::pull_to_asio`]), from the
     /// app's own loop on a steady period (about every 250 ms; never the
-    /// pump or the driver's callback). While no driver side pulls (no
+    /// pump or the driver's callback). The period must be longer than the
+    /// driver's buffer period (at most about 150 ms: the bridge's largest
+    /// target), or a driver that runs reads as stopped between two
+    /// switches and the drain restarts its read. While no driver side pulls (no
     /// driver open: closed, the reopen backoff, a stalled driver), it
     /// drains the flow sockets itself (`RxPull::drain_idle`), so the flow
     /// stays heard and the device keeps it; a buffer switch that pulls
@@ -291,7 +286,6 @@ impl Bridge {
         let rate = opened.rate.round() as u32;
         let dante = self.spec.dante_rate;
         let chunk = to_asio_chunk_ns(buffer, self.pull.get().is_some());
-        self.opened = true;
         let player = match &self.to_asio {
             Some(fifo) => Some(
                 Player::new(
@@ -326,6 +320,8 @@ impl Bridge {
         // one callback, and pieces of it would count half a buffer when the
         // driver takes the whole one back to back (dstack #317).
         let frames = CHUNK.max(opened.buffer_frames as usize);
+        // A side is made: a pull handed over from now on is refused.
+        self.opened = true;
         Ok(AsioSide {
             pull: Arc::clone(&self.pull),
             player,

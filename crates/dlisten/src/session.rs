@@ -393,8 +393,10 @@ impl Session {
             // positions; reported and cleared here, off the audio thread.
             tracing::warn!("dlisten: an RX pull panicked; pulling on");
         }
-        let look = self.pull.keep(&mut self.watch);
+        // The counts read just before the look, so the log carries what it
+        // saw (a callback can pull in between: the look reads them again).
         let (pulls, restarts) = (self.pull_stats.pulls(), self.pull_stats.restarts());
+        let look = self.pull.keep(&mut self.watch);
         if look.changed && look.idle {
             tracing::warn!(
                 pulls,
