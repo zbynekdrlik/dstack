@@ -17,10 +17,10 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use dlink::bridge::AppBuffer;
-use dlink::{Link, Map};
+use dlink::bridge::pull::{IdleWatch, PullStats};
+use dlink::bridge::{AppBuffer, RxPull};
+use dlink::{Block, Link, Map, Process};
 use dlisten::cli::{self, Options};
-use dlisten::feed::Feed;
 use dlisten::fifo::Fifo;
 use dlisten::outputs::{self, Output, Refind};
 use dlisten::player::{Player, Stats, fifo_for};
@@ -51,10 +51,28 @@ pub fn name_of(o: &Options) -> String {
         .unwrap_or_else(|| cli::default_name(&host::host_name()))
 }
 
+/// The device's processor: the pump has nothing to do for dlisten, whose
+/// output callback pulls the RX channels itself ([`RxPull`], dstack #307).
+struct Idle;
+
+impl Process for Idle {
+    fn process(&mut self, _block: &mut Block<'_>) {}
+}
+
 /// A running dlisten (module doc).
 pub struct Session {
     link: Link,
     fifo: Arc<Fifo>,
+    /// The RX pull (dstack #307): the playing output's callback calls it
+    /// before each read of the FIFO. Shared so the next stream of an output
+    /// switch takes it over; a callback only tries the lock, so the old
+    /// stream's last callback beside the new one's skips a pull, never
+    /// waits.
+    pull: Arc<Mutex<RxPull>>,
+    /// The pull's counts, and the main thread's watch over them
+    /// ([`Session::keep_pulled`]).
+    pull_stats: Arc<PullStats>,
+    watch: IdleWatch,
     stats: Arc<Stats>,
     rate: u32,
     /// The app buffer the players keep (dstack #247).
@@ -127,7 +145,10 @@ impl Session {
                 p
             }
         };
-        let fifo = Arc::new(fifo_for(o.channels, o.rate));
+        // The FIFO the output callback fills from the RX rings, at the
+        // device's rate (dstack #307).
+        let rate = cli::link_config(o, &name, state.clone()).device_rate();
+        let fifo = Arc::new(fifo_for(o.channels, rate));
         // The app buffer (dstack #247): the output's WASAPI period and one
         // pump block, or `--app-buffer-ms`, as the device logs it.
         let buffer = cli::link_config(o, &name, state.clone())
@@ -138,22 +159,31 @@ impl Session {
         // The place is there now (`with_free_ports` waited for it, dstack
         // #225), so `Link::start`, which fails at once on a place not
         // there (#230), takes it.
-        let link = Link::start(
+        // The output callback pulls the RX channels (dstack #307): it drains
+        // the flow sockets and reads the rings by position itself, so a late
+        // pump cannot empty the FIFO. While no output plays nothing drains:
+        // the flow reads silent and is asked again once one plays
+        // (`Link::start_pulling`).
+        let (link, pull) = Link::start_pulling(
             &cli::link_config(&free, &name, state.clone()),
             &place,
             Map {
                 rx: (0..o.channels).collect(),
                 tx: vec![],
             },
-            Feed::new(Arc::clone(&fifo)),
+            Idle,
+            Arc::clone(&fifo),
         )
         .map_err(|e| format!("the Dante device {name} did not start: {e}"))?;
         tracing::info!(name, state = %state.display(), "dlisten: the Dante device runs");
         let mut session = Session {
             link,
             fifo,
+            pull_stats: pull.stats(),
+            pull: Arc::new(Mutex::new(pull)),
+            watch: IdleWatch::default(),
             stats: Arc::default(),
-            rate: o.rate,
+            rate,
             buffer,
             mono: o.mono,
             devices,
@@ -188,8 +218,9 @@ impl Session {
             self.rate,
             out_rate,
             self.buffer,
-            // The pump writes the FIFO, a block at a time (dstack #317).
-            self.buffer.block_ns(),
+            // The output callback writes the FIFO (its RX pull, dstack
+            // #307), a period at a time: the app buffer's chunk.
+            self.buffer.chunk_ns(),
             Arc::clone(&self.stats),
         )
         .map_err(|e| format!("the rate conversion {} to {out_rate} Hz: {e}", self.rate))?
@@ -197,7 +228,7 @@ impl Session {
         // The new stream is opened while the old one plays (a failure
         // leaves the old one playing); the old one stops before the new
         // one starts: the FIFO has one reader.
-        let stream = audio::open(device, &config, player, &self.failed)?;
+        let stream = audio::open(device, &config, player, &self.pull, &self.failed)?;
         let was = self.playing.take().map(|_| self.current);
         match audio::start(stream) {
             Ok(p) => self.playing = Some(p),
@@ -345,6 +376,49 @@ impl Session {
                 );
                 true
             }
+        }
+    }
+
+    /// The main thread's look at the RX pull, every 250 ms (dstack #307).
+    /// While no output pulls (none open, a stream that stopped calling
+    /// back), it drains the flow sockets itself, so the flow stays heard
+    /// and the device keeps it ([`RxPull::drain_idle`]); a callback that
+    /// pulls again takes over at once. Logs the change both ways, and each
+    /// rise of the pull's restarts (a callback gap past the FIFO, a clock
+    /// step).
+    pub fn keep_pulled(&mut self) {
+        if self.pull.is_poisoned() {
+            // A panic inside a pull (its message went to stderr): the
+            // callbacks pull on through the poison, its state being read
+            // positions; reported and cleared here, off the audio thread.
+            tracing::warn!("dlisten: an RX pull panicked; pulling on");
+            self.pull.clear_poison();
+        }
+        let (pulls, restarts) = (self.pull_stats.pulls(), self.pull_stats.restarts());
+        let look = self.watch.look(pulls, restarts);
+        if look.changed && look.idle {
+            tracing::warn!(
+                pulls,
+                "dlisten: no output pulls the audio: draining it from the main thread"
+            );
+        } else if look.changed {
+            tracing::info!(pulls, "dlisten: the output pulls the audio again");
+        }
+        // Under the lock, only while no callback pulled since the look: a
+        // callback that resumed in between keeps its read position.
+        if look.idle
+            && let Ok(mut pull) = self.pull.try_lock()
+            && self.pull_stats.pulls() == pulls
+        {
+            pull.drain_idle();
+        }
+        if look.restarts_rose > 0 {
+            tracing::warn!(
+                restarts,
+                rose = look.restarts_rose,
+                frames = self.pull_stats.frames(),
+                "dlisten: the RX pull started again at now (a gap past the FIFO or a clock step)"
+            );
         }
     }
 

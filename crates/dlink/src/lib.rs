@@ -184,6 +184,10 @@
 //! link.stop();
 //! ```
 
+// The rtsan CI job (nightly, `--cfg iem_rtsan`) marks the RX pull's ring
+// read (`bridge::pull`) as a real-time context (dstack #307).
+#![cfg_attr(iem_rtsan, feature(sanitize))]
+
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -201,6 +205,7 @@ pub mod bridge;
 pub mod rated;
 
 mod latency;
+mod pulling;
 
 pub use latency::{
     Directions, MIN_LATENCY_NS, NETWORK_LATENCY_NS, REFERENCE_PATH_NS, RX_WORK_MARGIN_NS, Split,
@@ -215,6 +220,8 @@ use dstack::device::TimingProfile;
 use dstack::embed::Embedded;
 use dstack::host::ClockSource;
 use dstack::media::bypass::FrameSender;
+
+use pulling::{Launch, Pushed};
 
 /// The sample rate unless the app sets one.
 pub const SAMPLE_RATE: u32 = 48_000;
@@ -773,6 +780,21 @@ impl Link {
         processor: P,
         source: ClockSource,
     ) -> Result<Link, HostError> {
+        Self::start_device::<Pushed, P>(config, place, wait, map, processor, source)
+            .map(|(link, ())| link)
+    }
+
+    /// The start, a place not there yet met as `wait` says, the embedded
+    /// device launched as `L` says (the RX rings' writer handed to the app
+    /// for [`pulling::Pulled`]).
+    fn start_device<L: Launch, P: Process + 'static>(
+        config: &Config,
+        place: &Place,
+        wait: PlaceWait<'_>,
+        map: Map,
+        processor: P,
+        source: ClockSource,
+    ) -> Result<(Link, L::Out), HostError> {
         let (cfg, s) = config.checked().map_err(|problems| {
             HostError::Setup(format!("dlink config: {}", problems.join("; ")))
         })?;
@@ -786,7 +808,7 @@ impl Link {
                 tracing::warn!(device = %config.name, "dlink: {short}");
             }
         }
-        let device = if config.converts() {
+        let (device, out) = if config.converts() {
             tracing::info!(
                 device_rate = config.device_rate(),
                 app_rate = config.sample_rate,
@@ -803,11 +825,11 @@ impl Link {
                 outputs,
             )
             .map_err(|e| HostError::Setup(format!("dlink rate conversion: {e}")))?;
-            Embedded::start_waiting(cfg, place, wait, map, rated, source, sender)?
+            L::launch(cfg, place, wait, map, rated, source, sender)?
         } else {
-            Embedded::start_waiting(cfg, place, wait, map, processor, source, sender)?
+            L::launch(cfg, place, wait, map, processor, source, sender)?
         };
-        Ok(Link { device })
+        Ok((Link { device }, out))
     }
 
     /// The device's media side: the pump's and the flows' counts.

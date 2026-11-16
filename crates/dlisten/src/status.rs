@@ -12,8 +12,8 @@ pub use dstack_endpoint::status::{
 
 /// Whether audio flows: a channel whose subscription is receiving
 /// (connected) wrote samples since the last reading (`before`, each
-/// channel's `written`, [`written`]). The pump writes silence into the FIFO
-/// either way; a lost flow shows as a count that stops.
+/// channel's `written`, [`written`]). The output's RX pull writes silence into
+/// the FIFO either way; a lost flow shows as a count that stops.
 pub fn flowing(before: &[u64], now: &[RxChannel]) -> bool {
     now.iter().enumerate().any(|(i, ch)| {
         ch.status.is_some_and(|s| s.state() == SubState::Connected)
@@ -294,7 +294,7 @@ mod tests {
         assert!(!flowing(&[10], &[ch(rx, 10)]), "stopped");
         assert!(
             !flowing(&[0], &[ch(Some(SubStatus::Unresolved), 50)]),
-            "written but not connected: the pump's silence"
+            "written but not connected: the pull's silence"
         );
         assert!(flowing(&[], &[ch(rx, 1)]), "a first reading");
         assert!(!flowing(&[], &[]));
