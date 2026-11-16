@@ -493,3 +493,6 @@ fn a_low_delay_step_refuses_a_wrong_call_and_has_no_ratio_to_adjust() {
     c.process(&[0.0; 32], 16, &mut out, 32).unwrap();
     assert!(out.iter().all(|&v| v == 0.0));
 }
+
+/// dstack #341: a restart's skip of silence.
+mod skip;

@@ -51,6 +51,16 @@
 //! block: the same path as [`Rated::new`], sample for sample, no delay
 //! added.
 //!
+//! **A restart keeps the app's timeline exact** (dstack #341): a block's
+//! media time labels the app's frames `start * app_rate / device_rate`.
+//! At a ratio that does not divide the block that is seldom whole, so a
+//! restart (the first block, or the first after a discontinuity: a pump
+//! re-bootstrap) begins the converters at the latest earlier block start
+//! that is a whole app frame, through silent blocks that call no app and
+//! send nothing (their phase steps need no filter work). An impulse that
+//! crosses a re-bootstrap therefore comes back after the same app samples
+//! as one that does not. No delay changes.
+//!
 //! `process` allocates nothing: every buffer is sized at the start.
 
 use std::collections::VecDeque;
@@ -111,6 +121,51 @@ fn fixed_app_frames(device_rate: u32, app_rate: u32, block: usize) -> usize {
     usize::try_from(frames).unwrap_or(usize::MAX)
 }
 
+/// The most silent blocks a restart runs before its first block
+/// ([`lead_blocks`]), which bounds a restart's added work: a silent block
+/// costs about 4 us with 2 channels and 7 us with 16 (dev1, release; the
+/// converters' buffers move, no filter runs), so 40 add at most about
+/// 0.3 ms to the restart's block. It covers every app from 16 to 192 kHz
+/// on a 48 or 96 kHz device at every block size (44.1 kHz on 96 kHz: at
+/// most 4 at 128 frames, 19 at 16; 22.05 kHz on 96 kHz at 16 frames: 39),
+/// and on a 192 kHz one but 22.05 kHz at 16 frames. Longer periods keep
+/// the old label, a fraction of an app frame off at each restart: an app
+/// of the 48 kHz family (16, 24, 32, 48, 96, 192 kHz) on a device of the
+/// 44.1 kHz family (whole app frames 147 or 441 device frames apart: up to
+/// 146 or 440 blocks), 22.05 kHz on 192 kHz at 16 frames, and 11.025 kHz.
+const MAX_LEAD: u64 = 40;
+
+fn gcd(mut a: u64, mut b: u64) -> u64 {
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    a
+}
+
+/// The silent blocks a restart at device frame `start` runs first (dstack
+/// #341): the fewest `m` for which `start - m * block` is a whole app frame
+/// (`(start - m * block) * app_rate` divisible by `device_rate`), within
+/// [`MAX_LEAD`] and not before frame 0; else 0 (a start off the block grid,
+/// where no such anchor exists, or a longer period).
+fn lead_blocks(start: u64, block: usize, device_rate: u32, app_rate: u32) -> u64 {
+    let (dev, app) = (u64::from(device_rate), u64::from(app_rate));
+    // The device frames between whole app frames.
+    // Both rates are a converter's, which refuses 0.
+    let period = dev / gcd(dev, app);
+    let n = block as u64;
+    (0..=MAX_LEAD)
+        .take_while(|m| m * n <= start)
+        .find(|m| (start - m * n).is_multiple_of(period))
+        .unwrap_or(0)
+}
+
+/// Device frame `start` at the app's rate, rounded down (exact integers:
+/// `start * app_rate / device_rate`).
+fn app_frame(start: u64, device_rate: u32, app_rate: u32) -> u64 {
+    let frames = u128::from(start) * u128::from(app_rate) / u128::from(device_rate);
+    u64::try_from(frames).unwrap_or(u64::MAX)
+}
+
 /// The fixed app block's RX side at a ratio that does not divide the block
 /// (dstack #330): the converter's frames wait here until a whole app block
 /// is ready.
@@ -121,6 +176,23 @@ struct Reblock {
     fifo: Vec<VecDeque<f64>>,
     /// How many frames wait (counted also with no RX channel).
     held: usize,
+}
+
+impl Reblock {
+    /// Counts `k` new frames (already in `fifo`). When a whole app block
+    /// waits, it leaves the count and the frames that waited before the
+    /// `k` are returned: the caller takes `frames` frames off each FIFO.
+    /// `held < A` before and `k <= A` (A rounds the converter's frames a
+    /// block up), so a device block makes at most one app block.
+    fn take(&mut self, k: usize) -> Option<usize> {
+        let before = self.held;
+        self.held += k;
+        if self.held < self.frames {
+            return None;
+        }
+        self.held -= self.frames;
+        Some(before)
+    }
 }
 
 /// The RX FIFO's worst wait, app frames: `A - 1` with a fixed app block's
@@ -216,6 +288,11 @@ pub struct Rated<P> {
     /// The fixed app block's RX FIFO, at a ratio that does not divide the
     /// block only.
     reblock: Option<Reblock>,
+    /// The converters start again at the next block (new, or after a
+    /// discontinuity): when it has a media time, it runs [`lead_blocks`]
+    /// silent blocks first (dstack #341); without one the converters run
+    /// that block as before and no lead follows.
+    restart: bool,
 }
 
 impl<P: Process> Rated<P> {
@@ -319,6 +396,7 @@ impl<P: Process> Rated<P> {
             rx_delay_ns: i64::try_from(rx_delay).unwrap_or(i64::MAX),
             app_block,
             reblock,
+            restart: true,
         })
     }
 
@@ -355,7 +433,7 @@ impl<P: Process> Rated<P> {
     fn app_start(&self, start: u64) -> u64 {
         match self.last {
             Some((dev, app, frames)) if dev + self.block as u64 == start => app + frames as u64,
-            _ => (start as f64 * self.rx.ratio()) as u64,
+            _ => app_frame(start, self.rates.0, self.rates.1),
         }
     }
 }
@@ -368,6 +446,21 @@ impl<P: Process> Process for Rated<P> {
             return;
         }
         let n = self.block;
+        // A restart (dstack #341): the converters' first frame sits at the
+        // first block's start, which at a ratio that does not divide the
+        // block is seldom a whole app frame, and the app's frames would be
+        // labelled up to one frame early, a different fraction at each
+        // restart. Start them instead at the latest earlier block start
+        // that is a whole app frame, as if the device and a silent app had
+        // run from there: silent blocks, no app call, no device output.
+        if std::mem::take(&mut self.restart)
+            && let Some(s) = block.start()
+        {
+            let lead = lead_blocks(s, n, self.rates.0, self.rates.1);
+            for m in (1..=lead).rev() {
+                self.silent_block(s - m * n as u64);
+            }
+        }
         // RX: the device's block in, about n * ratio app frames out.
         let room = self.rx.output_frames_max();
         // No RX channels: the app's frames still follow the ratio, through
@@ -417,11 +510,7 @@ impl<P: Process> Process for Rated<P> {
         for (c, fifo) in rb.fifo.iter_mut().enumerate() {
             fifo.extend(self.rx_out[c * room..c * room + k].iter().copied());
         }
-        // `held < A` before and `k <= A` (A rounds the converter's frames a
-        // block up), so this block makes at most one call.
-        let before = rb.held as i64;
-        rb.held += k;
-        if rb.held >= a {
+        if let Some(before) = rb.take(k) {
             for (c, fifo) in rb.fifo.iter_mut().enumerate() {
                 for (d, v) in self.app_in[c * a..(c + 1) * a]
                     .iter_mut()
@@ -430,7 +519,7 @@ impl<P: Process> Process for Rated<P> {
                     *d = v;
                 }
             }
-            rb.held -= a;
+            let before = before as i64;
             let early_ns = before * 1_000_000_000 / i64::from(self.rates.1);
             call_app(
                 &mut self.inner,
@@ -461,6 +550,7 @@ impl<P: Process> Process for Rated<P> {
             rb.held = 0;
         }
         self.last = None;
+        self.restart = true;
         self.inner.discontinuity();
     }
 }
@@ -496,15 +586,66 @@ fn call_app<P: Process>(
 }
 
 impl<P: Process> Rated<P> {
-    /// TX: exactly the device's block out of the FIFO, through the TX
-    /// converter, into `block`'s outputs.
-    fn send(&mut self, block: &mut Block<'_>) {
+    /// A silent device block at `at` before a restart's first block
+    /// (dstack #341): the converters' phases move on as for a block of
+    /// silence (no filter work: their history is silent, as after a reset),
+    /// the app's frames are silence into the TX FIFO (through the fixed app
+    /// block's RX FIFO and its call cadence, with no call), and the TX
+    /// side takes its frames for a device block that is not sent.
+    fn silent_block(&mut self, at: u64) {
         let n = self.block;
+        let room = self.rx.output_frames_max();
+        let lanes = self.inputs.max(1);
+        let k = self
+            .rx
+            .skip_silence(&self.staged[..lanes * n], n, &mut self.rx_out, room)
+            .map_or(0, |(_, made)| made);
+        self.last = Some((at, self.app_start(at), k));
+        let made = match self.reblock.as_mut() {
+            None => k,
+            Some(rb) => {
+                for fifo in &mut rb.fifo {
+                    fifo.extend(std::iter::repeat_n(0.0, k));
+                }
+                if rb.take(k).is_none() {
+                    0
+                } else {
+                    for fifo in &mut rb.fifo {
+                        fifo.drain(..rb.frames);
+                    }
+                    rb.frames
+                }
+            }
+        };
+        for fifo in &mut self.fifo {
+            fifo.extend(std::iter::repeat_n(0.0, made));
+        }
+        let need = self.take_tx();
+        // The block is not sent: the skip's frame count is all it gives.
+        // With no TX channel the converter has one silent channel, which
+        // `send` never runs, so its skip is valid too.
+        let lanes = self.outputs.max(1);
+        let _ = self
+            .tx
+            .skip_silence(&self.tx_in[..lanes * need], need, &mut self.tx_out, n);
+    }
+
+    /// The TX converter's next input out of the FIFO into `tx_in`, a dry
+    /// FIFO's rest as silence (counted); returns its frames.
+    fn take_tx(&mut self) -> usize {
         let need = self.tx.input_frames_next();
         for (c, fifo) in self.fifo.iter_mut().enumerate() {
             let short = drain_into(fifo, &mut self.tx_in[c * need..(c + 1) * need]);
             self.dry.fetch_add(short as u64, Ordering::Relaxed);
         }
+        need
+    }
+
+    /// TX: exactly the device's block out of the FIFO, through the TX
+    /// converter, into `block`'s outputs.
+    fn send(&mut self, block: &mut Block<'_>) {
+        let n = self.block;
+        let need = self.take_tx();
         if self.outputs == 0 {
             return;
         }
