@@ -60,11 +60,12 @@
 //! its blocks' modelled age at the pump's take (the driver's side records
 //! each hand-over, the pump's side its take; [`Bridge::from_asio_age`]).
 
-use std::sync::{Arc, Mutex, OnceLock, TryLockError};
+use std::sync::{Arc, OnceLock};
 
 use dlink::bridge::pull::{IdleWatch, Look, PullStats};
 use dlink::bridge::{
-    AppBuffer, Clock, Fifo, Player, RxPull, Stats, Switch, Taker, chunk_ns, fifo_for, switch,
+    AppBuffer, Clock, Fifo, Player, RxPull, SharedPull, Stats, Switch, Taker, chunk_ns, fifo_for,
+    switch,
 };
 use dstack_audio_io::{Block, Process};
 
@@ -106,10 +107,12 @@ pub struct Bridge {
     /// The to-ASIO RX pull, once the app hands it over
     /// ([`Bridge::pull_to_asio`]): shared with the pump's side and every
     /// driver side.
-    pull: Arc<OnceLock<Mutex<RxPull>>>,
-    /// The pull's counts and the idle watch over them
-    /// ([`Bridge::keep_pulled`]).
-    pulled: Option<(Arc<PullStats>, IdleWatch)>,
+    pull: Arc<OnceLock<SharedPull>>,
+    /// The idle watch over the pull ([`Bridge::keep_pulled`]).
+    watch: IdleWatch,
+    /// A driver side was made ([`Bridge::asio_side`]): a pull handed over
+    /// after it is refused.
+    opened: bool,
 }
 
 /// What the FIFO's producer writes at once for the to-ASIO player (dstack
@@ -177,7 +180,8 @@ impl Bridge {
             dante: Some(dante),
             age,
             pull,
-            pulled: None,
+            watch: IdleWatch::default(),
+            opened: false,
         })
     }
 
@@ -194,7 +198,10 @@ impl Bridge {
     /// while the bridge runs.
     ///
     /// Refused for a bridge with no to-ASIO channels, a pull of another
-    /// FIFO, or a second pull.
+    /// FIFO or of another channel count (its read would write past its
+    /// scratch in the driver's callback), a pull after the driver's first
+    /// open (that run's player was made for the pump's block, dstack #317),
+    /// or a second pull.
     pub fn pull_to_asio(&mut self, pull: RxPull) -> Result<(), String> {
         let Some(fifo) = &self.to_asio else {
             return Err("the bridge has no channel to ASIO to pull".to_string());
@@ -202,12 +209,21 @@ impl Bridge {
         if !Arc::ptr_eq(fifo, pull.fifo()) {
             return Err("the pull writes another FIFO than the bridge's to-ASIO one".to_string());
         }
-        let stats = pull.stats();
+        if pull.channels().len() != fifo.channels() {
+            return Err(format!(
+                "the pull reads {} RX channels for the bridge's {} to ASIO",
+                pull.channels().len(),
+                fifo.channels()
+            ));
+        }
+        if self.opened {
+            return Err(
+                "the driver opened already: hand the pull over before its first open".to_string(),
+            );
+        }
         self.pull
-            .set(Mutex::new(pull))
-            .map_err(|_| "the bridge pulls already".to_string())?;
-        self.pulled = Some((stats, IdleWatch::default()));
-        Ok(())
+            .set(SharedPull::new(pull))
+            .map_err(|_| "the bridge pulls already".to_string())
     }
 
     /// The look at the to-ASIO pull ([`Bridge::pull_to_asio`]), from the
@@ -217,31 +233,21 @@ impl Bridge {
     /// drains the flow sockets itself (`RxPull::drain_idle`), so the flow
     /// stays heard and the device keeps it; a buffer switch that pulls
     /// again takes over at once. Only under the lock, and only while no
-    /// switch pulled since the look. A lock a panic poisoned is cleared
-    /// here (the switches pull on through it). `None` without a pull;
-    /// else the look, for the app's log (the change both ways, the
-    /// restarts' rise).
-    pub fn keep_pulled(&mut self) -> Option<Look> {
+    /// switch pulled since the look (`SharedPull::keep`). A lock a panic
+    /// poisoned is cleared here (the switches pull on through it). `None`
+    /// without a pull; else the look and whether a poisoned lock was
+    /// cleared, for the app's log (the change both ways, the restarts'
+    /// rise, a panicked pull).
+    pub fn keep_pulled(&mut self) -> Option<(Look, bool)> {
         let pull = self.pull.get()?;
-        let (stats, watch) = self.pulled.as_mut()?;
-        if pull.is_poisoned() {
-            pull.clear_poison();
-        }
-        let pulls = stats.pulls();
-        let look = watch.look(pulls, stats.restarts());
-        if look.idle
-            && let Ok(mut p) = pull.try_lock()
-            && stats.pulls() == pulls
-        {
-            p.drain_idle();
-        }
-        Some(look)
+        let poisoned = pull.clear_poison();
+        Some((pull.keep(&mut self.watch), poisoned))
     }
 
     /// The to-ASIO pull's counts ([`Bridge::pull_to_asio`]; `None`
     /// without one).
     pub fn to_asio_pull_stats(&self) -> Option<Arc<PullStats>> {
-        self.pulled.as_ref().map(|(s, _)| Arc::clone(s))
+        self.pull.get().map(SharedPull::stats)
     }
 
     pub fn spec(&self) -> Spec {
@@ -285,6 +291,7 @@ impl Bridge {
         let rate = opened.rate.round() as u32;
         let dante = self.spec.dante_rate;
         let chunk = to_asio_chunk_ns(buffer, self.pull.get().is_some());
+        self.opened = true;
         let player = match &self.to_asio {
             Some(fifo) => Some(
                 Player::new(
@@ -391,7 +398,7 @@ fn feed(fifo: &Fifo, block: &Block<'_>) {
 /// The pump's side: RX into the to-ASIO FIFO, the from-ASIO player into TX.
 pub struct DanteSide {
     to_asio: Option<Arc<Fifo>>,
-    pull: Arc<OnceLock<Mutex<RxPull>>>,
+    pull: Arc<OnceLock<SharedPull>>,
     /// The from-ASIO player and its handover's end.
     from_asio: Option<(Player, Taker<Player>)>,
     outputs: usize,
@@ -401,8 +408,11 @@ pub struct DanteSide {
 
 impl Process for DanteSide {
     fn process(&mut self, block: &mut Block<'_>) {
-        // Pulled, the driver's side writes the to-ASIO FIFO (dstack #307);
-        // a pump with no RX inputs (a pulling app's) has nothing for it.
+        // Pulled, the driver's side writes the to-ASIO FIFO (dstack #307).
+        // A pump with no RX inputs is a pulling app's (before its
+        // `pull_to_asio`): it has nothing for the FIFO, not silence. An
+        // unpulled pump always has them: a bridge's map reads every RX
+        // channel (its `to_asio` count).
         if let Some(fifo) = &self.to_asio
             && self.pull.get().is_none()
             && block.inputs() > 0
@@ -425,7 +435,7 @@ impl Process for DanteSide {
 /// the from-ASIO FIFO.
 pub struct AsioSide {
     /// The to-ASIO pull, once the app gave it (pulled before each play).
-    pull: Arc<OnceLock<Mutex<RxPull>>>,
+    pull: Arc<OnceLock<SharedPull>>,
     player: Option<Player>,
     outputs: usize,
     from_asio: Option<Arc<Fifo>>,
@@ -438,23 +448,15 @@ pub struct AsioSide {
 impl AsioSide {
     /// The to-ASIO pull's turn (dstack #307): drain the flow sockets and
     /// read the rings into the to-ASIO FIFO, up to media now less P. Never
-    /// waits: only an earlier run's last switch or the app's idle drain
-    /// ([`Bridge::keep_pulled`]) can hold the lock, and this switch then
-    /// plays what the FIFO holds. A lock a panicking pull poisoned still
-    /// pulls (its state is read positions). Its system calls are the
+    /// waits (`SharedPull::pull`): only an earlier run's last switch or the
+    /// app's idle drain ([`Bridge::keep_pulled`]) can hold the lock, and
+    /// this switch then plays what the FIFO holds, once maybe a little
+    /// emptier (the drain also restarts the next read at now). A lock a
+    /// panicking pull poisoned still pulls. Its system calls are the
     /// pull's: the clock read and the sockets' non-blocking reads.
     fn pull_rx(&self) {
-        let Some(pull) = self.pull.get() else {
-            return;
-        };
-        match pull.try_lock() {
-            Ok(mut p) => {
-                p.pull();
-            }
-            Err(TryLockError::Poisoned(e)) => {
-                e.into_inner().pull();
-            }
-            Err(TryLockError::WouldBlock) => {}
+        if let Some(pull) = self.pull.get() {
+            pull.pull();
         }
     }
 

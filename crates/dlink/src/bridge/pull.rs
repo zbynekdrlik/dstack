@@ -68,6 +68,9 @@ use dstack::stream::to_f64;
 
 use super::Fifo;
 
+mod shared;
+pub use shared::SharedPull;
+
 /// The most frames one pull reads (and its scratch holds a channel) for a
 /// FIFO of `capacity` frames: the FIFO's capacity, and at most half a
 /// ring ([`SLOTS`]), so a read never reaches positions the ring's writer
@@ -286,6 +289,13 @@ impl RxPull {
     /// own: dstack-asio's `Bridge::pull_to_asio`).
     pub fn fifo(&self) -> &Arc<Fifo> {
         &self.fifo
+    }
+
+    /// The RX channels it reads, FIFO channel `i` from RX channel
+    /// `channels()[i]` (a FIFO of another width is refused by its owner:
+    /// the read writes one FIFO channel per entry).
+    pub fn channels(&self) -> &[usize] {
+        &self.channels
     }
 
     /// Drains the flow sockets into the rings and brings the FIFO up to

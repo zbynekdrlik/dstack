@@ -2,7 +2,7 @@
 
 //! The to-ASIO side pulled by the driver's buffer switch (dstack #307): the
 //! handover of the pull, which side writes the to-ASIO FIFO, the switch's
-//! pull under a held or poisoned lock, and the app's idle look.
+//! pull, the refusals of a pull that does not fit, and the app's idle look.
 
 use std::net::{Ipv4Addr, UdpSocket};
 use std::time::Duration;
@@ -179,60 +179,24 @@ fn the_driver_s_switch_pulls_the_rings_into_the_fifo_before_it_plays() {
     assert_eq!(r.rx.rings()[0].counters().written, 64);
 }
 
-/// The switch never waits for the lock: held elsewhere (an earlier run's
-/// last switch, the idle drain), it plays what the FIFO holds; a lock a
-/// panic poisoned still pulls, and the app's look clears the poison.
-#[test]
-fn a_held_lock_skips_the_pull_and_a_poisoned_one_still_pulls() {
-    let (mut b, r) = pulled();
-    let stats = b.to_asio_pull_stats().unwrap();
-    let mut asio = b.asio_side(&driver()).unwrap();
-    let mut out = vec![1.0; 256];
-    let lock = b.pull.get().unwrap();
-    {
-        let _held = lock.lock().unwrap();
-        asio.process(&mut Block::new(256, &[], &mut out));
-    }
-    assert_eq!(stats.pulls(), 0, "held: no pull");
-    assert!(out.iter().all(|&x| x == 0.0), "it still played");
-    let shared = Arc::clone(&b.pull);
-    let _ = std::thread::spawn(move || {
-        let _guard = shared.get().unwrap().lock().unwrap();
-        panic!("a pull panicked");
-    })
-    .join();
-    assert!(lock.is_poisoned());
-    r.clock.sleep_until(ns_of(T + P + 64, NET));
-    asio.process(&mut Block::new(256, &[], &mut out));
-    assert_eq!(stats.pulls(), 1, "poisoned: it pulls on");
-    b.keep_pulled().unwrap();
-    assert!(!b.pull.get().unwrap().is_poisoned(), "the look cleared it");
-}
-
 /// While no switch pulls (no driver open), the app's look drains the flow
-/// itself; once a switch pulls again it leaves the pull alone; a held lock
-/// is never waited for.
+/// itself; once a switch pulls again it leaves the pull alone.
 #[test]
-fn the_app_s_look_drains_while_no_switch_pulls_and_never_waits() {
+fn the_app_s_look_drains_while_no_switch_pulls() {
     let (mut b, _r) = pulled();
     let stats = b.to_asio_pull_stats().unwrap();
-    let look = b.keep_pulled().unwrap();
-    assert!(look.idle && look.changed, "{look:?}");
+    let (look, poisoned) = b.keep_pulled().unwrap();
+    assert!(look.idle && look.changed && !poisoned, "{look:?}");
     assert_eq!(stats.idle_drains(), 1);
     let mut asio = b.asio_side(&driver()).unwrap();
     let mut out = vec![0.0; 256];
     asio.process(&mut Block::new(256, &[], &mut out));
-    let look = b.keep_pulled().unwrap();
+    let (look, _) = b.keep_pulled().unwrap();
     assert!(!look.idle && look.changed, "{look:?}");
     assert_eq!(stats.idle_drains(), 1, "a switch pulled: no drain");
-    let look = b.keep_pulled().unwrap();
+    let (look, _) = b.keep_pulled().unwrap();
     assert!(look.idle && look.changed, "{look:?}");
     assert_eq!(stats.idle_drains(), 2);
-    let lock = Arc::clone(&b.pull);
-    let _held = lock.get().unwrap().lock().unwrap();
-    let look = b.keep_pulled().unwrap();
-    assert!(look.idle && !look.changed, "{look:?}");
-    assert_eq!(stats.idle_drains(), 2, "held: never waited for");
 }
 
 /// A pull that reads another channel count than the to-ASIO FIFO holds
@@ -244,8 +208,10 @@ fn a_pull_of_another_width_or_after_the_first_open_is_refused() {
     let mut b = Bridge::new(spec(2, 0)).unwrap();
     let fifo = b.to_asio_fifo().unwrap();
     let mut r = rig(&fifo);
+    let narrow = r.pull.take().unwrap();
+    assert_eq!(narrow.channels(), &[0]);
     assert_eq!(
-        b.pull_to_asio(r.pull.take().unwrap()),
+        b.pull_to_asio(narrow),
         Err("the pull reads 1 RX channels for the bridge's 2 to ASIO".to_string())
     );
     let mut b = Bridge::new(spec(1, 0)).unwrap();

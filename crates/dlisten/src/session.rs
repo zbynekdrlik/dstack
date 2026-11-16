@@ -18,7 +18,7 @@ use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use dlink::bridge::pull::{IdleWatch, PullStats};
-use dlink::bridge::{AppBuffer, RxPull};
+use dlink::bridge::{AppBuffer, SharedPull};
 use dlink::{Block, Link, Map, Process};
 use dlisten::cli::{self, Options};
 use dlisten::fifo::Fifo;
@@ -52,7 +52,7 @@ pub fn name_of(o: &Options) -> String {
 }
 
 /// The device's processor: the pump has nothing to do for dlisten, whose
-/// output callback pulls the RX channels itself ([`RxPull`], dstack #307).
+/// output callback pulls the RX channels itself ([`dlink::bridge::RxPull`], dstack #307).
 struct Idle;
 
 impl Process for Idle {
@@ -67,8 +67,8 @@ pub struct Session {
     /// before each read of the FIFO. Shared so the next stream of an output
     /// switch takes it over; a callback only tries the lock, so the old
     /// stream's last callback beside the new one's skips a pull, never
-    /// waits.
-    pull: Arc<Mutex<RxPull>>,
+    /// waits ([`SharedPull`]).
+    pull: Arc<SharedPull>,
     /// The pull's counts, and the main thread's watch over them
     /// ([`Session::keep_pulled`]).
     pull_stats: Arc<PullStats>,
@@ -180,7 +180,7 @@ impl Session {
             link,
             fifo,
             pull_stats: pull.stats(),
-            pull: Arc::new(Mutex::new(pull)),
+            pull: Arc::new(SharedPull::new(pull)),
             watch: IdleWatch::default(),
             stats: Arc::default(),
             rate,
@@ -382,20 +382,19 @@ impl Session {
     /// The main thread's look at the RX pull, every 250 ms (dstack #307).
     /// While no output pulls (none open, a stream that stopped calling
     /// back), it drains the flow sockets itself, so the flow stays heard
-    /// and the device keeps it ([`RxPull::drain_idle`]); a callback that
+    /// and the device keeps it ([`SharedPull::keep`]); a callback that
     /// pulls again takes over at once. Logs the change both ways, and each
     /// rise of the pull's restarts (a callback gap past the FIFO, a clock
     /// step).
     pub fn keep_pulled(&mut self) {
-        if self.pull.is_poisoned() {
+        if self.pull.clear_poison() {
             // A panic inside a pull (its message went to stderr): the
             // callbacks pull on through the poison, its state being read
             // positions; reported and cleared here, off the audio thread.
             tracing::warn!("dlisten: an RX pull panicked; pulling on");
-            self.pull.clear_poison();
         }
+        let look = self.pull.keep(&mut self.watch);
         let (pulls, restarts) = (self.pull_stats.pulls(), self.pull_stats.restarts());
-        let look = self.watch.look(pulls, restarts);
         if look.changed && look.idle {
             tracing::warn!(
                 pulls,
@@ -403,14 +402,6 @@ impl Session {
             );
         } else if look.changed {
             tracing::info!(pulls, "dlisten: the output pulls the audio again");
-        }
-        // Under the lock, only while no callback pulled since the look: a
-        // callback that resumed in between keeps its read position.
-        if look.idle
-            && let Ok(mut pull) = self.pull.try_lock()
-            && self.pull_stats.pulls() == pulls
-        {
-            pull.drain_idle();
         }
         if look.restarts_rose > 0 {
             tracing::warn!(

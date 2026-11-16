@@ -321,3 +321,5 @@ fn the_device_s_published_latency_moves_the_playout_point() {
     r.clock.sleep_until(ns_of(T + P + 20, RATE));
     assert_eq!(r.pull.pull(), 16);
 }
+
+mod shared;
