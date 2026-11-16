@@ -41,22 +41,22 @@ const FIRST: u64 = 7 * N as u64;
 /// is in the network, `gap` blocks later than the next block (a stall).
 /// Returns the impulse's round trip in app frames, from its peak with a
 /// parabola through its neighbours.
-fn round_trip(fixed: bool, restart: Option<u64>) -> f64 {
+fn round_trip(fixed: bool, first: u64, restart: Option<u64>) -> f64 {
     let app = Pulse {
         at: AT,
         heard: Vec::new(),
     };
     let mut r = if fixed {
-        Rated::with_fixed_app_block(app, 96_000, 44_100, N, 1, 1)
+        Rated::with_fixed_app_block(app, 96_000, 44_100, N, 1, 2)
     } else {
-        Rated::new(app, 96_000, 44_100, N, 1, 1)
+        Rated::new(app, 96_000, 44_100, N, 1, 2)
     }
     .unwrap();
     let mut net = vec![0.0; 16_000];
     // Well after the impulse left the TX converter, well before it is back.
     let stall = AT * 96_000 / 44_100 + 1_500;
     let mut pending = restart;
-    let mut s = FIRST;
+    let mut s = first;
     while s < 14_000 {
         if s >= stall
             && let Some(gap) = pending.take()
@@ -67,9 +67,9 @@ fn round_trip(fixed: bool, restart: Option<u64>) -> f64 {
         let input: Vec<f64> = (s..s + N as u64)
             .map(|t| t.checked_sub(LOOP).map_or(0.0, |t| net[t as usize]))
             .collect();
-        let mut out = vec![0.0; N];
+        let mut out = vec![0.0; 2 * N];
         r.process(&mut Block::new(N, &input, &mut out).at(s));
-        net[s as usize..s as usize + N].copy_from_slice(&out);
+        net[s as usize..s as usize + N].copy_from_slice(&out[..N]);
         s += N as u64;
     }
     let heard = &r.inner.heard;
@@ -136,12 +136,12 @@ fn a_device_frame_at_the_app_s_rate_is_exact() {
 #[test]
 fn an_impulse_comes_back_after_the_same_app_samples_across_a_re_bootstrap() {
     for fixed in [false, true] {
-        let want = round_trip(fixed, None);
+        let want = round_trip(fixed, FIRST, None);
         // Gaps of 0 to 4 blocks put the new start on every app phase the
         // 128-frame grid has at 44.1 kHz (5: 640 device frames are 294
         // app frames).
         for gap in 0..5 {
-            let got = round_trip(fixed, Some(gap));
+            let got = round_trip(fixed, FIRST, Some(gap));
             assert_eq!(
                 got.round(),
                 want.round(),
@@ -150,6 +150,24 @@ fn an_impulse_comes_back_after_the_same_app_samples_across_a_re_bootstrap() {
             assert!(
                 (got - want).abs() < 0.01,
                 "fixed {fixed}, gap {gap}: {got} app frames, not {want}"
+            );
+        }
+    }
+}
+
+/// The same from any first start, with no re-bootstrap: the TX side too
+/// starts on a whole app frame (an impulse sent after a restart goes out
+/// through the restarted TX converter).
+#[test]
+fn an_impulse_comes_back_after_the_same_app_samples_from_any_first_start() {
+    for fixed in [false, true] {
+        let want = round_trip(fixed, FIRST, None);
+        // Leads of 0, 1, 3 and 4 blocks (FIRST's is 2).
+        for first in [640, 768, 1_024, 1_152] {
+            let got = round_trip(fixed, first, None);
+            assert!(
+                (got - want).abs() < 0.01,
+                "fixed {fixed}, first {first}: {got} app frames, not {want}"
             );
         }
     }
