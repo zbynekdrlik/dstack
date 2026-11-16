@@ -205,7 +205,8 @@ impl Json {
 ///   second, ns, rounded down; absent as `lateness_min_ns` is),
 ///   `lateness_sum_ns` and `lateness_count` (the placed packets' ages
 ///   summed, ns, and counted since the device started: a reader diffs two
-///   reads for the mean between them; an age past 4.29 s counts as 4.29 s),
+///   reads for the mean between them; an age past 4.29 s counts as 4.29 s,
+///   and the sum wraps only after 2^32 packets at that cap),
 ///   `keepalives`,
 ///   `keepalive_errors`, `recv_errors`, `multicast` (a transmitter's
 ///   multicast flow the slot joined: no request, no keepalive), `joins` and

@@ -62,6 +62,11 @@ fn transmitter(ip: Ipv4Addr) -> UdpSocket {
     s
 }
 
+/// Waits until a datagram sent is in its socket (or group's) for a read.
+fn settle() {
+    std::thread::sleep(Duration::from_millis(30));
+}
+
 fn slot_addr(s: &RxShared, slot: usize) -> SocketAddr {
     s.local_addr(slot).unwrap()
 }

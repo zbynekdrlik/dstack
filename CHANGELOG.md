@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+- **Feature (#342, dasio#128): each RX flow slot's mean packet age, and its playout point, for an information line.** The owner wants dtray to show each RX flow's MEAN delivery latency next to its peaks, as information only. dstack kept only the least and the largest of a placed packet's age (our PTP now less its own stamp, the judge's `lateness_min_ns` figure), so no mean could be formed. Every ring writer now adds each placed packet's age to a running sum and count per slot: the RX thread's pass, the pump's drain and an app's drain, all in the one function they place through. This costs two relaxed `fetch_add` a packet, with no allocation and no lock. Two edge rules apply. A packet stamped after our now counts 0. An age past 4.29 s counts as 4.29 s, so the sum wraps only after 2^32 packets at that cap (16 days at 3000 packets a second). A reader diffs modulo 2^64; `lateness_mean_ns_since` does.
+  - API (additive, dstack):
+    - `RxCounts::lateness_sum_ns` and `RxCounts::lateness_count`: totals since the device started, like `lateness_peak`.
+    - `RxCounts::lateness_mean_ns_since(&earlier) -> Option<u64>`: the mean, ns rounded down, of the packets placed between two looks; `None` when none was placed. Each reader keeps its own last look, so no reader takes another's window.
+    - `RxShared::last_lateness_mean_ns(slot)`: the heartbeat's last second's mean, beside `last_lateness` and `last_min_lateness_ns`. Reading it takes nothing.
+    - `RxShared::flow_playout(slot) -> Option<u32>`: the flow's published playout point (`RxPlan::latency`), samples. It is `None` without a flow, and for the moment a publish writes that slot.
+    - A consumer that builds an `RxCounts` with a struct literal adds `..Default::default()`.
+  - Status per RX flow (additive):
+    - `lateness_mean_ns`: the last second's mean, ns. It is absent for a second without a placed packet, as `lateness_min_ns` is.
+    - `lateness_sum_ns` and `lateness_count`: since the start. Diff two reads for the mean between them.
+    - `playout` was already there.
+- **No latency change** for any device or dlink app: P, (c), W and the app buffer are as in 0.6.155. Nothing reads the new figures to decide anything.
+- Consumers:
+  - dasio keeps each slot's `RxCounts` from its 10 s look. It shows `lateness_mean_ns_since(&previous)` next to its peaks (`lateness_peak`, `last_lateness`, `last_min_lateness_ns`), and `flow_playout(slot)` as the latency the age must stay under. It still never calls `take_max_lateness`.
+  - obs, camera-box, intercom, songplayer, presenter, iemmixer, dlisten and dsend move the stack version; nothing to port.
+
 ## 0.6.155
 
 - **Fix (#307, step 2: dstack-asio's Dante -> ASIO side): an ASIO bridge's output no longer depends on the pump's lateness.** The pump wrote each RX block into the to-ASIO FIFO (`DanteSide`) and the driver's buffer switch only played it (`AsioSide`), so a pump that woke late let the FIFO (the ASIO buffer + one pump block: 4 ms at 96 kHz by default) run dry although the audio already waited in the RX rings or the flow sockets: dlisten's class before 0.6.153. Now, as there, the thread with the deadline does the work: once the app hands the bridge its `RxPull`, each buffer switch first drains the flow sockets into the RX rings and reads them by position (media now less P) into the FIFO in one push, then plays through the player as before; the pump writes nothing there. A whole-device test (`crates/dstack-asio/tests/to_asio_pull.rs`: the pump stalled 10 to 20 ms at random, 31 stalls, against a steady 256-frame driver period at 48 kHz) had 13 to-ASIO underruns and 6350 samples off the level in 8 s with the pump's thread filling the FIFO (its RED commit: the same read by position, made on the pump's thread; 0.6.153's block feed cannot run under a pulling device, whose pump has no RX inputs); it now has 0 and 0, and no packet counted late.

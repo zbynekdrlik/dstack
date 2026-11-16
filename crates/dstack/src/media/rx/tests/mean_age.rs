@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// Copyright (C) 2026 dstack contributors.
+
 //! The placed packets' mean age (dstack #342) through each ring writer:
 //! the RX thread's pass, the pump's drain (#326) and an app's drain
 //! (#307) record it the same way.
@@ -9,11 +12,6 @@ use super::*;
 const P0: u64 = 10 * 365 * 86_400 * RATE as u64;
 /// Our now: P0 plus 10 ms.
 const NOW: u64 = P0 + 960;
-
-/// Waits until a datagram sent is in its socket for a read.
-fn settle() {
-    std::thread::sleep(Duration::from_millis(30));
-}
 
 /// Slot 0 with a flow from loopback (its playout 192 samples) feeding RX
 /// channel 0.

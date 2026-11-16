@@ -439,8 +439,11 @@ impl RxShared {
     /// (the heartbeat's 0x8003, plan Task 6); kept for
     /// [`RxShared::last_lateness`]. It also takes the packets' least
     /// lateness in ns, kept for [`RxShared::last_min_lateness_ns`], and
-    /// the largest wake delay, kept for [`RxShared::last_wake_delay_us`], so
-    /// the heartbeat's second is all of theirs.
+    /// the largest wake delay, kept for [`RxShared::last_wake_delay_us`],
+    /// and the second's mean age, kept for
+    /// [`RxShared::last_lateness_mean_ns`], so the heartbeat's second is all
+    /// of theirs. Only the heartbeat calls it: a second caller would split
+    /// its seconds.
     pub fn take_max_lateness(&self, slot: usize) -> u64 {
         self.lanes.get(slot).map_or(0, |l| {
             let wake = l.max_wake_ns.swap(0, Ordering::Relaxed);
@@ -537,7 +540,7 @@ impl RxShared {
     /// whose least is [`RxShared::last_min_lateness_ns`]; an age past
     /// 4.29 s counts as 4.29 s. `None` for a second without a placed
     /// packet. The status reads it and takes nothing; a reader with its
-    /// own window diffs [`RxCounts`] (`RxCounts::lateness_mean_ns_since`).
+    /// own window diffs [`RxCounts`] ([`RxCounts::lateness_mean_ns_since`]).
     pub fn last_lateness_mean_ns(&self, slot: usize) -> Option<u64> {
         self.lanes.get(slot)?.ages.last_mean_ns()
     }

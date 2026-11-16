@@ -3,8 +3,8 @@
 
 //! The placed packets' mean age of a flow slot (dstack #342): the sum and
 //! the count of each placed packet's age (our PTP now less its own stamp,
-//! ns: the judge's figure, `lateness_min_ns`), as running totals since the
-//! device started.
+//! ns: the judge's figure, `lateness_min_ns`; 0 for a packet stamped after
+//! our now), as running totals since the device started.
 //!
 //! The ring writer adds to both in `intake::place`, the one place every
 //! writer goes through (the RX thread's pass, the pump's drain, an app's
@@ -21,8 +21,9 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// The most one packet adds to a sum, ns (2^32, 4.29 s): a packet that
-/// old is far past any latency, and with it the sum cannot wrap in any run
-/// (2^32 packets at the cap).
+/// old is far past any latency. With it the sum wraps only after 2^32
+/// packets at the cap (16 days at 3000 packets a second); a reader diffs
+/// modulo 2^64 ([`mean_between`]).
 pub(super) const AGE_CAP_NS: u64 = 1 << 32;
 /// A mean that holds none: no packet placed in the last take's second.
 const NONE: u64 = u64::MAX;

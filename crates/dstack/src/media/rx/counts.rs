@@ -140,8 +140,9 @@ pub struct RxCounts {
     pub lateness_peak: u64,
     /// The sum of the placed packets' ages since the device started, ns
     /// (dstack #342): each our clock's now less the packet's own stamp
-    /// (the figure whose least is `lateness_min_ns`), an age past 4.29 s
-    /// counted as 4.29 s. With `lateness_count`, a running total a reader
+    /// (the figure whose least is `lateness_min_ns`; 0 for a packet
+    /// stamped after our now), an age past 4.29 s counted as 4.29 s; it
+    /// wraps only after 2^32 packets at that cap, so diff modulo 2^64. With `lateness_count`, a running total a reader
     /// diffs between two of its looks ([`RxCounts::lateness_mean_ns_since`]).
     pub lateness_sum_ns: u64,
     /// The placed packets since the device started (dstack #342): those

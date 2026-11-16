@@ -499,7 +499,8 @@ struct PlaceArgs<'a> {
 /// A packet judged and placed: its lateness, the judge and its age's
 /// sum and count (dstack #342), `late` and `wire_late`, the network
 /// latency and the minute's windows, its holes, its samples written into
-/// the rings routed to its slots, and its write delay. No allocation, no lock, no log.
+/// the rings routed to its slots, and its write delay. No allocation, no
+/// lock, no log.
 #[cfg_attr(iem_rtsan, sanitize(realtime = "nonblocking"))]
 fn place(p: PlaceArgs<'_>) {
     let PlaceArgs {
