@@ -340,6 +340,33 @@ mod tests {
         );
     }
 
+    /// The test clock's waits (dstack #328): a wait on the app's clock
+    /// (raw QPC) ends on it, never before its target, in both wait modes,
+    /// whatever the wall clock (the media threads' monotonic clock until a
+    /// poll) does meanwhile. Before, the deadline was on the wall.
+    #[test]
+    fn a_wait_on_the_app_clock_never_ends_before_its_target_on_it() {
+        for mode in [super::super::WaitMode::Spin, super::super::WaitMode::Timer] {
+            let mut late: Vec<i64> = (0..100)
+                .map(|_| {
+                    let target = app_monotonic_ns() + 1_000_000;
+                    sleep_until_in(target, app_monotonic_ns, mode, 0);
+                    app_monotonic_ns() - target
+                })
+                .collect();
+            late.sort_unstable();
+            assert!(late[0] >= 0, "{mode:?}: ended {} ns early", -late[0]);
+            assert!(
+                late[late.len() / 2] < 1_000_000,
+                "{mode:?}: median late {} ns",
+                late[late.len() / 2]
+            );
+        }
+        let target = app_monotonic_ns() + 2_000_000;
+        sleep_until_app(target);
+        assert!(app_monotonic_ns() >= target);
+    }
+
     /// FOH froze (5.11.2026, ~04:48Z) right after dasio rolled v0.6.35:
     /// its pinned TX and engine threads spun without yielding, and some
     /// per-CPU system work that must run on exactly those CPUs never ran

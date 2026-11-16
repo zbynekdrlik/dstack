@@ -39,6 +39,8 @@ pub mod dsyx;
 pub mod escape;
 pub mod skewed;
 pub mod steer;
+#[cfg(any(windows, test))]
+mod wait;
 
 use crate::device::TimingProfile;
 
