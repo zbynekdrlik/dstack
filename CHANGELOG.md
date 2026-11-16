@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.147
+
+- **Test fix (#304): the real-time soak case runs its pump on the app's clock.** `crates/dlink/tests/soak_real_time.rs` gave the pump a bare `MonoClock` that no poller ever fed; on Windows that reads the wall clock (`clock::monotonic_ns` before the steer model's first poll), which the CI runner's time service adjusts under the test, while the app's ticks and the TX FIFO's write stamps read raw QPC. A forward step of the pump's clock runs that much audio at once and the TX FIFO loses the depth, so main CI of 0.6.146 (and a dev run of 0.6.143) gapped at a tick only 2.2-2.7 ms late. The pump now runs on `SkewedClock` at 0 ppm on `clock::app_monotonic_ns`, the clock the ticks read; a gap failure also lists the five ticks before it with the TX FIFO's depth. No stack code changed.
+- **No latency change** for any device or dlink app: P, (c), W and the app buffer are as in 0.6.146.
+- Consumers: nothing to port; move the stack version when convenient.
+
 ## 0.6.146
 
 - **Feature (#323, follows #321): a stale local client (dtray, dtray-cli) now shows on the network.** A client below `NETWORK_FLOOR` reached only the device's local status endpoint (127.0.0.1), which dcontroller cannot read: exactly #319's stale dtray beside a device. Now:

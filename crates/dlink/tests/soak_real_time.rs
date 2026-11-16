@@ -1,9 +1,27 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! The soak's real-time case (dstack #304): one minute of wall time, the
-//! pump on its own thread on the box's monotonic clock, the app on the
-//! test's thread at real 1024-frame ticks. Real wakes are what the
-//! simulation (`tests/soak.rs`) cannot model.
+//! pump on its own thread, the app on the test's thread at real 1024-frame
+//! ticks. Real wakes are what the simulation (`tests/soak.rs`) cannot
+//! model.
+//!
+//! Both run on the app's clock ([`dstack::clock::app_monotonic_ns`]: Linux
+//! `CLOCK_MONOTONIC`, Windows raw QPC), which the ticks (`Instant`) and the
+//! TX FIFO's write stamps read too: the pump's media clock is a
+//! [`SkewedClock`] at 0 ppm on it. A bare `MonoClock` that no poller ever
+//! fed reads the wall on Windows (`clock::monotonic_ns` before the steer
+//! model's first poll is `realtime_ns`), which the runner's time service
+//! adjusts under the test (dstack #305 measured the wall-fed model 66 ppm off
+//! QPC on windows-2025; a run here read the RX bridge at -38.9 ppm). A
+//! forward step of the pump's clock makes the pump run that much audio at
+//! once: the TX FIFO loses that depth until the level loop gives it back
+//! (about 1.2 ms a minute at its 20 ppm bound), counted only as a late pump
+//! wake. Three such
+//! steps of 3 ms took the depth before a write from 14.1 to 3.5 ms on dev1,
+//! and the main run of v0.6.146 gapped at a tick 2.7 ms late with three
+//! late pump wakes (at most 3.7 ms). Clock drift and steps between the
+//! pump and the app are the simulated gate's (its drift cases); here they
+//! would only hide the player behind the runner's clock.
 //!
 //! Not in the release gate (no `gate_` name, and its own binary, so the
 //! simulated cases never load the box under it): on a shared runner the
@@ -24,7 +42,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use dstack::clock::{MonoClock, PtpClock};
+use dstack::clock::{PtpClock, SkewedClock, TestClockPpm, app_monotonic_ns};
 use dstack::stream::PumpView;
 
 use harness::*;
@@ -125,8 +143,8 @@ fn an_rx_dropout_counts_against_the_restarts_only_at_a_tick_on_time() {
 fn one_minute_in_real_time() {
     const REAL: Duration = Duration::from_secs(60);
     let Path { pump, ends: mut p } = path();
-    let clock = Arc::new(MonoClock::new());
-    clock.set_k(0);
+    // The app's clock, unskewed (module doc).
+    let clock = Arc::new(SkewedClock::new(app_monotonic_ns(), 0, TestClockPpm(0.0)));
     let stop = Arc::new(AtomicBool::new(false));
     let thread = dstack::stream::spawn(
         Arc::clone(&clock) as Arc<dyn PtpClock>,
@@ -142,8 +160,12 @@ fn one_minute_in_real_time() {
     let mut ticks = Vec::with_capacity(3000);
     let mut gaps = 0;
     let mut rx = 0;
+    // The TX FIFO's depth before each tick's write, ms: the sawtooth's
+    // bottom, shown with a failure.
+    let mut depths = Vec::with_capacity(3000);
     while start.elapsed() < REAL {
         let late = Instant::now().saturating_duration_since(deadline);
+        let depth_ms = p.tx_fifo.len() as f64 * 1e3 / f64::from(APP_RATE);
         ticker.tick(&mut p);
         let counts = Counts::of(&p, T0);
         if primed.is_none() && !p.tx_stats.priming() && !p.rx_stats.priming() {
@@ -157,6 +179,7 @@ fn one_minute_in_real_time() {
                 gap: counts.tx_sum() != gaps,
                 rx: counts.rx_underruns - rx,
             });
+            depths.push(depth_ms);
             gaps = counts.tx_sum();
             rx = counts.rx_underruns;
         }
@@ -183,8 +206,14 @@ fn one_minute_in_real_time() {
         last.tx_ppm
     );
     if let Some(i) = gap_on_time(&ticks) {
+        let from = i.saturating_sub(5);
+        let before: Vec<String> = (from..=i)
+            .map(|j| format!("{j}: {:?} late, {:.2} ms", ticks[j].late, depths[j]))
+            .collect();
         panic!(
-            "a TX gap at tick {i}, {:?} late (under {LATE_TICK:?}): {primed:?} {last:?} {view:?}",
+            "a TX gap at tick {i}, {:?} late (under {LATE_TICK:?}); the ticks up to it, \
+             late and the TX FIFO's depth before the write: {before:?}: \
+             {primed:?} {last:?} {view:?}",
             ticks[i].late
         );
     }
