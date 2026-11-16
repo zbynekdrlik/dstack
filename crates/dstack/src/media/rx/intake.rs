@@ -40,7 +40,11 @@
 //! P) the waits include the time to its next callback, and a packet is
 //! `late` (a hole lost) past P plus the time since its last drain
 //! ([`reads_apart`]) instead of P plus the pump's block: the reader has
-//! read exactly that far.
+//! read exactly that far. Two edges are counted loosely (counters only,
+//! no audio effect): after the reader's clock stepped back (it waits at a
+//! position past now less P) a packet between the two reads as not late,
+//! and after a gap the reader skips (it starts again at now) the skipped
+//! packets read as not late and their holes are lost at the next drain.
 //! A datagram to a slot without a flow is read and counted `stray` by the
 //! RX thread in both cases (under the pump up to
 //! [`super::UNPLANNED_DRAIN`] at each of its wakes, at least every
@@ -139,8 +143,10 @@ impl Intake {
     /// read until its socket is empty (at most [`PUMP_DRAIN`] datagrams),
     /// the holes behind the playout given up. A slot whose flow is new is
     /// emptied first: what waited there came before the flow (counted
-    /// `stray`). Never blocks.
-    pub fn drain_into_rings(&mut self, now_ns: Option<u64>) {
+    /// `stray`). Never blocks. Returns `true` when every socket read was
+    /// left empty (`false`: a slot hit [`PUMP_DRAIN`] and has more; the
+    /// pump drains it again at its next block, an idle drain at once).
+    pub fn drain_into_rings(&mut self, now_ns: Option<u64>) -> bool {
         if self.app {
             let now = now_ns.map(|ns| clock::to_samples(ns, self.shared.rate));
             self.gap = since(self.last_drain, now);
@@ -154,6 +160,7 @@ impl Intake {
         // and holds nothing of an older flow.
         let fresh = self.refresh();
         self.expire(now_ns);
+        let mut emptied = true;
         for (slot, fresh) in fresh.into_iter().enumerate() {
             let Some(lane) = self.lanes.get(slot).filter(|l| l.plan.src.is_some()) else {
                 continue;
@@ -171,10 +178,11 @@ impl Intake {
             if fresh && let Some(stats) = self.shared.lanes.get(slot) {
                 discard(stats, &mut self.buf[..], PUMP_DRAIN, read);
             }
-            self.receive(slot, now_ns, mono, wall, PUMP_DRAIN, read);
+            emptied &= self.receive(slot, now_ns, mono, wall, PUMP_DRAIN, read);
         }
         self.expire(now_ns);
         self.shared.handles.ack(moves);
+        emptied
     }
 
     /// The RX thread's part of its pass, for the slots in `ready` (one bit

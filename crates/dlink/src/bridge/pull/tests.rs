@@ -208,21 +208,65 @@ fn an_idle_drain_keeps_the_flow_heard_and_the_next_pull_starts_afresh() {
     r.clock.sleep_until(ns_of(T + P + 10, RATE));
     assert_eq!(r.pull.pull(), 10);
     assert_eq!(stats.pulls(), 2);
-    // The consumer stops; another thread drains: the packet is placed,
-    // nothing goes into the FIFO.
+    // The consumer stops; another thread drains: the packet is read (the
+    // flow is heard) but placed nowhere, and nothing goes into the FIFO.
     send(&r.rx, T + 10, 64);
     r.clock.sleep_until(ns_of(T + P + 74, RATE));
     r.pull.drain_idle();
-    assert_eq!(r.rx.lane(0).packets, 1);
-    assert_eq!(r.rings[0].counters().written, 64);
+    let c = r.rx.lane(0);
+    assert_eq!((c.packets, c.unplaced, c.late), (1, 1, 0), "{c:?}");
+    assert_eq!(r.rings[0].counters().written, 0);
     assert_eq!(r.fifo.len(), 10);
     assert_eq!((stats.pulls(), stats.idle_drains()), (2, 1));
+    // A packet 200 behind (past P + a block of 128, within P + the time
+    // since the idle drain) at the next pull: not late, placed.
+    send(&r.rx, T + P + 300 - 200 - P, 4);
+    r.clock.sleep_until(ns_of(T + P + 300, RATE));
     // The next pull starts at now: nothing read, no restart.
-    r.clock.sleep_until(ns_of(T + P + 100, RATE));
     assert_eq!(r.pull.pull(), 0);
-    r.clock.sleep_until(ns_of(T + P + 104, RATE));
+    let c = r.rx.lane(0);
+    assert_eq!((c.packets, c.unplaced, c.late), (2, 1, 0), "{c:?}");
+    r.clock.sleep_until(ns_of(T + P + 304, RATE));
     assert_eq!(r.pull.pull(), 4);
     assert_eq!(stats.restarts(), 0);
+}
+
+#[test]
+fn an_idle_drain_empties_a_backlog_past_one_drain() {
+    let mut r = rig(0);
+    assert_eq!(r.pull.pull(), 0);
+    let sender = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let mut out = [0u8; 1500];
+    let backlog = dstack::media::rx::PUMP_DRAIN as u64 + 40;
+    for k in 0..backlog {
+        let (secs, sub) = dstack::clock::stamp(T + k, RATE);
+        let n = dstack::media::packet::write(&mut out, secs, sub, 1, 3, 1, |_, _| 1 << 8);
+        sender
+            .send_to(&out[..n], r.rx.local_addr(0).unwrap())
+            .unwrap();
+    }
+    std::thread::sleep(Duration::from_millis(50));
+    r.clock.sleep_until(ns_of(T + P + backlog, RATE));
+    r.pull.drain_idle();
+    let c = r.rx.lane(0);
+    assert_eq!((c.packets, c.unplaced), (backlog, backlog), "{c:?}");
+}
+
+#[test]
+fn the_idle_watch_sees_a_consumer_stop_and_come_back_and_the_restarts() {
+    let mut w = IdleWatch::default();
+    let look = |idle, changed, restarts_rose| Look {
+        idle,
+        changed,
+        restarts_rose,
+    };
+    // The first look: idle until the consumer pulled once.
+    assert_eq!(w.look(0, 0), look(true, true, 0));
+    assert_eq!(w.look(5, 0), look(false, true, 0));
+    assert_eq!(w.look(9, 2), look(false, false, 2));
+    assert_eq!(w.look(9, 2), look(true, true, 0), "stopped");
+    assert_eq!(w.look(9, 3), look(true, false, 1));
+    assert_eq!(w.look(10, 3), look(false, true, 0), "back");
 }
 
 #[test]

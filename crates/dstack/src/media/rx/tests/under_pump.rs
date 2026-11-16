@@ -393,6 +393,67 @@ fn under_the_app_a_packet_is_late_past_p_and_the_time_since_its_last_drain() {
     assert_eq!(late_after_two_drains(|s| s.pump_intake()), 3);
 }
 
+/// A hole of 32 frames ending 100 behind a drain at `n` (one-ring device
+/// written by `claim`, drains at `n - 480` and `n`), then drains at each
+/// of `later`: the lane's lost holes (`gaps`) after each.
+fn gaps_after(claim: impl Fn(&Arc<RxShared>) -> Option<Intake>, later: &[u64]) -> Vec<u64> {
+    let s = shared(1);
+    let mut intake = claim(&s).expect("the claim");
+    let mut p = plan(LOOPBACK, 1, true, 1);
+    p.block = 32;
+    publish(&s, &[(0, p)], &[(0, RxRoute { flow: 0, slot: 0 })]);
+    let n = P0 + 480;
+    intake.drain_into_rings(Some(ns_of(P0, RATE)));
+    let t = transmitter(LOOPBACK);
+    for at in [n - 196, n - 164, n - 100] {
+        t.send_to(&packet_at(at, 1, 32), slot_addr(&s, 0)).unwrap();
+    }
+    settle();
+    intake.drain_into_rings(Some(ns_of(n, RATE)));
+    let c = s.lane(0);
+    assert_eq!((c.packets, c.late, c.gaps), (3, 0, 0), "{c:?}");
+    later
+        .iter()
+        .map(|&at| {
+            intake.drain_into_rings(Some(ns_of(at, RATE)));
+            s.lane(0).gaps
+        })
+        .collect()
+}
+
+#[test]
+fn under_the_app_a_hole_is_lost_once_its_reader_has_read_past_it() {
+    // dstack #307. At a drain 480 later the app's reader has read only to
+    // its last drain less P (n - 192): the hole (to n - 100) is still
+    // ahead of it. At a drain 10 after that it has read past: lost. The
+    // pump reads every block: lost at the first.
+    let n = P0 + 480;
+    assert_eq!(gaps_after(|s| s.app_intake(), &[n + 480, n + 490]), [0, 1]);
+    assert_eq!(gaps_after(|s| s.pump_intake(), &[n + 480]), [1]);
+}
+
+#[test]
+fn a_drain_says_whether_it_left_every_socket_empty() {
+    let s = shared(1);
+    let mut intake = s.pump_intake().unwrap();
+    publish(
+        &s,
+        &[(0, plan(LOOPBACK, 1, false, 1))],
+        &[(0, RxRoute { flow: 0, slot: 0 })],
+    );
+    assert!(intake.drain_into_rings(None), "nothing waits");
+    let t = transmitter(LOOPBACK);
+    let n = PUMP_DRAIN as u64 + 3;
+    for k in 0..n {
+        t.send_to(&packet_at(P0 + k, 1, 1), slot_addr(&s, 0))
+            .unwrap();
+    }
+    settle();
+    assert!(!intake.drain_into_rings(None), "the cap was hit: more wait");
+    assert!(intake.drain_into_rings(None), "the rest, then empty");
+    assert_eq!(s.lane(0).packets, n);
+}
+
 #[test]
 fn the_reader_s_step_is_the_block_until_the_app_has_drained_twice() {
     use crate::media::rx::intake::{reads_apart, since};

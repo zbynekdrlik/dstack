@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use dlink::bridge::pull::PullStats;
+use dlink::bridge::pull::{IdleWatch, PullStats};
 use dlink::bridge::{AppBuffer, RxPull};
 use dlink::{Block, Link, Map, Process};
 use dlisten::cli::{self, Options};
@@ -69,12 +69,10 @@ pub struct Session {
     /// stream's last callback beside the new one's skips a pull, never
     /// waits.
     pull: Arc<Mutex<RxPull>>,
-    /// The pull's counts, and their values at the last [`Session::keep_pulled`].
+    /// The pull's counts, and the main thread's watch over them
+    /// ([`Session::keep_pulled`]).
     pull_stats: Arc<PullStats>,
-    pulls_seen: u64,
-    restarts_seen: u64,
-    /// No output pulled since the look before: the main thread drains.
-    idle: bool,
+    watch: IdleWatch,
     stats: Arc<Stats>,
     rate: u32,
     /// The app buffer the players keep (dstack #247).
@@ -183,9 +181,7 @@ impl Session {
             fifo,
             pull_stats: pull.stats(),
             pull: Arc::new(Mutex::new(pull)),
-            pulls_seen: 0,
-            restarts_seen: 0,
-            idle: false,
+            watch: IdleWatch::default(),
             stats: Arc::default(),
             rate,
             buffer,
@@ -383,7 +379,7 @@ impl Session {
         }
     }
 
-    /// The main thread's look at the RX pull, once a second (dstack #307).
+    /// The main thread's look at the RX pull, every 250 ms (dstack #307).
     /// While no output pulls (none open, a stream that stopped calling
     /// back), it drains the flow sockets itself, so the flow stays heard
     /// and the device keeps it ([`RxPull::drain_idle`]); a callback that
@@ -398,32 +394,31 @@ impl Session {
             tracing::warn!("dlisten: an RX pull panicked; pulling on");
             self.pull.clear_poison();
         }
-        let pulls = self.pull_stats.pulls();
-        let idle = pulls == self.pulls_seen;
-        self.pulls_seen = pulls;
-        if idle != self.idle {
-            self.idle = idle;
-            if idle {
-                tracing::warn!(
-                    pulls,
-                    "dlisten: no output pulls the audio: draining it from the main thread"
-                );
-            } else {
-                tracing::info!(pulls, "dlisten: the output pulls the audio again");
-            }
+        let (pulls, restarts) = (self.pull_stats.pulls(), self.pull_stats.restarts());
+        let look = self.watch.look(pulls, restarts);
+        if look.changed && look.idle {
+            tracing::warn!(
+                pulls,
+                "dlisten: no output pulls the audio: draining it from the main thread"
+            );
+        } else if look.changed {
+            tracing::info!(pulls, "dlisten: the output pulls the audio again");
         }
-        if idle && let Ok(mut pull) = self.pull.try_lock() {
+        // Under the lock, only while no callback pulled since the look: a
+        // callback that resumed in between keeps its read position.
+        if look.idle
+            && let Ok(mut pull) = self.pull.try_lock()
+            && self.pull_stats.pulls() == pulls
+        {
             pull.drain_idle();
         }
-        let restarts = self.pull_stats.restarts();
-        if restarts != self.restarts_seen {
+        if look.restarts_rose > 0 {
             tracing::warn!(
                 restarts,
-                rose = restarts.wrapping_sub(self.restarts_seen),
+                rose = look.restarts_rose,
                 frames = self.pull_stats.frames(),
                 "dlisten: the RX pull started again at now (a gap past the FIFO or a clock step)"
             );
-            self.restarts_seen = restarts;
         }
     }
 

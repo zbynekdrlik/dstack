@@ -167,6 +167,7 @@ fn a_stalled_pump_leaves_the_output_s_bridge_whole() {
     // flow's audio is heard (and kept alive) only through it. The window
     // judged starts SETTLE after the channel reads Receiving.
     let receiving = Arc::new(AtomicU64::new(0));
+    let pulled = pull.stats();
     let output = {
         let (stats, receiving, fifo) = (
             Arc::clone(&stats),
@@ -225,6 +226,8 @@ fn a_stalled_pump_leaves_the_output_s_bridge_whole() {
     let heard = output.join().expect("the output thread");
     let channel = receiver.rx_channels().remove(0);
     let pump = receiver.media().engine().expect("the receiver's pump");
+    let sent = sender.media().engine().expect("the sender's pump");
+    let ring = receiver.media().rx.rings()[0].counters();
     let late: u64 = (0..dstack::media::rx::MAX_FLOWS)
         .map(|s| receiver.media().rx.lane(s).late)
         .sum();
@@ -240,7 +243,8 @@ fn a_stalled_pump_leaves_the_output_s_bridge_whole() {
     assert_eq!(
         (heard.underruns, heard.off),
         (0, 0),
-        "bridge underruns and samples off the level with {stalls} pump stalls: {heard:?}, {pump:?}, {channel:?}"
+        "bridge underruns and samples off the level with {stalls} pump stalls: {heard:?}, {pump:?}, {channel:?}, the ring {ring:?}, the pull's restarts {}, the sender's pump {sent:?}",
+        pulled.restarts()
     );
     // The pull drains every callback: a packet is late only past P and the
     // time since the last drain (a callback's 10 ms), never on the pump's

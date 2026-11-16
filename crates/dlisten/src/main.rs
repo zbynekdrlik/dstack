@@ -14,7 +14,7 @@
 use std::fs::File;
 use std::process::ExitCode;
 use std::sync::mpsc::{self, RecvTimeoutError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use dlisten::cli::{self, Command, Options};
 use dlisten::outputs;
@@ -34,12 +34,14 @@ use os_linux as os;
 #[cfg(windows)]
 use win as os;
 
-/// How often the main thread wakes (dtray's choices come at once).
-const WAKE: Duration = Duration::from_secs(1);
-/// Every how many wakes the status is logged (10 s).
-const LOG_EVERY: u32 = 10;
-/// Every how many wakes the output devices are read again (5 s).
-const OUTPUTS_EVERY: u32 = 5;
+/// The main thread's tick (dtray's choices come at once): the RX pull's
+/// look (dstack #307: an idle drain keeps the flow alive within its 2 s,
+/// so a tick is kept on time whatever event came between).
+const TICK: Duration = Duration::from_millis(250);
+/// Every how many ticks the status is logged (10 s).
+const LOG_EVERY: u32 = 40;
+/// Every how many ticks the output devices are read again (5 s).
+const OUTPUTS_EVERY: u32 = 20;
 
 fn main() -> ExitCode {
     #[cfg(windows)]
@@ -130,9 +132,25 @@ fn run(o: &Options) -> Result<(), String> {
         let _ = events.send(Event::Stop);
     })?;
 
-    let mut wakes: u32 = 0;
+    let mut ticks: u32 = 0;
+    let mut next_tick = Instant::now() + TICK;
     let result = loop {
-        match inbox.recv_timeout(WAKE) {
+        let event = inbox.recv_timeout(next_tick.saturating_duration_since(Instant::now()));
+        if Instant::now() >= next_tick {
+            next_tick = (next_tick + TICK).max(Instant::now());
+            ticks = ticks.wrapping_add(1);
+            session.keep_pulled();
+            if ticks.is_multiple_of(OUTPUTS_EVERY) {
+                session.refresh_outputs();
+            }
+            if ticks.is_multiple_of(LOG_EVERY) {
+                tracing::info!("dlisten: {}", session.line());
+            }
+            if let Some(why) = session.ended() {
+                break Err(format!("the Dante device ended: {why}"));
+            }
+        }
+        match event {
             Ok(Event::Stop) => {
                 tracing::info!("dlisten: Ctrl+C, stopping");
                 break Ok(());
@@ -142,19 +160,8 @@ fn run(o: &Options) -> Result<(), String> {
                     tracing::warn!("dlisten: the output {n}: {e}");
                 }
             }
-            Err(RecvTimeoutError::Timeout) => {
-                wakes = wakes.wrapping_add(1);
-                session.keep_pulled();
-                if wakes.is_multiple_of(OUTPUTS_EVERY) {
-                    session.refresh_outputs();
-                }
-                if wakes.is_multiple_of(LOG_EVERY) {
-                    tracing::info!("dlisten: {}", session.line());
-                }
-                if let Some(why) = session.ended() {
-                    break Err(format!("the Dante device ended: {why}"));
-                }
-            }
+            // The tick above ran when it was due.
+            Err(RecvTimeoutError::Timeout) => {}
             // The session holds a sender (its command hook): never.
             Err(RecvTimeoutError::Disconnected) => break Ok(()),
         }

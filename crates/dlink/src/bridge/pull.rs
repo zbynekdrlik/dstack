@@ -77,6 +77,54 @@ pub fn reach(capacity: usize) -> usize {
     capacity.min(SLOTS / 2)
 }
 
+/// The most drains one [`RxPull::drain_idle`] makes to empty the sockets
+/// (each reads up to dstack's `PUMP_DRAIN`, 512 datagrams a slot: 32 768
+/// in all, 2.7 s of a 48 kHz flow at 4 frames a packet, ten looks of
+/// 250 ms).
+pub const IDLE_PASSES: usize = 64;
+
+/// What the thread that watches a pull sees at a look ([`IdleWatch`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Look {
+    /// No pull since the look before: drain for the consumer
+    /// ([`RxPull::drain_idle`]).
+    pub idle: bool,
+    /// `idle` differs from the look before (log it).
+    pub changed: bool,
+    /// The restarts since the look before ([`PullStats::restarts`]).
+    pub restarts_rose: u64,
+}
+
+/// The watch a thread other than the consumer's keeps over a pull, looked
+/// at on a steady period (dlisten's main thread, every 250 ms): whether
+/// the consumer still pulls, and the restarts' rise.
+#[derive(Debug, Default)]
+pub struct IdleWatch {
+    pulls: u64,
+    restarts: u64,
+    idle: bool,
+}
+
+impl IdleWatch {
+    /// The look at `pulls` and `restarts` ([`PullStats`]) now. The first
+    /// look sees the consumer pulling as soon as it pulled once.
+    pub fn look(&mut self, pulls: u64, restarts: u64) -> Look {
+        let idle = pulls == self.pulls;
+        let changed = idle != self.idle;
+        let restarts_rose = restarts.wrapping_sub(self.restarts);
+        *self = IdleWatch {
+            pulls,
+            restarts,
+            idle,
+        };
+        Look {
+            idle,
+            changed,
+            restarts_rose,
+        }
+    }
+}
+
 /// What a pull does ([`due`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Due {
@@ -269,8 +317,19 @@ impl RxPull {
     /// flow is heard and kept alive, and forgets the read position, so the
     /// next [`RxPull::pull`] starts afresh at now (no restart counted).
     /// Reads nothing into the FIFO.
+    ///
+    /// What waited is read until the sockets are empty (at most
+    /// [`IDLE_PASSES`] drains) and counted `unplaced`, never written: no
+    /// reader is there, and a backlog of up to a look's period is stale.
+    /// One last drain at now then marks the time, so the next pull judges
+    /// its packets against the time since this drain.
     pub fn drain_idle(&mut self) {
         self.stats.idle_drains.fetch_add(1, Ordering::Relaxed);
+        for _ in 0..IDLE_PASSES {
+            if self.intake.drain_into_rings(None) {
+                break;
+            }
+        }
         self.intake.drain_into_rings(self.clock.now_ns());
         self.next = None;
     }
