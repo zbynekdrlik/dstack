@@ -122,6 +122,17 @@ fn the_walker_refuses_a_malformed_heartbeat() {
     let mut padded = good.clone();
     padded[peaks + 27] = 1;
     assert!(walk::heartbeat(&padded).unwrap_err().contains("padding"));
+    // 0x8004 (the last record) cut to one slot, beside 0x8003's two.
+    let late = record_at(&good, &beat, 0x8004);
+    let mut one_slot = good[..late + 24].to_vec();
+    for (at, value) in [(2, late + 24), (late, 24), (late + 6, 12), (late + 12, 1)] {
+        one_slot[at..at + 2].copy_from_slice(&u16::try_from(value).unwrap().to_be_bytes());
+    }
+    assert!(
+        walk::heartbeat(&one_slot)
+            .unwrap_err()
+            .contains("2 slots of lateness, 1 of late counts")
+    );
     let mut longer = good.clone();
     longer.extend([0; 4]);
     let n = u16::try_from(longer.len()).unwrap();
@@ -196,18 +207,25 @@ fn our_record_heads_are_the_hardware_s() {
     }
 }
 
-/// An info request for `op` (the request opcode's byte 3).
+/// An info request for `op` (the request opcode's byte 3), as Dante
+/// Controller's captured one.
 fn request(op: u8) -> Vec<u8> {
-    let mut d = vec![0u8; HEADER_LEN];
-    d[0..2].copy_from_slice(&[0xff, 0xff]);
-    d[2..4].copy_from_slice(&(HEADER_LEN as u16).to_be_bytes());
-    d[16..24].copy_from_slice(b"Audinate");
-    d[24..32].copy_from_slice(&[0x07, 0x2a, 0x00, op, 0, 0, 0, 0]);
-    d
+    asking([0x07, 0x2a, 0x00, op, 0, 0, 0, 0])
+}
+
+/// The clock stats' bytes that differ between the UltimoX2 and our reply
+/// for a reason: the frequency, our own, the master's and the
+/// grandmaster's ids (0x08-0x21, 0x98-0xaf, masked in the fixture), and a
+/// count per clock port that is 2 on the UltimoX2 and 1 on the Brooklyn II
+/// our template is (0x6b, 0x7b, 0x8b).
+fn ours_by_device(at: usize) -> bool {
+    matches!(at, 0x08..=0x21 | 0x6b | 0x7b | 0x8b | 0x98..=0xaf)
 }
 
 /// Every reply we send on the info group walks, and the network info and
 /// clock stats have the UltimoX2's sizes and fixed words (one interface).
+/// These replies hold no length-walked records: the header's length is
+/// their walk, and the bodies are compared with the hardware's.
 #[test]
 fn our_info_replies_walk_and_take_the_hardware_s_sizes() {
     let mut mc = InfoBuilder::new(identity());
@@ -232,6 +250,10 @@ fn our_info_replies_walk_and_take_the_hardware_s_sizes() {
     let ours = walk::info(&mc.answer(&request(0x21)).unwrap()).unwrap();
     assert_eq!(ours.opcode[2..], hw_clock.opcode[2..]);
     assert_eq!(ours.body.len(), hw_clock.body.len());
+    let differ: Vec<usize> = (0..ours.body.len())
+        .filter(|&at| !ours_by_device(at) && ours.body[at] != hw_clock.body[at])
+        .collect();
+    assert!(differ.is_empty(), "clock stats bytes {differ:x?}");
 }
 
 /// The channel-change notification for any set of RX channels, an odd

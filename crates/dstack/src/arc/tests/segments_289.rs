@@ -17,6 +17,10 @@ use crate::arc::flows::tests::hex;
 
 const CARD: &str = include_str!("../../../tests/fixtures/arc_289_card.json");
 
+/// Each list's record length in the card's layout (`layout/0x2400
+/// record` and so on in the fixture): 40, 56 and 68 bytes.
+const RECORD_LEN: [(&str, usize); 3] = [("0x2400", 40), ("0x3400", 56), ("0x3600", 68)];
+
 fn fixture() -> serde_json::Value {
     serde_json::from_str(CARD).expect("the fixture is JSON")
 }
@@ -101,10 +105,14 @@ fn segment(p: &[u8], at: usize) -> Result<(usize, usize), String> {
 }
 
 /// A page's records (0x2400, 0x3400, 0x3600): 6 zero bytes after the
-/// header, `[slots, count]`, the offsets; each record walked.
-fn walk_page(p: &[u8]) -> Result<Vec<usize>, String> {
+/// header, `[slots, count]`, the offsets; each record walked. Returns each
+/// record's offset and length.
+fn walk_page(p: &[u8]) -> Result<Vec<(usize, usize)>, String> {
     framed(p)?;
-    let (slots, count) = (usize::from(p[16]), usize::from(p[17]));
+    let Some(&[slots, count]) = p.get(16..18) else {
+        return Err(format!("a page of {} bytes", p.len()));
+    };
+    let (slots, count) = (usize::from(slots), usize::from(count));
     if count > slots || 18 + 2 * slots > p.len() {
         return Err(format!(
             "a page of {count} in {slots} slots, {} bytes",
@@ -114,18 +122,19 @@ fn walk_page(p: &[u8]) -> Result<Vec<usize>, String> {
     (0..count)
         .map(|k| {
             let at = word(p, 18 + 2 * k)?;
-            walk_record(p, at).map(|_| at)
+            walk_record(p, at).map(|len| (at, len))
         })
         .collect()
 }
 
 /// An RX flow's mapping node (0x3600): from the record's second segment,
-/// the node's offset; the first RX channel, the node's byte count (even),
-/// no next node, the bytes, all inside the reply.
+/// the node's offset; the first RX channel, the node's byte count (at
+/// least 1: the card's holds 2 for 2 channels, one sample, so evenness is
+/// not required), no next node, the bytes, all inside the reply.
 fn walk_mapping(p: &[u8], record: usize) -> Result<(), String> {
     let node = word(p, record + 54)?;
     let (count, next) = (word(p, node + 2)?, word(p, node + 4)?);
-    if count < 2 || !count.is_multiple_of(2) || next != 0 || node + 6 + count > p.len() {
+    if count == 0 || next != 0 || node + 6 + count > p.len() {
         return Err(format!(
             "mapping at {node}: {count} bytes, next {next}, reply of {}",
             p.len()
@@ -152,18 +161,18 @@ fn the_walker_reads_every_record_of_the_card_and_the_adapter() {
     assert_eq!(walk_counts(&card("replies", "0x1000")), Ok(40));
     assert_eq!(walk_counts(&card("second_device", "0x1000")), Ok(40));
     assert_eq!(walk_names(&card("replies", "0x1003")), Ok((10, 20)));
-    for op in ["0x2400", "0x3400", "0x3600"] {
+    for (op, len) in RECORD_LEN {
         let p = card("replies", op);
         let records = walk_page(&p).unwrap_or_else(|e| panic!("{op}: {e}"));
         assert!(!records.is_empty(), "{op}");
+        assert!(records.iter().all(|&(_, l)| l == len), "{op}: {records:?}");
         if op == "0x3600" {
-            assert_eq!(walk_record(&p, records[0]), Ok(68));
-            walk_mapping(&p, records[0]).unwrap();
+            walk_mapping(&p, records[0].0).unwrap();
         }
     }
     // Broken one rule at a time, the walker refuses.
     let p = card("replies", "0x3600");
-    let at = walk_page(&p).unwrap()[0];
+    let at = walk_page(&p).unwrap()[0].0;
     let with = |pos: usize, b: u8| {
         let mut q = p.clone();
         q[pos] = b;
@@ -190,6 +199,9 @@ fn the_walker_reads_every_record_of_the_card_and_the_adapter() {
     let mut short = p.clone();
     short.pop();
     assert!(framed(&short).unwrap_err().contains("length field"));
+    let mut cut = p[..17].to_vec();
+    cut[3] = 17;
+    assert!(walk_page(&cut).unwrap_err().contains("a page of 17"));
 }
 
 /// Odd channel counts and odd name lengths (a name of 1, 2, 3 bytes), the
@@ -229,6 +241,8 @@ fn our_2809_records_walk_for_odd_counts_and_names() {
                 "{rx}/{tx} {op}: {} records",
                 records.len()
             );
+            let len = RECORD_LEN.iter().find(|(o, _)| *o == op).unwrap().1;
+            assert!(records.iter().all(|&(_, l)| l == len), "{rx}/{tx} {op}");
         }
     }
 }
@@ -252,8 +266,7 @@ fn our_rx_flow_records_walk_for_odd_spans() {
         receiving(&mut dev.rx, subs, &net);
         let p = sent_bytes(dev.send(&card("requests", "0x3600")));
         let records = walk_page(&p).unwrap();
-        assert_eq!(records.len(), 1, "{subs:?}");
-        assert_eq!(walk_record(&p, records[0]), Ok(68));
-        walk_mapping(&p, records[0]).unwrap();
+        assert_eq!(records, [(records[0].0, 68)], "{subs:?}");
+        walk_mapping(&p, records[0].0).unwrap();
     }
 }

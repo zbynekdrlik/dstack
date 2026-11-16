@@ -32,7 +32,12 @@
 //! - 0x8004, each flow slot's late count: `n, 0, 20, 0`, then `n` `u32`s.
 //!
 //! 0x8000 and 0x8001 (clock records) are walked, not read. Each type
-//! comes at most once; the order differs between devices.
+//! comes at most once; the order differs between devices; 0x8003 and
+//! 0x8004 list the same number of slots.
+//!
+//! The info packets (start code 0xffff) are walked by the header alone;
+//! the channel-change notification's mask rule is inferno's, not yet a
+//! hardware capture's ([`info`]).
 
 // Each user (a unit test module, an integration test) takes what it needs.
 #![allow(dead_code)]
@@ -187,12 +192,8 @@ pub fn heartbeat(d: &[u8]) -> Result<Heartbeat, String> {
         }
         // 0x8000 states 4 there on both devices that send it (a record of
         // 36 and of 52 bytes), every other record its content's length.
-        let stated = if kind == 0x8000 {
-            len.min(16) - RECORD_HEAD
-        } else {
-            len - RECORD_HEAD
-        };
-        if content != stated {
+        let stated = if kind == 0x8000 { 4 } else { len - RECORD_HEAD };
+        if content != stated || content > len - RECORD_HEAD {
             return Err(format!(
                 "record {kind:04x} at {at}: content length {content} for a record of {len}"
             ));
@@ -224,6 +225,15 @@ pub fn heartbeat(d: &[u8]) -> Result<Heartbeat, String> {
         beat.records.push((kind, len));
         at += len;
     }
+    if let (Some((_, lateness)), Some(late)) = (&beat.lateness, &beat.late)
+        && lateness.len() != late.len()
+    {
+        return Err(format!(
+            "{} slots of lateness, {} of late counts",
+            lateness.len(),
+            late.len()
+        ));
+    }
     Ok(beat)
 }
 
@@ -238,11 +248,14 @@ pub struct Info {
 pub const CHANNEL_CHANGE: [u8; 8] = [0x07, 0x2a, 0x01, 0x02, 0x00, 0x00, 0x00, 0x00];
 
 /// Walks the info packet `d` strictly: the header (start code, the length
-/// field equal to the datagram's size, the vendor), a reply's opcode
-/// `07 xx 0y yy 00 00 00 00`, and for a channel-change notification its
-/// mask's length (`u16`, at least 1) and the mask, ending exactly at the
-/// datagram's end (inferno's layout; no hardware notification is
-/// captured yet).
+/// field equal to the datagram's size, the vendor) and a reply's opcode
+/// `07 xx 0y yy 00 00 00 00`. The replies to 8700 hold no records a reader
+/// steps through by length: the header's length is their one length to
+/// walk, and their bodies are compared with the hardware's in the tests.
+/// For a channel-change notification also its mask's length (`u16`, at
+/// least 1) and the mask, ending exactly at the datagram's end. That one
+/// rule is inferno's layout, the source our writer follows too, NOT a
+/// hardware capture: no hardware notification is captured yet (#349).
 pub fn info(d: &[u8]) -> Result<Info, String> {
     let opcode = header(d, INFO_START)?;
     if opcode[0] != 0x07 || opcode[4..] != [0, 0, 0, 0] {
