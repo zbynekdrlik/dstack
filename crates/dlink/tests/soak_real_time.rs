@@ -6,8 +6,8 @@
 //! model.
 //!
 //! Both run on the app's clock ([`dstack::clock::app_monotonic_ns`]: Linux
-//! `CLOCK_MONOTONIC`, Windows raw QPC), which the ticks (`Instant`) and the
-//! TX FIFO's write stamps read too: the pump's media clock is a
+//! `CLOCK_MONOTONIC`, Windows raw QPC), which the ticks and the TX FIFO's
+//! write stamps read too: the pump's media clock is a
 //! [`SkewedClock`] at 0 ppm on it. Its waits still sleep on the media
 //! threads' own clock, but a wall step there only moves a wake: the time
 //! each wake reads is the app's. A bare `MonoClock` that no poller ever fed
@@ -35,18 +35,34 @@
 //! which the player does not own; at a tick on time only where the pump
 //! itself restarted. The dry read of a hold is at the owed tick the loop runs
 //! at once after it, so the tick after a late one counts as held too.
+//!
+//! A failure names the thread that lost the audio (dstack #339,
+//! `soak/verdict.rs`): RUNNER when every loss the rules refuse had the app's
+//! thread or the pump not run long enough to lose it (the app's write
+//! landing late, read where it landed; the pump's late wakes, merged as they
+//! come), else OURS. The run fails either way: a run the box starved tested
+//! nothing, and the verdict only says whether a rerun can pass. Neither
+//! thread can be made to ride out such a stall here: the app writes on its
+//! own tick into a FIFO whose target is the device's fixed app buffer (the
+//! tick and a pump block, dstack #247), and the pump's margin is the
+//! device's W; either one larger is another latency, not the default's
+//! test.
 
 #[path = "soak/harness.rs"]
 mod harness;
+#[path = "soak/verdict.rs"]
+mod verdict;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use dlink::bridge::player::hard_excess_s;
 use dstack::clock::{PtpClock, SkewedClock, TestClockPpm, app_monotonic_ns};
-use dstack::stream::PumpView;
+use dstack::stream::{PumpStats, PumpView};
 
 use harness::*;
+use verdict::{Wakes, losses, verdict};
 
 /// A tick this late (the app's thread held: the runner's load) may cost
 /// one TX gap: at OBS's 22.67 ms target the sawtooth's bottom is about
@@ -57,12 +73,55 @@ const LATE_TICK: Duration = Duration::from_millis(5);
 
 /// What one tick saw: its lateness past its due time, whether a TX gap
 /// (a dropout or a re-centre) came since the last tick, and the RX
-/// dropouts since the last tick.
-#[derive(Debug, Clone, Copy)]
+/// dropouts since the last tick; and the threads' record a verdict reads
+/// (dstack #339).
+#[derive(Debug, Clone, Copy, Default)]
 struct Tick {
     late: Duration,
     gap: bool,
     rx: u64,
+    /// The TX gap held an underrun, a re-centre or both.
+    underrun: bool,
+    recentre: bool,
+    /// The wall time at the tick's start, at its TX depth read and after its
+    /// counts, whole ms since the Unix epoch (the clock of the pump's late
+    /// wakes).
+    top_ms: u64,
+    depth_at_ms: u64,
+    end_ms: u64,
+    /// The TX depth read after the tick's start, and where the tick's TX
+    /// write landed after that read, ms of the app's clock
+    /// (`Fifo::last_write`).
+    depth_after_ms: f64,
+    wrote_ms: f64,
+    /// The TX FIFO's depth before the write and the RX FIFO's before the
+    /// read, ms.
+    tx_depth_ms: f64,
+    rx_depth_ms: f64,
+    /// The pump since the last tick: its overruns, its writes after the TX
+    /// thread sent, and its blocks over two periods (the histogram's top);
+    /// its longest block since the start, µs.
+    overruns: u64,
+    after_send: u64,
+    long_blocks: u64,
+    max_process_us: u64,
+}
+
+/// The wall time now, whole ms since the Unix epoch.
+fn unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
+}
+
+/// The pump's blocks over two periods since the start (the process
+/// histogram's overflow bucket).
+fn long_blocks(stats: &PumpStats) -> u64 {
+    let h = stats.histograms();
+    h.process
+        .iter()
+        .find(|&&(b, _)| b == h.top_us)
+        .map_or(0, |&(_, n)| n)
 }
 
 /// Whether tick `i` is held or catches up after a held one: it or the
@@ -102,7 +161,11 @@ fn gap_on_time(ticks: &[Tick]) -> Option<usize> {
 fn a_gap_counts_only_at_a_late_tick() {
     let on_time = Duration::from_millis(1);
     let late = LATE_TICK;
-    let t = |late, gap| Tick { late, gap, rx: 0 };
+    let t = |late, gap| Tick {
+        late,
+        gap,
+        ..Tick::default()
+    };
     assert_eq!(gap_on_time(&[t(on_time, false), t(late, true)]), None);
     assert_eq!(gap_on_time(&[t(on_time, false), t(on_time, true)]), Some(1));
     let just_under = LATE_TICK - Duration::from_nanos(1);
@@ -116,8 +179,8 @@ fn an_rx_dropout_counts_against_the_restarts_only_at_a_tick_on_time() {
     let just_under = LATE_TICK - Duration::from_nanos(1);
     let t = |late, rx| Tick {
         late,
-        gap: false,
         rx,
+        ..Tick::default()
     };
     assert_eq!(rx_on_time(&[t(LATE_TICK, 1), t(on_time, 0)]), 0);
     assert_eq!(rx_on_time(&[t(on_time, 1), t(just_under, 2)]), 3);
@@ -154,38 +217,72 @@ fn one_minute_in_real_time() {
     )
     .unwrap();
     let period = Duration::from_secs_f64(CHUNK as f64 / f64::from(APP_RATE));
+    let ms = |frames: usize| frames as f64 * 1e3 / f64::from(APP_RATE);
     let mut ticker = Ticker::new();
-    let start = Instant::now();
+    // The ticks run on the app's clock, which the TX FIFO's write stamps
+    // read too (dstack #339: where a write landed).
+    let start = app_monotonic_ns();
     let mut deadline = start;
     let mut primed: Option<(Counts, PumpView)> = None;
     let mut ticks = Vec::with_capacity(3000);
-    let mut gaps = 0;
-    let mut rx = 0;
-    // The TX FIFO's depth before each tick's write, ms: the sawtooth's
-    // bottom, shown with a failure.
-    let mut depths = Vec::with_capacity(3000);
-    while start.elapsed() < REAL {
-        let late = Instant::now().saturating_duration_since(deadline);
-        let depth_ms = p.tx_fifo.len() as f64 * 1e3 / f64::from(APP_RATE);
+    let mut wakes = Wakes::default();
+    let mut last = (
+        Counts::of(&p, T0),
+        p.pump_stats.view(),
+        long_blocks(&p.pump_stats),
+    );
+    while app_monotonic_ns() - start < REAL.as_nanos() as i64 {
+        let top_ms = unix_ms();
+        let top = app_monotonic_ns();
+        let late = Duration::from_nanos((top - deadline).max(0) as u64);
+        // The FIFOs' depths before the write and the read: the TX
+        // sawtooth's bottom and the RX read's room.
+        let tx_depth_ms = ms(p.tx_fifo.len());
+        let depth_at = app_monotonic_ns();
+        let depth_at_ms = unix_ms();
+        let rx_depth_ms = ms(p.rx_fifo.len());
         ticker.tick(&mut p);
+        let wrote = p.tx_fifo.last_write().map_or(depth_at, |w| w.at_ns);
         let counts = Counts::of(&p, T0);
+        let view = p.pump_stats.view();
+        let long = long_blocks(&p.pump_stats);
+        let w = p.pump_stats.wakes();
+        wakes.merge(
+            w.late_wakes(),
+            w.recent()
+                .into_iter()
+                .map(|w| (w.unix_ms, w.behind_us, w.rebootstrap)),
+        );
         if primed.is_none() && !p.tx_stats.priming() && !p.rx_stats.priming() {
-            primed = Some((counts, p.pump_stats.view()));
-            gaps = counts.tx_sum();
-            rx = counts.rx_underruns;
+            primed = Some((counts, view));
+            last = (counts, view, long);
         }
         if primed.is_some() {
+            let (was, was_view, was_long) = last;
             ticks.push(Tick {
                 late,
-                gap: counts.tx_sum() != gaps,
-                rx: counts.rx_underruns - rx,
+                gap: counts.tx_sum() != was.tx_sum(),
+                rx: counts.rx_underruns - was.rx_underruns,
+                underrun: counts.tx_underruns != was.tx_underruns,
+                recentre: counts.tx_recentres != was.tx_recentres,
+                top_ms,
+                depth_at_ms,
+                end_ms: unix_ms(),
+                depth_after_ms: (depth_at - top) as f64 / 1e6,
+                wrote_ms: (wrote - depth_at) as f64 / 1e6,
+                tx_depth_ms,
+                rx_depth_ms,
+                overruns: view.overruns - was_view.overruns,
+                after_send: view.writes_after_send - was_view.writes_after_send,
+                long_blocks: long - was_long,
+                max_process_us: view.max_process_us,
             });
-            depths.push(depth_ms);
-            gaps = counts.tx_sum();
-            rx = counts.rx_underruns;
         }
-        deadline += period;
-        std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
+        last = (counts, view, long);
+        deadline += period.as_nanos() as i64;
+        std::thread::sleep(Duration::from_nanos(
+            (deadline - app_monotonic_ns()).max(0) as u64
+        ));
     }
     stop.store(true, Ordering::SeqCst);
     let ended = Instant::now() + Duration::from_secs(5);
@@ -206,21 +303,32 @@ fn one_minute_in_real_time() {
         ticks.len(),
         last.tx_ppm
     );
+    // Which thread lost the audio, for every loss the rules below refuse
+    // (dstack #339): printed with any failure.
+    let target_ms = p.buffer.target_s() * 1e3;
+    let excess_ms = hard_excess_s(p.buffer.target_s(), p.buffer.chunk_s()) * 1e3;
+    let judged = losses(&ticks, &wakes, restarts, target_ms, excess_ms);
+    let verdict = verdict(&judged, wakes.lost());
     if let Some(i) = gap_on_time(&ticks) {
         let from = i.saturating_sub(5);
         let before: Vec<String> = (from..=i)
-            .map(|j| format!("{j}: {:?} late, {:.2} ms", ticks[j].late, depths[j]))
+            .map(|j| {
+                format!(
+                    "{j}: {:?} late, {:.2} ms",
+                    ticks[j].late, ticks[j].tx_depth_ms
+                )
+            })
             .collect();
         panic!(
             "a TX gap at tick {i}, {:?} late (under {LATE_TICK:?}); the ticks up to it, \
              late and the TX FIFO's depth before the write: {before:?}: \
-             {primed:?} {last:?} {view:?}",
+             {primed:?} {last:?} {view:?}\n{verdict}",
             ticks[i].late
         );
     }
     if let Some(i) = rx_twice_late(&ticks) {
         panic!(
-            "{} RX dropouts at tick {i}, {:?} late: {primed:?} {last:?} {view:?}",
+            "{} RX dropouts at tick {i}, {:?} late: {primed:?} {last:?} {view:?}\n{verdict}",
             ticks[i].rx, ticks[i].late
         );
     }
@@ -228,7 +336,7 @@ fn one_minute_in_real_time() {
     assert!(
         rx_on_time(&ticks) <= restarts,
         "RX dropouts at ticks on time past the pump's own restarts ({restarts}; \
-         {rx_late} at late ticks): {primed:?} {last:?} {view:?}"
+         {rx_late} at late ticks): {primed:?} {last:?} {view:?}\n{verdict}"
     );
     assert!(view.blocks > 40_000, "{view:?}");
 }

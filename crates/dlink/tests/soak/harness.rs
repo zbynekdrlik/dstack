@@ -123,6 +123,12 @@ pub(crate) struct Ends {
     /// The app's RX reads.
     pub(crate) rx_player: Player,
     pub(crate) rx_stats: Arc<Stats>,
+    /// The RX bridge's FIFO, which the pump writes and the app's
+    /// `rx_player` reads (its depth before a read, dstack #339).
+    pub(crate) rx_fifo: Arc<Fifo>,
+    /// Both bridges' target and the app's chunk (dstack #339: what a TX
+    /// re-centre takes).
+    pub(crate) buffer: AppBuffer,
     pub(crate) marks: Arc<Mutex<Vec<Mark>>>,
     /// The TX output's tone gaps ([`App::tx_tone`]).
     pub(crate) tx_tone_gaps: Arc<std::sync::atomic::AtomicU64>,
@@ -202,7 +208,7 @@ fn path_on(simulated: bool) -> Path {
         tx_tone_gaps: Arc::clone(&tx_tone_gaps),
         tx,
         out: vec![0.0; 4 * CHUNK * CHANNELS],
-        rx: rx_fifo,
+        rx: Arc::clone(&rx_fifo),
         marks: Arc::clone(&marks),
     };
     let rated = Rated::new(
@@ -258,6 +264,8 @@ fn path_on(simulated: bool) -> Path {
             tx_stats,
             rx_player,
             rx_stats,
+            rx_fifo,
+            buffer,
             marks,
             tx_tone_gaps,
             tx_tone_locked,
