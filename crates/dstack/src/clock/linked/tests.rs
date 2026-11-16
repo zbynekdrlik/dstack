@@ -157,7 +157,9 @@ impl Follow for Arc<Fake> {
     /// A follower on the service's clock runs with it: the time between
     /// `set` and the selector's reads (a preempted test thread, a step of
     /// the wall a bare `MonoClock` reads on Windows) never moves the offset
-    /// the selector measures (v0.6.151's tag CI on windows-2025).
+    /// the selector measures (v0.6.151's tag CI on windows-2025). A wall
+    /// step between the selector's own reads (microseconds apart) still
+    /// counts, as it would for a real follower.
     fn now_ns(&self) -> Option<i64> {
         let time = self.0.lock().unwrap().0.clone();
         match time {
@@ -523,12 +525,17 @@ fn a_follower_that_disagrees_waits_then_takes_over_with_a_new_epoch() {
     }
     set(&fake, service_now_plus(&service, off), UNSETTLED);
     assert_eq!(linked.tick(), Source::Service);
-    set(
-        &fake,
-        service_now_plus(&service, off + 1_000_000),
-        ALIVE_LOCKED,
-    );
-    assert_eq!(linked.tick(), Source::Service, "the wait starts again");
+    // A whole wait less one round again: without the reset of the count
+    // and the mark the second round would re-align.
+    for round in 0..HANDOVER_WAIT - 1 {
+        off += 1_000_000;
+        set(&fake, service_now_plus(&service, off), ALIVE_LOCKED);
+        assert_eq!(
+            linked.tick(),
+            Source::Service,
+            "the wait starts again, round {round}"
+        );
+    }
 }
 
 /// A forced switch (the follower in use lost its anchor) never waits: a
