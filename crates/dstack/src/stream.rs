@@ -41,8 +41,7 @@
 //!   its outputs dropped, while the clock is not ready, so commands, meters
 //!   and the engine's status keep flowing and nothing is sent.
 //!   [`Pump::block`] is the real-time part (I7: no allocation, lock, log or
-//!   system call but the clock reads: the time and, on Linux, the thread's
-//!   CPU time ([`split`], dstack #354); `tests/hot_path.rs`, rtsan): `process`
+//!   system call but the clock read; `tests/hot_path.rs`, rtsan): `process`
 //!   inside `catch_unwind`, a panic zeroes the block and the processor is
 //!   never called again (the backends' crash model).
 //! - [`PumpStats`]: what the engine's status and the control socket read,
@@ -340,11 +339,6 @@ pub struct Pump<P: Process> {
     /// drain's packet judge (finer than a sample); taken by the next
     /// [`Pump::media`] at that time.
     read_ns: Option<u64>,
-    /// The sleep the thread asked for after the last media step: its
-    /// target and the clock when it asked, ns, and the clock's epoch then
-    /// ([`Pump::sleeping`], dstack #354); taken by the next
-    /// [`Pump::media`].
-    asleep: Option<(u64, u64, u32)>,
 }
 
 impl<P: Process> Pump<P> {
@@ -390,7 +384,6 @@ impl<P: Process> Pump<P> {
             played: play_at::Track::default(),
             intake,
             read_ns: None,
-            asleep: None,
         }
     }
 
@@ -410,16 +403,6 @@ impl<P: Process> Pump<P> {
             let datagrams = u64::try_from(intake.datagrams()).unwrap_or(u64::MAX);
             self.stats.drained(nanos(began.elapsed()), datagrams);
         }
-    }
-
-    /// The thread sleeps until media time `target_ns`, asked at `asked_ns`
-    /// (the media clock read just before the sleep; `None`: not read) with
-    /// the clock at `epoch`: the next [`Pump::media`] at the same epoch
-    /// records how late the sleep returned ([`split::oversleep_ns`], dstack
-    /// #354). A wait the thread asked for a time already past records
-    /// nothing (its lateness is the blocks' and drains' before it).
-    pub fn sleeping(&mut self, target_ns: u64, asked_ns: Option<u64>, epoch: u32) {
-        self.asleep = asked_ns.map(|asked| (target_ns, asked, epoch));
     }
 
     /// Reads the app's clock (`app_ns`, [`crate::clock::app_monotonic_ns`]
@@ -478,14 +461,6 @@ impl<P: Process> Pump<P> {
             .take()
             .filter(|&ns| to_samples(ns, rate) == now)
             .unwrap_or_else(|| ns_of(now, rate));
-        // How late the sleep before this wake returned (dstack #354): on the
-        // epoch it was asked on (a new one moved the clock).
-        if let Some((target, asked, epoch)) = self.asleep.take()
-            && epoch == anchor.epoch
-            && let Some(late) = split::oversleep_ns(target, asked, drain_ns)
-        {
-            self.stats.overslept(late);
-        }
         let before = self.engine_shift;
         if self.epoch != Some(anchor.epoch) {
             self.engine_shift = self
@@ -570,7 +545,7 @@ impl<P: Process> Pump<P> {
                         self.stats.late.fetch_add(1, Ordering::Relaxed);
                     }
                     self.drain(Some(drain_ns));
-                    self.block(start);
+                    self.cpu_timed(|pump| pump.block(start));
                 }
                 Due::Wait { until } => break until,
                 Due::Rebootstrap { skipped, cause } => {
@@ -589,14 +564,26 @@ impl<P: Process> Pump<P> {
     pub fn free(&mut self) {
         self.stats.media.store(false, Ordering::Relaxed);
         self.blocks = None;
-        self.asleep = None;
         // Packets keep coming: read (counted unplaced), never left to fill
         // their sockets.
         self.drain(None);
-        let entry = self.enter();
-        self.input.fill(0.0);
-        let fault = self.run_processor(None, None);
-        self.leave(entry, fault);
+        self.cpu_timed(|pump| {
+            let entry = pump.enter();
+            pump.input.fill(0.0);
+            let fault = pump.run_processor(None, None);
+            pump.leave(entry, fault);
+        });
+    }
+
+    /// Runs `block` (one block) and records the thread's CPU time over it
+    /// ([`split::thread_cpu_ns`], dstack #354): read outside
+    /// [`Pump::block`], as on Linux it is a system call (no vDSO).
+    fn cpu_timed(&mut self, block: impl FnOnce(&mut Self)) {
+        let before = split::thread_cpu_ns();
+        block(self);
+        if let Some(cpu) = split::cpu_between(before, split::thread_cpu_ns()) {
+            self.stats.record_cpu(cpu);
+        }
     }
 
     /// The block whose inputs are stamped `start`…`start + B − 1` (the
@@ -647,10 +634,8 @@ impl<P: Process> Pump<P> {
         self.leave(entry, fault);
     }
 
-    /// A block's start: the interval since the last one's; its time and
-    /// the thread's CPU time then ([`split::thread_cpu_ns`], dstack #354).
-    fn enter(&mut self) -> (Instant, Option<u64>) {
-        let cpu = split::thread_cpu_ns();
+    /// A block's start: the interval since the last one's.
+    fn enter(&mut self) -> Instant {
         let now = Instant::now();
         if let Some(before) = self.last_entry.replace(now) {
             self.stats
@@ -658,16 +643,12 @@ impl<P: Process> Pump<P> {
                 .interval
                 .record(nanos(now.saturating_duration_since(before)));
         }
-        (now, cpu)
+        now
     }
 
-    /// A block's end: its own time and thread CPU time recorded, and a
-    /// fault after it.
-    fn leave(&mut self, entry: (Instant, Option<u64>), fault: Option<Box<dyn Any + Send>>) {
-        let took = nanos(entry.0.elapsed());
-        if let Some(cpu) = split::cpu_between(entry.1, split::thread_cpu_ns()) {
-            self.stats.record_cpu(cpu);
-        }
+    /// A block's end: its own time recorded, and a fault after it.
+    fn leave(&mut self, entry: Instant, fault: Option<Box<dyn Any + Send>>) {
+        let took = nanos(entry.elapsed());
         self.stats.record(took);
         if let Some(payload) = fault {
             self.stats.fault(panic_message(&*payload), took);

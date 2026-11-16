@@ -9,10 +9,11 @@
 //! each has its own peak (since the start in [`super::PumpView`] and the
 //! status, that second's in the pump watch's warning):
 //!
-//! - **The sleep returned late** (`oversleep`): the wake's clock read less
-//!   the time the sleep was asked to end ([`oversleep_ns`]). Large here and
-//!   the late wake was the scheduler's: the thread was not run when its
-//!   timer fired.
+//! - **The sleep returned late** (`oversleep`): the media clock read right
+//!   after the sleep returned less the time it was asked to end
+//!   ([`oversleep_ns`], [`super::PumpStats::slept`]). Large here and the
+//!   late wake was the scheduler's: the thread was not run when its timer
+//!   fired.
 //! - **The drain ran long** (`drain`, `drain_datagrams`): each socket drain
 //!   before a block ([`crate::media::rx::Intake::drain_into_rings`]), its
 //!   wall time and the datagrams it read. It grows with the backlog (about
@@ -92,7 +93,10 @@ pub fn thread_cpu_ns() -> Option<u64> {
 pub fn timespec_ns(rc: i32, secs: i64, nanos: i64) -> Option<u64> {
     let secs = u64::try_from(secs).ok()?;
     let nanos = u64::try_from(nanos).ok()?;
-    (rc == 0).then(|| secs * 1_000_000_000 + nanos)
+    if rc != 0 {
+        return None;
+    }
+    secs.checked_mul(1_000_000_000)?.checked_add(nanos)
 }
 
 #[cfg(not(target_os = "linux"))]

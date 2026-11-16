@@ -10,45 +10,54 @@ use crate::device::TimingProfile;
 
 use super::drain::{flow_rig, send};
 
-/// A sleep asked before its target and returned late is recorded at the
-/// next wake, on the same epoch only; a sleep asked for a time already
-/// past (the work ran into it), an unread ask and free pacing record none.
+/// A sleep asked before its target and returned late is recorded, on one
+/// epoch only; a sleep asked for a time already past (the work ran into
+/// it), an unread clock and a new epoch record none.
 #[test]
-fn the_wake_after_a_sleep_records_how_late_the_sleep_returned() {
-    let mut r = rig(Map::default(), &[], &[]);
-    let wake = r.pump.media(T, 0);
-    let ns = |s: u64| ns_of(s, RATE);
-    // Asked 10 samples before its target, woke 96 samples (1 ms) past it.
-    r.pump.sleeping(ns(wake), Some(ns(wake - 10)), 0);
-    let wake = r.pump.media(wake + 96, 0);
-    assert_eq!(r.stats.view().oversleep_max_us, 1_000);
-    // Taken once: the next wake records only its own sleep.
-    let wake = r.pump.media(wake, 0);
-    assert_eq!(r.stats.view().oversleep_max_us, 1_000);
+fn a_sleep_records_how_late_it_returned() {
+    let s = PumpStats::new(TIMING, RATE);
+    // Asked 0.1 ms before its target, woke 1 ms past it.
+    s.slept(10_000_000, Some(9_900_000), Some(11_000_000), true);
+    assert_eq!(s.view().oversleep_max_us, 1_000);
     // A target already past at the ask: no sleep, nothing recorded.
-    r.pump.sleeping(ns(wake), Some(ns(wake)), 0);
-    let wake = r.pump.media(wake + 192, 0);
-    assert_eq!(r.stats.view().oversleep_max_us, 1_000);
-    // An ask that read no clock: nothing.
-    r.pump.sleeping(ns(wake), None, 0);
-    let wake = r.pump.media(wake + 192, 0);
-    assert_eq!(r.stats.view().oversleep_max_us, 1_000);
-    // A new epoch at the wake (the clock moved): nothing.
-    r.pump.sleeping(ns(wake), Some(ns(wake - 10)), 0);
-    let wake = r.pump.media(wake + 192, 1);
-    assert_eq!(r.stats.view().oversleep_max_us, 1_000);
-    // Free pacing between the ask and the wake: nothing.
-    r.pump.sleeping(ns(wake), Some(ns(wake - 10)), 1);
-    r.pump.free();
-    let wake = r.pump.media(wake + 192, 1);
-    assert_eq!(r.stats.view().oversleep_max_us, 1_000);
-    // A later, larger one on the same epoch: the peak.
-    r.pump.sleeping(ns(wake), Some(ns(wake - 10)), 1);
-    r.pump.media(wake + 192, 1);
-    let v = r.stats.view();
-    assert_eq!(v.oversleep_max_us, 2_000);
-    assert_eq!(r.stats.take_second_split().oversleep_us, 2_000);
-    assert_eq!(r.stats.take_second_split().oversleep_us, 0, "afresh");
+    s.slept(10_000_000, Some(10_000_000), Some(18_000_000), true);
+    // A clock not read before or after: nothing.
+    s.slept(10_000_000, None, Some(18_000_000), true);
+    s.slept(10_000_000, Some(9_900_000), None, true);
+    // A new epoch across the sleep (the clock moved): nothing.
+    s.slept(10_000_000, Some(9_900_000), Some(18_000_000), false);
+    assert_eq!(s.view().oversleep_max_us, 1_000);
+    assert_eq!(s.take_second_split().oversleep_us, 1_000);
+    // A later, larger one: the peak; the second's afresh.
+    s.slept(20_000_000, Some(19_000_000), Some(22_000_999), true);
+    assert_eq!(s.view().oversleep_max_us, 2_000);
+    assert_eq!(s.take_second_split().oversleep_us, 2_000);
+    assert_eq!(s.take_second_split().oversleep_us, 0, "afresh");
+}
+
+/// The pump thread records its sleeps: a pump on a running clock has
+/// slept within the bound (a wake reads the clock after its target, so
+/// the peak is above 0; its size is the scheduler's, so the test proves
+/// the wiring only).
+#[test]
+fn the_pump_thread_records_its_sleeps() {
+    use crate::clock::{SkewedClock, TestClockPpm, app_monotonic_ns};
+    use std::sync::atomic::AtomicBool;
+    let r = rig(Map::default(), &[], &[]);
+    let stats = Arc::clone(&r.stats);
+    let clock: Arc<dyn PtpClock> =
+        Arc::new(SkewedClock::new(app_monotonic_ns(), 0, TestClockPpm(0.0)));
+    let stop = Arc::new(AtomicBool::new(false));
+    let thread = spawn(clock, r.pump, Arc::clone(&stop)).unwrap();
+    let began = Instant::now();
+    let mut slept = false;
+    while !slept && began.elapsed() < BOUND {
+        std::thread::sleep(Duration::from_millis(20));
+        slept = stats.oversleep_ns.max() > 0;
+    }
+    stop.store(true, std::sync::atomic::Ordering::Release);
+    thread.join().unwrap();
+    assert!(slept, "no sleep recorded: {:?}", stats.view());
 }
 
 /// Each drain before a block records its own time and the datagrams it
@@ -146,7 +155,8 @@ fn a_block_records_its_thread_cpu_time_beside_its_wall_time() {
     // On a loaded box the spin gets part of its 20 ms; never more than
     // its wall time.
     assert!(cpu >= 1_000, "spun 20 ms: {cpu} us of CPU");
-    assert!(cpu <= working.max_process_us + 1, "{working:?}");
+    // The CPU window holds the block's wall window and two clock reads.
+    assert!(cpu <= working.max_process_us + 50, "{working:?}");
 }
 
 /// Off Linux a block's CPU time is unmeasured: absent, never a 0.

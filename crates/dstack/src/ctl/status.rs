@@ -264,7 +264,7 @@ impl Json {
 ///   `wake_behind_max_us` (since the start), `wake_behind_minute_max_us`
 ///   (the last whole minute, absent before the first); the lost time split
 ///   by cause since the start ([`crate::stream::split`], dstack #354):
-///   `oversleep_max_us` (the latest sleep's return past its target),
+///   `oversleep_max_us` (the largest return of a sleep past its target),
 ///   `drain_max_us` and `drain_max_datagrams` (the longest socket drain
 ///   before a block, the most datagrams one drain read), `max_process_cpu_us`
 ///   (the largest block's thread CPU time; absent where unmeasured, off

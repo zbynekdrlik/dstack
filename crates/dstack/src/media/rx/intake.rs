@@ -209,9 +209,10 @@ impl Intake {
         emptied
     }
 
-    /// The datagrams the last [`Intake::drain_into_rings`] read from its
-    /// sockets, every one (placed, stray, refused, or emptied from a new
-    /// flow's slot): the drain's work (dstack #354).
+    /// The datagrams the last [`Intake::drain_into_rings`] (or the RX
+    /// thread's last pass) read from its sockets, every one (placed, stray,
+    /// refused, or emptied from a new flow's slot): the drain's work
+    /// (dstack #354).
     pub fn datagrams(&self) -> usize {
         self.datagrams
     }

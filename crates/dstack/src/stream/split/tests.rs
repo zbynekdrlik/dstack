@@ -50,6 +50,10 @@ fn a_timespec_is_its_seconds_and_nanoseconds() {
     assert_eq!(timespec_ns(-1, 3, 250), None);
     assert_eq!(timespec_ns(0, -1, 250), None);
     assert_eq!(timespec_ns(0, 3, -1), None);
+    // A read past u64's ns (585 years past 1970) is none, never a wrap.
+    assert_eq!(timespec_ns(0, 18_446_744_074, 0), None);
+    assert_eq!(timespec_ns(0, 18_446_744_073, 709_551_615), Some(u64::MAX));
+    assert_eq!(timespec_ns(0, 18_446_744_073, 709_551_616), None);
 }
 
 #[cfg(target_os = "linux")]
