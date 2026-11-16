@@ -250,6 +250,13 @@ fn an_idle_drain_empties_a_backlog_past_one_drain() {
     r.pull.drain_idle();
     let c = r.rx.lane(0);
     assert_eq!((c.packets, c.unplaced), (backlog, backlog), "{c:?}");
+    // A second look, nothing waiting: counted, the read position forgotten.
+    r.pull.drain_idle();
+    assert_eq!(r.pull.stats().idle_drains(), 2);
+    assert_eq!(
+        format!("{:?}", r.pull),
+        format!("RxPull {{ channels: [0, 1], next: None, playout: {P}, rate: {RATE}, .. }}")
+    );
 }
 
 #[test]
