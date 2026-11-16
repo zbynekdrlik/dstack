@@ -88,6 +88,18 @@ struct Heard {
     off: u64,
     /// The bridge's underruns in the judged window.
     underruns: u64,
+    /// The FIFO's depth, frames, summed over two looks a callback (after
+    /// the pull, at the sawtooth's top, and after the fill, at its foot),
+    /// and the looks.
+    depth: u64,
+    looks: u64,
+}
+
+impl Heard {
+    /// The FIFO's mean depth over the judged window, ms.
+    fn mean_depth_ms(&self) -> f64 {
+        self.depth as f64 / self.looks.max(1) as f64 * 1e3 / f64::from(RATE)
+    }
 }
 
 #[test]
@@ -156,7 +168,11 @@ fn a_stalled_pump_leaves_the_output_s_bridge_whole() {
     // judged starts SETTLE after the channel reads Receiving.
     let receiving = Arc::new(AtomicU64::new(0));
     let output = {
-        let (stats, receiving) = (Arc::clone(&stats), Arc::clone(&receiving));
+        let (stats, receiving, fifo) = (
+            Arc::clone(&stats),
+            Arc::clone(&receiving),
+            Arc::clone(&fifo),
+        );
         std::thread::spawn(move || {
             let mut out = vec![0f32; PERIOD_FRAMES];
             let mut heard = Heard::default();
@@ -170,7 +186,9 @@ fn a_stalled_pump_leaves_the_output_s_bridge_whole() {
                     std::thread::sleep(wait);
                 }
                 pull.pull();
+                let top = fifo.len();
                 player.fill_with(&mut out, 1, |x| x as f32);
+                let foot = fifo.len();
                 if receiving.load(Ordering::Acquire) == 0 {
                     if began.elapsed() > Duration::from_secs(15) {
                         return heard;
@@ -186,6 +204,8 @@ fn a_stalled_pump_leaves_the_output_s_bridge_whole() {
                     heard.underruns = stats.underruns() - before;
                     break;
                 }
+                heard.depth += (top + foot) as u64;
+                heard.looks += 2;
                 for &x in &out {
                     if (f64::from(x) - LEVEL).abs() < 1e-2 {
                         heard.on += 1;
@@ -205,6 +225,9 @@ fn a_stalled_pump_leaves_the_output_s_bridge_whole() {
     let heard = output.join().expect("the output thread");
     let channel = receiver.rx_channels().remove(0);
     let pump = receiver.media().engine().expect("the receiver's pump");
+    let late: u64 = (0..dstack::media::rx::MAX_FLOWS)
+        .map(|s| receiver.media().rx.lane(s).late)
+        .sum();
     assert_eq!((sender.ended(), receiver.ended()), (None, None));
     assert!(matches!(receiver.stop(), Stopped::Done));
     assert!(matches!(sender.stop(), Stopped::Done));
@@ -218,5 +241,26 @@ fn a_stalled_pump_leaves_the_output_s_bridge_whole() {
         (heard.underruns, heard.off),
         (0, 0),
         "bridge underruns and samples off the level with {stalls} pump stalls: {heard:?}, {pump:?}, {channel:?}"
+    );
+    // The pull drains every callback: a packet is late only past P and the
+    // time since the last drain (a callback's 10 ms), never on the pump's
+    // block.
+    assert_eq!(late, 0, "packets counted late: {channel:?}");
+    // No latency added. A sample is due at its position + P; it then waits
+    // in the ring until it is read, and in the FIFO until it is played.
+    // Pulled, the ring wait is the time to the next callback and the FIFO
+    // holds its foot between callbacks, so the mean of the top (after the
+    // pull) and the foot is the whole wait. Written by the pump (dlisten up
+    // to v0.6.152), the wait is the FIFO's mean plus half a pump block in
+    // the ring. Measured on dev1 without stalls at this target (12.667 ms:
+    // the period + one pump block): 13.63 ms + 1.33 ms = 14.96 ms written
+    // by the pump, 14.34 ms pulled. The bound is the target + one pump
+    // block (15.33 ms), under the pump path's own wait.
+    let target_ms = buffer.target_ns() as f64 / 1e6;
+    let block_ms = buffer.block_ns() as f64 / 1e6;
+    let mean = heard.mean_depth_ms();
+    assert!(
+        mean > target_ms - 1.0 && mean < target_ms + block_ms,
+        "mean wait {mean:.2} ms against the target {target_ms:.3} ms + a block {block_ms:.3} ms: {heard:?}"
     );
 }

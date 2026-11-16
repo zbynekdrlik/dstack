@@ -190,10 +190,46 @@ fn a_flow_read_later_than_p_is_read_at_its_own_delay() {
 }
 
 #[test]
-fn a_read_longer_than_a_piece_is_read_whole() {
+fn a_pull_reads_at_most_the_fifo_or_half_a_ring() {
+    // 0.5 s FIFOs: 24 000 frames at 48 kHz, 96 000 at 192 kHz (past the
+    // ring's 65 536: half a ring).
+    assert_eq!(reach(24_000), 24_000);
+    assert_eq!(reach(SLOTS / 2), SLOTS / 2);
+    assert_eq!(reach(SLOTS / 2 + 1), SLOTS / 2);
+    assert_eq!(reach(96_000), 32_768);
+    assert_eq!(reach(super::super::fifo_for(2, 192_000).capacity()), 32_768);
+}
+
+#[test]
+fn an_idle_drain_keeps_the_flow_heard_and_the_next_pull_starts_afresh() {
+    let mut r = rig(0);
+    let stats = r.pull.stats();
+    assert_eq!(r.pull.pull(), 0);
+    r.clock.sleep_until(ns_of(T + P + 10, RATE));
+    assert_eq!(r.pull.pull(), 10);
+    assert_eq!(stats.pulls(), 2);
+    // The consumer stops; another thread drains: the packet is placed,
+    // nothing goes into the FIFO.
+    send(&r.rx, T + 10, 64);
+    r.clock.sleep_until(ns_of(T + P + 74, RATE));
+    r.pull.drain_idle();
+    assert_eq!(r.rx.lane(0).packets, 1);
+    assert_eq!(r.rings[0].counters().written, 64);
+    assert_eq!(r.fifo.len(), 10);
+    assert_eq!((stats.pulls(), stats.idle_drains()), (2, 1));
+    // The next pull starts at now: nothing read, no restart.
+    r.clock.sleep_until(ns_of(T + P + 100, RATE));
+    assert_eq!(r.pull.pull(), 0);
+    r.clock.sleep_until(ns_of(T + P + 104, RATE));
+    assert_eq!(r.pull.pull(), 4);
+    assert_eq!(stats.restarts(), 0);
+}
+
+#[test]
+fn a_read_longer_than_a_callback_is_read_whole() {
     let mut r = rig(0);
     assert_eq!(r.pull.pull(), 0);
-    let frames = 2 * PIECE as u64 + 10;
+    let frames = 2_000;
     r.clock.sleep_until(ns_of(T + P + frames, RATE));
     assert_eq!(r.pull.pull(), frames as usize);
     assert_eq!(r.fifo.len(), frames as usize);

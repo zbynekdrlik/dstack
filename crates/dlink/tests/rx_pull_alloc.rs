@@ -3,7 +3,7 @@
 //! `RxPull::pull` allocates nothing (dstack #307): it runs on the output's
 //! callback, the thread with the deadline. Each pull drains the flow's
 //! socket (packets waiting there), reads the rings into the FIFO (a read
-//! longer than one piece too), waits on a clock behind its last read and
+//! of a whole callback in one push), waits on a clock behind its last read and
 //! starts again after a gap past the FIFO, all under `assert_no_alloc`
 //! (warn mode: the violation count must stay zero). Its own test binary,
 //! because it installs the global allocator; the first test proves the
@@ -30,6 +30,8 @@ const T: u64 = 10 * 365 * 86_400 * RATE as u64;
 const P: u64 = 96;
 /// Frames a packet.
 const FPP: usize = 32;
+/// A little over one sample at [`RATE`], ns.
+const ONE_SAMPLE_NS: i64 = 20_834;
 
 #[test]
 fn the_detector_sees_an_allocation() {
@@ -100,8 +102,12 @@ fn a_pull_allocates_nothing() {
         clock.sleep_until(ns_of(at + 480 + P, RATE));
         assert_no_alloc(|| {
             written += pull.pull();
-            // The clock behind the last read: nothing to read.
+            // The same clock: an empty read.
             written += pull.pull();
+            // The clock a sample behind the last read: it waits.
+            clock.re_anchor(-ONE_SAMPLE_NS);
+            assert_eq!(pull.pull(), 0);
+            clock.re_anchor(ONE_SAMPLE_NS);
             assert!(fifo.pop_planar(&mut out[..2 * 480], 480));
         });
     }

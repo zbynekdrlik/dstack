@@ -35,6 +35,12 @@
 //! includes the wait for the next block (at most a block, plus the pump's
 //! own lateness), and the write delay likewise. `late`, `wire_late`,
 //! `late_at_read` and the ring counts are judged as before, at the read.
+//! Under an app's consumer (dstack #307, [`RxShared::app_intake`]: an
+//! output callback that drains, then reads the rings up to its now less
+//! P) the waits include the time to its next callback, and a packet is
+//! `late` (a hole lost) past P plus the time since its last drain
+//! ([`reads_apart`]) instead of P plus the pump's block: the reader has
+//! read exactly that far.
 //! A datagram to a slot without a flow is read and counted `stray` by the
 //! RX thread in both cases (under the pump up to
 //! [`super::UNPLANNED_DRAIN`] at each of its wakes, at least every
@@ -90,6 +96,15 @@ pub struct Intake {
     buf: Box<[u8; BUFFER]>,
     /// One packet's samples, channel slot by channel slot.
     frames: Box<[[i32; FRAMES_MAX]; MAX_CHANNELS]>,
+    /// The app's consumer drains (dstack #307, [`RxShared::app_intake`]):
+    /// its reads are apart by its own period, not the pump's block.
+    app: bool,
+    /// Under the app: the last drain's PTP time, samples (`None`: none
+    /// yet, or the clock was not ready).
+    last_drain: Option<u64>,
+    /// Under the app: the samples since the drain before this one, the
+    /// reader's step ([`reads_apart`]).
+    gap: Option<u64>,
 }
 
 impl Intake {
@@ -102,6 +117,19 @@ impl Intake {
             buf: Box::new([0; BUFFER]),
             frames: Box::new([[0; FRAMES_MAX]; MAX_CHANNELS]),
             shared,
+            app: false,
+            last_drain: None,
+            gap: None,
+        }
+    }
+
+    /// The writer of an app that drains on its own consumer's thread
+    /// (dstack #307): a packet is late, and a hole lost, against the time
+    /// since its last drain instead of the pump's block.
+    pub(super) fn for_app(shared: Arc<RxShared>) -> Self {
+        Intake {
+            app: true,
+            ..Intake::new(shared)
         }
     }
 
@@ -113,6 +141,11 @@ impl Intake {
     /// emptied first: what waited there came before the flow (counted
     /// `stray`). Never blocks.
     pub fn drain_into_rings(&mut self, now_ns: Option<u64>) {
+        if self.app {
+            let now = now_ns.map(|ns| clock::to_samples(ns, self.shared.rate));
+            self.gap = since(self.last_drain, now);
+            self.last_drain = now;
+        }
         let moves = self.shared.handles.moves();
         let wall = self.shared.stamps().then(wall_now_ns).flatten();
         let mono = self.shared.now_ns();
@@ -185,13 +218,13 @@ impl Intake {
 
     /// At PTP time `now_ns` (`None`: our clock is not ready, nothing to
     /// do), each flow's holes wholly behind its playout point (its latency
-    /// and block before now) are lost: the pump has read past them (dstack
-    /// #278).
+    /// and the reader's step before now, [`reads_apart`]) are lost: the
+    /// reader has read past them (dstack #278).
     fn expire(&mut self, now_ns: Option<u64>) {
         let Some(ns) = now_ns else { return };
         let now = clock::to_samples(ns, self.shared.rate);
         for (lane, stats) in self.lanes.iter_mut().zip(self.shared.lanes.iter()) {
-            let limit = u64::from(lane.plan.latency) + u64::from(lane.plan.block);
+            let limit = u64::from(lane.plan.latency) + reads_apart(lane.plan.block, self.gap);
             count_lost(stats, lane.holes.expire(now.saturating_sub(limit)));
         }
     }
@@ -281,6 +314,7 @@ impl Intake {
             lanes,
             buf,
             frames,
+            gap,
             ..
         } = self;
         let (Some(lane), Some(stats)) = (lanes.get_mut(slot), shared.lanes.get(slot)) else {
@@ -349,6 +383,7 @@ impl Intake {
                 count(&stats.unplaced);
                 continue;
             };
+            let step = reads_apart(lane.plan.block, *gap);
             place(PlaceArgs {
                 stats,
                 lane,
@@ -363,10 +398,27 @@ impl Intake {
                 nslots,
                 wake,
                 at_ns,
+                step,
             });
         }
         false
     }
+}
+
+/// The reader's step, samples: how far past a flow's playout point it may
+/// have read when the writer places a packet. The pump's (and the RX
+/// thread's) is the plan's `block`; an app that drains on its own
+/// consumer's thread (dstack #307) reads up to its drain's now less P, so
+/// its step is the time since its last drain (`gap`; the block until it
+/// has one).
+pub(super) fn reads_apart(block: u16, gap: Option<u64>) -> u64 {
+    gap.unwrap_or(u64::from(block))
+}
+
+/// Samples from `last` to `now` (`None` when either is unknown or the
+/// clock went back).
+pub(super) fn since(last: Option<u64>, now: Option<u64>) -> Option<u64> {
+    now?.checked_sub(last?)
 }
 
 /// Which socket the pump reads for a slot whose plan names `group`: the
@@ -432,6 +484,8 @@ struct PlaceArgs<'a> {
     nslots: usize,
     wake: Option<u64>,
     at_ns: Option<u64>,
+    /// The reader's step, samples ([`reads_apart`]).
+    step: u64,
 }
 
 /// A packet judged and placed: its lateness, the judge, `late` and
@@ -454,6 +508,7 @@ fn place(p: PlaceArgs<'_>) {
         nslots,
         wake,
         at_ns,
+        step,
     } = p;
     let count = |a: &AtomicU64| {
         a.fetch_add(1, Ordering::Relaxed);
@@ -467,7 +522,7 @@ fn place(p: PlaceArgs<'_>) {
         .min_lateness_ns
         .0
         .fetch_min(now_ns.saturating_sub(ns_of(pos, rate)), Ordering::Relaxed);
-    let limit = u64::from(lane.plan.latency) + u64::from(lane.plan.block);
+    let limit = u64::from(lane.plan.latency) + step;
     let late = lateness > limit;
     if late {
         count(&stats.late);

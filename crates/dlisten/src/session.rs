@@ -17,6 +17,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, PoisonError};
 
+use dlink::bridge::pull::PullStats;
 use dlink::bridge::{AppBuffer, RxPull};
 use dlink::{Block, Link, Map, Process};
 use dlisten::cli::{self, Options};
@@ -68,6 +69,12 @@ pub struct Session {
     /// stream's last callback beside the new one's skips a pull, never
     /// waits.
     pull: Arc<Mutex<RxPull>>,
+    /// The pull's counts, and their values at the last [`Session::keep_pulled`].
+    pull_stats: Arc<PullStats>,
+    pulls_seen: u64,
+    restarts_seen: u64,
+    /// No output pulled since the look before: the main thread drains.
+    idle: bool,
     stats: Arc<Stats>,
     rate: u32,
     /// The app buffer the players keep (dstack #247).
@@ -174,7 +181,11 @@ impl Session {
         let mut session = Session {
             link,
             fifo,
+            pull_stats: pull.stats(),
             pull: Arc::new(Mutex::new(pull)),
+            pulls_seen: 0,
+            restarts_seen: 0,
+            idle: false,
             stats: Arc::default(),
             rate,
             buffer,
@@ -369,6 +380,50 @@ impl Session {
                 );
                 true
             }
+        }
+    }
+
+    /// The main thread's look at the RX pull, once a second (dstack #307).
+    /// While no output pulls (none open, a stream that stopped calling
+    /// back), it drains the flow sockets itself, so the flow stays heard
+    /// and the device keeps it ([`RxPull::drain_idle`]); a callback that
+    /// pulls again takes over at once. Logs the change both ways, and each
+    /// rise of the pull's restarts (a callback gap past the FIFO, a clock
+    /// step).
+    pub fn keep_pulled(&mut self) {
+        if self.pull.is_poisoned() {
+            // A panic inside a pull (its message went to stderr): the
+            // callbacks pull on through the poison, its state being read
+            // positions; reported and cleared here, off the audio thread.
+            tracing::warn!("dlisten: an RX pull panicked; pulling on");
+            self.pull.clear_poison();
+        }
+        let pulls = self.pull_stats.pulls();
+        let idle = pulls == self.pulls_seen;
+        self.pulls_seen = pulls;
+        if idle != self.idle {
+            self.idle = idle;
+            if idle {
+                tracing::warn!(
+                    pulls,
+                    "dlisten: no output pulls the audio: draining it from the main thread"
+                );
+            } else {
+                tracing::info!(pulls, "dlisten: the output pulls the audio again");
+            }
+        }
+        if idle && let Ok(mut pull) = self.pull.try_lock() {
+            pull.drain_idle();
+        }
+        let restarts = self.pull_stats.restarts();
+        if restarts != self.restarts_seen {
+            tracing::warn!(
+                restarts,
+                rose = restarts.wrapping_sub(self.restarts_seen),
+                frames = self.pull_stats.frames(),
+                "dlisten: the RX pull started again at now (a gap past the FIFO or a clock step)"
+            );
+            self.restarts_seen = restarts;
         }
     }
 

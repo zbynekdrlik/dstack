@@ -392,3 +392,37 @@ fn under_the_app_a_packet_is_late_past_p_and_the_time_since_its_last_drain() {
     assert_eq!(late_after_two_drains(|s| s.app_intake()), 1);
     assert_eq!(late_after_two_drains(|s| s.pump_intake()), 3);
 }
+
+#[test]
+fn the_reader_s_step_is_the_block_until_the_app_has_drained_twice() {
+    use crate::media::rx::intake::{reads_apart, since};
+    assert_eq!(reads_apart(32, None), 32);
+    assert_eq!(reads_apart(32, Some(480)), 480);
+    assert_eq!(reads_apart(32, Some(0)), 0);
+    assert_eq!(since(Some(1_000), Some(1_480)), Some(480));
+    assert_eq!(since(Some(1_000), Some(1_000)), Some(0));
+    assert_eq!(since(Some(1_000), Some(999)), None, "the clock went back");
+    assert_eq!(since(None, Some(1_000)), None);
+    assert_eq!(since(Some(1_000), None), None);
+}
+
+#[test]
+fn an_app_drain_without_a_ready_clock_forgets_its_step() {
+    // A packet 600 behind after a drain whose clock was not ready: no step
+    // is known, so the block's limit (P 192 + 32) holds and it is late.
+    let s = shared(1);
+    let mut intake = s.app_intake().unwrap();
+    let mut p = plan(LOOPBACK, 1, true, 1);
+    p.block = 32;
+    publish(&s, &[(0, p)], &[(0, RxRoute { flow: 0, slot: 0 })]);
+    intake.drain_into_rings(Some(ns_of(P0, RATE)));
+    intake.drain_into_rings(None);
+    let t = transmitter(LOOPBACK);
+    let now = P0 + 480;
+    t.send_to(&packet_at(now - 600, 1, 1), slot_addr(&s, 0))
+        .unwrap();
+    settle();
+    intake.drain_into_rings(Some(ns_of(now, RATE)));
+    let c = s.lane(0);
+    assert_eq!((c.packets, c.late), (1, 1), "{c:?}");
+}

@@ -144,6 +144,7 @@ fn run(o: &Options) -> Result<(), String> {
             }
             Err(RecvTimeoutError::Timeout) => {
                 wakes = wakes.wrapping_add(1);
+                session.keep_pulled();
                 if wakes.is_multiple_of(OUTPUTS_EVERY) {
                     session.refresh_outputs();
                 }

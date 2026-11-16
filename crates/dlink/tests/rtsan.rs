@@ -84,10 +84,14 @@ fn the_rx_pull_is_realtime_safe() {
         assert!(fifo.pop_planar(&mut out, 480), "{} held", fifo.len());
     }
     assert_eq!(written, 50 * 480);
-    // Each pull drains a whole period's packets at once (read up to a
-    // period after their stamps: counted late, placed all the same).
+    // Each pull drains a whole period's packets at once, up to P and a
+    // period after their stamps: within the pull's own step, none late.
     let c = rx.lane(0);
-    assert_eq!((c.packets, c.refused, c.unplaced), (750, 0, 0), "{c:?}");
+    assert_eq!(
+        (c.packets, c.refused, c.unplaced, c.late),
+        (750, 0, 0, 0),
+        "{c:?}"
+    );
     assert_eq!(rings[1].counters().written, 50 * 480);
 }
 
