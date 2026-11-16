@@ -5,6 +5,7 @@ use std::sync::mpsc;
 
 use crate::device::DeviceConfig;
 use crate::media::rx::{RxPlan, RxRoute};
+use crate::media::tx::MediaThread;
 use crate::wire::tests::Rng;
 
 const TEST_DEVICE: &str = include_str!("../../../../config/test-device.toml");
