@@ -8,7 +8,8 @@
 use std::sync::PoisonError;
 use std::sync::atomic::Ordering;
 
-use super::{MAX_FLOWS, RxPlan, RxRoute, RxShared, new_flow};
+use super::plan::new_flow;
+use super::{MAX_FLOWS, RxPlan, RxRoute, RxShared};
 
 impl RxShared {
     /// Hands the flow slots' plans and the RX channels' routes to the RX

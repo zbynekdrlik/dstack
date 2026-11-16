@@ -109,6 +109,70 @@ fn the_pump_block_is_realtime_safe() {
     );
 }
 
+/// The pump's drain of the RX flows (dstack #326, the normal profile):
+/// each packet's judging and ring writes run in `media::rx`'s `place`,
+/// which carries the same attribute (the socket read before it is a
+/// system call by nature, non-blocking, outside it).
+#[test]
+fn the_pump_s_drain_places_its_packets_realtime_safe() {
+    let mut cfg = DeviceConfig::from_toml(include_str!("../../../config/test-device.toml"))
+        .expect("config/test-device.toml");
+    cfg.timing = dstack::device::TimingProfile::Normal;
+    let rings: Arc<[Ring]> = (0..INPUTS).map(|_| Ring::new()).collect::<Vec<_>>().into();
+    let rx = Arc::new(RxShared::new(RATE, Ipv4Addr::LOCALHOST, Arc::clone(&rings)).unwrap());
+    let plan = RxPlan {
+        src: Some(Ipv4Addr::LOCALHOST),
+        bps: 3,
+        nslots: 2,
+        latency: 96,
+        delay: 0,
+        block: BLOCK as u16,
+        live: false,
+        generation: 1,
+        group: None,
+    };
+    rx.publish(
+        |slot| if slot == 0 { plan } else { RxPlan::default() },
+        |c| (c < 2).then_some(RxRoute { flow: 0, slot: c }),
+    );
+    let tx = Arc::new(TxShared::new(cfg, Ipv4Addr::LOCALHOST, rings, 1, &[]).unwrap());
+    let timing = Timing {
+        block: BLOCK,
+        playout: 96,
+        margin: WORK_MARGIN,
+    };
+    let stats = Arc::new(PumpStats::new(timing, RATE));
+    let map = Map {
+        rx: vec![0, 1],
+        tx: Vec::new(),
+    };
+    let mut pump = Pump::new(
+        Copy,
+        map,
+        timing,
+        24,
+        Arc::clone(&rx),
+        tx,
+        Arc::clone(&stats),
+    );
+    assert!(pump.drains());
+    let sender = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let dest = rx.local_addr(0).unwrap();
+    let mut now = T + BLOCK + 96;
+    let mut out = [0u8; 1500];
+    for k in 0..100u64 {
+        let (secs, sub) = dstack::clock::stamp(T + BLOCK * k, RATE);
+        let n = dstack::media::packet::write(&mut out, secs, sub, 2, 3, BLOCK as usize, |f, _| {
+            (f as i32 + 1) << 8
+        });
+        sender.send_to(&out[..n], dest).unwrap();
+        now = pump.media(now, 0);
+    }
+    let c = rx.lane(0);
+    assert_eq!((c.packets, c.late, c.refused), (100, 0, 0), "{c:?}");
+    assert_eq!(stats.view().blocks, 100);
+}
+
 /// Allocates in a real-time context: a violation under the sanitizer.
 #[cfg_attr(iem_rtsan, sanitize(realtime = "nonblocking"))]
 fn nonblocking_alloc(n: usize) -> usize {

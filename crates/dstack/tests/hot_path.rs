@@ -398,6 +398,91 @@ fn the_rx_thread_s_passes_do_not_allocate() {
     assert_eq!(transmitter.recv(&mut buf).unwrap(), 2);
 }
 
+#[test]
+fn the_pump_s_drain_of_the_rx_flows_does_not_allocate() {
+    // dstack #326: in the normal profile the pump drains the flow sockets
+    // before each block: the read, the parse, the judge, the ring writes.
+    let mut cfg = DeviceConfig::from_toml(include_str!("../../../config/test-device.toml"))
+        .expect("config/test-device.toml");
+    cfg.timing = dstack::device::TimingProfile::Normal;
+    let rings: Arc<[Ring]> = (0..cfg.rx.len())
+        .map(|_| Ring::new())
+        .collect::<Vec<_>>()
+        .into();
+    let rx = Arc::new(RxShared::new(RATE, Ipv4Addr::LOCALHOST, Arc::clone(&rings)).unwrap());
+    let plan = RxPlan {
+        src: Some(Ipv4Addr::LOCALHOST),
+        bps: 3,
+        nslots: 2,
+        latency: 96,
+        delay: 0,
+        block: BLOCK as u16,
+        live: true,
+        generation: 1,
+        group: None,
+    };
+    rx.publish(
+        |slot| if slot == 0 { plan } else { RxPlan::default() },
+        |c| (c < 2).then_some(RxRoute { flow: 0, slot: c }),
+    );
+    let tx = Arc::new(TxShared::new(cfg, Ipv4Addr::LOCALHOST, rings, 1, &[]).unwrap());
+    let timing = Timing {
+        block: BLOCK,
+        playout: 96,
+        margin: WORK_MARGIN,
+    };
+    let stats = Arc::new(PumpStats::new(timing, RATE));
+    let map = Map {
+        rx: vec![0, 1],
+        tx: Vec::new(),
+    };
+    let mut pump = Pump::new(
+        Copy,
+        map,
+        timing,
+        24,
+        Arc::clone(&rx),
+        tx,
+        Arc::clone(&stats),
+    );
+    assert!(pump.drains());
+    let (transmitter, _) = receiver();
+    let dest = rx.local_addr(0).unwrap();
+    // 300 packets of 32 frames, one a block.
+    let packets: Vec<Vec<u8>> = (0..300u64)
+        .map(|k| {
+            let mut out = vec![0u8; 1500];
+            let (secs, sub) = clock::stamp(T + 32 * k, RATE);
+            let n = packet::write(&mut out, secs, sub, 2, 3, FPP, |f, s| {
+                ((f as i32 + 1) << 8) * if s == 0 { 1 } else { -1 }
+            });
+            out.truncate(n);
+            out
+        })
+        .collect();
+    let mut now = T + BLOCK + 96;
+    reset_violation_count();
+    assert_no_alloc(|| {
+        for p in &packets {
+            transmitter.send_to(p, dest).unwrap();
+            // The packet in its socket before the block's drain.
+            std::thread::sleep(Duration::from_micros(200));
+            now = pump.media(now, 0);
+        }
+    });
+    assert_eq!(violation_count(), 0, "the pump's drain allocated");
+    let v = stats.view();
+    assert_eq!((v.blocks, v.rebootstraps), (300, 0), "{v:?}");
+    let c = rx.lane(0);
+    assert_eq!(
+        (c.packets, c.refused, c.stray, c.late),
+        (300, 0, 0, 0),
+        "{c:?}"
+    );
+    let ring = rx.rings()[1].counters();
+    assert_eq!((ring.holes, ring.late), (0, 0), "{ring:?}");
+}
+
 /// Output j is input j (the first 24 of 32), through a stack buffer.
 struct Copy;
 

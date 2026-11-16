@@ -48,6 +48,41 @@ fn a_packet_is_wire_late_only_past_late_s_limit() {
     assert!(!wire_late(now, 20_000_000, P0, RATE, 0));
 }
 
+#[test]
+fn a_socket_is_read_through_its_handle_and_no_handle_is_an_error() {
+    // dstack #326: the pump reads a group socket the RX thread holds.
+    let a = UdpSocket::bind((LOOPBACK, 0)).unwrap();
+    let b = UdpSocket::bind((LOOPBACK, 0)).unwrap();
+    for s in [&a, &b] {
+        s.set_nonblocking(true).unwrap();
+    }
+    let (ha, hb) = (handle_of(&a), handle_of(&b));
+    assert!(ha != 0 && hb != 0 && ha != hb, "{ha} {hb}");
+    let t = UdpSocket::bind((LOOPBACK, 0)).unwrap();
+    t.send_to(b"to-b", b.local_addr().unwrap()).unwrap();
+    let mut buf = [0u8; 16];
+    let deadline = Instant::now() + BOUND;
+    let got = loop {
+        match recv_handle(hb, &mut buf) {
+            Ok(r) => break r,
+            Err(e) if e.kind() == ErrorKind::WouldBlock && Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Err(e) => panic!("{e}"),
+        }
+    };
+    assert_eq!(&buf[..got.len], b"to-b");
+    assert_eq!(got.from.map(SocketAddr::V4), Some(t.local_addr().unwrap()));
+    // The other socket has nothing, and both stay open.
+    let none = recv_handle(ha, &mut buf).unwrap_err();
+    assert_eq!(none.kind(), ErrorKind::WouldBlock);
+    assert!(a.local_addr().is_ok() && b.local_addr().is_ok());
+    assert_eq!(
+        recv_handle(0, &mut buf).unwrap_err().kind(),
+        ErrorKind::InvalidInput
+    );
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn a_timespec_reads_as_ns_since_1970() {

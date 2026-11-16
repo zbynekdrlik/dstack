@@ -1663,4 +1663,5 @@ fn a_seamless_handover_step_neither_rebootstraps_nor_loses_a_block() {
 }
 
 mod causes;
+mod drain;
 mod play_at;
