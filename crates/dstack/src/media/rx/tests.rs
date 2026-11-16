@@ -1390,6 +1390,25 @@ fn a_failed_join_is_tried_again_with_the_slot_s_next_flow() {
     assert_eq!((s.lane(0).joins, s.lane(0).join_errors), (1, 1));
 }
 
+#[test]
+fn a_stall_asked_for_is_slept_once_by_the_thread() {
+    // dstack #326: the test hook that stalls the RX thread as a loaded
+    // box's scheduler does.
+    let s = shared(1);
+    assert!(!s.serve_stall(), "no stall asked");
+    s.stall_thread(30 * MS);
+    let began = Instant::now();
+    assert!(s.serve_stall());
+    assert!(began.elapsed() >= Duration::from_millis(30), "slept it out");
+    assert!(!s.serve_stall(), "once only");
+    // A shorter stall asked during a longer one does not cut it.
+    s.stall_thread(40 * MS);
+    s.stall_thread(MS);
+    let began = Instant::now();
+    assert!(s.serve_stall());
+    assert!(began.elapsed() >= Duration::from_millis(40));
+}
+
 /// A socket's IPv4 address.
 fn v4(socket: &UdpSocket) -> SocketAddrV4 {
     match socket.local_addr().unwrap() {

@@ -206,6 +206,9 @@ pub struct RxShared {
     /// Every slot socket stamps its receive times (Linux): the passes
     /// measure wake delays and wire lateness.
     stamps: AtomicBool,
+    /// Until when (the thread's clock, [`RxShared::now_ns`]) the RX thread
+    /// stalls before its next pass ([`RxShared::stall_thread`]; 0: none).
+    stall_until: AtomicU64,
 }
 
 /// The last of the [`MAX_FLOWS`] ports from `base`, `None` past 65535.
@@ -278,6 +281,7 @@ impl RxShared {
             recv_buffer,
             stamps: AtomicBool::new(stamps),
             playout: AtomicU64::new(0),
+            stall_until: AtomicU64::new(0),
         })
     }
 
@@ -502,6 +506,30 @@ impl RxShared {
 
     pub fn stopping(&self) -> bool {
         self.stop.load(Ordering::Acquire)
+    }
+
+    /// Stalls the RX thread for `ns` before its next pass, as the
+    /// scheduler leaves a normal-priority thread behind on a loaded box
+    /// (dstack #326: strih-snv, up to 17.5 ms). For tests of the receive
+    /// path under such a stall; a running device never calls it.
+    #[doc(hidden)]
+    pub fn stall_thread(&self, ns: u64) {
+        self.stall_until
+            .fetch_max(self.now_ns().saturating_add(ns), Ordering::AcqRel);
+    }
+
+    /// The RX thread's side of [`RxShared::stall_thread`]: sleeps out a
+    /// stall asked for and not yet over; `true` when it slept.
+    fn serve_stall(&self) -> bool {
+        let rest = self
+            .stall_until
+            .load(Ordering::Acquire)
+            .saturating_sub(self.now_ns());
+        if rest == 0 {
+            return false;
+        }
+        std::thread::sleep(Duration::from_nanos(rest));
+        true
     }
 }
 
@@ -970,6 +998,7 @@ fn run(
     );
     let mut pin = super::repin::RePin::new(cpu);
     while !shared.stopping() {
+        shared.serve_stall();
         if let Err(e) = rx.wait(rx.timeout(shared.now_ns()))
             && failed_wait(shared, &e)
         {
