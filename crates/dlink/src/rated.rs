@@ -558,6 +558,11 @@ impl<P: Process> Rated<P> {
     /// took. All of it is silence. A skip that is refused (a half-band step
     /// at an odd start, which the pump never makes) leaves the reset state
     /// and the start's floor label, as before #341.
+    ///
+    /// It runs inside the restart's block: a few us at 2 channels for the
+    /// common pairs, up to about 1.1 ms with 64 channels for 11.025 kHz on
+    /// 192 kHz at 16-frame blocks (13 block periods; the skip's calls are
+    /// `(s mod period) / block`, CHANGELOG #343).
     fn restart_at(&mut self, s: u64) {
         let rx = self.rx.skip_silence(s, &self.staged, &mut self.rx_out);
         let tx = self.tx.skip_silence(s, &self.tx_in, &mut self.tx_out);

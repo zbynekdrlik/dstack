@@ -103,12 +103,22 @@ fn a_skip_lands_where_calls_of_silence_land() {
                     exact += 1;
                     assert_eq!(skipped.input_frames_next(), run.input_frames_next(), "{at}");
                 } else {
-                    let (a, b) = if fixed == Fixed::Input {
-                        (got.1, gave)
+                    // Fixed input: `floor((T - 2) * r)` on a whole value;
+                    // fixed output: `ceil(J / r + 1)` on a whole value.
+                    let (a, b, same, whole) = if fixed == Fixed::Input {
+                        let whole = frames >= 2 && ((frames - 2) * p_out).is_multiple_of(p_in);
+                        (got.1, gave, got.0 == took, whole)
                     } else {
-                        (got.0, took)
+                        (
+                            got.0,
+                            took,
+                            got.1 == gave,
+                            (frames * p_in).is_multiple_of(p_out),
+                        )
                     };
+                    assert!(same, "{at}: {got:?} vs {:?}", (took, gave));
                     assert_eq!(a.abs_diff(b), 1, "{at}: {got:?} vs {:?}", (took, gave));
+                    assert!(whole, "{at}: off a whole boundary");
                 }
                 let mut at_in = 0;
                 let (t, g) = call(&mut run, &silence, &mut at_in, &mut sink);
