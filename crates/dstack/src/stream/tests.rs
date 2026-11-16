@@ -5,6 +5,7 @@ use std::sync::mpsc;
 
 use crate::device::DeviceConfig;
 use crate::media::rx::{RxPlan, RxRoute};
+use crate::media::tx::MediaThread;
 use crate::wire::tests::Rng;
 
 const TEST_DEVICE: &str = include_str!("../../../../config/test-device.toml");
@@ -1663,4 +1664,5 @@ fn a_seamless_handover_step_neither_rebootstraps_nor_loses_a_block() {
 }
 
 mod causes;
+mod drain;
 mod play_at;

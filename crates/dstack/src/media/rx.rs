@@ -15,11 +15,21 @@
 //!   granted) and each RX channel's [`RxRoute`] (which flow slot and channel
 //!   slot feed its ring) over through seqlocked atomics
 //!   ([`RxShared::publish`]); the thread never blocks on them.
-//! - [`Receiver`] and [`spawn`]: the thread. It waits on every flow socket
-//!   at once (mio's poll), at most [`WAKE_NS`] at a time. A datagram counts
+//! - The rings' one writer, [`Intake`] (dstack #326, `rx/intake.rs`): the
+//!   RX thread's pass in the low-latency profile and on a device without
+//!   an engine pump; the engine's pump in the normal profile, which drains
+//!   the flow sockets itself just before it reads each block
+//!   ([`RxShared::pump_intake`]), so a helper thread the scheduler leaves
+//!   behind can no longer write samples behind the reader. Chosen once at
+//!   the start; the RX thread then keeps the groups' joins, the keepalives
+//!   and the rejoins, and polls no flow socket. What follows about reading
+//!   and placing a packet is the writer's, whichever thread runs it.
+//! - [`Receiver`] and [`spawn`]: the thread. While it writes the rings it
+//!   waits on every flow socket at once (mio's poll), at most [`WAKE_NS`]
+//!   at a time (under the pump only for its keepalives). A datagram counts
 //!   only from its slot's transmitter (by address; anything else is
 //!   `stray`); a well-formed one is a packet: its stamp, read as the sample
-//!   index nearest our clock's now ([`clock::from_stamp`], across the 32-bit
+//!   index nearest our clock's now ([`crate::clock::from_stamp`], across the 32-bit
 //!   seconds wrap and any uptime), places each channel slot's samples in
 //!   the rings of the RX channels routed to it ([`super::ring::Ring`]: a
 //!   missing packet reads as a hole, a late one is the ring's to count). Its
@@ -74,27 +84,30 @@
 //!
 //! The per-packet path (the receive, the parse, the ring writes, the
 //! judge's one `fetch_min`, a keepalive's send) allocates nothing, takes no
-//! lock and logs nothing (`tests/hot_path.rs`); every count is an atomic of
-//! its slot ([`RxCounts`]).
+//! lock and logs nothing (`tests/hot_path.rs`, the pump's drain too; the
+//! packet's placing under rtsan, `tests/rtsan.rs`); every count is an
+//! atomic of its slot ([`RxCounts`]).
 
 use std::io::{self, ErrorKind};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use mio::{Events, Interest, Poll, Token};
 use tracing::{info, warn};
 
-use super::packet::{self, MEDIA_HEADER};
+use super::packet::MEDIA_HEADER;
 use super::ring::{Counters, Ring};
-use super::tx::{Cell, MAX_CHANNELS, MediaThread, Scheduling, ns_of, place, take_priority};
-use crate::clock::{self, PtpClock};
+use super::tx::{Cell, MediaThread, Scheduling, place, take_priority};
+use crate::clock::PtpClock;
 use crate::wire::MAX_DATAGRAM;
 
 mod counts;
+mod handles;
 mod holes;
+mod intake;
 mod lane;
 mod minute;
 mod netlat;
@@ -104,15 +117,15 @@ mod rejoin;
 mod wake;
 pub use counts::RxCounts;
 use counts::{NO_LATENESS, RxStats, source_of, source_word};
-use lane::{Lane, count_lost};
+use handles::Handles;
+pub use intake::{Intake, PUMP_DRAIN};
+use lane::Keep;
 mod socket;
+use intake::discard;
 pub use netlat::NetLatency;
-use plan::new_flow;
 pub use plan::{RxPlan, RxRoute};
 pub use socket::{GROUP_BOUND_TO_PORT, join};
-use socket::{
-    Received, recv_stamped, set_recv_buffer, stamp_receives, wake_delay_ns, wall_now_ns, wire_late,
-};
+use socket::{handle_of, recv_stamped, set_recv_buffer, stamp_receives, wall_now_ns};
 pub use wake::WakeDelay;
 
 /// Our RX flow slots (inferno's `MAX_FLOWS`).
@@ -147,6 +160,11 @@ pub fn rest_ns(began: u64, now: u64) -> u64 {
 /// The most datagrams read from one socket in a pass (a flood never holds
 /// the thread); the rest wait for the next pass, at once.
 pub const DRAIN: usize = 64;
+/// The most datagrams the RX thread drops from a slot without a flow at one
+/// wake under the pump (dstack #326): a whole receive buffer of small
+/// ones, so an unsubscribed transmitter still sending (about 100 a wake)
+/// leaves no backlog for the slot's next flow.
+pub const UNPLANNED_DRAIN: usize = 4096;
 /// The RX thread's `SCHED_FIFO` priority when `RLIMIT_RTPRIO` allows it:
 /// below the TX thread's (a send preempts a receive) and above the engine
 /// pump's.
@@ -206,7 +224,26 @@ pub struct RxShared {
     /// Every slot socket stamps its receive times (Linux): the passes
     /// measure wake delays and wire lateness.
     stamps: AtomicBool,
+    /// Until when (the thread's clock, [`RxShared::now_ns`]) the RX thread
+    /// stalls before its next pass ([`RxShared::stall_thread`]; 0: none).
+    stall_until: AtomicU64,
+    /// Who writes the rings (dstack #326): [`WRITER_UNSET`] until the
+    /// engine's pump ([`RxShared::pump_intake`]) or the RX thread
+    /// ([`Receiver::new`]) claims it, once for the device's life.
+    ring_writer: AtomicU8,
+    /// Each slot's group socket for the writer, by its handle.
+    handles: Handles,
+    /// The group sockets the RX thread held when it ended while the pump
+    /// writes: closed with this state, after the pump's last read.
+    parked: Mutex<Vec<mio::net::UdpSocket>>,
 }
+
+/// [`RxShared`]'s ring writer: not chosen yet.
+const WRITER_UNSET: u8 = 0;
+/// The RX thread writes the rings ([`Receiver`] holds the [`Intake`]).
+const WRITER_THREAD: u8 = 1;
+/// The engine's pump writes them ([`RxShared::pump_intake`]).
+const WRITER_PUMP: u8 = 2;
 
 /// The last of the [`MAX_FLOWS`] ports from `base`, `None` past 65535.
 pub(crate) fn last_port(base: u16) -> Option<u16> {
@@ -278,7 +315,47 @@ impl RxShared {
             recv_buffer,
             stamps: AtomicBool::new(stamps),
             playout: AtomicU64::new(0),
+            stall_until: AtomicU64::new(0),
+            ring_writer: AtomicU8::new(WRITER_UNSET),
+            handles: Handles::new(),
+            parked: Mutex::new(Vec::new()),
         })
+    }
+
+    /// The engine's pump claims the rings' writes (dstack #326, the normal
+    /// profile; [`crate::stream::Pump::new`]): the [`Intake`] it drains
+    /// before each block, unless the RX thread already writes them (its
+    /// [`Receiver`] was built first; then `None`, and nothing changes).
+    pub fn pump_intake(self: &Arc<Self>) -> Option<Intake> {
+        self.ring_writer
+            .compare_exchange(
+                WRITER_UNSET,
+                WRITER_PUMP,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .ok()
+            .map(|_| Intake::new(Arc::clone(self)))
+    }
+
+    /// Whether the engine's pump writes the rings ([`RxShared::pump_intake`]);
+    /// else the RX thread does.
+    pub fn pump_writes(&self) -> bool {
+        self.ring_writer.load(Ordering::Acquire) == WRITER_PUMP
+    }
+
+    /// The RX thread claims the rings' writes: `true` when it is the first
+    /// claim (the device's one RX thread); a pump's claim or another
+    /// receiver's before it leaves this one without writes.
+    fn thread_writes(&self) -> bool {
+        self.ring_writer
+            .compare_exchange(
+                WRITER_UNSET,
+                WRITER_THREAD,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
     }
 
     /// The device latency is `ns`: the pump's playout point is its whole
@@ -503,61 +580,103 @@ impl RxShared {
     pub fn stopping(&self) -> bool {
         self.stop.load(Ordering::Acquire)
     }
+
+    /// Stalls the RX thread for `ns` before its next pass, as the
+    /// scheduler leaves a normal-priority thread behind on a loaded box
+    /// (dstack #326: strih-snv, up to 17.5 ms). For tests of the receive
+    /// path under such a stall; a running device never calls it.
+    #[doc(hidden)]
+    pub fn stall_thread(&self, ns: u64) {
+        self.stall_until
+            .fetch_max(self.now_ns().saturating_add(ns), Ordering::AcqRel);
+    }
+
+    /// The RX thread's side of [`RxShared::stall_thread`]: sleeps out a
+    /// stall asked for and not yet over; `true` when it slept.
+    fn serve_stall(&self) -> bool {
+        let rest = self
+            .stall_until
+            .load(Ordering::Acquire)
+            .saturating_sub(self.now_ns());
+        if rest == 0 {
+            return false;
+        }
+        std::thread::sleep(Duration::from_nanos(rest));
+        true
+    }
 }
 
 /// The RX thread's state: everything it needs, allocated before its loop.
+/// The ring writer ([`Intake`]) is its own while the RX thread writes the
+/// rings; under the engine's pump (the normal profile, dstack #326) it is
+/// the pump's, and this thread keeps the groups, the keepalives and the
+/// rejoins only, polling no flow socket.
 #[derive(Debug)]
 pub struct Receiver {
     shared: Arc<RxShared>,
     poll: Poll,
     events: Events,
-    /// The flow sockets (the shared ones' duplicates, registered with the
-    /// poll).
+    /// The flow sockets (the shared ones' duplicates: registered with the
+    /// poll while this thread writes; the keepalives go out on them).
     sockets: Vec<mio::net::UdpSocket>,
     /// Each slot's multicast socket while its plan names a group, and the
-    /// group: registered with the slot's token, read instead of the slot's
-    /// own socket.
+    /// group: read instead of the slot's own socket (by its handle,
+    /// `rx/handles.rs`), registered with the slot's token while this
+    /// thread writes.
     joined: Vec<Option<(SocketAddrV4, mio::net::UdpSocket)>>,
-    lanes: Vec<Lane>,
-    /// The routes' version read last.
-    routes_seen: Option<u32>,
+    /// Group sockets replaced, each with its swap's number: closed once
+    /// the writer moved past it.
+    retired: Vec<(u64, mio::net::UdpSocket)>,
+    /// Each slot's plan as this thread reads it, and its keepalives.
+    keeps: Vec<Keep>,
     /// [`RxShared::rejoin_groups`]'s count acted on last.
     rejoins_seen: u32,
-    /// Each RX channel's route word the last [`Receiver::refresh`] read.
-    routes_had: Vec<u64>,
     /// Slots with datagrams waiting, one bit each.
     ready: u32,
+    /// The ring writer, while this thread is it.
+    intake: Option<Intake>,
+    /// A datagram read and dropped under the pump ([`Receiver::pass`]).
     buf: Box<[u8; BUFFER]>,
-    /// One packet's samples, channel slot by channel slot.
-    frames: Box<[[i32; FRAMES_MAX]; MAX_CHANNELS]>,
 }
 
 impl Receiver {
-    /// The thread's state for `shared`: its poll with every flow socket.
+    /// The thread's state for `shared`: its poll, and, while it writes the
+    /// rings (the engine's pump did not claim them first,
+    /// [`RxShared::pump_intake`]), every flow socket registered with it and
+    /// the writer.
     pub fn new(shared: Arc<RxShared>) -> io::Result<Self> {
         let poll = Poll::new()?;
+        let intake = shared
+            .thread_writes()
+            .then(|| Intake::new(Arc::clone(&shared)));
         let mut sockets = Vec::with_capacity(MAX_FLOWS);
         for (slot, s) in shared.sockets.iter().enumerate() {
             let mut s = mio::net::UdpSocket::from_std(s.try_clone()?);
-            poll.registry()
-                .register(&mut s, Token(slot), Interest::READABLE)?;
+            if intake.is_some() {
+                poll.registry()
+                    .register(&mut s, Token(slot), Interest::READABLE)?;
+            }
             sockets.push(s);
         }
-        let channels = shared.rings.len();
         Ok(Receiver {
             poll,
             events: Events::with_capacity(MAX_FLOWS),
             sockets,
             joined: (0..MAX_FLOWS).map(|_| None).collect(),
-            lanes: (0..MAX_FLOWS).map(|_| Lane::new(channels)).collect(),
-            routes_seen: None,
+            retired: Vec::with_capacity(2 * MAX_FLOWS),
+            keeps: (0..MAX_FLOWS).map(|_| Keep::default()).collect(),
             rejoins_seen: shared.rejoins.load(Ordering::Acquire),
-            routes_had: vec![0; channels],
             ready: 0,
+            intake,
             buf: Box::new([0; BUFFER]),
-            frames: Box::new([[0; FRAMES_MAX]; MAX_CHANNELS]),
             shared,
         })
+    }
+
+    /// The writer's view of each slot (tests; none under the pump).
+    #[cfg(test)]
+    fn lanes(&self) -> &[lane::Lane] {
+        self.intake.as_ref().map_or(&[], |i| &i.lanes)
     }
 
     /// Waits up to `timeout` for datagrams; the slots that have some are
@@ -585,84 +704,74 @@ impl Receiver {
             return Duration::ZERO;
         }
         let due = self
-            .lanes
+            .keeps
             .iter()
-            .filter_map(|l| l.next_keepalive)
+            .filter_map(|k| k.next_keepalive)
             .fold(mono.saturating_add(WAKE_NS), u64::min);
         Duration::from_nanos(due.saturating_sub(mono))
     }
 
     /// One pass at PTP time `now_ns` (`None`: our clock is not ready) and
-    /// the thread's clock `mono`: the plans and routes that changed, every
-    /// slot with datagrams waiting read, the keepalives due sent.
-    /// The wall clock is read once at its start, for the packets' wake
-    /// delays (dstack #234), only while the sockets stamp their receives.
+    /// the thread's clock `mono`: the plans that changed (their groups),
+    /// every slot with datagrams waiting read while this thread writes the
+    /// rings ([`Intake`]), the group sockets the writer moved past closed,
+    /// the keepalives due sent. The wall clock is read once, for the
+    /// packets' wake delays (dstack #234), only while the sockets stamp
+    /// their receives and this thread reads them.
     pub fn pass(&mut self, now_ns: Option<u64>, mono: u64) {
-        let wall = self.shared.stamps().then(wall_now_ns).flatten();
         self.refresh();
-        self.expire(now_ns);
-        let mut ready = self.ready;
-        while ready != 0 {
-            let slot = ready.trailing_zeros() as usize;
-            ready &= ready - 1;
-            if self.receive(slot, now_ns, mono, wall) {
-                self.ready &= !(1 << slot);
+        match &mut self.intake {
+            Some(intake) => {
+                let wall = self.shared.stamps().then(wall_now_ns).flatten();
+                self.ready = intake.pass(
+                    self.ready,
+                    (now_ns, mono, wall),
+                    &self.sockets,
+                    &self.joined,
+                );
             }
+            None => self.empty_unplanned(),
         }
-        // Holes behind the playout are lost before and after the reads: a
-        // packet for a hole the pump already read is late, no reorder.
-        self.expire(now_ns);
+        self.release();
         self.keepalives(mono);
     }
 
-    /// At PTP time `now_ns` (`None`: our clock is not ready, nothing to
-    /// do), each flow's holes wholly behind its playout point (its latency
-    /// and block before now) are lost: the pump has read past them (dstack
-    /// #278).
-    fn expire(&mut self, now_ns: Option<u64>) {
-        let Some(ns) = now_ns else { return };
-        let now = clock::to_samples(ns, self.shared.rate);
-        for (lane, stats) in self.lanes.iter_mut().zip(self.shared.lanes.iter()) {
-            let limit = u64::from(lane.plan.latency) + u64::from(lane.plan.block);
-            count_lost(stats, lane.holes.expire(now.saturating_sub(limit)));
+    /// Under the pump (which reads only the slots that have a flow): each
+    /// slot without one emptied of what came to it, counted `stray`, so a
+    /// later flow in the slot never starts behind a backlog of the old one.
+    fn empty_unplanned(&mut self) {
+        let lanes = &self.shared.lanes;
+        for ((keep, socket), stats) in self.keeps.iter().zip(&self.sockets).zip(lanes.iter()) {
+            if keep.plan.src.is_none() {
+                discard(stats, &mut self.buf[..], UNPLANNED_DRAIN, |buf| {
+                    recv_stamped(socket, buf)
+                });
+            }
         }
     }
 
-    /// Reads the plans that changed (a new one resets its slot, a new flow
-    /// restarts its rings: dstack #234) and the routes
-    /// ([`Receiver::retarget`]).
+    /// Reads the plans that changed for this thread's part: a group to
+    /// join or leave, a keepalive schedule started again; and a rejoin
+    /// asked (dstack #282).
     fn refresh(&mut self) {
         let shared = &*self.shared;
         let mut regrouped = 0u64;
-        // dstack #234: the slots whose flow is new; their rings restart.
-        let mut fresh = [false; MAX_FLOWS];
-        for (slot, (lane, cell)) in self.lanes.iter_mut().zip(&shared.plans).enumerate() {
-            if lane.seen != Some(cell.version())
+        for (slot, (keep, cell)) in self.keeps.iter_mut().zip(&shared.plans).enumerate() {
+            if keep.seen != Some(cell.version())
                 && let Some((version, w)) = cell.read()
             {
                 let plan = RxPlan::from_words(w);
-                if plan != lane.plan {
+                if plan != keep.plan {
                     // Another group, or a new flow of a group whose join
                     // failed: (re)joined.
                     let unjoined = plan.group.is_some() && self.joined[slot].is_none();
-                    if plan.group != lane.plan.group || unjoined {
+                    if plan.group != keep.plan.group || unjoined {
                         regrouped |= 1 << slot;
                     }
-                    fresh[slot] = new_flow(lane.plan, plan);
-                    lane.plan = plan;
-                    lane.source = None;
-                    if let Some(stats) = shared.lanes.get(slot) {
-                        stats.source.store(0, Ordering::Relaxed);
-                    }
-                    lane.heard = None;
-                    lane.next_keepalive = None;
-                    lane.end = None;
-                    // The old flow's open holes never fill now.
-                    if let Some(stats) = shared.lanes.get(slot) {
-                        count_lost(stats, lane.holes.clear());
-                    }
+                    keep.plan = plan;
+                    keep.next_keepalive = None;
                 }
-                lane.seen = Some(version);
+                keep.seen = Some(version);
             }
         }
         // dstack #282: an interface change asked every slot's group joined
@@ -677,252 +786,118 @@ impl Receiver {
         if rejoin.is_some() {
             self.tell_missing();
         }
-        self.retarget();
-        // The writer restarts the rings of a new flow itself, before this
-        // pass writes: a restart of the publish's alone would be undone by
-        // the old flow's packets written meanwhile (dstack #234).
-        for (lane, _) in self.lanes.iter().zip(fresh).filter(|(_, f)| *f) {
-            for &(_, rx) in &lane.targets {
-                self.shared.rings[rx].restart();
-            }
-        }
-    }
-
-    /// After the routes changed (their version moves once
-    /// [`RxShared::publish`] wrote them all), which RX channels each slot
-    /// feeds; a channel routed anew restarts its ring (dstack #234).
-    fn retarget(&mut self) {
-        let shared = &*self.shared;
-        let version = shared.routes_version.load(Ordering::Acquire);
-        if self.routes_seen == Some(version) {
-            return;
-        }
-        for lane in &mut self.lanes {
-            lane.targets.clear();
-        }
-        for (rx, (cell, had)) in shared.routes.iter().zip(&mut self.routes_had).enumerate() {
-            let word = cell.load(Ordering::Acquire);
-            if let Some(r) = RxRoute::from_word(word)
-                && r.slot < MAX_CHANNELS
-                && let Some(lane) = self.lanes.get_mut(r.flow)
-            {
-                lane.targets.push((r.slot, rx));
-                if *had != word {
-                    shared.rings[rx].restart();
-                }
-            }
-            *had = word;
-        }
-        self.routes_seen = Some(version);
     }
 
     /// Slot `slot`'s plan names another group (or none), or a rejoin was
     /// asked (dstack #282): the old group's socket is closed (which leaves
-    /// the group), the new group's opened and registered. Only on a plan
-    /// change or a rejoin, never per packet.
+    /// the group) once the writer moved past it, the new group's opened,
+    /// handed to the writer and, while this thread writes, registered.
+    /// Only on a plan change or a rejoin, never per packet.
     fn regroup(&mut self, slot: usize) {
-        let want = self.lanes[slot].plan.group;
-        if let Some((group, mut old)) = self.joined[slot].take() {
-            let _ = self.poll.registry().deregister(&mut old);
+        let want = self.keeps[slot].plan.group;
+        let polled = self.intake.is_some();
+        let old = self.joined[slot].take();
+        if let Some((group, _)) = &old {
             info!(slot = slot + 1, %group, "RX multicast flow: group left");
         }
-        let Some(group) = want else { return };
-        let stats = &self.shared.lanes[slot];
-        let joined = join(self.shared.ip, group).and_then(|s| {
-            let mut s = mio::net::UdpSocket::from_std(s);
-            self.poll
-                .registry()
-                .register(&mut s, Token(slot), Interest::READABLE)?;
-            Ok(s)
+        if let Some(group) = want {
+            let stats = &self.shared.lanes[slot];
+            let joined = join(self.shared.ip, group).and_then(|s| {
+                let mut s = mio::net::UdpSocket::from_std(s);
+                if polled {
+                    self.poll
+                        .registry()
+                        .register(&mut s, Token(slot), Interest::READABLE)?;
+                }
+                Ok(s)
+            });
+            match joined {
+                Ok(s) => {
+                    stats.joins.fetch_add(1, Ordering::Relaxed);
+                    info!(slot = slot + 1, %group, "RX multicast flow: group joined");
+                    self.joined[slot] = Some((group, s));
+                }
+                Err(e) => {
+                    stats.join_errors.fetch_add(1, Ordering::Relaxed);
+                    warn!(slot = slot + 1, %group, error = %e, "RX multicast flow: the group could not be joined");
+                }
+            }
+        }
+        let (handle, of) = self.joined[slot].as_ref().map_or((0, 0), |(group, s)| {
+            (handle_of(s), source_word(Some(*group)))
         });
-        match joined {
-            Ok(s) => {
-                stats.joins.fetch_add(1, Ordering::Relaxed);
-                info!(slot = slot + 1, %group, "RX multicast flow: group joined");
-                self.joined[slot] = Some((group, s));
+        let moved = self.shared.handles.set(slot, handle, of);
+        if let Some((_, mut s)) = old {
+            if polled {
+                let _ = self.poll.registry().deregister(&mut s);
             }
-            Err(e) => {
-                stats.join_errors.fetch_add(1, Ordering::Relaxed);
-                warn!(slot = slot + 1, %group, error = %e, "RX multicast flow: the group could not be joined");
-            }
+            self.retired.push((moved, s));
         }
     }
 
-    /// Reads up to [`DRAIN`] datagrams of flow slot `slot`, `wall` the
-    /// pass's wall clock (ns since 1970); `true` when none is left. The hot
-    /// path: no allocation, no lock, no log.
-    fn receive(&mut self, slot: usize, now_ns: Option<u64>, mono: u64, wall: Option<u64>) -> bool {
-        let Receiver {
-            shared,
-            sockets,
-            joined,
-            lanes,
-            buf,
-            frames,
-            ..
-        } = self;
-        let socket = match joined.get(slot) {
-            Some(Some((_, s))) => Some(s),
-            _ => sockets.get(slot),
-        };
-        let (Some(socket), Some(lane), Some(stats)) =
-            (socket, lanes.get_mut(slot), shared.lanes.get(slot))
-        else {
-            return true;
-        };
-        let rate = shared.rate;
-        let rings: &[Ring] = &shared.rings;
-        let now = now_ns.map(|ns| (ns, clock::to_samples(ns, rate)));
-        let count = |a: &AtomicU64| {
-            a.fetch_add(1, Ordering::Relaxed);
-        };
-        for _ in 0..DRAIN {
-            let (n, from, at_ns) = match recv_stamped(socket, &mut buf[..]) {
-                Ok(Received {
-                    len,
-                    from: Some(from),
-                    at_ns,
-                }) => (len, from, at_ns),
-                Ok(_) => {
-                    count(&stats.stray);
-                    continue;
-                }
-                Err(e) => {
-                    // Would block: none left. Anything else (an unconnected
-                    // UDP socket reports none we know of) is counted and
-                    // ends this slot's reads for the pass.
-                    if e.kind() != ErrorKind::WouldBlock {
-                        count(&stats.recv_errors);
-                    }
-                    return true;
-                }
-            };
-            if lane.plan.src != Some(*from.ip()) {
-                count(&stats.stray);
-                continue;
-            }
-            let nslots = usize::from(lane.plan.nslots);
-            let datagram = &buf[..n];
-            let header = packet::read_header(datagram);
-            let read = (n <= MAX_DATAGRAM && nslots <= MAX_CHANNELS)
-                .then(|| {
-                    packet::read_frames(datagram, nslots, usize::from(lane.plan.bps), |f, s, v| {
-                        frames[s][f] = v;
-                    })
-                    .ok()
-                })
-                .flatten();
-            let (Some((secs, sub)), Some(nframes @ 1..)) = (header, read) else {
-                count(&stats.refused);
-                continue;
-            };
-            count(&stats.packets);
-            if lane.source != Some(from) {
-                stats
-                    .source
-                    .store(source_word(Some(from)), Ordering::Relaxed);
-                lane.source = Some(from);
-            }
-            lane.heard = Some(mono);
-            let wake = wake_delay_ns(wall, at_ns);
-            if let Some(w) = wake {
-                stats.max_wake_ns.fetch_max(w, Ordering::Relaxed);
-                stats.wake_peak_ns.fetch_max(w, Ordering::Relaxed);
-            }
-            let Some((now_ns, now)) = now else {
-                count(&stats.unplaced);
-                continue;
-            };
-            let pos = clock::from_stamp(secs, sub, rate, now);
-            let lateness = now.saturating_sub(pos);
-            stats.max_lateness.fetch_max(lateness, Ordering::Relaxed);
-            stats.lateness_peak.fetch_max(lateness, Ordering::Relaxed);
-            // The judge: the packet's own stamp in ns against our now in ns.
-            stats
-                .min_lateness_ns
-                .0
-                .fetch_min(now_ns.saturating_sub(ns_of(pos, rate)), Ordering::Relaxed);
-            let limit = u64::from(lane.plan.latency) + u64::from(lane.plan.block);
-            let late = lateness > limit;
-            if late {
-                count(&stats.late);
-            }
-            if let Some(w) = wake {
-                if wire_late(now_ns, w, pos, rate, limit) {
-                    count(&stats.wire_late);
-                }
-                let network = netlat::network_latency_ns(now_ns, w, ns_of(pos, rate));
-                stats.network.record(network);
-                stats.network_minute.record(network);
-                // The minute's two windows hold the same packets.
-                stats.wake_minute.record(w);
-            }
-            let end = pos.saturating_add(nframes as u64);
-            // dstack #278: holes, reorders and gaps.
-            let placed = holes::place(&mut lane.end, &mut lane.holes, pos, end, !late);
-            if placed.out_of_order {
-                count(&stats.out_of_order);
-            }
-            if placed.reordered {
-                count(&stats.reordered);
-            }
-            count_lost(stats, placed.lost);
-            let mut read_before = false;
-            let mut wrote = false;
-            for &(s, rx) in &lane.targets {
-                if s < nslots
-                    && let Some(ring) = rings.get(rx)
-                {
-                    read_before |= ring.write_at(pos, &frames[s][..nframes]).late > 0;
-                    wrote = true;
-                }
-            }
-            if read_before {
-                count(&stats.late_at_read);
-            }
-            // dstack #234: the kernel's receive time to the writes' end
-            // (one more wall-clock read, only for a stamped packet that
-            // reached a ring).
-            if wrote
-                && wake.is_some()
-                && let Some(delay) = wake_delay_ns(wall_now_ns(), at_ns)
-            {
-                stats.write_minute.record(delay);
-            }
-        }
-        false
+    /// Closes the replaced group sockets the writer has moved past.
+    fn release(&mut self) {
+        let handles = &self.shared.handles;
+        self.retired.retain(|(moved, _)| !handles.released(*moved));
     }
 
     /// Sends the keepalives due at the thread's clock `mono`: one per
     /// [`KEEPALIVE_NS`] per granted flow whose audio came within
-    /// [`LIVE_NS`], to that audio's source.
+    /// [`LIVE_NS`] (the writer's counts say when and from where), to that
+    /// audio's source while it is the plan's transmitter.
     fn keepalives(&mut self, mono: u64) {
-        for (slot, lane) in self.lanes.iter_mut().enumerate() {
-            let live =
-                lane.plan.live && lane.heard.is_some_and(|h| mono.saturating_sub(h) < LIVE_NS);
-            let (true, Some(to)) = (live, lane.source) else {
-                lane.next_keepalive = None;
+        for (slot, keep) in self.keeps.iter_mut().enumerate() {
+            let stats = &self.shared.lanes[slot];
+            let heard = stats.heard.load(Ordering::Acquire).checked_sub(1);
+            let source = source_of(stats.source.load(Ordering::Relaxed))
+                .filter(|s| keep.plan.src == Some(*s.ip()));
+            let live = keep.plan.live && heard.is_some_and(|h| mono.saturating_sub(h) < LIVE_NS);
+            let (true, Some(to)) = (live, source) else {
+                keep.next_keepalive = None;
                 continue;
             };
-            let due = *lane
+            let due = *keep
                 .next_keepalive
                 .get_or_insert(mono.saturating_add(KEEPALIVE_NS));
             if mono < due {
                 continue;
             }
-            let stats = &self.shared.lanes[slot];
             let counter = match self.sockets[slot].send_to(&KEEPALIVE, SocketAddr::V4(to)) {
                 Ok(_) => &stats.keepalives,
                 Err(_) => &stats.keepalive_errors,
             };
             counter.fetch_add(1, Ordering::Relaxed);
             let next = due.saturating_add(KEEPALIVE_NS);
-            lane.next_keepalive = Some(if next <= mono {
+            keep.next_keepalive = Some(if next <= mono {
                 mono.saturating_add(KEEPALIVE_NS)
             } else {
                 next
             });
         }
+    }
+}
+
+impl Drop for Receiver {
+    /// While the engine's pump writes the rings it may still read a group
+    /// socket by its handle: every group socket this thread holds then goes
+    /// to the shared state and closes with it, after the pump's last read
+    /// (dstack #326).
+    fn drop(&mut self) {
+        if self.intake.is_some() {
+            return;
+        }
+        let mut parked = self
+            .shared
+            .parked
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        parked.extend(
+            self.joined
+                .iter_mut()
+                .filter_map(Option::take)
+                .map(|(_, s)| s),
+        );
+        parked.extend(self.retired.drain(..).map(|(_, s)| s));
     }
 }
 
@@ -966,10 +941,13 @@ fn run(
     info!(
         bytes = shared.recv_buffer(),
         asked = RECV_BUFFER_BYTES,
+        // dstack #326: who writes the rings, the pump or this thread.
+        pump_writes = shared.pump_writes(),
         "RX flow sockets' receive buffer"
     );
     let mut pin = super::repin::RePin::new(cpu);
     while !shared.stopping() {
+        shared.serve_stall();
         if let Err(e) = rx.wait(rx.timeout(shared.now_ns()))
             && failed_wait(shared, &e)
         {
