@@ -10,6 +10,20 @@
 //! level. A file of its own (its process sets the normal profile), on the
 //! box's routed address and its own system clock; our device hears itself
 //! (the tests' rule: our device only).
+//!
+//! The driver thread records its own scheduling gaps on the app's clock
+//! (dstack #307, a windows-2025 failure of v0.6.155: 2 underruns and 2584
+//! samples off with no ring hole and no pull restart). A gap over two
+//! periods is the runner not running the "driver": the switches it then
+//! makes back to back, to keep its clock, take what the late switch's pull
+//! brought and the player had skipped as an excess (by design), and run
+//! the FIFO dry. A 20 ms stall of this thread every 700 switches, with no
+//! pump stall, reproduced that run on dev1 to the sample (2 underruns,
+//! 2584 off). A real card glitches there too: such a window says nothing
+//! about the bridge. So a judged window in which the driver thread stalled
+//! is set aside (kept for the message) and the next one is judged, up to
+//! [`WINDOWS`]; the asserts on the judged window are unchanged, and a
+//! failure names the driver's stalls before each underrun (`verdict`).
 
 use std::net::{SocketAddr, UdpSocket};
 use std::sync::Arc;
@@ -95,6 +109,60 @@ struct Heard {
     /// depth after it), and the looks.
     depth: u64,
     looks: u64,
+    /// The driver thread's own scheduling in the window: its largest gap
+    /// between two switches and every gap over [`DRIVER_STALL_US`] with the
+    /// switch it ended at (µs of the app's clock), and the switch at which
+    /// each underrun was counted.
+    largest_gap_us: u64,
+    stalls: Vec<(u64, u64)>,
+    underrun_at: Vec<u64>,
+}
+
+/// A gap between two of the driver thread's switches over this is a stall
+/// of the thread, µs: two periods (the card's next switch was due).
+const DRIVER_STALL_US: u64 = 2 * BUFFER as u64 * 1_000_000 / RATE as u64;
+
+/// The judged windows the driver thread may need: one whose driver thread
+/// never stalled is judged, a stalled one is set aside.
+const WINDOWS: usize = 4;
+
+/// How many switches after a stall of the driver thread an underrun is its
+/// own: the late switch's excess skip and the switches made back to back
+/// after it.
+const CAUSE_SWITCHES: u64 = 8;
+
+/// A failure's verdict: `RUNNER` when every underrun follows a stall of
+/// the driver thread within [`CAUSE_SWITCHES`] (the runner did not run
+/// it); else `OURS` (the bridge lost audio while its consumer ran on
+/// time).
+fn verdict(heard: &Heard) -> String {
+    let caused = |at: u64| {
+        heard
+            .stalls
+            .iter()
+            .filter(move |&&(end, _)| end <= at && at - end <= CAUSE_SWITCHES)
+    };
+    let causes: Vec<String> = heard
+        .underrun_at
+        .iter()
+        .map(|&at| {
+            let before: Vec<String> = caused(at)
+                .map(|&(end, us)| format!("{us} us, {} switches before", at - end))
+                .collect();
+            format!("underrun at switch {at}: driver stalls {before:?}")
+        })
+        .collect();
+    let runner = !heard.underrun_at.is_empty()
+        && heard
+            .underrun_at
+            .iter()
+            .all(|&at| caused(at).next().is_some());
+    let who = if runner {
+        "RUNNER (the driver thread was not run)"
+    } else {
+        "OURS"
+    };
+    format!("verdict {who}: {causes:?}")
 }
 
 impl Heard {
@@ -191,10 +259,14 @@ fn a_stalled_pump_leaves_the_to_asio_bridge_whole() {
             let period = Duration::from_nanos(BUFFER as u64 * 1_000_000_000 / u64::from(RATE));
             let mut out = vec![0f64; BUFFER];
             let mut heard = Heard::default();
+            let mut aside = Vec::new();
             let began = Instant::now();
             let mut next = began;
-            let mut judging = None;
             let mut since = None;
+            let mut window: Option<(Instant, u64)> = None;
+            let mut last_ns = dstack::clock::app_monotonic_ns();
+            let mut switch = 0u64;
+            let mut seen = stats.underruns();
             loop {
                 next += period;
                 if let Some(wait) = next.checked_duration_since(Instant::now()) {
@@ -202,20 +274,46 @@ fn a_stalled_pump_leaves_the_to_asio_bridge_whole() {
                 }
                 side.process(&mut Block::new(BUFFER, &[], &mut out));
                 let foot = fifo.len();
+                switch += 1;
+                let now_ns = dstack::clock::app_monotonic_ns();
+                let gap_us = u64::try_from(now_ns - last_ns).unwrap_or(0) / 1_000;
+                last_ns = now_ns;
                 if receiving.load(Ordering::Acquire) == 0 {
                     if began.elapsed() > Duration::from_secs(15) {
-                        return heard;
+                        return (heard, aside);
                     }
                     continue;
                 }
-                let elapsed = since.get_or_insert_with(Instant::now).elapsed();
-                if elapsed < SETTLE {
+                if since.get_or_insert_with(Instant::now).elapsed() < SETTLE {
                     continue;
                 }
-                let before = *judging.get_or_insert_with(|| stats.underruns());
-                if elapsed > SETTLE + JUDGED {
-                    heard.underruns = stats.underruns() - before;
-                    break;
+                let (start, before) = match window {
+                    Some(w) => w,
+                    None => {
+                        // A window starts: its underruns are counted from
+                        // here.
+                        seen = stats.underruns();
+                        *window.insert((Instant::now(), seen))
+                    }
+                };
+                heard.largest_gap_us = heard.largest_gap_us.max(gap_us);
+                if gap_us > DRIVER_STALL_US {
+                    heard.stalls.push((switch, gap_us));
+                }
+                let underruns = stats.underruns();
+                if underruns > seen {
+                    heard.underrun_at.push(switch);
+                    seen = underruns;
+                }
+                if start.elapsed() > JUDGED {
+                    heard.underruns = underruns - before;
+                    if heard.stalls.is_empty() || aside.len() + 1 == WINDOWS {
+                        break;
+                    }
+                    // The runner stalled the driver thread: set aside.
+                    aside.push(std::mem::take(&mut heard));
+                    window = None;
+                    continue;
                 }
                 heard.depth += (2 * foot + BUFFER) as u64;
                 heard.looks += 2;
@@ -227,7 +325,7 @@ fn a_stalled_pump_leaves_the_to_asio_bridge_whole() {
                     }
                 }
             }
-            heard
+            (heard, aside)
         })
     };
     let end = Instant::now() + Duration::from_secs(15);
@@ -235,7 +333,7 @@ fn a_stalled_pump_leaves_the_to_asio_bridge_whole() {
         std::thread::sleep(Duration::from_millis(50));
     }
     receiving.store(1, Ordering::Release);
-    let heard = driver.join().expect("the driver thread");
+    let (heard, aside) = driver.join().expect("the driver thread");
     let channel = receiver.rx_channels().remove(0);
     let pump = receiver.media().engine().expect("the receiver's pump");
     let sent = sender.media().engine().expect("the sender's pump");
@@ -255,7 +353,8 @@ fn a_stalled_pump_leaves_the_to_asio_bridge_whole() {
     assert_eq!(
         (heard.underruns, heard.off),
         (0, 0),
-        "to-ASIO underruns and samples off the level with {stalls} pump stalls: {heard:?}, {pump:?}, {channel:?}, the ring {ring:?}, the pull's restarts {}, the sender's pump {sent:?}",
+        "to-ASIO underruns and samples off the level with {stalls} pump stalls, {}: {heard:?}, {pump:?}, {channel:?}, the ring {ring:?}, the pull's restarts {}, the sender's pump {sent:?}; windows set aside (the driver thread stalled) {aside:?}",
+        verdict(&heard),
         pulled.restarts()
     );
     // The driver's side drains every buffer switch: a packet is late only
