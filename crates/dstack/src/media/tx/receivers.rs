@@ -82,7 +82,8 @@ impl TxShared {
     /// and each flow sending now to a receiver (as
     /// [`TxShared::receiver_flows`]) with its stated latency and its slot's
     /// late count. It locks the table: call it from a status loop, never
-    /// the pump or the TX thread.
+    /// the pump or the TX thread. One reader per device: a second caller
+    /// would take the first's peak.
     pub fn take_app_view(&self) -> AppView {
         let age_peak_ns = self
             .lanes

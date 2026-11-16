@@ -258,7 +258,8 @@ fn the_receiver_figure_is_the_tx_packet_age_not_the_modelled_block_age() {
 
 /// The warning comes only from a receiver's own late count rising (the
 /// TX side's `over_latency`), naming it and its latency, at most once an
-/// hour; the first look only learns the counts.
+/// hour; the first look only learns the counts, and a rise inside the hour
+/// is held for the next warning, never lost.
 #[test]
 fn a_receiver_that_counts_packets_late_is_warned_at_most_once_an_hour() {
     let (t, clock) = fake();
@@ -275,15 +276,24 @@ fn a_receiver_that_counts_packets_late_is_warned_at_most_once_an_hour() {
     }
     t.store(HOUR_NS - 1, Ordering::Relaxed);
     assert_eq!(age.look(&view(0, 11, 1), None), None, "a ns short");
+    // The hour's rises were kept, summed: warned without a new one.
     t.store(HOUR_NS, Ordering::Relaxed);
-    assert_eq!(age.look(&view(0, 11, 1), None), None, "no new rise");
+    let text = age.look(&view(0, 11, 1), None).expect("the held rises");
+    assert!(
+        text.contains("dvs-two at 2000 us (4 late), card-five at 5000 us (1 late)"),
+        "{text}"
+    );
+    // No packet age known (the window empty): the text says only who.
+    assert!(!text.contains("old"), "{text}");
+    assert_eq!(age.look(&view(0, 12, 3), None), None, "held again");
+    t.store(2 * HOUR_NS, Ordering::Relaxed);
     let text = age.look(&view(0, 12, 3), None).expect("an hour on");
     assert!(
         text.contains("dvs-two at 2000 us (1 late), card-five at 5000 us (2 late)"),
         "{text}"
     );
-    // No packet age known (the window empty): the text says only who.
-    assert!(!text.contains("old"), "{text}");
+    t.store(3 * HOUR_NS, Ordering::Relaxed);
+    assert_eq!(age.look(&view(0, 12, 3), None), None, "nothing new");
 }
 
 /// A view without a packet records no age; the packet age lasts one to

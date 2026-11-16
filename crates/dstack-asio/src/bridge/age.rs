@@ -184,8 +184,9 @@ pub struct BlockAge {
     packets: Shared,
     /// The network's share at the last look, ns.
     network_ns: AtomicU64,
-    /// Each slot's late count at the last look (`None`: not seen yet).
-    seen: Mutex<[Option<u64>; MAX_FLOWS]>,
+    /// The receivers' late counts and the rises not warned yet; its lock
+    /// also keeps [`BlockAge::look`] to one caller at a time.
+    late: Mutex<Late>,
     /// The last warning about late receivers, ns (`NONE`: none yet).
     warned: AtomicI64,
 }
@@ -201,7 +202,10 @@ impl BlockAge {
             blocks: Shared::new(),
             packets: Shared::new(),
             network_ns: AtomicU64::new(NETWORK_ALLOWANCE_NS),
-            seen: Mutex::new([None; MAX_FLOWS]),
+            late: Mutex::new(Late {
+                seen: [None; MAX_FLOWS],
+                pending: Vec::new(),
+            }),
             warned: AtomicI64::new(NONE),
         }
     }
@@ -238,11 +242,15 @@ impl BlockAge {
     /// [`dstack::media::tx::TxShared::take_app_view`], `network_p99_ns`
     /// from [`dstack::media::rx::RxShared::network_p99_ns`]. Records the
     /// view's packet age (none without a packet) and warns, at most once an
-    /// hour, when a receiver's late count rose since the last look (a
-    /// slot's first look only learns its count). Returns the warning it
-    /// logged. Call it from a status loop (about once a second), never the
-    /// pump: the view locks the TX table.
+    /// hour, about every receiver whose late count rose since the last
+    /// warning (a slot's first look only learns its count; a rise inside
+    /// the hour waits for the next warning, summed). The warning names each
+    /// receiver at the latency it states (the TX side counts against that,
+    /// or our own advertised latency when it is higher). Returns the
+    /// warning it logged. Call it from a status loop (about once a second),
+    /// never the pump: the view locks the TX table. Calls are serialised.
     pub fn look(&self, view: &AppView, network_p99_ns: Option<u64>) -> Option<String> {
+        let mut late = self.late.lock().unwrap_or_else(PoisonError::into_inner);
         let now = (self.clock)();
         self.network_ns.store(
             network_p99_ns.unwrap_or(NETWORK_ALLOWANCE_NS),
@@ -251,34 +259,18 @@ impl BlockAge {
         if view.age_peak_ns != 0 {
             self.packets.record(now, view.age_peak_ns);
         }
-        let rose = self.rises(&view.receivers);
+        late.add(&view.receivers);
         // `NONE` (no warning yet) is hours in the past to the saturation.
-        if rose.is_empty() || now.saturating_sub(self.warned.load(Ordering::Relaxed)) < HOUR_NS {
+        if late.pending.is_empty()
+            || now.saturating_sub(self.warned.load(Ordering::Relaxed)) < HOUR_NS
+        {
             return None;
         }
         self.warned.store(now, Ordering::Relaxed);
-        let text = late_text(&rose, self.report_at(now));
+        let text = late_text(&late.pending, self.report_at(now));
+        late.pending.clear();
         warn!("{text}");
         Some(text)
-    }
-
-    /// Each receiver whose slot's late count rose since the last look, with
-    /// the rise; every count seen is kept for the next look.
-    fn rises<'a>(&self, receivers: &'a [ReceiverLateness]) -> Vec<(&'a ReceiverLateness, u64)> {
-        let mut seen = self.seen.lock().unwrap_or_else(PoisonError::into_inner);
-        let mut out = Vec::new();
-        for r in receivers {
-            let Some(last) = seen.get_mut(r.slot) else {
-                continue;
-            };
-            if let Some(was) = last.replace(r.over_latency) {
-                let rose = r.over_latency.saturating_sub(was);
-                if rose != 0 {
-                    out.push((r, rose));
-                }
-            }
-        }
-        out
     }
 
     /// The status's values (module doc): `None` while neither a block was
@@ -304,9 +296,44 @@ impl BlockAge {
     }
 }
 
+/// [`BlockAge::look`]'s memory of the receivers' late counts.
+struct Late {
+    /// Each slot's late count at the last look (`None`: not seen yet).
+    seen: [Option<u64>; MAX_FLOWS],
+    /// The receivers whose count rose since the last warning, each as last
+    /// seen with the rises summed.
+    pending: Vec<(ReceiverLateness, u64)>,
+}
+
+impl Late {
+    /// The `receivers`' counts: each rise since the last look goes to
+    /// `pending`; every count is kept for the next look.
+    fn add(&mut self, receivers: &[ReceiverLateness]) {
+        for r in receivers {
+            let Some(last) = self.seen.get_mut(r.slot) else {
+                continue;
+            };
+            let Some(was) = last.replace(r.over_latency) else {
+                continue;
+            };
+            let rose = r.over_latency.saturating_sub(was);
+            if rose == 0 {
+                continue;
+            }
+            match self.pending.iter_mut().find(|(p, _)| p.slot == r.slot) {
+                Some((p, n)) => {
+                    *p = r.clone();
+                    *n += rose;
+                }
+                None => self.pending.push((r.clone(), rose)),
+            }
+        }
+    }
+}
+
 /// The warning for the receivers whose late count `rose` (each with its
 /// rise), with the packet age and receiver figure of `report` when known.
-fn late_text(rose: &[(&ReceiverLateness, u64)], report: Option<AgeReport>) -> String {
+fn late_text(rose: &[(ReceiverLateness, u64)], report: Option<AgeReport>) -> String {
     let who: Vec<String> = rose
         .iter()
         .map(|(r, n)| format!("{} at {} us ({n} late)", r.receiver, r.latency_ns / 1_000))
