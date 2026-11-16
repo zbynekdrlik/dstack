@@ -243,3 +243,76 @@ fn only_a_dante_query_from_port_5353_counts() {
     assert!(b.times_of(a(2)).is_empty());
     assert!(b.times_of(a(3)).is_empty());
 }
+
+/// dstack #319, field 16.11.2026: Dante hardware (an Audinate module)
+/// refreshes its own cache every 96 s, which is normal Dante behaviour. A
+/// source that announces `_netaudio-arc` records with no `dstack_vers` is
+/// such hardware and never named; a host with no records, or one whose ARC
+/// record states `dstack_vers`, still is.
+#[test]
+fn dante_hardware_on_the_cycle_is_not_named_and_any_other_host_is() {
+    let mut b = Browsers::default();
+    let (hardware, pc, ours) = (a(103), a(20), a(30));
+    // The hardware answers with its ARC record (no dstack_vers) before its
+    // chain is complete; the dstack device states its version.
+    b.arc_from(hardware, false, 50 * S);
+    b.arc_from(ours, true, 50 * S);
+    for k in 0..4 {
+        for host in [hardware, pc, ours] {
+            b.query(host, k * CYCLE_NS);
+        }
+    }
+    let named: Vec<Ipv4Addr> = b.take(3 * CYCLE_NS).iter().map(|x| x.source).collect();
+    assert_eq!(named, vec![pc, ours]);
+}
+
+/// The four cycle queries of `host` ending at `end_ns`.
+fn refreshes(b: &mut Browsers, host: Ipv4Addr, end_ns: u64) {
+    for k in (0..4).rev() {
+        b.query(host, end_ns - k * CYCLE_NS);
+    }
+}
+
+#[test]
+fn a_hardware_mark_lasts_an_hour_and_a_dstack_record_outweighs_it() {
+    let end = 10_000 * S;
+    // The mark's hour to the ns: hidden a ns before it ends, named at it.
+    let mut b = Browsers::default();
+    b.arc_from(a(1), false, end + 1 - HARDWARE_NS);
+    refreshes(&mut b, a(1), end);
+    assert!(b.take(end).is_empty());
+    assert_eq!(b.take(end + 1).len(), 1);
+    // A source stating dstack_vers within the hour is named, whichever
+    // came last.
+    let mut b = Browsers::default();
+    b.arc_from(a(2), false, end - 20 * S);
+    b.arc_from(a(2), true, end - 10 * S);
+    b.arc_from(a(3), true, end - 20 * S);
+    b.arc_from(a(3), false, end - 10 * S);
+    // ... but one whose dstack record is over an hour old is hardware.
+    b.arc_from(a(4), true, end - HARDWARE_NS);
+    b.arc_from(a(4), false, end - 10 * S);
+    for host in [a(2), a(3), a(4)] {
+        refreshes(&mut b, host, end);
+    }
+    let named: Vec<Ipv4Addr> = b.take(end).iter().map(|x| x.source).collect();
+    assert_eq!(named, vec![a(2), a(3)]);
+}
+
+#[test]
+fn past_the_most_marks_the_source_heard_longest_ago_is_forgotten() {
+    let mut b = Browsers::default();
+    // The oldest mark is the highest address, so neither address order
+    // nor arrival order alone picks it.
+    b.arc_from(a(200), false, S);
+    for k in 1..MAX_HOSTS {
+        b.arc_from(a(u8::try_from(k).unwrap()), false, (k as u64 + 1) * S);
+    }
+    b.arc_from(a(201), false, 100 * S);
+    let end = 1_000 * S;
+    for host in [a(200), a(1), a(201)] {
+        refreshes(&mut b, host, end);
+    }
+    let named: Vec<Ipv4Addr> = b.take(end).iter().map(|x| x.source).collect();
+    assert_eq!(named, vec![a(200)], "only the forgotten mark is named");
+}

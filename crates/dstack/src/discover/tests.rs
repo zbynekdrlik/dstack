@@ -756,3 +756,28 @@ fn discovery_names_the_listed_dstack_devices_below_the_network_floor() {
     assert_eq!(below[0].version.to_string(), "0.6.20");
     discovery.stop().unwrap();
 }
+
+/// dstack #323: a device that announces a local client below the network
+/// floor is named by `below_floor` as a client, at its address.
+#[test]
+fn discovery_names_a_device_s_announced_old_local_client() {
+    let (mdns, _) = responder(vec![vec![
+        rec(
+            ARC_SERVICE,
+            "Beside",
+            4440,
+            &["dstack_vers=0.6.146", "dstack_old_client=0.6.20"],
+        ),
+        rec(DBC_SERVICE, "Beside", 4455, &[]),
+        rec(CMC_SERVICE, "Beside", 8800, &["id=00000a4d070b0000"]),
+    ]]);
+    let (discovery, _changes) = Discovery::start_to(LOOPBACK, mdns, None).unwrap();
+    eventually("listed", || discovery.devices().len() == 1);
+    let below = discovery.below_floor();
+    assert_eq!(below.len(), 1, "{below:?}");
+    assert_eq!(below[0].kind, crate::network_floor::Kind::Client);
+    assert_eq!(below[0].name, "Beside");
+    assert_eq!(below[0].address, Some(LOOPBACK));
+    assert_eq!(below[0].version.to_string(), "0.6.20");
+    discovery.stop().unwrap();
+}

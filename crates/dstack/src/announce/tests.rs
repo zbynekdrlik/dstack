@@ -567,3 +567,35 @@ fn the_status_port_rides_on_the_arc_record_only() {
     assert_eq!(carrying.len(), 1);
     assert_eq!(carrying[0].service, ARC_SERVICE);
 }
+
+/// dstack #323: a local client below the network floor rides on the ARC
+/// record only, as `dstack_old_client=<version>`; with none the records
+/// are exactly as before.
+#[test]
+fn an_old_local_client_rides_on_the_arc_record_and_none_changes_nothing() {
+    assert_eq!(OLD_CLIENT_KEY, "dstack_old_client");
+    let cfg = config();
+    let state = DeviceState::from_config(&cfg);
+    let before = records(&state, &cfg, HOST, IP);
+    let mut recs = before.clone();
+    with_old_client(&mut recs, None);
+    assert_eq!(recs, before);
+    assert!(
+        recs.iter()
+            .all(|r| !r.txt.iter().any(|t| t.starts_with(OLD_CLIENT_KEY)))
+    );
+    with_old_client(&mut recs, Some(Version::new(0, 6, 20)));
+    let carrying: Vec<_> = recs
+        .iter()
+        .filter(|r| has(r, "dstack_old_client=0.6.20"))
+        .collect();
+    assert_eq!(carrying.len(), 1);
+    assert_eq!(carrying[0].service, ARC_SERVICE);
+    assert_eq!(carrying[0].txt.last().unwrap(), "dstack_old_client=0.6.20");
+    let others: Vec<_> = recs.iter().filter(|r| r.service != ARC_SERVICE).collect();
+    let others_before: Vec<_> = before.iter().filter(|r| r.service != ARC_SERVICE).collect();
+    assert_eq!(others, others_before);
+    // The record still builds for mdns-sd, the key in its TXT.
+    let info = carrying[0].info().unwrap();
+    assert_eq!(info.get_property_val_str(OLD_CLIENT_KEY), Some("0.6.20"));
+}

@@ -312,6 +312,13 @@ impl Media {
         lock(&self.clients).list(crate::network_floor::now_ns())
     }
 
+    /// The lowest version below the network floor of the local clients
+    /// that asked within the hour, if any (dstack #323): what the ARC
+    /// record announces ([`crate::announce::OLD_CLIENT_KEY`]).
+    pub fn old_client(&self) -> Option<crate::network_floor::Version> {
+        lock(&self.clients).lowest_below_floor(crate::network_floor::now_ns())
+    }
+
     /// Sets the app's command hook (dstack #139): a control request
     /// `app <words>` (the Unix socket, and the local endpoint dtray uses,
     /// [`crate::ctl::local`]) calls `f` with `<words>`, and answers `ok` for

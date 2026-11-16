@@ -1438,9 +1438,15 @@ fn announce_device_counts_the_records_it_made_the_announced_set() {
     let shared = device_in(dir.path());
     let log = Log::new(usize::MAX);
     let mut announcer = Announcer::new(log.clone());
-    assert_eq!(announce_device(&shared, &mut announcer, IP).unwrap(), 19);
+    assert_eq!(
+        announce_device(&shared, &mut announcer, IP, None).unwrap(),
+        19
+    );
     shared.lock().unwrap().state.tx[0] = "Mix 1".into();
-    assert_eq!(announce_device(&shared, &mut announcer, IP).unwrap(), 20);
+    assert_eq!(
+        announce_device(&shared, &mut announcer, IP, None).unwrap(),
+        20
+    );
     assert_eq!(log.calls().last().unwrap(), &chan("Mix 1"));
     assert_eq!(log.calls().len(), 20);
 }
@@ -1473,4 +1479,5 @@ fn a_server_that_ends_is_an_error_whatever_it_returned() {
     );
 }
 
+mod old_client;
 mod place;

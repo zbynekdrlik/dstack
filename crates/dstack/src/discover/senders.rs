@@ -19,7 +19,9 @@
 //!   Dante records every 96 s` per [`browsers::Browser`] (dstack #319),
 //!   once an hour per host.
 //! - [`browsers`]: the hosts that refresh Dante records on the 96 s cycle
-//!   of a standing browse, from the queries the meter hears.
+//!   of a standing browse, from the queries the meter hears; Dante
+//!   hardware (ARC records without `dstack_vers` in its answers) is never
+//!   named.
 //! - [`Meter`]: the process's passive listener on one address (one per
 //!   process and address, shared by every device there; its own thread,
 //!   nothing sent) and the last minute for the devices' status. It counts
@@ -423,7 +425,7 @@ impl Run {
                 Ok((n, SocketAddr::V4(from))) => {
                     senders.count(*from.ip());
                     let bytes = buf.get(..n).unwrap_or_default();
-                    self.versions(bytes, *from.ip());
+                    self.arc_records(bytes, *from.ip(), now());
                     self.browsers.heard(*from.ip(), from.port(), bytes, now());
                 }
                 Ok(_) => {}
@@ -437,11 +439,16 @@ impl Run {
         }
     }
 
-    /// The dstack versions datagram `bytes` from `from` states, checked
-    /// against the network floor (dstack #321).
-    fn versions(&self, bytes: &[u8], from: Ipv4Addr) {
-        for (name, version) in network_floor::arc_versions(bytes) {
-            network_floor::check(&self.floor, Kind::Peer, &name, Some(from), &version);
+    /// The ARC records datagram `bytes` from `from` carries at `now_ns`:
+    /// each dstack version checked against the network floor (dstack
+    /// #321), and each record told to the browser watch, which never names
+    /// Dante hardware (a record without `dstack_vers`, dstack #319).
+    fn arc_records(&mut self, bytes: &[u8], from: Ipv4Addr, now_ns: u64) {
+        for (name, version) in network_floor::arc_records(bytes) {
+            self.browsers.arc_from(from, version.is_some(), now_ns);
+            if let Some(version) = version {
+                network_floor::check(&self.floor, Kind::Peer, &name, Some(from), &version);
+            }
         }
     }
 }

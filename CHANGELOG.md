@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.6.146
+
+- **Feature (#323, follows #321): a stale local client (dtray, dtray-cli) now shows on the network.** A client below `NETWORK_FLOOR` reached only the device's local status endpoint (127.0.0.1), which dcontroller cannot read: exactly #319's stale dtray beside a device. Now:
+  - mDNS: while a local client below the floor asked within the hour, the device's `_netaudio-arc` TXT carries the new key `dstack_old_client=<the lowest such version>` (e.g. `dstack_old_client=0.6.20`), after `dstack_vers` and `dstack_ctl`. With none, the key is absent and the records are byte for byte as in 0.6.145. The daemon checks it every subscription tick (250 ms) and announces the ARC record again once each time the value changes (the client upgraded, or the hour since it last asked passed); no other record and no periodic traffic.
+  - `discover::Discovery::below_floor` (and `network_floor::below_of`, so `warn_devices` and Discovery's own hourly WARN) now also lists each device that announces the key, as `kind` `client`, `name` the device's Dante name, `address` its ARC address, `version` the client's. A value that does not read, or is not below the reader's floor, names nothing.
+  - API (changed): `daemon::announce_device` takes a fourth argument, `old_client: Option<network_floor::Version>` (`None` = as before). API (additive): `announce::OLD_CLIENT_KEY`, `announce::with_old_client`, `network_floor::Clients::lowest_below_floor`, `Media::old_client`. `Below::name`/`address` now also describe a client a device announces.
+- **Fix (#319, field 16.11.2026): the 96 s browser alarm no longer names Dante hardware.** dcontroller's relay alarmed on an Audinate-based interface: Audinate firmware refreshes its own mDNS cache every 96 s, which is normal Dante behaviour. The meter now never names a source that announced `_netaudio-arc` records without `dstack_vers` within the last hour (and none with it): such a source is Dante hardware. It reads those records from the answers it already parses for the network floor. A PC that hosts a non-dstack Dante device (Dante Virtual Soundcard, Dante Via) answers the same way and counts as hardware too. Every other source is still named: a PC with no such device, a stale dtray, a dstack device that states `dstack_vers` (also one that announces both kinds).
+  - API (additive): `network_floor::arc_records` (every ARC TXT record's name and `dstack_vers`, if any; `arc_versions` keeps its output), `discover::senders::browsers::{Browsers::arc_from, HARDWARE_NS}`.
+- **No latency change** for any device or dlink app: P, (c), W and the app buffer (the bridge target) are as in 0.6.145.
+- Consumers: dcontroller relays `kind: client` entries of `Discovery::below_floor()` like the peer floor alarm (its own change, told by peer); they name the PC by its device. Its 96 s alarm stops naming Dante hardware once its devices run 0.6.146 (nothing to port). dtray, dasio, intercom, songplayer, camera-box, presenter, obs, iemmixer: move the stack version; nothing to port (none calls `announce_device`).
+
 ## 0.6.145
 
 - **Feature (#321, field 15.11.2026, #319): the network floor, a version guard for every dstack binary on the network.** A 3.11 dtray (about v0.6.20, still with the standing mDNS browses that #141 later removed) ran 12 days on two PCs and nothing noticed. Now:

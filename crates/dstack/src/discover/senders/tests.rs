@@ -329,6 +329,77 @@ fn the_meter_names_a_host_refreshing_dante_records_on_the_cycle() {
     }
 }
 
+/// dstack #319, field 16.11.2026: a host whose own answers carry an ARC
+/// record without `dstack_vers` (Dante hardware) is not named for the same
+/// cycle; a host with no records beside it is.
+#[test]
+fn the_meter_names_no_dante_hardware_on_the_cycle() {
+    use simple_dns::rdata::{RData, TXT};
+    use simple_dns::{CLASS, Name, Packet, ResourceRecord};
+    let sock = loopback();
+    let to = sock.local_addr().unwrap();
+    let cycle = Browsers::with_cycle(250_000_000, 80_000_000, 20_000_000);
+    let meter = Meter::start(sock, None, Ipv4Addr::LOCALHOST, 200_000_000, cycle).unwrap();
+    let on_5353 = |last: u8| {
+        let s = socket2::Socket::new(
+            socket2::Domain::IPV4,
+            socket2::Type::DGRAM,
+            Some(socket2::Protocol::UDP),
+        )
+        .unwrap();
+        s.set_reuse_address(true).unwrap();
+        s.bind(&SocketAddr::from((Ipv4Addr::new(127, 0, 0, last), 5353)).into())
+            .unwrap();
+        UdpSocket::from(s)
+    };
+    let (pc, hardware) = (on_5353(4), on_5353(6));
+    let card_answer = {
+        let mut p = Packet::new_reply(0);
+        // The keys of the field case's ARC record (16.11.2026, an Audinate
+        // module), values made up.
+        let mut txt = TXT::new();
+        for entry in [
+            "arcp_vers=2.8.9",
+            "arcp_min=0.2.4",
+            "router_vers=4.0.0",
+            "router_info=x",
+            "mf=x",
+            "model=x",
+        ] {
+            txt.add_string(entry).unwrap();
+        }
+        p.answers = vec![ResourceRecord::new(
+            Name::new_unchecked("meter-card._netaudio-arc._udp.local"),
+            CLASS::IN,
+            120,
+            RData::TXT(txt),
+        )];
+        p.build_bytes_vec().unwrap()
+    };
+    hardware.send_to(&card_answer, to).unwrap();
+    let q = arc_query();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut seen: Vec<Minute> = Vec::new();
+    while seen.len() < 3 {
+        pc.send_to(&q, to).unwrap();
+        hardware.send_to(&q, to).unwrap();
+        for _ in 0..25 {
+            std::thread::sleep(Duration::from_millis(10));
+            if let Some(m) = meter.last()
+                && !m.browsers.is_empty()
+                && seen.last() != Some(&m)
+            {
+                seen.push(m);
+            }
+        }
+        assert!(Instant::now() < deadline, "no host named: {seen:?}");
+    }
+    for m in &seen {
+        let named: Vec<Ipv4Addr> = m.browsers.iter().map(|b| b.source).collect();
+        assert_eq!(named, vec![Ipv4Addr::new(127, 0, 0, 4)], "{m:?}");
+    }
+}
+
 #[test]
 fn one_meter_per_address_in_a_process_ending_with_its_last_holder() {
     // An address of this test's own: the registry is the process's.

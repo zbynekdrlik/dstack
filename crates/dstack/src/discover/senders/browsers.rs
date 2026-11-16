@@ -27,6 +27,20 @@
 //! same way, but at 80-82 % of the TTL (RFC 6762 §5.2), 96-98.4 s: it is
 //! named only while three of its intervals in a row fall within the
 //! tolerance.
+//!
+//! Dante hardware refreshes its own cache on the same cycle (an Audinate
+//! module, field 16.11.2026): normal Dante behaviour, nothing to fix. A
+//! source that announced `_netaudio-arc` records without `dstack_vers`
+//! within [`HARDWARE_NS`], and none with it, is such hardware and never
+//! named ([`Browsers::arc_from`], fed from the records the meter already
+//! reads for the network floor). A PC that hosts a Dante device that is not
+//! ours (Dante Virtual Soundcard, Dante Via) answers the same way and
+//! counts as hardware too. Every other source still is named: a PC with
+//! no such device, a stale dtray, a dstack device that states its version.
+//! The marks live in memory and come only from answers the meter hears (a
+//! multicast question asks them: Dante Controller, other Dante hardware):
+//! a meter started less than a chain after the last such answer may name
+//! the hardware until one comes.
 
 use std::collections::{HashMap, VecDeque};
 use std::net::Ipv4Addr;
@@ -48,6 +62,11 @@ pub const SAME_BURST_NS: u64 = S;
 pub const WARN_EVERY_NS: u64 = 3600 * S;
 /// Hosts followed at most (the one heard longest ago leaves).
 pub const MAX_HOSTS: usize = 64;
+/// How long a source stays known as Dante hardware after its last ARC
+/// record without `dstack_vers` (and a dstack device after its last one
+/// with it).
+pub const HARDWARE_NS: u64 = WARN_EVERY_NS;
+
 /// Times kept per host (the oldest leave): more than a whole chain's
 /// window holds at one a [`SAME_BURST_NS`].
 pub const MAX_TIMES: usize = 512;
@@ -127,6 +146,27 @@ struct Host {
     warned: Option<u64>,
 }
 
+/// When a source last announced an ARC record without `dstack_vers`
+/// (`plain`) and with it (`dstack`).
+#[derive(Debug, Default, Clone, Copy)]
+struct ArcSeen {
+    plain: Option<u64>,
+    dstack: Option<u64>,
+}
+
+impl ArcSeen {
+    fn last(self) -> Option<u64> {
+        self.plain.max(self.dstack)
+    }
+
+    /// Dante hardware at `now_ns`: a record without `dstack_vers` within
+    /// [`HARDWARE_NS`], none with it.
+    fn hardware(self, now_ns: u64) -> bool {
+        let recent = |t: Option<u64>| t.is_some_and(|t| now_ns.saturating_sub(t) < HARDWARE_NS);
+        recent(self.plain) && !recent(self.dstack)
+    }
+}
+
 /// The hosts' query times (see the module).
 #[derive(Debug)]
 pub struct Browsers {
@@ -134,6 +174,9 @@ pub struct Browsers {
     tolerance_ns: u64,
     same_burst_ns: u64,
     hosts: HashMap<Ipv4Addr, Host>,
+    /// The sources' ARC records, at most [`MAX_HOSTS`] (the one heard
+    /// longest ago leaves).
+    arc: HashMap<Ipv4Addr, ArcSeen>,
 }
 
 impl Default for Browsers {
@@ -151,6 +194,28 @@ impl Browsers {
             tolerance_ns,
             same_burst_ns,
             hosts: HashMap::new(),
+            arc: HashMap::new(),
+        }
+    }
+
+    /// `source` announced an `_netaudio-arc` record at `now_ns`, stating
+    /// `dstack_vers` (`dstack`) or not (Dante hardware, see the module).
+    pub fn arc_from(&mut self, source: Ipv4Addr, dstack: bool, now_ns: u64) {
+        if !self.arc.contains_key(&source) && self.arc.len() == MAX_HOSTS {
+            let oldest = self
+                .arc
+                .iter()
+                .min_by_key(|(a, seen)| (seen.last(), **a))
+                .map(|(a, _)| *a);
+            if let Some(a) = oldest {
+                self.arc.remove(&a);
+            }
+        }
+        let seen = self.arc.entry(source).or_default();
+        if dstack {
+            seen.dstack = Some(now_ns);
+        } else {
+            seen.plain = Some(now_ns);
         }
     }
 
@@ -205,8 +270,9 @@ impl Browsers {
     }
 
     /// The hosts whose cycle was seen within two cycles of `now_ns`, by
-    /// address, each marked to warn about once in [`WARN_EVERY_NS`]. A
-    /// host not heard in 4 cycles (and their tolerance) is forgotten.
+    /// address, each marked to warn about once in [`WARN_EVERY_NS`], Dante
+    /// hardware left out ([`Browsers::arc_from`]). A host not heard in 4
+    /// cycles (and their tolerance) is forgotten.
     pub fn take(&mut self, now_ns: u64) -> Vec<Browser> {
         let (recent, keep) = (2 * self.cycle_ns, self.window());
         self.hosts.retain(|_, h| {
@@ -219,6 +285,9 @@ impl Browsers {
             let Some((at, period_ns)) = h.seen else {
                 continue;
             };
+            if self.arc.get(source).is_some_and(|a| a.hardware(now_ns)) {
+                continue;
+            }
             if now_ns.saturating_sub(at) > recent {
                 continue;
             }
