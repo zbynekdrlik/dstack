@@ -25,6 +25,7 @@ use dstack::media::tx::{LATE_BINS, LATE_EDGES_NS, LaneCounts};
 use dstack::peer::args::{self, Parsed, PeerArgs};
 use dstack::peer::{Peer, Shared};
 use dstack::stream::PumpStats;
+use dstack::stream::wake::RECENT;
 
 /// Held by each test that runs a device: they bind the Dante ports on the
 /// routed address.
@@ -173,19 +174,25 @@ impl Progress {
             self.flat = Some(now);
             return None;
         }
-        let silence = self
-            .flat
+        let silence = self.close(late);
+        self.packets = packets;
+        self.late = late;
+        self.rose = now;
+        silence
+    }
+
+    /// The open silence, from the rise before to the last flat pass, when
+    /// the late record rose past the one at that rise (`late`); also the
+    /// witness's last word on a TX thread still silent when it stops.
+    fn close(&mut self, late: u64) -> Option<Silence> {
+        self.flat
             .take()
             .filter(|_| late > self.late)
             .map(|(flat_ns, flat_ms)| Silence {
                 begin_ms: self.rose.1,
                 end_ms: flat_ms,
                 silent_us: flat_ns.saturating_sub(self.rose.0) / 1_000,
-            });
-        self.packets = packets;
-        self.late = late;
-        self.rose = now;
-        silence
+            })
     }
 }
 
@@ -193,9 +200,10 @@ impl Progress {
 /// sent 5 ms or more past due plus its schedule's restarts (a lag past the
 /// latency sends nothing, it restarts). [`TxShared::lane`] loads `packets`
 /// before the late bins and the TX pass adds the late bin before `packets`
-/// (`media::tx::pass`), all relaxed: on x86 a rise of the packets is never
-/// read without its late bin; elsewhere a silence can be missed (the
-/// verdict then leans to `OURS`), never invented.
+/// (`media::tx::pass`), all relaxed: on x86 a rise of the packets is in
+/// practice never read without its late bin. Where it is, that silence is
+/// missed, or its late record credited to the next flat stretch of the
+/// same lane.
 ///
 /// [`TxShared::lane`]: dstack::media::tx::TxShared::lane
 fn tx_progress(lane: &LaneCounts) -> (u64, u64) {
@@ -237,25 +245,32 @@ impl Sender {
     /// is recorded with how far behind it was.
     fn look(&mut self, peer: usize, now: (u64, u64), seen: &mut Seen) {
         let (packets, late) = tx_progress(&self.media.tx.lane(0));
-        if let Some(s) = self.tx.look(packets, late, now)
-            && s.silent_us >= Witness::STALL_NS / 1_000
-        {
-            seen.silences[peer].push(s);
-        }
+        let silence = self.tx.look(packets, late, now);
+        seen.silence(peer, silence);
         let after_send = self.pump.view().writes_after_send;
         if after_send > self.after_send {
             self.after_send = after_send;
             seen.after_send[peer].push(now.1);
         }
         // The status keeps the last 32 late wakes only: merge them as they
-        // come, so a busy window keeps every one.
+        // come, so a busy window keeps every one (more than 32 between two
+        // passes, while the witness itself was not run, are counted lost).
         let late_wakes = self.pump.wakes().late_wakes();
         if late_wakes > self.late_wakes {
+            let new = late_wakes - self.late_wakes;
+            seen.late_wakes_lost[peer] += new.saturating_sub(RECENT as u64);
             self.late_wakes = late_wakes;
             for w in self.pump.wakes().recent() {
                 seen.late_wakes[peer].insert((w.unix_ms, w.behind_us));
             }
         }
+    }
+
+    /// The witness's last pass: a TX silence still open, into `seen`.
+    fn close(&mut self, peer: usize, seen: &mut Seen) {
+        let (_, late) = tx_progress(&self.media.tx.lane(0));
+        let silence = self.tx.close(late);
+        seen.silence(peer, silence);
     }
 }
 
@@ -274,8 +289,22 @@ struct Seen {
     silences: [Vec<Silence>; 2],
     /// Each peer's pump late wakes, `(unix_ms, behind_us)`.
     late_wakes: [BTreeSet<(u64, u64)>; 2],
+    /// Each peer's late wakes that left the pump's recent list before the
+    /// witness merged them.
+    late_wakes_lost: [u64; 2],
     /// When each peer's `writes_after_send` rose (ms since the Unix epoch).
     after_send: [Vec<u64>; 2],
+}
+
+impl Seen {
+    /// Keeps peer `peer`'s TX silence when it is one ([`Witness::STALL_NS`]).
+    fn silence(&mut self, peer: usize, silence: Option<Silence>) {
+        if let Some(s) = silence
+            && s.silent_us >= Witness::STALL_NS / 1_000
+        {
+            self.silences[peer].push(s);
+        }
+    }
 }
 
 /// A thread at the test's own priority that sleeps 1 ms at a time on the
@@ -330,12 +359,15 @@ impl Witness {
                     s.look(peer, now, &mut seen);
                 }
                 for (i, count) in counted.iter_mut().enumerate() {
-                    let now = lost(i, &senders);
-                    if now > *count {
-                        seen.rises[i].push(unix_ms());
-                        *count = now;
+                    let loss = lost(i, &senders);
+                    if loss > *count {
+                        seen.rises[i].push(now.1);
+                        *count = loss;
                     }
                 }
+            }
+            for (peer, s) in senders.iter_mut().enumerate() {
+                s.close(peer, &mut seen);
             }
             seen
         });
@@ -491,7 +523,7 @@ fn verdict(
          witness: {} stalls over {} us, largest {:?}\n\
          TX silences over {} us while the witness ran: {silences:?}\n\
          writes_after_send rose at (ms after the start): peer 0 {:?}, peer 1 {:?}\n\
-         pump late wakes seen: peer 0 {}, peer 1 {}\n\
+         pump late wakes seen: peer 0 {} ({} lost), peer 1 {} ({} lost)\n\
          peer {me} status: {}\npeer {other} status: {}",
         seen.stalls.len(),
         Witness::STALL_NS / 1_000,
@@ -500,7 +532,9 @@ fn verdict(
         since(&seen.after_send[0]),
         since(&seen.after_send[1]),
         seen.late_wakes[0].len(),
+        seen.late_wakes_lost[0],
         seen.late_wakes[1].len(),
+        seen.late_wakes_lost[1],
         status[me],
         status[other]
     )
@@ -552,6 +586,13 @@ fn a_tx_silence_is_what_the_witness_saw_flat_and_late() {
     assert_eq!(p.look(16, 2, at(64)), None);
     assert_eq!(p.look(16, 2, at(70)), None);
     assert_eq!(p.look(17, 3, at(71)), silence(64, 70, 6_000));
+    // Still silent when the witness stops: closed by the last flat pass,
+    // only with the late record risen.
+    assert_eq!(p.look(17, 3, at(80)), None);
+    assert_eq!(p.close(3), None);
+    assert_eq!(p.look(17, 3, at(90)), None);
+    assert_eq!(p.close(4), silence(71, 90, 19_000));
+    assert_eq!(p.close(5), None);
 }
 
 /// The TX lane's late record is its packets 5 ms or more past due plus its
