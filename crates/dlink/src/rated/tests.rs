@@ -371,5 +371,53 @@ fn the_app_s_block_plays_the_rx_converter_s_delay_after_the_device_s() {
     assert_eq!(r.inner.play_ats, [Some(625_000)]);
 }
 
+/// Writes `0.5` on every output for its first `loud` calls, then nothing
+/// (dstack #335: an app that leaves an output alone).
+struct Quiet {
+    loud: usize,
+    calls: usize,
+}
+
+impl Process for Quiet {
+    fn process(&mut self, block: &mut Block<'_>) {
+        if self.calls < self.loud {
+            for c in 0..block.outputs() {
+                block.output(c).fill(0.5);
+            }
+        }
+        self.calls += 1;
+    }
+}
+
+/// dstack #335 (dasio#107): an app that writes nothing to an output sends
+/// silence, as under the pump, never its previous block again, on both
+/// the follow-on and the fixed app block.
+#[test]
+fn an_output_the_app_leaves_alone_sends_silence_not_the_last_block() {
+    let quiet = || Quiet { loud: 20, calls: 0 };
+    let mut rated = [
+        Rated::new(quiet(), 96_000, 48_000, 128, 1, 1).unwrap(),
+        Rated::with_fixed_app_block(quiet(), 96_000, 44_100, 128, 1, 1).unwrap(),
+    ];
+    for (k, r) in rated.iter_mut().enumerate() {
+        let mut sent = Vec::new();
+        for b in 0..400u64 {
+            let mut out = vec![0.0; 128];
+            r.process(&mut Block::new(128, &[0.0; 128], &mut out).at(b * 128));
+            sent.extend_from_slice(&out);
+        }
+        assert!(r.inner.calls > 200, "{k}: {}", r.inner.calls);
+        // The loud calls went out (the test can tell sound from silence).
+        let peak = sent.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+        assert!(peak > 0.4, "{k}: peak {peak}");
+        let tail = &sent[sent.len() - 20_000..];
+        assert!(
+            tail.iter().all(|v| v.abs() < 1e-9),
+            "{k}: the tail repeats {:?}",
+            tail.iter().find(|v| v.abs() >= 1e-9)
+        );
+    }
+}
+
 /// dstack #330: the fixed app block.
 mod fixed;
