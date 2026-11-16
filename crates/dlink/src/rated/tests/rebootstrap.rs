@@ -77,9 +77,50 @@ fn round_trip(fixed: bool, restart: Option<u64>) -> f64 {
         .max_by(|&a, &b| heard[a].1.abs().total_cmp(&heard[b].1.abs()))
         .unwrap();
     let (y0, y1, y2) = (heard[peak - 1].1, heard[peak].1, heard[peak + 1].1);
-    assert_eq!(heard[peak + 1].0, heard[peak - 1].0 + 2, "a gap at the peak");
+    assert_eq!(
+        heard[peak + 1].0,
+        heard[peak - 1].0 + 2,
+        "a gap at the peak"
+    );
     let shift = 0.5 * (y0 - y2) / (y0 - 2.0 * y1 + y2);
     heard[peak].0 as f64 + shift - AT as f64
+}
+
+#[test]
+fn a_restart_leads_with_the_blocks_back_to_a_whole_app_frame() {
+    // 44.1 kHz on 96 kHz: a whole app frame every 320 device frames.
+    for (start, lead) in [
+        (0u64, 0u64),
+        (128, 1),
+        (256, 2),
+        (640, 0),
+        (896, 2),
+        (1_152, 4),
+    ] {
+        assert_eq!(lead_blocks(start, 128, 96_000, 44_100), lead, "{start}");
+    }
+    // Off the block grid no start back is whole: the old label stays.
+    assert_eq!(lead_blocks(1_000, 32, 96_000, 44_100), 0);
+    // A whole ratio needs none.
+    assert_eq!(lead_blocks(128, 128, 96_000, 48_000), 0);
+    assert_eq!(lead_blocks(4_800, 128, 48_000, 96_000), 0);
+    // At most MAX_LEAD blocks (one-frame blocks, a 320-frame period).
+    assert_eq!(lead_blocks(MAX_LEAD, 1, 96_000, 44_100), MAX_LEAD);
+    assert_eq!(lead_blocks(MAX_LEAD + 1, 1, 96_000, 44_100), 0);
+    assert_eq!(gcd(96_000, 44_100), 300);
+    assert_eq!(gcd(44_100, 96_000), 300);
+    assert_eq!(gcd(7, 0), 7);
+}
+
+#[test]
+fn a_device_frame_at_the_app_s_rate_is_exact() {
+    // 640 * 147 / 320 = 294 exactly (f64 gives 293.99999... for some).
+    for k in 0..10_000u64 {
+        assert_eq!(app_frame(640 * k, 96_000, 44_100), 294 * k);
+    }
+    assert_eq!(app_frame(896, 96_000, 44_100), 411);
+    assert_eq!(app_frame(1_000, 96_000, 48_000), 500);
+    assert_eq!(app_frame(u64::MAX, 48_000, 96_000), u64::MAX);
 }
 
 #[test]
