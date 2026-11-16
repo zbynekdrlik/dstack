@@ -13,6 +13,7 @@ use crate::subscribe::Manager;
 
 use crate::wire::tests::Rng;
 
+mod conformance;
 mod unanswered;
 
 const TEST_DEVICE: &str = include_str!("../../../../config/test-device.toml");
@@ -1007,6 +1008,9 @@ fn the_records_come_once_the_clock_is_ready_and_each_beat_takes_its_own_second()
     );
     // Slots 1 and 2 each receive a packet 300 samples late.
     let mut receiver = Receiver::new(Arc::clone(&rx)).unwrap();
+    // Synthetic times against the kernel's real receive stamps: the
+    // arrival is the age at the read only without a stamp (dstack #350).
+    rx.set_stamps(false);
     let plan = RxPlan {
         src: Some(lo),
         bps: 3,

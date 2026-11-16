@@ -8,6 +8,7 @@ use crate::media::packet::write;
 use crate::media::tx::ns_of;
 use crate::wire::tests::Rng;
 
+mod arrival;
 mod mean_age;
 mod network_p99;
 mod rejoin;
@@ -234,6 +235,10 @@ fn frames_of_24_bit_big_endian_land_at_their_stamps_across_the_seconds_wrap() {
     let wrap = (u64::from(u32::MAX) + 1) * u64::from(RATE);
     for p0 in [10 * 365 * 86_400 * u64::from(RATE), wrap - 2_000, wrap - 64] {
         let s = shared(3);
+        // Synthetic times against the kernel's real receive stamps: the
+        // arrival is the age at the read only without a stamp (dstack #350;
+        // the stamped arrival is `tests/arrival.rs`'s).
+        s.set_stamps(false);
         let mut rx = Receiver::new(Arc::clone(&s)).unwrap();
         // Slot 0 feeds RX 1 and RX 2, slot 1 RX 3; slot 2 nobody.
         publish(
@@ -296,6 +301,10 @@ fn the_least_lateness_of_a_second_is_kept_in_ns() {
     // 1000 s of media time: whole ns at every sample position used here.
     let p0 = 1_000 * u64::from(RATE);
     let s = shared(1);
+    // Synthetic times against the kernel's real receive stamps: the
+    // arrival is the age at the read only without a stamp (dstack #350;
+    // the stamped arrival is `tests/arrival.rs`'s).
+    s.set_stamps(false);
     let mut rx = Receiver::new(Arc::clone(&s)).unwrap();
     publish(
         &s,
@@ -340,6 +349,10 @@ fn the_least_lateness_of_a_second_is_kept_in_ns() {
 #[test]
 fn a_second_without_packets_has_no_least_lateness() {
     let s = shared(1);
+    // Synthetic times against the kernel's real receive stamps: the
+    // arrival is the age at the read only without a stamp (dstack #350;
+    // the stamped arrival is `tests/arrival.rs`'s).
+    s.set_stamps(false);
     let mut rx = Receiver::new(Arc::clone(&s)).unwrap();
     // A fresh slot, a taken one and one past the slots: none.
     assert_eq!(s.last_min_lateness_ns(0), None);
@@ -594,6 +607,10 @@ fn the_thread_s_clock_runs() {
 #[test]
 fn late_and_out_of_order_packets_are_counted_and_still_placed() {
     let s = shared(1);
+    // Synthetic times against the kernel's real receive stamps: the
+    // arrival is the age at the read only without a stamp (dstack #350;
+    // the stamped arrival is `tests/arrival.rs`'s).
+    s.set_stamps(false);
     let mut rx = Receiver::new(Arc::clone(&s)).unwrap();
     let mut p = plan(LOOPBACK, 1, true, 1);
     p.latency = 96;
@@ -1204,6 +1221,10 @@ fn a_packet_the_ring_refuses_as_read_counts_late_at_read_on_its_flow() {
     // past playout + block, but the pump had already read its positions.
     let p0 = 1_000 * u64::from(RATE);
     let s = shared(1);
+    // Synthetic times against the kernel's real receive stamps: the
+    // arrival is the age at the read only without a stamp (dstack #350;
+    // the stamped arrival is `tests/arrival.rs`'s).
+    s.set_stamps(false);
     let mut rx = Receiver::new(Arc::clone(&s)).unwrap();
     publish(
         &s,
