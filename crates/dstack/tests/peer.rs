@@ -185,6 +185,13 @@ impl Witness {
 /// and counted once it ends (the check's clear run, a block or two).
 const CAUSE_WINDOW_MS: u64 = 60;
 
+/// The least scheduling gap that can lose audio here, µs: a pump that
+/// woke this late plus its block's work ends past W (6 ms), fpp (0.67 ms)
+/// and the TX margin (0.25 ms) together and leaves TX holes; less is inside
+/// the budget. The witness's own 1 ms sleep counts in its gap (so its stall
+/// is this plus 1 ms).
+const LOSS_GAP_US: u64 = 5_000;
+
 /// A peer status's recent pump late wakes, `(unix_ms, behind_us)`.
 fn late_wakes(status: &str) -> Vec<(u64, u64)> {
     let v: serde_json::Value = serde_json::from_str(status).unwrap();
@@ -203,8 +210,9 @@ fn late_wakes(status: &str) -> Vec<(u64, u64)> {
 /// stalls, either pump's late wakes), the counts and both peers'
 /// statuses. `RUNNER` when the loss has a counted cause (the sender's TX
 /// holes or TX restart, either pump's restart) and every gap a scheduling
-/// gap before it; else `OURS`: a loss nothing counted, or one no thread's
-/// stall precedes, is the stack's.
+/// gap of at least [`LOSS_GAP_US`] before it; else `OURS`: a loss nothing
+/// counted, or one no long enough stall precedes, is the stack's. Too
+/// many restarts with no loss is `NO LOSS`.
 fn verdict(
     me: usize,
     mine: &Counts,
@@ -225,11 +233,14 @@ fn verdict(
             let mut stalls: Vec<String> = seen
                 .stalls
                 .iter()
-                .filter(|s| before(at, s.end_ms))
+                .filter(|s| s.gap_us >= LOSS_GAP_US + 1_000 && before(at, s.end_ms))
                 .map(|s| format!("witness {} us, {} ms before", s.gap_us, at - s.end_ms))
                 .collect();
             for (peer, w) in wakes.iter().enumerate() {
-                for &(end, us) in w.iter().filter(|&&(end, _)| before(at, end)) {
+                for &(end, us) in w
+                    .iter()
+                    .filter(|&&(end, us)| us >= LOSS_GAP_US && before(at, end))
+                {
                     stalls.push(format!(
                         "peer {peer}'s pump {us} us behind, {} ms before",
                         at - end
@@ -246,10 +257,14 @@ fn verdict(
         })
         .collect();
     let lost = mine.gaps + mine.holes > 0;
-    let verdict = if lost && caused && explained == seen.rises[me].len() {
-        "RUNNER: a counted cause, and a thread not run before every gap"
+    let rises = seen.rises[me].len();
+    let verdict = if !lost {
+        "NO LOSS: more than one counted restart in the window (a loaded box)"
+    } else if caused && rises > 0 && explained == rises {
+        "RUNNER: a counted cause, and a thread not run long enough to lose audio before \
+         every gap"
     } else {
-        "OURS: a loss with no counted cause, or a gap no thread's stall precedes"
+        "OURS: a loss with no counted cause, or with no thread not run long enough before it"
     };
     format!(
         "{verdict}\npeer {me}: {mine:?}\nsender (peer {other}): {theirs:?}\n{gaps:?}\n\

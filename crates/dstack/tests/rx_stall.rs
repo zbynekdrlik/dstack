@@ -17,14 +17,15 @@
 //! Which thread lost a sample (dstack #339: a windows-2025 run lost 1920
 //! samples in the normal profile, every one written after its read): the
 //! sender keeps each packet's send time and its own loop's largest gap, and
-//! the processor the positions it read as holes (each sample encodes its
-//! position and is never 0). A hole is the sender's when its packet left at
-//! or after the hole's earliest read (no block holding it runs before its
-//! position + 1 + P), else ours. Either way the run fails: a window where
-//! the sender did not run tested nothing; the message says whose it was.
+//! the processor the positions it read as holes with the time of that read
+//! (each sample encodes its position and is never 0). A hole is the
+//! sender's when its packet's send began at or after the read (so after
+//! that block's drain: not in its socket), else ours. Either way the run
+//! fails: a window where the sender did not run tested nothing; the message
+//! says whose it was.
 
 use std::net::{Ipv4Addr, UdpSocket};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -62,35 +63,71 @@ fn sample_at(pos: u64) -> i32 {
     i32::try_from((pos % 65_535 + 1) << 8).unwrap()
 }
 
-/// Runs of positions read as holes, `(first, samples)`, in reading order.
-type Runs = Arc<Mutex<Vec<(u64, u64)>>>;
+/// A run of positions one block read as holes after the flow was first
+/// heard: from `first`, `n` samples, read at media time `read` (samples,
+/// the clock read in the processor, after the block's drain and read).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Hole {
+    first: u64,
+    n: u64,
+    read: u64,
+}
 
-/// The app's processor: hears the inputs, sends nothing; records where
-/// its input read a hole (0) and counts samples that are neither their
-/// position's value nor a hole (`misplaced`).
+/// What the processor read: the hole runs, the holes before the flow was
+/// first heard (its start: reads before any write, a new flow's first
+/// drain dropping what waited), and samples that are neither their
+/// position's value nor a hole.
+#[derive(Debug, Default)]
+struct Heard {
+    holes: Vec<Hole>,
+    start: u64,
+    misplaced: u64,
+}
+
+/// The app's processor: hears the inputs, sends nothing; records into
+/// [`Heard`], at most one lock a block (only a block with a hole).
 struct Listen {
-    holes: Runs,
-    misplaced: Arc<AtomicU64>,
+    clock: Arc<dyn PtpClock>,
+    heard: Arc<Mutex<Heard>>,
+    /// A sample of the flow was read: holes from here on are the flow's.
+    started: bool,
+    /// This block's runs, `(first, n)` (capacity kept).
+    runs: Vec<(u64, u64)>,
 }
 
 impl Process for Listen {
     fn process(&mut self, block: &mut Block<'_>) {
         let Some(start) = block.start() else { return };
+        self.runs.clear();
+        let (mut before, mut misplaced) = (0, 0);
         for (i, &x) in block.input(0).iter().enumerate() {
             let pos = start + i as u64;
             if x == to_f64(sample_at(pos)) {
-                continue;
-            }
-            if x != 0.0 {
-                self.misplaced.fetch_add(1, Ordering::Relaxed);
-                continue;
-            }
-            let mut runs = self.holes.lock().unwrap_or_else(PoisonError::into_inner);
-            match runs.last_mut() {
-                Some((first, n)) if *first + *n == pos => *n += 1,
-                _ => runs.push((pos, 1)),
+                self.started = true;
+            } else if x != 0.0 {
+                misplaced += 1;
+            } else if !self.started {
+                before += 1;
+            } else {
+                match self.runs.last_mut() {
+                    Some((first, n)) if *first + *n == pos => *n += 1,
+                    _ => self.runs.push((pos, 1)),
+                }
             }
         }
+        if before + misplaced == 0 && self.runs.is_empty() {
+            return;
+        }
+        let read = self
+            .clock
+            .now_ns()
+            .map_or(0, |ns| clock::to_samples(ns, RATE));
+        let mut heard = self.heard.lock().unwrap_or_else(PoisonError::into_inner);
+        heard.start += before;
+        heard.misplaced += misplaced;
+        heard
+            .holes
+            .extend(self.runs.iter().map(|&(first, n)| Hole { first, n, read }));
     }
 }
 
@@ -99,17 +136,15 @@ struct Run {
     ring: Counters,
     lane: RxCounts,
     pump: PumpView,
-    /// The pump's recent late wakes, `unix_ms` as ms since the flow began.
+    /// The pump's recent late wakes.
     late_wakes: Vec<LateWake>,
     /// The flow's start, ms since the Unix epoch.
     began_unix_ms: u64,
-    /// Hole runs the processor read, `(first position, samples)`.
-    holes: Vec<(u64, u64)>,
-    misplaced: u64,
+    heard: Heard,
     /// The first packet's position.
     first: u64,
-    /// Each packet's send time (media samples, read after its send), in
-    /// position order from `first`, one per [`FPP`].
+    /// Each packet's send time (media samples, read just before its send),
+    /// in position order from `first`, one per [`FPP`].
     sent: Vec<u64>,
     /// The sender loop's largest gap between two passes, ns of the app's
     /// clock (QPC on Windows), and when it ended, ms since the flow began.
@@ -119,41 +154,42 @@ struct Run {
 /// Whose a lost sample is ([`attribute`]).
 #[derive(Debug, Default, PartialEq, Eq)]
 struct Blame {
-    /// Hole samples whose packet left at or after their earliest read.
+    /// Hole samples whose packet left after their read.
     sender: u64,
-    /// Hole samples whose packet left in time: the device's, the first
-    /// position of each run that has any.
+    /// Hole samples past the last packet sent (the flow had ended).
+    unsent: u64,
+    /// Hole samples whose packet may have left before their read: the
+    /// device's, and the first position of each run that has any.
     ours: u64,
     ours_at: Vec<u64>,
 }
 
-/// Splits the hole runs between the sender and us: a hole at `x` in the
-/// flow (from `first`) is the sender's when its packet's send time
-/// (`sent`, samples, one per [`FPP`] from `first`) is at or after
-/// `x + 1 + playout`, the earliest any block holding `x` is read; one past
-/// the last packet sent, or in a packet sent before that, is ours. A run
-/// that begins before `first` is the flow's start (no one's), all of it:
-/// the reads before the first write (the ring's start holes), which reach
-/// past `first` since a new flow's first drain drops what waited
-/// (`stray`).
-fn attribute(holes: &[(u64, u64)], first: u64, sent: &[u64], playout: u64) -> Blame {
+/// Splits the holes between the sender and us: a hole at `x` (from the
+/// flow's `first` position) is the sender's when its packet's send time
+/// (`sent`, samples, read before the send, one per [`FPP`] from `first`)
+/// is at or after the hole's `read` (the processor's clock read, after
+/// that block's drain): the packet was not in its socket at the drain.
+/// Any earlier send is ours, since the packet may have waited there. A
+/// hole past the last packet sent is `unsent`.
+fn attribute(holes: &[Hole], first: u64, sent: &[u64]) -> Blame {
     let mut blame = Blame::default();
-    for &(start, n) in holes.iter().filter(|&&(start, _)| start >= first) {
+    for hole in holes {
         let mut run_ours = false;
-        for x in start..start + n {
-            let k = x - first;
-            let late = sent
-                .get(usize::try_from(k / FPP).unwrap())
-                .is_some_and(|&at| at >= x + 1 + playout);
-            if late {
-                blame.sender += 1;
-            } else {
-                blame.ours += 1;
-                run_ours = true;
+        for x in hole.first..hole.first + hole.n {
+            let packet = x
+                .checked_sub(first)
+                .map(|k| usize::try_from(k / FPP).unwrap());
+            match packet.and_then(|k| sent.get(k)) {
+                Some(&at) if at >= hole.read => blame.sender += 1,
+                None if x >= first => blame.unsent += 1,
+                _ => {
+                    blame.ours += 1;
+                    run_ours = true;
+                }
             }
         }
         if run_ours {
-            blame.ours_at.push(start);
+            blame.ours_at.push(hole.first);
         }
     }
     blame
@@ -162,17 +198,18 @@ fn attribute(holes: &[(u64, u64)], first: u64, sent: &[u64], playout: u64) -> Bl
 impl Run {
     /// The failure message: the verdict, then the evidence.
     fn report(&self) -> String {
-        let blame = attribute(&self.holes, self.first, &self.sent, PLAYOUT);
+        let blame = attribute(&self.heard.holes, self.first, &self.sent);
         let verdict = if blame.ours > 0 {
             format!(
-                "OURS: {} hole samples came in packets sent in time (runs from {:?})",
+                "OURS: {} hole samples came in packets that may have been in their socket \
+                 at the read (runs from {:?})",
                 blame.ours, blame.ours_at
             )
         } else if blame.sender > 0 {
             format!(
                 "SENDER: all {} hole samples came in packets the test's sender sent after \
-                 their earliest read (its loop's largest gap {:.1} ms, ending at +{} ms): \
-                 the runner did not run the sender, so this run tested nothing there",
+                 their read (its loop's largest gap {:.1} ms, ending at +{} ms): the runner \
+                 did not run the sender, so this run tested nothing there",
                 blame.sender,
                 self.sender_gap.0 as f64 / 1e6,
                 self.sender_gap.1
@@ -181,11 +218,17 @@ impl Run {
             "OURS: no hole the processor read explains the counts".to_string()
         };
         let ms = |pos: u64| pos.saturating_sub(self.first) * 1000 / u64::from(RATE);
-        let runs: Vec<String> = self
-            .holes
+        // The blocks' runs, joined where they continue each other.
+        let mut joined: Vec<(u64, u64)> = Vec::new();
+        for h in &self.heard.holes {
+            match joined.last_mut() {
+                Some((first, n)) if *first + *n == h.first => *n += h.n,
+                _ => joined.push((h.first, h.n)),
+            }
+        }
+        let runs: Vec<String> = joined
             .iter()
-            .filter(|&&(start, _)| start >= self.first)
-            .map(|&(start, n)| format!("{n} at +{} ms", ms(start)))
+            .map(|&(first, n)| format!("{n} at +{} ms", ms(first)))
             .collect();
         let wakes: Vec<String> = self
             .late_wakes
@@ -200,9 +243,12 @@ impl Run {
             })
             .collect();
         format!(
-            "{verdict}\nhole runs: {runs:?}; misplaced {}\nsender: largest gap {:.1} ms \
-             ending at +{} ms\npump: {:?}\npump late wakes: {wakes:?}\nring {:?}\nlane {:?}",
-            self.misplaced,
+            "{verdict}\nhole runs: {runs:?}; {} past the flow's end; {} before it was heard; \
+             misplaced {}\nsender: largest gap {:.1} ms ending at +{} ms\npump: {:?}\n\
+             pump late wakes: {wakes:?}\nring {:?}\nlane {:?}",
+            blame.unsent,
+            self.heard.start,
+            self.heard.misplaced,
             self.sender_gap.0 as f64 / 1e6,
             self.sender_gap.1,
             self.pump,
@@ -262,11 +308,17 @@ fn stalled_run(profile: TimingProfile) -> Run {
         rx: vec![0],
         tx: Vec::new(),
     };
-    let holes: Runs = Arc::new(Mutex::new(Vec::with_capacity(64)));
-    let misplaced = Arc::new(AtomicU64::new(0));
+    let media: Arc<dyn PtpClock> = Arc::new(SkewedClock::new(
+        clock::app_monotonic_ns(),
+        0,
+        TestClockPpm(0.0),
+    ));
+    let heard = Arc::new(Mutex::new(Heard::default()));
     let listen = Listen {
-        holes: Arc::clone(&holes),
-        misplaced: Arc::clone(&misplaced),
+        clock: Arc::clone(&media),
+        heard: Arc::clone(&heard),
+        started: false,
+        runs: Vec::with_capacity(BLOCK as usize),
     };
     let pump = Pump::new(
         listen,
@@ -277,11 +329,6 @@ fn stalled_run(profile: TimingProfile) -> Run {
         tx,
         Arc::clone(&stats),
     );
-    let media: Arc<dyn PtpClock> = Arc::new(SkewedClock::new(
-        clock::app_monotonic_ns(),
-        0,
-        TestClockPpm(0.0),
-    ));
     let rx_thread = rx::spawn(
         Arc::clone(&media),
         Arc::clone(&shared),
@@ -338,8 +385,8 @@ fn stalled_run(profile: TimingProfile) -> Run {
             let n = packet::write(&mut out, secs, sub, 1, 3, FPP as usize, |f, _| {
                 sample_at(next + f as u64)
             });
-            sender.send_to(&out[..n], dest).unwrap();
             sent.push(samples(media.now_ns().unwrap()));
+            sender.send_to(&out[..n], dest).unwrap();
             next += FPP;
         }
         std::thread::sleep(Duration::from_micros(250));
@@ -350,15 +397,14 @@ fn stalled_run(profile: TimingProfile) -> Run {
     pump.join().unwrap();
     shared.stop();
     rx_thread.join().unwrap();
-    let holes = std::mem::take(&mut *holes.lock().unwrap_or_else(PoisonError::into_inner));
+    let heard = std::mem::take(&mut *heard.lock().unwrap_or_else(PoisonError::into_inner));
     Run {
         ring: shared.rings()[0].counters(),
         lane: shared.lane(0),
         pump: stats.view(),
         late_wakes: stats.wakes().recent(),
         began_unix_ms,
-        holes,
-        misplaced: misplaced.load(Ordering::Relaxed),
+        heard,
         first,
         sent,
         sender_gap,
@@ -375,7 +421,7 @@ fn a_stalled_rx_thread_loses_no_sample_in_the_normal_profile() {
             run.ring.late,
             run.ring.holes,
             run.lane.late_at_read,
-            run.misplaced
+            run.heard.misplaced
         ),
         (0, 0, 0, 0),
         "{}",
@@ -390,65 +436,69 @@ fn a_stalled_rx_thread_writes_behind_the_reader_when_it_writes() {
     assert!(run.lane.packets > 8_000, "{:?}", run.lane);
     assert!(run.ring.late > 0, "{}", run.report());
     assert!(run.lane.late_at_read > 0, "{}", run.report());
-    // The holes the processor read are the ring's, and the stalls' (the
-    // sender sent them in time): the evidence names the right thread.
-    let holes: u64 = run
-        .holes
-        .iter()
-        .filter(|&&(start, _)| start >= run.first)
-        .map(|&(_, n)| n)
-        .sum();
-    assert_eq!(holes, run.ring.holes, "{}", run.report());
-    let blame = attribute(&run.holes, run.first, &run.sent, PLAYOUT);
+    // Every 0 the processor read is a ring hole or start hole, and the
+    // stalls' holes are ours (the sender sent them in time): the evidence
+    // names the right thread.
+    let holes: u64 = run.heard.holes.iter().map(|h| h.n).sum();
+    assert_eq!(
+        holes + run.heard.start,
+        run.ring.holes + run.ring.start_holes,
+        "{}",
+        run.report()
+    );
+    let blame = attribute(&run.heard.holes, run.first, &run.sent);
     assert!(blame.ours > 0, "{}", run.report());
-    assert_eq!(run.misplaced, 0, "{}", run.report());
+    assert_eq!(run.heard.misplaced, 0, "{}", run.report());
 }
 
-/// [`attribute`] on numbers: P = 10, packets of [`FPP`] from 100.
+/// [`attribute`] on numbers: packets of [`FPP`] from 100.
 #[test]
-fn a_hole_is_the_sender_s_only_when_its_packet_left_after_its_earliest_read() {
+fn a_hole_is_the_sender_s_only_when_its_packet_left_after_its_read() {
+    let hole = |first, n, read| Hole { first, n, read };
     // Packet 0 (100..116) left at 110, packet 1 (116..132) at 126,
     // packet 2 (132..148) at 200.
     let sent = [110, 126, 200];
-    // A start run (from before 100) is no one's, past 100 too.
-    assert_eq!(attribute(&[(90, 10)], 100, &sent, 10), Blame::default());
-    assert_eq!(attribute(&[(99, 20)], 100, &sent, 10), Blame::default());
-    // Position 115's earliest read is 126: packet 0 left at 110, in time.
+    // Read at 126: packet 0 (sent 110) may have waited in its socket.
     assert_eq!(
-        attribute(&[(115, 1)], 100, &sent, 10),
+        attribute(&[hole(115, 1, 126)], 100, &sent),
         Blame {
-            sender: 0,
             ours: 1,
-            ours_at: vec![115]
+            ours_at: vec![115],
+            ..Blame::default()
         }
     );
-    // Position 115 with its packet sent at 126 (= 115 + 1 + 10): the
-    // sender's; at 125 it was in time.
+    // Sent at the read: the sender's; one sample before it: ours.
+    assert_eq!(attribute(&[hole(115, 1, 110)], 100, &sent).sender, 1);
+    assert_eq!(attribute(&[hole(115, 1, 111)], 100, &sent).ours, 1);
+    // One block's run over packets 1 and 2, read at 150: 116..132 (sent
+    // 126) ours, 132..148 (sent 200) the sender's.
     assert_eq!(
-        attribute(&[(115, 1)], 100, &[126], 10).sender,
-        1,
-        "at the earliest read"
-    );
-    assert_eq!(attribute(&[(115, 1)], 100, &[125], 10).ours, 1);
-    // A run over packets 1 and 2: 116..132 (sent 126, earliest reads
-    // 127..142) are ours, 132..148 (sent 200) the sender's.
-    assert_eq!(
-        attribute(&[(116, 32)], 100, &sent, 10),
+        attribute(&[hole(116, 32, 150)], 100, &sent),
         Blame {
             sender: 16,
             ours: 16,
-            ours_at: vec![116]
+            ours_at: vec![116],
+            ..Blame::default()
         }
     );
-    // Past the last packet sent: ours.
-    assert_eq!(attribute(&[(148, 2)], 100, &sent, 10).ours, 2);
+    // Past the last packet sent: unsent, no one's verdict.
+    assert_eq!(
+        attribute(&[hole(148, 2, 300)], 100, &sent),
+        Blame {
+            unsent: 2,
+            ..Blame::default()
+        }
+    );
+    // Before the first packet: ours (the processor records none there).
+    assert_eq!(attribute(&[hole(99, 1, 300)], 100, &sent).ours, 1);
     // Two runs, one each.
     assert_eq!(
-        attribute(&[(100, 1), (140, 2)], 100, &sent, 10),
+        attribute(&[hole(100, 1, 200), hole(140, 2, 150)], 100, &sent),
         Blame {
             sender: 2,
             ours: 1,
-            ours_at: vec![100]
+            ours_at: vec![100],
+            ..Blame::default()
         }
     );
 }
