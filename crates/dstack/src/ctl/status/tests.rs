@@ -174,6 +174,8 @@ const WORDS: &[&str] = &[
     "n",
     "sent",
     "uncounted",
+    "info_send_errors",
+    "info_send_recoveries",
     "tx",
     "tx_bytes",
     "flow",
@@ -333,7 +335,7 @@ fn a_fresh_device_s_status_is_its_name_and_numbers() {
         s,
         "{\"clock\":{\"ready\":0,\"epoch\":0,\"polls\":0,\"re_anchors\":0,\"holdovers\":0,\
          \"holdover\":0,\"freq_ppb\":-750,\"source\":\"dsync\"},\"requests\":[],\"sent\":[],\"uncounted\":0,\
-         \"tx\":[],\"tx_bytes\":0,\"name\":\"test-device\",\"rx\":[],\"rx_poll_errors\":0,\"channels\":[],\
+         \"info_send_errors\":0,\"info_send_recoveries\":0,\"tx\":[],\"tx_bytes\":0,\"name\":\"test-device\",\"rx\":[],\"rx_poll_errors\":0,\"channels\":[],\
          \"sources\":[],\"checks\":[]}"
     );
 }
@@ -382,6 +384,10 @@ fn the_status_names_the_clock_requests_channels_sources_and_checks() {
     let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 11));
     media.requests.received(4440, peer, 0x2200);
     media.requests.sent(peer, 0x0100);
+    for _ in 0..3 {
+        media.requests.info_send_failed();
+    }
+    media.requests.info_send_recovered();
     media.tx.set_source(0, Source::Counter);
     media.tx.set_source(
         2,
@@ -426,7 +432,8 @@ fn the_status_names_the_clock_requests_channels_sources_and_checks() {
             "{\"clock\":{\"ready\":1,\"epoch\":1,\"polls\":3,\"re_anchors\":1,\"holdovers\":1,\
              \"holdover\":0,\"freq_ppb\":-750,\"source\":\"dsync\"},\
              \"requests\":[{\"port\":4440,\"peer\":1,\"op\":8704,\"n\":1}],\
-             \"sent\":[{\"peer\":1,\"op\":256,\"n\":1}],\"uncounted\":0,\"tx\":[],\"tx_bytes\":0,\
+             \"sent\":[{\"peer\":1,\"op\":256,\"n\":1}],\"uncounted\":0,\
+             \"info_send_errors\":3,\"info_send_recoveries\":1,\"tx\":[],\"tx_bytes\":0,\
              \"name\":\"test-device\",\"rx\":[],"
         ),
         "{s}"

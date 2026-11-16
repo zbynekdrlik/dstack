@@ -362,6 +362,11 @@ pub struct RequestCounts {
     pub sent: Vec<Sent>,
     /// Datagrams past the [`MAX_ENTRIES`] of either table.
     pub uncounted: u64,
+    /// The info server's multicast sends that failed (dstack #340).
+    pub info_send_errors: u64,
+    /// The recoveries those failures asked: the multicast interface named
+    /// again or the info socket reopened (dstack #340).
+    pub info_send_recoveries: u64,
 }
 
 /// The device's request counts (cumulative; see the module).
@@ -375,6 +380,8 @@ struct Table {
     received: BTreeMap<(u16, usize, u16), u64>,
     sent: BTreeMap<(usize, u16), u64>,
     uncounted: u64,
+    info_send_errors: u64,
+    info_send_recoveries: u64,
 }
 
 impl Table {
@@ -428,6 +435,16 @@ impl Requests {
         id
     }
 
+    /// One multicast send of the info server failed (dstack #340).
+    pub fn info_send_failed(&self) {
+        lock(&self.0).info_send_errors += 1;
+    }
+
+    /// One recovery from failed info sends was asked (dstack #340).
+    pub fn info_send_recovered(&self) {
+        lock(&self.0).info_send_recoveries += 1;
+    }
+
     pub fn counts(&self) -> RequestCounts {
         let t = lock(&self.0);
         RequestCounts {
@@ -442,6 +459,8 @@ impl Requests {
                 .map(|(&(peer, op), &n)| Sent { peer, op, n })
                 .collect(),
             uncounted: t.uncounted,
+            info_send_errors: t.info_send_errors,
+            info_send_recoveries: t.info_send_recoveries,
         }
     }
 }
