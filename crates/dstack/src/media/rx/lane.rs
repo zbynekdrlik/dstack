@@ -30,6 +30,11 @@ pub(super) struct Lane {
     /// The runs of frames before `end` that no packet has filled yet
     /// (dstack #278): a gap only once lost ([`Holes`]).
     pub(super) holes: Holes,
+    /// The PTP time of the writer's last read of the slot that left its
+    /// socket empty, ns (dstack #350): a packet read later came after it,
+    /// which brackets its arrival without a kernel stamp. `None` before
+    /// one, after a flow change, and after a read that left datagrams.
+    pub(super) read_at: Option<u64>,
 }
 
 impl Lane {
@@ -41,6 +46,7 @@ impl Lane {
             source: None,
             end: None,
             holes: Holes::default(),
+            read_at: None,
         }
     }
 }

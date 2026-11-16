@@ -47,8 +47,15 @@ pub(super) struct RxStats {
     pub(super) wake_peak_ns: AtomicU64,
     /// The packets' judge: the least lateness in ns since the last take.
     pub(super) min_lateness_ns: Least,
-    /// The placed packets' age, summed and counted (dstack #342).
+    /// The placed packets' age at their arrival, summed and counted
+    /// (dstack #342, #350).
     pub(super) ages: age::Ages,
+    /// Each placed packet's wait from its arrival to the writer's read,
+    /// summed and counted (dstack #350): the pull's, the pump's or the RX
+    /// thread's wait, kept out of the ages.
+    pub(super) read_waits: age::Ages,
+    /// The largest of those waits since the device started, ns.
+    pub(super) read_wait_peak_ns: AtomicU64,
     /// The measured network latency's window (dstack #244, Linux).
     pub(super) network: netlat::Window,
     /// What the last [`RxShared::take_max_lateness`] took of it.
@@ -148,6 +155,17 @@ pub struct RxCounts {
     /// The placed packets since the device started (dstack #342): those
     /// `lateness_sum_ns` sums.
     pub lateness_count: u64,
+    /// The largest wait of a placed packet from its arrival to the
+    /// writer's read since the device started, µs (dstack #350: up to an
+    /// app's pull period, the pump's block, or the RX thread's wake).
+    pub read_wait_peak_us: u64,
+    /// Those waits summed, ns, and counted (one per placed packet, the
+    /// same packets as `lateness_count`) since the device started: a
+    /// reader diffs two looks for the mean between them
+    /// ([`RxCounts::read_wait_mean_ns_since`]); a wait past 4.29 s counts
+    /// as 4.29 s.
+    pub read_wait_sum_ns: u64,
+    pub read_wait_count: u64,
     /// The largest wake delay of any packet since the device started, µs:
     /// the RX pass's time less the kernel's receive time (dstack #234,
     /// Linux; 0 on Windows).
@@ -173,6 +191,16 @@ impl RxCounts {
         age::mean_between(
             (earlier.lateness_sum_ns, earlier.lateness_count),
             (self.lateness_sum_ns, self.lateness_count),
+        )
+    }
+
+    /// The mean wait from arrival to the writer's read of the packets
+    /// placed between an `earlier` look and this one, ns, rounded down
+    /// (dstack #350); `None` when none was placed between them.
+    pub fn read_wait_mean_ns_since(&self, earlier: &RxCounts) -> Option<u64> {
+        age::mean_between(
+            (earlier.read_wait_sum_ns, earlier.read_wait_count),
+            (self.read_wait_sum_ns, self.read_wait_count),
         )
     }
 }

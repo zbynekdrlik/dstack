@@ -60,6 +60,21 @@ fn check_arrival(s: &RxShared, read: &mut dyn FnMut(u64, u64)) {
     assert_eq!(s.last_lateness_mean_ns(0), Some(MS / 2), "{c:?}");
     assert_eq!(s.last_min_lateness_ns(0), Some(MS / 2), "{c:?}");
     assert_eq!(s.lane(0).lateness_peak, HALF_MS);
+    // The wait is reported apart: the ten waited 9, 8, .. 0 ms for the
+    // read (45 ms), the first read's packet none.
+    let c = s.lane(0);
+    assert_eq!(s.last_read_wait_mean_ns(0), Some(45 * MS / 10), "{c:?}");
+    assert_eq!(
+        (c.read_wait_sum_ns, c.read_wait_count, c.read_wait_peak_us),
+        (45 * MS, 11, 9_000),
+        "{c:?}"
+    );
+    assert_eq!(
+        c.read_wait_mean_ns_since(&RxCounts::default()),
+        Some(45 * MS / 11)
+    );
+    // The age at the read is the two together.
+    assert_eq!(c.lateness_sum_ns, 11 * MS / 2, "{c:?}");
 }
 
 #[test]
@@ -90,6 +105,58 @@ fn the_rx_thread_s_pass_reports_each_packet_s_arrival_age() {
     let mut rx = Receiver::new(Arc::clone(&s)).unwrap();
     flow_in_slot_0(&s);
     check_arrival(&s, &mut |now, n| pump(&mut rx, 0, n, Some(now), 0));
+}
+
+/// A read that left datagrams behind (the RX thread's pass reads at most
+/// [`DRAIN`] a slot) brackets nothing: what the next read takes may have
+/// waited since before it, so its ages are the ones at the read.
+#[test]
+fn a_read_that_left_datagrams_brackets_nothing() {
+    let s = shared(1);
+    s.set_stamps(false);
+    let mut rx = Receiver::new(Arc::clone(&s)).unwrap();
+    flow_in_slot_0(&s);
+    let t = transmitter(LOOPBACK);
+    let n = DRAIN as u64 + 6;
+    for k in 0..n {
+        t.send_to(&packet_at(T1 - 100 + k, 1, 1), slot_addr(&s, 0))
+            .unwrap();
+    }
+    settle();
+    rx.wait(Duration::from_millis(20)).unwrap();
+    rx.pass(Some(ns_of(T1, RATE)), 0);
+    assert_eq!(s.lane(0).packets, DRAIN as u64);
+    s.take_max_lateness(0);
+    // 10 ms later the rest: each its own age at the read, the oldest of
+    // them 996 samples (a bracket would have given the newest's 991).
+    rx.pass(Some(ns_of(NOW, RATE)), 0);
+    assert_eq!(s.lane(0).packets, n);
+    assert_eq!(s.take_max_lateness(0), NOW - (T1 - 100 + DRAIN as u64));
+}
+
+/// A new flow in the slot brackets nothing with the old flow's last read.
+#[test]
+fn a_new_flow_brackets_nothing_with_the_old_one_s_read() {
+    let s = shared(1);
+    s.set_stamps(false);
+    let mut rx = Receiver::new(Arc::clone(&s)).unwrap();
+    flow_in_slot_0(&s);
+    let t = transmitter(LOOPBACK);
+    t.send_to(&packet_at(T1 - HALF_MS, 1, 1), slot_addr(&s, 0))
+        .unwrap();
+    pump(&mut rx, 0, 1, Some(ns_of(T1, RATE)), 0);
+    s.take_max_lateness(0);
+    // The next generation of the flow, then two packets 6 and 0.5 ms old
+    // at the read 10 ms on: their ages at the read, the largest 6 ms (a
+    // bracket with the old flow's read would have given 0.5 ms).
+    let mut p = plan(LOOPBACK, 1, true, 2);
+    p.latency = 1920;
+    publish(&s, &[(0, p)], &[(0, RxRoute { flow: 0, slot: 0 })]);
+    for pos in [NOW - 576, NOW - HALF_MS] {
+        t.send_to(&packet_at(pos, 1, 1), slot_addr(&s, 0)).unwrap();
+    }
+    pump(&mut rx, 0, 3, Some(ns_of(NOW, RATE)), 0);
+    assert_eq!(s.take_max_lateness(0), 576);
 }
 
 /// With the kernel's receive stamps (Linux) the arrival is the stamp's: a

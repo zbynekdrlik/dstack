@@ -206,7 +206,17 @@ impl Json {
 ///   `lateness_sum_ns` and `lateness_count` (the placed packets' ages
 ///   summed, ns, and counted since the device started: a reader diffs two
 ///   reads for the mean between them; an age past 4.29 s counts as 4.29 s,
-///   and the sum wraps only after 2^32 packets at that cap),
+///   and the sum wraps only after 2^32 packets at that cap; since
+///   dstack #350 every age above is the packet's age at its ARRIVAL: the
+///   kernel's receive stamp on Linux, else bracketed by the writer's
+///   reads), `read_wait_peak_us` (dstack #350: the largest wait of a
+///   placed packet from its arrival to the writer's read since the device
+///   started, µs: an app's pull period, the pump's block or the RX
+///   thread's wake), `read_wait_mean_ns` (those waits' mean in the
+///   heartbeat's last second, ns, rounded down; absent as
+///   `lateness_min_ns` is), `read_wait_sum_ns` and `read_wait_count` (the
+///   waits summed, ns, and counted since the device started, for a
+///   reader's own mean),
 ///   `keepalives`,
 ///   `keepalive_errors`, `recv_errors`, `multicast` (a transmitter's
 ///   multicast flow the slot joined: no request, no keepalive), `joins` and
@@ -632,6 +642,12 @@ fn rx_part(j: &mut Json, media: &Media) {
         }
         j.num("lateness_sum_ns", lane.lateness_sum_ns);
         j.num("lateness_count", lane.lateness_count);
+        j.num("read_wait_peak_us", lane.read_wait_peak_us);
+        if let Some(ns) = media.rx.last_read_wait_mean_ns(slot) {
+            j.num("read_wait_mean_ns", ns);
+        }
+        j.num("read_wait_sum_ns", lane.read_wait_sum_ns);
+        j.num("read_wait_count", lane.read_wait_count);
         j.num("keepalives", lane.keepalives);
         j.num("keepalive_errors", lane.keepalive_errors);
         j.num("recv_errors", lane.recv_errors);

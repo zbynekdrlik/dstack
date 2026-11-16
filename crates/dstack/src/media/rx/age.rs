@@ -2,9 +2,11 @@
 // Copyright (C) 2026 dstack contributors.
 
 //! The placed packets' mean age of a flow slot (dstack #342): the sum and
-//! the count of each placed packet's age (our PTP now less its own stamp,
-//! ns: the judge's figure, `lateness_min_ns`; 0 for a packet stamped after
-//! our now), as running totals since the device started.
+//! the count of each placed packet's age (its arrival on our PTP clock
+//! less its own stamp, ns, [`arrival_age_ns`], dstack #350: the judge's
+//! figure, `lateness_min_ns`; 0 for a packet stamped after it came), as
+//! running totals since the device started. The wait from the arrival to
+//! the writer's read is kept the same way, apart (`read_waits`).
 //!
 //! The ring writer adds to both in `intake::place`, the one place every
 //! writer goes through (the RX thread's pass, the pump's drain, an app's
@@ -34,6 +36,36 @@ const NONE: u64 = u64::MAX;
 pub(super) fn mean_between(earlier: (u64, u64), later: (u64, u64)) -> Option<u64> {
     let count = later.1.wrapping_sub(earlier.1);
     (count != 0).then(|| later.0.wrapping_sub(earlier.0) / count)
+}
+
+/// A placed packet's age at its ARRIVAL, ns (dstack #350): what the
+/// heartbeat, the judge and the mean report, never the wait to its read.
+///
+/// - `at_read`: its age when the writer read it (our PTP now less its own
+///   stamp).
+/// - `wake`: the kernel's receive time to the read (Linux, `SO_TIMESTAMPNS`):
+///   with it the arrival is exact, `at_read` less `wake`.
+/// - Without a stamp (Windows), `since`: the time from the writer's last
+///   read that left the socket empty to this one. The packet came after
+///   that read, so its arrival age is at least `at_read - since`. The
+///   packets of one read share one network delay, which `newest` (the
+///   least `at_read` of the read: the newest packet, which came at most
+///   one packet interval before the read) bounds from above: the
+///   arrival age is the larger of the two, never above `at_read`
+///   (`newest <= at_read` by its definition).
+/// - With neither (the first read after the start, a flow change, a read
+///   that left datagrams behind, the clock back): `at_read`.
+pub(super) fn arrival_age_ns(
+    at_read: u64,
+    wake: Option<u64>,
+    since: Option<u64>,
+    newest: u64,
+) -> u64 {
+    match (wake, since) {
+        (Some(w), _) => at_read.saturating_sub(w),
+        (None, Some(s)) => at_read.saturating_sub(s).max(newest),
+        (None, None) => at_read,
+    }
 }
 
 /// One flow slot's ages: the running totals the writer adds to, and the
