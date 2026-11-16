@@ -435,8 +435,12 @@ impl PumpStats {
 
     /// A re-bootstrap for `cause` that skipped `skipped` blocks: counted
     /// in its cause's count (the total is their sum).
+    ///
+    /// The cause is counted FIRST and `missed` is added with `Release`
+    /// (dstack #332): a reader that loads `missed` with `Acquire` before
+    /// the causes ([`PumpStats::view`]) never sees skipped blocks whose
+    /// cause is not counted yet.
     pub(crate) fn rebootstrapped(&self, skipped: u64, cause: Cause) {
-        self.missed.fetch_add(skipped, Ordering::Relaxed);
         let by_cause = match cause {
             Cause::Late => &self.rebootstraps_late,
             Cause::ClockBack => &self.rebootstraps_clock_back,
@@ -444,6 +448,7 @@ impl PumpStats {
             Cause::Retime => &self.rebootstraps_retime,
         };
         by_cause.fetch_add(1, Ordering::Relaxed);
+        self.missed.fetch_add(skipped, Ordering::Release);
     }
 
     /// A wake on the media clock whose first due answer was `due`, `behind`
@@ -491,7 +496,7 @@ impl PumpStats {
             frames: self.frames,
             callbacks: self.blocks.load(Ordering::Relaxed),
             late: self.late.load(Ordering::Relaxed),
-            missed: self.missed.load(Ordering::Relaxed),
+            missed: self.missed.load(Ordering::Acquire),
             overruns: self.overruns.load(Ordering::Relaxed),
             resets: self.view().rebootstraps,
             faulted,
@@ -526,6 +531,9 @@ impl PumpStats {
 
     /// The numbers the device's control socket shows.
     pub fn view(&self) -> PumpView {
+        // `missed` first, with Acquire: every cause counted before those
+        // blocks is visible below (dstack #332, [`PumpStats::rebootstrapped`]).
+        let missed = self.missed.load(Ordering::Acquire);
         let late = self.rebootstraps_late.load(Ordering::Relaxed);
         let clock_back = self.rebootstraps_clock_back.load(Ordering::Relaxed);
         let reanchor = self.rebootstraps_reanchor.load(Ordering::Relaxed);
@@ -536,7 +544,7 @@ impl PumpStats {
             playout: self.playout.load(Ordering::Relaxed),
             blocks: self.blocks.load(Ordering::Relaxed),
             late: self.late.load(Ordering::Relaxed),
-            missed: self.missed.load(Ordering::Relaxed),
+            missed,
             overruns: self.overruns.load(Ordering::Relaxed),
             rebootstraps: late + clock_back + reanchor + retime,
             max_process_us: self.max_process_ns.load(Ordering::Relaxed) / 1_000,
