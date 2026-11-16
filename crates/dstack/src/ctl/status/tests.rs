@@ -229,6 +229,7 @@ const WORDS: &[&str] = &[
     "unplaced",
     "lateness",
     "lateness_peak",
+    "lateness_at_read_peak",
     "lateness_min_ns",
     "lateness_mean_ns",
     "lateness_sum_ns",
@@ -526,7 +527,7 @@ fn the_status_shows_the_packets_judge_in_ns_numbers_only() {
     let s = status(&media);
     assert!(
         s.contains(
-            "\"unplaced\":0,\"lateness\":0,\"lateness_peak\":40,\
+            "\"unplaced\":0,\"lateness\":0,\"lateness_peak\":40,\"lateness_at_read_peak\":40,\
              \"lateness_sum_ns\":677082,\"lateness_count\":2,\"read_wait_peak_us\":0,\
              \"read_wait_sum_ns\":0,\"read_wait_count\":2,\"keepalives\":0,"
         ),
@@ -582,7 +583,7 @@ fn the_status_shows_the_packets_judge_in_ns_numbers_only() {
             "\"rx\":[{{\"flow\":4,\"source\":\"{source}\",\"granted\":0,\"multicast\":0,\"fpp\":0,\"channels\":0,\"latency\":0,\
              \"playout\":0,\"delay\":0,\"late_after\":0,\"advertised\":0,\
              \"below_advertised\":0,\"packets\":2,\"refused\":0,\"stray\":0,\"out_of_order\":0,\"reordered\":0,\"gaps\":0,\"gap_frames\":0,{DROPS}\"late\":0,\"late_at_read\":0,\"start_holes\":0,{stamps}\
-             \"unplaced\":0,\"lateness\":40,\"lateness_peak\":40,\"lateness_min_ns\":260416,\
+             \"unplaced\":0,\"lateness\":40,\"lateness_peak\":40,\"lateness_at_read_peak\":40,\"lateness_min_ns\":260416,\
              \"lateness_mean_ns\":338541,\"lateness_sum_ns\":677082,\"lateness_count\":2,\
              \"read_wait_peak_us\":0,\"read_wait_mean_ns\":0,\"read_wait_sum_ns\":0,\
              \"read_wait_count\":2,\"keepalives\":0,\
@@ -750,7 +751,7 @@ fn the_status_lists_the_flows_of_both_sides() {
             "\"rx\":[{{\"flow\":1,\"device\":\"peer-device\",\"granted\":1,\"multicast\":0,\"fpp\":32,\"channels\":2,\"rx_channels\":[1],\"latency\":96,\
              \"playout\":96,\"delay\":0,\"late_after\":128,\"advertised\":96,\
              \"below_advertised\":0,\"packets\":0,\"refused\":0,\"stray\":0,\"out_of_order\":0,\"reordered\":0,\"gaps\":0,\"gap_frames\":0,{DROPS}\"late\":0,\"late_at_read\":0,\"start_holes\":0,{STAMPS_NONE}\
-             \"unplaced\":0,\"lateness\":0,\"lateness_peak\":0,\"lateness_sum_ns\":0,\"lateness_count\":0,\
+             \"unplaced\":0,\"lateness\":0,\"lateness_peak\":0,\"lateness_at_read_peak\":0,\"lateness_sum_ns\":0,\"lateness_count\":0,\
              \"read_wait_peak_us\":0,\"read_wait_sum_ns\":0,\"read_wait_count\":0,\
              \"keepalives\":0,\"keepalive_errors\":0,\
              \"recv_errors\":0,\"joins\":0,\"join_errors\":0}}],\"rx_poll_errors\":0,"

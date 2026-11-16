@@ -198,8 +198,13 @@ impl Json {
 ///   `lateness` (the largest in the heartbeat's last second, samples; the
 ///   status takes nothing),
 ///   `lateness_peak` (the largest since the device started, samples),
+///   `lateness_at_read_peak` (dstack #350: the largest at the writer's
+///   read since the device started, samples: the arrival's plus the read
+///   wait; on Windows, where the arrival is bracketed, the upper bound a
+///   late burst just before a read shows in),
 ///   `lateness_min_ns` (the packets' judge, phase D: the least lateness of
-///   that second in ns, our clock's now less the packets' own stamps; absent
+///   that second in ns, the packets' arrivals on our clock less their own
+///   stamps; absent
 ///   for a second without a placed packet), `lateness_mean_ns` (dstack
 ///   #342, information only: the mean of the same packets' ages in that
 ///   second, ns, rounded down; absent as `lateness_min_ns` is),
@@ -634,6 +639,7 @@ fn rx_part(j: &mut Json, media: &Media) {
         j.num("unplaced", lane.unplaced);
         j.num("lateness", media.rx.last_lateness(slot));
         j.num("lateness_peak", lane.lateness_peak);
+        j.num("lateness_at_read_peak", lane.lateness_at_read_peak);
         if let Some(ns) = media.rx.last_min_lateness_ns(slot) {
             j.num("lateness_min_ns", ns);
         }

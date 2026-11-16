@@ -56,6 +56,10 @@ pub(super) struct RxStats {
     pub(super) read_waits: age::Ages,
     /// The largest of those waits since the device started, ns.
     pub(super) read_wait_peak_ns: AtomicU64,
+    /// The largest lateness at the read since the device started, samples
+    /// (dstack #350: `lateness_peak` before #350; an upper bound where the
+    /// arrival is bracketed).
+    pub(super) lateness_at_read_peak: AtomicU64,
     /// The measured network latency's window (dstack #244, Linux).
     pub(super) network: netlat::Window,
     /// What the last [`RxShared::take_max_lateness`] took of it.
@@ -142,15 +146,23 @@ pub struct RxCounts {
     /// when the kernel received them (dstack #234, Linux; 0 on Windows):
     /// late on the wire, not by a late RX-thread wake.
     pub wire_late: u64,
-    /// The largest lateness of any packet since the device started,
-    /// samples (`lateness` is the last second's only).
+    /// The largest lateness of any packet at its arrival since the device
+    /// started, samples (`lateness` is the last second's only; dstack
+    /// #350: at the arrival, not the read).
     pub lateness_peak: u64,
+    /// The largest lateness of any packet at the writer's read since the
+    /// device started, samples (dstack #350): the arrival's plus the read
+    /// wait. Where the arrival is bracketed (Windows) it is the upper
+    /// bound: a burst that came late just before a read reads as on time
+    /// in `lateness_peak`, never here.
+    pub lateness_at_read_peak: u64,
     /// The sum of the placed packets' ages since the device started, ns
-    /// (dstack #342): each our clock's now less the packet's own stamp
-    /// (the figure whose least is `lateness_min_ns`; 0 for a packet
-    /// stamped after our now), an age past 4.29 s counted as 4.29 s; it
-    /// wraps only after 2^32 packets at that cap, so diff modulo 2^64. With `lateness_count`, a running total a reader
-    /// diffs between two of its looks ([`RxCounts::lateness_mean_ns_since`]).
+    /// (dstack #342): each the packet's arrival on our clock less its own
+    /// stamp (dstack #350; the figure whose least is `lateness_min_ns`; 0
+    /// for a packet stamped after it came), an age past 4.29 s counted as
+    /// 4.29 s; it wraps only after 2^32 packets at that cap, so diff
+    /// modulo 2^64. With `lateness_count`, a running total a reader diffs
+    /// between two of its looks ([`RxCounts::lateness_mean_ns_since`]).
     pub lateness_sum_ns: u64,
     /// The placed packets since the device started (dstack #342): those
     /// `lateness_sum_ns` sums.
@@ -165,6 +177,8 @@ pub struct RxCounts {
     /// ([`RxCounts::read_wait_mean_ns_since`]); a wait past 4.29 s counts
     /// as 4.29 s.
     pub read_wait_sum_ns: u64,
+    /// The placed packets whose waits `read_wait_sum_ns` sums (dstack
+    /// #350).
     pub read_wait_count: u64,
     /// The largest wake delay of any packet since the device started, µs:
     /// the RX pass's time less the kernel's receive time (dstack #234,

@@ -44,7 +44,9 @@ pub(super) fn mean_between(earlier: (u64, u64), later: (u64, u64)) -> Option<u64
 /// - `at_read`: its age when the writer read it (our PTP now less its own
 ///   stamp).
 /// - `wake`: the kernel's receive time to the read (Linux, `SO_TIMESTAMPNS`):
-///   with it the arrival is exact, `at_read` less `wake`.
+///   with it the arrival is exact, `at_read` less `wake`; a wake past
+///   `at_read` (a forward step of the wall clock the stamp is on) is
+///   ignored.
 /// - Without a stamp (Windows), `since`: the time from the writer's last
 ///   read that left the socket empty to this one. The packet came after
 ///   that read, so its arrival age is at least `at_read - since`. The
@@ -61,8 +63,10 @@ pub(super) fn arrival_age_ns(
     since: Option<u64>,
     newest: u64,
 ) -> u64 {
-    match (wake, since) {
-        (Some(w), _) => at_read.saturating_sub(w),
+    // A wake past the age at the read is no arrival (the wall clock the
+    // stamp is on stepped forward): the bracket then, as without a stamp.
+    match (wake.filter(|&w| w <= at_read), since) {
+        (Some(w), _) => at_read - w,
         (None, Some(s)) => at_read.saturating_sub(s).max(newest),
         (None, None) => at_read,
     }

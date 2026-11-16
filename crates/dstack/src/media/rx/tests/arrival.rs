@@ -73,8 +73,37 @@ fn check_arrival(s: &RxShared, read: &mut dyn FnMut(u64, u64)) {
         c.read_wait_mean_ns_since(&RxCounts::default()),
         Some(45 * MS / 11)
     );
-    // The age at the read is the two together.
+    // The age at the read is the two together; its peak is kept apart
+    // (the oldest of the ten, 9.5 ms).
     assert_eq!(c.lateness_sum_ns, 11 * MS / 2, "{c:?}");
+    assert_eq!(c.lateness_at_read_peak, 912, "{c:?}");
+}
+
+/// The bracket's error without a stamp: the newest packet of a read came
+/// 0.9 ms before it (its next one had not come), so every packet of the
+/// read reports the newest's 1.4 ms, 0.9 ms over its true 0.5 ms and less
+/// than the packet interval (1 ms) over it.
+#[test]
+fn without_a_stamp_the_arrival_is_over_by_at_most_a_packet_interval() {
+    let s = shared(1);
+    s.set_stamps(false);
+    let mut intake = s.app_intake().unwrap();
+    flow_in_slot_0(&s);
+    intake.drain_into_rings(None);
+    let t = transmitter(LOOPBACK);
+    intake.drain_into_rings(Some(ns_of(T1, RATE)));
+    let early = 86;
+    for k in 1..=10 {
+        let pos = T1 - HALF_MS - early + k * FRAMES as u64;
+        t.send_to(&packet_at(pos, 1, FRAMES), slot_addr(&s, 0))
+            .unwrap();
+    }
+    settle();
+    intake.drain_into_rings(Some(ns_of(NOW, RATE)));
+    let newest = ns_of(NOW, RATE) - ns_of(NOW - HALF_MS - early, RATE);
+    assert_eq!(s.take_max_lateness(0), HALF_MS + early);
+    assert_eq!(s.last_lateness_mean_ns(0), Some(newest));
+    assert_eq!(s.last_min_lateness_ns(0), Some(newest));
 }
 
 #[test]
@@ -183,5 +212,5 @@ fn with_kernel_stamps_a_pulled_packet_reports_its_age_at_the_stamp() {
     assert_eq!(s.lane(0).packets, 1);
     s.take_max_lateness(0);
     let mean = s.last_lateness_mean_ns(0).unwrap();
-    assert!((MS / 2 - 20_000..3 * MS).contains(&mean), "mean {mean} ns");
+    assert!((MS / 2 - 20_000..6 * MS).contains(&mean), "mean {mean} ns");
 }

@@ -73,8 +73,9 @@
 //!   refresh, before it writes (an old flow's packet written in between
 //!   would start it early).
 //! - The packets' judge (phase D, plan Task 3): the least lateness of each
-//!   flow slot's placed packets in ns (our clock's now in ns less the
-//!   packet's own stamp in ns), kept until read, so each heartbeat second
+//!   flow slot's placed packets in ns (each packet's arrival on our clock
+//!   in ns less its own stamp in ns: dstack #350, never the wait to its
+//!   read, `intake::record_arrivals`), kept until read, so each heartbeat second
 //!   has its own ([`RxShared::last_min_lateness_ns`]). Every Dante packet
 //!   carries its sender's PTP-locked media time, so the least of a second
 //!   measures the box's clock against the grandmaster's from the audio
@@ -392,6 +393,7 @@ impl RxShared {
             late_at_read: get(&l.late_at_read),
             wire_late: get(&l.wire_late),
             lateness_peak: get(&l.lateness_peak),
+            lateness_at_read_peak: get(&l.lateness_at_read_peak),
             lateness_sum_ns,
             lateness_count,
             read_wait_peak_us: get(&l.read_wait_peak_ns) / 1_000,

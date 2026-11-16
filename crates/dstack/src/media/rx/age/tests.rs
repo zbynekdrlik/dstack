@@ -85,8 +85,15 @@ fn a_kernel_stamp_gives_the_arrival_age_exactly() {
         7 * MS
     );
     assert_eq!(arrival_age_ns(10 * MS, Some(3 * MS), None, MS), 7 * MS);
-    // A wake past the age (a wall step): 0, never a wrap.
-    assert_eq!(arrival_age_ns(MS, Some(2 * MS), None, MS), 0);
+    // A wake of the whole age: arrived at its stamp, 0.
+    assert_eq!(arrival_age_ns(MS, Some(MS), None, MS / 2), 0);
+    // A wake past the age (the wall clock stepped forward) is no arrival:
+    // the bracket decides, else the age at the read.
+    assert_eq!(arrival_age_ns(MS, Some(MS + 1), None, MS / 2), MS);
+    assert_eq!(
+        arrival_age_ns(10 * MS, Some(20 * MS), Some(2 * MS), 4 * MS),
+        8 * MS
+    );
 }
 
 #[test]

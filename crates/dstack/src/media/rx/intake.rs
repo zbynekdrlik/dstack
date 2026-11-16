@@ -76,6 +76,7 @@ use super::lane::{Lane, count_lost};
 use super::plan::{RxPlan, RxRoute, new_flow};
 use super::socket::{
     Received, handle_of, recv_handle, recv_stamped, wake_delay_ns, wall_now_ns, wire_late,
+    wire_lateness,
 };
 use super::{BUFFER, DRAIN, FRAMES_MAX, MAX_FLOWS, RxShared, holes, netlat};
 use crate::clock;
@@ -196,7 +197,7 @@ impl Intake {
             if fresh && let Some(stats) = self.shared.lanes.get(slot) {
                 discard(stats, &mut self.buf[..], PUMP_DRAIN, read);
             }
-            emptied &= self.receive(slot, now_ns, mono, wall, PUMP_DRAIN, read);
+            emptied &= self.receive(slot, (now_ns, mono, wall), handle, PUMP_DRAIN, read);
         }
         self.expire(now_ns);
         self.shared.handles.ack(moves);
@@ -215,7 +216,7 @@ impl Intake {
         sockets: &[mio::net::UdpSocket],
         joined: &[Option<(SocketAddrV4, mio::net::UdpSocket)>],
     ) -> u32 {
-        let (now_ns, mono, wall) = at;
+        let now_ns = at.0;
         let moves = self.shared.handles.moves();
         self.refresh();
         self.expire(now_ns);
@@ -229,7 +230,7 @@ impl Intake {
                 _ => sockets.get(slot),
             };
             let emptied = socket.is_none_or(|s| {
-                self.receive(slot, now_ns, mono, wall, DRAIN, |buf| recv_stamped(s, buf))
+                self.receive(slot, at, handle_of(s), DRAIN, |buf| recv_stamped(s, buf))
             });
             if emptied {
                 left &= !(1 << slot);
@@ -323,19 +324,21 @@ impl Intake {
         self.routes_seen = Some(version);
     }
 
-    /// Reads up to `cap` datagrams of flow slot `slot` with `read`, `mono`
-    /// the reader's clock ([`RxShared::now_ns`]) and `wall` the read's wall
-    /// clock (ns since 1970); `true` when none is left. The hot path: no
-    /// allocation, no lock, no log.
+    /// Reads up to `cap` datagrams of flow slot `slot` with `read` from the
+    /// socket whose [`handle_of`] is `socket`, at `at`: (PTP now, `mono` the
+    /// reader's clock ([`RxShared::now_ns`]), `wall` the read's wall clock,
+    /// ns since 1970); `true` when it read no more (none left, or a read
+    /// error). The hot path: no allocation, no lock, no log.
     fn receive(
         &mut self,
         slot: usize,
-        now_ns: Option<u64>,
-        mono: u64,
-        wall: Option<u64>,
+        at: (Option<u64>, u64, Option<u64>),
+        socket: u64,
         cap: usize,
         mut read: impl FnMut(&mut [u8]) -> io::Result<Received>,
     ) -> bool {
+        debug_assert!(cap <= PUMP_DRAIN, "a read's packets fit `seen`");
+        let (now_ns, mono, wall) = at;
         let Intake {
             shared,
             lanes,
@@ -354,10 +357,14 @@ impl Intake {
         let count = |a: &AtomicU64| {
             a.fetch_add(1, Ordering::Relaxed);
         };
-        // dstack #350: the time since the slot's last read that left its
-        // socket empty brackets the arrival of what this one reads.
-        let since = now_ns.zip(lane.read_at).and_then(|(n, t)| n.checked_sub(t));
+        // dstack #350: the time since the slot's last read that left this
+        // same socket empty brackets the arrival of what this one reads (a
+        // socket read first now, a group's, may hold older datagrams).
+        let since = now_ns
+            .zip(lane.read_at.filter(|&(_, s)| s == socket))
+            .map(|(n, (t, _))| n.saturating_sub(t));
         let mut placed = 0;
+        let mut done = false;
         let mut emptied = false;
         for _ in 0..cap {
             let (n, from, at_ns) = match read(&mut buf[..]) {
@@ -373,7 +380,9 @@ impl Intake {
                 Err(e) => {
                     // Would block: none left. Anything else (an unconnected
                     // UDP socket reports none we know of) is counted and
-                    // ends this slot's reads for the pass.
+                    // ends this slot's reads for the pass; only an empty
+                    // socket brackets the next read's arrivals.
+                    done = true;
                     emptied = e.kind() == ErrorKind::WouldBlock;
                     if !emptied {
                         count(&stats.recv_errors);
@@ -442,8 +451,8 @@ impl Intake {
         if let Some(ns) = now_ns {
             record_arrivals(stats, rate, ns, since, &seen[..placed]);
         }
-        lane.read_at = now_ns.filter(|_| emptied);
-        emptied
+        lane.read_at = now_ns.filter(|_| emptied).map(|t| (t, socket));
+        done
     }
 }
 
@@ -625,10 +634,16 @@ fn record_arrivals(stats: &RxStats, rate: u32, now_ns: u64, since: Option<u64>, 
         let read_age = at_read(s);
         let age = arrival_age_ns(read_age, s.wake, since, newest);
         let wait = read_age - age;
-        // The arrival on our clock, in samples past the first frame.
-        let lateness = clock::to_samples(now_ns - wait, rate).saturating_sub(s.pos);
+        // The arrival on our clock, in samples past the first frame, and
+        // the read's: the peak at the read bounds a burst the bracket
+        // reads as on time (Windows).
+        let lateness = wire_lateness(now_ns, wait, s.pos, rate);
         stats.max_lateness.fetch_max(lateness, Ordering::Relaxed);
         stats.lateness_peak.fetch_max(lateness, Ordering::Relaxed);
+        let at_read_samples = wire_lateness(now_ns, 0, s.pos, rate);
+        stats
+            .lateness_at_read_peak
+            .fetch_max(at_read_samples, Ordering::Relaxed);
         // The judge: the packet's own stamp in ns against its arrival on
         // our clock; the same age summed and counted for its mean (#342).
         stats.min_lateness_ns.0.fetch_min(age, Ordering::Relaxed);
