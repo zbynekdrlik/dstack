@@ -7,7 +7,7 @@
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::sync::atomic::AtomicU64;
 
-use super::{netlat, wake};
+use super::{age, netlat, wake};
 
 /// A least lateness that holds none: no packet placed since it was last
 /// taken. A lateness of `u64::MAX` ns (585 years) reads as none too.
@@ -47,6 +47,8 @@ pub(super) struct RxStats {
     pub(super) wake_peak_ns: AtomicU64,
     /// The packets' judge: the least lateness in ns since the last take.
     pub(super) min_lateness_ns: Least,
+    /// The placed packets' age, summed and counted (dstack #342).
+    pub(super) ages: age::Ages,
     /// The measured network latency's window (dstack #244, Linux).
     pub(super) network: netlat::Window,
     /// What the last [`RxShared::take_max_lateness`] took of it.
@@ -136,6 +138,16 @@ pub struct RxCounts {
     /// The largest lateness of any packet since the device started,
     /// samples (`lateness` is the last second's only).
     pub lateness_peak: u64,
+    /// The sum of the placed packets' ages since the device started, ns
+    /// (dstack #342): each our clock's now less the packet's own stamp
+    /// (the figure whose least is `lateness_min_ns`; 0 for a packet
+    /// stamped after our now), an age past 4.29 s counted as 4.29 s; it
+    /// wraps only after 2^32 packets at that cap, so diff modulo 2^64. With `lateness_count`, a running total a reader
+    /// diffs between two of its looks ([`RxCounts::lateness_mean_ns_since`]).
+    pub lateness_sum_ns: u64,
+    /// The placed packets since the device started (dstack #342): those
+    /// `lateness_sum_ns` sums.
+    pub lateness_count: u64,
     /// The largest wake delay of any packet since the device started, µs:
     /// the RX pass's time less the kernel's receive time (dstack #234,
     /// Linux; 0 on Windows).
@@ -149,4 +161,18 @@ pub struct RxCounts {
     /// that failed (the socket, the bind or the membership).
     pub joins: u64,
     pub join_errors: u64,
+}
+
+impl RxCounts {
+    /// The mean age of the packets placed between an `earlier` look at
+    /// this slot's counts and this one, ns, rounded down (dstack #342:
+    /// information only); `None` when no packet was placed between them.
+    /// Each reader keeps its own last look, so no reader takes another's
+    /// window.
+    pub fn lateness_mean_ns_since(&self, earlier: &RxCounts) -> Option<u64> {
+        age::mean_between(
+            (earlier.lateness_sum_ns, earlier.lateness_count),
+            (self.lateness_sum_ns, self.lateness_count),
+        )
+    }
 }

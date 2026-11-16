@@ -8,6 +8,7 @@ use crate::media::packet::write;
 use crate::media::tx::ns_of;
 use crate::wire::tests::Rng;
 
+mod mean_age;
 mod network_p99;
 mod rejoin;
 mod reorder;
@@ -59,6 +60,11 @@ fn transmitter(ip: Ipv4Addr) -> UdpSocket {
     s.set_read_timeout(Some(Duration::from_millis(200)))
         .unwrap();
     s
+}
+
+/// Waits until a datagram sent is in its socket (or group's) for a read.
+fn settle() {
+    std::thread::sleep(Duration::from_millis(30));
 }
 
 fn slot_addr(s: &RxShared, slot: usize) -> SocketAddr {
