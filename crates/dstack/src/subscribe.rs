@@ -208,6 +208,8 @@ struct Flow {
     slots: Vec<Option<u16>>,
     bits: u32,
     fpp: u16,
+    /// Its transmitter's advertised latency or the device's, the larger:
+    /// set at its request and again at a latency write (dstack #352).
     latency_ns: u64,
     /// The transmitter's device name, lower-case (the `playout_override`
     /// key), and its advertised latency (0 when it advertises none).
@@ -373,12 +375,12 @@ impl Manager {
     }
 
     /// The device latency is `ns` now (Dante Controller set it): every
-    /// running flow takes it as a new flow would ([`flow_latency`]),
-    /// so the flow list states it and each flow's playout and delay follow
-    /// from the next plan read ([`Manager::rx_plan`]), with the same flow
-    /// (dstack #352). Nothing goes to a transmitter: a flow request carries
-    /// no latency. The audio jumps once by the change (a lower latency
-    /// skips that much, a higher one reads it again).
+    /// running flow takes it as a new flow would (its transmitter's latency
+    /// or ours, the larger), so the flow list states it and each flow's
+    /// playout and delay follow from the next plan read
+    /// ([`Manager::rx_plan`]), with the same flow (dstack #352). Nothing
+    /// goes to a transmitter: a flow request carries no latency. The pump
+    /// starts its schedule again at the moved playout point.
     pub fn set_latency(&mut self, ns: u64) {
         let was = self.latency_ns;
         self.latency_ns = ns;
