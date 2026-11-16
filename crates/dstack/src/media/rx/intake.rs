@@ -14,7 +14,7 @@
 //! - the engine's pump in the normal profile, just before it reads each
 //!   block ([`Intake::drain_into_rings`], [`crate::stream::Pump::media`]):
 //!   a non-blocking read of every slot that has a flow, until its socket
-//!   is empty. Packets wait in their sockets' buffers whatever a helper
+//!   is empty (at most [`PUMP_DRAIN`] datagrams). Packets wait in their sockets' buffers whatever a helper
 //!   thread does, and the pump reads by sample position, so its own
 //!   lateness loses nothing; a helper thread the scheduler leaves behind
 //!   (strih-snv, 15-16.11.2026: up to 17.5 ms against a 13 ms slack) can
@@ -26,8 +26,8 @@
 //! thread starts and never changes. A slot's multicast socket is the RX
 //! thread's (a join is a system call); the writer reads it by its handle
 //! ([`super::handles`]). Each datagram is one `recvmsg` with its kernel
-//! receive stamp (`socket::recv_handle`), up to [`DRAIN`] a slot a call;
-//! a batched `recvmmsg` would save system calls only (about 8 datagrams a
+//! receive stamp, up to [`DRAIN`] a slot a pass of the RX thread and
+//! [`PUMP_DRAIN`] a block of the pump; a batched `recvmmsg` would save system calls only (about 8 datagrams a
 //! flow a block), not time on the audio path.
 //!
 //! The counters keep their meaning under either writer. The wake delay is
@@ -36,10 +36,14 @@
 //! own lateness), and the write delay likewise. `late`, `wire_late`,
 //! `late_at_read` and the ring counts are judged as before, at the read.
 //! A datagram to a slot without a flow is read and counted `stray` by the
-//! RX thread in both cases (under the pump at each of its wakes, at least
-//! every [`super::WAKE_NS`]), so no backlog waits for the slot's next flow;
-//! the pump's first drain of a new flow also drops what still waited
-//! (`stray`). Under the pump a slot reads its group's socket only once the
+//! RX thread in both cases (under the pump up to
+//! [`super::UNPLANNED_DRAIN`] at each of its wakes, at least every
+//! [`super::WAKE_NS`]), so no backlog waits for the slot's next flow; the
+//! pump's first drain of a new flow also drops what still waited
+//! (`stray`): up to a block of the new flow's own first datagrams too,
+//! where it started before that drain. A publish that lands between the RX
+//! thread's plan read and its emptying of the slot may drop the new flow's
+//! first datagrams the same way (a window of microseconds). Under the pump a slot reads its group's socket only once the
 //! RX thread has joined the plan's group ([`pick`]), never the old one's.
 //! The thread's reads go through its mio sockets (Windows re-arms a
 //! socket's readiness only on mio's own read); the pump's through the
@@ -112,15 +116,22 @@ impl Intake {
         let moves = self.shared.handles.moves();
         let wall = self.shared.stamps().then(wall_now_ns).flatten();
         let mono = self.shared.now_ns();
+        // A new flow's slot is emptied at this drain only, from the socket
+        // it reads now: a group socket the RX thread joins later is new
+        // and holds nothing of an older flow.
         let fresh = self.refresh();
         self.expire(now_ns);
         for (slot, fresh) in fresh.into_iter().enumerate() {
             let Some(lane) = self.lanes.get(slot).filter(|l| l.plan.src.is_some()) else {
                 continue;
             };
-            let (handle, of) = self.shared.handles.get(slot);
             let own = self.shared.sockets.get(slot).map(handle_of);
-            let Some(handle) = pick(lane.plan.group, handle, of, own) else {
+            let Some(handle) = self
+                .shared
+                .handles
+                .get(slot)
+                .and_then(|(handle, of)| pick(lane.plan.group, handle, of, own))
+            else {
                 continue;
             };
             let read = |buf: &mut [u8]| recv_handle(handle, buf);

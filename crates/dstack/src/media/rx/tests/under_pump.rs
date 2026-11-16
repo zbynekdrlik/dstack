@@ -105,8 +105,8 @@ fn under_the_pump_the_rx_thread_reads_no_flow_socket_and_the_drain_does() {
         t.send_to(&packet_at(P0 + 32 * k, 2, 32), slot_addr(&s, 0))
             .unwrap();
     }
-    // And two to a slot without a flow.
-    for _ in 0..2 {
+    // And more than a pass's DRAIN to a slot without a flow.
+    for _ in 0..DRAIN + 26 {
         t.send_to(&packet_at(P0, 2, 32), slot_addr(&s, 5)).unwrap();
     }
     settle();
@@ -114,9 +114,9 @@ fn under_the_pump_the_rx_thread_reads_no_flow_socket_and_the_drain_does() {
     assert_eq!(rx.ready, 0, "no flow socket polled");
     rx.pass(Some(ns_of(P0 + 100, RATE)), 0);
     assert_eq!(read_of(s.lane(0)), 0, "the RX thread read no flow");
-    // It empties the slot without a flow: strays.
+    // It empties the slot without a flow at one wake: strays.
     let c = s.lane(5);
-    assert_eq!((c.stray, c.packets), (2, 0), "{c:?}");
+    assert_eq!((c.stray, c.packets), (DRAIN as u64 + 26, 0), "{c:?}");
     intake.drain_into_rings(Some(ns_of(P0 + 100, RATE)));
     let c = s.lane(0);
     assert_eq!((c.packets, c.stray, c.late), (3, 0, 0), "{c:?}");
@@ -270,7 +270,7 @@ fn under_the_pump_a_group_is_read_by_its_handle_and_a_left_one_closes_after_a_dr
     rx.pass(None, 0);
     intake.drain_into_rings(None);
     assert_eq!((s.lane(2).joins, s.lane(2).join_errors), (1, 0));
-    assert_ne!(s.handles.get(2).0, 0);
+    assert_ne!(s.handles.get(2).unwrap().0, 0);
     let t = multicast_transmitter();
     t.send_to(&packet_at(P0, 1, 32), group).unwrap();
     settle();

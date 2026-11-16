@@ -45,26 +45,28 @@ impl Handles {
     /// The RX thread: slot `slot`'s group socket is `handle` now (0: none),
     /// of the group `group` (its packed word, 0: none). Returns the swap's
     /// number: the socket it replaced may close once [`Handles::released`]
-    /// says so. The group is stored first, so a writer that reads the new
-    /// handle reads its group too (one that reads the old handle with the
-    /// new group sees them disagree and reads neither).
+    /// says so. The handle goes to 0 before the group changes and takes
+    /// its new value after, so [`Handles::get`] never pairs one swap's
+    /// handle with another's group.
     pub(super) fn set(&self, slot: usize, handle: u64, group: u64) -> u64 {
         if let (Some(s), Some(g)) = (self.slots.get(slot), self.groups.get(slot)) {
+            s.store(0, Ordering::Release);
             g.store(group, Ordering::Release);
             s.store(handle, Ordering::Release);
         }
         self.moves.fetch_add(1, Ordering::AcqRel) + 1
     }
 
-    /// Slot `slot`'s group socket handle (0: none) and the group it is of.
-    pub(super) fn get(&self, slot: usize) -> (u64, u64) {
-        match (self.slots.get(slot), self.groups.get(slot)) {
-            (Some(s), Some(g)) => {
-                let handle = s.load(Ordering::Acquire);
-                (handle, g.load(Ordering::Acquire))
-            }
-            _ => (0, 0),
-        }
+    /// Slot `slot`'s group socket handle (0: none) and the group it is of;
+    /// `None` while the RX thread is changing them (the handle read before
+    /// and after the group differ: read the slot at the next drain).
+    pub(super) fn get(&self, slot: usize) -> Option<(u64, u64)> {
+        let (Some(s), Some(g)) = (self.slots.get(slot), self.groups.get(slot)) else {
+            return Some((0, 0));
+        };
+        let handle = s.load(Ordering::Acquire);
+        let group = g.load(Ordering::Acquire);
+        (s.load(Ordering::Acquire) == handle).then_some((handle, group))
     }
 
     /// The writer, before a drain reads any handle: the swaps so far.
@@ -92,9 +94,9 @@ mod tests {
     fn a_replaced_socket_is_released_only_after_a_later_drain() {
         let h = Handles::new();
         let before = h.moves();
-        assert_eq!(h.get(3), (0, 0));
+        assert_eq!(h.get(3), Some((0, 0)));
         let moved = h.set(3, 42, 9);
-        assert_eq!(h.get(3), (42, 9));
+        assert_eq!(h.get(3), Some((42, 9)));
         assert_eq!(h.moves(), moved);
         assert!(!h.released(moved), "no drain yet");
         // A drain that began before the swap may still read the old one.
@@ -106,10 +108,10 @@ mod tests {
         // The next swap counts on.
         let next = h.set(3, 0, 0);
         assert_eq!(next, moved + 1);
-        assert_eq!(h.get(3), (0, 0));
+        assert_eq!(h.get(3), Some((0, 0)));
         assert!(!h.released(next));
         // No such slot: nothing stored, the swap still counted.
         assert_eq!(h.set(MAX_FLOWS, 7, 7), next + 1);
-        assert_eq!(h.get(MAX_FLOWS), (0, 0));
+        assert_eq!(h.get(MAX_FLOWS), Some((0, 0)));
     }
 }

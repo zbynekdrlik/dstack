@@ -160,6 +160,11 @@ pub fn rest_ns(began: u64, now: u64) -> u64 {
 /// The most datagrams read from one socket in a pass (a flood never holds
 /// the thread); the rest wait for the next pass, at once.
 pub const DRAIN: usize = 64;
+/// The most datagrams the RX thread drops from a slot without a flow at one
+/// wake under the pump (dstack #326): a whole receive buffer of small
+/// ones, so an unsubscribed transmitter still sending (about 100 a wake)
+/// leaves no backlog for the slot's next flow.
+pub const UNPLANNED_DRAIN: usize = 4096;
 /// The RX thread's `SCHED_FIFO` priority when `RLIMIT_RTPRIO` allows it:
 /// below the TX thread's (a send preempts a receive) and above the engine
 /// pump's.
@@ -738,7 +743,7 @@ impl Receiver {
         let lanes = &self.shared.lanes;
         for ((keep, socket), stats) in self.keeps.iter().zip(&self.sockets).zip(lanes.iter()) {
             if keep.plan.src.is_none() {
-                discard(stats, &mut self.buf[..], DRAIN, |buf| {
+                discard(stats, &mut self.buf[..], UNPLANNED_DRAIN, |buf| {
                     recv_stamped(socket, buf)
                 });
             }
