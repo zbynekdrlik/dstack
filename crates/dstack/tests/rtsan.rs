@@ -156,6 +156,8 @@ fn the_pump_s_drain_places_its_packets_realtime_safe() {
         Arc::clone(&stats),
     );
     assert!(pump.drains());
+    // A free block first: the drain takes the flow on.
+    pump.free();
     let sender = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let dest = rx.local_addr(0).unwrap();
     let mut now = T + BLOCK + 96;
@@ -170,7 +172,7 @@ fn the_pump_s_drain_places_its_packets_realtime_safe() {
     }
     let c = rx.lane(0);
     assert_eq!((c.packets, c.late, c.refused), (100, 0, 0), "{c:?}");
-    assert_eq!(stats.view().blocks, 100);
+    assert_eq!(stats.view().blocks, 101, "a free block, then 100");
 }
 
 /// Allocates in a real-time context: a violation under the sanitizer.

@@ -42,7 +42,7 @@ fn flow_rig(profile: TimingProfile) -> Rig {
         rx: vec![0],
         tx: vec![0],
     };
-    let pump = Pump::new(
+    let mut pump = Pump::new(
         Copy::default(),
         map,
         TIMING,
@@ -51,6 +51,9 @@ fn flow_rig(profile: TimingProfile) -> Rig {
         Arc::clone(&tx),
         Arc::clone(&stats),
     );
+    // The flow taken on before any packet (a new flow's first drain drops
+    // what waited before it).
+    pump.drain(None);
     Rig {
         pump,
         rx,

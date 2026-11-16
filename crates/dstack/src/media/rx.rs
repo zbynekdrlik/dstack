@@ -116,15 +116,16 @@ mod publish;
 mod rejoin;
 mod wake;
 pub use counts::RxCounts;
-use counts::{NO_LATENESS, RxStats, source_of};
+use counts::{NO_LATENESS, RxStats, source_of, source_word};
 use handles::Handles;
-pub use intake::Intake;
+pub use intake::{Intake, PUMP_DRAIN};
 use lane::Keep;
 mod socket;
+use intake::discard;
 pub use netlat::NetLatency;
 pub use plan::{RxPlan, RxRoute};
 pub use socket::{GROUP_BOUND_TO_PORT, join};
-use socket::{handle_of, set_recv_buffer, stamp_receives, wall_now_ns};
+use socket::{handle_of, recv_stamped, set_recv_buffer, stamp_receives, wall_now_ns};
 pub use wake::WakeDelay;
 
 /// Our RX flow slots (inferno's `MAX_FLOWS`).
@@ -338,16 +339,18 @@ impl RxShared {
         self.ring_writer.load(Ordering::Acquire) == WRITER_PUMP
     }
 
-    /// The RX thread claims the rings' writes unless the pump has them:
-    /// `true` when the thread writes.
+    /// The RX thread claims the rings' writes: `true` when it is the first
+    /// claim (the device's one RX thread); a pump's claim or another
+    /// receiver's before it leaves this one without writes.
     fn thread_writes(&self) -> bool {
-        let claimed = self.ring_writer.compare_exchange(
-            WRITER_UNSET,
-            WRITER_THREAD,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        );
-        claimed.unwrap_or_else(|had| had) != WRITER_PUMP
+        self.ring_writer
+            .compare_exchange(
+                WRITER_UNSET,
+                WRITER_THREAD,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
     }
 
     /// The device latency is `ns`: the pump's playout point is its whole
@@ -627,6 +630,8 @@ pub struct Receiver {
     ready: u32,
     /// The ring writer, while this thread is it.
     intake: Option<Intake>,
+    /// A datagram read and dropped under the pump ([`Receiver::pass`]).
+    buf: Box<[u8; BUFFER]>,
 }
 
 impl Receiver {
@@ -658,6 +663,7 @@ impl Receiver {
             rejoins_seen: shared.rejoins.load(Ordering::Acquire),
             ready: 0,
             intake,
+            buf: Box::new([0; BUFFER]),
             shared,
         })
     }
@@ -709,12 +715,34 @@ impl Receiver {
     /// their receives and this thread reads them.
     pub fn pass(&mut self, now_ns: Option<u64>, mono: u64) {
         self.refresh();
-        if let Some(intake) = &mut self.intake {
-            let wall = self.shared.stamps().then(wall_now_ns).flatten();
-            self.ready = intake.pass(self.ready, now_ns, mono, wall);
+        match &mut self.intake {
+            Some(intake) => {
+                let wall = self.shared.stamps().then(wall_now_ns).flatten();
+                self.ready = intake.pass(
+                    self.ready,
+                    (now_ns, mono, wall),
+                    &self.sockets,
+                    &self.joined,
+                );
+            }
+            None => self.empty_unplanned(),
         }
         self.release();
         self.keepalives(mono);
+    }
+
+    /// Under the pump (which reads only the slots that have a flow): each
+    /// slot without one emptied of what came to it, counted `stray`, so a
+    /// later flow in the slot never starts behind a backlog of the old one.
+    fn empty_unplanned(&mut self) {
+        let lanes = &self.shared.lanes;
+        for ((keep, socket), stats) in self.keeps.iter().zip(&self.sockets).zip(lanes.iter()) {
+            if keep.plan.src.is_none() {
+                discard(stats, &mut self.buf[..], DRAIN, |buf| {
+                    recv_stamped(socket, buf)
+                });
+            }
+        }
     }
 
     /// Reads the plans that changed for this thread's part: a group to
@@ -790,8 +818,10 @@ impl Receiver {
                 }
             }
         }
-        let handle = self.joined[slot].as_ref().map_or(0, |(_, s)| handle_of(s));
-        let moved = self.shared.handles.set(slot, handle);
+        let (handle, of) = self.joined[slot].as_ref().map_or((0, 0), |(group, s)| {
+            (handle_of(s), source_word(Some(*group)))
+        });
+        let moved = self.shared.handles.set(slot, handle, of);
         if let Some((_, mut s)) = old {
             if polled {
                 let _ = self.poll.registry().deregister(&mut s);

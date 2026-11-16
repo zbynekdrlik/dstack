@@ -41,6 +41,10 @@ const STALL: Duration = Duration::from_millis(20);
 const STALLS: usize = 6;
 /// The flow's length.
 const RUN: Duration = Duration::from_secs(3);
+/// How early the sender sends a packet, samples (4 ms): a sender thread
+/// late by less than this plus the slack still lands in time, so only the
+/// RX side decides the counts.
+const LEAD: u64 = 192;
 
 /// The app's processor: hears the inputs, sends nothing.
 struct Listen;
@@ -110,7 +114,8 @@ fn stalled_run(profile: TimingProfile) -> (Counters, RxCounts) {
     let stop = Arc::new(AtomicBool::new(false));
     let pump = stream::spawn(Arc::clone(&media), pump, Arc::clone(&stop)).unwrap();
 
-    // The sender: each packet once its last frame is due, in real time.
+    // The sender: each packet [`LEAD`] before its last frame is due, in
+    // real time.
     let sender = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let dest = shared.local_addr(0).unwrap();
     let samples = |ns: u64| clock::to_samples(ns, RATE);
@@ -135,7 +140,7 @@ fn stalled_run(profile: TimingProfile) -> (Counters, RxCounts) {
             stalled += 1;
         }
         let now = samples(media.now_ns().unwrap());
-        while next + FPP <= now {
+        while next + FPP <= now + LEAD {
             let (secs, sub) = clock::stamp(next, RATE);
             let n = packet::write(&mut out, secs, sub, 1, 3, FPP as usize, |f, _| {
                 (((next + f as u64) % 65_536) << 8) as i32

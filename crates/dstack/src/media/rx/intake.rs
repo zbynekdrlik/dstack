@@ -35,26 +35,43 @@
 //! includes the wait for the next block (at most a block, plus the pump's
 //! own lateness), and the write delay likewise. `late`, `wire_late`,
 //! `late_at_read` and the ring counts are judged as before, at the read.
-//! A datagram to a slot without a flow is read (and counted `stray`) only
-//! by the RX thread; under the pump it waits in its socket, unread.
+//! A datagram to a slot without a flow is read and counted `stray` by the
+//! RX thread in both cases (under the pump at each of its wakes, at least
+//! every [`super::WAKE_NS`]), so no backlog waits for the slot's next flow;
+//! the pump's first drain of a new flow also drops what still waited
+//! (`stray`). Under the pump a slot reads its group's socket only once the
+//! RX thread has joined the plan's group ([`pick`]), never the old one's.
+//! The thread's reads go through its mio sockets (Windows re-arms a
+//! socket's readiness only on mio's own read); the pump's through the
+//! sockets' handles, which no poll registered.
 //!
 //! The per-packet path allocates nothing, takes no lock and logs nothing
 //! (`tests/hot_path.rs`).
 
-use std::io::ErrorKind;
+use std::io::{self, ErrorKind};
+use std::net::SocketAddrV4;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::counts::{RxStats, source_word};
 use super::lane::{Lane, count_lost};
 use super::plan::{RxPlan, RxRoute, new_flow};
-use super::socket::{Received, handle_of, recv_handle, wake_delay_ns, wall_now_ns, wire_late};
+use super::socket::{
+    Received, handle_of, recv_handle, recv_stamped, wake_delay_ns, wall_now_ns, wire_late,
+};
 use super::{BUFFER, DRAIN, FRAMES_MAX, MAX_FLOWS, RxShared, holes, netlat};
 use crate::clock;
 use crate::media::packet;
 use crate::media::ring::Ring;
 use crate::media::tx::{MAX_CHANNELS, ns_of};
 use crate::wire::MAX_DATAGRAM;
+
+/// The most datagrams the pump's drain reads from one slot before a block:
+/// twice the largest block's frames even at one frame a packet, so a drain
+/// always keeps up with its flow (the RX thread's [`DRAIN`] a pass is
+/// followed by another pass at once; the pump's is not).
+pub const PUMP_DRAIN: usize = 8 * DRAIN;
+const _: () = assert!(PUMP_DRAIN as u64 >= 2 * crate::stream::BLOCKS[4]);
 
 /// The RX rings' writer (see the module): everything it needs, allocated
 /// before its first read.
@@ -87,33 +104,48 @@ impl Intake {
     /// The pump's drain (normal profile), at PTP time `now_ns` (`None`:
     /// the clock is not ready; packets are read and counted `unplaced`):
     /// the plans and routes that changed, then every slot that has a flow
-    /// read until its socket is empty (at most [`DRAIN`] datagrams), the
-    /// holes behind the playout given up. Never blocks.
+    /// read until its socket is empty (at most [`PUMP_DRAIN`] datagrams),
+    /// the holes behind the playout given up. A slot whose flow is new is
+    /// emptied first: what waited there came before the flow (counted
+    /// `stray`). Never blocks.
     pub fn drain_into_rings(&mut self, now_ns: Option<u64>) {
         let moves = self.shared.handles.moves();
         let wall = self.shared.stamps().then(wall_now_ns).flatten();
         let mono = self.shared.now_ns();
-        self.refresh();
+        let fresh = self.refresh();
         self.expire(now_ns);
-        for slot in 0..self.lanes.len() {
-            if self.lanes[slot].plan.src.is_some() {
-                self.receive(slot, now_ns, mono, wall);
+        for (slot, fresh) in fresh.into_iter().enumerate() {
+            let Some(lane) = self.lanes.get(slot).filter(|l| l.plan.src.is_some()) else {
+                continue;
+            };
+            let (handle, of) = self.shared.handles.get(slot);
+            let own = self.shared.sockets.get(slot).map(handle_of);
+            let Some(handle) = pick(lane.plan.group, handle, of, own) else {
+                continue;
+            };
+            let read = |buf: &mut [u8]| recv_handle(handle, buf);
+            if fresh && let Some(stats) = self.shared.lanes.get(slot) {
+                discard(stats, &mut self.buf[..], PUMP_DRAIN, read);
             }
+            self.receive(slot, now_ns, mono, wall, PUMP_DRAIN, read);
         }
         self.expire(now_ns);
         self.shared.handles.ack(moves);
     }
 
     /// The RX thread's part of its pass, for the slots in `ready` (one bit
-    /// each): read as [`Intake::drain_into_rings`] reads; returns the slots
-    /// that still have datagrams.
+    /// each), each read from its group's socket in `joined` while it has
+    /// one, else its own in `sockets` (the ones its poll registered): read
+    /// as [`Intake::drain_into_rings`] reads; returns the slots that still
+    /// have datagrams.
     pub(super) fn pass(
         &mut self,
         ready: u32,
-        now_ns: Option<u64>,
-        mono: u64,
-        wall: Option<u64>,
+        at: (Option<u64>, u64, Option<u64>),
+        sockets: &[mio::net::UdpSocket],
+        joined: &[Option<(SocketAddrV4, mio::net::UdpSocket)>],
     ) -> u32 {
+        let (now_ns, mono, wall) = at;
         let moves = self.shared.handles.moves();
         self.refresh();
         self.expire(now_ns);
@@ -122,7 +154,14 @@ impl Intake {
         while todo != 0 {
             let slot = todo.trailing_zeros() as usize;
             todo &= todo - 1;
-            if self.receive(slot, now_ns, mono, wall) {
+            let socket = match joined.get(slot) {
+                Some(Some((_, s))) => Some(s),
+                _ => sockets.get(slot),
+            };
+            let emptied = socket.is_none_or(|s| {
+                self.receive(slot, now_ns, mono, wall, DRAIN, |buf| recv_stamped(s, buf))
+            });
+            if emptied {
                 left &= !(1 << slot);
             }
         }
@@ -148,8 +187,8 @@ impl Intake {
 
     /// Reads the plans that changed (a new one resets its slot, a new flow
     /// restarts its rings: dstack #234) and the routes
-    /// ([`Intake::retarget`]).
-    fn refresh(&mut self) {
+    /// ([`Intake::retarget`]); returns the slots whose flow is new.
+    fn refresh(&mut self) -> [bool; MAX_FLOWS] {
         let shared = &*self.shared;
         // dstack #234: the slots whose flow is new; their rings restart.
         let mut fresh = [false; MAX_FLOWS];
@@ -182,6 +221,7 @@ impl Intake {
                 self.shared.rings[rx].restart();
             }
         }
+        fresh
     }
 
     /// After the routes changed (their version moves once
@@ -212,12 +252,19 @@ impl Intake {
         self.routes_seen = Some(version);
     }
 
-    /// Reads up to [`DRAIN`] datagrams of flow slot `slot` (its group's
-    /// socket while it has one, else its own), `mono` the reader's clock
-    /// ([`RxShared::now_ns`]) and `wall` the read's wall clock (ns since
-    /// 1970); `true` when none is left. The hot path: no allocation, no
-    /// lock, no log.
-    fn receive(&mut self, slot: usize, now_ns: Option<u64>, mono: u64, wall: Option<u64>) -> bool {
+    /// Reads up to `cap` datagrams of flow slot `slot` with `read`, `mono`
+    /// the reader's clock ([`RxShared::now_ns`]) and `wall` the read's wall
+    /// clock (ns since 1970); `true` when none is left. The hot path: no
+    /// allocation, no lock, no log.
+    fn receive(
+        &mut self,
+        slot: usize,
+        now_ns: Option<u64>,
+        mono: u64,
+        wall: Option<u64>,
+        cap: usize,
+        mut read: impl FnMut(&mut [u8]) -> io::Result<Received>,
+    ) -> bool {
         let Intake {
             shared,
             lanes,
@@ -225,13 +272,7 @@ impl Intake {
             frames,
             ..
         } = self;
-        let handle = match shared.handles.get(slot) {
-            0 => shared.sockets.get(slot).map(handle_of),
-            h => Some(h),
-        };
-        let (Some(handle), Some(lane), Some(stats)) =
-            (handle, lanes.get_mut(slot), shared.lanes.get(slot))
-        else {
+        let (Some(lane), Some(stats)) = (lanes.get_mut(slot), shared.lanes.get(slot)) else {
             return true;
         };
         let rate = shared.rate;
@@ -240,8 +281,8 @@ impl Intake {
         let count = |a: &AtomicU64| {
             a.fetch_add(1, Ordering::Relaxed);
         };
-        for _ in 0..DRAIN {
-            let (n, from, at_ns) = match recv_handle(handle, &mut buf[..]) {
+        for _ in 0..cap {
+            let (n, from, at_ns) = match read(&mut buf[..]) {
                 Ok(Received {
                     len,
                     from: Some(from),
@@ -315,6 +356,53 @@ impl Intake {
         }
         false
     }
+}
+
+/// Which socket the pump reads for a slot whose plan names `group`: the
+/// slot's own (`own`) without a group; with one, the RX thread's group
+/// socket `handle` when it is that group's (`of`, the group's
+/// [`source_word`]), the own socket while no group socket is open (a join
+/// that failed reads as the RX thread does), and none while the RX thread
+/// still holds another group's socket (it has not regrouped yet: those
+/// datagrams are not this flow's).
+pub(super) fn pick(
+    group: Option<SocketAddrV4>,
+    handle: u64,
+    of: u64,
+    own: Option<u64>,
+) -> Option<u64> {
+    match group {
+        None => own,
+        Some(_) if handle == 0 => own,
+        Some(g) if of == source_word(Some(g)) => Some(handle),
+        Some(_) => None,
+    }
+}
+
+/// Reads and drops up to `cap` datagrams with `read` (they came before
+/// the slot's flow, or to a slot without one), each counted `stray`; a
+/// failure other than an empty socket counts `recv_errors` and ends it.
+/// Returns how many it dropped.
+pub(super) fn discard(
+    stats: &RxStats,
+    buf: &mut [u8],
+    cap: usize,
+    mut read: impl FnMut(&mut [u8]) -> io::Result<Received>,
+) -> usize {
+    for n in 0..cap {
+        match read(buf) {
+            Ok(_) => {
+                stats.stray.fetch_add(1, Ordering::Relaxed);
+            }
+            Err(e) => {
+                if e.kind() != ErrorKind::WouldBlock {
+                    stats.recv_errors.fetch_add(1, Ordering::Relaxed);
+                }
+                return n;
+            }
+        }
+    }
+    cap
 }
 
 /// One well-formed packet of a flow, read at PTP time `now_ns` (`now` in

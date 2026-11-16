@@ -460,10 +460,26 @@ fn the_pump_s_drain_of_the_rx_flows_does_not_allocate() {
             out
         })
         .collect();
+    // A free block first: the drain takes the flow on (its first drain
+    // drops what waited before it).
+    pump.free();
+    let next = RxPlan {
+        generation: 2,
+        ..plan
+    };
     let mut now = T + BLOCK + 96;
     reset_violation_count();
     assert_no_alloc(|| {
-        for p in &packets {
+        for (k, p) in packets.iter().enumerate() {
+            // Halfway, a new flow in the slot: its rings restart and the
+            // packet that waited for it is dropped, still with no
+            // allocation.
+            if k == 150 {
+                rx.publish(
+                    |slot| if slot == 0 { next } else { RxPlan::default() },
+                    |c| (c < 2).then_some(RxRoute { flow: 0, slot: c }),
+                );
+            }
             transmitter.send_to(p, dest).unwrap();
             // The packet in its socket before the block's drain.
             std::thread::sleep(Duration::from_micros(200));
@@ -472,11 +488,11 @@ fn the_pump_s_drain_of_the_rx_flows_does_not_allocate() {
     });
     assert_eq!(violation_count(), 0, "the pump's drain allocated");
     let v = stats.view();
-    assert_eq!((v.blocks, v.rebootstraps), (300, 0), "{v:?}");
+    assert_eq!((v.blocks, v.rebootstraps), (301, 0), "{v:?}");
     let c = rx.lane(0);
     assert_eq!(
         (c.packets, c.refused, c.stray, c.late),
-        (300, 0, 0, 0),
+        (299, 0, 1, 0),
         "{c:?}"
     );
     let ring = rx.rings()[1].counters();
