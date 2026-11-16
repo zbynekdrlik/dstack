@@ -9,6 +9,31 @@ use std::net::SocketAddrV4;
 
 use super::{Plan, TxShared};
 
+/// One flow's receiver and how late it judged our packets, for an app's
+/// status ([`TxShared::take_app_view`], dstack #325).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReceiverLateness {
+    /// The flow's slot.
+    pub slot: usize,
+    /// The receiving device's name.
+    pub receiver: String,
+    /// The latency it states, ns (0: unknown).
+    pub latency_ns: u64,
+    /// The slot's packets over that latency since the device started
+    /// ([`super::LaneCounts::over_latency`]).
+    pub over_latency: u64,
+}
+
+/// What an app's status loop reads of the TX side ([`TxShared::take_app_view`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AppView {
+    /// The oldest packet of any slot since the app's last view, ns past its
+    /// stamp (0: none sent).
+    pub age_peak_ns: u64,
+    /// Each flow sending now to a receiver.
+    pub receivers: Vec<ReceiverLateness>,
+}
+
 impl TxShared {
     /// Slot `slot`'s receiver at `dest` states its latency as `ns` (0:
     /// unknown); the TX thread counts the slot's late packets against it
@@ -56,6 +81,11 @@ impl TxShared {
     /// ASIO bridge's from-ASIO block age, dstack #325).
     ///
     /// [`receiver_flows`]: TxShared::receiver_flows
+    pub fn take_app_view(&self) -> AppView {
+        AppView::default()
+    }
+
+    #[allow(missing_docs)]
     pub fn receiver_latencies(&self) -> Vec<(String, u64)> {
         self.receiver_flows()
             .into_iter()

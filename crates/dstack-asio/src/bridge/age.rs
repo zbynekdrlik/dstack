@@ -31,6 +31,7 @@
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 
 use dlink::bridge::Clock;
+use dstack::media::tx::AppView;
 use tracing::warn;
 
 /// A window of the max, ns.
@@ -105,14 +106,10 @@ impl Default for Window {
 /// What the status shows ([`BlockAge::report`]), µs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AgeReport {
-    /// The last block's age at the pump's take (`from_asio_block_age_us`).
-    pub block_age_us: u64,
-    /// The max over the last minute (`from_asio_block_age_max_us`).
-    pub block_age_max_us: u64,
-    /// The max + one pump block: the smallest receiver latency that never
-    /// sees a late packet from this path
-    /// (`from_asio_min_receiver_latency_us`).
-    pub min_receiver_latency_us: u64,
+    pub block_age_us: Option<u64>,
+    pub block_age_max_us: Option<u64>,
+    pub packet_age_us: Option<u64>,
+    pub min_receiver_latency_us: Option<u64>,
 }
 
 /// The from-ASIO block age's shared state (module doc).
@@ -196,9 +193,10 @@ impl BlockAge {
     pub fn report(&self) -> Option<AgeReport> {
         let max = self.window().max_at((self.clock)())?;
         Some(AgeReport {
-            block_age_us: self.last_ns.load(Ordering::Relaxed) / 1_000,
-            block_age_max_us: max / 1_000,
-            min_receiver_latency_us: max.saturating_add(self.block_ns) / 1_000,
+            block_age_us: Some(self.last_ns.load(Ordering::Relaxed) / 1_000),
+            block_age_max_us: Some(max / 1_000),
+            packet_age_us: None,
+            min_receiver_latency_us: Some(max.saturating_add(self.block_ns) / 1_000),
         })
     }
 
@@ -207,6 +205,16 @@ impl BlockAge {
     /// against the smallest receiver latency this path serves, and warns
     /// at most once an hour when a known one is below it. Returns the
     /// warning it logged. Call it from a status loop, not the pump.
+    /// RED stub (dstack #325): the old modelled check.
+    pub fn look(&self, view: &AppView, _network_p99_ns: Option<u64>) -> Option<String> {
+        let receivers: Vec<(String, u64)> = view
+            .receivers
+            .iter()
+            .map(|r| (r.receiver.clone(), r.latency_ns))
+            .collect();
+        self.warn_low_receivers(&receivers)
+    }
+
     pub fn warn_low_receivers(&self, receivers: &[(String, u64)]) -> Option<String> {
         let report = self.report()?;
         let text = low_receivers_text(report, receivers)?;
@@ -224,7 +232,7 @@ impl BlockAge {
 /// The warning for the `receivers` (name, stated latency ns) whose known
 /// latency is below `report`'s smallest serving one; `None` when none is.
 pub fn low_receivers_text(report: AgeReport, receivers: &[(String, u64)]) -> Option<String> {
-    let need_ns = report.min_receiver_latency_us * 1_000;
+    let need_ns = report.min_receiver_latency_us.unwrap_or(0) * 1_000;
     let low: Vec<String> = receivers
         .iter()
         .filter(|(_, ns)| *ns != 0 && *ns < need_ns)
@@ -236,8 +244,8 @@ pub fn low_receivers_text(report: AgeReport, receivers: &[(String, u64)]) -> Opt
              blocks are up to {} us old at the pump's take, so a receiver needs at least {} us \
              (set it higher, or a smaller ASIO buffer)",
             low.join(", "),
-            report.block_age_max_us,
-            report.min_receiver_latency_us
+            report.block_age_max_us.unwrap_or(0),
+            report.min_receiver_latency_us.unwrap_or(0)
         )
     })
 }

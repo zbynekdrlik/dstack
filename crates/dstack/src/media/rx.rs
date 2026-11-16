@@ -520,6 +520,11 @@ impl RxShared {
         self.lanes.get(slot)?.network.last()
     }
 
+    #[allow(missing_docs)]
+    pub fn network_p99_ns(&self) -> Option<u64> {
+        None
+    }
+
     /// Whether every slot socket stamps its datagrams' receive times, so
     /// `wire_late` and the wake delays are measured (dstack #234: Linux,
     /// where the kernel takes `SO_TIMESTAMPNS`; false on Windows). A

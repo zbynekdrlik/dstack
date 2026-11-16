@@ -1995,6 +1995,7 @@ mod multicast;
 mod receivers;
 use multicast::multicast_out;
 pub use multicast::{MULTICAST_PORT, MULTICAST_TTL, multicast_group};
+pub use receivers::{AppView, ReceiverLateness};
 
 #[cfg(test)]
 mod tests;
