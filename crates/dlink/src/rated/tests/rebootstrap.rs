@@ -104,9 +104,19 @@ fn a_restart_leads_with_the_blocks_back_to_a_whole_app_frame() {
     // A whole ratio needs none.
     assert_eq!(lead_blocks(128, 128, 96_000, 48_000), 0);
     assert_eq!(lead_blocks(4_800, 128, 48_000, 96_000), 0);
-    // At most MAX_LEAD blocks (one-frame blocks, a 320-frame period).
-    assert_eq!(lead_blocks(MAX_LEAD, 1, 96_000, 44_100), MAX_LEAD);
-    assert_eq!(lead_blocks(MAX_LEAD + 1, 1, 96_000, 44_100), 0);
+    // 22.05 kHz on 96 kHz at 16 frames: 39 blocks, within MAX_LEAD.
+    assert_eq!(lead_blocks(39 * 16, 16, 96_000, 22_050), 39);
+    // 32 kHz on a 44.1 kHz device (a whole app frame every 441 device
+    // frames) would need 440 blocks: past MAX_LEAD, the old label.
+    assert_eq!(lead_blocks(440 * 128, 128, 44_100, 32_000), 0);
+    assert_eq!(lead_blocks(441 * 128, 128, 44_100, 32_000), 0);
+    assert_eq!(lead_blocks(442 * 128, 128, 44_100, 32_000), 1);
+    // 44.1 kHz on 48 kHz: every 160 device frames.
+    assert_eq!(lead_blocks(4 * 128, 128, 48_000, 44_100), 4);
+    // At most MAX_LEAD blocks (one-frame blocks, a made-up rate whose
+    // period is 96000 frames).
+    assert_eq!(lead_blocks(MAX_LEAD, 1, 96_000, 44_099), MAX_LEAD);
+    assert_eq!(lead_blocks(MAX_LEAD + 1, 1, 96_000, 44_099), 0);
     assert_eq!(gcd(96_000, 44_100), 300);
     assert_eq!(gcd(44_100, 96_000), 300);
     assert_eq!(gcd(7, 0), 7);
@@ -114,7 +124,7 @@ fn a_restart_leads_with_the_blocks_back_to_a_whole_app_frame() {
 
 #[test]
 fn a_device_frame_at_the_app_s_rate_is_exact() {
-    // 640 * 147 / 320 = 294 exactly (f64 gives 293.99999... for some).
+    // 640 * 147 / 320 = 294: whole, exactly.
     for k in 0..10_000u64 {
         assert_eq!(app_frame(640 * k, 96_000, 44_100), 294 * k);
     }
@@ -141,6 +151,56 @@ fn an_impulse_comes_back_after_the_same_app_samples_across_a_re_bootstrap() {
                 (got - want).abs() < 0.01,
                 "fixed {fixed}, gap {gap}: {got} app frames, not {want}"
             );
+        }
+    }
+}
+
+/// The app's (media start, frames) for each device block start, from a
+/// `Rated` started at `first` that restarts at `restart` (a discontinuity
+/// and a jump to that start) and runs to device frame 20 000.
+fn labels(ch: (usize, usize), first: u64, restart: Option<u64>) -> Vec<(u64, Option<u64>, usize)> {
+    let mut r = Rated::new(Probe::new(0.0), 96_000, 44_100, N, ch.0, ch.1).unwrap();
+    let mut seen = Vec::new();
+    let mut s = first;
+    while s < 20_000 {
+        if Some(s) == restart.map(|r| r - 7 * N as u64) {
+            r.discontinuity();
+            s = restart.unwrap_or(s);
+        }
+        let input = vec![0.0; ch.0 * N];
+        let mut out = vec![0.0; ch.1 * N];
+        let calls = r.inner.starts.len();
+        r.process(&mut Block::new(N, &input, &mut out).at(s));
+        for (start, frames) in r.inner.starts[calls..].iter().zip(&r.inner.frames[calls..]) {
+            seen.push((s, *start, *frames));
+        }
+        s += N as u64;
+    }
+    seen
+}
+
+/// Every app block a restarted `Rated::new` gives carries the media start
+/// and frames that a `Rated` running from device frame 0 gives at the same
+/// device block, with no RX channel or no TX channel too. (A fixed app
+/// block's calls fall where its RX FIFO has `A` frames, which a restart
+/// moves; its round trip is checked above.)
+#[test]
+fn a_restarted_app_block_is_labelled_as_one_that_ran_from_the_start() {
+    for ch in [(1, 1), (0, 1), (1, 0)] {
+        let whole = labels(ch, 0, None);
+        for (first, restart) in [(896, None), (FIRST, Some(10_112)), (128, Some(9_984))] {
+            let got = labels(ch, first, restart);
+            // From the first block on, after each start, every block's
+            // label is the whole run's.
+            let from = restart.unwrap_or(first);
+            let tail: Vec<_> = got.iter().filter(|b| b.0 >= from).collect();
+            assert!(tail.len() > 40, "{ch:?} {first}");
+            for b in tail {
+                assert!(
+                    whole.contains(b),
+                    "{ch:?}, from {first}, restart {restart:?}: {b:?}"
+                );
+            }
         }
     }
 }

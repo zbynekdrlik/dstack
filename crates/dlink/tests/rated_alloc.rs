@@ -64,7 +64,9 @@ fn rated_s_process_allocates_nothing() {
                 }
                 r.process(
                     &mut Block::new(128, &input, &mut out)
-                        .at(b * 128)
+                        // Off a whole app frame at 44.1 kHz (dstack #341):
+                        // each start runs silent blocks first.
+                        .at((b + 7) * 128)
                         .played_at(b as i64 * 1_333_333),
                 );
             }

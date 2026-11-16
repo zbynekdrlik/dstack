@@ -383,7 +383,8 @@ impl Converter {
     }
 
     /// As [`Converter::process`] with `frames_in` frames of silence,
-    /// computing and writing nothing (dstack #341): the converter's phase
+    /// with no filter work and nothing written (dstack #341; the core only
+    /// moves its buffers and steps its index): the converter's phase
     /// moves on as that call's would, and its history stays silent. Valid
     /// only while the history is silence (new or just reset, and no
     /// [`Converter::process`] since), else an error and nothing moves.
