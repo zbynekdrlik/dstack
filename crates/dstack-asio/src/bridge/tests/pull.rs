@@ -234,3 +234,26 @@ fn the_app_s_look_drains_while_no_switch_pulls_and_never_waits() {
     assert!(look.idle && !look.changed, "{look:?}");
     assert_eq!(stats.idle_drains(), 2, "held: never waited for");
 }
+
+/// A pull that reads another channel count than the to-ASIO FIFO holds
+/// would write past its scratch in the driver's callback; a pull handed
+/// over after the driver's first open would leave that run's player on the
+/// pump's block (dstack #317). Both are refused.
+#[test]
+fn a_pull_of_another_width_or_after_the_first_open_is_refused() {
+    let mut b = Bridge::new(spec(2, 0)).unwrap();
+    let fifo = b.to_asio_fifo().unwrap();
+    let mut r = rig(&fifo);
+    assert_eq!(
+        b.pull_to_asio(r.pull.take().unwrap()),
+        Err("the pull reads 1 RX channels for the bridge's 2 to ASIO".to_string())
+    );
+    let mut b = Bridge::new(spec(1, 0)).unwrap();
+    let fifo = b.to_asio_fifo().unwrap();
+    let _asio = b.asio_side(&driver()).unwrap();
+    assert_eq!(
+        b.pull_to_asio(rig(&fifo).pull.take().unwrap()),
+        Err("the driver opened already: hand the pull over before its first open".to_string())
+    );
+    assert!(b.to_asio_pull_stats().is_none());
+}
