@@ -413,6 +413,7 @@ dependencies = [
  "dstack",
  "dstack-audio-io",
  "serde",
+ "tempfile",
  "tracing",
  "windows-sys 0.61.2",
 ]

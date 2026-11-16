@@ -38,10 +38,10 @@
 //! its blocks' modelled age at the pump's take (the driver's side records
 //! each hand-over, the pump's side its take; [`Bridge::from_asio_age`]).
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use dlink::bridge::{
-    AppBuffer, Clock, Fifo, Player, Stats, Switch, Taker, chunk_ns, fifo_for, switch,
+    AppBuffer, Clock, Fifo, Player, RxPull, Stats, Switch, Taker, chunk_ns, fifo_for, switch,
 };
 use dstack_audio_io::{Block, Process};
 
@@ -80,6 +80,9 @@ pub struct Bridge {
     switch: Option<Switch<Player>>,
     dante: Option<DanteSide>,
     age: Arc<BlockAge>,
+    /// The to-ASIO RX pull, once the app hands it over
+    /// ([`Bridge::pull_to_asio`]).
+    pull: Arc<OnceLock<Mutex<RxPull>>>,
 }
 
 impl Bridge {
@@ -115,8 +118,10 @@ impl Bridge {
         } else {
             (None, None)
         };
+        let pull = Arc::new(OnceLock::new());
         let dante = DanteSide {
             to_asio: to_asio.clone(),
+            pull: Arc::clone(&pull),
             from_asio,
             outputs: spec.from_asio,
             // A pump block wider than a piece would prime the from-ASIO
@@ -132,7 +137,15 @@ impl Bridge {
             switch,
             dante: Some(dante),
             age,
+            pull,
         })
+    }
+
+    /// The to-ASIO side read by position (dstack #307).
+    pub fn pull_to_asio(&mut self, pull: RxPull) -> Result<(), String> {
+        self.pull
+            .set(Mutex::new(pull))
+            .map_err(|_| "the bridge pulls already".to_string())
     }
 
     pub fn spec(&self) -> Spec {
@@ -283,6 +296,7 @@ fn feed(fifo: &Fifo, block: &Block<'_>) {
 /// The pump's side: RX into the to-ASIO FIFO, the from-ASIO player into TX.
 pub struct DanteSide {
     to_asio: Option<Arc<Fifo>>,
+    pull: Arc<OnceLock<Mutex<RxPull>>>,
     /// The from-ASIO player and its handover's end.
     from_asio: Option<(Player, Taker<Player>)>,
     outputs: usize,
@@ -292,7 +306,11 @@ pub struct DanteSide {
 
 impl Process for DanteSide {
     fn process(&mut self, block: &mut Block<'_>) {
-        if let Some(fifo) = &self.to_asio {
+        if let Some(pull) = self.pull.get() {
+            if let Ok(mut p) = pull.try_lock() {
+                p.pull();
+            }
+        } else if let Some(fifo) = &self.to_asio {
             feed(fifo, block);
         }
         match &mut self.from_asio {

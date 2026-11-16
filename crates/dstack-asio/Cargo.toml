@@ -25,6 +25,11 @@ serde = { version = "1", features = ["derive"], optional = true }
 [features]
 serde = ["dep:serde"]
 
+[dev-dependencies]
+# The whole-device test's config files (tests/to_asio_pull.rs, dstack
+# #307); already in the lockfile through dlink.
+tempfile = "3"
+
 [target.'cfg(windows)'.dependencies]
 # The ASIO host: azo, a pure-Rust COM ASIO host (MIT, no Steinberg SDK, no
 # LLVM), SongPlayer's pin (its #233 lane 3) so one azo serves both. Without
