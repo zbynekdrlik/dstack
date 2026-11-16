@@ -338,6 +338,7 @@ dependencies = [
 name = "dlink"
 version = "0.6.148"
 dependencies = [
+ "assert_no_alloc",
  "dstack",
  "dstack-audio-io",
  "dstack-resample",
