@@ -36,6 +36,21 @@
 //! The sinc stays for
 //! SongPlayer's own ASRC through `Converter::new` and `drifting`.)
 //!
+//! **A fixed app block** ([`Rated::with_fixed_app_block`], dstack #330,
+//! opt-in; dasio's ASIO hosts): an app whose buffer size is fixed gets
+//! exactly `A = ceil(block * app_rate / device_rate)` frames a call. At a
+//! ratio that does not divide the block the converter's frames go into a
+//! small RX FIFO with no prime, and the app is called once in a device
+//! block whose frames fill it to `A` or more, else not at all: 0 or 1 calls
+//! a block, `app_rate / A` calls a second on average, never a dry RX FIFO
+//! (the model of an ASIO host's own callback, whose cadence is the app's
+//! rate). A block with no call adds nothing to the TX FIFO, so its prime
+//! grows by `A`. That costs up to `A - 1` app frames RX and `A` TX, which
+//! [`Rated::delay_ns`] states (44.1 kHz on 96 kHz with a 128-frame block:
+//! `A` = 59, +1.32 ms RX, +1.34 ms TX). An exact 2:1 or 1:2 gives `A` every
+//! block: the same path as [`Rated::new`], sample for sample, no delay
+//! added.
+//!
 //! `process` allocates nothing: every buffer is sized at the start.
 
 use std::collections::VecDeque;
@@ -86,6 +101,43 @@ fn delays_ns(
 /// else [`PRIME`].
 fn prime_for(tx: &Converter) -> usize {
     if tx.is_half_band() { 0 } else { PRIME }
+}
+
+/// The app's frames a call with a fixed app block: `block` device frames
+/// at the app's rate, rounded up (dstack #330). Both rates are a
+/// converter's, which refuses 0.
+fn fixed_app_frames(device_rate: u32, app_rate: u32, block: usize) -> usize {
+    let frames = (block as u64 * u64::from(app_rate)).div_ceil(u64::from(device_rate.max(1)));
+    usize::try_from(frames).unwrap_or(usize::MAX)
+}
+
+/// The fixed app block's RX side at a ratio that does not divide the block
+/// (dstack #330): the converter's frames wait here until a whole app block
+/// is ready.
+struct Reblock {
+    /// The app's frames a call, `A`.
+    frames: usize,
+    /// The converter's frames waiting for the app, per RX channel.
+    fifo: Vec<VecDeque<f64>>,
+    /// How many frames wait (counted also with no RX channel).
+    held: usize,
+}
+
+/// The RX FIFO's worst wait, app frames: `A - 1` with a fixed app block's
+/// FIFO, else none.
+fn rx_wait(reblock: Option<&Reblock>) -> usize {
+    reblock.map_or(0, |r| r.frames - 1)
+}
+
+/// The capacities of the fixed app block's RX FIFO and of the TX FIFO, app
+/// frames, from `A` (0 without a fixed block's FIFO), the RX converter's
+/// most output, the TX converter's most input and the TX prime: room to
+/// spare, so `process` never grows (allocates) either.
+fn rooms(a: usize, rx_out_max: usize, tx_in_max: usize, prime: usize) -> (usize, usize) {
+    (
+        2 * (a + rx_out_max),
+        4 * (rx_out_max.max(a) + tx_in_max + prime + PRIME),
+    )
 }
 
 /// The converters for the device's RX into the app and the app's TX into
@@ -156,8 +208,14 @@ pub struct Rated<P> {
     /// ratio whose app blocks vary in size (44.1 kHz on 96 kHz: 58 or 59
     /// frames), an app block's first sample sits up to one app sample off
     /// its device block's start; the play time follows the device's blocks
-    /// and never drifts from them.
+    /// and never drifts from them. With a fixed app block at such a ratio
+    /// it holds the RX FIFO's worst case too ([`Rated::delay_ns`]).
     rx_delay_ns: i64,
+    /// The app's fixed frames a call ([`Rated::with_fixed_app_block`]).
+    app_block: Option<usize>,
+    /// The fixed app block's RX FIFO, at a ratio that does not divide the
+    /// block only.
+    reblock: Option<Reblock>,
 }
 
 impl<P: Process> Rated<P> {
@@ -171,17 +229,69 @@ impl<P: Process> Rated<P> {
         inputs: usize,
         outputs: usize,
     ) -> Result<Self, ConvertError> {
+        Self::build(
+            inner,
+            device_rate,
+            app_rate,
+            block,
+            (inputs, outputs),
+            false,
+        )
+    }
+
+    /// As [`Rated::new`], with the app called with exactly
+    /// `A = ceil(block * app_rate / device_rate)` frames each time (dstack
+    /// #330: a fixed-buffer app, an ASIO host). At a ratio that does not
+    /// divide the block the app is called 0 or 1 times a device block, at
+    /// `app_rate / A` calls a second on average, and [`Rated::delay_ns`]
+    /// adds up to `A - 1` app frames RX and `A` TX; an exact 2:1 or 1:2 is
+    /// [`Rated::new`]'s path unchanged. [`Rated::app_block`] gives `A`.
+    pub fn with_fixed_app_block(
+        inner: P,
+        device_rate: u32,
+        app_rate: u32,
+        block: usize,
+        inputs: usize,
+        outputs: usize,
+    ) -> Result<Self, ConvertError> {
+        Self::build(inner, device_rate, app_rate, block, (inputs, outputs), true)
+    }
+
+    fn build(
+        inner: P,
+        device_rate: u32,
+        app_rate: u32,
+        block: usize,
+        (inputs, outputs): (usize, usize),
+        fixed: bool,
+    ) -> Result<Self, ConvertError> {
         let (rx, tx) = converters(device_rate, app_rate, block, inputs.max(1), outputs.max(1))?;
-        let prime = prime_for(&tx);
+        let app_block = fixed.then(|| fixed_app_frames(device_rate, app_rate, block));
+        // The half-band's 2:1 or 1:2 (and one rate) gives exactly `A` every
+        // block: no FIFO.
+        let a = app_block.filter(|_| !rx.is_half_band() && !rx.is_copy());
+        let prime = prime_for(&tx) + a.unwrap_or(0);
+        let (rx_fifo_room, fifo_room) = rooms(
+            a.unwrap_or(0),
+            rx.output_frames_max(),
+            tx.input_frames_max(),
+            prime,
+        );
+        let reblock = a.map(|a| Reblock {
+            frames: a,
+            fifo: (0..inputs)
+                .map(|_| VecDeque::with_capacity(rx_fifo_room))
+                .collect(),
+            held: 0,
+        });
         let (rx_delay, _) = delays_ns(
-            rx.delay_frames(),
+            rx.delay_frames() + rx_wait(reblock.as_ref()),
             tx.delay_frames(),
             prime,
             device_rate,
             app_rate,
         );
-        let rx_room = rx.output_frames_max();
-        let fifo_room = 4 * (rx_room + tx.input_frames_max() + PRIME);
+        let rx_room = rx.output_frames_max().max(a.unwrap_or(0));
         let mut fifo: Vec<VecDeque<f64>> = (0..outputs)
             .map(|_| VecDeque::with_capacity(fifo_room))
             .collect();
@@ -207,20 +317,31 @@ impl<P: Process> Rated<P> {
             prime,
             dry: Arc::new(AtomicU64::new(0)),
             rx_delay_ns: i64::try_from(rx_delay).unwrap_or(i64::MAX),
+            app_block,
+            reblock,
         })
     }
 
     /// The delay each way, ns: RX (the device's input to the app's) and TX
     /// (the app's output to the device's, with the FIFO's [`PRIME`]).
-    /// [`delay_ns`] gives the same before a `Rated` exists.
+    /// [`delay_ns`] gives the same for [`Rated::new`] before a `Rated`
+    /// exists. With a fixed app block at a ratio that does not divide the
+    /// block, RX adds the RX FIFO's worst case (`A - 1` app frames) and TX
+    /// the prime's `A`; the free [`delay_ns`] does not include those.
     pub fn delay_ns(&self) -> (u64, u64) {
         delays_ns(
-            self.rx.delay_frames(),
+            self.rx.delay_frames() + rx_wait(self.reblock.as_ref()),
             self.tx.delay_frames(),
             self.prime,
             self.rates.0,
             self.rates.1,
         )
+    }
+
+    /// The app's frames each call when it was made with
+    /// [`Rated::with_fixed_app_block`] (`A`), else `None`.
+    pub fn app_block(&self) -> Option<usize> {
+        self.app_block
     }
 
     /// The TX FIFO's dry frames since the start (each played as silence).
@@ -262,33 +383,120 @@ impl<P: Process> Process for Rated<P> {
             Ok((_, made)) => made,
             Err(_) => 0,
         };
-        for c in 0..self.inputs {
-            self.app_in[c * k..(c + 1) * k].copy_from_slice(&self.rx_out[c * room..c * room + k]);
-        }
-        // The app at its rate.
+        // The app at its rate. `app_start` is the media time of this device
+        // block's converter frames; the play time is the device's + the RX
+        // converter's delay: the app's block plays at P + (c) as `split`
+        // states it (#295).
         let start = block.start();
         let app_start = start.map(|s| self.app_start(s));
-        {
-            let mut app = Block::new(
-                k,
-                &self.app_in[..self.inputs * k],
-                &mut self.app_out[..self.outputs * k],
-            );
-            if let Some(s) = app_start {
-                app = app.at(s);
-            }
-            // The device's play time + the RX converter's delay: the
-            // app's block plays at P + (c) as `split` states it (#295).
-            if let Some(at) = block.play_at() {
-                app = app.played_at(at.saturating_add(self.rx_delay_ns));
-            }
-            self.inner.process(&mut app);
-        }
+        let play_at = block
+            .play_at()
+            .map(|at| at.saturating_add(self.rx_delay_ns));
         self.last = start.zip(app_start).map(|(s, a)| (s, a, k));
-        // TX: the app's frames into the FIFO, exactly n device frames out.
-        for (c, fifo) in self.fifo.iter_mut().enumerate() {
-            fifo.extend(self.app_out[c * k..(c + 1) * k].iter().copied());
+        let Some(rb) = self.reblock.as_mut() else {
+            for c in 0..self.inputs {
+                self.app_in[c * k..(c + 1) * k]
+                    .copy_from_slice(&self.rx_out[c * room..c * room + k]);
+            }
+            call_app(
+                &mut self.inner,
+                (&self.app_in, &mut self.app_out),
+                (self.inputs, self.outputs),
+                k,
+                (app_start, play_at),
+                &mut self.fifo,
+            );
+            self.send(block);
+            return;
+        };
+        // A fixed app block (dstack #330): the converter's frames join the
+        // ones waiting; each whole block of `A` goes to the app. The waiting
+        // frames came before this device block's: the app's block starts
+        // that many frames earlier, in media time and in play time.
+        let a = rb.frames;
+        for (c, fifo) in rb.fifo.iter_mut().enumerate() {
+            fifo.extend(self.rx_out[c * room..c * room + k].iter().copied());
         }
+        // `held < A` before and `k <= A` (A rounds the converter's frames a
+        // block up), so this block makes at most one call.
+        let before = rb.held as i64;
+        rb.held += k;
+        if rb.held >= a {
+            for (c, fifo) in rb.fifo.iter_mut().enumerate() {
+                for (d, v) in self.app_in[c * a..(c + 1) * a]
+                    .iter_mut()
+                    .zip(fifo.drain(..a))
+                {
+                    *d = v;
+                }
+            }
+            rb.held -= a;
+            let early_ns = before * 1_000_000_000 / i64::from(self.rates.1);
+            call_app(
+                &mut self.inner,
+                (&self.app_in, &mut self.app_out),
+                (self.inputs, self.outputs),
+                a,
+                (
+                    app_start.map(|s| s.saturating_add_signed(-before)),
+                    play_at.map(|at| at.saturating_sub(early_ns)),
+                ),
+                &mut self.fifo,
+            );
+        }
+        self.send(block);
+    }
+
+    fn discontinuity(&mut self) {
+        self.rx.reset();
+        self.tx.reset();
+        for f in &mut self.fifo {
+            f.clear();
+            f.extend(std::iter::repeat_n(0.0, self.prime));
+        }
+        if let Some(rb) = self.reblock.as_mut() {
+            for f in &mut rb.fifo {
+                f.clear();
+            }
+            rb.held = 0;
+        }
+        self.last = None;
+        self.inner.discontinuity();
+    }
+}
+
+/// Calls the app with `frames` frames of `app_in` at `(start, play_at)`
+/// and puts its output into the TX FIFO.
+fn call_app<P: Process>(
+    inner: &mut P,
+    (app_in, app_out): (&[f64], &mut [f64]),
+    (inputs, outputs): (usize, usize),
+    frames: usize,
+    (start, play_at): (Option<u64>, Option<i64>),
+    fifo: &mut [VecDeque<f64>],
+) {
+    let mut app = Block::new(
+        frames,
+        &app_in[..inputs * frames],
+        &mut app_out[..outputs * frames],
+    );
+    if let Some(s) = start {
+        app = app.at(s);
+    }
+    if let Some(at) = play_at {
+        app = app.played_at(at);
+    }
+    inner.process(&mut app);
+    for (c, fifo) in fifo.iter_mut().enumerate() {
+        fifo.extend(app_out[c * frames..(c + 1) * frames].iter().copied());
+    }
+}
+
+impl<P: Process> Rated<P> {
+    /// TX: exactly the device's block out of the FIFO, through the TX
+    /// converter, into `block`'s outputs.
+    fn send(&mut self, block: &mut Block<'_>) {
+        let n = self.block;
         let need = self.tx.input_frames_next();
         for (c, fifo) in self.fifo.iter_mut().enumerate() {
             let short = drain_into(fifo, &mut self.tx_in[c * need..(c + 1) * need]);
@@ -314,17 +522,6 @@ impl<P: Process> Process for Rated<P> {
                 dst.fill(0.0);
             }
         }
-    }
-
-    fn discontinuity(&mut self) {
-        self.rx.reset();
-        self.tx.reset();
-        for f in &mut self.fifo {
-            f.clear();
-            f.extend(std::iter::repeat_n(0.0, self.prime));
-        }
-        self.last = None;
-        self.inner.discontinuity();
     }
 }
 

@@ -370,3 +370,6 @@ fn the_app_s_block_plays_the_rx_converter_s_delay_after_the_device_s() {
     r.process(&mut Block::new(128, &i, &mut o).at(0).played_at(0));
     assert_eq!(r.inner.play_ats, [Some(625_000)]);
 }
+
+/// dstack #330: the fixed app block.
+mod fixed;
