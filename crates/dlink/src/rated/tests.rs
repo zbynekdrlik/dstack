@@ -67,7 +67,16 @@ fn run(
 
 #[test]
 fn the_app_gets_its_rate_s_share_of_frames_in_follow_on_time() {
-    for (dev, app) in [(96_000u32, 48_000u32), (96_000, 44_100), (48_000, 96_000)] {
+    // The first start is the device's at the app's rate as a `Rated` that
+    // ran from device frame 0 labels it (dstack #343): 1000 / 2 and
+    // 1000 * 2 for the half-band, and at 44.1 kHz the RX converter's frames
+    // for 1000 silent inputs, floor(998 * 147 / 320) = 458 (not the
+    // floor of 1000 * 147 / 320, 459, which sat 0.375 app frames off).
+    for (dev, app, first) in [
+        (96_000u32, 48_000u32, 500u64),
+        (96_000, 44_100, 458),
+        (48_000, 96_000, 2_000),
+    ] {
         let mut r = Rated::new(Probe::new(0.0), dev, app, 32, 1, 1).unwrap();
         run(&mut r, (1, 1), 32, 4_000, 1_000, |_| 0.0);
         let frames = &r.inner.frames;
@@ -83,9 +92,7 @@ fn the_app_gets_its_rate_s_share_of_frames_in_follow_on_time() {
             let (s, f) = w;
             assert_eq!(s[1].unwrap(), s[0].unwrap() + f[0] as u64, "{dev} -> {app}");
         }
-        // The first start is the device's at the app's rate.
-        let first = (1_000.0 * f64::from(app) / f64::from(dev)) as u64;
-        assert_eq!(r.inner.starts[0], Some(first));
+        assert_eq!(r.inner.starts[0], Some(first), "{dev} -> {app}");
     }
 }
 
@@ -146,9 +153,10 @@ fn a_dry_fifo_plays_silence_and_is_counted() {
     r.fifo[0].clear();
     let dry = r.dry();
     // An app that hands back nothing: an RX side with no frames yet is
-    // the same as the FIFO cleared.
+    // the same as the FIFO cleared. No media time, so no restart sets the
+    // FIFO's depth (dstack #343).
     let (i, mut o) = ([0.0; 32], [1.0; 32]);
-    r.process(&mut Block::new(32, &i, &mut o).at(0));
+    r.process(&mut Block::new(32, &i, &mut o));
     assert!(dry.load(Ordering::Relaxed) > 0);
     assert!(o.iter().all(|v| v.is_finite()));
 }
@@ -199,7 +207,7 @@ fn a_discontinuity_clears_the_filters_and_reaches_the_app() {
         assert_eq!(r.inner.resets, 1);
         assert_eq!(r.fifo[0].len(), prime, "{app}");
         assert!(r.fifo[0].iter().all(|&v| v == 0.0));
-        assert!(r.last.is_none());
+        assert!(r.next.is_none());
         let before = r.inner.heard.len();
         run(&mut r, (1, 1), 32, 1, 0, |_| 0.0);
         assert!(r.inner.heard[before..].iter().all(|v| v.abs() < 1e-12));

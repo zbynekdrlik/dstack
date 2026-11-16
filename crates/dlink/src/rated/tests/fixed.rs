@@ -461,7 +461,7 @@ fn a_discontinuity_empties_the_fixed_block_s_fifo_and_primes_tx_again() {
             .iter()
             .all(|f| f.len() == A + PRIME && f.iter().all(|&v| v == 0.0))
     );
-    assert!(r.last.is_none());
+    assert!(r.next.is_none());
     assert_eq!(r.inner.resets, 1);
     // After it, the app hears only the new silence.
     let before = r.inner.heard.len();

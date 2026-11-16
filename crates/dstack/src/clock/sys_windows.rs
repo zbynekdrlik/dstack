@@ -190,6 +190,19 @@ pub fn allow_escape(allowed: bool) {
 }
 
 thread_local! {
+    /// Whether this thread's capped give is a timer wait ([`give_on_timer`]).
+    static TIMER_GIVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Makes this thread's capped give (dstack #351, `wait::GIVE_CAP_NS`) a
+/// timer wait instead of a yield: an engine pump whose W absorbs the
+/// timer's late wake ([`super::pump_gives_on_timer`]). Any other thread
+/// yields.
+pub fn give_on_timer(on: bool) {
+    TIMER_GIVE.with(|t| t.set(on));
+}
+
+thread_local! {
     /// This thread's bounded escape (dstack #1).
     static ESCAPE: std::cell::Cell<super::EscapeState> =
         const { std::cell::Cell::new(super::EscapeState::new()) };
@@ -238,6 +251,13 @@ pub fn block_escape() -> bool {
     });
     if go {
         block_for(super::ESCAPE_BLOCK_NS as i64);
+        // Bookkeeping only: TX's waits under the escape pause uncapped; a
+        // later wait without the escape counts from this block.
+        GIVES.with(|g| {
+            let mut gives = g.get();
+            gives.gave(app_monotonic_ns());
+            g.set(gives);
+        });
     }
     go
 }
@@ -255,8 +275,9 @@ pub fn relay_spin() {
 fn block_for(ns: i64) {
     let h = timer();
     if !h.is_null() {
-        // Relative due time: negative, in 100 ns units.
-        let due = -(ns / 100);
+        // Relative due time: negative, in 100 ns units, at least one (0
+        // would be an absolute time in the past: no block at all).
+        let due = -(ns / 100).max(1);
         // SAFETY: a valid timer handle, a valid due time, no callback.
         let set = unsafe { SetWaitableTimer(h, &due, 0, None, std::ptr::null(), 0) };
         if set != 0 {
@@ -280,6 +301,10 @@ impl super::wait::WaitOs for Os {
         (self.now)()
     }
 
+    fn app_ns(&mut self) -> i64 {
+        app_monotonic_ns()
+    }
+
     fn take_escape(&mut self) -> bool {
         let escape_ns = self.escape_ns;
         ESCAPE.with(|e| {
@@ -294,7 +319,7 @@ impl super::wait::WaitOs for Os {
         block_for(ns);
     }
 
-    fn spin_turn(&mut self, escape: bool) {
+    fn spin_turn(&mut self, turn: super::wait::Turn) {
         // The spin yields, on every thread (dstack #1). SwitchToThread
         // (`std::thread::yield_now`) lets ANY ready thread on the CPU run,
         // lower priority included, for the rest of its slice: on the FOH
@@ -311,13 +336,21 @@ impl super::wait::WaitOs for Os {
         // (Sleep(0) is no shelter: on windows-2025 a lower-priority thread
         // ran 21 million turns in 0.3 s of a Sleep(0) spin, and the waits
         // went 3 ms late), and its block once a period lets lower
-        // priorities run.
-        if escape {
-            std::hint::spin_loop();
-        } else {
-            std::thread::yield_now();
+        // priorities run. Which turn is `wait::until`'s decision: since
+        // dstack #351 no yield in the last `wait::NO_YIELD_NS` (Defender kept
+        // dsg's pump's CPU 1.4 ms after a late yield), with a give at least
+        // every `wait::GIVE_CAP_NS` so lower priorities still run.
+        match turn {
+            super::wait::Turn::Yield => std::thread::yield_now(),
+            super::wait::Turn::Pause => std::hint::spin_loop(),
         }
     }
+}
+
+thread_local! {
+    /// When this thread last gave its CPU away (dstack #351).
+    static GIVES: std::cell::Cell<super::wait::Gives> =
+        const { std::cell::Cell::new(super::wait::Gives::new()) };
 }
 
 /// A wait until the clock `now` reaches `target` in the wait `mode`, with a
@@ -334,6 +367,7 @@ fn sleep_until_in(target: i64, now: fn() -> i64, mode: super::WaitMode, escape_n
     // timer, no core spun.
     let tail = super::SPIN_TAIL.load(std::sync::atomic::Ordering::Relaxed);
     let spin = i64::try_from(super::spin_tail_for(mode, tail)).unwrap_or(i64::MAX);
+    let mut gives = GIVES.with(|g| g.get());
     super::wait::until(
         &mut Os { now, escape_ns },
         target,
@@ -341,13 +375,75 @@ fn sleep_until_in(target: i64, now: fn() -> i64, mode: super::WaitMode, escape_n
             spin_tail_ns: spin,
             escape,
             escape_block_ns: super::ESCAPE_BLOCK_NS as i64,
+            no_yield_ns: super::wait::NO_YIELD_NS,
+            give_cap_ns: super::wait::GIVE_CAP_NS,
+            give_on_timer: TIMER_GIVE.with(|t| t.get()),
         },
+        &mut gives,
     );
+    GIVES.with(|g| g.set(gives));
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The tests that pin a TIME_CRITICAL thread to CPU 0 run one at a
+    /// time: two such spinners would hand CPU 0 to each other.
+    static CPU0_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// A busy LOWEST-priority thread pinned to CPU 0 while `f` runs on this
+    /// thread, pinned there at TIME_CRITICAL; `f`'s result and how many
+    /// turns the busy thread ran meanwhile. This thread stays pinned (libtest
+    /// ends it with the test); the busy thread stops even when `f` panics.
+    fn beside_a_busy_lower_thread<T>(f: impl FnOnce() -> T) -> (T, u64) {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+        use windows_sys::Win32::System::Threading::{
+            GetCurrentThread, SetThreadAffinityMask, SetThreadPriority,
+        };
+        /// THREAD_PRIORITY_TIME_CRITICAL and THREAD_PRIORITY_LOWEST.
+        const TIME_CRITICAL: i32 = 15;
+        const LOWEST: i32 = -2;
+        /// Stops the busy thread when dropped.
+        struct Stop(Arc<AtomicBool>);
+        impl Drop for Stop {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Relaxed);
+            }
+        }
+        /// CPU 0 only.
+        const CPU0: usize = 1;
+        let _one = CPU0_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let pin = |priority: i32| {
+            // SAFETY: the calling thread's pseudo handle.
+            unsafe {
+                assert_ne!(SetThreadAffinityMask(GetCurrentThread(), CPU0), 0);
+                assert_ne!(SetThreadPriority(GetCurrentThread(), priority), 0);
+            }
+        };
+        let stop = Stop(Arc::new(AtomicBool::new(false)));
+        let turns = Arc::new(AtomicU64::new(0));
+        let busy = {
+            let (stop, turns) = (Arc::clone(&stop.0), Arc::clone(&turns));
+            std::thread::spawn(move || {
+                pin(LOWEST);
+                while !stop.load(Ordering::Relaxed) {
+                    turns.fetch_add(1, Ordering::Relaxed);
+                }
+            })
+        };
+        while turns.load(Ordering::Relaxed) == 0 {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        pin(TIME_CRITICAL);
+        let before = turns.load(Ordering::Relaxed);
+        let out = f();
+        let ran = turns.load(Ordering::Relaxed) - before;
+        drop(stop);
+        busy.join().unwrap();
+        (out, ran)
+    }
 
     /// dlink (#68): the normal profile's waits end on the high-resolution
     /// timer, not on the 15.6 ms system tick (SongPlayer 31.10: peaks of two
@@ -406,54 +502,63 @@ mod tests {
     /// lower-priority thread on its CPU run.
     #[test]
     fn a_spun_wait_lets_a_lower_priority_thread_on_its_cpu_run() {
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-        use windows_sys::Win32::System::Threading::{
-            GetCurrentThread, SetThreadAffinityMask, SetThreadPriority,
-        };
-        /// THREAD_PRIORITY_TIME_CRITICAL and THREAD_PRIORITY_LOWEST.
-        const TIME_CRITICAL: i32 = 15;
-        const LOWEST: i32 = -2;
-        /// Both threads on CPU 0 only.
-        const CPU0: usize = 1;
-        let pin = |priority: i32| {
-            // SAFETY: the calling thread's pseudo handle.
-            unsafe {
-                assert_ne!(SetThreadAffinityMask(GetCurrentThread(), CPU0), 0);
-                assert_ne!(SetThreadPriority(GetCurrentThread(), priority), 0);
+        let ((), ran) = beside_a_busy_lower_thread(|| {
+            for _ in 0..100 {
+                sleep_until_in(
+                    monotonic_ns() + 300_000,
+                    monotonic_ns,
+                    super::super::WaitMode::Spin,
+                    0,
+                );
             }
-        };
-        let stop = Arc::new(AtomicBool::new(false));
-        let turns = Arc::new(AtomicU64::new(0));
-        let busy = {
-            let (stop, turns) = (Arc::clone(&stop), Arc::clone(&turns));
-            std::thread::spawn(move || {
-                pin(LOWEST);
-                while !stop.load(Ordering::Relaxed) {
-                    turns.fetch_add(1, Ordering::Relaxed);
-                }
-            })
-        };
-        while turns.load(Ordering::Relaxed) == 0 {
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
-        pin(TIME_CRITICAL);
-        let before = turns.load(Ordering::Relaxed);
-        for _ in 0..100 {
-            sleep_until_in(
-                monotonic_ns() + 300_000,
-                monotonic_ns,
-                super::super::WaitMode::Spin,
-                0,
-            );
-        }
-        let ran = turns.load(Ordering::Relaxed) - before;
-        stop.store(true, Ordering::Relaxed);
-        busy.join().unwrap();
+        });
         assert!(
             ran > 0,
             "the lower-priority thread never ran during 100 spun waits"
         );
+    }
+
+    /// dsg (dstack #351, dasio#120): the pump's spin yielded right up to its
+    /// due time, and Defender (priority 6-8) kept its CPU 1.4 ms on a
+    /// process start; the pump re-bootstrapped. A wait that starts inside
+    /// the no-yield tail (`wait::NO_YIELD_NS`) yields only as its capped
+    /// give (`wait::GIVE_CAP_NS`): with a busy lower-priority thread on its
+    /// CPU, ~1 s of 150 µs waits stay on time (median late under 100 µs, p90
+    /// under 500 µs; a yield's victim keeps the CPU for its slice: median
+    /// 2.49 ms on windows-2025), and the busy thread still runs, in the
+    /// capped gives, a yield or a timer wait ([`give_on_timer`]).
+    #[test]
+    fn a_wait_inside_the_no_yield_tail_never_hands_a_lower_priority_its_slice() {
+        const WAIT_NS: i64 = 150_000;
+        const _: () = assert!(WAIT_NS < super::super::wait::NO_YIELD_NS);
+        // Both capped gives: a yield (any thread), the timer (a pump whose
+        // W absorbs its late wake).
+        for on_timer in [false, true] {
+            let (mut late, ran) = beside_a_busy_lower_thread(|| {
+                give_on_timer(on_timer);
+                let end = monotonic_ns() + 1_000_000_000;
+                let mut late = Vec::with_capacity(8_000);
+                while monotonic_ns() < end {
+                    let target = monotonic_ns() + WAIT_NS;
+                    sleep_until_in(target, monotonic_ns, super::super::WaitMode::Spin, 0);
+                    late.push(monotonic_ns() - target);
+                }
+                give_on_timer(false);
+                late
+            });
+            late.sort_unstable();
+            let (median, p90) = (late[late.len() / 2], late[late.len() * 9 / 10]);
+            let report = format!(
+                "give on the timer {on_timer}: {} waits: median late {median} ns, p90 {p90} ns, \
+                 p99 {} ns, max {} ns, over 0.5 ms: {}; the lower thread ran {ran}",
+                late.len(),
+                late[late.len() * 99 / 100],
+                late[late.len() - 1],
+                late.iter().filter(|&&l| l > 500_000).count(),
+            );
+            assert!(median < 100_000 && p90 < 500_000, "{report}");
+            assert!(ran > 0, "the lower-priority thread never ran: {report}");
+        }
     }
 
     /// The bounded escape (dstack #1, `spin_escape_ms`, a trial): the spin
@@ -465,6 +570,7 @@ mod tests {
     /// slice: median 2.49 ms on windows-2025, v0.6.34's test).
     #[test]
     fn the_bounded_escape_lets_a_lower_priority_thread_run_and_keeps_waits_on_time() {
+        let _one = CPU0_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         use std::sync::Arc;
         use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
         use windows_sys::Win32::System::Threading::{
