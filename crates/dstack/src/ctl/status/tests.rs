@@ -230,6 +230,9 @@ const WORDS: &[&str] = &[
     "lateness",
     "lateness_peak",
     "lateness_min_ns",
+    "lateness_mean_ns",
+    "lateness_sum_ns",
+    "lateness_count",
     "keepalive_errors",
     "recv_errors",
     "rx_poll_errors",
@@ -514,7 +517,10 @@ fn the_status_shows_the_packets_judge_in_ns_numbers_only() {
     // Before the heartbeat took a second: no judge, the key absent.
     let s = status(&media);
     assert!(
-        s.contains("\"unplaced\":0,\"lateness\":0,\"lateness_peak\":40,\"keepalives\":0,"),
+        s.contains(
+            "\"unplaced\":0,\"lateness\":0,\"lateness_peak\":40,\
+             \"lateness_sum_ns\":677082,\"lateness_count\":2,\"keepalives\":0,"
+        ),
         "{s}"
     );
     media.rx.take_max_lateness(3);
@@ -556,13 +562,16 @@ fn the_status_shows_the_packets_judge_in_ns_numbers_only() {
         String::new()
     };
     // The least: 25 samples, 260 416 ns (the stamp at 999 999 739 584 ns,
-    // rounded up); the largest 40 samples.
+    // rounded up); the largest 40 samples. dstack #342: the ages, 416 666
+    // ns (the stamp at 999 999 583 334 ns) and 260 416 ns, sum to 677 082
+    // over 2 packets, a mean of 338 541 ns.
     assert!(
         s.contains(&format!(
             "\"rx\":[{{\"flow\":4,\"source\":\"{source}\",\"granted\":0,\"multicast\":0,\"fpp\":0,\"channels\":0,\"latency\":0,\
              \"playout\":0,\"delay\":0,\"late_after\":0,\"advertised\":0,\
              \"below_advertised\":0,\"packets\":2,\"refused\":0,\"stray\":0,\"out_of_order\":0,\"reordered\":0,\"gaps\":0,\"gap_frames\":0,{DROPS}\"late\":0,\"late_at_read\":0,\"start_holes\":0,{stamps}\
-             \"unplaced\":0,\"lateness\":40,\"lateness_peak\":40,\"lateness_min_ns\":260416,\"keepalives\":0,\
+             \"unplaced\":0,\"lateness\":40,\"lateness_peak\":40,\"lateness_min_ns\":260416,\
+             \"lateness_mean_ns\":338541,\"lateness_sum_ns\":677082,\"lateness_count\":2,\"keepalives\":0,\
              \"keepalive_errors\":0,\"recv_errors\":0,\"joins\":0,\"join_errors\":0}}],"
         )),
         "{s}"
@@ -727,7 +736,8 @@ fn the_status_lists_the_flows_of_both_sides() {
             "\"rx\":[{{\"flow\":1,\"device\":\"peer-device\",\"granted\":1,\"multicast\":0,\"fpp\":32,\"channels\":2,\"rx_channels\":[1],\"latency\":96,\
              \"playout\":96,\"delay\":0,\"late_after\":128,\"advertised\":96,\
              \"below_advertised\":0,\"packets\":0,\"refused\":0,\"stray\":0,\"out_of_order\":0,\"reordered\":0,\"gaps\":0,\"gap_frames\":0,{DROPS}\"late\":0,\"late_at_read\":0,\"start_holes\":0,{STAMPS_NONE}\
-             \"unplaced\":0,\"lateness\":0,\"lateness_peak\":0,\"keepalives\":0,\"keepalive_errors\":0,\
+             \"unplaced\":0,\"lateness\":0,\"lateness_peak\":0,\"lateness_sum_ns\":0,\"lateness_count\":0,\
+             \"keepalives\":0,\"keepalive_errors\":0,\
              \"recv_errors\":0,\"joins\":0,\"join_errors\":0}}],\"rx_poll_errors\":0,"
         )),
         "{s}"

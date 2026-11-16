@@ -107,6 +107,7 @@ use super::tx::{Cell, MediaThread, Scheduling, place, take_priority};
 use crate::clock::PtpClock;
 use crate::wire::MAX_DATAGRAM;
 
+mod age;
 mod claim;
 mod counts;
 mod handles;
@@ -377,6 +378,7 @@ impl RxShared {
             return RxCounts::default();
         };
         let get = |a: &AtomicU64| a.load(Ordering::Relaxed);
+        let (lateness_sum_ns, lateness_count) = l.ages.totals();
         RxCounts {
             packets: get(&l.packets),
             refused: get(&l.refused),
@@ -389,6 +391,8 @@ impl RxShared {
             late_at_read: get(&l.late_at_read),
             wire_late: get(&l.wire_late),
             lateness_peak: get(&l.lateness_peak),
+            lateness_sum_ns,
+            lateness_count,
             wake_delay_peak_us: get(&l.wake_peak_ns) / 1_000,
             unplaced: get(&l.unplaced),
             keepalives: get(&l.keepalives),
@@ -442,6 +446,7 @@ impl RxShared {
             let wake = l.max_wake_ns.swap(0, Ordering::Relaxed);
             l.last_wake_ns.store(wake, Ordering::Relaxed);
             l.network.take();
+            l.ages.take();
             let least = l.min_lateness_ns.0.swap(NO_LATENESS, Ordering::Relaxed);
             l.last_min_lateness_ns.0.store(least, Ordering::Relaxed);
             let taken = l.max_lateness.swap(0, Ordering::Relaxed);
@@ -523,6 +528,18 @@ impl RxShared {
             .0
             .load(Ordering::Relaxed);
         (least != NO_LATENESS).then_some(least)
+    }
+
+    /// The mean age of flow slot `slot`'s packets placed in the
+    /// heartbeat's last second (what the last
+    /// [`RxShared::take_max_lateness`] took; dstack #342), ns, rounded
+    /// down: our clock's now less each packet's own stamp, the figure
+    /// whose least is [`RxShared::last_min_lateness_ns`]; an age past
+    /// 4.29 s counts as 4.29 s. `None` for a second without a placed
+    /// packet. The status reads it and takes nothing; a reader with its
+    /// own window diffs [`RxCounts`] (`RxCounts::lateness_mean_ns_since`).
+    pub fn last_lateness_mean_ns(&self, slot: usize) -> Option<u64> {
+        self.lanes.get(slot)?.ages.last_mean_ns()
     }
 
     /// The receive buffer the kernel gave the flow sockets, bytes.

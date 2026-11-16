@@ -496,10 +496,10 @@ struct PlaceArgs<'a> {
     step: u64,
 }
 
-/// A packet judged and placed: its lateness, the judge, `late` and
-/// `wire_late`, the network latency and the minute's windows, its holes,
-/// its samples written into the rings routed to its slots, and its write
-/// delay. No allocation, no lock, no log.
+/// A packet judged and placed: its lateness, the judge and its age's
+/// sum and count (dstack #342), `late` and `wire_late`, the network
+/// latency and the minute's windows, its holes, its samples written into
+/// the rings routed to its slots, and its write delay. No allocation, no lock, no log.
 #[cfg_attr(iem_rtsan, sanitize(realtime = "nonblocking"))]
 fn place(p: PlaceArgs<'_>) {
     let PlaceArgs {
@@ -525,11 +525,11 @@ fn place(p: PlaceArgs<'_>) {
     let lateness = now.saturating_sub(pos);
     stats.max_lateness.fetch_max(lateness, Ordering::Relaxed);
     stats.lateness_peak.fetch_max(lateness, Ordering::Relaxed);
-    // The judge: the packet's own stamp in ns against our now in ns.
-    stats
-        .min_lateness_ns
-        .0
-        .fetch_min(now_ns.saturating_sub(ns_of(pos, rate)), Ordering::Relaxed);
+    // The judge: the packet's own stamp in ns against our now in ns; the
+    // same age summed and counted for its mean (dstack #342).
+    let age_ns = now_ns.saturating_sub(ns_of(pos, rate));
+    stats.min_lateness_ns.0.fetch_min(age_ns, Ordering::Relaxed);
+    stats.ages.record(age_ns);
     let limit = u64::from(lane.plan.latency) + step;
     let late = lateness > limit;
     if late {
