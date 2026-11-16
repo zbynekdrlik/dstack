@@ -40,6 +40,33 @@ fn the_first_claim_of_the_rings_holds_for_good() {
 }
 
 #[test]
+fn the_app_s_claim_of_the_rings_holds_against_the_pump_and_the_thread() {
+    // dstack #307: the app first; neither the pump nor the RX thread
+    // writes, and a second app claim gets nothing.
+    let s = shared(1);
+    assert!(!s.app_writes());
+    assert!(s.app_intake().is_some());
+    assert!(s.app_writes());
+    assert!(!s.pump_writes());
+    assert!(s.app_intake().is_none(), "one writer");
+    assert!(s.pump_intake().is_none());
+    let rx = Receiver::new(Arc::clone(&s)).unwrap();
+    assert!(rx.intake.is_none());
+    assert!(s.app_writes());
+    // The pump first: the app gets nothing.
+    let s = shared(1);
+    assert!(s.pump_intake().is_some());
+    assert!(s.app_intake().is_none());
+    assert!(!s.app_writes());
+    // The RX thread first: likewise.
+    let s = shared(1);
+    let rx = Receiver::new(Arc::clone(&s)).unwrap();
+    assert!(rx.intake.is_some());
+    assert!(s.app_intake().is_none());
+    assert!(!s.app_writes());
+}
+
+#[test]
 fn the_pump_reads_a_slot_s_own_socket_or_its_group_s_when_it_is_the_plan_s() {
     let a = SocketAddrV4::new(Ipv4Addr::new(239, 1, 2, 3), 4321);
     let b = SocketAddrV4::new(Ipv4Addr::new(239, 1, 2, 4), 4321);
@@ -331,4 +358,132 @@ fn while_the_rx_thread_writes_its_dropped_sockets_close_with_it() {
     assert_eq!(s.lane(0).joins, 1);
     drop(rx);
     assert!(s.parked.lock().unwrap().is_empty());
+}
+
+/// Drains slot 0 of a fresh one-ring device written by `claim`, at P0 and
+/// again at P0 + 480 (an output callback's 10 ms at 48 kHz), with packets
+/// 673, 672 and 600 behind the second drain's now waiting in between:
+/// the lane's `late` count.
+fn late_after_two_drains(claim: impl Fn(&Arc<RxShared>) -> Option<Intake>) -> u64 {
+    let s = shared(1);
+    let mut intake = claim(&s).expect("the claim");
+    let mut p = plan(LOOPBACK, 1, true, 1);
+    p.block = 32;
+    publish(&s, &[(0, p)], &[(0, RxRoute { flow: 0, slot: 0 })]);
+    intake.drain_into_rings(Some(ns_of(P0, RATE)));
+    let t = transmitter(LOOPBACK);
+    let now = P0 + 480;
+    for behind in [673, 672, 600] {
+        t.send_to(&packet_at(now - behind, 1, 1), slot_addr(&s, 0))
+            .unwrap();
+    }
+    settle();
+    intake.drain_into_rings(Some(ns_of(now, RATE)));
+    let c = s.lane(0);
+    assert_eq!(c.packets, 3, "{c:?}");
+    c.late
+}
+
+#[test]
+fn under_the_app_a_packet_is_late_past_p_and_the_time_since_its_last_drain() {
+    // dstack #307: the app's consumer read up to its last drain's now less
+    // P (192), 480 samples ago: only the packet 673 behind is late. The
+    // pump reads every block (32): all three are past P + 32.
+    assert_eq!(late_after_two_drains(|s| s.app_intake()), 1);
+    assert_eq!(late_after_two_drains(|s| s.pump_intake()), 3);
+}
+
+/// A hole of 32 frames ending 100 behind a drain at `n` (one-ring device
+/// written by `claim`, drains at `n - 480` and `n`), then drains at each
+/// of `later`: the lane's lost holes (`gaps`) after each.
+fn gaps_after(claim: impl Fn(&Arc<RxShared>) -> Option<Intake>, later: &[u64]) -> Vec<u64> {
+    let s = shared(1);
+    let mut intake = claim(&s).expect("the claim");
+    let mut p = plan(LOOPBACK, 1, true, 1);
+    p.block = 32;
+    publish(&s, &[(0, p)], &[(0, RxRoute { flow: 0, slot: 0 })]);
+    let n = P0 + 480;
+    intake.drain_into_rings(Some(ns_of(P0, RATE)));
+    let t = transmitter(LOOPBACK);
+    for at in [n - 196, n - 164, n - 100] {
+        t.send_to(&packet_at(at, 1, 32), slot_addr(&s, 0)).unwrap();
+    }
+    settle();
+    intake.drain_into_rings(Some(ns_of(n, RATE)));
+    let c = s.lane(0);
+    assert_eq!((c.packets, c.late, c.gaps), (3, 0, 0), "{c:?}");
+    later
+        .iter()
+        .map(|&at| {
+            intake.drain_into_rings(Some(ns_of(at, RATE)));
+            s.lane(0).gaps
+        })
+        .collect()
+}
+
+#[test]
+fn under_the_app_a_hole_is_lost_once_its_reader_has_read_past_it() {
+    // dstack #307. At a drain 480 later the app's reader has read only to
+    // its last drain less P (n - 192): the hole (to n - 100) is still
+    // ahead of it. At a drain 10 after that it has read past: lost. The
+    // pump reads every block: lost at the first.
+    let n = P0 + 480;
+    assert_eq!(gaps_after(|s| s.app_intake(), &[n + 480, n + 490]), [0, 1]);
+    assert_eq!(gaps_after(|s| s.pump_intake(), &[n + 480]), [1]);
+}
+
+#[test]
+fn a_drain_says_whether_it_left_every_socket_empty() {
+    let s = shared(1);
+    let mut intake = s.pump_intake().unwrap();
+    publish(
+        &s,
+        &[(0, plan(LOOPBACK, 1, false, 1))],
+        &[(0, RxRoute { flow: 0, slot: 0 })],
+    );
+    assert!(intake.drain_into_rings(None), "nothing waits");
+    let t = transmitter(LOOPBACK);
+    let n = PUMP_DRAIN as u64 + 3;
+    for k in 0..n {
+        t.send_to(&packet_at(P0 + k, 1, 1), slot_addr(&s, 0))
+            .unwrap();
+    }
+    settle();
+    assert!(!intake.drain_into_rings(None), "the cap was hit: more wait");
+    assert!(intake.drain_into_rings(None), "the rest, then empty");
+    assert_eq!(s.lane(0).packets, n);
+}
+
+#[test]
+fn the_reader_s_step_is_the_block_until_the_app_has_drained_twice() {
+    use crate::media::rx::intake::{reads_apart, since};
+    assert_eq!(reads_apart(32, None), 32);
+    assert_eq!(reads_apart(32, Some(480)), 480);
+    assert_eq!(reads_apart(32, Some(0)), 0);
+    assert_eq!(since(Some(1_000), Some(1_480)), Some(480));
+    assert_eq!(since(Some(1_000), Some(1_000)), Some(0));
+    assert_eq!(since(Some(1_000), Some(999)), None, "the clock went back");
+    assert_eq!(since(None, Some(1_000)), None);
+    assert_eq!(since(Some(1_000), None), None);
+}
+
+#[test]
+fn an_app_drain_without_a_ready_clock_forgets_its_step() {
+    // A packet 600 behind after a drain whose clock was not ready: no step
+    // is known, so the block's limit (P 192 + 32) holds and it is late.
+    let s = shared(1);
+    let mut intake = s.app_intake().unwrap();
+    let mut p = plan(LOOPBACK, 1, true, 1);
+    p.block = 32;
+    publish(&s, &[(0, p)], &[(0, RxRoute { flow: 0, slot: 0 })]);
+    intake.drain_into_rings(Some(ns_of(P0, RATE)));
+    intake.drain_into_rings(None);
+    let t = transmitter(LOOPBACK);
+    let now = P0 + 480;
+    t.send_to(&packet_at(now - 600, 1, 1), slot_addr(&s, 0))
+        .unwrap();
+    settle();
+    intake.drain_into_rings(Some(ns_of(now, RATE)));
+    let c = s.lane(0);
+    assert_eq!((c.packets, c.late), (1, 1), "{c:?}");
 }

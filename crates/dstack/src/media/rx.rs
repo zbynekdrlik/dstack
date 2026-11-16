@@ -20,7 +20,10 @@
 //!   an engine pump; the engine's pump in the normal profile, which drains
 //!   the flow sockets itself just before it reads each block
 //!   ([`RxShared::pump_intake`]), so a helper thread the scheduler leaves
-//!   behind can no longer write samples behind the reader. Chosen once at
+//!   behind can no longer write samples behind the reader; or the app's
+//!   own consumer (dstack #307, [`RxShared::app_intake`]: an output
+//!   callback that drains and reads the rings by position itself, dlink's
+//!   `bridge::RxPull`). Chosen once at
 //!   the start; the RX thread then keeps the groups' joins, the keepalives
 //!   and the rejoins, and polls no flow socket. What follows about reading
 //!   and placing a packet is the writer's, whichever thread runs it.
@@ -104,6 +107,7 @@ use super::tx::{Cell, MediaThread, Scheduling, place, take_priority};
 use crate::clock::PtpClock;
 use crate::wire::MAX_DATAGRAM;
 
+mod claim;
 mod counts;
 mod handles;
 mod holes;
@@ -227,8 +231,9 @@ pub struct RxShared {
     /// Until when (the thread's clock, [`RxShared::now_ns`]) the RX thread
     /// stalls before its next pass ([`RxShared::stall_thread`]; 0: none).
     stall_until: AtomicU64,
-    /// Who writes the rings (dstack #326): [`WRITER_UNSET`] until the
-    /// engine's pump ([`RxShared::pump_intake`]) or the RX thread
+    /// Who writes the rings (dstack #326): unset until the
+    /// engine's pump ([`RxShared::pump_intake`]), the app
+    /// ([`RxShared::app_intake`], dstack #307) or the RX thread
     /// ([`Receiver::new`]) claims it, once for the device's life.
     ring_writer: AtomicU8,
     /// Each slot's group socket for the writer, by its handle.
@@ -237,13 +242,6 @@ pub struct RxShared {
     /// writes: closed with this state, after the pump's last read.
     parked: Mutex<Vec<mio::net::UdpSocket>>,
 }
-
-/// [`RxShared`]'s ring writer: not chosen yet.
-const WRITER_UNSET: u8 = 0;
-/// The RX thread writes the rings ([`Receiver`] holds the [`Intake`]).
-const WRITER_THREAD: u8 = 1;
-/// The engine's pump writes them ([`RxShared::pump_intake`]).
-const WRITER_PUMP: u8 = 2;
 
 /// The last of the [`MAX_FLOWS`] ports from `base`, `None` past 65535.
 pub(crate) fn last_port(base: u16) -> Option<u16> {
@@ -316,46 +314,10 @@ impl RxShared {
             stamps: AtomicBool::new(stamps),
             playout: AtomicU64::new(0),
             stall_until: AtomicU64::new(0),
-            ring_writer: AtomicU8::new(WRITER_UNSET),
+            ring_writer: AtomicU8::new(claim::WRITER_UNSET),
             handles: Handles::new(),
             parked: Mutex::new(Vec::new()),
         })
-    }
-
-    /// The engine's pump claims the rings' writes (dstack #326, the normal
-    /// profile; [`crate::stream::Pump::new`]): the [`Intake`] it drains
-    /// before each block, unless the RX thread already writes them (its
-    /// [`Receiver`] was built first; then `None`, and nothing changes).
-    pub fn pump_intake(self: &Arc<Self>) -> Option<Intake> {
-        self.ring_writer
-            .compare_exchange(
-                WRITER_UNSET,
-                WRITER_PUMP,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
-            .ok()
-            .map(|_| Intake::new(Arc::clone(self)))
-    }
-
-    /// Whether the engine's pump writes the rings ([`RxShared::pump_intake`]);
-    /// else the RX thread does.
-    pub fn pump_writes(&self) -> bool {
-        self.ring_writer.load(Ordering::Acquire) == WRITER_PUMP
-    }
-
-    /// The RX thread claims the rings' writes: `true` when it is the first
-    /// claim (the device's one RX thread); a pump's claim or another
-    /// receiver's before it leaves this one without writes.
-    fn thread_writes(&self) -> bool {
-        self.ring_writer
-            .compare_exchange(
-                WRITER_UNSET,
-                WRITER_THREAD,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
-            .is_ok()
     }
 
     /// The device latency is `ns`: the pump's playout point is its whole
@@ -955,6 +917,8 @@ fn run(
         asked = RECV_BUFFER_BYTES,
         // dstack #326: who writes the rings, the pump or this thread.
         pump_writes = shared.pump_writes(),
+        // dstack #307: or the app's consumer (an RX bridge it pulls).
+        app_writes = shared.app_writes(),
         "RX flow sockets' receive buffer"
     );
     let mut pin = super::repin::RePin::new(cpu);

@@ -10,9 +10,15 @@
 //! underruns or overruns within minutes. So:
 //!
 //! - A dlink device (`<host>-dlisten`, RX only, 2 channels L/R by default)
-//!   whose pump writes each block into a lock-free [`fifo::Fifo`].
+//!   whose RX channels the output callback reads itself (dstack #307,
+//!   `dlink::bridge::RxPull`): at each callback it drains the flow sockets
+//!   into the RX rings and reads them by position into a lock-free
+//!   [`fifo::Fifo`], so a late pump never empties it. While no output
+//!   plays, nothing drains: the flow reads silent and is asked again once
+//!   one plays.
 //! - The output callback (cpal: WASAPI shared on Windows, ALSA on Linux,
-//!   at the output's own default rate) pulls through the [`player::Player`]:
+//!   at the output's own default rate) then pulls through the
+//!   [`player::Player`]:
 //!   `dstack-resample`'s adjustable converter, its ratio steered by the
 //!   ASRC controller (SongPlayer's laws) on the FIFO's depth, kept at the
 //!   app buffer (dstack #247): the output's 10 ms WASAPI period and one
@@ -37,7 +43,6 @@
 
 pub mod autostart;
 pub mod cli;
-pub mod feed;
 pub mod status;
 
 // The endpoint bridge dlisten shares with dsend (dstack #164), under the
