@@ -359,3 +359,36 @@ fn while_the_rx_thread_writes_its_dropped_sockets_close_with_it() {
     drop(rx);
     assert!(s.parked.lock().unwrap().is_empty());
 }
+
+/// Drains slot 0 of a fresh one-ring device written by `claim`, at P0 and
+/// again at P0 + 480 (an output callback's 10 ms at 48 kHz), with packets
+/// 673, 672 and 600 behind the second drain's now waiting in between:
+/// the lane's `late` count.
+fn late_after_two_drains(claim: impl Fn(&Arc<RxShared>) -> Option<Intake>) -> u64 {
+    let s = shared(1);
+    let mut intake = claim(&s).expect("the claim");
+    let mut p = plan(LOOPBACK, 1, true, 1);
+    p.block = 32;
+    publish(&s, &[(0, p)], &[(0, RxRoute { flow: 0, slot: 0 })]);
+    intake.drain_into_rings(Some(ns_of(P0, RATE)));
+    let t = transmitter(LOOPBACK);
+    let now = P0 + 480;
+    for behind in [673, 672, 600] {
+        t.send_to(&packet_at(now - behind, 1, 1), slot_addr(&s, 0))
+            .unwrap();
+    }
+    settle();
+    intake.drain_into_rings(Some(ns_of(now, RATE)));
+    let c = s.lane(0);
+    assert_eq!(c.packets, 3, "{c:?}");
+    c.late
+}
+
+#[test]
+fn under_the_app_a_packet_is_late_past_p_and_the_time_since_its_last_drain() {
+    // dstack #307: the app's consumer read up to its last drain's now less
+    // P (192), 480 samples ago: only the packet 673 behind is late. The
+    // pump reads every block (32): all three are past P + 32.
+    assert_eq!(late_after_two_drains(|s| s.app_intake()), 1);
+    assert_eq!(late_after_two_drains(|s| s.pump_intake()), 3);
+}
