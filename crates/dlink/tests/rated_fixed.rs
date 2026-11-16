@@ -2,7 +2,7 @@
 
 //! dstack #330: a fixed app block at 44.1 kHz on a 96 kHz device (block
 //! 128, `A` = 59) stays exact for ten simulated minutes. Its own test
-//! binary: the run takes about a minute unoptimised, more than the
+//! binary: the run takes about 50 s unoptimised, more than the
 //! mutation gate's 20 s bound on a unit test (the unit tests run the same
 //! checks over 20 s, `rated::tests::fixed`).
 

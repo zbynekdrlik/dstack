@@ -116,6 +116,11 @@ impl Process for Calls {
 fn check_exact(blocks: u64) {
     let mut r = Rated::with_fixed_app_block(Calls::default(), 96_000, 44_100, 128, 1, 1).unwrap();
     let dry = r.dry();
+    let room = |r: &Rated<Calls>| {
+        let rx = r.reblock.as_ref().unwrap().fifo[0].capacity();
+        (rx, r.fifo[0].capacity())
+    };
+    let rooms_before = room(&r);
     let input = [0.25f64; 128];
     let mut out = [0.0f64; 128];
     let mut twice = 0u64;
@@ -136,6 +141,8 @@ fn check_exact(blocks: u64) {
         let held = r.reblock.as_ref().unwrap().held;
         assert!(held < A, "block {b}: {held}");
     }
+    // Neither FIFO ever grew (no allocation in `process`).
+    assert_eq!(room(&r), rooms_before);
     let c = &r.inner;
     assert_eq!((c.wrong, c.wrong_play, twice), (0, 0, 0));
     assert_eq!(dry.load(Ordering::Relaxed), 0);
@@ -357,10 +364,7 @@ fn a_fixed_call_s_start_and_play_time_follow_its_own_frames() {
             // less the call's.
             let start = r.inner.starts[call].unwrap();
             let waited = plain.inner.starts[b].unwrap() as i64 - start as i64;
-            assert!(
-                (0..A as i64).contains(&waited) || call > 0 && waited < 0,
-                "{b}"
-            );
+            assert!((0..A as i64).contains(&waited), "{b}: {waited}");
             let want = play_of(b as u64 * 128) + rx_ns as i64 - waited * 1_000_000_000 / 44_100;
             assert_eq!(r.inner.play_ats[call], Some(want), "block {b}");
             call += 1;
@@ -374,6 +378,56 @@ fn a_fixed_call_s_start_and_play_time_follow_its_own_frames() {
     }
     assert_eq!(r.inner.starts.last(), Some(&None));
     assert_eq!(r.inner.play_ats.last(), Some(&None));
+}
+
+/// dstack #330: a device block that does not follow on restarts the app's
+/// time at the device's start at the app's rate; the frames still waiting
+/// keep their audio and sit that many frames before it, so the app's
+/// frames follow on again from there.
+#[test]
+fn a_fixed_block_s_time_restarts_with_a_device_block_that_does_not_follow_on() {
+    let mut r = Rated::with_fixed_app_block(Probe::new(0.0), 96_000, 44_100, 128, 1, 1).unwrap();
+    let (i, mut o) = ([0.0; 128], [0.0; 128]);
+    let mut b = 0u64;
+    // Some frames waiting.
+    while b < 10 || r.reblock.as_ref().unwrap().held == 0 {
+        r.process(&mut Block::new(128, &i, &mut o).at(b * 128));
+        b += 1;
+    }
+    let calls = r.inner.starts.len();
+    let held = r.reblock.as_ref().unwrap().held as u64;
+    // Ten seconds on: device frame 960 000 is app frame 441 000, and the
+    // frames that waited come just before it, whichever block calls next.
+    let jump = 96_000 * 10;
+    for k in 0..10 {
+        r.process(&mut Block::new(128, &i, &mut o).at(jump + k * 128));
+    }
+    let starts = &r.inner.starts[calls..];
+    assert_eq!(starts[0], Some(441_000 - held));
+    for w in starts.windows(2) {
+        assert_eq!(w[1].unwrap(), w[0].unwrap() + A as u64);
+    }
+    assert!(starts.len() >= 9, "{}", starts.len());
+}
+
+#[test]
+fn a_fixed_block_at_one_rate_is_the_device_s_block_with_no_fifo() {
+    let fixed = Rated::with_fixed_app_block(Probe::new(0.0), 96_000, 96_000, 128, 1, 1).unwrap();
+    let plain = Rated::new(Probe::new(0.0), 96_000, 96_000, 128, 1, 1).unwrap();
+    assert!(fixed.reblock.is_none());
+    assert_eq!(fixed.app_block(), Some(128));
+    assert_eq!(fixed.delay_ns(), plain.delay_ns());
+    assert_eq!(fixed.fifo[0].len(), plain.fifo[0].len());
+}
+
+/// dstack #330: the FIFOs' room, pinned (a smaller one would grow, which
+/// allocates, inside `process`).
+#[test]
+fn the_fifos_room_covers_a_call_and_the_prime() {
+    assert_eq!(rooms(59, 60, 140, 67), (238, 1100));
+    assert_eq!(rooms(0, 60, 140, 8), (120, 864));
+    assert_eq!(rooms(70, 60, 140, 8), (260, 904));
+    assert_eq!(rx_wait(None), 0);
 }
 
 #[test]

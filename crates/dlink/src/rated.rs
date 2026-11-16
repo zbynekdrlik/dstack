@@ -123,6 +123,23 @@ struct Reblock {
     held: usize,
 }
 
+/// The RX FIFO's worst wait, app frames: `A - 1` with a fixed app block's
+/// FIFO, else none.
+fn rx_wait(reblock: Option<&Reblock>) -> usize {
+    reblock.map_or(0, |r| r.frames - 1)
+}
+
+/// The capacities of the fixed app block's RX FIFO and of the TX FIFO, app
+/// frames, from `A` (0 without a fixed block's FIFO), the RX converter's
+/// most output, the TX converter's most input and the TX prime: room to
+/// spare, so `process` never grows (allocates) either.
+fn rooms(a: usize, rx_out_max: usize, tx_in_max: usize, prime: usize) -> (usize, usize) {
+    (
+        2 * (a + rx_out_max),
+        4 * (rx_out_max.max(a) + tx_in_max + prime + PRIME),
+    )
+}
+
 /// The converters for the device's RX into the app and the app's TX into
 /// the device: [`Converter::low_delay`], whose delay is in the app hand-off
 /// (dstack #1: the half-band for 2:1 and 1:2).
@@ -250,25 +267,31 @@ impl<P: Process> Rated<P> {
     ) -> Result<Self, ConvertError> {
         let (rx, tx) = converters(device_rate, app_rate, block, inputs.max(1), outputs.max(1))?;
         let app_block = fixed.then(|| fixed_app_frames(device_rate, app_rate, block));
-        // The half-band's 2:1 or 1:2 gives exactly `A` every block: no FIFO.
-        let a = app_block.filter(|_| !rx.is_half_band());
+        // The half-band's 2:1 or 1:2 (and one rate) gives exactly `A` every
+        // block: no FIFO.
+        let a = app_block.filter(|_| !rx.is_half_band() && !rx.is_copy());
+        let prime = prime_for(&tx) + a.unwrap_or(0);
+        let (rx_fifo_room, fifo_room) = rooms(
+            a.unwrap_or(0),
+            rx.output_frames_max(),
+            tx.input_frames_max(),
+            prime,
+        );
         let reblock = a.map(|a| Reblock {
             frames: a,
             fifo: (0..inputs)
-                .map(|_| VecDeque::with_capacity(2 * (a + rx.output_frames_max())))
+                .map(|_| VecDeque::with_capacity(rx_fifo_room))
                 .collect(),
             held: 0,
         });
-        let prime = prime_for(&tx) + a.unwrap_or(0);
         let (rx_delay, _) = delays_ns(
-            rx.delay_frames() + a.map_or(0, |a| a - 1),
+            rx.delay_frames() + rx_wait(reblock.as_ref()),
             tx.delay_frames(),
             prime,
             device_rate,
             app_rate,
         );
         let rx_room = rx.output_frames_max().max(a.unwrap_or(0));
-        let fifo_room = 4 * (rx_room + tx.input_frames_max() + prime + PRIME);
         let mut fifo: Vec<VecDeque<f64>> = (0..outputs)
             .map(|_| VecDeque::with_capacity(fifo_room))
             .collect();
@@ -301,12 +324,13 @@ impl<P: Process> Rated<P> {
 
     /// The delay each way, ns: RX (the device's input to the app's) and TX
     /// (the app's output to the device's, with the FIFO's [`PRIME`]).
-    /// [`delay_ns`] gives the same before a `Rated` exists. With a fixed app
-    /// block at a ratio that does not divide the block, RX adds the RX
-    /// FIFO's worst case (`A - 1` app frames) and TX the prime's `A`.
+    /// [`delay_ns`] gives the same for [`Rated::new`] before a `Rated`
+    /// exists. With a fixed app block at a ratio that does not divide the
+    /// block, RX adds the RX FIFO's worst case (`A - 1` app frames) and TX
+    /// the prime's `A`; the free [`delay_ns`] does not include those.
     pub fn delay_ns(&self) -> (u64, u64) {
         delays_ns(
-            self.rx.delay_frames() + self.reblock.as_ref().map_or(0, |r| r.frames - 1),
+            self.rx.delay_frames() + rx_wait(self.reblock.as_ref()),
             self.tx.delay_frames(),
             self.prime,
             self.rates.0,
@@ -393,9 +417,11 @@ impl<P: Process> Process for Rated<P> {
         for (c, fifo) in rb.fifo.iter_mut().enumerate() {
             fifo.extend(self.rx_out[c * room..c * room + k].iter().copied());
         }
-        let mut before = rb.held as i64;
+        // `held < A` before and `k <= A` (A rounds the converter's frames a
+        // block up), so this block makes at most one call.
+        let before = rb.held as i64;
         rb.held += k;
-        while rb.held >= a {
+        if rb.held >= a {
             for (c, fifo) in rb.fifo.iter_mut().enumerate() {
                 for (d, v) in self.app_in[c * a..(c + 1) * a]
                     .iter_mut()
@@ -417,7 +443,6 @@ impl<P: Process> Process for Rated<P> {
                 ),
                 &mut self.fifo,
             );
-            before -= a as i64;
         }
         self.send(block);
     }
