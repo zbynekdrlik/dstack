@@ -408,6 +408,7 @@ dependencies = [
 name = "dstack-asio"
 version = "0.6.153"
 dependencies = [
+ "assert_no_alloc",
  "azo",
  "dlink",
  "dstack",

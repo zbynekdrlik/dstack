@@ -11,10 +11,20 @@
 //! buffer + one pump block by default, a configured `app_buffer_ns`
 //! verbatim; never grown after a dropout (counted in its [`Stats`]).
 //!
-//! - **Dante -> ASIO:** the pump runs [`DanteSide`], which writes each RX
-//!   block into the to-ASIO FIFO at the network's clock; the driver's buffer
-//!   switch runs [`AsioSide`], whose player pulls it at the driver's clock
-//!   (dlisten's direction).
+//! - **Dante -> ASIO:** the driver's buffer switch runs [`AsioSide`], whose
+//!   player plays the to-ASIO FIFO at the driver's clock (dlisten's
+//!   direction). Pulled ([`Bridge::pull_to_asio`], dstack #307, the
+//!   owner's ROZHODNUTÉ of 16.11.2026: no latency term), the switch itself
+//!   first drains the flow sockets and reads the RX rings by position
+//!   (media now less P, `dlink::bridge::RxPull`) into the FIFO in one
+//!   push, so a late pump never empties it: the thread with the deadline
+//!   does the work. Otherwise the pump runs [`DanteSide`], which writes
+//!   each RX block into the FIFO at the network's clock, and a pump that
+//!   wakes late (2 to 20 ms on a loaded PC) lets it run dry before it
+//!   catches up (`tests/to_asio_pull.rs`: 13 underruns in 8 s under 31
+//!   stalls of 10 to 20 ms, 0 pulled). The latency is the same either way
+//!   (the same P and target); pulled, the wait from a sample's due time to
+//!   its playing loses the half pump block it waited in the ring.
 //! - **ASIO -> Dante:** [`AsioSide`] writes the driver's inputs into the
 //!   from-ASIO FIFO at the driver's clock; [`DanteSide`]'s player pulls them
 //!   for TX at the network's (dsend's direction).
@@ -28,8 +38,20 @@
 //! silence), so `from_asio_stats` reads priming at a 1 ms target until the
 //! driver's first open. The switch keeps one handover in flight: while the
 //! pump does not run (the Dante device restarting), a second driver open is
-//! refused and the runner retries it after its backoff. Neither `process` allocates or makes a system call, and
-//! neither waits on a lock (the switch's bounded channel never blocks).
+//! refused and the runner retries it after its backoff. Neither `process` allocates, and
+//! neither waits on a lock (the switch's bounded channel never blocks; the
+//! pull's lock is only tried). Neither makes a system call but a clock read
+//! (the FIFO's stamp, the block age) and, pulled, the pull's non-blocking
+//! socket reads on the driver's side.
+//!
+//! A pulled bridge (dstack #307): the app claims the RX rings' writer for
+//! itself (`RxShared::app_intake`, before the pump is made, its map with
+//! no RX channels; `dlink::Link::start_pulling` does both), makes the
+//! `RxPull` on [`Bridge::to_asio_fifo`] and hands it over with
+//! [`Bridge::pull_to_asio`] before the driver's first open, and calls
+//! [`Bridge::keep_pulled`] from its own loop about every 250 ms: while no
+//! driver runs, that drain keeps the flow heard (else it reads silent and
+//! is closed and asked again).
 //!
 //! The from-ASIO side's status figures ([`BlockAge`], dstack #325): the
 //! TX packets' age and the smallest receiver latency it serves, from the
@@ -38,8 +60,9 @@
 //! its blocks' modelled age at the pump's take (the driver's side records
 //! each hand-over, the pump's side its take; [`Bridge::from_asio_age`]).
 
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, TryLockError};
 
+use dlink::bridge::pull::{IdleWatch, Look, PullStats};
 use dlink::bridge::{
     AppBuffer, Clock, Fifo, Player, RxPull, Stats, Switch, Taker, chunk_ns, fifo_for, switch,
 };
@@ -81,8 +104,24 @@ pub struct Bridge {
     dante: Option<DanteSide>,
     age: Arc<BlockAge>,
     /// The to-ASIO RX pull, once the app hands it over
-    /// ([`Bridge::pull_to_asio`]).
+    /// ([`Bridge::pull_to_asio`]): shared with the pump's side and every
+    /// driver side.
     pull: Arc<OnceLock<Mutex<RxPull>>>,
+    /// The pull's counts and the idle watch over them
+    /// ([`Bridge::keep_pulled`]).
+    pulled: Option<(Arc<PullStats>, IdleWatch)>,
+}
+
+/// What the FIFO's producer writes at once for the to-ASIO player (dstack
+/// #317, #307), ns: the driver's buffer when the driver side pulls the
+/// rings (one push a buffer switch), else the pump's block (the pump
+/// writes it, a block at a time).
+pub fn to_asio_chunk_ns(buffer: AppBuffer, pulled: bool) -> u64 {
+    if pulled {
+        buffer.chunk_ns()
+    } else {
+        buffer.block_ns()
+    }
 }
 
 impl Bridge {
@@ -138,14 +177,71 @@ impl Bridge {
             dante: Some(dante),
             age,
             pull,
+            pulled: None,
         })
     }
 
-    /// The to-ASIO side read by position (dstack #307).
+    /// The Dante -> ASIO side pulled by the driver's buffer switch (dstack
+    /// #307; module doc): `pull` reads the device's RX rings by position
+    /// into this bridge's to-ASIO FIFO ([`Bridge::to_asio_fifo`]). Make it
+    /// with `dlink::Link::start_pulling` (its FIFO this one), or with
+    /// `RxPull::new` over `RxShared::app_intake`, claimed before the pump
+    /// (`stream::Pump::new`) is made, with a pump map of no RX channels.
+    /// From here on the pump's side writes nothing into the to-ASIO FIFO
+    /// and each driver side pulls before it plays. Give it before the
+    /// driver's first open ([`Bridge::asio_side`]: the player's producer
+    /// is the driver's buffer then), and call [`Bridge::keep_pulled`]
+    /// while the bridge runs.
+    ///
+    /// Refused for a bridge with no to-ASIO channels, a pull of another
+    /// FIFO, or a second pull.
     pub fn pull_to_asio(&mut self, pull: RxPull) -> Result<(), String> {
+        let Some(fifo) = &self.to_asio else {
+            return Err("the bridge has no channel to ASIO to pull".to_string());
+        };
+        if !Arc::ptr_eq(fifo, pull.fifo()) {
+            return Err("the pull writes another FIFO than the bridge's to-ASIO one".to_string());
+        }
+        let stats = pull.stats();
         self.pull
             .set(Mutex::new(pull))
-            .map_err(|_| "the bridge pulls already".to_string())
+            .map_err(|_| "the bridge pulls already".to_string())?;
+        self.pulled = Some((stats, IdleWatch::default()));
+        Ok(())
+    }
+
+    /// The look at the to-ASIO pull ([`Bridge::pull_to_asio`]), from the
+    /// app's own loop on a steady period (about every 250 ms; never the
+    /// pump or the driver's callback). While no driver side pulls (no
+    /// driver open: closed, the reopen backoff, a stalled driver), it
+    /// drains the flow sockets itself (`RxPull::drain_idle`), so the flow
+    /// stays heard and the device keeps it; a buffer switch that pulls
+    /// again takes over at once. Only under the lock, and only while no
+    /// switch pulled since the look. A lock a panic poisoned is cleared
+    /// here (the switches pull on through it). `None` without a pull;
+    /// else the look, for the app's log (the change both ways, the
+    /// restarts' rise).
+    pub fn keep_pulled(&mut self) -> Option<Look> {
+        let pull = self.pull.get()?;
+        let (stats, watch) = self.pulled.as_mut()?;
+        if pull.is_poisoned() {
+            pull.clear_poison();
+        }
+        let pulls = stats.pulls();
+        let look = watch.look(pulls, stats.restarts());
+        if look.idle
+            && let Ok(mut p) = pull.try_lock()
+            && stats.pulls() == pulls
+        {
+            p.drain_idle();
+        }
+        Some(look)
+    }
+
+    /// The to-ASIO pull's counts ([`Bridge::pull_to_asio`]; `None`
+    /// without one).
+    pub fn to_asio_pull_stats(&self) -> Option<Arc<PullStats>> {
+        self.pulled.as_ref().map(|(s, _)| Arc::clone(s))
     }
 
     pub fn spec(&self) -> Spec {
@@ -188,7 +284,7 @@ impl Bridge {
         }
         let rate = opened.rate.round() as u32;
         let dante = self.spec.dante_rate;
-        let block_ns = buffer.block_ns();
+        let chunk = to_asio_chunk_ns(buffer, self.pull.get().is_some());
         let player = match &self.to_asio {
             Some(fifo) => Some(
                 Player::new(
@@ -196,9 +292,7 @@ impl Bridge {
                     dante,
                     rate,
                     buffer,
-                    // The pump writes the to-ASIO FIFO, a block at a time,
-                    // not the driver's buffer (dstack #317).
-                    block_ns,
+                    chunk,
                     Arc::clone(&self.to_stats),
                 )
                 .map_err(|e| e.to_string())?,
@@ -226,6 +320,7 @@ impl Bridge {
         // driver takes the whole one back to back (dstack #317).
         let frames = CHUNK.max(opened.buffer_frames as usize);
         Ok(AsioSide {
+            pull: Arc::clone(&self.pull),
             player,
             outputs: self.spec.to_asio,
             age: from_asio.is_some().then(|| Arc::clone(&self.age)),
@@ -306,11 +401,12 @@ pub struct DanteSide {
 
 impl Process for DanteSide {
     fn process(&mut self, block: &mut Block<'_>) {
-        if let Some(pull) = self.pull.get() {
-            if let Ok(mut p) = pull.try_lock() {
-                p.pull();
-            }
-        } else if let Some(fifo) = &self.to_asio {
+        // Pulled, the driver's side writes the to-ASIO FIFO (dstack #307);
+        // a pump with no RX inputs (a pulling app's) has nothing for it.
+        if let Some(fifo) = &self.to_asio
+            && self.pull.get().is_none()
+            && block.inputs() > 0
+        {
             feed(fifo, block);
         }
         match &mut self.from_asio {
@@ -328,6 +424,8 @@ impl Process for DanteSide {
 /// The driver's side: the to-ASIO player into its outputs, its inputs into
 /// the from-ASIO FIFO.
 pub struct AsioSide {
+    /// The to-ASIO pull, once the app gave it (pulled before each play).
+    pull: Arc<OnceLock<Mutex<RxPull>>>,
     player: Option<Player>,
     outputs: usize,
     from_asio: Option<Arc<Fifo>>,
@@ -337,8 +435,36 @@ pub struct AsioSide {
     scratch: Vec<f64>,
 }
 
-impl Process for AsioSide {
-    fn process(&mut self, block: &mut Block<'_>) {
+impl AsioSide {
+    /// The to-ASIO pull's turn (dstack #307): drain the flow sockets and
+    /// read the rings into the to-ASIO FIFO, up to media now less P. Never
+    /// waits: only an earlier run's last switch or the app's idle drain
+    /// ([`Bridge::keep_pulled`]) can hold the lock, and this switch then
+    /// plays what the FIFO holds. A lock a panicking pull poisoned still
+    /// pulls (its state is read positions). Its system calls are the
+    /// pull's: the clock read and the sockets' non-blocking reads.
+    fn pull_rx(&self) {
+        let Some(pull) = self.pull.get() else {
+            return;
+        };
+        match pull.try_lock() {
+            Ok(mut p) => {
+                p.pull();
+            }
+            Err(TryLockError::Poisoned(e)) => {
+                e.into_inner().pull();
+            }
+            Err(TryLockError::WouldBlock) => {}
+        }
+    }
+
+    /// The rest of the buffer switch, after the pull: the driver's inputs
+    /// into the from-ASIO FIFO, the hand-over's age, the to-ASIO player
+    /// into the driver's outputs. No allocation, lock or blocking call
+    /// (rtsan's `nonblocking`, `tests/rtsan.rs`); the FIFO's stamp and the
+    /// age read the app's clock.
+    #[cfg_attr(iem_rtsan, sanitize(realtime = "nonblocking"))]
+    fn serve(&mut self, block: &mut Block<'_>) {
         if let Some(fifo) = &self.from_asio {
             feed(fifo, block);
         }
@@ -349,6 +475,13 @@ impl Process for AsioSide {
             Some(p) => play(p, block, self.outputs, &mut self.scratch),
             None => block.zero_outputs(),
         }
+    }
+}
+
+impl Process for AsioSide {
+    fn process(&mut self, block: &mut Block<'_>) {
+        self.pull_rx();
+        self.serve(block);
     }
 }
 

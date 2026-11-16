@@ -391,4 +391,5 @@ fn a_skipped_block_resyncs_the_player_and_its_pieces_never_do() {
     assert_eq!(b.from_asio_stats().resyncs(), 1, "the skip");
 }
 
+mod pull;
 mod pump_skip;

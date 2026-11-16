@@ -282,6 +282,12 @@ impl RxPull {
         Arc::clone(&self.stats)
     }
 
+    /// The bridge FIFO it writes (an owner of the FIFO checks it is its
+    /// own: dstack-asio's `Bridge::pull_to_asio`).
+    pub fn fifo(&self) -> &Arc<Fifo> {
+        &self.fifo
+    }
+
     /// Drains the flow sockets into the rings and brings the FIFO up to
     /// media now less P (module doc); returns the frames written.
     pub fn pull(&mut self) -> usize {

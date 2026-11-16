@@ -29,6 +29,14 @@ serde = ["dep:serde"]
 # The whole-device test's config files (tests/to_asio_pull.rs, dstack
 # #307); already in the lockfile through dlink.
 tempfile = "3"
+# The driver side's buffer switch allocates nothing (tests/to_asio_alloc.rs;
+# already in the lockfile through dstack).
+assert_no_alloc = { version = "1.1.2", default-features = false, features = ["warn_debug", "warn_release"] }
+
+[lints.rust]
+# `iem_rtsan` is set by the rtsan CI job (nightly, -Zsanitizer=realtime):
+# the driver side's buffer switch after its pull (dstack #307).
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(iem_rtsan)"] }
 
 [target.'cfg(windows)'.dependencies]
 # The ASIO host: azo, a pure-Rust COM ASIO host (MIT, no Steinberg SDK, no

@@ -140,7 +140,8 @@ jobs:
           cargo llvm-cov --workspace --locked --summary-only --fail-under-lines "$floor"
 
   rtsan:
-    # The pump block, the histogram record and dlink's RX pull under
+    # The pump block, the histogram record, dlink's RX pull and the ASIO
+    # driver side's switch after its pull under
     # RealtimeSanitizer, and the build an application's rtsan job makes of
     # those crates.
     runs-on: ubuntu-24.04
@@ -160,6 +161,10 @@ jobs:
         env:
           RUSTFLAGS: "-Zsanitizer=realtime --cfg iem_rtsan"
         run: cargo +nightly-2026-09-20 test --locked -Zbuild-std --target x86_64-unknown-linux-gnu -p dlink --test rtsan -- --nocapture
+      - name: The ASIO driver side's rtsan test (its buffer switch's to-ASIO pull, dstack #307)
+        env:
+          RUSTFLAGS: "-Zsanitizer=realtime --cfg iem_rtsan"
+        run: cargo +nightly-2026-09-20 test --locked -Zbuild-std --target x86_64-unknown-linux-gnu -p dstack-asio --test rtsan -- --nocapture
 
   fuzz:
     # Coverage-guided fuzzing of every datagram parser and server a foreign
