@@ -25,8 +25,8 @@
 
 use rubato::audioadapter_buffers::direct::SequentialSlice;
 use rubato::{
-    Adjustable, Async, FixedAsync, Resampler, SincInterpolationParameters, SincInterpolationType,
-    WindowFunction,
+    Adjustable, Async, FixedAsync, Indexing, Resampler, SincInterpolationParameters,
+    SincInterpolationType, WindowFunction,
 };
 
 pub mod asrc;
@@ -96,8 +96,10 @@ impl std::error::Error for ConvertError {}
 enum Engine {
     /// Equal rates: a copy.
     Copy,
-    /// The sinc stage.
-    Sinc(Box<Async<f64>>),
+    /// The sinc stage, and its call with no channel active
+    /// ([`Converter::skip_silence`]; built once, so a skip allocates
+    /// nothing).
+    Sinc(Box<Async<f64>>, Box<Indexing>),
     /// The half-band 2:1 or 1:2 step ([`Converter::low_delay`]).
     Half(Box<HalfBand>),
 }
@@ -135,6 +137,9 @@ fn half_input(fixed: Fixed, step: Step, block: usize) -> usize {
 /// channels, `block` frames on its [`Fixed`] side.
 pub struct Converter {
     engine: Engine,
+    /// Whether the filter's history is silence: new or just reset, and
+    /// no call since but [`Converter::skip_silence`].
+    silent: bool,
     channels: usize,
     block: usize,
     fixed: Fixed,
@@ -191,6 +196,7 @@ impl Converter {
         let max_in = half_input(fixed, step, block);
         Ok(Converter {
             engine: Engine::Half(Box::new(HalfBand::new(step, channels, max_in))),
+            silent: true,
             channels,
             block,
             fixed,
@@ -236,10 +242,13 @@ impl Converter {
             let room = if drifting { MAX_RELATIVE } else { 1.0 };
             let stage = Async::<f64>::new_sinc(ratio, room, &PARAMS, block, channels, side)
                 .map_err(|e| ConvertError::Core(e.to_string()))?;
-            Engine::Sinc(Box::new(stage))
+            let mut none = Indexing::new();
+            none.active_channels_mask = Some(vec![false; channels]);
+            Engine::Sinc(Box::new(stage), Box::new(none))
         };
         Ok(Converter {
             engine,
+            silent: true,
             channels,
             block,
             fixed,
@@ -268,7 +277,7 @@ impl Converter {
     pub fn input_frames_next(&self) -> usize {
         match &self.engine {
             Engine::Copy => self.block,
-            Engine::Sinc(s) => s.input_frames_next(),
+            Engine::Sinc(s, _) => s.input_frames_next(),
             Engine::Half(h) => half_input(self.fixed, h.step(), self.block),
         }
     }
@@ -277,7 +286,7 @@ impl Converter {
     pub fn input_frames_max(&self) -> usize {
         match &self.engine {
             Engine::Copy => self.block,
-            Engine::Sinc(s) => s.input_frames_max(),
+            Engine::Sinc(s, _) => s.input_frames_max(),
             Engine::Half(h) => half_input(self.fixed, h.step(), self.block),
         }
     }
@@ -286,7 +295,7 @@ impl Converter {
     pub fn output_frames_max(&self) -> usize {
         match &self.engine {
             Engine::Copy => self.block,
-            Engine::Sinc(s) => s.output_frames_max(),
+            Engine::Sinc(s, _) => s.output_frames_max(),
             Engine::Half(h) => h.output_frames(half_input(self.fixed, h.step(), self.block)),
         }
     }
@@ -296,7 +305,7 @@ impl Converter {
     pub fn delay_frames(&self) -> usize {
         match &self.engine {
             Engine::Copy => 0,
-            Engine::Sinc(s) => s.output_delay(),
+            Engine::Sinc(s, _) => s.output_delay(),
             Engine::Half(h) => h.delay_frames(),
         }
     }
@@ -314,6 +323,7 @@ impl Converter {
         output: &mut [f64],
         out_frames: usize,
     ) -> Result<(usize, usize), ConvertError> {
+        self.silent = false;
         let channels = self.channels;
         match &mut self.engine {
             Engine::Copy => {
@@ -331,7 +341,7 @@ impl Converter {
                 }
                 Ok((frames_in, frames_in))
             }
-            Engine::Sinc(stage) => {
+            Engine::Sinc(stage, _) => {
                 let core = |e: &dyn std::fmt::Display| ConvertError::Core(e.to_string());
                 let i = SequentialSlice::new(input, channels, frames_in).map_err(|e| core(&e))?;
                 let mut o =
@@ -361,7 +371,7 @@ impl Converter {
     /// ramped over the next call, within ±[`ROOM_PPM`]. An error for a
     /// converter made by [`Converter::new`] (its ratio is fixed).
     pub fn set_ppm(&mut self, ppm: f64) -> Result<(), ConvertError> {
-        let Engine::Sinc(stage) = &mut self.engine else {
+        let Engine::Sinc(stage, _) = &mut self.engine else {
             return Err(ConvertError::Invalid(
                 "a copy or a half-band step has no ratio to adjust".into(),
             ));
@@ -372,11 +382,62 @@ impl Converter {
             .map_err(|e| ConvertError::Core(e.to_string()))
     }
 
+    /// As [`Converter::process`] with `frames_in` frames of silence,
+    /// with no filter work and nothing written (dstack #341; the core only
+    /// moves its buffers and steps its index): the converter's phase
+    /// moves on as that call's would, and its history stays silent. Valid
+    /// only while the history is silence (new or just reset, and no
+    /// [`Converter::process`] since), else an error and nothing moves.
+    /// `input` and `output` are only sized as for [`Converter::process`];
+    /// neither is read or written. A copy or a half-band step has no phase
+    /// between its frames: its skip only counts.
+    pub fn skip_silence(
+        &mut self,
+        input: &[f64],
+        frames_in: usize,
+        output: &mut [f64],
+        out_frames: usize,
+    ) -> Result<(usize, usize), ConvertError> {
+        if !self.silent {
+            return Err(ConvertError::Invalid(
+                "a skip after audio: the history is not silent".into(),
+            ));
+        }
+        let channels = self.channels;
+        match &mut self.engine {
+            Engine::Sinc(stage, none) => {
+                let core = |e: &dyn std::fmt::Display| ConvertError::Core(e.to_string());
+                let i = SequentialSlice::new(input, channels, frames_in).map_err(|e| core(&e))?;
+                let mut o =
+                    SequentialSlice::new_mut(output, channels, out_frames).map_err(|e| core(&e))?;
+                stage
+                    .process_into_buffer(&i, &mut o, Some(none))
+                    .map_err(|e| core(&e))
+            }
+            Engine::Copy | Engine::Half(_) => {
+                let (next, made) = match &self.engine {
+                    Engine::Half(h) => (
+                        half_input(self.fixed, h.step(), self.block),
+                        h.output_frames(frames_in),
+                    ),
+                    _ => (self.block, frames_in),
+                };
+                if frames_in != next || made > out_frames {
+                    return Err(ConvertError::Invalid(format!(
+                        "a skip of {frames_in} frames into room for {out_frames}"
+                    )));
+                }
+                Ok((frames_in, made))
+            }
+        }
+    }
+
     /// Forgets the filter's history (after a gap in the audio).
     pub fn reset(&mut self) {
+        self.silent = true;
         match &mut self.engine {
             Engine::Copy => {}
-            Engine::Sinc(s) => s.reset(),
+            Engine::Sinc(s, _) => s.reset(),
             Engine::Half(h) => h.reset(),
         }
     }

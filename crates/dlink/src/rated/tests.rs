@@ -421,3 +421,6 @@ fn an_output_the_app_leaves_alone_sends_silence_not_the_last_block() {
 
 /// dstack #330: the fixed app block.
 mod fixed;
+
+/// dstack #341: the app's timeline across a re-bootstrap.
+mod rebootstrap;
