@@ -134,15 +134,6 @@ pub struct BlockAge {
     warned: AtomicI64,
 }
 
-impl std::fmt::Debug for BlockAge {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("BlockAge")
-            .field("block_ns", &self.block_ns)
-            .field("last_ns", &self.last_ns)
-            .finish_non_exhaustive()
-    }
-}
-
 impl BlockAge {
     /// The age of a bridge whose pump block is `block_ns`, on `clock`.
     pub fn new(block_ns: u64, clock: Clock) -> Self {
