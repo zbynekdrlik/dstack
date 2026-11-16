@@ -152,16 +152,7 @@ impl Embedded {
         source: ClockSource,
         frame_sender: Option<Arc<dyn FrameSender>>,
     ) -> Result<(Embedded, Intake), HostError> {
-        match Self::launch(
-            cfg,
-            place,
-            wait,
-            map,
-            processor,
-            source,
-            frame_sender,
-            true,
-        )? {
+        match Self::launch(cfg, place, wait, map, processor, source, frame_sender, true)? {
             (device, Some(intake)) => Ok((device, intake)),
             (device, None) => {
                 let stopped = device.stop(STOP_WAIT);

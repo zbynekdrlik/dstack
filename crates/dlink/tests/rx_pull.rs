@@ -139,10 +139,6 @@ fn a_stalled_pump_leaves_the_output_s_bridge_whole() {
         Clock::System,
     )
     .expect("the receiving device started");
-    let end = Instant::now() + Duration::from_secs(15);
-    while receiver.rx_channels()[0].status != Some(SubStatus::Receiving) && Instant::now() < end {
-        std::thread::sleep(Duration::from_millis(50));
-    }
     let stats = Arc::new(Stats::default());
     let mut player = Player::new(
         Arc::clone(&fifo),
@@ -154,15 +150,20 @@ fn a_stalled_pump_leaves_the_output_s_bridge_whole() {
     )
     .expect("the player");
     // The output thread: a steady deadline every PERIOD, as a sound card's
-    // callback, whatever the pump does.
+    // callback, whatever the pump does. It runs from the device's start,
+    // as dlisten's output does: its pull is the rings' only drain, so the
+    // flow's audio is heard (and kept alive) only through it. The window
+    // judged starts SETTLE after the channel reads Receiving.
+    let receiving = Arc::new(AtomicU64::new(0));
     let output = {
-        let stats = Arc::clone(&stats);
+        let (stats, receiving) = (Arc::clone(&stats), Arc::clone(&receiving));
         std::thread::spawn(move || {
             let mut out = vec![0f32; PERIOD_FRAMES];
             let mut heard = Heard::default();
             let began = Instant::now();
             let mut next = began;
             let mut judging = None;
+            let mut since = None;
             loop {
                 next += PERIOD;
                 if let Some(wait) = next.checked_duration_since(Instant::now()) {
@@ -170,7 +171,13 @@ fn a_stalled_pump_leaves_the_output_s_bridge_whole() {
                 }
                 pull.pull();
                 player.fill_with(&mut out, 1, |x| x as f32);
-                let elapsed = began.elapsed();
+                if receiving.load(Ordering::Acquire) == 0 {
+                    if began.elapsed() > Duration::from_secs(15) {
+                        return heard;
+                    }
+                    continue;
+                }
+                let elapsed = since.get_or_insert_with(Instant::now).elapsed();
                 if elapsed < SETTLE {
                     continue;
                 }
@@ -190,6 +197,11 @@ fn a_stalled_pump_leaves_the_output_s_bridge_whole() {
             heard
         })
     };
+    let end = Instant::now() + Duration::from_secs(15);
+    while receiver.rx_channels()[0].status != Some(SubStatus::Receiving) && Instant::now() < end {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    receiving.store(1, Ordering::Release);
     let heard = output.join().expect("the output thread");
     let channel = receiver.rx_channels().remove(0);
     let pump = receiver.media().engine().expect("the receiver's pump");

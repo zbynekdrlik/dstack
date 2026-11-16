@@ -740,6 +740,15 @@ impl Link {
     /// and the TX channels `map.tx`, so a late pump no longer empties the
     /// bridge, with the same latency (the bridge's target unchanged).
     ///
+    /// The pull is the RX rings' only writer, so start calling it at once
+    /// and keep calling it: the device hears a flow's audio only through
+    /// it. While nothing pulls (no output open, a stopped callback), the
+    /// packets wait unread, no keepalive goes to the transmitter, and the
+    /// flow reads silent: the channel stays `InProgress` instead of
+    /// `Receiving`, and a granted flow silent for 2 s (once 6 s old) is
+    /// closed and asked again. The audio comes back by itself once the
+    /// pulls resume (the first reads nothing; the player primes from there).
+    ///
     /// A FIFO whose channels are not `map.rx`'s or an RX channel past the
     /// device's is [`HostError::Setup`]; every other error as
     /// [`Link::start`].

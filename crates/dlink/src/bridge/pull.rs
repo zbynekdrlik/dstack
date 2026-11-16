@@ -41,6 +41,10 @@
 //! clock is not ready the sockets are drained (the packets counted
 //! unplaced) and the next ready call starts afresh.
 //!
+//! Nothing else drains the sockets: a consumer that stops pulling (no
+//! output open) leaves the flow silent, and the device closes and asks for
+//! it again ([`crate::Link::start_pulling`]). Pull from the device's start.
+//!
 //! [`RxPull::pull`] allocates nothing and takes no lock; its system calls
 //! are the clock read and the sockets' non-blocking reads (the drain); the
 //! ring read and the FIFO write after them carry the rtsan attribute.
@@ -168,8 +172,10 @@ impl RxPull {
     /// A reader of `rx`'s rings `channels` into `fifo` on `clock` at
     /// `rate`, writing them through `intake` (the rings' one writer), P
     /// `playout` samples until the device publishes its own. Allocates its
-    /// scratch here.
-    pub(crate) fn new(
+    /// scratch here. An app gets one from [`crate::Link::start_pulling`];
+    /// this builds one over an RX side the caller runs itself (the
+    /// allocation test, `tests/rx_pull_alloc.rs`).
+    pub fn new(
         intake: Intake,
         clock: Arc<dyn PtpClock>,
         rx: Arc<RxShared>,
@@ -238,7 +244,13 @@ impl RxPull {
         let mut pos = from;
         while pos < to {
             let n = usize::try_from(to - pos).map_or(PIECE, |left| left.min(PIECE));
-            for (piece, &rx) in self.scratch.chunks_exact_mut(PIECE).zip(&self.channels) {
+            for (piece, &rx) in self
+                .scratch
+                .as_chunks_mut::<PIECE>()
+                .0
+                .iter_mut()
+                .zip(&self.channels)
+            {
                 let piece = &mut piece[..n];
                 match rings.get(rx).filter(|_| self.rx.routed(rx)) {
                     Some(ring) => {

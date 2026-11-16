@@ -130,7 +130,9 @@ fn send(rx: &RxShared, at: u64, frames: usize) {
     let n = dstack::media::packet::write(&mut out, secs, sub, 1, 3, frames, |f, _| {
         (f as i32 + 1) << 8
     });
-    sender.send_to(&out[..n], rx.local_addr(0).unwrap()).unwrap();
+    sender
+        .send_to(&out[..n], rx.local_addr(0).unwrap())
+        .unwrap();
     std::thread::sleep(Duration::from_millis(30));
 }
 
@@ -181,8 +183,8 @@ fn a_flow_read_later_than_p_is_read_at_its_own_delay() {
     // Positions T - 16 to T + 48: 16 before the flow's first sample, then
     // its first 48.
     assert_eq!(got[..16], [0.0; 16]);
-    for f in 16..64 {
-        assert_eq!(got[f], to_f64((f as i32 - 15) << 8), "frame {f}");
+    for (f, &x) in got.iter().enumerate().take(64).skip(16) {
+        assert_eq!(x, to_f64((f as i32 - 15) << 8), "frame {f}");
     }
     assert_eq!(r.rings[0].counters().start_holes, 16);
 }
