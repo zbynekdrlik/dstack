@@ -117,7 +117,7 @@ impl EscapeState {
         }
     }
 
-    /// Whether an escape is due at monotonic `now` with `period_ns`
+    /// Whether an escape is due at `now` (the app's clock, dstack #328) with `period_ns`
     /// between escapes (0: never); the first look only starts the period.
     fn due(&mut self, now: i64, period_ns: u64) -> bool {
         if period_ns == 0 {
@@ -143,7 +143,7 @@ impl EscapeState {
     }
 
     /// TX could not hand its passes over (its relay did not take over in
-    /// time, or the clock re-anchored): puts off the armed escape at monotonic `now`, unless
+    /// time, or the clock re-anchored): puts off the armed escape at `now`, unless
     /// it is already [`ESCAPE_DEFER_MAX_NS`] past its period. `true`: put
     /// off (the next ask asks again); `false`: nothing armed, or overdue,
     /// so the wait escapes anyway.
@@ -160,7 +160,7 @@ impl EscapeState {
         false
     }
 
-    /// The wait at monotonic `now`: whether it escapes (an ask said so, or,
+    /// The wait at `now`: whether it escapes (an ask said so, or,
     /// for a thread that never asks, the period is over). An escape starts
     /// the next period.
     pub fn take(&mut self, now: i64, period_ns: u64) -> bool {

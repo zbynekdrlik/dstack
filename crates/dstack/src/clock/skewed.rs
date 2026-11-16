@@ -127,12 +127,11 @@ impl PtpClock for SkewedClock {
     }
 
     fn sleep_until(&self, ptp_ns: u64) {
-        // The wait on the app's clock, slept on the media threads' own
-        // monotonic clock (the same on Linux; a few ppm apart on Windows,
-        // which a caller's next read of the time absorbs).
-        let wait = unskewed_ns(self.base_ns, self.k_ns, self.ppt, ptp_ns)
-            .saturating_sub(super::app_monotonic_ns());
-        super::sys::sleep_until_monotonic(super::monotonic_ns().saturating_add(wait.max(0)));
+        // Slept on the app's clock, the clock the target is on (dstack
+        // #328): on Windows the media threads' own monotonic clock is the
+        // wall until a poll, and none runs on the test clock, so a wall
+        // step during the sleep moved the wake.
+        super::sys::sleep_until_app(unskewed_ns(self.base_ns, self.k_ns, self.ppt, ptp_ns));
     }
 
     fn epoch(&self) -> u32 {
