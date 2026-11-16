@@ -70,7 +70,7 @@
 //!   follows, never a lock of our own;
 //! - 0x8002: the peaks, one byte a channel (`−40·log10` of the peak's part
 //!   of full scale, 0 to 255: [`peak_byte`]), TX channels then RX channels,
-//!   padded to 4 bytes;
+//!   padded to 4 bytes (the record's length counts the padding);
 //! - 0x8003: our rate and each RX flow slot's largest lateness since the
 //!   last beat, samples (0 for a slot without a granted flow);
 //! - 0x8004: each RX flow slot's late packets since the device started
@@ -459,14 +459,11 @@ pub struct Records {
 /// of 4 (the head states the length without them).
 fn push_record(out: &mut Vec<u8>, seq: u16, kind: u16, payload: &[u8]) {
     let word = |v: usize| u16::try_from(v).unwrap_or(u16::MAX);
-    let head = [
-        word(12 + payload.len()),
-        kind,
-        4,
-        word(payload.len()),
-        seq,
-        0,
-    ];
+    // Both lengths count the padding to 4 bytes, as the hardware's do: a
+    // reader walks to the next record by the first (dstack #345; an
+    // UltimoX2 with 2 RX channels writes its peaks record as 28 and 16).
+    let padded = payload.len().next_multiple_of(4);
+    let head = [word(12 + padded), kind, 4, word(padded), seq, 0];
     out.extend(head.iter().flat_map(|f| f.to_be_bytes()));
     out.extend_from_slice(payload);
     out.resize(out.len().next_multiple_of(4), 0);
