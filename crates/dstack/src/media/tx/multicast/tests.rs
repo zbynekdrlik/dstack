@@ -191,30 +191,6 @@ fn the_receiver_latency_reader_skips_a_multicast_flow() {
     );
 }
 
-/// dstack #325: each unicast flow's receiver with its stated latency, 0
-/// until it is read; a multicast flow has no receiver to name.
-#[test]
-fn the_receiver_latencies_name_each_unicast_receiver_with_its_latency() {
-    let cfg = DeviceConfig::from_toml(TEST_DEVICE).expect("config/test-device.toml");
-    let shared = TxShared::new(cfg, Ipv4Addr::LOCALHOST, Vec::new().into(), 1, &[]).unwrap();
-    let rx = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 4000);
-    {
-        let mut c = shared.lock();
-        c.table.add_multicast(0, group(), &[1], 32, 3).unwrap();
-        c.table.add(&unicast(rx), 0).unwrap();
-        shared.publish(&c);
-    }
-    assert_eq!(
-        shared.receiver_latencies(),
-        [("peer-device".to_string(), 0)]
-    );
-    shared.set_receiver_latency(1, rx, 2_000_000);
-    assert_eq!(
-        shared.receiver_latencies(),
-        [("peer-device".to_string(), 2_000_000)]
-    );
-}
-
 /// dstack #207: at start the device makes each saved multicast flow again,
 /// in its slot, to its group (derived from the address, process id and
 /// slot), and hands the plans to the TX thread; a saved flow it cannot

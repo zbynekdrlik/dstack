@@ -76,21 +76,6 @@ impl TxShared {
             .collect()
     }
 
-    /// Each flow sending now to a receiver (as [`receiver_flows`]): the
-    /// receiving device's name and its stated latency, ns (0: unknown).
-    /// For an app that checks what it sends against its receivers (the
-    /// ASIO bridge's from-ASIO block age, dstack #325).
-    ///
-    /// [`receiver_flows`]: TxShared::receiver_flows
-    pub fn receiver_latencies(&self) -> Vec<(String, u64)> {
-        self.receiver_flows()
-            .into_iter()
-            .map(|(slot, dest, name)| (name, self.receiver_latency_ns(slot, dest)))
-            .collect()
-    }
-}
-
-impl TxShared {
     /// What an app's status loop reads of the TX side (dstack #325, the
     /// ASIO bridge's receiver figure): the oldest packet of any slot since
     /// its last call, taken (the app's own peak, never the late watch's),

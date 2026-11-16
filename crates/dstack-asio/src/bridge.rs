@@ -91,10 +91,7 @@ impl Bridge {
     /// [`Bridge::new`] with the from-ASIO block age ([`BlockAge`]) on
     /// `clock` (a simulation's time; the app's clock in [`Bridge::new`]).
     pub fn with_clock(spec: Spec, clock: Clock) -> Result<Self, String> {
-        let age = Arc::new(BlockAge::new(
-            chunk_ns(u64::from(spec.block_frames), spec.dante_rate),
-            clock,
-        ));
+        let age = Arc::new(BlockAge::new(clock));
         let to_asio = (spec.to_asio > 0).then(|| Arc::new(fifo_for(spec.to_asio, spec.dante_rate)));
         let from_stats = Arc::new(Stats::default());
         let (from_asio, switch) = if spec.from_asio > 0 {

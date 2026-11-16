@@ -167,7 +167,7 @@ fn a_128_frame_call_at_96k_is_at_least_one_call_old_at_the_pump_s_take() {
 #[test]
 fn the_oldest_untaken_hand_over_is_the_one_aged() {
     let (t, clock) = fake();
-    let age = BlockAge::new(CALL_128_96K, clock);
+    let age = BlockAge::new(clock);
     age.handed(128, 96_000);
     t.store(1_333_333, Ordering::Relaxed);
     age.handed(128, 96_000);
@@ -230,7 +230,7 @@ fn view(peak_ns: u64, two: u64, five: u64) -> AppView {
 #[test]
 fn the_receiver_figure_is_the_tx_packet_age_not_the_modelled_block_age() {
     let (t, clock) = fake();
-    let age = BlockAge::new(CALL_128_96K, clock);
+    let age = BlockAge::new(clock);
     age.handed(128, 96_000);
     t.store(566_667, Ordering::Relaxed);
     age.taken();
@@ -262,7 +262,7 @@ fn the_receiver_figure_is_the_tx_packet_age_not_the_modelled_block_age() {
 #[test]
 fn a_receiver_that_counts_packets_late_is_warned_at_most_once_an_hour() {
     let (t, clock) = fake();
-    let age = BlockAge::new(CALL_128_96K, clock);
+    let age = BlockAge::new(clock);
     assert_eq!(age.look(&view(900_000, 5, 0), None), None, "learns 5");
     assert_eq!(age.look(&view(900_000, 5, 0), None), None, "no rise");
     let text = age.look(&view(900_000, 7, 0), None).expect("a rise");
@@ -291,7 +291,7 @@ fn a_receiver_that_counts_packets_late_is_warned_at_most_once_an_hour() {
 #[test]
 fn the_packet_age_needs_a_packet_and_lasts_two_minutes() {
     let (t, clock) = fake();
-    let age = BlockAge::new(CALL_128_96K, clock);
+    let age = BlockAge::new(clock);
     age.look(&AppView::default(), Some(100_000));
     assert_eq!(age.report(), None, "no packet, no block");
     age.look(&view(1_200_000, 0, 0), Some(100_000));

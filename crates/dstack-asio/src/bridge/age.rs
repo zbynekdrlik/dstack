@@ -191,9 +191,8 @@ pub struct BlockAge {
 }
 
 impl BlockAge {
-    /// The figures of a bridge whose pump block is `block_ns`, on `clock`.
-    pub fn new(block_ns: u64, clock: Clock) -> Self {
-        let _ = block_ns;
+    /// A bridge's figures on `clock`.
+    pub fn new(clock: Clock) -> Self {
         BlockAge {
             clock,
             period_ns: AtomicU64::new(0),
