@@ -520,6 +520,22 @@ fn a_forced_switch_that_disagrees_re_aligns_at_once() {
     assert_ne!(linked.epoch(), before);
 }
 
+/// The fake follower's time runs with the service's: a tick that comes long
+/// after `set` still sees the two agree. The v0.6.151 tag CI on
+/// windows-2025 failed `a_forced_switch_that_disagrees_re_aligns_at_once`
+/// at its first seamless takeover: the fake held the service's time read at
+/// `set` while the service ran on, so any gap over [`HANDOVER_NS`] before
+/// the selector's reads (a preempted test thread, or a step of the wall
+/// clock a bare `MonoClock` reads on Windows before a poll) read as
+/// disagreement.
+#[test]
+fn a_follower_set_to_the_service_s_time_still_agrees_after_a_pause() {
+    let (fake, service, linked) = linked_on_service();
+    set(&fake, service_now(&service), ALIVE_LOCKED);
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    assert_eq!(linked.tick(), Source::Internal);
+}
+
 /// The first round's waits are logged once, with the offset; a seamless
 /// handover and a re-align each log their own line.
 #[test]
