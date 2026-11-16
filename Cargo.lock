@@ -409,6 +409,7 @@ version = "0.6.149"
 dependencies = [
  "azo",
  "dlink",
+ "dstack",
  "dstack-audio-io",
  "serde",
  "tracing",

@@ -30,13 +30,23 @@
 //! pump does not run (the Dante device restarting), a second driver open is
 //! refused and the runner retries it after its backoff. Neither `process` allocates or makes a system call, and
 //! neither waits on a lock (the switch's bounded channel never blocks).
+//!
+//! The from-ASIO side also measures its blocks' age at the pump's take
+//! ([`BlockAge`], dstack #325): the driver's side records each hand-over,
+//! the pump's side its take, so the status can check a receiver's latency
+//! against it ([`Bridge::from_asio_age`]).
 
 use std::sync::Arc;
 
-use dlink::bridge::{AppBuffer, Fifo, Player, Stats, Switch, Taker, chunk_ns, fifo_for, switch};
+use dlink::bridge::{
+    AppBuffer, Clock, Fifo, Player, Stats, Switch, Taker, chunk_ns, fifo_for, switch,
+};
 use dstack_audio_io::{Block, Process};
 
 use crate::device::Opened;
+
+mod age;
+pub use age::{AgeReport, BlockAge, Window, low_receivers_text};
 
 /// Frames a side converts at once at least (its interleaved scratch): the
 /// pump's side a whole pump block, the driver's side its whole buffer
@@ -67,11 +77,22 @@ pub struct Bridge {
     from_stats: Arc<Stats>,
     switch: Option<Switch<Player>>,
     dante: Option<DanteSide>,
+    age: Arc<BlockAge>,
 }
 
 impl Bridge {
     /// A bridge for `spec`; an error only for a rate the converter refuses.
     pub fn new(spec: Spec) -> Result<Self, String> {
+        Self::with_clock(spec, Arc::new(dstack::clock::app_monotonic_ns))
+    }
+
+    /// [`Bridge::new`] with the from-ASIO block age ([`BlockAge`]) on
+    /// `clock` (a simulation's time; the app's clock in [`Bridge::new`]).
+    pub fn with_clock(spec: Spec, clock: Clock) -> Result<Self, String> {
+        let age = Arc::new(BlockAge::new(
+            chunk_ns(u64::from(spec.block_frames), spec.dante_rate),
+            clock,
+        ));
         let to_asio = (spec.to_asio > 0).then(|| Arc::new(fifo_for(spec.to_asio, spec.dante_rate)));
         let from_stats = Arc::new(Stats::default());
         let (from_asio, switch) = if spec.from_asio > 0 {
@@ -102,6 +123,7 @@ impl Bridge {
             // A pump block wider than a piece would prime the from-ASIO
             // player for a piece (dstack #317): one call a block.
             scratch: vec![0.0; CHUNK.max(spec.block_frames as usize) * spec.from_asio],
+            age: Arc::clone(&age),
         };
         Ok(Bridge {
             spec,
@@ -110,6 +132,7 @@ impl Bridge {
             from_stats,
             switch,
             dante: Some(dante),
+            age,
         })
     }
 
@@ -193,6 +216,8 @@ impl Bridge {
         Ok(AsioSide {
             player,
             outputs: self.spec.to_asio,
+            age: from_asio.is_some().then(|| Arc::clone(&self.age)),
+            rate,
             from_asio,
             scratch: vec![0.0; frames * self.spec.to_asio],
         })
@@ -211,6 +236,12 @@ impl Bridge {
     /// The ASIO -> Dante player's counts.
     pub fn from_asio_stats(&self) -> Arc<Stats> {
         Arc::clone(&self.from_stats)
+    }
+
+    /// The from-ASIO block age (dstack #325): [`BlockAge::report`] for the
+    /// status, [`BlockAge::warn_low_receivers`] from its loop.
+    pub fn from_asio_age(&self) -> Arc<BlockAge> {
+        Arc::clone(&self.age)
     }
 
     /// The to-ASIO FIFO (its depth and overflows for a status line).
@@ -257,6 +288,7 @@ pub struct DanteSide {
     from_asio: Option<(Player, Taker<Player>)>,
     outputs: usize,
     scratch: Vec<f64>,
+    age: Arc<BlockAge>,
 }
 
 impl Process for DanteSide {
@@ -267,6 +299,8 @@ impl Process for DanteSide {
         match &mut self.from_asio {
             Some((player, taker)) => {
                 taker.take(player);
+                // The pump's take of the driver's blocks (dstack #325).
+                self.age.taken();
                 play(player, block, self.outputs, &mut self.scratch);
             }
             None => block.zero_outputs(),
@@ -280,6 +314,9 @@ pub struct AsioSide {
     player: Option<Player>,
     outputs: usize,
     from_asio: Option<Arc<Fifo>>,
+    /// The from-ASIO block age (with `from_asio`) and the driver's rate.
+    age: Option<Arc<BlockAge>>,
+    rate: u32,
     scratch: Vec<f64>,
 }
 
@@ -287,6 +324,9 @@ impl Process for AsioSide {
     fn process(&mut self, block: &mut Block<'_>) {
         if let Some(fifo) = &self.from_asio {
             feed(fifo, block);
+        }
+        if let Some(age) = &self.age {
+            age.handed(block.frames(), self.rate);
         }
         match &mut self.player {
             Some(p) => play(p, block, self.outputs, &mut self.scratch),
