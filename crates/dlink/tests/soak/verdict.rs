@@ -17,9 +17,13 @@
 //!   once). So the app's write must have landed that late, the pump's
 //!   backlog at the read counted in. And the depth read must be the usual
 //!   one (at least the run's median less a call: the sawtooth's bottom
-//!   moves by a call with the calls' phase): a FIFO already short before
-//!   an on-time tick lost a write or gave frames it never had, which no
-//!   thread's lateness explains.
+//!   moves by a call with the calls' phase), less what the pump took on
+//!   time while this tick ran late: the tick's lateness past the run's
+//!   median lateness (the median depth is read at the median lateness). A
+//!   FIFO short of that lost a write or gave frames it never had, which no
+//!   thread's lateness explains. The pump's backlog at the read never
+//!   lowers it (a pump behind leaves the FIFO fuller); it enters the dry
+//!   point only.
 //! - A TX re-centre: the pump was not run while the app kept writing, until
 //!   the depth passed the target by the player's hard excess.
 //! - An RX dropout: the pump was not run long enough to leave less than a
@@ -116,8 +120,9 @@ pub(crate) fn recentre_stall_ms(target_ms: f64, excess_ms: f64, depth_ms: f64) -
 
 /// The losses the run's rules do not allow (`gap_on_time`, `rx_twice_late`,
 /// and the RX dropouts at ticks on time past `restarts`), each judged
-/// against the run's usual depths (the medians before a write and a read);
-/// `target_ms` and `excess_ms` are the TX bridge's.
+/// against the run's usual depths (the medians before a write and a read,
+/// and the median lateness they were read at); `target_ms` and `excess_ms`
+/// are the TX bridge's.
 pub(crate) fn losses(
     ticks: &[Tick],
     wakes: &Wakes,
@@ -127,6 +132,7 @@ pub(crate) fn losses(
 ) -> Vec<Loss> {
     let rx_median_ms = median(ticks.iter().map(|t| t.rx_depth_ms));
     let tx_median_ms = median(ticks.iter().map(|t| t.tx_depth_ms));
+    let late_median_ms = median(ticks.iter().map(late_ms));
     let on_time_rx: u64 = (0..ticks.len())
         .filter(|&i| !held(ticks, i))
         .map(|i| ticks[i].rx)
@@ -140,8 +146,9 @@ pub(crate) fn losses(
         } as f64;
         let to = t.end_ms as f64;
         let on_time = t.late < LATE_TICK;
+        let usual_ms = usual_tx_depth_ms(tx_median_ms, late_median_ms, late_ms(t));
         let tx = [
-            (on_time && t.underrun).then(|| ("TX underrun", tx_underrun(t, wakes, tx_median_ms))),
+            (on_time && t.underrun).then(|| ("TX underrun", tx_underrun(t, wakes, usual_ms))),
             (on_time && t.recentre).then(|| {
                 let need = recentre_stall_ms(target_ms, excess_ms, t.tx_depth_ms);
                 ("TX re-centre", pump_stall(wakes, from, to, need, false))
@@ -153,7 +160,8 @@ pub(crate) fn losses(
                 what,
                 runner,
                 around: format!(
-                    "{} (the run's usual TX depth {tx_median_ms:.2} ms)",
+                    "{} (the run's usual TX depth {tx_median_ms:.2} ms at its median lateness \
+                     {late_median_ms:.2} ms; {usual_ms:.2} ms at this tick's)",
                     around(t, wakes, from, to)
                 ),
             });
@@ -178,11 +186,27 @@ pub(crate) fn losses(
     out
 }
 
+/// A tick's lateness, ms.
+fn late_ms(t: &Tick) -> f64 {
+    t.late.as_secs_f64() * 1e3
+}
+
+/// The TX depth a tick `late_ms` late should read before its write: the
+/// run's median `median_ms` (read at the median lateness `late_median_ms`)
+/// less what the pump took on time over the tick's lateness past that
+/// median (dstack #339: a tick 3.55 ms late read 8.88 ms where the median
+/// was 14.85 ms, and its write was held 10.99 ms). A tick earlier than the
+/// median reads no more than the median: the rule never tightens.
+pub(crate) fn usual_tx_depth_ms(median_ms: f64, late_median_ms: f64, late_ms: f64) -> f64 {
+    median_ms - (late_ms - late_median_ms).max(0.0)
+}
+
 /// A TX underrun's thread: the app's write landed past the dry point of the
 /// depth read before it, the pump's backlog at that read counted in, and
-/// that depth was the usual one (`median_ms`, the run's, less a call).
-fn tx_underrun(t: &Tick, wakes: &Wakes, median_ms: f64) -> Option<String> {
-    if t.tx_depth_ms + CALL_MS + SLACK_MS < median_ms {
+/// that depth was the usual one (`usual_ms`, [`usual_tx_depth_ms`], less a
+/// call).
+fn tx_underrun(t: &Tick, wakes: &Wakes, usual_ms: f64) -> Option<String> {
+    if t.tx_depth_ms + CALL_MS + SLACK_MS < usual_ms {
         return None;
     }
     let top = t.depth_at_ms as f64;
@@ -390,6 +414,56 @@ mod tests {
         // A pump stall after the read leaves the FIFO fuller: no help.
         let after = judge(&run(gap(4.0)), &wakes(&[(1199, 8_000, false)]));
         assert_eq!(after[0].runner, None);
+    }
+
+    #[test]
+    fn a_tick_late_reads_the_usual_depth_less_its_lateness() {
+        // v0.6.158 tag CI (windows-2025, dstack #339): the run's usual TX depth
+        // 14.85 ms; a tick 3.55 ms late read 8.88 ms and its write landed
+        // 10.99 ms after that read. The pump took 3.05 ms on time over the
+        // lateness past the run's median (0.5 ms): the usual depth there is
+        // 11.80 ms, and 8.88 ms is within a call and the slack of it.
+        let usual = |t: Tick| Tick {
+            tx_depth_ms: 14.85,
+            ..t
+        };
+        let ci = |late_us, tx_depth_ms| Tick {
+            gap: true,
+            underrun: true,
+            late: Duration::from_micros(late_us),
+            wrote_ms: 10.99,
+            tx_depth_ms,
+            ..tick(0)
+        };
+        let ticks = |last| {
+            let mut v: Vec<Tick> = run(last).into_iter().map(usual).collect();
+            v.last_mut().unwrap().tx_depth_ms = last.tx_depth_ms;
+            v
+        };
+        assert!((usual_tx_depth_ms(14.85, 0.5, 3.55) - 11.80).abs() < 1e-9);
+        let held = judge(&ticks(ci(3_550, 8.88)), &Wakes::default());
+        assert_eq!(held.len(), 1);
+        assert!(
+            held[0]
+                .runner
+                .as_deref()
+                .unwrap()
+                .contains("landed 10.99 ms")
+        );
+        assert!(held[0].around.contains("11.80 ms at this tick's"));
+        assert!(verdict(&held, 0).starts_with("VERDICT RUNNER"));
+        // Short of that by more than a call and the slack: a lost write.
+        assert_eq!(
+            judge(&ticks(ci(3_550, 8.10)), &Wakes::default())[0].runner,
+            None
+        );
+        // The same depth at a tick on time is short: a lost write.
+        assert_eq!(
+            judge(&ticks(ci(500, 8.88)), &Wakes::default())[0].runner,
+            None
+        );
+        // A tick earlier than the median reads no more than the median.
+        assert_eq!(usual_tx_depth_ms(14.85, 0.5, 0.0), 14.85);
     }
 
     #[test]
