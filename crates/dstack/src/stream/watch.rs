@@ -10,9 +10,12 @@
 //! real-time pump thread, and never logs per event. A gap in an app's RX or
 //! a TX hole in the same second as this line with `rebootstraps` or
 //! `missed` grown is the pump falling more than W behind its block; with
-//! `writes_after_send` grown, a block woke within W but ended past the TX
-//! thread's slack (W + fpp + the TX margin from its due time), so the TX
-//! sent its stamps as silence with no re-bootstrap (dstack #346); with
+//! `writes_after_send` grown, the TX thread sent a block's stamps as
+//! silence before the block wrote them (dstack #346): alone, most often a
+//! block that woke within W but ended past the TX thread's slack (W, fpp
+//! and the TX margin from its due time), with no re-bootstrap; beside a
+//! `retime` or `reanchor`, the first block on the new timing landing on
+//! stamps already sent; with
 //! only `overruns` grown, blocks took longer than their period (an
 //! unoptimised converter in a debug build, dstack #1). A gap without the
 //! line is the network or the RX/TX path.
@@ -20,11 +23,12 @@
 //! The line names the re-bootstraps' causes (`cause`, [`cause_word`]:
 //! `late`, `clock_back`, `reanchor`, `retime`, joined by `+`; `none` when
 //! only overruns or `writes_after_send` grew) and that second's latest
-//! wake (`behind_max_us`, [`super::wake`], dstack #281). Every [`MINUTE_NS`] the watch also ends
-//! the pump's wake minute ([`super::wake::WakeLateness::take_minute`]),
-//! which the status shows, and logs one info line ([`REJECTED_LINE`]) when
-//! the play-time filter rejected torn clock pairs in that minute
-//! (`play_at_rejected`, [`super::app_offset`], dstack #295).
+//! wake (`behind_max_us`, [`super::wake`], dstack #281). Every
+//! [`MINUTE_NS`] the watch also ends the pump's wake minute
+//! ([`super::wake::WakeLateness::take_minute`]), which the status shows,
+//! and logs one info line ([`REJECTED_LINE`]) when the play-time filter
+//! rejected torn clock pairs in that minute (`play_at_rejected`,
+//! [`super::app_offset`], dstack #295).
 
 use tracing::{info, warn};
 

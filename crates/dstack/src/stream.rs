@@ -380,8 +380,11 @@ pub struct PumpView {
     /// Blocks with an output the TX thread had already sent as silence
     /// (dstack #346): it read some of the block's stamps before the block
     /// wrote them ([`Ring::put_at`]), so they went out as its lane's
-    /// `holes`. A block that woke within W (no re-bootstrap, no skipped
-    /// block) but ended past W + fpp + the TX margin of its due time.
+    /// `holes`, whatever the cause. Most often a block that woke within W
+    /// (no re-bootstrap, no skipped block) but ended past W + fpp + the TX
+    /// margin of its due time; also the first block after a lower device
+    /// latency (a smaller D) or a re-anchor, landing on stamps already
+    /// sent.
     pub writes_after_send: u64,
 }
 
