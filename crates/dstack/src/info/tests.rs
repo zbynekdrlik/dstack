@@ -696,14 +696,15 @@ fn the_heartbeat_with_a_clock_holds_inferno_s_three_records() {
     let body = heartbeat_body(1, &quiet);
     assert_eq!(body.len(), 16 + 152 + 148);
     assert_eq!(body[16..20], [0x00, 0x98, 0x80, 0x03]);
-    // One peak pads by three.
+    // One peak pads by three, and the record's length counts the padding
+    // (as the hardware's does, #345): 12 + 12 + 1 + 3.
     let one = Records {
         tx_peaks: vec![9],
         rx_peaks: Vec::new(),
         ..records()
     };
     let body = heartbeat_body(1, &one);
-    assert_eq!(body[16..18], [0x00, 25]);
+    assert_eq!(body[16..18], [0x00, 28]);
     assert_eq!(body[16 + 24..16 + 28], [9, 0, 0, 0]);
     assert_eq!(body[16 + 28..16 + 32], [0x00, 0x98, 0x80, 0x03]);
     // Four peaks need no padding.
