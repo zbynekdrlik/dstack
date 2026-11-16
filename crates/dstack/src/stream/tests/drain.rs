@@ -155,6 +155,9 @@ fn a_low_latency_pump_reads_no_flow_socket() {
 #[test]
 fn the_drain_judges_its_packets_at_the_wake_s_clock_read() {
     let mut r = flow_rig(TimingProfile::Normal);
+    // Synthetic times against the kernel's real receive stamps: the
+    // arrival is the age at the read only without a stamp (dstack #350).
+    r.rx.set_stamps(false);
     let t = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let now = T + B + P;
     // The wake read media now 7 µs into sample `now`: the judge sees it.

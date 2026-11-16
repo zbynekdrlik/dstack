@@ -73,8 +73,9 @@
 //!   refresh, before it writes (an old flow's packet written in between
 //!   would start it early).
 //! - The packets' judge (phase D, plan Task 3): the least lateness of each
-//!   flow slot's placed packets in ns (our clock's now in ns less the
-//!   packet's own stamp in ns), kept until read, so each heartbeat second
+//!   flow slot's placed packets in ns (each packet's arrival on our clock
+//!   in ns less its own stamp in ns: dstack #350, never the wait to its
+//!   read, `intake::record_arrivals`), kept until read, so each heartbeat second
 //!   has its own ([`RxShared::last_min_lateness_ns`]). Every Dante packet
 //!   carries its sender's PTP-locked media time, so the least of a second
 //!   measures the box's clock against the grandmaster's from the audio
@@ -379,6 +380,7 @@ impl RxShared {
         };
         let get = |a: &AtomicU64| a.load(Ordering::Relaxed);
         let (lateness_sum_ns, lateness_count) = l.ages.totals();
+        let (read_wait_sum_ns, read_wait_count) = l.read_waits.totals();
         RxCounts {
             packets: get(&l.packets),
             refused: get(&l.refused),
@@ -391,8 +393,12 @@ impl RxShared {
             late_at_read: get(&l.late_at_read),
             wire_late: get(&l.wire_late),
             lateness_peak: get(&l.lateness_peak),
+            lateness_at_read_peak: get(&l.lateness_at_read_peak),
             lateness_sum_ns,
             lateness_count,
+            read_wait_peak_us: get(&l.read_wait_peak_ns) / 1_000,
+            read_wait_sum_ns,
+            read_wait_count,
             wake_delay_peak_us: get(&l.wake_peak_ns) / 1_000,
             unplaced: get(&l.unplaced),
             keepalives: get(&l.keepalives),
@@ -440,8 +446,9 @@ impl RxShared {
     /// [`RxShared::last_lateness`]. It also takes the packets' least
     /// lateness in ns, kept for [`RxShared::last_min_lateness_ns`], and
     /// the largest wake delay, kept for [`RxShared::last_wake_delay_us`],
-    /// and the second's mean age, kept for
-    /// [`RxShared::last_lateness_mean_ns`], so the heartbeat's second is all
+    /// and the second's mean age and mean read wait, kept for
+    /// [`RxShared::last_lateness_mean_ns`] and
+    /// [`RxShared::last_read_wait_mean_ns`], so the heartbeat's second is all
     /// of theirs. Only the heartbeat calls it: a second caller would split
     /// its seconds.
     pub fn take_max_lateness(&self, slot: usize) -> u64 {
@@ -450,6 +457,7 @@ impl RxShared {
             l.last_wake_ns.store(wake, Ordering::Relaxed);
             l.network.take();
             l.ages.take();
+            l.read_waits.take();
             let least = l.min_lateness_ns.0.swap(NO_LATENESS, Ordering::Relaxed);
             l.last_min_lateness_ns.0.store(least, Ordering::Relaxed);
             let taken = l.max_lateness.swap(0, Ordering::Relaxed);
@@ -543,6 +551,17 @@ impl RxShared {
     /// own window diffs [`RxCounts`] ([`RxCounts::lateness_mean_ns_since`]).
     pub fn last_lateness_mean_ns(&self, slot: usize) -> Option<u64> {
         self.lanes.get(slot)?.ages.last_mean_ns()
+    }
+
+    /// The mean wait from arrival to the writer's read of flow slot
+    /// `slot`'s packets placed in the heartbeat's last second (what the
+    /// last [`RxShared::take_max_lateness`] took; dstack #350), ns,
+    /// rounded down: the part of the age at the read that the reported
+    /// ages leave out (an app's pull, the pump's block). `None` for a
+    /// second without a placed packet. The status reads it and takes
+    /// nothing.
+    pub fn last_read_wait_mean_ns(&self, slot: usize) -> Option<u64> {
+        self.lanes.get(slot)?.read_waits.last_mean_ns()
     }
 
     /// The receive buffer the kernel gave the flow sockets, bytes.

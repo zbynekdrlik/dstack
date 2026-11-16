@@ -35,6 +35,9 @@
 //! includes the wait for the next block (at most a block, plus the pump's
 //! own lateness), and the write delay likewise. `late`, `wire_late`,
 //! `late_at_read` and the ring counts are judged as before, at the read.
+//! The reported ages (the heartbeat's lateness, the peak, the judge and
+//! the mean) are each packet's age at its ARRIVAL (dstack #350,
+//! [`record_arrivals`]): the read's wait is reported apart.
 //! Under an app's consumer (dstack #307, [`RxShared::app_intake`]: an
 //! output callback that drains, then reads the rings up to its now less
 //! P) the waits include the time to its next callback, and a packet is
@@ -67,11 +70,13 @@ use std::net::SocketAddrV4;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use super::age::arrival_age_ns;
 use super::counts::{RxStats, source_word};
 use super::lane::{Lane, count_lost};
 use super::plan::{RxPlan, RxRoute, new_flow};
 use super::socket::{
     Received, handle_of, recv_handle, recv_stamped, wake_delay_ns, wall_now_ns, wire_late,
+    wire_lateness,
 };
 use super::{BUFFER, DRAIN, FRAMES_MAX, MAX_FLOWS, RxShared, holes, netlat};
 use crate::clock;
@@ -109,7 +114,20 @@ pub struct Intake {
     /// Under the app: the samples since the drain before this one, the
     /// reader's step ([`reads_apart`]).
     gap: Option<u64>,
+    /// The packets one slot's read placed, for their arrival ages once the
+    /// read is done ([`record_arrivals`], dstack #350).
+    seen: Box<[Seen; PUMP_DRAIN]>,
 }
+
+/// A packet placed by a read: its first frame and its wake delay (the
+/// kernel's receive time to the read; `None` without a stamp).
+#[derive(Debug, Clone, Copy, Default)]
+struct Seen {
+    pos: u64,
+    wake: Option<u64>,
+}
+
+const _: () = assert!(DRAIN <= PUMP_DRAIN);
 
 impl Intake {
     pub(super) fn new(shared: Arc<RxShared>) -> Self {
@@ -124,6 +142,7 @@ impl Intake {
             app: false,
             last_drain: None,
             gap: None,
+            seen: Box::new([Seen::default(); PUMP_DRAIN]),
         }
     }
 
@@ -178,7 +197,7 @@ impl Intake {
             if fresh && let Some(stats) = self.shared.lanes.get(slot) {
                 discard(stats, &mut self.buf[..], PUMP_DRAIN, read);
             }
-            emptied &= self.receive(slot, now_ns, mono, wall, PUMP_DRAIN, read);
+            emptied &= self.receive(slot, (now_ns, mono, wall), handle, PUMP_DRAIN, read);
         }
         self.expire(now_ns);
         self.shared.handles.ack(moves);
@@ -197,7 +216,7 @@ impl Intake {
         sockets: &[mio::net::UdpSocket],
         joined: &[Option<(SocketAddrV4, mio::net::UdpSocket)>],
     ) -> u32 {
-        let (now_ns, mono, wall) = at;
+        let now_ns = at.0;
         let moves = self.shared.handles.moves();
         self.refresh();
         self.expire(now_ns);
@@ -211,7 +230,7 @@ impl Intake {
                 _ => sockets.get(slot),
             };
             let emptied = socket.is_none_or(|s| {
-                self.receive(slot, now_ns, mono, wall, DRAIN, |buf| recv_stamped(s, buf))
+                self.receive(slot, at, handle_of(s), DRAIN, |buf| recv_stamped(s, buf))
             });
             if emptied {
                 left &= !(1 << slot);
@@ -254,6 +273,7 @@ impl Intake {
                     lane.plan = plan;
                     lane.source = None;
                     lane.end = None;
+                    lane.read_at = None;
                     if let Some(stats) = shared.lanes.get(slot) {
                         stats.source.store(0, Ordering::Relaxed);
                         stats.heard.store(0, Ordering::Release);
@@ -304,25 +324,28 @@ impl Intake {
         self.routes_seen = Some(version);
     }
 
-    /// Reads up to `cap` datagrams of flow slot `slot` with `read`, `mono`
-    /// the reader's clock ([`RxShared::now_ns`]) and `wall` the read's wall
-    /// clock (ns since 1970); `true` when none is left. The hot path: no
-    /// allocation, no lock, no log.
+    /// Reads up to `cap` datagrams of flow slot `slot` with `read` from the
+    /// socket whose [`handle_of`] is `socket`, at `at`: (PTP now, `mono` the
+    /// reader's clock ([`RxShared::now_ns`]), `wall` the read's wall clock,
+    /// ns since 1970); `true` when it read no more (none left, or a read
+    /// error). The hot path: no allocation, no lock, no log.
     fn receive(
         &mut self,
         slot: usize,
-        now_ns: Option<u64>,
-        mono: u64,
-        wall: Option<u64>,
+        at: (Option<u64>, u64, Option<u64>),
+        socket: u64,
         cap: usize,
         mut read: impl FnMut(&mut [u8]) -> io::Result<Received>,
     ) -> bool {
+        debug_assert!(cap <= PUMP_DRAIN, "a read's packets fit `seen`");
+        let (now_ns, mono, wall) = at;
         let Intake {
             shared,
             lanes,
             buf,
             frames,
             gap,
+            seen,
             ..
         } = self;
         let (Some(lane), Some(stats)) = (lanes.get_mut(slot), shared.lanes.get(slot)) else {
@@ -334,6 +357,15 @@ impl Intake {
         let count = |a: &AtomicU64| {
             a.fetch_add(1, Ordering::Relaxed);
         };
+        // dstack #350: the time since the slot's last read that left this
+        // same socket empty brackets the arrival of what this one reads (a
+        // socket read first now, a group's, may hold older datagrams).
+        let since = now_ns
+            .zip(lane.read_at.filter(|&(_, s)| s == socket))
+            .map(|(n, (t, _))| n.saturating_sub(t));
+        let mut placed = 0;
+        let mut done = false;
+        let mut emptied = false;
         for _ in 0..cap {
             let (n, from, at_ns) = match read(&mut buf[..]) {
                 Ok(Received {
@@ -348,11 +380,14 @@ impl Intake {
                 Err(e) => {
                     // Would block: none left. Anything else (an unconnected
                     // UDP socket reports none we know of) is counted and
-                    // ends this slot's reads for the pass.
-                    if e.kind() != ErrorKind::WouldBlock {
+                    // ends this slot's reads for the pass; only an empty
+                    // socket brackets the next read's arrivals.
+                    done = true;
+                    emptied = e.kind() == ErrorKind::WouldBlock;
+                    if !emptied {
                         count(&stats.recv_errors);
                     }
-                    return true;
+                    break;
                 }
             };
             if lane.plan.src != Some(*from.ip()) {
@@ -392,7 +427,7 @@ impl Intake {
                 continue;
             };
             let step = reads_apart(lane.plan.block, *gap);
-            place(PlaceArgs {
+            let pos = place(PlaceArgs {
                 stats,
                 lane,
                 rings,
@@ -408,8 +443,16 @@ impl Intake {
                 at_ns,
                 step,
             });
+            if let Some(s) = seen.get_mut(placed) {
+                *s = Seen { pos, wake };
+                placed += 1;
+            }
         }
-        false
+        if let Some(ns) = now_ns {
+            record_arrivals(stats, rate, ns, since, &seen[..placed]);
+        }
+        lane.read_at = now_ns.filter(|_| emptied).map(|t| (t, socket));
+        done
     }
 }
 
@@ -496,13 +539,14 @@ struct PlaceArgs<'a> {
     step: u64,
 }
 
-/// A packet judged and placed: its lateness, the judge and its age's
-/// sum and count (dstack #342), `late` and `wire_late`, the network
-/// latency and the minute's windows, its holes, its samples written into
-/// the rings routed to its slots, and its write delay. No allocation, no
-/// lock, no log.
+/// A packet judged and placed at the read: `late` and `wire_late`, the
+/// network latency and the minute's windows, its holes, its samples
+/// written into the rings routed to its slots, and its write delay;
+/// returns its first frame's position. Its ages are recorded once the
+/// slot's read is done ([`record_arrivals`], dstack #350). No allocation,
+/// no lock, no log.
 #[cfg_attr(iem_rtsan, sanitize(realtime = "nonblocking"))]
-fn place(p: PlaceArgs<'_>) {
+fn place(p: PlaceArgs<'_>) -> u64 {
     let PlaceArgs {
         stats,
         lane,
@@ -523,14 +567,8 @@ fn place(p: PlaceArgs<'_>) {
         a.fetch_add(1, Ordering::Relaxed);
     };
     let pos = clock::from_stamp(secs, sub, rate, now);
+    // `late` is the reader's verdict, judged at the read.
     let lateness = now.saturating_sub(pos);
-    stats.max_lateness.fetch_max(lateness, Ordering::Relaxed);
-    stats.lateness_peak.fetch_max(lateness, Ordering::Relaxed);
-    // The judge: the packet's own stamp in ns against our now in ns; the
-    // same age summed and counted for its mean (dstack #342).
-    let age_ns = now_ns.saturating_sub(ns_of(pos, rate));
-    stats.min_lateness_ns.0.fetch_min(age_ns, Ordering::Relaxed);
-    stats.ages.record(age_ns);
     let limit = u64::from(lane.plan.latency) + step;
     let late = lateness > limit;
     if late {
@@ -576,5 +614,41 @@ fn place(p: PlaceArgs<'_>) {
         && let Some(delay) = wake_delay_ns(wall_now_ns(), at_ns)
     {
         stats.write_minute.record(delay);
+    }
+    pos
+}
+
+/// The packets one slot's read placed at PTP time `now_ns`, `since` the
+/// time since its last read that left the socket empty, and each one's
+/// age at its arrival ([`arrival_age_ns`], dstack #350): the heartbeat's
+/// lateness (0x8003) and peak, samples, the judge (the least, ns) and the
+/// mean age; the rest of its age at the read is its read wait (summed,
+/// counted and peaked apart). No allocation, no lock, no log.
+#[cfg_attr(iem_rtsan, sanitize(realtime = "nonblocking"))]
+fn record_arrivals(stats: &RxStats, rate: u32, now_ns: u64, since: Option<u64>, seen: &[Seen]) {
+    let at_read = |s: &Seen| now_ns.saturating_sub(ns_of(s.pos, rate));
+    let Some(newest) = seen.iter().map(at_read).min() else {
+        return;
+    };
+    for s in seen {
+        let read_age = at_read(s);
+        let age = arrival_age_ns(read_age, s.wake, since, newest);
+        let wait = read_age - age;
+        // The arrival on our clock, in samples past the first frame, and
+        // the read's: the peak at the read bounds a burst the bracket
+        // reads as on time (Windows).
+        let lateness = wire_lateness(now_ns, wait, s.pos, rate);
+        stats.max_lateness.fetch_max(lateness, Ordering::Relaxed);
+        stats.lateness_peak.fetch_max(lateness, Ordering::Relaxed);
+        let at_read_samples = wire_lateness(now_ns, 0, s.pos, rate);
+        stats
+            .lateness_at_read_peak
+            .fetch_max(at_read_samples, Ordering::Relaxed);
+        // The judge: the packet's own stamp in ns against its arrival on
+        // our clock; the same age summed and counted for its mean (#342).
+        stats.min_lateness_ns.0.fetch_min(age, Ordering::Relaxed);
+        stats.ages.record(age);
+        stats.read_waits.record(wait);
+        stats.read_wait_peak_ns.fetch_max(wait, Ordering::Relaxed);
     }
 }
