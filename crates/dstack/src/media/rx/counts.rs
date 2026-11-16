@@ -63,6 +63,10 @@ pub(super) struct RxStats {
     /// none yet): the RX thread writes it only when it changes (dstack
     /// #266), the status and the loss watch read it.
     pub(super) source: AtomicU64,
+    /// When the flow's last packet came, [`super::RxShared::now_ns`] plus
+    /// 1 (0: none since its plan): the ring writer stores it, the RX
+    /// thread's keepalives read it (dstack #326: they may be two threads).
+    pub(super) heard: AtomicU64,
 }
 
 /// `source` packed in one word for [`RxStats::source`]: a set byte, the

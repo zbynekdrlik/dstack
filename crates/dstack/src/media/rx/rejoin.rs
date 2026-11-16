@@ -37,10 +37,10 @@ impl Receiver {
         self.rejoins_seen = asked;
         // Distinct bits: a sum (an `|` would leave its `^` mutant).
         Some(
-            self.lanes
+            self.keeps
                 .iter()
                 .enumerate()
-                .filter(|(_, lane)| lane.plan.group.is_some())
+                .filter(|(_, keep)| keep.plan.group.is_some())
                 .map(|(slot, _)| 1u64 << slot)
                 .sum(),
         )
@@ -50,10 +50,10 @@ impl Receiver {
     /// for [`RxShared::take_groups_missing`].
     pub(super) fn tell_missing(&self) {
         let missing = self
-            .lanes
+            .keeps
             .iter()
             .zip(&self.joined)
-            .any(|(lane, joined)| lane.plan.group.is_some() && joined.is_none());
+            .any(|(keep, joined)| keep.plan.group.is_some() && joined.is_none());
         self.shared.groups_missing.store(missing, Ordering::Release);
     }
 }

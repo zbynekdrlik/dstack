@@ -1,5 +1,8 @@
 use super::*;
 
+use super::plan::new_flow;
+use crate::clock;
+
 use crate::clock::ManualClock;
 use crate::media::packet::write;
 use crate::media::tx::ns_of;
@@ -9,6 +12,7 @@ mod rejoin;
 mod reorder;
 mod source;
 mod start;
+mod under_pump;
 
 const RATE: u32 = 96_000;
 const MS: u64 = 1_000_000;
@@ -178,9 +182,9 @@ fn publish_hands_over_what_changed_and_the_thread_reads_it() {
     );
     assert_eq!(s.routes_version.load(Ordering::SeqCst), v0 + 1);
     rx.pass(None, 0);
-    assert_eq!(rx.lanes[3].plan, p);
-    assert_eq!(rx.lanes[3].targets, [(1, 1), (0, 2)]);
-    assert!(rx.lanes[0].targets.is_empty());
+    assert_eq!(rx.lanes()[3].plan, p);
+    assert_eq!(rx.lanes()[3].targets, [(1, 1), (0, 2)]);
+    assert!(rx.lanes()[0].targets.is_empty());
     // A route moves: one version more; the old slot loses it.
     publish(
         &s,
@@ -192,13 +196,13 @@ fn publish_hands_over_what_changed_and_the_thread_reads_it() {
     );
     assert_eq!(s.routes_version.load(Ordering::SeqCst), v0 + 2);
     rx.pass(None, 0);
-    assert_eq!(rx.lanes[3].targets, [(0, 2)]);
-    assert_eq!(rx.lanes[4].targets, [(0, 1)]);
+    assert_eq!(rx.lanes()[3].targets, [(0, 2)]);
+    assert_eq!(rx.lanes()[4].targets, [(0, 1)]);
     // Every route gone, every plan cleared.
     publish(&s, &[], &[]);
     rx.pass(None, 0);
     assert!(
-        rx.lanes
+        rx.lanes()
             .iter()
             .all(|l| l.targets.is_empty() && l.plan == RxPlan::default())
     );
@@ -213,7 +217,7 @@ fn publish_hands_over_what_changed_and_the_thread_reads_it() {
     );
     s.routes_version.fetch_add(1, Ordering::SeqCst);
     rx.pass(None, 0);
-    assert!(rx.lanes.iter().all(|l| l.targets.is_empty()));
+    assert!(rx.lanes().iter().all(|l| l.targets.is_empty()));
 }
 
 #[test]
@@ -414,7 +418,7 @@ fn a_route_change_alone_is_read() {
     let p = plan(LOOPBACK, 2, true, 1);
     publish(&s, &[(0, p)], &[(0, RxRoute { flow: 0, slot: 0 })]);
     rx.pass(None, 0);
-    assert_eq!(rx.lanes[0].targets, [(0, 0)]);
+    assert_eq!(rx.lanes()[0].targets, [(0, 0)]);
     // The same plan, one more route.
     publish(
         &s,
@@ -425,7 +429,7 @@ fn a_route_change_alone_is_read() {
         ],
     );
     rx.pass(None, 0);
-    assert_eq!(rx.lanes[0].targets, [(0, 0), (1, 2)]);
+    assert_eq!(rx.lanes()[0].targets, [(0, 0), (1, 2)]);
 }
 
 /// Phase C: the engine's pump reads only a routed channel's ring.
@@ -830,7 +834,7 @@ fn a_new_flow_in_the_slot_starts_afresh() {
     t.send_to(&packet_at(5_000, 1, 8), slot_addr(&s, 0))
         .unwrap();
     pump(&mut rx, 0, 1, now, 0);
-    assert!(rx.lanes[0].source.is_some());
+    assert!(rx.lanes()[0].source.is_some());
     assert_eq!(
         s.source(0),
         Some(v4(&t)),
@@ -841,7 +845,7 @@ fn a_new_flow_in_the_slot_starts_afresh() {
     publish(&s, &[(0, plan(LOOPBACK, 1, true, 2))], &[]);
     rx.pass(now, 250 * MS);
     assert_eq!(keepalives(&t), 0);
-    assert_eq!(rx.lanes[0].source, None);
+    assert_eq!(rx.lanes()[0].source, None);
     assert_eq!(s.source(0), None);
     t.send_to(&packet_at(4_000, 1, 8), slot_addr(&s, 0))
         .unwrap();
@@ -1388,6 +1392,25 @@ fn a_failed_join_is_tried_again_with_the_slot_s_next_flow() {
     publish(&s, &[(0, p(2))], &[]);
     rx.pass(None, 0);
     assert_eq!((s.lane(0).joins, s.lane(0).join_errors), (1, 1));
+}
+
+#[test]
+fn a_stall_asked_for_is_slept_once_by_the_thread() {
+    // dstack #326: the test hook that stalls the RX thread as a loaded
+    // box's scheduler does.
+    let s = shared(1);
+    assert!(!s.serve_stall(), "no stall asked");
+    s.stall_thread(30 * MS);
+    let began = Instant::now();
+    assert!(s.serve_stall());
+    assert!(began.elapsed() >= Duration::from_millis(30), "slept it out");
+    assert!(!s.serve_stall(), "once only");
+    // A shorter stall asked during a longer one does not cut it.
+    s.stall_thread(40 * MS);
+    s.stall_thread(MS);
+    let began = Instant::now();
+    assert!(s.serve_stall());
+    assert!(began.elapsed() >= Duration::from_millis(40));
 }
 
 /// A socket's IPv4 address.

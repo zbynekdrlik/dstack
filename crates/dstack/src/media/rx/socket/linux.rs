@@ -7,9 +7,38 @@
 use std::io;
 use std::mem::{size_of, zeroed};
 use std::net::{Ipv4Addr, SocketAddrV4};
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, RawFd};
 
 use super::Received;
+
+/// A flow socket's descriptor as one word for the writer's handle table
+/// (dstack #326): the descriptor plus 1, so 0 is none.
+pub fn handle_of(s: &impl AsRawFd) -> u64 {
+    u64::try_from(s.as_raw_fd()).map_or(0, |fd| fd + 1)
+}
+
+/// A descriptor read through its handle; it owns nothing, so it never
+/// closes the socket.
+struct Fd(RawFd);
+
+impl AsRawFd for Fd {
+    fn as_raw_fd(&self) -> RawFd {
+        self.0
+    }
+}
+
+/// Reads one datagram of the socket whose [`handle_of`] is `handle`, as
+/// [`recv_stamped`]; an invalid handle (0) is an `InvalidInput` error (no
+/// allocation). The socket must stay open for the call: the RX thread
+/// closes a replaced one only after the writer moved past it
+/// (`super::super::handles`).
+pub fn recv_handle(handle: u64, buf: &mut [u8]) -> io::Result<Received> {
+    let fd = handle
+        .checked_sub(1)
+        .and_then(|h| RawFd::try_from(h).ok())
+        .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+    recv_stamped(&Fd(fd), buf)
+}
 
 /// Asks the kernel to stamp every datagram `s` receives with its receive
 /// time (`SO_TIMESTAMPNS`, the wall clock); `true` when it will.

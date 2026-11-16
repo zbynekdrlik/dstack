@@ -34,9 +34,9 @@ mod linux;
 mod other;
 
 #[cfg(target_os = "linux")]
-pub(super) use linux::{recv_stamped, stamp_receives};
+pub(super) use linux::{handle_of, recv_handle, recv_stamped, stamp_receives};
 #[cfg(not(target_os = "linux"))]
-pub(super) use other::{recv_stamped, stamp_receives};
+pub(super) use other::{handle_of, recv_handle, recv_stamped, stamp_receives};
 
 /// One datagram read from a flow socket.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

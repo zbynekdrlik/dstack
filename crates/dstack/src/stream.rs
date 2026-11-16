@@ -49,6 +49,16 @@
 //! - [`watch::PumpWatch`]: once a second, from the daemon's tick (never
 //!   the pump thread), one warning when re-bootstraps, skipped blocks or
 //!   overruns grew in that second.
+//! - The RX rings' writer in the normal profile (dstack #326): the pump
+//!   claims it at [`Pump::new`] ([`crate::media::rx::RxShared::pump_intake`])
+//!   and drains the flow sockets (non-blocking, every slot with a flow)
+//!   just before each block reads the rings, and in each free block
+//!   (counted unplaced). The pump reads by sample position, so its own
+//!   lateness loses nothing, and no helper thread stands between a packet
+//!   in its socket and the block that reads it. The drain is outside
+//!   [`Pump::block`] (a socket read is a system call); its per-packet part
+//!   carries the same rtsan attribute. The low-latency profile leaves the
+//!   writes to the RX thread, as before.
 //! - [`spawn`]: the `dstack-engine` thread (`SCHED_FIFO` [`ENGINE_PRIORITY`]
 //!   when allowed): on the media clock while it is ready, paced on its own
 //!   ([`free_deadline`], NullRt's rule) while it is not.
@@ -58,11 +68,9 @@
 //! flow's bits and saturates at full scale.
 
 use std::any::Any;
-use std::io;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use dstack_audio_io::hist::{HistSnapshot, StreamHists};
@@ -70,10 +78,9 @@ use dstack_audio_io::telemetry::period_ns;
 use dstack_audio_io::{Block, Process, StreamStats, panic_message};
 
 use crate::clock::{PtpClock, to_samples};
-use crate::media::repin::RePin;
 use crate::media::ring::Ring;
-use crate::media::rx::RxShared;
-use crate::media::tx::{DISCONTINUITY, MediaThread, Shift, TxShared, ns_of, place, take_priority};
+use crate::media::rx::{Intake, RxShared};
+use crate::media::tx::{DISCONTINUITY, Shift, TxShared, ns_of};
 use app_offset::{OffsetFilter, Outcome};
 use wake::WakeLateness;
 
@@ -590,6 +597,13 @@ pub struct Pump<P: Process> {
     /// The last block's play time, for the next one's deviation
     /// ([`play_at`], dstack #305).
     played: play_at::Track,
+    /// The RX rings' writer while the pump is it (the normal profile,
+    /// dstack #326): drained just before each block reads the rings.
+    intake: Option<Intake>,
+    /// Media now in ns as the last [`Pump::read_clocks`] read it, for the
+    /// drain's packet judge (finer than a sample); taken by the next
+    /// [`Pump::media`] at that time.
+    read_ns: Option<u64>,
 }
 
 impl<P: Process> Pump<P> {
@@ -606,6 +620,12 @@ impl<P: Process> Pump<P> {
         stats: Arc<PumpStats>,
     ) -> Self {
         let frames = usize::try_from(timing.block).unwrap_or(usize::MAX);
+        // dstack #326: in the normal profile the pump writes the RX rings
+        // itself, so no helper thread's scheduling stands between a packet
+        // in its socket and the block that reads it.
+        let intake = (tx.cfg.timing == crate::device::TimingProfile::Normal)
+            .then(|| rx.pump_intake())
+            .flatten();
         Pump {
             input: vec![0.0; map.rx.len() * frames],
             output: vec![0.0; map.tx.len() * frames],
@@ -627,6 +647,22 @@ impl<P: Process> Pump<P> {
             app: OffsetFilter::new(),
             pair: None,
             played: play_at::Track::default(),
+            intake,
+            read_ns: None,
+        }
+    }
+
+    /// Whether the pump writes the RX rings (dstack #326: the normal
+    /// profile, unless the RX thread claimed them first).
+    pub fn drains(&self) -> bool {
+        self.intake.is_some()
+    }
+
+    /// Drains the RX flow sockets into the rings while the pump writes
+    /// them, at PTP time `now_ns` (`None`: the clock is not ready).
+    fn drain(&mut self, now_ns: Option<u64>) {
+        if let Some(intake) = &mut self.intake {
+            intake.drain_into_rings(now_ns);
         }
     }
 
@@ -646,6 +682,7 @@ impl<P: Process> Pump<P> {
         let before = app_ns();
         let now = clock.now_ns()?;
         self.pair = Some(app_offset::pair_offset(before, now, app_ns()));
+        self.read_ns = Some(now);
         Some(now)
     }
 
@@ -678,6 +715,13 @@ impl<P: Process> Pump<P> {
     pub fn media(&mut self, now: u64, anchor: impl Into<crate::clock::Anchor>) -> u64 {
         let anchor = anchor.into();
         let rate = self.tx.cfg.sample_rate;
+        // The drain's time: the clock read of this wake when it is `now`,
+        // else `now` itself.
+        let drain_ns = self
+            .read_ns
+            .take()
+            .filter(|&ns| to_samples(ns, rate) == now)
+            .unwrap_or_else(|| ns_of(now, rate));
         let before = self.engine_shift;
         if self.epoch != Some(anchor.epoch) {
             self.engine_shift = self
@@ -761,6 +805,7 @@ impl<P: Process> Pump<P> {
                     if late {
                         self.stats.late.fetch_add(1, Ordering::Relaxed);
                     }
+                    self.drain(Some(drain_ns));
                     self.block(start);
                 }
                 Due::Wait { until } => break until,
@@ -780,6 +825,9 @@ impl<P: Process> Pump<P> {
     pub fn free(&mut self) {
         self.stats.media.store(false, Ordering::Relaxed);
         self.blocks = None;
+        // Packets keep coming: read (counted unplaced), never left to fill
+        // their sockets.
+        self.drain(None);
         let entry = self.enter();
         self.input.fill(0.0);
         let fault = self.run_processor(None, None);
@@ -916,85 +964,10 @@ pub fn inputs_jump(step_ns: i64, rate: u32, shift: Option<i64>) -> bool {
     shift.is_some_and(|s| s != 0 && s != crate::clock::grid_shift(step_ns, rate, 1))
 }
 
-/// The deadline of the free block after one due at `deadline`, at `now`: a
-/// period later; more than [`FREE_RESYNC_BLOCKS`] periods behind it, `now`
-/// (no burst; NullRt's rule).
-pub fn free_deadline(deadline: Instant, now: Instant, period: Duration) -> Instant {
-    let next = deadline + period;
-    if now > next + period * FREE_RESYNC_BLOCKS {
-        now
-    } else {
-        next
-    }
-}
-
-/// Starts the `dstack-engine` thread: `pump` on `clock` until `stop` is set
-/// (within one block, or one free period, of it).
-pub fn spawn<P: Process + 'static>(
-    clock: Arc<dyn PtpClock>,
-    pump: Pump<P>,
-    stop: Arc<AtomicBool>,
-) -> io::Result<JoinHandle<()>> {
-    let stats = Arc::clone(&pump.stats);
-    stats.running.store(true, Ordering::Release);
-    let spawned = std::thread::Builder::new()
-        .name("dstack-engine".to_string())
-        .spawn(move || run(clock.as_ref(), pump, &stop));
-    if spawned.is_err() {
-        stats.running.store(false, Ordering::Release);
-    }
-    spawned
-}
-
-/// The pump thread's loop (glue: every decision is [`Pump`]'s, [`Blocks`]'
-/// and [`free_deadline`]'s): on the media clock while it is ready, paced on
-/// `Instant` deadlines a block apart while it is not.
-fn run<P: Process>(clock: &dyn PtpClock, mut pump: Pump<P>, stop: &AtomicBool) {
-    take_priority(MediaThread::Pump, ENGINE_PRIORITY, pump.tx.scheduling());
-    place("engine pump", pump.tx.cfg.pump_cpu);
-    let rate = pump.tx.cfg.sample_rate;
-    // The bounded escape (dstack #1, Windows): only when W covers its block.
-    let escapes = crate::clock::pump_may_escape(pump.timing.margin, pump.timing.block, rate);
-    #[cfg(any(target_os = "linux", windows))]
-    crate::clock::allow_escape(escapes);
-    if let Some(line) = crate::clock::pump_escape_line(
-        crate::clock::escape_on(),
-        escapes,
-        pump.timing.margin,
-        pump.timing.block,
-    ) {
-        tracing::info!("{line}");
-    }
-    let period = Duration::from_nanos(pump.stats.period_ns);
-    let mut deadline: Option<Instant> = None;
-    let mut pin = RePin::new(pump.tx.cfg.pump_cpu);
-    while !stop.load(Ordering::Acquire) {
-        pin.keep(pump.tx.now_ns());
-        // The epoch before the time (`crate::media::tx::shift`).
-        let anchor = crate::clock::Anchor::of(clock);
-        // The app's clock, media now and the app's clock again, back to
-        // back (dstack #295).
-        #[cfg(any(target_os = "linux", windows))]
-        let now = pump.read_clocks(clock, crate::clock::app_monotonic_ns);
-        #[cfg(not(any(target_os = "linux", windows)))]
-        let now = clock.now_ns();
-        if let Some(now_ns) = now {
-            deadline = None;
-            let wake = pump.media(to_samples(now_ns, rate), anchor);
-            clock.sleep_until(ns_of(wake, rate));
-        } else {
-            pump.free();
-            let now = Instant::now();
-            let next = free_deadline(deadline.unwrap_or(now), now, period);
-            deadline = Some(next);
-            std::thread::sleep(next.saturating_duration_since(now));
-        }
-    }
-    pump.stats.running.store(false, Ordering::Release);
-}
-
 pub mod app_offset;
 pub mod play_at;
+mod thread;
+pub use thread::{free_deadline, spawn};
 pub mod wake;
 pub mod watch;
 
