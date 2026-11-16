@@ -140,6 +140,12 @@ async fn sends_failing_with_10049_name_the_interface_again_then_reopen_and_beats
         peer.send_to(&captured(), (ip, REQUEST_PORT)).await.unwrap();
         let reply = recv(&info_rx).await;
         assert_eq!(id_of(&reply), identity().device_id);
+        // It holds the members' share port again after the reopen.
+        let share_at = (Ipv4Addr::LOCALHOST, share::share_port(ip));
+        assert!(
+            UdpSocket::bind(share_at).await.is_err(),
+            "the manager's share port is held again"
+        );
     };
     tokio::select! {
         ended = task => panic!("the server ended: {ended:?}"),

@@ -12,18 +12,28 @@
 //!
 //! [`SendWatch`] (pure) takes each send's result and the time:
 //!
-//! - the log: the first failure is reported at once, later ones at most
-//!   once a [`REPORT_EVERY`] ([`Report`]: the failures since the last
-//!   report and the last OS error); [`SendWatch::flush`] reports the rest
-//!   once due, so no failure goes uncounted and no packet gets a line of
-//!   its own;
+//! - the log: a failure is reported at once when no report went within the
+//!   last [`REPORT_EVERY`], else with the next due one ([`Report`]: the
+//!   failures since the last report and the last OS error);
+//!   [`SendWatch::flush`] reports the rest once due, so no failure goes
+//!   uncounted and no packet gets a line of its own, even when failures
+//!   and sends alternate;
 //! - the recovery, after [`membership`](crate::membership)'s pattern (the
 //!   owner acts on its own socket): [`REAPPLY_AT`] failures in a row ask
 //!   the multicast interface named again ([`Recover::Reapply`]),
-//!   [`REOPEN_AT`] in a row the socket reopened ([`Recover::Reopen`]), each
-//!   at most once a [`RECOVER_EVERY`];
+//!   [`REOPEN_AT`] in a row the socket reopened ([`Recover::Reopen`]). Each
+//!   kind waits a period since its last: [`RECOVER_EVERY`] at first,
+//!   doubled at each reopen up to [`RECOVER_CAP`] while the failures go on
+//!   (dsg's state lasted a day: a reopen a minute would have been 1440
+//!   rebinds and their lines);
 //! - [`SendWatch::sent`]: a send that went out after a run of failures with
-//!   a recovery in it ends the run: the server logs that sends work again.
+//!   a recovery in it ends the outage (the period starts again at
+//!   [`RECOVER_EVERY`]) and takes the failures not reported yet: the server
+//!   logs that sends work again, with the outage's count.
+//!
+//! The watch is the socket's, not a group's: when only one group fails
+//! while the other's sends go out, each send resets the run, so no
+//! recovery is asked (dsg's state failed both groups).
 //!
 //! [`index_form`] is the interface index as `IP_MULTICAST_IF` takes it on
 //! Windows (an address in 0.0.0.0/8), [`interface_by_index`] the re-apply
@@ -41,8 +51,20 @@ pub const REPORT_EVERY: Duration = Duration::from_secs(60);
 pub const REAPPLY_AT: u32 = 3;
 /// Failures in a row that ask the socket reopened.
 pub const REOPEN_AT: u32 = 10;
-/// The least time between two recoveries of one kind.
+// The start's two sends (board and product info) never ask a reopen.
+const _: () = assert!(REOPEN_AT > 2);
+/// The least time between two recoveries of one kind, at first.
 pub const RECOVER_EVERY: Duration = Duration::from_secs(60);
+/// The longest the period between recoveries grows to.
+pub const RECOVER_CAP: Duration = Duration::from_secs(3600);
+
+/// The period between recoveries after `reopens` reopens in one outage:
+/// [`RECOVER_EVERY`] doubled each time, at most [`RECOVER_CAP`].
+pub fn recover_period(reopens: u32) -> Duration {
+    RECOVER_EVERY
+        .saturating_mul(1u32.checked_shl(reopens).unwrap_or(u32::MAX))
+        .min(RECOVER_CAP)
+}
 
 /// A recovery asked of the server.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,6 +107,8 @@ pub struct SendWatch {
     next_report: Option<Instant>,
     last_reapply: Option<Instant>,
     last_reopen: Option<Instant>,
+    /// Reopens in this outage (the recovery period's doublings).
+    reopens: u32,
 }
 
 /// `last` plus `every` is past at `now` (or nothing was done yet).
@@ -100,11 +124,13 @@ impl SendWatch {
         self.unreported += 1;
         self.error = error.to_string();
         let report = self.flush(now);
-        let recover = if self.run >= REOPEN_AT && due(self.last_reopen, RECOVER_EVERY, now) {
+        let period = recover_period(self.reopens);
+        let recover = if self.run >= REOPEN_AT && due(self.last_reopen, period, now) {
             self.last_reopen = Some(now);
             self.run = 0;
+            self.reopens += 1;
             Some(Recover::Reopen)
-        } else if self.run >= REAPPLY_AT && due(self.last_reapply, RECOVER_EVERY, now) {
+        } else if self.run >= REAPPLY_AT && due(self.last_reapply, period, now) {
             self.last_reapply = Some(now);
             Some(Recover::Reapply)
         } else {
@@ -127,11 +153,17 @@ impl SendWatch {
     }
 
     /// A send went out: the failures of the outage it ends, when a
-    /// recovery was asked in it (the server logs that sends work again).
+    /// recovery was asked in it (the server logs that sends work again);
+    /// those not reported yet are taken with it.
     pub fn sent(&mut self) -> Option<u64> {
         self.run = 0;
+        self.reopens = 0;
         let outage = std::mem::take(&mut self.outage);
-        std::mem::take(&mut self.recovered).then_some(outage)
+        if !std::mem::take(&mut self.recovered) {
+            return None;
+        }
+        self.unreported = 0;
+        Some(outage)
     }
 }
 

@@ -186,11 +186,12 @@ impl Multicast {
 /// first beat at once. The socket's address picks the interface the
 /// multicasts leave by (Linux routes a multicast from a bound source
 /// address out of that address's interface). Every datagram received is
-/// counted in `requests` (the control socket's status). Ends only with an
-/// error receiving; a packet that cannot be sent is counted and the server
-/// goes on: failures are logged at most once a minute and, in a row,
-/// recovered from ([`sendwatch`]: the multicast interface named again, then
-/// the socket reopened on its address; dstack #340).
+/// counted in `requests` (the control socket's status). Ends with an error
+/// receiving, or when a reopen cannot bind the address again; a packet that
+/// cannot be sent is counted and the server goes on: failures are logged at
+/// most once a minute and, in a row, recovered from ([`sendwatch`]: the
+/// multicast interface named again, then the socket reopened on its
+/// address; dstack #340).
 pub async fn serve_info(
     sock: UdpSocket,
     mc: InfoBuilder,
@@ -237,7 +238,7 @@ pub(crate) async fn serve_info_by<S>(
 where
     S: AsyncFn(&UdpSocket, &[u8], SocketAddrV4) -> io::Result<usize>,
 {
-    let mut manager = Served::new(ctx.to.every);
+    let mut manager = Served::new(ctx.to.every, SendWatch::default());
     manager.start(&sock, &mut mc, ctx, send).await;
     loop {
         manager
@@ -278,7 +279,7 @@ struct Served {
 }
 
 impl Served {
-    fn new(period: Duration) -> Self {
+    fn new(period: Duration, watch: SendWatch) -> Self {
         let mut every = tokio::time::interval(period);
         every.set_missed_tick_behavior(MissedTickBehavior::Delay);
         let mut check = tokio::time::interval(limit::CHECK);
@@ -288,7 +289,7 @@ impl Served {
             members: share::Members::default(),
             bound: Limit::default(),
             unanswered: Unanswered::new(),
-            watch: SendWatch::default(),
+            watch,
             every,
             check,
         }
@@ -298,8 +299,9 @@ impl Served {
         u64::try_from(self.base.elapsed().as_nanos()).unwrap_or(u64::MAX)
     }
 
-    /// The board and the product info. A reopen they ask waits for the
-    /// loop's next failed send.
+    /// The board and the product info. They never ask a reopen: a new
+    /// watch's run reaches 2 at most here, and one carried over from a
+    /// reopen that fell back to a member was reset by its reopen (`run` 0).
     async fn start<S>(&mut self, sock: &UdpSocket, mc: &mut InfoBuilder, ctx: &Ctx, send: &S)
     where
         S: AsyncFn(&UdpSocket, &[u8], SocketAddrV4) -> io::Result<usize>,
@@ -438,7 +440,6 @@ impl Served {
             }
             Some(Recover::Reopen) => {
                 ctx.requests.info_send_recovered();
-                info!("info multicast sends keep failing: the info socket is reopened");
                 true
             }
         }
@@ -602,6 +603,8 @@ where
 {
     let port = share::share_port(ip);
     let at = SocketAddrV4::new(ip, REQUEST_PORT);
+    // The watch outlives a fall back to a member, so its periods hold.
+    let mut watch = SendWatch::default();
     loop {
         let mut sock = match own.take() {
             Some(own) => own,
@@ -628,20 +631,16 @@ where
             }
         };
         name_interface(&sock, ip);
-        let share = match UdpSocket::bind((Ipv4Addr::LOCALHOST, port)).await {
-            // A member may end while the manager sends to it.
-            Ok(s) => crate::winsock::no_connreset(&s).map(|()| Some(s))?,
-            Err(e) => {
-                warn!(error = %e, port, "the info manager's loopback port: no members can join");
-                None
-            }
-        };
-        let mut manager = Served::new(ctx.to.every);
+        let mut share = bind_share(port).await?;
+        let mut manager = Served::new(ctx.to.every, std::mem::take(&mut watch));
         manager.start(&sock, &mut mc, ctx, send).await;
         loop {
             manager
                 .serve(&sock, share.as_ref(), &mut mc, ctx, send)
                 .await?;
+            // The share port goes with the info port: a member that takes
+            // the info port in this moment becomes the manager and binds it.
+            drop(share.take());
             drop(sock);
             match UdpSocket::bind(at).await {
                 Ok(s) => {
@@ -649,15 +648,30 @@ where
                     info!("the info socket reopened after failed sends");
                     name_interface(&s, ip);
                     sock = s;
+                    share = bind_share(port).await?;
                 }
                 Err(e) => {
                     info!(
                         error = %e,
-                        "the info port was taken while it reopened: this device becomes a member"
+                        "the info port could not be bound again: this device waits as a member until it can"
                     );
+                    watch = std::mem::take(&mut manager.watch);
                     break;
                 }
             }
+        }
+    }
+}
+
+/// The manager's loopback share socket on `port`; `None` (a warning) when
+/// another holds it.
+async fn bind_share(port: u16) -> io::Result<Option<UdpSocket>> {
+    match UdpSocket::bind((Ipv4Addr::LOCALHOST, port)).await {
+        // A member may end while the manager sends to it.
+        Ok(s) => crate::winsock::no_connreset(&s).map(|()| Some(s)),
+        Err(e) => {
+            warn!(error = %e, port, "the info manager's loopback port: no members can join");
+            Ok(None)
         }
     }
 }

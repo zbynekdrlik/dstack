@@ -70,41 +70,75 @@ fn failures_in_a_row_ask_a_reapply_then_a_reopen() {
 }
 
 #[test]
-fn each_recovery_waits_its_minute_and_comes_again_while_failures_go_on() {
+fn the_recovery_period_doubles_with_each_reopen_up_to_an_hour() {
+    let periods: Vec<u64> = [0, 1, 2, 5, 6, 7, 31, 32, 40]
+        .iter()
+        .map(|&n| recover_period(n).as_secs())
+        .collect();
+    assert_eq!(periods, [60, 120, 240, 1920, 3600, 3600, 3600, 3600, 3600]);
+}
+
+#[test]
+fn each_recovery_waits_its_period_and_comes_again_while_failures_go_on() {
     let t0 = Instant::now();
     let mut w = SendWatch::default();
     for _ in 0..REOPEN_AT {
         w.failed(t0, &addr_not_avail());
     }
-    // Within the minute: the run grows again, nothing more is asked.
-    for k in 1..=30 {
+    // After the first reopen the period is two minutes: the run grows
+    // again, nothing more is asked before it, a minute included.
+    for k in 1..=119 {
         assert_eq!(
             w.failed(t0 + secs(k), &addr_not_avail()).recover,
             None,
-            "failure {k} after the reopen"
+            "failure {k} s after the reopen"
         );
     }
-    // A minute after the reopen: the run is past REOPEN_AT, a reopen again.
+    let at = t0 + recover_period(1);
     assert_eq!(
-        w.failed(t0 + secs(59), &addr_not_avail()).recover,
+        w.failed(at, &addr_not_avail()).recover,
+        Some(Recover::Reopen),
+        "at the period's end: the run is past REOPEN_AT"
+    );
+    // Two reopens: the period is four minutes for both kinds. The new
+    // run's reapply waits until four minutes after the last one (t0).
+    for _ in 0..REAPPLY_AT {
+        assert_eq!(w.failed(at, &addr_not_avail()).recover, None);
+    }
+    assert_eq!(
+        w.failed(t0 + secs(239), &addr_not_avail()).recover,
         None,
-        "not before the minute"
+        "not before four minutes"
     );
     assert_eq!(
-        w.failed(t0 + RECOVER_EVERY, &addr_not_avail()).recover,
-        Some(Recover::Reopen)
-    );
-    // The reopen started a new run: its third failure, a minute after the
-    // last reapply, asks a reapply again.
-    w.failed(t0 + RECOVER_EVERY, &addr_not_avail());
-    assert_eq!(
-        w.failed(t0 + RECOVER_EVERY, &addr_not_avail()).recover,
-        None
-    );
-    assert_eq!(
-        w.failed(t0 + RECOVER_EVERY, &addr_not_avail()).recover,
+        w.failed(t0 + recover_period(2), &addr_not_avail()).recover,
         Some(Recover::Reapply)
     );
+    // And the reopen four minutes after the last reopen.
+    for _ in 0..REOPEN_AT {
+        assert_eq!(w.failed(at + secs(239), &addr_not_avail()).recover, None);
+    }
+    assert_eq!(
+        w.failed(at + recover_period(2), &addr_not_avail()).recover,
+        Some(Recover::Reopen)
+    );
+}
+
+#[test]
+fn a_send_that_goes_out_starts_the_period_again() {
+    let t0 = Instant::now();
+    let mut w = SendWatch::default();
+    for _ in 0..REOPEN_AT {
+        w.failed(t0, &addr_not_avail());
+    }
+    assert!(w.sent().is_some());
+    // A new outage a minute later: the minute period again, not two.
+    let at = t0 + RECOVER_EVERY;
+    let asked: Vec<Option<Recover>> = (0..REOPEN_AT)
+        .map(|_| w.failed(at, &addr_not_avail()).recover)
+        .collect();
+    assert_eq!(asked[REAPPLY_AT as usize - 1], Some(Recover::Reapply));
+    assert_eq!(asked[REOPEN_AT as usize - 1], Some(Recover::Reopen));
 }
 
 #[test]
@@ -123,6 +157,9 @@ fn a_send_that_goes_out_ends_the_run() {
         Some(Recover::Reapply),
         "the third in a row"
     );
+    // The first outage's unreported failure waits for the minute's report,
+    // with this outage's three.
+    assert_eq!(w.flush(t0 + REPORT_EVERY).unwrap().failures, 4);
 }
 
 #[test]
@@ -135,6 +172,11 @@ fn a_send_that_goes_out_after_recoveries_names_the_outage() {
     }
     assert_eq!(w.sent(), Some(u64::from(REOPEN_AT + 2)));
     assert_eq!(w.sent(), None, "once");
+    assert_eq!(
+        w.flush(t0 + REPORT_EVERY),
+        None,
+        "the end of the outage took the failures not reported"
+    );
     // An outage with one reapply.
     for _ in 0..REAPPLY_AT {
         w.failed(t0 + RECOVER_EVERY, &addr_not_avail());

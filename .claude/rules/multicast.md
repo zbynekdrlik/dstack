@@ -8,6 +8,9 @@ paths:
   - "crates/dstack/src/media/rx/rejoin.rs"
   - "crates/dstack/src/media/rx/socket.rs"
   - "crates/dstack/src/info/client.rs"
+  - "crates/dstack/src/info/server.rs"
+  - "crates/dstack/src/info/sendwatch.rs"
+  - "crates/dstack/src/info/sendwatch/**"
 ---
 
 # Multicast sockets and their group membership
@@ -17,3 +20,4 @@ paths:
 - **Known limit:** a same-index re-add between two 2 s reads is not seen. Windows lists an address again only once its duplicate-address check is done (`if_addrs` 0.15 filters on `IpDadStatePreferred`).
 - **A bit mask built in a fresh accumulator from distinct bits:** sum the bits (`.map(|s| 1u64 << s).sum()`), not `|=`: the `|=` to `^=` mutant gives the same mask and cannot be killed (`media/rx/rejoin.rs`). Merging that mask into another one with `|=` is fine when a test makes the two overlap (a plan change and a rejoin in one pass).
 - **A wildcard or group-bound listener and other interfaces' traffic** (#289, `discover::senders::Meter`): Linux hands a socket bound to the group address every membership of the HOST (another socket's join on the LAN too) unless `IP_MULTICAST_ALL` is off (`socket2::SockRef::set_multicast_all_v4(false)`, Linux only). Windows delivers by the socket's own membership: a `0.0.0.0:5353` socket joined on the Dante address only heard Dante-subnet sources for 20 s on a two-leg PC (14.11.2026). `discover::group_listener` itself does not turn it off (a Discovery may hear the LAN's mDNS on Linux).
+- **A multicast SEND can fail for hours while unicast works** (#340, dsg 15.-16.11.2026: every info/heartbeat send WSAEADDRNOTAVAIL 10049 for ~24 h after a reboot; a new socket did not clear it, an adapter restart did; cause inside Windows unproven). A long-lived sender never logs per packet: it feeds each result to a pure watch (`info::sendwatch::SendWatch`: at most one line a minute with the count, even when failures and sends alternate; reapply `IP_MULTICAST_IF` after 3 in a row, reopen after 10, each kind at most once a period that doubles per reopen up to an hour; a reopen frees the share port with the info port so a member that takes it can serve) and counts it in the status (`info_send_errors`, `info_send_recoveries`). `IP_MULTICAST_IF` by interface index on Windows is the address `0.0.0.<index>` (`sendwatch::index_form`). Test the wiring with an injected `AsyncFn` send that fails with `io::Error::from_raw_os_error(10049)` (`info/tests/send_failures.rs`); on Linux a real send to 255.255.255.255 without `SO_BROADCAST` fails every time (EACCES; WSAEACCES 10013 on Windows). A port taken during a reopen is simulated with `SO_REUSEPORT` on both sockets (unix only): the plain rebind is refused. The wiring tests serve on 127.0.34.1 and .2 (their 8700 and share ports 19213/19214 must be free on the box).
