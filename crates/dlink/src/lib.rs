@@ -722,6 +722,42 @@ impl Link {
         )
     }
 
+    /// [`Link::start`] whose RX channels `map.rx` reach the app through
+    /// the bridge `fifo` (dstack #307).
+    pub fn start_pulling<P: Process + 'static>(
+        config: &Config,
+        place: &Place,
+        map: Map,
+        processor: P,
+        fifo: Arc<bridge::Fifo>,
+    ) -> Result<(Link, bridge::RxPull), HostError> {
+        Self::start_pulling_on(
+            config,
+            place,
+            map,
+            processor,
+            fifo,
+            config.clock(ClockSource::Linked),
+        )
+    }
+
+    /// [`Link::start_pulling`] on the clock `source` (as [`Link::start_on`]).
+    pub fn start_pulling_on<P: Process + 'static>(
+        config: &Config,
+        place: &Place,
+        map: Map,
+        processor: P,
+        fifo: Arc<bridge::Fifo>,
+        source: ClockSource,
+    ) -> Result<(Link, bridge::RxPull), HostError> {
+        let feed = PushInputs {
+            inner: processor,
+            fifo: Arc::clone(&fifo),
+        };
+        let link = Self::start_on(config, place, map, feed, source)?;
+        Ok((link, bridge::RxPull::new(fifo)))
+    }
+
     /// [`Link::start`] that waits for an address or interface not there
     /// yet (the network still coming up at boot or logon, dstack #225,
     /// #230) until `stop` is set: it looks the place up every second and
@@ -875,6 +911,22 @@ impl Link {
 }
 
 pub use dstack::host::ClockSource as Clock;
+
+/// The app's processor, then the block's inputs into the bridge FIFO.
+struct PushInputs<P> {
+    inner: P,
+    fifo: Arc<bridge::Fifo>,
+}
+
+impl<P: Process> Process for PushInputs<P> {
+    fn process(&mut self, block: &mut Block<'_>) {
+        self.inner.process(block);
+        let block = &*block;
+        self.fifo.push_with(block.frames(), |f, c| {
+            block.input(c).get(f).copied().unwrap_or(0.0)
+        });
+    }
+}
 
 #[cfg(test)]
 mod tests;
