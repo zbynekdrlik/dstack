@@ -13,6 +13,7 @@ use crate::subscribe::Manager;
 
 use crate::wire::tests::Rng;
 
+mod conformance;
 mod unanswered;
 
 const TEST_DEVICE: &str = include_str!("../../../../config/test-device.toml");
