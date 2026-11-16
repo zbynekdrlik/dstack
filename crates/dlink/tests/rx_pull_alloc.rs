@@ -87,7 +87,8 @@ fn a_pull_allocates_nothing() {
         Arc::clone(&fifo),
         P,
         RATE,
-    );
+    )
+    .expect("the pull");
     let sender = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let stats = pull.stats();
     let mut out = vec![0.0f64; 2 * 4096];

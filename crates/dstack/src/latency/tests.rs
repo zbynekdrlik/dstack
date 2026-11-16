@@ -390,3 +390,65 @@ fn one_read_hands_on_a_heartbeat_and_ends_only_on_a_failure_or_no_receiver() {
     assert!(hand_on(Ok((4, from)), &beat, &tx));
     assert!(!hand_on(Ok((beat.len(), from)), &beat, &tx));
 }
+
+#[test]
+fn a_heartbeat_whose_peaks_need_padding_still_reads_its_latency() {
+    // dstack #345: two RX channels (dlisten) give a peaks record of 26
+    // bytes, padded to 28. A reader walks by the record's length, so the
+    // length must count the padding, as the hardware's does (an UltimoX2
+    // with 0 TX + 2 RX channels writes 0x8002 with length 28).
+    for (tx, rx) in [(0usize, 2usize), (2, 0), (1, 0), (3, 0), (32, 54)] {
+        let mut lateness = [0u32; crate::arc::MAX_FLOWS as usize];
+        lateness[0] = 77;
+        let body = heartbeat_body(
+            1,
+            &Records {
+                freq_ppb: 0,
+                tx_peaks: vec![5; tx],
+                rx_peaks: vec![6; rx],
+                rate: 96_000,
+                lateness,
+                late: std::array::from_fn(|slot| slot as u32),
+            },
+        );
+        // Every record's length lands on the next record, and the last on
+        // the end of the body.
+        let mut at = 0;
+        while at < body.len() {
+            let len = usize::from(u16::from_be_bytes([body[at], body[at + 1]]));
+            assert_eq!(len % 4, 0, "{tx}+{rx}: a record of {len} bytes at {at}");
+            at += len;
+        }
+        assert_eq!(at, body.len(), "{tx}+{rx}");
+        let beat = parse(&datagram(&body)).expect("a heartbeat");
+        assert_eq!(
+            beat.lateness,
+            Some((96_000, lateness.to_vec())),
+            "{tx}+{rx}"
+        );
+        assert_eq!(beat.late.map(|l| l.len()), Some(32), "{tx}+{rx}");
+    }
+}
+
+#[test]
+fn our_peaks_record_head_is_the_hardware_s_for_the_same_channels() {
+    // dstack #345: an UltimoX2 with 0 TX + 2 RX channels starts its peaks
+    // record `00 1c 80 02 00 04 00 10`: both lengths count the 2 bytes of
+    // padding (28 = 12 + 12 + 2 + 2, 16 = 12 + 2 + 2).
+    let body = heartbeat_body(
+        1,
+        &Records {
+            freq_ppb: 0,
+            tx_peaks: Vec::new(),
+            rx_peaks: vec![0x34, 0x35],
+            rate: 96_000,
+            lateness: [0; crate::arc::MAX_FLOWS as usize],
+            late: [0; crate::arc::MAX_FLOWS as usize],
+        },
+    );
+    assert_eq!(
+        body[16..24],
+        [0x00, 0x1c, 0x80, 0x02, 0x00, 0x04, 0x00, 0x10]
+    );
+    assert_eq!(body[16 + 24..16 + 28], [0x34, 0x35, 0x00, 0x00]);
+}

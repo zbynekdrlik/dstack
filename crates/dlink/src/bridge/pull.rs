@@ -68,6 +68,9 @@ use dstack::stream::to_f64;
 
 use super::Fifo;
 
+mod shared;
+pub use shared::SharedPull;
+
 /// The most frames one pull reads (and its scratch holds a channel) for a
 /// FIFO of `capacity` frames: the FIFO's capacity, and at most half a
 /// ring ([`SLOTS`]), so a read never reaches positions the ring's writer
@@ -250,8 +253,11 @@ impl RxPull {
     /// `rate`, writing them through `intake` (the rings' one writer), P
     /// `playout` samples until the device publishes its own. Allocates its
     /// scratch here. An app gets one from [`crate::Link::start_pulling`];
-    /// this builds one over an RX side the caller runs itself (the
-    /// allocation test, `tests/rx_pull_alloc.rs`).
+    /// this builds one over an RX side the caller runs itself (dasio's
+    /// bridge, the allocation test `tests/rx_pull_alloc.rs`). Refused
+    /// ([`check`]) when the FIFO has not one channel per entry of
+    /// `channels` (the read would index past its scratch on the consumer's
+    /// thread) or an entry is past the device's RX channels.
     pub fn new(
         intake: Intake,
         clock: Arc<dyn PtpClock>,
@@ -260,9 +266,10 @@ impl RxPull {
         fifo: Arc<Fifo>,
         playout: u64,
         rate: u32,
-    ) -> Self {
+    ) -> Result<Self, String> {
+        check(&channels, rx.rings().len(), fifo.channels())?;
         let span = reach(fifo.capacity());
-        RxPull {
+        Ok(RxPull {
             scratch: vec![0; channels.len() * span],
             span,
             intake,
@@ -274,12 +281,24 @@ impl RxPull {
             playout,
             rate,
             stats: Arc::default(),
-        }
+        })
     }
 
     /// The counts, for a status thread.
     pub fn stats(&self) -> Arc<PullStats> {
         Arc::clone(&self.stats)
+    }
+
+    /// The bridge FIFO it writes (an owner of the FIFO checks it is its
+    /// own: dstack-asio's `Bridge::pull_to_asio`).
+    pub fn fifo(&self) -> &Arc<Fifo> {
+        &self.fifo
+    }
+
+    /// The RX channels it reads, FIFO channel `i` from RX channel
+    /// `channels()[i]` (as many as the FIFO's channels: [`RxPull::new`]).
+    pub fn channels(&self) -> &[usize] {
+        &self.channels
     }
 
     /// Drains the flow sockets into the rings and brings the FIFO up to
