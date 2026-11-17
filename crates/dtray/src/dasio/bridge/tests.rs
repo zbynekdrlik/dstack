@@ -53,6 +53,7 @@ fn bridge() -> Bridge {
         app_buffer_ns: Some(5_000_000),
         to_asio_app_buffer_ns: None,
         from_asio_app_buffer_ns: None,
+        converter_taps: None,
     }
 }
 
@@ -74,6 +75,7 @@ fn a_bridge_instance_s_file_reads_with_its_table() {
             app_buffer_ns: None,
             to_asio_app_buffer_ns: None,
             from_asio_app_buffer_ns: None,
+            converter_taps: None,
         })
     );
 }
@@ -291,6 +293,7 @@ fn every_value_dasio_refuses_is_named() {
         app_buffer_ns: Some(MIN_APP_BUFFER_NS - 1),
         to_asio_app_buffer_ns: None,
         from_asio_app_buffer_ns: None,
+        converter_taps: None,
     };
     let p = b.problems(5, 2);
     assert_eq!(
@@ -317,6 +320,7 @@ fn every_value_dasio_refuses_is_named() {
         app_buffer_ns: None,
         to_asio_app_buffer_ns: None,
         from_asio_app_buffer_ns: None,
+        converter_taps: None,
     };
     assert_eq!(none.problems(0, 0), ["the bridge carries no channel"]);
 }
@@ -602,6 +606,7 @@ fn a_changed_per_direction_target_is_written() {
     let new = Bridge {
         to_asio_app_buffer_ns: Some(1_500_000),
         from_asio_app_buffer_ns: None,
+        converter_taps: None,
         ..old.clone()
     };
     let mut doc: toml_edit::DocumentMut = text.parse().expect("toml");
@@ -611,4 +616,69 @@ fn a_changed_per_direction_target_is_written() {
     assert!(!out.contains("from_asio_app_buffer_ns"), "{out}");
     let back = Fields::read(&out).expect("reads").bridge.expect("a bridge");
     assert_eq!(back, new);
+}
+
+/// dstack #387 (dasio, 17.11.2026): dasio's `[bridge] converter_taps`
+/// (dstack-asio's `Spec::converter_taps`, v0.6.174) reads, its range and
+/// step are dstack-asio's (32-256 in steps of 8), and an edit of the
+/// window keeps it (the window has no control for it).
+#[test]
+fn the_converter_length_reads_is_checked_and_stays() {
+    let table = "[bridge]\ndriver = \"Test ASIO\"\nto_asio = [1, 2, 3, 4]\nfrom_asio = [5, 6]\nconverter_taps = 48\n";
+    let text = format!("{DAW}\n{table}");
+    let b = Fields::read(&text)
+        .expect("a bridge with a converter length reads")
+        .bridge
+        .expect("a bridge");
+    assert!(b.problems(4, 2).is_empty(), "{:?}", b.problems(4, 2));
+    for (taps, problems) in [(32, 0), (256, 0), (31, 1), (33, 1), (264, 1), (0, 1)] {
+        let t = text.replace("= 48", &format!("= {taps}"));
+        let b = Fields::read(&t).expect("reads").bridge.expect("a bridge");
+        assert_eq!(
+            b.problems(4, 2).len(),
+            problems,
+            "{taps}: {:?}",
+            b.problems(4, 2)
+        );
+    }
+    let edited = from_texts("Test ASIO", "1, 2, 3, 4", "5, 6", "5").expect("texts");
+    let kept = keep_unedited(&b, edited);
+    let mut doc: toml_edit::DocumentMut = text.parse().expect("toml");
+    write(&mut doc, &b, &kept).expect("written");
+    assert!(doc.to_string().contains("converter_taps = 48"), "{doc}");
+    let changed = Bridge {
+        converter_taps: Some(32),
+        ..kept.clone()
+    };
+    write(&mut doc, &kept, &changed).expect("written");
+    assert!(doc.to_string().contains("converter_taps = 32"), "{doc}");
+}
+
+/// dtray's copy of the shortest converter is dstack-asio's (that crate
+/// builds on Windows only).
+#[cfg(windows)]
+#[test]
+fn the_shortest_converter_is_dstack_asio_s() {
+    assert_eq!(MIN_CONVERTER_TAPS, dstack_asio::bridge::MIN_CONVERTER_TAPS);
+    assert_eq!(
+        dstack_resample::TAPS as u32,
+        dstack_asio::bridge::MAX_CONVERTER_TAPS
+    );
+}
+
+/// dstack #387: the keys the window has no control for are shown in the
+/// note beside the app buffer; with none set it says what empty means.
+#[test]
+fn the_note_shows_the_file_only_keys() {
+    let mut b = bridge();
+    b.to_asio_app_buffer_ns = None;
+    b.from_asio_app_buffer_ns = None;
+    b.converter_taps = None;
+    assert_eq!(note_text(&b), DEFAULT_NOTE);
+    b.converter_taps = Some(48);
+    assert_eq!(note_text(&b), "file: 48 taps");
+    b.to_asio_app_buffer_ns = Some(1_333_333);
+    assert_eq!(note_text(&b), "file: to 1.333333 ms, 48 taps");
+    b.from_asio_app_buffer_ns = Some(2_000_000);
+    assert_eq!(note_text(&b), "file: to 1.333333 ms, from 2 ms, 48 taps");
 }
