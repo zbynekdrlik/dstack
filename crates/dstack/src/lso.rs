@@ -40,9 +40,14 @@ pub fn verdict(v2: Option<&str>, v1: Option<&str>) -> Verdict {
 /// `DriverVersion` show them) measured with a 20 to 30 ms receive DPC that
 /// held every send completion about every 96 to 130 s: late packets at a
 /// receiver and failed sends (dasio#1, the FOH PC, 2.11.2026; RTL8125).
+/// Measured on the [`MEASURED_FAMILY`] only (dstack #383).
 pub const REALTEK_BAD: [&str; 2] = ["10.79.20.1003", "10.72.524.2024"];
 /// Realtek driver versions measured clean on the same PCs.
 pub const REALTEK_GOOD: [&str; 1] = ["10.39.212.2020"];
+/// The adapter family both lists were measured on, as its `DriverDesc`
+/// names it ("Realtek Gaming 2.5GbE Family Controller"): the same version
+/// on the 1 GbE family measured clean (dsg, 17.11.2026; dstack #383).
+pub const MEASURED_FAMILY: &str = "2.5gbe";
 
 /// What the start line says about the NIC's driver.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,8 +73,8 @@ pub fn virtual_adapter(description: Option<&str>) -> bool {
     description.is_some_and(|d| d.to_ascii_lowercase().contains("virtual adapter"))
 }
 
-/// The verdict on an adapter's driver from its `ProviderName` and
-/// `DriverVersion` (the network class key's values).
+/// The verdict on a [`MEASURED_FAMILY`] adapter's driver from its
+/// `ProviderName` and `DriverVersion` (the network class key's values).
 pub fn driver(provider: Option<&str>, version: Option<&str>) -> Driver {
     let realtek = provider.is_some_and(|p| p.to_ascii_lowercase().contains("realtek"));
     match version.map(str::trim) {
@@ -77,6 +82,22 @@ pub fn driver(provider: Option<&str>, version: Option<&str>) -> Driver {
         Some(v) if realtek && REALTEK_GOOD.contains(&v) => Driver::KnownGood,
         Some(_) if realtek => Driver::Unverified,
         _ => Driver::Other,
+    }
+}
+
+/// The verdict on an adapter's driver from its `ProviderName`,
+/// `DriverVersion` and `DriverDesc` (dstack #383): [`driver`] on the
+/// [`MEASURED_FAMILY`]; on another family, or one not read, a measured
+/// version is only unverified.
+pub fn driver_of(
+    provider: Option<&str>,
+    version: Option<&str>,
+    description: Option<&str>,
+) -> Driver {
+    let measured = description.is_some_and(|d| d.to_ascii_lowercase().contains(MEASURED_FAMILY));
+    match driver(provider, version) {
+        Driver::KnownBad | Driver::KnownGood if !measured => Driver::Unverified,
+        v => v,
     }
 }
 

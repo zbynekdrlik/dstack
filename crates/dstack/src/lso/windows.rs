@@ -4,7 +4,7 @@
 
 use tracing::{info, warn};
 
-use super::{Driver, REALTEK_GOOD, Verdict, driver, verdict, virtual_adapter};
+use super::{Driver, MEASURED_FAMILY, REALTEK_GOOD, Verdict, driver_of, verdict, virtual_adapter};
 
 /// The verdict for the adapter whose GUID is `adapter` (`{...}`).
 pub fn check(adapter: &str) -> Verdict {
@@ -19,7 +19,10 @@ pub fn check(adapter: &str) -> Verdict {
 pub fn check_driver(adapter: &str) -> (Driver, Option<String>) {
     match sys::adapter_values(adapter, &["ProviderName", "DriverVersion", "DriverDesc"]) {
         Some(v) if virtual_adapter(v[2].as_deref()) => (Driver::Virtual, v[1].clone()),
-        Some(v) => (driver(v[0].as_deref(), v[1].as_deref()), v[1].clone()),
+        Some(v) => (
+            driver_of(v[0].as_deref(), v[1].as_deref(), v[2].as_deref()),
+            v[1].clone(),
+        ),
         None => (Driver::Other, None),
     }
 }
@@ -32,7 +35,8 @@ pub fn report(adapter: &str) {
         (Driver::KnownBad, v) => warn!(
             version = v.as_deref().unwrap_or(""),
             good = %good,
-            "the Dante NIC's Realtek driver was measured with a 20-30 ms receive DPC every ~100 s: late packets at receivers and failed sends; install a measured-good driver (docs/windows-box.md)"
+            family = MEASURED_FAMILY,
+            "the Dante NIC's Realtek driver was measured with a 20-30 ms receive DPC every ~100 s on this adapter family: late packets at receivers and failed sends; install a measured-good driver (docs/windows-box.md)"
         ),
         (Driver::KnownGood, v) => info!(
             version = v.as_deref().unwrap_or(""),
@@ -41,7 +45,7 @@ pub fn report(adapter: &str) {
         (Driver::Unverified, v) => info!(
             version = v.as_deref().unwrap_or(""),
             good = %good,
-            "the Dante NIC's Realtek driver was never measured (docs/windows-box.md)"
+            "the Dante NIC's Realtek driver was never measured on this adapter family (docs/windows-box.md)"
         ),
         (Driver::Virtual, v) => info!(
             version = v.as_deref().unwrap_or(""),
