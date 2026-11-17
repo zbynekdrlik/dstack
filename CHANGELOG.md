@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.173
 
 - **Feature (#386, dasio#120): dstack-asio bins the driver callback's lateness under two periods, and names it at each underrun.** A callback counted `late` only past a gap of two periods (more than 1.333 ms late at 128 @ 96 kHz), while the from-ASIO side loses audio from 1.0-1.5 ms late at a 1.333 ms target (#382's measurement): dasio saw from-ASIO underruns with `late_callbacks` 0.
   - **Lateness bins:** each buffer switch 0.25 ms late or more, up to a gap of two periods, counts in one of eight 0.25 ms bins of its lateness (gap less the period): 0.25-0.5, 0.5-0.75, ..., 1.75-2.0 ms, and 2.0 ms or more. Past two periods it counts in `late_callbacks` only, as before (no switch counted twice); under 0.25 ms in none. Decided by the pure `state::lateness_bin(gap_ns, period_ns)`; counted per run like `late_callbacks` (`engine::Counters::late_bins`, `DeviceEvents::late_bins`, `runner::Status::late_bins`, a `[u64; 8]`).
