@@ -127,6 +127,16 @@ pub struct DeviceConfig {
     /// Accepted and ignored on Linux, whose wait never spins.
     #[serde(default)]
     pub spin_escape_ms: Option<u64>,
+    /// Windows, the low-latency profile (dstack #351), off when left out:
+    /// no yield in the last 500 µs before a deadline (a pause there, so a
+    /// lower-priority thread such as Defender cannot keep the CPU past the
+    /// due time), with a give at least every 10 ms so per-CPU system work
+    /// still runs. Off: the spin yields on every turn (the v0.6.157 wait).
+    /// Opt-in until its non-production soak passes. Process-wide: the last
+    /// device set wins. Accepted and ignored on Linux, whose wait never
+    /// spins.
+    #[serde(default)]
+    pub spin_no_yield_tail: bool,
     /// The most frames per packet our TX channels offer (mDNS `fpp`, a
     /// receiver asks for at most this, a request for more is refused):
     /// [`FPP_MIN`] to [`FPP_MAX`], [`FPP_MAX`] when left out. The IEM card
@@ -1328,6 +1338,7 @@ const CONFIG_KEYS: &[&str] = &[
     "tx_margin_ns",
     "spin_tail_ns",
     "spin_escape_ms",
+    "spin_no_yield_tail",
     "tx_fpp_max",
     "arc_rx_fpp",
     "pump_cpu",

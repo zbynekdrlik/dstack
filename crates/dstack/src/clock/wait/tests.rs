@@ -63,14 +63,14 @@ impl WaitOs for Fake {
     }
 }
 
-/// A plan with no no-yield tail and no cap: the spin and the escape alone.
+/// A plan with no guard (the device's `spin_no_yield_tail` off, dstack
+/// #351): the spin and the escape alone.
 fn plan(spin_tail_ns: i64, escape: bool) -> Plan {
     Plan {
         spin_tail_ns,
         escape,
         escape_block_ns: 500_000,
-        no_yield_ns: 0,
-        give_cap_ns: i64::MAX,
+        guard: guard_of(false),
         give_on_timer: false,
     }
 }

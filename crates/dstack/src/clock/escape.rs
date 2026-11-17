@@ -118,6 +118,21 @@ pub fn spin_escape_line(configured_ms: Option<u64>, os: Os) -> Option<String> {
     })
 }
 
+/// The start line for a device's `spin_no_yield_tail` on `os` (dstack
+/// #351): `None` when off (the default).
+pub fn no_yield_tail_line(on: bool, os: Os) -> Option<String> {
+    on.then(|| match os {
+        Os::Windows => {
+            "the low-latency spin's no-yield tail is on (dstack #351, opt-in): no yield in \
+                        the last 500 µs before a due time, a give at least every 10 ms"
+                .to_string()
+        }
+        Os::Other => {
+            "spin_no_yield_tail = true is for Windows only: ignored on this OS".to_string()
+        }
+    })
+}
+
 /// A media thread's bounded escape: when its last escape was, and, for a
 /// thread that hands its work over first (TX, [`EscapeState::ask`]), whether its
 /// next wait escapes. Kept per thread.

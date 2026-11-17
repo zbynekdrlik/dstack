@@ -904,6 +904,33 @@ fn the_spin_escape_line_names_the_mode_on_windows_and_says_ignored_elsewhere() {
     );
 }
 
+/// dstack #351: the no-yield tail is opt-in: the process starts with it
+/// off and keeps what a device set (set here off Windows only, where no
+/// wait reads it; the Windows tests' waits do), and its start line names
+/// it on Windows and says ignored elsewhere, only when on.
+#[test]
+fn the_no_yield_tail_starts_off_and_its_line_names_it_only_when_on() {
+    assert!(!no_yield_tail_on());
+    #[cfg(not(windows))]
+    {
+        set_spin_no_yield_tail(true);
+        assert!(no_yield_tail_on());
+        set_spin_no_yield_tail(false);
+        assert!(!no_yield_tail_on());
+    }
+    assert_eq!(no_yield_tail_line(false, Os::Windows), None);
+    assert_eq!(no_yield_tail_line(false, Os::Other), None);
+    assert_eq!(
+        no_yield_tail_line(true, Os::Windows).unwrap(),
+        "the low-latency spin's no-yield tail is on (dstack #351, opt-in): no yield in \
+         the last 500 µs before a due time, a give at least every 10 ms"
+    );
+    assert_eq!(
+        no_yield_tail_line(true, Os::Other).unwrap(),
+        "spin_no_yield_tail = true is for Windows only: ignored on this OS"
+    );
+}
+
 /// TX's relay thread (dstack #141) never escapes: it asks nothing, is
 /// never armed, and its waits never block, however long it runs.
 #[test]

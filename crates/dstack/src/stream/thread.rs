@@ -63,8 +63,11 @@ fn run<P: Process>(clock: &dyn PtpClock, mut pump: Pump<P>, stop: &AtomicBool) {
     // W absorbs the timer's late wake, else a yield.
     #[cfg(any(target_os = "linux", windows))]
     crate::clock::give_on_timer(crate::clock::pump_gives_on_timer(pump.timing.margin, rate));
+    // Named only with the no-yield tail on (the device's
+    // `spin_no_yield_tail`): off, the spin has no capped give.
     #[cfg(windows)]
-    if let crate::clock::WaitMode::Spin = crate::clock::wait_mode() {
+    if crate::clock::wait_mode() == crate::clock::WaitMode::Spin && crate::clock::no_yield_tail_on()
+    {
         tracing::info!("{}", crate::clock::pump_give_line(pump.timing.margin, rate));
     }
     if let Some(line) = crate::clock::pump_escape_line(

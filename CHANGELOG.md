@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- **Change (#351): the #351 tail is now opt-in, default off (= v0.6.157's wait).** v0.6.158's no-yield tail (no SwitchToThread in the last 500 µs before a due time, a give at least every 10 ms) waits for its non-production soak, and every release since carried it. Now a device turns it on with the new key `spin_no_yield_tail = true` (Windows, the low-latency profile; process-wide, the last device set wins; accepted and ignored on Linux); left out it is off and the spin yields on every turn with no give cap, the same turns as v0.6.157. On Windows a device with it on logs `the low-latency spin's no-yield tail is on (dstack #351, opt-in) ...` at start, and the engine pump names its capped give (`the engine pump's capped give (dstack #351) is a yield|timer wait ...`) only then.
+  - **dasio may move past v0.6.157 without the soak**: with the key left out its wait is v0.6.157's.
+  - **The soak runs with the switch on** (`spin_no_yield_tail = true` in the soak device's config); a pass flips the default.
+  - API (additive): `DeviceConfig::spin_no_yield_tail` (`bool`, serde default false), `clock::set_spin_no_yield_tail`, `clock::no_yield_tail_on`, `clock::no_yield_tail_line`. **Migration: a full `DeviceConfig` struct literal (iemmixer's `crates/iem-engine/tests/dante_loopback.rs`) needs `spin_no_yield_tail: false`** (or `..` from a parsed config).
+  - **No latency change.**
+
 ## 0.6.164
 
 - **Tests (#366): dstack's own tests no longer multicast onto a site's network.** dev1's whole-device tests ran their devices on the box's routed address (its LAN leg), so each test binary announced mDNS there (measured: `system_clock` 780 datagrams in its 22 s, about 35/s; `embed` 73 in 1.3 s; `heartbeat_walk` 61 in 2.6 s) and sent its info and heartbeat multicasts with it; dasio found dev1 among the top mDNS senders on the FOH PC's Dante leg in the minutes its NIC stalled sends (dasio#127). Now:

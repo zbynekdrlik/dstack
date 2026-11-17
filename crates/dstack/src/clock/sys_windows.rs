@@ -156,7 +156,13 @@ impl Drop for Timer {
 /// Sleeps until [`monotonic_ns`] reaches `target`: the timer for all but
 /// the last spin tail (`super::SPIN_TAIL`), then a spin.
 pub fn sleep_until_monotonic(target: i64) {
-    sleep_until_in(target, monotonic_ns, super::wait_mode(), escape_period());
+    sleep_until_in(
+        target,
+        monotonic_ns,
+        super::wait_mode(),
+        escape_period(),
+        super::no_yield_tail_on(),
+    );
 }
 
 /// Sleeps until the app's clock ([`app_monotonic_ns`], raw QPC) reaches
@@ -168,6 +174,7 @@ pub fn sleep_until_app(target: i64) {
         app_monotonic_ns,
         super::wait_mode(),
         escape_period(),
+        super::no_yield_tail_on(),
     );
 }
 
@@ -336,8 +343,9 @@ impl super::wait::WaitOs for Os {
         // (Sleep(0) is no shelter: on windows-2025 a lower-priority thread
         // ran 21 million turns in 0.3 s of a Sleep(0) spin, and the waits
         // went 3 ms late), and its block once a period lets lower
-        // priorities run. Which turn is `wait::until`'s decision: since
-        // dstack #351 no yield in the last `wait::NO_YIELD_NS` (Defender kept
+        // priorities run. Which turn is `wait::until`'s decision: with the
+        // device's `spin_no_yield_tail` (dstack #351, opt-in, off by
+        // default) no yield in the last `wait::NO_YIELD_NS` (Defender kept
         // dsg's pump's CPU 1.4 ms after a late yield), with a give at least
         // every `wait::GIVE_CAP_NS` so lower priorities still run.
         match turn {
@@ -354,8 +362,16 @@ thread_local! {
 }
 
 /// A wait until the clock `now` reaches `target` in the wait `mode`, with a
-/// bounded escape every `escape_ns` (0: none; the spin wait only).
-fn sleep_until_in(target: i64, now: fn() -> i64, mode: super::WaitMode, escape_ns: u64) {
+/// bounded escape every `escape_ns` (0: none; the spin wait only), and the
+/// no-yield tail when `no_yield_tail` (dstack #351, the device's
+/// `spin_no_yield_tail`; off: the v0.6.157 wait).
+fn sleep_until_in(
+    target: i64,
+    now: fn() -> i64,
+    mode: super::WaitMode,
+    escape_ns: u64,
+    no_yield_tail: bool,
+) {
     // The bounded escape (dstack #1, `spin_escape_ms`): once a period the
     // thread blocks one timer tick, whatever its deadline. The timer's
     // expiry preempts a lower priority at once, so per-CPU system work
@@ -375,8 +391,7 @@ fn sleep_until_in(target: i64, now: fn() -> i64, mode: super::WaitMode, escape_n
             spin_tail_ns: spin,
             escape,
             escape_block_ns: super::ESCAPE_BLOCK_NS as i64,
-            no_yield_ns: super::wait::NO_YIELD_NS,
-            give_cap_ns: super::wait::GIVE_CAP_NS,
+            guard: super::wait::guard_of(no_yield_tail),
             give_on_timer: TIMER_GIVE.with(|t| t.get()),
         },
         &mut gives,
@@ -463,7 +478,13 @@ mod tests {
         let mut late: Vec<i64> = (0..200)
             .map(|_| {
                 let target = monotonic_ns() + 1_000_000;
-                sleep_until_in(target, monotonic_ns, super::super::WaitMode::Timer, 0);
+                sleep_until_in(
+                    target,
+                    monotonic_ns,
+                    super::super::WaitMode::Timer,
+                    0,
+                    false,
+                );
                 monotonic_ns() - target
             })
             .collect();
@@ -488,7 +509,7 @@ mod tests {
             let mut late: Vec<i64> = (0..100)
                 .map(|_| {
                     let target = app_monotonic_ns() + 1_000_000;
-                    sleep_until_in(target, app_monotonic_ns, mode, 0);
+                    sleep_until_in(target, app_monotonic_ns, mode, 0, false);
                     app_monotonic_ns() - target
                 })
                 .collect();
@@ -515,29 +536,36 @@ mod tests {
     /// per-CPU system work that must run on exactly those CPUs never ran
     /// (the same freeze as v0.6.28's Sleep(0)); in v0.6.34 unpinned
     /// spinners starved dasio's runner. A spun wait, pinned or not, lets a
-    /// lower-priority thread on its CPU run.
+    /// lower-priority thread on its CPU run: with the no-yield tail off (a
+    /// yield every turn) and on (dstack #351: the capped give).
     #[test]
     fn a_spun_wait_lets_a_lower_priority_thread_on_its_cpu_run() {
-        let ((), ran) = beside_a_busy_lower_thread(|| {
-            for _ in 0..100 {
-                sleep_until_in(
-                    monotonic_ns() + 300_000,
-                    monotonic_ns,
-                    super::super::WaitMode::Spin,
-                    0,
-                );
-            }
-        });
-        assert!(
-            ran > 0,
-            "the lower-priority thread never ran during 100 spun waits"
-        );
+        for no_yield_tail in [false, true] {
+            let ((), ran) = beside_a_busy_lower_thread(|| {
+                for _ in 0..100 {
+                    sleep_until_in(
+                        monotonic_ns() + 300_000,
+                        monotonic_ns,
+                        super::super::WaitMode::Spin,
+                        0,
+                        no_yield_tail,
+                    );
+                }
+            });
+            assert!(
+                ran > 0,
+                "the lower-priority thread never ran during 100 spun waits \
+                 (no-yield tail {no_yield_tail})"
+            );
+        }
     }
 
     /// dsg (dstack #351, dasio#120): the pump's spin yielded right up to its
     /// due time, and Defender (priority 6-8) kept its CPU 1.4 ms on a
-    /// process start; the pump re-bootstrapped. A wait that starts inside
-    /// the no-yield tail (`wait::NO_YIELD_NS`) yields only as its capped
+    /// process start; the pump re-bootstrapped. With the device's
+    /// `spin_no_yield_tail` on (opt-in since the ROZHODNUTÉ of 17.11.2026;
+    /// this test runs it on), a wait that starts inside the no-yield tail
+    /// (`wait::NO_YIELD_NS`) yields only as its capped
     /// give (`wait::GIVE_CAP_NS`): with a busy lower-priority thread on its
     /// CPU, ~1 s of 150 µs waits stay on time (median late under 100 µs, p90
     /// under 500 µs; a yield's victim keeps the CPU for its slice: median
@@ -556,7 +584,7 @@ mod tests {
                 let mut late = Vec::with_capacity(8_000);
                 while monotonic_ns() < end {
                     let target = monotonic_ns() + WAIT_NS;
-                    sleep_until_in(target, monotonic_ns, super::super::WaitMode::Spin, 0);
+                    sleep_until_in(target, monotonic_ns, super::super::WaitMode::Spin, 0, true);
                     late.push(monotonic_ns() - target);
                 }
                 give_on_timer(false);
@@ -634,6 +662,7 @@ mod tests {
                     monotonic_ns,
                     super::super::WaitMode::Spin,
                     10_000_000_000,
+                    false,
                 );
                 late.push(monotonic_ns() - target);
             }
@@ -650,6 +679,7 @@ mod tests {
                 monotonic_ns,
                 super::super::WaitMode::Spin,
                 PERIOD_NS,
+                false,
             );
             late.push(monotonic_ns() - target);
         }

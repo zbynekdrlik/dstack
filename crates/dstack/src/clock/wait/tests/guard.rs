@@ -2,7 +2,8 @@
 
 //! The no-yield tail and the give cap (dstack #351): no SwitchToThread in
 //! the last [`NO_YIELD_NS`] before a due time, and no spin longer than
-//! [`GIVE_CAP_NS`] without a give.
+//! [`GIVE_CAP_NS`] without a give; opt-in by the device's
+//! `spin_no_yield_tail` ([`guard_of`], off: v0.6.157's wait).
 
 use super::*;
 
@@ -14,8 +15,10 @@ fn traced() -> Plan {
         spin_tail_ns: 50_000_000,
         escape: false,
         escape_block_ns: 500_000,
-        no_yield_ns: 250_000,
-        give_cap_ns: GIVE_CAP_NS,
+        guard: Some(Guard {
+            no_yield_ns: 250_000,
+            give_cap_ns: GIVE_CAP_NS,
+        }),
         give_on_timer: true,
     }
 }
@@ -204,4 +207,86 @@ fn the_shipped_numbers_fit_dsgs_pump() {
     const _: () = assert!(GIVE_CAP_NS > 30 * PERIOD_NS && GIVE_CAP_NS < 15_625_000);
     assert!(!crate::clock::pump_gives_on_timer(96, 96_000));
     assert_eq!((NO_YIELD_NS, GIVE_CAP_NS), (500_000, 10_000_000));
+    assert_eq!(
+        guard_of(true),
+        Some(Guard {
+            no_yield_ns: NO_YIELD_NS,
+            give_cap_ns: GIVE_CAP_NS,
+        }),
+        "the switch on is the shipped guard"
+    );
+}
+
+/// The device's `spin_no_yield_tail` off (the default since the
+/// ROZHODNUTÉ of 17.11.2026): no guard, v0.6.157's wait. Every spin turn
+/// yields, inside the last 500 µs too; a wait inside them long after the
+/// last give makes no capped give (no block, even for a pump that would
+/// give on the timer); no give is counted, the timer to the tail's
+/// included.
+#[test]
+fn with_the_switch_off_every_turn_yields_and_nothing_is_capped() {
+    assert_eq!(guard_of(false), None);
+    let off = Plan {
+        guard: guard_of(false),
+        ..traced()
+    };
+    // Reads at 50..=550 µs leave 550..=50 µs: eleven yields.
+    let mut os = Fake::at(0, 50_000);
+    let mut gives = Gives::new();
+    gives.gave(-50_000_000);
+    until(&mut os, 600_000, off, &mut gives);
+    assert_eq!(os.log, [Ev::Yield; 11]);
+    assert_eq!(gives.last, Some(-50_000_000), "no give counted");
+
+    // A wait inside the tail ending far past a cap after the last give:
+    // with the switch on the timer for its whole length, off yields.
+    let mut os = Fake::at(0, 10_000);
+    let mut gives = Gives::new();
+    gives.gave(-50_000_000);
+    until(&mut os, 100_000, traced(), &mut gives);
+    assert_eq!(os.log, [Ev::Block(90_000)], "on");
+    let mut os = Fake::at(0, 10_000);
+    let mut gives = Gives::new();
+    gives.gave(-50_000_000);
+    until(&mut os, 100_000, off, &mut gives);
+    assert_eq!(os.log, [Ev::Yield; 9], "off");
+    assert_eq!(gives.last, Some(-50_000_000));
+
+    // The timer to the tail and the escape's block count no give.
+    let mut os = Fake::at(0, 100_000);
+    let mut gives = Gives::new();
+    let tail = Plan {
+        spin_tail_ns: 200_000,
+        ..off
+    };
+    until(&mut os, 1_000_000, tail, &mut gives);
+    assert_eq!(os.log, [Ev::Block(800_000), Ev::Yield]);
+    let mut os = Fake::at(0, 100_000);
+    os.escape = true;
+    let escape = Plan {
+        escape: true,
+        ..off
+    };
+    until(&mut os, 700_000, escape, &mut gives);
+    assert_eq!(os.log, [Ev::Escape, Ev::Block(500_000), Ev::Pause]);
+    assert_eq!(gives, Gives::new(), "no give counted");
+}
+
+/// The switch on: the shipped guard's trace (dstack #351, v0.6.158): with
+/// 500 µs or less left every turn pauses, the turns before yield.
+#[test]
+fn with_the_switch_on_no_turn_yields_in_the_last_500_us() {
+    let on = Plan {
+        guard: guard_of(true),
+        ..traced()
+    };
+    // Reads at 100..=1000 µs leave 1100..=200 µs: 1100..=600 yield, 500
+    // and less pause.
+    let mut os = Fake::at(0, 100_000);
+    let mut gives = Gives::new();
+    until(&mut os, 1_200_000, on, &mut gives);
+    let mut want = vec![Ev::Yield; 6];
+    want.extend([Ev::Pause; 5]);
+    assert_eq!(os.log, want);
+    assert_eq!(gives.last, Some(700_000), "the last yield (read at 600 µs)");
 }
