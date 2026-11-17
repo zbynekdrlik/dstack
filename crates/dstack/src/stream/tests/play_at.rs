@@ -151,16 +151,27 @@ fn a_clock_not_ready_gives_no_pair_and_keeps_the_offset() {
     assert_eq!(r.pump.processor.play_ats, [Some(APP0)]);
 }
 
-/// Each block's play time, shared with the test (the pump thread owns
-/// the processor).
-struct Stamps(Arc<Mutex<Vec<Option<i64>>>>);
+/// One block's play time and the app's real clock when it ran.
+#[derive(Debug, Clone, Copy)]
+struct Stamp {
+    play_at: Option<i64>,
+    ran: i64,
+}
+
+/// Each block's [`Stamp`], shared with the test (the pump thread owns the
+/// processor).
+struct Stamps(Arc<Mutex<Vec<Stamp>>>);
 
 impl Process for Stamps {
     fn process(&mut self, block: &mut Block<'_>) {
+        let ran = crate::clock::app_monotonic_ns();
         self.0
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .push(block.play_at());
+            .push(Stamp {
+                play_at: block.play_at(),
+                ran,
+            });
     }
 }
 
@@ -210,22 +221,46 @@ fn the_pump_thread_stamps_each_media_block_in_the_app_s_real_clock() {
     // #295 step 2) keeps an early pair's offset: each block is stamped
     // from a pair read on the app's real clock between `before` and
     // `after`, plus at most the 10 ms of media time run.
-    for s in &stamps {
-        let s = s.expect("a media block has a play time");
+    for stamp in &stamps {
+        let s = stamp.play_at.expect("a media block has a play time");
         assert!(s >= before && s <= after + 10 * MS, "{before} {s} {after}");
     }
     // The first block is stamped from the first pair, read between
-    // `before` and `after`; every later one a block after it (a pair
-    // followed moves it by at most the slew bound, 33 ns a wake), so no
-    // stamp runs ahead of the media time run.
-    let first = stamps[0].expect("a media block has a play time");
+    // `before` and `after`; every later one a block after it, moved by at
+    // most the slew of the pairs followed, so no stamp runs ahead of the
+    // media time run. That slew is `SLEW_PPM` of the app's real time since
+    // the last pair followed: at most since `before`, up to the block's
+    // own run (on the pump thread, after its pair). A measured time, not
+    // a fixed 33 ns a wake, which holds only while each wake takes far
+    // less than a block of real time (dstack #373: 333 367 ns with 0.3 ms
+    // of real time a wake).
+    let first = stamps[0].play_at.expect("a media block has a play time");
     assert!(
         first >= before && first <= after,
         "{before} {first} {after}"
     );
-    for w in stamps.windows(2) {
-        let gap = w[1].unwrap() - w[0].unwrap();
-        assert!((333_333 - 34..=333_334).contains(&gap), "{w:?}");
+    // A loaded box can also pace a few wakes at about a block of real
+    // time each: their pairs then read alike, as real clocks' do, and the
+    // filter takes them as a step (dstack #373, 0.3 ms a wake). A step
+    // moves one block's stamp by more than `REJECT_NS`, and the next can
+    // come only `STEP_WAKES` wakes (a block each) after it; a pair taken
+    // at every wake (no filter) fails both.
+    let mut last_step: Option<usize> = None;
+    for (i, w) in stamps.windows(2).enumerate() {
+        let gap = w[1].play_at.unwrap() - w[0].play_at.unwrap();
+        let slew = app_offset::slew_max_ns(w[1].ran - before);
+        if (333_333 - slew..=333_334 + slew).contains(&gap) {
+            continue;
+        }
+        assert!(
+            (gap - 333_333).unsigned_abs() >= app_offset::REJECT_NS,
+            "{w:?}: neither within the slew {slew} ns nor a step"
+        );
+        assert!(
+            last_step.is_none_or(|s| i - s >= app_offset::STEP_WAKES as usize),
+            "{w:?}: a step at block pair {i}, the last at {last_step:?}"
+        );
+        last_step = Some(i);
     }
 }
 

@@ -3,6 +3,7 @@
 ## Unreleased
 
 - **Tests (#373): two stream unit tests bound real time by each step's own measured time.** `stream::tests::split::each_drain_records_its_time_and_its_datagrams` bounded the drain peak since the start by an `Instant` around one `Pump::media`, but the peak also held the rig's own first drain (`flow_rig`), outside that window: at dev1 load 40-55 it failed 2 full lib runs of 55 (`3346 > 130`, `890 > 379`; the issue's `2983 > 102`). The test now takes the rig's second first, bounds the step's own second by the step's time, and pins the peak since the start as the larger of the two. No code change.
+  - `stream::tests::play_at::the_pump_thread_stamps_each_media_block_in_the_app_s_real_clock` bounded each block-to-block stamp gap by a fixed 33 ns of slew, but the play-time filter slews `SLEW_PPM` of the app's real time since its last followed pair, and wakes paced at about a block of real time read alike pairs, which the filter takes as a step. Each block now records the app's clock when it ran: a gap is bounded by the slew of the real time measured since the test's start, and a gap off that must be a step (over `REJECT_NS`, at least `STEP_WAKES` blocks after the last). A temporary 0.3 ms spin per block failed the old test both ways (333 367 ns; a 116 us step) and passes the new one; a pair taken at every wake (filter bypassed) still fails it. No code change, no latency change.
 
 ## 0.6.166
 
