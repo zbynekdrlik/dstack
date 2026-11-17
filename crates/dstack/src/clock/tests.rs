@@ -905,19 +905,12 @@ fn the_spin_escape_line_names_the_mode_on_windows_and_says_ignored_elsewhere() {
 }
 
 /// dstack #351: the no-yield tail is opt-in: the process starts with it
-/// off and keeps what a device set (set here off Windows only, where no
-/// wait reads it; the Windows tests' waits do), and its start line names
+/// off (no test sets it on: the host tests set every device's value at
+/// once, and the Windows tests' waits read it), and its start line names
 /// it on Windows and says ignored elsewhere, only when on.
 #[test]
 fn the_no_yield_tail_starts_off_and_its_line_names_it_only_when_on() {
     assert!(!no_yield_tail_on());
-    #[cfg(not(windows))]
-    {
-        set_spin_no_yield_tail(true);
-        assert!(no_yield_tail_on());
-        set_spin_no_yield_tail(false);
-        assert!(!no_yield_tail_on());
-    }
     assert_eq!(no_yield_tail_line(false, Os::Windows), None);
     assert_eq!(no_yield_tail_line(false, Os::Other), None);
     assert_eq!(
@@ -928,6 +921,34 @@ fn the_no_yield_tail_starts_off_and_its_line_names_it_only_when_on() {
     assert_eq!(
         no_yield_tail_line(true, Os::Other).unwrap(),
         "spin_no_yield_tail = true is for Windows only: ignored on this OS"
+    );
+}
+
+/// The pump's start line on its capped give (dstack #351): only for the
+/// spin with the no-yield tail on, a yield or a timer wait by W.
+#[test]
+fn the_pump_names_its_capped_give_only_for_the_spin_with_the_tail_on() {
+    let dsg = pump_give_line(96, 96_000);
+    assert!(dsg.contains("is a yield"), "{dsg}");
+    assert_eq!(
+        pump_give_start_line(WaitMode::Spin, true, 96, 96_000),
+        Some(dsg)
+    );
+    assert_eq!(
+        pump_give_start_line(WaitMode::Spin, true, 384, 96_000),
+        Some(pump_give_line(384, 96_000))
+    );
+    assert_eq!(
+        pump_give_start_line(WaitMode::Spin, false, 96, 96_000),
+        None
+    );
+    assert_eq!(
+        pump_give_start_line(WaitMode::Timer, true, 96, 96_000),
+        None
+    );
+    assert_eq!(
+        pump_give_start_line(WaitMode::Timer, false, 96, 96_000),
+        None
     );
 }
 

@@ -32,7 +32,8 @@ pub(crate) const NO_YIELD_NS: i64 = 500_000;
 /// busy CPU waits a quantum anyway. Per-CPU system work that must run on
 /// this CPU therefore runs at least this often (v0.6.28 and v0.6.35 froze
 /// FOH: no give, ever). A wait already past its due time makes no turn
-/// and gives nothing, as before.
+/// and gives nothing, as before. Only with the device's
+/// `spin_no_yield_tail` ([`guard_of`]).
 pub(crate) const GIVE_CAP_NS: i64 = 10_000_000;
 
 /// What a wait needs from the OS.

@@ -204,7 +204,8 @@ thread_local! {
 /// Makes this thread's capped give (dstack #351, `wait::GIVE_CAP_NS`) a
 /// timer wait instead of a yield: an engine pump whose W absorbs the
 /// timer's late wake ([`super::pump_gives_on_timer`]). Any other thread
-/// yields.
+/// yields. Read only with the device's `spin_no_yield_tail` on: off, no
+/// wait has a capped give.
 pub fn give_on_timer(on: bool) {
     TIMER_GIVE.with(|t| t.set(on));
 }
