@@ -211,6 +211,7 @@ pub mod rated;
 
 mod latency;
 mod pulling;
+mod tx_pulling;
 
 pub use latency::{
     Directions, MIN_LATENCY_NS, NETWORK_LATENCY_NS, REFERENCE_PATH_NS, RX_WORK_MARGIN_NS, Split,
