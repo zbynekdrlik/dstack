@@ -2,6 +2,8 @@
 
 ## 0.6.174
 
+- **Fix (#387): dtray reads a dasio bridge instance that sets the per-direction buffer targets.** dasio's `[bridge]` table takes `to_asio_app_buffer_ns` and `from_asio_app_buffer_ns` (dstack-asio v0.6.172); dtray's settings window refused such a file as an unknown field ("Settings not readable"). It now reads both, checks their range as the app buffer's, writes a changed one and keeps the file's on an edit (the window has no control for them). No latency change.
+
 - **Feature (#382, the owner's ROZHODNUTÉ of 17.11.2026): an ASIO bridge's converter length is a setting.** The owner's call: the SoundGrid driver runs at 96 kHz too (96 <-> 96, no rate change), and the bridge's converter goes to the minimum to show how low the path can go; production may raise it later.
   - **`dstack_asio::bridge::Spec::converter_taps: Option<u32>`** sets both directions' sinc length (the to-ASIO and from-ASIO players, the idle from-ASIO player before the first open too). `None` is 256 taps, exactly as before. Accepted `MIN_CONVERTER_TAPS` (32) to `MAX_CONVERTER_TAPS` (256) in steps of 8 (the converter core takes multiples of 8 and would round any other length up); anything else refuses `Bridge::new` with `converter_taps: 31; 32 to 256 in steps of 8`.
   - **Measured at 96 <-> 96 kHz** (the crate's own helpers, +7.5 ppm, a -1 dBFS tone 20 Hz-20 kHz): 256 taps 1.333 ms a direction, flat; **48 taps 0.250 ms a direction, flat** (within 5e-7 dB to 20 kHz, THD+N 212 dB): 1.083 ms less each way, nothing lost in the audio band; 32 taps 0.167 ms, -0.40 dB at 20 kHz (-0.24 dB at 19 kHz, -0.02 dB at 15 kHz). With a rate change a short filter cuts the band (#382 issuecomment-6952851834: 128 taps lose 0.9 dB at 20 kHz at 96 -> 48 kHz), so keep 256 (or 192) there.
