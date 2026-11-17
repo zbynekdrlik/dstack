@@ -51,6 +51,8 @@ fn bridge() -> Bridge {
         to_asio: vec![1, 2, 3, 4],
         from_asio: vec![5, 6],
         app_buffer_ns: Some(5_000_000),
+        to_asio_app_buffer_ns: None,
+        from_asio_app_buffer_ns: None,
     }
 }
 
@@ -70,6 +72,8 @@ fn a_bridge_instance_s_file_reads_with_its_table() {
             to_asio: vec![1, 2, 3, 4],
             from_asio: Vec::new(),
             app_buffer_ns: None,
+            to_asio_app_buffer_ns: None,
+            from_asio_app_buffer_ns: None,
         })
     );
 }
@@ -285,6 +289,8 @@ fn every_value_dasio_refuses_is_named() {
         to_asio: vec![0, 2, 2, 0, 2],
         from_asio: vec![3, 3],
         app_buffer_ns: Some(MIN_APP_BUFFER_NS - 1),
+        to_asio_app_buffer_ns: None,
+        from_asio_app_buffer_ns: None,
     };
     let p = b.problems(5, 2);
     assert_eq!(
@@ -309,6 +315,8 @@ fn every_value_dasio_refuses_is_named() {
         to_asio: Vec::new(),
         from_asio: Vec::new(),
         app_buffer_ns: None,
+        to_asio_app_buffer_ns: None,
+        from_asio_app_buffer_ns: None,
     };
     assert_eq!(none.problems(0, 0), ["the bridge carries no channel"]);
 }
@@ -579,4 +587,28 @@ fn the_per_direction_buffer_targets_read_and_stay() {
         doc.to_string()
             .contains("from_asio_app_buffer_ns = 2000000")
     );
+}
+
+/// dstack #387: a changed per-direction target is written to the file, and
+/// a removed one is taken out (an edit from another tool's bridge).
+#[test]
+fn a_changed_per_direction_target_is_written() {
+    let table = "[bridge]\ndriver = \"Test ASIO\"\nto_asio = [1, 2, 3, 4]\nfrom_asio = [5, 6]\nto_asio_app_buffer_ns = 1333333\nfrom_asio_app_buffer_ns = 2000000\n";
+    let text = format!("{DAW}\n{table}");
+    let old = Fields::read(&text)
+        .expect("reads")
+        .bridge
+        .expect("a bridge");
+    let new = Bridge {
+        to_asio_app_buffer_ns: Some(1_500_000),
+        from_asio_app_buffer_ns: None,
+        ..old.clone()
+    };
+    let mut doc: toml_edit::DocumentMut = text.parse().expect("toml");
+    write(&mut doc, &old, &new).expect("written");
+    let out = doc.to_string();
+    assert!(out.contains("to_asio_app_buffer_ns = 1500000"), "{out}");
+    assert!(!out.contains("from_asio_app_buffer_ns"), "{out}");
+    let back = Fields::read(&out).expect("reads").bridge.expect("a bridge");
+    assert_eq!(back, new);
 }

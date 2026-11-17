@@ -578,7 +578,12 @@ fn read_controls(st: &mut State) {
     if new.bridge.is_some() {
         match bridge::read(h, &l.driver) {
             Ok(b) => {
-                new.bridge = Some(b);
+                // The window has no control for the per-direction targets
+                // (dstack #387): the file's stay.
+                new.bridge = Some(match old.bridge.as_ref() {
+                    Some(prev) => dtray::dasio::bridge::keep_unedited(prev, b),
+                    None => b,
+                });
                 tab.bridge_error = None;
             }
             Err(e) => tab.bridge_error = Some(e),
