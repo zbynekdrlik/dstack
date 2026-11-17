@@ -44,8 +44,9 @@ pub fn pump_may_escape(margin: u64, block: u64, rate: u32) -> bool {
 
 /// Whether an engine pump with work margin `margin` (samples at `rate`)
 /// gives its CPU on the timer when its spin owes a give (dstack #351, the
-/// wait's give cap, only with the device's `spin_no_yield_tail`): the timer wakes up to [`TIMER_LATE_NS`] late even on
-/// an idle CPU, and a pump woken more than W late re-bootstraps
+/// wait's give cap, only with the device's `spin_no_yield_tail`): the
+/// timer wakes up to [`TIMER_LATE_NS`] late even on an idle CPU, and a
+/// pump woken more than W late re-bootstraps
 /// (`stream::Blocks::next`). A pump whose W is under it (dsg: W 96 at
 /// 96 kHz, 1 ms) yields instead, which costs only when a lower priority is
 /// ready; so does every thread that is not a pump.
