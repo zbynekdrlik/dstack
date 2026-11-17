@@ -53,8 +53,8 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 pub use dsyx::{DateState, Reading};
 pub use escape::{
     ESCAPE_BLOCK_NS, ESCAPE_DEFER_MAX_NS, ESCAPE_MAX_NS, EscapeState, SPIN_ESCAPE_MAX_MS,
-    SPIN_ESCAPE_MIN_MS, TIMER_LATE_NS, pump_escape_line, pump_give_line, pump_gives_on_timer,
-    pump_may_escape, spin_escape_line, spin_escape_of,
+    SPIN_ESCAPE_MIN_MS, TIMER_LATE_NS, no_yield_tail_line, pump_escape_line, pump_give_line,
+    pump_give_start_line, pump_gives_on_timer, pump_may_escape, spin_escape_line, spin_escape_of,
 };
 #[cfg(any(target_os = "linux", windows))]
 pub use skewed::SkewedClock;
@@ -624,6 +624,25 @@ pub fn set_spin_escape_ms(configured_ms: Option<u64>) {
 /// Whether the process runs the bounded escape (`spin_escape_ms` set).
 pub fn escape_on() -> bool {
     SPIN_ESCAPE.load(Ordering::Relaxed) != 0
+}
+
+/// Whether the process's low-latency spin keeps #351's no-yield tail
+/// ([`set_spin_no_yield_tail`]; process-wide, the last device set wins, as
+/// the spin tail). Off by default: the v0.6.157 wait. Read by the Windows
+/// wait only.
+static SPIN_NO_YIELD_TAIL: AtomicBool = AtomicBool::new(false);
+
+/// Sets the process's no-yield tail (the device's `spin_no_yield_tail`,
+/// dstack #351, opt-in until its non-production soak passes). Only the
+/// Windows low-latency wait reads it.
+pub fn set_spin_no_yield_tail(on: bool) {
+    SPIN_NO_YIELD_TAIL.store(on, Ordering::Relaxed);
+}
+
+/// Whether the process's spin keeps the no-yield tail
+/// ([`set_spin_no_yield_tail`]).
+pub fn no_yield_tail_on() -> bool {
+    SPIN_NO_YIELD_TAIL.load(Ordering::Relaxed)
 }
 
 mod app;

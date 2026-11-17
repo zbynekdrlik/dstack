@@ -677,6 +677,41 @@ async fn the_driver_s_tick_warns_once_for_a_second_the_pump_restarted() {
     assert!(lines[0].contains("cause=late"), "{log}");
 }
 
+/// dstack #363: the tick's TX pull watch warns once for a second the
+/// app's TX processor panicked on the TX thread, naming the panic.
+#[tokio::test]
+async fn the_driver_s_tick_warns_once_for_a_second_the_tx_pull_faulted() {
+    use crate::media::tx::{TX_PULL_WARNING, Transmitter, TxFill, ns_of};
+    use crate::test_log::{capture_warnings, undecided};
+    struct Panics;
+    impl dstack_audio_io::Process for Panics {
+        fn process(&mut self, _block: &mut dstack_audio_io::Block<'_>) {
+            panic!("the app's TX processor panics");
+        }
+    }
+    undecided();
+    let dir = tempfile::tempdir().unwrap();
+    let device = device_at(dir.path());
+    let media = media_with_engine(&device, Arc::new(Unready), &[0]);
+    let timing = crate::stream::Timing::of(&media.tx.cfg);
+    let fill = TxFill::new(Box::new(Panics), vec![0], timing, 24, Arc::clone(&media.rx));
+    assert!(media.tx.claim_fill(fill).is_ok());
+    let records = Records::default();
+    let (mut driver, _answers, _changes) = driver_of(&media);
+    driver.tick(&records);
+    let mut tx = Transmitter::new(Arc::clone(&media.tx));
+    tx.step(Some(ns_of(T, media.tx.cfg.sample_rate)), 0);
+    std::thread::sleep(Duration::from_millis(1_010));
+    let log = capture_warnings(|| driver.tick(&records));
+    let lines: Vec<&str> = log
+        .lines()
+        .filter(|l| l.contains(TX_PULL_WARNING))
+        .collect();
+    assert_eq!(lines.len(), 1, "{log}");
+    assert!(lines[0].contains("faults=1"), "{log}");
+    assert!(lines[0].contains("the app's TX processor panics"), "{log}");
+}
+
 /// dstack #203: the tick's traffic watch reads the neighbours its discovery
 /// lists on our address (each its `status`), never our own endpoint.
 #[tokio::test]

@@ -11,6 +11,8 @@ use dstack_endpoint::fifo::Fifo;
 use dstack_endpoint::player::{Stats, fifo_for};
 
 use crate::capture::push_interleaved;
+use dlink::{Block, Process};
+use dstack_endpoint::player::Player;
 
 /// The pump's block (dlink's default).
 const PUMP_BLOCK: usize = 128;
@@ -249,10 +251,10 @@ fn converts(cap_rate: u32, net_rate: u32) {
     // The 10 ms packets make the first fit ride a transient (up to about
     // 140 ppm at 44.1 to 48 kHz); a minute settles it.
     s.run(60.0);
-    let consumed = s.source.player.consumed();
+    let consumed = s.source.player().consumed();
     let played = s.stats.played();
     let l = s.record(10.0, 0);
-    let per_s = (s.source.player.consumed() - consumed) as f64
+    let per_s = (s.source.player().consumed() - consumed) as f64
         / ((s.stats.played() - played) as f64 / f64::from(net_rate));
     let freq = frequency(&l, f64::from(net_rate));
     let level_db = 20.0 * (rms(&l) / (0.5 / 2f64.sqrt())).log10();

@@ -216,6 +216,12 @@ exclude_re = [
   # The bounded escape's setter (dstack #1): the same, its value is
   # `spin_escape_of` (tested), and only the Windows wait reads it.
   "replace set_spin_escape_ms with \\(\\)",
+  # The #351 no-yield tail's setter and its read (dstack #351): the same,
+  # its value is `wait::guard_of` (tested), only the Windows wait reads
+  # it, and a Linux test that sets it races the host tests, which set
+  # every device's value. The default (off) is tested.
+  "replace set_spin_no_yield_tail with \\(\\)",
+  "replace no_yield_tail_on -> bool with false",
   "replace profile -> TimingProfile",
   # The direct socket needs CAP_NET_RAW, which neither CI nor the gate has;
   # the headers, the ARP lookup and the counting are tested (media::bypass).

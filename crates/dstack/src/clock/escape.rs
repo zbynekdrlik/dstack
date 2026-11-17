@@ -44,8 +44,9 @@ pub fn pump_may_escape(margin: u64, block: u64, rate: u32) -> bool {
 
 /// Whether an engine pump with work margin `margin` (samples at `rate`)
 /// gives its CPU on the timer when its spin owes a give (dstack #351, the
-/// wait's give cap): the timer wakes up to [`TIMER_LATE_NS`] late even on
-/// an idle CPU, and a pump woken more than W late re-bootstraps
+/// wait's give cap, only with the device's `spin_no_yield_tail`): the
+/// timer wakes up to [`TIMER_LATE_NS`] late even on an idle CPU, and a
+/// pump woken more than W late re-bootstraps
 /// (`stream::Blocks::next`). A pump whose W is under it (dsg: W 96 at
 /// 96 kHz, 1 ms) yields instead, which costs only when a lower priority is
 /// ready; so does every thread that is not a pump.
@@ -75,6 +76,19 @@ pub fn pump_give_line(margin: u64, rate: u32) -> String {
              timer's late wake ({late_us} µs)"
         )
     }
+}
+
+/// The engine pump's start line on its capped give (dstack #351): named
+/// ([`pump_give_line`]) only for the spin wait with the no-yield tail on
+/// (the device's `spin_no_yield_tail`); otherwise the spin has no capped
+/// give, `None`.
+pub fn pump_give_start_line(
+    mode: super::WaitMode,
+    no_yield_tail: bool,
+    margin: u64,
+    rate: u32,
+) -> Option<String> {
+    (mode == super::WaitMode::Spin && no_yield_tail).then(|| pump_give_line(margin, rate))
 }
 
 /// The start line of an engine pump that stays out of the bounded escape
@@ -114,6 +128,21 @@ pub fn spin_escape_line(configured_ms: Option<u64>, os: Os) -> Option<String> {
         ),
         Os::Other => {
             format!("spin_escape_ms = {ms} is for Windows only: ignored on this OS")
+        }
+    })
+}
+
+/// The start line for a device's `spin_no_yield_tail` on `os` (dstack
+/// #351): `None` when off (the default).
+pub fn no_yield_tail_line(on: bool, os: Os) -> Option<String> {
+    on.then(|| match os {
+        Os::Windows => {
+            "the low-latency spin's no-yield tail is on (dstack #351, opt-in): no yield in \
+                        the last 500 µs before a due time, a give at least every 10 ms"
+                .to_string()
+        }
+        Os::Other => {
+            "spin_no_yield_tail = true is for Windows only: ignored on this OS".to_string()
         }
     })
 }

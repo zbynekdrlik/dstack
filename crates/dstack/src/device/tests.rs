@@ -2059,6 +2059,29 @@ fn the_spin_escape_is_off_by_default_taken_and_checked() {
     }
 }
 
+/// The #351 no-yield tail is opt-in (the ROZHODNUTÉ of 17.11.2026): off
+/// when left out (the v0.6.157 wait), on only when set true.
+#[test]
+fn the_no_yield_tail_is_off_by_default_and_taken() {
+    assert!(
+        !DeviceConfig::from_toml(TEST_DEVICE)
+            .unwrap()
+            .spin_no_yield_tail
+    );
+    for on in [true, false] {
+        let text = format!("{TEST_DEVICE}\nspin_no_yield_tail = {on}\n");
+        assert_eq!(
+            DeviceConfig::from_toml(&text).unwrap().spin_no_yield_tail,
+            on
+        );
+    }
+    let text = format!("{TEST_DEVICE}\nspin_no_yield_tail = 1\n");
+    assert!(
+        DeviceConfig::from_toml(&text).is_err(),
+        "a number is no switch"
+    );
+}
+
 /// obs's review of v0.6.26: Windows pins a thread only within the first
 /// processor group (64 CPUs), so a config that names a CPU from 64 on
 /// passed the check there and was then never pinned. The limit is the

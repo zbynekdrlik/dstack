@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! A [`Link`] whose app pulls its RX channels on its own thread with the
-//! deadline (dstack #307, [`bridge::RxPull`]), and the two ways the start
-//! launches the embedded device: the pump writing the RX rings
-//! ([`Pushed`], every other start) or the app ([`Pulled`]).
+//! deadline (dstack #307, [`bridge::RxPull`]), and the ways the start
+//! launches the embedded device ([`Launch`]): the pump writing the RX rings
+//! ([`Pushed`], every other start), the app ([`Pulled`]), or the TX
+//! thread filling the app's pulled TX channels (`TxPulled`, dstack #363).
 
 use std::sync::Arc;
 
@@ -25,7 +26,9 @@ pub(crate) trait Launch {
     type Out;
 
     /// The embedded device of `cfg` (as [`Embedded::start_waiting`]).
+    #[allow(clippy::too_many_arguments)]
     fn launch<P: Process + 'static>(
+        self,
         cfg: DeviceConfig,
         place: &Place,
         wait: PlaceWait<'_>,
@@ -44,6 +47,7 @@ impl Launch for Pushed {
     type Out = ();
 
     fn launch<P: Process + 'static>(
+        self,
         cfg: DeviceConfig,
         place: &Place,
         wait: PlaceWait<'_>,
@@ -65,6 +69,7 @@ impl Launch for Pulled {
     type Out = Intake;
 
     fn launch<P: Process + 'static>(
+        self,
         cfg: DeviceConfig,
         place: &Place,
         wait: PlaceWait<'_>,
@@ -137,7 +142,8 @@ impl Link {
             rx: Vec::new(),
             tx: map.tx,
         };
-        let (link, intake) = Self::start_device::<Pulled, P>(
+        let (link, intake) = Self::start_device(
+            Pulled,
             config,
             place,
             PlaceWait::Now,

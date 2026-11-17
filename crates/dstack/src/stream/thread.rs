@@ -59,13 +59,19 @@ fn run<P: Process>(clock: &dyn PtpClock, mut pump: Pump<P>, stop: &AtomicBool) {
     let escapes = crate::clock::pump_may_escape(pump.timing.margin, pump.timing.block, rate);
     #[cfg(any(target_os = "linux", windows))]
     crate::clock::allow_escape(escapes);
-    // The spin's capped give (dstack #351, Windows): on the timer only when
-    // W absorbs the timer's late wake, else a yield.
+    // The spin's capped give (dstack #351, Windows, only with the device's
+    // `spin_no_yield_tail`): on the timer only when W absorbs the timer's
+    // late wake, else a yield.
     #[cfg(any(target_os = "linux", windows))]
     crate::clock::give_on_timer(crate::clock::pump_gives_on_timer(pump.timing.margin, rate));
     #[cfg(windows)]
-    if let crate::clock::WaitMode::Spin = crate::clock::wait_mode() {
-        tracing::info!("{}", crate::clock::pump_give_line(pump.timing.margin, rate));
+    if let Some(line) = crate::clock::pump_give_start_line(
+        crate::clock::wait_mode(),
+        crate::clock::no_yield_tail_on(),
+        pump.timing.margin,
+        rate,
+    ) {
+        tracing::info!("{line}");
     }
     if let Some(line) = crate::clock::pump_escape_line(
         crate::clock::escape_on(),
