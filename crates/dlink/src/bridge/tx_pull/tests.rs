@@ -132,3 +132,29 @@ fn idle_writes_nothing() {
     Idle.process(&mut Block::new(2, &[], &mut out));
     assert_eq!(out, vec![9.0; 4]);
 }
+
+#[test]
+fn a_pull_fits_only_as_many_tx_channels_as_it_fills_all_on_the_device() {
+    assert_eq!(check(&[0, 1], 2, 2), Ok(()));
+    assert_eq!(check(&[1], 2, 1), Ok(()));
+    assert_eq!(
+        check(&[0], 2, 2),
+        Err("the TX pull fills 2 channels for 1 TX channels".to_string())
+    );
+    assert_eq!(
+        check(&[0, 2], 2, 2),
+        Err("the app's TX channel 3 is past the device's 2 TX channels".to_string())
+    );
+}
+
+#[test]
+fn the_debug_form_names_the_outputs_and_the_switch() {
+    let fifo = Arc::new(fifo_for(1, RATE));
+    let stats: Arc<Stats> = Arc::default();
+    let (pull, _switch) = TxPull::switched(player(&fifo, &stats), 1);
+    let text = format!("{pull:?}");
+    assert!(
+        text.contains("outputs: 1") && text.contains("switched: true"),
+        "{text}"
+    );
+}

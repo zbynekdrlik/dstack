@@ -168,7 +168,12 @@ fn a_late_tx_thread_catches_up_within_its_reach_and_starts_again_past_it() {
     fill.fill_due(next_due + reach + 1, MAX_LAG, &engine, 0);
     let v = fill.stats().view();
     assert_eq!((v.rebootstraps, v.writes_after_send), (1, 0), "{v:?}");
-    assert!(v.skipped >= reach / B, "{v:?}");
+    // From the next block (input at next_due - B - P) to the one the
+    // restart runs first (its input ending at the playout point).
+    let now = next_due + reach + 1;
+    let fresh = (now - P - B).div_ceil(B) * B;
+    assert_eq!(v.skipped, (fresh - (next_due - B - P)) / B, "{v:?}");
+    assert_eq!(v.skipped, 7, "{v:?}");
     // The processor hears it before its next block.
     let wake = fill.wake_ns(RATE).unwrap();
     fill.fill_due(crate::clock::to_samples(wake, RATE), MAX_LAG, &engine, 0);
