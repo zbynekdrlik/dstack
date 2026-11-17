@@ -64,15 +64,17 @@ use std::sync::{Arc, OnceLock};
 
 use dlink::bridge::pull::{IdleWatch, Look, PullStats};
 use dlink::bridge::{
-    AppBuffer, Clock, Fifo, Player, RxPull, SharedPull, Stats, Switch, Taker, chunk_ns, fifo_for,
-    switch,
+    AppBuffer, Clock, Fifo, Player, RxPull, SharedPull, Stats, Switch, Taker, TxPull, chunk_ns,
+    fifo_for, switch,
 };
 use dstack_audio_io::{Block, Process};
 
 use crate::device::Opened;
 
 mod age;
+mod from_asio;
 pub use age::{AgeReport, BlockAge, NETWORK_ALLOWANCE_NS};
+pub use from_asio::FromAsio;
 
 /// Frames a side converts at once at least (its interleaved scratch): the
 /// pump's side a whole pump block, the driver's side its whole buffer
@@ -243,6 +245,45 @@ impl Bridge {
     /// without one).
     pub fn to_asio_pull_stats(&self) -> Option<Arc<PullStats>> {
         self.pull.get().map(SharedPull::stats)
+    }
+
+    /// The ASIO -> Dante side for the device's TX thread (dstack #364,
+    /// [`FromAsio`]): the from-ASIO player (and each driver open's after
+    /// it, through the bridge's switch) in a `dlink::bridge::TxPull` on
+    /// the bridge's `from_asio` TX outputs. Hand it to
+    /// `dlink::Link::start_pulling_with_tx` (with the to-ASIO pull, its
+    /// map's `tx` the from-ASIO channels) or `dlink::Link::start_tx_pulling`
+    /// (no to-ASIO channel). From here on the pump's side plays no
+    /// from-ASIO audio: give the pump no TX channel (both starts do).
+    ///
+    /// Call it before [`Bridge::dante_side`] (the from-ASIO player lives
+    /// in the pump's side until then) and before the driver's first open
+    /// (the open hands its player through the switch the pull now holds).
+    /// Refused for a bridge with no from-ASIO channels, after the pump's
+    /// side was taken or the driver's first open, or a second time.
+    pub fn pull_from_asio(&mut self) -> Result<FromAsio, String> {
+        if self.spec.from_asio == 0 {
+            return Err("the bridge has no channel from ASIO to pull".to_string());
+        }
+        if self.opened {
+            return Err(
+                "the driver opened already: take the from-ASIO pull before its first open"
+                    .to_string(),
+            );
+        }
+        let Some(dante) = &mut self.dante else {
+            return Err(
+                "the pump's side was taken already: take the from-ASIO pull before it".to_string(),
+            );
+        };
+        let Some((first, _pump_taker)) = dante.from_asio.take() else {
+            return Err("the bridge pulls from ASIO already".to_string());
+        };
+        // The pull's own switch replaces the pump's: no open sent a player
+        // through the old one yet.
+        let (pull, switch) = TxPull::switched(first, self.spec.from_asio);
+        self.switch = Some(switch);
+        Ok(FromAsio::new(pull, Arc::clone(&self.age)))
     }
 
     pub fn spec(&self) -> Spec {

@@ -21,13 +21,13 @@ use crate::{Config, Link, Rated, bridge};
 /// ([`Embedded::start_tx_pulling`]); behind `Rated`'s TX converter when
 /// the app's rate is not the device's (`rates`: the device's and the
 /// app's).
-pub(crate) struct TxPulled {
+pub(crate) struct TxPulled<T> {
     tx: Vec<usize>,
-    pull: bridge::TxPull,
+    pull: T,
     rates: Option<(u32, u32)>,
 }
 
-impl Launch for TxPulled {
+impl<T: bridge::TxProcess> Launch for TxPulled<T> {
     type Out = ();
 
     fn launch<P: Process + 'static>(
@@ -74,7 +74,8 @@ impl Launch for TxPulled {
 impl Link {
     /// [`Link::start`] whose TX channels `map.tx` carry the app's audio
     /// through `pull` ([`bridge::TxPull`]: the [`bridge::Player`] of the
-    /// app's FIFO, pull output `i` on TX channel `map.tx[i]`), run by the
+    /// app's FIFO, pull output `i` on TX channel `map.tx[i]`; or an app's
+    /// [`bridge::TxProcess`] around one, dstack #364), run by the
     /// device's TX thread (dstack #363): it fills each block at the pump's
     /// own due time and stamp just before it sends, so a late pump no
     /// longer leaves the sent stamps silent, with the same latency (the
@@ -91,12 +92,12 @@ impl Link {
     /// A pull whose outputs are not `map.tx`'s or a TX channel past the
     /// device's is [`HostError::Setup`]; every other error as
     /// [`Link::start`].
-    pub fn start_tx_pulling<P: Process + 'static>(
+    pub fn start_tx_pulling<P: Process + 'static, T: bridge::TxProcess>(
         config: &Config,
         place: &Place,
         map: Map,
         processor: P,
-        pull: bridge::TxPull,
+        pull: T,
     ) -> Result<Link, HostError> {
         Self::start_tx_pulling_on(
             config,
@@ -110,12 +111,12 @@ impl Link {
 
     /// [`Link::start_tx_pulling`] on the clock `source` (as
     /// [`Link::start_on`]).
-    pub fn start_tx_pulling_on<P: Process + 'static>(
+    pub fn start_tx_pulling_on<P: Process + 'static, T: bridge::TxProcess>(
         config: &Config,
         place: &Place,
         map: Map,
         processor: P,
-        pull: bridge::TxPull,
+        pull: T,
         source: ClockSource,
     ) -> Result<Link, HostError> {
         bridge::tx_pull::check(&map.tx, config.tx.len(), pull.outputs())
@@ -141,6 +142,73 @@ impl Link {
             source,
         )
         .map(|(link, ())| link)
+    }
+}
+
+/// The TX pull run by the pump beside `processor` (dstack #364's RED: the
+/// TX thread's fill replaces it).
+struct PumpFilled<P, T> {
+    processor: P,
+    pull: T,
+}
+
+impl<P: Process, T: bridge::TxProcess> Process for PumpFilled<P, T> {
+    fn process(&mut self, block: &mut dstack_audio_io::Block<'_>) {
+        let frames = block.frames();
+        let mut none = dstack_audio_io::Block::new(frames, &[], &mut []);
+        if let Some(s) = block.start() {
+            none = none.at(s);
+        }
+        self.processor.process(&mut none);
+        self.pull.process(block);
+    }
+}
+
+impl Link {
+    /// [`Link::start_pulling`] (the app pulls the RX channels `map.rx`
+    /// into `fifo`) whose TX channels `map.tx` carry `pull`
+    /// ([`Link::start_tx_pulling`]): a bridge pulled both ways (dstack
+    /// #364, dstack-asio's to- and from-ASIO sides).
+    pub fn start_pulling_with_tx<P: Process + 'static, T: bridge::TxProcess>(
+        config: &Config,
+        place: &Place,
+        map: Map,
+        processor: P,
+        fifo: Arc<bridge::Fifo>,
+        pull: T,
+    ) -> Result<(Link, bridge::RxPull), HostError> {
+        Self::start_pulling_with_tx_on(
+            config,
+            place,
+            map,
+            processor,
+            fifo,
+            pull,
+            config.clock(ClockSource::Linked),
+        )
+    }
+
+    /// [`Link::start_pulling_with_tx`] on the clock `source` (as
+    /// [`Link::start_on`]).
+    pub fn start_pulling_with_tx_on<P: Process + 'static, T: bridge::TxProcess>(
+        config: &Config,
+        place: &Place,
+        map: Map,
+        processor: P,
+        fifo: Arc<bridge::Fifo>,
+        pull: T,
+        source: ClockSource,
+    ) -> Result<(Link, bridge::RxPull), HostError> {
+        bridge::tx_pull::check(&map.tx, config.tx.len(), pull.outputs())
+            .map_err(HostError::Setup)?;
+        Self::start_pulling_on(
+            config,
+            place,
+            map,
+            PumpFilled { processor, pull },
+            fifo,
+            source,
+        )
     }
 }
 

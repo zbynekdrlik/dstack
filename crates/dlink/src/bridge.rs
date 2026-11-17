@@ -52,4 +52,4 @@ pub use fifo::{Clock, Fifo, Stamp};
 pub use player::{Player, Stats, fifo_for};
 pub use pull::{RxPull, SharedPull};
 pub use switch::{Switch, Taker, switch};
-pub use tx_pull::{Idle, TxPull};
+pub use tx_pull::{Idle, TxProcess, TxPull};
