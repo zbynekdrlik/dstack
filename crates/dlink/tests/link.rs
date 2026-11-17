@@ -1,12 +1,11 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! dstack #68: a dlink device in the app's process, on the box's routed
-//! address and its own system clock, at dlink's defaults ((a) 1 ms, (b) keeping v0.6.105's P,
+//! dstack #68: a dlink device in the app's process, on loopback
+//! (dstack #366) and its own system clock, at dlink's defaults ((a) 1 ms, (b) keeping v0.6.105's P,
 //! the normal profile: no real-time priority, no pinning). A file of its own,
 //! so its process sets the normal profile (one per process). Our device
 //! hears itself (the tests' rule: our device only).
 
-use std::net::{SocketAddr, UdpSocket};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -14,19 +13,15 @@ use std::time::{Duration, Instant};
 use dlink::{Block, Clock, Config, Link, Map, Place, Ports, Process, Stopped, SubState, SubStatus};
 use dstack::device::{DeviceState, Subscription};
 
-/// The box's IPv4 address on its default route (connecting a UDP socket
-/// picks the route and sends nothing).
-fn routed_ipv4() -> std::net::Ipv4Addr {
-    let probe = UdpSocket::bind("0.0.0.0:0").unwrap();
-    probe.connect("192.0.2.1:9").unwrap();
-    match probe.local_addr().expect("the routed address") {
-        SocketAddr::V4(a) => *a.ip(),
-        other => panic!("no routed IPv4 address on this box: {other}"),
-    }
+/// The test device's address: loopback, so none of its mDNS, info or
+/// heartbeat multicasts leaves the box (dstack #366: this workspace is a
+/// test run, which refuses a device on a site address).
+fn test_ipv4() -> std::net::Ipv4Addr {
+    std::net::Ipv4Addr::LOCALHOST
 }
 
 /// Held by each test that runs a device: they bind the same Dante ports on
-/// the routed address, and the harness runs a file's tests at once.
+/// loopback, and the harness runs a file's tests at once.
 static ONE_DEVICE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// A constant on output 0, and the largest input 0 heard (as `f64` bits).
@@ -67,7 +62,7 @@ fn a_dlink_device_runs_the_app_s_processor_at_its_defaults() {
     let heard = Arc::new(AtomicU64::new(0f64.to_bits()));
     let link = Link::start_on(
         &config,
-        &Place::Ip(routed_ipv4()),
+        &Place::Ip(test_ipv4()),
         Map {
             rx: vec![0],
             tx: vec![0],
@@ -143,7 +138,7 @@ fn a_48_khz_app_runs_a_96_khz_device_through_the_conversion() {
     }
     let link = Link::start_on(
         &config,
-        &Place::Ip(routed_ipv4()),
+        &Place::Ip(test_ipv4()),
         Map {
             rx: vec![0],
             tx: vec![0],
@@ -229,7 +224,7 @@ fn a_declared_subscription_subscribes_a_fresh_device() {
     let heard = Arc::new(AtomicU64::new(0f64.to_bits()));
     let link = Link::start_on(
         &config,
-        &Place::Ip(routed_ipv4()),
+        &Place::Ip(test_ipv4()),
         Map {
             rx: vec![0],
             tx: vec![0],
@@ -293,7 +288,7 @@ fn a_dlink_device_on_the_linked_clock_starts_and_stops_without_a_source() {
     let config = Config::new("dlink-linked", dir.path().join("dlink.toml")).tx(["Out 1"]);
     let link = Link::start_on(
         &config,
-        &Place::Ip(routed_ipv4()),
+        &Place::Ip(test_ipv4()),
         Map {
             rx: vec![],
             tx: vec![0],
@@ -355,7 +350,7 @@ fn measured_loop(config: &Config, app_rate: u32) -> u64 {
     let back = Arc::new(AtomicU64::new(NONE));
     let link = Link::start_on(
         config,
-        &Place::Ip(routed_ipv4()),
+        &Place::Ip(test_ipv4()),
         Map {
             rx: vec![0],
             tx: vec![0],
@@ -502,7 +497,7 @@ fn a_pump_late_within_its_margin_keeps_the_tone_whole() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = tempfile::tempdir().unwrap();
-    let place = Place::Ip(routed_ipv4());
+    let place = Place::Ip(test_ipv4());
     let count = Arc::new(AtomicBool::new(false));
     let good = Arc::new(AtomicU64::new(0));
     let bad = Arc::new(AtomicU64::new(0));
