@@ -42,7 +42,7 @@
 //!   started by them (the RX thread cannot tell the two apart), so its
 //!   first gap counts as holes.
 //! - A read that ends a whole ring or more before the end of the furthest
-//!   read is a clock that went back to another time base ([`went_back`],
+//!   read is a clock that went back to another time base (`went_back`,
 //!   dstack #379: a new PTP grandmaster's time, 43.9 days back on
 //!   stream-obs, and every write was late for good). The ring follows it:
 //!   that read becomes the furthest and the flow starts again (start
@@ -51,7 +51,12 @@
 //!   re-read where it overlaps, and its writes there are late. Known
 //!   limit: for one ring after such a step, a slot still holding the old
 //!   base's sample is not marked read empty, so a write the reader
-//!   overtakes there counts written (as before camera-box#1485).
+//!   overtakes there counts written (as before camera-box#1485). The
+//!   rebase is a load and a store, not a compare-and-swap: a second reader
+//!   of the same ring (a ctl check beside the TX echo, dstack-dev only)
+//!   moving its end at that moment, or a write's late `first` landing
+//!   after the restart, can count a few positions of that step `holes`
+//!   instead of start holes, once.
 //! - The largest magnitude stored is kept until [`Ring::take_peak`] (the
 //!   heartbeat's peaks, once a second): one atomic per write.
 //!
@@ -321,7 +326,7 @@ impl Ring {
 /// ending at `at` then rebases the ring ([`Ring::read_at`]); a flow whose
 /// furthest end is that far past the clock's now starts its holes over
 /// ([`crate::media::rx`]).
-pub fn went_back(furthest: u64, at: u64) -> bool {
+pub(crate) fn went_back(furthest: u64, at: u64) -> bool {
     furthest.saturating_sub(at) >= SLOTS as u64
 }
 

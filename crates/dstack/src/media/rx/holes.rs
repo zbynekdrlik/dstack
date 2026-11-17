@@ -154,9 +154,13 @@ pub struct Placed {
 
 /// The clock went back under the flow (dstack #379, a new PTP time base: the
 /// transmitter's stamps went back with it): its furthest end, a whole ring
-/// or more past the clock's `now` ([`went_back`]), and its open holes are
+/// or more past the clock's `now` (`went_back`), and its open holes are
 /// the old base's. The flow starts over: the holes are lost, and the next
-/// packet is its first. Else nothing changes.
+/// packet is its first. Else nothing changes. A packet a ring or more past
+/// `now` is not placed at all ([`crate::media::rx`]'s writer): a stray of
+/// the old base after the step, or a transmitter stamping on another base
+/// (whose flow then counts no holes, gaps or reorders; its ring writes
+/// count `early`).
 pub fn follow_clock(furthest: &mut Option<u64>, holes: &mut Holes, now: u64) -> Lost {
     match *furthest {
         Some(e) if went_back(e, now) => {

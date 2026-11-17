@@ -1131,6 +1131,18 @@ fn a_flow_follows_the_clock_when_it_goes_back() {
         (5, 0, 1, 32),
         "{c:?}"
     );
+    // A stray packet of the old base after the step, then the new base's
+    // next: the stray opens no 43.9-day hole, so no giant gap is lost.
+    for pos in [p0 + 64, q0 + 128] {
+        t.send_to(&packet_at(pos, 1, 32), slot_addr(&s, 0)).unwrap();
+    }
+    pump(&mut rx, 0, 7, Some(ns_of(q0 + 1_000, RATE)), 0);
+    let c = s.lane(0);
+    assert_eq!(
+        (c.packets, c.out_of_order, c.gaps, c.gap_frames),
+        (7, 0, 1, 32),
+        "{c:?}"
+    );
 }
 
 #[test]

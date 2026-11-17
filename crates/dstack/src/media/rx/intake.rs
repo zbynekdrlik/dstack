@@ -81,7 +81,7 @@ use super::socket::{
 use super::{BUFFER, DRAIN, FRAMES_MAX, MAX_FLOWS, RxShared, holes, netlat};
 use crate::clock;
 use crate::media::packet;
-use crate::media::ring::Ring;
+use crate::media::ring::{Ring, went_back};
 use crate::media::tx::{MAX_CHANNELS, ns_of};
 use crate::wire::MAX_DATAGRAM;
 
@@ -609,8 +609,13 @@ fn place(p: PlaceArgs<'_>) -> u64 {
         stats,
         holes::follow_clock(&mut lane.end, &mut lane.holes, now),
     );
-    // dstack #278: holes, reorders and gaps.
-    let placed = holes::place(&mut lane.end, &mut lane.holes, pos, end, !late);
+    // dstack #278: holes, reorders and gaps; a packet a ring or more past
+    // now (another time base's, #379) is no measure of them.
+    let placed = if went_back(pos, now) {
+        holes::Placed::default()
+    } else {
+        holes::place(&mut lane.end, &mut lane.holes, pos, end, !late)
+    };
     if placed.out_of_order {
         count(&stats.out_of_order);
     }

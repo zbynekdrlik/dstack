@@ -653,7 +653,7 @@ fn counters_add_field_by_field() {
 fn a_ring_follows_its_reader_when_the_clock_goes_back() {
     let rate = 96_000;
     let lead = 4 * N as u64;
-    for step_ns in [3_792_840_060_134_767, 1_000_000_000, 1_000_000] {
+    for step_ns in [3_792_840_060_134_767, 1_000_000_000, 10_000_000, 1_000_000] {
         let step = crate::clock::to_samples(step_ns, rate);
         let ring = Ring::new();
         // On the old base: the writer `lead` ahead of the reader.
