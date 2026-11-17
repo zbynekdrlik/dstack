@@ -1,7 +1,8 @@
 //! A whole device on the test-only system clock (dasio's CI E2E: a
 //! GitHub-hosted runner has no dsync and no PTP network). The real
-//! host is prepared on the box's IPv4 address on its default route (the
-//! production checks stay: no loopback, a real MAC) with
+//! host is prepared on loopback (dstack #366: this workspace is a test
+//! run, served on loopback with a test MAC, so nothing reaches a site's
+//! network) with
 //! `ClockSource::System` and a state
 //! file that subscribes RX 1 to our own TX 1 (resolved from our own
 //! records, no mDNS); it starts its threads as in production. TX 1 sends
@@ -91,18 +92,11 @@ fn config_in(dir: &Path, rx: bool) -> PathBuf {
     path
 }
 
-/// The box's IPv4 address on its default route: the adapter a runner
-/// really uses (not a virtual or down one). Connecting a UDP socket picks
-/// the route and sends nothing.
-fn routed_ipv4() -> Ipv4Addr {
-    let probe = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).expect("a UDP socket");
-    probe
-        .connect((Ipv4Addr::new(192, 0, 2, 1), 9))
-        .expect("a default route on this box");
-    match probe.local_addr().expect("the routed address") {
-        SocketAddr::V4(a) if !a.ip().is_loopback() && !a.ip().is_unspecified() => *a.ip(),
-        other => panic!("no routed IPv4 address on this box: {other}"),
-    }
+/// The test device's address: loopback, so none of its mDNS, info or
+/// heartbeat multicasts leaves the box (dstack #366: this workspace is a
+/// test run, which refuses a device on a site address).
+fn test_ipv4() -> Ipv4Addr {
+    Ipv4Addr::LOCALHOST
 }
 
 /// The number after `"key":` in the first object of `json` that starts
@@ -166,7 +160,7 @@ fn wait_checked(media: &dstack::daemon::media::Media, host: &host::Host, frames:
 fn our_tx_reaches_our_rx_clean_on_the_system_clock() {
     let _one = ONE_DEVICE.lock().unwrap_or_else(|e| e.into_inner());
     let dir = tempfile::tempdir().unwrap();
-    let ip = routed_ipv4();
+    let ip = test_ipv4();
     let opts = Options {
         config: device_in(dir.path()),
         place: Place::Ip(ip),
@@ -312,7 +306,7 @@ fn a_tx_only_device_serves_a_receiver() {
     use std::net::SocketAddrV4;
 
     let dir = tempfile::tempdir().unwrap();
-    let ip = routed_ipv4();
+    let ip = test_ipv4();
     let opts = Options {
         config: config_in(dir.path(), false),
         place: Place::Ip(ip),
@@ -391,7 +385,7 @@ fn arc_control_renames_our_running_device_s_channels() {
 
     let _one = ONE_DEVICE.lock().unwrap_or_else(|e| e.into_inner());
     let dir = tempfile::tempdir().unwrap();
-    let ip = routed_ipv4();
+    let ip = test_ipv4();
     let opts = Options {
         config: config_in(dir.path(), true),
         place: Place::Ip(ip),
@@ -435,7 +429,7 @@ fn discovery_lists_our_running_device_and_its_withdrawal() {
 
     let _one = ONE_DEVICE.lock().unwrap_or_else(|e| e.into_inner());
     let dir = tempfile::tempdir().unwrap();
-    let ip = routed_ipv4();
+    let ip = test_ipv4();
     let opts = Options {
         config: config_in(dir.path(), false),
         place: Place::Ip(ip),
@@ -491,7 +485,7 @@ fn control_subscribes_our_running_device_and_ends_it() {
 
     let _one = ONE_DEVICE.lock().unwrap_or_else(|e| e.into_inner());
     let dir = tempfile::tempdir().unwrap();
-    let ip = routed_ipv4();
+    let ip = test_ipv4();
     let opts = Options {
         config: config_in(dir.path(), true),
         place: Place::Ip(ip),
@@ -542,7 +536,7 @@ fn the_info_client_reads_our_running_device_s_model_and_versions() {
 
     let _one = ONE_DEVICE.lock().unwrap_or_else(|e| e.into_inner());
     let dir = tempfile::tempdir().unwrap();
-    let ip = routed_ipv4();
+    let ip = test_ipv4();
     let opts = Options {
         config: config_in(dir.path(), true),
         place: Place::Ip(ip),
@@ -593,7 +587,7 @@ fn a_direct_instance_query_reads_our_running_device_s_channel_record() {
 
     let _one = ONE_DEVICE.lock().unwrap_or_else(|e| e.into_inner());
     let dir = tempfile::tempdir().unwrap();
-    let ip = routed_ipv4();
+    let ip = test_ipv4();
     let opts = Options {
         config: config_in(dir.path(), false),
         place: Place::Ip(ip),
@@ -644,7 +638,7 @@ fn two_devices_share_one_address_each_on_its_own_ports() {
     use std::sync::atomic::AtomicU16;
 
     let _one = ONE_DEVICE.lock().unwrap_or_else(|e| e.into_inner());
-    let ip = routed_ipv4();
+    let ip = test_ipv4();
     let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let config_a = config_in(dir_a.path(), false);
     // B: another name, its own ports and process id.
@@ -715,7 +709,7 @@ fn our_device_creates_lists_sends_and_deletes_a_multicast_flow() {
 
     let _one = ONE_DEVICE.lock().unwrap_or_else(|e| e.into_inner());
     let dir = tempfile::tempdir().unwrap();
-    let ip = routed_ipv4();
+    let ip = test_ipv4();
     let opts = Options {
         config: config_in(dir.path(), false),
         place: Place::Ip(ip),
@@ -799,7 +793,7 @@ fn our_multicast_flow_survives_a_restart_of_the_device() {
 
     let _one = ONE_DEVICE.lock().unwrap_or_else(|e| e.into_inner());
     let dir = tempfile::tempdir().unwrap();
-    let ip = routed_ipv4();
+    let ip = test_ipv4();
     let opts = Options {
         config: config_in(dir.path(), false),
         place: Place::Ip(ip),
@@ -872,7 +866,7 @@ fn tx_end_stops_our_rx_and_it_recovers_by_itself() {
     let dir = tempfile::tempdir().unwrap();
     let opts = Options {
         config: device_in(dir.path()),
-        place: Place::Ip(routed_ipv4()),
+        place: Place::Ip(test_ipv4()),
         control: dir.path().join("control.sock"),
     };
     let prepared = host::prepare_with(&opts, &[], ClockSource::System).expect("the device set up");
@@ -965,7 +959,7 @@ fn tx_end_stops_our_rx_and_it_recovers_by_itself() {
 #[test]
 fn each_device_binds_its_slot_s_fixed_flow_ports() {
     let _one = ONE_DEVICE.lock().unwrap_or_else(|e| e.into_inner());
-    let ip = routed_ipv4();
+    let ip = test_ipv4();
     let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let config_a = device_in(dir_a.path());
     let config_b = device_in(dir_b.path());
@@ -1007,7 +1001,7 @@ fn each_device_binds_its_slot_s_fixed_flow_ports() {
 #[test]
 fn a_device_with_no_slot_and_no_flow_ports_refuses_to_start() {
     let _one = ONE_DEVICE.lock().unwrap_or_else(|e| e.into_inner());
-    let ip = routed_ipv4();
+    let ip = test_ipv4();
     let dir = tempfile::tempdir().unwrap();
     let config = device_in(dir.path());
     let text = std::fs::read_to_string(&config).unwrap()

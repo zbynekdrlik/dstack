@@ -2,13 +2,13 @@
 // Copyright (C) 2026 dstack contributors.
 
 //! dstack #20: a device inside an app's own process ([`Embedded`]), on the
-//! box's routed address and its own system clock. A file of its own: its
+//! loopback (dstack #366) and its own system clock. A file of its own: its
 //! process must never have had a signal handler, so that it can check
 //! that [`Embedded`] leaves none (the whole-device tests use
 //! `Signals::Report`, and tokio keeps a handler for the process's life).
 //! Cargo runs test files one after another, so it never meets their ports.
 
-use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
+use std::net::Ipv4Addr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -23,7 +23,7 @@ use dstack_audio_io::{Block, Process};
 const TEST_DEVICE: &str = include_str!("../../../config/test-device.toml");
 
 /// Held by each test that runs the device: they bind the same Dante ports
-/// on the routed address, and the test harness runs a file's tests at once.
+/// on loopback, and the test harness runs a file's tests at once.
 static ONE_DEVICE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// The test device's config, 10 ms latency (a test proves the path, not
@@ -55,15 +55,11 @@ fn config_in(dir: &std::path::Path) -> DeviceConfig {
     cfg
 }
 
-/// The box's IPv4 address on its default route (connecting a UDP socket
-/// picks the route and sends nothing).
-fn routed_ipv4() -> Ipv4Addr {
-    let probe = UdpSocket::bind("0.0.0.0:0").unwrap();
-    probe.connect("192.0.2.1:9").unwrap();
-    match probe.local_addr().expect("the routed address") {
-        SocketAddr::V4(a) => *a.ip(),
-        other => panic!("no routed IPv4 address on this box: {other}"),
-    }
+/// The test device's address: loopback, so none of its mDNS, info or
+/// heartbeat multicasts leaves the box (dstack #366: this workspace is a
+/// test run, which refuses a device on a site address).
+fn test_ipv4() -> Ipv4Addr {
+    Ipv4Addr::LOCALHOST
 }
 
 /// The app's processor: a constant on output 0, and the largest input 0
@@ -108,7 +104,7 @@ fn an_embedded_device_runs_the_app_s_processor_and_starts_again() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = tempfile::tempdir().unwrap();
-    let ip = routed_ipv4();
+    let ip = test_ipv4();
     let cfg = config_in(dir.path());
     for round in 0..2 {
         let heard = Arc::new(AtomicU64::new(0f64.to_bits()));
@@ -187,7 +183,7 @@ fn an_embedded_pump_plays_at_the_latency_dante_controller_set() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = tempfile::tempdir().unwrap();
-    let ip = routed_ipv4();
+    let ip = test_ipv4();
     let cfg = config_in(dir.path());
     let state = dir.path().join("state.toml");
     let mut saved = DeviceState::load_or_default(&cfg).unwrap();

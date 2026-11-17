@@ -275,9 +275,19 @@ fn prepare_refuses_as_the_binary_did_before_anything_is_bound() {
     // once; the engine's channels were the device's. An address or an
     // interface not there yet is waited for (dstack #225,
     // `a_place_that_appears_after_the_start_is_the_device_s`).
-    let e = prepare(&opts(path.clone(), Place::Ip(Ipv4Addr::LOCALHOST)), &[15])
-        .err()
-        .unwrap();
+    // The production lookup, as the binary runs it: this process is a test
+    // run (dstack #366), where `prepare` serves loopback on purpose.
+    let (_, cfg) = config_in(dir.path());
+    let e = prepare_on(
+        cfg,
+        &Place::Ip(Ipv4Addr::LOCALHOST),
+        Some(&dir.path().join("control.sock")),
+        &[15],
+        ClockSource::Linked,
+        |place| daemon::resolve_place(place, PlaceWait::Now, interfaces, |_| panic!("waited")),
+    )
+    .err()
+    .unwrap();
     let why = run_error(e);
     assert!(why.contains("loopback"), "{why}");
     assert!(!why.contains("127.0.0"), "no address in {why}");
@@ -511,3 +521,5 @@ fn a_device_with_no_slot_and_a_base_unset_is_a_setup_error() {
     );
     assert_eq!(cfg.tx_port_base, None, "nothing set");
 }
+
+mod test_run;

@@ -9,7 +9,7 @@
 //! the tests' devices had aligned counts and were read back with our own
 //! parser.
 //!
-//! The device runs on the box's routed IPv4 address, as in
+//! The device runs on loopback (dstack #366), as in
 //! `tests/system_clock.rs` (one device at a time: each binds the Dante
 //! ports on that address).
 
@@ -73,16 +73,11 @@ fn config_in(dir: &Path, tx: usize, rx: usize) -> PathBuf {
     path
 }
 
-/// The box's IPv4 address on its default route (sends nothing).
-fn routed_ipv4() -> Ipv4Addr {
-    let probe = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).expect("a UDP socket");
-    probe
-        .connect((Ipv4Addr::new(192, 0, 2, 1), 9))
-        .expect("a default route on this box");
-    match probe.local_addr().expect("the routed address") {
-        SocketAddr::V4(a) if !a.ip().is_loopback() && !a.ip().is_unspecified() => *a.ip(),
-        other => panic!("no routed IPv4 address on this box: {other}"),
-    }
+/// The test device's address: loopback, so none of its mDNS, info or
+/// heartbeat multicasts leaves the box (dstack #366: this workspace is a
+/// test run, which refuses a device on a site address).
+fn test_ipv4() -> Ipv4Addr {
+    Ipv4Addr::LOCALHOST
 }
 
 /// A socket on the heartbeat group, joined on `ip`'s network, sharing the
@@ -111,7 +106,7 @@ fn heartbeat_socket(ip: Ipv4Addr) -> UdpSocket {
 fn walked_beats(tx: usize, rx: usize) -> Vec<walk::Heartbeat> {
     let _one = ONE_DEVICE.lock().unwrap_or_else(|e| e.into_inner());
     let dir = tempfile::tempdir().unwrap();
-    let ip = routed_ipv4();
+    let ip = test_ipv4();
     let opts = Options {
         config: config_in(dir.path(), tx, rx),
         place: Place::Ip(ip),

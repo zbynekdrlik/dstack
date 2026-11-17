@@ -1,0 +1,9 @@
+# dstack #366: every process cargo runs in this workspace (cargo test, cargo
+# run, nextest, cargo-mutants, CI) is a TEST RUN: the host serves a device
+# only on a loopback address (`host::test_run`), so no test's mDNS, info or
+# heartbeat multicast leaves the box onto a site's network. A live test on a
+# real network sets DSTACK_LIVE_TEST=1 on its command line. Consumers never
+# read this file (a git dependency's .cargo is not theirs), and production
+# never has the variable.
+[env]
+DSTACK_TEST_LOOPBACK = "1"
