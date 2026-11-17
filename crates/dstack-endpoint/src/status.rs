@@ -325,8 +325,8 @@ mod tests {
         let pulled = fifo.push_with(1440, |_, _| 0.5);
         let mut big = [0.0f32; 960];
         player.fill_pulled(pulled, &mut big, 1, |x| x as f32);
-        let read = Snapshot::read(&fifo, &player.stats(), 96_000);
-        assert_eq!((read.output_gaps, read.output_lost_ms), (1, 5.0));
+        let read = Snapshot::read(&fifo, &player.stats(), 48_000);
+        assert_eq!((read.output_gaps, read.output_lost_ms), (1, 10.0));
     }
 
     /// dstack #303: the resyncs are read from the player and named in the

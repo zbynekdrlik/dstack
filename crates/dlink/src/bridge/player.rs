@@ -76,8 +76,8 @@
 //!   FIFO itself just before and asks for the room it has (dlisten's
 //!   WASAPI callback, [`Player::fill_pulled`]) comes back from a hold past
 //!   its buffer with a pull of the whole time held and a call of the whole
-//!   buffer; the excess ([`output_gap`]) is the time the card played
-//!   silence of its own, dropped once and counted apart
+//!   buffer; the whole engine periods of its excess ([`output_gap`]) are
+//!   the time the card played silence of its own, dropped and counted apart
 //!   ([`Stats::output_gaps`]), never left to the excess bound (whose
 //!   re-centre mid-call ran the rest of the big call dry).
 //!
@@ -131,21 +131,64 @@ pub fn hard_excess_s(target_s: f64, chunk_s: f64) -> f64 {
         .min(2.0 * (MAX_APP_BUFFER_NS as f64 / 1e9))
 }
 
-/// The input frames to drop before a call of an output that writes the
-/// FIFO itself and asks for the room it has ([`Player::fill_pulled`]):
-/// its pull wrote `pulled` frames and the call takes `call` (input
-/// frames), its last call that was no gap took `usual`. A call bigger than
-/// the usual one whose pull wrote more than it takes by more than `least`
-/// (a converter call) follows a gap of the output: the card played the
-/// excess as its own silence, so the excess is dropped. Otherwise 0: a
-/// late call of the same size (a fixed-size callback) or a pull within
-/// `least` of its take (the two clocks' reads, a late call the card's
-/// buffer covered).
-pub fn output_gap(pulled: usize, call: usize, usual: usize, least: usize) -> usize {
-    if call > usual && pulled > call + least {
-        pulled - call
+/// What a call of an output that writes the FIFO itself drops
+/// ([`output_gap`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Gap {
+    /// Input frames to drop before the call: whole periods the card played
+    /// as silence of its own.
+    pub drop: usize,
+    /// The excess left for the next call to settle, input frames (0: no
+    /// gap open).
+    pub owed: i64,
+}
+
+/// What a call of an output that writes the FIFO itself and asks for the
+/// room it has drops ([`Player::fill_pulled`]): its pull wrote `pulled`
+/// frames and the call takes `call`, the output's usual call (its engine
+/// period) is `usual`, and the call before left `owed`, all input frames.
+///
+/// A WASAPI shared-mode engine reads the client's buffer one period at
+/// each of its ticks, so its padding falls a period at a time and the card
+/// plays silence only at a tick that finds the buffer empty: whole periods.
+/// A callback held H past its event's tick (a buffer of two periods) still
+/// finds a period of padding while H is under a period (a call of the
+/// usual size: nothing lost), and none once the next tick read it (a call
+/// of the whole buffer). The ticks from the one after that to the call
+/// found nothing: `floor(H / period) - 1` periods of silence. The call's
+/// excess (`pulled - call`) is H - period less the lateness d of the call
+/// before after its own tick (the pull's start): its whole periods are the
+/// silence, unless H ends within d past a tick, where they come out a
+/// period short. The part left (`owed`, the call's phase off the grid) is
+/// settled by the next call, back on the grid: it reads that phase less
+/// (plus its own lateness), so the two calls' excess adds up to the
+/// silence within the two latenesses' difference, and the next call drops
+/// that sum rounded to whole periods (0 when no period was missed).
+///
+/// So a call bigger than the usual one drops its excess's whole periods
+/// and owes the rest; the call after it drops the rounded sum and owes
+/// nothing. Any other call drops nothing: a late call of the usual size (a
+/// fixed-size callback, an ASIO switch, reads more and takes the same), a
+/// call with no gap open, or no usual call known yet (`usual` 0).
+pub fn output_gap(owed: i64, pulled: usize, call: usize, usual: usize) -> Gap {
+    if usual == 0 {
+        return Gap { drop: 0, owed: 0 };
+    }
+    let period = usual as i64;
+    let total = owed + pulled as i64 - call as i64;
+    if call > usual {
+        let drop = total.max(0) / period * period;
+        Gap {
+            drop: drop as usize,
+            owed: total - drop,
+        }
+    } else if owed == 0 {
+        Gap { drop: 0, owed: 0 }
     } else {
-        0
+        Gap {
+            drop: ((total + period / 2).max(0) / period * period) as usize,
+            owed: 0,
+        }
     }
 }
 
@@ -239,10 +282,11 @@ impl Stats {
         self.priming.load(Ordering::Relaxed)
     }
 
-    /// Gaps of the output itself: calls after which the output had played
-    /// silence of its own (its callback held past its buffer), whose
-    /// audio was dropped once ([`Player::fill_pulled`], dstack #307). Not
-    /// the bridge's dropouts: an app publishes it as `output_gaps`.
+    /// Gaps of the output itself: calls that dropped the audio due while
+    /// the output played silence of its own (its callback held past its
+    /// buffer; one a gap, two when the gap ended right at an engine tick),
+    /// [`Player::fill_pulled`], dstack #307. Not the bridge's dropouts: an
+    /// app publishes it as `output_gaps`.
     pub fn output_gaps(&self) -> u64 {
         self.output_gaps.load(Ordering::Relaxed)
     }
@@ -295,9 +339,11 @@ pub struct Player {
     convert_errors: u64,
     output_gaps: u64,
     output_lost_frames: u64,
-    /// The output's last call that was no gap, input frames
-    /// ([`output_gap`]).
+    /// The output's usual call, input frames: the smallest so far
+    /// ([`output_gap`]; 0: none yet).
     usual_call_in: usize,
+    /// The excess the last call left to the next ([`Gap::owed`]).
+    owed_in: i64,
     /// The producer's schedule ([`writer`]), followed when its chunk is
     /// wider than the output's callback.
     writer: Writer,
@@ -404,6 +450,7 @@ impl Player {
             output_gaps: stats.output_gaps(),
             output_lost_frames: stats.output_lost_frames(),
             usual_call_in: 0,
+            owed_in: 0,
             writer: Writer::new(chunk_in, net_rate),
             arrived,
             skipped: 0,
@@ -449,18 +496,23 @@ impl Player {
     /// Such an output's callback held past its buffer comes back to a card
     /// that played silence meanwhile: its pull reads the whole time held
     /// and the call asks for the whole buffer, so the time the card played
-    /// silence stays in the FIFO, `pulled` less the call's take. Up to
-    /// v0.6.170 that excess went past the controller's bound, which
-    /// re-centred to the target after the call's first converter block and
-    /// left the rest of the big call to run the FIFO dry (an underrun), or,
-    /// under the bound, stayed as latency (mbc's dlisten, 17.11.2026). Now
-    /// it is dropped once before the call ([`output_gap`]), counted as the
-    /// output's own gap ([`Stats::output_gaps`]), and the output's clock
-    /// counts the time (as a resync's skip), so the rate fit sees no step:
-    /// no re-centre, no underrun, the latency the same. A fixed-size
-    /// callback (an ASIO switch) late by L reads L more and takes the same:
-    /// nothing is dropped there ([`output_gap`] needs a call bigger than
-    /// the usual), and the next call reads L less.
+    /// silence, whole engine periods, stays in the FIFO. Up to v0.6.170
+    /// that excess went past the controller's bound, which re-centred to
+    /// the target after the call's first converter block and left the rest
+    /// of the big call to run the FIFO dry (an underrun), or, under the
+    /// bound, stayed as latency (mbc's dlisten, 17.11.2026). Now those
+    /// periods are dropped ([`output_gap`]: the excess's whole periods
+    /// before the big call, the call's phase off the engine's grid settled
+    /// by the next call), counted as the output's own gap
+    /// ([`Stats::output_gaps`]), and the output's clock counts the time (as
+    /// a resync's skip), so the rate fit sees no step: no re-centre, no
+    /// underrun, the latency the same. A fixed-size callback (an ASIO
+    /// switch) late by L reads L more and takes the same: nothing is
+    /// dropped there (only a call bigger than the usual one opens a gap),
+    /// and the next call reads L less. A pull that wrote nothing on a held
+    /// call (its lock held by an output switch's old stream or the idle
+    /// drain, [`super::SharedPull::pull`]) is no gap this rule sees: that
+    /// call is served from the FIFO alone, as before.
     pub fn fill_pulled<T>(
         &mut self,
         pulled: usize,
@@ -470,21 +522,29 @@ impl Player {
     ) {
         if let Some(frames) = out.len().checked_div(outputs) {
             let call = frames_of(frames as f64 / f64::from(self.out_rate), self.net_rate);
-            let least = frames_of(BLOCK as f64 / f64::from(self.out_rate), self.net_rate);
-            match output_gap(pulled, call, self.usual_call_in, least) {
-                0 => self.usual_call_in = call,
-                gap if self.state == State::Running => {
+            let usual = self.usual_call_in;
+            let gap = output_gap(self.owed_in, pulled, call, usual);
+            // The usual call is the smallest (a stream's first call is often
+            // the whole buffer; a call of the whole buffer after a hold is
+            // no usual one).
+            if usual == 0 || call < usual {
+                self.usual_call_in = call;
+            }
+            if self.state == State::Running {
+                self.owed_in = gap.owed;
+                if gap.drop > 0 {
                     // The converter keeps its history: the audio jumps as
                     // the card's did, and a reset would add a step from
                     // silence (its filter's ring) to the card's gap.
-                    let dropped = self.fifo.skip(gap);
+                    let dropped = self.fifo.skip(gap.drop);
                     self.skipped +=
                         frames_of(dropped as f64 / f64::from(self.net_rate), self.out_rate) as u64;
                     self.output_gaps += 1;
                     self.output_lost_frames += dropped as u64;
                 }
+            } else {
                 // Priming: the priming starts from its own level.
-                _ => {}
+                self.owed_in = 0;
             }
         }
         self.fill_at(None, out, outputs, to);

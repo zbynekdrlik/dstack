@@ -129,7 +129,8 @@ fn output(
     let mut heard = Heard::default();
     let began = Instant::now();
     // The engine's reads up to `now`: a period at each tick passed.
-    let card = |now: Instant| (now - began).as_nanos() as u64 / PERIOD.as_nanos() as u64 * PERIOD_FRAMES;
+    let card =
+        |now: Instant| (now - began).as_nanos() as u64 / PERIOD.as_nanos() as u64 * PERIOD_FRAMES;
     let holes = || media.rx.rings()[0].counters().holes;
     // Frames written into the client's buffer, on the card's count (a
     // tick that found it short moves it on).
@@ -309,7 +310,11 @@ fn run(hold: Duration) -> (Heard, u64, String) {
 /// The asserts of a held run (module doc).
 fn judge(hold: Duration, heard: &Heard, restarts: u64, counts: &str) {
     let (before, after) = (Heard::mean_ms(heard.before), Heard::mean_ms(heard.after));
-    let verdict = if heard.ring_holes > 0 { "SENDER" } else { "OURS" };
+    let verdict = if heard.ring_holes > 0 {
+        "SENDER"
+    } else {
+        "OURS"
+    };
     let at = format!(
         "held {hold:?}: {heard:?}, restarts {restarts}, wait before {before:.2} ms, after {after:.2} ms; verdict {verdict} (ring holes in the window {}); {counts}",
         heard.ring_holes
