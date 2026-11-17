@@ -36,3 +36,4 @@ Start from `docs/HANDOVER.md`, then `docs/design/2026-10-30-shared-dstack.md`.
 - RX counters, the ring, the minute lines, status keys → `.claude/rules/rx-counters.md` (auto-loads on its `paths:`)
 - multicast sockets, keeping a group joined across an interface change → `.claude/rules/multicast.md` (auto-loads on its `paths:`)
 - device config/state parse errors, what may reach a log → `.claude/rules/config-errors.md` (auto-loads on its `paths:`)
+- the TX side's module layout (media/tx) → `.claude/rules/tx.md` (auto-loads on its `paths:`)
