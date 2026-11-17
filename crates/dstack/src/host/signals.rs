@@ -160,3 +160,7 @@ impl Watch {
         }
     }
 }
+
+// libc (raise) is a Linux dependency only.
+#[cfg(all(test, target_os = "linux"))]
+mod tests;
