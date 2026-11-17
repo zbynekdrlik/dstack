@@ -113,8 +113,6 @@ struct Judged {
     /// The sender's TX holes and its pump's writes after send.
     holes: u64,
     after_send: u64,
-    /// The bridge's underruns.
-    underruns: u64,
     /// The pump's stalls, and the pump's view at the window's end.
     stalls: u64,
     sent: String,
@@ -159,14 +157,13 @@ fn a_stalled_pump_leaves_the_tx_bridge_s_audio_whole() {
     .expect("the player");
     // The app: a steady write every PERIOD on its own clock, whatever the
     // device does, its gaps on the witness.
-    let witness = Arc::new(Witness::new(PERIOD, &buffer));
+    let witness = Arc::new(Witness::new(PERIOD, &buffer, Arc::clone(&stats)));
     let writing = Arc::new(AtomicBool::new(true));
     let app = {
-        let (fifo, writing, witness, stats) = (
+        let (fifo, writing, witness) = (
             Arc::clone(&fifo),
             Arc::clone(&writing),
             Arc::clone(&witness),
-            Arc::clone(&stats),
         );
         std::thread::spawn(move || {
             let mut next = Instant::now();
@@ -176,7 +173,7 @@ fn a_stalled_pump_leaves_the_tx_bridge_s_audio_whole() {
                     std::thread::sleep(wait);
                 }
                 fifo.push_with(PERIOD_FRAMES, |_, _| LEVEL);
-                witness.wrote(stats.underruns());
+                witness.wrote(next);
             }
         })
     };
@@ -220,10 +217,9 @@ fn a_stalled_pump_leaves_the_tx_bridge_s_audio_whole() {
     std::thread::sleep(SETTLE);
     let pump = || sender.media().engine().expect("the sender's pump");
     let (judged, window, aside) = judge(&witness, || {
-        let (holes, after_send, underruns, stalled, on0, off0) = (
+        let (holes, after_send, stalled, on0, off0) = (
             tx_holes(&sender),
             pump().writes_after_send,
-            stats.underruns(),
             stalls.load(Ordering::Relaxed),
             on.load(Ordering::Relaxed),
             off.load(Ordering::Relaxed),
@@ -237,7 +233,6 @@ fn a_stalled_pump_leaves_the_tx_bridge_s_audio_whole() {
             off: off.load(Ordering::Relaxed) - off0,
             holes: tx_holes(&sender) - holes,
             after_send: sent.writes_after_send - after_send,
-            underruns: stats.underruns() - underruns,
             stalls: stalls.load(Ordering::Relaxed) - stalled,
             sent: format!("{sent:?}"),
         }
@@ -247,7 +242,6 @@ fn a_stalled_pump_leaves_the_tx_bridge_s_audio_whole() {
         off,
         holes,
         after_send,
-        underruns,
         stalls,
         sent,
     } = judged;
@@ -262,13 +256,21 @@ fn a_stalled_pump_leaves_the_tx_bridge_s_audio_whole() {
         on + off >= 7 * u64::from(RATE),
         "{on} on, {off} off: {channel:?}"
     );
+    // A writer stall makes no TX hole and no write after send: every
+    // window's, set aside or judged.
+    let aside_counts: Vec<(u64, u64)> =
+        aside.iter().map(|(j, _)| (j.holes, j.after_send)).collect();
+    assert!(
+        aside_counts.iter().all(|&c| c == (0, 0)),
+        "the TX holes and writes after send of the windows set aside: {aside_counts:?}, {aside:?}"
+    );
+    let underruns = window.underruns;
     assert_eq!(
         (off, holes, after_send, underruns),
         (0, 0, 0, 0),
         "samples off the level, the sender's TX holes, its pump's writes after send and its bridge's underruns with {stalls} pump stalls: {on} on, the sender's pump {sent}, {channel:?}; {}, the app thread's stall bound {} us, its record {window:?}; windows set aside (the app thread stalled) {aside:?}",
         verdict(
             &window,
-            underruns,
             &[("TX holes", holes), ("writes after send", after_send)]
         ),
         witness.stall_us(),

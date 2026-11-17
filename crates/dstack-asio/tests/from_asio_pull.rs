@@ -125,8 +125,6 @@ struct Judged {
     /// The bridge device's TX holes and its pump's writes after send.
     holes: u64,
     after_send: u64,
-    /// The from-ASIO player's underruns.
-    underruns: u64,
     /// The pump's stalls, and the pump's view at the window's end.
     stalls: u64,
     sent: String,
@@ -230,14 +228,14 @@ fn a_stalled_pump_against(to_asio: usize) {
     // pump does, from the device's start (a driver opened at the bridge's
     // start), its gaps on the witness.
     let period = Duration::from_nanos(BUFFER as u64 * 1_000_000_000 / u64::from(RATE));
-    let witness = Arc::new(Witness::new(period, &bridge.app_buffer(&opened)));
+    let witness = Arc::new(Witness::new(
+        period,
+        &bridge.app_buffer(&opened),
+        Arc::clone(&stats),
+    ));
     let running = Arc::new(AtomicBool::new(true));
     let driver = {
-        let (running, witness, stats) = (
-            Arc::clone(&running),
-            Arc::clone(&witness),
-            Arc::clone(&stats),
-        );
+        let (running, witness) = (Arc::clone(&running), Arc::clone(&witness));
         std::thread::spawn(move || {
             let input = vec![LEVEL; BUFFER];
             let mut out = vec![0f64; BUFFER * to_asio];
@@ -248,7 +246,7 @@ fn a_stalled_pump_against(to_asio: usize) {
                     std::thread::sleep(wait);
                 }
                 side.process(&mut Block::new(BUFFER, &input, &mut out));
-                witness.wrote(stats.underruns());
+                witness.wrote(next);
             }
         })
     };
@@ -279,10 +277,9 @@ fn a_stalled_pump_against(to_asio: usize) {
     // pump-run pull had none, so it is read where there is one.
     let fill = || sender.media().tx.tx_fill().unwrap_or_default();
     let (judged, window, aside) = judge(&witness, || {
-        let (holes, after_send, underruns, stalled, before, on0, off0) = (
+        let (holes, after_send, stalled, before, on0, off0) = (
             tx_holes(&sender),
             pump().writes_after_send,
-            stats.underruns(),
             stalls.load(Ordering::Relaxed),
             fill(),
             on.load(Ordering::Relaxed),
@@ -297,7 +294,6 @@ fn a_stalled_pump_against(to_asio: usize) {
             off: off.load(Ordering::Relaxed) - off0,
             holes: tx_holes(&sender) - holes,
             after_send: sent.writes_after_send - after_send,
-            underruns: stats.underruns() - underruns,
             stalls: stalls.load(Ordering::Relaxed) - stalled,
             sent: format!("{sent:?}"),
             before,
@@ -309,7 +305,6 @@ fn a_stalled_pump_against(to_asio: usize) {
         off,
         holes,
         after_send,
-        underruns,
         stalls,
         sent,
         before,
@@ -327,15 +322,43 @@ fn a_stalled_pump_against(to_asio: usize) {
         on + off >= 7 * u64::from(RATE),
         "{on} on, {off} off: {channel:?}"
     );
+    // A writer stall makes no TX hole, write after send, fill restart or
+    // fault: every window's, set aside or judged.
+    let aside_counts: Vec<[u64; 5]> = aside
+        .iter()
+        .map(|(j, _)| {
+            [
+                j.holes,
+                j.after_send,
+                j.after.rebootstraps - j.before.rebootstraps,
+                j.after.writes_after_send - j.before.writes_after_send,
+                j.after.faults,
+            ]
+        })
+        .collect();
+    assert!(
+        aside_counts.iter().all(|c| *c == [0; 5]),
+        "the TX holes, writes after send, fill restarts, fill writes after send and faults of the windows set aside: {aside_counts:?}, {aside:?}"
+    );
+    let underruns = window.underruns;
+    let fill_counts = [
+        ("TX holes", holes),
+        ("writes after send", after_send),
+        (
+            "the fill's restarts",
+            after.rebootstraps - before.rebootstraps,
+        ),
+        (
+            "the fill's writes after send",
+            after.writes_after_send - before.writes_after_send,
+        ),
+        ("faults", after.faults),
+    ];
     assert_eq!(
         (off, holes, after_send, underruns),
         (0, 0, 0, 0),
         "samples off the level, the bridge device's TX holes, its pump's writes after send and the from-ASIO underruns with {stalls} pump stalls: {on} on, the bridge device's pump {sent}, its TX pull {filled:?}, {channel:?}; {}, the driver thread's stall bound {} us, its record {window:?}; windows set aside (the driver thread stalled) {aside:?}",
-        verdict(
-            &window,
-            underruns,
-            &[("TX holes", holes), ("writes after send", after_send)]
-        ),
+        verdict(&window, &fill_counts),
         witness.stall_us(),
     );
     // The TX thread filled every block of the judged window (128 frames at

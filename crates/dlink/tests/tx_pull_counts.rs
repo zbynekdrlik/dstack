@@ -93,9 +93,8 @@ struct Judged {
     /// The receiver's samples at the level and off it.
     on: u64,
     off: u64,
-    /// The sender's TX holes and its bridge's underruns.
+    /// The sender's TX holes.
     holes: u64,
-    underruns: u64,
     /// The pump's stalls.
     stalls: u64,
     /// The TX fill's counts at the window's start and end.
@@ -147,14 +146,13 @@ fn stalled_pump_at(network: u32, name: &str) {
     .expect("the player");
     // The app: a steady write every PERIOD on its own clock, its gaps on
     // the witness.
-    let witness = Arc::new(Witness::new(PERIOD, &buffer));
+    let witness = Arc::new(Witness::new(PERIOD, &buffer, Arc::clone(&stats)));
     let writing = Arc::new(AtomicBool::new(true));
     let app = {
-        let (fifo, writing, witness, stats) = (
+        let (fifo, writing, witness) = (
             Arc::clone(&fifo),
             Arc::clone(&writing),
             Arc::clone(&witness),
-            Arc::clone(&stats),
         );
         std::thread::spawn(move || {
             let mut next = Instant::now();
@@ -164,7 +162,7 @@ fn stalled_pump_at(network: u32, name: &str) {
                     std::thread::sleep(wait);
                 }
                 fifo.push_with(APP as usize / 100, |_, _| LEVEL);
-                witness.wrote(stats.underruns());
+                witness.wrote(next);
             }
         })
     };
@@ -208,10 +206,9 @@ fn stalled_pump_at(network: u32, name: &str) {
     std::thread::sleep(SETTLE);
     let fill = || sender.media().tx.tx_fill().expect("the TX pull's counts");
     let (judged, window, aside) = judge(&witness, || {
-        let (holes, before, underruns, stalled, on0, off0) = (
+        let (holes, before, stalled, on0, off0) = (
             tx_holes(&sender),
             fill(),
-            stats.underruns(),
             stalls.load(Ordering::Relaxed),
             on.load(Ordering::Relaxed),
             off.load(Ordering::Relaxed),
@@ -223,7 +220,6 @@ fn stalled_pump_at(network: u32, name: &str) {
             on: on.load(Ordering::Relaxed) - on0,
             off: off.load(Ordering::Relaxed) - off0,
             holes: tx_holes(&sender) - holes,
-            underruns: stats.underruns() - underruns,
             stalls: stalls.load(Ordering::Relaxed) - stalled,
             before,
             after: fill(),
@@ -233,7 +229,6 @@ fn stalled_pump_at(network: u32, name: &str) {
         on,
         off,
         holes,
-        underruns,
         stalls,
         before,
         after,
@@ -259,6 +254,24 @@ fn stalled_pump_at(network: u32, name: &str) {
         blocks + 50 >= expected && blocks <= expected + 50,
         "{blocks} blocks filled at {network} Hz, about {expected} due: {after:?}"
     );
+    // A writer stall makes no TX hole, fill restart, write after send or
+    // fault: every window's, set aside or judged.
+    let aside_counts: Vec<[u64; 4]> = aside
+        .iter()
+        .map(|(j, _)| {
+            [
+                j.holes,
+                j.after.rebootstraps - j.before.rebootstraps,
+                j.after.writes_after_send - j.before.writes_after_send,
+                j.after.faults,
+            ]
+        })
+        .collect();
+    assert!(
+        aside_counts.iter().all(|c| *c == [0; 4]),
+        "the TX holes, fill restarts, writes after send and faults of the windows set aside at {network} Hz: {aside_counts:?}, {aside:?}"
+    );
+    let underruns = window.underruns;
     let restarts = after.rebootstraps - before.rebootstraps;
     let after_send = after.writes_after_send - before.writes_after_send;
     assert_eq!(
@@ -267,7 +280,6 @@ fn stalled_pump_at(network: u32, name: &str) {
         "samples off the level, TX holes, bridge underruns, the fill's restarts, writes after send and faults at {network} Hz with {stalls} pump stalls: {on} on, {after:?}, {channel:?}; {}, the app thread's stall bound {} us, its record {window:?}; windows set aside (the app thread stalled) {aside:?}; the player's recentres {} and resyncs {}; the sender's status {status}",
         verdict(
             &window,
-            underruns,
             &[
                 ("TX holes", holes),
                 ("the fill's restarts", restarts),
