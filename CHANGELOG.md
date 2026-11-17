@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.168
 
 - **Fix (#366): dlink's `wait_for_place` takes a test run's loopback place** (`DSTACK_TEST_LOOPBACK=1`), as `Link::start` serves there; outside a test run loopback is refused as before. No API change.
 
