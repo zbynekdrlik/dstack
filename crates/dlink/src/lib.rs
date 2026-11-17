@@ -692,6 +692,14 @@ pub struct Link {
 /// cannot reach, an interface with several IPv4 addresses, an interface
 /// list that cannot be read) is [`HostError::Run`] at once.
 pub fn wait_for_place(place: &Place) -> Result<(), HostError> {
+    // dstack #366: a test run serves on loopback (as `Link::start` does), so
+    // its loopback place is there at once; every other place is looked up.
+    if dstack::host::test_run::TestRun::from_env()
+        .loopback(place)
+        .is_some()
+    {
+        return Ok(());
+    }
     dstack::daemon::wait_for_interface(place, dstack::host::interfaces, std::thread::sleep)
         .map(drop)
         .map_err(HostError::Run)
