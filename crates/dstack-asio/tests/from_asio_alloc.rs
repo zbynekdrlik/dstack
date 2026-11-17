@@ -74,6 +74,7 @@ fn the_tx_thread_s_from_asio_fill_allocates_nothing() {
         app_buffer_ns: None,
         to_asio_app_buffer_ns: None,
         from_asio_app_buffer_ns: None,
+        converter_taps: None,
     })
     .unwrap();
     let mut from = bridge.pull_from_asio().unwrap();

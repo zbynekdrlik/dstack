@@ -11,6 +11,8 @@
 //! to_asio = [1, 2]        # the driver output of each RX channel, 1-based
 //! from_asio = [1, 2]      # the driver input of each TX channel, 1-based
 //! app_buffer_ns = 5000000 # optional
+//! to_asio_app_buffer_ns = 1333333   # optional, dstack #387 (v0.6.172)
+//! from_asio_app_buffer_ns = 2000000 # optional, dstack #387
 //! ```
 //!
 //! [`parse`] takes the table's shape (the keys and their types: a typo is
@@ -49,6 +51,14 @@ pub struct Bridge {
     /// The bridge FIFO's target, ns (`None`: dstack's default).
     #[serde(default)]
     pub app_buffer_ns: Option<u64>,
+    /// The to-ASIO side's own target, ns (`None`: `app_buffer_ns`;
+    /// dstack-asio v0.6.172, dstack #387). The window has no control for
+    /// it: it shows and keeps the file's ([`keep_unedited`]).
+    #[serde(default)]
+    pub to_asio_app_buffer_ns: Option<u64>,
+    /// The from-ASIO side's own target, ns (as `to_asio_app_buffer_ns`).
+    #[serde(default)]
+    pub from_asio_app_buffer_ns: Option<u64>,
 }
 
 /// The table as the file holds it.
@@ -75,6 +85,8 @@ pub const DRIVER: &str = "ASIO driver";
 pub const TO_ASIO: &str = "Dante RX to driver outputs";
 pub const FROM_ASIO: &str = "Driver inputs to Dante TX";
 pub const APP_BUFFER: &str = "App buffer";
+pub const TO_ASIO_BUFFER: &str = "To-ASIO buffer";
+pub const FROM_ASIO_BUFFER: &str = "From-ASIO buffer";
 
 impl Bridge {
     /// Why dasio would refuse this bridge on a device with `rx` RX and `tx`
@@ -102,10 +114,16 @@ impl Bridge {
         }
         // dlink's own check and text (the range the bridge's FIFO takes);
         // unset is dstack's default, always in range.
-        if let Some(ns) = self.app_buffer_ns
-            && let Some(problem) = AppBuffer::new(0, 0).set(Some(ns)).problem()
-        {
-            out.push(format!("{APP_BUFFER}: {problem}"));
+        for (label, target) in [
+            (APP_BUFFER, self.app_buffer_ns),
+            (TO_ASIO_BUFFER, self.to_asio_app_buffer_ns),
+            (FROM_ASIO_BUFFER, self.from_asio_app_buffer_ns),
+        ] {
+            if let Some(ns) = target
+                && let Some(problem) = AppBuffer::new(0, 0).set(Some(ns)).problem()
+            {
+                out.push(format!("{label}: {problem}"));
+            }
         }
         out
     }
@@ -205,12 +223,24 @@ pub fn from_texts(
             to_asio,
             from_asio,
             app_buffer_ns,
+            to_asio_app_buffer_ns: None,
+            from_asio_app_buffer_ns: None,
         }),
         (to, from, app) => Err([to.err(), from.err(), app.err()]
             .into_iter()
             .flatten()
             .collect::<Vec<_>>()
             .join("; ")),
+    }
+}
+
+/// The bridge the window's controls give (`edited`), with the keys the
+/// window has no control for kept from the file's (`prev`).
+pub fn keep_unedited(prev: &Bridge, edited: Bridge) -> Bridge {
+    Bridge {
+        to_asio_app_buffer_ns: prev.to_asio_app_buffer_ns,
+        from_asio_app_buffer_ns: prev.from_asio_app_buffer_ns,
+        ..edited
     }
 }
 
@@ -240,6 +270,12 @@ pub fn write(doc: &mut DocumentMut, old: &Bridge, new: &Bridge) -> Result<(), St
     }
     if old.app_buffer_ns != new.app_buffer_ns {
         set_opt(t, "app_buffer_ns", new.app_buffer_ns)?;
+    }
+    if old.to_asio_app_buffer_ns != new.to_asio_app_buffer_ns {
+        set_opt(t, "to_asio_app_buffer_ns", new.to_asio_app_buffer_ns)?;
+    }
+    if old.from_asio_app_buffer_ns != new.from_asio_app_buffer_ns {
+        set_opt(t, "from_asio_app_buffer_ns", new.from_asio_app_buffer_ns)?;
     }
     Ok(())
 }

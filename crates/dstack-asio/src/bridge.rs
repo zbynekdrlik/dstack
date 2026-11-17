@@ -16,7 +16,10 @@
 //! late callbacks one for one (a late write while the TX thread reads on
 //! time), the to-ASIO one does not (its pull and play share the buffer
 //! switch), so to-ASIO can run shorter. Each player's ASRC can start from
-//! the last run's locked rate ([`Seed`], [`Bridge::seed_from`]).
+//! the last run's locked rate ([`Seed`], [`Bridge::seed_from`]). Both
+//! converters may run a shorter sinc ([`Spec`]'s `converter_taps`, dstack
+//! #382: 48 taps at 96 <-> 96 kHz delay 0.250 ms a direction instead of
+//! 1.333 ms and keep 20 Hz to 20 kHz flat).
 //!
 //! - **Dante -> ASIO:** the driver's buffer switch runs [`AsioSide`], whose
 //!   player plays the to-ASIO FIFO at the driver's clock (dlisten's
@@ -134,6 +137,47 @@ pub struct Spec {
     /// The from-ASIO FIFO's own target, ns (dstack #382; `None`:
     /// `app_buffer_ns`).
     pub from_asio_app_buffer_ns: Option<u64>,
+    /// Both converters' sinc length, taps (dstack #382, the owner's
+    /// ROZHODNUTÉ of 17.11.2026; `None`: [`MAX_CONVERTER_TAPS`], as
+    /// before): [`MIN_CONVERTER_TAPS`] to [`MAX_CONVERTER_TAPS`] in steps of
+    /// [`dstack_resample::TAPS_STEP`], else [`Bridge::new`] refuses. The
+    /// delay is half the length a direction (at 96 <-> 96 kHz 48 taps
+    /// 0.250 ms, 32 taps 0.167 ms, 256 taps 1.333 ms;
+    /// `Stats::converter_delay_ns`). At equal rates 48 taps keep 20 Hz to
+    /// 20 kHz flat and 32 lose 0.4 dB at 20 kHz; with a rate change a short
+    /// filter cuts the band (dstack #382 issuecomment-6952851834).
+    pub converter_taps: Option<u32>,
+}
+
+/// The shortest converter a bridge takes ([`Spec::converter_taps`]): 32
+/// taps, 0.167 ms at 96 <-> 96 kHz, -0.4 dB at 20 kHz.
+pub const MIN_CONVERTER_TAPS: u32 = 32;
+
+/// The longest converter a bridge takes and its default
+/// ([`dstack_resample::TAPS`]).
+pub const MAX_CONVERTER_TAPS: u32 = dstack_resample::TAPS as u32;
+
+/// Why `taps` ([`Spec::converter_taps`]) cannot be used, if it cannot.
+fn converter_taps_problem(taps: Option<u32>) -> Option<String> {
+    let t = taps?;
+    if (MIN_CONVERTER_TAPS..=MAX_CONVERTER_TAPS).contains(&t)
+        && (t as usize).is_multiple_of(dstack_resample::TAPS_STEP)
+    {
+        return None;
+    }
+    Some(format!(
+        "converter_taps: {t}; {MIN_CONVERTER_TAPS} to {MAX_CONVERTER_TAPS} in steps of {}",
+        dstack_resample::TAPS_STEP
+    ))
+}
+
+/// `player` with the spec's converter length ([`Spec::converter_taps`],
+/// checked at [`Bridge::new`]); unset, as made.
+fn tapped(player: Player, taps: Option<u32>) -> Result<Player, String> {
+    match taps {
+        Some(t) => player.with_taps(t as usize).map_err(|e| e.to_string()),
+        None => Ok(player),
+    }
 }
 
 /// The bridge: its FIFOs, players' counts and the pump's side (module doc).
@@ -199,7 +243,8 @@ pub fn to_asio_chunk_ns(buffer: AppBuffer, pulled: bool) -> u64 {
 }
 
 impl Bridge {
-    /// A bridge for `spec`; an error only for a rate the converter refuses.
+    /// A bridge for `spec`; an error for a rate the converter refuses or a
+    /// converter length out of range ([`Spec::converter_taps`]).
     pub fn new(spec: Spec) -> Result<Self, String> {
         Self::with_clock(spec, Arc::new(dstack::clock::app_monotonic_ns))
     }
@@ -208,6 +253,9 @@ impl Bridge {
     /// FIFOs' stamps on `clock` (a simulation's time; the app's clock in
     /// [`Bridge::new`], the FIFOs' own default).
     pub fn with_clock(spec: Spec, clock: Clock) -> Result<Self, String> {
+        if let Some(problem) = converter_taps_problem(spec.converter_taps) {
+            return Err(problem);
+        }
         let age = Arc::new(BlockAge::new(Arc::clone(&clock)));
         let to_asio = (spec.to_asio > 0).then(|| {
             Arc::new(fifo_for(spec.to_asio, spec.dante_rate).with_clock(Arc::clone(&clock)))
@@ -220,16 +268,19 @@ impl Bridge {
                 Arc::new(fifo_for(spec.from_asio, spec.dante_rate).with_clock(Arc::clone(&clock)));
             let buffer = AppBuffer::new(0, chunk_ns(u64::from(spec.block_frames), spec.dante_rate))
                 .set(Some(dlink::bridge::MIN_APP_BUFFER_NS));
-            let first = Player::new(
-                idle,
-                spec.dante_rate,
-                spec.dante_rate,
-                buffer,
-                // Nobody writes it.
-                0,
-                Arc::clone(&from_stats),
-            )
-            .map_err(|e| e.to_string())?;
+            let first = tapped(
+                Player::new(
+                    idle,
+                    spec.dante_rate,
+                    spec.dante_rate,
+                    buffer,
+                    // Nobody writes it.
+                    0,
+                    Arc::clone(&from_stats),
+                )
+                .map_err(|e| e.to_string())?,
+                spec.converter_taps,
+            )?;
             let (taker, switch) = switch();
             (Some((first, taker)), Some(switch))
         } else {
@@ -483,17 +534,21 @@ impl Bridge {
         let dante = self.spec.dante_rate;
         let (to_seed, from_seed) = self.seeds_for(rate);
         let chunk = to_asio_chunk_ns(to_buffer, self.pull.get().is_some());
+        let taps = self.spec.converter_taps;
         let player = match &self.to_asio {
             Some(fifo) => Some(seeded(
-                Player::new(
-                    Arc::clone(fifo),
-                    dante,
-                    rate,
-                    to_buffer,
-                    chunk,
-                    Arc::clone(&self.to_stats),
-                )
-                .map_err(|e| e.to_string())?,
+                tapped(
+                    Player::new(
+                        Arc::clone(fifo),
+                        dante,
+                        rate,
+                        to_buffer,
+                        chunk,
+                        Arc::clone(&self.to_stats),
+                    )
+                    .map_err(|e| e.to_string())?,
+                    taps,
+                )?,
                 to_seed,
             )),
             None => None,
@@ -502,16 +557,19 @@ impl Bridge {
         if let Some(switch) = &mut self.switch {
             let fifo =
                 Arc::new(fifo_for(self.spec.from_asio, rate).with_clock(Arc::clone(&self.clock)));
-            let p = Player::new(
-                Arc::clone(&fifo),
-                rate,
-                dante,
-                from_buffer,
-                // The driver writes the from-ASIO FIFO, its buffer at once.
-                from_buffer.chunk_ns(),
-                Arc::clone(&self.from_stats),
-            )
-            .map_err(|e| e.to_string())?;
+            let p = tapped(
+                Player::new(
+                    Arc::clone(&fifo),
+                    rate,
+                    dante,
+                    from_buffer,
+                    // The driver writes the from-ASIO FIFO, its buffer at once.
+                    from_buffer.chunk_ns(),
+                    Arc::clone(&self.from_stats),
+                )
+                .map_err(|e| e.to_string())?,
+                taps,
+            )?;
             switch.send(seeded(p, from_seed))?;
             from_asio = Some(fifo);
         }

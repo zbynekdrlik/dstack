@@ -67,3 +67,4 @@ One line per ticket: issue, commits, tests (RED -> GREEN where a bug), decisions
 - 17.11 16:25 CET: v0.6.171 = #307 (held output callback = the card's gap: Player::fill_pulled, dlisten on Windows; 134 caught 0 missed) + #383 (Realtek verdict by adapter family; 3 caught).
 - 17.11 17:06 CET: v0.6.172 = #382 (dstack-asio per-direction app buffer targets, ASRC seed file; item 2 measured: the 128-frame calls are not the cause; filter table for the owner; mutation 57/57 bridge::).
 - 17.11 17:40 CET: v0.6.173 = #386 (dstack-asio late_250us..late_2000us bins, UnderrunWatch names an underrun's cause; mutation 87 caught 0 missed).
+- 17.11 18:59 CET: v0.6.174 = #387 (dtray reads dasio's per-direction bridge keys; RED fe603f1 GREEN 9fa9f27; 8 caught) + #382 converter_taps (32-256 step 8, default 256; 48 taps 0.250 ms a direction at 96<->96, owner 17.11; 23 caught 0 missed).
