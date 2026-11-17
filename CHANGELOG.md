@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.160
 
 - **Fix (#340): the info server survives a long multicast send failure and logs it once a minute, not once a packet.** On a Windows PC after a reboot (dsg, 15.-16.11.2026) every heartbeat (224.0.0.233:8708) and info packet (224.0.0.231:8702) the info server sent failed with WSAEADDRNOTAVAIL (10049) for about 24 hours, while the device's address and unicast worked: Dante Controller and dcontroller lost the device's heartbeat and info, and the log got one WARN a packet (11 678 lines). A new socket (the app's restart) did not clear it, an adapter restart did; the cause inside Windows is unproven. Now (`info::sendwatch`):
   - the log: a failed send is one WARN at once when no such line went within the last minute (`info packets could not be sent (counted; one line a minute at most)`, with `failures` and the OS `error`), else it is counted into the next one; at most one line a minute even when failures and sends alternate. The first send that goes out after a recovery logs `info multicast sends work again` with the outage's failures (those not yet reported included).
