@@ -207,6 +207,7 @@ fn an_open_starts_the_apps_process_and_reads_running() {
     r.tick(10, 2560);
     r.fake.borrow_mut().events.late_callbacks = 2;
     r.fake.borrow_mut().events.fast_callbacks = 3;
+    r.fake.borrow_mut().events.late_bins = [1, 2, 3, 4, 5, 6, 7, 8];
     r.fake.borrow_mut().events.overloads = 4;
     r.fake.borrow_mut().events.callback_gap_max_ns = 5_500_000;
     r.fake.borrow_mut().events.resync = true;
@@ -223,6 +224,7 @@ fn an_open_starts_the_apps_process_and_reads_running() {
         (10, 2, 3, 4, 1)
     );
     assert_eq!(s.gap_max_ms, 5.5);
+    assert_eq!(s.late_bins, [1, 2, 3, 4, 5, 6, 7, 8]);
     assert_eq!(s.state, RunState::Running);
     assert_eq!(r.fake.borrow().closes, 0);
 }
