@@ -7,7 +7,8 @@
 //! `assert_no_alloc` (warn mode: the violation count must stay zero). Phase
 //! C adds the engine's pump (its media steps and blocks: the RX rings read,
 //! the processor, the engine rings written, the stats and histograms) and
-//! the TX passes that send the engine rings. The first test proves the
+//! the TX passes that send the engine rings. The TX passes are timed and
+//! their sleeps read as the TX thread does (dstack #359). The first test proves the
 //! detector sees an allocation. Its own test binary, because it installs
 //! the global allocator; every buffer, ring, checker, socket, the
 //! transmitter, the receiver and the pump are built before the detector
@@ -174,14 +175,32 @@ fn the_tx_thread_s_passes_do_not_allocate() {
     let mut tx = Transmitter::new(Arc::clone(&shared));
     let start = T / u64::from(RATE) * 1_000_000_000;
     reset_violation_count();
+    let base = std::time::Instant::now();
     assert_no_alloc(|| {
         // 100 ms in passes 250 µs apart: three reads of the plans, the
-        // sources and the keepalives, and every packet in between.
+        // sources and the keepalives, and every packet in between; each
+        // pass timed and each sleep's return read as the TX thread's loop
+        // does (dstack #359).
         for i in 0..400 {
-            tx.step(Some(start + i * 250_000), 0);
+            let now = Some(start + i * 250_000);
+            tx.timed_step(now, 0, || {
+                (
+                    u64::try_from(base.elapsed().as_nanos()).unwrap_or(u64::MAX),
+                    dstack::stream::split::thread_cpu_ns(),
+                )
+            });
+            let woke = Some(start + (i + 1) * 250_000);
+            tx.slept(tx.wake_ns(now), now, woke, true);
         }
     });
     assert_eq!(violation_count(), 0, "the TX passes allocated");
+    let thread = shared.tx_thread();
+    assert!(thread.pass_max_us > 0, "{thread:?}");
+    assert_eq!(
+        thread.pass_max_cpu_us.is_some(),
+        cfg!(target_os = "linux"),
+        "{thread:?}"
+    );
     let (la, lb) = (shared.lane(0), shared.lane(1));
     // 100 ms at 96 kHz: 300 packets of 32 frames, 600 of 16, less the first.
     assert!((295..=300).contains(&la.packets), "{la:?}");

@@ -741,6 +741,8 @@ pub struct TxShared {
     /// relay threads and the pump record here, the RX thread through its
     /// own handle ([`TxShared::scheduling`]).
     scheduling: Arc<Scheduling>,
+    /// The TX thread's sleep and pass peaks (dstack #359, [`split`]).
+    tx_thread: split::TxThreadStats,
     stop: AtomicBool,
     base: Instant,
 }
@@ -867,6 +869,7 @@ impl TxShared {
             rings,
             lanes: std::array::from_fn(|_| LaneStats::default()),
             receivers: std::array::from_fn(|_| Cell::new()),
+            tx_thread: split::TxThreadStats::default(),
             stop: AtomicBool::new(false),
             base: Instant::now(),
         })
@@ -1095,12 +1098,24 @@ impl TxShared {
         }
     }
 
+    /// The TX thread's sleep and pass peaks since the start (dstack #359).
+    pub fn tx_thread(&self) -> split::TxThreadView {
+        self.tx_thread.view()
+    }
+
     /// Every slot's bytes on the wire since the device started.
     pub fn bytes_sent(&self) -> u64 {
         self.lanes
             .iter()
             .map(|l| l.bytes.load(Ordering::Relaxed))
             .sum()
+    }
+
+    /// The TX thread's peaks, to record as the TX thread does (other
+    /// modules' tests: the status's `tx_thread`).
+    #[cfg(test)]
+    pub(crate) fn tx_thread_stats(&self) -> &split::TxThreadStats {
+        &self.tx_thread
     }
 
     /// Counts a sent packet of `len` datagram bytes on slot `slot`, as the
@@ -1170,24 +1185,7 @@ impl Schedule {
     /// samples ahead of the clock, starts it again (counted) and sends
     /// nothing now.
     pub fn due(&mut self, now: u64) -> Option<u64> {
-        let send = self.next.saturating_add(self.fpp);
-        if now > send.saturating_add(self.max_lag) || send > now.saturating_add(DISCONTINUITY) {
-            // Why (dasio, Windows): the lag past the send time, or a
-            // jump back. Rare (each one is a restart), so logged.
-            tracing::warn!(
-                lag = now as i64 - send as i64,
-                max_lag = self.max_lag,
-                "the TX schedule starts again"
-            );
-            self.realign(now);
-            return None;
-        }
-        if now < send {
-            return None;
-        }
-        let stamp = self.next;
-        self.next = send;
-        Some(stamp)
+        self.due_after(now, &split::Before::default())
     }
 
     /// A re-anchor of the clock at media time `now` (after it) with the
@@ -1224,6 +1222,34 @@ impl Schedule {
     pub fn realign(&mut self, now: u64) {
         self.next = aligned_after(now, self.fpp);
         self.rebootstraps += 1;
+    }
+
+    /// [`Schedule::due`] whose restart line also says what the TX thread
+    /// measured of the time `before` the pass (dstack #359): its last
+    /// sleep's oversleep and its last pass's wall and CPU time, so a
+    /// restart reads scheduled late, pass long or preempted.
+    pub fn due_after(&mut self, now: u64, before: &split::Before) -> Option<u64> {
+        let send = self.next.saturating_add(self.fpp);
+        if now > send.saturating_add(self.max_lag) || send > now.saturating_add(DISCONTINUITY) {
+            // Why (dasio, Windows): the lag past the send time, or a
+            // jump back. Rare (each one is a restart), so logged.
+            tracing::warn!(
+                lag = now as i64 - send as i64,
+                max_lag = self.max_lag,
+                oversleep_us = %split::Us(before.oversleep_ns),
+                last_pass_us = %split::Us(before.pass_ns),
+                last_pass_cpu_us = %split::Us(before.pass_cpu_ns),
+                "the TX schedule starts again"
+            );
+            self.realign(now);
+            return None;
+        }
+        if now < send {
+            return None;
+        }
+        let stamp = self.next;
+        self.next = send;
+        Some(stamp)
     }
 
     /// The starts again since the last call.
@@ -1320,6 +1346,9 @@ pub struct Transmitter {
     relayed: bool,
     /// When the last bounded escape began, PTP ns.
     escaped_ns: Option<u64>,
+    /// What the TX thread measured of the time before this pass (dstack
+    /// #359): the restart line's cause.
+    before: split::Before,
 }
 
 impl Transmitter {
@@ -1344,6 +1373,7 @@ impl Transmitter {
             latency_ns: shared.advertised_latency_ns(),
             relayed: false,
             escaped_ns: None,
+            before: split::Before::default(),
             shared,
         }
     }
@@ -1410,6 +1440,10 @@ impl Transmitter {
         };
         if escapes && now_ns.is_some() {
             self.escaped_ns = now_ns;
+        }
+        if escapes {
+            // The relay thread's passes come next: nothing measured.
+            self.before = split::Before::default();
         }
         escapes
     }
@@ -1504,6 +1538,7 @@ impl Transmitter {
             engine_shift,
             relayed,
             escaped_ns,
+            before,
             ..
         } = self;
         let clock = PassClock {
@@ -1534,7 +1569,7 @@ impl Transmitter {
             let fpp = usize::from(plan.fpp);
             let nch = usize::from(plan.nch);
             let mut holes = 0;
-            while let Some(stamp) = schedule.due(now) {
+            while let Some(stamp) = schedule.due_after(now, before) {
                 for (frame, &id) in frames.iter_mut().zip(&plan.channels).take(nch) {
                     let out = &mut frame[..fpp];
                     match usize::from(id).checked_sub(1).and_then(|i| {
@@ -1726,13 +1761,17 @@ fn run_passes(
     crate::clock::allow_escape(relay.is_some());
     let mut pin = super::repin::RePin::new(shared.cfg.io_cpu);
     let mut misses = 0u64;
+    // The base of the passes' wall times ([`split`], dstack #359).
+    let base = Instant::now();
     while !shared.stopping() {
         pin.keep(shared.now_ns());
         // The epoch before the time: the clock moves k before the epoch,
         // so a pass never sees a new epoch with the old time ([`shift`]).
         let anchor = crate::clock::Anchor::of(clock);
         let now = clock.now_ns();
-        tx.step(now, anchor);
+        tx.timed_step(now, anchor, || {
+            (nanos(base.elapsed()), crate::stream::split::thread_cpu_ns())
+        });
         // The bounded escape (dstack #1, `spin_escape_ms`, Windows): the
         // relay thread sends while this thread blocks one timer tick.
         #[cfg(any(target_os = "linux", windows))]
@@ -1755,7 +1794,14 @@ fn run_passes(
             );
             continue;
         }
-        clock.sleep_until(tx.wake_ns(now));
+        // How late the sleep returns, read right around it (dstack #359),
+        // on one epoch (a re-anchor moved the clock).
+        let target = tx.wake_ns(now);
+        let asked = clock.now_ns();
+        clock.sleep_until(target);
+        let woke = clock.now_ns();
+        let same = crate::clock::Anchor::of(clock).epoch == anchor.epoch;
+        tx.slept(target, asked, woke, same);
     }
 }
 
@@ -1978,6 +2024,7 @@ pub(crate) fn pin_to_cpu(_cpu: usize) -> bool {
 
 mod priority;
 pub mod relay;
+pub mod split;
 pub(crate) use priority::take_priority;
 pub use priority::{
     MediaThread, MmcssError, NO_MMCSS, Priority, Scheduled, Scheduling, join_mmcss,
