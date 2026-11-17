@@ -269,8 +269,11 @@ impl Bridge {
     /// the bridge's `from_asio` TX outputs. Hand it to
     /// `dlink::Link::start_pulling_with_tx` (with the to-ASIO pull, its
     /// map's `tx` the from-ASIO channels) or `dlink::Link::start_tx_pulling`
-    /// (no to-ASIO channel). From here on the pump's side plays no
-    /// from-ASIO audio: give the pump no TX channel (both starts do).
+    /// (no to-ASIO channel), or, building the device from dstack's parts
+    /// (dasio), claim it as a `dstack::media::tx::TxFill` with
+    /// `TxShared::claim_fill` before the TX thread starts. From here on the
+    /// pump's side plays no from-ASIO audio: give the pump no TX channel
+    /// (both dlink starts do).
     ///
     /// Call it before [`Bridge::dante_side`] (the from-ASIO player lives
     /// in the pump's side until then) and before the driver's first open

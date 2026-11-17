@@ -13,7 +13,10 @@
 //! the level, the bridge device's TX lanes count no hole, its pump no
 //! write after send, and the from-ASIO player no underrun. A file of its
 //! own, on loopback (dstack #366) and its own system clock; our device
-//! hears itself (the tests' rule: our device only). On a loaded dev1 run it
+//! hears itself (the tests' rule: our device only). A second case runs a
+//! bridge from ASIO only (`Link::start_tx_pulling`), and both read the TX
+//! thread's fill (status `tx_pull`): every block filled, no restart, no
+//! write after send, no fault. On a loaded dev1 run it
 //! real-time (`DSTACK_TEST_LOOPBACK=1 chrt -f 10 <binary>`,
 //! `.claude/rules/tests.md`).
 
@@ -24,6 +27,9 @@ use std::time::{Duration, Instant};
 use dlink::{Clock, Config, Link, Map, Place, Ports, Stopped, SubStatus};
 use dstack_asio::bridge::{Bridge, DanteSide, Spec};
 use dstack_asio::{Block, Opened, Process, Sample};
+
+/// One device pair at a time: each binds the Dante ports on loopback.
+static ONE_DEVICE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// The test device's address: loopback, so none of its mDNS, info or
 /// heartbeat multicasts leaves the box (dstack #366: this workspace is a
@@ -107,12 +113,56 @@ fn tx_holes(link: &Link) -> u64 {
         .sum()
 }
 
-#[test]
-fn a_stalled_pump_leaves_the_from_asio_bridge_whole() {
+/// The bridge device started as a dasio bridge instance starts it pulled
+/// (`to_asio` channels to ASIO: both ways, `Link::start_pulling_with_tx`;
+/// none: `Link::start_tx_pulling`), its pump running `side` under the
+/// stalls; the to-ASIO pull handed over when there is one.
+fn start_bridge(
+    bridge: &mut Bridge,
+    config: &Config,
+    place: &Place,
+    to_asio: usize,
+    stalls: &Arc<AtomicU64>,
+) -> Link {
+    let from = bridge.pull_from_asio().expect("the from-ASIO pull");
+    let side = Stalling {
+        side: bridge.dante_side().expect("the pump's side"),
+        seed: 364,
+        stalls: Arc::clone(stalls),
+    };
+    if to_asio == 0 {
+        let map = Map {
+            rx: vec![],
+            tx: vec![0],
+        };
+        return Link::start_tx_pulling_on(config, place, map, side, from, Clock::System)
+            .expect("the bridge device started");
+    }
+    let fifo = bridge.to_asio_fifo().expect("the to-ASIO FIFO");
+    let map = Map {
+        rx: vec![0],
+        tx: vec![0],
+    };
+    let (link, pull) =
+        Link::start_pulling_with_tx_on(config, place, map, side, fifo, from, Clock::System)
+            .expect("the bridge device started");
+    bridge
+        .pull_to_asio(pull)
+        .expect("the bridge takes the to-ASIO pull");
+    link
+}
+
+/// The stalled-pump run (module doc) of a bridge with `to_asio` channels to
+/// ASIO (0 or 1) and one from it.
+fn a_stalled_pump_against(to_asio: usize) {
+    let _one = ONE_DEVICE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = tempfile::tempdir().unwrap();
     let place = Place::Ip(test_ipv4());
+    let rx: &[&str] = if to_asio == 0 { &[] } else { &["In 1"] };
     let bridge_config = Config::new("asio-from-tx", dir.path().join("tx.toml"))
-        .rx(["In 1"])
+        .rx(rx.iter().copied())
         .tx(["Out 1"])
         .sample_rate(RATE);
     let rx_config = Config::new("asio-from-rx", dir.path().join("rx.toml"))
@@ -131,42 +181,21 @@ fn a_stalled_pump_leaves_the_from_asio_bridge_whole() {
         driver_inputs: 1,
         driver_outputs: 1,
         inputs: vec![0],
-        outputs: vec![0],
+        outputs: (0..to_asio as u32).collect(),
         input_sample: Some(Sample::Float32),
         output_sample: Sample::Float32,
     };
     let mut bridge = Bridge::new(Spec {
         dante_rate: RATE,
         block_frames: dlink::BLOCK as u32,
-        to_asio: 1,
+        to_asio,
         from_asio: 1,
         app_buffer_ns: None,
     })
     .expect("the bridge");
-    let fifo = bridge.to_asio_fifo().expect("the to-ASIO FIFO");
     let stats = bridge.from_asio_stats();
-    let from = bridge.pull_from_asio().expect("the from-ASIO pull");
     let stalls = Arc::new(AtomicU64::new(0));
-    let (sender, pull) = Link::start_pulling_with_tx_on(
-        &bridge_config,
-        &place,
-        Map {
-            rx: vec![0],
-            tx: vec![0],
-        },
-        Stalling {
-            side: bridge.dante_side().expect("the pump's side"),
-            seed: 364,
-            stalls: Arc::clone(&stalls),
-        },
-        fifo,
-        from,
-        Clock::System,
-    )
-    .expect("the bridge device started");
-    bridge
-        .pull_to_asio(pull)
-        .expect("the bridge takes the to-ASIO pull");
+    let sender = start_bridge(&mut bridge, &bridge_config, &place, to_asio, &stalls);
     let mut side = bridge.asio_side(&opened).expect("the driver's side");
     // The driver thread: a buffer switch every ASIO period, whatever the
     // pump does, from the device's start (a driver opened at the bridge's
@@ -178,7 +207,7 @@ fn a_stalled_pump_leaves_the_from_asio_bridge_whole() {
         std::thread::spawn(move || {
             let period = Duration::from_nanos(BUFFER as u64 * 1_000_000_000 / u64::from(RATE));
             let input = vec![LEVEL; BUFFER];
-            let mut out = vec![0f64; BUFFER];
+            let mut out = vec![0f64; BUFFER * to_asio];
             let mut next = Instant::now();
             while running.load(Ordering::Relaxed) {
                 next += period;
@@ -216,11 +245,15 @@ fn a_stalled_pump_leaves_the_from_asio_bridge_whole() {
     }
     std::thread::sleep(SETTLE);
     let pump = || sender.media().engine().expect("the bridge device's pump");
-    let (holes, after_send, underruns, stalled) = (
+    // The TX thread's fill (dstack #363's status `tx_pull`): the RED's
+    // pump-run pull had none, so it is read where there is one.
+    let fill = || sender.media().tx.tx_fill().unwrap_or_default();
+    let (holes, after_send, underruns, stalled, before) = (
         tx_holes(&sender),
         pump().writes_after_send,
         stats.underruns(),
         stalls.load(Ordering::Relaxed),
+        fill(),
     );
     late_us.store(0, Ordering::Relaxed);
     judging.store(true, Ordering::Relaxed);
@@ -231,6 +264,8 @@ fn a_stalled_pump_leaves_the_from_asio_bridge_whole() {
     let after_send = sent.writes_after_send - after_send;
     let underruns = stats.underruns() - underruns;
     let stalls = stalls.load(Ordering::Relaxed) - stalled;
+    let after = fill();
+    let filled = sender.media().tx.tx_fill();
     let channel = receiver.rx_channels().remove(0);
     let (on, off) = (on.load(Ordering::Relaxed), off.load(Ordering::Relaxed));
     running.store(false, Ordering::Relaxed);
@@ -246,7 +281,41 @@ fn a_stalled_pump_leaves_the_from_asio_bridge_whole() {
     assert_eq!(
         (off, holes, after_send, underruns),
         (0, 0, 0, 0),
-        "samples off the level, the bridge device's TX holes, its pump's writes after send and the from-ASIO underruns with {stalls} pump stalls: {on} on, the driver thread's latest switch {} us late, the bridge device's pump {sent:?}, {channel:?}",
+        "samples off the level, the bridge device's TX holes, its pump's writes after send and the from-ASIO underruns with {stalls} pump stalls: {on} on, the driver thread's latest switch {} us late, the bridge device's pump {sent:?}, its TX pull {filled:?}, {channel:?}",
         late_us.load(Ordering::Relaxed)
     );
+    // The TX thread filled every block of the judged window (128 frames at
+    // 48 kHz), and never started again, wrote after a send or faulted.
+    assert!(
+        filled.is_some(),
+        "the TX thread fills the from-ASIO channel"
+    );
+    let blocks = after.blocks - before.blocks;
+    let expected = JUDGED.as_secs() * u64::from(RATE) / dlink::BLOCK;
+    assert!(
+        blocks + 50 >= expected && blocks <= expected + 50,
+        "{blocks} blocks filled, about {expected} due: {after:?}"
+    );
+    assert_eq!(
+        (
+            after.rebootstraps - before.rebootstraps,
+            after.writes_after_send - before.writes_after_send,
+            after.faults
+        ),
+        (0, 0, 0),
+        "the TX pull's restarts, writes after send and faults: {after:?}"
+    );
+}
+
+/// A dasio bridge both ways (to ASIO pulled by the driver, #307; from ASIO
+/// by the TX thread).
+#[test]
+fn a_stalled_pump_leaves_the_from_asio_bridge_whole() {
+    a_stalled_pump_against(1);
+}
+
+/// A bridge from ASIO only (`Link::start_tx_pulling`).
+#[test]
+fn a_stalled_pump_leaves_a_from_asio_only_bridge_whole() {
+    a_stalled_pump_against(0);
 }
