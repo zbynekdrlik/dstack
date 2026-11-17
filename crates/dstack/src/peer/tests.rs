@@ -241,3 +241,168 @@ fn a_tone_break_logs_one_line() {
         "{line}"
     );
 }
+
+/// The peer's processor at obs's shape (a 440 Hz tone at 96 kHz, 128-frame
+/// blocks): blocks `from..from + blocks` of the media grid, each one's
+/// input the tone the app sends, from block `jump.0`'s sample `jump.1` on
+/// `jump.2` samples further on (0: the tone at the block's own positions).
+/// Each run starts as the engine pump starts one, with a discontinuity
+/// (its bootstrap, or the re-bootstrap after skipped blocks).
+fn hear(p: &mut Tones, from: u64, blocks: u64, jump: (u64, u64, u64)) {
+    let frames = 128u64;
+    let mut out = vec![0.0; 0];
+    p.discontinuity();
+    for b in 0..blocks {
+        let start = from + b * frames;
+        let input: Vec<f64> = (0..frames)
+            .map(|i| {
+                let past = (b, i) >= (jump.0, jump.1);
+                let n = start + i + if past { jump.2 } else { 0 };
+                tone::tone_at(n, 440, 96_000)
+            })
+            .collect();
+        let mut block = Block::new(frames as usize, &input, &mut out).at(start);
+        p.process(&mut block);
+    }
+}
+
+/// The peer's `own_skips` and its RX 1's `tone_gaps`, from its status.
+fn skips_and_gaps(p: &Tones) -> (serde_json::Value, serde_json::Value) {
+    let a = peer_args();
+    let v: serde_json::Value = serde_json::from_str(&status_json(&a, &p.shared(), "{}")).unwrap();
+    (
+        v["peer"]["own_skips"].clone(),
+        v["peer"]["rx"][0]["tone_gaps"].clone(),
+    )
+}
+
+/// dstack #358: the peer's OWN pump skipping blocks (a re-bootstrap: its
+/// next block starts past the last one's end) jumps the received tone by
+/// what it did not read. That is no break of the flow it receives: the
+/// check re-locks across the jump and counts it apart (`own_skips`). Each
+/// of these skips gave one 2-sample `misplaced` break before (#354).
+#[test]
+fn the_peer_s_own_skip_counts_no_tone_break() {
+    crate::test_log::undecided();
+    let frames = 128u64;
+    let mut p = Tones::new(vec![], 1, 96_000);
+    let text = crate::test_log::capture_warnings(|| {
+        let mut at = 5_000_000;
+        hear(&mut p, at, 40, (0, 0, 0));
+        for skip in [1, 5, 6, 11] {
+            at += 40 * frames + skip * frames;
+            hear(&mut p, at, 40, (0, 0, 0));
+        }
+    });
+    assert!(!text.contains("a tone break"), "{text}");
+    assert_eq!(skips_and_gaps(&p), (4.into(), 0.into()), "{text}");
+    // One WARN a jump: how far, and the count.
+    let lines: Vec<&str> = text
+        .lines()
+        .filter(|l| l.contains("dstack-dev peer: its own reads jumped"))
+        .collect();
+    assert_eq!(lines.len(), 4, "{text}");
+    for (n, (line, frames)) in lines.iter().zip([128, 640, 768, 1408]).enumerate() {
+        assert!(line.contains("dstack::peer::tone"), "{line}");
+        assert!(line.contains(&format!("frames={frames} ")), "{line}");
+        assert!(line.contains(&format!("own_skips={}", n + 1)), "{line}");
+    }
+}
+
+/// dstack #358: a block that starts BEFORE the last one's end (a re-anchor
+/// back) is the peer's own jump too, logged with its negative frames.
+#[test]
+fn an_own_jump_back_is_counted_with_its_frames() {
+    crate::test_log::undecided();
+    let frames = 128u64;
+    let mut p = Tones::new(vec![], 1, 96_000);
+    let text = crate::test_log::capture_warnings(|| {
+        hear(&mut p, 10 * frames, 40, (0, 0, 0));
+        hear(&mut p, 0, 40, (0, 0, 0));
+    });
+    assert_eq!(skips_and_gaps(&p), (1.into(), 0.into()), "{text}");
+    // From the last block's end, 50 blocks in, back to 0.
+    assert!(text.contains("frames=-6400 own_skips=1"), "{text}");
+}
+
+/// dstack #358: a break in the received flow still counts, with no own
+/// skip (the app's flow jumps 2300 samples, off the tone's period, inside
+/// a block at a steady start) and in the first block after an own skip (at
+/// its third sample, past the two the check re-locks on).
+#[test]
+fn a_break_in_the_received_flow_still_counts_beside_an_own_skip() {
+    let frames = 128u64;
+    let mut p = Tones::new(vec![], 1, 96_000);
+    hear(&mut p, 0, 40, (20, 64, 2300));
+    assert_eq!(skips_and_gaps(&p), (0.into(), 1.into()));
+    // An own skip of 3 blocks.
+    hear(&mut p, 43 * frames, 40, (0, 2, 2300));
+    assert_eq!(skips_and_gaps(&p), (1.into(), 2.into()));
+}
+
+/// dstack #358: a block start off the last one's end with NO discontinuity
+/// from the engine (a re-anchor the shift kept on the grid: the senders
+/// stepped with it, the inputs go on) is no jump of the peer's reads: no
+/// own skip, no re-lock, and a break of the flow at that block's start
+/// still counts.
+#[test]
+fn a_start_shift_without_a_discontinuity_is_no_own_skip() {
+    let frames = 128u64;
+    let mut p = Tones::new(vec![], 1, 96_000);
+    hear(&mut p, 0, 40, (0, 0, 0));
+    let mut out = vec![0.0; 0];
+    // The starts shift by 1000 samples, the inputs go on unbroken.
+    for b in 40..80u64 {
+        let input: Vec<f64> = (0..frames)
+            .map(|i| tone::tone_at(b * frames + i, 440, 96_000))
+            .collect();
+        let mut block = Block::new(frames as usize, &input, &mut out).at(1000 + b * frames);
+        p.process(&mut block);
+    }
+    assert_eq!(skips_and_gaps(&p), (0.into(), 0.into()));
+    // The flow jumps at a block's very first sample, no discontinuity.
+    for b in 80..120u64 {
+        let input: Vec<f64> = (0..frames)
+            .map(|i| tone::tone_at(2300 + b * frames + i, 440, 96_000))
+            .collect();
+        let mut block = Block::new(frames as usize, &input, &mut out).at(1000 + b * frames);
+        p.process(&mut block);
+    }
+    assert_eq!(skips_and_gaps(&p), (0.into(), 1.into()));
+}
+
+/// dstack #358: the pump's sequence when its clock goes away after a
+/// re-bootstrap: the discontinuity is still due, the next block is a free
+/// one (no media start, silent inputs, `Pump::free`), and the media's
+/// return bootstraps with another discontinuity. Each counts: the free
+/// block's without `frames` (no start), the restart's with the jump from
+/// the end of the last block WITH a start (free blocks move nothing). The
+/// free block's silence is a gap (the received audio was not read); on the
+/// peer's own test system clock the pump never paces itself after its
+/// start.
+#[test]
+fn a_jump_into_free_pacing_counts_without_frames_then_again_at_the_restart() {
+    crate::test_log::undecided();
+    let frames = 128u64;
+    let mut p = Tones::new(vec![], 1, 96_000);
+    let text = crate::test_log::capture_warnings(|| {
+        hear(&mut p, 0, 40, (0, 0, 0));
+        let silent = vec![0.0; frames as usize];
+        let mut out = vec![0.0; 0];
+        p.discontinuity();
+        for _ in 0..10 {
+            p.process(&mut Block::new(frames as usize, &silent, &mut out));
+        }
+        hear(&mut p, 100 * frames, 40, (0, 0, 0));
+    });
+    assert_eq!(skips_and_gaps(&p), (2.into(), 1.into()), "{text}");
+    let lines: Vec<&str> = text
+        .lines()
+        .filter(|l| l.contains("its own reads jumped"))
+        .collect();
+    assert_eq!(lines.len(), 2, "{text}");
+    assert!(!lines[0].contains("frames="), "{}", lines[0]);
+    assert!(lines[0].contains("own_skips=1"), "{}", lines[0]);
+    // From block 40's start (the last started one's end) to block 100.
+    assert!(lines[1].contains("frames=7680 own_skips=2"), "{}", lines[1]);
+}
