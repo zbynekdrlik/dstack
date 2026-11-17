@@ -273,7 +273,9 @@ impl Bridge {
     /// (dasio), claim it as a `dstack::media::tx::TxFill` with
     /// `TxShared::claim_fill` before the TX thread starts. From here on the
     /// pump's side plays no from-ASIO audio: give the pump no TX channel
-    /// (both dlink starts do).
+    /// (both dlink starts do). A pull taken and never handed to the device
+    /// leaves the from-ASIO channels silent (and refuses the driver's
+    /// second open, as an untaken handover does).
     ///
     /// Call it before [`Bridge::dante_side`] (the from-ASIO player lives
     /// in the pump's side until then) and before the driver's first open
