@@ -26,7 +26,7 @@ use dstack_audio_io::{Block, Process};
 
 use crate::device::Opened;
 use crate::format::Sample;
-use crate::state::{GapKind, callback_gap_kind, frames_to_ns};
+use crate::state::{GapKind, LATE_BINS, callback_gap_kind, frames_to_ns, lateness_bin};
 
 /// A run's counts, written by its buffer switches and read by the worker.
 #[derive(Debug)]
@@ -36,6 +36,8 @@ pub struct Counters {
     faults: AtomicU64,
     late: AtomicU64,
     fast: AtomicU64,
+    /// Buffer switches per lateness bin ([`lateness_bin`], dstack #386).
+    late_bins: [AtomicU64; LATE_BINS],
     /// The driver's buffer period, ns.
     period_ns: i64,
     /// The last buffer switch, ns on the caller's clock ([`NO_CALLBACK`]
@@ -57,6 +59,7 @@ impl Counters {
             faults: AtomicU64::new(0),
             late: AtomicU64::new(0),
             fast: AtomicU64::new(0),
+            late_bins: [const { AtomicU64::new(0) }; LATE_BINS],
             period_ns,
             last_ns: AtomicI64::new(NO_CALLBACK),
             gap_max_ns: AtomicI64::new(0),
@@ -88,6 +91,12 @@ impl Counters {
         self.fast.load(Ordering::Relaxed)
     }
 
+    /// Buffer switches per lateness bin so far ([`lateness_bin`]: 0.25 ms
+    /// bins up to two periods; later ones are [`Counters::late`]).
+    pub fn late_bins(&self) -> [u64; LATE_BINS] {
+        std::array::from_fn(|i| self.late_bins[i].load(Ordering::Relaxed))
+    }
+
     /// The longest gap since the last call, ns (0 when none came after
     /// another); starts the next interval.
     pub fn take_gap_max_ns(&self) -> i64 {
@@ -95,7 +104,8 @@ impl Counters {
     }
 
     /// A buffer switch at `now_ns`: the gap since the one before is kept as
-    /// the interval's max and counted by its kind. Atomics only.
+    /// the interval's max and counted by its kind and its lateness bin.
+    /// Atomics only.
     pub fn note_callback(&self, now_ns: i64) {
         let before = self.last_ns.swap(now_ns, Ordering::Relaxed);
         if before == NO_CALLBACK {
@@ -111,6 +121,9 @@ impl Counters {
                 self.fast.fetch_add(1, Ordering::Relaxed);
             }
             GapKind::Normal => {}
+        }
+        if let Some(bin) = lateness_bin(gap, self.period_ns) {
+            self.late_bins[bin].fetch_add(1, Ordering::Relaxed);
         }
     }
 }

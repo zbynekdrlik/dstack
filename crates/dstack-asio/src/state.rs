@@ -189,6 +189,9 @@ pub struct DeviceEvents {
     /// Buffer switches that came [`GapKind::Fast`] (a catch-up burst), since
     /// the start (monotonic).
     pub fast_callbacks: u64,
+    /// Buffer switches per lateness bin ([`lateness_bin`], [`LATE_BIN_KEYS`]),
+    /// since the start (monotonic): 0.25 ms bins under [`GapKind::Late`].
+    pub late_bins: [u64; LATE_BINS],
     /// Panics of the app's `Process` since the start (it plays silence from
     /// then on).
     pub faults: u64,
@@ -404,6 +407,49 @@ pub fn callback_gap_kind(gap_ns: i64, period_ns: i64) -> GapKind {
     } else {
         GapKind::Normal
     }
+}
+
+/// The width of one lateness bin ([`lateness_bin`]), ns: 0.25 ms.
+pub const LATE_BIN_NS: i64 = 250_000;
+
+/// The lateness bins a run counts ([`lateness_bin`]).
+pub const LATE_BINS: usize = 8;
+
+/// A status key per lateness bin, named by the bin's lower edge
+/// ([`lateness_bin`]): `late_250us` counts callbacks 0.25-0.5 ms late, ...,
+/// `late_2000us` those 2.0 ms late or more, up to two periods (later ones
+/// are `late_callbacks`).
+pub const LATE_BIN_KEYS: [&str; LATE_BINS] = [
+    "late_250us",
+    "late_500us",
+    "late_750us",
+    "late_1000us",
+    "late_1250us",
+    "late_1500us",
+    "late_1750us",
+    "late_2000us",
+];
+
+/// The lateness bin of a gap of `gap_ns` between two buffer switches of a
+/// driver whose buffer lasts `period_ns` (dstack #386): the switch came
+/// `gap_ns - period_ns` late. Bin `k` counts `k + 1` to `k + 2` bin widths
+/// ([`LATE_BIN_NS`]) late, the last bin everything from 2.0 ms on. `None`
+/// under one bin's width (jitter) and for a [`GapKind::Late`] gap, which
+/// `late_callbacks` counts, so no switch is counted twice.
+///
+/// The from-ASIO FIFO loses depth one for one with a switch's lateness
+/// (#382: audio lost from 1.0-1.5 ms late at a 1.333 ms target), well under
+/// the two periods of [`callback_gap_kind`]: these bins show it.
+pub fn lateness_bin(gap_ns: i64, period_ns: i64) -> Option<usize> {
+    if callback_gap_kind(gap_ns, period_ns) == GapKind::Late {
+        return None;
+    }
+    // Whole bin widths late; truncation puts an early switch at 0.
+    let widths = (gap_ns - period_ns) / LATE_BIN_NS;
+    if widths < 1 {
+        return None;
+    }
+    Some(widths.min(LATE_BINS as i64) as usize - 1)
 }
 
 /// The ASIO driver-to-host message selectors (asio.h `kAsio…`).

@@ -82,6 +82,12 @@
 //! its blocks' modelled age at the take (the driver's side records each
 //! hand-over, the side that plays the from-ASIO player its take: the
 //! pump's, or pulled the TX thread's fill; [`Bridge::from_asio_age`]).
+//!
+//! The underrun line ([`UnderrunWatch`], dstack #386): the status loop
+//! hands it both players' underruns and the runner's lateness bins
+//! (`runner::Status::late_bins`, 0.25 ms bins under `late_callbacks`); a
+//! rise is warned with the callbacks' lateness over the same time and
+//! whose it reads as ([`from_asio_cause`], [`to_asio_cause`]).
 
 use std::sync::{Arc, OnceLock};
 
@@ -97,9 +103,11 @@ use crate::device::Opened;
 mod age;
 mod from_asio;
 mod seed;
+mod underrun;
 pub use age::{AgeReport, BlockAge, NETWORK_ALLOWANCE_NS};
 pub use from_asio::FromAsio;
 pub use seed::{MAX_SEED_PPM, Seed};
+pub use underrun::{Cause, UnderrunCounts, UnderrunWatch, from_asio_cause, to_asio_cause};
 
 /// Frames a side converts at once at least (its interleaved scratch): the
 /// pump's side a whole pump block, the driver's side its whole buffer

@@ -541,6 +541,7 @@ impl Device for WinDevice {
             callback_gap_max_ns: c.take_gap_max_ns(),
             late_callbacks: c.late(),
             fast_callbacks: c.fast(),
+            late_bins: c.late_bins(),
             faults: c.faults(),
         }
     }
