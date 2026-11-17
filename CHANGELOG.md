@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.175
+
+- **Fix (#387): dtray reads a dasio bridge instance that sets `converter_taps`.** dasio's `[bridge]` takes the converter length (dstack-asio `Spec::converter_taps`, v0.6.174); dtray refused the file as an unknown field. It now reads it, refuses one outside 32-256 in steps of 8 (as dasio and dstack-asio do), keeps the file's on an edit and writes a changed one. API (additive): `dasio::bridge::{taps_problem, MIN_CONVERTER_TAPS, CONVERTER_TAPS}`. No latency change.
+
 ## 0.6.174
 
 - **Fix (#387): dtray reads a dasio bridge instance that sets the per-direction buffer targets.** dasio's `[bridge]` table takes `to_asio_app_buffer_ns` and `from_asio_app_buffer_ns` (dstack-asio v0.6.172); dtray's settings window refused such a file as an unknown field ("Settings not readable"). It now reads both, checks their range as the app buffer's, writes a changed one and keeps the file's on an edit (the window has no control for them). No latency change.
