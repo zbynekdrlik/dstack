@@ -293,8 +293,8 @@ impl Json {
 ///   `late_wakes` (wakes one block or more behind), `late_wakes_recent`
 ///   (the last 32 of them, oldest first: `unix_ms` UTC, `behind_us`,
 ///   `rebootstrap` 0/1, `oversleep_us`: how late the pump's sleep before
-///   that wake returned, absent where unmeasured, dstack #370); `threads`: each media thread that took its
-///   priority, `thread` (`pump`, `tx`, `tx_relay`, `rx`), `scheduling`
+///   that wake returned, absent where unmeasured, dstack #370);
+///   `threads`: each media thread that took its priority, `thread` (`pump`, `tx`, `tx_relay`, `rx`), `scheduling`
 ///   (`mmcss_high`, `mmcss_joined_priority_refused`, `highest`,
 ///   `sched_fifo`, `realtime` (Windows), `normal`, `refused`) and
 ///   `mmcss_task` (MMCSS's task index, null outside MMCSS).

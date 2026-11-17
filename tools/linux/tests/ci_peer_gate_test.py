@@ -322,6 +322,9 @@ class PerWakeOversleep(unittest.TestCase):
             (D_LINE.replace("06:38:39.999479Z", "06:38:42.000000Z"),),
         ]:
             self.assertFalse(two_in_a_second(*good, lines=bad)[0], bad)
+        # A second with one re-bootstrap: its own line still gives W.
+        line = D_LINE.replace("rebootstraps=2", "rebootstraps=1")
+        self.assertTrue(two_in_a_second(*good, lines=(line,))[0])
         # Another cause beside the late one still names the late one.
         line = D_LINE.replace("cause=late", "cause=late+retime")
         self.assertTrue(two_in_a_second(*good, lines=(line,))[0])

@@ -39,8 +39,9 @@ each `late_wakes_recent` entry carries its own sleep's oversleep
 (`oversleep_us`), so a re-bootstrap is matched to its own number, even
 when it shares its second with another (run 44032644214: two in one
 second, the line's peak 7192 us explained the 7187 us one only); the line
-then gives W only. An entry without the field (an older peer) falls back
-to the line's per-second peak. The oversleep is read
+then gives W only. An entry without the field (an older peer, or a sleep
+not measured) falls back to the line's per-second peak, under its strict
+rule (the line counts that re-bootstrap alone and names it its latest). The oversleep is read
 on the media clock, so a forward step of it would read as an oversleep
 too: this holds only because the gate's peers run on the TEST system
 clock (`--test-clock-ppm`; ci-peer.test.sh checks `clock.source ==

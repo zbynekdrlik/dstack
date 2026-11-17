@@ -10,8 +10,8 @@
 //! the TX passes that send the engine rings. The TX passes are timed and
 //! their sleeps read as the TX thread does (dstack #359), and the TX pull
 //! the TX thread fills before it sends (dstack #363), and the pump's late
-//! wakes with their own sleep's oversleep (dstack #370). The first test proves the
-//! detector sees an allocation. Its own test binary, because it installs
+//! wakes with their own sleep's oversleep (dstack #370). The first test
+//! proves the detector sees an allocation. Its own test binary, because it installs
 //! the global allocator; every buffer, ring, checker, socket, the
 //! transmitter, the receiver and the pump are built before the detector
 //! runs.
