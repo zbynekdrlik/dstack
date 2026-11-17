@@ -144,8 +144,8 @@ fn stalled_pump_at(network: u32, name: &str) {
         Arc::clone(&stats),
     )
     .expect("the player");
-    // The app: a steady write every PERIOD on its own clock, its gaps on
-    // the witness.
+    // The app: a steady write every PERIOD on its own clock, each write's
+    // lateness on the witness.
     let witness = Arc::new(Witness::new(PERIOD, &buffer, Arc::clone(&stats)));
     let writing = Arc::new(AtomicBool::new(true));
     let app = {

@@ -13,7 +13,7 @@
 //! device hears itself (the tests' rule: our device only). On a loaded
 //! dev1 run it real-time (`chrt -f 10`, `.claude/rules/tests.md`).
 //!
-//! The app thread records its own scheduling gaps (dstack #376, v0.6.166
+//! The app thread records how late each of its writes lands (dstack #376, v0.6.166
 //! windows-2025: 1 underrun, 390 off, the TX side clean): a judged window
 //! in which it stalled is set aside and the next judged, up to
 //! [`witness::WINDOWS`], and a failure prints `verdict RUNNER|OURS`
@@ -156,7 +156,7 @@ fn a_stalled_pump_leaves_the_tx_bridge_s_audio_whole() {
     )
     .expect("the player");
     // The app: a steady write every PERIOD on its own clock, whatever the
-    // device does, its gaps on the witness.
+    // device does, each write's lateness on the witness.
     let witness = Arc::new(Witness::new(PERIOD, &buffer, Arc::clone(&stats)));
     let writing = Arc::new(AtomicBool::new(true));
     let app = {

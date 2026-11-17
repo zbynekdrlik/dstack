@@ -226,7 +226,7 @@ fn a_stalled_pump_against(to_asio: usize) {
     let mut side = bridge.asio_side(&opened).expect("the driver's side");
     // The driver thread: a buffer switch every ASIO period, whatever the
     // pump does, from the device's start (a driver opened at the bridge's
-    // start), its gaps on the witness.
+    // start), each switch's lateness on the witness.
     let period = Duration::from_nanos(BUFFER as u64 * 1_000_000_000 / u64::from(RATE));
     let witness = Arc::new(Witness::new(
         period,

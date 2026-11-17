@@ -11,9 +11,12 @@
 //! the FIFO runs dry and the player counts an underrun: the runner's, not
 //! the stack's (v0.6.166 main CI on windows-2025: 1 underrun, 390 samples
 //! off, 0 TX holes, 0 writes after send). The writer keeps an absolute
-//! schedule, so how far each write landed past its due time is how much
-//! depth the FIFO lost to the writer; a write later than the bridge's room
-//! ([`room_ns`]) is a stall, late enough to run the FIFO dry. The writer
+//! schedule, so how far each write landed past its due time, less its
+//! least lateness since its start (the timer's steady oversleep: the
+//! player keeps the depth on the writes' real line), is how much depth
+//! the FIFO lost to the writer; a write later than that floor by more
+//! than the bridge's room ([`room_ns`]) is a stall, late enough to run
+//! the FIFO dry. The writer
 //! reads the bridge's underruns after each write under the witness's lock,
 //! and a window's underruns are read there too at its open and close, so
 //! the record and the count are of one moment.
@@ -69,10 +72,15 @@ pub(crate) struct Window {
     pub(crate) writes: u64,
     /// The bridge's underruns between the window's open and close.
     pub(crate) underruns: u64,
-    /// The latest write past its due time, µs.
+    /// The latest write past its due time, µs, and the writer's least
+    /// lateness since its start at the close (its timer's steady
+    /// oversleep, which costs no depth: the player keeps the depth on the
+    /// writes' real line).
     pub(crate) latest_us: u64,
-    /// Every write later than the room, with how late it was (µs); a
-    /// stall still running at the close is the write after the last.
+    pub(crate) floor_us: u64,
+    /// Every write later than the floor by more than the room, with how
+    /// late it was (µs, past its due time); a stall still running at the
+    /// close is the write after the last.
     pub(crate) stalls: Vec<(u64, u64)>,
     /// The write after which the underruns rose, and by how many.
     pub(crate) underrun_at: Vec<(u64, u64)>,
@@ -92,14 +100,19 @@ impl Window {
     }
 
     /// Whether the window's loss is the runner's: the bridge underran, the
-    /// writer read every underrun, each after a stall of its own, and the
-    /// stack's own counts (`ours`) are all 0. Samples off with no underrun
-    /// are never the writer's.
+    /// writer read every underrun (or the ones it did not read yet wait on
+    /// a write still stalled at the close), each after a stall of its own,
+    /// and the stack's own counts (`ours`) are all 0. Samples off with no
+    /// underrun are never the writer's.
     pub(crate) fn runner(&self, ours: &[(&str, u64)]) -> bool {
         let read: u64 = self.underrun_at.iter().map(|&(_, n)| n).sum();
+        let pending = self
+            .stalls
+            .last()
+            .is_some_and(|&(at, _)| at == self.writes + 1);
         self.underruns > 0
             && ours.iter().all(|&(_, n)| n == 0)
-            && read >= self.underruns
+            && (read >= self.underruns || pending)
             && self
                 .underrun_at
                 .iter()
@@ -136,6 +149,8 @@ pub(crate) fn verdict(window: &Window, ours: &[(&str, u64)]) -> String {
 struct State {
     /// The last write's due time.
     due: Option<Instant>,
+    /// The writer's least lateness since its start, µs.
+    floor_us: Option<u64>,
     /// The underruns the last write read, and at the window's open.
     seen: u64,
     opened: u64,
@@ -187,6 +202,8 @@ impl Witness {
         let risen = underruns.saturating_sub(state.seen);
         state.seen = underruns;
         state.due = Some(due);
+        let floor_us = state.floor_us.map_or(late_us, |f| f.min(late_us));
+        state.floor_us = Some(floor_us);
         if !state.open {
             return;
         }
@@ -195,7 +212,7 @@ impl Witness {
         window.writes += 1;
         let at = window.writes;
         window.latest_us = window.latest_us.max(late_us);
-        if late_us > stall_us {
+        if late_us - floor_us > stall_us {
             window.stalls.push((at, late_us));
         }
         if risen > 0 {
@@ -216,12 +233,14 @@ impl Witness {
         state.open = false;
         let mut window = std::mem::take(&mut state.window);
         window.underruns = self.stats.underruns().saturating_sub(state.opened);
+        let floor_us = state.floor_us.unwrap_or(0);
+        window.floor_us = floor_us;
         // The next write, not landed yet, already later than the room.
         if let Some(late_us) = state
             .due
             .and_then(|due| Instant::now().checked_duration_since(due + self.period))
             .map(|late| u64::try_from(late.as_micros()).unwrap_or(u64::MAX))
-            .filter(|&us| us > self.stall_us)
+            .filter(|&us| us.saturating_sub(floor_us) > self.stall_us)
         {
             window.stalls.push((window.writes + 1, late_us));
         }
@@ -259,6 +278,7 @@ mod witness_tests {
             writes: 100,
             underruns,
             latest_us: stalls.iter().map(|&(_, us)| us).max().unwrap_or(0),
+            floor_us: 0,
             stalls: stalls.to_vec(),
             underrun_at: underrun_at.to_vec(),
         }
@@ -292,6 +312,10 @@ mod witness_tests {
         assert!(!window(2, STALL, &[(40, 1)]).runner(CLEAN));
         // One underrun of two without a stall before it.
         assert!(!window(2, STALL, &[(40, 1), (90, 1)]).runner(CLEAN));
+        // An unread underrun waits on a write still stalled at the close
+        // (write 101 of 100): the runner's; one stalled earlier is no cover.
+        assert!(window(2, &[(40, 30_000), (101, 20_000)], &[(40, 1)]).runner(CLEAN));
+        assert!(!window(2, &[(40, 30_000), (100, 20_000)], &[(40, 1)]).runner(CLEAN));
         // A stack count is never the writer's.
         assert!(!window(1, STALL, &[(40, 1)]).runner(&[("TX holes", 1)]));
     }
@@ -309,13 +333,16 @@ mod witness_tests {
         assert_eq!(witness.stall_us(), 5_000);
     }
 
-    /// A witness of a 10 ms writer with a 5 ms room.
+    /// A witness of a 10 ms writer with a 5 ms room, its floor set by a
+    /// write on time before any window.
     fn witness() -> Witness {
-        Witness::new(
+        let witness = Witness::new(
             Duration::from_millis(10),
             &AppBuffer::new(10_000_000, 0),
             Arc::new(Stats::default()),
-        )
+        );
+        witness.wrote(Instant::now());
+        witness
     }
 
     #[test]
@@ -335,11 +362,31 @@ mod witness_tests {
         // A window whose write is on time is judged at once (a fresh
         // witness: no earlier write whose next is due).
         let on_time = witness();
-        let (_, window, aside) = judge(&on_time, || on_time.wrote(Instant::now()));
+        let (_, window, aside) = judge(&on_time, || {
+            on_time.wrote(Instant::now() + Duration::from_secs(1))
+        });
         assert_eq!(
             (window.stalled(), aside.len(), window.writes),
             (false, 0, 1)
         );
+    }
+
+    #[test]
+    fn a_timer_s_steady_oversleep_is_no_stall() {
+        // A writer whose every wake is 3 ms late: 7 ms late is 4 ms past
+        // its floor (within the 5 ms room), 9 ms late is 6 ms past it.
+        let witness = Witness::new(
+            Duration::from_millis(10),
+            &AppBuffer::new(10_000_000, 0),
+            Arc::new(Stats::default()),
+        );
+        let ago = |ms| Instant::now() - Duration::from_millis(ms);
+        witness.wrote(ago(3));
+        let (_, window, aside) = judge(&witness, || witness.wrote(ago(7)));
+        assert!(!window.stalled() && aside.is_empty(), "{window:?}");
+        assert!(window.floor_us >= 3_000, "{window:?}");
+        let (_, window, _) = judge(&witness, || witness.wrote(ago(9)));
+        assert_eq!(window.stalls.first().map(|s| s.0), Some(1), "{window:?}");
     }
 
     #[test]
