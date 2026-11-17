@@ -13,7 +13,8 @@ description = "The ASIO host for our apps (dstack #243): a local ASIO driver ope
 dstack-audio-io = { path = "../dstack-audio-io" }
 # The bridge's clock crossing: Fifo, Player, AppBuffer (dstack #247).
 dlink = { path = "../dlink" }
-# The app's clock for the from-ASIO block age (dstack #325).
+# The app's clock for the from-ASIO block age (dstack #325) and the
+# device's bridge figures slot (dstack #391).
 dstack = { path = "../dstack" }
 # The ASRC controller's bound for the bridge's rate seed (dstack #382).
 dstack-resample = { path = "../dstack-resample" }

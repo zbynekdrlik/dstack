@@ -36,6 +36,12 @@
 //! confirmed by reading it back, and the encoding (`.. 00 83 .. 64`, body
 //! `1, bits`), whose reply is not known.
 //!
+//! A bridge device's own figures (dstack #391, [`super::bridge`]): the
+//! dstack-own request `07 31 d5 b1 00 00 00 00` with no body, answered
+//! UNICAST to the asking socket by a dstack device that holds them (reply
+//! `07 2a d5 b0`), never to the group: [`bridge_figures`] asks it from a
+//! socket of the caller's ([`unicast_socket`]).
+//!
 //! Every version is `major u8, minor u8, patch u16`, big-endian.
 //!
 //! | product info (0xc0) | |
@@ -115,18 +121,21 @@ pub enum Ask {
     SetSampleRate(u32),
     /// An encoding write, bits (netaudio's `set_encoding`).
     SetEncoding(u32),
+    /// A bridge device's figures (dstack's own, [`super::bridge`]).
+    BridgeFigures,
 }
 
 impl Ask {
-    /// The request opcode's last byte.
-    fn request_op(self) -> u8 {
+    /// The request opcode's bytes 2 and 3.
+    fn request_code(self) -> [u8; 2] {
         match self {
-            Ask::Product => 0xc1,
-            Ask::Board => 0x61,
-            Ask::Clock => 0x21,
-            Ask::Network => 0x13,
-            Ask::SampleRate | Ask::SetSampleRate(_) => 0x81,
-            Ask::SetEncoding(_) => 0x83,
+            Ask::Product => [0x00, 0xc1],
+            Ask::Board => [0x00, 0x61],
+            Ask::Clock => [0x00, 0x21],
+            Ask::Network => [0x00, 0x13],
+            Ask::SampleRate | Ask::SetSampleRate(_) => [0x00, 0x81],
+            Ask::SetEncoding(_) => [0x00, 0x83],
+            Ask::BridgeFigures => super::bridge::REQUEST_CODE,
         }
     }
 
@@ -134,7 +143,7 @@ impl Ask {
     /// netaudio's clock-stats request ends `.. 64` and carries 60 zeros.
     fn request_tail(self) -> (u8, usize) {
         match self {
-            Ask::Product | Ask::Board => (0, 0),
+            Ask::Product | Ask::Board | Ask::BridgeFigures => (0, 0),
             Ask::Clock => (0x64, CLOCK_REQUEST_BODY),
             Ask::Network | Ask::SampleRate | Ask::SetSampleRate(_) | Ask::SetEncoding(_) => {
                 (0x64, NETWORK_REQUEST_BODY)
@@ -151,16 +160,17 @@ impl Ask {
         }
     }
 
-    /// The reply opcode's last byte; `None` for an encoding write, to
+    /// The reply opcode's bytes 2 and 3; `None` for an encoding write, to
     /// which no reply is known.
-    fn reply_op(self) -> Option<u8> {
+    fn reply_code(self) -> Option<[u8; 2]> {
         match self {
-            Ask::Product => Some(0xc0),
-            Ask::Board => Some(0x60),
-            Ask::Clock => Some(0x20),
-            Ask::Network => Some(0x11),
-            Ask::SampleRate | Ask::SetSampleRate(_) => Some(0x80),
+            Ask::Product => Some([0x00, 0xc0]),
+            Ask::Board => Some([0x00, 0x60]),
+            Ask::Clock => Some([0x00, 0x20]),
+            Ask::Network => Some([0x00, 0x11]),
+            Ask::SampleRate | Ask::SetSampleRate(_) => Some([0x00, 0x80]),
             Ask::SetEncoding(_) => None,
+            Ask::BridgeFigures => Some(super::bridge::REPLY_CODE),
         }
     }
 }
@@ -364,7 +374,8 @@ pub fn request(seq: u16, from: [u8; 8], ask: Ask) -> Vec<u8> {
     out.extend_from_slice(&0u16.to_be_bytes());
     out.extend_from_slice(&from);
     out.extend_from_slice(&VENDOR);
-    out.extend_from_slice(&[0x07, 0x31, 0x00, ask.request_op(), 0, 0, 0, tail]);
+    let [hi, lo] = ask.request_code();
+    out.extend_from_slice(&[0x07, 0x31, hi, lo, 0, 0, 0, tail]);
     if let Some(words) = ask.request_words() {
         for w in words {
             out.extend_from_slice(&w.to_be_bytes());
@@ -381,8 +392,7 @@ pub fn reply_body(datagram: &[u8], ask: Ask, id: Option<[u8; 8]>) -> Option<&[u8
     let opcode = &head[24..32];
     let ours = head[0..2] == START_INFO.to_be_bytes()
         && opcode[0] == 0x07
-        && opcode[2] == 0x00
-        && ask.reply_op() == Some(opcode[3])
+        && ask.reply_code() == Some([opcode[2], opcode[3]])
         && opcode[4..8] == [0, 0, 0, 0]
         && id.is_none_or(|id| head[8..16] == id);
     ours.then_some(body)
@@ -726,6 +736,46 @@ pub fn set_encoding(iface: Ipv4Addr, device: Ipv4Addr, bits: u32) -> Result<(), 
     let write = Ask::SetEncoding(bits);
     let sock = on_group(iface, write)?;
     send_write(&sock, SocketAddrV4::new(device, REQUEST_PORT), write)
+}
+
+/// A socket for [`bridge_figures`]: UDP on our interface's address `iface`,
+/// a port of the OS's. The reply comes back to it alone (unicast), so one
+/// socket can ask every bridge device in turn.
+pub fn unicast_socket(iface: Ipv4Addr) -> io::Result<UdpSocket> {
+    let sock = UdpSocket::bind(SocketAddrV4::new(iface, 0))?;
+    crate::winsock::no_connreset(&sock)?;
+    Ok(sock)
+}
+
+/// The bridge figures of the device at `device` (with the device id `id`,
+/// when given: several devices share one address), asked from `sock`
+/// ([`unicast_socket`]) and resent every [`RESEND`] for up to `wait`
+/// ([`ask`]). dcontroller calls it about once a second per bridge device.
+/// The fields, their keys and units are [`super::bridge`]'s table.
+///
+/// [`InfoError::Timeout`] from a device that holds no bridge figures (any
+/// Audinate device, a dstack device without a bridge, a dstack older than
+/// dstack #391), from a bridge device whose address's 8700 is held by an
+/// older dstack app on the same PC (that manager relays the request in the
+/// old form, [`super::share`]), or none within `wait`; [`InfoError::Malformed`] for a reply
+/// of another version or length ([`super::bridge::parse_figures`] says
+/// which).
+pub fn bridge_figures(
+    sock: &UdpSocket,
+    device: Ipv4Addr,
+    id: Option<[u8; 8]>,
+    wait: Duration,
+) -> Result<super::BridgeFigures, InfoError> {
+    let body = ask(
+        sock,
+        SocketAddrV4::new(device, REQUEST_PORT),
+        id,
+        Ask::BridgeFigures,
+        wait,
+    )?;
+    super::bridge::parse_figures(&body).map_err(|_| InfoError::Malformed {
+        ask: Ask::BridgeFigures,
+    })
 }
 
 #[cfg(test)]

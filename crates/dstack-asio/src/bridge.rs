@@ -91,6 +91,12 @@
 //! (`runner::Status::late_bins`, 0.25 ms bins under `late_callbacks`); a
 //! rise is warned with the callbacks' lateness over the same time and
 //! whose it reads as ([`from_asio_cause`], [`to_asio_cause`]).
+//!
+//! The network read of these figures (dstack #391, for dcontroller):
+//! [`Bridge::publish_figures`] hands the device the players' targets and
+//! converter delays and the runner's lateness, read at each request
+//! ([`own_figures`]); [`UnderrunWatch::publish`] hands it the underruns
+//! and each side's latest cause after every look.
 
 use std::sync::{Arc, OnceLock};
 
@@ -104,10 +110,12 @@ use dstack_audio_io::{Block, Process};
 use crate::device::Opened;
 
 mod age;
+mod figures;
 mod from_asio;
 mod seed;
 mod underrun;
 pub use age::{AgeReport, BlockAge, NETWORK_ALLOWANCE_NS};
+pub use figures::own_figures;
 pub use from_asio::FromAsio;
 pub use seed::{MAX_SEED_PPM, Seed};
 pub use underrun::{Cause, UnderrunCounts, UnderrunWatch, from_asio_cause, to_asio_cause};
