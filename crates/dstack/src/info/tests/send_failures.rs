@@ -81,6 +81,28 @@ impl FailFirst {
     }
 }
 
+/// The first packet on `sock` with `opcode`, within the bound; packets
+/// with another opcode are skipped (their headers named if none comes).
+async fn recv_opcode(sock: &UdpSocket, opcode: [u8; 8]) -> Vec<u8> {
+    let start = Instant::now();
+    let mut skipped = Vec::new();
+    loop {
+        let left = BOUND.saturating_sub(start.elapsed());
+        let mut buf = [0u8; 2048];
+        let (n, _) = tokio::time::timeout(left, sock.recv_from(&mut buf))
+            .await
+            .unwrap_or_else(|_| {
+                panic!("a {opcode:02x?} packet within the bound; skipped: {skipped:02x?}")
+            })
+            .unwrap();
+        let p = buf[..n].to_vec();
+        if p.len() >= 32 && p[24..32] == opcode {
+            return p;
+        }
+        skipped.push(p[..p.len().min(32)].to_vec());
+    }
+}
+
 /// `requests`' info send counts (errors, recoveries) once `errors` sends
 /// failed, within the bound.
 async fn sends_failed(requests: &Requests, errors: u64) -> (u64, u64) {
@@ -157,10 +179,18 @@ async fn sends_failing_with_10049_name_the_interface_again_then_reopen_and_beats
             .expect("a heartbeat after the failures")
             .unwrap();
         assert_eq!(from, SocketAddr::from(SocketAddrV4::new(ip, REQUEST_PORT)));
-        // The reopened socket answers requests to the info port.
+        // The reopened socket answers requests to the info port. Asked for
+        // the network info, which the server sends only as an answer: the
+        // reopen's own board and product info reach the same group, at a
+        // time of their own, and are skipped.
         let peer = UdpSocket::bind((ip, 0)).await.unwrap();
-        peer.send_to(&captured(), (ip, REQUEST_PORT)).await.unwrap();
-        let reply = recv(&info_rx).await;
+        peer.send_to(
+            &asking([0x07, 0x2a, 0x00, 0x13, 0x00, 0x00, 0x00, 0x00]),
+            (ip, REQUEST_PORT),
+        )
+        .await
+        .unwrap();
+        let reply = recv_opcode(&info_rx, NETWORK_INFO).await;
         assert_eq!(id_of(&reply), identity().device_id);
         // It holds the members' share port again after the reopen.
         let share_at = (Ipv4Addr::LOCALHOST, share::share_port(ip));

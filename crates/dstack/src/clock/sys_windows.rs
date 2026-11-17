@@ -23,7 +23,7 @@ use windows_sys::Win32::System::Threading::{
 
 /// 100 ns intervals from 1601-01-01 to 1970-01-01.
 const UNIX_EPOCH_FT: i64 = 116_444_736_000_000_000;
-// The spin tail (`super::SPIN_TAIL`, the device's `spin_tail_ns`,
+// The spin tail (`super::spin::SPIN_TAIL`, the device's `spin_tail_ns`,
 // 50 ms unless set): waits up to it are spun, never slept. The
 // high-resolution timer wakes on the system tick: on the FOH PC (5.11.2026)
 // at most one tick + 140 µs late (1.1 ms at the 1 ms resolution, 0.64 ms at
@@ -154,7 +154,7 @@ impl Drop for Timer {
 }
 
 /// Sleeps until [`monotonic_ns`] reaches `target`: the timer for all but
-/// the last spin tail (`super::SPIN_TAIL`), then a spin.
+/// the last spin tail (`super::spin::SPIN_TAIL`), then a spin.
 pub fn sleep_until_monotonic(target: i64) {
     sleep_until_in(
         target,
@@ -178,9 +178,9 @@ pub fn sleep_until_app(target: i64) {
     );
 }
 
-/// The process's bounded-escape period, ns (0: off; `super::SPIN_ESCAPE`).
+/// The process's bounded-escape period, ns (0: off; `super::spin::SPIN_ESCAPE`).
 fn escape_period() -> u64 {
-    super::SPIN_ESCAPE.load(std::sync::atomic::Ordering::Relaxed)
+    super::spin::SPIN_ESCAPE.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 thread_local! {
@@ -382,7 +382,7 @@ fn sleep_until_in(
     let escape = mode == super::WaitMode::Spin && escape_ns != 0 && ALLOWED.with(|a| a.get());
     // The timer mode (problem A's measurement): the whole wait on the
     // timer, no core spun.
-    let tail = super::SPIN_TAIL.load(std::sync::atomic::Ordering::Relaxed);
+    let tail = super::spin::SPIN_TAIL.load(std::sync::atomic::Ordering::Relaxed);
     let spin = i64::try_from(super::spin_tail_for(mode, tail)).unwrap_or(i64::MAX);
     let mut gives = GIVES.with(|g| g.get());
     super::wait::until(
