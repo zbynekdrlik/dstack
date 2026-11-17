@@ -545,3 +545,38 @@ fn the_window_s_texts_give_the_bridge_or_every_mistake() {
     assert!(all.starts_with("Dante RX"), "{all}");
     assert!(all.ends_with("(like 5 or 2.5)"), "{all}");
 }
+
+/// dstack #387 (dasio, 17.11.2026): dasio's `[bridge]` gains the optional
+/// per-direction targets of dstack-asio v0.6.172. dtray reads a file that
+/// holds them (it refused it as an unknown field), checks their range as
+/// the app buffer's, and an edit of the window keeps them in the file.
+#[test]
+fn the_per_direction_buffer_targets_read_and_stay() {
+    let table = "[bridge]\ndriver = \"Test ASIO\"\nto_asio = [1, 2, 3, 4]\nfrom_asio = [5, 6]\nto_asio_app_buffer_ns = 1333333\nfrom_asio_app_buffer_ns = 2000000\n";
+    let text = format!("{DAW}\n{table}");
+    let f = Fields::read(&text).expect("a bridge with per-direction targets reads");
+    let b = f.bridge.expect("a bridge");
+    assert!(b.problems(4, 2).is_empty(), "{:?}", b.problems(4, 2));
+    let out_of_range = text.replace("1333333", "1");
+    let bad = Fields::read(&out_of_range)
+        .expect("reads")
+        .bridge
+        .expect("a bridge");
+    assert_eq!(bad.problems(4, 2).len(), 1, "{:?}", bad.problems(4, 2));
+    // The window edits the driver, the maps and the app buffer only: what
+    // it read back from its controls keeps the targets of the file.
+    let edited = from_texts("Test ASIO", "1, 2, 3, 4", "5, 6", "5").expect("texts");
+    let kept = keep_unedited(&b, edited);
+    let mut doc: toml_edit::DocumentMut = text.parse().expect("toml");
+    write(&mut doc, &b, &kept).expect("written");
+    let back = Fields::read(&doc.to_string())
+        .expect("reads")
+        .bridge
+        .expect("a bridge");
+    assert_eq!(back, kept);
+    assert!(doc.to_string().contains("to_asio_app_buffer_ns = 1333333"));
+    assert!(
+        doc.to_string()
+            .contains("from_asio_app_buffer_ns = 2000000")
+    );
+}

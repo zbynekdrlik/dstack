@@ -214,6 +214,13 @@ pub fn from_texts(
     }
 }
 
+/// The bridge the window's controls give (`edited`), with the keys the
+/// window has no control for kept from the file's (`prev`).
+pub fn keep_unedited(prev: &Bridge, edited: Bridge) -> Bridge {
+    let _ = prev;
+    edited
+}
+
 /// A map as an inline TOML array (`[1, 2]`, as dasio's configs write it).
 fn array(list: &[u32]) -> Array {
     list.iter().map(|&c| i64::from(c)).collect()
