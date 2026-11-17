@@ -59,6 +59,10 @@ pub struct Bridge {
     /// The from-ASIO side's own target, ns (as `to_asio_app_buffer_ns`).
     #[serde(default)]
     pub from_asio_app_buffer_ns: Option<u64>,
+    /// The converters' sinc length, taps (`None`: 256; dstack-asio's
+    /// `Spec::converter_taps`, v0.6.174, dstack #387).
+    #[serde(default)]
+    pub converter_taps: Option<u32>,
 }
 
 /// The table as the file holds it.
@@ -225,6 +229,7 @@ pub fn from_texts(
             app_buffer_ns,
             to_asio_app_buffer_ns: None,
             from_asio_app_buffer_ns: None,
+            converter_taps: None,
         }),
         (to, from, app) => Err([to.err(), from.err(), app.err()]
             .into_iter()
