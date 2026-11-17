@@ -106,16 +106,9 @@ fn an_open_at_the_seed_s_rates_starts_each_player_at_its_rate() {
             expect,
             "{rate}"
         );
-        // Before any lock the run stands at what it started from.
-        let standing = b.seed().unwrap();
-        assert_eq!(standing.driver_rate, rate as u32);
-        assert_eq!(standing.dante_rate, RATE);
-        let started = (rate == 96_000.0).then_some((Some(7.5), Some(-7.25)));
-        assert_eq!(
-            (standing.to_asio_ppm, standing.from_asio_ppm),
-            started.unwrap_or((None, None)),
-            "{rate}"
-        );
+        // Before any lock the run stands at what it started from; a run at
+        // other rates knows none and keeps the seed it was given.
+        assert_eq!(b.seed(), Some(seed(7.5, -7.25)), "{rate}");
     }
     let mut b = bridge(spec(1, 1));
     assert_eq!(b.seed(), None, "nothing known");
@@ -126,8 +119,31 @@ fn an_open_at_the_seed_s_rates_starts_each_player_at_its_rate() {
         (b.to_asio_stats().ppm(), b.from_asio_stats().ppm()),
         (0.0, 0.0)
     );
-    let s = b.seed().unwrap();
-    assert_eq!((s.to_asio_ppm, s.from_asio_ppm), (None, None));
+    assert_eq!(b.seed(), None, "still nothing known");
+}
+
+/// A reopen at the seed's rates starts from it again; an open at other
+/// rates in between neither uses nor loses it.
+#[test]
+fn a_reopen_starts_from_the_seed_again_after_an_open_at_other_rates() {
+    let mut b = bridge(spec(1, 1));
+    b.seed_from(seed(7.5, -7.25));
+    let mut dante = b.dante_side().unwrap();
+    for (rate, expect) in [
+        (96_000.0, (7.5, -7.25)),
+        (48_000.0, (0.0, 0.0)),
+        (96_000.0, (7.5, -7.25)),
+    ] {
+        let mut asio = b.asio_side(&opened(rate, 128)).unwrap();
+        one_round(&mut dante, &mut asio);
+        assert_eq!(
+            (b.to_asio_stats().ppm(), b.from_asio_stats().ppm()),
+            expect,
+            "{rate}"
+        );
+        assert_eq!(b.seed(), Some(seed(7.5, -7.25)), "{rate}");
+        b.collect();
+    }
 }
 
 /// A one-way bridge seeds and keeps only its own direction.

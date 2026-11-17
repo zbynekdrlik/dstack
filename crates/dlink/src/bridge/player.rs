@@ -206,7 +206,7 @@ impl Stats {
     /// (dstack #382).
     pub fn locked_ppm(&self) -> Option<f64> {
         self.locked
-            .load(Ordering::Relaxed)
+            .load(Ordering::Acquire)
             .then(|| f64::from_bits(self.locked_ppm.load(Ordering::Relaxed)))
     }
 
@@ -486,7 +486,7 @@ impl Player {
         if self.ctl.locked() {
             s.locked_ppm
                 .store(self.ctl.rate_ppm().to_bits(), Ordering::Relaxed);
-            s.locked.store(true, Ordering::Relaxed);
+            s.locked.store(true, Ordering::Release);
         }
         s.priming
             .store(matches!(self.state, State::Priming(_)), Ordering::Relaxed);

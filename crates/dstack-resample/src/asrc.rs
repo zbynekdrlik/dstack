@@ -424,8 +424,12 @@ impl Controller {
     /// a seed the rate is 0 until the lock, and a clock d ppm off drifts
     /// the depth until the braking catches it (7.5 ppm: about 0.45 ms by
     /// the lock at 60 s, dasio#120). A seed set after observations moves
-    /// only the rate term; the correction slews to it as usual.
+    /// only the rate term; the correction slews to it as usual. A seed that
+    /// is no number (NaN, infinite) is ignored.
     pub fn seed_ppm(&mut self, ppm: f64) {
+        if !ppm.is_finite() {
+            return;
+        }
         let ppm = ppm.clamp(-MAX_PPM, MAX_PPM);
         if self.window.is_none() && self.last_apply_s.is_none() {
             self.applied_ppm = ppm;

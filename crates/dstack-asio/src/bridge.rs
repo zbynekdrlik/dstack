@@ -148,8 +148,9 @@ pub struct Bridge {
     opened: bool,
     /// The FIFOs' clock ([`Bridge::with_clock`]).
     clock: Clock,
-    /// The seed the app gave ([`Bridge::seed_from`]).
-    given: Option<Seed>,
+    /// The seed known before the last open: the app's ([`Bridge::seed_from`]),
+    /// and what [`Bridge::seed`] falls back to while a run knows no rate.
+    known: Option<Seed>,
     /// The last open's rate and what its players started from
     /// ([`Bridge::seed`]).
     run: Option<Run>,
@@ -249,7 +250,7 @@ impl Bridge {
             watch: IdleWatch::default(),
             opened: false,
             clock,
-            given: None,
+            known: None,
             run: None,
         })
     }
@@ -260,27 +261,35 @@ impl Bridge {
     /// same rates then starts from those). Give it before the driver's
     /// first open.
     pub fn seed_from(&mut self, seed: Seed) {
-        self.given = Some(seed);
+        self.known = Some(seed);
     }
 
-    /// The rates to keep for the next run ([`Seed::write`]): each player's
-    /// own lock since the last open, else what it started from; the given
-    /// seed before any open; `None` with nothing known. An app writes it
-    /// when it changed, from its own loop (a fit locks 60 s after an open,
-    /// so once a minute is plenty).
+    /// The rates to keep for the next run ([`Seed::write`]): the last
+    /// open's, each player's own lock since that open, else what it started
+    /// from; while that run knows no rate at all (an open at other rates
+    /// than the seed's, before its fits lock), the seed known before it, so
+    /// a seed for another rate is never written over with an empty one.
+    /// `None` with nothing known. An app writes it when it changed, from
+    /// its own loop (a fit locks 60 s after an open, so once a minute is
+    /// plenty).
     pub fn seed(&self) -> Option<Seed> {
         let Some(run) = self.run else {
-            return self.given;
+            return self.known;
         };
+        let to_asio_ppm = standing(self.to_stats.locked_ppm(), run.to_at_open, run.to_seed);
+        let from_asio_ppm = standing(
+            self.from_stats.locked_ppm(),
+            run.from_at_open,
+            run.from_seed,
+        );
+        if to_asio_ppm.is_none() && from_asio_ppm.is_none() {
+            return self.known;
+        }
         Some(Seed {
             dante_rate: self.spec.dante_rate,
             driver_rate: run.driver_rate,
-            to_asio_ppm: standing(self.to_stats.locked_ppm(), run.to_at_open, run.to_seed),
-            from_asio_ppm: standing(
-                self.from_stats.locked_ppm(),
-                run.from_at_open,
-                run.from_seed,
-            ),
+            to_asio_ppm,
+            from_asio_ppm,
         })
     }
 
@@ -435,7 +444,8 @@ impl Bridge {
     }
 
     /// The seeds for an open at `driver_rate`: the standing rates
-    /// ([`Bridge::seed`]) when they were locked at this rate, else none.
+    /// ([`Bridge::seed`], the known seed while the last run knows none)
+    /// when they were locked at this rate, else none.
     fn seeds_for(&self, driver_rate: u32) -> (Option<f64>, Option<f64>) {
         self.seed()
             .and_then(|s| s.for_rates(self.spec.dante_rate, driver_rate))
@@ -497,6 +507,9 @@ impl Bridge {
             switch.send(seeded(p, from_seed))?;
             from_asio = Some(fifo);
         }
+        // What the last run stands at (or the seed before it) stays known
+        // while this one knows no rate.
+        self.known = self.seed();
         self.run = Some(Run {
             driver_rate: rate,
             to_seed: player.as_ref().and(to_seed),

@@ -118,13 +118,19 @@ impl Seed {
         }
     }
 
-    /// Writes the seed to `path`, whole: a temporary file beside it,
-    /// renamed over it (a crash never leaves half a file).
+    /// Writes the seed to `path`, whole: a temporary file beside it, synced
+    /// to disk, then renamed over it (neither a crash nor a power loss
+    /// leaves half a file; at worst the last seed stays).
     pub fn write(&self, path: &Path) -> Result<(), String> {
+        use std::io::Write;
         let mut tmp = path.as_os_str().to_owned();
         tmp.push(".tmp");
         let tmp = std::path::PathBuf::from(tmp);
-        std::fs::write(&tmp, self.text())
+        std::fs::File::create(&tmp)
+            .and_then(|mut f| {
+                f.write_all(self.text().as_bytes())?;
+                f.sync_all()
+            })
             .and_then(|()| std::fs::rename(&tmp, path))
             .map_err(|e| format!("{}: {e}", path.display()))
     }

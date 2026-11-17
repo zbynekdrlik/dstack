@@ -126,6 +126,10 @@ fn a_run_seeded_from_the_last_one_holds_its_rate_from_the_start() {
     );
     assert_eq!(to_start, to, "seeded: from the kept rate");
     assert!(held < 0.5, "seeded: {held}");
+    // Its own fits locked (each bridge has its own counts), on the same
+    // rates.
+    assert!(next.to_asio_stats().locked_ppm().is_some());
+    assert!(next.from_asio_stats().locked_ppm().is_some());
     let again = next.seed().unwrap();
     assert!((again.to_asio_ppm.unwrap() - to).abs() < 0.5, "{again:?}");
     assert!(

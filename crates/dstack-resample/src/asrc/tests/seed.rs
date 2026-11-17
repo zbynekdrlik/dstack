@@ -85,6 +85,13 @@ fn a_seed_is_held_within_the_bound() {
     assert_eq!((c.ppm(), c.seed()), (MAX_PPM, MAX_PPM));
     c.seed_ppm(-1000.0);
     assert_eq!(c.seed(), -MAX_PPM);
+    // No number: ignored, the controller as it was.
+    let mut c = Controller::new(0.010, 0.0, 0.050, Basis::Arrival);
+    c.seed_ppm(7.5);
+    for nan in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        c.seed_ppm(nan);
+        assert_eq!((c.ppm(), c.seed()), (7.5, 7.5), "{nan}");
+    }
 }
 
 /// The fit wins once locked: a wrong seed (40 ppm on a clock with no
