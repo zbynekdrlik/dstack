@@ -12,8 +12,9 @@
 //!   stream is WASAPI loopback) writes each packet into a lock-free
 //!   [`dstack_endpoint::fifo::Fifo`] ([`capture::push_interleaved`]).
 //! - A dlink device (`<host>-dsend`, TX only, 2 channels L and R) whose
-//!   pump pulls every block through the [`dstack_endpoint::player::Player`]
-//!   ([`source::Source`]): `dstack-resample`'s drifting converter, its ratio
+//!   TX thread pulls every block through the
+//!   [`dstack_endpoint::player::Player`] just before it sends it
+//!   ([`source::Source`], dlink's `TxPull`, dstack #363): `dstack-resample`'s drifting converter, its ratio
 //!   steered by the ASRC controller on the FIFO's depth, kept at the app
 //!   buffer (dstack #247): WASAPI's 10 ms period and one pump block,
 //!   11.333 ms at 96 kHz, or `--app-buffer-ms`.
@@ -23,7 +24,7 @@
 //! - WASAPI loopback delivers nothing while nothing plays; the binary keeps
 //!   a silent render stream open on the captured output, so the capture
 //!   runs on the endpoint's clock all the time and an idle output is plain
-//!   silence on Dante. Should the capture stop anyway, the pump sends
+//!   silence on Dante. Should the capture stop anyway, the device sends
 //!   silence, counts the underrun and primes again.
 //! - A busy desktop must not starve the capture, whatever the process's
 //!   priority class (dstack #198): the capture thread joins MMCSS "Pro

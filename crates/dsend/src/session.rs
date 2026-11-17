@@ -11,14 +11,14 @@
 //! dtray's Output menu sends `app output <n>`: the command hook runs on the
 //! device's control task, so it only checks the number and hands it to the
 //! main thread, which owns the streams (cpal's streams stay on the thread
-//! that made them) and hands the new player to the pump.
+//! that made them) and hands the new player to the TX thread.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use dlink::bridge::AppBuffer;
+use dlink::bridge::{AppBuffer, Idle};
 use dlink::{Link, Map};
 use dsend::cli::{self, Options};
 use dsend::source::{self, Switch, TX_CHANNELS};
@@ -200,20 +200,22 @@ impl Session {
         let buffer = buffer_of(o, &name, &state)?;
         let first = open(&devices[current], o.rate, buffer, &stats, &failed)?;
         tracing::info!(output = %outputs[current].name, "dsend: the output captured");
-        let (processor, switch) = source::source(first.player);
+        let (pull, switch) = source::source(first.player);
         let free = with_free_ports(o, &place)
             .map_err(|e| format!("the Dante device {name} did not start: {e}"))?;
         // The place is there now (`with_free_ports` waited for it, dstack
         // #225), so `Link::start`, which fails at once on a place not
-        // there (#230), takes it.
-        let link = Link::start(
+        // there (#230), takes it. The TX thread fills L and R from the
+        // player (dstack #363); the pump has nothing to do.
+        let link = Link::start_tx_pulling(
             &cli::link_config(&free, &name, state.clone()),
             &place,
             Map {
                 rx: vec![],
                 tx: (0..TX_CHANNELS).collect(),
             },
-            processor,
+            Idle,
+            pull,
         )
         .map_err(|e| format!("the Dante device {name} did not start: {e}"))?;
         tracing::info!(name, state = %state.display(), "dsend: the Dante device runs");
@@ -246,8 +248,9 @@ impl Session {
         Ok(session)
     }
 
-    /// Captures output `index` of the list: its capture starts, the pump
-    /// takes its player at the next block, then the old capture stops. On
+    /// Captures output `index` of the list: its capture starts, the TX
+    /// thread takes its player at the next block, then the old capture
+    /// stops. On
     /// an error the old capture goes on.
     fn capture(&mut self, index: usize) -> Result<(), String> {
         let device = self
@@ -255,7 +258,7 @@ impl Session {
             .get(index)
             .ok_or_else(|| format!("no output {index}"))?;
         let opened = open(device, self.rate, self.buffer, &self.stats, &self.failed)?;
-        // Refused (the pump has not taken the last one, or ended): the new
+        // Refused (the TX thread has not taken the last one, or ended): the new
         // capture stops as `opened` drops.
         self.switch.send(opened.player)?;
         self.capturing = Some(opened.capturing);
@@ -278,8 +281,8 @@ impl Session {
         Ok(())
     }
 
-    /// Once a wake: frees the players the pump replaced (on this thread,
-    /// not the pump's), and opens the captured output again when a stream
+    /// Once a wake: frees the players the TX thread replaced (on this
+    /// thread, not the TX thread's), and opens the captured output again when a stream
     /// failed or the capture stalled ([`status::reopen_due`]).
     pub fn watch(&mut self) {
         self.switch.collect();
