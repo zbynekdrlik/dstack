@@ -194,6 +194,13 @@ fn the_pump_thread_gives_each_late_wake_its_sleep_s_oversleep() {
 #[test]
 fn each_drain_records_its_time_and_its_datagrams() {
     let mut r = flow_rig(TimingProfile::Normal);
+    // The rig's own first drain (`flow_rig`, no datagram) is in the peaks
+    // too: its second is taken here, so the next second holds only the
+    // drain below, which its own measured time bounds. Under load the
+    // rig's drain can take longer than that whole step (dstack #373: 2983
+    // us against 102 us), so the lifetime peak is the larger of the two.
+    let rig = r.stats.take_second_split();
+    assert_eq!(rig.drain_datagrams, 0);
     let t = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     // Three packets wait; one block is due: its drain reads all three.
     send(&r, &t, T);
@@ -205,12 +212,14 @@ fn each_drain_records_its_time_and_its_datagrams() {
     let v = r.stats.view();
     assert_eq!(v.blocks, 1);
     assert_eq!(v.drain_max_datagrams, 3);
-    assert!(v.drain_max_us <= took_us, "{} > {took_us}", v.drain_max_us);
     let second = r.stats.take_second_split();
-    assert_eq!(
-        (second.drain_datagrams, second.drain_us),
-        (3, v.drain_max_us)
+    assert_eq!(second.drain_datagrams, 3);
+    assert!(
+        second.drain_us <= took_us,
+        "{} > {took_us}",
+        second.drain_us
     );
+    assert_eq!(v.drain_max_us, second.drain_us.max(rig.drain_us), "{rig:?}");
     // One packet at the next block: that second's peak is 1, the start's
     // stays 3.
     send(&r, &t, T + 3 * B);
