@@ -102,6 +102,7 @@ use limit::Limit;
 
 pub mod client;
 pub mod limit;
+pub mod sendwatch;
 mod server;
 pub mod share;
 pub(crate) mod unanswered;
