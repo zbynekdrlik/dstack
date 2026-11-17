@@ -19,10 +19,23 @@ fn a_place_the_dante_network_cannot_reach_is_refused_without_a_wait() {
     // dstack #225: the wait an app runs before its own use of the address
     // (dsend's and dlisten's free ports) refuses as `Link::start_until`
     // does.
-    match wait_for_place(&Place::Ip(std::net::Ipv4Addr::LOCALHOST)) {
-        Err(HostError::Run(why)) => assert!(why.contains("loopback"), "{why}"),
+    // A broadcast address: loopback is a test run's own place (#366).
+    match wait_for_place(&Place::Ip(std::net::Ipv4Addr::BROADCAST)) {
+        Err(HostError::Run(why)) => assert!(why.contains("broadcast"), "{why}"),
         other => panic!("{other:?}"),
     }
+}
+
+/// dstack #366: in a test run (`DSTACK_TEST_LOOPBACK=1`, which this
+/// workspace's `.cargo/config.toml` sets for every test) the device serves
+/// on loopback, so the wait an app runs before its start (dsend's and
+/// dlisten's) takes a loopback place too, as `Link::start` does.
+#[test]
+fn a_test_run_s_loopback_place_is_taken_by_the_wait() {
+    assert_eq!(
+        wait_for_place(&Place::Ip(std::net::Ipv4Addr::LOCALHOST)),
+        Ok(())
+    );
 }
 
 /// dstack #230: the place of an app given no address or interface (dsend,
