@@ -321,10 +321,17 @@ mod tests {
             let pulled = fifo.push_with(480, |_, _| 0.5);
             player.fill_pulled(pulled, &mut out, 1, |x| x as f32);
         }
-        // A call held 20 ms past its period on a 2-period buffer.
-        let pulled = fifo.push_with(1440, |_, _| 0.5);
+        // A call held 25 ms past its tick on a 2-period buffer (the card
+        // played a period of silence), then the calls that settle it.
+        let pulled = fifo.push_with(1680, |_, _| 0.5);
         let mut big = [0.0f32; 960];
         player.fill_pulled(pulled, &mut big, 1, |x| x as f32);
+        let pulled = fifo.push_with(240, |_, _| 0.5);
+        player.fill_pulled(pulled, &mut out, 1, |x| x as f32);
+        for _ in 0..dlink::bridge::player::SETTLE_CALLS {
+            let pulled = fifo.push_with(480, |_, _| 0.5);
+            player.fill_pulled(pulled, &mut out, 1, |x| x as f32);
+        }
         let read = Snapshot::read(&fifo, &player.stats(), 48_000);
         assert_eq!((read.output_gaps, read.output_lost_ms), (1, 10.0));
     }
