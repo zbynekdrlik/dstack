@@ -1765,13 +1765,7 @@ fn run_passes(
     let base = Instant::now();
     while !shared.stopping() {
         pin.keep(shared.now_ns());
-        // The epoch before the time: the clock moves k before the epoch,
-        // so a pass never sees a new epoch with the old time ([`shift`]).
-        let anchor = crate::clock::Anchor::of(clock);
-        let now = clock.now_ns();
-        tx.timed_step(now, anchor, || {
-            (nanos(base.elapsed()), crate::stream::split::thread_cpu_ns())
-        });
+        let (anchor, now) = split::timed_pass(clock, &mut tx, base);
         // The bounded escape (dstack #1, `spin_escape_ms`, Windows): the
         // relay thread sends while this thread blocks one timer tick.
         #[cfg(any(target_os = "linux", windows))]
@@ -1794,14 +1788,9 @@ fn run_passes(
             );
             continue;
         }
-        // How late the sleep returns, read right around it (dstack #359),
-        // on one epoch (a re-anchor moved the clock).
+        // How late the sleep returns (dstack #359).
         let target = tx.wake_ns(now);
-        let asked = clock.now_ns();
-        clock.sleep_until(target);
-        let woke = clock.now_ns();
-        let same = crate::clock::Anchor::of(clock).epoch == anchor.epoch;
-        tx.slept(target, asked, woke, same);
+        split::timed_sleep(clock, &mut tx, target, anchor.epoch);
     }
 }
 
@@ -1848,12 +1837,13 @@ fn run_relay(clock: &dyn PtpClock, relay: &relay::Relay<Transmitter>, scheduling
     take_priority(MediaThread::TxRelay, TX_PRIORITY, scheduling);
     #[cfg(any(target_os = "linux", windows))]
     crate::clock::relay_spin();
+    // The base of the passes' wall times ([`split`], dstack #359).
+    let base = Instant::now();
     relay.serve(|tx, back| {
         tx.relayed = true;
         loop {
-            let anchor = crate::clock::Anchor::of(clock);
-            let now = clock.now_ns();
-            tx.step(now, anchor);
+            // Timed and its sleeps read as the TX thread's (dstack #359).
+            let (anchor, now) = split::timed_pass(clock, tx, base);
             if back() {
                 tx.relayed = false;
                 return;
@@ -1861,7 +1851,8 @@ fn run_relay(clock: &dyn PtpClock, relay: &relay::Relay<Transmitter>, scheduling
             // At most an escape's length, so a TX thread back from its block
             // never waits long for the handback.
             let wake = tx.wake_ns(now);
-            clock.sleep_until(now.map_or(wake, |n| wake.min(n + crate::clock::ESCAPE_MAX_NS)));
+            let target = now.map_or(wake, |n| wake.min(n + crate::clock::ESCAPE_MAX_NS));
+            split::timed_sleep(clock, tx, target, anchor.epoch);
         }
     });
 }

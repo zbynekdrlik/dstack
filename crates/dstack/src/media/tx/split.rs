@@ -30,10 +30,11 @@
 //! clock is read around a pass, two system calls on Linux (no vDSO path).
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Instant;
 
-use super::Transmitter;
-use crate::clock;
-use crate::stream::split::{cpu_between, oversleep_ns};
+use super::{Transmitter, nanos};
+use crate::clock::{self, PtpClock};
+use crate::stream::split::{cpu_between, oversleep_ns, thread_cpu_ns};
 
 /// The TX thread's peaks since the start: written by the TX thread, read
 /// by the status.
@@ -115,7 +116,9 @@ impl Transmitter {
     /// One pass ([`Transmitter::step`]) timed: `read` gives a wall time,
     /// ns on any fixed base, and the thread's CPU time (`None`:
     /// unmeasured), read before and after it. The pass's times become the
-    /// next restart line's and count in the peaks.
+    /// next restart line's and count in the peaks; the sleep before it is
+    /// its own (a restart in a later send without a sleep, the bounded
+    /// escape's last pass, names none).
     pub fn timed_step(
         &mut self,
         now_ns: Option<u64>,
@@ -124,6 +127,7 @@ impl Transmitter {
     ) {
         let (wall_before, cpu_before) = read();
         self.step(now_ns, anchor);
+        self.before.oversleep_ns = None;
         let (wall_after, cpu_after) = read();
         let wall = wall_after.saturating_sub(wall_before);
         let cpu = cpu_between(cpu_before, cpu_after);
@@ -154,4 +158,32 @@ impl Transmitter {
             self.shared.tx_thread.overslept(late);
         }
     }
+}
+
+/// One pass of a TX loop (the TX thread's or, while it covers a bounded
+/// escape, the relay thread's) at `clock`'s time, timed on the calling
+/// thread ([`Transmitter::timed_step`]; the wall time from `base`): the
+/// clock's anchor and time it read.
+pub(super) fn timed_pass(
+    clock: &dyn PtpClock,
+    tx: &mut Transmitter,
+    base: Instant,
+) -> (clock::Anchor, Option<u64>) {
+    // The epoch before the time: the clock moves k before the epoch, so a
+    // pass never sees a new epoch with the old time ([`super::shift`]).
+    let anchor = clock::Anchor::of(clock);
+    let now = clock.now_ns();
+    tx.timed_step(now, anchor, || (nanos(base.elapsed()), thread_cpu_ns()));
+    (anchor, now)
+}
+
+/// A TX loop's sleep until PTP `target_ns`, the media clock read right
+/// before and after it and its epoch checked against `epoch` (the pass's):
+/// how late it returned is recorded ([`Transmitter::slept`]).
+pub(super) fn timed_sleep(clock: &dyn PtpClock, tx: &mut Transmitter, target_ns: u64, epoch: u32) {
+    let asked = clock.now_ns();
+    clock.sleep_until(target_ns);
+    let woke = clock.now_ns();
+    let same = clock::Anchor::of(clock).epoch == epoch;
+    tx.slept(target_ns, asked, woke, same);
 }

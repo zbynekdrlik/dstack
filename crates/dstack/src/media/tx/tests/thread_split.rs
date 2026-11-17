@@ -179,6 +179,43 @@ fn a_pass_s_restart_line_names_what_came_before_it() {
     );
 }
 
+/// A sleep belongs to the pass after it: a send without a sleep before it
+/// (the bounded escape's last pass, `before_wait`) that restarts names no
+/// oversleep, only the pass before.
+#[test]
+fn a_sleep_is_the_next_pass_s_only() {
+    let mut rig = Rig::new(Vec::new());
+    assert!(rig.shared.set_source(0, Source::Counter));
+    rig.flow(vec![Some(1)]);
+    let mut reads = [(0, Some(0)), (400_000, Some(30_000))].into_iter();
+    rig.tx.timed_step(Some(T), 0, || reads.next().unwrap());
+    let target = rig.tx.wake_ns(Some(T));
+    let woke = target + 100_000;
+    rig.tx.slept(target, Some(T), Some(woke), true);
+    assert_eq!(rig.tx.before.oversleep_ns, Some(100_000));
+    let mut reads = [(0, Some(0)), (60_000, Some(50_000))].into_iter();
+    rig.tx.timed_step(Some(woke), 0, || reads.next().unwrap());
+    assert_eq!(
+        rig.tx.before,
+        Before {
+            oversleep_ns: None,
+            pass_ns: Some(60_000),
+            pass_cpu_ns: Some(50_000),
+        }
+    );
+    crate::test_log::undecided();
+    let warnings = crate::test_log::capture_warnings(|| {
+        assert!(
+            rig.tx
+                .before_wait(|| (Some(woke + 5 * MS), 0), || true, || false)
+        );
+    });
+    assert!(
+        warnings.contains("oversleep_us=- last_pass_us=60 last_pass_cpu_us=50"),
+        "{warnings}"
+    );
+}
+
 /// A bounded escape hands the next passes to the relay thread: what the
 /// TX thread measured before it no longer describes them.
 #[test]

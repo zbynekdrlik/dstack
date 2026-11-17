@@ -156,7 +156,8 @@ impl Json {
 ///   scheduled late), `pass_max_us` (its longest pass, wall time: the
 ///   plans, keepalives and every packet due) and `pass_max_cpu_us` (the
 ///   largest thread CPU time of a pass, Linux only; absent elsewhere: a
-///   pass far longer than it was preempted). The restart line carries the
+///   pass far longer than its CPU time was preempted). The restart line
+///   carries the
 ///   same three for the sleep and the pass before it (`oversleep_us`,
 ///   `last_pass_us`, `last_pass_cpu_us`, `-` when unmeasured).
 /// - `name` (dstack #209): the device's name as it is now, the one its ARC
