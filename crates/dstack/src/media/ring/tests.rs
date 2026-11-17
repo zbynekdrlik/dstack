@@ -639,3 +639,66 @@ fn counters_add_field_by_field() {
         }
     );
 }
+
+/// dstack #379 (stream-obs, 16.11.2026): the media clock re-anchored 43.9
+/// days back (`delta_ns` -3792840060134767, a new PTP time base: the
+/// transmitter's stamps went back with it), and from then on every sample
+/// read as a hole and every write was refused late, while the packets came
+/// on time. The writer and the reader both move to the new base; the ring
+/// must follow them: after the reader's first read there, nothing is late
+/// and nothing is a hole (the positions before the first stored write are
+/// start holes). A step back within one ring is re-read where it overlaps
+/// and its overlapping writes are late, nothing else.
+#[test]
+fn a_ring_follows_its_reader_when_the_clock_goes_back() {
+    let rate = 96_000;
+    let lead = 4 * N as u64;
+    for step_ns in [3_792_840_060_134_767, 1_000_000_000, 10_000_000, 1_000_000] {
+        let step = crate::clock::to_samples(step_ns, rate);
+        let ring = Ring::new();
+        // On the old base: the writer `lead` ahead of the reader.
+        let mut w = T + step;
+        for _ in 0..100 {
+            ring.write_at(w, &packet(w));
+            read(&ring, w - lead, N);
+            w += N as u64;
+        }
+        let old_end = w - lead;
+        let before = ring.counters();
+        assert_eq!((before.holes, before.late), (0, 0), "old base");
+        // The clock went back by `step`: both sides on the new base.
+        w -= step;
+        let mut late = 0;
+        let mut last = Vec::new();
+        for k in 0..100 {
+            let wr = ring.write_at(w, &packet(w));
+            // Expected late: the first packet, written before the reader's
+            // first read on the new base; past that, only the positions a
+            // step within one ring overlaps.
+            late += if step >= SLOTS as u64 {
+                if k == 0 { N } else { 0 }
+            } else {
+                (old_end.saturating_sub(w) as usize).min(N)
+            };
+            assert_eq!(wr.early, 0, "step {step_ns} ns packet {k}");
+            let (got, _) = read(&ring, w - lead, N);
+            last = got;
+            w += N as u64;
+        }
+        let c = ring.counters();
+        assert_eq!(c.holes, 0, "step {step_ns} ns: holes {c:?}");
+        assert_eq!(c.late, late as u64, "step {step_ns} ns: late {c:?}");
+        assert_eq!(last, packet(w - N as u64 - lead), "step {step_ns} ns");
+    }
+}
+
+/// dstack #379: a whole ring back is another time base; less is not.
+#[test]
+fn a_clock_went_back_from_a_whole_ring() {
+    let ring = SLOTS as u64;
+    assert!(went_back(T + ring, T));
+    assert!(!went_back(T + ring - 1, T));
+    assert!(went_back(T + 2 * ring, T));
+    assert!(!went_back(T, T + ring), "ahead");
+    assert!(!went_back(0, T), "no read yet");
+}
