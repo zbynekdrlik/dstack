@@ -3,8 +3,10 @@
 
 //! The Windows media threads' wait (dstack #1 problem A, #328), on the
 //! clock it is given: the timer for all but the spin tail, then a spin
-//! that yields (or, under the bounded escape, a pause). Cross-platform so
-//! Linux tests it with a fake OS clock; only Windows waits with it.
+//! that yields (or, under the bounded escape, a pause; with the device's
+//! `spin_no_yield_tail`, dstack #351, a pause near the due time).
+//! Cross-platform so Linux tests it with a fake OS clock; only Windows
+//! waits with it.
 
 /// No yield in the last this much before a wait's due time, ns (dstack
 /// #351). A yield hands the CPU to any ready thread on it, lower priority
@@ -15,7 +17,8 @@
 /// W + 500 µs (the trace's 1416 µs included) costs it nothing. That pump's
 /// waits (333 µs a period) all start inside these 500 µs, so it gives its
 /// CPU only through [`GIVE_CAP_NS`]; a thread with longer waits still
-/// yields on every turn before them.
+/// yields on every turn before them. Only with the device's
+/// `spin_no_yield_tail` ([`guard_of`]).
 pub(crate) const NO_YIELD_NS: i64 = 500_000;
 
 /// The longest a spun wait outside the bounded escape goes without the
@@ -29,7 +32,8 @@ pub(crate) const NO_YIELD_NS: i64 = 500_000;
 /// busy CPU waits a quantum anyway. Per-CPU system work that must run on
 /// this CPU therefore runs at least this often (v0.6.28 and v0.6.35 froze
 /// FOH: no give, ever). A wait already past its due time makes no turn
-/// and gives nothing, as before.
+/// and gives nothing, as before. Only with the device's
+/// `spin_no_yield_tail` ([`guard_of`]).
 pub(crate) const GIVE_CAP_NS: i64 = 10_000_000;
 
 /// What a wait needs from the OS.
@@ -66,13 +70,37 @@ pub(crate) struct Plan {
     pub escape: bool,
     /// The escape's block, ns.
     pub escape_block_ns: i64,
+    /// The no-yield tail and its give cap (dstack #351), or `None`: the
+    /// spin yields on every turn and counts no gives (v0.6.157's wait,
+    /// [`guard_of`]).
+    pub guard: Option<Guard>,
+    /// The capped give is the timer for the wait's whole length, not a
+    /// yield ([`super::pump_gives_on_timer`]; read only with a guard).
+    pub give_on_timer: bool,
+}
+
+/// The no-yield tail and its give cap (dstack #351).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Guard {
     /// No yield in the last this much, ns ([`NO_YIELD_NS`]).
     pub no_yield_ns: i64,
     /// The longest spin without a give, ns ([`GIVE_CAP_NS`]).
     pub give_cap_ns: i64,
-    /// The capped give is the timer for the wait's whole length, not a
-    /// yield ([`super::pump_gives_on_timer`]).
-    pub give_on_timer: bool,
+}
+
+/// The guard of the process's waits for the device's `spin_no_yield_tail`
+/// (dstack #351, opt-in until its non-production soak passes): the shipped
+/// [`NO_YIELD_NS`] and [`GIVE_CAP_NS`] when on; `None` when off, the
+/// v0.6.157 wait (a yield on every spin turn, no cap).
+pub(crate) const fn guard_of(on: bool) -> Option<Guard> {
+    if on {
+        Some(Guard {
+            no_yield_ns: NO_YIELD_NS,
+            give_cap_ns: GIVE_CAP_NS,
+        })
+    } else {
+        None
+    }
 }
 
 /// When a thread last gave its CPU away (a yield or a timer block), on the
@@ -108,21 +136,22 @@ impl Gives {
 }
 
 /// Waits until `os`'s clock reaches `target`: the escape's block when it is
-/// due, the timer for all but the spin tail, then the spin: it yields
-/// until [`Plan::no_yield_ns`] before `target` and pauses from there
-/// (dstack #351), and gives once when it would give nothing for
-/// [`Plan::give_cap_ns`] ([`Gives::owed`]): a yield, or the timer for the
+/// due, the timer for all but the spin tail, then the spin. Without a
+/// [`Plan::guard`] it yields on every turn (v0.6.157). With one (dstack
+/// #351) it yields until [`Guard::no_yield_ns`] before `target` and pauses
+/// from there, and gives once when it would give nothing for
+/// [`Guard::give_cap_ns`] ([`Gives::owed`]): a yield, or the timer for the
 /// rest of the wait ([`Plan::give_on_timer`]). Under the bounded escape
 /// it pauses throughout, uncapped (the escape's block is its give).
 pub(crate) fn until(os: &mut impl WaitOs, target: i64, plan: Plan, gives: &mut Gives) {
     if plan.escape && os.take_escape() {
         os.block_for(plan.escape_block_ns);
-        gives.gave(os.app_ns());
+        gave(os, plan, gives);
     }
     let left = target.saturating_sub(os.now_ns());
     if left > plan.spin_tail_ns {
         os.block_for(left - plan.spin_tail_ns);
-        gives.gave(os.app_ns());
+        gave(os, plan, gives);
     }
     if plan.spin_tail_ns == 0 {
         return;
@@ -132,21 +161,42 @@ pub(crate) fn until(os: &mut impl WaitOs, target: i64, plan: Plan, gives: &mut G
         if left <= 0 {
             return;
         }
-        if plan.escape {
-            os.spin_turn(Turn::Pause);
-        } else if left > plan.no_yield_ns {
-            os.spin_turn(Turn::Yield);
-            gives.gave(os.app_ns());
-        } else if gives.owed(os.app_ns(), left, plan.give_cap_ns) {
-            if plan.give_on_timer {
-                os.block_for(left);
-            } else {
-                os.spin_turn(Turn::Yield);
-            }
-            gives.gave(os.app_ns());
-        } else {
-            os.spin_turn(Turn::Pause);
+        match plan.guard {
+            _ if plan.escape => os.spin_turn(Turn::Pause),
+            None => os.spin_turn(Turn::Yield),
+            Some(guard) => guarded_turn(os, left, guard, plan.give_on_timer, gives),
         }
+    }
+}
+
+/// Counts a give at the app clock's now, only for a guarded wait (an
+/// unguarded one keeps no count: v0.6.157's wait).
+fn gave(os: &mut impl WaitOs, plan: Plan, gives: &mut Gives) {
+    if plan.guard.is_some() {
+        gives.gave(os.app_ns());
+    }
+}
+
+/// One turn of a guarded spin (dstack #351) with `left` to go.
+fn guarded_turn(
+    os: &mut impl WaitOs,
+    left: i64,
+    guard: Guard,
+    give_on_timer: bool,
+    gives: &mut Gives,
+) {
+    if left > guard.no_yield_ns {
+        os.spin_turn(Turn::Yield);
+        gives.gave(os.app_ns());
+    } else if gives.owed(os.app_ns(), left, guard.give_cap_ns) {
+        if give_on_timer {
+            os.block_for(left);
+        } else {
+            os.spin_turn(Turn::Yield);
+        }
+        gives.gave(os.app_ns());
+    } else {
+        os.spin_turn(Turn::Pause);
     }
 }
 

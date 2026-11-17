@@ -430,6 +430,12 @@ pub(crate) fn prepare_on(
     }
     crate::clock::set_spin_tail_ns(device.cfg.spin_tail_ns);
     crate::clock::set_spin_escape_ms(device.cfg.spin_escape_ms);
+    crate::clock::set_spin_no_yield_tail(device.cfg.spin_no_yield_tail);
+    if let Some(line) =
+        crate::clock::no_yield_tail_line(device.cfg.spin_no_yield_tail, crate::clock::Os::current())
+    {
+        info!("{line}");
+    }
     if let Some(line) =
         crate::clock::spin_escape_line(device.cfg.spin_escape_ms, crate::clock::Os::current())
     {

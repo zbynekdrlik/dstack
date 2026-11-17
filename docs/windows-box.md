@@ -33,6 +33,10 @@ Every spin that did not yield to lower priorities froze a Windows PC (dstack #1)
 
 Never ship a spin that starves lower priorities; a change to this wait is tried on a non-production Windows box before FOH.
 
+### The no-yield tail (`spin_no_yield_tail`, opt-in, off by default)
+
+Since 0.6.158 (dstack #351, dasio#120: on dsg Defender kept the engine pump's CPU 1.4 ms after a yield near its due time, and the pump re-bootstrapped) the spin can skip SwitchToThread in the last 500 µs before a due time (a CPU pause there) and give its CPU at least every 10 ms (a yield, or a timer wait for a pump whose W absorbs the timer's late wake). Since the decision of 17.11.2026 a device turns it on with `spin_no_yield_tail = true` (process-wide, the last device set wins); left out it is off and the spin yields on every turn, the wait of 0.6.157. It stays opt-in until its non-production soak passes (the soak runs with it on); a pass flips the default.
+
 ### The bounded escape (`spin_escape_ms`, a trial, off by default)
 
 Since 0.6.38 (dstack #1) a device may set `spin_escape_ms` (100 to 10000; left out: off, the yielding spin above; process-wide, the last device set wins). It is built for a trial on dasio's test PC (iem-snv, no live receivers) before any production PC. When set, on Windows in the low-latency profile:
