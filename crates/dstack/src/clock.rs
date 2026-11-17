@@ -1003,3 +1003,7 @@ mod tests;
 
 #[cfg(test)]
 mod anchor_tests;
+
+/// The runner's timer state in a Windows timer test's failure (#339).
+/// Only tests call it; built in every build so the mutation gate sees it.
+mod timer_state;

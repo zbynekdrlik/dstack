@@ -445,6 +445,16 @@ mod tests {
         (out, ran)
     }
 
+    /// The calling thread's timer state (#339): the OS's timer resolution
+    /// and whether this thread got its high-resolution waitable timer.
+    fn timer_state() -> super::super::timer_state::TimerState {
+        use windows_sys::Wdk::System::SystemInformation::NtQueryTimerResolution;
+        let (mut coarsest, mut finest, mut current) = (0u32, 0u32, 0u32);
+        // SAFETY: three valid, writable u32s; the call only writes them.
+        let status = unsafe { NtQueryTimerResolution(&mut coarsest, &mut finest, &mut current) };
+        super::super::timer_state::from_nt(status, coarsest, finest, current, !timer().is_null())
+    }
+
     /// dlink (#68): the normal profile's waits end on the high-resolution
     /// timer, not on the 15.6 ms system tick (SongPlayer 31.10: peaks of two
     /// ticks). The median of 200 waits of 1 ms oversleeps under 1 ms.
@@ -461,9 +471,10 @@ mod tests {
         let median = late[late.len() / 2];
         assert!(
             (0..1_000_000).contains(&median),
-            "median oversleep {median} ns; p90 {} ns, max {} ns",
+            "median oversleep {median} ns; p90 {} ns, max {} ns; {}",
             late[late.len() * 9 / 10],
-            late[late.len() - 1]
+            late[late.len() - 1],
+            super::super::timer_state::describe(median, true, &timer_state())
         );
     }
 
@@ -483,10 +494,15 @@ mod tests {
                 .collect();
             late.sort_unstable();
             assert!(late[0] >= 0, "{mode:?}: ended {} ns early", -late[0]);
+            let median = late[late.len() / 2];
             assert!(
-                late[late.len() / 2] < 1_000_000,
-                "{mode:?}: median late {} ns",
-                late[late.len() / 2]
+                median < 1_000_000,
+                "{mode:?}: median late {median} ns; {}",
+                super::super::timer_state::describe(
+                    median,
+                    mode == super::super::WaitMode::Timer,
+                    &timer_state()
+                )
             );
         }
         let target = app_monotonic_ns() + 2_000_000;

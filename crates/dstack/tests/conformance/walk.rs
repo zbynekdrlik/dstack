@@ -35,9 +35,10 @@
 //! comes at most once; the order differs between devices; 0x8003 and
 //! 0x8004 list the same number of slots.
 //!
-//! The info packets (start code 0xffff) are walked by the header alone;
-//! the channel-change notification's mask rule is inferno's, not yet a
-//! hardware capture's ([`info`]).
+//! The info packets (start code 0xffff) are walked by the header alone,
+//! the channel-change notification also by its mask's length, as an
+//! UltimoX2 and a Yamaha card sent it (`channel_changes` in the fixture,
+//! [`info`]).
 
 // Each user (a unit test module, an integration test) takes what it needs.
 #![allow(dead_code)]
@@ -244,30 +245,39 @@ pub struct Info {
     pub body: Vec<u8>,
 }
 
-/// The channel-change notification's opcode.
-pub const CHANNEL_CHANGE: [u8; 8] = [0x07, 0x2a, 0x01, 0x02, 0x00, 0x00, 0x00, 0x00];
+/// The channel-change notification's opcode bytes 2-3 (`07 xx 01 02 00
+/// 00 00 00`; the second byte differs per device: 0x38 on the UltimoX2,
+/// 0x24 on the Yamaha card, a reader does not match it).
+pub const CHANNEL_CHANGE: [u8; 2] = [0x01, 0x02];
 
 /// Walks the info packet `d` strictly: the header (start code, the length
 /// field equal to the datagram's size, the vendor) and a reply's opcode
 /// `07 xx 0y yy 00 00 00 00`. The replies to 8700 hold no records a reader
 /// steps through by length: the header's length is their one length to
 /// walk, and their bodies are compared with the hardware's in the tests.
-/// For a channel-change notification also its mask's length (`u16`, at
-/// least 1) and the mask, ending exactly at the datagram's end. That one
-/// rule is inferno's layout, the source our writer follows too, NOT a
-/// hardware capture: no hardware notification is captured yet (#349).
+/// For a channel-change notification also its mask, as the hardware sends
+/// it (captured 17.11.2026, dstack #349): a `u16` length n (at least 1),
+/// then n mask bytes, ending exactly at the datagram's end (no padding to
+/// 4: the hardware's are 35 and 36 bytes long), and the mask's last byte
+/// names a channel (the hardware sends the shortest mask that holds the
+/// highest channel: 1 byte for channel 7 of 128).
 pub fn info(d: &[u8]) -> Result<Info, String> {
     let opcode = header(d, INFO_START)?;
     if opcode[0] != 0x07 || opcode[4..] != [0, 0, 0, 0] {
         return Err(format!("opcode {opcode:02x?}: not a reply's"));
     }
     let body = d[HEADER..].to_vec();
-    if opcode[2..4] == CHANNEL_CHANGE[2..4] {
+    if opcode[2..4] == CHANNEL_CHANGE {
         let n = usize::from(word(&body, 0)?);
         if n == 0 || 2 + n != body.len() {
             return Err(format!(
                 "channel change: a mask of {n} bytes in a body of {}",
                 body.len()
+            ));
+        }
+        if body[body.len() - 1] == 0 {
+            return Err(format!(
+                "channel change: the mask's last byte of {n} names no channel"
             ));
         }
     }
