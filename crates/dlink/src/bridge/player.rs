@@ -526,11 +526,10 @@ impl Player {
             } else {
                 // Priming (an underrun after the gap's first drop, too):
                 // the priming starts from its own level; a gap that
-                // dropped frames still counts.
+                // dropped frames still counts. (The lateness floor of a gap
+                // cut short is not started afresh here: the priming's calls
+                // refill it before the output plays.)
                 self.output_gaps += u64::from(self.gap.dropped > 0);
-                if self.gap.left > 0 {
-                    self.late.forget();
-                }
                 self.gap = GapState::default();
             }
         }
