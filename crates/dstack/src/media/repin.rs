@@ -120,7 +120,8 @@ pub(crate) fn note(found: PinOutcome) {
 
 /// On Windows: pins the calling thread to `cpu` again. The previous mask
 /// is `SetThreadAffinityMask`'s answer, so the check costs nothing. (The
-/// same call as `media::tx::pin_to_cpu`, which only needs a yes or no.)
+/// same call as `media::tx::priority::pin_to_cpu`, which only needs a yes
+/// or no.)
 #[cfg(windows)]
 fn repin(cpu: usize) -> PinOutcome {
     use windows_sys::Win32::System::Threading::{GetCurrentThread, SetThreadAffinityMask};

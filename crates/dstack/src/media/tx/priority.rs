@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use tracing::{info, warn};
 
-use super::ask_priority;
+use super::TX_PRIORITY;
 use crate::clock::{Os, ThreadPriority};
 
 /// What a media thread got of the priority its profile asks.
@@ -360,6 +360,162 @@ pub fn join_mmcss() -> Result<u32, MmcssError> {
 
 /// [`join_mmcss`]'s error off Windows.
 pub const NO_MMCSS: &str = "no MMCSS on this OS";
+
+/// On Linux: when `asked` is real-time, `SCHED_FIFO` at `priority` for
+/// the calling thread (reset in any child it forks); `false` when the
+/// kernel refuses it or nothing raised was asked. The RX thread and the
+/// pump ask too ([`take_priority`]).
+#[cfg(target_os = "linux")]
+pub(super) fn ask_priority(asked: ThreadPriority, priority: i32) -> bool {
+    if asked != ThreadPriority::Realtime {
+        return false;
+    }
+    let param = libc::sched_param {
+        sched_priority: priority,
+    };
+    // SAFETY: `param` is a valid sched_param the call only reads; pid 0 is
+    // the calling thread.
+    unsafe {
+        libc::sched_setscheduler(0, libc::SCHED_FIFO | libc::SCHED_RESET_ON_FORK, &param) == 0
+    }
+}
+
+/// Windows' thread priority for a media thread asking `priority` (the
+/// Linux `SCHED_FIFO` number): THREAD_PRIORITY_TIME_CRITICAL (15; 31 in a
+/// REALTIME_PRIORITY_CLASS process) for the TX thread ([`TX_PRIORITY`] and
+/// above), THREAD_PRIORITY_HIGHEST (2; 26 there) for the RX thread and the
+/// engine's pump, so TX goes first as on Linux (TX 47 > RX 44 > pump 40;
+/// dasio, the owner's gen3 list for Windows, 1.11.2026). Both stay above
+/// MMCSS's audio threads, which left the pump short of time on the FOH PC
+/// (missed blocks and TX holes at W 0.33 ms).
+pub fn windows_thread_priority(priority: i32) -> i32 {
+    if priority >= TX_PRIORITY {
+        WINDOWS_TIME_CRITICAL
+    } else {
+        WINDOWS_HIGHEST
+    }
+}
+
+/// THREAD_PRIORITY_TIME_CRITICAL.
+pub const WINDOWS_TIME_CRITICAL: i32 = 15;
+/// THREAD_PRIORITY_HIGHEST.
+pub const WINDOWS_HIGHEST: i32 = 2;
+
+/// Windows' thread priority for a media thread that asks `asked` at
+/// `priority` (the Linux `SCHED_FIFO` number): [`windows_thread_priority`]
+/// for real-time, THREAD_PRIORITY_HIGHEST within the process's normal
+/// class for the normal profile (dstack #90: no privilege, nothing
+/// process-wide, no setup asked of the app; the thread then also joins
+/// MMCSS 'Pro Audio' on Windows), none at normal.
+pub fn windows_priority_for(asked: ThreadPriority, priority: i32) -> Option<i32> {
+    match asked {
+        ThreadPriority::Realtime => Some(windows_thread_priority(priority)),
+        ThreadPriority::Highest => Some(WINDOWS_HIGHEST),
+        ThreadPriority::Normal => None,
+    }
+}
+
+/// On Windows: the thread at [`windows_priority_for`]`(asked, priority)`;
+/// `false` when Windows refuses it or nothing raised was asked.
+/// Under the normal profile (dlink, #68) the thread also opts out of
+/// Windows' power throttling (EcoQoS), which would end its timer waits on
+/// the coarse system tick (SongPlayer 31.10: peaks of two 15.6 ms ticks).
+/// Our thread only, nothing process-wide.
+#[cfg(windows)]
+pub(super) fn ask_priority(asked: ThreadPriority, priority: i32) -> bool {
+    if asked != ThreadPriority::Realtime && !unthrottle() {
+        warn!(
+            error = %std::io::Error::last_os_error(),
+            "a media thread could not opt out of power throttling: its waits may end late"
+        );
+    }
+    let Some(level) = windows_priority_for(asked, priority) else {
+        return false;
+    };
+    use windows_sys::Win32::System::Threading::{GetCurrentThread, SetThreadPriority};
+    // SAFETY: the calling thread's pseudo handle.
+    unsafe { SetThreadPriority(GetCurrentThread(), level) != 0 }
+}
+
+/// Takes the calling thread out of Windows' execution-speed throttling;
+/// `false` when Windows refuses (before Windows 10 1709).
+#[cfg(windows)]
+fn unthrottle() -> bool {
+    use windows_sys::Win32::System::Threading::{
+        GetCurrentThread, SetThreadInformation, THREAD_POWER_THROTTLING_CURRENT_VERSION,
+        THREAD_POWER_THROTTLING_EXECUTION_SPEED, THREAD_POWER_THROTTLING_STATE,
+        ThreadPowerThrottling,
+    };
+    let state = THREAD_POWER_THROTTLING_STATE {
+        Version: THREAD_POWER_THROTTLING_CURRENT_VERSION,
+        ControlMask: THREAD_POWER_THROTTLING_EXECUTION_SPEED,
+        StateMask: 0,
+    };
+    // SAFETY: the calling thread's pseudo handle; `state` is a valid
+    // THREAD_POWER_THROTTLING_STATE of the size given, only read.
+    unsafe {
+        SetThreadInformation(
+            GetCurrentThread(),
+            ThreadPowerThrottling,
+            (&raw const state).cast(),
+            std::mem::size_of::<THREAD_POWER_THROTTLING_STATE>() as u32,
+        ) != 0
+    }
+}
+
+#[cfg(not(any(target_os = "linux", windows)))]
+pub(super) fn ask_priority(_asked: ThreadPriority, _priority: i32) -> bool {
+    false
+}
+
+/// Pins the calling thread, named `thread` in the log, to `cpu` when the
+/// device config names one (#72 phase F: the pump and the RX/TX threads on
+/// isolated cores); a refusal (no such CPU) leaves it where it was.
+pub(crate) fn place(thread: &str, cpu: Option<usize>) {
+    let Some(cpu) = cpu else {
+        return;
+    };
+    if pin_to_cpu(cpu) {
+        info!(thread, cpu, "pinned to its CPU");
+    } else {
+        let error = std::io::Error::last_os_error();
+        warn!(thread, cpu, %error, "not pinned: the kernel refused that CPU");
+    }
+}
+
+/// Pins the calling thread to `cpu` alone; `false` when the kernel refuses
+/// it (no such CPU, or outside the thread's cpuset).
+#[cfg(target_os = "linux")]
+pub(super) fn pin_to_cpu(cpu: usize) -> bool {
+    if cpu >= crate::device::MAX_CPU {
+        return false;
+    }
+    // SAFETY: an all-zero cpu_set_t is a valid empty set; CPU_SET writes
+    // inside it (cpu is below CPU_SETSIZE); pid 0 is the calling thread and
+    // the call only reads the set.
+    unsafe {
+        let mut set: libc::cpu_set_t = std::mem::zeroed();
+        libc::CPU_SET(cpu, &mut set);
+        libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &set) == 0
+    }
+}
+
+/// On Windows: the thread's affinity to `cpu` alone (the first processor
+/// group, 64 CPUs).
+#[cfg(windows)]
+pub(super) fn pin_to_cpu(cpu: usize) -> bool {
+    use windows_sys::Win32::System::Threading::{GetCurrentThread, SetThreadAffinityMask};
+    if cpu >= 64 {
+        return false;
+    }
+    // SAFETY: the pseudo handle of the calling thread and a one-CPU mask.
+    unsafe { SetThreadAffinityMask(GetCurrentThread(), 1usize << cpu) != 0 }
+}
+
+#[cfg(not(any(target_os = "linux", windows)))]
+pub(super) fn pin_to_cpu(_cpu: usize) -> bool {
+    false
+}
 
 #[cfg(test)]
 mod tests;
