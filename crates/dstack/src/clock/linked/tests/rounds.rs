@@ -42,7 +42,8 @@ impl Rounds {
     pub(super) fn timed<T>(&self, bound_ns: i64, f: impl FnOnce() -> T) -> T {
         let t = Instant::now();
         let out = f();
-        if t.elapsed() > Duration::from_nanos(bound_ns.unsigned_abs()) {
+        let bound = u64::try_from(bound_ns).expect("a round's bound is not negative");
+        if t.elapsed() > Duration::from_nanos(bound) {
             self.slow.set(true);
         }
         out
@@ -123,7 +124,8 @@ fn a_run_that_keeps_failing_slow_fails_at_the_last_attempt() {
 /// The CI shape (v0.6.158 main, windows-2025): a switch round preempted
 /// between its reads waits instead of handing over. A follower whose read
 /// takes 1 ms (the service's time at its end) stands in for the preempted
-/// reads on the first run; the second run reads at once and hands over.
+/// reads on the first run, which always fails slow; a later run reads at
+/// once and hands over (a later run preempted itself makes one more).
 #[test]
 fn a_preempted_switch_round_runs_again_and_hands_over_on_time() {
     use super::{ALIVE_LOCKED, tricky_on_service};
@@ -138,5 +140,5 @@ fn a_preempted_switch_round_runs_again_and_hands_over_on_time() {
         assert_eq!(r.tick(&linked, AGREE_NS), Source::Internal);
         assert_eq!(linked.epoch(), e);
     });
-    assert_eq!(made, 2);
+    assert!(made >= 2, "{made}");
 }

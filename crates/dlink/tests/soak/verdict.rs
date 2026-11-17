@@ -18,8 +18,8 @@
 //!   backlog at the read counted in. And the depth read must be the usual
 //!   one (at least the run's median less a call: the sawtooth's bottom
 //!   moves by a call with the calls' phase), less what the pump took on
-//!   time while this tick ran late: the tick's lateness past the run's
-//!   median lateness (the median depth is read at the median lateness). A
+//!   time while this tick's depth read ran late: that read's lateness past
+//!   the run's median one (the median depth is read at it). A
 //!   FIFO short of that lost a write or gave frames it never had, which no
 //!   thread's lateness explains. The pump's backlog at the read never
 //!   lowers it (a pump behind leaves the FIFO fuller); it enters the dry
@@ -132,7 +132,7 @@ pub(crate) fn losses(
 ) -> Vec<Loss> {
     let rx_median_ms = median(ticks.iter().map(|t| t.rx_depth_ms));
     let tx_median_ms = median(ticks.iter().map(|t| t.tx_depth_ms));
-    let late_median_ms = median(ticks.iter().map(late_ms));
+    let late_median_ms = median(ticks.iter().map(read_late_ms));
     let on_time_rx: u64 = (0..ticks.len())
         .filter(|&i| !held(ticks, i))
         .map(|i| ticks[i].rx)
@@ -146,7 +146,7 @@ pub(crate) fn losses(
         } as f64;
         let to = t.end_ms as f64;
         let on_time = t.late < LATE_TICK;
-        let usual_ms = usual_tx_depth_ms(tx_median_ms, late_median_ms, late_ms(t));
+        let usual_ms = usual_tx_depth_ms(tx_median_ms, late_median_ms, read_late_ms(t));
         let tx = [
             (on_time && t.underrun).then(|| ("TX underrun", tx_underrun(t, wakes, usual_ms))),
             (on_time && t.recentre).then(|| {
@@ -186,13 +186,16 @@ pub(crate) fn losses(
     out
 }
 
-/// A tick's lateness, ms.
-fn late_ms(t: &Tick) -> f64 {
-    t.late.as_secs_f64() * 1e3
+/// How late a tick's TX depth was read past its due time, ms: its lateness
+/// and the time from its start to that read (a thread preempted between
+/// the two reads the depth later still).
+fn read_late_ms(t: &Tick) -> f64 {
+    t.late.as_secs_f64() * 1e3 + t.depth_after_ms
 }
 
-/// The TX depth a tick `late_ms` late should read before its write: the
-/// run's median `median_ms` (read at the median lateness `late_median_ms`)
+/// The TX depth a tick should read before its write when it read it
+/// `late_ms` past its due time ([`read_late_ms`]): the run's median
+/// `median_ms` (read at the median of those, `late_median_ms`)
 /// less what the pump took on time over the tick's lateness past that
 /// median (dstack #339: a tick 3.55 ms late read 8.88 ms where the median
 /// was 14.85 ms, and its write was held 10.99 ms). A tick earlier than the
@@ -420,12 +423,17 @@ mod tests {
     fn a_tick_late_reads_the_usual_depth_less_its_lateness() {
         // v0.6.158 tag CI (windows-2025, dstack #339): the run's usual TX depth
         // 14.85 ms; a tick 3.55 ms late read 8.88 ms and its write landed
-        // 10.99 ms after that read. The pump took 3.05 ms on time over the
-        // lateness past the run's median (0.5 ms): the usual depth there is
-        // 11.80 ms, and 8.88 ms is within a call and the slack of it.
-        let usual = |t: Tick| Tick {
-            tx_depth_ms: 14.85,
-            ..t
+        // 10.99 ms after that read. The five ticks before it were 0.13-0.48 ms
+        // late (its failure message), the run's median lateness unprinted:
+        // 0.5 ms here. The pump took 3.05 ms on time over the lateness past
+        // that median: the usual depth there is 11.80 ms, and 8.88 ms is
+        // within a call and the slack of it.
+        let usual = |med_us| {
+            move |t: Tick| Tick {
+                tx_depth_ms: 14.85,
+                late: Duration::from_micros(med_us),
+                ..t
+            }
         };
         let ci = |late_us, tx_depth_ms| Tick {
             gap: true,
@@ -435,11 +443,18 @@ mod tests {
             tx_depth_ms,
             ..tick(0)
         };
-        let ticks = |last| {
-            let mut v: Vec<Tick> = run(last).into_iter().map(usual).collect();
-            v.last_mut().unwrap().tx_depth_ms = last.tx_depth_ms;
+        // Ticks at the median lateness `med_us`, the last one `last`.
+        let at = |med_us, last: Tick| {
+            let mut v: Vec<Tick> = run(last).into_iter().map(usual(med_us)).collect();
+            *v.last_mut().unwrap() = Tick {
+                top_ms: 1189,
+                depth_at_ms: 1189,
+                end_ms: 1190,
+                ..last
+            };
             v
         };
+        let ticks = |last| at(500, last);
         assert!((usual_tx_depth_ms(14.85, 0.5, 3.55) - 11.80).abs() < 1e-9);
         let held = judge(&ticks(ci(3_550, 8.88)), &Wakes::default());
         assert_eq!(held.len(), 1);
@@ -461,6 +476,29 @@ mod tests {
         assert_eq!(
             judge(&ticks(ci(500, 8.88)), &Wakes::default())[0].runner,
             None
+        );
+        // The break-even: at a median lateness up to 1.25 ms the CI case is the
+        // app's (8.88 + 2.67 + 1 >= 14.85 - (3.55 - median)), past it a lost
+        // write.
+        assert!(
+            judge(&at(1_200, ci(3_550, 8.88)), &Wakes::default())[0]
+                .runner
+                .is_some()
+        );
+        assert_eq!(
+            judge(&at(1_300, ci(3_550, 8.88)), &Wakes::default())[0].runner,
+            None
+        );
+        // The time from the tick's start to its depth read counts as lateness.
+        let read_late = Tick {
+            late: Duration::from_micros(500),
+            depth_after_ms: 3.05,
+            ..ci(0, 8.88)
+        };
+        assert!(
+            judge(&ticks(read_late), &Wakes::default())[0]
+                .runner
+                .is_some()
         );
         // A tick earlier than the median reads no more than the median.
         assert_eq!(usual_tx_depth_ms(14.85, 0.5, 0.0), 14.85);
