@@ -220,6 +220,7 @@ fn a_stalled_pump_against(to_asio: usize) {
         app_buffer_ns: None,
         to_asio_app_buffer_ns: None,
         from_asio_app_buffer_ns: None,
+        converter_taps: None,
     })
     .expect("the bridge");
     let stats = bridge.from_asio_stats();
