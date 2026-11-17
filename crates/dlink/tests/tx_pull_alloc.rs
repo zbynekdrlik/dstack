@@ -140,8 +140,9 @@ fn passes(app: u32, wrap: impl FnOnce(TxPull) -> Box<dyn Process>) -> u64 {
 
 #[test]
 fn the_tx_passes_with_a_tx_pull_allocate_nothing() {
-    // The first block at T, then one each 32 samples up to 99.75 ms.
-    assert_eq!(passes(RATE, |p| Box::new(p)), 300);
+    // The 4 blocks of the start at T (from the one stamped T), then one
+    // each 32 samples up to 99.75 ms.
+    assert_eq!(passes(RATE, |p| Box::new(p)), 303);
 }
 
 #[test]
@@ -149,5 +150,5 @@ fn the_tx_passes_with_a_converting_tx_pull_allocate_nothing() {
     let blocks = passes(48_000, |p| {
         Box::new(Rated::new(p, RATE, 48_000, 32, 0, 2).expect("the converter"))
     });
-    assert_eq!(blocks, 300);
+    assert_eq!(blocks, 303);
 }

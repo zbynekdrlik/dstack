@@ -218,6 +218,20 @@ impl Blocks {
         self.start
     }
 
+    /// The same schedule judged against the margin `margin` (how far behind
+    /// a block may run before [`Blocks::next`] starts again, and the room
+    /// [`Blocks::re_anchor`] moves within): the TX pull's catch-up reach
+    /// for its runs, W for a re-anchor (dstack #363).
+    pub fn with_margin(self, margin: u64) -> Blocks {
+        Blocks {
+            timing: Timing {
+                margin,
+                ..self.timing
+            },
+            ..self
+        }
+    }
+
     /// When the next block is due: its last input sample's playout time.
     pub fn due(&self) -> u64 {
         self.start + self.timing.block + self.timing.playout

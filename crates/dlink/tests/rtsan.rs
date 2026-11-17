@@ -148,7 +148,7 @@ fn the_tx_pull_is_realtime_safe() {
     }
     assert_eq!(switch.collect(), 1);
     let v = shared.tx_fill().unwrap();
-    assert_eq!((v.blocks, v.rebootstraps, v.faults), (300, 0, 0), "{v:?}");
+    assert_eq!((v.blocks, v.rebootstraps, v.faults), (303, 0, 0), "{v:?}");
 }
 
 /// Allocates in a real-time context: a violation under the sanitizer.

@@ -551,6 +551,8 @@ pub struct Driver {
     /// The engine pump's re-bootstraps, skipped blocks and overruns, logged
     /// once a second.
     pump: crate::stream::watch::PumpWatch,
+    /// The TX pull's watch (dstack #363).
+    fill: crate::media::tx::FillWatch,
     /// Other traffic on our NIC, logged once a minute.
     traffic: crate::traffic::TrafficWatch,
     /// Our other devices on the PC, whose audio is not other traffic
@@ -600,6 +602,7 @@ impl Driver {
                 sends: crate::media::late::SendWatch::new(),
                 host: crate::media::late::HostWatch::new(),
                 pump: crate::stream::watch::PumpWatch::new(),
+                fill: crate::media::tx::FillWatch::new(),
                 traffic: crate::traffic::TrafficWatch::new(),
                 neighbours: crate::traffic::neighbours::Neighbours::default(),
                 nic: crate::traffic::nic_sent_bytes,
@@ -616,7 +619,7 @@ impl Driver {
 
     /// One round of the manager now, with the channel records `resolver`
     /// knows; then the checks' round and the late, loss, RX minute, send,
-    /// host, pump, traffic and pin watches, the traffic recorder and its
+    /// host, pump, TX pull, traffic and pin watches, the traffic recorder and its
     /// dump at a refusal (dstack #195), and the interface watch that joins
     /// the RX multicast flows' groups again after a change (dstack #282).
     pub fn tick(&mut self, resolver: &dyn Resolver) {
@@ -642,6 +645,7 @@ impl Driver {
             &self.media.tx.cfg.name,
             self.media.engine_stats().as_deref(),
         );
+        self.fill.watch(now, &self.media.tx);
         let ip = self.media.ip;
         let nic = self.nic;
         let ours = self.media.tx.bytes_sent();

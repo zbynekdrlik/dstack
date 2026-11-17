@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use dstack::daemon::{Place, PlaceWait};
 use dstack::device::DeviceConfig;
-use dstack::embed::Embedded;
+use dstack::embed::{Embedded, TxPullOf};
 use dstack::host::{ClockSource, HostError};
 use dstack::media::bypass::FrameSender;
 use dstack::stream::Map;
@@ -62,7 +62,10 @@ impl Launch for TxPulled {
             processor,
             source,
             sender,
-            (self.tx, fill),
+            TxPullOf {
+                channels: self.tx,
+                processor: fill,
+            },
         )
         .map(|device| (device, ()))
     }
@@ -140,3 +143,6 @@ impl Link {
         .map(|(link, ())| link)
     }
 }
+
+#[cfg(test)]
+mod tests;

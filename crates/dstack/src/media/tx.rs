@@ -499,7 +499,7 @@ pub struct TxShared {
     /// The TX thread's sleep and pass peaks (dstack #359, [`split`]).
     tx_thread: split::TxThreadStats,
     /// The TX pull handed over for the TX thread (dstack #363,
-    /// [`TxShared::claim_fill`]), taken when its state is built.
+    /// [`TxShared::claim_fill`], `fill.rs`), taken when its state is built.
     fill: Mutex<Option<TxFill>>,
     /// The claimed TX pull's counts, for the status.
     fill_stats: OnceLock<Arc<TxFillStats>>,
@@ -860,41 +860,6 @@ impl TxShared {
         }
     }
 
-    /// Hands the TX thread the app's TX pull (dstack #363, [`TxFill`]): it
-    /// fills `fill`'s channels' engine rings itself from then on. Once,
-    /// before the TX thread is built (the embedded device's start does it
-    /// before the host starts); refused (`fill` back) after that, for a
-    /// second claim, or for a channel without an engine ring.
-    pub fn claim_fill(&self, fill: TxFill) -> Result<(), Box<TxFill>> {
-        // Under the control lock, as the TX thread's state is built
-        // ([`TxShared::host_for_tx`]): seen by it, or refused.
-        let _built = self.lock();
-        let rings = fill
-            .channels()
-            .iter()
-            .all(|&tx| self.engine_ring(tx).is_some());
-        if !rings || self.tx_built.load(Ordering::Relaxed) || self.fill_stats.get().is_some() {
-            return Err(Box::new(fill));
-        }
-        let _ = self.fill_stats.set(Arc::clone(fill.stats()));
-        *self.fill.lock().unwrap_or_else(PoisonError::into_inner) = Some(fill);
-        Ok(())
-    }
-
-    /// The claimed TX pull for the TX thread's state being built now
-    /// (after [`TxShared::host_for_tx`], which closes the claims).
-    fn fill_for_tx(&self) -> Option<TxFill> {
-        self.fill
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take()
-    }
-
-    /// The TX pull's counts (dstack #363); `None` without one.
-    pub fn tx_fill(&self) -> Option<TxFillView> {
-        self.fill_stats.get().map(|s| s.view())
-    }
-
     /// The TX thread's sleep and pass peaks since the start (dstack #359).
     pub fn tx_thread(&self) -> split::TxThreadView {
         self.tx_thread.view()
@@ -1007,7 +972,10 @@ pub use shift::{EngineLine, Shift};
 pub mod host;
 pub use host::{HostNic, TxPath};
 mod fill;
-pub use fill::{TxFill, TxFillStats, TxFillView, engine_channels};
+pub use fill::{
+    BUILT, CLAIMED, FillWatch, NO_RING, Refused, TX_PULL_WARNING, TxFill, TxFillStats, TxFillView,
+    engine_channels,
+};
 mod pass;
 use pass::{PassClock, Sent, account, send_timed};
 mod refused;

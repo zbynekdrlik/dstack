@@ -35,13 +35,17 @@
 //! sends in the same pass: its own sends never read an unfilled stamp. It
 //! catches up blocks up to W + the advertised latency behind (past that
 //! the flows have restarted anyway): further behind, the schedule starts
-//! again at now (counted, the blocks between skipped) and the processor
-//! hears a `discontinuity` before its next block, as after a pump
-//! re-bootstrap; the player in it resyncs once on the start that does not
-//! follow on. A re-anchor moves the schedule by S's change, as the pump's;
-//! a new latency (Dante Controller) starts it again at the new playout
-//! point. While the clock is not ready nothing is filled; the next ready
-//! pass starts afresh.
+//! again (counted, the blocks between skipped) and the processor hears a
+//! `discontinuity` before its next block, as after a pump re-bootstrap;
+//! the player in it resyncs once on the start that does not follow on. A
+//! start or restart begins with the block stamped now (the one due W ago),
+//! where a TX flow that starts or starts again at now sends first, so it
+//! sends filled stamps at once (the pump's bootstrap, at its playout point,
+//! leaves W of stamps before its first block silent). A re-anchor moves
+//! or keeps the schedule by S's change within W, as the pump's; a new
+//! latency P (Dante Controller) starts it again at the new playout point;
+//! a new advertised latency only moves the reach. While the clock is not
+//! ready nothing is filled; the next ready pass starts afresh.
 //!
 //! A TX computed from RX in the same block (iemmixer's mix) cannot be
 //! pulled (its audio does not exist before the block runs): it keeps the
@@ -53,16 +57,20 @@
 //! (its blocks silent, counted), as the pump's.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 
-use dstack_audio_io::{Block, Process};
+use dstack_audio_io::{Block, Process, panic_message};
 
-use super::{Ring, ns_of};
+use super::{Ring, Shift, TxShared, ns_of};
 use crate::media::rx::RxShared;
 use crate::stream::{Blocks, Due, Timing, quantize};
 
-/// The TX pull's counts: written by the TX thread, read by the status.
+mod watch;
+pub use watch::{FillWatch, TX_PULL_WARNING};
+
+/// The TX pull's counts: written by the TX thread, read by the status and
+/// the watch ([`FillWatch`]).
 #[derive(Debug, Default)]
 pub struct TxFillStats {
     blocks: AtomicU64,
@@ -70,6 +78,9 @@ pub struct TxFillStats {
     skipped: AtomicU64,
     writes_after_send: AtomicU64,
     faults: AtomicU64,
+    /// The processor's panic message (its one panic: never called again);
+    /// written once, on the panic's path only.
+    fault: Mutex<Option<String>>,
 }
 
 /// [`TxFillStats`] as the status shows them (`tx_pull`).
@@ -101,9 +112,94 @@ impl TxFillStats {
         }
     }
 
+    /// The processor's panic message, once it panicked.
+    pub fn fault(&self) -> Option<String> {
+        self.fault
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
     fn rebootstrapped(&self, skipped: u64) {
         self.rebootstraps.fetch_add(1, Ordering::Relaxed);
         self.skipped.fetch_add(skipped, Ordering::Relaxed);
+    }
+
+    /// The processor panicked with `message` (the panic's path, never a
+    /// block's: it allocates and locks once).
+    fn faulted(&self, message: String) {
+        *self.fault.lock().unwrap_or_else(PoisonError::into_inner) = Some(message);
+        self.faults.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Why [`TxShared::claim_fill`] refused a TX pull, and the pull itself.
+#[derive(Debug)]
+pub struct Refused {
+    /// The reason, for an error line.
+    pub reason: &'static str,
+    pub fill: Box<TxFill>,
+}
+
+/// [`Refused::reason`]: a channel of the pull has no engine ring.
+pub const NO_RING: &str = "a TX channel of the pull has no engine ring";
+/// [`Refused::reason`]: a pull was claimed already.
+pub const CLAIMED: &str = "the device has a TX pull already";
+/// [`Refused::reason`]: the TX thread has built its state.
+pub const BUILT: &str = "the TX thread was built before the app's TX pull";
+
+impl TxShared {
+    /// Hands the TX thread the app's TX pull (dstack #363, [`TxFill`]): it
+    /// fills `fill`'s channels' engine rings itself from then on. Once,
+    /// before the TX thread is built (the embedded device's start does it
+    /// before the host starts); refused ([`Refused`], `fill` back) for a
+    /// channel without an engine ring ([`NO_RING`]), a second claim
+    /// ([`CLAIMED`]) or after the TX thread was built ([`BUILT`]).
+    pub fn claim_fill(&self, fill: TxFill) -> Result<(), Refused> {
+        // Under the control lock, as the TX thread's state is built
+        // ([`TxShared::host_for_tx`]): seen by it, or refused.
+        let _built = self.lock();
+        let rings = fill
+            .channels()
+            .iter()
+            .all(|&tx| self.engine_ring(tx).is_some());
+        let reason = if !rings {
+            Some(NO_RING)
+        } else if self.fill_stats.get().is_some() {
+            Some(CLAIMED)
+        } else if self.tx_built.load(Ordering::Relaxed) {
+            Some(BUILT)
+        } else {
+            None
+        };
+        if let Some(reason) = reason {
+            return Err(Refused {
+                reason,
+                fill: Box::new(fill),
+            });
+        }
+        let _ = self.fill_stats.set(Arc::clone(fill.stats()));
+        *self.fill.lock().unwrap_or_else(PoisonError::into_inner) = Some(fill);
+        Ok(())
+    }
+
+    /// The claimed TX pull for the TX thread's state being built now
+    /// (after [`TxShared::host_for_tx`], which closes the claims).
+    pub(super) fn fill_for_tx(&self) -> Option<TxFill> {
+        self.fill
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+    }
+
+    /// The TX pull's counts (dstack #363); `None` without one.
+    pub fn tx_fill(&self) -> Option<TxFillView> {
+        self.fill_stats.get().map(|s| s.view())
+    }
+
+    /// The TX pull's counts themselves (the watch's), `None` without one.
+    pub fn tx_fill_stats(&self) -> Option<&Arc<TxFillStats>> {
+        self.fill_stats.get()
     }
 }
 
@@ -241,41 +337,69 @@ impl TxFill {
         let Some(blocks) = self.blocks.as_mut() else {
             return;
         };
-        let (outcome, skipped) = blocks.re_anchor(shift, now);
-        if outcome == super::Shift::Restarted {
-            self.stats.rebootstrapped(skipped);
+        // Moved or kept within W, as the pump's schedule is, so the fill
+        // and the pump stay on one line (the reach is only the catch-up's).
+        let before = blocks.start();
+        let mut within_w = blocks.with_margin(self.timing.margin);
+        let (outcome, _) = within_w.re_anchor(shift, now);
+        *blocks = within_w.with_margin(self.reach);
+        if outcome == Shift::Restarted {
+            let fresh = self.fresh(now);
+            self.stats.rebootstrapped(self.skipped(before, &fresh));
+            self.blocks = Some(fresh);
             self.discontinuity = true;
         }
+    }
+
+    /// The schedule started (again) at media time `now`: from the block
+    /// whose stamps start at the TX's own restart point (W before the
+    /// pump's playout point: the block due W ago, stamped now), so a TX
+    /// that starts or starts again at now sends filled stamps at once,
+    /// with no W of silence the pump's bootstrap would leave.
+    fn fresh(&self, now: u64) -> Blocks {
+        Blocks::bootstrap(now.saturating_sub(self.timing.margin), self.schedule())
+    }
+
+    /// The blocks between `before` (the next start) and `fresh`'s start
+    /// that never run (0 when it is not later).
+    fn skipped(&self, before: u64, fresh: &Blocks) -> u64 {
+        fresh.start().saturating_sub(before) / self.timing.block
     }
 
     /// Every block due at media time `now` into the `engine` rings (each TX
     /// channel's, [`super::TxShared`]'s) on the line of the engine shift
     /// `shift`, with the flows' lag bound `max_lag` (the advertised
-    /// latency, samples). A new latency (P or the bound) starts the
-    /// schedule again (counted).
+    /// latency, samples). A new P starts the schedule again at the new
+    /// playout point (counted), as the pump's; a new bound only moves the
+    /// reach (the blocks go on).
     pub fn fill_due(&mut self, now: u64, max_lag: u64, engine: &[Option<Ring>], shift: i64) {
         let playout = self.rx.playout().unwrap_or(self.timing.playout);
-        let reach = self.timing.margin.saturating_add(max_lag);
-        if playout != self.timing.playout || reach != self.reach {
+        if playout != self.timing.playout {
             self.timing.playout = playout;
-            self.reach = reach;
             if self.blocks.take().is_some() {
                 self.stats.rebootstrapped(0);
             }
+        }
+        let reach = self.timing.margin.saturating_add(max_lag);
+        if reach != self.reach {
+            self.reach = reach;
+            self.blocks = self.blocks.map(|b| b.with_margin(reach));
         }
         let mut blocks = match self.blocks {
             Some(b) => b,
             None => {
                 self.discontinuity = true;
-                Blocks::bootstrap(now, self.schedule())
+                self.fresh(now)
             }
         };
         loop {
+            let before = blocks.start();
             match blocks.next(now) {
                 Due::Run { start, .. } => self.block(start, engine, shift),
                 Due::Wait { .. } => break,
-                Due::Rebootstrap { skipped, .. } => {
-                    self.stats.rebootstrapped(skipped);
+                Due::Rebootstrap { .. } => {
+                    blocks = self.fresh(now);
+                    self.stats.rebootstrapped(self.skipped(before, &blocks));
                     self.discontinuity = true;
                 }
             }
@@ -326,10 +450,10 @@ impl TxFill {
             }
             processor.process(&mut Block::new(*frames, &[], output).at(start));
         }));
-        if caught.is_err() {
+        if let Err(payload) = caught {
             self.output.fill(0.0);
             self.faulted = true;
-            self.stats.faults.fetch_add(1, Ordering::Relaxed);
+            self.stats.faulted(panic_message(&*payload));
         }
     }
 }

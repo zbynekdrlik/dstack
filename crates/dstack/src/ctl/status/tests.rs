@@ -1158,7 +1158,7 @@ fn the_status_shows_the_tx_pull_s_counts_only_with_one() {
     let s = status(&media);
     assert!(
         s.contains(
-            r#""tx_pull":{"blocks":2,"rebootstraps":0,"skipped":0,"writes_after_send":0,"faults":0}"#
+            r#""tx_pull":{"blocks":5,"rebootstraps":0,"skipped":0,"writes_after_send":0,"faults":0}"#
         ),
         "{s}"
     );
