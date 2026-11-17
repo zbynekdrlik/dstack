@@ -8,7 +8,7 @@
 //! (256 frames at 48 kHz), as a driver's buffer switch does. The driver's
 //! output plays the constant with no to-ASIO underrun and no sample off the
 //! level. A file of its own (its process sets the normal profile), on the
-//! box's routed address and its own system clock; our device hears itself
+//! loopback (dstack #366) and its own system clock; our device hears itself
 //! (the tests' rule: our device only).
 //!
 //! The driver thread records its own scheduling gaps on the app's clock
@@ -25,7 +25,6 @@
 //! [`WINDOWS`]; the asserts on the judged window are unchanged, and a
 //! failure names the driver's stalls before each underrun (`verdict`).
 
-use std::net::{SocketAddr, UdpSocket};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -34,15 +33,11 @@ use dlink::{Clock, Config, Link, Map, Place, Ports, Stopped, SubStatus};
 use dstack_asio::bridge::{Bridge, DanteSide, Spec};
 use dstack_asio::{Block, Opened, Process, Sample};
 
-/// The box's IPv4 address on its default route (connecting a UDP socket
-/// picks the route and sends nothing).
-fn routed_ipv4() -> std::net::Ipv4Addr {
-    let probe = UdpSocket::bind("0.0.0.0:0").unwrap();
-    probe.connect("192.0.2.1:9").unwrap();
-    match probe.local_addr().expect("the routed address") {
-        SocketAddr::V4(a) => *a.ip(),
-        other => panic!("no routed IPv4 address on this box: {other}"),
-    }
+/// The test device's address: loopback, so none of its mDNS, info or
+/// heartbeat multicasts leaves the box (dstack #366: this workspace is a
+/// test run, which refuses a device on a site address).
+fn test_ipv4() -> std::net::Ipv4Addr {
+    std::net::Ipv4Addr::LOCALHOST
 }
 
 /// The level the sender plays.
@@ -175,7 +170,7 @@ impl Heard {
 #[test]
 fn a_stalled_pump_leaves_the_to_asio_bridge_whole() {
     let dir = tempfile::tempdir().unwrap();
-    let place = Place::Ip(routed_ipv4());
+    let place = Place::Ip(test_ipv4());
     let tx_config = Config::new("asio-pull-tx", dir.path().join("tx.toml"))
         .tx(["Out 1"])
         .sample_rate(RATE)

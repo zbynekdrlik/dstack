@@ -11,7 +11,7 @@
 //! query or refresh anything.
 //!
 //! The test runs the daemon as a device runs it (`host.rs`: only the
-//! routed address's interface, our records through `announce::Announcer`),
+//! device address's interface, here loopback (dstack #366), our records through `announce::Announcer`),
 //! with the cache taking every response it hears (`accept_unsolicited`, a
 //! superset of the device's setting). For 2.5 TTLs of a 4 s TTL, the
 //! scaled 5 minutes of a Dante record's 120 s TTL, it hears other devices'
@@ -48,14 +48,11 @@ const RUN: Duration = Duration::from_millis(2500 * TTL_S as u64);
 /// Other devices on the network.
 const OTHERS: usize = 4;
 
-/// The box's routed IPv4 (sends nothing).
-fn routed_ip() -> Ipv4Addr {
-    let s = UdpSocket::bind("0.0.0.0:0").unwrap();
-    s.connect("192.0.2.1:9").unwrap();
-    match s.local_addr().unwrap().ip() {
-        IpAddr::V4(ip) => ip,
-        other => panic!("no routed IPv4: {other}"),
-    }
+/// The test device's address: loopback, so none of its mDNS, info or
+/// heartbeat multicasts leaves the box (dstack #366: this workspace is a
+/// test run, which refuses a device on a site address).
+fn test_ipv4() -> Ipv4Addr {
+    Ipv4Addr::LOCALHOST
 }
 
 /// A socket on 5353 in the mDNS group on `ip`'s interface, beside the
@@ -201,7 +198,7 @@ fn the_classifier_tells_answers_probes_and_queries() {
 
 #[test]
 fn the_daemon_sends_no_query_of_its_own_in_five_scaled_minutes() {
-    let ip = routed_ip();
+    let ip = test_ipv4();
     let token = format!("dstk{:08x}", std::process::id() ^ 0x0319_a0a0);
     let ty: &'static str = Box::leak(format!("_{token}._udp.local.").into_boxed_str());
     let net = network(ip);

@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // Copyright (C) 2026 dstack contributors.
 
-//! dstack #305: the CI test peer (`dstack-dev peer`) on the box's routed
-//! address. Two peers in this process, each on the TEST system clock with
+//! dstack #305: the CI test peer (`dstack-dev peer`) on loopback
+//! (dstack #366). Two peers in this process, each on the TEST system clock with
 //! its own skew, send each other a tone: each hears the other's tone whole,
 //! and each one's play times show its own clock's skew against the app's
 //! clock. The binary's command line parses, runs and stops on SIGINT with
@@ -10,7 +10,7 @@
 //! timing profile (one per process).
 
 use std::collections::BTreeSet;
-use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
+use std::net::Ipv4Addr;
 use std::path::Path;
 
 use std::sync::Arc;
@@ -27,26 +27,22 @@ use dstack::peer::{Peer, Shared};
 use dstack::stream::PumpStats;
 use dstack::stream::wake::RECENT;
 
-/// Held by each test that runs a device: they bind the Dante ports on the
-/// routed address.
+/// Held by each test that runs a device: they bind the Dante ports on
+/// loopback.
 static ONE_DEVICE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// The box's IPv4 address on its default route (connecting a UDP socket
-/// picks the route and sends nothing).
-fn routed_ipv4() -> Ipv4Addr {
-    let probe = UdpSocket::bind("0.0.0.0:0").unwrap();
-    probe.connect("192.0.2.1:9").unwrap();
-    match probe.local_addr().expect("the routed address") {
-        SocketAddr::V4(a) => *a.ip(),
-        other => panic!("no routed IPv4 address on this box: {other}"),
-    }
+/// The test device's address: loopback, so none of its mDNS, info or
+/// heartbeat multicasts leaves the box (dstack #366: this workspace is a
+/// test run, which refuses a device on a site address).
+fn test_ipv4() -> Ipv4Addr {
+    Ipv4Addr::LOCALHOST
 }
 
 fn peer_args(line: &str, dir: &Path, name: &str) -> PeerArgs {
     let mut words: Vec<String> = line.split_whitespace().map(str::to_string).collect();
     words.extend([
         "--ip".into(),
-        routed_ipv4().to_string(),
+        test_ipv4().to_string(),
         "--name".into(),
         name.into(),
         "--status".into(),
@@ -757,8 +753,8 @@ fn two_peers_at_different_skews_hear_each_other_s_tone_whole() {
     );
 }
 
-/// The binary: `peer --help` exits 0, a usage error 2, and a run on the
-/// routed address writes its status and ends on SIGINT with exit 0.
+/// The binary: `peer --help` exits 0, a usage error 2, and a run on
+/// loopback writes its status and ends on SIGINT with exit 0.
 #[cfg(unix)]
 #[test]
 fn the_peer_command_line_parses_runs_and_stops() {
@@ -783,7 +779,7 @@ fn the_peer_command_line_parses_runs_and_stops() {
         .args([
             "peer",
             "--ip",
-            &routed_ipv4().to_string(),
+            &test_ipv4().to_string(),
             "--name",
             "peer-cli",
         ])
