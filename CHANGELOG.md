@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.166
 
 - **Diagnosis (#370, part of #339): each recent late wake carries its own sleep's oversleep.** Each entry of the status' `engine.late_wakes_recent` gains `oversleep_us`: how late the pump's sleep just before that wake returned past its target (the sleep's target is that wake), absent when unmeasured (a sleep asked for a time already past, a clock not read, a new epoch across the sleep). Before, only the second's peak (`oversleep_max_us` on the pump watch line) and the peak since the start existed, so a second with two late wakes told the cause of its latest one only: PR #368's ci-peer run 44032644214 had two re-bootstraps in one second (6979 and 7187 us behind, the line's oversleep 7192 us) and failed on the 6979 us one, whose own oversleep the gate could not see. Recorded where the entry is recorded: one more relaxed atomic in the ring's seqlock slot, no allocation (`tests/hot_path.rs`), no lock.
   - **The ci-peer gate** (`tools/linux/tests/ci_peer_gate.py`) matches each re-bootstrap the witness missed to its own entry's oversleep (past W, within 0.5 ms of its lateness; W from the wake's own late watch line), whatever else its second held; an entry without the field (an older peer, or a sleep not measured) falls back to the line's per-second peak under its old strict rule. Its unit tests carry run 44032644214's second.
