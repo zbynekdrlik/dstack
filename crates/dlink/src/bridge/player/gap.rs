@@ -72,6 +72,8 @@ pub struct Lateness {
     run: i64,
     recent: [i64; RECENT_CALLS],
     next: usize,
+    /// The recent values hold this run's calls ([`Lateness::forget`]).
+    known: bool,
 }
 
 impl Lateness {
@@ -81,15 +83,30 @@ impl Lateness {
     pub fn add(&mut self, pulled: usize, call: usize) {
         self.run += pulled as i64 - call as i64;
         if pulled > 0 {
+            if !self.known {
+                self.forget();
+            }
             self.recent[self.next] = self.run;
             self.next = (self.next + 1) % RECENT_CALLS;
         }
     }
 
-    /// The lateness of the last call over the least of the recent ones.
+    /// Starts the recent values afresh at the running sum now: at the
+    /// first call, and after a gap (whose calls carry its silence, so the
+    /// running sum no longer lines up with the values before it). Until
+    /// new calls come, the lateness reads 0 over the floor (under, never
+    /// over: the safe side).
+    pub fn forget(&mut self) {
+        self.recent = [self.run; RECENT_CALLS];
+        self.known = true;
+    }
+
+    /// The lateness of the last call over the least of the recent ones:
+    /// negative after a pull that wrote nothing (the next pull pays its
+    /// call), which the estimate needs as it is.
     pub fn over_floor(&self) -> i64 {
         let least = self.recent.iter().copied().min().unwrap_or(self.run);
-        (self.run - least).max(0)
+        self.run - least
     }
 }
 

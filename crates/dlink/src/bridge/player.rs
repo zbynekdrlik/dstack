@@ -497,10 +497,12 @@ impl Player {
                 self.buffer_call_in,
                 self.late.over_floor(),
             );
-            // A call outside a gap is the floor's (a gap's calls carry its
-            // silence).
-            if self.gap.left == 0 && gap.state.left == 0 {
-                self.late.add(pulled, call);
+            // A call outside a gap is the floor's; a gap's calls carry its
+            // silence, so the floor starts afresh after one.
+            match (self.gap.left, gap.state.left) {
+                (0, 0) => self.late.add(pulled, call),
+                (_, 0) => self.late.forget(),
+                _ => {}
             }
             self.usual_call_in = usual_call(usual, self.last_call_in, call);
             self.last_call_in = call;
@@ -526,6 +528,9 @@ impl Player {
                 // the priming starts from its own level; a gap that
                 // dropped frames still counts.
                 self.output_gaps += u64::from(self.gap.dropped > 0);
+                if self.gap.left > 0 {
+                    self.late.forget();
+                }
                 self.gap = GapState::default();
             }
         }

@@ -173,6 +173,10 @@ fn the_call_before_the_hold_is_measured_against_its_floor() {
 
 #[test]
 fn the_lateness_floor_is_the_least_of_the_recent_calls() {
+    // A first call that wrote more than it took is the floor itself.
+    let mut late = Lateness::default();
+    late.add(2000, 1056);
+    assert_eq!(late.over_floor(), 0);
     let mut late = Lateness::default();
     for _ in 0..RECENT_CALLS {
         late.add(480, 480);
@@ -181,9 +185,10 @@ fn the_lateness_floor_is_the_least_of_the_recent_calls() {
     // A call 3 ms late reads 3 ms more.
     late.add(624, 480);
     assert_eq!(late.over_floor(), 144);
-    // A pull that wrote nothing is no lateness; the next reads its time.
+    // A pull that wrote nothing is no lateness, and reads a call under the
+    // floor (the next pull pays it); the next reads its time.
     late.add(0, 480);
-    assert_eq!(late.over_floor(), 0);
+    assert_eq!(late.over_floor(), -336);
     late.add(960, 480);
     assert_eq!(late.over_floor(), 144);
     // The floor moves with the recent calls only: four on time after.
@@ -196,6 +201,31 @@ fn the_lateness_floor_is_the_least_of_the_recent_calls() {
         late.add(480, 480);
     }
     assert_eq!(late.over_floor(), 0);
+    // Forgotten (after a gap): the floor is the running sum now.
+    late.add(624, 480);
+    late.forget();
+    assert_eq!(late.over_floor(), 0);
+}
+
+#[test]
+fn a_pull_that_wrote_nothing_before_the_hold_is_paid_by_the_dry_call() {
+    // The call before the hold found the pull's lock held: the dry call's
+    // pull (45 ms) also reads that call's time. Held 25 ms on two periods:
+    // 480 of silence.
+    let mut late = Lateness::default();
+    for _ in 0..RECENT_CALLS {
+        late.add(480, 480);
+    }
+    late.add(0, 480);
+    let before = late.over_floor();
+    let dry = output_gap(GapState::default(), 2160, 960, 480, 960, before);
+    let mut state = dry.state;
+    let mut dropped = dry.drop;
+    for (pulled, call) in [(240, 480), ON, ON, ON] {
+        let next = output_gap(state, pulled, call, 480, 960, 0);
+        (state, dropped) = (next.state, dropped + next.drop);
+    }
+    assert_eq!((dry.drop, dropped), (480, 480));
 }
 
 #[test]
@@ -350,6 +380,31 @@ fn the_player_measures_the_call_before_the_hold() {
         call(&fifo, &mut player, 480, 480);
     }
     assert_eq!((stats.output_gaps(), stats.output_lost_frames()), (1, 1440));
+    assert_eq!((stats.underruns(), stats.recentres()), (0, 0));
+}
+
+#[test]
+fn a_hold_soon_after_a_gap_is_measured_on_a_fresh_floor() {
+    let (fifo, mut player) = running(200);
+    let stats = player.stats();
+    // The call before the first hold 3 ms late, held 41 ms (1440).
+    call(&fifo, &mut player, 624, 480);
+    call(&fifo, &mut player, 2304, 960);
+    call(&fifo, &mut player, 432, 480);
+    for _ in 1..SETTLE_CALLS {
+        call(&fifo, &mut player, 480, 480);
+    }
+    // Two calls on time, then held 28 ms (480: the tick at T+20), the
+    // call before on time: the floor from before the first gap would read
+    // it 3 ms late and drop a period too many.
+    call(&fifo, &mut player, 480, 480);
+    call(&fifo, &mut player, 480, 480);
+    call(&fifo, &mut player, 1824, 960);
+    call(&fifo, &mut player, 96, 480);
+    for _ in 1..SETTLE_CALLS {
+        call(&fifo, &mut player, 480, 480);
+    }
+    assert_eq!((stats.output_gaps(), stats.output_lost_frames()), (2, 1920));
     assert_eq!((stats.underruns(), stats.recentres()), (0, 0));
 }
 
