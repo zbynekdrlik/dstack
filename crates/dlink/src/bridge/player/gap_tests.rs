@@ -3,21 +3,23 @@
 //! The output's own gaps (dstack #307, [`Player::fill_pulled`],
 //! [`output_gap`]): a fill-the-room output (WASAPI shared: the engine
 //! reading a period at each tick) whose callback was held past its buffer.
-//! At 48 kHz a period is 480 frames, 1 ms 48 frames.
+//! At 48 kHz a period is 480 frames, 1 ms 48 frames. T is the held
+//! event's tick; the call before it was on its tick unless said.
 
 use super::*;
 
 use crate::bridge::chunk_ns;
 
 /// The calls `(pulled, call)` through [`output_gap`] at a usual call of
-/// 480: the frames dropped at each and the gaps ended.
-fn run(calls: &[(usize, usize)]) -> (Vec<usize>, u64) {
+/// 480 and a buffer of `buffer`: the frames dropped at each and the gaps
+/// ended.
+fn run(buffer: usize, calls: &[(usize, usize)]) -> (Vec<usize>, u64) {
     let mut state = GapState::default();
     let mut ended = 0;
     let drops = calls
         .iter()
         .map(|&(pulled, call)| {
-            let gap = output_gap(state, pulled, call, 480);
+            let gap = output_gap(state, pulled, call, 480, buffer);
             state = gap.state;
             ended += u64::from(gap.ended);
             gap.drop
@@ -26,75 +28,79 @@ fn run(calls: &[(usize, usize)]) -> (Vec<usize>, u64) {
     (drops, ended)
 }
 
+/// A usual call on the grid, on time.
+const ON: (usize, usize) = (480, 480);
+
 #[test]
 fn a_hold_drops_the_card_s_silence_and_keeps_the_phase() {
-    // Held 25 ms past its tick on a buffer of two periods, every wake on
-    // time: the tick at 20 ms found it empty (480 of silence). The big
-    // call reads 35 ms for 20 and drops what surely was silence (the
-    // excess past a period); the next, on the grid at 30 ms, reads 5 ms
-    // for a period; the lowest sum settles the rest.
-    let (drops, ended) = run(&[(1680, 960), (240, 480), (480, 480), (480, 480), (480, 480)]);
+    // Held 25 ms on a buffer of two periods: the tick at T+20 found it
+    // empty (480 of silence). The dry call reads 35 ms for 20 and drops the
+    // sum past a period at once; the next, on the grid at T+30, reads 5 ms
+    // for a period; the settling drops the rest.
+    let (drops, ended) = run(960, &[(1680, 960), (240, 480), ON, ON, ON]);
     assert_eq!(drops, [240, 0, 0, 0, 240]);
     assert_eq!(ended, 1);
 }
 
 #[test]
-fn a_late_wake_after_the_hold_drops_no_more_than_the_silence() {
-    // The same hold, the call before 0.5 ms late (24) and the call after
-    // the hold 6 ms late (288): rounding each call's excess to periods
-    // dropped 960 here; the lowest sum drops 456 of the 480.
-    let (drops, ended) = run(&[(1656, 960), (528, 480), (192, 480), (480, 480), (480, 480)]);
-    assert_eq!(drops.iter().sum::<usize>(), 456);
+fn late_wakes_after_the_hold_are_not_dropped_as_silence() {
+    // The same hold, the next calls 3 ms late each (the lowest sum alone
+    // dropped 624), then 6 ms late each.
+    let (drops, ended) = run(960, &[(1680, 960), (384, 480), ON, ON, ON]);
+    assert_eq!(drops.iter().sum::<usize>(), 480);
     assert_eq!(ended, 1);
+    let (drops, _) = run(960, &[(1680, 960), (528, 480), ON, ON, ON]);
+    assert_eq!(drops.iter().sum::<usize>(), 480);
 }
 
 #[test]
 fn a_hold_the_buffer_covered_drops_nothing() {
-    // Held 15 ms: the call came before the tick at 20 ms.
-    let (drops, ended) = run(&[(1200, 960), (240, 480), (480, 480), (480, 480), (480, 480)]);
+    // Held 15 ms on a buffer of two periods: the tick at T+10 emptied it
+    // (a dry call), the call came before the tick at T+20.
+    let (drops, ended) = run(960, &[(1200, 960), (240, 480), ON, ON, ON]);
+    assert_eq!(drops, [0; 5]);
+    assert_eq!(ended, 0);
+    // On Windows' 1056 frames 96 were left: no dry call at all.
+    let (drops, ended) = run(1056, &[(1200, 960), (240, 480), ON, ON, ON]);
     assert_eq!(drops, [0; 5]);
     assert_eq!(ended, 0);
 }
 
 #[test]
-fn a_hold_that_ended_right_at_a_tick_is_settled_by_the_next_calls() {
-    // Held to 1 ms past the tick at 20 ms (480 of silence), the call
-    // before 2 ms late: the big call's excess (432) is under a period.
-    let (drops, ended) = run(&[(1392, 960), (480, 480), (480, 480), (480, 480), (480, 480)]);
-    assert_eq!(drops, [0, 0, 0, 0, 432]);
+fn a_hold_that_ended_right_at_a_tick_is_settled_whole() {
+    // Held to 1 ms past the tick at T+20 (480 of silence), the call before
+    // 2 ms late: the dry call's sum (432) is under a period.
+    let (drops, ended) = run(960, &[(1392, 960), (480, 480), ON, ON, ON]);
+    assert_eq!(drops, [0, 0, 0, 0, 480]);
     assert_eq!(ended, 1);
 }
 
 #[test]
 fn a_buffer_of_two_periods_and_a_fraction_drops_its_partial_silence() {
-    // Windows' 1056-frame buffer for a 480-frame period, held 25 ms: the
-    // tick at 20 ms found 96 frames, 384 of silence.
-    let (drops, _) = run(&[(1680, 1056), (240, 480), (480, 480), (480, 480), (480, 480)]);
-    assert_eq!(drops.iter().sum::<usize>(), 384);
+    // Windows' 1056-frame buffer, held 25 ms: the tick at T+20 found 96
+    // frames, 384 of silence.
+    let (drops, _) = run(1056, &[(1680, 1056), (240, 480), ON, ON, ON]);
+    assert_eq!(drops, [144, 0, 0, 0, 240]);
 }
 
 #[test]
 fn the_field_s_46_ms_hold_drops_three_periods() {
-    // Held 46 ms: ticks at 20, 30, 40 ms found it empty (1440). The next
-    // call, on the grid at 50 ms, reads 4 ms.
-    let (drops, ended) = run(&[(2688, 960), (192, 480), (480, 480), (480, 480), (480, 480)]);
-    assert_eq!(drops.iter().sum::<usize>(), 1440);
+    // Ticks at T+20, T+30, T+40 found it empty; the next call, on the grid
+    // at T+50, reads 4 ms.
+    let (drops, ended) = run(960, &[(2688, 960), (192, 480), ON, ON, ON]);
+    assert_eq!(drops, [1248, 0, 0, 0, 192]);
     assert_eq!(ended, 1);
+    // On 1056 frames: 1344.
+    let (drops, _) = run(1056, &[(2688, 1056), (192, 480), ON, ON, ON]);
+    assert_eq!(drops.iter().sum::<usize>(), 1344);
 }
 
 #[test]
 fn two_holds_back_to_back_are_one_gap() {
-    // Held 25 ms, then the next event (at 30 ms) held 25 ms too: the
-    // ticks at 20 and 50 ms found it empty (960).
-    let (drops, ended) = run(&[
-        (1680, 960),
-        (1440, 960),
-        (240, 480),
-        (480, 480),
-        (480, 480),
-        (480, 480),
-    ]);
-    assert_eq!(drops.iter().sum::<usize>(), 960);
+    // Held 25 ms, then the next event (T+30) held 25 ms too: the ticks at
+    // T+20 and T+50 found it empty (960).
+    let (drops, ended) = run(960, &[(1680, 960), (1440, 960), (240, 480), ON, ON, ON]);
+    assert_eq!(drops, [240, 480, 0, 0, 0, 240]);
     assert_eq!(ended, 1);
 }
 
@@ -102,64 +108,72 @@ fn two_holds_back_to_back_are_one_gap() {
 fn a_pull_that_wrote_nothing_is_left_out_of_the_lowest_sum() {
     // The call after the hold found the pull's lock held (0 written); the
     // next reads both calls' time.
-    let (drops, _) = run(&[(1680, 960), (0, 480), (720, 480), (480, 480), (480, 480)]);
+    let (drops, _) = run(960, &[(1680, 960), (0, 480), (720, 480), ON, ON]);
     assert_eq!(drops.iter().sum::<usize>(), 480);
 }
 
 #[test]
-fn calls_of_the_usual_size_open_no_gap() {
-    // A late call of the usual size (it reads more, takes the same), a
-    // pull skipped on the call before (0, then double).
-    let (drops, ended) = run(&[(960, 480), (0, 480), (960, 480), (480, 480)]);
-    assert_eq!(drops, [0; 4]);
+fn calls_that_are_not_dry_open_no_gap() {
+    // Late calls of the usual size (they read more, take the same), a pull
+    // skipped on the call before (0, then double), a big call short of
+    // the buffer.
+    let (drops, ended) = run(1056, &[(960, 480), (0, 480), (1200, 480), (1200, 960), ON]);
+    assert_eq!(drops, [0; 5]);
     assert_eq!(ended, 0);
-    // No usual call known yet.
-    let gap = output_gap(GapState::default(), 4800, 960, 0);
-    assert_eq!((gap.drop, gap.state), (0, GapState::default()));
+    // No usual call known yet, or a buffer no bigger than the usual call.
+    for (usual, buffer) in [(0, 960), (480, 480)] {
+        let gap = output_gap(GapState::default(), 4800, buffer, usual, buffer);
+        assert_eq!((gap.drop, gap.state), (0, GapState::default()));
+    }
 }
 
 #[test]
-fn a_remainder_under_a_quarter_period_is_the_latenesses_noise() {
-    // Held 15 ms (no silence), the next call 2.5 ms late: the lowest sum
-    // ends at 119, under 120, nothing dropped; at 120 it is.
-    let (drops, ended) = run(&[(1200, 960), (359, 480), (480, 480), (480, 480), (480, 480)]);
-    assert_eq!(drops, [0; 5]);
-    assert_eq!(ended, 0);
-    let (drops, ended) = run(&[(1200, 960), (360, 480), (480, 480), (480, 480), (480, 480)]);
-    assert_eq!(drops, [0, 0, 0, 0, 120]);
-    assert_eq!(ended, 1);
+fn the_silence_snaps_to_what_the_buffer_allows() {
+    // A buffer of whole periods: whole periods, from a quarter period under
+    // to three quarters over.
+    assert_eq!(snap(359, 1, 960, 480), 0);
+    assert_eq!(snap(360, 1, 960, 480), 480);
+    assert_eq!(snap(480 - 120, 1, 960, 480), 480);
+    assert_eq!(snap(480 - 121, 1, 960, 480), 0);
+    assert_eq!(snap(-200, 1, 960, 480), 0);
+    // 1056 frames: 384 at least, then whole periods.
+    assert_eq!(snap(0, 1, 1056, 480), 384);
+    assert_eq!(snap(384 + 359, 1, 1056, 480), 384);
+    assert_eq!(snap(384 + 360, 1, 1056, 480), 864);
+    // Two dry calls: twice the least silence.
+    assert_eq!(snap(768, 2, 1056, 480), 768);
 }
 
 #[test]
 fn the_settling_runs_its_calls_then_closes() {
-    let gap = output_gap(GapState::default(), 1680, 960, 480);
+    let gap = output_gap(GapState::default(), 1680, 960, 480, 960);
+    let open = GapState {
+        sum: 720,
+        least: 720,
+        left: SETTLE_CALLS,
+        dry: 1,
+        dropped: 240,
+    };
+    assert_eq!(gap.state, open);
+    let gap = output_gap(gap.state, 240, 480, 480, 960);
     assert_eq!(
         gap.state,
         GapState {
             sum: 480,
             least: 480,
-            left: SETTLE_CALLS,
-            dropped: 240
-        }
-    );
-    let gap = output_gap(gap.state, 240, 480, 480);
-    assert_eq!(
-        gap.state,
-        GapState {
-            sum: 240,
-            least: 240,
             left: SETTLE_CALLS - 1,
-            dropped: 240
+            ..open
         }
     );
-    // A big call while owed carries the sum and what it dropped.
-    let gap = output_gap(gap.state, 1440, 960, 480);
+    // A dry call while settling counts its silence in and starts again.
+    let gap = output_gap(gap.state, 1440, 960, 480, 960);
     assert_eq!(
         gap.state,
         GapState {
-            sum: 480,
-            least: 480,
+            sum: 960,
+            least: 960,
             left: SETTLE_CALLS,
+            dry: 2,
             dropped: 480
         }
     );
@@ -178,19 +192,6 @@ fn the_usual_call_is_the_smallest_that_came_twice() {
     // A stray small call once, never.
     assert_eq!(usual_call(480, 480, 16), 480);
     assert_eq!(usual_call(480, 16, 480), 480);
-}
-
-#[test]
-fn a_stray_small_call_does_not_make_every_period_big() {
-    let (fifo, mut player) = running(200);
-    let stats = player.stats();
-    call(&fifo, &mut player, 16, 16);
-    for _ in 0..200 {
-        // A pull a frame over its take now and then (the two clocks).
-        call(&fifo, &mut player, 481, 480);
-        call(&fifo, &mut player, 479, 480);
-    }
-    assert_eq!((stats.output_gaps(), stats.output_lost_frames()), (0, 0));
 }
 
 /// A player at 48 kHz on both sides (dlisten's default buffer: 10 ms +
@@ -231,7 +232,7 @@ fn the_output_s_gap_is_dropped_and_counted_as_its_own() {
     // Held 25 ms: one period of the card's silence.
     call(&fifo, &mut player, 1680, 960);
     call(&fifo, &mut player, 240, 480);
-    for _ in 0..SETTLE_CALLS {
+    for _ in 1..SETTLE_CALLS {
         call(&fifo, &mut player, 480, 480);
     }
     assert_eq!((stats.output_gaps(), stats.output_lost_frames()), (1, 480));
@@ -249,7 +250,7 @@ fn the_output_s_gap_is_dropped_and_counted_as_its_own() {
 }
 
 #[test]
-fn a_gap_on_a_44_1_khz_output_is_dropped_in_network_frames() {
+fn gaps_on_a_44_1_khz_output_are_dropped_in_network_frames() {
     let fifo = Arc::new(fifo_for(1, 48_000));
     let buffer = AppBuffer::new(10_000_000, chunk_ns(128, 48_000));
     let mut player = Player::new(
@@ -266,27 +267,45 @@ fn a_gap_on_a_44_1_khz_output_is_dropped_in_network_frames() {
     }
     let stats = player.stats();
     let skipped = player.skipped;
-    // Held 25 ms: the call asks the whole buffer, 882 output frames.
-    call(&fifo, &mut player, 1680, 882);
-    call(&fifo, &mut player, 240, 441);
-    for _ in 0..SETTLE_CALLS {
-        call(&fifo, &mut player, 480, 441);
+    // Two holds of 25 ms, apart: each call asks the whole buffer, 882
+    // output frames.
+    for _ in 0..2 {
+        call(&fifo, &mut player, 1680, 882);
+        call(&fifo, &mut player, 240, 441);
+        for _ in 1..SETTLE_CALLS {
+            call(&fifo, &mut player, 480, 441);
+        }
     }
-    assert_eq!((stats.output_gaps(), stats.output_lost_frames()), (1, 480));
-    // The output's clock counts it in output frames.
-    assert_eq!(player.skipped, skipped + 441);
+    assert_eq!((stats.output_gaps(), stats.output_lost_frames()), (2, 960));
+    // The output's clock counts them in output frames, 441 each.
+    assert_eq!(player.skipped, skipped + 882);
 }
 
 #[test]
 fn a_priming_player_drops_nothing_and_owes_nothing() {
     let (fifo, mut player) = running(0);
     let stats = player.stats();
-    // The usual call known, then a big call short of the priming's level.
+    // The usual call known, then a dry call short of the priming's level.
+    call(&fifo, &mut player, 100, 480);
     call(&fifo, &mut player, 100, 480);
     call(&fifo, &mut player, 700, 960);
     assert!(matches!(player.state, State::Priming(_)));
     assert_eq!(player.gap, GapState::default());
     assert_eq!((stats.output_gaps(), player.skipped), (0, 0));
+}
+
+#[test]
+fn a_gap_cut_short_by_an_underrun_still_counts() {
+    let (fifo, mut player) = running(200);
+    let stats = player.stats();
+    call(&fifo, &mut player, 1680, 960);
+    // The FIFO emptied under the settling call: an underrun, priming.
+    fifo.skip(fifo.len());
+    call(&fifo, &mut player, 0, 480);
+    call(&fifo, &mut player, 480, 480);
+    assert!(matches!(player.state, State::Priming(_)));
+    assert_eq!((stats.output_gaps(), stats.output_lost_frames()), (1, 240));
+    assert_eq!(player.gap, GapState::default());
 }
 
 #[test]

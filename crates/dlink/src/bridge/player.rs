@@ -105,7 +105,7 @@ use super::map;
 mod gap;
 mod writer;
 
-pub use gap::{Gap, GapState, SETTLE_CALLS, output_gap};
+pub use gap::{Gap, GapState, SETTLE_CALLS, output_gap, snap};
 
 use writer::Writer;
 
@@ -302,6 +302,9 @@ pub struct Player {
     usual_call_in: usize,
     /// The output's last call, input frames ([`usual_call`]).
     last_call_in: usize,
+    /// The output's largest call, input frames: its whole buffer, the call
+    /// that follows a gap ([`output_gap`]).
+    buffer_call_in: usize,
     /// The output's gap left open ([`output_gap`]).
     gap: GapState,
     /// The producer's schedule ([`writer`]), followed when its chunk is
@@ -411,6 +414,7 @@ impl Player {
             output_lost_frames: stats.output_lost_frames(),
             usual_call_in: 0,
             last_call_in: 0,
+            buffer_call_in: 0,
             gap: GapState::default(),
             writer: Writer::new(chunk_in, net_rate),
             arrived,
@@ -467,8 +471,9 @@ impl Player {
     /// phase off the engine's grid left), counted as the output's own gap
     /// ([`Stats::output_gaps`]), and the output's clock counts the time (as
     /// a resync's skip), so the rate fit sees no step: no re-centre, no
-    /// underrun, the latency the same. Only a call bigger than the usual
-    /// one opens a gap: a fixed-size callback (an ASIO switch) never does,
+    /// underrun, the latency the same. Only a dry call (the whole buffer,
+    /// bigger than the usual one) opens a gap: a fixed-size callback (an
+    /// ASIO switch) never makes one,
     /// which is why it is not this function's caller.
     pub fn fill_pulled<T>(
         &mut self,
@@ -480,29 +485,32 @@ impl Player {
         if let Some(frames) = out.len().checked_div(outputs) {
             let call = frames_of(frames as f64 / f64::from(self.out_rate), self.net_rate);
             let usual = self.usual_call_in;
-            let gap = output_gap(self.gap, pulled, call, usual);
+            self.buffer_call_in = self.buffer_call_in.max(call);
+            let gap = output_gap(self.gap, pulled, call, usual, self.buffer_call_in);
             self.usual_call_in = usual_call(usual, self.last_call_in, call);
             self.last_call_in = call;
             if self.state == State::Running {
                 self.gap = gap.state;
-                if gap.drop > 0 {
-                    // The converter keeps its history: the audio jumps as
-                    // the card's did, and a reset would add a step from
-                    // silence (its filter's ring) to the card's gap.
-                    // The output's clock counts the time in its own frames,
-                    // converted from the whole loss so far so the rounding
-                    // of each drop does not add up.
-                    let dropped = self.fifo.skip(gap.drop) as u64;
-                    let out_of = |lost: u64| {
-                        frames_of(lost as f64 / f64::from(self.net_rate), self.out_rate) as u64
-                    };
-                    let lost = self.output_lost_frames + dropped;
-                    self.skipped += out_of(lost) - out_of(self.output_lost_frames);
-                    self.output_lost_frames = lost;
-                }
+                // The converter keeps its history: the audio jumps as the
+                // card's did, and a reset would add a step from silence (its
+                // filter's ring) to the card's gap. The output's clock counts
+                // the time in its own frames, converted from the whole loss
+                // so far so the rounding of each drop does not add up. (No
+                // test of `drop > 0` first: skipping 0 is a no-op, and its
+                // `>=` mutant could not be told apart.)
+                let dropped = self.fifo.skip(gap.drop) as u64;
+                let out_of = |lost: u64| {
+                    frames_of(lost as f64 / f64::from(self.net_rate), self.out_rate) as u64
+                };
+                let lost = self.output_lost_frames + dropped;
+                self.skipped += out_of(lost) - out_of(self.output_lost_frames);
+                self.output_lost_frames = lost;
                 self.output_gaps += u64::from(gap.ended);
             } else {
-                // Priming: the priming starts from its own level.
+                // Priming (an underrun after the gap's first drop, too):
+                // the priming starts from its own level; a gap that
+                // dropped frames still counts.
+                self.output_gaps += u64::from(self.gap.dropped > 0);
                 self.gap = GapState::default();
             }
         }
