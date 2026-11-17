@@ -13,9 +13,10 @@
 //! device hears itself (the tests' rule: our device only). On a loaded
 //! dev1 run it real-time (`chrt -f 10`, `.claude/rules/tests.md`).
 //!
-//! The app thread records how late each of its writes lands (dstack #376, v0.6.166
-//! windows-2025: 1 underrun, 390 off, the TX side clean): a judged window
-//! in which it stalled is set aside and the next judged, up to
+//! The app thread records how late each of its writes lands (dstack
+//! #376, v0.6.166 windows-2025: 1 underrun, 390 off, the TX side clean):
+//! a judged window in which it stalled is set aside and the next judged,
+//! up to
 //! [`witness::WINDOWS`], and a failure prints `verdict RUNNER|OURS`
 //! (`tests/writer/witness.rs`).
 

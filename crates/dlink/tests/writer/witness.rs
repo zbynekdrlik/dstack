@@ -72,11 +72,11 @@ pub(crate) struct Window {
     pub(crate) writes: u64,
     /// The bridge's underruns between the window's open and close.
     pub(crate) underruns: u64,
-    /// The latest write past its due time, µs, and the writer's least
-    /// lateness since its start at the close (its timer's steady
-    /// oversleep, which costs no depth: the player keeps the depth on the
-    /// writes' real line).
+    /// The latest write past its due time, µs.
     pub(crate) latest_us: u64,
+    /// The writer's least lateness since its start, µs, at the close: its
+    /// timer's steady oversleep, which costs no depth (the player keeps
+    /// the depth on the writes' real line).
     pub(crate) floor_us: u64,
     /// Every write later than the floor by more than the room, with how
     /// late it was (µs, past its due time); a stall still running at the
@@ -373,8 +373,9 @@ mod witness_tests {
 
     #[test]
     fn a_timer_s_steady_oversleep_is_no_stall() {
-        // A writer whose every wake is 3 ms late: 7 ms late is 4 ms past
-        // its floor (within the 5 ms room), 9 ms late is 6 ms past it.
+        // A writer whose every wake is 3 ms late: 5 ms late is 2 ms past
+        // its floor (within the 5 ms room), 15 ms late is 12 ms past it
+        // (several ms of slack either way for a descheduled test thread).
         let witness = Witness::new(
             Duration::from_millis(10),
             &AppBuffer::new(10_000_000, 0),
@@ -382,10 +383,10 @@ mod witness_tests {
         );
         let ago = |ms| Instant::now() - Duration::from_millis(ms);
         witness.wrote(ago(3));
-        let (_, window, aside) = judge(&witness, || witness.wrote(ago(7)));
+        let (_, window, aside) = judge(&witness, || witness.wrote(ago(5)));
         assert!(!window.stalled() && aside.is_empty(), "{window:?}");
         assert!(window.floor_us >= 3_000, "{window:?}");
-        let (_, window, _) = judge(&witness, || witness.wrote(ago(9)));
+        let (_, window, _) = judge(&witness, || witness.wrote(ago(15)));
         assert_eq!(window.stalls.first().map(|s| s.0), Some(1), "{window:?}");
     }
 
