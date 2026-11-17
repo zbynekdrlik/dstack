@@ -108,12 +108,14 @@ pub fn source_position(source: &Source, stamp: u64, engine_shift: i64) -> u64 {
 }
 
 impl Transmitter {
-    /// A pass at media time `now` sees the clock at `anchor`, an epoch
-    /// other than the last pass's: the engine shift follows the line, and
-    /// when the step from the last pass's epoch is known every flow moves
-    /// by the change of S ([`super::Schedule::re_anchor`]); else every flow
-    /// starts again (counted). Logged: a re-anchor is rare.
-    pub(super) fn re_anchored(&mut self, now: u64, anchor: Anchor) {
+    /// A pass at media time `now` (the send clock; `media` the media
+    /// clock itself) sees the clock at `anchor`, an epoch other than the
+    /// last pass's: the engine shift follows the line, and when the step
+    /// from the last pass's epoch is known every flow and the TX pull's
+    /// schedule (dstack #363) move by the change of S
+    /// ([`super::Schedule::re_anchor`]); else every flow starts again
+    /// (counted). Logged: a re-anchor is rare.
+    pub(super) fn re_anchored(&mut self, now: u64, media: u64, anchor: Anchor) {
         let before = self.engine_shift;
         self.engine_shift =
             self.shared
@@ -124,6 +126,9 @@ impl Transmitter {
         };
         let step = anchor.step_from(old);
         let shift = step.map(|_| self.engine_shift.wrapping_sub(before));
+        if let Some(fill) = self.fill.as_mut() {
+            fill.re_anchor(shift, media);
+        }
         let block = self.shared.cfg.block;
         let mut counts = [0u32; 3];
         for schedule in self.lanes.iter_mut().filter_map(|l| l.schedule.as_mut()) {

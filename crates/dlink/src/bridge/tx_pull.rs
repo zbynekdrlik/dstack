@@ -103,6 +103,11 @@ impl TxPull {
     pub fn outputs(&self) -> usize {
         self.outputs
     }
+
+    /// The player it plays now (the last one handed over and taken).
+    pub fn player(&self) -> &Player {
+        &self.player
+    }
 }
 
 impl Process for TxPull {

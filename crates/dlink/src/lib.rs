@@ -788,7 +788,7 @@ impl Link {
         processor: P,
         source: ClockSource,
     ) -> Result<Link, HostError> {
-        Self::start_device::<Pushed, P>(config, place, wait, map, processor, source)
+        Self::start_device(Pushed, config, place, wait, map, processor, source)
             .map(|(link, ())| link)
     }
 
@@ -796,6 +796,7 @@ impl Link {
     /// device launched as `L` says (the RX rings' writer handed to the app
     /// for [`pulling::Pulled`]).
     fn start_device<L: Launch, P: Process + 'static>(
+        launch: L,
         config: &Config,
         place: &Place,
         wait: PlaceWait<'_>,
@@ -833,9 +834,9 @@ impl Link {
                 outputs,
             )
             .map_err(|e| HostError::Setup(format!("dlink rate conversion: {e}")))?;
-            L::launch(cfg, place, wait, map, rated, source, sender)?
+            launch.launch(cfg, place, wait, map, rated, source, sender)?
         } else {
-            L::launch(cfg, place, wait, map, processor, source, sender)?
+            launch.launch(cfg, place, wait, map, processor, source, sender)?
         };
         Ok((Link { device }, out))
     }

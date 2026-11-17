@@ -72,6 +72,9 @@ pub struct Transmitter {
     /// What the TX thread measured of the time before this pass (dstack
     /// #359): the restart line's cause.
     pub(super) before: split::Before,
+    /// The app's TX pull (dstack #363, [`super::TxFill`]): filled each
+    /// pass before the sends; `None` without one.
+    pub(super) fill: Option<super::TxFill>,
 }
 
 impl Transmitter {
@@ -87,6 +90,8 @@ impl Transmitter {
             packet: Box::new([0; HEADROOM + MAX_DATAGRAM]),
             ip_id: 0,
             batch: shared.host_for_tx().map(host::Batch::new),
+            // After the host's: the claims are closed now.
+            fill: shared.fill_for_tx(),
             epoch: None,
             engine_shift: 0,
             next_events: None,
@@ -124,13 +129,17 @@ impl Transmitter {
             self.next_events = now_ns.map(|now| now.saturating_add(EVENTS_EVERY_NS));
         }
         let Some(now_ns) = now_ns else {
+            if let Some(fill) = self.fill.as_mut() {
+                fill.idle();
+            }
             return;
         };
         let now = send_clock(now_ns, self.rate, self.margin_ns);
         if self.epoch != Some(anchor.epoch) {
-            self.re_anchored(now, anchor);
+            self.re_anchored(now, clock::to_samples(now_ns, self.rate), anchor);
         }
         self.epoch = Some(anchor.epoch);
+        self.fill_due(now_ns);
         self.send_due(now, now_ns, pass);
     }
 
@@ -156,6 +165,7 @@ impl Transmitter {
         let escapes = match now_ns {
             Some(now_ns) if self.epoch == Some(epoch) => {
                 let now = send_clock(now_ns, self.rate, self.margin_ns);
+                self.fill_due(now_ns);
                 self.send_due(now, now_ns, Instant::now());
                 true
             }
@@ -178,11 +188,26 @@ impl Transmitter {
         if now_ns.is_none() {
             return 0;
         }
-        // A lane has a schedule only while its plan sends.
+        // A lane has a schedule only while its plan sends; the TX pull's
+        // next block is due at the pump's own time (dstack #363).
         self.lanes
             .iter()
             .filter_map(|l| l.schedule.map(|s| s.wake_ns(self.rate, self.margin_ns)))
+            .chain(self.fill.as_ref().and_then(|f| f.wake_ns(self.rate)))
             .fold(self.next_events.unwrap_or(0), u64::min)
+    }
+
+    /// The TX pull's blocks due at PTP `now_ns` into the engine rings
+    /// (dstack #363), before the pass's sends.
+    fn fill_due(&mut self, now_ns: u64) {
+        if let Some(fill) = self.fill.as_mut() {
+            fill.fill_due(
+                clock::to_samples(now_ns, self.rate),
+                self.max_lag,
+                &self.shared.engine,
+                self.engine_shift,
+            );
+        }
     }
 
     /// The plans and sources that changed, and the keepalives of every
