@@ -653,3 +653,15 @@ fn the_converter_length_reads_is_checked_and_stays() {
     write(&mut doc, &kept, &changed).expect("written");
     assert!(doc.to_string().contains("converter_taps = 32"), "{doc}");
 }
+
+/// dtray's copy of the shortest converter is dstack-asio's (that crate
+/// builds on Windows only).
+#[cfg(windows)]
+#[test]
+fn the_shortest_converter_is_dstack_asio_s() {
+    assert_eq!(MIN_CONVERTER_TAPS, dstack_asio::bridge::MIN_CONVERTER_TAPS);
+    assert_eq!(
+        dstack_resample::TAPS as u32,
+        dstack_asio::bridge::MAX_CONVERTER_TAPS
+    );
+}

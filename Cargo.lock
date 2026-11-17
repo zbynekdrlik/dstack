@@ -470,6 +470,7 @@ dependencies = [
  "dlink",
  "dstack",
  "dstack-asio",
+ "dstack-resample",
  "glib",
  "gtk",
  "serde",
