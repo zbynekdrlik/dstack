@@ -10,26 +10,29 @@
 //!
 //! Here a dlink TX device sends a constant and a pulled RX device (an idle
 //! pump, as dlisten's) is read by a simulated WASAPI shared-mode output:
-//! the card's engine reads the client's buffer of two periods one period
-//! at each of its ticks (every 10 ms, on its own clock; a tick that finds
-//! the buffer short plays silence for what is missing), and each event,
-//! signalled at a tick, runs the callback, which fills the room the buffer
-//! has (cpal's `max_frames_in_buffer - padding`). A callback held past
-//! what the buffer still holds leaves the card playing silence meanwhile
-//! (the card's gap, not the bridge's). Some events are held 46 ms (the
-//! field's worst) or 20 ms. The bridge must play every frame it is asked
-//! for at the level (no underrun, no re-centre), and the latency after a
-//! hold must be the latency before it: the frames due while the card
-//! played silence are dropped once, counted as the output's own gap
+//! the card's engine reads the client's buffer one period at each of its
+//! ticks (every 10 ms, on its own clock; a tick that finds less plays
+//! silence for what is missing), and each event, signalled at a tick, runs
+//! the callback, which fills the room the buffer has (cpal's
+//! `max_frames_in_buffer - padding`). The buffer is 1056 frames, as
+//! Windows sizes it for a 480-frame period, so a tick can find part of a
+//! period. A callback held past what the buffer still holds leaves the
+//! card playing silence meanwhile (the card's gap, not the bridge's). Some
+//! events are held 46 ms (the field's worst) or 20 ms, or 25 ms with the
+//! next event 6 ms late. The bridge must play every frame it is asked for
+//! at the level (no underrun, no re-centre), and the latency after a hold
+//! must be the latency before it: the frames due while the card played
+//! silence are dropped, counted as the output's own gap
 //! ([`dlink::bridge::Stats::output_gaps`]), never played late.
 //!
-//! The level is judged only while the sender's audio reached the ring
-//! whole: a sender thread not run long enough (a loaded box) leaves ring
-//! holes, which play as samples off the level with no underrun; such a run
-//! says `SENDER` and is judged on the bridge's own counts only (the
-//! `rx_pull.rs` rule: holes with no underrun is the sender). A file of its
-//! own (its process sets the normal profile), on loopback (dstack #366)
-//! and its own system clock.
+//! The level is judged in the callbacks whose read met no ring hole (nor
+//! the one after it, which the converter's filter reaches): a sender
+//! thread not run long enough (a loaded box) leaves ring holes, which play
+//! as samples off the level with no underrun (the `rx_pull.rs` rule: holes
+//! with no underrun is the sender); a run with any says `SENDER` and is
+//! still judged on the bridge's own counts. A file of its own (its process
+//! sets the normal profile), on loopback (dstack #366) and its own system
+//! clock.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -54,8 +57,10 @@ const RATE: u32 = 48_000;
 /// The card's engine period: 10 ms, WASAPI shared mode's default.
 const PERIOD: Duration = Duration::from_millis(10);
 const PERIOD_FRAMES: u64 = 480;
-/// The client's buffer: two periods (WASAPI shared mode gives about that).
-const CARD_FRAMES: u64 = 2 * PERIOD_FRAMES;
+/// The client's buffer: two periods and a fraction, as Windows sizes a
+/// shared-mode buffer (1056 frames for a 480-frame period at 48 kHz), so a
+/// tick can find part of a period.
+const CARD_FRAMES: u64 = 2 * PERIOD_FRAMES + 96;
 /// The settling (priming, the converter's filters), then the window
 /// judged.
 const SETTLE: Duration = Duration::from_secs(2);
@@ -82,9 +87,13 @@ impl Process for Idle {
 /// What the simulated output saw over the judged window.
 #[derive(Debug, Default)]
 struct Heard {
-    /// Samples the callback wrote at the level and off it.
+    /// Samples the callback wrote at the level and off it, in callbacks
+    /// whose read met no ring hole (nor the one before: the converter's
+    /// filter carries a hole into the next callback).
     on: u64,
     off: u64,
+    /// Callbacks whose read met a ring hole (the sender's, not judged).
+    hole_calls: u64,
     /// The bridge's underruns and re-centres in the judged window.
     underruns: u64,
     recentres: u64,
@@ -115,9 +124,12 @@ impl Heard {
     }
 }
 
-/// The card and its event thread (module doc): returns what it heard.
+/// The card and its event thread (module doc), each held event `hold`
+/// late and the event after it `late_after` late: returns what it heard.
+#[allow(clippy::too_many_arguments)]
 fn output(
     hold: Duration,
+    late_after: Duration,
     mut pull: dlink::bridge::RxPull,
     mut player: Player,
     fifo: Arc<dlink::bridge::Fifo>,
@@ -128,14 +140,13 @@ fn output(
     let mut out = vec![0f32; CARD_FRAMES as usize];
     let mut heard = Heard::default();
     let began = Instant::now();
-    // The engine's reads up to `now`: a period at each tick passed.
-    let card =
-        |now: Instant| (now - began).as_nanos() as u64 / PERIOD.as_nanos() as u64 * PERIOD_FRAMES;
     let holes = || media.rx.rings()[0].counters().holes;
-    // Frames written into the client's buffer, on the card's count (a
-    // tick that found it short moves it on).
-    let mut written = 0u64;
+    // The engine's ticks read so far, and what the client's buffer holds.
+    let mut ticks = 0u64;
+    let mut padding = 0u64;
     let mut next = began;
+    let mut was_held = false;
+    let mut hole_before = false;
     let mut events = 0u64;
     let mut judging: Option<(Instant, [u64; 5])> = None;
     let mut since = None;
@@ -145,7 +156,12 @@ fn output(
         next += PERIOD;
         events += 1;
         let held = judging.is_some() && events.is_multiple_of(HOLD_EVERY);
-        let wake = if held { next + hold } else { next };
+        let wake = match (held, was_held) {
+            (true, _) => next + hold,
+            (false, true) => next + late_after,
+            (false, false) => next,
+        };
+        was_held = held;
         if let Some(wait) = wake.checked_duration_since(Instant::now()) {
             std::thread::sleep(wait);
         }
@@ -154,16 +170,25 @@ fn output(
         while next + PERIOD <= now {
             next += PERIOD;
         }
-        let played = card(now);
-        let silence = played.saturating_sub(written);
-        written = written.max(played);
-        let padding = written - played;
+        // Each tick passed reads a period; what it does not find plays as
+        // silence.
+        let mut silence = 0;
+        let now_ticks = (now - began).as_nanos() as u64 / PERIOD.as_nanos() as u64;
+        for _ in ticks..now_ticks {
+            let take = padding.min(PERIOD_FRAMES);
+            silence += PERIOD_FRAMES - take;
+            padding -= take;
+        }
+        ticks = now_ticks;
+        let before_padding = padding;
         let room = (CARD_FRAMES - padding) as usize;
+        let h0 = holes();
         let pulled = pull.pull();
         let top = fifo.len() as u64;
         player.fill_pulled(pulled, &mut out[..room], 1, |x| x as f32);
         let foot = fifo.len() as u64;
-        written += room as u64;
+        let hole_now = holes() > h0;
+        padding = CARD_FRAMES;
         if receiving.load(Ordering::Acquire) == 0 {
             if began.elapsed() > Duration::from_secs(15) {
                 return heard;
@@ -198,7 +223,7 @@ fn output(
             after_hold = 0;
         }
         heard.card_silence += silence;
-        let looks = (top + padding) + (foot + padding + room as u64);
+        let looks = (top + before_padding) + (foot + padding);
         if heard.holds == 0 && now - start < Duration::from_secs(1) {
             heard.before.0 += looks;
             heard.before.1 += 2;
@@ -207,6 +232,12 @@ fn output(
             heard.after.1 += 2;
         }
         after_hold = after_hold.saturating_add(1);
+        let judged = !hole_now && !hole_before;
+        hole_before = hole_now;
+        if !judged {
+            heard.hole_calls += 1;
+            continue;
+        }
         for &x in &out[..room] {
             if (f64::from(x) - LEVEL).abs() < 1e-2 {
                 heard.on += 1;
@@ -220,7 +251,7 @@ fn output(
 /// The whole run with each held event `hold` late: what the card heard,
 /// the pull's restarts, and the receiver's and sender's counts for a
 /// failure's message.
-fn run(hold: Duration) -> (Heard, u64, String) {
+fn run(hold: Duration, late_after: Duration) -> (Heard, u64, String) {
     let _one = ONE_DEVICE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -285,7 +316,11 @@ fn run(hold: Duration) -> (Heard, u64, String) {
             Arc::clone(receiver.media()),
             Arc::clone(&receiving),
         );
-        std::thread::spawn(move || output(hold, pull, player, fifo, stats, media, receiving))
+        std::thread::spawn(move || {
+            output(
+                hold, late_after, pull, player, fifo, stats, media, receiving,
+            )
+        })
     };
     let end = Instant::now() + Duration::from_secs(15);
     while receiver.rx_channels()[0].status != Some(SubStatus::Receiving) && Instant::now() < end {
@@ -308,7 +343,7 @@ fn run(hold: Duration) -> (Heard, u64, String) {
 }
 
 /// The asserts of a held run (module doc).
-fn judge(hold: Duration, heard: &Heard, restarts: u64, counts: &str) {
+fn judge(case: &str, heard: &Heard, restarts: u64, counts: &str) {
     let (before, after) = (Heard::mean_ms(heard.before), Heard::mean_ms(heard.after));
     let verdict = if heard.ring_holes > 0 {
         "SENDER"
@@ -316,8 +351,8 @@ fn judge(hold: Duration, heard: &Heard, restarts: u64, counts: &str) {
         "OURS"
     };
     let at = format!(
-        "held {hold:?}: {heard:?}, restarts {restarts}, wait before {before:.2} ms, after {after:.2} ms; verdict {verdict} (ring holes in the window {}); {counts}",
-        heard.ring_holes
+        "{case}: {heard:?}, restarts {restarts}, wait before {before:.2} ms, after {after:.2} ms; verdict {verdict} (ring holes in the window {}, callbacks not judged on the level {}); {counts}",
+        heard.ring_holes, heard.hole_calls
     );
     eprintln!("{at}");
     assert!(heard.holds >= 8, "only {} holds: {at}", heard.holds);
@@ -326,21 +361,22 @@ fn judge(hold: Duration, heard: &Heard, restarts: u64, counts: &str) {
         (0, 0, 0),
         "bridge underruns, re-centres and pull restarts: {at}"
     );
-    // Samples off the level are judged while the sender's audio reached
-    // the ring whole (module doc).
-    assert!(
-        heard.off == 0 || heard.ring_holes > 0,
-        "samples off the level with the ring whole: {at}"
-    );
+    // The level, in every callback whose read met no ring hole (module
+    // doc).
+    assert_eq!(heard.off, 0, "samples off the level: {at}");
     // The frames due while the card played silence are the output's gap,
-    // dropped once and counted as its own: exactly the card's silence, up
-    // to one period in all (a hold that ends right at an engine tick, read
-    // on both sides of it by the card's clock and the pull's).
+    // dropped and counted as its own: the card's silence, never more than
+    // a millisecond a hold over it (the settling calls' least lateness),
+    // and at most a quarter period a hold under it (the lateness of the
+    // call before the hold, the noise floor of the settling).
+    let (lost, silence) = (heard.output_lost, heard.card_silence);
     assert!(
-        heard.output_lost.abs_diff(heard.card_silence) <= PERIOD_FRAMES,
-        "the output's gaps dropped {} frames for the card's {} of silence: {at}",
-        heard.output_lost,
-        heard.card_silence
+        lost <= silence + heard.holds * 48 && silence <= lost + heard.holds * PERIOD_FRAMES / 4,
+        "the output's gaps dropped {lost} frames for the card's {silence} of silence: {at}"
+    );
+    assert!(
+        heard.output_gaps > 0 || silence == 0,
+        "no gap counted: {at}"
     );
     // No latency added: the frames due while the card played silence are
     // dropped, not played late (within a converter call and a pump block).
@@ -352,14 +388,20 @@ fn judge(hold: Duration, heard: &Heard, restarts: u64, counts: &str) {
 
 #[test]
 fn an_output_callback_held_46_ms_plays_on_from_the_queued_packets() {
-    let hold = Duration::from_millis(46);
-    let (heard, restarts, counts) = run(hold);
-    judge(hold, &heard, restarts, &counts);
+    let (heard, restarts, counts) = run(Duration::from_millis(46), Duration::ZERO);
+    judge("held 46 ms", &heard, restarts, &counts);
 }
 
 #[test]
 fn an_output_callback_held_20_ms_plays_on_from_the_queued_packets() {
-    let hold = Duration::from_millis(20);
-    let (heard, restarts, counts) = run(hold);
-    judge(hold, &heard, restarts, &counts);
+    let (heard, restarts, counts) = run(Duration::from_millis(20), Duration::ZERO);
+    judge("held 20 ms", &heard, restarts, &counts);
+}
+
+/// The hold's next event wakes 6 ms late too (a held PC's burst): the
+/// settling must not drop that lateness as silence.
+#[test]
+fn an_output_callback_held_25_ms_then_6_ms_late_plays_on() {
+    let (heard, restarts, counts) = run(Duration::from_millis(25), Duration::from_millis(6));
+    judge("held 25 ms, then 6 ms late", &heard, restarts, &counts);
 }
