@@ -11,6 +11,8 @@
 //!   channel), for the app to receive;
 //! - its RX channels are subscribed to the app's TX channels, and each one's
 //!   tone is checked for continuity ([`tone::ToneCheck`]: `tone_gaps`);
+//!   the peer's own block-start jumps (its pump skipping blocks) re-lock
+//!   the checks and are counted apart (`own_skips`, dstack #358);
 //! - a JSON status file, rewritten once a second ([`status_json`]): the
 //!   peer's own part and the device's status (`ctl status`: the RX
 //!   channels' counters, the pump's `play_at_steps` / `play_at_max_dev_us`).
@@ -113,6 +115,10 @@ pub struct Shared {
     pub rx: Box<[RxTone]>,
     /// Blocks run with a media start.
     pub blocks: AtomicU64,
+    /// The peer's own block-start jumps (dstack #358: its pump skipped
+    /// blocks, a re-bootstrap; or started again elsewhere): the tone
+    /// checks re-locked across each, counted here, never in `tone_gaps`.
+    pub own_skips: AtomicU64,
     /// The play times' rate against the media time, ppm, as `f64` bits
     /// ([`play_at_ppm`]; NaN before two blocks with one).
     pub play_at_ppm: AtomicU64,
@@ -148,6 +154,19 @@ fn tone_break(ch: usize, samples: u64, rate: u32, gaps: u64, kind: GapKind) {
     );
 }
 
+/// One WARN for the peer's own block-start jump (dstack #358): the block
+/// starts `frames` off the last one's end (a pump re-bootstrap skips
+/// forward), the tone checks re-lock, `own_skips` so far. Logged on the
+/// pump thread.
+fn own_skip(frames: i128, own_skips: u64) {
+    warn!(
+        target: "dstack::peer::tone",
+        frames = %frames,
+        own_skips,
+        "dstack-dev peer: its own block start jumped; the tone check re-locks"
+    );
+}
+
 /// The peer's processor: the TX tones out, the RX tones checked.
 pub struct Tones {
     tones: Vec<u32>,
@@ -165,6 +184,7 @@ impl Tones {
         let shared = Shared {
             rx: (0..rx).map(|_| RxTone::default()).collect(),
             blocks: AtomicU64::new(0),
+            own_skips: AtomicU64::new(0),
             play_at_ppm: AtomicU64::new(f64::NAN.to_bits()),
         };
         Tones {
@@ -187,6 +207,19 @@ impl Process for Tones {
     fn process(&mut self, block: &mut Block<'_>) {
         let frames = block.frames();
         let rate = self.rate;
+        // A start off the last block's end is the peer's OWN jump (dstack
+        // #358: its pump skipped the blocks between, a re-bootstrap): the
+        // received tone jumps by what was not read, which is no break of
+        // the flow. Re-lock the checks and count it apart.
+        if let (Some(start), Some(next)) = (block.start(), self.next)
+            && start != next
+        {
+            let skips = self.shared.own_skips.fetch_add(1, Ordering::Relaxed) + 1;
+            own_skip(i128::from(start) - i128::from(next), skips);
+            for check in &mut self.checks {
+                check.relock();
+            }
+        }
         for (ch, check) in self.checks.iter_mut().enumerate() {
             check.block_with(block.input(ch), |samples, gaps, kind| {
                 tone_break(ch, samples, rate, gaps, kind);
@@ -286,8 +319,9 @@ impl Peer {
 /// The status: `peer` (its name, `test_clock_ppm` or null, `tx`: each
 /// channel's `tone_hz`; `rx`: each channel's `from` (device:channel),
 /// `locked`, `tone_hz` and `level_dbfs` (the last clean block's; null
-/// before a lock), `samples`, `tone_gaps`; `blocks`, `play_at_ppm` (null
-/// before two blocks)) and `device` (the device's own status, as `ctl
+/// before a lock), `samples`, `tone_gaps`; `blocks`, `own_skips` (the
+/// peer's own block-start jumps, [`Shared::own_skips`]), `play_at_ppm`
+/// (null before two blocks)) and `device` (the device's own status, as `ctl
 /// status`; a status that does not parse goes in as its text).
 pub fn status_json(a: &PeerArgs, shared: &Shared, device: &str) -> String {
     use serde_json::{Value, json};
@@ -330,6 +364,7 @@ pub fn status_json(a: &PeerArgs, shared: &Shared, device: &str) -> String {
             "tx": tx,
             "rx": rx,
             "blocks": shared.blocks.load(Ordering::Relaxed),
+            "own_skips": shared.own_skips.load(Ordering::Relaxed),
             "play_at_ppm": finite(f64::from_bits(shared.play_at_ppm.load(Ordering::Relaxed))),
         },
         "device": device,

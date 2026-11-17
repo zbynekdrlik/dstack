@@ -266,8 +266,7 @@ fn hear(p: &mut Tones, from: u64, blocks: u64, jump: (u64, u64, u64)) {
 /// The peer's `own_skips` and its RX 1's `tone_gaps`, from its status.
 fn skips_and_gaps(p: &Tones) -> (serde_json::Value, serde_json::Value) {
     let a = peer_args();
-    let v: serde_json::Value =
-        serde_json::from_str(&status_json(&a, &p.shared(), "{}")).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&status_json(&a, &p.shared(), "{}")).unwrap();
     (
         v["peer"]["own_skips"].clone(),
         v["peer"]["rx"][0]["tone_gaps"].clone(),
@@ -294,6 +293,33 @@ fn the_peer_s_own_skip_counts_no_tone_break() {
     });
     assert!(!text.contains("a tone break"), "{text}");
     assert_eq!(skips_and_gaps(&p), (4.into(), 0.into()), "{text}");
+    // One WARN a jump: how far, and the count.
+    let lines: Vec<&str> = text
+        .lines()
+        .filter(|l| l.contains("dstack-dev peer: its own block start jumped"))
+        .collect();
+    assert_eq!(lines.len(), 4, "{text}");
+    for (n, (line, frames)) in lines.iter().zip([128, 640, 768, 1408]).enumerate() {
+        assert!(line.contains("dstack::peer::tone"), "{line}");
+        assert!(line.contains(&format!("frames={frames} ")), "{line}");
+        assert!(line.contains(&format!("own_skips={}", n + 1)), "{line}");
+    }
+}
+
+/// dstack #358: a block that starts BEFORE the last one's end (a re-anchor
+/// back) is the peer's own jump too, logged with its negative frames.
+#[test]
+fn an_own_jump_back_is_counted_with_its_frames() {
+    crate::test_log::undecided();
+    let frames = 128u64;
+    let mut p = Tones::new(vec![], 1, 96_000);
+    let text = crate::test_log::capture_warnings(|| {
+        hear(&mut p, 10 * frames, 40, (0, 0, 0));
+        hear(&mut p, 0, 40, (0, 0, 0));
+    });
+    assert_eq!(skips_and_gaps(&p), (1.into(), 0.into()), "{text}");
+    // From the last block's end, 50 blocks in, back to 0.
+    assert!(text.contains("frames=-6400 own_skips=1"), "{text}");
 }
 
 /// dstack #358: a break in the received flow still counts, with no own
