@@ -1003,3 +1003,7 @@ mod tests;
 
 #[cfg(test)]
 mod anchor_tests;
+
+/// The runner's timer state in a Windows timer test's failure (#339).
+#[cfg(test)]
+mod timer_state;

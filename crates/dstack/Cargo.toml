@@ -88,6 +88,11 @@ tempfile = "3"
 # The socket tests: a runtime, #[tokio::test] and bounded waits.
 tokio = { version = "1", features = ["macros", "rt", "time"] }
 
+[target.'cfg(windows)'.dev-dependencies]
+# `clock::sys`'s timer tests name the runner's timer resolution in their
+# failure (NtQueryTimerResolution, #339); test builds only.
+windows-sys = { version = "0.61", features = ["Wdk_System_SystemInformation"] }
+
 [lints.rust]
 # `iem_rtsan` is set by the rtsan CI job (nightly, -Zsanitizer=realtime):
 # stream::Pump::block.
