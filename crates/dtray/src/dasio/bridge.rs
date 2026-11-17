@@ -208,6 +208,30 @@ pub fn buffer_text(ns: Option<u64>) -> String {
     format!("{whole}.{}", frac.trim_end_matches('0'))
 }
 
+/// The note beside the app buffer: the default's meaning, or the keys the
+/// file sets that the window has no control for (dstack #387), shown
+/// read-only, short for the label (`file: to 1.333333 ms, from 2 ms, 48
+/// taps`: to-ASIO, from-ASIO, the converter).
+pub fn note_text(b: &Bridge) -> String {
+    let mut parts = Vec::new();
+    if let Some(ns) = b.to_asio_app_buffer_ns {
+        parts.push(format!("to {} ms", buffer_text(Some(ns))));
+    }
+    if let Some(ns) = b.from_asio_app_buffer_ns {
+        parts.push(format!("from {} ms", buffer_text(Some(ns))));
+    }
+    if let Some(t) = b.converter_taps {
+        parts.push(format!("{t} taps"));
+    }
+    if parts.is_empty() {
+        return DEFAULT_NOTE.to_string();
+    }
+    format!("file: {}", parts.join(", "))
+}
+
+/// The note when the file sets none of them.
+pub const DEFAULT_NOTE: &str = "empty: the default (the ASIO buffer + one block)";
+
 /// The app buffer typed in ms (up to 6 decimals, a dot); `None` when
 /// empty (the default); the reason otherwise.
 pub fn parse_buffer(text: &str) -> Result<Option<u64>, String> {

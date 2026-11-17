@@ -665,3 +665,20 @@ fn the_shortest_converter_is_dstack_asio_s() {
         dstack_asio::bridge::MAX_CONVERTER_TAPS
     );
 }
+
+/// dstack #387: the keys the window has no control for are shown in the
+/// note beside the app buffer; with none set it says what empty means.
+#[test]
+fn the_note_shows_the_file_only_keys() {
+    let mut b = bridge();
+    b.to_asio_app_buffer_ns = None;
+    b.from_asio_app_buffer_ns = None;
+    b.converter_taps = None;
+    assert_eq!(note_text(&b), DEFAULT_NOTE);
+    b.converter_taps = Some(48);
+    assert_eq!(note_text(&b), "file: 48 taps");
+    b.to_asio_app_buffer_ns = Some(1_333_333);
+    assert_eq!(note_text(&b), "file: to 1.333333 ms, 48 taps");
+    b.from_asio_app_buffer_ns = Some(2_000_000);
+    assert_eq!(note_text(&b), "file: to 1.333333 ms, from 2 ms, 48 taps");
+}

@@ -99,7 +99,7 @@ pub(super) fn build(h: HWND, font: HFONT) {
         st("↻", ID_RESTART + 6 + i, (mark_x, y + 3, 20, 20));
     }
     st(
-        "empty: the default (the ASIO buffer + one block)",
+        pure::DEFAULT_NOTE,
         ID_BRIDGE_LABEL + 5,
         (ctl_x + 128, TOP + 107, 252, 20),
     );
@@ -139,6 +139,8 @@ pub(super) fn fill_values(h: HWND, list: &[Choice<String>], b: &dasio::Bridge) {
     set_text(h, ID_TOASIO, &pure::map_text(&b.to_asio));
     set_text(h, ID_FROMASIO, &pure::map_text(&b.from_asio));
     set_text(h, ID_APPBUF, &pure::buffer_text(b.app_buffer_ns));
+    // The file's keys the window has no control for (dstack #387).
+    set_text(h, ID_BRIDGE_LABEL + 5, &pure::note_text(b));
 }
 
 /// An edit's text.
