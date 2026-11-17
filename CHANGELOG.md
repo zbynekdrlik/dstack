@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.162
 
 - **Internal (#360): `media/tx.rs` split, no change.** A pure move: `Schedule` and its time helpers into `media/tx/schedule.rs`, the TX thread (`Transmitter`, `spawn` and its loops) into `media/tx/thread.rs`, the control side's `TxTable`/`TxFlow` into `media/tx/table.rs`, the OS thread calls (priority, pinning) into `media/tx/priority.rs`. Every public name keeps its `dstack::media::tx::` path (re-exported); no behaviour, API or latency change.
 
