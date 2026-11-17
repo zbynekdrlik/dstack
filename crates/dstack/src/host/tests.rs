@@ -511,3 +511,5 @@ fn a_device_with_no_slot_and_a_base_unset_is_a_setup_error() {
     );
     assert_eq!(cfg.tx_port_base, None, "nothing set");
 }
+
+mod test_run;
