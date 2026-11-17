@@ -70,9 +70,21 @@ fn build<T: SizedSample + FromSample<f32>>(
             move |data: &mut [T], _| {
                 // Never waits: only an old stream's last callback during an
                 // output switch, or the main thread's idle drain, can hold
-                // it (dstack #307).
-                pull.pull();
-                player.fill_with(data, outputs, |x| T::from_sample(x as f32));
+                // it (dstack #307). On Windows the frames it wrote tell the
+                // player whether this call follows a gap of the output
+                // itself (the callback held past WASAPI's buffer: the card
+                // played silence, and the call asks for the whole buffer).
+                // Elsewhere (ALSA through PipeWire or Pulse) a call follows
+                // the hardware position, with no whole-buffer call to tell a
+                // gap by: the plain fill.
+                let pulled = pull.pull();
+                #[cfg(windows)]
+                player.fill_pulled(pulled, data, outputs, |x| T::from_sample(x as f32));
+                #[cfg(not(windows))]
+                {
+                    let _ = pulled;
+                    player.fill_with(data, outputs, |x| T::from_sample(x as f32));
+                }
             },
             // The driver's own thread: a lost device or a driver error.
             move |e| {

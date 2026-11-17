@@ -128,6 +128,8 @@ mod tests {
             recentres: 0,
             resyncs: 0,
             convert_errors: 3,
+            output_gaps: 4,
+            output_lost_ms: 61.5,
             priming: false,
             mono: false,
             input_peak: None,
