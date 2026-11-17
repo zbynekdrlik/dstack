@@ -20,7 +20,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use dlink::{Block, Clock, Config, Link, Map, Place, Process};
+use dlink::{Block, Clock, Config, Link, Map, Place, Process, Stopped};
 use dstack::flows::client::Client;
 use dstack::flows::control::FlowRequest;
 use dstack::media::packet;
@@ -57,9 +57,11 @@ impl Process for Levels {
 struct Heard {
     packets: u64,
     first_packet: Option<Duration>,
+    /// When a packet first ended at each level (the settled level, never a
+    /// sample of the filter's ringing on the step from silence).
     left_at: Option<Duration>,
     right_at: Option<Duration>,
-    /// The last packet's first sample of each slot (24-bit).
+    /// The last packet's last sample of each slot (24-bit).
     last: [i32; 2],
 }
 
@@ -110,8 +112,10 @@ fn one_start(run: usize) -> Result<Duration, String> {
     let granted = rt.block_on(Client::new(ip).request_flow(flows, &req));
     if let Err(e) = granted {
         let status = link.status();
-        link.stop();
-        return Err(format!("run {run}: the flow: {e:?}; status {status}"));
+        let stopped = link.stop();
+        return Err(format!(
+            "run {run}: the flow: {e:?}; stop {stopped:?}; status {status}"
+        ));
     }
     on.store(true, Ordering::Relaxed);
     let start = Instant::now();
@@ -132,35 +136,30 @@ fn one_start(run: usize) -> Result<Duration, String> {
         };
         heard.packets += 1;
         heard.first_packet.get_or_insert(start.elapsed());
-        let mut first = [None::<i32>; 2];
-        packet::read_frames(&buf[..n], 2, 3, |_, slot, x| {
-            let x = x >> 8;
-            if first[slot].is_none() {
-                first[slot] = Some(x);
-            }
-            if slot == 0 && (x - (1 << 22)).abs() < 8 {
-                heard.left_at.get_or_insert(start.elapsed());
-            }
-            if slot == 1 && (x + (1 << 21)).abs() < 8 {
-                heard.right_at.get_or_insert(start.elapsed());
-            }
-        })
-        .expect("two 24-bit slots");
-        heard.last = [first[0].unwrap_or(0), first[1].unwrap_or(0)];
+        packet::read_frames(&buf[..n], 2, 3, |_, slot, x| heard.last[slot] = x >> 8)
+            .expect("two 24-bit slots");
+        if (heard.last[0] - (1 << 22)).abs() < 8 {
+            heard.left_at.get_or_insert(start.elapsed());
+        }
+        if (heard.last[1] + (1 << 21)).abs() < 8 {
+            heard.right_at.get_or_insert(start.elapsed());
+        }
     }
     let took = start.elapsed();
     let status = link.status();
-    link.stop();
-    if heard.left_at.is_some() && heard.right_at.is_some() {
-        Ok(took)
-    } else {
-        Err(format!(
-            "run {run}: no tone within {BOUND:?} of the grant: {heard:?}; receive errors {errors:?}; status {status}"
-        ))
+    let stopped = link.stop();
+    if heard.left_at.is_none() || heard.right_at.is_none() {
+        return Err(format!(
+            "run {run}: the levels 0.5 / -0.25 not heard within {BOUND:?} of the grant: {heard:?}; receive errors {errors:?}; stop {stopped:?}; status {status}"
+        ));
     }
+    if !matches!(stopped, Stopped::Done) {
+        return Err(format!("run {run}: the stop: {stopped:?}"));
+    }
+    Ok(took)
 }
 
-/// `runs` starts in a row; every one must carry the tone within [`BOUND`].
+/// `runs` starts in a row; every one must carry the levels within [`BOUND`].
 fn starts(runs: usize) {
     let _one = ONE_DEVICE
         .lock()
@@ -172,7 +171,7 @@ fn starts(runs: usize) {
             Err(why) => panic!("{why}"),
         }
     }
-    eprintln!("{runs} flow starts, the slowest tone {slowest:?} after the grant");
+    eprintln!("{runs} flow starts, the slowest levels {slowest:?} after the grant");
 }
 
 #[test]
