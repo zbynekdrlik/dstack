@@ -62,15 +62,16 @@ fn test_ipv4() -> Ipv4Addr {
 
 /// Runs a device, with bridge figures when `bridged`, and asks it from a
 /// socket of our own: the raw replies the walker read (by the raw request
-/// for up to `BOUND`, or `quiet` for a device without figures), and the
-/// client's read.
+/// for up to `BOUND`, or `quiet` for a device without figures), the
+/// client's read, and the device's board info read after them (the proof
+/// its info server ran meanwhile).
 fn ask_device(
     bridged: bool,
     quiet: Duration,
 ) -> (
     Vec<walk::Reply>,
     Result<dstack::info::BridgeFigures, InfoError>,
-    [u8; 8],
+    Result<client::Board, InfoError>,
 ) {
     let _one = ONE_DEVICE.lock().unwrap_or_else(|e| e.into_inner());
     let dir = tempfile::tempdir().unwrap();
@@ -139,14 +140,16 @@ fn ask_device(
         Some(ours),
         if bridged { BOUND } else { quiet },
     );
+    let board = client::board_info(ip, ip, Some(ours), BOUND);
     let stopped = host.stop(Duration::from_secs(5));
     assert!(matches!(stopped, host::Stopped::Done), "{stopped:?}");
-    (replies, read, ours)
+    (replies, read, board)
 }
 
 #[test]
 fn a_running_bridge_device_answers_its_figures_to_the_asker() {
-    let (replies, read, _) = ask_device(true, BOUND);
+    let (replies, read, board) = ask_device(true, BOUND);
+    assert!(board.is_ok(), "{board:?}");
     assert!(replies.len() >= 2, "replies within {BOUND:?}: {replies:?}");
     let first = &replies[0];
     for (key, want) in [
@@ -185,7 +188,9 @@ fn a_running_bridge_device_answers_its_figures_to_the_asker() {
 
 #[test]
 fn a_running_device_without_a_bridge_never_answers() {
-    let (replies, read, _) = ask_device(false, Duration::from_secs(2));
+    let (replies, read, board) = ask_device(false, Duration::from_secs(2));
+    // Its info server answered all along: the board info comes.
+    assert!(board.is_ok(), "{board:?}");
     assert!(replies.is_empty(), "{replies:?}");
     assert_eq!(
         read,

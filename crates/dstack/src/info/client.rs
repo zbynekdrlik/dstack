@@ -755,7 +755,9 @@ pub fn unicast_socket(iface: Ipv4Addr) -> io::Result<UdpSocket> {
 ///
 /// [`InfoError::Timeout`] from a device that holds no bridge figures (any
 /// Audinate device, a dstack device without a bridge, a dstack older than
-/// dstack #391) or none within `wait`; [`InfoError::Malformed`] for a reply
+/// dstack #391), from a bridge device whose address's 8700 is held by an
+/// older dstack app on the same PC (that manager relays the request in the
+/// old form, [`super::share`]), or none within `wait`; [`InfoError::Malformed`] for a reply
 /// of another version or length ([`super::bridge::parse_figures`] says
 /// which).
 pub fn bridge_figures(

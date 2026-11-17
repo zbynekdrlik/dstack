@@ -544,9 +544,9 @@ pub trait Beat: Send + Sync {
         None
     }
 
-    /// A bridge device's figures now ([`bridge`]); `None` (no reply to a
+    /// A bridge device's figures ([`bridge`]); `None` (no reply to a
     /// bridge-figures request) for a device that holds none.
-    fn bridge(&self) -> Option<BridgeFigures> {
+    fn bridge(&self) -> Option<&FigureSlot> {
         None
     }
 }
@@ -800,23 +800,23 @@ impl InfoBuilder {
     }
 
     /// The reply to a bridge-figures request in `datagram` ([`bridge`]),
-    /// for the asker alone, within `limit` (a kind of its own); `None` for
-    /// any other datagram, when `figures` gives none (the device holds no
-    /// bridge figures: nothing counted against the bound), or over the
-    /// bound. Each reply takes the next `sequence` (from 1) and the next
-    /// packet sequence.
+    /// for the asker alone, within `limit` (a kind of its own, one for every
+    /// asker); `None` for any other datagram, when `slot` holds no figures
+    /// (none, or no source: nothing counted against the bound), or over the
+    /// bound (the figures then not read). Each reply takes the next
+    /// `sequence` (from 1) and the next packet sequence.
     pub fn bridge_within(
         &mut self,
         limit: &mut Limit,
         now: Instant,
         datagram: &[u8],
-        figures: impl FnOnce() -> Option<BridgeFigures>,
+        slot: Option<&FigureSlot>,
     ) -> Option<Vec<u8>> {
         let req = parse_request(datagram)?;
         if req.kind != Kind::BridgeFigures {
             return None;
         }
-        let Some(mut f) = figures() else {
+        let Some(slot) = slot.filter(|s| s.has_source()) else {
             debug!(
                 seq = req.seq,
                 "bridge figures asked: this device holds none, no reply"
@@ -826,6 +826,7 @@ impl InfoBuilder {
         if !limit.allow(now, Kind::BridgeFigures) {
             return None;
         }
+        let mut f = slot.figures()?;
         self.bridge_replies = self.bridge_replies.wrapping_add(1);
         f.sequence = self.bridge_replies;
         debug!(

@@ -41,15 +41,26 @@
 //! | 0x14 | u32 | `from_asio_target_us` | the ASIO -> Dante FIFO's target, us |
 //! | 0x18 | u32 | `to_asio_converter_delay_us` | the to-ASIO converter's delay, us |
 //! | 0x1c | u32 | `from_asio_converter_delay_us` | the from-ASIO converter's delay, us |
-//! | 0x20 | u64 | `to_asio_underruns` | blocks played as silence to ASIO, since the run's start |
-//! | 0x28 | u64 | `from_asio_underruns` | blocks played as silence to Dante, since the run's start |
+//! | 0x20 | u64 | `to_asio_underruns` | blocks played as silence to ASIO, since the device's start |
+//! | 0x28 | u64 | `from_asio_underruns` | blocks played as silence to Dante, since the device's start |
 //! | 0x30 | u64 | `late_callbacks` | driver callbacks over two periods late, this driver run |
 //! | 0x38 | 8 × u64 | `late_250us` .. `late_2000us` | driver callbacks per 0.25 ms lateness bin, this driver run ([`LATE_BIN_KEYS`]) |
 //!
 //! A restart of the device shows as a new `run_start_unix_ms` and a
 //! `sequence` that falls; the late counts start again at each driver open
 //! (they fall then while the run's start stays). A target or a delay of 0
-//! is not known yet (no driver opened).
+//! is not known yet (no driver opened). The targets, delays and late
+//! counts are read at each request; the underruns and causes are the app's
+//! last hand-over (dasio: its counts tick, every 10 s), so a cause always
+//! belongs to the counts beside it. The two parts are read under separate
+//! locks, so one reply may join a hand-over a moment older than its
+//! lateness figures.
+//!
+//! **The bound:** at most [`super::limit::PER_SPAN`] replies a second,
+//! one bound for every asker (as the info replies'): a host that floods
+//! the request can take them all, and the others' reads then time out (no
+//! audio effect). A reader that asks again after a timeout may still get
+//! the earlier ask's late reply: `sequence` tells it apart.
 //!
 //! **Where the figures come from** ([`FigureSlot`], one per device,
 //! `Media::bridge_figures`): the bridge's own figures (targets, delays,

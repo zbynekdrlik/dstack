@@ -15,7 +15,9 @@
 //! - A bridge-figures request (dstack #391, [`super::bridge`]) is relayed
 //!   with its sender's address instead ([`Msg::Ask`]): its reply goes back
 //!   to the asker alone, so a member hands it over with that address
-//!   ([`Msg::SendTo`]) and the manager sends it from 8700 unicast. An older
+//!   ([`Msg::SendTo`]) and the manager sends it from 8700 unicast, only a
+//!   bridge reply ([`is_bridge_reply`]), only to one host ([`is_unicast`])
+//!   it relayed a request from within [`ASK_HOLD_NS`] ([`Asks`]). An older
 //!   member or manager reads neither message and drops it: that device
 //!   answers no bridge figures until both run a dstack that knows them.
 //! - When the manager ends, 8700 frees; a member that binds it becomes the
@@ -81,12 +83,13 @@ const ADDR_LEN: usize = 6;
 
 /// `kind`, `at` (its address, then its port, big-endian) and `body`.
 fn addressed(kind: u8, at: &SocketAddrV4, body: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(1 + ADDR_LEN + body.len());
-    out.push(kind);
-    out.extend_from_slice(&at.ip().octets());
-    out.extend_from_slice(&at.port().to_be_bytes());
-    out.extend_from_slice(body);
-    out
+    [
+        &[kind][..],
+        &at.ip().octets(),
+        &at.port().to_be_bytes(),
+        body,
+    ]
+    .concat()
 }
 
 /// The address and the datagram after it; `None` when shorter than an
@@ -129,6 +132,56 @@ impl Msg {
             _ => None,
         }
     }
+}
+
+/// How long the manager takes a member's reply to an asker
+/// ([`Msg::SendTo`]) after it relayed that asker's request ([`Asks`]).
+pub const ASK_HOLD_NS: u64 = 1_000_000_000;
+/// Askers kept at most ([`Asks`]).
+pub const MAX_ASKS: usize = 32;
+
+/// The askers whose bridge-figures request the manager relayed lately: a
+/// member's [`Msg::SendTo`] goes out only to one of them, so no process on
+/// the PC can send from the Dante info port to any address it names.
+#[derive(Debug, Default)]
+pub struct Asks {
+    at: BTreeMap<SocketAddrV4, u64>,
+}
+
+impl Asks {
+    /// A request from `asker` relayed at `now` (ns of the manager's clock).
+    /// The askers past [`ASK_HOLD_NS`] are forgotten; a new one is not kept
+    /// while [`MAX_ASKS`] are.
+    pub fn note(&mut self, asker: SocketAddrV4, now: u64) {
+        self.at
+            .retain(|_, &mut t| now.saturating_sub(t) < ASK_HOLD_NS);
+        if self.at.len() < MAX_ASKS || self.at.contains_key(&asker) {
+            self.at.insert(asker, now);
+        }
+    }
+
+    /// Whether `asker`'s request was relayed less than [`ASK_HOLD_NS`]
+    /// before `now`.
+    pub fn holds(&self, asker: &SocketAddrV4, now: u64) -> bool {
+        self.at
+            .get(asker)
+            .is_some_and(|&t| now.saturating_sub(t) < ASK_HOLD_NS)
+    }
+}
+
+/// Whether `to` is one host's address and port: no multicast, broadcast
+/// or unspecified address, no port 0. Only there does a bridge-figures
+/// reply go.
+pub fn is_unicast(to: &SocketAddrV4) -> bool {
+    let ip = to.ip();
+    !(ip.is_multicast() || ip.is_broadcast() || ip.is_unspecified() || to.port() == 0)
+}
+
+/// Whether `packet` is a bridge-figures reply ([`super::bridge`]): its
+/// length and its opcode. A member's [`Msg::SendTo`] carries nothing else.
+pub fn is_bridge_reply(packet: &[u8]) -> bool {
+    packet.len() == super::HEADER_LEN + super::bridge::FIGURES_LEN
+        && packet[24..32] == super::bridge::REPLY_OPCODE
 }
 
 /// The manager's members, by their loopback address.

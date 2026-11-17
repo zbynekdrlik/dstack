@@ -212,24 +212,19 @@ fn the_request_is_known_by_its_opcode_whatever_its_second_byte() {
     }
 }
 
-/// Figures a test device holds.
-fn held() -> Option<BridgeFigures> {
-    Some(BridgeFigures {
-        sequence: 77,
-        ..distinct()
-    })
-}
-
 #[test]
 fn a_device_without_figures_answers_nothing_and_uses_no_sequence_or_bound() {
     let mut mc = InfoBuilder::new(identity());
     let mut limit = Limit::default();
     let now = Instant::now();
-    for _ in 0..20 {
-        assert_eq!(
-            mc.bridge_within(&mut limit, now, &asking(REQUEST), || None),
-            None
-        );
+    let empty = FigureSlot::started_at(1);
+    for slot in [None, Some(&empty)] {
+        for _ in 0..20 {
+            assert_eq!(
+                mc.bridge_within(&mut limit, now, &asking(REQUEST), slot),
+                None
+            );
+        }
     }
     // The info group's path never answers it either.
     assert_eq!(mc.answer(&asking(REQUEST)), None);
@@ -237,12 +232,26 @@ fn a_device_without_figures_answers_nothing_and_uses_no_sequence_or_bound() {
     // No packet sequence was used, and the bound is whole: ten replies
     // with figures now.
     assert_eq!(mc.board_info()[4..6], [0, 1]);
+    let held = bridged();
     for n in 1..=10 {
         let p = mc
-            .bridge_within(&mut limit, now, &asking(REQUEST), held)
+            .bridge_within(&mut limit, now, &asking(REQUEST), Some(&held))
             .unwrap_or_else(|| panic!("reply {n}"));
         assert_eq!(walk::reply(&p).unwrap().get("sequence"), n);
     }
+}
+
+/// A slot whose source counts its reads (or panics, `panics`).
+fn counted(panics: bool) -> (FigureSlot, Arc<std::sync::atomic::AtomicU64>) {
+    let slot = FigureSlot::started_at(1);
+    let reads = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let r = Arc::clone(&reads);
+    slot.set_source(move || {
+        assert!(!panics, "figures read for another request");
+        r.fetch_add(1, Ordering::Relaxed);
+        OwnFigures::default()
+    });
+    (slot, reads)
 }
 
 #[test]
@@ -250,12 +259,32 @@ fn other_datagrams_never_read_the_figures() {
     let mut mc = InfoBuilder::new(identity());
     let mut limit = Limit::default();
     let now = Instant::now();
-    let never = || -> Option<BridgeFigures> { panic!("figures read for another request") };
-    assert_eq!(mc.bridge_within(&mut limit, now, &captured(), never), None);
+    let (never, _) = counted(true);
     assert_eq!(
-        mc.bridge_within(&mut limit, now, &captured()[..31], never),
+        mc.bridge_within(&mut limit, now, &captured(), Some(&never)),
         None
     );
+    assert_eq!(
+        mc.bridge_within(&mut limit, now, &captured()[..31], Some(&never)),
+        None
+    );
+}
+
+/// A request over the bound reads no figures: a flood takes the runner's
+/// lock at most ten times a second.
+#[test]
+fn a_request_over_the_bound_reads_no_figures() {
+    let mut mc = InfoBuilder::new(identity());
+    let mut limit = Limit::default();
+    let now = Instant::now();
+    let (slot, reads) = counted(false);
+    let replies = (0..25)
+        .filter(|_| {
+            mc.bridge_within(&mut limit, now, &asking(REQUEST), Some(&slot))
+                .is_some()
+        })
+        .count();
+    assert_eq!((replies, reads.load(Ordering::Relaxed)), (10, 10));
 }
 
 #[test]
@@ -263,8 +292,9 @@ fn a_reply_carries_the_figures_its_own_header_and_a_sequence_from_1() {
     let mut mc = InfoBuilder::new(identity());
     let mut limit = Limit::default();
     let now = Instant::now();
+    let held = bridged();
     let first = mc
-        .bridge_within(&mut limit, now, &asking(REQUEST), held)
+        .bridge_within(&mut limit, now, &asking(REQUEST), Some(&held))
         .expect("a reply");
     assert_eq!(
         first[..32],
@@ -281,7 +311,7 @@ fn a_reply_carries_the_figures_its_own_header_and_a_sequence_from_1() {
     // every other packet.
     assert_eq!(mc.board_info()[4..6], [0, 2]);
     let second = mc
-        .bridge_within(&mut limit, now, &asking(REQUEST), held)
+        .bridge_within(&mut limit, now, &asking(REQUEST), Some(&held))
         .expect("a reply");
     assert_eq!(second[4..6], [0, 3]);
     assert_eq!(walk::reply(&second).unwrap().get("sequence"), 2);
@@ -293,10 +323,11 @@ fn the_sequence_wraps_after_u32_max() {
     mc.bridge_replies = u32::MAX - 1;
     let mut limit = Limit::default();
     let now = Instant::now();
+    let held = bridged();
     let seqs: Vec<u64> = (0..3)
         .map(|_| {
             let p = mc
-                .bridge_within(&mut limit, now, &asking(REQUEST), held)
+                .bridge_within(&mut limit, now, &asking(REQUEST), Some(&held))
                 .unwrap();
             walk::reply(&p).unwrap().get("sequence")
         })
@@ -311,11 +342,12 @@ fn ten_bridge_replies_a_second_and_the_group_replies_keep_their_own_bound() {
     let mut mc = InfoBuilder::new(identity());
     let mut limit = Limit::default();
     let t0 = Instant::now();
+    let held = bridged();
     let mut replies = 0;
     for _ in 0..15 {
         assert_eq!(mc.answer_within(&mut limit, t0, &asking(REQUEST)), None);
         replies += usize::from(
-            mc.bridge_within(&mut limit, t0, &asking(REQUEST), held)
+            mc.bridge_within(&mut limit, t0, &asking(REQUEST), Some(&held))
                 .is_some(),
         );
     }
@@ -327,7 +359,7 @@ fn ten_bridge_replies_a_second_and_the_group_replies_keep_their_own_bound() {
     assert_eq!(boards, 10);
     let later = t0 + limit::SPAN;
     assert!(
-        mc.bridge_within(&mut limit, later, &asking(REQUEST), held)
+        mc.bridge_within(&mut limit, later, &asking(REQUEST), Some(&held))
             .is_some()
     );
     let report = limit
@@ -412,8 +444,8 @@ impl Beat for Bridged {
         None
     }
 
-    fn bridge(&self) -> Option<BridgeFigures> {
-        self.0.figures()
+    fn bridge(&self) -> Option<&FigureSlot> {
+        Some(&self.0)
     }
 }
 
@@ -444,12 +476,14 @@ fn the_running_device_s_beat_gives_its_slot_s_figures() {
     let dir = tempfile::tempdir().unwrap();
     let media = media_on(&device_at(dir.path()), Arc::new(Unready));
     let beat = media.beat();
-    assert_eq!(Beat::bridge(&beat), None);
+    let held = Beat::bridge(&beat).expect("the device's slot");
+    assert_eq!(held.figures(), None);
     let slot = media.bridge_figures();
     slot.set_source(OwnFigures::default);
     slot.set_underruns(1, 2, UnderrunCause::Bridge, UnderrunCause::None);
-    let f = Beat::bridge(&beat).expect("the slot's figures");
+    let f = held.figures().expect("the slot's figures");
     assert_eq!((f.to_asio_underruns, f.from_asio_underruns), (1, 2));
+    assert!(NoClock.bridge().is_none(), "a beat holds none by default");
 }
 
 #[tokio::test]
@@ -538,8 +572,10 @@ async fn a_member_s_bridge_figures_go_to_the_asker_through_the_manager() {
     recv(&info_rx).await;
     recv(&info_rx).await;
     recv(&beat_rx).await;
+    let member_sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let member_at = member_sock.local_addr().unwrap();
     let member = tokio::spawn(serve_member(
-        UdpSocket::bind("127.0.0.1:0").await.unwrap(),
+        member_sock,
         manager_at,
         v4(at),
         InfoBuilder::new(b.clone()),
@@ -579,8 +615,165 @@ async fn a_member_s_bridge_figures_go_to_the_asker_through_the_manager() {
     stranger.send_to(&forged, manager_at).await.unwrap();
     let got = tokio::time::timeout(Duration::from_millis(200), asker.recv_from(&mut buf)).await;
     assert!(got.is_err(), "nothing sent for a stranger");
+    // A forged request to the member from a stranger is never answered.
+    let ask = share::Msg::Ask(v4(asker.local_addr().unwrap()), asking(REQUEST)).encode();
+    stranger.send_to(&ask, member_at).await.unwrap();
+    let got = tokio::time::timeout(Duration::from_millis(200), asker.recv_from(&mut buf)).await;
+    assert!(got.is_err(), "a member answers its manager's relays only");
     member.abort();
     manager.abort();
+}
+
+/// A member's hand-over goes out only as a bridge reply, to an asker the
+/// manager relayed lately: no process on the PC can send from the info
+/// port to an address it names (a registered member here, the test).
+#[tokio::test]
+async fn the_manager_sends_a_member_s_reply_only_to_a_recent_asker() {
+    let (at, info_rx, beat_rx, to, sock) = loopback(NEVER).await;
+    let share = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let manager_at = share.local_addr().unwrap();
+    let manager = tokio::spawn(serve_info_with(
+        sock,
+        Some(share),
+        InfoBuilder::new(identity()),
+        to,
+        Arc::new(NoClock),
+        Arc::new(Changes::default()),
+        Arc::new(Requests::default()),
+    ));
+    recv(&info_rx).await;
+    recv(&info_rx).await;
+    recv(&beat_rx).await;
+    let fake = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    fake.send_to(&share::Msg::Register([5; 8]).encode(), manager_at)
+        .await
+        .unwrap();
+    let asker = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let other = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    // Registered: a board-info request reaches the fake member.
+    let mut buf = [0u8; 2048];
+    loop {
+        asker.send_to(&captured(), at).await.unwrap();
+        let (n, _) = tokio::time::timeout(BOUND, fake.recv_from(&mut buf))
+            .await
+            .expect("the relay")
+            .unwrap();
+        if share::Msg::decode(&buf[..n]) == Some(share::Msg::Request(captured())) {
+            break;
+        }
+    }
+    let reply = {
+        let mut mc = InfoBuilder::new(identity());
+        let mut limit = Limit::default();
+        let held = bridged();
+        mc.bridge_within(&mut limit, Instant::now(), &asking(REQUEST), Some(&held))
+            .unwrap()
+    };
+    let quiet = |s: &UdpSocket| {
+        let mut b = [0u8; 256];
+        s.try_recv_from(&mut b).is_err()
+    };
+    // Before any ask: dropped.
+    let to_asker = share::Msg::SendTo(v4(asker.local_addr().unwrap()), reply.clone()).encode();
+    fake.send_to(&to_asker, manager_at).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(quiet(&asker), "the hand-over before the ask was dropped");
+    // The asker asks; the relay reaches the fake member with its sender.
+    asker.send_to(&asking(REQUEST), at).await.unwrap();
+    let (n, _) = tokio::time::timeout(BOUND, fake.recv_from(&mut buf))
+        .await
+        .expect("the relay")
+        .unwrap();
+    assert_eq!(
+        share::Msg::decode(&buf[..n]),
+        Some(share::Msg::Ask(
+            v4(asker.local_addr().unwrap()),
+            asking(REQUEST)
+        ))
+    );
+    // Now: a packet that is no bridge reply, and a reply to another
+    // address, are dropped; the reply to the asker goes out.
+    let bad = share::Msg::SendTo(v4(asker.local_addr().unwrap()), captured()).encode();
+    fake.send_to(&bad, manager_at).await.unwrap();
+    let short = share::Msg::SendTo(
+        v4(asker.local_addr().unwrap()),
+        reply[..reply.len() - 1].to_vec(),
+    )
+    .encode();
+    fake.send_to(&short, manager_at).await.unwrap();
+    let elsewhere = share::Msg::SendTo(v4(other.local_addr().unwrap()), reply.clone()).encode();
+    fake.send_to(&elsewhere, manager_at).await.unwrap();
+    fake.send_to(&to_asker, manager_at).await.unwrap();
+    let (n, from) = tokio::time::timeout(BOUND, asker.recv_from(&mut buf))
+        .await
+        .expect("the reply")
+        .unwrap();
+    assert_eq!((from, &buf[..n]), (at, &reply[..]), "only the good reply");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(quiet(&asker), "nothing else to the asker");
+    assert!(quiet(&other), "nothing to an address nobody asked from");
+    manager.abort();
+}
+
+#[test]
+fn the_manager_keeps_an_asker_for_a_second_and_at_most_32() {
+    let a = |port: u16| SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 1), port);
+    let mut asks = share::Asks::default();
+    assert!(!asks.holds(&a(1), 0));
+    asks.note(a(1), 1_000);
+    assert!(asks.holds(&a(1), 1_000));
+    assert!(asks.holds(&a(1), 1_000 + share::ASK_HOLD_NS - 1));
+    assert!(!asks.holds(&a(1), 1_000 + share::ASK_HOLD_NS));
+    assert!(!asks.holds(&a(2), 1_000));
+    // Full: a new asker is not kept, a known one is renewed.
+    for port in 2..=32 {
+        asks.note(a(port), 2_000);
+    }
+    asks.note(a(99), 2_000);
+    assert!(!asks.holds(&a(99), 2_000), "the 33rd");
+    asks.note(a(1), 3_000);
+    assert!(asks.holds(&a(1), 3_000 + share::ASK_HOLD_NS - 1));
+    // Once the old ones lapse, room again.
+    asks.note(a(99), 2_000 + share::ASK_HOLD_NS);
+    assert!(asks.holds(&a(99), 2_000 + share::ASK_HOLD_NS));
+    assert!(!asks.holds(&a(2), 2_000 + share::ASK_HOLD_NS));
+}
+
+#[test]
+fn a_reply_goes_only_to_one_host_and_only_a_bridge_reply_is_handed_over() {
+    let at = |a: [u8; 4], port: u16| SocketAddrV4::new(Ipv4Addr::from(a), port);
+    assert!(share::is_unicast(&at([10, 0, 0, 1], 4000)));
+    assert!(share::is_unicast(&at([127, 0, 0, 1], 1)));
+    assert!(share::is_unicast(&at([223, 255, 255, 255], 1)));
+    assert!(!share::is_unicast(&at([224, 0, 0, 231], 8702)), "multicast");
+    assert!(!share::is_unicast(&at([239, 1, 1, 1], 1)), "multicast");
+    assert!(
+        !share::is_unicast(&at([255, 255, 255, 255], 1)),
+        "broadcast"
+    );
+    assert!(!share::is_unicast(&at([0, 0, 0, 0], 1)), "unspecified");
+    assert!(!share::is_unicast(&at([10, 0, 0, 1], 0)), "port 0");
+    let mut mc = InfoBuilder::new(identity());
+    let held = bridged();
+    let reply = mc
+        .bridge_within(
+            &mut Limit::default(),
+            Instant::now(),
+            &asking(REQUEST),
+            Some(&held),
+        )
+        .unwrap();
+    assert!(share::is_bridge_reply(&reply));
+    assert!(!share::is_bridge_reply(&reply[..reply.len() - 1]));
+    let mut longer = reply.clone();
+    longer.push(0);
+    assert!(!share::is_bridge_reply(&longer));
+    for at in 24..32 {
+        let mut other = reply.clone();
+        other[at] ^= 1;
+        assert!(!share::is_bridge_reply(&other), "opcode byte {at}");
+    }
+    assert!(!share::is_bridge_reply(&mc.board_info()));
 }
 
 /// The manager relays a bridge-figures request with its sender, anything
@@ -589,16 +782,16 @@ async fn a_member_s_bridge_figures_go_to_the_asker_through_the_manager() {
 fn the_manager_relays_a_bridge_request_with_its_sender() {
     let asker: SocketAddr = "127.0.0.9:4321".parse().unwrap();
     assert_eq!(
-        share::Msg::decode(&server::relay_of(&asking(REQUEST), asker)),
-        Some(share::Msg::Ask(v4(asker), asking(REQUEST)))
+        server::relay_of(&asking(REQUEST), asker),
+        share::Msg::Ask(v4(asker), asking(REQUEST))
     );
     assert_eq!(
-        share::Msg::decode(&server::relay_of(&captured(), asker)),
-        Some(share::Msg::Request(captured()))
+        server::relay_of(&captured(), asker),
+        share::Msg::Request(captured())
     );
     assert_eq!(
-        share::Msg::decode(&server::relay_of(&captured()[..20], asker)),
-        Some(share::Msg::Request(captured()[..20].to_vec()))
+        server::relay_of(&captured()[..20], asker),
+        share::Msg::Request(captured()[..20].to_vec())
     );
 }
 
