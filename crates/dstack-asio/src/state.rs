@@ -412,7 +412,9 @@ pub fn callback_gap_kind(gap_ns: i64, period_ns: i64) -> GapKind {
 /// The width of one lateness bin ([`lateness_bin`]), ns: 0.25 ms.
 pub const LATE_BIN_NS: i64 = 250_000;
 
-/// The lateness bins a run counts ([`lateness_bin`]).
+/// The lateness bins a run counts ([`lateness_bin`]). Not the TX packets'
+/// `late_bins` of `dstack::media::tx` (six bins, one JSON array): these are
+/// the driver callback's, one status key each ([`LATE_BIN_KEYS`]).
 pub const LATE_BINS: usize = 8;
 
 /// A status key per lateness bin, named by the bin's lower edge

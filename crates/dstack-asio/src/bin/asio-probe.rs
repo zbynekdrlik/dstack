@@ -91,7 +91,7 @@ mod probe {
         format!(
             "{:?} reason={} rate={} buffer={} in={:?} out={:?} latency in/out={}/{} frames \
              callbacks={} late={} fast={} overloads={} faults={} resets={} gap_max={:.2} ms \
-             input_peak={peak:.4}",
+             {} input_peak={peak:.4}",
             s.state,
             s.reason.as_ref().map_or("-".into(), |r| r.text()),
             s.rate,
@@ -106,7 +106,13 @@ mod probe {
             s.overloads,
             s.faults,
             s.resets,
-            s.gap_max_ms
+            s.gap_max_ms,
+            dstack_asio::state::LATE_BIN_KEYS
+                .iter()
+                .zip(s.late_bins)
+                .map(|(k, n)| format!("{k}={n}"))
+                .collect::<Vec<_>>()
+                .join(" ")
         )
     }
 

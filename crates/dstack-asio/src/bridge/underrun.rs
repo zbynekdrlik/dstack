@@ -18,17 +18,19 @@
 //! already reads (the players' underruns, the runner's lateness bins and
 //! late count, [`UnderrunCounts::of`]); never the driver's callback or a
 //! player's thread (it formats and logs). A count that falls (a new run's
-//! counters, a new player's) counts again from 0.
+//! counters, a new player's) counts again from 0; a count reset and grown
+//! past its old value between two checks reads as a smaller rise (the
+//! check is the app's tick, 10 s in dasio).
 
 use tracing::warn;
 
 use crate::runner::Status;
-use crate::state::{LATE_BIN_NS, LATE_BINS};
+use crate::state::{LATE_BIN_NS, LATE_BINS, frames_to_ns};
 
 /// One bin's width, us.
 const LATE_BIN_US: u64 = LATE_BIN_NS as u64 / 1000;
 
-/// The counts one look reads (module doc).
+/// The counts one check reads (module doc).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct UnderrunCounts {
     /// The Dante -> ASIO player's underruns (`Bridge::to_asio_stats`).
@@ -39,26 +41,37 @@ pub struct UnderrunCounts {
     pub late_bins: [u64; LATE_BINS],
     /// The runner's callbacks over two periods ([`Status::late_callbacks`]).
     pub late_callbacks: u64,
+    /// The driver's buffer period, us (0: no driver opened yet): how late
+    /// the top bin's callbacks can be.
+    pub period_us: u64,
 }
 
 impl UnderrunCounts {
     /// The counts from the runner's status and the two players' underruns.
     pub fn of(status: &Status, to_asio_underruns: u64, from_asio_underruns: u64) -> Self {
+        let period_us = if status.rate == 0 {
+            0
+        } else {
+            frames_to_ns(i64::from(status.buffer_frames), f64::from(status.rate)) as u64 / 1000
+        };
         UnderrunCounts {
             to_asio_underruns,
             from_asio_underruns,
             late_bins: status.late_bins,
             late_callbacks: status.late_callbacks,
+            period_us,
         }
     }
 
-    /// What rose from `before` to `self`, each count on its own.
+    /// What rose from `before` to `self`, each count on its own (the
+    /// period is `self`'s).
     fn since(&self, before: &UnderrunCounts) -> UnderrunCounts {
         UnderrunCounts {
             to_asio_underruns: rise(self.to_asio_underruns, before.to_asio_underruns),
             from_asio_underruns: rise(self.from_asio_underruns, before.from_asio_underruns),
             late_bins: std::array::from_fn(|i| rise(self.late_bins[i], before.late_bins[i])),
             late_callbacks: rise(self.late_callbacks, before.late_callbacks),
+            period_us: self.period_us,
         }
     }
 }
@@ -75,29 +88,43 @@ pub enum Cause {
     Driver,
     /// No callback came late enough: the bridge's (or its clock's).
     Bridge,
+    /// The from-ASIO target is not known yet (0: no player started).
+    Unknown,
 }
 
 impl Cause {
     fn text(self) -> &'static str {
         match self {
-            Cause::Driver => "the driver's lateness",
-            Cause::Bridge => "the bridge's",
+            Cause::Driver => "cause: driver callback lateness",
+            Cause::Bridge => "cause: the bridge (no callback late enough)",
+            Cause::Unknown => "cause: unknown (no target yet)",
         }
     }
 }
 
 /// Whose a from-ASIO underrun over `rise` reads as, at a from-ASIO target
 /// of `target_us`: the driver's when a callback came over two periods
-/// late, or in a bin whose lower edge is at least 3/4 of the target (at
-/// 1.333 ms from 1.0 ms late, where #382's simulation first lost audio);
-/// else the bridge's.
+/// late, or surely at least 3/4 of the target late: a bin whose lower edge
+/// is at least that (at 1.333 ms from 1.0 ms late, where #382's simulation
+/// first lost audio); the open top bin (2.0 ms up to one period late) is
+/// judged by the period, as late as its callbacks can be. Else the
+/// bridge's; unknown while the target is 0.
 pub fn from_asio_cause(rise: &UnderrunCounts, target_us: u64) -> Cause {
+    if target_us == 0 {
+        return Cause::Unknown;
+    }
     if rise.late_callbacks > 0 {
         return Cause::Driver;
     }
-    match rise.late_bins.iter().rposition(|&n| n > 0) {
-        Some(bin) if 4 * lower_edge_us(bin) >= 3 * target_us => Cause::Driver,
-        _ => Cause::Bridge,
+    let reach_us = match rise.late_bins.iter().rposition(|&n| n > 0) {
+        None => return Cause::Bridge,
+        Some(bin) if is_top(bin) => rise.period_us.max(lower_edge_us(bin)),
+        Some(bin) => lower_edge_us(bin),
+    };
+    if 4 * reach_us >= 3 * target_us {
+        Cause::Driver
+    } else {
+        Cause::Bridge
     }
 }
 
@@ -116,6 +143,11 @@ fn lower_edge_us(bin: usize) -> u64 {
     (bin as u64 + 1) * LATE_BIN_US
 }
 
+/// The open top bin (2.0 ms late or more, up to two periods' gap).
+fn is_top(bin: usize) -> bool {
+    bin + 1 == LATE_BINS
+}
+
 /// The bins that rose, by their edges in us, and the count over two
 /// periods; "none" when no callback came a bin's width late.
 fn lateness_text(rise: &UnderrunCounts) -> String {
@@ -125,7 +157,7 @@ fn lateness_text(rise: &UnderrunCounts) -> String {
             continue;
         }
         let low = lower_edge_us(bin);
-        if bin + 1 == LATE_BINS {
+        if is_top(bin) {
             parts.push(format!("{low} us or more: {n}"));
         } else {
             parts.push(format!("{low}-{} us: {n}", low + LATE_BIN_US));
@@ -146,26 +178,27 @@ fn underrun_text(rise: &UnderrunCounts, from_asio_target_us: u64) -> String {
     let mut sides: Vec<String> = Vec::new();
     if rise.from_asio_underruns > 0 {
         sides.push(format!(
-            "from-ASIO {} (target {from_asio_target_us} us): {}",
+            "from-ASIO {} (target {from_asio_target_us} us), {}",
             rise.from_asio_underruns,
             from_asio_cause(rise, from_asio_target_us).text()
         ));
     }
     if rise.to_asio_underruns > 0 {
         sides.push(format!(
-            "to-ASIO {}: {}",
+            "to-ASIO {}, {}",
             rise.to_asio_underruns,
             to_asio_cause(rise).text()
         ));
     }
     format!(
-        "asio bridge underruns since the last look: {}; driver callbacks late meanwhile: {}",
-        sides.join(", "),
+        "asio bridge underruns since the last check: {}; driver callbacks late meanwhile: {}",
+        sides.join("; "),
         lateness_text(rise)
     )
 }
 
-/// A ms figure (`dlink::bridge::Stats::target_ms`) in whole us.
+/// A ms figure (`dlink::bridge::Stats::target_ms`) in whole us, rounded
+/// (NaN and negatives read 0).
 fn us_of_ms(ms: f64) -> u64 {
     (ms * 1000.0).round() as u64
 }
@@ -182,7 +215,7 @@ impl UnderrunWatch {
         UnderrunWatch::default()
     }
 
-    /// One look: when an underrun count rose since the last look, WARN
+    /// One check: when an underrun count rose since the last check, WARN
     /// which side, how many, whose, and the callbacks' lateness over the
     /// same time, and return that text; `None` otherwise.
     /// `from_asio_target_ms` is the from-ASIO player's target
