@@ -248,9 +248,9 @@ fn the_warning_names_the_causes_and_that_second_s_latest_wake() {
     w.watch(0, "d1", Some(&s));
     // A wake 3.2 ms late before the second: not the line's (taken at the
     // quiet look).
-    s.wakes().record(3_200_000, true, false, || 1);
+    s.wakes().record(3_200_000, true, false, None, || 1);
     assert_eq!(capture_warnings(|| w.watch(S, "d1", Some(&s))), "");
-    s.wakes().record(2_500_000, true, true, || 2);
+    s.wakes().record(2_500_000, true, true, None, || 2);
     s.rebootstrapped(2, Cause::Late);
     s.rebootstrapped(0, Cause::Retime);
     let log = capture_warnings(|| w.watch(2 * S, "d1", Some(&s)));
@@ -273,12 +273,12 @@ fn the_watch_ends_the_wake_minute_every_minute() {
     let s = stats();
     let mut w = PumpWatch::new();
     w.watch(0, "d1", Some(&s));
-    s.wakes().record(4_000_000, false, false, || 0);
+    s.wakes().record(4_000_000, false, false, None, || 0);
     w.watch(M - S, "d1", Some(&s));
     assert_eq!(s.view().wake_behind_minute_max_us, None, "not a minute yet");
     w.watch(M, "d1", Some(&s));
     assert_eq!(s.view().wake_behind_minute_max_us, Some(4_000));
-    s.wakes().record(1_000_000, false, false, || 0);
+    s.wakes().record(1_000_000, false, false, None, || 0);
     w.watch(M + S, "d1", Some(&s));
     assert_eq!(
         s.view().wake_behind_minute_max_us,
@@ -296,7 +296,7 @@ fn the_watch_ends_the_wake_minute_every_minute() {
     // Another engine: its minute starts at its first look.
     let b = stats();
     w.watch(3 * M + S, "d1", Some(&b));
-    b.wakes().record(9_000_000, false, false, || 0);
+    b.wakes().record(9_000_000, false, false, None, || 0);
     w.watch(4 * M, "d1", Some(&b));
     assert_eq!(b.view().wake_behind_minute_max_us, None, "under its minute");
     w.watch(4 * M + S, "d1", Some(&b));

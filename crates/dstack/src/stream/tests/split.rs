@@ -16,16 +16,31 @@ use super::drain::{flow_rig, send};
 #[test]
 fn a_sleep_records_how_late_it_returned() {
     let s = PumpStats::new(TIMING, RATE);
-    // Asked 0.1 ms before its target, woke 1 ms past it.
-    s.slept(10_000_000, Some(9_900_000), Some(11_000_000), true);
+    // Asked 0.1 ms before its target, woke 1 ms past it (returned for the
+    // wake after it, dstack #370).
+    assert_eq!(
+        s.slept(10_000_000, Some(9_900_000), Some(11_000_000), true),
+        Some(1_000_000)
+    );
     assert_eq!(s.view().oversleep_max_us, 1_000);
     // A target already past at the ask: no sleep, nothing recorded.
-    s.slept(10_000_000, Some(10_000_000), Some(18_000_000), true);
+    assert_eq!(
+        s.slept(10_000_000, Some(10_000_000), Some(18_000_000), true),
+        None
+    );
     // A clock not read before or after: nothing.
-    s.slept(10_000_000, None, Some(18_000_000), true);
-    s.slept(10_000_000, Some(9_900_000), None, true);
+    assert_eq!(s.slept(10_000_000, None, Some(18_000_000), true), None);
+    assert_eq!(s.slept(10_000_000, Some(9_900_000), None, true), None);
     // A new epoch across the sleep (the clock moved): nothing.
-    s.slept(10_000_000, Some(9_900_000), Some(18_000_000), false);
+    assert_eq!(
+        s.slept(10_000_000, Some(9_900_000), Some(18_000_000), false),
+        None
+    );
+    // On time: a measured 0.
+    assert_eq!(
+        s.slept(10_000_000, Some(9_900_000), Some(9_999_000), true),
+        Some(0)
+    );
     assert_eq!(s.view().oversleep_max_us, 1_000);
     assert_eq!(s.take_second_split().oversleep_us, 1_000);
     // A later, larger one: the peak; the second's afresh.
@@ -58,6 +73,120 @@ fn the_pump_thread_records_its_sleeps() {
     stop.store(true, std::sync::atomic::Ordering::Release);
     thread.join().unwrap();
     assert!(slept, "no sleep recorded: {:?}", stats.view());
+}
+
+/// dstack #370: each late wake in the recent ring carries the oversleep
+/// of the sleep just before it, taken once: a wake with no measured sleep
+/// before it (none, or one asked for a time already past) carries none.
+#[test]
+fn each_late_wake_carries_its_own_sleep_s_oversleep() {
+    let mut r = rig(Map::default(), &[], &[]);
+    let w = r.pump.media(T, 0);
+    // Asked 0.1 ms before the wake's target, returned 40 samples (416 667
+    // ns at 96 kHz) past it, and woke there: late, not past W.
+    let target = ns_of(w, RATE);
+    r.pump.slept(
+        target,
+        Some(target - 100_000),
+        Some(ns_of(w + 40, RATE)),
+        true,
+    );
+    let w = r.pump.media(w + 40, 0);
+    // Late again with no sleep measured in between: none (taken once).
+    let w = r.pump.media(w + 50, 0);
+    // A sleep 1 ms past its target, the wake a further 0.05 ms on: past
+    // W, a re-bootstrap with its own oversleep.
+    let target = ns_of(w, RATE);
+    r.pump.slept(
+        target,
+        Some(target - 100_000),
+        Some(target + 1_000_000),
+        true,
+    );
+    let w = r.pump.media(w + WORK_MARGIN + 5, 0);
+    // A sleep asked for a time already past: unmeasured.
+    let target = ns_of(w, RATE);
+    r.pump
+        .slept(target, Some(target), Some(target + 2_000_000), true);
+    r.pump.media(w + 2 * B, 0);
+    let late: Vec<_> = r
+        .stats
+        .wakes()
+        .recent()
+        .iter()
+        .map(|l| (l.behind_us, l.rebootstrap, l.oversleep_us))
+        .collect();
+    assert_eq!(
+        late,
+        [
+            (416, false, Some(416)),
+            (520, false, None),
+            (1_052, true, Some(1_000)),
+            (666, false, None),
+        ]
+    );
+    // The peak since the start is the largest of them.
+    assert_eq!(r.stats.view().oversleep_max_us, 1_000);
+}
+
+/// A clock whose every sleep returns [`LateClock::LATE`] past its target,
+/// 1 ms of real time a sleep.
+#[derive(Debug)]
+struct LateClock {
+    now: std::sync::atomic::AtomicU64,
+}
+
+impl LateClock {
+    /// Past W (1 ms): every wake re-bootstraps.
+    const LATE: u64 = 2_000_000;
+}
+
+impl PtpClock for LateClock {
+    fn now_ns(&self) -> Option<u64> {
+        Some(self.now.load(std::sync::atomic::Ordering::SeqCst))
+    }
+
+    fn sleep_until(&self, ptp_ns: u64) {
+        use std::sync::atomic::Ordering::SeqCst;
+        let now = self.now.load(SeqCst);
+        self.now.store(now.max(ptp_ns) + Self::LATE, SeqCst);
+        std::thread::sleep(Duration::from_millis(1));
+    }
+
+    fn epoch(&self) -> u32 {
+        0
+    }
+}
+
+/// dstack #370, the pump thread's wiring: a sleep that returns late is
+/// kept for the wake after it, so each late wake in the recent ring
+/// carries its own oversleep, here the whole of its lateness.
+#[test]
+fn the_pump_thread_gives_each_late_wake_its_sleep_s_oversleep() {
+    use std::sync::atomic::{AtomicBool, AtomicU64};
+    let r = rig(Map::default(), &[], &[]);
+    let stats = Arc::clone(&r.stats);
+    let clock: Arc<dyn PtpClock> = Arc::new(LateClock {
+        now: AtomicU64::new(ns_of(T, RATE)),
+    });
+    let stop = Arc::new(AtomicBool::new(false));
+    let thread = spawn(clock, r.pump, Arc::clone(&stop)).unwrap();
+    let began = Instant::now();
+    while stats.wakes().late_wakes() < 3 && began.elapsed() < BOUND {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    stop.store(true, std::sync::atomic::Ordering::Release);
+    thread.join().unwrap();
+    let recent = stats.wakes().recent();
+    assert!(recent.len() >= 3, "{recent:?}");
+    let us = LateClock::LATE / 1_000;
+    for l in &recent {
+        assert_eq!(
+            (l.behind_us, l.rebootstrap, l.oversleep_us),
+            (us, true, Some(us)),
+            "{recent:?}"
+        );
+    }
 }
 
 /// Each drain before a block records its own time and the datagrams it

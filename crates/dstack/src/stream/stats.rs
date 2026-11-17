@@ -233,20 +233,23 @@ impl PumpStats {
     /// returned (`woke_ns`; `None`: not read), with the clock's epoch
     /// unchanged across it (`same_epoch`; a new epoch moved the clock):
     /// how late it returned is recorded ([`super::split::oversleep_ns`],
-    /// dstack #354). A sleep asked for a time already past records nothing
-    /// (its lateness is the blocks' and drains' before it).
+    /// dstack #354) and returned, ns, for the wake after it (dstack #370,
+    /// [`super::Pump::slept`]). A sleep asked for a time already past
+    /// records nothing (its lateness is the blocks' and drains' before
+    /// it): `None`, as for a clock not read or a new epoch.
     pub fn slept(
         &self,
         target_ns: u64,
         asked_ns: Option<u64>,
         woke_ns: Option<u64>,
         same_epoch: bool,
-    ) {
-        if let (Some(asked), Some(woke), true) = (asked_ns, woke_ns, same_epoch)
-            && let Some(late) = super::split::oversleep_ns(target_ns, asked, woke)
-        {
-            self.overslept(late);
-        }
+    ) -> Option<u64> {
+        let (Some(asked), Some(woke), true) = (asked_ns, woke_ns, same_epoch) else {
+            return None;
+        };
+        let late = super::split::oversleep_ns(target_ns, asked, woke)?;
+        self.overslept(late);
+        Some(late)
     }
 
     /// A socket drain before a block that took `ns` and read `datagrams`
@@ -296,9 +299,11 @@ impl PumpStats {
     /// A wake on the media clock whose first due answer was `due`, `behind`
     /// samples after the oldest due block's time (the pump thread): a run
     /// or a re-bootstrap for lateness is recorded as the wake's lateness
-    /// (late from one block behind, as [`Blocks::next`] counts it); a wait
-    /// (nothing due yet) or a clock gone back is no lateness.
-    pub(super) fn woke(&self, behind: u64, due: Due) {
+    /// (late from one block behind, as [`Blocks::next`] counts it), with
+    /// how late the sleep before it returned (`oversleep_ns`, `None`:
+    /// unmeasured; dstack #370); a wait (nothing due yet) or a clock gone
+    /// back is no lateness.
+    pub(super) fn woke(&self, behind: u64, due: Due, oversleep_ns: Option<u64>) {
         let rebootstrap = match due {
             Due::Run { .. } => false,
             Due::Rebootstrap {
@@ -311,6 +316,7 @@ impl PumpStats {
             ns_of(behind, self.rate),
             late,
             rebootstrap,
+            oversleep_ns,
             wake::unix_ms_now,
         );
     }

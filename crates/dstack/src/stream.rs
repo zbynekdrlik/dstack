@@ -353,6 +353,13 @@ pub struct Pump<P: Process> {
     /// drain's packet judge (finer than a sample); taken by the next
     /// [`Pump::media`] at that time.
     read_ns: Option<u64>,
+    /// How late the pump thread's last sleep returned, ns ([`Pump::slept`],
+    /// dstack #370): the sleep's target is the next wake, so the next
+    /// [`Pump::media`] takes it for that wake's record; `None` when
+    /// unmeasured. Free pacing leaves it (its sleep is not measured): the
+    /// next media step bootstraps, a wake that is never late, so nothing
+    /// records it.
+    overslept_ns: Option<u64>,
 }
 
 impl<P: Process> Pump<P> {
@@ -398,6 +405,7 @@ impl<P: Process> Pump<P> {
             played: play_at::Track::default(),
             intake,
             read_ns: None,
+            overslept_ns: None,
         }
     }
 
@@ -417,6 +425,21 @@ impl<P: Process> Pump<P> {
             let datagrams = u64::try_from(intake.datagrams()).unwrap_or(u64::MAX);
             self.stats.drained(nanos(began.elapsed()), datagrams);
         }
+    }
+
+    /// The pump thread slept until media time `target_ns`, reading the
+    /// media clock just before (`asked_ns`) and just after (`woke_ns`) on
+    /// one epoch (`same_epoch`): recorded ([`PumpStats::slept`]) and kept
+    /// for the next [`Pump::media`]'s wake, which that sleep woke for
+    /// (dstack #370: each late wake's own oversleep).
+    pub fn slept(
+        &mut self,
+        target_ns: u64,
+        asked_ns: Option<u64>,
+        woke_ns: Option<u64>,
+        same_epoch: bool,
+    ) {
+        self.overslept_ns = self.stats.slept(target_ns, asked_ns, woke_ns, same_epoch);
     }
 
     /// Reads the app's clock (`app_ns`, [`crate::clock::app_monotonic_ns`]
@@ -468,6 +491,8 @@ impl<P: Process> Pump<P> {
     pub fn media(&mut self, now: u64, anchor: impl Into<crate::clock::Anchor>) -> u64 {
         let anchor = anchor.into();
         let rate = self.tx.cfg.sample_rate;
+        // The sleep before this wake, for its record (dstack #370).
+        let overslept_ns = self.overslept_ns.take();
         // The drain's time: the clock read of this wake when it is `now`,
         // else `now` itself.
         let drain_ns = self
@@ -551,7 +576,7 @@ impl<P: Process> Pump<P> {
             let behind = now.saturating_sub(blocks.due());
             let due = blocks.next(now);
             if std::mem::take(&mut first) {
-                self.stats.woke(behind, due);
+                self.stats.woke(behind, due, overslept_ns);
             }
             match due {
                 Due::Run { start, late } => {

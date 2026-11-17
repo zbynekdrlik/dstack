@@ -9,7 +9,8 @@
 //! the processor, the engine rings written, the stats and histograms) and
 //! the TX passes that send the engine rings. The TX passes are timed and
 //! their sleeps read as the TX thread does (dstack #359), and the TX pull
-//! the TX thread fills before it sends (dstack #363). The first test proves the
+//! the TX thread fills before it sends (dstack #363), and the pump's late
+//! wakes with their own sleep's oversleep (dstack #370). The first test proves the
 //! detector sees an allocation. Its own test binary, because it installs
 //! the global allocator; every buffer, ring, checker, socket, the
 //! transmitter, the receiver and the pump are built before the detector
@@ -535,6 +536,57 @@ fn the_pump_s_drain_of_the_rx_flows_does_not_allocate() {
     assert_eq!((ring.holes, ring.late), (0, 0), "{ring:?}");
 }
 
+#[test]
+fn the_pump_s_late_wakes_with_their_oversleep_do_not_allocate() {
+    // dstack #370: a late wake goes into the recent ring with its wall
+    // time and its own sleep's oversleep, re-bootstrap or not.
+    let cfg = DeviceConfig::from_toml(include_str!("../../../config/test-device.toml"))
+        .expect("config/test-device.toml");
+    let rings: Arc<[Ring]> = (0..cfg.rx.len())
+        .map(|_| Ring::new())
+        .collect::<Vec<_>>()
+        .into();
+    let rx = Arc::new(RxShared::new(RATE, Ipv4Addr::LOCALHOST, Arc::clone(&rings)).unwrap());
+    let tx = Arc::new(TxShared::new(cfg, Ipv4Addr::LOCALHOST, rings, 1, &[]).unwrap());
+    let timing = Timing {
+        block: BLOCK,
+        playout: 96,
+        margin: WORK_MARGIN,
+    };
+    let stats = Arc::new(PumpStats::new(timing, RATE));
+    let mut pump = Pump::new(Copy, Map::default(), timing, 24, rx, tx, Arc::clone(&stats));
+    let mut now = pump.media(T, 0);
+    reset_violation_count();
+    assert_no_alloc(|| {
+        // 40 wakes, each 2 blocks late (every fourth past W), each after
+        // a sleep that returned that late.
+        for k in 0..40u64 {
+            let late = if k % 4 == 3 {
+                WORK_MARGIN + 1
+            } else {
+                2 * BLOCK
+            };
+            let target = ns_of(now, RATE);
+            pump.slept(
+                target,
+                Some(target - 50_000),
+                Some(ns_of(now + late, RATE)),
+                true,
+            );
+            now = pump.media(now + late, 0);
+        }
+    });
+    assert_eq!(violation_count(), 0, "a late wake's record allocated");
+    let recent = stats.wakes().recent();
+    assert_eq!(stats.wakes().late_wakes(), 40);
+    assert_eq!(recent.len(), 32);
+    for w in &recent {
+        let us = if w.rebootstrap { 1_010 } else { 666 };
+        assert_eq!((w.behind_us, w.oversleep_us), (us, Some(us)), "{recent:?}");
+    }
+    assert_eq!(recent.iter().filter(|w| w.rebootstrap).count(), 8);
+}
+
 /// Output j is input j (the first 24 of 32), through a stack buffer.
 struct Copy;
 
@@ -637,7 +689,11 @@ fn the_engine_pump_and_its_tx_passes_do_not_allocate() {
         // wake reads the media and the app's clock first, as the pump
         // thread does (dstack #295), so every block carries a play time.
         for _ in 0..300 {
-            clock::PtpClock::sleep_until(&media, ns_of(now, RATE));
+            // The sleep timed as the pump thread does (dstack #370).
+            let target = ns_of(now, RATE);
+            let asked = clock::PtpClock::now_ns(&media);
+            clock::PtpClock::sleep_until(&media, target);
+            pump.slept(target, asked, clock::PtpClock::now_ns(&media), true);
             pump.read_clocks(&media, clock::app_monotonic_ns);
             now = pump.media(now, 0);
         }
