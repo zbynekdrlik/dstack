@@ -31,6 +31,12 @@ pub struct Snapshot {
     /// Blocks played as silence because the converter refused them
     /// ([`Stats::convert_errors`], dstack #303).
     pub convert_errors: u64,
+    /// Gaps of the consumer itself (an output callback held past its
+    /// buffer: the card played silence of its own), whose audio the player
+    /// dropped ([`Stats::output_gaps`], dstack #307), and that time, ms of
+    /// the producer's rate.
+    pub output_gaps: u64,
+    pub output_lost_ms: f64,
     /// The consumer waits for the FIFO to fill (silence: no audio yet, or a
     /// refill after an underrun).
     pub priming: bool,
@@ -57,6 +63,9 @@ impl Snapshot {
             recentres: stats.recentres(),
             resyncs: stats.resyncs(),
             convert_errors: stats.convert_errors(),
+            output_gaps: stats.output_gaps(),
+            output_lost_ms: stats.output_lost_frames() as f64 * 1000.0
+                / f64::from(fifo_rate.max(1)),
             priming: stats.priming(),
             mono: stats.mono(),
             input_peak: None,
@@ -110,6 +119,12 @@ pub fn line(s: &Snapshot) -> String {
     }
     if s.convert_errors > 0 {
         text.push_str(&format!(", {} convert errors", s.convert_errors));
+    }
+    if s.output_gaps > 0 {
+        text.push_str(&format!(
+            ", {} output gaps ({:.1} ms the output played silence of its own)",
+            s.output_gaps, s.output_lost_ms
+        ));
     }
     if let Some(peak) = s.input_peak {
         text.push_str(&peak_text(peak));
@@ -227,6 +242,8 @@ mod tests {
             recentres: 0,
             resyncs: 0,
             convert_errors: 0,
+            output_gaps: 0,
+            output_lost_ms: 0.0,
             priming: false,
             mono: false,
             input_peak: None,
@@ -272,6 +289,44 @@ mod tests {
         let stats = Stats::default();
         let fifo = fifo_for(1, 48_000);
         assert_eq!(Snapshot::read(&fifo, &stats, 48_000).convert_errors, 0);
+    }
+
+    /// dstack #307: the output's own gaps are read from the player (the
+    /// time in ms of the FIFO's rate) and named in the line when there are
+    /// any, apart from the bridge's underruns.
+    #[test]
+    fn the_output_gaps_are_read_and_named_when_there_are_any() {
+        let base = line(&snap());
+        assert!(!base.contains("gap"));
+        assert_eq!(
+            line(&Snapshot {
+                output_gaps: 2,
+                output_lost_ms: 20.04,
+                ..snap()
+            }),
+            format!("{base}, 2 output gaps (20.0 ms the output played silence of its own)")
+        );
+        let fifo = Arc::new(fifo_for(1, 48_000));
+        let mut player = Player::new(
+            Arc::clone(&fifo),
+            48_000,
+            48_000,
+            dlink::bridge::AppBuffer::new(10_000_000, 2_666_667),
+            10_000_000,
+            Arc::default(),
+        )
+        .unwrap();
+        let mut out = [0.0f32; 480];
+        for _ in 0..200 {
+            let pulled = fifo.push_with(480, |_, _| 0.5);
+            player.fill_pulled(pulled, &mut out, 1, |x| x as f32);
+        }
+        // A call held 20 ms past its period on a 2-period buffer.
+        let pulled = fifo.push_with(1440, |_, _| 0.5);
+        let mut big = [0.0f32; 960];
+        player.fill_pulled(pulled, &mut big, 1, |x| x as f32);
+        let read = Snapshot::read(&fifo, &player.stats(), 96_000);
+        assert_eq!((read.output_gaps, read.output_lost_ms), (1, 5.0));
     }
 
     /// dstack #303: the resyncs are read from the player and named in the
@@ -444,6 +499,8 @@ mod tests {
                 recentres: 0,
                 resyncs: 0,
                 convert_errors: 0,
+                output_gaps: 0,
+                output_lost_ms: 0.0,
                 priming: true,
                 mono: false,
                 input_peak: None,

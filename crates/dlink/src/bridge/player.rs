@@ -72,6 +72,15 @@
 //!   was on its way, and the floor's re-prime made a whole target of
 //!   silence out of it.
 //!
+//! - **The output's own gap** (dstack #307): an output that writes the
+//!   FIFO itself just before and asks for the room it has (dlisten's
+//!   WASAPI callback, [`Player::fill_pulled`]) comes back from a hold past
+//!   its buffer with a pull of the whole time held and a call of the whole
+//!   buffer; the excess ([`output_gap`]) is the time the card played
+//!   silence of its own, dropped once and counted apart
+//!   ([`Stats::output_gaps`]), never left to the excess bound (whose
+//!   re-centre mid-call ran the rest of the big call dry).
+//!
 //! [`Player::fill_with`] allocates nothing, takes no lock and makes no
 //! system call: it runs on the audio driver's thread. [`Player::fill_at`]
 //! with a start reads the FIFO's clock once a converter call (the app's
@@ -122,6 +131,24 @@ pub fn hard_excess_s(target_s: f64, chunk_s: f64) -> f64 {
         .min(2.0 * (MAX_APP_BUFFER_NS as f64 / 1e9))
 }
 
+/// The input frames to drop before a call of an output that writes the
+/// FIFO itself and asks for the room it has ([`Player::fill_pulled`]):
+/// its pull wrote `pulled` frames and the call takes `call` (input
+/// frames), its last call that was no gap took `usual`. A call bigger than
+/// the usual one whose pull wrote more than it takes by more than `least`
+/// (a converter call) follows a gap of the output: the card played the
+/// excess as its own silence, so the excess is dropped. Otherwise 0: a
+/// late call of the same size (a fixed-size callback) or a pull within
+/// `least` of its take (the two clocks' reads, a late call the card's
+/// buffer covered).
+pub fn output_gap(pulled: usize, call: usize, usual: usize, least: usize) -> usize {
+    if call > usual && pulled > call + least {
+        pulled - call
+    } else {
+        0
+    }
+}
+
 /// The FIFO for `channels` channels at the network's `net_rate`
 /// ([`FIFO_S`]).
 pub fn fifo_for(channels: usize, net_rate: u32) -> Fifo {
@@ -147,6 +174,8 @@ pub struct Stats {
     recentres: AtomicU64,
     resyncs: AtomicU64,
     convert_errors: AtomicU64,
+    output_gaps: AtomicU64,
+    output_lost_frames: AtomicU64,
     /// The converter's correction, ppm (`f64` bits).
     ppm: AtomicU64,
     priming: AtomicBool,
@@ -210,14 +239,19 @@ impl Stats {
         self.priming.load(Ordering::Relaxed)
     }
 
-    /// Gaps of the output itself ([`Player::fill_pulled`], dstack #307).
+    /// Gaps of the output itself: calls after which the output had played
+    /// silence of its own (its callback held past its buffer), whose
+    /// audio was dropped once ([`Player::fill_pulled`], dstack #307). Not
+    /// the bridge's dropouts: an app publishes it as `output_gaps`.
     pub fn output_gaps(&self) -> u64 {
-        0
+        self.output_gaps.load(Ordering::Relaxed)
     }
 
-    /// Input frames dropped for the output's gaps ([`Player::fill_pulled`]).
+    /// Input frames dropped for the output's gaps ([`Stats::output_gaps`]):
+    /// the time the output played silence of its own, to within a
+    /// converter call.
     pub fn output_lost_frames(&self) -> u64 {
-        0
+        self.output_lost_frames.load(Ordering::Relaxed)
     }
 }
 
@@ -259,6 +293,11 @@ pub struct Player {
     recentres_before: u64,
     resyncs: u64,
     convert_errors: u64,
+    output_gaps: u64,
+    output_lost_frames: u64,
+    /// The output's last call that was no gap, input frames
+    /// ([`output_gap`]).
+    usual_call_in: usize,
     /// The producer's schedule ([`writer`]), followed when its chunk is
     /// wider than the output's callback.
     writer: Writer,
@@ -362,6 +401,9 @@ impl Player {
             recentres_before: stats.recentres(),
             resyncs: stats.resyncs(),
             convert_errors: stats.convert_errors(),
+            output_gaps: stats.output_gaps(),
+            output_lost_frames: stats.output_lost_frames(),
+            usual_call_in: 0,
             writer: Writer::new(chunk_in, net_rate),
             arrived,
             skipped: 0,
@@ -398,9 +440,27 @@ impl Player {
         self.fill_at(None, out, outputs, to);
     }
 
-    /// [`Player::fill_with`] for a consumer that just wrote `pulled` frames
-    /// into the FIFO itself (its RX pull, dstack #307). RED stub: plays as
-    /// [`Player::fill_with`].
+    /// [`Player::fill_with`] for an output that writes the FIFO itself
+    /// just before (its RX pull, dstack #307: `pulled` the frames the pull
+    /// wrote, [`super::RxPull::pull`]) and asks for the room it has (a
+    /// fill-the-room driver: WASAPI shared mode, where cpal asks for the
+    /// buffer's frames less its padding).
+    ///
+    /// Such an output's callback held past its buffer comes back to a card
+    /// that played silence meanwhile: its pull reads the whole time held
+    /// and the call asks for the whole buffer, so the time the card played
+    /// silence stays in the FIFO, `pulled` less the call's take. Up to
+    /// v0.6.170 that excess went past the controller's bound, which
+    /// re-centred to the target after the call's first converter block and
+    /// left the rest of the big call to run the FIFO dry (an underrun), or,
+    /// under the bound, stayed as latency (mbc's dlisten, 17.11.2026). Now
+    /// it is dropped once before the call ([`output_gap`]), counted as the
+    /// output's own gap ([`Stats::output_gaps`]), and the output's clock
+    /// counts the time (as a resync's skip), so the rate fit sees no step:
+    /// no re-centre, no underrun, the latency the same. A fixed-size
+    /// callback (an ASIO switch) late by L reads L more and takes the same:
+    /// nothing is dropped there ([`output_gap`] needs a call bigger than
+    /// the usual), and the next call reads L less.
     pub fn fill_pulled<T>(
         &mut self,
         pulled: usize,
@@ -408,7 +468,25 @@ impl Player {
         outputs: usize,
         to: impl Fn(f64) -> T,
     ) {
-        let _ = pulled;
+        if let Some(frames) = out.len().checked_div(outputs) {
+            let call = frames_of(frames as f64 / f64::from(self.out_rate), self.net_rate);
+            let least = frames_of(BLOCK as f64 / f64::from(self.out_rate), self.net_rate);
+            match output_gap(pulled, call, self.usual_call_in, least) {
+                0 => self.usual_call_in = call,
+                gap if self.state == State::Running => {
+                    // The converter keeps its history: the audio jumps as
+                    // the card's did, and a reset would add a step from
+                    // silence (its filter's ring) to the card's gap.
+                    let dropped = self.fifo.skip(gap);
+                    self.skipped +=
+                        frames_of(dropped as f64 / f64::from(self.net_rate), self.out_rate) as u64;
+                    self.output_gaps += 1;
+                    self.output_lost_frames += dropped as u64;
+                }
+                // Priming: the priming starts from its own level.
+                _ => {}
+            }
+        }
         self.fill_at(None, out, outputs, to);
     }
 
@@ -479,6 +557,9 @@ impl Player {
         s.resyncs.store(self.resyncs, Ordering::Relaxed);
         s.convert_errors
             .store(self.convert_errors, Ordering::Relaxed);
+        s.output_gaps.store(self.output_gaps, Ordering::Relaxed);
+        s.output_lost_frames
+            .store(self.output_lost_frames, Ordering::Relaxed);
         s.ppm.store(self.ctl.ppm().to_bits(), Ordering::Relaxed);
         s.priming
             .store(matches!(self.state, State::Priming(_)), Ordering::Relaxed);
@@ -763,3 +844,6 @@ mod resync_tests;
 
 #[cfg(test)]
 mod line_tests;
+
+#[cfg(test)]
+mod gap_tests;
