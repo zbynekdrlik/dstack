@@ -43,6 +43,8 @@
 
 #[path = "soak/harness.rs"]
 mod harness;
+#[path = "soak/pulled.rs"]
+mod pulled;
 
 use std::sync::PoisonError;
 
@@ -51,6 +53,7 @@ use dstack::media::tx::ns_of;
 use dstack::stream::{Blocks, PumpView};
 
 use harness::*;
+use pulled::{TX_STALL_AT_NS, TX_STALL_NS, Tx};
 
 /// A case's simulated time.
 const SOAK_NS: u64 = 600 * SECOND;
@@ -227,24 +230,6 @@ fn median(values: &mut [f64]) -> f64 {
     }
 }
 
-/// Who fills the TX block (dstack #363).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Tx {
-    /// The pump, inside the app's processor (every app before #363).
-    Pumped,
-    /// The TX thread (`Link::start_tx_pulling`), on its own schedule, on
-    /// time.
-    Pulled,
-    /// The TX thread, one of whose passes comes [`TX_STALL_NS`] late
-    /// (past W and the flows' lag bound: the fill starts again).
-    PulledTxStall,
-}
-
-/// The TX thread's one stall in a [`Tx::PulledTxStall`] case, ns, and when
-/// (after the bridges settled, before the 5 minutes whose rate is judged).
-const TX_STALL_NS: u64 = 40_000_000;
-const TX_STALL_AT_NS: u64 = 200 * SECOND;
-
 /// One simulated case.
 struct Soak {
     drift_ppm: f64,
@@ -287,6 +272,8 @@ struct Soak {
     jumps: Vec<u64>,
     marks: u64,
     view: PumpView,
+    /// The TX pull's counts at the end ([`Tx::Pulled`] and kin; dstack #363).
+    fill_view: Option<dstack::media::tx::TxFillView>,
 }
 
 impl Soak {
@@ -326,6 +313,7 @@ impl Soak {
             jumps: Vec::new(),
             marks: 0,
             view: PumpView::default(),
+            fill_view: None,
         };
         soak.record_stall();
         soak
@@ -430,6 +418,8 @@ impl Soak {
         // pump's: `u64::MAX`), and its one stall still to come.
         let mut tx_at = if fill.is_some() { T0 } else { u64::MAX };
         let mut tx_stalled = self.tx != Tx::PulledTxStall;
+        // Its wakes as late as the pump's, on a draw of their own.
+        let mut tx_rng = Rng(seed ^ 0x0363_0000);
         while wake_at.min(tick_at).min(tx_at) < end {
             let at = wake_at.min(tick_at).min(tx_at);
             if tx_at <= wake_at.min(tick_at) {
@@ -443,7 +433,7 @@ impl Soak {
                     self.before_tx_stall = Some(Counts::of(&p, due));
                     due + TX_STALL_NS
                 } else {
-                    due
+                    due + tx_rng.late_ns(self.wakes)
                 };
             } else if wake_at <= tick_at {
                 clock.sleep_until(wake_at);
@@ -502,6 +492,7 @@ impl Soak {
             }
         }
         self.view = p.pump_stats.view();
+        self.fill_view = fill.map(|f| f.fill.stats().view());
         self.tx_tone_locked = p.tx_tone_locked.load(std::sync::atomic::Ordering::Relaxed);
         self
     }
@@ -708,19 +699,9 @@ impl Soak {
                 !self.tone_break_at.is_empty(),
                 "{label}: the fault's skip made no TX tone break"
             ),
-            // dstack #363: the pump's late wakes and its fault never reach
-            // a TX the TX thread fills.
-            Tx::Pulled => assert!(
-                self.tone_break_at.is_empty() && self.tx_gap_at.is_empty(),
-                "{label}: the pulled TX broke at {:?} s (gaps at {:?} s)",
-                self.gap_seconds(&self.tone_break_at),
-                self.gap_seconds(&self.tx_gap_at)
-            ),
-            Tx::PulledTxStall => assert!(
-                !self.tone_break_at.is_empty(),
-                "{label}: the TX thread's stall made no TX tone break"
-            ),
             Tx::Pumped => {}
+            // dstack #363: the pulled path's own checks.
+            Tx::Pulled | Tx::PulledTxStall => self.check_tx_pull(&label),
         }
         let uncounted = unaccounted(&self.tone_break_at, &self.tx_counted_at, TONE_GRACE_NS);
         assert!(
@@ -891,34 +872,6 @@ fn gate_ten_minutes_of_a_steady_writer_app_slow() {
 fn gate_ten_minutes_of_the_rx_bridge_with_short_wakes_and_a_rebootstrap() {
     Soak::new(6.0, true, Wakes::Short, Writer::Ticks)
         .run(0x304_0007)
-        .check();
-}
-
-/// dstack #363: the TX side pulled by the TX thread, the pump's late wakes
-/// (the field's, all inside W) and one wake past W (8 blocks skipped):
-/// the TX tone never breaks and the TX bridge never resyncs; the RX side
-/// as on the pump's path.
-#[test]
-fn gate_ten_minutes_of_a_tx_pull_with_a_pump_rebootstrap_app_fast() {
-    Soak::with_tx(6.0, true, Wakes::Field, Writer::Ticks, Tx::Pulled)
-        .run(0x363_0001)
-        .check();
-}
-
-#[test]
-fn gate_ten_minutes_of_a_tx_pull_with_a_pump_rebootstrap_app_slow() {
-    Soak::with_tx(-6.0, true, Wakes::Field, Writer::Ticks, Tx::Pulled)
-        .run(0x363_0002)
-        .check();
-}
-
-/// dstack #363: the TX thread itself stalls once past W and the flows'
-/// lag bound (40 ms): the fill starts again, the TX bridge resyncs once,
-/// and its tone break is that resync's.
-#[test]
-fn gate_ten_minutes_of_a_tx_pull_with_a_tx_thread_stall() {
-    Soak::with_tx(6.0, false, Wakes::Field, Writer::Ticks, Tx::PulledTxStall)
-        .run(0x363_0003)
         .check();
 }
 
