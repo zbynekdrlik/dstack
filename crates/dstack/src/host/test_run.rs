@@ -14,7 +14,8 @@
 //! workspace's `.cargo/config.toml` sets it for every process cargo runs:
 //! `cargo test`, nextest, cargo-mutants, CI). In a test run a device on a
 //! loopback address is served there with a locally administered MAC
-//! ([`loopback_net`]), and a device on any other place is refused, unless
+//! ([`loopback_net`]), and a device on any other address the lookup finds
+//! is refused before anything is bound ([`TestRun::admit`]), unless
 //! [`LIVE_ENV`] is `1` (an explicitly live test on a real network). Without
 //! the variable (production, and every consumer: a git dependency's
 //! `.cargo` is never read) nothing changes.
@@ -60,23 +61,30 @@ impl TestRun {
         }
     }
 
-    /// What this run makes of `place`: `Ok(None)` the production lookup
-    /// (not a test run, or a live test on a real network), `Ok(Some(_))` a
-    /// loopback address served as it is (no interface is looked up), `Err`
-    /// a site place refused ([`SITE_REFUSED`]).
-    pub fn place(self, place: &Place) -> Result<Option<IfAddr>, String> {
-        if !self.loopback {
-            return Ok(None);
-        }
+    /// A loopback address served as it is in a test run (no interface is
+    /// looked up; the production lookup refuses loopback); `None` for every
+    /// other place, and outside a test run: the production lookup.
+    pub fn loopback(self, place: &Place) -> Option<IfAddr> {
         match place {
-            Place::Ip(ip) if ip.is_loopback() => Ok(Some(IfAddr {
+            Place::Ip(ip) if self.loopback && ip.is_loopback() => Some(IfAddr {
                 name: "lo".into(),
                 ip: *ip,
                 netmask: Ipv4Addr::new(255, 0, 0, 0),
-            })),
-            _ if self.live => Ok(None),
-            _ => Err(SITE_REFUSED.into()),
+            }),
+            _ => None,
         }
+    }
+
+    /// The production lookup's answer `found` as this run takes it: a test
+    /// run refuses a site address ([`SITE_REFUSED`]) unless it is live. A
+    /// place not there yet is not judged (the lookup waits or fails as in
+    /// production), so the guard refuses only an address the device would
+    /// really serve on.
+    pub fn admit(self, found: IfAddr) -> Result<IfAddr, String> {
+        if self.loopback && !self.live && !found.ip.is_loopback() {
+            return Err(SITE_REFUSED.into());
+        }
+        Ok(found)
     }
 }
 

@@ -8,6 +8,14 @@ fn run(loopback: bool, live: bool) -> TestRun {
     TestRun { loopback, live }
 }
 
+fn found(name: &str, ip: Ipv4Addr) -> IfAddr {
+    IfAddr {
+        name: name.into(),
+        ip,
+        netmask: Ipv4Addr::new(255, 255, 255, 0),
+    }
+}
+
 #[test]
 fn each_flag_is_set_by_its_own_variable_at_exactly_1() {
     let with = |pairs: &'static [(&'static str, &'static str)]| {
@@ -33,44 +41,51 @@ fn each_flag_is_set_by_its_own_variable_at_exactly_1() {
 }
 
 #[test]
-fn outside_a_test_run_every_place_takes_the_production_lookup() {
-    for live in [false, true] {
-        for place in [
-            Place::Ip(Ipv4Addr::LOCALHOST),
-            Place::Ip(SITE),
-            Place::Iface("eth0".into()),
-        ] {
-            assert_eq!(run(false, live).place(&place), Ok(None), "{place:?}");
-        }
-    }
-}
-
-#[test]
 fn a_test_run_serves_a_loopback_address_as_it_is() {
     for live in [false, true] {
         for ip in [Ipv4Addr::LOCALHOST, Ipv4Addr::new(127, 36, 6, 1)] {
             assert_eq!(
-                run(true, live).place(&Place::Ip(ip)),
-                Ok(Some(IfAddr {
+                run(true, live).loopback(&Place::Ip(ip)),
+                Some(IfAddr {
                     name: "lo".into(),
                     ip,
                     netmask: Ipv4Addr::new(255, 0, 0, 0),
-                }))
+                })
             );
         }
     }
 }
 
 #[test]
-fn a_test_run_refuses_a_site_place_unless_live() {
-    for place in [Place::Ip(SITE), Place::Iface("lo".into())] {
-        assert_eq!(
-            run(true, false).place(&place),
-            Err(SITE_REFUSED.to_string()),
-            "{place:?}"
-        );
-        assert_eq!(run(true, true).place(&place), Ok(None), "{place:?}");
+fn every_other_place_and_every_place_outside_a_test_run_takes_the_lookup() {
+    for live in [false, true] {
+        for place in [Place::Ip(SITE), Place::Iface("lo".into())] {
+            assert_eq!(run(true, live).loopback(&place), None, "{place:?}");
+        }
+        for place in [
+            Place::Ip(Ipv4Addr::LOCALHOST),
+            Place::Ip(SITE),
+            Place::Iface("eth0".into()),
+        ] {
+            assert_eq!(run(false, live).loopback(&place), None, "{place:?}");
+        }
     }
+}
+
+#[test]
+fn a_test_run_refuses_a_found_site_address_unless_live() {
+    let site = found("eth0", SITE);
+    assert_eq!(
+        run(true, false).admit(site.clone()),
+        Err(SITE_REFUSED.to_string())
+    );
+    assert_eq!(run(true, true).admit(site.clone()), Ok(site.clone()));
+    // Outside a test run, live or not, the lookup's answer stands.
+    assert_eq!(run(false, false).admit(site.clone()), Ok(site.clone()));
+    assert_eq!(run(false, true).admit(site.clone()), Ok(site));
+    // A loopback answer (never from the production lookup) is admitted.
+    let lo = found("lo", Ipv4Addr::LOCALHOST);
+    assert_eq!(run(true, false).admit(lo.clone()), Ok(lo));
     assert!(SITE_REFUSED.contains("DSTACK_LIVE_TEST=1"));
     assert!(SITE_REFUSED.contains("127.0.0.1"));
 }

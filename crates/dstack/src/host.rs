@@ -367,9 +367,14 @@ pub(crate) fn prepare_config_waiting(
     // dstack #366: a test run serves on loopback only (`test_run`).
     let run = test_run::TestRun::from_env();
     prepare_on(cfg, place, control, engine_tx, source, |place| {
-        match run.place(place)? {
+        match run.loopback(place) {
             Some(lo) => Ok(lo),
-            None => daemon::resolve_place(place, wait, interfaces, std::thread::sleep),
+            None => run.admit(daemon::resolve_place(
+                place,
+                wait,
+                interfaces,
+                std::thread::sleep,
+            )?),
         }
     })
 }
