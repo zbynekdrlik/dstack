@@ -115,7 +115,7 @@ kill -INT "$PEER"; wait "$PEER"   # exit 0 after the goodbyes
   here, never in `tone_gaps` (until #358 each one read as a 2-sample
   `kind=misplaced` tone break). Each logs one WARN (target
   `dstack::peer::tone`, `dstack-dev peer: its own reads jumped; the tone
-  check re-locks`, fields `frames`, the jump from the last block's end,
+  check re-locks`, fields `frames`, the jump from the end of the last block with a media start,
   absent when the block has no media start, and `own_skips`). A rise is
   the peer's (or the runner's) stall, not the app's: gate it with
   `device.engine.rebootstraps` below.

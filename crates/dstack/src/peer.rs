@@ -158,7 +158,7 @@ fn tone_break(ch: usize, samples: u64, rate: u32, gaps: u64, kind: GapKind) {
 }
 
 /// One WARN for the peer's own jump (dstack #358): the block after it
-/// starts `frames` off the last started one's end (a re-bootstrap skips
+/// starts `frames` off the end of the last block with a media start (a re-bootstrap skips
 /// forward; absent when the block has no media start), the tone checks
 /// re-lock, `own_skips` so far. Logged on the pump thread, like
 /// [`tone_break`], against `Process`'s no-log rule: at most once a jump,
@@ -225,7 +225,9 @@ impl Process for Tones {
                 check.relock();
             }
             if let Some(next) = self.next {
-                let skips = self.shared.own_skips.fetch_add(1, Ordering::Relaxed) + 1;
+                // Release: the pump counted the re-bootstrap before this block,
+                // so a status that sees this count sees that one (#332).
+                let skips = self.shared.own_skips.fetch_add(1, Ordering::Release) + 1;
                 let frames = block.start().map(|s| i128::from(s) - i128::from(next));
                 own_skip(frames, skips);
             }
@@ -348,7 +350,7 @@ pub fn status_json(a: &PeerArgs, shared: &Shared, device: &str) -> String {
 fn status_with(a: &PeerArgs, shared: &Shared, device: impl FnOnce() -> String) -> String {
     use serde_json::{Value, json};
     let blocks = shared.blocks.load(Ordering::Relaxed);
-    let own_skips = shared.own_skips.load(Ordering::Relaxed);
+    let own_skips = shared.own_skips.load(Ordering::Acquire);
     let finite = |x: f64| x.is_finite().then_some(x);
     let tx: Vec<Value> = a
         .tones

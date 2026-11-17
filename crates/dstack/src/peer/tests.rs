@@ -371,34 +371,38 @@ fn a_start_shift_without_a_discontinuity_is_no_own_skip() {
     assert_eq!(skips_and_gaps(&p), (0.into(), 1.into()));
 }
 
-/// dstack #358: a discontinuity before a block with no media start (the
-/// pump pacing itself while its clock is not ready) re-locks and counts
-/// too; its line has no `frames` (no start to measure from), and the next
-/// started block measures nothing either.
+/// dstack #358: the pump's sequence when its clock goes away after a
+/// re-bootstrap: the discontinuity is still due, the next block is a free
+/// one (no media start, silent inputs, `Pump::free`), and the media's
+/// return bootstraps with another discontinuity. Each counts: the free
+/// block's without `frames` (no start), the restart's with the jump from
+/// the end of the last block WITH a start (free blocks move nothing). The
+/// free block's silence is a gap (the received audio was not read); on the
+/// peer's own test system clock the pump never paces itself after its
+/// start.
 #[test]
-fn a_jump_before_a_block_with_no_start_counts_without_frames() {
+fn a_jump_into_free_pacing_counts_without_frames_then_again_at_the_restart() {
     crate::test_log::undecided();
-    let frames = 128usize;
+    let frames = 128u64;
     let mut p = Tones::new(vec![], 1, 96_000);
     let text = crate::test_log::capture_warnings(|| {
         hear(&mut p, 0, 40, (0, 0, 0));
-        let input: Vec<f64> = (0..frames as u64)
-            .map(|i| tone::tone_at(90_000 + i, 440, 96_000))
-            .collect();
+        let silent = vec![0.0; frames as usize];
         let mut out = vec![0.0; 0];
         p.discontinuity();
-        p.process(&mut Block::new(frames, &input, &mut out));
-        // The free block's input goes on into the next started one.
-        let input: Vec<f64> = (0..frames as u64)
-            .map(|i| tone::tone_at(90_128 + i, 440, 96_000))
-            .collect();
-        p.process(&mut Block::new(frames, &input, &mut out).at(40 * 128));
+        for _ in 0..10 {
+            p.process(&mut Block::new(frames as usize, &silent, &mut out));
+        }
+        hear(&mut p, 100 * frames, 40, (0, 0, 0));
     });
-    assert_eq!(skips_and_gaps(&p), (1.into(), 0.into()), "{text}");
-    let line = text
+    assert_eq!(skips_and_gaps(&p), (2.into(), 1.into()), "{text}");
+    let lines: Vec<&str> = text
         .lines()
-        .find(|l| l.contains("its own reads jumped"))
-        .unwrap_or_else(|| panic!("{text}"));
-    assert!(!line.contains("frames="), "{line}");
-    assert!(line.contains("own_skips=1"), "{line}");
+        .filter(|l| l.contains("its own reads jumped"))
+        .collect();
+    assert_eq!(lines.len(), 2, "{text}");
+    assert!(!lines[0].contains("frames="), "{}", lines[0]);
+    assert!(lines[0].contains("own_skips=1"), "{}", lines[0]);
+    // From block 40's start (the last started one's end) to block 100.
+    assert!(lines[1].contains("frames=7680 own_skips=2"), "{}", lines[1]);
 }
