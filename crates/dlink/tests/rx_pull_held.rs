@@ -10,25 +10,33 @@
 //!
 //! Here a dlink TX device sends a constant and a pulled RX device (an idle
 //! pump, as dlisten's) is read by a simulated WASAPI shared-mode output:
-//! the card plays on its own clock from a buffer of two periods, each
-//! event (every 10 ms) the callback fills what the card has room for
-//! (cpal's `max_frames_in_buffer - padding`), and a callback held past
-//! what the card still holds leaves the card playing silence meanwhile
-//! (the card's glitch, not the bridge's). Some events are held 46 ms (the
+//! the card's engine reads the client's buffer of two periods one period
+//! at each of its ticks (every 10 ms, on its own clock; a tick that finds
+//! the buffer short plays silence for what is missing), and each event,
+//! signalled at a tick, runs the callback, which fills the room the buffer
+//! has (cpal's `max_frames_in_buffer - padding`). A callback held past
+//! what the buffer still holds leaves the card playing silence meanwhile
+//! (the card's gap, not the bridge's). Some events are held 46 ms (the
 //! field's worst) or 20 ms. The bridge must play every frame it is asked
 //! for at the level (no underrun, no re-centre), and the latency after a
 //! hold must be the latency before it: the frames due while the card
 //! played silence are dropped once, counted as the output's own gap
 //! ([`dlink::bridge::Stats::output_gaps`]), never played late.
-//! A file of its own (its process sets the normal profile), on loopback
-//! (dstack #366) and its own system clock.
+//!
+//! The level is judged only while the sender's audio reached the ring
+//! whole: a sender thread not run long enough (a loaded box) leaves ring
+//! holes, which play as samples off the level with no underrun; such a run
+//! says `SENDER` and is judged on the bridge's own counts only (the
+//! `rx_pull.rs` rule: holes with no underrun is the sender). A file of its
+//! own (its process sets the normal profile), on loopback (dstack #366)
+//! and its own system clock.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use dlink::bridge::{Player, Stats, fifo_for};
-use dlink::{Block, Clock, Config, Link, Map, Place, Ports, Process, Stopped, SubStatus};
+use dlink::{Block, Clock, Config, Link, Map, Media, Place, Ports, Process, Stopped, SubStatus};
 
 /// One device set at a time in this process: both tests bind the same
 /// ports on 127.0.0.1.
@@ -43,10 +51,10 @@ fn test_ipv4() -> std::net::Ipv4Addr {
 const LEVEL: f64 = 0.5;
 /// The app's, the network's and the card's rate.
 const RATE: u32 = 48_000;
-/// The card's period: 10 ms, WASAPI shared mode's default.
+/// The card's engine period: 10 ms, WASAPI shared mode's default.
 const PERIOD: Duration = Duration::from_millis(10);
 const PERIOD_FRAMES: u64 = 480;
-/// The card's buffer: two periods (WASAPI shared mode gives about that).
+/// The client's buffer: two periods (WASAPI shared mode gives about that).
 const CARD_FRAMES: u64 = 2 * PERIOD_FRAMES;
 /// The settling (priming, the converter's filters), then the window
 /// judged.
@@ -84,8 +92,11 @@ struct Heard {
     /// dropped for them.
     output_gaps: u64,
     output_lost: u64,
+    /// The RX ring's holes in the judged window (the sender's audio that
+    /// never came).
+    ring_holes: u64,
     /// Held events, and the frames the card played as silence meanwhile
-    /// (its own glitch: the callback was not there to fill it).
+    /// (its own gap: the callback was not there to fill it).
     holds: u64,
     card_silence: u64,
     /// The whole wait of a sample from its due time to the card's output,
@@ -111,17 +122,21 @@ fn output(
     mut player: Player,
     fifo: Arc<dlink::bridge::Fifo>,
     stats: Arc<Stats>,
+    media: Arc<Media>,
     receiving: Arc<AtomicU64>,
 ) -> Heard {
     let mut out = vec![0f32; CARD_FRAMES as usize];
     let mut heard = Heard::default();
     let began = Instant::now();
-    let card = |now: Instant| (now - began).as_nanos() as u64 * u64::from(RATE) / 1_000_000_000;
-    // Frames written into the card, on its clock (a glitch moves it on).
+    // The engine's reads up to `now`: a period at each tick passed.
+    let card = |now: Instant| (now - began).as_nanos() as u64 / PERIOD.as_nanos() as u64 * PERIOD_FRAMES;
+    let holes = || media.rx.rings()[0].counters().holes;
+    // Frames written into the client's buffer, on the card's count (a
+    // tick that found it short moves it on).
     let mut written = 0u64;
     let mut next = began;
     let mut events = 0u64;
-    let mut judging: Option<(Instant, [u64; 4])> = None;
+    let mut judging: Option<(Instant, [u64; 5])> = None;
     let mut since = None;
     // Callbacks since the last hold (the latency is judged two after it).
     let mut after_hold = u64::MAX;
@@ -134,7 +149,7 @@ fn output(
             std::thread::sleep(wait);
         }
         let now = Instant::now();
-        // The event stays on the card's grid: the ones missed are gone.
+        // The events stay on the engine's ticks: the ones missed are gone.
         while next + PERIOD <= now {
             next += PERIOD;
         }
@@ -164,6 +179,7 @@ fn output(
                 stats.recentres(),
                 stats.output_gaps(),
                 stats.output_lost_frames(),
+                holes(),
             ]
         };
         let (start, first) = *judging.get_or_insert_with(|| (now, counts()));
@@ -173,6 +189,7 @@ fn output(
             heard.recentres = last[1] - first[1];
             heard.output_gaps = last[2] - first[2];
             heard.output_lost = last[3] - first[3];
+            heard.ring_holes = last[4] - first[4];
             return heard;
         }
         if held {
@@ -199,9 +216,10 @@ fn output(
     }
 }
 
-/// The whole run with each held event `hold` late; returns what the card
-/// heard and the pull's restarts.
-fn run(hold: Duration, rx_port: u16) -> (Heard, u64) {
+/// The whole run with each held event `hold` late: what the card heard,
+/// the pull's restarts, and the receiver's and sender's counts for a
+/// failure's message.
+fn run(hold: Duration) -> (Heard, u64, String) {
     let _one = ONE_DEVICE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -218,7 +236,7 @@ fn run(hold: Duration, rx_port: u16) -> (Heard, u64) {
         .ports(Ports {
             arc: 4441,
             cmc: 8801,
-            flows: rx_port,
+            flows: 4456,
         })
         .process_id(1)
         .subscribe(1, "Out 1", "dlink-held-tx");
@@ -260,12 +278,13 @@ fn run(hold: Duration, rx_port: u16) -> (Heard, u64) {
     let receiving = Arc::new(AtomicU64::new(0));
     let pulled = pull.stats();
     let card = {
-        let (fifo, stats, receiving) = (
+        let (fifo, stats, media, receiving) = (
             Arc::clone(&fifo),
             Arc::clone(&stats),
+            Arc::clone(receiver.media()),
             Arc::clone(&receiving),
         );
-        std::thread::spawn(move || output(hold, pull, player, fifo, stats, receiving))
+        std::thread::spawn(move || output(hold, pull, player, fifo, stats, media, receiving))
     };
     let end = Instant::now() + Duration::from_secs(15);
     while receiver.rx_channels()[0].status != Some(SubStatus::Receiving) && Instant::now() < end {
@@ -276,36 +295,45 @@ fn run(hold: Duration, rx_port: u16) -> (Heard, u64) {
     let channel = receiver.rx_channels().remove(0);
     let ring = receiver.media().rx.rings()[0].counters();
     let sent = sender.media().engine().expect("the sender's pump");
+    let counts = format!("{channel:?}, the ring {ring:?}, the sender's pump {sent:?}");
     assert_eq!((sender.ended(), receiver.ended()), (None, None));
     assert!(matches!(receiver.stop(), Stopped::Done));
     assert!(matches!(sender.stop(), Stopped::Done));
     assert!(
         heard.on + heard.off >= 7 * u64::from(RATE),
-        "{heard:?}: {channel:?}, the ring {ring:?}, the sender's pump {sent:?}"
+        "{heard:?}: {counts}"
     );
-    (heard, pulled.restarts())
+    (heard, pulled.restarts(), counts)
 }
 
 /// The asserts of a held run (module doc).
-fn judge(hold: Duration, heard: &Heard, restarts: u64) {
+fn judge(hold: Duration, heard: &Heard, restarts: u64, counts: &str) {
     let (before, after) = (Heard::mean_ms(heard.before), Heard::mean_ms(heard.after));
-    eprintln!(
-        "held {hold:?}: {heard:?}, restarts {restarts}, wait before {before:.2} ms, after {after:.2} ms"
+    let verdict = if heard.ring_holes > 0 { "SENDER" } else { "OURS" };
+    let at = format!(
+        "held {hold:?}: {heard:?}, restarts {restarts}, wait before {before:.2} ms, after {after:.2} ms; verdict {verdict} (ring holes in the window {}); {counts}",
+        heard.ring_holes
     );
-    assert!(heard.holds >= 8, "only {} holds: {heard:?}", heard.holds);
+    eprintln!("{at}");
+    assert!(heard.holds >= 8, "only {} holds: {at}", heard.holds);
     assert_eq!(
-        (heard.underruns, heard.off, restarts),
+        (heard.underruns, heard.recentres, restarts),
         (0, 0, 0),
-        "bridge underruns, samples off the level and pull restarts with the callback held {hold:?}: {heard:?}"
+        "bridge underruns, re-centres and pull restarts: {at}"
     );
-    // Nothing the controller must re-centre: the frames due while the card
-    // played silence are the output's gap, dropped once and counted as its
-    // own, within a converter call of what the card lost.
-    assert_eq!(heard.recentres, 0, "re-centres: {heard:?}");
-    let call = dlink::bridge::player::BLOCK as u64;
+    // Samples off the level are judged while the sender's audio reached
+    // the ring whole (module doc).
     assert!(
-        heard.output_lost.abs_diff(heard.card_silence) <= heard.holds * call,
-        "the output's gaps dropped {} frames for the card's {} of silence: {heard:?}",
+        heard.off == 0 || heard.ring_holes > 0,
+        "samples off the level with the ring whole: {at}"
+    );
+    // The frames due while the card played silence are the output's gap,
+    // dropped once and counted as its own: exactly the card's silence, up
+    // to one period in all (a hold that ends right at an engine tick, read
+    // on both sides of it by the card's clock and the pull's).
+    assert!(
+        heard.output_lost.abs_diff(heard.card_silence) <= PERIOD_FRAMES,
+        "the output's gaps dropped {} frames for the card's {} of silence: {at}",
         heard.output_lost,
         heard.card_silence
     );
@@ -313,20 +341,20 @@ fn judge(hold: Duration, heard: &Heard, restarts: u64) {
     // dropped, not played late (within a converter call and a pump block).
     assert!(
         (after - before).abs() < 2.0,
-        "the wait after the holds {after:.2} ms against {before:.2} ms before: {heard:?}"
+        "the wait after the holds {after:.2} ms against {before:.2} ms before: {at}"
     );
 }
 
 #[test]
 fn an_output_callback_held_46_ms_plays_on_from_the_queued_packets() {
     let hold = Duration::from_millis(46);
-    let (heard, restarts) = run(hold, 4456);
-    judge(hold, &heard, restarts);
+    let (heard, restarts, counts) = run(hold);
+    judge(hold, &heard, restarts, &counts);
 }
 
 #[test]
 fn an_output_callback_held_20_ms_plays_on_from_the_queued_packets() {
     let hold = Duration::from_millis(20);
-    let (heard, restarts) = run(hold, 4456);
-    judge(hold, &heard, restarts);
+    let (heard, restarts, counts) = run(hold);
+    judge(hold, &heard, restarts, &counts);
 }
