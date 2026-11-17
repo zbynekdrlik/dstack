@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **Tests (#349): the channel-change notification's walker rule is the hardware's now, not inferno's.** Captured on the info group (224.0.0.231:8702) after dstack's own ARC client renamed an RX channel and back (restored at once, logged on the ticket): an UltimoX2 (channel 1 of 2) and a Yamaha card (Audinate DCM, channels 7 and 8 of 128). The hardware sends a `u16` mask length n, then n mask bytes, nothing after (no padding to 4: 35 and 36 bytes), bit `ch % 8` of byte `ch / 8` for RX channel `ch` from 0, the shortest mask that holds the highest channel named (1 byte for channel 7 of 128), one notification per rename (the rename back too, none empty). The opcode's second byte is the device's own (0x38 on the UltimoX2, 0x24 on the Yamaha card; ours 0x2a). The strict walker (`tests/conformance/walk.rs`) now also refuses a mask whose last byte names no channel and matches the opcode by its bytes 2-3; the captures are `channel_changes` in `tests/fixtures/heartbeat_hardware.json` (device ids zeros), and our notification for the channels the hardware named equals the hardware's body and length byte for byte. Our writer already sent these bytes: no fix. Test code and docs only; **no latency change**, no API change.
+
 ## 0.6.162
 
 - **Internal (#360): `media/tx.rs` split, no change.** A pure move: `Schedule` and its time helpers into `media/tx/schedule.rs`, the TX thread (`Transmitter`, `spawn` and its loops) into `media/tx/thread.rs`, the control side's `TxTable`/`TxFlow` into `media/tx/table.rs`, the OS thread calls (priority, pinning) into `media/tx/priority.rs`. Every public name keeps its `dstack::media::tx::` path (re-exported); no behaviour, API or latency change.
