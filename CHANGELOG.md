@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.164
 
 - **Tests (#366): dstack's own tests no longer multicast onto a site's network.** dev1's whole-device tests ran their devices on the box's routed address (its LAN leg), so each test binary announced mDNS there (measured: `system_clock` 780 datagrams in its 22 s, about 35/s; `embed` 73 in 1.3 s; `heartbeat_walk` 61 in 2.6 s) and sent its info and heartbeat multicasts with it; dasio found dev1 among the top mDNS senders on the FOH PC's Dante leg in the minutes its NIC stalled sends (dasio#127). Now:
   - **A test run** (new `host::test_run`): a process with `DSTACK_TEST_LOOPBACK=1` serves a device on a loopback address (`127.0.0.1`), with a locally administered MAC holding the address (`02:00` and its four bytes), no gateway and no link speed, and refuses any other address the lookup finds, before anything is bound ("a test run (DSTACK_TEST_LOOPBACK=1) serves a device on a loopback address only ..."), unless `DSTACK_LIVE_TEST=1` (an explicitly live test on a real network). The workspace's new `.cargo/config.toml` sets the variable for every process cargo runs here (`cargo test`, `cargo run`, nextest, cargo-mutants, CI). Loopback multicast never leaves the box; it was checked by hand on dev1 (Linux) and on a Windows 11 PC, and CI's ubuntu-24.04 and windows-2025 test jobs run the moved tests.
