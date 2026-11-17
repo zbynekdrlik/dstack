@@ -414,6 +414,7 @@ dependencies = [
  "dlink",
  "dstack",
  "dstack-audio-io",
+ "dstack-resample",
  "serde",
  "tempfile",
  "tracing",

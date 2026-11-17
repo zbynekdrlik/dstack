@@ -14,6 +14,8 @@ fn spec(to_asio: usize, from_asio: usize) -> Spec {
         to_asio,
         from_asio,
         app_buffer_ns: None,
+        to_asio_app_buffer_ns: None,
+        from_asio_app_buffer_ns: None,
     }
 }
 
@@ -391,5 +393,6 @@ fn a_skipped_block_resyncs_the_player_and_its_pieces_never_do() {
     assert_eq!(b.from_asio_stats().resyncs(), 1, "the skip");
 }
 
+mod directions;
 mod pull;
 mod pump_skip;

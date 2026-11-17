@@ -201,6 +201,8 @@ fn a_stalled_pump_leaves_the_to_asio_bridge_whole() {
         to_asio: 1,
         from_asio: 0,
         app_buffer_ns: None,
+        to_asio_app_buffer_ns: None,
+        from_asio_app_buffer_ns: None,
     })
     .expect("the bridge");
     let buffer = bridge.app_buffer(&opened);

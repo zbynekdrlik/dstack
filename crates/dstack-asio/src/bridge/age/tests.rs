@@ -79,6 +79,8 @@ fn spec() -> Spec {
         to_asio: 1,
         from_asio: 1,
         app_buffer_ns: None,
+        to_asio_app_buffer_ns: None,
+        from_asio_app_buffer_ns: None,
     }
 }
 
