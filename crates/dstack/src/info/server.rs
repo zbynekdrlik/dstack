@@ -266,6 +266,12 @@ async fn send_multicast(sock: &UdpSocket, packet: &[u8], to: SocketAddrV4) -> io
     sock.send_to(packet, to).await
 }
 
+/// The ns since `base`, saturated: the members' lease clock (since the
+/// manager's start).
+pub(crate) fn elapsed_ns(base: Instant) -> u64 {
+    u64::try_from(base.elapsed().as_nanos()).unwrap_or(u64::MAX)
+}
+
 /// A manager's state, kept across a reopen of its socket: the members, the
 /// bound, the unanswered requests, the send watch and the timers.
 struct Served {
@@ -293,10 +299,6 @@ impl Served {
             every,
             check,
         }
-    }
-
-    fn now_ns(&self) -> u64 {
-        u64::try_from(self.base.elapsed().as_nanos()).unwrap_or(u64::MAX)
     }
 
     /// The board and the product info. They never ask a reopen: a new
@@ -341,7 +343,7 @@ impl Served {
                     }
                     if let Some(share) = share {
                         let relay = share::Msg::Request(buf[..n].to_vec()).encode();
-                        for member in self.members.live(self.now_ns()) {
+                        for member in self.members.live(elapsed_ns(self.base)) {
                             if let Err(e) = share.send_to(&relay, member).await {
                                 debug!(error = %e, "an info request not relayed to a member");
                             }
@@ -351,7 +353,7 @@ impl Served {
                 }
                 got = recv_share(share, &mut sbuf) => {
                     let (n, from) = got?;
-                    let now_ns = self.now_ns();
+                    let now_ns = elapsed_ns(self.base);
                     match share::Msg::decode(&sbuf[..n]) {
                         Some(share::Msg::Register(id)) => {
                             if self.members.register(from, id, now_ns) {
@@ -677,7 +679,7 @@ async fn bind_share(port: u16) -> io::Result<Option<UdpSocket>> {
 }
 
 /// Names `sock`'s multicast interface by the device's address.
-fn name_interface(sock: &UdpSocket, ip: Ipv4Addr) {
+pub(crate) fn name_interface(sock: &UdpSocket, ip: Ipv4Addr) {
     if let Err(e) = socket2::SockRef::from(sock).set_multicast_if_v4(&ip) {
         warn!(error = %e, "the info port's multicast interface not named");
     }

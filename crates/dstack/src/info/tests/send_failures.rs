@@ -99,6 +99,28 @@ async fn sends_failed(requests: &Requests, errors: u64) -> (u64, u64) {
     }
 }
 
+/// The info socket's multicast interface is the device's address (named
+/// at the start and after every reopen).
+#[tokio::test]
+async fn the_info_socket_s_multicast_interface_is_the_device_s_address() {
+    let ip = Ipv4Addr::LOCALHOST;
+    let sock = UdpSocket::bind((ip, 0)).await.unwrap();
+    let before = socket2::SockRef::from(&sock).multicast_if_v4().unwrap();
+    assert_eq!(before, Ipv4Addr::UNSPECIFIED, "none named by the OS");
+    server::name_interface(&sock, ip);
+    assert_eq!(socket2::SockRef::from(&sock).multicast_if_v4().unwrap(), ip);
+}
+
+/// The manager's lease clock (its members expire by it) runs in ns.
+#[test]
+fn the_lease_clock_counts_the_ns_since_the_manager_s_start() {
+    let base = Instant::now();
+    std::thread::sleep(Duration::from_millis(2));
+    let ns = server::elapsed_ns(base);
+    assert!(ns >= 2_000_000, "{ns} ns");
+    assert!(ns < BOUND.as_nanos() as u64, "{ns} ns");
+}
+
 fn ctx(to: Multicast, requests: &Arc<Requests>) -> server::Ctx {
     server::Ctx {
         to,
