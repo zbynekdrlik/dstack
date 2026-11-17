@@ -80,6 +80,16 @@ pub fn driver(provider: Option<&str>, version: Option<&str>) -> Driver {
     }
 }
 
+/// The verdict on an adapter's driver from its `ProviderName`,
+/// `DriverVersion` and `DriverDesc` (dstack #383).
+pub fn driver_of(
+    provider: Option<&str>,
+    version: Option<&str>,
+    _description: Option<&str>,
+) -> Driver {
+    driver(provider, version)
+}
+
 #[cfg(windows)]
 mod windows;
 #[cfg(all(windows, test))]

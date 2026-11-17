@@ -57,6 +57,41 @@ fn the_driver_verdict_names_only_measured_realtek_versions() {
     assert_eq!(driver(None, Some("10.79.20.1003")), Driver::Other);
 }
 
+/// dstack #383: the bad and good measurements were on the 2.5 GbE family
+/// (the FOH PC's RTL8125, dasio#1); the same version on the 1 GbE family
+/// measured clean (dsg, 17.11.2026), so a version on another family is
+/// only unverified, and an adapter whose description was not read too.
+#[test]
+fn a_measured_version_is_judged_only_on_its_measured_family() {
+    let rt = Some("Realtek");
+    let gaming = Some("Realtek Gaming 2.5GbE Family Controller");
+    let gbe = Some("Realtek PCIe GbE Family Controller");
+    assert_eq!(
+        driver_of(rt, Some("10.79.20.1003"), gaming),
+        Driver::KnownBad
+    );
+    assert_eq!(
+        driver_of(rt, Some("10.39.212.2020"), gaming),
+        Driver::KnownGood
+    );
+    assert_eq!(
+        driver_of(rt, Some("10.79.20.1003"), gbe),
+        Driver::Unverified
+    );
+    assert_eq!(
+        driver_of(rt, Some("10.39.212.2020"), gbe),
+        Driver::Unverified
+    );
+    assert_eq!(
+        driver_of(rt, Some("10.79.20.1003"), None),
+        Driver::Unverified
+    );
+    assert_eq!(
+        driver_of(Some("Intel"), Some("10.79.20.1003"), gaming),
+        Driver::Other
+    );
+}
+
 /// The runner's adapter: its provider and driver version are read from
 /// the class key (a Windows runner has no Realtek NIC).
 #[cfg(windows)]
