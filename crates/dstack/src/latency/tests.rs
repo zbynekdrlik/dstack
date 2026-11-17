@@ -222,17 +222,11 @@ fn two_devices_on_one_address_are_heard_apart_by_their_device_id() {
     assert_eq!(Heard::default().result(), []);
 }
 
-/// The box's routed IPv4 (connecting a UDP socket picks the route and
-/// sends nothing).
-fn routed_ipv4() -> Ipv4Addr {
-    let probe = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).expect("a UDP socket");
-    probe
-        .connect((Ipv4Addr::new(192, 0, 2, 1), 9))
-        .expect("a default route on this box");
-    match probe.local_addr().expect("the routed address") {
-        SocketAddr::V4(a) if !a.ip().is_loopback() && !a.ip().is_unspecified() => *a.ip(),
-        other => panic!("no routed IPv4 address on this box: {other}"),
-    }
+/// The listener's address: loopback, so the test's made-up heartbeats never
+/// leave the box (dstack #366: they went out on dev1's LAN leg with a fake
+/// device id and late records).
+fn test_ipv4() -> Ipv4Addr {
+    Ipv4Addr::LOCALHOST
 }
 
 /// A device id no other sender on the box uses (dcontroller's E2E runs
@@ -300,7 +294,7 @@ fn closes(rx: &std::sync::mpsc::Receiver<(Ipv4Addr, Beat)>) {
 
 #[test]
 fn the_listener_hands_on_every_heartbeat_with_its_sender_until_stopped() {
-    let ip = routed_ipv4();
+    let ip = test_ipv4();
     let id = unique_id();
     let (listener, rx) = Listener::start(ip).expect("the heartbeat group joined");
     let tx = group_sender(ip);
@@ -342,7 +336,7 @@ fn only_a_read_that_timed_out_is_a_timeout() {
 
 #[test]
 fn the_listener_stops_when_its_receiver_is_gone() {
-    let ip = routed_ipv4();
+    let ip = test_ipv4();
     let (listener, rx) = Listener::start(ip).expect("the heartbeat group joined");
     drop(rx);
     // The next heartbeat finds no receiver: the thread ends on its own.

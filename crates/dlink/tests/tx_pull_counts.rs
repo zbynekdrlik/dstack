@@ -9,11 +9,10 @@
 //! hole, its bridge no underrun, and the TX thread's fill (status
 //! `tx_pull`) no restart, no write after send and no fault in the judged
 //! window, while it filled every block (the pump's own counts no longer
-//! see the pulled channels). Its own file, on the box's routed address
+//! see the pulled channels). Its own file, on loopback (dstack #366)
 //! and its own system clock; on a loaded dev1 run it real-time (`chrt -f
 //! 10`, `.claude/rules/tests.md`).
 
-use std::net::{SocketAddr, UdpSocket};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -21,17 +20,14 @@ use std::time::{Duration, Instant};
 use dlink::bridge::{Player, Stats, TxPull, fifo_for};
 use dlink::{Block, Clock, Config, Link, Map, Place, Ports, Process, Stopped, SubStatus};
 
-/// One device pair at a time: each binds the Dante ports on the routed
-/// address.
+/// One device pair at a time: each binds the Dante ports on loopback.
 static ONE_DEVICE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-fn routed_ipv4() -> std::net::Ipv4Addr {
-    let probe = UdpSocket::bind("0.0.0.0:0").unwrap();
-    probe.connect("192.0.2.1:9").unwrap();
-    match probe.local_addr().expect("the routed address") {
-        SocketAddr::V4(a) => *a.ip(),
-        other => panic!("no routed IPv4 address on this box: {other}"),
-    }
+/// The test device's address: loopback, so none of its mDNS, info or
+/// heartbeat multicasts leaves the box (dstack #366: this workspace is a
+/// test run, which refuses a device on a site address).
+fn test_ipv4() -> std::net::Ipv4Addr {
+    std::net::Ipv4Addr::LOCALHOST
 }
 
 const LEVEL: f64 = 0.5;
@@ -97,7 +93,7 @@ fn stalled_pump_at(network: u32, name: &str) {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = tempfile::tempdir().unwrap();
-    let place = Place::Ip(routed_ipv4());
+    let place = Place::Ip(test_ipv4());
     let tx_name = format!("{name}-tx");
     let tx_config = Config::new(tx_name.as_str(), dir.path().join("tx.toml"))
         .tx(["Out 1"])

@@ -490,17 +490,12 @@ fn the_meter_joins_its_group_again_after_an_interface_change() {
     assert_eq!(meter.rejoins(), 1);
 }
 
-/// The real socket on the routed address: datagrams to the mDNS group from
-/// our own address are counted under it.
+/// The real socket on loopback: datagrams to the mDNS group from our own
+/// address are counted under it. Loopback, so the test's mDNS never leaves
+/// the box (dstack #366: it sent up to 500 datagrams on dev1's LAN leg).
 #[test]
 fn the_meter_s_socket_counts_the_mdns_group_on_its_address() {
-    let ip = match UdpSocket::bind("0.0.0.0:0")
-        .and_then(|s| s.connect("192.0.2.1:9").map(|()| s))
-        .and_then(|s| s.local_addr())
-    {
-        Ok(SocketAddr::V4(a)) => *a.ip(),
-        other => panic!("no routed IPv4 address: {other:?}"),
-    };
+    let ip = Ipv4Addr::LOCALHOST;
     let meter = Meter::open(ip, 300_000_000).unwrap();
     let from = UdpSocket::bind((ip, 0)).unwrap();
     socket2::SockRef::from(&from)

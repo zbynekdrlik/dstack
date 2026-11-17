@@ -1,6 +1,6 @@
 {
-  "what": "Dante heartbeats (224.0.0.233:8708) of four hardware devices and one old dstack device, and an UltimoX2's network info and clock stats replies (224.0.0.231:8702), as each device sent them: the format dstack #349's strict walker (tests/conformance/walk.rs) is written from.",
-  "captured": "2026-11-16 ~20:45 CET, dstack #349, a python listener on dev1's Dante leg. The device ids (header bytes 8-15) are zeros; in the info replies the MAC and its EUI-64 are 02:00:00:00:00:01, the grandmaster's 02:00:00:00:00:02, and the addresses 192.0.2.x. Device names, addresses and the site are not recorded.",
+  "what": "Dante heartbeats (224.0.0.233:8708) of four hardware devices and one old dstack device, an UltimoX2's network info and clock stats replies, and the channel-change notifications (0x0102) of an UltimoX2 and a Yamaha card (224.0.0.231:8702), as each device sent them: the format dstack #349's strict walker (tests/conformance/walk.rs) is written from.",
+  "captured": "2026-11-16 ~20:45 CET, dstack #349, a python listener on dev1's Dante leg. The device ids (header bytes 8-15) are zeros; in the info replies the MAC and its EUI-64 are 02:00:00:00:00:01, the grandmaster's 02:00:00:00:00:02, and the addresses 192.0.2.x. Device names, addresses and the site are not recorded. The channel changes: 2026-11-17 04:58-05:00 CET, dstack #349, the same listener, each notification sent by the device after dstack's own ARC client renamed one of its RX channels (restored right after; logged on the ticket); device ids zeros the same way.",
   "heartbeats": {
     "ultimo_0tx_2rx": "fffe00b867ee00000000000000000000417564696e6174650008000110000000001c80010004001060690000ffffd08e0000000000000000000000000024800000040004606900000010000000010010000001e6000c7e950000000000000000001c800200040010606900000000000000020000001800000e0e00000020800300040014606900000002000000180000000177000000002700000000001c8004000400106069000000020000001400000000000000000000",
     "ultimo_2tx_2rx": "fffe00b8758300000000000000000000417564696e6174650008000110000000001c8001000400106cc50000ffff76c500000000000000000000000000248000000400046cc5000000100000000100100016bd06000c862d0000000000000000001c8002000400106cc50000000200000002000000180000a1840e0e00208003000400146cc500000002000000180000000177000000002600000000001c8004000400106cc5000000020000001400000000000000000000",
@@ -21,6 +21,12 @@
     "brooklyn_card": "0x8003/280 0x8004/276 (64 flow slots), no peaks, no clock record",
     "yamaha_card": "0x8000/52 0x8001/16 only",
     "dstack_0_6_150_2tx_0rx": "a dstack device before v0.6.155 (dstack #345): its peaks record says 26/14 for 2 peaks, so a walk by the lengths lands at byte 74 inside the padding and never reaches 0x8003",
-    "info_replies": "header as above with start code ffff and opcode 07 xx 00 11 (network info, 64-byte body for one interface) and 07 xx 00 20 (clock stats, 188 bytes)"
+    "info_replies": "header as above with start code ffff and opcode 07 xx 00 11 (network info, 64-byte body for one interface) and 07 xx 00 20 (clock stats, 188 bytes)",
+    "channel_changes": "header as above with start code ffff and opcode 07 xx 01 02 (xx per device: 38 the UltimoX2, 24 the Yamaha card), then a u16 mask length n and n mask bytes, nothing after (no padding: 35 and 36 bytes); bit ch % 8 of byte ch / 8 for RX channel ch from 0; the shortest mask that holds the highest channel named (1 byte for channel 7 of the Yamaha card's 128). ultimo_rx1: channel 1 of 2 renamed; yamaha_rx7, yamaha_rx8: channels 7 and 8 of 128."
+  },
+  "channel_changes": {
+    "ultimo_rx1": "ffff0023e3b800000000000000000000417564696e6174650738010200000000000102",
+    "yamaha_rx7": "ffff0023118200000000000000000000417564696e6174650724010200000000000180",
+    "yamaha_rx8": "ffff0024118400000000000000000000417564696e617465072401020000000000020001"
   }
 }

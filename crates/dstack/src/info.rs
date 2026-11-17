@@ -50,8 +50,10 @@
 //!
 //! **The channel-change notification** (`07 2a 01 02 00 00 00 00`, to the
 //! info group, unasked): a 16-bit length, then a bitmask of RX channels
-//! (bit `n mod 8` of byte `n / 8` for channel `n` from 0, at least one
-//! byte; inferno's `make_channel_change_notification`). Dante Controller
+//! (bit `n mod 8` of byte `n / 8` for channel `n` from 0, the shortest
+//! that holds the highest channel, at least one byte, no padding), as an
+//! UltimoX2 and a Yamaha card send it (captured, dstack #349; the
+//! opcode's second byte is each device's own). Dante Controller
 //! reads ARC 0x3000 again for them. It goes out when an RX channel is
 //! renamed, or its subscription or its status changes ([`Changes`]);
 //! changes are coalesced, so one notification names every channel that
