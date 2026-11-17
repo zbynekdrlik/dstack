@@ -256,6 +256,63 @@ fn our_info_replies_walk_and_take_the_hardware_s_sizes() {
     assert!(differ.is_empty(), "clock stats bytes {differ:x?}");
 }
 
+/// The hardware's channel-change notifications walk and name the channel
+/// renamed: an UltimoX2's channel 1 (of 2), a Yamaha card's 7 and 8 (of
+/// 128).
+#[test]
+fn the_walker_reads_the_hardware_channel_changes() {
+    for (name, channel, len) in [
+        ("ultimo_rx1", 1, 35),
+        ("yamaha_rx7", 7, 35),
+        ("yamaha_rx8", 8, 36),
+    ] {
+        let d = captured("channel_changes", name);
+        assert_eq!(d.len(), len, "{name}");
+        let info = walk::info(&d).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(info.opcode[2..4], walk::CHANNEL_CHANGE, "{name}");
+        assert_eq!(walk::changed_channels(&info.body), [channel], "{name}");
+    }
+}
+
+/// The hardware's notification broken one rule at a time: a mask length
+/// past the body, the body padded to 4, a zero length, a mask whose last
+/// byte names no channel (each with the header's length set right).
+#[test]
+fn the_walker_refuses_a_malformed_channel_change() {
+    let good = captured("channel_changes", "yamaha_rx8");
+    let refused = |mut d: Vec<u8>, n: u16| {
+        d[walk::HEADER..walk::HEADER + 2].copy_from_slice(&n.to_be_bytes());
+        let len = u16::try_from(d.len()).unwrap();
+        d[2..4].copy_from_slice(&len.to_be_bytes());
+        walk::info(&d).expect_err("a broken channel change")
+    };
+    assert!(refused(good.clone(), 3).contains("a mask of 3 bytes in a body of 4"));
+    let mut padded = good.clone();
+    padded.extend([0; 2]);
+    assert!(refused(padded.clone(), 2).contains("a mask of 2 bytes in a body of 6"));
+    assert!(refused(good.clone(), 0).contains("a mask of 0 bytes"));
+    padded.truncate(good.len() + 1);
+    let e = refused(padded, 3);
+    assert!(
+        e.contains("the mask's last byte of 3 names no channel"),
+        "{e}"
+    );
+}
+
+/// Our notification for the channels the hardware named is the hardware's
+/// body and length byte for byte; the opcode's second byte is the
+/// device's own (ours 0x2a, inferno's).
+#[test]
+fn our_channel_change_is_the_hardware_s() {
+    let mut mc = InfoBuilder::new(identity());
+    for (name, channel) in [("ultimo_rx1", 1), ("yamaha_rx7", 7), ("yamaha_rx8", 8)] {
+        let hw = captured("channel_changes", name);
+        let ours = mc.channel_change(&[channel]);
+        assert_eq!(ours.len(), hw.len(), "{name}");
+        assert_eq!(ours[26..], hw[26..], "{name}");
+    }
+}
+
 /// The channel-change notification for any set of RX channels, an odd
 /// mask length too, walks to the datagram's end and names the channels.
 #[test]
@@ -271,7 +328,7 @@ fn our_channel_change_walks_for_every_channel() {
     for rx in sets {
         let d = mc.channel_change(&rx);
         let info = walk::info(&d).unwrap_or_else(|e| panic!("{rx:?}: {e}"));
-        assert_eq!(info.opcode, walk::CHANNEL_CHANGE);
+        assert_eq!(info.opcode[2..4], walk::CHANNEL_CHANGE);
         assert_eq!(walk::changed_channels(&info.body), rx);
     }
 }
