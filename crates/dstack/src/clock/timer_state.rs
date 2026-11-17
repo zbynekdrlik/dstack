@@ -11,8 +11,12 @@
 //! [`describe`] in their failure. A run on a coarse timer still fails (a
 //! test that cannot run truly fails); only the message names the runner.
 //!
-//! Cross-platform and pure, so its Linux unit tests run in the gate; the
-//! Windows reads stay in `sys_windows`'s tests.
+//! Cross-platform and pure, so its Linux unit tests run in the mutation
+//! gate (the module is compiled in every build for that: a `#[cfg(test)]`
+//! module is skipped by cargo-mutants); the Windows reads stay in
+//! `sys_windows`'s tests. Nothing outside the tests calls it.
+
+#![cfg_attr(not(test), allow(dead_code))]
 
 /// The timer state of the thread that waited, as the OS reports it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,11 +70,16 @@ fn ms(ns: Option<u64>) -> String {
 /// of waits on the timer (`on_timer`; a spun wait never waits on it) and
 /// the runner's timer state. `RUNNER: coarse timer (res X ms)` when the
 /// median matches the timer resolution, `OURS` when the resolution is
-/// known and does not explain it, `UNKNOWN` when it could not be read.
+/// known and does not explain it, `UNKNOWN` when it could not be read or
+/// the thread had no high-resolution timer (its waits were not on ours:
+/// the OS refusing the timer is not shown to be the runner's).
 pub fn describe(median_late_ns: i64, on_timer: bool, state: &TimerState) -> String {
     let verdict = match state.current_ns {
         _ if !on_timer => "OURS: a spun wait, not on the timer".to_owned(),
         None => "UNKNOWN: the timer resolution could not be read".to_owned(),
+        Some(_) if !state.high_resolution => {
+            "UNKNOWN: no high-resolution waitable timer for this thread".to_owned()
+        }
         Some(res) if matches(median_late_ns, res) => {
             format!("RUNNER: coarse timer (res {} ms)", ms(Some(res)))
         }
@@ -134,6 +143,18 @@ mod tests {
         );
         // A wait that ended early never matches.
         assert!(describe(-1_000_000, true, &at(10_000)).starts_with("OURS"));
+        // A resolution of 0 explains nothing, not even a median of 0.
+        assert!(describe(0, true, &at(0)).starts_with("OURS"));
+    }
+
+    #[test]
+    fn a_thread_without_the_high_resolution_timer_is_never_the_runner() {
+        let s = describe(1_012_500, true, &from_nt(0, 156_250, 5_000, 10_000, false));
+        assert!(
+            s.starts_with("UNKNOWN: no high-resolution waitable timer for this thread;"),
+            "{s}"
+        );
+        assert!(s.contains("now 1.000 ms"), "{s}");
     }
 
     #[test]

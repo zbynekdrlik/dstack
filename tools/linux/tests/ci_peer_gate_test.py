@@ -226,6 +226,8 @@ class Oversleep(unittest.TestCase):
             good.replace("rebootstraps=1", "rebootstraps=2"),
             good.replace("cause=late", "cause=late+retime"),
             good.replace("behind_max_us=6125", "behind_max_us=6200"),
+            # No margin: W unknown.
+            good.replace(" margin=288", ""),
             # Logged before the wake, or past WATCH_AFTER_MS after it.
             good.replace("21:37:56.722460Z", "21:37:55.821000Z"),
             good.replace("21:37:56.722460Z", "21:37:57.822000Z"),

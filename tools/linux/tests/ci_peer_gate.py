@@ -34,7 +34,11 @@ re-bootstrapped, and an oversleep about the wake's whole lateness says the
 thread was not run when its timer fired: the scheduler's miss, not dstack's
 work. A thread's CPU time against its wall time is NOT evidence: on a
 Hyper-V runner the host's steal counts as the thread's CPU (#354). A line
-without the field (before v0.6.158) is no evidence.
+without the field (before v0.6.158) is no evidence. The oversleep is read
+on the media clock, so a forward step of it would read as an oversleep
+too: this holds only because the gate's peers run on the TEST system
+clock (`--test-clock-ppm`; ci-peer.test.sh checks `clock.source ==
+"system"`), the app's monotonic clock at a fixed skew, which never steps.
 """
 
 import datetime
@@ -151,8 +155,10 @@ def overslept(wake, watch):
     oversleep past the margin W (any sleep returned past W re-bootstraps,
     so the oversleeping wake is this one) and within OVERSLEEP_SLACK_US of
     the wake's whole lateness. Per-second peaks are all the line carries,
-    so a rebootstrap that shares its second with another stays unexplained
-    (the gate leans to "the rise stands")."""
+    so a rebootstrap that shares its second with another, or whose sleep
+    the watch took in the second before its wake's (the pump records the
+    oversleep before the next block's lateness), stays unexplained: the
+    gate leans to "the rise stands"."""
     unix_ms, behind_us = wake
     for w in watch:
         if not unix_ms < w["unix_ms"] <= unix_ms + WATCH_AFTER_MS:
