@@ -43,11 +43,12 @@ pub(super) fn mean_between(earlier: (u64, u64), later: (u64, u64)) -> Option<u64
 ///
 /// - `at_read`: its age when the writer read it (our PTP now less its own
 ///   stamp).
-/// - `wake`: the kernel's receive time to the read (Linux, `SO_TIMESTAMPNS`):
-///   with it the arrival is exact, `at_read` less `wake`; a wake past
-///   `at_read` (a forward step of the wall clock the stamp is on) is
-///   ignored.
-/// - Without a stamp (Windows), `since`: the time from the writer's last
+/// - `wake`: the OS's receive time to the read (Linux's `SO_TIMESTAMPNS`,
+///   Windows' NIC stamp where the driver gives one, dstack #381): with it
+///   the arrival is exact, `at_read` less `wake`; a wake past `at_read`
+///   (a forward step of the wall clock the Linux stamp is on) is ignored.
+/// - Without a stamp (a box or a datagram the OS stamps nothing on),
+///   `since`: the time from the writer's last
 ///   read that left the socket empty to this one. The packet came after
 ///   that read, so its arrival age is at least `at_read - since`. The
 ///   packets of one read share one network delay, which `newest` (the

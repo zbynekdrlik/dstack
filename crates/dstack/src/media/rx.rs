@@ -46,22 +46,24 @@
 //!   A hole counts as a gap (`gaps`, `gap_frames`) only once it is wholly
 //!   behind the flow's playout point (each pass looks), the oldest of 16
 //!   when another opens, or when the slot's flow changes.
-//! - Wire lateness against the wake (dstack #234, Linux): each datagram
-//!   comes with the kernel's receive time (`rx/socket.rs`), so its wake delay
-//!   (the pass's wall clock less that time) is kept, the largest until
-//!   read and since the start, and a packet already late on the wire (by
-//!   `late`'s rule, at the pass's time less its wake delay) counts
-//!   `wire_late`. Windows has no stamp: both stay 0.
-//! - The measured network latency (dstack #244, Linux): each such packet's
-//!   arrival on our PTP clock (the pass's now less its wake delay) less its
-//!   own stamp, as min, p99 and max of each heartbeat second, from a fixed
-//!   histogram of the slot (`rx/netlat.rs`;
-//!   [`RxShared::last_network_latency`]). Windows records none.
-//! - The minute (dstack #234, Linux): the wake delays (`rx/wake.rs`) and
+//! - Wire lateness against the wake (dstack #234; Linux, and Windows with
+//!   a NIC that stamps, #381): each datagram comes with the OS's receive
+//!   time (`rx/socket.rs`), so its wake delay (the pass's stamp clock less
+//!   that time) is kept, the largest until read and since the start, and a
+//!   packet already late on the wire (by `late`'s rule, at the pass's time
+//!   less its wake delay) counts `wire_late`. A box without stamps
+//!   ([`RxShared::stamping`]) keeps both at 0.
+//! - The measured network latency (dstack #244, where stamped): each such
+//!   packet's arrival on our PTP clock (the pass's now less its wake delay)
+//!   less its own stamp, as min, p99 and max of each heartbeat second, from
+//!   a fixed histogram of the slot (`rx/netlat.rs`;
+//!   [`RxShared::last_network_latency`]). A box without stamps records
+//!   none.
+//! - The minute (dstack #234, where stamped): the wake delays (`rx/wake.rs`) and
 //!   network latencies of each slot in windows the RX minute watch takes
 //!   once a minute ([`RxShared::take_minute`]) and logs, for apps without
 //!   a status socket; and each packet's write delay (the kernel's receive
-//!   time to the end of its ring writes, one more wall-clock read per
+//!   time to the end of its ring writes, one more stamp-clock read per
 //!   stamped packet), which also sees a stall inside a pass
 //!   ([`RxShared::take_write_minute`]).
 //! - Start holes (dstack #234): a publish of a new flow in a slot (another
@@ -130,8 +132,9 @@ mod socket;
 use intake::discard;
 pub use netlat::NetLatency;
 pub use plan::{RxPlan, RxRoute};
+pub use socket::Stamping;
 pub use socket::{GROUP_BOUND_TO_PORT, join};
-use socket::{handle_of, recv_stamped, set_recv_buffer, stamp_receives, wall_now_ns};
+use socket::{handle_of, recv_stamped, set_recv_buffer, stamp_now_ns, stamp_receives, stamping};
 pub use wake::WakeDelay;
 
 /// Our RX flow slots (inferno's `MAX_FLOWS`).
@@ -227,9 +230,11 @@ pub struct RxShared {
     stop: AtomicBool,
     base: Instant,
     recv_buffer: usize,
-    /// Every slot socket stamps its receive times (Linux): the passes
-    /// measure wake delays and wire lateness.
+    /// Every slot socket stamps its receive times ([`Stamping::on`]): the
+    /// passes measure wake delays and wire lateness.
     stamps: AtomicBool,
+    /// Where the receive times come from, or why none (dstack #381).
+    stamping: Stamping,
     /// Until when (the thread's clock, [`RxShared::now_ns`]) the RX thread
     /// stalls before its next pass ([`RxShared::stall_thread`]; 0: none).
     stall_until: AtomicU64,
@@ -295,7 +300,7 @@ impl RxShared {
                 Ok(s)
             })
             .collect::<io::Result<Box<[UdpSocket]>>>()?;
-        let stamps = sockets.iter().all(stamp_receives);
+        let stamping = stamping(ip, sockets.iter().all(stamp_receives));
         Ok(RxShared {
             rate,
             plans: std::array::from_fn(|_| Cell::new()),
@@ -313,7 +318,8 @@ impl RxShared {
             stop: AtomicBool::new(false),
             base: Instant::now(),
             recv_buffer,
-            stamps: AtomicBool::new(stamps),
+            stamps: AtomicBool::new(stamping.on()),
+            stamping,
             playout: AtomicU64::new(0),
             stall_until: AtomicU64::new(0),
             ring_writer: AtomicU8::new(claim::WRITER_UNSET),
@@ -491,9 +497,9 @@ impl RxShared {
     /// [`RxShared::take_max_lateness`] took; dstack #244): the least, the
     /// 99th percentile and the largest of each packet's arrival (the
     /// kernel's receive time on our PTP clock) less its own stamp. `None`
-    /// for a second without a stamped packet (always on Windows, where the
-    /// kernel stamps no receive time). The status reads it and takes
-    /// nothing.
+    /// for a second without a stamped packet (always on a box without
+    /// receive stamps, [`RxShared::stamping`]). The status reads it and
+    /// takes nothing.
     pub fn last_network_latency(&self, slot: usize) -> Option<NetLatency> {
         self.lanes.get(slot)?.network.last()
     }
@@ -501,7 +507,8 @@ impl RxShared {
     /// The device's measured network latency for an app's status (dstack
     /// #325, the ASIO bridge's receiver figure): the largest p99 of any
     /// flow slot's last second ([`RxShared::last_network_latency`]), ns;
-    /// `None` while no slot measured one (always on Windows).
+    /// `None` while no slot measured one (always on a box without receive
+    /// stamps, [`RxShared::stamping`]).
     pub fn network_p99_ns(&self) -> Option<u64> {
         self.lanes
             .iter()
@@ -512,14 +519,22 @@ impl RxShared {
 
     /// Whether every slot socket stamps its datagrams' receive times, so
     /// `wire_late` and the wake delays are measured (dstack #234: Linux,
-    /// where the kernel takes `SO_TIMESTAMPNS`; false on Windows). A
+    /// where the kernel takes `SO_TIMESTAMPNS`; dstack #381: Windows with a
+    /// NIC driver that stamps in software, else false). A
     /// multicast group's socket asks for the stamp too ([`join`]).
     pub fn stamps(&self) -> bool {
         self.stamps.load(Ordering::Relaxed)
     }
 
+    /// Where the slot sockets' receive times come from, or why they get
+    /// none (dstack #381; the status's `rx_stamps`): decided once, when
+    /// the sockets are made.
+    pub fn stamping(&self) -> Stamping {
+        self.stamping
+    }
+
     /// Turns the measuring off as on a box without receive stamps: the
-    /// Windows path's behaviour, for a Linux test.
+    /// path of a Windows NIC that stamps none, for a Linux test.
     #[cfg(test)]
     pub(crate) fn set_stamps(&self, on: bool) {
         self.stamps.store(on, Ordering::Relaxed);
@@ -728,14 +743,14 @@ impl Receiver {
     /// the thread's clock `mono`: the plans that changed (their groups),
     /// every slot with datagrams waiting read while this thread writes the
     /// rings ([`Intake`]), the group sockets the writer moved past closed,
-    /// the keepalives due sent. The wall clock is read once, for the
+    /// the keepalives due sent. The stamp clock is read once, for the
     /// packets' wake delays (dstack #234), only while the sockets stamp
     /// their receives and this thread reads them.
     pub fn pass(&mut self, now_ns: Option<u64>, mono: u64) {
         self.refresh();
         match &mut self.intake {
             Some(intake) => {
-                let wall = self.shared.stamps().then(wall_now_ns).flatten();
+                let wall = self.shared.stamps().then(stamp_now_ns).flatten();
                 self.ready = intake.pass(
                     self.ready,
                     (now_ns, mono, wall),

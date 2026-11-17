@@ -97,14 +97,228 @@ fn a_timespec_reads_as_ns_since_1970() {
     assert_eq!(timespec_ns(18_446_744_073, 709_551_616), None);
 }
 
+/// Linux stamps a receive in the wall clock: the stamp clock is it.
+#[cfg(not(windows))]
 #[test]
-fn the_wall_clock_is_now() {
-    let wall = wall_now_ns().unwrap();
+fn the_stamp_clock_is_the_wall_clock_now() {
+    let wall = stamp_now_ns().unwrap();
     let sys = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos() as u64;
     assert!(sys.abs_diff(wall) < 1_000_000_000, "{wall} vs {sys}");
+}
+
+/// dstack #381: Windows stamps a receive in QPC: the stamp clock is the
+/// app's raw QPC clock, which the stamps are scaled to.
+#[cfg(windows)]
+#[test]
+fn the_stamp_clock_is_the_app_s_qpc_now() {
+    let before = crate::clock::app_monotonic_ns();
+    let at = stamp_now_ns().unwrap();
+    let after = crate::clock::app_monotonic_ns();
+    assert!(
+        i64::try_from(at).is_ok_and(|a| before <= a && a <= after),
+        "{before} {at} {after}"
+    );
+}
+
+#[test]
+fn a_box_stamps_only_when_its_sockets_took_the_request_and_its_nic_stamps_on_qpc() {
+    let nic = |software_rx, hardware_rx| {
+        Some(NicStamps {
+            software_rx,
+            hardware_rx,
+        })
+    };
+    // Linux: the kernel's, whatever an interface would say.
+    assert_eq!(stamping_of(true, true, None), Stamping::Kernel);
+    assert_eq!(stamping_of(true, true, nic(false, true)), Stamping::Kernel);
+    assert_eq!(stamping_of(true, false, None), Stamping::Refused);
+    // Windows: the NIC driver's software stamps only.
+    assert_eq!(stamping_of(false, true, nic(true, false)), Stamping::Nic);
+    assert_eq!(
+        stamping_of(false, true, nic(false, false)),
+        Stamping::NicOff
+    );
+    assert_eq!(stamping_of(false, true, None), Stamping::NicOff);
+    // A hardware clock's stamps are not QPC: none taken, even beside
+    // software ones.
+    assert_eq!(
+        stamping_of(false, true, nic(false, true)),
+        Stamping::NicClock
+    );
+    assert_eq!(
+        stamping_of(false, true, nic(true, true)),
+        Stamping::NicClock
+    );
+    // A refused request (Windows before 10 2004) wins over the interface.
+    assert_eq!(
+        stamping_of(false, false, nic(true, false)),
+        Stamping::Refused
+    );
+}
+
+#[test]
+fn only_the_kernel_s_and_the_nic_s_software_stamps_are_taken() {
+    let all = [
+        (Stamping::Kernel, true, "kernel"),
+        (Stamping::Nic, true, "nic"),
+        (Stamping::Refused, false, "refused"),
+        (Stamping::NicOff, false, "nic_off"),
+        (Stamping::NicClock, false, "nic_clock"),
+    ];
+    for (s, on, word) in all {
+        assert_eq!((s.on(), s.word()), (on, word), "{s:?}");
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_stamps_in_the_kernel_once_the_sockets_took_the_request() {
+    assert_eq!(stamping(LOOPBACK, true), Stamping::Kernel);
+    assert_eq!(stamping(LOOPBACK, false), Stamping::Refused);
+    let s = UdpSocket::bind((LOOPBACK, 0)).unwrap();
+    assert!(stamp_receives(&s));
+    let (shared, _rx) = receiver(None);
+    assert_eq!(shared.stamping(), Stamping::Kernel);
+    assert!(shared.stamps());
+}
+
+/// QPC at 10 MHz: a tick is 100 ns.
+const QPC_HZ: i64 = 10_000_000;
+
+#[test]
+fn a_qpc_stamp_up_to_a_second_before_its_read_is_taken_in_ns() {
+    let now = 50 * QPC_HZ;
+    // 3 ms before the read: its own ticks as ns.
+    let stamp = now - 30_000;
+    assert_eq!(
+        qpc_stamp_ns(stamp as u64, now, QPC_HZ),
+        Some(stamp as u64 * 100)
+    );
+    assert_eq!(
+        qpc_stamp_ns(now as u64, now, QPC_HZ),
+        Some(now as u64 * 100)
+    );
+    // Exactly the window before the read, and one tick more.
+    let edge = now - QPC_HZ;
+    assert_eq!(STAMP_WINDOW_NS, 1_000_000_000);
+    assert_eq!(
+        qpc_stamp_ns(edge as u64, now, QPC_HZ),
+        Some(edge as u64 * 100)
+    );
+    assert_eq!(qpc_stamp_ns(edge as u64 - 1, now, QPC_HZ), None);
+    // After the read, or no count of ours (a NIC clock's).
+    assert_eq!(qpc_stamp_ns(now as u64 + 1, now, QPC_HZ), None);
+    assert_eq!(qpc_stamp_ns(u64::MAX, now, QPC_HZ), None);
+    assert_eq!(qpc_stamp_ns(1 << 63, now, QPC_HZ), None);
+    // Another frequency scales both the window and the value: 3 GHz.
+    let ghz3 = 3_000_000_000;
+    let now = 9 * ghz3;
+    assert_eq!(
+        qpc_stamp_ns(now as u64 - 3, now, ghz3),
+        Some(9_000_000_000 - 1)
+    );
+    assert_eq!(
+        qpc_stamp_ns((now - ghz3) as u64, now, ghz3),
+        Some(8_000_000_000)
+    );
+    assert_eq!(qpc_stamp_ns((now - ghz3 - 3) as u64, now, ghz3), None);
+}
+
+/// One Windows control message: its `cmsg_len` (`len`), level and type,
+/// and `data`, padded to the next header.
+fn control_message(len: u64, level: i32, kind: i32, data: &[u8]) -> Vec<u8> {
+    let mut m = Vec::new();
+    m.extend_from_slice(&len.to_le_bytes());
+    m.extend_from_slice(&level.to_le_bytes());
+    m.extend_from_slice(&kind.to_le_bytes());
+    m.extend_from_slice(data);
+    m.resize(m.len().next_multiple_of(WIN_CMSG_ALIGN), 0);
+    m
+}
+
+#[test]
+fn the_receive_stamp_is_the_whole_socket_level_timestamp_message() {
+    let stamp = 0x0102_0304_0506_0708u64.to_le_bytes();
+    let ts = |len: u64| control_message(len, WIN_SOL_SOCKET, WIN_SO_TIMESTAMP, &stamp);
+    // The header (16 bytes) and the UINT64, as WSA_CMSG_LEN(8) says.
+    assert_eq!(qpc_stamp_of(&ts(24)), Some(0x0102_0304_0506_0708));
+    assert_eq!(qpc_stamp_of(&ts(32)), Some(0x0102_0304_0506_0708));
+    // A length short of the stamp: none read.
+    assert_eq!(qpc_stamp_of(&ts(23)), None);
+    // Cut short in the buffer: none read.
+    assert_eq!(qpc_stamp_of(&ts(24)[..23]), None);
+    assert_eq!(qpc_stamp_of(&ts(24)[..15]), None);
+    assert_eq!(qpc_stamp_of(&[]), None);
+    // Another type or level.
+    let other = control_message(24, WIN_SOL_SOCKET, WIN_SO_TIMESTAMP + 1, &stamp);
+    assert_eq!(qpc_stamp_of(&other), None);
+    let ip = control_message(24, 0, WIN_SO_TIMESTAMP, &stamp);
+    assert_eq!(qpc_stamp_of(&ip), None);
+}
+
+#[test]
+fn the_walk_steps_over_other_messages_by_their_aligned_length() {
+    let stamp = 77u64.to_le_bytes();
+    let ts = || control_message(24, WIN_SOL_SOCKET, WIN_SO_TIMESTAMP, &stamp);
+    // An IP_PKTINFO-shaped message first (28 bytes: the header, an address
+    // and an index, padded to 32), then the stamp.
+    let mut c = control_message(28, 0, 19, &[0xaa; 12]);
+    assert_eq!(c.len(), 32);
+    c.extend(ts());
+    assert_eq!(qpc_stamp_of(&c), Some(77));
+    // An odd length rounds up to the alignment: 20 -> 24.
+    let mut c = control_message(20, 0, 19, &[0xbb; 4]);
+    assert_eq!(c.len(), 24);
+    c.extend(ts());
+    assert_eq!(qpc_stamp_of(&c), Some(77));
+    // A header whose length cannot hold itself stops the walk (it would
+    // never move on); one that holds only itself is stepped over.
+    let mut c = control_message(15, 0, 19, &[]);
+    c.extend(ts());
+    assert_eq!(qpc_stamp_of(&c), None);
+    let mut c = control_message(16, 0, 19, &[]);
+    c.extend(ts());
+    assert_eq!(qpc_stamp_of(&c), Some(77));
+    // A length past the buffer ends it.
+    let mut c = control_message(u64::MAX, 0, 19, &[]);
+    c.extend(ts());
+    assert_eq!(qpc_stamp_of(&c), None);
+}
+
+/// dstack #381: Windows takes the stamp request on a UDP socket (Windows 10
+/// 2004 and later, as the runners), but stamps only in a NIC's miniport
+/// driver: loopback has none, so its datagrams come unstamped through
+/// `WSARecvMsg` and the box reads `nic_off`.
+#[cfg(windows)]
+#[test]
+fn windows_reads_a_loopback_datagram_through_wsarecvmsg_unstamped() {
+    let r = UdpSocket::bind((LOOPBACK, 0)).unwrap();
+    r.set_nonblocking(true).unwrap();
+    assert!(stamp_receives(&r), "SIO_TIMESTAMPING refused");
+    assert_eq!(stamping(LOOPBACK, true), Stamping::NicOff);
+    assert_eq!(stamping(LOOPBACK, false), Stamping::Refused);
+    let t = UdpSocket::bind((LOOPBACK, 0)).unwrap();
+    t.send_to(b"stamped?", r.local_addr().unwrap()).unwrap();
+    let mut buf = [0u8; 64];
+    let deadline = Instant::now() + BOUND;
+    let got = loop {
+        match recv_handle(handle_of(&r), &mut buf) {
+            Ok(g) => break g,
+            Err(e) if e.kind() == ErrorKind::WouldBlock && Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Err(e) => panic!("{e}"),
+        }
+    };
+    assert_eq!(&buf[..got.len], b"stamped?");
+    assert_eq!(got.from.map(SocketAddr::V4), Some(t.local_addr().unwrap()));
+    assert_eq!(got.at_ns, None);
+    let (shared, _rx) = receiver(None);
+    assert_eq!(shared.stamping(), Stamping::NicOff);
+    assert!(!shared.stamps());
 }
 
 #[cfg(target_os = "linux")]

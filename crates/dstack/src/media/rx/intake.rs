@@ -25,13 +25,13 @@
 //! The ring writes stay single-writer: the choice is made before either
 //! thread starts and never changes. A slot's multicast socket is the RX
 //! thread's (a join is a system call); the writer reads it by its handle
-//! ([`super::handles`]). Each datagram is one `recvmsg` with its kernel
-//! receive stamp, up to [`DRAIN`] a slot a pass of the RX thread and
+//! ([`super::handles`]). Each datagram is one `recvmsg` (Windows:
+//! `WSARecvMsg`) with its OS receive stamp, up to [`DRAIN`] a slot a pass of the RX thread and
 //! [`PUMP_DRAIN`] a block of the pump; a batched `recvmmsg` would save system calls only (about 8 datagrams a
 //! flow a block), not time on the audio path.
 //!
 //! The counters keep their meaning under either writer. The wake delay is
-//! the read's time less the kernel's receive time: under the pump it
+//! the read's time less the OS's receive time: under the pump it
 //! includes the wait for the next block (at most a block, plus the pump's
 //! own lateness), and the write delay likewise. `late`, `wire_late`,
 //! `late_at_read` and the ring counts are judged as before, at the read.
@@ -75,7 +75,7 @@ use super::counts::{RxStats, source_word};
 use super::lane::{Lane, count_lost};
 use super::plan::{RxPlan, RxRoute, new_flow};
 use super::socket::{
-    Received, handle_of, recv_handle, recv_stamped, wake_delay_ns, wall_now_ns, wire_late,
+    Received, handle_of, recv_handle, recv_stamped, stamp_now_ns, wake_delay_ns, wire_late,
     wire_lateness,
 };
 use super::{BUFFER, DRAIN, FRAMES_MAX, MAX_FLOWS, RxShared, holes, netlat};
@@ -123,7 +123,7 @@ pub struct Intake {
 }
 
 /// A packet placed by a read: its first frame and its wake delay (the
-/// kernel's receive time to the read; `None` without a stamp).
+/// OS's receive time to the read; `None` without a stamp).
 #[derive(Debug, Clone, Copy, Default)]
 struct Seen {
     pos: u64,
@@ -177,7 +177,7 @@ impl Intake {
             self.last_drain = now;
         }
         let moves = self.shared.handles.moves();
-        let wall = self.shared.stamps().then(wall_now_ns).flatten();
+        let wall = self.shared.stamps().then(stamp_now_ns).flatten();
         let mono = self.shared.now_ns();
         // A new flow's slot is emptied at this drain only, from the socket
         // it reads now: a group socket the RX thread joins later is new
@@ -340,8 +340,8 @@ impl Intake {
 
     /// Reads up to `cap` datagrams of flow slot `slot` with `read` from the
     /// socket whose [`handle_of`] is `socket`, at `at`: (PTP now, `mono` the
-    /// reader's clock ([`RxShared::now_ns`]), `wall` the read's wall clock,
-    /// ns since 1970); `true` when it read no more (none left, or a read
+    /// reader's clock ([`RxShared::now_ns`]), `wall` the read's stamp clock,
+    /// `stamp_now_ns`); `true` when it read no more (none left, or a read
     /// error). The hot path: no allocation, no lock, no log.
     fn receive(
         &mut self,
@@ -636,11 +636,11 @@ fn place(p: PlaceArgs<'_>) -> u64 {
     if read_before {
         count(&stats.late_at_read);
     }
-    // dstack #234: the kernel's receive time to the writes' end (one more
-    // wall-clock read, only for a stamped packet that reached a ring).
+    // dstack #234: the OS's receive time to the writes' end (one more
+    // stamp-clock read, only for a stamped packet that reached a ring).
     if wrote
         && wake.is_some()
-        && let Some(delay) = wake_delay_ns(wall_now_ns(), at_ns)
+        && let Some(delay) = wake_delay_ns(stamp_now_ns(), at_ns)
     {
         stats.write_minute.record(delay);
     }

@@ -20,8 +20,15 @@ exclude_globs = [
   "crates/dstack/src/lso/windows.rs",
   "crates/dstack/src/media/bypass/windows.rs",
   "crates/dstack/src/media/dscp/windows.rs",
-  # The RX receive path off Linux (dstack #234): recv_from with no stamp.
+  # The RX receive path off Linux and Windows (dstack #234): recv_from
+  # with no stamp; not built on the gate's Linux.
   "crates/dstack/src/media/rx/socket/other.rs",
+  # The RX receive path on Windows (dstack #381): SIO_TIMESTAMPING, the
+  # interface's capabilities and WSARecvMsg; the control message walk, the
+  # stamp's check and the box's verdict are socket.rs's pure functions
+  # (qpc_stamp_of, qpc_stamp_ns, stamping_of: each tested on Linux), and
+  # Windows CI reads every RX test's datagrams through it.
+  "crates/dstack/src/media/rx/socket/windows.rs",
   "crates/dstack/src/traffic/windows.rs",
   # The shared registry read (dstack #256): its decisions are lso's and
   # media::dscp's (each tested); Windows CI reads a test key with it.

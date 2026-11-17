@@ -9,7 +9,7 @@ use std::mem::{size_of, zeroed};
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::os::fd::{AsRawFd, RawFd};
 
-use super::Received;
+use super::{Received, Stamping, stamping_of};
 
 /// A flow socket's descriptor as one word for the writer's handle table
 /// (dstack #326): the descriptor plus 1, so 0 is none.
@@ -55,6 +55,13 @@ pub fn stamp_receives(s: &impl AsRawFd) -> bool {
         )
     };
     set == 0
+}
+
+/// The box's [`Stamping`] (dstack #381): the kernel stamps every receive
+/// when each flow socket took [`stamp_receives`] (`accepted`); our address
+/// does not matter.
+pub fn stamping(_ip: Ipv4Addr, accepted: bool) -> Stamping {
+    stamping_of(true, accepted, None)
 }
 
 /// Whether a control message of `level` and `kind`, `len` bytes with its

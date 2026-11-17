@@ -191,36 +191,36 @@ impl Json {
 ///   before the flow's first sample, in the rings of the channels routed
 ///   to the slot now, summed; not in any `holes`), `wire_late`,
 ///   `wake_delay_us` and
-///   `wake_delay_peak_us` (dstack #234, Linux only, absent on Windows where
-///   the kernel stamps no receive time: packets already late by `late`'s
-///   rule when the kernel received them, and the largest wake delay, the RX
-///   thread's pass time less the kernel's receive time, in µs, of the
+///   `wake_delay_peak_us` (dstack #234, where stamped, `rx_stamps`; absent
+///   on a box whose OS stamps no receive time: packets already late by
+///   `late`'s rule when the OS received them, and the largest wake delay,
+///   the reader's time less the OS's receive time, in µs, of the
 ///   heartbeat's last second and since the device started),
 ///   `wake_delay_p50_us`, `wake_delay_p99_us` and `wake_delay_p999_us`
-///   (dstack #234, Linux only: the wake delay's 50th, 99th and 99.9th
+///   (dstack #234, where stamped: the wake delay's 50th, 99th and 99.9th
 ///   percentile over the minute the RX minute watch took last (the first
 ///   from the device's start, shorter), the upper edge of its 50 µs
 ///   bucket; absent before the first take and for a minute without a
 ///   stamped packet; the watch logs the same once a minute),
-///   `write_delay_p999_us` and `write_delay_max_us` (dstack #234, Linux
-///   only: the 99.9th percentile and the largest of each packet's write
-///   delay, the kernel's receive time to the end of its ring writes, which
+///   `write_delay_p999_us` and `write_delay_max_us` (dstack #234, where
+///   stamped: the 99.9th percentile and the largest of each packet's write
+///   delay, the OS's receive time to the end of its ring writes, which
 ///   also catches a stall inside an RX pass, over the same minute; absent
 ///   as the wake percentiles are),
 ///   `network_latency_min_us`, `network_latency_p99_us` and
-///   `network_latency_max_us` (dstack #244, Linux only, and only for a
-///   second with a stamped packet: each packet's arrival, the kernel's
+///   `network_latency_max_us` (dstack #244, where stamped, and only for a
+///   second with a stamped packet: each packet's arrival, the OS's
 ///   receive time on our PTP clock, less its sender's media-clock stamp
 ///   (its first frame: transit plus the packet's own frames and the
 ///   sender's lateness, an upper bound on the transit),
 ///   the least, the 99th percentile in 20 µs steps and the largest of the
-///   heartbeat's last second, in µs; absent on Windows), `unplaced`,
+///   heartbeat's last second, in µs; absent without stamps), `unplaced`,
 ///   `lateness` (the largest in the heartbeat's last second, samples; the
 ///   status takes nothing),
 ///   `lateness_peak` (the largest since the device started, samples),
 ///   `lateness_at_read_peak` (dstack #350: the largest at the writer's
 ///   read since the device started, samples: the arrival's plus the read
-///   wait; on Windows, where the arrival is bracketed, the upper bound a
+///   wait; without a stamp, where the arrival is bracketed, the upper bound a
 ///   late burst just before a read shows in),
 ///   `lateness_min_ns` (the packets' judge, phase D: the least lateness of
 ///   that second in ns, the packets' arrivals on our clock less their own
@@ -233,7 +233,7 @@ impl Json {
 ///   reads for the mean between them; an age past 4.29 s counts as 4.29 s,
 ///   and the sum wraps only after 2^32 packets at that cap; since
 ///   dstack #350 every age above is the packet's age at its ARRIVAL: the
-///   kernel's receive stamp on Linux, else bracketed by the writer's
+///   OS's receive stamp where stamped, else bracketed by the writer's
 ///   reads), `read_wait_peak_us` (dstack #350: the largest wait of a
 ///   placed packet from its arrival to the writer's read since the device
 ///   started, µs: an app's pull period, the pump's block or the RX
@@ -246,7 +246,14 @@ impl Json {
 ///   `keepalive_errors`, `recv_errors`, `multicast` (a transmitter's
 ///   multicast flow the slot joined: no request, no keepalive), `joins` and
 ///   `join_errors` (its multicast groups joined, and the joins that
-///   failed); `rx_poll_errors`.
+///   failed); `rx_poll_errors`; `rx_stamps` (dstack #381: where the RX
+///   sockets' receive times come from, or why none: `kernel` (Linux),
+///   `nic` (Windows, the NIC driver's software stamps), `refused` (the OS
+///   refused the request: Windows before 10 2004), `nic_off` (the NIC's
+///   driver stamps no receive: its software timestamping is off or
+///   unsupported, or loopback), `nic_clock` (the NIC stamps in its own
+///   hardware clock, not read); the keys marked "where stamped" above are
+///   there only for `kernel` and `nic`).
 /// - `channels`: each RX channel subscribed or whose ring counted anything
 ///   (written, or read by the echo or a check): `rx`, `status`
 ///   (ARC 0x3000's code, 0 without a subscription), its ring's `written`,
@@ -709,6 +716,7 @@ fn rx_part(j: &mut Json, media: &Media) {
     }
     j.close(']');
     j.num("rx_poll_errors", media.rx.poll_errors());
+    j.text("rx_stamps", media.rx.stamping().word());
     j.open(Some("channels"), '[');
     for (rx, (ring, status)) in rings.iter().zip(statuses).enumerate() {
         let c = ring.counters();

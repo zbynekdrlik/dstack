@@ -16,6 +16,15 @@ const DROPS: &str = if cfg!(target_os = "linux") {
     ""
 };
 
+/// The device's receive-stamp source on loopback (dstack #381): the
+/// kernel's on Linux; Windows stamps only in a NIC's driver, and loopback
+/// has none.
+const RX_STAMPS: &str = if cfg!(target_os = "linux") {
+    "kernel"
+} else {
+    "nic_off"
+};
+
 /// The status's receive-stamp fields of a flow that received nothing:
 /// Linux only (dstack #234, `SO_TIMESTAMPNS`).
 const STAMPS_NONE: &str = if cfg!(target_os = "linux") {
@@ -248,6 +257,12 @@ const WORDS: &[&str] = &[
     "keepalive_errors",
     "recv_errors",
     "rx_poll_errors",
+    "rx_stamps",
+    "kernel",
+    "nic",
+    "refused",
+    "nic_off",
+    "nic_clock",
     "status",
     "written",
     "duplicate",
@@ -343,10 +358,12 @@ fn a_fresh_device_s_status_is_its_name_and_numbers() {
     }
     assert_eq!(
         s,
-        "{\"clock\":{\"ready\":0,\"epoch\":0,\"polls\":0,\"re_anchors\":0,\"holdovers\":0,\
-         \"holdover\":0,\"freq_ppb\":-750,\"source\":\"dsync\"},\"requests\":[],\"sent\":[],\"uncounted\":0,\
-         \"info_send_errors\":0,\"info_send_recoveries\":0,\"tx\":[],\"tx_bytes\":0,\"tx_thread\":{\"oversleep_max_us\":0,\"pass_max_us\":0},\"name\":\"test-device\",\"rx\":[],\"rx_poll_errors\":0,\"channels\":[],\
-         \"sources\":[],\"checks\":[]}"
+        format!(
+            "{{\"clock\":{{\"ready\":0,\"epoch\":0,\"polls\":0,\"re_anchors\":0,\"holdovers\":0,\
+             \"holdover\":0,\"freq_ppb\":-750,\"source\":\"dsync\"}},\"requests\":[],\"sent\":[],\"uncounted\":0,\
+             \"info_send_errors\":0,\"info_send_recoveries\":0,\"tx\":[],\"tx_bytes\":0,\"tx_thread\":{{\"oversleep_max_us\":0,\"pass_max_us\":0}},\"name\":\"test-device\",\"rx\":[],\"rx_poll_errors\":0,\"rx_stamps\":\"{RX_STAMPS}\",\"channels\":[],\
+             \"sources\":[],\"checks\":[]}}"
+        )
     );
 }
 
@@ -771,7 +788,7 @@ fn the_status_lists_the_flows_of_both_sides() {
              \"unplaced\":0,\"lateness\":0,\"lateness_peak\":0,\"lateness_at_read_peak\":0,\"lateness_sum_ns\":0,\"lateness_count\":0,\
              \"read_wait_peak_us\":0,\"read_wait_sum_ns\":0,\"read_wait_count\":0,\
              \"keepalives\":0,\"keepalive_errors\":0,\
-             \"recv_errors\":0,\"joins\":0,\"join_errors\":0}}],\"rx_poll_errors\":0,"
+             \"recv_errors\":0,\"joins\":0,\"join_errors\":0}}],\"rx_poll_errors\":0,\"rx_stamps\":\"{RX_STAMPS}\","
         )),
         "{s}"
     );
