@@ -179,6 +179,10 @@ pub struct Stats {
     output_lost_frames: AtomicU64,
     /// The converter's correction, ppm (`f64` bits).
     ppm: AtomicU64,
+    /// The rate fit's last locked rate, ppm (`f64` bits; with `locked`).
+    locked_ppm: AtomicU64,
+    /// A player on these counts locked its rate fit once.
+    locked: AtomicBool,
     priming: AtomicBool,
     /// The player sums every channel to both speakers (`--mono`).
     mono: AtomicBool,
@@ -223,6 +227,17 @@ impl Stats {
     /// The converter's correction, ppm.
     pub fn ppm(&self) -> f64 {
         f64::from_bits(self.ppm.load(Ordering::Relaxed))
+    }
+
+    /// The rate the ASRC's fit last locked on, ppm: `None` until a player
+    /// on these counts locked (60 s of rate points), then the latest
+    /// locked value, kept across a re-prime and the next player (another
+    /// open). An app keeps it for the next run's [`Player::with_seed_ppm`]
+    /// (dstack #382).
+    pub fn locked_ppm(&self) -> Option<f64> {
+        self.locked
+            .load(Ordering::Acquire)
+            .then(|| f64::from_bits(self.locked_ppm.load(Ordering::Relaxed)))
     }
 
     /// The FIFO's target, ms (the device's [`AppBuffer`]).
@@ -432,6 +447,18 @@ impl Player {
         })
     }
 
+    /// Starts the ASRC from a known rate (dstack #382): `ppm` is the last
+    /// run's [`Stats::locked_ppm`] for the same producer and caller (the
+    /// same two clocks). It is the controller's rate until its own fit
+    /// locks (60 s), and the correction starts at it, so a known drift
+    /// costs no depth in the first minute (7.5 ppm drifted about 0.45 ms
+    /// before the lock, dasio#120). Held within the controller's bound
+    /// (`asrc::MAX_PPM`). Call it right after [`Player::new`].
+    pub fn with_seed_ppm(mut self, ppm: f64) -> Self {
+        self.ctl.seed_ppm(ppm);
+        self
+    }
+
     /// Under `--mono`: every channel summed to both speakers.
     pub fn with_mono(mut self, mono: bool) -> Self {
         self.mono = mono;
@@ -607,6 +634,11 @@ impl Player {
         s.output_lost_frames
             .store(self.output_lost_frames, Ordering::Relaxed);
         s.ppm.store(self.ctl.ppm().to_bits(), Ordering::Relaxed);
+        if self.ctl.locked() {
+            s.locked_ppm
+                .store(self.ctl.rate_ppm().to_bits(), Ordering::Relaxed);
+            s.locked.store(true, Ordering::Release);
+        }
         s.priming
             .store(matches!(self.state, State::Priming(_)), Ordering::Relaxed);
     }

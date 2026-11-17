@@ -717,3 +717,61 @@ fn under_mono_both_speakers_play_the_sum_of_our_channels() {
         rms(&s.out)
     );
 }
+
+/// A player on an output 50 ppm fast, seeded with `seed`, after 2 s.
+fn seeded(seed: Option<f64>) -> Sim {
+    let mut s = Sim::new(48_000, 48_000, 50.0, 1, 1);
+    let player = Player::new(
+        Arc::clone(&s.fifo),
+        48_000,
+        48_000,
+        buffer(48_000),
+        buffer(48_000).chunk_ns(),
+        s.player.stats(),
+    )
+    .unwrap();
+    s.player = match seed {
+        Some(ppm) => player.with_seed_ppm(ppm),
+        None => player,
+    };
+    s.run(2.0);
+    s
+}
+
+/// dstack #382: the ASRC seeded with the last run's locked rate starts at
+/// it (the controller's own first-minute test, `asrc::tests::seed`, shows
+/// the depth it saves), and the counts keep the rate the fit locks on, for
+/// the next run, across a reopen's new player too.
+#[test]
+fn a_seeded_player_starts_at_the_seed_and_its_counts_keep_the_lock() {
+    let unseeded = seeded(None).player.stats().ppm();
+    let mut s = seeded(Some(50.0));
+    let stats = s.player.stats();
+    assert!(unseeded < 10.0, "unseeded: slewing from 0: {unseeded}");
+    assert!(
+        (stats.ppm() - 50.0).abs() < 1.0,
+        "seeded: from the seed: {}",
+        stats.ppm()
+    );
+    assert_eq!(stats.locked_ppm(), None, "no lock before 60 s");
+    s.run(58.0);
+    assert_eq!(stats.locked_ppm(), None, "no lock before 60 s");
+    s.run(20.0);
+    let locked = stats.locked_ppm().expect("locked after 60 s");
+    assert!((locked - 50.0).abs() < 1.0, "{locked}");
+    assert_eq!(stats.underruns(), 0);
+    // The next player on the same counts (a reopen) keeps the last lock
+    // until it locks itself.
+    s.player = Player::new(
+        Arc::clone(&s.fifo),
+        48_000,
+        48_000,
+        buffer(48_000),
+        buffer(48_000).chunk_ns(),
+        Arc::clone(&stats),
+    )
+    .unwrap()
+    .with_seed_ppm(locked);
+    s.run(1.0);
+    assert_eq!(stats.locked_ppm(), Some(locked));
+}

@@ -65,3 +65,4 @@ One line per ticket: issue, commits, tests (RED -> GREEN where a bug), decisions
 - 17.11 11:05 CET: v0.6.169 = #369 (clock.rs/host.rs pure-move split: clock/spin.rs, host/signals.rs; host::signals' report test; mutation 9/9 caught).
 - 17.11 14:03 CET: v0.6.170 = #379 (ring + flow counters follow the clock back after a time-base change: stream-obs silent 16.11 13:26 after a -43.9 d re-anchor; RED 70a2da6/2b7c068, GREEN ab1d6b4; mutation 10/10).
 - 17.11 16:25 CET: v0.6.171 = #307 (held output callback = the card's gap: Player::fill_pulled, dlisten on Windows; 134 caught 0 missed) + #383 (Realtek verdict by adapter family; 3 caught).
+- 17.11 17:06 CET: v0.6.172 = #382 (dstack-asio per-direction app buffer targets, ASRC seed file; item 2 measured: the 128-frame calls are not the cause; filter table for the owner; mutation 57/57 bridge::).

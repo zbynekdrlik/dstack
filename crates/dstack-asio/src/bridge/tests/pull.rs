@@ -83,6 +83,8 @@ fn pulled() -> (Bridge, Rig) {
         to_asio: 1,
         from_asio: 0,
         app_buffer_ns: None,
+        to_asio_app_buffer_ns: None,
+        from_asio_app_buffer_ns: None,
     })
     .unwrap();
     let mut r = rig(&b.to_asio_fifo().unwrap());

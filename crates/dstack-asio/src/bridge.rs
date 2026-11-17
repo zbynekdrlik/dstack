@@ -9,7 +9,14 @@
 //! resample's drifting sinc, steered by the ASRC controller) pulling it on
 //! the consumer's, held at the [`AppBuffer`] target (dstack #247): the ASIO
 //! buffer + one pump block by default, a configured `app_buffer_ns`
-//! verbatim; never grown after a dropout (counted in its [`Stats`]).
+//! verbatim; never grown after a dropout (counted in its [`Stats`]). Each
+//! direction may set its own target (dstack #382, [`Spec`]'s
+//! `to_asio_app_buffer_ns` and `from_asio_app_buffer_ns`; `app_buffer_ns`
+//! stays the default for both): the from-ASIO FIFO must cover the driver's
+//! late callbacks one for one (a late write while the TX thread reads on
+//! time), the to-ASIO one does not (its pull and play share the buffer
+//! switch), so to-ASIO can run shorter. Each player's ASRC can start from
+//! the last run's locked rate ([`Seed`], [`Bridge::seed_from`]).
 //!
 //! - **Dante -> ASIO:** the driver's buffer switch runs [`AsioSide`], whose
 //!   player plays the to-ASIO FIFO at the driver's clock (dlisten's
@@ -89,8 +96,10 @@ use crate::device::Opened;
 
 mod age;
 mod from_asio;
+mod seed;
 pub use age::{AgeReport, BlockAge, NETWORK_ALLOWANCE_NS};
 pub use from_asio::FromAsio;
+pub use seed::{MAX_SEED_PPM, Seed};
 
 /// Frames a side converts at once at least (its interleaved scratch): the
 /// pump's side a whole pump block, the driver's side its whole buffer
@@ -109,8 +118,14 @@ pub struct Spec {
     /// Channels from the driver to Dante (its inputs -> TX).
     pub from_asio: usize,
     /// The FIFO target set in the config, ns (`None`: the ASIO buffer + one
-    /// pump block).
+    /// pump block), for both directions unless one sets its own.
     pub app_buffer_ns: Option<u64>,
+    /// The to-ASIO FIFO's own target, ns (dstack #382; `None`:
+    /// `app_buffer_ns`).
+    pub to_asio_app_buffer_ns: Option<u64>,
+    /// The from-ASIO FIFO's own target, ns (dstack #382; `None`:
+    /// `app_buffer_ns`).
+    pub from_asio_app_buffer_ns: Option<u64>,
 }
 
 /// The bridge: its FIFOs, players' counts and the pump's side (module doc).
@@ -131,6 +146,36 @@ pub struct Bridge {
     /// A driver side was made ([`Bridge::asio_side`]): a pull handed over
     /// after it is refused.
     opened: bool,
+    /// The FIFOs' clock ([`Bridge::with_clock`]).
+    clock: Clock,
+    /// The seed known before the last open: the app's ([`Bridge::seed_from`]),
+    /// and what [`Bridge::seed`] falls back to while a run knows no rate.
+    known: Option<Seed>,
+    /// The last open's rate and what its players started from
+    /// ([`Bridge::seed`]).
+    run: Option<Run>,
+}
+
+/// One driver open's seeding ([`Bridge::seed`]): its driver rate, each
+/// player's seed, and each [`Stats::locked_ppm`] at the open (a change is
+/// this run's own lock).
+#[derive(Clone, Copy, Debug)]
+struct Run {
+    driver_rate: u32,
+    to_seed: Option<f64>,
+    from_seed: Option<f64>,
+    to_at_open: Option<f64>,
+    from_at_open: Option<f64>,
+}
+
+/// The rate a player of this run stands at: its own lock when it locked
+/// since the open (`now` is not `at_open`), else the seed it started from.
+fn standing(now: Option<f64>, at_open: Option<f64>, seed: Option<f64>) -> Option<f64> {
+    if now.map(f64::to_bits) != at_open.map(f64::to_bits) {
+        now
+    } else {
+        seed
+    }
 }
 
 /// What the FIFO's producer writes at once for the to-ASIO player (dstack
@@ -151,16 +196,20 @@ impl Bridge {
         Self::with_clock(spec, Arc::new(dstack::clock::app_monotonic_ns))
     }
 
-    /// [`Bridge::new`] with the from-ASIO block age ([`BlockAge`]) on
-    /// `clock` (a simulation's time; the app's clock in [`Bridge::new`]).
+    /// [`Bridge::new`] with the from-ASIO block age ([`BlockAge`]) and the
+    /// FIFOs' stamps on `clock` (a simulation's time; the app's clock in
+    /// [`Bridge::new`], the FIFOs' own default).
     pub fn with_clock(spec: Spec, clock: Clock) -> Result<Self, String> {
-        let age = Arc::new(BlockAge::new(clock));
-        let to_asio = (spec.to_asio > 0).then(|| Arc::new(fifo_for(spec.to_asio, spec.dante_rate)));
+        let age = Arc::new(BlockAge::new(Arc::clone(&clock)));
+        let to_asio = (spec.to_asio > 0).then(|| {
+            Arc::new(fifo_for(spec.to_asio, spec.dante_rate).with_clock(Arc::clone(&clock)))
+        });
         let from_stats = Arc::new(Stats::default());
         let (from_asio, switch) = if spec.from_asio > 0 {
             // Until the driver's first open: a FIFO nobody writes, so the
             // player primes (silence) and counts no underrun.
-            let idle = Arc::new(fifo_for(spec.from_asio, spec.dante_rate));
+            let idle =
+                Arc::new(fifo_for(spec.from_asio, spec.dante_rate).with_clock(Arc::clone(&clock)));
             let buffer = AppBuffer::new(0, chunk_ns(u64::from(spec.block_frames), spec.dante_rate))
                 .set(Some(dlink::bridge::MIN_APP_BUFFER_NS));
             let first = Player::new(
@@ -200,6 +249,47 @@ impl Bridge {
             pull,
             watch: IdleWatch::default(),
             opened: false,
+            clock,
+            known: None,
+            run: None,
+        })
+    }
+
+    /// Starts each player's ASRC from `seed` (dstack #382, [`Seed`]: the
+    /// last run's locked rates, from [`Seed::read`]) at every driver open
+    /// at its rates, until a run locks rates of its own (a reopen at the
+    /// same rates then starts from those). Give it before the driver's
+    /// first open.
+    pub fn seed_from(&mut self, seed: Seed) {
+        self.known = Some(seed);
+    }
+
+    /// The rates to keep for the next run ([`Seed::write`]): the last
+    /// open's, each player's own lock since that open, else what it started
+    /// from; while that run knows no rate at all (an open at other rates
+    /// than the seed's, before its fits lock), the seed known before it, so
+    /// a seed for another rate is never written over with an empty one.
+    /// `None` with nothing known. An app writes it when it changed, from
+    /// its own loop (a fit locks 60 s after an open, so once a minute is
+    /// plenty).
+    pub fn seed(&self) -> Option<Seed> {
+        let Some(run) = self.run else {
+            return self.known;
+        };
+        let to_asio_ppm = standing(self.to_stats.locked_ppm(), run.to_at_open, run.to_seed);
+        let from_asio_ppm = standing(
+            self.from_stats.locked_ppm(),
+            run.from_at_open,
+            run.from_seed,
+        );
+        if to_asio_ppm.is_none() && from_asio_ppm.is_none() {
+            return self.known;
+        }
+        Some(Seed {
+            dante_rate: self.spec.dante_rate,
+            driver_rate: run.driver_rate,
+            to_asio_ppm,
+            from_asio_ppm,
         })
     }
 
@@ -317,14 +407,49 @@ impl Bridge {
     }
 
     /// The FIFO target for a driver opened as `opened` (dstack #247): its
-    /// buffer + one pump block, or the configured value.
+    /// buffer + one pump block, or the configured `app_buffer_ns` (both
+    /// directions' default).
     pub fn app_buffer(&self, opened: &Opened) -> AppBuffer {
+        self.buffer_set(opened, self.spec.app_buffer_ns)
+    }
+
+    /// The to-ASIO FIFO's target (dstack #382): its own
+    /// `to_asio_app_buffer_ns`, else [`Bridge::app_buffer`].
+    pub fn to_asio_app_buffer(&self, opened: &Opened) -> AppBuffer {
+        self.buffer_set(
+            opened,
+            self.spec.to_asio_app_buffer_ns.or(self.spec.app_buffer_ns),
+        )
+    }
+
+    /// The from-ASIO FIFO's target (dstack #382): its own
+    /// `from_asio_app_buffer_ns`, else [`Bridge::app_buffer`].
+    pub fn from_asio_app_buffer(&self, opened: &Opened) -> AppBuffer {
+        self.buffer_set(
+            opened,
+            self.spec
+                .from_asio_app_buffer_ns
+                .or(self.spec.app_buffer_ns),
+        )
+    }
+
+    /// The driver's buffer + one pump block, or `set`.
+    fn buffer_set(&self, opened: &Opened, set: Option<u64>) -> AppBuffer {
         let rate = opened.rate.round() as u32;
         AppBuffer::new(
             chunk_ns(u64::from(opened.buffer_frames), rate),
             chunk_ns(u64::from(self.spec.block_frames), self.spec.dante_rate),
         )
-        .set(self.spec.app_buffer_ns)
+        .set(set)
+    }
+
+    /// The seeds for an open at `driver_rate`: the standing rates
+    /// ([`Bridge::seed`], the known seed while the last run knows none)
+    /// when they were locked at this rate, else none.
+    fn seeds_for(&self, driver_rate: u32) -> (Option<f64>, Option<f64>) {
+        self.seed()
+            .and_then(|s| s.for_rates(self.spec.dante_rate, driver_rate))
+            .map_or((None, None), |s| (s.to_asio_ppm, s.from_asio_ppm))
     }
 
     /// The driver's side for a driver opened as `opened` (its rate, buffer
@@ -341,43 +466,57 @@ impl Bridge {
                 self.spec.from_asio
             ));
         }
-        let buffer = self.app_buffer(opened);
-        if let Some(problem) = buffer.problem() {
+        let to_buffer = self.to_asio_app_buffer(opened);
+        let from_buffer = self.from_asio_app_buffer(opened);
+        if let Some(problem) = to_buffer.problem().or_else(|| from_buffer.problem()) {
             return Err(problem);
         }
         let rate = opened.rate.round() as u32;
         let dante = self.spec.dante_rate;
-        let chunk = to_asio_chunk_ns(buffer, self.pull.get().is_some());
+        let (to_seed, from_seed) = self.seeds_for(rate);
+        let chunk = to_asio_chunk_ns(to_buffer, self.pull.get().is_some());
         let player = match &self.to_asio {
-            Some(fifo) => Some(
+            Some(fifo) => Some(seeded(
                 Player::new(
                     Arc::clone(fifo),
                     dante,
                     rate,
-                    buffer,
+                    to_buffer,
                     chunk,
                     Arc::clone(&self.to_stats),
                 )
                 .map_err(|e| e.to_string())?,
-            ),
+                to_seed,
+            )),
             None => None,
         };
         let mut from_asio = None;
         if let Some(switch) = &mut self.switch {
-            let fifo = Arc::new(fifo_for(self.spec.from_asio, rate));
+            let fifo =
+                Arc::new(fifo_for(self.spec.from_asio, rate).with_clock(Arc::clone(&self.clock)));
             let p = Player::new(
                 Arc::clone(&fifo),
                 rate,
                 dante,
-                buffer,
+                from_buffer,
                 // The driver writes the from-ASIO FIFO, its buffer at once.
-                buffer.chunk_ns(),
+                from_buffer.chunk_ns(),
                 Arc::clone(&self.from_stats),
             )
             .map_err(|e| e.to_string())?;
-            switch.send(p)?;
+            switch.send(seeded(p, from_seed))?;
             from_asio = Some(fifo);
         }
+        // What the last run stands at (or the seed before it) stays known
+        // while this one knows no rate.
+        self.known = self.seed();
+        self.run = Some(Run {
+            driver_rate: rate,
+            to_seed: player.as_ref().and(to_seed),
+            from_seed: from_asio.as_ref().and(from_seed),
+            to_at_open: self.to_stats.locked_ppm(),
+            from_at_open: self.from_stats.locked_ppm(),
+        });
         // The whole buffer in one call: the player primes for the take of
         // one callback, and pieces of it would count half a buffer when the
         // driver takes the whole one back to back (dstack #317).
@@ -419,6 +558,14 @@ impl Bridge {
     /// The to-ASIO FIFO (its depth and overflows for a status line).
     pub fn to_asio_fifo(&self) -> Option<Arc<Fifo>> {
         self.to_asio.clone()
+    }
+}
+
+/// `player` started from `seed` ([`Player::with_seed_ppm`]), if any.
+fn seeded(player: Player, seed: Option<f64>) -> Player {
+    match seed {
+        Some(ppm) => player.with_seed_ppm(ppm),
+        None => player,
     }
 }
 

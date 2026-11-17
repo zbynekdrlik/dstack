@@ -15,6 +15,8 @@ dstack-audio-io = { path = "../dstack-audio-io" }
 dlink = { path = "../dlink" }
 # The app's clock for the from-ASIO block age (dstack #325).
 dstack = { path = "../dstack" }
+# The ASRC controller's bound for the bridge's rate seed (dstack #382).
+dstack-resample = { path = "../dstack-resample" }
 # Already in the lockfile through dstack.
 tracing = "0.1"
 # `Reason` and `DeviceEvents` over a pipe (SongPlayer's ASIO host process

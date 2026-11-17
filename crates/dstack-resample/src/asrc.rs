@@ -19,6 +19,9 @@
 //!   clock's time less ours), used once [`REGRESSION_MIN_POINTS`] span
 //!   [`REGRESSION_LOCK_SPAN_S`]. A point more than [`STEP_RESIDUAL_S`] off
 //!   the fit re-bases it (the next point moves the line by the step).
+//!   Until it locks the rate is the seed ([`Controller::seed_ppm`], dstack
+//!   #382: the last run's locked rate; 0 without one), and the correction
+//!   starts there, so a known drift costs no depth in the first minute.
 //! - **Level:** P [`LEVEL_KP_PPM_PER_MS`] on a [`LEVEL_EMA_TAU_S`] EMA of
 //!   the window-mean depth error, at most ±[`LEVEL_KP_MAX_PPM`]; I
 //!   [`LEVEL_KI_PPM_PER_MS_S`], at most ±[`LEVEL_INTEGRAL_MAX_PPM`], frozen
@@ -364,6 +367,8 @@ pub struct Controller {
     /// [`settled`]: the rate fit locked and a window's error came within
     /// the calm zone once.
     settled: bool,
+    /// The rate until the fit locks, ppm ([`Controller::seed_ppm`]).
+    seed_ppm: f64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -408,7 +413,33 @@ impl Controller {
             stalls: 0,
             level_bound_ppm: None,
             settled: false,
+            seed_ppm: 0.0,
         }
+    }
+
+    /// Starts from a known rate (dstack #382): the last run's locked rate
+    /// of the same two clocks, `ppm`, within ±[`MAX_PPM`]. It is the rate
+    /// until the fit locks (and again while a stall has flushed it), and
+    /// the correction starts at it instead of 0 (no slew from 0). Without
+    /// a seed the rate is 0 until the lock, and a clock d ppm off drifts
+    /// the depth until the braking catches it (7.5 ppm: about 0.45 ms by
+    /// the lock at 60 s, dasio#120). A seed set after observations moves
+    /// only the rate term; the correction slews to it as usual. A seed that
+    /// is no number (NaN, infinite) is ignored.
+    pub fn seed_ppm(&mut self, ppm: f64) {
+        if !ppm.is_finite() {
+            return;
+        }
+        let ppm = ppm.clamp(-MAX_PPM, MAX_PPM);
+        if self.window.is_none() && self.last_apply_s.is_none() {
+            self.applied_ppm = ppm;
+        }
+        self.seed_ppm = ppm;
+    }
+
+    /// The seed ([`Controller::seed_ppm`]), ppm; 0 without one.
+    pub fn seed(&self) -> f64 {
+        self.seed_ppm
     }
 
     /// Keeps up to `max_s` of the excess the consumer's silence leaves
@@ -632,7 +663,11 @@ impl Controller {
         }
         let band_err_ms = band_error_ms(err_ms, self.cushion_s * 1000.0);
         self.offset_ms = -band_err_ms;
-        let rate = self.rate.rate_ppm();
+        let rate = if self.rate.locked() {
+            self.rate.rate_ppm()
+        } else {
+            self.seed_ppm
+        };
         let braking = braking_ppm(band_err_ms, self.calm_ms);
         let base = rate + braking + self.bias_ppm;
         let pi = self.level.update(err_ms, dt_s, base);
