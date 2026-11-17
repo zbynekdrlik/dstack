@@ -178,6 +178,9 @@ const WORDS: &[&str] = &[
     "info_send_recoveries",
     "tx",
     "tx_bytes",
+    "tx_thread",
+    "pass_max_us",
+    "pass_max_cpu_us",
     "flow",
     "live",
     "fpp",
@@ -339,7 +342,7 @@ fn a_fresh_device_s_status_is_its_name_and_numbers() {
         s,
         "{\"clock\":{\"ready\":0,\"epoch\":0,\"polls\":0,\"re_anchors\":0,\"holdovers\":0,\
          \"holdover\":0,\"freq_ppb\":-750,\"source\":\"dsync\"},\"requests\":[],\"sent\":[],\"uncounted\":0,\
-         \"info_send_errors\":0,\"info_send_recoveries\":0,\"tx\":[],\"tx_bytes\":0,\"name\":\"test-device\",\"rx\":[],\"rx_poll_errors\":0,\"channels\":[],\
+         \"info_send_errors\":0,\"info_send_recoveries\":0,\"tx\":[],\"tx_bytes\":0,\"tx_thread\":{\"oversleep_max_us\":0,\"pass_max_us\":0},\"name\":\"test-device\",\"rx\":[],\"rx_poll_errors\":0,\"channels\":[],\
          \"sources\":[],\"checks\":[]}"
     );
 }
@@ -437,7 +440,7 @@ fn the_status_names_the_clock_requests_channels_sources_and_checks() {
              \"holdover\":0,\"freq_ppb\":-750,\"source\":\"dsync\"},\
              \"requests\":[{\"port\":4440,\"peer\":1,\"op\":8704,\"n\":1}],\
              \"sent\":[{\"peer\":1,\"op\":256,\"n\":1}],\"uncounted\":0,\
-             \"info_send_errors\":3,\"info_send_recoveries\":1,\"tx\":[],\"tx_bytes\":0,\
+             \"info_send_errors\":3,\"info_send_recoveries\":1,\"tx\":[],\"tx_bytes\":0,\"tx_thread\":{\"oversleep_max_us\":0,\"pass_max_us\":0},\
              \"name\":\"test-device\",\"rx\":[],"
         ),
         "{s}"
@@ -1113,6 +1116,30 @@ fn the_status_carries_the_tx_wire_bytes_for_a_neighbour() {
     assert_eq!(
         crate::traffic::tx_bytes_of(&local::reply("status", &media)),
         Some(want)
+    );
+}
+
+/// dstack #359: the TX thread's peaks, µs; its CPU peak only once a
+/// pass's CPU time was read.
+#[test]
+fn the_status_shows_the_tx_thread_s_sleep_and_pass_peaks() {
+    let dir = tempfile::tempdir().unwrap();
+    let media = media_on(&device_at(dir.path()), Arc::new(Unready));
+    let t = media.tx.tx_thread_stats();
+    t.overslept(8_551_999);
+    t.passed(9_300_999, None);
+    let s = status(&media);
+    assert!(
+        s.contains("\"tx_thread\":{\"oversleep_max_us\":8551,\"pass_max_us\":9300},"),
+        "{s}"
+    );
+    t.passed(100_000, Some(150_999));
+    let s = status(&media);
+    assert!(
+        s.contains(
+            "\"tx_thread\":{\"oversleep_max_us\":8551,\"pass_max_us\":9300,\"pass_max_cpu_us\":150},"
+        ),
+        "{s}"
     );
 }
 
