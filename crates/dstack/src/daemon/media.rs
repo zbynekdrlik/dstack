@@ -116,6 +116,9 @@ pub struct Media {
     /// The local clients of the status endpoint, with their versions
     /// ([`Media::client_asked`], dstack #321).
     clients: Mutex<crate::network_floor::Clients>,
+    /// The device's bridge figures ([`Media::bridge_figures`], dstack
+    /// #391).
+    bridge: Arc<crate::info::FigureSlot>,
 }
 
 /// One RX channel's state ([`Media::rx_channels`]).
@@ -207,6 +210,7 @@ impl Media {
             dev_requests: AtomicBool::new(false),
             mdns: Mutex::new(None),
             clients: Mutex::default(),
+            bridge: Arc::default(),
         })
     }
 
@@ -268,6 +272,17 @@ impl Media {
     /// rest of the status, the part may carry names: it is the app's.
     pub fn set_app_status(&self, f: impl Fn() -> String + Send + Sync + 'static) {
         self.app.set(Arc::new(f));
+    }
+
+    /// The device's bridge figures (dstack #391, [`crate::info::bridge`]):
+    /// a bridge device (dasio's bridge kind) sets their source here
+    /// (dstack-asio's `Bridge::publish_figures`) and hands its underruns
+    /// with [`crate::info::FigureSlot::set_underruns`]; from the first
+    /// source on, the device answers dcontroller's bridge-figures request
+    /// on 8700 ([`crate::info::client::bridge_figures`]). Empty, the
+    /// device answers nothing to it.
+    pub fn bridge_figures(&self) -> &Arc<crate::info::FigureSlot> {
+        &self.bridge
     }
 
     /// Holds the process's mDNS meter on our address (dstack #289, the
@@ -441,6 +456,7 @@ impl Media {
             manager: Arc::clone(&self.manager),
             levels: Arc::clone(&self.levels),
             stats: Arc::clone(&self.clock_stats),
+            bridge: Arc::clone(&self.bridge),
         }
     }
 

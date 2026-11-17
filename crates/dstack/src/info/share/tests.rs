@@ -16,6 +16,16 @@ fn every_message_round_trips_and_junk_is_none() {
         Msg::Request(Vec::new()),
         Msg::Send(Dest::Info, vec![9, 9]),
         Msg::Send(Dest::Heartbeat, vec![7]),
+        Msg::Ask(
+            SocketAddrV4::new(Ipv4Addr::new(10, 2, 3, 4), 50_123),
+            vec![1, 2, 3],
+        ),
+        Msg::Ask(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 1), Vec::new()),
+        Msg::SendTo(
+            SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 255), 65_535),
+            vec![4; 152],
+        ),
+        Msg::SendTo(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0), Vec::new()),
     ] {
         assert_eq!(Msg::decode(&m.encode()), Some(m.clone()), "{m:?}");
     }
@@ -23,6 +33,28 @@ fn every_message_round_trips_and_junk_is_none() {
     assert_eq!(Msg::decode(b"X123"), None);
     assert_eq!(Msg::decode(b"R1234567"), None, "an id of 7 bytes");
     assert_eq!(Msg::decode(b"R123456789"), None, "an id of 9 bytes");
+    // An addressed message shorter than its address and port.
+    assert_eq!(Msg::decode(b"A12345"), None);
+    assert_eq!(Msg::decode(b"U12345"), None);
+}
+
+/// dstack #391: the address and port are the sender's, big-endian, before
+/// the datagram.
+#[test]
+fn an_addressed_message_carries_its_address_and_port_first() {
+    let at = SocketAddrV4::new(Ipv4Addr::new(10, 2, 3, 4), 0x1f90);
+    assert_eq!(
+        Msg::Ask(at, vec![0xaa, 0xbb]).encode(),
+        [b'A', 10, 2, 3, 4, 0x1f, 0x90, 0xaa, 0xbb]
+    );
+    assert_eq!(
+        Msg::SendTo(at, vec![0xcc]).encode(),
+        [b'U', 10, 2, 3, 4, 0x1f, 0x90, 0xcc]
+    );
+    assert_eq!(
+        Msg::decode(&[b'U', 10, 2, 3, 4, 0x1f, 0x90]),
+        Some(Msg::SendTo(at, Vec::new()))
+    );
 }
 
 #[test]

@@ -79,6 +79,39 @@ fn a_request_is_netaudio_s() {
     assert_eq!(r.seq, 7);
 }
 
+/// dstack #391: the bridge-figures request, its own opcode and no body;
+/// only its reply opcode reads as its reply.
+#[test]
+fn the_bridge_figures_request_is_dstack_s_own_opcode() {
+    let r = request(0x0102, [0; 8], Ask::BridgeFigures);
+    assert_eq!(r.len(), 32);
+    assert_eq!(r[2..4], [0x00, 0x20]);
+    assert_eq!(r[24..32], [0x07, 0x31, 0xd5, 0xb1, 0, 0, 0, 0]);
+    assert_eq!(
+        crate::info::parse_request(&r).unwrap().kind,
+        crate::info::Kind::BridgeFigures
+    );
+    let mut reply = r.clone();
+    reply[24..32].copy_from_slice(&crate::info::bridge::REPLY_OPCODE);
+    reply.extend_from_slice(&[1, 2]);
+    assert_eq!(
+        reply_body(&reply, Ask::BridgeFigures, None),
+        Some(&[1u8, 2][..])
+    );
+    // Another reply's opcode bytes 2 and 3 are not it, nor is its own
+    // opcode for another ask.
+    for (at, v) in [(26, 0x00), (26, 0xd4), (27, 0xb1), (27, 0x60)] {
+        let mut other = reply.clone();
+        other[at] = v;
+        assert_eq!(
+            reply_body(&other, Ask::BridgeFigures, None),
+            None,
+            "{at} {v:x}"
+        );
+    }
+    assert_eq!(reply_body(&reply, Ask::Board, None), None);
+}
+
 #[test]
 fn the_captured_product_info_reads_as_netaudio_shows_it() {
     let p = parse_product(&captured_product()).unwrap();

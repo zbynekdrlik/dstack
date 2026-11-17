@@ -22,6 +22,7 @@
 //! past its old value between two checks reads as a smaller rise (the
 //! check is the app's tick, 10 s in dasio).
 
+use dstack::info::{FigureSlot, UnderrunCause};
 use tracing::warn;
 
 use crate::runner::Status;
@@ -90,6 +91,17 @@ pub enum Cause {
     Bridge,
     /// The from-ASIO target is not known yet (0: no player started).
     Unknown,
+}
+
+impl From<Cause> for UnderrunCause {
+    /// The cause as the bridge-figures reply carries it (dstack #391).
+    fn from(c: Cause) -> UnderrunCause {
+        match c {
+            Cause::Driver => UnderrunCause::Driver,
+            Cause::Bridge => UnderrunCause::Bridge,
+            Cause::Unknown => UnderrunCause::Unknown,
+        }
+    }
 }
 
 impl Cause {
@@ -207,6 +219,9 @@ fn us_of_ms(ms: f64) -> u64 {
 #[derive(Debug, Default)]
 pub struct UnderrunWatch {
     last: UnderrunCounts,
+    /// Each side's latest underrun's cause ([`UnderrunWatch::publish`]).
+    to_cause: UnderrunCause,
+    from_cause: UnderrunCause,
 }
 
 impl UnderrunWatch {
@@ -226,9 +241,30 @@ impl UnderrunWatch {
         if rise.to_asio_underruns == 0 && rise.from_asio_underruns == 0 {
             return None;
         }
-        let text = underrun_text(&rise, us_of_ms(from_asio_target_ms));
+        let target_us = us_of_ms(from_asio_target_ms);
+        if rise.to_asio_underruns > 0 {
+            self.to_cause = to_asio_cause(&rise).into();
+        }
+        if rise.from_asio_underruns > 0 {
+            self.from_cause = from_asio_cause(&rise, target_us).into();
+        }
+        let text = underrun_text(&rise, target_us);
         warn!("{text}");
         Some(text)
+    }
+
+    /// Hands the last check's underrun counts and each side's latest
+    /// underrun's cause to the device's bridge figures (dstack #391,
+    /// [`FigureSlot::set_underruns`]): dcontroller reads them over the
+    /// network. Call it after each [`UnderrunWatch::look`] (dasio: its
+    /// counts tick, `underruns.publish(media.bridge_figures())`).
+    pub fn publish(&self, slot: &FigureSlot) {
+        slot.set_underruns(
+            self.last.to_asio_underruns,
+            self.last.from_asio_underruns,
+            self.to_cause,
+            self.from_cause,
+        );
     }
 }
 

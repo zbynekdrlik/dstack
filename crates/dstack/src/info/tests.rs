@@ -13,6 +13,7 @@ use crate::subscribe::Manager;
 
 use crate::wire::tests::Rng;
 
+mod bridge;
 mod conformance;
 mod send_failures;
 mod unanswered;
@@ -991,6 +992,7 @@ fn the_records_come_once_the_clock_is_ready_and_each_beat_takes_its_own_second()
         manager: Arc::new(Mutex::new(m)),
         levels: Arc::default(),
         stats: Arc::default(),
+        bridge: Arc::default(),
     };
     // Not ready: no records, nothing taken, no clock stats.
     rings[2].write_at(5, &[i32::MAX / 10]);

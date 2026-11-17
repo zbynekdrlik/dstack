@@ -215,3 +215,78 @@ fn the_counts_come_from_the_runners_status_and_the_players() {
     };
     assert_eq!(UnderrunCounts::of(&closed, 0, 0).period_us, 0);
 }
+
+/// dstack #391: after each look the watch hands the device's figures the
+/// last counts and each side's latest underrun's cause; a side with no
+/// underrun yet says none, and a cause changes only on its own side's
+/// rise.
+#[test]
+fn the_watch_publishes_the_counts_and_each_side_s_latest_cause() {
+    use dstack::info::{FigureSlot, OwnFigures, UnderrunCause};
+    let slot = FigureSlot::started_at(0);
+    slot.set_source(OwnFigures::default);
+    let read = |slot: &FigureSlot| {
+        let f = slot.figures().unwrap();
+        (
+            f.to_asio_underruns,
+            f.from_asio_underruns,
+            f.to_asio_cause,
+            f.from_asio_cause,
+        )
+    };
+    let mut w = UnderrunWatch::new();
+    let mut now = UnderrunCounts {
+        period_us: 1333,
+        ..UnderrunCounts::default()
+    };
+    w.look(now, 1.333_333);
+    w.publish(&slot);
+    assert_eq!(
+        read(&slot),
+        (0, 0, UnderrunCause::None, UnderrunCause::None)
+    );
+    // From-ASIO with a callback 1.0 ms late: the driver's.
+    now.from_asio_underruns = 2;
+    now.late_bins[3] = 1;
+    w.look(now, 1.333_333);
+    w.publish(&slot);
+    assert_eq!(
+        read(&slot),
+        (0, 2, UnderrunCause::None, UnderrunCause::Driver)
+    );
+    // To-ASIO with no gap over two periods: the bridge's; from-ASIO did
+    // not rise, so its cause stays.
+    now.to_asio_underruns = 1;
+    w.look(now, 1.333_333);
+    w.publish(&slot);
+    assert_eq!(
+        read(&slot),
+        (1, 2, UnderrunCause::Bridge, UnderrunCause::Driver)
+    );
+    // To-ASIO after a gap over two periods: the driver's; from-ASIO again
+    // with nothing late in its bins: still the driver's (the gap).
+    now.to_asio_underruns = 4;
+    now.late_callbacks = 1;
+    w.look(now, 1.333_333);
+    w.publish(&slot);
+    assert_eq!(
+        read(&slot),
+        (4, 2, UnderrunCause::Driver, UnderrunCause::Driver)
+    );
+    // From-ASIO with nothing late: now the bridge's; to-ASIO's stays.
+    now.from_asio_underruns = 5;
+    w.look(now, 1.333_333);
+    w.publish(&slot);
+    assert_eq!(
+        read(&slot),
+        (4, 5, UnderrunCause::Driver, UnderrunCause::Bridge)
+    );
+    // Before any target: unknown.
+    now.from_asio_underruns = 6;
+    w.look(now, 0.0);
+    w.publish(&slot);
+    assert_eq!(read(&slot).3, UnderrunCause::Unknown);
+    assert_eq!(UnderrunCause::from(Cause::Driver), UnderrunCause::Driver);
+    assert_eq!(UnderrunCause::from(Cause::Bridge), UnderrunCause::Bridge);
+    assert_eq!(UnderrunCause::from(Cause::Unknown), UnderrunCause::Unknown);
+}

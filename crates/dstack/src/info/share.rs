@@ -12,6 +12,12 @@
 //!   the packet back ([`Msg::Send`]), and the manager sends it from 8700,
 //!   as it sends its own. A member's heartbeats and notifications go the
 //!   same way.
+//! - A bridge-figures request (dstack #391, [`super::bridge`]) is relayed
+//!   with its sender's address instead ([`Msg::Ask`]): its reply goes back
+//!   to the asker alone, so a member hands it over with that address
+//!   ([`Msg::SendTo`]) and the manager sends it from 8700 unicast. An older
+//!   member or manager reads neither message and drops it: that device
+//!   answers no bridge figures until both run a dstack that knows them.
 //! - When the manager ends, 8700 frees; a member that binds it becomes the
 //!   manager, and the others' leases reach it on the same loopback port.
 //!
@@ -19,7 +25,7 @@
 //! loops are in [`super::serve_info`] and [`super::serve_member`].
 
 use std::collections::BTreeMap;
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::time::Duration;
 
 /// A member registers again this often.
@@ -55,16 +61,50 @@ pub enum Msg {
     Request(Vec<u8>),
     /// Member to manager: a packet to send from 8700.
     Send(Dest, Vec<u8>),
+    /// Manager to member: a bridge-figures request the manager received
+    /// from that address and port.
+    Ask(SocketAddrV4, Vec<u8>),
+    /// Member to manager: a reply to send from 8700 to that address and
+    /// port alone.
+    SendTo(SocketAddrV4, Vec<u8>),
 }
 
 const REGISTER: u8 = b'R';
 const REQUEST: u8 = b'Q';
 const SEND_INFO: u8 = b'I';
 const SEND_HEARTBEAT: u8 = b'H';
+const ASK: u8 = b'A';
+const SEND_TO: u8 = b'U';
+/// An address and a port, before the datagram of [`Msg::Ask`] and
+/// [`Msg::SendTo`].
+const ADDR_LEN: usize = 6;
+
+/// `kind`, `at` (its address, then its port, big-endian) and `body`.
+fn addressed(kind: u8, at: &SocketAddrV4, body: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(1 + ADDR_LEN + body.len());
+    out.push(kind);
+    out.extend_from_slice(&at.ip().octets());
+    out.extend_from_slice(&at.port().to_be_bytes());
+    out.extend_from_slice(body);
+    out
+}
+
+/// The address and the datagram after it; `None` when shorter than an
+/// address.
+fn address_of(body: &[u8]) -> Option<(SocketAddrV4, Vec<u8>)> {
+    let (a, rest) = body.split_first_chunk::<ADDR_LEN>()?;
+    let at = SocketAddrV4::new(
+        Ipv4Addr::new(a[0], a[1], a[2], a[3]),
+        u16::from_be_bytes([a[4], a[5]]),
+    );
+    Some((at, rest.to_vec()))
+}
 
 impl Msg {
     pub fn encode(&self) -> Vec<u8> {
         let (kind, body): (u8, &[u8]) = match self {
+            Msg::Ask(at, d) => return addressed(ASK, at, d),
+            Msg::SendTo(at, p) => return addressed(SEND_TO, at, p),
             Msg::Register(id) => (REGISTER, id),
             Msg::Request(d) => (REQUEST, d),
             Msg::Send(Dest::Info, p) => (SEND_INFO, p),
@@ -84,6 +124,8 @@ impl Msg {
             REQUEST => Some(Msg::Request(body.to_vec())),
             SEND_INFO => Some(Msg::Send(Dest::Info, body.to_vec())),
             SEND_HEARTBEAT => Some(Msg::Send(Dest::Heartbeat, body.to_vec())),
+            ASK => address_of(body).map(|(at, d)| Msg::Ask(at, d)),
+            SEND_TO => address_of(body).map(|(at, p)| Msg::SendTo(at, p)),
             _ => None,
         }
     }
