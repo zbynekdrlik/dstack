@@ -19,31 +19,79 @@
 //! so over the calls from a gap on the running sum of the excess
 //! (`pulled - call`) is the silence plus the latest call's lateness after
 //! its tick, less the lateness of the call before the gap (where that pull
-//! started). So:
+//! started). Both latenesses are measured against the least of the recent
+//! ones ([`Lateness`]: the running excess of the calls before the gap), so
+//! the estimate's noise is the difference of two floors, near 0. So:
 //!
-//! - At a dry call, what surely was silence is dropped at once: the sum
-//!   past one period (a lateness is under a period), which keeps the depth
-//!   under the controller's excess bound, whose re-centre mid-call ran the
-//!   rest of the big call dry.
+//! - At a dry call, what surely was silence is dropped at once: the
+//!   silence the running sum (plus the lateness of the call before) holds,
+//!   rounded down ([`snap`] with no slack: the call's phase off the grid is
+//!   under a period, so this is the silence or a period under it, never
+//!   over). That keeps the depth under the controller's excess bound,
+//!   whose re-centre mid-call ran the rest of the big call dry; on a buffer
+//!   of up to two periods and a fraction, so the big call itself fits.
 //! - The next [`SETTLE_CALLS`] calls add their excess; the lowest running
-//!   sum since the last dry call (the least lateness) is taken to the
-//!   silence it can be ([`snap`]), with the latenesses' noise allowed from
-//!   a quarter period under to three quarters over (a held PC's wakes after
-//!   a hold run late), and what is not dropped yet is dropped at the end.
+//!   sum since the last dry call (the least lateness after the gap), plus
+//!   the lateness of the call before the gap, is taken to the silence it
+//!   can be ([`snap`]: the noise allowed from a quarter period under to
+//!   three quarters over, mostly late wakes after a hold; none at all
+//!   below a quarter period under the least silence), and what is not
+//!   dropped yet is dropped at the end.
 //!   A pull that wrote nothing (its lock held,
-//!   [`crate::bridge::SharedPull::pull`]) is left out of the lowest sum: the
-//!   next pull reads its time. A dry call while settling (two holds) counts
-//!   its own silence in and starts the settling again.
+//!   [`crate::bridge::SharedPull::pull`]) is left out of the lowest sum and
+//!   of the recent latenesses: the next pull reads its time. A dry call
+//!   while settling (two holds) counts its own silence in and starts the
+//!   settling again.
 //!
-//! Not seen: a callback held after it read its room but before its pull (a
-//! call of the usual size with a large excess, which is also what a pull
-//! skipped on the call before looks like): that excess stays with the
-//! controller. An engine period that is not a whole number of the
-//! network's frames (470, 470, 471...) has no repeated usual call
-//! ([`super::usual_call`]) and keeps the first call as the usual one.
+//! The estimate is off by the difference between the least lateness after
+//! the gap and the least before it; past three quarters of a period over
+//! (7.5 ms at a 10 ms period: every call after the hold that late) or a
+//! quarter under, the drop is a period off. Not seen: a callback held after it
+//! read its room but before its pull (a call of the usual size with a
+//! large excess, which is also what a pull skipped on the call before
+//! looks like): that excess stays with the controller. An engine period
+//! that is not a whole number of the network's frames (470, 470, 471...)
+//! has no repeated usual call ([`super::usual_call`]) and keeps the first
+//! call as the usual one. An output whose calls follow the hardware
+//! position continuously (ALSA through PipeWire) has no dry call: dlisten
+//! uses this on Windows only.
 
 /// The calls after a dry call whose excess settles its silence.
 pub const SETTLE_CALLS: u32 = 4;
+
+/// The recent calls whose least lateness is the floor the call before a
+/// gap is measured against ([`Lateness`]).
+pub const RECENT_CALLS: usize = 4;
+
+/// The lateness of an output's calls after their ticks, relative: the
+/// running excess of its calls (each call's pull reads the time since
+/// the last, so the running sum moves by each call's lateness change) and
+/// its last [`RECENT_CALLS`] values. Fixed size, no allocation.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Lateness {
+    run: i64,
+    recent: [i64; RECENT_CALLS],
+    next: usize,
+}
+
+impl Lateness {
+    /// A call outside a gap whose pull wrote `pulled` and that took
+    /// `call`. A pull that wrote nothing moves the sum but is no lateness
+    /// (the next pull reads its time).
+    pub fn add(&mut self, pulled: usize, call: usize) {
+        self.run += pulled as i64 - call as i64;
+        if pulled > 0 {
+            self.recent[self.next] = self.run;
+            self.next = (self.next + 1) % RECENT_CALLS;
+        }
+    }
+
+    /// The lateness of the last call over the least of the recent ones.
+    pub fn over_floor(&self) -> i64 {
+        let least = self.recent.iter().copied().min().unwrap_or(self.run);
+        (self.run - least).max(0)
+    }
+}
 
 /// What a gap left open (all input frames; [`GapState::default`]: none).
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -52,6 +100,9 @@ pub struct GapState {
     pub sum: i64,
     /// The lowest running sum since the last dry call.
     pub least: i64,
+    /// The lateness of the call before the gap over its floor
+    /// ([`Lateness::over_floor`]).
+    pub before: i64,
     /// Calls left to settle (0: no gap open).
     pub left: u32,
     /// Dry calls in this gap.
@@ -74,19 +125,33 @@ pub struct Gap {
 /// The silence of `dry` dry calls on a buffer of `buffer` frames and a
 /// period of `period` that `estimate` stands for: `dry` times the least
 /// silence one can be (`period - buffer mod period`, mod period) plus the
-/// whole periods the estimate holds past that, rounded down unless within
-/// a quarter period of the next.
-pub fn snap(estimate: i64, dry: u32, buffer: usize, period: usize) -> i64 {
+/// whole periods the estimate holds past it, rounded down unless within
+/// `slack` of the next; none when the estimate is more than `slack` under
+/// that least (no dry call played less). The settling's slack is a quarter
+/// period (its noise is mostly late wakes after the hold: over); the dry
+/// call's is 0 (its phase off the grid is over by up to a period).
+pub fn snap(estimate: i64, dry: u32, buffer: usize, period: usize, slack: i64) -> i64 {
     let p = period as i64;
     let base = i64::from(dry) * ((p - buffer as i64 % p) % p);
-    base + ((estimate - base + p / 4).div_euclid(p)).max(0) * p
+    match (estimate - base + slack).div_euclid(p) {
+        k if k < 0 => 0,
+        k => base + k * p,
+    }
 }
 
 /// One call's decision (module doc): its pull wrote `pulled` frames, it
 /// takes `call`, the output's usual call (its engine period) is `usual`
-/// and its buffer `buffer` (the largest call), all input frames, with
-/// `state` left by the call before.
-pub fn output_gap(state: GapState, pulled: usize, call: usize, usual: usize, buffer: usize) -> Gap {
+/// and its buffer `buffer` (the largest call), all input frames, the call
+/// before was `before` late over its floor ([`Lateness::over_floor`]),
+/// with `state` left by the call before.
+pub fn output_gap(
+    state: GapState,
+    pulled: usize,
+    call: usize,
+    usual: usize,
+    buffer: usize,
+    before: i64,
+) -> Gap {
     let none = Gap {
         drop: 0,
         ended: false,
@@ -96,16 +161,22 @@ pub fn output_gap(state: GapState, pulled: usize, call: usize, usual: usize, buf
     if !dry && state.left == 0 {
         return none;
     }
-    let p = usual as i64;
     let sum = state.sum + pulled as i64 - call as i64;
     if dry {
-        let drop = (sum - p - state.dropped as i64).max(0);
+        let before = if state.left == 0 {
+            before
+        } else {
+            state.before
+        };
+        let surely = snap(sum + before, state.dry + 1, buffer, usual, 0);
+        let drop = (surely - state.dropped as i64).max(0);
         return Gap {
             drop: drop as usize,
             ended: false,
             state: GapState {
                 sum,
                 least: sum,
+                before,
                 left: SETTLE_CALLS,
                 dry: state.dry + 1,
                 dropped: state.dropped + drop as usize,
@@ -128,7 +199,13 @@ pub fn output_gap(state: GapState, pulled: usize, call: usize, usual: usize, buf
             },
         };
     }
-    let silence = snap(least, state.dry, buffer, usual);
+    let silence = snap(
+        least + state.before,
+        state.dry,
+        buffer,
+        usual,
+        usual as i64 / 4,
+    );
     let drop = (silence - state.dropped as i64).max(0) as usize;
     Gap {
         drop,

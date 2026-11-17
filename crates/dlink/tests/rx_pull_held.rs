@@ -38,6 +38,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use dlink::bridge::player::SETTLE_CALLS;
 use dlink::bridge::{Player, Stats, fifo_for};
 use dlink::{Block, Clock, Config, Link, Map, Media, Place, Ports, Process, Stopped, SubStatus};
 
@@ -216,7 +217,11 @@ fn output(
             ]
         };
         let (start, first) = *judging.get_or_insert_with(|| (now, counts()));
-        if elapsed > SETTLE + JUDGED {
+        // The window ends outside a gap: a gap's dry call drops before its
+        // silence is counted here, and its settling drops the rest a few
+        // calls later.
+        let settled = !held && after_hold > u64::from(SETTLE_CALLS) + 2;
+        if elapsed > SETTLE + JUDGED && settled {
             let last = counts();
             heard.underruns = last[0] - first[0];
             heard.recentres = last[1] - first[1];

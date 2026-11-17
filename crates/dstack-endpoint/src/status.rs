@@ -33,9 +33,10 @@ pub struct Snapshot {
     pub convert_errors: u64,
     /// Gaps of the consumer itself (an output callback held past its
     /// buffer: the card played silence of its own), whose audio the player
-    /// dropped ([`Stats::output_gaps`], dstack #307), and that time, ms of
-    /// the producer's rate.
+    /// dropped ([`Stats::output_gaps`], dstack #307).
     pub output_gaps: u64,
+    /// The audio dropped for those gaps, ms of the producer's rate: the
+    /// time the card played silence, within the gap estimate's bounds.
     pub output_lost_ms: f64,
     /// The consumer waits for the FIFO to fill (silence: no audio yet, or a
     /// refill after an underrun).

@@ -105,7 +105,7 @@ use super::map;
 mod gap;
 mod writer;
 
-pub use gap::{Gap, GapState, SETTLE_CALLS, output_gap, snap};
+pub use gap::{Gap, GapState, Lateness, RECENT_CALLS, SETTLE_CALLS, output_gap, snap};
 
 use writer::Writer;
 
@@ -305,6 +305,8 @@ pub struct Player {
     /// The output's largest call, input frames: its whole buffer, the call
     /// that follows a gap ([`output_gap`]).
     buffer_call_in: usize,
+    /// The lateness of the output's calls outside a gap ([`Lateness`]).
+    late: Lateness,
     /// The output's gap left open ([`output_gap`]).
     gap: GapState,
     /// The producer's schedule ([`writer`]), followed when its chunk is
@@ -415,6 +417,7 @@ impl Player {
             usual_call_in: 0,
             last_call_in: 0,
             buffer_call_in: 0,
+            late: Lateness::default(),
             gap: GapState::default(),
             writer: Writer::new(chunk_in, net_rate),
             arrived,
@@ -486,7 +489,19 @@ impl Player {
             let call = frames_of(frames as f64 / f64::from(self.out_rate), self.net_rate);
             let usual = self.usual_call_in;
             self.buffer_call_in = self.buffer_call_in.max(call);
-            let gap = output_gap(self.gap, pulled, call, usual, self.buffer_call_in);
+            let gap = output_gap(
+                self.gap,
+                pulled,
+                call,
+                usual,
+                self.buffer_call_in,
+                self.late.over_floor(),
+            );
+            // A call outside a gap is the floor's (a gap's calls carry its
+            // silence).
+            if self.gap.left == 0 && gap.state.left == 0 {
+                self.late.add(pulled, call);
+            }
             self.usual_call_in = usual_call(usual, self.last_call_in, call);
             self.last_call_in = call;
             if self.state == State::Running {
