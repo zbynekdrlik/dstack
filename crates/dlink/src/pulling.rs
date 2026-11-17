@@ -142,7 +142,7 @@ impl Link {
             rx: Vec::new(),
             tx: map.tx,
         };
-        let (link, intake) = Self::start_device(
+        let started = Self::start_device(
             Pulled,
             config,
             place,
@@ -151,15 +151,28 @@ impl Link {
             processor,
             source,
         )?;
+        Self::rx_pull_of(started, config, map.rx, fifo)
+    }
+
+    /// The [`bridge::RxPull`] of a started pulling device (`started`: the
+    /// link and its RX rings' writer) over the RX channels `rx` into
+    /// `fifo`; the device stopped when it is refused.
+    pub(crate) fn rx_pull_of(
+        (link, intake): (Link, Intake),
+        config: &Config,
+        rx: Vec<usize>,
+        fifo: Arc<bridge::Fifo>,
+    ) -> Result<(Link, bridge::RxPull), HostError> {
         let playout = link.device.timing().playout;
         let media = link.media();
-        // Checked before the start (above): refused here only if the device
-        // has fewer RX rings than its config's channels, never seen.
+        // Checked before the start (by the caller): refused here only if
+        // the device has fewer RX rings than its config's channels, never
+        // seen.
         match bridge::RxPull::new(
             intake,
             Arc::clone(&media.clock),
             Arc::clone(&media.rx),
-            map.rx,
+            rx,
             fifo,
             playout,
             config.device_rate(),

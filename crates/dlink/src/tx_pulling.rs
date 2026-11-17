@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! A [`Link`] whose TX channels carry the app's audio through a
-//! [`bridge::TxPull`] run by the device's TX thread (dstack #363), and the
-//! launch that hands it over ([`TxPulled`]).
+//! [`bridge::TxPull`] (or an app's [`bridge::TxProcess`] around one) run
+//! by the device's TX thread (dstack #363), alone or beside the app's RX
+//! pull (dstack #364), and the launches that hand it over ([`TxPulled`],
+//! [`BothPulled`]).
 
 use std::sync::Arc;
 
@@ -11,6 +13,7 @@ use dstack::device::DeviceConfig;
 use dstack::embed::{Embedded, TxPullOf};
 use dstack::host::{ClockSource, HostError};
 use dstack::media::bypass::FrameSender;
+use dstack::media::rx::Intake;
 use dstack::stream::Map;
 use dstack_audio_io::Process;
 
@@ -27,6 +30,42 @@ pub(crate) struct TxPulled<T> {
     rates: Option<(u32, u32)>,
 }
 
+impl<T: bridge::TxProcess> TxPulled<T> {
+    /// `pull` filling the TX channels `tx` of `config`'s device, with its
+    /// rates when the app's is not the device's.
+    fn new(config: &Config, tx: Vec<usize>, pull: T) -> Self {
+        TxPulled {
+            tx,
+            pull,
+            rates: config
+                .converts()
+                .then(|| (config.device_rate(), config.sample_rate)),
+        }
+    }
+
+    /// The device's fill: the pull, behind `Rated` when it converts.
+    fn fill(self, cfg: &DeviceConfig) -> Result<TxPullOf, HostError> {
+        let outputs = self.tx.len();
+        let processor: Box<dyn Process> = match self.rates {
+            // The same TX converter (and prime) as on the pump's path, so
+            // the stated (c) TX stays what it was: `Rated` with no inputs.
+            Some((device, app)) => {
+                let block = usize::try_from(cfg.block).unwrap_or(usize::MAX);
+                Box::new(
+                    Rated::new(self.pull, device, app, block, 0, outputs).map_err(|e| {
+                        HostError::Setup(format!("dlink rate conversion (TX pull): {e}"))
+                    })?,
+                )
+            }
+            None => Box::new(self.pull),
+        };
+        Ok(TxPullOf {
+            channels: self.tx,
+            processor,
+        })
+    }
+}
+
 impl<T: bridge::TxProcess> Launch for TxPulled<T> {
     type Out = ();
 
@@ -40,34 +79,32 @@ impl<T: bridge::TxProcess> Launch for TxPulled<T> {
         source: ClockSource,
         sender: Option<Arc<dyn FrameSender>>,
     ) -> Result<(Embedded, ()), HostError> {
-        let outputs = self.tx.len();
-        let fill: Box<dyn Process> = match self.rates {
-            // The same TX converter (and prime) as on the pump's path, so
-            // the stated (c) TX stays what it was: `Rated` with no inputs.
-            Some((device, app)) => {
-                let block = usize::try_from(cfg.block).unwrap_or(usize::MAX);
-                Box::new(
-                    Rated::new(self.pull, device, app, block, 0, outputs).map_err(|e| {
-                        HostError::Setup(format!("dlink rate conversion (TX pull): {e}"))
-                    })?,
-                )
-            }
-            None => Box::new(self.pull),
-        };
-        Embedded::start_tx_pulling(
-            cfg,
-            place,
-            wait,
-            map,
-            processor,
-            source,
-            sender,
-            TxPullOf {
-                channels: self.tx,
-                processor: fill,
-            },
-        )
-        .map(|device| (device, ()))
+        let fill = self.fill(&cfg)?;
+        Embedded::start_tx_pulling(cfg, place, wait, map, processor, source, sender, fill)
+            .map(|device| (device, ()))
+    }
+}
+
+/// The app pulls the RX rings and the TX thread fills the TX pull
+/// ([`Embedded::start_pulling_with_tx`], dstack #364): the app gets the
+/// RX rings' writer.
+pub(crate) struct BothPulled<T>(TxPulled<T>);
+
+impl<T: bridge::TxProcess> Launch for BothPulled<T> {
+    type Out = Intake;
+
+    fn launch<P: Process + 'static>(
+        self,
+        cfg: DeviceConfig,
+        place: &Place,
+        wait: PlaceWait<'_>,
+        map: Map,
+        processor: P,
+        source: ClockSource,
+        sender: Option<Arc<dyn FrameSender>>,
+    ) -> Result<(Embedded, Intake), HostError> {
+        let fill = self.0.fill(&cfg)?;
+        Embedded::start_pulling_with_tx(cfg, place, wait, map, processor, source, sender, fill)
     }
 }
 
@@ -121,13 +158,7 @@ impl Link {
     ) -> Result<Link, HostError> {
         bridge::tx_pull::check(&map.tx, config.tx.len(), pull.outputs())
             .map_err(HostError::Setup)?;
-        let launch = TxPulled {
-            tx: map.tx,
-            pull,
-            rates: config
-                .converts()
-                .then(|| (config.device_rate(), config.sample_rate)),
-        };
+        let launch = TxPulled::new(config, map.tx, pull);
         let pump = Map {
             rx: map.rx,
             tx: Vec::new(),
@@ -145,30 +176,16 @@ impl Link {
     }
 }
 
-/// The TX pull run by the pump beside `processor` (dstack #364's RED: the
-/// TX thread's fill replaces it).
-struct PumpFilled<P, T> {
-    processor: P,
-    pull: T,
-}
-
-impl<P: Process, T: bridge::TxProcess> Process for PumpFilled<P, T> {
-    fn process(&mut self, block: &mut dstack_audio_io::Block<'_>) {
-        let frames = block.frames();
-        let mut none = dstack_audio_io::Block::new(frames, &[], &mut []);
-        if let Some(s) = block.start() {
-            none = none.at(s);
-        }
-        self.processor.process(&mut none);
-        self.pull.process(block);
-    }
-}
-
 impl Link {
     /// [`Link::start_pulling`] (the app pulls the RX channels `map.rx`
-    /// into `fifo`) whose TX channels `map.tx` carry `pull`
+    /// into `fifo`: the [`bridge::RxPull`] it returns) whose TX channels
+    /// `map.tx` carry `pull`, run by the device's TX thread
     /// ([`Link::start_tx_pulling`]): a bridge pulled both ways (dstack
-    /// #364, dstack-asio's to- and from-ASIO sides).
+    /// #364, dstack-asio's to- and from-ASIO sides), with the same latency
+    /// as either alone. The pump runs `processor` every block on no RX
+    /// input and no TX channel. A FIFO or a pull that does not fit its
+    /// channels is [`HostError::Setup`]; every other error as
+    /// [`Link::start`].
     pub fn start_pulling_with_tx<P: Process + 'static, T: bridge::TxProcess>(
         config: &Config,
         place: &Place,
@@ -199,16 +216,20 @@ impl Link {
         pull: T,
         source: ClockSource,
     ) -> Result<(Link, bridge::RxPull), HostError> {
+        bridge::pull::check(&map.rx, config.rx.len(), fifo.channels()).map_err(HostError::Setup)?;
         bridge::tx_pull::check(&map.tx, config.tx.len(), pull.outputs())
             .map_err(HostError::Setup)?;
-        Self::start_pulling_on(
+        let launch = BothPulled(TxPulled::new(config, map.tx, pull));
+        let started = Self::start_device(
+            launch,
             config,
             place,
-            map,
-            PumpFilled { processor, pull },
-            fifo,
+            PlaceWait::Now,
+            Map::default(),
+            processor,
             source,
-        )
+        )?;
+        Self::rx_pull_of(started, config, map.rx, fifo)
     }
 }
 

@@ -154,7 +154,7 @@ impl Embedded {
         frame_sender: Option<Arc<dyn FrameSender>>,
     ) -> Result<(Embedded, Intake), HostError> {
         let pulls = Pulls { rx: true, tx: None };
-        match Self::launch(
+        Self::with_intake(Self::launch(
             cfg,
             place,
             wait,
@@ -163,7 +163,46 @@ impl Embedded {
             source,
             frame_sender,
             pulls,
-        )? {
+        )?)
+    }
+
+    /// [`Embedded::start_pulling`] (the app reads the RX rings itself)
+    /// whose TX channels `pull.channels` the TX thread fills from
+    /// `pull.processor` ([`Embedded::start_tx_pulling`]): a bridge pulled
+    /// both ways (dstack #364, dstack-asio's to- and from-ASIO sides). The
+    /// pump still runs `processor` every block on `map` (no RX inputs, no
+    /// pulled TX channel).
+    #[allow(clippy::too_many_arguments)]
+    pub fn start_pulling_with_tx<P: Process + 'static>(
+        cfg: DeviceConfig,
+        place: &Place,
+        wait: PlaceWait<'_>,
+        map: Map,
+        processor: P,
+        source: ClockSource,
+        frame_sender: Option<Arc<dyn FrameSender>>,
+        pull: TxPullOf,
+    ) -> Result<(Embedded, Intake), HostError> {
+        let pulls = Pulls {
+            rx: true,
+            tx: Some(pull),
+        };
+        Self::with_intake(Self::launch(
+            cfg,
+            place,
+            wait,
+            map,
+            processor,
+            source,
+            frame_sender,
+            pulls,
+        )?)
+    }
+
+    /// The started device with the RX rings' writer the app asked for, or
+    /// the device stopped when another writer had them.
+    fn with_intake(launched: (Embedded, Option<Intake>)) -> Result<(Embedded, Intake), HostError> {
+        match launched {
             (device, Some(intake)) => Ok((device, intake)),
             (device, None) => {
                 let stopped = device.stop(STOP_WAIT);
