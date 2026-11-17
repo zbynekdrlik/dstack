@@ -180,3 +180,22 @@ fn a_jump_into_a_full_set_loses_the_oldest() {
         assert_eq!(p.lost, want, "{k}");
     }
 }
+
+/// dstack #379: a flow whose furthest end is a whole ring past the clock's
+/// now starts over, its open holes lost; nearer, nothing changes.
+#[test]
+fn a_flow_starts_over_when_the_clock_goes_back_a_ring() {
+    let ring = crate::media::ring::SLOTS as u64;
+    let now = 1_000_000;
+    let mut h = Holes::default();
+    h.open(now + ring - 64, now + ring - 32);
+    let mut end = Some(now + ring - 1);
+    assert_eq!(follow_clock(&mut end, &mut h, now), Lost::default());
+    assert_eq!((end, h.open_holes().len()), (Some(now + ring - 1), 1));
+    let mut end = Some(now + ring);
+    assert_eq!(follow_clock(&mut end, &mut h, now), lost(1, 32));
+    assert_eq!((end, h.open_holes().len()), (None, 0));
+    let mut none = None;
+    assert_eq!(follow_clock(&mut none, &mut h, now), Lost::default());
+    assert_eq!(none, None);
+}

@@ -691,3 +691,14 @@ fn a_ring_follows_its_reader_when_the_clock_goes_back() {
         assert_eq!(last, packet(w - N as u64 - lead), "step {step_ns} ns");
     }
 }
+
+/// dstack #379: a whole ring back is another time base; less is not.
+#[test]
+fn a_clock_went_back_from_a_whole_ring() {
+    let ring = SLOTS as u64;
+    assert!(went_back(T + ring, T));
+    assert!(!went_back(T + ring - 1, T));
+    assert!(went_back(T + 2 * ring, T));
+    assert!(!went_back(T, T + ring), "ahead");
+    assert!(!went_back(0, T), "no read yet");
+}

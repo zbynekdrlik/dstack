@@ -604,6 +604,11 @@ fn place(p: PlaceArgs<'_>) -> u64 {
         stats.wake_minute.record(w);
     }
     let end = pos.saturating_add(nframes as u64);
+    // dstack #379: the clock went back under the flow; start it over.
+    count_lost(
+        stats,
+        holes::follow_clock(&mut lane.end, &mut lane.holes, now),
+    );
     // dstack #278: holes, reorders and gaps.
     let placed = holes::place(&mut lane.end, &mut lane.holes, pos, end, !late);
     if placed.out_of_order {

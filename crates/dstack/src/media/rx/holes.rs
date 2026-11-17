@@ -17,6 +17,8 @@
 //!
 //! The RX thread owns it: a fixed array, no allocation, no atomics.
 
+use crate::media::ring::went_back;
+
 /// The most open holes a flow keeps; opening one more loses the oldest.
 pub const HOLES: usize = 16;
 
@@ -148,6 +150,21 @@ pub struct Placed {
     pub reordered: bool,
     /// Holes given up to make room.
     pub lost: Lost,
+}
+
+/// The clock went back under the flow (dstack #379, a new PTP time base: the
+/// transmitter's stamps went back with it): its furthest end, a whole ring
+/// or more past the clock's `now` ([`went_back`]), and its open holes are
+/// the old base's. The flow starts over: the holes are lost, and the next
+/// packet is its first. Else nothing changes.
+pub fn follow_clock(furthest: &mut Option<u64>, holes: &mut Holes, now: u64) -> Lost {
+    match *furthest {
+        Some(e) if went_back(e, now) => {
+            *furthest = None;
+            holes.clear()
+        }
+        _ => Lost::default(),
+    }
 }
 
 /// A packet of `start..end` (samples) arrived, `in_time` when it was not

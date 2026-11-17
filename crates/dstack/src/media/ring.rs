@@ -41,6 +41,17 @@
 //!   flow from the same transmitter whose old packets still arrive is
 //!   started by them (the RX thread cannot tell the two apart), so its
 //!   first gap counts as holes.
+//! - A read that ends a whole ring or more before the end of the furthest
+//!   read is a clock that went back to another time base ([`went_back`],
+//!   dstack #379: a new PTP grandmaster's time, 43.9 days back on
+//!   stream-obs, and every write was late for good). The ring follows it:
+//!   that read becomes the furthest and the flow starts again (start
+//!   holes until its first sample on the new base). The writes on the new
+//!   base before that read are late. A step back within one ring is
+//!   re-read where it overlaps, and its writes there are late. Known
+//!   limit: for one ring after such a step, a slot still holding the old
+//!   base's sample is not marked read empty, so a write the reader
+//!   overtakes there counts written (as before camera-box#1485).
 //! - The largest magnitude stored is kept until [`Ring::take_peak`] (the
 //!   heartbeat's peaks, once a second): one atomic per write.
 //!
@@ -231,6 +242,16 @@ impl Ring {
 
     /// Reads positions `pos`, `pos + 1`, … into `out`, a hole as 0.
     pub fn read_at(&self, pos: u64, out: &mut [i32]) -> Read {
+        let end = pos.wrapping_add(out.len() as u64);
+        // dstack #379: a read a whole ring or more behind the furthest one
+        // is a time base that went back (the reader's positions are its
+        // clock's; on one base they never go back a ring). The ring
+        // follows: this read is the furthest, and the flow starts again,
+        // so the writes on the new base are not late.
+        if went_back(self.read_end.load(Ordering::Relaxed), end) {
+            self.read_end.store(end, Ordering::Relaxed);
+            self.first.store(NOT_STARTED, Ordering::Relaxed);
+        }
         let first = self.first.load(Ordering::Relaxed);
         let mut r = Read::default();
         for (i, o) in out.iter_mut().enumerate() {
@@ -257,8 +278,7 @@ impl Ring {
                 0
             };
         }
-        self.read_end
-            .fetch_max(pos.wrapping_add(out.len() as u64), Ordering::Relaxed);
+        self.read_end.fetch_max(end, Ordering::Relaxed);
         self.holes.fetch_add(r.holes as u64, Ordering::Relaxed);
         self.start_holes
             .fetch_add(r.start_holes as u64, Ordering::Relaxed);
@@ -292,6 +312,17 @@ impl Ring {
     fn slot(&self, p: u64) -> &AtomicU64 {
         &self.slots[p as usize % SLOTS]
     }
+}
+
+/// Whether a position `at` is a whole ring ([`SLOTS`]) or more before
+/// `furthest` (dstack #379): the clock under it went back to another time
+/// base (a new PTP grandmaster's), since on one base the positions a reader
+/// asks or a flow's packets bring never go back that far. A ring's read
+/// ending at `at` then rebases the ring ([`Ring::read_at`]); a flow whose
+/// furthest end is that far past the clock's now starts its holes over
+/// ([`crate::media::rx`]).
+pub fn went_back(furthest: u64, at: u64) -> bool {
+    furthest.saturating_sub(at) >= SLOTS as u64
 }
 
 /// The bit above the lap that marks a slot the reader found empty.
