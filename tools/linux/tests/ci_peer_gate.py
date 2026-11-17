@@ -34,7 +34,14 @@ re-bootstrapped, and an oversleep about the wake's whole lateness says the
 thread was not run when its timer fired: the scheduler's miss, not dstack's
 work. A thread's CPU time against its wall time is NOT evidence: on a
 Hyper-V runner the host's steal counts as the thread's CPU (#354). A line
-without the field (before v0.6.158) is no evidence. The oversleep is read
+without the field (before v0.6.158) is no evidence. Since dstack #370
+each `late_wakes_recent` entry carries its own sleep's oversleep
+(`oversleep_us`), so a re-bootstrap is matched to its own number, even
+when it shares its second with another (run 44032644214: two in one
+second, the line's peak 7192 us explained the 7187 us one only); the line
+then gives W only. An entry without the field (an older peer, or a sleep
+not measured) falls back to the line's per-second peak, under its strict
+rule (the line counts that re-bootstrap alone and names it its latest). The oversleep is read
 on the media clock, so a forward step of it would read as an oversleep
 too: this holds only because the gate's peers run on the TEST system
 clock (`--test-clock-ppm`; ci-peer.test.sh checks `clock.source ==
@@ -103,10 +110,12 @@ def stalls(lines):
 
 def rebootstraps(status, from_ms, to_ms):
     """A peer's recent re-bootstrapping wakes in the window, as
-    (unix_ms, behind_us): the pump woke at unix_ms, behind_us late."""
+    (unix_ms, behind_us, oversleep_us): the pump woke at unix_ms,
+    behind_us late, its sleep before that wake returned oversleep_us past
+    its target (None: unmeasured, or a peer before dstack #370)."""
     wakes = status["device"]["engine"]["late_wakes_recent"]
     return [
-        (w["unix_ms"], w["behind_us"])
+        (w["unix_ms"], w["behind_us"], w.get("oversleep_us"))
         for w in wakes
         if w["rebootstrap"] and from_ms - STATUS_AGE_MS <= w["unix_ms"] <= to_ms
     ]
@@ -147,33 +156,47 @@ def watch_lines(lines):
 
 
 def overslept(wake, watch):
-    """The watch line showing this re-bootstrap's wake (`unix_ms`,
-    `behind_us`) was a sleep the scheduler returned late, or None. The
-    line, logged up to WATCH_AFTER_MS after the wake, must count one
-    re-bootstrap only, caused by a late wake, name this wake as its
-    second's latest (`behind_max_us` == `behind_us`), and show an
-    oversleep past the margin W (any sleep returned past W re-bootstraps,
-    so the oversleeping wake is this one) and within OVERSLEEP_SLACK_US of
-    the wake's whole lateness. Per-second peaks are all the line carries,
-    so a rebootstrap that shares its second with another, or whose sleep
-    the watch took in the second before its wake's (the pump records the
-    oversleep before the next block's lateness), stays unexplained: the
-    gate leans to "the rise stands"."""
-    unix_ms, behind_us = wake
+    """How late this re-bootstrap's sleep returned, us, when that is the
+    scheduler's miss, else None. `wake` is (`unix_ms`, `behind_us`,
+    `oversleep_us`), `watch` the peer's pump watch lines. The oversleep
+    must be past the margin W (a sleep back within W re-bootstraps
+    nothing: the rest of the lateness was the pump's own) and within
+    OVERSLEEP_SLACK_US of the wake's whole lateness; W is read from the
+    wake's own watch line, logged up to WATCH_AFTER_MS after it, which
+    counts a late re-bootstrap.
+
+    With the wake's own oversleep (`oversleep_us`, dstack #370) that is
+    the number judged, whatever else its second held. Without it (a peer
+    before #370) the line's per-second peak is judged instead, and then
+    the line must count this re-bootstrap alone, caused by a late wake,
+    and name this wake as its second's latest (`behind_max_us` ==
+    `behind_us`), so the peak is this wake's; a re-bootstrap sharing its
+    second with another, or whose sleep the watch took in the second
+    before its wake's, stays unexplained there: the gate leans to "the
+    rise stands"."""
+    unix_ms, behind_us, own = wake
     for w in watch:
         if not unix_ms < w["unix_ms"] <= unix_ms + WATCH_AFTER_MS:
             continue
-        over, margin = w["oversleep_max_us"], w["margin"]
+        margin = w["margin"]
+        if own is not None:
+            over = own
+            shown = (w["rebootstraps"] or 0) >= 1 and "late" in (w["cause"] or "").split("+")
+        else:
+            over = w["oversleep_max_us"]
+            shown = (
+                w["rebootstraps"] == 1
+                and w["cause"] == "late"
+                and w["behind_max_us"] == behind_us
+            )
         if (
-            w["rebootstraps"] == 1
-            and w["cause"] == "late"
-            and w["behind_max_us"] == behind_us
+            shown
             and over is not None
             and margin is not None
             and over * RATE_HZ > margin * 1_000_000
             and over >= behind_us - OVERSLEEP_SLACK_US
         ):
-            return w
+            return over
     return None
 
 
@@ -196,19 +219,19 @@ def void(seen, from_ms, to_ms, peers):
         found = rebootstraps(status, from_ms, to_ms)
         if len(found) < late:
             return False, f"{name}: {late} re-bootstraps rose, {len(found)} in its recent late wakes"
-        for unix_ms, behind_us in found:
+        for unix_ms, behind_us, own in found:
             if witnessed((unix_ms - behind_us / 1000, unix_ms), seen):
                 why.append(f"{name}: re-bootstrap at {unix_ms} ms in a witnessed stall")
                 continue
-            line = overslept((unix_ms, behind_us), watch)
-            if line is None:
+            over = overslept((unix_ms, behind_us, own), watch)
+            if over is None:
                 return False, (
                     f"{name}: re-bootstrap at {unix_ms} ms ({behind_us} us behind) not seen by "
                     "the witness, and no pump watch line shows its sleep returned that late"
                 )
             why.append(
                 f"{name}: re-bootstrap at {unix_ms} ms, {behind_us} us behind, its sleep "
-                f"returned {line['oversleep_max_us']} us late (the scheduler's)"
+                f"returned {over} us late (the scheduler's)"
             )
     return True, "every re-bootstrap has runner evidence: " + "; ".join(why)
 

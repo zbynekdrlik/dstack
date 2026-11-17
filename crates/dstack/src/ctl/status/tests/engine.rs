@@ -36,10 +36,13 @@ fn the_engine_status_names_the_causes_the_wakes_and_the_threads() {
     stats.drained(9_000, 4);
     stats.record_cpu(81_500);
     let wakes = stats.wakes();
-    wakes.record(100_000, false, false, || 0);
-    wakes.record(12_345_678, true, true, || 1_794_000_000_123);
+    wakes.record(100_000, false, false, None, || 0);
+    // dstack #370: a late wake with its sleep's oversleep, one without.
+    wakes.record(12_345_678, true, true, Some(12_300_999), || {
+        1_794_000_000_123
+    });
     wakes.take_minute();
-    wakes.record(700_000, true, false, || 1_794_000_000_456);
+    wakes.record(700_000, true, false, None, || 1_794_000_000_456);
     let scheduling = media.tx.scheduling();
     scheduling.record(MediaThread::Rx, Priority::Refused, None);
     scheduling.record(MediaThread::Pump, Priority::MmcssPriorityRefused, Some(9));
@@ -53,7 +56,7 @@ fn the_engine_status_names_the_causes_the_wakes_and_the_threads() {
          \"wake_behind_minute_max_us\":12345,\"oversleep_max_us\":8551,\"drain_max_us\":74,\
          \"drain_max_datagrams\":34,\"max_process_cpu_us\":81,\"wake_behind_buckets\":[1,1,0,0,0,1,0,0],\
          \"late_wakes\":2,\"late_wakes_recent\":[\
-         {\"unix_ms\":1794000000123,\"behind_us\":12345,\"rebootstrap\":1},\
+         {\"unix_ms\":1794000000123,\"behind_us\":12345,\"rebootstrap\":1,\"oversleep_us\":12300},\
          {\"unix_ms\":1794000000456,\"behind_us\":700,\"rebootstrap\":0}],\
          \"threads\":[{\"thread\":\"pump\",\"scheduling\":\"mmcss_joined_priority_refused\",\
          \"mmcss_task\":9},{\"thread\":\"rx\",\"scheduling\":\"refused\",\"mmcss_task\":null}]}}";

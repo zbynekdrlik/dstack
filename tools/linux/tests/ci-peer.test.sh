@@ -7,8 +7,9 @@
 # pump restart, no play-time step, and each peer's play_at_ppm at its skew.
 # A runner stall is told from a defect by a witness process with no dstack
 # code (ci_peer_gate.py): a window that rose, where every re-bootstrap was a
-# late wake inside a stall the witness saw too, or one whose own pump watch
-# line shows its sleep returned that late (#339), is measured again, at most
+# late wake inside a stall the witness saw too, or one whose sleep returned
+# that late (its own status entry's oversleep, #370, else its pump watch
+# line's, #339), is measured again, at most
 # WINDOWS times (other counters may rise with it: a restart is heard as a
 # gap by the other peer). A void window is a warning on the run.
 # Run as root (the interface); the binary is $1 (default target/release).

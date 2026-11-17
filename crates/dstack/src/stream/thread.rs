@@ -105,7 +105,7 @@ fn run<P: Process>(clock: &dyn PtpClock, mut pump: Pump<P>, stop: &AtomicBool) {
             clock.sleep_until(target);
             let woke = clock.now_ns();
             let same = crate::clock::Anchor::of(clock).epoch == epoch;
-            pump.stats.slept(target, asked, woke, same);
+            pump.slept(target, asked, woke, same);
         } else {
             pump.free();
             let now = Instant::now();
