@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.176
 
 - **Feature (#391, dcontroller#108): a bridge device's own figures over the network.** dcontroller can now read a dasio bridge device's targets, converter delays, underruns (with each side's latest cause) and callback lateness bins over the Dante network, about once a second, to graph them beside the packet latency. Until now they were in the local control socket's status only.
   - **The read:** a dstack-own request on the info port 8700, opcode `07 xx d5 b1 00 00 00 00` (no Audinate message type uses 0xd5xx), answered by a dstack device that holds bridge figures, UNICAST to the asking socket (reply `07 2a d5 b0 00 00 00 00`), never to the info group 224.0.0.231:8702 or the heartbeat, which Dante Controller and every Audinate device read. Any other device leaves it unanswered, as any opcode it does not know. Bounded like the info replies (10 a second, one bound for every asker; a request over it reads nothing). Several devices on one address: the address's manager relays the request with its sender to its members (new share messages `A` and `U`) and sends a member's reply only as a bridge reply, only to an asker it relayed within the last second, only to one host; a member or manager older than this release ignores the new messages, so that device answers nothing until both run it.
