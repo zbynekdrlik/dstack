@@ -67,6 +67,9 @@ const SETTLE: Duration = Duration::from_secs(2);
 const JUDGED: Duration = Duration::from_secs(8);
 /// A held event about every this many events (0.7 s).
 const HOLD_EVERY: u64 = 70;
+/// The events after a hold that wake late in the late-wake case (more
+/// than the gap's settling calls: a held PC's burst).
+const LATE_EVENTS: u32 = 6;
 
 /// [`LEVEL`] on output 0.
 struct Constant;
@@ -125,7 +128,8 @@ impl Heard {
 }
 
 /// The card and its event thread (module doc), each held event `hold`
-/// late and the event after it `late_after` late: returns what it heard.
+/// late and the [`LATE_EVENTS`] events after it `late_after` late: returns
+/// what it heard.
 #[allow(clippy::too_many_arguments)]
 fn output(
     hold: Duration,
@@ -145,7 +149,7 @@ fn output(
     let mut ticks = 0u64;
     let mut padding = 0u64;
     let mut next = began;
-    let mut was_held = false;
+    let mut late_left = 0;
     let mut hole_before = false;
     let mut events = 0u64;
     let mut judging: Option<(Instant, [u64; 5])> = None;
@@ -156,12 +160,15 @@ fn output(
         next += PERIOD;
         events += 1;
         let held = judging.is_some() && events.is_multiple_of(HOLD_EVERY);
-        let wake = match (held, was_held) {
-            (true, _) => next + hold,
-            (false, true) => next + late_after,
-            (false, false) => next,
+        let wake = if held {
+            late_left = LATE_EVENTS;
+            next + hold
+        } else if late_left > 0 {
+            late_left -= 1;
+            next + late_after
+        } else {
+            next
         };
-        was_held = held;
         if let Some(wait) = wake.checked_duration_since(Instant::now()) {
             std::thread::sleep(wait);
         }
@@ -365,13 +372,11 @@ fn judge(case: &str, heard: &Heard, restarts: u64, counts: &str) {
     // doc).
     assert_eq!(heard.off, 0, "samples off the level: {at}");
     // The frames due while the card played silence are the output's gap,
-    // dropped and counted as its own: the card's silence, never more than
-    // a millisecond a hold over it (the settling calls' least lateness),
-    // and at most a quarter period a hold under it (the lateness of the
-    // call before the hold, the noise floor of the settling).
+    // dropped and counted as its own: the card's silence, to the frame
+    // (the settling snaps the estimate to the silence the buffer allows).
     let (lost, silence) = (heard.output_lost, heard.card_silence);
-    assert!(
-        lost <= silence + heard.holds * 48 && silence <= lost + heard.holds * PERIOD_FRAMES / 4,
+    assert_eq!(
+        lost, silence,
         "the output's gaps dropped {lost} frames for the card's {silence} of silence: {at}"
     );
     assert!(
@@ -398,8 +403,8 @@ fn an_output_callback_held_20_ms_plays_on_from_the_queued_packets() {
     judge("held 20 ms", &heard, restarts, &counts);
 }
 
-/// The hold's next event wakes 6 ms late too (a held PC's burst): the
-/// settling must not drop that lateness as silence.
+/// The events after the hold wake 6 ms late too, past the settling (a
+/// held PC's burst): that lateness must not be dropped as silence.
 #[test]
 fn an_output_callback_held_25_ms_then_6_ms_late_plays_on() {
     let (heard, restarts, counts) = run(Duration::from_millis(25), Duration::from_millis(6));
