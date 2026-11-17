@@ -9,7 +9,9 @@
 //! reads the largest since the start, that second's and the last minute's
 //! (taken by the pump watch), the fixed buckets ([`BUCKET_EDGES_NS`]) and
 //! the last [`RECENT`] wakes one block or more late, each with its UTC
-//! time and whether the pump re-bootstrapped there.
+//! time, whether the pump re-bootstrapped there and how late the sleep
+//! before it returned (dstack #370: that wake's own oversleep, so a reader
+//! can tell each late wake's cause, not only the second's peak).
 //!
 //! The recent wakes are a ring of slots, each guarded by a sequence word
 //! (a seqlock with one writer, the pump): the word goes up by one before a
@@ -50,6 +52,12 @@ pub struct LateWake {
     pub behind_us: u64,
     /// The pump was more than its margin behind there and re-bootstrapped.
     pub rebootstrap: bool,
+    /// How late the pump's sleep before this wake returned past its
+    /// target, whole µs ([`super::split::oversleep_ns`], dstack #370):
+    /// near `behind_us`, the thread was not run when its timer fired.
+    /// `None` when unmeasured (a sleep asked for a time already past, a
+    /// clock not read, a new epoch across the sleep, free pacing).
+    pub oversleep_us: Option<u64>,
 }
 
 /// One slot of the recent late wakes.
@@ -60,6 +68,9 @@ struct Slot {
     unix_ms: AtomicU64,
     /// `behind_us << 1`, plus 1 when the pump re-bootstrapped.
     word: AtomicU64,
+    /// The oversleep in whole µs plus 1 ([`oversleep_word`]), 0 when
+    /// unmeasured.
+    oversleep: AtomicU64,
 }
 
 /// The pump's wake lateness (see the module).
@@ -101,12 +112,15 @@ impl WakeLateness {
     /// A wake `behind_ns` behind its due time (the pump thread): the
     /// largest kept, its bucket counted; when it was `late` (one block or
     /// more), it goes into the recent ring with its wall time (`unix_ms`,
-    /// read only then) and whether the pump re-bootstrapped there.
+    /// read only then), whether the pump re-bootstrapped there and how
+    /// late the sleep before it returned (`oversleep_ns`, `None`:
+    /// unmeasured).
     pub fn record(
         &self,
         behind_ns: u64,
         late: bool,
         rebootstrap: bool,
+        oversleep_ns: Option<u64>,
         unix_ms: impl FnOnce() -> u64,
     ) {
         self.max_ns.fetch_max(behind_ns, Ordering::Relaxed);
@@ -128,6 +142,8 @@ impl WakeLateness {
             ((behind_ns / 1_000) << 1) + u64::from(rebootstrap),
             Ordering::Relaxed,
         );
+        slot.oversleep
+            .store(oversleep_word(oversleep_ns), Ordering::Relaxed);
         slot.seq.fetch_add(1, Ordering::Release);
         self.late.store(i + 1, Ordering::Release);
     }
@@ -187,13 +203,21 @@ impl WakeLateness {
         }
         let unix_ms = slot.unix_ms.load(Ordering::Relaxed);
         let word = slot.word.load(Ordering::Relaxed);
+        let oversleep = slot.oversleep.load(Ordering::Relaxed);
         fence(Ordering::Acquire);
         (slot.seq.load(Ordering::Relaxed) == done).then_some(LateWake {
             unix_ms,
             behind_us: word >> 1,
             rebootstrap: word & 1 == 1,
+            oversleep_us: oversleep.checked_sub(1),
         })
     }
+}
+
+/// A slot's oversleep word: whole µs plus 1, 0 for `None` (unmeasured).
+/// `u64::MAX` ns is under `u64::MAX - 1` µs, so the sum never wraps.
+fn oversleep_word(oversleep_ns: Option<u64>) -> u64 {
+    oversleep_ns.map_or(0, |ns| ns / 1_000 + 1)
 }
 
 /// The sequence word of late wake `i`'s slot once that wake is written:

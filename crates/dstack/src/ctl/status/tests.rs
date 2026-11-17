@@ -303,6 +303,7 @@ const WORDS: &[&str] = &[
     "unix_ms",
     "behind_us",
     "rebootstrap",
+    "oversleep_us",
     "threads",
     "thread",
     "scheduling",

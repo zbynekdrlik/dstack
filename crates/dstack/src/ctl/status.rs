@@ -292,8 +292,9 @@ impl Json {
 ///   (8 counts: under 0.5, 1, 2, 5, 10, 20, 50 ms, and 50 ms or more),
 ///   `late_wakes` (wakes one block or more behind), `late_wakes_recent`
 ///   (the last 32 of them, oldest first: `unix_ms` UTC, `behind_us`,
-///   `rebootstrap` 0/1); `threads`: each media thread that took its
-///   priority, `thread` (`pump`, `tx`, `tx_relay`, `rx`), `scheduling`
+///   `rebootstrap` 0/1, `oversleep_us`: how late the pump's sleep before
+///   that wake returned, absent where unmeasured, dstack #370);
+///   `threads`: each media thread that took its priority, `thread` (`pump`, `tx`, `tx_relay`, `rx`), `scheduling`
 ///   (`mmcss_high`, `mmcss_joined_priority_refused`, `highest`,
 ///   `sched_fifo`, `realtime` (Windows), `normal`, `refused`) and
 ///   `mmcss_task` (MMCSS's task index, null outside MMCSS).
@@ -845,6 +846,9 @@ fn wakes_part(j: &mut Json, wakes: &crate::stream::wake::WakeLateness) {
         j.num("unix_ms", w.unix_ms);
         j.num("behind_us", w.behind_us);
         j.flag("rebootstrap", w.rebootstrap);
+        if let Some(us) = w.oversleep_us {
+            j.num("oversleep_us", us);
+        }
         j.close('}');
     }
     j.close(']');
