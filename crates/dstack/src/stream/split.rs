@@ -21,7 +21,18 @@
 //! - **The block's work** (`max_process_cpu`): a block's own thread CPU
 //!   time ([`thread_cpu_ns`], Linux), beside its wall time
 //!   (`max_process_us`). A block with a long wall time and a short CPU time
-//!   was not run in its middle (preempted), not slow.
+//!   was not run in its middle (preempted), not slow. The converse does
+//!   not hold: CPU time near the wall time proves only that the thread
+//!   was the one current on its CPU, not that it worked. A kernel without
+//!   `CONFIG_PARAVIRT_TIME_ACCOUNTING` (Ubuntu's generic and azure kernels)
+//!   or a hypervisor that gives no steal clock (Hyper-V, under GitHub's
+//!   Azure runners) counts the time the host took the virtual CPU as the
+//!   thread's, and one without `CONFIG_IRQ_TIME_ACCOUNTING` (the same
+//!   kernels) counts the interrupts and softirqs that ran meanwhile. No
+//!   reading inside such a guest separates them from work (dstack #354:
+//!   obs's 1.5-3.2 ms `cause=none` blocks with CPU = wall on a runner,
+//!   against at most 56 us of CPU for the same block shape on dev1 under
+//!   `chrt -f 10`, re-bootstraps, resyncs and 1 s stalls included).
 //! - **The blocks before the sleep**: a wake whose sleep was asked for a
 //!   time already past (the blocks and drains ran into the next block's
 //!   time) records no oversleep; its lateness is the work's, seen in the
