@@ -14,16 +14,16 @@ import ci_peer_gate as gate  # noqa: E402
 
 
 def status(*wakes):
-    """A peer status holding these (unix_ms, behind_us, rebootstrap) wakes."""
-    return {
-        "device": {
-            "engine": {
-                "late_wakes_recent": [
-                    {"unix_ms": t, "behind_us": b, "rebootstrap": r} for t, b, r in wakes
-                ]
-            }
-        }
-    }
+    """A peer status holding these (unix_ms, behind_us, rebootstrap) wakes,
+    each with its oversleep_us as a fourth item when given (dstack #370)."""
+
+    def entry(t, b, r, *over):
+        e = {"unix_ms": t, "behind_us": b, "rebootstrap": r}
+        if over:
+            e["oversleep_us"] = over[0]
+        return e
+
+    return {"device": {"engine": {"late_wakes_recent": [entry(*w) for w in wakes]}}}
 
 
 def peer(rise, late, st, watch=()):
@@ -245,6 +245,106 @@ class Oversleep(unittest.TestCase):
         self.assertTrue(is_void, reason)
         self.assertIn(f"a: re-bootstrap at {B_STALL} ms in a witnessed stall", reason)
         self.assertIn("b: re-bootstrap at 1794865075821 ms, 6125 us behind", reason)
+
+
+# PR #368's ci-peer run 44032644214 (v0.6.165, attempt 1, #370): peer a
+# re-bootstrapped twice in one second, 6979 us and 7187 us late, and the
+# witness saw neither. Its watch line, verbatim, counts both and carries
+# that second's peaks only (oversleep 7192 us: the 7187 us wake's). The run
+# failed on the 6979 us one. Its peers logged no per-wake oversleep: the
+# 6984 us below is made up, about its lateness, as for every late wake of
+# that run with a line of its own. The window is about the log's window 1.
+D_LINE = (
+    "2026-11-17T06:38:39.999479Z  WARN dstack::stream::watch: engine pump lost or overran "
+    'blocks this second device="ci-peer-a" rebootstraps=2 missed=6 overruns=0 '
+    "writes_after_send=0 max_process_us=43 media=true block=128 margin=288 playout=480 "
+    "offset=896 cause=late behind_max_us=7187 oversleep_max_us=7192 drain_max_us=1043 "
+    "drain_max_datagrams=16 max_process_cpu_us=44"
+)
+D_FIRST, D_SECOND = 1794897519128, 1794897519985
+D_FROM, D_TO = 1794897519700, 1794897539777
+
+
+def two_in_a_second(first, second, lines=(D_LINE,)):
+    """Run 44032644214's second: peer a's two re-bootstraps, each
+    (behind_us,) or (behind_us, oversleep_us), and its log's `lines`."""
+    st = status(
+        (D_FIRST - 63, 5208, False),
+        (D_FIRST, first[0], True, *first[1:]),
+        (D_SECOND, second[0], True, *second[1:]),
+    )
+    peers = {"a": peer(2, 2, st, gate.watch_lines(lines)), "b": peer(0, 0, status())}
+    return gate.void([], D_FROM, D_TO, peers)
+
+
+class PerWakeOversleep(unittest.TestCase):
+    def test_the_run_s_second_stands_on_the_peak_alone(self):
+        # As the run logged it (no per-wake field): the peak is the
+        # second's latest wake's, so the 6979 us one has no evidence.
+        is_void, reason = two_in_a_second((6979,), (7187,))
+        self.assertFalse(is_void)
+        self.assertIn(
+            "a: re-bootstrap at 1794897519128 ms (6979 us behind) not seen by the witness", reason
+        )
+
+    def test_each_rebootstrap_s_own_oversleep_explains_it(self):
+        is_void, reason = two_in_a_second((6979, 6984), (7187, 7192))
+        self.assertTrue(is_void, reason)
+        self.assertIn("1794897519128 ms, 6979 us behind, its sleep returned 6984 us late", reason)
+        self.assertIn("1794897519985 ms, 7187 us behind, its sleep returned 7192 us late", reason)
+
+    def test_the_own_oversleep_must_be_about_the_whole_lateness(self):
+        # OVERSLEEP_SLACK_US (500 us) short of the lateness, not more.
+        self.assertTrue(two_in_a_second((6979, 6479), (7187, 7192))[0])
+        is_void, reason = two_in_a_second((6979, 6478), (7187, 7192))
+        self.assertFalse(is_void)
+        self.assertIn("6979 us behind", reason)
+        # A sleep back on time: the lateness was the pump's own.
+        self.assertFalse(two_in_a_second((6979, 0), (7187, 7192))[0])
+
+    def test_the_own_oversleep_must_be_past_w(self):
+        # W = margin 288 samples = 6000 us.
+        self.assertFalse(two_in_a_second((6200, 6000), (7187, 7192))[0])
+        self.assertTrue(two_in_a_second((6200, 6001), (7187, 7192))[0])
+
+    def test_w_comes_from_the_wake_s_own_late_watch_line(self):
+        good = ((6979, 6984), (7187, 7192))
+        for bad in [
+            # No line, or W unknown: no evidence.
+            (),
+            (D_LINE.replace(" margin=288", ""),),
+            # A line counting no late re-bootstrap.
+            (D_LINE.replace("cause=late", "cause=clock_back"),),
+            (D_LINE.replace("cause=late", "cause=lateish"),),
+            (D_LINE.replace("rebootstraps=2", "rebootstraps=0"),),
+            # Logged before the wakes, or past WATCH_AFTER_MS after them.
+            (D_LINE.replace("06:38:39.999479Z", "06:38:39.100000Z"),),
+            (D_LINE.replace("06:38:39.999479Z", "06:38:42.000000Z"),),
+        ]:
+            self.assertFalse(two_in_a_second(*good, lines=bad)[0], bad)
+        # Another cause beside the late one still names the late one.
+        line = D_LINE.replace("cause=late", "cause=late+retime")
+        self.assertTrue(two_in_a_second(*good, lines=(line,))[0])
+        # One line per wake: each finds its own within WATCH_AFTER_MS.
+        early = D_LINE.replace("06:38:39.999479Z", "06:38:39.500000Z")
+        self.assertTrue(two_in_a_second(*good, lines=(early, D_LINE))[0])
+
+    def test_an_entry_without_its_own_falls_back_to_the_peak(self):
+        # The 6979 us wake's own oversleep explains it; the 7187 us one has
+        # none, and its line counts two: the peak is no evidence for it.
+        is_void, reason = two_in_a_second((6979, 6984), (7187,))
+        self.assertFalse(is_void)
+        self.assertIn("1794897519985 ms (7187 us behind) not seen", reason)
+        # Alone in its line, the peak is its own again.
+        line = D_LINE.replace("rebootstraps=2", "rebootstraps=1")
+        peers = {"a": peer(1, 1, status((D_SECOND, 7187, True)), gate.watch_lines([line]))}
+        self.assertTrue(gate.void([], D_FROM, D_TO, peers)[0])
+
+    def test_a_status_entry_s_oversleep_is_read(self):
+        st = status((D_FIRST, 6979, True, 6984), (D_SECOND, 7187, True), (D_SECOND, 10, False, 5))
+        self.assertEqual(
+            gate.rebootstraps(st, D_FROM, D_TO), [(D_FIRST, 6979, 6984), (D_SECOND, 7187, None)]
+        )
 
 
 class Main(unittest.TestCase):
