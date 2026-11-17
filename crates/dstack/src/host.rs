@@ -210,6 +210,7 @@ pub fn interface_info(ifa: &IfAddr) -> Result<NetInfo, HostError> {
     daemon::net_info(ifa, &mac, speed.as_deref(), routes.as_deref()).map_err(setup)
 }
 
+pub mod test_run;
 #[cfg(windows)]
 pub(crate) mod windows;
 #[cfg(windows)]
@@ -363,8 +364,13 @@ pub(crate) fn prepare_config_waiting(
     engine_tx: &[usize],
     source: ClockSource,
 ) -> Result<Prepared, HostError> {
+    // dstack #366: a test run serves on loopback only (`test_run`).
+    let run = test_run::TestRun::from_env();
     prepare_on(cfg, place, control, engine_tx, source, |place| {
-        daemon::resolve_place(place, wait, interfaces, std::thread::sleep)
+        match run.place(place)? {
+            Some(lo) => Ok(lo),
+            None => daemon::resolve_place(place, wait, interfaces, std::thread::sleep),
+        }
     })
 }
 
@@ -433,7 +439,14 @@ pub(crate) fn prepare_on(
     }
     // An address not there yet is waited for; a refused one is exit 1.
     let ifa = resolve(place).map_err(run_failed)?;
-    let net = interface_info(&ifa)?;
+    // Only a test run reaches here with a loopback address (the lookup
+    // refuses one): it has no MAC of its own (`test_run::loopback_net`).
+    let net = if ifa.ip.is_loopback() {
+        warn!("TEST RUN: the device serves on loopback; no network sees it");
+        test_run::loopback_net(&ifa)
+    } else {
+        interface_info(&ifa)?
+    };
     info!(
         version = VERSION,
         build = BUILD,
