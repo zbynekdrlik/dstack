@@ -20,7 +20,7 @@ use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, TrySendError, sync_cha
 
 /// [`Switch::send`]'s error while the audio thread has not taken the last
 /// handover (it does not run), or the replaced ones still wait to be freed.
-pub const NOT_TAKEN: &str = "the Dante device's pump has not taken the last output yet";
+pub const NOT_TAKEN: &str = "the Dante device has not taken the last output yet";
 /// [`Switch::send`]'s error once the audio thread's end is gone.
 pub const GONE: &str = "the Dante device is gone";
 /// The room of the channel back to the control thread.

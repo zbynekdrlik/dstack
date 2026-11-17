@@ -26,19 +26,28 @@
 //!   (the same P and target); pulled, the wait from a sample's due time to
 //!   its playing loses the half pump block it waited in the ring.
 //! - **ASIO -> Dante:** [`AsioSide`] writes the driver's inputs into the
-//!   from-ASIO FIFO at the driver's clock; [`DanteSide`]'s player pulls them
-//!   for TX at the network's (dsend's direction).
+//!   from-ASIO FIFO at the driver's clock; a player pulls them for TX at
+//!   the network's (dsend's direction). Pulled ([`Bridge::pull_from_asio`],
+//!   dstack #364, the TX pull of #363: no latency term), the device's TX
+//!   thread runs that player ([`FromAsio`]) and fills each block at the
+//!   pump's own due time and stamp just before it sends, so a late pump no
+//!   longer leaves sent stamps silent (`tests/from_asio_pull.rs`'s
+//!   stalls of 10 to 20 ms: on the pump's path 20868 samples off and 17920
+//!   TX holes in 8 s under 22 stalls, 0 pulled). Otherwise [`DanteSide`] plays it on
+//!   the pump. The latency is the same either way (the same D, W, (c) TX
+//!   and target).
 //!
 //! The pump's side lives as long as the device; the driver's side is made
 //! anew at every open ([`Bridge::asio_side`], from the rate and buffer the
 //! open read), and so is the from-ASIO player, handed to the running
-//! `DanteSide` through `dlink::bridge`'s [`Switch`] (dsend's handover) and
-//! given back the same way to be freed off the pump's thread. Until the
-//! first open the pump's side plays a player on an empty FIFO (priming:
-//! silence), so `from_asio_stats` reads priming at a 1 ms target until the
-//! driver's first open. The switch keeps one handover in flight: while the
-//! pump does not run (the Dante device restarting), a second driver open is
-//! refused and the runner retries it after its backoff. Neither `process` allocates, and
+//! `DanteSide` (pulled: [`FromAsio`] on the TX thread) through
+//! `dlink::bridge`'s [`Switch`] (dsend's handover) and given back the same
+//! way to be freed off that thread. Until the first open it plays a player
+//! on an empty FIFO (priming: silence), so `from_asio_stats` reads priming
+//! at a 1 ms target until the driver's first open. The switch keeps one
+//! handover in flight: while its taker does not run (the Dante device
+//! restarting), a second driver open is refused and the runner retries it
+//! after its backoff. Neither `process` (nor [`FromAsio`]'s) allocates, and
 //! neither waits on a lock (the switch's bounded channel never blocks; the
 //! pull's lock is only tried). Neither makes a system call but a clock read
 //! (the FIFO's stamp, the block age) and, pulled, the pull's non-blocking
@@ -53,26 +62,35 @@
 //! driver runs, that drain keeps the flow heard (else it reads silent and
 //! is closed and asked again).
 //!
+//! Pulled both ways (dstack #364), the app takes [`Bridge::pull_from_asio`]
+//! first, then [`Bridge::dante_side`], and starts the device with
+//! `dlink::Link::start_pulling_with_tx` (the to-ASIO FIFO and the
+//! from-ASIO pull; `dlink::Link::start_tx_pulling` for a bridge with no
+//! channel to ASIO), then hands the RX pull over as above.
+//!
 //! The from-ASIO side's status figures ([`BlockAge`], dstack #325): the
 //! TX packets' age and the smallest receiver latency it serves, from the
 //! TX side's own measure, and a warning when a receiver counts our packets
 //! late ([`BlockAge::look`] from the status loop); and, as a diagnostic,
-//! its blocks' modelled age at the pump's take (the driver's side records
-//! each hand-over, the pump's side its take; [`Bridge::from_asio_age`]).
+//! its blocks' modelled age at the take (the driver's side records each
+//! hand-over, the side that plays the from-ASIO player its take: the
+//! pump's, or pulled the TX thread's fill; [`Bridge::from_asio_age`]).
 
 use std::sync::{Arc, OnceLock};
 
 use dlink::bridge::pull::{IdleWatch, Look, PullStats};
 use dlink::bridge::{
-    AppBuffer, Clock, Fifo, Player, RxPull, SharedPull, Stats, Switch, Taker, chunk_ns, fifo_for,
-    switch,
+    AppBuffer, Clock, Fifo, Player, RxPull, SharedPull, Stats, Switch, Taker, TxPull, chunk_ns,
+    fifo_for, switch,
 };
 use dstack_audio_io::{Block, Process};
 
 use crate::device::Opened;
 
 mod age;
+mod from_asio;
 pub use age::{AgeReport, BlockAge, NETWORK_ALLOWANCE_NS};
+pub use from_asio::FromAsio;
 
 /// Frames a side converts at once at least (its interleaved scratch): the
 /// pump's side a whole pump block, the driver's side its whole buffer
@@ -245,6 +263,50 @@ impl Bridge {
         self.pull.get().map(SharedPull::stats)
     }
 
+    /// The ASIO -> Dante side for the device's TX thread (dstack #364,
+    /// [`FromAsio`]): the from-ASIO player (and each driver open's after
+    /// it, through the bridge's switch) in a `dlink::bridge::TxPull` on
+    /// the bridge's `from_asio` TX outputs. Hand it to
+    /// `dlink::Link::start_pulling_with_tx` (with the to-ASIO pull, its
+    /// map's `tx` the from-ASIO channels) or `dlink::Link::start_tx_pulling`
+    /// (no to-ASIO channel), or, building the device from dstack's parts
+    /// (dasio), claim it as a `dstack::media::tx::TxFill` with
+    /// `TxShared::claim_fill` before the TX thread starts. From here on the
+    /// pump's side plays no from-ASIO audio: give the pump no TX channel
+    /// (both dlink starts do). A pull taken and never handed to the device
+    /// leaves the from-ASIO channels silent (and refuses the driver's
+    /// second open, as an untaken handover does).
+    ///
+    /// Call it before [`Bridge::dante_side`] (the from-ASIO player lives
+    /// in the pump's side until then) and before the driver's first open
+    /// (the open hands its player through the switch the pull now holds).
+    /// Refused for a bridge with no from-ASIO channels, after the pump's
+    /// side was taken or the driver's first open, or a second time.
+    pub fn pull_from_asio(&mut self) -> Result<FromAsio, String> {
+        if self.spec.from_asio == 0 {
+            return Err("the bridge has no channel from ASIO to pull".to_string());
+        }
+        if self.opened {
+            return Err(
+                "the driver opened already: take the from-ASIO pull before its first open"
+                    .to_string(),
+            );
+        }
+        let Some(dante) = &mut self.dante else {
+            return Err(
+                "the pump's side was taken already: take the from-ASIO pull before it".to_string(),
+            );
+        };
+        let Some((first, _pump_taker)) = dante.from_asio.take() else {
+            return Err("the bridge pulls from ASIO already".to_string());
+        };
+        // The pull's own switch replaces the pump's: no open sent a player
+        // through the old one yet.
+        let (pull, switch) = TxPull::switched(first, self.spec.from_asio);
+        self.switch = Some(switch);
+        Ok(FromAsio::new(pull, Arc::clone(&self.age)))
+    }
+
     pub fn spec(&self) -> Spec {
         self.spec
     }
@@ -391,11 +453,13 @@ fn feed(fifo: &Fifo, block: &Block<'_>) {
     });
 }
 
-/// The pump's side: RX into the to-ASIO FIFO, the from-ASIO player into TX.
+/// The pump's side: RX into the to-ASIO FIFO, the from-ASIO player into TX
+/// (unpulled each way: [`Bridge::pull_to_asio`], [`Bridge::pull_from_asio`]).
 pub struct DanteSide {
     to_asio: Option<Arc<Fifo>>,
     pull: Arc<OnceLock<SharedPull>>,
-    /// The from-ASIO player and its handover's end.
+    /// The from-ASIO player and its handover's end; `None` when the bridge
+    /// has no channel from ASIO or the TX thread pulls them ([`FromAsio`]).
     from_asio: Option<(Player, Taker<Player>)>,
     outputs: usize,
     scratch: Vec<f64>,

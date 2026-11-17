@@ -44,6 +44,24 @@ pub fn check(channels: &[usize], tx: usize, outputs: usize) -> Result<(), String
     }
 }
 
+/// What the device's TX thread runs for an app's pulled TX channels
+/// ([`crate::Link::start_tx_pulling`], dstack #363/#364): a [`Process`]
+/// with no inputs and [`TxProcess::outputs`] outputs, one a pulled TX
+/// channel. [`TxPull`] is one; an app may wrap it to count its own
+/// figures at each fill (dstack-asio's from-ASIO side, #364). Its
+/// `process` runs on the TX thread under the same rules as [`TxPull`]'s:
+/// no allocation, no lock, no blocking call.
+pub trait TxProcess: Process + 'static {
+    /// The TX channels it fills.
+    fn outputs(&self) -> usize;
+}
+
+impl TxProcess for TxPull {
+    fn outputs(&self) -> usize {
+        self.outputs
+    }
+}
+
 /// A processor with nothing to do: the pump's processor of an app whose
 /// only audio is the pulled TX (dsend), [`crate::Link::start_tx_pulling`]
 /// with no RX channels.

@@ -17,16 +17,18 @@
 //! the latency its receiver states, the TX side's `over_latency`) rising.
 //!
 //! **The block age is a diagnostic, not a receiver threshold.** It models
-//! how old the oldest sample of a driver's block is at the pump's take: a
+//! how old the oldest sample of a driver's block is at its take (the
+//! pump's block, or pulled the TX thread's fill, dstack #364): a
 //! driver hands a whole call's inputs at once, so its first sample is one
 //! call period old at the hand-over (128 frames at 96 kHz: 1.333 ms), and
-//! the wait for the pump's next block adds to it. dasio's field reading
+//! the wait for the next take adds to it. dasio's field reading
 //! (16.11.2026) showed it above the packets' real ages (1.9 ms modelled,
 //! 1.0-1.4 ms measured): a packet's stamp is not the capture time, so the
 //! model does not say what a receiver sees. The driver's side records each
-//! callback (its period, and the hand-over's time while the pump has not
-//! taken an earlier one); the pump's side, when it plays the from-ASIO
-//! player, takes the oldest untaken hand-over and records its age. Both on
+//! callback (its period, and the hand-over's time while no earlier one
+//! was taken); the side that plays the from-ASIO player (the pump's, or
+//! pulled the TX thread's `FromAsio`; only one of them) takes the oldest
+//! untaken hand-over and records its age. Both on
 //! the app's clock, atomics only: no allocation, no lock, no system call
 //! beyond the clock's read. It leaves out the from-ASIO FIFO's own depth
 //! (the bridge target, [`dlink::bridge::AppBuffer`]).
@@ -118,7 +120,7 @@ impl Default for Window {
 /// What the status shows ([`BlockAge::report`]), µs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AgeReport {
-    /// The last block's modelled age at the pump's take
+    /// The last block's modelled age at its take
     /// (`from_asio_block_age_us`, a diagnostic); `None` while no block was
     /// taken for one to two minutes.
     pub block_age_us: Option<u64>,
@@ -134,8 +136,9 @@ pub struct AgeReport {
     pub min_receiver_latency_us: Option<u64>,
 }
 
-/// A [`Window`] in three atomics (one writer: the pump's side for the
-/// block age, the status loop for the packet age).
+/// A [`Window`] in three atomics (one writer: the side that plays the
+/// from-ASIO player for the block age, the pump's or pulled the TX
+/// thread's; the status loop for the packet age).
 struct Shared {
     start: AtomicI64,
     max: AtomicU64,
@@ -174,11 +177,11 @@ pub struct BlockAge {
     clock: Clock,
     /// The latest callback's period, ns.
     period_ns: AtomicU64,
-    /// The oldest hand-over the pump has not taken, ns (`NONE`: none).
+    /// The oldest hand-over not taken yet, ns (`NONE`: none).
     pending: AtomicI64,
     /// The last block age, ns.
     last_ns: AtomicU64,
-    /// The block ages' window (the pump's side writes it).
+    /// The block ages' window (the taking side writes it).
     blocks: Shared,
     /// The TX packet ages' window (the status loop's [`BlockAge::look`]).
     packets: Shared,
@@ -224,7 +227,8 @@ impl BlockAge {
         );
     }
 
-    /// The pump took the from-ASIO FIFO: the oldest untaken hand-over's age
+    /// The from-ASIO FIFO was taken (the pump's block, or pulled the TX
+    /// thread's fill): the oldest untaken hand-over's age
     /// (its call period + the wait since) is recorded.
     pub fn taken(&self) {
         let at = self.pending.swap(NONE, Ordering::AcqRel);

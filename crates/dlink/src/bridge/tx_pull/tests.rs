@@ -158,3 +158,15 @@ fn the_debug_form_names_the_outputs_and_the_switch() {
         "{text}"
     );
 }
+
+/// dstack #364: the TX thread's view of a pull ([`TxProcess`], what
+/// `Link::start_tx_pulling` checks against the map) is its outputs.
+#[test]
+fn a_pull_as_a_tx_process_fills_its_outputs() {
+    let fifo = Arc::new(fifo_for(2, RATE));
+    let stats: Arc<Stats> = Arc::default();
+    let pull = TxPull::new(player(&fifo, &stats), 2);
+    assert_eq!(TxProcess::outputs(&pull), 2);
+    let pull = TxPull::new(player(&fifo, &stats), 3);
+    assert_eq!(TxProcess::outputs(&pull), 3);
+}

@@ -12,7 +12,8 @@
 //! blocking syscall inside them aborts the test binary. The sockets' reads
 //! and the clock read stay outside the attribute (system calls by nature,
 //! non-blocking). Built normally (every other job), the same workload runs
-//! without the sanitizer.
+//! without the sanitizer. The from-ASIO side the TX thread runs (dstack
+//! #364, `bridge::FromAsio`'s `process`) carries the attribute too.
 #![cfg_attr(iem_rtsan, feature(sanitize))]
 
 use std::net::{Ipv4Addr, UdpSocket};
@@ -117,6 +118,63 @@ fn the_driver_s_switch_with_its_pull_is_realtime_safe() {
     assert!(played >= 30, "it played the flow: {played} switches");
     let c = rx.lane(0);
     assert_eq!((c.packets, c.unplaced, c.late), (400, 0, 0), "{c:?}");
+}
+
+/// The from-ASIO side the TX thread runs (dstack #364, `FromAsio`'s
+/// `process`, rtsan-marked: the block age's take, the switch's take of a
+/// driver open's player and the player's fill), through priming into
+/// playing, a reopen's player taken and a skipped stretch (a resync).
+#[test]
+fn the_tx_thread_s_from_asio_fill_is_realtime_safe() {
+    let mut bridge = Bridge::new(Spec {
+        dante_rate: RATE,
+        block_frames: 128,
+        to_asio: 0,
+        from_asio: 1,
+        app_buffer_ns: None,
+    })
+    .unwrap();
+    let mut from = bridge.pull_from_asio().unwrap();
+    let _dante = bridge.dante_side().unwrap();
+    let opened = Opened {
+        rate: f64::from(RATE),
+        buffer_frames: BUFFER as u32,
+        driver_inputs: 1,
+        driver_outputs: 0,
+        inputs: vec![0],
+        outputs: vec![],
+        input_sample: Some(Sample::Int32),
+        output_sample: Sample::Int32,
+    };
+    let input = vec![0.25; BUFFER];
+    let mut none = [0.0; 0];
+    let mut tx = vec![0.0; 128];
+    let mut start = 1_000_000u64;
+    let mut played = 0;
+    for open in 0..2 {
+        let mut asio = bridge.asio_side(&opened).unwrap();
+        if open == 1 {
+            // A skipped stretch before the reopen's first fill.
+            start += 48_000;
+        }
+        for _ in 0..60 {
+            asio.process(&mut Block::new(BUFFER, &input, &mut none));
+            for _ in 0..BUFFER / 128 {
+                from.process(&mut Block::new(128, &[], &mut tx).at(start));
+                start += 128;
+                if tx.iter().all(|&x| (x - 0.25).abs() < 1e-3) {
+                    played += 1;
+                }
+            }
+        }
+    }
+    // The reopen's handover freed the idle player; the first open's came
+    // back at the reopen's take.
+    assert_eq!(bridge.collect(), 1, "the first open's player came back");
+    assert!(
+        played >= 150,
+        "it played the driver's input: {played} fills"
+    );
 }
 
 /// Allocates in a real-time context: a violation under the sanitizer.
