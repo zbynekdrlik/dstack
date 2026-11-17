@@ -4,8 +4,9 @@
 //! The process-wide spin switches (dstack #369 moved them out of
 //! `clock.rs`): the spin tail, the bounded escape's period and #351's
 //! no-yield tail, each set from the device's config at its start (the last
-//! device set wins) and read by the Windows low-latency wait
-//! (`sys_windows`). Re-exported at `clock::`.
+//! device set wins). The Windows low-latency wait (`sys_windows`) reads the
+//! values; [`escape_on`] is also read on every OS (the TX loop and the
+//! pump's thread start). Re-exported at `clock::`.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
