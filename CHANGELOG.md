@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- **Feature (#386, dasio#120): dstack-asio bins the driver callback's lateness under two periods, and names it at each underrun.** A callback counted `late` only past a gap of two periods (more than 1.333 ms late at 128 @ 96 kHz), while the from-ASIO side loses audio from 1.0-1.5 ms late at a 1.333 ms target (#382's measurement): dasio saw from-ASIO underruns with `late_callbacks` 0.
+  - **Lateness bins:** each buffer switch 0.25 ms late or more, up to a gap of two periods, counts in one of eight 0.25 ms bins of its lateness (gap less the period): 0.25-0.5, 0.5-0.75, ..., 1.75-2.0 ms, and 2.0 ms or more. Past two periods it counts in `late_callbacks` only, as before (no switch counted twice); under 0.25 ms in none. Decided by the pure `state::lateness_bin(gap_ns, period_ns)`; counted per run like `late_callbacks` (`engine::Counters::late_bins`, `DeviceEvents::late_bins`, `runner::Status::late_bins`, a `[u64; 8]`).
+  - **New status keys (dasio, additive):** one per bin, `state::LATE_BIN_KEYS` = `late_250us`, `late_500us`, `late_750us`, `late_1000us`, `late_1250us`, `late_1500us`, `late_1750us`, `late_2000us` (each the bin's lower edge; the same keys at every buffer size: at 128 @ 96 kHz the bins from 1.5 ms on stay 0, a callback later than 1.333 ms being `late_callbacks`). The existing keys (`late_callbacks`, `fast_callbacks`, `gap_max_ms`, ...) are unchanged.
+  - **The underrun line:** `bridge::UnderrunWatch::look(UnderrunCounts::of(&status, to_asio_underruns, from_asio_underruns), from_stats.target_ms())`, from the app's status loop (dasio's 10 s counts tick), WARNs when a player's underruns rose since the last look, e.g. `asio bridge underruns since the last look: from-ASIO 2 (target 1333 us): the driver's lateness; driver callbacks late meanwhile: 1000-1250 us: 1`. A from-ASIO underrun reads as the driver's when a callback came over two periods late or in a bin whose lower edge is at least 3/4 of the from-ASIO target (at 1.333 ms: from 1.0 ms late), else as the bridge's; a to-ASIO one as the driver's only past two periods (its pull and play share the switch). `bridge::{from_asio_cause, to_asio_cause, Cause}` are the pure decisions. A count that falls (a new run, a new player) counts again from 0.
+  - **No latency change:** no target, block, converter or default moves; the bins are counters in the driver callback (atomics, no allocation).
+  - Each consumer:
+    - **dasio:** `bridge_json` adds the eight keys from `status.late_bins` with `LATE_BIN_KEYS`; keep an `UnderrunWatch` in the instance loop and call `look` on the counts tick. A struct literal of `DeviceEvents` or `runner::Status` adds `late_bins` (or uses `..Default::default()`).
+    - **songplayer, obs, camera-box, intercom, presenter, iemmixer, dsend, dlisten:** nothing to change.
+
 ## 0.6.172
 
 - **Feature (#382, dasio#120): an ASIO bridge's directions take their own targets, and each ASRC starts from the last run's locked rate.** dasio measured on a 96 kHz bridge (128-frame driver buffer, pump block 32) that one `app_buffer_ns` for both directions cannot go lower: at 1.333 ms the to-ASIO side held (0 underruns with 4 late driver callbacks) and the from-ASIO side did not (4 underruns in 29 min).
