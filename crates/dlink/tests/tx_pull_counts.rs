@@ -11,7 +11,10 @@
 //! window, while it filled every block (the pump's own counts no longer
 //! see the pulled channels). Its own file, on loopback (dstack #366)
 //! and its own system clock; on a loaded dev1 run it real-time (`chrt -f
-//! 10`, `.claude/rules/tests.md`).
+//! 10`, `.claude/rules/tests.md`). The app thread is witnessed as in
+//! `tests/tx_pull.rs` (dstack #376, `tests/writer/witness.rs`): a judged
+//! window in which it stalled is set aside, and a failure prints
+//! `verdict RUNNER|OURS`.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -19,6 +22,10 @@ use std::time::{Duration, Instant};
 
 use dlink::bridge::{Player, Stats, TxPull, fifo_for};
 use dlink::{Block, Clock, Config, Link, Map, Place, Ports, Process, Stopped, SubStatus};
+
+#[path = "writer/witness.rs"]
+mod witness;
+use witness::{Witness, judge, verdict};
 
 /// One device pair at a time: each binds the Dante ports on loopback.
 static ONE_DEVICE: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -80,6 +87,21 @@ impl Process for Listen {
     }
 }
 
+/// The counts of one judged window.
+#[derive(Debug)]
+struct Judged {
+    /// The receiver's samples at the level and off it.
+    on: u64,
+    off: u64,
+    /// The sender's TX holes.
+    holes: u64,
+    /// The pump's stalls.
+    stalls: u64,
+    /// The TX fill's counts at the window's start and end.
+    before: dstack::media::tx::TxFillView,
+    after: dstack::media::tx::TxFillView,
+}
+
 fn tx_holes(link: &Link) -> u64 {
     (0..dstack::media::tx::MAX_FLOWS)
         .map(|s| link.media().tx.lane(s).holes)
@@ -122,16 +144,15 @@ fn stalled_pump_at(network: u32, name: &str) {
         Arc::clone(&stats),
     )
     .expect("the player");
+    // The app: a steady write every PERIOD on its own clock, each write's
+    // lateness on the witness.
+    let witness = Arc::new(Witness::new(PERIOD, &buffer, Arc::clone(&stats)));
     let writing = Arc::new(AtomicBool::new(true));
-    // The app thread's latest write past its schedule, us: an underrun
-    // with this near the bridge's foot (the target less half a write) is
-    // the test's own thread starved on a loaded box, not the stack.
-    let app_late_us = Arc::new(AtomicU64::new(0));
     let app = {
-        let (fifo, writing, late) = (
+        let (fifo, writing, witness) = (
             Arc::clone(&fifo),
             Arc::clone(&writing),
-            Arc::clone(&app_late_us),
+            Arc::clone(&witness),
         );
         std::thread::spawn(move || {
             let mut next = Instant::now();
@@ -140,9 +161,8 @@ fn stalled_pump_at(network: u32, name: &str) {
                 if let Some(wait) = next.checked_duration_since(Instant::now()) {
                     std::thread::sleep(wait);
                 }
-                let us = Instant::now().saturating_duration_since(next).as_micros();
-                late.fetch_max(u64::try_from(us).unwrap_or(u64::MAX), Ordering::Relaxed);
                 fifo.push_with(APP as usize / 100, |_, _| LEVEL);
+                witness.wrote(next);
             }
         })
     };
@@ -185,22 +205,36 @@ fn stalled_pump_at(network: u32, name: &str) {
     }
     std::thread::sleep(SETTLE);
     let fill = || sender.media().tx.tx_fill().expect("the TX pull's counts");
-    let (holes, before, underruns, stalled) = (
-        tx_holes(&sender),
-        fill(),
-        stats.underruns(),
-        stalls.load(Ordering::Relaxed),
-    );
-    judging.store(true, Ordering::Relaxed);
-    std::thread::sleep(JUDGED);
-    judging.store(false, Ordering::Relaxed);
-    let holes = tx_holes(&sender) - holes;
-    let after = fill();
-    let underruns = stats.underruns() - underruns;
-    let stalls = stalls.load(Ordering::Relaxed) - stalled;
+    let (judged, window, aside) = judge(&witness, || {
+        let (holes, before, stalled, on0, off0) = (
+            tx_holes(&sender),
+            fill(),
+            stalls.load(Ordering::Relaxed),
+            on.load(Ordering::Relaxed),
+            off.load(Ordering::Relaxed),
+        );
+        judging.store(true, Ordering::Relaxed);
+        std::thread::sleep(JUDGED);
+        judging.store(false, Ordering::Relaxed);
+        Judged {
+            on: on.load(Ordering::Relaxed) - on0,
+            off: off.load(Ordering::Relaxed) - off0,
+            holes: tx_holes(&sender) - holes,
+            stalls: stalls.load(Ordering::Relaxed) - stalled,
+            before,
+            after: fill(),
+        }
+    });
+    let Judged {
+        on,
+        off,
+        holes,
+        stalls,
+        before,
+        after,
+    } = judged;
     let channel = receiver.rx_channels().remove(0);
     let status = sender.status();
-    let (on, off) = (on.load(Ordering::Relaxed), off.load(Ordering::Relaxed));
     writing.store(false, Ordering::Relaxed);
     app.join().expect("the app thread");
     assert_eq!((sender.ended(), receiver.ended()), (None, None));
@@ -220,18 +254,40 @@ fn stalled_pump_at(network: u32, name: &str) {
         blocks + 50 >= expected && blocks <= expected + 50,
         "{blocks} blocks filled at {network} Hz, about {expected} due: {after:?}"
     );
+    // A writer stall makes no TX hole, fill restart, write after send or
+    // fault: every window's, set aside or judged.
+    let aside_counts: Vec<[u64; 4]> = aside
+        .iter()
+        .map(|(j, _)| {
+            [
+                j.holes,
+                j.after.rebootstraps - j.before.rebootstraps,
+                j.after.writes_after_send - j.before.writes_after_send,
+                j.after.faults,
+            ]
+        })
+        .collect();
+    assert!(
+        aside_counts.iter().all(|c| *c == [0; 4]),
+        "the TX holes, fill restarts, writes after send and faults of the windows set aside at {network} Hz: {aside_counts:?}, {aside:?}"
+    );
+    let underruns = window.underruns;
+    let restarts = after.rebootstraps - before.rebootstraps;
+    let after_send = after.writes_after_send - before.writes_after_send;
     assert_eq!(
-        (
-            off,
-            holes,
-            underruns,
-            after.rebootstraps - before.rebootstraps,
-            after.writes_after_send - before.writes_after_send,
-            after.faults
-        ),
+        (off, holes, underruns, restarts, after_send, after.faults),
         (0, 0, 0, 0, 0, 0),
-        "samples off the level, TX holes, bridge underruns, the fill's restarts, writes after send and faults at {network} Hz with {stalls} pump stalls: {on} on, {after:?}, {channel:?}, the app thread's latest write {} us late; the player's recentres {} and resyncs {}; the sender's status {status}",
-        app_late_us.load(Ordering::Relaxed),
+        "samples off the level, TX holes, bridge underruns, the fill's restarts, writes after send and faults at {network} Hz with {stalls} pump stalls: {on} on, {after:?}, {channel:?}; {}, the app thread's stall bound {} us, its record {window:?}; windows set aside (the app thread stalled) {aside:?}; the player's recentres {} and resyncs {}; the sender's status {status}",
+        verdict(
+            &window,
+            &[
+                ("TX holes", holes),
+                ("the fill's restarts", restarts),
+                ("writes after send", after_send),
+                ("faults", after.faults),
+            ]
+        ),
+        witness.stall_us(),
         stats.recentres(),
         stats.resyncs(),
     );

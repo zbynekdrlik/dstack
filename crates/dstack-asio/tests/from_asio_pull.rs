@@ -19,6 +19,12 @@
 //! write after send, no fault. On a loaded dev1 run it
 //! real-time (`DSTACK_TEST_LOOPBACK=1 chrt -f 10 <binary>`,
 //! `.claude/rules/tests.md`).
+//!
+//! The driver thread is the from-ASIO FIFO's writer, witnessed as dlink's
+//! `tests/tx_pull.rs` witnesses its app thread (dstack #376, dlink's
+//! `tests/writer/witness.rs`): a judged window in which it stalled is set
+//! aside and the next judged, up to [`witness::WINDOWS`], and a failure
+//! prints `verdict RUNNER|OURS`.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -27,6 +33,10 @@ use std::time::{Duration, Instant};
 use dlink::{Clock, Config, Link, Map, Place, Ports, Stopped, SubStatus};
 use dstack_asio::bridge::{Bridge, DanteSide, Spec};
 use dstack_asio::{Block, Opened, Process, Sample};
+
+#[path = "../../dlink/tests/writer/witness.rs"]
+mod witness;
+use witness::{Witness, judge, verdict};
 
 /// One device pair at a time: each binds the Dante ports on loopback.
 static ONE_DEVICE: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -104,6 +114,23 @@ impl Process for Listen {
         self.on.fetch_add(on, Ordering::Relaxed);
         self.off.fetch_add(off, Ordering::Relaxed);
     }
+}
+
+/// The counts of one judged window.
+#[derive(Debug)]
+struct Judged {
+    /// The receiver's samples at the level and off it.
+    on: u64,
+    off: u64,
+    /// The bridge device's TX holes and its pump's writes after send.
+    holes: u64,
+    after_send: u64,
+    /// The pump's stalls, and the pump's view at the window's end.
+    stalls: u64,
+    sent: String,
+    /// The TX fill's counts at the window's start and end.
+    before: dstack::media::tx::TxFillView,
+    after: dstack::media::tx::TxFillView,
 }
 
 /// Every TX slot's holes of `link`.
@@ -199,26 +226,27 @@ fn a_stalled_pump_against(to_asio: usize) {
     let mut side = bridge.asio_side(&opened).expect("the driver's side");
     // The driver thread: a buffer switch every ASIO period, whatever the
     // pump does, from the device's start (a driver opened at the bridge's
-    // start). It keeps its latest lateness for the message.
+    // start), each switch's lateness on the witness.
+    let period = Duration::from_nanos(BUFFER as u64 * 1_000_000_000 / u64::from(RATE));
+    let witness = Arc::new(Witness::new(
+        period,
+        &bridge.app_buffer(&opened),
+        Arc::clone(&stats),
+    ));
     let running = Arc::new(AtomicBool::new(true));
-    let late_us = Arc::new(AtomicU64::new(0));
     let driver = {
-        let (running, late_us) = (Arc::clone(&running), Arc::clone(&late_us));
+        let (running, witness) = (Arc::clone(&running), Arc::clone(&witness));
         std::thread::spawn(move || {
-            let period = Duration::from_nanos(BUFFER as u64 * 1_000_000_000 / u64::from(RATE));
             let input = vec![LEVEL; BUFFER];
             let mut out = vec![0f64; BUFFER * to_asio];
             let mut next = Instant::now();
             while running.load(Ordering::Relaxed) {
                 next += period;
-                match next.checked_duration_since(Instant::now()) {
-                    Some(wait) => std::thread::sleep(wait),
-                    None => {
-                        let us = u64::try_from(next.elapsed().as_micros()).unwrap_or(u64::MAX);
-                        late_us.fetch_max(us, Ordering::Relaxed);
-                    }
+                if let Some(wait) = next.checked_duration_since(Instant::now()) {
+                    std::thread::sleep(wait);
                 }
                 side.process(&mut Block::new(BUFFER, &input, &mut out));
+                witness.wrote(next);
             }
         })
     };
@@ -248,41 +276,90 @@ fn a_stalled_pump_against(to_asio: usize) {
     // The TX thread's fill (dstack #363's status `tx_pull`): the RED's
     // pump-run pull had none, so it is read where there is one.
     let fill = || sender.media().tx.tx_fill().unwrap_or_default();
-    let (holes, after_send, underruns, stalled, before) = (
-        tx_holes(&sender),
-        pump().writes_after_send,
-        stats.underruns(),
-        stalls.load(Ordering::Relaxed),
-        fill(),
-    );
-    late_us.store(0, Ordering::Relaxed);
-    judging.store(true, Ordering::Relaxed);
-    std::thread::sleep(JUDGED);
-    judging.store(false, Ordering::Relaxed);
-    let holes = tx_holes(&sender) - holes;
-    let sent = pump();
-    let after_send = sent.writes_after_send - after_send;
-    let underruns = stats.underruns() - underruns;
-    let stalls = stalls.load(Ordering::Relaxed) - stalled;
-    let after = fill();
+    let (judged, window, aside) = judge(&witness, || {
+        let (holes, after_send, stalled, before, on0, off0) = (
+            tx_holes(&sender),
+            pump().writes_after_send,
+            stalls.load(Ordering::Relaxed),
+            fill(),
+            on.load(Ordering::Relaxed),
+            off.load(Ordering::Relaxed),
+        );
+        judging.store(true, Ordering::Relaxed);
+        std::thread::sleep(JUDGED);
+        judging.store(false, Ordering::Relaxed);
+        let sent = pump();
+        Judged {
+            on: on.load(Ordering::Relaxed) - on0,
+            off: off.load(Ordering::Relaxed) - off0,
+            holes: tx_holes(&sender) - holes,
+            after_send: sent.writes_after_send - after_send,
+            stalls: stalls.load(Ordering::Relaxed) - stalled,
+            sent: format!("{sent:?}"),
+            before,
+            after: fill(),
+        }
+    });
+    let Judged {
+        on,
+        off,
+        holes,
+        after_send,
+        stalls,
+        sent,
+        before,
+        after,
+    } = judged;
     let filled = sender.media().tx.tx_fill();
     let channel = receiver.rx_channels().remove(0);
-    let (on, off) = (on.load(Ordering::Relaxed), off.load(Ordering::Relaxed));
     running.store(false, Ordering::Relaxed);
     driver.join().expect("the driver thread");
     assert_eq!((sender.ended(), receiver.ended()), (None, None));
     assert!(matches!(receiver.stop(), Stopped::Done));
     assert!(matches!(sender.stop(), Stopped::Done));
-    assert!(stalls >= 10, "only {stalls} pump stalls: {sent:?}");
+    assert!(stalls >= 10, "only {stalls} pump stalls: {sent}");
     assert!(
         on + off >= 7 * u64::from(RATE),
         "{on} on, {off} off: {channel:?}"
     );
+    // A writer stall makes no TX hole, write after send, fill restart or
+    // fault: every window's, set aside or judged.
+    let aside_counts: Vec<[u64; 5]> = aside
+        .iter()
+        .map(|(j, _)| {
+            [
+                j.holes,
+                j.after_send,
+                j.after.rebootstraps - j.before.rebootstraps,
+                j.after.writes_after_send - j.before.writes_after_send,
+                j.after.faults,
+            ]
+        })
+        .collect();
+    assert!(
+        aside_counts.iter().all(|c| *c == [0; 5]),
+        "the TX holes, writes after send, fill restarts, fill writes after send and faults of the windows set aside: {aside_counts:?}, {aside:?}"
+    );
+    let underruns = window.underruns;
+    let fill_counts = [
+        ("TX holes", holes),
+        ("writes after send", after_send),
+        (
+            "the fill's restarts",
+            after.rebootstraps - before.rebootstraps,
+        ),
+        (
+            "the fill's writes after send",
+            after.writes_after_send - before.writes_after_send,
+        ),
+        ("faults", after.faults),
+    ];
     assert_eq!(
         (off, holes, after_send, underruns),
         (0, 0, 0, 0),
-        "samples off the level, the bridge device's TX holes, its pump's writes after send and the from-ASIO underruns with {stalls} pump stalls: {on} on, the driver thread's latest switch {} us late, the bridge device's pump {sent:?}, its TX pull {filled:?}, {channel:?}",
-        late_us.load(Ordering::Relaxed)
+        "samples off the level, the bridge device's TX holes, its pump's writes after send and the from-ASIO underruns with {stalls} pump stalls: {on} on, the bridge device's pump {sent}, its TX pull {filled:?}, {channel:?}; {}, the driver thread's stall bound {} us, its record {window:?}; windows set aside (the driver thread stalled) {aside:?}",
+        verdict(&window, &fill_counts),
+        witness.stall_us(),
     );
     // The TX thread filled every block of the judged window (128 frames at
     // 48 kHz), and never started again, wrote after a send or faulted.
