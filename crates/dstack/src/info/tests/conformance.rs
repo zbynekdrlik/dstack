@@ -23,7 +23,7 @@ fn fixture() -> serde_json::Value {
 }
 
 /// A captured datagram: `group` (`heartbeats`, `malformed`,
-/// `info_replies`), `name`.
+/// `info_replies`, `channel_changes`), `name`.
 fn captured(group: &str, name: &str) -> Vec<u8> {
     hex(fixture()[group][name]
         .as_str()
@@ -275,8 +275,9 @@ fn the_walker_reads_the_hardware_channel_changes() {
 }
 
 /// The hardware's notification broken one rule at a time: a mask length
-/// past the body, the body padded to 4, a zero length, a mask whose last
-/// byte names no channel (each with the header's length set right).
+/// past the body, two zero bytes after the mask, a zero length, a mask
+/// whose last byte names no channel (each with the header's length set
+/// right).
 #[test]
 fn the_walker_refuses_a_malformed_channel_change() {
     let good = captured("channel_changes", "yamaha_rx8");
