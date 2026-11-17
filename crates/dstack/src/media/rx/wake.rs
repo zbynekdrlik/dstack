@@ -14,8 +14,8 @@
 //! reads it; a packet recorded meanwhile counts in this window or the
 //! next, never in both, though its largest may land in the other window
 //! than its count (which can only lower this window's top figures by that
-//! one packet's). Windows has no receive stamp: nothing is recorded
-//! there.
+//! one packet's). A box without receive stamps (dstack #381: a Windows
+//! NIC that stamps none, `rx_stamps` not `kernel`/`nic`) records nothing.
 //!
 //! The same window holds each packet's write delay (dstack #234: the
 //! kernel's receive time to the end of its ring writes), which also

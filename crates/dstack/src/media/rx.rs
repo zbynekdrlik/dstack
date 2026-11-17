@@ -301,6 +301,11 @@ impl RxShared {
             })
             .collect::<io::Result<Box<[UdpSocket]>>>()?;
         let stamping = stamping(ip, sockets.iter().all(stamp_receives));
+        info!(
+            "RX receive stamps on {ip}: {} (dstack #381: kernel or nic \
+             measure each packet's arrival; otherwise it is bracketed by the reads)",
+            stamping.word()
+        );
         Ok(RxShared {
             rate,
             plans: std::array::from_fn(|_| Cell::new()),
@@ -398,6 +403,7 @@ impl RxShared {
             late: get(&l.late),
             late_at_read: get(&l.late_at_read),
             wire_late: get(&l.wire_late),
+            stamped: get(&l.stamped),
             lateness_peak: get(&l.lateness_peak),
             lateness_at_read_peak: get(&l.lateness_at_read_peak),
             lateness_sum_ns,

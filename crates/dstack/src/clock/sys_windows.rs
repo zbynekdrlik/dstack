@@ -42,8 +42,9 @@ pub fn realtime_ns() -> i64 {
     (t - UNIX_EPOCH_FT) * 100
 }
 
-/// QPC's frequency, ticks a second (fixed at boot).
-fn qpc_frequency() -> i64 {
+/// QPC's frequency, ticks a second (fixed at boot). The RX receive stamps
+/// are scaled with it (dstack #381).
+pub(crate) fn qpc_frequency() -> i64 {
     static FREQ: OnceLock<i64> = OnceLock::new();
     *FREQ.get_or_init(|| {
         let mut f = 0i64;
@@ -53,12 +54,17 @@ fn qpc_frequency() -> i64 {
     })
 }
 
-/// QPC as ns since boot.
-fn qpc_ns() -> i64 {
+/// QPC now, ticks (an RX receive stamp's unit, dstack #381).
+pub(crate) fn qpc_ticks() -> i64 {
     let mut t = 0i64;
     // SAFETY: a valid, writable i64.
     unsafe { QueryPerformanceCounter(&mut t) };
-    super::qpc_ns_of(t, qpc_frequency())
+    t
+}
+
+/// QPC as ns since boot.
+fn qpc_ns() -> i64 {
+    super::qpc_ns_of(qpc_ticks(), qpc_frequency())
 }
 
 /// The app's clock (`clock::app_monotonic_ns`, dstack #295): raw QPC in

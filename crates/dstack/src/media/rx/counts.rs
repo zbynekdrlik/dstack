@@ -28,6 +28,8 @@ pub(super) struct RxStats {
     pub(super) late_at_read: AtomicU64,
     /// Packets already late when the kernel received them.
     pub(super) wire_late: AtomicU64,
+    /// Packets whose receive stamp was taken (dstack #381).
+    pub(super) stamped: AtomicU64,
     pub(super) unplaced: AtomicU64,
     pub(super) keepalives: AtomicU64,
     pub(super) keepalive_errors: AtomicU64,
@@ -143,9 +145,15 @@ pub struct RxCounts {
     /// (iemmixer, 5.11.2026).
     pub late_at_read: u64,
     /// Packets whose first frame was already later than `late`'s limit
-    /// when the kernel received them (dstack #234, Linux; 0 on Windows):
-    /// late on the wire, not by a late RX-thread wake.
+    /// when the OS received them (dstack #234; 0 without receive stamps,
+    /// [`super::RxShared::stamping`]): late on the wire, not by a late
+    /// RX-thread wake.
     pub wire_late: u64,
+    /// Packets whose receive stamp was taken (dstack #381): their ages are
+    /// the stamp's. Fewer than `packets` on a box that stamps means some
+    /// datagrams came without a stamp (bracketed instead); 0 without
+    /// receive stamps.
+    pub stamped: u64,
     /// The largest lateness of any packet at its arrival since the device
     /// started, samples (`lateness` is the last second's only; dstack
     /// #350: at the arrival, not the read).

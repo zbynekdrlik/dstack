@@ -588,6 +588,9 @@ mod app;
 pub use app::*;
 #[cfg(any(target_os = "linux", windows))]
 pub use sys::{allow_escape, ask_escape, block_escape, defer_escape, give_on_timer, relay_spin};
+/// QPC's raw count and frequency, for the RX receive stamps (dstack #381).
+#[cfg(windows)]
+pub(crate) use sys::{qpc_frequency, qpc_ticks};
 
 /// The wait of a timing profile.
 pub fn wait_mode_for(profile: TimingProfile) -> WaitMode {

@@ -28,7 +28,7 @@ const RX_STAMPS: &str = if cfg!(target_os = "linux") {
 /// The status's receive-stamp fields of a flow that received nothing:
 /// Linux only (dstack #234, `SO_TIMESTAMPNS`).
 const STAMPS_NONE: &str = if cfg!(target_os = "linux") {
-    "\"wire_late\":0,\"wake_delay_us\":0,\"wake_delay_peak_us\":0,"
+    "\"wire_late\":0,\"stamped\":0,\"wake_delay_us\":0,\"wake_delay_peak_us\":0,"
 } else {
     ""
 };
@@ -258,6 +258,7 @@ const WORDS: &[&str] = &[
     "recv_errors",
     "rx_poll_errors",
     "rx_stamps",
+    "stamped",
     "kernel",
     "nic",
     "refused",
@@ -600,7 +601,7 @@ fn the_status_shows_the_packets_judge_in_ns_numbers_only() {
         assert!(net[0] <= 260 && net[2] <= 416, "{net:?}");
         assert!(net[0] <= net[1] && net[1] <= net[2], "{net:?}");
         format!(
-            "\"wire_late\":0,\"wake_delay_us\":{wake},\"wake_delay_peak_us\":{peak},\
+            "\"wire_late\":0,\"stamped\":2,\"wake_delay_us\":{wake},\"wake_delay_peak_us\":{peak},\
              \"network_latency_min_us\":{},\"network_latency_p99_us\":{},\
              \"network_latency_max_us\":{},",
             net[0], net[1], net[2]

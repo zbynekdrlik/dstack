@@ -16,6 +16,7 @@ use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
 use std::os::windows::io::{AsRawSocket, FromRawSocket};
 use std::sync::OnceLock;
 
+use tracing::info;
 use windows_sys::Win32::Foundation::NO_ERROR;
 use windows_sys::Win32::NetworkManagement::IpHelper::{
     ConvertInterfaceIndexToLuid, INTERFACE_TIMESTAMP_CAPABILITIES,
@@ -26,15 +27,17 @@ use windows_sys::Win32::Networking::WinSock::{
     SO_TIMESTAMP, SOCKADDR, SOCKADDR_IN, SOCKET, SOCKET_ERROR, SOL_SOCKET, TIMESTAMPING_CONFIG,
     TIMESTAMPING_FLAG_RX, WSABUF, WSAGetLastError, WSAID_WSARECVMSG, WSAIoctl, WSAMSG,
 };
-use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
-use windows_sys::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
+use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
+
+use crate::clock;
 
 use super::{
     NicStamps, Received, Stamping, WIN_CMSG_HEADER, WIN_SO_TIMESTAMP, WIN_SOL_SOCKET, qpc_stamp_ns,
     qpc_stamp_of, stamping_of,
 };
 
-// The pure walk's layout is the platform's.
+// The pure walk's layout is the platform's (64-bit Windows: the only
+// Windows target dstack builds).
 const _: () = assert!(size_of::<CMSGHDR>() == WIN_CMSG_HEADER);
 const _: () = assert!(SOL_SOCKET == WIN_SOL_SOCKET);
 const _: () = assert!(SO_TIMESTAMP as i32 == WIN_SO_TIMESTAMP);
@@ -109,21 +112,22 @@ pub fn stamp_receives(s: &impl AsRawSocket) -> bool {
 type ActiveCaps =
     unsafe extern "system" fn(*const NET_LUID_LH, *mut INTERFACE_TIMESTAMP_CAPABILITIES) -> u32;
 
-/// The receive-stamp capabilities active on the interface that holds `ip`;
-/// `None` when no adapter holds it or Windows cannot say.
-fn nic_stamps(ip: Ipv4Addr) -> Option<NicStamps> {
-    let (_, _, _, index, _) = crate::host::windows::win_nic::of_with_index(ip).ok()?;
+/// The receive-stamp capabilities active on the interface that holds `ip`,
+/// or why Windows cannot say (for the start's log line).
+fn nic_stamps(ip: Ipv4Addr) -> Result<NicStamps, String> {
+    let (_, _, _, index, _) = crate::host::windows::win_nic::of_with_index(ip)?;
     let mut luid = NET_LUID_LH { Value: 0 };
     // SAFETY: a writable LUID.
-    if unsafe { ConvertInterfaceIndexToLuid(index, &mut luid) } != NO_ERROR {
-        return None;
+    let r = unsafe { ConvertInterfaceIndexToLuid(index, &mut luid) };
+    if r != NO_ERROR {
+        return Err(format!("interface {index}: no LUID ({r})"));
     }
     let dll: Vec<u16> = "iphlpapi.dll\0".encode_utf16().collect();
-    // SAFETY: a NUL-terminated wide name; the module stays loaded (a
-    // system DLL this binary already imports from).
-    let module = unsafe { LoadLibraryW(dll.as_ptr()) };
+    // SAFETY: a NUL-terminated wide name. iphlpapi is loaded: this binary
+    // imports from it (`ConvertInterfaceIndexToLuid` above).
+    let module = unsafe { GetModuleHandleW(dll.as_ptr()) };
     if module.is_null() {
-        return None;
+        return Err("iphlpapi.dll not loaded".to_string());
     }
     // SAFETY: a loaded module and a NUL-terminated ANSI name.
     let found = unsafe {
@@ -131,15 +135,22 @@ fn nic_stamps(ip: Ipv4Addr) -> Option<NicStamps> {
             module,
             c"GetInterfaceActiveTimestampCapabilities".as_ptr().cast(),
         )
-    }?;
+    }
+    .ok_or("no GetInterfaceActiveTimestampCapabilities (Windows before 10 2004)")?;
     // SAFETY: the export's documented signature.
     let active: ActiveCaps = unsafe { std::mem::transmute(found) };
     let mut caps = INTERFACE_TIMESTAMP_CAPABILITIES::default();
     // SAFETY: a valid LUID and a writable capabilities struct.
-    if unsafe { active(&luid, &mut caps) } != NO_ERROR {
-        return None;
+    let r = unsafe { active(&luid, &mut caps) };
+    if r != NO_ERROR {
+        return Err(format!("interface {index}: capabilities unreadable ({r})"));
     }
-    Some(NicStamps {
+    info!(
+        "RX receive stamps: interface {index} stamps receives in software {}, \
+         in hardware {} (dstack #381)",
+        caps.SoftwareCapabilities.AllReceive, caps.HardwareCapabilities.AllReceive
+    );
+    Ok(NicStamps {
         software_rx: caps.SoftwareCapabilities.AllReceive,
         hardware_rx: caps.HardwareCapabilities.AllReceive,
     })
@@ -147,24 +158,13 @@ fn nic_stamps(ip: Ipv4Addr) -> Option<NicStamps> {
 
 /// The box's [`Stamping`] for flow sockets on our address `ip`, `accepted`
 /// when every one took [`stamp_receives`]: the NIC driver's active
-/// capabilities decide ([`stamping_of`]).
+/// capabilities decide ([`stamping_of`]); why none were read is logged.
 pub fn stamping(ip: Ipv4Addr, accepted: bool) -> Stamping {
-    stamping_of(false, accepted, accepted.then(|| nic_stamps(ip)).flatten())
-}
-
-/// QPC now, ticks, and its frequency (fixed at boot).
-fn qpc_now() -> (i64, i64) {
-    static FREQ: OnceLock<i64> = OnceLock::new();
-    let frequency = *FREQ.get_or_init(|| {
-        let mut f = 0i64;
-        // SAFETY: a valid, writable i64.
-        unsafe { QueryPerformanceFrequency(&mut f) };
-        f.max(1)
+    let nic = accepted.then(|| nic_stamps(ip)).and_then(|read| {
+        read.map_err(|why| info!("RX receive stamps: no NIC capabilities for {ip}: {why}"))
+            .ok()
     });
-    let mut t = 0i64;
-    // SAFETY: a valid, writable i64.
-    unsafe { QueryPerformanceCounter(&mut t) };
-    (t, frequency)
+    stamping_of(false, accepted, nic)
 }
 
 /// The control messages' room: one stamp (a header and a `UINT64`) and
@@ -205,10 +205,8 @@ fn recv_msg(sock: SOCKET, buf: &mut [u8]) -> io::Result<Received> {
         return Err(io::Error::from_raw_os_error(unsafe { WSAGetLastError() }));
     }
     let written = (msg.Control.len as usize).min(control.0.len());
-    let at_ns = qpc_stamp_of(&control.0[..written]).and_then(|stamp| {
-        let (now, frequency) = qpc_now();
-        qpc_stamp_ns(stamp, now, frequency)
-    });
+    let at_ns = qpc_stamp_of(&control.0[..written])
+        .and_then(|stamp| qpc_stamp_ns(stamp, clock::qpc_ticks(), clock::qpc_frequency()));
     let whole = usize::try_from(msg.namelen).is_ok_and(|l| l >= size_of::<SOCKADDR_IN>());
     let from = (whole && addr.sin_family == AF_INET).then(|| {
         // SAFETY: the IPv4 union member of an AF_INET address.

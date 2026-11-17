@@ -21,9 +21,10 @@
 //! (the packet's frames, which exist only once its last frame does, and
 //! how late the sender sent it). It is an upper bound on the transit, the
 //! figure to set (a) and (b) against. Only differences of one clock's
-//! reads go into the arrival (as for `wire_late`), so the wall clock's
+//! reads go into the arrival (as for `wire_late`), so the stamp clock's
 //! offset from PTP does not matter.
-//! Windows has no receive stamp: nothing is recorded there.
+//! A box without receive stamps (dstack #381: a Windows NIC that stamps
+//! none, `rx_stamps` not `kernel`/`nic`) records nothing.
 
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 

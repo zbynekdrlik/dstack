@@ -190,7 +190,9 @@ impl Json {
 ///   and late samples), `start_holes` (dstack #234: the holes the pump read
 ///   before the flow's first sample, in the rings of the channels routed
 ///   to the slot now, summed; not in any `holes`), `wire_late`,
-///   `wake_delay_us` and
+///   `stamped` (dstack #381, where stamped: the placed packets whose
+///   receive stamp was taken; fewer than `packets` means datagrams came
+///   without one and were bracketed), `wake_delay_us` and
 ///   `wake_delay_peak_us` (dstack #234, where stamped, `rx_stamps`; absent
 ///   on a box whose OS stamps no receive time: packets already late by
 ///   `late`'s rule when the OS received them, and the largest wake delay,
@@ -672,6 +674,7 @@ fn rx_part(j: &mut Json, media: &Media) {
         j.num("start_holes", media.rx.flow_rings(slot).start_holes);
         if media.rx.stamps() {
             j.num("wire_late", lane.wire_late);
+            j.num("stamped", lane.stamped);
             j.num("wake_delay_us", media.rx.last_wake_delay_us(slot));
             j.num("wake_delay_peak_us", lane.wake_delay_peak_us);
             if let Some([p50, p99, p999]) = media.rx.last_wake_minute(slot) {

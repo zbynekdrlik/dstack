@@ -594,6 +594,7 @@ fn place(p: PlaceArgs<'_>) -> u64 {
         count(&stats.late);
     }
     if let Some(w) = wake {
+        count(&stats.stamped);
         if wire_late(now_ns, w, pos, rate, limit) {
             count(&stats.wire_late);
         }

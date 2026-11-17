@@ -430,6 +430,8 @@ fn a_packet_that_waited_in_its_socket_is_late_by_the_wake_not_on_the_wire() {
     let c = pump(&mut rx, 1, now);
     assert_eq!((c.packets, c.late, c.wire_late), (1, 1, 0), "{c:?}");
     assert!(c.wake_delay_peak_us >= 30_000, "{c:?}");
+    // dstack #381: its stamp was taken.
+    assert_eq!(c.stamped, 1, "{c:?}");
     // The heartbeat's take hands the second's largest on to the status.
     assert_eq!(s.last_wake_delay_us(2), 0);
     s.take_max_lateness(2);
@@ -522,6 +524,8 @@ fn with_the_stamps_off_a_linux_pass_measures_as_windows_does() {
     let c = pump(&mut rx, 1, ns_of(P0 + u64::from(RATE), RATE));
     assert_eq!((c.packets, c.late), (1, 1), "{c:?}");
     assert_eq!((c.wire_late, c.wake_delay_peak_us), (0, 0), "{c:?}");
+    // dstack #381: the kernel stamped it, but no stamp was taken.
+    assert_eq!(c.stamped, 0, "{c:?}");
     s.take_max_lateness(2);
     assert_eq!(s.last_wake_delay_us(2), 0);
 }
