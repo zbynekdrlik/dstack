@@ -8,7 +8,8 @@
 //! C adds the engine's pump (its media steps and blocks: the RX rings read,
 //! the processor, the engine rings written, the stats and histograms) and
 //! the TX passes that send the engine rings. The TX passes are timed and
-//! their sleeps read as the TX thread does (dstack #359). The first test proves the
+//! their sleeps read as the TX thread does (dstack #359), and the TX pull
+//! the TX thread fills before it sends (dstack #363). The first test proves the
 //! detector sees an allocation. Its own test binary, because it installs
 //! the global allocator; every buffer, ring, checker, socket, the
 //! transmitter, the receiver and the pump are built before the detector
@@ -29,7 +30,7 @@ use dstack::media::packet::{self, MEDIA_HEADER};
 use dstack::media::ring::Ring;
 use dstack::media::rx::{Receiver, RxPlan, RxRoute, RxShared};
 use dstack::media::source::Source;
-use dstack::media::tx::{HostNic, Transmitter, TxShared, ns_of};
+use dstack::media::tx::{HostNic, Transmitter, TxFill, TxShared, ns_of};
 use dstack::stream::{BLOCK, Map, Pump, PumpStats, Timing, WORK_MARGIN};
 use dstack_audio_io::{Block, Process};
 
@@ -681,4 +682,97 @@ fn the_engine_pump_and_its_tx_passes_do_not_allocate() {
         assert_eq!(x, counter(t - 224 + k as u64), "slot {k} at {t}");
     }
     assert!(b.recv(&mut buf).is_ok());
+}
+
+/// Output j at position p is the counter of p + j.
+struct Counter;
+
+impl Process for Counter {
+    fn process(&mut self, block: &mut Block<'_>) {
+        let start = block.start().unwrap_or(0);
+        for ch in 0..block.outputs() {
+            for (f, y) in block.output(ch).iter_mut().enumerate() {
+                *y = dstack::stream::to_f64(counter(start + f as u64 + ch as u64));
+            }
+        }
+    }
+}
+
+/// dstack #363: the TX thread's passes with a TX pull fill each due block
+/// into the engine rings (the processor, the quantizing, the writes) and
+/// then send, without allocating, a bounded escape's last pass too.
+#[test]
+fn the_tx_passes_with_a_tx_pull_do_not_allocate() {
+    let cfg = DeviceConfig::from_toml(include_str!("../../../config/test-device.toml"))
+        .expect("config/test-device.toml");
+    let timing = Timing::of(&cfg);
+    let none: Arc<[Ring]> = Arc::from(Vec::<Ring>::new());
+    let tx =
+        Arc::new(TxShared::new(cfg, Ipv4Addr::LOCALHOST, Arc::clone(&none), 1, &[0, 1]).unwrap());
+    assert!(tx.set_source(0, Source::Engine));
+    assert!(tx.set_source(1, Source::Engine));
+    let rx = Arc::new(RxShared::new(RATE, Ipv4Addr::LOCALHOST, none).unwrap());
+    let fill = TxFill::new(Box::new(Counter), vec![0, 1], timing, 24, rx);
+    assert!(tx.claim_fill(fill).is_ok());
+    let (a, at_a) = receiver();
+    {
+        let mut c = tx.lock();
+        let req = FlowRequest {
+            rx_host: "peer-device".to_string(),
+            rx_flow_name: "flow-1".to_string(),
+            sample_rate: RATE,
+            bits: 24,
+            channels: vec![Some(1), Some(2)],
+            fpp: 32,
+            rx: at_a,
+        };
+        c.table.add(&req, tx.now_ns()).unwrap();
+        tx.publish(&c);
+    }
+    let mut transmitter = Transmitter::new(Arc::clone(&tx));
+    let start = ns_of(T, RATE);
+    reset_violation_count();
+    assert_no_alloc(|| {
+        for i in 0..400 {
+            let at = start + i * 250_000;
+            transmitter.step(Some(at), 0);
+            if i % 40 == 20 {
+                let _ = transmitter.before_wait(|| (Some(at + 100_000), 0), || true, || false);
+            }
+        }
+    });
+    assert_eq!(
+        violation_count(),
+        0,
+        "the TX passes with a TX pull allocated"
+    );
+    let v = tx.tx_fill().expect("the TX pull's counts");
+    assert_eq!(
+        (v.blocks, v.rebootstraps, v.writes_after_send),
+        (300, 0, 0),
+        "{v:?}"
+    );
+    let lane = tx.lane(0);
+    assert!((295..=300).contains(&lane.packets), "{lane:?}");
+    // Only the first W (96) of each channel's stamps, before the first
+    // block's, as the pump's bootstrap leaves them.
+    assert_eq!(lane.holes, 2 * 96, "{lane:?}");
+    // The last packet: TX 2 is the counter one ahead, D = 224 after its
+    // input.
+    let mut buf = [0u8; 2048];
+    let mut last = None;
+    while let Ok(n) = a.recv(&mut buf) {
+        last = Some(buf[..n].to_vec());
+    }
+    let p = last.expect("packets to the receiver");
+    let (secs, sub) = packet::read_header(&p).unwrap();
+    let t = u64::from(secs) * u64::from(RATE) + u64::from(sub);
+    let mut first = [0i32; 2];
+    packet::read_frames(&p, 2, 3, |f, s, x| {
+        if f == 0 {
+            first[s] = x;
+        }
+    })
+    .unwrap();
+    assert_eq!(first, [counter(t - 224), counter(t - 224 + 1)], "at {t}");
 }

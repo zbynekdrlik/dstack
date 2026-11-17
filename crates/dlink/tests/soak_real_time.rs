@@ -206,7 +206,9 @@ fn an_rx_dropout_counts_against_the_restarts_only_at_a_tick_on_time() {
 #[test]
 fn one_minute_in_real_time() {
     const REAL: Duration = Duration::from_secs(60);
-    let Path { pump, ends: mut p } = path();
+    let Path {
+        pump, ends: mut p, ..
+    } = path();
     // The app's clock, unskewed (module doc).
     let clock = Arc::new(SkewedClock::new(app_monotonic_ns(), 0, TestClockPpm(0.0)));
     let stop = Arc::new(AtomicBool::new(false));

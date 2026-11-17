@@ -157,7 +157,7 @@ jobs:
         env:
           RUSTFLAGS: "-Zsanitizer=realtime --cfg iem_rtsan"
         run: cargo +nightly-2026-09-20 test --locked -Zbuild-std --target x86_64-unknown-linux-gnu -p dstack --test rtsan -- --nocapture
-      - name: The dlink RX pull's rtsan test (an output callback's pull, dstack #307)
+      - name: The dlink pulls' rtsan test (an output callback's RX pull, dstack #307; the TX thread's TX pull, dstack #363)
         env:
           RUSTFLAGS: "-Zsanitizer=realtime --cfg iem_rtsan"
         run: cargo +nightly-2026-09-20 test --locked -Zbuild-std --target x86_64-unknown-linux-gnu -p dlink --test rtsan -- --nocapture

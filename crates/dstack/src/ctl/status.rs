@@ -160,6 +160,13 @@ impl Json {
 ///   carries the
 ///   same three for the sleep and the pass before it (`oversleep_us`,
 ///   `last_pass_us`, `last_pass_cpu_us`, `-` when unmeasured).
+/// - `tx_pull` (dstack #363, only on a device whose app's TX the TX
+///   thread fills, `media::tx::TxFill`): `blocks` filled, `rebootstraps`
+///   (the fill's schedule started again: the TX thread more than W + the
+///   latency behind, a clock step, a new latency) and the `skipped` blocks
+///   they left out, `writes_after_send` (blocks written after some of
+///   their stamps were sent: never by the fill's order) and `faults` (the
+///   app's processor panicked; silent from then on).
 /// - `name` (dstack #209): the device's name as it is now, the one its ARC
 ///   record announces (the config's, or a controller's rename since), as a
 ///   JSON string: a local reader can tell which device answered. The
@@ -520,6 +527,15 @@ fn tx_part(j: &mut Json, media: &Media) {
         j.num("pass_max_cpu_us", us);
     }
     j.close('}');
+    if let Some(f) = media.tx.tx_fill() {
+        j.open(Some("tx_pull"), '{');
+        j.num("blocks", f.blocks);
+        j.num("rebootstraps", f.rebootstraps);
+        j.num("skipped", f.skipped);
+        j.num("writes_after_send", f.writes_after_send);
+        j.num("faults", f.faults);
+        j.close('}');
+    }
 }
 
 /// A TX lane's counts as the status shows them (µs for the times).

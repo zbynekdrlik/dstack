@@ -43,6 +43,7 @@ use crate::host::{self, ClockSource, Host, HostError, Signals, Stopped};
 use crate::media::bypass::FrameSender;
 use crate::media::rx::Intake;
 use crate::media::source::Source;
+use crate::media::tx::{TxFill, engine_channels};
 use crate::stream::{self, Map, Pump, PumpStats, Timing};
 
 /// A device running inside the app: serving, and its pump running the
@@ -129,7 +130,7 @@ impl Embedded {
             processor,
             source,
             frame_sender,
-            false,
+            Pulls::default(),
         )?;
         Ok(device)
     }
@@ -152,7 +153,17 @@ impl Embedded {
         source: ClockSource,
         frame_sender: Option<Arc<dyn FrameSender>>,
     ) -> Result<(Embedded, Intake), HostError> {
-        match Self::launch(cfg, place, wait, map, processor, source, frame_sender, true)? {
+        let pulls = Pulls { rx: true, tx: None };
+        match Self::launch(
+            cfg,
+            place,
+            wait,
+            map,
+            processor,
+            source,
+            frame_sender,
+            pulls,
+        )? {
             (device, Some(intake)) => Ok((device, intake)),
             (device, None) => {
                 let stopped = device.stop(STOP_WAIT);
@@ -164,8 +175,47 @@ impl Embedded {
         }
     }
 
-    /// The start: the device, its pump, and the RX rings' writer for the
-    /// app when `pull` asks for it ([`Embedded::start_pulling`]).
+    /// [`Embedded::start_waiting`] whose app's TX channels `pull.channels`
+    /// (from 0) carry what `pull.processor` makes (dstack #363): the TX thread runs it in
+    /// whole blocks at the pump's due time and stamp, just before it sends
+    /// ([`TxFill`], claimed with [`crate::media::tx::TxShared::claim_fill`]
+    /// before the TX thread starts), so a late pump no longer leaves those
+    /// channels' sent stamps empty. `pull.processor` has no inputs and one
+    /// output a channel of `pull.channels`. The pump still runs
+    /// `processor` every block on `map`, whose `map.tx` must not name a
+    /// pulled channel (one writer a ring); a channel past the device's or
+    /// named twice is [`HostError::Setup`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn start_tx_pulling<P: Process + 'static>(
+        cfg: DeviceConfig,
+        place: &Place,
+        wait: PlaceWait<'_>,
+        map: Map,
+        processor: P,
+        source: ClockSource,
+        frame_sender: Option<Arc<dyn FrameSender>>,
+        pull: TxPullOf,
+    ) -> Result<Embedded, HostError> {
+        let pulls = Pulls {
+            rx: false,
+            tx: Some(pull),
+        };
+        let (device, _) = Self::launch(
+            cfg,
+            place,
+            wait,
+            map,
+            processor,
+            source,
+            frame_sender,
+            pulls,
+        )?;
+        Ok(device)
+    }
+
+    /// The start: the device, its pump, the RX rings' writer for the app
+    /// when `pulls` asks for it ([`Embedded::start_pulling`]) and the TX
+    /// thread's fill ([`Embedded::start_tx_pulling`]).
     #[allow(clippy::too_many_arguments)]
     fn launch<P: Process + 'static>(
         cfg: DeviceConfig,
@@ -175,7 +225,7 @@ impl Embedded {
         processor: P,
         source: ClockSource,
         frame_sender: Option<Arc<dyn FrameSender>>,
-        pull: bool,
+        pulls: Pulls,
     ) -> Result<(Embedded, Option<Intake>), HostError> {
         if let Some(&rx) = map.rx.iter().find(|&&rx| rx >= cfg.rx.len()) {
             return Err(HostError::Setup(format!(
@@ -184,7 +234,9 @@ impl Embedded {
                 cfg.rx.len()
             )));
         }
-        let prepared = host::prepare_config_waiting(cfg, place, wait, None, &map.tx, source)?;
+        let pulled: &[usize] = pulls.tx.as_ref().map_or(&[], |p| &p.channels);
+        let engine = engine_channels(&map.tx, pulled, cfg.tx.len()).map_err(HostError::Setup)?;
+        let prepared = host::prepare_config_waiting(cfg, place, wait, None, &engine, source)?;
         // The device as it runs: a latency Dante Controller set holds over
         // the config's, and the RX plays at it.
         let timing = Timing::of(prepared.config());
@@ -196,15 +248,37 @@ impl Embedded {
         }
         // Every TX channel is silent at start: the app's outputs go out as
         // their channels' engine rings (each has one: `prepare_config`
-        // made a ring on every channel of `map.tx`).
-        for &tx in &map.tx {
+        // made a ring on every channel of `map.tx` and of the TX pull).
+        for &tx in &engine {
             media.tx.set_source(tx, Source::Engine);
+        }
+        // dstack #363: the TX pull's claim comes before the TX thread's
+        // start (the host's, below).
+        let tx_pull = pulls.tx.is_some();
+        if let Some(pull) = pulls.tx {
+            let fill = TxFill::new(
+                pull.processor,
+                pull.channels,
+                timing,
+                bits,
+                Arc::clone(&media.rx),
+            );
+            if let Err(refused) = media.tx.claim_fill(fill) {
+                return Err(HostError::Setup(format!(
+                    "the app's TX pull: {}",
+                    refused.reason
+                )));
+            }
         }
         let stats = Arc::new(PumpStats::new(timing, rate));
         media.attach_engine(Arc::clone(&stats));
         // dstack #307: the app's claim comes before the pump's (here) and
         // the RX thread's (at the host's start).
-        let intake = if pull { media.rx.app_intake() } else { None };
+        let intake = if pulls.rx {
+            media.rx.app_intake()
+        } else {
+            None
+        };
         let pump = Pump::new(
             processor,
             map,
@@ -232,6 +306,7 @@ impl Embedded {
             playout = timing.playout,
             margin = timing.margin,
             app_reads_rx = intake.is_some(),
+            tx_thread_fills = tx_pull,
             "embedded device serving, its pump running"
         );
         Ok((
@@ -275,6 +350,22 @@ impl Embedded {
         }
         self.host.stop(within)
     }
+}
+
+/// What the app pulls itself: the RX rings (`rx`, [`Embedded::start_pulling`])
+/// and TX channels the TX thread fills (`tx`, [`Embedded::start_tx_pulling`]).
+#[derive(Default)]
+struct Pulls {
+    rx: bool,
+    tx: Option<TxPullOf>,
+}
+
+/// An app's TX pull for [`Embedded::start_tx_pulling`] (dstack #363): its
+/// `processor` (no inputs, one output a channel) fills the TX channels
+/// `channels` (from 0) on the TX thread.
+pub struct TxPullOf {
+    pub channels: Vec<usize>,
+    pub processor: Box<dyn Process>,
 }
 
 /// The bound on the device's stop after its pump failed to start.

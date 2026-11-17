@@ -17,7 +17,7 @@ use dlink::{Block, Config, Map, Process, Rated};
 use dstack::clock::to_samples;
 use dstack::media::ring::Ring;
 use dstack::media::rx::RxShared;
-use dstack::media::tx::TxShared;
+use dstack::media::tx::{TxFill, TxShared};
 use dstack::peer::tone::ToneCheck;
 use dstack::stream::{Pump, PumpStats, Timing};
 
@@ -44,17 +44,23 @@ pub(crate) const MS: u64 = 1_000_000;
 pub(crate) type Mark = (Option<u64>, Option<i64>);
 
 /// The app's processor at its own rate (inside [`Rated`]): OBS's
-/// dante-input shape.
+/// dante-input shape. Its TX side is [`TxSide`], run inside it on the
+/// pump's path, or apart by the TX thread on the pulled path (dstack
+/// #363: `tx` is `None` then).
 pub(crate) struct App {
-    /// The TX bridge: the app's own writes, converted to the device's
-    /// clock.
-    pub(crate) tx: Player,
-    /// Interleaved TX frames of one block.
-    pub(crate) out: Vec<f64>,
+    pub(crate) tx: Option<TxSide>,
     /// The RX bridge's FIFO (the app's own player reads it).
     pub(crate) rx: Arc<Fifo>,
     /// Each block's start and play time, for the test.
     pub(crate) marks: Arc<Mutex<Vec<Mark>>>,
+}
+
+/// The app's TX side: the TX bridge (the app's own writes, converted to
+/// the device's clock) and the check of what it sends.
+pub(crate) struct TxSide {
+    pub(crate) tx: Player,
+    /// Interleaved TX frames of one block.
+    pub(crate) out: Vec<f64>,
     /// The TX output's left channel, checked for continuity as a receiver
     /// hears it (the peer's tone check, dstack #305): any discontinuity,
     /// counted by the player or not.
@@ -65,8 +71,9 @@ pub(crate) struct App {
     pub(crate) tx_tone_locked: Arc<std::sync::atomic::AtomicBool>,
 }
 
-impl Process for App {
-    fn process(&mut self, block: &mut Block<'_>) {
+impl TxSide {
+    /// Fills `block`'s outputs from the TX bridge and checks the tone.
+    fn fill(&mut self, block: &mut Block<'_>) {
         let frames = block.frames();
         let out = &mut self.out[..frames * CHANNELS];
         self.tx.fill_at(block.start(), out, CHANNELS, |x| x);
@@ -85,6 +92,22 @@ impl Process for App {
                 *y = out[f * CHANNELS + c];
             }
         }
+    }
+}
+
+/// The TX side alone: the TX pull's processor (dstack #363).
+impl Process for TxSide {
+    fn process(&mut self, block: &mut Block<'_>) {
+        self.fill(block);
+    }
+}
+
+impl Process for App {
+    fn process(&mut self, block: &mut Block<'_>) {
+        if let Some(tx) = self.tx.as_mut() {
+            tx.fill(block);
+        }
+        let frames = block.frames();
         let input = [block.input(0), block.input(1)];
         self.rx.push_with(frames, |f, c| input[c][f]);
         self.marks
@@ -106,11 +129,38 @@ pub(crate) fn config(dir: &std::path::Path) -> Config {
         .app_buffer(bridge::chunk_ns(CHUNK as u64, APP_RATE), None)
 }
 
-/// The path, built as dlink builds it: the pump, and the app's ends of
-/// its bridges.
+/// The path, built as dlink builds it: the pump, the TX pull on the pulled
+/// path, and the app's ends of its bridges.
 pub(crate) struct Path {
     pub(crate) pump: Pump<Rated<App>>,
+    pub(crate) fill: Option<Pulled>,
     pub(crate) ends: Ends,
+}
+
+/// The pulled TX path (dstack #363): the TX thread's fill of the TX side
+/// (behind its own `Rated`, no RX side), the engine rings it writes and
+/// the flows' lag bound it catches up within.
+pub(crate) struct Pulled {
+    pub(crate) fill: TxFill,
+    pub(crate) engine: Vec<Option<Ring>>,
+    pub(crate) max_lag: u64,
+}
+
+impl Pulled {
+    /// The TX thread's pass at media time `now_ns`: every block due.
+    pub(crate) fn pass(&mut self, now_ns: u64) {
+        self.fill.fill_due(
+            to_samples(now_ns, DEVICE_RATE),
+            self.max_lag,
+            &self.engine,
+            0,
+        );
+    }
+
+    /// When the fill's next block is due, ns.
+    pub(crate) fn wake_ns(&self) -> u64 {
+        self.fill.wake_ns(DEVICE_RATE).expect("a started fill")
+    }
 }
 
 /// The app's ends of the bridges and the counts the test reads.
@@ -149,16 +199,17 @@ impl Ends {
 
 /// The path on the box's real clocks (the real-time case).
 pub(crate) fn path() -> Path {
-    path_on(false)
+    path_on(false, false)
 }
 
 /// The path whose TX FIFO stamps on the simulated app clock
-/// ([`Ends::set_app_ns`]).
-pub(crate) fn simulated_path() -> Path {
-    path_on(true)
+/// ([`Ends::set_app_ns`]); its TX side pulled by the TX thread when
+/// `pulled` (dstack #363), else run by the pump.
+pub(crate) fn simulated_path(pulled: bool) -> Path {
+    path_on(true, pulled)
 }
 
-fn path_on(simulated: bool) -> Path {
+fn path_on(simulated: bool, pulled: bool) -> Path {
     let dir = tempfile::tempdir().unwrap();
     let config = config(dir.path());
     let cfg = config.device().expect("the soak's config");
@@ -201,23 +252,32 @@ fn path_on(simulated: bool) -> Path {
     let marks = Arc::new(Mutex::new(Vec::new()));
     let tx_tone_gaps = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let tx_tone_locked = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let app = App {
+    let side = TxSide {
         tx_tone_locked: Arc::clone(&tx_tone_locked),
         tx_tone: ToneCheck::default(),
         tx_left: vec![0.0; 4 * CHUNK],
         tx_tone_gaps: Arc::clone(&tx_tone_gaps),
         tx,
         out: vec![0.0; 4 * CHUNK * CHANNELS],
+    };
+    let (pumped, pulled_side) = if pulled {
+        (None, Some(side))
+    } else {
+        (Some(side), None)
+    };
+    let app = App {
+        tx: pumped,
         rx: Arc::clone(&rx_fifo),
         marks: Arc::clone(&marks),
     };
+    let pump_tx: Vec<usize> = if pulled { Vec::new() } else { vec![0, 1] };
     let rated = Rated::new(
         app,
         DEVICE_RATE,
         APP_RATE,
         BLOCK as usize,
         CHANNELS,
-        CHANNELS,
+        pump_tx.len(),
     )
     .unwrap();
 
@@ -242,12 +302,25 @@ fn path_on(simulated: bool) -> Path {
         )
         .unwrap(),
     );
+    // dlink's `Link::start_tx_pulling`: the TX side behind its own TX
+    // converter, no RX side, on the TX thread.
+    let fill = pulled_side.map(|side| Pulled {
+        fill: TxFill::new(
+            Box::new(Rated::new(side, DEVICE_RATE, APP_RATE, BLOCK as usize, 0, CHANNELS).unwrap()),
+            vec![0, 1],
+            timing,
+            24,
+            Arc::clone(&rx),
+        ),
+        engine: vec![Some(Ring::new()), Some(Ring::new())],
+        max_lag: dstack::clock::latency_samples(cfg.advertised_latency_ns(), DEVICE_RATE),
+    });
     let pump_stats = Arc::new(PumpStats::new(timing, DEVICE_RATE));
     let pump = Pump::new(
         rated,
         Map {
             rx: vec![0, 1],
-            tx: vec![0, 1],
+            tx: pump_tx,
         },
         timing,
         24,
@@ -257,6 +330,7 @@ fn path_on(simulated: bool) -> Path {
     );
     Path {
         pump,
+        fill,
         ends: Ends {
             pump_stats,
             timing,

@@ -181,6 +181,8 @@ const WORDS: &[&str] = &[
     "tx_thread",
     "pass_max_us",
     "pass_max_cpu_us",
+    "tx_pull",
+    "faults",
     "flow",
     "live",
     "fpp",
@@ -1116,6 +1118,49 @@ fn the_status_carries_the_tx_wire_bytes_for_a_neighbour() {
     assert_eq!(
         crate::traffic::tx_bytes_of(&local::reply("status", &media)),
         Some(want)
+    );
+}
+
+/// dstack #363: the TX pull's counts, only on a device with one.
+#[test]
+fn the_status_shows_the_tx_pull_s_counts_only_with_one() {
+    struct Quarter;
+    impl dstack_audio_io::Process for Quarter {
+        fn process(&mut self, block: &mut dstack_audio_io::Block<'_>) {
+            block.output(0).fill(0.25);
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let media = media_with_engine(&device_at(dir.path()), Arc::new(Unready), &[0]);
+    let fill = |tx: usize| {
+        crate::media::tx::TxFill::new(
+            Box::new(Quarter),
+            vec![tx],
+            crate::stream::Timing::of(&media.tx.cfg),
+            24,
+            Arc::clone(&media.rx),
+        )
+    };
+    assert!(
+        media.tx.claim_fill(fill(1)).is_err(),
+        "no engine ring on TX 2"
+    );
+    assert!(!status(&media).contains("tx_pull"));
+    assert!(media.tx.claim_fill(fill(0)).is_ok());
+    let mut tx = crate::media::tx::Transmitter::new(Arc::clone(&media.tx));
+    let rate = media.tx.cfg.sample_rate;
+    let at = crate::media::tx::ns_of(T, rate);
+    tx.step(Some(at), 0);
+    tx.step(
+        Some(crate::media::tx::ns_of(T + media.tx.cfg.block, rate)),
+        0,
+    );
+    let s = status(&media);
+    assert!(
+        s.contains(
+            r#""tx_pull":{"blocks":2,"rebootstraps":0,"skipped":0,"writes_after_send":0,"faults":0}"#
+        ),
+        "{s}"
     );
 }
 

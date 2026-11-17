@@ -498,6 +498,11 @@ pub struct TxShared {
     scheduling: Arc<Scheduling>,
     /// The TX thread's sleep and pass peaks (dstack #359, [`split`]).
     tx_thread: split::TxThreadStats,
+    /// The TX pull handed over for the TX thread (dstack #363,
+    /// [`TxShared::claim_fill`], `fill.rs`), taken when its state is built.
+    fill: Mutex<Option<TxFill>>,
+    /// The claimed TX pull's counts, for the status.
+    fill_stats: OnceLock<Arc<TxFillStats>>,
     stop: AtomicBool,
     base: Instant,
 }
@@ -625,6 +630,8 @@ impl TxShared {
             lanes: std::array::from_fn(|_| LaneStats::default()),
             receivers: std::array::from_fn(|_| Cell::new()),
             tx_thread: split::TxThreadStats::default(),
+            fill: Mutex::new(None),
+            fill_stats: OnceLock::new(),
             stop: AtomicBool::new(false),
             base: Instant::now(),
         })
@@ -964,6 +971,11 @@ pub mod shift;
 pub use shift::{EngineLine, Shift};
 pub mod host;
 pub use host::{HostNic, TxPath};
+mod fill;
+pub use fill::{
+    BUILT, CLAIMED, FillWatch, NO_RING, Refused, TX_PULL_WARNING, TxFill, TxFillStats, TxFillView,
+    engine_channels,
+};
 mod pass;
 use pass::{PassClock, Sent, account, send_timed};
 mod refused;
