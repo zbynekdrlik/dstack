@@ -39,8 +39,8 @@ pub struct TxFlow {
 
 /// The TX flows: the control side's table (pure; the times are the
 /// control side's ns, [`TxShared::now_ns`](super::TxShared::now_ns)). A
-/// clone is a copy to put back when a change cannot be kept (a multicast create the state file
-/// could not save, `arc::answer`).
+/// clone is a copy to put back when a change cannot be kept (a multicast
+/// create the state file could not save, `arc::answer`).
 #[derive(Debug, Clone)]
 pub struct TxTable {
     pub(super) flows: Vec<Option<TxFlow>>,
