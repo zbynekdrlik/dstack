@@ -243,12 +243,19 @@ fn the_pump_thread_stamps_each_media_block_in_the_app_s_real_clock() {
     // time each: their pairs then read alike, as real clocks' do, and the
     // filter takes them as a step (dstack #373, 0.3 ms a wake). A step
     // moves one block's stamp by more than `REJECT_NS`, and the next can
-    // come only `STEP_WAKES` wakes (a block each) after it; a pair taken
-    // at every wake (no filter) fails both.
+    // come only `STEP_WAKES` wakes after it. Block pairs count wakes here:
+    // while `run_to` runs, `StepClock` wakes the thread at each block's
+    // due time, one block a wake (wakes with no block come only while it
+    // is parked, before the first block and after the last). A pair taken
+    // at every wake (no filter) fails both while a wake takes far less or
+    // far more than a block of real time; this test guards the wiring,
+    // the filter's own tests (`app_offset`) pin its arithmetic.
     let mut last_step: Option<usize> = None;
     for (i, w) in stamps.windows(2).enumerate() {
         let gap = w[1].play_at.unwrap() - w[0].play_at.unwrap();
-        let slew = app_offset::slew_max_ns(w[1].ran - before);
+        // `SLEW_PPM` of the real time, computed here rather than with the
+        // filter's own `slew_max_ns`.
+        let slew = (w[1].ran - before).max(0) * app_offset::SLEW_PPM / 1_000_000;
         if (333_333 - slew..=333_334 + slew).contains(&gap) {
             continue;
         }
