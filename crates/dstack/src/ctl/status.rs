@@ -150,6 +150,16 @@ impl Json {
 ///   [`crate::media::tx::TxShared::bytes_sent`]):
 ///   another device's traffic watch on the same PC subtracts it from the
 ///   NIC's own count (dstack #203, [`crate::traffic`]).
+/// - `tx_thread` (dstack #359): the TX thread's peaks since the device
+///   started, which split a `the TX schedule starts again` by cause:
+///   `oversleep_max_us` (the largest return of its sleep past its target:
+///   scheduled late), `pass_max_us` (its longest pass, wall time: the
+///   plans, keepalives and every packet due) and `pass_max_cpu_us` (the
+///   largest thread CPU time of a pass, Linux only; absent elsewhere: a
+///   pass far longer than its CPU time was preempted). The restart line
+///   carries the
+///   same three for the sleep and the pass before it (`oversleep_us`,
+///   `last_pass_us`, `last_pass_cpu_us`, `-` when unmeasured).
 /// - `name` (dstack #209): the device's name as it is now, the one its ARC
 ///   record announces (the config's, or a controller's rename since), as a
 ///   JSON string: a local reader can tell which device answered. The
@@ -502,6 +512,14 @@ fn tx_part(j: &mut Json, media: &Media) {
     }
     j.close(']');
     j.num("tx_bytes", media.tx.bytes_sent());
+    let t = media.tx.tx_thread();
+    j.open(Some("tx_thread"), '{');
+    j.num("oversleep_max_us", t.oversleep_max_us);
+    j.num("pass_max_us", t.pass_max_us);
+    if let Some(us) = t.pass_max_cpu_us {
+        j.num("pass_max_cpu_us", us);
+    }
+    j.close('}');
 }
 
 /// A TX lane's counts as the status shows them (µs for the times).

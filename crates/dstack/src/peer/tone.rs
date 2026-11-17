@@ -21,6 +21,11 @@
 //! bad sample to last) and its [`GapKind`] go to [`ToneCheck::block_with`]'s
 //! caller (the peer logs one line a break, dstack #303).
 //!
+//! A jump of the receiver's OWN reads (its pump skipped blocks, dstack
+//! #358) is no break of the flow: [`ToneCheck::relock`] starts the
+//! recurrence again at the next block, so it is not judged across the
+//! jump.
+//!
 //! The kind tells the two causes apart (dstack #303: obs's 24 ms breaks
 //! were silence in OBS's mix, not a stack skip): a sample out of place
 //! (a skip, a repeat, a jump) breaks the recurrence at one pair of samples
@@ -253,9 +258,17 @@ impl ToneCheck {
     /// gap that ends in the block: its length, first bad sample to last,
     /// the gaps so far and what broke it.
     pub fn block_with(&mut self, x: &[f64], mut ended: impl FnMut(u64, u64, GapKind)) {
-        if let (Some(f), 2) = (self.fit, self.seen) {
+        if let Some(f) = self.fit {
             let [mut p2, mut p1] = self.before;
+            // Real samples before `s`: after a re-lock the block's first
+            // two only set the recurrence's start.
+            let mut have = self.seen;
             for &s in x {
+                if have < 2 {
+                    have += 1;
+                    (p2, p1) = (p1, s);
+                    continue;
+                }
                 let energy = invariant(s, p1, f.c);
                 // Written so a NaN sample is bad: no comparison holds.
                 let good =
@@ -284,6 +297,17 @@ impl ToneCheck {
         } else {
             self.seen + 1
         };
+    }
+
+    /// The samples before the next block are not the ones before its
+    /// first (dstack #358: the peer's own pump skipped blocks, so the
+    /// positions in between were never read): forget them. The next block
+    /// is judged from its third sample on against the last clean fit (its
+    /// first two start the recurrence again, so only a break exactly at
+    /// the jump goes unseen) and is not fitted itself; a gap that was open
+    /// goes on.
+    pub fn relock(&mut self) {
+        self.seen = 0;
     }
 
     /// One sample judged; the length of the gap it ends, if it ends one.

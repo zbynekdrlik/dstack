@@ -1970,6 +1970,15 @@ fn the_relay_thread_sends_the_tx_packets_while_the_tx_thread_blocks() {
         relay.stop();
         tx
     });
+    // dstack #359: the relay thread times its passes as the TX thread does
+    // (its CPU time on Linux only).
+    assert!(tx.before.pass_ns.is_some(), "{:?}", tx.before);
+    assert_eq!(
+        tx.before.pass_cpu_ns.is_some(),
+        cfg!(target_os = "linux"),
+        "{:?}",
+        tx.before
+    );
     let sent: Vec<u64> = drain(&rig.rx).iter().map(|p| stamp_of(p)).collect();
     let n0 = send_clock(T, RATE, TX_MARGIN_NS);
     let first = n0 - n0 % FPP + FPP;
@@ -2857,3 +2866,4 @@ fn a_seamless_handover_step_restarts_no_tx_schedule() {
 }
 
 mod app_view;
+mod thread_split;

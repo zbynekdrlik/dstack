@@ -87,7 +87,7 @@ kill -INT "$PEER"; wait "$PEER"   # exit 0 after the goodbyes
           "rx": [{"channel": "RX 1", "from": "obs-ci:Out 1", "locked": true,
                   "tone_hz": 1000.0, "level_dbfs": -6.02,
                   "samples": 2880000, "tone_gaps": 0}],
-          "blocks": 22500, "play_at_ppm": 6.0},
+          "blocks": 22500, "own_skips": 0, "play_at_ppm": 6.0},
  "device": { ... the device's own status, as `dstack-dev ctl status` ... }}
 ```
 
@@ -102,6 +102,23 @@ kill -INT "$PEER"; wait "$PEER"   # exit 0 after the goodbyes
   audio was not there: silence in the app's own mix, a dropout),
   `kind=misplaced` when it held but a sample was out of place (a skip, a
   repeat, a jump; also a smaller gain step or a NaN sample).
+- `own_skips` (dstack #358): the peer's OWN jumps, each discontinuity its
+  engine pump signals after its first block. On the peer's TEST system
+  clock (never re-anchored) each is a re-bootstrap (skipping the blocks it
+  was too late for; also a retime), so `own_skips` never exceeds
+  `device.engine.rebootstraps` in one status; a pump that lost its clock
+  and starts again after pacing itself would count one with no
+  re-bootstrap. The received tone then jumps by what the peer did not
+  read, which is no break of the app's flow: the tone check re-locks
+  across the jump (it judges the next block from its third sample on, so
+  only a break exactly at the jump goes unseen) and the jump is counted
+  here, never in `tone_gaps` (until #358 each one read as a 2-sample
+  `kind=misplaced` tone break). Each logs one WARN (target
+  `dstack::peer::tone`, `dstack-dev peer: its own reads jumped; the tone
+  check re-locks`, fields `frames`, the jump from the end of the last block with a media start,
+  absent when the block has no media start, and `own_skips`). A rise is
+  the peer's (or the runner's) stall, not the app's: gate it with
+  `device.engine.rebootstraps` below.
 - `play_at_ppm`: the peer's media clock against its app clock as its blocks'
   play times show it: its own `test_clock_ppm`, a check the skew is live.
 - `device.engine.play_at_steps` / `play_at_max_dev_us` (dstack #305, every
@@ -124,7 +141,8 @@ again at the end; gate on the rise between the two, as dstack's own soak
 
 The peer (`peer.json`):
 
-- `peer.rx[].locked` true, `tone_gaps` rise 0;
+- `peer.rx[].locked` true, `tone_gaps` rise 0; `own_skips` rise 0 (or
+  voided with the peer's re-bootstraps, below);
 - `device.channels[]` `holes` and `late`, `device.rx[]` `gaps`, `late` and
   `socket_drops` rise 0;
 - `device.engine.rebootstraps` rise 0, `play_at_steps` 0;
