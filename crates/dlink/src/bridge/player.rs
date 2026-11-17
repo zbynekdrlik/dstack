@@ -209,6 +209,16 @@ impl Stats {
     pub fn priming(&self) -> bool {
         self.priming.load(Ordering::Relaxed)
     }
+
+    /// Gaps of the output itself ([`Player::fill_pulled`], dstack #307).
+    pub fn output_gaps(&self) -> u64 {
+        0
+    }
+
+    /// Input frames dropped for the output's gaps ([`Player::fill_pulled`]).
+    pub fn output_lost_frames(&self) -> u64 {
+        0
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -385,6 +395,20 @@ impl Player {
     /// Fills an interleaved output buffer of `outputs` channels, each
     /// sample made from an `f64` by `to` (the driver's sample format).
     pub fn fill_with<T>(&mut self, out: &mut [T], outputs: usize, to: impl Fn(f64) -> T) {
+        self.fill_at(None, out, outputs, to);
+    }
+
+    /// [`Player::fill_with`] for a consumer that just wrote `pulled` frames
+    /// into the FIFO itself (its RX pull, dstack #307). RED stub: plays as
+    /// [`Player::fill_with`].
+    pub fn fill_pulled<T>(
+        &mut self,
+        pulled: usize,
+        out: &mut [T],
+        outputs: usize,
+        to: impl Fn(f64) -> T,
+    ) {
+        let _ = pulled;
         self.fill_at(None, out, outputs, to);
     }
 
