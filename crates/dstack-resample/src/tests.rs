@@ -496,3 +496,6 @@ fn a_low_delay_step_refuses_a_wrong_call_and_has_no_ratio_to_adjust() {
 
 /// dstack #341: a restart's skip of silence.
 mod skip;
+
+/// dstack #382: a drifting converter's sinc length.
+mod taps;

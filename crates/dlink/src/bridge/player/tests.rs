@@ -775,3 +775,96 @@ fn a_seeded_player_starts_at_the_seed_and_its_counts_keep_the_lock() {
     s.run(1.0);
     assert_eq!(stats.locked_ppm(), Some(locked));
 }
+
+/// A 96 <-> 96 kHz player of two channels, its output 50 ppm fast, with
+/// `taps` (`None`: the default).
+fn with_taps(taps: Option<usize>) -> Sim {
+    let mut s = Sim::new(96_000, 96_000, 50.0, 2, 2);
+    let player = Player::new(
+        Arc::clone(&s.fifo),
+        96_000,
+        96_000,
+        buffer(96_000),
+        buffer(96_000).chunk_ns(),
+        s.player.stats(),
+    )
+    .unwrap();
+    s.player = match taps {
+        Some(taps) => player.with_taps(taps).unwrap(),
+        None => player,
+    };
+    s
+}
+
+/// dstack #382: a player's converter length. The default keeps 256 taps
+/// (1.333 ms at 96 <-> 96 kHz); 48 taps delay 0.250 ms and play the tone
+/// at its rate, frequency and level, both channels, with no underrun; a
+/// length the converter refuses is refused.
+#[test]
+fn a_player_with_48_taps_delays_a_quarter_ms_and_plays_as_before() {
+    assert_eq!(
+        with_taps(None).player.stats().converter_delay_ns(),
+        1_333_333
+    );
+    assert_eq!(
+        with_taps(Some(256)).player.stats().converter_delay_ns(),
+        1_333_333
+    );
+    let mut s = with_taps(Some(48));
+    let stats = s.player.stats();
+    assert_eq!(stats.converter_delay_ns(), 250_000);
+    s.run(20.0);
+    let tone = s.record(5.0, 0);
+    let freq = frequency(&tone, s.out_rate * (1.0 + s.drift_ppm * 1e-6));
+    let level_db = 20.0 * (rms(&tone) / (s.amp / 2f64.sqrt())).log10();
+    assert_eq!(stats.underruns(), 0);
+    assert_eq!(s.fifo.overflows(), 0);
+    assert!((freq - s.freq).abs() < 0.1, "{freq} Hz");
+    assert!(level_db.abs() < 0.1, "{level_db} dB");
+    let r = s.record(0.1, 1);
+    assert!(rms(&r) > 0.3, "R plays");
+    // 96 to 44.1 kHz: the same quarter ms, read in whole frames at the
+    // output's rate (11 frames, 249433 ns; at the input's 114583).
+    let fifo = Arc::new(fifo_for(1, 96_000));
+    let p = Player::new(fifo, 96_000, 44_100, buffer(96_000), 0, Arc::default())
+        .unwrap()
+        .with_taps(48)
+        .unwrap();
+    let delay = p.stats().converter_delay_ns();
+    assert_eq!(delay, 249_433);
+    let fifo = Arc::new(fifo_for(1, 96_000));
+    let p = Player::new(fifo, 96_000, 96_000, buffer(96_000), 0, Arc::default()).unwrap();
+    assert!(p.with_taps(33).is_err());
+}
+
+/// The phase of a `hz` tone in `x` (output frames at `rate` from the same
+/// start), rad.
+fn phase(x: &[f64], hz: f64, rate: f64) -> f64 {
+    let (mut s, mut c) = (0.0, 0.0);
+    for (n, v) in x.iter().enumerate() {
+        let w = TAU * hz * n as f64 / rate;
+        s += v * w.sin();
+        c += v * w.cos();
+    }
+    c.atan2(s)
+}
+
+/// dstack #382: the shorter converter is the one that plays. The same
+/// 100 Hz tone through a 256-tap and a 48-tap player on the same steps
+/// comes out 104 frames (128 - 24, 1.083 ms) earlier through the 48.
+#[test]
+fn a_player_with_48_taps_plays_1_083_ms_earlier_than_the_default() {
+    let mut long = with_taps(None);
+    let mut short = with_taps(Some(48));
+    for s in [&mut long, &mut short] {
+        s.drift_ppm = 0.0;
+        s.freq = 100.0;
+        s.run(10.0);
+    }
+    let rate = 96_000.0;
+    let a = phase(&long.record(1.0, 0), 100.0, rate);
+    let b = phase(&short.record(1.0, 0), 100.0, rate);
+    let lead = (b - a).rem_euclid(TAU) / TAU * rate / 100.0;
+    println!("48 taps lead the default by {lead:.3} frames");
+    assert!((lead - 104.0).abs() < 0.5, "{lead} frames");
+}

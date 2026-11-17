@@ -20,6 +20,7 @@ fn spec(to_asio: usize, from_asio: usize) -> Spec {
         app_buffer_ns: None,
         to_asio_app_buffer_ns: None,
         from_asio_app_buffer_ns: None,
+        converter_taps: None,
     }
 }
 

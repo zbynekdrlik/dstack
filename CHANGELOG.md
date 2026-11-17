@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.6.174
+
+- **Feature (#382, the owner's ROZHODNUTÉ of 17.11.2026): an ASIO bridge's converter length is a setting.** The owner's call: the SoundGrid driver runs at 96 kHz too (96 <-> 96, no rate change), and the bridge's converter goes to the minimum to show how low the path can go; production may raise it later.
+  - **`dstack_asio::bridge::Spec::converter_taps: Option<u32>`** sets both directions' sinc length (the to-ASIO and from-ASIO players, the idle from-ASIO player before the first open too). `None` is 256 taps, exactly as before. Accepted `MIN_CONVERTER_TAPS` (32) to `MAX_CONVERTER_TAPS` (256) in steps of 8 (the converter core takes multiples of 8 and would round any other length up); anything else refuses `Bridge::new` with `converter_taps: 31; 32 to 256 in steps of 8`.
+  - **Measured at 96 <-> 96 kHz** (the crate's own helpers, +7.5 ppm, a -1 dBFS tone 20 Hz-20 kHz): 256 taps 1.333 ms a direction, flat; **48 taps 0.250 ms a direction, flat** (within 5e-7 dB to 20 kHz, THD+N 212 dB): 1.083 ms less each way, nothing lost in the audio band; 32 taps 0.167 ms, -0.40 dB at 20 kHz (-0.24 dB at 19 kHz, -0.02 dB at 15 kHz). With a rate change a short filter cuts the band (#382 issuecomment-6952851834: 128 taps lose 0.9 dB at 20 kHz at 96 -> 48 kHz), so keep 256 (or 192) there.
+  - **dlink (additive):** `Player::with_taps(taps)` (right after `Player::new`; refused for a length the converter refuses) and `Stats::converter_delay_ns()` (the current player's converter delay at its output rate: 1333333 ns at 96 <-> 96 kHz with 256 taps, 250000 with 48). **dstack-resample (additive):** `Converter::drifting_with_taps(.., taps)`, `TAPS_STEP`.
+  - **No latency change** for any consumer that does not set it: every default stays (256 taps). A dasio bridge with `converter_taps = 48` moves its latency by -1.083 ms each way at 96 <-> 96 kHz.
+  - Each consumer:
+    - **dasio:** `Spec` gained `converter_taps`: add `converter_taps: None` to its `Spec { .. }`, or set it from a new `[bridge]` key; dsg runs `Some(48)` (and may show `Some(32)` for the how-low test). Log `bridge.to_asio_stats().converter_delay_ns()` / `from_asio_stats()` with the targets if the status should carry each direction's converter delay.
+    - **dtray:** its dasio settings refuse unknown `[bridge]` keys: a new dasio key for the length needs dtray to know it first (with dasio's key name).
+    - **obs, camera-box, intercom, songplayer, presenter, iemmixer, dsend, dlisten:** nothing to change.
+
 ## 0.6.173
 
 - **Feature (#386, dasio#120): dstack-asio bins the driver callback's lateness under two periods, and names it at each underrun.** A callback counted `late` only past a gap of two periods (more than 1.333 ms late at 128 @ 96 kHz), while the from-ASIO side loses audio from 1.0-1.5 ms late at a 1.333 ms target (#382's measurement): dasio saw from-ASIO underruns with `late_callbacks` 0.

@@ -161,6 +161,12 @@ fn frames_of(seconds: f64, rate: u32) -> usize {
     (seconds * f64::from(rate)).round() as usize
 }
 
+/// `conv`'s delay at `out_rate` into `stats` ([`Stats::converter_delay_ns`]).
+fn publish_delay(stats: &Stats, conv: &Converter, out_rate: u32) {
+    let ns = (conv.delay_frames() as f64 * 1e9 / f64::from(out_rate)).round() as u64;
+    stats.converter_delay_ns.store(ns, Ordering::Relaxed);
+}
+
 /// The player's counts, read by the status thread. One `Stats` outlives
 /// the players of a run: a player made for another output (the tray's
 /// output menu) goes on counting from the last one's counts.
@@ -170,6 +176,8 @@ pub struct Stats {
     out_rate: AtomicU32,
     /// The FIFO's target, ns ([`AppBuffer::target_ns`]).
     target_ns: AtomicU64,
+    /// The current player's converter delay, ns ([`Stats::converter_delay_ns`]).
+    converter_delay_ns: AtomicU64,
     underruns: AtomicU64,
     played: AtomicU64,
     recentres: AtomicU64,
@@ -243,6 +251,15 @@ impl Stats {
     /// The FIFO's target, ms (the device's [`AppBuffer`]).
     pub fn target_ms(&self) -> f64 {
         self.target_ns.load(Ordering::Relaxed) as f64 / 1e6
+    }
+
+    /// The current player's converter delay, ns: how far behind its input
+    /// the sinc's output runs, at the output's rate (dstack #382; 1333333
+    /// at 96 <-> 96 kHz with the default 256 taps, 250000 with 48,
+    /// [`Player::with_taps`]). Part of the bridge's latency beside the
+    /// FIFO's target.
+    pub fn converter_delay_ns(&self) -> u64 {
+        self.converter_delay_ns.load(Ordering::Relaxed)
     }
 
     /// The current output's rate, Hz.
@@ -403,6 +420,7 @@ impl Player {
         let chunk_in = frames_of(producer_chunk_ns as f64 / 1e9, net_rate);
         stats.priming.store(true, Ordering::Relaxed);
         stats.out_rate.store(out_rate, Ordering::Relaxed);
+        publish_delay(&stats, &conv, out_rate);
         let target_s = buffer.target_s();
         stats
             .target_ns
@@ -457,6 +475,31 @@ impl Player {
     pub fn with_seed_ppm(mut self, ppm: f64) -> Self {
         self.ctl.seed_ppm(ppm);
         self
+    }
+
+    /// The converter with a sinc of `taps` instead of
+    /// [`dstack_resample::TAPS`] (dstack #382,
+    /// [`dstack_resample::Converter::drifting_with_taps`]: a shorter filter
+    /// delays less and keeps less of the band; at equal rates 48 taps
+    /// still keep 20 Hz to 20 kHz flat). Call it right after
+    /// [`Player::new`], before any fill. Refused (the player is dropped)
+    /// for a length the converter refuses; its `Stats` then keep what
+    /// [`Player::new`] set (priming, the output's rate, the default
+    /// converter's delay).
+    pub fn with_taps(mut self, taps: usize) -> Result<Self, ConvertError> {
+        let channels = self.fifo.channels();
+        let conv = Converter::drifting_with_taps(
+            self.net_rate,
+            self.out_rate,
+            channels,
+            BLOCK,
+            Fixed::Output,
+            taps,
+        )?;
+        self.input = vec![0.0; conv.input_frames_max() * channels];
+        publish_delay(&self.stats, &conv, self.out_rate);
+        self.conv = conv;
+        Ok(self)
     }
 
     /// Under `--mono`: every channel summed to both speakers.

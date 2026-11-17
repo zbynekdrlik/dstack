@@ -16,6 +16,7 @@ fn spec(to_asio: usize, from_asio: usize) -> Spec {
         app_buffer_ns: None,
         to_asio_app_buffer_ns: None,
         from_asio_app_buffer_ns: None,
+        converter_taps: None,
     }
 }
 
@@ -106,10 +107,19 @@ struct Sim {
 
 impl Sim {
     fn new(drift: f64, buffer: usize, app_buffer_ns: Option<u64>) -> Self {
-        let mut bridge = bridge(Spec {
-            app_buffer_ns,
-            ..spec(1, 1)
-        });
+        Self::of(
+            Spec {
+                app_buffer_ns,
+                ..spec(1, 1)
+            },
+            drift,
+            buffer,
+        )
+    }
+
+    /// [`Sim::new`] for a bridge of `spec` (one channel each way).
+    fn of(spec: Spec, drift: f64, buffer: usize) -> Self {
+        let mut bridge = bridge(spec);
         let dante = bridge.dante_side().expect("once");
         assert!(bridge.dante_side().is_none(), "only once");
         let asio = bridge
@@ -396,3 +406,4 @@ fn a_skipped_block_resyncs_the_player_and_its_pieces_never_do() {
 mod directions;
 mod pull;
 mod pump_skip;
+mod taps;

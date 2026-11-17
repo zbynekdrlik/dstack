@@ -53,6 +53,7 @@ fn run(seed: Option<Seed>, seconds: f64, around: f64) -> (Bridge, (f64, f64)) {
             app_buffer_ns: None,
             to_asio_app_buffer_ns: None,
             from_asio_app_buffer_ns: None,
+            converter_taps: None,
         },
         Arc::new(move || clock.load(Ordering::Relaxed)),
     )

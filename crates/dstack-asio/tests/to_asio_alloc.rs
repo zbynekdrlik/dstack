@@ -82,6 +82,7 @@ fn the_driver_s_switch_with_its_pull_allocates_nothing() {
         app_buffer_ns: None,
         to_asio_app_buffer_ns: None,
         from_asio_app_buffer_ns: None,
+        converter_taps: None,
     })
     .unwrap();
     // The pump's side takes the from-ASIO player at each open.

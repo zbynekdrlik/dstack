@@ -37,6 +37,11 @@ use halfband::{HalfBand, Step};
 /// The sinc filter's length, taps.
 pub const TAPS: usize = 256;
 
+/// The step of a sinc's length ([`Converter::drifting_with_taps`]): the
+/// core takes a multiple of 8 and would round any other length up, so the
+/// filter would not be the one asked for.
+pub const TAPS_STEP: usize = 8;
+
 /// The sinc table's oversampling (rubato's default is 128; SongPlayer
 /// measured 256).
 pub const OVERSAMPLING: usize = 256;
@@ -233,6 +238,34 @@ impl Converter {
         Self::build(from, to, channels, block, fixed, true)
     }
 
+    /// [`Converter::drifting`] with a sinc of `taps` instead of [`TAPS`]
+    /// (dstack #382: a bridge's converter length, the latency it costs
+    /// against the band it keeps); the rest of [`PARAMS`] stays, the cutoff
+    /// rubato's automatic one for that length. The delay is half the length
+    /// in input frames, which [`Converter::delay_frames`] counts at the
+    /// output rate (48 taps: 24 frames, 0.250 ms, at 96 <-> 96 kHz against
+    /// 128 for 256; 11 frames at 96 -> 44.1 kHz). Measured (dstack
+    /// #382 issuecomment-6952851834): at equal rates 48 taps keep 20 Hz to
+    /// 20 kHz flat and 32 lose 0.4 dB at 20 kHz; with a rate change a short
+    /// filter cuts the top of the band (128 taps lose 0.9 dB at 20 kHz at
+    /// 96 -> 48 kHz). Refused unless `taps` is a positive multiple of
+    /// [`TAPS_STEP`].
+    pub fn drifting_with_taps(
+        from: u32,
+        to: u32,
+        channels: usize,
+        block: usize,
+        fixed: Fixed,
+        taps: usize,
+    ) -> Result<Converter, ConvertError> {
+        if taps == 0 || !taps.is_multiple_of(TAPS_STEP) {
+            return Err(ConvertError::Invalid(format!(
+                "a sinc of {taps} taps: a positive multiple of {TAPS_STEP}"
+            )));
+        }
+        Self::build_with(from, to, channels, block, fixed, true, taps)
+    }
+
     fn build(
         from: u32,
         to: u32,
@@ -240,6 +273,18 @@ impl Converter {
         block: usize,
         fixed: Fixed,
         drifting: bool,
+    ) -> Result<Converter, ConvertError> {
+        Self::build_with(from, to, channels, block, fixed, drifting, TAPS)
+    }
+
+    fn build_with(
+        from: u32,
+        to: u32,
+        channels: usize,
+        block: usize,
+        fixed: Fixed,
+        drifting: bool,
+        taps: usize,
     ) -> Result<Converter, ConvertError> {
         if from == 0 || to == 0 || channels == 0 || block == 0 {
             return Err(ConvertError::Invalid(format!(
@@ -255,7 +300,11 @@ impl Converter {
             };
             let ratio = f64::from(to) / f64::from(from);
             let room = if drifting { MAX_RELATIVE } else { 1.0 };
-            let stage = Async::<f64>::new_sinc(ratio, room, &PARAMS, block, channels, side)
+            let params = SincInterpolationParameters {
+                sinc_len: taps,
+                ..PARAMS
+            };
+            let stage = Async::<f64>::new_sinc(ratio, room, &params, block, channels, side)
                 .map_err(|e| ConvertError::Core(e.to_string()))?;
             let mut none = Indexing::new();
             none.active_channels_mask = Some(vec![false; channels]);
@@ -418,8 +467,10 @@ impl Converter {
     ///
     /// The sinc stage's counts and phase repeat with the ratio's period
     /// ([`Converter::period`]) from its second fixed-side frame on: the
-    /// core's output `j` sits at input `j / r - (TAPS - 1)` after a reset
-    /// (`r` the ratio) and needs `TAPS + 1` input frames past it, so a
+    /// core's output `j` sits at input `j / r - (L - 1)` after a reset
+    /// (`r` the ratio, `L` the sinc's length: [`TAPS`] unless made by
+    /// [`Converter::drifting_with_taps`]) and needs `L + 1` input frames
+    /// past it, so a
     /// fixed input gives `floor((T - 2) * r)` frames for `T` and a fixed
     /// output takes `ceil(J / r + 1)` for `J`. So it runs only
     /// `frames mod period` of them (one period more when that is under 2),
