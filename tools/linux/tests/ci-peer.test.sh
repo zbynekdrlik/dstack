@@ -7,7 +7,8 @@
 # pump restart, no play-time step, and each peer's play_at_ppm at its skew.
 # A runner stall is told from a defect by a witness process with no dstack
 # code (ci_peer_gate.py): a window that rose, where every re-bootstrap was a
-# late wake inside a stall the witness saw too, is measured again, at most
+# late wake inside a stall the witness saw too, or one whose own pump watch
+# line shows its sleep returned that late (#339), is measured again, at most
 # WINDOWS times (other counters may rise with it: a restart is heard as a
 # gap by the other peer). A void window is a warning on the run.
 # Run as root (the interface); the binary is $1 (default target/release).
@@ -69,9 +70,9 @@ counts() {
           .device.engine.rebootstraps_late]' "$DIR/$1.json"
 }
 # A peer's `void` argument: its rebootstrap and late rebootstrap rises
-# between counts $2 and $3, its status.
+# between counts $2 and $3, its status, its log (the pump watch lines).
 peer_arg() {
-  echo "$1=$(( $(jq '.[3]' <<<"$3") - $(jq '.[3]' <<<"$2") )),$(( $(jq '.[4]' <<<"$3") - $(jq '.[4]' <<<"$2") )):$DIR/$1.json"
+  echo "$1=$(( $(jq '.[3]' <<<"$3") - $(jq '.[3]' <<<"$2") )),$(( $(jq '.[4]' <<<"$3") - $(jq '.[4]' <<<"$2") )):$DIR/$1.json:$DIR/$1.log"
 }
 witness_alive() { kill -0 "$W" 2>/dev/null || fail "the stall witness died"; }
 now_ms() { date +%s%3N; }
