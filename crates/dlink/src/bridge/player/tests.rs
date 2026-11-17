@@ -775,3 +775,64 @@ fn a_seeded_player_starts_at_the_seed_and_its_counts_keep_the_lock() {
     s.run(1.0);
     assert_eq!(stats.locked_ppm(), Some(locked));
 }
+
+/// A 96 <-> 96 kHz player of two channels, its output 50 ppm fast, with
+/// `taps` (`None`: the default).
+fn with_taps(taps: Option<usize>) -> Sim {
+    let mut s = Sim::new(96_000, 96_000, 50.0, 2, 2);
+    let player = Player::new(
+        Arc::clone(&s.fifo),
+        96_000,
+        96_000,
+        buffer(96_000),
+        buffer(96_000).chunk_ns(),
+        s.player.stats(),
+    )
+    .unwrap();
+    s.player = match taps {
+        Some(taps) => player.with_taps(taps).unwrap(),
+        None => player,
+    };
+    s
+}
+
+/// dstack #382: a player's converter length. The default keeps 256 taps
+/// (1.333 ms at 96 <-> 96 kHz); 48 taps delay 0.250 ms and play the tone
+/// at its rate, frequency and level, both channels, with no underrun; a
+/// length the converter refuses is refused.
+#[test]
+fn a_player_with_48_taps_delays_a_quarter_ms_and_plays_as_before() {
+    assert_eq!(
+        with_taps(None).player.stats().converter_delay_ns(),
+        1_333_333
+    );
+    assert_eq!(
+        with_taps(Some(256)).player.stats().converter_delay_ns(),
+        1_333_333
+    );
+    let mut s = with_taps(Some(48));
+    let stats = s.player.stats();
+    assert_eq!(stats.converter_delay_ns(), 250_000);
+    s.run(20.0);
+    let tone = s.record(5.0, 0);
+    let freq = frequency(&tone, s.out_rate * (1.0 + s.drift_ppm * 1e-6));
+    let level_db = 20.0 * (rms(&tone) / (s.amp / 2f64.sqrt())).log10();
+    assert_eq!(stats.underruns(), 0);
+    assert_eq!(s.fifo.overflows(), 0);
+    assert!((freq - s.freq).abs() < 0.1, "{freq} Hz");
+    assert!(level_db.abs() < 0.1, "{level_db} dB");
+    let r = s.record(0.1, 1);
+    assert!(rms(&r) > 0.3, "R plays");
+    // 96 to 44.1 kHz: the same quarter ms, read in whole frames at the
+    // output's rate (11 frames, 249433 ns; at the input's 114583).
+    let fifo = Arc::new(fifo_for(1, 96_000));
+    let p = Player::new(fifo, 96_000, 44_100, buffer(96_000), 0, Arc::default())
+        .unwrap()
+        .with_taps(48)
+        .unwrap();
+    let delay = p.stats().converter_delay_ns();
+    assert_eq!(delay, 249_433);
+    let fifo = Arc::new(fifo_for(1, 96_000));
+    let p = Player::new(fifo, 96_000, 96_000, buffer(96_000), 0, Arc::default()).unwrap();
+    assert!(p.with_taps(33).is_err());
+}
