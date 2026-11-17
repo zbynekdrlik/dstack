@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **Internal (#369): clock.rs/host.rs split, no change.** A pure move: the three process-wide spin switches (spin tail, bounded escape, no-yield tail) and their setters and readers into `clock/spin.rs`; the device's signals (`Signals` and the registered watch) into `host/signals.rs`. Every public name keeps its `dstack::clock::` and `dstack::host::` path (re-exported); no behaviour, API or latency change.
+
 ## 0.6.168
 
 - **Fix (#366): dlink's `wait_for_place` takes a test run's loopback place** (`DSTACK_TEST_LOOPBACK=1`), as `Link::start` serves there; outside a test run loopback is refused as before. No API change.

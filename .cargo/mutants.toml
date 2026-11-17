@@ -123,7 +123,8 @@ exclude_re = [
   # tests/embed.rs runs a whole device with them (not per mutant);
   # Timing::of, their one computation, is unit tested.
   "embed.rs",
-  "host.rs.*(prepare_config|Watch::new|Watch::stop)",
+  "host.rs.*prepare_config",
+  "host/signals.rs.*(Watch::new|Watch::stop)",
   # The CI test peer's device and process glue (dstack #305): the device
   # start and stop, its status read, main and the signal loop; their
   # decisions (args::parse, device_config, Tones, tone::ToneCheck,

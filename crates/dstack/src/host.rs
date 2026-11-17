@@ -44,7 +44,7 @@
 use std::fmt::Display;
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::atomic::AtomicI32;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -54,8 +54,6 @@ use tokio::net::UdpSocket;
 #[cfg(unix)]
 use tokio::net::UnixListener;
 use tokio::runtime::Runtime;
-#[cfg(unix)]
-use tokio::signal::unix::{Signal, SignalKind, signal};
 use tokio::sync::Notify;
 use tracing::{info, warn};
 
@@ -123,21 +121,6 @@ pub enum ClockSource {
     /// PTP network (CI): its flows are on no network's time, so another
     /// device cannot play them in sync. Logged as a warning at start.
     System,
-}
-
-/// What SIGTERM and SIGINT do while the device serves.
-#[derive(Debug, Clone)]
-pub enum Signals {
-    /// End serving (the standalone device: the unit's stop).
-    Stop,
-    /// Only set the flag: the host (the engine) decides when to stop,
-    /// through [`Host::stop`].
-    Report(Arc<AtomicBool>),
-    /// No handler at all: an app that hosts the device in its own process
-    /// (an OBS plugin) owns its signals and stops the device through
-    /// [`Host::stop`]. A registered handler would outlive the device and
-    /// keep SIGTERM from ending the app ([`crate::embed`]).
-    Host,
 }
 
 /// The device's config read from `path`: a file that cannot be read or a
@@ -210,6 +193,9 @@ pub fn interface_info(ifa: &IfAddr) -> Result<NetInfo, HostError> {
     daemon::net_info(ifa, &mac, speed.as_deref(), routes.as_deref()).map_err(setup)
 }
 
+mod signals;
+pub use signals::Signals;
+use signals::Watch;
 pub mod test_run;
 #[cfg(windows)]
 pub(crate) mod windows;
@@ -705,134 +691,6 @@ fn open_local(device: &mut Device) -> Option<tokio::net::TcpListener> {
         Err(e) => {
             warn!(error = %e, "no local status endpoint: dtray will not list this device");
             None
-        }
-    }
-}
-
-/// The signals as registered (in the device's runtime).
-#[cfg(unix)]
-enum Watch {
-    Stop {
-        term: Signal,
-        int: Signal,
-    },
-    Report {
-        term: Signal,
-        int: Signal,
-        flag: Arc<AtomicBool>,
-    },
-    /// No handler: only the host's stop.
-    Host,
-}
-
-#[cfg(unix)]
-impl Watch {
-    /// Registers SIGTERM and SIGINT (inside the runtime), except for
-    /// [`Signals::Host`], which registers nothing.
-    fn new(signals: Signals) -> Result<Watch, HostError> {
-        let both = || -> Result<(Signal, Signal), HostError> {
-            let term = signal(SignalKind::terminate()).map_err(run_failed)?;
-            let int = signal(SignalKind::interrupt()).map_err(run_failed)?;
-            Ok((term, int))
-        };
-        Ok(match signals {
-            Signals::Stop => {
-                let (term, int) = both()?;
-                Watch::Stop { term, int }
-            }
-            Signals::Report(flag) => {
-                let (term, int) = both()?;
-                Watch::Report { term, int, flag }
-            }
-            Signals::Host => Watch::Host,
-        })
-    }
-
-    /// The future that ends serving: a signal (for [`Signals::Stop`]) or
-    /// the host's stop. For [`Signals::Report`] a task sets the flag at
-    /// each signal while the device serves. Glue: tokio's signals.
-    async fn stop(self, control: &Control) {
-        match self {
-            Watch::Stop { mut term, mut int } => {
-                tokio::select! {
-                    _ = term.recv() => info!("SIGTERM: stopping"),
-                    _ = int.recv() => info!("SIGINT: stopping"),
-                    () = control.stop.notified() => info!("the device's stop was asked"),
-                }
-            }
-            Watch::Report { term, int, flag } => {
-                tokio::spawn(report(term, int, flag));
-                control.stop.notified().await;
-                info!("the device's stop was asked");
-            }
-            Watch::Host => {
-                control.stop.notified().await;
-                info!("the device's stop was asked");
-            }
-        }
-    }
-}
-
-/// Sets `flag` at every SIGTERM or SIGINT (the host stops the device).
-#[cfg(unix)]
-async fn report(mut term: Signal, mut int: Signal, flag: Arc<AtomicBool>) {
-    loop {
-        let which = tokio::select! {
-            Some(()) = term.recv() => "SIGTERM",
-            Some(()) = int.recv() => "SIGINT",
-            else => return,
-        };
-        info!(
-            signal = which,
-            "a stop was asked: the host stops the device"
-        );
-        flag.store(true, Ordering::Release);
-    }
-}
-
-/// On Windows: a console Ctrl+C (or the console's close) in place of the
-/// signals.
-#[cfg(windows)]
-enum Watch {
-    Stop,
-    Report(Arc<AtomicBool>),
-    Host,
-}
-
-#[cfg(windows)]
-impl Watch {
-    fn new(signals: Signals) -> Result<Watch, HostError> {
-        Ok(match signals {
-            Signals::Stop => Watch::Stop,
-            Signals::Report(flag) => Watch::Report(flag),
-            Signals::Host => Watch::Host,
-        })
-    }
-
-    /// The future that ends serving: Ctrl+C (for [`Signals::Stop`]) or the
-    /// host's stop; for [`Signals::Report`] Ctrl+C only sets the flag.
-    async fn stop(self, control: &Control) {
-        match self {
-            Watch::Stop => {
-                tokio::select! {
-                    _ = tokio::signal::ctrl_c() => info!("Ctrl+C: stopping"),
-                    () = control.stop.notified() => info!("the device's stop was asked"),
-                }
-            }
-            Watch::Report(flag) => {
-                tokio::spawn(async move {
-                    while tokio::signal::ctrl_c().await.is_ok() {
-                        info!("Ctrl+C: the host stops the device");
-                        flag.store(true, Ordering::Release);
-                    }
-                });
-                control.stop.notified().await;
-                info!("the device's stop was asked");
-            }
-            Watch::Host => {
-                control.stop.notified().await;
-                info!("the device's stop was asked");
-            }
         }
     }
 }
