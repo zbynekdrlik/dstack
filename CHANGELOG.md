@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **Tests (#373): two stream unit tests bound real time by each step's own measured time.** `stream::tests::split::each_drain_records_its_time_and_its_datagrams` bounded the drain peak since the start by an `Instant` around one `Pump::media`, but the peak also held the rig's own first drain (`flow_rig`), outside that window: at dev1 load 40-55 it failed 2 full lib runs of 55 (`3346 > 130`, `890 > 379`; the issue's `2983 > 102`). The test now takes the rig's second first, bounds the step's own second by the step's time, and pins the peak since the start as the larger of the two. No code change.
+
 ## 0.6.166
 
 - **Diagnosis (#370, part of #339): each recent late wake carries its own sleep's oversleep.** Each entry of the status' `engine.late_wakes_recent` gains `oversleep_us`: how late the pump's sleep just before that wake returned past its target (the sleep's target is that wake), absent when unmeasured (a sleep asked for a time already past, a clock not read, a new epoch across the sleep). Before, only the second's peak (`oversleep_max_us` on the pump watch line) and the peak since the start existed, so a second with two late wakes told the cause of its latest one only: PR #368's ci-peer run 44032644214 had two re-bootstraps in one second (6979 and 7187 us behind, the line's oversleep 7192 us) and failed on the 6979 us one, whose own oversleep the gate could not see. Recorded where the entry is recorded: one more relaxed atomic in the ring's seqlock slot, no allocation (`tests/hot_path.rs`), no lock.
