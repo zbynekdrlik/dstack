@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- **Tests (#371): a granted flow carries an app's audio within 3 s, start after start (new `dlink/tests/flow_start.rs`).** SongPlayer's Windows CI (run 44030478973) once read a granted flow for 6 s without its levels, `live_flows 0` at the end. Not the stack: the TX sent the whole 4 s the flow lives without keepalives (11988 sends), the pump was on time, and `live_flows 0` was that expiry. The cause is in SongPlayer's test: its processor pops single samples from an interleaved stereo ring while the test pushes one sample at a time, so a pop between a pair's two pushes (the MMCSS pump preempting the test thread) shifts every later frame by one sample and swaps the two channels for the rest of the run. Reproduced through our stack on Linux with a 5 ms pause between the first pair's pushes: left -0.25, right 0.5, 0 holes, every packet sent. The new test runs SongPlayer's shape (a 48 kHz app on a 96 kHz device, two TX channels, a receiver of ours asking 32-frame 24-bit packets on loopback) 3 times on every OS and 40 times on Windows CI, and names what the receiver heard and the device's status when it misses.
+- **No latency change**; no API change. Consumers: nothing to port. SongPlayer: pop whole frames only from its interleaved ring, and push a test's pair as one slice.
+
 ## 0.6.165
 
 - **Change (#351): the #351 tail is now opt-in, default off (= v0.6.157's wait).** v0.6.158's no-yield tail (no SwitchToThread in the last 500 µs before a due time, a give at least every 10 ms) waits for its non-production soak, and every release since carried it. Now a device turns it on with the new key `spin_no_yield_tail = true` (Windows, the low-latency profile; process-wide, the last device set wins; accepted and ignored on Linux); left out it is off and the spin yields on every turn with no give cap, the same turns as v0.6.157. On Windows a device with it on logs `the low-latency spin's no-yield tail is on (dstack #351, opt-in) ...` at start, and the engine pump names its capped give (`the engine pump's capped give (dstack #351) is a yield|timer wait ...`) only then.
