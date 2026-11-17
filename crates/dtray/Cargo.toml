@@ -26,6 +26,8 @@ dstack = { path = "../dstack" }
 # A dasio bridge instance's `[bridge]` table (dstack #292): its app
 # buffer's range (`AppBuffer::problem`, as dasio checks it).
 dlink = { path = "../dlink" }
+# The converter length's step and longest ([`dasio::bridge`], dstack #387).
+dstack-resample = { path = "../dstack-resample" }
 # The switch file (dstack #210), as dstack reads its device config (both
 # already in the lockfile through dstack).
 serde = { version = "1.0", features = ["derive"] }

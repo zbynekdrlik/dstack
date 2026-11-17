@@ -247,6 +247,7 @@ fn a_bridge_is_complete_with_its_driver_and_no_block() {
         app_buffer_ns: None,
         to_asio_app_buffer_ns: None,
         from_asio_app_buffer_ns: None,
+        converter_taps: None,
     });
     let mut b = good();
     b.block = None;

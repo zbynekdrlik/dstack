@@ -13,6 +13,7 @@
 //! app_buffer_ns = 5000000 # optional
 //! to_asio_app_buffer_ns = 1333333   # optional, dstack #387 (v0.6.172)
 //! from_asio_app_buffer_ns = 2000000 # optional, dstack #387
+//! converter_taps = 48               # optional, dstack #387 (v0.6.174)
 //! ```
 //!
 //! [`parse`] takes the table's shape (the keys and their types: a typo is
@@ -59,6 +60,10 @@ pub struct Bridge {
     /// The from-ASIO side's own target, ns (as `to_asio_app_buffer_ns`).
     #[serde(default)]
     pub from_asio_app_buffer_ns: Option<u64>,
+    /// The converters' sinc length, taps (`None`: 256; dstack-asio's
+    /// `Spec::converter_taps`, v0.6.174, dstack #387).
+    #[serde(default)]
+    pub converter_taps: Option<u32>,
 }
 
 /// The table as the file holds it.
@@ -87,6 +92,25 @@ pub const FROM_ASIO: &str = "Driver inputs to Dante TX";
 pub const APP_BUFFER: &str = "App buffer";
 pub const TO_ASIO_BUFFER: &str = "To-ASIO buffer";
 pub const FROM_ASIO_BUFFER: &str = "From-ASIO buffer";
+pub const CONVERTER_TAPS: &str = "Converter length";
+
+/// The shortest converter dasio's bridge takes, taps: dstack-asio's
+/// `MIN_CONVERTER_TAPS` (that crate builds on Windows only; a Windows test
+/// pins the two equal).
+pub const MIN_CONVERTER_TAPS: u32 = 32;
+
+/// Why a converter length cannot be used (dstack-asio's check: 32 up to
+/// [`dstack_resample::TAPS`] in steps of [`dstack_resample::TAPS_STEP`]).
+pub fn taps_problem(taps: u32) -> Option<String> {
+    let max = dstack_resample::TAPS as u32;
+    let step = dstack_resample::TAPS_STEP as u32;
+    if (MIN_CONVERTER_TAPS..=max).contains(&taps) && taps.is_multiple_of(step) {
+        return None;
+    }
+    Some(format!(
+        "{CONVERTER_TAPS}: {taps} taps; {MIN_CONVERTER_TAPS} to {max} in steps of {step}"
+    ))
+}
 
 impl Bridge {
     /// Why dasio would refuse this bridge on a device with `rx` RX and `tx`
@@ -125,6 +149,7 @@ impl Bridge {
                 out.push(format!("{label}: {problem}"));
             }
         }
+        out.extend(self.converter_taps.and_then(taps_problem));
         out
     }
 }
@@ -183,6 +208,30 @@ pub fn buffer_text(ns: Option<u64>) -> String {
     format!("{whole}.{}", frac.trim_end_matches('0'))
 }
 
+/// The note beside the app buffer: the default's meaning, or the keys the
+/// file sets that the window has no control for (dstack #387), shown
+/// read-only, short for the label (`file: to 1.333333 ms, from 2 ms, 48
+/// taps`: to-ASIO, from-ASIO, the converter).
+pub fn note_text(b: &Bridge) -> String {
+    let mut parts = Vec::new();
+    if let Some(ns) = b.to_asio_app_buffer_ns {
+        parts.push(format!("to {} ms", buffer_text(Some(ns))));
+    }
+    if let Some(ns) = b.from_asio_app_buffer_ns {
+        parts.push(format!("from {} ms", buffer_text(Some(ns))));
+    }
+    if let Some(t) = b.converter_taps {
+        parts.push(format!("{t} taps"));
+    }
+    if parts.is_empty() {
+        return DEFAULT_NOTE.to_string();
+    }
+    format!("file: {}", parts.join(", "))
+}
+
+/// The note when the file sets none of them.
+pub const DEFAULT_NOTE: &str = "empty: the default (the ASIO buffer + one block)";
+
 /// The app buffer typed in ms (up to 6 decimals, a dot); `None` when
 /// empty (the default); the reason otherwise.
 pub fn parse_buffer(text: &str) -> Result<Option<u64>, String> {
@@ -225,6 +274,7 @@ pub fn from_texts(
             app_buffer_ns,
             to_asio_app_buffer_ns: None,
             from_asio_app_buffer_ns: None,
+            converter_taps: None,
         }),
         (to, from, app) => Err([to.err(), from.err(), app.err()]
             .into_iter()
@@ -240,6 +290,7 @@ pub fn keep_unedited(prev: &Bridge, edited: Bridge) -> Bridge {
     Bridge {
         to_asio_app_buffer_ns: prev.to_asio_app_buffer_ns,
         from_asio_app_buffer_ns: prev.from_asio_app_buffer_ns,
+        converter_taps: prev.converter_taps,
         ..edited
     }
 }
@@ -276,6 +327,9 @@ pub fn write(doc: &mut DocumentMut, old: &Bridge, new: &Bridge) -> Result<(), St
     }
     if old.from_asio_app_buffer_ns != new.from_asio_app_buffer_ns {
         set_opt(t, "from_asio_app_buffer_ns", new.from_asio_app_buffer_ns)?;
+    }
+    if old.converter_taps != new.converter_taps {
+        set_opt(t, "converter_taps", new.converter_taps.map(u64::from))?;
     }
     Ok(())
 }
