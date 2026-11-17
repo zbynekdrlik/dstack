@@ -181,4 +181,30 @@ fn each_callback_is_timed_against_the_period() {
     assert_eq!(c.take_gap_max_ns(), 0, "a new interval");
     e.note_callback(15_999_999);
     assert_eq!(c.take_gap_max_ns(), 500_000);
+    // Lateness bins (dstack #386): the switch exactly two periods apart
+    // was 1.0 ms late (bin 3); the late one counts only as late.
+    assert_eq!(c.late_bins(), [0, 0, 0, 1, 0, 0, 0, 0]);
+}
+
+/// Each switch's lateness goes to its own bin, counted per bin; under a
+/// quarter ms late and past two periods count in no bin (dstack #386).
+#[test]
+fn each_callback_counts_in_its_lateness_bin() {
+    // 96 frames at 48 kHz: a period of 2 ms.
+    let (p, _, _) = gain(None);
+    let e = Engine::new(p, &opened(96, 1, &[], &[]));
+    let c = e.counters();
+    let mut t = 0;
+    e.note_callback(t);
+    for late in [
+        249_999, 250_000, 250_000, 1_000_000, 1_999_999, 2_000_000, 2_000_001,
+    ] {
+        t += 2_000_000 + late;
+        e.note_callback(t);
+    }
+    assert_eq!(c.late_bins(), [2, 0, 0, 1, 0, 0, 1, 1]);
+    assert_eq!(c.late(), 1, "2 ms + 1 ns late: past two periods");
+    let before = c.late_bins();
+    e.note_callback(t + 2_000_000);
+    assert_eq!(c.late_bins(), before, "on time");
 }
