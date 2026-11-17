@@ -749,15 +749,14 @@ fn the_tx_passes_with_a_tx_pull_do_not_allocate() {
     let v = tx.tx_fill().expect("the TX pull's counts");
     assert_eq!(
         (v.blocks, v.rebootstraps, v.writes_after_send),
-        (303, 0, 0),
+        (300, 0, 0),
         "{v:?}"
     );
     let lane = tx.lane(0);
     assert!((295..=300).contains(&lane.packets), "{lane:?}");
-    assert_eq!(
-        lane.holes, 0,
-        "the fill starts at the stamp the TX starts at: {lane:?}"
-    );
+    // Only the first W (96) of each channel's stamps, before the first
+    // block's, as the pump's bootstrap leaves them.
+    assert_eq!(lane.holes, 2 * 96, "{lane:?}");
     // The last packet: TX 2 is the counter one ahead, D = 224 after its
     // input.
     let mut buf = [0u8; 2048];

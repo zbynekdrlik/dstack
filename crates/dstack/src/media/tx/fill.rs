@@ -38,10 +38,9 @@
 //! again (counted, the blocks between skipped) and the processor hears a
 //! `discontinuity` before its next block, as after a pump re-bootstrap;
 //! the player in it resyncs once on the start that does not follow on. A
-//! start or restart begins with the block stamped now (the one due W ago),
-//! where a TX flow that starts or starts again at now sends first, so it
-//! sends filled stamps at once (the pump's bootstrap, at its playout point,
-//! leaves W of stamps before its first block silent). A re-anchor moves
+//! start or restart begins as the pump's bootstrap does (the block due
+//! now, no catch-up), so a TX flow that starts or starts again with it
+//! sends W of holes first, as on the pump's path. A re-anchor moves
 //! or keeps the schedule by S's change within W, as the pump's; a new
 //! latency P (Dante Controller) starts it again at the new playout point;
 //! a new advertised latency only moves the reach. While the clock is not
@@ -154,7 +153,10 @@ impl TxShared {
     /// before the TX thread is built (the embedded device's start does it
     /// before the host starts); refused ([`Refused`], `fill` back) for a
     /// channel without an engine ring ([`NO_RING`]), a second claim
-    /// ([`CLAIMED`]) or after the TX thread was built ([`BUILT`]).
+    /// ([`CLAIMED`]) or after the TX thread was built ([`BUILT`]). It does
+    /// not know the pump's map: a caller keeps the pulled channels out of
+    /// it ([`engine_channels`], as [`crate::embed::Embedded::start_tx_pulling`]
+    /// does), or a ring gets two writers.
     pub fn claim_fill(&self, fill: TxFill) -> Result<(), Refused> {
         // Under the control lock, as the TX thread's state is built
         // ([`TxShared::host_for_tx`]): seen by it, or refused.
@@ -351,13 +353,15 @@ impl TxFill {
         }
     }
 
-    /// The schedule started (again) at media time `now`: from the block
-    /// whose stamps start at the TX's own restart point (W before the
-    /// pump's playout point: the block due W ago, stamped now), so a TX
-    /// that starts or starts again at now sends filled stamps at once,
-    /// with no W of silence the pump's bootstrap would leave.
+    /// The schedule started (again) at media time `now`, as the pump's
+    /// bootstrap: the first block is the one whose input ends at the
+    /// playout point, no catch-up. Starting earlier (the block stamped now,
+    /// due W ago) would fill the W of stamps a TX restart sends first, but
+    /// pop W of audio in one pass right after the player's resync prime
+    /// and leave its FIFO W under the target until the controller brakes
+    /// it back (dstack #363's review): the app buffer short, a stated term.
     fn fresh(&self, now: u64) -> Blocks {
-        Blocks::bootstrap(now.saturating_sub(self.timing.margin), self.schedule())
+        Blocks::bootstrap(now, self.schedule())
     }
 
     /// The blocks between `before` (the next start) and `fresh`'s start

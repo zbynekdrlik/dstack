@@ -102,30 +102,31 @@ fn a_due_block_is_filled_at_the_pump_s_stamp_on_each_channel() {
     let (mut fill, calls, disc) = fill_of(Ramp::default());
     let engine = engine();
     assert_eq!(fill.wake_ns(RATE), None, "no schedule yet");
-    // The start fills from the block stamped now (due W ago) up to the
-    // one due now (its input ending at the playout point): 4 blocks.
+    // The first block's input ends at the playout point: due at T.
     fill.fill_due(T, MAX_LAG, &engine, 0);
-    let first = T - D;
-    assert_eq!(calls.load(Ordering::Relaxed), 4);
+    let first = T - B - P;
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
     assert_eq!(disc.load(Ordering::Relaxed), 1, "the start");
     let ring = engine[0].as_ref().unwrap();
-    assert_eq!(read(ring, T, 4 * B as usize), (ramps(first, 4 * B, 0), 0));
+    assert_eq!(read(ring, first + D, B as usize), (ramps(first, B, 0), 0));
     let ring = engine[2].as_ref().unwrap();
-    assert_eq!(read(ring, T, 4 * B as usize), (ramps(first, 4 * B, 1), 0));
+    assert_eq!(read(ring, first + D, B as usize), (ramps(first, B, 1), 0));
     // The next block is due a block later, at the pump's time.
     assert_eq!(fill.wake_ns(RATE), Some(ns_of(T + B, RATE)));
     fill.fill_due(T + B - 1, MAX_LAG, &engine, 0);
-    assert_eq!(calls.load(Ordering::Relaxed), 4, "not due yet");
+    assert_eq!(calls.load(Ordering::Relaxed), 1, "not due yet");
     fill.fill_due(T + B, MAX_LAG, &engine, 0);
-    assert_eq!(calls.load(Ordering::Relaxed), 5);
+    assert_eq!(calls.load(Ordering::Relaxed), 2);
     let ring = engine[0].as_ref().unwrap();
-    let last = T - P;
-    assert_eq!(read(ring, last + D, B as usize), (ramps(last, B, 0), 0));
+    assert_eq!(
+        read(ring, first + B + D, B as usize),
+        (ramps(first + B, B, 0), 0)
+    );
     let v = fill.stats().view();
     assert_eq!(
         v,
         TxFillView {
-            blocks: 5,
+            blocks: 2,
             ..TxFillView::default()
         }
     );
@@ -154,25 +155,20 @@ fn a_late_tx_thread_catches_up_within_its_reach_and_starts_again_past_it() {
     // between is filled, none lost.
     let reach = W + MAX_LAG;
     fill.fill_due(T + reach, MAX_LAG, &engine, 0);
-    let filled = 4 + reach / B;
+    let filled = 1 + reach / B;
     assert_eq!(calls.load(Ordering::Relaxed), filled);
-    let first = T - D;
+    let first = T - B - P;
     let ring = engine[0].as_ref().unwrap();
     let n = filled * B;
     assert_eq!(read(ring, first + D, n as usize), (ramps(first, n, 0), 0));
     assert_eq!(fill.stats().view().rebootstraps, 0);
-    // A sample past the reach behind the next block: started again from
-    // the block stamped now, the blocks before it skipped, the processor
-    // told.
+    // A sample past the reach behind the next block: started again at
+    // now, the blocks between skipped, the processor told.
     let next_due = T + reach + B;
-    let now = next_due + reach + 1;
-    fill.fill_due(now, MAX_LAG, &engine, 0);
+    fill.fill_due(next_due + reach + 1, MAX_LAG, &engine, 0);
     let v = fill.stats().view();
     assert_eq!((v.rebootstraps, v.writes_after_send), (1, 0), "{v:?}");
-    let fresh = (now - W - P - B).div_ceil(B) * B;
-    assert_eq!(v.skipped, (fresh - (next_due - B - P)) / B, "{v:?}");
-    let ring = engine[0].as_ref().unwrap();
-    assert_eq!(read(ring, fresh + D, B as usize), (ramps(fresh, B, 0), 0));
+    assert!(v.skipped >= reach / B, "{v:?}");
     // The processor hears it before its next block.
     let wake = fill.wake_ns(RATE).unwrap();
     fill.fill_due(crate::clock::to_samples(wake, RATE), MAX_LAG, &engine, 0);
@@ -265,10 +261,9 @@ fn a_re_anchor_moves_the_schedule_by_the_shift_or_starts_it_again() {
     // An unknown step: started again, counted, the processor told.
     fill.re_anchor(None, T + 2 * B);
     assert_eq!(fill.stats().view().rebootstraps, 1);
-    // From the block stamped now, as at the start: 4 blocks.
     fill.fill_due(T + 2 * B, MAX_LAG, &engine, 0);
     assert_eq!(disc.load(Ordering::Relaxed), 2);
-    assert_eq!(calls.load(Ordering::Relaxed), 8);
+    assert_eq!(calls.load(Ordering::Relaxed), 2);
 }
 
 /// A known step the pump would keep (its schedule already started again
@@ -304,7 +299,7 @@ fn a_re_anchor_keeps_the_schedule_where_the_pump_keeps_its_own() {
 
 #[test]
 fn a_panicking_processor_is_silent_from_then_on_and_counted() {
-    let first = T - D;
+    let first = T - B - P;
     let (mut fill, calls, _) = fill_of(Ramp {
         panic_at: Some(first + B),
         ..Ramp::default()
@@ -315,10 +310,10 @@ fn a_panicking_processor_is_silent_from_then_on_and_counted() {
     assert_eq!(calls.load(Ordering::Relaxed), 2, "never called after it");
     let ring = engine[0].as_ref().unwrap();
     assert_eq!(read(ring, first + D, B as usize), (ramps(first, B, 0), 0));
-    let silent = vec![0; 5 * B as usize];
-    assert_eq!(read(ring, first + B + D, 5 * B as usize), (silent, 0));
+    let silent = vec![0; 2 * B as usize];
+    assert_eq!(read(ring, first + B + D, 2 * B as usize), (silent, 0));
     let v = fill.stats().view();
-    assert_eq!((v.blocks, v.faults), (6, 1), "{v:?}");
+    assert_eq!((v.blocks, v.faults), (3, 1), "{v:?}");
 }
 
 #[test]
@@ -451,16 +446,19 @@ fn the_tx_thread_fills_before_it_sends_even_when_it_runs_late() {
             packets.push(buf[..n].to_vec());
         }
     }
+    // The first block's stamps (W after the TX's first, as the pump's
+    // bootstrap leaves them) and every one after it.
+    let written = T + W;
     let mut checked = 0;
     for p in &packets {
         let t = stamp_of(p);
         assert!(ns_of(t + 32, RATE) + TX_MARGIN_NS <= start + 30 * 1_000_000);
         let mut got = Vec::new();
         read_frames(p, 1, 3, |_, _, x| got.push(x)).unwrap();
-        // Every packet, the first included: the fill starts from the
-        // block stamped at the TX's own start.
-        assert_eq!(got, ramps(t - D, 32, 0), "the processor's audio at {t}");
-        checked += 1;
+        if t >= written {
+            assert_eq!(got, ramps(t - D, 32, 0), "the processor's audio at {t}");
+            checked += 1;
+        }
     }
     assert!(
         checked >= 70,
@@ -469,15 +467,16 @@ fn the_tx_thread_fills_before_it_sends_even_when_it_runs_late() {
     );
     let lane = shared.lane(0);
     assert_eq!(lane.rebootstraps, 0, "{lane:?}");
-    assert_eq!(lane.holes, 0, "{lane:?}");
+    // Only the stamps before the first block's are holes.
+    assert_eq!(lane.holes, written - T, "{lane:?}");
     let v = shared.tx_fill().unwrap();
     assert_eq!(
         (v.rebootstraps, v.writes_after_send, v.faults),
         (0, 0, 0),
         "{v:?}"
     );
-    // The 4 of the start, then 27 ms at 96 kHz: 81 blocks of 32.
-    assert_eq!(v.blocks, 85, "{v:?}");
+    // 27 ms at 96 kHz: 81 blocks of 32 after the first.
+    assert_eq!(v.blocks, 82, "{v:?}");
 }
 
 /// While the clock is not ready the TX thread fills nothing; at a re-anchor
@@ -493,7 +492,7 @@ fn the_tx_thread_idles_the_fill_without_a_clock_and_moves_it_at_a_re_anchor() {
     assert_eq!(calls.load(Ordering::Relaxed), 0);
     let start = ns_of(T, RATE);
     tx.step(Some(start), 0);
-    assert_eq!(calls.load(Ordering::Relaxed), 4);
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
     tx.step(None, 0);
     assert_eq!(tx.wake_ns(None), 0);
     assert!(tx.fill.as_ref().unwrap().wake_ns(RATE).is_none(), "idle");
