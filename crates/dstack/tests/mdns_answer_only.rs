@@ -11,7 +11,8 @@
 //! query or refresh anything.
 //!
 //! The test runs the daemon as a device runs it (`host.rs`: only the
-//! device address's interface, here loopback (dstack #366), our records through `announce::Announcer`),
+//! device address's interface, here loopback (dstack #366), our records
+//! through `announce::Announcer`),
 //! with the cache taking every response it hears (`accept_unsolicited`, a
 //! superset of the device's setting). For 2.5 TTLs of a 4 s TTL, the
 //! scaled 5 minutes of a Dante record's 120 s TTL, it hears other devices'
