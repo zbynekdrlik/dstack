@@ -241,3 +241,72 @@ fn a_tone_break_logs_one_line() {
         "{line}"
     );
 }
+
+/// The peer's processor at obs's shape (a 440 Hz tone at 96 kHz, 128-frame
+/// blocks): blocks `from..from + blocks` of the media grid, each one's
+/// input the tone the app sends, from block `jump.0`'s sample `jump.1` on
+/// `jump.2` samples further on (0: the tone at the block's own positions).
+fn hear(p: &mut Tones, from: u64, blocks: u64, jump: (u64, u64, u64)) {
+    let frames = 128u64;
+    let mut out = vec![0.0; 0];
+    for b in 0..blocks {
+        let start = from + b * frames;
+        let input: Vec<f64> = (0..frames)
+            .map(|i| {
+                let past = (b, i) >= (jump.0, jump.1);
+                let n = start + i + if past { jump.2 } else { 0 };
+                tone::tone_at(n, 440, 96_000)
+            })
+            .collect();
+        let mut block = Block::new(frames as usize, &input, &mut out).at(start);
+        p.process(&mut block);
+    }
+}
+
+/// The peer's `own_skips` and its RX 1's `tone_gaps`, from its status.
+fn skips_and_gaps(p: &Tones) -> (serde_json::Value, serde_json::Value) {
+    let a = peer_args();
+    let v: serde_json::Value =
+        serde_json::from_str(&status_json(&a, &p.shared(), "{}")).unwrap();
+    (
+        v["peer"]["own_skips"].clone(),
+        v["peer"]["rx"][0]["tone_gaps"].clone(),
+    )
+}
+
+/// dstack #358: the peer's OWN pump skipping blocks (a re-bootstrap: its
+/// next block starts past the last one's end) jumps the received tone by
+/// what it did not read. That is no break of the flow it receives: the
+/// check re-locks across the jump and counts it apart (`own_skips`). Each
+/// of these skips gave one 2-sample `misplaced` break before (#354).
+#[test]
+fn the_peer_s_own_skip_counts_no_tone_break() {
+    crate::test_log::undecided();
+    let frames = 128u64;
+    let mut p = Tones::new(vec![], 1, 96_000);
+    let text = crate::test_log::capture_warnings(|| {
+        let mut at = 5_000_000;
+        hear(&mut p, at, 40, (0, 0, 0));
+        for skip in [1, 5, 6, 11] {
+            at += 40 * frames + skip * frames;
+            hear(&mut p, at, 40, (0, 0, 0));
+        }
+    });
+    assert!(!text.contains("a tone break"), "{text}");
+    assert_eq!(skips_and_gaps(&p), (4.into(), 0.into()), "{text}");
+}
+
+/// dstack #358: a break in the received flow still counts, with no own
+/// skip (the app's flow jumps 2300 samples, off the tone's period, inside
+/// a block at a steady start) and in the first block after an own skip (at
+/// its third sample, past the two the check re-locks on).
+#[test]
+fn a_break_in_the_received_flow_still_counts_beside_an_own_skip() {
+    let frames = 128u64;
+    let mut p = Tones::new(vec![], 1, 96_000);
+    hear(&mut p, 0, 40, (20, 64, 2300));
+    assert_eq!(skips_and_gaps(&p), (0.into(), 1.into()));
+    // An own skip of 3 blocks.
+    hear(&mut p, 43 * frames, 40, (0, 2, 2300));
+    assert_eq!(skips_and_gaps(&p), (1.into(), 2.into()));
+}
