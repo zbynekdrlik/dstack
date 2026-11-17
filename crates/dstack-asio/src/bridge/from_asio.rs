@@ -15,8 +15,8 @@
 //! `dlink::Link::start_tx_pulling`.
 //!
 //! Its `process` allocates nothing, takes no lock and makes no system
-//! call but the age's clock read: the pull's (module doc of
-//! `dlink::bridge::tx_pull`) and the age's atomics.
+//! call but clock reads (the age's, the player's FIFO stamps): the pull's
+//! rules (module doc of `dlink::bridge::tx_pull`) and the age's atomics.
 
 use std::sync::Arc;
 

@@ -31,9 +31,9 @@
 //!   dstack #364, the TX pull of #363: no latency term), the device's TX
 //!   thread runs that player ([`FromAsio`]) and fills each block at the
 //!   pump's own due time and stamp just before it sends, so a late pump no
-//!   longer leaves sent stamps silent (`tests/from_asio_pull.rs`: 23178
-//!   samples off and 18688 TX holes in 8 s under 23 stalls of 10 to 20 ms
-//!   on the pump's path, 0 pulled). Otherwise [`DanteSide`] plays it on
+//!   longer leaves sent stamps silent (`tests/from_asio_pull.rs`'s
+//!   stalls of 10 to 20 ms: on the pump's path 20868 samples off and 17920
+//!   TX holes in 8 s under 22 stalls, 0 pulled). Otherwise [`DanteSide`] plays it on
 //!   the pump. The latency is the same either way (the same D, W, (c) TX
 //!   and target).
 //!

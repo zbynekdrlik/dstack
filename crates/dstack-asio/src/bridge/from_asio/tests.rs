@@ -50,6 +50,11 @@ fn the_pull_plays_each_open_s_player_and_the_pump_plays_none() {
     let mut bridge = Bridge::new(spec(1, 2)).unwrap();
     let mut from = bridge.pull_from_asio().expect("the pull");
     assert_eq!(TxProcess::outputs(&from), 2);
+    let text = format!("{from:?}");
+    assert!(
+        text.starts_with("FromAsio") && text.contains("outputs: 2"),
+        "{text}"
+    );
     let mut dante = bridge.dante_side().unwrap();
     let mut asio = bridge.asio_side(&opened(1, 2)).unwrap();
     let input = vec![0.5; 2 * 256];
@@ -124,8 +129,12 @@ fn the_pull_is_refused_when_late_twice_or_without_channels() {
         b.pull_from_asio().err().as_deref(),
         Some("the driver opened already: take the from-ASIO pull before its first open")
     );
-    // A bridge that was refused late still plays on the pump's path.
-    assert!(b.dante_side().is_some());
+    // A bridge that was refused late still plays on the pump's path: its
+    // pump side takes the open's player (and gives the idle one back).
+    let mut dante = b.dante_side().expect("the pump's side");
+    let mut out = vec![1.0; 128];
+    dante.process(&mut Block::new(128, &[0.0; 128], &mut out));
+    assert_eq!(b.collect(), 1, "the pump took the open's player");
 }
 
 /// dstack #325's modelled block age: the TX thread's fill takes the

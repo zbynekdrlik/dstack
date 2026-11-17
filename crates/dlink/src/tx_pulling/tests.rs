@@ -46,7 +46,10 @@ fn pull(outputs: usize) -> crate::bridge::TxPull {
 /// The start's refusal, which must come before anything runs (the place
 /// is never reached).
 fn refused(map: Map, fifo_channels: usize, outputs: usize) -> String {
-    let config = Config::new("app-link", "/tmp/never-written.toml")
+    // Its own state file (`.claude/rules/tests.md`), though no case here
+    // reaches the start.
+    let dir = tempfile::tempdir().unwrap();
+    let config = Config::new("app-link", dir.path().join("link.toml"))
         .rx(["In 1", "In 2"])
         .tx(["Out 1", "Out 2"]);
     let e = Link::start_pulling_with_tx_on(
