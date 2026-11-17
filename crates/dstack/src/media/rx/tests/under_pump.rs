@@ -170,6 +170,8 @@ fn a_new_flow_under_the_pump_starts_past_what_waited_before_it() {
     intake.drain_into_rings(Some(ns_of(P0 + 10_000, RATE)));
     let c = s.lane(0);
     assert_eq!((c.packets, c.stray, c.late), (0, 4, 0), "{c:?}");
+    // dstack #354: the four emptied are the drain's datagrams.
+    assert_eq!(intake.datagrams(), 4);
     // The flow's own packets after it: read.
     t.send_to(&packet_at(P0 + 9_900, 1, 32), slot_addr(&s, 0))
         .unwrap();
@@ -177,6 +179,7 @@ fn a_new_flow_under_the_pump_starts_past_what_waited_before_it() {
     intake.drain_into_rings(Some(ns_of(P0 + 10_000, RATE)));
     let c = s.lane(0);
     assert_eq!((c.packets, c.stray, c.late), (1, 4, 0), "{c:?}");
+    assert_eq!(intake.datagrams(), 1, "this drain's only");
     // Another plan of the same flow (granted now): nothing dropped.
     t.send_to(&packet_at(P0 + 9_932, 1, 32), slot_addr(&s, 0))
         .unwrap();
@@ -437,16 +440,24 @@ fn a_drain_says_whether_it_left_every_socket_empty() {
         &[(0, RxRoute { flow: 0, slot: 0 })],
     );
     assert!(intake.drain_into_rings(None), "nothing waits");
+    assert_eq!(intake.datagrams(), 0);
     let t = transmitter(LOOPBACK);
     let n = PUMP_DRAIN as u64 + 3;
     for k in 0..n {
         t.send_to(&packet_at(P0 + k, 1, 1), slot_addr(&s, 0))
             .unwrap();
     }
+    // A datagram from another source: read (stray), so a datagram too.
+    transmitter(Ipv4Addr::new(127, 0, 0, 2))
+        .send_to(&packet_at(P0, 1, 1), slot_addr(&s, 0))
+        .unwrap();
     settle();
     assert!(!intake.drain_into_rings(None), "the cap was hit: more wait");
+    // dstack #354: every datagram the drain read, up to its cap.
+    assert_eq!(intake.datagrams(), PUMP_DRAIN);
     assert!(intake.drain_into_rings(None), "the rest, then empty");
-    assert_eq!(s.lane(0).packets, n);
+    assert_eq!(intake.datagrams(), 4);
+    assert_eq!((s.lane(0).packets, s.lane(0).stray), (n, 1));
 }
 
 #[test]

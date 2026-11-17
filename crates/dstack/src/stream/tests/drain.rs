@@ -11,7 +11,7 @@ use crate::media::packet;
 
 /// A pump of `profile` over RX 1 (from slot 0 of a 32-frame flow from
 /// loopback, slot 0 of the flow) into TX 1's engine ring.
-fn flow_rig(profile: TimingProfile) -> Rig {
+pub(super) fn flow_rig(profile: TimingProfile) -> Rig {
     let mut cfg = DeviceConfig::from_toml(TEST_DEVICE).expect("config/test-device.toml");
     cfg.timing = profile;
     let rings: Arc<[Ring]> = (0..cfg.rx.len()).map(|_| Ring::new()).collect();
@@ -64,7 +64,7 @@ fn flow_rig(profile: TimingProfile) -> Rig {
 
 /// Sends the 32 frames from position `pos` to slot 0, counter-valued, and
 /// waits for them to be in its socket.
-fn send(r: &Rig, t: &UdpSocket, pos: u64) {
+pub(super) fn send(r: &Rig, t: &UdpSocket, pos: u64) {
     let mut out = [0u8; 1500];
     let (secs, sub) = crate::clock::stamp(pos, RATE);
     let n = packet::write(&mut out, secs, sub, 1, 3, B as usize, |f, _| {

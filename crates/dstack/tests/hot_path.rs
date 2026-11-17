@@ -386,7 +386,10 @@ fn the_rx_thread_s_passes_do_not_allocate() {
     assert_eq!(c.lateness_sum_ns + c.read_wait_sum_ns, at_pass, "{c:?}");
     assert_eq!(c.read_wait_count, 300);
     let peak = shared.take_max_lateness(0);
-    let waited = c.read_wait_peak_us * u64::from(RATE) / 1_000_000 + 1;
+    // `read_wait_peak_us` is truncated to whole us (31 stands for up to
+    // 31.999 us), and the peak lateness to whole samples: take the wait's
+    // upper end, rounded up to samples, plus the peak's own sample.
+    let waited = ((c.read_wait_peak_us + 1) * u64::from(RATE)).div_ceil(1_000_000) + 1;
     assert!(
         peak <= 32 * 300 + 64 && peak + waited >= 32 * 300 + 64,
         "{peak} {c:?}"

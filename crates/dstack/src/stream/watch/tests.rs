@@ -390,3 +390,59 @@ fn a_block_written_after_its_send_alone_warns_with_its_count() {
     assert_eq!(s.view().writes_after_send, 2, "the status keeps it");
     assert_eq!(capture_warnings(|| w.watch(2 * S, "d1", Some(&s))), "");
 }
+
+/// dstack #354: the warning splits that second's lost time by cause: the
+/// sleep's oversleep, the longest drain and its datagrams, the largest
+/// block's thread CPU time (`-` until one is measured); each taken at
+/// every look, so a quiet second's peaks never reach the next line.
+#[test]
+fn the_warning_splits_that_second_s_lost_time_by_cause() {
+    undecided();
+    let s = stats();
+    let mut w = PumpWatch::new();
+    w.watch(0, "d1", Some(&s));
+    let line = |w: &mut PumpWatch, at: u64| capture_warnings(|| w.watch(at, "d1", Some(&s)));
+    s.overslept(8_551_999);
+    s.drained(74_999, 34);
+    s.drained(9_000, 4);
+    s.rebootstrapped(7, Cause::Late);
+    let log = line(&mut w, S);
+    assert!(
+        log.trim_end().ends_with(
+            "oversleep_max_us=8551 drain_max_us=74 drain_max_datagrams=34 max_process_cpu_us=-"
+        ),
+        "{log}"
+    );
+    // A quiet second's peaks are taken with it.
+    s.overslept(3_000_000);
+    s.drained(50_000, 20);
+    s.record_cpu(900_000);
+    assert_eq!(line(&mut w, 2 * S), "");
+    s.record_cpu(81_000);
+    s.rebootstrapped(1, Cause::Late);
+    let log = line(&mut w, 3 * S);
+    assert!(
+        log.trim_end().ends_with(
+            "oversleep_max_us=0 drain_max_us=0 drain_max_datagrams=0 max_process_cpu_us=81"
+        ),
+        "{log}"
+    );
+    // The status keeps the largest since the start.
+    let v = s.view();
+    assert_eq!(
+        (
+            v.oversleep_max_us,
+            v.drain_max_us,
+            v.drain_max_datagrams,
+            v.max_process_cpu_us
+        ),
+        (8_551, 74, 34, Some(900))
+    );
+}
+
+#[test]
+fn a_cpu_time_shows_in_whole_us_or_a_dash() {
+    assert_eq!(cpu_word(Some(81)), "81");
+    assert_eq!(cpu_word(Some(0)), "0");
+    assert_eq!(cpu_word(None), "-");
+}

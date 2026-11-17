@@ -160,7 +160,12 @@
 //! A pump that overruns or restarts logs `engine pump lost or overran
 //! blocks this second` once a second, with its `overruns` and that
 //! second's longest block, `max_process_us` (dstack 0.6.25; that second's
-//! since 0.6.32, the longest since the start before).
+//! since 0.6.32, the longest since the start before). Since 0.6.158 the
+//! line splits the lost time by cause (dstack #354): `oversleep_max_us`
+//! (the pump's sleep returned that late: the scheduler's), `drain_max_us`
+//! and `drain_max_datagrams` (its socket drain before a block) and
+//! `max_process_cpu_us` (a block's thread CPU time on Linux, `-` elsewhere:
+//! far under `max_process_us`, the block was preempted, not slow).
 //!
 //! ```no_run
 //! use dlink::{Block, Config, Link, Map, Place, Process};

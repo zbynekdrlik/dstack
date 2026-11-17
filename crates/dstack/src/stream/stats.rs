@@ -14,6 +14,7 @@ use dstack_audio_io::StreamStats;
 use dstack_audio_io::hist::{HistSnapshot, StreamHists};
 use dstack_audio_io::telemetry::period_ns;
 
+use super::split::Peak;
 use super::wake::{self, WakeLateness};
 use super::{Cause, Due, Timing};
 use crate::media::tx::ns_of;
@@ -48,11 +49,10 @@ pub struct PumpStats {
     pub(super) rate: u32,
     /// How late the pump woke ([`wake`], dstack #281).
     pub(super) wakes: WakeLateness,
-    pub(super) max_process_ns: AtomicU64,
-    /// The longest block since the pump watch's last look, ns
-    /// ([`PumpStats::take_second_max_us`]; dstack #1: the watch's line
-    /// reports that second's, not the longest since the start).
-    pub(super) second_max_ns: AtomicU64,
+    /// The longest block since the start and since the pump watch's last
+    /// look, ns ([`PumpStats::take_second_max_us`]; dstack #1: the watch's
+    /// line reports that second's, not the longest since the start).
+    pub(super) process_ns: Peak,
     /// The faulting block's own time; stored before `faulted`.
     pub(super) fault_ns: AtomicU64,
     pub(super) fault: Mutex<Option<String>>,
@@ -67,6 +67,28 @@ pub struct PumpStats {
     /// Blocks with an output the TX thread had already sent as silence
     /// (dstack #346, [`PumpView::writes_after_send`]).
     pub(super) writes_after_send: AtomicU64,
+    /// The pump's lost time split by cause (dstack #354, [`super::split`]):
+    /// the sleep's oversleep, each drain's time and datagrams, each block's
+    /// thread CPU time (measured once any block's was).
+    pub(super) oversleep_ns: Peak,
+    pub(super) drain_ns: Peak,
+    pub(super) drain_datagrams: Peak,
+    pub(super) process_cpu_ns: Peak,
+    pub(super) cpu_measured: AtomicBool,
+}
+
+/// That second's peaks of the lost time's split (dstack #354): the pump
+/// watch takes them once a second, for its line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SecondSplit {
+    /// The largest return of a sleep past its target, whole µs.
+    pub oversleep_us: u64,
+    /// The longest drain, whole µs, and the most datagrams one drain read.
+    pub drain_us: u64,
+    pub drain_datagrams: u64,
+    /// The largest block's thread CPU time, whole µs (`None` where
+    /// unmeasured: off Linux).
+    pub process_cpu_us: Option<u64>,
 }
 
 /// The pump's numbers for the device's control socket (numbers only).
@@ -117,6 +139,19 @@ pub struct PumpView {
     /// latency (a smaller D) or a re-anchor, landing on stamps already
     /// sent.
     pub writes_after_send: u64,
+    /// The lost time split by cause since the start (dstack #354,
+    /// [`super::split`]): the largest return of a sleep past its target,
+    /// whole µs (a late wake with this near its `wake_behind` was the
+    /// scheduler's) ...
+    pub oversleep_max_us: u64,
+    /// ... the longest socket drain before a block, whole µs, and the most
+    /// datagrams one drain read (0 while the pump writes no RX ring) ...
+    pub drain_max_us: u64,
+    pub drain_max_datagrams: u64,
+    /// ... and the largest block's thread CPU time, whole µs, beside
+    /// `max_process_us` (its wall time): a block far longer than its CPU
+    /// time was not run in its middle. `None` where unmeasured (off Linux).
+    pub max_process_cpu_us: Option<u64>,
 }
 
 impl PumpStats {
@@ -144,8 +179,7 @@ impl PumpStats {
             rebootstraps_retime: AtomicU64::new(0),
             rate,
             wakes: WakeLateness::new(),
-            max_process_ns: AtomicU64::new(0),
-            second_max_ns: AtomicU64::new(0),
+            process_ns: Peak::default(),
             fault_ns: AtomicU64::new(0),
             fault: Mutex::new(None),
             hists: StreamHists::new(period),
@@ -153,6 +187,11 @@ impl PumpStats {
             play_at_steps: AtomicU64::new(0),
             play_at_max_dev_ns: AtomicU64::new(0),
             writes_after_send: AtomicU64::new(0),
+            oversleep_ns: Peak::default(),
+            drain_ns: Peak::default(),
+            drain_datagrams: Peak::default(),
+            process_cpu_ns: Peak::default(),
+            cpu_measured: AtomicBool::new(false),
         }
     }
 
@@ -161,8 +200,7 @@ impl PumpStats {
     /// an overrun when longer than one period.
     pub(super) fn record(&self, took_ns: u64) {
         self.blocks.fetch_add(1, Ordering::Relaxed);
-        self.max_process_ns.fetch_max(took_ns, Ordering::Relaxed);
-        self.second_max_ns.fetch_max(took_ns, Ordering::Relaxed);
+        self.process_ns.record(took_ns);
         self.hists.process.record(took_ns);
         if took_ns > self.period_ns {
             self.overruns.fetch_add(1, Ordering::Relaxed);
@@ -172,7 +210,60 @@ impl PumpStats {
     /// The longest block since the last call, whole µs, and a fresh start
     /// for the next (the pump watch, once a second).
     pub(crate) fn take_second_max_us(&self) -> u64 {
-        self.second_max_ns.swap(0, Ordering::Relaxed) / 1_000
+        self.process_ns.take_second() / 1_000
+    }
+
+    /// A block's own thread CPU time, ns (the pump thread; dstack #354).
+    pub(crate) fn record_cpu(&self, cpu_ns: u64) {
+        self.process_cpu_ns.record(cpu_ns);
+        self.cpu_measured.store(true, Ordering::Relaxed);
+    }
+
+    /// A sleep that returned `ns` past its target (the pump thread; dstack
+    /// #354).
+    pub(crate) fn overslept(&self, ns: u64) {
+        self.oversleep_ns.record(ns);
+    }
+
+    /// The pump thread slept until media time `target_ns`, reading the
+    /// media clock just before the sleep (`asked_ns`) and just after it
+    /// returned (`woke_ns`; `None`: not read), with the clock's epoch
+    /// unchanged across it (`same_epoch`; a new epoch moved the clock):
+    /// how late it returned is recorded ([`super::split::oversleep_ns`],
+    /// dstack #354). A sleep asked for a time already past records nothing
+    /// (its lateness is the blocks' and drains' before it).
+    pub fn slept(
+        &self,
+        target_ns: u64,
+        asked_ns: Option<u64>,
+        woke_ns: Option<u64>,
+        same_epoch: bool,
+    ) {
+        if let (Some(asked), Some(woke), true) = (asked_ns, woke_ns, same_epoch)
+            && let Some(late) = super::split::oversleep_ns(target_ns, asked, woke)
+        {
+            self.overslept(late);
+        }
+    }
+
+    /// A socket drain before a block that took `ns` and read `datagrams`
+    /// (the pump thread; dstack #354).
+    pub(crate) fn drained(&self, ns: u64, datagrams: u64) {
+        self.drain_ns.record(ns);
+        self.drain_datagrams.record(datagrams);
+    }
+
+    /// That second's split of the lost time since the last call, and a
+    /// fresh start for the next (the pump watch, once a second; dstack
+    /// #354).
+    pub(crate) fn take_second_split(&self) -> SecondSplit {
+        let cpu = self.process_cpu_ns.take_second() / 1_000;
+        SecondSplit {
+            oversleep_us: self.oversleep_ns.take_second() / 1_000,
+            drain_us: self.drain_ns.take_second() / 1_000,
+            drain_datagrams: self.drain_datagrams.take_second(),
+            process_cpu_us: self.cpu_measured.load(Ordering::Relaxed).then_some(cpu),
+        }
     }
 
     /// The pump plays at `timing` now (its W unchanged).
@@ -255,7 +346,7 @@ impl PumpStats {
             resets: self.view().rebootstraps,
             faulted,
             running: self.running.load(Ordering::Acquire),
-            max_process_ns: self.max_process_ns.load(Ordering::Relaxed),
+            max_process_ns: self.process_ns.max(),
             fault: self
                 .fault
                 .lock()
@@ -301,7 +392,7 @@ impl PumpStats {
             missed,
             overruns: self.overruns.load(Ordering::Relaxed),
             rebootstraps: late + clock_back + reanchor + retime,
-            max_process_us: self.max_process_ns.load(Ordering::Relaxed) / 1_000,
+            max_process_us: self.process_ns.max() / 1_000,
             rebootstraps_late: late,
             rebootstraps_clock_back: clock_back,
             rebootstraps_reanchor: reanchor,
@@ -312,6 +403,13 @@ impl PumpStats {
             play_at_steps: self.play_at_steps.load(Ordering::Relaxed),
             play_at_max_dev_us: self.play_at_max_dev_ns.load(Ordering::Relaxed) / 1_000,
             writes_after_send: self.writes_after_send.load(Ordering::Relaxed),
+            oversleep_max_us: self.oversleep_ns.max() / 1_000,
+            drain_max_us: self.drain_ns.max() / 1_000,
+            drain_max_datagrams: self.drain_datagrams.max(),
+            max_process_cpu_us: self
+                .cpu_measured
+                .load(Ordering::Relaxed)
+                .then(|| self.process_cpu_ns.max() / 1_000),
         }
     }
 }
