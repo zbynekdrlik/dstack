@@ -333,3 +333,27 @@ fn a_re_lock_judges_the_next_block_from_its_third_sample() {
     assert_eq!(ends(&mut check, &after), [2]);
     assert_eq!(check.gaps(), 1);
 }
+
+/// dstack #358: a gap open at a re-lock goes on and ends once, after its
+/// good run in the blocks past the jump: one gap, handed on once (its
+/// length counts only the samples the check saw).
+#[test]
+fn a_gap_open_at_a_re_lock_goes_on_and_ends_once() {
+    let mut check = ToneCheck::default();
+    let mut before: Vec<Vec<f64>> = (0..20)
+        .map(|b| tone(b * BLOCK as u64, BLOCK, 1000))
+        .collect();
+    // Silence from the last block's half on: a gap opens there.
+    before[19][BLOCK / 2..].fill(0.0);
+    assert_eq!(ends(&mut check, &before), [0u64; 0]);
+    assert_eq!(check.gaps(), 1);
+    check.relock();
+    let after: Vec<Vec<f64>> = (0..20)
+        .map(|b| tone(50_000 + b * BLOCK as u64, BLOCK, 1000))
+        .collect();
+    // Seen: the silent samples but the first (the tone's own 0 there,
+    // sample 2496 = 52 periods), the 2 the re-lock starts on are not
+    // judged, then the clean run (16 good samples end it).
+    assert_eq!(ends(&mut check, &after), [63]);
+    assert_eq!(check.gaps(), 1);
+}

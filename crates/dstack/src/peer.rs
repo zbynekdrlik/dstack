@@ -11,8 +11,9 @@
 //!   channel), for the app to receive;
 //! - its RX channels are subscribed to the app's TX channels, and each one's
 //!   tone is checked for continuity ([`tone::ToneCheck`]: `tone_gaps`);
-//!   the peer's own block-start jumps (its pump skipping blocks) re-lock
-//!   the checks and are counted apart (`own_skips`, dstack #358);
+//!   the peer's own jumps (its engine's discontinuity, e.g. its pump
+//!   skipping blocks) re-lock the checks and are counted apart
+//!   (`own_skips`, dstack #358);
 //! - a JSON status file, rewritten once a second ([`status_json`]): the
 //!   peer's own part and the device's status (`ctl status`: the RX
 //!   channels' counters, the pump's `play_at_steps` / `play_at_max_dev_us`).
@@ -115,9 +116,11 @@ pub struct Shared {
     pub rx: Box<[RxTone]>,
     /// Blocks run with a media start.
     pub blocks: AtomicU64,
-    /// The peer's own block-start jumps (dstack #358: its pump skipped
-    /// blocks, a re-bootstrap; or started again elsewhere): the tone
-    /// checks re-locked across each, counted here, never in `tone_gaps`.
+    /// The peer's own jumps (dstack #358): each discontinuity its engine
+    /// pump signals after its first started block (its inputs jumped: a
+    /// re-bootstrap skipping the blocks it was too late for, a retime, a
+    /// re-anchor off the block grid, a start again after free pacing). The
+    /// tone checks re-lock across each; counted here, never in `tone_gaps`.
     pub own_skips: AtomicU64,
     /// The play times' rate against the media time, ppm, as `f64` bits
     /// ([`play_at_ppm`]; NaN before two blocks with one).
@@ -154,16 +157,18 @@ fn tone_break(ch: usize, samples: u64, rate: u32, gaps: u64, kind: GapKind) {
     );
 }
 
-/// One WARN for the peer's own block-start jump (dstack #358): the block
-/// starts `frames` off the last one's end (a pump re-bootstrap skips
-/// forward), the tone checks re-lock, `own_skips` so far. Logged on the
-/// pump thread.
-fn own_skip(frames: i128, own_skips: u64) {
+/// One WARN for the peer's own jump (dstack #358): the block after it
+/// starts `frames` off the last started one's end (a re-bootstrap skips
+/// forward; absent when the block has no media start), the tone checks
+/// re-lock, `own_skips` so far. Logged on the pump thread, like
+/// [`tone_break`], against `Process`'s no-log rule: at most once a jump,
+/// which is a stall already.
+fn own_skip(frames: Option<i128>, own_skips: u64) {
     warn!(
         target: "dstack::peer::tone",
-        frames = %frames,
+        frames,
         own_skips,
-        "dstack-dev peer: its own block start jumped; the tone check re-locks"
+        "dstack-dev peer: its own reads jumped; the tone check re-locks"
     );
 }
 
@@ -176,6 +181,8 @@ pub struct Tones {
     first: Option<(u64, i64)>,
     /// Where the next block starts on the media grid.
     next: Option<u64>,
+    /// The engine signalled a discontinuity before the next block.
+    jumped: bool,
     shared: Arc<Shared>,
 }
 
@@ -194,6 +201,7 @@ impl Tones {
             samples: 0,
             first: None,
             next: None,
+            jumped: false,
             shared: Arc::new(shared),
         }
     }
@@ -207,17 +215,19 @@ impl Process for Tones {
     fn process(&mut self, block: &mut Block<'_>) {
         let frames = block.frames();
         let rate = self.rate;
-        // A start off the last block's end is the peer's OWN jump (dstack
-        // #358: its pump skipped the blocks between, a re-bootstrap): the
+        // The engine's discontinuity is the peer's OWN jump (dstack #358:
+        // e.g. its pump skipped the blocks it was too late for): the
         // received tone jumps by what was not read, which is no break of
-        // the flow. Re-lock the checks and count it apart.
-        if let (Some(start), Some(next)) = (block.start(), self.next)
-            && start != next
-        {
-            let skips = self.shared.own_skips.fetch_add(1, Ordering::Relaxed) + 1;
-            own_skip(i128::from(start) - i128::from(next), skips);
+        // the flow. Re-lock the checks; count it apart once a block ran
+        // (the first bootstrap is no jump).
+        if std::mem::take(&mut self.jumped) {
             for check in &mut self.checks {
                 check.relock();
+            }
+            if let Some(next) = self.next {
+                let skips = self.shared.own_skips.fetch_add(1, Ordering::Relaxed) + 1;
+                let frames = block.start().map(|s| i128::from(s) - i128::from(next));
+                own_skip(frames, skips);
             }
         }
         for (ch, check) in self.checks.iter_mut().enumerate() {
@@ -251,6 +261,12 @@ impl Process for Tones {
                     .store(ppm.to_bits(), Ordering::Relaxed);
             }
         }
+    }
+
+    /// The engine's inputs jump before the next block (dstack #358): the
+    /// next `process` re-locks the tone checks and counts the jump.
+    fn discontinuity(&mut self) {
+        self.jumped = true;
     }
 }
 
@@ -296,13 +312,13 @@ impl Peer {
         &self.shared
     }
 
-    /// The status JSON ([`status_json`]).
+    /// The status JSON ([`status_json`]), the peer's counts read before the
+    /// device's: `own_skips` (counted at the block after a re-bootstrap)
+    /// then never runs ahead of `engine.rebootstraps` in one status.
     pub fn status(&self) -> String {
-        status_json(
-            &self.args,
-            &self.shared,
-            &crate::ctl::status(self.device.media()),
-        )
+        status_with(&self.args, &self.shared, || {
+            crate::ctl::status(self.device.media())
+        })
     }
 
     /// Why the device ended by itself, if it did.
@@ -320,11 +336,19 @@ impl Peer {
 /// channel's `tone_hz`; `rx`: each channel's `from` (device:channel),
 /// `locked`, `tone_hz` and `level_dbfs` (the last clean block's; null
 /// before a lock), `samples`, `tone_gaps`; `blocks`, `own_skips` (the
-/// peer's own block-start jumps, [`Shared::own_skips`]), `play_at_ppm`
-/// (null before two blocks)) and `device` (the device's own status, as `ctl
-/// status`; a status that does not parse goes in as its text).
+/// peer's own jumps, [`Shared::own_skips`]), `play_at_ppm` (null before
+/// two blocks)) and `device` (the device's own status, as `ctl status`; a
+/// status that does not parse goes in as its text).
 pub fn status_json(a: &PeerArgs, shared: &Shared, device: &str) -> String {
+    status_with(a, shared, || device.to_owned())
+}
+
+/// [`status_json`] with the device's status read by `device` after the
+/// peer's own counts.
+fn status_with(a: &PeerArgs, shared: &Shared, device: impl FnOnce() -> String) -> String {
     use serde_json::{Value, json};
+    let blocks = shared.blocks.load(Ordering::Relaxed);
+    let own_skips = shared.own_skips.load(Ordering::Relaxed);
     let finite = |x: f64| x.is_finite().then_some(x);
     let tx: Vec<Value> = a
         .tones
@@ -354,8 +378,8 @@ pub fn status_json(a: &PeerArgs, shared: &Shared, device: &str) -> String {
             })
         })
         .collect();
-    let device: Value =
-        serde_json::from_str(device).unwrap_or_else(|_| Value::String(device.to_string()));
+    let device = device();
+    let device: Value = serde_json::from_str(&device).unwrap_or(Value::String(device));
     json!({
         "peer": {
             "name": a.name,
@@ -363,8 +387,8 @@ pub fn status_json(a: &PeerArgs, shared: &Shared, device: &str) -> String {
             "test_clock_ppm": a.test_clock_ppm.map(|p: TestClockPpm| p.0),
             "tx": tx,
             "rx": rx,
-            "blocks": shared.blocks.load(Ordering::Relaxed),
-            "own_skips": shared.own_skips.load(Ordering::Relaxed),
+            "blocks": blocks,
+            "own_skips": own_skips,
             "play_at_ppm": finite(f64::from_bits(shared.play_at_ppm.load(Ordering::Relaxed))),
         },
         "device": device,

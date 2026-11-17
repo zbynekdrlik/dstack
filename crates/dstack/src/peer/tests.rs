@@ -246,9 +246,12 @@ fn a_tone_break_logs_one_line() {
 /// blocks): blocks `from..from + blocks` of the media grid, each one's
 /// input the tone the app sends, from block `jump.0`'s sample `jump.1` on
 /// `jump.2` samples further on (0: the tone at the block's own positions).
+/// Each run starts as the engine pump starts one, with a discontinuity
+/// (its bootstrap, or the re-bootstrap after skipped blocks).
 fn hear(p: &mut Tones, from: u64, blocks: u64, jump: (u64, u64, u64)) {
     let frames = 128u64;
     let mut out = vec![0.0; 0];
+    p.discontinuity();
     for b in 0..blocks {
         let start = from + b * frames;
         let input: Vec<f64> = (0..frames)
@@ -296,7 +299,7 @@ fn the_peer_s_own_skip_counts_no_tone_break() {
     // One WARN a jump: how far, and the count.
     let lines: Vec<&str> = text
         .lines()
-        .filter(|l| l.contains("dstack-dev peer: its own block start jumped"))
+        .filter(|l| l.contains("dstack-dev peer: its own reads jumped"))
         .collect();
     assert_eq!(lines.len(), 4, "{text}");
     for (n, (line, frames)) in lines.iter().zip([128, 640, 768, 1408]).enumerate() {
@@ -335,4 +338,67 @@ fn a_break_in_the_received_flow_still_counts_beside_an_own_skip() {
     // An own skip of 3 blocks.
     hear(&mut p, 43 * frames, 40, (0, 2, 2300));
     assert_eq!(skips_and_gaps(&p), (1.into(), 2.into()));
+}
+
+/// dstack #358: a block start off the last one's end with NO discontinuity
+/// from the engine (a re-anchor the shift kept on the grid: the senders
+/// stepped with it, the inputs go on) is no jump of the peer's reads: no
+/// own skip, no re-lock, and a break of the flow at that block's start
+/// still counts.
+#[test]
+fn a_start_shift_without_a_discontinuity_is_no_own_skip() {
+    let frames = 128u64;
+    let mut p = Tones::new(vec![], 1, 96_000);
+    hear(&mut p, 0, 40, (0, 0, 0));
+    let mut out = vec![0.0; 0];
+    // The starts shift by 1000 samples, the inputs go on unbroken.
+    for b in 40..80u64 {
+        let input: Vec<f64> = (0..frames)
+            .map(|i| tone::tone_at(b * frames + i, 440, 96_000))
+            .collect();
+        let mut block = Block::new(frames as usize, &input, &mut out).at(1000 + b * frames);
+        p.process(&mut block);
+    }
+    assert_eq!(skips_and_gaps(&p), (0.into(), 0.into()));
+    // The flow jumps at a block's very first sample, no discontinuity.
+    for b in 80..120u64 {
+        let input: Vec<f64> = (0..frames)
+            .map(|i| tone::tone_at(2300 + b * frames + i, 440, 96_000))
+            .collect();
+        let mut block = Block::new(frames as usize, &input, &mut out).at(1000 + b * frames);
+        p.process(&mut block);
+    }
+    assert_eq!(skips_and_gaps(&p), (0.into(), 1.into()));
+}
+
+/// dstack #358: a discontinuity before a block with no media start (the
+/// pump pacing itself while its clock is not ready) re-locks and counts
+/// too; its line has no `frames` (no start to measure from), and the next
+/// started block measures nothing either.
+#[test]
+fn a_jump_before_a_block_with_no_start_counts_without_frames() {
+    crate::test_log::undecided();
+    let frames = 128usize;
+    let mut p = Tones::new(vec![], 1, 96_000);
+    let text = crate::test_log::capture_warnings(|| {
+        hear(&mut p, 0, 40, (0, 0, 0));
+        let input: Vec<f64> = (0..frames as u64)
+            .map(|i| tone::tone_at(90_000 + i, 440, 96_000))
+            .collect();
+        let mut out = vec![0.0; 0];
+        p.discontinuity();
+        p.process(&mut Block::new(frames, &input, &mut out));
+        // The free block's input goes on into the next started one.
+        let input: Vec<f64> = (0..frames as u64)
+            .map(|i| tone::tone_at(90_128 + i, 440, 96_000))
+            .collect();
+        p.process(&mut Block::new(frames, &input, &mut out).at(40 * 128));
+    });
+    assert_eq!(skips_and_gaps(&p), (1.into(), 0.into()), "{text}");
+    let line = text
+        .lines()
+        .find(|l| l.contains("its own reads jumped"))
+        .unwrap_or_else(|| panic!("{text}"));
+    assert!(!line.contains("frames="), "{line}");
+    assert!(line.contains("own_skips=1"), "{line}");
 }

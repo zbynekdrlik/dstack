@@ -739,8 +739,16 @@ fn two_peers_at_different_skews_hear_each_other_s_tone_whole() {
     let v: serde_json::Value = serde_json::from_str(&status[0]).unwrap();
     assert_eq!(v["peer"]["test_clock_ppm"], 40.0);
     assert_eq!(v["peer"]["rx"][0]["tone_gaps"], after[0].gaps);
-    // The peer's own block-start jumps, apart from its tone gaps (#358).
-    assert!(v["peer"]["own_skips"].is_u64(), "{}", status[0]);
+    // The peer's own jumps, apart from its tone gaps (#358): on the TEST
+    // system clock (never re-anchored) each is a re-bootstrap, and the
+    // status reads them before the engine's count.
+    let own = v["peer"]["own_skips"].as_u64();
+    let restarts = v["device"]["engine"]["rebootstraps"].as_u64();
+    assert!(
+        own.zip(restarts).is_some_and(|(o, r)| o <= r),
+        "{}",
+        status[0]
+    );
     assert_eq!(v["device"]["engine"]["play_at_steps"], 0);
     assert!(
         v["device"]["engine"]["play_at_max_dev_us"].is_u64(),
