@@ -13,7 +13,8 @@ const RATE: u32 = 96_000;
 /// dsg's driver against Dante, ppm (dasio#120).
 const DRIFT_PPM: f64 = 7.5;
 const BLOCK: usize = 32;
-const BLOCKS: usize = 3_000;
+/// The doc's figures were measured over these 6000 blocks of 32.
+const BLOCKS: usize = 6_000;
 /// The audio band's points, Hz.
 const BAND: [f64; 9] = [
     20.0, 100.0, 1_000.0, 5_000.0, 10_000.0, 15_000.0, 18_000.0, 19_000.0, 20_000.0,

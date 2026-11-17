@@ -242,8 +242,9 @@ impl Converter {
     /// (dstack #382: a bridge's converter length, the latency it costs
     /// against the band it keeps); the rest of [`PARAMS`] stays, the cutoff
     /// rubato's automatic one for that length. The delay is half the length
-    /// at the output rate ([`Converter::delay_frames`]: 24 frames, 0.250 ms,
-    /// for 48 taps at 96 <-> 96 kHz, against 128 for 256). Measured (dstack
+    /// in input frames, which [`Converter::delay_frames`] counts at the
+    /// output rate (48 taps: 24 frames, 0.250 ms, at 96 <-> 96 kHz against
+    /// 128 for 256; 11 frames at 96 -> 44.1 kHz). Measured (dstack
     /// #382 issuecomment-6952851834): at equal rates 48 taps keep 20 Hz to
     /// 20 kHz flat and 32 lose 0.4 dB at 20 kHz; with a rate change a short
     /// filter cuts the top of the band (128 taps lose 0.9 dB at 20 kHz at
@@ -466,8 +467,10 @@ impl Converter {
     ///
     /// The sinc stage's counts and phase repeat with the ratio's period
     /// ([`Converter::period`]) from its second fixed-side frame on: the
-    /// core's output `j` sits at input `j / r - (TAPS - 1)` after a reset
-    /// (`r` the ratio) and needs `TAPS + 1` input frames past it, so a
+    /// core's output `j` sits at input `j / r - (L - 1)` after a reset
+    /// (`r` the ratio, `L` the sinc's length: [`TAPS`] unless made by
+    /// [`Converter::drifting_with_taps`]) and needs `L + 1` input frames
+    /// past it, so a
     /// fixed input gives `floor((T - 2) * r)` frames for `T` and a fixed
     /// output takes `ceil(J / r + 1)` for `J`. So it runs only
     /// `frames mod period` of them (one period more when that is under 2),

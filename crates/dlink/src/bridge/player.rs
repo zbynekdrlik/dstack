@@ -483,7 +483,9 @@ impl Player {
     /// delays less and keeps less of the band; at equal rates 48 taps
     /// still keep 20 Hz to 20 kHz flat). Call it right after
     /// [`Player::new`], before any fill. Refused (the player is dropped)
-    /// for a length the converter refuses.
+    /// for a length the converter refuses; its `Stats` then keep what
+    /// [`Player::new`] set (priming, the output's rate, the default
+    /// converter's delay).
     pub fn with_taps(mut self, taps: usize) -> Result<Self, ConvertError> {
         let channels = self.fifo.channels();
         let conv = Converter::drifting_with_taps(
