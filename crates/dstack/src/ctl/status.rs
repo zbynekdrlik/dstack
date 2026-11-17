@@ -128,7 +128,10 @@ impl Json {
 ///   it); `sent`: `[{peer, op, n}]`, our RX's flow requests (256) and stops
 ///   (257), and its ARC reads of transmitters' channels (4096 once a
 ///   directory read, 8192 and 8208 once a page); `uncounted`: past the
-///   tables.
+///   tables; `info_send_errors` and `info_send_recoveries` (dstack #340):
+///   the info server's heartbeats and info packets whose send failed, and
+///   the recoveries those failures asked (the multicast interface named
+///   again, the info socket reopened; [`crate::info::sendwatch`]).
 /// - `tx`: each TX flow slot that has or had a flow: `flow`, `receiver`
 ///   (dstack #298: the receiving device's Dante name as its flow request
 ///   named it; absent for a multicast flow and a slot without a flow now),
@@ -442,6 +445,8 @@ fn requests_part(j: &mut Json, media: &Media) {
     }
     j.close(']');
     j.num("uncounted", r.uncounted);
+    j.num("info_send_errors", r.info_send_errors);
+    j.num("info_send_recoveries", r.info_send_recoveries);
 }
 
 /// A TX flow as the status shows it.
