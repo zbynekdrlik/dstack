@@ -1097,6 +1097,42 @@ fn a_packet_that_begins_past_the_last_end_is_a_gap_of_the_frames_skipped() {
     assert_eq!((s.lane(0).gaps, s.lane(0).gap_frames), (2, 33));
 }
 
+/// dstack #379 (stream-obs, 16.11.2026): the clock and the transmitter's
+/// stamps went 43.9 days back together (a new PTP time base). The flow's
+/// furthest end must follow them: the new base's packets are in order, and
+/// a packet missing there is a gap again.
+#[test]
+fn a_flow_follows_the_clock_when_it_goes_back() {
+    let s = shared(1);
+    let mut rx = Receiver::new(Arc::clone(&s)).unwrap();
+    publish(
+        &s,
+        &[(0, plan(LOOPBACK, 1, true, 1))],
+        &[(0, RxRoute { flow: 0, slot: 0 })],
+    );
+    let t = transmitter(LOOPBACK);
+    let step = crate::clock::to_samples(3_792_840_060_134_767, RATE);
+    let p0 = step + 1_000_000_000;
+    for k in [0, 1] {
+        t.send_to(&packet_at(p0 + 32 * k, 1, 32), slot_addr(&s, 0))
+            .unwrap();
+    }
+    pump(&mut rx, 0, 2, Some(ns_of(p0 + 1_000, RATE)), 0);
+    // The new base: packets 0, 1, then 3 (2 missing).
+    let q0 = p0 - step;
+    for k in [0, 1, 3] {
+        t.send_to(&packet_at(q0 + 32 * k, 1, 32), slot_addr(&s, 0))
+            .unwrap();
+    }
+    pump(&mut rx, 0, 5, Some(ns_of(q0 + 1_000, RATE)), 0);
+    let c = s.lane(0);
+    assert_eq!(
+        (c.packets, c.out_of_order, c.gaps, c.gap_frames),
+        (5, 0, 1, 32),
+        "{c:?}"
+    );
+}
+
 #[test]
 fn a_socket_s_drops_are_read_from_the_kernel_s_table() {
     // Two lines of /proc/net/udp on a little-endian host: 127.0.0.1:8080
