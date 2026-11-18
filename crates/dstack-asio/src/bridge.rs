@@ -15,11 +15,14 @@
 //! stays the default for both): the from-ASIO FIFO must cover the driver's
 //! late callbacks one for one (a late write while the TX thread reads on
 //! time), the to-ASIO one does not (its pull and play share the buffer
-//! switch), so to-ASIO can run shorter. Each player's ASRC can start from
-//! the last run's locked rate ([`Seed`], [`Bridge::seed_from`]). Both
-//! converters may run a shorter sinc ([`Spec`]'s `converter_taps`, dstack
-//! #382: 48 taps at 96 <-> 96 kHz delay 0.250 ms a direction instead of
-//! 1.333 ms and keep 20 Hz to 20 kHz flat).
+//! switch), so to-ASIO can run shorter. A direction's own target may go
+//! under dlink's 1 ms app-buffer floor, down to [`MIN_BRIDGE_TARGET_NS`]
+//! (dstack #422, measured; [`direction_target_problem`]). Each player's
+//! ASRC can start from the last run's locked rate ([`Seed`],
+//! [`Bridge::seed_from`]). Both converters may run a shorter sinc
+//! ([`Spec`]'s `converter_taps`, dstack #382: 48 taps at 96 <-> 96 kHz
+//! delay 0.250 ms a direction instead of 1.333 ms and keep 20 Hz to 20 kHz
+//! flat).
 //!
 //! - **Dante -> ASIO:** the driver's buffer switch runs [`AsioSide`], whose
 //!   player plays the to-ASIO FIFO at the driver's clock (dlisten's
@@ -140,10 +143,11 @@ pub struct Spec {
     /// pump block), for both directions unless one sets its own.
     pub app_buffer_ns: Option<u64>,
     /// The to-ASIO FIFO's own target, ns (dstack #382; `None`:
-    /// `app_buffer_ns`).
+    /// `app_buffer_ns`): [`MIN_BRIDGE_TARGET_NS`] to dlink's
+    /// `MAX_APP_BUFFER_NS`, else [`Bridge::new`] refuses (dstack #422).
     pub to_asio_app_buffer_ns: Option<u64>,
     /// The from-ASIO FIFO's own target, ns (dstack #382; `None`:
-    /// `app_buffer_ns`).
+    /// `app_buffer_ns`), in the same range as `to_asio_app_buffer_ns`.
     pub from_asio_app_buffer_ns: Option<u64>,
     /// Both converters' sinc length, taps (dstack #382, the owner's
     /// ROZHODNUTÉ of 17.11.2026; `None`: [`MAX_CONVERTER_TAPS`], as
@@ -164,6 +168,40 @@ pub const MIN_CONVERTER_TAPS: u32 = 32;
 /// The longest converter a bridge takes and its default
 /// ([`dstack_resample::TAPS`]).
 pub const MAX_CONVERTER_TAPS: u32 = dstack_resample::TAPS as u32;
+
+/// The least per-direction FIFO target a bridge takes, ns
+/// ([`Spec::to_asio_app_buffer_ns`], [`Spec::from_asio_app_buffer_ns`];
+/// dstack #422): 0.5 ms, under dlink's 1 ms floor for its apps
+/// (`dlink::bridge::MIN_APP_BUFFER_NS`, which `app_buffer_ns` keeps).
+/// Measured on simulated time at 96 kHz, both sides pulled as in the field,
+/// pump blocks of 32 and 64 frames, 180 s a run: the to-ASIO side held 0
+/// underruns from 0.5 ms with 128- and 64-frame driver buffers at ±7.5 ppm
+/// from a cold start (0.375 ms dropped out once) and from 0.125 ms seeded
+/// ([`Seed`]) at ±7.5, ±50 and ±100 ppm; the from-ASIO side, whose
+/// producer writes a whole driver buffer at once, held (worst of cold
+/// ±7.5 ppm and seeded ±7.5 to ±100 ppm) from 0.375 ms with a 64-frame
+/// buffer and from 0.75 ms with a 128-frame one (seeded, 0.625 ms dropped
+/// out once at a phase crossing of the two clocks; cold at ±7.5 ppm it
+/// held 0.375 ms over 180 s). Like dlink's floor it is a sanity bound, not
+/// a working value: a target holds only when it also covers the driver's
+/// callback lateness (from ASIO, one for one) and a cold start's drift
+/// (dstack #422's table).
+pub const MIN_BRIDGE_TARGET_NS: u64 = 500_000;
+
+/// Why a per-direction target of `ns`, set as `key`
+/// (`to_asio_app_buffer_ns` or `from_asio_app_buffer_ns`), cannot be used,
+/// if it cannot (dstack #422): outside [`MIN_BRIDGE_TARGET_NS`] to dlink's
+/// `MAX_APP_BUFFER_NS`, in dlink's words with the bridge's floor
+/// (`to_asio_app_buffer_ns: 400000 ns (0.4 ms); 0.5 to 150 ms`).
+/// [`Bridge::new`] refuses such a spec with it; dasio's `[bridge]` check
+/// uses it for these two keys (`app_buffer_ns` keeps dlink's
+/// `AppBuffer::problem`).
+pub fn direction_target_problem(key: &str, ns: u64) -> Option<String> {
+    AppBuffer::new(0, 0)
+        .set(Some(ns))
+        .with_floor(MIN_BRIDGE_TARGET_NS)
+        .problem_for(key)
+}
 
 /// Why `taps` ([`Spec::converter_taps`]) cannot be used, if it cannot.
 fn converter_taps_problem(taps: Option<u32>) -> Option<String> {
@@ -251,8 +289,9 @@ pub fn to_asio_chunk_ns(buffer: AppBuffer, pulled: bool) -> u64 {
 }
 
 impl Bridge {
-    /// A bridge for `spec`; an error for a rate the converter refuses or a
-    /// converter length out of range ([`Spec::converter_taps`]).
+    /// A bridge for `spec`; an error for a rate the converter refuses, a
+    /// converter length out of range ([`Spec::converter_taps`]) or a
+    /// direction's target out of range ([`direction_target_problem`]).
     pub fn new(spec: Spec) -> Result<Self, String> {
         Self::with_clock(spec, Arc::new(dstack::clock::app_monotonic_ns))
     }
@@ -263,6 +302,14 @@ impl Bridge {
     pub fn with_clock(spec: Spec, clock: Clock) -> Result<Self, String> {
         if let Some(problem) = converter_taps_problem(spec.converter_taps) {
             return Err(problem);
+        }
+        for (key, set) in [
+            ("to_asio_app_buffer_ns", spec.to_asio_app_buffer_ns),
+            ("from_asio_app_buffer_ns", spec.from_asio_app_buffer_ns),
+        ] {
+            if let Some(problem) = set.and_then(|ns| direction_target_problem(key, ns)) {
+                return Err(problem);
+            }
         }
         let age = Arc::new(BlockAge::new(Arc::clone(&clock)));
         let to_asio = (spec.to_asio > 0).then(|| {
@@ -481,23 +528,29 @@ impl Bridge {
     }
 
     /// The to-ASIO FIFO's target (dstack #382): its own
-    /// `to_asio_app_buffer_ns`, else [`Bridge::app_buffer`].
+    /// `to_asio_app_buffer_ns` on the bridge's floor
+    /// ([`MIN_BRIDGE_TARGET_NS`], dstack #422), else [`Bridge::app_buffer`]
+    /// (dlink's floor).
     pub fn to_asio_app_buffer(&self, opened: &Opened) -> AppBuffer {
-        self.buffer_set(
-            opened,
-            self.spec.to_asio_app_buffer_ns.or(self.spec.app_buffer_ns),
-        )
+        self.direction_buffer(opened, self.spec.to_asio_app_buffer_ns)
     }
 
     /// The from-ASIO FIFO's target (dstack #382): its own
-    /// `from_asio_app_buffer_ns`, else [`Bridge::app_buffer`].
+    /// `from_asio_app_buffer_ns` on the bridge's floor, else
+    /// [`Bridge::app_buffer`].
     pub fn from_asio_app_buffer(&self, opened: &Opened) -> AppBuffer {
-        self.buffer_set(
-            opened,
-            self.spec
-                .from_asio_app_buffer_ns
-                .or(self.spec.app_buffer_ns),
-        )
+        self.direction_buffer(opened, self.spec.from_asio_app_buffer_ns)
+    }
+
+    /// A direction's target: its own `set` on [`MIN_BRIDGE_TARGET_NS`],
+    /// else the shared [`Bridge::app_buffer`].
+    fn direction_buffer(&self, opened: &Opened, set: Option<u64>) -> AppBuffer {
+        match set {
+            Some(ns) => self
+                .buffer_set(opened, Some(ns))
+                .with_floor(MIN_BRIDGE_TARGET_NS),
+            None => self.app_buffer(opened),
+        }
     }
 
     /// The driver's buffer + one pump block, or `set`.
@@ -535,6 +588,9 @@ impl Bridge {
         }
         let to_buffer = self.to_asio_app_buffer(opened);
         let from_buffer = self.from_asio_app_buffer(opened);
+        // Only the shared `app_buffer_ns` can be out of range here (hence
+        // its key in the text): a direction's own target was checked at
+        // `Bridge::new` (dstack #422) and the spec never changes.
         if let Some(problem) = to_buffer.problem().or_else(|| from_buffer.problem()) {
             return Err(problem);
         }

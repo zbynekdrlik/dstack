@@ -654,6 +654,58 @@ fn the_converter_length_reads_is_checked_and_stays() {
     assert!(doc.to_string().contains("converter_taps = 32"), "{doc}");
 }
 
+/// dstack #422: a direction's own target takes dstack-asio's bridge floor
+/// (0.5 ms) with the key dasio's file names; the shared app buffer keeps
+/// dlink's 1 ms.
+#[test]
+fn a_direction_s_target_takes_the_bridge_floor() {
+    let at = |to: Option<u64>, from: Option<u64>, shared: Option<u64>| {
+        let mut b = bridge();
+        b.to_asio_app_buffer_ns = to;
+        b.from_asio_app_buffer_ns = from;
+        b.app_buffer_ns = shared;
+        b.problems(4, 2)
+    };
+    let floor = MIN_BRIDGE_TARGET_NS;
+    assert_eq!(floor, 500_000);
+    assert!(at(Some(floor), Some(floor), None).is_empty());
+    assert!(at(Some(MAX_APP_BUFFER_NS), Some(MAX_APP_BUFFER_NS), None).is_empty());
+    assert_eq!(
+        at(Some(floor - 1), None, None),
+        ["To-ASIO buffer: to_asio_app_buffer_ns: 499999 ns (0.499999 ms); 0.5 to 150 ms"]
+    );
+    assert_eq!(
+        at(None, Some(MAX_APP_BUFFER_NS + 1), None),
+        [
+            "From-ASIO buffer: from_asio_app_buffer_ns: 150000001 ns (150.000001 ms); \
+             0.5 to 150 ms"
+        ]
+    );
+    assert_eq!(
+        at(None, None, Some(floor)),
+        ["App buffer: app_buffer_ns: 500000 ns (0.5 ms); 1 to 150 ms"]
+    );
+}
+
+/// dtray's copy of the bridge floor is dstack-asio's, and so is its text
+/// (that crate builds on Windows only).
+#[cfg(windows)]
+#[test]
+fn the_bridge_floor_is_dstack_asio_s() {
+    assert_eq!(
+        MIN_BRIDGE_TARGET_NS,
+        dstack_asio::bridge::MIN_BRIDGE_TARGET_NS
+    );
+    let mut b = bridge();
+    b.to_asio_app_buffer_ns = Some(MIN_BRIDGE_TARGET_NS - 1);
+    let want = dstack_asio::bridge::direction_target_problem(
+        "to_asio_app_buffer_ns",
+        MIN_BRIDGE_TARGET_NS - 1,
+    )
+    .expect("refused");
+    assert_eq!(b.problems(4, 2), [format!("{TO_ASIO_BUFFER}: {want}")]);
+}
+
 /// dtray's copy of the shortest converter is dstack-asio's (that crate
 /// builds on Windows only).
 #[cfg(windows)]

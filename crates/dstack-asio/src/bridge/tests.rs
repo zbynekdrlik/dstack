@@ -404,6 +404,7 @@ fn a_skipped_block_resyncs_the_player_and_its_pieces_never_do() {
 }
 
 mod directions;
+mod floor;
 mod pull;
 mod pump_skip;
 mod taps;
