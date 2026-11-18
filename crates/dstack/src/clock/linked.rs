@@ -37,6 +37,11 @@ use super::{
     ClockCounts, FollowerCounts, MonoClock, NOT_READY_NAP_NS, PtpClock, ReAnchor, monotonic_ns,
 };
 
+mod waiting;
+pub use waiting::{
+    Minute, NOT_IN_USE_EVERY_NS, NOT_IN_USE_LINE, Waiting, grandmaster_text, waiting_of,
+};
+
 /// Where the linked clock takes PTP time from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -271,8 +276,26 @@ pub struct Linked {
     /// The wait's mark: the |offset| at its last progress, ns.
     best: AtomicU64,
     was_locked: AtomicBool,
+    /// Why the follower is not in use, and its minute (the selector's
+    /// only; the status reads the reason).
+    report: std::sync::Mutex<Report>,
     /// Keeps the follower's thread alive for the clock's life.
     _keep: Option<Box<dyn Send + Sync>>,
+}
+
+/// The selector's report on a follower not in use ([`Linked::report`]).
+#[derive(Debug, Default)]
+struct Report {
+    minute: Minute,
+    waiting: Option<Waiting>,
+}
+
+/// What [`Linked::select`] chose: the source, and while a switch waits to
+/// agree, the new source's offset from the one in use (`Some(None)`: one
+/// of them has no time).
+struct Selected {
+    source: Source,
+    wait_offset_ns: Option<Option<i64>>,
 }
 
 impl Linked {
@@ -297,6 +320,7 @@ impl Linked {
             waited: AtomicU32::new(0),
             best: AtomicU64::new(u64::MAX),
             was_locked: AtomicBool::new(false),
+            report: std::sync::Mutex::new(Report::default()),
             _keep: keep,
         }
     }
@@ -315,10 +339,21 @@ impl Linked {
         self.internal.is_some()
     }
 
-    /// The follower's counts ([`Follow::counts`]); `None` when it did not
-    /// start.
+    /// The follower's counts ([`Follow::counts`]) with why the selector
+    /// does not use it ([`FollowerCounts::waiting`], as of its last round);
+    /// `None` when it did not start.
     pub fn follower_counts(&self) -> Option<FollowerCounts> {
-        self.internal.as_ref().map(|f| f.counts())
+        let waiting = self.lock_report().waiting;
+        self.internal.as_ref().map(|f| FollowerCounts {
+            waiting,
+            ..f.counts()
+        })
+    }
+
+    fn lock_report(&self) -> std::sync::MutexGuard<'_, Report> {
+        self.report
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// A source's re-anchor count (the follower's re-anchors and time
@@ -372,8 +407,55 @@ impl Linked {
     /// The selector's round: picks the source by [`choose`]; a change
     /// between the follower and the service is a [`handover`] (seamless,
     /// a wait, or a re-align that moves the epoch); every change is logged.
+    /// A follower not in use has its reason ([`waiting_of`]) kept for
+    /// [`Linked::follower_counts`] and logged once a minute
+    /// ([`NOT_IN_USE_LINE`]).
     pub fn tick(&self) -> Source {
+        self.tick_at(monotonic_ns())
+    }
+
+    /// [`Linked::tick`] at the monotonic time `now_ns` (a test's own).
+    pub(crate) fn tick_at(&self, now_ns: i64) -> Source {
         let view = self.internal.as_ref().map(|f| f.view());
+        let selected = self.select(view);
+        if let (Some(f), Some(v)) = (self.internal.as_deref(), view) {
+            self.report(now_ns, f, v, &selected);
+        }
+        selected.source
+    }
+
+    /// Why the follower (its view `v`) is not the source `selected` chose:
+    /// kept for the status, and [`NOT_IN_USE_LINE`] once a minute with the
+    /// windows it closed in that minute, the grandmaster it heard last,
+    /// its lock, its own last error and, while the switch to it waits to
+    /// agree, its offset from the service. Nothing while it is in use.
+    fn report(&self, now_ns: i64, f: &dyn Follow, v: View, selected: &Selected) {
+        let c = f.counts();
+        let waiting = selected.source != Source::Internal;
+        let mut r = self.lock_report();
+        let (heard, due) = r.minute.round(now_ns, c.counts.polls, waiting);
+        r.waiting = waiting.then(|| waiting_of(v, heard));
+        if let (Some(why), Some(windows)) = (r.waiting, due) {
+            info!(
+                reason = %why.word(),
+                windows_last_minute = windows,
+                grandmaster = %grandmaster_text(c.grandmaster),
+                locked = c.locked,
+                settled = c.settled,
+                error_ns = ?c.offset_ns,
+                offset_ns = ?selected.wait_offset_ns.flatten(),
+                source = ?selected.source,
+                "{NOT_IN_USE_LINE}"
+            );
+        }
+    }
+
+    /// [`Linked::tick`]'s choice for the follower's view `view`.
+    fn select(&self, view: Option<View>) -> Selected {
+        let done = |source| Selected {
+            source,
+            wait_offset_ns: None,
+        };
         if view.is_some_and(|v| v.alive && v.locked) {
             self.was_locked.store(true, Ordering::Release);
         }
@@ -391,7 +473,7 @@ impl Linked {
             if self.waited.swap(0, Ordering::AcqRel) != 0 {
                 info!(source = ?before, "{WAIT_ENDED_LINE}");
             }
-            return next;
+            return done(next);
         }
         // From or to none there is no offset, and the source in use is not
         // a ready service: a break.
@@ -411,7 +493,10 @@ impl Linked {
                 let (rounds, best) = wait_round(waited, self.best.load(Ordering::Acquire), offset);
                 self.waited.store(rounds, Ordering::Release);
                 self.best.store(best, Ordering::Release);
-                return before;
+                return Selected {
+                    source: before,
+                    wait_offset_ns: Some(offset),
+                };
             }
             Handover::Seamless => State {
                 source: next,
@@ -437,7 +522,7 @@ impl Linked {
             }
             _ => info!(source = ?next, from = ?before, "{FIRST_SOURCE_LINE}"),
         }
-        next
+        done(next)
     }
 }
 
@@ -680,6 +765,8 @@ impl<M: Model> Follow for Absorbing<M> {
             offset_ns: m.offset_ns,
             recent_abs_e_ns: m.recent_abs_e_ns,
             pull_ns: m.pull_ns,
+            grandmaster: m.gm_uuid,
+            waiting: None,
         }
     }
 
