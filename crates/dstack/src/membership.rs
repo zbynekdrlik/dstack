@@ -218,4 +218,6 @@ pub fn rejoin(sock: &UdpSocket, group: Ipv4Addr, ip: Ipv4Addr) -> io::Result<()>
 }
 
 #[cfg(test)]
+pub(crate) mod fake;
+#[cfg(test)]
 mod tests;

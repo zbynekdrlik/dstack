@@ -7,6 +7,8 @@ use simple_dns::rdata::{PTR, SRV};
 
 use crate::announce::ServiceRecord;
 
+mod send_if;
+
 /// Every wait in these tests ends.
 const BOUND: Duration = Duration::from_secs(5);
 const LOOPBACK: Ipv4Addr = Ipv4Addr::LOCALHOST;

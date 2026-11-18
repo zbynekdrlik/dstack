@@ -3,6 +3,8 @@ use super::*;
 use simple_dns::ResourceRecord;
 use simple_dns::rdata::{A, SRV, TXT};
 
+mod send_if;
+
 const S: u64 = 1_000_000_000;
 /// A mic's instance as its device publishes it (the shape of the field's,
 /// with a synthetic name): a space in the channel, the device after `@`.
