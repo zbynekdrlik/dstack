@@ -1,0 +1,66 @@
+name: Consumer pins
+
+# The weekly consumer version sync (dstack #399, owner 18.11.2026): once a
+# week, Wednesday morning (06:00 UTC: 07:00 CET, 08:00 CEST), read every consumer's
+# pinned dstack tag and open or update the one "Weekly consumer version sync"
+# issue when any is behind the latest release. The dstack session works that
+# issue (each lagging consumer gets its upgrade notes from its own pin);
+# consumers are never asked to move per micro-release.
+
+on:
+  schedule:
+    - cron: "0 6 * * 3"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: consumer-pins
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: The reader's own tests
+        run: python3 -m unittest scripts/consumer_pins_test.py
+      - name: Read every consumer's pin
+        id: pins
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          latest=$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName)
+          python3 scripts/consumer_pins.py --latest "$latest" --date "$(date -u +%F)" \
+            --out body.md --github-output "$GITHUB_OUTPUT"
+      - name: Open, update or close the sync issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LAGGING: ${{ steps.pins.outputs.lagging }}
+          LATEST: ${{ steps.pins.outputs.latest }}
+        run: |
+          set -euo pipefail
+          title="Weekly consumer version sync"
+          n=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --limit 200 \
+            --search "\"$title\" in:title" \
+            --json number,title --jq "map(select(.title == \"$title\")) | .[0].number // empty")
+          if [ "$LAGGING" = "0" ]; then
+            # Every consumer runs the latest release: an open sync issue is done.
+            if [ -n "$n" ]; then
+              gh issue edit "$n" --repo "$GITHUB_REPOSITORY" --body-file body.md
+              gh issue close "$n" --repo "$GITHUB_REPOSITORY" \
+                --comment "Wednesday read $(date -u +%F): every consumer runs $LATEST."
+            fi
+          elif [ -n "$n" ]; then
+            gh issue edit "$n" --repo "$GITHUB_REPOSITORY" --body-file body.md
+            gh issue comment "$n" --repo "$GITHUB_REPOSITORY" \
+              --body "Wednesday read $(date -u +%F): $LAGGING consumer(s) behind $LATEST."
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body-file body.md
+          fi
