@@ -336,7 +336,7 @@ dependencies = [
 
 [[package]]
 name = "dlink"
-version = "0.6.179"
+version = "0.6.180"
 dependencies = [
  "assert_no_alloc",
  "dstack",
@@ -350,7 +350,7 @@ dependencies = [
 
 [[package]]
 name = "dlisten"
-version = "0.6.179"
+version = "0.6.180"
 dependencies = [
  "cpal",
  "dlink",
@@ -371,7 +371,7 @@ checksum = "d8b14ccef22fc6f5a8f4d7d768562a182c04ce9a3b3157b91390b52ddfdf1a76"
 
 [[package]]
 name = "dsend"
-version = "0.6.179"
+version = "0.6.180"
 dependencies = [
  "cpal",
  "dlink",
@@ -383,7 +383,7 @@ dependencies = [
 
 [[package]]
 name = "dstack"
-version = "0.6.179"
+version = "0.6.180"
 dependencies = [
  "assert_no_alloc",
  "dstack-audio-io",
@@ -407,7 +407,7 @@ dependencies = [
 
 [[package]]
 name = "dstack-asio"
-version = "0.6.179"
+version = "0.6.180"
 dependencies = [
  "assert_no_alloc",
  "azo",
@@ -423,11 +423,11 @@ dependencies = [
 
 [[package]]
 name = "dstack-audio-io"
-version = "0.6.179"
+version = "0.6.180"
 
 [[package]]
 name = "dstack-endpoint"
-version = "0.6.179"
+version = "0.6.180"
 dependencies = [
  "cpal",
  "dlink",
@@ -442,7 +442,7 @@ dependencies = [
 
 [[package]]
 name = "dstack-resample"
-version = "0.6.179"
+version = "0.6.180"
 dependencies = [
  "rubato",
 ]
@@ -465,7 +465,7 @@ dependencies = [
 
 [[package]]
 name = "dtray"
-version = "0.6.179"
+version = "0.6.180"
 dependencies = [
  "dlink",
  "dstack",
