@@ -372,8 +372,9 @@ impl TxFill {
 
     /// Every block due at media time `now` into the `engine` rings (each TX
     /// channel's, [`super::TxShared`]'s) on the line of the engine shift
-    /// `shift`, with the flows' lag bound `max_lag` (the advertised
-    /// latency, samples). A new P starts the schedule again at the new
+    /// `shift`, with the flows' lag bound `max_lag` (samples: the
+    /// longest of the advertised latency and the receivers' stated ones,
+    /// dstack #426). A new P starts the schedule again at the new
     /// playout point (counted), as the pump's; a new bound only moves the
     /// reach (the blocks go on).
     pub fn fill_due(&mut self, now: u64, max_lag: u64, engine: &[Option<Ring>], shift: i64) {

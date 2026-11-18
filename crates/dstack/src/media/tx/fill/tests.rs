@@ -484,6 +484,57 @@ fn the_tx_thread_fills_before_it_sends_even_when_it_runs_late() {
     assert_eq!(v.blocks, 82, "{v:?}");
 }
 
+/// dstack #426: the fill's reach is W + the flows' lag bound, which is the
+/// receiver's latency when it is longer than ours. A TX thread late past
+/// W + our latency but within W + the receiver's fills every block in
+/// between and restarts nothing, and the flow sends their stamps.
+#[test]
+fn the_fill_reaches_as_far_as_the_receiver_s_latency() {
+    let shared = shared();
+    assert!(shared.set_source(0, Source::Engine));
+    assert!(shared.claim_fill(one_channel(Ramp::default())).is_ok());
+    let rx = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    rx.set_nonblocking(true).unwrap();
+    let SocketAddr::V4(to) = rx.local_addr().unwrap() else {
+        panic!("an IPv4 socket");
+    };
+    let slot = {
+        let mut c = shared.lock();
+        let req = FlowRequest {
+            rx_host: "peer-device".to_string(),
+            rx_flow_name: "flow-1".to_string(),
+            sample_rate: RATE,
+            bits: 24,
+            channels: vec![Some(1)],
+            fpp: 32,
+            rx: to,
+        };
+        let (slot, _) = c.table.add(&req, shared.now_ns()).unwrap();
+        shared.publish(&c);
+        slot
+    };
+    let mut tx = Transmitter::new(Arc::clone(&shared));
+    let start = ns_of(T, RATE);
+    tx.step(Some(start), 0);
+    // The receiver plays the flow at 5 ms (480 samples).
+    shared.set_receiver_latency(slot, to, 5_000_000);
+    // 3 ms (288 samples) late: past W + our latency (192), within W + 480.
+    tx.step(Some(start + 3_000_000), 0);
+    let v = shared.tx_fill().unwrap();
+    assert_eq!((v.rebootstraps, v.skipped, v.faults), (0, 0, 0), "{v:?}");
+    // The first block and the 9 due in the 3 ms since.
+    assert_eq!(v.blocks, 10, "{v:?}");
+    let lane = shared.lane(slot);
+    assert_eq!(lane.rebootstraps, 0, "{lane:?}");
+    let mut buf = [0u8; 2048];
+    let mut stamps = Vec::new();
+    while let Ok(n) = rx.recv(&mut buf) {
+        stamps.push(stamp_of(&buf[..n]));
+    }
+    assert!(stamps.len() >= 8, "{stamps:?}");
+    assert!(stamps.windows(2).all(|w| w[1] == w[0] + 32), "{stamps:?}");
+}
+
 /// While the clock is not ready the TX thread fills nothing; at a re-anchor
 /// it moves the fill with the flows.
 #[test]

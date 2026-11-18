@@ -8,6 +8,7 @@
 
 use super::{DISCONTINUITY, Shift, split};
 use crate::clock;
+use crate::device::MAX_LATENCY_SAMPLES;
 
 /// A flow's packets in time, in media samples ([`send_clock`]): `next` is
 /// the stamp of the next packet, due once the clock reaches `next + fpp`.
@@ -15,9 +16,13 @@ use crate::clock;
 pub struct Schedule {
     pub next: u64,
     pub fpp: u64,
-    /// The lag past which the schedule starts again: the device's latency
-    /// in samples (a packet that late is of no use to the receiver).
+    /// The device's latency in samples: the least lag past which the
+    /// schedule starts again ([`Schedule::bound`] takes the receiver's when
+    /// longer).
     pub max_lag: u64,
+    /// The flow's receiver's latency in samples ([`receiver_lag`]; 0:
+    /// unknown), set each pass (dstack #426).
+    pub receiver_lag: u64,
     /// Starts again since the last [`Schedule::take_rebootstraps`].
     pub(super) rebootstraps: u64,
 }
@@ -31,12 +36,23 @@ impl Schedule {
             next: aligned_after(now, fpp),
             fpp,
             max_lag,
+            receiver_lag: 0,
             rebootstraps: 0,
         }
     }
 
+    /// The lag past which the schedule starts again (dstack #426): the
+    /// latency the receiver plays the flow at, its own when it states a
+    /// longer one than ours (Dante's rule, as `PassClock::late_threshold`
+    /// counts late packets). A packet later than that can never play; one
+    /// within it is sent (the lane's late count judges whether it came in
+    /// time). Ours while the receiver's is unknown.
+    pub fn bound(&self) -> u64 {
+        self.max_lag.max(self.receiver_lag)
+    }
+
     /// The stamp of the packet due at `now`, if one is (the schedule moves
-    /// on by fpp). A lag past `max_lag`, or a schedule [`DISCONTINUITY`]
+    /// on by fpp). A lag past its [`Schedule::bound`], or a schedule [`DISCONTINUITY`]
     /// samples ahead of the clock, starts it again (counted) and sends
     /// nothing now.
     pub fn due(&mut self, now: u64) -> Option<u64> {
@@ -85,12 +101,14 @@ impl Schedule {
     /// restart reads scheduled late, pass long or preempted.
     pub fn due_after(&mut self, now: u64, before: &split::Before) -> Option<u64> {
         let send = self.next.saturating_add(self.fpp);
-        if now > send.saturating_add(self.max_lag) || send > now.saturating_add(DISCONTINUITY) {
+        let bound = self.bound();
+        if now > send.saturating_add(bound) || send > now.saturating_add(DISCONTINUITY) {
             // Why (dasio, Windows): the lag past the send time, or a
-            // jump back. Rare (each one is a restart), so logged.
+            // jump back. Rare (each one is a restart), so logged; its
+            // `max_lag` is the bound it was judged by.
             tracing::warn!(
                 lag = now as i64 - send as i64,
-                max_lag = self.max_lag,
+                max_lag = bound,
                 oversleep_us = %split::Us(before.oversleep_ns),
                 last_pass_us = %split::Us(before.pass_ns),
                 last_pass_cpu_us = %split::Us(before.pass_cpu_ns),
@@ -117,6 +135,14 @@ impl Schedule {
     pub fn wake_ns(&self, rate: u32, margin_ns: u64) -> u64 {
         ns_of(self.next.saturating_add(self.fpp), rate).saturating_add(margin_ns)
     }
+}
+
+/// A receiver's stated latency `receiver_ns` (0: unknown) in samples at
+/// `rate`, as a flow's lag bound takes it (dstack #426): at most
+/// [`MAX_LATENCY_SAMPLES`], the engine ring's reach behind its writer, so a
+/// receiver that states more never makes the TX thread read past it.
+pub fn receiver_lag(receiver_ns: u64, rate: u32) -> u64 {
+    clock::latency_samples(receiver_ns, rate).min(MAX_LATENCY_SAMPLES)
 }
 
 /// The first multiple of `fpp` after `now`.

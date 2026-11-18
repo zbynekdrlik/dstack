@@ -193,7 +193,7 @@ pub(crate) fn verdict(window: &Window, cause: u64, names: Names) -> String {
                 .to_string()
         }
         Who::Both => format!("RUNNER (the {thread} was not run; the sender's TX thread neither)"),
-        Who::Ours => "OURS".to_string(),
+        Who::Ours => format!("OURS{}", window.sender.ours()),
     };
     format!(
         "verdict {who}: {causes:?}, {} samples off, ring holes never written {}, the sender's {:?}",
@@ -463,6 +463,26 @@ mod consumer_tests {
         assert_eq!(w.who(CAUSE), Who::Ours);
         // Samples off with a consumer stall but no underrun and no hole.
         assert_eq!(window(0, 520, STALL, &[]).who(CAUSE), Who::Ours);
+    }
+
+    /// dstack #426: never-written holes after a sender restart bound under
+    /// its receiver's latency are the stack's (the sender gave up packets
+    /// the receiver still plays), however late the sleep, and named so.
+    #[test]
+    fn holes_after_a_restart_under_the_receiver_s_latency_are_ours() {
+        let mut w = window(0, 520, &[], &[]);
+        w.holes = 512;
+        w.sender = sender(1, &[Some(9_282)]);
+        w.sender.receiver_lag = 433;
+        assert_eq!(w.who(CAUSE), Who::Ours, "{:?}", w.sender);
+        assert!(
+            says(&w)
+                .starts_with("verdict OURS (a TX restart bound under the receiver's latency): "),
+            "{}",
+            says(&w)
+        );
+        w.sender.receiver_lag = 432;
+        assert_eq!(w.who(CAUSE), Who::Sender);
     }
 
     /// A witness of a 10 ms consumer judging 95 ms windows (a window opens

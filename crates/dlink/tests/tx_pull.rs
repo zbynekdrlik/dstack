@@ -223,6 +223,24 @@ fn a_stalled_pump_leaves_the_tx_bridge_s_audio_whole() {
     while receiver.rx_channels()[0].status != Some(SubStatus::Receiving) && Instant::now() < end {
         std::thread::sleep(Duration::from_millis(50));
     }
+    // The sender knows the latency its receiver plays the flow at (read
+    // within seconds of the flow's start, `dstack::flows::receivers`), so
+    // the judged window's TX restarts are bound by it (dstack #426).
+    let tx = &sender.media().tx;
+    let known = || {
+        tx.receiver_flows()
+            .iter()
+            .any(|&(slot, dest, _)| tx.receiver_latency_ns(slot, dest) != 0)
+    };
+    let end = Instant::now() + Duration::from_secs(15);
+    while !known() && Instant::now() < end {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        known(),
+        "the sender never learned its receiver's latency: {}",
+        sender.status()
+    );
     std::thread::sleep(SETTLE);
     let pump = || sender.media().engine().expect("the sender's pump");
     let (judged, window, aside) = judge(&witness, || {

@@ -17,7 +17,7 @@ use tracing::{info, warn};
 use super::{
     DSCP_EF, EVENTS_EVERY_NS, FPP_MAX, KEEPALIVE_DRAIN, MAX_CHANNELS, MAX_FLOWS, MediaThread,
     PassClock, Plan, SEND_BUFFER_BYTES, Schedule, Scheduling, TX_PRIORITY, TxShared, account, host,
-    place, relay, send_clock, send_timed, shift, source_from, split, take_priority,
+    place, receiver_lag, relay, send_clock, send_timed, shift, source_from, split, take_priority,
 };
 use crate::clock::{self, PtpClock};
 use crate::media::bypass::{self, Direct, HEADROOM};
@@ -198,16 +198,40 @@ impl Transmitter {
     }
 
     /// The TX pull's blocks due at PTP `now_ns` into the engine rings
-    /// (dstack #363), before the pass's sends.
+    /// (dstack #363), before the pass's sends, with the flows' largest lag
+    /// bound ([`Transmitter::reach_lag`], read only for a device with a
+    /// pull: the lanes' latency reads are no cost to any other).
     fn fill_due(&mut self, now_ns: u64) {
+        if self.fill.is_none() {
+            return;
+        }
+        let reach_lag = self.reach_lag();
         if let Some(fill) = self.fill.as_mut() {
             fill.fill_due(
                 clock::to_samples(now_ns, self.rate),
-                self.max_lag,
+                reach_lag,
                 &self.shared.engine,
                 self.engine_shift,
             );
         }
+    }
+
+    /// The largest lag bound of the flows that send now (dstack #426):
+    /// our latency, or a receiver's when it states a longer one (each
+    /// lane's [`Schedule::bound`]), so the TX pull reaches as far back as
+    /// any flow still sends and never restarts before it.
+    pub(super) fn reach_lag(&self) -> u64 {
+        self.lanes
+            .iter()
+            .enumerate()
+            .filter_map(|(slot, lane)| {
+                let dest = lane.plan.dest?;
+                Some(receiver_lag(
+                    self.shared.receiver_latency_ns(slot, dest),
+                    self.rate,
+                ))
+            })
+            .fold(self.max_lag, u64::max)
     }
 
     /// The plans and sources that changed, and the keepalives of every
@@ -314,6 +338,9 @@ impl Transmitter {
             let schedule = lane
                 .schedule
                 .get_or_insert_with(|| Schedule::bootstrap(now, plan.fpp, *max_lag));
+            // The receiver's latency, read each pass as the late count reads
+            // it: the schedule holds on as long as the receiver plays.
+            schedule.receiver_lag = receiver_lag(receiver_ns, *rate);
             let fpp = usize::from(plan.fpp);
             let nch = usize::from(plan.nch);
             let mut holes = 0;

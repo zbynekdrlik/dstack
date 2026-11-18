@@ -960,7 +960,7 @@ pub use priority::{
 };
 pub(crate) use priority::{place, take_priority};
 mod schedule;
-pub use schedule::{Schedule, flow_latency_ns, ns_of, over_latency, send_clock};
+pub use schedule::{Schedule, flow_latency_ns, ns_of, over_latency, receiver_lag, send_clock};
 mod table;
 pub use table::{TxFlow, TxTable};
 mod thread;
