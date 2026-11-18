@@ -38,9 +38,15 @@ fn after_an_interface_re_create_the_queries_multicast_interface_is_set_again() {
     fake.read_more(1);
     spoil(&i);
     fake.read_more(2);
-    assert_eq!(send_if(&i), Ipv4Addr::UNSPECIFIED, "nothing while the index holds");
+    assert_eq!(
+        send_if(&i),
+        Ipv4Addr::UNSPECIFIED,
+        "nothing while the index holds"
+    );
     fake.recreate(9);
-    until("the interface set again", || send_if(&i) == Ipv4Addr::LOCALHOST);
+    until("the interface set again", || {
+        send_if(&i) == Ipv4Addr::LOCALHOST
+    });
     // Once per change.
     spoil(&i);
     fake.read_more(2);

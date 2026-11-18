@@ -38,7 +38,9 @@ fn after_an_interface_re_create_the_sweeps_multicast_interface_is_set_again() {
         "nothing while the index holds"
     );
     fake.recreate(9);
-    until("the interface set again", || send_if(&discovery) == LOOPBACK);
+    until("the interface set again", || {
+        send_if(&discovery) == LOOPBACK
+    });
     discovery.stop().unwrap();
 }
 
