@@ -985,6 +985,7 @@ pub use retry::{
     transient_refusal,
 };
 
+mod direct;
 mod multicast;
 mod receivers;
 use multicast::multicast_out;

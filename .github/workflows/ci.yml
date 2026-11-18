@@ -102,10 +102,11 @@ jobs:
         run: sudo bash tools/linux/tests/ci-peer.test.sh target/release/dstack-dev
 
   recreate:
-    # dstack #411 (#409's whole-device proof): two `dstack-dev peer` devices
-    # on a dummy interface in a private network namespace, one receiving the
-    # other's multicast flow and the other a unicast flow; the interface is
-    # deleted and added again (a new index, as a USB NIC's reset) and each
+    # dstack #411, #414 (#409's whole-device proof): two `dstack-dev peer`
+    # devices in two private network namespaces joined by a veth pair, one
+    # receiving the other's multicast flow and the other a unicast flow sent
+    # past the qdisc (the AF_PACKET socket, root has CAP_NET_RAW); the pair
+    # is deleted and added again (a new index, as a USB NIC's reset) and each
     # must hear the other again within a bound, without a restart.
     runs-on: ubuntu-24.04
     timeout-minutes: 20
