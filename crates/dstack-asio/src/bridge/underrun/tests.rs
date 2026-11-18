@@ -290,3 +290,31 @@ fn the_watch_publishes_the_counts_and_each_side_s_latest_cause() {
     assert_eq!(UnderrunCause::from(Cause::Bridge), UnderrunCause::Bridge);
     assert_eq!(UnderrunCause::from(Cause::Unknown), UnderrunCause::Unknown);
 }
+
+/// A lateness summed over several switches can pass the period the top
+/// bin is otherwise judged by (dstack #393): when the run's peak lateness
+/// rose over the check, the top bin reaches that peak. 3.5 ms behind at a
+/// 4 ms target (3/4: 3 ms) is the driver's, though the period (2.667 ms)
+/// is not; a check whose peak did not rise falls back to the period.
+#[test]
+fn the_top_bin_reaches_the_peak_lateness_that_rose_over_the_check() {
+    let mut w = UnderrunWatch::new();
+    let at = |from_asio_underruns, top, late_max_us| UnderrunCounts {
+        from_asio_underruns,
+        period_us: 2667,
+        late_max_us,
+        ..bins(&[(7, top)])
+    };
+    let text = w.look(at(1, 1, 3500), 4.0).expect("an underrun rose");
+    assert!(text.contains("cause: driver callback lateness"), "{text}");
+    let text = w.look(at(2, 2, 3500), 4.0).expect("an underrun rose");
+    assert!(text.contains("cause: the bridge"), "{text}");
+    // A new run's counters (the peak fell): its own peak counts.
+    let text = w.look(at(1, 1, 3200), 4.0).expect("an underrun rose");
+    assert!(text.contains("cause: driver callback lateness"), "{text}");
+    let low = UnderrunCounts {
+        late_max_us: 2900,
+        ..at(1, 1, 0)
+    };
+    assert_eq!(from_asio_cause(&low, 4000), Cause::Bridge, "3/4: 3000");
+}
