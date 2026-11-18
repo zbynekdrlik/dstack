@@ -50,7 +50,7 @@ use tokio::task::JoinSet;
 use tracing::{info, warn};
 
 use crate::arc::Running;
-use crate::clock::{ClockStats, PtpClock, to_samples};
+use crate::clock::{ClockStats, PtpClock, latency_samples, to_samples};
 use crate::ctl::{Checks, Limits, Playout, Requests};
 use crate::device::Device;
 use crate::flows::client::Client;
@@ -544,6 +544,20 @@ impl Threads {
 /// daemon's loop passes each to [`Driver::answered`].
 pub type Answers = mpsc::UnboundedReceiver<(FlowId, Answer)>;
 
+/// A flow's read, samples at the device's rate, as the status's `rx[]`
+/// keys name it: the grant's log line carries it (dstack #403).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FlowRead {
+    /// Its latency: its transmitter's advertised one or ours, the larger.
+    latency: u64,
+    /// The playout point it is read at (its latency, at least its fpp).
+    playout: u32,
+    /// Read this much later than the device's latency, whole blocks.
+    delay: u16,
+    /// Its transmitter's advertised latency (0: none).
+    advertised: u64,
+}
+
 /// The control side of our RX (see the module).
 pub struct Driver {
     media: Arc<Media>,
@@ -752,17 +766,30 @@ impl Driver {
 
     /// The answer to the request of `flow`.
     pub fn answered(&mut self, flow: FlowId, answer: Answer) {
-        let device = self.device_of(flow);
         match answer {
-            Answer::Granted(_) => info!(device = %device, flow = flow.slot + 1, "RX flow granted"),
+            // The flow's read with its grant (dstack #403): a transmitter's
+            // latency over ours reads its audio later (`delay`), and moves
+            // the app's blocks' `play_at` with it.
+            Answer::Granted(_) => match self.read_of(flow) {
+                Some((device, r)) => info!(
+                    device = %device,
+                    flow = flow.slot + 1,
+                    latency = r.latency,
+                    playout = r.playout,
+                    delay = r.delay,
+                    advertised = r.advertised,
+                    "RX flow granted"
+                ),
+                None => info!(device = %"-", flow = flow.slot + 1, "RX flow granted"),
+            },
             Answer::Refused(status) => info!(
-                device = %device,
+                device = %self.device_of(flow),
                 flow = flow.slot + 1,
                 status = format_args!("{status:#06x}"),
                 "RX flow refused"
             ),
             Answer::Failed => info!(
-                device = %device,
+                device = %self.device_of(flow),
                 flow = flow.slot + 1,
                 "RX flow request had no answer"
             ),
@@ -815,6 +842,27 @@ impl Driver {
             || String::from("-"),
             |v| crate::media::late::named(&v.device),
         )
+    }
+
+    /// The transmitter's Dante name of `flow` ([`Driver::device_of`]) and
+    /// how the manager reads it, as the status shows it (dstack #403), from
+    /// one look under the manager's lock; `None` once another flow took
+    /// its slot or none is there.
+    fn read_of(&self, flow: FlowId) -> Option<(String, FlowRead)> {
+        let m = lock(&self.media.manager);
+        let v = m.flow(flow.slot).filter(|v| v.id == flow)?;
+        let plan = m.rx_plan(flow.slot);
+        let rate = self.media.tx.cfg.sample_rate;
+        let device = crate::media::late::named(&v.device);
+        Some((
+            device,
+            FlowRead {
+                latency: latency_samples(v.latency_ns, rate),
+                playout: plan.latency,
+                delay: plan.delay,
+                advertised: latency_samples(v.advertised_ns, rate),
+            },
+        ))
     }
 
     /// Sends the manager's datagrams, one task each; finished tasks are

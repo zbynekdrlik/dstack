@@ -24,7 +24,8 @@
 //! `tests/tx_pull.rs` witnesses its app thread (dstack #376, dlink's
 //! `tests/writer/witness.rs`): a judged window in which it stalled is set
 //! aside and the next judged, up to [`witness::WINDOWS`], and a failure
-//! prints `verdict RUNNER|OURS`.
+//! prints `verdict RUNNER|OURS`, which also reads the bridge device's TX
+//! schedule restarts (dstack #401, dlink's `tests/tx_restart/restarts.rs`).
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -34,6 +35,8 @@ use dlink::{Clock, Config, Link, Map, Place, Ports, Stopped, SubStatus};
 use dstack_asio::bridge::{Bridge, DanteSide, Spec};
 use dstack_asio::{Block, Opened, Process, Sample};
 
+#[path = "../../dlink/tests/tx_restart/restarts.rs"]
+mod restarts;
 #[path = "../../dlink/tests/writer/witness.rs"]
 mod witness;
 use witness::{Witness, judge, verdict};
@@ -131,6 +134,8 @@ struct Judged {
     /// The TX fill's counts at the window's start and end.
     before: dstack::media::tx::TxFillView,
     after: dstack::media::tx::TxFillView,
+    /// The bridge device's TX schedule restarts (dstack #401).
+    tx: restarts::Restarts,
 }
 
 /// Every TX slot's holes of `link`.
@@ -185,6 +190,7 @@ fn a_stalled_pump_against(to_asio: usize) {
     let _one = ONE_DEVICE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    restarts::listen();
     let dir = tempfile::tempdir().unwrap();
     let place = Place::Ip(test_ipv4());
     let rx: &[&str] = if to_asio == 0 { &[] } else { &["In 1"] };
@@ -280,7 +286,8 @@ fn a_stalled_pump_against(to_asio: usize) {
     // pump-run pull had none, so it is read where there is one.
     let fill = || sender.media().tx.tx_fill().unwrap_or_default();
     let (judged, window, aside) = judge(&witness, || {
-        let (holes, after_send, stalled, before, on0, off0) = (
+        let (tx, holes, after_send, stalled, before, on0, off0) = (
+            restarts::open(&sender.media().tx),
             tx_holes(&sender),
             pump().writes_after_send,
             stalls.load(Ordering::Relaxed),
@@ -301,6 +308,7 @@ fn a_stalled_pump_against(to_asio: usize) {
             sent: format!("{sent:?}"),
             before,
             after: fill(),
+            tx: tx.close(&sender.media().tx, RATE),
         }
     });
     let Judged {
@@ -312,6 +320,7 @@ fn a_stalled_pump_against(to_asio: usize) {
         sent,
         before,
         after,
+        tx,
     } = judged;
     let filled = sender.media().tx.tx_fill();
     let channel = receiver.rx_channels().remove(0);
@@ -361,7 +370,7 @@ fn a_stalled_pump_against(to_asio: usize) {
         (off, holes, after_send, underruns),
         (0, 0, 0, 0),
         "samples off the level, the bridge device's TX holes, its pump's writes after send and the from-ASIO underruns with {stalls} pump stalls: {on} on, the bridge device's pump {sent}, its TX pull {filled:?}, {channel:?}; {}, the driver thread's stall bound {} us, its record {window:?}; windows set aside (the driver thread stalled) {aside:?}",
-        verdict(&window, &fill_counts),
+        verdict(&window, off, &tx, &fill_counts),
         witness.stall_us(),
     );
     // The TX thread filled every block of the judged window (128 frames at

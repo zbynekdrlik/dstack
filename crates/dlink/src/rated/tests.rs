@@ -352,11 +352,13 @@ fn the_delay_before_the_start_is_the_running_rated_s() {
     assert!(delay_ns(96_000, 0, 128).is_err());
 }
 
-/// dstack #295: the app's block plays the RX converter's delay after the
-/// device's block, so the app sees P + (c) with (c) = B + that delay, as
-/// `dlink::split` states and the device logs it.
+/// dstack #295, #410: the app's block plays at its own content's stamp +
+/// P + (c), with (c) = B + the RX converter's delay as `dlink::split`
+/// states it. The converter's output is that delay older than the device
+/// block, so the app block's play time is the device block's, unchanged
+/// (stamping it the delay later counted the delay twice, #410).
 #[test]
-fn the_app_s_block_plays_the_rx_converter_s_delay_after_the_device_s() {
+fn the_app_s_block_plays_at_its_device_block_s_time() {
     for (dev, app) in [(96_000u32, 48_000u32), (96_000, 44_100), (48_000, 96_000)] {
         let mut r = Rated::new(Probe::new(0.0), dev, app, 128, 1, 1).unwrap();
         let rx = r.delay_ns().0 as i64;
@@ -368,15 +370,17 @@ fn the_app_s_block_plays_the_rx_converter_s_delay_after_the_device_s() {
         r.process(&mut Block::new(128, &i, &mut o).at(384).played_at(i64::MAX - 1));
         assert_eq!(
             r.inner.play_ats,
-            [Some(5_000_000 + rx), Some(rx - 9), None, Some(i64::MAX)],
+            [Some(5_000_000), Some(-9), None, Some(i64::MAX - 1)],
             "{dev} -> {app}"
         );
     }
-    // 48 kHz on 96 kHz: the half-band's 0.625 ms, split's (c) less B.
+    // 48 kHz on 96 kHz: the half-band's 0.625 ms is in the content, not
+    // added to the stamp (#410: it was, giving 625_000 here).
     let mut r = Rated::new(Probe::new(0.0), 96_000, 48_000, 128, 1, 1).unwrap();
+    assert_eq!(r.delay_ns().0, 625_000, "the half-band's RX delay");
     let (i, mut o) = ([0.0; 128], [0.0; 128]);
     r.process(&mut Block::new(128, &i, &mut o).at(0).played_at(0));
-    assert_eq!(r.inner.play_ats, [Some(625_000)]);
+    assert_eq!(r.inner.play_ats, [Some(0)]);
 }
 
 /// Writes `0.5` on every output for its first `loud` calls, then nothing

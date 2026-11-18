@@ -165,6 +165,12 @@ fn rx_wait(reblock: Option<&Reblock>) -> usize {
     reblock.map_or(0, |r| r.frames - 1)
 }
 
+/// [`rx_wait`] in ns at the app's rate (a converter's, never 0): what a
+/// fixed app block's play time adds to its device block's (dstack #410).
+fn rx_wait_ns(reblock: Option<&Reblock>, app_rate: u32) -> u64 {
+    rx_wait(reblock) as u64 * 1_000_000_000 / u64::from(app_rate.max(1))
+}
+
 /// The capacities of the fixed app block's RX FIFO and of the TX FIFO, app
 /// frames, from `A` (0 without a fixed block's FIFO), the RX converter's
 /// most output, the TX converter's most input and the TX prime: room to
@@ -239,14 +245,12 @@ pub struct Rated<P> {
     prime: usize,
     /// TX FIFO runs dry, frames (shared with the app's status).
     dry: Arc<AtomicU64>,
-    /// The RX converter's delay, ns ([`Rated::delay_ns`]'s RX): the app's
-    /// block plays that much after the device's ([`Block::play_at`]). At a
-    /// ratio whose app blocks vary in size (44.1 kHz on 96 kHz: 58 or 59
-    /// frames), an app block's first sample sits up to one app sample off
-    /// its device block's start; the play time follows the device's blocks
-    /// and never drifts from them. With a fixed app block at such a ratio
-    /// it holds the RX FIFO's worst case too ([`Rated::delay_ns`]).
-    rx_delay_ns: i64,
+    /// The fixed app block's RX FIFO wait, ns ([`Rated::with_fixed_app_block`],
+    /// 0 without one): its worst case, which (c) states; the app's block
+    /// plays that much after the device's ([`Block::play_at`]). The RX
+    /// converter's delay is NOT added: the converter's output already holds
+    /// audio that much older than the device block (dstack #410).
+    rx_wait_ns: i64,
     /// The app's fixed frames a call ([`Rated::with_fixed_app_block`]).
     app_block: Option<usize>,
     /// The fixed app block's RX FIFO, at a ratio that does not divide the
@@ -325,13 +329,6 @@ impl<P: Process> Rated<P> {
                 .collect(),
             held: 0,
         });
-        let (rx_delay, _) = delays_ns(
-            rx.delay_frames() + rx_wait(reblock.as_ref()),
-            tx.delay_frames(),
-            prime,
-            device_rate,
-            app_rate,
-        );
         let rx_room = rx.output_frames_max().max(a.unwrap_or(0));
         let mut fifo: Vec<VecDeque<f64>> = (0..outputs)
             .map(|_| VecDeque::with_capacity(fifo_room))
@@ -357,7 +354,7 @@ impl<P: Process> Rated<P> {
             rates: (device_rate, app_rate),
             prime,
             dry: Arc::new(AtomicU64::new(0)),
-            rx_delay_ns: i64::try_from(rx_delay).unwrap_or(i64::MAX),
+            rx_wait_ns: i64::try_from(rx_wait_ns(reblock.as_ref(), app_rate)).unwrap_or(i64::MAX),
             app_block,
             reblock,
             restart: true,
@@ -432,14 +429,15 @@ impl<P: Process> Process for Rated<P> {
             Err(_) => 0,
         };
         // The app at its rate. `app_start` is the media time of this device
-        // block's converter frames; the play time is the device's + the RX
-        // converter's delay: the app's block plays at P + (c) as `split`
-        // states it (#295).
+        // block's converter frames. The play time is the device block's +
+        // the fixed app block's FIFO wait, never + the converter's delay d:
+        // the converter's first output of this call holds audio from d
+        // before the device block's start, so that content's stamp + P +
+        // (c) (with (c) = B + d) is the device block's start + P + B. Adding
+        // d again stamped it d late (dstack #410).
         let start = block.start();
         let app_start = start.map(|s| self.app_start(s));
-        let play_at = block
-            .play_at()
-            .map(|at| at.saturating_add(self.rx_delay_ns));
+        let play_at = block.play_at().map(|at| at.saturating_add(self.rx_wait_ns));
         self.next = start
             .zip(app_start)
             .map(|(s, a)| (s.saturating_add(n as u64), a.saturating_add(k as u64)));

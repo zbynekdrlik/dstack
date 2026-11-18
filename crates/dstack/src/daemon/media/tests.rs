@@ -19,6 +19,7 @@ use crate::subscribe::SubStatus;
 use crate::subscribe::resolve::Advertised;
 use crate::wire::{Header, reply};
 
+mod grant_read;
 mod names;
 
 pub(crate) const TEST_DEVICE: &str = include_str!("../../../../../config/test-device.toml");

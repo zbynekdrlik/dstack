@@ -33,11 +33,28 @@
 //! prints [`verdict`]: `RUNNER` when every bridge underrun follows a writer
 //! stall within [`CAUSE_WRITES`] and the stack's own counts are 0, else
 //! `OURS`.
+//!
+//! The TX thread itself can also be not run (dstack #401, v0.6.178 tag
+//! CI's coverage job: 480 samples off, no TX hole, no underrun, the TX
+//! lane's `rebootstraps: 1` after a sleep 9.3 ms late on a 9 ms latency):
+//! its schedule then starts again and the packets it skipped never reach
+//! the receiver. The verdict reads the window's TX restarts with their own
+//! lines' `oversleep_us` (`tests/tx_restart/restarts.rs`, which each
+//! including test declares as `mod restarts`): samples off with no
+//! underrun are `RUNNER` only when every restart's sleep returned the
+//! flow's latency late and they are no more than the restarts can leave
+//! unsent (each its lag and its bound); a restart without that evidence
+//! is `OURS`. Here the TX thread is the code under test, so a window lost
+//! to it is never set aside (only a writer stall is): the test fails with
+//! the verdict. The consumer tests (`tests/consumer/witness.rs`) set such
+//! a window aside, since their sender is not under test.
 
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use dlink::bridge::{AppBuffer, Stats};
+
+use super::restarts::Restarts;
 
 /// The judged windows a run may need: one whose writer never stalled is
 /// judged, a stalled one is set aside.
@@ -99,29 +116,45 @@ impl Window {
             .filter(move |&&(end, _)| end <= at && at - end <= CAUSE_WRITES)
     }
 
-    /// Whether the window's loss is the runner's: the bridge underran, the
-    /// writer read every underrun (or the ones it did not read yet wait on
-    /// a write still stalled at the close), each after a stall of its own,
-    /// and the stack's own counts (`ours`) are all 0. Samples off with no
-    /// underrun are never the writer's.
-    pub(crate) fn runner(&self, ours: &[(&str, u64)]) -> bool {
+    /// Whether the window's underruns are the writer's: the writer read
+    /// every underrun (or the ones it did not read yet wait on a write
+    /// still stalled at the close), each after a stall of its own. True
+    /// with no underrun.
+    fn underruns_writer_s(&self) -> bool {
         let read: u64 = self.underrun_at.iter().map(|&(_, n)| n).sum();
         let pending = self
             .stalls
             .last()
             .is_some_and(|&(at, _)| at == self.writes + 1);
-        self.underruns > 0
+        self.underruns == 0
+            || ((read >= self.underruns || pending)
+                && self
+                    .underrun_at
+                    .iter()
+                    .all(|&(at, _)| self.causes(at).next().is_some()))
+    }
+
+    /// Whether the window's loss is the runner's: it lost audio (an
+    /// underrun, or `off` samples off the level at the receiver), the
+    /// stack's own counts (`ours`) are all 0, every underrun is the
+    /// writer's ([`Window::underruns_writer_s`]), and the sender's TX
+    /// schedule restarts (`tx`), if any, all came after a sleep that
+    /// returned the flow's latency late (dstack #401: the TX thread not
+    /// run). Samples off with no underrun are never the writer's: only
+    /// such a restart explains them.
+    pub(crate) fn runner(&self, off: u64, tx: &Restarts, ours: &[(&str, u64)]) -> bool {
+        (self.underruns > 0 || off > 0)
             && ours.iter().all(|&(_, n)| n == 0)
-            && (read >= self.underruns || pending)
-            && self
-                .underrun_at
-                .iter()
-                .all(|&(at, _)| self.causes(at).next().is_some())
+            && self.underruns_writer_s()
+            && (!tx.any() || tx.runner())
+            && (self.underruns > 0 || tx.explain(off))
     }
 }
 
-/// The verdict of a judged window that lost audio (module doc).
-pub(crate) fn verdict(window: &Window, ours: &[(&str, u64)]) -> String {
+/// The verdict of a judged window that lost audio (module doc): its
+/// underruns, `off` samples off the level at the receiver, the sender's
+/// TX restarts `tx` and the stack's own counts `ours`.
+pub(crate) fn verdict(window: &Window, off: u64, tx: &Restarts, ours: &[(&str, u64)]) -> String {
     let causes: Vec<String> = window
         .underrun_at
         .iter()
@@ -133,13 +166,20 @@ pub(crate) fn verdict(window: &Window, ours: &[(&str, u64)]) -> String {
             format!("{n} underruns read at write {at}: writer stalls {before:?}")
         })
         .collect();
-    let who = if window.runner(ours) {
-        "RUNNER (the writer thread was not run)"
+    let who = if !window.runner(off, tx, ours) {
+        "OURS".to_string()
     } else {
-        "OURS"
+        let mut threads = Vec::new();
+        if window.underruns > 0 {
+            threads.push("the writer thread was not run");
+        }
+        if tx.any() {
+            threads.push("the TX thread's sleep returned past the latency");
+        }
+        format!("RUNNER ({})", threads.join("; "))
     };
     format!(
-        "verdict {who}: {} underruns {causes:?}, the stack's counts {ours:?}",
+        "verdict {who}: {} underruns {causes:?}, {off} samples off, {tx:?}, the stack's counts {ours:?}",
         window.underruns
     )
 }
@@ -286,38 +326,98 @@ mod witness_tests {
 
     const CLEAN: &[(&str, u64)] = &[("TX holes", 0), ("writes after send", 0)];
     const STALL: &[(u64, u64)] = &[(40, 30_000)];
+    /// The samples off the level an underrun costs (v0.6.166's 390).
+    const OFF: u64 = 390;
+    /// A window whose TX schedule never restarted (a 48 kHz device).
+    const NO_TX: Restarts = Restarts {
+        counted: 0,
+        lines: Vec::new(),
+        rate: 48_000,
+        oversleep_max_us: 0,
+    };
+
+    // `counted` TX restarts with lines of these oversleeps (µs), each a
+    // lag of 440 samples on a 9 ms latency (432 samples at 48 kHz): 9000
+    // us and more is the runner's, 872 samples off each at most.
+    use crate::restarts::fixture as restarts;
+
+    #[test]
+    fn samples_off_after_a_late_tx_sleep_are_the_runner_s() {
+        // v0.6.178's coverage case: 480 off, no underrun, one TX restart
+        // after a sleep 9282 us late on a 9 ms latency.
+        let w = window(0, &[], &[]);
+        let late = restarts(1, &[Some(9_282)]);
+        assert!(w.runner(480, &late, CLEAN));
+        let text = verdict(&w, 480, &late, CLEAN);
+        assert!(
+            text.starts_with("verdict RUNNER (the TX thread's"),
+            "{text}"
+        );
+        // With an underrun after a writer stall as well: both named.
+        let both = window(1, STALL, &[(40, 1)]);
+        assert!(both.runner(OFF + 480, &late, CLEAN));
+        let text = verdict(&both, OFF + 480, &late, CLEAN);
+        assert!(
+            text.contains("the writer thread was not run; the TX thread's"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_tx_restart_without_a_late_sleep_is_ours() {
+        let w = window(0, &[], &[]);
+        // Samples off with no TX restart and no underrun.
+        assert!(!w.runner(480, &NO_TX, CLEAN));
+        // The restart's sleep on time (the pass ran long), unmeasured, or
+        // a counted restart with no line (a re-anchor).
+        assert!(!w.runner(480, &restarts(1, &[Some(500)]), CLEAN));
+        assert!(!w.runner(480, &restarts(1, &[None]), CLEAN));
+        assert!(!w.runner(480, &restarts(2, &[Some(9_282)]), CLEAN));
+        assert!(verdict(&w, 480, &restarts(1, &[Some(500)]), CLEAN).starts_with("verdict OURS"));
+        // Such a restart beside a writer's underrun spoils it too.
+        let stalled = window(1, STALL, &[(40, 1)]);
+        assert!(!stalled.runner(OFF, &restarts(1, &[Some(500)]), CLEAN));
+        // A late restart never covers a stack count, or no loss at all.
+        let late = restarts(1, &[Some(9_282)]);
+        assert!(!w.runner(480, &late, &[("TX holes", 1)]));
+        assert!(!w.runner(0, &late, CLEAN));
+        // More off than the restart may cost (440 + 432): a
+        // dropped packet beside it.
+        assert!(w.runner(872, &late, CLEAN));
+        assert!(!w.runner(873, &late, CLEAN));
+    }
 
     #[test]
     fn an_underrun_after_a_writer_stall_is_the_runner_s() {
         let w = window(1, STALL, &[(40, 1)]);
-        assert!(w.runner(CLEAN));
-        assert!(verdict(&w, CLEAN).starts_with("verdict RUNNER"));
+        assert!(w.runner(OFF, &NO_TX, CLEAN));
+        assert!(verdict(&w, OFF, &NO_TX, CLEAN).starts_with("verdict RUNNER"));
         // Two underruns read in one rise.
-        assert!(window(2, STALL, &[(40, 2)]).runner(CLEAN));
+        assert!(window(2, STALL, &[(40, 2)]).runner(OFF, &NO_TX, CLEAN));
         // The last write the stall still explains, and the first it does not.
-        assert!(window(1, STALL, &[(40 + CAUSE_WRITES, 1)]).runner(CLEAN));
-        assert!(!window(1, STALL, &[(41 + CAUSE_WRITES, 1)]).runner(CLEAN));
+        assert!(window(1, STALL, &[(40 + CAUSE_WRITES, 1)]).runner(OFF, &NO_TX, CLEAN));
+        assert!(!window(1, STALL, &[(41 + CAUSE_WRITES, 1)]).runner(OFF, &NO_TX, CLEAN));
         // An underrun read before the stall is not its.
-        assert!(!window(1, STALL, &[(39, 1)]).runner(CLEAN));
+        assert!(!window(1, STALL, &[(39, 1)]).runner(OFF, &NO_TX, CLEAN));
     }
 
     #[test]
     fn a_loss_with_the_writer_on_time_is_ours() {
         let w = window(1, &[], &[(40, 1)]);
-        assert!(!w.runner(CLEAN));
-        assert!(verdict(&w, CLEAN).starts_with("verdict OURS"));
+        assert!(!w.runner(OFF, &NO_TX, CLEAN));
+        assert!(verdict(&w, OFF, &NO_TX, CLEAN).starts_with("verdict OURS"));
         // Samples off with no underrun: no writer explains them.
-        assert!(!window(0, STALL, &[]).runner(CLEAN));
+        assert!(!window(0, STALL, &[]).runner(OFF, &NO_TX, CLEAN));
         // An underrun the writer never read.
-        assert!(!window(2, STALL, &[(40, 1)]).runner(CLEAN));
+        assert!(!window(2, STALL, &[(40, 1)]).runner(OFF, &NO_TX, CLEAN));
         // One underrun of two without a stall before it.
-        assert!(!window(2, STALL, &[(40, 1), (90, 1)]).runner(CLEAN));
+        assert!(!window(2, STALL, &[(40, 1), (90, 1)]).runner(OFF, &NO_TX, CLEAN));
         // An unread underrun waits on a write still stalled at the close
         // (write 101 of 100): the runner's; one stalled earlier is no cover.
-        assert!(window(2, &[(40, 30_000), (101, 20_000)], &[(40, 1)]).runner(CLEAN));
-        assert!(!window(2, &[(40, 30_000), (100, 20_000)], &[(40, 1)]).runner(CLEAN));
+        assert!(window(2, &[(40, 30_000), (101, 20_000)], &[(40, 1)]).runner(OFF, &NO_TX, CLEAN));
+        assert!(!window(2, &[(40, 30_000), (100, 20_000)], &[(40, 1)]).runner(OFF, &NO_TX, CLEAN));
         // A stack count is never the writer's.
-        assert!(!window(1, STALL, &[(40, 1)]).runner(&[("TX holes", 1)]));
+        assert!(!window(1, STALL, &[(40, 1)]).runner(OFF, &NO_TX, &[("TX holes", 1)]));
     }
 
     #[test]
