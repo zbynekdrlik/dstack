@@ -65,7 +65,8 @@
 //! counts beside it. The two parts are read under separate locks, so one
 //! reply may join a hand-over a moment older than its lateness figures.
 //! [`BridgeFigures`] holds a 0 latency and an empty driver name as `None`,
-//! as it holds a version 1 body's missing ones.
+//! as it holds a version 1 body's missing ones. A reader takes the
+//! driver's `driver_len` bytes and ignores the rest of its room.
 //!
 //! **The bound:** at most [`super::limit::PER_SPAN`] replies a second,
 //! one bound for every asker (as the info replies'): a host that floods
@@ -138,6 +139,9 @@ mod at {
 
 const _: () = assert!(at::LATE_BINS + 8 * LATE_BINS == FIGURES_LEN);
 const _: () = assert!(at::ASIO_TO_DANTE == FIGURES_LEN);
+const _: () = assert!(at::DANTE_TO_ASIO == at::ASIO_TO_DANTE + 4);
+const _: () = assert!(at::DRIVER_LEN == at::DANTE_TO_ASIO + 4);
+const _: () = assert!(at::DRIVER == at::DRIVER_LEN + 1);
 const _: () = assert!(at::DRIVER + DRIVER_MAX == FIGURES_LEN_V2);
 
 /// The cause of a side's latest underrun, as the app's underrun watch read
@@ -167,7 +171,7 @@ impl UnderrunCause {
         }
     }
 
-    /// The cause of wire byte `code`; `None` for a byte version 1 never
+    /// The cause of wire byte `code`; `None` for a byte no version
     /// writes.
     pub fn of_code(code: u8) -> Option<UnderrunCause> {
         match code {
