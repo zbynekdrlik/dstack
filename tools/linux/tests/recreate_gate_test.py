@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT OR Apache-2.0
-"""recreate_gate.py's reads (dstack #411), run without root:
+"""recreate_gate.py's reads (dstack #411, #414), run without root:
 python3 -m unittest tools/linux/tests/recreate_gate_test.py"""
 
 import json
@@ -47,6 +47,31 @@ class Flow(unittest.TestCase):
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(status(rx("b", 42, 1)), f)
             self.assertEqual(gate.read_flow(path, "b"), (42, 1))
+
+
+def lanes(*direct):
+    return {"device": {"tx": [{"flow": i + 1, "packets": 9, "direct": d} for i, d in enumerate(direct)]}}
+
+
+class Direct(unittest.TestCase):
+    def test_sums_every_tx_lane_s_direct_packets(self):
+        self.assertEqual(gate.direct(lanes(100, 0, 23)), 123)
+
+    def test_no_lane_is_none_sent(self):
+        self.assertEqual(gate.direct(lanes()), 0)
+        self.assertEqual(gate.direct({}), 0)
+        self.assertEqual(gate.direct({"device": {"tx": [{"flow": 1}]}}), 0)
+
+    def test_a_file_not_readable_yet_reads_minus_one(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "a.json")
+            self.assertEqual(gate.read_direct(path), -1, "no file")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write('{"device": {"tx": [')
+            self.assertEqual(gate.read_direct(path), -1, "half written")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(lanes(7, 8), f)
+            self.assertEqual(gate.read_direct(path), 15)
 
 
 class Index(unittest.TestCase):
@@ -99,6 +124,16 @@ class Cli(unittest.TestCase):
                 json.dump(status(rx("b", 3000, 1)), f)
             r = self.run_gate("flow", path, "b")
             self.assertEqual((r.returncode, r.stdout), (0, "3000 1\n"))
+
+    def test_direct_prints_the_sum(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "a.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(lanes(3000, 2), f)
+            r = self.run_gate("direct", path)
+            self.assertEqual((r.returncode, r.stdout), (0, "3002\n"))
+            r = self.run_gate("direct", os.path.join(d, "none.json"))
+            self.assertEqual((r.returncode, r.stdout), (0, "-1\n"))
 
     def test_index_reads_stdin(self):
         r = self.run_gate("index", "rig0", stdin=Index.LINKS)

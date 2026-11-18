@@ -334,6 +334,23 @@ impl Direct {
         Err(io::Error::from(io::ErrorKind::Unsupported))
     }
 
+    /// A stand-in on interface index `ifindex` for tests, which have no
+    /// `CAP_NET_RAW`: a UDP socket's descriptor, never sent on.
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn stand_in(ifindex: i32) -> Direct {
+        let udp = std::net::UdpSocket::bind("127.0.0.1:0").expect("a UDP socket");
+        Direct {
+            fd: udp.into(),
+            ifindex,
+        }
+    }
+
+    /// The interface index each send names now (tests).
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn index(&self) -> i32 {
+        self.ifindex
+    }
+
     /// Sends the IPv4 `frame` to `mac` (the hot path: one system call).
     #[cfg(target_os = "linux")]
     pub fn send(&self, frame: &[u8], mac: [u8; 6]) -> io::Result<()> {
