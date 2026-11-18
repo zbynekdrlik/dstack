@@ -31,22 +31,29 @@
 //! - [`Instances`]: the [`Resolver`] the network resolver asks after the
 //!   records and before ARC; its thread ([`Instances::start`]) sends the
 //!   queries and reads the answers, on one socket bound to our address.
+//!   For queries to mDNS's group it watches our address on the interface
+//!   list and names its interface again as the socket's multicast send
+//!   interface after a change (dstack #409: Linux keeps the interface
+//!   index, and a NIC re-created under a new one failed every query until
+//!   the app restarted).
 //!
 //! Logs carry counts only, never a name or an address.
 
 use std::collections::{BTreeMap, HashMap};
 use std::io;
 use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use simple_dns::rdata::RData;
 use simple_dns::{CLASS, Name, Packet, QCLASS, QTYPE, Question, TYPE};
-use tracing::{debug, info, trace};
+use tracing::{debug, info, trace, warn};
 
 use super::resolve::{Advertised, Resolver, instance, parse};
+use crate::info::sendwatch::{Report, SendWatch};
+use crate::membership::{Lister, Membership, SEND_IF, send_on};
 
 /// A name not answered is asked again after this long, once the quick
 /// tries ([`QUICK_NS`]) are spent.
@@ -473,6 +480,11 @@ pub struct Instances {
     tried: bool,
     thread: Option<JoinHandle<()>>,
     clock: Clock,
+    /// The thread's failed sends ([`Instances::send_errors`]).
+    send_errors: Arc<AtomicU64>,
+    /// The thread's socket, for a test to read its options.
+    #[cfg(test)]
+    sock: Option<UdpSocket>,
 }
 
 impl Instances {
@@ -490,6 +502,9 @@ impl Instances {
             tried: false,
             thread: None,
             clock: Clock::Real(Instant::now()),
+            send_errors: Arc::default(),
+            #[cfg(test)]
+            sock: None,
         }
     }
 
@@ -525,23 +540,57 @@ impl Instances {
     /// [`Instances::start`] with the queries sent to `to` (mDNS's group, or
     /// a test's responder).
     pub fn start_to(&mut self, ip: Ipv4Addr, to: SocketAddrV4) -> io::Result<bool> {
+        self.start_watched(ip, to, Lister::default())
+    }
+
+    /// [`Instances::start_to`] with the interface list `lister` (dstack
+    /// #409): for queries to a multicast group, the thread watches our
+    /// address on it and names its interface again as the socket's
+    /// multicast send interface after a change (a NIC re-created under a
+    /// new index).
+    pub(crate) fn start_watched(
+        &mut self,
+        ip: Ipv4Addr,
+        to: SocketAddrV4,
+        lister: Lister,
+    ) -> io::Result<bool> {
         if self.started() {
             return Ok(false);
         }
         self.tried = true;
         let sock = UdpSocket::bind(SocketAddrV4::new(ip, 0))?;
         sock.set_read_timeout(Some(ROUND))?;
-        if to.ip().is_multicast() {
-            socket2::SockRef::from(&sock).set_multicast_if_v4(&ip)?;
+        let watch = if to.ip().is_multicast() {
+            send_on(&sock, ip)?;
+            Some((lister.watch(ip), lister))
+        } else {
+            None
+        };
+        #[cfg(test)]
+        {
+            self.sock = Some(sock.try_clone()?);
         }
+        let out = Out {
+            ip,
+            to,
+            watch,
+            sends: SendWatch::default(),
+            errors: Arc::clone(&self.send_errors),
+        };
         let (table, stop) = (Arc::clone(&self.table), Arc::clone(&self.stop));
         let clock = self.clock.clone();
         self.thread = Some(
             std::thread::Builder::new()
                 .name("dstack-mdns-instance".to_string())
-                .spawn(move || run(&sock, to, &table, &stop, &clock))?,
+                .spawn(move || run(&sock, &table, &stop, &clock, out))?,
         );
         Ok(true)
+    }
+
+    /// The queries whose send failed so far (dstack #409: they were logged
+    /// at debug only, so a socket that could send nothing went unseen).
+    pub fn send_errors(&self) -> u64 {
+        self.send_errors.load(Ordering::Relaxed)
     }
 }
 
@@ -556,6 +605,11 @@ impl Instances {
     /// The stop flag its thread reads.
     fn stop_flag(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.stop)
+    }
+
+    /// The running thread's socket (the same socket, another handle).
+    fn socket(&self) -> &UdpSocket {
+        self.sock.as_ref().expect("the thread started")
     }
 }
 
@@ -608,11 +662,87 @@ impl Resolver for Instances {
     }
 }
 
-/// The thread: the due queries every [`ROUND`], the answers in between.
-fn run(sock: &UdpSocket, to: SocketAddrV4, table: &Mutex<Table>, stop: &AtomicBool, clock: &Clock) {
+/// What the INFO line after an interface change names.
+const QUERIES: &str = "the directory's mDNS queries";
+
+/// The queries' way out (dstack #409):
+///
+/// - for queries to a multicast group, the watch of our address on the
+///   interface list: on a change (back after it was gone, or on a new
+///   index) its interface named again as the socket's multicast send
+///   interface ([`Membership::keep_as`] logs it once; a failure is warned
+///   and tried at the next look);
+/// - each send's result to a [`SendWatch`] (`.claude/rules/multicast.md`,
+///   #340): a failure counted ([`Instances::send_errors`]), reported at
+///   most once a minute, and after failures in a row the interface named
+///   again (a reopen too: a new socket would change the query port and
+///   drop the answers on their way).
+struct Out {
+    ip: Ipv4Addr,
+    to: SocketAddrV4,
+    watch: Option<(Membership, Lister)>,
+    sends: SendWatch,
+    errors: Arc<AtomicU64>,
+}
+
+impl Out {
+    /// A look when due (the interface named again after a change), and the
+    /// failures not reported yet once a report is due.
+    fn keep(&mut self, sock: &UdpSocket) {
+        let ip = self.ip;
+        if let Some((membership, lister)) = self.watch.as_mut() {
+            membership.keep_as(Instant::now(), &mut lister.read, SEND_IF, QUERIES, || {
+                send_on(sock, ip)
+            });
+        }
+        if let Some(r) = self.sends.flush(Instant::now()) {
+            report(&r);
+        }
+    }
+
+    /// One query sent to its target, the result watched.
+    fn send(&mut self, sock: &UdpSocket, bytes: &[u8]) {
+        let e = match sock.send_to(bytes, self.to) {
+            Ok(_) => {
+                if let Some(failures) = self.sends.sent() {
+                    info!(failures, "mDNS queries go out again");
+                }
+                return;
+            }
+            Err(e) => e,
+        };
+        self.errors.fetch_add(1, Ordering::Relaxed);
+        let failed = self.sends.failed(Instant::now(), &e);
+        if let Some(r) = &failed.report {
+            report(r);
+        }
+        if failed.recover.is_some() {
+            match send_on(sock, self.ip) {
+                Ok(()) => info!("mDNS queries' multicast interface named again after failed sends"),
+                Err(e) => {
+                    warn!(error = %e, "mDNS queries' multicast interface not named again");
+                }
+            }
+        }
+    }
+}
+
+/// Failed query sends, one line a minute at most.
+fn report(r: &Report) {
+    warn!(
+        failures = r.failures,
+        error = %r.error,
+        "mDNS queries could not be sent (counted; one line a minute at most)"
+    );
+}
+
+/// The thread: the due queries every [`ROUND`], the answers in between;
+/// the way out kept first ([`Out`]).
+fn run(sock: &UdpSocket, table: &Mutex<Table>, stop: &AtomicBool, clock: &Clock, mut out: Out) {
     let mut id: u16 = 0;
     let mut buf = vec![0u8; 9000];
     while !stop.load(Ordering::Relaxed) {
+        out.keep(sock);
         let asks = lock(table).due(clock.now());
         for ask in asks {
             id = id.wrapping_add(1);
@@ -620,8 +750,8 @@ fn run(sock: &UdpSocket, to: SocketAddrV4, table: &Mutex<Table>, stop: &AtomicBo
                 Ask::Instance(name) => query(id, name),
                 Ask::Host(_, host) => host_query(id, host),
             };
-            if let Some(Err(e)) = bytes.map(|b| sock.send_to(&b, to)) {
-                debug!(%e, "instance query not sent");
+            if let Some(b) = bytes {
+                out.send(sock, &b);
             }
             // Spaced, never a burst; answers to earlier ones are read on.
             read_answers(sock, &mut buf, table, clock, PACE);

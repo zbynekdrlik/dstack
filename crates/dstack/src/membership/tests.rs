@@ -240,6 +240,39 @@ fn keep_warns_on_a_failed_rejoin_and_tries_again_at_the_next_period() {
 }
 
 #[test]
+fn keep_as_logs_its_owner_s_words_for_a_send_interface() {
+    let every = Duration::from_millis(10);
+    let mut m = Membership::every(OURS, every);
+    let t0 = Instant::now();
+    let what = "the directory's mDNS queries";
+    assert!(!m.keep_as(t0, || Ok(two_legs(26)), SEND_IF, what, || Ok(())));
+    let text = crate::test_log::capture_at(Level::INFO, || {
+        assert!(m.keep_as(t0 + every, || Ok(two_legs(19)), SEND_IF, what, || Ok(())));
+    });
+    assert!(
+        text.contains("multicast send interface named again after an interface change"),
+        "{text}"
+    );
+    assert!(!text.contains("re-joined"), "{text}");
+    assert!(
+        text.contains("group=the directory's mDNS queries"),
+        "{text}"
+    );
+    assert!(text.contains("old_index=26") && text.contains("new_index=19"));
+    let text = crate::test_log::capture_warnings(|| {
+        let failing = || Err(io::Error::other("no such device"));
+        assert!(!m.keep_as(t0 + every * 2, || Ok(two_legs(7)), SEND_IF, what, failing));
+    });
+    assert!(
+        text.contains(
+            "multicast send interface not named again after an interface change; tried again"
+        ),
+        "{text}"
+    );
+    assert!(text.contains("no such device"), "{text}");
+}
+
+#[test]
 fn rejoin_leaves_and_joins_the_group_again_on_the_same_socket() {
     let group = Ipv4Addr::new(239, 255, 77, 82);
     let sock = UdpSocket::bind("0.0.0.0:0").unwrap();
@@ -299,4 +332,41 @@ fn links_lists_the_loopback_address_with_its_index() {
         .expect("127.0.0.1 is listed");
     assert!(lo.index.is_some(), "{lo:?}");
     assert!(!lo.name.is_empty());
+}
+
+#[test]
+fn send_on_names_the_address_as_the_multicast_send_interface_again() {
+    let sock = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let s = socket2::SockRef::from(&sock);
+    // The option as a re-created interface leaves it (dstack #409): naming
+    // no interface the socket's sends can take.
+    s.set_multicast_if_v4(&Ipv4Addr::UNSPECIFIED).unwrap();
+    assert_eq!(s.multicast_if_v4().unwrap(), Ipv4Addr::UNSPECIFIED);
+    send_on(&sock, Ipv4Addr::LOCALHOST).unwrap();
+    assert_eq!(s.multicast_if_v4().unwrap(), Ipv4Addr::LOCALHOST);
+}
+
+#[test]
+fn the_default_lister_reads_the_os_list_every_two_seconds() {
+    let mut l = Lister::default();
+    assert_eq!(l.every, EVERY);
+    let all = (l.read)().unwrap();
+    assert!(all.iter().any(|x| x.ip == Ipv4Addr::LOCALHOST), "{all:?}");
+}
+
+#[test]
+fn a_lister_s_watch_reads_at_the_lister_s_period() {
+    let l = Lister {
+        read: Box::new(|| Ok(two_legs(26))),
+        every: Duration::from_millis(10),
+    };
+    let mut m = l.watch(OURS);
+    let t0 = Instant::now();
+    assert_eq!(m.poll(t0, || Ok(two_legs(26))), None);
+    let not_due = || -> io::Result<Vec<Link>> { panic!("read before its period") };
+    assert_eq!(m.poll(t0 + Duration::from_millis(9), not_due), None);
+    assert_eq!(
+        m.poll(t0 + Duration::from_millis(10), || Ok(two_legs(19))),
+        rejoin_of(Some(26), Some(19))
+    );
 }
