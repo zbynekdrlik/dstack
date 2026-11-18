@@ -20,6 +20,10 @@
 //!   logged once ("multicast group re-joined after an interface change");
 //!   a failed rejoin is logged and asked again at the next poll.
 //! - [`rejoin`]: leaves and joins a group again on the same socket.
+//! - [`send_on`]: names the address's interface again as a socket's
+//!   multicast send interface (dstack #409: Linux keeps the interface
+//!   index, which a re-created NIC no longer has); [`Lister`]: the list a
+//!   thread's watch reads, the OS's or a test's.
 //!
 //! Known limit: a change is seen only by a read that finds the address
 //! gone, or on another index. An address removed and added again on the
@@ -29,7 +33,7 @@
 //!
 //! Each socket owner keeps its own [`Membership`] and calls `keep` from its
 //! own loop (the mDNS responder, discovery, the latency listener, the
-//! daemon's tick for the RX flows). `host` re-exports it as
+//! daemon's tick for the RX flows, the directory's instance queries). `host` re-exports it as
 //! `host::Membership`.
 
 use std::fmt::Display;
@@ -203,6 +207,47 @@ impl Membership {
             }
         }
     }
+}
+
+/// The interface list a watch reads and how often (dstack #409): the OS's
+/// ([`links`]) every [`EVERY`] by default; a test's own list and period.
+pub struct Lister {
+    pub read: Box<dyn FnMut() -> io::Result<Vec<Link>> + Send>,
+    pub every: Duration,
+}
+
+impl Default for Lister {
+    fn default() -> Self {
+        Lister {
+            read: Box::new(links),
+            every: EVERY,
+        }
+    }
+}
+
+impl std::fmt::Debug for Lister {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Lister")
+            .field("every", &self.every)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Lister {
+    /// The watch of the address `ip`, read at this list's period.
+    pub fn watch(&self, ip: Ipv4Addr) -> Membership {
+        Membership::every(ip, self.every)
+    }
+}
+
+/// Names `ip`'s interface again as `sock`'s multicast SEND interface
+/// (`IP_MULTICAST_IF`, dstack #409). Linux keeps the interface INDEX the
+/// address had when the option was set, and routes every later multicast
+/// send by it: after the interface is destroyed and created again under a
+/// new index (a USB NIC's reset), each send fails with ENODEV until the
+/// option is set again, while unicast from the bound address works.
+pub fn send_on(sock: &UdpSocket, ip: Ipv4Addr) -> io::Result<()> {
+    socket2::SockRef::from(sock).set_multicast_if_v4(&ip)
 }
 
 /// Leaves the multicast `group` on `ip`'s interface and joins it again, on

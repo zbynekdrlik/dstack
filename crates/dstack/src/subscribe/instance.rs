@@ -31,6 +31,11 @@
 //! - [`Instances`]: the [`Resolver`] the network resolver asks after the
 //!   records and before ARC; its thread ([`Instances::start`]) sends the
 //!   queries and reads the answers, on one socket bound to our address.
+//!   For queries to mDNS's group it watches our address on the interface
+//!   list and names its interface again as the socket's multicast send
+//!   interface after a change (dstack #409: Linux keeps the interface
+//!   index, and a NIC re-created under a new one failed every query until
+//!   the app restarted).
 //!
 //! Logs carry counts only, never a name or an address.
 
@@ -47,6 +52,7 @@ use simple_dns::{CLASS, Name, Packet, QCLASS, QTYPE, Question, TYPE};
 use tracing::{debug, info, trace};
 
 use super::resolve::{Advertised, Resolver, instance, parse};
+use crate::membership::{Lister, Membership, send_on};
 
 /// A name not answered is asked again after this long, once the quick
 /// tries ([`QUICK_NS`]) are spent.
@@ -473,6 +479,9 @@ pub struct Instances {
     tried: bool,
     thread: Option<JoinHandle<()>>,
     clock: Clock,
+    /// The thread's socket, for a test to read its options.
+    #[cfg(test)]
+    sock: Option<UdpSocket>,
 }
 
 impl Instances {
@@ -490,6 +499,8 @@ impl Instances {
             tried: false,
             thread: None,
             clock: Clock::Real(Instant::now()),
+            #[cfg(test)]
+            sock: None,
         }
     }
 
@@ -525,21 +536,42 @@ impl Instances {
     /// [`Instances::start`] with the queries sent to `to` (mDNS's group, or
     /// a test's responder).
     pub fn start_to(&mut self, ip: Ipv4Addr, to: SocketAddrV4) -> io::Result<bool> {
+        self.start_watched(ip, to, Lister::default())
+    }
+
+    /// [`Instances::start_to`] with the interface list `lister` (dstack
+    /// #409): for queries to a multicast group, the thread watches our
+    /// address on it and names its interface again as the socket's
+    /// multicast send interface after a change (a NIC re-created under a
+    /// new index).
+    pub fn start_watched(
+        &mut self,
+        ip: Ipv4Addr,
+        to: SocketAddrV4,
+        lister: Lister,
+    ) -> io::Result<bool> {
         if self.started() {
             return Ok(false);
         }
         self.tried = true;
         let sock = UdpSocket::bind(SocketAddrV4::new(ip, 0))?;
         sock.set_read_timeout(Some(ROUND))?;
-        if to.ip().is_multicast() {
-            socket2::SockRef::from(&sock).set_multicast_if_v4(&ip)?;
+        let watch = if to.ip().is_multicast() {
+            send_on(&sock, ip)?;
+            Some(SendIf::new(ip, lister))
+        } else {
+            None
+        };
+        #[cfg(test)]
+        {
+            self.sock = Some(sock.try_clone()?);
         }
         let (table, stop) = (Arc::clone(&self.table), Arc::clone(&self.stop));
         let clock = self.clock.clone();
         self.thread = Some(
             std::thread::Builder::new()
                 .name("dstack-mdns-instance".to_string())
-                .spawn(move || run(&sock, to, &table, &stop, &clock))?,
+                .spawn(move || run(&sock, to, &table, &stop, &clock, watch))?,
         );
         Ok(true)
     }
@@ -556,6 +588,11 @@ impl Instances {
     /// The stop flag its thread reads.
     fn stop_flag(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.stop)
+    }
+
+    /// The running thread's socket (the same socket, another handle).
+    fn socket(&self) -> &UdpSocket {
+        self.sock.as_ref().expect("the thread started")
     }
 }
 
@@ -608,11 +645,52 @@ impl Resolver for Instances {
     }
 }
 
-/// The thread: the due queries every [`ROUND`], the answers in between.
-fn run(sock: &UdpSocket, to: SocketAddrV4, table: &Mutex<Table>, stop: &AtomicBool, clock: &Clock) {
+/// The watch of the queries' multicast send interface (dstack #409): our
+/// address on the interface list, and on a change (back after it was gone,
+/// or on a new index) its interface named again on the socket, logged once
+/// by [`Membership::keep`]; a failure is warned and tried at the next look.
+#[derive(Debug)]
+struct SendIf {
+    ip: Ipv4Addr,
+    membership: Membership,
+    lister: Lister,
+}
+
+impl SendIf {
+    fn new(ip: Ipv4Addr, lister: Lister) -> Self {
+        SendIf {
+            ip,
+            membership: lister.watch(ip),
+            lister,
+        }
+    }
+
+    /// A look when due; the interface named again on `sock` after a change.
+    fn keep(&mut self, sock: &UdpSocket, to: SocketAddrV4) {
+        let ip = self.ip;
+        self.membership
+            .keep(Instant::now(), &mut self.lister.read, to, || {
+                send_on(sock, ip)
+            });
+    }
+}
+
+/// The thread: the due queries every [`ROUND`], the answers in between;
+/// with `watch`, the send interface kept across an interface change first.
+fn run(
+    sock: &UdpSocket,
+    to: SocketAddrV4,
+    table: &Mutex<Table>,
+    stop: &AtomicBool,
+    clock: &Clock,
+    mut watch: Option<SendIf>,
+) {
     let mut id: u16 = 0;
     let mut buf = vec![0u8; 9000];
     while !stop.load(Ordering::Relaxed) {
+        if let Some(w) = watch.as_mut() {
+            w.keep(sock, to);
+        }
         let asks = lock(table).due(clock.now());
         for ask in asks {
             id = id.wrapping_add(1);
