@@ -118,9 +118,11 @@ impl Cause {
 /// of `target_us`: the driver's when a callback came over two periods
 /// late, or surely at least 3/4 of the target late: a bin whose lower edge
 /// is at least that (at 1.333 ms from 1.0 ms late, where #382's simulation
-/// first lost audio); the open top bin (2.0 ms up to one period late) is
-/// judged by the period, as late as its callbacks can be. Else the
-/// bridge's; unknown while the target is 0.
+/// first lost audio); the open top bin (2.0 ms or more behind the
+/// driver's schedule, #393) is judged by the period too, as late as one
+/// gap can make a callback (a lateness summed over several switches can
+/// pass it; the bins do not say by how much). Else the bridge's; unknown
+/// while the target is 0.
 pub fn from_asio_cause(rise: &UnderrunCounts, target_us: u64) -> Cause {
     if target_us == 0 {
         return Cause::Unknown;
@@ -155,7 +157,7 @@ fn lower_edge_us(bin: usize) -> u64 {
     (bin as u64 + 1) * LATE_BIN_US
 }
 
-/// The open top bin (2.0 ms late or more, up to two periods' gap).
+/// The open top bin (2.0 ms or more behind the driver's schedule).
 fn is_top(bin: usize) -> bool {
     bin + 1 == LATE_BINS
 }

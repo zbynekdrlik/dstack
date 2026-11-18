@@ -320,34 +320,51 @@ fn a_callback_gap_is_late_over_two_periods_and_fast_under_a_quarter() {
     assert_eq!(callback_gap_kind(333_333, dvs), GapKind::Fast);
 }
 
-/// Each lateness bin's edges, exact (dstack #386): a switch counts in bin
-/// `k` from `k + 1` quarter-ms late, under a quarter ms in none, and past
-/// two periods only as `late_callbacks` (no bin). A 4 ms period reaches
-/// every bin, the open top one too.
+/// Each lateness bin's edges, exact (dstack #386, #393): a switch counts
+/// in bin `k` from `k + 1` quarter-ms behind the driver's schedule, under
+/// a quarter ms in none; the top bin is open (a lag summed over several
+/// switches can pass two periods without one gap doing it).
 #[test]
 fn a_callback_counts_in_the_quarter_ms_bin_of_its_lateness() {
-    let p = 4_000_000;
-    assert_eq!(lateness_bin(p, p), None, "on time");
-    assert_eq!(lateness_bin(p - 300_000, p), None, "early");
-    assert_eq!(lateness_bin(0, p), None, "a catch-up burst");
-    assert_eq!(lateness_bin(p + 249_999, p), None, "jitter");
+    assert_eq!(lateness_bin(0), None, "on time");
+    assert_eq!(lateness_bin(-300_000), None, "early");
+    assert_eq!(lateness_bin(249_999), None, "jitter");
     for k in 0..LATE_BINS {
-        let low = p + (k as i64 + 1) * LATE_BIN_NS;
-        assert_eq!(lateness_bin(low, p), Some(k), "bin {k}'s lower edge");
-        assert_eq!(lateness_bin(low - 1, p), k.checked_sub(1), "under {k}");
-        assert_eq!(lateness_bin(low + LATE_BIN_NS - 1, p), Some(k), "{k} top");
+        let low = (k as i64 + 1) * LATE_BIN_NS;
+        assert_eq!(lateness_bin(low), Some(k), "bin {k}'s lower edge");
+        assert_eq!(lateness_bin(low - 1), k.checked_sub(1), "under {k}");
+        assert_eq!(lateness_bin(low + LATE_BIN_NS - 1), Some(k), "{k} top");
     }
-    // The top bin is open up to two periods, then the late count's.
-    assert_eq!(lateness_bin(p + 2_250_000, p), Some(7));
-    assert_eq!(lateness_bin(2 * p, p), Some(7), "exactly two periods");
-    assert_eq!(lateness_bin(2 * p + 1, p), None, "late_callbacks");
-    // 128 frames at 96 kHz (dsg): 1.333 ms late at most, in the 1.25 bin.
-    let dvs = frames_to_ns(128, 96_000.0);
-    assert_eq!(lateness_bin(dvs + 999_999, dvs), Some(2));
-    assert_eq!(lateness_bin(dvs + 1_000_000, dvs), Some(3), "1.0 ms late");
-    assert_eq!(lateness_bin(dvs + 1_250_000, dvs), Some(4));
-    assert_eq!(lateness_bin(2 * dvs, dvs), Some(4), "1.333 ms late");
-    assert_eq!(lateness_bin(2 * dvs + 1, dvs), None);
+    assert_eq!(lateness_bin(2_250_000), Some(7));
+    assert_eq!(lateness_bin(10_000_000), Some(7), "the top bin is open");
+}
+
+/// The driver's schedule line (dstack #393): a switch on time or early
+/// re-anchors it at the switch; a late one is `now - due` late, and the
+/// line creeps toward it by at most a thousandth of a period, so a slow
+/// driver clock's few ns a switch never sum up.
+#[test]
+fn a_switch_is_timed_against_the_drivers_schedule_line() {
+    let p = frames_to_ns(128, 96_000.0);
+    let line = 10_000_000;
+    let due = line + p;
+    assert_eq!(schedule_lag(due, line, p), (0, due), "on time");
+    assert_eq!(
+        schedule_lag(due - 300_000, line, p),
+        (0, due - 300_000),
+        "early"
+    );
+    assert_eq!(schedule_lag(due + 133, line, p), (133, due + 133), "drift");
+    assert_eq!(
+        schedule_lag(due + 1333, line, p),
+        (1333, due + 1333),
+        "the creep's edge"
+    );
+    assert_eq!(
+        schedule_lag(due + 600_000, line, p),
+        (600_000, due + p / 1000),
+        "late: the line creeps a thousandth of a period"
+    );
 }
 
 #[test]

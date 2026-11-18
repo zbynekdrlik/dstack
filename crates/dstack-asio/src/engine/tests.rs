@@ -182,12 +182,16 @@ fn each_callback_is_timed_against_the_period() {
     e.note_callback(15_999_999);
     assert_eq!(c.take_gap_max_ns(), 500_000);
     // Lateness bins (dstack #386): the switch exactly two periods apart
-    // was 1.0 ms late (bin 3); the late one counts only as late.
-    assert_eq!(c.late_bins(), [0, 0, 0, 1, 0, 0, 0, 0]);
+    // was 1.0 ms late (bin 3); the late one counts only as late. The one
+    // half a period after it is still 0.5 ms behind the driver's schedule
+    // (bin 0, #393): it did not catch up.
+    assert_eq!(c.late_bins(), [1, 0, 0, 1, 0, 0, 0, 0]);
 }
 
 /// Each switch's lateness goes to its own bin, counted per bin; under a
-/// quarter ms late and past two periods count in no bin (dstack #386).
+/// quarter ms late and a gap past two periods count in no bin (dstack
+/// #386). A catch-up switch right after each late one re-anchors the
+/// line, so each is late by exactly its own lateness (#393).
 #[test]
 fn each_callback_counts_in_its_lateness_bin() {
     // 96 frames at 48 kHz: a period of 2 ms.
@@ -201,10 +205,70 @@ fn each_callback_counts_in_its_lateness_bin() {
     ] {
         t += 2_000_000 + late;
         e.note_callback(t);
+        t += 1_000; // the catch-up switch: early, the line re-anchors
+        e.note_callback(t);
     }
     assert_eq!(c.late_bins(), [2, 0, 0, 1, 0, 0, 1, 1]);
     assert_eq!(c.late(), 1, "2 ms + 1 ns late: past two periods");
     let before = c.late_bins();
     e.note_callback(t + 2_000_000);
     assert_eq!(c.late_bins(), before, "on time");
+}
+
+/// Two switches late one after the other, with no early one between them
+/// to catch up, put the driver's writes their summed lateness behind its
+/// schedule: the second counts in the bin of that sum (dstack #393). dsg's
+/// MiniFuse (128 @ 96 kHz on 1 ms USB frames) read two 500-750 us
+/// switches for a write 1.2 ms behind, and its underrun line blamed the
+/// bridge.
+/// 64 frames at 48 kHz: dsg's 1.333 ms period.
+#[test]
+fn consecutive_late_switches_count_their_summed_lateness() {
+    let (p, _, _) = gain(None);
+    let e = Engine::new(p, &opened(64, 1, &[], &[]));
+    let c = e.counters();
+    let period = frames_to_ns(64, 48_000.0);
+    e.note_callback(0);
+    e.note_callback(period + 600_000);
+    e.note_callback(2 * period + 1_200_000);
+    assert_eq!(
+        c.late_bins(),
+        [0, 1, 0, 1, 0, 0, 0, 0],
+        "0.6 ms behind, then 1.2 ms behind"
+    );
+    assert_eq!(c.late(), 0);
+}
+
+/// A driver clock slower than the PC's builds no lag on its own (dstack
+/// #393): 500 000 switches on time at 100 ppm slow count in no bin.
+#[test]
+fn a_slow_driver_clock_counts_in_no_lateness_bin() {
+    let (p, _, _) = gain(None);
+    let e = Engine::new(p, &opened(64, 1, &[], &[]));
+    let c = e.counters();
+    let slow = frames_to_ns(64, 48_000.0) as f64 * 1.0001;
+    for k in 0..500_000_i64 {
+        e.note_callback((k as f64 * slow) as i64);
+    }
+    assert_eq!(c.late_bins(), [0; LATE_BINS]);
+}
+
+/// The schedule line's creep has a ceiling (dstack #393): 900 ppm slow
+/// still counts in no bin, 2000 ppm slow reads as a lag that grows (past
+/// the 1000 ppm a late switch can creep the line).
+#[test]
+fn a_driver_clock_past_the_creep_reads_as_a_growing_lag() {
+    let period = frames_to_ns(64, 48_000.0) as f64;
+    let run = |ppm: f64| {
+        let (p, _, _) = gain(None);
+        let e = Engine::new(p, &opened(64, 1, &[], &[]));
+        let slow = period * (1.0 + ppm * 1e-6);
+        for k in 0..20_000_i64 {
+            e.note_callback((k as f64 * slow) as i64);
+        }
+        e.counters().late_bins()
+    };
+    assert_eq!(run(900.0), [0; LATE_BINS]);
+    let fast_drift = run(2000.0);
+    assert!(fast_drift[LATE_BINS - 1] > 0, "{fast_drift:?}");
 }

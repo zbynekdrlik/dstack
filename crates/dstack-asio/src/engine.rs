@@ -26,7 +26,9 @@ use dstack_audio_io::{Block, Process};
 
 use crate::device::Opened;
 use crate::format::Sample;
-use crate::state::{GapKind, LATE_BINS, callback_gap_kind, frames_to_ns, lateness_bin};
+use crate::state::{
+    GapKind, LATE_BINS, callback_gap_kind, frames_to_ns, lateness_bin, schedule_lag,
+};
 
 /// A run's counts, written by its buffer switches and read by the worker.
 #[derive(Debug)]
@@ -38,6 +40,9 @@ pub struct Counters {
     fast: AtomicU64,
     /// Buffer switches per lateness bin ([`lateness_bin`], dstack #386).
     late_bins: [AtomicU64; LATE_BINS],
+    /// The driver's schedule line at the last switch ([`schedule_lag`],
+    /// dstack #393).
+    line_ns: AtomicI64,
     /// The driver's buffer period, ns.
     period_ns: i64,
     /// The last buffer switch, ns on the caller's clock ([`NO_CALLBACK`]
@@ -60,6 +65,7 @@ impl Counters {
             late: AtomicU64::new(0),
             fast: AtomicU64::new(0),
             late_bins: [const { AtomicU64::new(0) }; LATE_BINS],
+            line_ns: AtomicI64::new(NO_CALLBACK),
             period_ns,
             last_ns: AtomicI64::new(NO_CALLBACK),
             gap_max_ns: AtomicI64::new(0),
@@ -92,7 +98,8 @@ impl Counters {
     }
 
     /// Buffer switches per lateness bin so far ([`lateness_bin`]: 0.25 ms
-    /// bins up to two periods; later ones are [`Counters::late`]).
+    /// bins of how far behind the driver's schedule a switch came; a gap
+    /// over two periods is [`Counters::late`] only).
     pub fn late_bins(&self) -> [u64; LATE_BINS] {
         std::array::from_fn(|i| self.late_bins[i].load(Ordering::Relaxed))
     }
@@ -104,11 +111,15 @@ impl Counters {
     }
 
     /// A buffer switch at `now_ns`: the gap since the one before is kept as
-    /// the interval's max and counted by its kind and its lateness bin.
-    /// Atomics only.
+    /// the interval's max and counted by its kind, and the switch by how
+    /// far behind the driver's schedule it came ([`schedule_lag`], dstack
+    /// #393). A gap over two periods counts as late only and re-anchors the
+    /// schedule (its catch-up switches are not lateness). Atomics only; the
+    /// driver's switches are one writer.
     pub fn note_callback(&self, now_ns: i64) {
         let before = self.last_ns.swap(now_ns, Ordering::Relaxed);
         if before == NO_CALLBACK {
+            self.line_ns.store(now_ns, Ordering::Relaxed);
             return;
         }
         let gap = now_ns - before;
@@ -116,13 +127,18 @@ impl Counters {
         match callback_gap_kind(gap, self.period_ns) {
             GapKind::Late => {
                 self.late.fetch_add(1, Ordering::Relaxed);
+                self.line_ns.store(now_ns, Ordering::Relaxed);
+                return;
             }
             GapKind::Fast => {
                 self.fast.fetch_add(1, Ordering::Relaxed);
             }
             GapKind::Normal => {}
         }
-        if let Some(bin) = lateness_bin(gap, self.period_ns) {
+        let line = self.line_ns.load(Ordering::Relaxed);
+        let (late, line) = schedule_lag(now_ns, line, self.period_ns);
+        self.line_ns.store(line, Ordering::Relaxed);
+        if let Some(bin) = lateness_bin(late) {
             self.late_bins[bin].fetch_add(1, Ordering::Relaxed);
         }
     }
