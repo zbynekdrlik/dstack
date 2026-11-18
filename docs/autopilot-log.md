@@ -79,3 +79,4 @@ One line per ticket: issue, commits, tests (RED -> GREEN where a bug), decisions
 - 18.11 17:51 CET: v0.6.181 released (#409/#410/#403/#401/#396). v0.6.182 = #411 (TX flows' multicast send interface after a re-create, CI netns test) + networkd docs (#407).
 - 18.11 20:04 CET: v0.6.182 released (#411). v0.6.183 = #414 (direct socket index after a re-create, CI veth re-create test); follow-up #417 (Windows host frame sender).
 - 18.11 21:31 CET: v0.6.183 tagged (#414 direct socket, #417 Windows host sender, CI apt bound). v0.6.184 = #419 bridge figures v2 (dcontroller first, then dasio).
+- 18.11 23:01 CET: v0.6.184 released (#419 figures v2). v0.6.185 = #422 (bridge per-direction floor 0.5 ms, measured) + #420 (follower waiting line).
