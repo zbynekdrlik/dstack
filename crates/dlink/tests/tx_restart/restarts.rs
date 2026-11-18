@@ -19,6 +19,15 @@
 //! `tx_thread.oversleep_max_us` is a peak since the start and cannot tell
 //! which restart it was (dstack #370), so each line is read on its own.
 //!
+//! The bound is the latency the receiver plays the flow at: its own
+//! stated latency when longer than the sender's (dstack #426, run
+//! 44407677291 on windows-2025: a sleep 8.465 ms late restarted a schedule
+//! bound at the sender's 8.36 ms while the receiver played at 13.67 ms, 864
+//! off, read `RUNNER`). A window reads the receivers' stated latencies at
+//! its open; a line whose `max_lag` is under the longest of them is the
+//! stack's (the schedule gave up packets the receiver still plays), never
+//! the runner's, and the verdict names it.
+//!
 //! [`listen`] sets one global subscriber per test binary that records
 //! only that line (every other callsite is never enabled); a window
 //! [`open`]s on the sender's TX side and [`Opened::close`]s into
@@ -29,6 +38,7 @@
 use std::fmt::{self, Debug};
 use std::sync::{Mutex, MutexGuard, Once, PoisonError};
 
+use dstack::clock::latency_samples;
 use dstack::media::tx::{MAX_FLOWS, TxShared};
 use tracing::field::{Field, Visit};
 use tracing::span::{Attributes, Id, Record};
@@ -168,11 +178,22 @@ fn counted(tx: &TxShared) -> u64 {
     (0..MAX_FLOWS).map(|s| tx.lane(s).rebootstraps).sum()
 }
 
+/// The longest latency `tx`'s receivers state now, ns (0: none known).
+fn receiver_ns(tx: &TxShared) -> u64 {
+    tx.receiver_flows()
+        .iter()
+        .map(|&(slot, dest, _)| tx.receiver_latency_ns(slot, dest))
+        .max()
+        .unwrap_or(0)
+}
+
 /// A window open on a sender's TX side.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Opened {
     counted: u64,
     mark: usize,
+    /// The receivers' longest stated latency at the open, ns.
+    receiver_ns: u64,
 }
 
 /// Opens a window on `tx`, the sending device's TX side.
@@ -181,6 +202,7 @@ pub(crate) fn open(tx: &TxShared) -> Opened {
     Opened {
         counted: counted(tx),
         mark: lines().len(),
+        receiver_ns: receiver_ns(tx),
     }
 }
 
@@ -192,6 +214,7 @@ impl Opened {
             lines: tx_lines(lines().get(self.mark..).unwrap_or_default()),
             rate,
             oversleep_max_us: tx.tx_thread().oversleep_max_us,
+            receiver_lag: latency_samples(self.receiver_ns, rate),
         }
     }
 }
@@ -208,6 +231,10 @@ pub(crate) struct Restarts {
     /// The TX thread's largest oversleep since its start, µs (the status
     /// `tx_thread`; for the message only).
     pub(crate) oversleep_max_us: u64,
+    /// The receivers' longest stated latency at the window's open, samples
+    /// (0: none known): every restart's bound must be at least this
+    /// (dstack #426).
+    pub(crate) receiver_lag: u64,
 }
 
 impl Restarts {
@@ -219,11 +246,34 @@ impl Restarts {
     /// Whether every counted restart came with a line whose sleep
     /// returned the flow's latency late or more: the runner did not run
     /// the TX thread. A restart without such a line (a pass that ran long,
-    /// a re-anchor, or no restart at all) is not the runner's.
+    /// a re-anchor, or no restart at all), or one bound under the
+    /// receiver's latency ([`Restarts::under_receiver`]), is not the
+    /// runner's.
     pub(crate) fn runner(&self) -> bool {
         self.any()
             && self.lines.len() as u64 >= self.counted
+            && self.under_receiver() == 0
             && self.lines.iter().all(|r| r.slept_past(self.rate))
+    }
+
+    /// The restart lines bound under the receiver's latency (dstack #426):
+    /// the schedule gave up packets the receiver still plays, the stack's
+    /// loss whatever the sleep.
+    pub(crate) fn under_receiver(&self) -> usize {
+        self.lines
+            .iter()
+            .filter(|r| r.max_lag < self.receiver_lag)
+            .count()
+    }
+
+    /// What the verdict names when the restarts are the stack's own
+    /// (`OURS`): restarts bound under the receiver's latency, else nothing.
+    pub(crate) fn ours(&self) -> &'static str {
+        if self.under_receiver() > 0 {
+            " (a TX restart bound under the receiver's latency)"
+        } else {
+            ""
+        }
     }
 
     /// Whether the restarts are the runner's ([`Restarts::runner`]) and
@@ -262,6 +312,7 @@ pub(crate) fn fixture(counted: u64, oversleeps: &[Option<u64>]) -> Restarts {
             .collect(),
         rate: 48_000,
         oversleep_max_us: 0,
+        receiver_lag: 0,
     }
 }
 
@@ -277,8 +328,13 @@ impl Debug for Restarts {
             .collect();
         write!(
             f,
-            "{} TX restarts at {} Hz, lines {lines:?}, tx_thread.oversleep_max_us {}",
-            self.counted, self.rate, self.oversleep_max_us
+            "{} TX restarts at {} Hz, lines {lines:?}, tx_thread.oversleep_max_us {}, \
+             the receiver's latency {} samples ({} lines bound under it)",
+            self.counted,
+            self.rate,
+            self.oversleep_max_us,
+            self.receiver_lag,
+            self.under_receiver()
         )
     }
 }
@@ -330,6 +386,46 @@ mod restarts_tests {
             ..line(Some(20_000))
         };
         assert!(!within.slept_past(48_000));
+    }
+
+    /// dstack #426 (run 44407677291): a restart whose bound is under the
+    /// receiver's latency is the stack's, however late its sleep; at the
+    /// receiver's latency or with none known, the sleep decides.
+    #[test]
+    fn a_restart_bound_under_the_receiver_s_latency_is_never_the_runner_s() {
+        let mut r = fixture(1, &[Some(9_282)]);
+        assert!(r.runner(), "no receiver latency known");
+        assert_eq!((r.under_receiver(), r.ours()), (0, ""));
+        r.receiver_lag = 432;
+        assert!(r.runner(), "bound at the receiver's latency");
+        r.receiver_lag = 433;
+        assert!(!r.runner(), "bound one sample under it");
+        assert!(!r.explain(1));
+        assert_eq!(r.under_receiver(), 1);
+        assert_eq!(
+            r.ours(),
+            " (a TX restart bound under the receiver's latency)"
+        );
+        // The run's own line: lag 812, bound 803 at 96 kHz, a sleep 8465 us
+        // late, the receiver at 13666 us (1312 samples).
+        let run = Restarts {
+            counted: 1,
+            lines: vec![Restart {
+                lag: 812,
+                max_lag: 803,
+                oversleep_us: Some(8_465),
+            }],
+            rate: 96_000,
+            oversleep_max_us: 8_465,
+            receiver_lag: latency_samples(13_666_000, 96_000),
+        };
+        assert!(run.lines[0].slept_past(96_000), "the sleep alone");
+        assert!(!run.runner(), "{run:?}");
+        assert!(
+            format!("{run:?}")
+                .contains("the receiver's latency 1312 samples (1 lines bound under it)"),
+            "{run:?}"
+        );
     }
 
     #[test]
