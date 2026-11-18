@@ -2,7 +2,8 @@
 // Copyright (C) 2026 dstack contributors.
 
 //! A running device asked for its bridge figures over the info port, as
-//! dcontroller asks a dasio bridge device (dstack #391): with figures the
+//! dcontroller asks a dasio bridge device (dstack #391, version 2 since
+//! #419: the through-latency and the driver's name): with figures the
 //! reply comes back to the asking socket and reads with the strict walker
 //! (`conformance/bridge_figures.rs`) and with the client; a device that
 //! holds none never answers.
@@ -98,6 +99,10 @@ fn ask_device(
         media
             .bridge_figures()
             .set_underruns(5, 3, UnderrunCause::Bridge, UnderrunCause::Driver);
+        media.bridge_figures().set_path(5333, 4667);
+        media
+            .bridge_figures()
+            .set_driver("ASIO Fireface USB \u{2014} test");
     }
     let stop = Arc::new(AtomicBool::new(false));
     let host = prepared
@@ -164,9 +169,13 @@ fn a_running_bridge_device_answers_its_figures_to_the_asker() {
         ("late_callbacks", 7),
         ("late_250us", 1),
         ("late_2000us", 15),
+        ("asio_to_dante_us", 5333),
+        ("dante_to_asio_us", 4667),
+        ("driver_len", 26),
     ] {
         assert_eq!(first.get(key), want, "{key}");
     }
+    assert_eq!(first.driver, "ASIO Fireface USB \u{2014} test");
     // Read at each request: a later reply has the source's new value, each
     // its own sequence (from 1), all the same run.
     let last = replies.last().unwrap();
@@ -183,6 +192,11 @@ fn a_running_bridge_device_answers_its_figures_to_the_asker() {
     );
     assert_eq!((f.to_asio_underruns, f.from_asio_underruns), (5, 3));
     assert_eq!(f.late_bins, [1, 3, 5, 7, 9, 11, 13, 15]);
+    assert_eq!(
+        (f.asio_to_dante_us, f.dante_to_asio_us),
+        (Some(5333), Some(4667))
+    );
+    assert_eq!(f.driver.as_deref(), Some("ASIO Fireface USB \u{2014} test"));
     assert!(f.sequence > last.get("sequence") as u32, "{f:?}");
 }
 

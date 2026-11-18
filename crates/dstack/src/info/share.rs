@@ -178,10 +178,15 @@ pub fn is_unicast(to: &SocketAddrV4) -> bool {
 }
 
 /// Whether `packet` is a bridge-figures reply ([`super::bridge`]): its
-/// length and its opcode. A member's [`Msg::SendTo`] carries nothing else.
+/// length (a version 2 body, or a version 1 body from a member older than
+/// dstack #419) and its opcode. A member's [`Msg::SendTo`] carries nothing
+/// else.
 pub fn is_bridge_reply(packet: &[u8]) -> bool {
-    packet.len() == super::HEADER_LEN + super::bridge::FIGURES_LEN
-        && packet[24..32] == super::bridge::REPLY_OPCODE
+    let body = packet.len().checked_sub(super::HEADER_LEN);
+    matches!(
+        body,
+        Some(super::bridge::FIGURES_LEN | super::bridge::FIGURES_LEN_V2)
+    ) && packet[24..32] == super::bridge::REPLY_OPCODE
 }
 
 /// The manager's members, by their loopback address.
