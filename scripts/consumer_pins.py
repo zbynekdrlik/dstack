@@ -19,8 +19,11 @@ from typing import Callable, Optional
 
 TITLE = "Weekly consumer version sync"
 
-# A dstack git source in a Cargo.lock: `git+https://github.com/<owner>/dstack?tag=v0.6.178#<sha>`.
-SOURCE = re.compile(r'git\+https://github\.com/[^/"]+/dstack\?tag=v(\d+)\.(\d+)\.(\d+)#')
+# A dstack git source in a Cargo.lock: `git+https://github.com/<owner>/dstack?tag=v0.6.178#<sha>`
+# (`dstack.git` too).
+SOURCE = re.compile(r'git\+https://github\.com/[^/"]+/dstack(?:\.git)?\?tag=v(\d+)\.(\d+)\.(\d+)#')
+# A dstack git source pinned by a commit or a branch instead of a tag.
+UNTAGGED = re.compile(r'git\+https://github\.com/[^/"]+/dstack(?:\.git)?\?(?:rev|branch)=')
 
 Version = tuple[int, int, int]
 
@@ -45,18 +48,28 @@ def pin_of(lock: str) -> Optional[Version]:
     return min(found) if found else None
 
 
-def collect(consumers: list[dict], fetch: Callable[[str, str], str]) -> list[tuple[str, Optional[Version]]]:
-    """Each consumer's name and pin, `fetch(repo, path)` giving the lock's text."""
-    return [(c["name"], pin_of(fetch(c["name"], c["lock"]))) for c in consumers]
+def untagged(lock: str) -> bool:
+    """The lock takes dstack by a commit or a branch, not a tag."""
+    return UNTAGGED.search(lock) is not None
 
 
-def lagging(rows: list[tuple[str, Optional[Version]]], latest: Version) -> list[str]:
-    """The consumers behind `latest` (no dstack pin found counts: the read
-    or the consumer's lock changed and needs a look)."""
-    return [name for name, pin in rows if pin is None or pin < latest]
+def collect(consumers: list[dict], fetch: Callable[[str, str], str]) -> list[tuple[str, Optional[Version], bool]]:
+    """Each consumer's name, its pin and whether it takes dstack untagged,
+    `fetch(repo, path)` giving the lock's text."""
+    rows = []
+    for c in consumers:
+        lock = fetch(c["name"], c["lock"])
+        rows.append((c["name"], pin_of(lock), untagged(lock)))
+    return rows
 
 
-def render(rows: list[tuple[str, Optional[Version]]], latest: Version, date: str) -> str:
+def lagging(rows: list[tuple[str, Optional[Version], bool]], latest: Version) -> list[str]:
+    """The consumers behind `latest` (no dstack tag found counts: an untagged
+    pin or a changed lock needs a look)."""
+    return [name for name, pin, _ in rows if pin is None or pin < latest]
+
+
+def render(rows: list[tuple[str, Optional[Version], bool]], latest: Version, date: str) -> str:
     """The sync issue's body."""
     behind = lagging(rows, latest)
     lines = [
@@ -66,8 +79,10 @@ def render(rows: list[tuple[str, Optional[Version]]], latest: Version, date: str
         "| Consumer | Pin | |",
         "|---|---|---|",
     ]
-    for name, pin in rows:
-        if pin is None:
+    for name, pin, by_rev in rows:
+        if pin is None and by_rev:
+            lines.append(f"| {name} | a commit or branch, no tag | move it to a tag |")
+        elif pin is None:
             lines.append(f"| {name} | no dstack tag found | read its lock |")
         elif pin < latest:
             lines.append(f"| {name} | {show(pin)} | behind |")
@@ -110,8 +125,8 @@ def main() -> None:
     with open(a.out, "w", encoding="utf-8") as f:
         f.write(body)
     behind = lagging(rows, latest)
-    for name, pin in rows:
-        print(f"{name}: {show(pin) if pin else 'no dstack tag'}")
+    for name, pin, by_rev in rows:
+        print(f"{name}: {show(pin) if pin else ('untagged' if by_rev else 'no dstack tag')}")
     print(f"{len(behind)} behind {show(latest)}")
     if a.github_output:
         with open(a.github_output, "a", encoding="utf-8") as f:

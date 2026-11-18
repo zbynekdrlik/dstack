@@ -36,6 +36,15 @@ class PinOf(unittest.TestCase):
         lock = 'source = "git+https://github.com/zbynekdrlik/intercom?tag=v1.9.23#abc"\n'
         self.assertIsNone(cp.pin_of(lock))
 
+    def test_a_dstack_git_url_is_read_too(self):
+        lock = 'source = "git+https://github.com/zbynekdrlik/dstack.git?tag=v0.6.150#abc"\n'
+        self.assertEqual(cp.pin_of(lock), (0, 6, 150))
+
+    def test_a_rev_or_branch_pin_is_untagged(self):
+        self.assertTrue(cp.untagged('source = "git+https://github.com/zbynekdrlik/dstack?rev=abc#abc"\n'))
+        self.assertTrue(cp.untagged('source = "git+https://github.com/zbynekdrlik/dstack.git?branch=dev#abc"\n'))
+        self.assertFalse(cp.untagged(LOCK))
+
     def test_versions_compare_as_numbers(self):
         lock = (
             'source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.99#abc"\n'
@@ -65,8 +74,10 @@ class Sync(unittest.TestCase):
             "intercom": LOCK,
             "dasio": 'source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.178#abc"\n',
             "odd": "no dstack here\n",
+            "rev": 'source = "git+https://github.com/zbynekdrlik/dstack?rev=abc#abc"\n',
         }
-        consumers = [{"name": n, "lock": "Cargo.lock"} for n in ("intercom", "dasio", "odd")]
+        names = ("intercom", "dasio", "odd", "rev")
+        consumers = [{"name": n, "lock": "Cargo.lock"} for n in names]
         seen = []
 
         def fetch(repo, path):
@@ -74,25 +85,28 @@ class Sync(unittest.TestCase):
             return locks[repo]
 
         rows = cp.collect(consumers, fetch)
-        self.assertEqual(seen, [(n, "Cargo.lock") for n in ("intercom", "dasio", "odd")])
+        self.assertEqual(seen, [(n, "Cargo.lock") for n in names])
         return rows
 
     def test_collect_reads_each_consumers_lock(self):
         self.assertEqual(
-            self.rows(), [("intercom", (0, 6, 118)), ("dasio", (0, 6, 178)), ("odd", None)]
+            self.rows(),
+            [("intercom", (0, 6, 118), False), ("dasio", (0, 6, 178), False),
+             ("odd", None, False), ("rev", None, True)],
         )
 
     def test_behind_and_unread_consumers_lag_a_current_one_not(self):
-        self.assertEqual(cp.lagging(self.rows(), self.LATEST), ["intercom", "odd"])
-        self.assertEqual(cp.lagging([("x", (0, 6, 179))], self.LATEST), [])
+        self.assertEqual(cp.lagging(self.rows(), self.LATEST), ["intercom", "odd", "rev"])
+        self.assertEqual(cp.lagging([("x", (0, 6, 179), False)], self.LATEST), [])
 
     def test_the_body_lists_every_consumer_and_a_line_per_lagging_one(self):
         body = cp.render(self.rows(), self.LATEST, "2026-11-25")
         self.assertIn("Wednesday read 2026-11-25: the latest dstack release is v0.6.178; "
-                      "2 of 3 consumers are behind it", body)
+                      "3 of 4 consumers are behind it", body)
         self.assertIn("| intercom | v0.6.118 | behind |", body)
         self.assertIn("| dasio | v0.6.178 | current |", body)
         self.assertIn("| odd | no dstack tag found | read its lock |", body)
+        self.assertIn("| rev | a commit or branch, no tag | move it to a tag |", body)
         self.assertIn("- [ ] intercom on v0.6.178", body)
         self.assertIn("- [ ] odd on v0.6.178", body)
         self.assertNotIn("- [ ] dasio", body)
