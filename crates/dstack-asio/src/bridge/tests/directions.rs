@@ -50,10 +50,11 @@ fn each_direction_takes_its_own_target() {
     assert!((b.from_asio_stats().target_ms() - 2.0).abs() < 1e-9);
 }
 
-/// A direction's target out of range refuses the open with its reason.
+/// A direction's target out of range refuses the bridge with its reason:
+/// since dstack #422 at `Bridge::new`, before any open (it refused the
+/// open before; `floor.rs` has the floor's edges).
 #[test]
-fn a_direction_s_target_out_of_range_refuses_the_open() {
-    let at = opened(96_000.0, 128);
+fn a_direction_s_target_out_of_range_refuses_the_bridge() {
     for to in [true, false] {
         let mut s = spec(1, 1);
         if to {
@@ -61,14 +62,16 @@ fn a_direction_s_target_out_of_range_refuses_the_open() {
         } else {
             s.from_asio_app_buffer_ns = Some(400_000_000);
         }
-        let mut b = bridge(s);
-        let problem = if to {
-            b.to_asio_app_buffer(&at).problem()
+        let key = if to {
+            "to_asio_app_buffer_ns"
         } else {
-            b.from_asio_app_buffer(&at).problem()
+            "from_asio_app_buffer_ns"
         };
-        assert!(problem.is_some(), "{to}");
-        assert_eq!(b.asio_side(&at).err(), problem, "{to}");
+        assert_eq!(
+            Bridge::new(s).err().as_deref(),
+            Some(format!("{key}: 400000000 ns (400 ms); 0.5 to 150 ms").as_str()),
+            "{to}"
+        );
     }
 }
 

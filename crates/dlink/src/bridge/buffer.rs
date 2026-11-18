@@ -19,9 +19,12 @@
 
 use crate::latency::ms;
 
-/// The least target the device takes, ns. It is a sanity bound, not a
-/// working value: a target only holds when it covers half the app's chunk
-/// and a block ([`AppBuffer::short`], warned at the start).
+/// The least target a dlink app's device takes, ns, and every
+/// [`AppBuffer`]'s floor unless its user sets its own
+/// ([`AppBuffer::with_floor`]: dstack-asio's per-direction bridge targets,
+/// dstack #422). It is a sanity bound, not a working value: a target only
+/// holds when it covers half the app's chunk and a block
+/// ([`AppBuffer::short`], warned at the start).
 pub const MIN_APP_BUFFER_NS: u64 = 1_000_000;
 /// The largest target, ns: the player re-centres an excess of twice the
 /// target ([`super::player::hard_excess_s`]), so three targets must fit in
@@ -38,12 +41,14 @@ pub fn chunk_ns(frames: u64, rate: u32) -> u64 {
 }
 
 /// The bridge FIFO's target of one device (module doc): the app's chunk,
-/// the pump's block and the value the app configured, if any.
+/// the pump's block, the value the app configured, if any, and the least
+/// target taken ([`AppBuffer::floor_ns`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AppBuffer {
     chunk_ns: u64,
     block_ns: u64,
     set_ns: Option<u64>,
+    floor_ns: u64,
 }
 
 impl AppBuffer {
@@ -54,7 +59,27 @@ impl AppBuffer {
             chunk_ns,
             block_ns,
             set_ns: None,
+            floor_ns: MIN_APP_BUFFER_NS,
         }
+    }
+
+    /// With the least target its user takes, ns (dstack #422; the default
+    /// is [`MIN_APP_BUFFER_NS`], every dlink app's): a bridge whose floor was
+    /// measured for its own shape (dstack-asio's per-direction targets,
+    /// `MIN_BRIDGE_TARGET_NS`). [`AppBuffer::problem`] and the clamp
+    /// ([`AppBuffer::clamped_ns`]) follow it; a floor over
+    /// [`MAX_APP_BUFFER_NS`] counts as that.
+    #[must_use]
+    pub fn with_floor(self, floor_ns: u64) -> Self {
+        AppBuffer {
+            floor_ns: floor_ns.min(MAX_APP_BUFFER_NS),
+            ..self
+        }
+    }
+
+    /// The least target taken, ns ([`AppBuffer::with_floor`]).
+    pub fn floor_ns(&self) -> u64 {
+        self.floor_ns
     }
 
     /// With the value the app configured (`None`: the default). It is the
@@ -90,17 +115,18 @@ impl AppBuffer {
         self.set_ns.unwrap_or_else(|| self.default_ns())
     }
 
-    /// The target, s, within [`MIN_APP_BUFFER_NS`] to [`MAX_APP_BUFFER_NS`]
-    /// (a target the device refused never reaches a player; this only
-    /// keeps a direct caller's out-of-range value from breaking the FIFO).
+    /// The target, s, within [`AppBuffer::floor_ns`] to
+    /// [`MAX_APP_BUFFER_NS`] (a target the device refused never reaches a
+    /// player; this only keeps a direct caller's out-of-range value from
+    /// breaking the FIFO).
     pub fn target_s(&self) -> f64 {
         self.clamped_ns() as f64 / 1e9
     }
 
-    /// The target, ns, within [`MIN_APP_BUFFER_NS`] to [`MAX_APP_BUFFER_NS`]
-    /// (what a player keeps, [`AppBuffer::target_s`]).
+    /// The target, ns, within [`AppBuffer::floor_ns`] to
+    /// [`MAX_APP_BUFFER_NS`] (what a player keeps, [`AppBuffer::target_s`]).
     pub fn clamped_ns(&self) -> u64 {
-        self.target_ns().clamp(MIN_APP_BUFFER_NS, MAX_APP_BUFFER_NS)
+        self.target_ns().clamp(self.floor_ns, MAX_APP_BUFFER_NS)
     }
 
     /// The chunk, s.
@@ -128,16 +154,23 @@ impl AppBuffer {
     }
 
     /// Why the target cannot be used, if it cannot: outside
-    /// [`MIN_APP_BUFFER_NS`] to [`MAX_APP_BUFFER_NS`].
+    /// [`AppBuffer::floor_ns`] to [`MAX_APP_BUFFER_NS`]
+    /// (`app_buffer_ns: 999999 ns (0.999999 ms); 1 to 150 ms`).
     pub fn problem(&self) -> Option<String> {
+        self.problem_for("app_buffer_ns")
+    }
+
+    /// [`AppBuffer::problem`] named for the setting `key` that gave the
+    /// target (dstack-asio's `to_asio_app_buffer_ns`, dstack #422).
+    pub fn problem_for(&self, key: &str) -> Option<String> {
         let t = self.target_ns();
-        if (MIN_APP_BUFFER_NS..=MAX_APP_BUFFER_NS).contains(&t) {
+        if (self.floor_ns..=MAX_APP_BUFFER_NS).contains(&t) {
             return None;
         }
         Some(format!(
-            "app_buffer_ns: {t} ns ({} ms); {} to {} ms",
+            "{key}: {t} ns ({} ms); {} to {} ms",
             ms(t),
-            ms(MIN_APP_BUFFER_NS),
+            ms(self.floor_ns),
             ms(MAX_APP_BUFFER_NS)
         ))
     }
@@ -225,6 +258,41 @@ mod tests {
         assert!(big.problem().is_some());
         assert!((big.target_s() - 0.150).abs() < 1e-12);
         assert!((b.set(Some(0)).target_s() - 0.001).abs() < 1e-12);
+    }
+
+    /// dstack #422: a floor its user sets moves the range, the clamp and
+    /// the text; every buffer made without one keeps dlink's 1 ms, and a
+    /// floor past the largest target counts as that.
+    #[test]
+    fn a_floor_its_user_sets_moves_the_range_and_the_clamp() {
+        let b = AppBuffer::new(10_000_000, 1_333_333);
+        assert_eq!(b.floor_ns(), MIN_APP_BUFFER_NS);
+        assert_eq!(b.with_floor(MIN_APP_BUFFER_NS), b);
+        let low = b.with_floor(400_000);
+        assert_eq!(low.floor_ns(), 400_000);
+        assert_eq!(low.set(Some(400_000)).problem(), None);
+        assert_eq!(low.set(Some(MAX_APP_BUFFER_NS)).problem(), None);
+        assert_eq!(
+            low.set(Some(399_999)).problem().as_deref(),
+            Some("app_buffer_ns: 399999 ns (0.399999 ms); 0.4 to 150 ms")
+        );
+        assert_eq!(
+            low.set(Some(MAX_APP_BUFFER_NS + 1))
+                .problem_for("to_asio_app_buffer_ns")
+                .as_deref(),
+            Some("to_asio_app_buffer_ns: 150000001 ns (150.000001 ms); 0.4 to 150 ms")
+        );
+        assert_eq!(low.set(Some(500_000)).clamped_ns(), 500_000);
+        assert!((low.set(Some(500_000)).target_s() - 0.0005).abs() < 1e-15);
+        assert_eq!(low.set(Some(0)).clamped_ns(), 400_000);
+        // The same target without the floor is clamped up to dlink's.
+        assert_eq!(b.set(Some(500_000)).clamped_ns(), MIN_APP_BUFFER_NS);
+        assert!(b.set(Some(500_000)).problem().is_some());
+        let over = b.with_floor(u64::MAX);
+        assert_eq!(over.floor_ns(), MAX_APP_BUFFER_NS);
+        assert_eq!(over.set(Some(0)).clamped_ns(), MAX_APP_BUFFER_NS);
+        assert_eq!(over.set(Some(MAX_APP_BUFFER_NS)).problem(), None);
+        assert_eq!(b.with_floor(0).set(Some(0)).problem(), None);
     }
 
     /// A set target under half the chunk plus a block is warned at the

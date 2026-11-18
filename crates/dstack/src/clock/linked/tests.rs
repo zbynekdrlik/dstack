@@ -4,6 +4,7 @@ use super::*;
 
 mod rounds;
 use rounds::{AGREE_NS, DRIFT_NS, on_time};
+mod waiting;
 
 const ALIVE_LOCKED: View = View {
     alive: true,
@@ -193,6 +194,8 @@ impl Follow for Arc<Fake> {
             offset_ns: Some(-39_806),
             recent_abs_e_ns: None,
             pull_ns: 0,
+            grandmaster: None,
+            waiting: None,
         }
     }
 }
@@ -681,7 +684,9 @@ fn the_pump_absorbs_a_handover_step_at_its_tightest_schedule() {
     }
 }
 
-/// The follower's counts, for the status (v0.6.31); none without one.
+/// The follower's counts, for the status (v0.6.31), with why the last
+/// round did not use it (dstack #420: there its thread was not alive); none
+/// without one.
 #[test]
 fn the_linked_clock_reads_the_follower_s_counts() {
     let (fake, _service, linked) = linked_on_service();
@@ -701,6 +706,8 @@ fn the_linked_clock_reads_the_follower_s_counts() {
             offset_ns: Some(-39_806),
             recent_abs_e_ns: None,
             pull_ns: 0,
+            grandmaster: None,
+            waiting: Some(Waiting::Stopped),
         })
     );
     let service = Arc::new(MonoClock::new());

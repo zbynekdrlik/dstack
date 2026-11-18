@@ -32,7 +32,7 @@ use toml_edit::{Array, DocumentMut, Item, Value as TomlValue};
 
 use super::{set_opt, set_value};
 
-use dlink::bridge::AppBuffer;
+use dlink::bridge::{AppBuffer, MIN_APP_BUFFER_NS};
 
 /// The device config's table that makes an instance a bridge.
 pub const KEY: &str = "bridge";
@@ -99,6 +99,12 @@ pub const CONVERTER_TAPS: &str = "Converter length";
 /// pins the two equal).
 pub const MIN_CONVERTER_TAPS: u32 = 32;
 
+/// The least per-direction target dasio's bridge takes, ns: dstack-asio's
+/// `MIN_BRIDGE_TARGET_NS` (dstack #422; that crate builds on Windows only,
+/// a Windows test pins the two equal). The shared `app_buffer_ns` keeps
+/// dlink's `MIN_APP_BUFFER_NS`.
+pub const MIN_BRIDGE_TARGET_NS: u64 = 500_000;
+
 /// Why a converter length cannot be used (dstack-asio's check: 32 up to
 /// [`dstack_resample::TAPS`] in steps of [`dstack_resample::TAPS_STEP`]).
 pub fn taps_problem(taps: u32) -> Option<String> {
@@ -137,14 +143,34 @@ impl Bridge {
             out.push("the bridge carries no channel".to_string());
         }
         // dlink's own check and text (the range the bridge's FIFO takes);
-        // unset is dstack's default, always in range.
-        for (label, target) in [
-            (APP_BUFFER, self.app_buffer_ns),
-            (TO_ASIO_BUFFER, self.to_asio_app_buffer_ns),
-            (FROM_ASIO_BUFFER, self.from_asio_app_buffer_ns),
+        // unset is dstack's default, always in range. A direction's own
+        // target takes the bridge's floor (dstack-asio's
+        // `direction_target_problem`, dstack #422), the shared one dlink's.
+        for (label, key, floor, target) in [
+            (
+                APP_BUFFER,
+                "app_buffer_ns",
+                MIN_APP_BUFFER_NS,
+                self.app_buffer_ns,
+            ),
+            (
+                TO_ASIO_BUFFER,
+                "to_asio_app_buffer_ns",
+                MIN_BRIDGE_TARGET_NS,
+                self.to_asio_app_buffer_ns,
+            ),
+            (
+                FROM_ASIO_BUFFER,
+                "from_asio_app_buffer_ns",
+                MIN_BRIDGE_TARGET_NS,
+                self.from_asio_app_buffer_ns,
+            ),
         ] {
             if let Some(ns) = target
-                && let Some(problem) = AppBuffer::new(0, 0).set(Some(ns)).problem()
+                && let Some(problem) = AppBuffer::new(0, 0)
+                    .set(Some(ns))
+                    .with_floor(floor)
+                    .problem_for(key)
             {
                 out.push(format!("{label}: {problem}"));
             }
