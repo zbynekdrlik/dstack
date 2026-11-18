@@ -195,10 +195,24 @@ impl Membership {
         what: impl Display,
         act: impl FnOnce() -> io::Result<()>,
     ) -> bool {
+        self.keep_with(now, read, says, what, |_| act())
+    }
+
+    /// [`Membership::keep_as`] whose act gets the change it follows: the
+    /// interface's new index from the list just read (dstack #417: the
+    /// host frame sender's NIC moves to it).
+    pub fn keep_with(
+        &mut self,
+        now: Instant,
+        read: impl FnOnce() -> io::Result<Vec<Link>>,
+        says: Says,
+        what: impl Display,
+        act: impl FnOnce(&Rejoin) -> io::Result<()>,
+    ) -> bool {
         let Some(r) = self.poll(now, read) else {
             return false;
         };
-        match act() {
+        match act(&r) {
             Ok(()) => {
                 info!(
                     interface = %r.interface,
