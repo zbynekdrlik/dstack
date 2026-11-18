@@ -101,6 +101,25 @@ jobs:
       - name: Two peers on a dummy interface hear each other whole
         run: sudo bash tools/linux/tests/ci-peer.test.sh target/release/dstack-dev
 
+  recreate:
+    # dstack #411 (#409's whole-device proof): two `dstack-dev peer` devices
+    # on a dummy interface in a private network namespace, one receiving the
+    # other's multicast flow and the other a unicast flow; the interface is
+    # deleted and added again (a new index, as a USB NIC's reset) and each
+    # must hear the other again within a bound, without a restart.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: The test's reads, their own tests
+        run: python3 -m unittest tools/linux/tests/recreate_gate_test.py
+      - run: cargo build --release --locked -p dstack --bin dstack-dev
+      - name: An interface re-created under two peers, both hear each other again
+        run: sudo bash tools/linux/tests/recreate.test.sh target/release/dstack-dev
+
   dsend-audio-driver:
     # dsend's own Windows render endpoint (drivers/dsend-audio, MS-PL; dstack
     # #184), built like dasio's NDIS filter: NuGet WDK, 64-bit MSBuild, the

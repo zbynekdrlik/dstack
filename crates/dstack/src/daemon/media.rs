@@ -609,6 +609,13 @@ pub struct Driver {
     /// Our address's interface, for the RX multicast flows' groups: joined
     /// again after a change (dstack #282).
     membership: crate::membership::Membership,
+    /// Our address's interface, for the TX flow sockets' multicast send
+    /// interface: named again after a change (dstack #411). A watch of its
+    /// own, so a failure of one act never asks the other again.
+    send_if: crate::membership::Membership,
+    /// The interface list both watches read ([`crate::membership::links`]
+    /// every [`crate::membership::EVERY`]; tests: their own).
+    lister: crate::membership::Lister,
 }
 
 impl Driver {
@@ -617,7 +624,9 @@ impl Driver {
     /// answers come back.
     pub fn new(media: Arc<Media>, client: Client, changes: Arc<Changes>) -> (Driver, Answers) {
         let (answers, back) = mpsc::unbounded_channel();
-        let membership = crate::membership::Membership::new(media.ip);
+        let lister = crate::membership::Lister::default();
+        let membership = lister.watch(media.ip);
+        let send_if = lister.watch(media.ip);
         (
             Driver {
                 media,
@@ -642,6 +651,8 @@ impl Driver {
                 pins: crate::media::repin::PinWatch::new(),
                 names: HashMap::new(),
                 membership,
+                send_if,
+                lister,
             },
             back,
         )
@@ -650,8 +661,9 @@ impl Driver {
     /// One round of the manager now, with the channel records `resolver`
     /// knows; then the checks' round and the late, loss, RX minute, send,
     /// host, pump, TX pull, traffic and pin watches, the traffic recorder and its
-    /// dump at a refusal (dstack #195), and the interface watch that joins
-    /// the RX multicast flows' groups again after a change (dstack #282).
+    /// dump at a refusal (dstack #195), and the interface watches that join
+    /// the RX multicast flows' groups again after a change (dstack #282)
+    /// and name the TX flow sockets' multicast send interface again (#411).
     pub fn tick(&mut self, resolver: &dyn Resolver) {
         let now = self.media.rx.now_ns();
         let packets = self.media.rx.packets();
@@ -694,13 +706,30 @@ impl Driver {
         }
         self.membership.keep(
             std::time::Instant::now(),
-            crate::membership::links,
+            &mut self.lister.read,
             "every RX multicast flow (joined by the RX thread)",
             || {
                 rx.rejoin_groups();
                 Ok(())
             },
         );
+        // Linux keeps IP_MULTICAST_IF as the interface's index: after a
+        // re-create our multicast flows send nothing until it is named
+        // again (dstack #411).
+        self.media.tx.keep_send_interface(
+            &mut self.send_if,
+            std::time::Instant::now(),
+            &mut self.lister.read,
+        );
+    }
+
+    /// The interface list both watches read (tests: a fake list and
+    /// period), each watch started again on it.
+    #[cfg(test)]
+    pub(crate) fn set_lister(&mut self, lister: crate::membership::Lister) {
+        self.membership = lister.watch(self.media.ip);
+        self.send_if = lister.watch(self.media.ip);
+        self.lister = lister;
     }
 
     /// The traffic recorder's step at `now`, this device's audio bytes
