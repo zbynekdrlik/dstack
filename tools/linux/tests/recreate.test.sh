@@ -33,11 +33,27 @@ B=recreate-b
 GONE_S=5
 BOUND_S=60
 MIN_RISE=2000
+STOP_S=10
 
 in_ns() { ip netns exec "$NS" "$@"; }
-cleanup() {
+# Stops the peers still running: INT (their goodbyes), KILL after STOP_S;
+# false when one needed the KILL. `ip netns del` kills nothing inside.
+stop_peers() {
+  local pid alive _
   for pid in ${PIDS:-}; do kill -INT "$pid" 2>/dev/null || true; done
+  for _ in $(seq 1 $((STOP_S * 10))); do
+    alive=""
+    for pid in ${PIDS:-}; do kill -0 "$pid" 2>/dev/null && alive="$alive $pid"; done
+    [ -n "$alive" ] || return 0
+    sleep 0.1
+  done
+  for pid in $alive; do kill -KILL "$pid" 2>/dev/null || true; done
+  return 1
+}
+cleanup() {
+  stop_peers || true
   ip netns del "$NS" 2>/dev/null || true
+  rm -rf "$DIR"
 }
 trap cleanup EXIT
 
@@ -67,12 +83,12 @@ EOF
 # it), so the INT at the end reaches it, not a subshell.
 ip netns exec "$NS" "$BIN" peer --iface "$IF" --name "$A" --tone-hz 1000 \
   --rx-from "$B:TX 1" --test-clock-ppm 6 \
-  --state "$DIR/a-state.toml" --status "$DIR/a.json" 2>"$DIR/a.log" &
+  --state "$DIR/a-state.toml" --status "$DIR/a.json" >"$DIR/a.out" 2>"$DIR/a.log" &
 PA=$!
 ip netns exec "$NS" "$BIN" peer --iface "$IF" --name "$B" --tone-hz 440 \
   --rx-from "$A:TX 1" --test-clock-ppm 6 \
   --ports 4441,8801,4456 --process-id 1 \
-  --state "$DIR/b-state.toml" --status "$DIR/b.json" 2>"$DIR/b.log" &
+  --state "$DIR/b-state.toml" --status "$DIR/b.json" >"$DIR/b.out" 2>"$DIR/b.log" &
 PB=$!
 PIDS="$PA $PB"
 
@@ -85,7 +101,8 @@ fail() {
   exit 1
 }
 
-# `<packets> <multicast>`: a's flow from b, then b's from a.
+# `<packets> <multicast>`: a's flow from b, then b's from a (a missing
+# line reads as unread, -1).
 heard() {
   python3 -I "$GATE" flow "$DIR/a.json" "$B"
   python3 -I "$GATE" flow "$DIR/b.json" "$A"
@@ -97,6 +114,7 @@ both_deliver() {
   { read -r a0 _; read -r b0 _; } < <(heard)
   sleep 2
   { read -r a1 am; read -r b1 _; } < <(heard)
+  a0=${a0:--1} b0=${b0:--1} a1=${a1:--1} am=${am:--1} b1=${b1:--1}
   HEARD="a from b: $a0 -> $a1 (multicast $am); b from a: $b0 -> $b1"
   python3 -I "$GATE" rose "$a0" "$a1" "$MIN_RISE" &&
     python3 -I "$GATE" rose "$b0" "$b1" "$MIN_RISE" &&
@@ -132,8 +150,8 @@ echo "after: both deliver again, the delivering window ended $WAITED s after the
 grep -F "multicast send interface named again" "$DIR/b.log" | grep -qF "the TX flow sockets" ||
   fail "b's log never named its flow sockets' send interface again"
 
+stop_peers || fail "a peer did not stop within $STOP_S s of its INT"
 PIDS=""
-kill -INT "$PA" "$PB"
 wait "$PA" || fail "peer a exited $?"
 wait "$PB" || fail "peer b exited $?"
 echo "recreate: a hears b by multicast and b hears a again after $IF's re-create"

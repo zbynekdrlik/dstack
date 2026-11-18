@@ -190,6 +190,13 @@ impl TxShared {
     ) -> bool {
         watch.keep_as(now, read, SEND_IF, FLOW_SOCKETS, || self.send_on_again())
     }
+
+    /// The flow sockets, one per slot (other modules' tests: their
+    /// multicast send interface, dstack #411).
+    #[cfg(test)]
+    pub(crate) fn flow_sockets(&self) -> &[UdpSocket] {
+        &self.sockets
+    }
 }
 
 #[cfg(test)]
