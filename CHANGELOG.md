@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.177
+
+- **Fix (#393, dasio#120): an ASIO bridge's callback lateness is measured against the driver's schedule.** dsg's bridge (MiniFuse, 128 frames at 96 kHz, from-ASIO target 1.667 ms) logged two from-ASIO underruns as `cause: the bridge (no callback late enough)` with only 500-1000 us late callbacks counted. The lateness bins counted each switch's gap minus the period alone. The MiniFuse delivers on 1 ms USB frames (gaps 2, 1, 1 ms: a third of all switches read 500-750 us), and a frame slip (two 2 ms gaps in a row) puts the driver's write 1.0-1.333 ms behind its schedule while the gaps read 500-750 us twice.
+  - Each switch is now timed against the driver's schedule line (`dstack_asio::state::schedule_lag`): due one period after the line; one on time or early re-anchors it; a late one creeps it at most a thousandth of a period, so a driver clock slower than the PC's never sums into a lag. A gap over two periods still counts as `late_callbacks` only, and re-anchors the line.
+  - The bins keep their keys (`late_250us`..`late_2000us`) and width; they now count how far behind the schedule a switch came, the top one 2.0 ms or more behind. Expect more counts than before: a switch that comes on a shorter gap but has not caught up counts too (dsg: the switch one 1 ms frame after a 2 ms gap is still 0.333 ms behind). The underrun line, its cause and dcontroller's bridge figures read the new counts.
+  - API: `dstack_asio::state::lateness_bin` takes the lateness (`late_ns`) instead of `(gap_ns, period_ns)`; new `state::schedule_lag(now_ns, line_ns, period_ns) -> (late_ns, line_ns)`.
+  - **No latency change.** **dasio:** move the pin; no code change. **Other consumers:** nothing to change.
+
 ## 0.6.176
 
 - **Feature (#391, dcontroller#108): a bridge device's own figures over the network.** dcontroller can now read a dasio bridge device's targets, converter delays, underruns (with each side's latest cause) and callback lateness bins over the Dante network, about once a second, to graph them beside the packet latency. Until now they were in the local control socket's status only.
