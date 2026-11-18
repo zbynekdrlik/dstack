@@ -159,6 +159,7 @@ fn the_watch_names_the_callback_lateness_around_each_underrun_rise() {
         late_bins: [0; LATE_BINS],
         late_callbacks: 1,
         period_us: 1333,
+        late_max_us: 0,
     };
     let text = w.look(now, 4.0).expect("a to-ASIO rise");
     assert_eq!(
@@ -194,6 +195,7 @@ fn the_counts_come_from_the_runners_status_and_the_players() {
     let status = Status {
         late_bins: [1, 2, 3, 4, 5, 6, 7, 8],
         late_callbacks: 9,
+        late_max_us: 2345,
         rate: 48_000,
         buffer_frames: 256,
         ..Status::default()
@@ -206,6 +208,7 @@ fn the_counts_come_from_the_runners_status_and_the_players() {
             late_bins: [1, 2, 3, 4, 5, 6, 7, 8],
             late_callbacks: 9,
             period_us: 5333,
+            late_max_us: 2345,
         }
     );
     let closed = Status {
