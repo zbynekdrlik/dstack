@@ -418,9 +418,9 @@ pub const LATE_BIN_NS: i64 = 250_000;
 pub const LATE_BINS: usize = 8;
 
 /// A status key per lateness bin, named by the bin's lower edge
-/// ([`lateness_bin`]): `late_250us` counts callbacks 0.25-0.5 ms late, ...,
-/// `late_2000us` those 2.0 ms late or more, up to two periods (later ones
-/// are `late_callbacks`).
+/// ([`lateness_bin`]): `late_250us` counts callbacks 0.25-0.5 ms behind the
+/// driver's schedule, ..., `late_2000us` those 2.0 ms behind or more (a
+/// gap over two periods is `late_callbacks` only).
 pub const LATE_BIN_KEYS: [&str; LATE_BINS] = [
     "late_250us",
     "late_500us",
@@ -432,22 +432,46 @@ pub const LATE_BIN_KEYS: [&str; LATE_BINS] = [
     "late_2000us",
 ];
 
-/// The lateness bin of a gap of `gap_ns` between two buffer switches of a
-/// driver whose buffer lasts `period_ns` (dstack #386): the switch came
-/// `gap_ns - period_ns` late. Bin `k` counts `k + 1` to `k + 2` bin widths
-/// ([`LATE_BIN_NS`]) late, the last bin everything from 2.0 ms on. `None`
-/// under one bin's width (jitter) and for a [`GapKind::Late`] gap, which
-/// `late_callbacks` counts, so no switch is counted twice.
+/// How late a buffer switch at `now_ns` is behind the driver's schedule,
+/// and the schedule line it leaves (dstack #393), from the line at the
+/// switch before (`line_ns`) and the buffer's `period_ns`: the switch was
+/// due one period after the line. One on time or early re-anchors the line
+/// at itself (0 late). A late one is `now - due` late, and the line creeps
+/// toward it by at most a thousandth of a period, so a driver clock slower
+/// than the PC's (a few ns a switch) never sums into a lag, and a real lag
+/// is forgotten at 1 ms a second.
+///
+/// Why the line and not the gap: two late gaps in a row, with no early
+/// switch between them to catch up, put the driver's write their summed
+/// lateness behind, and the from-ASIO FIFO loses that much depth. dsg's
+/// MiniFuse (1 ms USB frames under a 1.333 ms period) read two 500-750 us
+/// gaps for a write 1.0-1.333 ms behind, and its underrun line blamed the
+/// bridge.
+pub fn schedule_lag(now_ns: i64, line_ns: i64, period_ns: i64) -> (i64, i64) {
+    let due = line_ns + period_ns;
+    if now_ns <= due {
+        return (0, now_ns);
+    }
+    let late = now_ns - due;
+    (late, due + late.min(period_ns / SCHEDULE_CREEP))
+}
+
+/// [`schedule_lag`]'s line creeps a `1 / SCHEDULE_CREEP` of a period a
+/// late switch.
+const SCHEDULE_CREEP: i64 = 1000;
+
+/// The lateness bin of a switch `late_ns` behind the driver's schedule
+/// ([`schedule_lag`], dstack #386, #393). Bin `k` counts `k + 1` to `k + 2`
+/// bin widths ([`LATE_BIN_NS`]) late, the last bin everything from 2.0 ms
+/// on. `None` under one bin's width (jitter). A gap over two periods is
+/// counted by `late_callbacks` and in no bin, so no switch counts twice.
 ///
 /// The from-ASIO FIFO loses depth one for one with a switch's lateness
 /// (#382: audio lost from 1.0-1.5 ms late at a 1.333 ms target), well under
 /// the two periods of [`callback_gap_kind`]: these bins show it.
-pub fn lateness_bin(gap_ns: i64, period_ns: i64) -> Option<usize> {
-    if callback_gap_kind(gap_ns, period_ns) == GapKind::Late {
-        return None;
-    }
+pub fn lateness_bin(late_ns: i64) -> Option<usize> {
     // Whole bin widths late; truncation puts an early switch at 0.
-    let widths = (gap_ns - period_ns) / LATE_BIN_NS;
+    let widths = late_ns / LATE_BIN_NS;
     if widths < 1 {
         return None;
     }
