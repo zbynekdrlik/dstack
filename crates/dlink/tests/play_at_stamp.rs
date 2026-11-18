@@ -9,16 +9,17 @@
 //! (that stamp + P)` in the app's clock is then fixed by the terms:
 //!
 //! - (c) RX, the hand-off: B + the converter's RX delay (`play_at` adds it);
-//! - the converter's delay once more: the app block's first sample holds
-//!   the audio that delay before the block's start (a ramp through the
-//!   half-band's linear phase comes out shifted by exactly its delay);
+//! - (the converter's delay is in (c) once: the app block's first sample
+//!   holds the audio that delay before the device block's start, and
+//!   `play_at` does not add it again, dstack #410);
 //! - the flow's read delay, when the transmitter's latency is over ours:
 //!   the flow is read at its latency, rounded up to whole blocks
 //!   (`Manager::read_at`).
 //!
-//! #402 measured it on v0.6.144 and v0.6.170 alike: 2.583 ms at a 9 ms
-//! transmitter, 30.583 ms at a 40 ms one (the flow read 28.0 ms later,
-//! `delay 2688`), the same in every block. Both are pinned here to the
+//! At the documented path that is 1.958 ms at a 9 ms transmitter and
+//! 29.958 ms at a 40 ms one (the flow read 28.0 ms later, `delay 2688`),
+//! the same in every block. #402 measured 2.583 / 30.583 ms on v0.6.144 and
+//! v0.6.170: the converter's delay counted twice (#410). Both are pinned here to the
 //! microsecond, derived from `Config::split`; a change in any term (or in
 //! how `play_at` or the read follow them) fails one of the two.
 //!
@@ -495,7 +496,7 @@ fn pinned(tx_latency_ns: u64, measured_us: u64) {
 }
 
 /// A transmitter latency under ours (9 ms against 13.041666 ms): the flow
-/// is read at our P, `L` = (c) RX + the converter's delay = 2.583 ms.
+/// is read at our P, `L` = (c) RX = 1.958 ms.
 #[test]
 fn play_at_is_the_wire_stamp_plus_the_rx_path_under_our_latency() {
     pinned(9_000_000, MEASURED_UNDER_US);
@@ -503,7 +504,7 @@ fn play_at_is_the_wire_stamp_plus_the_rx_path_under_our_latency() {
 
 /// A transmitter latency over ours (40 ms): the flow is read at its
 /// latency in whole blocks (28.0 ms later, `delay 2688`), and `play_at`
-/// follows the read: 30.583 ms.
+/// follows the read: 29.958 ms.
 #[test]
 fn play_at_follows_a_flow_read_later_at_a_transmitter_latency_over_ours() {
     pinned(40_000_000, MEASURED_OVER_US);
