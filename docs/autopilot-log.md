@@ -70,3 +70,4 @@ One line per ticket: issue, commits, tests (RED -> GREEN where a bug), decisions
 - 17.11 18:59 CET: v0.6.174 = #387 (dtray reads dasio's per-direction bridge keys; RED fe603f1 GREEN 9fa9f27; 8 caught) + #382 converter_taps (32-256 step 8, default 256; 48 taps 0.250 ms a direction at 96<->96, owner 17.11; 23 caught 0 missed).
 - 17.11 20:12 CET: v0.6.175 = #387 converter_taps in dtray (RED 71f0326; 10 caught 0 missed).
 - 17.11 22:48 CET: v0.6.176 = #391 (bridge figures over a dstack-own info read 8700, opcode 0xd5b1/0xd5b0, unicast to the asker; client info::client::bridge_figures; dasio publishes; 165 caught 0 missed).
+- 18.11 06:09 CET: v0.6.177 = #393 (ASIO callback lateness against the driver's schedule line, not gap minus period; dsg MiniFuse frame slips read as the bridge's underruns; RED 14a50f3 GREEN 9cf3579; 24 caught 0 missed).
