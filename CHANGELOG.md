@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.183
+
+- **Fix (#414, #409's family): the Linux socket past the qdisc (AF_PACKET, a device with CAP_NET_RAW) follows a NIC re-create.** It names its interface by index in every send, and that index was read once at open; after a re-create (same name and address, new index) every direct send failed with ENXIO and the unicast flows stayed dead until a restart (reproduced in two netns: 60 s, the receiver at 0 packets). The index is now an atomic the TX thread loads per send (no lock, no allocation), moved by the #411 interface watch (`the direct socket sends on the interface's new index`); until the watch's next look (at most 2 s) sends fail and are counted. CI's `recreate` job now runs two netns joined by a veth pair, so a peer takes the direct path, and requires it to rise again. Windows' host frame sender has the same pattern but falls back to UDP (nothing lost): #417.
+  - **No latency change.** **Consumers:** move the pin with Wednesday's sync; nothing to port.
+
 ## 0.6.182
 
 - **Fix (#411, #409's follow-up): a device's own multicast TX flows send again after its NIC is re-created.** Each TX flow socket set its multicast send interface once at bind, and Linux keeps the interface INDEX: after a re-create (a USB reset, a new ifindex) every multicast send failed with ENODEV for good (in the netns proof: 60 s of `os_error=19`, the receiver at 0 packets). The daemon's tick now keeps a second interface watch beside #282's RX one and names every flow socket's send interface again on a change (`multicast send interface named again ... the TX flow sockets`). Not covered yet: the Linux AF_PACKET TX bypass socket (#414).
