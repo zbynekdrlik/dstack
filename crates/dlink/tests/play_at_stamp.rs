@@ -56,13 +56,20 @@ const WRAP: u64 = 1 << 20;
 const WRAP_MARGIN: f64 = 3000.0;
 /// Blocks set aside after a discontinuity: the converter starts again.
 const AFTER_RESTART: u32 = 32;
+/// How far an app sample may sit off its block's ramp, samples at the
+/// network's rate (measured: about 1e-6).
+const LINE_TOLERANCE: f64 = 0.05;
 /// #402's measurement (issuecomment-6975644042), µs: `L` at a transmitter
 /// latency under ours (9 ms) and over it (40 ms).
 const MEASURED_UNDER_US: u64 = 2583;
 const MEASURED_OVER_US: u64 = 30583;
-/// How far a block's `L` may sit off the terms: the pump's offset filter
-/// (its pairs read back to back) and the f64 decode.
-const TOLERANCE_NS: f64 = 2_000.0;
+/// How far the median `L` may sit off the terms (measured on dev1: within
+/// 0.25 µs), and any one block's: the pump's offset filter follows a torn
+/// clock pair by up to 133 ns a 1.33 ms wake (100 ppm), so a starved
+/// runner may lean a few µs; still far under the converter's 625 µs and a
+/// block's 1333 µs, the least a term moves `L` by.
+const MEDIAN_TOLERANCE_NS: f64 = 1_000.0;
+const BLOCK_TOLERANCE_NS: f64 = 20_000.0;
 /// The audio recorded once the flow runs.
 const RECORD: Duration = Duration::from_secs(2);
 const SETTLE: Duration = Duration::from_millis(1500);
@@ -78,6 +85,20 @@ fn code(w: u64) -> f64 {
 /// between the codes).
 fn decode(x: f64) -> f64 {
     (x + 0.25) * (2 * WRAP) as f64
+}
+
+/// Whether `x` (one app block) is the coded ramp throughout: each sample
+/// `step` network samples after the one before. A ring hole (a packet that
+/// came after its read on a loaded box, silence) or the converter's smear
+/// of one is not, and says nothing about `play_at`.
+fn on_ramp(x: &[f64], step: f64) -> bool {
+    let Some(&last) = x.last() else {
+        return false;
+    };
+    let end = decode(last);
+    x.iter()
+        .enumerate()
+        .all(|(i, &v)| (decode(v) - (end - step * (x.len() - 1 - i) as f64)).abs() < LINE_TOLERANCE)
 }
 
 /// A 24-bit wire sample (`read_frames`' word >> 8) back to its index mod
@@ -117,6 +138,8 @@ struct Rec {
     play_at: i64,
     /// Its first input sample.
     first: f64,
+    /// The whole block is the ramp ([`on_ramp`]).
+    on_ramp: bool,
 }
 
 /// The receiver: records each block once `on`, but none within
@@ -140,12 +163,15 @@ impl Process for Stamps {
         let (Some(start), Some(play_at)) = (block.start(), block.play_at()) else {
             return;
         };
-        let first = block.input(0).first().copied().unwrap_or(0.0);
+        let input = block.input(0);
+        let first = input.first().copied().unwrap_or(0.0);
+        let on_ramp = on_ramp(input, f64::from(RATE) / f64::from(APP_RATE));
         if let Ok(mut v) = self.recs.try_lock() {
             v.push(Rec {
                 start,
                 play_at,
                 first,
+                on_ramp,
             });
         }
     }
@@ -244,8 +270,10 @@ fn wire_carries_its_stamps() -> Result<u64, String> {
 struct Measured {
     /// Per block, `play_at - (stamp + P)`, ns.
     ls: Vec<f64>,
-    /// Blocks recorded, and set aside (near the wrap).
+    /// Blocks recorded, and set aside: not the ramp throughout (a ring
+    /// hole, silence), or near its wrap.
     recorded: usize,
+    off_ramp: usize,
     near_wrap: usize,
     restarts: u64,
     expected_ns: f64,
@@ -365,8 +393,12 @@ fn run(tx_latency_ns: u64) -> Measured {
     let ratio = f64::from(RATE) / f64::from(APP_RATE);
     let p_ns = p as f64 * 1e9 / f64::from(RATE);
     let mut ls = Vec::with_capacity(recs.len());
-    let mut near_wrap = 0;
+    let (mut off_ramp, mut near_wrap) = (0, 0);
     for r in &recs {
+        if !r.on_ramp {
+            off_ramp += 1;
+            continue;
+        }
         let w = decode(r.first);
         if !(WRAP_MARGIN..WRAP as f64 - WRAP_MARGIN).contains(&w) {
             near_wrap += 1;
@@ -382,6 +414,7 @@ fn run(tx_latency_ns: u64) -> Measured {
     Measured {
         ls,
         recorded: recs.len(),
+        off_ramp,
         near_wrap,
         restarts: restarts.load(Ordering::Relaxed),
         expected_ns,
@@ -402,11 +435,12 @@ fn pinned(tx_latency_ns: u64, measured_us: u64) {
     let (min, max) = (sorted.first().copied(), sorted.last().copied());
     let median = sorted.get(sorted.len() / 2).copied();
     eprintln!(
-        "tx {} ms: L expected {:.0} ns; min {min:?} median {median:?} max {max:?} over {} blocks ({} recorded, {} near the wrap, {} restarts)",
+        "tx {} ms: L expected {:.0} ns; min {min:?} median {median:?} max {max:?} over {} blocks ({} recorded, {} off the ramp, {} near the wrap, {} restarts)",
         tx_latency_ns as f64 / 1e6,
         m.expected_ns,
         sorted.len(),
         m.recorded,
+        m.off_ramp,
         m.near_wrap,
         m.restarts
     );
@@ -423,24 +457,33 @@ fn pinned(tx_latency_ns: u64, measured_us: u64) {
         "the flow's read {read} not in the status {}",
         m.status
     );
-    // 2 s of 64-frame app blocks at 48 kHz is 1500; the wrap may take some.
+    // 2 s of 64-frame app blocks at 48 kHz is 1500; the wrap, and ring
+    // holes on a loaded box (the status's `holes`), may take some.
     assert!(
         sorted.len() >= 1_000,
-        "only {} blocks judged ({} recorded, {} near the wrap, {} restarts); status {}",
+        "only {} blocks judged ({} recorded, {} off the ramp, {} near the wrap, {} restarts); status {}",
         sorted.len(),
         m.recorded,
+        m.off_ramp,
         m.near_wrap,
         m.restarts,
+        m.status
+    );
+    let median = median.expect("blocks judged");
+    assert!(
+        (median - m.expected_ns).abs() <= MEDIAN_TOLERANCE_NS,
+        "the median L {median:.0} ns is off the terms' {:.0} ns by over {MEDIAN_TOLERANCE_NS} ns (min {min:?}, max {max:?}); status {}",
+        m.expected_ns,
         m.status
     );
     let off: Vec<f64> = sorted
         .iter()
         .copied()
-        .filter(|l| (l - m.expected_ns).abs() > TOLERANCE_NS)
+        .filter(|l| (l - m.expected_ns).abs() > BLOCK_TOLERANCE_NS)
         .collect();
     assert!(
         off.is_empty(),
-        "{} of {} blocks off the terms' L {:.0} ns by over {TOLERANCE_NS} ns (min {min:?}, max {max:?}); status {}",
+        "{} of {} blocks off the terms' L {:.0} ns by over {BLOCK_TOLERANCE_NS} ns (min {min:?}, max {max:?}); status {}",
         off.len(),
         sorted.len(),
         m.expected_ns,

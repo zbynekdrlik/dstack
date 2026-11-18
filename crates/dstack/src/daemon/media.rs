@@ -766,13 +766,12 @@ impl Driver {
 
     /// The answer to the request of `flow`.
     pub fn answered(&mut self, flow: FlowId, answer: Answer) {
-        let device = self.device_of(flow);
         match answer {
             // The flow's read with its grant (dstack #403): a transmitter's
             // latency over ours reads its audio later (`delay`), and moves
             // the app's blocks' `play_at` with it.
             Answer::Granted(_) => match self.read_of(flow) {
-                Some(r) => info!(
+                Some((device, r)) => info!(
                     device = %device,
                     flow = flow.slot + 1,
                     latency = r.latency,
@@ -781,16 +780,16 @@ impl Driver {
                     advertised = r.advertised,
                     "RX flow granted"
                 ),
-                None => info!(device = %device, flow = flow.slot + 1, "RX flow granted"),
+                None => info!(device = %"-", flow = flow.slot + 1, "RX flow granted"),
             },
             Answer::Refused(status) => info!(
-                device = %device,
+                device = %self.device_of(flow),
                 flow = flow.slot + 1,
                 status = format_args!("{status:#06x}"),
                 "RX flow refused"
             ),
             Answer::Failed => info!(
-                device = %device,
+                device = %self.device_of(flow),
                 flow = flow.slot + 1,
                 "RX flow request had no answer"
             ),
@@ -845,20 +844,25 @@ impl Driver {
         )
     }
 
-    /// How the manager reads `flow` while it holds it, as the status shows
-    /// it (dstack #403); `None` once another flow took its slot or none is
-    /// there.
-    fn read_of(&self, flow: FlowId) -> Option<FlowRead> {
+    /// The transmitter's Dante name of `flow` ([`Driver::device_of`]) and
+    /// how the manager reads it, as the status shows it (dstack #403), from
+    /// one look under the manager's lock; `None` once another flow took
+    /// its slot or none is there.
+    fn read_of(&self, flow: FlowId) -> Option<(String, FlowRead)> {
         let m = lock(&self.media.manager);
         let v = m.flow(flow.slot).filter(|v| v.id == flow)?;
         let plan = m.rx_plan(flow.slot);
         let rate = self.media.tx.cfg.sample_rate;
-        Some(FlowRead {
-            latency: latency_samples(v.latency_ns, rate),
-            playout: plan.latency,
-            delay: plan.delay,
-            advertised: latency_samples(v.advertised_ns, rate),
-        })
+        let device = crate::media::late::named(&v.device);
+        Some((
+            device,
+            FlowRead {
+                latency: latency_samples(v.latency_ns, rate),
+                playout: plan.latency,
+                delay: plan.delay,
+                advertised: latency_samples(v.advertised_ns, rate),
+            },
+        ))
     }
 
     /// Sends the manager's datagrams, one task each; finished tasks are

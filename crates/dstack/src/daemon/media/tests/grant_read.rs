@@ -102,7 +102,7 @@ async fn a_grant_of_a_flow_gone_from_its_slot_carries_no_read() {
     assert!(matches!(answer, Answer::Granted(_)));
     let stale = FlowId {
         slot: flow.slot,
-        generation: flow.generation.wrapping_add(1),
+        generation: flow.generation.wrapping_sub(1),
     };
     let log = Captured::start(tracing::Level::INFO);
     driver.answered(stale, answer);
