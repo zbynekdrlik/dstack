@@ -234,3 +234,5 @@ fn saved_multicast_flows_are_made_again_at_start() {
     assert_eq!(warnings.matches("not made again").count(), 1, "{warnings}");
     assert!(warnings.contains("slot=3"), "{warnings}");
 }
+
+mod send_if;
