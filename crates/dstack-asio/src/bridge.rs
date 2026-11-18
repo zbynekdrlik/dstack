@@ -178,13 +178,14 @@ pub const MAX_CONVERTER_TAPS: u32 = dstack_resample::TAPS as u32;
 /// underruns from 0.5 ms with 128- and 64-frame driver buffers at ±7.5 ppm
 /// from a cold start (0.375 ms dropped out once) and from 0.125 ms seeded
 /// ([`Seed`]) at ±7.5, ±50 and ±100 ppm; the from-ASIO side, whose
-/// producer writes a whole driver buffer at once, held from 0.375 ms with a
-/// 64-frame buffer and from 0.75 ms with a 128-frame one (0.625 ms dropped
-/// out once, at a phase crossing of the two clocks, seeded at +7.5 to
-/// +100 ppm). Like dlink's floor it is a sanity bound, not a working
-/// value: a target holds only when it also covers the driver's callback
-/// lateness (from ASIO, one for one) and a cold start's drift (dstack
-/// #422's table).
+/// producer writes a whole driver buffer at once, held (worst of cold
+/// ±7.5 ppm and seeded ±7.5 to ±100 ppm) from 0.375 ms with a 64-frame
+/// buffer and from 0.75 ms with a 128-frame one (seeded, 0.625 ms dropped
+/// out once at a phase crossing of the two clocks; cold at ±7.5 ppm it
+/// held 0.375 ms over 180 s). Like dlink's floor it is a sanity bound, not
+/// a working value: a target holds only when it also covers the driver's
+/// callback lateness (from ASIO, one for one) and a cold start's drift
+/// (dstack #422's table).
 pub const MIN_BRIDGE_TARGET_NS: u64 = 500_000;
 
 /// Why a per-direction target of `ns`, set as `key`
@@ -587,6 +588,9 @@ impl Bridge {
         }
         let to_buffer = self.to_asio_app_buffer(opened);
         let from_buffer = self.from_asio_app_buffer(opened);
+        // Only the shared `app_buffer_ns` can be out of range here (hence
+        // its key in the text): a direction's own target was checked at
+        // `Bridge::new` (dstack #422) and the spec never changes.
         if let Some(problem) = to_buffer.problem().or_else(|| from_buffer.problem()) {
             return Err(problem);
         }

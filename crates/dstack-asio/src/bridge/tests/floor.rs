@@ -127,7 +127,11 @@ const FLOOR_BUFFER: usize = 64;
 /// naming its start and every FIFO on the simulated time, each player
 /// seeded at its rate (as dasio keeps it, [`Seed`]). At ±50 ppm the two
 /// clocks' phase crosses a whole driver buffer every 13.3 s, the moment a
-/// target too short drops out (a 128-frame driver did at 23 s).
+/// target too short drops out (a 128-frame driver did at 23 s). The
+/// to-ASIO side here is pump-written (32-frame pushes from the pump's
+/// side; a pull needs a device), an easier producer than the field's pull
+/// of a whole driver buffer a switch: the pulled shape's floor is the
+/// ticket's simulation table, not this test.
 fn at_the_floor(drift: f64) {
     let now = Arc::new(AtomicI64::new(0));
     let clock = Arc::clone(&now);
