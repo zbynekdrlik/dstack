@@ -122,12 +122,14 @@ const WINDOWS: usize = 4;
 
 /// The unjudged time after a window set aside: the callbacks a stall at
 /// its close still makes back to back, and the player's re-priming after
-/// their underrun, with room.
+/// their underrun, with room. A stall inside it starts it again.
 const GUARD: Duration = Duration::from_millis(100);
 
 /// How many callbacks after a stall of the output thread an underrun is
-/// its own: the late callback (its pull brings the stall's audio, the
-/// player skips the excess) and the ones it then makes back to back.
+/// its own: the late callback's pull brings the stall's audio, the player
+/// skips the excess, and the first callback made back to back after it
+/// runs the FIFO dry (counted once, then re-primed: a 25 to 40 ms stall's
+/// underrun came 1 callback after it on dev1); 4 is margin.
 const CAUSE_CALLBACKS: u64 = 4;
 
 /// A failure's verdict: `RUNNER` when every underrun follows a stall of
@@ -254,7 +256,8 @@ fn a_stalled_pump_leaves_the_output_s_bridge_whole() {
             let mut guard_until: Option<Instant> = None;
             let mut last_ns = dstack::clock::app_monotonic_ns();
             let mut callback = 0u64;
-            let mut seen = stats.underruns();
+            let mut counted = stats.underruns();
+            let mut seen = counted;
             loop {
                 next += PERIOD;
                 if let Some(wait) = next.checked_duration_since(Instant::now()) {
@@ -268,6 +271,9 @@ fn a_stalled_pump_leaves_the_output_s_bridge_whole() {
                 let now_ns = dstack::clock::app_monotonic_ns();
                 let gap_us = u64::try_from(now_ns - last_ns).unwrap_or(0) / 1_000;
                 last_ns = now_ns;
+                // The underruns after this callback's fill, and before it.
+                let underruns = stats.underruns();
+                let prior = std::mem::replace(&mut counted, underruns);
                 if receiving.load(Ordering::Acquire) == 0 {
                     if began.elapsed() > Duration::from_secs(15) {
                         return (heard, aside);
@@ -278,22 +284,24 @@ fn a_stalled_pump_leaves_the_output_s_bridge_whole() {
                     continue;
                 }
                 if guard_until.is_some_and(|until| Instant::now() < until) {
+                    if gap_us > OUTPUT_STALL_US {
+                        guard_until = Some(Instant::now() + GUARD);
+                    }
                     continue;
                 }
                 let (start, before) = match window {
                     Some(w) => w,
                     None => {
                         // A window starts: its underruns are counted from
-                        // here.
-                        seen = stats.underruns();
-                        *window.insert((Instant::now(), seen))
+                        // before this callback's fill.
+                        seen = prior;
+                        *window.insert((Instant::now(), prior))
                     }
                 };
                 heard.largest_gap_us = heard.largest_gap_us.max(gap_us);
                 if gap_us > OUTPUT_STALL_US {
                     heard.stalls.push((callback, gap_us));
                 }
-                let underruns = stats.underruns();
                 if underruns > seen {
                     heard.underrun_at.push(callback);
                     seen = underruns;
@@ -393,4 +401,8 @@ fn the_verdict_names_the_runner_only_after_an_output_stall() {
     assert!(verdict(&heard(stall, &[40, 90])).starts_with("verdict OURS"));
     // Samples off with no underrun: no stall explains them.
     assert!(verdict(&heard(stall, &[])).starts_with("verdict OURS"));
+    // Each underrun after a stall of its own, the second one's the later.
+    let two = &[(40, 30_000), (90, 25_000)];
+    assert!(verdict(&heard(two, &[41, 92])).starts_with("verdict RUNNER"));
+    assert!(verdict(&heard(two, &[41, 95])).starts_with("verdict OURS"));
 }

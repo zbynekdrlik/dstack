@@ -22,7 +22,7 @@
 //! 2584 off). A real card glitches there too: such a window says nothing
 //! about the bridge. So a judged window in which the driver thread stalled
 //! is set aside (kept for the message) and the next one is judged, up to
-//! [`WINDOWS`]; the asserts on the judged window are unchanged, and a
+//! [`WINDOWS`], with [`GUARD`] unjudged between them; the asserts on the judged window are unchanged, and a
 //! failure names the driver's stalls before each underrun (`verdict`).
 
 use std::sync::Arc;
@@ -120,6 +120,13 @@ const DRIVER_STALL_US: u64 = 2 * BUFFER as u64 * 1_000_000 / RATE as u64;
 /// The judged windows the driver thread may need: one whose driver thread
 /// never stalled is judged, a stalled one is set aside.
 const WINDOWS: usize = 4;
+
+/// The unjudged time after a window set aside: the switches a stall at its
+/// close still makes back to back, and the player's re-priming after their
+/// underrun, with room (dstack #395: without it that underrun counted in
+/// the next window, which had no stall of its own and read `OURS`). A
+/// stall inside it starts it again.
+const GUARD: Duration = Duration::from_millis(100);
 
 /// How many switches after a stall of the driver thread an underrun is its
 /// own: the late switch's excess skip and the switches made back to back
@@ -262,9 +269,11 @@ fn a_stalled_pump_leaves_the_to_asio_bridge_whole() {
             let mut next = began;
             let mut since = None;
             let mut window: Option<(Instant, u64)> = None;
+            let mut guard_until: Option<Instant> = None;
             let mut last_ns = dstack::clock::app_monotonic_ns();
             let mut switch = 0u64;
-            let mut seen = stats.underruns();
+            let mut counted = stats.underruns();
+            let mut seen = counted;
             loop {
                 next += period;
                 if let Some(wait) = next.checked_duration_since(Instant::now()) {
@@ -276,6 +285,9 @@ fn a_stalled_pump_leaves_the_to_asio_bridge_whole() {
                 let now_ns = dstack::clock::app_monotonic_ns();
                 let gap_us = u64::try_from(now_ns - last_ns).unwrap_or(0) / 1_000;
                 last_ns = now_ns;
+                // The underruns after this switch, and before it.
+                let underruns = stats.underruns();
+                let prior = std::mem::replace(&mut counted, underruns);
                 if receiving.load(Ordering::Acquire) == 0 {
                     if began.elapsed() > Duration::from_secs(15) {
                         return (heard, aside);
@@ -285,20 +297,25 @@ fn a_stalled_pump_leaves_the_to_asio_bridge_whole() {
                 if since.get_or_insert_with(Instant::now).elapsed() < SETTLE {
                     continue;
                 }
+                if guard_until.is_some_and(|until| Instant::now() < until) {
+                    if gap_us > DRIVER_STALL_US {
+                        guard_until = Some(Instant::now() + GUARD);
+                    }
+                    continue;
+                }
                 let (start, before) = match window {
                     Some(w) => w,
                     None => {
                         // A window starts: its underruns are counted from
-                        // here.
-                        seen = stats.underruns();
-                        *window.insert((Instant::now(), seen))
+                        // before this switch.
+                        seen = prior;
+                        *window.insert((Instant::now(), prior))
                     }
                 };
                 heard.largest_gap_us = heard.largest_gap_us.max(gap_us);
                 if gap_us > DRIVER_STALL_US {
                     heard.stalls.push((switch, gap_us));
                 }
-                let underruns = stats.underruns();
                 if underruns > seen {
                     heard.underrun_at.push(switch);
                     seen = underruns;
@@ -311,6 +328,7 @@ fn a_stalled_pump_leaves_the_to_asio_bridge_whole() {
                     // The runner stalled the driver thread: set aside.
                     aside.push(std::mem::take(&mut heard));
                     window = None;
+                    guard_until = Some(Instant::now() + GUARD);
                     continue;
                 }
                 heard.depth += (2 * foot + BUFFER) as u64;
