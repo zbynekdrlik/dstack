@@ -47,7 +47,7 @@ pub struct UnderrunCounts {
     pub period_us: u64,
     /// The run's peak lateness behind the driver's schedule, us
     /// ([`Status::late_max_us`], dstack #393). In a rise
-    /// ([`UnderrunCounts::since`]): the peak when it rose over the check
+    /// (a check's `since`): the peak when it rose over the check
     /// (or a new run's), else 0.
     pub late_max_us: u64,
 }
