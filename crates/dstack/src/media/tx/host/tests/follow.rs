@@ -70,7 +70,7 @@ fn after_an_interface_re_create_the_host_path_takes_the_rows_on_the_new_index() 
 }
 
 #[test]
-fn the_move_is_one_info_line_and_a_held_index_none() {
+fn the_move_is_one_info_line_and_a_held_index_logs_nothing() {
     let shared = shared();
     let _rec = host(&shared, Take::All);
     crate::test_log::undecided();
@@ -97,6 +97,36 @@ fn an_interface_without_an_index_fails_the_act_and_keeps_the_index() {
     assert_eq!(shared.host_mac(slot), Some(PEER_MAC), "the index held");
     shared.set_neighbours(&rows_on(NEW_INDEX));
     assert_eq!(shared.host_mac(slot), None, "still on the old index");
+}
+
+#[test]
+fn the_watch_asks_again_after_a_list_without_the_index() {
+    let shared = shared();
+    let slot = flow(&shared, SocketAddrV4::new(RESOLVED, 4321), 32);
+    let _rec = host(&shared, Take::All);
+    let fake = Fake::at(IFINDEX);
+    let mut lister = fake.lister(Ipv4Addr::LOCALHOST, Duration::from_millis(1));
+    let mut watch = lister.watch(Ipv4Addr::LOCALHOST);
+    let start = Instant::now();
+    assert!(!shared.keep_send_interface(&mut watch, start, &mut lister.read));
+    fake.without_index();
+    shared.set_neighbours(&rows_on(NEW_INDEX));
+    let later = start + Duration::from_millis(2);
+    crate::test_log::undecided();
+    let warned = crate::test_log::capture_warnings(|| {
+        assert!(
+            !shared.keep_send_interface(&mut watch, later, &mut lister.read),
+            "the host path's act failed, whatever the flow sockets did"
+        );
+    });
+    let named = format!("{HOST_SENDER} on test0");
+    assert_eq!(warned.matches(&named).count(), 1, "{warned}");
+    assert_eq!(shared.host_mac(slot), None, "nothing moved");
+    // The index back in the list: the next look moves the NIC to it.
+    fake.recreate(NEW_INDEX);
+    let again = later + Duration::from_millis(2);
+    assert!(shared.keep_send_interface(&mut watch, again, &mut lister.read));
+    assert_eq!(shared.host_mac(slot), Some(PEER_MAC));
 }
 
 #[test]
