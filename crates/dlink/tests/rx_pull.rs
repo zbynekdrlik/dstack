@@ -9,20 +9,18 @@
 //! profile), on loopback (dstack #366) and its own system clock; our
 //! device hears itself (the tests' rule: our device only).
 //!
-//! The output thread records its own scheduling gaps on the app's clock
-//! (dstack #395, a windows-2025 failure of PR #394's run: 2 underruns and
-//! 2578 samples off with no ring hole, no pull restart and a clean sender,
-//! the signature of `dstack-asio/tests/to_asio_pull.rs`'s driver stall). A
-//! gap over two periods is the runner not running the output thread: the
-//! callbacks it then makes back to back, to keep its schedule, take what
-//! the late callback's pull brought and the player had skipped as an
-//! excess (by design), and run the FIFO dry. A real sound card glitches
-//! there too: such a window says nothing about the bridge. So a judged
-//! window in which the output thread stalled is set aside (kept for the
-//! message) and the next one is judged, up to [`WINDOWS`], with [`GUARD`]
-//! unjudged between them; the asserts on the judged window are unchanged,
-//! and a failure names the output thread's stalls before each underrun
-//! (`verdict`).
+//! The output thread is witnessed (`tests/consumer/witness.rs`, dstack
+//! #395/#396): each callback's lateness against its absolute schedule, the
+//! ring's holes never written and the sender's TX schedule restarts
+//! (dstack #401). A late output thread (the runner not running it: its
+//! catch-up callbacks run the FIFO dry, a windows-2025 failure of PR
+//! #394's run: 2 underruns, 2578 off, no ring hole) or a sender whose TX
+//! thread slept past its latency (PR #406's windows-2025 run: 520 off, 0
+//! underruns, 512 holes never written) says nothing about the bridge: a
+//! judged window that lost audio to either is set aside (kept for the
+//! message) and the next one judged, up to [`witness::WINDOWS`]; the
+//! asserts on the judged window are unchanged, and a failure prints
+//! `verdict RUNNER|SENDER|OURS`.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -30,6 +28,12 @@ use std::time::{Duration, Instant};
 
 use dlink::bridge::{Player, Stats, fifo_for};
 use dlink::{Block, Clock, Config, Link, Map, Place, Ports, Process, Stopped, SubStatus};
+
+#[path = "tx_restart/restarts.rs"]
+mod restarts;
+#[path = "consumer/witness.rs"]
+mod witness;
+use witness::{Names, Played, Window, Witness, verdict};
 
 /// The test device's address: loopback, so none of its mDNS, info or
 /// heartbeat multicasts leaves the box (dstack #366: this workspace is a
@@ -49,6 +53,20 @@ const PERIOD_FRAMES: usize = 480;
 /// window judged.
 const SETTLE: Duration = Duration::from_secs(2);
 const JUDGED: Duration = Duration::from_secs(8);
+
+/// How many callbacks after a stall of the output thread an underrun is
+/// its own: the late callback's pull brings the stall's audio, the player
+/// skips the excess, and the first callback made back to back after it
+/// runs the FIFO dry (counted once, then re-primed: a 25 to 40 ms stall's
+/// underrun came 1 callback after it on dev1); 4 is margin.
+const CAUSE_CALLBACKS: u64 = 4;
+
+/// The output thread in a verdict.
+const NAMES: Names = Names {
+    thread: "output thread",
+    call: "callback",
+    calls: "callbacks",
+};
 
 /// [`LEVEL`] on output 0.
 struct Constant;
@@ -90,91 +108,9 @@ impl Process for Stalling {
     }
 }
 
-/// What the output thread saw over the judged window.
-#[derive(Debug, Default)]
-struct Heard {
-    /// Samples at the level and off it.
-    on: u64,
-    off: u64,
-    /// The bridge's underruns in the judged window.
-    underruns: u64,
-    /// The FIFO's depth, frames, summed over two looks a callback (after
-    /// the pull, at the sawtooth's top, and after the fill, at its foot),
-    /// and the looks.
-    depth: u64,
-    looks: u64,
-    /// The output thread's own scheduling in the window: its largest gap
-    /// between two callbacks and every gap over [`OUTPUT_STALL_US`] with
-    /// the callback it ended at (µs of the app's clock), and the callback
-    /// at which each underrun was counted.
-    largest_gap_us: u64,
-    stalls: Vec<(u64, u64)>,
-    underrun_at: Vec<u64>,
-}
-
-/// A gap between two of the output thread's callbacks over this is a stall
-/// of the thread, µs: two periods (the card's next callback was due).
-const OUTPUT_STALL_US: u64 = 2 * PERIOD.as_micros() as u64;
-
-/// The judged windows the output thread may need: one whose output thread
-/// never stalled is judged, a stalled one is set aside.
-const WINDOWS: usize = 4;
-
-/// The unjudged time after a window set aside: the callbacks a stall at
-/// its close still makes back to back, and the player's re-priming after
-/// their underrun, with room. A stall inside it starts it again.
-const GUARD: Duration = Duration::from_millis(100);
-
-/// How many callbacks after a stall of the output thread an underrun is
-/// its own: the late callback's pull brings the stall's audio, the player
-/// skips the excess, and the first callback made back to back after it
-/// runs the FIFO dry (counted once, then re-primed: a 25 to 40 ms stall's
-/// underrun came 1 callback after it on dev1); 4 is margin.
-const CAUSE_CALLBACKS: u64 = 4;
-
-/// A failure's verdict: `RUNNER` when every underrun follows a stall of
-/// the output thread within [`CAUSE_CALLBACKS`] (the runner did not run
-/// it); else `OURS` (the bridge lost audio while its consumer ran on
-/// time).
-fn verdict(heard: &Heard) -> String {
-    let caused = |at: u64| {
-        heard
-            .stalls
-            .iter()
-            .filter(move |&&(end, _)| end <= at && at - end <= CAUSE_CALLBACKS)
-    };
-    let causes: Vec<String> = heard
-        .underrun_at
-        .iter()
-        .map(|&at| {
-            let before: Vec<String> = caused(at)
-                .map(|&(end, us)| format!("{us} us, {} callbacks before", at - end))
-                .collect();
-            format!("underrun at callback {at}: output stalls {before:?}")
-        })
-        .collect();
-    let runner = !heard.underrun_at.is_empty()
-        && heard
-            .underrun_at
-            .iter()
-            .all(|&at| caused(at).next().is_some());
-    let who = if runner {
-        "RUNNER (the output thread was not run)"
-    } else {
-        "OURS"
-    };
-    format!("verdict {who}: {causes:?}")
-}
-
-impl Heard {
-    /// The FIFO's mean depth over the judged window, ms.
-    fn mean_depth_ms(&self) -> f64 {
-        self.depth as f64 / self.looks.max(1) as f64 * 1e3 / f64::from(RATE)
-    }
-}
-
 #[test]
 fn a_stalled_pump_leaves_the_output_s_bridge_whole() {
+    restarts::listen();
     let dir = tempfile::tempdir().unwrap();
     let place = Place::Ip(test_ipv4());
     let tx_config = Config::new("dlink-pull-tx", dir.path().join("tx.toml"))
@@ -232,6 +168,21 @@ fn a_stalled_pump_leaves_the_output_s_bridge_whole() {
         Arc::clone(&stats),
     )
     .expect("the player");
+    // The ring's holes never written (holes the sender left), and the
+    // sender's TX side, for the witness.
+    let ring_media = Arc::clone(receiver.media());
+    let mut witness = Witness::new(
+        PERIOD,
+        CAUSE_CALLBACKS,
+        JUDGED,
+        stats.underruns(),
+        move || {
+            let ring = ring_media.rx.rings()[0].counters();
+            ring.holes.saturating_sub(ring.late)
+        },
+        Some((Arc::clone(&sender.media().tx), RATE)),
+    );
+    let stall_us = witness.stall_us();
     // The output thread: a steady deadline every PERIOD, as a sound card's
     // callback, whatever the pump does. It runs from the device's start,
     // as dlisten's output does: its pull is the rings' only drain, so the
@@ -247,87 +198,45 @@ fn a_stalled_pump_leaves_the_output_s_bridge_whole() {
         );
         std::thread::spawn(move || {
             let mut out = vec![0f32; PERIOD_FRAMES];
-            let mut heard = Heard::default();
-            let mut aside = Vec::new();
             let began = Instant::now();
             let mut next = began;
             let mut since = None;
-            let mut window: Option<(Instant, u64)> = None;
-            let mut guard_until: Option<Instant> = None;
-            let mut last_ns = dstack::clock::app_monotonic_ns();
-            let mut callback = 0u64;
-            let mut counted = stats.underruns();
-            let mut seen = counted;
             loop {
                 next += PERIOD;
                 if let Some(wait) = next.checked_duration_since(Instant::now()) {
                     std::thread::sleep(wait);
                 }
+                // How late this callback woke past its due time.
+                let late = Instant::now().saturating_duration_since(next);
+                let late_us = u64::try_from(late.as_micros()).unwrap_or(u64::MAX);
                 pull.pull();
                 let top = fifo.len();
                 player.fill_with(&mut out, 1, |x| x as f32);
                 let foot = fifo.len();
-                callback += 1;
-                let now_ns = dstack::clock::app_monotonic_ns();
-                let gap_us = u64::try_from(now_ns - last_ns).unwrap_or(0) / 1_000;
-                last_ns = now_ns;
-                // The underruns after this callback's fill, and before it.
                 let underruns = stats.underruns();
-                let prior = std::mem::replace(&mut counted, underruns);
-                if receiving.load(Ordering::Acquire) == 0 {
-                    if began.elapsed() > Duration::from_secs(15) {
-                        return (heard, aside);
-                    }
-                    continue;
+                let heard = receiving.load(Ordering::Acquire) != 0;
+                if !heard && began.elapsed() > Duration::from_secs(15) {
+                    return None;
                 }
-                if since.get_or_insert_with(Instant::now).elapsed() < SETTLE {
-                    continue;
-                }
-                if guard_until.is_some_and(|until| Instant::now() < until) {
-                    if gap_us > OUTPUT_STALL_US {
-                        guard_until = Some(Instant::now() + GUARD);
-                    }
-                    continue;
-                }
-                let (start, before) = match window {
-                    Some(w) => w,
-                    None => {
-                        // A window starts: its underruns are counted from
-                        // before this callback's fill.
-                        seen = prior;
-                        *window.insert((Instant::now(), prior))
-                    }
+                let judging = heard && since.get_or_insert_with(Instant::now).elapsed() >= SETTLE;
+                let on = out
+                    .iter()
+                    .filter(|&&x| (f64::from(x) - LEVEL).abs() < 1e-2)
+                    .count() as u64;
+                // The FIFO's depth after the pull (the sawtooth's top) and
+                // after the fill (its foot).
+                let played = Played {
+                    on,
+                    off: PERIOD_FRAMES as u64 - on,
+                    depth: (top + foot) as u64,
+                    looks: 2,
                 };
-                heard.largest_gap_us = heard.largest_gap_us.max(gap_us);
-                if gap_us > OUTPUT_STALL_US {
-                    heard.stalls.push((callback, gap_us));
-                }
-                if underruns > seen {
-                    heard.underrun_at.push(callback);
-                    seen = underruns;
-                }
-                if start.elapsed() > JUDGED {
-                    heard.underruns = underruns - before;
-                    if heard.stalls.is_empty() || aside.len() + 1 == WINDOWS {
-                        break;
-                    }
-                    // The runner stalled the output thread: set aside.
-                    aside.push(std::mem::take(&mut heard));
-                    window = None;
-                    guard_until = Some(Instant::now() + GUARD);
-                    continue;
-                }
-                heard.depth += (top + foot) as u64;
-                heard.looks += 2;
-                for &x in &out {
-                    if (f64::from(x) - LEVEL).abs() < 1e-2 {
-                        heard.on += 1;
-                    } else {
-                        heard.off += 1;
-                    }
+                if let Some(judged) =
+                    witness.called(Instant::now(), late_us, underruns, judging, played)
+                {
+                    return Some(judged);
                 }
             }
-            (heard, aside)
         })
     };
     let end = Instant::now() + Duration::from_secs(15);
@@ -335,7 +244,10 @@ fn a_stalled_pump_leaves_the_output_s_bridge_whole() {
         std::thread::sleep(Duration::from_millis(50));
     }
     receiving.store(1, Ordering::Release);
-    let (heard, aside) = output.join().expect("the output thread");
+    let (heard, aside) = output
+        .join()
+        .expect("the output thread")
+        .unwrap_or_else(|| (Window::default(), Vec::new()));
     let channel = receiver.rx_channels().remove(0);
     let pump = receiver.media().engine().expect("the receiver's pump");
     let sent = sender.media().engine().expect("the sender's pump");
@@ -355,8 +267,8 @@ fn a_stalled_pump_leaves_the_output_s_bridge_whole() {
     assert_eq!(
         (heard.underruns, heard.off),
         (0, 0),
-        "bridge underruns and samples off the level with {stalls} pump stalls, {}: {heard:?}, {pump:?}, {channel:?}, the ring {ring:?}, the pull's restarts {}, the sender's pump {sent:?}; windows set aside (the output thread stalled) {aside:?}",
-        verdict(&heard),
+        "bridge underruns and samples off the level with {stalls} pump stalls, {}: {heard:?}, the output thread's stall bound {stall_us} us past its floor, {pump:?}, {channel:?}, the ring {ring:?}, the pull's restarts {}, the sender's pump {sent:?}; windows set aside (lost to the runner) {aside:?}",
+        verdict(&heard, CAUSE_CALLBACKS, NAMES),
         pulled.restarts()
     );
     // The pull drains every callback: a packet is late only past P and the
@@ -375,34 +287,9 @@ fn a_stalled_pump_leaves_the_output_s_bridge_whole() {
     // block (15.33 ms), under the pump path's own wait.
     let target_ms = buffer.target_ns() as f64 / 1e6;
     let block_ms = buffer.block_ns() as f64 / 1e6;
-    let mean = heard.mean_depth_ms();
+    let mean = heard.mean_depth_ms(RATE);
     assert!(
         mean > target_ms - 1.0 && mean < target_ms + block_ms,
         "mean wait {mean:.2} ms against the target {target_ms:.3} ms + a block {block_ms:.3} ms: {heard:?}"
     );
-}
-
-#[test]
-fn the_verdict_names_the_runner_only_after_an_output_stall() {
-    let heard = |stalls: &[(u64, u64)], underrun_at: &[u64]| Heard {
-        stalls: stalls.to_vec(),
-        underrun_at: underrun_at.to_vec(),
-        ..Heard::default()
-    };
-    let stall = &[(40, 30_000)];
-    assert!(verdict(&heard(stall, &[40])).starts_with("verdict RUNNER"));
-    // The last callback the stall still explains, and the first it does not.
-    assert!(verdict(&heard(stall, &[40 + CAUSE_CALLBACKS])).starts_with("verdict RUNNER"));
-    assert!(verdict(&heard(stall, &[41 + CAUSE_CALLBACKS])).starts_with("verdict OURS"));
-    // An underrun before the stall, or with the output thread on time.
-    assert!(verdict(&heard(stall, &[39])).starts_with("verdict OURS"));
-    assert!(verdict(&heard(&[], &[40])).starts_with("verdict OURS"));
-    // One underrun of two without a stall before it.
-    assert!(verdict(&heard(stall, &[40, 90])).starts_with("verdict OURS"));
-    // Samples off with no underrun: no stall explains them.
-    assert!(verdict(&heard(stall, &[])).starts_with("verdict OURS"));
-    // Each underrun after a stall of its own, the second one's the later.
-    let two = &[(40, 30_000), (90, 25_000)];
-    assert!(verdict(&heard(two, &[41, 92])).starts_with("verdict RUNNER"));
-    assert!(verdict(&heard(two, &[41, 95])).starts_with("verdict OURS"));
 }
