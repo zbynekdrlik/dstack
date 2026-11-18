@@ -104,7 +104,9 @@ impl Counters {
     /// bins of how far behind the driver's schedule a switch came; a gap
     /// over two periods is [`Counters::late`] only).
     pub fn late_bins(&self) -> [u64; LATE_BINS] {
-        std::array::from_fn(|i| self.late_bins[i].load(Ordering::Relaxed))
+        // Acquire: a bin read sees the peak stored before its count
+        // (`note_callback`), so a reader of both reads the bins first.
+        std::array::from_fn(|i| self.late_bins[i].load(Ordering::Acquire))
     }
 
     /// The run's peak lateness behind the driver's schedule so far, ns
@@ -149,7 +151,8 @@ impl Counters {
         self.line_ns.store(line, Ordering::Relaxed);
         self.late_max_ns.fetch_max(late, Ordering::Relaxed);
         if let Some(bin) = lateness_bin(late) {
-            self.late_bins[bin].fetch_add(1, Ordering::Relaxed);
+            // Release: the peak above is visible with this count.
+            self.late_bins[bin].fetch_add(1, Ordering::Release);
         }
     }
 }

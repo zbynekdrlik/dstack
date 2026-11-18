@@ -79,12 +79,25 @@ impl UnderrunCounts {
             late_bins: std::array::from_fn(|i| rise(self.late_bins[i], before.late_bins[i])),
             late_callbacks: rise(self.late_callbacks, before.late_callbacks),
             period_us: self.period_us,
-            late_max_us: if self.late_max_us == before.late_max_us {
-                0
-            } else {
+            late_max_us: if self.late_max_us != before.late_max_us || self.fell_from(before) {
                 self.late_max_us
+            } else {
+                0
             },
         }
+    }
+}
+
+impl UnderrunCounts {
+    /// A lateness count fell since `before`: a new run's counters, whose
+    /// peak lateness is its own even when it equals the old run's.
+    fn fell_from(&self, before: &UnderrunCounts) -> bool {
+        self.late_callbacks < before.late_callbacks
+            || self
+                .late_bins
+                .iter()
+                .zip(&before.late_bins)
+                .any(|(n, b)| n < b)
     }
 }
 
