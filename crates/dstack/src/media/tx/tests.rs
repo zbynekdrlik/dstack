@@ -450,6 +450,7 @@ fn wake_ns_is_the_first_ns_the_next_packet_is_due() {
                 next,
                 fpp: 32,
                 max_lag: 96,
+                receiver_lag: 0,
                 rebootstraps: 0,
             };
             let w = s.wake_ns(rate, TX_MARGIN_NS);
@@ -2868,4 +2869,5 @@ fn a_seamless_handover_step_restarts_no_tx_schedule() {
 mod app_view;
 #[cfg(target_os = "linux")]
 mod direct;
+mod receiver_bound;
 mod thread_split;

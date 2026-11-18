@@ -167,7 +167,7 @@ pub(crate) fn verdict(window: &Window, off: u64, tx: &Restarts, ours: &[(&str, u
         })
         .collect();
     let who = if !window.runner(off, tx, ours) {
-        "OURS".to_string()
+        format!("OURS{}", tx.ours())
     } else {
         let mut threads = Vec::new();
         if window.underruns > 0 {
@@ -334,6 +334,7 @@ mod witness_tests {
         lines: Vec::new(),
         rate: 48_000,
         oversleep_max_us: 0,
+        receiver_lag: 0,
     };
 
     // `counted` TX restarts with lines of these oversleeps (µs), each a
@@ -361,6 +362,30 @@ mod witness_tests {
             text.contains("the writer thread was not run; the TX thread's"),
             "{text}"
         );
+    }
+
+    /// dstack #426 (run 44407677291): 864 off after one restart whose
+    /// sleep was 8465 us late, bound at the sender's 803 samples while the
+    /// receiver played at 1312: the stack's, named so.
+    #[test]
+    fn samples_off_after_a_restart_under_the_receiver_s_latency_are_ours() {
+        let w = window(0, &[], &[]);
+        let mut under = restarts(1, &[Some(9_282)]);
+        under.receiver_lag = 433;
+        assert!(!w.runner(480, &under, CLEAN));
+        let text = verdict(&w, 480, &under, CLEAN);
+        assert!(
+            text.starts_with(
+                "verdict OURS (a TX restart bound under the receiver's latency): 0 underruns"
+            ),
+            "{text}"
+        );
+        // At the receiver's latency the sleep decides, as before.
+        under.receiver_lag = 432;
+        assert!(verdict(&w, 480, &under, CLEAN).starts_with("verdict RUNNER"));
+        // Any other OURS names nothing more.
+        let text = verdict(&w, 480, &restarts(1, &[Some(500)]), CLEAN);
+        assert!(text.starts_with("verdict OURS: "), "{text}");
     }
 
     #[test]
