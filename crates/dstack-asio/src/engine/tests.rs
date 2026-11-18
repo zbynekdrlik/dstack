@@ -182,14 +182,16 @@ fn each_callback_is_timed_against_the_period() {
     e.note_callback(15_999_999);
     assert_eq!(c.take_gap_max_ns(), 500_000);
     // Lateness bins (dstack #386): the switch exactly two periods apart
-    // was 1.0 ms late (bin 3); the late one counts only as late.
-    assert_eq!(c.late_bins(), [0, 0, 0, 1, 0, 0, 0, 0]);
+    // was 1.0 ms late (bin 3); the late one counts only as late. The one
+    // half a period after it is still 0.5 ms behind the driver's schedule
+    // (bin 0, #393): it did not catch up.
+    assert_eq!(c.late_bins(), [1, 0, 0, 1, 0, 0, 0, 0]);
 }
 
 /// Each switch's lateness goes to its own bin, counted per bin; under a
 /// quarter ms late and a gap past two periods count in no bin (dstack
-/// #386). An early switch re-anchors the line after each late one, so each
-/// is late by exactly its own lateness (#393).
+/// #386). A catch-up switch right after each late one re-anchors the
+/// line, so each is late by exactly its own lateness (#393).
 #[test]
 fn each_callback_counts_in_its_lateness_bin() {
     // 96 frames at 48 kHz: a period of 2 ms.
@@ -203,7 +205,7 @@ fn each_callback_counts_in_its_lateness_bin() {
     ] {
         t += 2_000_000 + late;
         e.note_callback(t);
-        t += 1_000_000; // half a period on: early, the line re-anchors
+        t += 1_000; // the catch-up switch: early, the line re-anchors
         e.note_callback(t);
     }
     assert_eq!(c.late_bins(), [2, 0, 0, 1, 0, 0, 1, 1]);
