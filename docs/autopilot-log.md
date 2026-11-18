@@ -75,3 +75,4 @@ One line per ticket: issue, commits, tests (RED -> GREEN where a bug), decisions
 - 18.11 10:31 CET: v0.6.178 tagged (#393 peak lateness, #395 rx_pull witness). v0.6.179 = #399 weekly consumer version sync (consumer-pins.yml Wed 06:00 UTC; owner 18.11).
 - 18.11 12:15 CET: v0.6.179 released (#399 weekly sync). v0.6.180 = sync judges by library change + CI apt step without third-party sources.
 - 18.11 14:41 CET: v0.6.180 released (sync judges by library change; CI apt sources). First sync run: #405, 2 of 7 behind (songplayer main, iemmixer).
+- 18.11 15:41 CET: v0.6.181 = #409 (send interface after a NIC re-create) + #410 (play_at d earlier) + #403 (guard, grant line) + #401/#396 (verdicts) + #290 docs (Cx kept; NDIS measured worse on mbc).
