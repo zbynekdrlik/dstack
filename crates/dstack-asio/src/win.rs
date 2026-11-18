@@ -542,6 +542,7 @@ impl Device for WinDevice {
             late_callbacks: c.late(),
             fast_callbacks: c.fast(),
             late_bins: c.late_bins(),
+            late_max_ns: c.late_max_ns(),
             faults: c.faults(),
         }
     }

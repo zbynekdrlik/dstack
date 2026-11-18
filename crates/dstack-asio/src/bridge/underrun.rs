@@ -43,8 +43,13 @@ pub struct UnderrunCounts {
     /// The runner's callbacks over two periods ([`Status::late_callbacks`]).
     pub late_callbacks: u64,
     /// The driver's buffer period, us (0: no driver opened yet): how late
-    /// the top bin's callbacks can be.
+    /// one gap can make the top bin's callbacks.
     pub period_us: u64,
+    /// The run's peak lateness behind the driver's schedule, us
+    /// ([`Status::late_max_us`], dstack #393). In a rise
+    /// ([`UnderrunCounts::since`]): the peak when it rose over the check
+    /// (or a new run's), else 0.
+    pub late_max_us: u64,
 }
 
 impl UnderrunCounts {
@@ -61,6 +66,7 @@ impl UnderrunCounts {
             late_bins: status.late_bins,
             late_callbacks: status.late_callbacks,
             period_us,
+            late_max_us: status.late_max_us,
         }
     }
 
@@ -73,6 +79,11 @@ impl UnderrunCounts {
             late_bins: std::array::from_fn(|i| rise(self.late_bins[i], before.late_bins[i])),
             late_callbacks: rise(self.late_callbacks, before.late_callbacks),
             period_us: self.period_us,
+            late_max_us: if self.late_max_us == before.late_max_us {
+                0
+            } else {
+                self.late_max_us
+            },
         }
     }
 }
@@ -119,10 +130,10 @@ impl Cause {
 /// late, or surely at least 3/4 of the target late: a bin whose lower edge
 /// is at least that (at 1.333 ms from 1.0 ms late, where #382's simulation
 /// first lost audio); the open top bin (2.0 ms or more behind the
-/// driver's schedule, #393) is judged by the period too, as late as one
-/// gap can make a callback (a lateness summed over several switches can
-/// pass it; the bins do not say by how much). Else the bridge's; unknown
-/// while the target is 0.
+/// driver's schedule, #393) by the run's peak lateness when that rose over
+/// the check (a lateness summed over several switches can pass a period),
+/// else by the period, as late as one gap can make a callback. Else the
+/// bridge's; unknown while the target is 0.
 pub fn from_asio_cause(rise: &UnderrunCounts, target_us: u64) -> Cause {
     if target_us == 0 {
         return Cause::Unknown;
@@ -132,6 +143,7 @@ pub fn from_asio_cause(rise: &UnderrunCounts, target_us: u64) -> Cause {
     }
     let reach_us = match rise.late_bins.iter().rposition(|&n| n > 0) {
         None => return Cause::Bridge,
+        Some(bin) if is_top(bin) && rise.late_max_us > 0 => rise.late_max_us,
         Some(bin) if is_top(bin) => rise.period_us.max(lower_edge_us(bin)),
         Some(bin) => lower_edge_us(bin),
     };

@@ -43,6 +43,8 @@ pub struct Counters {
     /// The driver's schedule line at the last switch ([`schedule_lag`],
     /// dstack #393).
     line_ns: AtomicI64,
+    /// The run's peak lateness behind the schedule, ns (dstack #393).
+    late_max_ns: AtomicI64,
     /// The driver's buffer period, ns.
     period_ns: i64,
     /// The last buffer switch, ns on the caller's clock ([`NO_CALLBACK`]
@@ -66,6 +68,7 @@ impl Counters {
             fast: AtomicU64::new(0),
             late_bins: [const { AtomicU64::new(0) }; LATE_BINS],
             line_ns: AtomicI64::new(NO_CALLBACK),
+            late_max_ns: AtomicI64::new(0),
             period_ns,
             last_ns: AtomicI64::new(NO_CALLBACK),
             gap_max_ns: AtomicI64::new(0),
@@ -104,6 +107,12 @@ impl Counters {
         std::array::from_fn(|i| self.late_bins[i].load(Ordering::Relaxed))
     }
 
+    /// The run's peak lateness behind the driver's schedule so far, ns
+    /// ([`schedule_lag`]; 0 while none came late).
+    pub fn late_max_ns(&self) -> i64 {
+        self.late_max_ns.load(Ordering::Relaxed)
+    }
+
     /// The longest gap since the last call, ns (0 when none came after
     /// another); starts the next interval.
     pub fn take_gap_max_ns(&self) -> i64 {
@@ -138,6 +147,7 @@ impl Counters {
         let line = self.line_ns.load(Ordering::Relaxed);
         let (late, line) = schedule_lag(now_ns, line, self.period_ns);
         self.line_ns.store(line, Ordering::Relaxed);
+        self.late_max_ns.fetch_max(late, Ordering::Relaxed);
         if let Some(bin) = lateness_bin(late) {
             self.late_bins[bin].fetch_add(1, Ordering::Relaxed);
         }
