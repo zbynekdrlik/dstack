@@ -19,6 +19,14 @@
 //! kernel resolve it. Opening the socket needs `CAP_NET_RAW`; without it the
 //! device warns at start and every flow uses the UDP socket.
 //!
+//! The socket is not bound to an interface: each send names the
+//! interface's index ([`Direct::send`], `sll_ifindex`). A NIC destroyed
+//! and created again (a USB reset, dstack #414) keeps its name and address
+//! under a new index, and a send to the old one fails with ENXIO; the
+//! daemon's interface watch moves the socket to the new index
+//! ([`Direct::follow`], through `TxShared::keep_send_interface`), a single
+//! atomic word the TX thread reads without a lock.
+//!
 //! On Windows (dstack #1, the FOH PC's send stalls below Winsock) the host
 //! application may hand dstack a [`FrameSender`]: its own kernel send path
 //! (an NDIS filter, dasio's). dstack then writes the whole Ethernet II frame
@@ -32,6 +40,8 @@
 
 use std::io;
 use std::net::{Ipv4Addr, SocketAddrV4};
+#[cfg(target_os = "linux")]
+use std::sync::atomic::{AtomicI32, Ordering};
 
 /// The IPv4 and UDP headers written in front of a media packet.
 pub const HEADROOM: usize = IP_HEADER + UDP_HEADER;
@@ -274,8 +284,29 @@ pub fn nic_of(ip: Ipv4Addr) -> Option<String> {
 pub struct Direct {
     #[cfg(target_os = "linux")]
     fd: std::os::fd::OwnedFd,
+    /// The interface index each send names: the control side moves it
+    /// after a re-create ([`Direct::follow`]), the TX thread reads it.
     #[cfg(target_os = "linux")]
-    ifindex: i32,
+    ifindex: AtomicI32,
+}
+
+/// The index of the interface `nic` now; an error when there is none.
+#[cfg(target_os = "linux")]
+fn index_of(nic: &str) -> io::Result<i32> {
+    let name = std::ffi::CString::new(nic)?;
+    // SAFETY: a NUL-terminated name the call only reads.
+    match unsafe { libc::if_nametoindex(name.as_ptr()) } {
+        0 => Err(io::Error::last_os_error()),
+        index => Ok(index as i32),
+    }
+}
+
+/// Stores the interface's index `now` in `cell`: the old and the new index
+/// when it moved (a re-create), `None` when it holds.
+#[cfg(target_os = "linux")]
+fn moved_to(cell: &AtomicI32, now: i32) -> Option<(i32, i32)> {
+    let old = cell.swap(now, Ordering::Relaxed);
+    (old != now).then_some((old, now))
 }
 
 /// Linux's `PACKET_QDISC_BYPASS` (not in the libc crate).
@@ -288,12 +319,7 @@ impl Direct {
     #[cfg(target_os = "linux")]
     pub fn open(nic: &str) -> io::Result<Direct> {
         use std::os::fd::FromRawFd;
-        let name = std::ffi::CString::new(nic)?;
-        // SAFETY: a NUL-terminated name the call only reads.
-        let ifindex = unsafe { libc::if_nametoindex(name.as_ptr()) };
-        if ifindex == 0 {
-            return Err(io::Error::last_os_error());
-        }
+        let ifindex = index_of(nic)?;
         // Protocol 0: the socket receives nothing; each send names its own.
         // SAFETY: plain arguments; the result is checked.
         let raw = unsafe {
@@ -324,7 +350,7 @@ impl Direct {
         }
         Ok(Direct {
             fd,
-            ifindex: ifindex as i32,
+            ifindex: AtomicI32::new(ifindex),
         })
     }
 
@@ -341,14 +367,29 @@ impl Direct {
         let udp = std::net::UdpSocket::bind("127.0.0.1:0").expect("a UDP socket");
         Direct {
             fd: udp.into(),
-            ifindex,
+            ifindex: AtomicI32::new(ifindex),
         }
     }
 
     /// The interface index each send names now (tests).
     #[cfg(all(test, target_os = "linux"))]
     pub(crate) fn index(&self) -> i32 {
-        self.ifindex
+        self.ifindex.load(Ordering::Relaxed)
+    }
+
+    /// Sends on the interface `nic`'s index from now on (dstack #414: a
+    /// re-created NIC keeps its name under a new index): the old and the
+    /// new index when it moved, `None` when it holds, an error when no
+    /// interface has the name. The TX thread's next send names it.
+    #[cfg(target_os = "linux")]
+    pub fn follow(&self, nic: &str) -> io::Result<Option<(i32, i32)>> {
+        Ok(moved_to(&self.ifindex, index_of(nic)?))
+    }
+
+    /// Off Linux: never opened, so never called.
+    #[cfg(not(target_os = "linux"))]
+    pub fn follow(&self, _nic: &str) -> io::Result<Option<(i32, i32)>> {
+        Ok(None)
     }
 
     /// Sends the IPv4 `frame` to `mac` (the hot path: one system call).
@@ -358,7 +399,9 @@ impl Direct {
         let mut to: libc::sockaddr_ll = unsafe { std::mem::zeroed() };
         to.sll_family = libc::AF_PACKET as u16;
         to.sll_protocol = (libc::ETH_P_IP as u16).to_be();
-        to.sll_ifindex = self.ifindex;
+        // One word the control side may move (a re-create), read without
+        // a lock: the TX thread never waits on it.
+        to.sll_ifindex = self.ifindex.load(Ordering::Relaxed);
         to.sll_halen = 6;
         to.sll_addr[..6].copy_from_slice(&mac);
         // SAFETY: `frame` and `to` outlive the call, which only reads them.
