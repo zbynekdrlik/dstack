@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.178
+
+- **Fix (#393): the underrun line judges the top lateness bin by the run's peak lateness.** Since 0.6.177 a callback's lateness is summed over switches that did not catch up, so the top bin (2.0 ms or more behind) can hold callbacks later than one period, the reach it was judged by: 3.5 ms behind at a 4 ms from-ASIO target read as the bridge's. The counters now keep the run's peak lateness behind the driver's schedule (`DeviceEvents::late_max_ns`, `runner::Status::late_max_us`); a check whose peak rose judges the top bin by it, any other by the period as before. dsg's 1.667 ms target is not affected (its top bin is the driver's either way).
+  - API (additive): `DeviceEvents::late_max_ns`, `Status::late_max_us`, `UnderrunCounts::late_max_us`, `Counters::late_max_ns`. A full `UnderrunCounts { .. }` or `DeviceEvents { .. }` literal adds the field.
+  - **dasio:** move the pin; log `late_max_us` beside `late_bins` in the counts line if wanted. **Other consumers:** nothing to change. **No latency change.**
+- **Tests (#395): `dlink/tests/rx_pull.rs` witnesses its output thread.** A windows-2025 run (PR #394) failed it with 2 underruns and no ring hole: the runner not running the test's output thread, as `to_asio_pull.rs` once did. It now records the thread's own gaps, sets aside a window with a stall over two periods (up to 4) and prints `verdict RUNNER|OURS`. Both consumer witnesses guard 100 ms after a set-aside window and count underruns from before a window's first fill.
+
 ## 0.6.177
 
 - **Fix (#393, dasio#120): an ASIO bridge's callback lateness is measured against the driver's schedule.** dsg's bridge (MiniFuse, 128 frames at 96 kHz, from-ASIO target 1.667 ms) logged two from-ASIO underruns as `cause: the bridge (no callback late enough)` with only 500-1000 us late callbacks counted. The lateness bins counted each switch's gap minus the period alone. The MiniFuse delivers on 1 ms USB frames (gaps 2, 1, 1 ms: a third of all switches read 500-750 us), and a frame slip (two 2 ms gaps in a row) puts the driver's write 1.0-1.333 ms behind its schedule while the gaps read 500-750 us twice.

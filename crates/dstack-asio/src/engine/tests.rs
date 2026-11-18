@@ -237,6 +237,11 @@ fn consecutive_late_switches_count_their_summed_lateness() {
         "0.6 ms behind, then 1.2 ms behind"
     );
     assert_eq!(c.late(), 0);
+    // The run's peak lateness: the second switch's, to the ns.
+    assert_eq!(
+        c.late_max_ns(),
+        2 * period + 1_200_000 - (period + period / 1000 + period)
+    );
 }
 
 /// A driver clock slower than the PC's builds no lag on its own (dstack

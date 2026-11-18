@@ -82,6 +82,9 @@ pub struct Status {
     /// Callbacks per lateness bin, under `late_callbacks` (0.25 ms bins,
     /// named by [`crate::state::LATE_BIN_KEYS`], dstack #386).
     pub late_bins: [u64; crate::state::LATE_BINS],
+    /// The run's peak lateness behind the driver's schedule, whole us
+    /// (dstack #393): how far the top bin's callbacks reached.
+    pub late_max_us: u64,
     pub overloads: u64,
     pub faults: u64,
     /// The longest gap between two buffer switches over the last poll, ms.
@@ -294,6 +297,7 @@ impl<D: Device> Runner<D> {
             s.late_callbacks = ev.late_callbacks;
             s.fast_callbacks = ev.fast_callbacks;
             s.late_bins = ev.late_bins;
+            s.late_max_us = (ev.late_max_ns / 1000).max(0) as u64;
             s.overloads = ev.overloads;
             s.faults = ev.faults;
             s.gap_max_ms = ev.callback_gap_max_ns as f64 / 1e6;

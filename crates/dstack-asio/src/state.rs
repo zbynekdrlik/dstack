@@ -192,6 +192,9 @@ pub struct DeviceEvents {
     /// Buffer switches per lateness bin ([`lateness_bin`], [`LATE_BIN_KEYS`]),
     /// since the start (monotonic): 0.25 ms bins under [`GapKind::Late`].
     pub late_bins: [u64; LATE_BINS],
+    /// The peak lateness behind the driver's schedule since the start, ns
+    /// ([`schedule_lag`], dstack #393; it only rises).
+    pub late_max_ns: i64,
     /// Panics of the app's `Process` since the start (it plays silence from
     /// then on).
     pub faults: u64,
