@@ -46,14 +46,14 @@ impl Waiting {
 }
 
 /// Why a follower with the view `v` that is not in use waits, having
-/// closed `heard` windows lately ([`Minute::round`]): its thread ended;
-/// else it hears nothing; else not locked; else not settled; else (locked
-/// and settled, yet not chosen) the selector waits for it to agree with
-/// the service.
-pub fn waiting_of(v: super::View, heard: u64) -> Waiting {
+/// closed `heard` windows lately ([`Minute::round`]; `None`: the wait's
+/// first round, nothing counted yet): its thread ended; else it hears
+/// nothing; else not locked; else not settled; else (locked and settled,
+/// yet not chosen) the selector waits for it to agree with the service.
+pub fn waiting_of(v: super::View, heard: Option<u64>) -> Waiting {
     if !v.alive {
         Waiting::Stopped
-    } else if heard == 0 {
+    } else if heard == Some(0) {
         Waiting::NoPtp
     } else if !v.locked {
         Waiting::NotLocked
@@ -79,21 +79,30 @@ impl Minute {
     /// One selector round at `now_ns` with the follower's `windows` so far,
     /// `waiting` while it is not in use. Returns the windows it closed
     /// lately (the last whole minute's or this minute's so far, the more;
-    /// 0 while in use) and, when a line is due (a minute of waiting since
+    /// `None` while in use and on a wait's first round, which has nothing
+    /// to count from) and, when a line is due (a minute of waiting since
     /// the last), the windows of that minute.
-    pub fn round(&mut self, now_ns: i64, windows: u64, waiting: bool) -> (u64, Option<u64>) {
+    pub fn round(
+        &mut self,
+        now_ns: i64,
+        windows: u64,
+        waiting: bool,
+    ) -> (Option<u64>, Option<u64>) {
         if !waiting {
             *self = Minute::default();
-            return (0, None);
+            return (None, None);
         }
-        let (at, base) = *self.mark.get_or_insert((now_ns, windows));
+        let Some((at, base)) = self.mark else {
+            self.mark = Some((now_ns, windows));
+            return (None, None);
+        };
         let since = windows.saturating_sub(base);
         let due = (now_ns.saturating_sub(at) >= NOT_IN_USE_EVERY_NS).then_some(since);
         if due.is_some() {
             self.mark = Some((now_ns, windows));
             self.last = due;
         }
-        (self.last.unwrap_or(0).max(since), due)
+        (Some(self.last.unwrap_or(0).max(since)), due)
     }
 }
 

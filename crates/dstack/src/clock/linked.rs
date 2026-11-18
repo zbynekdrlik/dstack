@@ -440,8 +440,9 @@ impl Linked {
                 reason = %why.word(),
                 windows_last_minute = windows,
                 grandmaster = %grandmaster_text(c.grandmaster),
-                locked = c.locked,
-                settled = c.settled,
+                // The view the reason was judged on, never a later read.
+                locked = v.locked,
+                settled = v.settled,
                 error_ns = ?c.offset_ns,
                 offset_ns = ?selected.wait_offset_ns.flatten(),
                 source = ?selected.source,

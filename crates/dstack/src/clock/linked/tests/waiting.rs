@@ -27,18 +27,53 @@ fn the_reason_is_the_first_that_holds() {
                 alive: false,
                 ..all
             },
-            9
+            Some(9)
         ),
         Waiting::Stopped
     );
-    assert_eq!(waiting_of(view(false, false, false), 0), Waiting::Stopped);
-    assert_eq!(waiting_of(all, 0), Waiting::NoPtp);
-    assert_eq!(waiting_of(view(true, false, false), 0), Waiting::NoPtp);
-    assert_eq!(waiting_of(view(true, false, true), 1), Waiting::NotLocked);
-    assert_eq!(waiting_of(view(true, false, false), 1), Waiting::NotLocked);
-    assert_eq!(waiting_of(view(true, true, false), 1), Waiting::NotSettled);
-    assert_eq!(waiting_of(all, 1), Waiting::WaitsToAgree);
-    assert_eq!(waiting_of(all, 60), Waiting::WaitsToAgree);
+    assert_eq!(
+        waiting_of(view(false, false, false), Some(0)),
+        Waiting::Stopped
+    );
+    assert_eq!(waiting_of(view(false, true, true), None), Waiting::Stopped);
+    assert_eq!(waiting_of(all, Some(0)), Waiting::NoPtp);
+    assert_eq!(
+        waiting_of(view(true, false, false), Some(0)),
+        Waiting::NoPtp
+    );
+    assert_eq!(
+        waiting_of(view(true, false, true), Some(1)),
+        Waiting::NotLocked
+    );
+    assert_eq!(
+        waiting_of(view(true, false, false), Some(1)),
+        Waiting::NotLocked
+    );
+    assert_eq!(
+        waiting_of(view(true, true, false), Some(1)),
+        Waiting::NotSettled
+    );
+    assert_eq!(waiting_of(all, Some(1)), Waiting::WaitsToAgree);
+    assert_eq!(waiting_of(all, Some(60)), Waiting::WaitsToAgree);
+}
+
+/// A wait's first round has counted nothing yet: never `no_ptp` for a
+/// follower that is locked (the review of #420: a locked, settled follower
+/// read `no_ptp` for its first second).
+#[test]
+fn a_wait_s_first_round_judges_the_lock_not_the_count() {
+    assert_eq!(
+        waiting_of(view(true, true, true), None),
+        Waiting::WaitsToAgree
+    );
+    assert_eq!(
+        waiting_of(view(true, true, false), None),
+        Waiting::NotSettled
+    );
+    assert_eq!(
+        waiting_of(view(true, false, false), None),
+        Waiting::NotLocked
+    );
 }
 
 #[test]
@@ -71,32 +106,35 @@ fn a_grandmaster_reads_as_hex_pairs_or_none() {
 
 /// One line a minute of waiting, from the minute's start (never at once),
 /// with the windows of that minute; the windows heard lately are the last
-/// whole minute's or this one's so far, the more.
+/// whole minute's or this one's so far, the more (none counted on a wait's
+/// first round).
 #[test]
 fn the_minute_limiter_counts_a_minute_of_waiting_on_fake_time() {
     let mut m = Minute::default();
     let t0 = 5 * S;
-    assert_eq!(m.round(t0, 100, true), (0, None));
-    assert_eq!(m.round(t0 + 30 * S, 103, true), (3, None));
-    assert_eq!(m.round(t0 + 60 * S - 1, 110, true), (10, None));
+    assert_eq!(m.round(t0, 100, true), (None, None));
+    assert_eq!(m.round(t0 + S, 100, true), (Some(0), None));
+    assert_eq!(m.round(t0 + 30 * S, 103, true), (Some(3), None));
+    assert_eq!(m.round(t0 + 60 * S - 1, 110, true), (Some(10), None));
     // A minute: the line, with that minute's windows.
-    assert_eq!(m.round(t0 + 60 * S, 111, true), (11, Some(11)));
+    assert_eq!(m.round(t0 + 60 * S, 111, true), (Some(11), Some(11)));
     // The last minute's count holds until this one's passes it.
-    assert_eq!(m.round(t0 + 61 * S, 112, true), (11, None));
-    assert_eq!(m.round(t0 + 90 * S, 140, true), (29, None));
-    assert_eq!(m.round(t0 + 120 * S - 1, 140, true), (29, None));
-    assert_eq!(m.round(t0 + 120 * S, 141, true), (30, Some(30)));
+    assert_eq!(m.round(t0 + 61 * S, 112, true), (Some(11), None));
+    assert_eq!(m.round(t0 + 90 * S, 140, true), (Some(29), None));
+    assert_eq!(m.round(t0 + 120 * S - 1, 140, true), (Some(29), None));
+    assert_eq!(m.round(t0 + 120 * S, 141, true), (Some(30), Some(30)));
     // A silent minute after it.
-    assert_eq!(m.round(t0 + 150 * S, 141, true), (30, None));
-    assert_eq!(m.round(t0 + 180 * S, 141, true), (0, Some(0)));
+    assert_eq!(m.round(t0 + 150 * S, 141, true), (Some(30), None));
+    assert_eq!(m.round(t0 + 180 * S, 141, true), (Some(0), Some(0)));
     // In use: nothing, and the next wait starts a minute of its own.
-    assert_eq!(m.round(t0 + 181 * S, 150, false), (0, None));
+    assert_eq!(m.round(t0 + 181 * S, 150, false), (None, None));
     assert_eq!(m, Minute::default());
-    assert_eq!(m.round(t0 + 200 * S, 160, true), (0, None));
-    assert_eq!(m.round(t0 + 240 * S, 161, true), (1, None));
-    assert_eq!(m.round(t0 + 260 * S, 165, true), (5, Some(5)));
-    // A count that went back (never in dsync) reads as none heard.
-    assert_eq!(m.round(t0 + 261 * S, 100, true), (5, None));
+    assert_eq!(m.round(t0 + 200 * S, 160, true), (None, None));
+    assert_eq!(m.round(t0 + 240 * S, 161, true), (Some(1), None));
+    assert_eq!(m.round(t0 + 260 * S, 165, true), (Some(5), Some(5)));
+    // A count that went back (never in dsync): this minute's count reads
+    // as 0; the last whole minute's 5 holds.
+    assert_eq!(m.round(t0 + 261 * S, 100, true), (Some(5), None));
 }
 
 /// What the test's follower has: its view, windows and grandmaster, and
@@ -180,7 +218,13 @@ fn the_selector_says_once_a_minute_why_the_follower_is_not_in_use() {
     let log = crate::test_log::capture_at(tracing::Level::INFO, || {
         for t in 0..=60 {
             assert_eq!(linked.tick_at(t * S), Source::Service);
-            assert_eq!(waiting(), Some(Waiting::NoPtp), "at {t} s");
+            // The first round has counted nothing: judged on the lock.
+            let want = if t == 0 {
+                Waiting::NotLocked
+            } else {
+                Waiting::NoPtp
+            };
+            assert_eq!(waiting(), Some(want), "at {t} s");
         }
     });
     let l = lines(&log);
