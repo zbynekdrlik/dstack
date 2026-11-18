@@ -51,12 +51,27 @@ pub(crate) struct Restart {
 }
 
 impl Restart {
-    /// Whether the sleep before the restart returned the flow's latency
-    /// late or more, at the device's `rate`: the TX thread was not run.
+    /// Whether the restart was a lag past the bound (not a jump back, whose
+    /// lag is negative) after a sleep that returned the flow's latency late
+    /// or more, at the device's `rate`: the TX thread was not run.
     pub(crate) fn slept_past(&self, rate: u32) -> bool {
-        self.oversleep_us.is_some_and(|us| {
-            u128::from(us) * u128::from(rate) >= u128::from(self.max_lag) * 1_000_000
-        })
+        self.lag > i64::try_from(self.max_lag).unwrap_or(i64::MAX)
+            && self.oversleep_us.is_some_and(|us| {
+                u128::from(us) * u128::from(rate) >= u128::from(self.max_lag) * 1_000_000
+            })
+    }
+
+    /// The most samples the restart may cost the receiver: its lag and its
+    /// bound again. The schedule skips its lag and up to two packets (the
+    /// packet it found late, and the new first stamp is the next multiple
+    /// of fpp after now); the receiver counted 61 to 83 samples more than
+    /// the lag a restart at 48 kHz (dev1, 18.11.2026: lag 577, 638 and 660
+    /// ring holes a restart; fpp 32), so the room is the latency, not two
+    /// packets. A loss past it has another cause beside the restarts.
+    pub(crate) fn lost_max(&self) -> u64 {
+        u64::try_from(self.lag.max(0))
+            .unwrap_or(0)
+            .saturating_add(self.max_lag)
     }
 }
 
@@ -174,13 +189,7 @@ impl Opened {
     pub(crate) fn close(&self, tx: &TxShared, rate: u32) -> Restarts {
         Restarts {
             counted: counted(tx).saturating_sub(self.counted),
-            lines: lines()
-                .get(self.mark..)
-                .unwrap_or_default()
-                .iter()
-                .filter(|(thread, _)| thread.starts_with(TX_THREAD))
-                .map(|&(_, r)| r)
-                .collect(),
+            lines: tx_lines(lines().get(self.mark..).unwrap_or_default()),
             rate,
             oversleep_max_us: tx.tx_thread().oversleep_max_us,
         }
@@ -216,6 +225,44 @@ impl Restarts {
             && self.lines.len() as u64 >= self.counted
             && self.lines.iter().all(|r| r.slept_past(self.rate))
     }
+
+    /// Whether the restarts are the runner's ([`Restarts::runner`]) and
+    /// left at least `lost` samples unsent: each at most
+    /// [`Restart::lost_max`]. A larger loss has another cause beside them
+    /// (a dropped packet in the same window).
+    pub(crate) fn explain(&self, lost: u64) -> bool {
+        self.runner() && lost <= self.lines.iter().map(Restart::lost_max).sum::<u64>()
+    }
+}
+
+/// The lines of `logged` the TX threads wrote: every other thread's (a
+/// unit test's) never enters a window.
+fn tx_lines(logged: &[(String, Restart)]) -> Vec<Restart> {
+    logged
+        .iter()
+        .filter(|(thread, _)| thread.starts_with(TX_THREAD))
+        .map(|&(_, r)| r)
+        .collect()
+}
+
+/// `counted` TX restarts at 48 kHz with lines of these oversleeps (µs),
+/// each a lag of 440 samples on a 9 ms latency (432 samples): the
+/// witnesses' unit tests' fixture.
+#[cfg(test)]
+pub(crate) fn fixture(counted: u64, oversleeps: &[Option<u64>]) -> Restarts {
+    Restarts {
+        counted,
+        lines: oversleeps
+            .iter()
+            .map(|&oversleep_us| Restart {
+                lag: 440,
+                max_lag: 432,
+                oversleep_us,
+            })
+            .collect(),
+        rate: 48_000,
+        oversleep_max_us: 0,
+    }
 }
 
 impl Debug for Restarts {
@@ -239,6 +286,8 @@ impl Debug for Restarts {
 #[cfg(test)]
 mod restarts_tests {
     use super::*;
+    use dstack::media::tx::Schedule;
+    use dstack::media::tx::split::Before;
 
     /// A restart line at 48 kHz with a 9 ms latency (432 samples).
     fn line(oversleep_us: Option<u64>) -> Restart {
@@ -249,35 +298,60 @@ mod restarts_tests {
         }
     }
 
-    fn restarts(counted: u64, lines: &[Restart]) -> Restarts {
-        Restarts {
-            counted,
-            lines: lines.to_vec(),
-            rate: 48_000,
-            oversleep_max_us: 0,
-        }
-    }
-
     #[test]
     fn a_restart_is_the_runner_s_when_its_sleep_returned_the_latency_late() {
         // 432 samples at 48 kHz: 9000 us exactly, and one µs under it.
         assert!(line(Some(9_000)).slept_past(48_000));
         assert!(!line(Some(8_999)).slept_past(48_000));
         assert!(!line(None).slept_past(48_000));
-        assert!(restarts(1, &[line(Some(9_282))]).runner());
-        assert!(restarts(2, &[line(Some(9_282)), line(Some(12_000))]).runner());
+        assert!(fixture(1, &[Some(9_282)]).runner());
+        assert!(fixture(2, &[Some(9_282), Some(12_000)]).runner());
     }
 
     #[test]
     fn a_restart_without_a_late_sleep_is_not_the_runner_s() {
         // No restart: nothing to blame on the TX thread.
-        assert!(!restarts(0, &[]).runner());
+        assert!(!fixture(0, &[]).runner());
         // A sleep on time (the pass ran long), unmeasured, or one of two.
-        assert!(!restarts(1, &[line(Some(500))]).runner());
-        assert!(!restarts(1, &[line(None)]).runner());
-        assert!(!restarts(2, &[line(Some(9_282)), line(Some(500))]).runner());
+        assert!(!fixture(1, &[Some(500)]).runner());
+        assert!(!fixture(1, &[None]).runner());
+        assert!(!fixture(2, &[Some(9_282), Some(500)]).runner());
         // A counted restart with no line (a re-anchor).
-        assert!(!restarts(2, &[line(Some(9_282))]).runner());
+        assert!(!fixture(2, &[Some(9_282)]).runner());
+        // A jump back (a negative lag) or a lag within the bound, whatever
+        // the sleep.
+        let jump = Restart {
+            lag: -5_000,
+            ..line(Some(20_000))
+        };
+        assert!(!jump.slept_past(48_000));
+        let within = Restart {
+            lag: 432,
+            ..line(Some(20_000))
+        };
+        assert!(!within.slept_past(48_000));
+    }
+
+    #[test]
+    fn restarts_explain_at_most_their_lags_and_bounds_each() {
+        // 440 + 432 samples a restart.
+        assert_eq!(line(Some(9_282)).lost_max(), 872);
+        let two = fixture(2, &[Some(9_282), Some(9_282)]);
+        assert!(two.explain(1_744));
+        assert!(!two.explain(1_745));
+        // Never past a restart without a late sleep.
+        assert!(!fixture(1, &[Some(500)]).explain(1));
+    }
+
+    #[test]
+    fn a_window_takes_only_the_tx_threads_lines() {
+        let logged = [
+            ("dstack-tx".to_string(), line(Some(1))),
+            ("dstack-tx-relay".to_string(), line(Some(2))),
+            ("restarts_tests".to_string(), line(Some(3))),
+            (String::new(), line(Some(4))),
+        ];
+        assert_eq!(tx_lines(&logged), [line(Some(1)), line(Some(2))]);
     }
 
     /// The lines this thread logged since `mark`.
@@ -291,28 +365,25 @@ mod restarts_tests {
     }
 
     #[test]
-    fn the_subscriber_records_the_restart_line_s_fields() {
+    fn the_subscriber_records_the_stack_s_own_restart_line() {
         listen();
         let mark = lines().len();
-        // The line as `Schedule::due_after` writes it, from a target under
-        // the TX module; another warning and another target are not taken.
-        tracing::warn!(
-            target: "dstack::media::tx::schedule",
-            lag = 440_i64,
-            max_lag = 432_u64,
-            oversleep_us = %9_282,
-            last_pass_us = %"-",
-            "the TX schedule starts again"
-        );
+        // The stack's own line (`Schedule::due_after`): a schedule at 0
+        // with fpp 32 sends its first packet (stamp 32) at 64, so a pass at
+        // 504 is 440 samples late, past a 432-sample bound, after a sleep
+        // 9.282 ms late.
+        let mut schedule = Schedule::bootstrap(0, 32, 432);
+        let before = Before {
+            oversleep_ns: Some(9_282_000),
+            ..Before::default()
+        };
+        assert_eq!(schedule.due_after(504, &before), None);
+        // Unmeasured: `-`.
+        let mut schedule = Schedule::bootstrap(0, 32, 432);
+        assert_eq!(schedule.due_after(600, &Before::default()), None);
+        // Another warning and another target are not taken.
         tracing::warn!(target: "dstack::media::tx::schedule", lag = 1_i64, "another line");
         tracing::warn!(target: "dstack::other", "the TX schedule starts again");
-        tracing::warn!(
-            target: "dstack::media::tx::schedule",
-            lag = 7_i64,
-            max_lag = 432_u64,
-            oversleep_us = %"-",
-            "the TX schedule starts again"
-        );
         assert_eq!(
             own_since(mark),
             [
@@ -322,7 +393,7 @@ mod restarts_tests {
                     oversleep_us: Some(9_282)
                 },
                 Restart {
-                    lag: 7,
+                    lag: 536,
                     max_lag: 432,
                     oversleep_us: None
                 }

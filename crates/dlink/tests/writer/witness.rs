@@ -40,9 +40,14 @@
 //! its schedule then starts again and the packets it skipped never reach
 //! the receiver. The verdict reads the window's TX restarts with their own
 //! lines' `oversleep_us` (`tests/tx_restart/restarts.rs`, which each
-//! including test declares as `mod restarts`): samples off are `RUNNER`
-//! only with such a restart, every restart's sleep returned the flow's
-//! latency late, and a restart without that evidence is `OURS`.
+//! including test declares as `mod restarts`): samples off with no
+//! underrun are `RUNNER` only when every restart's sleep returned the
+//! flow's latency late and they are no more than the restarts can leave
+//! unsent (each its lag and its bound); a restart without that evidence
+//! is `OURS`. Here the TX thread is the code under test, so a window lost
+//! to it is never set aside (only a writer stall is): the test fails with
+//! the verdict. The consumer tests (`tests/consumer/witness.rs`) set such
+//! a window aside, since their sender is not under test.
 
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
@@ -141,8 +146,8 @@ impl Window {
         (self.underruns > 0 || off > 0)
             && ours.iter().all(|&(_, n)| n == 0)
             && self.underruns_writer_s()
-            && (self.underruns > 0 || tx.any())
             && (!tx.any() || tx.runner())
+            && (self.underruns > 0 || tx.explain(off))
     }
 }
 
@@ -331,22 +336,10 @@ mod witness_tests {
         oversleep_max_us: 0,
     };
 
-    /// `counted` TX restarts with lines of these oversleeps (µs) on a 9 ms
-    /// latency (432 samples at 48 kHz): 9000 us and more is the runner's.
-    fn restarts(counted: u64, oversleeps: &[Option<u64>]) -> Restarts {
-        Restarts {
-            counted,
-            lines: oversleeps
-                .iter()
-                .map(|&oversleep_us| crate::restarts::Restart {
-                    lag: 440,
-                    max_lag: 432,
-                    oversleep_us,
-                })
-                .collect(),
-            ..NO_TX
-        }
-    }
+    // `counted` TX restarts with lines of these oversleeps (µs), each a
+    // lag of 440 samples on a 9 ms latency (432 samples at 48 kHz): 9000
+    // us and more is the runner's, 872 samples off each at most.
+    use crate::restarts::fixture as restarts;
 
     #[test]
     fn samples_off_after_a_late_tx_sleep_are_the_runner_s() {
@@ -388,6 +381,10 @@ mod witness_tests {
         let late = restarts(1, &[Some(9_282)]);
         assert!(!w.runner(480, &late, &[("TX holes", 1)]));
         assert!(!w.runner(0, &late, CLEAN));
+        // More off than the restart may cost (440 + 432): a
+        // dropped packet beside it.
+        assert!(w.runner(872, &late, CLEAN));
+        assert!(!w.runner(873, &late, CLEAN));
     }
 
     #[test]

@@ -31,13 +31,18 @@
 //! their own lines' oversleep ([`super::restarts`]).
 //!
 //! [`verdict`]: `RUNNER` when every underrun follows a consumer stall
-//! within the cause count, `SENDER` when the loss is never-written holes
-//! and every TX restart of the sender in the window slept the flow's
-//! latency late, both named when both hold, else `OURS`. A judged window
-//! is set aside (kept for the message) only when it lost audio and its
-//! verdict is not `OURS`, and the next one is judged after [`GUARD`], up
-//! to [`WINDOWS`]; the last is judged as it is. A window in which the
-//! consumer stalled without a loss is judged, so the run stays short.
+//! within the cause count, `SENDER` when the loss is never-written holes,
+//! every TX restart of the sender in the window slept the flow's latency
+//! late and the holes are no more than those restarts can leave unsent,
+//! both named when both hold, else `OURS`. A judged window is set aside
+//! (kept for the message) only when it lost audio and its verdict is not
+//! `OURS`, and the next one is judged after [`GUARD`], up to [`WINDOWS`];
+//! the last is judged as it is. A window in which the consumer stalled
+//! without a loss is judged, so the run stays short. A stall in the
+//! settling starts the guard too. A window counts its underruns and holes
+//! from before its first callback; its TX restarts from that callback's
+//! end, so a restart just before the open whose holes land inside it
+//! reads `OURS` (every edge errs to `OURS`, never past a failure).
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -138,8 +143,9 @@ impl Window {
     /// Who lost the window's audio: every underrun after a consumer stall
     /// within `cause` callbacks is the runner's; never-written ring holes
     /// are the sender's when every TX restart of its window slept the
-    /// flow's latency late; samples off with neither, or a TX restart
-    /// without that evidence, are ours.
+    /// flow's latency late and they are no more than those restarts can
+    /// leave unsent ([`Restarts::explain`]); samples off with neither, or
+    /// a TX restart without that evidence, are ours.
     pub(crate) fn who(&self, cause: u64) -> Who {
         let consumer = self.underruns > 0;
         let sender = self.holes > 0;
@@ -149,8 +155,8 @@ impl Window {
                     .underrun_at
                     .iter()
                     .all(|&at| self.causes(at, cause).next().is_some()));
-        let sender_explained =
-            (!sender || self.sender.any()) && (!self.sender.any() || self.sender.runner());
+        let sender_explained = (!sender || self.sender.explain(self.holes))
+            && (!self.sender.any() || self.sender.runner());
         if !self.lost() || !(consumer || sender) || !underruns_explained || !sender_explained {
             return Who::Ours;
         }
@@ -195,6 +201,11 @@ pub(crate) fn verdict(window: &Window, cause: u64, names: Names) -> String {
     )
 }
 
+/// How late a callback due at `due` woke, µs: read right after its sleep.
+pub(crate) fn late_us(due: Instant) -> u64 {
+    u64::try_from(Instant::now().saturating_duration_since(due).as_micros()).unwrap_or(u64::MAX)
+}
+
 /// An open window: when, and the counts at its open.
 struct Open {
     start: Instant,
@@ -209,8 +220,9 @@ pub(crate) struct Witness<H> {
     stall_us: u64,
     cause: u64,
     judged: Duration,
-    /// The ring's never-written holes so far.
+    /// The ring's never-written holes so far, and as of the last callback.
     holes: H,
+    holes_seen: u64,
     /// The sending device's TX side and rate.
     sender: Option<(Arc<TxShared>, u32)>,
     /// The consumer's least lateness since its start, µs.
@@ -235,13 +247,14 @@ impl<H: FnMut() -> u64> Witness<H> {
         cause: u64,
         judged: Duration,
         underruns: u64,
-        holes: H,
+        mut holes: H,
         sender: Option<(Arc<TxShared>, u32)>,
     ) -> Self {
         Witness {
             stall_us: u64::try_from(period.as_micros()).unwrap_or(u64::MAX),
             cause,
             judged,
+            holes_seen: holes(),
             holes,
             sender,
             floor_us: None,
@@ -274,9 +287,17 @@ impl<H: FnMut() -> u64> Witness<H> {
         let floor_us = self.floor_us.map_or(late_us, |f| f.min(late_us));
         self.floor_us = Some(floor_us);
         let stalled = late_us - floor_us > self.stall_us;
-        // The underruns after this callback, and before it.
+        // The underruns and the ring's never-written holes after this
+        // callback, and before it.
         let prior = std::mem::replace(&mut self.counted, underruns);
+        let holes = (self.holes)();
+        let holes_prior = std::mem::replace(&mut self.holes_seen, holes);
         if !judging {
+            // A stall in the settling: its catch-up underrun must not land
+            // in the first window.
+            if stalled {
+                self.guard_until = Some(now + GUARD);
+            }
             return None;
         }
         if self.guard_until.is_some_and(|until| now < until) {
@@ -286,14 +307,14 @@ impl<H: FnMut() -> u64> Witness<H> {
             return None;
         }
         if self.open.is_none() {
-            // A window starts: its underruns are counted from before this
-            // callback.
+            // A window starts: its underruns and holes are counted from
+            // before this callback, whose samples it counts.
             self.seen = prior;
             self.window = Window::default();
             self.open = Some(Open {
                 start: now,
                 underruns: prior,
-                holes: (self.holes)(),
+                holes: holes_prior,
                 sender: self.sender.as_ref().map(|(tx, _)| restarts::open(tx)),
             });
         }
@@ -320,7 +341,7 @@ impl<H: FnMut() -> u64> Witness<H> {
         let mut window = std::mem::take(&mut self.window);
         window.underruns = underruns - open.underruns;
         window.floor_us = floor_us;
-        window.holes = (self.holes)().saturating_sub(open.holes);
+        window.holes = holes.saturating_sub(open.holes);
         if let (Some(opened), Some((tx, rate))) = (open.sender, self.sender.as_ref()) {
             window.sender = opened.close(tx, *rate);
         }
@@ -362,22 +383,15 @@ mod consumer_tests {
         }
     }
 
-    /// `counted` TX restarts with lines of these oversleeps (µs) on a 9 ms
-    /// latency (432 samples at 48 kHz).
+    /// `counted` TX restarts with lines of these oversleeps (µs), each 470
+    /// samples late on a 9 ms latency (432 samples at 48 kHz): up to 902
+    /// samples unsent each.
     fn sender(counted: u64, oversleeps: &[Option<u64>]) -> Restarts {
-        Restarts {
-            counted,
-            lines: oversleeps
-                .iter()
-                .map(|&oversleep_us| Restart {
-                    lag: 440,
-                    max_lag: 432,
-                    oversleep_us,
-                })
-                .collect(),
-            rate: 48_000,
-            oversleep_max_us: 0,
+        let mut restarts = crate::restarts::fixture(counted, oversleeps);
+        for line in &mut restarts.lines {
+            *line = Restart { lag: 470, ..*line };
         }
+        restarts
     }
 
     fn says(w: &Window) -> String {
@@ -439,6 +453,16 @@ mod consumer_tests {
         let mut w = window(1, 3000, STALL, &[41]);
         w.sender = sender(1, &[Some(500)]);
         assert_eq!(w.who(CAUSE), Who::Ours);
+        // More holes than the late restarts may cost (902 each): packets
+        // dropped beside them.
+        let mut w = window(0, 1804, &[], &[]);
+        w.sender = sender(2, &[Some(9_282), Some(9_282)]);
+        w.holes = 1804;
+        assert_eq!(w.who(CAUSE), Who::Sender);
+        w.holes = 1805;
+        assert_eq!(w.who(CAUSE), Who::Ours);
+        // Samples off with a consumer stall but no underrun and no hole.
+        assert_eq!(window(0, 520, STALL, &[]).who(CAUSE), Who::Ours);
     }
 
     /// A witness of a 10 ms consumer judging 95 ms windows (a window opens
@@ -554,5 +578,68 @@ mod consumer_tests {
             (1, Who::Runner),
             "{judged:?}"
         );
+    }
+
+    /// One callback at `ms` after `t0`, `late` µs late, the bridge at
+    /// `underruns` after it.
+    fn at(
+        w: &mut Witness<impl FnMut() -> u64>,
+        t0: Instant,
+        ms: u64,
+        late: u64,
+        underruns: u64,
+        judging: bool,
+    ) -> Option<(Window, Vec<Window>)> {
+        let now = t0 + Duration::from_millis(ms);
+        w.called(now, late, underruns, judging, Played::default())
+    }
+
+    #[test]
+    fn a_stall_in_the_guard_restarts_it_and_a_window_counts_from_before_its_first_callback() {
+        let t0 = Instant::now();
+        let mut w = witness();
+        // A window lost to a stall: set aside at 100 ms, guarded to 200.
+        assert!(at(&mut w, t0, 0, 0, 0, true).is_none());
+        assert!(at(&mut w, t0, 10, 25_000, 0, true).is_none());
+        for ms in (20..=100).step_by(10) {
+            assert!(at(&mut w, t0, ms, 0, 1, true).is_none());
+        }
+        // A stall at 150 ms restarts the guard to 250: 210 is unjudged.
+        assert!(at(&mut w, t0, 150, 25_000, 1, true).is_none());
+        assert!(at(&mut w, t0, 210, 0, 1, true).is_none());
+        // The next window opens at 250 on a callback that underran: the
+        // underrun is its first callback's.
+        assert!(at(&mut w, t0, 250, 0, 2, true).is_none());
+        let judged = (260..=350)
+            .step_by(10)
+            .find_map(|ms| at(&mut w, t0, ms, 0, 2, true));
+        let (judged, aside) = judged.expect("judged at 350 ms");
+        assert_eq!(aside.len(), 1, "{aside:?}");
+        assert_eq!(
+            (
+                judged.underruns,
+                judged.underrun_at.as_slice(),
+                judged.calls
+            ),
+            (1, &[1][..], 11),
+            "{judged:?}"
+        );
+    }
+
+    #[test]
+    fn a_stall_in_the_settling_guards_the_first_window() {
+        let t0 = Instant::now();
+        let mut w = witness();
+        // Settling: a stall at 10 ms, its catch-up underrun at 20 ms (now
+        // judged, but inside the guard to 110 ms).
+        assert!(at(&mut w, t0, 0, 0, 0, false).is_none());
+        assert!(at(&mut w, t0, 10, 25_000, 0, false).is_none());
+        assert!(at(&mut w, t0, 20, 0, 1, true).is_none());
+        let judged = (30..=300)
+            .step_by(10)
+            .find_map(|ms| at(&mut w, t0, ms, 0, 1, true));
+        let (judged, aside) = judged.expect("judged");
+        assert!(aside.is_empty(), "{aside:?}");
+        assert_eq!((judged.underruns, judged.lost()), (0, false), "{judged:?}");
     }
 }

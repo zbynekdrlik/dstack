@@ -40,7 +40,7 @@ use dstack_asio::{Block, Opened, Process, Sample};
 mod restarts;
 #[path = "../../dlink/tests/consumer/witness.rs"]
 mod witness;
-use witness::{Names, Played, Window, Witness, verdict};
+use witness::{Names, Played, Window, Witness, late_us, verdict};
 
 /// How many switches after a stall of the driver thread an underrun is its
 /// own: the late switch's excess skip and the switches made back to back
@@ -226,8 +226,7 @@ fn a_stalled_pump_leaves_the_to_asio_bridge_whole() {
                     std::thread::sleep(wait);
                 }
                 // How late this switch woke past its due time.
-                let late = Instant::now().saturating_duration_since(next);
-                let late_us = u64::try_from(late.as_micros()).unwrap_or(u64::MAX);
+                let late_us = late_us(next);
                 side.process(&mut Block::new(BUFFER, &[], &mut out));
                 let foot = fifo.len();
                 let underruns = stats.underruns();

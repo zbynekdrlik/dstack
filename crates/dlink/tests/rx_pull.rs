@@ -33,7 +33,7 @@ use dlink::{Block, Clock, Config, Link, Map, Place, Ports, Process, Stopped, Sub
 mod restarts;
 #[path = "consumer/witness.rs"]
 mod witness;
-use witness::{Names, Played, Window, Witness, verdict};
+use witness::{Names, Played, Window, Witness, late_us, verdict};
 
 /// The test device's address: loopback, so none of its mDNS, info or
 /// heartbeat multicasts leaves the box (dstack #366: this workspace is a
@@ -207,8 +207,7 @@ fn a_stalled_pump_leaves_the_output_s_bridge_whole() {
                     std::thread::sleep(wait);
                 }
                 // How late this callback woke past its due time.
-                let late = Instant::now().saturating_duration_since(next);
-                let late_us = u64::try_from(late.as_micros()).unwrap_or(u64::MAX);
+                let late_us = late_us(next);
                 pull.pull();
                 let top = fifo.len();
                 player.fill_with(&mut out, 1, |x| x as f32);
