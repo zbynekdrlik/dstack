@@ -96,3 +96,18 @@ fn failed_query_sends_are_counted_and_name_the_interface_again() {
     });
     assert_eq!(fake.reads(), 0, "named by the send watch, not the list's");
 }
+
+#[test]
+fn failed_query_sends_are_reported_with_their_count_and_error() {
+    let r = Report {
+        failures: 7,
+        error: "No such device (os error 19)".to_string(),
+    };
+    let text = crate::test_log::capture_warnings(|| report(&r));
+    assert!(
+        text.contains("mDNS queries could not be sent (counted; one line a minute at most)"),
+        "{text}"
+    );
+    assert!(text.contains("failures=7"), "{text}");
+    assert!(text.contains("No such device (os error 19)"), "{text}");
+}
