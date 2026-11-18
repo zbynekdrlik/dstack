@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.180
+
+- **The weekly consumer sync asks a consumer to move only when the library code changed (#399).** The first run (18.11.2026) listed all 7 consumers as behind v0.6.179, a release that changed only a workflow and scripts: exactly the per-release churn the owner ruled out. A pin now counts as behind only when the library crates (`dstack`, `dlink`, `dstack-audio-io`, `dstack-resample`, `dstack-endpoint`, `dstack-asio`) or `vendor/mdns-sd` differ between it and the latest tag; otherwise its row reads "current (no library change to vX)". The same read on 18.11: songplayer (main v0.6.99) and iemmixer (v0.6.137) behind, the other five current.
+- **CI: the apt step leaves third-party sources out.** The v0.6.179 release's Linux binaries job failed when packages.microsoft.com answered 429 (`apt-get update --error-on=any`), while the Ubuntu mirrors worked; every package the step installs comes from Ubuntu's archive, so `scripts/ci-apt-deps.sh` moves the runner's other sources aside first.
+  - **No code or latency change.** Consumers: nothing to change.
+
 ## 0.6.179
 
 - **Weekly consumer version sync (#399, the owner's call of 18.11.2026).** Consumers had drifted far behind (intercom 60 releases, iemmixer 41), while an upgrade ask per micro-release costs every consumer session tokens. Now once a week, Wednesday 06:00 UTC (07:00 CET), the `Consumer pins` workflow reads each consumer's pinned dstack tag from its Cargo.lock (`scripts/consumers.toml`) and opens or updates one "Weekly consumer version sync" issue listing those behind the latest release; dstack then sends each its upgrade notes from its own pin. Between Wednesdays a release goes only to the consumer that reported its bug or asked for its feature.
