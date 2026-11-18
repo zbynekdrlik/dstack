@@ -21,6 +21,7 @@ use crate::wire::{Header, reply};
 
 mod grant_read;
 mod names;
+mod send_if;
 
 pub(crate) const TEST_DEVICE: &str = include_str!("../../../../../config/test-device.toml");
 /// Every wait's bound, so a mutant that hangs fails fast.

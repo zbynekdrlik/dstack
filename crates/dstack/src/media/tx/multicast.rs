@@ -5,16 +5,24 @@
 //! [`TxTable`] entry sent to a group ([`multicast_group`]) rather than to
 //! the receiver that asked for it. No receiver keeps one alive, so it
 //! never expires; the TX thread sends it as any other flow, from the
-//! slot's socket ([`multicast_out`]).
+//! slot's socket ([`multicast_out`]). After an interface change the
+//! daemon's tick names the sockets' send interface again
+//! ([`TxShared::keep_send_interface`], dstack #411).
 
 use std::io;
 use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
+use std::time::Instant;
 
 use tracing::{info, warn};
 
 use super::{MAX_FLOWS, TxFlow, TxShared, TxTable};
 use crate::arc::flows::MAX_FLOW_CHANNELS;
 use crate::device::{DeviceConfig, SavedMulticast};
+use crate::membership::{Link, Membership, SEND_IF, send_on};
+
+/// What the flow sockets' interface watch names in its lines (dstack
+/// #411).
+pub(crate) const FLOW_SOCKETS: &str = "the TX flow sockets (our multicast flows)";
 
 /// The UDP port of our multicast flows' groups, Dante's.
 pub const MULTICAST_PORT: u16 = 4321;
@@ -42,7 +50,8 @@ pub fn multicast_group(ip: Ipv4Addr, process_id: u16, slot: usize) -> SocketAddr
 /// address `ip` (the interface a group is sent on is otherwise the
 /// routing table's), with [`MULTICAST_TTL`]. Looped back to this host's
 /// members, as by default (another device on the same PC may receive the
-/// flow).
+/// flow). Linux keeps the interface's INDEX; after an interface re-create
+/// [`TxShared::keep_send_interface`] names it again.
 pub(super) fn multicast_out(s: &UdpSocket, ip: Ipv4Addr) -> io::Result<()> {
     let r = socket2::SockRef::from(s);
     r.set_multicast_if_v4(&ip)?;
@@ -153,6 +162,40 @@ impl TxShared {
             }
         }
         self.publish(&control);
+    }
+
+    /// Names our address's interface again as every flow socket's
+    /// multicast send interface ([`send_on`], dstack #411): each socket
+    /// tried, the first error returned.
+    pub(crate) fn send_on_again(&self) -> io::Result<()> {
+        (self.sockets.iter())
+            .map(|s| send_on(s, self.ip))
+            .fold(Ok(()), Result::and)
+    }
+
+    /// The flow sockets' interface watch, from the daemon's tick (dstack
+    /// #411): [`Membership::keep_as`] of `watch` at `now` on the list
+    /// `read`; after an interface change (the address back after it was
+    /// gone, or on a new index: a USB NIC's reset re-creates it) every
+    /// socket's send interface is named again ([`TxShared::send_on_again`]),
+    /// logged once with [`SEND_IF`]'s words, a failure warned and tried at
+    /// the next look. True when it was named again. Without it Linux routes
+    /// every multicast send by the old index, and each fails with ENODEV
+    /// (counted in the lane's `send_errors`) until a restart.
+    pub(crate) fn keep_send_interface(
+        &self,
+        watch: &mut Membership,
+        now: Instant,
+        read: impl FnOnce() -> io::Result<Vec<Link>>,
+    ) -> bool {
+        watch.keep_as(now, read, SEND_IF, FLOW_SOCKETS, || self.send_on_again())
+    }
+
+    /// The flow sockets, one per slot (other modules' tests: their
+    /// multicast send interface, dstack #411).
+    #[cfg(test)]
+    pub(crate) fn flow_sockets(&self) -> &[UdpSocket] {
+        &self.sockets
     }
 }
 

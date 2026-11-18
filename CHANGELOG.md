@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.182
+
+- **Fix (#411, #409's follow-up): a device's own multicast TX flows send again after its NIC is re-created.** Each TX flow socket set its multicast send interface once at bind, and Linux keeps the interface INDEX: after a re-create (a USB reset, a new ifindex) every multicast send failed with ENODEV for good (in the netns proof: 60 s of `os_error=19`, the receiver at 0 packets). The daemon's tick now keeps a second interface watch beside #282's RX one and names every flow socket's send interface again on a change (`multicast send interface named again ... the TX flow sockets`). Not covered yet: the Linux AF_PACKET TX bypass socket (#414).
+- **CI (#411): a whole-device interface re-create test** (`recreate` job): two `dstack-dev peer` devices in a netns on a dummy `rig0`, one receiving the other by multicast and the other by unicast; `rig0` is deleted for 5 s and re-added with a new index, and both must deliver again within 60 s.
+- **Docs (#407): a Dante leg on a netplan/systemd-networkd host** keeps its real prefix (the kernel's prefix route stays in main there), never a `/32`: dstack's devices report their interface netmask to Dante Controller, so a `/32` reads as a subnet mismatch.
+  - **No latency change.** **Consumers:** move the pin with Wednesday's sync; nothing to port.
+
 ## 0.6.181
 
 - **Fix (#409): a device finds its transmitters again after its NIC is re-created.** On stream-snv (18.11.2026) the Dante NIC (a USB RTL8156B) went through a USB reset and came back under the same name with a new interface index; the running stream-obs (dlink in OBS) never received again (`unknown_device` every minute) until OBS was restarted, 23 min later. Cause: the RX directory's mDNS query socket and discovery's sweeper set their multicast send interface once at start, and Linux keeps the interface INDEX, so every later query failed with ENODEV (logged only at debug). Now the #282 interface watch also names the send interface again when the address returns or its index changes (`multicast send interface named again after an interface change`), failed query sends are counted (`Instances::send_errors`), warned at most once a minute, and three in a row name the interface again. Our own multicast TX flows have the same pattern: #411.
