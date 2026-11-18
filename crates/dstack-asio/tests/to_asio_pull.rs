@@ -11,19 +11,22 @@
 //! loopback (dstack #366) and its own system clock; our device hears itself
 //! (the tests' rule: our device only).
 //!
-//! The driver thread records its own scheduling gaps on the app's clock
-//! (dstack #307, a windows-2025 failure of v0.6.155: 2 underruns and 2584
-//! samples off with no ring hole and no pull restart). A gap over two
-//! periods is the runner not running the "driver": the switches it then
-//! makes back to back, to keep its clock, take what the late switch's pull
-//! brought and the player had skipped as an excess (by design), and run
-//! the FIFO dry. A 20 ms stall of this thread every 700 switches, with no
-//! pump stall, reproduced that run on dev1 to the sample (2 underruns,
-//! 2584 off). A real card glitches there too: such a window says nothing
-//! about the bridge. So a judged window in which the driver thread stalled
-//! is set aside (kept for the message) and the next one is judged, up to
-//! [`WINDOWS`], with [`GUARD`] unjudged between them; the asserts on the judged window are unchanged, and a
-//! failure names the driver's stalls before each underrun (`verdict`).
+//! The driver thread is witnessed as dlink's `tests/rx_pull.rs` witnesses
+//! its output thread (dlink's `tests/consumer/witness.rs`, dstack #396):
+//! each switch's lateness against its absolute schedule, the ring's holes
+//! never written and the sender's TX schedule restarts (dstack #401). When
+//! the runner does not run the "driver" (a windows-2025 failure of
+//! v0.6.155: 2 underruns and 2584 samples off with no ring hole and no pull
+//! restart), the switches it then makes back to back, to keep its clock,
+//! take what the late switch's pull brought and the player had skipped as
+//! an excess (by design), and run the FIFO dry. A 20 ms stall of this
+//! thread every 700 switches, with no pump stall, reproduced that run on
+//! dev1 to the sample (2 underruns, 2584 off). A real card glitches there
+//! too: such a window says nothing about the bridge. So a judged window
+//! that lost audio to the runner (the driver thread, or the sender's TX
+//! thread) is set aside (kept for the message) and the next one is judged,
+//! up to [`witness::WINDOWS`]; the asserts on the judged window are
+//! unchanged, and a failure prints `verdict RUNNER|SENDER|OURS`.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -32,6 +35,24 @@ use std::time::{Duration, Instant};
 use dlink::{Clock, Config, Link, Map, Place, Ports, Stopped, SubStatus};
 use dstack_asio::bridge::{Bridge, DanteSide, Spec};
 use dstack_asio::{Block, Opened, Process, Sample};
+
+#[path = "../../dlink/tests/tx_restart/restarts.rs"]
+mod restarts;
+#[path = "../../dlink/tests/consumer/witness.rs"]
+mod witness;
+use witness::{Names, Played, Window, Witness, late_us, verdict};
+
+/// How many switches after a stall of the driver thread an underrun is its
+/// own: the late switch's excess skip and the switches made back to back
+/// after it.
+const CAUSE_SWITCHES: u64 = 8;
+
+/// The driver thread in a verdict.
+const NAMES: Names = Names {
+    thread: "driver thread",
+    call: "switch",
+    calls: "switches",
+};
 
 /// The test device's address: loopback, so none of its mDNS, info or
 /// heartbeat multicasts leaves the box (dstack #366: this workspace is a
@@ -91,91 +112,9 @@ impl Process for Stalling {
     }
 }
 
-/// What the driver thread saw over the judged window.
-#[derive(Debug, Default)]
-struct Heard {
-    /// Samples at the level and off it.
-    on: u64,
-    off: u64,
-    /// The to-ASIO player's underruns in the judged window.
-    underruns: u64,
-    /// The FIFO's depth, frames, summed over two looks a buffer switch (its
-    /// top, a buffer over the depth after the switch, and its foot, the
-    /// depth after it), and the looks.
-    depth: u64,
-    looks: u64,
-    /// The driver thread's own scheduling in the window: its largest gap
-    /// between two switches and every gap over [`DRIVER_STALL_US`] with the
-    /// switch it ended at (µs of the app's clock), and the switch at which
-    /// each underrun was counted.
-    largest_gap_us: u64,
-    stalls: Vec<(u64, u64)>,
-    underrun_at: Vec<u64>,
-}
-
-/// A gap between two of the driver thread's switches over this is a stall
-/// of the thread, µs: two periods (the card's next switch was due).
-const DRIVER_STALL_US: u64 = 2 * BUFFER as u64 * 1_000_000 / RATE as u64;
-
-/// The judged windows the driver thread may need: one whose driver thread
-/// never stalled is judged, a stalled one is set aside.
-const WINDOWS: usize = 4;
-
-/// The unjudged time after a window set aside: the switches a stall at its
-/// close still makes back to back, and the player's re-priming after their
-/// underrun, with room (dstack #395: without it that underrun counted in
-/// the next window, which had no stall of its own and read `OURS`). A
-/// stall inside it starts it again.
-const GUARD: Duration = Duration::from_millis(100);
-
-/// How many switches after a stall of the driver thread an underrun is its
-/// own: the late switch's excess skip and the switches made back to back
-/// after it.
-const CAUSE_SWITCHES: u64 = 8;
-
-/// A failure's verdict: `RUNNER` when every underrun follows a stall of
-/// the driver thread within [`CAUSE_SWITCHES`] (the runner did not run
-/// it); else `OURS` (the bridge lost audio while its consumer ran on
-/// time).
-fn verdict(heard: &Heard) -> String {
-    let caused = |at: u64| {
-        heard
-            .stalls
-            .iter()
-            .filter(move |&&(end, _)| end <= at && at - end <= CAUSE_SWITCHES)
-    };
-    let causes: Vec<String> = heard
-        .underrun_at
-        .iter()
-        .map(|&at| {
-            let before: Vec<String> = caused(at)
-                .map(|&(end, us)| format!("{us} us, {} switches before", at - end))
-                .collect();
-            format!("underrun at switch {at}: driver stalls {before:?}")
-        })
-        .collect();
-    let runner = !heard.underrun_at.is_empty()
-        && heard
-            .underrun_at
-            .iter()
-            .all(|&at| caused(at).next().is_some());
-    let who = if runner {
-        "RUNNER (the driver thread was not run)"
-    } else {
-        "OURS"
-    };
-    format!("verdict {who}: {causes:?}")
-}
-
-impl Heard {
-    /// The FIFO's mean depth over the judged window, ms.
-    fn mean_depth_ms(&self) -> f64 {
-        self.depth as f64 / self.looks.max(1) as f64 * 1e3 / f64::from(RATE)
-    }
-}
-
 #[test]
 fn a_stalled_pump_leaves_the_to_asio_bridge_whole() {
+    restarts::listen();
     let dir = tempfile::tempdir().unwrap();
     let place = Place::Ip(test_ipv4());
     let tx_config = Config::new("asio-pull-tx", dir.path().join("tx.toml"))
@@ -249,6 +188,22 @@ fn a_stalled_pump_leaves_the_to_asio_bridge_whole() {
         .pull_to_asio(pull)
         .expect("the bridge takes the pull");
     let mut side = bridge.asio_side(&opened).expect("the driver's side");
+    // The ring's holes never written (holes the sender left), and the
+    // sender's TX side, for the witness.
+    let period = Duration::from_nanos(BUFFER as u64 * 1_000_000_000 / u64::from(RATE));
+    let ring_media = Arc::clone(receiver.media());
+    let mut witness = Witness::new(
+        period,
+        CAUSE_SWITCHES,
+        JUDGED,
+        stats.underruns(),
+        move || {
+            let ring = ring_media.rx.rings()[0].counters();
+            ring.holes.saturating_sub(ring.late)
+        },
+        Some((Arc::clone(&sender.media().tx), RATE)),
+    );
+    let stall_us = witness.stall_us();
     // The driver thread: a buffer switch every ASIO period, whatever the
     // pump does. It runs from the device's start, as a driver opened at
     // the bridge's start does. The window judged starts SETTLE after the
@@ -261,87 +216,40 @@ fn a_stalled_pump_leaves_the_to_asio_bridge_whole() {
             Arc::clone(&fifo),
         );
         std::thread::spawn(move || {
-            let period = Duration::from_nanos(BUFFER as u64 * 1_000_000_000 / u64::from(RATE));
             let mut out = vec![0f64; BUFFER];
-            let mut heard = Heard::default();
-            let mut aside = Vec::new();
             let began = Instant::now();
             let mut next = began;
             let mut since = None;
-            let mut window: Option<(Instant, u64)> = None;
-            let mut guard_until: Option<Instant> = None;
-            let mut last_ns = dstack::clock::app_monotonic_ns();
-            let mut switch = 0u64;
-            let mut counted = stats.underruns();
-            let mut seen = counted;
             loop {
                 next += period;
                 if let Some(wait) = next.checked_duration_since(Instant::now()) {
                     std::thread::sleep(wait);
                 }
+                // How late this switch woke past its due time.
+                let late_us = late_us(next);
                 side.process(&mut Block::new(BUFFER, &[], &mut out));
                 let foot = fifo.len();
-                switch += 1;
-                let now_ns = dstack::clock::app_monotonic_ns();
-                let gap_us = u64::try_from(now_ns - last_ns).unwrap_or(0) / 1_000;
-                last_ns = now_ns;
-                // The underruns after this switch, and before it.
                 let underruns = stats.underruns();
-                let prior = std::mem::replace(&mut counted, underruns);
-                if receiving.load(Ordering::Acquire) == 0 {
-                    if began.elapsed() > Duration::from_secs(15) {
-                        return (heard, aside);
-                    }
-                    continue;
+                let heard = receiving.load(Ordering::Acquire) != 0;
+                if !heard && began.elapsed() > Duration::from_secs(15) {
+                    return None;
                 }
-                if since.get_or_insert_with(Instant::now).elapsed() < SETTLE {
-                    continue;
-                }
-                if guard_until.is_some_and(|until| Instant::now() < until) {
-                    if gap_us > DRIVER_STALL_US {
-                        guard_until = Some(Instant::now() + GUARD);
-                    }
-                    continue;
-                }
-                let (start, before) = match window {
-                    Some(w) => w,
-                    None => {
-                        // A window starts: its underruns are counted from
-                        // before this switch.
-                        seen = prior;
-                        *window.insert((Instant::now(), prior))
-                    }
+                let judging = heard && since.get_or_insert_with(Instant::now).elapsed() >= SETTLE;
+                let on = out.iter().filter(|&&x| (x - LEVEL).abs() < 1e-2).count() as u64;
+                // The FIFO's top (a buffer over the depth after the switch)
+                // and its foot (the depth after it).
+                let played = Played {
+                    on,
+                    off: BUFFER as u64 - on,
+                    depth: (2 * foot + BUFFER) as u64,
+                    looks: 2,
                 };
-                heard.largest_gap_us = heard.largest_gap_us.max(gap_us);
-                if gap_us > DRIVER_STALL_US {
-                    heard.stalls.push((switch, gap_us));
-                }
-                if underruns > seen {
-                    heard.underrun_at.push(switch);
-                    seen = underruns;
-                }
-                if start.elapsed() > JUDGED {
-                    heard.underruns = underruns - before;
-                    if heard.stalls.is_empty() || aside.len() + 1 == WINDOWS {
-                        break;
-                    }
-                    // The runner stalled the driver thread: set aside.
-                    aside.push(std::mem::take(&mut heard));
-                    window = None;
-                    guard_until = Some(Instant::now() + GUARD);
-                    continue;
-                }
-                heard.depth += (2 * foot + BUFFER) as u64;
-                heard.looks += 2;
-                for &x in &out {
-                    if (x - LEVEL).abs() < 1e-2 {
-                        heard.on += 1;
-                    } else {
-                        heard.off += 1;
-                    }
+                if let Some(judged) =
+                    witness.called(Instant::now(), late_us, underruns, judging, played)
+                {
+                    return Some(judged);
                 }
             }
-            (heard, aside)
         })
     };
     let end = Instant::now() + Duration::from_secs(15);
@@ -349,7 +257,10 @@ fn a_stalled_pump_leaves_the_to_asio_bridge_whole() {
         std::thread::sleep(Duration::from_millis(50));
     }
     receiving.store(1, Ordering::Release);
-    let (heard, aside) = driver.join().expect("the driver thread");
+    let (heard, aside) = driver
+        .join()
+        .expect("the driver thread")
+        .unwrap_or_else(|| (Window::default(), Vec::new()));
     let channel = receiver.rx_channels().remove(0);
     let pump = receiver.media().engine().expect("the receiver's pump");
     let sent = sender.media().engine().expect("the sender's pump");
@@ -369,8 +280,8 @@ fn a_stalled_pump_leaves_the_to_asio_bridge_whole() {
     assert_eq!(
         (heard.underruns, heard.off),
         (0, 0),
-        "to-ASIO underruns and samples off the level with {stalls} pump stalls, {}: {heard:?}, {pump:?}, {channel:?}, the ring {ring:?}, the pull's restarts {}, the sender's pump {sent:?}; windows set aside (the driver thread stalled) {aside:?}",
-        verdict(&heard),
+        "to-ASIO underruns and samples off the level with {stalls} pump stalls, {}: {heard:?}, the driver thread's stall bound {stall_us} us past its floor, {pump:?}, {channel:?}, the ring {ring:?}, the pull's restarts {}, the sender's pump {sent:?}; windows set aside (lost to the runner) {aside:?}",
+        verdict(&heard, CAUSE_SWITCHES, NAMES),
         pulled.restarts()
     );
     // The driver's side drains every buffer switch: a packet is late only
@@ -384,7 +295,7 @@ fn a_stalled_pump_leaves_the_to_asio_bridge_whole() {
     // ring).
     let target_ms = buffer.target_ns() as f64 / 1e6;
     let block_ms = buffer.block_ns() as f64 / 1e6;
-    let mean = heard.mean_depth_ms();
+    let mean = heard.mean_depth_ms(RATE);
     assert!(
         mean > target_ms - 1.0 && mean < target_ms + block_ms,
         "mean wait {mean:.2} ms against the target {target_ms:.3} ms + a block {block_ms:.3} ms: {heard:?}"

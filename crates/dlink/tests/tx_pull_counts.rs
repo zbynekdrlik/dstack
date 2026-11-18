@@ -14,7 +14,9 @@
 //! 10`, `.claude/rules/tests.md`). The app thread is witnessed as in
 //! `tests/tx_pull.rs` (dstack #376, `tests/writer/witness.rs`): a judged
 //! window in which it stalled is set aside, and a failure prints
-//! `verdict RUNNER|OURS`.
+//! `verdict RUNNER|OURS`, reading the window's TX schedule restarts too
+//! (dstack #401, `tests/tx_restart/restarts.rs`; v0.6.178 tag CI's coverage
+//! job: 480 off after a TX sleep 9.3 ms late on a 9 ms latency read `OURS`).
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -23,6 +25,8 @@ use std::time::{Duration, Instant};
 use dlink::bridge::{Player, Stats, TxPull, fifo_for};
 use dlink::{Block, Clock, Config, Link, Map, Place, Ports, Process, Stopped, SubStatus};
 
+#[path = "tx_restart/restarts.rs"]
+mod restarts;
 #[path = "writer/witness.rs"]
 mod witness;
 use witness::{Witness, judge, verdict};
@@ -100,6 +104,8 @@ struct Judged {
     /// The TX fill's counts at the window's start and end.
     before: dstack::media::tx::TxFillView,
     after: dstack::media::tx::TxFillView,
+    /// The sender's TX schedule restarts (dstack #401).
+    tx: restarts::Restarts,
 }
 
 fn tx_holes(link: &Link) -> u64 {
@@ -114,6 +120,7 @@ fn stalled_pump_at(network: u32, name: &str) {
     let _one = ONE_DEVICE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    restarts::listen();
     let dir = tempfile::tempdir().unwrap();
     let place = Place::Ip(test_ipv4());
     let tx_name = format!("{name}-tx");
@@ -206,7 +213,8 @@ fn stalled_pump_at(network: u32, name: &str) {
     std::thread::sleep(SETTLE);
     let fill = || sender.media().tx.tx_fill().expect("the TX pull's counts");
     let (judged, window, aside) = judge(&witness, || {
-        let (holes, before, stalled, on0, off0) = (
+        let (tx, holes, before, stalled, on0, off0) = (
+            restarts::open(&sender.media().tx),
             tx_holes(&sender),
             fill(),
             stalls.load(Ordering::Relaxed),
@@ -223,6 +231,7 @@ fn stalled_pump_at(network: u32, name: &str) {
             stalls: stalls.load(Ordering::Relaxed) - stalled,
             before,
             after: fill(),
+            tx: tx.close(&sender.media().tx, network),
         }
     });
     let Judged {
@@ -232,6 +241,7 @@ fn stalled_pump_at(network: u32, name: &str) {
         stalls,
         before,
         after,
+        tx,
     } = judged;
     let channel = receiver.rx_channels().remove(0);
     let status = sender.status();
@@ -272,17 +282,26 @@ fn stalled_pump_at(network: u32, name: &str) {
         "the TX holes, fill restarts, writes after send and faults of the windows set aside at {network} Hz: {aside_counts:?}, {aside:?}"
     );
     let underruns = window.underruns;
-    let restarts = after.rebootstraps - before.rebootstraps;
+    let fill_restarts = after.rebootstraps - before.rebootstraps;
     let after_send = after.writes_after_send - before.writes_after_send;
     assert_eq!(
-        (off, holes, underruns, restarts, after_send, after.faults),
+        (
+            off,
+            holes,
+            underruns,
+            fill_restarts,
+            after_send,
+            after.faults
+        ),
         (0, 0, 0, 0, 0, 0),
         "samples off the level, TX holes, bridge underruns, the fill's restarts, writes after send and faults at {network} Hz with {stalls} pump stalls: {on} on, {after:?}, {channel:?}; {}, the app thread's stall bound {} us, its record {window:?}; windows set aside (the app thread stalled) {aside:?}; the player's recentres {} and resyncs {}; the sender's status {status}",
         verdict(
             &window,
+            off,
+            &tx,
             &[
                 ("TX holes", holes),
-                ("the fill's restarts", restarts),
+                ("the fill's restarts", fill_restarts),
                 ("writes after send", after_send),
                 ("faults", after.faults),
             ]

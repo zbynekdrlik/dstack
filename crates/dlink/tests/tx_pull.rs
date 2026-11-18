@@ -18,7 +18,10 @@
 //! a judged window in which it stalled is set aside and the next judged,
 //! up to
 //! [`witness::WINDOWS`], and a failure prints `verdict RUNNER|OURS`
-//! (`tests/writer/witness.rs`).
+//! (`tests/writer/witness.rs`). The verdict also reads the window's TX
+//! schedule restarts (dstack #401, `tests/tx_restart/restarts.rs`): samples
+//! off after a restart whose own sleep returned the flow's latency late are
+//! the runner's.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -27,6 +30,8 @@ use std::time::{Duration, Instant};
 use dlink::bridge::{Player, Stats, TxPull, fifo_for};
 use dlink::{Block, Clock, Config, Link, Map, Place, Ports, Process, Stopped, SubStatus};
 
+#[path = "tx_restart/restarts.rs"]
+mod restarts;
 #[path = "writer/witness.rs"]
 mod witness;
 use witness::{Witness, judge, verdict};
@@ -117,6 +122,8 @@ struct Judged {
     /// The pump's stalls, and the pump's view at the window's end.
     stalls: u64,
     sent: String,
+    /// The sender's TX schedule restarts (dstack #401).
+    tx: restarts::Restarts,
 }
 
 /// Every TX slot's holes of `link`.
@@ -128,6 +135,7 @@ fn tx_holes(link: &Link) -> u64 {
 
 #[test]
 fn a_stalled_pump_leaves_the_tx_bridge_s_audio_whole() {
+    restarts::listen();
     let dir = tempfile::tempdir().unwrap();
     let place = Place::Ip(test_ipv4());
     let tx_config = Config::new("dlink-txpull-tx", dir.path().join("tx.toml"))
@@ -218,7 +226,8 @@ fn a_stalled_pump_leaves_the_tx_bridge_s_audio_whole() {
     std::thread::sleep(SETTLE);
     let pump = || sender.media().engine().expect("the sender's pump");
     let (judged, window, aside) = judge(&witness, || {
-        let (holes, after_send, stalled, on0, off0) = (
+        let (tx, holes, after_send, stalled, on0, off0) = (
+            restarts::open(&sender.media().tx),
             tx_holes(&sender),
             pump().writes_after_send,
             stalls.load(Ordering::Relaxed),
@@ -236,6 +245,7 @@ fn a_stalled_pump_leaves_the_tx_bridge_s_audio_whole() {
             after_send: sent.writes_after_send - after_send,
             stalls: stalls.load(Ordering::Relaxed) - stalled,
             sent: format!("{sent:?}"),
+            tx: tx.close(&sender.media().tx, RATE),
         }
     });
     let Judged {
@@ -245,6 +255,7 @@ fn a_stalled_pump_leaves_the_tx_bridge_s_audio_whole() {
         after_send,
         stalls,
         sent,
+        tx,
     } = judged;
     let channel = receiver.rx_channels().remove(0);
     writing.store(false, Ordering::Relaxed);
@@ -272,6 +283,8 @@ fn a_stalled_pump_leaves_the_tx_bridge_s_audio_whole() {
         "samples off the level, the sender's TX holes, its pump's writes after send and its bridge's underruns with {stalls} pump stalls: {on} on, the sender's pump {sent}, {channel:?}; {}, the app thread's stall bound {} us, its record {window:?}; windows set aside (the app thread stalled) {aside:?}",
         verdict(
             &window,
+            off,
+            &tx,
             &[("TX holes", holes), ("writes after send", after_send)]
         ),
         witness.stall_us(),
