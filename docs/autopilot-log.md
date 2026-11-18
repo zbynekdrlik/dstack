@@ -74,3 +74,4 @@ One line per ticket: issue, commits, tests (RED -> GREEN where a bug), decisions
 - 18.11 08:52 CET: v0.6.177 released (#393 schedule-line lateness; Release 44259122792). v0.6.178 = #393 top bin by the run's peak lateness (RED 0289cc4 GREEN 6af4ea3) + #395 rx_pull output-thread witness (lane 5e8adc0..493c621).
 - 18.11 10:31 CET: v0.6.178 tagged (#393 peak lateness, #395 rx_pull witness). v0.6.179 = #399 weekly consumer version sync (consumer-pins.yml Wed 06:00 UTC; owner 18.11).
 - 18.11 12:15 CET: v0.6.179 released (#399 weekly sync). v0.6.180 = sync judges by library change + CI apt step without third-party sources.
+- 18.11 14:41 CET: v0.6.180 released (sync judges by library change; CI apt sources). First sync run: #405, 2 of 7 behind (songplayer main, iemmixer).
