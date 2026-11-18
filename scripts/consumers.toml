@@ -1,0 +1,32 @@
+# The applications that pin dstack by tag (dstack #399): the weekly
+# consumer version sync (`scripts/consumer_pins.py`, workflow
+# `consumer-pins.yml`, Wednesday mornings) reads each one's pinned tag
+# from its Cargo.lock on its default branch. Every repo is public.
+
+[[consumer]]
+name = "intercom"
+lock = "Cargo.lock"
+
+[[consumer]]
+name = "songplayer"
+lock = "Cargo.lock"
+
+[[consumer]]
+name = "iemmixer"
+lock = "Cargo.lock"
+
+[[consumer]]
+name = "presenter"
+lock = "Cargo.lock"
+
+[[consumer]]
+name = "obs"
+lock = "plugins/dante-input/ffi/Cargo.lock"
+
+[[consumer]]
+name = "dcontroller"
+lock = "Cargo.lock"
+
+[[consumer]]
+name = "dasio"
+lock = "Cargo.lock"

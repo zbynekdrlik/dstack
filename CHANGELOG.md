@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.179
+
+- **Weekly consumer version sync (#399, the owner's call of 18.11.2026).** Consumers had drifted far behind (intercom 60 releases, iemmixer 41), while an upgrade ask per micro-release costs every consumer session tokens. Now once a week, Wednesday 06:00 UTC (07:00 CET), the `Consumer pins` workflow reads each consumer's pinned dstack tag from its Cargo.lock (`scripts/consumers.toml`) and opens or updates one "Weekly consumer version sync" issue listing those behind the latest release; dstack then sends each its upgrade notes from its own pin. Between Wednesdays a release goes only to the consumer that reported its bug or asked for its feature.
+  - **No code or latency change.** **Every consumer:** expect one upgrade ask a week at most (Wednesday), with the API changes from your own pin; nothing to change now.
+
 ## 0.6.178
 
 - **Fix (#393): the underrun line judges the top lateness bin by the run's peak lateness.** Since 0.6.177 a callback's lateness is summed over switches that did not catch up, so the top bin (2.0 ms or more behind) can hold callbacks later than one period, the reach it was judged by: 3.5 ms behind at a 4 ms from-ASIO target read as the bridge's. The counters now keep the run's peak lateness behind the driver's schedule (`DeviceEvents::late_max_ns`, `runner::Status::late_max_us`); a check whose peak rose judges the top bin by it, any other by the period as before. dsg's 1.667 ms target is not affected (its top bin is the driver's either way).
