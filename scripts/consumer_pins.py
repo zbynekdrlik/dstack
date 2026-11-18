@@ -124,17 +124,43 @@ def render(rows: list[Row], latest: Version, date: str,
     return "\n".join(lines) + "\n"
 
 
+def without_version(manifest: str) -> str:
+    """The root Cargo.toml less its `version = "..."` lines: every release
+    bumps the workspace version, while the rest (the edition, the profiles
+    every crate inherits) is library-relevant."""
+    return "\n".join(l for l in manifest.splitlines() if not l.startswith("version = "))
+
+
+def tag_exists(v: Version) -> bool:
+    """Whether this checkout knows the tag (a git failure reads as no)."""
+    r = subprocess.run(["git", "rev-parse", "--verify", "--quiet", f"refs/tags/{show(v)}"],
+                       capture_output=True, text=True)
+    return r.returncode == 0
+
+
 def library_changed(pin: Version, latest: Version) -> bool:
     """Whether the library code differs between two dstack tags, read from
-    this checkout's git history (the workflow fetches every tag); a git
-    failure exits."""
+    this checkout's git history (the workflow fetches every tag): the
+    library paths, and the root Cargo.toml less its version. A pin this
+    checkout does not know reads as changed (the consumer is asked to move,
+    never the whole read failed); any other git failure exits."""
+    if not tag_exists(pin):
+        return True
     r = subprocess.run(
         ["git", "diff", "--quiet", show(pin), show(latest), "--", *LIBRARY],
         capture_output=True, text=True,
     )
     if r.returncode not in (0, 1):
         sys.exit(f"git diff {show(pin)} {show(latest)} failed: {r.stderr.strip()}")
-    return r.returncode == 1
+    if r.returncode == 1:
+        return True
+    roots = []
+    for v in (pin, latest):
+        s = subprocess.run(["git", "show", f"{show(v)}:Cargo.toml"], capture_output=True, text=True)
+        if s.returncode != 0:
+            sys.exit(f"git show {show(v)}:Cargo.toml failed: {s.stderr.strip()}")
+        roots.append(without_version(s.stdout))
+    return roots[0] != roots[1]
 
 
 def fetch_raw(owner: str) -> Callable[[str, str], str]:

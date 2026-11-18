@@ -113,6 +113,15 @@ class Sync(unittest.TestCase):
         self.assertIn("| older | v0.6.150 | behind |", body)
         self.assertNotIn("- [ ] old on", body)
 
+    def test_the_root_manifest_counts_less_its_version(self):
+        a = '[workspace.package]\nversion = "0.6.178"\nedition = "2024"\n'
+        self.assertEqual(cp.without_version(a), cp.without_version(a.replace("178", "179")))
+        self.assertNotEqual(cp.without_version(a), cp.without_version(a.replace("2024", "2027")))
+
+    def test_an_unknown_pin_tag_reads_as_changed(self):
+        self.assertFalse(cp.tag_exists((0, 0, 9999)))
+        self.assertTrue(cp.library_changed((0, 0, 9999), (0, 6, 179)))
+
     def test_the_library_diff_reads_this_repo(self):
         # Two tags of this repo with no library change between them
         # (v0.6.179 changed only a workflow and scripts), and two with one.
