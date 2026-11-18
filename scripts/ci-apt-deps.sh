@@ -13,6 +13,18 @@ PKGS=(libgtk-3-dev libayatana-appindicator3-dev libasound2-dev)
 FALLBACK=http://mirrors.edge.kernel.org/ubuntu/
 APT=(sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 -o Acquire::ForceIPv4=true)
 
+# Every package here comes from Ubuntu's own archive. A third-party source
+# the runner image carries (packages.microsoft.com and others under
+# sources.list.d) only adds a way to fail: on 18.11.2026 the Microsoft repo
+# answered 429 and `--error-on=any` failed the v0.6.179 release's Linux job
+# while the Ubuntu mirrors were fine. Leave them out of this job's apt.
+for f in /etc/apt/sources.list.d/*; do
+    case "$f" in
+        */ubuntu.sources) ;;
+        *) [ -e "$f" ] && sudo mv "$f" "$f.ci-apt-deps-off" ;;
+    esac
+done
+
 install() {
     "${APT[@]}" update --error-on=any && "${APT[@]}" install -y "${PKGS[@]}"
 }
