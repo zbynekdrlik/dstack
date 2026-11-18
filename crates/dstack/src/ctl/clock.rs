@@ -16,8 +16,10 @@ use crate::daemon::media::Media;
 /// ([`clock_counts_in_use`]), and for a linked clock each source's apart
 /// (`service`: the poller's polls; `follower`: dsync's follower's windows,
 /// and its `locked`, `settled`, `offset_ns` and `recent_abs_e_ns`, what the
-/// selector decides on, and `pull_ns`, the phase dsync still retires after
-/// a grandmaster change in the same time base).
+/// selector decides on, `pull_ns`, the phase dsync still retires after
+/// a grandmaster change in the same time base, and `waiting`, why the
+/// selector does not use the follower: `stopped`, `no_ptp`, `not_locked`,
+/// `not_settled` or `waits_to_agree`, `null` while in use, dstack #420).
 pub(super) fn clock_part(j: &mut Json, media: &Media) {
     let linked = media.clock_stats.linked();
     let service = media.clock_stats.counts();
@@ -48,6 +50,10 @@ pub(super) fn clock_part(j: &mut Json, media: &Media) {
             j.opt("offset_ns", f.offset_ns);
             j.opt("recent_abs_e_ns", f.recent_abs_e_ns);
             j.num("pull_ns", f.pull_ns);
+            match f.waiting {
+                Some(w) => j.word("waiting", w.word()),
+                None => j.opt("waiting", None::<u8>),
+            }
             j.close('}');
         }
     }

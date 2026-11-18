@@ -241,6 +241,13 @@ pub struct FollowerCounts {
     /// The phase, ns, still being retired along dsync's pull after a
     /// grandmaster change in the same time base (dsync#158); 0 when none.
     pub pull_ns: i64,
+    /// The grandmaster of the last Sync the follower heard (`None` before
+    /// one).
+    pub grandmaster: Option<[u8; 6]>,
+    /// Why the selector does not use the follower ([`linked::waiting_of`],
+    /// dstack #420); `None` while it is in use, and in the follower's own
+    /// counts ([`linked::Follow::counts`]).
+    pub waiting: Option<linked::Waiting>,
 }
 
 impl ClockStats {

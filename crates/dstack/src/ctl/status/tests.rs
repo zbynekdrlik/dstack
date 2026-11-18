@@ -4,6 +4,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
+use crate::clock::linked::Waiting;
 use crate::clock::{Event, ManualClock};
 use crate::ctl::clock::{clock_counts_in_use, clock_source_word};
 use crate::ctl::{Playout, local};
@@ -162,6 +163,12 @@ const WORDS: &[&str] = &[
     "offset_ns",
     "recent_abs_e_ns",
     "pull_ns",
+    "waiting",
+    "stopped",
+    "no_ptp",
+    "not_locked",
+    "not_settled",
+    "waits_to_agree",
     "dsync",
     "system",
     "internal",
@@ -1277,6 +1284,8 @@ fn the_clock_counts_describe_the_source_in_use_and_each_source_apart() {
             offset_ns: Some(-39_806),
             recent_abs_e_ns: None,
             pull_ns: -88_000,
+            grandmaster: Some([0x00, 0x1d, 0xc1, 0xab, 0xcd, 0xef]),
+            waiting: None,
         }));
     assert_eq!(
         media.clock_stats.follower().map(|c| c.counts.polls),
@@ -1292,7 +1301,8 @@ fn the_clock_counts_describe_the_source_in_use_and_each_source_apart() {
              \"source\":\"internal\",\
              \"service\":{\"polls\":2,\"re_anchors\":0,\"holdovers\":1,\"holdover\":1},\
              \"follower\":{\"windows\":300,\"re_anchors\":4,\"holdovers\":3,\"holdover\":0,\"absorbed\":2,\
-             \"locked\":1,\"settled\":0,\"offset_ns\":-39806,\"recent_abs_e_ns\":null,\"pull_ns\":-88000}}"
+             \"locked\":1,\"settled\":0,\"offset_ns\":-39806,\"recent_abs_e_ns\":null,\"pull_ns\":-88000,\
+             \"waiting\":null}}"
         ),
         "{s}"
     );
@@ -1304,6 +1314,29 @@ fn the_clock_counts_describe_the_source_in_use_and_each_source_apart() {
         "{s}"
     );
     assert!(s.contains("\"follower\":{\"windows\":300,"), "{s}");
+    // dstack #420: why the selector does not use the follower, as a word.
+    for why in [
+        Waiting::Stopped,
+        Waiting::NoPtp,
+        Waiting::NotLocked,
+        Waiting::NotSettled,
+        Waiting::WaitsToAgree,
+    ] {
+        let mut f = media.clock_stats.follower().unwrap();
+        f.waiting = Some(why);
+        media.clock_stats.set_follower(Some(f));
+        let s = status(&media);
+        for word in words_of(&s, "test-device") {
+            assert!(WORDS.contains(&word.as_str()), "{word:?} in {s}");
+        }
+        assert!(
+            s.contains(&format!(
+                "\"pull_ns\":-88000,\"waiting\":\"{}\"}}}}",
+                why.word()
+            )),
+            "{s}"
+        );
+    }
     // A linked clock whose follower did not start: no follower object.
     media.clock_stats.set_follower(None);
     let s = status(&media);
