@@ -759,7 +759,8 @@ pub fn unicast_socket(iface: Ipv4Addr) -> io::Result<UdpSocket> {
 /// older dstack app on the same PC (that manager relays the request in the
 /// old form, [`super::share`]), or none within `wait`; [`InfoError::Malformed`] for a reply
 /// of another version or length ([`super::bridge::parse_figures`] says
-/// which).
+/// which: it reads version 1, from a dstack older than dstack #419, with
+/// the through-latency and the driver `None`, and version 2).
 pub fn bridge_figures(
     sock: &UdpSocket,
     device: Ipv4Addr,
