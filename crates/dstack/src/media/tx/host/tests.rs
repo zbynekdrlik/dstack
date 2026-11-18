@@ -528,3 +528,5 @@ fn a_new_flow_takes_its_receivers_mac_when_it_is_made_not_at_the_next_tick() {
     let next = flow(&shared, other, 8);
     assert_eq!(shared.host_mac(next), None);
 }
+
+mod follow;
