@@ -208,3 +208,41 @@ fn each_callback_counts_in_its_lateness_bin() {
     e.note_callback(t + 2_000_000);
     assert_eq!(c.late_bins(), before, "on time");
 }
+
+/// Two switches late one after the other, with no early one between them
+/// to catch up, put the driver's writes their summed lateness behind its
+/// schedule: the second counts in the bin of that sum (dstack #393). dsg's
+/// MiniFuse (128 @ 96 kHz on 1 ms USB frames) read two 500-750 us
+/// switches for a write 1.2 ms behind, and its underrun line blamed the
+/// bridge.
+/// 64 frames at 48 kHz: dsg's 1.333 ms period.
+#[test]
+fn consecutive_late_switches_count_their_summed_lateness() {
+    let (p, _, _) = gain(None);
+    let e = Engine::new(p, &opened(64, 1, &[], &[]));
+    let c = e.counters();
+    let period = frames_to_ns(64, 48_000.0);
+    e.note_callback(0);
+    e.note_callback(period + 600_000);
+    e.note_callback(2 * period + 1_200_000);
+    assert_eq!(
+        c.late_bins(),
+        [0, 1, 0, 1, 0, 0, 0, 0],
+        "0.6 ms behind, then 1.2 ms behind"
+    );
+    assert_eq!(c.late(), 0);
+}
+
+/// A driver clock slower than the PC's builds no lag on its own (dstack
+/// #393): 500 000 switches on time at 100 ppm slow count in no bin.
+#[test]
+fn a_slow_driver_clock_counts_in_no_lateness_bin() {
+    let (p, _, _) = gain(None);
+    let e = Engine::new(p, &opened(64, 1, &[], &[]));
+    let c = e.counters();
+    let slow = frames_to_ns(64, 48_000.0) as f64 * 1.0001;
+    for k in 0..500_000_i64 {
+        e.note_callback((k as f64 * slow) as i64);
+    }
+    assert_eq!(c.late_bins(), [0; LATE_BINS]);
+}
