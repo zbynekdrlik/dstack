@@ -22,8 +22,9 @@
 //! - [`rejoin`]: leaves and joins a group again on the same socket.
 //! - [`send_on`]: names the address's interface again as a socket's
 //!   multicast send interface (dstack #409: Linux keeps the interface
-//!   index, which a re-created NIC no longer has); [`Lister`]: the list a
-//!   thread's watch reads, the OS's or a test's.
+//!   index, which a re-created NIC no longer has), from
+//!   [`Membership::keep_as`] with [`SEND_IF`]'s lines; `Lister`: the list
+//!   a thread's watch reads, the OS's or a test's.
 //!
 //! Known limit: a change is seen only by a read that finds the address
 //! gone, or on another index. An address removed and added again on the
@@ -181,26 +182,41 @@ impl Membership {
         group: impl Display,
         rejoin: impl FnOnce() -> io::Result<()>,
     ) -> bool {
+        self.keep_as(now, read, REJOINED, group, rejoin)
+    }
+
+    /// [`Membership::keep`] with the owner's act and its lines `says`, for
+    /// `what` (a group, or the socket whose interface is named again).
+    pub fn keep_as(
+        &mut self,
+        now: Instant,
+        read: impl FnOnce() -> io::Result<Vec<Link>>,
+        says: Says,
+        what: impl Display,
+        act: impl FnOnce() -> io::Result<()>,
+    ) -> bool {
         let Some(r) = self.poll(now, read) else {
             return false;
         };
-        match rejoin() {
+        match act() {
             Ok(()) => {
                 info!(
                     interface = %r.interface,
                     old_index = r.old_index,
                     new_index = r.new_index,
-                    %group,
-                    "multicast group re-joined after an interface change"
+                    group = %what,
+                    "{} after an interface change",
+                    says.done
                 );
                 true
             }
             Err(e) => {
                 warn!(
                     interface = %r.interface,
-                    %group,
+                    group = %what,
                     error = %e,
-                    "multicast group not re-joined after an interface change; tried again"
+                    "{} after an interface change; tried again",
+                    says.failed
                 );
                 self.failed();
                 false
@@ -209,9 +225,30 @@ impl Membership {
     }
 }
 
+/// What a watch's owner logs after an interface change: the INFO line's
+/// words when its act worked, the warning's when it failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Says {
+    pub done: &'static str,
+    pub failed: &'static str,
+}
+
+/// A group joined again ([`rejoin`]).
+pub const REJOINED: Says = Says {
+    done: "multicast group re-joined",
+    failed: "multicast group not re-joined",
+};
+
+/// A socket's multicast send interface named again ([`send_on`], dstack
+/// #409).
+pub const SEND_IF: Says = Says {
+    done: "multicast send interface named again",
+    failed: "multicast send interface not named again",
+};
+
 /// The interface list a watch reads and how often (dstack #409): the OS's
 /// ([`links`]) every [`EVERY`] by default; a test's own list and period.
-pub struct Lister {
+pub(crate) struct Lister {
     pub read: Box<dyn FnMut() -> io::Result<Vec<Link>> + Send>,
     pub every: Duration,
 }
@@ -222,14 +259,6 @@ impl Default for Lister {
             read: Box::new(links),
             every: EVERY,
         }
-    }
-}
-
-impl std::fmt::Debug for Lister {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Lister")
-            .field("every", &self.every)
-            .finish_non_exhaustive()
     }
 }
 
@@ -245,9 +274,19 @@ impl Lister {
 /// address had when the option was set, and routes every later multicast
 /// send by it: after the interface is destroyed and created again under a
 /// new index (a USB NIC's reset), each send fails with ENODEV until the
-/// option is set again, while unicast from the bound address works.
+/// option is set again, while unicast from the bound address works. Named
+/// as the info server names its socket's again (by the address, on Windows
+/// by the interface's index when that fails,
+/// [`crate::info::sendwatch::interface_by_index`]).
 pub fn send_on(sock: &UdpSocket, ip: Ipv4Addr) -> io::Result<()> {
-    socket2::SockRef::from(sock).set_multicast_if_v4(&ip)
+    let s = socket2::SockRef::from(sock);
+    crate::info::sendwatch::interface_by_index(
+        ip,
+        cfg!(windows),
+        |a| s.set_multicast_if_v4(&a),
+        links,
+    )
+    .map(drop)
 }
 
 /// Leaves the multicast `group` on `ip`'s interface and joins it again, on

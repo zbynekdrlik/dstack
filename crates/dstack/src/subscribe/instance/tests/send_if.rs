@@ -71,4 +71,28 @@ fn a_thread_that_asks_a_unicast_responder_reads_no_interface_list() {
     let mut buf = [0u8; 1500];
     responder.recv_from(&mut buf).expect("a query");
     assert_eq!(fake.reads(), 0, "no multicast interface to keep");
+    assert_eq!(i.send_errors(), 0);
+}
+
+#[test]
+fn failed_query_sends_are_counted_and_name_the_interface_again() {
+    let mut i = Instances::new();
+    // Several names, so several queries are due at once.
+    for ch in ["a", "b", "c", "d"] {
+        i.lookup(DEVICE, ch);
+    }
+    // A send to the broadcast address without SO_BROADCAST is refused
+    // every time (EACCES; WSAEACCES on Windows), and it is no group: no
+    // interface watch, and the option is not set at the start.
+    let to = SocketAddrV4::new(Ipv4Addr::BROADCAST, 9);
+    let fake = Fake::at(4);
+    let lister = fake.lister(Ipv4Addr::LOCALHOST, Duration::from_millis(1));
+    assert!(i.start_watched(Ipv4Addr::LOCALHOST, to, lister).unwrap());
+    assert_eq!(send_if(&i), Ipv4Addr::UNSPECIFIED, "not named at the start");
+    let at = u64::from(crate::info::sendwatch::REAPPLY_AT);
+    until("failed sends counted", || i.send_errors() >= at);
+    until("the interface named after failed sends", || {
+        send_if(&i) == Ipv4Addr::LOCALHOST
+    });
+    assert_eq!(fake.reads(), 0, "named by the send watch, not the list's");
 }

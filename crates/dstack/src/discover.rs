@@ -16,7 +16,9 @@
 //!   ([`sweep_after`]), sent from a port of our own (legacy unicast: the
 //!   answers come back to us alone). Its multicast send interface is
 //!   named again after an interface change (dstack #409: Linux keeps the
-//!   interface index, which a re-created NIC no longer has).
+//!   interface index, which a re-created NIC no longer has). The records'
+//!   queries below keep their own watch: two reads of the interface list
+//!   every 2 s per discovery.
 //! - **Listening**: the mDNS group's traffic on the interface, as a
 //!   passive member (nothing sent from it): announcements, goodbyes and
 //!   others' answers. A device that answers no PTR query (a wireless mic
@@ -70,7 +72,7 @@ use simple_dns::{CLASS, Name, Packet, QCLASS, QTYPE, Question, TYPE};
 use tracing::{debug, info, trace, warn};
 
 use crate::announce::{ARC_SERVICE, CMC_SERVICE};
-use crate::membership::{Lister, rejoin, send_on};
+use crate::membership::{Lister, REJOINED, SEND_IF, Says, rejoin, send_on};
 use crate::subscribe::directory::DBC_SERVICE;
 use crate::subscribe::instance::{Instances, MDNS, Srv};
 
@@ -506,7 +508,7 @@ impl Discovery {
     /// thread watches our address on it and, after a change, joins the
     /// group again on the listener and names the interface again as the
     /// sweeper's multicast send interface (dstack #282, #409).
-    pub fn start_watched(
+    pub(crate) fn start_watched(
         ip: Ipv4Addr,
         mdns: SocketAddrV4,
         listener: Option<UdpSocket>,
@@ -534,11 +536,10 @@ impl Discovery {
             devices: Arc::clone(&devices),
             stop: Arc::clone(&stop),
             tx,
-            lister,
         };
         let thread = std::thread::Builder::new()
             .name("dstack-discover".to_string())
-            .spawn(move || run.run())?;
+            .spawn(move || run.run(lister))?;
         info!("discovery: started on one interface (sweeps, no standing browse)");
         Ok((
             Discovery {
@@ -629,34 +630,50 @@ struct Run {
     devices: Arc<Mutex<Devices>>,
     stop: Arc<AtomicBool>,
     tx: Sender<Change>,
-    /// The interface list the watch reads.
-    lister: Lister,
+}
+
+/// What discovery's watch logs after an interface change: the group joined
+/// again with a `listener`, the sweeps' interface named again with
+/// `multicast` sweeps (both, either; `None`: nothing to follow, no watch).
+fn follows(listener: bool, multicast: bool) -> Option<Says> {
+    match (listener, multicast) {
+        (true, true) => Some(Says {
+            done: "mDNS group re-joined and the sweeps' multicast send interface named again",
+            failed: "mDNS group or the sweeps' multicast send interface not followed",
+        }),
+        (true, false) => Some(REJOINED),
+        (false, true) => Some(SEND_IF),
+        (false, false) => None,
+    }
 }
 
 impl Run {
     /// Sweeps when due, reads the sweep's answers and the group, and brings
-    /// the list up to date every [`ROUND`], until the stop.
-    fn run(mut self) {
+    /// the list up to date every [`ROUND`], until the stop; after an
+    /// interface change in `lister`'s list, follows it ([`Run::follow`]).
+    fn run(self, mut lister: Lister) {
         let origin = Instant::now();
         let mut names = Names::default();
         let mut next_sweep = Duration::ZERO;
         let mut id: u16 = 0;
         let mut buf = vec![0u8; 9000];
-        let mut lister = std::mem::take(&mut self.lister);
         let mut membership = lister.watch(self.ip);
         let multicast = self.mdns.ip().is_multicast();
+        let says = follows(self.listener.is_some(), multicast);
         while !self.stop.load(Ordering::Relaxed) {
             // After an interface change: the group joined again (dstack
             // #282) and the sweeps' interface named again (#409).
-            if self.listener.is_some() || multicast {
-                membership.keep(Instant::now(), &mut lister.read, MDNS, || {
+            if let Some(says) = says {
+                membership.keep_as(Instant::now(), &mut lister.read, says, MDNS, || {
                     self.follow(multicast)
                 });
             }
             if origin.elapsed() >= next_sweep {
                 id = id.wrapping_add(1);
+                // At most one a sweep (30 to 60 s): a socket that cannot
+                // send is seen (dstack #409).
                 if let Err(e) = self.sweeper.send_to(&sweep_query(id), self.mdns) {
-                    debug!(%e, "discovery: a sweep not sent");
+                    warn!(%e, "discovery: a sweep not sent");
                 }
                 // dstack #321: the whole list against the network floor.
                 let listed = lock(&self.devices).list();
@@ -678,15 +695,19 @@ impl Run {
 
     /// After an interface change: the group joined again on the listener,
     /// and with `multicast` sweeps our interface named again as the
-    /// sweeper's send interface.
+    /// sweeper's send interface. Both are tried whatever the other did; the
+    /// first error is the result (the watch then tries both again).
     fn follow(&self, multicast: bool) -> io::Result<()> {
-        if let Some(listener) = &self.listener {
-            rejoin(listener, *MDNS.ip(), self.ip)?;
-        }
-        if multicast {
-            send_on(&self.sweeper, self.ip)?;
-        }
-        Ok(())
+        let joined = self
+            .listener
+            .as_ref()
+            .map_or(Ok(()), |l| rejoin(l, *MDNS.ip(), self.ip));
+        let named = if multicast {
+            send_on(&self.sweeper, self.ip)
+        } else {
+            Ok(())
+        };
+        joined.and(named)
     }
 
     /// One datagram at `now`: its goodbyes, its names (each wanted at once,

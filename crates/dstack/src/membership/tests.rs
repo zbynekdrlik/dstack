@@ -240,6 +240,39 @@ fn keep_warns_on_a_failed_rejoin_and_tries_again_at_the_next_period() {
 }
 
 #[test]
+fn keep_as_logs_its_owner_s_words_for_a_send_interface() {
+    let every = Duration::from_millis(10);
+    let mut m = Membership::every(OURS, every);
+    let t0 = Instant::now();
+    let what = "the directory's mDNS queries";
+    assert!(!m.keep_as(t0, || Ok(two_legs(26)), SEND_IF, what, || Ok(())));
+    let text = crate::test_log::capture_at(Level::INFO, || {
+        assert!(m.keep_as(t0 + every, || Ok(two_legs(19)), SEND_IF, what, || Ok(())));
+    });
+    assert!(
+        text.contains("multicast send interface named again after an interface change"),
+        "{text}"
+    );
+    assert!(!text.contains("re-joined"), "{text}");
+    assert!(
+        text.contains("group=the directory's mDNS queries"),
+        "{text}"
+    );
+    assert!(text.contains("old_index=26") && text.contains("new_index=19"));
+    let text = crate::test_log::capture_warnings(|| {
+        let failing = || Err(io::Error::other("no such device"));
+        assert!(!m.keep_as(t0 + every * 2, || Ok(two_legs(7)), SEND_IF, what, failing));
+    });
+    assert!(
+        text.contains(
+            "multicast send interface not named again after an interface change; tried again"
+        ),
+        "{text}"
+    );
+    assert!(text.contains("no such device"), "{text}");
+}
+
+#[test]
 fn rejoin_leaves_and_joins_the_group_again_on_the_same_socket() {
     let group = Ipv4Addr::new(239, 255, 77, 82);
     let sock = UdpSocket::bind("0.0.0.0:0").unwrap();
