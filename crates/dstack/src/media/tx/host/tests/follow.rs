@@ -68,3 +68,44 @@ fn after_an_interface_re_create_the_host_path_takes_the_rows_on_the_new_index() 
     assert_eq!(lane.direct, lane.packets, "{lane:?}");
     assert_eq!(rec.frames().len() as u64, lane.packets);
 }
+
+#[test]
+fn the_move_is_one_info_line_and_a_held_index_none() {
+    let shared = shared();
+    let _rec = host(&shared, Take::All);
+    crate::test_log::undecided();
+    let moved = crate::test_log::capture_at(tracing::Level::INFO, || {
+        shared.follow_host(Some(NEW_INDEX)).unwrap();
+    });
+    assert_eq!(moved.matches(HOST_FOLLOWED).count(), 1, "{moved}");
+    assert!(moved.contains(&format!("old_index={IFINDEX}")), "{moved}");
+    assert!(moved.contains(&format!("new_index={NEW_INDEX}")), "{moved}");
+    assert!(moved.contains("nic=test0"), "{moved}");
+    let held = crate::test_log::capture_at(tracing::Level::INFO, || {
+        shared.follow_host(Some(NEW_INDEX)).unwrap();
+    });
+    assert!(!held.contains(HOST_FOLLOWED), "{held}");
+}
+
+#[test]
+fn an_interface_without_an_index_fails_the_act_and_keeps_the_index() {
+    let shared = shared();
+    let slot = flow(&shared, SocketAddrV4::new(RESOLVED, 4321), 32);
+    let _rec = host(&shared, Take::All);
+    let text = shared.follow_host(None).unwrap_err().to_string();
+    assert!(text.contains(&format!("{HOST_SENDER} on test0")), "{text}");
+    assert_eq!(shared.host_mac(slot), Some(PEER_MAC), "the index held");
+    shared.set_neighbours(&rows_on(NEW_INDEX));
+    assert_eq!(shared.host_mac(slot), None, "still on the old index");
+}
+
+#[test]
+fn without_a_sender_there_is_nothing_to_follow() {
+    let shared = shared();
+    let slot = flow(&shared, SocketAddrV4::new(RESOLVED, 4321), 32);
+    shared.follow_host(None).unwrap();
+    shared.follow_host(Some(NEW_INDEX)).unwrap();
+    shared.set_neighbours(&rows_on(NEW_INDEX));
+    assert_eq!(shared.host_mac(slot), None);
+    assert_ne!(shared.tx_path(), TxPath::HostSender);
+}
