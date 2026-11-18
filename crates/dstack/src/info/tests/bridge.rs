@@ -1,22 +1,24 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // Copyright (C) 2026 dstack contributors.
 
-//! dstack's bridge-figures read (dstack #391): the request's opcode, the
-//! codec's every field and bound (read back with the independent walker,
-//! `tests/conformance/bridge_figures.rs`, never only with our parser), the
-//! reply's bound and sequence, the slot, the share messages, and the
-//! server answering the asker alone (a member's reply through its
-//! manager).
+//! dstack's bridge-figures read (dstack #391, version 2 since #419): the
+//! request's opcode, the reply's bound and sequence, the slot, the share
+//! messages, and the server answering the asker alone (a member's reply
+//! through its manager), each reply read back with the independent walker
+//! (`tests/conformance/bridge_figures.rs`), never only with our parser.
+//! The body's codec is `bridge/codec.rs`.
 
 use super::*;
 
 use crate::info::bridge::{
-    BridgeFigures, FIGURES_LEN, FiguresError, LATE_BIN_KEYS, OwnFigures, REPLY_OPCODE,
-    UnderrunCause, figures_body, parse_figures,
+    BridgeFigures, DRIVER_MAX, FIGURES_LEN, FIGURES_LEN_V2, FiguresError, LATE_BIN_KEYS,
+    OwnFigures, REPLY_OPCODE, UnderrunCause, driver_cut, figures_body, parse_figures,
 };
 
 #[path = "../../../tests/conformance/bridge_figures.rs"]
 mod walk;
+
+mod codec;
 
 const REQUEST: [u8; 8] = [0x07, 0x31, 0xd5, 0xb1, 0, 0, 0, 0];
 
@@ -40,13 +42,17 @@ fn distinct() -> BridgeFigures {
             let b = 0x6b + 16 * k as u64;
             u64::from_be_bytes(std::array::from_fn(|i| (b + 2 * i as u64) as u8))
         }),
+        asio_to_dante_us: Some(0xebed_eff1),
+        dante_to_asio_us: Some(0xf3f5_f7f9),
+        // 0x24 bytes, a length no other field's byte holds (theirs are odd).
+        driver: Some("ASIO Fireface USB \u{2014} kanál 1+2 Ž!".to_string()),
     }
 }
 
 /// `f`'s fields by the walker's keys, as `f` holds them.
 fn keyed(f: &BridgeFigures) -> Vec<(&'static str, u64)> {
     let mut v = vec![
-        ("version", 1),
+        ("version", 2),
         ("to_asio_cause", u64::from(f.to_asio_cause.code())),
         ("from_asio_cause", u64::from(f.from_asio_cause.code())),
         ("sequence", u64::from(f.sequence)),
@@ -68,7 +74,22 @@ fn keyed(f: &BridgeFigures) -> Vec<(&'static str, u64)> {
     for (k, n) in LATE_BIN_KEYS.iter().zip(f.late_bins) {
         v.push((k, n));
     }
+    let driver = f.driver.as_deref().map_or("", driver_cut);
+    v.push((
+        "asio_to_dante_us",
+        u64::from(f.asio_to_dante_us.unwrap_or(0)),
+    ));
+    v.push((
+        "dante_to_asio_us",
+        u64::from(f.dante_to_asio_us.unwrap_or(0)),
+    ));
+    v.push(("driver_len", driver.len() as u64));
     v
+}
+
+/// `f`'s driver name as the walker reads it (empty when not known).
+fn named(f: &BridgeFigures) -> String {
+    f.driver.as_deref().map_or("", driver_cut).to_string()
 }
 
 /// A reply datagram for `body` as a device sends it (the header the
@@ -77,111 +98,6 @@ fn datagram(body: &[u8]) -> Vec<u8> {
     let mut d = header(0xffff, 32 + body.len(), 9, REPLY_OPCODE);
     d.extend_from_slice(body);
     d
-}
-
-/// Figures with every field at `v` (each field saturated to its width).
-fn all_at(v: u64) -> BridgeFigures {
-    let w = u32::try_from(v).unwrap_or(u32::MAX);
-    BridgeFigures {
-        sequence: w,
-        run_start_unix_ms: v,
-        to_asio_target_us: w,
-        from_asio_target_us: w,
-        to_asio_converter_delay_us: w,
-        from_asio_converter_delay_us: w,
-        to_asio_underruns: v,
-        from_asio_underruns: v,
-        to_asio_cause: UnderrunCause::None,
-        from_asio_cause: UnderrunCause::None,
-        late_callbacks: v,
-        late_bins: [v; 8],
-    }
-}
-
-#[test]
-fn every_field_sits_at_its_offset_for_the_independent_walker() {
-    let f = distinct();
-    let body = figures_body(&f);
-    assert_eq!(body.len(), FIGURES_LEN);
-    let walked = walk::reply(&datagram(&body)).expect("the walker reads our reply");
-    assert_eq!(walked.fields, keyed(&f));
-    assert_eq!(parse_figures(&body), Ok(f));
-    // The keys are dasio's status names, the walker's too.
-    let names: Vec<&str> = walk::FIELDS[12..].iter().map(|f| f.0).collect();
-    assert_eq!(names, LATE_BIN_KEYS);
-}
-
-#[test]
-fn every_field_reads_back_at_both_of_its_bounds() {
-    for v in [0, 1, u64::MAX - 1, u64::MAX] {
-        let mut f = all_at(v);
-        for cause in [UnderrunCause::None, UnderrunCause::Unknown] {
-            f.to_asio_cause = cause;
-            f.from_asio_cause = cause;
-            let body = figures_body(&f);
-            assert_eq!(parse_figures(&body), Ok(f), "{v:x}");
-            let walked = walk::reply(&datagram(&body)).expect("walked");
-            assert_eq!(walked.fields, keyed(&f), "{v:x}");
-        }
-    }
-}
-
-#[test]
-fn each_cause_has_its_code_both_ways() {
-    let all = [
-        (UnderrunCause::None, 0),
-        (UnderrunCause::Bridge, 1),
-        (UnderrunCause::Driver, 2),
-        (UnderrunCause::Unknown, 3),
-    ];
-    for (cause, code) in all {
-        assert_eq!(cause.code(), code);
-        assert_eq!(UnderrunCause::of_code(code), Some(cause));
-        let mut f = distinct();
-        f.to_asio_cause = cause;
-        f.from_asio_cause = all[(usize::from(code) + 1) % 4].0;
-        assert_eq!(parse_figures(&figures_body(&f)), Ok(f));
-    }
-    for code in [4, 5, 0x80, 0xff] {
-        assert_eq!(UnderrunCause::of_code(code), None);
-    }
-    assert_eq!(UnderrunCause::default(), UnderrunCause::None);
-}
-
-#[test]
-fn a_body_of_another_length_is_refused() {
-    let body = figures_body(&distinct());
-    for n in [0, 1, FIGURES_LEN - 8, FIGURES_LEN - 1] {
-        assert_eq!(parse_figures(&body[..n]), Err(FiguresError::Length(n)));
-    }
-    let mut long = body.to_vec();
-    long.push(0);
-    assert_eq!(
-        parse_figures(&long),
-        Err(FiguresError::Length(FIGURES_LEN + 1))
-    );
-    assert!(walk::reply(&datagram(&long)).is_err());
-    assert!(walk::reply(&datagram(&body[..FIGURES_LEN - 1])).is_err());
-}
-
-#[test]
-fn another_version_is_refused() {
-    for (bytes, v) in [([0, 0], 0), ([0, 2], 2), ([1, 0], 0x100), ([1, 1], 0x101)] {
-        let mut body = figures_body(&distinct());
-        body[0..2].copy_from_slice(&bytes);
-        assert_eq!(parse_figures(&body), Err(FiguresError::Version(v)));
-        assert!(walk::reply(&datagram(&body)).is_err());
-    }
-}
-
-#[test]
-fn a_cause_byte_past_3_is_refused_on_either_side() {
-    for (at, code) in [(2, 4), (3, 4), (2, 0xff), (3, 0x83)] {
-        let mut body = figures_body(&distinct());
-        body[at] = code;
-        assert_eq!(parse_figures(&body), Err(FiguresError::Cause(code)));
-        assert!(walk::reply(&datagram(&body)).is_err());
-    }
 }
 
 #[test]
@@ -298,7 +214,7 @@ fn a_reply_carries_the_figures_its_own_header_and_a_sequence_from_1() {
         .expect("a reply");
     assert_eq!(
         first[..32],
-        header(0xffff, 32 + FIGURES_LEN, 1, REPLY_OPCODE)
+        header(0xffff, 32 + FIGURES_LEN_V2, 1, REPLY_OPCODE)
     );
     let walked = walk::reply(&first).expect("walked");
     assert_eq!(walked.device_id, identity().device_id);
@@ -402,6 +318,9 @@ fn a_slot_answers_only_once_a_bridge_set_its_source() {
         from_asio_cause: UnderrunCause::Driver,
         late_callbacks: 3,
         late_bins: [1, 2, 3, 4, 5, 6, 7, 8],
+        asio_to_dante_us: None,
+        dante_to_asio_us: None,
+        driver: None,
     };
     assert_eq!(slot.figures(), Some(want));
     // Read at each request: the source's change and the app's last
@@ -418,6 +337,72 @@ fn a_slot_answers_only_once_a_bridge_set_its_source() {
         (UnderrunCause::None, UnderrunCause::Unknown)
     );
     assert!(format!("{slot:?}").contains("source: true"));
+}
+
+/// The app's through-latency and driver name (dstack #419) reach the
+/// slot's figures and the reply, the last hand-over each; the underruns
+/// stay as handed.
+#[test]
+fn the_path_and_the_driver_reach_the_figures_and_the_reply() {
+    let slot = FigureSlot::started_at(1);
+    slot.set_source(OwnFigures::default);
+    slot.set_underruns(4, 5, UnderrunCause::Bridge, UnderrunCause::Driver);
+    let read = |slot: &FigureSlot| {
+        let f = slot.figures().unwrap();
+        (f.asio_to_dante_us, f.dante_to_asio_us, f.driver)
+    };
+    assert_eq!(read(&slot), (None, None, None));
+    slot.set_path(5_333, 4_667);
+    slot.set_driver("ASIO MADIface USB");
+    assert_eq!(
+        read(&slot),
+        (Some(5_333), Some(4_667), Some("ASIO MADIface USB".into()))
+    );
+    let mut mc = InfoBuilder::new(identity());
+    let reply = mc
+        .bridge_within(
+            &mut Limit::default(),
+            Instant::now(),
+            &asking(REQUEST),
+            Some(&slot),
+        )
+        .expect("a reply");
+    let walked = walk::reply(&reply).expect("walked");
+    assert_eq!(
+        (
+            walked.get("asio_to_dante_us"),
+            walked.get("dante_to_asio_us")
+        ),
+        (5_333, 4_667)
+    );
+    assert_eq!(walked.driver, "ASIO MADIface USB");
+    assert_eq!(
+        (
+            walked.get("to_asio_underruns"),
+            walked.get("from_asio_cause")
+        ),
+        (4, 2)
+    );
+    // Each side not known on its own; a long name kept cut; an empty
+    // name not known.
+    slot.set_path(0, 4_000);
+    let long = format!("{}é", "d".repeat(62));
+    slot.set_driver(&long);
+    assert_eq!(read(&slot), (None, Some(4_000), Some("d".repeat(62))));
+    slot.set_path(3_000, 0);
+    slot.set_driver("");
+    assert_eq!(read(&slot), (Some(3_000), None, None));
+    // The underruns were not touched by the other setters.
+    let f = slot.figures().unwrap();
+    assert_eq!((f.to_asio_underruns, f.from_asio_underruns), (4, 5));
+    assert_eq!(
+        (f.to_asio_cause, f.from_asio_cause),
+        (UnderrunCause::Bridge, UnderrunCause::Driver)
+    );
+    // And set_underruns leaves the path and the driver.
+    slot.set_driver("x");
+    slot.set_underruns(6, 7, UnderrunCause::None, UnderrunCause::None);
+    assert_eq!(read(&slot), (Some(3_000), None, Some("x".into())));
 }
 
 #[test]
@@ -449,24 +434,27 @@ impl Beat for Bridged {
     }
 }
 
-/// A slot whose source gives `distinct()`'s own figures.
+/// A slot whose source and hand-over give `distinct()`'s figures.
 fn bridged() -> Arc<FigureSlot> {
     let slot = Arc::new(FigureSlot::started_at(distinct().run_start_unix_ms));
     let f = distinct();
-    slot.set_source(move || OwnFigures {
+    let own = OwnFigures {
         to_asio_target_us: f.to_asio_target_us,
         from_asio_target_us: f.from_asio_target_us,
         to_asio_converter_delay_us: f.to_asio_converter_delay_us,
         from_asio_converter_delay_us: f.from_asio_converter_delay_us,
         late_callbacks: f.late_callbacks,
         late_bins: f.late_bins,
-    });
+    };
+    slot.set_source(move || own);
     slot.set_underruns(
         f.to_asio_underruns,
         f.from_asio_underruns,
         f.to_asio_cause,
         f.from_asio_cause,
     );
+    slot.set_path(f.asio_to_dante_us.unwrap(), f.dante_to_asio_us.unwrap());
+    slot.set_driver(f.driver.as_deref().unwrap());
     slot
 }
 
@@ -514,6 +502,7 @@ async fn the_server_answers_bridge_figures_to_the_asker_alone() {
         ..distinct()
     };
     assert_eq!(walked.fields, keyed(&want));
+    assert_eq!(walked.driver, named(&want));
     // Nothing went to the info group.
     let mut group = [0u8; 64];
     let to_group =
@@ -765,6 +754,12 @@ fn a_reply_goes_only_to_one_host_and_only_a_bridge_reply_is_handed_over() {
         .unwrap();
     assert!(share::is_bridge_reply(&reply));
     assert!(!share::is_bridge_reply(&reply[..reply.len() - 1]));
+    // A version 1 reply (a member older than dstack #419) is still handed
+    // over; no length between or around it.
+    assert!(share::is_bridge_reply(&reply[..32 + FIGURES_LEN]));
+    for n in [32 + FIGURES_LEN - 1, 32 + FIGURES_LEN + 1, 32, 31, 0] {
+        assert!(!share::is_bridge_reply(&reply[..n]), "{n}");
+    }
     let mut longer = reply.clone();
     longer.push(0);
     assert!(!share::is_bridge_reply(&longer));
