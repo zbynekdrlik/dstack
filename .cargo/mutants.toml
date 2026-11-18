@@ -226,6 +226,10 @@ exclude_re = [
   "replace profile -> TimingProfile",
   # The direct socket needs CAP_NET_RAW, which neither CI nor the gate has;
   # the headers, the ARP lookup and the counting are tested (media::bypass).
+  # `Direct::follow` (dstack #414) is glue too: its Linux body is
+  # `index_of` + `moved_to` (both tested, outside this pattern), and its
+  # off-Linux twin of the same name (`Ok(None)`) is never compiled here, so
+  # its mutants could never be caught.
   "bypass.rs.*Direct::",
   "bypass.rs.*open_for",
   "tx/thread.rs.*send_one",

@@ -105,11 +105,17 @@ fn an_interface_name_not_there_fails_the_act_and_is_asked_again() {
         2,
         "warned at each look: {warned}"
     );
+    // The warning is the TX watch's; its error names the direct socket,
+    // not the flow sockets, which were named again.
+    let named = format!("{} on dstack-none0", super::super::direct::DIRECT_SOCKET);
+    assert_eq!(warned.matches(&named).count(), 2, "{warned}");
 }
 
 #[test]
 fn without_the_socket_there_is_nothing_to_follow() {
-    let shared = TxShared::new(cfg(), Ipv4Addr::LOCALHOST, Vec::new().into(), 1, &[]).unwrap();
-    assert_eq!(shared.direct_index(), None, "no CAP_NET_RAW in a test");
+    let shared = TxShared::new(cfg(), Ipv4Addr::LOCALHOST, Vec::new().into(), 1, &[])
+        .unwrap()
+        .without_direct();
+    assert_eq!(shared.direct_index(), None);
     shared.follow_direct().unwrap();
 }

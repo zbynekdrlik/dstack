@@ -26,17 +26,25 @@ use crate::media::bypass::Direct;
 /// interface's index (CI's re-create test reads it).
 pub(crate) const FOLLOWED: &str = "the direct socket sends on the interface's new index";
 
+/// What a failed move names: the act's warning is the TX watch's, worded
+/// for the flow sockets it also names again.
+pub(crate) const DIRECT_SOCKET: &str = "the direct socket (audio TX past the qdisc)";
+
 impl TxShared {
     /// Moves the socket past the qdisc to its interface's index now
     /// ([`Direct::follow`](crate::media::bypass::Direct::follow), dstack
-    /// #414), logged once when it moved; an error when its interface is not
-    /// there (asked again at the watch's next look). Nothing without the
-    /// socket.
+    /// #414), logged once when it moved; an error naming the direct socket
+    /// when its interface is not there (the watch warns it beside the flow
+    /// sockets' naming and asks again at its next look). Nothing without
+    /// the socket.
     pub(crate) fn follow_direct(&self) -> io::Result<()> {
         let Some((direct, nic)) = &self.direct else {
             return Ok(());
         };
-        if let Some((old, new)) = direct.follow(nic)? {
+        let moved = direct
+            .follow(nic)
+            .map_err(|e| io::Error::new(e.kind(), format!("{DIRECT_SOCKET} on {nic}: {e}")))?;
+        if let Some((old, new)) = moved {
             info!(nic = %nic, old_index = old, new_index = new, "{FOLLOWED}");
         }
         Ok(())
@@ -58,5 +66,13 @@ impl TxShared {
     #[cfg(target_os = "linux")]
     pub(crate) fn direct_index(&self) -> Option<i32> {
         self.direct.as_ref().map(|(d, _)| d.index())
+    }
+
+    /// This state without the socket past the qdisc (a test run as root
+    /// opens a real one on `lo`).
+    #[cfg(target_os = "linux")]
+    pub(crate) fn without_direct(mut self) -> Self {
+        self.direct = None;
+        self
     }
 }
