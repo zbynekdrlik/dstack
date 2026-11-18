@@ -44,8 +44,9 @@ impl Schedule {
     /// The lag past which the schedule starts again (dstack #426): the
     /// latency the receiver plays the flow at, its own when it states a
     /// longer one than ours (Dante's rule, as `PassClock::late_threshold`
-    /// counts late packets). A packet later than that is of no use to it;
-    /// one within it still plays. Ours while the receiver's is unknown.
+    /// counts late packets). A packet later than that can never play; one
+    /// within it is sent (the lane's late count judges whether it came in
+    /// time). Ours while the receiver's is unknown.
     pub fn bound(&self) -> u64 {
         self.max_lag.max(self.receiver_lag)
     }

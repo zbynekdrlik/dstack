@@ -199,8 +199,12 @@ impl Transmitter {
 
     /// The TX pull's blocks due at PTP `now_ns` into the engine rings
     /// (dstack #363), before the pass's sends, with the flows' largest lag
-    /// bound ([`Transmitter::reach_lag`]).
+    /// bound ([`Transmitter::reach_lag`], read only for a device with a
+    /// pull: the lanes' latency reads are no cost to any other).
     fn fill_due(&mut self, now_ns: u64) {
+        if self.fill.is_none() {
+            return;
+        }
         let reach_lag = self.reach_lag();
         if let Some(fill) = self.fill.as_mut() {
             fill.fill_due(

@@ -24,9 +24,13 @@
 //! 44407677291 on windows-2025: a sleep 8.465 ms late restarted a schedule
 //! bound at the sender's 8.36 ms while the receiver played at 13.67 ms, 864
 //! off, read `RUNNER`). A window reads the receivers' stated latencies at
-//! its open; a line whose `max_lag` is under the longest of them is the
-//! stack's (the schedule gave up packets the receiver still plays), never
-//! the runner's, and the verdict names it.
+//! its open and close (lock-free, the lanes' own counts, so a consumer
+//! thread that opens it never waits on the control lock); a line whose
+//! `max_lag` is under the shortest of them (capped at the ring's reach, as
+//! the stack caps it) is the stack's (the schedule gave up packets the
+//! receiver still plays), never the runner's, and the verdict names it. The
+//! line names no slot, so a sender whose receivers state different
+//! latencies is judged by the shortest, never against a flow's own.
 //!
 //! [`listen`] sets one global subscriber per test binary that records
 //! only that line (every other callsite is never enabled); a window
@@ -39,6 +43,7 @@ use std::fmt::{self, Debug};
 use std::sync::{Mutex, MutexGuard, Once, PoisonError};
 
 use dstack::clock::latency_samples;
+use dstack::device::MAX_LATENCY_SAMPLES;
 use dstack::media::tx::{MAX_FLOWS, TxShared};
 use tracing::field::{Field, Visit};
 use tracing::span::{Attributes, Id, Record};
@@ -178,13 +183,27 @@ fn counted(tx: &TxShared) -> u64 {
     (0..MAX_FLOWS).map(|s| tx.lane(s).rebootstraps).sum()
 }
 
-/// The longest latency `tx`'s receivers state now, ns (0: none known).
+/// The shortest latency `tx`'s receivers state now, ns (0: none known),
+/// read from the lanes' counts (no lock, no allocation).
 fn receiver_ns(tx: &TxShared) -> u64 {
-    tx.receiver_flows()
-        .iter()
-        .map(|&(slot, dest, _)| tx.receiver_latency_ns(slot, dest))
-        .max()
+    (0..MAX_FLOWS)
+        .map(|s| tx.lane(s).receiver_latency_ns)
+        .filter(|&ns| ns != 0)
+        .min()
         .unwrap_or(0)
+}
+
+/// The receivers' latency a window judges its restarts by, samples at
+/// `rate`, from the reads at its `open` and `close` (ns, 0: none known):
+/// the shorter, known at both (a receiver that lowered its latency
+/// mid-window, or one not yet known at the open, never makes a correct
+/// line read under it), capped at the engine ring's reach as the stack
+/// caps it.
+fn window_lag(open: u64, close: u64, rate: u32) -> u64 {
+    if open == 0 || close == 0 {
+        return 0;
+    }
+    latency_samples(open.min(close), rate).min(MAX_LATENCY_SAMPLES)
 }
 
 /// A window open on a sender's TX side.
@@ -192,7 +211,7 @@ fn receiver_ns(tx: &TxShared) -> u64 {
 pub(crate) struct Opened {
     counted: u64,
     mark: usize,
-    /// The receivers' longest stated latency at the open, ns.
+    /// The receivers' shortest stated latency at the open, ns.
     receiver_ns: u64,
 }
 
@@ -214,7 +233,7 @@ impl Opened {
             lines: tx_lines(lines().get(self.mark..).unwrap_or_default()),
             rate,
             oversleep_max_us: tx.tx_thread().oversleep_max_us,
-            receiver_lag: latency_samples(self.receiver_ns, rate),
+            receiver_lag: window_lag(self.receiver_ns, receiver_ns(tx), rate),
         }
     }
 }
@@ -231,7 +250,8 @@ pub(crate) struct Restarts {
     /// The TX thread's largest oversleep since its start, µs (the status
     /// `tx_thread`; for the message only).
     pub(crate) oversleep_max_us: u64,
-    /// The receivers' longest stated latency at the window's open, samples
+    /// The receivers' shortest stated latency, known at the window's open
+    /// and close ([`window_lag`]), samples
     /// (0: none known): every restart's bound must be at least this
     /// (dstack #426).
     pub(crate) receiver_lag: u64,
@@ -425,6 +445,22 @@ mod restarts_tests {
             format!("{run:?}")
                 .contains("the receiver's latency 1312 samples (1 lines bound under it)"),
             "{run:?}"
+        );
+    }
+
+    /// The window's receiver latency: known at both edges, the shorter,
+    /// rounded to samples and capped at the ring's reach.
+    #[test]
+    fn a_window_judges_by_the_receivers_latency_known_at_both_edges() {
+        assert_eq!(window_lag(0, 13_666_000, 96_000), 0, "unknown at the open");
+        assert_eq!(window_lag(13_666_000, 0, 96_000), 0, "unknown at the close");
+        assert_eq!(window_lag(13_666_000, 13_666_000, 96_000), 1_312);
+        assert_eq!(window_lag(13_666_000, 9_000_000, 48_000), 432, "lowered");
+        assert_eq!(window_lag(9_000_000, 13_666_000, 48_000), 432, "raised");
+        assert_eq!(
+            window_lag(u64::MAX / 96_000, u64::MAX / 96_000, 96_000),
+            MAX_LATENCY_SAMPLES,
+            "capped"
         );
     }
 
