@@ -887,6 +887,13 @@ impl TxShared {
         count_send(&self.lanes[slot], &Ok(false), len);
     }
 
+    /// The flow sockets, one per slot (other modules' tests: their
+    /// multicast send interface, dstack #411).
+    #[cfg(test)]
+    pub(crate) fn flow_sockets(&self) -> &[UdpSocket] {
+        &self.sockets
+    }
+
     /// Where slot `slot`'s audio comes from and its keepalives go.
     pub fn local_addr(&self, slot: usize) -> io::Result<SocketAddr> {
         self.sockets
