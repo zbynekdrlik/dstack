@@ -2868,4 +2868,5 @@ fn a_seamless_handover_step_restarts_no_tx_schedule() {
 mod app_view;
 #[cfg(target_os = "linux")]
 mod direct;
+mod receiver_bound;
 mod thread_split;
