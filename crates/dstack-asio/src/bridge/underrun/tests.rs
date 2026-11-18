@@ -321,3 +321,20 @@ fn the_top_bin_reaches_the_peak_lateness_that_rose_over_the_check() {
     };
     assert_eq!(from_asio_cause(&low, 4000), Cause::Bridge, "3/4: 3000");
 }
+
+/// A new run (its counts fell) whose peak lateness equals the old run's
+/// is that run's own peak (dstack #393 review): its top bin is judged by
+/// it, not by the period.
+#[test]
+fn a_new_runs_equal_peak_is_its_own() {
+    let mut w = UnderrunWatch::new();
+    let at = |from_asio_underruns, top, late_max_us| UnderrunCounts {
+        from_asio_underruns,
+        period_us: 2667,
+        late_max_us,
+        ..bins(&[(7, top)])
+    };
+    w.look(at(1, 3, 3500), 4.0).expect("an underrun rose");
+    let text = w.look(at(2, 1, 3500), 4.0).expect("an underrun rose");
+    assert!(text.contains("cause: driver callback lateness"), "{text}");
+}
