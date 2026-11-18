@@ -349,11 +349,13 @@ fn rises_take_at_most_the_fixed_block_s_tx_delay() {
 }
 
 /// dstack #330: each fixed call's media start and play time sit as many
-/// frames before its device block's as were waiting.
+/// frames before its device block's as were waiting; its play time adds
+/// the fixed block's FIFO wait (A - 1 frames) and never the converter's
+/// delay (dstack #410).
 #[test]
 fn a_fixed_call_s_start_and_play_time_follow_its_own_frames() {
     let mut r = Rated::with_fixed_app_block(Probe::new(0.0), 96_000, 44_100, 128, 1, 1).unwrap();
-    let (rx_ns, _) = r.delay_ns();
+    let wait_ns = (A as i64 - 1) * 1_000_000_000 / 44_100;
     let mut plain = Rated::new(Probe::new(0.0), 96_000, 44_100, 128, 1, 1).unwrap();
     let (_, calls) = run_played(&mut r, (1, 1), 400, |_| 0.0);
     run_played(&mut plain, (1, 1), 400, |_| 0.0);
@@ -365,7 +367,7 @@ fn a_fixed_call_s_start_and_play_time_follow_its_own_frames() {
             let start = r.inner.starts[call].unwrap();
             let waited = plain.inner.starts[b].unwrap() as i64 - start as i64;
             assert!((0..A as i64).contains(&waited), "{b}: {waited}");
-            let want = play_of(b as u64 * 128) + rx_ns as i64 - waited * 1_000_000_000 / 44_100;
+            let want = play_of(b as u64 * 128) + wait_ns - waited * 1_000_000_000 / 44_100;
             assert_eq!(r.inner.play_ats[call], Some(want), "block {b}");
             call += 1;
         }
