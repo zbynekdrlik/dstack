@@ -338,3 +338,26 @@ fn a_new_runs_equal_peak_is_its_own() {
     let text = w.look(at(2, 1, 3500), 4.0).expect("an underrun rose");
     assert!(text.contains("cause: driver callback lateness"), "{text}");
 }
+
+/// A new run is also told by its late count falling alone (dstack #393
+/// review): its top bin is judged by its own equal peak.
+#[test]
+fn a_fallen_late_count_alone_marks_a_new_run() {
+    let mut w = UnderrunWatch::new();
+    let before = UnderrunCounts {
+        from_asio_underruns: 1,
+        late_callbacks: 2,
+        period_us: 2667,
+        late_max_us: 3500,
+        ..bins(&[(7, 1)])
+    };
+    w.look(before, 4.0).expect("an underrun rose");
+    let now = UnderrunCounts {
+        from_asio_underruns: 2,
+        late_callbacks: 0,
+        late_bins: bins(&[(7, 2)]).late_bins,
+        ..before
+    };
+    let text = w.look(now, 4.0).expect("an underrun rose");
+    assert!(text.contains("cause: driver callback lateness"), "{text}");
+}
