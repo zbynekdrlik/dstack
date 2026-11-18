@@ -59,10 +59,13 @@ const AFTER_RESTART: u32 = 32;
 /// How far an app sample may sit off its block's ramp, samples at the
 /// network's rate (measured: about 1e-6).
 const LINE_TOLERANCE: f64 = 0.05;
-/// #402's measurement (issuecomment-6975644042), µs: `L` at a transmitter
-/// latency under ours (9 ms) and over it (40 ms).
-const MEASURED_UNDER_US: u64 = 2583;
-const MEASURED_OVER_US: u64 = 30583;
+/// `L` at a transmitter latency under ours (9 ms) and over it (40 ms), µs:
+/// the documented path, (c) = B + the converter's delay, plus the flow's
+/// read (dstack #410). #402's measurement (issuecomment-6975644042) read
+/// 2583 and 30583: one converter delay (625 µs) more, the RX converter's
+/// delay counted twice by `Rated`.
+const MEASURED_UNDER_US: u64 = 1958;
+const MEASURED_OVER_US: u64 = 29958;
 /// How far the median `L` may sit off the terms (measured on dev1: within
 /// 0.25 µs), and any one block's: the pump's offset filter follows a torn
 /// clock pair by up to 133 ns a 1.33 ms wake (100 ppm), so a starved
@@ -312,8 +315,8 @@ fn run(tx_latency_ns: u64) -> Measured {
     assert_eq!(latency_samples(rx.block_ns, RATE), BLOCK);
     // The flow's read: its latency (the larger) less ours, in whole blocks.
     let delay = advertised.saturating_sub(p).div_ceil(BLOCK) * BLOCK;
-    let expected_ns =
-        (rx.rx_handoff_ns + rx.rx_convert_ns) as f64 + delay as f64 * 1e9 / f64::from(RATE);
+    // (c) on the RX side already holds the converter's delay (dstack #410).
+    let expected_ns = rx.rx_handoff_ns as f64 + delay as f64 * 1e9 / f64::from(RATE);
 
     let offset = Arc::new(AtomicU64::new(0));
     let sender = Link::start_on(
@@ -447,7 +450,7 @@ fn pinned(tx_latency_ns: u64, measured_us: u64) {
     assert_eq!(
         (m.expected_ns / 1_000.0).round() as u64,
         measured_us,
-        "the terms no longer give #402's measured L"
+        "the terms no longer give the documented L"
     );
     // The receiver's status states the same read of the flow.
     let (playout, delay) = m.read;
