@@ -181,14 +181,24 @@ impl TxShared {
     /// logged once with [`SEND_IF`]'s words, a failure warned and tried at
     /// the next look. True when it was named again. Without it Linux routes
     /// every multicast send by the old index, and each fails with ENODEV
-    /// (counted in the lane's `send_errors`) until a restart.
+    /// (counted in the lane's `send_errors`) until a restart. The socket
+    /// past the qdisc follows the same change ([`TxShared::follow_direct`],
+    /// dstack #414: its unicast sends name the old index and fail with
+    /// ENXIO), and the host frame sender's NIC moves to the index the list
+    /// gives ([`TxShared::follow_host`], dstack #417: its neighbour rows
+    /// count on the new index), each whatever the others did.
     pub(crate) fn keep_send_interface(
         &self,
         watch: &mut Membership,
         now: Instant,
         read: impl FnOnce() -> io::Result<Vec<Link>>,
     ) -> bool {
-        watch.keep_as(now, read, SEND_IF, FLOW_SOCKETS, || self.send_on_again())
+        watch.keep_with(now, read, SEND_IF, FLOW_SOCKETS, |r| {
+            let named = self.send_on_again();
+            let direct = self.follow_direct();
+            let host = self.follow_host(r.new_index);
+            named.and(direct).and(host)
+        })
     }
 
     /// The flow sockets, one per slot (other modules' tests: their

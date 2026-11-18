@@ -5,7 +5,7 @@
 
 use std::net::Ipv4Addr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use super::{Link, Lister};
@@ -20,6 +20,8 @@ pub(crate) struct Fake {
     pub index: Arc<AtomicU32>,
     /// The reads so far.
     pub reads: Arc<AtomicU64>,
+    /// The list gives the interface no index (dstack #417).
+    pub no_index: Arc<AtomicBool>,
 }
 
 impl Fake {
@@ -39,7 +41,8 @@ impl Fake {
                 Ok(vec![Link {
                     name: "lo".to_string(),
                     ip,
-                    index: Some(fake.index.load(Ordering::Relaxed)),
+                    index: (!fake.no_index.load(Ordering::Relaxed))
+                        .then(|| fake.index.load(Ordering::Relaxed)),
                 }])
             }),
             every,
@@ -48,7 +51,13 @@ impl Fake {
 
     /// The interface re-created: a new index.
     pub fn recreate(&self, index: u32) {
+        self.no_index.store(false, Ordering::Relaxed);
         self.index.store(index, Ordering::Relaxed);
+    }
+
+    /// The interface listed with no index (the OS gave none).
+    pub fn without_index(&self) {
+        self.no_index.store(true, Ordering::Relaxed);
     }
 
     pub fn reads(&self) -> u64 {

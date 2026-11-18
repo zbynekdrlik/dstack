@@ -256,3 +256,46 @@ fn a_mac_parses_from_six_hex_pairs() {
         assert_eq!(parse_mac(bad), None, "{bad}");
     }
 }
+
+/// dstack #414: the socket's interface index across a re-create.
+#[cfg(target_os = "linux")]
+mod follow {
+    use super::*;
+
+    /// `lo`'s index as the OS gives it.
+    fn lo() -> i32 {
+        let name = std::ffi::CString::new("lo").unwrap();
+        // SAFETY: a NUL-terminated name the call only reads.
+        let index = unsafe { libc::if_nametoindex(name.as_ptr()) };
+        assert!(index > 0, "the box has lo");
+        index as i32
+    }
+
+    #[test]
+    fn an_interface_s_index_is_the_os_s_and_a_missing_one_an_error() {
+        assert_eq!(index_of("lo").unwrap(), lo());
+        let e = index_of("dstack-none0").unwrap_err();
+        assert_eq!(e.raw_os_error(), Some(libc::ENODEV), "{e}");
+        assert!(index_of("l\0o").is_err(), "a name with a NUL");
+    }
+
+    #[test]
+    fn a_moved_index_is_stored_and_told_once() {
+        let cell = AtomicI32::new(7);
+        assert_eq!(moved_to(&cell, 9), Some((7, 9)));
+        assert_eq!(cell.load(Ordering::Relaxed), 9);
+        assert_eq!(moved_to(&cell, 9), None, "it holds");
+        assert_eq!(cell.load(Ordering::Relaxed), 9);
+    }
+
+    #[test]
+    fn the_socket_follows_its_interface_by_name() {
+        let stale = lo() + 1000;
+        let d = Direct::stand_in(stale);
+        assert_eq!(d.follow("lo").unwrap(), Some((stale, lo())));
+        assert_eq!(d.index(), lo());
+        assert_eq!(d.follow("lo").unwrap(), None, "the same index");
+        assert!(d.follow("dstack-none0").is_err(), "no such interface");
+        assert_eq!(d.index(), lo(), "a missing name moves nothing");
+    }
+}

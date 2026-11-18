@@ -17,10 +17,13 @@
 //! batch: they go out through the UDP socket at once, as without a sender.
 
 use std::fmt;
+use std::io;
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Instant;
+
+use tracing::info;
 
 use super::{
     Control, DSCP_EF, MAX_FLOWS, PassClock, Sent, TxShared, account, nanos, nic_refusal, send_timed,
@@ -38,7 +41,9 @@ pub const FRAME_MAX: usize = FRAME_HEADROOM + MAX_DATAGRAM;
 /// Our NIC, as the host sender's frames name it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostNic {
-    /// Its interface index: the neighbour table's entries on it count.
+    /// Its interface index when the sender is set: the neighbour table's
+    /// entries on it count, until the NIC is re-created under another
+    /// index (the TX interface watch moves it then, dstack #417).
     pub ifindex: u32,
     /// Its MAC: the frames' source.
     pub mac: [u8; 6],
@@ -50,6 +55,21 @@ pub struct HostNic {
 pub(super) struct HostPath {
     pub(super) sender: Arc<dyn FrameSender>,
     pub(super) nic: HostNic,
+    /// Our NIC's interface index now: `nic.ifindex` at the start, moved by
+    /// the TX interface watch after a re-create ([`TxShared::follow_host`]).
+    /// Read on the control side only, never by the TX thread.
+    ifindex: AtomicU32,
+}
+
+impl HostPath {
+    fn new(sender: Arc<dyn FrameSender>, nic: HostNic) -> HostPath {
+        let ifindex = AtomicU32::new(nic.ifindex);
+        HostPath {
+            sender,
+            nic,
+            ifindex,
+        }
+    }
 }
 
 impl fmt::Debug for HostPath {
@@ -57,6 +77,15 @@ impl fmt::Debug for HostPath {
         f.debug_struct("HostPath").field("nic", &self.nic).finish()
     }
 }
+
+/// The INFO line after the host frame sender's NIC moved to a re-created
+/// interface's index (dstack #417).
+pub(crate) const HOST_FOLLOWED: &str =
+    "the host frame sender's NIC is on the interface's new index";
+
+/// What a failed move names: the act's warning is the TX watch's, worded
+/// for the flow sockets it also names again.
+pub(crate) const HOST_SENDER: &str = "the host frame sender (audio TX past Winsock)";
 
 /// The path a device's TX takes (the start line names it).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -117,7 +146,8 @@ impl TxShared {
             return;
         };
         let dests = (0..MAX_FLOWS).map(|slot| c.table.plan(slot).dest);
-        let words = bypass::neighbour_mac_words(rows, host.nic.ifindex, dests);
+        let ifindex = host.ifindex.load(Ordering::Relaxed);
+        let words = bypass::neighbour_mac_words(rows, ifindex, dests);
         for (cell, w) in self.macs.iter().zip(words) {
             if cell.peek()[0] != w {
                 cell.write([w]);
@@ -142,7 +172,34 @@ impl TxShared {
         // Under the lock the TX thread's state is built in: a sender is
         // either seen by it or refused, never set unused.
         let _built = self.lock();
-        !self.tx_built.load(Ordering::Relaxed) && self.host.set(HostPath { sender, nic }).is_ok()
+        !self.tx_built.load(Ordering::Relaxed) && self.host.set(HostPath::new(sender, nic)).is_ok()
+    }
+
+    /// Moves the host frame sender's NIC to the interface index `now`
+    /// (the TX interface watch's list after a change, dstack #417): a NIC
+    /// destroyed and created again (a USB reset: same address) gets a new
+    /// index, and the neighbour rows count on that one only. When it moved,
+    /// logged once and each slot's MAC taken again from the rows already
+    /// read (the next read follows a second later anyway). An error naming
+    /// the host sender when the list gave the interface no index (the watch
+    /// warns and asks again at its next look). Nothing without a sender.
+    pub(crate) fn follow_host(&self, now: Option<u32>) -> io::Result<()> {
+        let Some(host) = self.host.get() else {
+            return Ok(());
+        };
+        let Some(now) = now else {
+            return Err(io::Error::other(format!(
+                "{HOST_SENDER} on {}: the interface list gives no index",
+                host.nic.name
+            )));
+        };
+        let old = host.ifindex.swap(now, Ordering::Relaxed);
+        if old != now {
+            info!(nic = %host.nic.name, old_index = old, new_index = now, "{HOST_FOLLOWED}");
+            let c = self.lock();
+            self.set_host_macs(&c, &c.neighbours);
+        }
+        Ok(())
     }
 
     /// The host path for the TX thread's state being built now; from then
