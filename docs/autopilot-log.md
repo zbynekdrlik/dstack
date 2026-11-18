@@ -73,3 +73,4 @@ One line per ticket: issue, commits, tests (RED -> GREEN where a bug), decisions
 - 18.11 06:09 CET: v0.6.177 = #393 (ASIO callback lateness against the driver's schedule line, not gap minus period; dsg MiniFuse frame slips read as the bridge's underruns; RED 14a50f3 GREEN 9cf3579; 24 caught 0 missed).
 - 18.11 08:52 CET: v0.6.177 released (#393 schedule-line lateness; Release 44259122792). v0.6.178 = #393 top bin by the run's peak lateness (RED 0289cc4 GREEN 6af4ea3) + #395 rx_pull output-thread witness (lane 5e8adc0..493c621).
 - 18.11 10:31 CET: v0.6.178 tagged (#393 peak lateness, #395 rx_pull witness). v0.6.179 = #399 weekly consumer version sync (consumer-pins.yml Wed 06:00 UTC; owner 18.11).
+- 18.11 12:15 CET: v0.6.179 released (#399 weekly sync). v0.6.180 = sync judges by library change + CI apt step without third-party sources.

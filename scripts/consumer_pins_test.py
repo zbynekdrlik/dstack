@@ -66,6 +66,11 @@ class Versions(unittest.TestCase):
         self.assertEqual(cp.show((0, 6, 7)), "v0.6.7")
 
 
+def changed_after_150(pin, latest):
+    """A fake library history: the code last changed in 0.6.151."""
+    return pin < (0, 6, 151)
+
+
 class Sync(unittest.TestCase):
     LATEST = (0, 6, 178)
 
@@ -96,11 +101,35 @@ class Sync(unittest.TestCase):
         )
 
     def test_behind_and_unread_consumers_lag_a_current_one_not(self):
-        self.assertEqual(cp.lagging(self.rows(), self.LATEST), ["intercom", "odd", "rev"])
-        self.assertEqual(cp.lagging([("x", (0, 6, 179), False)], self.LATEST), [])
+        self.assertEqual(cp.lagging(self.rows(), self.LATEST, changed_after_150),
+                         ["intercom", "odd", "rev"])
+        self.assertEqual(cp.lagging([("x", (0, 6, 179), False)], self.LATEST, changed_after_150), [])
+
+    def test_an_older_pin_with_the_same_library_code_is_current(self):
+        rows = [("old", (0, 6, 151), False), ("older", (0, 6, 150), False)]
+        self.assertEqual(cp.lagging(rows, self.LATEST, changed_after_150), ["older"])
+        body = cp.render(rows, self.LATEST, "2026-11-25", changed_after_150)
+        self.assertIn("| old | v0.6.151 | current (no library change to v0.6.178) |", body)
+        self.assertIn("| older | v0.6.150 | behind |", body)
+        self.assertNotIn("- [ ] old on", body)
+
+    def test_the_root_manifest_counts_less_its_version(self):
+        a = '[workspace.package]\nversion = "0.6.178"\nedition = "2024"\n'
+        self.assertEqual(cp.without_version(a), cp.without_version(a.replace("178", "179")))
+        self.assertNotEqual(cp.without_version(a), cp.without_version(a.replace("2024", "2027")))
+
+    def test_an_unknown_pin_tag_reads_as_changed(self):
+        self.assertFalse(cp.tag_exists((0, 0, 9999)))
+        self.assertTrue(cp.library_changed((0, 0, 9999), (0, 6, 179)))
+
+    def test_the_library_diff_reads_this_repo(self):
+        # Two tags of this repo with no library change between them
+        # (v0.6.179 changed only a workflow and scripts), and two with one.
+        self.assertFalse(cp.library_changed((0, 6, 178), (0, 6, 179)))
+        self.assertTrue(cp.library_changed((0, 6, 177), (0, 6, 178)))
 
     def test_the_body_lists_every_consumer_and_a_line_per_lagging_one(self):
-        body = cp.render(self.rows(), self.LATEST, "2026-11-25")
+        body = cp.render(self.rows(), self.LATEST, "2026-11-25", changed_after_150)
         self.assertIn("Wednesday read 2026-11-25: the latest dstack release is v0.6.178; "
                       "3 of 4 consumers are behind it", body)
         self.assertIn("| intercom | v0.6.118 | behind |", body)

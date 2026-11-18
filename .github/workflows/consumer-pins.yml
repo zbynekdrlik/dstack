@@ -27,6 +27,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # Every tag: a pin counts as behind only when the library code
+          # changed since it (scripts/consumer_pins.py, `library_changed`).
+          fetch-depth: 0
           persist-credentials: false
       - name: The reader's own tests
         run: python3 -m unittest scripts/consumer_pins_test.py

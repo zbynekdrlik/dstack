@@ -12,6 +12,7 @@ Consumers are never asked to move per micro-release.
 """
 import argparse
 import re
+import subprocess
 import sys
 import tomllib
 import urllib.request
@@ -26,6 +27,20 @@ SOURCE = re.compile(r'git\+https://github\.com/[^/"]+/dstack(?:\.git)?\?tag=v(\d
 UNTAGGED = re.compile(r'git\+https://github\.com/[^/"]+/dstack(?:\.git)?\?(?:rev|branch)=')
 
 Version = tuple[int, int, int]
+Row = tuple[str, Optional[Version], bool]
+
+# What a consumer compiles from dstack: the library crates and the vendored
+# mDNS crate. A release that touches none of them (a tool, a workflow, a
+# binary like dtray or dstack-dev) gives a consumer nothing to move for.
+LIBRARY = (
+    "crates/dstack",
+    "crates/dlink",
+    "crates/dstack-audio-io",
+    "crates/dstack-resample",
+    "crates/dstack-endpoint",
+    "crates/dstack-asio",
+    "vendor/mdns-sd",
+)
 
 
 def parse_version(text: str) -> Version:
@@ -63,15 +78,32 @@ def collect(consumers: list[dict], fetch: Callable[[str, str], str]) -> list[tup
     return rows
 
 
-def lagging(rows: list[tuple[str, Optional[Version], bool]], latest: Version) -> list[str]:
-    """The consumers behind `latest` (no dstack tag found counts: an untagged
-    pin or a changed lock needs a look)."""
-    return [name for name, pin, _ in rows if pin is None or pin < latest]
+def state(pin: Optional[Version], by_rev: bool, latest: Version,
+          changed: Callable[[Version, Version], bool]) -> tuple[bool, str]:
+    """Whether a consumer must move, and its row's label. An older pin whose
+    library code equals `latest`'s (`changed(pin, latest)` false) is current:
+    the owner wants one move a week, never one per release (#399)."""
+    if pin is None and by_rev:
+        return True, "a commit or branch, no tag | move it to a tag"
+    if pin is None:
+        return True, "no dstack tag found | read its lock"
+    if pin >= latest:
+        return False, f"{show(pin)} | current"
+    if not changed(pin, latest):
+        return False, f"{show(pin)} | current (no library change to {show(latest)})"
+    return True, f"{show(pin)} | behind"
 
 
-def render(rows: list[tuple[str, Optional[Version], bool]], latest: Version, date: str) -> str:
+def lagging(rows: list[Row], latest: Version, changed: Callable[[Version, Version], bool]) -> list[str]:
+    """The consumers that must move to `latest` (no dstack tag found counts:
+    an untagged pin or a changed lock needs a look)."""
+    return [name for name, pin, by_rev in rows if state(pin, by_rev, latest, changed)[0]]
+
+
+def render(rows: list[Row], latest: Version, date: str,
+           changed: Callable[[Version, Version], bool]) -> str:
     """The sync issue's body."""
-    behind = lagging(rows, latest)
+    behind = lagging(rows, latest, changed)
     lines = [
         f"Wednesday read {date}: the latest dstack release is {show(latest)}; "
         f"{len(behind)} of {len(rows)} consumers are behind it (dstack #399).",
@@ -80,14 +112,7 @@ def render(rows: list[tuple[str, Optional[Version], bool]], latest: Version, dat
         "|---|---|---|",
     ]
     for name, pin, by_rev in rows:
-        if pin is None and by_rev:
-            lines.append(f"| {name} | a commit or branch, no tag | move it to a tag |")
-        elif pin is None:
-            lines.append(f"| {name} | no dstack tag found | read its lock |")
-        elif pin < latest:
-            lines.append(f"| {name} | {show(pin)} | behind |")
-        else:
-            lines.append(f"| {name} | {show(pin)} | current |")
+        lines.append(f"| {name} | {state(pin, by_rev, latest, changed)[1]} |")
     lines += [
         "",
         "Work it: send each consumer behind its upgrade notes from its own pin "
@@ -97,6 +122,45 @@ def render(rows: list[tuple[str, Optional[Version], bool]], latest: Version, dat
     ]
     lines += [f"- [ ] {name} on {show(latest)}" for name in behind]
     return "\n".join(lines) + "\n"
+
+
+def without_version(manifest: str) -> str:
+    """The root Cargo.toml less its `version = "..."` lines: every release
+    bumps the workspace version, while the rest (the edition, the profiles
+    every crate inherits) is library-relevant."""
+    return "\n".join(l for l in manifest.splitlines() if not l.startswith("version = "))
+
+
+def tag_exists(v: Version) -> bool:
+    """Whether this checkout knows the tag (a git failure reads as no)."""
+    r = subprocess.run(["git", "rev-parse", "--verify", "--quiet", f"refs/tags/{show(v)}"],
+                       capture_output=True, text=True)
+    return r.returncode == 0
+
+
+def library_changed(pin: Version, latest: Version) -> bool:
+    """Whether the library code differs between two dstack tags, read from
+    this checkout's git history (the workflow fetches every tag): the
+    library paths, and the root Cargo.toml less its version. A pin this
+    checkout does not know reads as changed (the consumer is asked to move,
+    never the whole read failed); any other git failure exits."""
+    if not tag_exists(pin):
+        return True
+    r = subprocess.run(
+        ["git", "diff", "--quiet", show(pin), show(latest), "--", *LIBRARY],
+        capture_output=True, text=True,
+    )
+    if r.returncode not in (0, 1):
+        sys.exit(f"git diff {show(pin)} {show(latest)} failed: {r.stderr.strip()}")
+    if r.returncode == 1:
+        return True
+    roots = []
+    for v in (pin, latest):
+        s = subprocess.run(["git", "show", f"{show(v)}:Cargo.toml"], capture_output=True, text=True)
+        if s.returncode != 0:
+            sys.exit(f"git show {show(v)}:Cargo.toml failed: {s.stderr.strip()}")
+        roots.append(without_version(s.stdout))
+    return roots[0] != roots[1]
 
 
 def fetch_raw(owner: str) -> Callable[[str, str], str]:
@@ -121,10 +185,10 @@ def main() -> None:
     with open(a.consumers, "rb") as f:
         consumers = tomllib.load(f)["consumer"]
     rows = collect(consumers, fetch_raw(a.owner))
-    body = render(rows, latest, a.date)
+    body = render(rows, latest, a.date, library_changed)
     with open(a.out, "w", encoding="utf-8") as f:
         f.write(body)
-    behind = lagging(rows, latest)
+    behind = lagging(rows, latest, library_changed)
     for name, pin, by_rev in rows:
         print(f"{name}: {show(pin) if pin else ('untagged' if by_rev else 'no dstack tag')}")
     print(f"{len(behind)} behind {show(latest)}")
