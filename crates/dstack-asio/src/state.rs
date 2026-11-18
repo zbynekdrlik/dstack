@@ -438,8 +438,11 @@ pub const LATE_BIN_KEYS: [&str; LATE_BINS] = [
 /// due one period after the line. One on time or early re-anchors the line
 /// at itself (0 late). A late one is `now - due` late, and the line creeps
 /// toward it by at most a thousandth of a period, so a driver clock slower
-/// than the PC's (a few ns a switch) never sums into a lag, and a real lag
-/// is forgotten at 1 ms a second.
+/// than the PC's by under 1000 ppm (field clocks: under 100) never sums
+/// into a lag, and a real lag is forgotten at a thousandth of the time
+/// that passes (a 0.6 ms lag in 0.6 s): the from-ASIO player re-centres
+/// its depth meanwhile. A driver clock 1000 ppm slow or more reads as a
+/// lag that grows (it would also overrun the player's ASRC range).
 ///
 /// Why the line and not the gap: two late gaps in a row, with no early
 /// switch between them to catch up, put the driver's write their summed
@@ -467,8 +470,9 @@ const SCHEDULE_CREEP: i64 = 1000;
 /// counted by `late_callbacks` and in no bin, so no switch counts twice.
 ///
 /// The from-ASIO FIFO loses depth one for one with a switch's lateness
-/// (#382: audio lost from 1.0-1.5 ms late at a 1.333 ms target), well under
-/// the two periods of [`callback_gap_kind`]: these bins show it.
+/// (#382: audio lost from 1.0-1.5 ms late at a 1.333 ms target), which a
+/// single gap rarely takes past the two periods of [`callback_gap_kind`]:
+/// these bins show it.
 pub fn lateness_bin(late_ns: i64) -> Option<usize> {
     // Whole bin widths late; truncation puts an early switch at 0.
     let widths = late_ns / LATE_BIN_NS;

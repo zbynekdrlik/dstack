@@ -119,9 +119,10 @@ impl Cause {
 /// late, or surely at least 3/4 of the target late: a bin whose lower edge
 /// is at least that (at 1.333 ms from 1.0 ms late, where #382's simulation
 /// first lost audio); the open top bin (2.0 ms or more behind the
-/// driver's schedule, #393) is judged by the period too, at least as late
-/// as one gap can make a callback. Else the bridge's; unknown while the
-/// target is 0.
+/// driver's schedule, #393) is judged by the period too, as late as one
+/// gap can make a callback (a lateness summed over several switches can
+/// pass it; the bins do not say by how much). Else the bridge's; unknown
+/// while the target is 0.
 pub fn from_asio_cause(rise: &UnderrunCounts, target_us: u64) -> Cause {
     if target_us == 0 {
         return Cause::Unknown;

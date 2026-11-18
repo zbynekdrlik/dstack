@@ -252,3 +252,23 @@ fn a_slow_driver_clock_counts_in_no_lateness_bin() {
     }
     assert_eq!(c.late_bins(), [0; LATE_BINS]);
 }
+
+/// The schedule line's creep has a ceiling (dstack #393): 900 ppm slow
+/// still counts in no bin, 2000 ppm slow reads as a lag that grows (past
+/// the 1000 ppm a late switch can creep the line).
+#[test]
+fn a_driver_clock_past_the_creep_reads_as_a_growing_lag() {
+    let period = frames_to_ns(64, 48_000.0) as f64;
+    let run = |ppm: f64| {
+        let (p, _, _) = gain(None);
+        let e = Engine::new(p, &opened(64, 1, &[], &[]));
+        let slow = period * (1.0 + ppm * 1e-6);
+        for k in 0..20_000_i64 {
+            e.note_callback((k as f64 * slow) as i64);
+        }
+        e.counters().late_bins()
+    };
+    assert_eq!(run(900.0), [0; LATE_BINS]);
+    let fast_drift = run(2000.0);
+    assert!(fast_drift[LATE_BINS - 1] > 0, "{fast_drift:?}");
+}
