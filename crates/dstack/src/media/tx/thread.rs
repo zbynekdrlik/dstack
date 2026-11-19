@@ -335,9 +335,10 @@ impl Transmitter {
             // The host sender, when the slot's receiver is resolved.
             let host_mac = batch.as_ref().and_then(|_| shared.host_mac(slot));
             let src = SocketAddrV4::new(shared.ip, shared.ports[slot]);
-            let schedule = lane
-                .schedule
-                .get_or_insert_with(|| Schedule::bootstrap(now, plan.fpp, *max_lag));
+            let schedule = lane.schedule.get_or_insert_with(|| Schedule {
+                slot,
+                ..Schedule::bootstrap(now, plan.fpp, *max_lag)
+            });
             // The receiver's latency, read each pass as the late count reads
             // it: the schedule holds on as long as the receiver plays.
             schedule.receiver_lag = receiver_lag(receiver_ns, *rate);
