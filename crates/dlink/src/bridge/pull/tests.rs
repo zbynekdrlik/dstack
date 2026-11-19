@@ -18,13 +18,13 @@ const P: u64 = 96;
 
 #[test]
 fn the_first_pull_starts_at_the_playout_point_and_reads_nothing() {
-    assert_eq!(due(None, 1_000, 100), Due::Start(1_000));
+    assert_eq!(due(None, 1_000, 100, 100), Due::Start(1_000));
 }
 
 #[test]
 fn a_pull_reads_the_gap_up_to_the_fifo_s_capacity() {
     assert_eq!(
-        due(Some(1_000), 1_480, 1_000),
+        due(Some(1_000), 1_480, 1_000, 1_000),
         Due::Read {
             from: 1_000,
             to: 1_480
@@ -32,7 +32,7 @@ fn a_pull_reads_the_gap_up_to_the_fifo_s_capacity() {
     );
     // Nothing new: an empty read.
     assert_eq!(
-        due(Some(1_000), 1_000, 1_000),
+        due(Some(1_000), 1_000, 1_000, 1_000),
         Due::Read {
             from: 1_000,
             to: 1_000
@@ -40,20 +40,46 @@ fn a_pull_reads_the_gap_up_to_the_fifo_s_capacity() {
     );
     // The whole capacity is still read; one frame more starts again.
     assert_eq!(
-        due(Some(1_000), 2_000, 1_000),
+        due(Some(1_000), 2_000, 1_000, 1_000),
         Due::Read {
             from: 1_000,
             to: 2_000
         }
     );
-    assert_eq!(due(Some(1_000), 2_001, 1_000), Due::Restart(2_001));
+    assert_eq!(due(Some(1_000), 2_001, 1_000, 1_000), Due::Restart(2_001));
 }
 
 #[test]
 fn a_clock_behind_the_last_read_waits_unless_it_went_too_far_back() {
-    assert_eq!(due(Some(1_000), 999, 100), Due::Wait);
-    assert_eq!(due(Some(1_000), 900, 100), Due::Wait);
-    assert_eq!(due(Some(1_000), 899, 100), Due::Restart(899));
+    assert_eq!(due(Some(1_000), 999, 100, 100), Due::Wait);
+    assert_eq!(due(Some(1_000), 900, 100, 100), Due::Wait);
+    assert_eq!(due(Some(1_000), 899, 100, 100), Due::Restart(899));
+}
+
+/// The back room (dstack #440): exactly the room behind waits, one frame
+/// more starts again at the new end, whatever the reach.
+#[test]
+fn a_clock_behind_past_the_back_room_restarts() {
+    assert_eq!(due(Some(1_000), 998, 1_000, 2), Due::Wait);
+    assert_eq!(due(Some(1_000), 997, 1_000, 2), Due::Restart(997));
+    assert_eq!(
+        due(Some(1_000), 1_000, 1_000, 2),
+        Due::Read {
+            from: 1_000,
+            to: 1_000
+        }
+    );
+}
+
+/// A handover's 30 µs in samples, rounded up.
+#[test]
+fn the_back_room_is_a_handover_s_step_rounded_up_to_samples() {
+    // 1.323, 1.44, 2.88, 3.0 and 5.76 samples.
+    assert_eq!(back_room(44_100), 2);
+    assert_eq!(back_room(48_000), 2);
+    assert_eq!(back_room(96_000), 3);
+    assert_eq!(back_room(100_000), 3);
+    assert_eq!(back_room(192_000), 6);
 }
 
 #[test]
@@ -311,6 +337,77 @@ fn a_gap_past_the_fifo_starts_again_and_an_unready_clock_starts_afresh() {
     r.clock.sleep_until(ns_of(T + P + room + 55, RATE));
     assert_eq!(r.pull.pull(), 5);
     assert_eq!(r.pull.stats().restarts(), 1);
+}
+
+/// dstack #440 on the pull: the media clock a step back (100 ms, 400 ms,
+/// both within the FIFO's reach) left the pull waiting the whole step out
+/// for the clock to come back to where the last read ended, the consumer's
+/// FIFO unfed for that long. A wait that far ahead is the clock gone back
+/// (the clock-back rule of `Blocks::next`, ROZHODNUTÉ 19.11): the pull
+/// starts again at once at the new playout point, counted, and reads on
+/// from there.
+#[test]
+fn a_clock_a_step_back_starts_the_pull_again_at_once() {
+    for back in [4_800u64, 19_200] {
+        let mut r = rig(0);
+        assert!(
+            back < reach(r.fifo.capacity()) as u64,
+            "{back} within the reach"
+        );
+        assert_eq!(r.pull.pull(), 0);
+        r.clock.advance(ns_of(480, RATE));
+        assert_eq!(r.pull.pull(), 480, "{back} back");
+        assert!(r.fifo.pop_planar(&mut [0.0; 960], 480));
+        r.clock
+            .re_anchor(-i64::try_from(ns_of(back, RATE)).unwrap());
+        assert_eq!(r.pull.pull(), 0, "{back} back: nothing read at the step");
+        assert_eq!(r.pull.stats().restarts(), 1, "{back} back");
+        r.clock.advance(ns_of(480, RATE));
+        assert_eq!(r.pull.pull(), 480, "{back} back: on from the new time");
+    }
+}
+
+/// The pull's room behind its position is a clock handover's step
+/// (`dstack::clock::linked::HANDOVER_NS`, 30 µs; ROZHODNUTÉ 19.11 on
+/// #440): the clock's only backward move with no new epoch. At 48 kHz that
+/// is 1.44 samples, so 2 samples back (the most two reads 30 µs apart can
+/// differ) wait, and 3 start the pull again, counted, which then reads on
+/// from the new playout point (the 3 positions again).
+#[test]
+fn a_step_back_within_a_handover_waits_and_one_sample_more_restarts() {
+    for (back, restarts, reads) in [(2u64, 0u64, 10usize), (3, 1, 13)] {
+        let mut r = rig(0);
+        assert_eq!(r.pull.pull(), 0);
+        r.clock.sleep_until(ns_of(T + P + 480, RATE));
+        assert_eq!(r.pull.pull(), 480);
+        let step = i64::try_from(ns_of(T + P + 480 - back, RATE)).unwrap()
+            - i64::try_from(ns_of(T + P + 480, RATE)).unwrap();
+        r.clock.re_anchor(step);
+        assert_eq!(r.pull.pull(), 0, "{back} back");
+        assert_eq!(r.pull.stats().restarts(), restarts, "{back} back");
+        r.clock.sleep_until(ns_of(T + P + 490, RATE));
+        assert_eq!(r.pull.pull(), reads, "{back} back");
+    }
+}
+
+/// A P that Dante Controller raises moves the playout point back: within
+/// the room the pull waits it out, past it the pull starts again once,
+/// counted (as the pump re-bootstraps at a new P), and reads on from the
+/// new playout point.
+#[test]
+fn a_playout_raised_past_the_room_restarts_the_pull_once() {
+    for (more, restarts, reads) in [(2u64, 0u64, 8usize), (4, 1, 10)] {
+        let mut r = rig(0);
+        assert_eq!(r.pull.pull(), 0);
+        r.clock.sleep_until(ns_of(T + P + 480, RATE));
+        assert_eq!(r.pull.pull(), 480);
+        r.rx.set_device_latency(ns_of(P + more, RATE));
+        assert_eq!(r.pull.pull(), 0, "{more} more");
+        assert_eq!(r.pull.stats().restarts(), restarts, "{more} more");
+        r.clock.sleep_until(ns_of(T + P + 490, RATE));
+        assert_eq!(r.pull.pull(), reads, "{more} more");
+        assert_eq!(r.pull.stats().restarts(), restarts, "{more} more");
+    }
 }
 
 #[test]

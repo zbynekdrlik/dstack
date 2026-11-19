@@ -44,8 +44,8 @@ fn each_rebootstrap_counts_in_its_cause_and_in_the_total() {
     // More than W behind: late.
     let w = r.pump.media(w + WORK_MARGIN + 1, 0);
     assert_eq!(causes(&r.stats.view()), (1, 0, 0, 0, 1));
-    // The clock back more than the discontinuity, on the same epoch.
-    let back = w - DISCONTINUITY - 1;
+    // The clock back more than the margin and a block, on the same epoch.
+    let back = w - WORK_MARGIN - B - 1;
     let w = r.pump.media(back, 0);
     assert!(w >= back && w <= back + B, "{w}");
     assert_eq!(causes(&r.stats.view()), (1, 1, 0, 0, 2));
@@ -100,7 +100,7 @@ fn a_late_rebootstrap_is_a_late_wake_and_a_clock_gone_back_is_none() {
     assert_eq!((recent[0].behind_us, recent[0].rebootstrap), (1_010, true));
     assert_eq!(r.stats.view().wake_behind_max_us, 1_010);
     // The clock back: a re-bootstrap, no lateness at all.
-    r.pump.media(w - DISCONTINUITY - 1, 0);
+    r.pump.media(w - WORK_MARGIN - B - 1, 0);
     assert_eq!(r.stats.view().rebootstraps_clock_back, 1);
     assert_eq!(wakes(&r), 2, "a clock gone back is no wake lateness");
     assert_eq!(r.stats.wakes().late_wakes(), 1);

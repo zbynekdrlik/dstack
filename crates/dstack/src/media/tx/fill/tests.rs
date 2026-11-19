@@ -185,7 +185,8 @@ fn a_clock_gone_back_far_starts_again() {
     let (mut fill, _, disc) = fill_of(Ramp::default());
     let engine = engine();
     fill.fill_due(T, MAX_LAG, &engine, 0);
-    fill.fill_due(T - 2 * crate::media::tx::DISCONTINUITY, MAX_LAG, &engine, 0);
+    // 4 s back at 96 kHz.
+    fill.fill_due(T - 384_000, MAX_LAG, &engine, 0);
     assert_eq!(fill.stats().view().rebootstraps, 1);
     assert_eq!(disc.load(Ordering::Relaxed), 2);
 }
@@ -580,4 +581,43 @@ fn the_engine_rings_are_the_pump_s_and_the_pull_s_channels_once_each() {
         engine_channels(&[], &[2, 2], 4),
         Err("the app's TX channel 3 is named twice".to_string())
     );
+}
+
+/// dstack #440: a TX thread pass that reads the time a step back under the
+/// old epoch starts the fill again (a clock gone back, counted); the next
+/// pass's epoch with the step keeps it at the new time, as the pump keeps
+/// its own (ROZHODNUTÉ 19.11), instead of moving it the step behind and
+/// starting it again late. A pass with no re-anchor between them spends
+/// the mark: the step then moves it, a second restart, as before.
+#[test]
+fn the_tx_thread_keeps_the_fill_restarted_by_a_step_back_for_one_pass() {
+    for between in [false, true] {
+        let shared = shared();
+        assert!(shared.claim_fill(one_channel(Ramp::default())).is_ok());
+        let mut tx = Transmitter::new(Arc::clone(&shared));
+        let start = ns_of(T, RATE);
+        tx.step(Some(start), 0);
+        // 100 ms back (9600 samples, 300 blocks), read under epoch 0.
+        let back_ns = 100_000_000;
+        let new = start + 1_000_000 - back_ns;
+        tx.step(Some(new), 0);
+        assert_eq!(shared.tx_fill().unwrap().rebootstraps, 1, "gone back");
+        if between {
+            tx.step(Some(new + 300_000), 0);
+        }
+        let step = -i64::try_from(back_ns).unwrap();
+        tx.step(
+            Some(new + 600_000),
+            crate::clock::Anchor {
+                epoch: 1,
+                re_anchor: Some(crate::clock::ReAnchor {
+                    epoch: 1,
+                    step_ns: step,
+                }),
+            },
+        );
+        let v = shared.tx_fill().unwrap();
+        let expected = if between { 2 } else { 1 };
+        assert_eq!(v.rebootstraps, expected, "a pass between: {between} {v:?}");
+    }
 }

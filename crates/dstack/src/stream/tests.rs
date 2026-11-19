@@ -236,15 +236,19 @@ fn a_pump_behind_more_than_its_margin_rebootstraps_once_and_counts_the_skipped_b
     assert_eq!(b.start(), s + 7 * B);
 }
 
+/// No schedule waits further than the margin and a block (a re-anchor moves
+/// one up to there, a run or a bootstrap leaves at most a block): a wait
+/// further ahead is the clock gone back (dstack #440), started again at once.
 #[test]
 fn a_schedule_far_ahead_rebootstraps() {
     let fresh = Blocks::bootstrap(T + 5, TIMING);
     let due = fresh.due();
-    // Exactly the discontinuity ahead (the clock went back): a wait.
+    // Exactly the margin and a block ahead: a wait.
     let mut b = fresh;
-    assert_eq!(b.next(due - DISCONTINUITY), Due::Wait { until: due });
-    // One sample more: the schedule starts again at now, nothing skipped.
-    let now = due - DISCONTINUITY - 1;
+    assert_eq!(b.next(due - WORK_MARGIN - B), Due::Wait { until: due });
+    // One sample more (the clock went back): the schedule starts again at
+    // now, nothing skipped.
+    let now = due - WORK_MARGIN - B - 1;
     let mut b = fresh;
     assert_eq!(
         b.next(now),
@@ -253,7 +257,7 @@ fn a_schedule_far_ahead_rebootstraps() {
             cause: Cause::ClockBack
         }
     );
-    assert_eq!(b, Blocks::bootstrap(now, TIMING));
+    assert_eq!(b.start(), Blocks::bootstrap(now, TIMING).start());
     assert!(b.due() >= now && b.due() < now + B);
     assert!(matches!(b.next(now), Due::Wait { .. }));
 }
@@ -1669,6 +1673,7 @@ fn a_seamless_handover_step_neither_rebootstraps_nor_loses_a_block() {
 
 mod after_send;
 mod causes;
+mod clock_back;
 mod drain;
 mod play_at;
 mod re_anchor_sleep;
