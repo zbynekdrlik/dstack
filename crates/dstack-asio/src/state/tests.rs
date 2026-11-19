@@ -277,13 +277,17 @@ fn a_driver_that_does_not_tick_waits_for_its_clock_and_reopens_at_its_interval()
         (0, true, true, 2_000_000_000, long, Quiet),
         (0, false, true, 59_999_999_999, long, Quiet),
         (0, true, true, 60_000_000_000, long, Reopen),
-        (0, false, false, 60_000_000_000, long, Reopen),
+        // A run not yet waiting starts its wait first, however late its
+        // first step (a slow open, dstack #447).
+        (0, false, false, 60_000_000_000, long, StartsWaiting),
+        (0, true, false, i64::MAX, long, StartsWaiting),
         (0, true, true, i64::MAX, long, Reopen),
         // dstack #447: the first re-open of a wait, 4 s after the open.
         (0, true, false, 3_999_999_999, first, StartsWaiting),
         (0, true, true, 3_999_999_999, first, Quiet),
         (0, true, true, 4_000_000_000, first, Reopen),
-        (0, false, false, 4_000_000_000, first, Reopen),
+        (0, false, false, 4_000_000_000, first, StartsWaiting),
+        (0, false, true, 4_000_000_000, first, Reopen),
         (1, true, false, 4_000_000_000, first, Ticking),
         (1, true, true, 4_000_000_000, first, ClockArrived),
     ];

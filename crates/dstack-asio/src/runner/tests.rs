@@ -363,6 +363,24 @@ fn a_driver_with_no_clock_is_opened_again_after_4_8_16_32_then_every_60_s() {
     }
 }
 
+/// dstack #447 (review): an open that blocks longer than the first re-open
+/// interval (the run's first step comes 5 s after it) still starts its wait
+/// (the WARN, once a wait) before it is opened again.
+#[test]
+fn a_slow_open_starts_its_wait_before_the_first_re_open() {
+    let mut r = rig();
+    r.runner.step(0);
+    r.runner.step(5 * S);
+    let s = r.status();
+    assert_eq!(
+        (s.state, s.reason.clone(), r.fake.borrow().closes),
+        (RunState::Waiting, Some(Reason::NoClock), 0),
+        "the wait starts first"
+    );
+    r.runner.step(5 * S + POLL_NS);
+    assert_eq!(r.fake.borrow().closes, 1, "then it is opened again");
+}
+
 /// dstack #447: each wait for a clock starts its re-opens at 4 s again: a
 /// driver that gave its clock, then stalled and came back without one, is
 /// not opened again on the earlier wait's longer interval.
