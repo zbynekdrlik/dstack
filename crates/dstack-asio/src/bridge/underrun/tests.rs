@@ -46,15 +46,16 @@ fn a_from_asio_underrun_is_judged_against_the_target_less_the_floor() {
     // No driver shape known (no open): no floor, the lateness alone.
     assert_eq!(from_asio_cause(&bins(&[(3, 1)]), 1000), Cause::Driver);
     assert_eq!(from_asio_cause(&bins(&[(3, 1)]), 1001), Cause::Bridge);
-    // A 4 ms target (the default 256 at 96 kHz, a 2.667 ms period): the
-    // top bin by the period, 2667 us + 1333.5 us of floor reaches 4000 us.
+    // A 4 ms target (the default 256 at 96 kHz, a period `of` reads as
+    // 2666 us): the top bin by the period, 2666 us + 1333 us of floor
+    // reaches 3999 us, not 4000 (an even period: the edge is equality).
     assert_eq!(from_asio_cause(&bins(&[(7, 3)]), 4000), Cause::Bridge);
     let top = UnderrunCounts {
-        period_us: 2667,
+        period_us: 2666,
         ..bins(&[(7, 3)])
     };
-    assert_eq!(from_asio_cause(&top, 4000), Cause::Target);
-    assert_eq!(from_asio_cause(&top, 4001), Cause::Bridge);
+    assert_eq!(from_asio_cause(&top, 3999), Cause::Target);
+    assert_eq!(from_asio_cause(&top, 4000), Cause::Bridge);
     let late = UnderrunCounts {
         late_callbacks: 1,
         ..UnderrunCounts::default()
@@ -322,16 +323,16 @@ fn the_watch_publishes_the_counts_and_each_side_s_latest_cause() {
 /// A lateness summed over several switches can pass the period the top
 /// bin is otherwise judged by (dstack #393): when the run's peak lateness
 /// rose over the check, the top bin reaches that peak. 4.6 ms behind at a
-/// 4.5 ms target is the driver's, though the period (2.667 ms, with its
-/// floor of 1333.5 us under 4.5 ms) is not; a check whose peak did not
-/// rise falls back to the period. A peak from 3166.5 us reaches the target
-/// with the floor.
+/// 4.5 ms target is the driver's, though the period (2666 us, 256 at
+/// 96 kHz as `UnderrunCounts::of` reads it, with its floor of 1333 us
+/// under 4.5 ms) is not; a check whose peak did not rise falls back to
+/// the period. A peak from 3167 us reaches the target with the floor.
 #[test]
 fn the_top_bin_reaches_the_peak_lateness_that_rose_over_the_check() {
     let mut w = UnderrunWatch::new();
     let at = |from_asio_underruns, top, late_max_us| UnderrunCounts {
         from_asio_underruns,
-        period_us: 2667,
+        period_us: 2666,
         late_max_us,
         ..bins(&[(7, top)])
     };
@@ -354,8 +355,8 @@ fn the_top_bin_reaches_the_peak_lateness_that_rose_over_the_check() {
 /// dsg's case (dstack #393): a from-ASIO target of 1 ms with a 128-frame
 /// driver at 96 kHz, two callbacks 0.6 ms late, then an underrun. The side
 /// needs about half a period (0.667 ms, #422's measured floor) plus the
-/// callbacks' lateness: 1.267 ms is over the 1 ms target, so the cause is
-/// the target, not the bridge.
+/// callbacks' lateness: the bin's lower edge (500 us) + 666.5 us is over
+/// the 1 ms target, so the cause is the target, not the bridge.
 #[test]
 fn a_target_under_the_floor_plus_the_lateness_is_named_so() {
     let status = Status {
@@ -387,7 +388,7 @@ fn a_new_runs_equal_peak_is_its_own() {
     let mut w = UnderrunWatch::new();
     let at = |from_asio_underruns, top, late_max_us| UnderrunCounts {
         from_asio_underruns,
-        period_us: 2667,
+        period_us: 2666,
         late_max_us,
         ..bins(&[(7, top)])
     };
@@ -404,7 +405,7 @@ fn a_fallen_late_count_alone_marks_a_new_run() {
     let before = UnderrunCounts {
         from_asio_underruns: 1,
         late_callbacks: 2,
-        period_us: 2667,
+        period_us: 2666,
         late_max_us: 4600,
         ..bins(&[(7, 1)])
     };

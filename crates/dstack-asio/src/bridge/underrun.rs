@@ -9,10 +9,14 @@
 //! thread reads on time, so the from-ASIO side loses depth one for one
 //! with the lateness (at a 1.333 ms target the simulation lost audio from
 //! 1.0-1.5 ms late, far under the two periods `late_callbacks` counts).
-//! The side needs its own floor on top (#393, [`from_asio_cause`]): the
-//! driver writes its whole buffer at a switch, so the FIFO's depth swings
-//! a period around the target, half a period under it (#422's measured
-//! floor, issuecomment-6992267133).
+//! At worst the side needs its own floor on top (#393, [`from_asio_cause`]):
+//! the driver writes its whole buffer at a switch, so the FIFO's depth
+//! swings a period around the target, half a period under it (#422's
+//! measured floor, issuecomment-6992267133), and a late write that lands
+//! at that low point costs the floor plus its lateness. #422's sparse late
+//! bursts (every 7 s) mostly missed that point and needed only the larger
+//! of the two; dsg's underrun at 1 ms with two 500-750 us late callbacks
+//! (18.11.2026) is the sum's case.
 //! The to-ASIO side pulls and plays in the same switch, so a late switch
 //! costs it nothing; only a gap over two periods (its catch-up switches
 //! run the FIFO dry, `tests/to_asio_pull.rs`' driver-thread witness) is
@@ -119,7 +123,8 @@ pub enum Cause {
     Bridge,
     /// The target is under the side's floor plus the callbacks' lateness
     /// (dstack #393): no callback alone came the target late, yet with
-    /// what the side needs for its driver shape they cost it its audio.
+    /// what the side needs for its driver shape they can explain the
+    /// loss (the worst case, module doc).
     Target,
     /// The from-ASIO target is not known yet (0: no player started).
     Unknown,
@@ -164,8 +169,10 @@ impl Cause {
 /// floor plus the reach is: the floor is half the driver's period (module
 /// doc; #422 measured 0.75 ms holding and 0.625 ms dropping at 128 frames,
 /// 0.375 holding and 0.25 dropping at 64 frames with 64-frame blocks, at
-/// 96 kHz, seeded), 0 with no period known. Else the bridge's; unknown
-/// while the target is 0.
+/// 96 kHz, seeded; with 32-frame blocks a 64-frame driver held 0.125 ms,
+/// so there half a period is an upper bound and names the target a little
+/// early: the counts carry no pump block), 0 with no period known. Else
+/// the bridge's; unknown while the target is 0.
 pub fn from_asio_cause(rise: &UnderrunCounts, target_us: u64) -> Cause {
     if target_us == 0 {
         return Cause::Unknown;
