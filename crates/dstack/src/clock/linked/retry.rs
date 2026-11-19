@@ -105,8 +105,8 @@ pub fn failed(e: &FollowerError) -> Attempt {
 /// (`NpcapMissing`), port 319 is refused (`PermissionDenied`) or no adapter
 /// has the name (`InterfaceNotFound` of a missing NIC); yes, when the
 /// adapter has no IPv4 yet (`InterfaceNotFound` of a present one) or the
-/// capture did not open (`Other`: on Windows "no Npcap device carries
-/// <ip>" while Npcap binds to a fresh adapter at boot). A kind dsync adds
+/// capture did not open (`Other`: on Windows `no Npcap device carries <ip>`
+/// while Npcap binds to a fresh adapter at boot). A kind dsync adds
 /// later stays failed.
 pub fn start_passes(e: &FollowerError) -> bool {
     match e {
@@ -115,5 +115,61 @@ pub fn start_passes(e: &FollowerError) -> bool {
             .is_some_and(|p| p.missing),
         FollowerError::Other(_) => true,
         _ => false,
+    }
+}
+
+/// The longest wait between two tries, s.
+pub const RETRY_MAX_S: i64 = 30;
+
+/// The wait after `failures` failed starts, s: 1, 2, 4, 8, 16, then
+/// [`RETRY_MAX_S`] (a first failure waits 1 s).
+pub fn retry_delay_s(failures: u32) -> i64 {
+    (1_i64 << failures.saturating_sub(1).min(5)).min(RETRY_MAX_S)
+}
+
+const S: i64 = 1_000_000_000;
+
+/// A follower that did not start yet, for a cause that can pass: the
+/// selector's to try again ([`super::Linked::tick`]).
+#[derive(Debug)]
+pub(super) struct Retry {
+    pub(super) starter: Starter,
+    /// The first failure's monotonic time, ns.
+    first_ns: i64,
+    /// The starts that failed so far.
+    pub(super) attempts: u32,
+    /// The next try's monotonic time, ns.
+    next_ns: i64,
+    /// The last failure's text.
+    pub(super) error: String,
+}
+
+impl Retry {
+    /// The tries after a first failure at `now_ns` with `error`.
+    pub(super) fn new(starter: Starter, now_ns: i64, error: String) -> Retry {
+        Retry {
+            starter,
+            first_ns: now_ns,
+            attempts: 1,
+            next_ns: now_ns.saturating_add(retry_delay_s(1) * S),
+            error,
+        }
+    }
+
+    /// Whether a try is due at `now_ns`.
+    pub(super) fn due(&self, now_ns: i64) -> bool {
+        now_ns >= self.next_ns
+    }
+
+    /// A try at `now_ns` failed again with `error`.
+    pub(super) fn failed(&mut self, now_ns: i64, error: String) {
+        self.attempts = self.attempts.saturating_add(1);
+        self.next_ns = now_ns.saturating_add(retry_delay_s(self.attempts) * S);
+        self.error = error;
+    }
+
+    /// Whole seconds since the first failure at `now_ns`.
+    pub(super) fn retrying_for_s(&self, now_ns: i64) -> i64 {
+        now_ns.saturating_sub(self.first_ns) / S
     }
 }

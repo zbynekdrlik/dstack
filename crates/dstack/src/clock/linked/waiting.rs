@@ -16,7 +16,8 @@ pub const NOT_IN_USE_EVERY_NS: i64 = 60_000_000_000;
 /// Why the selector does not use the follower ([`waiting_of`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Waiting {
-    /// Its receive thread ended.
+    /// Its receive thread ended, or it has not started yet and its start
+    /// is tried again (dstack #431).
     Stopped,
     /// No phase-lock window closed lately: it hears no Sync/Follow_Up
     /// pairs.

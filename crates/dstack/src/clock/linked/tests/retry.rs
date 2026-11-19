@@ -303,3 +303,36 @@ fn dsync_s_start_on_no_such_adapter_fails_for_good() {
         }
     }
 }
+
+/// The wait after each failed start: 1, 2, 4, 8, 16, then 30 s for ever.
+#[test]
+fn the_tries_wait_1_2_4_8_16_then_30_s() {
+    let waits: Vec<i64> = (1..=8).map(retry_delay_s).collect();
+    assert_eq!(waits, [1, 2, 4, 8, 16, 30, 30, 30]);
+    assert_eq!(RETRY_MAX_S, 30);
+    // No failure yet reads as the first; any count stays at the longest.
+    assert_eq!(retry_delay_s(0), 1);
+    assert_eq!(retry_delay_s(u32::MAX), 30);
+}
+
+/// A try is due from its delay after the last failure, to the ns, never
+/// before; the seconds since the first failure count whole seconds.
+#[test]
+fn a_try_is_due_its_delay_after_the_last_failure() {
+    use crate::clock::linked::retry::Retry;
+    let start = Starter::new("Ethernet 3", None, |_, _| unreachable!("not run"));
+    let t0 = 5 * S;
+    let mut r = Retry::new(start, t0, "first".into());
+    assert_eq!((r.attempts, r.error.as_str()), (1, "first"));
+    assert!(!r.due(t0 + S - 1));
+    assert!(r.due(t0 + S));
+    r.failed(t0 + S, "second".into());
+    assert_eq!((r.attempts, r.error.as_str()), (2, "second"));
+    assert!(!r.due(t0 + 3 * S - 1));
+    assert!(r.due(t0 + 3 * S));
+    r.failed(t0 + 3 * S + 7, "third".into());
+    assert!(!r.due(t0 + 7 * S + 6));
+    assert!(r.due(t0 + 7 * S + 7));
+    assert_eq!(r.retrying_for_s(t0 + 61 * S - 1), 60);
+    assert_eq!(r.retrying_for_s(t0 + 61 * S), 61);
+}
