@@ -11,12 +11,15 @@
 //!
 //! The output thread is witnessed (`tests/consumer/witness.rs`, dstack
 //! #395/#396): each callback's lateness against its absolute schedule, the
-//! ring's holes never written and the sender's TX schedule restarts
-//! (dstack #401). A late output thread (the runner not running it: its
-//! catch-up callbacks run the FIFO dry, a windows-2025 failure of PR
-//! #394's run: 2 underruns, 2578 off, no ring hole) or a sender whose TX
-//! thread slept past its latency (PR #406's windows-2025 run: 520 off, 0
-//! underruns, 512 holes never written) says nothing about the bridge: a
+//! ring's holes never written, the sender's TX schedule restarts (dstack
+//! #401) and its pump restarts with the silence they sent (dstack #436). A
+//! late output thread (the runner not running it: its catch-up callbacks
+//! run the FIFO dry, a windows-2025 failure of PR #394's run: 2 underruns,
+//! 2578 off, no ring hole), a sender whose TX thread slept past its
+//! latency (PR #406's windows-2025 run: 520 off, 0 underruns, 512 holes
+//! never written) or whose pump woke more than W late (its TX thread sends
+//! the positions the restart left unwritten as silence) says nothing about
+//! the bridge: a
 //! judged window that lost audio to either is set aside (kept for the
 //! message) and the next one judged, up to [`witness::WINDOWS`]; the
 //! asserts on the judged window are unchanged, and a failure prints
@@ -169,7 +172,7 @@ fn a_stalled_pump_leaves_the_output_s_bridge_whole() {
     )
     .expect("the player");
     // The ring's holes never written (holes the sender left), and the
-    // sender's TX side, for the witness.
+    // sender's TX side and pump, for the witness.
     let ring_media = Arc::clone(receiver.media());
     let mut witness = Witness::new(
         PERIOD,
@@ -180,7 +183,11 @@ fn a_stalled_pump_leaves_the_output_s_bridge_whole() {
             let ring = ring_media.rx.rings()[0].counters();
             ring.holes.saturating_sub(ring.late)
         },
-        Some((Arc::clone(&sender.media().tx), RATE)),
+        Some(witness::Sender {
+            tx: Arc::clone(&sender.media().tx),
+            pump: sender.media().engine_stats().expect("the sender's pump"),
+            rate: RATE,
+        }),
     );
     let stall_us = witness.stall_us();
     // The output thread: a steady deadline every PERIOD, as a sound card's
