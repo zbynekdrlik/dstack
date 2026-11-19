@@ -351,7 +351,12 @@ fn a_driver_with_no_clock_is_opened_again_after_4_8_16_32_then_every_60_s() {
         let s = r.status();
         assert_eq!(
             (s.state, s.reason.clone(), s.clock_waits, s.resets),
-            (RunState::Waiting, Some(Reason::NoClock), u64::from(k) + 1, 0),
+            (
+                RunState::Waiting,
+                Some(Reason::NoClock),
+                u64::from(k) + 1,
+                0
+            ),
             "after {wait_s} s"
         );
         open_at = due;

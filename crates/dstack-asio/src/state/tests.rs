@@ -250,40 +250,62 @@ fn every_reason_has_its_code_and_text() {
 }
 
 /// A driver that does not tick waits for its clock from 2 s after the open
-/// (once per wait) and is opened again every 60 s; the first tick ends a
-/// wait. Every edge, both sides.
+/// (once per wait) and is opened again its re-open interval after the open
+/// (here the longest, 60 s, and the first, 4 s); the first tick ends a wait.
+/// Every edge, both sides.
 #[test]
-fn a_driver_that_does_not_tick_waits_for_its_clock_and_reopens_every_60_s() {
+fn a_driver_that_does_not_tick_waits_for_its_clock_and_reopens_at_its_interval() {
     use ClockStep::*;
     assert_eq!(
         (NO_CLOCK_NS, NO_CLOCK_REOPEN_NS),
         (2_000_000_000, 60_000_000_000)
     );
+    let long = NO_CLOCK_REOPEN_NS;
+    let first = 4_000_000_000;
     let table = [
-        (1, true, false, 0, Ticking),
-        (1, false, false, 0, Ticking),
-        (1, true, false, 70_000_000_000, Ticking),
-        (1, true, true, 0, ClockArrived),
-        (u64::MAX, true, true, 70_000_000_000, ClockArrived),
-        (1, false, true, 0, Quiet),
-        (u64::MAX, false, true, 70_000_000_000, Quiet),
-        (0, true, false, 0, Quiet),
-        (0, false, false, 1_999_999_999, Quiet),
-        (0, true, false, 2_000_000_000, StartsWaiting),
-        (0, false, false, 59_999_999_999, StartsWaiting),
-        (0, true, true, 2_000_000_000, Quiet),
-        (0, false, true, 59_999_999_999, Quiet),
-        (0, true, true, 60_000_000_000, Reopen),
-        (0, false, false, 60_000_000_000, Reopen),
-        (0, true, true, i64::MAX, Reopen),
+        (1, true, false, 0, long, Ticking),
+        (1, false, false, 0, long, Ticking),
+        (1, true, false, 70_000_000_000, long, Ticking),
+        (1, true, true, 0, long, ClockArrived),
+        (u64::MAX, true, true, 70_000_000_000, long, ClockArrived),
+        (1, false, true, 0, long, Quiet),
+        (u64::MAX, false, true, 70_000_000_000, long, Quiet),
+        (0, true, false, 0, long, Quiet),
+        (0, false, false, 1_999_999_999, long, Quiet),
+        (0, true, false, 2_000_000_000, long, StartsWaiting),
+        (0, false, false, 59_999_999_999, long, StartsWaiting),
+        (0, true, true, 2_000_000_000, long, Quiet),
+        (0, false, true, 59_999_999_999, long, Quiet),
+        (0, true, true, 60_000_000_000, long, Reopen),
+        (0, false, false, 60_000_000_000, long, Reopen),
+        (0, true, true, i64::MAX, long, Reopen),
+        // dstack #447: the first re-open of a wait, 4 s after the open.
+        (0, true, false, 3_999_999_999, first, StartsWaiting),
+        (0, true, true, 3_999_999_999, first, Quiet),
+        (0, true, true, 4_000_000_000, first, Reopen),
+        (0, false, false, 4_000_000_000, first, Reopen),
+        (1, true, false, 4_000_000_000, first, Ticking),
+        (1, true, true, 4_000_000_000, first, ClockArrived),
     ];
-    for (ticks, primed, waiting, since, want) in table {
+    for (ticks, primed, waiting, since, reopen, want) in table {
         assert_eq!(
-            clock_step(ticks, primed, waiting, since),
+            clock_step(ticks, primed, waiting, since, reopen),
             want,
-            "{ticks} {primed} {waiting} {since}"
+            "{ticks} {primed} {waiting} {since} {reopen}"
         );
     }
+}
+
+/// dstack #447: a wait's re-opens come 4, 8, 16 and 32 s after each open,
+/// then every 60 s, however many there were.
+#[test]
+fn a_wait_s_re_opens_come_after_4_8_16_32_then_every_60_s() {
+    let s: Vec<i64> = (0..=6)
+        .map(|n| no_clock_reopen_ns(n) / 1_000_000_000)
+        .collect();
+    assert_eq!(s, vec![4, 8, 16, 32, 60, 60, 60]);
+    assert_eq!(no_clock_reopen_ns(u32::MAX), NO_CLOCK_REOPEN_NS);
+    assert_eq!(NO_CLOCK_REOPEN_S, [4, 8, 16, 32, 60]);
 }
 
 #[test]
