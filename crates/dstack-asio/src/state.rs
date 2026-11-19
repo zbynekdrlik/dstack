@@ -243,9 +243,11 @@ pub enum ClockStep {
     /// No callback [`NO_CLOCK_NS`] after the open: the host waits for its
     /// clock, the driver kept open (one WARN per wait).
     StartsWaiting,
-    /// No callback the re-open interval after the open
+    /// Waiting, and no callback the re-open interval after the open
     /// ([`no_clock_reopen_ns`]): closed and opened again at once (no reset,
-    /// no backoff).
+    /// no backoff). A run comes here only after its wait started: an open
+    /// that blocked past the interval eats that window, and the next ones
+    /// double.
     Reopen,
 }
 
@@ -270,10 +272,17 @@ pub fn clock_step(
             (true, false) => ClockStep::Quiet,
         };
     }
-    if since_open_ns >= reopen_ns {
+    // A run not yet waiting starts its wait first, however late its first
+    // step (an open that blocked past the interval, dstack #447): the wait
+    // is announced once before any re-open.
+    if !waiting {
+        if since_open_ns >= NO_CLOCK_NS {
+            ClockStep::StartsWaiting
+        } else {
+            ClockStep::Quiet
+        }
+    } else if since_open_ns >= reopen_ns {
         ClockStep::Reopen
-    } else if since_open_ns >= NO_CLOCK_NS && !waiting {
-        ClockStep::StartsWaiting
     } else {
         ClockStep::Quiet
     }
