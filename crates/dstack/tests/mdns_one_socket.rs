@@ -105,6 +105,21 @@ fn mdns_sockets() -> Vec<String> {
         .collect()
 }
 
+/// The 5353 sockets once the last device stopped: the daemon's thread
+/// confirms its shutdown just before it drops its socket, so they are
+/// read again for up to 1 s while any is left.
+#[cfg(target_os = "linux")]
+fn sockets_after_stop() -> Vec<String> {
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        let left = mdns_sockets();
+        if left.is_empty() || deadline.saturating_duration_since(Instant::now()).is_zero() {
+            return left;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 /// Waits until a direct query reads `device`'s channel `tx` (at most
 /// [`BOUND`]): the daemon answers on the shared socket.
 fn read_record(device: &str, tx: &str) {
@@ -150,7 +165,11 @@ fn a_device_s_process_receives_mdns_on_one_socket_and_still_answers() {
     #[cfg(target_os = "linux")]
     {
         assert_eq!(held.len(), 1, "one 5353 socket: {held:?}");
-        assert_eq!(mdns_sockets(), Vec::<String>::new(), "none after the stop");
+        assert_eq!(
+            sockets_after_stop(),
+            Vec::<String>::new(),
+            "none after the stop"
+        );
     }
 }
 
@@ -178,7 +197,11 @@ fn two_devices_on_one_address_share_the_socket_and_one_s_stop_keeps_the_other() 
     {
         assert_eq!(both.len(), 1, "one 5353 socket for both: {both:?}");
         assert_eq!(after_b, both, "A keeps the socket");
-        assert_eq!(mdns_sockets(), Vec::<String>::new(), "none after the stops");
+        assert_eq!(
+            sockets_after_stop(),
+            Vec::<String>::new(),
+            "none after the stops"
+        );
     }
 }
 

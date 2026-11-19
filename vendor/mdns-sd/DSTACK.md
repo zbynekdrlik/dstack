@@ -61,7 +61,9 @@ LICENSE-APACHE and LICENSE-MIT), copied unchanged except:
   device process received it three times (dsg, dasio#190: 0.1-0.8 ms of
   receive DPC a datagram; dstack #442, `crates/dstack/src/announce/mdns.rs`,
   `crates/dstack/tests/mdns_one_socket.rs`). `new`/`new_with_port` keep
-  upstream's behaviour.
+  upstream's behaviour. The tap is exercised by dstack's tests (unit tests
+  on loopback, the whole-device count); `IP_MULTICAST_ALL` off is in no
+  gate (this crate is outside the mutation gate, its tests run by hand).
 
 - `Cargo.toml`: an empty `[workspace]` table, so cargo never searches above
   this crate (a dstack checkout nested in another one, such as a git

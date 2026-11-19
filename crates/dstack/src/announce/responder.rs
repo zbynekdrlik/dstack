@@ -64,6 +64,13 @@ const OTHER_TTL: u32 = 4500;
 pub const MAX_DATAGRAM: usize = 1452;
 /// The thread's receive wait (it looks at the stop between two).
 const WAIT: Duration = Duration::from_millis(250);
+/// The device's responder's wait for the daemon's next query: between two
+/// it reads the unicast queries to its own socket, so one waits at most
+/// this long (dstack #442).
+const HEARD_WAIT: Duration = Duration::from_millis(50);
+/// The queries a pass takes at most from each source (the watch is looked
+/// at between two passes).
+const DRAIN_MAX: usize = 64;
 
 /// A name as compared: lower case, no dot at the end.
 fn key(name: &str) -> String {
@@ -462,8 +469,10 @@ struct Server {
 }
 
 impl Server {
-    /// The thread: each query answered, until the stop (the daemon's first,
-    /// waited for up to [`WAIT`], then one from its own socket a pass);
+    /// The thread: each query answered, until the stop (a pass: the
+    /// daemon's, the first waited for up to [`HEARD_WAIT`], then every
+    /// unicast one on its own socket; a test's: one read waiting up to
+    /// [`WAIT`]);
     /// with a watch, the socket opened again and the records announced
     /// after an interface change (a socket that cannot be opened keeps the
     /// old one, and the next look tries again).
@@ -482,13 +491,35 @@ impl Server {
                 };
                 m.keep_as(Instant::now(), &mut w.read, REOPENED, GROUP, reopen);
             }
-            if let Some(Ok(d)) = self.heard.as_ref().map(|h| h.recv_timeout(WAIT)) {
+            let Some(heard) = self.heard.as_ref() else {
+                // A test's responder: one read a pass, waiting up to WAIT.
+                match sock.recv_from(&mut buf) {
+                    Ok((n, SocketAddr::V4(from))) => self.reply(&sock, &buf[..n], from),
+                    Ok(_) => {}
+                    Err(e) => trace!(kind = ?e.kind(), "no mDNS query this wait"),
+                }
+                continue;
+            };
+            // The daemon's queries: the first waited for, the rest taken.
+            let mut wait = HEARD_WAIT;
+            for _ in 0..DRAIN_MAX {
+                let Ok(d) = heard.recv_timeout(wait) else {
+                    break;
+                };
                 self.reply(&sock, &d.bytes, d.from);
+                wait = Duration::ZERO;
             }
-            match sock.recv_from(&mut buf) {
-                Ok((n, SocketAddr::V4(from))) => self.reply(&sock, &buf[..n], from),
-                Ok(_) => {}
-                Err(e) => trace!(kind = ?e.kind(), "no mDNS query this wait"),
+            // Its own socket, without a wait: every unicast query to the
+            // address.
+            for _ in 0..DRAIN_MAX {
+                match sock.recv_from(&mut buf) {
+                    Ok((n, SocketAddr::V4(from))) => self.reply(&sock, &buf[..n], from),
+                    Ok(_) => {}
+                    Err(e) => {
+                        trace!(kind = ?e.kind(), "no unicast mDNS query left");
+                        break;
+                    }
+                }
             }
         }
     }

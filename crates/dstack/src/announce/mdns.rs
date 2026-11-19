@@ -12,8 +12,8 @@
 //!   `0.0.0.0:5353`, only the address's interface enabled), one per process
 //!   and address, shared by every device there ([`Mdns::shared`]); its
 //!   last holder's drop shuts it down. A device withdraws its own records
-//!   ([`super::Announcer::announce`] of none, then [`Mdns::settle`]), so a
-//!   device that stops never takes another's records down.
+//!   ([`Mdns::withdraw`]), so a device that stops never takes another's
+//!   records down.
 //! - The daemon's thread hands every datagram it reads to [`Taps::feed`]
 //!   (`mdns_sd::ServiceDaemon::new_tapped`), which copies it into each
 //!   [`Listener`]'s bounded channel that takes it ([`Heard`]): the
@@ -22,12 +22,20 @@
 //!   ([`super::responder::Responder`], queries only). A full channel drops
 //!   the datagram (counted, [`Taps::dropped`]): the daemon's thread never
 //!   waits for a reader.
-//! - The group membership is the daemon's: its IP check (every 5 s) leaves
-//!   an address that is gone and joins it again when it comes back, also on
-//!   another interface index (`check_ip_changes`).
+//! - The group membership is the daemon's (dstack #282's watch, its own
+//!   form): its IP check, run every [`crate::membership::EVERY`] here as
+//!   the watches' (mdns-sd's default is 5 s), leaves an address that is
+//!   gone and joins it again when it comes back, also on another interface
+//!   index (`check_ip_changes`). The watches' known limit holds: a re-add
+//!   on the same index between two checks is not seen.
+//! - The daemon's commands wait out a full queue (`announce::retried`): a device with
+//!   more records than its queue holds (100) fills it at a withdrawal too.
 //!
 //! The subscriptions' direct queries (`subscribe::instance`) read their
-//! legacy unicast answers on a port of their own, never on 5353.
+//! legacy unicast answers on a port of their own, never on 5353. A
+//! [`crate::discover::Discovery`] (a device's `traffic::neighbours` starts
+//! one only while its NIC is loud past our audio) still joins a socket of
+//! its own.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -38,11 +46,14 @@ use std::time::Duration;
 use mdns_sd::{DaemonStatus, IfKind, Metrics, ServiceDaemon};
 use tracing::{debug, info, warn};
 
-use super::Announcer;
+use super::{AGAIN_TRIES, Announcer, retried};
 use crate::discover::senders::{MINUTE_NS, Meter, browsers::Browsers};
 
-/// How long a withdrawal or the daemon's shutdown is waited for.
+/// How long a withdrawal is waited for.
 pub const GOODBYE_WAIT: Duration = Duration::from_secs(3);
+/// How long the daemon's shutdown is waited for: after a withdrawal it has
+/// nothing left to send, so a device's stop stays within dlink's 5 s.
+pub const SHUTDOWN_WAIT: Duration = Duration::from_secs(1);
 /// The datagrams a listener's channel holds; past that one is dropped.
 pub const QUEUE: usize = 256;
 
@@ -79,7 +90,7 @@ impl Heard {
 }
 
 /// The `n`th dropped datagram gets a warning: the 1st, 2nd, 4th, 8th, ...
-/// (a reader that stalls is named, and the log stays bounded).
+/// (the log stays bounded; each line names the reader's kind).
 pub fn warn_at(n: u64) -> bool {
     n.is_power_of_two()
 }
@@ -132,6 +143,7 @@ impl Taps {
                 if warn_at(n) {
                     warn!(
                         dropped = n,
+                        reader = ?sub.heard,
                         queue = QUEUE,
                         "an mDNS datagram not handed on: its reader's queue is full"
                     );
@@ -158,12 +170,6 @@ pub struct Listener {
     from: Receiver<Datagram>,
 }
 
-impl std::fmt::Debug for Listener {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Listener").field("id", &self.id).finish()
-    }
-}
-
 impl Listener {
     /// The next datagram, waiting at most `wait`.
     pub fn recv_timeout(&self, wait: Duration) -> Result<Datagram, RecvTimeoutError> {
@@ -180,6 +186,14 @@ impl Drop for Listener {
 /// The daemons running in this process, by address.
 static SHARED: Mutex<Vec<(Ipv4Addr, Weak<Mdns>)>> = Mutex::new(Vec::new());
 
+/// The running daemon on `ip` in `all`, if any (dead entries dropped).
+fn running(all: &mut Vec<(Ipv4Addr, Weak<Mdns>)>, ip: Ipv4Addr) -> Option<Arc<Mdns>> {
+    all.retain(|(_, w)| w.strong_count() > 0);
+    all.iter()
+        .find(|(a, _)| *a == ip)
+        .and_then(|(_, w)| w.upgrade())
+}
+
 /// The process's mDNS daemon on one address (see the module).
 pub struct Mdns {
     daemon: ServiceDaemon,
@@ -187,42 +201,40 @@ pub struct Mdns {
     meter: Option<Arc<Meter>>,
 }
 
-impl std::fmt::Debug for Mdns {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Mdns").finish_non_exhaustive()
-    }
-}
-
 impl Mdns {
     /// The daemon on the interface with the address `ip`: the one already
     /// running in this process there, or a new one (with the address's
-    /// mDNS meter, dstack #289).
+    /// mDNS meter, dstack #289). A new one is opened without the registry's
+    /// lock (a failed one waits for its shutdown), so two devices starting
+    /// at once may open two: the later is dropped and the first kept.
     pub fn shared(ip: Ipv4Addr) -> Result<Arc<Mdns>, String> {
-        let mut all = lock(&SHARED);
-        all.retain(|(_, w)| w.strong_count() > 0);
-        if let Some(m) = all
-            .iter()
-            .find(|(a, _)| *a == ip)
-            .and_then(|(_, w)| w.upgrade())
-        {
+        if let Some(m) = running(&mut lock(&SHARED), ip) {
             return Ok(m);
         }
-        let m = Arc::new(Mdns::open(ip)?);
-        all.push((ip, Arc::downgrade(&m)));
-        Ok(m)
+        let opened = Arc::new(Mdns::open(ip)?);
+        let mut all = lock(&SHARED);
+        if let Some(first) = running(&mut all, ip) {
+            drop(all);
+            return Ok(first);
+        }
+        all.push((ip, Arc::downgrade(&opened)));
+        Ok(opened)
     }
 
     /// A new daemon on `ip`'s interface only, IPv4 (no other network sees
-    /// the records; mdns-sd applies the selections in order).
+    /// the records; mdns-sd applies the selections in order), its IP check
+    /// at the watches' period.
     fn open(ip: Ipv4Addr) -> Result<Mdns, String> {
         let taps = Arc::new(Taps::default());
         let feed = Arc::clone(&taps);
         let daemon = ServiceDaemon::new_tapped(Box::new(move |bytes, from| feed.feed(bytes, from)))
             .map_err(|e| format!("the mDNS daemon: {e}"))?;
+        let every = u32::try_from(crate::membership::EVERY.as_secs()).unwrap_or(u32::MAX);
         let selected = daemon
             .disable_interface(IfKind::All)
-            .and_then(|()| daemon.enable_interface(IfKind::Addr(IpAddr::V4(ip))));
-        let meter = Meter::start(taps.listen(Heard::All), ip, MINUTE_NS, Browsers::default());
+            .and_then(|()| daemon.enable_interface(IfKind::Addr(IpAddr::V4(ip))))
+            .and_then(|()| daemon.set_ip_check_interval(every));
+        let meter = Meter::start(taps.listen(Heard::All), MINUTE_NS, Browsers::default());
         let m = Mdns {
             daemon,
             taps,
@@ -266,21 +278,23 @@ impl Mdns {
     }
 
     /// Waits until the daemon has run every command sent before this call
-    /// (a withdrawal's goodbyes): a round trip through its command queue,
-    /// at most `wait`. Its counts of what it sent so far.
+    /// (a withdrawal's goodbyes): a round trip through its command queue
+    /// (a full queue waited out), at most `wait` for the answer. Its counts
+    /// of what it sent so far.
     pub fn settle(&self, wait: Duration) -> Result<Metrics, String> {
-        let asked = self
-            .daemon
-            .get_metrics()
-            .map_err(|e| format!("the mDNS daemon was not asked: {e}"))?;
+        let (asked, _waits) = retried(AGAIN_TRIES, || self.daemon.get_metrics());
         asked
+            .map_err(|e| format!("the mDNS daemon was not asked: {e}"))?
             .recv_timeout(wait)
             .map_err(|e| format!("not within {} ms: {e}", wait.as_millis()))
     }
 
     /// A device's goodbye: the records `announcer` registered withdrawn
     /// (every other device's on the daemon kept), waited for until the
-    /// daemon sent them, at most `wait`.
+    /// daemon sent them, at most `wait`. A name registered again within
+    /// 120 ms on a daemon another device keeps running may see the
+    /// withdrawal's repeated goodbye after its announcement; the daemon's
+    /// own repeat a second later announces it again.
     pub fn withdraw(
         &self,
         announcer: &mut Announcer<ServiceDaemon>,
@@ -297,13 +311,13 @@ impl Mdns {
 
 impl Drop for Mdns {
     /// The last holder's end: the daemon shut down (goodbyes for any record
-    /// still registered), waited for at most [`GOODBYE_WAIT`].
+    /// still registered; a full queue waited out), waited for at most
+    /// [`SHUTDOWN_WAIT`].
     fn drop(&mut self) {
-        let ended = self
-            .daemon
-            .shutdown()
+        let (asked, _waits) = retried(AGAIN_TRIES, || self.daemon.shutdown());
+        let ended = asked
             .map_err(|e| e.to_string())
-            .and_then(|s| s.recv_timeout(GOODBYE_WAIT).map_err(|e| e.to_string()));
+            .and_then(|s| s.recv_timeout(SHUTDOWN_WAIT).map_err(|e| e.to_string()));
         match ended {
             Ok(DaemonStatus::Shutdown) => debug!("mDNS daemon stopped"),
             Ok(other) => warn!(?other, "the mDNS daemon's shutdown answered otherwise"),

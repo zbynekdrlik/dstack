@@ -194,13 +194,7 @@ fn a_quiet_minute_logs_nothing() {
 /// hands it (dstack #442).
 fn fed(minute_ns: u64, browsers: Browsers) -> (Arc<Taps>, Meter) {
     let taps = Arc::new(Taps::default());
-    let meter = Meter::start(
-        taps.listen(Heard::All),
-        Ipv4Addr::LOCALHOST,
-        minute_ns,
-        browsers,
-    )
-    .unwrap();
+    let meter = Meter::start(taps.listen(Heard::All), minute_ns, browsers).unwrap();
     (taps, meter)
 }
 

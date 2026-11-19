@@ -256,15 +256,10 @@ pub struct Meter {
 const WAIT: Duration = Duration::from_millis(250);
 
 impl Meter {
-    /// A meter counting what `heard` receives (the daemon's socket on
-    /// `ip`, dstack #442), in minutes of `minute_ns`, the 96 s refreshes
+    /// A meter counting what `heard` receives (the daemon's socket on its
+    /// address, dstack #442), in minutes of `minute_ns`, the 96 s refreshes
     /// looked for by `browsers`.
-    pub fn start(
-        heard: Listener,
-        ip: Ipv4Addr,
-        minute_ns: u64,
-        browsers: Browsers,
-    ) -> io::Result<Meter> {
+    pub fn start(heard: Listener, minute_ns: u64, browsers: Browsers) -> io::Result<Meter> {
         let last = Arc::new(Mutex::new(None));
         let floor = Arc::new(Mutex::new(Guard::default()));
         let stop = Arc::new(AtomicBool::new(false));
@@ -281,7 +276,7 @@ impl Meter {
         let thread = std::thread::Builder::new()
             .name("dstack-mdns-meter".to_string())
             .spawn(move || run.run())?;
-        info!(%ip, "mDNS meter: started on the Dante leg (passive, nothing sent)");
+        info!("mDNS meter: started on the Dante leg (passive, nothing sent)");
         Ok(Meter {
             last,
             floor,

@@ -17,10 +17,12 @@
 //!   engine ring on each TX channel the engine feeds) and the control
 //!   socket bound. [`Prepared::media`] and [`Prepared::config`] are what the
 //!   engine builds its pump from.
-//! - [`Prepared::start`]: the mDNS daemon on the interface only, the
-//!   signals ([`Signals`]), and the `dstack-device` thread: a current-thread
-//!   tokio runtime running the media clock's poller and
-//!   [`daemon::serve`] until it is stopped, then the mDNS goodbyes.
+//! - [`Prepared::start`]: the mDNS daemon on the interface only (the
+//!   process's one on the address, shared by every device there and shut
+//!   down with its last, [`crate::announce::mdns`]), the signals
+//!   ([`Signals`]), and the `dstack-device` thread: a current-thread tokio
+//!   runtime running the media clock's poller and [`daemon::serve`] until
+//!   it is stopped, then the device's own mDNS goodbyes.
 //! - [`Host`]: the running device: [`Host::ended`] (serving ended by
 //!   itself, and why), [`Host::stop`] (asks serving to end and waits a
 //!   bounded time; one still running is a warning, never killed),

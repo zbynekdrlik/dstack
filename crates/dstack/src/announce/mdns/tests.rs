@@ -228,3 +228,39 @@ fn a_device_s_withdrawal_takes_its_own_records_only() {
         "B's two at its own goodbye"
     );
 }
+
+/// iemmixer's device has about 200 records, mdns-sd's queue holds 100
+/// commands: a withdrawal fills it, and its round trip and the shutdown
+/// after it wait the queue out instead of failing (`Error::Again`).
+#[test]
+fn a_withdrawal_of_more_records_than_the_queue_holds_is_confirmed() {
+    use crate::announce::{CHAN_SERVICE, ServiceRecord};
+    let _one = ONE_DAEMON.lock().unwrap_or_else(PoisonError::into_inner);
+    let mdns = Mdns::shared(Ipv4Addr::LOCALHOST).unwrap();
+    let recs: Vec<ServiceRecord> = (0..250)
+        .map(|i| ServiceRecord {
+            service: CHAN_SERVICE,
+            instance: format!("{i}@mdns-test-many"),
+            host: "mdns-test-many.local.".to_string(),
+            ip: Ipv4Addr::LOCALHOST,
+            port: 4455,
+            txt: vec![format!("id={i}")],
+        })
+        .collect();
+    let mut a = Announcer::new(mdns.daemon().clone());
+    a.announce(&recs).unwrap();
+    let before = unregistered(&mdns.settle(GOODBYE_WAIT).unwrap());
+    mdns.withdraw(&mut a, GOODBYE_WAIT)
+        .expect("the goodbyes confirmed");
+    let after = unregistered(&mdns.settle(GOODBYE_WAIT).unwrap());
+    assert_eq!(after - before, 250);
+    // The last holder's shutdown right after such a burst still ends the
+    // daemon.
+    a.announce(&recs).unwrap();
+    let handle = mdns.daemon().clone();
+    for rec in &recs {
+        let _queued = handle.unregister(&format!("{}.{}", rec.instance, rec.service));
+    }
+    drop(mdns);
+    assert!(handle.get_metrics().is_err(), "the daemon still runs");
+}
