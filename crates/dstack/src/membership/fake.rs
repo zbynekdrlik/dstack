@@ -22,6 +22,8 @@ pub(crate) struct Fake {
     pub reads: Arc<AtomicU64>,
     /// The list gives the interface no index (dstack #417).
     pub no_index: Arc<AtomicBool>,
+    /// The address is not listed at all (dstack #444: removed).
+    pub gone: Arc<AtomicBool>,
 }
 
 impl Fake {
@@ -38,6 +40,9 @@ impl Fake {
         Lister {
             read: Box::new(move || {
                 fake.reads.fetch_add(1, Ordering::Relaxed);
+                if fake.gone.load(Ordering::Relaxed) {
+                    return Ok(Vec::new());
+                }
                 Ok(vec![Link {
                     name: "lo".to_string(),
                     ip,
@@ -49,10 +54,17 @@ impl Fake {
         }
     }
 
-    /// The interface re-created: a new index.
+    /// The interface re-created: a new index (or the same one, its address
+    /// added again after [`Fake::remove`]).
     pub fn recreate(&self, index: u32) {
         self.no_index.store(false, Ordering::Relaxed);
+        self.gone.store(false, Ordering::Relaxed);
         self.index.store(index, Ordering::Relaxed);
+    }
+
+    /// The address removed: the list no longer holds it (dstack #444).
+    pub fn remove(&self) {
+        self.gone.store(true, Ordering::Relaxed);
     }
 
     /// The interface listed with no index (the OS gave none).

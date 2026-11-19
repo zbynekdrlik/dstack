@@ -62,6 +62,7 @@ use tracing::{debug, info, warn};
 
 use super::{AGAIN_TRIES, Announcer, retried};
 use crate::discover::senders::{MINUTE_NS, Meter, browsers::Browsers};
+use crate::membership::{Link, Lister, Membership};
 
 /// How long a withdrawal is waited for.
 pub const GOODBYE_WAIT: Duration = Duration::from_secs(3);
@@ -118,6 +119,22 @@ pub fn bound_note(group_to_bound: bool) -> Option<&'static str> {
          group query (only unicast to the address), so browsers and direct queries to \
          the group find no device here; a Windows trial switch (dstack #444)",
     )
+}
+
+/// The INFO line of a bound daemon whose socket was opened again (dstack
+/// #444).
+pub const BOUND_REOPENED: &str =
+    "mdns: the bound daemon's socket opened again after its address came back";
+
+/// One look of a bound daemon's watch on `ip` at `now` (not written yet).
+fn keep_bound(
+    _m: &mut Membership,
+    _now: std::time::Instant,
+    _read: impl FnOnce() -> std::io::Result<Vec<Link>>,
+    _ip: Ipv4Addr,
+    _reopen: impl FnOnce() -> Result<(), String>,
+) -> bool {
+    false
 }
 
 /// The `n`th dropped datagram gets a warning: the 1st, 2nd, 4th, 8th, ...
@@ -262,6 +279,12 @@ impl Mdns {
     /// whatever it was opened with (one socket an address); a device that
     /// asks the other form is told so in a warning.
     pub fn shared_bound(ip: Ipv4Addr, bound: bool) -> Result<Arc<Mdns>, String> {
+        Mdns::shared_listed(ip, bound, Lister::default())
+    }
+
+    /// [`Mdns::shared_bound`] whose bound daemon's watch reads `lister`
+    /// (not written yet).
+    fn shared_listed(ip: Ipv4Addr, bound: bool, _lister: Lister) -> Result<Arc<Mdns>, String> {
         if let Some(m) = running(&mut lock(&SHARED), ip) {
             return Ok(m.kept_for(bound));
         }
@@ -338,6 +361,12 @@ impl Mdns {
     /// #444), not the wildcard.
     pub fn bound(&self) -> bool {
         self.bound
+    }
+
+    /// How often the bound daemon's socket was opened again (not written
+    /// yet).
+    pub fn reopens(&self) -> u64 {
+        0
     }
 
     /// A Windows device needs a responder of its own for answers from its
