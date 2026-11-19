@@ -43,6 +43,12 @@ use std::time::{Duration, Instant};
 use dlink::bridge::player::SETTLE_CALLS;
 use dlink::bridge::{Player, Stats, fifo_for};
 use dlink::{Block, Clock, Config, Link, Map, Media, Place, Ports, Process, Stopped, SubStatus};
+use dstack::media::tx::{MAX_FLOWS, TxShared};
+use dstack::stream::PumpStats;
+
+#[path = "tx_restart/restarts.rs"]
+mod restarts;
+use restarts::Restarts;
 
 /// One device set at a time in this process: both tests bind the same
 /// ports on 127.0.0.1.
@@ -112,8 +118,11 @@ struct Heard {
     output_gaps: u64,
     output_lost: u64,
     /// The RX ring's holes in the judged window (the sender's audio that
-    /// never came).
+    /// never came), and those written later (late packets).
     ring_holes: u64,
+    ring_late: u64,
+    /// What the sender did in the judged window.
+    sender: Sender,
     /// Held events, and the frames the card played as silence meanwhile
     /// (its own gap: the callback was not there to fill it).
     holds: u64,
@@ -132,6 +141,136 @@ impl Heard {
     fn mean_ms(sum: (u64, u64)) -> f64 {
         sum.0 as f64 / sum.1.max(1) as f64 * 1e3 / f64::from(RATE)
     }
+
+    /// The ring's holes never written in the window: packets the sender
+    /// never sent.
+    fn never_written(&self) -> u64 {
+        self.ring_holes.saturating_sub(self.ring_late)
+    }
+}
+
+/// The sending device's counts a window reads at its edges, lock-free (the
+/// card thread never waits on a lock): its pump's and its TX side's.
+struct SenderSide {
+    pump: Arc<PumpStats>,
+    tx: Arc<TxShared>,
+}
+
+/// The sender's counts at a window's open.
+#[derive(Debug, Clone, Copy)]
+struct SenderAt {
+    pump_restarts: u64,
+    pump_late: u64,
+    silence: u64,
+    opened: restarts::Opened,
+}
+
+/// What the sender did in a judged window (dstack #436).
+#[derive(Debug, Default)]
+struct Sender {
+    /// Its pump's restarts, and those after a wake more than W late
+    /// (`rebootstraps_late`).
+    pump_restarts: u64,
+    pump_late: u64,
+    /// The samples its TX thread sent as silence: engine ring positions
+    /// its pump left unwritten (the TX lanes' `holes`), which reach the
+    /// receiver as whole packets, so no RX counter sees them.
+    silence: u64,
+    /// Its TX schedule's restarts, with their lines (dstack #401).
+    tx: Restarts,
+}
+
+impl SenderSide {
+    fn silence(&self) -> u64 {
+        (0..MAX_FLOWS).map(|s| self.tx.lane(s).holes).sum()
+    }
+
+    /// The counts at a window's open.
+    fn open(&self) -> SenderAt {
+        let pump = self.pump.view();
+        SenderAt {
+            pump_restarts: pump.rebootstraps,
+            pump_late: pump.rebootstraps_late,
+            silence: self.silence(),
+            opened: restarts::open(&self.tx),
+        }
+    }
+
+    /// What the sender did since the window opened `at`.
+    fn since(&self, at: &SenderAt) -> Sender {
+        let pump = self.pump.view();
+        Sender {
+            pump_restarts: pump.rebootstraps.saturating_sub(at.pump_restarts),
+            pump_late: pump.rebootstraps_late.saturating_sub(at.pump_late),
+            silence: self.silence().saturating_sub(at.silence),
+            tx: at.opened.close(&self.tx, RATE),
+        }
+    }
+}
+
+/// The samples off the level a pump restart's silence may cost past the
+/// samples it sent: the RX converter's filter rings at both edges of the
+/// silence (measured, see [`who`]).
+const SILENCE_EDGES: u64 = 64;
+
+/// Who lost a judged window's audio (dstack #436).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Who {
+    /// The sender's pump or TX thread was not run.
+    Sender,
+    /// The bridge (or nothing explains it).
+    Ours,
+}
+
+/// Who lost `heard`'s audio, with the bridge's own counts `bridge_clean`
+/// (no underrun, re-centre or pull restart, the gaps' drops the card's
+/// silence, the latency kept). `SENDER` when the bridge is clean and every
+/// loss has the sender's evidence, the `rx_pull` rule (the consumer
+/// witness, `tests/consumer/witness.rs`) plus the sender's pump:
+/// - samples off only with the sender's pump restarted in the window,
+///   every restart late (its wake more than W behind), and the off within
+///   the silence it sent and [`SILENCE_EDGES`] a restart;
+/// - ring holes never written only within the sender's TX restarts
+///   ([`Restarts::explain`]: every restart's sleep returned the flow's
+///   latency late, its bound at least its own receiver's, the holes within
+///   the restarts' bound);
+/// - any TX restart without that evidence is `OURS`.
+///
+/// Every edge errs to `OURS`: a restart just before the window's open whose
+/// silence or holes land inside it is unexplained.
+fn who(heard: &Heard, bridge_clean: bool) -> Who {
+    let s = &heard.sender;
+    let holes = heard.never_written();
+    let lost = heard.off > 0 || holes > 0;
+    let pump = heard.off == 0
+        || (s.pump_restarts > 0
+            && s.pump_late == s.pump_restarts
+            && heard.off <= s.silence + SILENCE_EDGES * s.pump_restarts);
+    let tx = (holes == 0 || s.tx.explain(holes)) && (!s.tx.any() || s.tx.runner());
+    if lost && bridge_clean && pump && tx {
+        Who::Sender
+    } else {
+        Who::Ours
+    }
+}
+
+/// The verdict of a judged window ([`who`]) and its evidence.
+fn verdict(heard: &Heard, bridge_clean: bool) -> String {
+    let s = &heard.sender;
+    let who = match who(heard, bridge_clean) {
+        Who::Sender => "SENDER (the sender's pump or TX thread was not run)".to_string(),
+        Who::Ours => format!("OURS{}", s.tx.ours()),
+    };
+    format!(
+        "verdict {who}: {} samples off, ring holes never written {}, the sender's pump {} \
+         restarts ({} late), {} samples sent as silence, the sender's {:?}",
+        heard.off,
+        heard.never_written(),
+        s.pump_restarts,
+        s.pump_late,
+        s.silence,
+        s.tx
+    )
 }
 
 /// How the event thread wakes: each held event `hold` late, the
@@ -145,7 +284,8 @@ struct Wakes {
 }
 
 /// The card and its event thread (module doc), woken as `wakes` says:
-/// returns what it heard.
+/// returns what it heard, and what the `sender` did meanwhile.
+#[allow(clippy::too_many_arguments)]
 fn output(
     wakes: Wakes,
     mut pull: dlink::bridge::RxPull,
@@ -153,6 +293,7 @@ fn output(
     fifo: Arc<dlink::bridge::Fifo>,
     stats: Arc<Stats>,
     media: Arc<Media>,
+    sender: SenderSide,
     receiving: Arc<AtomicU64>,
 ) -> Heard {
     let mut out = vec![0f32; CARD_FRAMES as usize];
@@ -166,7 +307,7 @@ fn output(
     let mut late_left = 0;
     let mut hole_before = false;
     let mut events = 0u64;
-    let mut judging: Option<(Instant, [u64; 5])> = None;
+    let mut judging: Option<(Instant, [u64; 6], SenderAt)> = None;
     let mut since = None;
     // Callbacks since the last hold (the latency is judged two after it).
     let mut after_hold = u64::MAX;
@@ -228,9 +369,10 @@ fn output(
                 stats.output_gaps(),
                 stats.output_lost_frames(),
                 holes(),
+                media.rx.rings()[0].counters().late,
             ]
         };
-        let (start, first) = *judging.get_or_insert_with(|| (now, counts()));
+        let (start, first, opened) = *judging.get_or_insert_with(|| (now, counts(), sender.open()));
         // The window ends outside a gap: a gap's dry call drops before its
         // silence is counted here, and its settling drops the rest a few
         // calls later.
@@ -242,6 +384,8 @@ fn output(
             heard.output_gaps = last[2] - first[2];
             heard.output_lost = last[3] - first[3];
             heard.ring_holes = last[4] - first[4];
+            heard.ring_late = last[5] - first[5];
+            heard.sender = sender.since(&opened);
             return heard;
         }
         if held {
@@ -282,6 +426,7 @@ fn run(wakes: Wakes) -> (Heard, u64, String) {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = tempfile::tempdir().unwrap();
+    restarts::listen();
     let place = Place::Ip(test_ipv4());
     let tx_config = Config::new("dlink-held-tx", dir.path().join("tx.toml"))
         .tx(["Out 1"])
@@ -342,7 +487,13 @@ fn run(wakes: Wakes) -> (Heard, u64, String) {
             Arc::clone(receiver.media()),
             Arc::clone(&receiving),
         );
-        std::thread::spawn(move || output(wakes, pull, player, fifo, stats, media, receiving))
+        let sender = SenderSide {
+            pump: sender.media().engine_stats().expect("the sender's pump"),
+            tx: Arc::clone(&sender.media().tx),
+        };
+        std::thread::spawn(move || {
+            output(wakes, pull, player, fifo, stats, media, sender, receiving)
+        })
     };
     let end = Instant::now() + Duration::from_secs(15);
     while receiver.rx_channels()[0].status != Some(SubStatus::Receiving) && Instant::now() < end {
@@ -367,14 +518,16 @@ fn run(wakes: Wakes) -> (Heard, u64, String) {
 /// The asserts of a held run (module doc).
 fn judge(case: &str, heard: &Heard, restarts: u64, counts: &str) {
     let (before, after) = (Heard::mean_ms(heard.before), Heard::mean_ms(heard.after));
-    let verdict = if heard.ring_holes > 0 {
-        "SENDER"
-    } else {
-        "OURS"
-    };
+    // The bridge's own counts, each asserted below: the verdict names the
+    // sender only when all of them hold (dstack #436).
+    let bridge_clean = (heard.underruns, heard.recentres, restarts) == (0, 0, 0)
+        && heard.output_lost == heard.card_silence
+        && (heard.output_gaps > 0 || heard.card_silence == 0)
+        && (after - before).abs() < 2.0;
     let at = format!(
-        "{case}: {heard:?}, restarts {restarts}, wait before {before:.2} ms, after {after:.2} ms; verdict {verdict} (ring holes in the window {}, callbacks not judged on the level {}); {counts}",
-        heard.ring_holes, heard.hole_calls
+        "{case}: {heard:?}, restarts {restarts}, wait before {before:.2} ms, after {after:.2} ms; {} (callbacks not judged on the level {}); {counts}",
+        verdict(heard, bridge_clean),
+        heard.hole_calls
     );
     eprintln!("{at}");
     assert!(heard.holds >= 8, "only {} holds: {at}", heard.holds);
