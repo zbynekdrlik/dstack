@@ -334,7 +334,7 @@ mod witness_tests {
         lines: Vec::new(),
         rate: 48_000,
         oversleep_max_us: 0,
-        receiver_lag: 0,
+        receiver_lag: Vec::new(),
     };
 
     // `counted` TX restarts with lines of these oversleeps (µs), each a
@@ -371,7 +371,7 @@ mod witness_tests {
     fn samples_off_after_a_restart_under_the_receiver_s_latency_are_ours() {
         let w = window(0, &[], &[]);
         let mut under = restarts(1, &[Some(9_282)]);
-        under.receiver_lag = 433;
+        under.receiver_lag = vec![433];
         assert!(!w.runner(480, &under, CLEAN));
         let text = verdict(&w, 480, &under, CLEAN);
         assert!(
@@ -381,7 +381,7 @@ mod witness_tests {
             "{text}"
         );
         // At the receiver's latency the sleep decides, as before.
-        under.receiver_lag = 432;
+        under.receiver_lag = vec![432];
         assert!(verdict(&w, 480, &under, CLEAN).starts_with("verdict RUNNER"));
         // Any other OURS names nothing more.
         let text = verdict(&w, 480, &restarts(1, &[Some(500)]), CLEAN);

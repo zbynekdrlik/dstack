@@ -473,7 +473,7 @@ mod consumer_tests {
         let mut w = window(0, 520, &[], &[]);
         w.holes = 512;
         w.sender = sender(1, &[Some(9_282)]);
-        w.sender.receiver_lag = 433;
+        w.sender.receiver_lag = vec![433];
         assert_eq!(w.who(CAUSE), Who::Ours, "{:?}", w.sender);
         assert!(
             says(&w)
@@ -481,7 +481,7 @@ mod consumer_tests {
             "{}",
             says(&w)
         );
-        w.sender.receiver_lag = 432;
+        w.sender.receiver_lag = vec![432];
         assert_eq!(w.who(CAUSE), Who::Sender);
     }
 

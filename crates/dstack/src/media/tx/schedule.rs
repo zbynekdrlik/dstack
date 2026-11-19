@@ -23,6 +23,10 @@ pub struct Schedule {
     /// The flow's receiver's latency in samples ([`receiver_lag`]; 0:
     /// unknown), set each pass (dstack #426).
     pub receiver_lag: u64,
+    /// The flow's slot, which the restart line names (dstack #427: a
+    /// reader judges each line by its own receiver's latency); 0 from
+    /// [`Schedule::bootstrap`], set by the TX thread for its lane.
+    pub slot: usize,
     /// Starts again since the last [`Schedule::take_rebootstraps`].
     pub(super) rebootstraps: u64,
 }
@@ -37,6 +41,7 @@ impl Schedule {
             fpp,
             max_lag,
             receiver_lag: 0,
+            slot: 0,
             rebootstraps: 0,
         }
     }
@@ -105,8 +110,10 @@ impl Schedule {
         if now > send.saturating_add(bound) || send > now.saturating_add(DISCONTINUITY) {
             // Why (dasio, Windows): the lag past the send time, or a
             // jump back. Rare (each one is a restart), so logged; its
-            // `max_lag` is the bound it was judged by.
+            // `max_lag` is the bound it was judged by, for its `slot`'s
+            // receiver.
             tracing::warn!(
+                slot = self.slot,
                 lag = now as i64 - send as i64,
                 max_lag = bound,
                 oversleep_us = %split::Us(before.oversleep_ns),
