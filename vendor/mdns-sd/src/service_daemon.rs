@@ -3043,7 +3043,10 @@ impl Zeroconf {
                 );
                 if msg.is_query() {
                     let querier_addr = pktinfo.addr_src;
-                    self.handle_query(msg, pkt_if_index, querier_addr);
+                    // dstack #444: a query sent to our address, not to the
+                    // group (RFC 6762 section 5.5), is answered to its sender.
+                    let direct = !pktinfo.addr_dst.is_multicast();
+                    self.handle_query(msg, pkt_if_index, querier_addr, direct);
                 } else if msg.is_response() {
                     self.handle_response(msg, pkt_if_index);
                 } else {
@@ -3738,7 +3741,16 @@ impl Zeroconf {
     }
 
     /// Handle incoming query packets, figure out whether and what to respond.
-    fn handle_query(&mut self, msg: DnsIncoming, if_index: u32, querier_addr: SocketAddr) {
+    /// `direct`: the query was sent to our address, not to the group (dstack
+    /// #444, RFC 6762 section 5.5): its answer goes unicast to its source
+    /// address and port, never deferred, whatever its source port.
+    fn handle_query(
+        &mut self,
+        msg: DnsIncoming,
+        if_index: u32,
+        querier_addr: SocketAddr,
+        direct: bool,
+    ) {
         let querier_ip = querier_addr.ip();
         let is_ipv4 = querier_ip.is_ipv4();
 
@@ -3765,9 +3777,10 @@ impl Zeroconf {
 
             if qtype == RRType::PTR {
                 // PTR answers are shared records: defer the response unless this
-                // is a legacy-unicast (source port != 5353) or probe-defense
+                // is a legacy-unicast (source port != 5353), direct-unicast
+                // (dstack #444: sent to our address) or probe-defense
                 // (records in the Authority Section) query.
-                if querier_addr.port() == MDNS_PORT && msg.num_authorities() == 0 {
+                if querier_addr.port() == MDNS_PORT && !direct && msg.num_authorities() == 0 {
                     delayed = true;
                 }
                 for service in self.my_services.values() {
@@ -3865,7 +3878,7 @@ impl Zeroconf {
         }
 
         if out.answers_count() > 0 {
-            self.send_response(&mut out, &msg, if_index, querier_addr);
+            self.send_response(&mut out, &msg, if_index, querier_addr, direct);
         }
 
         self.increase_counter(Counter::KnownAnswerSuppression, out.known_answer_count());
@@ -3877,6 +3890,7 @@ impl Zeroconf {
         msg: &DnsIncoming,
         if_index: u32,
         querier_addr: SocketAddr,
+        direct: bool,
     ) {
         let querier_ip = querier_addr.ip();
         let is_ipv4 = querier_ip.is_ipv4();
@@ -3911,17 +3925,27 @@ impl Zeroconf {
         // responses must also echo the question section, clear the
         // cache-flush bit (legacy resolvers don't understand it), and cap
         // record TTLs to 10 seconds (see update_records_for_legacy_unicast).
-        let unicast_dest = if querier_addr.port() != MDNS_PORT {
+        //
+        // dstack #444: a query sent to our address instead of the group
+        // (RFC 6762 section 5.5, `direct`) is answered as a QU question is:
+        // unicast to its source address and port, also from port 5353.
+        // Upstream answered it to the group, which a querier on a unicast
+        // 5353 socket never hears. Only a legacy query is reshaped.
+        let legacy = querier_addr.port() != MDNS_PORT;
+        let unicast_dest = if legacy || direct {
             Some(querier_addr)
         } else {
             None
         };
 
-        if unicast_dest.is_some() {
+        if legacy {
             for q in msg.questions() {
                 out.add_question(q.entry_name(), q.entry_type());
             }
             out.update_records_for_legacy_unicast();
+            out.set_multicast(false);
+        } else if direct {
+            // A unicast answer carries the query's id (RFC 6762 section 18.1).
             out.set_multicast(false);
         } else if msg.num_authorities() == 0 {
             // RFC 6762 §6: a record MUST NOT be multicast on an interface
@@ -7768,7 +7792,7 @@ mod tests {
         };
         let packets = out.to_data_on_wire(MAX_PKT_DEFAULT, true);
         let incoming = DnsIncoming::new(packets[0].clone(), interface.clone()).unwrap();
-        daemon.handle_query(incoming, index, querier.local_addr().unwrap());
+        daemon.handle_query(incoming, index, querier.local_addr().unwrap(), false);
         let mut data = [0; 4096];
         match querier.recv_from(&mut data) {
             Ok((length, _)) => Some(DnsIncoming::new(data[..length].to_vec(), interface).unwrap()),

@@ -78,6 +78,20 @@ LICENSE-APACHE and LICENSE-MIT), copied unchanged except:
   Nothing else changes: the same joins, IP check and sends. `new`/`new_with_port`/
   `new_tapped` bind `0.0.0.0` as before.
 
+- `src/service_daemon.rs` `handle_read`, `handle_query`, `send_response`
+  (and the one unit test calling `handle_query`): a query sent to the
+  daemon's address instead of the group (the datagram's destination from
+  `IP_PKTINFO`, RFC 6762 section 5.5) is answered as a QU question:
+  unicast to its source address and port, never deferred (a PTR answer
+  too), with the query's id, also when it came from port 5353. Upstream
+  decided by the source port alone and answered such a query from 5353 to
+  the group, which a querier on a unicast 5353 socket never hears (dstack
+  #444, `announce::mdns::tests::a_bound_daemon_answers_a_direct_query_from_5353_to_its_source`).
+  A legacy query (another source port) keeps upstream's answer (unicast,
+  question echoed, TTL capped, no cache-flush). The QU bit itself is still
+  not read (an answer to a QU question sent to the group goes to the
+  group).
+
 - `Cargo.toml`: an empty `[workspace]` table, so cargo never searches above
   this crate (a dstack checkout nested in another one, such as a git
   worktree, found the outer workspace and refused this excluded path; dstack
