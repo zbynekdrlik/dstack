@@ -42,7 +42,7 @@
 //! | 0x28 | u32 | `service_reply_age_ms` | ms since the service's last reply; `u32::MAX` = no reply yet |
 //! | 0x2c | 6 bytes | `follower_grandmaster` | the PTPv1 UUID of the last Sync the follower heard; zeros = none |
 //! | 0x32 | 6 bytes | `service_grandmaster` | the grandmaster the service's last reply named; zeros = none |
-//! | 0x38 | u8 | `follower` | 1 when the device runs the follower (a linked clock whose follower started), 0 when not: then every `follower_` field is 0 |
+//! | 0x38 | u8 | `follower` | 1 when the device runs the follower (a linked clock whose follower started, or whose start is tried again: then `follower_waiting` is 1 and its counts 0, dstack #431), 0 when not: then every `follower_` field is 0 |
 //! | 0x39 | u8 | `follower_locked` | dsync's lock gate: \|e\| within 50 µs for 3 windows |
 //! | 0x3a | u8 | `follower_settled` | locked, and its recent error and pull within 30 µs |
 //! | 0x3b | u8 | `follower_holdover` | in holdover now |

@@ -13,6 +13,32 @@ const BOUND: Duration = Duration::from_secs(5);
 /// An address no interface of a build box holds (RFC 5737's TEST-NET-1).
 const NOWHERE: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 77);
 
+/// dstack #431: the device's follower starter takes each try's seed from
+/// the poller's read of the service (the stats the poller writes), not
+/// only the boot's.
+#[test]
+fn the_follower_s_tries_are_seeded_from_the_poller_s_stats() {
+    use crate::clock::{Reading, Sample};
+    let stats = Arc::new(ClockStats::default());
+    let mut start = linked_starter("dstack-no-such-nic", Some(-4_671), &stats);
+    assert_eq!(start.seed_ppb, Some(-4_671));
+    start.reseed();
+    assert_eq!(start.seed_ppb, Some(-4_671), "no poll yet");
+    let reply = Reading {
+        wall_ns: 1,
+        locked: true,
+        settled: true,
+        mode: 3,
+        freq_ppb: -750,
+        grandmaster: [1; 6],
+        master: [1; 6],
+        date: None,
+    };
+    stats.set_poll(Sample::Usable { k_ns: 1 }, Some(reply), 1);
+    start.reseed();
+    assert_eq!(start.seed_ppb, Some(-750));
+}
+
 #[test]
 fn exit_codes_are_phase_b_s() {
     assert_eq!(exit_code(&HostError::Setup("the config".into())), 2);

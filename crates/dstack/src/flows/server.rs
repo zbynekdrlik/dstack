@@ -490,9 +490,14 @@ pub async fn serve(
                 match peer {
                     SocketAddr::V4(from) => {
                         let at = Instant::now();
+                        // Read once: the answer and the hold below decide on
+                        // the same readiness. Read again, a TX pass that turned
+                        // it ready in between left a request neither granted
+                        // nor held (dstack #434).
+                        let ready = shared.clock_ready();
                         let outcome = {
                             let mut c = shared.lock();
-                            let outcome = answer(&mut limit, &mut c.table, &shared.cfg, from, &buf[..n], at, shared.now_ns(), shared.clock_ready());
+                            let outcome = answer(&mut limit, &mut c.table, &shared.cfg, from, &buf[..n], at, shared.now_ns(), ready);
                             shared.publish(&c);
                             outcome
                         };
@@ -501,9 +506,7 @@ pub async fn serve(
                         {
                             warn!(error = %e, "a flow-control reply could not be sent");
                         }
-                        if outcome == (FlowOutcome::Unanswered { op: op::REQUEST })
-                            && !shared.clock_ready()
-                        {
+                        if outcome == (FlowOutcome::Unanswered { op: op::REQUEST }) && !ready {
                             let kept = held.hold(at, from, &buf[..n]);
                             info!(peer = %from.ip(), kept, "a flow request held: our TX clock is not ready yet");
                         }

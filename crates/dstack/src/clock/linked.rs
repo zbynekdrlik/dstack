@@ -4,7 +4,9 @@
 //! never worse than the service: when the follower cannot run (no
 //! capability for port 319 on Linux, no Npcap on Windows) or is not locked
 //! while the service is, the device runs on the service as before; and it
-//! has a clock when the service does not run.
+//! has a clock when the service does not run. A start that failed for a
+//! cause that can pass (no Npcap device for the adapter yet at boot) is
+//! tried again on the selector's round ([`Linked::start`], dstack #431).
 //!
 //! A fresh follower takes over from a ready service only once settled
 //! (dsync 1.27.3: locked in 9 s, but 20-60 µs off until its boot fit is
@@ -25,8 +27,8 @@
 //! agree, longer while they keep closing in ([`wait_round`]); then, or at once when the source in use is gone, the switch
 //! changes the epoch and the media threads re-align as on a re-anchor.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use tracing::{info, warn};
@@ -37,6 +39,12 @@ use super::{
     ClockCounts, FollowerCounts, MonoClock, NOT_READY_NAP_NS, PtpClock, ReAnchor, monotonic_ns,
 };
 
+mod retry;
+use retry::Retry;
+pub use retry::{
+    Attempt, ESCALATE_AFTER_S, RETRY_MAX_S, Starter, attempt, failed, retry_delay_s, seed_now,
+    start_passes,
+};
 mod waiting;
 pub use waiting::{
     Minute, NOT_IN_USE_EVERY_NS, NOT_IN_USE_LINE, Waiting, grandmaster_text, waiting_of,
@@ -196,6 +204,19 @@ pub const RE_ALIGN_LINE: &str = "media clock source changed with a re-align";
 pub const FIRST_SOURCE_LINE: &str = "media clock: a first source is ready";
 /// No source ready any more (a warning).
 pub const NO_SOURCE_LINE: &str = "media clock: no source ready";
+/// The follower started.
+pub const STARTED_LINE: &str = "media clock: dsync's in-process follower started";
+/// The follower did not start, for a cause that can pass: it is tried
+/// again (a warning).
+pub const RETRY_LINE: &str = "media clock: dsync's in-process follower did not start yet: the dsync service's clock is used, its start is tried again";
+/// The follower's start, tried again for a cause that can pass, still
+/// fails [`ESCALATE_AFTER_S`] after the first failure (a warning, once;
+/// the tries go on, every [`RETRY_MAX_S`]).
+pub const STILL_NOT_STARTED_LINE: &str = "media clock: dsync's in-process follower has failed to start for 10 minutes: the dsync service's clock is still used, its start is tried again every 30 s";
+const _: () = assert!(ESCALATE_AFTER_S == 600 && RETRY_MAX_S == 30);
+/// The follower did not start, for a cause that cannot pass (a warning).
+pub const NOT_STARTED_LINE: &str =
+    "media clock: dsync's in-process follower did not start: the dsync service's clock is used";
 
 /// The epoch the media threads see: the re-aligns (`switches`) in the high
 /// half; the re-anchors since the last re-align in the low half (a seamless
@@ -205,10 +226,6 @@ pub fn epoch_of(switches: u32, component: u32) -> u32 {
     // equal (.claude/rules/tests.md).
     (switches << 16).wrapping_add(component & 0xffff)
 }
-
-/// A started follower's clock and the value that keeps it running (both
-/// `None` when it did not start).
-pub type Started = (Option<Box<dyn Follow>>, Option<Box<dyn Send + Sync>>);
 
 /// The follower as the linked clock reads it.
 pub trait Follow: Send + Sync {
@@ -266,7 +283,9 @@ struct Measured {
 
 /// The linked clock (see the module).
 pub struct Linked {
-    internal: Option<Box<dyn Follow>>,
+    /// The follower, once started (at the start, or by a later try of the
+    /// selector's: the media threads read it lock-free).
+    internal: OnceLock<Box<dyn Follow>>,
     service: Arc<MonoClock>,
     /// [`State::pack`].
     state: AtomicU64,
@@ -280,16 +299,18 @@ pub struct Linked {
     /// only; the status reads the reason).
     report: std::sync::Mutex<Report>,
     /// Keeps the follower's thread alive for the clock's life.
-    _keep: Option<Box<dyn Send + Sync>>,
+    keep: OnceLock<Box<dyn Send + Sync>>,
 }
 
 /// The selector's report on a follower not in use ([`Linked::report`]).
-#[derive(Debug, Default)]
+#[derive(Default)]
 struct Report {
     minute: Minute,
     waiting: Option<Waiting>,
     /// While a switch to it waits to agree: its time less the service's.
     offset_from_service_ns: Option<i64>,
+    /// A follower not started yet whose start is tried again.
+    retry: Option<Retry>,
 }
 
 /// What [`Linked::select`] chose: the source, and while a switch waits to
@@ -309,7 +330,7 @@ impl Linked {
         keep: Option<Box<dyn Send + Sync>>,
     ) -> Linked {
         Linked {
-            internal,
+            internal: internal.map_or_else(OnceLock::new, OnceLock::from),
             service,
             state: AtomicU64::new(
                 State {
@@ -323,7 +344,7 @@ impl Linked {
             best: AtomicU64::new(u64::MAX),
             was_locked: AtomicBool::new(false),
             report: std::sync::Mutex::new(Report::default()),
-            _keep: keep,
+            keep: keep.map_or_else(OnceLock::new, OnceLock::from),
         }
     }
 
@@ -338,24 +359,32 @@ impl Linked {
 
     /// Whether the follower started.
     pub fn has_internal(&self) -> bool {
-        self.internal.is_some()
+        self.internal.get().is_some()
     }
 
     /// The follower's counts ([`Follow::counts`]) with why the selector
     /// does not use it ([`FollowerCounts::waiting`]) and, while the switch
     /// to it waits to agree, its offset from the service
     /// ([`FollowerCounts::offset_from_service_ns`]), both as of its last
-    /// round; `None` when it did not start.
+    /// round. While its start is tried again, counts of 0 with the reason
+    /// [`Waiting::Stopped`] (dstack #431); `None` when it did not start and
+    /// is not tried again.
     pub fn follower_counts(&self) -> Option<FollowerCounts> {
-        let (waiting, offset_from_service_ns) = {
+        let (waiting, offset_from_service_ns, retrying) = {
             let r = self.lock_report();
-            (r.waiting, r.offset_from_service_ns)
+            (r.waiting, r.offset_from_service_ns, r.retry.is_some())
         };
-        self.internal.as_ref().map(|f| FollowerCounts {
-            waiting,
-            offset_from_service_ns,
-            ..f.counts()
-        })
+        match self.internal.get() {
+            Some(f) => Some(FollowerCounts {
+                waiting,
+                offset_from_service_ns,
+                ..f.counts()
+            }),
+            None => retrying.then(|| FollowerCounts {
+                waiting: Some(Waiting::Stopped),
+                ..FollowerCounts::default()
+            }),
+        }
     }
 
     fn lock_report(&self) -> std::sync::MutexGuard<'_, Report> {
@@ -368,7 +397,7 @@ impl Linked {
     /// bases, the service's re-anchors; 0 for none).
     fn component(&self, source: Source) -> u32 {
         match source {
-            Source::Internal => self.internal.as_ref().map_or(0, |f| f.view().epoch),
+            Source::Internal => self.internal.get().map_or(0, |f| f.view().epoch),
             Source::Service => self.service.epoch(),
             Source::None => 0,
         }
@@ -377,7 +406,7 @@ impl Linked {
     /// A source's PTP time now, ns (`None`: it has none).
     fn time_of(&self, source: Source) -> Option<i128> {
         match source {
-            Source::Internal => self.internal.as_ref()?.now_ns().map(i128::from),
+            Source::Internal => self.internal.get()?.now_ns().map(i128::from),
             Source::Service => self.service.now_ns().map(i128::from),
             Source::None => None,
         }
@@ -417,17 +446,20 @@ impl Linked {
     /// a wait, or a re-align that moves the epoch); every change is logged.
     /// A follower not in use has its reason ([`waiting_of`]) kept for
     /// [`Linked::follower_counts`] and logged once a minute
-    /// ([`NOT_IN_USE_LINE`]).
+    /// ([`NOT_IN_USE_LINE`]). A follower start that is tried again is
+    /// tried first, when due (dstack #431).
     pub fn tick(&self) -> Source {
         self.tick_at(monotonic_ns())
     }
 
     /// [`Linked::tick`] at the monotonic time `now_ns` (a test's own).
     pub(crate) fn tick_at(&self, now_ns: i64) -> Source {
-        let view = self.internal.as_ref().map(|f| f.view());
+        self.try_start(now_ns);
+        let view = self.internal.get().map(|f| f.view());
         let selected = self.select(view);
-        if let (Some(f), Some(v)) = (self.internal.as_deref(), view) {
-            self.report(now_ns, f, v, &selected);
+        match (self.internal.get(), view) {
+            (Some(f), Some(v)) => self.report(now_ns, &**f, v, &selected),
+            _ => self.report_tries(now_ns, selected.source),
         }
         selected.source
     }
@@ -584,7 +616,7 @@ impl PtpClock for Linked {
                 .service
                 .last_re_anchor()
                 .map(|r| (r.epoch, r.step_ns))?,
-            Source::Internal => self.internal.as_ref()?.last_re_anchor()?,
+            Source::Internal => self.internal.get()?.last_re_anchor()?,
             Source::None => return None,
         };
         (at == component).then(|| ReAnchor {
@@ -815,36 +847,6 @@ pub async fn service_seed(target: std::net::SocketAddr) -> Option<i32> {
         .once(&MonoClock::new(), &std::sync::atomic::AtomicI32::new(0))
         .await;
     polled.reading.as_ref().and_then(seed_of)
-}
-
-/// Starts dsync's follower on the interface `iface`, seeded with `seed_ppb`
-/// ([`seed_of`]) when given: the linked clock's internal source, or `None`
-/// with the reason logged (Linux: no capability for port 319; Windows: no
-/// Npcap; anywhere: no such interface): the device then runs on the
-/// service.
-pub fn start_internal(iface: &str, seed_ppb: Option<i32>) -> Started {
-    let mut cfg = dsync_ptp::follower::FollowerConfig::on_interface(iface);
-    if let Some(ppb) = seed_ppb {
-        cfg = cfg.with_frequency_seed(i64::from(ppb));
-    }
-    match dsync_ptp::follower::Follower::start(cfg) {
-        Ok(f) => {
-            info!(
-                iface,
-                seed_ppb, "media clock: dsync's in-process follower started"
-            );
-            (Some(Box::new(Absorbing::new(f.clock()))), Some(Box::new(f)))
-        }
-        Err(e) => {
-            warn!(
-                iface,
-                reason = follower_failure(&e),
-                error = %e,
-                "media clock: dsync's in-process follower did not start: the dsync service's clock is used"
-            );
-            (None, None)
-        }
-    }
 }
 
 /// What the app can do about a follower that did not start, in a word.

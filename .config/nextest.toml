@@ -31,5 +31,6 @@ filter = '''
     | test(/^cmc::tests::our_server_sends_meter_frames/)
     | test(/^daemon::media::app::tests::a_hook_that_(stalls|panics)/)
     | test(/^status::tests::a_cut_list_keeps_the_one_playing/)
+    | test(/^flows::server::tests::ready_race::/)
 '''
 priority = -50
