@@ -845,8 +845,24 @@ fn fixed_ports_bind_first(
             freq: Arc::default(),
             stats: Arc::default(),
         };
-        let media = Media::new(&device, ip, clock, 7, &[])
-            .unwrap_or_else(|e| panic!("start {k}, base {base}: {e}"));
+        let media = match Media::new(&device, ip, clock, 7, &[]) {
+            Ok(media) => media,
+            // Between `free` and this start another thread of the test
+            // binary can take a port of the range with an OS-chosen
+            // port of its own (a wildcard socket; coverage run 44467402295:
+            // `RX flow port 58583: Address already in use`). Our failed
+            // start released its own sockets, so a range still held now
+            // is that other socket's: skip the base. A range free again
+            // means our own other side took it, which is the bug this
+            // test is for.
+            Err(e) if !free(base) => {
+                eprintln!(
+                    "start {k}, base {base}: taken by another socket meanwhile ({e}); skipped"
+                );
+                continue;
+            }
+            Err(e) => panic!("start {k}, base {base}: {e}"),
+        };
         let got = ports(&media);
         let want: Vec<u16> = (base..base + MAX_FLOWS as u16).collect();
         assert_eq!(got, want, "start {k}");
