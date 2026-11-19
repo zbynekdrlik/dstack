@@ -958,3 +958,74 @@ fn the_wildcard_daemon_keeps_no_watch_of_its_address() {
     assert_eq!(fake.reads(), 0, "no watch on the wildcard's daemon");
     assert_eq!(mdns.reopens(), 0);
 }
+
+/// How many announcements of each of `fulls` (a response from `from` with
+/// that name's SRV) `l` reads within `wait`.
+fn announcements_each(
+    l: &UdpSocket,
+    fulls: &[&str],
+    from: SocketAddr,
+    wait: Duration,
+) -> Vec<usize> {
+    use crate::subscribe::instance;
+    let deadline = Instant::now() + wait;
+    let mut n = vec![0; fulls.len()];
+    let mut buf = [0u8; 9000];
+    while !deadline.saturating_duration_since(Instant::now()).is_zero() {
+        if let Ok((len, src)) = l.recv_from(&mut buf)
+            && src == from
+            && !is_query(&buf[..len])
+        {
+            for (i, full) in fulls.iter().enumerate() {
+                if instance::read(&buf[..len], full).is_some_and(|f| f.srv.is_some()) {
+                    n[i] += 1;
+                }
+            }
+        }
+    }
+    n
+}
+
+/// dstack #450: every record is announced twice at its registration, one
+/// second apart (RFC 6762 §8.3), also one whose name has upper case, as
+/// every Dante `TX 1@...` record. Up to v0.6.197 the second announcement
+/// looked its record up by the original-case name, while the daemon keys
+/// its records in lower case: such a record was announced once, and one
+/// datagram lost on a busy leg left the device unseen until a query. An
+/// all-lower-case record beside it is the control (two before and after).
+#[test]
+fn every_record_is_announced_twice_also_one_whose_name_has_upper_case() {
+    use crate::announce::{CHAN_SERVICE, ServiceRecord};
+    let _one = ONE_DAEMON.lock().unwrap_or_else(PoisonError::into_inner);
+    let ip = Ipv4Addr::LOCALHOST;
+    let mdns = Mdns::shared(ip).unwrap();
+    let record = |instance: &str, host: &str| ServiceRecord {
+        service: CHAN_SERVICE,
+        instance: instance.to_string(),
+        host: format!("{host}.local."),
+        ip,
+        port: 4455,
+        txt: vec!["id=1".to_string()],
+    };
+    let upper = record("TX 1@Mdns-Test-Case", "mdns-test-case-upper");
+    let lower = record("tx 1@mdns-test-case-lower", "mdns-test-case-lower");
+    let full_upper = format!("{}.{}", upper.instance, CHAN_SERVICE);
+    let full_lower = format!("{}.{}", lower.instance, CHAN_SERVICE);
+    let wire = group_listener(ip);
+    let mut a = Announcer::new(mdns.daemon().clone());
+    a.announce(&[upper, lower]).unwrap();
+    // The probes (3 x 250 ms), the first announcement, the second one
+    // 1.1-1.15 s after it, and time to spare for a third that must not come.
+    let counts = announcements_each(
+        &wire,
+        &[&full_upper, &full_lower],
+        SocketAddr::V4(SocketAddrV4::new(ip, 5353)),
+        Duration::from_secs(5),
+    );
+    assert_eq!(
+        counts,
+        [2, 2],
+        "announcements of the upper-case record and of the lower-case one"
+    );
+    mdns.withdraw(&mut a, GOODBYE_WAIT).unwrap();
+}
