@@ -31,9 +31,10 @@ fn a_schedule_a_step_back_ahead_starts_again_at_once() {
 /// On the transmitter: a pass reads the time a step back with its old
 /// epoch, the next pass the new epoch with the step. The flow starts again
 /// at once and sends from the new time, its stamps on the packet grid,
-/// never waiting the step out. (The re-anchor then moves the restarted
-/// schedule the step back once more, a second restart; left to the main
-/// session's call on #440, not pinned here.)
+/// never waiting the step out. The re-anchor then moves the restarted
+/// schedule the step back once more, a second restart: pinned as it is
+/// today so a change to it is on purpose (a keep of the restarted schedule
+/// is the main session's call on #440).
 #[test]
 fn a_time_read_back_before_its_epoch_restarts_and_sends_at_once() {
     for back in BACK {
@@ -53,6 +54,7 @@ fn a_time_read_back_before_its_epoch_restarts_and_sends_at_once() {
             rig.tx.step(Some(new + us * 1_000), stepped(2, step_ns));
             packets.extend(drain(&rig.rx));
         }
+        assert_eq!(rig.shared.lane(slot).rebootstraps, 2, "{back} back");
         // 2.5 ms of passes: 7 packets on a quiet path, one fewer for the
         // epoch pass's second restart, which sends nothing in its pass.
         assert!(

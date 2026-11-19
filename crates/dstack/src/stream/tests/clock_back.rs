@@ -48,10 +48,11 @@ fn a_time_read_back_before_its_epoch_rebootstraps_at_once() {
 
 /// The epoch follows the time (the next pass reads it, with the step): the
 /// pump runs on within a block or two of the new time, the step counted
-/// once as `clock_back`. (The re-anchor then moves the schedule, already
+/// once as `clock_back`. The re-anchor then moves the schedule, already
 /// started again at the new time, the step back once more and re-bootstraps
-/// it as `late`: a second count, not a silence; left to the main session's
-/// call on #440, not pinned here.)
+/// it as `late`, counting the step's blocks as missed: a second count, not
+/// a silence. Pinned as it is today so a change to it is on purpose (a
+/// keep of the restarted schedule is the main session's call on #440).
 #[test]
 fn the_epoch_after_a_time_read_back_runs_the_pump_on() {
     for back_ns in BACK_NS {
@@ -63,6 +64,11 @@ fn the_epoch_after_a_time_read_back_runs_the_pump_on() {
         assert!(wake <= back + 2 * B, "{back_ns} ns back: {wake}");
         let v = r.stats.view();
         assert_eq!(v.rebootstraps_clock_back, 1, "{back_ns} ns back: {v:?}");
+        assert_eq!(
+            (v.rebootstraps_late, v.rebootstraps, v.missed),
+            (1, 2, to_samples(back_ns, RATE) / B),
+            "{back_ns} ns back: {v:?}"
+        );
     }
 }
 
