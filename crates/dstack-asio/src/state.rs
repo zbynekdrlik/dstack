@@ -16,8 +16,10 @@
 //! - **No clock:** a driver that opens and does not tick gives none (DVS not
 //!   running, no PTP leader on its network): no close, no reset, no backoff;
 //!   the host waits for it from 2 s after the open and opens the driver
-//!   again every 60 s ([`clock_step`]; SongPlayer's owner ruling of
-//!   8.10.2026).
+//!   again 4, 8, 16 and 32 s after each open, then every 60 s
+//!   ([`clock_step`], [`no_clock_reopen_ns`]; SongPlayer's owner ruling of
+//!   8.10.2026: never a loop or a crash, and it starts by itself; the first
+//!   re-opens since dstack #447).
 //! - **Off rate:** a driver that ticks far from the rate it reports (Waves
 //!   SoundGrid with its network off: 44 100 Hz reported, ~2.9 % more taken)
 //!   is no usable clock either: [`RateWatch`] compares the frames the card
@@ -37,9 +39,21 @@ pub const STALL_NS: i64 = 2_000_000_000;
 /// No callback this long after an open: the driver gives no clock, and the
 /// host waits for it, calmly (2 s), ns.
 pub const NO_CLOCK_NS: i64 = 2_000_000_000;
-/// Still no clock this long after an open: the driver is closed and opened
-/// again at once, every 60 s (no backoff: a fixed, slow cadence), ns.
+/// Still no clock this long after an open, by the re-opens of the wait so
+/// far: the driver is closed and opened again at once (no backoff, no
+/// reset), 4, 8, 16 and 32 s after each open, then every 60 s
+/// ([`no_clock_reopen_ns`], dstack #447). dsg's SoundGrid driver, opened
+/// while its network was down, gave its clock only after a re-open (10.7 s
+/// after it, 64 s late on a flat 60 s); another open gave it 2.49 s after
+/// the open, so the first re-open comes after the wait starts
+/// ([`NO_CLOCK_NS`]), not with it. s.
+pub const NO_CLOCK_REOPEN_S: [i64; 5] = [4, 8, 16, 32, 60];
+/// The longest wait for a clock before a re-open, and a proving run's
+/// (60 s), ns.
 pub const NO_CLOCK_REOPEN_NS: i64 = 60_000_000_000;
+const _: () =
+    assert!(NO_CLOCK_REOPEN_S[NO_CLOCK_REOPEN_S.len() - 1] * 1_000_000_000 == NO_CLOCK_REOPEN_NS);
+const _: () = assert!(NO_CLOCK_REOPEN_S[0] * 1_000_000_000 > NO_CLOCK_NS);
 /// A host's worker steps at least this often (the driver's messages,
 /// 10 ms), ns.
 pub const POLL_NS: i64 = 10_000_000;
@@ -56,6 +70,13 @@ pub fn frames_to_ns(frames: i64, rate: f64) -> i64 {
 pub fn backoff_ns(failures: u32) -> i64 {
     let i = (failures.max(1) as usize - 1).min(BACKOFF_S.len() - 1);
     BACKOFF_S[i] * 1_000_000_000
+}
+
+/// How long a driver with no clock stays open before it is opened again,
+/// after `reopens` re-opens in this wait ([`NO_CLOCK_REOPEN_S`]), ns.
+pub fn no_clock_reopen_ns(reopens: u32) -> i64 {
+    let i = (reopens as usize).min(NO_CLOCK_REOPEN_S.len() - 1);
+    NO_CLOCK_REOPEN_S[i] * 1_000_000_000
 }
 
 /// The failure count after a close of a run that lasted `ran_ns`.
@@ -223,17 +244,28 @@ pub enum ClockStep {
     /// No callback [`NO_CLOCK_NS`] after the open: the host waits for its
     /// clock, the driver kept open (one WARN per wait).
     StartsWaiting,
-    /// No callback [`NO_CLOCK_REOPEN_NS`] after the open: closed and opened
-    /// again at once (no reset, no backoff).
+    /// Waiting, and no callback the re-open interval after the open
+    /// ([`no_clock_reopen_ns`]): closed and opened again at once (no reset,
+    /// no backoff). A run comes here only after its wait started: an open
+    /// that blocked past the interval eats that window, and the next ones
+    /// double.
     Reopen,
 }
 
 /// The clock decision of a run whose driver ticked `ticks` times since its
 /// tick base, `primed` (the app's first data is in; an app with no priming
-/// passes true), opened `since_open_ns` ago, `waiting` for its clock or not.
-/// A tick before the priming while waiting (a burst at a reopen) is no
-/// clock; before the priming of a first open it is a tick.
-pub fn clock_step(ticks: u64, primed: bool, waiting: bool, since_open_ns: i64) -> ClockStep {
+/// passes true), opened `since_open_ns` ago, `waiting` for its clock or not,
+/// to be opened again `reopen_ns` after its open while it gives no clock
+/// ([`no_clock_reopen_ns`]; over [`NO_CLOCK_NS`]). A tick before the
+/// priming while waiting (a burst at a reopen) is no clock; before the
+/// priming of a first open it is a tick.
+pub fn clock_step(
+    ticks: u64,
+    primed: bool,
+    waiting: bool,
+    since_open_ns: i64,
+    reopen_ns: i64,
+) -> ClockStep {
     if ticks > 0 {
         return match (waiting, primed) {
             (false, _) => ClockStep::Ticking,
@@ -241,10 +273,17 @@ pub fn clock_step(ticks: u64, primed: bool, waiting: bool, since_open_ns: i64) -
             (true, false) => ClockStep::Quiet,
         };
     }
-    if since_open_ns >= NO_CLOCK_REOPEN_NS {
+    // A run not yet waiting starts its wait first, however late its first
+    // step (an open that blocked past the interval, dstack #447): the wait
+    // is announced once before any re-open.
+    if !waiting {
+        if since_open_ns >= NO_CLOCK_NS {
+            ClockStep::StartsWaiting
+        } else {
+            ClockStep::Quiet
+        }
+    } else if since_open_ns >= reopen_ns {
         ClockStep::Reopen
-    } else if since_open_ns >= NO_CLOCK_NS && !waiting {
-        ClockStep::StartsWaiting
     } else {
         ClockStep::Quiet
     }
