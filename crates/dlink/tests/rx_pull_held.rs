@@ -156,8 +156,9 @@ impl Heard {
     }
 }
 
-/// The sending device's counts a window reads at its edges, lock-free (the
-/// card thread never waits on a lock): its pump's and its TX side's.
+/// The sending device's counts a window reads at its edges: its pump's and
+/// its TX lanes' (atomics and seqlocks, no control lock) and its restart
+/// lines (one short lock on the line log, `restarts::open`/`close`).
 struct SenderSide {
     pump: Arc<PumpStats>,
     tx: Arc<TxShared>,
@@ -219,7 +220,9 @@ impl SenderSide {
 /// (a pump restart's silence, a TX restart's holes): the RX converter's
 /// filter rings at both edges of it. Measured at most 10 a pump restart
 /// (dev1 under `chrt -f 10`, 19.11.2026: 10 restarts of 1024 samples of
-/// silence, 9474 to 10340 off), so 32 is room, not a second cause.
+/// silence, 9302 to 10340 off), so 32 is room, not a second cause. Only a
+/// gap that left evidence has edges: a pump restart that sent silence, a
+/// TX restart line beside holes never written.
 const GAP_EDGES: u64 = 32;
 
 /// Who lost a judged window's audio (dstack #436).
@@ -247,17 +250,28 @@ enum Who {
 ///   window's late pump restarts and the holes never written (a hole's
 ///   call and the next are not judged, yet the FIFO holds over a period,
 ///   so a hole's tail can play in a judged call), and [`GAP_EDGES`] a
-///   restart.
+///   gap with evidence.
 ///
-/// Every edge errs to `OURS`: a restart just before the window's open whose
-/// silence or holes land inside it is unexplained.
+/// A window's edges mostly err to `OURS`: a restart just before the open
+/// whose holes land inside, or whose silence does in a window with no late
+/// pump restart of its own, is unexplained. Two err the other way, each by
+/// at most one restart: in a window with a late pump restart of its own,
+/// silence sent after the open by a restart just before it is counted too;
+/// a hole read before the open and written late inside lowers the holes
+/// never written.
 fn who(heard: &Heard, bridge_clean: bool) -> Who {
     let s = &heard.sender;
     let holes = heard.never_written();
     let lost = heard.off > 0 || holes > 0;
     let pump = s.pump_late == s.pump_restarts;
     let silence = if s.pump_restarts > 0 { s.silence } else { 0 };
-    let gaps = s.pump_restarts + s.tx.lines.len() as u64;
+    let pump_gaps = if silence > 0 { s.pump_restarts } else { 0 };
+    let tx_gaps = if holes > 0 {
+        s.tx.lines.len() as u64
+    } else {
+        0
+    };
+    let gaps = pump_gaps + tx_gaps;
     let off = heard.off <= silence + holes + GAP_EDGES * gaps;
     let tx = (holes == 0 || s.tx.explain(holes)) && (!s.tx.any() || s.tx.runner());
     if lost && bridge_clean && pump && off && tx {
@@ -296,19 +310,31 @@ struct Wakes {
     every: Duration,
 }
 
-/// The card and its event thread (module doc), woken as `wakes` says:
-/// returns what it heard, and what the `sender` did meanwhile.
-#[allow(clippy::too_many_arguments)]
-fn output(
-    wakes: Wakes,
-    mut pull: dlink::bridge::RxPull,
-    mut player: Player,
+/// What the card's thread works with: the receiver's pull, its player
+/// and their FIFO and counts, the receiving device's media (its ring), the
+/// sender's counts, and the flag set once the channel reads Receiving.
+struct Card {
+    pull: dlink::bridge::RxPull,
+    player: Player,
     fifo: Arc<dlink::bridge::Fifo>,
     stats: Arc<Stats>,
     media: Arc<Media>,
     sender: SenderSide,
     receiving: Arc<AtomicU64>,
-) -> Heard {
+}
+
+/// The card and its event thread (module doc), woken as `wakes` says:
+/// returns what it heard, and what the sender did meanwhile.
+fn output(wakes: Wakes, card: Card) -> Heard {
+    let Card {
+        mut pull,
+        mut player,
+        fifo,
+        stats,
+        media,
+        sender,
+        receiving,
+    } = card;
     let mut out = vec![0f32; CARD_FRAMES as usize];
     let mut heard = Heard::default();
     let began = Instant::now();
@@ -493,21 +519,19 @@ fn run(wakes: Wakes) -> (Heard, u64, String) {
     .expect("the player");
     let receiving = Arc::new(AtomicU64::new(0));
     let pulled = pull.stats();
-    let card = {
-        let (fifo, stats, media, receiving) = (
-            Arc::clone(&fifo),
-            Arc::clone(&stats),
-            Arc::clone(receiver.media()),
-            Arc::clone(&receiving),
-        );
-        let sender = SenderSide {
+    let card = Card {
+        pull,
+        player,
+        fifo: Arc::clone(&fifo),
+        stats: Arc::clone(&stats),
+        media: Arc::clone(receiver.media()),
+        sender: SenderSide {
             pump: sender.media().engine_stats().expect("the sender's pump"),
             tx: Arc::clone(&sender.media().tx),
-        };
-        std::thread::spawn(move || {
-            output(wakes, pull, player, fifo, stats, media, sender, receiving)
-        })
+        },
+        receiving: Arc::clone(&receiving),
     };
+    let card = std::thread::spawn(move || output(wakes, card));
     let end = Instant::now() + Duration::from_secs(15);
     while receiver.rx_channels()[0].status != Some(SubStatus::Receiving) && Instant::now() < end {
         std::thread::sleep(Duration::from_millis(50));
@@ -692,7 +716,9 @@ mod verdict_tests {
         // late restart that sent none.
         assert_eq!(who(&heard(500, 0, pump(0, 0, 10_240)), true), Who::Ours);
         assert_eq!(who(&heard(500, 0, pump(1, 1, 0)), true), Who::Ours);
-        assert_eq!(who(&heard(32, 0, pump(1, 1, 0)), true), Who::Sender);
+        assert_eq!(who(&heard(1, 0, pump(1, 1, 0)), true), Who::Ours);
+        assert_eq!(who(&heard(1_056, 0, pump(1, 1, 1_024)), true), Who::Sender);
+        assert_eq!(who(&heard(1_057, 0, pump(1, 1, 1_024)), true), Who::Ours);
         // The bridge's own counts not clean (an underrun, a dropped pull).
         assert_eq!(who(&w, false), Who::Ours);
         assert!(verdict(&w, false).starts_with("verdict OURS: 10340 samples off"));
@@ -706,6 +732,8 @@ mod verdict_tests {
         let late = tx(2, &[Some(12_010), Some(12_011)]);
         assert_eq!(who(&heard(56, 1_280, late.clone()), true), Who::Sender);
         assert_eq!(who(&heard(0, 1_280, late.clone()), true), Who::Sender);
+        // No hole never written: the lines leave no edge.
+        assert_eq!(who(&heard(1, 0, late.clone()), true), Who::Ours);
         // The holes past the restarts' bound, the off past the holes and
         // GAP_EDGES a restart.
         assert_eq!(who(&heard(0, 1_745, late.clone()), true), Who::Ours);

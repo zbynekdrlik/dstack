@@ -515,6 +515,11 @@ mod restarts_tests {
         assert_eq!(runner.under_receiver(), 0, "{runner:?}");
         assert!(runner.runner(), "at its own receiver: {runner:?}");
         assert!(runner.explain(864 + 10 + 864));
+        // Over its own receiver's latency (the receiver's own bound taken
+        // by the stack, 900 past 864), still under the other's 1312.
+        let over = two(vec![at(1, 900)]);
+        assert_eq!(over.under_receiver(), 0, "{over:?}");
+        assert!(over.runner(), "over its own receiver: {over:?}");
         // A slot with no receiver known, or past the lanes read: the sleep
         // decides.
         assert!(two(vec![at(5, 100)]).runner());
