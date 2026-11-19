@@ -86,36 +86,58 @@ async fn a_request_while_the_clock_turns_ready_is_answered() {
     for k in 1..=PEERS {
         peers.push(Peer::bind(k).await);
     }
-    // The TX thread's passes, as fast as they can come: the clock ready,
-    // then not (a clock that comes and goes), so a request's handling
-    // meets a change of it at any point.
-    let done = Arc::new(AtomicBool::new(false));
-    let passes = std::thread::spawn({
-        let (shared, done) = (Arc::clone(&shared), Arc::clone(&done));
-        move || {
-            while !done.load(Ordering::Relaxed) {
-                shared.set_clock_ready(true);
-                shared.set_clock_ready(false);
-            }
-        }
-    });
-    let mut unanswered = None;
-    'asking: for burst in 0..BURSTS {
+    let passes = Passes::start(&shared);
+    for burst in 0..BURSTS {
         if burst > 0 {
             tokio::time::sleep(SPAN).await;
         }
         let seqs = burst * BURST..(burst + 1) * BURST;
         for peer in &peers {
             if let Err(why) = peer.ask(server, seqs.clone()).await {
-                unanswered = Some(why);
-                break 'asking;
+                panic!("{why}");
             }
         }
     }
-    done.store(true, Ordering::Relaxed);
-    passes.join().unwrap();
+    drop(passes);
     task.abort();
-    if let Some(why) = unanswered {
-        panic!("{why}");
+}
+
+/// The TX thread's passes, as fast as they can come: the clock ready, then
+/// not (a clock that comes and goes), so a request's handling meets a
+/// change of it at any point. Stopped and joined when dropped, by a failing
+/// test's panic too: a thread left spinning would load every test after it
+/// in the binary.
+struct Passes {
+    done: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Passes {
+    fn start(shared: &Arc<TxShared>) -> Passes {
+        let done = Arc::new(AtomicBool::new(false));
+        let thread = std::thread::spawn({
+            let (shared, done) = (Arc::clone(shared), Arc::clone(&done));
+            move || {
+                while !done.load(Ordering::Relaxed) {
+                    shared.set_clock_ready(true);
+                    shared.set_clock_ready(false);
+                }
+            }
+        });
+        Passes {
+            done,
+            thread: Some(thread),
+        }
+    }
+}
+
+impl Drop for Passes {
+    fn drop(&mut self) {
+        self.done.store(true, Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            // Never a panic here: a drop during a failing test's unwind
+            // would abort the binary (the loop itself cannot panic).
+            let _joined = thread.join();
+        }
     }
 }
