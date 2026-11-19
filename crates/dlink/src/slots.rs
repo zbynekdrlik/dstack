@@ -19,7 +19,7 @@
 
 use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
 
-use dlink::{Place, Ports};
+use crate::{Place, Ports};
 
 /// How many slots are tried: ARC 4440-4454 never meets flows 4455 up.
 pub const SLOTS: u16 = 15;

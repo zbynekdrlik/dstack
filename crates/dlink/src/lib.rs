@@ -208,6 +208,7 @@ pub use dstack_audio_io::{Block, Process};
 
 pub mod bridge;
 pub mod rated;
+pub mod slots;
 
 mod latency;
 mod pulling;
