@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.187
+
+- **CI (no library change): the Linux jobs' apt step installs from the last good run's packages.** The runner's Ubuntu mirrors and the fallback mirrors.edge.kernel.org both failed on 18-19.11.2026 (dev push run 44407677291, the v0.6.186 release's Linux binaries 44423972765). `actions/cache` (v6.1.0, pinned) keeps the debs of the last good install, keyed on the runner image and `scripts/ci-apt-deps.sh`; a hit installs them with `dpkg -i` and needs no mirror. A miss walks the runner's mirrors, then kernel.org, Princeton and RWTH Aachen, each try bounded to 240 s.
+- Playbook: WPR DPC/ISR vs a send queue on a Windows PC, and a QoS throttle must match the flow's protocol (#425).
+- **No latency change, no API change.**
+
 ## 0.6.186
 
 - **Fix (#426): a TX flow holds on for its receiver's latency, not only ours.** A flow's TX schedule restarted once its lag passed OUR advertised latency, even when its receiver states a longer one, and plays the flow at that longer latency (a receiver plays at max(its own, ours), the rule `PassClock::late_threshold` already counts by). So a TX thread waking late by more than our latency, yet within the receiver's, threw away packets the receiver would still have played. Seen in v0.6.185's dev CI (windows-2025): a 96 kHz sender advertising 8.36 ms, a receiver stating 13.67 ms, a sleep returning 8.47 ms late, 27 packets (864 samples) dropped, `over_latency` 0. A flow now restarts past `Schedule::bound` = max(our latency, its receiver's stated latency), capped at the engine ring's reach (`device::MAX_LATENCY_SAMPLES`); multicast and a receiver not yet known keep ours. The restart line's `max_lag` names the bound it was judged by. The TX pull's catch-up reach takes the flows' largest bound, so the fill never restarts before them. A re-anchor's room stays on our latency.
