@@ -31,9 +31,10 @@
 //!   [`PumpView::writes_after_send`] (dstack #346).
 //! - [`Blocks`] (pure) says what is due: a block, a wait, or a
 //!   re-bootstrap when the pump is more than W behind (the skipped blocks'
-//!   stamps go out as silence, counted as TX holes) or more than
-//!   [`DISCONTINUITY`] ahead (the clock went back). A start never catches
-//!   up: the first block is the one whose input ends at the playout point.
+//!   stamps go out as silence, counted as TX holes) or more than W and a
+//!   block ahead (the clock went back: no schedule waits further, dstack
+//!   #440). A start never catches up: the first block is the one whose
+//!   input ends at the playout point.
 //! - [`Pump`]: the buffers, allocated once; [`Pump::media`] runs every due
 //!   block at a media time (the first media step and a new clock epoch
 //!   re-bootstrap; the processor's `discontinuity` is called once before
@@ -85,7 +86,7 @@ use dstack_audio_io::{Block, Process, panic_message};
 use crate::clock::{PtpClock, to_samples};
 use crate::media::ring::Ring;
 use crate::media::rx::{Intake, RxShared};
-use crate::media::tx::{DISCONTINUITY, Shift, TxShared, ns_of};
+use crate::media::tx::{Shift, TxShared, ns_of};
 use app_offset::{OffsetFilter, Outcome};
 
 /// The engine's default block, frames: the B = 32 of the RT contract, what
@@ -175,8 +176,8 @@ pub enum Due {
     Run { start: u64, late: bool },
     /// Nothing due before media time `until`.
     Wait { until: u64 },
-    /// More than the margin behind, or more than [`DISCONTINUITY`] ahead
-    /// (`cause`, [`Cause::Late`] or [`Cause::ClockBack`]): the schedule
+    /// More than the margin behind, or more than the margin and a block
+    /// ahead (`cause`, [`Cause::Late`] or [`Cause::ClockBack`]): the schedule
     /// started again at now, `skipped` blocks never ran.
     Rebootstrap { skipped: u64, cause: Cause },
 }
@@ -187,7 +188,8 @@ pub enum Due {
 pub enum Cause {
     /// The pump woke more than its margin W behind a block ([`Blocks::next`]).
     Late,
-    /// The media clock went back more than [`DISCONTINUITY`] ([`Blocks::next`]).
+    /// The media clock went back: the next block more than the margin and a
+    /// block ahead ([`Blocks::next`], dstack #440).
     ClockBack,
     /// A clock re-anchor whose step is unknown or off the block grid
     /// ([`Blocks::re_anchor`]'s [`Shift::Restarted`]).
@@ -239,11 +241,15 @@ impl Blocks {
 
     /// What is due at media time `now`; a run moves the schedule on by one
     /// block, a re-bootstrap starts it again at `now` (after which nothing
-    /// is behind).
+    /// is behind). No schedule waits more than the margin and a block (a
+    /// bootstrap or a run leaves the next block under a block ahead, a
+    /// re-anchor moves it up to W and a block past now), so a block due
+    /// further ahead is the clock gone back (dstack #440: a step back read
+    /// under the old epoch), started again at once instead of waited out.
     pub fn next(&mut self, now: u64) -> Due {
         let due = self.due();
         if now < due {
-            if due - now > DISCONTINUITY {
+            if due - now > self.timing.margin.saturating_add(self.timing.block) {
                 return Due::Rebootstrap {
                     skipped: self.rebootstrap(now),
                     cause: Cause::ClockBack,

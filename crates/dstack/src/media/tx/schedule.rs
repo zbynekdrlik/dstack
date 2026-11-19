@@ -6,7 +6,7 @@
 //! ([`ns_of`]), the media clock a schedule runs on ([`send_clock`]) and a
 //! receiver's lateness ([`flow_latency_ns`], [`over_latency`]).
 
-use super::{DISCONTINUITY, Shift, split};
+use super::{Shift, split};
 use crate::clock;
 use crate::device::MAX_LATENCY_SAMPLES;
 
@@ -27,6 +27,10 @@ pub struct Schedule {
     /// reader judges each line by its own receiver's latency); 0 from
     /// [`Schedule::bootstrap`], set by the TX thread for its lane.
     pub slot: usize,
+    /// The device's block in samples (0 from [`Schedule::bootstrap`], set
+    /// by the TX thread): the least room a re-anchor moves the next stamp
+    /// within, so the least of [`Schedule::ahead_limit`] (dstack #440).
+    pub block: u64,
     /// Starts again since the last [`Schedule::take_rebootstraps`].
     pub(super) rebootstraps: u64,
 }
@@ -42,6 +46,7 @@ impl Schedule {
             max_lag,
             receiver_lag: 0,
             slot: 0,
+            block: 0,
             rebootstraps: 0,
         }
     }
@@ -56,10 +61,20 @@ impl Schedule {
         self.max_lag.max(self.receiver_lag)
     }
 
+    /// How far the next stamp may be ahead of the clock (dstack #440): the
+    /// [`Schedule::bound`], at least the [`Schedule::block`], and a packet.
+    /// A start leaves it at most a packet ahead and [`Schedule::re_anchor`]
+    /// moves it at most our latency (at least the block) and a packet past
+    /// now, so a stamp further ahead is the clock gone back (a step back
+    /// read under the old epoch), never a wait.
+    pub fn ahead_limit(&self) -> u64 {
+        self.bound().max(self.block).saturating_add(self.fpp)
+    }
+
     /// The stamp of the packet due at `now`, if one is (the schedule moves
-    /// on by fpp). A lag past its [`Schedule::bound`], or a schedule [`DISCONTINUITY`]
-    /// samples ahead of the clock, starts it again (counted) and sends
-    /// nothing now.
+    /// on by fpp). A lag past its [`Schedule::bound`], or a next stamp more
+    /// than [`Schedule::ahead_limit`] ahead of the clock, starts it again
+    /// (counted) and sends nothing now.
     pub fn due(&mut self, now: u64) -> Option<u64> {
         self.due_after(now, &split::Before::default())
     }
@@ -107,7 +122,7 @@ impl Schedule {
     pub fn due_after(&mut self, now: u64, before: &split::Before) -> Option<u64> {
         let send = self.next.saturating_add(self.fpp);
         let bound = self.bound();
-        if now > send.saturating_add(bound) || send > now.saturating_add(DISCONTINUITY) {
+        if now > send.saturating_add(bound) || self.next > now.saturating_add(self.ahead_limit()) {
             // Why (dasio, Windows): the lag past the send time, or a
             // jump back. Rare (each one is a restart), so logged; its
             // `max_lag` is the bound it was judged by, for its `slot`'s

@@ -337,6 +337,7 @@ impl Transmitter {
             let src = SocketAddrV4::new(shared.ip, shared.ports[slot]);
             let schedule = lane.schedule.get_or_insert_with(|| Schedule {
                 slot,
+                block: shared.cfg.block,
                 ..Schedule::bootstrap(now, plan.fpp, *max_lag)
             });
             // The receiver's latency, read each pass as the late count reads

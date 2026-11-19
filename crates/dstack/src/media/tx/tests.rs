@@ -456,6 +456,7 @@ fn wake_ns_is_the_first_ns_the_next_packet_is_due() {
                 max_lag: 96,
                 receiver_lag: 0,
                 slot: 0,
+                block: 0,
                 rebootstraps: 0,
             };
             let w = s.wake_ns(rate, TX_MARGIN_NS);

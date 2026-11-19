@@ -66,3 +66,58 @@ fn a_time_read_back_before_its_epoch_restarts_and_sends_at_once() {
         );
     }
 }
+
+/// The limit is the bound, at least the device's block, and a packet: a
+/// re-anchor moves the next stamp up to our latency (at least the block)
+/// and a packet past now, so a moved schedule is never taken for a clock
+/// gone back.
+#[test]
+fn the_ahead_limit_is_the_bound_at_least_the_block_and_a_packet() {
+    // fpp 32, our latency 24 samples (0.25 ms at 96 kHz).
+    let mut s = Schedule::bootstrap(1_000_000, 32, 24);
+    assert_eq!(s.ahead_limit(), 56);
+    s.block = 64;
+    assert_eq!(s.ahead_limit(), 96);
+    s.receiver_lag = 200;
+    assert_eq!(s.ahead_limit(), 232);
+    // A block of 64: the next stamp exactly 96 ahead waits, 97 restarts.
+    let fresh = || Schedule {
+        block: 64,
+        ..Schedule::bootstrap(1_000_000, 32, 24)
+    };
+    let mut s = fresh();
+    assert_eq!(s.due(s.next - 96), None);
+    assert_eq!(s.take_rebootstraps(), 0);
+    let mut s = fresh();
+    assert_eq!(s.due(s.next - 97), None);
+    assert_eq!(s.take_rebootstraps(), 1);
+}
+
+/// A schedule moved by a re-anchor to the edge of its room (block 64 over a
+/// latency of 24, as `a_re_anchor_s_room_is_at_least_the_block`) waits its
+/// packet instead of starting again.
+#[test]
+fn a_schedule_moved_to_the_edge_of_its_room_waits() {
+    let now = 1_000_000;
+    let mut s = Schedule {
+        block: 64,
+        ..Schedule::bootstrap(now - 64, 32, 24)
+    };
+    assert_eq!(s.re_anchor(Some(128), now, 64), Shift::Moved);
+    assert_eq!(s.next, now + 96);
+    assert_eq!(s.due(now), None);
+    assert_eq!(s.take_rebootstraps(), 0);
+    assert_eq!(s.due(now + 128), Some(now + 96));
+}
+
+/// The TX thread gives each lane's schedule the device's block.
+#[test]
+fn a_lane_s_schedule_carries_the_device_s_block() {
+    let mut rig = Rig::new(Vec::new());
+    let (slot, _) = rig.flow(vec![Some(1)]);
+    rig.tx.step(Some(T), 1);
+    let block = rig.shared.cfg.block;
+    assert!(block > 0);
+    let schedule = rig.tx.lanes[slot].schedule.expect("a schedule");
+    assert_eq!(schedule.block, block);
+}
