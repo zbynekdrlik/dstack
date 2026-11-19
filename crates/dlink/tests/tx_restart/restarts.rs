@@ -23,14 +23,15 @@
 //! stated latency when longer than the sender's (dstack #426, run
 //! 44407677291 on windows-2025: a sleep 8.465 ms late restarted a schedule
 //! bound at the sender's 8.36 ms while the receiver played at 13.67 ms, 864
-//! off, read `RUNNER`). A window reads the receivers' stated latencies at
-//! its open and close (lock-free, the lanes' own counts, so a consumer
-//! thread that opens it never waits on the control lock); a line whose
-//! `max_lag` is under the shortest of them (capped at the ring's reach, as
-//! the stack caps it) is the stack's (the schedule gave up packets the
-//! receiver still plays), never the runner's, and the verdict names it. The
-//! line names no slot, so a sender whose receivers state different
-//! latencies is judged by the shortest, never against a flow's own.
+//! off, read `RUNNER`). A window reads each lane's receiver's stated
+//! latency at its open and close (lock-free, the lanes' own counts, so a
+//! consumer thread that opens it never waits on the control lock); a line
+//! whose `max_lag` is under its own lane's (the line names its `slot`,
+//! dstack #427; capped at the ring's reach, as the stack caps it) is the
+//! stack's (the schedule gave up packets the receiver still plays), never
+//! the runner's, and the verdict names it. A sender whose receivers state
+//! different latencies has each line judged by its own flow's receiver,
+//! never by another flow's.
 //!
 //! [`listen`] sets one global subscriber per test binary that records
 //! only that line (every other callsite is never enabled); a window
@@ -56,6 +57,8 @@ const LINE: &str = "the TX schedule starts again";
 /// One restart line.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct Restart {
+    /// The flow's slot (its TX lane).
+    pub(crate) slot: usize,
     /// The pass's lag past the packet's send time, samples.
     pub(crate) lag: i64,
     /// The schedule's bound: the flow's latency, samples.
@@ -125,8 +128,10 @@ impl Visit for Fields {
     }
 
     fn record_u64(&mut self, field: &Field, value: u64) {
-        if field.name() == "max_lag" {
-            self.restart.max_lag = value;
+        match field.name() {
+            "max_lag" => self.restart.max_lag = value,
+            "slot" => self.restart.slot = usize::try_from(value).unwrap_or(usize::MAX),
+            _ => {}
         }
     }
 
@@ -183,17 +188,13 @@ fn counted(tx: &TxShared) -> u64 {
     (0..MAX_FLOWS).map(|s| tx.lane(s).rebootstraps).sum()
 }
 
-/// The shortest latency `tx`'s receivers state now, ns (0: none known),
-/// read from the lanes' counts (no lock, no allocation).
-fn receiver_ns(tx: &TxShared) -> u64 {
-    (0..MAX_FLOWS)
-        .map(|s| tx.lane(s).receiver_latency_ns)
-        .filter(|&ns| ns != 0)
-        .min()
-        .unwrap_or(0)
+/// The latency each lane's receiver of `tx` states now, ns (0: none
+/// known), by slot, read from the lanes' counts (no lock, no allocation).
+fn receiver_ns(tx: &TxShared) -> [u64; MAX_FLOWS] {
+    std::array::from_fn(|s| tx.lane(s).receiver_latency_ns)
 }
 
-/// The receivers' latency a window judges its restarts by, samples at
+/// The receiver's latency a window judges a lane's restarts by, samples at
 /// `rate`, from the reads at its `open` and `close` (ns, 0: none known):
 /// the shorter, known at both (a receiver that lowered its latency
 /// mid-window, or one not yet known at the open, never makes a correct
@@ -206,13 +207,22 @@ fn window_lag(open: u64, close: u64, rate: u32) -> u64 {
     latency_samples(open.min(close), rate).min(MAX_LATENCY_SAMPLES)
 }
 
+/// [`window_lag`] of every lane, by slot, from the reads at the window's
+/// `open` and `close`.
+fn window_lags(open: &[u64], close: &[u64], rate: u32) -> Vec<u64> {
+    open.iter()
+        .zip(close)
+        .map(|(&o, &c)| window_lag(o, c, rate))
+        .collect()
+}
+
 /// A window open on a sender's TX side.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Opened {
     counted: u64,
     mark: usize,
-    /// The receivers' shortest stated latency at the open, ns.
-    receiver_ns: u64,
+    /// Each lane's receiver's stated latency at the open, ns, by slot.
+    receiver_ns: [u64; MAX_FLOWS],
 }
 
 /// Opens a window on `tx`, the sending device's TX side.
@@ -233,7 +243,7 @@ impl Opened {
             lines: tx_lines(lines().get(self.mark..).unwrap_or_default()),
             rate,
             oversleep_max_us: tx.tx_thread().oversleep_max_us,
-            receiver_lag: window_lag(self.receiver_ns, receiver_ns(tx), rate),
+            receiver_lag: window_lags(&self.receiver_ns, &receiver_ns(tx), rate),
         }
     }
 }
@@ -250,11 +260,11 @@ pub(crate) struct Restarts {
     /// The TX thread's largest oversleep since its start, µs (the status
     /// `tx_thread`; for the message only).
     pub(crate) oversleep_max_us: u64,
-    /// The receivers' shortest stated latency, known at the window's open
-    /// and close ([`window_lag`]), samples
-    /// (0: none known): every restart's bound must be at least this
-    /// (dstack #426).
-    pub(crate) receiver_lag: u64,
+    /// Each lane's receiver's stated latency, known at the window's open
+    /// and close ([`window_lag`]), samples, by slot (0, or no entry: none
+    /// known): a restart's bound must be at least its own lane's (dstack
+    /// #426, #427).
+    pub(crate) receiver_lag: Vec<u64>,
 }
 
 impl Restarts {
@@ -276,13 +286,19 @@ impl Restarts {
             && self.lines.iter().all(|r| r.slept_past(self.rate))
     }
 
-    /// The restart lines bound under the receiver's latency (dstack #426):
-    /// the schedule gave up packets the receiver still plays, the stack's
-    /// loss whatever the sleep.
+    /// The receiver's latency of lane `slot` in the window, samples (0:
+    /// none known).
+    pub(crate) fn receiver_lag_of(&self, slot: usize) -> u64 {
+        self.receiver_lag.get(slot).copied().unwrap_or(0)
+    }
+
+    /// The restart lines bound under their own lane's receiver latency
+    /// (dstack #426, #427): the schedule gave up packets the receiver
+    /// still plays, the stack's loss whatever the sleep.
     pub(crate) fn under_receiver(&self) -> usize {
         self.lines
             .iter()
-            .filter(|r| r.max_lag < self.receiver_lag)
+            .filter(|r| r.max_lag < self.receiver_lag_of(r.slot))
             .count()
     }
 
@@ -316,8 +332,8 @@ fn tx_lines(logged: &[(String, Restart)]) -> Vec<Restart> {
 }
 
 /// `counted` TX restarts at 48 kHz with lines of these oversleeps (µs),
-/// each a lag of 440 samples on a 9 ms latency (432 samples): the
-/// witnesses' unit tests' fixture.
+/// each on slot 0, a lag of 440 samples on a 9 ms latency (432 samples),
+/// no receiver latency known: the witnesses' unit tests' fixture.
 #[cfg(test)]
 pub(crate) fn fixture(counted: u64, oversleeps: &[Option<u64>]) -> Restarts {
     Restarts {
@@ -325,6 +341,7 @@ pub(crate) fn fixture(counted: u64, oversleeps: &[Option<u64>]) -> Restarts {
         lines: oversleeps
             .iter()
             .map(|&oversleep_us| Restart {
+                slot: 0,
                 lag: 440,
                 max_lag: 432,
                 oversleep_us,
@@ -332,7 +349,7 @@ pub(crate) fn fixture(counted: u64, oversleeps: &[Option<u64>]) -> Restarts {
             .collect(),
         rate: 48_000,
         oversleep_max_us: 0,
-        receiver_lag: 0,
+        receiver_lag: Vec::new(),
     }
 }
 
@@ -343,17 +360,27 @@ impl Debug for Restarts {
             .iter()
             .map(|r| {
                 let us = r.oversleep_us.map_or("-".into(), |us| us.to_string());
-                format!("lag {} max_lag {} oversleep_us {us}", r.lag, r.max_lag)
+                format!(
+                    "slot {} lag {} max_lag {} oversleep_us {us}",
+                    r.slot, r.lag, r.max_lag
+                )
             })
+            .collect();
+        // The lanes whose receiver's latency is known, as (slot, samples).
+        let known: Vec<(usize, u64)> = self
+            .receiver_lag
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|&(_, lag)| lag != 0)
             .collect();
         write!(
             f,
             "{} TX restarts at {} Hz, lines {lines:?}, tx_thread.oversleep_max_us {}, \
-             the receiver's latency {} samples ({} lines bound under it)",
+             the receivers' latencies (slot, samples) {known:?} ({} lines bound under their own)",
             self.counted,
             self.rate,
             self.oversleep_max_us,
-            self.receiver_lag,
             self.under_receiver()
         )
     }
@@ -368,6 +395,7 @@ mod restarts_tests {
     /// A restart line at 48 kHz with a 9 ms latency (432 samples).
     fn line(oversleep_us: Option<u64>) -> Restart {
         Restart {
+            slot: 0,
             lag: 440,
             max_lag: 432,
             oversleep_us,
@@ -416,9 +444,9 @@ mod restarts_tests {
         let mut r = fixture(1, &[Some(9_282)]);
         assert!(r.runner(), "no receiver latency known");
         assert_eq!((r.under_receiver(), r.ours()), (0, ""));
-        r.receiver_lag = 432;
+        r.receiver_lag = vec![432];
         assert!(r.runner(), "bound at the receiver's latency");
-        r.receiver_lag = 433;
+        r.receiver_lag = vec![433];
         assert!(!r.runner(), "bound one sample under it");
         assert!(!r.explain(1));
         assert_eq!(r.under_receiver(), 1);
@@ -431,20 +459,98 @@ mod restarts_tests {
         let run = Restarts {
             counted: 1,
             lines: vec![Restart {
+                slot: 0,
                 lag: 812,
                 max_lag: 803,
                 oversleep_us: Some(8_465),
             }],
             rate: 96_000,
             oversleep_max_us: 8_465,
-            receiver_lag: latency_samples(13_666_000, 96_000),
+            receiver_lag: vec![latency_samples(13_666_000, 96_000)],
         };
         assert!(run.lines[0].slept_past(96_000), "the sleep alone");
         assert!(!run.runner(), "{run:?}");
         assert!(
             format!("{run:?}")
-                .contains("the receiver's latency 1312 samples (1 lines bound under it)"),
+                .contains("the receivers' latencies (slot, samples) [(0, 1312)] (1 lines bound under their own)"),
             "{run:?}"
+        );
+    }
+
+    /// dstack #427: two flows whose receivers state different latencies
+    /// (slot 0 at 13666 us, 1312 samples at 96 kHz; slot 1 at 9 ms, 864).
+    /// Each line is judged by its own flow's receiver: slot 0's bound 1000
+    /// is under its own 1312 (OURS) though over slot 1's 864, and slot 1's
+    /// bound 864 is at its own (the sleep decides: RUNNER) though under
+    /// slot 0's 1312. Read by the shortest receiver (before #427) the first
+    /// was RUNNER; by the longest, the second was OURS.
+    #[test]
+    fn each_flow_s_restart_is_judged_by_its_own_receiver_s_latency() {
+        let at = |slot, max_lag| Restart {
+            slot,
+            lag: i64::try_from(max_lag).unwrap() + 10,
+            max_lag,
+            oversleep_us: Some(20_000),
+        };
+        let two = |lines: Vec<Restart>| Restarts {
+            counted: lines.len() as u64,
+            lines,
+            rate: 96_000,
+            oversleep_max_us: 20_000,
+            receiver_lag: window_lags(&[13_666_000, 9_000_000], &[13_666_000, 9_000_000], 96_000),
+        };
+        let both = two(vec![at(0, 1_000), at(1, 864)]);
+        assert_eq!(both.receiver_lag, [1_312, 864]);
+        assert!(both.lines.iter().all(|r| r.slept_past(96_000)));
+        assert_eq!(both.under_receiver(), 1, "slot 0's only: {both:?}");
+        assert!(!both.runner(), "{both:?}");
+        let ours = two(vec![at(0, 1_000)]);
+        assert_eq!(ours.under_receiver(), 1, "{ours:?}");
+        assert!(!ours.runner(), "under its own receiver: {ours:?}");
+        assert_eq!(
+            ours.ours(),
+            " (a TX restart bound under the receiver's latency)"
+        );
+        let runner = two(vec![at(1, 864)]);
+        assert_eq!(runner.under_receiver(), 0, "{runner:?}");
+        assert!(runner.runner(), "at its own receiver: {runner:?}");
+        assert!(runner.explain(864 + 10 + 864));
+        // Over its own receiver's latency (the receiver's own bound taken
+        // by the stack, 900 past 864), still under the other's 1312.
+        let over = two(vec![at(1, 900)]);
+        assert_eq!(over.under_receiver(), 0, "{over:?}");
+        assert!(over.runner(), "over its own receiver: {over:?}");
+        // A slot with no receiver known, or past the lanes read: the sleep
+        // decides.
+        assert!(two(vec![at(5, 100)]).runner());
+        assert!(two(vec![at(usize::MAX, 100)]).runner());
+        assert!(
+            format!("{both:?}").contains(
+                "lines [\"slot 0 lag 1010 max_lag 1000 oversleep_us 20000\", \
+                 \"slot 1 lag 874 max_lag 864 oversleep_us 20000\"]"
+            ),
+            "{both:?}"
+        );
+        assert!(
+            format!("{both:?}").contains(
+                "the receivers' latencies (slot, samples) [(0, 1312), (1, 864)] \
+                 (1 lines bound under their own)"
+            ),
+            "{both:?}"
+        );
+    }
+
+    /// Each lane's window latency on its own: a lane known at one edge
+    /// only is unknown, the others keep theirs.
+    #[test]
+    fn a_window_reads_each_lane_s_receiver_on_its_own() {
+        assert_eq!(
+            window_lags(
+                &[13_666_000, 0, 9_000_000, 9_000_000],
+                &[13_666_000, 9_000_000, 0, 4_500_000],
+                96_000
+            ),
+            [1_312, 0, 0, 432]
         );
     }
 
@@ -503,8 +609,9 @@ mod restarts_tests {
         // The stack's own line (`Schedule::due_after`): a schedule at 0
         // with fpp 32 sends its first packet (stamp 32) at 64, so a pass at
         // 504 is 440 samples late, past a 432-sample bound, after a sleep
-        // 9.282 ms late.
+        // 9.282 ms late, on slot 3.
         let mut schedule = Schedule::bootstrap(0, 32, 432);
+        schedule.slot = 3;
         let before = Before {
             oversleep_ns: Some(9_282_000),
             ..Before::default()
@@ -520,11 +627,13 @@ mod restarts_tests {
             own_since(mark),
             [
                 Restart {
+                    slot: 3,
                     lag: 440,
                     max_lag: 432,
                     oversleep_us: Some(9_282)
                 },
                 Restart {
+                    slot: 0,
                     lag: 536,
                     max_lag: 432,
                     oversleep_us: None

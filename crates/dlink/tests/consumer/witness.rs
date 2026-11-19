@@ -4,8 +4,8 @@
 //! bridge's audio, the test's own consumer thread, the test's sender, or
 //! the bridge. Shared by `tests/rx_pull.rs` (dlisten's output callback)
 //! and dstack-asio's `tests/to_asio_pull.rs` (an ASIO driver's buffer
-//! switch) through `#[path]`, beside `tests/tx_restart/restarts.rs`
-//! (declared by each as `mod restarts`).
+//! switch) through `#[path]`, beside `tests/tx_restart/restarts.rs` and
+//! `consumer/sender.rs` (declared by each as `mod restarts`, `mod sender`).
 //!
 //! In those tests a thread of the test pulls the bridge on an absolute
 //! schedule (one period after the last due time) and plays what the
@@ -30,26 +30,52 @@
 //! reads the ring's never-written holes and the sender's TX restarts with
 //! their own lines' oversleep ([`super::restarts`]).
 //!
+//! Samples off with no underrun and no ring hole can be the sender's
+//! pump: a pump restart after a wake more than W late leaves its engine
+//! ring's positions unwritten, and its TX thread sends them as silence,
+//! whole packets no RX counter sees (dstack #436, `tests/rx_pull_held.rs`:
+//! plain at dev1 load ~24 that read `OURS` 8 runs of 9). The window also
+//! reads the sender's pump restarts (all and late) and the samples its TX
+//! lanes sent as silence (their `holes`, [`super::sender`]), as
+//! `rx_pull_held`'s verdict does.
+//!
 //! [`verdict`]: `RUNNER` when every underrun follows a consumer stall
-//! within the cause count, `SENDER` when the loss is never-written holes,
-//! every TX restart of the sender in the window slept the flow's latency
-//! late and the holes are no more than those restarts can leave unsent,
-//! both named when both hold, else `OURS`. A judged window is set aside
-//! (kept for the message) only when it lost audio and its verdict is not
-//! `OURS`, and the next one is judged after [`GUARD`], up to [`WINDOWS`];
-//! the last is judged as it is. A window in which the consumer stalled
-//! without a loss is judged, so the run stays short. A stall in the
-//! settling starts the guard too. A window counts its underruns and holes
-//! from before its first callback; its TX restarts from that callback's
-//! end, so a restart just before the open whose holes land inside it
-//! reads `OURS` (every edge errs to `OURS`, never past a failure).
+//! within the cause count, `SENDER` when the loss is never-written holes
+//! or the silence of the sender's late pump restarts, every TX restart of
+//! the sender in the window slept the flow's latency late, the holes are
+//! no more than those restarts can leave unsent, every pump restart of
+//! the sender was late and, with no underrun and that silence counted, the
+//! samples off are within the holes, the silence and [`GAP_EDGES`] a gap;
+//! both named when both hold, else `OURS`. A sender TX restart without its
+//! late sleep, or a sender pump restart that was not late, spoils `RUNNER`
+//! too (`OURS`). A window with both holes and a pump's silence bounds the
+//! holes' edges by [`GAP_EDGES`] too, under what a hole judged whole was
+//! measured to cost: such a mixed window errs to `OURS`.
+//!
+//! A judged window is set aside (kept for the message) only when it lost
+//! audio and its verdict is not `OURS`, and the next one is judged after
+//! [`GUARD`], up to [`WINDOWS`]; the last is judged as it is. A window in
+//! which the consumer stalled without a loss is judged, so the run stays
+//! short. A stall in the settling starts the guard too. A window counts
+//! its underruns and holes from before its first callback; its TX
+//! restarts from that callback's end, so a restart just before the open
+//! whose holes land inside it reads `OURS`. Its pump counts open
+//! [`SILENCE_DELAY`] before its first callback: the silence is counted
+//! when the sender sends it and played that much later, so a pump restart
+//! just before the open whose silence plays inside it is counted. Three
+//! edges err the other way: the silence sent within [`SILENCE_DELAY`]
+//! before the open that played before it, and the silence sent before the
+//! close that plays after it, are counted too (each at most
+//! [`SILENCE_DELAY`] of silence), and a hole read before the open and
+//! written late inside lowers the holes never written (at most one
+//! restart's).
+//!
+//! [`SILENCE_DELAY`]: super::sender::SILENCE_DELAY
 
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use dstack::media::tx::TxShared;
-
-use super::restarts::{self, Restarts};
+use super::restarts::Restarts;
+use super::sender::{GAP_EDGES, Noted, Pump, Sender, SenderAt};
 
 /// The judged windows a run may need: a window that lost audio to the
 /// runner is set aside, any other is judged.
@@ -107,6 +133,9 @@ pub(crate) struct Window {
     pub(crate) holes: u64,
     /// The sender's TX schedule restarts in the window.
     pub(crate) sender: Restarts,
+    /// The sender's pump restarts in the window, from `SILENCE_DELAY`
+    /// (`super::sender`) before its first callback (dstack #436).
+    pub(crate) pump: Pump,
 }
 
 /// Who lost a window's audio.
@@ -144,19 +173,45 @@ impl Window {
     /// within `cause` callbacks is the runner's; never-written ring holes
     /// are the sender's when every TX restart of its window slept the
     /// flow's latency late and they are no more than those restarts can
-    /// leave unsent ([`Restarts::explain`]); samples off with neither, or
-    /// a TX restart without that evidence, are ours.
+    /// leave unsent ([`Restarts::explain`]); the silence the sender's pump
+    /// restarts sent is the sender's when every one of them was late
+    /// (dstack #436). With that silence and no underrun the samples off
+    /// must be within the holes and the silence, and [`GAP_EDGES`] a gap
+    /// with evidence (holes alone keep #401's rule: the holes bounded, the
+    /// samples off not). Samples off with neither, or more off than the
+    /// silence explains, are ours; so is any window, `RUNNER` too, with a
+    /// TX restart without its late sleep or a pump restart that was not
+    /// late.
     pub(crate) fn who(&self, cause: u64) -> Who {
         let consumer = self.underruns > 0;
-        let sender = self.holes > 0;
+        let pump = &self.pump;
+        // The pump's silence counts only with a pump restart in the window
+        // (silence with none is a block that ended past W: no evidence).
+        let silence = if pump.restarts > 0 { pump.silence } else { 0 };
+        let sender = self.holes > 0 || silence > 0;
         let underruns_explained = !consumer
             || (!self.underrun_at.is_empty()
                 && self
                     .underrun_at
                     .iter()
                     .all(|&at| self.causes(at, cause).next().is_some()));
-        let sender_explained = (!sender || self.sender.explain(self.holes))
-            && (!self.sender.any() || self.sender.runner());
+        // A gap with evidence has edges: each pump restart (read only with
+        // its silence, below), each TX line beside holes never written.
+        let tx_gaps = if self.holes > 0 {
+            self.sender.lines.len() as u64
+        } else {
+            0
+        };
+        let edges = GAP_EDGES.saturating_mul(pump.restarts.saturating_add(tx_gaps));
+        // The pump's silence bounds the samples off (holes alone keep
+        // #401's rule).
+        let off_explained = consumer
+            || silence == 0
+            || self.off <= silence.saturating_add(self.holes).saturating_add(edges);
+        let sender_explained = (self.holes == 0 || self.sender.explain(self.holes))
+            && (!self.sender.any() || self.sender.runner())
+            && pump.late == pump.restarts
+            && off_explained;
         if !self.lost() || !(consumer || sender) || !underruns_explained || !sender_explained {
             return Who::Ours;
         }
@@ -188,16 +243,17 @@ pub(crate) fn verdict(window: &Window, cause: u64, names: Names) -> String {
         .collect();
     let who = match window.who(cause) {
         Who::Runner => format!("RUNNER (the {thread} was not run)"),
-        Who::Sender => {
-            "SENDER (the sender's TX thread was not run: its sleep returned past the latency)"
-                .to_string()
+        Who::Sender => "SENDER (the sender's pump or TX thread was not run)".to_string(),
+        Who::Both => {
+            format!("RUNNER (the {thread} was not run; the sender's pump or TX thread neither)")
         }
-        Who::Both => format!("RUNNER (the {thread} was not run; the sender's TX thread neither)"),
         Who::Ours => format!("OURS{}", window.sender.ours()),
     };
+    let pump = &window.pump;
     format!(
-        "verdict {who}: {causes:?}, {} samples off, ring holes never written {}, the sender's {:?}",
-        window.off, window.holes, window.sender
+        "verdict {who}: {causes:?}, {} samples off, ring holes never written {}, the sender's \
+         pump {} restarts ({} late), {} samples sent as silence, the sender's {:?}",
+        window.off, window.holes, pump.restarts, pump.late, pump.silence, window.sender
     )
 }
 
@@ -211,7 +267,7 @@ struct Open {
     start: Instant,
     underruns: u64,
     holes: u64,
-    sender: Option<restarts::Opened>,
+    sender: Option<SenderAt>,
 }
 
 /// The consumer's witness: the consumer thread calls [`Witness::called`]
@@ -223,8 +279,10 @@ pub(crate) struct Witness<H> {
     /// The ring's never-written holes so far, and as of the last callback.
     holes: H,
     holes_seen: u64,
-    /// The sending device's TX side and rate.
-    sender: Option<(Arc<TxShared>, u32)>,
+    /// The sending device's TX side, pump and rate.
+    sender: Option<Sender>,
+    /// The sender's pump counts at the recent callbacks.
+    noted: Noted,
     /// The consumer's least lateness since its start, µs.
     floor_us: Option<u64>,
     /// The underruns as of the last callback, and as last recorded.
@@ -239,16 +297,16 @@ pub(crate) struct Witness<H> {
 impl<H: FnMut() -> u64> Witness<H> {
     /// The witness of a consumer every `period` whose underrun is its
     /// stall's within `cause` callbacks, judging windows of `judged`; the
-    /// ring's never-written holes from `holes`, the sender's TX restarts
-    /// from `sender` (its TX side and rate; `None`: no sender read). The
-    /// bridge has counted `underruns` so far.
+    /// ring's never-written holes from `holes`, the sender's TX and pump
+    /// restarts from `sender` (`None`: no sender read). The bridge has
+    /// counted `underruns` so far.
     pub(crate) fn new(
         period: Duration,
         cause: u64,
         judged: Duration,
         underruns: u64,
         mut holes: H,
-        sender: Option<(Arc<TxShared>, u32)>,
+        sender: Option<Sender>,
     ) -> Self {
         Witness {
             stall_us: u64::try_from(period.as_micros()).unwrap_or(u64::MAX),
@@ -257,6 +315,7 @@ impl<H: FnMut() -> u64> Witness<H> {
             holes_seen: holes(),
             holes,
             sender,
+            noted: Noted::default(),
             floor_us: None,
             counted: underruns,
             seen: underruns,
@@ -286,6 +345,9 @@ impl<H: FnMut() -> u64> Witness<H> {
     ) -> Option<(Window, Vec<Window>)> {
         let floor_us = self.floor_us.map_or(late_us, |f| f.min(late_us));
         self.floor_us = Some(floor_us);
+        if let Some(sender) = &self.sender {
+            self.noted.note(now, sender);
+        }
         let stalled = late_us - floor_us > self.stall_us;
         // The underruns and the ring's never-written holes after this
         // callback, and before it.
@@ -315,7 +377,7 @@ impl<H: FnMut() -> u64> Witness<H> {
                 start: now,
                 underruns: prior,
                 holes: holes_prior,
-                sender: self.sender.as_ref().map(|(tx, _)| restarts::open(tx)),
+                sender: self.sender.as_ref().map(|s| s.open(self.noted.delayed())),
             });
         }
         let window = &mut self.window;
@@ -342,8 +404,8 @@ impl<H: FnMut() -> u64> Witness<H> {
         window.underruns = underruns - open.underruns;
         window.floor_us = floor_us;
         window.holes = holes.saturating_sub(open.holes);
-        if let (Some(opened), Some((tx, rate))) = (open.sender, self.sender.as_ref()) {
-            window.sender = opened.close(tx, *rate);
+        if let (Some(at), Some(sender)) = (open.sender, self.sender.as_ref()) {
+            (window.sender, window.pump) = sender.since(&at);
         }
         if !window.lost() || window.who(self.cause) == Who::Ours || self.aside.len() + 1 == WINDOWS
         {
@@ -473,7 +535,7 @@ mod consumer_tests {
         let mut w = window(0, 520, &[], &[]);
         w.holes = 512;
         w.sender = sender(1, &[Some(9_282)]);
-        w.sender.receiver_lag = 433;
+        w.sender.receiver_lag = vec![433];
         assert_eq!(w.who(CAUSE), Who::Ours, "{:?}", w.sender);
         assert!(
             says(&w)
@@ -481,8 +543,122 @@ mod consumer_tests {
             "{}",
             says(&w)
         );
-        w.sender.receiver_lag = 432;
+        w.sender.receiver_lag = vec![432];
         assert_eq!(w.who(CAUSE), Who::Sender);
+    }
+
+    /// `restarts` pump restarts of the sender, `late` of them late,
+    /// `silence` samples its TX lanes sent as silence.
+    fn pump(restarts: u64, late: u64, silence: u64) -> Pump {
+        Pump {
+            restarts,
+            late,
+            silence,
+        }
+    }
+
+    /// dstack #436: samples off with no underrun and no ring hole after
+    /// the sender's late pump restarts are the sender's, within the
+    /// silence they sent.
+    #[test]
+    fn samples_off_within_a_late_sender_pump_restart_s_silence_are_the_sender_s() {
+        // A 20 ms sender pump stall every 300 blocks: 10 late restarts,
+        // 10240 samples sent as silence, no ring hole.
+        let mut w = window(0, 10_340, &[], &[]);
+        assert_eq!(w.who(CAUSE), Who::Ours, "no sender evidence");
+        w.pump = pump(10, 10, 10_240);
+        assert_eq!(w.who(CAUSE), Who::Sender);
+        assert!(
+            says(&w).starts_with("verdict SENDER (the sender's pump or TX thread was not run): "),
+            "{}",
+            says(&w)
+        );
+        assert!(
+            says(&w).contains("pump 10 restarts (10 late), 10240 samples sent as silence"),
+            "{}",
+            says(&w)
+        );
+        // The silence and GAP_EDGES a restart, and one sample past them.
+        w.off = 10_560;
+        assert_eq!(w.who(CAUSE), Who::Sender);
+        w.off = 10_561;
+        assert_eq!(w.who(CAUSE), Who::Ours);
+        // One restart of the ten not late (a clock step back, a
+        // re-anchor).
+        w.off = 10_340;
+        w.pump = pump(10, 9, 10_240);
+        assert_eq!(w.who(CAUSE), Who::Ours);
+        // Silence with no pump restart (a block that ended past W), and a
+        // late restart that sent none: no gap, no edges.
+        w.pump = pump(0, 0, 10_240);
+        assert_eq!(w.who(CAUSE), Who::Ours);
+        let mut one = window(0, 1, &[], &[]);
+        one.pump = pump(1, 1, 0);
+        assert_eq!(one.who(CAUSE), Who::Ours);
+        one.pump = pump(1, 1, 1_024);
+        one.off = 1_056;
+        assert_eq!(one.who(CAUSE), Who::Sender);
+        one.off = 1_057;
+        assert_eq!(one.who(CAUSE), Who::Ours);
+        // An underrun on time beside the pump's silence: ours; after a
+        // consumer stall: both; a pump restart that was not late spoils
+        // the stall's case.
+        let mut w = window(1, 3000, &[], &[41]);
+        w.pump = pump(1, 1, 1_024);
+        assert_eq!(w.who(CAUSE), Who::Ours);
+        let mut w = window(1, 3000, STALL, &[41]);
+        w.pump = pump(1, 1, 1_024);
+        assert_eq!(w.who(CAUSE), Who::Both);
+        assert!(
+            says(&w).starts_with(
+                "verdict RUNNER (the output thread was not run; the sender's pump or TX thread neither)"
+            ),
+            "{}",
+            says(&w)
+        );
+        w.pump = pump(1, 0, 1_024);
+        assert_eq!(w.who(CAUSE), Who::Ours);
+        // A late pump restart beside a TX restart without a late sleep.
+        let mut w = window(0, 1_024, &[], &[]);
+        w.pump = pump(1, 1, 1_024);
+        w.sender = sender(1, &[Some(500)]);
+        assert_eq!(w.who(CAUSE), Who::Ours);
+        // A late TX line with no hole never written gives no edge: the
+        // silence and one pump restart's edge only.
+        w.sender = sender(1, &[Some(9_282)]);
+        w.off = 1_056;
+        assert_eq!(w.who(CAUSE), Who::Sender);
+        w.off = 1_057;
+        assert_eq!(w.who(CAUSE), Who::Ours);
+    }
+
+    /// With no underrun and a late pump restart's silence, samples off past
+    /// the sender's holes, that silence and their edges have another cause
+    /// beside them (dstack #436, as `rx_pull_held`'s rule); holes alone
+    /// keep #401's rule.
+    #[test]
+    fn samples_off_past_the_sender_s_gaps_and_their_edges_are_ours() {
+        // 640 holes never written after one 12 ms TX sleep: 907 off read
+        // SENDER (measured, rx_pull under `chrt -f 10`, 19.11.2026).
+        let mut w = window(0, 907, &[], &[]);
+        w.holes = 640;
+        w.sender = sender(1, &[Some(12_010)]);
+        assert_eq!(w.who(CAUSE), Who::Sender);
+        // Holes and a late pump restart's silence together: 512 + 1024
+        // and an edge for each gap.
+        w.holes = 512;
+        w.pump = pump(1, 1, 1_024);
+        w.off = 1_600;
+        assert_eq!(w.who(CAUSE), Who::Sender);
+        w.off = 1_601;
+        assert_eq!(w.who(CAUSE), Who::Ours);
+        // With an underrun after a stall, the runner's loss is not
+        // bounded by the sender's gaps.
+        let mut w = window(1, 30_000, STALL, &[41]);
+        w.holes = 512;
+        w.sender = sender(1, &[Some(9_282)]);
+        w.pump = pump(1, 1, 1_024);
+        assert_eq!(w.who(CAUSE), Who::Both);
     }
 
     /// A witness of a 10 ms consumer judging 95 ms windows (a window opens

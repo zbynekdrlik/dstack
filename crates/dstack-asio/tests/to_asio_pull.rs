@@ -14,7 +14,8 @@
 //! The driver thread is witnessed as dlink's `tests/rx_pull.rs` witnesses
 //! its output thread (dlink's `tests/consumer/witness.rs`, dstack #396):
 //! each switch's lateness against its absolute schedule, the ring's holes
-//! never written and the sender's TX schedule restarts (dstack #401). When
+//! never written, the sender's TX schedule restarts (dstack #401) and its
+//! pump restarts with the silence they sent (dstack #436). When
 //! the runner does not run the "driver" (a windows-2025 failure of
 //! v0.6.155: 2 underruns and 2584 samples off with no ring hole and no pull
 //! restart), the switches it then makes back to back, to keep its clock,
@@ -23,8 +24,8 @@
 //! thread every 700 switches, with no pump stall, reproduced that run on
 //! dev1 to the sample (2 underruns, 2584 off). A real card glitches there
 //! too: such a window says nothing about the bridge. So a judged window
-//! that lost audio to the runner (the driver thread, or the sender's TX
-//! thread) is set aside (kept for the message) and the next one is judged,
+//! that lost audio to the runner (the driver thread, or the sender's pump
+//! or TX thread) is set aside (kept for the message) and the next one is judged,
 //! up to [`witness::WINDOWS`]; the asserts on the judged window are
 //! unchanged, and a failure prints `verdict RUNNER|SENDER|OURS`.
 
@@ -38,6 +39,8 @@ use dstack_asio::{Block, Opened, Process, Sample};
 
 #[path = "../../dlink/tests/tx_restart/restarts.rs"]
 mod restarts;
+#[path = "../../dlink/tests/consumer/sender.rs"]
+mod sender;
 #[path = "../../dlink/tests/consumer/witness.rs"]
 mod witness;
 use witness::{Names, Played, Window, Witness, late_us, verdict};
@@ -189,7 +192,7 @@ fn a_stalled_pump_leaves_the_to_asio_bridge_whole() {
         .expect("the bridge takes the pull");
     let mut side = bridge.asio_side(&opened).expect("the driver's side");
     // The ring's holes never written (holes the sender left), and the
-    // sender's TX side, for the witness.
+    // sender's TX side and pump, for the witness.
     let period = Duration::from_nanos(BUFFER as u64 * 1_000_000_000 / u64::from(RATE));
     let ring_media = Arc::clone(receiver.media());
     let mut witness = Witness::new(
@@ -201,7 +204,11 @@ fn a_stalled_pump_leaves_the_to_asio_bridge_whole() {
             let ring = ring_media.rx.rings()[0].counters();
             ring.holes.saturating_sub(ring.late)
         },
-        Some((Arc::clone(&sender.media().tx), RATE)),
+        Some(sender::Sender {
+            tx: Arc::clone(&sender.media().tx),
+            pump: sender.media().engine_stats().expect("the sender's pump"),
+            rate: RATE,
+        }),
     );
     let stall_us = witness.stall_us();
     // The driver thread: a buffer switch every ASIO period, whatever the

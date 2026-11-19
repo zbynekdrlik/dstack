@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.190
+
+- **Logs (#427): the TX restart line names its flow slot.** `the TX schedule starts again` now carries `slot` (the flow's TX lane) first, before `lag`, `max_lag` (the bound it was judged by: ours, or that flow's receiver's stated latency when longer, #426), `oversleep_us` and the pass times. A reader of a sender with several flows can match each line to its own receiver. The bridge tests' verdict (`tx_restart/restarts.rs`, shared by tx_pull, tx_pull_counts, rx_pull, from_asio_pull, to_asio_pull) now judges each line by its own lane's receiver latency, never by the shortest of all.
+  - API (vs the consumers' pins): `media::tx::Schedule` gains a public `slot: usize` (0 from `Schedule::bootstrap`); a full struct literal adds it.
+  - **No latency change.**
+- **Tests (#436): `dlink/tests/rx_pull_held.rs`'s verdict names the sender.** A sender's pump restart after a late wake sends silence in whole packets that no RX counter sees; the verdict read that `OURS` (plain at dev1 load ~24: 8 of 9 runs). The judged window now reads the sender's pump restarts, the silence its TX lanes sent and its TX restarts with their lines, and names `SENDER` only with that evidence and the bridge's own counts clean; the asserts are unchanged. Proved under `chrt -f 10`: a sender pump stall read `SENDER`, a dropped pull `OURS`, a late TX sleep `SENDER`.
+- Tests (#436): the shared consumer witness (dlink `rx_pull`, dstack-asio `to_asio_pull`) reads a sender's late pump restart as `SENDER`: the window reads the sender's pump restarts and the silence its TX lanes sent (counts opened 50 ms before the window, since the silence plays that much later), and bounds the samples off by that silence + 32 a gap. Holes alone keep the #401 rule. The asserts are unchanged.
+
 ## 0.6.189
 
 - **Dependency (#435): dsync-ptp moves from v1.33.1 to v1.35.13.** For every device on the in-process follower (the default): dsync#204 tracks a thermal frequency ramp fast enough (resolume-pp, 18.11.2026: ~6 ppm in minutes after its GPU load started; dsync's simulation ~100 -> ~35 µs), and dsync#206 handles the Windows boot race in dsync-ptp too (dstack's own retry, #431, stays). No API change for dstack's consumers. **No latency change.**

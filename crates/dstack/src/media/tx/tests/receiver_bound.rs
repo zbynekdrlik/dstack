@@ -111,3 +111,49 @@ fn the_reach_is_the_longest_receiver_latency_of_the_flows_that_send() {
         .set_receiver_latency(b, v4(&rig.stranger), MS / 2);
     assert_eq!(rig.tx.reach_lag(), 192);
 }
+
+/// dstack #427: the restart line names its flow's slot, so a reader of a
+/// sender whose receivers state different latencies judges each line by
+/// its own receiver's. Two flows, one receiver at 10 ms and one unknown
+/// (ours, 1 ms): a lag of 5 ms restarts only the second, 16 ms both, and
+/// every line names its own slot with its own bound.
+#[test]
+fn the_restart_line_names_its_slot_and_its_own_receiver_s_bound() {
+    let mut rig = Rig::new(Vec::new());
+    let (a, _) = rig.flow(vec![Some(1)]);
+    let (b, _) = add(
+        &rig.shared,
+        &FlowRequest {
+            channels: vec![Some(2)],
+            ..req(v4(&rig.stranger))
+        },
+    );
+    assert_ne!(a, b);
+    rig.tx.step(Some(T), 0);
+    rig.shared.set_receiver_latency(a, v4(&rig.rx), 10 * MS);
+    let due = first_due_ns(T);
+    crate::test_log::undecided();
+    let warnings = crate::test_log::capture_warnings(|| {
+        rig.tx.step(Some(due + 5 * MS), 0);
+        rig.tx.step(Some(due + 16 * MS), 0);
+    });
+    let lines = |slot: usize| -> Vec<&str> {
+        let named = format!("slot={slot} lag=");
+        warnings.lines().filter(|l| l.contains(&named)).collect()
+    };
+    let (on_a, on_b) = (lines(a), lines(b));
+    assert_eq!((on_a.len(), on_b.len()), (1, 2), "{warnings}");
+    assert!(
+        on_a.iter().all(|l| l.contains(" max_lag=960 ")),
+        "{warnings}"
+    );
+    assert!(
+        on_b.iter().all(|l| l.contains(" max_lag=96 ")),
+        "{warnings}"
+    );
+    assert_eq!(
+        warnings.matches("the TX schedule starts again").count(),
+        3,
+        "{warnings}"
+    );
+}
