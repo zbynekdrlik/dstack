@@ -30,6 +30,12 @@
 //!   over). That keeps the depth under the controller's excess bound,
 //!   whose re-centre mid-call ran the rest of the big call dry; on a buffer
 //!   of up to two periods and a fraction, so the big call itself fits.
+//!   The period under comes when the dry call is less late past its tick
+//!   than the floor's calls were past theirs (dstack #433: every wake on
+//!   windows-2025 about 1 ms late, a hold that ended 0.9 ms past a tick):
+//!   so while a gap is open the player makes no controller observation
+//!   (`Player::steer`), and the period it may still owe is never taken for
+//!   an excess.
 //! - The next [`SETTLE_CALLS`] calls add their excess; the lowest running
 //!   sum since the last dry call (the least lateness after the gap), plus
 //!   the lateness of the call before the gap, is taken to the silence it

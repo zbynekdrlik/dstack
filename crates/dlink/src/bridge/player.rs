@@ -898,8 +898,18 @@ impl Player {
         }
     }
 
-    /// One observation after a converted block, and its answer.
+    /// One observation after a converted block, and its answer. None while
+    /// the output's gap is open ([`output_gap`], dstack #433): its dry
+    /// call drops what the excess surely holds, which is the silence or a
+    /// period under it (a hold that ended less late past its tick than the
+    /// calls before were past theirs), so until the settling drops the rest
+    /// the FIFO may hold that period. It is the gap's, not an excess of the
+    /// producer's: taken for one, it re-centred mid-call and ran the rest
+    /// of the big call dry.
     fn steer(&mut self) {
+        if self.gap.left > 0 {
+            return;
+        }
         let now_s = (self.made + self.skipped) as f64 / f64::from(self.out_rate);
         let net = f64::from(self.net_rate);
         let Some((depth, produced)) = self.observed() else {
