@@ -61,7 +61,7 @@ checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
 name = "dstack"
-version = "0.6.190"
+version = "0.6.191"
 dependencies = [
  "dstack-audio-io",
  "dsync-ptp",
@@ -83,7 +83,7 @@ dependencies = [
 
 [[package]]
 name = "dstack-audio-io"
-version = "0.6.190"
+version = "0.6.191"
 
 [[package]]
 name = "dstack-fuzz"
@@ -95,8 +95,8 @@ dependencies = [
 
 [[package]]
 name = "dsync-ptp"
-version = "1.35.13"
-source = "git+https://github.com/zbynekdrlik/dsync?tag=v1.35.13#b4353b1bc1222e33d9889d1ffec0cbd873481ad3"
+version = "1.35.14"
+source = "git+https://github.com/zbynekdrlik/dsync?tag=v1.35.14#10b75f07456c99886ac873beaf0094f266b23ead"
 dependencies = [
  "anyhow",
  "byteorder",

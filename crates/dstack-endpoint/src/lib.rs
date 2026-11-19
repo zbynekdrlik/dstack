@@ -36,7 +36,9 @@ pub mod endpoints;
 pub mod host;
 pub mod outputs;
 pub mod settings;
-pub mod slots;
+/// The control-port slots, now dlink's (`dlink::slots`, so an app
+/// without cpal takes them too, songplayer#324); kept here by name.
+pub use dlink::slots;
 pub mod status;
 pub mod stream;
 #[cfg(windows)]
