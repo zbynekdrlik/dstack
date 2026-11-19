@@ -6,7 +6,7 @@
 //! ([`ns_of`]), the media clock a schedule runs on ([`send_clock`]) and a
 //! receiver's lateness ([`flow_latency_ns`], [`over_latency`]).
 
-use super::{DISCONTINUITY, Shift, split};
+use super::{Shift, split};
 use crate::clock;
 use crate::device::MAX_LATENCY_SAMPLES;
 
@@ -27,8 +27,16 @@ pub struct Schedule {
     /// reader judges each line by its own receiver's latency); 0 from
     /// [`Schedule::bootstrap`], set by the TX thread for its lane.
     pub slot: usize,
+    /// The device's block in samples (0 from [`Schedule::bootstrap`], set
+    /// by the TX thread): the least room a re-anchor moves the next stamp
+    /// within, so the least of [`Schedule::ahead_limit`] (dstack #440).
+    pub block: u64,
     /// Starts again since the last [`Schedule::take_rebootstraps`].
     pub(super) rebootstraps: u64,
+    /// Started again as a clock gone back ([`Schedule::ahead_limit`]), and
+    /// no pass's re-anchor point since ([`Schedule::re_anchor`],
+    /// [`Schedule::unmark`]; dstack #440).
+    pub(super) back: bool,
 }
 
 impl Schedule {
@@ -42,7 +50,9 @@ impl Schedule {
             max_lag,
             receiver_lag: 0,
             slot: 0,
+            block: 0,
             rebootstraps: 0,
+            back: false,
         }
     }
 
@@ -56,25 +66,46 @@ impl Schedule {
         self.max_lag.max(self.receiver_lag)
     }
 
+    /// How far the next stamp may be ahead of the clock (dstack #440): the
+    /// [`Schedule::bound`], at least the [`Schedule::block`], and a packet.
+    /// A start leaves it at most a packet ahead and [`Schedule::re_anchor`]
+    /// moves it at most our latency (at least the block) and a packet past
+    /// now, so a stamp further ahead is the clock gone back (a step back
+    /// read under the old epoch), never a wait.
+    pub fn ahead_limit(&self) -> u64 {
+        self.bound().max(self.block).saturating_add(self.fpp)
+    }
+
     /// The stamp of the packet due at `now`, if one is (the schedule moves
-    /// on by fpp). A lag past its [`Schedule::bound`], or a schedule [`DISCONTINUITY`]
-    /// samples ahead of the clock, starts it again (counted) and sends
-    /// nothing now.
+    /// on by fpp). A lag past its [`Schedule::bound`], or a next stamp more
+    /// than [`Schedule::ahead_limit`] ahead of the clock, starts it again
+    /// (counted) and sends nothing now; the second marks it for the next
+    /// pass's re-anchor ([`Schedule::re_anchor`]).
     pub fn due(&mut self, now: u64) -> Option<u64> {
         self.due_after(now, &split::Before::default())
     }
 
     /// A re-anchor of the clock at media time `now` (after it) with the
     /// device's `shift` ([`shift`](super::shift), on the grid of the
-    /// device's `block`; `None`: the step is unknown): moved by it when it is a whole number
+    /// device's block, [`Schedule::block`]; `None`: the step is unknown):
+    /// moved by it when it is a whole number
     /// of packets and leaves the next stamp at most the latency (at least
     /// the block) and a packet past now (not counted; a rest of the
     /// step off the grid is a lag or a wait of at most half a block, which
     /// [`Schedule::due`] judges as any other); kept when it would leave it
     /// further (the pass before read the new time with the old
-    /// epoch and already started it again there); else started again,
-    /// counted.
-    pub fn re_anchor(&mut self, shift: Option<i64>, now: u64, block: u64) -> Shift {
+    /// epoch and already started it again there); kept too when it moves
+    /// back a schedule the pass before started again as a clock gone back
+    /// (that pass read the new time of this step under the old epoch, so a
+    /// move would leave it the step behind and start it again, dstack
+    /// #440); else started again, counted. It spends the mark either way.
+    pub fn re_anchor(&mut self, shift: Option<i64>, now: u64) -> Shift {
+        // A marked schedule is already at the new time, whatever the grid
+        // of the step back (fpp 64 on a block of 32 takes half the steps
+        // off its grid).
+        if std::mem::take(&mut self.back) && shift.is_some_and(i64::is_negative) {
+            return Shift::Kept;
+        }
         let Some(by) = shift.filter(|by| by.rem_euclid(self.fpp as i64) == 0) else {
             self.realign(now);
             return Shift::Restarted;
@@ -85,12 +116,19 @@ impl Schedule {
         // ahead; a latency set apart from the block can be smaller), and a
         // packet. A pass that restarted at the new time lands a whole step
         // further.
-        let room = self.max_lag.max(block).saturating_add(self.fpp);
+        let room = self.max_lag.max(self.block).saturating_add(self.fpp);
         if next > now.saturating_add(room) {
             return Shift::Kept;
         }
         self.next = next;
         Shift::Moved
+    }
+
+    /// A pass's re-anchor point with no re-anchor: a clock-back mark from
+    /// the pass before is spent, so it keeps a schedule through one pass's
+    /// re-anchor only (dstack #440, ROZHODNUTÉ 19.11).
+    pub fn unmark(&mut self) {
+        self.back = false;
     }
 
     /// Starts the schedule again at `now` (counted): a lag, a jump, a
@@ -107,7 +145,8 @@ impl Schedule {
     pub fn due_after(&mut self, now: u64, before: &split::Before) -> Option<u64> {
         let send = self.next.saturating_add(self.fpp);
         let bound = self.bound();
-        if now > send.saturating_add(bound) || send > now.saturating_add(DISCONTINUITY) {
+        let back = self.next > now.saturating_add(self.ahead_limit());
+        if now > send.saturating_add(bound) || back {
             // Why (dasio, Windows): the lag past the send time, or a
             // jump back. Rare (each one is a restart), so logged; its
             // `max_lag` is the bound it was judged by, for its `slot`'s
@@ -122,6 +161,7 @@ impl Schedule {
                 "the TX schedule starts again"
             );
             self.realign(now);
+            self.back = back;
             return None;
         }
         if now < send {

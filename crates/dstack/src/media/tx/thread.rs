@@ -132,11 +132,15 @@ impl Transmitter {
             if let Some(fill) = self.fill.as_mut() {
                 fill.idle();
             }
+            // A pass all the same: the lanes' clock-back marks go.
+            self.unmark();
             return;
         };
         let now = send_clock(now_ns, self.rate, self.margin_ns);
         if self.epoch != Some(anchor.epoch) {
             self.re_anchored(now, clock::to_samples(now_ns, self.rate), anchor);
+        } else {
+            self.unmark();
         }
         self.epoch = Some(anchor.epoch);
         self.fill_due(now_ns);
@@ -337,6 +341,7 @@ impl Transmitter {
             let src = SocketAddrV4::new(shared.ip, shared.ports[slot]);
             let schedule = lane.schedule.get_or_insert_with(|| Schedule {
                 slot,
+                block: shared.cfg.block,
                 ..Schedule::bootstrap(now, plan.fpp, *max_lag)
             });
             // The receiver's latency, read each pass as the late count reads

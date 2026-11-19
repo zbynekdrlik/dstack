@@ -129,10 +129,18 @@ impl Transmitter {
         if let Some(fill) = self.fill.as_mut() {
             fill.re_anchor(shift, media);
         }
-        let block = self.shared.cfg.block;
+        // The flows a clock gone back started again the pass before (a
+        // step back keeps them): logged, so a field log tells that keep
+        // from one past the room.
+        let marked = self
+            .lanes
+            .iter()
+            .filter_map(|l| l.schedule)
+            .filter(|s| s.back)
+            .count();
         let mut counts = [0u32; 3];
         for schedule in self.lanes.iter_mut().filter_map(|l| l.schedule.as_mut()) {
-            counts[schedule.re_anchor(shift, now, block) as usize] += 1;
+            counts[schedule.re_anchor(shift, now) as usize] += 1;
         }
         let [moved, kept, restarted] = counts;
         info!(
@@ -142,9 +150,24 @@ impl Transmitter {
             engine_shift = self.engine_shift,
             moved,
             kept,
+            marked,
             restarted,
             "{TX_LINE}"
         );
+    }
+
+    /// A pass at the same epoch as the last, or with the clock not ready:
+    /// every flow's and the fill's clock-back mark is spent (a re-anchor
+    /// spends them in [`Transmitter::re_anchored`]), so a mark keeps a
+    /// schedule through the next pass's re-anchor only (dstack #440,
+    /// ROZHODNUTÉ 19.11).
+    pub(super) fn unmark(&mut self) {
+        if let Some(fill) = self.fill.as_mut() {
+            fill.unmark();
+        }
+        for schedule in self.lanes.iter_mut().filter_map(|l| l.schedule.as_mut()) {
+            schedule.unmark();
+        }
     }
 }
 
