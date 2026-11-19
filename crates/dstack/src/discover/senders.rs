@@ -22,17 +22,19 @@
 //!   of a standing browse, from the queries the meter hears; Dante
 //!   hardware (ARC records without `dstack_vers` in its answers) is never
 //!   named.
-//! - [`Meter`]: the process's passive listener on one address (one per
-//!   process and address, shared by every device there; its own thread,
-//!   nothing sent) and the last minute for the devices' status. It counts
-//!   the group as joined on that address's interface only: Linux is told
-//!   so (`IP_MULTICAST_ALL` off; it would hand over every membership of the
-//!   host), and Windows delivers by the socket's own membership (checked
-//!   on a two-leg PC, 14.11.2026: 20 s, every source on the Dante subnet,
-//!   none from the LAN's mDNS). On Windows the socket is bound to the
-//!   wildcard address (`discover`'s group listener), so it may also take
-//!   a unicast datagram to port 5353 meant for another wildcard socket
-//!   there, as a [`super::Discovery`] does; mDNS answers go to the group.
+//! - [`Meter`]: the process's passive count on one address (one per
+//!   process and address, held by the address's
+//!   [`crate::announce::mdns::Mdns`] and every device there; its own
+//!   thread, nothing sent) and the last minute for the devices' status.
+//!   Since dstack #442 it has no socket: it reads every datagram the
+//!   daemon's socket receives ([`crate::announce::mdns::Listener`]), the
+//!   group as joined on that address's interface only (the daemon's socket
+//!   takes only its own memberships on Linux, `IP_MULTICAST_ALL` off, and
+//!   Windows delivers by the socket's own membership: checked on a two-leg
+//!   PC, 14.11.2026, 20 s, every source on the Dante subnet, none from the
+//!   LAN's mDNS). The socket is bound to the wildcard address, so it may
+//!   also take a unicast datagram to port 5353; mDNS answers go to the
+//!   group.
 //! - The network floor (dstack #321): the meter also reads the dstack
 //!   version in every `_netaudio-arc` TXT it hears
 //!   ([`crate::network_floor::arc_versions`]) and keeps the peers below the
@@ -40,17 +42,17 @@
 
 use std::collections::HashMap;
 use std::io;
-use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
+use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
+use std::sync::mpsc::RecvTimeoutError;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use tracing::{debug, info, trace, warn};
 
-use crate::membership::{Link, Membership, links, rejoin};
+use crate::announce::mdns::Listener;
 use crate::network_floor::{self, Below, Guard, Kind};
-use crate::subscribe::instance::MDNS;
 
 pub mod browsers;
 
@@ -239,9 +241,6 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// The meters running in this process, by address.
-static METERS: Mutex<Vec<(Ipv4Addr, Weak<Meter>)>> = Mutex::new(Vec::new());
-
 /// The process's mDNS meter on one address (see the module): it ends with
 /// its last holder.
 #[derive(Debug)]
@@ -249,108 +248,47 @@ pub struct Meter {
     last: Arc<Mutex<Option<Minute>>>,
     floor: Arc<Mutex<Guard>>,
     stop: Arc<AtomicBool>,
-    rejoins: Arc<AtomicU64>,
+    heard: Arc<AtomicU64>,
     thread: Option<JoinHandle<()>>,
 }
 
-/// How the meter's socket keeps its group (dstack #282): the watch of the
-/// address and the interface list it reads ([`links`]; a test: its own).
-pub struct MeterWatch {
-    pub membership: Membership,
-    pub read: Box<dyn FnMut() -> io::Result<Vec<Link>> + Send>,
-}
-
-/// The meter's socket's receive wait (it looks at the stop between two).
+/// The meter's receive wait (it looks at the stop between two).
 const WAIT: Duration = Duration::from_millis(250);
 
 impl Meter {
-    /// The meter on the interface with the address `ip`: the one already
-    /// running in this process there, or a new one listening to the mDNS
-    /// group as a passive member (`discover`'s group listener, joined
-    /// again after an interface change, dstack #282). One per process
-    /// and address, so its lines are logged once whatever the devices.
-    pub fn shared(ip: Ipv4Addr) -> io::Result<Arc<Meter>> {
-        Meter::shared_with(ip, || Meter::open(ip, MINUTE_NS))
-    }
-
-    /// A new meter listening to the mDNS group on the interface with the
-    /// address `ip`, in minutes of `minute_ns` ([`Meter::shared`]'s, not
-    /// registered).
-    pub fn open(ip: Ipv4Addr, minute_ns: u64) -> io::Result<Meter> {
-        let sock = super::group_listener(ip)?;
-        // Only the group as joined on this socket's interface: Linux
-        // otherwise hands it every membership of the host (the LAN's).
-        #[cfg(target_os = "linux")]
-        socket2::SockRef::from(&sock).set_multicast_all_v4(false)?;
-        sock.set_read_timeout(Some(WAIT))?;
-        let watch = MeterWatch {
-            membership: Membership::new(ip),
-            read: Box::new(links),
-        };
-        Meter::start(sock, Some(watch), ip, minute_ns, Browsers::default())
-    }
-
-    /// [`Meter::shared`] with the meter `open` makes when none runs on `ip`.
-    pub fn shared_with(
-        ip: Ipv4Addr,
-        open: impl FnOnce() -> io::Result<Meter>,
-    ) -> io::Result<Arc<Meter>> {
-        let mut meters = lock(&METERS);
-        meters.retain(|(_, w)| w.strong_count() > 0);
-        if let Some(m) = meters
-            .iter()
-            .find(|(a, _)| *a == ip)
-            .and_then(|(_, w)| w.upgrade())
-        {
-            return Ok(m);
-        }
-        let m = Arc::new(open()?);
-        meters.push((ip, Arc::downgrade(&m)));
-        info!("mDNS meter: started on the Dante leg (passive, nothing sent)");
-        Ok(m)
-    }
-
-    /// A meter counting what `sock` receives, in minutes of `minute_ns`,
-    /// its mDNS group membership on `ip` kept by `watch` when there is one,
-    /// the 96 s refreshes looked for by `browsers`.
-    pub fn start(
-        sock: UdpSocket,
-        watch: Option<MeterWatch>,
-        ip: Ipv4Addr,
-        minute_ns: u64,
-        browsers: Browsers,
-    ) -> io::Result<Meter> {
+    /// A meter counting what `heard` receives (the daemon's socket on its
+    /// address, dstack #442), in minutes of `minute_ns`, the 96 s refreshes
+    /// looked for by `browsers`.
+    pub fn start(heard: Listener, minute_ns: u64, browsers: Browsers) -> io::Result<Meter> {
         let last = Arc::new(Mutex::new(None));
         let floor = Arc::new(Mutex::new(Guard::default()));
         let stop = Arc::new(AtomicBool::new(false));
-        let rejoins = Arc::new(AtomicU64::new(0));
+        let count = Arc::new(AtomicU64::new(0));
         let run = Run {
-            sock,
-            watch,
-            ip,
+            heard,
             minute_ns,
             browsers,
             last: Arc::clone(&last),
             floor: Arc::clone(&floor),
             stop: Arc::clone(&stop),
-            rejoins: Arc::clone(&rejoins),
+            heard_count: Arc::clone(&count),
         };
         let thread = std::thread::Builder::new()
             .name("dstack-mdns-meter".to_string())
             .spawn(move || run.run())?;
+        info!("mDNS meter: started on the Dante leg (passive, nothing sent)");
         Ok(Meter {
             last,
             floor,
             stop,
-            rejoins,
+            heard: count,
             thread: Some(thread),
         })
     }
 
-    /// How often its socket joined the group again after an interface
-    /// change.
-    pub fn rejoins(&self) -> u64 {
-        self.rejoins.load(Ordering::Relaxed)
+    /// The datagrams it counted since its start.
+    pub fn heard(&self) -> u64 {
+        self.heard.load(Ordering::Relaxed)
     }
 
     /// The last closed minute (`None` before the first).
@@ -377,7 +315,7 @@ impl Meter {
             last: Arc::new(Mutex::new(minute)),
             floor: Arc::new(Mutex::new(floor)),
             stop: Arc::new(AtomicBool::new(true)),
-            rejoins: Arc::default(),
+            heard: Arc::default(),
             thread: None,
         }
     }
@@ -395,15 +333,13 @@ impl Drop for Meter {
 
 /// The meter's thread.
 struct Run {
-    sock: UdpSocket,
-    watch: Option<MeterWatch>,
-    ip: Ipv4Addr,
+    heard: Listener,
     minute_ns: u64,
     browsers: Browsers,
     last: Arc<Mutex<Option<Minute>>>,
     floor: Arc<Mutex<Guard>>,
     stop: Arc<AtomicBool>,
-    rejoins: Arc<AtomicU64>,
+    heard_count: Arc<AtomicU64>,
 }
 
 impl Run {
@@ -411,25 +347,18 @@ impl Run {
         let origin = Instant::now();
         let now = || u64::try_from(origin.elapsed().as_nanos()).unwrap_or(u64::MAX);
         let mut senders = Senders::new(now());
-        let mut buf = vec![0u8; 9000];
         while !self.stop.load(Ordering::Relaxed) {
-            if let Some(w) = self.watch.as_mut() {
-                let (sock, ip) = (&self.sock, self.ip);
-                if w.membership.keep(Instant::now(), &mut w.read, MDNS, || {
-                    rejoin(sock, *MDNS.ip(), ip)
-                }) {
-                    self.rejoins.fetch_add(1, Ordering::Relaxed);
+            match self.heard.recv_timeout(WAIT) {
+                Ok(d) => {
+                    self.heard_count.fetch_add(1, Ordering::Relaxed);
+                    senders.count(*d.from.ip());
+                    self.arc_records(&d.bytes, *d.from.ip(), now());
+                    self.browsers
+                        .heard(*d.from.ip(), d.from.port(), &d.bytes, now());
                 }
-            }
-            match self.sock.recv_from(&mut buf) {
-                Ok((n, SocketAddr::V4(from))) => {
-                    senders.count(*from.ip());
-                    let bytes = buf.get(..n).unwrap_or_default();
-                    self.arc_records(bytes, *from.ip(), now());
-                    self.browsers.heard(*from.ip(), from.port(), bytes, now());
-                }
-                Ok(_) => {}
-                Err(e) => trace!(kind = ?e.kind(), "mDNS meter: nothing this wait"),
+                Err(RecvTimeoutError::Timeout) => trace!("mDNS meter: nothing this wait"),
+                // Its listener's channel lives as long as the thread: never.
+                Err(RecvTimeoutError::Disconnected) => return,
             }
             if let Some(mut minute) = senders.roll_after(now(), self.minute_ns) {
                 minute.browsers = self.browsers.take(now());

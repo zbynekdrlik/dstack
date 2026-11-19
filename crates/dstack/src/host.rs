@@ -17,10 +17,12 @@
 //!   engine ring on each TX channel the engine feeds) and the control
 //!   socket bound. [`Prepared::media`] and [`Prepared::config`] are what the
 //!   engine builds its pump from.
-//! - [`Prepared::start`]: the mDNS daemon on the interface only, the
-//!   signals ([`Signals`]), and the `dstack-device` thread: a current-thread
-//!   tokio runtime running the media clock's poller and
-//!   [`daemon::serve`] until it is stopped, then the mDNS goodbyes.
+//! - [`Prepared::start`]: the mDNS daemon on the interface only (the
+//!   process's one on the address, shared by every device there and shut
+//!   down with its last, [`crate::announce::mdns`]), the signals
+//!   ([`Signals`]), and the `dstack-device` thread: a current-thread tokio
+//!   runtime running the media clock's poller and [`daemon::serve`] until
+//!   it is stopped, then the device's own mDNS goodbyes.
 //! - [`Host`]: the running device: [`Host::ended`] (serving ended by
 //!   itself, and why), [`Host::stop`] (asks serving to end and waits a
 //!   bounded time; one still running is a warning, never killed),
@@ -42,14 +44,14 @@
 //! ports and channel numbers, never a name or an address.
 
 use std::fmt::Display;
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::Ipv4Addr;
 use std::path::Path;
 use std::sync::atomic::AtomicI32;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use mdns_sd::{DaemonStatus, IfKind, ServiceDaemon};
+use mdns_sd::ServiceDaemon;
 use tokio::net::UdpSocket;
 #[cfg(unix)]
 use tokio::net::UnixListener;
@@ -58,6 +60,8 @@ use tokio::sync::Notify;
 use tracing::{info, warn};
 
 use crate::announce::Announcer;
+pub use crate::announce::mdns::GOODBYE_WAIT;
+use crate::announce::mdns::Mdns;
 use crate::clock::linked::Linked;
 use crate::clock::{ClockStats, MonoClock, monotonic_ns, poll_dsync, realtime_ns};
 #[cfg(unix)]
@@ -66,9 +70,6 @@ use crate::daemon::media::{Clock, Media};
 use crate::daemon::{self, BUILD, IfAddr, Options, Place, PlaceWait, ServeError, Sockets, VERSION};
 use crate::device::{Device, DeviceConfig, DeviceState};
 use crate::info::{self, Multicast, NetInfo};
-
-/// How long the mDNS daemon gets to send the goodbyes and stop.
-pub const GOODBYE_WAIT: Duration = Duration::from_secs(3);
 
 /// Why the device could not run, or ended badly; its exit code is
 /// [`exit_code`]'s.
@@ -619,21 +620,12 @@ impl Prepared {
             let _in_rt = rt.enter();
             (Watch::new(signals)?, open_local(&mut device))
         };
-        let mdns = ServiceDaemon::new().map_err(|e| run_failed(format!("the mDNS daemon: {e}")))?;
-        // Only the served address's interface, IPv4: no other network sees
-        // the records (mdns-sd applies the selections in order).
-        let selected = mdns
-            .disable_interface(IfKind::All)
-            .and_then(|()| mdns.enable_interface(IfKind::Addr(IpAddr::V4(net.ip))));
-        if let Err(e) = selected {
-            let _withdrawn = goodbye(&mdns);
-            return Err(run_failed(format!("the mDNS interface: {e}")));
-        }
-        // dstack #289: who sends how much mDNS on the leg, one meter per
-        // process and address; the device runs on without it (logged).
-        match crate::discover::senders::Meter::shared(net.ip) {
-            Ok(meter) => media.set_mdns_meter(meter),
-            Err(e) => warn!(%e, "the mDNS meter is not started: no mDNS senders in the status"),
+        // dstack #442: the process's one mDNS socket on the address (the
+        // daemon, its interface only), shared by every device there, with
+        // the address's meter (dstack #289; the device runs on without it).
+        let mdns = Mdns::shared(net.ip).map_err(run_failed)?;
+        if let Some(meter) = mdns.meter() {
+            media.set_mdns_meter(meter);
         }
         let control = Arc::new(Control::default());
         #[cfg(windows)]
@@ -650,29 +642,30 @@ impl Prepared {
             #[cfg(unix)]
             listener,
         };
-        let kept = mdns.clone();
         let theirs = Arc::clone(&control);
-        let announcer = Announcer::new(mdns);
         // Windows: our records answered from the device's own address too
         // (a SkipAsSource address's answers leave from the primary one;
-        // dstack #1 problem E); it ends with the device's thread.
+        // dstack #1 problem E), the queries heard on the daemon's socket
+        // (dstack #442); it ends with the device's thread.
         #[cfg(windows)]
-        let own = crate::announce::responder::Responder::start(net_ip, announcer.published())
-            .map_err(|e| warn!(%e, "mDNS answers from the device's address not started"))
-            .ok();
+        let heard = mdns.listen(crate::announce::mdns::Heard::Queries);
+        let announcer = Announcer::new(mdns.daemon().clone());
+        #[cfg(windows)]
+        let own =
+            crate::announce::responder::Responder::start(net_ip, announcer.published(), heard)
+                .map_err(|e| warn!(%e, "mDNS answers from the device's address not started"))
+                .ok();
         let thread = std::thread::Builder::new()
             .name("dstack-device".to_string())
             .spawn(move || {
                 #[cfg(windows)]
                 let _own = own;
-                device_thread(rt, served, announcer, &theirs, watch)
+                device_thread(rt, served, announcer, mdns, &theirs, watch)
             });
         match thread {
             Ok(thread) => Ok(Host { control, thread }),
-            Err(e) => {
-                let _withdrawn = goodbye(&kept);
-                Err(run_failed(format!("the device thread: {e}")))
-            }
+            // Nothing registered yet; the closure's drop let the daemon go.
+            Err(e) => Err(run_failed(format!("the device thread: {e}"))),
         }
     }
 }
@@ -712,18 +705,20 @@ fn open_local(device: &mut Device) -> Option<tokio::net::TcpListener> {
 }
 
 /// The `dstack-device` thread: serving in the runtime until stopped, then
-/// the goodbyes whatever ended serving (no record outlives the device).
-/// Glue: the runtime and the mDNS daemon.
+/// the goodbyes whatever ended serving (no record outlives the device);
+/// the daemon `mdns` stops with its last device. Glue: the runtime and the
+/// mDNS daemon.
 fn device_thread(
     rt: Runtime,
     served: Served,
     mut announcer: Announcer<ServiceDaemon>,
+    mdns: Arc<Mdns>,
     control: &Control,
     watch: Watch,
 ) -> Result<(), HostError> {
     let served = rt.block_on(serve_device(served, &mut announcer, control, watch));
     let served = settle(control, served);
-    let goodbye = goodbye(announcer.registry());
+    let goodbye = goodbye(&mut announcer, &mdns);
     served?;
     goodbye
 }
@@ -790,23 +785,13 @@ async fn serve_device(
     .await
 }
 
-/// Shuts the mDNS daemon down, which withdraws every record (goodbyes)
-/// before it says so; waits at most [`GOODBYE_WAIT`] for that.
-fn goodbye(mdns: &ServiceDaemon) -> Result<(), HostError> {
-    let status = mdns
-        .shutdown()
-        .map_err(|e| run_failed(format!("the mDNS shutdown: {e}")))?;
-    match status.recv_timeout(GOODBYE_WAIT) {
-        Ok(DaemonStatus::Shutdown) => {
-            info!("mDNS records withdrawn (goodbyes sent); stopped");
-            Ok(())
-        }
-        Ok(other) => Err(run_failed(format!("the mDNS shutdown answered {other:?}"))),
-        Err(e) => Err(run_failed(format!(
-            "the mDNS shutdown was not confirmed within {} s: {e}",
-            GOODBYE_WAIT.as_secs()
-        ))),
-    }
+/// Withdraws the device's own records (goodbyes; another device on the
+/// shared daemon keeps its own, dstack #442) and waits at most
+/// [`GOODBYE_WAIT`] until the daemon has sent them.
+fn goodbye(announcer: &mut Announcer<ServiceDaemon>, mdns: &Mdns) -> Result<(), HostError> {
+    mdns.withdraw(announcer, GOODBYE_WAIT).map_err(run_failed)?;
+    info!("mDNS records withdrawn (goodbyes sent)");
+    Ok(())
 }
 
 /// How [`Host::stop`] ended.

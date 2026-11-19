@@ -303,10 +303,10 @@ pub const AGAIN_PAUSE: Duration = Duration::from_millis(1);
 
 /// `call`, and again while it answers [`mdns_sd::Error::Again`], at most
 /// `tries` times more: its last answer, and how many times it tried again.
-fn retried(
+pub(crate) fn retried<T>(
     tries: u64,
-    mut call: impl FnMut() -> Result<(), mdns_sd::Error>,
-) -> (Result<(), mdns_sd::Error>, u64) {
+    mut call: impl FnMut() -> Result<T, mdns_sd::Error>,
+) -> (Result<T, mdns_sd::Error>, u64) {
     let mut again = 0;
     loop {
         match call() {
@@ -427,6 +427,7 @@ impl<R: Registry> Announcer<R> {
     }
 }
 
+pub mod mdns;
 pub mod responder;
 
 #[cfg(test)]

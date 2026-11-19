@@ -144,7 +144,7 @@ pub use error::{Error, Result};
 pub use service_daemon::send_from_v4;
 pub use service_daemon::{
     DaemonEvent, DaemonStatus, DnsNameChange, HostnameResolutionEvent, IfKind, IfPredicate,
-    Metrics, ServiceDaemon, ServiceEvent, UnregisterStatus, IP_CHECK_INTERVAL_IN_SECS_DEFAULT,
+    Metrics, ServiceDaemon, ServiceEvent, Tap, UnregisterStatus, IP_CHECK_INTERVAL_IN_SECS_DEFAULT,
     MDNS_PORT, SERVICE_NAME_LEN_MAX_DEFAULT,
 };
 pub use service_info::{
