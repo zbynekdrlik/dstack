@@ -374,6 +374,19 @@ pub trait PtpClock: Send + Sync {
     /// return early (a signal, or a clock that is not ready: then after at
     /// most [`NOT_READY_NAP_NS`]): callers read [`PtpClock::now_ns`] again.
     fn sleep_until(&self, ptp_ns: u64);
+    /// [`PtpClock::sleep_until`] for at most `max_ns` from the call, with
+    /// the clock's time base read once (dstack #440): a media thread passes
+    /// its target less its own time read, so a re-anchor between that read
+    /// and the sleep (a new k, a follower's step, a source switch) never
+    /// stretches the sleep by the step. Back by 43.9 days on iemmixer-snv
+    /// (16.11.2026), the pump slept three days. The default bounds the
+    /// target through one [`PtpClock::now_ns`] read.
+    fn sleep_until_within(&self, ptp_ns: u64, max_ns: u64) {
+        match self.now_ns() {
+            Some(now) => self.sleep_until(ptp_ns.min(now.saturating_add(max_ns))),
+            None => self.sleep_until(ptp_ns),
+        }
+    }
     /// The re-anchors so far: a change tells the media threads to re-align.
     fn epoch(&self) -> u32;
     /// The latest re-anchor whose time step the clock knows, with the epoch
@@ -438,6 +451,12 @@ impl Anchor {
 /// How long [`PtpClock::sleep_until`] waits on a clock that is not ready.
 pub const NOT_READY_NAP_NS: u64 = 10_000_000;
 
+/// A sleep's deadline on the box's monotonic clock (dstack #440): the
+/// target, at most `max_ns` past `now` (both monotonic ns), saturating.
+pub fn bounded_deadline(target: i64, now: i64, max_ns: u64) -> i64 {
+    target.min(now.saturating_add_unsigned(max_ns))
+}
+
 /// A clock for tests: ready from its start time, and time moves only in
 /// [`PtpClock::sleep_until`] (to the time asked), [`ManualClock::advance`]
 /// and [`ManualClock::re_anchor`].
@@ -493,6 +512,13 @@ impl PtpClock for ManualClock {
 
     fn sleep_until(&self, ptp_ns: u64) {
         self.now.fetch_max(ptp_ns, Ordering::SeqCst);
+    }
+
+    /// Time moves to the target, at most `max_ns` on.
+    fn sleep_until_within(&self, ptp_ns: u64, max_ns: u64) {
+        let now = self.now.load(Ordering::SeqCst);
+        self.now
+            .fetch_max(ptp_ns.min(now.saturating_add(max_ns)), Ordering::SeqCst);
     }
 
     fn epoch(&self) -> u32 {
@@ -808,12 +834,18 @@ mod os {
         }
 
         fn sleep_until(&self, ptp_ns: u64) {
+            self.sleep_until_within(ptp_ns, u64::MAX);
+        }
+
+        /// k read once: the deadline is the target on it, at most `max_ns`
+        /// past now (dstack #440).
+        fn sleep_until_within(&self, ptp_ns: u64, max_ns: u64) {
             let Some(k) = self.k_ns() else {
                 std::thread::sleep(Duration::from_nanos(NOT_READY_NAP_NS));
                 return;
             };
             let target = i64::try_from(i128::from(ptp_ns) - i128::from(k)).unwrap_or(i64::MAX);
-            super::sys::sleep_until_monotonic(target);
+            super::sys::sleep_until_monotonic(bounded_deadline(target, monotonic_ns(), max_ns));
         }
 
         fn epoch(&self) -> u32 {
@@ -984,6 +1016,9 @@ mod tests;
 
 #[cfg(test)]
 mod anchor_tests;
+
+#[cfg(test)]
+mod sleep_tests;
 
 /// The runner's timer state in a Windows timer test's failure (#339).
 /// Only tests call it; built in every build so the mutation gate sees it.

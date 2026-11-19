@@ -577,11 +577,19 @@ impl PtpClock for Linked {
     }
 
     fn sleep_until(&self, ptp_ns: u64) {
+        self.sleep_until_within(ptp_ns, u64::MAX);
+    }
+
+    /// The source in use's time read once, the sleep at most `max_ns`
+    /// (dstack #440: a step of the follower, or a switch, after the
+    /// caller's read never stretches it).
+    fn sleep_until_within(&self, ptp_ns: u64, max_ns: u64) {
         match self.source() {
-            Source::Service => self.service.sleep_until(ptp_ns),
+            Source::Service => self.service.sleep_until_within(ptp_ns, max_ns),
             Source::Internal => match self.now_ns() {
                 Some(now) => {
-                    let left = i64::try_from(ptp_ns.saturating_sub(now)).unwrap_or(i64::MAX);
+                    let left = ptp_ns.saturating_sub(now).min(max_ns);
+                    let left = i64::try_from(left).unwrap_or(i64::MAX);
                     super::sys::sleep_until_monotonic(monotonic_ns().saturating_add(left));
                 }
                 None => std::thread::sleep(Duration::from_nanos(NOT_READY_NAP_NS)),
