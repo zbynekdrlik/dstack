@@ -225,3 +225,37 @@ fn the_address_s_meter_counts_what_the_shared_socket_hears() {
     #[cfg(target_os = "linux")]
     assert_eq!(held.len(), 1, "the device's own daemon: {held:?}");
 }
+
+/// The traffic watch's discovery of our other devices (`traffic::neighbours`,
+/// dstack #203) as a device runs it while its NIC is loud past our audio:
+/// it reads the group from the daemon's socket, so the process still holds
+/// one 5353 socket, and it lists the devices on the address.
+#[test]
+fn a_loud_nic_s_neighbours_discovery_keeps_the_one_socket() {
+    use dstack::traffic::neighbours::{DiscoveryFinder, Finder};
+    let _one = ONE_DEVICE.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = tempfile::tempdir().unwrap();
+    let (host, name, tx1) = start(dir.path(), false);
+    read_record(&name, &tx1);
+    let mut finder = DiscoveryFinder::default();
+    finder.start(test_ipv4()).expect("the neighbours' discovery");
+    let deadline = Instant::now() + BOUND;
+    while !finder.devices().iter().any(|d| d.name == name) {
+        assert!(Instant::now() < deadline, "{name} was never listed");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    #[cfg(target_os = "linux")]
+    let held = mdns_sockets();
+    finder.stop();
+    let stopped = host.stop(Duration::from_secs(5));
+    assert!(matches!(stopped, host::Stopped::Done), "{stopped:?}");
+    #[cfg(target_os = "linux")]
+    {
+        assert_eq!(held.len(), 1, "one 5353 socket with the discovery: {held:?}");
+        assert_eq!(
+            sockets_after_stop(),
+            Vec::<String>::new(),
+            "none after the stops"
+        );
+    }
+}
