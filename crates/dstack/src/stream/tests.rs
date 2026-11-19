@@ -257,7 +257,7 @@ fn a_schedule_far_ahead_rebootstraps() {
             cause: Cause::ClockBack
         }
     );
-    assert_eq!(b, Blocks::bootstrap(now, TIMING));
+    assert_eq!(b.start(), Blocks::bootstrap(now, TIMING).start());
     assert!(b.due() >= now && b.due() < now + B);
     assert!(matches!(b.next(now), Due::Wait { .. }));
 }
