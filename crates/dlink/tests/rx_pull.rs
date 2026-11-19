@@ -19,11 +19,10 @@
 //! latency (PR #406's windows-2025 run: 520 off, 0 underruns, 512 holes
 //! never written) or whose pump woke more than W late (its TX thread sends
 //! the positions the restart left unwritten as silence) says nothing about
-//! the bridge: a
-//! judged window that lost audio to either is set aside (kept for the
-//! message) and the next one judged, up to [`witness::WINDOWS`]; the
-//! asserts on the judged window are unchanged, and a failure prints
-//! `verdict RUNNER|SENDER|OURS`.
+//! the bridge: a judged window that lost audio to any of them is set aside
+//! (kept for the message) and the next one judged, up to
+//! [`witness::WINDOWS`]; the asserts on the judged window are unchanged,
+//! and a failure prints `verdict RUNNER|SENDER|OURS`.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
