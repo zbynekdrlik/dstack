@@ -89,3 +89,4 @@ One line per ticket: issue, commits, tests (RED -> GREEN where a bug), decisions
 - 19.11 15:57 CET: v0.6.193 = #440 residual. v0.6.194 = #442 (one mDNS socket per process and address).
 - 19.11 17:35 CET: v0.6.194 = #442. v0.6.195 = #444's trial switch (mdns_bind_address, default off).
 - 19.11 19:30 CET: v0.6.195 = #444 switch. v0.6.196 = #447 (backed-off re-open, unplaced reads not lost).
+- 19.11 22:55 CET: v0.6.196 = #447. v0.6.197 = #444 direct-query fix + nic-burst-log tool (#408).
