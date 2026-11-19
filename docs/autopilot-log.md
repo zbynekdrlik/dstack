@@ -85,3 +85,4 @@ One line per ticket: issue, commits, tests (RED -> GREEN where a bug), decisions
 - 19.11 06:45 CET: v0.6.188 = #431 + #433 + #434. v0.6.189 = dsync-ptp v1.35.13 (#435).
 - 19.11 08:37 CET: v0.6.189 = dsync-ptp v1.35.13 (#435). v0.6.190 = #427 (restart line slot) + #436 (verdicts name the sender).
 - 19.11 13:48 CET: v0.6.191 = slots in dlink + dsync-ptp v1.35.14. v0.6.192 = #440 (pump slept through a re-anchor; iemmixer silent since 16.11) + #393 (from-ASIO cause).
+- 19.11 15:24 CET: v0.6.192 released (#440 main fix, #393). v0.6.193 = #440's residual: clock-back rule, one-pass flag, dlink pull's room.
