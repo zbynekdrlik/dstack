@@ -230,8 +230,7 @@ fn a_device_s_withdrawal_takes_its_own_records_only() {
 }
 
 /// iemmixer's device has about 200 records, mdns-sd's queue holds 100
-/// commands: a withdrawal fills it, and its round trip and the shutdown
-/// after it wait the queue out instead of failing (`Error::Again`).
+/// commands: a withdrawal of more than that is confirmed whole.
 #[test]
 fn a_withdrawal_of_more_records_than_the_queue_holds_is_confirmed() {
     use crate::announce::{CHAN_SERVICE, ServiceRecord};
@@ -255,8 +254,10 @@ fn a_withdrawal_of_more_records_than_the_queue_holds_is_confirmed() {
     let after = unregistered(&mdns.settle(GOODBYE_WAIT).unwrap());
     assert_eq!(after - before, 250);
     // A round trip and the last holder's shutdown, each right after a
-    // registration burst (which mdns-sd runs slower than it is sent, so its
-    // queue is full at the burst's end), still go through.
+    // registration burst, still go through. On a loaded box the queue can
+    // be full at the burst's end (`Error::Again`, waited out); on an idle
+    // dev1 the daemon keeps up, so this does not prove that wait (19.11.2026:
+    // it passed with the wait removed, 3 of 3).
     a.announce(&recs).unwrap();
     mdns.settle(GOODBYE_WAIT)
         .expect("a round trip behind a full queue");
