@@ -51,15 +51,19 @@
 //! the last is judged as it is. A window in which the consumer stalled
 //! without a loss is judged, so the run stays short. A stall in the
 //! settling starts the guard too. A window counts its underruns and holes
-//! from before its first callback; its TX and pump restarts from that
-//! callback's end, so a restart just before the open whose holes land
-//! inside it, or whose silence does in a window with no pump restart of
-//! its own, reads `OURS`. Two edges err the other way, each by at most one
-//! restart (as `rx_pull_held`'s): in a window with a late pump restart of
-//! its own, silence sent after the open by a restart just before it is
-//! counted too; a hole read before the open and written late inside
-//! lowers the holes never written.
+//! from before its first callback; its TX restarts from that callback's
+//! end, so a restart just before the open whose holes land inside it reads
+//! `OURS`. Its pump counts open [`SILENCE_DELAY`] before its first
+//! callback: the silence is counted when the sender sends it and played
+//! that much later, so a pump restart just before the open whose silence
+//! plays inside it is counted. Two edges err the other way: the silence
+//! sent within [`SILENCE_DELAY`] before the open that played before it is
+//! counted too (at most that much silence), and a hole read before the
+//! open and written late inside lowers the holes never written (at most
+//! one restart's). The silence counted before the close that plays after
+//! it only leaves the bound room.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -87,6 +91,17 @@ pub(crate) const GUARD: Duration = Duration::from_millis(100);
 /// edges: a pump restart that sent silence, a TX restart line beside holes
 /// never written.
 pub(crate) const GAP_EDGES: u64 = 32;
+
+/// How long after the sender sends a sample the consumer plays it, at
+/// most: the receiver's latency and the FIFO's wait. Measured in
+/// `rx_pull` (dstack #436, dev1 under `chrt -f 10`, 19.11.2026): the
+/// receiver plays at 592 samples (12.3 ms) and the FIFO's mean wait is
+/// ~14.3 ms, ~27 ms in all; `to_asio_pull`'s FIFO waits less (an 8 ms
+/// target). With the counts taken at the first callback, a sender pump
+/// restart ~25 ms before the open read 626 samples off past the window's
+/// silence (9842 off, 9 late restarts, 9216 silence) and `OURS` in 2 runs
+/// of 3. A window's pump counts open this long before its first callback.
+pub(crate) const SILENCE_DELAY: Duration = Duration::from_millis(50);
 
 /// The consumer's words in a verdict: its thread and its call, one and
 /// several.
@@ -176,11 +191,12 @@ impl Sender {
         }
     }
 
-    /// The counts at a window's open.
-    fn open(&self) -> SenderAt {
+    /// The counts at a window's open, its pump's as of `pump`
+    /// ([`SILENCE_DELAY`] before).
+    fn open(&self, pump: Pump) -> SenderAt {
         SenderAt {
             opened: restarts::open(&self.tx),
-            pump: self.pump_now(),
+            pump,
         }
     }
 
@@ -314,6 +330,18 @@ pub(crate) fn late_us(due: Instant) -> u64 {
     u64::try_from(Instant::now().saturating_duration_since(due).as_micros()).unwrap_or(u64::MAX)
 }
 
+/// Drops the counts of `seen` (oldest first) older than the latest at
+/// least `delay` before `now`, so the first is that one (or the oldest,
+/// while none is that old).
+fn keep_delayed<T>(seen: &mut VecDeque<(Instant, T)>, now: Instant, delay: Duration) {
+    let Some(cutoff) = now.checked_sub(delay) else {
+        return;
+    };
+    while seen.get(1).is_some_and(|&(at, _)| at <= cutoff) {
+        seen.pop_front();
+    }
+}
+
 /// An open window: when, and the counts at its open.
 struct Open {
     start: Instant,
@@ -333,6 +361,9 @@ pub(crate) struct Witness<H> {
     holes_seen: u64,
     /// The sending device's TX side, pump and rate.
     sender: Option<Sender>,
+    /// The sender's pump counts at the recent callbacks, oldest first: the
+    /// first is the latest at least [`SILENCE_DELAY`] old (or the oldest).
+    pumps: VecDeque<(Instant, Pump)>,
     /// The consumer's least lateness since its start, µs.
     floor_us: Option<u64>,
     /// The underruns as of the last callback, and as last recorded.
@@ -365,6 +396,7 @@ impl<H: FnMut() -> u64> Witness<H> {
             holes_seen: holes(),
             holes,
             sender,
+            pumps: VecDeque::new(),
             floor_us: None,
             counted: underruns,
             seen: underruns,
@@ -373,6 +405,16 @@ impl<H: FnMut() -> u64> Witness<H> {
             window: Window::default(),
             aside: Vec::new(),
         }
+    }
+
+    /// Notes the sender's pump counts at a callback done at `now`, and
+    /// keeps the latest at least [`SILENCE_DELAY`] old as the first.
+    fn note_pump(&mut self, now: Instant) {
+        let Some(sender) = &self.sender else {
+            return;
+        };
+        self.pumps.push_back((now, sender.pump_now()));
+        keep_delayed(&mut self.pumps, now, SILENCE_DELAY);
     }
 
     /// The stall bound past the floor, µs: a period.
@@ -394,6 +436,7 @@ impl<H: FnMut() -> u64> Witness<H> {
     ) -> Option<(Window, Vec<Window>)> {
         let floor_us = self.floor_us.map_or(late_us, |f| f.min(late_us));
         self.floor_us = Some(floor_us);
+        self.note_pump(now);
         let stalled = late_us - floor_us > self.stall_us;
         // The underruns and the ring's never-written holes after this
         // callback, and before it.
@@ -423,7 +466,11 @@ impl<H: FnMut() -> u64> Witness<H> {
                 start: now,
                 underruns: prior,
                 holes: holes_prior,
-                sender: self.sender.as_ref().map(Sender::open),
+                sender: self
+                    .sender
+                    .as_ref()
+                    .zip(self.pumps.front())
+                    .map(|(s, &(_, p))| s.open(p)),
             });
         }
         let window = &mut self.window;
@@ -696,6 +743,31 @@ mod consumer_tests {
         w.holes = 512;
         w.sender = sender(1, &[Some(9_282)]);
         assert_eq!(w.who(CAUSE), Who::Both);
+    }
+
+    #[test]
+    fn a_window_s_pump_counts_open_the_silence_s_delay_before_it() {
+        // A callback every 10 ms: at 100 ms the first kept is the one at
+        // 50 ms (exactly the delay old), at 105 ms still that one (the next,
+        // at 60 ms, is 45 ms old), at 110 ms the one at 60 ms.
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        let mut seen = VecDeque::new();
+        for ms in (0..=100).step_by(10) {
+            seen.push_back((at(ms), ms));
+            keep_delayed(&mut seen, at(ms), SILENCE_DELAY);
+        }
+        assert_eq!(seen.front().map(|&(_, ms)| ms), Some(50), "{seen:?}");
+        assert_eq!(seen.len(), 6, "{seen:?}");
+        keep_delayed(&mut seen, at(105), SILENCE_DELAY);
+        assert_eq!(seen.front().map(|&(_, ms)| ms), Some(50), "{seen:?}");
+        seen.push_back((at(110), 110));
+        keep_delayed(&mut seen, at(110), SILENCE_DELAY);
+        assert_eq!(seen.front().map(|&(_, ms)| ms), Some(60), "{seen:?}");
+        // While none is that old, the oldest stays first.
+        let mut young = VecDeque::from([(at(0), 0), (at(10), 10)]);
+        keep_delayed(&mut young, at(20), SILENCE_DELAY);
+        assert_eq!(young.front().map(|&(_, ms)| ms), Some(0), "{young:?}");
     }
 
     /// A witness of a 10 ms consumer judging 95 ms windows (a window opens
