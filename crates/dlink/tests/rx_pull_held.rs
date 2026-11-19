@@ -39,9 +39,8 @@
 //! runs, read `OURS`). The judged window therefore also reads the sender's
 //! pump restarts, the silence it sent and its TX restarts with their lines
 //! (`tests/consumer/sender.rs` and `tests/tx_restart/restarts.rs`, shared
-//! with the consumer witness), and
-//! a failure prints `verdict SENDER|OURS` ([`who`]); the asserts are the
-//! same either way. A file of its own (its process sets the normal
+//! with the consumer witness), and a failure prints `verdict SENDER|OURS`
+//! ([`who`]); the asserts are the same either way. A file of its own (its process sets the normal
 //! profile), on loopback (dstack #366) and its own system clock.
 
 use std::sync::Arc;
@@ -480,7 +479,7 @@ fn run(wakes: Wakes) -> (Heard, u64, String) {
         fifo: Arc::clone(&fifo),
         stats: Arc::clone(&stats),
         media: Arc::clone(receiver.media()),
-        sender: crate::sender::Sender {
+        sender: sender::Sender {
             tx: Arc::clone(&sender.media().tx),
             pump: sender.media().engine_stats().expect("the sender's pump"),
             rate: RATE,

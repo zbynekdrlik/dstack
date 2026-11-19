@@ -50,24 +50,27 @@
 //! late sleep, or a sender pump restart that was not late, spoils `RUNNER`
 //! too (`OURS`). A window with both holes and a pump's silence bounds the
 //! holes' edges by [`GAP_EDGES`] too, under what a hole judged whole was
-//! measured to cost: such a mixed window errs to `OURS`. A judged window is
-//! set aside
-//! (kept for the message) only when it lost audio and its verdict is not
-//! `OURS`, and the next one is judged after [`GUARD`], up to [`WINDOWS`];
-//! the last is judged as it is. A window in which the consumer stalled
-//! without a loss is judged, so the run stays short. A stall in the
-//! settling starts the guard too. A window counts its underruns and holes
-//! from before its first callback; its TX restarts from that callback's
-//! end, so a restart just before the open whose holes land inside it reads
-//! `OURS`. Its pump counts open [`SILENCE_DELAY`](super::sender::SILENCE_DELAY) before its first
-//! callback: the silence is counted when the sender sends it and played
-//! that much later, so a pump restart just before the open whose silence
-//! plays inside it is counted. Three edges err the other way: the silence
-//! sent within [`SILENCE_DELAY`](super::sender::SILENCE_DELAY) before the open that played before it, and
-//! the silence sent before the close that plays after it, are counted too
-//! (each at most [`SILENCE_DELAY`](super::sender::SILENCE_DELAY) of silence), and a hole read before the
-//! open and written late inside lowers the holes never written (at most
-//! one restart's).
+//! measured to cost: such a mixed window errs to `OURS`.
+//!
+//! A judged window is set aside (kept for the message) only when it lost
+//! audio and its verdict is not `OURS`, and the next one is judged after
+//! [`GUARD`], up to [`WINDOWS`]; the last is judged as it is. A window in
+//! which the consumer stalled without a loss is judged, so the run stays
+//! short. A stall in the settling starts the guard too. A window counts
+//! its underruns and holes from before its first callback; its TX
+//! restarts from that callback's end, so a restart just before the open
+//! whose holes land inside it reads `OURS`. Its pump counts open
+//! [`SILENCE_DELAY`] before its first callback: the silence is counted
+//! when the sender sends it and played that much later, so a pump restart
+//! just before the open whose silence plays inside it is counted. Three
+//! edges err the other way: the silence sent within [`SILENCE_DELAY`]
+//! before the open that played before it, and the silence sent before the
+//! close that plays after it, are counted too (each at most
+//! [`SILENCE_DELAY`] of silence), and a hole read before the open and
+//! written late inside lowers the holes never written (at most one
+//! restart's).
+//!
+//! [`SILENCE_DELAY`]: super::sender::SILENCE_DELAY
 
 use std::time::{Duration, Instant};
 
@@ -130,8 +133,8 @@ pub(crate) struct Window {
     pub(crate) holes: u64,
     /// The sender's TX schedule restarts in the window.
     pub(crate) sender: Restarts,
-    /// The sender's pump restarts in the window, from [`SILENCE_DELAY`](super::sender::SILENCE_DELAY)
-    /// before its first callback (dstack #436).
+    /// The sender's pump restarts in the window, from `SILENCE_DELAY`
+    /// (`super::sender`) before its first callback (dstack #436).
     pub(crate) pump: Pump,
 }
 
