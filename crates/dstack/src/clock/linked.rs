@@ -299,7 +299,7 @@ pub struct Linked {
 }
 
 /// The selector's report on a follower not in use ([`Linked::report`]).
-#[derive(Debug, Default)]
+#[derive(Default)]
 struct Report {
     minute: Minute,
     waiting: Option<Waiting>,

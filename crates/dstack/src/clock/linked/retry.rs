@@ -68,15 +68,6 @@ impl Starter {
     }
 }
 
-impl std::fmt::Debug for Starter {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Starter")
-            .field("iface", &self.iface)
-            .field("seed_ppb", &self.seed_ppb)
-            .finish_non_exhaustive()
-    }
-}
-
 /// One start of dsync's follower on the interface `iface`, seeded with
 /// `seed_ppb` ([`super::seed_of`]) when given.
 pub fn attempt(iface: &str, seed_ppb: Option<i32>) -> Attempt {
@@ -131,7 +122,6 @@ const S: i64 = 1_000_000_000;
 
 /// A follower that did not start yet, for a cause that can pass: the
 /// selector's to try again ([`super::Linked::tick`]).
-#[derive(Debug)]
 pub(super) struct Retry {
     pub(super) starter: Starter,
     /// The first failure's monotonic time, ns.
