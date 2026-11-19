@@ -56,6 +56,7 @@ def main():
     every_s = float(sys.argv[3]) if len(sys.argv) > 3 else MISSED_EVERY_S
     base = f"/sys/class/net/{iface}/statistics/"
     bytes_path, packets_path = base + "rx_bytes", base + "rx_packets"
+    tx_path = base + "tx_bytes"
 
     steps = []  # (perf time, missed before, missed after)
     stop = threading.Event()
@@ -74,7 +75,7 @@ def main():
     if every_s > 0:
         watcher.start()
 
-    samples = []  # (perf time, rx_bytes, rx_packets), one a millisecond
+    samples = []  # (perf time, rx_bytes, rx_packets, tx_bytes), one a millisecond
     start = time.perf_counter()
     due = start
     end = start + run_s
@@ -84,17 +85,17 @@ def main():
             break
         if now < due:
             continue
-        samples.append((now, read_int(bytes_path), read_int(packets_path)))
+        samples.append((now, read_int(bytes_path), read_int(packets_path), read_int(tx_path)))
         due += 0.001
     stop.set()
     if every_s > 0:
         watcher.join()
     last = missed_now(iface)
 
-    rates = []  # (time, Mb/s, packets) per sample interval
-    for (t0, b0, p0), (t1, b1, p1) in zip(samples, samples[1:]):
+    rates = []  # (time, RX Mb/s, RX packets, TX Mb/s) per sample interval
+    for (t0, b0, p0, x0), (t1, b1, p1, x1) in zip(samples, samples[1:]):
         dt = t1 - t0
-        rates.append((t1, (b1 - b0) * 8 / dt / 1e6, p1 - p0))
+        rates.append((t1, (b1 - b0) * 8 / dt / 1e6, p1 - p0, (x1 - x0) * 8 / dt / 1e6))
 
     wall0 = time.time() - (time.perf_counter() - start)
 
@@ -107,9 +108,13 @@ def main():
         f"(read every {every_s:g} s, 0 = start and end only), {len(steps)} steps seen"
     )
     busiest = sorted(rates, key=lambda r: r[1], reverse=True)[:10]
-    print("# busiest milliseconds (local time, Mb/s, packets):")
-    for t, mbps, pkts in busiest:
-        print(f"{stamp(t)} {mbps:8.0f} {pkts:5d}")
+    print("# busiest RX milliseconds (local time, RX Mb/s, RX packets, TX Mb/s):")
+    for t, mbps, pkts, tx in busiest:
+        print(f"{stamp(t)} {mbps:8.0f} {pkts:5d} {tx:8.0f}")
+    both = sorted(rates, key=lambda r: r[1] + r[3], reverse=True)[:10]
+    print("# busiest RX+TX milliseconds (the USB bus carries both):")
+    for t, mbps, pkts, tx in both:
+        print(f"{stamp(t)} {mbps:8.0f} {pkts:5d} {tx:8.0f}")
     for t, before, after in steps:
         # The step happened somewhere in the read interval before t: show that
         # interval's busiest milliseconds, in time order.
@@ -121,7 +126,7 @@ def main():
             f"peak {peak:.0f} Mb/s in the {every_s:g} s before the read; its busiest ms:"
         )
         for r in top:
-            print(f"  {stamp(r[0])} {r[1]:8.0f} Mb/s {r[2]:5d} pkts")
+            print(f"  {stamp(r[0])} RX {r[1]:8.0f} Mb/s {r[2]:5d} pkts, TX {r[3]:8.0f} Mb/s")
 
 if __name__ == "__main__":
     main()
