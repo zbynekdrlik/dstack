@@ -255,19 +255,14 @@ fn a_withdrawal_of_more_records_than_the_queue_holds_is_confirmed() {
     let after = unregistered(&mdns.settle(GOODBYE_WAIT).unwrap());
     assert_eq!(after - before, 250);
     // A round trip and the last holder's shutdown, each right after a
-    // burst that keeps the queue full, still go through.
-    let handle = mdns.daemon().clone();
-    let burst = || {
-        for _ in 0..3 {
-            for rec in &recs {
-                let _queued = handle.unregister(&format!("{}.{}", rec.instance, rec.service));
-            }
-        }
-    };
-    burst();
+    // registration burst (which mdns-sd runs slower than it is sent, so its
+    // queue is full at the burst's end), still go through.
+    a.announce(&recs).unwrap();
     mdns.settle(GOODBYE_WAIT)
         .expect("a round trip behind a full queue");
-    burst();
+    a.announce(&[]).unwrap();
+    a.announce(&recs).unwrap();
+    let handle = mdns.daemon().clone();
     drop(mdns);
     assert!(handle.get_metrics().is_err(), "the daemon still runs");
 }
