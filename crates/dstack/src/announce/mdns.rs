@@ -40,15 +40,17 @@
 //!   once. Windows delivers the group to a joined address-bound socket
 //!   (mbc, 19.11.2026: 185 datagrams in 20 s); Linux delivers it none
 //!   (only unicast to the address), so there it hears no group query
-//!   ([`bound_note`]). On Windows a bound socket whose address was removed
-//!   and added again stays deaf, though mdns-sd's IP check joined it
-//!   again (mbc, 19.11.2026: 0 datagrams for 2.5 min), so a bound daemon
-//!   has a watch of its own (`dstack-mdns-bound`, the #282 watch every
-//!   2 s, [`Mdns::reopens`]): once the address is back it asks the daemon
-//!   to open its socket again (`mdns_sd::ServiceDaemon::reopen`: a new
-//!   bind, the group joined, every record announced once; records and
-//!   taps kept) and logs [`BOUND_REOPENED`]. The wildcard daemon needs
-//!   none (its socket outlives the address).
+//!   ([`bound_note`]). On Windows a bound daemon whose address was removed
+//!   and added again heard nothing more (mbc, 19.11.2026: `mdns.per_s`
+//!   0.0 for 2.5 min, the same socket), whether its socket went deaf or
+//!   the IP check's join on it failed and left the interface out (both at
+//!   debug, not read). So a bound daemon has a watch of its own
+//!   (`dstack-mdns-bound`, the #282 watch every 2 s, [`Mdns::reopens`]):
+//!   once the address is back it asks the daemon to open its socket again
+//!   (`mdns_sd::ServiceDaemon::reopen`: a new bind, the group joined on
+//!   every enabled interface, every record announced once; records and
+//!   taps kept) and logs [`BOUND_REOPENED`] with the interfaces joined and
+//!   the records announced. The wildcard daemon has no such watch.
 //!
 //! The subscriptions' direct queries (`subscribe::instance`) read their
 //! legacy unicast answers on a port of their own, never on 5353. A
@@ -68,7 +70,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use mdns_sd::{DaemonStatus, IfKind, Metrics, ServiceDaemon};
+use mdns_sd::{DaemonStatus, IfKind, Metrics, Reopened, ServiceDaemon};
 use tracing::{debug, info, warn};
 
 use super::{AGAIN_TRIES, Announcer, retried};
@@ -138,32 +140,37 @@ pub const BOUND_REOPENED: &str =
     "mdns: the bound daemon's socket opened again after its address came back";
 
 /// How long a bound daemon's watch waits for the daemon's answer to a
-/// reopen (a bind, the group's join and one announcement a record).
+/// reopen (a bind, the group's join and one announcement a record). A
+/// reopen answered later still happened; the watch counts it failed and
+/// the next look reopens once more (one more announcement, harmless).
 pub const REOPEN_WAIT: Duration = Duration::from_secs(1);
 
 /// One look of a bound daemon's watch on `ip` at `now` (dstack #444, the
 /// #282 watch): the list read with `read` at the watch's period and, when
 /// the address is there again after a look found it gone (or on another
 /// interface index), `reopen` run. True when it reopened (INFO
-/// [`BOUND_REOPENED`]); a failed reopen is warned about and asked again at
-/// the next look.
+/// [`BOUND_REOPENED`], with the interfaces the new socket joined and the
+/// records announced: 0 interfaces is a reopen that heard nothing yet);
+/// a failed reopen is warned about and asked again at the next look.
 fn keep_bound(
     m: &mut Membership,
     now: Instant,
     read: impl FnOnce() -> io::Result<Vec<Link>>,
     ip: Ipv4Addr,
-    reopen: impl FnOnce() -> Result<(), String>,
+    reopen: impl FnOnce() -> Result<Reopened, String>,
 ) -> bool {
     let Some(r) = m.poll(now, read) else {
         return false;
     };
     match reopen() {
-        Ok(()) => {
+        Ok(done) => {
             info!(
                 %ip,
                 interface = %r.interface,
                 old_index = r.old_index,
                 new_index = r.new_index,
+                joined_interfaces = done.interfaces,
+                announced_records = done.services,
                 "{BOUND_REOPENED}"
             );
             true
@@ -184,7 +191,7 @@ fn keep_bound(
 
 /// Asks `daemon` to open its bound socket again and waits for its answer
 /// (a full queue waited out), at most [`REOPEN_WAIT`].
-fn reopen(daemon: &ServiceDaemon) -> Result<(), String> {
+fn reopen(daemon: &ServiceDaemon) -> Result<Reopened, String> {
     let (asked, _waits) = retried(AGAIN_TRIES, || daemon.reopen());
     asked
         .map_err(|e| format!("the mDNS daemon was not asked: {e}"))?

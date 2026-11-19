@@ -406,20 +406,22 @@ impl ServiceDaemon {
     /// and port (the old one kept when that fails), the group joined again
     /// on every enabled interface, and every registered service announced
     /// once on each. Its registrations and its tap stay as they are. On
-    /// Windows a socket bound to an address that was removed and added
-    /// again hears no group datagram, though the IP check joined it again
-    /// (mbc, 19.11.2026); the caller asks this when the address came back.
+    /// Windows a daemon bound to an address that was removed and added
+    /// again heard nothing more (mbc, 19.11.2026), whether its socket went
+    /// deaf or the IP check's join on it failed (logged at debug only, not
+    /// read); the caller asks this when the address came back.
     ///
     /// The answer comes on the returned channel once the daemon's thread
-    /// ran it: `Err` with the reason when the bind or the poller refused
-    /// the new socket, or the daemon is not bound to an address.
+    /// ran it: the interfaces joined and the services announced
+    /// ([`Reopened`]), or `Err` with the reason when the bind or the poller
+    /// refused the new socket, or the daemon is not bound to an address.
     ///
     /// # Errors
     ///
     /// Returns [`Error::Again`] if the daemon's command queue is full.
     ///
     /// Returns [`Error::DaemonShutdown`] if the daemon thread has already exited.
-    pub fn reopen(&self) -> Result<Receiver<std::result::Result<(), String>>> {
+    pub fn reopen(&self) -> Result<Receiver<std::result::Result<Reopened, String>>> {
         let (resp_s, resp_r) = bounded(1);
         self.send_cmd(Command::Reopen(resp_s))?;
         Ok(resp_r)
@@ -1460,6 +1462,15 @@ fn new_multicast_socket(addr: SocketAddr) -> Result<MyUdpSocket> {
     MyUdpSocket::new(sock).map_err(|e| e_fmt!("create MyUdpSocket for {}: {}", addr, e))
 }
 
+/// dstack #444: what a reopen ([`ServiceDaemon::reopen`]) did: the
+/// interfaces the new socket joined the group on, and the registered
+/// services announced on each of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Reopened {
+    pub interfaces: usize,
+    pub services: usize,
+}
+
 /// dstack #442: on Linux a tapped daemon's IPv4 socket takes only the
 /// groups it joined itself (`IP_MULTICAST_ALL` off); elsewhere a socket
 /// takes its own memberships already.
@@ -1615,13 +1626,18 @@ impl Zeroconf {
     /// on it by upstream's own path (`my_intfs` forgotten, the IP check
     /// adding every selected address again through `add_intf_addr`), and
     /// every registered service is announced once on each interface.
-    fn reopen_bound(&mut self) -> Result<()> {
+    fn reopen_bound(&mut self) -> Result<Reopened> {
         let Some(addr) = self.bound_addr else {
             return Err(e_fmt!("the IPv4 socket is not bound to an address"));
         };
         let mut sock = new_multicast_socket(addr)?;
         if self.tap.is_some() {
             own_groups_only(&sock);
+        }
+        if !self.multicast_loop_v4 {
+            if let Err(e) = sock.pktinfo.set_multicast_loop_v4(false) {
+                debug!("reopen: multicast loop v4 off failed: {e}");
+            }
         }
         if let Some(old) = self.ipv4_sock.as_mut() {
             if let Err(e) = self.poller.registry().deregister(&mut old.mio) {
@@ -1669,7 +1685,10 @@ impl Zeroconf {
             names.len(),
             intfs.len()
         );
-        Ok(())
+        Ok(Reopened {
+            interfaces: intfs.len(),
+            services: names.len(),
+        })
     }
 
     /// Send a Command into the daemon channel and poke the signal socket to wake the poll loop.
@@ -5080,7 +5099,7 @@ enum Command {
 
     /// dstack #444: open the IPv4 socket bound to an address again
     /// (`ServiceDaemon::reopen`), answered on the channel.
-    Reopen(Sender<std::result::Result<(), String>>),
+    Reopen(Sender<std::result::Result<Reopened, String>>),
 
     Exit(Sender<DaemonStatus>),
 }

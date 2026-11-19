@@ -684,11 +684,14 @@ fn a_bound_daemon_s_watch_opens_its_socket_again_once_its_address_came_back() {
     };
     let gone = || -> std::io::Result<Vec<Link>> { Ok(Vec::new()) };
     let (opened, refused) = (Cell::new(0), Cell::new(0));
-    let ok = || -> Result<(), String> {
+    let ok = || -> Result<Reopened, String> {
         opened.set(opened.get() + 1);
-        Ok(())
+        Ok(Reopened {
+            interfaces: 1,
+            services: 4,
+        })
     };
-    let fails = || -> Result<(), String> {
+    let fails = || -> Result<Reopened, String> {
         refused.set(refused.get() + 1);
         Err("bind refused".to_string())
     };
@@ -716,6 +719,8 @@ fn a_bound_daemon_s_watch_opens_its_socket_again_once_its_address_came_back() {
     assert_eq!(lines.matches(BOUND_REOPENED).count(), 3, "{lines}");
     assert!(lines.contains("interface=lo"), "{lines}");
     assert!(lines.contains("new_index=5"), "{lines}");
+    assert!(lines.contains("joined_interfaces=1"), "{lines}");
+    assert!(lines.contains("announced_records=4"), "{lines}");
     assert_eq!(
         warns
             .matches("the bound daemon's socket not opened again")
@@ -781,6 +786,61 @@ fn asked(
     (answer.unwrap(), group_heard)
 }
 
+/// The test's own socket on `0.0.0.0:5353` joined to the group on `ip`
+/// (beside the daemon's bound socket, `SO_REUSEADDR`/`SO_REUSEPORT`): it
+/// reads what the daemon multicasts. A unicast to `<ip>:5353` still goes
+/// to the daemon's socket, the more specific bind.
+fn group_listener(ip: Ipv4Addr) -> UdpSocket {
+    let sock = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::DGRAM, None).unwrap();
+    sock.set_reuse_address(true).unwrap();
+    #[cfg(unix)]
+    sock.set_reuse_port(true).unwrap();
+    sock.bind(&SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 5353).into())
+        .unwrap();
+    sock.join_multicast_v4(&Ipv4Addr::new(224, 0, 0, 251), &ip)
+        .unwrap();
+    let sock: UdpSocket = sock.into();
+    sock.set_read_timeout(Some(Duration::from_millis(10)))
+        .unwrap();
+    sock
+}
+
+/// How many announcements of `full` (a response from `from` with `full`'s
+/// SRV) `l` reads within `wait`.
+fn announcements(l: &UdpSocket, full: &str, from: SocketAddr, wait: Duration) -> usize {
+    use crate::subscribe::instance;
+    let deadline = Instant::now() + wait;
+    let mut n = 0;
+    let mut buf = [0u8; 9000];
+    while !deadline.saturating_duration_since(Instant::now()).is_zero() {
+        if let Ok((len, src)) = l.recv_from(&mut buf)
+            && src == from
+            && !is_query(&buf[..len])
+            && instance::read(&buf[..len], full).is_some_and(|f| f.srv.is_some())
+        {
+            n += 1;
+        }
+    }
+    n
+}
+
+/// Waits (at most 8 s) for an announcement of `full` on `l`, then until
+/// none has come for 1.2 s, past the record's multicast rate limit of a
+/// second (`MULTICAST_RATE_LIMIT_MILLIS`): every announcement of the
+/// registration is then out, and the next is not held back.
+fn quiet_after_announcements(l: &UdpSocket, full: &str, from: SocketAddr) {
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while announcements(l, full, from, Duration::from_millis(100)) == 0 {
+        assert!(
+            Instant::now() < deadline,
+            "the registration never announced"
+        );
+    }
+    while announcements(l, full, from, Duration::from_millis(1200)) > 0 {
+        assert!(Instant::now() < deadline, "the announcements never ended");
+    }
+}
+
 /// dstack #444's reopen line through the real daemon on loopback: the
 /// bound daemon's address removed and added again (a fake list, read every
 /// 5 ms) opens its socket again once: a new socket on `127.0.0.1:5353`
@@ -809,7 +869,6 @@ fn a_bound_daemon_opens_its_socket_again_after_its_address_came_back_with_its_re
     };
     let mut a = Announcer::new(mdns.daemon().clone());
     a.announce(std::slice::from_ref(&record)).unwrap();
-    let announced = Instant::now();
     let full = format!("{}.{}", record.instance, CHAN_SERVICE);
     let client = UdpSocket::bind((ip, 0)).unwrap();
     socket2::SockRef::from(&client)
@@ -819,12 +878,14 @@ fn a_bound_daemon_opens_its_socket_again_after_its_address_came_back_with_its_re
         .set_read_timeout(Some(Duration::from_millis(20)))
         .unwrap();
     let to = SocketAddrV4::new(ip, 5353);
+    let wire = group_listener(ip);
     let (from, _) = asked(&client, &heard, &full, to, (0x4451, 0x4452));
     assert_eq!(from, SocketAddr::V4(to), "answered before the change");
-    // The registration's own second announcement (due 1.1-1.15 s after it,
-    // `ANNOUNCE_SECOND_DELAY_MILLIS` + jitter) is past before the address
-    // goes, so the count below is the reopen's alone.
-    std::thread::sleep(Duration::from_millis(1300).saturating_sub(announced.elapsed()));
+    // The registration's announcements are on the wire and past the
+    // record's rate limit (a record is multicast at most once a second,
+    // RFC 6762 §6) before the address goes: the reopen's is then sent,
+    // and the counts below are the reopen's alone.
+    quiet_after_announcements(&wire, &full, SocketAddr::V4(to));
     let resent = resends(&mdns);
     #[cfg(target_os = "linux")]
     let bound_inodes = || -> Vec<String> {
@@ -846,6 +907,12 @@ fn a_bound_daemon_opens_its_socket_again_after_its_address_came_back_with_its_re
     until("the bound socket opened again", || mdns.reopens() == 1);
     fake.read_more(2);
     assert_eq!(mdns.reopens(), 1, "once a return");
+    // The reopen announced before it answered: its datagram is queued.
+    assert_eq!(
+        announcements(&wire, &full, SocketAddr::V4(to), Duration::from_millis(300)),
+        1,
+        "the record announced once on the wire after the reopen"
+    );
     #[cfg(target_os = "linux")]
     {
         let after = bound_inodes();
@@ -865,7 +932,7 @@ fn a_bound_daemon_opens_its_socket_again_after_its_address_came_back_with_its_re
     assert_eq!(
         resends(&mdns) - resent,
         1,
-        "its one record announced once after the reopen"
+        "its one record asked to announce once by the reopen"
     );
     mdns.withdraw(&mut a, GOODBYE_WAIT).unwrap();
     drop(heard);

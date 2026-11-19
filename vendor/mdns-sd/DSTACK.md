@@ -79,20 +79,34 @@ LICENSE-APACHE and LICENSE-MIT), copied unchanged except:
   `new_tapped` bind `0.0.0.0` as before.
 
 - `src/service_daemon.rs` `ServiceDaemon::reopen`, `Command::Reopen`,
-  `Zeroconf::reopen_bound` (+ `bound_addr`, `own_groups_only` taken out of
-  `set_tap`): a daemon bound to an address opens its IPv4 socket again on
-  request. On Windows a socket bound to an address that was removed and
-  added again heard no group datagram for 2.5 min, though the IP check
-  had joined the group again on it (mbc, dstack #444 step 4a,
-  19.11.2026). The daemon's thread binds a new socket to the same address
-  and port (a failure keeps the old one and is the answer), turns
-  `IP_MULTICAST_ALL` off for a tap as `set_tap` does, swaps it in the
-  poller (the old one closed), joins the group by upstream's own path
-  (`my_intfs` forgotten, then `check_ip_changes`), and announces every
-  registered service once on each interface (`exec_command_register_resend`).
-  Registrations, the cache and the tap stay. dstack asks it from its own
-  watch of the address (`crates/dstack/src/announce/mdns.rs`,
+  `Zeroconf::reopen_bound`, `Reopened` (exported; + `bound_addr`,
+  `own_groups_only` taken out of `set_tap`): a daemon bound to an address
+  opens its IPv4 socket again on request. On Windows a daemon bound to an
+  address that was removed and added again handed its tap nothing for
+  2.5 min with the same socket (mbc, dstack #444 step 4a, 19.11.2026).
+  Which of two it was is not read: the socket went deaf, or the IP check's
+  join on it failed (a debug line) and left the interface out of
+  `my_intfs`, so `handle_read` dropped every datagram before the tap.
+  The reopen covers both. The daemon's thread binds a new socket to the
+  same address and port (a failure keeps the old one and is the answer),
+  turns `IP_MULTICAST_ALL` off for a tap as `set_tap` does (and the
+  multicast loop off when it was set so), swaps it in the poller (the old
+  one closed), joins the group by upstream's own path (`my_intfs`
+  forgotten, then `check_ip_changes`), and announces every registered
+  service once on each interface (`exec_command_register_resend`, keyed by
+  `my_services`' lower-case names). The answer counts the interfaces
+  joined and the services announced (dstack's INFO line carries them).
+  Registrations and the tap stay; so does the cache, also records cached
+  under an interface index that is gone (an answer-only daemon reads no
+  cache). dstack asks it from its own watch of the address
+  (`crates/dstack/src/announce/mdns.rs`,
   `a_bound_daemon_opens_its_socket_again_after_its_address_came_back_with_its_records_and_taps`).
+  Known upstream bug left as it is: a registration's second announcement
+  (`Command::RegisterResend` from `send_unsolicited_response` and the
+  probing handler) carries the original-case full name, while
+  `my_services` is keyed in lower case, so a record whose name has an
+  upper-case letter (every Dante `TX 1@...`) is announced once, not twice
+  (RFC 6762 §8.3), and `register-resend` does not count it.
 
 - `src/service_daemon.rs` `handle_read`, `handle_query`, `send_response`
   (and the one unit test calling `handle_query`): a query sent to the
