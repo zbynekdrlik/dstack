@@ -679,6 +679,44 @@ async fn the_driver_s_tick_warns_once_for_a_second_the_pump_restarted() {
     assert!(lines[0].contains("cause=late"), "{log}");
 }
 
+/// dstack #440: the driver's tick runs the stall watch with the clock's
+/// readiness: a running pump whose blocks stay still warns once on a ready
+/// clock, never on a clock that is not ready.
+#[tokio::test]
+async fn the_driver_s_tick_warns_once_for_a_pump_whose_blocks_stop_on_a_ready_clock() {
+    use crate::stream::watch::stall::STALL_WARNING;
+    use crate::stream::{PumpStats, Timing};
+    use crate::test_log::{capture_warnings, undecided};
+    undecided();
+    let timing = Timing {
+        block: 32,
+        playout: 96,
+        margin: 96,
+    };
+    for (ptp, warns) in [
+        (Arc::new(ManualClock::new(T)) as Arc<dyn PtpClock>, 1),
+        (Arc::new(Unready) as Arc<dyn PtpClock>, 0),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let device = device_at(dir.path());
+        let media = media_with_engine(&device, ptp, &[0]);
+        let stats = Arc::new(PumpStats::new(timing, 96_000));
+        stats.mark_running();
+        media.attach_engine(Arc::clone(&stats));
+        let records = Records::default();
+        let (mut driver, _answers, _changes) = driver_of(&media);
+        driver.tick(&records);
+        // Past three blocks (1 ms) of the tick's own clock: three ticks.
+        let mut lines = 0;
+        for _ in 0..3 {
+            std::thread::sleep(Duration::from_millis(5));
+            let log = capture_warnings(|| driver.tick(&records));
+            lines += log.lines().filter(|l| l.contains(STALL_WARNING)).count();
+        }
+        assert_eq!(lines, warns, "ready: {warns}");
+    }
+}
+
 /// dstack #363: the tick's TX pull watch warns once for a second the
 /// app's TX processor panicked on the TX thread, naming the panic.
 #[tokio::test]

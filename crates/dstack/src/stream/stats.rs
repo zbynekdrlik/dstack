@@ -383,6 +383,13 @@ impl PumpStats {
         }
     }
 
+    /// Marks the pump running, as [`super::spawn`] does (a watch test's
+    /// pump without a thread).
+    #[cfg(test)]
+    pub(crate) fn mark_running(&self) {
+        self.running.store(true, Ordering::Release);
+    }
+
     /// The numbers the device's control socket shows.
     pub fn view(&self) -> PumpView {
         // `missed` first, with Acquire: every cause counted before those
