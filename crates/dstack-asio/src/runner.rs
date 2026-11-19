@@ -14,7 +14,9 @@
 //!   closes the run and waits the backoff (a run of 60 s resets it); a
 //!   parked driver is never opened again.
 //! - **No clock:** a driver that does not tick waits calmly from 2 s after
-//!   the open and is opened again every 60 s (no backoff, no reset).
+//!   the open and is opened again 4, 8, 16 and 32 s after each open, then
+//!   every 60 s (no backoff, no reset; each wait starts at 4 s again,
+//!   dstack #447).
 //! - **Off rate** (songplayer #229): two 10 s windows in a row more than 1 %
 //!   off the reported rate stop the run (one WARN per episode) and open the
 //!   driver again at once to PROVE its rate silently: the app's `Process`
@@ -41,7 +43,8 @@ use crate::device::{Channels, Device, Opened};
 use crate::engine::Engine;
 use crate::state::{
     ClockStep, NO_CLOCK_REOPEN_NS, OFF_RATE_STRIKES_PLAYING, POLL_NS, RateStep, RateWatch, Reason,
-    StallWatch, backoff_ns, clock_step, close_reason, failures_after_close, rate_settled,
+    StallWatch, backoff_ns, clock_step, close_reason, failures_after_close, no_clock_reopen_ns,
+    rate_settled,
 };
 
 /// What the app builds for each open: its `Process` for a driver opened as
@@ -112,7 +115,8 @@ struct Run {
 /// A close that is no fault: no backoff, no reset.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Calm {
-    /// No clock 60 s after the open: open again at once, still waiting.
+    /// No clock the re-open interval after the open: open again at once,
+    /// still waiting.
     NoClock,
     /// The card is off its rate: open again at once, silently proving.
     OffRate,
@@ -148,6 +152,9 @@ pub struct Runner<D: Device> {
     state: State,
     failures: u32,
     waiting_for_clock: bool,
+    /// The re-opens of the current wait for a clock (dstack #447: the next
+    /// one's interval, [`no_clock_reopen_ns`]).
+    clock_reopens: u32,
     /// The rate and buffer the card was found off its rate at.
     off_rate: Option<(u32, u32)>,
 }
@@ -174,6 +181,7 @@ impl<D: Device> Runner<D> {
             state: State::Closed { retry_at: i64::MIN },
             failures: 0,
             waiting_for_clock: false,
+            clock_reopens: 0,
             off_rate: None,
         }
     }
@@ -212,13 +220,20 @@ impl<D: Device> Runner<D> {
         let since_open = now - run.opened_at;
         let (rate, buffer) = (run.opened.rate, run.opened.buffer_frames);
         let proving = run.proving;
-        let clock = clock_step(ticks, primed, self.waiting_for_clock, since_open);
+        let reopen = no_clock_reopen_ns(self.clock_reopens);
+        let clock = clock_step(ticks, primed, self.waiting_for_clock, since_open, reopen);
         let mut calm = None;
         match clock {
             ClockStep::Ticking | ClockStep::Quiet => {}
             ClockStep::ClockArrived => {
                 self.waiting_for_clock = false;
-                info!(driver = %self.driver, proving, "asio: the driver gives a clock now");
+                self.clock_reopens = 0;
+                info!(
+                    driver = %self.driver,
+                    proving,
+                    since_open_s = since_open as f64 / 1e9,
+                    "asio: the driver gives a clock now"
+                );
                 update(&self.status, |s| {
                     if !proving {
                         s.state = RunState::Running;
@@ -228,11 +243,11 @@ impl<D: Device> Runner<D> {
             }
             ClockStep::StartsWaiting => {
                 // A proving card that stops ticking reads NoClock: both are
-                // calm waits, and the 60 s reopen proves it again.
+                // calm waits, and the re-open proves it again.
                 self.waiting_for_clock = true;
                 warn!(
                     driver = %self.driver,
-                    "asio: no callback since the driver opened - waiting for its clock (the driver stays open, opened again every 60 s)"
+                    "asio: no callback since the driver opened - waiting for its clock (the driver stays open, opened again 4, 8, 16, 32 s after each open, then every 60 s)"
                 );
                 update(&self.status, |s| {
                     s.state = RunState::Waiting;
@@ -392,6 +407,11 @@ impl<D: Device> Runner<D> {
     /// reset): a driver without a usable clock, or one just proven.
     fn calm_close(&mut self, now: i64, calm: Calm) {
         self.waiting_for_clock = calm == Calm::NoClock;
+        self.clock_reopens = if self.waiting_for_clock {
+            self.clock_reopens.saturating_add(1)
+        } else {
+            0
+        };
         let reason = match calm {
             Calm::NoClock => Some(Reason::NoClock),
             Calm::OffRate => Some(Reason::ClockOffRate),
@@ -404,7 +424,12 @@ impl<D: Device> Runner<D> {
                 s.reason = Some(reason);
             });
         }
-        debug!(driver = %self.driver, ?calm, "asio: closing the driver to open it again");
+        debug!(
+            driver = %self.driver,
+            ?calm,
+            reopens = self.clock_reopens,
+            "asio: closing the driver to open it again"
+        );
         self.device.close();
         self.state = State::Closed { retry_at: now };
     }
@@ -421,6 +446,7 @@ impl<D: Device> Runner<D> {
 
     fn wait(&mut self, now: i64, reason: Reason, what: &str) {
         self.waiting_for_clock = false;
+        self.clock_reopens = 0;
         // A parked driver never opens again in this process: no retry.
         let wait = (reason != Reason::Parked).then(|| backoff_ns(self.failures));
         let retry_in_s = wait.map(|w| w as f64 / 1e9);
