@@ -51,7 +51,8 @@ pub const NO_CLOCK_REOPEN_S: [i64; 5] = [4, 8, 16, 32, 60];
 /// The longest wait for a clock before a re-open, and a proving run's
 /// (60 s), ns.
 pub const NO_CLOCK_REOPEN_NS: i64 = 60_000_000_000;
-const _: () = assert!(NO_CLOCK_REOPEN_S[4] * 1_000_000_000 == NO_CLOCK_REOPEN_NS);
+const _: () =
+    assert!(NO_CLOCK_REOPEN_S[NO_CLOCK_REOPEN_S.len() - 1] * 1_000_000_000 == NO_CLOCK_REOPEN_NS);
 const _: () = assert!(NO_CLOCK_REOPEN_S[0] * 1_000_000_000 > NO_CLOCK_NS);
 /// A host's worker steps at least this often (the driver's messages,
 /// 10 ms), ns.
