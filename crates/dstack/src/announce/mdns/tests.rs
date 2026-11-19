@@ -184,6 +184,9 @@ fn the_daemon_s_socket_feeds_the_meter_and_the_listeners_and_ends_with_its_last_
     assert!(handle.get_metrics().is_err(), "the daemon still runs");
     let next = Mdns::shared(ip).unwrap();
     next.settle(GOODBYE_WAIT).expect("a new daemon runs");
+    // The ended one's entry is gone: the new one is found, not a third.
+    let found = Mdns::shared(ip).unwrap();
+    assert!(Arc::ptr_eq(&next, &found), "the running daemon is shared");
 }
 
 /// The daemon's count of withdrawn records so far.
