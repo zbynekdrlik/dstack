@@ -11,32 +11,50 @@ fn bins(set: &[(usize, u64)]) -> UnderrunCounts {
     c
 }
 
-/// At dsg's 1.333 ms from-ASIO target a callback 1.0 ms late or more is
-/// the driver's (3/4 of the target: 999.75 us), one 0.75-1.0 ms late the
-/// bridge's; the highest risen bin decides, and any gap over two periods is
-/// the driver's whatever the bins.
+/// Counts with `bins` risen at dsg's driver shape (128 @ 96 kHz, a
+/// 1.333 ms period: the side's floor is half of it, 666.5 us).
+fn dsg(set: &[(usize, u64)]) -> UnderrunCounts {
+    UnderrunCounts {
+        period_us: 1333,
+        ..bins(set)
+    }
+}
+
+/// At dsg's 1.333 ms from-ASIO target (a 1.333 ms period) a callback
+/// that alone reaches the target is the driver's; one the side's floor
+/// (half the period) plus it reaches the target is the target's: from
+/// 666.5 us late, so 0.75-1.0 and 1.0-1.25 ms; under that the bridge's.
+/// The highest risen bin decides, and any gap over two periods is the
+/// driver's whatever the bins.
 #[test]
-fn a_from_asio_underrun_is_the_drivers_from_three_quarters_of_its_target() {
-    assert_eq!(from_asio_cause(&bins(&[]), 1333), Cause::Bridge);
-    assert_eq!(from_asio_cause(&bins(&[(2, 5)]), 1333), Cause::Bridge);
-    assert_eq!(from_asio_cause(&bins(&[(3, 1)]), 1333), Cause::Driver);
+fn a_from_asio_underrun_is_judged_against_the_target_less_the_floor() {
+    assert_eq!(from_asio_cause(&dsg(&[]), 1333), Cause::Bridge);
+    assert_eq!(from_asio_cause(&dsg(&[(1, 5)]), 1333), Cause::Bridge);
+    assert_eq!(from_asio_cause(&dsg(&[(2, 5)]), 1333), Cause::Target);
+    assert_eq!(from_asio_cause(&dsg(&[(3, 1)]), 1333), Cause::Target);
     assert_eq!(
-        from_asio_cause(&bins(&[(0, 9), (3, 1)]), 1333),
-        Cause::Driver
+        from_asio_cause(&dsg(&[(0, 9), (3, 1)]), 1333),
+        Cause::Target
     );
-    assert_eq!(from_asio_cause(&bins(&[(7, 1)]), 1333), Cause::Driver);
-    // The edge itself: 3/4 of 1000 us is the 750 us bin's lower edge.
-    assert_eq!(from_asio_cause(&bins(&[(2, 1)]), 1000), Cause::Driver);
-    assert_eq!(from_asio_cause(&bins(&[(1, 1)]), 1000), Cause::Bridge);
-    assert_eq!(from_asio_cause(&bins(&[(2, 1)]), 1001), Cause::Bridge);
-    // A 4 ms target (the default 256 at 96 kHz, a 2.667 ms period): even
-    // the top bin (2.0 ms up to 2.667 ms late) is not.
+    assert_eq!(from_asio_cause(&dsg(&[(7, 1)]), 1333), Cause::Driver);
+    // The floor's edge: 500 us late + 666.5 us reaches 1166 us, not 1167.
+    assert_eq!(from_asio_cause(&dsg(&[(1, 1)]), 1166), Cause::Target);
+    assert_eq!(from_asio_cause(&dsg(&[(1, 1)]), 1167), Cause::Bridge);
+    // The driver's edge: 1000 us late alone reaches 1000 us, not 1001.
+    assert_eq!(from_asio_cause(&dsg(&[(3, 1)]), 1000), Cause::Driver);
+    assert_eq!(from_asio_cause(&dsg(&[(3, 1)]), 1001), Cause::Target);
+    // No driver shape known (no open): no floor, the lateness alone.
+    assert_eq!(from_asio_cause(&bins(&[(3, 1)]), 1000), Cause::Driver);
+    assert_eq!(from_asio_cause(&bins(&[(3, 1)]), 1001), Cause::Bridge);
+    // A 4 ms target (the default 256 at 96 kHz, a 2.667 ms period): the
+    // top bin by the period, 2667 us + 1333.5 us of floor reaches 4000 us.
     assert_eq!(from_asio_cause(&bins(&[(7, 3)]), 4000), Cause::Bridge);
     let top = UnderrunCounts {
         period_us: 2667,
         ..bins(&[(7, 3)])
     };
-    assert_eq!(from_asio_cause(&top, 4000), Cause::Bridge);
+    assert_eq!(from_asio_cause(&top, 4000), Cause::Target);
+    assert_eq!(from_asio_cause(&top, 4001), Cause::Bridge);
     let late = UnderrunCounts {
         late_callbacks: 1,
         ..UnderrunCounts::default()
@@ -45,25 +63,28 @@ fn a_from_asio_underrun_is_the_drivers_from_three_quarters_of_its_target() {
 }
 
 /// The open top bin reaches up to one period late, so at a long period it
-/// is judged by the period: 256 at 48 kHz (5.333 ms) against a 6 ms target
-/// (3/4: 4.5 ms) can be the driver's; a closed bin's lower edge never is.
+/// is judged by the period: 256 at 48 kHz (5.333 ms) is the driver's up to
+/// a 5.333 ms target and the target's up to 8 ms (half the period of
+/// floor, 2666.5 us); a closed bin's lower edge never is.
 #[test]
 fn the_top_bin_is_judged_by_the_period_it_reaches() {
     let top = UnderrunCounts {
         period_us: 5333,
         ..bins(&[(7, 1)])
     };
-    assert_eq!(from_asio_cause(&top, 6000), Cause::Driver);
-    assert_eq!(from_asio_cause(&top, 7110), Cause::Driver, "3/4: 5332.5");
-    assert_eq!(from_asio_cause(&top, 7111), Cause::Bridge, "3/4: 5333.25");
+    assert_eq!(from_asio_cause(&top, 5333), Cause::Driver);
+    assert_eq!(from_asio_cause(&top, 5334), Cause::Target);
+    assert_eq!(from_asio_cause(&top, 6000), Cause::Target);
+    assert_eq!(from_asio_cause(&top, 7999), Cause::Target, "7999.5");
+    assert_eq!(from_asio_cause(&top, 8000), Cause::Bridge, "7999.5");
     let below = UnderrunCounts {
         period_us: 5333,
         ..bins(&[(6, 1)])
     };
     assert_eq!(from_asio_cause(&below, 6000), Cause::Bridge, "1.75-2.0 ms");
-    // No period known (no open): the top bin's lower edge, 2.0 ms.
-    assert_eq!(from_asio_cause(&bins(&[(7, 1)]), 2666), Cause::Driver);
-    assert_eq!(from_asio_cause(&bins(&[(7, 1)]), 2667), Cause::Bridge);
+    // No period known (no open): the top bin's lower edge, 2.0 ms, alone.
+    assert_eq!(from_asio_cause(&bins(&[(7, 1)]), 2000), Cause::Driver);
+    assert_eq!(from_asio_cause(&bins(&[(7, 1)]), 2001), Cause::Bridge);
 }
 
 /// With no from-ASIO target (0: the player not started) nothing is judged.
@@ -129,27 +150,29 @@ fn the_watch_names_the_callback_lateness_around_each_underrun_rise() {
     // Lateness without an underrun: no line, but its rise is spent.
     now.late_bins[2] = 4;
     assert_eq!(w.look(now, 1.333_333), None, "no underrun");
-    // A from-ASIO underrun with a callback 1.0-1.25 ms late meanwhile.
+    // A from-ASIO underrun with a callback 1.0-1.25 ms late meanwhile:
+    // under the target alone, over it with the side's floor (666.5 us).
     now.from_asio_underruns = 2;
     now.late_bins[3] = 1;
     let text = w.look(now, 1.333_333).expect("a from-ASIO rise");
     assert_eq!(
         text,
         "asio bridge underruns since the last check: from-ASIO 2 (target 1333 us), \
-         cause: driver callback lateness; driver callbacks late meanwhile: 1000-1250 us: 1"
+         cause: the target under the side's floor plus the callbacks' lateness; \
+         driver callbacks late meanwhile: 1000-1250 us: 1"
     );
     // The same counts again: nothing rose.
     assert_eq!(w.look(now, 1.333_333), None, "no new underrun");
-    // A to-ASIO underrun and a from-ASIO one with only 0.75 ms late.
+    // A to-ASIO underrun and a from-ASIO one with only 0.5 ms late.
     now.to_asio_underruns = 1;
     now.from_asio_underruns = 3;
-    now.late_bins[2] = 5;
+    now.late_bins[1] = 5;
     let text = w.look(now, 1.333_333).expect("both rose");
     assert_eq!(
         text,
         "asio bridge underruns since the last check: from-ASIO 1 (target 1333 us), \
          cause: the bridge (no callback late enough); to-ASIO 1, cause: the bridge \
-         (no callback late enough); driver callbacks late meanwhile: 750-1000 us: 1"
+         (no callback late enough); driver callbacks late meanwhile: 500-750 us: 5"
     );
     // A new run's counters (fallen) count from 0: its one late gap is the
     // driver's to-ASIO.
@@ -248,7 +271,8 @@ fn the_watch_publishes_the_counts_and_each_side_s_latest_cause() {
         read(&slot),
         (0, 0, UnderrunCause::None, UnderrunCause::None)
     );
-    // From-ASIO with a callback 1.0 ms late: the driver's.
+    // From-ASIO with a callback 1.0 ms late: the target's, sent as the
+    // driver's (the wire has no code of its own for it).
     now.from_asio_underruns = 2;
     now.late_bins[3] = 1;
     w.look(now, 1.333_333);
@@ -292,13 +316,16 @@ fn the_watch_publishes_the_counts_and_each_side_s_latest_cause() {
     assert_eq!(UnderrunCause::from(Cause::Driver), UnderrunCause::Driver);
     assert_eq!(UnderrunCause::from(Cause::Bridge), UnderrunCause::Bridge);
     assert_eq!(UnderrunCause::from(Cause::Unknown), UnderrunCause::Unknown);
+    assert_eq!(UnderrunCause::from(Cause::Target), UnderrunCause::Driver);
 }
 
 /// A lateness summed over several switches can pass the period the top
 /// bin is otherwise judged by (dstack #393): when the run's peak lateness
-/// rose over the check, the top bin reaches that peak. 3.5 ms behind at a
-/// 4 ms target (3/4: 3 ms) is the driver's, though the period (2.667 ms)
-/// is not; a check whose peak did not rise falls back to the period.
+/// rose over the check, the top bin reaches that peak. 4.6 ms behind at a
+/// 4.5 ms target is the driver's, though the period (2.667 ms, with its
+/// floor of 1333.5 us under 4.5 ms) is not; a check whose peak did not
+/// rise falls back to the period. A peak from 3166.5 us reaches the target
+/// with the floor.
 #[test]
 fn the_top_bin_reaches_the_peak_lateness_that_rose_over_the_check() {
     let mut w = UnderrunWatch::new();
@@ -308,18 +335,20 @@ fn the_top_bin_reaches_the_peak_lateness_that_rose_over_the_check() {
         late_max_us,
         ..bins(&[(7, top)])
     };
-    let text = w.look(at(1, 1, 3500), 4.0).expect("an underrun rose");
+    let text = w.look(at(1, 1, 4600), 4.5).expect("an underrun rose");
     assert!(text.contains("cause: driver callback lateness"), "{text}");
-    let text = w.look(at(2, 2, 3500), 4.0).expect("an underrun rose");
+    let text = w.look(at(2, 2, 4600), 4.5).expect("an underrun rose");
     assert!(text.contains("cause: the bridge"), "{text}");
     // A new run's counters (the peak fell): its own peak counts.
-    let text = w.look(at(1, 1, 3200), 4.0).expect("an underrun rose");
+    let text = w.look(at(1, 1, 4500), 4.5).expect("an underrun rose");
     assert!(text.contains("cause: driver callback lateness"), "{text}");
-    let low = UnderrunCounts {
-        late_max_us: 2900,
+    let low = |late_max_us| UnderrunCounts {
+        late_max_us,
         ..at(1, 1, 0)
     };
-    assert_eq!(from_asio_cause(&low, 4000), Cause::Bridge, "3/4: 3000");
+    assert_eq!(from_asio_cause(&low(2900), 4500), Cause::Bridge);
+    assert_eq!(from_asio_cause(&low(3166), 4500), Cause::Bridge);
+    assert_eq!(from_asio_cause(&low(3167), 4500), Cause::Target);
 }
 
 /// dsg's case (dstack #393): a from-ASIO target of 1 ms with a 128-frame
@@ -362,8 +391,8 @@ fn a_new_runs_equal_peak_is_its_own() {
         late_max_us,
         ..bins(&[(7, top)])
     };
-    w.look(at(1, 3, 3500), 4.0).expect("an underrun rose");
-    let text = w.look(at(2, 1, 3500), 4.0).expect("an underrun rose");
+    w.look(at(1, 3, 4600), 4.5).expect("an underrun rose");
+    let text = w.look(at(2, 1, 4600), 4.5).expect("an underrun rose");
     assert!(text.contains("cause: driver callback lateness"), "{text}");
 }
 
@@ -376,16 +405,16 @@ fn a_fallen_late_count_alone_marks_a_new_run() {
         from_asio_underruns: 1,
         late_callbacks: 2,
         period_us: 2667,
-        late_max_us: 3500,
+        late_max_us: 4600,
         ..bins(&[(7, 1)])
     };
-    w.look(before, 4.0).expect("an underrun rose");
+    w.look(before, 4.5).expect("an underrun rose");
     let now = UnderrunCounts {
         from_asio_underruns: 2,
         late_callbacks: 0,
         late_bins: bins(&[(7, 2)]).late_bins,
         ..before
     };
-    let text = w.look(now, 4.0).expect("an underrun rose");
+    let text = w.look(now, 4.5).expect("an underrun rose");
     assert!(text.contains("cause: driver callback lateness"), "{text}");
 }
