@@ -1007,8 +1007,17 @@ fn every_record_is_announced_twice_also_one_whose_name_has_upper_case() {
         port: 4455,
         txt: vec!["id=1".to_string()],
     };
-    let upper = record("TX 1@Mdns-Test-Case", "mdns-test-case-upper");
-    let lower = record("tx 1@mdns-test-case-lower", "mdns-test-case-lower");
+    // A token of the process in every name: parallel mutant jobs run this
+    // test at once on one box, each beside the others' daemons on 5353.
+    let pid = std::process::id();
+    let upper = record(
+        &format!("TX 1@Mdns-Test-Case-{pid}"),
+        &format!("mdns-test-case-upper-{pid}"),
+    );
+    let lower = record(
+        &format!("tx 1@mdns-test-case-lower-{pid}"),
+        &format!("mdns-test-case-lower-{pid}"),
+    );
     let full_upper = format!("{}.{}", upper.instance, CHAN_SERVICE);
     let full_lower = format!("{}.{}", lower.instance, CHAN_SERVICE);
     let wire = group_listener(ip);
