@@ -13,8 +13,8 @@ use std::sync::atomic::AtomicI64;
 use super::*;
 use crate::clock::{MonoClock, ReAnchor, monotonic_ns};
 
-/// The field's step (16.11.2026, the service's `delta_ns`).
-const FIELD_STEP_NS: i64 = -3_792_840_297_399_476;
+/// The field's record (`tests/fixtures/pump_stall_440.json`).
+const FIELD: &str = include_str!("../../../../tests/fixtures/pump_stall_440.json");
 /// Sleeps before the step.
 const SLEEPS: u64 = 50;
 /// Packets the flow must send after the step, and in what real time: at
@@ -68,7 +68,9 @@ impl PtpClock for StepsAtSleep {
 
 #[test]
 fn a_re_anchor_before_the_tx_loop_s_sleep_never_stops_its_flows() {
-    for step in [-3_000_000_000, FIELD_STEP_NS, 3_000_000_000, -FIELD_STEP_NS] {
+    let record: serde_json::Value = serde_json::from_str(FIELD).unwrap();
+    let field = record["service_re_anchor_delta_ns"].as_i64().unwrap();
+    for step in [-3_000_000_000, field, 3_000_000_000, -field] {
         let shared = shared_with(Vec::new());
         assert!(shared.set_source(0, Source::Counter));
         let rx = socket();

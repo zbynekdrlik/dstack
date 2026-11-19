@@ -16,11 +16,31 @@ use super::*;
 use crate::clock::linked::{Follow, Linked, View};
 use crate::clock::{FollowerCounts, MonoClock, monotonic_ns};
 
-/// The field's step (16.11.2026, `delta_ns` of the service's re-anchor).
-const FIELD_STEP_NS: i64 = -3_792_840_297_399_476;
-/// The steps each clock is moved by inside a block: just past the
-/// service tracker's tolerance, a few blocks, seconds, the field's.
-const STEPS_NS: [i64; 4] = [-40_000, -1_500_000, -3_000_000_000, FIELD_STEP_NS];
+/// The field's record (`tests/fixtures/pump_stall_440.json`): the service's
+/// and the follower's re-anchors of 16.11.2026, and what followed.
+const FIELD: &str = include_str!("../../../tests/fixtures/pump_stall_440.json");
+
+/// The field's record, parsed.
+fn record() -> serde_json::Value {
+    serde_json::from_str(FIELD).unwrap()
+}
+
+/// A whole number of the field's record.
+fn field(key: &str) -> i64 {
+    record()[key]
+        .as_i64()
+        .unwrap_or_else(|| panic!("{key} in {FIELD}"))
+}
+
+/// The steps a clock is moved by inside a block: just past the service
+/// tracker's tolerance, a few blocks, seconds, and the field's own step of
+/// that clock (`field_key`), each back and forward.
+fn steps(field_key: &str) -> Vec<i64> {
+    [-40_000, -1_500_000, -3_000_000_000, field(field_key)]
+        .into_iter()
+        .flat_map(|s| [s, -s])
+        .collect()
+}
 /// The block that moves the clock.
 const AT: u64 = 100;
 /// Blocks after it that must run.
@@ -102,18 +122,16 @@ fn resumes(clock: Arc<dyn PtpClock>, step: Box<dyn FnOnce() + Send>, what: &str)
 /// then) takes a new k between the pump's read and its sleep.
 #[test]
 fn a_service_clock_re_anchored_inside_a_block_never_stops_the_pump() {
-    for sign in [1, -1] {
-        for step in STEPS_NS.map(|s| s * sign) {
-            let clock = Arc::new(MonoClock::new());
-            let k = BASE_NS - monotonic_ns();
-            clock.set_k(k);
-            let stepping = Arc::clone(&clock);
-            resumes(
-                clock,
-                Box::new(move || stepping.set_k(k + step)),
-                &format!("service step {step} ns"),
-            );
-        }
+    for step in steps("service_re_anchor_delta_ns") {
+        let clock = Arc::new(MonoClock::new());
+        let k = BASE_NS - monotonic_ns();
+        clock.set_k(k);
+        let stepping = Arc::clone(&clock);
+        resumes(
+            clock,
+            Box::new(move || stepping.set_k(k + step)),
+            &format!("service step {step} ns"),
+        );
     }
 }
 
@@ -165,23 +183,56 @@ impl Follow for Arc<Stepping> {
 /// the pump's read and its sleep.
 #[test]
 fn a_follower_re_anchored_inside_a_block_never_stops_the_pump() {
-    for sign in [1, -1] {
-        for step in STEPS_NS.map(|s| s * sign) {
-            let follower = Arc::new(Stepping::default());
-            follower
-                .offset_ns
-                .store(BASE_NS - monotonic_ns(), Ordering::SeqCst);
-            let linked = Linked::new(
-                Some(Box::new(Arc::clone(&follower))),
-                Arc::new(MonoClock::new()),
-                None,
-            );
-            assert_eq!(linked.tick(), crate::clock::linked::Source::Internal);
-            resumes(
-                Arc::new(linked),
-                Box::new(move || follower.re_anchor(step)),
-                &format!("follower step {step} ns"),
-            );
-        }
+    for step in steps("follower_re_anchor_step_ns") {
+        let follower = Arc::new(Stepping::default());
+        follower
+            .offset_ns
+            .store(BASE_NS - monotonic_ns(), Ordering::SeqCst);
+        let linked = Linked::new(
+            Some(Box::new(Arc::clone(&follower))),
+            Arc::new(MonoClock::new()),
+            None,
+        );
+        assert_eq!(linked.tick(), crate::clock::linked::Source::Internal);
+        resumes(
+            Arc::new(linked),
+            Box::new(move || follower.re_anchor(step)),
+            &format!("follower step {step} ns"),
+        );
     }
+}
+
+/// The field's record replayed on the pump's schedule (dstack #440): the
+/// service's step is the TX shift the record shows on the 16-sample grid,
+/// a whole number of the pump's blocks, so once the pump sees its epoch it
+/// moves by it and loses nothing; and the blocks counted at the restart
+/// are the time from the engine's start to that re-anchor: no block ran
+/// after it.
+#[test]
+fn the_field_s_re_anchor_moves_the_pump_and_its_blocks_stopped_there() {
+    let rate = u32::try_from(field("rate")).unwrap();
+    let block = u64::try_from(field("block")).unwrap();
+    let shift = crate::clock::grid_shift(field("service_re_anchor_delta_ns"), rate, block);
+    assert_eq!(shift, field("tx_shift_samples"));
+    let timing = Timing {
+        block,
+        playout: 24,
+        margin: 16,
+    };
+    let mut b = Blocks::bootstrap(T, timing);
+    let start = b.start();
+    let after = T.wrapping_add_signed(shift);
+    assert_eq!(b.re_anchor(Some(shift), after), (Shift::Moved, 0));
+    assert_eq!(b.start(), start.wrapping_add_signed(shift));
+    assert!(matches!(b.next(after), Due::Wait { .. }));
+    // 6000 blocks a second at block 16 and 96 kHz.
+    let per_s = f64::from(rate) / block as f64;
+    let ran_s = field("engine_blocks_at_restart") as f64 / per_s;
+    let to_re_anchor_s = record()["engine_start_to_service_re_anchor_s"]
+        .as_f64()
+        .unwrap();
+    assert!(
+        (ran_s - to_re_anchor_s).abs() < 2.0,
+        "{ran_s} s against {to_re_anchor_s} s"
+    );
 }

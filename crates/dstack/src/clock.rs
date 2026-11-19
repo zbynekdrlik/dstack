@@ -373,6 +373,8 @@ pub trait PtpClock: Send + Sync {
     /// Sleeps until PTP ns `ptp_ns` (at once when it is past). It may
     /// return early (a signal, or a clock that is not ready: then after at
     /// most [`NOT_READY_NAP_NS`]): callers read [`PtpClock::now_ns`] again.
+    /// A loop whose target comes from its own time read sleeps with
+    /// [`PtpClock::sleep_until_within`] instead (dstack #440).
     fn sleep_until(&self, ptp_ns: u64);
     /// [`PtpClock::sleep_until`] for at most `max_ns` from the call, with
     /// the clock's time base read once (dstack #440): a media thread passes
@@ -453,7 +455,7 @@ pub const NOT_READY_NAP_NS: u64 = 10_000_000;
 
 /// A sleep's deadline on the box's monotonic clock (dstack #440): the
 /// target, at most `max_ns` past `now` (both monotonic ns), saturating.
-pub fn bounded_deadline(target: i64, now: i64, max_ns: u64) -> i64 {
+pub(crate) fn bounded_deadline(target: i64, now: i64, max_ns: u64) -> i64 {
     target.min(now.saturating_add_unsigned(max_ns))
 }
 

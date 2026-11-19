@@ -75,7 +75,8 @@ fn the_default_bounds_the_target_through_one_time_read() {
     assert_eq!(clock.asked.load(Ordering::SeqCst), 10_000);
 }
 
-/// How long `sleep` took, real time.
+/// How long `sleep` took, real time, its own time reads included (a
+/// target read before the start, then a preemption, would shorten it).
 fn took(sleep: impl FnOnce()) -> Duration {
     let start = Instant::now();
     sleep();
@@ -102,21 +103,22 @@ fn assert_bounded(t: Duration, what: &str) {
 #[test]
 fn the_service_clock_sleeps_to_the_target_at_most_the_bound() {
     let clock = service();
-    let now = clock.now_ns().unwrap();
+    let now = || clock.now_ns().unwrap();
     assert_bounded(
-        took(|| clock.sleep_until_within(now + 10_000_000_000, BOUND_NS)),
+        took(|| clock.sleep_until_within(now() + 10_000_000_000, BOUND_NS)),
         "a far target",
     );
-    let now = clock.now_ns().unwrap();
     assert_bounded(
-        took(|| clock.sleep_until_within(now + BOUND_NS, 10_000_000_000)),
+        took(|| clock.sleep_until_within(now() + BOUND_NS, 10_000_000_000)),
         "a near target",
     );
     // A new k 10 s back after the target was read: the bound holds.
-    let target = clock.now_ns().unwrap() + BOUND_NS;
-    clock.set_k(clock.k_ns().unwrap() - 10_000_000_000);
     assert_bounded(
-        took(|| clock.sleep_until_within(target, BOUND_NS)),
+        took(|| {
+            let target = now() + BOUND_NS;
+            clock.set_k(clock.k_ns().unwrap() - 10_000_000_000);
+            clock.sleep_until_within(target, BOUND_NS);
+        }),
         "a k 10 s back",
     );
 }
@@ -157,20 +159,18 @@ fn the_linked_clock_sleeps_to_the_target_at_most_the_bound_on_either_source() {
         (on_service, Source::Service),
     ] {
         assert_eq!(linked.tick(), source);
-        let now = linked.now_ns().unwrap();
+        let now = || linked.now_ns().unwrap();
         assert_bounded(
-            took(|| linked.sleep_until_within(now + 10_000_000_000, BOUND_NS)),
+            took(|| linked.sleep_until_within(now() + 10_000_000_000, BOUND_NS)),
             &format!("{source:?}: a far target"),
         );
-        let now = linked.now_ns().unwrap();
         assert_bounded(
-            took(|| linked.sleep_until_within(now + BOUND_NS, 10_000_000_000)),
+            took(|| linked.sleep_until_within(now() + BOUND_NS, 10_000_000_000)),
             &format!("{source:?}: a near target"),
         );
         // No bound: the target.
-        let now = linked.now_ns().unwrap();
         assert_bounded(
-            took(|| linked.sleep_until(now + BOUND_NS)),
+            took(|| linked.sleep_until(now() + BOUND_NS)),
             &format!("{source:?}: sleep_until"),
         );
     }
