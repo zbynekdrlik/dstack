@@ -10,7 +10,6 @@
   - New: `announce::mdns` (`Mdns::shared`/`listen`/`settle`/`withdraw`/`meter`, `Taps`, `Listener`, `Heard`, `Datagram`, `GOODBYE_WAIT`, `SHUTDOWN_WAIT`), `Responder::start_heard`, `responder::Mode`/`REOPENED`, `Meter::heard`; `announce::retried` is generic (crate-internal). The daemon's IP check runs every 2 s (the interface watches' period; mdns-sd's default is 5 s).
   - `Meter::start(listener, minute_ns, browsers)` takes the daemon's listener instead of a socket and no address; `Meter::shared`, `Meter::open`, `MeterWatch` and `Meter::rejoins` are gone (the daemon keeps the membership). `Responder::start` takes the daemon's listener; `start_on`/`start_watched` lost their `multicast` flag (unicast test responders). `host::GOODBYE_WAIT` is now `announce::mdns::GOODBYE_WAIT` (re-exported).
   - mDNS: a device's discovery of our other devices on the PC (`traffic::neighbours`, started while its NIC is loud past our audio, #203) reads the group from the daemon's socket too, so a device process never holds a second joined 5353 socket (#442). New: `Mdns::listen_on` (a listener on the running daemon on an address; never opens one), `Discovery::start_heard` (the group read from such a listener; a Discovery in a process with no device keeps its own socket).
-
   - **dasio measures dsg before/after on this release** (#442's last field line). **No latency change.**
 
 ## 0.6.193
