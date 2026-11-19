@@ -72,6 +72,17 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: The runner image (the apt package cache's key)
+        id: image
+        if: runner.os == 'Linux'
+        run: echo "id=${ImageOS}-${ImageVersion}" >> "$GITHUB_OUTPUT"
+        shell: bash
+      - name: The apt packages of the last good install (no mirror needed on a hit)
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: runner.os == 'Linux'
+        with:
+          path: ~/.cache/ci-apt-debs
+          key: ci-apt-debs-${{ steps.image.outputs.id }}-${{ hashFiles('scripts/ci-apt-deps.sh') }}
       - name: GTK, AppIndicator and ALSA headers (dtray's Linux tray, dlisten's output)
         if: runner.os == 'Linux'
         run: scripts/ci-apt-deps.sh
