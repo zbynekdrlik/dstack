@@ -2,6 +2,7 @@ use std::sync::Mutex;
 
 use super::*;
 
+mod retry;
 mod rounds;
 use rounds::{AGREE_NS, DRIFT_NS, on_time};
 mod waiting;
@@ -298,16 +299,6 @@ fn a_sleep_on_the_follower_s_time_returns_at_its_target() {
     let t = std::time::Instant::now();
     linked.sleep_until(999_000_000);
     assert!(t.elapsed() < Duration::from_millis(100));
-}
-
-/// The follower's start returns a clock and its keeper together, or
-/// neither (no capability for port 319, as on a runner): never one alone.
-#[test]
-fn the_follower_starts_with_its_keeper_or_not_at_all() {
-    let (internal, keep) = start_internal("lo", None);
-    assert_eq!(internal.is_some(), keep.is_some());
-    let (internal, keep) = start_internal("lo", Some(-4_671));
-    assert_eq!(internal.is_some(), keep.is_some());
 }
 
 /// The linked clock keeps a ready service while the follower is locked but

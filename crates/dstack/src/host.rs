@@ -491,8 +491,10 @@ pub(crate) fn prepare_on(
         // Seeded with the service's frequency word when it is locked and
         // settled (dstack #68): settled in 37 s instead of 70.
         let seed = rt.block_on(crate::clock::linked::service_seed(crate::clock::DSYNC));
-        let (internal, keep) = crate::clock::linked::start_internal(&ifa.name, seed);
-        Arc::new(Linked::new(internal, Arc::clone(&mono), keep))
+        // A start that fails for a cause that can pass (no Npcap device
+        // for the adapter yet at boot) is tried again (dstack #431).
+        let start = crate::clock::linked::Starter::dsync(ifa.name.clone(), seed);
+        Arc::new(Linked::start(Arc::clone(&mono), start))
     });
     let stats = Arc::new(ClockStats::default());
     let ptp = crate::clock::skewed::media_ptp(

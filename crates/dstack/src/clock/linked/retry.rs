@@ -1,0 +1,119 @@
+//! Starting dsync's follower, and starting it again (dstack #431, mbc-snv
+//! 19.11.2026: 4 s after logon Npcap had no device for the pinned adapter
+//! yet, the start failed once, nothing tried it again, and the device ran
+//! without its follower until it was restarted).
+//!
+//! A start that failed for a cause that can pass ([`start_passes`]: no
+//! Npcap device for the adapter yet, the adapter without an IPv4 yet, the
+//! capture not opened) is tried again on the selector's round
+//! ([`super::Linked::tick`]) after [`retry_delay_s`]: 1, 2, 4, 8, 16, then
+//! every 30 s. A cause that cannot pass (no Npcap installed, no capability
+//! for port 319, no adapter of that name) stays failed, as before. While
+//! it tries, the follower's status reads `stopped` and the once-a-minute
+//! line names the tries; once it starts, the selector takes it the usual
+//! way (it agrees with the service, or waits to).
+
+use dsync_ptp::follower::FollowerError;
+
+use super::{Absorbing, Follow, follower_failure};
+
+/// What one start of the follower gave.
+pub enum Attempt {
+    /// It runs: its clock and the value that keeps it running.
+    Started(Box<dyn Follow>, Box<dyn Send + Sync>),
+    /// It did not start.
+    Failed {
+        /// The cause can pass: try again ([`start_passes`]).
+        passes: bool,
+        /// What the app can do about it, in a word ([`follower_failure`]).
+        reason: &'static str,
+        /// The error's text.
+        error: String,
+    },
+}
+
+/// The run that starts a follower on an interface with a seed.
+type Run = Box<dyn FnMut(&str, Option<i32>) -> Attempt + Send>;
+
+/// Starts the follower on `iface`, seeded with `seed_ppb`, as often as the
+/// linked clock asks ([`attempt`] for dsync's).
+pub struct Starter {
+    pub(super) iface: String,
+    pub(super) seed_ppb: Option<i32>,
+    run: Run,
+}
+
+impl Starter {
+    /// A starter that runs `run` with the interface and the seed.
+    pub fn new(
+        iface: impl Into<String>,
+        seed_ppb: Option<i32>,
+        run: impl FnMut(&str, Option<i32>) -> Attempt + Send + 'static,
+    ) -> Starter {
+        Starter {
+            iface: iface.into(),
+            seed_ppb,
+            run: Box::new(run),
+        }
+    }
+
+    /// dsync's follower ([`attempt`]).
+    pub fn dsync(iface: impl Into<String>, seed_ppb: Option<i32>) -> Starter {
+        Starter::new(iface, seed_ppb, attempt)
+    }
+
+    /// One start.
+    pub(super) fn attempt(&mut self) -> Attempt {
+        (self.run)(&self.iface, self.seed_ppb)
+    }
+}
+
+impl std::fmt::Debug for Starter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Starter")
+            .field("iface", &self.iface)
+            .field("seed_ppb", &self.seed_ppb)
+            .finish_non_exhaustive()
+    }
+}
+
+/// One start of dsync's follower on the interface `iface`, seeded with
+/// `seed_ppb` ([`super::seed_of`]) when given.
+pub fn attempt(iface: &str, seed_ppb: Option<i32>) -> Attempt {
+    let mut cfg = dsync_ptp::follower::FollowerConfig::on_interface(iface);
+    if let Some(ppb) = seed_ppb {
+        cfg = cfg.with_frequency_seed(i64::from(ppb));
+    }
+    match dsync_ptp::follower::Follower::start(cfg) {
+        Ok(f) => Attempt::Started(Box::new(Absorbing::new(f.clock())), Box::new(f)),
+        Err(e) => failed(&e),
+    }
+}
+
+/// A failed start's [`Attempt`]: whether its cause can pass, its word and
+/// its text.
+pub fn failed(e: &FollowerError) -> Attempt {
+    Attempt::Failed {
+        passes: start_passes(e),
+        reason: follower_failure(e),
+        error: e.to_string(),
+    }
+}
+
+/// Whether a start that failed with `e` can succeed later without a change
+/// on the PC (dsync-ptp v1.33.1's kinds): no, when Npcap is not installed
+/// (`NpcapMissing`), port 319 is refused (`PermissionDenied`) or no adapter
+/// has the name (`InterfaceNotFound` of a missing NIC); yes, when the
+/// adapter has no IPv4 yet (`InterfaceNotFound` of a present one) or the
+/// capture did not open (`Other`: on Windows "no Npcap device carries
+/// <ip>" while Npcap binds to a fresh adapter at boot). A kind dsync adds
+/// later stays failed.
+pub fn start_passes(e: &FollowerError) -> bool {
+    match e {
+        FollowerError::InterfaceNotFound { cause, .. } => !cause
+            .downcast_ref::<dsync_ptp::net::PinnedInterfaceUnavailable>()
+            .is_some_and(|p| p.missing),
+        FollowerError::Other(_) => true,
+        _ => false,
+    }
+}

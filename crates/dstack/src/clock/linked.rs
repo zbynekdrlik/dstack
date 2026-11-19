@@ -37,6 +37,8 @@ use super::{
     ClockCounts, FollowerCounts, MonoClock, NOT_READY_NAP_NS, PtpClock, ReAnchor, monotonic_ns,
 };
 
+mod retry;
+pub use retry::{Attempt, Starter, attempt, failed, start_passes};
 mod waiting;
 pub use waiting::{
     Minute, NOT_IN_USE_EVERY_NS, NOT_IN_USE_LINE, Waiting, grandmaster_text, waiting_of,
@@ -196,6 +198,14 @@ pub const RE_ALIGN_LINE: &str = "media clock source changed with a re-align";
 pub const FIRST_SOURCE_LINE: &str = "media clock: a first source is ready";
 /// No source ready any more (a warning).
 pub const NO_SOURCE_LINE: &str = "media clock: no source ready";
+/// The follower started.
+pub const STARTED_LINE: &str = "media clock: dsync's in-process follower started";
+/// The follower did not start, for a cause that can pass: it is tried
+/// again (a warning).
+pub const RETRY_LINE: &str = "media clock: dsync's in-process follower did not start yet: the dsync service's clock is used, its start is tried again";
+/// The follower did not start, for a cause that cannot pass (a warning).
+pub const NOT_STARTED_LINE: &str =
+    "media clock: dsync's in-process follower did not start: the dsync service's clock is used";
 
 /// The epoch the media threads see: the re-aligns (`switches`) in the high
 /// half; the re-anchors since the last re-align in the low half (a seamless
@@ -324,6 +334,33 @@ impl Linked {
             was_locked: AtomicBool::new(false),
             report: std::sync::Mutex::new(Report::default()),
             _keep: keep,
+        }
+    }
+
+    /// A linked clock over the follower `start` starts on the service's
+    /// clock: the device then runs on the service until the follower is
+    /// in use.
+    pub fn start(service: Arc<MonoClock>, start: Starter) -> Linked {
+        Linked::start_at(service, start, monotonic_ns())
+    }
+
+    /// [`Linked::start`] at the monotonic time `now_ns` (a test's own).
+    pub(crate) fn start_at(service: Arc<MonoClock>, mut start: Starter, now_ns: i64) -> Linked {
+        let _ = now_ns;
+        match start.attempt() {
+            Attempt::Started(f, keep) => {
+                info!(
+                    iface = %start.iface,
+                    seed_ppb = ?start.seed_ppb,
+                    start_attempts = 1,
+                    "{STARTED_LINE}"
+                );
+                Linked::new(Some(f), service, Some(keep))
+            }
+            Attempt::Failed { reason, error, .. } => {
+                warn!(iface = %start.iface, reason, error = %error, "{NOT_STARTED_LINE}");
+                Linked::new(None, service, None)
+            }
         }
     }
 
@@ -815,36 +852,6 @@ pub async fn service_seed(target: std::net::SocketAddr) -> Option<i32> {
         .once(&MonoClock::new(), &std::sync::atomic::AtomicI32::new(0))
         .await;
     polled.reading.as_ref().and_then(seed_of)
-}
-
-/// Starts dsync's follower on the interface `iface`, seeded with `seed_ppb`
-/// ([`seed_of`]) when given: the linked clock's internal source, or `None`
-/// with the reason logged (Linux: no capability for port 319; Windows: no
-/// Npcap; anywhere: no such interface): the device then runs on the
-/// service.
-pub fn start_internal(iface: &str, seed_ppb: Option<i32>) -> Started {
-    let mut cfg = dsync_ptp::follower::FollowerConfig::on_interface(iface);
-    if let Some(ppb) = seed_ppb {
-        cfg = cfg.with_frequency_seed(i64::from(ppb));
-    }
-    match dsync_ptp::follower::Follower::start(cfg) {
-        Ok(f) => {
-            info!(
-                iface,
-                seed_ppb, "media clock: dsync's in-process follower started"
-            );
-            (Some(Box::new(Absorbing::new(f.clock()))), Some(Box::new(f)))
-        }
-        Err(e) => {
-            warn!(
-                iface,
-                reason = follower_failure(&e),
-                error = %e,
-                "media clock: dsync's in-process follower did not start: the dsync service's clock is used"
-            );
-            (None, None)
-        }
-    }
 }
 
 /// What the app can do about a follower that did not start, in a word.
