@@ -34,3 +34,16 @@ filter = '''
     | test(/^flows::server::tests::ready_race::/)
 '''
 priority = -50
+
+# The tests that bind a daemon to 127.0.0.1:5353 run one at a time (dstack
+# #444): nextest runs each test in its own process, so `ONE_DAEMON` (one
+# process's lock) serializes nothing, and Linux shares a unicast to
+# 127.0.0.1:5353 between two processes' SO_REUSEPORT sockets. A mutant run
+# of #444's reopen line: the direct-query test, run beside the reopen
+# test, failed first (its queries went to the other process's daemon).
+[test-groups]
+mdns-bound = { max-threads = 1 }
+
+[[profile.mutants.overrides]]
+filter = 'test(/^announce::mdns::tests::a_(daemon_bound_to_its_address|bound_daemon_(answers|opens))/)'
+test-group = 'mdns-bound'
