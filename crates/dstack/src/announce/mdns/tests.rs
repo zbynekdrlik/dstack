@@ -537,6 +537,21 @@ fn answers_ptr(bytes: &[u8], id: u16, instance: &str) -> bool {
     })
 }
 
+/// `bytes` is an answer to a direct query from 5353 with id `id`: no
+/// question echoed and its SRV's TTL the full one (over the 10 s a legacy
+/// answer is capped to), so not reshaped as a legacy one.
+fn direct_shaped(bytes: &[u8], id: u16) -> bool {
+    use simple_dns::Packet;
+    use simple_dns::rdata::RData;
+    Packet::parse(bytes).is_ok_and(|p| {
+        p.id() == id
+            && p.questions.is_empty()
+            && p.answers
+                .iter()
+                .any(|r| matches!(r.rdata, RData::SRV(_)) && r.ttl > 10)
+    })
+}
+
 /// Whether a datagram is the answer a test waits for.
 type IsAnswer<'a> = &'a dyn Fn(&[u8]) -> bool;
 
@@ -596,7 +611,9 @@ fn a_bound_daemon_answers_a_direct_query_from_5353_to_its_source() {
     let to = SocketAddrV4::new(ip, 5353);
     let srv_query = instance::query(0x4443, &full).unwrap();
     let ptr = ptr_query(0x4444, CHAN_SERVICE);
-    let srv_answer = |b: &[u8]| instance::read(b, &full).is_some_and(|f| f.srv.is_some());
+    let srv_answer = |b: &[u8]| {
+        instance::read(b, &full).is_some_and(|f| f.srv.is_some()) && direct_shaped(b, 0x4443)
+    };
     let ptr_answer = |b: &[u8]| answers_ptr(b, 0x4444, &full);
     let cases: [(&str, &[u8], IsAnswer); 2] = [
         ("SRV/TXT", &srv_query, &srv_answer),

@@ -90,7 +90,9 @@ LICENSE-APACHE and LICENSE-MIT), copied unchanged except:
   A legacy query (another source port) keeps upstream's answer (unicast,
   question echoed, TTL capped, no cache-flush). The QU bit itself is still
   not read (an answer to a QU question sent to the group goes to the
-  group).
+  group). Known limit, as upstream's legacy path: a unicast answer goes
+  to any source, no check that it is on the interface's subnet (RFC 6762
+  sections 5.5 and 11 say SHOULD).
 
 - `Cargo.toml`: an empty `[workspace]` table, so cargo never searches above
   this crate (a dstack checkout nested in another one, such as a git
