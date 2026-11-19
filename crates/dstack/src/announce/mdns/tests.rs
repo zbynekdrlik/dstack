@@ -808,20 +808,7 @@ fn group_listener(ip: Ipv4Addr) -> UdpSocket {
 /// How many announcements of `full` (a response from `from` with `full`'s
 /// SRV) `l` reads within `wait`.
 fn announcements(l: &UdpSocket, full: &str, from: SocketAddr, wait: Duration) -> usize {
-    use crate::subscribe::instance;
-    let deadline = Instant::now() + wait;
-    let mut n = 0;
-    let mut buf = [0u8; 9000];
-    while !deadline.saturating_duration_since(Instant::now()).is_zero() {
-        if let Ok((len, src)) = l.recv_from(&mut buf)
-            && src == from
-            && !is_query(&buf[..len])
-            && instance::read(&buf[..len], full).is_some_and(|f| f.srv.is_some())
-        {
-            n += 1;
-        }
-    }
-    n
+    announcements_each(l, &[full], from, wait)[0]
 }
 
 /// Waits (at most 8 s) for an announcement of `full` on `l`, then until
@@ -995,21 +982,24 @@ fn announcements_each(
 /// all-lower-case record beside it is the control (two before and after).
 #[test]
 fn every_record_is_announced_twice_also_one_whose_name_has_upper_case() {
-    use crate::announce::{CHAN_SERVICE, ServiceRecord};
+    use crate::announce::ServiceRecord;
     let _one = ONE_DAEMON.lock().unwrap_or_else(PoisonError::into_inner);
     let ip = Ipv4Addr::LOCALHOST;
     let mdns = Mdns::shared(ip).unwrap();
+    // A token of the process in every name and a service type of its own:
+    // parallel mutant jobs run this test at once on one box, each beside
+    // the others' daemons on 5353, and a browse of a real type by any
+    // process would add answers to the count (`tests/mdns_answer_only.rs`).
+    let pid = std::process::id();
+    let ty: &'static str = Box::leak(format!("_d450{pid:08x}._udp.local.").into_boxed_str());
     let record = |instance: &str, host: &str| ServiceRecord {
-        service: CHAN_SERVICE,
+        service: ty,
         instance: instance.to_string(),
         host: format!("{host}.local."),
         ip,
         port: 4455,
         txt: vec!["id=1".to_string()],
     };
-    // A token of the process in every name: parallel mutant jobs run this
-    // test at once on one box, each beside the others' daemons on 5353.
-    let pid = std::process::id();
     let upper = record(
         &format!("TX 1@Mdns-Test-Case-{pid}"),
         &format!("mdns-test-case-upper-{pid}"),
@@ -1018,8 +1008,8 @@ fn every_record_is_announced_twice_also_one_whose_name_has_upper_case() {
         &format!("tx 1@mdns-test-case-lower-{pid}"),
         &format!("mdns-test-case-lower-{pid}"),
     );
-    let full_upper = format!("{}.{}", upper.instance, CHAN_SERVICE);
-    let full_lower = format!("{}.{}", lower.instance, CHAN_SERVICE);
+    let full_upper = format!("{}.{ty}", upper.instance);
+    let full_lower = format!("{}.{ty}", lower.instance);
     let wire = group_listener(ip);
     let mut a = Announcer::new(mdns.daemon().clone());
     a.announce(&[upper, lower]).unwrap();

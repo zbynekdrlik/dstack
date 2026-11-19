@@ -32,6 +32,7 @@ filter = '''
     | test(/^daemon::media::app::tests::a_hook_that_(stalls|panics)/)
     | test(/^status::tests::a_cut_list_keeps_the_one_playing/)
     | test(/^flows::server::tests::ready_race::/)
+    | test(/^announce::mdns::tests::every_record_is_announced_twice/)
 '''
 priority = -50
 
