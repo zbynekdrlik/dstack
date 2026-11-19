@@ -17,7 +17,7 @@
 
 #![cfg(any(target_os = "linux", windows))]
 
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, SocketAddrV4};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -40,8 +40,9 @@ fn test_ipv4() -> Ipv4Addr {
 }
 
 /// The test device's config with its state file in `dir`; `second` gives
-/// it another name, its own ports and process id (two on one address).
-fn config_in(dir: &Path, second: bool) -> PathBuf {
+/// it another name, its own ports and process id (two on one address);
+/// the config lines `extra` added.
+fn config_with(dir: &Path, second: bool, extra: &str) -> PathBuf {
     let state = dir.join("state.toml");
     let mut text: String = TEST_DEVICE
         .lines()
@@ -53,6 +54,7 @@ fn config_in(dir: &Path, second: bool) -> PathBuf {
         text = text.replace("name = \"test-device\"", "name = \"test-device-b\"")
             + "arc_port = 4441\ncmc_port = 8801\nflows_port = 4456\nprocess_id = 1\n";
     }
+    text.push_str(extra);
     let path = dir.join("device.toml");
     std::fs::write(&path, &text).unwrap();
     path
@@ -60,8 +62,13 @@ fn config_in(dir: &Path, second: bool) -> PathBuf {
 
 /// A started device on the test address: its host, name and TX 1.
 fn start(dir: &Path, second: bool) -> (host::Host, String, String) {
+    start_with(dir, second, "")
+}
+
+/// [`start`] with the config lines `extra` added.
+fn start_with(dir: &Path, second: bool, extra: &str) -> (host::Host, String, String) {
     let opts = Options {
-        config: config_in(dir, second),
+        config: config_with(dir, second, extra),
         place: Place::Ip(test_ipv4()),
         control: dir.join("control.sock"),
     };
@@ -123,8 +130,16 @@ fn sockets_after_stop() -> Vec<String> {
 /// Waits until a direct query reads `device`'s channel `tx` (at most
 /// [`BOUND`]): the daemon answers on the shared socket.
 fn read_record(device: &str, tx: &str) {
+    read_record_at(device, tx, dstack::subscribe::instance::MDNS);
+}
+
+/// [`read_record`] with the queries sent to `to` (the group, or a unicast
+/// address and port).
+fn read_record_at(device: &str, tx: &str, to: SocketAddrV4) {
     let mut instances = Instances::new();
-    instances.start(test_ipv4()).expect("the query thread");
+    instances
+        .start_to(test_ipv4(), to)
+        .expect("the query thread");
     let deadline = Instant::now() + BOUND;
     while instances.lookup(device, tx).is_none() {
         assert!(
@@ -165,6 +180,36 @@ fn a_device_s_process_receives_mdns_on_one_socket_and_still_answers() {
     #[cfg(target_os = "linux")]
     {
         assert_eq!(held.len(), 1, "one 5353 socket: {held:?}");
+        // The #444 trial switch is off by default: the wildcard's socket.
+        assert_eq!(held, ["00000000"], "bound to the wildcard");
+        assert_eq!(
+            sockets_after_stop(),
+            Vec::<String>::new(),
+            "none after the stop"
+        );
+    }
+}
+
+/// dstack #444's trial switch (`mdns_bind_address = true`): the process's
+/// one 5353 socket is bound to the device's address and answers a unicast
+/// query to `<address>:5353`. Windows also delivers the group to it (a
+/// direct query to the group reads the record); Linux delivers it none
+/// (`announce::mdns::GROUP_TO_BOUND_SOCKET`).
+#[test]
+fn the_mdns_bind_address_trial_binds_the_one_socket_to_the_address() {
+    let _one = ONE_DEVICE.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = tempfile::tempdir().unwrap();
+    let (host, name, tx1) = start_with(dir.path(), false, "mdns_bind_address = true\n");
+    read_record_at(&name, &tx1, SocketAddrV4::new(test_ipv4(), 5353));
+    #[cfg(windows)]
+    read_record(&name, &tx1);
+    #[cfg(target_os = "linux")]
+    let held = mdns_sockets();
+    let stopped = host.stop(Duration::from_secs(5));
+    assert!(matches!(stopped, host::Stopped::Done), "{stopped:?}");
+    #[cfg(target_os = "linux")]
+    {
+        assert_eq!(held, ["0100007F"], "one 5353 socket, on the address");
         assert_eq!(
             sockets_after_stop(),
             Vec::<String>::new(),

@@ -622,8 +622,9 @@ impl Prepared {
         };
         // dstack #442: the process's one mDNS socket on the address (the
         // daemon, its interface only), shared by every device there, with
-        // the address's meter (dstack #289; the device runs on without it).
-        let mdns = Mdns::shared(net.ip).map_err(run_failed)?;
+        // the address's meter (dstack #289; the device runs on without it);
+        // bound to the address under the #444 trial switch.
+        let mdns = Mdns::shared_bound(net.ip, device.cfg.mdns_bind_address).map_err(run_failed)?;
         if let Some(meter) = mdns.meter() {
             media.set_mdns_meter(meter);
         }
@@ -646,15 +647,19 @@ impl Prepared {
         // Windows: our records answered from the device's own address too
         // (a SkipAsSource address's answers leave from the primary one;
         // dstack #1 problem E), the queries heard on the daemon's socket
-        // (dstack #442); it ends with the device's thread.
+        // (dstack #442); it ends with the device's thread. A daemon bound to
+        // the address (the #444 trial) answers from it itself: none then.
         #[cfg(windows)]
-        let heard = mdns.listen(crate::announce::mdns::Heard::Queries);
+        let heard = mdns
+            .own_responder_needed()
+            .then(|| mdns.listen(crate::announce::mdns::Heard::Queries));
         let announcer = Announcer::new(mdns.daemon().clone());
         #[cfg(windows)]
-        let own =
+        let own = heard.and_then(|heard| {
             crate::announce::responder::Responder::start(net_ip, announcer.published(), heard)
                 .map_err(|e| warn!(%e, "mDNS answers from the device's address not started"))
-                .ok();
+                .ok()
+        });
         let thread = std::thread::Builder::new()
             .name("dstack-device".to_string())
             .spawn(move || {

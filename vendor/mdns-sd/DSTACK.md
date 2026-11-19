@@ -65,6 +65,16 @@ LICENSE-APACHE and LICENSE-MIT), copied unchanged except:
   on loopback, the whole-device count); `IP_MULTICAST_ALL` off is in no
   gate (this crate is outside the mutation gate, its tests run by hand).
 
+- `src/service_daemon.rs` `ServiceDaemon::new_tapped_on`, `Zeroconf::new_bound`
+  (`Zeroconf::new`, now `cfg(test)`, calls it with `0.0.0.0`): a field
+  trial's daemon (dstack #444, the device config's `mdns_bind_address`)
+  binds its IPv4 socket to the device's address instead of the wildcard,
+  so every send leaves from that address (on Windows a wildcard socket's
+  multicast leaves from the interface's preferred source). Windows delivers
+  the group to a joined address-bound socket, Linux does not. Nothing else
+  changes: the same joins, IP check and sends. `new`/`new_with_port`/
+  `new_tapped` bind `0.0.0.0` as before.
+
 - `Cargo.toml`: an empty `[workspace]` table, so cargo never searches above
   this crate (a dstack checkout nested in another one, such as a git
   worktree, found the outer workspace and refused this excluded path; dstack
