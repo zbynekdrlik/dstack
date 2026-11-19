@@ -510,3 +510,145 @@ fn a_bound_daemon_whose_bind_fails_is_an_error() {
     assert!(e.contains("192.0.2.1:5353"), "{e}");
     assert!(Mdns::listen_on(nowhere, Heard::All).is_none(), "none kept");
 }
+
+/// A PTR query for `service` (QU bit clear).
+fn ptr_query(id: u16, service: &str) -> Vec<u8> {
+    use simple_dns::{CLASS, Name, Packet, QCLASS, QTYPE, Question, TYPE};
+    let mut p = Packet::new_query(id);
+    p.questions.push(Question::new(
+        Name::new_unchecked(service.trim_end_matches('.')),
+        QTYPE::TYPE(TYPE::PTR),
+        QCLASS::CLASS(CLASS::IN),
+        false,
+    ));
+    p.build_bytes_vec().unwrap()
+}
+
+/// `bytes` is a response with id `id` holding a PTR answer naming `instance`.
+fn answers_ptr(bytes: &[u8], id: u16, instance: &str) -> bool {
+    use simple_dns::Packet;
+    use simple_dns::rdata::RData;
+    Packet::parse(bytes).is_ok_and(|p| {
+        p.id() == id
+            && p.answers.iter().any(|r| {
+                matches!(&r.rdata, RData::PTR(ptr)
+                    if ptr.0.to_string().eq_ignore_ascii_case(instance.trim_end_matches('.')))
+            })
+    })
+}
+
+/// `bytes` is an answer to a direct query from 5353 with id `id`: no
+/// question echoed and its SRV's TTL the full one (over the 10 s a legacy
+/// answer is capped to), so not reshaped as a legacy one.
+fn direct_shaped(bytes: &[u8], id: u16) -> bool {
+    use simple_dns::Packet;
+    use simple_dns::rdata::RData;
+    Packet::parse(bytes).is_ok_and(|p| {
+        p.id() == id
+            && p.questions.is_empty()
+            && p.answers
+                .iter()
+                .any(|r| matches!(r.rdata, RData::SRV(_)) && r.ttl > 10)
+    })
+}
+
+/// Whether a datagram is the answer a test waits for.
+type IsAnswer<'a> = &'a dyn Fn(&[u8]) -> bool;
+
+/// The sources of the datagrams `client` reads within `wait` that
+/// `is_answer` takes.
+fn answers_within(client: &UdpSocket, wait: Duration, is_answer: IsAnswer) -> Vec<SocketAddr> {
+    let deadline = Instant::now() + wait;
+    let mut out = Vec::new();
+    let mut buf = [0u8; 9000];
+    while !deadline.saturating_duration_since(Instant::now()).is_zero() {
+        if let Ok((n, from)) = client.recv_from(&mut buf)
+            && is_answer(&buf[..n])
+        {
+            out.push(from);
+        }
+    }
+    out
+}
+
+/// dstack #444: a direct query from port 5353 to the bound daemon's
+/// address (RFC 6762 §5.5: sent to the address, not to the group) is
+/// answered once, unicast to its source address and port, from
+/// `<address>:5353`; a PTR one is not deferred to the group. Up to
+/// v0.6.196 the daemon decided by the source port alone and answered it to
+/// the group, which this querier (bound to 127.0.0.2:5353, joined to
+/// nothing) never hears. A legacy query (another source port) is answered
+/// to its source already (`a_daemon_bound_to_its_address_hears_unicast_and_answers_from_it`).
+#[test]
+fn a_bound_daemon_answers_a_direct_query_from_5353_to_its_source() {
+    use crate::announce::{CHAN_SERVICE, ServiceRecord};
+    use crate::subscribe::instance;
+    let _one = ONE_DAEMON.lock().unwrap_or_else(PoisonError::into_inner);
+    let ip = Ipv4Addr::LOCALHOST;
+    let mdns = Mdns::shared_bound(ip, true).unwrap();
+    let heard = mdns.listen(Heard::Queries);
+    let record = ServiceRecord {
+        service: CHAN_SERVICE,
+        instance: "TX 1@mdns-test-direct".to_string(),
+        host: "mdns-test-direct.local.".to_string(),
+        ip,
+        port: 4455,
+        txt: vec!["id=1".to_string()],
+    };
+    let mut a = Announcer::new(mdns.daemon().clone());
+    a.announce(std::slice::from_ref(&record)).unwrap();
+    let full = format!("{}.{}", record.instance, CHAN_SERVICE);
+    let querier = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 2), 5353);
+    let sock = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::DGRAM, None).unwrap();
+    sock.set_reuse_address(true).unwrap();
+    #[cfg(unix)]
+    sock.set_reuse_port(true).unwrap();
+    sock.bind(&querier.into()).unwrap();
+    let client: UdpSocket = sock.into();
+    client
+        .set_read_timeout(Some(Duration::from_millis(10)))
+        .unwrap();
+    let to = SocketAddrV4::new(ip, 5353);
+    let srv_query = instance::query(0x4443, &full).unwrap();
+    let ptr = ptr_query(0x4444, CHAN_SERVICE);
+    let srv_answer = |b: &[u8]| {
+        instance::read(b, &full).is_some_and(|f| f.srv.is_some()) && direct_shaped(b, 0x4443)
+    };
+    let ptr_answer = |b: &[u8]| answers_ptr(b, 0x4444, &full);
+    let cases: [(&str, &[u8], IsAnswer); 2] = [
+        ("SRV/TXT", &srv_query, &srv_answer),
+        ("PTR", &ptr, &ptr_answer),
+    ];
+    for (what, query, is_answer) in cases {
+        // Until the record is announced; then one query counted alone.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut tapped = false;
+        loop {
+            client.send_to(query, to).unwrap();
+            tapped |= heard_from_within(&heard, querier, Duration::from_millis(20))
+                .iter()
+                .any(|b| b == query);
+            if !answers_within(&client, Duration::from_millis(100), is_answer).is_empty() {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the {what} query from {querier} to {to} was never answered to its source \
+                 (the daemon heard it: {tapped})"
+            );
+        }
+        // A PTR answer to the group would come 20-120 ms late: wait it out.
+        answers_within(&client, Duration::from_millis(300), is_answer);
+        client.send_to(query, to).unwrap();
+        assert_eq!(
+            answers_within(&client, Duration::from_millis(300), is_answer),
+            [SocketAddr::V4(to)],
+            "the {what} query: one answer, from the bound address and port"
+        );
+    }
+    mdns.withdraw(&mut a, GOODBYE_WAIT).unwrap();
+    drop(heard);
+    let handle = mdns.daemon().clone();
+    drop(mdns);
+    assert!(handle.get_metrics().is_err(), "the daemon still runs");
+}

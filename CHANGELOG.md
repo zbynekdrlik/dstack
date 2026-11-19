@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.197
+
+- **Fix (#444): a direct mDNS query from port 5353 to a device's address is answered to its sender.** A query sent straight to the address, not to the group (RFC 6762 section 5.5), is answered unicast to its sender, once, from the address, and a PTR answer to it is no longer deferred to the group. Before, the vendored daemon answered it to the group, which a querier on a unicast 5353 socket never hears. A legacy query (another source port) is answered as before. Changes the default (wildcard) daemon too; recorded in `vendor/mdns-sd/DSTACK.md`. RED test first.
+  - Note from #444's mbc trial: the 0 of 13 unanswered unicast queries (0 of 3 for the device's own responder too) were taken by the PC's Bonjour/Audinate mDNSResponder. Windows gives a unicast datagram to the first socket bound to an address and port.
+- Tool (#408): `tools/linux/nic-burst-log.py`, a read-only per-millisecond NIC receive logger (sysfs `rx_bytes`/`rx_packets` every 1 ms) with `rx_missed` steps from `ethtool -S` at a chosen cadence (default 1 s; on r8152 that read is a USB control transfer to the chip, so never fast; 0 = start and end only).
+- **No latency change.**
+
 ## 0.6.196
 
 - **Fix (#447, dasio#190, dsg's SoundGrid link outage): a clockless ASIO driver is opened again after 4, 8, 16 and 32 s, then every 60 s.** The runner re-opened a driver that gives no clock only 60 s after its last open. On dsg (19.11.2026) SoundGrid's driver, opened while its network was down, never ticked in the 53 s the link was back; the 60 s re-open brought its clock 10.7 s later, 64 s after the link returned. Now each wait for a clock re-opens 4, 8, 16, 32 s after each open, then every 60 s, and starts at 4 s again with the next wait (the clock arriving, any close or backoff). Still no reset, no backoff, no fault; each re-open counts in `clock_waits` and logs at DEBUG. A run not yet waiting always starts its wait (the one WARN) before any re-open, so an open that blocks past the interval no longer skips it (that window is spent; the next ones double). A proving run (a card off its rate) keeps its 60 s. RED tests first.
