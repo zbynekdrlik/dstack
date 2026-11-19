@@ -40,8 +40,15 @@
 //!   once. Windows delivers the group to a joined address-bound socket
 //!   (mbc, 19.11.2026: 185 datagrams in 20 s); Linux delivers it none
 //!   (only unicast to the address), so there it hears no group query
-//!   ([`bound_note`]). How the bound socket fares on Windows when the
-//!   address goes and comes back is what the field trial reads.
+//!   ([`bound_note`]). On Windows a bound socket whose address was removed
+//!   and added again stays deaf, though mdns-sd's IP check joined it
+//!   again (mbc, 19.11.2026: 0 datagrams for 2.5 min), so a bound daemon
+//!   has a watch of its own (`dstack-mdns-bound`, the #282 watch every
+//!   2 s, [`Mdns::reopens`]): once the address is back it asks the daemon
+//!   to open its socket again (`mdns_sd::ServiceDaemon::reopen`: a new
+//!   bind, the group joined, every record announced once; records and
+//!   taps kept) and logs [`BOUND_REOPENED`]. The wildcard daemon needs
+//!   none (its socket outlives the address).
 //!
 //! The subscriptions' direct queries (`subscribe::instance`) read their
 //! legacy unicast answers on a port of their own, never on 5353. A
@@ -186,10 +193,12 @@ fn reopen(daemon: &ServiceDaemon) -> Result<(), String> {
 }
 
 /// A bound daemon's watch of its address (dstack #444): a thread looking
-/// at the interface list at its period ([`keep_bound`]), ended at its drop.
+/// at the interface list at its period ([`keep_bound`]), stopped and
+/// joined by the daemon's drop before its shutdown.
 struct BoundWatch {
-    stop: Option<Sender<()>>,
-    thread: Option<JoinHandle<()>>,
+    /// Never sent on: its drop is the stop.
+    stop: Sender<()>,
+    thread: JoinHandle<()>,
 }
 
 impl BoundWatch {
@@ -217,19 +226,7 @@ impl BoundWatch {
                     }
                 }
             })?;
-        Ok(BoundWatch {
-            stop: Some(stop),
-            thread: Some(thread),
-        })
-    }
-}
-
-impl Drop for BoundWatch {
-    fn drop(&mut self) {
-        drop(self.stop.take());
-        if let Some(t) = self.thread.take() {
-            let _ended = t.join();
-        }
+        Ok(BoundWatch { stop, thread })
     }
 }
 
@@ -555,7 +552,10 @@ impl Drop for Mdns {
     /// [`SHUTDOWN_WAIT`]. A bound daemon's watch ends first, so it asks
     /// the daemon nothing more.
     fn drop(&mut self) {
-        drop(self.watch.take());
+        if let Some(watch) = self.watch.take() {
+            drop(watch.stop);
+            let _ended = watch.thread.join();
+        }
         let (asked, _waits) = retried(AGAIN_TRIES, || self.daemon.shutdown());
         let ended = asked
             .map_err(|e| e.to_string())

@@ -78,6 +78,22 @@ LICENSE-APACHE and LICENSE-MIT), copied unchanged except:
   Nothing else changes: the same joins, IP check and sends. `new`/`new_with_port`/
   `new_tapped` bind `0.0.0.0` as before.
 
+- `src/service_daemon.rs` `ServiceDaemon::reopen`, `Command::Reopen`,
+  `Zeroconf::reopen_bound` (+ `bound_addr`, `own_groups_only` taken out of
+  `set_tap`): a daemon bound to an address opens its IPv4 socket again on
+  request. On Windows a socket bound to an address that was removed and
+  added again heard no group datagram for 2.5 min, though the IP check
+  had joined the group again on it (mbc, dstack #444 step 4a,
+  19.11.2026). The daemon's thread binds a new socket to the same address
+  and port (a failure keeps the old one and is the answer), turns
+  `IP_MULTICAST_ALL` off for a tap as `set_tap` does, swaps it in the
+  poller (the old one closed), joins the group by upstream's own path
+  (`my_intfs` forgotten, then `check_ip_changes`), and announces every
+  registered service once on each interface (`exec_command_register_resend`).
+  Registrations, the cache and the tap stay. dstack asks it from its own
+  watch of the address (`crates/dstack/src/announce/mdns.rs`,
+  `a_bound_daemon_opens_its_socket_again_after_its_address_came_back_with_its_records_and_taps`).
+
 - `src/service_daemon.rs` `handle_read`, `handle_query`, `send_response`
   (and the one unit test calling `handle_query`): a query sent to the
   daemon's address instead of the group (the datagram's destination from
