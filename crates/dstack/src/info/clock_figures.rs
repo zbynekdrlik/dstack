@@ -34,7 +34,7 @@
 //! | 0x03 | u8 | `ready` | 1 when the media clock has a time |
 //! | 0x04 | u32 | `sequence` | this reply's number, from 1 at the device's start |
 //! | 0x08 | i64 | `follower_error_p90_ns` | the follower's phase error, the p90 of \|e\| over its last 30 windows, ns; `i64::MIN` = not known (fewer windows) |
-//! | 0x10 | i64 | `follower_offset_from_service_ns` | the follower's time less the service's while the switch to it waits to agree, ns; `i64::MIN` = not known (no such wait) |
+//! | 0x10 | i64 | `follower_offset_from_service_ns` | the follower's time less the service's while the switch to it waits to agree, ns; `i64::MIN` = not known (no such wait, or a re-anchor fell between the selector's reads) |
 //! | 0x18 | i32 | `follower_freq_ppb` | the follower's frequency against the PC's counter, ppb (dsync's `rate_ppm` × 1000, rounded) |
 //! | 0x1c | u32 | `follower_holdovers` | the follower's entries into holdover |
 //! | 0x20 | i32 | `service_freq_ppb` | the service's frequency adjustment, ppb, from its last reply |
@@ -236,7 +236,7 @@ pub struct FollowerFigures {
     /// The p90 of its |e| over its last 30 windows, ns; `None` before.
     pub error_p90_ns: Option<i64>,
     /// Its time less the service's while the switch to it waits to agree,
-    /// ns; `None` otherwise.
+    /// ns; `None` otherwise (and when a re-anchor fell between the reads).
     pub offset_from_service_ns: Option<i64>,
 }
 
@@ -483,7 +483,7 @@ pub fn figures_of(stats: &ClockStats, ready: bool, now_ns: i64) -> ClockFigures 
             holdover: polled.in_holdover,
             holdovers: polled.holdovers,
             freq_ppb: reply.map_or(0, |r| r.freq_ppb),
-            grandmaster: stats.grandmaster(),
+            grandmaster: reply.and_then(|r| uuid_of(r.grandmaster)),
         }
     });
     ClockFigures {

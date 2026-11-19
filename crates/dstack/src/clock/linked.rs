@@ -792,7 +792,8 @@ impl<M: Model> Follow for Absorbing<M> {
 
 /// dsync's model rate (`ClockModel::rate_ppm`, ppm) in whole ppb, rounded
 /// to the nearest and saturated at `i32`'s bounds (dstack #429: the clock
-/// figures carry it as the service's frequency word, in ppb).
+/// figures carry it as `follower_freq_ppb`, in the unit of the service's
+/// frequency word).
 pub fn ppb_of(rate_ppm: f64) -> i32 {
     // `as` saturates a float past the bounds, and reads NaN as 0.
     (rate_ppm * 1000.0).round() as i32

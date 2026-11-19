@@ -363,8 +363,7 @@ impl Served {
                     if reply.is_none() && never_answered(&buf[..n]) {
                         self.unanswered.record(Instant::now(), peer.ip(), &buf[..n]);
                     }
-                    let direct = mc.bridge_within(&mut self.bound, Instant::now(), &buf[..n], ctx.beat.bridge())
-                        .or_else(|| mc.clock_within(&mut self.bound, Instant::now(), &buf[..n], || ctx.beat.clock_figures()));
+                    let direct = direct_reply(mc, &mut self.bound, &buf[..n], ctx.beat.as_ref());
                     if let (Some(p), std::net::SocketAddr::V4(asker)) = (direct, peer) {
                         send_direct(sock, &p, asker).await;
                     }
@@ -504,6 +503,19 @@ pub(super) fn relay_of(datagram: &[u8], peer: std::net::SocketAddr) -> share::Ms
     }
 }
 
+/// The reply for the asker alone to a dstack-own request in `datagram`
+/// (bridge figures, then clock figures: each answers its own kind only),
+/// within `bound`; `None` for any other datagram.
+fn direct_reply(
+    mc: &mut InfoBuilder,
+    bound: &mut Limit,
+    datagram: &[u8],
+    beat: &dyn Beat,
+) -> Option<Vec<u8>> {
+    mc.bridge_within(bound, Instant::now(), datagram, beat.bridge())
+        .or_else(|| mc.clock_within(bound, Instant::now(), datagram, || beat.clock_figures()))
+}
+
 /// Sends a reply to the one asker `to` (a bridge-figures or clock-figures
 /// reply, never a group's packet), only to one host ([`share::is_unicast`]): outside the
 /// multicast send watch, a failure logged at debug (the asker asks again).
@@ -607,8 +619,7 @@ pub async fn serve_member(
                     }
                     Some(share::Msg::Ask(asker, d)) if from == manager => {
                         requests.received(REQUEST_PORT, from.ip(), info_op(&d));
-                        mc.bridge_within(&mut bound, Instant::now(), &d, beat.bridge())
-                            .or_else(|| mc.clock_within(&mut bound, Instant::now(), &d, || beat.clock_figures()))
+                        direct_reply(&mut mc, &mut bound, &d, beat.as_ref())
                             .map(|p| share::Msg::SendTo(asker, p).encode())
                     }
                     _ => None,

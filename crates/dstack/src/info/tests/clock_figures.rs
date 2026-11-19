@@ -372,8 +372,9 @@ fn the_service_s_part_is_the_poller_s_last_read() {
         (TimeSource::Service, None, None)
     );
     // Not locked yet: the reply's word and mode, not locked.
+    // The grandmaster is the reply's own, never another poll's.
+    stats.set_grandmaster([9; 6]);
     stats.set_poll(Sample::NotLocked, Some(reading(false)), 2 * S);
-    stats.set_grandmaster(reading(false).grandmaster);
     let f = figures_of(&stats, false, 2 * S + 1_500_000);
     assert_eq!(
         f.service,

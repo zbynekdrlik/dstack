@@ -7,7 +7,7 @@
 //! error and its `:8898` status are not read here (the DSYX reply carries
 //! neither).
 
-use super::{Reading, Sample};
+use super::{ClockStats, Reading, Sample};
 
 /// What the last poll of the service gave the tracker ([`Sample`], k
 /// left out).
@@ -61,5 +61,24 @@ impl ServiceRead {
         if let Some(r) = reading {
             self.reply = Some((r, at_ns));
         }
+    }
+}
+
+impl ClockStats {
+    /// One poll of the service: its sample, and its reply read at the
+    /// monotonic time `at_ns` (the poller's).
+    pub fn set_poll(&self, s: Sample, reading: Option<Reading>, at_ns: i64) {
+        self.service
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .polled(s, reading, at_ns);
+    }
+
+    /// The service as the poller read it last ([`ServiceRead`]).
+    pub fn service(&self) -> ServiceRead {
+        *self
+            .service
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }

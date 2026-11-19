@@ -184,8 +184,8 @@ pub fn is_unicast(to: &SocketAddrV4) -> bool {
 
 /// Whether `packet` is a bridge-figures reply ([`super::bridge`]): its
 /// length (a version 2 body, or a version 1 body from a member older than
-/// dstack #419) and its opcode. A member's [`Msg::SendTo`] carries nothing
-/// else.
+/// dstack #419) and its opcode. A member's [`Msg::SendTo`] carries this or
+/// a clock reply ([`is_clock_reply`]), nothing else.
 pub fn is_bridge_reply(packet: &[u8]) -> bool {
     let body = packet.len().checked_sub(super::HEADER_LEN);
     matches!(

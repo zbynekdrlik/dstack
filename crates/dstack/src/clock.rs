@@ -209,7 +209,8 @@ pub struct ClockStats {
     /// A linked clock's follower counts, as the selector read them last
     /// (`None`: no follower).
     follower: std::sync::Mutex<Option<FollowerCounts>>,
-    /// The service as the poller read it last (dstack #429).
+    /// The service as the poller read it last (dstack #429,
+    /// [`ClockStats::set_poll`]).
     service: std::sync::Mutex<ServiceRead>,
 }
 
@@ -260,7 +261,7 @@ pub struct FollowerCounts {
     /// service's ([`linked::Waiting::WaitsToAgree`]): the follower's time
     /// less the service's, ns, as the selector's last round measured it
     /// ([`linked::offset_of`]); `None` otherwise, and when either had no
-    /// time. dstack #429.
+    /// time or a re-anchor fell between the reads. dstack #429.
     pub offset_from_service_ns: Option<i64>,
 }
 
@@ -336,23 +337,6 @@ impl ClockStats {
     pub fn follower(&self) -> Option<FollowerCounts> {
         *self
             .follower
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
-    /// One poll of the service: its sample, and its reply read at the
-    /// monotonic time `at_ns` (the poller's; dstack #429).
-    pub fn set_poll(&self, s: Sample, reading: Option<Reading>, at_ns: i64) {
-        self.service
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .polled(s, reading, at_ns);
-    }
-
-    /// The service as the poller read it last ([`ServiceRead`]).
-    pub fn service(&self) -> ServiceRead {
-        *self
-            .service
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
