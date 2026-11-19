@@ -409,6 +409,32 @@ fn a_hold_that_ended_under_the_floor_s_lateness_is_settled_whole() {
     assert_eq!((stats.output_gaps(), stats.output_lost_frames()), (1, 864));
 }
 
+/// A callback held on every call (each 35 ms after the last, a dry call
+/// each time) keeps its gap open, so the controller makes no observation
+/// (dstack #433): the gap's running sum still drops the card's silence, so
+/// the depth neither runs dry nor grows, and the settling after it closes
+/// the gap with the FIFO where it was.
+#[test]
+fn a_callback_held_on_every_call_keeps_the_depth() {
+    let (fifo, mut player) = running(200);
+    let stats = player.stats();
+    let before = fifo.len();
+    for _ in 0..40 {
+        call(&fifo, &mut player, 1680, 1056);
+    }
+    call(&fifo, &mut player, 480, 480);
+    for _ in 1..SETTLE_CALLS {
+        call(&fifo, &mut player, 480, 480);
+    }
+    assert_eq!((stats.underruns(), stats.recentres()), (0, 0));
+    assert_eq!(stats.output_gaps(), 1);
+    assert!(
+        fifo.len().abs_diff(before) <= 480,
+        "{} {before}",
+        fifo.len()
+    );
+}
+
 #[test]
 fn a_hold_soon_after_a_gap_is_measured_on_a_fresh_floor() {
     let (fifo, mut player) = running(200);

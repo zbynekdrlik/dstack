@@ -21,11 +21,11 @@
 //! events are held 46 ms (the field's worst) or 20 ms, or 25 ms with the
 //! next event 6 ms late, or (dstack #433, windows-2025's timer: every wake
 //! about 1 ms late) every event 1 ms late and the held one to 0.9 ms past
-//! a tick, less late than the calls before it. The bridge must play every frame it is asked for
-//! at the level (no underrun, no re-centre), and the latency after a hold
-//! must be the latency before it: the frames due while the card played
-//! silence are dropped, counted as the output's own gap
-//! ([`dlink::bridge::Stats::output_gaps`]), never played late.
+//! a tick, less late than the calls before it. The bridge must play every
+//! frame it is asked for at the level (no underrun, no re-centre), and the
+//! latency after a hold must be the latency before it: the frames due
+//! while the card played silence are dropped, counted as the output's own
+//! gap ([`dlink::bridge::Stats::output_gaps`]), never played late.
 //!
 //! The level is judged in the callbacks whose read met no ring hole (nor
 //! the one after it, which the converter's filter reaches): a sender
