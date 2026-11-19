@@ -219,10 +219,6 @@ pub fn epoch_of(switches: u32, component: u32) -> u32 {
     (switches << 16).wrapping_add(component & 0xffff)
 }
 
-/// A started follower's clock and the value that keeps it running (both
-/// `None` when it did not start).
-pub type Started = (Option<Box<dyn Follow>>, Option<Box<dyn Send + Sync>>);
-
 /// The follower as the linked clock reads it.
 pub trait Follow: Send + Sync {
     /// PTP time now, ns; `None` until anchored.
@@ -344,102 +340,6 @@ impl Linked {
         }
     }
 
-    /// A linked clock over the follower `start` starts on the service's
-    /// clock: the device then runs on the service until the follower is
-    /// in use. A start that fails for a cause that can pass is tried again
-    /// by the selector ([`Linked::tick`], [`retry_delay_s`]); one that
-    /// cannot pass is not.
-    pub fn start(service: Arc<MonoClock>, start: Starter) -> Linked {
-        Linked::start_at(service, start, monotonic_ns())
-    }
-
-    /// [`Linked::start`] at the monotonic time `now_ns` (a test's own).
-    pub(crate) fn start_at(service: Arc<MonoClock>, mut start: Starter, now_ns: i64) -> Linked {
-        match start.attempt() {
-            Attempt::Started(f, keep) => {
-                info!(
-                    iface = %start.iface,
-                    seed_ppb = ?start.seed_ppb,
-                    start_attempts = 1,
-                    "{STARTED_LINE}"
-                );
-                Linked::new(Some(f), service, Some(keep))
-            }
-            Attempt::Failed {
-                passes: false,
-                reason,
-                error,
-            } => {
-                warn!(iface = %start.iface, reason, error = %error, "{NOT_STARTED_LINE}");
-                Linked::new(None, service, None)
-            }
-            Attempt::Failed {
-                passes: true,
-                reason,
-                error,
-            } => {
-                warn!(
-                    iface = %start.iface,
-                    reason,
-                    error = %error,
-                    retry_in_s = retry_delay_s(1),
-                    "{RETRY_LINE}"
-                );
-                let linked = Linked::new(None, service, None);
-                linked.lock_report().retry = Some(Retry::new(start, now_ns, error));
-                linked
-            }
-        }
-    }
-
-    /// The selector's try of a follower start that is due at `now_ns`: a
-    /// follower that starts is the selector's from this round on; a try
-    /// that fails for a cause that can pass waits its next delay, one that
-    /// cannot ends the tries ([`NOT_STARTED_LINE`]).
-    fn try_start(&self, now_ns: i64) {
-        let mut r = self.lock_report();
-        let Some(retry) = r.retry.as_mut().filter(|t| t.due(now_ns)) else {
-            return;
-        };
-        let attempts = retry.attempts.saturating_add(1);
-        let iface = retry.starter.iface.clone();
-        match retry.starter.attempt() {
-            Attempt::Started(f, keep) => {
-                info!(
-                    iface = %iface,
-                    seed_ppb = ?retry.starter.seed_ppb,
-                    start_attempts = attempts,
-                    retrying_for_s = retry.retrying_for_s(now_ns),
-                    "{STARTED_LINE}"
-                );
-                // The keeper first: whoever sees the follower sees it kept.
-                // Neither is set while the tries run.
-                let _ = self.keep.set(keep);
-                let _ = self.internal.set(f);
-                r.retry = None;
-            }
-            Attempt::Failed {
-                passes: true,
-                error,
-                ..
-            } => retry.failed(now_ns, error),
-            Attempt::Failed {
-                passes: false,
-                reason,
-                error,
-            } => {
-                warn!(
-                    iface = %iface,
-                    reason,
-                    error = %error,
-                    start_attempts = attempts,
-                    "{NOT_STARTED_LINE}"
-                );
-                r.retry = None;
-            }
-        }
-    }
-
     fn state(&self) -> State {
         State::unpack(self.state.load(Ordering::Acquire))
     }
@@ -554,27 +454,6 @@ impl Linked {
             _ => self.report_tries(now_ns, selected.source),
         }
         selected.source
-    }
-
-    /// While the follower's start is tried again: [`NOT_IN_USE_LINE`] once
-    /// a minute with the reason `stopped`, the starts so far, the seconds
-    /// since the first failed and the last failure's text.
-    fn report_tries(&self, now_ns: i64, source: Source) {
-        let mut r = self.lock_report();
-        let Report { minute, retry, .. } = &mut *r;
-        let Some(retry) = retry.as_ref() else {
-            return;
-        };
-        if let (_, Some(_)) = minute.round(now_ns, 0, true) {
-            info!(
-                reason = %Waiting::Stopped.word(),
-                start_attempts = retry.attempts,
-                retrying_for_s = retry.retrying_for_s(now_ns),
-                error = %retry.error,
-                source = ?source,
-                "{NOT_IN_USE_LINE}"
-            );
-        }
     }
 
     /// Why the follower (its view `v`) is not the source `selected` chose:

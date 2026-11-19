@@ -3,7 +3,7 @@
 //! after logon, and no second try): the backoff on fake time, the lines,
 //! the status, and a late start that becomes the source.
 
-use std::sync::atomic::AtomicI64;
+use std::sync::atomic::{AtomicBool, AtomicI64};
 
 use super::*;
 
@@ -20,11 +20,23 @@ enum Answer {
     Start,
 }
 
-/// When the starter was called: the test's fake time at each call.
+/// When the starter was called: the test's fake time at each call; and
+/// whether the keeper of the follower it started was dropped.
 #[derive(Default)]
 struct Calls {
     now: AtomicI64,
     at: Mutex<Vec<i64>>,
+    kept_dropped: Arc<AtomicBool>,
+}
+
+/// The test's keeper: marks its drop (a dropped keeper stops a real
+/// follower's thread).
+struct Keeper(Arc<AtomicBool>);
+
+impl Drop for Keeper {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
 }
 
 impl Calls {
@@ -58,7 +70,10 @@ fn starter(calls: &Arc<Calls>, fake: &Arc<Fake>, script: Vec<Answer>) -> Starter
                 reason: "Npcap is not installed",
                 error: "wpcap.dll".into(),
             },
-            Answer::Start => Attempt::Started(Box::new(Arc::clone(&fake)), Box::new(())),
+            Answer::Start => Attempt::Started(
+                Box::new(Arc::clone(&fake)),
+                Box::new(Keeper(Arc::clone(&calls.kept_dropped))),
+            ),
         }
     })
 }
@@ -141,9 +156,12 @@ fn a_start_that_failed_for_a_passing_cause_is_tried_again_until_it_is_the_source
     for field in [
         "INFO",
         "reason=stopped",
+        "iface=Ethernet 3",
         "start_attempts=7",
         "retrying_for_s=61",
+        "start_failure=\"another failure\"",
         "error=no Npcap device (try 7)",
+        "start_ms=",
         "source=Service",
     ] {
         assert!(minute[0].contains(field), "{field} in {}", minute[0]);
@@ -174,10 +192,66 @@ fn a_start_that_failed_for_a_passing_cause_is_tried_again_until_it_is_the_source
         "seed_ppb=Some(-4671)",
         "start_attempts=9",
         "retrying_for_s=121",
+        "start_ms=",
     ] {
         assert!(started[0].contains(field), "{field} in {}", started[0]);
     }
     assert!(!log.contains("reason=stopped"), "{log}");
+    // The follower started late is kept running for the clock's life.
+    assert!(!calls.kept_dropped.load(Ordering::SeqCst));
+    drop(linked);
+    assert!(calls.kept_dropped.load(Ordering::SeqCst));
+}
+
+/// A follower started by a try waits a minute of its own before its first
+/// line: never the tries' minute, which would call a fresh follower's 0
+/// windows `no_ptp` in the very round it started (the review of #431: the
+/// 30 s tries start it on a minute's edge every other try).
+#[test]
+fn a_follower_started_late_waits_its_own_minute_before_a_line() {
+    crate::test_log::undecided();
+    let (service, fake) = ready();
+    // Alive, hearing nothing yet, not locked: not taken from the service.
+    set(
+        &fake,
+        Time::OnService(Arc::clone(&service), 0),
+        View {
+            alive: true,
+            ..View::default()
+        },
+    );
+    let calls = Arc::new(Calls::default());
+    let mut script = vec![Answer::Pass; 8];
+    script.push(Answer::Start);
+    let (linked, _) = boot(&service, starter(&calls, &fake, script), &calls, 5);
+    let log = crate::test_log::capture_at(tracing::Level::INFO, || {
+        for t in 6..126 {
+            tick(&linked, &calls, t);
+        }
+    });
+    // The tries' minute: lines at 66 s, and its next due at 126 s.
+    assert_eq!(lines(&log, NOT_IN_USE_LINE).len(), 1, "{log}");
+    let log = crate::test_log::capture_at(tracing::Level::INFO, || {
+        assert_eq!(tick(&linked, &calls, 126), Source::Service);
+    });
+    assert!(linked.has_internal(), "started at 126 s");
+    assert_eq!(lines(&log, NOT_IN_USE_LINE).len(), 0, "{log}");
+    let log = crate::test_log::capture_at(tracing::Level::INFO, || {
+        for t in 127..186 {
+            assert_eq!(tick(&linked, &calls, t), Source::Service, "at {t} s");
+        }
+    });
+    assert_eq!(lines(&log, NOT_IN_USE_LINE).len(), 0, "{log}");
+    let log = crate::test_log::capture_at(tracing::Level::INFO, || {
+        assert_eq!(tick(&linked, &calls, 186), Source::Service);
+    });
+    let l = lines(&log, NOT_IN_USE_LINE);
+    assert_eq!(l.len(), 1, "{log}");
+    for field in ["reason=no_ptp", "windows_last_minute=0"] {
+        assert!(l[0].contains(field), "{field} in {}", l[0]);
+    }
+    assert!(!l[0].contains("start_attempts"), "{}", l[0]);
+    assert_eq!(waiting(&linked), Some(Waiting::NoPtp));
 }
 
 /// A cause that cannot pass (Npcap not installed) stays as before: one
@@ -272,9 +346,11 @@ fn only_a_start_failure_that_can_pass_is_tried_again() {
         interface: "Ethernet 3".into(),
         cause: std::io::Error::from(std::io::ErrorKind::NotFound).into(),
     }));
-    let capture = FollowerError::Other(
-        std::io::Error::other("pinned PTP interface Ethernet 3: no Npcap device").into(),
-    );
+    // mbc-snv's failure as dsync-ptp v1.33.1 words it (`net_pcap.rs`;
+    // the address a documentation one): an `anyhow!` from the open.
+    const NO_DEVICE: &str =
+        "pinned PTP interface Ethernet 3 (192.0.2.10): no Npcap device carries 192.0.2.10";
+    let capture = FollowerError::Other(std::io::Error::other(NO_DEVICE).into());
     assert!(start_passes(&capture));
     match failed(&capture) {
         Attempt::Failed {
@@ -284,7 +360,7 @@ fn only_a_start_failure_that_can_pass_is_tried_again() {
         } => {
             assert!(passes);
             assert_eq!(reason, "another failure");
-            assert_eq!(error, "pinned PTP interface Ethernet 3: no Npcap device");
+            assert_eq!(error, NO_DEVICE);
         }
         Attempt::Started(..) => panic!("a failure"),
     }
@@ -322,15 +398,26 @@ fn a_try_is_due_its_delay_after_the_last_failure() {
     use crate::clock::linked::retry::Retry;
     let start = Starter::new("Ethernet 3", None, |_, _| unreachable!("not run"));
     let t0 = 5 * S;
-    let mut r = Retry::new(start, t0, "first".into());
-    assert_eq!((r.attempts, r.error.as_str()), (1, "first"));
+    let mut r = Retry::new(start, t0, "another failure", "first".into());
+    assert_eq!(
+        (r.attempts, r.reason, r.error.as_str(), r.start_ms),
+        (1, "another failure", "first", 0)
+    );
     assert!(!r.due(t0 + S - 1));
     assert!(r.due(t0 + S));
-    r.failed(t0 + S, "second".into());
-    assert_eq!((r.attempts, r.error.as_str()), (2, "second"));
+    r.failed(
+        t0 + S,
+        "no such interface, or no IPv4 on it",
+        "second".into(),
+        7,
+    );
+    assert_eq!(
+        (r.attempts, r.reason, r.error.as_str(), r.start_ms),
+        (2, "no such interface, or no IPv4 on it", "second", 7)
+    );
     assert!(!r.due(t0 + 3 * S - 1));
     assert!(r.due(t0 + 3 * S));
-    r.failed(t0 + 3 * S + 7, "third".into());
+    r.failed(t0 + 3 * S + 7, "another failure", "third".into(), 0);
     assert!(!r.due(t0 + 7 * S + 6));
     assert!(r.due(t0 + 7 * S + 7));
     assert_eq!(r.retrying_for_s(t0 + 61 * S - 1), 60);

@@ -15,7 +15,14 @@
 
 use dsync_ptp::follower::FollowerError;
 
-use super::{Absorbing, Follow, follower_failure};
+use std::sync::Arc;
+
+use tracing::{info, warn};
+
+use super::{
+    Absorbing, Follow, Linked, Minute, MonoClock, NOT_IN_USE_LINE, NOT_STARTED_LINE, RETRY_LINE,
+    Report, STARTED_LINE, Source, Waiting, follower_failure, monotonic_ns,
+};
 
 /// What one start of the follower gave.
 pub enum Attempt {
@@ -130,19 +137,27 @@ pub(super) struct Retry {
     pub(super) attempts: u32,
     /// The next try's monotonic time, ns.
     next_ns: i64,
+    /// The last failure's word ([`follower_failure`]).
+    pub(super) reason: &'static str,
     /// The last failure's text.
     pub(super) error: String,
+    /// How long the last try took, ms (the selector's round waits for it;
+    /// 0 for the first, which the start timed itself).
+    pub(super) start_ms: u128,
 }
 
 impl Retry {
-    /// The tries after a first failure at `now_ns` with `error`.
-    pub(super) fn new(starter: Starter, now_ns: i64, error: String) -> Retry {
+    /// The tries after a first failure at `now_ns` for `reason` with
+    /// `error`.
+    pub(super) fn new(starter: Starter, now_ns: i64, reason: &'static str, error: String) -> Retry {
         Retry {
             starter,
             first_ns: now_ns,
             attempts: 1,
             next_ns: now_ns.saturating_add(retry_delay_s(1) * S),
+            reason,
             error,
+            start_ms: 0,
         }
     }
 
@@ -151,15 +166,167 @@ impl Retry {
         now_ns >= self.next_ns
     }
 
-    /// A try at `now_ns` failed again with `error`.
-    pub(super) fn failed(&mut self, now_ns: i64, error: String) {
+    /// A try at `now_ns` that took `start_ms` failed again for `reason`
+    /// with `error`.
+    pub(super) fn failed(
+        &mut self,
+        now_ns: i64,
+        reason: &'static str,
+        error: String,
+        start_ms: u128,
+    ) {
         self.attempts = self.attempts.saturating_add(1);
         self.next_ns = now_ns.saturating_add(retry_delay_s(self.attempts) * S);
+        self.reason = reason;
         self.error = error;
+        self.start_ms = start_ms;
     }
 
     /// Whole seconds since the first failure at `now_ns`.
     pub(super) fn retrying_for_s(&self, now_ns: i64) -> i64 {
         now_ns.saturating_sub(self.first_ns) / S
+    }
+}
+
+impl Linked {
+    /// A linked clock over the follower `start` starts on the service's
+    /// clock: the device then runs on the service until the follower is
+    /// in use. A start that fails for a cause that can pass is tried again
+    /// by the selector ([`Linked::tick`], [`retry_delay_s`]); one that
+    /// cannot pass is not.
+    pub fn start(service: Arc<MonoClock>, start: Starter) -> Linked {
+        Linked::start_at(service, start, monotonic_ns())
+    }
+
+    /// [`Linked::start`] at the monotonic time `now_ns` (a test's own).
+    pub(crate) fn start_at(service: Arc<MonoClock>, mut start: Starter, now_ns: i64) -> Linked {
+        let took = std::time::Instant::now();
+        let attempt = start.attempt();
+        let start_ms = took.elapsed().as_millis();
+        match attempt {
+            Attempt::Started(f, keep) => {
+                info!(
+                    iface = %start.iface,
+                    seed_ppb = ?start.seed_ppb,
+                    start_attempts = 1,
+                    start_ms,
+                    "{STARTED_LINE}"
+                );
+                Linked::new(Some(f), service, Some(keep))
+            }
+            Attempt::Failed {
+                passes: false,
+                reason,
+                error,
+            } => {
+                warn!(
+                    iface = %start.iface,
+                    reason,
+                    error = %error,
+                    start_ms,
+                    "{NOT_STARTED_LINE}"
+                );
+                Linked::new(None, service, None)
+            }
+            Attempt::Failed {
+                passes: true,
+                reason,
+                error,
+            } => {
+                warn!(
+                    iface = %start.iface,
+                    reason,
+                    error = %error,
+                    retry_in_s = retry_delay_s(1),
+                    start_ms,
+                    "{RETRY_LINE}"
+                );
+                let linked = Linked::new(None, service, None);
+                linked.lock_report().retry = Some(Retry::new(start, now_ns, reason, error));
+                linked
+            }
+        }
+    }
+
+    /// The selector's try of a follower start that is due at `now_ns`: a
+    /// follower that starts is the selector's from this round on; a try
+    /// that fails for a cause that can pass waits its next delay, one that
+    /// cannot ends the tries ([`NOT_STARTED_LINE`]).
+    pub(super) fn try_start(&self, now_ns: i64) {
+        let mut r = self.lock_report();
+        let Some(retry) = r.retry.as_mut().filter(|t| t.due(now_ns)) else {
+            return;
+        };
+        let attempts = retry.attempts.saturating_add(1);
+        let iface = retry.starter.iface.clone();
+        let took = std::time::Instant::now();
+        let attempt = retry.starter.attempt();
+        let start_ms = took.elapsed().as_millis();
+        match attempt {
+            Attempt::Started(f, keep) => {
+                info!(
+                    iface = %iface,
+                    seed_ppb = ?retry.starter.seed_ppb,
+                    start_attempts = attempts,
+                    retrying_for_s = retry.retrying_for_s(now_ns),
+                    start_ms,
+                    "{STARTED_LINE}"
+                );
+                // The keeper first: whoever sees the follower sees it kept.
+                // Neither is set while the tries run.
+                let _ = self.keep.set(keep);
+                let _ = self.internal.set(f);
+                r.retry = None;
+                // Its own wait starts its own minute: never the tries' minute
+                // with a fresh follower's 0 windows (a `no_ptp` line in the
+                // round it started).
+                r.minute = Minute::default();
+            }
+            Attempt::Failed {
+                passes: true,
+                reason,
+                error,
+            } => retry.failed(now_ns, reason, error, start_ms),
+            Attempt::Failed {
+                passes: false,
+                reason,
+                error,
+            } => {
+                warn!(
+                    iface = %iface,
+                    reason,
+                    error = %error,
+                    start_attempts = attempts,
+                    start_ms,
+                    "{NOT_STARTED_LINE}"
+                );
+                r.retry = None;
+            }
+        }
+    }
+
+    /// While the follower's start is tried again: [`NOT_IN_USE_LINE`] once
+    /// a minute with the reason `stopped`, the interface, the starts so far,
+    /// the seconds since the first failed, and the last failure's word,
+    /// text and duration.
+    pub(super) fn report_tries(&self, now_ns: i64, source: Source) {
+        let mut r = self.lock_report();
+        let Report { minute, retry, .. } = &mut *r;
+        let Some(retry) = retry.as_ref() else {
+            return;
+        };
+        if let (_, Some(_)) = minute.round(now_ns, 0, true) {
+            info!(
+                reason = %Waiting::Stopped.word(),
+                iface = %retry.starter.iface,
+                start_attempts = retry.attempts,
+                retrying_for_s = retry.retrying_for_s(now_ns),
+                start_failure = retry.reason,
+                error = %retry.error,
+                start_ms = retry.start_ms,
+                source = ?source,
+                "{NOT_IN_USE_LINE}"
+            );
+        }
     }
 }
