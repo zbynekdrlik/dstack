@@ -177,12 +177,24 @@ pub(super) fn timed_pass(
     (anchor, now)
 }
 
-/// A TX loop's sleep until PTP `target_ns`, the media clock read right
-/// before and after it and its epoch checked against `epoch` (the pass's):
-/// how late it returned is recorded ([`Transmitter::slept`]).
-pub(super) fn timed_sleep(clock: &dyn PtpClock, tx: &mut Transmitter, target_ns: u64, epoch: u32) {
+/// A TX loop's sleep until PTP `target_ns`, at most its distance from the
+/// pass's own time read `read` (dstack #440: a re-anchor since that read
+/// is the next pass's, never a sleep stretched by its step), the media
+/// clock read right before and after it and its epoch checked against
+/// `epoch` (the pass's): how late it returned is recorded
+/// ([`Transmitter::slept`]).
+pub(super) fn timed_sleep(
+    clock: &dyn PtpClock,
+    tx: &mut Transmitter,
+    target_ns: u64,
+    read: Option<u64>,
+    epoch: u32,
+) {
     let asked = clock.now_ns();
-    clock.sleep_until(target_ns);
+    match read {
+        Some(read) => clock.sleep_until_within(target_ns, target_ns.saturating_sub(read)),
+        None => clock.sleep_until(target_ns),
+    }
     let woke = clock.now_ns();
     let same = clock::Anchor::of(clock).epoch == epoch;
     tx.slept(target_ns, asked, woke, same);

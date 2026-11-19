@@ -581,6 +581,9 @@ pub struct Driver {
     /// The engine pump's re-bootstraps, skipped blocks and overruns, logged
     /// once a second.
     pump: crate::stream::watch::PumpWatch,
+    /// The engine pump's blocks that stop rising while the clock is ready,
+    /// warned once a stall (dstack #440).
+    stall: crate::stream::watch::stall::StallWatch,
     /// The TX pull's watch (dstack #363).
     fill: crate::media::tx::FillWatch,
     /// Other traffic on our NIC, logged once a minute.
@@ -641,6 +644,7 @@ impl Driver {
                 sends: crate::media::late::SendWatch::new(),
                 host: crate::media::late::HostWatch::new(),
                 pump: crate::stream::watch::PumpWatch::new(),
+                stall: crate::stream::watch::stall::StallWatch::new(),
                 fill: crate::media::tx::FillWatch::new(),
                 traffic: crate::traffic::TrafficWatch::new(),
                 neighbours: crate::traffic::neighbours::Neighbours::default(),
@@ -660,7 +664,7 @@ impl Driver {
 
     /// One round of the manager now, with the channel records `resolver`
     /// knows; then the checks' round and the late, loss, RX minute, send,
-    /// host, pump, TX pull, traffic and pin watches, the traffic recorder and its
+    /// host, pump, pump stall, TX pull, traffic and pin watches, the traffic recorder and its
     /// dump at a refusal (dstack #195), and the interface watches that join
     /// the RX multicast flows' groups again after a change (dstack #282)
     /// and name the TX flow sockets' multicast send interface again (#411).
@@ -682,10 +686,14 @@ impl Driver {
             });
         self.sends.watch(now, &self.media.tx);
         self.host.watch(now, &self.media.tx);
-        self.pump.watch(
+        let engine = self.media.engine_stats();
+        self.pump
+            .watch(now, &self.media.tx.cfg.name, engine.as_deref());
+        self.stall.watch(
             now,
             &self.media.tx.cfg.name,
-            self.media.engine_stats().as_deref(),
+            engine.as_deref(),
+            self.media.clock.now_ns().is_some(),
         );
         self.fill.watch(now, &self.media.tx);
         let ip = self.media.ip;

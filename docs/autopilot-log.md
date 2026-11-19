@@ -84,3 +84,4 @@ One line per ticket: issue, commits, tests (RED -> GREEN where a bug), decisions
 - 19.11 02:54 CET: v0.6.186 (#426) and v0.6.187 (#429 clock figures, CI apt cache) released. mbc-snv's reboot: no clock (boot race, dsync#206 + #431) and a starved USB NIC (dasio's ReservedCpuSets, reverted). v0.6.188 = #431.
 - 19.11 06:45 CET: v0.6.188 = #431 + #433 + #434. v0.6.189 = dsync-ptp v1.35.13 (#435).
 - 19.11 08:37 CET: v0.6.189 = dsync-ptp v1.35.13 (#435). v0.6.190 = #427 (restart line slot) + #436 (verdicts name the sender).
+- 19.11 13:48 CET: v0.6.191 = slots in dlink + dsync-ptp v1.35.14. v0.6.192 = #440 (pump slept through a re-anchor; iemmixer silent since 16.11) + #393 (from-ASIO cause).

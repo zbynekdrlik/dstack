@@ -34,7 +34,8 @@
 //! ([`super::wake::WakeLateness::take_minute`]), which the status shows,
 //! and logs one info line ([`REJECTED_LINE`]) when the play-time filter
 //! rejected torn clock pairs in that minute (`play_at_rejected`,
-//! [`super::app_offset`], dstack #295).
+//! [`super::app_offset`], dstack #295). A pump whose blocks stop rising
+//! while the clock is ready is [`stall`]'s (dstack #440).
 
 use tracing::{info, warn};
 
@@ -253,6 +254,8 @@ impl PumpWatch {
         );
     }
 }
+
+pub mod stall;
 
 #[cfg(test)]
 mod tests;

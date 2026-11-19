@@ -153,8 +153,9 @@ pub enum UnderrunCause {
     None,
     /// No driver callback came late enough: the bridge's (wire 1).
     Bridge,
-    /// A driver callback came late enough to cost that side its audio
-    /// (wire 2).
+    /// A driver callback came late enough to cost that side its audio,
+    /// alone or on top of the side's floor (dstack-asio's `Cause::Target`,
+    /// dstack #393) (wire 2).
     Driver,
     /// Not known: the from-ASIO target was not known yet (wire 3).
     Unknown,

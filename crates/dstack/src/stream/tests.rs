@@ -1671,6 +1671,7 @@ mod after_send;
 mod causes;
 mod drain;
 mod play_at;
+mod re_anchor_sleep;
 mod split;
 
 /// dstack #332: a reader (the status, dasio's shm probe) never sees

@@ -9,6 +9,14 @@
 //! thread reads on time, so the from-ASIO side loses depth one for one
 //! with the lateness (at a 1.333 ms target the simulation lost audio from
 //! 1.0-1.5 ms late, far under the two periods `late_callbacks` counts).
+//! At worst the side needs its own floor on top (#393, [`from_asio_cause`]):
+//! the driver writes its whole buffer at a switch, so the FIFO's depth
+//! swings a period around the target, half a period under it (#422's
+//! measured floor, issuecomment-6992267133), and a late write that lands
+//! at that low point costs the floor plus its lateness. #422's sparse late
+//! bursts (every 7 s) mostly missed that point and needed only the larger
+//! of the two; dsg's underrun at 1 ms with two 500-750 us late callbacks
+//! (18.11.2026) is the sum's case.
 //! The to-ASIO side pulls and plays in the same switch, so a late switch
 //! costs it nothing; only a gap over two periods (its catch-up switches
 //! run the FIFO dry, `tests/to_asio_pull.rs`' driver-thread witness) is
@@ -113,6 +121,11 @@ pub enum Cause {
     Driver,
     /// No callback came late enough: the bridge's (or its clock's).
     Bridge,
+    /// The target is under the side's floor plus the callbacks' lateness
+    /// (dstack #393): no callback alone came the target late, yet with
+    /// what the side needs for its driver shape they can explain the
+    /// loss (the worst case, module doc).
+    Target,
     /// The from-ASIO target is not known yet (0: no player started).
     Unknown,
 }
@@ -122,6 +135,9 @@ impl From<Cause> for UnderrunCause {
     fn from(c: Cause) -> UnderrunCause {
         match c {
             Cause::Driver => UnderrunCause::Driver,
+            // The wire has no code of its own: the callbacks' lateness
+            // cost the side its audio, as the Driver code says.
+            Cause::Target => UnderrunCause::Driver,
             Cause::Bridge => UnderrunCause::Bridge,
             Cause::Unknown => UnderrunCause::Unknown,
         }
@@ -133,20 +149,30 @@ impl Cause {
         match self {
             Cause::Driver => "cause: driver callback lateness",
             Cause::Bridge => "cause: the bridge (no callback late enough)",
+            Cause::Target => {
+                "cause: the target under the side's floor plus the callbacks' lateness"
+            }
             Cause::Unknown => "cause: unknown (no target yet)",
         }
     }
 }
 
 /// Whose a from-ASIO underrun over `rise` reads as, at a from-ASIO target
-/// of `target_us`: the driver's when a callback came over two periods
-/// late, or surely at least 3/4 of the target late: a bin whose lower edge
-/// is at least that (at 1.333 ms from 1.0 ms late, where #382's simulation
-/// first lost audio); the open top bin (2.0 ms or more behind the
+/// of `target_us`, by how late the callbacks surely came (the reach): a
+/// closed bin's lower edge; the open top bin (2.0 ms or more behind the
 /// driver's schedule, #393) by the run's peak lateness when that rose over
 /// the check (a lateness summed over several switches can pass a period),
-/// else by the period, as late as one gap can make a callback. Else the
-/// bridge's; unknown while the target is 0.
+/// else by the period, as late as one gap can make a callback.
+///
+/// The driver's when a callback came over two periods late or the reach
+/// alone is the target; the target's ([`Cause::Target`]) when the side's
+/// floor plus the reach is: the floor is half the driver's period (module
+/// doc; #422 measured 0.75 ms holding and 0.625 ms dropping at 128 frames,
+/// 0.375 holding and 0.25 dropping at 64 frames with 64-frame blocks, at
+/// 96 kHz, seeded; with 32-frame blocks a 64-frame driver held 0.125 ms,
+/// so there half a period is an upper bound and names the target a little
+/// early: the counts carry no pump block), 0 with no period known. Else
+/// the bridge's; unknown while the target is 0.
 pub fn from_asio_cause(rise: &UnderrunCounts, target_us: u64) -> Cause {
     if target_us == 0 {
         return Cause::Unknown;
@@ -160,11 +186,20 @@ pub fn from_asio_cause(rise: &UnderrunCounts, target_us: u64) -> Cause {
         Some(bin) if is_top(bin) => rise.period_us.max(lower_edge_us(bin)),
         Some(bin) => lower_edge_us(bin),
     };
-    if 4 * reach_us >= 3 * target_us {
+    if reach_us >= target_us {
         Cause::Driver
+    } else if over_floor(reach_us, rise.period_us, target_us) {
+        Cause::Target
     } else {
         Cause::Bridge
     }
+}
+
+/// The side's floor at a driver period of `period_us` (half of it,
+/// [`from_asio_cause`]) plus a lateness of `reach_us` is at least the
+/// target, compared doubled so a half us is never rounded away.
+fn over_floor(reach_us: u64, period_us: u64, target_us: u64) -> bool {
+    2 * reach_us + period_us >= 2 * target_us
 }
 
 /// Whose a to-ASIO underrun over `rise` reads as: the driver's only after
