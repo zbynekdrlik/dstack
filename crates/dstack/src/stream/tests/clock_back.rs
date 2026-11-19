@@ -188,3 +188,32 @@ fn a_time_back_inside_a_block_never_silences_the_pump_for_the_step() {
         assert_eq!(v.rebootstraps_clock_back, 1, "{back_ns} ns back: {v:?}");
     }
 }
+
+/// Near media time 0 a bootstrap's first block is due at P + B (no block
+/// starts before 0), further ahead than W + B when P > W: that is the
+/// start's own wait, never a clock gone back (else the pump re-bootstraps
+/// at once, again and again, and never leaves its pass).
+#[test]
+fn a_schedule_near_time_0_waits_its_first_block() {
+    let t = Timing {
+        block: 32,
+        playout: 480,
+        margin: 96,
+    };
+    for now in [0, 1, 100, 480] {
+        let mut b = Blocks::bootstrap(now, t);
+        assert_eq!(b.due(), 512, "{now}");
+        assert_eq!(b.next(now), Due::Wait { until: 512 }, "{now}");
+    }
+    // Past the floor the limit holds again: due more than W + B ahead of a
+    // now past P + B is the clock gone back.
+    let fresh = Blocks::bootstrap(10_000, t);
+    let mut b = fresh;
+    assert!(matches!(
+        b.next(fresh.due() - 129),
+        Due::Rebootstrap {
+            cause: Cause::ClockBack,
+            ..
+        }
+    ));
+}
