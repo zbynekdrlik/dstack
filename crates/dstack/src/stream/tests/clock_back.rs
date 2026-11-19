@@ -48,15 +48,17 @@ fn a_time_read_back_before_its_epoch_rebootstraps_at_once() {
 
 /// The epoch follows the time (the next pass reads it, with the step): the
 /// pump runs on within a block or two of the new time, the step counted
-/// once as `clock_back`. The re-anchor then moves the schedule, already
-/// started again at the new time, the step back once more and re-bootstraps
-/// it as `late`, counting the step's blocks as missed: a second count, not
-/// a silence. Pinned as it is today so a change to it is on purpose (a
-/// keep of the restarted schedule is the main session's call on #440).
+/// once as `clock_back`. The re-anchor keeps the schedule the clock-back
+/// restart started at the new time (ROZHODNUTÉ 19.11: a one-pass mark)
+/// instead of moving it the step back once more: no second re-bootstrap,
+/// nothing missed, no wake late by the step (a `late` count with the
+/// step's blocks missed reads like #440's stall for a pump that never
+/// stopped).
 #[test]
-fn the_epoch_after_a_time_read_back_runs_the_pump_on() {
+fn the_epoch_after_a_time_read_back_keeps_the_restarted_schedule() {
     for back_ns in BACK_NS {
         let (mut r, now) = pump_at_epoch_5();
+        let behind_before = r.stats.view().wake_behind_max_us;
         let back = now - to_samples(back_ns, RATE);
         let wake = r.pump.media(back, 5);
         let step = -i64::try_from(back_ns).unwrap();
@@ -66,9 +68,14 @@ fn the_epoch_after_a_time_read_back_runs_the_pump_on() {
         assert_eq!(v.rebootstraps_clock_back, 1, "{back_ns} ns back: {v:?}");
         assert_eq!(
             (v.rebootstraps_late, v.rebootstraps, v.missed),
-            (1, 2, to_samples(back_ns, RATE) / B),
+            (0, 1, 0),
             "{back_ns} ns back: {v:?}"
         );
+        assert_eq!(v.wake_behind_max_us, behind_before, "{back_ns} ns back");
+        // It runs its blocks on from there, nothing more counted.
+        let wake = r.pump.media(wake, 6);
+        assert!(wake <= back + 3 * B, "{back_ns} ns back: {wake}");
+        assert_eq!(r.stats.view().rebootstraps, 1, "{back_ns} ns back");
     }
 }
 
