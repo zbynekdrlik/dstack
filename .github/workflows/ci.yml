@@ -26,6 +26,15 @@ jobs:
         with:
           persist-credentials: false
       - run: cargo fmt --all --check
+      - name: The runner image (the apt package cache's key)
+        id: image
+        run: echo "id=${ImageOS}-${ImageVersion}" >> "$GITHUB_OUTPUT"
+        shell: bash
+      - name: The apt packages of the last good install (no mirror needed on a hit)
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ci-apt-debs
+          key: ci-apt-debs-${{ steps.image.outputs.id }}-${{ hashFiles('scripts/ci-apt-deps.sh') }}
       - name: GTK, AppIndicator and ALSA headers (dtray's Linux tray, dlisten's output)
         run: scripts/ci-apt-deps.sh
       - name: Docs build without warnings (broken or private links)
@@ -45,6 +54,17 @@ jobs:
         with:
           persist-credentials: false
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: The runner image (the apt package cache's key)
+        id: image
+        if: runner.os == 'Linux'
+        run: echo "id=${ImageOS}-${ImageVersion}" >> "$GITHUB_OUTPUT"
+        shell: bash
+      - name: The apt packages of the last good install (no mirror needed on a hit)
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: runner.os == 'Linux'
+        with:
+          path: ~/.cache/ci-apt-debs
+          key: ci-apt-debs-${{ steps.image.outputs.id }}-${{ hashFiles('scripts/ci-apt-deps.sh') }}
       - name: GTK, AppIndicator and ALSA headers (dtray's Linux tray, dlisten's output)
         if: runner.os == 'Linux'
         run: scripts/ci-apt-deps.sh
@@ -151,6 +171,15 @@ jobs:
       - uses: taiki-e/install-action@7623a79cdfecb99d681017af368ca353d9f49bb5 # v2.87.19
         with:
           tool: cargo-llvm-cov@0.9.1
+      - name: The runner image (the apt package cache's key)
+        id: image
+        run: echo "id=${ImageOS}-${ImageVersion}" >> "$GITHUB_OUTPUT"
+        shell: bash
+      - name: The apt packages of the last good install (no mirror needed on a hit)
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ci-apt-debs
+          key: ci-apt-debs-${{ steps.image.outputs.id }}-${{ hashFiles('scripts/ci-apt-deps.sh') }}
       - name: GTK, AppIndicator and ALSA headers (dtray's Linux tray, dlisten's output)
         run: scripts/ci-apt-deps.sh
       - name: Line coverage against the floor (.github/coverage-floor)
@@ -245,6 +274,15 @@ jobs:
       - uses: taiki-e/install-action@7623a79cdfecb99d681017af368ca353d9f49bb5 # v2.87.19
         with:
           tool: cargo-mutants@27.1.0,cargo-nextest@0.9.146
+      - name: The runner image (the apt package cache's key)
+        id: image
+        run: echo "id=${ImageOS}-${ImageVersion}" >> "$GITHUB_OUTPUT"
+        shell: bash
+      - name: The apt packages of the last good install (no mirror needed on a hit)
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ci-apt-debs
+          key: ci-apt-debs-${{ steps.image.outputs.id }}-${{ hashFiles('scripts/ci-apt-deps.sh') }}
       - name: GTK, AppIndicator and ALSA headers (dtray's Linux tray, dlisten's output)
         run: scripts/ci-apt-deps.sh
       - name: Mutants of the diff

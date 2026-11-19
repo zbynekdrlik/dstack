@@ -24,9 +24,9 @@ use super::limit::{self, Limit};
 use super::sendwatch::{self, Recover, SendWatch};
 use super::unanswered::Unanswered;
 use super::{
-    Beat, Changes, FigureSlot, Follower, HEARTBEAT_EVERY, HEARTBEAT_GROUP, HEARTBEAT_PORT,
-    INFO_GROUP, INFO_PORT, InfoBuilder, RECV_BUFFER, REQUEST_PORT, Records, never_answered,
-    peak_byte, share,
+    Beat, Changes, ClockFigures, FigureSlot, Follower, HEARTBEAT_EVERY, HEARTBEAT_GROUP,
+    HEARTBEAT_PORT, INFO_GROUP, INFO_PORT, InfoBuilder, RECV_BUFFER, REQUEST_PORT, Records,
+    never_answered, peak_byte, share,
 };
 use crate::clock::{ClockStats, PtpClock};
 use crate::ctl::{Requests, info_op};
@@ -98,6 +98,16 @@ impl Beat for Sources {
 
     fn bridge(&self) -> Option<&FigureSlot> {
         Some(&self.bridge)
+    }
+
+    /// The clock's figures from its stats (dstack #429): every running
+    /// device knows its clock.
+    fn clock_figures(&self) -> Option<ClockFigures> {
+        Some(super::clock_figures::figures_of(
+            &self.stats,
+            self.clock.now_ns().is_some(),
+            crate::clock::monotonic_ns(),
+        ))
     }
 }
 
@@ -285,7 +295,8 @@ pub(crate) fn elapsed_ns(base: Instant) -> u64 {
 struct Served {
     base: Instant,
     members: share::Members,
-    /// The askers whose bridge-figures request went to the members.
+    /// The askers whose bridge-figures or clock-figures request went to the
+    /// members.
     asks: share::Asks,
     bound: Limit,
     unanswered: Unanswered,
@@ -352,7 +363,7 @@ impl Served {
                     if reply.is_none() && never_answered(&buf[..n]) {
                         self.unanswered.record(Instant::now(), peer.ip(), &buf[..n]);
                     }
-                    let direct = mc.bridge_within(&mut self.bound, Instant::now(), &buf[..n], ctx.beat.bridge());
+                    let direct = direct_reply(mc, &mut self.bound, &buf[..n], ctx.beat.as_ref());
                     if let (Some(p), std::net::SocketAddr::V4(asker)) = (direct, peer) {
                         send_direct(sock, &p, asker).await;
                     }
@@ -381,10 +392,10 @@ impl Served {
                             None
                         }
                         Some(share::Msg::SendTo(asker, packet)) if self.members.is_live(&from, now_ns) => {
-                            if self.asks.holds(&asker, now_ns) && share::is_bridge_reply(&packet) {
+                            if self.asks.holds(&asker, now_ns) && (share::is_bridge_reply(&packet) || share::is_clock_reply(&packet)) {
                                 send_direct(sock, &packet, asker).await;
                             } else {
-                                debug!("a member's reply to no asker, or no bridge reply: dropped");
+                                debug!("a member's reply to no asker, or no bridge or clock reply: dropped");
                             }
                             None
                         }
@@ -476,28 +487,45 @@ impl Served {
 }
 
 /// What the manager relays to its members for `datagram` from `peer`: a
-/// bridge-figures request with its sender ([`share::Msg::Ask`]), so the
-/// member's reply can go back to it alone; anything else as it came
-/// ([`share::Msg::Request`]).
+/// bridge-figures or clock-figures request with its sender
+/// ([`share::Msg::Ask`]), so the member's reply can go back to it alone;
+/// anything else as it came ([`share::Msg::Request`]).
 pub(super) fn relay_of(datagram: &[u8], peer: std::net::SocketAddr) -> share::Msg {
-    let bridge =
-        super::parse_request(datagram).is_some_and(|r| r.kind == super::Kind::BridgeFigures);
+    let direct = super::parse_request(datagram).is_some_and(|r| {
+        matches!(
+            r.kind,
+            super::Kind::BridgeFigures | super::Kind::ClockFigures
+        )
+    });
     match peer {
-        std::net::SocketAddr::V4(asker) if bridge => share::Msg::Ask(asker, datagram.to_vec()),
+        std::net::SocketAddr::V4(asker) if direct => share::Msg::Ask(asker, datagram.to_vec()),
         _ => share::Msg::Request(datagram.to_vec()),
     }
 }
 
-/// Sends a reply to the one asker `to` (a bridge-figures reply, never a
-/// group's packet), only to one host ([`share::is_unicast`]): outside the
+/// The reply for the asker alone to a dstack-own request in `datagram`
+/// (bridge figures, then clock figures: each answers its own kind only),
+/// within `bound`; `None` for any other datagram.
+fn direct_reply(
+    mc: &mut InfoBuilder,
+    bound: &mut Limit,
+    datagram: &[u8],
+    beat: &dyn Beat,
+) -> Option<Vec<u8>> {
+    mc.bridge_within(bound, Instant::now(), datagram, beat.bridge())
+        .or_else(|| mc.clock_within(bound, Instant::now(), datagram, || beat.clock_figures()))
+}
+
+/// Sends a reply to the one asker `to` (a bridge-figures or clock-figures
+/// reply, never a group's packet), only to one host ([`share::is_unicast`]): outside the
 /// multicast send watch, a failure logged at debug (the asker asks again).
 async fn send_direct(sock: &UdpSocket, packet: &[u8], to: SocketAddrV4) {
     if !share::is_unicast(&to) {
-        debug!("a bridge figures reply to no single host: not sent");
+        debug!("a dstack figures reply to no single host: not sent");
         return;
     }
     if let Err(e) = sock.send_to(packet, to).await {
-        debug!(error = %e, "a bridge figures reply not sent to its asker");
+        debug!(error = %e, "a dstack figures reply not sent to its asker");
     }
 }
 
@@ -591,7 +619,7 @@ pub async fn serve_member(
                     }
                     Some(share::Msg::Ask(asker, d)) if from == manager => {
                         requests.received(REQUEST_PORT, from.ip(), info_op(&d));
-                        mc.bridge_within(&mut bound, Instant::now(), &d, beat.bridge())
+                        direct_reply(&mut mc, &mut bound, &d, beat.as_ref())
                             .map(|p| share::Msg::SendTo(asker, p).encode())
                     }
                     _ => None,

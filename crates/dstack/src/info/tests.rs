@@ -14,6 +14,7 @@ use crate::subscribe::Manager;
 use crate::wire::tests::Rng;
 
 mod bridge;
+mod clock_figures;
 mod conformance;
 mod send_failures;
 mod unanswered;

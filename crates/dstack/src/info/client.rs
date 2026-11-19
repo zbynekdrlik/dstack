@@ -42,6 +42,10 @@
 //! `07 2a d5 b0`), never to the group: [`bridge_figures`] asks it from a
 //! socket of the caller's ([`unicast_socket`]).
 //!
+//! A dstack device's clock figures (dstack #429, [`super::clock_figures`]):
+//! the request `07 31 d5 b3 00 00 00 00` with no body, answered unicast in
+//! the same way (reply `07 2a d5 b2`): [`clock_figures`].
+//!
 //! Every version is `major u8, minor u8, patch u16`, big-endian.
 //!
 //! | product info (0xc0) | |
@@ -123,6 +127,9 @@ pub enum Ask {
     SetEncoding(u32),
     /// A bridge device's figures (dstack's own, [`super::bridge`]).
     BridgeFigures,
+    /// A dstack device's clock figures (dstack's own,
+    /// [`super::clock_figures`]).
+    ClockFigures,
 }
 
 impl Ask {
@@ -136,6 +143,7 @@ impl Ask {
             Ask::SampleRate | Ask::SetSampleRate(_) => [0x00, 0x81],
             Ask::SetEncoding(_) => [0x00, 0x83],
             Ask::BridgeFigures => super::bridge::REQUEST_CODE,
+            Ask::ClockFigures => super::clock_figures::REQUEST_CODE,
         }
     }
 
@@ -143,7 +151,7 @@ impl Ask {
     /// netaudio's clock-stats request ends `.. 64` and carries 60 zeros.
     fn request_tail(self) -> (u8, usize) {
         match self {
-            Ask::Product | Ask::Board | Ask::BridgeFigures => (0, 0),
+            Ask::Product | Ask::Board | Ask::BridgeFigures | Ask::ClockFigures => (0, 0),
             Ask::Clock => (0x64, CLOCK_REQUEST_BODY),
             Ask::Network | Ask::SampleRate | Ask::SetSampleRate(_) | Ask::SetEncoding(_) => {
                 (0x64, NETWORK_REQUEST_BODY)
@@ -171,6 +179,7 @@ impl Ask {
             Ask::SampleRate | Ask::SetSampleRate(_) => Some([0x00, 0x80]),
             Ask::SetEncoding(_) => None,
             Ask::BridgeFigures => Some(super::bridge::REPLY_CODE),
+            Ask::ClockFigures => Some(super::clock_figures::REPLY_CODE),
         }
     }
 }
@@ -738,7 +747,7 @@ pub fn set_encoding(iface: Ipv4Addr, device: Ipv4Addr, bits: u32) -> Result<(), 
     send_write(&sock, SocketAddrV4::new(device, REQUEST_PORT), write)
 }
 
-/// A socket for [`bridge_figures`]: UDP on our interface's address `iface`,
+/// A socket for [`bridge_figures`] and [`clock_figures`]: UDP on our interface's address `iface`,
 /// a port of the OS's. The reply comes back to it alone (unicast), so one
 /// socket can ask every bridge device in turn.
 pub fn unicast_socket(iface: Ipv4Addr) -> io::Result<UdpSocket> {
@@ -776,6 +785,36 @@ pub fn bridge_figures(
     )?;
     super::bridge::parse_figures(&body).map_err(|_| InfoError::Malformed {
         ask: Ask::BridgeFigures,
+    })
+}
+
+/// The clock figures of the dstack device at `device` (with the device id
+/// `id`, when given: several devices share one address), asked from `sock`
+/// ([`unicast_socket`]) and resent every [`RESEND`] for up to `wait`
+/// ([`ask`]). dcontroller polls it every few seconds per device. The
+/// fields, their keys and units are [`super::clock_figures`]'s table.
+///
+/// [`InfoError::Timeout`] from a device that is no dstack device or runs a
+/// dstack older than dstack #429, from a device whose address's 8700 is
+/// held by such an older dstack app on the same PC, or none within `wait`;
+/// [`InfoError::Malformed`] for a reply of another version or length, a
+/// code or flag no version writes ([`super::clock_figures::parse_figures`]
+/// says which).
+pub fn clock_figures(
+    sock: &UdpSocket,
+    device: Ipv4Addr,
+    id: Option<[u8; 8]>,
+    wait: Duration,
+) -> Result<super::ClockFigures, InfoError> {
+    let body = ask(
+        sock,
+        SocketAddrV4::new(device, REQUEST_PORT),
+        id,
+        Ask::ClockFigures,
+        wait,
+    )?;
+    super::clock_figures::parse_figures(&body).map_err(|_| InfoError::Malformed {
+        ask: Ask::ClockFigures,
     })
 }
 

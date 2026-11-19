@@ -34,7 +34,7 @@ pub const REPORT_EVERY: Duration = Duration::from_secs(60);
 pub const CHECK: Duration = Duration::from_secs(1);
 
 /// The kinds the server sends, in their report order.
-pub const BOUNDED: [Kind; 9] = [
+pub const BOUNDED: [Kind; 10] = [
     Kind::BoardInfo,
     Kind::ProductInfo,
     Kind::NetworkInfo,
@@ -44,6 +44,7 @@ pub const BOUNDED: [Kind; 9] = [
     Kind::Pullup,
     Kind::ChannelChange,
     Kind::BridgeFigures,
+    Kind::ClockFigures,
 ];
 
 /// The replies dropped over the bound in one report's time.
@@ -72,6 +73,7 @@ fn label(kind: Kind) -> &'static str {
         Kind::Pullup => "0x85 pull-up",
         Kind::ChannelChange => "channel change",
         Kind::BridgeFigures => "0xd5b1 bridge figures",
+        Kind::ClockFigures => "0xd5b3 clock figures",
         // Never bounded, so never in a report.
         Kind::ClockStats | Kind::Unknown => "no reply",
     }

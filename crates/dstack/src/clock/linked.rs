@@ -288,6 +288,8 @@ pub struct Linked {
 struct Report {
     minute: Minute,
     waiting: Option<Waiting>,
+    /// While a switch to it waits to agree: its time less the service's.
+    offset_from_service_ns: Option<i64>,
 }
 
 /// What [`Linked::select`] chose: the source, and while a switch waits to
@@ -340,12 +342,18 @@ impl Linked {
     }
 
     /// The follower's counts ([`Follow::counts`]) with why the selector
-    /// does not use it ([`FollowerCounts::waiting`], as of its last round);
-    /// `None` when it did not start.
+    /// does not use it ([`FollowerCounts::waiting`]) and, while the switch
+    /// to it waits to agree, its offset from the service
+    /// ([`FollowerCounts::offset_from_service_ns`]), both as of its last
+    /// round; `None` when it did not start.
     pub fn follower_counts(&self) -> Option<FollowerCounts> {
-        let waiting = self.lock_report().waiting;
+        let (waiting, offset_from_service_ns) = {
+            let r = self.lock_report();
+            (r.waiting, r.offset_from_service_ns)
+        };
         self.internal.as_ref().map(|f| FollowerCounts {
             waiting,
+            offset_from_service_ns,
             ..f.counts()
         })
     }
@@ -435,6 +443,9 @@ impl Linked {
         let mut r = self.lock_report();
         let (heard, due) = r.minute.round(now_ns, c.counts.polls, waiting);
         r.waiting = waiting.then(|| waiting_of(v, heard));
+        // Only a wait to agree measures it: the follower's time less the
+        // service's (a wait is always from the service to the follower).
+        r.offset_from_service_ns = selected.wait_offset_ns.flatten();
         if let (Some(why), Some(windows)) = (r.waiting, due) {
             info!(
                 reason = %why.word(),
@@ -768,6 +779,8 @@ impl<M: Model> Follow for Absorbing<M> {
             pull_ns: m.pull_ns,
             grandmaster: m.gm_uuid,
             waiting: None,
+            freq_ppb: ppb_of(m.rate_ppm),
+            offset_from_service_ns: None,
         }
     }
 
@@ -775,6 +788,15 @@ impl<M: Model> Follow for Absorbing<M> {
         let at = self.step_at.load(Ordering::Acquire);
         (at != 0).then(|| (at, self.step_ns.load(Ordering::Relaxed)))
     }
+}
+
+/// dsync's model rate (`ClockModel::rate_ppm`, ppm) in whole ppb, rounded
+/// to the nearest and saturated at `i32`'s bounds (dstack #429: the clock
+/// figures carry it as `follower_freq_ppb`, in the unit of the service's
+/// frequency word).
+pub fn ppb_of(rate_ppm: f64) -> i32 {
+    // `as` saturates a float past the bounds, and reads NaN as 0.
+    (rate_ppm * 1000.0).round() as i32
 }
 
 /// The follower's frequency seed from a service reply: its frequency word

@@ -196,6 +196,8 @@ impl Follow for Arc<Fake> {
             pull_ns: 0,
             grandmaster: None,
             waiting: None,
+            freq_ppb: 0,
+            offset_from_service_ns: None,
         }
     }
 }
@@ -708,6 +710,8 @@ fn the_linked_clock_reads_the_follower_s_counts() {
             pull_ns: 0,
             grandmaster: None,
             waiting: Some(Waiting::Stopped),
+            freq_ppb: 0,
+            offset_from_service_ns: None,
         })
     );
     let service = Arc::new(MonoClock::new());

@@ -202,6 +202,7 @@ fn the_follower_counts_carry_its_lock_settled_and_errors() {
         offset_ns: Some(-39_806),
         recent_abs_e_ns: Some(41_250),
         pull_ns: 87_500,
+        rate_ppm: -12.3456,
         ..model(M0, P0, 0, 0)
     };
     let src = Arc::new(FakeModel(Mutex::new((unsettled, true))));
@@ -216,6 +217,8 @@ fn the_follower_counts_carry_its_lock_settled_and_errors() {
         ),
         (true, false, Some(-39_806), Some(41_250), 87_500)
     );
+    // dstack #429: its rate in ppb; the wait's offset is the selector's.
+    assert_eq!((c.freq_ppb, c.offset_from_service_ns), (-12_346, None));
     let fresh = ClockModel {
         locked: false,
         settled: false,
@@ -298,4 +301,21 @@ fn a_re_align_with_no_measured_step_publishes_none() {
     src.0.lock().unwrap().0 = model(4 * M0, P0 + 3 * M0, 1, 3);
     assert_eq!(f.view().epoch, 3);
     assert_eq!(f.last_re_anchor(), None);
+}
+
+/// dstack #429: dsync's rate in whole ppb, rounded to the nearest, either
+/// sign, saturated past `i32` (and NaN 0).
+#[test]
+fn the_rate_reads_as_rounded_ppb() {
+    assert_eq!(ppb_of(0.0), 0);
+    assert_eq!(ppb_of(12.3456), 12_346);
+    assert_eq!(ppb_of(12.3454), 12_345);
+    assert_eq!(ppb_of(-12.3456), -12_346);
+    assert_eq!(ppb_of(0.0004), 0);
+    assert_eq!(ppb_of(0.0006), 1);
+    assert_eq!(ppb_of(-0.0006), -1);
+    assert_eq!(ppb_of(500.0), 500_000);
+    assert_eq!(ppb_of(3_000_000.0), i32::MAX);
+    assert_eq!(ppb_of(-3_000_000.0), i32::MIN);
+    assert_eq!(ppb_of(f64::NAN), 0);
 }
