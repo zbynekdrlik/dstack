@@ -2,9 +2,14 @@
 
 ## 0.6.187
 
-- **CI (no library change): the Linux jobs' apt step installs from the last good run's packages.** The runner's Ubuntu mirrors and the fallback mirrors.edge.kernel.org both failed on 18-19.11.2026 (dev push run 44407677291, the v0.6.186 release's Linux binaries 44423972765). `actions/cache` (v6.1.0, pinned) keeps the debs of the last good install, keyed on the runner image and `scripts/ci-apt-deps.sh`; a hit installs them with `dpkg -i` and needs no mirror. A miss walks the runner's mirrors, then kernel.org, Princeton and RWTH Aachen, each try bounded to 240 s.
+- **Feature (#429, for dcontroller#124): clock figures on the info port.** Every dstack device answers a dstack-own request (`07 xx d5 b3`, reply `07 2a d5 b2`, 66 bytes, version 1, big-endian, unicast to the asker, at most 10 a second) with its media clock's state: the source (none / in-process follower / dsync service / test system clock), readiness; the in-process follower's locked, settled and holdover flags, error p90 (ns), offset from the service while a switch waits to agree (ns), frequency (ppb), holdovers, grandmaster and wait reason (#420's words); the dsync service's last poll result, locked/settled/holdover, mode, frequency word (ppb), reply age (ms), holdovers and grandmaster. "Not known" is `i64::MIN` / `u32::MAX` / a zero UUID on the wire and `None` in the struct. No app hand-over: the stack knows its clock.
+  - Reader: `info::client::clock_figures(&sock, ip, Some(device_id), wait) -> Result<ClockFigures, InfoError>` (`ClockFigures { sequence, source: TimeSource, ready, follower: Option<FollowerFigures>, service: Option<ServiceFigures> }`). `Timeout` = a non-dstack device, a dstack before this release, or an older app holding the address's 8700; `Malformed` = a wrong version/length or a code outside its table.
+  - Several devices on one address answer through the share manager; a manager before this release does not pass the request on, so every dstack app on such a PC takes this release before a controller relies on it.
+  - API (vs the consumers' pins): `clock::FollowerCounts` gains `freq_ppb` and `offset_from_service_ns` (a full struct literal adds them); `ClockStats` gains `set_poll` / `service`.
+  - dsync's `ptp_phase_error_us` is not in it (the DSYX reply the stack reads has none): a controller reads that from a service node's `:8898/status` over the LAN.
+- **CI: the Linux jobs' apt step installs from the last good run's packages.** The runner's Ubuntu mirrors and the fallback mirrors.edge.kernel.org both failed on 18-19.11.2026 (dev push run 44407677291, the v0.6.186 release's Linux binaries 44423972765). `actions/cache` (v6.1.0, pinned) keeps the debs of the last good install, keyed on the runner image and `scripts/ci-apt-deps.sh`; a hit installs them with `dpkg -i` and needs no mirror. A miss walks the runner's mirrors, then kernel.org, Princeton and RWTH Aachen, each try's update and download bounded to 240 s (the install itself is not: a limit that stopped dpkg left its lock held, push run 44428444113).
 - Playbook: WPR DPC/ISR vs a send queue on a Windows PC, and a QoS throttle must match the flow's protocol (#425).
-- **No latency change, no API change.**
+- **No latency change.**
 
 ## 0.6.186
 
