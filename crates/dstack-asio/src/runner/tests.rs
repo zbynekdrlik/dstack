@@ -363,6 +363,35 @@ fn a_driver_with_no_clock_is_opened_again_after_4_8_16_32_then_every_60_s() {
     }
 }
 
+/// dstack #447 (review): a wait that ends in a failed open (the backoff)
+/// starts the next wait's re-opens at 4 s again, not on the old wait's
+/// longer interval.
+#[test]
+fn a_failed_open_inside_a_wait_starts_the_next_wait_s_re_opens_at_4_s() {
+    let mut r = rig();
+    r.runner.step(0);
+    r.runner.step(NO_CLOCK_NS);
+    r.runner.step(4 * S);
+    r.runner.step(4 * S);
+    r.runner.step(12 * S);
+    assert_eq!((r.opens(), r.fake.borrow().closes), (2, 2));
+    // The second re-open fails: a fault, the backoff (2 s).
+    r.fake
+        .borrow_mut()
+        .opens
+        .push_back(Err(Reason::Busy("in use".into())));
+    r.runner.step(12 * S);
+    assert_eq!(r.status().reason, Some(Reason::Busy("in use".into())));
+    r.runner.step(14 * S);
+    assert_eq!((r.opens(), r.fake.borrow().closes), (4, 3));
+    r.runner.step(16 * S);
+    assert_eq!(r.status().reason, Some(Reason::NoClock));
+    r.runner.step(18 * S - 1);
+    assert_eq!(r.fake.borrow().closes, 3);
+    r.runner.step(18 * S);
+    assert_eq!(r.fake.borrow().closes, 4, "the new wait's first re-open");
+}
+
 /// dstack #447 (review): an open that blocks longer than the first re-open
 /// interval (the run's first step comes 5 s after it) still starts its wait
 /// (the WARN, once a wait) before it is opened again.
