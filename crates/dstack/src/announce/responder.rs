@@ -14,14 +14,21 @@
 //!   host), with the instance's SRV, TXT and A as additional records; a
 //!   query from port 5353 is answered to the group, a legacy one (another
 //!   port) to its sender.
-//! - [`Responder`]: a socket bound to `<device address>:5353` that joined
-//!   224.0.0.251 there, and a thread answering every query with the
-//!   records the announcer published last ([`super::Announcer::published`]).
-//!   Started on Windows only (`host`): Linux sends from the device's
-//!   address already, and a socket bound to a unicast address receives no
-//!   multicast there. Its [`Watch`] reads the interface list every 2 s
-//!   (dstack #282): after the address is added again, or moves to another
-//!   interface index, the socket is opened and joined again and every
+//! - [`Responder`]: a socket bound to `<device address>:5353` and a thread
+//!   answering every query with the records the announcer published last
+//!   ([`super::Announcer::published`]). Started on Windows only (`host`):
+//!   Linux sends from the device's address already, and a socket bound to
+//!   a unicast address receives no multicast there. Since dstack #442 the
+//!   device's responder takes the group's queries from the daemon's socket
+//!   ([`super::mdns::Listener`], [`Responder::start`]) and its own socket
+//!   joins no group: Windows then delivers it no multicast (mbc,
+//!   19.11.2026: 0 datagrams in 20 s, a joined one 185), so a datagram
+//!   reaches the process once; it still sends from the device's address
+//!   and reads the unicast queries to it. A test's responder
+//!   ([`Responder::start_on`]) reads only the unicast queries to its own
+//!   socket. Its [`Watch`] reads the interface list every 2 s (dstack
+//!   #282): after the address is added again, or moves to another
+//!   interface index, the socket is opened again ([`REOPENED`]) and every
 //!   record is announced ([`announcement`]), so browsers find the device
 //!   at once.
 //!
@@ -41,7 +48,8 @@ use simple_dns::{CLASS, Name, Packet, QTYPE, ResourceRecord, TYPE};
 use tracing::{debug, info, trace};
 
 use super::ServiceRecord;
-use crate::membership::{Link, Membership};
+use super::mdns::Listener;
+use crate::membership::{Link, Membership, Says};
 
 /// mDNS's group and port.
 pub const GROUP: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 251);
@@ -56,6 +64,13 @@ const OTHER_TTL: u32 = 4500;
 pub const MAX_DATAGRAM: usize = 1452;
 /// The thread's receive wait (it looks at the stop between two).
 const WAIT: Duration = Duration::from_millis(250);
+/// The device's responder's wait for the daemon's next query: between two
+/// it reads the unicast queries to its own socket, so one waits at most
+/// this long (dstack #442).
+const HEARD_WAIT: Duration = Duration::from_millis(50);
+/// The queries a pass takes at most from each source (the watch is looked
+/// at between two passes).
+const DRAIN_MAX: usize = 64;
 
 /// A name as compared: lower case, no dot at the end.
 fn key(name: &str) -> String {
@@ -301,8 +316,26 @@ pub struct Responder {
     thread: Option<JoinHandle<()>>,
 }
 
-/// The socket on `at`, joined to the group there with `multicast`.
-fn open(at: SocketAddrV4, multicast: bool) -> io::Result<UdpSocket> {
+/// How a responder's socket takes the group's queries. Neither joins the
+/// group (dstack #442).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    /// Unicast only, read with a wait (a test's responder on loopback).
+    Unicast,
+    /// Sends to the group, read without a wait: the group's queries come
+    /// from the daemon's socket.
+    Sends,
+}
+
+/// The lines of a re-open after an interface change (no group is joined:
+/// the socket is bound and its send interface named again).
+pub const REOPENED: Says = Says {
+    done: "mDNS answer socket opened again",
+    failed: "mDNS answer socket not opened again",
+};
+
+/// The socket on `at` for `mode`.
+fn open(at: SocketAddrV4, mode: Mode) -> io::Result<UdpSocket> {
     let sock = socket2::Socket::new(
         socket2::Domain::IPV4,
         socket2::Type::DGRAM,
@@ -310,63 +343,82 @@ fn open(at: SocketAddrV4, multicast: bool) -> io::Result<UdpSocket> {
     )?;
     sock.set_reuse_address(true)?;
     sock.bind(&at.into())?;
-    if multicast {
-        sock.join_multicast_v4(&GROUP, at.ip())?;
+    let sends = mode == Mode::Sends;
+    if sends {
         sock.set_multicast_if_v4(at.ip())?;
         sock.set_multicast_ttl_v4(255)?;
     }
     let sock: UdpSocket = sock.into();
-    sock.set_read_timeout(Some(WAIT))?;
+    if sends {
+        sock.set_nonblocking(true)?;
+    } else {
+        sock.set_read_timeout(Some(WAIT))?;
+    }
     Ok(sock)
 }
 
 impl Responder {
-    /// The socket on `ip`:5353, joined to the group there, and the thread
-    /// answering from `published`; joined again after an interface change
-    /// (dstack #282).
-    pub fn start(ip: Ipv4Addr, published: Arc<Mutex<Vec<ServiceRecord>>>) -> io::Result<Self> {
+    /// The socket on `ip`:5353 (no group joined) and the thread answering
+    /// from `published` every query `heard` hands it (the daemon's socket,
+    /// dstack #442) and each unicast one to the address; opened again after
+    /// an interface change (dstack #282).
+    pub fn start(
+        ip: Ipv4Addr,
+        published: Arc<Mutex<Vec<ServiceRecord>>>,
+        heard: Listener,
+    ) -> io::Result<Self> {
         let watch = Watch {
             read: Box::new(crate::membership::links),
             every: crate::membership::EVERY,
             announce_to: SocketAddrV4::new(GROUP, PORT),
         };
-        Self::start_watched(SocketAddrV4::new(ip, PORT), true, published, watch)
+        Self::start_heard(SocketAddrV4::new(ip, PORT), published, heard, Some(watch))
     }
 
-    /// [`Responder::start`] on `at`, joined to the group only with
-    /// `multicast` (a test's unicast responder on loopback), with no
-    /// interface watch.
+    /// [`Responder::start`] on `at`, with the interface watch `watch` when
+    /// there is one.
+    pub fn start_heard(
+        at: SocketAddrV4,
+        published: Arc<Mutex<Vec<ServiceRecord>>>,
+        heard: Listener,
+        watch: Option<Watch>,
+    ) -> io::Result<Self> {
+        Self::spawn(at, Mode::Sends, published, watch, Some(heard))
+    }
+
+    /// A responder answering the unicast queries to `at` (a test's on
+    /// loopback), with no interface watch.
     pub fn start_on(
         at: SocketAddrV4,
-        multicast: bool,
         published: Arc<Mutex<Vec<ServiceRecord>>>,
     ) -> io::Result<Self> {
-        Self::spawn(at, multicast, published, None)
+        Self::spawn(at, Mode::Unicast, published, None, None)
     }
 
     /// [`Responder::start_on`] with the interface watch `watch`.
     pub fn start_watched(
         at: SocketAddrV4,
-        multicast: bool,
         published: Arc<Mutex<Vec<ServiceRecord>>>,
         watch: Watch,
     ) -> io::Result<Self> {
-        Self::spawn(at, multicast, published, Some(watch))
+        Self::spawn(at, Mode::Unicast, published, Some(watch), None)
     }
 
     fn spawn(
         at: SocketAddrV4,
-        multicast: bool,
+        mode: Mode,
         published: Arc<Mutex<Vec<ServiceRecord>>>,
         watch: Option<Watch>,
+        heard: Option<Listener>,
     ) -> io::Result<Self> {
-        let sock = open(at, multicast)?;
+        let sock = open(at, mode)?;
         let stop = Arc::new(AtomicBool::new(false));
         let rejoins = Arc::new(AtomicU64::new(0));
         let thread = {
             let server = Server {
                 at,
-                multicast,
+                mode,
+                heard,
                 published,
                 stop: Arc::clone(&stop),
                 rejoins: Arc::clone(&rejoins),
@@ -408,17 +460,22 @@ impl Drop for Responder {
 /// What the responder's thread keeps.
 struct Server {
     at: SocketAddrV4,
-    multicast: bool,
+    mode: Mode,
+    /// The group's queries from the daemon's socket ([`Mode::Sends`]).
+    heard: Option<Listener>,
     published: Arc<Mutex<Vec<ServiceRecord>>>,
     stop: Arc<AtomicBool>,
     rejoins: Arc<AtomicU64>,
 }
 
 impl Server {
-    /// The thread: each query answered, until the stop; with a watch, the
-    /// socket opened again and the records announced after an interface
-    /// change (a socket that cannot be opened keeps the old one, and the
-    /// next look tries again).
+    /// The thread: each query answered, until the stop (a pass: the
+    /// daemon's, the first waited for up to [`HEARD_WAIT`], then every
+    /// unicast one on its own socket; a test's: one read waiting up to
+    /// [`WAIT`]);
+    /// with a watch, the socket opened again and the records announced
+    /// after an interface change (a socket that cannot be opened keeps the
+    /// old one, and the next look tries again).
     fn serve(&self, mut sock: UdpSocket, mut watch: Option<Watch>) {
         let mut membership = watch
             .as_ref()
@@ -427,32 +484,58 @@ impl Server {
         while !self.stop.load(Ordering::Relaxed) {
             if let (Some(w), Some(m)) = (watch.as_mut(), membership.as_mut()) {
                 let reopen = || -> io::Result<()> {
-                    sock = open(self.at, self.multicast)?;
+                    sock = open(self.at, self.mode)?;
                     self.rejoins.fetch_add(1, Ordering::Relaxed);
                     self.announce(&sock, w.announce_to);
                     Ok(())
                 };
-                m.keep(Instant::now(), &mut w.read, GROUP, reopen);
+                m.keep_as(Instant::now(), &mut w.read, REOPENED, GROUP, reopen);
             }
-            let (n, from) = match sock.recv_from(&mut buf) {
-                Ok((n, SocketAddr::V4(from))) => (n, from),
-                Ok(_) => continue,
-                Err(e) => {
-                    trace!(kind = ?e.kind(), "no mDNS query this wait");
-                    continue;
+            let Some(heard) = self.heard.as_ref() else {
+                // A test's responder: one read a pass, waiting up to WAIT.
+                match sock.recv_from(&mut buf) {
+                    Ok((n, SocketAddr::V4(from))) => self.reply(&sock, &buf[..n], from),
+                    Ok(_) => {}
+                    Err(e) => trace!(kind = ?e.kind(), "no mDNS query this wait"),
                 }
+                continue;
             };
-            let replies = {
-                let recs = self
-                    .published
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner);
-                answers(&buf[..n], &recs)
-            };
-            for r in replies {
-                if let Err(e) = sock.send_to(&r, reply_to(from)) {
-                    debug!(%e, "mDNS answer from the device's address not sent");
+            // The daemon's queries: the first waited for, the rest taken.
+            let mut wait = HEARD_WAIT;
+            for _ in 0..DRAIN_MAX {
+                let Ok(d) = heard.recv_timeout(wait) else {
+                    break;
+                };
+                self.reply(&sock, &d.bytes, d.from);
+                wait = Duration::ZERO;
+            }
+            // Its own socket, without a wait: every unicast query to the
+            // address.
+            for _ in 0..DRAIN_MAX {
+                match sock.recv_from(&mut buf) {
+                    Ok((n, SocketAddr::V4(from))) => self.reply(&sock, &buf[..n], from),
+                    Ok(_) => {}
+                    Err(e) => {
+                        trace!(kind = ?e.kind(), "no unicast mDNS query left");
+                        break;
+                    }
                 }
+            }
+        }
+    }
+
+    /// The answers to the query `bytes` from `from`, sent from `sock`.
+    fn reply(&self, sock: &UdpSocket, bytes: &[u8], from: SocketAddrV4) {
+        let replies = {
+            let recs = self
+                .published
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            answers(bytes, &recs)
+        };
+        for r in replies {
+            if let Err(e) = sock.send_to(&r, reply_to(from)) {
+                debug!(%e, "mDNS answer from the device's address not sent");
             }
         }
     }

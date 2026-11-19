@@ -302,6 +302,11 @@ const IPV4_SOCK_EVENT_KEY: usize = 4; // Pick a key just to indicate IPv4.
 const IPV6_SOCK_EVENT_KEY: usize = 6; // Pick a key just to indicate IPv6.
 const SIGNAL_SOCK_EVENT_KEY: usize = usize::MAX - 1; // avoid to overlap with zc.poll_ids
 
+/// dstack #442: what [`ServiceDaemon::new_tapped`]'s thread calls with each
+/// datagram its IPv4 socket received on an enabled interface, and its source.
+/// It runs on the daemon's thread: it must not block.
+pub type Tap = Box<dyn FnMut(&[u8], SocketAddr) + Send>;
+
 /// A daemon thread for mDNS
 ///
 /// This struct provides a handle and an API to the daemon. It is cloneable.
@@ -370,6 +375,19 @@ impl ServiceDaemon {
     /// reported by this constructor — listen for such failures via
     /// [`monitor`](Self::monitor).
     pub fn new_with_port(port: u16) -> Result<Self> {
+        Self::start(port, None)
+    }
+
+    /// dstack #442: [`ServiceDaemon::new`] whose thread hands `tap` every
+    /// datagram its IPv4 socket receives on an enabled interface (after the
+    /// interface check, before decoding), so the process needs no other
+    /// socket on port 5353 to hear the group. On Linux the socket is also
+    /// handed only its own memberships (`IP_MULTICAST_ALL` off).
+    pub fn new_tapped(tap: Tap) -> Result<Self> {
+        Self::start(MDNS_PORT, Some(tap))
+    }
+
+    fn start(port: u16, tap: Option<Tap>) -> Result<Self> {
         // Use port 0 to allow the system assign a random available port,
         // no need for a pre-defined port number.
         let signal_addr = SocketAddrV4::new(LOOPBACK_V4, 0);
@@ -397,7 +415,15 @@ impl ServiceDaemon {
         thread::Builder::new()
             .name("mDNS_daemon".to_string())
             .spawn(move || {
-                Self::daemon_thread(mio_sock, poller, receiver, port, cmd_sender, signal_addr)
+                Self::daemon_thread(
+                    mio_sock,
+                    poller,
+                    receiver,
+                    port,
+                    cmd_sender,
+                    signal_addr,
+                    tap,
+                )
             })
             .map_err(|e| e_fmt!("thread builder failed to spawn: {}", e))?;
 
@@ -871,8 +897,12 @@ impl ServiceDaemon {
         port: u16,
         cmd_sender: Sender<Command>,
         signal_addr: SocketAddr,
+        tap: Option<Tap>,
     ) {
         let mut zc = Zeroconf::new(signal_sock, poller, port, cmd_sender, signal_addr);
+        if let Some(tap) = tap {
+            zc.set_tap(tap);
+        }
 
         if let Some(cmd) = zc.run(receiver) {
             match cmd {
@@ -1249,6 +1279,9 @@ struct Zeroconf {
 
     signal_addr: SocketAddr,
 
+    /// dstack #442: hears every datagram read (see [`Tap`]).
+    tap: Option<Tap>,
+
     #[cfg(test)]
     test_down_interfaces: HashSet<String>,
 }
@@ -1468,10 +1501,23 @@ impl Zeroconf {
             include_apple_p2p: false,
             cmd_sender,
             signal_addr,
+            tap: None,
 
             #[cfg(test)]
             test_down_interfaces: HashSet::new(),
         }
+    }
+
+    /// dstack #442: hands every datagram read from now on to `tap`. On Linux
+    /// the IPv4 socket then takes only the groups it joined itself.
+    fn set_tap(&mut self, tap: Tap) {
+        #[cfg(target_os = "linux")]
+        if let Some(sock) = self.ipv4_sock.as_ref() {
+            if let Err(e) = socket2::SockRef::from(&sock.mio).set_multicast_all_v4(false) {
+                debug!("IP_MULTICAST_ALL off failed: {e}");
+            }
+        }
+        self.tap = Some(tap);
     }
 
     /// Send a Command into the daemon channel and poke the signal socket to wake the poll loop.
@@ -2931,6 +2977,11 @@ impl Zeroconf {
         }
 
         buf.truncate(sz); // reduce potential processing errors
+
+        // dstack #442: the process's other mDNS readers hear it here.
+        if let (true, Some(tap)) = (is_ipv4, self.tap.as_mut()) {
+            tap(&buf, pktinfo.addr_src);
+        }
 
         match DnsIncoming::new(buf, my_intf.into()) {
             Ok(msg) => {

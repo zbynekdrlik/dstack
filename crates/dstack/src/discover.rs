@@ -24,7 +24,10 @@
 //!   others' answers. A device that answers no PTR query (a wireless mic
 //!   receiver, dstack #1) is still heard when it announces. The group is
 //!   joined again after an interface change ([`crate::membership`], dstack
-//!   #282).
+//!   #282). A discovery started with [`Discovery::start_heard`] (a
+//!   device's `traffic::neighbours`) reads the group from the address's
+//!   mDNS daemon socket instead (dstack #442): the device's process holds
+//!   no second joined 5353 socket, and the daemon keeps that membership.
 //! - **Each instance's record** ([`crate::subscribe::instance`]): SRV,
 //!   TXT and the target's A by direct legacy unicast queries, asked again
 //!   before the answer is [`crate::subscribe::instance::MAX_AGE_NS`] old;
@@ -53,10 +56,11 @@
 //! the mDNS senders' addresses: that is its purpose).
 //!
 //! [`senders`]: who sends how much mDNS on the leg (dstack #289), each
-//! device's status and a minute line; its own passive listener, one per
-//! process and address (a device runs a [`Discovery`] only now and then,
-//! `traffic::neighbours`, so the meter does not ride on it; it also never
-//! counts a [`Discovery`]'s datagrams, which are the same group's).
+//! device's status and a minute line; one per process and address, it
+//! reads what the address's mDNS daemon socket receives (dstack #442,
+//! [`crate::announce::mdns`]; a device runs a [`Discovery`] only now and
+//! then, `traffic::neighbours`, so the meter does not ride on it; it also
+//! never counts a [`Discovery`]'s datagrams, which are the same group's).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
@@ -71,6 +75,7 @@ use simple_dns::rdata::RData;
 use simple_dns::{CLASS, Name, Packet, QCLASS, QTYPE, Question, TYPE};
 use tracing::{debug, info, trace, warn};
 
+use crate::announce::mdns::Listener;
 use crate::announce::{ARC_SERVICE, CMC_SERVICE};
 use crate::membership::{Lister, REJOINED, SEND_IF, Says, rejoin, send_on};
 use crate::subscribe::directory::DBC_SERVICE;
@@ -440,6 +445,36 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// Where a discovery reads the mDNS group's traffic.
+enum Group {
+    /// A socket of its own, joined on the interface ([`group_listener`],
+    /// or a test's).
+    Socket(UdpSocket),
+    /// The address's mDNS daemon socket, through its tap (dstack #442):
+    /// the daemon keeps the membership.
+    Tap(Listener),
+}
+
+impl Group {
+    /// Its own socket, which the discovery's watch joins again after an
+    /// interface change; none for a tap.
+    fn socket(&self) -> Option<&UdpSocket> {
+        match self {
+            Group::Socket(sock) => Some(sock),
+            Group::Tap(_) => None,
+        }
+    }
+
+    /// Reads it until `until` while datagrams come ([`drain`],
+    /// [`drain_tap`]).
+    fn drain(&self, buf: &mut [u8], until: Instant, take: impl FnMut(&[u8])) {
+        match self {
+            Group::Socket(sock) => drain(sock, buf, until, take),
+            Group::Tap(heard) => drain_tap(heard, until, READ_WAIT, take),
+        }
+    }
+}
+
 /// Discovery running on one interface (see the module).
 pub struct Discovery {
     devices: Arc<Mutex<Devices>>,
@@ -481,7 +516,10 @@ impl Discovery {
     /// Starts discovery on the interface with the address `ip`: the devices
     /// listed so far through [`Discovery::devices`], every change on the
     /// returned channel. The group's traffic is listened to when the mDNS
-    /// port can be shared (a warning otherwise: the sweeps still list).
+    /// port can be shared (a warning otherwise: the sweeps still list), on
+    /// a socket of its own: inside a device process, take a listener on its
+    /// daemon ([`crate::announce::mdns::Mdns::listen_on`]) and
+    /// [`Discovery::start_heard`] instead (dstack #442).
     pub fn start(ip: Ipv4Addr) -> Result<(Self, Receiver<Change>), DiscoverError> {
         let listener = match group_listener(ip) {
             Ok(sock) => Some(sock),
@@ -491,6 +529,19 @@ impl Discovery {
             }
         };
         Self::start_to(ip, MDNS, listener)
+    }
+
+    /// [`Discovery::start`] with the group's traffic read from `heard`, a
+    /// listener on this process's mDNS daemon socket on `ip`
+    /// ([`crate::announce::mdns::Mdns::listen_on`], dstack #442): no
+    /// socket of its own joins the group. Its watch names the sweeps'
+    /// interface again after a change; the daemon's own check keeps the
+    /// group.
+    pub fn start_heard(
+        ip: Ipv4Addr,
+        heard: Listener,
+    ) -> Result<(Self, Receiver<Change>), DiscoverError> {
+        Self::start_group(ip, MDNS, Some(Group::Tap(heard)), Lister::default())
     }
 
     /// [`Discovery::start`] with the sweeps and the records' queries sent
@@ -514,6 +565,16 @@ impl Discovery {
         listener: Option<UdpSocket>,
         lister: Lister,
     ) -> Result<(Self, Receiver<Change>), DiscoverError> {
+        Self::start_group(ip, mdns, listener.map(Group::Socket), lister)
+    }
+
+    /// [`Discovery::start_watched`] with the group read from `group`.
+    fn start_group(
+        ip: Ipv4Addr,
+        mdns: SocketAddrV4,
+        group: Option<Group>,
+        lister: Lister,
+    ) -> Result<(Self, Receiver<Change>), DiscoverError> {
         let sweeper = UdpSocket::bind(SocketAddrV4::new(ip, 0))?;
         sweeper.set_read_timeout(Some(READ_WAIT))?;
         if mdns.ip().is_multicast() {
@@ -530,7 +591,7 @@ impl Discovery {
         let run = Run {
             ip,
             sweeper,
-            listener,
+            group,
             mdns,
             records: Arc::clone(&records),
             devices: Arc::clone(&devices),
@@ -619,12 +680,29 @@ fn drain(sock: &UdpSocket, buf: &mut [u8], until: Instant, mut take: impl FnMut(
     }
 }
 
+/// Reads the daemon's tap `heard` while it hands datagrams on and `until`
+/// has not passed, each to `take`, as [`drain`] reads a socket: a wait of
+/// at most `wait` ([`READ_WAIT`] in a round; never past `until`) with
+/// nothing ends it.
+fn drain_tap(heard: &Listener, until: Instant, wait: Duration, mut take: impl FnMut(&[u8])) {
+    loop {
+        let left = until.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            break;
+        }
+        let Ok(d) = heard.recv_timeout(left.min(wait)) else {
+            break;
+        };
+        take(&d.bytes);
+    }
+}
+
 /// The thread's state.
 struct Run {
     /// Our address: the group is joined on its interface.
     ip: Ipv4Addr,
     sweeper: UdpSocket,
-    listener: Option<UdpSocket>,
+    group: Option<Group>,
     mdns: SocketAddrV4,
     records: Arc<Instances>,
     devices: Arc<Mutex<Devices>>,
@@ -659,7 +737,7 @@ impl Run {
         let mut buf = vec![0u8; 9000];
         let mut membership = lister.watch(self.ip);
         let multicast = self.mdns.ip().is_multicast();
-        let says = follows(self.listener.is_some(), multicast);
+        let says = follows(self.joined().is_some(), multicast);
         while !self.stop.load(Ordering::Relaxed) {
             // After an interface change: the group joined again (dstack
             // #282) and the sweeps' interface named again (#409).
@@ -683,8 +761,11 @@ impl Run {
             }
             let round = Instant::now() + ROUND;
             while !round.saturating_duration_since(Instant::now()).is_zero() {
-                for sock in std::iter::once(&self.sweeper).chain(self.listener.as_ref()) {
-                    drain(sock, &mut buf, round, |bytes| {
+                drain(&self.sweeper, &mut buf, round, |bytes| {
+                    self.take(bytes, &mut names, now_ns(origin));
+                });
+                if let Some(group) = &self.group {
+                    group.drain(&mut buf, round, |bytes| {
                         self.take(bytes, &mut names, now_ns(origin));
                     });
                 }
@@ -693,14 +774,18 @@ impl Run {
         }
     }
 
+    /// The group socket of its own it joined, if any (a tap has none).
+    fn joined(&self) -> Option<&UdpSocket> {
+        self.group.as_ref().and_then(Group::socket)
+    }
+
     /// After an interface change: the group joined again on the listener,
     /// and with `multicast` sweeps our interface named again as the
     /// sweeper's send interface. Both are tried whatever the other did; the
     /// first error is the result (the watch then tries both again).
     fn follow(&self, multicast: bool) -> io::Result<()> {
         let joined = self
-            .listener
-            .as_ref()
+            .joined()
             .map_or(Ok(()), |l| rejoin(l, *MDNS.ip(), self.ip));
         let named = if multicast {
             send_on(&self.sweeper, self.ip)

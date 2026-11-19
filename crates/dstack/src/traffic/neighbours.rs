@@ -13,7 +13,10 @@
 //!   neighbours are subtracted: a PC loud only with our own devices keeps
 //!   it, or the next look would warn about them again.
 //! - [`Finder`]: the discovery as the watch uses it; [`DiscoveryFinder`] is
-//!   the real one, a test gives its own.
+//!   the real one, a test gives its own. It reads the mDNS group from the
+//!   process's daemon socket on the address (dstack #442,
+//!   [`Discovery::start_heard`]): a loud NIC adds no 5353 socket to the
+//!   device's process.
 //! - [`Neighbours`]: the list for a look ([`Neighbours::list`], empty while
 //!   nothing runs), the start or stop after it ([`Neighbours::after`]), and
 //!   the watch's step at each control tick ([`Neighbours::tick`]).
@@ -31,7 +34,9 @@ use std::net::Ipv4Addr;
 use tracing::{info, warn};
 
 use super::{Peer, Traffic, TrafficWatch, on_address, too_much};
+use crate::announce::mdns::{Heard, Mdns};
 use crate::discover::{Device, Discovery};
+use crate::subscribe::instance::MDNS;
 
 /// How long the discovery keeps running after the last loud look, ns.
 pub const QUIET_NS: u64 = 3_600_000_000_000;
@@ -86,10 +91,12 @@ pub trait Finder: Send {
     fn devices(&self) -> Vec<Device>;
 }
 
-/// The real [`Finder`]: a [`Discovery`] on our address. Glue over
-/// [`Discovery`], which holds mDNS's port 5353: outside the mutation gate
+/// The real [`Finder`]: a [`Discovery`] on our address, the group heard
+/// on the address's mDNS daemon socket ([`Mdns::listen_on`]; with no
+/// daemon there, sweeps only, warned). Glue over [`Discovery`] and the
+/// daemon (mDNS's port 5353): outside the mutation gate
 /// (`.cargo/mutants.toml`); its decisions are [`Lazy`]'s and
-/// [`Neighbours`]'.
+/// [`Neighbours`]', and `tests/mdns_one_socket.rs` runs it whole.
 #[derive(Default)]
 pub struct DiscoveryFinder {
     running: Option<Discovery>,
@@ -101,7 +108,16 @@ impl Finder for DiscoveryFinder {
     }
 
     fn start(&mut self, ip: Ipv4Addr) -> Result<(), String> {
-        let (d, _changes) = Discovery::start(ip).map_err(|e| e.to_string())?;
+        let started = match Mdns::listen_on(ip, Heard::All) {
+            Some(heard) => Discovery::start_heard(ip, heard),
+            None => {
+                warn!(
+                    "the neighbours' discovery: no mDNS daemon of this process on the address; sweeps only"
+                );
+                Discovery::start_to(ip, MDNS, None)
+            }
+        };
+        let (d, _changes) = started.map_err(|e| e.to_string())?;
         self.running = Some(d);
         Ok(())
     }

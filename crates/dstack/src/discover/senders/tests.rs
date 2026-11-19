@@ -5,6 +5,8 @@
 //! meter's wiring.
 
 use super::*;
+use crate::announce::mdns::{Heard, Taps};
+use std::net::{SocketAddr, SocketAddrV4};
 
 const S: u64 = 1_000_000_000;
 
@@ -188,36 +190,34 @@ fn a_quiet_minute_logs_nothing() {
     assert_eq!(text, "");
 }
 
-fn loopback() -> UdpSocket {
-    let sock = UdpSocket::bind("127.0.0.1:0").unwrap();
-    sock.set_read_timeout(Some(Duration::from_millis(50)))
-        .unwrap();
-    sock
+/// A meter fed by taps of its own, no socket: what the daemon's socket
+/// hands it (dstack #442).
+fn fed(minute_ns: u64, browsers: Browsers) -> (Arc<Taps>, Meter) {
+    let taps = Arc::new(Taps::default());
+    let meter = Meter::start(taps.listen(Heard::All), minute_ns, browsers).unwrap();
+    (taps, meter)
 }
 
-/// The wiring: a meter on a loopback socket names a flooding source in
-/// its last minute (minutes of 300 ms here).
+/// The source `127.0.0.<last>:<port>`.
+fn from(last: u8, port: u16) -> SocketAddr {
+    SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, last), port))
+}
+
+/// The wiring: a meter names a flooding source in its last minute
+/// (minutes of 300 ms here) and counts every datagram it was handed.
 #[test]
 fn the_meter_names_a_flooding_source_in_its_last_minute() {
-    let sock = loopback();
-    let to = sock.local_addr().unwrap();
-    let meter = Meter::start(
-        sock,
-        None,
-        Ipv4Addr::LOCALHOST,
-        300_000_000,
-        Browsers::default(),
-    )
-    .unwrap();
+    let (taps, meter) = fed(300_000_000, Browsers::default());
     assert_eq!(meter.last(), None);
-    let flood = UdpSocket::bind("127.0.0.2:0").unwrap();
-    let quiet = UdpSocket::bind("127.0.0.3:0").unwrap();
+    assert_eq!(meter.heard(), 0);
+    let mut handed = 0;
     let deadline = Instant::now() + Duration::from_secs(10);
     let named = loop {
         for _ in 0..20 {
-            flood.send_to(b"x", to).unwrap();
+            taps.feed(b"x", from(2, 5353));
         }
-        quiet.send_to(b"x", to).unwrap();
+        taps.feed(b"x", from(3, 5353));
+        handed += 21;
         std::thread::sleep(Duration::from_millis(10));
         if let Some(m) = meter.last()
             && m.top.len() == 2
@@ -230,9 +230,16 @@ fn the_meter_names_a_flooding_source_in_its_last_minute() {
     assert_eq!(named.top[1].source, Ipv4Addr::new(127, 0, 0, 3));
     assert_eq!(named.over_cap[0].source, Ipv4Addr::new(127, 0, 0, 2));
     assert!(named.ns >= 300_000_000);
-    // Its drop ends the thread, which closes the socket: the port is free.
+    while meter.heard() < handed {
+        assert!(Instant::now() < deadline, "{} of {handed}", meter.heard());
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(meter.heard(), handed);
+    assert_eq!(taps.dropped(), 0);
+    // Its drop ends the thread, and its listener leaves the taps.
+    assert_eq!(taps.listeners(), 1);
     drop(meter);
-    UdpSocket::bind(to).expect("the meter's socket closed with its thread");
+    assert_eq!(taps.listeners(), 0);
 }
 
 /// dstack #319: a host refreshing Dante records every 96 s gets one WARN
@@ -285,31 +292,16 @@ fn arc_query() -> Vec<u8> {
 /// 200 ms), and not one sending the same from another port.
 #[test]
 fn the_meter_names_a_host_refreshing_dante_records_on_the_cycle() {
-    let sock = loopback();
-    let to = sock.local_addr().unwrap();
     let cycle = Browsers::with_cycle(250_000_000, 80_000_000, 20_000_000);
-    let meter = Meter::start(sock, None, Ipv4Addr::LOCALHOST, 200_000_000, cycle).unwrap();
-    let browser = {
-        let s = socket2::Socket::new(
-            socket2::Domain::IPV4,
-            socket2::Type::DGRAM,
-            Some(socket2::Protocol::UDP),
-        )
-        .unwrap();
-        s.set_reuse_address(true).unwrap();
-        s.bind(&SocketAddr::from((Ipv4Addr::new(127, 0, 0, 4), 5353)).into())
-            .unwrap();
-        UdpSocket::from(s)
-    };
-    let other_port = UdpSocket::bind("127.0.0.5:0").unwrap();
+    let (taps, meter) = fed(200_000_000, cycle);
     let q = arc_query();
     let deadline = Instant::now() + Duration::from_secs(10);
     // Every minute seen that named a host (a later minute lists it again,
     // not warned: look between the sends).
     let mut seen: Vec<Minute> = Vec::new();
     while seen.is_empty() || !seen.iter().any(|m| m.browsers.iter().any(|b| b.warn)) {
-        browser.send_to(&q, to).unwrap();
-        other_port.send_to(&q, to).unwrap();
+        taps.feed(&q, from(4, 5353));
+        taps.feed(&q, from(5, 40000));
         for _ in 0..25 {
             std::thread::sleep(Duration::from_millis(10));
             if let Some(m) = meter.last()
@@ -336,23 +328,9 @@ fn the_meter_names_a_host_refreshing_dante_records_on_the_cycle() {
 fn the_meter_names_no_dante_hardware_on_the_cycle() {
     use simple_dns::rdata::{RData, TXT};
     use simple_dns::{CLASS, Name, Packet, ResourceRecord};
-    let sock = loopback();
-    let to = sock.local_addr().unwrap();
     let cycle = Browsers::with_cycle(250_000_000, 80_000_000, 20_000_000);
-    let meter = Meter::start(sock, None, Ipv4Addr::LOCALHOST, 200_000_000, cycle).unwrap();
-    let on_5353 = |last: u8| {
-        let s = socket2::Socket::new(
-            socket2::Domain::IPV4,
-            socket2::Type::DGRAM,
-            Some(socket2::Protocol::UDP),
-        )
-        .unwrap();
-        s.set_reuse_address(true).unwrap();
-        s.bind(&SocketAddr::from((Ipv4Addr::new(127, 0, 0, last), 5353)).into())
-            .unwrap();
-        UdpSocket::from(s)
-    };
-    let (pc, hardware) = (on_5353(4), on_5353(6));
+    let (taps, meter) = fed(200_000_000, cycle);
+    let (pc, hardware) = (from(4, 5353), from(6, 5353));
     let card_answer = {
         let mut p = Packet::new_reply(0);
         // The keys of the field case's ARC record (16.11.2026, an Audinate
@@ -376,13 +354,13 @@ fn the_meter_names_no_dante_hardware_on_the_cycle() {
         )];
         p.build_bytes_vec().unwrap()
     };
-    hardware.send_to(&card_answer, to).unwrap();
+    taps.feed(&card_answer, hardware);
     let q = arc_query();
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut seen: Vec<Minute> = Vec::new();
     while seen.len() < 3 {
-        pc.send_to(&q, to).unwrap();
-        hardware.send_to(&q, to).unwrap();
+        taps.feed(&q, pc);
+        taps.feed(&q, hardware);
         for _ in 0..25 {
             std::thread::sleep(Duration::from_millis(10));
             if let Some(m) = meter.last()
@@ -397,123 +375,6 @@ fn the_meter_names_no_dante_hardware_on_the_cycle() {
     for m in &seen {
         let named: Vec<Ipv4Addr> = m.browsers.iter().map(|b| b.source).collect();
         assert_eq!(named, vec![Ipv4Addr::new(127, 0, 0, 4)], "{m:?}");
-    }
-}
-
-#[test]
-fn one_meter_per_address_in_a_process_ending_with_its_last_holder() {
-    // An address of this test's own: the registry is the process's.
-    let ip = Ipv4Addr::new(192, 0, 2, 189);
-    let mut opened = 0;
-    let first = Meter::shared_with(ip, || {
-        opened += 1;
-        Ok(Meter::holding(None))
-    })
-    .unwrap();
-    let second = Meter::shared_with(ip, || {
-        opened += 1;
-        Ok(Meter::holding(None))
-    })
-    .unwrap();
-    assert!(Arc::ptr_eq(&first, &second));
-    assert_eq!(opened, 1);
-    let other = Meter::shared_with(Ipv4Addr::new(192, 0, 2, 190), || {
-        opened += 1;
-        Ok(Meter::holding(None))
-    })
-    .unwrap();
-    assert!(!Arc::ptr_eq(&first, &other));
-    assert_eq!(opened, 2);
-    drop((first, second));
-    let again = Meter::shared_with(ip, || {
-        opened += 1;
-        Ok(Meter::holding(None))
-    })
-    .unwrap();
-    assert_eq!(opened, 3);
-    // The new one is found again (the ended one's entry is not).
-    let found = Meter::shared_with(ip, || {
-        opened += 1;
-        Ok(Meter::holding(None))
-    })
-    .unwrap();
-    assert!(Arc::ptr_eq(&again, &found));
-    assert_eq!(opened, 3);
-    drop((again, found, other));
-    // An open that fails is the caller's error, and nothing is kept.
-    let refused = Meter::shared_with(ip, || Err(io::Error::other("no socket")));
-    assert!(refused.is_err());
-    let after = Meter::shared_with(ip, || {
-        opened += 1;
-        Ok(Meter::holding(None))
-    })
-    .unwrap();
-    assert_eq!(opened, 4);
-    drop(after);
-}
-
-/// dstack #282: the meter's group is joined again after its address came
-/// back (an injected interface list; its reads are counted).
-#[test]
-fn the_meter_joins_its_group_again_after_an_interface_change() {
-    use std::sync::atomic::AtomicUsize;
-    let sock = loopback();
-    let ip = Ipv4Addr::LOCALHOST;
-    let reads = Arc::new(AtomicUsize::new(0));
-    let read = {
-        let reads = Arc::clone(&reads);
-        move || {
-            let n = reads.fetch_add(1, Ordering::Relaxed);
-            let at = |index| Link {
-                name: "lo".to_string(),
-                ip,
-                index: Some(index),
-            };
-            // Up, gone, then back on another index, and so on.
-            Ok(match n {
-                0 => vec![at(1)],
-                1 => vec![],
-                _ => vec![at(2)],
-            })
-        }
-    };
-    let watch = MeterWatch {
-        membership: Membership::every(ip, Duration::from_millis(1)),
-        read: Box::new(read),
-    };
-    let meter = Meter::start(sock, Some(watch), ip, MINUTE_NS, Browsers::default()).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while reads.load(Ordering::Relaxed) < 5 {
-        assert!(Instant::now() < deadline, "the list was not read");
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    assert_eq!(meter.rejoins(), 1);
-}
-
-/// The real socket on loopback: datagrams to the mDNS group from our own
-/// address are counted under it. Loopback, so the test's mDNS never leaves
-/// the box (dstack #366: it sent up to 500 datagrams on dev1's LAN leg).
-#[test]
-fn the_meter_s_socket_counts_the_mdns_group_on_its_address() {
-    let ip = Ipv4Addr::LOCALHOST;
-    let meter = Meter::open(ip, 300_000_000).unwrap();
-    let from = UdpSocket::bind((ip, 0)).unwrap();
-    socket2::SockRef::from(&from)
-        .set_multicast_if_v4(&ip)
-        .unwrap();
-    // An mDNS header with no questions or records: nothing to answer.
-    let empty = [0u8; 12];
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        from.send_to(&empty, MDNS).unwrap();
-        std::thread::sleep(Duration::from_millis(20));
-        if meter
-            .last()
-            .is_some_and(|m| m.top.iter().any(|r| r.source == ip))
-        {
-            break;
-        }
-        assert!(Instant::now() < deadline, "our datagrams were not counted");
     }
 }
 
@@ -535,24 +396,14 @@ fn the_meter_keeps_the_peers_it_hears_below_the_network_floor() {
         )];
         p.build_bytes_vec().unwrap()
     };
-    let sock = loopback();
-    let to = sock.local_addr().unwrap();
-    let meter = Meter::start(
-        sock,
-        None,
-        Ipv4Addr::LOCALHOST,
-        MINUTE_NS,
-        Browsers::default(),
-    )
-    .unwrap();
+    let (taps, meter) = fed(MINUTE_NS, Browsers::default());
     assert!(meter.below_floor().is_empty());
-    let peer = UdpSocket::bind("127.0.0.4:0").unwrap();
     let old = answer("meter-old._netaudio-arc._udp.local", "dstack_vers=0.6.20");
     let new = answer("meter-new._netaudio-arc._udp.local", "dstack_vers=0.6.144");
     let deadline = Instant::now() + Duration::from_secs(10);
     let listed = loop {
-        peer.send_to(&new, to).unwrap();
-        peer.send_to(&old, to).unwrap();
+        taps.feed(&new, from(4, 5353));
+        taps.feed(&old, from(4, 5353));
         std::thread::sleep(Duration::from_millis(10));
         let listed = meter.below_floor();
         if !listed.is_empty() {
