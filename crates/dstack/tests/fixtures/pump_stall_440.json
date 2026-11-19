@@ -1,0 +1,18 @@
+{
+  "what": "dstack #440: the field record of a pump that slept through a clock re-anchor. A gen3 in-ear mixer's engine (dstack v0.6.137, timing low_latency, 96 kHz, block 16) on the linked clock, read from its own journal and status on 19.11.2026. Not recorded here: the device's name, any address, the grandmasters' ids (a grandmaster in another time base came up at 13:24:51 CET on 16.11.2026).",
+  "rate": 96000,
+  "block": 16,
+  "engine_start_utc": "2026-11-15T13:43:29.285Z",
+  "follower_new_time_base_utc": "2026-11-16T12:24:51.236Z",
+  "follower_re_anchor_step_ns": 3792840297321992,
+  "service_re_anchor_utc": "2026-11-16T12:25:43.215Z",
+  "service_re_anchor_delta_ns": -3792840297399476,
+  "tx_shift_samples": -364112668544,
+  "tx_moved": 4,
+  "pump_line_after_it": false,
+  "engine_start_to_service_re_anchor_s": 81733.93,
+  "engine_blocks_at_restart": 490392062,
+  "engine_late_missed_rebootstraps_at_restart": [0, 0, 0],
+  "restart_utc": "2026-11-19T11:59:38.192Z",
+  "stop_line": "the engine pump did not end within the wait"
+}

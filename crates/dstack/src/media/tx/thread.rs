@@ -540,7 +540,7 @@ fn run_passes(
         }
         // How late the sleep returns (dstack #359).
         let target = tx.wake_ns(now);
-        split::timed_sleep(clock, &mut tx, target, anchor.epoch);
+        split::timed_sleep(clock, &mut tx, target, now, anchor.epoch);
     }
 }
 
@@ -606,7 +606,7 @@ pub(super) fn run_relay(
             // never waits long for the handback.
             let wake = tx.wake_ns(now);
             let target = now.map_or(wake, |n| wake.min(n + crate::clock::ESCAPE_MAX_NS));
-            split::timed_sleep(clock, tx, target, anchor.epoch);
+            split::timed_sleep(clock, tx, target, now, anchor.epoch);
         }
     });
 }

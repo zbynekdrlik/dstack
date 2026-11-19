@@ -102,7 +102,10 @@ fn run<P: Process>(clock: &dyn PtpClock, mut pump: Pump<P>, stop: &AtomicBool) {
             // How late the sleep returns, read right around it (dstack
             // #354), on one epoch (a re-anchor moved the clock).
             let asked = clock.now_ns();
-            clock.sleep_until(target);
+            // At most the wake's distance from this pass's read (dstack
+            // #440): a re-anchor since it is the next pass's, never a sleep
+            // stretched by its step.
+            clock.sleep_until_within(target, target.saturating_sub(now_ns));
             let woke = clock.now_ns();
             let same = crate::clock::Anchor::of(clock).epoch == epoch;
             pump.slept(target, asked, woke, same);
