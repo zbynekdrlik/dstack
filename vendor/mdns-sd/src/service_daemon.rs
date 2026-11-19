@@ -375,7 +375,7 @@ impl ServiceDaemon {
     /// reported by this constructor — listen for such failures via
     /// [`monitor`](Self::monitor).
     pub fn new_with_port(port: u16) -> Result<Self> {
-        Self::start(port, None)
+        Self::start(port, None, Ipv4Addr::UNSPECIFIED)
     }
 
     /// dstack #442: [`ServiceDaemon::new`] whose thread hands `tap` every
@@ -384,10 +384,33 @@ impl ServiceDaemon {
     /// socket on port 5353 to hear the group. On Linux the socket is also
     /// handed only its own memberships (`IP_MULTICAST_ALL` off).
     pub fn new_tapped(tap: Tap) -> Result<Self> {
-        Self::start(MDNS_PORT, Some(tap))
+        Self::start(MDNS_PORT, Some(tap), Ipv4Addr::UNSPECIFIED)
     }
 
-    fn start(port: u16, tap: Option<Tap>) -> Result<Self> {
+    /// dstack #444 (a field trial): [`ServiceDaemon::new_tapped`] whose IPv4
+    /// socket is bound to `bind:5353` instead of `0.0.0.0:5353`. Every send
+    /// then leaves from `bind` (on Windows too, where a wildcard socket's
+    /// multicast leaves from the interface's preferred source). Windows
+    /// delivers the group to an address-bound socket that joined it; Linux
+    /// delivers it none (only unicast to `bind`), so there the daemon hears
+    /// no multicast query. The bound socket is opened here, on the caller's
+    /// thread: a bind that fails (an address not on the host, a port held
+    /// exclusively) is this call's error, never a daemon running without a
+    /// socket.
+    pub fn new_tapped_on(tap: Tap, bind: Ipv4Addr) -> Result<Self> {
+        Self::start(MDNS_PORT, Some(tap), bind)
+    }
+
+    fn start(port: u16, tap: Option<Tap>, bind: Ipv4Addr) -> Result<Self> {
+        // dstack #444: a socket bound to an address is opened before the
+        // thread, so its failure is returned (the wildcard's stays the
+        // thread's, as upstream).
+        let bound = if bind.is_unspecified() {
+            None
+        } else {
+            Some(new_multicast_socket(SocketAddrV4::new(bind, port).into())?)
+        };
+
         // Use port 0 to allow the system assign a random available port,
         // no need for a pre-defined port number.
         let signal_addr = SocketAddrV4::new(LOOPBACK_V4, 0);
@@ -423,6 +446,7 @@ impl ServiceDaemon {
                     cmd_sender,
                     signal_addr,
                     tap,
+                    bound,
                 )
             })
             .map_err(|e| e_fmt!("thread builder failed to spawn: {}", e))?;
@@ -898,8 +922,9 @@ impl ServiceDaemon {
         cmd_sender: Sender<Command>,
         signal_addr: SocketAddr,
         tap: Option<Tap>,
+        bound: Option<MyUdpSocket>,
     ) {
-        let mut zc = Zeroconf::new(signal_sock, poller, port, cmd_sender, signal_addr);
+        let mut zc = Zeroconf::new_bound(signal_sock, poller, port, cmd_sender, signal_addr, bound);
         if let Some(tap) = tap {
             zc.set_tap(tap);
         }
@@ -1406,12 +1431,29 @@ fn new_multicast_socket(addr: SocketAddr) -> Result<MyUdpSocket> {
 }
 
 impl Zeroconf {
+    // dstack #444: the crate's own tests make a `Zeroconf` this way; the
+    // daemon's thread calls `new_bound`.
+    #[cfg(test)]
     fn new(
         signal_sock: MioUdpSocket,
         poller: Poll,
         port: u16,
         cmd_sender: Sender<Command>,
         signal_addr: SocketAddr,
+    ) -> Self {
+        Self::new_bound(signal_sock, poller, port, cmd_sender, signal_addr, None)
+    }
+
+    /// dstack #444: upstream's `Zeroconf::new` with `bound` as its IPv4
+    /// socket when given (one bound to an address, `new_tapped_on`), else
+    /// upstream's `0.0.0.0` socket.
+    fn new_bound(
+        signal_sock: MioUdpSocket,
+        poller: Poll,
+        port: u16,
+        cmd_sender: Sender<Command>,
+        signal_addr: SocketAddr,
+        bound: Option<MyUdpSocket>,
     ) -> Self {
         // Get interfaces.
         let my_ifaddrs = my_ip_interfaces(true);
@@ -1423,9 +1465,12 @@ impl Zeroconf {
         let mut dns_registry_map = HashMap::new();
 
         // Use the same socket for receiving and sending multicast packets.
-        // Such socket has to bind to INADDR_ANY or IN6ADDR_ANY.
-        let addr = SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), port);
-        let ipv4_sock = new_multicast_socket(addr.into());
+        // Such socket has to bind to INADDR_ANY or IN6ADDR_ANY (dstack #444:
+        // or, on Windows, the one interface's address; see `new_tapped_on`).
+        let ipv4_sock = match bound {
+            Some(sock) => Ok(sock),
+            None => new_multicast_socket(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port).into()),
+        };
         if let Err(e) = &ipv4_sock {
             debug!("failed to set up IPv4 socket: {e}");
         }

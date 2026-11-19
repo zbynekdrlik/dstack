@@ -32,6 +32,16 @@
 //!   on the same index between two checks is not seen.
 //! - The daemon's commands wait out a full queue (`announce::retried`): a device with
 //!   more records than its queue holds (100) fills it at a withdrawal too.
+//! - A TRIAL (dstack #444), off by default: a device config's
+//!   `mdns_bind_address` opens the address's daemon with its socket bound
+//!   to `<address>:5353` ([`Mdns::shared_bound`]). Every send then leaves
+//!   from the address, so a Windows device needs no responder of its own
+//!   ([`Mdns::own_responder_needed`]) and Dante Controller gets each answer
+//!   once. Windows delivers the group to a joined address-bound socket
+//!   (mbc, 19.11.2026: 185 datagrams in 20 s); Linux delivers it none
+//!   (only unicast to the address), so there it hears no group query
+//!   ([`bound_note`]). How the bound socket fares on Windows when the
+//!   address goes and comes back is what the field trial reads.
 //!
 //! The subscriptions' direct queries (`subscribe::instance`) read their
 //! legacy unicast answers on a port of their own, never on 5353. A
@@ -91,6 +101,23 @@ impl Heard {
             Heard::Queries => is_query(bytes),
         }
     }
+}
+
+/// Whether the OS hands a group datagram to a socket bound to a unicast
+/// address that joined the group: Windows does (mbc, #442), Linux does not
+/// (dev1, dstack #444); assumed not on any other OS, where it was never
+/// measured (BSD stacks deliver only to the wildcard or the group).
+pub const GROUP_TO_BOUND_SOCKET: bool = cfg!(windows);
+
+/// The warning for a daemon bound to its address (`mdns_bind_address`),
+/// given whether the OS hands such a socket the group
+/// ([`GROUP_TO_BOUND_SOCKET`]): none where it does.
+pub fn bound_note(group_to_bound: bool) -> Option<&'static str> {
+    (!group_to_bound).then_some(
+        "mdns_bind_address on this OS: the mDNS socket bound to the address hears no \
+         group query (only unicast to the address), so browsers and direct queries to \
+         the group find no device here; a Windows trial switch (dstack #444)",
+    )
 }
 
 /// The `n`th dropped datagram gets a warning: the 1st, 2nd, 4th, 8th, ...
@@ -215,6 +242,8 @@ pub struct Mdns {
     daemon: ServiceDaemon,
     taps: Arc<Taps>,
     meter: Option<Arc<Meter>>,
+    /// Its socket is bound to the address, not the wildcard (dstack #444).
+    bound: bool,
 }
 
 impl Mdns {
@@ -224,14 +253,23 @@ impl Mdns {
     /// lock (a failed one waits for its shutdown), so two devices starting
     /// at once may open two: the later is dropped and the first kept.
     pub fn shared(ip: Ipv4Addr) -> Result<Arc<Mdns>, String> {
+        Mdns::shared_bound(ip, false)
+    }
+
+    /// [`Mdns::shared`], a new daemon's socket bound to `ip` when `bound`
+    /// (the device config's `mdns_bind_address`, a trial, dstack #444),
+    /// else to the wildcard. The daemon already running on `ip` is shared
+    /// whatever it was opened with (one socket an address); a device that
+    /// asks the other form is told so in a warning.
+    pub fn shared_bound(ip: Ipv4Addr, bound: bool) -> Result<Arc<Mdns>, String> {
         if let Some(m) = running(&mut lock(&SHARED), ip) {
-            return Ok(m);
+            return Ok(m.kept_for(bound));
         }
-        let opened = Arc::new(Mdns::open(ip)?);
+        let opened = Arc::new(Mdns::open(ip, bound)?);
         let mut all = lock(&SHARED);
         if let Some(first) = running(&mut all, ip) {
             drop(all);
-            return Ok(first);
+            return Ok(first.kept_for(bound));
         }
         all.push(Entry {
             ip,
@@ -244,11 +282,13 @@ impl Mdns {
     /// A new daemon on `ip`'s interface only, IPv4 (no other network sees
     /// the records; mdns-sd applies the selections in order), its IP check
     /// at the watches' period.
-    fn open(ip: Ipv4Addr) -> Result<Mdns, String> {
+    fn open(ip: Ipv4Addr, bound: bool) -> Result<Mdns, String> {
         let taps = Arc::new(Taps::default());
         let feed = Arc::clone(&taps);
-        let daemon = ServiceDaemon::new_tapped(Box::new(move |bytes, from| feed.feed(bytes, from)))
-            .map_err(|e| format!("the mDNS daemon: {e}"))?;
+        let tap: mdns_sd::Tap = Box::new(move |bytes, from| feed.feed(bytes, from));
+        let bind = if bound { ip } else { Ipv4Addr::UNSPECIFIED };
+        let daemon =
+            ServiceDaemon::new_tapped_on(tap, bind).map_err(|e| format!("the mDNS daemon: {e}"))?;
         let every = u32::try_from(crate::membership::EVERY.as_secs()).unwrap_or(u32::MAX);
         let selected = daemon
             .disable_interface(IfKind::All)
@@ -265,14 +305,46 @@ impl Mdns {
                     None
                 }
             },
+            bound,
         };
         // A failed selection drops `m`, which shuts its daemon down.
         selected.map_err(|e| format!("the mDNS interface: {e}"))?;
         info!(
             meter = m.meter.is_some(),
-            "mDNS: one socket on the address's interface, shared by its devices"
+            bound, "mDNS: one socket on the address's interface, shared by its devices"
         );
+        if let Some(note) = bound.then(|| bound_note(GROUP_TO_BOUND_SOCKET)).flatten() {
+            warn!("{note}");
+        }
         Ok(m)
+    }
+
+    /// This running daemon, for a device that asked for a socket `bound`
+    /// to the address or not: one asking the other form gets it as it is,
+    /// with a warning (one socket an address).
+    fn kept_for(self: Arc<Self>, bound: bool) -> Arc<Self> {
+        if bound != self.bound {
+            warn!(
+                asked_bound = bound,
+                running_bound = self.bound,
+                "mdns_bind_address differs from the running mDNS daemon's on the address: \
+                 the running one is shared"
+            );
+        }
+        self
+    }
+
+    /// Its socket is bound to the address (`mdns_bind_address`, dstack
+    /// #444), not the wildcard.
+    pub fn bound(&self) -> bool {
+        self.bound
+    }
+
+    /// A Windows device needs a responder of its own for answers from its
+    /// address (dstack #1 problem E) only while the daemon's socket is the
+    /// wildcard's: a bound one sends from the address itself (dstack #444).
+    pub fn own_responder_needed(&self) -> bool {
+        !self.bound
     }
 
     /// A new listener on this process's running daemon on `ip`, if one
