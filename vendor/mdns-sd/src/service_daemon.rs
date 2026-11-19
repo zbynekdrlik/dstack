@@ -401,6 +401,30 @@ impl ServiceDaemon {
         Self::start(MDNS_PORT, Some(tap), bind)
     }
 
+    /// dstack #444: a daemon bound to an address ([`ServiceDaemon::new_tapped_on`])
+    /// opens its IPv4 socket again: a new socket bound to the same address
+    /// and port (the old one kept when that fails), the group joined again
+    /// on every enabled interface, and every registered service announced
+    /// once on each. Its registrations and its tap stay as they are. On
+    /// Windows a socket bound to an address that was removed and added
+    /// again hears no group datagram, though the IP check joined it again
+    /// (mbc, 19.11.2026); the caller asks this when the address came back.
+    ///
+    /// The answer comes on the returned channel once the daemon's thread
+    /// ran it: `Err` with the reason when the bind or the poller refused
+    /// the new socket, or the daemon is not bound to an address.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Again`] if the daemon's command queue is full.
+    ///
+    /// Returns [`Error::DaemonShutdown`] if the daemon thread has already exited.
+    pub fn reopen(&self) -> Result<Receiver<std::result::Result<(), String>>> {
+        let (resp_s, resp_r) = bounded(1);
+        self.send_cmd(Command::Reopen(resp_s))?;
+        Ok(resp_r)
+    }
+
     fn start(port: u16, tap: Option<Tap>, bind: Ipv4Addr) -> Result<Self> {
         // dstack #444: a socket bound to an address is opened before the
         // thread, so its failure is returned (the wildcard's stays the
@@ -408,7 +432,8 @@ impl ServiceDaemon {
         let bound = if bind.is_unspecified() {
             None
         } else {
-            Some(new_multicast_socket(SocketAddrV4::new(bind, port).into())?)
+            let addr: SocketAddr = SocketAddrV4::new(bind, port).into();
+            Some((addr, new_multicast_socket(addr)?))
         };
 
         // Use port 0 to allow the system assign a random available port,
@@ -922,7 +947,7 @@ impl ServiceDaemon {
         cmd_sender: Sender<Command>,
         signal_addr: SocketAddr,
         tap: Option<Tap>,
-        bound: Option<MyUdpSocket>,
+        bound: Option<(SocketAddr, MyUdpSocket)>,
     ) {
         let mut zc = Zeroconf::new_bound(signal_sock, poller, port, cmd_sender, signal_addr, bound);
         if let Some(tap) = tap {
@@ -1223,6 +1248,11 @@ struct Zeroconf {
     /// A common socket for IPv4 interfaces. It's None if IPv4 is disabled in OS kernel.
     ipv4_sock: Option<MyUdpSocket>,
 
+    /// dstack #444: the address and port `ipv4_sock` is bound to when it is
+    /// bound to an address (`new_tapped_on`), for `reopen_bound`; `None`
+    /// for upstream's wildcard socket.
+    bound_addr: Option<SocketAddr>,
+
     /// A common socket for IPv6 interfaces. It's None if IPv6 is disabled in OS kernel.
     ipv6_sock: Option<MyUdpSocket>,
 
@@ -1430,6 +1460,18 @@ fn new_multicast_socket(addr: SocketAddr) -> Result<MyUdpSocket> {
     MyUdpSocket::new(sock).map_err(|e| e_fmt!("create MyUdpSocket for {}: {}", addr, e))
 }
 
+/// dstack #442: on Linux a tapped daemon's IPv4 socket takes only the
+/// groups it joined itself (`IP_MULTICAST_ALL` off); elsewhere a socket
+/// takes its own memberships already.
+fn own_groups_only(sock: &MyUdpSocket) {
+    #[cfg(target_os = "linux")]
+    if let Err(e) = socket2::SockRef::from(&sock.mio).set_multicast_all_v4(false) {
+        debug!("IP_MULTICAST_ALL off failed: {e}");
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = sock;
+}
+
 impl Zeroconf {
     // dstack #444: the crate's own tests make a `Zeroconf` this way; the
     // daemon's thread calls `new_bound`.
@@ -1445,16 +1487,20 @@ impl Zeroconf {
     }
 
     /// dstack #444: upstream's `Zeroconf::new` with `bound` as its IPv4
-    /// socket when given (one bound to an address, `new_tapped_on`), else
-    /// upstream's `0.0.0.0` socket.
+    /// socket when given (one bound to an address, `new_tapped_on`, with
+    /// that address), else upstream's `0.0.0.0` socket.
     fn new_bound(
         signal_sock: MioUdpSocket,
         poller: Poll,
         port: u16,
         cmd_sender: Sender<Command>,
         signal_addr: SocketAddr,
-        bound: Option<MyUdpSocket>,
+        bound: Option<(SocketAddr, MyUdpSocket)>,
     ) -> Self {
+        let (bound_addr, bound) = match bound {
+            Some((addr, sock)) => (Some(addr), Some(sock)),
+            None => (None, None),
+        };
         // Get interfaces.
         let my_ifaddrs = my_ip_interfaces(true);
 
@@ -1519,6 +1565,7 @@ impl Zeroconf {
             port,
             my_intfs,
             ipv4_sock,
+            bound_addr,
             ipv6_sock,
             my_services: HashMap::new(),
             cache: DnsCache::new(),
@@ -1556,13 +1603,73 @@ impl Zeroconf {
     /// dstack #442: hands every datagram read from now on to `tap`. On Linux
     /// the IPv4 socket then takes only the groups it joined itself.
     fn set_tap(&mut self, tap: Tap) {
-        #[cfg(target_os = "linux")]
         if let Some(sock) = self.ipv4_sock.as_ref() {
-            if let Err(e) = socket2::SockRef::from(&sock.mio).set_multicast_all_v4(false) {
-                debug!("IP_MULTICAST_ALL off failed: {e}");
-            }
+            own_groups_only(sock);
         }
         self.tap = Some(tap);
+    }
+
+    /// dstack #444: opens the IPv4 socket bound to an address again (see
+    /// `ServiceDaemon::reopen`). The new socket is bound before the old one
+    /// goes, so a failed bind keeps the old one; then the group is joined
+    /// on it by upstream's own path (`my_intfs` forgotten, the IP check
+    /// adding every selected address again through `add_intf_addr`), and
+    /// every registered service is announced once on each interface.
+    fn reopen_bound(&mut self) -> Result<()> {
+        let Some(addr) = self.bound_addr else {
+            return Err(e_fmt!("the IPv4 socket is not bound to an address"));
+        };
+        let mut sock = new_multicast_socket(addr)?;
+        if self.tap.is_some() {
+            own_groups_only(&sock);
+        }
+        if let Some(old) = self.ipv4_sock.as_mut() {
+            if let Err(e) = self.poller.registry().deregister(&mut old.mio) {
+                debug!("reopen: the old IPv4 socket not deregistered: {e}");
+            }
+        }
+        if let Err(e) = self.poller.registry().register(
+            &mut sock.mio,
+            Token(IPV4_SOCK_EVENT_KEY),
+            Interest::READABLE,
+        ) {
+            if let Some(old) = self.ipv4_sock.as_mut() {
+                if let Err(e) = self.poller.registry().register(
+                    &mut old.mio,
+                    Token(IPV4_SOCK_EVENT_KEY),
+                    Interest::READABLE,
+                ) {
+                    debug!("reopen: the old IPv4 socket not registered again: {e}");
+                }
+            }
+            return Err(e_fmt!("register the new IPv4 socket on {addr}: {e}"));
+        }
+        // The old socket closes here.
+        self.ipv4_sock = Some(sock);
+        self.my_intfs.clear();
+        self.check_ip_changes();
+
+        let names: Vec<String> = self.my_services.keys().cloned().collect();
+        let intfs: Vec<u32> = self.my_intfs.keys().copied().collect();
+        let mut invalid_intf_addrs = HashSet::new();
+        for name in &names {
+            for if_index in &intfs {
+                if let Err(InternalError::IntfAddrInvalid(intf_addr)) =
+                    self.exec_command_register_resend(name.clone(), *if_index)
+                {
+                    invalid_intf_addrs.insert(intf_addr);
+                }
+            }
+        }
+        if !invalid_intf_addrs.is_empty() {
+            let _ = self.send_cmd_to_self(Command::InvalidIntfAddrs(invalid_intf_addrs));
+        }
+        debug!(
+            "reopen: IPv4 socket on {addr} opened again, {} services announced on {} interfaces",
+            names.len(),
+            intfs.len()
+        );
+        Ok(())
     }
 
     /// Send a Command into the daemon channel and poke the signal socket to wake the poll loop.
@@ -4175,6 +4282,13 @@ impl Zeroconf {
                 self.check_ip_changes();
             }
 
+            Command::Reopen(resp_s) => {
+                let result = self.reopen_bound().map_err(|e| e.to_string());
+                if let Err(e) = resp_s.send(result) {
+                    debug!("reopen: failed to send the answer: {}", e);
+                }
+            }
+
             _ => {
                 debug!("unexpected command: {:?}", &command);
             }
@@ -4964,6 +5078,10 @@ enum Command {
     /// Invalidate some interface addresses.
     InvalidIntfAddrs(HashSet<Interface>),
 
+    /// dstack #444: open the IPv4 socket bound to an address again
+    /// (`ServiceDaemon::reopen`), answered on the channel.
+    Reopen(Sender<std::result::Result<(), String>>),
+
     Exit(Sender<DaemonStatus>),
 }
 
@@ -4992,6 +5110,7 @@ impl fmt::Display for Command {
             #[cfg(test)]
             Self::Verify(_, _) => write!(f, "Command VerifyResource"),
             Self::InvalidIntfAddrs(_) => write!(f, "Command InvalidIntfAddrs"),
+            Self::Reopen(_) => write!(f, "Command Reopen"),
         }
     }
 }
