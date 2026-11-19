@@ -443,6 +443,11 @@ impl Intake {
             }
             let Some((now_ns, now)) = now else {
                 count(&stats.unplaced);
+                // dstack #447: it came, unplaced (an idle drain, a clock not
+                // ready): the flow's furthest end is unknown now, so the
+                // next placed packet starts the sequence again instead of
+                // opening a hole across what came (dsg's false gaps).
+                lane.end = None;
                 continue;
             };
             let step = reads_apart(lane.plan.block, *gap);
