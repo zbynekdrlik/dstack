@@ -419,19 +419,23 @@ fn a_lag_beyond_the_latency_restarts_once() {
     assert_eq!(s.due(1_184 + 32), Some(1_184));
 }
 
+/// No schedule's next stamp is further ahead than its bound (at least the
+/// block) and a packet (a re-anchor moves one up to there, a start leaves it
+/// at most a packet ahead): further is the clock gone back (dstack #440).
 #[test]
 fn a_clock_jump_back_restarts_once() {
-    // Due at 1 000 064: a clock 192 000 samples before that is a jump.
+    // Next 1 000 032, the bound 96 and a packet 32: a clock 128 samples
+    // before it is no jump.
     let mut s = Schedule::bootstrap(1_000_000, 32, 96);
-    assert_eq!(s.due(808_064), None);
+    assert_eq!(s.due(999_904), None);
     assert_eq!(
         s.take_rebootstraps(),
         0,
-        "exactly the jump's size is no jump"
+        "exactly the bound and a packet is no jump"
     );
-    assert_eq!(s.due(808_063), None);
+    assert_eq!(s.due(999_903), None);
     assert_eq!(s.take_rebootstraps(), 1);
-    assert_eq!(s.next, 808_064);
+    assert_eq!(s.next, 999_904);
 }
 
 #[test]

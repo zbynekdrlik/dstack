@@ -185,7 +185,8 @@ fn a_clock_gone_back_far_starts_again() {
     let (mut fill, _, disc) = fill_of(Ramp::default());
     let engine = engine();
     fill.fill_due(T, MAX_LAG, &engine, 0);
-    fill.fill_due(T - 2 * crate::media::tx::DISCONTINUITY, MAX_LAG, &engine, 0);
+    // 4 s back at 96 kHz.
+    fill.fill_due(T - 384_000, MAX_LAG, &engine, 0);
     assert_eq!(fill.stats().view().rebootstraps, 1);
     assert_eq!(disc.load(Ordering::Relaxed), 2);
 }
