@@ -166,6 +166,12 @@ impl Timing {
     pub fn offset(&self) -> u64 {
         self.block + self.playout + self.margin
     }
+
+    /// When the earliest block is due, B + P: block 0's (no block starts
+    /// before media time 0), the floor of every bootstrap.
+    fn first_due(&self) -> u64 {
+        self.block + self.playout
+    }
 }
 
 /// What [`Blocks::next`] says at a media time.
@@ -211,7 +217,7 @@ impl Blocks {
     /// multiple of the block whose input ends at or after `now − playout`,
     /// so its block is due at or after `now` (no catch-up at start).
     pub fn bootstrap(now: u64, t: Timing) -> Blocks {
-        let start = now.saturating_sub(t.playout + t.block).div_ceil(t.block) * t.block;
+        let start = now.saturating_sub(t.first_due()).div_ceil(t.block) * t.block;
         Blocks { start, timing: t }
     }
 
@@ -246,10 +252,13 @@ impl Blocks {
     /// re-anchor moves it up to W and a block past now), so a block due
     /// further ahead is the clock gone back (dstack #440: a step back read
     /// under the old epoch), started again at once instead of waited out.
+    /// Near media time 0 the wait is judged from the earliest due time
+    /// (B + P: no block starts before 0), so a start's own wait never is.
     pub fn next(&mut self, now: u64) -> Due {
         let due = self.due();
         if now < due {
-            if due - now > self.timing.margin.saturating_add(self.timing.block) {
+            let from = now.max(self.timing.first_due());
+            if due - from > self.timing.margin.saturating_add(self.timing.block) {
                 return Due::Rebootstrap {
                     skipped: self.rebootstrap(now),
                     cause: Cause::ClockBack,
