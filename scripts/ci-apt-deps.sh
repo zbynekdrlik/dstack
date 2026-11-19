@@ -43,9 +43,15 @@ done
 # ran out of time moves to the fallback mirror like one that failed.
 TRY_SECONDS=240
 
+# Only the network is bounded: the index update and the download. The
+# install itself runs from the downloaded files without a limit, because a
+# limit that stops it leaves dpkg running on with its lock held (dev push
+# run 44428444113: dpkg was still setting up when its 240 s ran out, and the
+# fallback's `dpkg --configure -a` found the lock taken).
 install() {
-    timeout "$TRY_SECONDS" "${APT[@]}" update --error-on=any &&
-        timeout "$TRY_SECONDS" "${APT[@]}" install -y "${PKGS[@]}"
+    timeout --kill-after=10 "$TRY_SECONDS" "${APT[@]}" update --error-on=any &&
+        timeout --kill-after=10 "$TRY_SECONDS" "${APT[@]}" install -y --download-only "${PKGS[@]}" &&
+        "${APT[@]}" install -y "${PKGS[@]}"
 }
 
 if compgen -G "$CACHE_DIR/*.deb" >/dev/null; then
