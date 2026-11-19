@@ -322,6 +322,34 @@ fn the_top_bin_reaches_the_peak_lateness_that_rose_over_the_check() {
     assert_eq!(from_asio_cause(&low, 4000), Cause::Bridge, "3/4: 3000");
 }
 
+/// dsg's case (dstack #393): a from-ASIO target of 1 ms with a 128-frame
+/// driver at 96 kHz, two callbacks 0.6 ms late, then an underrun. The side
+/// needs about half a period (0.667 ms, #422's measured floor) plus the
+/// callbacks' lateness: 1.267 ms is over the 1 ms target, so the cause is
+/// the target, not the bridge.
+#[test]
+fn a_target_under_the_floor_plus_the_lateness_is_named_so() {
+    let status = Status {
+        rate: 96_000,
+        buffer_frames: 128,
+        ..Status::default()
+    };
+    let mut w = UnderrunWatch::new();
+    let mut now = UnderrunCounts::of(&status, 0, 0);
+    assert_eq!(now.period_us, 1333);
+    assert_eq!(w.look(now, 1.0), None, "nothing yet");
+    let bin = crate::state::lateness_bin(600_000).expect("600 us is binned");
+    now.late_bins[bin] = 2;
+    now.from_asio_underruns = 1;
+    let text = w.look(now, 1.0).expect("a from-ASIO rise");
+    assert_eq!(
+        text,
+        "asio bridge underruns since the last check: from-ASIO 1 (target 1000 us), \
+         cause: the target under the side's floor plus the callbacks' lateness; \
+         driver callbacks late meanwhile: 500-750 us: 2"
+    );
+}
+
 /// A new run (its counts fell) whose peak lateness equals the old run's
 /// is that run's own peak (dstack #393 review): its top bin is judged by
 /// it, not by the period.
