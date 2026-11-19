@@ -24,10 +24,10 @@
 //!   others' answers. A device that answers no PTR query (a wireless mic
 //!   receiver, dstack #1) is still heard when it announces. The group is
 //!   joined again after an interface change ([`crate::membership`], dstack
-//!   #282). Inside a device process the group comes from the address's
-//!   mDNS daemon socket instead ([`Discovery::start_heard`], dstack #442),
-//!   so the process never holds a second joined 5353 socket; the daemon
-//!   keeps that membership.
+//!   #282). A discovery started with [`Discovery::start_heard`] (a
+//!   device's `traffic::neighbours`) reads the group from the address's
+//!   mDNS daemon socket instead (dstack #442): the device's process holds
+//!   no second joined 5353 socket, and the daemon keeps that membership.
 //! - **Each instance's record** ([`crate::subscribe::instance`]): SRV,
 //!   TXT and the target's A by direct legacy unicast queries, asked again
 //!   before the answer is [`crate::subscribe::instance::MAX_AGE_NS`] old;
@@ -470,7 +470,7 @@ impl Group {
     fn drain(&self, buf: &mut [u8], until: Instant, take: impl FnMut(&[u8])) {
         match self {
             Group::Socket(sock) => drain(sock, buf, until, take),
-            Group::Tap(heard) => drain_tap(heard, until, take),
+            Group::Tap(heard) => drain_tap(heard, until, READ_WAIT, take),
         }
     }
 }
@@ -516,7 +516,10 @@ impl Discovery {
     /// Starts discovery on the interface with the address `ip`: the devices
     /// listed so far through [`Discovery::devices`], every change on the
     /// returned channel. The group's traffic is listened to when the mDNS
-    /// port can be shared (a warning otherwise: the sweeps still list).
+    /// port can be shared (a warning otherwise: the sweeps still list), on
+    /// a socket of its own: inside a device process, take a listener on its
+    /// daemon ([`crate::announce::mdns::Mdns::listen_on`]) and
+    /// [`Discovery::start_heard`] instead (dstack #442).
     pub fn start(ip: Ipv4Addr) -> Result<(Self, Receiver<Change>), DiscoverError> {
         let listener = match group_listener(ip) {
             Ok(sock) => Some(sock),
@@ -679,14 +682,15 @@ fn drain(sock: &UdpSocket, buf: &mut [u8], until: Instant, mut take: impl FnMut(
 
 /// Reads the daemon's tap `heard` while it hands datagrams on and `until`
 /// has not passed, each to `take`, as [`drain`] reads a socket: a wait of
-/// at most [`READ_WAIT`] (and never past `until`) with nothing ends it.
-fn drain_tap(heard: &Listener, until: Instant, mut take: impl FnMut(&[u8])) {
+/// at most `wait` ([`READ_WAIT`] in a round; never past `until`) with
+/// nothing ends it.
+fn drain_tap(heard: &Listener, until: Instant, wait: Duration, mut take: impl FnMut(&[u8])) {
     loop {
         let left = until.saturating_duration_since(Instant::now());
         if left.is_zero() {
             break;
         }
-        let Ok(d) = heard.recv_timeout(left.min(READ_WAIT)) else {
+        let Ok(d) = heard.recv_timeout(left.min(wait)) else {
             break;
         };
         take(&d.bytes);

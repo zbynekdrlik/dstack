@@ -187,15 +187,27 @@ impl Drop for Listener {
     }
 }
 
-/// The daemons running in this process, by address.
-static SHARED: Mutex<Vec<(Ipv4Addr, Weak<Mdns>)>> = Mutex::new(Vec::new());
+/// A daemon running in this process: its address, the daemon and its
+/// taps (a listener is taken from the taps alone, [`Mdns::listen_on`]).
+struct Entry {
+    ip: Ipv4Addr,
+    mdns: Weak<Mdns>,
+    taps: Weak<Taps>,
+}
 
-/// The running daemon on `ip` in `all`, if any (dead entries dropped).
-fn running(all: &mut Vec<(Ipv4Addr, Weak<Mdns>)>, ip: Ipv4Addr) -> Option<Arc<Mdns>> {
-    all.retain(|(_, w)| w.strong_count() > 0);
-    all.iter()
-        .find(|(a, _)| *a == ip)
-        .and_then(|(_, w)| w.upgrade())
+/// The daemons running in this process.
+static SHARED: Mutex<Vec<Entry>> = Mutex::new(Vec::new());
+
+/// The entry of the running daemon on `ip` in `all`, if any (dead entries
+/// dropped).
+fn live(all: &mut Vec<Entry>, ip: Ipv4Addr) -> Option<&Entry> {
+    all.retain(|e| e.mdns.strong_count() > 0);
+    all.iter().find(|e| e.ip == ip)
+}
+
+/// The running daemon on `ip` in `all`, if any.
+fn running(all: &mut Vec<Entry>, ip: Ipv4Addr) -> Option<Arc<Mdns>> {
+    live(all, ip).and_then(|e| e.mdns.upgrade())
 }
 
 /// The process's mDNS daemon on one address (see the module).
@@ -221,7 +233,11 @@ impl Mdns {
             drop(all);
             return Ok(first);
         }
-        all.push((ip, Arc::downgrade(&opened)));
+        all.push(Entry {
+            ip,
+            mdns: Arc::downgrade(&opened),
+            taps: Arc::downgrade(&opened.taps),
+        });
         Ok(opened)
     }
 
@@ -260,12 +276,13 @@ impl Mdns {
     }
 
     /// A new listener on this process's running daemon on `ip`, if one
-    /// runs there; none is opened. The listener holds the daemon's taps,
-    /// not the daemon: once its last device ends it, the listener hears
-    /// nothing more.
+    /// runs there; none is opened. Only the daemon's taps are taken, never
+    /// the daemon, so its last device's drop always shuts it down (never
+    /// the caller's thread); once it ended, the listener hears nothing
+    /// more.
     pub fn listen_on(ip: Ipv4Addr, heard: Heard) -> Option<Listener> {
-        let running = running(&mut lock(&SHARED), ip)?;
-        Some(running.listen(heard))
+        let taps = live(&mut lock(&SHARED), ip)?.taps.upgrade()?;
+        Some(taps.listen(heard))
     }
 
     /// The daemon: a device's records go to it through its own

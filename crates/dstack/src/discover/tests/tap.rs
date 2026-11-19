@@ -97,29 +97,33 @@ fn queued(queued: u8) -> (Arc<Taps>, crate::announce::mdns::Listener) {
 fn draining_a_tap_reads_every_queued_datagram_in_order_then_ends_at_the_empty_one() {
     let (_taps, heard) = queued(5);
     let mut seen = Vec::new();
-    drain_tap(&heard, Instant::now() + BOUND, |b| seen.push(b.to_vec()));
+    drain_tap(&heard, Instant::now() + BOUND, READ_WAIT, |b| {
+        seen.push(b.to_vec());
+    });
     let want: Vec<Vec<u8>> = (1..=5).map(|i| vec![i, i]).collect();
     assert_eq!(seen, want);
-    // Nothing queued: one wait of at most `READ_WAIT`, nothing taken.
+    // Nothing queued: one wait of `READ_WAIT`, nothing taken, never a
+    // second (that would wait out the whole `BOUND`).
     let started = Instant::now();
-    drain_tap(&heard, Instant::now() + BOUND, |_| panic!());
+    drain_tap(&heard, Instant::now() + BOUND, READ_WAIT, |_| panic!());
     let waited = started.elapsed();
     assert!(waited >= READ_WAIT, "{waited:?}");
-    assert!(waited < 4 * READ_WAIT, "{waited:?}");
+    assert!(waited < BOUND / 2, "{waited:?}");
 }
 
 #[test]
 fn draining_a_tap_reads_nothing_once_its_time_is_up_and_never_waits_past_it() {
     let (_taps, heard) = queued(3);
-    drain_tap(&heard, Instant::now(), |_| panic!());
+    drain_tap(&heard, Instant::now(), BOUND, |_| panic!());
     // The datagrams are still queued for the next round.
     let mut read = 0;
-    drain_tap(&heard, Instant::now() + BOUND, |_| read += 1);
+    drain_tap(&heard, Instant::now() + BOUND, READ_WAIT, |_| read += 1);
     assert_eq!(read, 3);
-    // An empty tap is waited for until the round's end only.
+    // An empty tap is waited for until the round's end only, however long
+    // a read may wait.
     let started = Instant::now();
-    drain_tap(&heard, Instant::now() + READ_WAIT / 5, |_| panic!());
-    assert!(started.elapsed() < READ_WAIT, "{:?}", started.elapsed());
+    drain_tap(&heard, Instant::now() + READ_WAIT, BOUND, |_| panic!());
+    assert!(started.elapsed() < BOUND / 2, "{:?}", started.elapsed());
 }
 
 #[test]
@@ -138,6 +142,8 @@ fn a_tapped_discovery_sweeping_a_unicast_responder_reads_no_interface_list() {
     let (discovery, _changes) = Discovery::start_group(LOOPBACK, mdns, group, lister).unwrap();
     eventually("a sweep", || !asked.lock().unwrap().is_empty());
     // The daemon keeps the group: nothing of the discovery's to follow.
+    // The watch runs at each round's start, so one more round gives it
+    // another look (nothing counts rounds; the fake counts list reads).
     std::thread::sleep(ROUND);
     assert_eq!(fake.reads(), 0, "nothing to keep");
     discovery.stop().unwrap();
