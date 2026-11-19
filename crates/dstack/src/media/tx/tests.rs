@@ -458,6 +458,7 @@ fn wake_ns_is_the_first_ns_the_next_packet_is_due() {
                 slot: 0,
                 block: 0,
                 rebootstraps: 0,
+                back: false,
             };
             let w = s.wake_ns(rate, TX_MARGIN_NS);
             assert!(

@@ -147,5 +147,20 @@ impl Transmitter {
     }
 }
 
+impl Transmitter {
+    /// A pass at the same epoch as the last: every flow's and the fill's
+    /// clock-back mark is spent (a re-anchor spends them in
+    /// [`Transmitter::re_anchored`]), so a mark keeps a schedule through the
+    /// next pass's re-anchor only (dstack #440, ROZHODNUTÉ 19.11).
+    pub(super) fn unmark(&mut self) {
+        if let Some(fill) = self.fill.as_mut() {
+            fill.unmark();
+        }
+        for schedule in self.lanes.iter_mut().filter_map(|l| l.schedule.as_mut()) {
+            schedule.unmark();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests;

@@ -325,6 +325,14 @@ impl TxFill {
         self.blocks.map(|b| ns_of(b.due(), rate))
     }
 
+    /// A pass's re-anchor point with no re-anchor: the schedule's clock-back
+    /// mark is spent ([`Blocks::unmark`]).
+    pub fn unmark(&mut self) {
+        if let Some(blocks) = self.blocks.as_mut() {
+            blocks.unmark();
+        }
+    }
+
     /// The clock is not ready: nothing is filled, and the next ready pass
     /// starts afresh.
     pub fn idle(&mut self) {
@@ -398,13 +406,14 @@ impl TxFill {
             }
         };
         loop {
-            let before = blocks.start();
             match blocks.next(now) {
                 Due::Run { start, .. } => self.block(start, engine, shift),
                 Due::Wait { .. } => break,
-                Due::Rebootstrap { .. } => {
-                    blocks = self.fresh(now);
-                    self.stats.rebootstrapped(self.skipped(before, &blocks));
+                // `next` started it again as `fresh` would (its timing is
+                // the schedule's), a clock gone back with the mark the
+                // next pass's re-anchor reads (dstack #440).
+                Due::Rebootstrap { skipped, .. } => {
+                    self.stats.rebootstrapped(skipped);
                     self.discontinuity = true;
                 }
             }

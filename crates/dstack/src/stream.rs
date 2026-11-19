@@ -210,6 +210,9 @@ pub enum Cause {
 pub struct Blocks {
     start: u64,
     timing: Timing,
+    /// Started again by [`Blocks::next`] as a clock gone back, and no pass's
+    /// re-anchor point since ([`Blocks::re_anchor`], [`Blocks::unmark`]).
+    back: bool,
 }
 
 impl Blocks {
@@ -218,7 +221,11 @@ impl Blocks {
     /// so its block is due at or after `now` (no catch-up at start).
     pub fn bootstrap(now: u64, t: Timing) -> Blocks {
         let start = now.saturating_sub(t.first_due()).div_ceil(t.block) * t.block;
-        Blocks { start, timing: t }
+        Blocks {
+            start,
+            timing: t,
+            back: false,
+        }
     }
 
     /// The next block's first input stamp.
@@ -254,13 +261,17 @@ impl Blocks {
     /// under the old epoch), started again at once instead of waited out.
     /// Near media time 0 the wait is judged from the earliest due time
     /// (B + P: no block starts before 0), so a start's own wait never is.
+    /// Such a restart marks the schedule for the next pass's re-anchor
+    /// ([`Blocks::re_anchor`]).
     pub fn next(&mut self, now: u64) -> Due {
         let due = self.due();
         if now < due {
             let from = now.max(self.timing.first_due());
             if due - from > self.timing.margin.saturating_add(self.timing.block) {
+                let skipped = self.rebootstrap(now);
+                self.back = true;
                 return Due::Rebootstrap {
-                    skipped: self.rebootstrap(now),
+                    skipped,
                     cause: Cause::ClockBack,
                 };
             }
@@ -289,13 +300,22 @@ impl Blocks {
     /// of at most half a block, which [`Blocks::next`] judges as any other,
     /// W being at least the block); kept when it would leave it further (the
     /// step before read the new time with the old epoch and already started
-    /// it again there); else re-bootstrapped at `now`, and the blocks
-    /// skipped (the [`Blocks::rebootstrap`] count) are returned with it.
+    /// it again there); kept too when it moves back a schedule that the
+    /// pass before started again as a clock gone back ([`Blocks::next`]:
+    /// that pass read the new time of this step under the old epoch, so a
+    /// move would leave it the step behind and re-bootstrap it late, dstack
+    /// #440); else re-bootstrapped at `now`, and the blocks skipped (the
+    /// [`Blocks::rebootstrap`] count) are returned with it. It spends the
+    /// mark either way.
     pub fn re_anchor(&mut self, shift: Option<i64>, now: u64) -> (Shift, u64) {
+        let back = std::mem::take(&mut self.back);
         let block = self.timing.block;
         let Some(by) = shift.filter(|by| by.rem_euclid(block as i64) == 0) else {
             return (Shift::Restarted, self.rebootstrap(now));
         };
+        if back && by.is_negative() {
+            return (Shift::Kept, 0);
+        }
         let start = self.start.wrapping_add_signed(by);
         let due = start + block + self.timing.playout;
         if due > now.saturating_add(self.timing.margin).saturating_add(block) {
@@ -303,6 +323,13 @@ impl Blocks {
         }
         self.start = start;
         (Shift::Moved, 0)
+    }
+
+    /// A pass's re-anchor point with no re-anchor: a clock-back mark from
+    /// the pass before is spent, so it keeps a schedule through one pass's
+    /// re-anchor only (dstack #440, ROZHODNUTÉ 19.11).
+    pub fn unmark(&mut self) {
+        self.back = false;
     }
 
     /// Starts the schedule again at media time `now` (a lag, a clock that
@@ -577,7 +604,10 @@ impl<P: Process> Pump<P> {
                 );
                 b
             }
-            Some(b) => b,
+            Some(mut b) => {
+                b.unmark();
+                b
+            }
             None => {
                 self.discontinuity = true;
                 Blocks::bootstrap(now, self.timing)

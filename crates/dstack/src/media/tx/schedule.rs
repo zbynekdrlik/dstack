@@ -33,6 +33,10 @@ pub struct Schedule {
     pub block: u64,
     /// Starts again since the last [`Schedule::take_rebootstraps`].
     pub(super) rebootstraps: u64,
+    /// Started again as a clock gone back ([`Schedule::ahead_limit`]), and
+    /// no pass's re-anchor point since ([`Schedule::re_anchor`],
+    /// [`Schedule::unmark`]; dstack #440).
+    pub(super) back: bool,
 }
 
 impl Schedule {
@@ -48,6 +52,7 @@ impl Schedule {
             slot: 0,
             block: 0,
             rebootstraps: 0,
+            back: false,
         }
     }
 
@@ -74,7 +79,8 @@ impl Schedule {
     /// The stamp of the packet due at `now`, if one is (the schedule moves
     /// on by fpp). A lag past its [`Schedule::bound`], or a next stamp more
     /// than [`Schedule::ahead_limit`] ahead of the clock, starts it again
-    /// (counted) and sends nothing now.
+    /// (counted) and sends nothing now; the second marks it for the next
+    /// pass's re-anchor ([`Schedule::re_anchor`]).
     pub fn due(&mut self, now: u64) -> Option<u64> {
         self.due_after(now, &split::Before::default())
     }
@@ -88,13 +94,20 @@ impl Schedule {
     /// step off the grid is a lag or a wait of at most half a block, which
     /// [`Schedule::due`] judges as any other); kept when it would leave it
     /// further (the pass before read the new time with the old
-    /// epoch and already started it again there); else started again,
-    /// counted.
+    /// epoch and already started it again there); kept too when it moves
+    /// back a schedule the pass before started again as a clock gone back
+    /// (that pass read the new time of this step under the old epoch, so a
+    /// move would leave it the step behind and start it again, dstack
+    /// #440); else started again, counted. It spends the mark either way.
     pub fn re_anchor(&mut self, shift: Option<i64>, now: u64) -> Shift {
+        let back = std::mem::take(&mut self.back);
         let Some(by) = shift.filter(|by| by.rem_euclid(self.fpp as i64) == 0) else {
             self.realign(now);
             return Shift::Restarted;
         };
+        if back && by.is_negative() {
+            return Shift::Kept;
+        }
         let next = self.next.wrapping_add_signed(by);
         // The room: the latency, or the block when larger (the shift is on
         // the block grid, so its rest can leave the stamp up to half a block
@@ -107,6 +120,13 @@ impl Schedule {
         }
         self.next = next;
         Shift::Moved
+    }
+
+    /// A pass's re-anchor point with no re-anchor: a clock-back mark from
+    /// the pass before is spent, so it keeps a schedule through one pass's
+    /// re-anchor only (dstack #440, ROZHODNUTÉ 19.11).
+    pub fn unmark(&mut self) {
+        self.back = false;
     }
 
     /// Starts the schedule again at `now` (counted): a lag, a jump, a
@@ -123,7 +143,8 @@ impl Schedule {
     pub fn due_after(&mut self, now: u64, before: &split::Before) -> Option<u64> {
         let send = self.next.saturating_add(self.fpp);
         let bound = self.bound();
-        if now > send.saturating_add(bound) || self.next > now.saturating_add(self.ahead_limit()) {
+        let back = self.next > now.saturating_add(self.ahead_limit());
+        if now > send.saturating_add(bound) || back {
             // Why (dasio, Windows): the lag past the send time, or a
             // jump back. Rare (each one is a restart), so logged; its
             // `max_lag` is the bound it was judged by, for its `slot`'s
@@ -138,6 +159,7 @@ impl Schedule {
                 "the TX schedule starts again"
             );
             self.realign(now);
+            self.back = back;
             return None;
         }
         if now < send {

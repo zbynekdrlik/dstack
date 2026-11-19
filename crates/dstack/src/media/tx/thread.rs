@@ -137,6 +137,8 @@ impl Transmitter {
         let now = send_clock(now_ns, self.rate, self.margin_ns);
         if self.epoch != Some(anchor.epoch) {
             self.re_anchored(now, clock::to_samples(now_ns, self.rate), anchor);
+        } else {
+            self.unmark();
         }
         self.epoch = Some(anchor.epoch);
         self.fill_due(now_ns);
