@@ -287,6 +287,7 @@ impl Intake {
                     lane.plan = plan;
                     lane.source = None;
                     lane.end = None;
+                    lane.restart = false;
                     lane.read_at = None;
                     if let Some(stats) = shared.lanes.get(slot) {
                         stats.source.store(0, Ordering::Relaxed);
@@ -444,10 +445,10 @@ impl Intake {
             let Some((now_ns, now)) = now else {
                 count(&stats.unplaced);
                 // dstack #447: it came, unplaced (an idle drain, a clock not
-                // ready): the flow's furthest end is unknown now, so the
-                // next placed packet starts the sequence again instead of
-                // opening a hole across what came (dsg's false gaps).
-                lane.end = None;
+                // ready): the next placed packet starts the sequence again
+                // instead of opening a hole across what came (dsg's false
+                // gaps; `place`).
+                lane.restart = true;
                 continue;
             };
             let step = reads_apart(lane.plan.block, *gap);
@@ -614,6 +615,13 @@ fn place(p: PlaceArgs<'_>) -> u64 {
         stats,
         holes::follow_clock(&mut lane.end, &mut lane.holes, now),
     );
+    // dstack #447: packets came unplaced since the furthest end; it no
+    // longer marks where this one follows (after the clock's check above,
+    // so a time base gone back meanwhile still loses the old holes).
+    if lane.restart {
+        lane.restart = false;
+        lane.end = None;
+    }
     // dstack #278: holes, reorders and gaps; a packet a ring or more past
     // now (another time base's, #379) is no measure of them.
     let placed = if went_back(pos, now) {

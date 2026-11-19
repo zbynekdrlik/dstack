@@ -27,6 +27,10 @@ pub(super) struct Lane {
     pub(super) source: Option<SocketAddrV4>,
     /// The end of the furthest packet so far, samples.
     pub(super) end: Option<u64>,
+    /// Packets came unplaced since the last placed one (dstack #447: an
+    /// idle drain, a clock not ready): the next placed packet starts the
+    /// sequence again, after the clock's check on the old end.
+    pub(super) restart: bool,
     /// The runs of frames before `end` that no packet has filled yet
     /// (dstack #278): a gap only once lost ([`Holes`]).
     pub(super) holes: Holes,
@@ -46,6 +50,7 @@ impl Lane {
             targets: Vec::with_capacity(channels),
             source: None,
             end: None,
+            restart: false,
             holes: Holes::default(),
             read_at: None,
         }
