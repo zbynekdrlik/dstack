@@ -383,6 +383,32 @@ fn the_player_measures_the_call_before_the_hold() {
     assert_eq!((stats.underruns(), stats.recentres()), (0, 0));
 }
 
+/// dstack #433 (v0.6.187 tag CI on windows-2025: 1 underrun, 1 re-centre,
+/// 5088 frames dropped for the card's 5568 of silence): every wake there
+/// is about 1 ms late (the runner's timer), so the floor's calls are 1 ms
+/// past their ticks, and a hold that ended 0.3 ms past a tick reads its
+/// excess 0.7 ms under the silence. The dry call drops a period under it
+/// (no slack: never over), and the FIFO holds that period until the
+/// settling drops it. Meanwhile the controller must not take that period
+/// for an excess: its re-centre mid-call ran the rest of the big call dry.
+#[test]
+fn a_hold_that_ended_under_the_floor_s_lateness_is_settled_whole() {
+    let (fifo, mut player) = running(200);
+    let stats = player.stats();
+    // Held past the tick at T+30 on Windows' 1056 frames: the ticks at T+20
+    // and T+30 found 96 and nothing (864 of silence). The call before was
+    // 1 ms past its tick (every call is), the dry call 0.3 ms past T+30:
+    // 40 ms less 0.7 ms read for the whole buffer; the next, 1 ms past
+    // T+40, reads the 0.7 ms back.
+    call(&fifo, &mut player, 1920 - 34, 1056);
+    call(&fifo, &mut player, 480 + 34, 480);
+    for _ in 1..SETTLE_CALLS {
+        call(&fifo, &mut player, 480, 480);
+    }
+    assert_eq!((stats.underruns(), stats.recentres()), (0, 0));
+    assert_eq!((stats.output_gaps(), stats.output_lost_frames()), (1, 864));
+}
+
 #[test]
 fn a_hold_soon_after_a_gap_is_measured_on_a_fresh_floor() {
     let (fifo, mut player) = running(200);

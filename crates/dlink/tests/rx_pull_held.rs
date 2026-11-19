@@ -19,7 +19,9 @@
 //! period. A callback held past what the buffer still holds leaves the
 //! card playing silence meanwhile (the card's gap, not the bridge's). Some
 //! events are held 46 ms (the field's worst) or 20 ms, or 25 ms with the
-//! next event 6 ms late. The bridge must play every frame it is asked for
+//! next event 6 ms late, or (dstack #433, windows-2025's timer: every wake
+//! about 1 ms late) every event 1 ms late and the held one to 0.9 ms past
+//! a tick, less late than the calls before it. The bridge must play every frame it is asked for
 //! at the level (no underrun, no re-centre), and the latency after a hold
 //! must be the latency before it: the frames due while the card played
 //! silence are dropped, counted as the output's own gap
@@ -66,8 +68,12 @@ const CARD_FRAMES: u64 = 2 * PERIOD_FRAMES + 96;
 /// judged.
 const SETTLE: Duration = Duration::from_secs(2);
 const JUDGED: Duration = Duration::from_secs(8);
-/// A held event about every this many events (0.7 s).
-const HOLD_EVERY: u64 = 70;
+/// A held event about every this many events (0.7 s). Not a multiple of
+/// 4: the converter's 128-frame blocks meet the 480-frame calls in four
+/// phases (480 mod 128 = 96), and the holds meet each of them (dstack
+/// #433: at 70 they alternated two, and a dry call a period over the
+/// excess bound in another phase never ran).
+const HOLD_EVERY: u64 = 71;
 /// The events after a hold that wake late in the late-wake case (more
 /// than the gap's settling calls: a held PC's burst).
 const LATE_EVENTS: u32 = 6;
@@ -128,13 +134,20 @@ impl Heard {
     }
 }
 
-/// The card and its event thread (module doc), each held event `hold`
-/// late and the [`LATE_EVENTS`] events after it `late_after` late: returns
-/// what it heard.
-#[allow(clippy::too_many_arguments)]
-fn output(
+/// How the event thread wakes: each held event `hold` late, the
+/// [`LATE_EVENTS`] events after it `late_after` late, and every event
+/// `every` later still (a runner's timer that wakes each sleep late).
+#[derive(Debug, Clone, Copy)]
+struct Wakes {
     hold: Duration,
     late_after: Duration,
+    every: Duration,
+}
+
+/// The card and its event thread (module doc), woken as `wakes` says:
+/// returns what it heard.
+fn output(
+    wakes: Wakes,
     mut pull: dlink::bridge::RxPull,
     mut player: Player,
     fifo: Arc<dlink::bridge::Fifo>,
@@ -161,15 +174,16 @@ fn output(
         next += PERIOD;
         events += 1;
         let held = judging.is_some() && events.is_multiple_of(HOLD_EVERY);
-        let wake = if held {
+        let late = if held {
             late_left = LATE_EVENTS;
-            next + hold
+            wakes.hold
         } else if late_left > 0 {
             late_left -= 1;
-            next + late_after
+            wakes.late_after
         } else {
-            next
+            Duration::ZERO
         };
+        let wake = next + late + wakes.every;
         if let Some(wait) = wake.checked_duration_since(Instant::now()) {
             std::thread::sleep(wait);
         }
@@ -260,10 +274,10 @@ fn output(
     }
 }
 
-/// The whole run with each held event `hold` late: what the card heard,
-/// the pull's restarts, and the receiver's and sender's counts for a
-/// failure's message.
-fn run(hold: Duration, late_after: Duration) -> (Heard, u64, String) {
+/// The whole run with the events woken as `wakes` says: what the card
+/// heard, the pull's restarts, and the receiver's and sender's counts for
+/// a failure's message.
+fn run(wakes: Wakes) -> (Heard, u64, String) {
     let _one = ONE_DEVICE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -328,11 +342,7 @@ fn run(hold: Duration, late_after: Duration) -> (Heard, u64, String) {
             Arc::clone(receiver.media()),
             Arc::clone(&receiving),
         );
-        std::thread::spawn(move || {
-            output(
-                hold, late_after, pull, player, fifo, stats, media, receiving,
-            )
-        })
+        std::thread::spawn(move || output(wakes, pull, player, fifo, stats, media, receiving))
     };
     let end = Instant::now() + Duration::from_secs(15);
     while receiver.rx_channels()[0].status != Some(SubStatus::Receiving) && Instant::now() < end {
@@ -396,15 +406,24 @@ fn judge(case: &str, heard: &Heard, restarts: u64, counts: &str) {
     );
 }
 
+/// Each held event `hold` late, none other late.
+fn held(hold: Duration) -> Wakes {
+    Wakes {
+        hold,
+        late_after: Duration::ZERO,
+        every: Duration::ZERO,
+    }
+}
+
 #[test]
 fn an_output_callback_held_46_ms_plays_on_from_the_queued_packets() {
-    let (heard, restarts, counts) = run(Duration::from_millis(46), Duration::ZERO);
+    let (heard, restarts, counts) = run(held(Duration::from_millis(46)));
     judge("held 46 ms", &heard, restarts, &counts);
 }
 
 #[test]
 fn an_output_callback_held_20_ms_plays_on_from_the_queued_packets() {
-    let (heard, restarts, counts) = run(Duration::from_millis(20), Duration::ZERO);
+    let (heard, restarts, counts) = run(held(Duration::from_millis(20)));
     judge("held 20 ms", &heard, restarts, &counts);
 }
 
@@ -412,6 +431,35 @@ fn an_output_callback_held_20_ms_plays_on_from_the_queued_packets() {
 /// held PC's burst): that lateness must not be dropped as silence.
 #[test]
 fn an_output_callback_held_25_ms_then_6_ms_late_plays_on() {
-    let (heard, restarts, counts) = run(Duration::from_millis(25), Duration::from_millis(6));
+    let (heard, restarts, counts) = run(Wakes {
+        late_after: Duration::from_millis(6),
+        ..held(Duration::from_millis(25))
+    });
     judge("held 25 ms, then 6 ms late", &heard, restarts, &counts);
+}
+
+/// dstack #433 (v0.6.187 tag CI on windows-2025: 1 underrun, 1 re-centre,
+/// 5088 frames dropped for 5568 of silence): every wake 1 ms late, and the
+/// held one to 0.9 ms past the tick at T+30, less late past its tick than
+/// the calls before were past theirs. Its dry call drops a period under
+/// the card's silence (never over), and the FIFO holds that period until
+/// the settling drops it: the controller must not re-centre on it. The
+/// depth then crosses the excess bound only in the converter's latest
+/// phase and with the hold as late as it can be under the floor (dev1
+/// under `chrt -f 10`: 0.9 ms failed 4 of 4 with 3 underruns and 3
+/// re-centres, 0.3 ms passed: 1807 frames at its first look against the
+/// bound's 1824).
+#[test]
+fn an_output_callback_held_to_just_past_a_tick_on_a_late_timer_plays_on() {
+    let (heard, restarts, counts) = run(Wakes {
+        hold: Duration::from_micros(29_900),
+        late_after: Duration::ZERO,
+        every: Duration::from_millis(1),
+    });
+    judge(
+        "every wake 1 ms late, held to 0.9 ms past a tick",
+        &heard,
+        restarts,
+        &counts,
+    );
 }
