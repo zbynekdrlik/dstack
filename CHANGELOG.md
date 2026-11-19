@@ -3,6 +3,7 @@
 ## 0.6.189
 
 - **Dependency (#435): dsync-ptp moves from v1.33.1 to v1.35.13.** For every device on the in-process follower (the default): dsync#204 tracks a thermal frequency ramp fast enough (resolume-pp, 18.11.2026: ~6 ppm in minutes after its GPU load started; dsync's simulation ~100 -> ~35 µs), and dsync#206 handles the Windows boot race in dsync-ptp too (dstack's own retry, #431, stays). No API change for dstack's consumers. **No latency change.**
+- Test: `daemon::media::tests::the_fixed_*_ports_are_bound_before_any_port_the_os_chooses` skips a base that another test thread's wildcard socket took between its probe and the start (PR #437's coverage run); its expectation is unchanged.
 
 ## 0.6.188
 
