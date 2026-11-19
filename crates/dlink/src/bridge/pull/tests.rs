@@ -341,6 +341,49 @@ fn a_clock_a_step_back_starts_the_pull_again_at_once() {
     }
 }
 
+/// The pull's room behind its position is a clock handover's step
+/// (`dstack::clock::linked::HANDOVER_NS`, 30 µs; ROZHODNUTÉ 19.11 on
+/// #440): the clock's only backward move with no new epoch. At 48 kHz that
+/// is 1.44 samples, so 2 samples back (the most two reads 30 µs apart can
+/// differ) wait, and 3 start the pull again, counted, which then reads on
+/// from the new playout point (the 3 positions again).
+#[test]
+fn a_step_back_within_a_handover_waits_and_one_sample_more_restarts() {
+    for (back, restarts, reads) in [(2u64, 0u64, 10usize), (3, 1, 13)] {
+        let mut r = rig(0);
+        assert_eq!(r.pull.pull(), 0);
+        r.clock.sleep_until(ns_of(T + P + 480, RATE));
+        assert_eq!(r.pull.pull(), 480);
+        let step = i64::try_from(ns_of(T + P + 480 - back, RATE)).unwrap()
+            - i64::try_from(ns_of(T + P + 480, RATE)).unwrap();
+        r.clock.re_anchor(step);
+        assert_eq!(r.pull.pull(), 0, "{back} back");
+        assert_eq!(r.pull.stats().restarts(), restarts, "{back} back");
+        r.clock.sleep_until(ns_of(T + P + 490, RATE));
+        assert_eq!(r.pull.pull(), reads, "{back} back");
+    }
+}
+
+/// A P that Dante Controller raises moves the playout point back: within
+/// the room the pull waits it out, past it the pull starts again once,
+/// counted (as the pump re-bootstraps at a new P), and reads on from the
+/// new playout point.
+#[test]
+fn a_playout_raised_past_the_room_restarts_the_pull_once() {
+    for (more, restarts, reads) in [(2u64, 0u64, 8usize), (4, 1, 10)] {
+        let mut r = rig(0);
+        assert_eq!(r.pull.pull(), 0);
+        r.clock.sleep_until(ns_of(T + P + 480, RATE));
+        assert_eq!(r.pull.pull(), 480);
+        r.rx.set_device_latency(ns_of(P + more, RATE));
+        assert_eq!(r.pull.pull(), 0, "{more} more");
+        assert_eq!(r.pull.stats().restarts(), restarts, "{more} more");
+        r.clock.sleep_until(ns_of(T + P + 490, RATE));
+        assert_eq!(r.pull.pull(), reads, "{more} more");
+        assert_eq!(r.pull.stats().restarts(), restarts, "{more} more");
+    }
+}
+
 #[test]
 fn the_device_s_published_latency_moves_the_playout_point() {
     let mut r = rig(0);
