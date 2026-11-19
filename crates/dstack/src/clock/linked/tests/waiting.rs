@@ -214,6 +214,11 @@ fn the_selector_says_once_a_minute_why_the_follower_is_not_in_use() {
         None,
     );
     let waiting = || linked.follower_counts().and_then(|c| c.waiting);
+    let offset = || {
+        linked
+            .follower_counts()
+            .and_then(|c| c.offset_from_service_ns)
+    };
     // A minute hearing nothing: one line, at its end.
     let log = crate::test_log::capture_at(tracing::Level::INFO, || {
         for t in 0..=60 {
@@ -225,6 +230,7 @@ fn the_selector_says_once_a_minute_why_the_follower_is_not_in_use() {
                 Waiting::NoPtp
             };
             assert_eq!(waiting(), Some(want), "at {t} s");
+            assert_eq!(offset(), None, "no wait to agree at {t} s");
         }
     });
     let l = lines(&log);
@@ -250,6 +256,7 @@ fn the_selector_says_once_a_minute_why_the_follower_is_not_in_use() {
             }
             assert_eq!(linked.tick_at(t * S), Source::Service);
             assert_eq!(waiting(), Some(Waiting::NotLocked), "at {t} s");
+            assert_eq!(offset(), None, "no wait to agree at {t} s");
         }
     });
     let l = lines(&log);
@@ -273,6 +280,13 @@ fn the_selector_says_once_a_minute_why_the_follower_is_not_in_use() {
             hears.state.lock().unwrap().windows += 1;
             assert_eq!(linked.tick_at(t * S), Source::Service, "at {t} s");
             assert_eq!(waiting(), Some(Waiting::WaitsToAgree), "at {t} s");
+            // dstack #429: the follower's time less the service's, 1 ms
+            // ahead; the farther of the two reads from 0, so never nearer.
+            let o = offset().expect("measured while it waits to agree");
+            assert!(
+                (1_000_000..1_000_000_000).contains(&o.unsigned_abs()),
+                "{o} at {t} s"
+            );
         }
     });
     let l = lines(&log);
@@ -293,10 +307,10 @@ fn the_selector_says_once_a_minute_why_the_follower_is_not_in_use() {
             assert!(t < 1_000, "the wait never ended");
             t += 1;
         }
-        assert_eq!(waiting(), None);
+        assert_eq!((waiting(), offset()), (None, None));
         for t in t + 1..t + 200 {
             assert_eq!(linked.tick_at(t * S), Source::Internal);
-            assert_eq!(waiting(), None);
+            assert_eq!((waiting(), offset()), (None, None));
         }
     });
     assert_eq!(lines(&log).len(), 0, "{log}");
