@@ -18,10 +18,12 @@
 //!   (`mdns_sd::ServiceDaemon::new_tapped`), which copies it into each
 //!   [`Listener`]'s bounded channel that takes it ([`Heard`]): the
 //!   address's mDNS meter ([`crate::discover::senders::Meter`], every
-//!   datagram) and, on Windows, each device's responder on its own address
-//!   ([`super::responder::Responder`], queries only). A full channel drops
-//!   the datagram (counted, [`Taps::dropped`]): the daemon's thread never
-//!   waits for a reader.
+//!   datagram), on Windows each device's responder on its own address
+//!   ([`super::responder::Responder`], queries only), and a device's
+//!   discovery of our other devices on the PC while it runs
+//!   (`traffic::neighbours`, every datagram, [`Mdns::listen_on`]). A full
+//!   channel drops the datagram (counted, [`Taps::dropped`]): the daemon's
+//!   thread never waits for a reader.
 //! - The group membership is the daemon's (dstack #282's watch, its own
 //!   form): its IP check, run every [`crate::membership::EVERY`] here as
 //!   the watches' (mdns-sd's default is 5 s), leaves an address that is
@@ -33,9 +35,11 @@
 //!
 //! The subscriptions' direct queries (`subscribe::instance`) read their
 //! legacy unicast answers on a port of their own, never on 5353. A
-//! [`crate::discover::Discovery`] (a device's `traffic::neighbours` starts
-//! one only while its NIC is loud past our audio) still joins a socket of
-//! its own.
+//! [`crate::discover::Discovery`] in a device process (its
+//! `traffic::neighbours` starts one only while its NIC is loud past our
+//! audio) reads the group from here too
+//! ([`crate::discover::Discovery::start_heard`]); one in a process with no
+//! device (dtray, a controller) joins a socket of its own.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -253,6 +257,15 @@ impl Mdns {
             "mDNS: one socket on the address's interface, shared by its devices"
         );
         Ok(m)
+    }
+
+    /// A new listener on this process's running daemon on `ip`, if one
+    /// runs there; none is opened. The listener holds the daemon's taps,
+    /// not the daemon: once its last device ends it, the listener hears
+    /// nothing more.
+    pub fn listen_on(ip: Ipv4Addr, heard: Heard) -> Option<Listener> {
+        let running = running(&mut lock(&SHARED), ip)?;
+        Some(running.listen(heard))
     }
 
     /// The daemon: a device's records go to it through its own

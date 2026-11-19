@@ -270,3 +270,40 @@ fn a_withdrawal_of_more_records_than_the_queue_holds_is_confirmed() {
     drop(mdns);
     assert!(handle.get_metrics().is_err(), "the daemon still runs");
 }
+
+/// A listener on the running daemon (`traffic::neighbours`' discovery,
+/// dstack #442): found on its address, never opened, and holding no
+/// daemon: the last holder's drop still shuts it down.
+#[test]
+fn a_listener_on_the_running_daemon_opens_none_and_keeps_none() {
+    let _one = ONE_DAEMON.lock().unwrap_or_else(PoisonError::into_inner);
+    let ip = Ipv4Addr::LOCALHOST;
+    assert!(Mdns::listen_on(ip, Heard::All).is_none(), "none runs yet");
+    assert!(
+        running(&mut lock(&SHARED), ip).is_none(),
+        "the look opened none"
+    );
+    let mdns = Mdns::shared(ip).unwrap();
+    let before = mdns.listeners();
+    let heard = Mdns::listen_on(ip, Heard::All).expect("the running daemon");
+    assert_eq!(mdns.listeners(), before + 1);
+    assert!(
+        Mdns::listen_on(Ipv4Addr::new(127, 0, 0, 2), Heard::All).is_none(),
+        "another address's"
+    );
+    let sender = UdpSocket::bind((ip, 0)).unwrap();
+    socket2::SockRef::from(&sender)
+        .set_multicast_if_v4(&ip)
+        .unwrap();
+    let mut response = RESPONSE;
+    response[..2].copy_from_slice(&0x4422u16.to_be_bytes());
+    heard_from(&heard, &sender, &response);
+    let handle = mdns.daemon().clone();
+    drop(mdns);
+    assert!(
+        handle.get_metrics().is_err(),
+        "the listener kept the daemon"
+    );
+    assert!(Mdns::listen_on(ip, Heard::All).is_none(), "it ended");
+    drop(heard);
+}

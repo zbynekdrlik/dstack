@@ -8,6 +8,7 @@ use simple_dns::rdata::{PTR, SRV};
 use crate::announce::ServiceRecord;
 
 mod send_if;
+mod tap;
 
 /// Every wait in these tests ends.
 const BOUND: Duration = Duration::from_secs(5);

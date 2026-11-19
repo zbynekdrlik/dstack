@@ -119,9 +119,11 @@ exclude_re = [
   "dtray/src/switches.rs.*(read_live|set_live)",
   "dtray/src/switches.rs.*replace path -> PathBuf",
   # The traffic watch's discovery of our other devices (dstack #203): glue
-  # over a real Discovery (mDNS on port 5353, likewise); its decisions
+  # over a real Discovery and the address's mDNS daemon (port 5353,
+  # likewise; dstack #442: it reads the daemon's tap); its decisions
   # (traffic::neighbours::Lazy, Neighbours, traffic::on_address) are tested
-  # with a test Finder.
+  # with a test Finder, Mdns::listen_on and the tapped Discovery in their
+  # own unit tests, and tests/mdns_one_socket.rs runs it whole.
   "traffic/neighbours.rs.*DiscoveryFinder>::(start|stop|devices)",
   # The embedding glue and its host paths (no socket, no signal handler):
   # tests/embed.rs runs a whole device with them (not per mutant);

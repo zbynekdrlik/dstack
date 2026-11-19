@@ -237,8 +237,14 @@ fn a_loud_nic_s_neighbours_discovery_keeps_the_one_socket() {
     let dir = tempfile::tempdir().unwrap();
     let (host, name, tx1) = start(dir.path(), false);
     read_record(&name, &tx1);
+    let mdns = dstack::announce::mdns::Mdns::shared(test_ipv4()).expect("the device's daemon");
+    let before = mdns.listeners();
     let mut finder = DiscoveryFinder::default();
-    finder.start(test_ipv4()).expect("the neighbours' discovery");
+    finder
+        .start(test_ipv4())
+        .expect("the neighbours' discovery");
+    // It listens on the daemon's socket.
+    let listening = mdns.listeners();
     let deadline = Instant::now() + BOUND;
     while !finder.devices().iter().any(|d| d.name == name) {
         assert!(Instant::now() < deadline, "{name} was never listed");
@@ -246,12 +252,25 @@ fn a_loud_nic_s_neighbours_discovery_keeps_the_one_socket() {
     }
     #[cfg(target_os = "linux")]
     let held = mdns_sockets();
+    // Its stop ends its thread in the background: the listener goes with it.
     finder.stop();
+    let deadline = Instant::now() + BOUND;
+    while mdns.listeners() > before && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let after = mdns.listeners();
+    drop(mdns);
     let stopped = host.stop(Duration::from_secs(5));
     assert!(matches!(stopped, host::Stopped::Done), "{stopped:?}");
+    assert_eq!(listening, before + 1, "the discovery's listener");
+    assert_eq!(after, before, "gone with the discovery");
     #[cfg(target_os = "linux")]
     {
-        assert_eq!(held.len(), 1, "one 5353 socket with the discovery: {held:?}");
+        assert_eq!(
+            held.len(),
+            1,
+            "one 5353 socket with the discovery: {held:?}"
+        );
         assert_eq!(
             sockets_after_stop(),
             Vec::<String>::new(),
