@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.198
+
+- **Fix (#450): every mDNS record is announced twice at its registration**, one second apart as RFC 6762 §8.3 asks, also a record whose name has upper case (every Dante `TX 1@...` record). The vendored mdns-sd looked the second announcement up by the record's original-case name while it keys records in lower case, so such a record was announced once, and one datagram lost on a busy leg left the device unseen until the next query. Vendor patch in `vendor/mdns-sd/DSTACK.md`; RED test first. Cost: one more multicast per record at registration on every device, once (about 200 at iemmixer's start).
+- **Fix (#444, the `mdns_bind_address` trial, off by default): a daemon bound to the device address opens its socket again after the address was removed and added again.** On Windows the bound socket stayed deaf after the address came back (mbc, #444 step 4a: no group datagram and no answer for 2.5 min). A bound daemon now has a watch of its own (`dstack-mdns-bound`, the 2 s interface watch); once the address is listed again it asks the vendored daemon to reopen (`ServiceDaemon::reopen`: a new bind to `<address>:5353`, the old socket kept if that fails, the group joined again, every record announced once; records and taps kept), and logs `mdns: the bound daemon's socket opened again after its address came back` with `joined_interfaces` and `announced_records`. A failed reopen is warned and retried at the next look. The default wildcard daemon is unchanged. RED test first.
+  - The mutation gate's nextest profile runs the tests that bind a daemon to 127.0.0.1:5353 one at a time (a test group).
+- **No latency change.**
+
 ## 0.6.197
 
 - **Fix (#444): a direct mDNS query from port 5353 to a device's address is answered to its sender.** A query sent straight to the address, not to the group (RFC 6762 section 5.5), is answered unicast to its sender, once, from the address, and a PTR answer to it is no longer deferred to the group. Before, the vendored daemon answered it to the group, which a querier on a unicast 5353 socket never hears. A legacy query (another source port) is answered as before. Changes the default (wildcard) daemon too; recorded in `vendor/mdns-sd/DSTACK.md`. RED test first.
