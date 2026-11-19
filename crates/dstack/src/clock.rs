@@ -37,6 +37,7 @@
 
 pub mod dsyx;
 pub mod escape;
+pub mod service;
 pub mod skewed;
 pub mod steer;
 #[cfg(any(windows, test))]
@@ -56,6 +57,7 @@ pub use escape::{
     SPIN_ESCAPE_MIN_MS, TIMER_LATE_NS, no_yield_tail_line, pump_escape_line, pump_give_line,
     pump_give_start_line, pump_gives_on_timer, pump_may_escape, spin_escape_line, spin_escape_of,
 };
+pub use service::{PollOutcome, ServiceRead};
 #[cfg(any(target_os = "linux", windows))]
 pub use skewed::SkewedClock;
 pub use skewed::{MAX_TEST_CLOCK_PPM, TestClockPpm};
@@ -207,6 +209,9 @@ pub struct ClockStats {
     /// A linked clock's follower counts, as the selector read them last
     /// (`None`: no follower).
     follower: std::sync::Mutex<Option<FollowerCounts>>,
+    /// The service as the poller read it last (dstack #429,
+    /// [`ClockStats::set_poll`]).
+    service: std::sync::Mutex<ServiceRead>,
 }
 
 /// [`ClockStats`] read at one moment.
@@ -248,6 +253,16 @@ pub struct FollowerCounts {
     /// dstack #420); `None` while it is in use, and in the follower's own
     /// counts ([`linked::Follow::counts`]).
     pub waiting: Option<linked::Waiting>,
+    /// Its frequency against the PC's own counter, ppb: dsync's model
+    /// `rate_ppm` × 1000, rounded ([`linked::ppb_of`]; 0 before its model
+    /// exists). dstack #429.
+    pub freq_ppb: i32,
+    /// While the selector waits for the follower's time to agree with the
+    /// service's ([`linked::Waiting::WaitsToAgree`]): the follower's time
+    /// less the service's, ns, as the selector's last round measured it
+    /// ([`linked::offset_of`]); `None` otherwise, and when either had no
+    /// time or a re-anchor fell between the reads. dstack #429.
+    pub offset_from_service_ns: Option<i64>,
 }
 
 impl ClockStats {
@@ -851,6 +866,7 @@ mod os {
             tick.tick().await;
             let p = poller.once(&clock, &freq).await;
             stats.record(p.event);
+            stats.set_poll(p.sample, p.reading, monotonic_ns());
             if let Some(r) = &p.reading {
                 stats.set_grandmaster(r.grandmaster);
                 stats.set_master(r.master);

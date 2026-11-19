@@ -1286,6 +1286,8 @@ fn the_clock_counts_describe_the_source_in_use_and_each_source_apart() {
             pull_ns: -88_000,
             grandmaster: Some([0x00, 0x1d, 0xc1, 0xab, 0xcd, 0xef]),
             waiting: None,
+            freq_ppb: 0,
+            offset_from_service_ns: None,
         }));
     assert_eq!(
         media.clock_stats.follower().map(|c| c.counts.polls),

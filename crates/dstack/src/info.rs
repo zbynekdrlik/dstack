@@ -37,7 +37,8 @@
 //! | `07 xx 00 83 00 00 00 xx` | `07 2a 00 82 00 00 00 00` | our encoding as the one option, 20 bytes ([`encoding_body`]); a write gets the same answer |
 //! | `07 xx 00 85 00 00 00 xx` | `07 2a 00 84 00 00 00 00` | pull-up none as the one option, 44 bytes ([`PULLUP_BODY`]) |
 //! | `07 xx 00 21 00 00 00 xx` | `07 2a 00 20 00 00 00 00` | clock stats as a follower, 188 bytes ([`clock_stats_body`]): only once the media clock is ready and dsync names a grandmaster (DSYX bytes 42–47) |
-//! | `07 xx d5 b1 00 00 00 00` | `07 2a d5 b0 00 00 00 00` | dstack's own: a bridge device's figures, 120 bytes ([`bridge`], dstack #391), UNICAST to the asker, only from a device that holds them |
+//! | `07 xx d5 b1 00 00 00 00` | `07 2a d5 b0 00 00 00 00` | dstack's own: a bridge device's figures, 192 bytes ([`bridge`], dstack #391, version 2 since #419), UNICAST to the asker, only from a device that holds them |
+//! | `07 xx d5 b3 00 00 00 00` | `07 2a d5 b2 00 00 00 00` | dstack's own: the device's clock figures, 66 bytes ([`clock_figures`], dstack #429), UNICAST to the asker |
 //!
 //! Any other opcode gets no reply and is logged by its opcode; a datagram
 //! shorter than the header is dropped. As inferno, neither the start code
@@ -105,6 +106,7 @@ use limit::Limit;
 
 pub mod bridge;
 pub mod client;
+pub mod clock_figures;
 pub mod limit;
 pub mod sendwatch;
 mod server;
@@ -112,6 +114,7 @@ pub mod share;
 pub(crate) mod unanswered;
 
 pub use bridge::{BridgeFigures, FigureSlot, OwnFigures, UnderrunCause};
+pub use clock_figures::ClockFigures;
 pub use server::{
     Levels, Multicast, Sources, follower_of, serve_info, serve_info_with, serve_member,
     serve_shared,
@@ -294,6 +297,10 @@ pub enum Kind {
     /// answered unicast to the asker by a device that holds them
     /// ([`InfoBuilder::bridge_within`]), never to the info group.
     BridgeFigures,
+    /// dstack's own `d5 b3`: the device's clock figures
+    /// ([`clock_figures`]), answered unicast to the asker
+    /// ([`InfoBuilder::clock_within`]), never to the info group.
+    ClockFigures,
     /// Anything else: no reply.
     Unknown,
     /// No request: the channel-change notification, sent unasked and
@@ -331,6 +338,7 @@ pub fn parse_request(datagram: &[u8]) -> Option<Request> {
         [0x07, _, 0x00, 0x83, 0, 0, 0, _] => Kind::Encoding,
         [0x07, _, 0x00, 0x85, 0, 0, 0, _] => Kind::Pullup,
         o if bridge::is_request(&o) => Kind::BridgeFigures,
+        o if clock_figures::is_request(&o) => Kind::ClockFigures,
         _ => Kind::Unknown,
     };
     Some(Request { seq, opcode, kind })
@@ -549,6 +557,13 @@ pub trait Beat: Send + Sync {
     fn bridge(&self) -> Option<&FigureSlot> {
         None
     }
+
+    /// The device's clock figures ([`clock_figures`], `sequence` 0);
+    /// `None` (no reply to a clock-figures request) for a source that
+    /// knows no clock.
+    fn clock_figures(&self) -> Option<ClockFigures> {
+        None
+    }
 }
 
 /// Our clock as a PTP follower states it (the clock-stats reply): the
@@ -652,6 +667,9 @@ pub struct InfoBuilder {
     /// The bridge-figures replies sent ([`InfoBuilder::bridge_within`]):
     /// the next one's `sequence` is this plus 1.
     bridge_replies: u32,
+    /// The clock-figures replies sent ([`InfoBuilder::clock_within`]), as
+    /// `bridge_replies`.
+    clock_replies: u32,
 }
 
 impl InfoBuilder {
@@ -662,6 +680,7 @@ impl InfoBuilder {
             seq: 1,
             clock: None,
             bridge_replies: 0,
+            clock_replies: 0,
         }
     }
 
@@ -766,10 +785,10 @@ impl InfoBuilder {
                     None
                 }
             },
-            Kind::BridgeFigures => {
+            Kind::BridgeFigures | Kind::ClockFigures => {
                 // Never to the info group: [`InfoBuilder::bridge_within`]
-                // answers it unicast.
-                debug!(op = %opcode, seq = req.seq, "bridge figures asked: answered to the asker only");
+                // and [`InfoBuilder::clock_within`] answer them unicast.
+                debug!(op = %opcode, seq = req.seq, "dstack figures asked: answered to the asker only");
                 None
             }
             Kind::Unknown | Kind::ChannelChange => {
@@ -791,7 +810,7 @@ impl InfoBuilder {
         datagram: &[u8],
     ) -> Option<Vec<u8>> {
         if let Some(req) = parse_request(datagram)
-            && req.kind != Kind::BridgeFigures
+            && !matches!(req.kind, Kind::BridgeFigures | Kind::ClockFigures)
             && !limit.allow(now, req.kind)
         {
             return None;
@@ -835,6 +854,44 @@ impl InfoBuilder {
             "bridge figures answered"
         );
         Some(self.packet(START_INFO, bridge::REPLY_OPCODE, &bridge::figures_body(&f)))
+    }
+
+    /// The reply to a clock-figures request in `datagram`
+    /// ([`clock_figures`]), for the asker alone, within `limit` (a kind of
+    /// its own, one for every asker); `None` for any other datagram, over
+    /// the bound (the figures then not read), or when `read` gives none.
+    /// Each reply takes the next `sequence` (from 1) and the next packet
+    /// sequence.
+    pub fn clock_within(
+        &mut self,
+        limit: &mut Limit,
+        now: Instant,
+        datagram: &[u8],
+        read: impl FnOnce() -> Option<ClockFigures>,
+    ) -> Option<Vec<u8>> {
+        let req = parse_request(datagram)?;
+        if req.kind != Kind::ClockFigures || !limit.allow(now, Kind::ClockFigures) {
+            return None;
+        }
+        let Some(mut f) = read() else {
+            debug!(
+                seq = req.seq,
+                "clock figures asked: this device knows no clock, no reply"
+            );
+            return None;
+        };
+        self.clock_replies = self.clock_replies.wrapping_add(1);
+        f.sequence = self.clock_replies;
+        debug!(
+            seq = req.seq,
+            sequence = f.sequence,
+            "clock figures answered"
+        );
+        Some(self.packet(
+            START_INFO,
+            clock_figures::REPLY_OPCODE,
+            &clock_figures::figures_body(&f),
+        ))
     }
 }
 

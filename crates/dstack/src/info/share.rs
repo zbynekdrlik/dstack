@@ -12,14 +12,18 @@
 //!   the packet back ([`Msg::Send`]), and the manager sends it from 8700,
 //!   as it sends its own. A member's heartbeats and notifications go the
 //!   same way.
-//! - A bridge-figures request (dstack #391, [`super::bridge`]) is relayed
-//!   with its sender's address instead ([`Msg::Ask`]): its reply goes back
-//!   to the asker alone, so a member hands it over with that address
+//! - A bridge-figures or clock-figures request (dstack #391, #429,
+//!   [`super::bridge`], [`super::clock_figures`]) is relayed with its
+//!   sender's address instead ([`Msg::Ask`]): its reply goes back to the
+//!   asker alone, so a member hands it over with that address
 //!   ([`Msg::SendTo`]) and the manager sends it from 8700 unicast, only a
-//!   bridge reply ([`is_bridge_reply`]), only to one host ([`is_unicast`])
-//!   it relayed a request from within [`ASK_HOLD_NS`] ([`Asks`]). An older
-//!   member or manager reads neither message and drops it: that device
-//!   answers no bridge figures until both run a dstack that knows them.
+//!   bridge or clock reply ([`is_bridge_reply`], [`is_clock_reply`]), only
+//!   to one host ([`is_unicast`]) it relayed a request from within
+//!   [`ASK_HOLD_NS`] ([`Asks`]). An older member or manager reads neither
+//!   message and drops it: that device answers no bridge figures until
+//!   both run a dstack that knows them; a manager older than dstack #429
+//!   relays a clock-figures request as a plain [`Msg::Request`] (which a
+//!   member answers with nothing) and drops a member's clock reply.
 //! - When the manager ends, 8700 frees; a member that binds it becomes the
 //!   manager, and the others' leases reach it on the same loopback port.
 //!
@@ -63,8 +67,8 @@ pub enum Msg {
     Request(Vec<u8>),
     /// Member to manager: a packet to send from 8700.
     Send(Dest, Vec<u8>),
-    /// Manager to member: a bridge-figures request the manager received
-    /// from that address and port.
+    /// Manager to member: a bridge-figures or clock-figures request the
+    /// manager received from that address and port.
     Ask(SocketAddrV4, Vec<u8>),
     /// Member to manager: a reply to send from 8700 to that address and
     /// port alone.
@@ -140,9 +144,10 @@ pub const ASK_HOLD_NS: u64 = 1_000_000_000;
 /// Askers kept at most ([`Asks`]).
 pub const MAX_ASKS: usize = 32;
 
-/// The askers whose bridge-figures request the manager relayed lately: a
-/// member's [`Msg::SendTo`] goes out only to one of them, so no process on
-/// the PC can send from the Dante info port to any address it names.
+/// The askers whose bridge-figures or clock-figures request the manager
+/// relayed lately: a member's [`Msg::SendTo`] goes out only to one of
+/// them, so no process on the PC can send from the Dante info port to any
+/// address it names.
 #[derive(Debug, Default)]
 pub struct Asks {
     at: BTreeMap<SocketAddrV4, u64>,
@@ -170,8 +175,8 @@ impl Asks {
 }
 
 /// Whether `to` is one host's address and port: no multicast, broadcast
-/// or unspecified address, no port 0. Only there does a bridge-figures
-/// reply go.
+/// or unspecified address, no port 0. Only there does a bridge-figures or
+/// clock-figures reply go.
 pub fn is_unicast(to: &SocketAddrV4) -> bool {
     let ip = to.ip();
     !(ip.is_multicast() || ip.is_broadcast() || ip.is_unspecified() || to.port() == 0)
@@ -179,14 +184,22 @@ pub fn is_unicast(to: &SocketAddrV4) -> bool {
 
 /// Whether `packet` is a bridge-figures reply ([`super::bridge`]): its
 /// length (a version 2 body, or a version 1 body from a member older than
-/// dstack #419) and its opcode. A member's [`Msg::SendTo`] carries nothing
-/// else.
+/// dstack #419) and its opcode. A member's [`Msg::SendTo`] carries this or
+/// a clock reply ([`is_clock_reply`]), nothing else.
 pub fn is_bridge_reply(packet: &[u8]) -> bool {
     let body = packet.len().checked_sub(super::HEADER_LEN);
     matches!(
         body,
         Some(super::bridge::FIGURES_LEN | super::bridge::FIGURES_LEN_V2)
     ) && packet[24..32] == super::bridge::REPLY_OPCODE
+}
+
+/// Whether `packet` is a clock-figures reply ([`super::clock_figures`],
+/// dstack #429): its length (a version 1 body) and its opcode. A member's
+/// [`Msg::SendTo`] carries this or a bridge reply, nothing else.
+pub fn is_clock_reply(packet: &[u8]) -> bool {
+    packet.len().checked_sub(super::HEADER_LEN) == Some(super::clock_figures::FIGURES_LEN)
+        && packet[24..32] == super::clock_figures::REPLY_OPCODE
 }
 
 /// The manager's members, by their loopback address.

@@ -645,6 +645,13 @@ mod os {
             Some([0x00, 0x1d, 0xc1, 0x0a, 0x0b, 0x0c])
         );
         assert_eq!(stats.master(), Some([0x00, 0x1d, 0xc1, 0x0d, 0x0e, 0x0f]));
+        // dstack #429: the poll's outcome and its reply, read a moment ago.
+        let read = stats.service();
+        assert_eq!(read.outcome, Some(crate::clock::PollOutcome::Usable));
+        let (r, at) = read.reply.expect("the reply kept");
+        assert_eq!((r.locked, r.freq_ppb), (true, -750));
+        let age = monotonic_ns() - at;
+        assert!((0..5_000_000_000).contains(&age), "{age}");
         // PTP now = the box's wall less D, within the loop's few ms.
         let ptp = clock.now_ns().unwrap() as i64;
         let expect = realtime_ns() - d;
@@ -794,7 +801,7 @@ mod os {
             addr,
             clock.clone(),
             freq.clone(),
-            stats,
+            stats.clone(),
         ));
         let mut buf = [0u8; 128];
         for _ in 0..2 {
@@ -802,8 +809,15 @@ mod os {
                 tokio::time::timeout(Duration::from_secs(3), server.recv_from(&mut buf)).await;
             assert!(matches!(got, Ok(Ok((64, _)))), "a poll a second");
         }
+        // The first poll's 200 ms timeout ran out before the second request
+        // came: its outcome is kept, and no reply.
         polling.abort();
         assert_eq!((clock.k_ns(), freq.load(Ordering::Relaxed)), (None, 7));
+        let read = stats.service();
+        assert_eq!(
+            (read.outcome, read.reply),
+            (Some(crate::clock::PollOutcome::NoReply), None)
+        );
     }
 }
 
@@ -1195,5 +1209,61 @@ fn the_app_clock_is_raw_qpc_on_windows() {
     assert!(
         steered - app > 10 * 365 * 86_400 * 1_000_000_000,
         "{steered} {app}"
+    );
+}
+
+/// dstack #429: each sample's outcome, k left out.
+#[test]
+fn a_poll_s_outcome_is_its_sample_s_kind() {
+    use crate::clock::PollOutcome;
+    let all = [
+        (Sample::Usable { k_ns: 5 }, PollOutcome::Usable),
+        (Sample::NoReply, PollOutcome::NoReply),
+        (Sample::NotLocked, PollOutcome::NotLocked),
+        (Sample::NoDateState, PollOutcome::NoDateState),
+        (Sample::StepNear, PollOutcome::StepNear),
+        (Sample::Slewing, PollOutcome::Slewing),
+    ];
+    for (s, o) in all {
+        assert_eq!(PollOutcome::of(s), o, "{s:?}");
+    }
+}
+
+/// dstack #429: the service's read keeps the last poll's outcome and the
+/// last reply with its moment; a poll without a reply keeps the reply.
+#[test]
+fn the_service_s_read_keeps_the_last_reply_across_a_silent_poll() {
+    use crate::clock::{PollOutcome, ServiceRead};
+    let r = Reading {
+        wall_ns: 1,
+        locked: true,
+        settled: false,
+        mode: 3,
+        freq_ppb: 42,
+        grandmaster: [1; 6],
+        master: [0; 6],
+        date: None,
+    };
+    let mut read = ServiceRead::default();
+    assert_eq!((read.outcome, read.reply), (None, None));
+    read.polled(Sample::NotLocked, Some(r), 10);
+    assert_eq!(
+        (read.outcome, read.reply),
+        (Some(PollOutcome::NotLocked), Some((r, 10)))
+    );
+    read.polled(Sample::NoReply, None, 20);
+    assert_eq!(
+        (read.outcome, read.reply),
+        (Some(PollOutcome::NoReply), Some((r, 10)))
+    );
+    let newer = Reading { mode: 4, ..r };
+    let stats = ClockStats::default();
+    stats.set_poll(Sample::Usable { k_ns: 1 }, Some(newer), 30);
+    assert_eq!(
+        stats.service(),
+        ServiceRead {
+            outcome: Some(PollOutcome::Usable),
+            reply: Some((newer, 30)),
+        }
     );
 }
