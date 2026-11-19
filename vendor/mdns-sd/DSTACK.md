@@ -78,6 +78,43 @@ LICENSE-APACHE and LICENSE-MIT), copied unchanged except:
   Nothing else changes: the same joins, IP check and sends. `new`/`new_with_port`/
   `new_tapped` bind `0.0.0.0` as before.
 
+- `src/service_daemon.rs` `ServiceDaemon::reopen`, `Command::Reopen`,
+  `Zeroconf::reopen_bound`, `Reopened` (exported; + `bound_addr`,
+  `own_groups_only` taken out of `set_tap`): a daemon bound to an address
+  opens its IPv4 socket again on request. On Windows a daemon bound to an
+  address that was removed and added again handed its tap nothing for
+  2.5 min with the same socket (mbc, dstack #444 step 4a, 19.11.2026).
+  Which of two it was is not read: the socket went deaf, or the IP check's
+  join on it failed (a debug line) and left the interface out of
+  `my_intfs`, so `handle_read` dropped every datagram before the tap.
+  The reopen covers both. The daemon's thread binds a new socket to the
+  same address and port (a failure keeps the old one and is the answer),
+  turns `IP_MULTICAST_ALL` off for a tap as `set_tap` does (and the
+  multicast loop off when it was set so), swaps it in the poller (the old
+  one closed), joins the group by upstream's own path (`my_intfs`
+  forgotten, then `check_ip_changes`), and announces every registered
+  service once on each interface (`exec_command_register_resend`, keyed by
+  `my_services`' lower-case names). The answer counts the interfaces
+  joined and the services announced (dstack's INFO line carries them).
+  Registrations and the tap stay; so does the cache, also records cached
+  under an interface index that is gone (an answer-only daemon reads no
+  cache). dstack asks it from its own watch of the address
+  (`crates/dstack/src/announce/mdns.rs`,
+  `a_bound_daemon_opens_its_socket_again_after_its_address_came_back_with_its_records_and_taps`).
+
+- `src/service_daemon.rs` `exec_command_register_resend`: the second
+  announcement looks its record up by the lower-case name. A
+  registration's resend (`Command::RegisterResend` from
+  `send_unsolicited_response` and the probing handler) carries the
+  original-case full name, while `my_services` is keyed in lower case, so
+  upstream announced a record whose name has an upper-case letter (every
+  Dante `TX 1@...`) once, not twice (RFC 6762 §8.3), and `register-resend`
+  did not count it (dstack #450,
+  `announce::mdns::tests::every_record_is_announced_twice_also_one_whose_name_has_upper_case`).
+  The announced name is still resolved from the record's own original-case
+  name (`name_changes` is keyed by it), never from the lower-case key. The
+  cost: one more multicast per record at registration, once.
+
 - `src/service_daemon.rs` `handle_read`, `handle_query`, `send_response`
   (and the one unit test calling `handle_query`): a query sent to the
   daemon's address instead of the group (the datagram's destination from
