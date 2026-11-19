@@ -11,9 +11,12 @@
 //! for port 319, no adapter of that name) stays failed, as before. While
 //! it tries, the follower's status reads `stopped` and the once-a-minute
 //! line names the tries; still failing [`ESCALATE_AFTER_S`] after the
-//! first failure, one warning says so, and the tries go on for ever. Once
-//! it starts, the selector takes it the usual way (it agrees with the
-//! service, or waits to).
+//! first failure, one warning says so, and the tries go on for ever. Each
+//! try is seeded with the service's frequency word as its poller read it
+//! last ([`seed_now`]), not the boot's (the service is usually still
+//! acquiring at boot, so that one is mostly none). Once it starts, the
+//! selector takes it the usual way (it agrees with the service, or waits
+//! to).
 
 use dsync_ptp::follower::FollowerError;
 
@@ -21,9 +24,12 @@ use std::sync::Arc;
 
 use tracing::{info, warn};
 
+use crate::clock::{ClockStats, PollOutcome, ServiceRead};
+
 use super::{
     Absorbing, Follow, Linked, Minute, MonoClock, NOT_IN_USE_LINE, NOT_STARTED_LINE, RETRY_LINE,
     Report, STARTED_LINE, STILL_NOT_STARTED_LINE, Source, Waiting, follower_failure, monotonic_ns,
+    seed_of,
 };
 
 /// What one start of the follower gave.
@@ -45,11 +51,15 @@ pub enum Attempt {
 type Run = Box<dyn FnMut(&str, Option<i32>) -> Attempt + Send>;
 
 /// Starts the follower on `iface`, seeded with `seed_ppb`, as often as the
-/// linked clock asks ([`attempt`] for dsync's).
+/// linked clock asks ([`attempt`] for dsync's); a try after the first takes
+/// the service's seed of the moment when it has the service's poll
+/// ([`Starter::reseeded_from`]).
 pub struct Starter {
     pub(super) iface: String,
     pub(super) seed_ppb: Option<i32>,
     run: Run,
+    /// The service as its poller reads it, for each try's seed.
+    service: Option<Arc<ClockStats>>,
 }
 
 impl Starter {
@@ -63,6 +73,22 @@ impl Starter {
             iface: iface.into(),
             seed_ppb,
             run: Box::new(run),
+            service: None,
+        }
+    }
+
+    /// This starter's tries after the first seeded from the service's poll
+    /// in `stats` ([`seed_now`]; [`crate::clock::poll_dsync`] keeps it).
+    pub fn reseeded_from(mut self, stats: Arc<ClockStats>) -> Starter {
+        self.service = Some(stats);
+        self
+    }
+
+    /// Before a try: the seed from the service's last poll ([`seed_now`]),
+    /// when this starter has the poll.
+    pub(super) fn reseed(&mut self) {
+        if let Some(stats) = &self.service {
+            self.seed_ppb = seed_now(&stats.service(), self.seed_ppb);
         }
     }
 
@@ -87,6 +113,17 @@ pub fn attempt(iface: &str, seed_ppb: Option<i32>) -> Attempt {
     match dsync_ptp::follower::Follower::start(cfg) {
         Ok(f) => Attempt::Started(Box::new(Absorbing::new(f.clock())), Box::new(f)),
         Err(e) => failed(&e),
+    }
+}
+
+/// A try's seed from the service as its poller read it last (`read`): the
+/// last poll's reply when that poll had one ([`seed_of`]: its word when
+/// locked and settled, else none); `held` (the seed so far) before the
+/// first poll and after a poll without a reply.
+pub fn seed_now(read: &ServiceRead, held: Option<i32>) -> Option<i32> {
+    match (read.outcome, read.reply) {
+        (Some(outcome), Some((reply, _))) if outcome != PollOutcome::NoReply => seed_of(&reply),
+        _ => held,
     }
 }
 
@@ -278,6 +315,7 @@ impl Linked {
         };
         let attempts = retry.attempts.saturating_add(1);
         let iface = retry.starter.iface.clone();
+        retry.starter.reseed();
         let took = std::time::Instant::now();
         let attempt = retry.starter.attempt();
         let start_ms = took.elapsed().as_millis();

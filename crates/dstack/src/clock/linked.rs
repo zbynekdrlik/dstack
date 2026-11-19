@@ -42,7 +42,8 @@ use super::{
 mod retry;
 use retry::Retry;
 pub use retry::{
-    Attempt, ESCALATE_AFTER_S, RETRY_MAX_S, Starter, attempt, failed, retry_delay_s, start_passes,
+    Attempt, ESCALATE_AFTER_S, RETRY_MAX_S, Starter, attempt, failed, retry_delay_s, seed_now,
+    start_passes,
 };
 mod waiting;
 pub use waiting::{

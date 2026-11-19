@@ -499,3 +499,136 @@ fn a_try_is_due_its_delay_after_the_last_failure() {
     assert_eq!(r.retrying_for_s(t0 + 61 * S - 1), 60);
     assert_eq!(r.retrying_for_s(t0 + 61 * S), 61);
 }
+
+/// A service reply locked or not, settled, with the word `freq_ppb`.
+fn reply(locked: bool, freq_ppb: i32) -> crate::clock::Reading {
+    crate::clock::Reading {
+        wall_ns: 1,
+        locked,
+        settled: true,
+        mode: 3,
+        freq_ppb,
+        grandmaster: [1; 6],
+        master: [1; 6],
+        date: None,
+    }
+}
+
+/// A try's seed: the service's word from its last poll when that poll had
+/// a reply (none when it was not locked and settled), the seed held so far
+/// before the first poll and after a silent one.
+#[test]
+fn a_try_s_seed_is_the_service_s_last_polled_word() {
+    use crate::clock::{PollOutcome, ServiceRead};
+    let read = |outcome, reply| ServiceRead { outcome, reply };
+    let held = Some(-4_671);
+    // No poll yet: the boot's seed (or none) stays.
+    assert_eq!(seed_now(&ServiceRead::default(), held), held);
+    assert_eq!(seed_now(&ServiceRead::default(), None), None);
+    // Locked and settled: its word, whatever was held.
+    let ready = Some((reply(true, -750), 7));
+    assert_eq!(
+        seed_now(&read(Some(PollOutcome::Usable), ready), None),
+        Some(-750)
+    );
+    assert_eq!(
+        seed_now(&read(Some(PollOutcome::Usable), ready), held),
+        Some(-750)
+    );
+    // A reply not locked (or not settled): no seed, the held one dropped.
+    let acquiring = Some((reply(false, -9), 7));
+    assert_eq!(
+        seed_now(&read(Some(PollOutcome::NotLocked), acquiring), held),
+        None
+    );
+    let unsettled = Some((
+        crate::clock::Reading {
+            settled: false,
+            ..reply(true, -9)
+        },
+        7,
+    ));
+    assert_eq!(
+        seed_now(&read(Some(PollOutcome::Usable), unsettled), held),
+        None
+    );
+    // The last poll silent: its older reply is not this moment's; the held
+    // seed stays.
+    assert_eq!(
+        seed_now(&read(Some(PollOutcome::NoReply), ready), held),
+        held
+    );
+    assert_eq!(
+        seed_now(&read(Some(PollOutcome::NoReply), ready), None),
+        None
+    );
+    // An outcome without a reply: the held seed.
+    assert_eq!(seed_now(&read(Some(PollOutcome::Usable), None), held), held);
+}
+
+/// mbc-snv's boot: the service still acquires (no seed at boot), the
+/// start fails, and by the try that starts the follower the service is
+/// locked and settled: that try is seeded with the service's word of that
+/// moment, read from its poller, and the started line names it.
+#[test]
+fn a_late_start_is_seeded_from_the_service_s_last_poll() {
+    use crate::clock::{ClockStats, Sample};
+    crate::test_log::undecided();
+    let (service, fake) = ready();
+    let stats = Arc::new(ClockStats::default());
+    let seeds = Arc::new(Mutex::new(Vec::new()));
+    let start = {
+        let seeds = Arc::clone(&seeds);
+        Starter::new("Ethernet 3", None, move |iface, seed| {
+            assert_eq!(iface, "Ethernet 3");
+            let mut seeds = seeds.lock().unwrap();
+            seeds.push(seed);
+            if seeds.len() < 4 {
+                Attempt::Failed {
+                    passes: true,
+                    reason: "another failure",
+                    error: "no Npcap device".into(),
+                }
+            } else {
+                Attempt::Started(Box::new(Arc::clone(&fake)), Box::new(()))
+            }
+        })
+        .reseeded_from(Arc::clone(&stats))
+    };
+    let linked = Linked::start_at(Arc::clone(&service), start, 5 * S);
+    // No poll yet: the try at 6 s holds the boot's none.
+    linked.tick_at(6 * S);
+    // The service answers, still acquiring: no seed for the try at 8 s.
+    stats.set_poll(Sample::NotLocked, Some(reply(false, -9)), 7 * S);
+    linked.tick_at(8 * S);
+    assert_eq!(*seeds.lock().unwrap(), [None, None, None]);
+    // Locked and settled at 11 s: the try at 12 s starts with its word.
+    stats.set_poll(Sample::Usable { k_ns: 1 }, Some(reply(true, -750)), 11 * S);
+    let log = crate::test_log::capture_at(tracing::Level::INFO, || {
+        linked.tick_at(12 * S);
+    });
+    assert!(linked.has_internal());
+    assert_eq!(*seeds.lock().unwrap(), [None, None, None, Some(-750)]);
+    let started = lines(&log, STARTED_LINE);
+    assert_eq!(started.len(), 1, "{log}");
+    for field in ["seed_ppb=Some(-750)", "start_attempts=4"] {
+        assert!(started[0].contains(field), "{field} in {}", started[0]);
+    }
+}
+
+/// A starter without the service's poll keeps its own seed for every try
+/// (the tests' starters above; dsync's own is always given the poll).
+#[test]
+fn a_starter_without_the_poll_keeps_its_seed() {
+    let mut start = Starter::new("Ethernet 3", Some(-4_671), |_, seed| {
+        assert_eq!(seed, Some(-4_671));
+        Attempt::Failed {
+            passes: true,
+            reason: "another failure",
+            error: String::new(),
+        }
+    });
+    start.reseed();
+    assert_eq!(start.seed_ppb, Some(-4_671));
+    assert!(matches!(start.attempt(), Attempt::Failed { .. }));
+}
