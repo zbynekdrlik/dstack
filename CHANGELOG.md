@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.6.194
+
+- **Feature (#442, dasio#190, dsg's late SoundGrid callbacks): one mDNS receive socket per process and address.** On dsg one mDNS datagram was handed at DPC level to three dstack sockets (`dstack-mdns-own`, `dstack-mdns-meter`, `mDNS_daemon`) plus Windows' Dnscache, 0.1-0.8 ms of CPU 0 each; a 791 µs run delayed SoundGrid's receive DPC. Details:
+  - mDNS: a process receives each mDNS datagram on ONE 5353 socket per address (#442, dasio#190). The vendored daemon's socket is the only joined one; the mDNS meter and, on Windows, each device's responder read the group from it through in-process taps (`announce::mdns`, `ServiceDaemon::new_tapped` in `vendor/mdns-sd`). Before, a one-device Windows process received every datagram three times (daemon, meter, responder: 0.1-0.8 ms of receive DPC each on dsg), and every further device on the address added one or two more.
+  - mDNS: every device on one address in a process shares that daemon; a device's stop withdraws its own records only (goodbyes), and the daemon stops with the last device.
+  - Windows: the responder on the device's address no longer joins 224.0.0.251 (Windows delivers no multicast to an unjoined socket, checked on mbc); it still answers from the device's address and reads unicast queries to it.
+  - Linux: the daemon's socket takes only its own group memberships (`IP_MULTICAST_ALL` off).
+  - New: `announce::mdns` (`Mdns::shared`/`listen`/`settle`/`withdraw`/`meter`, `Taps`, `Listener`, `Heard`, `Datagram`, `GOODBYE_WAIT`, `SHUTDOWN_WAIT`), `Responder::start_heard`, `responder::Mode`/`REOPENED`, `Meter::heard`; `announce::retried` is generic (crate-internal). The daemon's IP check runs every 2 s (the interface watches' period; mdns-sd's default is 5 s).
+  - `Meter::start(listener, minute_ns, browsers)` takes the daemon's listener instead of a socket and no address; `Meter::shared`, `Meter::open`, `MeterWatch` and `Meter::rejoins` are gone (the daemon keeps the membership). `Responder::start` takes the daemon's listener; `start_on`/`start_watched` lost their `multicast` flag (unicast test responders). `host::GOODBYE_WAIT` is now `announce::mdns::GOODBYE_WAIT` (re-exported).
+  - mDNS: a device's discovery of our other devices on the PC (`traffic::neighbours`, started while its NIC is loud past our audio, #203) reads the group from the daemon's socket too, so a device process never holds a second joined 5353 socket (#442). New: `Mdns::listen_on` (a listener on the running daemon on an address; never opens one), `Discovery::start_heard` (the group read from such a listener; a Discovery in a process with no device keeps its own socket).
+
+  - **dasio measures dsg before/after on this release** (#442's last field line). **No latency change.**
+
 ## 0.6.193
 
 - **Fix (#440, the residual window): a clock that steps back under 2 s no longer silences the pump or the TX flows for the step.** A step back landing between a pass's epoch read and its time read gave that pass the new time under the old epoch; the pump's next block then looked due the whole step ahead and the pump waited it out (silent, up to 2 s at 96 kHz, 4 s at 48 kHz), and a TX flow sent nothing for the step. No schedule ever waits that far, so a wait further ahead than W and a block (the pump, the TX pull) or a TX flow's next stamp further ahead than its lag bound (at least the block) and a packet is now a clock gone back: the pump re-bootstraps at once, counted in `rebootstraps_clock_back` (the pump watch line says `cause=clock_back`), and the flow starts again at once (counted, `the TX schedule starts again` with a negative `lag`). RED tests first: steps back of 100 ms and 1 s, on fake time and on the pump thread over a linked follower.
