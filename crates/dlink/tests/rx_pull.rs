@@ -34,6 +34,8 @@ use dlink::{Block, Clock, Config, Link, Map, Place, Ports, Process, Stopped, Sub
 
 #[path = "tx_restart/restarts.rs"]
 mod restarts;
+#[path = "consumer/sender.rs"]
+mod sender;
 #[path = "consumer/witness.rs"]
 mod witness;
 use witness::{Names, Played, Window, Witness, late_us, verdict};
@@ -183,7 +185,7 @@ fn a_stalled_pump_leaves_the_output_s_bridge_whole() {
             let ring = ring_media.rx.rings()[0].counters();
             ring.holes.saturating_sub(ring.late)
         },
-        Some(witness::Sender {
+        Some(sender::Sender {
             tx: Arc::clone(&sender.media().tx),
             pump: sender.media().engine_stats().expect("the sender's pump"),
             rate: RATE,
