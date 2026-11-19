@@ -40,8 +40,17 @@
 //!   once. Windows delivers the group to a joined address-bound socket
 //!   (mbc, 19.11.2026: 185 datagrams in 20 s); Linux delivers it none
 //!   (only unicast to the address), so there it hears no group query
-//!   ([`bound_note`]). How the bound socket fares on Windows when the
-//!   address goes and comes back is what the field trial reads.
+//!   ([`bound_note`]). On Windows a bound daemon whose address was removed
+//!   and added again heard nothing more (mbc, 19.11.2026: `mdns.per_s`
+//!   0.0 for 2.5 min, the same socket), whether its socket went deaf or
+//!   the IP check's join on it failed and left the interface out (both at
+//!   debug, not read). So a bound daemon has a watch of its own
+//!   (`dstack-mdns-bound`, the #282 watch every 2 s, [`Mdns::reopens`]):
+//!   once the address is back it asks the daemon to open its socket again
+//!   (`mdns_sd::ServiceDaemon::reopen`: a new bind, the group joined on
+//!   every enabled interface, every record announced once; records and
+//!   taps kept) and logs [`BOUND_REOPENED`] with the interfaces joined and
+//!   the records announced. The wildcard daemon has no such watch.
 //!
 //! The subscriptions' direct queries (`subscribe::instance`) read their
 //! legacy unicast answers on a port of their own, never on 5353. A
@@ -51,17 +60,22 @@
 //! ([`crate::discover::Discovery::start_heard`]); one in a process with no
 //! device (dtray, a controller) joins a socket of its own.
 
+use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError, sync_channel};
+use std::sync::mpsc::{
+    Receiver, RecvTimeoutError, Sender, SyncSender, TrySendError, channel, sync_channel,
+};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
-use std::time::Duration;
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
-use mdns_sd::{DaemonStatus, IfKind, Metrics, ServiceDaemon};
+use mdns_sd::{DaemonStatus, IfKind, Metrics, Reopened, ServiceDaemon};
 use tracing::{debug, info, warn};
 
 use super::{AGAIN_TRIES, Announcer, retried};
 use crate::discover::senders::{MINUTE_NS, Meter, browsers::Browsers};
+use crate::membership::{Link, Lister, Membership};
 
 /// How long a withdrawal is waited for.
 pub const GOODBYE_WAIT: Duration = Duration::from_secs(3);
@@ -118,6 +132,109 @@ pub fn bound_note(group_to_bound: bool) -> Option<&'static str> {
          group query (only unicast to the address), so browsers and direct queries to \
          the group find no device here; a Windows trial switch (dstack #444)",
     )
+}
+
+/// The INFO line of a bound daemon whose socket was opened again (dstack
+/// #444).
+pub const BOUND_REOPENED: &str =
+    "mdns: the bound daemon's socket opened again after its address came back";
+
+/// How long a bound daemon's watch waits for the daemon's answer to a
+/// reopen (a bind, the group's join and one announcement a record). A
+/// reopen answered later still happened; the watch counts it failed and
+/// the next look reopens once more (one more announcement, harmless).
+pub const REOPEN_WAIT: Duration = Duration::from_secs(1);
+
+/// One look of a bound daemon's watch on `ip` at `now` (dstack #444, the
+/// #282 watch): the list read with `read` at the watch's period and, when
+/// the address is there again after a look found it gone (or on another
+/// interface index), `reopen` run. True when it reopened (INFO
+/// [`BOUND_REOPENED`], with the interfaces the new socket joined and the
+/// records announced: 0 interfaces is a reopen that heard nothing yet);
+/// a failed reopen is warned about and asked again at the next look.
+fn keep_bound(
+    m: &mut Membership,
+    now: Instant,
+    read: impl FnOnce() -> io::Result<Vec<Link>>,
+    ip: Ipv4Addr,
+    reopen: impl FnOnce() -> Result<Reopened, String>,
+) -> bool {
+    let Some(r) = m.poll(now, read) else {
+        return false;
+    };
+    match reopen() {
+        Ok(done) => {
+            info!(
+                %ip,
+                interface = %r.interface,
+                old_index = r.old_index,
+                new_index = r.new_index,
+                joined_interfaces = done.interfaces,
+                announced_records = done.services,
+                "{BOUND_REOPENED}"
+            );
+            true
+        }
+        Err(e) => {
+            warn!(
+                %ip,
+                interface = %r.interface,
+                error = %e,
+                "mdns: the bound daemon's socket not opened again after its address came \
+                 back; tried again"
+            );
+            m.failed();
+            false
+        }
+    }
+}
+
+/// Asks `daemon` to open its bound socket again and waits for its answer
+/// (a full queue waited out), at most [`REOPEN_WAIT`].
+fn reopen(daemon: &ServiceDaemon) -> Result<Reopened, String> {
+    let (asked, _waits) = retried(AGAIN_TRIES, || daemon.reopen());
+    asked
+        .map_err(|e| format!("the mDNS daemon was not asked: {e}"))?
+        .recv_timeout(REOPEN_WAIT)
+        .map_err(|e| format!("not within {} ms: {e}", REOPEN_WAIT.as_millis()))?
+}
+
+/// A bound daemon's watch of its address (dstack #444): a thread looking
+/// at the interface list at its period ([`keep_bound`]), stopped and
+/// joined by the daemon's drop before its shutdown.
+struct BoundWatch {
+    /// Never sent on: its drop is the stop.
+    stop: Sender<()>,
+    thread: JoinHandle<()>,
+}
+
+impl BoundWatch {
+    /// The watch of `ip` reading `lister`, asking `daemon` to reopen and
+    /// counting each reopen in `reopens`.
+    fn start(
+        daemon: ServiceDaemon,
+        ip: Ipv4Addr,
+        lister: Lister,
+        reopens: Arc<AtomicU64>,
+    ) -> io::Result<BoundWatch> {
+        let (stop, stopped) = channel::<()>();
+        let thread = std::thread::Builder::new()
+            .name("dstack-mdns-bound".to_string())
+            .spawn(move || {
+                let Lister { mut read, every } = lister;
+                let mut m = Membership::every(ip, every);
+                loop {
+                    if keep_bound(&mut m, Instant::now(), &mut read, ip, || reopen(&daemon)) {
+                        reopens.fetch_add(1, Ordering::Relaxed);
+                    }
+                    // Nothing is ever sent: the sender's drop is the stop.
+                    if stopped.recv_timeout(every) != Err(RecvTimeoutError::Timeout) {
+                        break;
+                    }
+                }
+            })?;
+        Ok(BoundWatch { stop, thread })
+    }
 }
 
 /// The `n`th dropped datagram gets a warning: the 1st, 2nd, 4th, 8th, ...
@@ -244,6 +361,11 @@ pub struct Mdns {
     meter: Option<Arc<Meter>>,
     /// Its socket is bound to the address, not the wildcard (dstack #444).
     bound: bool,
+    /// A bound daemon's watch of its address (dstack #444); none for the
+    /// wildcard's.
+    watch: Option<BoundWatch>,
+    /// How often the bound socket was opened again.
+    reopens: Arc<AtomicU64>,
 }
 
 impl Mdns {
@@ -262,10 +384,16 @@ impl Mdns {
     /// whatever it was opened with (one socket an address); a device that
     /// asks the other form is told so in a warning.
     pub fn shared_bound(ip: Ipv4Addr, bound: bool) -> Result<Arc<Mdns>, String> {
+        Mdns::shared_listed(ip, bound, Lister::default())
+    }
+
+    /// [`Mdns::shared_bound`] whose new bound daemon's watch reads `lister`
+    /// (the OS's list every 2 s; a test's own).
+    fn shared_listed(ip: Ipv4Addr, bound: bool, lister: Lister) -> Result<Arc<Mdns>, String> {
         if let Some(m) = running(&mut lock(&SHARED), ip) {
             return Ok(m.kept_for(bound));
         }
-        let opened = Arc::new(Mdns::open(ip, bound)?);
+        let opened = Arc::new(Mdns::open(ip, bound, lister)?);
         let mut all = lock(&SHARED);
         if let Some(first) = running(&mut all, ip) {
             drop(all);
@@ -281,8 +409,9 @@ impl Mdns {
 
     /// A new daemon on `ip`'s interface only, IPv4 (no other network sees
     /// the records; mdns-sd applies the selections in order), its IP check
-    /// at the watches' period.
-    fn open(ip: Ipv4Addr, bound: bool) -> Result<Mdns, String> {
+    /// at the watches' period; a bound one with its watch on `lister`
+    /// (dstack #444).
+    fn open(ip: Ipv4Addr, bound: bool, lister: Lister) -> Result<Mdns, String> {
         let taps = Arc::new(Taps::default());
         let feed = Arc::clone(&taps);
         let tap: mdns_sd::Tap = Box::new(move |bytes, from| feed.feed(bytes, from));
@@ -295,7 +424,7 @@ impl Mdns {
             .and_then(|()| daemon.enable_interface(IfKind::Addr(IpAddr::V4(ip))))
             .and_then(|()| daemon.set_ip_check_interval(every));
         let meter = Meter::start(taps.listen(Heard::All), MINUTE_NS, Browsers::default());
-        let m = Mdns {
+        let mut m = Mdns {
             daemon,
             taps,
             meter: match meter {
@@ -306,6 +435,8 @@ impl Mdns {
                 }
             },
             bound,
+            watch: None,
+            reopens: Arc::new(AtomicU64::new(0)),
         };
         // A failed selection drops `m`, which shuts its daemon down.
         selected.map_err(|e| format!("the mDNS interface: {e}"))?;
@@ -315,6 +446,11 @@ impl Mdns {
         );
         if let Some(note) = bound.then(|| bound_note(GROUP_TO_BOUND_SOCKET)).flatten() {
             warn!("{note}");
+        }
+        if bound {
+            let watch = BoundWatch::start(m.daemon.clone(), ip, lister, Arc::clone(&m.reopens))
+                .map_err(|e| format!("the bound mDNS daemon's watch: {e}"))?;
+            m.watch = Some(watch);
         }
         Ok(m)
     }
@@ -338,6 +474,12 @@ impl Mdns {
     /// #444), not the wildcard.
     pub fn bound(&self) -> bool {
         self.bound
+    }
+
+    /// How often the bound daemon's socket was opened again after its
+    /// address came back (dstack #444); always 0 for the wildcard's.
+    pub fn reopens(&self) -> u64 {
+        self.reopens.load(Ordering::Relaxed)
     }
 
     /// A Windows device needs a responder of its own for answers from its
@@ -414,8 +556,13 @@ impl Mdns {
 impl Drop for Mdns {
     /// The last holder's end: the daemon shut down (goodbyes for any record
     /// still registered; a full queue waited out), waited for at most
-    /// [`SHUTDOWN_WAIT`].
+    /// [`SHUTDOWN_WAIT`]. A bound daemon's watch ends first, so it asks
+    /// the daemon nothing more.
     fn drop(&mut self) {
+        if let Some(watch) = self.watch.take() {
+            drop(watch.stop);
+            let _ended = watch.thread.join();
+        }
         let (asked, _waits) = retried(AGAIN_TRIES, || self.daemon.shutdown());
         let ended = asked
             .map_err(|e| e.to_string())

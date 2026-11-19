@@ -336,6 +336,13 @@ fn heard_from_within(l: &Listener, me: SocketAddrV4, wait: Duration) -> Vec<Vec<
 /// of this process's sockets on UDP port 5353.
 #[cfg(target_os = "linux")]
 fn own_5353_sockets() -> Vec<String> {
+    own_5353().into_iter().map(|(addr, _)| addr).collect()
+}
+
+/// [`own_5353_sockets`] with each socket's inode: a socket opened again is
+/// a new inode on the same address.
+#[cfg(target_os = "linux")]
+fn own_5353() -> Vec<(String, String)> {
     let mut ours = std::collections::HashSet::new();
     for fd in std::fs::read_dir("/proc/self/fd").unwrap().flatten() {
         if let Ok(link) = std::fs::read_link(fd.path())
@@ -354,7 +361,8 @@ fn own_5353_sockets() -> Vec<String> {
         .filter_map(|line| {
             let cols: Vec<&str> = line.split_whitespace().collect();
             let (addr, port) = cols.get(1)?.split_once(':')?;
-            (port == "14E9" && ours.contains(*cols.get(9)?)).then(|| addr.to_string())
+            let inode = *cols.get(9)?;
+            (port == "14E9" && ours.contains(inode)).then(|| (addr.to_string(), inode.to_string()))
         })
         .collect()
 }
@@ -651,4 +659,372 @@ fn a_bound_daemon_answers_a_direct_query_from_5353_to_its_source() {
     let handle = mdns.daemon().clone();
     drop(mdns);
     assert!(handle.get_metrics().is_err(), "the daemon still runs");
+}
+
+/// dstack #444's reopen line: a bound daemon's watch (the #282 watch, on
+/// the device's address) opens its socket again once the address is listed
+/// again after a look found it gone, or on another interface index, with
+/// one INFO line; never at the first look, while the address is gone or
+/// while it stays. A failed reopen is warned about and asked again at the
+/// next look.
+#[test]
+fn a_bound_daemon_s_watch_opens_its_socket_again_once_its_address_came_back() {
+    use std::cell::Cell;
+    crate::test_log::undecided();
+    let ip = Ipv4Addr::LOCALHOST;
+    let mut m = Membership::every(ip, Duration::from_secs(2));
+    let t0 = Instant::now();
+    let at = |s: u64| t0 + Duration::from_secs(s);
+    let on = |index: u32| -> std::io::Result<Vec<Link>> {
+        Ok(vec![Link {
+            name: "lo".to_string(),
+            ip,
+            index: Some(index),
+        }])
+    };
+    let gone = || -> std::io::Result<Vec<Link>> { Ok(Vec::new()) };
+    let (opened, refused) = (Cell::new(0), Cell::new(0));
+    let ok = || -> Result<Reopened, String> {
+        opened.set(opened.get() + 1);
+        Ok(Reopened {
+            interfaces: 1,
+            services: 4,
+        })
+    };
+    let fails = || -> Result<Reopened, String> {
+        refused.set(refused.get() + 1);
+        Err("bind refused".to_string())
+    };
+    let mut looks = Vec::new();
+    let mut warns = String::new();
+    let lines = crate::test_log::capture_at(tracing::Level::INFO, || {
+        looks.push(keep_bound(&mut m, at(0), || on(3), ip, ok));
+        looks.push(keep_bound(&mut m, at(2), gone, ip, ok));
+        looks.push(keep_bound(&mut m, at(4), || on(3), ip, ok));
+        looks.push(keep_bound(&mut m, at(6), || on(3), ip, ok));
+        looks.push(keep_bound(&mut m, at(8), || on(5), ip, ok));
+        looks.push(keep_bound(&mut m, at(10), gone, ip, ok));
+        warns = crate::test_log::capture_warnings(|| {
+            looks.push(keep_bound(&mut m, at(12), || on(5), ip, fails));
+        });
+        looks.push(keep_bound(&mut m, at(14), || on(5), ip, ok));
+        looks.push(keep_bound(&mut m, at(16), || on(5), ip, ok));
+    });
+    assert_eq!(
+        looks,
+        [false, false, true, false, true, false, false, true, false],
+        "learnt, gone, back, stays, moved, gone, refused, asked again, stays"
+    );
+    assert_eq!((opened.get(), refused.get()), (3, 1));
+    assert_eq!(lines.matches(BOUND_REOPENED).count(), 3, "{lines}");
+    assert!(lines.contains("interface=lo"), "{lines}");
+    assert!(lines.contains("new_index=5"), "{lines}");
+    assert!(lines.contains("joined_interfaces=1"), "{lines}");
+    assert!(lines.contains("announced_records=4"), "{lines}");
+    assert_eq!(
+        warns
+            .matches("the bound daemon's socket not opened again")
+            .count(),
+        1,
+        "{warns}"
+    );
+    assert!(warns.contains("bind refused"), "{warns}");
+}
+
+/// The daemon's count of announcements sent again so far (a registration's
+/// second one, and since #444 a reopen's).
+fn resends(m: &Mdns) -> i64 {
+    m.settle(GOODBYE_WAIT)
+        .unwrap()
+        .get("register-resend")
+        .copied()
+        .unwrap_or(0)
+}
+
+/// Asks `full`'s SRV/TXT from `client` to the group and to `to` (the bound
+/// daemon's address) every 50 ms until it is answered and the address's
+/// query was handed on by `heard` (at most 10 s); `ids` tag the two
+/// queries. The answer's source, and whether the group's query was handed
+/// on too (another 200 ms waited for it).
+fn asked(
+    client: &UdpSocket,
+    heard: &Listener,
+    full: &str,
+    to: SocketAddrV4,
+    ids: (u16, u16),
+) -> (SocketAddr, bool) {
+    use crate::subscribe::instance;
+    let SocketAddr::V4(me) = client.local_addr().unwrap() else {
+        panic!("IPv4");
+    };
+    let group = SocketAddrV4::new(Ipv4Addr::new(224, 0, 0, 251), 5353);
+    let to_group = instance::query(ids.0, full).unwrap();
+    let to_address = instance::query(ids.1, full).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let (mut answer, mut group_heard, mut address_heard) = (None, false, false);
+    while answer.is_none() || !address_heard {
+        assert!(
+            Instant::now() < deadline,
+            "never answered (the address's query heard: {address_heard})"
+        );
+        client.send_to(&to_group, group).unwrap();
+        client.send_to(&to_address, to).unwrap();
+        for bytes in heard_from_within(heard, me, Duration::from_millis(50)) {
+            group_heard |= bytes == to_group;
+            address_heard |= bytes == to_address;
+        }
+        let mut buf = [0u8; 9000];
+        while let Ok((n, from)) = client.recv_from(&mut buf) {
+            if instance::read(&buf[..n], full).is_some_and(|f| f.srv.is_some()) {
+                answer = Some(from);
+            }
+        }
+    }
+    for bytes in heard_from_within(heard, me, Duration::from_millis(200)) {
+        group_heard |= bytes == to_group;
+    }
+    (answer.unwrap(), group_heard)
+}
+
+/// The test's own socket on `0.0.0.0:5353` joined to the group on `ip`
+/// (beside the daemon's bound socket, `SO_REUSEADDR`/`SO_REUSEPORT`): it
+/// reads what the daemon multicasts. A unicast to `<ip>:5353` still goes
+/// to the daemon's socket, the more specific bind.
+fn group_listener(ip: Ipv4Addr) -> UdpSocket {
+    let sock = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::DGRAM, None).unwrap();
+    sock.set_reuse_address(true).unwrap();
+    #[cfg(unix)]
+    sock.set_reuse_port(true).unwrap();
+    sock.bind(&SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 5353).into())
+        .unwrap();
+    sock.join_multicast_v4(&Ipv4Addr::new(224, 0, 0, 251), &ip)
+        .unwrap();
+    let sock: UdpSocket = sock.into();
+    sock.set_read_timeout(Some(Duration::from_millis(10)))
+        .unwrap();
+    sock
+}
+
+/// How many announcements of `full` (a response from `from` with `full`'s
+/// SRV) `l` reads within `wait`.
+fn announcements(l: &UdpSocket, full: &str, from: SocketAddr, wait: Duration) -> usize {
+    announcements_each(l, &[full], from, wait)[0]
+}
+
+/// Waits (at most 8 s) for an announcement of `full` on `l`, then until
+/// none has come for 1.2 s, past the record's multicast rate limit of a
+/// second (`MULTICAST_RATE_LIMIT_MILLIS`): every announcement of the
+/// registration is then out, and the next is not held back.
+fn quiet_after_announcements(l: &UdpSocket, full: &str, from: SocketAddr) {
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while announcements(l, full, from, Duration::from_millis(100)) == 0 {
+        assert!(
+            Instant::now() < deadline,
+            "the registration never announced"
+        );
+    }
+    while announcements(l, full, from, Duration::from_millis(1200)) > 0 {
+        assert!(Instant::now() < deadline, "the announcements never ended");
+    }
+}
+
+/// dstack #444's reopen line through the real daemon on loopback: the
+/// bound daemon's address removed and added again (a fake list, read every
+/// 5 ms) opens its socket again once: a new socket on `127.0.0.1:5353`
+/// (Linux: a new inode, the old one closed), the record still answered to
+/// a query to the address, heard by a listener taken before the reopen,
+/// announced once more, and the group heard where the OS hands it to a
+/// bound socket (Windows: the new socket joined it). mbc's step 4a
+/// (19.11.2026): the socket of v0.6.195 kept its address and heard nothing
+/// for 2.5 min after the address came back.
+#[test]
+fn a_bound_daemon_opens_its_socket_again_after_its_address_came_back_with_its_records_and_taps() {
+    use crate::announce::{CHAN_SERVICE, ServiceRecord};
+    use crate::membership::fake::{Fake, until};
+    let _one = ONE_DAEMON.lock().unwrap_or_else(PoisonError::into_inner);
+    let ip = Ipv4Addr::LOCALHOST;
+    let fake = Fake::at(1);
+    let mdns = Mdns::shared_listed(ip, true, fake.lister(ip, Duration::from_millis(5))).unwrap();
+    let heard = mdns.listen(Heard::Queries);
+    let record = ServiceRecord {
+        service: CHAN_SERVICE,
+        instance: "TX 1@mdns-test-reopen".to_string(),
+        host: "mdns-test-reopen.local.".to_string(),
+        ip,
+        port: 4455,
+        txt: vec!["id=1".to_string()],
+    };
+    let mut a = Announcer::new(mdns.daemon().clone());
+    a.announce(std::slice::from_ref(&record)).unwrap();
+    let full = format!("{}.{}", record.instance, CHAN_SERVICE);
+    let client = UdpSocket::bind((ip, 0)).unwrap();
+    socket2::SockRef::from(&client)
+        .set_multicast_if_v4(&ip)
+        .unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_millis(20)))
+        .unwrap();
+    let to = SocketAddrV4::new(ip, 5353);
+    let wire = group_listener(ip);
+    let (from, _) = asked(&client, &heard, &full, to, (0x4451, 0x4452));
+    assert_eq!(from, SocketAddr::V4(to), "answered before the change");
+    // The registration's announcements are on the wire and past the
+    // record's rate limit (a record is multicast at most once a second,
+    // RFC 6762 §6) before the address goes: the reopen's is then sent,
+    // and the counts below are the reopen's alone.
+    quiet_after_announcements(&wire, &full, SocketAddr::V4(to));
+    let resent = resends(&mdns);
+    #[cfg(target_os = "linux")]
+    let bound_inodes = || -> Vec<String> {
+        own_5353()
+            .into_iter()
+            .filter(|(addr, _)| addr == "0100007F")
+            .map(|(_, inode)| inode)
+            .collect()
+    };
+    #[cfg(target_os = "linux")]
+    let before = bound_inodes();
+    #[cfg(target_os = "linux")]
+    assert_eq!(before.len(), 1, "one socket on 127.0.0.1:5353: {before:?}");
+    assert_eq!(mdns.reopens(), 0, "nothing changed yet");
+    fake.remove();
+    fake.read_more(2);
+    assert_eq!(mdns.reopens(), 0, "never while the address is gone");
+    fake.recreate(1);
+    until("the bound socket opened again", || mdns.reopens() == 1);
+    fake.read_more(2);
+    assert_eq!(mdns.reopens(), 1, "once a return");
+    // The reopen announced before it answered: its datagram is queued.
+    assert_eq!(
+        announcements(&wire, &full, SocketAddr::V4(to), Duration::from_millis(300)),
+        1,
+        "the record announced once on the wire after the reopen"
+    );
+    #[cfg(target_os = "linux")]
+    {
+        let after = bound_inodes();
+        assert_eq!(after.len(), 1, "the old socket closed: {after:?}");
+        assert_ne!(after, before, "a new socket on the address");
+    }
+    let (from, group_heard) = asked(&client, &heard, &full, to, (0x4453, 0x4454));
+    assert_eq!(
+        from,
+        SocketAddr::V4(to),
+        "the record answered again from the bound address"
+    );
+    assert_eq!(
+        group_heard, GROUP_TO_BOUND_SOCKET,
+        "the new socket's group (joined again)"
+    );
+    assert_eq!(
+        resends(&mdns) - resent,
+        1,
+        "its one record asked to announce once by the reopen"
+    );
+    mdns.withdraw(&mut a, GOODBYE_WAIT).unwrap();
+    drop(heard);
+    let handle = mdns.daemon().clone();
+    drop(mdns);
+    assert!(handle.get_metrics().is_err(), "the daemon still runs");
+    let reads = fake.reads();
+    std::thread::sleep(Duration::from_millis(50));
+    assert_eq!(fake.reads(), reads, "the watch ended with the daemon");
+}
+
+/// Off (the default), the wildcard daemon keeps no watch of its own: the
+/// list is never read for it (the path of v0.6.197).
+#[test]
+fn the_wildcard_daemon_keeps_no_watch_of_its_address() {
+    use crate::membership::fake::Fake;
+    let _one = ONE_DAEMON.lock().unwrap_or_else(PoisonError::into_inner);
+    let ip = Ipv4Addr::LOCALHOST;
+    let fake = Fake::at(1);
+    let mdns = Mdns::shared_listed(ip, false, fake.lister(ip, Duration::from_millis(1))).unwrap();
+    mdns.settle(GOODBYE_WAIT).expect("the daemon runs");
+    std::thread::sleep(Duration::from_millis(50));
+    assert_eq!(fake.reads(), 0, "no watch on the wildcard's daemon");
+    assert_eq!(mdns.reopens(), 0);
+}
+
+/// How many announcements of each of `fulls` (a response from `from` with
+/// that name's SRV) `l` reads within `wait`.
+fn announcements_each(
+    l: &UdpSocket,
+    fulls: &[&str],
+    from: SocketAddr,
+    wait: Duration,
+) -> Vec<usize> {
+    use crate::subscribe::instance;
+    let deadline = Instant::now() + wait;
+    let mut n = vec![0; fulls.len()];
+    let mut buf = [0u8; 9000];
+    while !deadline.saturating_duration_since(Instant::now()).is_zero() {
+        if let Ok((len, src)) = l.recv_from(&mut buf)
+            && src == from
+            && !is_query(&buf[..len])
+        {
+            for (i, full) in fulls.iter().enumerate() {
+                if instance::read(&buf[..len], full).is_some_and(|f| f.srv.is_some()) {
+                    n[i] += 1;
+                }
+            }
+        }
+    }
+    n
+}
+
+/// dstack #450: every record is announced twice at its registration, one
+/// second apart (RFC 6762 §8.3), also one whose name has upper case, as
+/// every Dante `TX 1@...` record. Up to v0.6.197 the second announcement
+/// looked its record up by the original-case name, while the daemon keys
+/// its records in lower case: such a record was announced once, and one
+/// datagram lost on a busy leg left the device unseen until a query. An
+/// all-lower-case record beside it is the control (two before and after).
+#[test]
+fn every_record_is_announced_twice_also_one_whose_name_has_upper_case() {
+    use crate::announce::ServiceRecord;
+    let _one = ONE_DAEMON.lock().unwrap_or_else(PoisonError::into_inner);
+    let ip = Ipv4Addr::LOCALHOST;
+    let mdns = Mdns::shared(ip).unwrap();
+    // A token of the process in every name and a service type of its own:
+    // parallel mutant jobs run this test at once on one box, each beside
+    // the others' daemons on 5353, and a browse of a real type by any
+    // process would add answers to the count (`tests/mdns_answer_only.rs`).
+    let pid = std::process::id();
+    let ty: &'static str = Box::leak(format!("_d450{pid:08x}._udp.local.").into_boxed_str());
+    let record = |instance: &str, host: &str| ServiceRecord {
+        service: ty,
+        instance: instance.to_string(),
+        host: format!("{host}.local."),
+        ip,
+        port: 4455,
+        txt: vec!["id=1".to_string()],
+    };
+    let upper = record(
+        &format!("TX 1@Mdns-Test-Case-{pid}"),
+        &format!("mdns-test-case-upper-{pid}"),
+    );
+    let lower = record(
+        &format!("tx 1@mdns-test-case-lower-{pid}"),
+        &format!("mdns-test-case-lower-{pid}"),
+    );
+    let full_upper = format!("{}.{ty}", upper.instance);
+    let full_lower = format!("{}.{ty}", lower.instance);
+    let wire = group_listener(ip);
+    let mut a = Announcer::new(mdns.daemon().clone());
+    a.announce(&[upper, lower]).unwrap();
+    // The probes (3 x 250 ms), the first announcement, the second one
+    // 1.1-1.15 s after it, and time to spare for a third that must not come.
+    let counts = announcements_each(
+        &wire,
+        &[&full_upper, &full_lower],
+        SocketAddr::V4(SocketAddrV4::new(ip, 5353)),
+        Duration::from_secs(5),
+    );
+    assert_eq!(
+        counts,
+        [2, 2],
+        "announcements of the upper-case record and of the lower-case one"
+    );
+    mdns.withdraw(&mut a, GOODBYE_WAIT).unwrap();
 }
