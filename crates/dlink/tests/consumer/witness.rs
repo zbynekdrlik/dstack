@@ -43,9 +43,9 @@
 //! or the silence of the sender's late pump restarts, every TX restart of
 //! the sender in the window slept the flow's latency late, the holes are
 //! no more than those restarts can leave unsent, every pump restart of
-//! the sender was late and, with no underrun, the samples off are within
-//! the holes, the silence and [`GAP_EDGES`] a gap; both named when both
-//! hold, else `OURS`. A judged window is set aside
+//! the sender was late and, with no underrun and that silence counted, the
+//! samples off are within the holes, the silence and [`GAP_EDGES`] a gap;
+//! both named when both hold, else `OURS`. A judged window is set aside
 //! (kept for the message) only when it lost audio and its verdict is not
 //! `OURS`, and the next one is judged after [`GUARD`], up to [`WINDOWS`];
 //! the last is judged as it is. A window in which the consumer stalled
@@ -83,13 +83,15 @@ pub(crate) const WINDOWS: usize = 4;
 pub(crate) const GUARD: Duration = Duration::from_millis(100);
 
 /// The samples off the level a sender's gap may cost past its own samples
-/// (a pump restart's silence, a TX restart's holes never written): the
-/// player's converter rings at both edges of it. `rx_pull_held` measured
-/// at most 10 a pump restart (dstack #436), the #401 proofs here 10 a TX
-/// restart (`rx_pull`: 11669 off, 11488 holes never written, 18 lines), so
-/// 32 is room, not a second cause. Only a gap that left evidence has
-/// edges: a pump restart that sent silence, a TX restart line beside holes
-/// never written.
+/// in a window with the silence of a late pump restart (dstack #436): the
+/// player's converter rings at both edges of it. Measured under `chrt -f
+/// 10` on dev1 (19.11.2026) at most 14 a pump restart (`rx_pull` 10340 off
+/// for 10 restarts' 10240 samples of silence, `to_asio_pull` 10380;
+/// `rx_pull_held` 10), so 32 is room, not a second cause. Only a gap that
+/// left evidence has edges: a pump restart that sent silence, a TX restart
+/// line beside holes never written. A window with holes and no pump
+/// silence keeps #401's rule (the holes bounded by the restarts, the
+/// samples off not): one 12 ms TX sleep's 640 holes cost 677 to 907 off.
 pub(crate) const GAP_EDGES: u64 = 32;
 
 /// How long after the sender sends a sample the consumer plays it, at
@@ -249,9 +251,11 @@ impl Window {
     /// flow's latency late and they are no more than those restarts can
     /// leave unsent ([`Restarts::explain`]); the silence the sender's pump
     /// restarts sent is the sender's when every one of them was late
-    /// (dstack #436). With no underrun the samples off must be within
-    /// those holes and that silence, and [`GAP_EDGES`] a gap with evidence.
-    /// Samples off with neither, more off than they explain, a TX restart
+    /// (dstack #436). With that silence and no underrun the samples off
+    /// must be within the holes and the silence, and [`GAP_EDGES`] a gap
+    /// with evidence (holes alone keep #401's rule: the holes bounded, the
+    /// samples off not). Samples off with neither, more off than the
+    /// silence explains, a TX restart
     /// without that evidence or a pump restart that was not late, are
     /// ours.
     pub(crate) fn who(&self, cause: u64) -> Who {
@@ -274,8 +278,11 @@ impl Window {
             0
         };
         let edges = GAP_EDGES.saturating_mul(pump_gaps + tx_gaps);
-        let off_explained =
-            consumer || self.off <= silence.saturating_add(self.holes).saturating_add(edges);
+        // The pump's silence bounds the samples off (holes alone keep
+        // #401's rule, GAP_EDGES).
+        let off_explained = consumer
+            || silence == 0
+            || self.off <= silence.saturating_add(self.holes).saturating_add(edges);
         let sender_explained = (self.holes == 0 || self.sender.explain(self.holes))
             && (!self.sender.any() || self.sender.runner())
             && pump.late == pump.restarts
@@ -718,20 +725,21 @@ mod consumer_tests {
         assert_eq!(w.who(CAUSE), Who::Ours);
     }
 
-    /// With no underrun, samples off past the sender's holes, its pump's
-    /// silence and their edges have another cause beside them (dstack
-    /// #436, as `rx_pull_held`'s rule).
+    /// With no underrun and a late pump restart's silence, samples off past
+    /// the sender's holes, that silence and their edges have another cause
+    /// beside them (dstack #436, as `rx_pull_held`'s rule); holes alone
+    /// keep #401's rule.
     #[test]
     fn samples_off_past_the_sender_s_gaps_and_their_edges_are_ours() {
-        // 512 holes never written after one late TX sleep: up to 544 off.
-        let mut w = window(0, 544, &[], &[]);
-        w.holes = 512;
-        w.sender = sender(1, &[Some(9_282)]);
+        // 640 holes never written after one 12 ms TX sleep: 907 off read
+        // SENDER (measured, rx_pull under `chrt -f 10`, 19.11.2026).
+        let mut w = window(0, 907, &[], &[]);
+        w.holes = 640;
+        w.sender = sender(1, &[Some(12_010)]);
         assert_eq!(w.who(CAUSE), Who::Sender);
-        w.off = 545;
-        assert_eq!(w.who(CAUSE), Who::Ours);
         // Holes and a late pump restart's silence together: 512 + 1024
         // and an edge for each gap.
+        w.holes = 512;
         w.pump = pump(1, 1, 1_024);
         w.off = 1_600;
         assert_eq!(w.who(CAUSE), Who::Sender);
