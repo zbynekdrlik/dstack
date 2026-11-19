@@ -230,3 +230,96 @@ fn a_schedule_near_time_0_waits_its_first_block() {
         }
     ));
 }
+
+/// A clock-back restart marks the schedule: the next re-anchor's step back
+/// (the epoch that carries the step the pass before read under the old
+/// one) keeps it where the restart put it, at the new time, instead of
+/// moving it the step behind (ROZHODNUTÉ 19.11). The mark is spent by
+/// that re-anchor: the one after moves as it always did.
+#[test]
+fn a_re_anchor_back_after_a_clock_back_restart_keeps_the_schedule() {
+    for back in [9_600u64, 96_000] {
+        let mut b = Blocks::bootstrap(T, TIMING);
+        let new = T - back;
+        assert!(
+            matches!(
+                b.next(new),
+                Due::Rebootstrap {
+                    cause: Cause::ClockBack,
+                    ..
+                }
+            ),
+            "{back} back"
+        );
+        let restarted = b.start();
+        let by = -i64::try_from(back).unwrap();
+        assert_eq!(b.re_anchor(Some(by), new), (Shift::Kept, 0), "{back} back");
+        assert_eq!(b.start(), restarted, "{back} back");
+        assert_eq!(b.re_anchor(Some(by), new), (Shift::Moved, 0), "{back} back");
+        assert_eq!(b.start(), restarted - back, "{back} back");
+    }
+}
+
+/// A re-bootstrap for lateness marks nothing: a re-anchor back after it
+/// moves the schedule, as before #440's mark.
+#[test]
+fn a_re_anchor_back_after_a_late_restart_moves_the_schedule() {
+    let mut b = Blocks::bootstrap(T, TIMING);
+    let late = b.due() + WORK_MARGIN + 1;
+    assert!(matches!(
+        b.next(late),
+        Due::Rebootstrap {
+            cause: Cause::Late,
+            ..
+        }
+    ));
+    let restarted = b.start();
+    assert_eq!(b.re_anchor(Some(-3_200), late), (Shift::Moved, 0));
+    assert_eq!(b.start(), restarted - 3_200);
+}
+
+/// The mark keeps a step BACK only: a forward step after a clock-back
+/// restart moves the schedule as before (kept, it would be the step behind
+/// the clock and re-bootstrap late).
+#[test]
+fn a_re_anchor_forward_after_a_clock_back_restart_moves_the_schedule() {
+    let mut b = Blocks::bootstrap(T, TIMING);
+    let new = T - 9_600;
+    assert!(matches!(
+        b.next(new),
+        Due::Rebootstrap {
+            cause: Cause::ClockBack,
+            ..
+        }
+    ));
+    let restarted = b.start();
+    let by = i64::try_from(B).unwrap();
+    assert_eq!(b.re_anchor(Some(by), new), (Shift::Moved, 0));
+    assert_eq!(b.start(), restarted + B);
+}
+
+/// The mark lasts one pass: a pass with no re-anchor after the clock-back
+/// restart spends it, and an epoch with the step that comes only after it
+/// moves the schedule the step back once more, a second re-bootstrap
+/// (`late`), as before the mark.
+#[test]
+fn a_clock_back_mark_lasts_one_pass() {
+    for back_ns in BACK_NS {
+        let (mut r, now) = pump_at_epoch_5();
+        let back = now - to_samples(back_ns, RATE);
+        let wake = r.pump.media(back, 5);
+        let wake = r.pump.media(wake, 5);
+        let step = -i64::try_from(back_ns).unwrap();
+        r.pump.media(wake, stepped(6, step));
+        let v = r.stats.view();
+        assert_eq!(
+            (
+                v.rebootstraps_clock_back,
+                v.rebootstraps_late,
+                v.rebootstraps
+            ),
+            (1, 1, 2),
+            "{back_ns} ns back: {v:?}"
+        );
+    }
+}

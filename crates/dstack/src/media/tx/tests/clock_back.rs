@@ -122,3 +122,75 @@ fn a_lane_s_schedule_carries_the_device_s_block() {
     let schedule = rig.tx.lanes[slot].schedule.expect("a schedule");
     assert_eq!(schedule.block, block);
 }
+
+/// A clock-back restart marks the schedule: the next re-anchor's step back
+/// keeps it at the new time instead of moving it the step behind
+/// (ROZHODNUTÉ 19.11); that re-anchor spends the mark, the one after moves
+/// as it always did.
+#[test]
+fn a_re_anchor_back_after_a_clock_back_restart_keeps_the_schedule() {
+    for back in BACK {
+        let mut s = Schedule::bootstrap(1_000_000, 32, 96);
+        let now = 1_000_000 - back;
+        assert_eq!(s.due(now), None, "{back} back");
+        assert_eq!(s.take_rebootstraps(), 1, "{back} back");
+        let restarted = s.next;
+        let by = -i64::try_from(back).unwrap();
+        assert_eq!(s.re_anchor(Some(by), now), Shift::Kept, "{back} back");
+        assert_eq!(
+            (s.next, s.take_rebootstraps()),
+            (restarted, 0),
+            "{back} back"
+        );
+        assert_eq!(s.re_anchor(Some(by), now), Shift::Moved, "{back} back");
+        assert_eq!(s.next, restarted - back, "{back} back");
+    }
+}
+
+/// A restart for a lag past the bound marks nothing: a re-anchor back after
+/// it moves the schedule, as before #440's mark.
+#[test]
+fn a_re_anchor_back_after_a_lag_restart_moves_the_schedule() {
+    let mut s = Schedule::bootstrap(1_000_000, 32, 96);
+    let late = s.next + 32 + 96 + 1;
+    assert_eq!(s.due(late), None);
+    assert_eq!(s.take_rebootstraps(), 1);
+    let restarted = s.next;
+    assert_eq!(s.re_anchor(Some(-320), late), Shift::Moved);
+    assert_eq!(s.next, restarted - 320);
+}
+
+/// The mark keeps a step BACK only: a forward step after a clock-back
+/// restart moves the schedule as before.
+#[test]
+fn a_re_anchor_forward_after_a_clock_back_restart_moves_the_schedule() {
+    let mut s = Schedule::bootstrap(1_000_000, 32, 96);
+    let now = 1_000_000 - 9_600;
+    assert_eq!(s.due(now), None);
+    assert_eq!(s.take_rebootstraps(), 1);
+    let restarted = s.next;
+    assert_eq!(s.re_anchor(Some(32), now), Shift::Moved);
+    assert_eq!(s.next, restarted + 32);
+}
+
+/// On the transmitter the mark lasts one pass: a pass with no re-anchor
+/// after the clock-back restart spends it, and an epoch with the step that
+/// comes only after it moves the schedule the step back once more, a
+/// second restart, as before the mark.
+#[test]
+fn a_clock_back_mark_lasts_one_pass() {
+    for back in BACK {
+        let mut rig = Rig::new(Vec::new());
+        let (slot, _) = rig.flow(vec![Some(1)]);
+        for us in (0..=3_000).step_by(500) {
+            rig.tx.step(Some(T + us * 1_000), 1);
+        }
+        let back_ns = ns_of(back, RATE);
+        let new = T + 3_500_000 - back_ns;
+        rig.tx.step(Some(new), 1);
+        rig.tx.step(Some(new + 500_000), 1);
+        let step_ns = -i64::try_from(back_ns).unwrap();
+        rig.tx.step(Some(new + 1_000_000), stepped(2, step_ns));
+        assert_eq!(rig.shared.lane(slot).rebootstraps, 2, "{back} back");
+    }
+}
