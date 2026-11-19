@@ -81,3 +81,4 @@ One line per ticket: issue, commits, tests (RED -> GREEN where a bug), decisions
 - 18.11 21:31 CET: v0.6.183 tagged (#414 direct socket, #417 Windows host sender, CI apt bound). v0.6.184 = #419 bridge figures v2 (dcontroller first, then dasio).
 - 18.11 23:01 CET: v0.6.184 released (#419 figures v2). v0.6.185 = #422 (bridge per-direction floor 0.5 ms, measured) + #420 (follower waiting line).
 - 19.11 00:17 CET: v0.6.185 released (#420, #422). #424 closed (not a dstack regression; the delay after the send on resolume-pp's shared USB NIC: #425). v0.6.186 = #426 (a TX flow holds on for its receiver's latency).
+- 19.11 02:54 CET: v0.6.186 (#426) and v0.6.187 (#429 clock figures, CI apt cache) released. mbc-snv's reboot: no clock (boot race, dsync#206 + #431) and a starved USB NIC (dasio's ReservedCpuSets, reverted). v0.6.188 = #431.
