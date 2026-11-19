@@ -537,13 +537,12 @@ fn answers_ptr(bytes: &[u8], id: u16, instance: &str) -> bool {
     })
 }
 
+/// Whether a datagram is the answer a test waits for.
+type IsAnswer<'a> = &'a dyn Fn(&[u8]) -> bool;
+
 /// The sources of the datagrams `client` reads within `wait` that
 /// `is_answer` takes.
-fn answers_within(
-    client: &UdpSocket,
-    wait: Duration,
-    is_answer: &dyn Fn(&[u8]) -> bool,
-) -> Vec<SocketAddr> {
+fn answers_within(client: &UdpSocket, wait: Duration, is_answer: IsAnswer) -> Vec<SocketAddr> {
     let deadline = Instant::now() + wait;
     let mut out = Vec::new();
     let mut buf = [0u8; 9000];
@@ -599,7 +598,7 @@ fn a_bound_daemon_answers_a_direct_query_from_5353_to_its_source() {
     let ptr = ptr_query(0x4444, CHAN_SERVICE);
     let srv_answer = |b: &[u8]| instance::read(b, &full).is_some_and(|f| f.srv.is_some());
     let ptr_answer = |b: &[u8]| answers_ptr(b, 0x4444, &full);
-    let cases: [(&str, &[u8], &dyn Fn(&[u8]) -> bool); 2] = [
+    let cases: [(&str, &[u8], IsAnswer); 2] = [
         ("SRV/TXT", &srv_query, &srv_answer),
         ("PTR", &ptr, &ptr_answer),
     ];
