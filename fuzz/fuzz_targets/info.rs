@@ -1,6 +1,7 @@
 //! The info requests (UDP 8700): one datagram, answered for the info group;
-//! the same bytes read as a bridge-figures reply body (dstack #419), as
-//! dcontroller reads a device's.
+//! the same bytes read as a bridge-figures reply body (dstack #419) and as
+//! a clock-figures reply body (dstack #429), as dcontroller reads a
+//! device's.
 #![no_main]
 
 use std::net::Ipv4Addr;
@@ -28,4 +29,5 @@ fuzz_target!(|data: &[u8]| {
     let mut m = InfoBuilder::new(Identity::new(cfg, net));
     let _ = m.answer(data);
     let _ = dstack::info::bridge::parse_figures(data);
+    let _ = dstack::info::clock_figures::parse_figures(data);
 });

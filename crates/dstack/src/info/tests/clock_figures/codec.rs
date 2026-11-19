@@ -18,6 +18,9 @@ fn every_field_sits_at_its_offset_for_the_independent_walker() {
     assert_eq!(parse_figures(&body), Ok(f));
 }
 
+/// Sets one field of the figures.
+type Set = fn(&mut ClockFigures);
+
 /// The flags cannot all differ in one body: each alone, set, reads at its
 /// own key and nowhere else.
 #[test]
@@ -37,7 +40,7 @@ fn each_flag_alone_sits_at_its_own_key() {
         }),
         ..ClockFigures::default()
     };
-    let set: [(&str, fn(&mut ClockFigures)); 8] = [
+    let set: [(&str, Set); 8] = [
         ("ready", |f| f.ready = true),
         ("follower_locked", |f| {
             f.follower.as_mut().unwrap().locked = true
