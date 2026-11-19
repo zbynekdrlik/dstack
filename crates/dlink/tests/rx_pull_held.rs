@@ -31,10 +31,17 @@
 //! the one after it, which the converter's filter reaches): a sender
 //! thread not run long enough (a loaded box) leaves ring holes, which play
 //! as samples off the level with no underrun (the `rx_pull.rs` rule: holes
-//! with no underrun is the sender); a run with any says `SENDER` and is
-//! still judged on the bridge's own counts. A file of its own (its process
-//! sets the normal profile), on loopback (dstack #366) and its own system
-//! clock.
+//! with no underrun is the sender), and is still judged on the bridge's
+//! own counts. A sender's pump restart after a late wake leaves its engine
+//! ring's positions unwritten, which its TX thread sends as silence: whole
+//! packets, so no RX counter sees them, and they play as samples off in a
+//! judged callback (dstack #436: plain at dev1 load ~24 that failed 8 of 9
+//! runs, read `OURS`). The judged window therefore also reads the sender's
+//! pump restarts, the silence it sent and its TX restarts with their lines
+//! (`tests/tx_restart/restarts.rs`, shared with the bridge witnesses), and
+//! a failure prints `verdict SENDER|OURS` ([`who`]); the asserts are the
+//! same either way. A file of its own (its process sets the normal
+//! profile), on loopback (dstack #366) and its own system clock.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -166,7 +173,7 @@ struct SenderAt {
 }
 
 /// What the sender did in a judged window (dstack #436).
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 struct Sender {
     /// Its pump's restarts, and those after a wake more than W late
     /// (`rebootstraps_late`).
@@ -208,10 +215,12 @@ impl SenderSide {
     }
 }
 
-/// The samples off the level a pump restart's silence may cost past the
-/// samples it sent: the RX converter's filter rings at both edges of the
-/// silence (measured, see [`who`]).
-const SILENCE_EDGES: u64 = 64;
+/// The samples off the level a sender's gap may cost past its own samples
+/// (a pump restart's silence, a TX restart's holes): the RX converter's
+/// filter rings at both edges of it. Measured at most 10 a pump restart
+/// (dev1 under `chrt -f 10`, 19.11.2026: 10 restarts of 1024 samples of
+/// silence, 9474 to 10340 off), so 32 is room, not a second cause.
+const GAP_EDGES: u64 = 32;
 
 /// Who lost a judged window's audio (dstack #436).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -227,14 +236,18 @@ enum Who {
 /// silence, the latency kept). `SENDER` when the bridge is clean and every
 /// loss has the sender's evidence, the `rx_pull` rule (the consumer
 /// witness, `tests/consumer/witness.rs`) plus the sender's pump:
-/// - samples off only with the sender's pump restarted in the window,
-///   every restart late (its wake more than W behind), and the off within
-///   the silence it sent and [`SILENCE_EDGES`] a restart;
+/// - a pump restart is the sender's only after a late wake (more than W
+///   behind, `rebootstraps_late`), and its TX thread sends the positions
+///   it left unwritten as silence, which no RX counter sees;
 /// - ring holes never written only within the sender's TX restarts
 ///   ([`Restarts::explain`]: every restart's sleep returned the flow's
 ///   latency late, its bound at least its own receiver's, the holes within
-///   the restarts' bound);
-/// - any TX restart without that evidence is `OURS`.
+///   the restarts' bound); any TX restart without that evidence is `OURS`;
+/// - samples off only within what those gaps can cost: the silence of the
+///   window's late pump restarts and the holes never written (a hole's
+///   call and the next are not judged, yet the FIFO holds over a period,
+///   so a hole's tail can play in a judged call), and [`GAP_EDGES`] a
+///   restart.
 ///
 /// Every edge errs to `OURS`: a restart just before the window's open whose
 /// silence or holes land inside it is unexplained.
@@ -242,12 +255,12 @@ fn who(heard: &Heard, bridge_clean: bool) -> Who {
     let s = &heard.sender;
     let holes = heard.never_written();
     let lost = heard.off > 0 || holes > 0;
-    let pump = heard.off == 0
-        || (s.pump_restarts > 0
-            && s.pump_late == s.pump_restarts
-            && heard.off <= s.silence + SILENCE_EDGES * s.pump_restarts);
+    let pump = s.pump_late == s.pump_restarts;
+    let silence = if s.pump_restarts > 0 { s.silence } else { 0 };
+    let gaps = s.pump_restarts + s.tx.lines.len() as u64;
+    let off = heard.off <= silence + holes + GAP_EDGES * gaps;
     let tx = (holes == 0 || s.tx.explain(holes)) && (!s.tx.any() || s.tx.runner());
-    if lost && bridge_clean && pump && tx {
+    if lost && bridge_clean && pump && off && tx {
         Who::Sender
     } else {
         Who::Ours
@@ -615,4 +628,125 @@ fn an_output_callback_held_to_just_past_a_tick_on_a_late_timer_plays_on() {
         restarts,
         &counts,
     );
+}
+
+/// The verdict's rule (dstack #436) on the numbers of its proofs (dev1
+/// under `chrt -f 10`, 19.11.2026).
+mod verdict_tests {
+    use super::*;
+
+    /// A window with `off` samples off and these sender counts.
+    fn heard(off: u64, holes: u64, sender: Sender) -> Heard {
+        Heard {
+            off,
+            ring_holes: holes + 56,
+            ring_late: 56,
+            sender,
+            ..Heard::default()
+        }
+    }
+
+    /// `restarts` pump restarts, `late` of them late, `silence` samples
+    /// sent as silence, no TX restart.
+    fn pump(restarts: u64, late: u64, silence: u64) -> Sender {
+        Sender {
+            pump_restarts: restarts,
+            pump_late: late,
+            silence,
+            tx: restarts::fixture(0, &[]),
+        }
+    }
+
+    /// `counted` TX restarts with lines of these oversleeps (µs), each 440
+    /// samples late on a 432-sample bound: up to 872 samples unsent each.
+    fn tx(counted: u64, oversleeps: &[Option<u64>]) -> Sender {
+        Sender {
+            tx: restarts::fixture(counted, oversleeps),
+            ..Sender::default()
+        }
+    }
+
+    #[test]
+    fn samples_off_within_a_late_pump_restart_s_silence_are_the_sender_s() {
+        // A 20 ms pump stall every 300 blocks: 10 late restarts, 10240
+        // samples sent as silence, 10340 off.
+        let w = heard(10_340, 0, pump(10, 10, 10_240));
+        assert_eq!(who(&w, true), Who::Sender);
+        assert!(
+            verdict(&w, true).starts_with("verdict SENDER (the sender's pump or TX thread"),
+            "{}",
+            verdict(&w, true)
+        );
+        // The silence and GAP_EDGES a restart, and one sample past them.
+        assert_eq!(
+            who(&heard(10_560, 0, pump(10, 10, 10_240)), true),
+            Who::Sender
+        );
+        assert_eq!(
+            who(&heard(10_561, 0, pump(10, 10, 10_240)), true),
+            Who::Ours
+        );
+        // A restart that was not late (a clock step back, a re-anchor).
+        assert_eq!(who(&heard(10_340, 0, pump(10, 9, 10_240)), true), Who::Ours);
+        // Silence with no pump restart (a block that ended past W), or a
+        // late restart that sent none.
+        assert_eq!(who(&heard(500, 0, pump(0, 0, 10_240)), true), Who::Ours);
+        assert_eq!(who(&heard(500, 0, pump(1, 1, 0)), true), Who::Ours);
+        assert_eq!(who(&heard(32, 0, pump(1, 1, 0)), true), Who::Sender);
+        // The bridge's own counts not clean (an underrun, a dropped pull).
+        assert_eq!(who(&w, false), Who::Ours);
+        assert!(verdict(&w, false).starts_with("verdict OURS: 10340 samples off"));
+    }
+
+    #[test]
+    fn holes_never_written_after_a_late_tx_sleep_are_the_sender_s() {
+        // A 12 ms TX sleep every 700: two restarts, 1280 holes never
+        // written, 56 off where a hole's tail played (here each line of
+        // lag 440 on 432 may leave 872 unsent).
+        let late = tx(2, &[Some(12_010), Some(12_011)]);
+        assert_eq!(who(&heard(56, 1_280, late.clone()), true), Who::Sender);
+        assert_eq!(who(&heard(0, 1_280, late.clone()), true), Who::Sender);
+        // The holes past the restarts' bound, the off past the holes and
+        // GAP_EDGES a restart.
+        assert_eq!(who(&heard(0, 1_745, late.clone()), true), Who::Ours);
+        assert_eq!(who(&heard(1_344, 1_280, late.clone()), true), Who::Sender);
+        assert_eq!(who(&heard(1_345, 1_280, late.clone()), true), Who::Ours);
+        // A restart whose sleep was on time, a counted one with no line,
+        // and holes with no restart at all.
+        assert_eq!(who(&heard(0, 512, tx(1, &[Some(500)])), true), Who::Ours);
+        assert_eq!(who(&heard(0, 512, tx(2, &[Some(12_010)])), true), Who::Ours);
+        assert_eq!(who(&heard(0, 512, tx(0, &[])), true), Who::Ours);
+        // A late pump restart beside a TX restart without a late sleep.
+        let mut both = pump(1, 1, 1_024);
+        both.tx = restarts::fixture(1, &[Some(500)]);
+        assert_eq!(who(&heard(1_024, 0, both), true), Who::Ours);
+        // dstack #426/#427: a restart bound under its own receiver's
+        // latency is the stack's, named so.
+        let mut under = late;
+        under.tx.receiver_lag = vec![433];
+        let w = heard(0, 1_280, under);
+        assert_eq!(who(&w, true), Who::Ours);
+        assert!(
+            verdict(&w, true)
+                .starts_with("verdict OURS (a TX restart bound under the receiver's latency): "),
+            "{}",
+            verdict(&w, true)
+        );
+    }
+
+    #[test]
+    fn a_loss_with_no_sender_evidence_is_ours() {
+        // A dropped pull's samples off with a clean sender, and no loss.
+        assert_eq!(who(&heard(1_548, 0, Sender::default()), true), Who::Ours);
+        assert_eq!(who(&heard(0, 0, pump(3, 3, 3_072)), true), Who::Ours);
+        // Late packets (holes written later) are no hole never written.
+        let w = Heard {
+            off: 0,
+            ring_holes: 56,
+            ring_late: 56,
+            sender: tx(1, &[Some(12_010)]),
+            ..Heard::default()
+        };
+        assert_eq!((w.never_written(), who(&w, true)), (0, Who::Ours));
+    }
 }
