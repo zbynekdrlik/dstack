@@ -203,6 +203,82 @@ fn a_start_that_failed_for_a_passing_cause_is_tried_again_until_it_is_the_source
     assert!(calls.kept_dropped.load(Ordering::SeqCst));
 }
 
+/// A cause that never passes: the tries go on for ever, and 10 minutes
+/// after the first failure one warning says so (the starts so far, the
+/// seconds, the last error), never before and never again; the minute
+/// line goes on as before (#431's escalation, dstack's call: retry for
+/// ever, but say it loudly once).
+#[test]
+fn a_start_still_failing_after_10_minutes_warns_once_and_is_tried_on() {
+    crate::test_log::undecided();
+    let (service, fake) = ready();
+    let calls = Arc::new(Calls::default());
+    let (linked, _) = boot(&service, starter(&calls, &fake, vec![]), &calls, 5);
+    let log = crate::test_log::capture_at(tracing::Level::INFO, || {
+        for t in 6..605 {
+            assert_eq!(tick(&linked, &calls, t), Source::Service, "at {t} s");
+        }
+    });
+    assert!(!log.contains(STILL_NOT_STARTED_LINE), "{log}");
+    assert!(!log.contains("WARN"), "{log}");
+    // Tries at 5, 6, 8, 12, 20, 36, then every 30 s from 66 to 576.
+    assert_eq!(calls.seconds().len(), 24);
+    assert_eq!(calls.seconds().last(), Some(&576));
+    // 600 s after the first failure (at 5 s): the warning, in that round.
+    let log = crate::test_log::capture_at(tracing::Level::INFO, || {
+        assert_eq!(tick(&linked, &calls, 605), Source::Service);
+    });
+    let warned = lines(&log, STILL_NOT_STARTED_LINE);
+    assert_eq!(warned.len(), 1, "{log}");
+    for field in [
+        "WARN",
+        "iface=Ethernet 3",
+        "start_attempts=24",
+        "retrying_for_s=600",
+        "start_failure=\"another failure\"",
+        "error=no Npcap device (try 24)",
+        "start_ms=",
+    ] {
+        assert!(warned[0].contains(field), "{field} in {}", warned[0]);
+    }
+    assert_eq!(log.lines().count(), 1, "{log}");
+    // The tries go on every 30 s, the minute line as before, no second
+    // warning.
+    let log = crate::test_log::capture_at(tracing::Level::INFO, || {
+        for t in 606..=1300 {
+            assert_eq!(tick(&linked, &calls, t), Source::Service, "at {t} s");
+            assert_eq!(waiting(&linked), Some(Waiting::Stopped), "at {t} s");
+        }
+    });
+    assert!(!log.contains(STILL_NOT_STARTED_LINE), "{log}");
+    assert!(!log.contains("WARN"), "{log}");
+    assert_eq!(calls.seconds().len(), 24 + 24);
+    assert_eq!(calls.seconds().last(), Some(&1296));
+    let minute = lines(&log, NOT_IN_USE_LINE);
+    assert_eq!(minute.len(), 12, "{log}");
+    for l in minute {
+        assert!(l.contains("INFO") && l.contains("reason=stopped"), "{l}");
+    }
+    assert!(!linked.has_internal());
+}
+
+/// The warning is due from 600 s after the first failure, to the ns, and
+/// once.
+#[test]
+fn the_tries_escalate_once_from_600_s_after_the_first_failure() {
+    use crate::clock::linked::retry::Retry;
+    let start = Starter::new("Ethernet 3", None, |_, _| unreachable!("not run"));
+    let t0 = 5 * S;
+    let mut r = Retry::new(start, t0, "another failure", "first".into());
+    assert_eq!(ESCALATE_AFTER_S, 600);
+    assert!(!r.escalate(t0 + 600 * S - 1));
+    assert!(!r.escalate(t0 + 599 * S));
+    assert!(r.escalate(t0 + 600 * S));
+    for t in [600, 601, 1200, 100_000] {
+        assert!(!r.escalate(t0 + t * S), "again at {t} s");
+    }
+}
+
 /// A follower started by a try waits a minute of its own before its first
 /// line: never the tries' minute, which would call a fresh follower's 0
 /// windows `no_ptp` in the very round it started (the review of #431: the

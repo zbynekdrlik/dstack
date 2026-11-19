@@ -41,7 +41,9 @@ use super::{
 
 mod retry;
 use retry::Retry;
-pub use retry::{Attempt, RETRY_MAX_S, Starter, attempt, failed, retry_delay_s, start_passes};
+pub use retry::{
+    Attempt, ESCALATE_AFTER_S, RETRY_MAX_S, Starter, attempt, failed, retry_delay_s, start_passes,
+};
 mod waiting;
 pub use waiting::{
     Minute, NOT_IN_USE_EVERY_NS, NOT_IN_USE_LINE, Waiting, grandmaster_text, waiting_of,
@@ -206,6 +208,11 @@ pub const STARTED_LINE: &str = "media clock: dsync's in-process follower started
 /// The follower did not start, for a cause that can pass: it is tried
 /// again (a warning).
 pub const RETRY_LINE: &str = "media clock: dsync's in-process follower did not start yet: the dsync service's clock is used, its start is tried again";
+/// The follower's start, tried again for a cause that can pass, still
+/// fails [`ESCALATE_AFTER_S`] after the first failure (a warning, once;
+/// the tries go on, every [`RETRY_MAX_S`]).
+pub const STILL_NOT_STARTED_LINE: &str = "media clock: dsync's in-process follower has failed to start for 10 minutes: the dsync service's clock is still used, its start is tried again every 30 s";
+const _: () = assert!(ESCALATE_AFTER_S == 600 && RETRY_MAX_S == 30);
 /// The follower did not start, for a cause that cannot pass (a warning).
 pub const NOT_STARTED_LINE: &str =
     "media clock: dsync's in-process follower did not start: the dsync service's clock is used";

@@ -10,8 +10,10 @@
 //! every 30 s. A cause that cannot pass (no Npcap installed, no capability
 //! for port 319, no adapter of that name) stays failed, as before. While
 //! it tries, the follower's status reads `stopped` and the once-a-minute
-//! line names the tries; once it starts, the selector takes it the usual
-//! way (it agrees with the service, or waits to).
+//! line names the tries; still failing [`ESCALATE_AFTER_S`] after the
+//! first failure, one warning says so, and the tries go on for ever. Once
+//! it starts, the selector takes it the usual way (it agrees with the
+//! service, or waits to).
 
 use dsync_ptp::follower::FollowerError;
 
@@ -21,7 +23,7 @@ use tracing::{info, warn};
 
 use super::{
     Absorbing, Follow, Linked, Minute, MonoClock, NOT_IN_USE_LINE, NOT_STARTED_LINE, RETRY_LINE,
-    Report, STARTED_LINE, Source, Waiting, follower_failure, monotonic_ns,
+    Report, STARTED_LINE, STILL_NOT_STARTED_LINE, Source, Waiting, follower_failure, monotonic_ns,
 };
 
 /// What one start of the follower gave.
@@ -125,6 +127,10 @@ pub fn retry_delay_s(failures: u32) -> i64 {
     (1_i64 << failures.saturating_sub(1).min(5)).min(RETRY_MAX_S)
 }
 
+/// How long the tries run before one warning says the cause did not pass,
+/// s (10 minutes; the tries go on).
+pub const ESCALATE_AFTER_S: i64 = 600;
+
 const S: i64 = 1_000_000_000;
 
 /// A follower that did not start yet, for a cause that can pass: the
@@ -144,6 +150,8 @@ pub(super) struct Retry {
     /// How long the last try took, ms (the selector's round waits for it;
     /// 0 for the first, which the start timed itself).
     pub(super) start_ms: u128,
+    /// [`STILL_NOT_STARTED_LINE`] was logged.
+    escalated: bool,
 }
 
 impl Retry {
@@ -158,6 +166,7 @@ impl Retry {
             reason,
             error,
             start_ms: 0,
+            escalated: false,
         }
     }
 
@@ -185,6 +194,16 @@ impl Retry {
     /// Whole seconds since the first failure at `now_ns`.
     pub(super) fn retrying_for_s(&self, now_ns: i64) -> i64 {
         now_ns.saturating_sub(self.first_ns) / S
+    }
+
+    /// Whether [`STILL_NOT_STARTED_LINE`] is due at `now_ns`: the first time
+    /// the tries have run [`ESCALATE_AFTER_S`], and never again.
+    pub(super) fn escalate(&mut self, now_ns: i64) -> bool {
+        if self.escalated || self.retrying_for_s(now_ns) < ESCALATE_AFTER_S {
+            return false;
+        }
+        self.escalated = true;
+        true
     }
 }
 
@@ -308,13 +327,25 @@ impl Linked {
     /// While the follower's start is tried again: [`NOT_IN_USE_LINE`] once
     /// a minute with the reason `stopped`, the interface, the starts so far,
     /// the seconds since the first failed, and the last failure's word,
-    /// text and duration.
+    /// text and duration; once, [`ESCALATE_AFTER_S`] after the first
+    /// failure, [`STILL_NOT_STARTED_LINE`] (a warning) with the same.
     pub(super) fn report_tries(&self, now_ns: i64, source: Source) {
         let mut r = self.lock_report();
         let Report { minute, retry, .. } = &mut *r;
-        let Some(retry) = retry.as_ref() else {
+        let Some(retry) = retry.as_mut() else {
             return;
         };
+        if retry.escalate(now_ns) {
+            warn!(
+                iface = %retry.starter.iface,
+                start_attempts = retry.attempts,
+                retrying_for_s = retry.retrying_for_s(now_ns),
+                start_failure = retry.reason,
+                error = %retry.error,
+                start_ms = retry.start_ms,
+                "{STILL_NOT_STARTED_LINE}"
+            );
+        }
         if let (_, Some(_)) = minute.round(now_ns, 0, true) {
             info!(
                 reason = %Waiting::Stopped.word(),
