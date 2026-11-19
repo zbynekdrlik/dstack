@@ -18,13 +18,13 @@ const P: u64 = 96;
 
 #[test]
 fn the_first_pull_starts_at_the_playout_point_and_reads_nothing() {
-    assert_eq!(due(None, 1_000, 100), Due::Start(1_000));
+    assert_eq!(due(None, 1_000, 100, 100), Due::Start(1_000));
 }
 
 #[test]
 fn a_pull_reads_the_gap_up_to_the_fifo_s_capacity() {
     assert_eq!(
-        due(Some(1_000), 1_480, 1_000),
+        due(Some(1_000), 1_480, 1_000, 1_000),
         Due::Read {
             from: 1_000,
             to: 1_480
@@ -32,7 +32,7 @@ fn a_pull_reads_the_gap_up_to_the_fifo_s_capacity() {
     );
     // Nothing new: an empty read.
     assert_eq!(
-        due(Some(1_000), 1_000, 1_000),
+        due(Some(1_000), 1_000, 1_000, 1_000),
         Due::Read {
             from: 1_000,
             to: 1_000
@@ -40,20 +40,46 @@ fn a_pull_reads_the_gap_up_to_the_fifo_s_capacity() {
     );
     // The whole capacity is still read; one frame more starts again.
     assert_eq!(
-        due(Some(1_000), 2_000, 1_000),
+        due(Some(1_000), 2_000, 1_000, 1_000),
         Due::Read {
             from: 1_000,
             to: 2_000
         }
     );
-    assert_eq!(due(Some(1_000), 2_001, 1_000), Due::Restart(2_001));
+    assert_eq!(due(Some(1_000), 2_001, 1_000, 1_000), Due::Restart(2_001));
 }
 
 #[test]
 fn a_clock_behind_the_last_read_waits_unless_it_went_too_far_back() {
-    assert_eq!(due(Some(1_000), 999, 100), Due::Wait);
-    assert_eq!(due(Some(1_000), 900, 100), Due::Wait);
-    assert_eq!(due(Some(1_000), 899, 100), Due::Restart(899));
+    assert_eq!(due(Some(1_000), 999, 100, 100), Due::Wait);
+    assert_eq!(due(Some(1_000), 900, 100, 100), Due::Wait);
+    assert_eq!(due(Some(1_000), 899, 100, 100), Due::Restart(899));
+}
+
+/// The back room (dstack #440): exactly the room behind waits, one frame
+/// more starts again at the new end, whatever the reach.
+#[test]
+fn a_clock_behind_past_the_back_room_restarts() {
+    assert_eq!(due(Some(1_000), 998, 1_000, 2), Due::Wait);
+    assert_eq!(due(Some(1_000), 997, 1_000, 2), Due::Restart(997));
+    assert_eq!(
+        due(Some(1_000), 1_000, 1_000, 2),
+        Due::Read {
+            from: 1_000,
+            to: 1_000
+        }
+    );
+}
+
+/// A handover's 30 µs in samples, rounded up.
+#[test]
+fn the_back_room_is_a_handover_s_step_rounded_up_to_samples() {
+    // 1.323, 1.44, 2.88, 3.0 and 5.76 samples.
+    assert_eq!(back_room(44_100), 2);
+    assert_eq!(back_room(48_000), 2);
+    assert_eq!(back_room(96_000), 3);
+    assert_eq!(back_room(100_000), 3);
+    assert_eq!(back_room(192_000), 6);
 }
 
 #[test]

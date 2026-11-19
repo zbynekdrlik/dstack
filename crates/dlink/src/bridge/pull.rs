@@ -39,9 +39,14 @@
 //!
 //! The first call reads nothing (no catch-up, as the pump's bootstrap) and
 //! the player primes from there. A gap past [`reach`] (the callback
-//! stopped, a clock step) or a clock gone back as far starts again at now
-//! (counted, [`PullStats::restarts`]); a smaller step back waits for the
-//! clock to come back to where it stopped. While the media clock is not
+//! stopped, a clock step) starts again at now (counted,
+//! [`PullStats::restarts`]). So does a clock further back than
+//! [`back_room`] (dstack #440, ROZHODNUTÉ 19.11): a read leaves the
+//! position at the playout point, so only a clock gone back or a raised P
+//! puts it behind, and a wait for the clock to come back would leave the
+//! FIFO unfed for the whole step (a raised P restarts too, as the pump
+//! re-bootstraps at a new P); a step within the room (a clock handover's)
+//! is waited out. While the media clock is not
 //! ready the sockets are drained (the packets counted unplaced) and the
 //! next ready call starts afresh.
 //!
@@ -61,6 +66,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use dstack::clock::linked::HANDOVER_NS;
 use dstack::clock::{PtpClock, to_samples};
 use dstack::media::ring::SLOTS;
 use dstack::media::rx::{Intake, RxShared};
@@ -78,6 +84,16 @@ pub use shared::SharedPull;
 /// ring 65 536).
 pub fn reach(capacity: usize) -> usize {
     capacity.min(SLOTS / 2)
+}
+
+/// How far behind its position a pull at `rate` waits for the clock
+/// (dstack #440): a clock handover's step ([`HANDOVER_NS`], 30 µs: the
+/// clock's only move back that comes with no new epoch) in samples,
+/// rounded up (two reads that far apart differ by at most that many
+/// samples). Further back is a clock gone back: the pull starts again.
+pub fn back_room(rate: u32) -> u64 {
+    let room = u128::from(HANDOVER_NS.unsigned_abs()) * u128::from(rate);
+    u64::try_from(room.div_ceil(1_000_000_000)).unwrap_or(u64::MAX)
 }
 
 /// The most drains one [`RxPull::drain_idle`] makes to empty the sockets
@@ -135,7 +151,8 @@ pub enum Due {
     Start(u64),
     /// Read positions `from` to `to` (`to` excluded).
     Read { from: u64, to: u64 },
-    /// The clock is behind where the last read ended: nothing to read.
+    /// The clock is behind where the last read ended, within the back
+    /// room: nothing to read.
     Wait,
     /// Too far from the last read either way: start again at `at`.
     Restart(u64),
@@ -143,9 +160,11 @@ pub enum Due {
 
 /// What a pull reads when the last one ended at `next` (`None`: none yet)
 /// and the positions due end at `end` (media now less P), reading at most
-/// `max` frames at once ([`reach`]): the gap up to `max` is
-/// read, a gap past it (or a clock as far back) starts again at `end`.
-pub fn due(next: Option<u64>, end: u64, max: u64) -> Due {
+/// `max` frames at once ([`reach`]) and waiting at most `back` frames
+/// ([`back_room`]): the gap up to `max` is read, a gap past it starts
+/// again at `end`; an `end` up to `back` behind waits, further behind (a
+/// clock gone back, a raised P) starts again at `end` (dstack #440).
+pub fn due(next: Option<u64>, end: u64, max: u64, back: u64) -> Due {
     match next {
         None => Due::Start(end),
         Some(n) if end >= n => {
@@ -156,7 +175,7 @@ pub fn due(next: Option<u64>, end: u64, max: u64) -> Due {
             }
         }
         Some(n) => {
-            if n - end > max {
+            if n - end > back {
                 Due::Restart(end)
             } else {
                 Due::Wait
@@ -210,6 +229,8 @@ pub struct RxPull {
     scratch: Vec<i32>,
     /// [`reach`] of the FIFO: the most frames a pull reads.
     span: usize,
+    /// [`back_room`] at the rate: the most frames a pull waits behind.
+    back: u64,
     /// Where the last read ended (`None`: none yet, or the clock was not
     /// ready).
     next: Option<u64>,
@@ -272,6 +293,7 @@ impl RxPull {
         Ok(RxPull {
             scratch: vec![0; channels.len() * span],
             span,
+            back: back_room(rate),
             intake,
             clock,
             rx,
@@ -313,7 +335,7 @@ impl RxPull {
         self.intake.drain_into_rings(Some(ns));
         let playout = self.rx.playout().unwrap_or(self.playout);
         let end = to_samples(ns, self.rate).saturating_sub(playout);
-        match due(self.next, end, self.span as u64) {
+        match due(self.next, end, self.span as u64, self.back) {
             Due::Start(at) => {
                 self.next = Some(at);
                 0
