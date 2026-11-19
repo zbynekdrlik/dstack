@@ -493,13 +493,10 @@ pub(crate) fn prepare_on(
         // Seeded with the service's frequency word when it is locked and
         // settled (dstack #68): settled in 37 s instead of 70.
         let seed = rt.block_on(crate::clock::linked::service_seed(crate::clock::DSYNC));
-        // A start that fails for a cause that can pass (no Npcap device
-        // for the adapter yet at boot) is tried again (dstack #431), each
-        // try seeded from the poller's last read of the service (the boot's
-        // seed is mostly none: the service still acquires).
-        let start = crate::clock::linked::Starter::dsync(ifa.name.clone(), seed)
-            .reseeded_from(Arc::clone(&stats));
-        Arc::new(Linked::start(Arc::clone(&mono), start))
+        Arc::new(Linked::start(
+            Arc::clone(&mono),
+            linked_starter(&ifa.name, seed, &stats),
+        ))
     });
     let ptp = crate::clock::skewed::media_ptp(
         source,
@@ -547,6 +544,19 @@ pub(crate) fn prepare_on(
         #[cfg(unix)]
         listener,
     })
+}
+
+/// dsync's follower on `iface`, seeded with the boot's `seed`. A start that
+/// fails for a cause that can pass (no Npcap device for the adapter yet at
+/// boot) is tried again (dstack #431), each try seeded from the poller's
+/// last read of the service in `stats` (the boot's seed is mostly none: the
+/// service still acquires).
+fn linked_starter(
+    iface: &str,
+    seed: Option<i32>,
+    stats: &Arc<ClockStats>,
+) -> crate::clock::linked::Starter {
+    crate::clock::linked::Starter::dsync(iface, seed).reseeded_from(Arc::clone(stats))
 }
 
 /// What the device's thread and its host share.

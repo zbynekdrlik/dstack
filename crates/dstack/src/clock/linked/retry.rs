@@ -56,7 +56,7 @@ type Run = Box<dyn FnMut(&str, Option<i32>) -> Attempt + Send>;
 /// ([`Starter::reseeded_from`]).
 pub struct Starter {
     pub(super) iface: String,
-    pub(super) seed_ppb: Option<i32>,
+    pub(crate) seed_ppb: Option<i32>,
     run: Run,
     /// The service as its poller reads it, for each try's seed.
     service: Option<Arc<ClockStats>>,
@@ -86,7 +86,7 @@ impl Starter {
 
     /// Before a try: the seed from the service's last poll ([`seed_now`]),
     /// when this starter has the poll.
-    pub(super) fn reseed(&mut self) {
+    pub(crate) fn reseed(&mut self) {
         if let Some(stats) = &self.service {
             self.seed_ppb = seed_now(&stats.service(), self.seed_ppb);
         }
@@ -119,7 +119,12 @@ pub fn attempt(iface: &str, seed_ppb: Option<i32>) -> Attempt {
 /// A try's seed from the service as its poller read it last (`read`): the
 /// last poll's reply when that poll had one ([`seed_of`]: its word when
 /// locked and settled, else none); `held` (the seed so far) before the
-/// first poll and after a poll without a reply.
+/// first poll and after a poll without a reply. A reply not locked and
+/// settled drops a held seed on purpose: the service has no word to trust
+/// at that moment, so the follower starts unseeded, as dsync's own boot
+/// does. The stored reply is the last poll's exactly when that poll's
+/// outcome is not `NoReply` (`Poller::once` gives a reading with every
+/// other outcome; [`ServiceRead::polled`] keeps an older one otherwise).
 pub fn seed_now(read: &ServiceRead, held: Option<i32>) -> Option<i32> {
     match (read.outcome, read.reply) {
         (Some(outcome), Some((reply, _))) if outcome != PollOutcome::NoReply => seed_of(&reply),
@@ -381,6 +386,7 @@ impl Linked {
                 start_failure = retry.reason,
                 error = %retry.error,
                 start_ms = retry.start_ms,
+                seed_ppb = ?retry.starter.seed_ppb,
                 "{STILL_NOT_STARTED_LINE}"
             );
         }

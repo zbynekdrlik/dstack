@@ -238,6 +238,7 @@ fn a_start_still_failing_after_10_minutes_warns_once_and_is_tried_on() {
         "start_failure=\"another failure\"",
         "error=no Npcap device (try 24)",
         "start_ms=",
+        "seed_ppb=Some(-4671)",
     ] {
         assert!(warned[0].contains(field), "{field} in {}", warned[0]);
     }
@@ -393,6 +394,13 @@ fn a_try_that_fails_for_a_lasting_cause_ends_the_tries() {
     }
     assert!(!log.contains(NOT_IN_USE_LINE), "{log}");
     assert!(!linked.has_internal());
+    // Ended tries never escalate: no warning 600 s after the first failure.
+    let log = crate::test_log::capture_at(tracing::Level::INFO, || {
+        for t in 201..=700 {
+            assert_eq!(tick(&linked, &calls, t), Source::Service, "at {t} s");
+        }
+    });
+    assert_eq!(log, "");
 }
 
 /// dsync-ptp v1.33.1's kinds: Npcap not installed, port 319 refused and no
