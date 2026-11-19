@@ -71,8 +71,11 @@ LICENSE-APACHE and LICENSE-MIT), copied unchanged except:
   binds its IPv4 socket to the device's address instead of the wildcard,
   so every send leaves from that address (on Windows a wildcard socket's
   multicast leaves from the interface's preferred source). Windows delivers
-  the group to a joined address-bound socket, Linux does not. Nothing else
-  changes: the same joins, IP check and sends. `new`/`new_with_port`/
+  the group to a joined address-bound socket, Linux does not. The bound
+  socket is opened in `start` on the caller's thread and handed to the
+  daemon's, so a failed bind is the constructor's error (the wildcard's
+  stays opened on the thread, a failure logged at debug, as upstream).
+  Nothing else changes: the same joins, IP check and sends. `new`/`new_with_port`/
   `new_tapped` bind `0.0.0.0` as before.
 
 - `Cargo.toml`: an empty `[workspace]` table, so cargo never searches above

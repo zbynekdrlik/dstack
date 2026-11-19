@@ -104,9 +104,10 @@ impl Heard {
 }
 
 /// Whether the OS hands a group datagram to a socket bound to a unicast
-/// address that joined the group: Windows does, Linux does not (dstack
-/// #444).
-pub const GROUP_TO_BOUND_SOCKET: bool = !cfg!(target_os = "linux");
+/// address that joined the group: Windows does (mbc, #442), Linux does not
+/// (dev1, dstack #444); assumed not on any other OS, where it was never
+/// measured (BSD stacks deliver only to the wildcard or the group).
+pub const GROUP_TO_BOUND_SOCKET: bool = cfg!(windows);
 
 /// The warning for a daemon bound to its address (`mdns_bind_address`),
 /// given whether the OS hands such a socket the group

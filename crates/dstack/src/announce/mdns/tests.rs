@@ -332,12 +332,40 @@ fn heard_from_within(l: &Listener, me: SocketAddrV4, wait: Duration) -> Vec<Vec<
     out
 }
 
+/// The local addresses (`/proc/net/udp`'s hex, `0100007F` for 127.0.0.1)
+/// of this process's sockets on UDP port 5353.
+#[cfg(target_os = "linux")]
+fn own_5353_sockets() -> Vec<String> {
+    let mut ours = std::collections::HashSet::new();
+    for fd in std::fs::read_dir("/proc/self/fd").unwrap().flatten() {
+        if let Ok(link) = std::fs::read_link(fd.path())
+            && let Some(inode) = link
+                .to_string_lossy()
+                .strip_prefix("socket:[")
+                .and_then(|s| s.strip_suffix(']'))
+        {
+            ours.insert(inode.to_string());
+        }
+    }
+    std::fs::read_to_string("/proc/net/udp")
+        .unwrap()
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            let cols: Vec<&str> = line.split_whitespace().collect();
+            let (addr, port) = cols.get(1)?.split_once(':')?;
+            (port == "14E9" && ours.contains(*cols.get(9)?)).then(|| addr.to_string())
+        })
+        .collect()
+}
+
 /// The #444 trial on loopback: the daemon's socket bound to the address
-/// (`mdns_bind_address`) hears a unicast query to `<address>:5353`,
-/// answers it from that address and port, and hears the group only where
-/// the OS delivers it to an address-bound socket (Windows; Linux never).
-/// The device then needs no responder of its own. A later device on the
-/// address shares it whatever it asks.
+/// (`mdns_bind_address`; on Linux read in `/proc/net/udp`) hears a unicast
+/// query to `<address>:5353`, answers it (from `<address>:5353`, which on
+/// loopback a wildcard socket's reply also comes from), and hears the
+/// group only where the OS delivers it to an address-bound socket
+/// (Windows; Linux never). The device then needs no responder of its own.
+/// A later device on the address shares it whatever it asks.
 #[test]
 fn a_daemon_bound_to_its_address_hears_unicast_and_answers_from_it() {
     use crate::announce::{CHAN_SERVICE, ServiceRecord};
@@ -354,6 +382,13 @@ fn a_daemon_bound_to_its_address_hears_unicast_and_answers_from_it() {
     assert!(
         !mdns.own_responder_needed(),
         "the bound socket answers itself"
+    );
+    // A bound socket is opened before `shared_bound` returns.
+    #[cfg(target_os = "linux")]
+    assert!(
+        own_5353_sockets().iter().any(|a| a == "0100007F"),
+        "bound to 127.0.0.1:5353: {:?}",
+        own_5353_sockets()
     );
     assert_eq!(
         warns.contains("hears no group query"),
@@ -450,4 +485,28 @@ fn the_default_daemon_is_unbound_and_needs_the_responder() {
     let mdns = Mdns::shared(Ipv4Addr::LOCALHOST).unwrap();
     assert!(!mdns.bound());
     assert!(mdns.own_responder_needed());
+    // Its thread opened its socket before it ran a command: none of this
+    // process's 5353 sockets is bound to 127.0.0.1 (no other unit test
+    // binds 127.0.0.1:5353).
+    mdns.settle(GOODBYE_WAIT).expect("the daemon runs");
+    #[cfg(target_os = "linux")]
+    assert!(
+        !own_5353_sockets().iter().any(|a| a == "0100007F"),
+        "the wildcard's: {:?}",
+        own_5353_sockets()
+    );
+}
+
+/// A bound socket whose bind fails (an address not on this host) is the
+/// call's error: no daemon runs without a socket (#444's review).
+#[test]
+fn a_bound_daemon_whose_bind_fails_is_an_error() {
+    // TEST-NET-1: never on a host; the bind fails before anything is sent.
+    let nowhere = Ipv4Addr::new(192, 0, 2, 1);
+    let e = Mdns::shared_bound(nowhere, true)
+        .err()
+        .expect("no daemon without its socket");
+    assert!(e.contains("the mDNS daemon"), "{e}");
+    assert!(e.contains("192.0.2.1:5353"), "{e}");
+    assert!(Mdns::listen_on(nowhere, Heard::All).is_none(), "none kept");
 }
