@@ -1400,11 +1400,7 @@ fn a_re_anchor_moves_a_schedule_up_to_its_latency_and_a_packet_past_now() {
     assert_eq!(s.re_anchor(Some(-320), now), Shift::Moved);
     assert_eq!(s.next, now - 352);
     let mut s = fresh();
-    assert_eq!(
-        s.re_anchor(Some(16), now),
-        Shift::Restarted,
-        "off its grid"
-    );
+    assert_eq!(s.re_anchor(Some(16), now), Shift::Restarted, "off its grid");
     assert_eq!((s.next, s.take_rebootstraps()), (now + 32, 1));
     let mut s = fresh();
     assert_eq!(s.re_anchor(None, now), Shift::Restarted);
