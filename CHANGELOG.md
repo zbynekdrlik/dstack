@@ -4,6 +4,7 @@
 
 - **API (songplayer#324): the control-port slots move into dlink.** `dlink::slots` (slot `k` = ARC `4440 + k`, CMC `8800 + k`, flows `4455 + k`, process id `k`, the first slot whose ports are free on the address and then on the wildcard; `SLOTS`, `slot`, `first_free`, `binds_with`, `pick`, `pick_when_there`) was `dstack_endpoint::slots`, which pulls cpal. An app that embeds dlink alone (SongPlayer's native Dante output) now uses it instead of a copy. `dstack_endpoint::slots` stays as a re-export, so dsend, dlisten and their consumers are unchanged. A pure move, tests included.
   - **No latency change.**
+- **Dependency (#435): dsync-ptp v1.35.13 -> v1.35.14.** dsync#204's last part for the in-process follower: the excursion boost decides on a plain-PI mirror, so two followers on one PC stay within 82 ns at a thermal ramp's release (was 7.25 µs), and thermal and 6 ppm / 5 min ramps on 1 s windows stay under 50 µs. No API change. **No latency change.**
 
 ## 0.6.190
 
