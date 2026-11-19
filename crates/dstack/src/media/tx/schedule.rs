@@ -100,14 +100,16 @@ impl Schedule {
     /// move would leave it the step behind and start it again, dstack
     /// #440); else started again, counted. It spends the mark either way.
     pub fn re_anchor(&mut self, shift: Option<i64>, now: u64) -> Shift {
-        let back = std::mem::take(&mut self.back);
+        // A marked schedule is already at the new time, whatever the grid
+        // of the step back (fpp 64 on a block of 32 takes half the steps
+        // off its grid).
+        if std::mem::take(&mut self.back) && shift.is_some_and(i64::is_negative) {
+            return Shift::Kept;
+        }
         let Some(by) = shift.filter(|by| by.rem_euclid(self.fpp as i64) == 0) else {
             self.realign(now);
             return Shift::Restarted;
         };
-        if back && by.is_negative() {
-            return Shift::Kept;
-        }
         let next = self.next.wrapping_add_signed(by);
         // The room: the latency, or the block when larger (the shift is on
         // the block grid, so its rest can leave the stamp up to half a block

@@ -308,14 +308,15 @@ impl Blocks {
     /// [`Blocks::rebootstrap`] count) are returned with it. It spends the
     /// mark either way.
     pub fn re_anchor(&mut self, shift: Option<i64>, now: u64) -> (Shift, u64) {
-        let back = std::mem::take(&mut self.back);
+        // A marked schedule is already at the new time, whatever the grid
+        // of the step back.
+        if std::mem::take(&mut self.back) && shift.is_some_and(i64::is_negative) {
+            return (Shift::Kept, 0);
+        }
         let block = self.timing.block;
         let Some(by) = shift.filter(|by| by.rem_euclid(block as i64) == 0) else {
             return (Shift::Restarted, self.rebootstrap(now));
         };
-        if back && by.is_negative() {
-            return (Shift::Kept, 0);
-        }
         let start = self.start.wrapping_add_signed(by);
         let due = start + block + self.timing.playout;
         if due > now.saturating_add(self.timing.margin).saturating_add(block) {
@@ -582,6 +583,10 @@ impl<P: Process> Pump<P> {
             Some(mut b) if self.epoch != Some(anchor.epoch) => {
                 let step = self.epoch.and_then(|e| anchor.step_from(e));
                 let shift = step.map(|_| self.engine_shift.wrapping_sub(before));
+                // Started again as a clock gone back the pass before: a
+                // step back keeps it (logged, so a field log tells this
+                // keep from one past the room).
+                let marked = b.back;
                 let (outcome, skipped) = b.re_anchor(shift, now);
                 if outcome == Shift::Restarted {
                     self.stats.rebootstrapped(skipped, Cause::Reanchor);
@@ -598,6 +603,7 @@ impl<P: Process> Pump<P> {
                     shift = ?shift,
                     engine_shift = self.engine_shift,
                     ?outcome,
+                    marked,
                     skipped,
                     "{}",
                     crate::media::tx::shift::PUMP_LINE

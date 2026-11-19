@@ -410,8 +410,8 @@ impl TxFill {
                 Due::Run { start, .. } => self.block(start, engine, shift),
                 Due::Wait { .. } => break,
                 // `next` started it again as `fresh` would (its timing is
-                // the schedule's), a clock gone back with the mark the
-                // next pass's re-anchor reads (dstack #440).
+                // the schedule's): a lag, or a clock gone back, whose mark
+                // the next pass's re-anchor reads (dstack #440).
                 Due::Rebootstrap { skipped, .. } => {
                     self.stats.rebootstrapped(skipped);
                     self.discontinuity = true;

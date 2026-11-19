@@ -132,6 +132,8 @@ impl Transmitter {
             if let Some(fill) = self.fill.as_mut() {
                 fill.idle();
             }
+            // A pass all the same: the lanes' clock-back marks go.
+            self.unmark();
             return;
         };
         let now = send_clock(now_ns, self.rate, self.margin_ns);
