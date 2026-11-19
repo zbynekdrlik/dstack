@@ -353,7 +353,7 @@ impl<D: Device> Runner<D> {
             Ok(l) => {
                 let waiting = self.waiting_for_clock || proving;
                 if waiting {
-                    debug!(driver = %self.driver, proving, "asio: opened the driver again - still waiting for a usable clock");
+                    info!(driver = %self.driver, proving, "asio: opened the driver again - still waiting for a usable clock");
                 } else {
                     info!(
                         driver = %self.driver,
