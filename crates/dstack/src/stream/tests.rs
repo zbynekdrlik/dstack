@@ -1669,6 +1669,7 @@ fn a_seamless_handover_step_neither_rebootstraps_nor_loses_a_block() {
 
 mod after_send;
 mod causes;
+mod clock_back;
 mod drain;
 mod play_at;
 mod re_anchor_sleep;
