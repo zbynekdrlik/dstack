@@ -313,6 +313,31 @@ fn a_gap_past_the_fifo_starts_again_and_an_unready_clock_starts_afresh() {
     assert_eq!(r.pull.stats().restarts(), 1);
 }
 
+/// dstack #440 on the pull: the media clock a step back (100 ms, 400 ms,
+/// both within the FIFO's reach) left the pull waiting the whole step out
+/// for the clock to come back to where the last read ended, the consumer's
+/// FIFO unfed for that long. A wait that far ahead is the clock gone back
+/// (the clock-back rule of `Blocks::next`, ROZHODNUTÉ 19.11): the pull
+/// starts again at once at the new playout point, counted, and reads on
+/// from there.
+#[test]
+fn a_clock_a_step_back_starts_the_pull_again_at_once() {
+    for back in [4_800u64, 19_200] {
+        let mut r = rig(0);
+        assert!(back < r.fifo.capacity() as u64, "{back} within the reach");
+        assert_eq!(r.pull.pull(), 0);
+        r.clock.advance(ns_of(480, RATE));
+        assert_eq!(r.pull.pull(), 480, "{back} back");
+        assert!(r.fifo.pop_planar(&mut [0.0; 960], 480));
+        r.clock
+            .re_anchor(-i64::try_from(ns_of(back, RATE)).unwrap());
+        assert_eq!(r.pull.pull(), 0, "{back} back: nothing read at the step");
+        assert_eq!(r.pull.stats().restarts(), 1, "{back} back");
+        r.clock.advance(ns_of(480, RATE));
+        assert_eq!(r.pull.pull(), 480, "{back} back: on from the new time");
+    }
+}
+
 #[test]
 fn the_device_s_published_latency_moves_the_playout_point() {
     let mut r = rig(0);
