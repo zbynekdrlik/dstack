@@ -4648,7 +4648,11 @@ impl Zeroconf {
     }
 
     fn exec_command_register_resend(&mut self, fullname: String, if_index: u32) -> MyResult<()> {
-        let Some(info) = self.my_services.get_mut(&fullname) else {
+        // dstack #450: `my_services` is keyed in lower case (`register_service`),
+        // and a registration's resend carries the original-case name: a name
+        // with upper case (every Dante `TX 1@...`) was never found, so it was
+        // announced once, not twice (RFC 6762 section 8.3).
+        let Some(info) = self.my_services.get_mut(&fullname.to_lowercase()) else {
             trace!("announce: cannot find such service {}", &fullname);
             return Ok(());
         };
@@ -4674,7 +4678,9 @@ impl Zeroconf {
 
         if announced_v4 || announced_v6 {
             let hostname = dns_registry.resolve_name(info.get_hostname());
-            let service_name = dns_registry.resolve_name(&fullname).to_string();
+            // `name_changes` is keyed by the record's original name, never
+            // the lower-case key (the reopen's resends pass that key).
+            let service_name = dns_registry.resolve_name(info.get_fullname()).to_string();
 
             debug!("resend: announce service {service_name} on {}", intf.name);
 

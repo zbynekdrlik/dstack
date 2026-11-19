@@ -101,12 +101,19 @@ LICENSE-APACHE and LICENSE-MIT), copied unchanged except:
   cache). dstack asks it from its own watch of the address
   (`crates/dstack/src/announce/mdns.rs`,
   `a_bound_daemon_opens_its_socket_again_after_its_address_came_back_with_its_records_and_taps`).
-  Known upstream bug left as it is: a registration's second announcement
-  (`Command::RegisterResend` from `send_unsolicited_response` and the
-  probing handler) carries the original-case full name, while
-  `my_services` is keyed in lower case, so a record whose name has an
-  upper-case letter (every Dante `TX 1@...`) is announced once, not twice
-  (RFC 6762 §8.3), and `register-resend` does not count it.
+
+- `src/service_daemon.rs` `exec_command_register_resend`: the second
+  announcement looks its record up by the lower-case name. A
+  registration's resend (`Command::RegisterResend` from
+  `send_unsolicited_response` and the probing handler) carries the
+  original-case full name, while `my_services` is keyed in lower case, so
+  upstream announced a record whose name has an upper-case letter (every
+  Dante `TX 1@...`) once, not twice (RFC 6762 §8.3), and `register-resend`
+  did not count it (dstack #450,
+  `announce::mdns::tests::every_record_is_announced_twice_also_one_whose_name_has_upper_case`).
+  The announced name is still resolved from the record's own original-case
+  name (`name_changes` is keyed by it), never from the lower-case key. The
+  cost: one more multicast per record at registration, once.
 
 - `src/service_daemon.rs` `handle_read`, `handle_query`, `send_response`
   (and the one unit test calling `handle_query`): a query sent to the
