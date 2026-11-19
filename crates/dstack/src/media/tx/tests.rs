@@ -1380,31 +1380,34 @@ fn a_time_read_before_its_epoch_restarts_once_and_is_not_shifted_again() {
 #[test]
 fn a_re_anchor_moves_a_schedule_up_to_its_latency_and_a_packet_past_now() {
     let now = 1_000_000;
-    let fresh = || Schedule::bootstrap(now - 64, 32, 96);
+    let fresh = || Schedule {
+        block: 32,
+        ..Schedule::bootstrap(now - 64, 32, 96)
+    };
     // Bootstrapped at now − 64: next = now − 32.
     assert_eq!(fresh().next, now - 32);
     let mut s = fresh();
-    assert_eq!(s.re_anchor(Some(160), now, 32), Shift::Moved);
+    assert_eq!(s.re_anchor(Some(160), now), Shift::Moved);
     assert_eq!((s.next, s.take_rebootstraps()), (now + 128, 0));
     let mut s = fresh();
     assert_eq!(
-        s.re_anchor(Some(192), now, 32),
+        s.re_anchor(Some(192), now),
         Shift::Kept,
         "now + 160 is past it"
     );
     assert_eq!((s.next, s.take_rebootstraps()), (now - 32, 0));
     let mut s = fresh();
-    assert_eq!(s.re_anchor(Some(-320), now, 32), Shift::Moved);
+    assert_eq!(s.re_anchor(Some(-320), now), Shift::Moved);
     assert_eq!(s.next, now - 352);
     let mut s = fresh();
     assert_eq!(
-        s.re_anchor(Some(16), now, 32),
+        s.re_anchor(Some(16), now),
         Shift::Restarted,
         "off its grid"
     );
     assert_eq!((s.next, s.take_rebootstraps()), (now + 32, 1));
     let mut s = fresh();
-    assert_eq!(s.re_anchor(None, now, 32), Shift::Restarted);
+    assert_eq!(s.re_anchor(None, now), Shift::Restarted);
     assert_eq!(s.take_rebootstraps(), 1);
 }
 
@@ -1415,12 +1418,15 @@ fn a_re_anchor_moves_a_schedule_up_to_its_latency_and_a_packet_past_now() {
 fn a_re_anchor_s_room_is_at_least_the_block() {
     let now = 1_000_000;
     // fpp 32, a latency of 24 samples (0.25 ms at 96 kHz), block 64.
-    let fresh = || Schedule::bootstrap(now - 64, 32, 24);
+    let fresh = || Schedule {
+        block: 64,
+        ..Schedule::bootstrap(now - 64, 32, 24)
+    };
     let mut s = fresh();
-    assert_eq!(s.re_anchor(Some(128), now, 64), Shift::Moved);
+    assert_eq!(s.re_anchor(Some(128), now), Shift::Moved);
     assert_eq!(s.next, now + 96);
     let mut s = fresh();
-    assert_eq!(s.re_anchor(Some(160), now, 64), Shift::Kept);
+    assert_eq!(s.re_anchor(Some(160), now), Shift::Kept);
     assert_eq!(s.next, now - 32);
 }
 

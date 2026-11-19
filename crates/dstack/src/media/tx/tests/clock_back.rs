@@ -103,7 +103,7 @@ fn a_schedule_moved_to_the_edge_of_its_room_waits() {
         block: 64,
         ..Schedule::bootstrap(now - 64, 32, 24)
     };
-    assert_eq!(s.re_anchor(Some(128), now, 64), Shift::Moved);
+    assert_eq!(s.re_anchor(Some(128), now), Shift::Moved);
     assert_eq!(s.next, now + 96);
     assert_eq!(s.due(now), None);
     assert_eq!(s.take_rebootstraps(), 0);

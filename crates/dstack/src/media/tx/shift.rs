@@ -129,10 +129,9 @@ impl Transmitter {
         if let Some(fill) = self.fill.as_mut() {
             fill.re_anchor(shift, media);
         }
-        let block = self.shared.cfg.block;
         let mut counts = [0u32; 3];
         for schedule in self.lanes.iter_mut().filter_map(|l| l.schedule.as_mut()) {
-            counts[schedule.re_anchor(shift, now, block) as usize] += 1;
+            counts[schedule.re_anchor(shift, now) as usize] += 1;
         }
         let [moved, kept, restarted] = counts;
         info!(

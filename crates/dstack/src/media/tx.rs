@@ -33,9 +33,10 @@
 //!   the source's samples T…T+fpp−1 and goes out once the clock has passed
 //!   T + fpp by the device's `tx_margin_ns` ([`TX_MARGIN_NS`] unless the
 //!   config sets it); the first stamp is a multiple of fpp, a lag past the
-//!   device's advertised latency or a next stamp further ahead of the clock
-//!   than that latency (at least the block) and a packet (the clock went
-//!   back, [`Schedule::ahead_limit`], dstack #440) starts it again
+//!   flow's bound (our advertised latency, or the receiver's when longer)
+//!   or a next stamp further ahead of the clock than that bound (at least
+//!   the block) and a packet (the clock went back,
+//!   [`Schedule::ahead_limit`], dstack #440) starts it again
 //!   (counted), and so does a re-anchor of the clock. A
 //!   flow sends exactly rate / fpp packets a second and never more.
 //! - [`Transmitter`] and [`spawn`]: the TX thread. Nothing leaves before the

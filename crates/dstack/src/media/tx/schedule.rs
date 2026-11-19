@@ -81,7 +81,8 @@ impl Schedule {
 
     /// A re-anchor of the clock at media time `now` (after it) with the
     /// device's `shift` ([`shift`](super::shift), on the grid of the
-    /// device's `block`; `None`: the step is unknown): moved by it when it is a whole number
+    /// device's block, [`Schedule::block`]; `None`: the step is unknown):
+    /// moved by it when it is a whole number
     /// of packets and leaves the next stamp at most the latency (at least
     /// the block) and a packet past now (not counted; a rest of the
     /// step off the grid is a lag or a wait of at most half a block, which
@@ -89,7 +90,7 @@ impl Schedule {
     /// further (the pass before read the new time with the old
     /// epoch and already started it again there); else started again,
     /// counted.
-    pub fn re_anchor(&mut self, shift: Option<i64>, now: u64, block: u64) -> Shift {
+    pub fn re_anchor(&mut self, shift: Option<i64>, now: u64) -> Shift {
         let Some(by) = shift.filter(|by| by.rem_euclid(self.fpp as i64) == 0) else {
             self.realign(now);
             return Shift::Restarted;
@@ -100,7 +101,7 @@ impl Schedule {
         // ahead; a latency set apart from the block can be smaller), and a
         // packet. A pass that restarted at the new time lands a whole step
         // further.
-        let room = self.max_lag.max(block).saturating_add(self.fpp);
+        let room = self.max_lag.max(self.block).saturating_add(self.fpp);
         if next > now.saturating_add(room) {
             return Shift::Kept;
         }
