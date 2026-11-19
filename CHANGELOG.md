@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.195
+
+- **Feature (#444, step 1's preparation): a trial switch that binds the mDNS daemon to the device's address.** A device config's `mdns_bind_address = true` (off when left out; off, nothing changes) opens the process's mDNS daemon on the address with its one socket bound to `<address>:5353` instead of `0.0.0.0:5353`, so every answer leaves from the address, and a Windows device then starts no responder of its own (Dante Controller reads each answer once). It exists for a field trial on mbc before any default changes (the plan on #444).
+  - Linux delivers no group datagram to a socket bound to a unicast address, so there the bound daemon hears no group query (browsers, Dante Controller, the directory's direct queries): never set it on Linux; the start warns.
+  - The process's first device on an address decides the socket; a later one asking the other form shares it, with a warning.
+  - New: `DeviceConfig::mdns_bind_address`, `announce::mdns::Mdns::shared_bound`, `Mdns::bound`, `Mdns::own_responder_needed`, `announce::mdns::GROUP_TO_BOUND_SOCKET`, `announce::mdns::bound_note`; vendored mdns-sd: `ServiceDaemon::new_tapped_on`. `Mdns::shared` is unchanged (the wildcard's socket).
+  - **No latency change.**
+
 ## 0.6.194
 
 - **Feature (#442, dasio#190, dsg's late SoundGrid callbacks): one mDNS receive socket per process and address.** On dsg one mDNS datagram was handed at DPC level to three dstack sockets (`dstack-mdns-own`, `dstack-mdns-meter`, `mDNS_daemon`) plus Windows' Dnscache, 0.1-0.8 ms of CPU 0 each; a 791 µs run delayed SoundGrid's receive DPC. Details:

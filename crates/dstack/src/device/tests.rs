@@ -2082,6 +2082,29 @@ fn the_no_yield_tail_is_off_by_default_and_taken() {
     );
 }
 
+/// The #444 trial switch: off when left out (the wildcard mDNS socket and,
+/// on Windows, the device's own responder), on only when set true.
+#[test]
+fn the_mdns_bind_address_trial_is_off_by_default_and_taken() {
+    assert!(
+        !DeviceConfig::from_toml(TEST_DEVICE)
+            .unwrap()
+            .mdns_bind_address
+    );
+    for on in [true, false] {
+        let text = format!("{TEST_DEVICE}\nmdns_bind_address = {on}\n");
+        assert_eq!(
+            DeviceConfig::from_toml(&text).unwrap().mdns_bind_address,
+            on
+        );
+    }
+    let text = format!("{TEST_DEVICE}\nmdns_bind_address = \"yes\"\n");
+    assert!(
+        DeviceConfig::from_toml(&text).is_err(),
+        "a string is no switch"
+    );
+}
+
 /// obs's review of v0.6.26: Windows pins a thread only within the first
 /// processor group (64 CPUs), so a config that names a CPU from 64 on
 /// passed the check there and was then never pinned. The limit is the
