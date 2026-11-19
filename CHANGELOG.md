@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.189
+
+- **Dependency (#435): dsync-ptp moves from v1.33.1 to v1.35.13.** For every device on the in-process follower (the default): dsync#204 tracks a thermal frequency ramp fast enough (resolume-pp, 18.11.2026: ~6 ppm in minutes after its GPU load started; dsync's simulation ~100 -> ~35 µs), and dsync#206 handles the Windows boot race in dsync-ptp too (dstack's own retry, #431, stays). No API change for dstack's consumers. **No latency change.**
+- Test: `daemon::media::tests::the_fixed_*_ports_are_bound_before_any_port_the_os_chooses` skips a base that another test thread's wildcard socket took between its probe and the start (PR #437's coverage run); its expectation is unchanged.
+
 ## 0.6.188
 
 - **Fix (#434, PR #432's windows-2025 run): a flow request that came while our TX clock turned ready is answered.** The flow server read the TX clock's readiness twice for one request: once to answer (not ready: left unanswered) and again to decide whether to hold it until the clock is ready. A TX pass that turned the clock ready between the two reads left the request neither granted nor held, so a receiver that asks once (`flows::client::Client::request_flow`, dlink's `flow_start` test) timed out and a real receiver lost its retry interval. Both now decide on one read: a request that comes before the clock is ready is always held, and granted at the next expiry tick (within 100 ms) that reads it ready. Older than v0.6.188 (the server is unchanged since before v0.6.150); seen most right after a device's start, before its TX thread's first pass. RED test first (`flows/server/tests/ready_race.rs`). **No latency change, no API change.**
