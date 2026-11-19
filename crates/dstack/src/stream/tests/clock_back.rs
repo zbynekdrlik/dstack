@@ -323,3 +323,25 @@ fn a_clock_back_mark_lasts_one_pass() {
         );
     }
 }
+
+/// The mark keeps a step back off the block grid too (the restart already
+/// put the schedule at the new time; the pump's own shift is always on the
+/// grid, so this is the TX lanes' case kept alike for the one schedule
+/// type): kept once, then restarted as before.
+#[test]
+fn a_marked_schedule_keeps_a_step_back_off_the_block_grid() {
+    let mut b = Blocks::bootstrap(T, TIMING);
+    let new = T - 9_600;
+    assert!(matches!(
+        b.next(new),
+        Due::Rebootstrap {
+            cause: Cause::ClockBack,
+            ..
+        }
+    ));
+    let restarted = b.start();
+    let by = -9_616;
+    assert_eq!(b.re_anchor(Some(by), new), (Shift::Kept, 0));
+    assert_eq!(b.start(), restarted);
+    assert_eq!(b.re_anchor(Some(by), new).0, Shift::Restarted);
+}

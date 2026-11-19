@@ -324,7 +324,10 @@ fn a_gap_past_the_fifo_starts_again_and_an_unready_clock_starts_afresh() {
 fn a_clock_a_step_back_starts_the_pull_again_at_once() {
     for back in [4_800u64, 19_200] {
         let mut r = rig(0);
-        assert!(back < r.fifo.capacity() as u64, "{back} within the reach");
+        assert!(
+            back < reach(r.fifo.capacity()) as u64,
+            "{back} within the reach"
+        );
         assert_eq!(r.pull.pull(), 0);
         r.clock.advance(ns_of(480, RATE));
         assert_eq!(r.pull.pull(), 480, "{back} back");

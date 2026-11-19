@@ -194,3 +194,47 @@ fn a_clock_back_mark_lasts_one_pass() {
         assert_eq!(rig.shared.lane(slot).rebootstraps, 2, "{back} back");
     }
 }
+
+/// A lane whose packet is not a divisor of the step (fpp 64 on the
+/// device's block of 32: the shift is on the block grid, not the packet's)
+/// keeps its clock-back restart too: the restart already put it at the new
+/// time, so the off-grid step restarts nothing a second time (review of
+/// #440's one-pass mark).
+#[test]
+fn a_marked_lane_off_its_packet_grid_keeps_its_restart() {
+    for back in BACK {
+        let mut s = Schedule::bootstrap(1_000_000, 64, 96);
+        let now = 1_000_000 - back;
+        assert_eq!(s.due(now), None, "{back} back");
+        assert_eq!(s.take_rebootstraps(), 1, "{back} back");
+        let restarted = s.next;
+        let by = -i64::try_from(back + 32).unwrap();
+        assert_eq!(s.re_anchor(Some(by), now), Shift::Kept, "{back} back");
+        assert_eq!(
+            (s.next, s.take_rebootstraps()),
+            (restarted, 0),
+            "{back} back"
+        );
+        // Unmarked, the same step restarts it, as before.
+        assert_eq!(s.re_anchor(Some(by), now), Shift::Restarted, "{back} back");
+    }
+}
+
+/// A pass while the clock is not ready is a pass too: it spends a lane's
+/// mark, so an epoch with the step after it moves the schedule the step
+/// back once more (a second restart), as after a ready pass between.
+#[test]
+fn a_not_ready_pass_spends_a_lane_s_mark() {
+    let mut rig = Rig::new(Vec::new());
+    let (slot, _) = rig.flow(vec![Some(1)]);
+    for us in (0..=3_000).step_by(500) {
+        rig.tx.step(Some(T + us * 1_000), 1);
+    }
+    let back_ns = ns_of(9_600, RATE);
+    let new = T + 3_500_000 - back_ns;
+    rig.tx.step(Some(new), 1);
+    rig.tx.step(None, 1);
+    let step_ns = -i64::try_from(back_ns).unwrap();
+    rig.tx.step(Some(new + 1_000_000), stepped(2, step_ns));
+    assert_eq!(rig.shared.lane(slot).rebootstraps, 2);
+}
