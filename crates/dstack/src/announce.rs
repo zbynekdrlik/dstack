@@ -427,6 +427,7 @@ impl<R: Registry> Announcer<R> {
     }
 }
 
+pub mod mdns;
 pub mod responder;
 
 #[cfg(test)]

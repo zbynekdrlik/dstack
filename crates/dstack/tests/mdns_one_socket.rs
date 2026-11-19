@@ -120,6 +120,21 @@ fn read_record(device: &str, tx: &str) {
     }
 }
 
+/// A direct query never reads `device`'s channel `tx` for `within`: its
+/// record was withdrawn (a record still registered is read in ms).
+fn never_read(device: &str, tx: &str, within: Duration) {
+    let mut instances = Instances::new();
+    instances.start(test_ipv4()).expect("the query thread");
+    let deadline = Instant::now() + within;
+    while !deadline.saturating_duration_since(Instant::now()).is_zero() {
+        assert!(
+            instances.lookup(device, tx).is_none(),
+            "{device}'s withdrawn record was read"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 #[test]
 fn a_device_s_process_receives_mdns_on_one_socket_and_still_answers() {
     let _one = ONE_DEVICE.lock().unwrap_or_else(|e| e.into_inner());
@@ -151,8 +166,9 @@ fn two_devices_on_one_address_share_the_socket_and_one_s_stop_keeps_the_other() 
     let both = mdns_sockets();
     let stopped_b = host_b.stop(Duration::from_secs(5));
     // B's stop withdrew B's records only: A still answers, a fresh
-    // reader reads it.
+    // reader reads it, and never B's.
     read_record(&name_a, &tx_a);
+    never_read(&name_b, &tx_b, Duration::from_secs(2));
     #[cfg(target_os = "linux")]
     let after_b = mdns_sockets();
     let stopped_a = host_a.stop(Duration::from_secs(5));
@@ -164,4 +180,25 @@ fn two_devices_on_one_address_share_the_socket_and_one_s_stop_keeps_the_other() 
         assert_eq!(after_b, both, "A keeps the socket");
         assert_eq!(mdns_sockets(), Vec::<String>::new(), "none after the stops");
     }
+}
+
+#[test]
+fn the_address_s_meter_counts_what_the_shared_socket_hears() {
+    use dstack::announce::mdns::Mdns;
+    let _one = ONE_DEVICE.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = tempfile::tempdir().unwrap();
+    let (host, name, tx1) = start(dir.path(), false);
+    // The direct query goes to the group: the daemon's socket hears it.
+    read_record(&name, &tx1);
+    let mdns = Mdns::shared(test_ipv4()).expect("the device's daemon");
+    let meter = mdns.meter().expect("the address's meter");
+    let heard = meter.heard();
+    #[cfg(target_os = "linux")]
+    let held = mdns_sockets();
+    drop((meter, mdns));
+    let stopped = host.stop(Duration::from_secs(5));
+    assert!(matches!(stopped, host::Stopped::Done), "{stopped:?}");
+    assert!(heard > 0, "the meter heard nothing");
+    #[cfg(target_os = "linux")]
+    assert_eq!(held.len(), 1, "the device's own daemon: {held:?}");
 }

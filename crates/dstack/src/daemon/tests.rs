@@ -1266,8 +1266,7 @@ async fn our_stop_of_a_flow_from_our_own_tx_is_answered_by_our_own_flow_control(
     lo.multicast.mdns = SocketAddrV4::new(Ipv4Addr::LOCALHOST, port);
     let published = Arc::new(Mutex::new(loop_records(&shared, lo.flows)));
     let _responder =
-        crate::announce::responder::Responder::start_on(lo.multicast.mdns, false, published)
-            .unwrap();
+        crate::announce::responder::Responder::start_on(lo.multicast.mdns, published).unwrap();
     let mut announcer = Announcer::new(Log::new(usize::MAX));
     // A ready media clock: our TX grants a flow only once it can send it
     // (dstack #20).

@@ -50,6 +50,19 @@ LICENSE-APACHE and LICENSE-MIT), copied unchanged except:
   routed only for its own address) answered from its LAN address, through
   the router (dstack #155, 9.11.2026; `crates/dstack/tests/mdns_reply_source.rs`).
 
+- `src/service_daemon.rs` `ServiceDaemon::new_tapped`, `Tap` (exported from
+  `src/lib.rs`), `Zeroconf::set_tap` and one call in `handle_read`: the
+  daemon's thread hands every datagram its IPv4 socket received on an
+  enabled interface (after the interface check, before decoding) to the
+  caller's tap, and on Linux that socket takes only its own memberships
+  (`IP_MULTICAST_ALL` off). dstack's mDNS meter and Windows responder read
+  the group from it instead of a 5353 socket each: a process then receives
+  each datagram once per address, where up to dstack v0.6.192 a Windows
+  device process received it three times (dsg, dasio#190: 0.1-0.8 ms of
+  receive DPC a datagram; dstack #442, `crates/dstack/src/announce/mdns.rs`,
+  `crates/dstack/tests/mdns_one_socket.rs`). `new`/`new_with_port` keep
+  upstream's behaviour.
+
 - `Cargo.toml`: an empty `[workspace]` table, so cargo never searches above
   this crate (a dstack checkout nested in another one, such as a git
   worktree, found the outer workspace and refused this excluded path; dstack

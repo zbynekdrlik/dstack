@@ -175,7 +175,7 @@ fn the_responder_answers_from_the_published_records_and_stops_when_dropped() {
         .unwrap()
         .port();
     let at = SocketAddrV4::new(Ipv4Addr::LOCALHOST, port);
-    let r = Responder::start_on(at, false, Arc::clone(&published)).unwrap();
+    let r = Responder::start_on(at, Arc::clone(&published)).unwrap();
     let client = UdpSocket::bind("127.0.0.1:0").unwrap();
     client
         .set_read_timeout(Some(Duration::from_millis(500)))
@@ -387,7 +387,6 @@ fn after_an_address_re_add_the_responder_rejoins_announces_and_answers_again() {
     let every = Duration::from_millis(20);
     let r = Responder::start_watched(
         at,
-        false,
         Arc::clone(&published),
         Watch {
             read: Box::new(read),
@@ -435,4 +434,75 @@ fn after_an_address_re_add_the_responder_rejoins_announces_and_answers_again() {
     );
     std::thread::sleep(every * 10);
     assert_eq!(r.rejoins(), 1, "one change, one rejoin");
+}
+
+/// A free port on loopback for a responder's socket.
+fn free_at() -> SocketAddrV4 {
+    let port = UdpSocket::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    SocketAddrV4::new(Ipv4Addr::LOCALHOST, port)
+}
+
+/// dstack #442: the device's responder answers a query the daemon's
+/// socket heard (handed on by its taps) from its own socket and address,
+/// and still answers a unicast query to that address.
+#[test]
+fn a_query_heard_on_the_daemon_s_socket_is_answered_from_the_device_s_address() {
+    use crate::announce::mdns::{Heard, Taps};
+    let taps = Arc::new(Taps::default());
+    let published = Arc::new(Mutex::new(recs()));
+    let at = free_at();
+    let r = Responder::start_heard(at, published, taps.listen(Heard::Queries), None).unwrap();
+    let client = UdpSocket::bind("127.0.0.1:0").unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_millis(200)))
+        .unwrap();
+    let me = client.local_addr().unwrap();
+    let query = ask("_netaudio-arc._udp.local", QTYPE::TYPE(TYPE::PTR));
+    let mut buf = [0u8; 1500];
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let (n, source) = loop {
+        // A legacy query (not from 5353): answered to its sender.
+        taps.feed(&query, me);
+        if let Ok(got) = client.recv_from(&mut buf) {
+            break got;
+        }
+        assert!(std::time::Instant::now() < deadline, "never answered");
+    };
+    assert_eq!(source, SocketAddr::V4(at), "from the device's address");
+    let (answers, _) = records_of(&buf[..n]);
+    assert_eq!(
+        answers,
+        [("_netaudio-arc._udp.local".to_string(), TYPE::PTR)]
+    );
+    // Its own socket still answers a unicast query to the address.
+    let (answers, _) = records_of(&answered(&client, &query, at));
+    assert_eq!(answers.len(), 1, "a unicast query to the address");
+    drop(r);
+    assert_eq!(taps.listeners(), 0, "its listener ends with it");
+}
+
+/// The device's socket sends to the group from the address and is read
+/// without a wait (its queries come from the daemon's socket); a test's
+/// unicast one is read with the thread's wait and names no send interface.
+#[test]
+fn the_device_s_socket_names_the_send_interface_and_never_waits() {
+    let at = free_at();
+    let sends = open(at, Mode::Sends).unwrap();
+    let s = socket2::SockRef::from(&sends);
+    assert_eq!(s.multicast_if_v4().unwrap(), Ipv4Addr::LOCALHOST);
+    assert_eq!(s.multicast_ttl_v4().unwrap(), 255);
+    let mut buf = [0u8; 16];
+    let e = sends.recv_from(&mut buf).unwrap_err();
+    assert_eq!(e.kind(), io::ErrorKind::WouldBlock);
+    drop(sends);
+    let unicast = open(at, Mode::Unicast).unwrap();
+    assert_eq!(unicast.read_timeout().unwrap(), Some(WAIT));
+    assert_eq!(
+        socket2::SockRef::from(&unicast).multicast_if_v4().unwrap(),
+        Ipv4Addr::UNSPECIFIED
+    );
 }

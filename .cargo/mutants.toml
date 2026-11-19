@@ -83,6 +83,10 @@ exclude_globs = [
 exclude_re = [
   # Host glue only the whole-host tests run (they cannot run per mutant).
   "replace serve_device -> Result",
+  # The device thread and its goodbye (dstack #442): glue over
+  # `Mdns::withdraw` (unit tested); tests/mdns_one_socket.rs fails when a
+  # stopped device's records stay on the shared daemon.
+  "host.rs.*replace (device_thread|goodbye) -> Result",
   # A binary's main only calls the library (`daemon::cli::main`), and a
   # unit test cannot run it.
   "src/bin/dstack-dev.rs.*replace main",

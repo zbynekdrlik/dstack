@@ -53,10 +53,11 @@
 //! the mDNS senders' addresses: that is its purpose).
 //!
 //! [`senders`]: who sends how much mDNS on the leg (dstack #289), each
-//! device's status and a minute line; its own passive listener, one per
-//! process and address (a device runs a [`Discovery`] only now and then,
-//! `traffic::neighbours`, so the meter does not ride on it; it also never
-//! counts a [`Discovery`]'s datagrams, which are the same group's).
+//! device's status and a minute line; one per process and address, it
+//! reads what the address's mDNS daemon socket receives (dstack #442,
+//! [`crate::announce::mdns`]; a device runs a [`Discovery`] only now and
+//! then, `traffic::neighbours`, so the meter does not ride on it; it also
+//! never counts a [`Discovery`]'s datagrams, which are the same group's).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
