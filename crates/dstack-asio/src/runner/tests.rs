@@ -285,7 +285,7 @@ fn a_reset_closes_the_run_and_a_60_s_run_resets_the_backoff() {
 }
 
 #[test]
-fn a_driver_with_no_clock_waits_calmly_and_reopens_every_60_s() {
+fn a_driver_with_no_clock_waits_calmly_and_is_opened_again_at_4_s() {
     let mut r = rig();
     r.runner.step(0);
     r.runner.step(NO_CLOCK_NS - 1);
@@ -296,13 +296,13 @@ fn a_driver_with_no_clock_waits_calmly_and_reopens_every_60_s() {
         (s.state, s.reason.clone()),
         (RunState::Waiting, Some(Reason::NoClock))
     );
-    r.runner.step(60 * S - 1);
+    r.runner.step(4 * S - 1);
     assert_eq!(r.fake.borrow().closes, 0);
-    r.runner.step(60 * S);
+    r.runner.step(4 * S);
     assert_eq!(r.fake.borrow().closes, 1, "closed to open again");
     assert_eq!(r.status().clock_waits, 1);
     assert_eq!(r.status().resets, 0, "no reset");
-    r.runner.step(60 * S);
+    r.runner.step(4 * S);
     assert_eq!(r.opens(), 2, "opened again at once, no backoff");
     let s = r.status();
     assert_eq!(
@@ -312,9 +312,9 @@ fn a_driver_with_no_clock_waits_calmly_and_reopens_every_60_s() {
     // A burst of callbacks at the reopen is no clock: the run's first step
     // takes it as its tick base.
     r.tick(2, 512);
-    r.runner.step(60 * S + POLL_NS);
+    r.runner.step(4 * S + POLL_NS);
     assert_eq!(r.status().reason, Some(Reason::NoClock));
-    r.runner.step(63 * S);
+    r.runner.step(7 * S);
     let s = r.status();
     assert_eq!(
         (s.state, s.reason.clone()),
@@ -323,9 +323,72 @@ fn a_driver_with_no_clock_waits_calmly_and_reopens_every_60_s() {
     assert_eq!(s.resets, 0, "never read as a stall");
     // It ticks from there: the clock arrived.
     r.tick(3, 768);
-    r.runner.step(64 * S);
+    r.runner.step(8 * S);
     let s = r.status();
     assert_eq!((s.state, s.reason), (RunState::Running, None));
+}
+
+/// dstack #447: dsg's SoundGrid driver, opened while its network was down,
+/// gave no clock until the 60 s re-open (its clock then came 10.7 s after
+/// it). A driver with no clock is opened again 4, 8, 16 and 32 s after each
+/// open, then every 60 s.
+#[test]
+fn a_driver_with_no_clock_is_opened_again_after_4_8_16_32_then_every_60_s() {
+    let mut r = rig();
+    r.runner.step(0);
+    r.runner.step(NO_CLOCK_NS);
+    assert_eq!(r.status().reason, Some(Reason::NoClock));
+    let mut open_at = 0;
+    for (k, wait_s) in [4, 8, 16, 32, 60, 60, 60].into_iter().enumerate() {
+        let k = k as u32;
+        let due = open_at + wait_s * S;
+        r.runner.step(due - 1);
+        assert_eq!(r.fake.borrow().closes, k, "not before {wait_s} s");
+        r.runner.step(due);
+        assert_eq!(r.fake.borrow().closes, k + 1, "closed after {wait_s} s");
+        r.runner.step(due);
+        assert_eq!(r.opens(), k + 2, "opened again at once");
+        let s = r.status();
+        assert_eq!(
+            (s.state, s.reason.clone(), s.clock_waits, s.resets),
+            (RunState::Waiting, Some(Reason::NoClock), u64::from(k) + 1, 0),
+            "after {wait_s} s"
+        );
+        open_at = due;
+    }
+}
+
+/// dstack #447: each wait for a clock starts its re-opens at 4 s again: a
+/// driver that gave its clock, then stalled and came back without one, is
+/// not opened again on the earlier wait's longer interval.
+#[test]
+fn each_wait_for_a_clock_starts_its_re_opens_at_4_s_again() {
+    let mut r = rig();
+    r.runner.step(0);
+    r.runner.step(NO_CLOCK_NS);
+    for at in [4 * S, 12 * S] {
+        r.runner.step(at);
+        r.runner.step(at);
+    }
+    assert_eq!((r.opens(), r.fake.borrow().closes), (3, 2));
+    // The clock comes (the first step takes the run's tick base).
+    r.runner.step(12 * S + POLL_NS);
+    r.tick(1, 256);
+    r.runner.step(13 * S);
+    assert_eq!(r.status().state, RunState::Running);
+    // It stops: a stall closes the run, and the backoff (2 s) opens it again.
+    let stall = 13 * S + STALL_NS;
+    r.runner.step(stall);
+    assert_eq!(r.status().reason, Some(Reason::Stalled));
+    let open = stall + 2 * S;
+    r.runner.step(open);
+    assert_eq!(r.opens(), 4);
+    r.runner.step(open + NO_CLOCK_NS);
+    assert_eq!(r.status().reason, Some(Reason::NoClock));
+    r.runner.step(open + 4 * S - 1);
+    assert_eq!(r.fake.borrow().closes, 3);
+    r.runner.step(open + 4 * S);
+    assert_eq!(r.fake.borrow().closes, 4, "the new wait's first re-open");
 }
 
 #[test]
