@@ -172,7 +172,7 @@ pub(super) fn tx_clash(base: u16, rx_base: Option<u16>, own: [u16; 3]) -> Option
         ("the device's ARC port", one(own[0])),
         ("the device's CMC port", one(own[1])),
         ("the device's flow-control port", one(own[2])),
-        ("mDNS", one(crate::announce::responder::PORT)),
+        ("mDNS", one(crate::announce::mdns::PORT)),
         ("the info request port", one(crate::info::REQUEST_PORT)),
         ("the info port", one(crate::info::INFO_PORT)),
         ("the heartbeat port", one(crate::info::HEARTBEAT_PORT)),

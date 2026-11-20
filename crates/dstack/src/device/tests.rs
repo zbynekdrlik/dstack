@@ -2082,27 +2082,18 @@ fn the_no_yield_tail_is_off_by_default_and_taken() {
     );
 }
 
-/// The #444 trial switch: off when left out (the wildcard mDNS socket and,
-/// on Windows, the device's own responder), on only when set true.
+/// The #444 trial switch is gone (the Windows daemon is bound to the
+/// address by default since #444's last step): a config that still names
+/// it is refused as an unknown key, never taken silently.
 #[test]
-fn the_mdns_bind_address_trial_is_off_by_default_and_taken() {
-    assert!(
-        !DeviceConfig::from_toml(TEST_DEVICE)
-            .unwrap()
-            .mdns_bind_address
-    );
-    for on in [true, false] {
-        let text = format!("{TEST_DEVICE}\nmdns_bind_address = {on}\n");
-        assert_eq!(
-            DeviceConfig::from_toml(&text).unwrap().mdns_bind_address,
-            on
-        );
-    }
-    let text = format!("{TEST_DEVICE}\nmdns_bind_address = \"yes\"\n");
-    assert!(
-        DeviceConfig::from_toml(&text).is_err(),
-        "a string is no switch"
-    );
+fn the_mdns_bind_address_trial_switch_is_gone() {
+    let text = format!("{TEST_DEVICE}\nmdns_bind_address = true\n");
+    let e = DeviceConfig::from_toml(&text)
+        .expect_err("an unknown key")
+        .to_string();
+    // The unknown key itself is redacted (no longer in `CONFIG_KEYS`).
+    assert!(e.contains("unknown field"), "{e}");
+    assert!(!e.contains("mdns_bind_address"), "{e}");
 }
 
 /// obs's review of v0.6.26: Windows pins a thread only within the first

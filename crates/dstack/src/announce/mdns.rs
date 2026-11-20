@@ -8,49 +8,53 @@
 //! every one of them, on Windows inside the NIC's receive DPC (dasio#190,
 //! dsg: 0.1-0.8 ms of DPC a datagram, late SoundGrid callbacks).
 //!
-//! - [`Mdns`]: the vendored daemon (`vendor/mdns-sd`, its IPv4 socket on
-//!   `0.0.0.0:5353`, only the address's interface enabled), one per process
-//!   and address, shared by every device there ([`Mdns::shared`]); its
-//!   last holder's drop shuts it down. A device withdraws its own records
-//!   ([`Mdns::withdraw`]), so a device that stops never takes another's
-//!   records down.
+//! - [`Mdns`]: the vendored daemon (`vendor/mdns-sd`, one IPv4 socket, only
+//!   the address's interface enabled), one per process and address, shared
+//!   by every device there ([`Mdns::shared`]); its last holder's drop shuts
+//!   it down. A device withdraws its own records ([`Mdns::withdraw`]), so a
+//!   device that stops never takes another's records down.
+//! - Its socket is bound to `<address>:5353` exactly where the OS hands a
+//!   joined address-bound socket the group ([`binds_to_address`],
+//!   [`GROUP_TO_BOUND_SOCKET`]: Windows; dstack #444, #451), else to
+//!   `0.0.0.0:5353` (Linux delivers no group to a bound socket, dev1
+//!   19.11.2026). Bound, every send leaves from the address, so Dante
+//!   Controller reads each answer once and from the device's own address
+//!   (a SkipAsSource address's answers would leave from the primary one on
+//!   the wildcard, dstack #1 problem E); up to v0.6.206 a separate responder
+//!   socket per Windows device answered from the address beside the
+//!   wildcard daemon (`announce::responder`'s answers now serve the tests'
+//!   loopback responders only).
 //! - The daemon's thread hands every datagram it reads to [`Taps::feed`]
-//!   (`mdns_sd::ServiceDaemon::new_tapped`), which copies it into each
+//!   (`mdns_sd::ServiceDaemon::new_tapped_on`), which copies it into each
 //!   [`Listener`]'s bounded channel that takes it ([`Heard`]): the
 //!   address's mDNS meter ([`crate::discover::senders::Meter`], every
-//!   datagram), on Windows each device's responder on its own address
-//!   ([`super::responder::Responder`], queries only), and a device's
-//!   discovery of our other devices on the PC while it runs
-//!   (`traffic::neighbours`, every datagram, [`Mdns::listen_on`]). A full
-//!   channel drops the datagram (counted, [`Taps::dropped`]): the daemon's
-//!   thread never waits for a reader.
+//!   datagram) and a device's discovery of our other devices on the PC
+//!   while it runs (`traffic::neighbours`, every datagram,
+//!   [`Mdns::listen_on`]). A full channel drops the datagram (counted,
+//!   [`Taps::dropped`]): the daemon's thread never waits for a reader.
 //! - The group membership is the daemon's (dstack #282's watch, its own
 //!   form): its IP check, run every [`crate::membership::EVERY`] here as
 //!   the watches' (mdns-sd's default is 5 s), leaves an address that is
 //!   gone and joins it again when it comes back, also on another interface
 //!   index (`check_ip_changes`). The watches' known limit holds: a re-add
 //!   on the same index between two checks is not seen.
-//! - The daemon's commands wait out a full queue (`announce::retried`): a device with
-//!   more records than its queue holds (100) fills it at a withdrawal too.
-//! - A TRIAL (dstack #444), off by default: a device config's
-//!   `mdns_bind_address` opens the address's daemon with its socket bound
-//!   to `<address>:5353` ([`Mdns::shared_bound`]). Every send then leaves
-//!   from the address, so a Windows device needs no responder of its own
-//!   ([`Mdns::own_responder_needed`]) and Dante Controller gets each answer
-//!   once. Windows delivers the group to a joined address-bound socket
-//!   (mbc, 19.11.2026: 185 datagrams in 20 s); Linux delivers it none
-//!   (only unicast to the address), so there it hears no group query
-//!   ([`bound_note`]). On Windows a bound daemon whose address was removed
-//!   and added again heard nothing more (mbc, 19.11.2026: `mdns.per_s`
-//!   0.0 for 2.5 min, the same socket), whether its socket went deaf or
-//!   the IP check's join on it failed and left the interface out (both at
-//!   debug, not read). So a bound daemon has a watch of its own
-//!   (`dstack-mdns-bound`, the #282 watch every 2 s, [`Mdns::reopens`]):
-//!   once the address is back it asks the daemon to open its socket again
-//!   (`mdns_sd::ServiceDaemon::reopen`: a new bind, the group joined on
-//!   every enabled interface, every record announced once; records and
+//! - A bound daemon also has a watch of its own (`dstack-mdns-bound`, the
+//!   #282 watch every 2 s, [`Mdns::reopens`]). On Windows a socket whose
+//!   address was removed and added again heard nothing more (mbc,
+//!   19.11.2026: `mdns.per_s` 0.0 for 2.5 min with a bound socket; 20.11.2026
+//!   the wildcard daemon with its responder answered nothing until a
+//!   restart, #451): whether the socket went deaf or the IP check's join on
+//!   it failed and left the interface out (both at debug) was not read. So
+//!   once the address is back the watch asks the daemon to open its socket
+//!   again (`mdns_sd::ServiceDaemon::reopen`: a new bind, the group joined
+//!   on every enabled interface, every record announced once; records and
 //!   taps kept) and logs [`BOUND_REOPENED`] with the interfaces joined and
-//!   the records announced. The wildcard daemon has no such watch.
+//!   the records announced (mbc step 4a, 20.11.2026: `joined_interfaces=1`
+//!   5 s after the add, answered again). The wildcard daemon has no such
+//!   watch.
+//! - The daemon's commands wait out a full queue (`announce::retried`): a
+//!   device with more records than its queue holds (100) fills it at a
+//!   withdrawal too.
 //!
 //! The subscriptions' direct queries (`subscribe::instance`) read their
 //! legacy unicast answers on a port of their own, never on 5353. A
@@ -77,6 +81,8 @@ use super::{AGAIN_TRIES, Announcer, retried};
 use crate::discover::senders::{MINUTE_NS, Meter, browsers::Browsers};
 use crate::membership::{Link, Lister, Membership};
 
+/// mDNS's port.
+pub const PORT: u16 = 5353;
 /// How long a withdrawal is waited for.
 pub const GOODBYE_WAIT: Duration = Duration::from_secs(3);
 /// How long the daemon's shutdown is waited for: after a withdrawal it has
@@ -97,7 +103,7 @@ pub struct Datagram {
 pub enum Heard {
     /// Every datagram (the meter).
     All,
-    /// Queries only: the DNS header's QR bit clear (a responder).
+    /// Queries only: the DNS header's QR bit clear.
     Queries,
 }
 
@@ -123,15 +129,15 @@ impl Heard {
 /// measured (BSD stacks deliver only to the wildcard or the group).
 pub const GROUP_TO_BOUND_SOCKET: bool = cfg!(windows);
 
-/// The warning for a daemon bound to its address (`mdns_bind_address`),
-/// given whether the OS hands such a socket the group
-/// ([`GROUP_TO_BOUND_SOCKET`]): none where it does.
-pub fn bound_note(group_to_bound: bool) -> Option<&'static str> {
-    (!group_to_bound).then_some(
-        "mdns_bind_address on this OS: the mDNS socket bound to the address hears no \
-         group query (only unicast to the address), so browsers and direct queries to \
-         the group find no device here; a Windows trial switch (dstack #444)",
-    )
+/// Whether the address's daemon binds its socket to the address, given
+/// whether the OS hands such a socket the group ([`GROUP_TO_BOUND_SOCKET`];
+/// dstack #444, #451): exactly then. Bound, every answer leaves from the
+/// address (one answer, no responder beside it) and the daemon's own watch
+/// opens the socket again after an address cycle, where the wildcard daemon
+/// on Windows went deaf until a restart (mbc, 20.11.2026). Where a bound
+/// socket hears no group (Linux) it stays the wildcard's.
+pub fn binds_to_address(group_to_bound: bool) -> bool {
+    group_to_bound
 }
 
 /// The INFO line of a bound daemon whose socket was opened again (dstack
@@ -371,19 +377,22 @@ pub struct Mdns {
 impl Mdns {
     /// The daemon on the interface with the address `ip`: the one already
     /// running in this process there, or a new one (with the address's
-    /// mDNS meter, dstack #289). A new one is opened without the registry's
-    /// lock (a failed one waits for its shutdown), so two devices starting
-    /// at once may open two: the later is dropped and the first kept.
+    /// mDNS meter, dstack #289), its socket bound to `ip` where
+    /// [`binds_to_address`] says so (Windows), else to the wildcard. A new
+    /// one is opened without the registry's lock (a failed one waits for
+    /// its shutdown), so two devices starting at once may open two: the
+    /// later is dropped and the first kept. A bound socket is opened before
+    /// this returns: its failed bind is this call's error.
     pub fn shared(ip: Ipv4Addr) -> Result<Arc<Mdns>, String> {
-        Mdns::shared_bound(ip, false)
+        Mdns::shared_bound(ip, binds_to_address(GROUP_TO_BOUND_SOCKET))
     }
 
-    /// [`Mdns::shared`], a new daemon's socket bound to `ip` when `bound`
-    /// (the device config's `mdns_bind_address`, a trial, dstack #444),
-    /// else to the wildcard. The daemon already running on `ip` is shared
-    /// whatever it was opened with (one socket an address); a device that
-    /// asks the other form is told so in a warning.
-    pub fn shared_bound(ip: Ipv4Addr, bound: bool) -> Result<Arc<Mdns>, String> {
+    /// [`Mdns::shared`], a new daemon's socket bound to `ip` when `bound`,
+    /// else to the wildcard: the tests pin either form on any OS. The
+    /// daemon already running on `ip` is shared whatever it was opened with
+    /// (one socket an address); a caller asking the other form is told so
+    /// in a warning.
+    pub(crate) fn shared_bound(ip: Ipv4Addr, bound: bool) -> Result<Arc<Mdns>, String> {
         Mdns::shared_listed(ip, bound, Lister::default())
     }
 
@@ -444,9 +453,6 @@ impl Mdns {
             meter = m.meter.is_some(),
             bound, "mDNS: one socket on the address's interface, shared by its devices"
         );
-        if let Some(note) = bound.then(|| bound_note(GROUP_TO_BOUND_SOCKET)).flatten() {
-            warn!("{note}");
-        }
         if bound {
             let watch = BoundWatch::start(m.daemon.clone(), ip, lister, Arc::clone(&m.reopens))
                 .map_err(|e| format!("the bound mDNS daemon's watch: {e}"))?;
@@ -455,23 +461,24 @@ impl Mdns {
         Ok(m)
     }
 
-    /// This running daemon, for a device that asked for a socket `bound`
+    /// This running daemon, for a caller that asked for a socket `bound`
     /// to the address or not: one asking the other form gets it as it is,
-    /// with a warning (one socket an address).
+    /// with a warning (one socket an address). Only tests ask both forms on
+    /// one address: every production caller goes through [`Mdns::shared`].
     fn kept_for(self: Arc<Self>, bound: bool) -> Arc<Self> {
         if bound != self.bound {
             warn!(
                 asked_bound = bound,
                 running_bound = self.bound,
-                "mdns_bind_address differs from the running mDNS daemon's on the address: \
-                 the running one is shared"
+                "the mDNS socket's form asked differs from the running daemon's on the \
+                 address: the running one is shared"
             );
         }
         self
     }
 
-    /// Its socket is bound to the address (`mdns_bind_address`, dstack
-    /// #444), not the wildcard.
+    /// Its socket is bound to the address (dstack #444), not the
+    /// wildcard.
     pub fn bound(&self) -> bool {
         self.bound
     }
@@ -480,13 +487,6 @@ impl Mdns {
     /// address came back (dstack #444); always 0 for the wildcard's.
     pub fn reopens(&self) -> u64 {
         self.reopens.load(Ordering::Relaxed)
-    }
-
-    /// A Windows device needs a responder of its own for answers from its
-    /// address (dstack #1 problem E) only while the daemon's socket is the
-    /// wildcard's: a bound one sends from the address itself (dstack #444).
-    pub fn own_responder_needed(&self) -> bool {
-        !self.bound
     }
 
     /// A new listener on this process's running daemon on `ip`, if one

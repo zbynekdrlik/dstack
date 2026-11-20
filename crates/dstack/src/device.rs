@@ -234,19 +234,6 @@ pub struct DeviceConfig {
     /// suspected of lengthening a WFP receive DPC (dstack #1, dasio#1).
     #[serde(default = "default_flow_slots")]
     pub flow_slots: usize,
-    /// A Windows TRIAL (dstack #444), off when left out: the process's mDNS
-    /// daemon on the device's address binds its socket to
-    /// `<address>:5353` instead of `0.0.0.0:5353`
-    /// ([`crate::announce::mdns::Mdns::shared_bound`]), so its answers
-    /// leave from the address and the device starts no responder of its
-    /// own (Dante Controller then reads each answer once). Off, nothing
-    /// changes. The daemon a process opens first on an address decides its
-    /// socket (of two devices starting at once, the first opened is kept);
-    /// a device asking the other form is warned and shares it. On Linux a
-    /// socket bound to an address hears no group query: never set it there
-    /// (a start warning says so).
-    #[serde(default)]
-    pub mdns_bind_address: bool,
     /// TEST ONLY (dstack #305): the TEST system clock's skew, ppm, -1000 to
     /// 1000 ([`crate::clock::skewed`]). Only with the system clock
     /// (`host::ClockSource::System`, `--clock system`): any other source
@@ -1367,7 +1354,6 @@ const CONFIG_KEYS: &[&str] = &[
     "tx_port_base",
     "subscribe",
     "flow_slots",
-    "mdns_bind_address",
     "test_clock_ppm",
     "state_file",
     "tx_channel",

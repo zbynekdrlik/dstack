@@ -33,8 +33,9 @@
 //! done (`if_addrs` lists preferred addresses only), which narrows it.
 //!
 //! Each socket owner keeps its own [`Membership`] and calls `keep` from its
-//! own loop (the mDNS responder, discovery, the latency listener, the
-//! daemon's tick for the RX flows, the directory's instance queries). `host` re-exports it as
+//! own loop (the bound mDNS daemon's watch, discovery, the latency
+//! listener, the daemon's tick for the RX flows, the directory's instance
+//! queries). `host` re-exports it as
 //! `host::Membership`.
 
 use std::fmt::Display;
