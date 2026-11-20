@@ -559,7 +559,6 @@ impl Instances {
         }
         self.tried = true;
         let sock = UdpSocket::bind(SocketAddrV4::new(ip, 0))?;
-        sock.set_read_timeout(Some(ROUND))?;
         let watch = if to.ip().is_multicast() {
             send_on(&sock, ip)?;
             Some((lister.watch(ip), lister))
@@ -760,7 +759,8 @@ fn run(sock: &UdpSocket, table: &Mutex<Table>, stop: &AtomicBool, clock: &Clock,
     }
 }
 
-/// Answers read into `table` for `wait` (each read waits at most the rest).
+/// Answers read into `table` for `wait` (each read waits at most the rest,
+/// [`crate::recv`]: no read timeout on Windows, dstack #454).
 fn read_answers(
     sock: &UdpSocket,
     buf: &mut [u8],
@@ -771,17 +771,14 @@ fn read_answers(
     let until = Instant::now() + wait;
     loop {
         let left = until.saturating_duration_since(Instant::now());
-        // A zero timeout is refused (it would mean "wait forever").
-        if sock.set_read_timeout(Some(left)).is_err() {
-            return;
-        }
-        match sock.recv_from(buf) {
-            Ok((n, _)) => {
+        match crate::recv::recv_from_within(sock, buf, left) {
+            Ok(Some((n, _))) => {
                 lock(table).answer(&buf[..n], clock.now());
             }
-            // Mostly the wait's end.
+            // The wait's end (a zero wait reads nothing).
+            Ok(None) => return,
             Err(e) => {
-                trace!(kind = ?e.kind(), "no instance answer this wait");
+                trace!(kind = ?e.kind(), "an instance answer read failed");
                 return;
             }
         }

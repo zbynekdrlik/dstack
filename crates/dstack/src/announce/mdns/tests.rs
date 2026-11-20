@@ -790,6 +790,13 @@ fn asked(
 /// (beside the daemon's bound socket, `SO_REUSEADDR`/`SO_REUSEPORT`): it
 /// reads what the daemon multicasts. A unicast to `<ip>:5353` still goes
 /// to the daemon's socket, the more specific bind.
+///
+/// Non-blocking, never a read timeout (dstack #453): on Windows a blocking
+/// `recvfrom` that ends on `SO_RCVTIMEO` can lose a datagram arriving as it
+/// times out. On windows-2025 under load, two such listeners (10 ms) each
+/// missed announcements the daemon had sent (`send_to` Ok every time) and
+/// the other one read, 28 runs of 40, while a non-blocking one beside them
+/// read every announcement in all 40.
 fn group_listener(ip: Ipv4Addr) -> UdpSocket {
     let sock = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::DGRAM, None).unwrap();
     sock.set_reuse_address(true).unwrap();
@@ -800,8 +807,7 @@ fn group_listener(ip: Ipv4Addr) -> UdpSocket {
     sock.join_multicast_v4(&Ipv4Addr::new(224, 0, 0, 251), &ip)
         .unwrap();
     let sock: UdpSocket = sock.into();
-    sock.set_read_timeout(Some(Duration::from_millis(10)))
-        .unwrap();
+    sock.set_nonblocking(true).unwrap();
     sock
 }
 
@@ -947,7 +953,8 @@ fn the_wildcard_daemon_keeps_no_watch_of_its_address() {
 }
 
 /// How many announcements of each of `fulls` (a response from `from` with
-/// that name's SRV) `l` reads within `wait`.
+/// that name's SRV) `l` (a [`group_listener`]) reads within `wait`; an
+/// empty read waits 1 ms, and any other read error fails the test.
 fn announcements_each(
     l: &UdpSocket,
     fulls: &[&str],
@@ -959,15 +966,19 @@ fn announcements_each(
     let mut n = vec![0; fulls.len()];
     let mut buf = [0u8; 9000];
     while !deadline.saturating_duration_since(Instant::now()).is_zero() {
-        if let Ok((len, src)) = l.recv_from(&mut buf)
-            && src == from
-            && !is_query(&buf[..len])
-        {
-            for (i, full) in fulls.iter().enumerate() {
-                if instance::read(&buf[..len], full).is_some_and(|f| f.srv.is_some()) {
-                    n[i] += 1;
+        match l.recv_from(&mut buf) {
+            Ok((len, src)) if src == from && !is_query(&buf[..len]) => {
+                for (i, full) in fulls.iter().enumerate() {
+                    if instance::read(&buf[..len], full).is_some_and(|f| f.srv.is_some()) {
+                        n[i] += 1;
+                    }
                 }
             }
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Err(e) => panic!("the group listener's read failed: {e}"),
         }
     }
     n

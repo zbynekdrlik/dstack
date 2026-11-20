@@ -233,14 +233,6 @@ fn heartbeat_socket(our: Ipv4Addr) -> io::Result<UdpSocket> {
     Ok(sock.into())
 }
 
-/// A read that only timed out.
-fn timed_out(e: &io::Error) -> bool {
-    matches!(
-        e.kind(),
-        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-    )
-}
-
 /// Listens on `our` address's network for `window` to the heartbeats from
 /// the address `device`, gathering each device's latency records there
 /// (one entry per device id, in id order). An error only when the socket
@@ -255,16 +247,15 @@ pub fn listen(our: Ipv4Addr, device: Ipv4Addr, window: Duration) -> io::Result<V
         .checked_duration_since(Instant::now())
         .filter(|d| !d.is_zero())
     {
-        sock.set_read_timeout(Some(left))?;
-        match sock.recv_from(&mut buf) {
-            Ok((n, SocketAddr::V4(from))) if *from.ip() == device => {
+        // dstack #454: no read timeout on Windows (crate::recv).
+        match crate::recv::recv_from_within(&sock, &mut buf, left)? {
+            Some((n, SocketAddr::V4(from))) if *from.ip() == device => {
                 if let Some(beat) = parse(&buf[..n]) {
                     heard.add(&beat);
                 }
             }
-            Ok(_) => {}
-            Err(e) if timed_out(&e) => break,
-            Err(e) => return Err(e),
+            Some(_) => {}
+            None => break,
         }
     }
     Ok(heard.result())
@@ -273,14 +264,14 @@ pub fn listen(our: Ipv4Addr, device: Ipv4Addr, window: Duration) -> io::Result<V
 /// Hands on one read of the listener's socket from the datagrams in
 /// `buf`: a heartbeat goes to `tx` with its sender's address, anything
 /// else is left out. False when the thread must end: the receiver is gone,
-/// or the socket failed (logged); a read that only timed out goes on.
+/// or the socket failed (logged); a read with nothing in its wait goes on.
 fn hand_on(
-    read: io::Result<(usize, SocketAddr)>,
+    read: io::Result<Option<(usize, SocketAddr)>>,
     buf: &[u8],
     tx: &std::sync::mpsc::Sender<(Ipv4Addr, Beat)>,
 ) -> bool {
     match read {
-        Ok((n, SocketAddr::V4(from))) => {
+        Ok(Some((n, SocketAddr::V4(from)))) => {
             let sent = buf
                 .get(..n)
                 .and_then(parse)
@@ -292,7 +283,6 @@ fn hand_on(
             true
         }
         Ok(_) => true,
-        Err(e) if timed_out(&e) => true,
         Err(e) => {
             tracing::warn!(error = %e, "latency listener: the socket failed, stopping");
             false
@@ -326,7 +316,6 @@ impl Listener {
     ) -> io::Result<(Listener, std::sync::mpsc::Receiver<(Ipv4Addr, Beat)>)> {
         use std::sync::atomic::{AtomicBool, Ordering};
         let sock = heartbeat_socket(our)?;
-        sock.set_read_timeout(Some(STOP_POLL))?;
         let stop = std::sync::Arc::new(AtomicBool::new(false));
         let (tx, rx) = std::sync::mpsc::channel();
         let halt = std::sync::Arc::clone(&stop);
@@ -345,7 +334,9 @@ impl Listener {
                         HEARTBEAT_GROUP,
                         || crate::membership::rejoin(&sock, HEARTBEAT_GROUP, our),
                     );
-                    if !hand_on(sock.recv_from(&mut buf), &buf, &tx) {
+                    // dstack #454: no read timeout on Windows.
+                    let read = crate::recv::recv_from_within(&sock, &mut buf, STOP_POLL);
+                    if !hand_on(read, &buf, &tx) {
                         return;
                     }
                 }

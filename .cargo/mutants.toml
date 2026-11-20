@@ -22,6 +22,9 @@ exclude_globs = [
   "crates/dstack/src/media/dscp/windows.rs",
   # The RX receive path off Linux (dstack #234): recv_from with no stamp.
   "crates/dstack/src/media/rx/socket/other.rs",
+  # The UDP read's wait on Windows (dstack #454): WSAPoll glue; its
+  # decisions are recv::read_when_ready and recv::poll_ms (each tested).
+  "crates/dstack/src/recv/windows.rs",
   "crates/dstack/src/traffic/windows.rs",
   # The shared registry read (dstack #256): its decisions are lso's and
   # media::dscp's (each tested); Windows CI reads a test key with it.
