@@ -8,7 +8,7 @@
 //! the status shows (`engine.threads[]`), so an app can tell a pump that
 //! MMCSS dropped from one that was starved.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 
 use tracing::{info, warn};
 
@@ -108,10 +108,13 @@ pub const NO_MMCSS_TASK: u32 = u32::MAX;
 /// 19 in a BelowNormal process on resolume-snv, 20.11.2026). With no
 /// read-back (off Windows, or the read failed) the index alone decides.
 pub fn joined_task(joined: &Result<u32, MmcssError>, read: Option<i32>) -> Option<u32> {
-    let _ = read;
     match joined {
-        Ok(index) | Err(MmcssError::Priority { index, .. }) => Some(*index),
-        Err(MmcssError::Join(_)) => None,
+        Ok(index) | Err(MmcssError::Priority { index, .. })
+            if *index != NO_MMCSS_TASK && read.is_none_or(|level| level > WINDOWS_HIGHEST) =>
+        {
+            Some(*index)
+        }
+        _ => None,
     }
 }
 
@@ -138,16 +141,14 @@ pub(crate) fn mmcss_of(
 /// (resolume-snv, 20.11.2026: 25 back to 8). Nothing asked or nothing read:
 /// no.
 pub(crate) fn needs_again(wanted: Option<i32>, mmcss: Mmcss, read: Option<i32>) -> bool {
-    let _ = (wanted, mmcss, read);
-    false
+    mmcss == Mmcss::Out && matches!((wanted, read), (Some(w), Some(r)) if r < w)
 }
 
 /// Whether a thread whose ask answered `granted` holds Windows' level
 /// `wanted` by its read-back `read` (dstack #461): the read-back at least
 /// the level asked; with nothing wanted or nothing read, the ask's answer.
 pub(crate) fn held(granted: bool, wanted: Option<i32>, read: Option<i32>) -> bool {
-    let _ = (wanted, read);
-    granted
+    granted && !matches!((wanted, read), (Some(w), Some(r)) if r < w)
 }
 
 /// The outcome for a thread that asked `asked`, whose ask succeeded
@@ -245,11 +246,18 @@ pub struct Scheduled {
 /// A device's record of its media threads' scheduling (dstack #281): each
 /// thread's last `take_priority` outcome and MMCSS task index, one atomic
 /// word each (the outcome's code in the low 8 bits, the task index + 1
-/// above them, 0 for none; a word of 0: not started).
+/// above them, 0 for none; a word of 0: not started), and its read-back
+/// priority (dstack #461).
 #[derive(Debug, Default)]
 pub struct Scheduling {
     slots: [AtomicU64; 4],
+    /// Each thread's read-back priority (dstack #461), [`UNREAD`] for none;
+    /// written before its slot's word, read only for a started thread.
+    levels: [AtomicI64; 4],
 }
+
+/// A [`Scheduling`] level with no read-back: outside `i32`'s range.
+const UNREAD: i64 = i64::MIN;
 
 impl Scheduling {
     pub fn new() -> Self {
@@ -265,7 +273,9 @@ impl Scheduling {
         task: Option<u32>,
         read: Option<i32>,
     ) {
-        let _ = read;
+        // The read-back first: a reader that sees the word sees it too.
+        let level = read.map_or(UNREAD, i64::from);
+        self.levels[thread.slot()].store(level, Ordering::Release);
         let task = task.map_or(0, |t| u64::from(t) + 1);
         // Disjoint halves: a sum, never an `|` (its `^` mutant is the same).
         let word = (task << 8) + outcome.code();
@@ -285,7 +295,8 @@ impl Scheduling {
                     thread,
                     outcome,
                     mmcss_task: task.checked_sub(1).map(|t| t as u32),
-                    priority: None,
+                    priority: i32::try_from(self.levels[thread.slot()].load(Ordering::Acquire))
+                        .ok(),
                 })
             })
             .collect()

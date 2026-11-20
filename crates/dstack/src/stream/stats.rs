@@ -207,14 +207,16 @@ impl PumpStats {
     /// channel (an RX channel it reads or a TX channel it writes). A pump
     /// built with [`PumpStats::new`] alone owns channels.
     pub fn for_map(self, map: &Map) -> Self {
-        let _ = map;
-        self
+        PumpStats {
+            owns_channels: !map.rx.is_empty() || !map.tx.is_empty(),
+            ..self
+        }
     }
 
     /// Whether the pump reads or writes any channel of the app
     /// ([`PumpStats::for_map`]): its re-bootstrap then loses audio.
     pub fn owns_channels(&self) -> bool {
-        true
+        self.owns_channels
     }
 
     /// One block's own time (the pump thread): counted, the longest kept

@@ -71,21 +71,37 @@ impl ThreadJoin {
 /// MMCSS off, task index 4294967295), that it runs at its process's
 /// priority ([`dstack::media::tx::joined_task`]).
 pub fn mmcss_line(joined: &Result<u32, MmcssError>, read: Option<i32>) -> (bool, String) {
-    let _ = read;
-    (joined.is_ok(), mmcss_text(joined))
-}
-
-fn mmcss_text(joined: &Result<u32, MmcssError>) -> String {
+    let level = read.map_or_else(|| "-".to_string(), |r| r.to_string());
+    let in_mmcss = dstack::media::tx::joined_task(joined, read).is_some();
     match joined {
-        Ok(index) => {
-            format!("the loopback capture thread runs in MMCSS Pro Audio (task index {index})")
-        }
-        Err(MmcssError::Join(e)) => format!(
-            "MMCSS refused the loopback capture thread ({e}): it runs at its process's priority"
+        Err(MmcssError::Join(e)) => (
+            false,
+            format!(
+                "MMCSS refused the loopback capture thread ({e}): \
+                 it runs at its process's priority (priority {level})"
+            ),
         ),
-        Err(MmcssError::Priority { index, error }) => format!(
-            "the loopback capture thread runs in MMCSS Pro Audio (task index {index}), \
-             but AVRT_PRIORITY_HIGH was refused ({error}): it runs at the task's default priority"
+        Ok(index) | Err(MmcssError::Priority { index, .. }) if !in_mmcss => (
+            false,
+            format!(
+                "MMCSS raised nothing for the loopback capture thread \
+                 (task index {index}, priority {level}): it runs at its process's priority"
+            ),
+        ),
+        Ok(index) => (
+            true,
+            format!(
+                "the loopback capture thread runs in MMCSS Pro Audio \
+                 (task index {index}, priority {level})"
+            ),
+        ),
+        Err(MmcssError::Priority { index, error }) => (
+            false,
+            format!(
+                "the loopback capture thread runs in MMCSS Pro Audio (task index {index}, \
+                 priority {level}), but AVRT_PRIORITY_HIGH was refused ({error}): \
+                 it runs at the task's default priority"
+            ),
         ),
     }
 }

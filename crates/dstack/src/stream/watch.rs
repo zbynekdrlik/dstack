@@ -18,7 +18,10 @@
 //! stamps already sent; with
 //! only `overruns` grown, blocks took longer than their period (an
 //! unoptimised converter in a debug build, dstack #1). A gap without the
-//! line is the network or the RX/TX path.
+//! line is the network or the RX/TX path. A pump that owns no channels
+//! ([`PumpStats::owns_channels`], dstack #461: dsend's, whose TX thread
+//! fills L and R) loses nothing that way: its second is an info line,
+//! [`PUMP_NO_LOSS`], with the same fields.
 //!
 //! The line names the re-bootstraps' causes (`cause`, [`cause_word`]:
 //! `late`, `clock_back`, `reanchor`, `retime`, joined by `+`; `none` when
