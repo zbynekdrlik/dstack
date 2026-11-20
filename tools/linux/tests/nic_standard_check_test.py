@@ -84,6 +84,62 @@ STREAM_OUTPUTS = {
     "-i": STREAM_I, "-k": STREAM_K, "-c": STREAM_C, "-g": STREAM_G,
     "-a": STREAM_A, "--show-eee": STREAM_EEE, "": STREAM_LINK,
 }
+# A cable-less NIC (the PP editing PC's unused onboard enp6s0 and enp7s0,
+# 20.11.2026): ethtool reads no speed or duplex.
+NO_LINK = """Settings for enp6s0:
+\tSpeed: Unknown!
+\tDuplex: Unknown! (255)
+\tAuto-negotiation: on
+\tLink detected: no
+"""
+# The PP editing PC's RTL8125 (enp6s0, r8169, no cable), 20.11.2026: the one
+# Linux RTL8125 in the fleet. ethtool -c answers "Operation not supported".
+RTL8125_I = """driver: r8169
+version: 7.0.0-38-generic
+firmware-version: rtl8125b-2_0.0.2 07/13/20
+bus-info: 0000:06:00.0
+"""
+RTL8125_K = """Features for enp6s0:
+rx-checksumming: on
+tx-checksumming: on
+scatter-gather: on
+tcp-segmentation-offload: on
+generic-segmentation-offload: on
+generic-receive-offload: on
+large-receive-offload: off [fixed]
+rx-vlan-offload: on
+tx-vlan-offload: on
+"""
+RTL8125_G = """Ring parameters for enp6s0:
+Pre-set maximums:
+RX:\t\t\t256
+TX:\t\t\t256
+Current hardware settings:
+RX:\t\t\t256
+TX:\t\t\t256
+"""
+RTL8125_A = """Pause parameters for enp6s0:
+Autonegotiate:\ton
+RX:\t\toff
+TX:\t\toff
+"""
+RTL8125_EEE = """EEE settings for enp6s0:
+\tEEE status: disabled
+\tTx LPI: 0 (us)
+"""
+
+
+def rtl8125_facts():
+    facts = {}
+    facts.update(nsc.parse_driver_info(RTL8125_I))
+    facts.update(nsc.parse_features(RTL8125_K))
+    facts.update(nsc.parse_ring(RTL8125_G))
+    facts.update(nsc.parse_coalesce("netlink error: Operation not supported\n"))
+    facts.update(nsc.parse_pause(RTL8125_A))
+    facts.update(nsc.parse_eee(RTL8125_EEE))
+    facts.update(nsc.parse_link(NO_LINK))
+    facts["pci:power/control"] = "on"
+    return facts
 
 
 def stream_facts():
@@ -132,12 +188,27 @@ class TheStandard(unittest.TestCase):
         self.assertTrue({"rtl8156b-windows", "rtl8125-rtl8168-windows", "realtek-vlan-windows"} <= ids)
 
     def test_an_unmeasured_chip_has_no_entry(self):
-        # RTL8153 and a Linux RTL8125 are in no production use: no entry, so a
-        # checker fails one instead of passing it on a guess.
+        # The RTL8153 is in no production use: no entry, so a checker fails
+        # one instead of passing it on a guess.
         std = load()
         self.assertIsNone(nsc.find_entry(std, "linux", "usb", "0bda:8153"))
-        self.assertIsNone(nsc.find_entry(std, "linux", "pci", "10ec:8125"))
+        self.assertIsNone(nsc.find_entry(std, "linux", "pci", "10ec:b852"))
         self.assertIsNone(nsc.find_entry(std, "windows", "pci", "10ec:8168"))
+
+    def test_the_rtl8125_on_linux_has_its_entry_from_the_fleet(self):
+        # The PP editing PC's unused RTL8125 (camera-box's --all run, 20.11).
+        std = load()
+        self.assertGreaterEqual(std["version"], 4)
+        e = nsc.find_entry(std, "linux", "pci", "10ec:8125")
+        self.assertIsNotNone(e)
+        self.assertEqual(e["id"], "rtl8125-linux")
+        self.assertEqual(e["driver"]["modules"], ["r8169"])
+        values = {v["key"]: v for v in e["values"]}
+        # No link was ever read on one: speed and duplex are no standard yet.
+        self.assertEqual(values["link:speed"]["status"], "report")
+        self.assertEqual(values["link:duplex"]["status"], "report")
+        self.assertEqual(values["ring:rx"]["expected"], "256")
+        self.assertNotIn("coalesce:rx-usecs", values)
 
     def test_validation_refuses_a_broken_file(self):
         good = load()
@@ -214,6 +285,8 @@ class Parsing(unittest.TestCase):
         self.assertEqual((f["pause:autonegotiate"], f["pause:rx"], f["pause:tx"]), ("on", "off", "off"))
         self.assertEqual(f["eee:status"], "disabled")
         self.assertEqual((f["link:speed"], f["link:duplex"], f["link:autoneg"]), ("2500Mb/s", "Full", "on"))
+        self.assertEqual(f["link:detected"], "yes")
+        self.assertEqual(nsc.parse_link(NO_LINK)["link:detected"], "no")
 
     def test_the_ring_reads_the_current_settings_not_the_maximums(self):
         text = "Pre-set maximums:\nRX:\t4096\nTX:\t256\nCurrent hardware settings:\nRX:\t100\nTX:\t256\n"
@@ -314,6 +387,38 @@ class Judging(unittest.TestCase):
         fails = [k for k, r in rows.items() if r[0] == "FAIL"]
         self.assertEqual(fails, [])
         low = rows_by_key(nsc.check(entry(load(), "rtl8156b-linux"), stream_facts(), "low_latency"))
+        self.assertEqual(sorted(k for k, r in low.items() if r[0] == "FAIL"),
+                         ["feature:generic-segmentation-offload", "feature:tcp-segmentation-offload"])
+
+    def test_a_nic_without_a_link_gets_no_speed_or_duplex_verdict(self):
+        # A cable-less onboard RTL8168 (camera-box's --all runs, 20.11): speed
+        # and duplex are INFO "no link"; autoneg, EEE and the rest are judged.
+        facts = {"driver": "r8169", "eee:status": "enabled"}
+        facts.update(nsc.parse_link(NO_LINK))
+        facts["link:autoneg"] = "off"
+        rows = rows_by_key(nsc.check(entry(load(), "rtl8168-linux"), facts, "normal"))
+        for key in ("link:speed", "link:duplex"):
+            self.assertEqual(rows[key][0], "INFO")
+            self.assertEqual(rows[key][3], "no link")
+        self.assertEqual(rows["link:autoneg"][0], "FAIL")
+        self.assertEqual(rows["eee:status"][0], "FAIL")
+        self.assertEqual(rows["ring:rx"][0], "FAIL")
+        # With a link, a wrong speed still fails.
+        facts.update(nsc.parse_link(STREAM_LINK))
+        rows = rows_by_key(nsc.check(entry(load(), "rtl8168-linux"), facts, "normal"))
+        self.assertEqual(rows["link:speed"][:4], ("FAIL", "link:speed", "1000Mb/s", "2500Mb/s"))
+        # No "Link detected" line read: judged as before (absent fails).
+        rows = rows_by_key(nsc.check(entry(load(), "rtl8168-linux"), {"driver": "r8169"}, "normal"))
+        self.assertEqual(rows["link:speed"][0], "FAIL")
+
+    def test_the_pp_editing_pcs_rtl8125_against_its_entry(self):
+        rows = rows_by_key(nsc.check(entry(load(), "rtl8125-linux"), rtl8125_facts(), "normal"))
+        self.assertEqual([k for k, r in rows.items() if r[0] == "FAIL"], [])
+        self.assertEqual(rows["driver"][0], "PASS")
+        self.assertEqual(rows["firmware"][0], "PASS")
+        self.assertEqual(rows["link:speed"][:4], ("INFO", "link:speed", "(no standard yet)", "no link"))
+        self.assertEqual(rows["feature:tcp-segmentation-offload"][0], "SKIP")
+        low = rows_by_key(nsc.check(entry(load(), "rtl8125-linux"), rtl8125_facts(), "low_latency"))
         self.assertEqual(sorted(k for k, r in low.items() if r[0] == "FAIL"),
                          ["feature:generic-segmentation-offload", "feature:tcp-segmentation-offload"])
 
@@ -511,6 +616,8 @@ class ThisPc(unittest.TestCase):
         self._write(os.path.join(pcidev, "vendor"), "0x10ec")
         self._write(os.path.join(pcidev, "device"), "0x8168")
         self._write(os.path.join(pcidev, "power", "control"), "on")
+        # An Ethernet controller's class, as every wired NIC in the fleet.
+        self._write(os.path.join(pcidev, "class"), "0x020000")
         self._write(os.path.join(root, "devices", "pci", "0000:00:1c.0", "power", "control"), "auto")
         intel = os.path.join(root, "devices", "pci", "0000:07:00.0")
         os.makedirs(intel)
@@ -537,10 +644,14 @@ class ThisPc(unittest.TestCase):
         # ethtool's stderr per interface, handed back only when the caller
         # asks for it (with_stderr), as nsc.run does.
         self.eee_stderr = {}
+        # `ethtool <iface>` per interface (stream-snv's link unless a test
+        # sets another).
+        self.link = {}
         nsc.run = lambda args, with_stderr=False: (
             self.eee.get(args[-1], STREAM_EEE) + (self.eee_stderr.get(args[-1], "") if with_stderr else "")
             if args[1] == "--show-eee"
-            else STREAM_OUTPUTS[args[1] if len(args) > 2 else ""]
+            else STREAM_OUTPUTS[args[1]] if len(args) > 2
+            else self.link.get(args[-1], STREAM_LINK)
         )
 
     def tearDown(self):
@@ -654,6 +765,60 @@ class ThisPc(unittest.TestCase):
         self._write(os.path.join(self.net, "ib0", "type"), "32")
         self._write(os.path.join(self.net, "enp7s0", "type"), "1")
         self.assertEqual(nsc.wired_nics(self.net), ["enp2s0", "enp7s0", "rig0"])
+
+    def _realtek_wifi(self, iface, markers=("wireless", "phy80211")):
+        """A Realtek WiFi (RTL8852BE, 10ec:b852, class 0x028000, as on the
+        SNV editing PC and both stream PCs, 20.11.2026), down."""
+        wifi = os.path.join(self.root.name, "devices", "pci", "0000:04:00.0")
+        os.makedirs(wifi, exist_ok=True)
+        self._write(os.path.join(wifi, "vendor"), "0x10ec")
+        self._write(os.path.join(wifi, "device"), "0xb852")
+        self._write(os.path.join(wifi, "class"), "0x028000")
+        os.makedirs(os.path.join(self.net, iface))
+        os.symlink(wifi, os.path.join(self.net, iface, "device"))
+        self._write(os.path.join(self.net, iface, "operstate"), "down")
+        for marker in markers:
+            os.makedirs(os.path.join(self.net, iface, marker))
+
+    def test_a_down_nic_without_a_link_gets_no_speed_or_duplex_fail(self):
+        # camera-box's --all runs (20.11): a cable-less onboard RTL8168.
+        self.link["enp2s0"] = NO_LINK
+        rc, lines = self.main("--all")
+        self.assertIn("--    enp2s0  RTL8168 (rtl8168-linux)", lines)
+        for key in ("link:speed", "link:duplex"):
+            line = next(x for x in lines if x.startswith(f"INFO  enp2s0  {key}  "))
+            self.assertIn("  actual=no link  (", line)
+        self.assertFalse(any(x.startswith("FAIL  enp2s0  link:") for x in lines))
+        # Its other values are still judged (stream-snv's ring is no RTL8168's).
+        self.assertTrue(any(x.startswith("FAIL  enp2s0  ring:rx  expected=256  actual=4096") for x in lines))
+        self.assertIn("PASS  enp2s0  eee:status  expected=disabled|not supported  actual=disabled", lines)
+        self.assertEqual(rc, 1)
+
+    def test_a_realtek_wifi_is_out_of_the_wired_scan(self):
+        self._realtek_wifi("wlp4s0")
+        rc, lines = self.main("--all", "--profile", "normal")
+        self.assertFalse(any("wlp4s0" in x for x in lines))
+        self.assertIn("3 wired NIC(s) checked for EEE, 0 FAIL", lines)
+        self.assertEqual(lines[-1].split(" Realtek")[0], "2")
+
+    def test_a_wifi_by_its_pci_class_alone_is_out_of_the_wired_scan(self):
+        # No wireless/phy80211 node (a driver that registers neither): the PCI class 0x0280
+        # (network controller, not Ethernet 0x0200) still tells it.
+        self._realtek_wifi("wlp4s0", markers=())
+        self.assertTrue(nsc.is_wireless("wlp4s0", self.net))
+        # enp2s0's class 0x020000 (Ethernet) is wired.
+        self.assertFalse(nsc.is_wireless("enp2s0", self.net))
+        self.assertIn("enp2s0", nsc.wired_nics(self.net))
+        self.assertNotIn("wlp4s0", nsc.wired_nics(self.net))
+        rc, lines = self.main("--all")
+        self.assertFalse(any("wlp4s0" in x for x in lines))
+
+    def test_a_named_wifi_fails_as_no_wired_realtek(self):
+        self._realtek_wifi("wlp4s0")
+        rc, lines = self.main("wlp4s0")
+        self.assertEqual(rc, 1)
+        self.assertIn("FAIL  wlp4s0: no such Realtek NIC", lines)
+        self.assertEqual(lines[-1], "0 Realtek NIC(s) checked, 1 FAIL")
 
     def test_an_unreadable_standard_exits_2(self):
         rc, lines = self.main(standard=os.path.join(self.root.name, "missing.json"))

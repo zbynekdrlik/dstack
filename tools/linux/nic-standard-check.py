@@ -16,6 +16,11 @@ yet (status `report`, or a driver version under an open question); SKIP is a
 value of another profile or a NIC that is down. A Realtek NIC without an entry
 FAILs: a new chip is measured and added before it carries production traffic.
 So does an interface named on the command line that is missing or no Realtek.
+A NIC with no carrier (ethtool's "Link detected: no", a cable-less onboard
+NIC) gets no speed or duplex verdict: those two read INFO "no link", every
+other value is judged. Wireless NICs (a `wireless` or `phy80211` node, or the
+PCI class 0x0280, such as the Realtek WiFi 10ec:b852) are out of the wired
+scan.
 
 First, whatever the vendor, it checks the standard's vendor-independent rule
 `eee` on EVERY wired physical NIC, up or down, with or without an entry and
@@ -347,10 +352,13 @@ def parse_eee(text):
 
 
 def parse_link(text):
-    """`ethtool <iface>`: auto-negotiation, speed and duplex."""
+    """`ethtool <iface>`: auto-negotiation, speed, duplex and whether a link
+    is detected (`link:detected` yes/no: no carrier reads no)."""
     p = _colon_pairs(text)
     out = {}
-    for name, key in (("Auto-negotiation", "autoneg"), ("Speed", "speed"), ("Duplex", "duplex")):
+    for name, key in (
+        ("Auto-negotiation", "autoneg"), ("Speed", "speed"), ("Duplex", "duplex"), ("Link detected", "detected")
+    ):
         if name in p:
             out["link:" + key] = p[name]
     return out
@@ -399,6 +407,17 @@ def _lookup(facts, key):
     return None
 
 
+# The values a NIC has only with a link: without a carrier ethtool reads
+# "Unknown!", so they get no verdict (camera-box's --all runs, 20.11.2026).
+LINK_STATE_KEYS = ("link:speed", "link:duplex")
+NO_LINK_NOTE = "no carrier: no speed or duplex verdict without a link; the driver and the other values are judged"
+
+
+def no_link(facts):
+    """Whether ethtool read no link on the NIC ("Link detected: no")."""
+    return (_lookup(facts, "link:detected") or "").strip().casefold() == "no"
+
+
 def judge_value(spec, facts, profile):
     """One row (verdict, key, expected, actual, note) for a value."""
     key = spec["key"]
@@ -409,6 +428,8 @@ def judge_value(spec, facts, profile):
     note = spec["evidence"]
     if spec.get("profile", "normal") != "normal" and spec["profile"] != profile:
         return ("SKIP", key, expected, shown, f"{spec['profile']} profile only")
+    if key in LINK_STATE_KEYS and no_link(facts):
+        return ("INFO", key, expected, "no link", NO_LINK_NOTE)
     if status == "report":
         return ("INFO", key, expected, shown, note)
     if status == "open":
@@ -592,6 +613,23 @@ def run(args, with_stderr=False):
     return r.stdout
 
 
+# PCI class 0x0280 ("network controller, other", not Ethernet's 0x0200): the
+# class of the WiFi cards (the Realtek RTL8852BE 10ec:b852, Intel's CNVi).
+# Every wired NIC read in the fleet (20.11.2026) is 0x020000.
+PCI_CLASS_WIRELESS = "0x0280"
+
+
+def is_wireless(iface, sysfs=SYSFS_NET):
+    """Whether a NIC is wireless: its `wireless` or `phy80211` node (a
+    cfg80211 or wext driver registers one), or its PCI class 0x0280, for a
+    WiFi driver that registers neither (the dispatch's third test, #465)."""
+    base = os.path.join(sysfs, iface)
+    if os.path.exists(os.path.join(base, "wireless")) or os.path.exists(os.path.join(base, "phy80211")):
+        return True
+    pci_class = _read(os.path.join(base, "device", "class"))
+    return pci_class is not None and pci_class.lower().startswith(PCI_CLASS_WIRELESS)
+
+
 def wired_nics(sysfs=SYSFS_NET):
     """Every wired physical NIC: an interface with a device, no wireless
     one, of type 1 (Ethernet) where the type is readable."""
@@ -600,7 +638,7 @@ def wired_nics(sysfs=SYSFS_NET):
         base = os.path.join(sysfs, iface)
         if not os.path.exists(os.path.join(base, "device")):
             continue
-        if os.path.exists(os.path.join(base, "wireless")) or os.path.exists(os.path.join(base, "phy80211")):
+        if is_wireless(iface, sysfs):
             continue
         kind = _read(os.path.join(base, "type"))
         if kind is not None and kind != "1":
@@ -676,7 +714,8 @@ def main(argv=None, sysfs=SYSFS_NET, quirks_path=USBCORE_QUIRKS):
     failed = checked = 0
     for iface in ifaces:
         ids = nic_ids(iface, sysfs)
-        if ids is None or ids[1].split(":")[0] not in (REALTEK_USB, REALTEK_PCI):
+        # A Realtek WiFi (10ec:b852) is out of the wired scan.
+        if ids is None or ids[1].split(":")[0] not in (REALTEK_USB, REALTEK_PCI) or is_wireless(iface, sysfs):
             if named:
                 print(f"FAIL  {iface}: no such Realtek NIC")
                 failed += 1

@@ -16,7 +16,9 @@ Read the file, or call the checker; never copy its values into your own constant
 - **Only some NICs:** `-Name` (Windows) or `IFACE` arguments (Linux) check just those against their entries, up or not; a named one that is missing or no Realtek fails. The EEE rule still covers every wired NIC of the PC. A PC whose second Realtek NIC is not a Dante leg (dsg's SoundGrid NIC) names its Dante NIC.
 - **Exit status:** 0 when every judged value passes, 1 on any FAIL, 2 when the file cannot be read, is not of this schema, or is malformed.
 - **The lines:** `PASS` and `FAIL` judge a value and show the expected and the actual value. `INFO` prints a value the standard does not decide yet. `SKIP` marks a value of another profile, or an adapter that is down. Lines other than PASS carry the evidence or the open plan.
-- **A Realtek NIC without an entry FAILs** ("no standard for this Realtek adapter"). A new chip, or a known chip on a new OS, is measured and added here before it carries production traffic. The RTL8153 and a Linux RTL8125 have no entry today: no production PC uses one.
+- **A NIC without a link** (no carrier: a cable-less onboard NIC checked with `--all`/`-IncludeDown` or by name) gets no speed or duplex verdict (version 4, camera-box's `--all` runs 20.11.2026). Linux: ethtool's `Link detected: no` turns `link:speed` and `link:duplex` into `INFO ... actual=no link`; Windows (which judges no negotiated speed; `*SpeedDuplex` is a setting) prints one `INFO <name>  link  expected=(a link)  actual=no link` line for a Disconnected adapter. Its driver, auto-negotiation, EEE and every other value are still judged.
+- **Wireless NICs are out of the scan.** Linux: an interface with a `wireless` or `phy80211` node, or a device of PCI class 0x0280 ("network controller, other", the WiFi cards' class, for a WiFi driver that registers neither node; every wired NIC in the fleet reads 0x020000). Windows: `NdisPhysicalMedium` 9 or a `PhysicalMediaType` of 802.11. So the Realtek WiFi RTL8852BE (`10ec:b852`, on the SNV editing PC and both stream PCs) is no Realtek chip without an entry; naming one fails as no such Realtek NIC.
+- **A Realtek NIC without an entry FAILs** ("no standard for this Realtek adapter"). A new chip, or a known chip on a new OS, is measured and added here before it carries production traffic. The RTL8153 has no entry today: no production PC uses one.
 - **Profiles:** `normal` (default, every dlink app) and `low_latency` (the iemmixer box, dasio). A value marked `"profile": "low_latency"` (TSO/GSO off on Linux) is checked only with that profile.
 - **Setting the values** stays the project's own setup (songplayer's `setup-prod-pc.ps1`, dasio's baseline, camera-box's NetworkManager profiles), written from this file, then proved with the checker.
 
@@ -98,6 +100,7 @@ The file holds every value; this is the summary.
 | RTL8156B | Linux | `r8152`, in-tree or Realtek's v2.21.4 (**open**, #408) | RX ring 4096; rx-usecs the default 15 µs (never changed on a running link); pause off; EEE off; USB autosuspend off; usbcore NO_LPM quirk (`usbcore.quirks=0bda:8156:k`); TSO/GSO off in the low-latency profile |
 | RTL8125 / RTL8168 (PCIe) | Windows | `rt640x64.sys` ≥ 10.79.20.1003, never 10.72.524.2024 (**open**: one version for the family; 10.79 measured clean only with dasio's deferred receive) | interrupt moderation 0; flow control, EEE, green, power saving 0; LSO 0; jumbo 1514; speed auto; wake-on-LAN 0; ASPM 0; PnPCapabilities with 0x08. Low-latency profile (dasio's tuning): Receive and Transmit Buffers 4096 (**open** on the RTL8168), RSS 1 with 4 queues |
 | RTL8168 (PCIe) | Linux | the kernel's `r8169`, firmware `rtl8168h-2_0.0.2 02/26/15` | rings 256/256; coalescing 0; pause off; EEE off; runtime PM off; TSO/GSO off in the low-latency profile |
+| RTL8125 (PCIe), version 4 | Linux | the kernel's `r8169`, firmware `rtl8125b-2_0.0.2 07/13/20` (fleet value) | rings 256/256; pause off; EEE off; offloads on; runtime PM off; TSO/GSO off in the low-latency profile (the RTL8168's measurement, same driver); speed and duplex `report` (no link ever read); no coalescing (r8169 has none for this chip). From the fleet's one Linux RTL8125, the PP editing PC's unused onboard NIC (read 20.11.2026), nothing measured |
 | Realtek Virtual Adapter (the VLAN leg) | Windows | `RtVlan640.sys` ≥ 10.4.1117.2020 | none (its VLAN ID is per PC); never disable or restart one (#239) |
 
 ### The open measurement: Transmit URBs 8 or 32
@@ -124,7 +127,7 @@ Every reachable production PC, read through the fleet MCP (`Get-NetAdapter`, `Ge
 | the iemmixer box (gen3) | Linux, RT kernel | RTL8168H PCIe | `r8169`, firmware rtl8168h-2_0.0.2 | one leg (Dante) | rings 256/256; coalescing 0; pause off; EEE off; **TSO/GSO off**; qdisc prio. A second RTL8168H is down |
 | companion-snv | Linux | RTL8168H PCIe | `r8169`, the same firmware | LAN untagged + Dante VLAN | rings 256/256; coalescing 0; pause off; EEE not supported; TSO/GSO on |
 | the PP presenter PC | Linux | RTL8168H PCIe | `r8169`, the same firmware | LAN untagged + Dante VLAN | rings 256/256; coalescing 0; pause off; **EEE enabled** (inactive); TSO/GSO on. A second RTL8168 is down |
-| the editing PCs | Linux | none in use | | Dante on Aquantia (`atlantic`) and Intel (`ixgbe`) NICs | their onboard RTL8168H and RTL8125B are down; outside this standard |
+| the editing PCs | Linux | none in use | | Dante on Aquantia (`atlantic`) and Intel (`ixgbe`) NICs | their onboard RTL8168H and RTL8125B are down, judged with `--all` (the RTL8125B by entry `rtl8125-linux` since version 4); the SNV one also has a Realtek WiFi RTL8852BE, out of the scan |
 
 Every USB NIC in the fleet is an RTL8156B: the 1156.22 driver's INF matches REV_31F4 to its `RTL8156Bx64` section, and Linux's in-tree driver loads `rtl8156b-2` firmware on bcdDevice 31f4. No RTL8156 (non-B) and no RTL8153 is in use.
 
@@ -252,6 +255,14 @@ SKIP  enp2s0  feature:generic-segmentation-offload  expected=off  actual=on  (lo
 ```
 
 The iemmixer box with `--profile low_latency`: 1 NIC checked, 0 FAIL (TSO and GSO off pass).
+
+## The checker fixes (version 4, 20.11.2026, read only)
+
+camera-box's `nic-standard-check.py --all` runs on its four PCs (20.11) failed beyond EEE on three checker gaps: a cable-less NIC's speed and duplex ("Unknown!"), the Realtek WiFi as a Realtek chip without an entry, and the PP editing PC's RTL8125 without an entry. After the fixes, run read-only with `--all`:
+
+- **the PP editing PC** (`strih-pp`): exit 0. enp6s0 (RTL8125, entry `rtl8125-linux`) and enp7s0 (RTL8168): every value PASS, `link:speed`/`link:duplex` INFO `no link`, TSO/GSO SKIP (low-latency profile); EEE on the four wired NICs 0 FAIL (the ixgbe pair `not supported`).
+- **stream-snv**: no FAIL from a missing link or a wireless NIC: enp56s0 (RTL8168, no cable) passes with speed/duplex `no link`, the Intel WiFi `wlo1` is not scanned. Exit 1 only on rig0's EEE: `enabled - inactive` again after a USB reset re-enumerated rig0 at 23:16 (kernel log: `reset SuperSpeed USB device`, then `renamed from eth0`), so camera-box's EEE-off does not survive a re-enumeration of the USB NIC (camera-box's setup to make persistent).
+- **resolume-snv**, `nic-standard-check.ps1 -IncludeDown`: exit 0 (its Wi-Fi is Not Present; its Ethernet 4 has a link, no `link` line).
 
 ## The consuming projects
 
