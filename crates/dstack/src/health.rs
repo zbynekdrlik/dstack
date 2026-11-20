@@ -133,7 +133,7 @@ mod glue {
     /// One `status` request to the control socket at `path`: its raw
     /// answer line (the device's status JSON, or its `error: ...` line),
     /// read within `wait` a read, without the line end, at most
-    /// [`MAX_READ`] bytes. For a reader that judges fields the parsed
+    /// `MAX_READ` (1 MiB) bytes. For a reader that judges fields the parsed
     /// [`Status`] does not carry (iemmixer#122); [`read_status`] parses
     /// the same line.
     pub fn read_status_line(path: &Path, wait: Duration) -> io::Result<String> {
