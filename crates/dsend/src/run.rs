@@ -4,7 +4,6 @@
 //! thread of a run (the session, the log, Ctrl+C, dtray's choices, the
 //! watch and the refresh). Glue, run by hand on Windows.
 
-use std::fs::File;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::Duration;
@@ -44,16 +43,8 @@ pub fn run(o: &Options) -> Result<(), String> {
     let name = session::name_of(o);
     let state = session::state_of(o, &name);
     let log = state.with_extension("log");
-    let file = log
-        .parent()
-        .and_then(|d| std::fs::create_dir_all(d).ok())
-        .and_then(|()| File::create(&log).ok());
-    let logged = file.is_some();
+    let logged = host::start_log("dsend", &log);
     LOG_OPEN.store(logged, Ordering::Relaxed);
-    init_log(file);
-    if logged {
-        tracing::info!(log = %log.display(), "dsend: the log");
-    }
     let (events, inbox) = mpsc::channel();
     let mut session = Session::start(o, events.clone())?;
     host::on_ctrl_c("dsend", move || {
