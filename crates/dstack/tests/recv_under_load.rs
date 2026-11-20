@@ -37,12 +37,14 @@ const QUIET: Duration = Duration::from_millis(500);
 /// A group of the test's own (administratively scoped), on loopback.
 const GROUP: Ipv4Addr = Ipv4Addr::new(239, 255, 45, 4);
 
-/// What one reader heard: each sequence number's count, and its waits that
-/// ended with nothing.
+/// What one reader heard: each sequence number's count, its waits that
+/// ended with nothing, and the shortest of those (never under its wait).
 struct Heard {
     name: String,
+    wait: Duration,
     counts: Vec<u32>,
     empty_waits: u64,
+    shortest_empty: Duration,
 }
 
 /// A socket on `GROUP`:`port`, joined on 127.0.0.1.
@@ -65,9 +67,11 @@ fn group_member(port: u16) -> UdpSocket {
 fn read(name: String, sock: UdpSocket, wait: Duration, sent: Arc<AtomicBool>) -> Heard {
     let mut counts = vec![0u32; DATAGRAMS as usize];
     let mut empty_waits = 0;
+    let mut shortest_empty = Duration::MAX;
     let mut buf = [0u8; 64];
     let mut quiet_since: Option<Instant> = None;
     loop {
+        let start = Instant::now();
         match dstack::recv::recv_from_within(&sock, &mut buf, wait) {
             Ok(Some((n, _))) => {
                 let datagram: [u8; 8] = buf
@@ -82,13 +86,16 @@ fn read(name: String, sock: UdpSocket, wait: Duration, sent: Arc<AtomicBool>) ->
             }
             Ok(None) => {
                 empty_waits += 1;
+                shortest_empty = shortest_empty.min(start.elapsed());
                 if sent.load(Ordering::Acquire)
                     && quiet_since.get_or_insert_with(Instant::now).elapsed() >= QUIET
                 {
                     return Heard {
                         name,
+                        wait,
                         counts,
                         empty_waits,
+                        shortest_empty,
                     };
                 }
             }
@@ -168,12 +175,13 @@ fn a_read_with_a_wait_loses_no_datagram_under_load() {
             let lost: Vec<usize> = (0..h.counts.len()).filter(|&i| h.counts[i] == 0).collect();
             let twice = h.counts.iter().filter(|&&c| c > 1).count();
             format!(
-                "{}: lost {} {:?}, twice {}, empty waits {}",
+                "{}: lost {} {:?}, twice {}, empty waits {} (shortest {:?})",
                 h.name,
                 lost.len(),
                 lost,
                 twice,
-                h.empty_waits
+                h.empty_waits,
+                h.shortest_empty
             )
         })
         .collect();
@@ -181,6 +189,13 @@ fn a_read_with_a_wait_loses_no_datagram_under_load() {
     assert!(
         heard.iter().all(|h| h.counts.iter().all(|&c| c == 1)),
         "every reader hears every datagram once:\n{}",
+        report.join("\n")
+    );
+    // A read with nothing returns only once its wait is over: an early
+    // return would end a request's wait or a heartbeat window early.
+    assert!(
+        heard.iter().all(|h| h.shortest_empty >= h.wait),
+        "no read with nothing before its wait:\n{}",
         report.join("\n")
     );
 }

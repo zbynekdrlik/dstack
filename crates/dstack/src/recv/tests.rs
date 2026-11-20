@@ -183,14 +183,39 @@ fn nothing_yet_waits_for_the_time_left_then_reads_again() {
 }
 
 #[test]
-fn a_wait_that_ends_with_nothing_reads_no_more() {
-    let until = Instant::now() + Duration::from_secs(1);
+fn a_wait_to_the_end_with_nothing_reads_no_more() {
+    let until = Instant::now() + Duration::from_millis(30);
     let mut waits = 0;
-    let got = read_when_ready(until, script(vec![nothing()]), |_| {
+    let got = read_when_ready(until, script(vec![nothing()]), |left| {
         waits += 1;
+        std::thread::sleep(left);
         Ok(false)
     });
     assert_eq!((got.unwrap(), waits), (None, 1));
+}
+
+#[test]
+fn a_wait_that_ends_early_with_nothing_waits_again_until_the_end() {
+    // WSAPoll can end a wait with nothing before its timeout: on
+    // windows-2025 a 10 ms wait's empty ends came about every 3.8 ms (#454,
+    // run 44664370634). Nothing is given before `until`, and a wait that
+    // ended with nothing is not read after.
+    let wait = Duration::from_millis(30);
+    let start = Instant::now();
+    let (mut reads, mut waits) = (0, 0);
+    let read = || {
+        reads += 1;
+        nothing()
+    };
+    let got = read_when_ready(start + wait, read, |left| {
+        waits += 1;
+        std::thread::sleep(left.min(Duration::from_millis(2)));
+        Ok(false)
+    });
+    assert_eq!(got.unwrap(), None);
+    assert!(start.elapsed() >= wait, "{:?}", start.elapsed());
+    assert!(waits >= 2, "{waits}");
+    assert_eq!(reads, 1);
 }
 
 #[test]
