@@ -349,10 +349,10 @@ fn open(at: SocketAddrV4, mode: Mode) -> io::Result<UdpSocket> {
         sock.set_multicast_ttl_v4(255)?;
     }
     let sock: UdpSocket = sock.into();
+    // The device's socket is read without a wait; a test's waits in each
+    // read ([`crate::recv`], dstack #454: no read timeout on Windows).
     if sends {
         sock.set_nonblocking(true)?;
-    } else {
-        sock.set_read_timeout(Some(WAIT))?;
     }
     Ok(sock)
 }
@@ -493,10 +493,10 @@ impl Server {
             }
             let Some(heard) = self.heard.as_ref() else {
                 // A test's responder: one read a pass, waiting up to WAIT.
-                match sock.recv_from(&mut buf) {
-                    Ok((n, SocketAddr::V4(from))) => self.reply(&sock, &buf[..n], from),
+                match crate::recv::recv_from_within(&sock, &mut buf, WAIT) {
+                    Ok(Some((n, SocketAddr::V4(from)))) => self.reply(&sock, &buf[..n], from),
                     Ok(_) => {}
-                    Err(e) => trace!(kind = ?e.kind(), "no mDNS query this wait"),
+                    Err(e) => trace!(kind = ?e.kind(), "mDNS query read failed"),
                 }
                 continue;
             };

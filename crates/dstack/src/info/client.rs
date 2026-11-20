@@ -530,30 +530,17 @@ pub fn ask(
                 .map_err(io)?;
             next = now + RESEND;
         }
-        sock.set_read_timeout(Some(deadline.min(next) - now))
-            .map_err(io)?;
-        match sock.recv_from(&mut buf) {
-            Ok((n, SocketAddr::V4(from))) if from.ip() == device.ip() => {
+        // dstack #454: no read timeout on Windows (crate::recv); nothing
+        // within the wait sends again or ends the ask at the loop's top.
+        let wait = deadline.min(next) - now;
+        match crate::recv::recv_from_within(sock, &mut buf, wait).map_err(io)? {
+            Some((n, SocketAddr::V4(from))) if from.ip() == device.ip() => {
                 if let Some(body) = reply_body(&buf[..n], ask, id) {
                     return Ok(body.to_vec());
                 }
             }
-            Ok(_) => {}
-            Err(e) => match recv_error(ask, &e) {
-                InfoError::Timeout { .. } => {}
-                other => return Err(other),
-            },
+            Some(_) | None => {}
         }
-    }
-}
-
-/// What a receive error ends an ask with: the read timeout's end (a
-/// would-block or a timed-out read, by platform) is a timeout, anything
-/// else a socket error.
-fn recv_error(ask: Ask, e: &io::Error) -> InfoError {
-    match e.kind() {
-        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut => InfoError::Timeout { ask },
-        kind => InfoError::Io { ask, kind },
     }
 }
 

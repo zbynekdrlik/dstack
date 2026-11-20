@@ -571,7 +571,8 @@ fn the_device_s_responder_opens_again_and_announces_after_an_address_re_add() {
 
 /// The device's socket sends to the group from the address and is read
 /// without a wait (its queries come from the daemon's socket); a test's
-/// unicast one is read with the thread's wait and names no send interface.
+/// unicast one carries no read timeout (its thread's reads wait through
+/// `crate::recv`, dstack #454) and names no send interface.
 #[test]
 fn the_device_s_socket_names_the_send_interface_and_never_waits() {
     let at = free_at();
@@ -584,7 +585,7 @@ fn the_device_s_socket_names_the_send_interface_and_never_waits() {
     assert_eq!(e.kind(), io::ErrorKind::WouldBlock);
     drop(sends);
     let unicast = open(at, Mode::Unicast).unwrap();
-    assert_eq!(unicast.read_timeout().unwrap(), Some(WAIT));
+    assert_eq!(unicast.read_timeout().unwrap(), None);
     assert_eq!(
         socket2::SockRef::from(&unicast).multicast_if_v4().unwrap(),
         Ipv4Addr::UNSPECIFIED

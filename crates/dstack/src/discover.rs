@@ -507,9 +507,7 @@ fn group_listener(ip: Ipv4Addr) -> io::Result<UdpSocket> {
     };
     sock.bind(&SocketAddrV4::new(bind, MDNS.port()).into())?;
     sock.join_multicast_v4(MDNS.ip(), &ip)?;
-    let sock: UdpSocket = sock.into();
-    sock.set_read_timeout(Some(READ_WAIT))?;
-    Ok(sock)
+    Ok(sock.into())
 }
 
 impl Discovery {
@@ -576,7 +574,6 @@ impl Discovery {
         lister: Lister,
     ) -> Result<(Self, Receiver<Change>), DiscoverError> {
         let sweeper = UdpSocket::bind(SocketAddrV4::new(ip, 0))?;
-        sweeper.set_read_timeout(Some(READ_WAIT))?;
         if mdns.ip().is_multicast() {
             send_on(&sweeper, ip)?;
         }
@@ -666,14 +663,14 @@ fn now_ns(origin: Instant) -> u64 {
 }
 
 /// Reads `sock` while it has datagrams and `until` has not passed, handing
-/// each to `take`. A read that waits out the socket's timeout (nothing
-/// arrived within it) or fails ends it. A busy group is read as fast
+/// each to `take`. A read that waits [`READ_WAIT`] with nothing (dstack
+/// #454: [`crate::recv`], no read timeout on Windows) or fails ends it. A busy group is read as fast
 /// as it comes (dstack #206: one datagram a pass read about 20 a second
 /// against dev1's 30, and the kernel dropped the rest, goodbyes among
 /// them).
 fn drain(sock: &UdpSocket, buf: &mut [u8], until: Instant, mut take: impl FnMut(&[u8])) {
     while !until.saturating_duration_since(Instant::now()).is_zero() {
-        let Ok((n, _)) = sock.recv_from(buf) else {
+        let Ok(Some((n, _))) = crate::recv::recv_from_within(sock, buf, READ_WAIT) else {
             break;
         };
         take(&buf[..n]);

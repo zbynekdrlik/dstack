@@ -327,14 +327,6 @@ fn the_listener_hands_on_every_heartbeat_with_its_sender_until_stopped() {
 }
 
 #[test]
-fn only_a_read_that_timed_out_is_a_timeout() {
-    use std::io::{Error, ErrorKind};
-    assert!(timed_out(&Error::from(ErrorKind::WouldBlock)));
-    assert!(timed_out(&Error::from(ErrorKind::TimedOut)));
-    assert!(!timed_out(&Error::from(ErrorKind::ConnectionReset)));
-}
-
-#[test]
 fn the_listener_stops_when_its_receiver_is_gone() {
     let ip = test_ipv4();
     let (listener, rx) = Listener::start(ip).expect("the heartbeat group joined");
@@ -360,20 +352,20 @@ fn one_read_hands_on_a_heartbeat_and_ends_only_on_a_failure_or_no_receiver() {
     let beat = late_beat([7; 8], 3);
     let (tx, rx) = std::sync::mpsc::channel();
     // A heartbeat goes on, with its sender.
-    assert!(hand_on(Ok((beat.len(), from)), &beat, &tx));
+    assert!(hand_on(Ok(Some((beat.len(), from))), &beat, &tx));
     let (ip, got) = rx.try_recv().expect("handed on");
     assert_eq!(
         (ip, got.device_id, got.late),
         (Ipv4Addr::new(10, 0, 0, 7), [7; 8], Some(vec![3, 4]))
     );
     // Not a heartbeat, a length past the buffer, an IPv6 sender: left out.
-    assert!(hand_on(Ok((4, from)), &beat, &tx));
-    assert!(hand_on(Ok((beat.len() + 1, from)), &beat, &tx));
+    assert!(hand_on(Ok(Some((4, from))), &beat, &tx));
+    assert!(hand_on(Ok(Some((beat.len() + 1, from))), &beat, &tx));
     let v6 = SocketAddr::new(std::net::Ipv6Addr::LOCALHOST.into(), 8708);
-    assert!(hand_on(Ok((beat.len(), v6)), &beat, &tx));
+    assert!(hand_on(Ok(Some((beat.len(), v6))), &beat, &tx));
     assert!(rx.try_recv().is_err());
-    // A timeout goes on; a failed socket ends the thread.
-    assert!(hand_on(Err(Error::from(ErrorKind::WouldBlock)), &beat, &tx));
+    // Nothing within the wait goes on; a failed socket ends the thread.
+    assert!(hand_on(Ok(None), &beat, &tx));
     assert!(!hand_on(
         Err(Error::from(ErrorKind::ConnectionReset)),
         &beat,
@@ -381,8 +373,8 @@ fn one_read_hands_on_a_heartbeat_and_ends_only_on_a_failure_or_no_receiver() {
     ));
     // No receiver: a heartbeat ends the thread, anything else does not.
     drop(rx);
-    assert!(hand_on(Ok((4, from)), &beat, &tx));
-    assert!(!hand_on(Ok((beat.len(), from)), &beat, &tx));
+    assert!(hand_on(Ok(Some((4, from))), &beat, &tx));
+    assert!(!hand_on(Ok(Some((beat.len(), from))), &beat, &tx));
 }
 
 #[test]
