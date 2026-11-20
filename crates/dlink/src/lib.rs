@@ -18,9 +18,10 @@
 //! without spinning a core. On Windows they ask THREAD_PRIORITY_HIGHEST
 //! within the process's normal class, join MMCSS "Pro Audio" at
 //! AVRT_PRIORITY_HIGH (so an app's own MMCSS audio threads no longer
-//! outrank them; dstack #1) and opt out of power throttling, all without
-//! privilege, for our threads only, nothing process-wide; elsewhere they
-//! run at normal priority. Very low latency is a different situation, for
+//! outrank them; dstack #1; where MMCSS is off the status and the log
+//! report the priority read back, dstack #461) and opt out of power
+//! throttling, all without privilege, for our threads only, nothing
+//! process-wide; elsewhere they run at normal priority. Very low latency is a different situation, for
 //! iemmixer and dasio, which use `dstack` directly with its `low_latency`
 //! profile.
 //!
@@ -166,6 +167,11 @@
 //! and `drain_max_datagrams` (its socket drain before a block) and
 //! `max_process_cpu_us` (a block's thread CPU time on Linux, `-` elsewhere:
 //! far under `max_process_us`, the block was preempted, not slow).
+//! A pump that owns no channels (every TX channel pulled by the TX thread,
+//! no RX channel: dsend's) loses no audio when it re-bootstraps or
+//! overruns, so since dstack #461 its second is an info line, `engine pump
+//! re-bootstrapped or overran this second: it owns no channels, no audio
+//! lost`, with the same fields.
 //!
 //! ```no_run
 //! use dlink::{Block, Config, Link, Map, Place, Process};
@@ -202,6 +208,7 @@ pub use dstack::daemon::Place;
 pub use dstack::daemon::media::{Media, RxChannel};
 pub use dstack::device::DeviceConfig;
 pub use dstack::host::{HostError, Stopped};
+pub use dstack::media::rx::RxDestinations;
 pub use dstack::stream::Map;
 pub use dstack::subscribe::{SubState, SubStatus};
 pub use dstack_audio_io::{Block, Process};
@@ -861,6 +868,18 @@ impl Link {
     /// receiving).
     pub fn rx_channels(&self) -> Vec<RxChannel> {
         self.device.media().rx_channels()
+    }
+
+    /// The (destination IPv4, UDP port) pairs the device's RX flows arrive
+    /// on, with their generation (dstack #464, [`Media::rx_destinations`]):
+    /// each multicast flow's group and port, the device's address with
+    /// each unicast flow's port, as its flow plan was last published. Poll
+    /// it and set a packet filter's match table again when the generation
+    /// moved (dasio's NDIS filter, `IOCTL_DASIO_RX_MATCH`). The set is
+    /// complete, up to 32 pairs; a table that holds fewer (dasio's 16)
+    /// caps it itself.
+    pub fn rx_destinations(&self) -> RxDestinations {
+        self.device.media().rx_destinations()
     }
 
     /// The device's numbers as one JSON line: the clock, the flows, the

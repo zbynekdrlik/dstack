@@ -70,6 +70,13 @@ jobs:
         run: scripts/ci-apt-deps.sh
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
+      # Linux only: one release build of dlink, and the code path is the
+      # same on Windows (the converter's FMA copy is chosen at run time).
+      - name: The 44.1 kHz conversion's cost at 64 x 64 channels (dstack #462, optimised)
+        if: runner.os == 'Linux'
+        run: |
+          cargo clippy --release --locked -p dlink --test rated_cost -- -D warnings
+          cargo test --release --locked -p dlink --test rated_cost -- --nocapture
 
   windows-tools:
     # The PowerShell tools for Windows PCs (tools/windows, dstack #239), tested

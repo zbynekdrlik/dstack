@@ -19,6 +19,7 @@ use crate::subscribe::SubStatus;
 use crate::subscribe::resolve::Advertised;
 use crate::wire::{Header, reply};
 
+mod destinations;
 mod grant_read;
 mod names;
 mod send_if;
