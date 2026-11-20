@@ -1,0 +1,198 @@
+{
+  "schema": "dstack-nic-standard/1",
+  "version": 2,
+  "updated": "2026-11-20",
+  "issue": "https://github.com/zbynekdrlik/dstack/issues/465",
+  "doc": "docs/nic-standard.md",
+  "scope": "Every Realtek NIC that is up on a production PC with a Dante leg (docs/two-networks.md, scope). One entry per chip and OS; a Realtek adapter without an entry fails until it is measured and added. Read-only checkers: tools/windows/nic-standard-check.ps1, tools/linux/nic-standard-check.py.",
+  "fields": {
+    "match": "windows: hardware_id prefixes of the device's first hardware id (case-insensitive); linux: usb or pci vendor:product ids (lowercase hex)",
+    "driver": "windows: files (the allowed DriverFileName); linux: modules and an optional firmware; both: min_version, bad (a file, a version, or both, that fails, with evidence), status, evidence, plan. Every object takes only its documented keys: an unknown key is refused",
+    "expected": "a string, or a list of strings any of which passes; null with status report",
+    "compare": "equals (default), bits (every bit of expected is set), contains (the value holds the expected text)",
+    "absent": "fail (default): the keyword must be there; pass: a driver without the keyword passes",
+    "status": "settled: decided with its evidence; open: the standard value until the named measurement decides; report: no standard value yet, printed, never a failure",
+    "profile": "low_latency: checked only with the low_latency profile (iemmixer gen3, dasio); every other value holds for every profile",
+    "evidence": "a ticket, a measurement or a vendor document; 'none yet: fleet value' where the working PCs already share the value and nothing measured it"
+  },
+  "adapters": [
+    {
+      "id": "rtl8156b-windows",
+      "chip": "RTL8156B",
+      "covers": "RTL8156 and RTL8156B (USB 2.5GbE): one USB id. Every one in the fleet is an RTL8156B (bcdDevice 0x31xx; Realtek's 1156.22 INF matches REV_31F4 to its RTL8156B section; Linux firmware rtl8156b-2). No RTL8156 (non-B) is in use.",
+      "os": "windows",
+      "match": {"hardware_id": ["USB\\VID_0BDA&PID_8156"]},
+      "driver": {
+        "files": ["rtucx22x64.sys"],
+        "min_version": "11.19.602.2025",
+        "bad": [
+          {"file": "rtucx21x64.sys", "evidence": "Microsoft's inbox NetAdapterCx driver 11.4.211.2022: a 3-URB / 18-buffer send queue, no PendingTransmits keyword; 6400-9700 late Dante packets a busy minute at dsg against 198 an hour on 11.19.602.2025 at 8 / 64 (dstack #425, songplayer#337)"},
+          {"file": "rtump64x64.sys", "evidence": "Realtek's NDIS driver 10.68.20: USB/WDF DPCs up to 19.3 ms against 0.28 ms on the Cx driver, A/B on mbc 18.11.2026 (dstack #290)"}
+        ],
+        "status": "settled",
+        "evidence": "Realtek's NetAdapterCx driver 11.19.602.2025 carries the transmit-queue keywords and measured clean against the inbox driver (dstack #425, songplayer#337); the Cx family against NDIS (dstack #290). Fleet: resolume-snv and resolume-pp."
+      },
+      "values": [
+        {"key": "PendingTransmits", "name": "Transmit URBs", "expected": "8", "status": "open", "evidence": "3 -> 8 (with buffers 18 -> 64): receivers' reorders ~9/h -> ~3/h, the FOH card's peak 9.6 -> 4.7 ms (dstack receiver A/B 10.11.2026, songplayer#255/#285); inbox 3 -> 8 cut dsg's late packets ~100x (dstack #425).", "plan": "8 vs 32 on resolume-pp with two NDI receivers, by #425's ndiD capture (pktmon on TCPIP / NetAdapterCx / miniport, a detached 60 s capture, .claude/rules/windows-pcs.md): Dante TCPIP -> miniport p99 against 9.4 ms and max against 18.4 ms at 8; the value with the lower p99 and max becomes the standard."},
+        {"key": "TransmitBufferLen", "name": "Transmit Buffers", "expected": "64", "evidence": "with PendingTransmits: the same A/B (songplayer#255/#285, dstack #425)"},
+        {"key": "PendingReceives", "name": "Receive URBs", "expected": "6", "evidence": "none yet: fleet value"},
+        {"key": "ReceiveBufferLen", "name": "Receive Buffers", "expected": "16", "evidence": "none yet: fleet value"},
+        {"key": "*FlowControl", "name": "Flow Control", "expected": "0", "evidence": "a PAUSE stops the NIC's whole send queue, Dante included (dstack #425); docs/two-networks.md"},
+        {"key": "*EEE", "name": "Energy-Efficient Ethernet", "expected": "0", "evidence": "power saving off on every wired NIC (owner 7.11.2026, songplayer#285); docs/two-networks.md"},
+        {"key": "EEE", "name": "EEE (Realtek)", "expected": "0", "evidence": "songplayer#285"},
+        {"key": "AdvancedEEE", "name": "Advanced EEE", "expected": "0", "evidence": "songplayer#285"},
+        {"key": "EnableGreenEthernet", "name": "Green Ethernet", "expected": "0", "evidence": "songplayer#285; docs/two-networks.md"},
+        {"key": "EnableExtraPowerSaving", "name": "Idle Power Saving", "expected": "0", "evidence": "songplayer#285"},
+        {"key": "GigaLite", "name": "Gigabit Lite", "expected": "0", "evidence": "songplayer#285"},
+        {"key": "*SelectiveSuspend", "name": "Selective suspend", "expected": "0", "evidence": "songplayer#285; docs/two-networks.md"},
+        {"key": "PnPCapabilities", "name": "Allow the computer to turn off this device: off", "expected": "8", "compare": "bits", "evidence": "NDIS_DEVICE_DISABLE_PM (0x08) set (songplayer#285)"},
+        {"key": "*InterruptModeration", "name": "Interrupt Moderation", "expected": "0", "absent": "pass", "evidence": "songplayer#285 (where the driver has it; 11.19 does not)"},
+        {"key": "*LsoV2IPv4", "name": "Large Send Offload v2 (IPv4)", "expected": "0", "absent": "pass", "evidence": "LSO off on a Dante NIC: 184 -> 117 gaps per 30 s (dstack #1, docs/windows-box.md); 11.19 has no LSO"},
+        {"key": "*LsoV2IPv6", "name": "Large Send Offload v2 (IPv6)", "expected": "0", "absent": "pass", "evidence": "dstack #1, docs/windows-box.md"},
+        {"key": "*JumboPacket", "name": "Jumbo Frame", "expected": "1514", "absent": "pass", "evidence": "none yet: fleet value"},
+        {"key": "*SpeedDuplex", "name": "Speed & Duplex", "expected": "0", "evidence": "none yet: fleet value (auto negotiation)"},
+        {"key": "*PriorityVLANTag", "name": "Priority & VLAN", "expected": "3", "evidence": "none yet: fleet value"},
+        {"key": "*IPChecksumOffloadIPv4", "name": "IPv4 Checksum Offload", "expected": "3", "evidence": "none yet: fleet value"},
+        {"key": "*TCPChecksumOffloadIPv4", "name": "TCP Checksum Offload (IPv4)", "expected": "3", "evidence": "none yet: fleet value"},
+        {"key": "*UDPChecksumOffloadIPv4", "name": "UDP Checksum Offload (IPv4)", "expected": "3", "evidence": "none yet: fleet value"},
+        {"key": "*TCPChecksumOffloadIPv6", "name": "TCP Checksum Offload (IPv6)", "expected": "3", "evidence": "none yet: fleet value"},
+        {"key": "*UDPChecksumOffloadIPv6", "name": "UDP Checksum Offload (IPv6)", "expected": "3", "evidence": "none yet: fleet value"},
+        {"key": "EnableUSBInterrupt", "name": "USB interrupt transfer", "expected": "0", "absent": "pass", "evidence": "none yet: fleet value"},
+        {"key": "*RscIPv4", "name": "Recv Segment Coalescing (IPv4)", "expected": null, "status": "report", "evidence": "only mbc's 1156.22 driver has it (on); no measurement"},
+        {"key": "*WakeOnMagicPacket", "name": "Wake on Magic Packet", "expected": null, "status": "report", "evidence": "only mbc's 1156.22 driver has it (on); no measurement"}
+      ]
+    },
+    {
+      "id": "rtl8156b-linux",
+      "chip": "RTL8156B",
+      "covers": "RTL8156 and RTL8156B (USB 2.5GbE), as on Windows",
+      "os": "linux",
+      "match": {"usb": ["0bda:8156"]},
+      "driver": {
+        "modules": ["r8152"],
+        "status": "open",
+        "evidence": "stream-snv runs Realtek's out-of-tree r8152 v2.21.4, the PP stream PC the kernel's; both lose rx_missed bursts next to near-line-rate video (dstack #408). The A/B of the two drivers decides; until then either passes and the version is printed.",
+        "plan": "dstack #408: the in-tree r8152 against v2.21.4 on the PP stream PC under the same JPEG XS load, rx_missed steps over a working day"
+      },
+      "values": [
+        {"key": "ring:rx", "name": "RX ring", "expected": "4096", "evidence": "the default 100 missed bursts (dstack #408, docs/two-networks.md #290)"},
+        {"key": "coalesce:rx-usecs", "name": "RX interrupt coalescing", "expected": ["15", "15000"], "evidence": "the driver's default, 15 us (the in-tree driver reads it in ns: 15000; v2.21.4 in us: 15). Any ethtool -C on a running r8152 link restarts the MAC (~2 s without Dante, docs/two-networks.md #290)"},
+        {"key": "pause:rx", "name": "Pause frames RX", "expected": "off", "evidence": "a PAUSE stops the whole send queue (dstack #425)"},
+        {"key": "pause:tx", "name": "Pause frames TX", "expected": "off", "evidence": "dstack #425"},
+        {"key": "eee:status", "name": "EEE", "expected": ["disabled", "not supported"], "evidence": "power saving off on every wired NIC (owner 7.11.2026, songplayer#285)"},
+        {"key": "feature:tcp-segmentation-offload", "name": "TSO", "expected": "off", "profile": "low_latency", "evidence": "measured on the RTL8168 under r8169 (one TX ring: a 64 kB TSO segment held our packet ~525 us; off gave peaks 198-260 us, dstack #1, docs/linux-box.md); the RTL8156B has one TX ring too, the same mechanism, not measured on it"},
+        {"key": "feature:generic-segmentation-offload", "name": "GSO", "expected": "off", "profile": "low_latency", "evidence": "measured on the RTL8168 under r8169 (dstack #1, docs/linux-box.md); the same mechanism here, not measured on it"},
+        {"key": "feature:rx-checksumming", "name": "RX checksum offload", "expected": "on", "evidence": "none yet: fleet value"},
+        {"key": "feature:tx-checksumming", "name": "TX checksum offload", "expected": "on", "evidence": "none yet: fleet value"},
+        {"key": "feature:scatter-gather", "name": "Scatter-gather", "expected": "on", "evidence": "none yet: fleet value"},
+        {"key": "feature:generic-receive-offload", "name": "GRO", "expected": "on", "evidence": "none yet: fleet value"},
+        {"key": "feature:rx-vlan-offload", "name": "RX VLAN offload", "expected": "on", "evidence": "none yet: fleet value"},
+        {"key": "feature:tx-vlan-offload", "name": "TX VLAN offload", "expected": "on", "evidence": "none yet: fleet value"},
+        {"key": "link:autoneg", "name": "Auto-negotiation", "expected": "on", "evidence": "none yet: fleet value"},
+        {"key": "link:speed", "name": "Speed", "expected": "2500Mb/s", "evidence": "none yet: fleet value"},
+        {"key": "link:duplex", "name": "Duplex", "expected": "Full", "evidence": "none yet: fleet value"},
+        {"key": "usb:power/control", "name": "USB autosuspend off", "expected": "on", "evidence": "power saving off (songplayer#285; the Windows selective-suspend twin); fleet value"},
+        {"key": "usbcore:no_lpm", "name": "USB LPM off (usbcore.quirks flag k for 0bda:8156)", "expected": "on", "evidence": "none yet: fleet value (stream-snv and the PP stream PC boot with usbcore.quirks=0bda:8156:k; U1/U2 off, dstack #408)"},
+        {"key": "firmware", "name": "Firmware", "expected": null, "status": "report", "evidence": "the in-tree driver names rtl8156b-2 v3 10/20/23, v2.21.4 names none"}
+      ]
+    },
+    {
+      "id": "rtl8125-rtl8168-windows",
+      "chip": "RTL8125 / RTL8168",
+      "covers": "Realtek PCIe 2.5GbE (RTL8125, 'Realtek Gaming 2.5GbE Family Controller') and GbE (RTL8111/8168, 'Realtek PCIe GbE Family Controller'): one driver (rt640x64), one INF, one entry",
+      "os": "windows",
+      "match": {"hardware_id": ["PCI\\VEN_10EC&DEV_8125", "PCI\\VEN_10EC&DEV_8168"]},
+      "driver": {
+        "files": ["rt640x64.sys"],
+        "min_version": "10.79.20.1003",
+        "bad": [
+          {"file": "rt640x64.sys", "version": "10.72.524.2024", "evidence": "a 20-30 ms receive DPC every ~100 s on FOH's RTL8125 (dasio#1, 2.11.2026; docs/windows-box.md; dstack's former start-line list), and no later measurement keeps it"}
+        ],
+        "status": "open",
+        "evidence": "The 20-30 ms receive DPC was measured on 10.72 AND 10.79 on FOH's RTL8125, with 10.39.212.2020 clean there (dasio#1, docs/windows-box.md). dasio then kept 10.79.20.1003 together with its own deferred receive (dasio_pacer RxdEnable: TCP and discovery receive leave the NIC's DPC) and kernel TX; its baseline records 10.79.20.1003 as best and the inbox rtcx21 and 10.39 as worse on that path (dasio's config/baseline-pc-profile.toml, dasio#1, dasio#128). 10.79.20.1003 read clean on dsg's RTL8168 (dstack #383); 10.79.50.1003 on dsg's RTL8168s since 18.11 (the owner's rule on dasio#120, dasio#188: SoundGrid clock losses 78 -> 0). Every rt640x64 PC in the fleet is a dasio host: 10.79 without dasio's deferred receive is NOT measured clean on the RTL8125.",
+        "plan": "one version for the family: 10.79.50.1003 on FOH's RTL8125 too (dasio's step under dasio#120's rule), then min_version 10.79.50.1003. A PC on rt640x64 without dasio's deferred receive is measured before it carries Dante (10.39.212.2020 is the only version measured clean without it)."
+      },
+      "values": [
+        {"key": "*ReceiveBuffers", "name": "Receive Buffers", "expected": "4096", "status": "open", "profile": "low_latency", "evidence": "dasio's baseline (the Dante NIC as tuned on FOH, dasio#1); on the RTL8168 4096 is above the INF's range (32-512) and what the driver applies is not measured", "plan": "on the RTL8168 (dsg), 4096 against the INF maximum 512, dasio's late and missed counts and a WPR DPC trace per hour (dasio's PC, dasio runs it); the RTL8125 (FOH) keeps 4096, inside its range 32-4096"},
+        {"key": "*TransmitBuffers", "name": "Transmit Buffers", "expected": "4096", "status": "open", "profile": "low_latency", "evidence": "dasio's baseline (dasio#1); on the RTL8168 above the INF's range (32-128). docs/windows-box.md's 'at the driver's minimum' was a next step, never measured", "plan": "on the RTL8168 (dsg), 4096 against the INF maximum 128, the same A/B; the RTL8125 (FOH) keeps 4096, inside its range 64-4096"},
+        {"key": "*FlowControl", "name": "Flow Control", "expected": "0", "evidence": "dasio#1; a PAUSE stops the whole send queue (dstack #425)"},
+        {"key": "*InterruptModeration", "name": "Interrupt Moderation", "expected": "0", "evidence": "dasio#1 (dasio's baseline, must); songplayer#285 sets it 0 on every wired NIC where present"},
+        {"key": "*EEE", "name": "Energy-Efficient Ethernet", "expected": "0", "evidence": "dasio#1; songplayer#285"},
+        {"key": "AdvancedEEE", "name": "Advanced EEE", "expected": "0", "evidence": "dasio#1; songplayer#285"},
+        {"key": "EnableGreenEthernet", "name": "Green Ethernet", "expected": "0", "evidence": "dasio#1; songplayer#285"},
+        {"key": "GigaLite", "name": "Gigabit Lite", "expected": "0", "evidence": "dasio#1; songplayer#285"},
+        {"key": "PowerSavingMode", "name": "Power Saving Mode", "expected": "0", "evidence": "dasio#1; songplayer#285"},
+        {"key": "PnPCapabilities", "name": "Allow the computer to turn off this device: off", "expected": "8", "compare": "bits", "evidence": "songplayer#285"},
+        {"key": "*LsoV2IPv4", "name": "Large Send Offload v2 (IPv4)", "expected": "0", "evidence": "dstack #1, docs/windows-box.md; dasio's baseline"},
+        {"key": "*LsoV2IPv6", "name": "Large Send Offload v2 (IPv6)", "expected": "0", "evidence": "dstack #1; dasio's baseline"},
+        {"key": "*JumboPacket", "name": "Jumbo Frame", "expected": "1514", "evidence": "dasio#1 (dasio's baseline)"},
+        {"key": "*SpeedDuplex", "name": "Speed & Duplex", "expected": "0", "evidence": "dasio#1 (dasio's baseline, auto negotiation)"},
+        {"key": "*RSS", "name": "Receive Side Scaling", "expected": "1", "profile": "low_latency", "evidence": "dasio#1 (dasio's baseline, tuned with its CPU layout); its CPUs are per PC (dasio#128), not in this standard"},
+        {"key": "*NumRssQueues", "name": "Maximum Number of RSS Queues", "expected": "4", "profile": "low_latency", "evidence": "none yet: fleet value (both dasio hosts)"},
+        {"key": "*WakeOnMagicPacket", "name": "Wake on Magic Packet", "expected": "0", "evidence": "dasio's baseline"},
+        {"key": "*WakeOnPattern", "name": "Wake on pattern match", "expected": "0", "evidence": "dasio's baseline"},
+        {"key": "*ModernStandbyWoLMagicPacket", "name": "Modern Standby WoL", "expected": "0", "evidence": "dasio's baseline"},
+        {"key": "S5WakeOnLan", "name": "Shutdown Wake-On-Lan", "expected": "0", "evidence": "dasio's baseline"},
+        {"key": "WolShutdownLinkSpeed", "name": "WOL & Shutdown Link Speed", "expected": "0", "evidence": "dasio's baseline"},
+        {"key": "ASPM", "name": "PCIe ASPM", "expected": "0", "evidence": "none yet: fleet value"},
+        {"key": "*PMARPOffload", "name": "ARP Offload", "expected": "1", "evidence": "none yet: fleet value"},
+        {"key": "*PMNSOffload", "name": "NS Offload", "expected": "1", "evidence": "none yet: fleet value"},
+        {"key": "*IPChecksumOffloadIPv4", "name": "IPv4 Checksum Offload", "expected": "3", "evidence": "none yet: fleet value"},
+        {"key": "*TCPChecksumOffloadIPv4", "name": "TCP Checksum Offload (IPv4)", "expected": "3", "evidence": "none yet: fleet value"},
+        {"key": "*UDPChecksumOffloadIPv4", "name": "UDP Checksum Offload (IPv4)", "expected": "3", "evidence": "none yet: fleet value"},
+        {"key": "*TCPChecksumOffloadIPv6", "name": "TCP Checksum Offload (IPv6)", "expected": "3", "evidence": "none yet: fleet value"},
+        {"key": "*UDPChecksumOffloadIPv6", "name": "UDP Checksum Offload (IPv6)", "expected": "3", "evidence": "none yet: fleet value"},
+        {"key": "*PriorityVlanTag", "name": "Priority & VLAN", "expected": null, "status": "report", "evidence": "dsg 0, FOH 3; no measurement"},
+        {"key": "CLKREQ", "name": "PCIe CLKREQ", "expected": null, "status": "report", "evidence": "dsg 1, FOH 0; no measurement"}
+      ]
+    },
+    {
+      "id": "rtl8168-linux",
+      "chip": "RTL8168",
+      "covers": "Realtek PCIe GbE (RTL8111/8168); every one in use is an RTL8168H",
+      "os": "linux",
+      "match": {"pci": ["10ec:8168"]},
+      "driver": {
+        "modules": ["r8169"],
+        "firmware": "rtl8168h-2_0.0.2 02/26/15",
+        "status": "settled",
+        "evidence": "the kernel's r8169 on every Linux PC with an RTL8168 (the iemmixer box, companion-snv, the PP presenter PC); the gen3 low-latency figures were measured on it (dstack #1, docs/linux-box.md). Firmware: none yet: fleet value."
+      },
+      "values": [
+        {"key": "ring:rx", "name": "RX ring", "expected": "256", "evidence": "none yet: fleet value (the driver's maximum)"},
+        {"key": "ring:tx", "name": "TX ring", "expected": "256", "evidence": "none yet: fleet value (the driver's maximum)"},
+        {"key": "coalesce:rx-usecs", "name": "RX interrupt coalescing", "expected": "0", "evidence": "none yet: fleet value"},
+        {"key": "coalesce:tx-usecs", "name": "TX interrupt coalescing", "expected": "0", "evidence": "none yet: fleet value"},
+        {"key": "pause:rx", "name": "Pause frames RX", "expected": "off", "evidence": "dstack #425"},
+        {"key": "pause:tx", "name": "Pause frames TX", "expected": "off", "evidence": "dstack #425"},
+        {"key": "eee:status", "name": "EEE", "expected": ["disabled", "not supported"], "evidence": "power saving off on every wired NIC (owner 7.11.2026, songplayer#285); the iemmixer box's low-latency NIC runs it off"},
+        {"key": "feature:tcp-segmentation-offload", "name": "TSO", "expected": "off", "profile": "low_latency", "evidence": "measured on this chip: card peak 750 us and 47 late an hour with TSO on, 198-260 us and 1 late off (dstack #1, docs/linux-box.md)"},
+        {"key": "feature:generic-segmentation-offload", "name": "GSO", "expected": "off", "profile": "low_latency", "evidence": "dstack #1, docs/linux-box.md"},
+        {"key": "feature:rx-checksumming", "name": "RX checksum offload", "expected": "on", "evidence": "none yet: fleet value"},
+        {"key": "feature:tx-checksumming", "name": "TX checksum offload", "expected": "on", "evidence": "none yet: fleet value"},
+        {"key": "feature:scatter-gather", "name": "Scatter-gather", "expected": "on", "evidence": "none yet: fleet value"},
+        {"key": "feature:generic-receive-offload", "name": "GRO", "expected": "on", "evidence": "none yet: fleet value"},
+        {"key": "feature:rx-vlan-offload", "name": "RX VLAN offload", "expected": "on", "evidence": "none yet: fleet value"},
+        {"key": "feature:tx-vlan-offload", "name": "TX VLAN offload", "expected": "on", "evidence": "none yet: fleet value"},
+        {"key": "link:autoneg", "name": "Auto-negotiation", "expected": "on", "evidence": "none yet: fleet value"},
+        {"key": "link:speed", "name": "Speed", "expected": "1000Mb/s", "evidence": "none yet: fleet value"},
+        {"key": "link:duplex", "name": "Duplex", "expected": "Full", "evidence": "none yet: fleet value"},
+        {"key": "pci:power/control", "name": "PCIe runtime power management off", "expected": "on", "evidence": "power saving off on every wired NIC (songplayer#285); fleet value (the iemmixer box, companion-snv, the PP presenter PC)"}
+      ]
+    },
+    {
+      "id": "realtek-vlan-windows",
+      "chip": "Realtek Virtual Adapter",
+      "covers": "the VLAN adapter Realtek's Ethernet Diagnostic Utility creates on a Realtek base NIC (docs/two-networks.md section 3); its VLAN ID is per PC and not judged here",
+      "os": "windows",
+      "match": {"hardware_id": ["RTK_VLANMP"]},
+      "driver": {
+        "files": ["RtVlan640.sys"],
+        "min_version": "10.4.1117.2020",
+        "status": "settled",
+        "evidence": "none yet: fleet value (resolume-snv, resolume-pp, dsg). Never disable or restart one (dstack #239)."
+      },
+      "values": []
+    }
+  ]
+}

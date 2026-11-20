@@ -10,9 +10,17 @@
 //! on. It never changes the NIC: that is the PC owner's step (the link
 //! resets when applied).
 //!
-//! It also reads the adapter's driver (`ProviderName`, `DriverVersion`)
-//! and warns on a Realtek driver measured with a long receive DPC
-//! ([`REALTEK_BAD`]); one never measured gets an info line ([`driver`]).
+//! It also reads the adapter's driver (hardware id, provider, driver file
+//! and version) and judges it by the Realtek NIC standard
+//! (`docs/nic-standard.json`, dstack #465, embedded: [`standard`]): a
+//! driver the standard names bad, another file than the standard's, a
+//! version under its minimum, or a Realtek adapter without an entry warns;
+//! the standard's driver is an info line ([`driver_verdict`],
+//! [`driver_line`], dstack #466). Why a driver is bad (the 20-30 ms receive
+//! DPC of rt640x64 10.72, dasio#1) is the standard's evidence text, printed
+//! with the warning.
+
+use std::cmp::Ordering;
 
 /// What the start line says about the NIC's large send offload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,68 +44,183 @@ pub fn verdict(v2: Option<&str>, v1: Option<&str>) -> Verdict {
     }
 }
 
-/// Realtek driver versions (as `Get-NetAdapter` and the registry's
-/// `DriverVersion` show them) measured with a 20 to 30 ms receive DPC that
-/// held every send completion about every 96 to 130 s: late packets at a
-/// receiver and failed sends (dasio#1, the FOH PC, 2.11.2026; RTL8125).
-/// Measured on the [`MEASURED_FAMILY`] only (dstack #383).
-pub const REALTEK_BAD: [&str; 2] = ["10.79.20.1003", "10.72.524.2024"];
-/// Realtek driver versions measured clean on the same PCs.
-pub const REALTEK_GOOD: [&str; 1] = ["10.39.212.2020"];
-/// The adapter family both lists were measured on, as its `DriverDesc`
-/// names it ("Realtek Gaming 2.5GbE Family Controller"): the same version
-/// on the 1 GbE family measured clean (dsg, 17.11.2026; dstack #383).
-pub const MEASURED_FAMILY: &str = "2.5gbe";
+pub mod standard;
 
-/// What the start line says about the NIC's driver.
+/// What the start line knows of the Dante NIC's driver (the network class
+/// key's values, the driver file from its service's `ImagePath`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DriverFacts {
+    /// `ProviderName` (`Realtek`, `Microsoft`).
+    pub provider: Option<String>,
+    /// The device's first hardware id (`Enum\<DeviceInstanceID>\HardwareID`,
+    /// as the checkers read it: `PCI\VEN_10EC&DEV_8125&...`, `RTK_VLANMP`),
+    /// or the class key's `MatchingDeviceId` when that is not read.
+    pub hardware_id: Option<String>,
+    /// The driver file (`rt640x64.sys`).
+    pub file: Option<String>,
+    /// `DriverVersion` (`10.79.20.1003`).
+    pub version: Option<String>,
+    /// `DriverDesc` (`Realtek Gaming 2.5GbE Family Controller`).
+    pub description: Option<String>,
+}
+
+/// The start line's verdict on the Dante NIC's driver against the NIC
+/// standard ([`standard`], dstack #466).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Driver {
-    /// A Realtek driver in [`REALTEK_BAD`].
-    KnownBad,
-    /// A Realtek driver in [`REALTEK_GOOD`].
-    KnownGood,
-    /// Another Realtek driver: never measured, neither good nor bad.
-    Unverified,
-    /// A VLAN virtual adapter (dstack #155: the Dante leg as a Realtek
-    /// VLAN on the PC's one NIC): its driver is the VLAN layer's, not the
-    /// NIC's, and is not judged.
-    Virtual,
-    /// Not a Realtek driver, or not read.
+pub enum DriverVerdict<'a> {
+    /// The driver is the entry's: an allowed file, at or above its minimum.
+    Standard(&'a standard::Entry),
+    /// A driver the entry names bad.
+    Bad(&'a standard::Entry, &'a standard::Bad),
+    /// Not one of the entry's driver files.
+    File(&'a standard::Entry),
+    /// Under the entry's minimum version (or no version read).
+    Old(&'a standard::Entry),
+    /// A Realtek adapter (a Realtek VLAN adapter too) the standard has no
+    /// entry for.
+    Unknown,
+    /// Not a Realtek adapter, or not read.
     Other,
 }
 
-/// Whether an adapter's `DriverDesc` names a VLAN virtual adapter, as
-/// Realtek's Ethernet Diagnostic Utility creates one per VLAN ("Realtek
-/// Virtual Adapter", dstack #155).
-pub fn virtual_adapter(description: Option<&str>) -> bool {
-    description.is_some_and(|d| d.to_ascii_lowercase().contains("virtual adapter"))
-}
-
-/// The verdict on a [`MEASURED_FAMILY`] adapter's driver from its
-/// `ProviderName` and `DriverVersion` (the network class key's values).
-pub fn driver(provider: Option<&str>, version: Option<&str>) -> Driver {
-    let realtek = provider.is_some_and(|p| p.to_ascii_lowercase().contains("realtek"));
-    match version.map(str::trim) {
-        Some(v) if realtek && REALTEK_BAD.contains(&v) => Driver::KnownBad,
-        Some(v) if realtek && REALTEK_GOOD.contains(&v) => Driver::KnownGood,
-        Some(_) if realtek => Driver::Unverified,
-        _ => Driver::Other,
+/// The verdict on the driver `facts` against the standard `std`: the
+/// Windows entry for the adapter's hardware id judges it as the checkers
+/// do (`judge_driver` in `tools/linux/nic-standard-check.py`); without an
+/// entry, a Realtek adapter has no standard (a warning, as the checkers
+/// fail it) and another vendor's is not judged.
+pub fn driver_verdict<'a>(std: &'a standard::Standard, facts: &DriverFacts) -> DriverVerdict<'a> {
+    match facts
+        .hardware_id
+        .as_deref()
+        .and_then(|h| std.windows_entry(h))
+    {
+        Some(entry) => judge(entry, facts),
+        None if realtek(facts) => DriverVerdict::Unknown,
+        None => DriverVerdict::Other,
     }
 }
 
-/// The verdict on an adapter's driver from its `ProviderName`,
-/// `DriverVersion` and `DriverDesc` (dstack #383): [`driver`] on the
-/// [`MEASURED_FAMILY`]; on another family, or one not read, a measured
-/// version is only unverified.
-pub fn driver_of(
-    provider: Option<&str>,
-    version: Option<&str>,
-    description: Option<&str>,
-) -> Driver {
-    let measured = description.is_some_and(|d| d.to_ascii_lowercase().contains(MEASURED_FAMILY));
-    match driver(provider, version) {
-        Driver::KnownBad | Driver::KnownGood if !measured => Driver::Unverified,
-        v => v,
+/// The hardware id prefixes of a Realtek adapter, as the Windows checker
+/// tells one (`Test-RealtekAdapter`): its PCI or USB vendor id, or its VLAN
+/// adapter.
+const REALTEK_IDS: [&str; 3] = [r"PCI\VEN_10EC&", r"USB\VID_0BDA&", "RTK_"];
+
+/// Whether the adapter is a Realtek one, as the Windows checker tells it:
+/// its description names Realtek, or its hardware id starts with a Realtek
+/// prefix ([`REALTEK_IDS`]; the inbox driver's provider is Microsoft);
+/// also a Realtek provider.
+fn realtek(facts: &DriverFacts) -> bool {
+    let upper = |v: &Option<String>| v.as_deref().map(|s| s.trim().to_ascii_uppercase());
+    let named = |v: &Option<String>| upper(v).is_some_and(|s| s.contains("REALTEK"));
+    named(&facts.provider)
+        || named(&facts.description)
+        || upper(&facts.hardware_id).is_some_and(|h| REALTEK_IDS.iter().any(|p| h.starts_with(p)))
+}
+
+/// The entry's verdict on a driver: a bad one (its file, its exact
+/// version, or both), then the allowed files (any case), then the minimum
+/// version.
+fn judge<'a>(entry: &'a standard::Entry, facts: &DriverFacts) -> DriverVerdict<'a> {
+    let file = facts.file.as_deref().map(str::trim);
+    let version = facts.version.as_deref().map(str::trim);
+    let is_file = |name: &str| file.is_some_and(|f| f.eq_ignore_ascii_case(name));
+    let rule = &entry.driver;
+    if let Some(bad) = rule.bad.iter().find(|b| {
+        b.file.as_deref().is_none_or(is_file)
+            && b.version.as_deref().is_none_or(|v| version == Some(v))
+    }) {
+        return DriverVerdict::Bad(entry, bad);
+    }
+    if !rule.files.iter().any(|f| is_file(f)) {
+        return DriverVerdict::File(entry);
+    }
+    if let Some(min) = &rule.min_version
+        && !version.is_some_and(|v| standard::compare_versions(v, min) != Ordering::Less)
+    {
+        return DriverVerdict::Old(entry);
+    }
+    DriverVerdict::Standard(entry)
+}
+
+/// One start-line sentence about the NIC: a warning or an info line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Line {
+    /// A warning (else an info line).
+    pub warn: bool,
+    /// The sentence.
+    pub text: String,
+}
+
+/// The start line's sentence for a driver verdict (none for another
+/// vendor's adapter). A warning names the standard's driver and its
+/// evidence (or, while the rule is open, the plan that decides it).
+pub fn driver_line(verdict: &DriverVerdict<'_>, facts: &DriverFacts) -> Option<Line> {
+    let file = facts.file.as_deref().map_or("(file not read)", str::trim);
+    let version = facts
+        .version
+        .as_deref()
+        .map_or("(version not read)", str::trim);
+    let want = |e: &standard::Entry| {
+        let files = e.driver.files.join(" or ");
+        match &e.driver.min_version {
+            Some(min) => format!("{files} {min} or newer"),
+            None => files,
+        }
+    };
+    let note = |e: &standard::Entry| match (e.driver.status.as_str(), &e.driver.plan) {
+        ("open", Some(plan)) => format!("open: {plan}"),
+        _ => e.driver.evidence.clone(),
+    };
+    let line = |warn: bool, text: String| Some(Line { warn, text });
+    match verdict {
+        DriverVerdict::Standard(e) => line(
+            false,
+            format!(
+                "the Dante NIC's driver {file} {version} is the NIC standard's for the {} ({}, docs/nic-standard.json)",
+                e.chip, e.id
+            ),
+        ),
+        DriverVerdict::Bad(e, bad) => line(
+            true,
+            format!(
+                "the Dante NIC's driver {file} {version} is one the NIC standard names bad for the {} ({}): {}; install {} (docs/nic-standard.md)",
+                e.chip,
+                e.id,
+                bad.evidence,
+                want(e)
+            ),
+        ),
+        DriverVerdict::File(e) => line(
+            true,
+            format!(
+                "the Dante NIC's driver {file} {version} is not the NIC standard's for the {} ({}): install {} (docs/nic-standard.md); {}",
+                e.chip,
+                e.id,
+                want(e),
+                note(e)
+            ),
+        ),
+        DriverVerdict::Old(e) => line(
+            true,
+            format!(
+                "the Dante NIC's driver {file} {version} is under the NIC standard's minimum for the {} ({}): install {} (docs/nic-standard.md); {}",
+                e.chip,
+                e.id,
+                want(e),
+                note(e)
+            ),
+        ),
+        DriverVerdict::Unknown => line(
+            true,
+            format!(
+                "the Dante NIC is a Realtek adapter ({}) the NIC standard has no entry for: its driver {file} {version} was never measured; measure it and add it to docs/nic-standard.json",
+                facts
+                    .hardware_id
+                    .as_deref()
+                    .unwrap_or("hardware id not read")
+            ),
+        ),
+        DriverVerdict::Other => None,
     }
 }
 
@@ -106,7 +229,7 @@ mod windows;
 #[cfg(all(windows, test))]
 use windows::sys;
 #[cfg(windows)]
-pub use windows::{check, check_driver, report};
+pub use windows::{check, driver_facts, report};
 
 #[cfg(test)]
 mod tests;
