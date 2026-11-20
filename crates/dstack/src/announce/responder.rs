@@ -1,49 +1,41 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // Copyright (C) 2026 dstack contributors.
 
-//! Our own records as an mDNS answer (dstack #1 problem E, #141): the
-//! reply to a query for the records we publish, packed in datagrams of one
-//! Ethernet frame.
+//! Test builds only: our own records as an mDNS answer (dstack #1
+//! problem E, #141), and a loopback responder serving them.
 //!
 //! - [`answers`] (pure): the reply to one query for the records we publish
 //!   (PTR of a service type, SRV, TXT or ANY of an instance, A of our
-//!   host), with the instance's SRV, TXT and A as additional records.
-//! - Up to v0.6.206 a Windows device ran a responder socket on
-//!   `<device address>:5353` beside the wildcard daemon, so its answers
-//!   left from the device's address (a SkipAsSource address's would leave
-//!   from the primary one). Since dstack #444's last step the Windows
-//!   daemon itself is bound to the address and answers from it
-//!   ([`super::mdns`]); the responder's thread, its tap reader and its
-//!   #282 reopen are gone. The answers stay: the tests' loopback responders
-//!   answer the stack's direct queries with them (`Responder::start_on`,
-//!   test builds only; the directory's and discovery's tests).
+//!   host), with the instance's SRV, TXT and A as additional records, in
+//!   datagrams of one Ethernet frame.
+//! - [`Responder::start_on`]: a socket on a test's address answering the
+//!   unicast queries to it with those answers; the tests' responders answer
+//!   the stack's direct queries with them (the directory's, discovery's,
+//!   the daemon's tests).
 //!
-//! Logs carry counts only.
+//! Up to v0.6.206 a Windows device ran this answer builder in a responder
+//! socket on `<device address>:5353` beside the wildcard daemon, so its
+//! answers left from the device's address (a SkipAsSource address's would
+//! leave from the primary one). Since dstack #444's last step the Windows
+//! daemon itself is bound to the address and answers from it
+//! ([`super::mdns`]); no build ships a responder of its own.
 
-#[cfg(test)]
 use std::io;
-use std::net::Ipv4Addr;
-#[cfg(test)]
-use std::net::{SocketAddr, SocketAddrV4, UdpSocket};
-#[cfg(test)]
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
-#[cfg(test)]
 use std::sync::{Arc, Mutex, PoisonError};
-#[cfg(test)]
 use std::thread::JoinHandle;
-#[cfg(test)]
 use std::time::Duration;
 
 use simple_dns::rdata::{A, PTR, RData, SRV, TXT};
 use simple_dns::{CLASS, Name, Packet, QTYPE, ResourceRecord, TYPE};
-#[cfg(test)]
 use tracing::{debug, trace};
 
 use super::ServiceRecord;
 
 /// mDNS's group and port.
 pub const GROUP: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 251);
-pub const PORT: u16 = 5353;
+pub use super::mdns::PORT;
 /// The TTL of a host's or an instance's own records (SRV, TXT, A) and of
 /// a service type's PTR, as mdns-sd gives them.
 const HOST_TTL: u32 = 120;
@@ -52,8 +44,7 @@ const OTHER_TTL: u32 = 4500;
 /// Ethernet frame with no IP fragments, as Audinate devices send their
 /// answers (dstack #141).
 pub const MAX_DATAGRAM: usize = 1452;
-/// The test responder's receive wait (it looks at the stop between two).
-#[cfg(test)]
+/// The responder's receive wait (it looks at the stop between two).
 const WAIT: Duration = Duration::from_millis(250);
 
 /// A name as compared: lower case, no dot at the end.
@@ -71,9 +62,8 @@ fn full(rec: &ServiceRecord) -> String {
     format!("{}.{}", rec.instance, rec.service)
 }
 
-/// Where a test responder's reply goes: the group for a query from port
-/// 5353, else its sender (a legacy unicast query).
-#[cfg(test)]
+/// Where a reply goes: the group for a query from port 5353, else its
+/// sender (a legacy unicast query).
 fn reply_to(from: SocketAddrV4) -> SocketAddrV4 {
     if from.port() == PORT {
         SocketAddrV4::new(GROUP, PORT)
@@ -252,16 +242,13 @@ fn a(rec: &ServiceRecord) -> ResourceRecord<'_> {
 }
 
 /// A responder answering the unicast queries to its own socket with the
-/// records published last (test builds only: the tests' loopback
-/// responders).
-#[cfg(test)]
+/// records published last (the tests' loopback responders).
 #[derive(Debug)]
 pub struct Responder {
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
 
-#[cfg(test)]
 impl Responder {
     /// A responder answering the unicast queries to `at` from `published`,
     /// its thread reading with a wait ([`crate::recv`], dstack #454: no read
@@ -297,7 +284,6 @@ impl Responder {
     }
 }
 
-#[cfg(test)]
 impl Drop for Responder {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
@@ -307,9 +293,8 @@ impl Drop for Responder {
     }
 }
 
-/// The test responder's thread: each query read (waiting up to [`WAIT`])
+/// The responder's thread: each query read (waiting up to [`WAIT`])
 /// answered from `published`, until the stop.
-#[cfg(test)]
 fn serve(sock: &UdpSocket, published: &Mutex<Vec<ServiceRecord>>, stop: &AtomicBool) {
     let mut buf = vec![0u8; 9000];
     while !stop.load(Ordering::Relaxed) {

@@ -81,6 +81,8 @@ use super::{AGAIN_TRIES, Announcer, retried};
 use crate::discover::senders::{MINUTE_NS, Meter, browsers::Browsers};
 use crate::membership::{Link, Lister, Membership};
 
+/// mDNS's port.
+pub const PORT: u16 = 5353;
 /// How long a withdrawal is waited for.
 pub const GOODBYE_WAIT: Duration = Duration::from_secs(3);
 /// How long the daemon's shutdown is waited for: after a withdrawal it has
@@ -101,7 +103,7 @@ pub struct Datagram {
 pub enum Heard {
     /// Every datagram (the meter).
     All,
-    /// Queries only: the DNS header's QR bit clear (a responder).
+    /// Queries only: the DNS header's QR bit clear.
     Queries,
 }
 
@@ -461,7 +463,8 @@ impl Mdns {
 
     /// This running daemon, for a caller that asked for a socket `bound`
     /// to the address or not: one asking the other form gets it as it is,
-    /// with a warning (one socket an address).
+    /// with a warning (one socket an address). Only tests ask both forms on
+    /// one address: every production caller goes through [`Mdns::shared`].
     fn kept_for(self: Arc<Self>, bound: bool) -> Arc<Self> {
         if bound != self.bound {
             warn!(
