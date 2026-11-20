@@ -103,13 +103,11 @@ fn result_of<T>(read: Read<T>) -> io::Result<Option<T>> {
 
 /// The longest wait taken as asked: a longer one (up to `Duration::MAX`)
 /// waits this long, about 24.8 days, `WSAPoll`'s longest timeout.
-#[cfg_attr(not(windows), allow(dead_code))]
 const MAX_WAIT: Duration = Duration::from_millis(2_147_483_647);
 const _: () = assert!(MAX_WAIT.as_millis() == i32::MAX as u128);
 
 /// When a wait of `wait` from `now` ends: at most [`MAX_WAIT`] away, so a
 /// huge wait never overflows the clock.
-#[cfg_attr(not(windows), allow(dead_code))]
 fn until_of(now: Instant, wait: Duration) -> Instant {
     now + wait.min(MAX_WAIT)
 }
@@ -152,16 +150,41 @@ fn read_when_ready<T>(
     }
 }
 
-/// The wait as a read timeout (`SO_RCVTIMEO`), then one read (every OS but
-/// Windows).
+/// The wait as read timeouts (`SO_RCVTIMEO`) for the time left (every OS
+/// but Windows): a timeout read can come back with nothing a little before
+/// its time (Linux: a 10 ms wait after 9.98 ms, v0.6.199's coverage run
+/// 44676560919), so it is read again for what is left and `None` comes
+/// only once the wait is over.
 #[cfg(not(windows))]
 fn wait_read<T>(
     sock: &UdpSocket,
     wait: Duration,
     mut read: impl FnMut(&UdpSocket) -> io::Result<T>,
 ) -> io::Result<Option<T>> {
-    sock.set_read_timeout(Some(wait))?;
-    result_of(read_of(read(sock)))
+    timeout_reads(until_of(Instant::now(), wait), |left| {
+        sock.set_read_timeout(Some(left))?;
+        read(sock)
+    })
+}
+
+/// Timeout reads (`attempt` takes the time left before `until` as its
+/// timeout, never zero) until one gives a datagram or fails, or `until`
+/// passed (`None`, never before).
+#[cfg(not(windows))]
+fn timeout_reads<T>(
+    until: Instant,
+    mut attempt: impl FnMut(Duration) -> io::Result<T>,
+) -> io::Result<Option<T>> {
+    loop {
+        let left = until.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Ok(None);
+        }
+        match read_of(attempt(left)) {
+            Read::Nothing => {}
+            done => return result_of(done),
+        }
+    }
 }
 
 #[cfg(test)]

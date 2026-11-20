@@ -115,7 +115,7 @@ pub fn device_reasons(
 }
 
 #[cfg(target_os = "linux")]
-pub use glue::read_status;
+pub use glue::{read_status, read_status_line};
 
 /// The Linux glue: one read of the control socket.
 #[cfg(target_os = "linux")]
@@ -130,20 +130,31 @@ mod glue {
     /// The longest status line read, bytes.
     pub const MAX_READ: u64 = 1 << 20;
 
+    /// One `status` request to the control socket at `path`: its raw
+    /// answer line (the device's status JSON, or its `error: ...` line),
+    /// read within `wait` a read, without the line end, at most
+    /// `MAX_READ` (1 MiB) bytes. For a reader that judges fields the parsed
+    /// [`Status`] does not carry (iemmixer#122); [`read_status`] parses
+    /// the same line.
+    pub fn read_status_line(path: &Path, wait: Duration) -> io::Result<String> {
+        let mut stream = UnixStream::connect(path)?;
+        stream.set_read_timeout(Some(wait))?;
+        stream.set_write_timeout(Some(wait))?;
+        stream.write_all(b"status\n")?;
+        let mut line = String::new();
+        BufReader::new(stream.take(MAX_READ)).read_line(&mut line)?;
+        let end = line.trim_end_matches(['\r', '\n']).len();
+        line.truncate(end);
+        Ok(line)
+    }
+
     /// One `status` request to the control socket at `path`, its answer
     /// line read within `wait` a read; `None` without a socket, an answer
     /// or a status.
     pub fn read_status(path: &Path, wait: Duration) -> Option<Status> {
-        let exchange = || -> io::Result<String> {
-            let mut stream = UnixStream::connect(path)?;
-            stream.set_read_timeout(Some(wait))?;
-            stream.set_write_timeout(Some(wait))?;
-            stream.write_all(b"status\n")?;
-            let mut line = String::new();
-            BufReader::new(stream.take(MAX_READ)).read_line(&mut line)?;
-            Ok(line)
-        };
-        exchange().ok().and_then(|line| parse_status(&line))
+        read_status_line(path, wait)
+            .ok()
+            .and_then(|line| parse_status(&line))
     }
 }
 

@@ -92,3 +92,4 @@ One line per ticket: issue, commits, tests (RED -> GREEN where a bug), decisions
 - 19.11 22:55 CET: v0.6.196 = #447. v0.6.197 = #444 direct-query fix + nic-burst-log tool (#408).
 - 20.11 00:17 CET: v0.6.197 = #444 direct query + nic-burst-log. v0.6.198 = #450 (two announcements) + #444 bound reopen.
 - 20.11 04:47 CET: v0.6.198 = #450 + #444 reopen. v0.6.199 = #454 (no SO_RCVTIMEO read on Windows) + #453 test.
+- 20.11 05:46 CET: v0.6.199 = #454 + #453. v0.6.200 = #457 read_status_line + #455 tests.

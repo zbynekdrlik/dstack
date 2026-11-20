@@ -11,12 +11,15 @@
 //!
 //! The devices are served on loopback (dstack #366). Linux counts the
 //! process's sockets bound to port 5353: its own file descriptors
-//! (`/proc/self/fd`) matched by inode against `/proc/net/udp`. The records
+//! (`/proc/self/fd`) matched by inode against `/proc/net/udp`, judged on
+//! a read that lists one (a read can skip rows, #455). The records
 //! are read as a consumer reads them, by a direct query of a channel
 //! (`subscribe::instance`, from a port of its own).
 
 #![cfg(any(target_os = "linux", windows))]
 
+#[cfg(target_os = "linux")]
+use std::collections::{BTreeSet, HashSet};
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -82,11 +85,12 @@ fn start_with(dir: &Path, second: bool, extra: &str) -> (host::Host, String, Str
     (host, name, tx1)
 }
 
-/// The sockets of this process bound to UDP port 5353, as `<address>`
-/// (`/proc/net/udp`'s hex `local_address`, e.g. `0100007F`).
+/// The inodes of this process's open sockets, exact: `/proc/self/fd` is
+/// listed by fd number, so a socket closed or opened meanwhile never hides
+/// another.
 #[cfg(target_os = "linux")]
-fn mdns_sockets() -> Vec<String> {
-    let mut ours = std::collections::HashSet::new();
+fn socket_inodes() -> HashSet<String> {
+    let mut ours = HashSet::new();
     for fd in std::fs::read_dir("/proc/self/fd").unwrap().flatten() {
         let Ok(link) = std::fs::read_link(fd.path()) else {
             continue;
@@ -99,29 +103,79 @@ fn mdns_sockets() -> Vec<String> {
             ours.insert(inode.to_string());
         }
     }
+    ours
+}
+
+/// One read of `/proc/net/udp`'s rows on port 5353 of the sockets `ours`:
+/// (`local_address` hex, e.g. `0100007F`, inode), sorted, each once. The
+/// read is not exact (#455): the kernel hands the table out a page a
+/// `read` and walks it again to its count at each `read`, so every row
+/// listed earlier that closes between two `read`s (a device thread's
+/// socket, another process's) skips a later one. Never judge from an
+/// empty read, and judge a close by [`socket_inodes`].
+#[cfg(target_os = "linux")]
+fn rows_5353(ours: &HashSet<String>) -> Vec<(String, String)> {
     let table = std::fs::read_to_string("/proc/net/udp").unwrap();
-    table
+    let rows: BTreeSet<(String, String)> = table
         .lines()
         .skip(1)
         .filter_map(|line| {
             let cols: Vec<&str> = line.split_whitespace().collect();
             let (addr, port) = cols.get(1)?.split_once(':')?;
             let inode = cols.get(9)?;
-            (port == "14E9" && ours.contains(*inode)).then(|| addr.to_string())
+            (port == "14E9" && ours.contains(*inode)).then(|| (addr.to_string(), inode.to_string()))
         })
-        .collect()
+        .collect();
+    rows.into_iter().collect()
 }
 
-/// The 5353 sockets once the last device stopped: the daemon's thread
-/// confirms its shutdown just before it drops its socket, so they are
-/// read again for up to 1 s while any is left.
+/// The sockets of this process bound to UDP port 5353 (address hex and
+/// inode, [`rows_5353`]), from the first read within 5 s that lists one
+/// of the sockets open at the call. A row a read skips comes back in the
+/// next; a socket the read does not list at all is not counted (a read
+/// can only miss a second socket, never add one).
 #[cfg(target_os = "linux")]
-fn sockets_after_stop() -> Vec<String> {
+fn mdns_sockets() -> Vec<(String, String)> {
+    let ours = socket_inodes();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let rows = rows_5353(&ours);
+        if !rows.is_empty() || deadline.saturating_duration_since(Instant::now()).is_zero() {
+            return rows;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// The addresses of [`mdns_sockets`]' sockets.
+#[cfg(target_os = "linux")]
+fn addresses(held: &[(String, String)]) -> Vec<&str> {
+    held.iter().map(|(addr, _)| addr.as_str()).collect()
+}
+
+/// The 5353 sockets once the last device stopped, as `<address> <inode>`:
+/// the daemon's thread confirms its shutdown just before it drops its
+/// socket, so the open fds are read again for up to 1 s while one of
+/// `held` is open (exact: [`socket_inodes`]). Then one read of the table
+/// for any other 5353 socket of the process.
+#[cfg(target_os = "linux")]
+fn sockets_after_stop(held: &[(String, String)]) -> Vec<String> {
     let deadline = Instant::now() + Duration::from_secs(1);
     loop {
-        let left = mdns_sockets();
-        if left.is_empty() || deadline.saturating_duration_since(Instant::now()).is_zero() {
-            return left;
+        let ours = socket_inodes();
+        let open: Vec<String> = held
+            .iter()
+            .filter(|(_, inode)| ours.contains(inode))
+            .map(|(addr, inode)| format!("{addr} {inode}"))
+            .collect();
+        if open.is_empty() {
+            return rows_5353(&ours)
+                .into_iter()
+                .map(|(addr, inode)| format!("{addr} {inode}"))
+                .collect();
+        }
+        if deadline.saturating_duration_since(Instant::now()).is_zero() {
+            return open;
         }
         std::thread::sleep(Duration::from_millis(10));
     }
@@ -181,9 +235,9 @@ fn a_device_s_process_receives_mdns_on_one_socket_and_still_answers() {
     {
         assert_eq!(held.len(), 1, "one 5353 socket: {held:?}");
         // The #444 trial switch is off by default: the wildcard's socket.
-        assert_eq!(held, ["00000000"], "bound to the wildcard");
+        assert_eq!(addresses(&held), ["00000000"], "bound to the wildcard");
         assert_eq!(
-            sockets_after_stop(),
+            sockets_after_stop(&held),
             Vec::<String>::new(),
             "none after the stop"
         );
@@ -209,9 +263,13 @@ fn the_mdns_bind_address_trial_binds_the_one_socket_to_the_address() {
     assert!(matches!(stopped, host::Stopped::Done), "{stopped:?}");
     #[cfg(target_os = "linux")]
     {
-        assert_eq!(held, ["0100007F"], "one 5353 socket, on the address");
         assert_eq!(
-            sockets_after_stop(),
+            addresses(&held),
+            ["0100007F"],
+            "one 5353 socket, on the address"
+        );
+        assert_eq!(
+            sockets_after_stop(&held),
             Vec::<String>::new(),
             "none after the stop"
         );
@@ -243,7 +301,7 @@ fn two_devices_on_one_address_share_the_socket_and_one_s_stop_keeps_the_other() 
         assert_eq!(both.len(), 1, "one 5353 socket for both: {both:?}");
         assert_eq!(after_b, both, "A keeps the socket");
         assert_eq!(
-            sockets_after_stop(),
+            sockets_after_stop(&both),
             Vec::<String>::new(),
             "none after the stops"
         );
@@ -317,7 +375,7 @@ fn a_loud_nic_s_neighbours_discovery_keeps_the_one_socket() {
             "one 5353 socket with the discovery: {held:?}"
         );
         assert_eq!(
-            sockets_after_stop(),
+            sockets_after_stop(&held),
             Vec::<String>::new(),
             "none after the stops"
         );
