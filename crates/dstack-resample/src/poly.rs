@@ -266,7 +266,11 @@ fn groups_for(channels: usize, rows: usize) -> Vec<Group> {
     let mut groups = Vec::new();
     let mut first = 0;
     for width in WIDTHS {
-        while channels - first >= width {
+        // A counted loop, never `while` on `first`: a mutant that stops
+        // `first` moving (`*=`) then still ends, where a `while` pushed
+        // groups until the runner ran out of memory (PR #463's mutation
+        // shard 6 overran its 20 minutes twice).
+        for _ in 0..(channels - first) / width {
             groups.push(Group {
                 first,
                 width,
