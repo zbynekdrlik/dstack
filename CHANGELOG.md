@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.201
+
+- Tests: the peer test (`tests/peer.rs`) counts one stall that re-bootstraps both peers' pumps at once as one restart (#459): two re-bootstrapping wakes within 2 ms of each other, each woken late by its own sleep (its `oversleep_us` within 0.5 ms of its lateness, both ways), inside the counted window, credited only within both pumps' counted restarts and only when every re-bootstrap wake in the window was counted (`tests/peer/stalls.rs`). A pump's restart alone, a TX restart or two restarts apart are judged as before. Measured first on throwaway CI (run 44688405554, 30 runs per tree and OS): v0.6.191 0 of 30 failed on windows-2025 and on ubuntu-24.04, v0.6.192 0 and 0, v0.6.193 1 and 0, v0.6.200 0 and 0, so #440's clock work did not raise the rate.
+- **No library change, no latency change.**
+
 ## 0.6.200
 
 - **API (#457, for iemmixer#122): `health::read_status_line(path, wait) -> io::Result<String>`** (Linux): one `status` request to a device's control socket, its raw answer line without the line end (at most `MAX_READ`, 1 MiB; an `error: ...` answer comes back as its text; no socket is an `Err`). For a reader that judges fields the parsed `Status` does not carry (iemmixer's mic-to-ear latency from `rx[].delay`, `tx[].receiver_latency_us`, `engine.offset`). `read_status` parses the same line, unchanged.
