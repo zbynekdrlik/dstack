@@ -224,6 +224,10 @@ function Set-FakePc {
             $fake | Add-Member -NotePropertyName Virtual -NotePropertyValue $virtual
             $fake | Add-Member -NotePropertyName NdisPhysicalMedium -NotePropertyValue $medium
         }
+        # The link state (MediaConnectionState) and the medium's name
+        # (PhysicalMediaType), given only where a test sets Link or MediaType.
+        if ($a.ContainsKey('Link')) { $fake | Add-Member -NotePropertyName MediaConnectionState -NotePropertyValue $a.Link }
+        if ($a.ContainsKey('MediaType')) { $fake | Add-Member -NotePropertyName PhysicalMediaType -NotePropertyValue $a.MediaType }
         $script:FakeAdapters += $fake
         $script:FakeIds['DEV\' + $a.Name] = $a.Hw
         $script:FakeValues[$a.Name] = $a.Props
@@ -322,6 +326,49 @@ Check 'named adapters: only those are checked, a down one too; a missing or non-
     @($down.Lines | Where-Object { $_ -like '--    soundgrid  *' }).Count -eq 1 -and
     $bad.Exit -eq 1 -and ($bad.Lines -contains 'FAIL  Ethernet 44: no such Realtek adapter') -and
     ($bad.Lines -contains 'FAIL  Wi-Fi: no such Realtek adapter') -and ($bad.Lines -contains '0 Realtek NIC(s) checked, 2 FAIL')
+}
+Check 'the RTL8125 on Linux has its entry, version 4 or later' {
+    $e = Entry 'rtl8125-linux'
+    $null -ne $e -and $std.version -ge 4 -and (@($e.match.pci) -contains '10ec:8125') -and
+    (ValueSpec 'rtl8125-linux' 'link:speed').status -eq 'report'
+}
+# A cable-less onboard RTL8168 (camera-box's --all runs, 20.11.2026): no link,
+# so no speed or duplex verdict, one INFO line; its values are still judged.
+Check 'an adapter without a link: one INFO no link line, the driver and values still judged' {
+    Set-FakePc @(
+        @{ Name = 'Ethernet 2'; Desc = 'Realtek PCIe GbE Family Controller'; Status = 'Disconnected'; Link = 'Disconnected'; File = 'rt640x64.sys'; Version = '10.79.50.1003'; Hw = 'PCI\VEN_10EC&DEV_8168&REV_15'; Props = [ordered]@{ '*EEE' = '1'; '*FlowControl' = '0' } }
+    )
+    $r = Run-Fake -IncludeDown
+    $named = Run-Fake -Name @('Ethernet 2')
+    $info = @($r.Lines | Where-Object { $_ -like 'INFO  Ethernet 2  link  expected=(a link)  actual=no link  (*' })
+    $info.Count -eq 1 -and @($named.Lines | Where-Object { $_ -like 'INFO  Ethernet 2  link  *actual=no link*' }).Count -eq 1 -and
+    ($r.Lines -contains 'PASS  Ethernet 2  driver  expected=rt640x64.sys  actual=rt640x64.sys') -and
+    @($r.Lines | Where-Object { $_ -like 'FAIL  Ethernet 2  `*EEE  expected=0  actual=1  (*' }).Count -eq 1 -and
+    ($r.Lines -contains 'PASS  Ethernet 2  *FlowControl  expected=0  actual=0') -and $r.Exit -eq 1
+}
+Check 'a disconnected status alone reads as no link; an adapter with a link gets no link line' {
+    Set-FakePc @(
+        @{ Name = 'Ethernet 2'; Desc = 'Realtek PCIe GbE Family Controller'; Status = 'Disconnected'; File = 'rt640x64.sys'; Version = '10.79.50.1003'; Hw = 'PCI\VEN_10EC&DEV_8168&REV_15'; Props = @{} },
+        @{ Name = 'Ethernet 4'; Desc = 'Realtek Gaming USB 2.5GbE Family Controller'; Status = 'Up'; Link = 'Connected'; File = 'rtucx22x64.sys'; Version = '11.19.602.2025'; Hw = $usb; Props = $resolumePp }
+    )
+    $r = Run-Fake -IncludeDown
+    @($r.Lines | Where-Object { $_ -like 'INFO  Ethernet 2  link  *actual=no link*' }).Count -eq 1 -and
+    @($r.Lines | Where-Object { $_ -like '*  Ethernet 4  link  *' }).Count -eq 0
+}
+# A Realtek Wi-Fi (RTL8852BE, PCI\VEN_10EC&DEV_B852, as in the SNV editing PC):
+# not a wired NIC, out of the Realtek scan too, by NdisPhysicalMedium 9 or by
+# PhysicalMediaType 802.11.
+Check 'a Realtek Wi-Fi is out of the wired scan, by its medium or its media type' {
+    Set-FakePc @(
+        @{ Name = 'Ethernet 4'; Desc = 'Realtek Gaming USB 2.5GbE Family Controller'; Status = 'Up'; File = 'rtucx22x64.sys'; Version = '11.19.602.2025'; Hw = $usb; Props = $resolumePp; Wired = $true },
+        @{ Name = 'Wi-Fi'; Desc = 'Realtek 8852BE Wireless LAN WiFi 6 PCI-E NIC'; Status = 'Disconnected'; File = 'rtwlane6.sys'; Version = '6001.15.157.0'; Hw = 'PCI\VEN_10EC&DEV_B852&SUBSYS_B85217AA&REV_00'; Props = @{ '*EEE' = '1' }; Medium = 9; MediaType = 'Native 802.11' },
+        @{ Name = 'Wi-Fi 2'; Desc = 'Realtek 8852BE Wireless LAN WiFi 6 PCI-E NIC #2'; Status = 'Up'; File = 'rtwlane6.sys'; Version = '6001.15.157.0'; Hw = 'PCI\VEN_10EC&DEV_B852&REV_00'; Props = @{}; MediaType = 'Native 802.11' }
+    )
+    $r = Run-Fake -IncludeDown
+    $named = Run-Fake -Name @('Wi-Fi')
+    $r.Exit -eq 0 -and -not ($r.Lines -match 'Wi-Fi') -and ($r.Lines -contains '1 Realtek NIC(s) checked, 0 FAIL') -and
+    (Test-NicWireless $script:FakeAdapters[1]) -and (Test-NicWireless $script:FakeAdapters[2]) -and -not (Test-NicWireless $script:FakeAdapters[0]) -and
+    $named.Exit -eq 1 -and ($named.Lines -contains 'FAIL  Wi-Fi: no such Realtek adapter')
 }
 Check 'a keyword with no registry value reads as absent' {
     Set-FakePc @(
