@@ -70,6 +70,8 @@ jobs:
         run: scripts/ci-apt-deps.sh
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
+      - name: The 44.1 kHz conversion's cost at 64 x 64 channels (dstack #462, optimised)
+        run: cargo test --release --locked -p dlink --test rated_cost -- --nocapture
 
   windows-tools:
     # The PowerShell tools for Windows PCs (tools/windows, dstack #239), tested
