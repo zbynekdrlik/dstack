@@ -268,6 +268,9 @@ class Judging(unittest.TestCase):
         self.assertEqual(row[:4], ("FAIL", "ring:rx", "4096", "100"))
         line = nsc.format_row("rig0", row)
         self.assertTrue(line.startswith("FAIL  rig0  ring:rx  expected=4096  actual=100  ("))
+        self.assertIn("#408", line)
+        passed = nsc.format_row("rig0", ("PASS", "ring:rx", "4096", "4096", "evidence"))
+        self.assertEqual(passed, "PASS  rig0  ring:rx  expected=4096  actual=4096")
 
 
 class ThisPc(unittest.TestCase):

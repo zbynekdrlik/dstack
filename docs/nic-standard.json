@@ -177,7 +177,7 @@
         {"key": "link:autoneg", "name": "Auto-negotiation", "expected": "on", "evidence": "none yet: fleet value"},
         {"key": "link:speed", "name": "Speed", "expected": "1000Mb/s", "evidence": "none yet: fleet value"},
         {"key": "link:duplex", "name": "Duplex", "expected": "Full", "evidence": "none yet: fleet value"},
-        {"key": "pci:power/control", "name": "PCIe runtime power management", "expected": null, "status": "report", "evidence": "auto on all three; power saving off is the rule elsewhere (songplayer#285), but r8169's runtime PM was never measured"}
+        {"key": "pci:power/control", "name": "PCIe runtime power management off", "expected": "on", "evidence": "power saving off on every wired NIC (songplayer#285); fleet value (iemmixer-snv, companion-snv, linux-pp)"}
       ]
     },
     {

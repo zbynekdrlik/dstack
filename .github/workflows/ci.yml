@@ -93,6 +93,9 @@ jobs:
       - name: Dante-leg firewall group tests (dstack #264)
         shell: powershell
         run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools\windows\tests\dante-leg.Tests.ps1
+      - name: NIC standard checker tests (dstack #465)
+        shell: powershell
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools\windows\tests\nic-standard-check.Tests.ps1
 
   linux-tools:
     # The generic Dante-leg nftables ruleset (tools/linux, dstack #264), loaded

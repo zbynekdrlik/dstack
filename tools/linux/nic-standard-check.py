@@ -290,8 +290,11 @@ def check(entry, facts, profile):
 
 
 def format_row(iface, row):
+    """One output line; the evidence or plan only where the reader acts on
+    it (FAIL, INFO, SKIP), so a clean run stays short."""
     verdict, key, expected, actual, note = row
-    return f"{verdict:<4}  {iface}  {key}  expected={expected}  actual={actual}  ({note})"
+    line = f"{verdict:<4}  {iface}  {key}  expected={expected}  actual={actual}"
+    return line if verdict == "PASS" else f"{line}  ({note})"
 
 
 # ------------------------------------------------------------ this PC
