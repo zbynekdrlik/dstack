@@ -5,23 +5,24 @@
 //! once, measured once. No Dante code: dlink uses it between the network's
 //! rate and the app's, and an app may use it for its other outputs.
 //!
-//! One filter core, rubato's band-limited sinc ([`Async`]) with the
-//! settings SongPlayer measured (256 taps, a 256× table, BlackmanHarris²,
-//! cubic interpolation, the automatic cutoff): THD+N above 120 dB, and the
-//! band that folds back held below −120 dBFS ([`PARAMS`]). Equal rates are
-//! a plain copy, with no filter and no delay. A fixed ratio on one clock
-//! holds the ratio exactly; the ASRC between two clocks (phase 2) steers the
-//! same stage. A fixed ratio runs that filter from a table of its kernels,
-//! built once ([`poly`], dstack #462: the same output, delay and frame
-//! counts, about half the cost at 64 channels); a ratio that is steered
-//! ([`Converter::drifting`]) runs rubato's stage itself.
+//! One filter, rubato's band-limited sinc with the settings SongPlayer
+//! measured (256 taps, a 256× table, BlackmanHarris², cubic interpolation,
+//! the automatic cutoff): THD+N above 120 dB, and the band that folds back
+//! held below −120 dBFS ([`PARAMS`]), in two engines. A fixed ratio on one
+//! clock runs it from a table of its kernels built once ([`poly`], dstack
+//! #462: the same filter, delay and frame counts, about half the cost at 64
+//! channels); a ratio that is steered (the ASRC between two clocks,
+//! [`Converter::drifting`]) runs rubato's [`Async`] stage itself. Equal
+//! rates are a plain copy, with no filter and no delay.
 //!
 //! Measured by the tests (1 kHz at −1 dBFS, computed in `f64`, so far
-//! below any 24-bit floor): THD+N 230.7 dB at 48→96 kHz, 252.0 dB at
-//! 96→48, 206–213 dB at 44.1↔48; a 20 kHz tone's 28 kHz image at 48→96
-//! −214.9 dBFS; a 30 kHz tone folded at 96→48 −209.1 dBFS. The tests hold
-//! the bars (≥ 120 dB, ≤ −120 dBFS). Delay at 48→96: 256 output frames
-//! (2.67 ms); at 96→48: 64 (1.33 ms).
+//! below any 24-bit floor, [`Converter::new`]): THD+N 230.7 dB at 48→96
+//! kHz, 252.0 dB at 96→48, 226.5 dB at 48→44.1 and 230.9 at 44.1→48 (the
+//! [`Async`] stage: the same at 2:1, 206.3–212.5 at 44.1↔48, its float
+//! position sum); a 20 kHz tone's 28 kHz image at 48→96 −214.9 dBFS; a 30
+//! kHz tone folded at 96→48 −209.1 dBFS. The tests hold the bars (≥ 120
+//! dB, ≤ −120 dBFS). Delay at 48→96: 256 output frames (2.67 ms); at
+//! 96→48: 64 (1.33 ms).
 //!
 //! Data is channel-major `f64`: channel `c` of a buffer of `frames` frames
 //! sits at `c * frames ..`. [`Converter::process`] allocates nothing.
@@ -58,6 +59,12 @@ pub const PARAMS: SincInterpolationParameters = SincInterpolationParameters {
     interpolation: SincInterpolationType::Cubic,
     window: WindowFunction::BlackmanHarris2,
 };
+// The table ([`poly`]) builds these settings' kernels itself: rubato's
+// length step, a blend that reaches one frame past the sinc, the window and
+// the interpolation it copies.
+const _: () = assert!(TAPS.is_multiple_of(TAPS_STEP) && OVERSAMPLING > 2);
+const _: () = assert!(matches!(PARAMS.window, WindowFunction::BlackmanHarris2));
+const _: () = assert!(matches!(PARAMS.interpolation, SincInterpolationType::Cubic));
 
 /// How far [`Converter::set_ppm`] may move an ASRC's ratio, ppm: the room
 /// SongPlayer's outputs use (rubato's 1.001). [`asrc::Controller`] keeps
@@ -499,12 +506,14 @@ impl Converter {
     /// [`Converter::drifting_with_taps`]) and needs `L + 1` input frames
     /// past it, so a
     /// fixed input gives `floor((T - 2) * r)` frames for `T` and a fixed
-    /// output takes `ceil(J / r + 1)` for `J`. So it runs only
-    /// `frames mod period` of them (one period more when that is under 2),
-    /// in calls of at most one block with no channel active (rubato's
-    /// channel mask: its index steps, its buffers move), and adds the
-    /// whole periods. That costs `ceil(rest / block)` calls of a few us
-    /// each (rubato moves each channel's 512-sample history per call).
+    /// output takes `ceil(J / r + 1)` for `J`. A table's skip
+    /// ([`Converter::is_polyphase`]) computes those counts at once. The
+    /// [`Async`] stage runs only `frames mod period` of them (one period
+    /// more when that is under 2), in calls of at most one block with no
+    /// channel active (rubato's channel mask: its index steps, its buffers
+    /// move), and adds the whole periods. That costs `ceil(rest / block)`
+    /// calls of a few us each (rubato moves each channel's 512-sample
+    /// history per call).
     pub fn skip_silence(
         &mut self,
         frames: u64,

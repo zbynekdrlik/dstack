@@ -27,7 +27,7 @@
 //! windows a frame (128 KB). On x86_64 the loop runs in a copy compiled
 //! for FMA when the CPU has it (asked once, when the engine is made).
 //!
-//! Nothing allocates after the engine is made.
+//! Nothing allocates in a call that succeeds, once the engine is made.
 
 use crate::{ConvertError, Fixed};
 
@@ -52,6 +52,20 @@ pub(crate) fn period(from: u32, to: u32) -> (u64, u64) {
     let (from, to) = (u64::from(from), u64::from(to));
     let g = crate::gcd(from, to);
     (from / g, to / g)
+}
+
+/// The rows a group has room for with a sinc of `taps` and calls of at
+/// most `max_in` input frames: the history never needs more than
+/// `taps + 3` rows before a call appends its input (module tests), and room
+/// for two such histories and two calls lets most calls move nothing.
+fn room_for(taps: usize, max_in: usize) -> usize {
+    2 * (taps + 4) + 2 * max_in
+}
+
+/// Whether the history must drop the rows no output needs before `take`
+/// more rows fit: `held` rows held, `room` rows of room.
+fn must_compact(held: usize, take: usize, room: usize) -> bool {
+    held + take > room
 }
 
 /// The windowed sinc prototype rubato builds (`sinc.rs` `make_sincs`):
@@ -348,10 +362,7 @@ impl Poly {
                 block,
             ),
         };
-        // The history never needs more than taps + 3 rows before a call
-        // appends its input (module tests): room for two calls more, so
-        // most calls move nothing.
-        let room = 2 * (taps + 4) + 2 * max_in;
+        let room = room_for(taps, max_in);
         let mut poly = Poly {
             table: Table::new(taps, factor, cutoff, q),
             p,
@@ -501,7 +512,7 @@ impl Poly {
         }
         // Drop the rows no output needs any more, when the input would not
         // fit after them.
-        if self.held + take > self.room {
+        if must_compact(self.held, take, self.room) {
             let (base, _) = self.place(self.given);
             let drop = usize::try_from(base - self.first)
                 .unwrap_or(0)

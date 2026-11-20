@@ -14,18 +14,23 @@
 
 use super::*;
 
+/// What [`stream`] heard: each channel's output, and each call's frames
+/// taken and given.
+type Heard = (Vec<Vec<f64>>, Vec<(usize, usize)>);
+
 /// Runs `c` over `input` (per channel) call by call until a call would
-/// pass its end; returns each channel's output.
-fn stream(c: &mut Converter, input: &[Vec<f64>]) -> Vec<Vec<f64>> {
+/// pass its end.
+fn stream(c: &mut Converter, input: &[Vec<f64>]) -> Heard {
     let channels = input.len();
     let room = c.output_frames_max();
     let mut out = vec![0.0; channels * room];
     let mut heard = vec![Vec::new(); channels];
+    let mut calls = Vec::new();
     let mut at = 0;
     loop {
         let n = c.input_frames_next();
         if at + n > input[0].len() {
-            return heard;
+            return (heard, calls);
         }
         let flat: Vec<f64> = input
             .iter()
@@ -33,6 +38,7 @@ fn stream(c: &mut Converter, input: &[Vec<f64>]) -> Vec<Vec<f64>> {
             .collect();
         let (took, gave) = c.process(&flat, n, &mut out, room).unwrap();
         assert_eq!(took, n);
+        calls.push((took, gave));
         at += took;
         for (ch, h) in heard.iter_mut().enumerate() {
             h.extend_from_slice(&out[ch * room..ch * room + gave]);
@@ -68,7 +74,10 @@ const PAIRS: [(u32, u32); 7] = [
 /// near full-scale signal, under -180 dBFS: the core's own float error
 /// reached 3.6e-10 at 22.05 -> 96 kHz), on a fixed input and a fixed
 /// output, 1, 2 and 31 channels (every group width), a block of 256 and an
-/// odd one, with the core's delay; both streams as long within a call.
+/// odd one, with the core's delay. Each call takes and gives the core's
+/// frames, but where the core's float rounding moves one frame on a whole
+/// boundary to the next call (#343): the fixed side alike every call, the
+/// other side's running sum within one frame.
 #[test]
 fn the_table_gives_the_sinc_core_s_output() {
     for (from, to) in PAIRS {
@@ -81,10 +90,21 @@ fn the_table_gives_the_sinc_core_s_output() {
                 assert_eq!(table.delay_frames(), core.delay_frames(), "{what}");
                 let frames = 6 * block.max(256) * from as usize / to.min(from) as usize;
                 let input = mixes(channels, from, frames);
-                let (a, b) = (stream(&mut table, &input), stream(&mut core, &input));
+                let ((a, ca), (b, cb)) = (stream(&mut table, &input), stream(&mut core, &input));
+                assert!(ca.len().abs_diff(cb.len()) <= 1 && ca.len() > 4, "{what}");
+                let (mut sum_a, mut sum_b) = (0i64, 0i64);
+                for (k, (&(ta, ga), &(tb, gb))) in ca.iter().zip(&cb).enumerate() {
+                    let (fa, fb, oa, ob) = match fixed {
+                        Fixed::Input => (ta, tb, ga, gb),
+                        Fixed::Output => (ga, gb, ta, tb),
+                    };
+                    assert_eq!(fa, fb, "{what}: call {k}");
+                    sum_a += oa as i64;
+                    sum_b += ob as i64;
+                    assert!((sum_a - sum_b).abs() <= 1, "{what}: call {k}");
+                }
                 let mut worst = 0.0f64;
                 for (x, y) in a.iter().zip(&b) {
-                    assert!(x.len().abs_diff(y.len()) <= block, "{what}");
                     for (p, q) in x.iter().zip(y) {
                         worst = worst.max((p - q).abs());
                     }

@@ -241,3 +241,50 @@ fn a_skip_moves_the_counts_and_keeps_silence() {
     q.process(&vec![0.0; n], n, &mut out, room).unwrap();
     assert!(out[..128].iter().all(|&v| v == 0.0));
 }
+
+/// The groups' room: two histories of `taps + 3` and a row, and two calls
+/// (1032 rows at 256 taps and 256 frames a call), what every group holds.
+#[test]
+fn the_room_holds_two_histories_and_two_calls() {
+    assert_eq!(room_for(256, 256), 1032);
+    assert_eq!(room_for(256, 248), 1016);
+    assert_eq!(room_for(48, 16), 136);
+    let p = poly(44_100, 96_000, 21, 256, Fixed::Output);
+    assert_eq!(p.room, room_for(TAPS, 248));
+    for g in &p.groups {
+        assert_eq!(g.rows.len(), p.room * g.width);
+    }
+}
+
+/// The history moves only when a call's input would not fit: the rows a
+/// call needs, the room, and one more.
+#[test]
+fn the_history_moves_only_when_the_input_would_not_fit() {
+    assert!(!must_compact(900, 132, 1032));
+    assert!(!must_compact(776, 256, 1032));
+    assert!(must_compact(777, 256, 1032));
+    assert!(must_compact(1032, 1, 1032));
+    // A run: the first row stays while calls fit, and moves (to the next
+    // output's first frame) on the call that would not.
+    let mut p = poly(96_000, 44_100, 2, 256, Fixed::Input);
+    let mut out = vec![0.0; 2 * p.output_frames_max()];
+    let x = signal(2, 256, 1);
+    let (mut moves, mut calls) = (0, 0);
+    for _ in 0..40 {
+        let (first, held) = (p.first, p.held);
+        let fits = !must_compact(held, 256, p.room);
+        let (base, _) = p.place(p.given);
+        p.process(&x, 256, &mut out, p.output_frames_max()).unwrap();
+        calls += 1;
+        if fits {
+            assert_eq!(p.first, first);
+            assert_eq!(p.held, held + 256);
+        } else {
+            moves += 1;
+            assert_eq!(p.first, base);
+            assert_eq!(p.held as i64, p.taken as i64 - base);
+        }
+    }
+    // 1032 rows of room, 256 a call, about 258 kept: a move every 3 calls.
+    assert!((12..=14).contains(&moves), "{moves} moves in {calls} calls");
+}

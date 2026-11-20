@@ -5,13 +5,16 @@
 //! a 96 kHz device with 256-frame blocks (2.667 ms), 64 RX and 64 TX
 //! channels, an ASIO host at 44.1 kHz with a fixed block
 //! ([`Rated::with_fixed_app_block`], 118 frames). Up to v0.6.201 the
-//! sinc core took 667-848 µs a block there on CI (25-32 %; 1085-1119 µs
-//! mean on a loaded dev1); the fixed-ratio table takes about half.
+//! sinc core took 667-848 µs a block there in dasio's CI (25-32 %; on a
+//! loaded dev1 1085-1119 µs mean, a median of 1410 µs at load 64, which
+//! this test fails); the fixed-ratio table takes about half (540-565 µs
+//! mean, a median of 613 µs at load 67). The assert holds #462's goal, a
+//! quarter of the block, not the half.
 //!
-//! Its own binary, run by CI in release (`cargo test --release -p dlink
-//! --test rated_cost`): a cost is only meaningful optimised, and the
-//! debug build's `Rated` glue alone takes about 500 µs a block. In a debug
-//! build the file holds no test.
+//! Its own binary, run by CI's Linux test job in release (`cargo test
+//! --release -p dlink --test rated_cost`): a cost is only meaningful
+//! optimised, and the debug build's `Rated` glue alone takes about 500 µs
+//! a block. In a debug build the file holds no test.
 #![cfg(not(debug_assertions))]
 
 use std::time::Instant;
