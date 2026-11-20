@@ -98,3 +98,4 @@ One line per ticket: issue, commits, tests (RED -> GREEN where a bug), decisions
 - 20.11 16:35 CET: v0.6.202 released (#461, #462, #464 item 2). v0.6.203 = #465 (Realtek NIC standard + checkers).
 - 20.11 18:29 CET: v0.6.203 released (#465). v0.6.204 = #466 (driver check follows the standard).
 - 20.11 22:33 CET: v0.6.204 released (#466). v0.6.205 = #465 EEE rule (owner: EEE on any rig device is a serious fail) + fleet scan.
+- 21.11 23:37 CET: v0.6.205 released. v0.6.206 = #465 checker fixes + #470 (log keeps the run before).
