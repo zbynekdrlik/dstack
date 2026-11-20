@@ -336,6 +336,23 @@ mod glue {
     }
 
     #[test]
+    fn the_raw_status_line_comes_back_as_sent_without_its_line_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let answer: &'static str = Box::leak(format!("{STATUS_LINE}\r\n").into_boxed_str());
+        let (path, served) = one_answer(dir.path(), answer);
+        assert_eq!(read_status_line(&path, BOUND).unwrap(), STATUS_LINE);
+        assert_eq!(served.join().unwrap(), "status\n");
+        let other = tempfile::tempdir().unwrap();
+        let (path, served) = one_answer(other.path(), "error: the request is not UTF-8\n");
+        assert_eq!(
+            read_status_line(&path, BOUND).unwrap(),
+            "error: the request is not UTF-8"
+        );
+        served.join().unwrap();
+        assert!(read_status_line(&dir.path().join("none.sock"), BOUND).is_err());
+    }
+
+    #[test]
     fn no_socket_or_an_error_answer_is_no_status() {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(read_status(&dir.path().join("none.sock"), BOUND), None);
