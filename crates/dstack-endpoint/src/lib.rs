@@ -26,6 +26,8 @@
 //!   state file's folder).
 //! - [`stream`]: whether a stream's error needs the endpoint opened again.
 //! - [`alert`]: where a failure the user must see goes (Windows).
+//! - [`logfile`]: the run's log file, the run before kept as
+//!   `<name>.log.1` (dstack #470).
 //! - [`endpoints`], [`host`] and `win` (Windows only): thin glue (cpal's
 //!   device list, the PC's name and routed address, the log, Ctrl+C, the
 //!   console and the error box), run by the binaries.
@@ -34,6 +36,7 @@ pub mod alert;
 pub mod cli;
 pub mod endpoints;
 pub mod host;
+pub mod logfile;
 pub mod outputs;
 pub mod settings;
 /// The control-port slots, now dlink's (`dlink::slots`, so an app

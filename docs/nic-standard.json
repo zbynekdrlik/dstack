@@ -1,6 +1,6 @@
 {
   "schema": "dstack-nic-standard/1",
-  "version": 3,
+  "version": 4,
   "updated": "2026-11-20",
   "issue": "https://github.com/zbynekdrlik/dstack/issues/465",
   "doc": "docs/nic-standard.md",
@@ -194,6 +194,38 @@
         {"key": "link:speed", "name": "Speed", "expected": "1000Mb/s", "evidence": "none yet: fleet value"},
         {"key": "link:duplex", "name": "Duplex", "expected": "Full", "evidence": "none yet: fleet value"},
         {"key": "pci:power/control", "name": "PCIe runtime power management off", "expected": "on", "evidence": "power saving off on every wired NIC (songplayer#285); fleet value (the iemmixer box, companion-snv, the PP presenter PC)"}
+      ]
+    },
+    {
+      "id": "rtl8125-linux",
+      "chip": "RTL8125",
+      "covers": "Realtek PCIe 2.5GbE (RTL8125; the one read is an RTL8125B, so the firmware rule names rtl8125b-2 and another revision fails on it until read) under the kernel's r8169. One in the fleet on Linux (20.11.2026): the PP editing PC's onboard NIC, no cable, unused; its values are that read. r8169 has no interrupt coalescing for this chip (ethtool -c: Operation not supported), so the entry has none",
+      "os": "linux",
+      "match": {"pci": ["10ec:8125"]},
+      "driver": {
+        "modules": ["r8169"],
+        "firmware": "rtl8125b-2_0.0.2 07/13/20",
+        "status": "settled",
+        "evidence": "none yet: fleet value (the kernel's r8169 7.0.0-38 and its rtl8125b-2 firmware on the PP editing PC, read 20.11.2026; dstack #465). The same driver as the RTL8168 entry; no measurement on this chip."
+      },
+      "values": [
+        {"key": "ring:rx", "name": "RX ring", "expected": "256", "evidence": "none yet: fleet value (the driver's maximum)"},
+        {"key": "ring:tx", "name": "TX ring", "expected": "256", "evidence": "none yet: fleet value (the driver's maximum)"},
+        {"key": "pause:rx", "name": "Pause frames RX", "expected": "off", "evidence": "a PAUSE stops the whole send queue (dstack #425)"},
+        {"key": "pause:tx", "name": "Pause frames TX", "expected": "off", "evidence": "dstack #425"},
+        {"key": "eee:status", "name": "EEE", "expected": ["disabled", "not supported"], "evidence": "power saving off on every wired NIC (owner 7.11.2026, songplayer#285); EEE off on every rig device (owner 20.11.2026, dstack #465)"},
+        {"key": "feature:tcp-segmentation-offload", "name": "TSO", "expected": "off", "profile": "low_latency", "evidence": "measured on the RTL8168 under the same r8169 driver (one TX ring: a 64 kB TSO segment held our packet ~525 us; off gave peaks 198-260 us, dstack #1, docs/linux-box.md); not measured on the RTL8125"},
+        {"key": "feature:generic-segmentation-offload", "name": "GSO", "expected": "off", "profile": "low_latency", "evidence": "measured on the RTL8168 under r8169 (dstack #1, docs/linux-box.md); not measured on the RTL8125"},
+        {"key": "feature:rx-checksumming", "name": "RX checksum offload", "expected": "on", "evidence": "none yet: fleet value"},
+        {"key": "feature:tx-checksumming", "name": "TX checksum offload", "expected": "on", "evidence": "none yet: fleet value"},
+        {"key": "feature:scatter-gather", "name": "Scatter-gather", "expected": "on", "evidence": "none yet: fleet value"},
+        {"key": "feature:generic-receive-offload", "name": "GRO", "expected": "on", "evidence": "none yet: fleet value"},
+        {"key": "feature:rx-vlan-offload", "name": "RX VLAN offload", "expected": "on", "evidence": "none yet: fleet value"},
+        {"key": "feature:tx-vlan-offload", "name": "TX VLAN offload", "expected": "on", "evidence": "none yet: fleet value"},
+        {"key": "link:autoneg", "name": "Auto-negotiation", "expected": "on", "evidence": "none yet: fleet value"},
+        {"key": "link:speed", "name": "Speed", "expected": null, "status": "report", "evidence": "the one Linux RTL8125 in the fleet has no cable: no speed was ever read"},
+        {"key": "link:duplex", "name": "Duplex", "expected": null, "status": "report", "evidence": "the one Linux RTL8125 in the fleet has no cable: no duplex was ever read"},
+        {"key": "pci:power/control", "name": "PCIe runtime power management off", "expected": "on", "evidence": "power saving off on every wired NIC (songplayer#285); fleet value (the PP editing PC)"}
       ]
     },
     {

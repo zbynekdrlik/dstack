@@ -48,8 +48,9 @@ the network's rate and clock. Windows only (WASAPI loopback).
 dsend has no window: dtray shows it (the status, and an Output menu that
 chooses the output to capture, remembered for the next start; --output
 wins). Subscribe a receiver to <host>-dsend's L and R in Dante Controller.
-The status is also logged every 10 s, to stderr and to <state file>.log.
-Ctrl+C stops it.";
+The status is also logged every 10 s, to stderr and to <state file>.log;
+a start keeps the run before's log as <state file>.log.1. Ctrl+C stops
+it.";
 
 /// The network's rate unless `--rate`.
 pub const RATE: u32 = 96_000;

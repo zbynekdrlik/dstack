@@ -29,9 +29,12 @@
 # PASS and FAIL judge a value; INFO prints a value the standard does not
 # decide yet; SKIP is a value of another profile or an adapter that is down
 # or disabled. A Realtek adapter without an entry FAILs, and so does one whose
-# values cannot be read. Exit 1 on any FAIL, 2 when the standard cannot be
-# read or is malformed, else 0. The output is plain pipeline text, so a caller
-# can capture it (`$lines = & .\nic-standard-check.ps1`).
+# values cannot be read. An adapter with no link (Disconnected: a cable-less
+# NIC) gets one INFO "no link" line, its driver and values still judged. A
+# Wi-Fi adapter (NdisPhysicalMedium 9 or PhysicalMediaType 802.11, the Realtek
+# WiFi RTL8852BE too) is out of the wired scan. Exit 1 on any FAIL, 2 when
+# the standard cannot be read or is malformed, else 0. The output is plain
+# pipeline text, so a caller can capture it (`$lines = & .\nic-standard-check.ps1`).
 #
 #   powershell -ExecutionPolicy Bypass -File nic-standard-check.ps1 [-Standard <path|url>] [-LatencyProfile normal|low_latency] [-IncludeDown] [-Name <adapter>[,<adapter>...]]
 #
@@ -441,6 +444,25 @@ function Test-NicWired {
         ((Get-NicProp $Adapter 'NdisPhysicalMedium') -eq 14)
 }
 
+# Whether an adapter is a Wi-Fi one (NdisPhysicalMedium 9, or a
+# PhysicalMediaType of 802.11, "Native 802.11"): out of the wired scan, the
+# Realtek WiFi (RTL8852BE, PCI\VEN_10EC&DEV_B852) included.
+function Test-NicWireless {
+    param($Adapter)
+    return ((Get-NicProp $Adapter 'NdisPhysicalMedium') -eq 9) -or
+        ([string](Get-NicProp $Adapter 'PhysicalMediaType' '') -match '802\.11')
+}
+
+# Whether an adapter has no link (no carrier: a cable-less NIC), by its
+# MediaConnectionState or its Status.
+function Test-NicNoLink {
+    param($Adapter)
+    return ([string](Get-NicProp $Adapter 'MediaConnectionState' '') -eq 'Disconnected') -or
+        ([string](Get-NicProp $Adapter 'Status' '') -eq 'Disconnected')
+}
+
+$script:NicNoLinkNote = 'no carrier: no speed or duplex verdict without a link; the driver and the other values are judged'
+
 function Format-NicRow {
     param([string]$Name, $Row)
     $line = '{0,-4}  {1}  {2}  expected={3}  actual={4}' -f $Row.Verdict, $Name, $Row.Key, $Row.Expected, $Row.Actual
@@ -489,6 +511,9 @@ function Get-NicRows {
     }
     Test-NicDriver $Entry.driver ([string]$Adapter.DriverFileName) ([string]$Adapter.DriverVersion)
     foreach ($v in @($Entry.values)) { Test-NicValue $v $facts $LatencyProfile }
+    # Windows judges no negotiated speed (*SpeedDuplex is a setting, judged
+    # above); an adapter without a link says so, as Linux does.
+    if (Test-NicNoLink $Adapter) { New-NicRow 'INFO' 'link' '(a link)' 'no link' $script:NicNoLinkNote }
 }
 
 # The EEE lines of every wired NIC, any vendor, up, down or disabled (the
@@ -542,6 +567,8 @@ function Invoke-NicStandardCheck {
     foreach ($a in $adapters) {
         if ($named.Count -gt 0 -and -not ($named -contains $a.Name)) { continue }
         if ($a.Status -eq 'Not Present') { continue }
+        # A Realtek Wi-Fi is out of the wired scan.
+        if (Test-NicWireless $a) { continue }
         $hw = Get-NicHardwareId $a
         if (-not (Test-RealtekAdapter $a $hw.Id)) { continue }
         $found[[string]$a.Name] = $true
