@@ -138,11 +138,11 @@ $mbc = [ordered]@{
     '*JumboPacket' = '1514'; '*LsoV2IPv4' = '0'; '*LsoV2IPv6' = '0'; '*RscIPv4' = '1'; '*WakeOnMagicPacket' = '1'
 }
 $script:FakeAdapters = @()
-$script:FakeProps = @{}
+$script:FakeValues = @{}
 $script:FakeIds = @{}
 function Set-FakePc {
     param([object[]]$Adapters)
-    $script:FakeAdapters = @(); $script:FakeProps = @{}; $script:FakeIds = @{}
+    $script:FakeAdapters = @(); $script:FakeValues = @{}; $script:FakeIds = @{}
     foreach ($a in $Adapters) {
         $script:FakeAdapters += [pscustomobject]@{
             Name = $a.Name; InterfaceDescription = $a.Desc; Status = $a.Status; DriverFileName = $a.File
