@@ -27,6 +27,10 @@ use dstack::peer::{Peer, Shared};
 use dstack::stream::PumpStats;
 use dstack::stream::wake::RECENT;
 
+#[path = "peer/stalls.rs"]
+mod stalls;
+use stalls::{Rebootstrap, counted_restarts, in_window, shared_stalls};
+
 /// Held by each test that runs a device: they bind the Dante ports on
 /// loopback.
 static ONE_DEVICE: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -55,7 +59,7 @@ fn peer_args(line: &str, dir: &Path, name: &str) -> PeerArgs {
 }
 
 /// A peer's counts the gap check reads.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 struct Counts {
     gaps: u64,
     holes: u64,
@@ -258,6 +262,13 @@ impl Sender {
             self.late_wakes = late_wakes;
             for w in self.pump.wakes().recent() {
                 seen.late_wakes[peer].insert((w.unix_ms, w.behind_us));
+                if w.rebootstrap {
+                    seen.rebootstraps[peer].insert(Rebootstrap {
+                        unix_ms: w.unix_ms,
+                        behind_us: w.behind_us,
+                        oversleep_us: w.oversleep_us,
+                    });
+                }
             }
         }
     }
@@ -285,6 +296,8 @@ struct Seen {
     silences: [Vec<Silence>; 2],
     /// Each peer's pump late wakes, `(unix_ms, behind_us)`.
     late_wakes: [BTreeSet<(u64, u64)>; 2],
+    /// Each peer's pump late wakes that re-bootstrapped (dstack #459).
+    rebootstraps: [BTreeSet<Rebootstrap>; 2],
     /// Each peer's late wakes that left the pump's recent list before the
     /// witness merged them.
     late_wakes_lost: [u64; 2],
@@ -632,8 +645,9 @@ fn a_cause_began_by_the_count_and_ended_within_the_window() {
 /// and settle: no ring hole, no tone gap without a counted restart of the
 /// sender's TX schedule or of a pump, and at most one such restart (dev1
 /// at load 46 from another account's job restarted a TX schedule once and
-/// the check saw it); no play-time step; each device's play times run at
-/// its own skew against the app's clock.
+/// the check saw it; one stall that re-bootstraps both pumps at once
+/// counts once, dstack #459); no play-time step; each
+/// device's play times run at its own skew against the app's clock.
 #[test]
 fn two_peers_at_different_skews_hear_each_other_s_tone_whole() {
     let _one = ONE_DEVICE
@@ -682,7 +696,10 @@ fn two_peers_at_different_skews_hear_each_other_s_tone_whole() {
     ]);
     let started_ms = unix_ms();
     let before = [Counts::of(&a), Counts::of(&b)];
+    // dstack #459: the counted window's wall times, inside the counts.
+    let counted_from_ms = unix_ms();
     std::thread::sleep(Duration::from_secs(8));
+    let counted_to_ms = unix_ms();
     let after = [Counts::of(&a), Counts::of(&b)];
     let seen = witness.stop();
     let status = [a.status(), b.status()];
@@ -701,12 +718,22 @@ fn two_peers_at_different_skews_hear_each_other_s_tone_whole() {
         let (mine, theirs) = (rise(me), rise(other));
         // No ring hole, and a gap only with a counted restart of the
         // sender's TX schedule or a pump (a loaded box: another account's
-        // job), at most one in the window. On a quiet box all are 0.
-        let restarts = theirs.tx_restarts + theirs.pump_restarts + mine.pump_restarts;
+        // job), at most one in the window. On a quiet box all are 0. Both
+        // pumps re-bootstrapped by one stall count once (dstack #459,
+        // [`shared_stalls`], [`counted_restarts`]).
+        let shared = shared_stalls(&seen.rebootstraps, counted_from_ms, counted_to_ms);
+        let wakes = |peer: usize| {
+            let in_it = seen.rebootstraps[peer]
+                .iter()
+                .filter(|r| in_window(r, counted_from_ms, counted_to_ms));
+            u64::try_from(in_it.count()).unwrap()
+        };
+        let restarts = counted_restarts(&mine, &theirs, (wakes(me), wakes(other)), shared);
         assert!(
             mine.gaps <= restarts && restarts <= 1 && mine.holes == 0,
             "peer {me}: {} tone gaps, {restarts} counted restarts (at most one, each gap \
-             one's), {} ring holes\n{}",
+             one's; {shared} stall(s) that re-bootstrapped both pumps, counted once each when \
+             every re-bootstrap in the window was counted), {} ring holes\n{}",
             mine.gaps,
             mine.holes,
             verdict(me, &mine, &theirs, &seen, started_ms, &status)
