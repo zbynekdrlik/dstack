@@ -27,6 +27,10 @@ use dstack::peer::{Peer, Shared};
 use dstack::stream::PumpStats;
 use dstack::stream::wake::RECENT;
 
+#[path = "peer/stalls.rs"]
+mod stalls;
+use stalls::{Rebootstrap, counted_restarts, in_window, shared_stalls};
+
 /// Held by each test that runs a device: they bind the Dante ports on
 /// loopback.
 static ONE_DEVICE: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -55,7 +59,7 @@ fn peer_args(line: &str, dir: &Path, name: &str) -> PeerArgs {
 }
 
 /// A peer's counts the gap check reads.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 struct Counts {
     gaps: u64,
     holes: u64,
@@ -545,58 +549,6 @@ fn verdict(
     )
 }
 
-/// A pump late wake that re-bootstrapped, as the witness merged it
-/// (dstack #459): its wall time (ms since the Unix epoch), how far behind
-/// it woke and how late its own sleep before it returned (µs; `None`
-/// unmeasured).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-struct Rebootstrap {
-    unix_ms: u64,
-    behind_us: u64,
-    oversleep_us: Option<u64>,
-}
-
-/// How far apart two peers' re-bootstrapping wakes may be and still be one
-/// stall of the process, ms (dstack #459): a stall ends for every thread
-/// at once and each pump wakes at its own next timer, a block (0.67 ms) or
-/// so apart. Every incident's two wakes were in the same ms.
-const TOGETHER_MS: u64 = 2;
-
-/// How far a re-bootstrap's own sleep may have returned short of or past
-/// its lateness and still be the scheduler's miss, µs: the sleep alone put
-/// the pump that late (`ci_peer_gate.py`'s rule for a lone re-bootstrap,
-/// dstack #339). The incidents: 1 to 10 µs.
-const OVERSLEEP_SLACK_US: u64 = 500;
-
-/// The pairs of both peers' pump re-bootstraps that one stall of the
-/// process caused (dstack #459): a re-bootstrap of peer 0 and one of peer 1
-/// within [`TOGETHER_MS`] of each other, each woken late by its own sleep
-/// ([`OVERSLEEP_SLACK_US`]), each after `from_ms` and by `to_ms` (the
-/// counted window), and each in one pair at most. A re-bootstrap with no
-/// measured oversleep, or one pump's alone, is in no pair.
-fn shared_stalls(rebootstraps: &[BTreeSet<Rebootstrap>; 2], from_ms: u64, to_ms: u64) -> u64 {
-    let judged = |peer: usize| {
-        rebootstraps[peer].iter().filter(move |r| {
-            r.unix_ms > from_ms
-                && r.unix_ms <= to_ms
-                && r.oversleep_us
-                    .is_some_and(|o| o.abs_diff(r.behind_us) <= OVERSLEEP_SLACK_US)
-        })
-    };
-    let mut theirs: Vec<&Rebootstrap> = judged(1).collect();
-    let mut pairs = 0;
-    for mine in judged(0) {
-        if let Some(i) = theirs
-            .iter()
-            .position(|t| t.unix_ms.abs_diff(mine.unix_ms) <= TOGETHER_MS)
-        {
-            theirs.remove(i);
-            pairs += 1;
-        }
-    }
-    pairs
-}
-
 /// Waits up to `bound` for `done`, polling.
 fn wait_for(bound: Duration, mut done: impl FnMut() -> bool) -> bool {
     let end = Instant::now() + bound;
@@ -687,73 +639,14 @@ fn a_cause_began_by_the_count_and_ended_within_the_window() {
     assert_eq!(when(at, at - 7), "ended 7 ms before");
 }
 
-/// One stall of the process that re-bootstraps both peers' pumps is one
-/// pair (dstack #459, the CI failures of 19-20.11.2026: both wakes in the
-/// same ms, each one's own sleep that late); one pump's re-bootstrap alone,
-/// two apart, a wake not woken late by its sleep and a wake outside the
-/// counted window are in none.
-#[test]
-fn both_pumps_restarted_by_one_stall_are_one_pair() {
-    let r = |unix_ms, behind_us, oversleep_us| Rebootstrap {
-        unix_ms,
-        behind_us,
-        oversleep_us,
-    };
-    let pairs = |a: &[Rebootstrap], b: &[Rebootstrap]| {
-        let set = |rs: &[Rebootstrap]| rs.iter().copied().collect::<BTreeSet<_>>();
-        shared_stalls(&[set(a), set(b)], 1_000, 9_000)
-    };
-    // v0.6.200 main, windows-2025 (run 44684350870) and v0.6.199 main,
-    // ubuntu-24.04 (run 44676550352), behind and oversleep in µs.
-    let a = r(5_000, 7_250, Some(7_251));
-    assert_eq!(pairs(&[a], &[r(5_000, 6_604, Some(6_607))]), 1);
-    assert_eq!(
-        pairs(
-            &[r(5_000, 6_770, Some(6_780))],
-            &[r(5_000, 6_083, Some(6_085))]
-        ),
-        1
-    );
-    // One pump alone, either peer: today's rule.
-    assert_eq!(pairs(&[a], &[]), 0);
-    assert_eq!(pairs(&[], &[a]), 0);
-    // Apart: within TOGETHER_MS either way is one stall, past it two.
-    assert_eq!(pairs(&[a], &[r(5_002, 6_604, Some(6_607))]), 1);
-    assert_eq!(pairs(&[r(5_002, 6_604, Some(6_607))], &[a]), 1);
-    assert_eq!(pairs(&[a], &[r(5_003, 6_604, Some(6_607))]), 0);
-    assert_eq!(pairs(&[a], &[r(4_997, 6_604, Some(6_607))]), 0);
-    // Each woken late by its own sleep, within 0.5 ms either way; a block
-    // that ran long (the sleep on time) or an unmeasured sleep is no stall.
-    let b = |oversleep| r(5_000, 6_600, oversleep);
-    assert_eq!(pairs(&[a], &[b(Some(6_100))]), 1);
-    assert_eq!(pairs(&[a], &[b(Some(7_100))]), 1);
-    assert_eq!(pairs(&[a], &[b(Some(6_099))]), 0);
-    assert_eq!(pairs(&[a], &[b(Some(7_101))]), 0);
-    assert_eq!(pairs(&[a], &[b(None)]), 0);
-    assert_eq!(pairs(&[b(None)], &[a]), 0);
-    assert_eq!(pairs(&[r(5_000, 7_250, Some(10))], &[a]), 0);
-    // Only inside the counted window: after its start, by its end.
-    let at = |ms| r(ms, 6_600, Some(6_600));
-    assert_eq!(pairs(&[at(1_000)], &[at(1_000)]), 0);
-    assert_eq!(pairs(&[at(1_001)], &[at(1_001)]), 1);
-    assert_eq!(pairs(&[at(9_000)], &[at(9_000)]), 1);
-    assert_eq!(pairs(&[at(9_001)], &[at(9_001)]), 0);
-    assert_eq!(pairs(&[at(1_001)], &[at(1_000)]), 0);
-    assert_eq!(pairs(&[at(9_000)], &[at(9_001)]), 0);
-    // Each wake in one pair at most; two stalls are two pairs.
-    assert_eq!(pairs(&[at(5_000), at(5_001)], &[at(5_000)]), 1);
-    assert_eq!(pairs(&[at(5_000)], &[at(5_000), at(5_001)]), 1);
-    assert_eq!(pairs(&[at(5_000), at(7_000)], &[at(5_001), at(7_000)]), 2);
-}
-
 /// The design's whole-device test: two devices at +40 and -30 ppm, each
 /// receiving the other's tone (a 70 ppm drift between them: 0.7 ms over the
 /// test's 10 s, well inside the 10 ms latency). Counted after both lock
 /// and settle: no ring hole, no tone gap without a counted restart of the
 /// sender's TX schedule or of a pump, and at most one such restart (dev1
 /// at load 46 from another account's job restarted a TX schedule once and
-/// the check saw it; one stall of the process that re-bootstraps both
-/// pumps at once counts once, dstack #459); no play-time step; each
+/// the check saw it; one stall that re-bootstraps both pumps at once
+/// counts once, dstack #459); no play-time step; each
 /// device's play times run at its own skew against the app's clock.
 #[test]
 fn two_peers_at_different_skews_hear_each_other_s_tone_whole() {
@@ -826,18 +719,21 @@ fn two_peers_at_different_skews_hear_each_other_s_tone_whole() {
         // No ring hole, and a gap only with a counted restart of the
         // sender's TX schedule or a pump (a loaded box: another account's
         // job), at most one in the window. On a quiet box all are 0. Both
-        // pumps re-bootstrapped by one stall of the process count once
-        // (dstack #459, [`shared_stalls`]); never more pairs than either
-        // pump's counted restarts.
-        let shared = shared_stalls(&seen.rebootstraps, counted_from_ms, counted_to_ms)
-            .min(mine.pump_restarts)
-            .min(theirs.pump_restarts);
-        let restarts = theirs.tx_restarts + theirs.pump_restarts + mine.pump_restarts - shared;
+        // pumps re-bootstrapped by one stall count once (dstack #459,
+        // [`shared_stalls`], [`counted_restarts`]).
+        let shared = shared_stalls(&seen.rebootstraps, counted_from_ms, counted_to_ms);
+        let wakes = |peer: usize| {
+            let in_it = seen.rebootstraps[peer]
+                .iter()
+                .filter(|r| in_window(r, counted_from_ms, counted_to_ms));
+            u64::try_from(in_it.count()).unwrap()
+        };
+        let restarts = counted_restarts(&mine, &theirs, (wakes(me), wakes(other)), shared);
         assert!(
             mine.gaps <= restarts && restarts <= 1 && mine.holes == 0,
             "peer {me}: {} tone gaps, {restarts} counted restarts (at most one, each gap \
-             one's; {shared} stall(s) that re-bootstrapped both pumps counted once each), {} \
-             ring holes\n{}",
+             one's; {shared} stall(s) that re-bootstrapped both pumps, counted once each when \
+             every re-bootstrap in the window was counted), {} ring holes\n{}",
             mine.gaps,
             mine.holes,
             verdict(me, &mine, &theirs, &seen, started_ms, &status)
