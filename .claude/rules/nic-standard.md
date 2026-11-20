@@ -5,6 +5,9 @@ paths:
   - "tools/windows/tests/nic-standard-check.Tests.ps1"
   - "tools/linux/nic-standard-check.py"
   - "tools/linux/tests/nic_standard_check_test.py"
+  - "crates/dstack/nic-standard.json"
+  - "crates/dstack/src/lso.rs"
+  - "crates/dstack/src/lso/**"
 ---
 
 # The Realtek NIC standard (docs/nic-standard.json, #465)
@@ -20,3 +23,5 @@ paths:
 - **r8152's `rx-usecs`** reads 15000 on the in-tree driver (ns) and 15 on Realtek's v2.21.4 (us): the same default. Never `ethtool -C` a running r8152 link (it restarts the MAC, #290).
 - **Running a checker on a PC:** fetch the script and the json by commit SHA from raw.githubusercontent into a temp dir, run, remove the dir. On dsg and FOH (production audio) keep to one read: every new `powershell.exe` with the NetAdapter module costs ~2.4 s wall and ~1.6 s CPU (#312).
 - **A hyphenated Python tool** (`nic-standard-check.py`) is imported by its test with `importlib.util.spec_from_file_location`.
+- **dstack's start line is a third reader** (#466, `crates/dstack/src/lso.rs`): it embeds the file from its copy `crates/dstack/nic-standard.json` (a git dependency builds from the whole checkout, but `cargo package`/`cargo vendor` keep only the crate's files). Every change to `docs/nic-standard.json` copies the file there in the same commit; `lso::standard::tests::the_embedded_copy_equals_the_standard_in_docs` fails otherwise. Its verdict mirrors `judge_driver` (bad, then files, then `min_version`) and tells a Realtek adapter as `Test-RealtekAdapter` does (description, or a `PCI\VEN_10EC&`/`USB\VID_0BDA&`/`RTK_` id prefix): a rule change goes into the Rust judge too, with a test over the real file.
+- **The first hardware id from the registry** (#466, resolume-pp 20.11.2026): the class subkey's `DeviceInstanceID`, then `Enum\<instance>\HardwareID` (REG_MULTI_SZ, `winreg::read_multi_sz`), first string. The class key's `MatchingDeviceId` is the INF id that won and can be a compatible id; it is only the fallback. The driver file is the service's (`<class subkey>\Ndi` value `Service`, then `Services\<svc>\ImagePath`'s file name; the VLAN adapter's service is `VLAN`, its file `RtVlan640.sys`; without an `ImagePath` Windows loads `<svc>.sys`). Microsoft's inbox RTL8156 driver has provider `Microsoft`: tell a Realtek adapter by its id, never its provider alone.
