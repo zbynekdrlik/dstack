@@ -124,23 +124,31 @@ fn poll_ms(wait: Duration) -> i32 {
 /// Reads with `read` (a non-blocking receive) until it gives a datagram or
 /// fails; after a read with nothing yet, waits with `ready` for the time
 /// left before `until` (true: the socket is readable, or has an error the
-/// next read gives) and reads again. `None` once `until` passed or a wait
-/// ended with nothing: no receive is pending then, so none is lost.
+/// next read gives), reading again only after a wait that found it
+/// readable. `None` once `until` passed, never before: `WSAPoll` can end a
+/// wait with nothing before its timeout (windows-2025: a 10 ms wait's
+/// empty ends about every 3.8 ms, #454), so such a wait is waited again
+/// for what is left. No receive is pending between the waits, so none is
+/// lost.
 #[cfg_attr(not(windows), allow(dead_code))]
 fn read_when_ready<T>(
     until: Instant,
     mut read: impl FnMut() -> io::Result<T>,
     mut ready: impl FnMut(Duration) -> io::Result<bool>,
 ) -> io::Result<Option<T>> {
+    let mut readable = true;
     loop {
-        match read_of(read()) {
-            Read::Nothing => {}
-            done => return result_of(done),
+        if readable {
+            match read_of(read()) {
+                Read::Nothing => {}
+                done => return result_of(done),
+            }
         }
         let left = until.saturating_duration_since(Instant::now());
-        if left.is_zero() || !ready(left)? {
+        if left.is_zero() {
             return Ok(None);
         }
+        readable = ready(left)?;
     }
 }
 
