@@ -43,9 +43,8 @@ fn test_ipv4() -> Ipv4Addr {
 }
 
 /// The test device's config with its state file in `dir`; `second` gives
-/// it another name, its own ports and process id (two on one address);
-/// the config lines `extra` added.
-fn config_with(dir: &Path, second: bool, extra: &str) -> PathBuf {
+/// it another name, its own ports and process id (two on one address).
+fn config_with(dir: &Path, second: bool) -> PathBuf {
     let state = dir.join("state.toml");
     let mut text: String = TEST_DEVICE
         .lines()
@@ -57,7 +56,6 @@ fn config_with(dir: &Path, second: bool, extra: &str) -> PathBuf {
         text = text.replace("name = \"test-device\"", "name = \"test-device-b\"")
             + "arc_port = 4441\ncmc_port = 8801\nflows_port = 4456\nprocess_id = 1\n";
     }
-    text.push_str(extra);
     let path = dir.join("device.toml");
     std::fs::write(&path, &text).unwrap();
     path
@@ -65,13 +63,8 @@ fn config_with(dir: &Path, second: bool, extra: &str) -> PathBuf {
 
 /// A started device on the test address: its host, name and TX 1.
 fn start(dir: &Path, second: bool) -> (host::Host, String, String) {
-    start_with(dir, second, "")
-}
-
-/// [`start`] with the config lines `extra` added.
-fn start_with(dir: &Path, second: bool, extra: &str) -> (host::Host, String, String) {
     let opts = Options {
-        config: config_with(dir, second, extra),
+        config: config_with(dir, second),
         place: Place::Ip(test_ipv4()),
         control: dir.join("control.sock"),
     };
@@ -267,36 +260,11 @@ fn a_device_s_one_socket_is_bound_to_its_address_where_the_os_hands_it_the_group
     assert!(matches!(stopped, host::Stopped::Done), "{stopped:?}");
     assert_eq!(bound, GROUP_TO_BOUND_SOCKET, "the device's daemon");
     #[cfg(target_os = "linux")]
-    assert_eq!(
-        addresses(&held),
-        ["00000000"],
-        "one 5353 socket, the wildcard's"
-    );
-}
-
-/// dstack #444's trial switch (`mdns_bind_address = true`): the process's
-/// one 5353 socket is bound to the device's address and answers a unicast
-/// query to `<address>:5353`. Windows also delivers the group to it (a
-/// direct query to the group reads the record); Linux delivers it none
-/// (`announce::mdns::GROUP_TO_BOUND_SOCKET`).
-#[test]
-fn the_mdns_bind_address_trial_binds_the_one_socket_to_the_address() {
-    let _one = ONE_DEVICE.lock().unwrap_or_else(|e| e.into_inner());
-    let dir = tempfile::tempdir().unwrap();
-    let (host, name, tx1) = start_with(dir.path(), false, "mdns_bind_address = true\n");
-    read_record_at(&name, &tx1, SocketAddrV4::new(test_ipv4(), 5353));
-    #[cfg(windows)]
-    read_record(&name, &tx1);
-    #[cfg(target_os = "linux")]
-    let held = mdns_sockets();
-    let stopped = host.stop(Duration::from_secs(5));
-    assert!(matches!(stopped, host::Stopped::Done), "{stopped:?}");
-    #[cfg(target_os = "linux")]
     {
         assert_eq!(
             addresses(&held),
-            ["0100007F"],
-            "one 5353 socket, on the address"
+            ["00000000"],
+            "one 5353 socket, the wildcard's"
         );
         assert_eq!(
             sockets_after_stop(&held),

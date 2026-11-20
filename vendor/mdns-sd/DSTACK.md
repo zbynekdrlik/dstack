@@ -55,8 +55,9 @@ LICENSE-APACHE and LICENSE-MIT), copied unchanged except:
   daemon's thread hands every datagram its IPv4 socket received on an
   enabled interface (after the interface check, before decoding) to the
   caller's tap, and on Linux that socket takes only its own memberships
-  (`IP_MULTICAST_ALL` off). dstack's mDNS meter and Windows responder read
-  the group from it instead of a 5353 socket each: a process then receives
+  (`IP_MULTICAST_ALL` off). dstack's mDNS meter (and, up to dstack
+  v0.6.206, the Windows responder) read the group from it instead of a
+  5353 socket each: a process then receives
   each datagram once per address, where up to dstack v0.6.192 a Windows
   device process received it three times (dsg, dasio#190: 0.1-0.8 ms of
   receive DPC a datagram; dstack #442, `crates/dstack/src/announce/mdns.rs`,
@@ -66,9 +67,10 @@ LICENSE-APACHE and LICENSE-MIT), copied unchanged except:
   gate (this crate is outside the mutation gate, its tests run by hand).
 
 - `src/service_daemon.rs` `ServiceDaemon::new_tapped_on`, `Zeroconf::new_bound`
-  (`Zeroconf::new`, now `cfg(test)`, calls it with `0.0.0.0`): a field
-  trial's daemon (dstack #444, the device config's `mdns_bind_address`)
-  binds its IPv4 socket to the device's address instead of the wildcard,
+  (`Zeroconf::new`, now `cfg(test)`, calls it with `0.0.0.0`): dstack's
+  daemon on Windows (dstack #444, its default since its last step;
+  `announce::mdns::binds_to_address`; a trial switch before) binds its
+  IPv4 socket to the device's address instead of the wildcard,
   so every send leaves from that address (on Windows a wildcard socket's
   multicast leaves from the interface's preferred source). Windows delivers
   the group to a joined address-bound socket, Linux does not. The bound

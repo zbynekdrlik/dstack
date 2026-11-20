@@ -327,8 +327,8 @@ pub struct Announcer<R: Registry> {
     live: BTreeMap<String, ServiceRecord>,
     /// [`AGAIN_TRIES`], fewer in tests.
     again_tries: u64,
-    /// The records the last announcement made the registered set, for
-    /// [`responder::Responder`].
+    /// The records the last announcement made the registered set (what a
+    /// test reads of them, the TXT included).
     published: Arc<Mutex<Vec<ServiceRecord>>>,
     /// Waits for a full command queue so far.
     waited: u64,
@@ -346,7 +346,7 @@ impl<R: Registry> Announcer<R> {
     }
 
     /// The records the last announcement made the registered set (shared:
-    /// the responder on the device's own address reads them).
+    /// a test reads them, or answers with them on loopback).
     pub fn published(&self) -> Arc<Mutex<Vec<ServiceRecord>>> {
         Arc::clone(&self.published)
     }

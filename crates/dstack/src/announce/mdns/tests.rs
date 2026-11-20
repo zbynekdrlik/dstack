@@ -310,16 +310,6 @@ fn a_listener_on_the_running_daemon_opens_none_and_keeps_none() {
     drop(heard);
 }
 
-/// The #444 trial's warning: only where the OS hands an address-bound
-/// socket no group datagram (Linux).
-#[test]
-fn a_bound_daemon_is_warned_about_only_where_it_hears_no_group() {
-    let note = bound_note(false).expect("a warning where the group is not delivered");
-    assert!(note.contains("hears no group query"), "{note}");
-    assert!(note.contains("#444"), "{note}");
-    assert_eq!(bound_note(true), None);
-}
-
 /// The datagrams `l` hands on within `wait`, from `me` only.
 fn heard_from_within(l: &Listener, me: SocketAddrV4, wait: Duration) -> Vec<Vec<u8>> {
     let deadline = Instant::now() + wait;
@@ -437,13 +427,13 @@ fn listed_on(what: &str, addr: &str) -> Listed {
     }
 }
 
-/// The #444 trial on loopback: the daemon's socket bound to the address
-/// (`mdns_bind_address`; on Linux read in `/proc/net/udp`) hears a unicast
-/// query to `<address>:5353`, answers it (from `<address>:5353`, which on
-/// loopback a wildcard socket's reply also comes from), and hears the
-/// group only where the OS delivers it to an address-bound socket
-/// (Windows; Linux never). The device then needs no responder of its own.
-/// A later device on the address shares it whatever it asks.
+/// The bound daemon on loopback (dstack #444, Windows' default; on Linux
+/// forced and read in `/proc/net/udp`): its socket bound to the address
+/// hears a unicast query to `<address>:5353`, answers it (from
+/// `<address>:5353`, which on loopback a wildcard socket's reply also comes
+/// from), and hears the group only where the OS delivers it to an
+/// address-bound socket (Windows; Linux never). A later caller on the
+/// address shares it whatever it asks.
 #[test]
 fn a_daemon_bound_to_its_address_hears_unicast_and_answers_from_it() {
     use crate::announce::{CHAN_SERVICE, ServiceRecord};
@@ -451,25 +441,12 @@ fn a_daemon_bound_to_its_address_hears_unicast_and_answers_from_it() {
     crate::test_log::undecided();
     let _one = ONE_DAEMON.lock().unwrap_or_else(PoisonError::into_inner);
     let ip = Ipv4Addr::LOCALHOST;
-    let mut opened = None;
-    let warns = crate::test_log::capture_warnings(|| {
-        opened = Some(Mdns::shared_bound(ip, true).unwrap());
-    });
-    let mdns = opened.unwrap();
+    let mdns = Mdns::shared_bound(ip, true).unwrap();
     assert!(mdns.bound());
-    assert!(
-        !mdns.own_responder_needed(),
-        "the bound socket answers itself"
-    );
     // A bound socket is opened before `shared_bound` returns: one of the
     // sockets open then is on 127.0.0.1:5353 (its row waited for, #455).
     #[cfg(target_os = "linux")]
     listed_on("bound to 127.0.0.1:5353", LOOPBACK_HEX);
-    assert_eq!(
-        warns.contains("hears no group query"),
-        !GROUP_TO_BOUND_SOCKET,
-        "{warns}"
-    );
     let heard = mdns.listen(Heard::Queries);
     let record = ServiceRecord {
         service: CHAN_SERVICE,
@@ -539,10 +516,7 @@ fn a_daemon_bound_to_its_address_hears_unicast_and_answers_from_it() {
     let again = again.unwrap();
     assert!(Arc::ptr_eq(&mdns, &again), "one socket an address");
     assert!(again.bound(), "the running daemon kept as it is");
-    assert!(
-        warns.contains("differs from the running mDNS daemon"),
-        "{warns}"
-    );
+    assert!(warns.contains("differs from the running daemon"), "{warns}");
     let warns = crate::test_log::capture_warnings(|| {
         drop(Mdns::shared_bound(ip, true).unwrap());
     });
