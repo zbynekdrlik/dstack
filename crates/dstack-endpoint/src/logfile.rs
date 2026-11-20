@@ -54,6 +54,27 @@ pub fn open(log: &Path) -> io::Result<Opened> {
     Ok(Opened { file, previous })
 }
 
+/// The start's line about its log (`app` the app's name): whether it is a
+/// warning (the run before could not be kept), and its text, which names
+/// the kept previous log when one was kept.
+pub fn start_line(app: &str, log: &Path, previous: &Previous) -> (bool, String) {
+    let log = log.display();
+    match previous {
+        Previous::Nothing => (false, format!("{app}: the log {log}")),
+        Previous::Kept(p) => (
+            false,
+            format!(
+                "{app}: the log {log}, the run before kept as {}",
+                p.display()
+            ),
+        ),
+        Previous::Lost(e) => (
+            true,
+            format!("{app}: the log {log}; the run before's was not kept ({e})"),
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::Write;
@@ -148,6 +169,38 @@ mod tests {
         assert!(matches!(previous, Previous::Lost(_)), "{previous:?}");
         assert_eq!(read(&log), "second run\n");
         assert_eq!(read(&blocker.join("inside")), "x");
+    }
+
+    #[test]
+    fn the_start_line_names_the_kept_previous_log() {
+        let log = Path::new("state/dlisten.log");
+        let kept = Previous::Kept(PathBuf::from("state/dlisten.log.1"));
+        assert_eq!(
+            start_line("dlisten", log, &kept),
+            (
+                false,
+                format!(
+                    "dlisten: the log {}, the run before kept as {}",
+                    log.display(),
+                    Path::new("state/dlisten.log.1").display()
+                )
+            )
+        );
+        assert_eq!(
+            start_line("dsend", log, &Previous::Nothing),
+            (false, format!("dsend: the log {}", log.display()))
+        );
+        let lost = Previous::Lost(io::Error::other("denied"));
+        assert_eq!(
+            start_line("dlisten", log, &lost),
+            (
+                true,
+                format!(
+                    "dlisten: the log {}; the run before's was not kept (denied)",
+                    log.display()
+                )
+            )
+        );
     }
 
     #[test]

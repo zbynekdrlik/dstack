@@ -11,7 +11,7 @@ use std::path::Path;
 use dlink::Place;
 use tracing_subscriber::fmt::writer::MakeWriterExt;
 
-use crate::logfile::{self, Previous};
+use crate::logfile;
 
 /// This PC's name (Windows `COMPUTERNAME`, Linux the kernel's hostname).
 pub fn host_name() -> String {
@@ -57,19 +57,9 @@ pub fn start_log(app: &str, log: &Path) -> bool {
     match logfile::open(log) {
         Ok(opened) => {
             init_log(Some(opened.file));
-            match opened.previous {
-                Previous::Nothing => {
-                    tracing::info!(log = %log.display(), "{app}: the log");
-                }
-                Previous::Kept(p) => tracing::info!(
-                    log = %log.display(),
-                    previous = %p.display(),
-                    "{app}: the log, the run before kept"
-                ),
-                Previous::Lost(e) => tracing::warn!(
-                    log = %log.display(),
-                    "{app}: the log; the run before's was not kept ({e})"
-                ),
+            match logfile::start_line(app, log, &opened.previous) {
+                (true, line) => tracing::warn!("{line}"),
+                (false, line) => tracing::info!("{line}"),
             }
             true
         }
