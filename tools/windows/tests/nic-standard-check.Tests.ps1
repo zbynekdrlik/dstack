@@ -355,6 +355,18 @@ Check 'a disconnected status alone reads as no link; an adapter with a link gets
     @($r.Lines | Where-Object { $_ -like 'INFO  Ethernet 2  link  *actual=no link*' }).Count -eq 1 -and
     @($r.Lines | Where-Object { $_ -like '*  Ethernet 4  link  *' }).Count -eq 0
 }
+Check 'a MediaConnectionState of Disconnected alone reads as no link' {
+    Set-FakePc @(
+        @{ Name = 'Ethernet 2'; Desc = 'Realtek PCIe GbE Family Controller'; Status = 'Up'; Link = 'Disconnected'; File = 'rt640x64.sys'; Version = '10.79.50.1003'; Hw = 'PCI\VEN_10EC&DEV_8168&REV_15'; Props = @{} }
+    )
+    $r = Run-Fake
+    @($r.Lines | Where-Object { $_ -like 'INFO  Ethernet 2  link  *actual=no link*' }).Count -eq 1
+}
+Check 'a medium of 9 alone (no media type) is wireless' {
+    $a = [pscustomobject]@{ Name = 'Wi-Fi'; NdisPhysicalMedium = 9 }
+    $b = [pscustomobject]@{ Name = 'Ethernet'; NdisPhysicalMedium = 14; PhysicalMediaType = '802.3' }
+    (Test-NicWireless $a) -and -not (Test-NicWireless $b)
+}
 # A Realtek Wi-Fi (RTL8852BE, PCI\VEN_10EC&DEV_B852, as in the SNV editing PC):
 # not a wired NIC, out of the Realtek scan too, by NdisPhysicalMedium 9 or by
 # PhysicalMediaType 802.11.
@@ -362,7 +374,8 @@ Check 'a Realtek Wi-Fi is out of the wired scan, by its medium or its media type
     Set-FakePc @(
         @{ Name = 'Ethernet 4'; Desc = 'Realtek Gaming USB 2.5GbE Family Controller'; Status = 'Up'; File = 'rtucx22x64.sys'; Version = '11.19.602.2025'; Hw = $usb; Props = $resolumePp; Wired = $true },
         @{ Name = 'Wi-Fi'; Desc = 'Realtek 8852BE Wireless LAN WiFi 6 PCI-E NIC'; Status = 'Disconnected'; File = 'rtwlane6.sys'; Version = '6001.15.157.0'; Hw = 'PCI\VEN_10EC&DEV_B852&SUBSYS_B85217AA&REV_00'; Props = @{ '*EEE' = '1' }; Medium = 9; MediaType = 'Native 802.11' },
-        @{ Name = 'Wi-Fi 2'; Desc = 'Realtek 8852BE Wireless LAN WiFi 6 PCI-E NIC #2'; Status = 'Up'; File = 'rtwlane6.sys'; Version = '6001.15.157.0'; Hw = 'PCI\VEN_10EC&DEV_B852&REV_00'; Props = @{}; MediaType = 'Native 802.11' }
+        @{ Name = 'Wi-Fi 2'; Desc = 'Realtek 8852BE Wireless LAN WiFi 6 PCI-E NIC #2'; Status = 'Up'; File = 'rtwlane6.sys'; Version = '6001.15.157.0'; Hw = 'PCI\VEN_10EC&DEV_B852&REV_00'; Props = @{}; MediaType = 'Native 802.11' },
+        @{ Name = 'Wi-Fi 3'; Desc = 'Realtek 8852BE Wireless LAN WiFi 6 PCI-E NIC #3'; Status = 'Up'; File = 'rtwlane6.sys'; Version = '6001.15.157.0'; Hw = 'PCI\VEN_10EC&DEV_B852&REV_00'; Props = @{}; Medium = 9 }
     )
     $r = Run-Fake -IncludeDown
     $named = Run-Fake -Name @('Wi-Fi')

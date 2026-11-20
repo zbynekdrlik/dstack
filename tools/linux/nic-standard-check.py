@@ -613,14 +613,16 @@ def run(args, with_stderr=False):
     return r.stdout
 
 
-# PCI class 0x0280: a network controller that is no Ethernet one (0x0200),
-# the WiFi cards (the Realtek RTL8852BE 10ec:b852, Intel's CNVi).
+# PCI class 0x0280 ("network controller, other", not Ethernet's 0x0200): the
+# class of the WiFi cards (the Realtek RTL8852BE 10ec:b852, Intel's CNVi).
+# Every wired NIC read in the fleet (20.11.2026) is 0x020000.
 PCI_CLASS_WIRELESS = "0x0280"
 
 
 def is_wireless(iface, sysfs=SYSFS_NET):
-    """Whether a NIC is wireless: its `wireless` or `phy80211` node (a bound
-    WiFi driver), or its PCI class 0x0280 (no driver needed)."""
+    """Whether a NIC is wireless: its `wireless` or `phy80211` node (a
+    cfg80211 or wext driver registers one), or its PCI class 0x0280, for a
+    WiFi driver that registers neither (the dispatch's third test, #465)."""
     base = os.path.join(sysfs, iface)
     if os.path.exists(os.path.join(base, "wireless")) or os.path.exists(os.path.join(base, "phy80211")):
         return True

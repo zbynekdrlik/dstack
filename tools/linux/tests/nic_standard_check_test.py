@@ -616,6 +616,8 @@ class ThisPc(unittest.TestCase):
         self._write(os.path.join(pcidev, "vendor"), "0x10ec")
         self._write(os.path.join(pcidev, "device"), "0x8168")
         self._write(os.path.join(pcidev, "power", "control"), "on")
+        # An Ethernet controller's class, as every wired NIC in the fleet.
+        self._write(os.path.join(pcidev, "class"), "0x020000")
         self._write(os.path.join(root, "devices", "pci", "0000:00:1c.0", "power", "control"), "auto")
         intel = os.path.join(root, "devices", "pci", "0000:07:00.0")
         os.makedirs(intel)
@@ -800,11 +802,13 @@ class ThisPc(unittest.TestCase):
         self.assertEqual(lines[-1].split(" Realtek")[0], "2")
 
     def test_a_wifi_by_its_pci_class_alone_is_out_of_the_wired_scan(self):
-        # No wireless/phy80211 node (no driver bound): the PCI class 0x0280
+        # No wireless/phy80211 node (a driver that registers neither): the PCI class 0x0280
         # (network controller, not Ethernet 0x0200) still tells it.
         self._realtek_wifi("wlp4s0", markers=())
         self.assertTrue(nsc.is_wireless("wlp4s0", self.net))
+        # enp2s0's class 0x020000 (Ethernet) is wired.
         self.assertFalse(nsc.is_wireless("enp2s0", self.net))
+        self.assertIn("enp2s0", nsc.wired_nics(self.net))
         self.assertNotIn("wlp4s0", nsc.wired_nics(self.net))
         rc, lines = self.main("--all")
         self.assertFalse(any("wlp4s0" in x for x in lines))

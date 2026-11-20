@@ -199,7 +199,7 @@
     {
       "id": "rtl8125-linux",
       "chip": "RTL8125",
-      "covers": "Realtek PCIe 2.5GbE (RTL8125) under the kernel's r8169. One in the fleet on Linux (20.11.2026): the PP editing PC's onboard NIC, no cable, unused; its values are that read. r8169 has no interrupt coalescing for this chip (ethtool -c: Operation not supported), so the entry has none",
+      "covers": "Realtek PCIe 2.5GbE (RTL8125; the one read is an RTL8125B, so the firmware rule names rtl8125b-2 and another revision fails on it until read) under the kernel's r8169. One in the fleet on Linux (20.11.2026): the PP editing PC's onboard NIC, no cable, unused; its values are that read. r8169 has no interrupt coalescing for this chip (ethtool -c: Operation not supported), so the entry has none",
       "os": "linux",
       "match": {"pci": ["10ec:8125"]},
       "driver": {
