@@ -8,10 +8,26 @@
 //! A read with nothing within its wait is `Ok(None)`, never an error, so a
 //! loop no longer tells a timeout from a failure by the error's kind (a
 //! would-block on Windows, a timed-out read elsewhere).
+//!
+//! On Windows no read ever times out inside the receive: the socket is
+//! non-blocking and waited on with `WSAPoll` (`recv/windows.rs`). A
+//! blocking receive that ends on `SO_RCVTIMEO` can lose the datagram that
+//! completes into it as the timeout fires (Microsoft: "If a blocking
+//! receive call times out, the connection is in an indeterminate state");
+//! under load (windows-2025, 8 busy threads) such reads lost 0.5-6 % of
+//! the timeouts that fired, multicast and unicast alike, and the poll
+//! none (#454's probe, run 44661855528). The socket stays non-blocking
+//! after the first read, sends on it included. Elsewhere the wait is the
+//! socket's read timeout, then one read (Linux loses nothing there).
 
 use std::io;
 use std::net::{SocketAddr, UdpSocket};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+#[cfg(windows)]
+mod windows;
+#[cfg(windows)]
+use windows::wait_read;
 
 /// One read of `sock` by `read`, waiting at most `wait` for a datagram:
 /// `Ok(None)` when none came within it (and at once for a zero wait),
@@ -79,7 +95,39 @@ fn result_of<T>(read: Read<T>) -> io::Result<Option<T>> {
     }
 }
 
-/// The wait as a read timeout (`SO_RCVTIMEO`), then one read.
+/// The wait as `WSAPoll`'s timeout: whole ms rounded up (a wait never
+/// ends before the time asked), at most `i32::MAX`.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn poll_ms(wait: Duration) -> i32 {
+    i32::try_from(wait.as_micros().div_ceil(1000)).unwrap_or(i32::MAX)
+}
+
+/// Reads with `read` (a non-blocking receive) until it gives a datagram or
+/// fails; after a read with nothing yet, waits with `ready` for the time
+/// left before `until` (true: the socket is readable, or has an error the
+/// next read gives) and reads again. `None` once `until` passed or a wait
+/// ended with nothing: no receive is pending then, so none is lost.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn read_when_ready<T>(
+    until: Instant,
+    mut read: impl FnMut() -> io::Result<T>,
+    mut ready: impl FnMut(Duration) -> io::Result<bool>,
+) -> io::Result<Option<T>> {
+    loop {
+        match read_of(read()) {
+            Read::Nothing => {}
+            done => return result_of(done),
+        }
+        let left = until.saturating_duration_since(Instant::now());
+        if left.is_zero() || !ready(left)? {
+            return Ok(None);
+        }
+    }
+}
+
+/// The wait as a read timeout (`SO_RCVTIMEO`), then one read (every OS but
+/// Windows).
+#[cfg(not(windows))]
 fn wait_read<T>(
     sock: &UdpSocket,
     wait: Duration,
