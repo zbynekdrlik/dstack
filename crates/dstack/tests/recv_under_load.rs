@@ -2,21 +2,26 @@
 // Copyright (C) 2026 dstack contributors.
 
 //! dstack #454: a UDP read that waits at most a while
-//! (`dstack::recv::recv_from_within`) loses no datagram on Windows under
-//! load. A blocking read that ends on `SO_RCVTIMEO` can lose a datagram
-//! arriving as it times out (Microsoft: "If a blocking receive call times
-//! out, the connection is in an indeterminate state"); #453's windows-2025
-//! runs and #454's probe (`wip-454-1`, 27 rounds of 300 datagrams, 8 busy
-//! threads) lost 0.3-6 % per timeout at 10 and 50 ms waits, multicast and
-//! unicast alike, and a non-blocking read waited on with `WSAPoll` none.
+//! (`dstack::recv::recv_from_within`) loses no datagram under load, on
+//! every OS. On Windows a blocking read that ends on `SO_RCVTIMEO` can lose
+//! a datagram arriving as it times out (Microsoft: "If a blocking receive
+//! call times out, the connection is in an indeterminate state"); #453's
+//! windows-2025 runs and #454's probe (run 44661855528, 27 rounds of 300
+//! datagrams, 8 busy threads) lost a datagram at 0.5-6 % of the timeouts
+//! that fired at 10 and 50 ms waits, multicast and unicast alike, and a
+//! non-blocking read waited on with `WSAPoll` none. Against the timeout
+//! read this test failed 15 of 15 there (run 44663445297). On Linux, where
+//! the helper keeps the read timeout, it is the measurement that the
+//! timeout read loses nothing.
 //!
 //! The load is the test's own: busy threads at normal priority for the
 //! run. Its own binary, so cargo runs no other test beside it. Readers at
 //! the stack's waits (10 ms as #453's listener, 50 ms as discovery's
 //! `READ_WAIT`), on a multicast group (as discovery and the heartbeat
 //! listener) and on unicast sockets (as the query and request loops),
-//! each read every datagram of a sender spaced 0-20 ms apart.
-#![cfg(windows)]
+//! each read every datagram of a sender spaced 0-20 ms apart. Each datagram
+//! carries the process id: another process's run on the same group and
+//! port is not counted.
 
 use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
 use std::sync::Arc;
@@ -65,13 +70,15 @@ fn read(name: String, sock: UdpSocket, wait: Duration, sent: Arc<AtomicBool>) ->
     loop {
         match dstack::recv::recv_from_within(&sock, &mut buf, wait) {
             Ok(Some((n, _))) => {
-                let seq = buf
+                let datagram: [u8; 8] = buf
                     .get(..n)
                     .and_then(|b| b.try_into().ok())
-                    .map(u32::from_be_bytes)
-                    .expect("a 4-byte sequence number");
-                counts[seq as usize] += 1;
-                quiet_since = None;
+                    .expect("a process id and a sequence number");
+                let [p0, p1, p2, p3, s0, s1, s2, s3] = datagram;
+                if u32::from_be_bytes([p0, p1, p2, p3]) == std::process::id() {
+                    counts[u32::from_be_bytes([s0, s1, s2, s3]) as usize] += 1;
+                    quiet_since = None;
+                }
             }
             Ok(None) => {
                 empty_waits += 1;
@@ -135,7 +142,9 @@ fn a_read_with_a_wait_loses_no_datagram_under_load() {
     std::thread::sleep(Duration::from_millis(100));
     let mut lcg: u64 = 0x9e37_79b9;
     for seq in 0..DATAGRAMS {
-        let bytes = seq.to_be_bytes();
+        let mut bytes = [0u8; 8];
+        bytes[..4].copy_from_slice(&std::process::id().to_be_bytes());
+        bytes[4..].copy_from_slice(&seq.to_be_bytes());
         sender
             .send_to(&bytes, SocketAddrV4::new(GROUP, port))
             .unwrap();

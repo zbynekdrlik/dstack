@@ -503,7 +503,8 @@ pub fn parse_clock(body: &[u8]) -> Option<ClockStatus> {
 /// (each with a sequence of its own),
 /// for up to `wait` in all: its reply from that address, any port (and the
 /// device id `id`, when given); the reply's body. Other datagrams on
-/// `sock` are skipped.
+/// `sock` are skipped. `sock` is read through [`crate::recv::within`]: on
+/// Windows it is left non-blocking (dstack #454).
 pub fn ask(
     sock: &UdpSocket,
     device: SocketAddrV4,

@@ -112,6 +112,18 @@ fn a_failed_read_is_an_error() {
 }
 
 #[test]
+fn a_wait_ends_its_length_after_now_at_most_the_longest_wait() {
+    let now = Instant::now();
+    let s = Duration::from_secs(1);
+    assert_eq!(until_of(now, s), now + s);
+    assert_eq!(until_of(now, MAX_WAIT), now + MAX_WAIT);
+    let past = MAX_WAIT + Duration::from_millis(1);
+    assert_eq!(until_of(now, past), now + MAX_WAIT);
+    assert_eq!(until_of(now, Duration::MAX), now + MAX_WAIT);
+    assert_eq!(poll_ms(MAX_WAIT), i32::MAX);
+}
+
+#[test]
 fn a_poll_waits_whole_milliseconds_rounded_up_and_capped() {
     let us = Duration::from_micros;
     assert_eq!(poll_ms(Duration::ZERO), 0);

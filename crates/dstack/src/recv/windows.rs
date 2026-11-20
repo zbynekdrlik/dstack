@@ -23,7 +23,7 @@ pub(super) fn wait_read<T>(
 ) -> io::Result<Option<T>> {
     sock.set_nonblocking(true)?;
     super::read_when_ready(
-        Instant::now() + wait,
+        super::until_of(Instant::now(), wait),
         || read(sock),
         |left| readable(sock, left),
     )

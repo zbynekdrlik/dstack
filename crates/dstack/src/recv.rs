@@ -18,7 +18,8 @@
 //! the timeouts that fired, multicast and unicast alike, and the poll
 //! none (#454's probe, run 44661855528). The socket stays non-blocking
 //! after the first read, sends on it included. Elsewhere the wait is the
-//! socket's read timeout, then one read (Linux loses nothing there).
+//! socket's read timeout, then one read: on Linux that loses nothing under
+//! the same load (`tests/recv_under_load.rs` runs on every OS).
 
 use std::io;
 use std::net::{SocketAddr, UdpSocket};
@@ -33,6 +34,11 @@ use windows::wait_read;
 /// `Ok(None)` when none came within it (and at once for a zero wait),
 /// an error when the read failed. `read` is the receive itself
 /// (`recv_from`, or `recv` on a connected socket).
+///
+/// The socket must be a blocking one when given. On Windows it is left
+/// non-blocking after the call (a later plain `recv_from` on it returns
+/// would-block at once, and a send can when its buffer is full);
+/// elsewhere its read timeout is left set to `wait`.
 pub fn within<T>(
     sock: &UdpSocket,
     wait: Duration,
@@ -93,6 +99,19 @@ fn result_of<T>(read: Read<T>) -> io::Result<Option<T>> {
         Read::Nothing => Ok(None),
         Read::Failed(e) => Err(e),
     }
+}
+
+/// The longest wait taken as asked: a longer one (up to `Duration::MAX`)
+/// waits this long, about 24.8 days, `WSAPoll`'s longest timeout.
+#[cfg_attr(not(windows), allow(dead_code))]
+const MAX_WAIT: Duration = Duration::from_millis(2_147_483_647);
+const _: () = assert!(MAX_WAIT.as_millis() == i32::MAX as u128);
+
+/// When a wait of `wait` from `now` ends: at most [`MAX_WAIT`] away, so a
+/// huge wait never overflows the clock.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn until_of(now: Instant, wait: Duration) -> Instant {
+    now + wait.min(MAX_WAIT)
 }
 
 /// The wait as `WSAPoll`'s timeout: whole ms rounded up (a wait never
