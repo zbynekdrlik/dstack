@@ -49,8 +49,10 @@ fn both_loops_give_the_plain_sum_of_each_kernel() {
         let first_out = p.given - made as u64;
         let stride = made;
         let (mut fused, mut plain) = (vec![0.0; 31 * stride], vec![0.0; 31 * stride]);
-        convolve::<true>(&p.table, &p.plan, &p.groups, &mut fused, stride);
-        convolve::<false>(&p.table, &p.plan, &p.groups, &mut plain, stride);
+        // SAFETY: dev1 and CI's runners have FMA; `Poly::new` read it.
+        assert!(p.fma);
+        unsafe { fma::convolve(&p.table, &p.plan, &p.groups, &mut fused, stride) };
+        convolve(&p.table, &p.plan, &p.groups, &mut plain, stride);
         let mut ran = vec![0.0; 31 * stride];
         p.run(&mut ran, stride);
         for k in 0..made {
@@ -182,7 +184,9 @@ fn the_history_stays_within_its_room() {
                 let mut p = poly(from, to, 3, block, fixed);
                 let lens: Vec<usize> = p.groups.iter().map(|g| g.rows.len()).collect();
                 let mut out = vec![0.0; 3 * p.output_frames_max()];
-                for k in 0..400 {
+                // Long enough for the history to move several times.
+                let calls = (4 * p.room / block).min(400) + 8;
+                for k in 0..calls {
                     let (base, _) = p.place(p.given);
                     let needed = p.taken as i64 - base;
                     assert!(

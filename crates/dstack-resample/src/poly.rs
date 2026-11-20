@@ -24,13 +24,16 @@
 //! and contiguous, so one tap weights a whole group at once and one
 //! output's window (257 rows of 16 channels, 32 KB) stays in the L1 cache
 //! from one output to the next. rubato reads 64 separate per-channel
-//! windows a frame (128 KB). On x86_64 the loop runs in a copy compiled
-//! for FMA when the CPU has it (asked once, when the engine is made).
+//! windows a frame (128 KB). On x86_64 the loop runs in AVX and FMA
+//! intrinsics when the CPU has FMA (asked once, when the engine is made),
+//! else in portable Rust.
 //!
 //! Nothing allocates in a call that succeeds, once the engine is made.
 
 use crate::{ConvertError, Fixed};
 
+#[cfg(target_arch = "x86_64")]
+mod fma;
 #[cfg(test)]
 mod tests;
 
@@ -177,17 +180,10 @@ impl Table {
     }
 }
 
-/// `w * x + acc`, fused when `FMA`.
-#[inline(always)]
-fn madd<const FMA: bool>(w: f64, x: f64, acc: f64) -> f64 {
-    if FMA { w.mul_add(x, acc) } else { acc + w * x }
-}
-
 /// One output of a group of `G` channels: `kernel` over `rows` (frame-major,
 /// `G` values a frame, at least `kernel.len()` frames), in `U` interleaved
 /// partial sums (more independent sums for a narrow group).
-#[inline(always)]
-fn dot<const G: usize, const U: usize, const FMA: bool>(kernel: &[f64], rows: &[f64]) -> [f64; G] {
+fn dot<const G: usize, const U: usize>(kernel: &[f64], rows: &[f64]) -> [f64; G] {
     let mut acc = [[0.0; G]; U];
     let (ks, tail) = kernel.as_chunks::<U>();
     let frames = &rows.as_chunks::<G>().0[..kernel.len()];
@@ -195,13 +191,13 @@ fn dot<const G: usize, const U: usize, const FMA: bool>(kernel: &[f64], rows: &[
     for (k, r) in ks.iter().zip(body.as_chunks::<U>().0) {
         for u in 0..U {
             for c in 0..G {
-                acc[u][c] = madd::<FMA>(k[u], r[u][c], acc[u][c]);
+                acc[u][c] += k[u] * r[u][c];
             }
         }
     }
     for (&w, r) in tail.iter().zip(rest) {
         for c in 0..G {
-            acc[0][c] = madd::<FMA>(w, r[c], acc[0][c]);
+            acc[0][c] += w * r[c];
         }
     }
     let mut sum = [0.0; G];
@@ -216,8 +212,7 @@ fn dot<const G: usize, const U: usize, const FMA: bool>(kernel: &[f64], rows: &[
 /// The outputs of one group of `G` channels: `plan` gives each output's
 /// first row and phase; output `k` of the group's channel `c` goes to
 /// `out[c * stride + k]`.
-#[inline(always)]
-fn group<const G: usize, const U: usize, const FMA: bool>(
+fn group<const G: usize, const U: usize>(
     table: &Table,
     plan: &[(usize, usize)],
     rows: &[f64],
@@ -226,7 +221,7 @@ fn group<const G: usize, const U: usize, const FMA: bool>(
 ) {
     let w = table.width;
     for (k, &(row, phase)) in plan.iter().enumerate() {
-        let sum = dot::<G, U, FMA>(table.kernel(phase), &rows[row * G..(row + w) * G]);
+        let sum = dot::<G, U>(table.kernel(phase), &rows[row * G..(row + w) * G]);
         for (c, v) in sum.into_iter().enumerate() {
             out[c * stride + k] = v;
         }
@@ -243,9 +238,9 @@ struct Group {
 }
 
 /// Every group's outputs for `plan` into `output` (channel-major at
-/// `stride`).
-#[inline(always)]
-fn convolve<const FMA: bool>(
+/// `stride`): the portable loop, for a CPU without FMA ([`fma::convolve`]
+/// otherwise).
+fn convolve(
     table: &Table,
     plan: &[(usize, usize)],
     groups: &[Group],
@@ -256,26 +251,13 @@ fn convolve<const FMA: bool>(
         let out = &mut output[g.first * stride..];
         let rows = &g.rows[..];
         match g.width {
-            16 => group::<16, 1, FMA>(table, plan, rows, out, stride),
-            8 => group::<8, 4, FMA>(table, plan, rows, out, stride),
-            4 => group::<4, 4, FMA>(table, plan, rows, out, stride),
-            2 => group::<2, 8, FMA>(table, plan, rows, out, stride),
-            _ => group::<1, 8, FMA>(table, plan, rows, out, stride),
+            16 => group::<16, 1>(table, plan, rows, out, stride),
+            8 => group::<8, 4>(table, plan, rows, out, stride),
+            4 => group::<4, 4>(table, plan, rows, out, stride),
+            2 => group::<2, 8>(table, plan, rows, out, stride),
+            _ => group::<1, 8>(table, plan, rows, out, stride),
         }
     }
-}
-
-/// [`convolve`] compiled for FMA.
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "fma")]
-fn convolve_fma(
-    table: &Table,
-    plan: &[(usize, usize)],
-    groups: &[Group],
-    output: &mut [f64],
-    stride: usize,
-) {
-    convolve::<true>(table, plan, groups, output, stride);
 }
 
 /// The channel groups for `channels` channels, [`WIDTHS`] widest first,
@@ -321,7 +303,7 @@ pub(crate) struct Poly {
     given: u64,
     /// Each output's first row and phase in this call.
     plan: Vec<(usize, usize)>,
-    /// The CPU has FMA (x86_64): the loop runs [`convolve_fma`].
+    /// The CPU has FMA (x86_64): the loop runs [`fma::convolve`].
     fma: bool,
     /// The most frames a call takes and gives.
     max_in: usize,
@@ -545,15 +527,15 @@ impl Poly {
         Ok((take, make))
     }
 
-    /// The call's outputs, through the FMA copy when the CPU has it.
+    /// The call's outputs, through the FMA loop when the CPU has it.
     fn run(&self, output: &mut [f64], stride: usize) {
         #[cfg(target_arch = "x86_64")]
         if self.fma {
-            // SAFETY: `fma` is set only when the CPU reported FMA
-            // (`Poly::new`).
-            unsafe { convolve_fma(&self.table, &self.plan, &self.groups, output, stride) };
+            // SAFETY: `fma` is set only when the CPU reported FMA, which
+            // std reports only with the OS's AVX state (`Poly::new`).
+            unsafe { fma::convolve(&self.table, &self.plan, &self.groups, output, stride) };
             return;
         }
-        convolve::<false>(&self.table, &self.plan, &self.groups, output, stride);
+        convolve(&self.table, &self.plan, &self.groups, output, stride);
     }
 }
