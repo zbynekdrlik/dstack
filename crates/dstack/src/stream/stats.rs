@@ -75,9 +75,9 @@ pub struct PumpStats {
     pub(super) drain_datagrams: Peak,
     pub(super) process_cpu_ns: Peak,
     pub(super) cpu_measured: AtomicBool,
-    /// The pump reads or writes any channel of the app ([`PumpStats::for_map`],
-    /// dstack #461): a pump with none (dsend's, whose TX thread fills L and R)
-    /// loses no audio when it re-bootstraps.
+    /// The pump reads or writes any channel ([`PumpStats::for_map`], dstack
+    /// #461): a pump with none (dsend's, whose TX thread fills L and R, on a
+    /// device with no RX channel) loses no audio when it re-bootstraps.
     pub(super) owns_channels: bool,
 }
 
@@ -203,12 +203,15 @@ impl PumpStats {
         }
     }
 
-    /// These counts for a pump on `map` (dstack #461): whether it owns any
-    /// channel (an RX channel it reads or a TX channel it writes). A pump
-    /// built with [`PumpStats::new`] alone owns channels.
-    pub fn for_map(self, map: &Map) -> Self {
+    /// These counts for a pump on `map` of a device with `device_rx` RX
+    /// channels (dstack #461): whether it owns any channel, an RX channel it
+    /// reads or a TX channel it writes for the app, or any RX channel of the
+    /// device (in the normal profile the pump writes the RX rings, which
+    /// another reader may use). A pump built with [`PumpStats::new`] alone
+    /// owns channels.
+    pub fn for_map(self, map: &Map, device_rx: usize) -> Self {
         PumpStats {
-            owns_channels: !map.rx.is_empty() || !map.tx.is_empty(),
+            owns_channels: !map.rx.is_empty() || !map.tx.is_empty() || device_rx > 0,
             ..self
         }
     }

@@ -22,7 +22,8 @@ pub enum Priority {
     /// profile's thread priority on Windows.
     Granted,
     /// THREAD_PRIORITY_HIGHEST, as the normal profile asks on Windows
-    /// (dstack #90), outside MMCSS (it refused).
+    /// (dstack #90), outside MMCSS (it refused, or raised nothing: dstack
+    /// #461), read back as asked.
     Highest,
     /// The normal profile on Windows in MMCSS "Pro Audio" at
     /// AVRT_PRIORITY_HIGH (dstack #1), HIGHEST beneath it.
@@ -33,7 +34,9 @@ pub enum Priority {
     /// Normal priority, as the normal profile asks elsewhere (dlink on
     /// Linux).
     Normal,
-    /// A raised priority asked and refused: the thread runs at normal.
+    /// A raised priority asked and refused, or read back under the level
+    /// asked (dstack #461: lost after a join MMCSS raised nothing for): the
+    /// thread runs under it (its read-back in the record).
     Refused,
 }
 
@@ -87,7 +90,8 @@ impl Priority {
 /// What a thread's MMCSS join gave ([`mmcss_of`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Mmcss {
-    /// Not in MMCSS: not asked, or the join refused.
+    /// Not in MMCSS: not asked, the join refused, or MMCSS raised nothing
+    /// (dstack #461, [`joined_task`]).
     Out,
     /// In "Pro Audio" at AVRT_PRIORITY_HIGH.
     High,
@@ -130,18 +134,6 @@ pub(crate) fn mmcss_of(
         (Some(index), Ok(_)) => (Mmcss::High, Some(index)),
         (Some(index), Err(_)) => (Mmcss::PriorityRefused, Some(index)),
     }
-}
-
-/// Whether a thread that asked Windows' level `wanted`
-/// ([`windows_priority_for`]) and is in `mmcss` sets its priority again
-/// after it read back `read` (dstack #461): outside MMCSS, when the
-/// read-back is under the level asked (on FOH, with MMCSS absent, the
-/// joined threads read their class's base). Never in MMCSS: a
-/// SetThreadPriority there takes the thread out of MMCSS's band
-/// (resolume-snv, 20.11.2026: 25 back to 8). Nothing asked or nothing read:
-/// no.
-pub(crate) fn needs_again(wanted: Option<i32>, mmcss: Mmcss, read: Option<i32>) -> bool {
-    mmcss == Mmcss::Out && matches!((wanted, read), (Some(w), Some(r)) if r < w)
 }
 
 /// Whether a thread whose ask answered `granted` holds Windows' level
@@ -283,7 +275,8 @@ impl Scheduling {
     }
 
     /// The threads that took their priority, in [`MediaThread::ALL`]'s
-    /// order.
+    /// order. A thread recorded again meanwhile (a new TX thread) can show
+    /// its new read-back beside its old outcome for one read: status only.
     pub fn threads(&self) -> Vec<Scheduled> {
         MediaThread::ALL
             .into_iter()
@@ -309,28 +302,23 @@ impl Scheduling {
 /// info when it is what was asked, a warning when a raised priority or
 /// MMCSS's was refused (the thread runs on). The thread's priority is read
 /// back after the join ([`thread_priority`], dstack #461): a join MMCSS
-/// raised nothing for is no join ([`mmcss_of`]), a priority under the one
-/// asked outside MMCSS is set again ([`needs_again`]) and read back again,
-/// and the outcome follows the read-back ([`held`]).
+/// raised nothing for is no join ([`mmcss_of`]), and the outcome follows
+/// the read-back ([`held`]). A priority found under the one asked is
+/// reported, never set again (owner ROZHODNUTÉ 20.11.2026, #461: a
+/// fallback app such as dsend takes no CPU priority from the PC's main
+/// audio work where MMCSS is off).
 pub(crate) fn take_priority(thread: MediaThread, priority: i32, scheduling: &Scheduling) {
     let asked =
         crate::clock::thread_priority_for(crate::clock::profile(), crate::clock::Os::current());
     let wanted = windows_priority_for(asked, priority);
     let granted = ask_priority(asked, priority);
     let joined = wants_mmcss(asked).then(join_mmcss);
-    let read_after_join = thread_priority();
+    let read = thread_priority();
     let (mmcss, task) = joined
         .as_ref()
-        .map_or((Mmcss::Out, None), |j| mmcss_of(j, read_after_join));
-    let again = needs_again(wanted, mmcss, read_after_join);
-    let (granted, read) = if again {
-        (ask_priority(asked, priority), thread_priority())
-    } else {
-        (granted, read_after_join)
-    };
+        .map_or((Mmcss::Out, None), |j| mmcss_of(j, read));
     let outcome = priority_outcome(asked, held(granted, wanted, read), mmcss);
     scheduling.record(thread, outcome, task, read);
-    let error = joined.as_ref().and_then(|j| j.as_ref().err());
     let thread = thread.log_name();
     match outcome {
         // Windows' real-time grant is a thread priority, not a scheduler.
@@ -339,8 +327,6 @@ pub(crate) fn take_priority(thread: MediaThread, priority: i32, scheduling: &Sch
             Os::Windows => info!(
                 thread,
                 priority,
-                read_after_join = ?read_after_join,
-                set_again = again,
                 read = ?read,
                 "runs at the real-time thread priority"
             ),
@@ -355,14 +341,12 @@ pub(crate) fn take_priority(thread: MediaThread, priority: i32, scheduling: &Sch
             thread,
             mmcss_task = ?task,
             read = ?read,
-            error = ?error,
+            joined = ?joined,
             "runs in MMCSS Pro Audio, but AVRT_PRIORITY_HIGH was refused (the normal timing profile on Windows)"
         ),
         Priority::Highest => warn!(
             thread,
             joined = ?joined,
-            read_after_join = ?read_after_join,
-            set_again = again,
             read = ?read,
             "not in MMCSS (refused, or it raised nothing: MMCSS is off on this PC): runs at THREAD_PRIORITY_HIGHEST (the normal timing profile on Windows)"
         ),
@@ -375,10 +359,8 @@ pub(crate) fn take_priority(thread: MediaThread, priority: i32, scheduling: &Sch
             asked = ?asked,
             priority,
             joined = ?joined,
-            read_after_join = ?read_after_join,
-            set_again = again,
             read = ?read,
-            "the asked priority was refused: runs at normal priority"
+            "the asked priority was refused, or read back under it after the MMCSS join: runs at the priority read"
         ),
     }
 }

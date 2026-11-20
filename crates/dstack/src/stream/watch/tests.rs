@@ -448,28 +448,34 @@ fn a_cpu_time_shows_in_whole_us_or_a_dash() {
 }
 
 /// dstack #461: a pump owns channels when its map names any RX or TX
-/// channel; one built without a map owns them.
+/// channel, or its device has an RX channel (the pump writes the RX rings
+/// in the normal profile); one built without a map owns them.
 #[test]
 fn a_pump_owns_channels_by_its_map() {
     use crate::stream::Map;
     assert!(stats().owns_channels(), "no map: as before");
-    let on = |rx: Vec<usize>, tx: Vec<usize>| stats().for_map(&Map { rx, tx }).owns_channels();
+    let on = |rx: Vec<usize>, tx: Vec<usize>, device_rx: usize| {
+        stats().for_map(&Map { rx, tx }, device_rx).owns_channels()
+    };
     assert!(
-        !on(vec![], vec![]),
-        "dsend's pump: the TX thread fills L and R"
+        !on(vec![], vec![], 0),
+        "dsend's pump: the TX thread fills L and R, no RX"
     );
-    assert!(on(vec![0], vec![]));
-    assert!(on(vec![], vec![1]));
-    assert!(on(vec![0, 1], vec![0, 1]));
+    assert!(on(vec![0], vec![], 1));
+    assert!(on(vec![], vec![1], 0));
+    assert!(on(vec![0, 1], vec![0, 1], 2));
+    assert!(on(vec![], vec![], 1), "its rings may have another reader");
 }
 
-/// dstack #461: a pump with no channels (dsend's) loses no audio when it
-/// re-bootstraps or overruns: its second is one info line, the same fields
-/// as the warning's, and no warning (FOH: 4 of 6 "lost" lines were this).
+/// dstack #461 (owner, 20.11.2026): a pump with no channels (dsend's) loses
+/// no audio when it re-bootstraps or overruns. Its second stays visible as
+/// one info line that says what was lost, 0 samples, never `missed` blocks
+/// (FOH: 4 of 6 "lost" lines were this). A pump with channels still warns
+/// with its missed blocks.
 #[test]
 fn a_pump_without_channels_logs_its_growth_as_no_loss() {
     undecided();
-    let s = PumpStats::new(TIMING, 96_000).for_map(&crate::stream::Map::default());
+    let s = PumpStats::new(TIMING, 96_000).for_map(&crate::stream::Map::default(), 0);
     let mut w = PumpWatch::new();
     assert_eq!(capture_warnings(|| w.watch(0, "d1", Some(&s))), "");
     s.rebootstrapped(6, Cause::Late);
@@ -483,7 +489,7 @@ fn a_pump_without_channels_logs_its_growth_as_no_loss() {
         "INFO",
         "device=\"d1\"",
         "rebootstraps=1",
-        "missed=6",
+        "lost_samples=0",
         "overruns=1",
         "cause=late",
         "block=64",
@@ -491,20 +497,27 @@ fn a_pump_without_channels_logs_its_growth_as_no_loss() {
     ] {
         assert!(log.contains(part), "{part} in {log}");
     }
+    // What was lost, 0 samples: never the skipped blocks as `missed`.
+    assert!(!log.contains("missed"), "{log}");
+    assert!(!log.contains("writes_after_send"), "{log}");
     // A quiet second: nothing, at any level.
     assert_eq!(
         capture_at(tracing::Level::TRACE, || w.watch(2 * S, "d1", Some(&s))),
         ""
     );
-    // A pump with channels still warns, with the warning's text.
-    let s = PumpStats::new(TIMING, 96_000).for_map(&crate::stream::Map {
-        rx: vec![],
-        tx: vec![0],
-    });
+    // A pump with channels still warns, with its missed blocks.
+    let s = PumpStats::new(TIMING, 96_000).for_map(
+        &crate::stream::Map {
+            rx: vec![],
+            tx: vec![0],
+        },
+        0,
+    );
     let mut w = PumpWatch::new();
     assert_eq!(capture_warnings(|| w.watch(0, "d1", Some(&s))), "");
     s.rebootstrapped(6, Cause::Late);
     let log = capture_warnings(|| w.watch(S, "d1", Some(&s)));
     assert!(log.contains(PUMP_WARNING), "{log}");
+    assert!(log.contains("missed=6"), "{log}");
     assert!(!log.contains(PUMP_NO_LOSS), "{log}");
 }

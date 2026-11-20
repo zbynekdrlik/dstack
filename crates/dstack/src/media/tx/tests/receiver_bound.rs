@@ -157,3 +157,38 @@ fn the_restart_line_names_its_slot_and_its_own_receiver_s_bound() {
         "{warnings}"
     );
 }
+
+/// dstack #461 (owner, 20.11.2026): a real TX loss still warns, at the
+/// bound where it is right. At dsend's 40 ms latency (FOH's largest hold
+/// was 35.7 ms) a TX thread held 35.7 ms restarts nothing and sends every
+/// packet late; held past 40 ms the schedule starts again with the warning,
+/// judged by the 40 ms bound (3840 samples at 96 kHz).
+#[test]
+fn at_a_40_ms_latency_a_hold_of_35_7_ms_loses_nothing_and_a_longer_one_warns() {
+    let mut cfg = cfg();
+    cfg.latency_ns = 40 * MS;
+    let shared =
+        Arc::new(TxShared::new(cfg, Ipv4Addr::LOCALHOST, Vec::new().into(), 1, &[]).unwrap());
+    let mut rig = Rig::with(shared);
+    let (slot, _) = rig.flow(vec![Some(1)]);
+    rig.tx.step(Some(T), 0);
+    let due = first_due_ns(T);
+    crate::test_log::undecided();
+    let held = crate::test_log::capture_warnings(|| rig.tx.step(Some(due + 35_700_000), 0));
+    let lane = rig.shared.lane(slot);
+    assert_eq!(lane.rebootstraps, 0, "{lane:?} {held}");
+    assert!(!held.contains("the TX schedule starts again"), "{held}");
+    // 35.7 ms of 333 µs packets went out at once, late.
+    assert!((107..=109).contains(&lane.packets), "{lane:?}");
+    // The next wake 41 ms past the last packet's due time: past the bound.
+    let last_due = due + (lane.packets - 1) * FPP * 1_000_000_000 / u64::from(RATE);
+    let restarted = crate::test_log::capture_warnings(|| rig.tx.step(Some(last_due + 41 * MS), 0));
+    let lane = rig.shared.lane(slot);
+    assert_eq!(lane.rebootstraps, 1, "{lane:?} {restarted}");
+    assert_eq!(
+        restarted.matches("the TX schedule starts again").count(),
+        1,
+        "{restarted}"
+    );
+    assert!(restarted.contains(" max_lag=3840 "), "{restarted}");
+}

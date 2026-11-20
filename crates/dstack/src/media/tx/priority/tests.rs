@@ -244,32 +244,6 @@ fn a_join_without_mmcss_is_no_thread_in_mmcss() {
     assert_eq!(joined_task(&Err(join), Some(19)), None);
 }
 
-/// dstack #461: outside MMCSS a thread whose read-back is under the level
-/// it asked sets it again; never in MMCSS (a SetThreadPriority there takes
-/// the thread out of MMCSS's band: resolume-snv, 25 back to 8), never with
-/// nothing asked or nothing read.
-#[test]
-fn outside_mmcss_a_priority_read_under_the_asked_one_is_set_again() {
-    let highest = Some(WINDOWS_HIGHEST);
-    // FOH: the joined threads read their class's base (relative 0).
-    assert!(needs_again(highest, Mmcss::Out, Some(0)));
-    assert!(needs_again(highest, Mmcss::Out, Some(WINDOWS_HIGHEST - 1)));
-    assert!(!needs_again(highest, Mmcss::Out, Some(WINDOWS_HIGHEST)));
-    assert!(!needs_again(highest, Mmcss::Out, Some(WINDOWS_HIGHEST + 1)));
-    let critical = Some(WINDOWS_TIME_CRITICAL);
-    assert!(needs_again(critical, Mmcss::Out, Some(WINDOWS_HIGHEST)));
-    assert!(!needs_again(
-        critical,
-        Mmcss::Out,
-        Some(WINDOWS_TIME_CRITICAL)
-    ));
-    for mmcss in [Mmcss::High, Mmcss::PriorityRefused] {
-        assert!(!needs_again(highest, mmcss, Some(0)), "{mmcss:?}");
-    }
-    assert!(!needs_again(None, Mmcss::Out, Some(0)));
-    assert!(!needs_again(highest, Mmcss::Out, None));
-}
-
 /// dstack #461: a raised priority holds only when its read-back reaches
 /// the level asked; unread or nothing wanted, the ask's own answer.
 #[test]
