@@ -222,7 +222,11 @@ fn the_history_stays_within_its_room() {
 fn a_reset_starts_from_silence_again() {
     let mut p = poly(96_000, 44_100, 2, 64, Fixed::Input);
     let mut fresh = poly(96_000, 44_100, 2, 64, Fixed::Input);
-    feed(&mut p, 5);
+    // Long enough for the history to move: its first rows then hold
+    // audio, which the reset must clear (they held the start's silence
+    // before the first move).
+    feed(&mut p, 20);
+    assert!(p.first > 0 && p.groups[0].rows[..64].iter().any(|&v| v != 0.0));
     p.reset();
     assert_eq!((p.taken, p.given), (0, 0));
     let x = signal(2, 64 * 8, 3);
