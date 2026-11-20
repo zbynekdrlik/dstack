@@ -258,6 +258,13 @@ impl Sender {
             self.late_wakes = late_wakes;
             for w in self.pump.wakes().recent() {
                 seen.late_wakes[peer].insert((w.unix_ms, w.behind_us));
+                if w.rebootstrap {
+                    seen.rebootstraps[peer].insert(Rebootstrap {
+                        unix_ms: w.unix_ms,
+                        behind_us: w.behind_us,
+                        oversleep_us: w.oversleep_us,
+                    });
+                }
             }
         }
     }
@@ -285,6 +292,8 @@ struct Seen {
     silences: [Vec<Silence>; 2],
     /// Each peer's pump late wakes, `(unix_ms, behind_us)`.
     late_wakes: [BTreeSet<(u64, u64)>; 2],
+    /// Each peer's pump late wakes that re-bootstrapped (dstack #459).
+    rebootstraps: [BTreeSet<Rebootstrap>; 2],
     /// Each peer's late wakes that left the pump's recent list before the
     /// witness merged them.
     late_wakes_lost: [u64; 2],
@@ -566,8 +575,26 @@ const OVERSLEEP_SLACK_US: u64 = 500;
 /// counted window), and each in one pair at most. A re-bootstrap with no
 /// measured oversleep, or one pump's alone, is in no pair.
 fn shared_stalls(rebootstraps: &[BTreeSet<Rebootstrap>; 2], from_ms: u64, to_ms: u64) -> u64 {
-    let _ = (rebootstraps, from_ms, to_ms);
-    0
+    let judged = |peer: usize| {
+        rebootstraps[peer].iter().filter(move |r| {
+            r.unix_ms > from_ms
+                && r.unix_ms <= to_ms
+                && r.oversleep_us
+                    .is_some_and(|o| o.abs_diff(r.behind_us) <= OVERSLEEP_SLACK_US)
+        })
+    };
+    let mut theirs: Vec<&Rebootstrap> = judged(1).collect();
+    let mut pairs = 0;
+    for mine in judged(0) {
+        if let Some(i) = theirs
+            .iter()
+            .position(|t| t.unix_ms.abs_diff(mine.unix_ms) <= TOGETHER_MS)
+        {
+            theirs.remove(i);
+            pairs += 1;
+        }
+    }
+    pairs
 }
 
 /// Waits up to `bound` for `done`, polling.
@@ -681,7 +708,10 @@ fn both_pumps_restarted_by_one_stall_are_one_pair() {
     let a = r(5_000, 7_250, Some(7_251));
     assert_eq!(pairs(&[a], &[r(5_000, 6_604, Some(6_607))]), 1);
     assert_eq!(
-        pairs(&[r(5_000, 6_770, Some(6_780))], &[r(5_000, 6_083, Some(6_085))]),
+        pairs(
+            &[r(5_000, 6_770, Some(6_780))],
+            &[r(5_000, 6_083, Some(6_085))]
+        ),
         1
     );
     // One pump alone, either peer: today's rule.
@@ -722,8 +752,9 @@ fn both_pumps_restarted_by_one_stall_are_one_pair() {
 /// and settle: no ring hole, no tone gap without a counted restart of the
 /// sender's TX schedule or of a pump, and at most one such restart (dev1
 /// at load 46 from another account's job restarted a TX schedule once and
-/// the check saw it); no play-time step; each device's play times run at
-/// its own skew against the app's clock.
+/// the check saw it; one stall of the process that re-bootstraps both
+/// pumps at once counts once, dstack #459); no play-time step; each
+/// device's play times run at its own skew against the app's clock.
 #[test]
 fn two_peers_at_different_skews_hear_each_other_s_tone_whole() {
     let _one = ONE_DEVICE
@@ -772,7 +803,10 @@ fn two_peers_at_different_skews_hear_each_other_s_tone_whole() {
     ]);
     let started_ms = unix_ms();
     let before = [Counts::of(&a), Counts::of(&b)];
+    // dstack #459: the counted window's wall times, inside the counts.
+    let counted_from_ms = unix_ms();
     std::thread::sleep(Duration::from_secs(8));
+    let counted_to_ms = unix_ms();
     let after = [Counts::of(&a), Counts::of(&b)];
     let seen = witness.stop();
     let status = [a.status(), b.status()];
@@ -791,12 +825,19 @@ fn two_peers_at_different_skews_hear_each_other_s_tone_whole() {
         let (mine, theirs) = (rise(me), rise(other));
         // No ring hole, and a gap only with a counted restart of the
         // sender's TX schedule or a pump (a loaded box: another account's
-        // job), at most one in the window. On a quiet box all are 0.
-        let restarts = theirs.tx_restarts + theirs.pump_restarts + mine.pump_restarts;
+        // job), at most one in the window. On a quiet box all are 0. Both
+        // pumps re-bootstrapped by one stall of the process count once
+        // (dstack #459, [`shared_stalls`]); never more pairs than either
+        // pump's counted restarts.
+        let shared = shared_stalls(&seen.rebootstraps, counted_from_ms, counted_to_ms)
+            .min(mine.pump_restarts)
+            .min(theirs.pump_restarts);
+        let restarts = theirs.tx_restarts + theirs.pump_restarts + mine.pump_restarts - shared;
         assert!(
             mine.gaps <= restarts && restarts <= 1 && mine.holes == 0,
             "peer {me}: {} tone gaps, {restarts} counted restarts (at most one, each gap \
-             one's), {} ring holes\n{}",
+             one's; {shared} stall(s) that re-bootstrapped both pumps counted once each), {} \
+             ring holes\n{}",
             mine.gaps,
             mine.holes,
             verdict(me, &mine, &theirs, &seen, started_ms, &status)
