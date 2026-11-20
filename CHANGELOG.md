@@ -4,6 +4,7 @@
 
 - **API (#457, for iemmixer#122): `health::read_status_line(path, wait) -> io::Result<String>`** (Linux): one `status` request to a device's control socket, its raw answer line without the line end (at most `MAX_READ`, 1 MiB; an `error: ...` answer comes back as its text; no socket is an `Err`). For a reader that judges fields the parsed `Status` does not carry (iemmixer's mic-to-ear latency from `rx[].delay`, `tx[].receiver_latency_us`, `engine.offset`). `read_status` parses the same line, unchanged.
 - Tests (#455): the mDNS daemon tests judge their 5353 sockets only on a `/proc/net/udp` read that lists them. The kernel hands the table out a page per read and skips a later row for every earlier socket closed between reads, so #444's reopen test read no row now and then (1 run in 23 of the full lib suite on dev1). The tests now wait (at most 5 s) for the row they need and judge the old socket closed on the process's own fd list. The rejoin test's wildcard socket takes its own port instead of a probed one (a parallel test could take that in between).
+- **Fix (#454, Linux): an empty read through `dstack::recv` no longer ends before its wait.** `SO_RCVTIMEO` can come back a little early (a 10 ms wait after 9.98 ms in v0.6.199's coverage run, which failed `recv_under_load`'s no-early-return check); the helper now reads again for the time left, as the Windows `WSAPoll` path does. RED test first.
 - **No latency change.**
 
 ## 0.6.199
