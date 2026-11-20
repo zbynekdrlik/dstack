@@ -1,10 +1,13 @@
-//! The NIC check's Windows glue: the adapter's settings read from the
-//! registry and the start line. Windows-only, so outside the mutation gate
-//! (`.cargo/mutants.toml`); CI tests it on Windows.
+//! The NIC check's Windows glue: the adapter's settings and driver read
+//! from the registry and the start line. Windows-only, so outside the
+//! mutation gate (`.cargo/mutants.toml`); CI tests it on Windows. The
+//! decisions are cross-platform ([`super::verdict`],
+//! [`super::driver_verdict`], [`super::driver_line`],
+//! [`super::standard::file_name`]).
 
 use tracing::{info, warn};
 
-use super::{Driver, MEASURED_FAMILY, REALTEK_GOOD, Verdict, driver_of, verdict, virtual_adapter};
+use super::{DriverFacts, Verdict, driver_line, driver_verdict, standard, verdict};
 
 /// The verdict for the adapter whose GUID is `adapter` (`{...}`).
 pub fn check(adapter: &str) -> Verdict {
@@ -14,44 +17,42 @@ pub fn check(adapter: &str) -> Verdict {
     }
 }
 
-/// The driver verdict for the adapter whose GUID is `adapter`, with its
-/// version string.
-pub fn check_driver(adapter: &str) -> (Driver, Option<String>) {
-    match sys::adapter_values(adapter, &["ProviderName", "DriverVersion", "DriverDesc"]) {
-        Some(v) if virtual_adapter(v[2].as_deref()) => (Driver::Virtual, v[1].clone()),
-        Some(v) => (
-            driver_of(v[0].as_deref(), v[1].as_deref(), v[2].as_deref()),
-            v[1].clone(),
-        ),
-        None => (Driver::Other, None),
-    }
+/// What the registry says of the driver of the adapter whose GUID is
+/// `adapter`: its class subkey's `ProviderName`, `MatchingDeviceId`,
+/// `DriverVersion` and `DriverDesc`, and the file of its service
+/// (`Ndi\Service`, then the service's `ImagePath`); `None` when no class
+/// subkey has the adapter.
+pub fn driver_facts(adapter: &str) -> Option<DriverFacts> {
+    let key = sys::adapter_key(adapter)?;
+    let file = sys::read(&format!(r"{key}\Ndi"), "Service")
+        .and_then(|service| sys::image_path(&service))
+        .map(|path| standard::file_name(&path).to_string());
+    Some(DriverFacts {
+        provider: sys::read(&key, "ProviderName"),
+        hardware_id: sys::read(&key, "MatchingDeviceId"),
+        file,
+        version: sys::read(&key, "DriverVersion"),
+        description: sys::read(&key, "DriverDesc"),
+    })
 }
 
-/// [`check`] and [`check_driver`] of `adapter`, logged: the start line's
+/// [`check`] and the driver verdict of `adapter`, logged: the start line's
 /// companions (log-only glue, left out of the mutation gate).
 pub fn report(adapter: &str) {
-    let good = REALTEK_GOOD.join(", ");
-    match check_driver(adapter) {
-        (Driver::KnownBad, v) => warn!(
-            version = v.as_deref().unwrap_or(""),
-            good = %good,
-            family = MEASURED_FAMILY,
-            "the Dante NIC's Realtek driver was measured with a 20-30 ms receive DPC every ~100 s on this adapter family: late packets at receivers and failed sends; install a measured-good driver (docs/windows-box.md)"
-        ),
-        (Driver::KnownGood, v) => info!(
-            version = v.as_deref().unwrap_or(""),
-            "the Dante NIC's Realtek driver is a measured-good one"
-        ),
-        (Driver::Unverified, v) => info!(
-            version = v.as_deref().unwrap_or(""),
-            good = %good,
-            "the Dante NIC's Realtek driver was never measured on this adapter family (docs/windows-box.md)"
-        ),
-        (Driver::Virtual, v) => info!(
-            version = v.as_deref().unwrap_or(""),
-            "the Dante leg is a VLAN virtual adapter: its driver is the VLAN layer's, the NIC's own driver is not read (docs/two-networks.md)"
-        ),
-        (Driver::Other, _) => {}
+    match (driver_facts(adapter), standard::embedded()) {
+        (Some(facts), Some(std)) => {
+            if let Some(line) = driver_line(&driver_verdict(std, &facts), &facts) {
+                if line.warn {
+                    warn!("{}", line.text);
+                } else {
+                    info!("{}", line.text);
+                }
+            }
+        }
+        (None, _) => info!("the Dante NIC's driver was not read"),
+        (Some(_), None) => {
+            warn!("the embedded NIC standard does not parse: the Dante NIC's driver is not judged")
+        }
     }
     match check(adapter) {
         Verdict::Off => info!("the Dante NIC's large send offload is off"),
@@ -66,10 +67,17 @@ pub(crate) mod sys {
     /// The network adapters' class key.
     const CLASS: &str =
         r"SYSTEM\CurrentControlSet\Control\Class\{4d36e972-e325-11ce-bfc1-08002be10318}";
+    /// The services' key (a driver's `ImagePath`).
+    const SERVICES: &str = r"SYSTEM\CurrentControlSet\Services";
 
     /// A string value of HKLM\`key`, `None` when absent.
-    fn read(key: &str, value: &str) -> Option<String> {
+    pub fn read(key: &str, value: &str) -> Option<String> {
         crate::winreg::read_sz(key, value)
+    }
+
+    /// The `ImagePath` of the service `service` (a REG_EXPAND_SZ value).
+    pub fn image_path(service: &str) -> Option<String> {
+        crate::winreg::read_text(&format!(r"{SERVICES}\{service}"), "ImagePath")
     }
 
     /// The `*LsoV2IPv4` and `*LsoV1IPv4` values of the adapter whose
@@ -79,14 +87,20 @@ pub(crate) mod sys {
         Some((v[0].clone(), v[1].clone()))
     }
 
-    /// The string values `names` of the adapter whose `NetCfgInstanceId`
-    /// is `adapter`, in order; `None` when no class subkey has it.
-    pub fn adapter_values(adapter: &str, names: &[&str]) -> Option<Vec<Option<String>>> {
+    /// The class subkey (HKLM path) of the adapter whose `NetCfgInstanceId`
+    /// is `adapter`; `None` when no class subkey has it.
+    pub fn adapter_key(adapter: &str) -> Option<String> {
         (0..1000).find_map(|i| {
             let key = format!(r"{CLASS}\{i:04}");
             let id = read(&key, "NetCfgInstanceId")?;
-            id.eq_ignore_ascii_case(adapter)
-                .then(|| names.iter().map(|n| read(&key, n)).collect())
+            id.eq_ignore_ascii_case(adapter).then_some(key)
         })
+    }
+
+    /// The string values `names` of the adapter whose `NetCfgInstanceId`
+    /// is `adapter`, in order; `None` when no class subkey has it.
+    pub fn adapter_values(adapter: &str, names: &[&str]) -> Option<Vec<Option<String>>> {
+        let key = adapter_key(adapter)?;
+        Some(names.iter().map(|n| read(&key, n)).collect())
     }
 }

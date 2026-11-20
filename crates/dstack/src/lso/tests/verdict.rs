@@ -214,3 +214,106 @@ fn a_virtual_adapter_without_an_entry_is_named_as_one() {
     };
     assert_eq!(entry_id(driver_verdict(std, &f)).0, "virtual");
 }
+
+/// Another file at a bad entry's version is that file's verdict, not the
+/// bad one's: a bad entry with a file matches that file only.
+#[test]
+fn a_bad_version_is_bad_only_for_its_own_file() {
+    let std = standard::embedded().unwrap();
+    let f = facts("Realtek", FOH, "rt68cx21x64.sys", "10.72.524.2024");
+    assert_eq!(
+        entry_id(driver_verdict(std, &f)),
+        ("file", "rtl8125-rtl8168-windows")
+    );
+    let mut f = facts("Realtek", FOH, "", "10.72.524.2024");
+    f.file = None;
+    assert_eq!(entry_id(driver_verdict(std, &f)).0, "file");
+}
+
+fn line_of(f: &DriverFacts) -> Option<Line> {
+    driver_line(&driver_verdict(standard::embedded().unwrap(), f), f)
+}
+
+/// The standard's driver is an info line naming its entry; FOH no longer
+/// warns.
+#[test]
+fn the_standard_s_driver_is_an_info_line() {
+    let line = line_of(&facts("Realtek", FOH, "rt640x64.sys", "10.79.20.1003")).unwrap();
+    assert!(!line.warn, "{line:?}");
+    assert!(
+        line.text.contains("rt640x64.sys 10.79.20.1003")
+            && line.text.contains("rtl8125-rtl8168-windows"),
+        "{line:?}"
+    );
+}
+
+/// The 20-30 ms receive DPC is the standard's evidence text, printed with
+/// the bad driver's warning, beside the driver to install.
+#[test]
+fn a_bad_driver_warns_with_the_dpc_evidence_from_the_standard() {
+    let line = line_of(&facts("Realtek", FOH, "rt640x64.sys", "10.72.524.2024")).unwrap();
+    assert!(line.warn, "{line:?}");
+    assert!(line.text.contains("20-30 ms receive DPC"), "{line:?}");
+    assert!(
+        line.text.contains("rt640x64.sys 10.79.20.1003 or newer"),
+        "{line:?}"
+    );
+}
+
+/// Another file and an old version warn, with the plan while the entry is
+/// open and the evidence when it is settled.
+#[test]
+fn a_wrong_file_or_an_old_version_warns_with_the_note() {
+    let mbc = line_of(&facts(
+        "Realtek",
+        USB,
+        "rtu56cx22x64.sys",
+        "1156.22.113.2026",
+    ))
+    .unwrap();
+    assert!(mbc.warn, "{mbc:?}");
+    assert!(
+        mbc.text.contains("rtucx22x64.sys 11.19.602.2025 or newer")
+            && mbc.text.contains("rtl8156b-windows")
+            && !mbc.text.contains("open: "),
+        "{mbc:?}"
+    );
+    let old = line_of(&facts("Realtek", USB, "rtucx22x64.sys", "11.18.1.2024")).unwrap();
+    assert!(old.warn && old.text.contains("minimum"), "{old:?}");
+    let open = line_of(&facts("Realtek", DSG, "rt640x64.sys", "10.39.212.2020")).unwrap();
+    assert!(
+        open.warn && open.text.contains("minimum") && open.text.contains("open: "),
+        "{open:?}"
+    );
+    let open = line_of(&facts("Realtek", DSG, "rtx.sys", "10.79.50.1003")).unwrap();
+    assert!(
+        open.warn
+            && open.text.contains("is not the NIC standard's")
+            && open.text.contains("open: "),
+        "{open:?}"
+    );
+}
+
+/// A Realtek adapter without an entry warns with its hardware id; a
+/// virtual adapter is an info line; another vendor's has no line.
+#[test]
+fn the_other_verdicts_lines() {
+    let unknown = line_of(&facts("Realtek", r"PCI\VEN_10EC&DEV_8161", "x.sys", "1.0")).unwrap();
+    assert!(unknown.warn, "{unknown:?}");
+    assert!(
+        unknown.text.contains(r"PCI\VEN_10EC&DEV_8161"),
+        "{unknown:?}"
+    );
+    let virt = line_of(&DriverFacts {
+        provider: Some("Realtek".into()),
+        description: Some("Realtek Virtual Adapter".into()),
+        version: Some("10.4.1117.2020".into()),
+        ..DriverFacts::default()
+    })
+    .unwrap();
+    assert!(!virt.warn && virt.text.contains("VLAN"), "{virt:?}");
+    assert_eq!(
+        line_of(&facts("Intel", r"PCI\VEN_8086&DEV_15F3", "e2f.sys", "2.1")),
+        None
+    );
+}

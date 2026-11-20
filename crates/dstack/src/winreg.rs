@@ -167,6 +167,18 @@ impl Drop for Key {
     }
 }
 
+/// The string value `value` of HKLM\\`key`, a REG_SZ or a REG_EXPAND_SZ
+/// (expanded: a driver's `ImagePath`); none when absent or of another type.
+pub fn read_text(key: &str, value: &str) -> Option<String> {
+    match Key::open(HKEY_LOCAL_MACHINE, key)
+        .ok()?
+        .get(value, RRF_RT_ANY)?
+    {
+        Value::Text(s) => Some(s),
+        Value::Number(_) => None,
+    }
+}
+
 /// The string value `value` of HKLM\\`key`; none when absent.
 pub fn read_sz(key: &str, value: &str) -> Option<String> {
     match Key::open(HKEY_LOCAL_MACHINE, key)

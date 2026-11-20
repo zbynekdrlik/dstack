@@ -30,70 +30,9 @@ fn the_routed_adapter_s_settings_are_found_by_its_guid() {
     );
 }
 
-/// dasio#1: the two Realtek versions measured with the long receive DPC
-/// warn, the measured-good one passes, any other Realtek one is only
-/// unverified, and another vendor's is no Realtek verdict at all.
-#[test]
-fn the_driver_verdict_names_only_measured_realtek_versions() {
-    let rt = Some("Realtek");
-    assert_eq!(driver(rt, Some("10.79.20.1003")), Driver::KnownBad);
-    assert_eq!(driver(rt, Some("10.72.524.2024")), Driver::KnownBad);
-    assert_eq!(
-        driver(Some("Realtek Semiconductor Corp."), Some(" 10.79.20.1003 ")),
-        Driver::KnownBad
-    );
-    assert_eq!(driver(rt, Some("10.39.212.2020")), Driver::KnownGood);
-    // Never measured: neither good nor bad (dasio: two points, no range).
-    for v in [
-        "10.56.119.2022",
-        "10.65.421.2023",
-        "10.68.815.2023",
-        "10.80.1.1",
-    ] {
-        assert_eq!(driver(rt, Some(v)), Driver::Unverified, "{v}");
-    }
-    assert_eq!(driver(rt, None), Driver::Other);
-    assert_eq!(driver(Some("Intel"), Some("10.79.20.1003")), Driver::Other);
-    assert_eq!(driver(None, Some("10.79.20.1003")), Driver::Other);
-}
-
-/// dstack #383: the bad and good measurements were on the 2.5 GbE family
-/// (the FOH PC's RTL8125, dasio#1); the same version on the 1 GbE family
-/// measured clean (dsg, 17.11.2026), so a version on another family is
-/// only unverified, and an adapter whose description was not read too.
-#[test]
-fn a_measured_version_is_judged_only_on_its_measured_family() {
-    let rt = Some("Realtek");
-    let gaming = Some("Realtek Gaming 2.5GbE Family Controller");
-    let gbe = Some("Realtek PCIe GbE Family Controller");
-    assert_eq!(
-        driver_of(rt, Some("10.79.20.1003"), gaming),
-        Driver::KnownBad
-    );
-    assert_eq!(
-        driver_of(rt, Some("10.39.212.2020"), gaming),
-        Driver::KnownGood
-    );
-    assert_eq!(
-        driver_of(rt, Some("10.79.20.1003"), gbe),
-        Driver::Unverified
-    );
-    assert_eq!(
-        driver_of(rt, Some("10.39.212.2020"), gbe),
-        Driver::Unverified
-    );
-    assert_eq!(
-        driver_of(rt, Some("10.79.20.1003"), None),
-        Driver::Unverified
-    );
-    assert_eq!(
-        driver_of(Some("Intel"), Some("10.79.20.1003"), gaming),
-        Driver::Other
-    );
-}
-
-/// The runner's adapter: its provider and driver version are read from
-/// the class key (a Windows runner has no Realtek NIC).
+/// The runner's adapter: its provider, hardware id, version and driver
+/// file are read from the class key and its service (a Windows runner has
+/// no Realtek NIC: a Hyper-V adapter, `netvsc.sys`).
 #[cfg(windows)]
 #[test]
 fn the_routed_adapter_s_driver_is_read() {
@@ -103,16 +42,20 @@ fn the_routed_adapter_s_driver_is_read() {
         panic!("no routed IPv4 address");
     };
     let (_, _, guid) = crate::host::win_nic::of(*local.ip()).unwrap();
-    let v = sys::adapter_values(&guid, &["ProviderName", "DriverVersion", "DriverDesc"]).unwrap();
-    assert!(v[0].is_some() && v[1].is_some(), "{v:?}");
-    let (verdict, version) = check_driver(&guid);
-    assert_eq!(version, v[1]);
-    let expected = if virtual_adapter(v[2].as_deref()) {
-        Driver::Virtual
-    } else {
-        driver(v[0].as_deref(), v[1].as_deref())
-    };
-    assert_eq!(verdict, expected);
+    let facts = driver_facts(&guid).expect("the adapter's class subkey");
+    assert!(
+        facts.provider.is_some()
+            && facts.version.is_some()
+            && facts.hardware_id.as_deref().is_some_and(|h| !h.is_empty()),
+        "{facts:?}"
+    );
+    let file = facts.file.clone().unwrap_or_default();
+    assert!(
+        file.to_ascii_lowercase().ends_with(".sys") && !file.contains('\\'),
+        "{facts:?}"
+    );
+    let v = sys::adapter_values(&guid, &["DriverVersion"]).unwrap();
+    assert_eq!(facts.version, v[0]);
 }
 
 /// dstack #155: the Dante leg on resolume-snv is Realtek's VLAN "Realtek
