@@ -16,6 +16,15 @@ slow-timeout = { period = "10s", terminate-after = 2, grace-period = "2s" }
 # caught only by a later unit test (`dstack peer::...`, test 1342 of 2079)
 # past cargo-mutants' 60 s: every such mutant timed out and two shards ran
 # out of their 20 minutes. Run every test that takes seconds after the rest.
+# The converter's unit tests first (dstack #462): they take about a second
+# in all, and a mutant in dstack-resample that only they catch (the table's
+# kernel build, its room, its counts) waited behind dstack's ~2000 unit
+# tests and ran into cargo-mutants' 60 s (PR #463: 10 such TIMEOUTs over
+# the shards, 80 s each, two shards past their 20 minutes).
+[[profile.mutants.overrides]]
+filter = 'package(dstack-resample)'
+priority = 40
+
 [[profile.mutants.overrides]]
 filter = '''
     test(/_ppm_(fast|slow)_/)
