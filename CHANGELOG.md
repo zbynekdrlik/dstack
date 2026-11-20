@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.200
+
+- **API (#457, for iemmixer#122): `health::read_status_line(path, wait) -> io::Result<String>`** (Linux): one `status` request to a device's control socket, its raw answer line without the line end (at most `MAX_READ`, 1 MiB; an `error: ...` answer comes back as its text; no socket is an `Err`). For a reader that judges fields the parsed `Status` does not carry (iemmixer's mic-to-ear latency from `rx[].delay`, `tx[].receiver_latency_us`, `engine.offset`). `read_status` parses the same line, unchanged.
+- Tests (#455): the mDNS daemon tests judge their 5353 sockets only on a `/proc/net/udp` read that lists them. The kernel hands the table out a page per read and skips a later row for every earlier socket closed between reads, so #444's reopen test read no row now and then (1 run in 23 of the full lib suite on dev1). The tests now wait (at most 5 s) for the row they need and judge the old socket closed on the process's own fd list. The rejoin test's wildcard socket takes its own port instead of a probed one (a parallel test could take that in between).
+- **No latency change.**
+
 ## 0.6.199
 
 - **Fix (#454, Windows): a UDP read with a wait no longer loses a datagram.** Every UDP read loop of the stack that must also look at a stop flag, a resend or a deadline (discovery's group listener and sweeper, the directory's instance queries, the info and ARC requests, the heartbeat listener and window, the meter, the test responder) read a blocking socket with a read timeout (`SO_RCVTIMEO`). On Windows such a read that ends on its timeout can lose the datagram arriving as it fires: on windows-2025 under load (8 busy threads) the timeout reads lost 0.5-6 % of the timeouts that fired, multicast and unicast alike (a 50 ms wait, discovery's, lost the most); a lost mDNS answer, goodbye or ARC reply was a retry later. The loops now read through one helper, `dstack::recv` (`within`, `recv_from_within`, `recv_within`: `Ok(None)` when nothing came within the wait, never an error), which on Windows makes the socket non-blocking and waits for it with `WSAPoll`: no receive is pending when a wait ends, and a wait `WSAPoll` ends early (by under a millisecond) is waited again, so nothing comes back before its time. Linux keeps the read timeout (it lost nothing there under the same load).
