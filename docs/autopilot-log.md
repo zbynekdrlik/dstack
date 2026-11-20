@@ -94,4 +94,4 @@ One line per ticket: issue, commits, tests (RED -> GREEN where a bug), decisions
 - 20.11 04:47 CET: v0.6.198 = #450 + #444 reopen. v0.6.199 = #454 (no SO_RCVTIMEO read on Windows) + #453 test.
 - 20.11 05:46 CET: v0.6.199 = #454 + #453. v0.6.200 = #457 read_status_line + #455 tests.
 - 20.11 07:57 CET: v0.6.200 = #457 + #455 + #454 Linux fix. v0.6.201 = #459 (peer.rs counts a both-pumps stall once).
-- 20.11 12:52 CET: v0.6.202 = #461 (truthful MMCSS line, no false lost blocks, dsend 40 ms per owner).
+- 20.11 12:52 CET: v0.6.202 = #461 (truthful MMCSS line, no false lost blocks, dsend 40 ms per owner). Plus #462 (a kernel table halves the 44.1 kHz conversion cost).
