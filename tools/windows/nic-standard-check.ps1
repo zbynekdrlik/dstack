@@ -15,6 +15,17 @@
 #   PASS  Ethernet 4  PendingTransmits  expected=8  actual=8
 #   FAIL  Ethernet 3  *EEE  expected=0  actual=1  (songplayer#285)
 #
+# First, whatever the vendor, it checks the standard's vendor-independent
+# rule `eee` on EVERY wired physical NIC (hardware, not virtual, 802.3), up,
+# down or disabled, with or without an entry and whatever -Name says (the
+# owner, 20.11.2026: EEE enabled on any rig device is a serious failure): the
+# listed keywords (*EEE, EEE, AdvancedEEE, Green Ethernet, Intel's
+# EEELinkAdvertisement; hidden ones too) must be off, any other keyword whose
+# display name says Energy Efficient / EEE / Green Ethernet is judged by its
+# display value. A FAIL names the NIC, its driver and the keyword:
+#
+#   FAIL  Ethernet 3  *EEE  expected=0  actual=1 (Enabled)  (driver rtu56cx22x64.sys 1156.22.113.2026; ...)
+#
 # PASS and FAIL judge a value; INFO prints a value the standard does not
 # decide yet; SKIP is a value of another profile or an adapter that is down
 # or disabled. A Realtek adapter without an entry FAILs, and so does one whose
@@ -92,7 +103,10 @@ function Test-NicNumber {
 # The keys each object may hold: an unknown key is a typo, never ignored
 # (compared case-sensitively, as JSON keys are).
 $script:NicKeys = @{
-    top    = @('schema', 'version', 'updated', 'issue', 'doc', 'scope', 'fields', 'adapters')
+    top    = @('schema', 'version', 'updated', 'issue', 'doc', 'scope', 'fields', 'eee', 'adapters')
+    eee    = @('name', 'scope', 'windows', 'linux', 'evidence')
+    eeewin = @('keywords', 'off', 'display_name', 'display_off', 'display_on')
+    eeelin = @('off')
     entry  = @('id', 'chip', 'covers', 'os', 'match', 'driver', 'values')
     driver = @('files', 'modules', 'min_version', 'bad', 'status', 'evidence', 'plan', 'firmware')
     bad    = @('file', 'version', 'evidence')
@@ -178,6 +192,33 @@ function Test-NicStandardValue {
     if ($status -ceq 'open' -and -not (Test-NicHasProp $V 'plan')) { throw "${where}: an open value needs its plan" }
 }
 
+# The vendor-independent EEE rule: Windows keywords and display patterns,
+# Linux passing states (dstack #465, owner 20.11.2026). The same rules as the
+# Python checker's `_validate_eee`.
+function Test-NicStandardEee {
+    param($Rule)
+    if ($null -eq $Rule -or -not ($Rule -is [psobject]) -or $Rule -is [array] -or $Rule -is [string]) { throw 'no eee rule' }
+    Assert-NicOnly 'eee' $Rule 'eee'
+    Assert-NicText 'eee' $Rule 'evidence' -Required
+    Assert-NicText 'eee' $Rule 'name'
+    Assert-NicText 'eee' $Rule 'scope'
+    $win = Get-NicProp $Rule 'windows'
+    $lin = Get-NicProp $Rule 'linux'
+    foreach ($part in @($win, $lin)) {
+        if ($null -eq $part -or -not ($part -is [psobject]) -or $part -is [array] -or $part -is [string]) { throw 'eee: needs its windows and linux parts' }
+    }
+    Assert-NicOnly 'eee/windows' $win 'eeewin'
+    Assert-NicOnly 'eee/linux' $lin 'eeelin'
+    foreach ($check in @(@('eee/windows', $win, 'keywords'), @('eee/windows', $win, 'off'), @('eee/linux', $lin, 'off'))) {
+        $list = Get-NicList $check[1] $check[2]
+        if (-not (Test-NicStrings $list)) { throw "$($check[0]): $($check[2]) must be a list of strings" }
+    }
+    foreach ($key in @('display_name', 'display_off', 'display_on')) {
+        Assert-NicText 'eee/windows' $win $key -Required
+        try { [void][regex]::new([string](Get-NicProp $win $key)) } catch { throw "eee/windows: $key is no regular expression: $($_.Exception.Message)" }
+    }
+}
+
 # Throws unless the parsed file is a well-formed standard: a broken file stops
 # the run (exit 2) instead of passing a PC by accident. The same rules as the
 # Python checker's `validate`.
@@ -187,6 +228,7 @@ function Test-NicStandard {
     Assert-NicOnly 'the file' $Std 'top'
     $version = Get-NicProp $Std 'version'
     if (-not ($version -is [int] -or $version -is [long])) { throw 'no integer version' }
+    Test-NicStandardEee (Get-NicProp $Std 'eee')
     $adapters = Get-NicList $Std 'adapters'
     if ($null -eq $adapters -or -not ($adapters -is [array])) { throw 'no adapters list' }
     $seen = @{}
@@ -333,6 +375,69 @@ function Test-NicDriver {
     }
 }
 
+# The EEE rows of a wired NIC from its advanced properties, each with Keyword,
+# Value, DisplayName and DisplayValue (a hidden keyword has no display name).
+# A listed keyword (any case) passes when its value is off. Another keyword
+# whose display name matches is judged by its display value: off passes, on
+# fails; with no display value its value decides; anything else (Realtek's
+# EEEMaxSupportSpeed, a speed) is INFO. No EEE keyword at all is one INFO row:
+# the driver's default holds and Windows shows no state for it. A FAIL's note
+# names the driver. The same judge as the Python checker's judge_eee_windows.
+function Test-NicEeeWindows {
+    param($Rule, $Props, [string]$Driver)
+    $win = $Rule.windows
+    $keywords = @(@($win.keywords) | ForEach-Object { ([string]$_).ToLowerInvariant() })
+    $off = @(@($win.off) | ForEach-Object { [string]$_ })
+    $shownDriver = if ($Driver.Trim()) { $Driver.Trim() } else { '(unknown)' }
+    $note = "driver $shownDriver; $($Rule.evidence)"
+    $rows = @()
+    foreach ($p in @($Props)) {
+        $keyword = [string]$p.Keyword
+        $value = if ($null -eq $p.Value) { '' } else { ([string]$p.Value).Trim() }
+        $dname = [string](Get-NicProp $p 'DisplayName' '')
+        $dvalue = ([string](Get-NicProp $p 'DisplayValue' '')).Trim()
+        $shown = if ($dvalue) { "$value ($dvalue)" } else { $value }
+        $isOff = [bool]($off | Where-Object { $_ -ieq $value })
+        if ($keywords -contains $keyword.ToLowerInvariant()) {
+            if ($value -eq '') { continue }
+            $verdict = if ($isOff) { 'PASS' } else { 'FAIL' }
+            $rows += New-NicRow $verdict $keyword ($off -join '|') $shown $note
+        } elseif ($dname -and [regex]::IsMatch($dname, [string]$win.display_name, 'IgnoreCase')) {
+            $verdict = 'INFO'
+            if ($dvalue -and [regex]::IsMatch($dvalue, [string]$win.display_off, 'IgnoreCase')) { $verdict = 'PASS' }
+            elseif ($dvalue -and [regex]::IsMatch($dvalue, [string]$win.display_on, 'IgnoreCase')) { $verdict = 'FAIL' }
+            elseif (-not $dvalue -and $isOff) { $verdict = 'PASS' }
+            $rows += New-NicRow $verdict $keyword 'off' $shown $note
+        }
+    }
+    if ($rows.Count -eq 0) { $rows += New-NicRow 'INFO' 'eee' '(a keyword)' '(no EEE keyword)' "the driver's default holds, unread; $note" }
+    return $rows
+}
+
+# The advanced properties the EEE rule reads, the hidden ones included
+# (-AllProperties returns the registry-only keywords, as the 11.19 RTL8156B
+# driver hides its EEE keywords). A keyword with no registry value is absent.
+function Get-NicEeeProps {
+    param([string]$Name)
+    foreach ($p in @(Get-NetAdapterAdvancedProperty -Name $Name -AllProperties)) {
+        if (-not $p.RegistryKeyword -or $null -eq $p.RegistryValue) { continue }
+        [pscustomobject]@{
+            Keyword      = [string]$p.RegistryKeyword
+            Value        = (@($p.RegistryValue) | ForEach-Object { [string]$_ }) -join ','
+            DisplayName  = [string](Get-NicProp $p 'DisplayName' '')
+            DisplayValue = [string](Get-NicProp $p 'DisplayValue' '')
+        }
+    }
+}
+
+# Whether an adapter is a wired physical NIC: hardware, not virtual, an 802.3
+# medium (NdisPhysicalMedium 14; Wi-Fi is 9, Bluetooth 10).
+function Test-NicWired {
+    param($Adapter)
+    return ((Get-NicProp $Adapter 'HardwareInterface') -eq $true) -and ((Get-NicProp $Adapter 'Virtual') -ne $true) -and
+        ((Get-NicProp $Adapter 'NdisPhysicalMedium') -eq 14)
+}
+
 function Format-NicRow {
     param([string]$Name, $Row)
     $line = '{0,-4}  {1}  {2}  expected={3}  actual={4}' -f $Row.Verdict, $Name, $Row.Key, $Row.Expected, $Row.Actual
@@ -395,10 +500,35 @@ function Invoke-NicStandardCheck {
         return
     }
     "nic-standard v$($std.version) ($Source), profile $LatencyProfile"
+    $adapters = @(Get-NetAdapter)
+    # EEE first: every wired NIC of the PC, any vendor, up, down or disabled,
+    # whatever -Name says (the owner, 20.11.2026: EEE on any rig device is a
+    # serious failure).
+    $eeeName = Get-NicProp $std.eee 'name' 'EEE off'
+    "--    every wired NIC: $eeeName (eee)"
+    $eeeFailed = 0; $eeeChecked = 0
+    foreach ($a in $adapters) {
+        if (-not (Test-NicWired $a)) { continue }
+        if ($a.Status -eq 'Not Present') { "SKIP  $($a.Name)  EEE: Not Present"; continue }
+        $eeeChecked++
+        $driver = "$($a.DriverFileName) $($a.DriverVersion)"
+        try {
+            $props = @(Get-NicEeeProps $a.Name)
+        } catch {
+            "FAIL  $($a.Name)  eee  expected=(readable)  actual=(unreadable)  (driver $($driver.Trim()); $($_.Exception.Message))"
+            $eeeFailed++
+            continue
+        }
+        foreach ($r in @(Test-NicEeeWindows $std.eee $props $driver)) {
+            Format-NicRow $a.Name $r
+            if ($r.Verdict -ceq 'FAIL') { $eeeFailed++ }
+        }
+    }
+    "$eeeChecked wired NIC(s) checked for EEE, $eeeFailed FAIL"
     $failed = 0; $checked = 0
     $named = @($Name | Where-Object { $_ })
     $found = @{}
-    foreach ($a in @(Get-NetAdapter)) {
+    foreach ($a in $adapters) {
         if ($named.Count -gt 0 -and -not ($named -contains $a.Name)) { continue }
         if ($a.Status -eq 'Not Present') { continue }
         $hw = Get-NicHardwareId $a
@@ -431,7 +561,7 @@ function Invoke-NicStandardCheck {
         }
     }
     "$checked Realtek NIC(s) checked, $failed FAIL"
-    $script:NicExit = if ($failed -gt 0) { 1 } else { 0 }
+    $script:NicExit = if ($failed + $eeeFailed -gt 0) { 1 } else { 0 }
 }
 
 if ($MyInvocation.InvocationName -ne '.') {
