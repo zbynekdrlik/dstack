@@ -41,11 +41,23 @@ fn both_loops_give_the_plain_sum_of_each_kernel() {
         (96_000, 44_100, Fixed::Input),
         (44_100, 96_000, Fixed::Output),
     ] {
-        // 31 channels: one group of each width.
-        let mut p = poly(from, to, 31, 96, fixed);
-        let (input, made) = feed(&mut p, 9);
+        // 31 channels: one group of each width. A block of 640 puts every
+        // phase in the last call, so the kernels whose last (257th) tap
+        // is not 0 run too (the loops' odd tap past their partial sums).
+        let mut p = poly(from, to, 31, 640, fixed);
+        let (input, made) = feed(&mut p, 3);
         assert_eq!(p.groups.len(), 5);
         assert!(made > 0 && p.plan.len() == made);
+        let mut phases: Vec<usize> = p.plan.iter().map(|&(_, ph)| ph).collect();
+        phases.sort_unstable();
+        phases.dedup();
+        assert_eq!(phases.len() as u64, p.q, "{from}->{to}: every phase");
+        // The last tap is the window's edge (3e-13 to 7.5e-12 at 96 ->
+        // 44.1), still above the sums' 1e-12 bound below once doubled.
+        assert!(
+            phases.iter().any(|&ph| p.table.kernel(ph)[TAPS] != 0.0),
+            "{from}->{to}: a kernel with its last tap"
+        );
         let first_out = p.given - made as u64;
         let stride = made;
         let (mut fused, mut plain) = (vec![0.0; 31 * stride], vec![0.0; 31 * stride]);
