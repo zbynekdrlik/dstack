@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.203
+
+- **One Realtek NIC standard for every production PC** (#465): `docs/nic-standard.json` (schema `dstack-nic-standard/1`, version 1) states, per chip and OS (RTL8156B on Windows and Linux, the PCIe RTL8125/RTL8168 on Windows, the RTL8168 on Linux, the Realtek Virtual Adapter), the driver (allowed file or module, minimum version, bad drivers) and every advanced value, each with its evidence or "none yet: fleet value". `PendingTransmits` stays 8, marked open, until the 8 vs 32 capture on resolume-pp decides. `docs/nic-standard.md` holds the fleet inventory of 20.11.2026, the conflicts found and the consumers' lines.
+- **Read-only checkers** that every project can call instead of parsing NIC settings itself: `tools/windows/nic-standard-check.ps1` (Windows PowerShell 5.1) and `tools/linux/nic-standard-check.py` (Python 3 + ethtool). Each reads the file by path or URL (pin your dstack tag: `https://raw.githubusercontent.com/zbynekdrlik/dstack/<tag>/docs/nic-standard.json`), prints PASS/FAIL per value with the expected and actual values, and exits 1 on a FAIL (2 when the file cannot be read). A Realtek chip without an entry fails. `--profile low_latency` / `-LatencyProfile low_latency` adds the low-latency values (TSO/GSO off on Linux; dasio's PCIe buffers and RSS on Windows). `IFACE ...` / `-Name <adapter>,...` check only the named NICs (a missing or non-Realtek name fails). A malformed file (unknown key, value without evidence, open value without plan ...) is refused by both with exit 2.
+
+No library change: no consumer needs to move its pin for this; no latency change.
+
 ## 0.6.202
 
 - **dsend's Dante latency is 40 ms by default (#461, owner ROZHODNUTÉ 20.11.2026), was 9 ms (dlink's default, #247).** dsend is a fallback path on the FOH PC: a click in the PC's main audio (Ableton, dasio) is critical, one in dsend is not, so dsend never raises its threads' priority there and rides the PC's CPU holds out in its latency instead. 40 ms covers every hold seen on FOH since 18.11 (6.6 to 35.7 ms; the TX schedule starts again only past P). Unset, (b) = 40 ms less (a) (39 ms at dlink's 1 ms network latency); `--receive-buffer-ms` still sets (b) as given (`dsend::cli::LATENCY_NS`, `dsend::cli::latency_of`). The Chrome/Brave -> dsend -> card path gets 31 ms longer; the app buffer (11.33 ms at 96 kHz) is unchanged. It takes effect at dsend's first start on this release; a latency set in Dante Controller still holds over it (dasio moves FOH's dsend at its own pace).
