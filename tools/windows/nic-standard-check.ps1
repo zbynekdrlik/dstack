@@ -139,7 +139,8 @@ function Test-NicStandard {
         $os = Get-NicProp $entry 'os'
         if (-not ($os -ceq 'windows' -or $os -ceq 'linux')) { throw "${id}: os must be windows or linux" }
         $match = Get-NicProp $entry 'match'
-        $props = if ($null -ne $match -and $match -is [psobject]) { @($match.PSObject.Properties) } else { @() }
+        $props = @()
+        if ($null -ne $match -and $match -is [psobject]) { $props = @($match.PSObject.Properties) }
         if ($props.Count -eq 0) { throw "${id}: match needs $($script:NicMatchKeys[$os] -join ' or ') id lists" }
         foreach ($p in $props) {
             if (-not ($script:NicMatchKeys[$os] -ccontains $p.Name) -or -not (Test-NicStrings $p.Value)) {
