@@ -97,3 +97,4 @@ One line per ticket: issue, commits, tests (RED -> GREEN where a bug), decisions
 - 20.11 12:52 CET: v0.6.202 = #461 (truthful MMCSS line, no false lost blocks, dsend 40 ms per owner). Plus #462 (a kernel table halves the 44.1 kHz conversion cost).
 - 20.11 16:35 CET: v0.6.202 released (#461, #462, #464 item 2). v0.6.203 = #465 (Realtek NIC standard + checkers).
 - 20.11 18:29 CET: v0.6.203 released (#465). v0.6.204 = #466 (driver check follows the standard).
+- 20.11 22:33 CET: v0.6.204 released (#466). v0.6.205 = #465 EEE rule (owner: EEE on any rig device is a serious fail) + fleet scan.

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.205
+
+- **EEE off on every wired NIC of a rig PC, whatever the vendor (#465).** The NIC standard (`docs/nic-standard.json`, version 3) has a vendor-independent `eee` rule, and both checkers (`tools/windows/nic-standard-check.ps1`, `tools/linux/nic-standard-check.py`) run it first on every wired physical NIC: any vendor, with or without an entry, up or down, whatever `-Name`/`IFACE` says. Windows: `*EEE`, `EEE`, `AdvancedEEE`, Green Ethernet and Intel's `EEELinkAdvertisement` must be 0 (hidden keywords included); any other keyword whose display name says Energy Efficient / EEE / Green Ethernet is judged by its display value. Linux: `enabled - active` and `enabled - inactive` fail. A FAIL names the NIC, its driver and the keyword; any FAIL exits 1.
+- **The fleet's EEE, read 20.11.2026** (`docs/nic-standard.md`): on at mbc's RTL8156B (dasio), the down onboard Realteks of stream-snv and both editing PCs (camera-box) and the iemmixer box's second RTL8168H (iemmixer); off or unsupported everywhere else.
+
 ## 0.6.204
 
 ### Changed
