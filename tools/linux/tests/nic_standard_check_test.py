@@ -4,7 +4,7 @@
 `python3 -m unittest tools/linux/tests/nic_standard_check_test.py`.
 
 The ethtool texts below are the real outputs read on the fleet on 20.11.2026
-(stream-snv's USB RTL8156B on r8152 v2.21.4, iemmixer-snv's RTL8168H on
+(stream-snv's USB RTL8156B on r8152 v2.21.4, the iemmixer box's RTL8168H on
 r8169), trimmed to the lines the checker reads."""
 
 import copy

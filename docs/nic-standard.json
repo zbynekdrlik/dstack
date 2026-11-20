@@ -71,8 +71,8 @@
       "driver": {
         "modules": ["r8152"],
         "status": "open",
-        "evidence": "stream-snv runs Realtek's out-of-tree r8152 v2.21.4, stream-pp the kernel's; both lose rx_missed bursts next to near-line-rate video (dstack #408). The A/B of the two drivers decides; until then either passes and the version is printed.",
-        "plan": "dstack #408: the in-tree r8152 against v2.21.4 on stream-pp under the same JPEG XS load, rx_missed steps over a working day"
+        "evidence": "stream-snv runs Realtek's out-of-tree r8152 v2.21.4, the PP stream PC the kernel's; both lose rx_missed bursts next to near-line-rate video (dstack #408). The A/B of the two drivers decides; until then either passes and the version is printed.",
+        "plan": "dstack #408: the in-tree r8152 against v2.21.4 on the PP stream PC under the same JPEG XS load, rx_missed steps over a working day"
       },
       "values": [
         {"key": "ring:rx", "name": "RX ring", "expected": "4096", "evidence": "the default 100 missed bursts (dstack #408, docs/two-networks.md #290)"},
@@ -92,7 +92,7 @@
         {"key": "link:speed", "name": "Speed", "expected": "2500Mb/s", "evidence": "none yet: fleet value"},
         {"key": "link:duplex", "name": "Duplex", "expected": "Full", "evidence": "none yet: fleet value"},
         {"key": "usb:power/control", "name": "USB autosuspend off", "expected": "on", "evidence": "power saving off (songplayer#285; the Windows selective-suspend twin); fleet value"},
-        {"key": "usbcore:quirks", "name": "USB LPM off (usbcore.quirks NO_LPM)", "expected": "0bda:8156:k", "compare": "contains", "evidence": "none yet: fleet value (stream-snv, stream-pp; U1/U2 off, dstack #408)"},
+        {"key": "usbcore:quirks", "name": "USB LPM off (usbcore.quirks NO_LPM)", "expected": "0bda:8156:k", "compare": "contains", "evidence": "none yet: fleet value (stream-snv and the PP stream PC; U1/U2 off, dstack #408)"},
         {"key": "firmware", "name": "Firmware", "expected": null, "status": "report", "evidence": "the in-tree driver names rtl8156b-2 v3 10/20/23, v2.21.4 names none"}
       ]
     },
@@ -156,7 +156,7 @@
         "modules": ["r8169"],
         "firmware": "rtl8168h-2_0.0.2 02/26/15",
         "status": "settled",
-        "evidence": "the kernel's r8169 on every Linux PC with an RTL8168 (iemmixer-snv, companion-snv, linux-pp); the gen3 low-latency figures were measured on it (dstack #1, docs/linux-box.md). Firmware: none yet: fleet value."
+        "evidence": "the kernel's r8169 on every Linux PC with an RTL8168 (the iemmixer box, companion-snv, the PP presenter PC); the gen3 low-latency figures were measured on it (dstack #1, docs/linux-box.md). Firmware: none yet: fleet value."
       },
       "values": [
         {"key": "ring:rx", "name": "RX ring", "expected": "256", "evidence": "none yet: fleet value (the driver's maximum)"},
@@ -165,7 +165,7 @@
         {"key": "coalesce:tx-usecs", "name": "TX interrupt coalescing", "expected": "0", "evidence": "none yet: fleet value"},
         {"key": "pause:rx", "name": "Pause frames RX", "expected": "off", "evidence": "dstack #425"},
         {"key": "pause:tx", "name": "Pause frames TX", "expected": "off", "evidence": "dstack #425"},
-        {"key": "eee:status", "name": "EEE", "expected": ["disabled", "not supported"], "evidence": "power saving off on every wired NIC (owner 7.11.2026, songplayer#285); iemmixer-snv's low-latency NIC runs it off"},
+        {"key": "eee:status", "name": "EEE", "expected": ["disabled", "not supported"], "evidence": "power saving off on every wired NIC (owner 7.11.2026, songplayer#285); the iemmixer box's low-latency NIC runs it off"},
         {"key": "feature:tcp-segmentation-offload", "name": "TSO", "expected": "off", "profile": "low_latency", "evidence": "measured on this chip: card peak 750 us and 47 late an hour with TSO on, 198-260 us and 1 late off (dstack #1, docs/linux-box.md)"},
         {"key": "feature:generic-segmentation-offload", "name": "GSO", "expected": "off", "profile": "low_latency", "evidence": "dstack #1, docs/linux-box.md"},
         {"key": "feature:rx-checksumming", "name": "RX checksum offload", "expected": "on", "evidence": "none yet: fleet value"},
@@ -177,7 +177,7 @@
         {"key": "link:autoneg", "name": "Auto-negotiation", "expected": "on", "evidence": "none yet: fleet value"},
         {"key": "link:speed", "name": "Speed", "expected": "1000Mb/s", "evidence": "none yet: fleet value"},
         {"key": "link:duplex", "name": "Duplex", "expected": "Full", "evidence": "none yet: fleet value"},
-        {"key": "pci:power/control", "name": "PCIe runtime power management off", "expected": "on", "evidence": "power saving off on every wired NIC (songplayer#285); fleet value (iemmixer-snv, companion-snv, linux-pp)"}
+        {"key": "pci:power/control", "name": "PCIe runtime power management off", "expected": "on", "evidence": "power saving off on every wired NIC (songplayer#285); fleet value (the iemmixer box, companion-snv, the PP presenter PC)"}
       ]
     },
     {
