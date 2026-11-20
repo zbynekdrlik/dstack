@@ -41,16 +41,30 @@ fn both_loops_give_the_plain_sum_of_each_kernel() {
         (96_000, 44_100, Fixed::Input),
         (44_100, 96_000, Fixed::Output),
     ] {
-        // 31 channels: one group of each width.
-        let mut p = poly(from, to, 31, 96, fixed);
-        let (input, made) = feed(&mut p, 9);
+        // 31 channels: one group of each width. A block of 640 puts every
+        // phase in the last call, so the kernels whose last (257th) tap
+        // is not 0 run too (the loops' odd tap past their partial sums).
+        let mut p = poly(from, to, 31, 640, fixed);
+        let (input, made) = feed(&mut p, 3);
         assert_eq!(p.groups.len(), 5);
         assert!(made > 0 && p.plan.len() == made);
+        let mut phases: Vec<usize> = p.plan.iter().map(|&(_, ph)| ph).collect();
+        phases.sort_unstable();
+        phases.dedup();
+        assert_eq!(phases.len() as u64, p.q, "{from}->{to}: every phase");
+        // The last tap is the window's edge (3e-13 to 7.5e-12 at 96 ->
+        // 44.1), still above the sums' 1e-12 bound below once doubled.
+        assert!(
+            phases.iter().any(|&ph| p.table.kernel(ph)[TAPS] != 0.0),
+            "{from}->{to}: a kernel with its last tap"
+        );
         let first_out = p.given - made as u64;
         let stride = made;
         let (mut fused, mut plain) = (vec![0.0; 31 * stride], vec![0.0; 31 * stride]);
-        convolve::<true>(&p.table, &p.plan, &p.groups, &mut fused, stride);
-        convolve::<false>(&p.table, &p.plan, &p.groups, &mut plain, stride);
+        // SAFETY: dev1 and CI's runners have FMA; `Poly::new` read it.
+        assert!(p.fma);
+        unsafe { fma::convolve(&p.table, &p.plan, &p.groups, &mut fused, stride) };
+        convolve(&p.table, &p.plan, &p.groups, &mut plain, stride);
         let mut ran = vec![0.0; 31 * stride];
         p.run(&mut ran, stride);
         for k in 0..made {
@@ -182,7 +196,9 @@ fn the_history_stays_within_its_room() {
                 let mut p = poly(from, to, 3, block, fixed);
                 let lens: Vec<usize> = p.groups.iter().map(|g| g.rows.len()).collect();
                 let mut out = vec![0.0; 3 * p.output_frames_max()];
-                for k in 0..400 {
+                // Long enough for the history to move several times.
+                let calls = (4 * p.room / block).min(400) + 8;
+                for k in 0..calls {
                     let (base, _) = p.place(p.given);
                     let needed = p.taken as i64 - base;
                     assert!(
@@ -206,7 +222,11 @@ fn the_history_stays_within_its_room() {
 fn a_reset_starts_from_silence_again() {
     let mut p = poly(96_000, 44_100, 2, 64, Fixed::Input);
     let mut fresh = poly(96_000, 44_100, 2, 64, Fixed::Input);
-    feed(&mut p, 5);
+    // Long enough for the history to move: its first rows then hold
+    // audio, which the reset must clear (they held the start's silence
+    // before the first move).
+    feed(&mut p, 20);
+    assert!(p.first > 0 && p.groups[0].rows[..64].iter().any(|&v| v != 0.0));
     p.reset();
     assert_eq!((p.taken, p.given), (0, 0));
     let x = signal(2, 64 * 8, 3);
