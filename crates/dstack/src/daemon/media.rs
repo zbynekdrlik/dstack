@@ -244,6 +244,18 @@ impl Media {
             .collect()
     }
 
+    /// The (destination IPv4, UDP port) pairs our RX flows arrive on, with
+    /// their generation (dstack #464, [`crate::media::rx::RxDestinations`]):
+    /// each multicast flow's group and port, our address with each unicast
+    /// flow's port, as the manager last published its plan. A reader that
+    /// takes our flows' packets before the host's network stack (dasio's
+    /// NDIS filter and its 16-pair match table) polls it and sets its
+    /// filter again when the generation moved. The set is complete (up to
+    /// [`crate::media::rx::MAX_FLOWS`] pairs); capping it is the reader's.
+    pub fn rx_destinations(&self) -> crate::media::rx::RxDestinations {
+        self.rx.rx_destinations()
+    }
+
     /// Sets the app's own part of the status (dstack #104): the status
     /// carries what `f` returns as `app` when that text is one JSON object
     /// of at most [`crate::ctl::APP_MAX`] bytes ([`crate::ctl::app_object`]).

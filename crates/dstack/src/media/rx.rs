@@ -111,6 +111,7 @@ use crate::wire::MAX_DATAGRAM;
 mod age;
 mod claim;
 mod counts;
+mod destinations;
 mod handles;
 mod holes;
 mod intake;
@@ -123,6 +124,7 @@ mod rejoin;
 mod wake;
 pub use counts::RxCounts;
 use counts::{NO_LATENESS, RxStats, source_of, source_word};
+pub use destinations::RxDestinations;
 use handles::Handles;
 pub use intake::{Intake, PUMP_DRAIN};
 use lane::Keep;
@@ -214,6 +216,13 @@ pub struct RxShared {
     /// joined (the daemon asks again; [`RxShared::take_groups_missing`]).
     groups_missing: AtomicBool,
     sockets: Box<[UdpSocket]>,
+    /// Each flow slot's socket's port (0: a slot with no socket), read
+    /// once at the bind: the unicast flows' destination ports.
+    slot_ports: [u16; MAX_FLOWS],
+    /// The (address, port) pairs the published plan receives on (dstack
+    /// #464, [`RxShared::rx_destinations`]): set by the publish, under its
+    /// writer lock; the RX thread never takes it.
+    destinations: Mutex<RxDestinations>,
     /// Our address: the multicast groups are joined on it.
     ip: Ipv4Addr,
     rings: Arc<[Ring]>,
@@ -296,6 +305,10 @@ impl RxShared {
             })
             .collect::<io::Result<Box<[UdpSocket]>>>()?;
         let stamps = sockets.iter().all(stamp_receives);
+        let mut slot_ports = [0; MAX_FLOWS];
+        for (port, s) in slot_ports.iter_mut().zip(sockets.iter()) {
+            *port = s.local_addr()?.port();
+        }
         Ok(RxShared {
             rate,
             plans: std::array::from_fn(|_| Cell::new()),
@@ -305,6 +318,8 @@ impl RxShared {
             rejoins: AtomicU32::new(0),
             groups_missing: AtomicBool::new(false),
             sockets,
+            slot_ports,
+            destinations: Mutex::new(RxDestinations::default()),
             ip,
             rings,
             lanes: (0..MAX_FLOWS).map(|_| RxStats::default()).collect(),

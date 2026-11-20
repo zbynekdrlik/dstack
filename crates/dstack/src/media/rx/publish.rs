@@ -2,19 +2,26 @@
 // Copyright (C) 2026 dstack contributors.
 
 //! The control side's hand-over to the RX thread ([`RxShared::publish`]):
-//! the flow slots' plans and the RX channels' routes, and the restart of
-//! the rings a new flow feeds (dstack #234).
+//! the flow slots' plans and the RX channels' routes, the restart of the
+//! rings a new flow feeds (dstack #234), and the (address, port) pairs the
+//! plans receive on, for a reader of our flows' packets before the host's
+//! stack (dstack #464, [`RxShared::rx_destinations`]).
 
 use std::sync::PoisonError;
 use std::sync::atomic::Ordering;
 
+use tracing::info;
+
+use super::destinations::destinations;
 use super::plan::new_flow;
-use super::{MAX_FLOWS, RxPlan, RxRoute, RxShared};
+use super::{MAX_FLOWS, RxDestinations, RxPlan, RxRoute, RxShared};
 
 impl RxShared {
     /// Hands the flow slots' plans and the RX channels' routes to the RX
     /// thread (what changed). Routes that leave a flow go first and routes
     /// that join one last, so no channel ever reads another flow's samples.
+    /// The plans' (address, port) pairs follow ([`RxShared::rx_destinations`];
+    /// a changed set moves its generation and logs one line).
     pub fn publish(
         &self,
         plan: impl Fn(usize) -> RxPlan,
@@ -32,8 +39,10 @@ impl RxShared {
         let mut delays = [0u16; MAX_FLOWS];
         // dstack #234: the slots whose flow is new; their rings restart.
         let mut fresh = [false; MAX_FLOWS];
+        let mut plans = [RxPlan::default(); MAX_FLOWS];
         for (slot, cell) in self.plans.iter().enumerate() {
             let p = plan(slot);
+            plans[slot] = p;
             delays[slot] = p.delay;
             let w = p.words();
             let had = cell.peek();
@@ -68,6 +77,32 @@ impl RxShared {
         if changed {
             self.routes_version.fetch_add(1, Ordering::Release);
         }
+        let pairs = destinations(self.ip, plans.into_iter().zip(self.slot_ports));
+        let mut held = self
+            .destinations
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if held.update(pairs) {
+            info!(
+                generation = held.generation,
+                count = held.pairs.len(),
+                pairs = ?held.pairs,
+                "RX flow destinations changed"
+            );
+        }
+    }
+
+    /// The (destination IPv4, UDP port) pairs our RX flows arrive on, as
+    /// the flow plan was last published, with their generation (dstack
+    /// #464, [`RxDestinations`]): a reader that takes our flows' packets
+    /// before the host's stack (dasio's NDIS filter) polls this and sets
+    /// its match table again when the generation moved. Never on the hot
+    /// path: it takes the publish's own lock for a copy.
+    pub fn rx_destinations(&self) -> RxDestinations {
+        self.destinations
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     /// Flow slot `slot`'s playout point as last published, samples
