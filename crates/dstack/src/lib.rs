@@ -104,6 +104,7 @@ pub mod network_floor;
 #[cfg(any(target_os = "linux", windows))]
 pub mod peer;
 pub mod qdisc;
+pub mod recv;
 pub mod stream;
 pub mod subscribe;
 #[cfg(windows)]

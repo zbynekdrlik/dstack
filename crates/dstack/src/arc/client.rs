@@ -387,22 +387,14 @@ impl Udp<'_> {
             if left.is_zero() {
                 return Err(ReadError::Timeout { op: op1 });
             }
-            self.sock.set_read_timeout(Some(left)).map_err(io)?;
-            match self.sock.recv(&mut buf) {
-                Ok(n) => {
+            // dstack #454: no read timeout on Windows (crate::recv).
+            match crate::recv::recv_within(&self.sock, &mut buf, left).map_err(io)? {
+                Some(n) => {
                     if let Some((status, body)) = reply_to(&buf[..n], seq, op1) {
                         return Ok((status, body.to_vec()));
                     }
                 }
-                Err(e)
-                    if matches!(
-                        e.kind(),
-                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-                    ) =>
-                {
-                    return Err(ReadError::Timeout { op: op1 });
-                }
-                Err(e) => return Err(io(e)),
+                None => return Err(ReadError::Timeout { op: op1 }),
             }
         }
     }

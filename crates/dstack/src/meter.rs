@@ -276,7 +276,6 @@ impl Meter {
     ) -> io::Result<(Meter, Receiver<Frame>)> {
         let sock = UdpSocket::bind(bind)?;
         crate::winsock::no_connreset(&sock)?;
-        sock.set_read_timeout(Some(POLL))?;
         let to = match sock.local_addr()? {
             SocketAddr::V4(a) => a,
             SocketAddr::V6(_) => return Err(io::Error::other("an IPv6 socket")),
@@ -367,15 +366,16 @@ fn listen(
             }
             next += RENEW;
         }
-        match sock.recv_from(&mut buf) {
-            Ok((n, SocketAddr::V4(a))) if a.ip() == device.ip() => {
+        // dstack #454: no read timeout on Windows (crate::recv).
+        match crate::recv::recv_from_within(sock, &mut buf, POLL) {
+            Ok(Some((n, SocketAddr::V4(a)))) if a.ip() == device.ip() => {
                 if let Some(f) = parse_frame(&buf[..n]) {
                     *latest.lock().unwrap_or_else(PoisonError::into_inner) = Some(f.clone());
                     let _full_or_gone = frames.try_send(f);
                 }
             }
-            // Another sender, or the read timeout's end (the stop and the
-            // renewal are looked at every POLL): nothing to keep.
+            // Another sender, nothing within POLL (the stop and the renewal
+            // are looked at every POLL) or a failed read: nothing to keep.
             Ok(_) | Err(_) => {}
         }
     }
