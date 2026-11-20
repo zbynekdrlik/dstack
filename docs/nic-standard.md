@@ -102,7 +102,7 @@ Where PCs or projects disagree today. Each is either decided in the file with it
 10. **Hidden keywords.** On the 11.19 driver the power-saving keywords are in the registry but not offered by the driver (songplayer writes them). A value the driver does not declare proves the setting, not the PHY's state (songplayer#337's note); the standard judges the setting, as songplayer's gate does.
 11. **The RTL8156B's receive queue.** The 11.19 PCs hold Receive URBs 6 / Receive Buffers 16; mbc reads 10 / 32 today, and read 32 / 256 on 18.11 before the NDIS trial reinstalled its driver (#290; `docs/two-networks.md` noted then that its Receive Buffers were at their maximum, 256). Nothing measured any of them: the standard keeps the working PCs' 6 / 16 as a fleet value.
 
-## The checkers run on real PCs (20.11.2026, read only)
+## The checkers run on real PCs (20.11.2026, read only, the final version 1 file)
 
 resolume-snv, `nic-standard-check.ps1` (exit 0):
 
@@ -189,7 +189,7 @@ PASS  rig0  link:autoneg  expected=on  actual=on
 PASS  rig0  link:speed  expected=2500Mb/s  actual=2500Mb/s
 PASS  rig0  link:duplex  expected=Full  actual=Full
 PASS  rig0  usb:power/control  expected=on  actual=on
-PASS  rig0  usbcore:quirks  expected=0bda:8156:k  actual=0bda:8156:k
+PASS  rig0  usbcore:no_lpm  expected=on  actual=on
 INFO  rig0  firmware  expected=(no standard yet)  actual=  (the in-tree driver names rtl8156b-2 v3 10/20/23, v2.21.4 names none)
 1 Realtek NIC(s) checked, 0 FAIL
 ```
