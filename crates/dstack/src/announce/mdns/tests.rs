@@ -342,7 +342,7 @@ const LOOPBACK_HEX: &str = "0100007F";
 #[cfg(target_os = "linux")]
 const WILDCARD_HEX: &str = "00000000";
 
-/// How long [`rows_5353_until`] reads the table for a row it waits on.
+/// How long [`listed_on`] reads the table for a row it waits on.
 #[cfg(target_os = "linux")]
 const TABLE_BOUND: Duration = Duration::from_secs(5);
 
@@ -374,7 +374,7 @@ fn socket_inodes() -> BTreeSet<String> {
 /// folds). A full lib run's other tests open and close sockets all the
 /// time, and the reopen test once read no row at all for 127.0.0.1:5353.
 /// So never judge a socket gone by its row's absence alone: wait for a
-/// row that is there ([`rows_5353_until`]) and judge a close by
+/// row that is there ([`listed_on`]) and judge a close by
 /// [`socket_inodes`].
 #[cfg(target_os = "linux")]
 fn rows_5353() -> BTreeSet<(String, String)> {
@@ -391,37 +391,47 @@ fn rows_5353() -> BTreeSet<(String, String)> {
         .collect()
 }
 
-/// The inodes among `ours` ([`socket_inodes`]) that `rows` lists on `addr`.
+/// The process's open sockets ([`socket_inodes`], taken once) with a read
+/// of [`rows_5353`] that lists at least one of them on the address waited
+/// for ([`listed_on`]).
 #[cfg(target_os = "linux")]
-fn ours_on(
-    rows: &BTreeSet<(String, String)>,
-    ours: &BTreeSet<String>,
-    addr: &str,
-) -> BTreeSet<String> {
-    rows.iter()
-        .filter(|(a, inode)| a == addr && ours.contains(inode))
-        .map(|(_, inode)| inode.clone())
-        .collect()
+#[derive(Debug)]
+struct Listed {
+    ours: BTreeSet<String>,
+    rows: BTreeSet<(String, String)>,
 }
 
-/// Reads [`rows_5353`] every 5 ms until `holds` is true of a read, at most
-/// [`TABLE_BOUND`], and returns that read; fails with the last read. Only
-/// a row that is there can be waited for: a skipped row comes back in a
-/// later read, a gone one never.
 #[cfg(target_os = "linux")]
-fn rows_5353_until(
-    what: &str,
-    holds: impl Fn(&BTreeSet<(String, String)>) -> bool,
-) -> BTreeSet<(String, String)> {
+impl Listed {
+    /// The inodes of [`Listed::ours`] the read lists on `addr`.
+    fn on(&self, addr: &str) -> BTreeSet<String> {
+        self.rows
+            .iter()
+            .filter(|(a, inode)| a == addr && self.ours.contains(inode))
+            .map(|(_, inode)| inode.clone())
+            .collect()
+    }
+}
+
+/// Takes the process's open sockets, then reads [`rows_5353`] every 5 ms
+/// until a read lists one of them on `addr`, at most [`TABLE_BOUND`]; fails
+/// with the last read. Only a row that is there can be waited for: a
+/// skipped row comes back in a later read, a gone one never.
+#[cfg(target_os = "linux")]
+fn listed_on(what: &str, addr: &str) -> Listed {
+    let ours = socket_inodes();
     let deadline = Instant::now() + TABLE_BOUND;
     loop {
-        let rows = rows_5353();
-        if holds(&rows) {
-            return rows;
+        let listed = Listed {
+            ours: ours.clone(),
+            rows: rows_5353(),
+        };
+        if !listed.on(addr).is_empty() {
+            return listed;
         }
         assert!(
             !deadline.saturating_duration_since(Instant::now()).is_zero(),
-            "{what}: never in /proc/net/udp within {TABLE_BOUND:?}; the last read's 5353 rows: {rows:?}"
+            "{what}: never in /proc/net/udp within {TABLE_BOUND:?}; the last read: {listed:?}"
         );
         std::thread::sleep(Duration::from_millis(5));
     }
@@ -454,12 +464,7 @@ fn a_daemon_bound_to_its_address_hears_unicast_and_answers_from_it() {
     // A bound socket is opened before `shared_bound` returns: one of the
     // sockets open then is on 127.0.0.1:5353 (its row waited for, #455).
     #[cfg(target_os = "linux")]
-    {
-        let ours = socket_inodes();
-        rows_5353_until("bound to 127.0.0.1:5353", |rows| {
-            !ours_on(rows, &ours, LOOPBACK_HEX).is_empty()
-        });
-    }
+    listed_on("bound to 127.0.0.1:5353", LOOPBACK_HEX);
     assert_eq!(
         warns.contains("hears no group query"),
         !GROUP_TO_BOUND_SOCKET,
@@ -559,17 +564,15 @@ fn the_default_daemon_is_unbound_and_needs_the_responder() {
     // process's 5353 sockets is bound to 127.0.0.1 (no other unit test
     // binds 127.0.0.1:5353).
     mdns.settle(GOODBYE_WAIT).expect("the daemon runs");
-    // Judged on a read that lists the wildcard's own row (#455: a read
-    // can skip rows).
+    // Judged on a read that lists one of this process's 0.0.0.0:5353 rows
+    // (the daemon's, or another test's wildcard socket): never on an empty
+    // read (#455). A read can still skip a row it does not list.
     #[cfg(target_os = "linux")]
     {
-        let ours = socket_inodes();
-        let rows = rows_5353_until("the wildcard daemon's 0.0.0.0:5353", |rows| {
-            !ours_on(rows, &ours, WILDCARD_HEX).is_empty()
-        });
+        let listed = listed_on("a 0.0.0.0:5353 socket", WILDCARD_HEX);
         assert!(
-            ours_on(&rows, &ours, LOOPBACK_HEX).is_empty(),
-            "the wildcard's: {rows:?}"
+            listed.on(LOOPBACK_HEX).is_empty(),
+            "the wildcard's: {listed:?}"
         );
     }
 }
@@ -953,12 +956,9 @@ fn a_bound_daemon_opens_its_socket_again_after_its_address_came_back_with_its_re
     // `/proc/net/udp` can skip rows).
     #[cfg(target_os = "linux")]
     let before = {
-        let ours = socket_inodes();
-        let rows = rows_5353_until("the bound socket", |rows| {
-            !ours_on(rows, &ours, LOOPBACK_HEX).is_empty()
-        });
-        let on = ours_on(&rows, &ours, LOOPBACK_HEX);
-        assert_eq!(on.len(), 1, "one socket on 127.0.0.1:5353: {rows:?}");
+        let listed = listed_on("the bound socket", LOOPBACK_HEX);
+        let on = listed.on(LOOPBACK_HEX);
+        assert_eq!(on.len(), 1, "one socket on 127.0.0.1:5353: {listed:?}");
         on.into_iter().next().unwrap()
     };
     assert_eq!(mdns.reopens(), 0, "nothing changed yet");
@@ -976,23 +976,18 @@ fn a_bound_daemon_opens_its_socket_again_after_its_address_came_back_with_its_re
         "the record announced once on the wire after the reopen"
     );
     // The old socket closed: its inode is no open fd of the process (an
-    // exact list). The new one is on the address: a read that lists a row
-    // of the sockets open now on 127.0.0.1:5353 with another inode, and
-    // only that one there (#455).
+    // exact list, taken after the reopen). A new one is on the address: a
+    // read lists one of the sockets open then on 127.0.0.1:5353, which is
+    // a new inode since the old one is closed, and only that one (#455).
     #[cfg(target_os = "linux")]
     {
-        let ours = socket_inodes();
+        let listed = listed_on("a new socket on 127.0.0.1:5353", LOOPBACK_HEX);
         assert!(
-            !ours.contains(&before),
+            !listed.ours.contains(&before),
             "the old socket closed: {before} still open"
         );
-        let rows = rows_5353_until("a new socket on 127.0.0.1:5353", |rows| {
-            ours_on(rows, &ours, LOOPBACK_HEX)
-                .iter()
-                .any(|inode| *inode != before)
-        });
-        let after = ours_on(&rows, &ours, LOOPBACK_HEX);
-        assert_eq!(after.len(), 1, "one socket on 127.0.0.1:5353: {rows:?}");
+        let after = listed.on(LOOPBACK_HEX);
+        assert_eq!(after.len(), 1, "one socket on 127.0.0.1:5353: {listed:?}");
     }
     let (from, group_heard) = asked(&client, &heard, &full, to, (0x4453, 0x4454));
     assert_eq!(
