@@ -309,7 +309,7 @@ impl Embedded {
                 )));
             }
         }
-        let stats = Arc::new(PumpStats::new(timing, rate));
+        let stats = Arc::new(PumpStats::new(timing, rate).for_map(&map));
         media.attach_engine(Arc::clone(&stats));
         // dstack #307: the app's claim comes before the pump's (here) and
         // the RX thread's (at the host's start).

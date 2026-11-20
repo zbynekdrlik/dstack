@@ -115,9 +115,10 @@ where
             stream_config,
             move |data: &[T], info: &cpal::InputCallbackInfo| {
                 if let Some(joined) = join.first(dstack::media::tx::join_mmcss) {
-                    match &joined {
-                        Ok(_) => tracing::info!("dsend: {}", mmcss_line(&joined)),
-                        Err(_) => tracing::warn!("dsend: {}", mmcss_line(&joined)),
+                    let read = dstack::media::tx::thread_priority();
+                    match mmcss_line(&joined, read) {
+                        (true, line) => tracing::info!("dsend: {line}"),
+                        (false, line) => tracing::warn!("dsend: {line}"),
                     }
                 }
                 push_interleaved(&fifo, data, channels, |x| f64::from(x.to_sample::<f32>()));

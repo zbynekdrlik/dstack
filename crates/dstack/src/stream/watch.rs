@@ -46,6 +46,13 @@ use crate::media::late::{EVERY_NS, MINUTE_NS};
 /// The text of the pump watch's warning: the line a consumer greps for.
 pub const PUMP_WARNING: &str = "engine pump lost or overran blocks this second";
 
+/// The pump watch's line for a pump that owns no channels (dstack #461,
+/// [`PumpStats::owns_channels`]: dsend's, whose TX thread fills L and R):
+/// an info line with the same fields as [`PUMP_WARNING`]'s, since its
+/// re-bootstrap or overrun loses no audio.
+pub const PUMP_NO_LOSS: &str =
+    "engine pump re-bootstrapped or overran this second: it owns no channels, no audio lost";
+
 /// What grew in the pump's counts since the last look.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Grew {
@@ -232,26 +239,39 @@ impl PumpWatch {
             return;
         };
         let timing = stats.timing();
-        warn!(
-            device,
-            rebootstraps = grew.rebootstraps,
-            missed = grew.missed,
-            overruns = grew.overruns,
-            writes_after_send = grew.writes_after_send,
-            max_process_us = second_max_us,
-            media = view.media,
-            block = timing.block,
-            margin = timing.margin,
-            playout = timing.playout,
-            offset = timing.offset(),
-            cause = %cause_word(&grew),
-            behind_max_us,
-            oversleep_max_us = split.oversleep_us,
-            drain_max_us = split.drain_us,
-            drain_max_datagrams = split.drain_datagrams,
-            max_process_cpu_us = %cpu_word(split.process_cpu_us),
-            "{PUMP_WARNING}"
-        );
+        // One field list for both lines: a pump that owns no channels
+        // (dstack #461) loses no audio, so its line is info, not the
+        // warning consumers grep.
+        macro_rules! pump_line {
+            ($level:ident, $text:ident) => {
+                $level!(
+                    device,
+                    rebootstraps = grew.rebootstraps,
+                    missed = grew.missed,
+                    overruns = grew.overruns,
+                    writes_after_send = grew.writes_after_send,
+                    max_process_us = second_max_us,
+                    media = view.media,
+                    block = timing.block,
+                    margin = timing.margin,
+                    playout = timing.playout,
+                    offset = timing.offset(),
+                    cause = %cause_word(&grew),
+                    behind_max_us,
+                    oversleep_max_us = split.oversleep_us,
+                    drain_max_us = split.drain_us,
+                    drain_max_datagrams = split.drain_datagrams,
+                    max_process_cpu_us = %cpu_word(split.process_cpu_us),
+                    "{}",
+                    $text
+                )
+            };
+        }
+        if stats.owns_channels() {
+            pump_line!(warn, PUMP_WARNING);
+        } else {
+            pump_line!(info, PUMP_NO_LOSS);
+        }
     }
 }
 

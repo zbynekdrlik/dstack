@@ -44,8 +44,13 @@ fn the_engine_status_names_the_causes_the_wakes_and_the_threads() {
     wakes.take_minute();
     wakes.record(700_000, true, false, None, || 1_794_000_000_456);
     let scheduling = media.tx.scheduling();
-    scheduling.record(MediaThread::Rx, Priority::Refused, None);
-    scheduling.record(MediaThread::Pump, Priority::MmcssPriorityRefused, Some(9));
+    scheduling.record(MediaThread::Rx, Priority::Refused, None, Some(0));
+    scheduling.record(
+        MediaThread::Pump,
+        Priority::MmcssPriorityRefused,
+        Some(9),
+        Some(18),
+    );
     let s = status(&media);
     for word in words_of(&s, "test-device") {
         assert!(WORDS.contains(&word.as_str()), "{word:?} in {s}");
@@ -59,7 +64,8 @@ fn the_engine_status_names_the_causes_the_wakes_and_the_threads() {
          {\"unix_ms\":1794000000123,\"behind_us\":12345,\"rebootstrap\":1,\"oversleep_us\":12300},\
          {\"unix_ms\":1794000000456,\"behind_us\":700,\"rebootstrap\":0}],\
          \"threads\":[{\"thread\":\"pump\",\"scheduling\":\"mmcss_joined_priority_refused\",\
-         \"mmcss_task\":9},{\"thread\":\"rx\",\"scheduling\":\"refused\",\"mmcss_task\":null}]}}";
+         \"mmcss_task\":9,\"priority\":18},{\"thread\":\"rx\",\"scheduling\":\"refused\",\
+         \"mmcss_task\":null,\"priority\":0}]}}";
     assert!(s.ends_with(os_free), "{s}");
     assert!(s.contains("\"rebootstraps\":7,"), "{s}");
 }

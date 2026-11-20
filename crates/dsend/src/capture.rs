@@ -60,12 +60,22 @@ impl ThreadJoin {
     }
 }
 
-/// The log line of the capture thread's MMCSS join: MMCSS's task index;
-/// the OS error of a refused join (the thread then runs at its process's
-/// priority); or the task index and the OS error when it joined but its
+/// The log line of the capture thread's MMCSS join, and whether it is the
+/// info line (in MMCSS) rather than a warning: MMCSS's task index and the
+/// thread's priority read back after the join (`read`,
+/// [`dstack::media::tx::thread_priority`], `-` where not read); the OS
+/// error of a refused join (the thread then runs at its process's
+/// priority); the task index and the OS error when it joined but its
 /// AVRT_PRIORITY_HIGH was refused (dstack #281: in MMCSS at the task's
-/// default priority).
-pub fn mmcss_line(joined: &Result<u32, MmcssError>) -> String {
+/// default priority); or, when MMCSS raised nothing (dstack #461: FOH with
+/// MMCSS off, task index 4294967295), that it runs at its process's
+/// priority ([`dstack::media::tx::joined_task`]).
+pub fn mmcss_line(joined: &Result<u32, MmcssError>, read: Option<i32>) -> (bool, String) {
+    let _ = read;
+    (joined.is_ok(), mmcss_text(joined))
+}
+
+fn mmcss_text(joined: &Result<u32, MmcssError>) -> String {
     match joined {
         Ok(index) => {
             format!("the loopback capture thread runs in MMCSS Pro Audio (task index {index})")
@@ -289,24 +299,67 @@ mod tests {
     #[test]
     fn the_mmcss_line_names_the_task_index_or_the_error() {
         assert_eq!(
-            mmcss_line(&Ok(2)),
-            "the loopback capture thread runs in MMCSS Pro Audio (task index 2)"
+            mmcss_line(&Ok(2), Some(19)),
+            (
+                true,
+                "the loopback capture thread runs in MMCSS Pro Audio \
+                 (task index 2, priority 19)"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            mmcss_line(&Ok(2), None),
+            (
+                true,
+                "the loopback capture thread runs in MMCSS Pro Audio \
+                 (task index 2, priority -)"
+                    .to_string()
+            )
         );
         let refused = std::io::Error::other("the service is stopped");
         assert_eq!(
-            mmcss_line(&Err(MmcssError::Join(refused))),
-            "MMCSS refused the loopback capture thread (the service is stopped): \
-             it runs at its process's priority"
+            mmcss_line(&Err(MmcssError::Join(refused)), Some(0)),
+            (
+                false,
+                "MMCSS refused the loopback capture thread (the service is stopped): \
+                 it runs at its process's priority (priority 0)"
+                    .to_string()
+            )
         );
-        let priority = MmcssError::Priority {
-            index: 5,
+        let priority = |index| MmcssError::Priority {
+            index,
             error: std::io::Error::other("access denied"),
         };
         assert_eq!(
-            mmcss_line(&Err(priority)),
-            "the loopback capture thread runs in MMCSS Pro Audio (task index 5), \
-             but AVRT_PRIORITY_HIGH was refused (access denied): \
-             it runs at the task's default priority"
+            mmcss_line(&Err(priority(5)), Some(18)),
+            (
+                false,
+                "the loopback capture thread runs in MMCSS Pro Audio (task index 5, \
+                 priority 18), but AVRT_PRIORITY_HIGH was refused (access denied): \
+                 it runs at the task's default priority"
+                    .to_string()
+            )
+        );
+        // dstack #461: FOH with MMCSS off joins with task index u32::MAX
+        // and raises nothing; a read-back not above HIGHEST is no join.
+        let raised_nothing = |index: u32, level: &str| {
+            (
+                false,
+                format!(
+                    "MMCSS raised nothing for the loopback capture thread \
+                     (task index {index}, priority {level}): \
+                     it runs at its process's priority"
+                ),
+            )
+        };
+        assert_eq!(
+            mmcss_line(&Ok(u32::MAX), None),
+            raised_nothing(u32::MAX, "-")
+        );
+        assert_eq!(mmcss_line(&Ok(2), Some(0)), raised_nothing(2, "0"));
+        assert_eq!(
+            mmcss_line(&Err(priority(u32::MAX)), Some(18)),
+            raised_nothing(u32::MAX, "18")
         );
     }
 
