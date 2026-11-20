@@ -536,6 +536,40 @@ fn verdict(
     )
 }
 
+/// A pump late wake that re-bootstrapped, as the witness merged it
+/// (dstack #459): its wall time (ms since the Unix epoch), how far behind
+/// it woke and how late its own sleep before it returned (µs; `None`
+/// unmeasured).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct Rebootstrap {
+    unix_ms: u64,
+    behind_us: u64,
+    oversleep_us: Option<u64>,
+}
+
+/// How far apart two peers' re-bootstrapping wakes may be and still be one
+/// stall of the process, ms (dstack #459): a stall ends for every thread
+/// at once and each pump wakes at its own next timer, a block (0.67 ms) or
+/// so apart. Every incident's two wakes were in the same ms.
+const TOGETHER_MS: u64 = 2;
+
+/// How far a re-bootstrap's own sleep may have returned short of or past
+/// its lateness and still be the scheduler's miss, µs: the sleep alone put
+/// the pump that late (`ci_peer_gate.py`'s rule for a lone re-bootstrap,
+/// dstack #339). The incidents: 1 to 10 µs.
+const OVERSLEEP_SLACK_US: u64 = 500;
+
+/// The pairs of both peers' pump re-bootstraps that one stall of the
+/// process caused (dstack #459): a re-bootstrap of peer 0 and one of peer 1
+/// within [`TOGETHER_MS`] of each other, each woken late by its own sleep
+/// ([`OVERSLEEP_SLACK_US`]), each after `from_ms` and by `to_ms` (the
+/// counted window), and each in one pair at most. A re-bootstrap with no
+/// measured oversleep, or one pump's alone, is in no pair.
+fn shared_stalls(rebootstraps: &[BTreeSet<Rebootstrap>; 2], from_ms: u64, to_ms: u64) -> u64 {
+    let _ = (rebootstraps, from_ms, to_ms);
+    0
+}
+
 /// Waits up to `bound` for `done`, polling.
 fn wait_for(bound: Duration, mut done: impl FnMut() -> bool) -> bool {
     let end = Instant::now() + bound;
@@ -624,6 +658,62 @@ fn a_cause_began_by_the_count_and_ended_within_the_window() {
     assert_eq!(began(at + 15, 14_000), at + 1);
     assert_eq!(when(at, at + 3), "ended 3 ms after");
     assert_eq!(when(at, at - 7), "ended 7 ms before");
+}
+
+/// One stall of the process that re-bootstraps both peers' pumps is one
+/// pair (dstack #459, the CI failures of 19-20.11.2026: both wakes in the
+/// same ms, each one's own sleep that late); one pump's re-bootstrap alone,
+/// two apart, a wake not woken late by its sleep and a wake outside the
+/// counted window are in none.
+#[test]
+fn both_pumps_restarted_by_one_stall_are_one_pair() {
+    let r = |unix_ms, behind_us, oversleep_us| Rebootstrap {
+        unix_ms,
+        behind_us,
+        oversleep_us,
+    };
+    let pairs = |a: &[Rebootstrap], b: &[Rebootstrap]| {
+        let set = |rs: &[Rebootstrap]| rs.iter().copied().collect::<BTreeSet<_>>();
+        shared_stalls(&[set(a), set(b)], 1_000, 9_000)
+    };
+    // v0.6.200 main, windows-2025 (run 44684350870) and v0.6.199 main,
+    // ubuntu-24.04 (run 44676550352), behind and oversleep in µs.
+    let a = r(5_000, 7_250, Some(7_251));
+    assert_eq!(pairs(&[a], &[r(5_000, 6_604, Some(6_607))]), 1);
+    assert_eq!(
+        pairs(&[r(5_000, 6_770, Some(6_780))], &[r(5_000, 6_083, Some(6_085))]),
+        1
+    );
+    // One pump alone, either peer: today's rule.
+    assert_eq!(pairs(&[a], &[]), 0);
+    assert_eq!(pairs(&[], &[a]), 0);
+    // Apart: within TOGETHER_MS either way is one stall, past it two.
+    assert_eq!(pairs(&[a], &[r(5_002, 6_604, Some(6_607))]), 1);
+    assert_eq!(pairs(&[r(5_002, 6_604, Some(6_607))], &[a]), 1);
+    assert_eq!(pairs(&[a], &[r(5_003, 6_604, Some(6_607))]), 0);
+    assert_eq!(pairs(&[a], &[r(4_997, 6_604, Some(6_607))]), 0);
+    // Each woken late by its own sleep, within 0.5 ms either way; a block
+    // that ran long (the sleep on time) or an unmeasured sleep is no stall.
+    let b = |oversleep| r(5_000, 6_600, oversleep);
+    assert_eq!(pairs(&[a], &[b(Some(6_100))]), 1);
+    assert_eq!(pairs(&[a], &[b(Some(7_100))]), 1);
+    assert_eq!(pairs(&[a], &[b(Some(6_099))]), 0);
+    assert_eq!(pairs(&[a], &[b(Some(7_101))]), 0);
+    assert_eq!(pairs(&[a], &[b(None)]), 0);
+    assert_eq!(pairs(&[b(None)], &[a]), 0);
+    assert_eq!(pairs(&[r(5_000, 7_250, Some(10))], &[a]), 0);
+    // Only inside the counted window: after its start, by its end.
+    let at = |ms| r(ms, 6_600, Some(6_600));
+    assert_eq!(pairs(&[at(1_000)], &[at(1_000)]), 0);
+    assert_eq!(pairs(&[at(1_001)], &[at(1_001)]), 1);
+    assert_eq!(pairs(&[at(9_000)], &[at(9_000)]), 1);
+    assert_eq!(pairs(&[at(9_001)], &[at(9_001)]), 0);
+    assert_eq!(pairs(&[at(1_001)], &[at(1_000)]), 0);
+    assert_eq!(pairs(&[at(9_000)], &[at(9_001)]), 0);
+    // Each wake in one pair at most; two stalls are two pairs.
+    assert_eq!(pairs(&[at(5_000), at(5_001)], &[at(5_000)]), 1);
+    assert_eq!(pairs(&[at(5_000)], &[at(5_000), at(5_001)]), 1);
+    assert_eq!(pairs(&[at(5_000), at(7_000)], &[at(5_001), at(7_000)]), 2);
 }
 
 /// The design's whole-device test: two devices at +40 and -30 ppm, each
