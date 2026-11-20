@@ -78,15 +78,19 @@ impl RxShared {
             self.routes_version.fetch_add(1, Ordering::Release);
         }
         let pairs = destinations(self.ip, plans.into_iter().zip(self.slot_ports));
-        let mut held = self
-            .destinations
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        if held.update(pairs) {
+        let moved = {
+            let mut held = self
+                .destinations
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            held.update(pairs.as_slice()).then(|| held.clone())
+        };
+        // Logged after the lock: a reader's poll never waits on the format.
+        if let Some(now) = moved {
             info!(
-                generation = held.generation,
-                count = held.pairs.len(),
-                pairs = ?held.pairs,
+                generation = now.generation,
+                count = now.pairs.len(),
+                pairs = ?now.pairs,
                 "RX flow destinations changed"
             );
         }

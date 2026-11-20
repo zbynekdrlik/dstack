@@ -288,7 +288,8 @@ fn an_embedded_device_gives_its_rx_flows_destinations() {
     };
     let last = seen.last().unwrap();
     assert_eq!(last.pairs, [SocketAddrV4::new(ip, port)], "{seen:?}");
-    assert_eq!(last.generation, 1, "{seen:?}");
+    // A request retried into another slot is a set (and a generation) more.
+    assert!(last.generation >= 1, "{seen:?}");
     assert!(matches!(stopped, Stopped::Done), "{stopped:?}");
 
     // The transmitter: our multicast flow of TX 1, no subscription.
@@ -317,6 +318,12 @@ fn an_embedded_device_gives_its_rx_flows_destinations() {
     let transmitter = start(&cfg);
     let receiver = start(&cfg_b);
     let (seen, flows) = destinations_of(&receiver, |_| vec![group]);
+    // The pair is where the audio comes: RX 1 counts packets of its flow.
+    let end = Instant::now() + Duration::from_secs(5);
+    while receiver.media().rx_channels()[0].packets == 0 && Instant::now() < end {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let heard = receiver.media().rx_channels().remove(0);
     let stopped_b = receiver.stop(Duration::from_secs(5));
     let stopped_a = transmitter.stop(Duration::from_secs(5));
     assert!(
@@ -324,10 +331,10 @@ fn an_embedded_device_gives_its_rx_flows_destinations() {
         "RX 1 on the multicast flow: {flows:?} {seen:?}"
     );
     assert_eq!(seen.last().unwrap().pairs, [group], "{seen:?}");
-    // A poll may miss a set that lasted under 50 ms; each one seen is new.
+    assert!(heard.packets > 0, "{heard:?} {seen:?}");
+    // Each set seen has a later generation (a poll may miss a short one).
     assert!(
-        seen.windows(2)
-            .all(|w| w[0].generation < w[1].generation && w[0].pairs != w[1].pairs),
+        seen.windows(2).all(|w| w[0].generation < w[1].generation),
         "{seen:?}"
     );
     assert!(matches!(stopped_b, Stopped::Done), "{stopped_b:?}");

@@ -371,13 +371,10 @@ impl RxShared {
             .is_some_and(|r| r.load(Ordering::Relaxed) != 0)
     }
 
-    /// Each flow slot's UDP port, where its transmitter sends the audio.
+    /// Each flow slot's UDP port, where its transmitter sends the audio (0
+    /// for a slot with no socket), as read at the bind.
     pub fn ports(&self) -> io::Result<[u16; MAX_FLOWS]> {
-        let mut ports = [0; MAX_FLOWS];
-        for (port, s) in ports.iter_mut().zip(self.sockets.iter()) {
-            *port = s.local_addr()?.port();
-        }
-        Ok(ports)
+        Ok(self.slot_ports)
     }
 
     /// Flow slot `slot`'s address.

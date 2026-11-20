@@ -14,7 +14,7 @@
 
 use std::net::{Ipv4Addr, SocketAddrV4};
 
-use super::RxPlan;
+use super::{MAX_FLOWS, RxPlan};
 
 /// The (destination IPv4, UDP port) pairs our RX flows arrive on, as the
 /// flow plan was last published (dstack #464).
@@ -41,36 +41,63 @@ pub struct RxDestinations {
 
 impl RxDestinations {
     /// Takes `pairs` as the set: `true` and the generation moved on when
-    /// they differ from the set held, else `false` and nothing changes.
-    pub fn update(&mut self, pairs: Vec<SocketAddrV4>) -> bool {
-        if pairs == self.pairs {
+    /// they differ from the set held, else `false` and nothing changes
+    /// (and nothing is allocated: a publish of the same set allocates
+    /// nothing, `tests/hot_path.rs`).
+    pub fn update(&mut self, pairs: &[SocketAddrV4]) -> bool {
+        if pairs == self.pairs.as_slice() {
             return false;
         }
-        self.pairs = pairs;
+        self.pairs = pairs.to_vec();
         self.generation += 1;
         true
+    }
+}
+
+/// At most [`MAX_FLOWS`] pairs, worked out without allocating
+/// ([`destinations`]).
+#[derive(Debug, Clone, Copy)]
+pub struct Pairs {
+    at: [SocketAddrV4; MAX_FLOWS],
+    len: usize,
+}
+
+impl Pairs {
+    /// The pairs, sorted, each once.
+    pub fn as_slice(&self) -> &[SocketAddrV4] {
+        &self.at[..self.len]
     }
 }
 
 /// The pairs flow slots `slots` (each its plan and its socket's port, 0
 /// for a slot with no socket) receive on, for a device at `ip`: a
 /// multicast flow's group, a unicast flow's (`ip`, port); sorted, each
-/// once.
-pub fn destinations(
-    ip: Ipv4Addr,
-    slots: impl IntoIterator<Item = (RxPlan, u16)>,
-) -> Vec<SocketAddrV4> {
-    let mut pairs: Vec<SocketAddrV4> = slots
+/// once; the first [`MAX_FLOWS`] found (one per flow slot). Allocates
+/// nothing (the publish runs it on every manager change).
+pub fn destinations(ip: Ipv4Addr, slots: impl IntoIterator<Item = (RxPlan, u16)>) -> Pairs {
+    let mut at = [SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0); MAX_FLOWS];
+    let found = slots
         .into_iter()
         .filter(|(plan, _)| plan.src.is_some())
         .filter_map(|(plan, port)| match plan.group {
             Some(group) => Some(group),
             None => (port != 0).then(|| SocketAddrV4::new(ip, port)),
-        })
-        .collect();
-    pairs.sort_unstable();
-    pairs.dedup();
-    pairs
+        });
+    let mut n = 0;
+    for (cell, pair) in at.iter_mut().zip(found) {
+        *cell = pair;
+        n += 1;
+    }
+    at[..n].sort_unstable();
+    // Each once: keep a pair unlike the one kept before it.
+    let mut len = 0;
+    for i in 0..n {
+        if len == 0 || at[i] != at[len - 1] {
+            at[len] = at[i];
+            len += 1;
+        }
+    }
+    Pairs { at, len }
 }
 
 #[cfg(test)]
