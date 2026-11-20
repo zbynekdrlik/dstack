@@ -288,11 +288,9 @@ fn rejoin_leaves_and_joins_the_group_again_on_the_same_socket() {
 #[test]
 fn rejoin_keeps_receiving_the_group() {
     let group = Ipv4Addr::new(239, 255, 77, 83);
-    let port = UdpSocket::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
+    // The wildcard socket takes its own port (port 0): a port picked
+    // first by a probe socket and bound after it was released could be
+    // taken in between by a parallel test (AddrInUse, #455's loop).
     let sock = {
         let s = socket2::Socket::new(
             socket2::Domain::IPV4,
@@ -301,11 +299,12 @@ fn rejoin_keeps_receiving_the_group() {
         )
         .unwrap();
         s.set_reuse_address(true).unwrap();
-        s.bind(&SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port).into())
+        s.bind(&SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0).into())
             .unwrap();
         s.join_multicast_v4(&group, &Ipv4Addr::LOCALHOST).unwrap();
         UdpSocket::from(s)
     };
+    let port = sock.local_addr().unwrap().port();
     sock.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
     rejoin(&sock, group, Ipv4Addr::LOCALHOST).unwrap();
     let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
