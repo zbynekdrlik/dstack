@@ -624,7 +624,11 @@ impl Prepared {
         // daemon, its interface only), shared by every device there, with
         // the address's meter (dstack #289; the device runs on without it);
         // bound to the address under the #444 trial switch.
-        let mdns = Mdns::shared_bound(net.ip, device.cfg.mdns_bind_address).map_err(run_failed)?;
+        let bound = device.cfg.mdns_bind_address
+            || crate::announce::mdns::binds_to_address(
+                crate::announce::mdns::GROUP_TO_BOUND_SOCKET,
+            );
+        let mdns = Mdns::shared_bound(net.ip, bound).map_err(run_failed)?;
         if let Some(meter) = mdns.meter() {
             media.set_mdns_meter(meter);
         }

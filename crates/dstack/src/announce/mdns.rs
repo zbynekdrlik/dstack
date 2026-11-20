@@ -123,12 +123,15 @@ impl Heard {
 /// measured (BSD stacks deliver only to the wildcard or the group).
 pub const GROUP_TO_BOUND_SOCKET: bool = cfg!(windows);
 
-/// Whether the address's daemon binds its socket to the address by
-/// default, given whether the OS hands such a socket the group
-/// ([`GROUP_TO_BOUND_SOCKET`]). Today: never (the wildcard's).
+/// Whether the address's daemon binds its socket to the address, given
+/// whether the OS hands such a socket the group ([`GROUP_TO_BOUND_SOCKET`];
+/// dstack #444, #451): exactly then. Bound, every answer leaves from the
+/// address (one answer, no responder beside it) and the daemon's own watch
+/// opens the socket again after an address cycle, where the wildcard daemon
+/// on Windows went deaf until a restart (mbc, 20.11.2026). Where a bound
+/// socket hears no group (Linux) it stays the wildcard's.
 pub fn binds_to_address(group_to_bound: bool) -> bool {
-    let _ = group_to_bound;
-    false
+    group_to_bound
 }
 
 /// The warning for a daemon bound to its address (`mdns_bind_address`),
