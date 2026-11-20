@@ -1,6 +1,6 @@
 {
   "schema": "dstack-nic-standard/1",
-  "version": 2,
+  "version": 3,
   "updated": "2026-11-20",
   "issue": "https://github.com/zbynekdrlik/dstack/issues/465",
   "doc": "docs/nic-standard.md",
@@ -13,7 +13,23 @@
     "absent": "fail (default): the keyword must be there; pass: a driver without the keyword passes",
     "status": "settled: decided with its evidence; open: the standard value until the named measurement decides; report: no standard value yet, printed, never a failure",
     "profile": "low_latency: checked only with the low_latency profile (iemmixer gen3, dasio); every other value holds for every profile",
-    "evidence": "a ticket, a measurement or a vendor document; 'none yet: fleet value' where the working PCs already share the value and nothing measured it"
+    "evidence": "a ticket, a measurement or a vendor document; 'none yet: fleet value' where the working PCs already share the value and nothing measured it",
+    "eee": "the vendor-independent rule, checked on every wired physical NIC of the PC (any vendor, with or without an entry, up or down): windows keywords (any case) whose value must be in off; any other keyword whose display_name matches the pattern is judged by its display value (display_off passes, display_on fails, else INFO); linux off lists the passing ethtool --show-eee states (enabled - active and enabled - inactive are enabled). Patterns are regular expressions matched without regard to case"
+  },
+  "eee": {
+    "name": "Energy-Efficient Ethernet off on every wired NIC",
+    "scope": "every wired physical NIC of a rig PC, whatever the vendor or chip (Realtek, Intel, Aquantia, any), up or down, with or without an entry in adapters",
+    "windows": {
+      "keywords": ["*EEE", "EEE", "AdvancedEEE", "EnableGreenEthernet", "*EnableGreenEthernet", "GreenEthernet", "EEELinkAdvertisement"],
+      "off": ["0"],
+      "display_name": "energy[- ]?efficient|\\beee\\b|green ?ethernet",
+      "display_off": "^(disabled|off)$",
+      "display_on": "^(enabled|on)\\b"
+    },
+    "linux": {
+      "off": ["disabled", "not supported"]
+    },
+    "evidence": "the owner, 20.11.2026: EEE enabled on any of our rig devices is a serious failure (dstack #465); power saving off on every wired NIC (owner 7.11.2026, songplayer#285). Keywords: Realtek *EEE, EEE, AdvancedEEE, EnableGreenEthernet (read on resolume-snv, resolume-pp, mbc, dsg, FOH 20.11.2026), Intel EEELinkAdvertisement and *EEE; an Aquantia (Marvell AQtion) or any other driver's EEE keyword by its display name (no Windows Aquantia NIC in the fleet to read its keyword). Realtek's EEEMaxSupportSpeed is a speed, not a switch: INFO"
   },
   "adapters": [
     {

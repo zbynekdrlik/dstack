@@ -16,6 +16,16 @@ yet (status `report`, or a driver version under an open question); SKIP is a
 value of another profile or a NIC that is down. A Realtek NIC without an entry
 FAILs: a new chip is measured and added before it carries production traffic.
 So does an interface named on the command line that is missing or no Realtek.
+
+First, whatever the vendor, it checks the standard's vendor-independent rule
+`eee` on EVERY wired physical NIC, up or down, with or without an entry and
+whatever IFACEs name (the owner, 20.11.2026: EEE enabled on any rig device is
+a serious failure): `ethtool --show-eee` "enabled - active" and "enabled -
+inactive" FAIL, "disabled" and "not supported" pass. A FAIL names the NIC,
+its driver and the key:
+
+    FAIL  enp1s0  eee:status  expected=disabled|not supported  actual=enabled - inactive  (driver r8169; ...)
+
 The exit status is 1 when anything FAILs, 2 when the standard cannot be read
 or is malformed, else 0.
 
@@ -77,7 +87,10 @@ def is_number(text):
 
 
 # The keys each object may hold: an unknown key is a typo, never ignored.
-TOP_KEYS = {"schema", "version", "updated", "issue", "doc", "scope", "fields", "adapters"}
+TOP_KEYS = {"schema", "version", "updated", "issue", "doc", "scope", "fields", "eee", "adapters"}
+EEE_KEYS = {"name", "scope", "windows", "linux", "evidence"}
+EEE_WINDOWS_KEYS = {"keywords", "off", "display_name", "display_off", "display_on"}
+EEE_LINUX_KEYS = {"off"}
 ENTRY_KEYS = {"id", "chip", "covers", "os", "match", "driver", "values"}
 DRIVER_KEYS = {"files", "modules", "min_version", "bad", "status", "evidence", "plan", "firmware"}
 BAD_KEYS = {"file", "version", "evidence"}
@@ -168,6 +181,31 @@ def _validate_value(eid, v, keys):
         raise StandardError(f"{where}: an open value needs its plan")
 
 
+def _validate_eee(rule):
+    """The vendor-independent EEE rule: Windows keywords and display
+    patterns, Linux passing states (dstack #465, owner 20.11.2026)."""
+    if not isinstance(rule, dict):
+        raise StandardError("no eee rule")
+    _only("eee", rule, EEE_KEYS)
+    _text("eee", rule, "evidence", required=True)
+    _text("eee", rule, "name")
+    _text("eee", rule, "scope")
+    win, lin = rule.get("windows"), rule.get("linux")
+    if not isinstance(win, dict) or not isinstance(lin, dict):
+        raise StandardError("eee: needs its windows and linux parts")
+    _only("eee/windows", win, EEE_WINDOWS_KEYS)
+    _only("eee/linux", lin, EEE_LINUX_KEYS)
+    for where, obj, key in (("eee/windows", win, "keywords"), ("eee/windows", win, "off"), ("eee/linux", lin, "off")):
+        if not _strings(obj.get(key)):
+            raise StandardError(f"{where}: {key} must be a list of strings")
+    for key in ("display_name", "display_off", "display_on"):
+        _text("eee/windows", win, key, required=True)
+        try:
+            re.compile(win[key])
+        except re.error as e:
+            raise StandardError(f"eee/windows: {key} is no regular expression: {e}") from e
+
+
 def validate(std):
     """Raises StandardError unless `std` is a well-formed standard: the
     checkers trust its shape, so a broken file stops the run (exit 2)
@@ -178,6 +216,7 @@ def validate(std):
     _only("the file", std, TOP_KEYS)
     if not isinstance(std.get("version"), int) or isinstance(std.get("version"), bool):
         raise StandardError("no integer version")
+    _validate_eee(std.get("eee"))
     if not isinstance(std.get("adapters"), list):
         raise StandardError("no adapters list")
     seen = set()
@@ -426,6 +465,81 @@ def check(entry, facts, profile):
     return rows
 
 
+# ------------------------------------------------ EEE on every wired NIC
+
+
+def _eee_note(rule, driver):
+    """A FAIL line names the NIC (its own column), its driver and the rule's
+    evidence."""
+    return f"driver {driver or '(unknown)'}; {rule['evidence']}"
+
+
+# ethtool's own answer for a driver without EEE support (ixgbe): new ethtool
+# over netlink, old over ioctl. Only this answer, and only with no status.
+EEE_UNSUPPORTED = re.compile(
+    r"^(netlink error|Cannot get EEE settings): Operation not supported", re.MULTILINE
+)
+
+
+def judge_eee_linux(rule, text, driver):
+    """The EEE row of a Linux NIC from `ethtool --show-eee` (stdout and
+    stderr together): "enabled - active" and "enabled - inactive" are
+    enabled (the actual value shows which); ethtool's answer for a driver
+    without EEE support is not supported; no answer is unreadable, a FAIL."""
+    off = rule["linux"]["off"]
+    m = re.search(r"EEE status:\s*(.+)", text)
+    shown = m.group(1).strip() if m else None
+    status = parse_eee(text).get("eee:status")
+    if shown is None and EEE_UNSUPPORTED.search(text):
+        shown = status = "not supported"
+    expected = "|".join(off)
+    note = _eee_note(rule, driver)
+    if status is None:
+        return ("FAIL", "eee:status", expected, "(unreadable)", note)
+    ok = status.casefold() in [o.casefold() for o in off]
+    return ("PASS" if ok else "FAIL", "eee:status", expected, shown, note)
+
+
+def judge_eee_windows(rule, props, driver):
+    """The EEE rows of a Windows NIC from its advanced properties, each
+    (keyword, value, display name, display value), the hidden ones (no
+    display name) included. A listed keyword (any case) passes when its
+    value is off. Another keyword whose display name matches is judged by
+    its display value: off passes, on fails; with no display value its
+    value decides; anything else (Realtek's EEEMaxSupportSpeed, a speed) is
+    INFO. A NIC with no EEE keyword at all gives one INFO row: the
+    driver's default holds and Windows shows no state for it."""
+    win = rule["windows"]
+    keywords = {k.casefold() for k in win["keywords"]}
+    off = [o.casefold() for o in win["off"]]
+    note = _eee_note(rule, driver)
+    rows = []
+    for keyword, value, display_name, display_value in props:
+        value = "" if value is None else str(value).strip()
+        display_value = (display_value or "").strip()
+        shown = f"{value} ({display_value})" if display_value else value
+        listed = keyword.casefold() in keywords
+        if listed and value != "":
+            rows.append(("PASS" if value.casefold() in off else "FAIL", keyword, "|".join(win["off"]), shown, note))
+        elif (listed and display_value) or (
+            not listed and display_name and re.search(win["display_name"], display_name, re.IGNORECASE)
+        ):
+            # A listed keyword with no registry value but a display value
+            # (the driver's default shown) is judged as an unlisted one.
+            if display_value and re.search(win["display_off"], display_value, re.IGNORECASE):
+                verdict = "PASS"
+            elif display_value and re.search(win["display_on"], display_value, re.IGNORECASE):
+                verdict = "FAIL"
+            elif not display_value and value.casefold() in off:
+                verdict = "PASS"
+            else:
+                verdict = "INFO"
+            rows.append((verdict, keyword, "off", shown, note))
+    if not rows:
+        rows.append(("INFO", "eee", "(a keyword)", "(no EEE keyword)", "the driver's default holds, unread; " + note))
+    return rows
+
+
 def format_row(iface, row):
     """One output line; the evidence or plan only where the reader acts on
     it (FAIL, INFO, SKIP), so a clean run stays short."""
@@ -462,17 +576,51 @@ def nic_ids(iface, sysfs=SYSFS_NET):
     return None
 
 
-def run(args):
+def run(args, with_stderr=False):
     """A read-only command's stdout ('' when it fails: its values then read
-    as absent, which fails unless the standard allows it)."""
+    as absent, which fails unless the standard allows it). `with_stderr`
+    adds its stderr to the text (ethtool reports an unsupported EEE there)."""
     try:
         r = subprocess.run(args, capture_output=True, text=True, timeout=10, check=False)
     except (OSError, subprocess.TimeoutExpired) as e:
         print(f"INFO  {' '.join(args)} did not run: {e}", file=sys.stderr)
         return ""
+    if with_stderr:
+        return r.stdout + r.stderr
     if r.returncode != 0:
         print(f"INFO  {' '.join(args)} exited {r.returncode}: {r.stderr.strip()}", file=sys.stderr)
     return r.stdout
+
+
+def wired_nics(sysfs=SYSFS_NET):
+    """Every wired physical NIC: an interface with a device, no wireless
+    one, of type 1 (Ethernet) where the type is readable."""
+    out = []
+    for iface in sorted(os.listdir(sysfs)):
+        base = os.path.join(sysfs, iface)
+        if not os.path.exists(os.path.join(base, "device")):
+            continue
+        if os.path.exists(os.path.join(base, "wireless")) or os.path.exists(os.path.join(base, "phy80211")):
+            continue
+        kind = _read(os.path.join(base, "type"))
+        if kind is not None and kind != "1":
+            continue
+        out.append(iface)
+    return out
+
+
+def nic_driver(iface, sysfs=SYSFS_NET):
+    """The kernel driver bound to the NIC's device (sysfs), or ''."""
+    link = os.path.join(sysfs, iface, "device", "driver")
+    return os.path.basename(os.path.realpath(link)) if os.path.exists(link) else ""
+
+
+def check_eee(rule, sysfs=SYSFS_NET):
+    """The EEE row of every wired NIC of this PC, up or down, any vendor."""
+    return [
+        (iface, judge_eee_linux(rule, run(["ethtool", "--show-eee", iface], with_stderr=True), nic_driver(iface, sysfs)))
+        for iface in wired_nics(sysfs)
+    ]
 
 
 def power_node(iface, bus, sysfs=SYSFS_NET):
@@ -516,6 +664,13 @@ def main(argv=None, sysfs=SYSFS_NET, quirks_path=USBCORE_QUIRKS):
         print(f"FAIL  {e}")
         return 2
     print(f"nic-standard v{std['version']} ({a.standard}), profile {a.profile}")
+    # EEE first: every wired NIC of the PC, whatever IFACEs name.
+    print(f"--    every wired NIC: {std['eee'].get('name', 'EEE off')} (eee)")
+    eee_rows = check_eee(std["eee"], sysfs)
+    for iface, row in eee_rows:
+        print(format_row(iface, row))
+    eee_failed = sum(row[0] == "FAIL" for _, row in eee_rows)
+    print(f"{len(eee_rows)} wired NIC(s) checked for EEE, {eee_failed} FAIL")
     named = bool(a.ifaces)
     ifaces = a.ifaces or sorted(os.listdir(sysfs))
     failed = checked = 0
@@ -541,7 +696,7 @@ def main(argv=None, sysfs=SYSFS_NET, quirks_path=USBCORE_QUIRKS):
             print(format_row(iface, row))
             failed += row[0] == "FAIL"
     print(f"{checked} Realtek NIC(s) checked, {failed} FAIL")
-    return 1 if failed else 0
+    return 1 if failed or eee_failed else 0
 
 
 if __name__ == "__main__":

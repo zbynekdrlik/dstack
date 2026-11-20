@@ -2,9 +2,9 @@
 
 One standard for every Realtek NIC on a production PC: which driver it runs and every advanced value it holds, each with its evidence. It is part of the production network standard (`docs/two-networks.md`, #155), and dstack owns it. The owner's rule (20.11.2026): one uniform working setup, not a different setting and driver version per project.
 
-- **The file:** [`docs/nic-standard.json`](nic-standard.json), machine-readable, `schema` `dstack-nic-standard/1`, `version` 2 (2: text only, #466). It is the only source: this page explains it, the file decides.
+- **The file:** [`docs/nic-standard.json`](nic-standard.json), machine-readable, `schema` `dstack-nic-standard/1`, `version` 3 (2: text only, #466; 3: the EEE rule for every wired NIC, below). It is the only source: this page explains it, the file decides.
 - **The checkers:** `tools/windows/nic-standard-check.ps1` and `tools/linux/nic-standard-check.py`. Both are read-only: they never set a value, install a driver or restart an adapter.
-- **Scope:** every Realtek NIC that is up on a PC with a Dante leg (`docs/two-networks.md`, scope: a PC without one is not checked). Other vendors' NICs (the editing PCs' Aquantia and Intel legs) are outside this file.
+- **Scope:** every Realtek NIC that is up on a PC with a Dante leg (`docs/two-networks.md`, scope: a PC without one is not checked). Other vendors' NICs (the editing PCs' Aquantia and Intel legs) have no entry, but **the EEE rule holds for every wired NIC of a rig PC, whatever the vendor, up or down** ([below](#eee-off-on-every-wired-nic-version-3)).
 
 ## How a project uses it
 
@@ -13,12 +13,54 @@ Read the file, or call the checker; never copy its values into your own constant
 - **Pin a tag.** Read `https://raw.githubusercontent.com/zbynekdrlik/dstack/<tag>/docs/nic-standard.json`, the tag your project already pins for the stack. The default URL (`main`) is for a person's manual check only.
 - **Windows:** `powershell -ExecutionPolicy Bypass -File nic-standard-check.ps1 -Standard <path|url> [-LatencyProfile low_latency] [-IncludeDown] [-Name <adapter>,...]`. Windows PowerShell 5.1, no module beyond the inbox NetAdapter/PnpDevice cmdlets. The output is plain pipeline text, so a setup script can capture it (`$lines = & .\nic-standard-check.ps1 -Standard $url`).
 - **Linux:** `python3 -I nic-standard-check.py --standard <path|url> [--profile low_latency] [--all] [IFACE ...]`. Python 3 and `ethtool`, no root.
-- **Only some NICs:** `-Name` (Windows) or `IFACE` arguments (Linux) check just those, up or not; a named one that is missing or no Realtek fails. A PC whose second Realtek NIC is not a Dante leg (dsg's SoundGrid NIC) names its Dante NIC.
+- **Only some NICs:** `-Name` (Windows) or `IFACE` arguments (Linux) check just those against their entries, up or not; a named one that is missing or no Realtek fails. The EEE rule still covers every wired NIC of the PC. A PC whose second Realtek NIC is not a Dante leg (dsg's SoundGrid NIC) names its Dante NIC.
 - **Exit status:** 0 when every judged value passes, 1 on any FAIL, 2 when the file cannot be read, is not of this schema, or is malformed.
 - **The lines:** `PASS` and `FAIL` judge a value and show the expected and the actual value. `INFO` prints a value the standard does not decide yet. `SKIP` marks a value of another profile, or an adapter that is down. Lines other than PASS carry the evidence or the open plan.
 - **A Realtek NIC without an entry FAILs** ("no standard for this Realtek adapter"). A new chip, or a known chip on a new OS, is measured and added here before it carries production traffic. The RTL8153 and a Linux RTL8125 have no entry today: no production PC uses one.
 - **Profiles:** `normal` (default, every dlink app) and `low_latency` (the iemmixer box, dasio). A value marked `"profile": "low_latency"` (TSO/GSO off on Linux) is checked only with that profile.
 - **Setting the values** stays the project's own setup (songplayer's `setup-prod-pc.ps1`, dasio's baseline, camera-box's NetworkManager profiles), written from this file, then proved with the checker.
+
+## EEE off on every wired NIC (version 3)
+
+The owner, 20.11.2026: EEE enabled on any of our rig devices is a serious failure. So the file has one rule that is not per chip: `eee`. Both checkers run it first, on every wired physical NIC of the PC, before the Realtek entries:
+
+- **Every wired NIC:** any vendor (Realtek, Intel, Aquantia, any), with or without an entry, up, down or disabled, and whatever `-Name` / `IFACE` limits the Realtek check to. A down onboard NIC counts: its EEE is on the moment a cable goes in. Windows: a hardware adapter that is not virtual with medium 802.3 (`NdisPhysicalMedium` 14; Wi-Fi, Bluetooth and the Realtek Virtual Adapter are not checked; one that is Not Present is a SKIP line). Linux: an interface with a device, not wireless, of type 1.
+- **Windows:** the keywords `*EEE`, `EEE`, `AdvancedEEE`, `EnableGreenEthernet`, `*EnableGreenEthernet`, `GreenEthernet` and Intel's `EEELinkAdvertisement`, in any case and hidden ones included (`-AllProperties` returns the registry-only keywords the 11.19 RTL8156B driver hides), must be `0`. Any other keyword whose display name says Energy Efficient, Energy-Efficient, EEE or Green Ethernet (an Aquantia or other driver's own keyword: no Windows Aquantia NIC is in the fleet to read its name) is judged by its display value: Disabled/Off passes, Enabled/On fails, anything else is INFO (Realtek's `EEEMaxSupportSpeed`, "1.0 Gbps Full Duplex", is a speed, not a switch). A NIC with no EEE keyword at all is one INFO line: its driver's default holds and Windows shows no state for it.
+- **Linux:** `ethtool --show-eee`: only `disabled` and `not supported` pass; `enabled - active` and `enabled - inactive` (on, waiting for the link partner) FAIL. A driver without EEE support (ethtool's "Operation not supported", ixgbe) is `not supported`; no answer at all FAILs.
+- **Display strings are English.** The display-name and display-value patterns match the drivers' English strings; a driver showing localised strings on a non-English Windows gives an unlisted keyword no row or an INFO row. Every rig PC read on 20.11.2026 shows English strings.
+- **The Realtek entries keep their own EEE values** (`*EEE`, `EEE`, `AdvancedEEE`, `EnableGreenEthernet`, `eee:status`): there they say more than the rule can, the keyword must be written for that chip (`absent` fails, the 11.19 driver's hidden keywords, conflict 10). So a Realtek NIC with EEE on shows it twice: once under the rule, once under its entry.
+- **The line:** a FAIL names the NIC, its driver and the keyword, `FAIL  enp1s0  eee:status  expected=disabled|not supported  actual=enabled - inactive  (driver r8169; ...)` or `FAIL  Ethernet 3  *EEE  expected=0  actual=1 (Enabled)  (driver rtu56cx22x64.sys 1156.22.113.2026; ...)`, then `N wired NIC(s) checked for EEE, F FAIL`. Any FAIL exits 1.
+- **Turning it off** is the owning project's setup, persistently (a Windows advanced property; on Linux `ethtool --set-eee <if> eee off` from a boot-time unit or NetworkManager), proved with the checker.
+
+### The fleet's EEE (20.11.2026, read only)
+
+Every reachable rig PC, every wired NIC, read through the fleet MCP (Windows `Get-NetAdapter -Physical` and `Get-NetAdapterAdvancedProperty -AllProperties`, with the adapter's class key in the registry; Linux `ethtool --show-eee` per physical interface). One light read on dsg and FOH. Nothing was changed. iem-snv is sold.
+
+| PC | NIC | Driver | EEE | Owner project |
+|---|---|---|---|---|
+| resolume-snv | Ethernet 4, RTL8156B USB | `rtucx22x64.sys` 11.19.602.2025 | off (`*EEE`, `EEE`, `AdvancedEEE`, `EnableGreenEthernet` 0, hidden) | songplayer |
+| resolume-snv | Ethernet, Intel I225-V (Not Present) | `e2fn.sys` 2.1.5.7 | off in the registry (`*EEE`, `EEE`, `AdvancedEEE`, green 0); the device is not present | songplayer |
+| resolume-pp | Ethernet 4, RTL8156B USB | `rtucx22x64.sys` 11.19.602.2025 | off (hidden keywords 0) | songplayer |
+| resolume-pp | soundgrid-pcie, RTL8168 PCIe (disabled) | `rt640x64.sys` 10.79.50.1003 | off (Energy-Efficient Ethernet Disabled, Advanced EEE Disabled, Green Ethernet Disabled) | songplayer |
+| **mbc** | Ethernet 3, RTL8156B USB | `rtu56cx22x64.sys` 1156.22.113.2026 | **ON**: `*EEE` 1 (Energy-Efficient Ethernet Enabled), `EnableGreenEthernet` 1; `AdvancedEEE` 0 | dasio |
+| dsg | Ethernet (Dante), RTL8168H PCIe | `rt640x64.sys` 10.79.50.1003 | off (`*EEE`, `AdvancedEEE`, green 0) | dasio |
+| dsg | soundgrid, RTL8168H PCIe | `rt640x64.sys` 10.79.50.1003 | off | dasio |
+| FOH | Ethernet, RTL8125BG PCIe | `rt640x64.sys` 10.79.20.1003 | off (`*EEE`, `AdvancedEEE`, green 0) | dasio (fohmixer: its Dante side) |
+| stream-snv | rig0, RTL8156B USB | `r8152` | disabled | camera-box |
+| **stream-snv** | enp56s0, RTL8168 PCIe (down) | `r8169` | **ON**: enabled - inactive | camera-box |
+| the PP stream PC | rig0, RTL8156B USB | `r8152` | disabled | camera-box |
+| the iemmixer box | enp2s0, RTL8168H PCIe (Dante) | `r8169` | disabled | iemmixer |
+| **the iemmixer box** | enp1s0, RTL8168H PCIe (down) | `r8169` | **ON**: enabled - inactive | iemmixer |
+| companion-snv | enp2s0, RTL8168H PCIe | `r8169` | not supported | presenter |
+| the PP presenter PC | enp2s0, RTL8168H PCIe | `r8169` | disabled (on until presenter#988 turned it off, 20.11.2026) | presenter |
+| the PP presenter PC | enp1s0, RTL8168 PCIe (down) | `r8169` | disabled | presenter |
+| the SNV editing PC | enp7s0, Aquantia (`1d6a:04c0`, Dante) | `atlantic` | disabled | camera-box |
+| **the SNV editing PC** | enp2s0, RTL8168 PCIe (down) | `r8169` | **ON**: enabled - inactive | camera-box |
+| the PP editing PC | enp5s0f0, enp5s0f1, Intel 82599 (`8086:10fb`) | `ixgbe` | not supported | camera-box |
+| **the PP editing PC** | enp6s0, RTL8125 PCIe (down) | `r8169` | **ON**: enabled - inactive | camera-box |
+| **the PP editing PC** | enp7s0, RTL8168 PCIe (down) | `r8169` | **ON**: enabled - inactive | camera-box |
+
+EEE on, by owner project, to turn off persistently and prove with the checker: **dasio** (mbc's RTL8156B, one of its FAILs since version 1), **camera-box** (stream-snv's onboard RTL8168, the SNV editing PC's RTL8168, the PP editing PC's RTL8125 and RTL8168: all four down onboard NICs), **iemmixer** (the iemmixer box's second RTL8168H, down). songplayer and presenter pass. The checkers at version 3, run read-only: resolume-snv exit 0 (1 wired NIC, 0 FAIL; the Intel one is Not Present), mbc exit 1 (`*EEE` and `EnableGreenEthernet` FAIL, `EEEMaxSupportSpeed` INFO), the iemmixer box exit 1 (enp1s0), the PP editing PC exit 1 (enp6s0, enp7s0; the ixgbe pair not supported, a PASS).
 
 ## The file's shape
 
@@ -42,6 +84,7 @@ Read the file, or call the checker; never copy its values into your own constant
 - `match`: Windows by the device's first hardware id (prefix, any case); Linux by the sysfs `usb` or `pci` vendor:product id.
 - `driver`: Windows `files` (the allowed `DriverFileName`), `min_version`, `bad` (a file, or a file and a version, that fails with its evidence); Linux `modules` and an optional `firmware`.
 - A value: `key` (the Windows registry keyword; on Linux `feature:<ethtool -k name>`, `ring:rx|tx`, `coalesce:rx-usecs|tx-usecs`, `pause:rx|tx`, `eee:status`, `link:autoneg|speed|duplex`, `usb:power/control`, `pci:power/control`, `usbcore:no_lpm` (the `k` flag of usbcore's `quirks` for this USB id), `firmware`), `expected` (a string, or a list any of which passes), `compare` (`equals`, `bits`: every bit set, `contains`), `absent` (`fail`, or `pass` where a driver without the keyword is fine), `status` (`settled`, `open` with its `plan`, `report`: no value yet, never fails), `profile`, and `evidence`.
+- `eee` (one object, not per chip): `windows` (`keywords` that must be in `off`, and `display_name` / `display_off` / `display_on`, regular expressions matched without regard to case), `linux` (`off`: the passing `ethtool --show-eee` states), and its `evidence`. Both checkers refuse a file without it.
 - **`evidence`** names a ticket, a measurement or a vendor document. Where nothing measured a value, the standard keeps the value the fleet's working PCs already share and says `none yet: fleet value`. No value is invented.
 - **Versioning:** `version` goes up by one with every change of a value, a driver rule or an entry, in the same commit as its evidence. `schema` changes only when the shape changes, and both checkers refuse a schema they do not know. Both checkers validate the file first, with the same case-sensitive rules (Python `validate`, PowerShell `Test-NicStandard`), and exit 2 on a malformed one: an unknown key, a value with no evidence, an open value or driver rule with no plan, a `report` value with an expected value, an unknown status, compare, absent or profile, a repeated key, a non-decimal `bits` value, a Windows driver without `files` or a Linux one without `modules`. CI runs both test suites (`linux-tools`, `windows-tools`).
 
@@ -97,7 +140,7 @@ Where PCs or projects disagree today. Each is either decided in the file with it
 4. **Transmit Buffers in opposite directions on the PCIe Realteks.** dasio's baseline writes 4096 receive and transmit buffers to every rt640x64 Dante NIC; on dsg's RTL8168 that is above the INF's ranges (32-512, 32-128) and what the driver applies is not measured. `docs/windows-box.md` named "Transmit Buffers at the driver's minimum" as FOH's next step, never measured. The standard keeps the fleet's 4096 in the low-latency profile, marked open, with an A/B on dsg as the plan. These and RSS are dasio's tuning, so a normal-profile check skips them; the power, flow-control, offload and interrupt-moderation values hold for every profile (songplayer#285 sets them on every wired NIC).
 5. **Priority & VLAN and CLKREQ** differ between dsg and FOH (0 / 3, 1 / 0). No measurement either way: `report`.
 6. **Two r8152 drivers on Linux.** stream-snv runs Realtek's v2.21.4, the PP stream PC the kernel's; both lose `rx_missed` bursts next to near-line-rate video. Open in #408. Their `rx-usecs` read 15 and 15000, the same 15 µs in two units: the standard accepts both.
-7. **EEE on the PP presenter PC** is enabled (inactive until the partner offers it), off or unsupported everywhere else: FAIL.
+7. **EEE on the PP presenter PC** was enabled (inactive until the partner offers it), off or unsupported everywhere else: FAIL. presenter#988 turned it off (read disabled 20.11.2026). The version 3 rule then found EEE on in five more NICs besides mbc's, all of them down onboard ones no Realtek check looked at ([EEE section](#the-fleets-eee-20112026-read-only)).
 8. **TSO/GSO on Linux** are on everywhere but the iemmixer box. `docs/linux-box.md` measured them off on the gen3 RTL8168 for the 250 µs-1 ms profile only; nothing measured them for the normal profile, so the standard checks them only with `--profile low_latency`. The mechanism (one TX ring) applies to the r8152 too.
 9. **Two writers with different scopes.** songplayer writes its power-saving values to every wired NIC (songplayer#285) and its RTL8156 queue to a Dante-leg RTL8156; dasio writes its rt640x64 values to the Dante NIC and pins its own driver (`config/baseline-pc-profile.toml`, `[[nic_driver]]`). Both now read this file instead (below).
 10. **Hidden keywords.** On the 11.19 driver the power-saving keywords are in the registry but not offered by the driver (songplayer writes them). A value the driver does not declare proves the setting, not the PHY's state (songplayer#337's note); the standard judges the setting, as songplayer's gate does.
