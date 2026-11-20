@@ -499,3 +499,6 @@ mod skip;
 
 /// dstack #382: a drifting converter's sinc length.
 mod taps;
+
+/// dstack #462: the fixed-ratio table.
+mod polyphase;

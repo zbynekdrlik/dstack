@@ -11,7 +11,10 @@
 //! band that folds back held below −120 dBFS ([`PARAMS`]). Equal rates are
 //! a plain copy, with no filter and no delay. A fixed ratio on one clock
 //! holds the ratio exactly; the ASRC between two clocks (phase 2) steers the
-//! same stage.
+//! same stage. A fixed ratio runs that filter from a table of its kernels,
+//! built once ([`poly`], dstack #462: the same output, delay and frame
+//! counts, about half the cost at 64 channels); a ratio that is steered
+//! ([`Converter::drifting`]) runs rubato's stage itself.
 //!
 //! Measured by the tests (1 kHz at −1 dBFS, computed in `f64`, so far
 //! below any 24-bit floor): THD+N 230.7 dB at 48→96 kHz, 252.0 dB at
@@ -31,6 +34,7 @@ use rubato::{
 
 pub mod asrc;
 pub mod halfband;
+pub mod poly;
 
 use halfband::{HalfBand, Step};
 
@@ -118,6 +122,9 @@ enum Engine {
     Sinc(Box<Async<f64>>, Box<Indexing>),
     /// The half-band 2:1 or 1:2 step ([`Converter::low_delay`]).
     Half(Box<HalfBand>),
+    /// The sinc's filter at a ratio that never moves, its kernels built
+    /// once ([`poly`]).
+    Poly(Box<poly::Poly>),
 }
 
 /// The half-band step for `from` to `to` Hz with `block` frames on the
@@ -181,7 +188,10 @@ impl std::fmt::Debug for Converter {
 
 impl Converter {
     /// A converter from `from` to `to` Hz for `channels` channels, `block`
-    /// frames on its `fixed` side.
+    /// frames on its `fixed` side: the sinc's filter from a table of its
+    /// kernels ([`Converter::is_polyphase`]) when the ratio has at most
+    /// [`poly::MAX_PHASES`] phases, else rubato's stage; a copy for equal
+    /// rates. Its ratio cannot be adjusted ([`Converter::set_ppm`]).
     pub fn new(
         from: u32,
         to: u32,
@@ -293,6 +303,11 @@ impl Converter {
         }
         let engine = if from == to && !drifting {
             Engine::Copy
+        } else if let Some(p) = (!drifting)
+            .then(|| poly::Poly::new(from, to, channels, block, fixed, taps, OVERSAMPLING))
+            .flatten()
+        {
+            Engine::Poly(Box::new(p))
         } else {
             let side = match fixed {
                 Fixed::Input => FixedAsync::Input,
@@ -333,6 +348,13 @@ impl Converter {
         matches!(self.engine, Engine::Copy)
     }
 
+    /// Whether this converter runs the sinc's filter from a table of
+    /// kernels built once ([`poly`]: a ratio that never moves, with at
+    /// most [`poly::MAX_PHASES`] phases).
+    pub fn is_polyphase(&self) -> bool {
+        matches!(self.engine, Engine::Poly(_))
+    }
+
     /// The output rate over the input rate.
     pub fn ratio(&self) -> f64 {
         f64::from(self.to) / f64::from(self.from)
@@ -344,6 +366,7 @@ impl Converter {
             Engine::Copy => self.block,
             Engine::Sinc(s, _) => s.input_frames_next(),
             Engine::Half(h) => half_input(self.fixed, h.step(), self.block),
+            Engine::Poly(p) => p.input_frames_next(),
         }
     }
 
@@ -353,6 +376,7 @@ impl Converter {
             Engine::Copy => self.block,
             Engine::Sinc(s, _) => s.input_frames_max(),
             Engine::Half(h) => half_input(self.fixed, h.step(), self.block),
+            Engine::Poly(p) => p.input_frames_max(),
         }
     }
 
@@ -362,6 +386,7 @@ impl Converter {
             Engine::Copy => self.block,
             Engine::Sinc(s, _) => s.output_frames_max(),
             Engine::Half(h) => h.output_frames(half_input(self.fixed, h.step(), self.block)),
+            Engine::Poly(p) => p.output_frames_max(),
         }
     }
 
@@ -372,6 +397,7 @@ impl Converter {
             Engine::Copy => 0,
             Engine::Sinc(s, _) => s.output_delay(),
             Engine::Half(h) => h.delay_frames(),
+            Engine::Poly(p) => p.delay_frames(self.ratio()),
         }
     }
 
@@ -429,6 +455,7 @@ impl Converter {
                 h.process(input, frames_in, output, out_frames);
                 Ok((frames_in, made))
             }
+            Engine::Poly(p) => p.process(input, frames_in, output, out_frames),
         }
     }
 
@@ -438,7 +465,7 @@ impl Converter {
     pub fn set_ppm(&mut self, ppm: f64) -> Result<(), ConvertError> {
         let Engine::Sinc(stage, _) = &mut self.engine else {
             return Err(ConvertError::Invalid(
-                "a copy or a half-band step has no ratio to adjust".into(),
+                "a copy, a half-band step or a fixed ratio's table has no ratio to adjust".into(),
             ));
         };
         let ppm = ppm.clamp(-ROOM_PPM, ROOM_PPM);
@@ -510,6 +537,20 @@ impl Converter {
                 }
                 Ok(counts(frames, frames / p_fixed * p_other))
             }
+            Engine::Poly(p) => {
+                // The core's contract: scratch for a call at its largest.
+                if input.len() < channels * p.input_frames_max()
+                    || output.len() < channels * p.output_frames_max()
+                {
+                    self.reset();
+                    return Err(ConvertError::Core(format!(
+                        "a skip's scratch of {} and {} samples for {channels} channels",
+                        input.len(),
+                        output.len()
+                    )));
+                }
+                Ok(p.skip(frames))
+            }
             Engine::Sinc(stage, none) => {
                 let mut run = frames % p_fixed;
                 while run < SKIP_WARM && run + p_fixed <= frames {
@@ -551,9 +592,7 @@ impl Converter {
     /// frames on both sides at once (`from / gcd`, `to / gcd`; 320 and 147
     /// for 96 to 44.1 kHz).
     pub fn period(&self) -> (u64, u64) {
-        let (from, to) = (u64::from(self.from), u64::from(self.to));
-        let g = gcd(from, to);
-        (from / g, to / g)
+        poly::period(self.from, self.to)
     }
 
     /// Forgets the filter's history (after a gap in the audio).
@@ -564,6 +603,7 @@ impl Converter {
             Engine::Copy => {}
             Engine::Sinc(s, _) => s.reset(),
             Engine::Half(h) => h.reset(),
+            Engine::Poly(p) => p.reset(),
         }
     }
 }
