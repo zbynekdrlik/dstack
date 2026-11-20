@@ -145,6 +145,10 @@ exclude_re = [
   # running device (not per mutant).
   "daemon/media.rs.*rx_channels",
   "dlink/src/lib.rs.*Link::rx_channels",
+  # The RX destination pairs for apps (dstack #464): the same glue over
+  # `Media::rx_destinations` (tested in daemon::media and media::rx);
+  # crates/dlink/tests/link.rs reads it from a running device.
+  "dlink/src/lib.rs.*Link::rx_destinations",
   # The status line for apps: the same glue over `ctl::status` (tested);
   # crates/dlink/tests/link.rs reads it from a running device.
   "dlink/src/lib.rs.*Link::status",

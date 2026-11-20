@@ -266,6 +266,23 @@ fn a_declared_subscription_subscribes_a_fresh_device() {
         ch.packets > first[0].packets && ch.written > first[0].written,
         "{first:?} {later:?}"
     );
+    // dstack #464: the flow's destination, our address and its flow slot's
+    // port, for a packet filter set from the plan.
+    let port = link
+        .media()
+        .manager
+        .lock()
+        .unwrap()
+        .flow(0)
+        .expect("the flow in slot 0")
+        .port;
+    let pairs = link.rx_destinations();
+    assert_eq!(
+        pairs.pairs,
+        [std::net::SocketAddrV4::new(test_ipv4(), port)],
+        "{pairs:?}"
+    );
+    assert!(pairs.generation >= 1, "{pairs:?}");
     assert_eq!(link.ended(), None);
     assert!(matches!(link.stop(), Stopped::Done));
     let got = f64::from_bits(heard.load(Ordering::Relaxed));

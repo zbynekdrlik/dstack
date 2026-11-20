@@ -208,6 +208,7 @@ pub use dstack::daemon::Place;
 pub use dstack::daemon::media::{Media, RxChannel};
 pub use dstack::device::DeviceConfig;
 pub use dstack::host::{HostError, Stopped};
+pub use dstack::media::rx::RxDestinations;
 pub use dstack::stream::Map;
 pub use dstack::subscribe::{SubState, SubStatus};
 pub use dstack_audio_io::{Block, Process};
@@ -867,6 +868,18 @@ impl Link {
     /// receiving).
     pub fn rx_channels(&self) -> Vec<RxChannel> {
         self.device.media().rx_channels()
+    }
+
+    /// The (destination IPv4, UDP port) pairs the device's RX flows arrive
+    /// on, with their generation (dstack #464, [`Media::rx_destinations`]):
+    /// each multicast flow's group and port, the device's address with
+    /// each unicast flow's port, as its flow plan was last published. Poll
+    /// it and set a packet filter's match table again when the generation
+    /// moved (dasio's NDIS filter, `IOCTL_DASIO_RX_MATCH`). The set is
+    /// complete, up to 32 pairs; a table that holds fewer (dasio's 16)
+    /// caps it itself.
+    pub fn rx_destinations(&self) -> RxDestinations {
+        self.device.media().rx_destinations()
     }
 
     /// The device's numbers as one JSON line: the clock, the flows, the
