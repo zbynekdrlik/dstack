@@ -13,17 +13,23 @@ prints one line per value:
 
 PASS and FAIL judge a value; INFO prints a value the standard does not decide
 yet (status `report`, or a driver version under an open question); SKIP is a
-value of another profile. A Realtek NIC without an entry FAILs: a new chip is
-measured and added before it carries production traffic. The exit status is 1
-when anything FAILs, 2 when the standard cannot be read, else 0.
+value of another profile or a NIC that is down. A Realtek NIC without an entry
+FAILs: a new chip is measured and added before it carries production traffic.
+So does an interface named on the command line that is missing or no Realtek.
+The exit status is 1 when anything FAILs, 2 when the standard cannot be read
+or is malformed, else 0.
 
 It only reads: no `ethtool -s/-K/-G/-C/-A/--set-eee`, nothing written.
 
     python3 -I nic-standard-check.py [--standard PATH|URL] [--profile normal|low_latency] [--all] [IFACE ...]
 
 `--profile low_latency` adds the values only the lowest-latency hosts need
-(iemmixer gen3); `--all` also checks NICs that are down; IFACEs limit the run
-to those interfaces.
+(iemmixer gen3, dasio); `--all` also checks NICs that are down; IFACEs limit
+the run to those interfaces.
+
+The judging (validate, holds, judge_value, judge_driver) is the same as the
+PowerShell checker's (tools/windows/nic-standard-check.ps1), and works on
+Windows facts too (registry keywords, matched without regard to case).
 """
 
 import argparse
@@ -38,58 +44,110 @@ SCHEMA = "dstack-nic-standard/1"
 DEFAULT_STANDARD = (
     "https://raw.githubusercontent.com/zbynekdrlik/dstack/main/docs/nic-standard.json"
 )
+SYSFS_NET = "/sys/class/net"
+USBCORE_QUIRKS = "/sys/module/usbcore/parameters/quirks"
 REALTEK_USB = "0bda"
 REALTEK_PCI = "10ec"
 STATUSES = ("settled", "open", "report")
 COMPARES = ("equals", "bits", "contains")
 PROFILES = ("normal", "low_latency")
+MATCH_KEYS = {"windows": ("hardware_id",), "linux": ("usb", "pci")}
 
 
 class StandardError(Exception):
-    """The standard file is missing, unreadable or not of this schema."""
+    """The standard file is missing, unreadable or malformed."""
 
 
 # ------------------------------------------------------------ the standard
 
 
+def as_list(expected):
+    return expected if isinstance(expected, list) else [expected]
+
+
+def _strings(value):
+    """A non-empty list of non-empty strings."""
+    return isinstance(value, list) and bool(value) and all(isinstance(x, str) and x for x in value)
+
+
+def _validate_driver(eid, driver):
+    if not isinstance(driver, dict) or not driver.get("evidence"):
+        raise StandardError(f"{eid}: the driver has no evidence")
+    if not _strings(driver.get("files") or driver.get("modules")):
+        raise StandardError(f"{eid}: the driver names no files or modules")
+    status = driver.get("status", "settled")
+    if status not in ("settled", "open"):
+        raise StandardError(f"{eid}: unknown driver status {status!r}")
+    if status == "open" and not driver.get("plan"):
+        raise StandardError(f"{eid}: an open driver rule needs its plan")
+    for bad in driver.get("bad", []):
+        if not isinstance(bad, dict) or not bad.get("evidence") or not (bad.get("file") or bad.get("version")):
+            raise StandardError(f"{eid}: a bad driver needs a file or a version, and evidence")
+
+
+def _validate_value(eid, v, keys):
+    key = v.get("key") if isinstance(v, dict) else None
+    where = f"{eid}/{key}"
+    if not isinstance(key, str) or not key or not v.get("evidence"):
+        raise StandardError(f"{where}: a value needs a key and evidence")
+    if key.lower() in keys:
+        raise StandardError(f"{where}: the key is repeated")
+    keys.add(key.lower())
+    status = v.get("status", "settled")
+    if status not in STATUSES:
+        raise StandardError(f"{where}: unknown status {status!r}")
+    if v.get("compare", "equals") not in COMPARES:
+        raise StandardError(f"{where}: unknown compare")
+    if v.get("absent", "fail") not in ("fail", "pass"):
+        raise StandardError(f"{where}: absent must be fail or pass")
+    if v.get("profile", "normal") not in PROFILES:
+        raise StandardError(f"{where}: unknown profile")
+    expected = v.get("expected")
+    if status == "report":
+        if expected is not None:
+            raise StandardError(f"{where}: a report value has no expected value")
+        return
+    if not (isinstance(expected, str) and expected) and not _strings(expected):
+        raise StandardError(f"{where}: expected must be a string or a list of strings")
+    if v.get("compare") == "bits" and not all(x.isdigit() for x in as_list(expected)):
+        raise StandardError(f"{where}: a bits value is a decimal number")
+    if status == "open" and not v.get("plan"):
+        raise StandardError(f"{where}: an open value needs its plan")
+
+
 def validate(std):
     """Raises StandardError unless `std` is a well-formed standard: the
-    checkers trust its shape, so a broken file stops the run instead of
-    passing a PC by accident."""
+    checkers trust its shape, so a broken file stops the run (exit 2)
+    instead of passing a PC by accident. Every rule is case-sensitive, as
+    the PowerShell checker's `Test-NicStandard`."""
     if not isinstance(std, dict) or std.get("schema") != SCHEMA:
         raise StandardError(f"not a {SCHEMA} file")
-    if not isinstance(std.get("version"), int):
+    if not isinstance(std.get("version"), int) or isinstance(std.get("version"), bool):
         raise StandardError("no integer version")
+    if not isinstance(std.get("adapters"), list):
+        raise StandardError("no adapters list")
     seen = set()
-    for entry in std.get("adapters", []):
-        eid = entry.get("id")
-        if not eid or eid in seen:
+    for entry in std["adapters"]:
+        eid = entry.get("id") if isinstance(entry, dict) else None
+        if not isinstance(eid, str) or not eid or eid in seen:
             raise StandardError(f"adapter id missing or repeated: {eid!r}")
         seen.add(eid)
-        if entry.get("os") not in ("windows", "linux"):
+        os_name = entry.get("os")
+        if os_name not in MATCH_KEYS:
             raise StandardError(f"{eid}: os must be windows or linux")
-        if not entry.get("match"):
-            raise StandardError(f"{eid}: no match")
-        if not (entry.get("driver") or {}).get("evidence"):
-            raise StandardError(f"{eid}: the driver has no evidence")
-        for v in entry.get("values", []):
-            key = v.get("key")
-            where = f"{eid}/{key}"
-            if not key or not v.get("evidence"):
-                raise StandardError(f"{where}: a value needs a key and evidence")
-            status = v.get("status", "settled")
-            if status not in STATUSES:
-                raise StandardError(f"{where}: unknown status {status!r}")
-            if v.get("compare", "equals") not in COMPARES:
-                raise StandardError(f"{where}: unknown compare")
-            if v.get("absent", "fail") not in ("fail", "pass"):
-                raise StandardError(f"{where}: absent must be fail or pass")
-            if v.get("profile", "normal") not in PROFILES:
-                raise StandardError(f"{where}: unknown profile")
-            if (v.get("expected") is None) != (status == "report"):
-                raise StandardError(f"{where}: expected is null exactly when status is report")
-            if status == "open" and not v.get("plan"):
-                raise StandardError(f"{where}: an open value needs its plan")
+        match = entry.get("match")
+        if not isinstance(match, dict) or not match or any(
+            k not in MATCH_KEYS[os_name] or not _strings(ids) for k, ids in match.items()
+        ):
+            raise StandardError(f"{eid}: match needs {' or '.join(MATCH_KEYS[os_name])} id lists")
+        _validate_driver(eid, entry.get("driver"))
+        if os_name == "windows" and "firmware" in entry["driver"]:
+            raise StandardError(f"{eid}: Windows has no firmware read; a firmware rule is Linux only")
+        if not isinstance(entry.get("values"), list):
+            raise StandardError(f"{eid}: no values list")
+        keys = set()
+        for v in entry["values"]:
+            _validate_value(eid, v, keys)
     return std
 
 
@@ -206,42 +264,61 @@ def parse_link(text):
     return out
 
 
+def parse_no_lpm(quirks, ident):
+    """Whether usbcore's `quirks` parameter (`vid:pid:flags,...`) gives the
+    USB device `ident` the NO_LPM flag `k`: `usbcore:no_lpm` on/off."""
+    for item in quirks.split(","):
+        parts = item.strip().lower().split(":")
+        if len(parts) == 3 and f"{parts[0]}:{parts[1]}" == ident and "k" in parts[2]:
+            return {"usbcore:no_lpm": "on"}
+    return {"usbcore:no_lpm": "off"}
+
+
 # ------------------------------------------------------------- judging
 
 
-def as_list(expected):
-    return expected if isinstance(expected, list) else [expected]
-
-
 def holds(spec, actual):
-    """Whether `actual` (a string) holds the value `spec` asks for."""
+    """Whether `actual` (a string) holds the value `spec` asks for: equals
+    and contains ignore case, bits takes decimal numbers."""
     compare = spec.get("compare", "equals")
+    value = actual.strip()
     for want in as_list(spec["expected"]):
-        if compare == "equals" and actual.strip() == str(want):
+        if compare == "equals" and value.casefold() == want.casefold():
             return True
-        if compare == "contains" and str(want) in actual:
+        if compare == "contains" and want.casefold() in value.casefold():
             return True
         if compare == "bits":
-            try:
-                if int(actual.strip(), 0) & int(want, 0) == int(want, 0):
-                    return True
-            except ValueError:
+            if not value.isdigit():
                 return False
+            if int(value) & int(want) == int(want):
+                return True
     return False
+
+
+def _lookup(facts, key):
+    """A fact by key, its case ignored (registry keywords differ in case
+    between drivers: `*PriorityVlanTag`, `*PriorityVLANTag`)."""
+    if key in facts:
+        return facts[key]
+    folded = key.casefold()
+    for k, v in facts.items():
+        if k.casefold() == folded:
+            return v
+    return None
 
 
 def judge_value(spec, facts, profile):
     """One row (verdict, key, expected, actual, note) for a value."""
     key = spec["key"]
-    expected = "|".join(str(e) for e in as_list(spec["expected"]))
-    actual = facts.get(key)
+    status = spec.get("status", "settled")
+    expected = "(no standard yet)" if status == "report" else "|".join(as_list(spec["expected"]))
+    actual = _lookup(facts, key)
     shown = "(absent)" if actual is None else actual
     note = spec["evidence"]
     if spec.get("profile", "normal") != "normal" and spec["profile"] != profile:
         return ("SKIP", key, expected, shown, f"{spec['profile']} profile only")
-    status = spec.get("status", "settled")
     if status == "report":
-        return ("INFO", key, "(no standard yet)", shown, note)
+        return ("INFO", key, expected, shown, note)
     if status == "open":
         note = "open: " + spec["plan"]
     if actual is None:
@@ -250,29 +327,36 @@ def judge_value(spec, facts, profile):
     return ("PASS" if holds(spec, actual) else "FAIL", key, expected, actual, note)
 
 
-def version_tuple(version):
-    return tuple(int(n) for n in re.findall(r"\d+", version))
+def compare_versions(a, b):
+    """-1, 0 or 1: dotted versions compared number by number, the shorter
+    padded with zeros (10.79.20 equals 10.79.20.0)."""
+    x = [int(n) for n in re.findall(r"\d+", a)]
+    y = [int(n) for n in re.findall(r"\d+", b)]
+    width = max(len(x), len(y))
+    x += [0] * (width - len(x))
+    y += [0] * (width - len(y))
+    return (x > y) - (x < y)
 
 
 def judge_driver(spec, facts):
-    """The driver's rows: its file or module, its version, its firmware."""
+    """The driver's rows: a bad driver, an allowed file or module, the
+    minimum version, the firmware."""
     rows = []
     name = facts.get("driver", "")
     version = facts.get("driver:version", "")
     allowed = spec.get("files") or spec.get("modules") or []
     note = spec["evidence"]
-    if spec.get("status") == "open" and spec.get("plan"):
+    if spec.get("status") == "open":
         note = "open: " + spec["plan"]
     for bad in spec.get("bad", []):
-        if bad.get("file", name) == name and bad.get("version", version) == version:
-            rows.append(("FAIL", "driver", "not " + " ".join(filter(None, (bad.get("file"), bad.get("version")))), f"{name} {version}", bad["evidence"]))
-            return rows
-    if name not in allowed:
-        rows.append(("FAIL", "driver", "|".join(allowed), name or "(none)", note))
-        return rows
+        if bad.get("file", name).casefold() == name.casefold() and bad.get("version", version) == version:
+            what = " ".join(filter(None, (bad.get("file"), bad.get("version"))))
+            return [("FAIL", "driver", "not " + what, f"{name} {version}".strip(), bad["evidence"])]
+    if name.casefold() not in [a.casefold() for a in allowed]:
+        return [("FAIL", "driver", "|".join(allowed), name or "(none)", note)]
     rows.append(("PASS", "driver", "|".join(allowed), name, note))
     if spec.get("min_version"):
-        ok = bool(version_tuple(version)) and version_tuple(version) >= version_tuple(spec["min_version"])
+        ok = bool(version) and compare_versions(version, spec["min_version"]) >= 0
         rows.append(("PASS" if ok else "FAIL", "driver:version", ">=" + spec["min_version"], version or "(none)", note))
     else:
         rows.append(("INFO", "driver:version", "(no standard yet)", version or "(none)", note))
@@ -308,7 +392,7 @@ def _read(path):
         return None
 
 
-def nic_ids(iface, sysfs="/sys/class/net"):
+def nic_ids(iface, sysfs=SYSFS_NET):
     """(bus, vendor:product) of a NIC, or None for a virtual interface."""
     dev = os.path.join(sysfs, iface, "device")
     if not os.path.exists(dev):
@@ -338,7 +422,16 @@ def run(args):
     return r.stdout
 
 
-def read_facts(iface, bus, sysfs="/sys/class/net"):
+def power_node(iface, bus, sysfs=SYSFS_NET):
+    """The NIC's own runtime-PM node: a USB NIC's is its USB device's (the
+    interface's parent), a PCI NIC's its own (`device/..` would be the
+    bridge). Never normalized: `device` is a symlink."""
+    parts = ["device", ".."] if bus == "usb" else ["device"]
+    return os.path.join(sysfs, iface, *parts, "power", "control")
+
+
+def read_facts(iface, ids, sysfs=SYSFS_NET, quirks_path=USBCORE_QUIRKS):
+    bus, ident = ids
     facts = {}
     facts.update(parse_driver_info(run(["ethtool", "-i", iface])))
     facts.update(parse_features(run(["ethtool", "-k", iface])))
@@ -347,19 +440,17 @@ def read_facts(iface, bus, sysfs="/sys/class/net"):
     facts.update(parse_pause(run(["ethtool", "-a", iface])))
     facts.update(parse_eee(run(["ethtool", "--show-eee", iface])))
     facts.update(parse_link(run(["ethtool", iface])))
-    # The USB device's own power node is the interface's parent; the path
-    # goes through the `device` symlink, so it is never normalized.
-    parts = ["device", ".."] if bus == "usb" else ["device"]
-    value = _read(os.path.join(sysfs, iface, *parts, "power", "control"))
+    value = _read(power_node(iface, bus, sysfs))
     if value is not None:
         facts[f"{bus}:power/control"] = value
-    quirks = _read("/sys/module/usbcore/parameters/quirks")
-    if quirks is not None:
-        facts["usbcore:quirks"] = quirks
+    if bus == "usb":
+        quirks = _read(quirks_path)
+        if quirks is not None:
+            facts.update(parse_no_lpm(quirks, ident))
     return facts
 
 
-def main(argv=None):
+def main(argv=None, sysfs=SYSFS_NET, quirks_path=USBCORE_QUIRKS):
     ap = argparse.ArgumentParser(description="Check this PC's Realtek NICs against dstack's NIC standard (read-only).")
     ap.add_argument("--standard", default=DEFAULT_STANDARD, help="the standard's path or URL")
     ap.add_argument("--profile", choices=PROFILES, default="normal")
@@ -372,14 +463,18 @@ def main(argv=None):
         print(f"FAIL  {e}")
         return 2
     print(f"nic-standard v{std['version']} ({a.standard}), profile {a.profile}")
-    ifaces = a.ifaces or sorted(os.listdir("/sys/class/net"))
+    named = bool(a.ifaces)
+    ifaces = a.ifaces or sorted(os.listdir(sysfs))
     failed = checked = 0
     for iface in ifaces:
-        ids = nic_ids(iface)
+        ids = nic_ids(iface, sysfs)
         if ids is None or ids[1].split(":")[0] not in (REALTEK_USB, REALTEK_PCI):
+            if named:
+                print(f"FAIL  {iface}: no such Realtek NIC")
+                failed += 1
             continue
-        state = _read(f"/sys/class/net/{iface}/operstate")
-        if state != "up" and not a.all and not a.ifaces:
+        state = _read(os.path.join(sysfs, iface, "operstate"))
+        if state != "up" and not a.all and not named:
             print(f"SKIP  {iface}  {ids[0]} {ids[1]} is {state}")
             continue
         checked += 1
@@ -389,7 +484,7 @@ def main(argv=None):
             failed += 1
             continue
         print(f"--    {iface}  {entry['chip']} ({entry['id']})")
-        for row in check(entry, read_facts(iface, ids[0]), a.profile):
+        for row in check(entry, read_facts(iface, ids, sysfs, quirks_path), a.profile):
             print(format_row(iface, row))
             failed += row[0] == "FAIL"
     print(f"{checked} Realtek NIC(s) checked, {failed} FAIL")

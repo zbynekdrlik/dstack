@@ -7,9 +7,10 @@ The ethtool texts below are the real outputs read on the fleet on 20.11.2026
 (stream-snv's USB RTL8156B on r8152 v2.21.4, the iemmixer box's RTL8168H on
 r8169), trimmed to the lines the checker reads."""
 
+import contextlib
 import copy
 import importlib.util
-import json
+import io
 import os
 import tempfile
 import unittest
@@ -78,6 +79,10 @@ IEM_EEE = """EEE settings for enp2s0:
 COMPANION_EEE = """EEE settings for enp2s0:
 \tEEE status: not supported
 """
+STREAM_OUTPUTS = {
+    "-i": STREAM_I, "-k": STREAM_K, "-c": STREAM_C, "-g": STREAM_G,
+    "-a": STREAM_A, "--show-eee": STREAM_EEE, "": STREAM_LINK,
+}
 
 
 def stream_facts():
@@ -90,7 +95,7 @@ def stream_facts():
     facts.update(nsc.parse_eee(STREAM_EEE))
     facts.update(nsc.parse_link(STREAM_LINK))
     facts["usb:power/control"] = "on"
-    facts["usbcore:quirks"] = "0bda:8156:k"
+    facts.update(nsc.parse_no_lpm("0bda:8156:k", "0bda:8156"))
     return facts
 
 
@@ -145,15 +150,26 @@ class TheStandard(unittest.TestCase):
         values = lambda s: s["adapters"][0]["values"]  # noqa: E731
         broken(lambda s: s.update(schema="other/1"))
         broken(lambda s: s.update(version="1"))
+        broken(lambda s: s.update(version=True))
+        broken(lambda s: s.pop("adapters"))
         broken(lambda s: values(s)[1].pop("evidence"))
         broken(lambda s: values(s)[1].update(status="report"))
+        broken(lambda s: values(s)[1].update(status="Report"))
         broken(lambda s: values(s)[1].update(compare="near"))
-        broken(lambda s: values(s)[1].update(absent="maybe"))
-        broken(lambda s: values(s)[1].update(profile="fast"))
+        broken(lambda s: values(s)[1].update(absent="PASS"))
+        broken(lambda s: values(s)[1].update(profile="lowlatency"))
+        broken(lambda s: values(s)[1].update(expected=64))
+        broken(lambda s: values(s)[1].update(expected=[]))
+        broken(lambda s: values(s)[1].update(key=values(s)[0]["key"].lower()))
         broken(lambda s: values(s)[0].pop("plan"))
+        broken(lambda s: [v for v in values(s) if v.get("compare") == "bits"][0].update(expected="0x08"))
         broken(lambda s: s["adapters"][1].update(id=s["adapters"][0]["id"]))
         broken(lambda s: s["adapters"][0]["driver"].pop("evidence"))
+        broken(lambda s: s["adapters"][0]["driver"].pop("files"))
+        broken(lambda s: s["adapters"][0]["driver"]["bad"][0].pop("evidence"))
         broken(lambda s: s["adapters"][0].update(os="macos"))
+        broken(lambda s: s["adapters"][0].update(match={"usb": ["0bda:8156"]}))
+        broken(lambda s: s["adapters"][0].pop("values"))
 
     def test_load_reports_a_missing_or_bad_file(self):
         with self.assertRaises(nsc.StandardError):
@@ -193,18 +209,30 @@ class Parsing(unittest.TestCase):
         self.assertEqual(nsc.parse_eee(COMPANION_EEE), {"eee:status": "not supported"})
         self.assertEqual(nsc.parse_eee(""), {})
 
+    def test_no_lpm_reads_the_flag_for_this_device_only(self):
+        on = {"usbcore:no_lpm": "on"}
+        off = {"usbcore:no_lpm": "off"}
+        self.assertEqual(nsc.parse_no_lpm("0bda:8156:k", "0bda:8156"), on)
+        self.assertEqual(nsc.parse_no_lpm("0bda:8156:gk", "0bda:8156"), on)
+        self.assertEqual(nsc.parse_no_lpm("1234:5678:k,0BDA:8156:k", "0bda:8156"), on)
+        self.assertEqual(nsc.parse_no_lpm("0bda:8153:k", "0bda:8156"), off)
+        self.assertEqual(nsc.parse_no_lpm("0bda:8156:g", "0bda:8156"), off)
+        self.assertEqual(nsc.parse_no_lpm("", "0bda:8156"), off)
+
 
 class Judging(unittest.TestCase):
     def test_holds(self):
         self.assertTrue(nsc.holds({"expected": "8"}, " 8 "))
         self.assertFalse(nsc.holds({"expected": "8"}, "32"))
+        self.assertTrue(nsc.holds({"expected": "Full"}, "full"))
         self.assertTrue(nsc.holds({"expected": ["15", "15000"]}, "15000"))
         self.assertFalse(nsc.holds({"expected": ["15", "15000"]}, "150"))
         self.assertTrue(nsc.holds({"expected": "8", "compare": "bits"}, "24"))
         self.assertFalse(nsc.holds({"expected": "8", "compare": "bits"}, "16"))
         self.assertFalse(nsc.holds({"expected": "8", "compare": "bits"}, "x"))
-        self.assertTrue(nsc.holds({"expected": "0bda:8156:k", "compare": "contains"}, "0bda:8153:k,0bda:8156:k"))
-        self.assertFalse(nsc.holds({"expected": "0bda:8156:k", "compare": "contains"}, ""))
+        self.assertFalse(nsc.holds({"expected": "8", "compare": "bits"}, "0x18"))
+        self.assertTrue(nsc.holds({"expected": "b", "compare": "contains"}, "ABC"))
+        self.assertFalse(nsc.holds({"expected": "d", "compare": "contains"}, "abc"))
 
     def test_absent_value(self):
         must = {"key": "k", "expected": "0", "evidence": "e"}
@@ -212,6 +240,10 @@ class Judging(unittest.TestCase):
         self.assertEqual(nsc.judge_value(must, {}, "normal")[0], "FAIL")
         self.assertEqual(nsc.judge_value(may, {}, "normal")[0], "PASS")
         self.assertEqual(nsc.judge_value(may, {"k": "1"}, "normal")[0], "FAIL")
+
+    def test_a_keyword_matches_whatever_its_case(self):
+        v = {"key": "*PriorityVLANTag", "expected": "3", "evidence": "e"}
+        self.assertEqual(nsc.judge_value(v, {"*PriorityVlanTag": "3"}, "normal")[:4], ("PASS", "*PriorityVLANTag", "3", "3"))
 
     def test_report_and_profile_and_open(self):
         report = {"key": "k", "expected": None, "status": "report", "evidence": "e"}
@@ -225,23 +257,28 @@ class Judging(unittest.TestCase):
         self.assertEqual(row[4], "open: measure it")
 
     def test_version_order(self):
-        self.assertGreater(nsc.version_tuple("1156.22.113.2026"), nsc.version_tuple("11.19.602.2025"))
-        self.assertLess(nsc.version_tuple("11.4.211.2022"), nsc.version_tuple("11.19.602.2025"))
-        self.assertLess(nsc.version_tuple("10.79.20.1003"), nsc.version_tuple("10.79.50.1003"))
+        self.assertEqual(nsc.compare_versions("1156.22.113.2026", "11.19.602.2025"), 1)
+        self.assertEqual(nsc.compare_versions("11.4.211.2022", "11.19.602.2025"), -1)
+        self.assertEqual(nsc.compare_versions("10.79.20.1003", "10.79.50.1003"), -1)
+        self.assertEqual(nsc.compare_versions("10.79.20", "10.79.20.0"), 0)
 
     def test_driver(self):
         std = load()
         win = entry(std, "rtl8156b-windows")["driver"]
         verdict = lambda name, version: [r[0] for r in nsc.judge_driver(win, {"driver": name, "driver:version": version})]  # noqa: E731
         self.assertEqual(verdict("rtucx22x64.sys", "11.19.602.2025"), ["PASS", "PASS"])
+        self.assertEqual(verdict("RTUCX22X64.SYS", "11.19.602.2025"), ["PASS", "PASS"])
         self.assertEqual(verdict("rtucx22x64.sys", "11.18.1.2025"), ["PASS", "FAIL"])
+        self.assertEqual(verdict("rtucx22x64.sys", ""), ["PASS", "FAIL"])
         self.assertEqual(verdict("rtucx21x64.sys", "11.4.211.2022"), ["FAIL"])
         self.assertEqual(verdict("rtu56cx22x64.sys", "1156.22.113.2026"), ["FAIL"])
         bad = nsc.judge_driver(win, {"driver": "rtump64x64.sys", "driver:version": "10.68.20.605"})
         self.assertIn("#290", bad[0][4])
         pcie = entry(std, "rtl8125-rtl8168-windows")["driver"]
         self.assertEqual(nsc.judge_driver(pcie, {"driver": "rt640x64.sys", "driver:version": "10.72.524.2024"})[0][0], "FAIL")
-        self.assertEqual([r[0] for r in nsc.judge_driver(pcie, {"driver": "rt640x64.sys", "driver:version": "10.79.50.1003"})], ["PASS", "PASS"])
+        good = nsc.judge_driver(pcie, {"driver": "rt640x64.sys", "driver:version": "10.79.50.1003"})
+        self.assertEqual([r[0] for r in good], ["PASS", "PASS"])
+        self.assertTrue(good[0][4].startswith("open: "))
         r8169 = entry(std, "rtl8168-linux")["driver"]
         rows = nsc.judge_driver(r8169, {"driver": "r8169", "driver:version": "7.0.0-38-realtime", "firmware": "rtl8168h-2_0.0.2 02/26/15"})
         self.assertEqual([r[0] for r in rows], ["PASS", "INFO", "PASS"])
@@ -254,6 +291,7 @@ class Judging(unittest.TestCase):
         self.assertEqual(rows["driver:version"][0], "INFO")
         self.assertTrue(rows["driver"][4].startswith("open: "))
         self.assertEqual(rows["feature:tcp-segmentation-offload"][0], "SKIP")
+        self.assertEqual(rows["usbcore:no_lpm"][0], "PASS")
         self.assertEqual(rows["firmware"][0], "INFO")
         fails = [k for k, r in rows.items() if r[0] == "FAIL"]
         self.assertEqual(fails, [])
@@ -272,28 +310,121 @@ class Judging(unittest.TestCase):
         passed = nsc.format_row("rig0", ("PASS", "ring:rx", "4096", "4096", "evidence"))
         self.assertEqual(passed, "PASS  rig0  ring:rx  expected=4096  actual=4096")
 
+    def test_windows_facts_judged_by_the_same_rules(self):
+        # dsg's RTL8168 as read on 20.11.2026 (the keys in its driver's case).
+        e = entry(load(), "rtl8125-rtl8168-windows")
+        facts = {"*PriorityVlanTag": "0", "CLKREQ": "1", "PnPCapabilities": "24"}
+        for v in e["values"]:
+            if v.get("status") != "report" and v["key"] not in facts:
+                facts[v["key"].lower()] = v["expected"] if isinstance(v["expected"], str) else v["expected"][0]
+        rows = rows_by_key(nsc.check(e, dict(facts, driver="rt640x64.sys", **{"driver:version": "10.79.50.1003"}), "low_latency"))
+        self.assertEqual([k for k, r in rows.items() if r[0] == "FAIL"], [])
+        self.assertEqual(rows["*PriorityVlanTag"][0], "INFO")
+
 
 class ThisPc(unittest.TestCase):
+    """The I/O layer on a temporary sysfs tree, with ethtool's outputs
+    replaced by stream-snv's (nsc.run patched)."""
+
+    def setUp(self):
+        self.root = tempfile.TemporaryDirectory()
+        root = self.root.name
+        self.net = os.path.join(root, "net")
+        usbdev = os.path.join(root, "devices", "usb4", "4-4")
+        os.makedirs(os.path.join(usbdev, "4-4:1.0", "power"))
+        os.makedirs(os.path.join(usbdev, "power"))
+        self._write(os.path.join(usbdev, "idVendor"), "0bda")
+        self._write(os.path.join(usbdev, "idProduct"), "8156")
+        self._write(os.path.join(usbdev, "power", "control"), "on")
+        self._write(os.path.join(usbdev, "4-4:1.0", "power", "control"), "auto")
+        pcidev = os.path.join(root, "devices", "pci", "0000:00:1c.0", "0000:02:00.0")
+        os.makedirs(os.path.join(pcidev, "power"))
+        os.makedirs(os.path.join(root, "devices", "pci", "0000:00:1c.0", "power"))
+        self._write(os.path.join(pcidev, "vendor"), "0x10ec")
+        self._write(os.path.join(pcidev, "device"), "0x8168")
+        self._write(os.path.join(pcidev, "power", "control"), "on")
+        self._write(os.path.join(root, "devices", "pci", "0000:00:1c.0", "power", "control"), "auto")
+        intel = os.path.join(root, "devices", "pci", "0000:07:00.0")
+        os.makedirs(intel)
+        self._write(os.path.join(intel, "vendor"), "0x8086")
+        self._write(os.path.join(intel, "device"), "0x10fb")
+        for iface, target, state in (
+            ("rig0", os.path.join(usbdev, "4-4:1.0"), "up"),
+            ("enp2s0", pcidev, "down"),
+            ("enp7s0", intel, "up"),
+        ):
+            os.makedirs(os.path.join(self.net, iface))
+            os.symlink(target, os.path.join(self.net, iface, "device"))
+            self._write(os.path.join(self.net, iface, "operstate"), state)
+        os.makedirs(os.path.join(self.net, "rig0.70"))
+        self.quirks = os.path.join(root, "quirks")
+        self._write(self.quirks, "0bda:8156:k")
+        self._run = nsc.run
+        nsc.run = lambda args: STREAM_OUTPUTS[args[1] if len(args) > 2 else ""]
+
+    def tearDown(self):
+        nsc.run = self._run
+        self.root.cleanup()
+
+    @staticmethod
+    def _write(path, text):
+        with open(path, "w") as f:
+            f.write(text + "\n")
+
+    def main(self, *argv, standard=STANDARD):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = nsc.main(["--standard", standard, *argv], sysfs=self.net, quirks_path=self.quirks)
+        return rc, out.getvalue().splitlines()
+
     def test_nic_ids_from_sysfs(self):
-        with tempfile.TemporaryDirectory() as root:
-            usbdev = os.path.join(root, "devices", "usb4", "4-4")
-            os.makedirs(os.path.join(usbdev, "4-4:1.0"))
-            for name, value in (("idVendor", "0bda"), ("idProduct", "8156")):
-                with open(os.path.join(usbdev, name), "w") as f:
-                    f.write(value + "\n")
-            pcidev = os.path.join(root, "devices", "pci", "0000:02:00.0")
-            os.makedirs(pcidev)
-            for name, value in (("vendor", "0x10ec"), ("device", "0x8168")):
-                with open(os.path.join(pcidev, name), "w") as f:
-                    f.write(value + "\n")
-            net = os.path.join(root, "net")
-            for iface, target in (("rig0", os.path.join(usbdev, "4-4:1.0")), ("enp2s0", pcidev)):
-                os.makedirs(os.path.join(net, iface))
-                os.symlink(target, os.path.join(net, iface, "device"))
-            os.makedirs(os.path.join(net, "rig0.70"))
-            self.assertEqual(nsc.nic_ids("rig0", net), ("usb", "0bda:8156"))
-            self.assertEqual(nsc.nic_ids("enp2s0", net), ("pci", "10ec:8168"))
-            self.assertIsNone(nsc.nic_ids("rig0.70", net))
+        self.assertEqual(nsc.nic_ids("rig0", self.net), ("usb", "0bda:8156"))
+        self.assertEqual(nsc.nic_ids("enp2s0", self.net), ("pci", "10ec:8168"))
+        self.assertIsNone(nsc.nic_ids("rig0.70", self.net))
+
+    def test_power_nodes_are_the_nics_own(self):
+        usb = nsc.read_facts("rig0", ("usb", "0bda:8156"), self.net, self.quirks)
+        pci = nsc.read_facts("enp2s0", ("pci", "10ec:8168"), self.net, self.quirks)
+        self.assertEqual(usb["usb:power/control"], "on")
+        self.assertEqual(usb["usbcore:no_lpm"], "on")
+        self.assertEqual(pci["pci:power/control"], "on")
+        self.assertNotIn("usbcore:no_lpm", pci)
+
+    def test_a_clean_pc_exits_0_and_skips_a_down_nic(self):
+        rc, lines = self.main()
+        self.assertEqual(rc, 0)
+        self.assertIn("SKIP  enp2s0  pci 10ec:8168 is down", lines)
+        self.assertIn("PASS  rig0  ring:rx  expected=4096  actual=4096", lines)
+        self.assertFalse(any("enp7s0" in line for line in lines))
+        self.assertEqual(lines[-1], "1 Realtek NIC(s) checked, 0 FAIL")
+
+    def test_a_down_nic_is_checked_with_all(self):
+        rc, lines = self.main("--all")
+        self.assertEqual(rc, 1)
+        self.assertIn("--    enp2s0  RTL8168 (rtl8168-linux)", lines)
+
+    def test_a_failed_value_exits_1(self):
+        self._write(self.quirks, "")
+        rc, lines = self.main("rig0")
+        self.assertEqual(rc, 1)
+        self.assertTrue(any(line.startswith("FAIL  rig0  usbcore:no_lpm  expected=on  actual=off") for line in lines))
+
+    def test_a_chip_without_an_entry_fails(self):
+        self._write(os.path.join(self.root.name, "devices", "usb4", "4-4", "idProduct"), "8153")
+        rc, lines = self.main()
+        self.assertEqual(rc, 1)
+        self.assertIn("FAIL  rig0  usb 0bda:8153: no standard for this Realtek chip on Linux", lines)
+
+    def test_a_named_interface_that_is_missing_or_no_realtek_fails(self):
+        rc, lines = self.main("rgi0", "enp7s0")
+        self.assertEqual(rc, 1)
+        self.assertIn("FAIL  rgi0: no such Realtek NIC", lines)
+        self.assertIn("FAIL  enp7s0: no such Realtek NIC", lines)
+
+    def test_an_unreadable_standard_exits_2(self):
+        rc, lines = self.main(standard=os.path.join(self.root.name, "missing.json"))
+        self.assertEqual(rc, 2)
+        self.assertTrue(lines[0].startswith("FAIL  cannot read the standard"))
 
 
 if __name__ == "__main__":

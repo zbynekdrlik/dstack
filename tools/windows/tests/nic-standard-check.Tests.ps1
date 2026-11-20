@@ -42,6 +42,45 @@ Check 'PendingTransmits stays 8, open, with its plan' {
     $v = ValueSpec 'rtl8156b-windows' 'PendingTransmits'
     $v.expected -eq '8' -and $v.status -eq 'open' -and $v.plan -like '*#425*'
 }
+$standardText = Get-Content -LiteralPath $standardPath -Raw -Encoding UTF8
+# The repo file with one change: $true when Test-NicStandard refuses it.
+function Refused {
+    param([scriptblock]$Change)
+    $s = $standardText | ConvertFrom-Json
+    & $Change $s
+    try { Test-NicStandard $s; return $false } catch { return $true }
+}
+Check 'the repo file validates' { $s = $standardText | ConvertFrom-Json; Test-NicStandard $s; $true }
+Check 'a malformed file is refused, as the Python checker refuses it' {
+    $v = { param($s) $s.adapters[0].values }
+    (Refused { param($s) $s.schema = 'other/1' }) -and
+    (Refused { param($s) $s.version = '1' }) -and
+    (Refused { param($s) $s.PSObject.Properties.Remove('adapters') }) -and
+    (Refused { param($s) (& $v $s)[1].PSObject.Properties.Remove('evidence') }) -and
+    (Refused { param($s) (& $v $s)[1] | Add-Member -NotePropertyName status -NotePropertyValue 'report' }) -and
+    (Refused { param($s) (& $v $s)[1] | Add-Member -NotePropertyName status -NotePropertyValue 'Report' }) -and
+    (Refused { param($s) (& $v $s)[1] | Add-Member -NotePropertyName compare -NotePropertyValue 'near' }) -and
+    (Refused { param($s) (& $v $s)[1] | Add-Member -NotePropertyName absent -NotePropertyValue 'PASS' }) -and
+    (Refused { param($s) (& $v $s)[1] | Add-Member -NotePropertyName profile -NotePropertyValue 'lowlatency' }) -and
+    (Refused { param($s) (& $v $s)[1].expected = 64 }) -and
+    (Refused { param($s) (& $v $s)[1].key = (& $v $s)[0].key.ToLowerInvariant() }) -and
+    (Refused { param($s) (& $v $s)[0].PSObject.Properties.Remove('plan') }) -and
+    (Refused { param($s) (@(& $v $s) | Where-Object { $_.PSObject.Properties['compare'] })[0].expected = '0x08' }) -and
+    (Refused { param($s) $s.adapters[1].id = $s.adapters[0].id }) -and
+    (Refused { param($s) $s.adapters[0].driver.PSObject.Properties.Remove('evidence') }) -and
+    (Refused { param($s) $s.adapters[0].driver.PSObject.Properties.Remove('files') }) -and
+    (Refused { param($s) $s.adapters[0].driver.bad[0].PSObject.Properties.Remove('evidence') }) -and
+    (Refused { param($s) $s.adapters[0].driver | Add-Member -NotePropertyName firmware -NotePropertyValue 'x' }) -and
+    (Refused { param($s) $s.adapters[0].os = 'macos' }) -and
+    (Refused { param($s) $s.adapters[0].match = [pscustomobject]@{ usb = @('0bda:8156') } }) -and
+    (Refused { param($s) $s.adapters[0].PSObject.Properties.Remove('values') })
+}
+Check 'a one-item list and an empty list in the file stay lists' {
+    $s = $standardText | ConvertFrom-Json
+    $files = Get-NicList (@($s.adapters) | Where-Object { $_.id -eq 'rtl8156b-windows' }).driver 'files'
+    $none = Get-NicList (@($s.adapters) | Where-Object { $_.id -eq 'realtek-vlan-windows' }) 'values'
+    ($files -is [array]) -and $files.Count -eq 1 -and ($none -is [array]) -and $none.Count -eq 0
+}
 Check 'a file of another schema is refused' {
     $tmp = [IO.Path]::GetTempFileName()
     try {
@@ -71,7 +110,10 @@ Check 'equals, a list, bits, contains' {
     (Test-NicValueHolds ([pscustomobject]@{ expected = '8'; compare = 'bits' }) '24') -and
     -not (Test-NicValueHolds ([pscustomobject]@{ expected = '8'; compare = 'bits' }) '16') -and
     -not (Test-NicValueHolds ([pscustomobject]@{ expected = '8'; compare = 'bits' }) 'x') -and
-    (Test-NicValueHolds ([pscustomobject]@{ expected = 'b'; compare = 'contains' }) 'abc')
+    -not (Test-NicValueHolds ([pscustomobject]@{ expected = '8'; compare = 'bits' }) '0x18') -and
+    (Test-NicValueHolds ([pscustomobject]@{ expected = 'Full' }) 'full') -and
+    (Test-NicValueHolds ([pscustomobject]@{ expected = 'b'; compare = 'contains' }) 'ABC') -and
+    -not (Test-NicValueHolds ([pscustomobject]@{ expected = 'd'; compare = 'contains' }) 'abc')
 }
 Check 'an absent keyword fails unless the standard allows it' {
     $must = [pscustomobject]@{ key = 'k'; expected = '0'; evidence = 'e' }
@@ -155,11 +197,14 @@ function Set-FakePc {
 function Get-NetAdapter { [CmdletBinding()] param() $script:FakeAdapters }
 function Get-PnpDeviceProperty {
     [CmdletBinding()] param([string]$InstanceId, [string]$KeyName)
-    [pscustomobject]@{ Data = @($script:FakeIds[$InstanceId], 'second id') }
+    $id = $script:FakeIds[$InstanceId]
+    if ($id -eq 'THROW') { throw 'the PnP store is unreadable' }
+    [pscustomobject]@{ Data = @($id, 'second id') }
 }
 function Get-NetAdapterAdvancedProperty {
     [CmdletBinding()] param([string]$Name, [switch]$AllProperties)
     $values = $script:FakeValues[$Name]
+    if ($null -eq $values) { throw "No MSFT_NetAdapterAdvancedPropertySettingData objects found with property 'Name' equal to '$Name'" }
     foreach ($k in $values.Keys) { [pscustomobject]@{ RegistryKeyword = $k; RegistryValue = $values[$k] } }
 }
 function Run-Fake {
@@ -202,6 +247,25 @@ Check 'an unknown Realtek fails as having no standard; a down one is skipped unl
     $r.Exit -eq 1 -and @($r.Lines | Where-Object { $_ -like 'FAIL  Ethernet 5  *no standard for this Realtek adapter on Windows' }).Count -eq 1 -and
     ($r.Lines -contains 'SKIP  soundgrid  PCI\VEN_10EC&DEV_8168&REV_15 is Disconnected') -and
     @($down.Lines | Where-Object { $_ -like '--    soundgrid  *' }).Count -eq 1
+}
+Check 'a disabled Realtek is named as skipped, even with -IncludeDown' {
+    Set-FakePc @(
+        @{ Name = 'soundgrid-pcie'; Desc = 'Realtek PCIe GbE Family Controller'; Status = 'Disabled'; File = 'rt640x64.sys'; Version = '10.79.50.1003'; Hw = 'PCI\VEN_10EC&DEV_8168&REV_15'; Props = @{} }
+    )
+    $r = Run-Fake -IncludeDown
+    $r.Exit -eq 0 -and ($r.Lines -contains 'SKIP  soundgrid-pcie  PCI\VEN_10EC&DEV_8168&REV_15 is Disabled') -and
+    ($r.Lines -contains '0 Realtek NIC(s) checked, 0 FAIL')
+}
+Check 'an unreadable hardware id or value list fails with its cause, and the run goes on' {
+    Set-FakePc @(
+        @{ Name = 'Ethernet 6'; Desc = 'Realtek Gaming USB 2.5GbE Family Controller'; Status = 'Up'; File = 'rtucx22x64.sys'; Version = '11.19.602.2025'; Hw = 'THROW'; Props = @{} },
+        @{ Name = 'Ethernet 7'; Desc = 'Realtek Gaming USB 2.5GbE Family Controller'; Status = 'Up'; File = 'rtucx22x64.sys'; Version = '11.19.602.2025'; Hw = $usb; Props = $null }
+    )
+    $r = Run-Fake
+    $r.Exit -eq 1 -and
+    @($r.Lines | Where-Object { $_ -like 'FAIL  Ethernet 6  *no standard for this Realtek adapter on Windows (hardware id unreadable: the PnP store is unreadable)' }).Count -eq 1 -and
+    @($r.Lines | Where-Object { $_ -like 'FAIL  Ethernet 7  values  expected=(readable)  actual=(unreadable)  (No MSFT_*' }).Count -eq 1 -and
+    ($r.Lines -contains '2 Realtek NIC(s) checked, 2 FAIL')
 }
 Check 'a standard that cannot be read exits 2' {
     $lines = @(Invoke-NicStandardCheck -Source (Join-Path $PSScriptRoot 'no-such-standard.json'))

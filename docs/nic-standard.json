@@ -80,8 +80,8 @@
         {"key": "pause:rx", "name": "Pause frames RX", "expected": "off", "evidence": "a PAUSE stops the whole send queue (dstack #425)"},
         {"key": "pause:tx", "name": "Pause frames TX", "expected": "off", "evidence": "dstack #425"},
         {"key": "eee:status", "name": "EEE", "expected": ["disabled", "not supported"], "evidence": "power saving off on every wired NIC (owner 7.11.2026, songplayer#285)"},
-        {"key": "feature:tcp-segmentation-offload", "name": "TSO", "expected": "off", "profile": "low_latency", "evidence": "one TX ring: a 64 kB TSO segment holds our packet ~525 us; off gave peaks 198-260 us (dstack #1, docs/linux-box.md)"},
-        {"key": "feature:generic-segmentation-offload", "name": "GSO", "expected": "off", "profile": "low_latency", "evidence": "dstack #1, docs/linux-box.md"},
+        {"key": "feature:tcp-segmentation-offload", "name": "TSO", "expected": "off", "profile": "low_latency", "evidence": "measured on the RTL8168 under r8169 (one TX ring: a 64 kB TSO segment held our packet ~525 us; off gave peaks 198-260 us, dstack #1, docs/linux-box.md); the RTL8156B has one TX ring too, the same mechanism, not measured on it"},
+        {"key": "feature:generic-segmentation-offload", "name": "GSO", "expected": "off", "profile": "low_latency", "evidence": "measured on the RTL8168 under r8169 (dstack #1, docs/linux-box.md); the same mechanism here, not measured on it"},
         {"key": "feature:rx-checksumming", "name": "RX checksum offload", "expected": "on", "evidence": "none yet: fleet value"},
         {"key": "feature:tx-checksumming", "name": "TX checksum offload", "expected": "on", "evidence": "none yet: fleet value"},
         {"key": "feature:scatter-gather", "name": "Scatter-gather", "expected": "on", "evidence": "none yet: fleet value"},
@@ -92,7 +92,7 @@
         {"key": "link:speed", "name": "Speed", "expected": "2500Mb/s", "evidence": "none yet: fleet value"},
         {"key": "link:duplex", "name": "Duplex", "expected": "Full", "evidence": "none yet: fleet value"},
         {"key": "usb:power/control", "name": "USB autosuspend off", "expected": "on", "evidence": "power saving off (songplayer#285; the Windows selective-suspend twin); fleet value"},
-        {"key": "usbcore:quirks", "name": "USB LPM off (usbcore.quirks NO_LPM)", "expected": "0bda:8156:k", "compare": "contains", "evidence": "none yet: fleet value (stream-snv and the PP stream PC; U1/U2 off, dstack #408)"},
+        {"key": "usbcore:no_lpm", "name": "USB LPM off (usbcore.quirks flag k for 0bda:8156)", "expected": "on", "evidence": "none yet: fleet value (stream-snv and the PP stream PC boot with usbcore.quirks=0bda:8156:k; U1/U2 off, dstack #408)"},
         {"key": "firmware", "name": "Firmware", "expected": null, "status": "report", "evidence": "the in-tree driver names rtl8156b-2 v3 10/20/23, v2.21.4 names none"}
       ]
     },
@@ -106,17 +106,17 @@
         "files": ["rt640x64.sys"],
         "min_version": "10.79.20.1003",
         "bad": [
-          {"file": "rt640x64.sys", "version": "10.72.524.2024", "evidence": "20-30 ms receive DPC every ~100 s on the RTL8125 (dasio#1, FOH 2.11.2026; dstack lso.rs REALTEK_BAD)"}
+          {"file": "rt640x64.sys", "version": "10.72.524.2024", "evidence": "a 20-30 ms receive DPC every ~100 s on FOH's RTL8125 (dasio#1, 2.11.2026; docs/windows-box.md; dstack lso.rs REALTEK_BAD), and no later measurement keeps it"}
         ],
         "status": "open",
-        "evidence": "10.79.20.1003 measured best on FOH's RTL8125 with dasio's deferred receive and kernel TX; the inbox rtcx21 and 10.39 worse (dasio#1, dasio's baseline pin); clean on dsg's RTL8168 (dstack #383). 10.79.50.1003 on dsg's RTL8168s since 18.11 (owner ROZHODNUTE on dasio#120, dasio#188: SoundGrid clock losses 78 -> 0).",
-        "plan": "one version for the family: 10.79.50.1003 on FOH's RTL8125 too (dasio's step, dasio#120's rule: newer drivers are tested and deployed), then min_version 10.79.50.1003. dstack's start-line verdict (lso.rs REALTEK_BAD names 10.79.20.1003) is reconciled with dasio#1's later measurement."
+        "evidence": "The 20-30 ms receive DPC was measured on 10.72 AND 10.79 on FOH's RTL8125, with 10.39.212.2020 clean there (dasio#1, docs/windows-box.md). dasio then kept 10.79.20.1003 together with its own deferred receive (dasio_pacer RxdEnable: TCP and discovery receive leave the NIC's DPC) and kernel TX; its baseline records 10.79.20.1003 as best and the inbox rtcx21 and 10.39 as worse on that path (dasio's config/baseline-pc-profile.toml, dasio#1, dasio#128). 10.79.20.1003 read clean on dsg's RTL8168 (dstack #383); 10.79.50.1003 on dsg's RTL8168s since 18.11 (the owner's rule on dasio#120, dasio#188: SoundGrid clock losses 78 -> 0). Every rt640x64 PC in the fleet is a dasio host: 10.79 without dasio's deferred receive is NOT measured clean on the RTL8125.",
+        "plan": "one version for the family: 10.79.50.1003 on FOH's RTL8125 too (dasio's step under dasio#120's rule), then min_version 10.79.50.1003; dstack's start-line driver verdict (lso.rs REALTEK_BAD / REALTEK_GOOD) made to follow this file. A PC on rt640x64 without dasio's deferred receive is measured before it carries Dante (10.39.212.2020 is the only version measured clean without it)."
       },
       "values": [
-        {"key": "*ReceiveBuffers", "name": "Receive Buffers", "expected": "4096", "status": "open", "evidence": "dasio's baseline (the Dante NIC as tuned on FOH, dasio#1); on the RTL8168 4096 is above the INF's range (32-512) and what the driver applies is not measured", "plan": "on the RTL8168 (dsg), 4096 against the INF maximum 512, dasio's late and missed counts and a WPR DPC trace per hour (dasio's PC, dasio runs it); the RTL8125 (FOH) keeps 4096, inside its range 32-4096"},
-        {"key": "*TransmitBuffers", "name": "Transmit Buffers", "expected": "4096", "status": "open", "evidence": "dasio's baseline (dasio#1); on the RTL8168 above the INF's range (32-128). docs/windows-box.md's 'at the driver's minimum' was a next step, never measured", "plan": "on the RTL8168 (dsg), 4096 against the INF maximum 128, the same A/B; the RTL8125 (FOH) keeps 4096, inside its range 64-4096"},
+        {"key": "*ReceiveBuffers", "name": "Receive Buffers", "expected": "4096", "status": "open", "profile": "low_latency", "evidence": "dasio's baseline (the Dante NIC as tuned on FOH, dasio#1); on the RTL8168 4096 is above the INF's range (32-512) and what the driver applies is not measured", "plan": "on the RTL8168 (dsg), 4096 against the INF maximum 512, dasio's late and missed counts and a WPR DPC trace per hour (dasio's PC, dasio runs it); the RTL8125 (FOH) keeps 4096, inside its range 32-4096"},
+        {"key": "*TransmitBuffers", "name": "Transmit Buffers", "expected": "4096", "status": "open", "profile": "low_latency", "evidence": "dasio's baseline (dasio#1); on the RTL8168 above the INF's range (32-128). docs/windows-box.md's 'at the driver's minimum' was a next step, never measured", "plan": "on the RTL8168 (dsg), 4096 against the INF maximum 128, the same A/B; the RTL8125 (FOH) keeps 4096, inside its range 64-4096"},
         {"key": "*FlowControl", "name": "Flow Control", "expected": "0", "evidence": "dasio#1; a PAUSE stops the whole send queue (dstack #425)"},
-        {"key": "*InterruptModeration", "name": "Interrupt Moderation", "expected": "0", "evidence": "dasio#1 (dasio's baseline, must)"},
+        {"key": "*InterruptModeration", "name": "Interrupt Moderation", "expected": "0", "evidence": "dasio#1 (dasio's baseline, must); songplayer#285 sets it 0 on every wired NIC where present"},
         {"key": "*EEE", "name": "Energy-Efficient Ethernet", "expected": "0", "evidence": "dasio#1; songplayer#285"},
         {"key": "AdvancedEEE", "name": "Advanced EEE", "expected": "0", "evidence": "dasio#1; songplayer#285"},
         {"key": "EnableGreenEthernet", "name": "Green Ethernet", "expected": "0", "evidence": "dasio#1; songplayer#285"},
@@ -127,8 +127,8 @@
         {"key": "*LsoV2IPv6", "name": "Large Send Offload v2 (IPv6)", "expected": "0", "evidence": "dstack #1; dasio's baseline"},
         {"key": "*JumboPacket", "name": "Jumbo Frame", "expected": "1514", "evidence": "dasio#1 (dasio's baseline)"},
         {"key": "*SpeedDuplex", "name": "Speed & Duplex", "expected": "0", "evidence": "dasio#1 (dasio's baseline, auto negotiation)"},
-        {"key": "*RSS", "name": "Receive Side Scaling", "expected": "1", "evidence": "dasio#1 (dasio's baseline); its CPUs are per PC (dasio#128), not in this standard"},
-        {"key": "*NumRssQueues", "name": "Maximum Number of RSS Queues", "expected": "4", "evidence": "none yet: fleet value"},
+        {"key": "*RSS", "name": "Receive Side Scaling", "expected": "1", "profile": "low_latency", "evidence": "dasio#1 (dasio's baseline, tuned with its CPU layout); its CPUs are per PC (dasio#128), not in this standard"},
+        {"key": "*NumRssQueues", "name": "Maximum Number of RSS Queues", "expected": "4", "profile": "low_latency", "evidence": "none yet: fleet value (both dasio hosts)"},
         {"key": "*WakeOnMagicPacket", "name": "Wake on Magic Packet", "expected": "0", "evidence": "dasio's baseline"},
         {"key": "*WakeOnPattern", "name": "Wake on pattern match", "expected": "0", "evidence": "dasio's baseline"},
         {"key": "*ModernStandbyWoLMagicPacket", "name": "Modern Standby WoL", "expected": "0", "evidence": "dasio's baseline"},
