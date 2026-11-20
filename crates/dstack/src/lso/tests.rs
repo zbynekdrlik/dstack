@@ -130,3 +130,5 @@ fn a_vlan_virtual_adapter_is_told_apart_from_a_nic() {
     )));
     assert!(!virtual_adapter(None));
 }
+
+mod verdict;

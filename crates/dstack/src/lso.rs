@@ -101,6 +101,65 @@ pub fn driver_of(
     }
 }
 
+pub mod standard;
+
+/// What the start line knows of the Dante NIC's driver (the network class
+/// key's values, the driver file from its service's `ImagePath`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DriverFacts {
+    /// `ProviderName` (`Realtek`, `Microsoft`).
+    pub provider: Option<String>,
+    /// `MatchingDeviceId` (`PCI\VEN_10EC&DEV_8125&...`, `RTK_VLANMP`).
+    pub hardware_id: Option<String>,
+    /// The driver file (`rt640x64.sys`).
+    pub file: Option<String>,
+    /// `DriverVersion` (`10.79.20.1003`).
+    pub version: Option<String>,
+    /// `DriverDesc` (`Realtek Gaming 2.5GbE Family Controller`).
+    pub description: Option<String>,
+}
+
+/// The start line's verdict on the Dante NIC's driver against the NIC
+/// standard ([`standard`], dstack #466).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DriverVerdict<'a> {
+    /// The driver is the entry's: an allowed file, at or above its minimum.
+    Standard(&'a standard::Entry),
+    /// A driver the entry names bad.
+    Bad(&'a standard::Entry, &'a standard::Bad),
+    /// Not one of the entry's driver files.
+    File(&'a standard::Entry),
+    /// Under the entry's minimum version (or no version read).
+    Old(&'a standard::Entry),
+    /// A Realtek adapter the standard has no entry for.
+    Unknown,
+    /// A VLAN virtual adapter the standard has no entry for: its driver is
+    /// the VLAN layer's, the NIC's own is not read.
+    Virtual,
+    /// Not a Realtek adapter, or not read.
+    Other,
+}
+
+/// The verdict on the driver `facts` against the standard `std`.
+pub fn driver_verdict<'a>(std: &'a standard::Standard, facts: &DriverFacts) -> DriverVerdict<'a> {
+    // Today's verdict: the lists above, on the measured family (#466 RED).
+    let entry = facts
+        .hardware_id
+        .as_deref()
+        .and_then(|h| std.windows_entry(h));
+    let old = driver_of(
+        facts.provider.as_deref(),
+        facts.version.as_deref(),
+        facts.description.as_deref(),
+    );
+    match (old, entry) {
+        (Driver::KnownBad, Some(e)) => DriverVerdict::Old(e),
+        (Driver::Other, _) => DriverVerdict::Other,
+        (_, Some(e)) => DriverVerdict::Standard(e),
+        (_, None) => DriverVerdict::Unknown,
+    }
+}
+
 #[cfg(windows)]
 mod windows;
 #[cfg(all(windows, test))]
