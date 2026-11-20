@@ -398,11 +398,13 @@ function Test-NicEeeWindows {
         $dvalue = ([string](Get-NicProp $p 'DisplayValue' '')).Trim()
         $shown = if ($dvalue) { "$value ($dvalue)" } else { $value }
         $isOff = [bool]($off | Where-Object { $_ -ieq $value })
-        if ($keywords -contains $keyword.ToLowerInvariant()) {
-            if ($value -eq '') { continue }
+        $listed = $keywords -contains $keyword.ToLowerInvariant()
+        if ($listed -and $value -ne '') {
             $verdict = if ($isOff) { 'PASS' } else { 'FAIL' }
             $rows += New-NicRow $verdict $keyword ($off -join '|') $shown $note
-        } elseif ($dname -and [regex]::IsMatch($dname, [string]$win.display_name, 'IgnoreCase')) {
+        } elseif (($listed -and $dvalue) -or (-not $listed -and $dname -and [regex]::IsMatch($dname, [string]$win.display_name, 'IgnoreCase'))) {
+            # A listed keyword with no registry value but a display value (the
+            # driver's default shown) is judged as an unlisted one.
             $verdict = 'INFO'
             if ($dvalue -and [regex]::IsMatch($dvalue, [string]$win.display_off, 'IgnoreCase')) { $verdict = 'PASS' }
             elseif ($dvalue -and [regex]::IsMatch($dvalue, [string]$win.display_on, 'IgnoreCase')) { $verdict = 'FAIL' }
@@ -416,14 +418,15 @@ function Test-NicEeeWindows {
 
 # The advanced properties the EEE rule reads, the hidden ones included
 # (-AllProperties returns the registry-only keywords, as the 11.19 RTL8156B
-# driver hides its EEE keywords). A keyword with no registry value is absent.
+# driver hides its EEE keywords). A keyword with no registry value keeps its
+# display value (the judge reads it), with Value ''.
 function Get-NicEeeProps {
     param([string]$Name)
     foreach ($p in @(Get-NetAdapterAdvancedProperty -Name $Name -AllProperties)) {
-        if (-not $p.RegistryKeyword -or $null -eq $p.RegistryValue) { continue }
+        if (-not $p.RegistryKeyword) { continue }
         [pscustomobject]@{
             Keyword      = [string]$p.RegistryKeyword
-            Value        = (@($p.RegistryValue) | ForEach-Object { [string]$_ }) -join ','
+            Value        = if ($null -eq $p.RegistryValue) { '' } else { (@($p.RegistryValue) | ForEach-Object { [string]$_ }) -join ',' }
             DisplayName  = [string](Get-NicProp $p 'DisplayName' '')
             DisplayValue = [string](Get-NicProp $p 'DisplayValue' '')
         }
@@ -488,6 +491,34 @@ function Get-NicRows {
     foreach ($v in @($Entry.values)) { Test-NicValue $v $facts $LatencyProfile }
 }
 
+# The EEE lines of every wired NIC, any vendor, up, down or disabled (the
+# owner, 20.11.2026: EEE on any rig device is a serious failure); sets
+# $script:NicEeeFailed to the number of FAIL lines.
+function Invoke-NicEeeCheck {
+    param($Rule, $Adapters)
+    "--    every wired NIC: $(Get-NicProp $Rule 'name' 'EEE off') (eee)"
+    $failed = 0; $checked = 0
+    foreach ($a in @($Adapters)) {
+        if (-not (Test-NicWired $a)) { continue }
+        if ($a.Status -eq 'Not Present') { "SKIP  $($a.Name)  EEE: Not Present"; continue }
+        $checked++
+        $driver = "$($a.DriverFileName) $($a.DriverVersion)"
+        try {
+            $props = @(Get-NicEeeProps $a.Name)
+        } catch {
+            "FAIL  $($a.Name)  eee  expected=(readable)  actual=(unreadable)  (driver $($driver.Trim()); $($_.Exception.Message))"
+            $failed++
+            continue
+        }
+        foreach ($r in @(Test-NicEeeWindows $Rule $props $driver)) {
+            Format-NicRow $a.Name $r
+            if ($r.Verdict -ceq 'FAIL') { $failed++ }
+        }
+    }
+    "$checked wired NIC(s) checked for EEE, $failed FAIL"
+    $script:NicEeeFailed = $failed
+}
+
 # Writes the report lines and sets $script:NicExit (0, 1 on a FAIL, 2 when
 # the standard cannot be read or is malformed).
 function Invoke-NicStandardCheck {
@@ -501,30 +532,10 @@ function Invoke-NicStandardCheck {
     }
     "nic-standard v$($std.version) ($Source), profile $LatencyProfile"
     $adapters = @(Get-NetAdapter)
-    # EEE first: every wired NIC of the PC, any vendor, up, down or disabled,
-    # whatever -Name says (the owner, 20.11.2026: EEE on any rig device is a
-    # serious failure).
-    $eeeName = Get-NicProp $std.eee 'name' 'EEE off'
-    "--    every wired NIC: $eeeName (eee)"
-    $eeeFailed = 0; $eeeChecked = 0
-    foreach ($a in $adapters) {
-        if (-not (Test-NicWired $a)) { continue }
-        if ($a.Status -eq 'Not Present') { "SKIP  $($a.Name)  EEE: Not Present"; continue }
-        $eeeChecked++
-        $driver = "$($a.DriverFileName) $($a.DriverVersion)"
-        try {
-            $props = @(Get-NicEeeProps $a.Name)
-        } catch {
-            "FAIL  $($a.Name)  eee  expected=(readable)  actual=(unreadable)  (driver $($driver.Trim()); $($_.Exception.Message))"
-            $eeeFailed++
-            continue
-        }
-        foreach ($r in @(Test-NicEeeWindows $std.eee $props $driver)) {
-            Format-NicRow $a.Name $r
-            if ($r.Verdict -ceq 'FAIL') { $eeeFailed++ }
-        }
-    }
-    "$eeeChecked wired NIC(s) checked for EEE, $eeeFailed FAIL"
+    # EEE first: every wired NIC of the PC, whatever -Name says.
+    $script:NicEeeFailed = 0
+    Invoke-NicEeeCheck $std.eee $adapters
+    $eeeFailed = $script:NicEeeFailed
     $failed = 0; $checked = 0
     $named = @($Name | Where-Object { $_ })
     $found = @{}

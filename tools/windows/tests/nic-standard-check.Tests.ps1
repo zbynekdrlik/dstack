@@ -387,6 +387,19 @@ Check 'EEE, another vendor (Aquantia-style) by its display name and display valu
     (& $v (EeeProp 'GreenMode' '2' 'Green Ethernet' 'On (at 1 Gbps)')) -eq 'FAIL' -and
     (& $v (EeeProp 'EeeEnable' '2' 'EEE' 'Auto')) -eq 'INFO'
 }
+Check 'EEE, a listed keyword without a value goes by its display value' {
+    (EeeVerdicts (Test-NicEeeWindows $eee @((EeeProp '*EEE' '' 'Energy-Efficient Ethernet' 'Enabled')) 'x.sys 1')) -eq '*EEE=FAIL' -and
+    (EeeVerdicts (Test-NicEeeWindows $eee @((EeeProp '*EEE' '' 'Energy-Efficient Ethernet' 'Disabled')) 'x.sys 1')) -eq '*EEE=PASS' -and
+    (EeeVerdicts (Test-NicEeeWindows $eee @((EeeProp '*EEE' '')) 'x.sys 1')) -eq 'eee=INFO'
+}
+Check 'EEE, a keyword with no registry value but a display value is read, not dropped' {
+    Set-FakePc @(
+        @{ Name = 'Ethernet 2'; Desc = 'Realtek PCIe GbE Family Controller'; Status = 'Up'; File = 'rt640x64.sys'; Version = '10.79.50.1003'; Hw = 'PCI\VEN_10EC&DEV_8168'; Props = [ordered]@{ '*EEE' = $null }; Display = @{ '*EEE' = @('Energy-Efficient Ethernet', 'Enabled') }; Wired = $true }
+    )
+    $p = @(Get-NicEeeProps 'Ethernet 2')
+    $p.Count -eq 1 -and $p[0].Value -eq '' -and $p[0].DisplayValue -eq 'Enabled' -and
+    (EeeVerdicts (Test-NicEeeWindows $eee $p 'rt640x64.sys 10.79.50.1003')) -eq '*EEE=FAIL'
+}
 Check 'EEE, no EEE keyword at all is one INFO row' {
     $rows = @(Test-NicEeeWindows $eee @((EeeProp 'IEEE11nMode' '3' '802.11n/ac/ax Wireless Mode' '4. 802.11ax'), (EeeProp 'GreenFieldCapable' '0')) 'x.sys 1')
     $rows.Count -eq 1 -and $rows[0].Verdict -eq 'INFO' -and $rows[0].Key -eq 'eee' -and $rows[0].Actual -eq '(no EEE keyword)'

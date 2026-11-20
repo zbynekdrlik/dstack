@@ -12,6 +12,7 @@ import copy
 import importlib.util
 import io
 import os
+import sys
 import tempfile
 import unittest
 
@@ -404,11 +405,15 @@ class Eee(unittest.TestCase):
     def test_linux_states(self):
         rule = eee_rule()
         for text, verdict, actual in (
-            (IEM_EEE, "FAIL", "enabled"),
-            ("EEE settings for enp1s0:\n\tEEE status: enabled - active\n", "FAIL", "enabled"),
+            (IEM_EEE, "FAIL", "enabled - inactive"),
+            ("EEE settings for enp1s0:\n\tEEE status: enabled - active\n", "FAIL", "enabled - active"),
             (STREAM_EEE, "PASS", "disabled"),
             (COMPANION_EEE, "PASS", "not supported"),
             ("netlink error: Operation not supported\n", "PASS", "not supported"),
+            ("Cannot get EEE settings: Operation not supported\n", "PASS", "not supported"),
+            # Another read's EOPNOTSUPP is no EEE answer: unreadable.
+            ("Cannot get wake-on-lan settings: Operation not supported\n", "FAIL", "(unreadable)"),
+            ("netlink error: No such device\n", "FAIL", "(unreadable)"),
             ("", "FAIL", "(unreadable)"),
         ):
             row = nsc.judge_eee_linux(rule, text, "r8169")
@@ -419,7 +424,7 @@ class Eee(unittest.TestCase):
         row = nsc.judge_eee_linux(eee_rule(), IEM_EEE, "r8169")
         line = nsc.format_row("enp1s0", row)
         self.assertTrue(
-            line.startswith("FAIL  enp1s0  eee:status  expected=disabled|not supported  actual=enabled  (driver r8169; "),
+            line.startswith("FAIL  enp1s0  eee:status  expected=disabled|not supported  actual=enabled - inactive  (driver r8169; "),
             line,
         )
 
@@ -463,6 +468,21 @@ class Eee(unittest.TestCase):
         self.assertEqual(nsc.judge_eee_windows(rule, zero, "aqnic650.sys 3.1.6")[0][0], "PASS")
         self.assertEqual(nsc.judge_eee_windows(rule, green, "x.sys 1")[0][0], "FAIL")
         self.assertEqual(nsc.judge_eee_windows(rule, odd, "x.sys 1")[0][0], "INFO")
+
+    def test_a_listed_keyword_without_a_value_goes_by_its_display_value(self):
+        rule = eee_rule()
+        on = [("*EEE", "", "Energy-Efficient Ethernet", "Enabled")]
+        off = [("*EEE", None, "Energy-Efficient Ethernet", "Disabled")]
+        bare = [("*EEE", "", "", "")]
+        self.assertEqual(verdicts(nsc.judge_eee_windows(rule, on, "x.sys 1")), {"*EEE": "FAIL"})
+        self.assertEqual(verdicts(nsc.judge_eee_windows(rule, off, "x.sys 1")), {"*EEE": "PASS"})
+        self.assertEqual(verdicts(nsc.judge_eee_windows(rule, bare, "x.sys 1")), {"eee": "INFO"})
+
+    def test_run_hands_back_stderr_only_when_asked(self):
+        args = [sys.executable, "-c", "import sys; print('out'); print('err', file=sys.stderr); sys.exit(75)"]
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(nsc.run(args), "out\n")
+        self.assertEqual(nsc.run(args, with_stderr=True), "out\nerr\n")
 
     def test_no_eee_keyword_is_info(self):
         rows = nsc.judge_eee_windows(eee_rule(), WIFI, "x.sys 1")
@@ -514,8 +534,12 @@ class ThisPc(unittest.TestCase):
         # ethtool --show-eee per interface (stream-snv's "disabled" unless a
         # test sets another), every other ethtool output stream-snv's.
         self.eee = {}
-        nsc.run = lambda args, **_: (
-            self.eee.get(args[-1], STREAM_EEE) if args[1] == "--show-eee"
+        # ethtool's stderr per interface, handed back only when the caller
+        # asks for it (with_stderr), as nsc.run does.
+        self.eee_stderr = {}
+        nsc.run = lambda args, with_stderr=False: (
+            self.eee.get(args[-1], STREAM_EEE) + (self.eee_stderr.get(args[-1], "") if with_stderr else "")
+            if args[1] == "--show-eee"
             else STREAM_OUTPUTS[args[1] if len(args) > 2 else ""]
         )
 
@@ -553,7 +577,10 @@ class ThisPc(unittest.TestCase):
         self.assertIn("SKIP  enp2s0  pci 10ec:8168 is down", lines)
         self.assertIn("PASS  rig0  ring:rx  expected=4096  actual=4096", lines)
         # enp7s0 (Intel) gets the EEE rule only, never a Realtek value.
-        self.assertFalse(any("enp7s0" in line and "eee:status" not in line for line in lines))
+        self.assertEqual(
+            [line for line in lines if "enp7s0" in line],
+            ["PASS  enp7s0  eee:status  expected=disabled|not supported  actual=disabled"],
+        )
         self.assertEqual(lines[-1], "1 Realtek NIC(s) checked, 0 FAIL")
 
     def test_a_down_nic_is_checked_with_all(self):
@@ -593,8 +620,8 @@ class ThisPc(unittest.TestCase):
         rc, lines = self.main()
         self.assertEqual(rc, 1)
         expected = "eee:status  expected=disabled|not supported  actual=enabled"
-        self.assertTrue(any(line.startswith(f"FAIL  enp2s0  {expected}  (driver r8169; ") for line in lines))
-        self.assertTrue(any(line.startswith(f"FAIL  enp7s0  {expected}  (driver ixgbe; ") for line in lines))
+        self.assertTrue(any(line.startswith(f"FAIL  enp2s0  {expected} - inactive  (driver r8169; ") for line in lines))
+        self.assertTrue(any(line.startswith(f"FAIL  enp7s0  {expected} - active  (driver ixgbe; ") for line in lines))
         self.assertIn("3 wired NIC(s) checked for EEE, 2 FAIL", lines)
         self.assertEqual(lines[-1], "1 Realtek NIC(s) checked, 0 FAIL")
 
@@ -608,6 +635,25 @@ class ThisPc(unittest.TestCase):
         self.assertTrue(any(line.startswith("FAIL  enp7s0  eee:status") for line in lines))
         self.assertFalse(any("wlan0" in line for line in lines))
         self.assertEqual(lines[-1], "1 Realtek NIC(s) checked, 0 FAIL")
+
+    def test_eee_reads_ethtools_unsupported_answer_from_stderr(self):
+        # ixgbe on the PP editing PC: nothing on stdout, the answer on stderr.
+        self.eee["enp7s0"] = ""
+        self.eee_stderr["enp7s0"] = "netlink error: Operation not supported\n"
+        rc, lines = self.main()
+        self.assertEqual(rc, 0)
+        self.assertIn("PASS  enp7s0  eee:status  expected=disabled|not supported  actual=not supported", lines)
+
+    def test_eee_skips_a_non_ethernet_or_wireless_interface(self):
+        intel = os.path.join(self.root.name, "devices", "pci", "0000:07:00.0")
+        for iface, marker in (("ib0", None), ("wlp1s0", "phy80211")):
+            os.makedirs(os.path.join(self.net, iface))
+            os.symlink(intel, os.path.join(self.net, iface, "device"))
+            if marker:
+                os.makedirs(os.path.join(self.net, iface, marker))
+        self._write(os.path.join(self.net, "ib0", "type"), "32")
+        self._write(os.path.join(self.net, "enp7s0", "type"), "1")
+        self.assertEqual(nsc.wired_nics(self.net), ["enp2s0", "enp7s0", "rig0"])
 
     def test_an_unreadable_standard_exits_2(self):
         rc, lines = self.main(standard=os.path.join(self.root.name, "missing.json"))

@@ -24,7 +24,7 @@ a serious failure): `ethtool --show-eee` "enabled - active" and "enabled -
 inactive" FAIL, "disabled" and "not supported" pass. A FAIL names the NIC,
 its driver and the key:
 
-    FAIL  enp1s0  eee:status  expected=disabled|not supported  actual=enabled  (driver r8169; ...)
+    FAIL  enp1s0  eee:status  expected=disabled|not supported  actual=enabled - inactive  (driver r8169; ...)
 
 The exit status is 1 when anything FAILs, 2 when the standard cannot be read
 or is malformed, else 0.
@@ -474,21 +474,30 @@ def _eee_note(rule, driver):
     return f"driver {driver or '(unknown)'}; {rule['evidence']}"
 
 
+# ethtool's own answer for a driver without EEE support (ixgbe): new ethtool
+# over netlink, old over ioctl. Only this answer, and only with no status.
+EEE_UNSUPPORTED = re.compile(
+    r"^(netlink error|Cannot get EEE settings): Operation not supported", re.MULTILINE
+)
+
+
 def judge_eee_linux(rule, text, driver):
     """The EEE row of a Linux NIC from `ethtool --show-eee` (stdout and
     stderr together): "enabled - active" and "enabled - inactive" are
-    enabled; a driver without EEE support ("Operation not supported") is
-    not supported; no answer is unreadable, a FAIL."""
+    enabled (the actual value shows which); ethtool's answer for a driver
+    without EEE support is not supported; no answer is unreadable, a FAIL."""
     off = rule["linux"]["off"]
+    m = re.search(r"EEE status:\s*(.+)", text)
+    shown = m.group(1).strip() if m else None
     status = parse_eee(text).get("eee:status")
-    if status is None and re.search(r"operation not supported", text, re.IGNORECASE):
-        status = "not supported"
+    if shown is None and EEE_UNSUPPORTED.search(text):
+        shown = status = "not supported"
     expected = "|".join(off)
     note = _eee_note(rule, driver)
     if status is None:
         return ("FAIL", "eee:status", expected, "(unreadable)", note)
     ok = status.casefold() in [o.casefold() for o in off]
-    return ("PASS" if ok else "FAIL", "eee:status", expected, status, note)
+    return ("PASS" if ok else "FAIL", "eee:status", expected, shown, note)
 
 
 def judge_eee_windows(rule, props, driver):
@@ -509,11 +518,14 @@ def judge_eee_windows(rule, props, driver):
         value = "" if value is None else str(value).strip()
         display_value = (display_value or "").strip()
         shown = f"{value} ({display_value})" if display_value else value
-        if keyword.casefold() in keywords:
-            if value == "":
-                continue
+        listed = keyword.casefold() in keywords
+        if listed and value != "":
             rows.append(("PASS" if value.casefold() in off else "FAIL", keyword, "|".join(win["off"]), shown, note))
-        elif display_name and re.search(win["display_name"], display_name, re.IGNORECASE):
+        elif (listed and display_value) or (
+            not listed and display_name and re.search(win["display_name"], display_name, re.IGNORECASE)
+        ):
+            # A listed keyword with no registry value but a display value
+            # (the driver's default shown) is judged as an unlisted one.
             if display_value and re.search(win["display_off"], display_value, re.IGNORECASE):
                 verdict = "PASS"
             elif display_value and re.search(win["display_on"], display_value, re.IGNORECASE):
