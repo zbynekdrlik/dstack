@@ -126,9 +126,9 @@ fn poll_ms(wait: Duration) -> i32 {
 /// left before `until` (true: the socket is readable, or has an error the
 /// next read gives), reading again only after a wait that found it
 /// readable. `None` once `until` passed, never before: `WSAPoll` can end a
-/// wait with nothing before its timeout (windows-2025: a 10 ms wait's
-/// empty ends about every 3.8 ms, #454), so such a wait is waited again
-/// for what is left. No receive is pending between the waits, so none is
+/// wait with nothing before its timeout (windows-2025: a 10 ms wait after
+/// 9.28 ms, a 50 ms one after 49.58 ms, #454 run 44666301837), so such a
+/// wait is waited again for what is left. No receive is pending between the waits, so none is
 /// lost.
 #[cfg_attr(not(windows), allow(dead_code))]
 fn read_when_ready<T>(

@@ -197,9 +197,9 @@ fn a_wait_to_the_end_with_nothing_reads_no_more() {
 #[test]
 fn a_wait_that_ends_early_with_nothing_waits_again_until_the_end() {
     // WSAPoll can end a wait with nothing before its timeout: on
-    // windows-2025 a 10 ms wait's empty ends came about every 3.8 ms (#454,
-    // run 44664370634). Nothing is given before `until`, and a wait that
-    // ended with nothing is not read after.
+    // windows-2025 a 10 ms wait after 9.28 ms, a 50 ms one after 49.58 ms
+    // (#454, run 44666301837). Nothing is given before `until`, and a wait
+    // that ended with nothing is not read after.
     let wait = Duration::from_millis(30);
     let start = Instant::now();
     let (mut reads, mut waits) = (0, 0);
