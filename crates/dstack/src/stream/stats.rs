@@ -16,7 +16,7 @@ use dstack_audio_io::telemetry::period_ns;
 
 use super::split::Peak;
 use super::wake::{self, WakeLateness};
-use super::{Cause, Due, Timing};
+use super::{Cause, Due, Map, Timing};
 use crate::media::tx::ns_of;
 
 /// The pump's counts: written by its thread, read by the engine's control
@@ -75,6 +75,10 @@ pub struct PumpStats {
     pub(super) drain_datagrams: Peak,
     pub(super) process_cpu_ns: Peak,
     pub(super) cpu_measured: AtomicBool,
+    /// The pump reads or writes any channel ([`PumpStats::for_map`], dstack
+    /// #461): a pump with none (dsend's, whose TX thread fills L and R, on a
+    /// device with no RX channel) loses no audio when it re-bootstraps.
+    pub(super) owns_channels: bool,
 }
 
 /// That second's peaks of the lost time's split (dstack #354): the pump
@@ -195,7 +199,27 @@ impl PumpStats {
             drain_datagrams: Peak::default(),
             process_cpu_ns: Peak::default(),
             cpu_measured: AtomicBool::new(false),
+            owns_channels: true,
         }
+    }
+
+    /// These counts for a pump on `map` of a device with `device_rx` RX
+    /// channels (dstack #461): whether it owns any channel, an RX channel it
+    /// reads or a TX channel it writes for the app, or any RX channel of the
+    /// device (in the normal profile the pump writes the RX rings, which
+    /// another reader may use). A pump built with [`PumpStats::new`] alone
+    /// owns channels.
+    pub fn for_map(self, map: &Map, device_rx: usize) -> Self {
+        PumpStats {
+            owns_channels: !map.rx.is_empty() || !map.tx.is_empty() || device_rx > 0,
+            ..self
+        }
+    }
+
+    /// Whether the pump reads or writes any channel of the app
+    /// ([`PumpStats::for_map`]): its re-bootstrap then loses audio.
+    pub fn owns_channels(&self) -> bool {
+        self.owns_channels
     }
 
     /// One block's own time (the pump thread): counted, the longest kept

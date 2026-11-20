@@ -315,6 +315,7 @@ const WORDS: &[&str] = &[
     "thread",
     "scheduling",
     "mmcss_task",
+    "priority",
     "pump",
     "tx_relay",
     "sched_fifo",

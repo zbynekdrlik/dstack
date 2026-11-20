@@ -28,7 +28,8 @@ the network's rate and clock. Windows only (WASAPI loopback).
   --rate <hz>                 the network's sample rate (default 96000)
   --network-latency-ms <ms>   (a) the Dante network latency (default 1)
   --receive-buffer-ms <ms>    (b) the receive buffer; the Dante latency is
-                              (a) + (b) (default: as before 0.6.106)
+                              (a) + (b) (default: 40 ms less (a), a
+                              Dante latency of 40 ms; 9 ms up to 0.6.201)
   --app-buffer-ms <ms>        the buffer between the captured output and
                               the network, 1 to 150 (default: WASAPI's
                               10 ms period, assumed, + one pump block,
@@ -199,17 +200,40 @@ pub fn state_path(
     )
 }
 
+/// dsend's Dante latency unless `--receive-buffer-ms` sets (b), ns: 40 ms
+/// (owner ROZHODNUTÉ 20.11.2026, dstack #461). dsend is a fallback path on
+/// the FOH PC, where any click in the PC's main audio (Ableton, dasio) is
+/// critical and a click in dsend is not, so dsend never raises its threads'
+/// priority; it rides the holds of the PC's shared CPUs out in its latency
+/// instead. 40 ms covers every hold seen there (FOH 18.11-20.11.2026: 6.6
+/// to 35.7 ms; the TX schedule starts again past P), where dlink's default
+/// gave dsend 9 ms (dstack #247).
+pub const LATENCY_NS: u64 = 40_000_000;
+
+/// The latency terms dsend's device runs at (dstack #461): those `given`,
+/// and with no (b) given, (b) = [`LATENCY_NS`] less (a) (`given`'s, else
+/// dlink's 1 ms), so the Dante latency is [`LATENCY_NS`].
+pub fn latency_of(given: Latency) -> Latency {
+    let network_ns = given.network_ns.unwrap_or(dlink::NETWORK_LATENCY_NS);
+    Latency {
+        receive_buffer_ns: given
+            .receive_buffer_ns
+            .or(Some(LATENCY_NS.saturating_sub(network_ns))),
+        ..given
+    }
+}
+
 /// The dlink device of a run: `name`, its state in `state`, TX only (L and
 /// R) at the network's rate, `dstack`/`dsend` as Dante Controller's
-/// manufacturer and model, and the latency terms, ports and process id
-/// the options give (dlink's defaults otherwise: (a) 1 ms, (b) keeping
-/// v0.6.105's latency, no real-time setup).
+/// manufacturer and model, and the latency terms ([`latency_of`]: a Dante
+/// latency of 40 ms unless set), ports and process id the options give (no
+/// real-time setup).
 pub fn link_config(o: &Options, name: &str, state: PathBuf) -> Config {
     let mut c = Config::new(name, state)
         .tx(TX_NAMES)
         .sample_rate(o.rate)
         .product("dstack", APP);
-    c = with_shared(c, o.latency, o.ports, o.process_id);
+    c = with_shared(c, latency_of(o.latency), o.ports, o.process_id);
     c
 }
 

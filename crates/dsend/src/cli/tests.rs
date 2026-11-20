@@ -181,6 +181,7 @@ fn the_link_config_is_a_tx_only_device_l_and_r_with_the_options() {
             .tx(["L", "R"])
             .sample_rate(96_000)
             .product("dstack", "dsend")
+            .receive_buffer_ns(39_000_000)
             .app_buffer(WASAPI_PERIOD_NS, None)
     );
     let dev = plain.device().unwrap();
@@ -259,4 +260,51 @@ fn a_run_never_shows_a_box_its_failure_goes_to_the_log() {
             "a script's redirected stderr"
         );
     }
+}
+
+/// dstack #461 (owner ROZHODNUTÉ 20.11.2026): dsend's Dante latency is 40
+/// ms unless (b) is set, up from dlink's 9 ms (dstack #247's per-app
+/// defaults). dsend is a fallback on the FOH PC: it never raises its
+/// threads' priority there (the PC's main audio, Ableton and dasio, must
+/// not lose CPU to it), so it rides the PC's holds out in its latency; the
+/// largest hold seen there was 35.7 ms, and the TX schedule starts again
+/// only past P.
+#[test]
+fn dsend_s_dante_latency_is_40_ms_unless_set() {
+    let state = PathBuf::from("/tmp/s.toml");
+    for (flags, network_ns) in [("", 1_000_000), ("--network-latency-ms 0.5", 500_000)] {
+        for rate in ["96000", "48000", "44100"] {
+            let o = run(&format!("{flags} --rate {rate}"));
+            let split = link_config(&o, "pc-dsend", state.clone()).split().unwrap();
+            assert_eq!(split.latency_ns, 40_000_000, "{flags} {rate}: {split:?}");
+            assert_eq!(split.network_latency_ns, network_ns, "{flags} {rate}");
+            assert_eq!(split.receive_buffer_ns, 40_000_000 - network_ns);
+        }
+    }
+    // (b) set: as given, (a) + (b).
+    let set = link_config(&run("--receive-buffer-ms 9"), "pc-dsend", state);
+    assert_eq!(set.split().unwrap().latency_ns, 10_000_000);
+    assert_eq!(LATENCY_NS, 40_000_000);
+    assert_eq!(
+        latency_of(Latency {
+            network_ns: Some(2_000_000),
+            receive_buffer_ns: None,
+            app_buffer_ns: Some(5_000_000),
+        }),
+        Latency {
+            network_ns: Some(2_000_000),
+            receive_buffer_ns: Some(38_000_000),
+            app_buffer_ns: Some(5_000_000),
+        }
+    );
+    // An (a) past 40 ms leaves (b) at 0: the device refuses what is under
+    // its floor, never a wrapped (b).
+    assert_eq!(
+        latency_of(Latency {
+            network_ns: Some(41_000_000),
+            ..Latency::default()
+        })
+        .receive_buffer_ns,
+        Some(0)
+    );
 }

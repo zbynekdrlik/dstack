@@ -18,9 +18,10 @@
 //! without spinning a core. On Windows they ask THREAD_PRIORITY_HIGHEST
 //! within the process's normal class, join MMCSS "Pro Audio" at
 //! AVRT_PRIORITY_HIGH (so an app's own MMCSS audio threads no longer
-//! outrank them; dstack #1) and opt out of power throttling, all without
-//! privilege, for our threads only, nothing process-wide; elsewhere they
-//! run at normal priority. Very low latency is a different situation, for
+//! outrank them; dstack #1; where MMCSS is off the status and the log
+//! report the priority read back, dstack #461) and opt out of power
+//! throttling, all without privilege, for our threads only, nothing
+//! process-wide; elsewhere they run at normal priority. Very low latency is a different situation, for
 //! iemmixer and dasio, which use `dstack` directly with its `low_latency`
 //! profile.
 //!
@@ -166,6 +167,11 @@
 //! and `drain_max_datagrams` (its socket drain before a block) and
 //! `max_process_cpu_us` (a block's thread CPU time on Linux, `-` elsewhere:
 //! far under `max_process_us`, the block was preempted, not slow).
+//! A pump that owns no channels (every TX channel pulled by the TX thread,
+//! no RX channel: dsend's) loses no audio when it re-bootstraps or
+//! overruns, so since dstack #461 its second is an info line, `engine pump
+//! re-bootstrapped or overran this second: it owns no channels, no audio
+//! lost`, with the same fields.
 //!
 //! ```no_run
 //! use dlink::{Block, Config, Link, Map, Place, Process};

@@ -181,6 +181,11 @@ exclude_re = [
   # gate's Linux, and its Linux twin is a constant error (a test pins it);
   # the decision is `wants_mmcss` and `priority_outcome` (tested).
   "tx/priority.rs.*(replace join_mmcss -> |in join_mmcss$)",
+  # The priority read-back (dstack #461): GetThreadPriority, Windows only, not
+  # compiled on the gate's Linux; its Linux twin `thread_priority` (None) is
+  # pinned by a test, the decisions are `joined_task`, `needs_again` and
+  # `held` (tested), and a Windows test reads a set level back on CI.
+  "tx/priority.rs.*thread_priority_of_windows",
   # The media threads' re-pin (dstack #1): the Windows SetThreadAffinityMask
   # call is not compiled on the gate's Linux; its decisions (`outcome`,
   # `one_cpu_mask`), the schedule (RePin::due) and the counting are tested,

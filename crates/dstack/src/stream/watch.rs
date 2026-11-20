@@ -18,7 +18,11 @@
 //! stamps already sent; with
 //! only `overruns` grown, blocks took longer than their period (an
 //! unoptimised converter in a debug build, dstack #1). A gap without the
-//! line is the network or the RX/TX path.
+//! line is the network or the RX/TX path. A pump that owns no channels
+//! ([`PumpStats::owns_channels`], dstack #461: dsend's, whose TX thread
+//! fills L and R) loses nothing that way: its second is an info line,
+//! [`PUMP_NO_LOSS`], with `lost_samples=0` in place of `missed` and
+//! `writes_after_send`.
 //!
 //! The line names the re-bootstraps' causes (`cause`, [`cause_word`]:
 //! `late`, `clock_back`, `reanchor`, `retime`, joined by `+`; `none` when
@@ -45,6 +49,14 @@ use crate::media::late::{EVERY_NS, MINUTE_NS};
 
 /// The text of the pump watch's warning: the line a consumer greps for.
 pub const PUMP_WARNING: &str = "engine pump lost or overran blocks this second";
+
+/// The pump watch's line for a pump that owns no channels (dstack #461,
+/// [`PumpStats::owns_channels`]: dsend's, whose TX thread fills L and R):
+/// its re-bootstrap or overrun loses no audio, so it is an info line that
+/// says what was lost (`lost_samples=0`), never `missed` blocks, with
+/// [`PUMP_WARNING`]'s timing fields.
+pub const PUMP_NO_LOSS: &str =
+    "engine pump re-bootstrapped or overran this second: it owns no channels, no audio lost";
 
 /// What grew in the pump's counts since the last look.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -232,6 +244,30 @@ impl PumpWatch {
             return;
         };
         let timing = stats.timing();
+        // A pump that owns no channels (dstack #461) loses no audio: its
+        // line says what was lost, 0 samples, never `missed` blocks.
+        if !stats.owns_channels() {
+            info!(
+                device,
+                rebootstraps = grew.rebootstraps,
+                lost_samples = 0,
+                overruns = grew.overruns,
+                max_process_us = second_max_us,
+                media = view.media,
+                block = timing.block,
+                margin = timing.margin,
+                playout = timing.playout,
+                offset = timing.offset(),
+                cause = %cause_word(&grew),
+                behind_max_us,
+                oversleep_max_us = split.oversleep_us,
+                drain_max_us = split.drain_us,
+                drain_max_datagrams = split.drain_datagrams,
+                max_process_cpu_us = %cpu_word(split.process_cpu_us),
+                "{PUMP_NO_LOSS}"
+            );
+            return;
+        }
         warn!(
             device,
             rebootstraps = grew.rebootstraps,

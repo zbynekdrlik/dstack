@@ -955,8 +955,9 @@ use priority::ask_priority;
 #[cfg(test)]
 use priority::pin_to_cpu;
 pub use priority::{
-    MediaThread, MmcssError, NO_MMCSS, Priority, Scheduled, Scheduling, WINDOWS_HIGHEST,
-    WINDOWS_TIME_CRITICAL, join_mmcss, windows_priority_for, windows_thread_priority,
+    MediaThread, MmcssError, NO_MMCSS, NO_MMCSS_TASK, Priority, Scheduled, Scheduling,
+    WINDOWS_HIGHEST, WINDOWS_TIME_CRITICAL, join_mmcss, joined_task, thread_priority,
+    windows_priority_for, windows_thread_priority,
 };
 pub(crate) use priority::{place, take_priority};
 mod schedule;
