@@ -164,5 +164,16 @@ fn wait_read<T>(
     result_of(read_of(read(sock)))
 }
 
+/// Timeout reads (`attempt` takes the time left as its timeout) until one
+/// gives a datagram or fails, or `until` passed: the stub of the RED test.
+#[cfg(not(windows))]
+#[cfg_attr(not(test), allow(dead_code))]
+fn timeout_reads<T>(
+    _until: Instant,
+    mut attempt: impl FnMut(Duration) -> io::Result<T>,
+) -> io::Result<Option<T>> {
+    result_of(read_of(attempt(Duration::from_millis(1))))
+}
+
 #[cfg(test)]
 mod tests;

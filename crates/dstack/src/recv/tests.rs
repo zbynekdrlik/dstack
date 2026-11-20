@@ -262,3 +262,37 @@ fn a_readiness_with_nothing_to_read_waits_again_until_the_end() {
     assert!(waits.len() >= 2, "{waits:?}");
     assert!(waits.windows(2).all(|w| w[1] < w[0]), "{waits:?}");
 }
+
+/// A timeout read that comes back with nothing before its time (Linux's
+/// `SO_RCVTIMEO` did: a 10 ms wait after 9.98 ms in v0.6.199's coverage
+/// run 44676560919) is read again for what is left, so an empty read never
+/// ends before its wait.
+#[cfg(not(windows))]
+#[test]
+fn a_timeout_read_that_ends_early_is_read_again_until_its_time() {
+    let wait = Duration::from_millis(30);
+    let mut tries = 0;
+    let start = Instant::now();
+    let got: io::Result<Option<()>> = timeout_reads(until_of(start, wait), |left| {
+        tries += 1;
+        // Each read comes back with nothing after half its timeout.
+        std::thread::sleep(left / 2);
+        Err(io::Error::from(io::ErrorKind::WouldBlock))
+    });
+    assert!(matches!(got, Ok(None)), "{got:?}");
+    assert!(start.elapsed() >= wait, "{:?} < {wait:?}", start.elapsed());
+    assert!(tries > 1, "{tries}");
+}
+
+/// A datagram is given at once; a failure is the read's error.
+#[cfg(not(windows))]
+#[test]
+fn a_timeout_read_gives_its_datagram_or_its_error_at_once() {
+    let until = until_of(Instant::now(), Duration::from_secs(5));
+    let got = timeout_reads(until, |_| Ok(7));
+    assert_eq!(got.unwrap(), Some(7));
+    let got: io::Result<Option<u8>> = timeout_reads(until, |_| {
+        Err(io::Error::from(io::ErrorKind::ConnectionRefused))
+    });
+    assert_eq!(got.unwrap_err().kind(), io::ErrorKind::ConnectionRefused);
+}
