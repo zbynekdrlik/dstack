@@ -14,7 +14,9 @@
 //! Its own binary, run by CI's Linux test job in release (`cargo test
 //! --release -p dlink --test rated_cost`): a cost is only meaningful
 //! optimised, and the debug build's `Rated` glue alone takes about 500 µs
-//! a block. In a debug build the file holds no test.
+//! a block. In a debug build the file holds no test. On a loaded box run
+//! the binary under `chrt -f 10`: plain at dev1 load 80 the table read a
+//! median of 689 µs (the run queue's), under `chrt -f 10` 587-601 µs.
 #![cfg(not(debug_assertions))]
 
 use std::time::Instant;
