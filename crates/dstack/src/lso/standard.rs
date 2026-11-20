@@ -133,5 +133,14 @@ pub fn file_name(image_path: &str) -> &str {
     path.rsplit(['\\', '/']).next().unwrap_or(path)
 }
 
+/// The driver file of the service `service`: its `ImagePath`'s file, or
+/// without one the file Windows loads then (`System32\drivers\<service>.sys`).
+pub fn driver_file(service: &str, image_path: Option<&str>) -> String {
+    match image_path.map(file_name).filter(|f| !f.is_empty()) {
+        Some(file) => file.to_string(),
+        None => format!("{}.sys", service.trim()),
+    }
+}
+
 #[cfg(test)]
 mod tests;

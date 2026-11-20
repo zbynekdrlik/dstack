@@ -2,15 +2,15 @@
 // Copyright (C) 2026 dstack contributors.
 
 //! Read-only access to the Windows registry, shared by the checks that read
-//! it (the NIC's offload in [`crate::lso`], the QoS policies in
+//! it (the NIC's offload and driver in [`crate::lso`], the QoS policies in
 //! [`crate::media::dscp`]). Windows-only glue, so outside the mutation gate
 //! (`.cargo/mutants.toml`); the decisions over what it reads are tested on
 //! every platform where they live.
 
 use windows_sys::Win32::Foundation::{ERROR_MORE_DATA, ERROR_NO_MORE_ITEMS};
 use windows_sys::Win32::System::Registry::{
-    KEY_READ, REG_DWORD, REG_EXPAND_SZ, REG_SZ, RRF_RT_ANY, RRF_RT_REG_SZ, RegCloseKey,
-    RegEnumKeyExW, RegEnumValueW, RegGetValueW, RegOpenKeyExW,
+    KEY_READ, REG_DWORD, REG_EXPAND_SZ, REG_SZ, RRF_RT_ANY, RRF_RT_REG_MULTI_SZ, RRF_RT_REG_SZ,
+    RegCloseKey, RegEnumKeyExW, RegEnumValueW, RegGetValueW, RegOpenKeyExW,
 };
 
 pub use windows_sys::Win32::System::Registry::{HKEY, HKEY_LOCAL_MACHINE};
@@ -158,6 +158,46 @@ impl Key {
         }
         None
     }
+
+    /// The REG_MULTI_SZ value `name` of this key, its strings in order;
+    /// none when absent or of another type.
+    fn get_multi(&self, name: &str) -> Option<Vec<String>> {
+        let name = wide(name);
+        let mut buf: Vec<u16> = vec![0; 256];
+        // The value can grow between the size asked and the read: try again.
+        for _ in 0..4 {
+            let mut len = (buf.len() * 2) as u32;
+            // SAFETY: an open key, a NUL-terminated name, `buf` is `len`
+            // writable bytes; no subkey and no type wanted (null).
+            let r = unsafe {
+                RegGetValueW(
+                    self.0,
+                    std::ptr::null(),
+                    name.as_ptr(),
+                    RRF_RT_REG_MULTI_SZ,
+                    std::ptr::null_mut(),
+                    buf.as_mut_ptr().cast(),
+                    &mut len,
+                )
+            };
+            if r == ERROR_MORE_DATA {
+                buf = vec![0; (len as usize).div_ceil(2) + 64];
+                continue;
+            }
+            if r != 0 {
+                return None;
+            }
+            let n = (len as usize / 2).min(buf.len());
+            return Some(
+                buf[..n]
+                    .split(|&w| w == 0)
+                    .filter(|part| !part.is_empty())
+                    .map(String::from_utf16_lossy)
+                    .collect(),
+            );
+        }
+        None
+    }
 }
 
 impl Drop for Key {
@@ -167,25 +207,28 @@ impl Drop for Key {
     }
 }
 
-/// The string value `value` of HKLM\\`key`, a REG_SZ or a REG_EXPAND_SZ
-/// (expanded: a driver's `ImagePath`); none when absent or of another type.
-pub fn read_text(key: &str, value: &str) -> Option<String> {
-    match Key::open(HKEY_LOCAL_MACHINE, key)
-        .ok()?
-        .get(value, RRF_RT_ANY)?
-    {
+/// The string value `value` of HKLM\\`key` among the `RRF_RT_*` types
+/// `types`; none when absent or of another type.
+fn read_string(key: &str, value: &str, types: u32) -> Option<String> {
+    match Key::open(HKEY_LOCAL_MACHINE, key).ok()?.get(value, types)? {
         Value::Text(s) => Some(s),
         Value::Number(_) => None,
     }
 }
 
+/// The string value `value` of HKLM\\`key`, a REG_SZ or a REG_EXPAND_SZ
+/// (expanded: a driver's `ImagePath`); none when absent or of another type.
+pub fn read_text(key: &str, value: &str) -> Option<String> {
+    read_string(key, value, RRF_RT_ANY)
+}
+
 /// The string value `value` of HKLM\\`key`; none when absent.
 pub fn read_sz(key: &str, value: &str) -> Option<String> {
-    match Key::open(HKEY_LOCAL_MACHINE, key)
-        .ok()?
-        .get(value, RRF_RT_REG_SZ)?
-    {
-        Value::Text(s) => Some(s),
-        Value::Number(_) => None,
-    }
+    read_string(key, value, RRF_RT_REG_SZ)
+}
+
+/// The REG_MULTI_SZ value `value` of HKLM\\`key`, its strings in order (a
+/// device's `HardwareID`); none when absent or of another type.
+pub fn read_multi_sz(key: &str, value: &str) -> Option<Vec<String>> {
+    Key::open(HKEY_LOCAL_MACHINE, key).ok()?.get_multi(value)
 }

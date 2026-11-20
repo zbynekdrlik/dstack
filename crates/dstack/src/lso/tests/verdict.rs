@@ -22,7 +22,6 @@ fn entry_id(v: DriverVerdict<'_>) -> (&'static str, &str) {
         DriverVerdict::File(e) => ("file", e.id.as_str()),
         DriverVerdict::Old(e) => ("old", e.id.as_str()),
         DriverVerdict::Unknown => ("unknown", ""),
-        DriverVerdict::Virtual => ("virtual", ""),
         DriverVerdict::Other => ("other", ""),
     }
 }
@@ -201,10 +200,12 @@ fn a_realtek_adapter_without_an_entry_warns() {
     assert_eq!(v(None, None), "other");
 }
 
-/// A VLAN virtual adapter the standard has no entry for (its hardware id
-/// not read) keeps the old info line: its driver is the VLAN layer's.
+/// A Realtek VLAN virtual adapter the standard has no entry for (its
+/// hardware id not read) is a Realtek adapter without an entry: it warns,
+/// as the Windows checker fails it (review of #466: the earlier info line
+/// was quieter than the checker).
 #[test]
-fn a_virtual_adapter_without_an_entry_is_named_as_one() {
+fn a_virtual_adapter_without_an_entry_warns_as_a_realtek_adapter() {
     let std = standard::embedded().unwrap();
     let f = DriverFacts {
         provider: Some("Realtek".into()),
@@ -212,7 +213,7 @@ fn a_virtual_adapter_without_an_entry_is_named_as_one() {
         version: Some("10.4.1117.2020".into()),
         ..DriverFacts::default()
     };
-    assert_eq!(entry_id(driver_verdict(std, &f)).0, "virtual");
+    assert_eq!(entry_id(driver_verdict(std, &f)).0, "unknown");
 }
 
 /// Another file at a bad entry's version is that file's verdict, not the
@@ -294,8 +295,8 @@ fn a_wrong_file_or_an_old_version_warns_with_the_note() {
     );
 }
 
-/// A Realtek adapter without an entry warns with its hardware id; a
-/// virtual adapter is an info line; another vendor's has no line.
+/// A Realtek adapter without an entry warns with its hardware id (a
+/// virtual one too); another vendor's has no line.
 #[test]
 fn the_other_verdicts_lines() {
     let unknown = line_of(&facts("Realtek", r"PCI\VEN_10EC&DEV_8161", "x.sys", "1.0")).unwrap();
@@ -311,9 +312,93 @@ fn the_other_verdicts_lines() {
         ..DriverFacts::default()
     })
     .unwrap();
-    assert!(!virt.warn && virt.text.contains("VLAN"), "{virt:?}");
+    assert!(
+        virt.warn && virt.text.contains("hardware id not read"),
+        "{virt:?}"
+    );
     assert_eq!(
         line_of(&facts("Intel", r"PCI\VEN_8086&DEV_15F3", "e2f.sys", "2.1")),
         None
+    );
+}
+
+/// A Realtek adapter as the Windows checker tells one
+/// (`Test-RealtekAdapter`): its description, or a hardware id that STARTS
+/// with a Realtek prefix (the VLAN adapter's `RTK_` too); its provider also
+/// counts. Without an entry each warns.
+#[test]
+fn a_realtek_adapter_is_told_as_the_checker_tells_it() {
+    let std = standard::embedded().unwrap();
+    let v = |description: Option<&str>, hw: Option<&str>| {
+        let f = DriverFacts {
+            provider: Some("Microsoft".into()),
+            hardware_id: hw.map(Into::into),
+            description: description.map(Into::into),
+            ..DriverFacts::default()
+        };
+        entry_id(driver_verdict(std, &f)).0
+    };
+    assert_eq!(
+        v(Some("Realtek USB GbE Family Controller"), None),
+        "unknown"
+    );
+    assert_eq!(v(Some("realtek gaming 2.5gbe"), None), "unknown");
+    assert_eq!(v(None, Some("RTK_VLANX")), "unknown");
+    assert_eq!(v(None, Some(r"usb\vid_0bda&pid_8153&rev_3000")), "unknown");
+    // Prefix, not substring; and the vendor id with its `&`.
+    assert_eq!(v(None, Some(r"X\PCI\VEN_10EC&DEV_8161")), "other");
+    assert_eq!(v(None, Some(r"USB\VID_0BDAX")), "other");
+    assert_eq!(v(Some("Intel(R) Ethernet I225-V"), None), "other");
+}
+
+/// The rule's other shapes, which the real file does not have yet: a bad
+/// entry with a version only (any file), an entry without a minimum (any
+/// version of its file), and its sentence without a minimum.
+#[test]
+fn a_version_only_bad_entry_and_an_entry_without_a_minimum() {
+    let std = standard::Standard::parse(
+        r#"{"version": 9, "adapters": [
+            {"id": "t-windows", "chip": "RTL-T", "os": "windows",
+             "match": {"hardware_id": ["PCI\\VEN_10EC&DEV_7777"]},
+             "driver": {"files": ["t.sys"], "status": "settled",
+                        "evidence": "the test's evidence",
+                        "bad": [{"version": "1.2.3", "evidence": "bad 1.2.3"}]}}
+        ]}"#,
+    )
+    .unwrap();
+    let hw = r"PCI\VEN_10EC&DEV_7777&REV_01";
+    let f = |file: &str, version: &str| facts("Realtek", hw, file, version);
+    let bad = f("other.sys", "1.2.3");
+    match driver_verdict(&std, &bad) {
+        DriverVerdict::Bad(e, b) => assert_eq!(
+            (e.id.as_str(), b.evidence.as_str()),
+            ("t-windows", "bad 1.2.3")
+        ),
+        v => panic!("{v:?}"),
+    }
+    assert_eq!(
+        entry_id(driver_verdict(&std, &f("t.sys", "0.1"))),
+        ("standard", "t-windows")
+    );
+    let mut none = f("t.sys", "");
+    none.version = None;
+    assert_eq!(entry_id(driver_verdict(&std, &none)).0, "standard");
+    let line = driver_line(&driver_verdict(&std, &f("u.sys", "2")), &f("u.sys", "2")).unwrap();
+    assert!(
+        line.warn
+            && line
+                .text
+                .contains("install t.sys (docs/nic-standard.md); the test's evidence"),
+        "{line:?}"
+    );
+}
+
+/// The sentence prints the file trimmed, as it was judged.
+#[test]
+fn the_sentence_prints_the_file_trimmed() {
+    let line = line_of(&facts("Realtek", DSG, " rt640x64.sys ", "10.79.50.1003")).unwrap();
+    assert!(
+        !line.warn && line.text.contains("driver rt640x64.sys 10.79.50.1003 is"),
+        "{line:?}"
     );
 }

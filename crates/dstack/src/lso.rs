@@ -44,13 +44,6 @@ pub fn verdict(v2: Option<&str>, v1: Option<&str>) -> Verdict {
     }
 }
 
-/// Whether an adapter's `DriverDesc` names a VLAN virtual adapter, as
-/// Realtek's Ethernet Diagnostic Utility creates one per VLAN ("Realtek
-/// Virtual Adapter", dstack #155).
-pub fn virtual_adapter(description: Option<&str>) -> bool {
-    description.is_some_and(|d| d.to_ascii_lowercase().contains("virtual adapter"))
-}
-
 pub mod standard;
 
 /// What the start line knows of the Dante NIC's driver (the network class
@@ -59,7 +52,9 @@ pub mod standard;
 pub struct DriverFacts {
     /// `ProviderName` (`Realtek`, `Microsoft`).
     pub provider: Option<String>,
-    /// `MatchingDeviceId` (`PCI\VEN_10EC&DEV_8125&...`, `RTK_VLANMP`).
+    /// The device's first hardware id (`Enum\<DeviceInstanceID>\HardwareID`,
+    /// as the checkers read it: `PCI\VEN_10EC&DEV_8125&...`, `RTK_VLANMP`),
+    /// or the class key's `MatchingDeviceId` when that is not read.
     pub hardware_id: Option<String>,
     /// The driver file (`rt640x64.sys`).
     pub file: Option<String>,
@@ -81,11 +76,9 @@ pub enum DriverVerdict<'a> {
     File(&'a standard::Entry),
     /// Under the entry's minimum version (or no version read).
     Old(&'a standard::Entry),
-    /// A Realtek adapter the standard has no entry for.
+    /// A Realtek adapter (a Realtek VLAN adapter too) the standard has no
+    /// entry for.
     Unknown,
-    /// A VLAN virtual adapter the standard has no entry for: its driver is
-    /// the VLAN layer's, the NIC's own is not read.
-    Virtual,
     /// Not a Realtek adapter, or not read.
     Other,
 }
@@ -93,8 +86,8 @@ pub enum DriverVerdict<'a> {
 /// The verdict on the driver `facts` against the standard `std`: the
 /// Windows entry for the adapter's hardware id judges it as the checkers
 /// do (`judge_driver` in `tools/linux/nic-standard-check.py`); without an
-/// entry, a VLAN virtual adapter is named as one, a Realtek adapter has no
-/// standard, and another vendor's is not judged.
+/// entry, a Realtek adapter has no standard (a warning, as the checkers
+/// fail it) and another vendor's is not judged.
 pub fn driver_verdict<'a>(std: &'a standard::Standard, facts: &DriverFacts) -> DriverVerdict<'a> {
     match facts
         .hardware_id
@@ -102,23 +95,26 @@ pub fn driver_verdict<'a>(std: &'a standard::Standard, facts: &DriverFacts) -> D
         .and_then(|h| std.windows_entry(h))
     {
         Some(entry) => judge(entry, facts),
-        None if virtual_adapter(facts.description.as_deref()) => DriverVerdict::Virtual,
         None if realtek(facts) => DriverVerdict::Unknown,
         None => DriverVerdict::Other,
     }
 }
 
-/// Whether the adapter is a Realtek one: its provider, or a Realtek PCI
-/// (`VEN_10EC`) or USB (`VID_0BDA`) vendor id under another provider (the
-/// inbox driver's provider is Microsoft).
+/// The hardware id prefixes of a Realtek adapter, as the Windows checker
+/// tells one (`Test-RealtekAdapter`): its PCI or USB vendor id, or its VLAN
+/// adapter.
+const REALTEK_IDS: [&str; 3] = [r"PCI\VEN_10EC&", r"USB\VID_0BDA&", "RTK_"];
+
+/// Whether the adapter is a Realtek one, as the Windows checker tells it:
+/// its description names Realtek, or its hardware id starts with a Realtek
+/// prefix ([`REALTEK_IDS`]; the inbox driver's provider is Microsoft);
+/// also a Realtek provider.
 fn realtek(facts: &DriverFacts) -> bool {
-    let names = |value: &Option<String>, parts: &[&str]| {
-        value.as_deref().is_some_and(|v| {
-            let v = v.to_ascii_uppercase();
-            parts.iter().any(|p| v.contains(p))
-        })
-    };
-    names(&facts.provider, &["REALTEK"]) || names(&facts.hardware_id, &["VEN_10EC", "VID_0BDA"])
+    let upper = |v: &Option<String>| v.as_deref().map(|s| s.trim().to_ascii_uppercase());
+    let named = |v: &Option<String>| upper(v).is_some_and(|s| s.contains("REALTEK"));
+    named(&facts.provider)
+        || named(&facts.description)
+        || upper(&facts.hardware_id).is_some_and(|h| REALTEK_IDS.iter().any(|p| h.starts_with(p)))
 }
 
 /// The entry's verdict on a driver: a bad one (its file, its exact
@@ -159,7 +155,7 @@ pub struct Line {
 /// vendor's adapter). A warning names the standard's driver and its
 /// evidence (or, while the rule is open, the plan that decides it).
 pub fn driver_line(verdict: &DriverVerdict<'_>, facts: &DriverFacts) -> Option<Line> {
-    let file = facts.file.as_deref().unwrap_or("(file not read)");
+    let file = facts.file.as_deref().map_or("(file not read)", str::trim);
     let version = facts
         .version
         .as_deref()
@@ -222,12 +218,6 @@ pub fn driver_line(verdict: &DriverVerdict<'_>, facts: &DriverFacts) -> Option<L
                     .hardware_id
                     .as_deref()
                     .unwrap_or("hardware id not read")
-            ),
-        ),
-        DriverVerdict::Virtual => line(
-            false,
-            format!(
-                "the Dante leg is a VLAN virtual adapter (driver {version}): its driver is the VLAN layer's, the NIC's own driver is not read (docs/two-networks.md)"
             ),
         ),
         DriverVerdict::Other => None,

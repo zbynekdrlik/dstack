@@ -18,18 +18,22 @@ pub fn check(adapter: &str) -> Verdict {
 }
 
 /// What the registry says of the driver of the adapter whose GUID is
-/// `adapter`: its class subkey's `ProviderName`, `MatchingDeviceId`,
-/// `DriverVersion` and `DriverDesc`, and the file of its service
-/// (`Ndi\Service`, then the service's `ImagePath`); `None` when no class
+/// `adapter`: the device's first hardware id (its `DeviceInstanceID`'s
+/// `HardwareID` under `Enum`, as the checkers read it; the class subkey's
+/// `MatchingDeviceId` when that is not read), the class subkey's
+/// `ProviderName`, `DriverVersion` and `DriverDesc`, and the file of its
+/// service (`Ndi\Service`, [`standard::driver_file`]); `None` when no class
 /// subkey has the adapter.
 pub fn driver_facts(adapter: &str) -> Option<DriverFacts> {
     let key = sys::adapter_key(adapter)?;
+    let hardware_id = sys::read(&key, "DeviceInstanceID")
+        .and_then(|instance| sys::first_hardware_id(&instance))
+        .or_else(|| sys::read(&key, "MatchingDeviceId"));
     let file = sys::read(&format!(r"{key}\Ndi"), "Service")
-        .and_then(|service| sys::image_path(&service))
-        .map(|path| standard::file_name(&path).to_string());
+        .map(|service| standard::driver_file(&service, sys::image_path(&service).as_deref()));
     Some(DriverFacts {
         provider: sys::read(&key, "ProviderName"),
-        hardware_id: sys::read(&key, "MatchingDeviceId"),
+        hardware_id,
         file,
         version: sys::read(&key, "DriverVersion"),
         description: sys::read(&key, "DriverDesc"),
@@ -69,6 +73,8 @@ pub(crate) mod sys {
         r"SYSTEM\CurrentControlSet\Control\Class\{4d36e972-e325-11ce-bfc1-08002be10318}";
     /// The services' key (a driver's `ImagePath`).
     const SERVICES: &str = r"SYSTEM\CurrentControlSet\Services";
+    /// The devices' key (a device's hardware ids).
+    const ENUM: &str = r"SYSTEM\CurrentControlSet\Enum";
 
     /// A string value of HKLM\`key`, `None` when absent.
     pub fn read(key: &str, value: &str) -> Option<String> {
@@ -78,6 +84,13 @@ pub(crate) mod sys {
     /// The `ImagePath` of the service `service` (a REG_EXPAND_SZ value).
     pub fn image_path(service: &str) -> Option<String> {
         crate::winreg::read_text(&format!(r"{SERVICES}\{service}"), "ImagePath")
+    }
+
+    /// The first of the device `instance`'s hardware ids (its
+    /// `HardwareID` under `Enum`, a REG_MULTI_SZ).
+    pub fn first_hardware_id(instance: &str) -> Option<String> {
+        let ids = crate::winreg::read_multi_sz(&format!(r"{ENUM}\{instance}"), "HardwareID")?;
+        ids.into_iter().next()
     }
 
     /// The `*LsoV2IPv4` and `*LsoV1IPv4` values of the adapter whose

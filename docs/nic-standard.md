@@ -2,7 +2,7 @@
 
 One standard for every Realtek NIC on a production PC: which driver it runs and every advanced value it holds, each with its evidence. It is part of the production network standard (`docs/two-networks.md`, #155), and dstack owns it. The owner's rule (20.11.2026): one uniform working setup, not a different setting and driver version per project.
 
-- **The file:** [`docs/nic-standard.json`](nic-standard.json), machine-readable, `schema` `dstack-nic-standard/1`, `version` 1. It is the only source: this page explains it, the file decides.
+- **The file:** [`docs/nic-standard.json`](nic-standard.json), machine-readable, `schema` `dstack-nic-standard/1`, `version` 2 (2: text only, #466). It is the only source: this page explains it, the file decides.
 - **The checkers:** `tools/windows/nic-standard-check.ps1` and `tools/linux/nic-standard-check.py`. Both are read-only: they never set a value, install a driver or restart an adapter.
 - **Scope:** every Realtek NIC that is up on a PC with a Dante leg (`docs/two-networks.md`, scope: a PC without one is not checked). Other vendors' NICs (the editing PCs' Aquantia and Intel legs) are outside this file.
 
@@ -63,7 +63,7 @@ The file holds every value; this is the summary.
 
 - **Why it is open.** On resolume-pp the RTL8156B's driver holds Dante behind NDI's video bursts in its one send queue: with two NDI receivers Dante waits up to 18.4 ms between NetAdapterCx and the miniport (p99 9.4 ms, capture ndiD, #425). 3 → 8 URBs already cut dsg's late packets about 100x. More URBs drain the USB queue faster but do not change Dante's place in it.
 - **The method** (#425's, `.claude/rules/windows-pcs.md`): `pktmon` on resolume-pp limited to the TCPIP component on the Dante VLAN adapter, the NetAdapterCx edge and the `rtucx22x64` miniport (`--comp <ids> --pkt-size 64`), as a detached `Start-Process` capture of 60 s or less whose `finally` stops it and removes the filter. Dante packets are timed by their Dante stamp, maxima trusted over counts. The capture runs with two NDI receivers connected (the condition that gave 9.4 / 18.4 ms), at 8 and then at 32, in the same hour.
-- **The decision rule:** the value with the lower TCPIP → miniport p99 and max becomes the standard. A change goes into the file with the two captures as its evidence and `version` 2, and every PC moves to it through its project. No single PC changes on its own (the owner, 20.11.2026: no PP-only Realtek change).
+- **The decision rule:** the value with the lower TCPIP → miniport p99 and max becomes the standard. A change goes into the file with the two captures as its evidence and the next `version`, and every PC moves to it through its project. No single PC changes on its own (the owner, 20.11.2026: no PP-only Realtek change).
 
 ## Inventory (20.11.2026, read only)
 

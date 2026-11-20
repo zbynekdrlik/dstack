@@ -54,24 +54,16 @@ fn the_routed_adapter_s_driver_is_read() {
         file.to_ascii_lowercase().ends_with(".sys") && !file.contains('\\'),
         "{facts:?}"
     );
-    let v = sys::adapter_values(&guid, &["DriverVersion"]).unwrap();
+    let v = sys::adapter_values(&guid, &["DriverVersion", "DeviceInstanceID"]).unwrap();
     assert_eq!(facts.version, v[0]);
-}
-
-/// dstack #155: the Dante leg on resolume-snv is Realtek's VLAN "Realtek
-/// Virtual Adapter" (driver 10.4.1117.2020), which the measured-driver
-/// check read as an unverified NIC driver.
-#[test]
-fn a_vlan_virtual_adapter_is_told_apart_from_a_nic() {
-    assert!(virtual_adapter(Some("Realtek Virtual Adapter")));
-    assert!(virtual_adapter(Some("Realtek Virtual Adapter #2")));
-    assert!(!virtual_adapter(Some(
-        "Realtek Gaming USB 2.5GbE Family Controller"
-    )));
-    assert!(!virtual_adapter(Some(
-        "Intel(R) Ethernet Controller (2) I225-V"
-    )));
-    assert!(!virtual_adapter(None));
+    // The hardware id is the device's first one under Enum (a REG_MULTI_SZ).
+    let instance = v[1].clone().expect("DeviceInstanceID");
+    let first = sys::first_hardware_id(&instance).expect("the device's HardwareID");
+    assert_eq!(
+        facts.hardware_id.as_deref(),
+        Some(first.as_str()),
+        "{facts:?}"
+    );
 }
 
 mod verdict;

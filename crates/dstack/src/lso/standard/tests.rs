@@ -113,3 +113,16 @@ fn the_driver_file_is_the_image_path_s_last_part() {
     assert_eq!(file_name("system32/drivers/netvsc.sys"), "netvsc.sys");
     assert_eq!(file_name("rt640x64.sys"), "rt640x64.sys");
 }
+
+/// A service's driver file: its `ImagePath`'s file, else the file Windows
+/// loads without one (`<service>.sys`; resolume-pp's VLAN service `VLAN`
+/// has `RtVlan640.sys`, so the path wins).
+#[test]
+fn a_service_s_driver_file_is_its_image_path_s_or_its_name_s() {
+    assert_eq!(
+        driver_file("VLAN", Some(r"\SystemRoot\System32\drivers\RtVlan640.sys")),
+        "RtVlan640.sys"
+    );
+    assert_eq!(driver_file("rt640x64", None), "rt640x64.sys");
+    assert_eq!(driver_file(" rt640x64 ", Some("")), "rt640x64.sys");
+}
