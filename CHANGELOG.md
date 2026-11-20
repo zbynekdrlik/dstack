@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.6.204
+
+### Changed
+- The start line's Realtek driver check follows the NIC standard (`docs/nic-standard.json`, embedded at build time from its copy `crates/dstack/nic-standard.json`; a test keeps the two equal) instead of its own list (#466). It warns on a driver the standard names bad, another driver file than the standard's for the chip, a version under its minimum, or a Realtek adapter the standard has no entry for, with the entry's evidence (or its plan while the rule is open); the standard's driver is an info line. FOH's rt640x64 10.79.20.1003 no longer warns at every start; mbc's rtu56cx22x64 1156.22.113.2026 now warns (not the standard's file). The 20-30 ms receive DPC is the standard's evidence text, no longer a verdict in code.
+- `docs/nic-standard.json` version 2: text only (the rt640x64 plan's start-line step is done; the bad 10.72.524.2024 evidence no longer names `REALTEK_BAD`). No value or rule changes.
+
+### Removed (API)
+- `lso::Driver`, `lso::driver`, `lso::driver_of`, `lso::REALTEK_BAD`, `lso::REALTEK_GOOD`, `lso::MEASURED_FAMILY` and (Windows) `lso::check_driver`. Their place: `lso::driver_verdict`, `lso::driver_line`, `lso::DriverFacts`, `lso::DriverVerdict`, `lso::Line`, `lso::standard` and (Windows) `lso::driver_facts`.
+- Tests and playbook: a late TX packet in the ci-peer gate (v0.6.203 main CI) is recorded as a runner class in `.claude/rules/tests.md`.
+
 ## 0.6.203
 
 - **One Realtek NIC standard for every production PC** (#465): `docs/nic-standard.json` (schema `dstack-nic-standard/1`, version 1) states, per chip and OS (RTL8156B on Windows and Linux, the PCIe RTL8125/RTL8168 on Windows, the RTL8168 on Linux, the Realtek Virtual Adapter), the driver (allowed file or module, minimum version, bad drivers) and every advanced value, each with its evidence or "none yet: fleet value". `PendingTransmits` stays 8, marked open, until the 8 vs 32 capture on resolume-pp decides. `docs/nic-standard.md` holds the fleet inventory of 20.11.2026, the conflicts found and the consumers' lines.

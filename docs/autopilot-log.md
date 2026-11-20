@@ -96,3 +96,4 @@ One line per ticket: issue, commits, tests (RED -> GREEN where a bug), decisions
 - 20.11 07:57 CET: v0.6.200 = #457 + #455 + #454 Linux fix. v0.6.201 = #459 (peer.rs counts a both-pumps stall once).
 - 20.11 12:52 CET: v0.6.202 = #461 (truthful MMCSS line, no false lost blocks, dsend 40 ms per owner). Plus #462 (a kernel table halves the 44.1 kHz conversion cost).
 - 20.11 16:35 CET: v0.6.202 released (#461, #462, #464 item 2). v0.6.203 = #465 (Realtek NIC standard + checkers).
+- 20.11 18:29 CET: v0.6.203 released (#465). v0.6.204 = #466 (driver check follows the standard).
