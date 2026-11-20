@@ -70,26 +70,79 @@ def _strings(value):
     return isinstance(value, list) and bool(value) and all(isinstance(x, str) and x for x in value)
 
 
-def _validate_driver(eid, driver):
-    if not isinstance(driver, dict) or not driver.get("evidence"):
-        raise StandardError(f"{eid}: the driver has no evidence")
-    if not _strings(driver.get("files") or driver.get("modules")):
-        raise StandardError(f"{eid}: the driver names no files or modules")
+def is_number(text):
+    """A decimal number of at most 18 digits (ASCII only: no other digit
+    characters, no sign, no space), so it always fits a 64-bit integer."""
+    return isinstance(text, str) and re.fullmatch(r"[0-9]{1,18}", text) is not None
+
+
+# The keys each object may hold: an unknown key is a typo, never ignored.
+TOP_KEYS = {"schema", "version", "updated", "issue", "doc", "scope", "fields", "adapters"}
+ENTRY_KEYS = {"id", "chip", "covers", "os", "match", "driver", "values"}
+DRIVER_KEYS = {"files", "modules", "min_version", "bad", "status", "evidence", "plan", "firmware"}
+BAD_KEYS = {"file", "version", "evidence"}
+VALUE_KEYS = {"key", "name", "expected", "compare", "absent", "status", "profile", "evidence", "plan"}
+# The driver's names per OS: Windows judges the driver file, Linux the module.
+DRIVER_NAMES = {"windows": "files", "linux": "modules"}
+
+
+def _only(where, obj, allowed):
+    unknown = sorted(set(obj) - allowed)
+    if unknown:
+        raise StandardError(f"{where}: unknown key(s) {', '.join(unknown)}")
+
+
+def _text(where, obj, key, required=False):
+    """A string field: absent unless required, else a non-empty string."""
+    if key not in obj:
+        if required:
+            raise StandardError(f"{where}: no {key}")
+        return
+    if not isinstance(obj[key], str) or not obj[key]:
+        raise StandardError(f"{where}: {key} must be a non-empty string")
+
+
+def _validate_driver(eid, os_name, driver):
+    if not isinstance(driver, dict):
+        raise StandardError(f"{eid}: no driver")
+    _only(f"{eid}/driver", driver, DRIVER_KEYS)
+    _text(f"{eid}/driver", driver, "evidence", required=True)
+    names = DRIVER_NAMES[os_name]
+    other = DRIVER_NAMES["linux" if os_name == "windows" else "windows"]
+    if not _strings(driver.get(names)) or other in driver:
+        raise StandardError(f"{eid}: a {os_name} driver names its {names} (and no {other})")
+    for key in ("min_version", "plan", "firmware"):
+        _text(f"{eid}/driver", driver, key)
+    if os_name == "windows" and "firmware" in driver:
+        raise StandardError(f"{eid}: Windows has no firmware read; a firmware rule is Linux only")
     status = driver.get("status", "settled")
     if status not in ("settled", "open"):
         raise StandardError(f"{eid}: unknown driver status {status!r}")
-    if status == "open" and not driver.get("plan"):
+    if status == "open" and "plan" not in driver:
         raise StandardError(f"{eid}: an open driver rule needs its plan")
-    for bad in driver.get("bad", []):
-        if not isinstance(bad, dict) or not bad.get("evidence") or not (bad.get("file") or bad.get("version")):
-            raise StandardError(f"{eid}: a bad driver needs a file or a version, and evidence")
+    bads = driver.get("bad", [])
+    if not isinstance(bads, list):
+        raise StandardError(f"{eid}: bad must be a list")
+    for bad in bads:
+        if not isinstance(bad, dict):
+            raise StandardError(f"{eid}: a bad driver is an object")
+        _only(f"{eid}/bad", bad, BAD_KEYS)
+        _text(f"{eid}/bad", bad, "evidence", required=True)
+        _text(f"{eid}/bad", bad, "file")
+        _text(f"{eid}/bad", bad, "version")
+        if "file" not in bad and "version" not in bad:
+            raise StandardError(f"{eid}: a bad driver names a file or a version")
 
 
 def _validate_value(eid, v, keys):
     key = v.get("key") if isinstance(v, dict) else None
     where = f"{eid}/{key}"
-    if not isinstance(key, str) or not key or not v.get("evidence"):
-        raise StandardError(f"{where}: a value needs a key and evidence")
+    if not isinstance(key, str) or not key:
+        raise StandardError(f"{where}: a value needs a key")
+    _only(where, v, VALUE_KEYS)
+    _text(where, v, "evidence", required=True)
+    _text(where, v, "name")
+    _text(where, v, "plan")
     if key.lower() in keys:
         raise StandardError(f"{where}: the key is repeated")
     keys.add(key.lower())
@@ -109,9 +162,9 @@ def _validate_value(eid, v, keys):
         return
     if not (isinstance(expected, str) and expected) and not _strings(expected):
         raise StandardError(f"{where}: expected must be a string or a list of strings")
-    if v.get("compare") == "bits" and not all(x.isdigit() for x in as_list(expected)):
+    if v.get("compare") == "bits" and not all(is_number(x) for x in as_list(expected)):
         raise StandardError(f"{where}: a bits value is a decimal number")
-    if status == "open" and not v.get("plan"):
+    if status == "open" and "plan" not in v:
         raise StandardError(f"{where}: an open value needs its plan")
 
 
@@ -122,6 +175,7 @@ def validate(std):
     the PowerShell checker's `Test-NicStandard`."""
     if not isinstance(std, dict) or std.get("schema") != SCHEMA:
         raise StandardError(f"not a {SCHEMA} file")
+    _only("the file", std, TOP_KEYS)
     if not isinstance(std.get("version"), int) or isinstance(std.get("version"), bool):
         raise StandardError("no integer version")
     if not isinstance(std.get("adapters"), list):
@@ -132,6 +186,7 @@ def validate(std):
         if not isinstance(eid, str) or not eid or eid in seen:
             raise StandardError(f"adapter id missing or repeated: {eid!r}")
         seen.add(eid)
+        _only(eid, entry, ENTRY_KEYS)
         os_name = entry.get("os")
         if os_name not in MATCH_KEYS:
             raise StandardError(f"{eid}: os must be windows or linux")
@@ -140,9 +195,7 @@ def validate(std):
             k not in MATCH_KEYS[os_name] or not _strings(ids) for k, ids in match.items()
         ):
             raise StandardError(f"{eid}: match needs {' or '.join(MATCH_KEYS[os_name])} id lists")
-        _validate_driver(eid, entry.get("driver"))
-        if os_name == "windows" and "firmware" in entry["driver"]:
-            raise StandardError(f"{eid}: Windows has no firmware read; a firmware rule is Linux only")
+        _validate_driver(eid, os_name, entry.get("driver"))
         if not isinstance(entry.get("values"), list):
             raise StandardError(f"{eid}: no values list")
         keys = set()
@@ -288,7 +341,7 @@ def holds(spec, actual):
         if compare == "contains" and want.casefold() in value.casefold():
             return True
         if compare == "bits":
-            if not value.isdigit():
+            if not is_number(value):
                 return False
             if int(value) & int(want) == int(want):
                 return True

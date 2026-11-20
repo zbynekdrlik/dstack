@@ -6,8 +6,8 @@
   "doc": "docs/nic-standard.md",
   "scope": "Every Realtek NIC that is up on a production PC with a Dante leg (docs/two-networks.md, scope). One entry per chip and OS; a Realtek adapter without an entry fails until it is measured and added. Read-only checkers: tools/windows/nic-standard-check.ps1, tools/linux/nic-standard-check.py.",
   "fields": {
-    "match": "windows: hardware_id prefixes (the device's first hardware id, case-insensitive) or descriptions; linux: usb or pci vendor:product ids",
-    "driver": "windows: files (the allowed DriverFileName), min_version, bad (a file, or a file and version, that fails); linux: modules, firmware",
+    "match": "windows: hardware_id prefixes of the device's first hardware id (case-insensitive); linux: usb or pci vendor:product ids (lowercase hex)",
+    "driver": "windows: files (the allowed DriverFileName); linux: modules and an optional firmware; both: min_version, bad (a file, a version, or both, that fails, with evidence), status, evidence, plan. Every object takes only its documented keys: an unknown key is refused",
     "expected": "a string, or a list of strings any of which passes; null with status report",
     "compare": "equals (default), bits (every bit of expected is set), contains (the value holds the expected text)",
     "absent": "fail (default): the keyword must be there; pass: a driver without the keyword passes",

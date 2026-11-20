@@ -73,7 +73,28 @@ Check 'a malformed file is refused, as the Python checker refuses it' {
     (Refused { param($s) $s.adapters[0].driver | Add-Member -NotePropertyName firmware -NotePropertyValue 'x' }) -and
     (Refused { param($s) $s.adapters[0].os = 'macos' }) -and
     (Refused { param($s) $s.adapters[0].match = [pscustomobject]@{ usb = @('0bda:8156') } }) -and
-    (Refused { param($s) $s.adapters[0].PSObject.Properties.Remove('values') })
+    (Refused { param($s) $s.adapters[0].PSObject.Properties.Remove('values') }) -and
+    (Refused { param($s) $s.version = $true }) -and
+    (Refused { param($s) (& $v $s)[1].expected = @() })
+}
+Check 'an unknown key, a wrong type or the wrong driver names are refused' {
+    $v = { param($s) $s.adapters[0].values }
+    $d = { param($s) $s.adapters[0].driver }
+    $bits = { param($s) (@(& $v $s) | Where-Object { $_.PSObject.Properties['compare'] })[0] }
+    (Refused { param($s) $s | Add-Member -NotePropertyName adpaters -NotePropertyValue @() }) -and
+    (Refused { param($s) $s.adapters[0] | Add-Member -NotePropertyName chips -NotePropertyValue 'RTL8156B' }) -and
+    (Refused { param($s) (& $d $s) | Add-Member -NotePropertyName min_versoin -NotePropertyValue '1' }) -and
+    (Refused { param($s) (& $v $s)[1] | Add-Member -NotePropertyName expect -NotePropertyValue '64' }) -and
+    (Refused { param($s) (& $d $s).bad[0] | Add-Member -NotePropertyName why -NotePropertyValue 'x' }) -and
+    (Refused { param($s) (& $d $s).bad = [pscustomobject]@{ file = 'x.sys'; evidence = 'e' } }) -and
+    (Refused { param($s) (& $d $s).bad = $null }) -and
+    (Refused { param($s) (& $d $s).min_version = 11 }) -and
+    (Refused { param($s) (& $d $s) | Add-Member -NotePropertyName plan -NotePropertyValue 7 }) -and
+    (Refused { param($s) (& $d $s) | Add-Member -NotePropertyName modules -NotePropertyValue @('r8152') }) -and
+    (Refused { param($s) $s.adapters[1].driver | Add-Member -NotePropertyName files -NotePropertyValue @('r8152.ko') }) -and
+    (Refused { param($s) $s.adapters[1].driver | Add-Member -NotePropertyName firmware -NotePropertyValue 3 }) -and
+    (Refused { param($s) (& $bits $s).expected = [string][char]0x00B2 }) -and
+    (Refused { param($s) (& $bits $s).expected = ('1' * 19) })
 }
 Check 'a one-item list and an empty list in the file stay lists' {
     $s = $standardText | ConvertFrom-Json
@@ -111,6 +132,9 @@ Check 'equals, a list, bits, contains' {
     -not (Test-NicValueHolds ([pscustomobject]@{ expected = '8'; compare = 'bits' }) '16') -and
     -not (Test-NicValueHolds ([pscustomobject]@{ expected = '8'; compare = 'bits' }) 'x') -and
     -not (Test-NicValueHolds ([pscustomobject]@{ expected = '8'; compare = 'bits' }) '0x18') -and
+    -not (Test-NicValueHolds ([pscustomobject]@{ expected = '8'; compare = 'bits' }) ([string][char]0x00B2)) -and
+    -not (Test-NicValueHolds ([pscustomobject]@{ expected = '8'; compare = 'bits' }) ('8' * 19)) -and
+    (Test-NicValueHolds ([pscustomobject]@{ expected = '8'; compare = 'bits' }) "24`n") -and
     (Test-NicValueHolds ([pscustomobject]@{ expected = 'Full' }) 'full') -and
     (Test-NicValueHolds ([pscustomobject]@{ expected = 'b'; compare = 'contains' }) 'ABC') -and
     -not (Test-NicValueHolds ([pscustomobject]@{ expected = 'd'; compare = 'contains' }) 'abc')
@@ -208,8 +232,8 @@ function Get-NetAdapterAdvancedProperty {
     foreach ($k in $values.Keys) { [pscustomobject]@{ RegistryKeyword = $k; RegistryValue = $values[$k] } }
 }
 function Run-Fake {
-    param([switch]$IncludeDown, [string]$LatencyProfile = 'normal')
-    $lines = @(Invoke-NicStandardCheck -Source $standardPath -LatencyProfile $LatencyProfile -IncludeDown:$IncludeDown)
+    param([switch]$IncludeDown, [string]$LatencyProfile = 'normal', [string[]]$Name = @())
+    $lines = @(Invoke-NicStandardCheck -Source $standardPath -LatencyProfile $LatencyProfile -IncludeDown:$IncludeDown -Name $Name)
     [pscustomobject]@{ Lines = $lines; Exit = $script:NicExit }
 }
 $usb = 'USB\VID_0BDA&PID_8156&REV_31F4'
@@ -266,6 +290,27 @@ Check 'an unreadable hardware id or value list fails with its cause, and the run
     @($r.Lines | Where-Object { $_ -like 'FAIL  Ethernet 6  *no standard for this Realtek adapter on Windows (hardware id unreadable: the PnP store is unreadable)' }).Count -eq 1 -and
     @($r.Lines | Where-Object { $_ -like 'FAIL  Ethernet 7  values  expected=(readable)  actual=(unreadable)  (No MSFT_*' }).Count -eq 1 -and
     ($r.Lines -contains '2 Realtek NIC(s) checked, 2 FAIL')
+}
+Check 'named adapters: only those are checked, a down one too; a missing or non-Realtek one fails' {
+    Set-FakePc @(
+        @{ Name = 'Ethernet 4'; Desc = 'Realtek Gaming USB 2.5GbE Family Controller'; Status = 'Up'; File = 'rtucx22x64.sys'; Version = '11.19.602.2025'; Hw = $usb; Props = $resolumePp },
+        @{ Name = 'soundgrid'; Desc = 'Realtek PCIe GbE Family Controller #2'; Status = 'Disconnected'; File = 'rt640x64.sys'; Version = '10.79.50.1003'; Hw = 'PCI\VEN_10EC&DEV_8168&REV_15'; Props = @{} },
+        @{ Name = 'Wi-Fi'; Desc = 'Intel(R) Wi-Fi 6E AX211 160MHz'; Status = 'Up'; File = 'Netwtw14.sys'; Version = '23.150.0.4'; Hw = 'PCI\VEN_8086&DEV_51F0'; Props = @{} }
+    )
+    $one = Run-Fake -Name @('Ethernet 4')
+    $down = Run-Fake -Name @('soundgrid')
+    $bad = Run-Fake -Name @('Ethernet 44', 'Wi-Fi')
+    $one.Exit -eq 0 -and -not ($one.Lines -match 'soundgrid') -and ($one.Lines -contains '1 Realtek NIC(s) checked, 0 FAIL') -and
+    @($down.Lines | Where-Object { $_ -like '--    soundgrid  *' }).Count -eq 1 -and
+    $bad.Exit -eq 1 -and ($bad.Lines -contains 'FAIL  Ethernet 44: no such Realtek adapter') -and
+    ($bad.Lines -contains 'FAIL  Wi-Fi: no such Realtek adapter') -and ($bad.Lines -contains '0 Realtek NIC(s) checked, 2 FAIL')
+}
+Check 'a keyword with no registry value reads as absent' {
+    Set-FakePc @(
+        @{ Name = 'Ethernet 4'; Desc = 'Realtek'; Status = 'Up'; File = 'x'; Version = '1'; Hw = $usb; Props = [ordered]@{ '*EEE' = $null; GigaLite = '0' } }
+    )
+    $f = Get-NicFacts 'Ethernet 4'
+    -not $f.ContainsKey('*EEE') -and $f['GigaLite'] -eq '0'
 }
 Check 'a standard that cannot be read exits 2' {
     $lines = @(Invoke-NicStandardCheck -Source (Join-Path $PSScriptRoot 'no-such-standard.json'))

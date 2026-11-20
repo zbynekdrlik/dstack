@@ -22,7 +22,7 @@
 # read or is malformed, else 0. The output is plain pipeline text, so a caller
 # can capture it (`$lines = & .\nic-standard-check.ps1`).
 #
-#   powershell -ExecutionPolicy Bypass -File nic-standard-check.ps1 [-Standard <path|url>] [-LatencyProfile normal|low_latency] [-IncludeDown]
+#   powershell -ExecutionPolicy Bypass -File nic-standard-check.ps1 [-Standard <path|url>] [-LatencyProfile normal|low_latency] [-IncludeDown] [-Name <adapter>[,<adapter>...]]
 #
 # The validation and the judging are the same as
 # tools/linux/nic-standard-check.py's (same file, same rules, every rule of
@@ -34,7 +34,10 @@ param(
     [string]$Standard = 'https://raw.githubusercontent.com/zbynekdrlik/dstack/main/docs/nic-standard.json',
     [ValidateSet('normal', 'low_latency')]
     [string]$LatencyProfile = 'normal',
-    [switch]$IncludeDown
+    [switch]$IncludeDown,
+    # Check only these adapters (by name), up or not; one that is missing or
+    # no Realtek fails.
+    [string[]]$Name = @()
 )
 
 $ErrorActionPreference = 'Stop'
@@ -79,28 +82,81 @@ function Test-NicStrings {
     return $true
 }
 
+# A decimal number of at most 18 digits (ASCII only, no sign or space), so it
+# always fits a 64-bit integer.
+function Test-NicNumber {
+    param($Text)
+    return ($Text -is [string] -and $Text -cmatch '\A[0-9]{1,18}\z')
+}
+
+# The keys each object may hold: an unknown key is a typo, never ignored
+# (compared case-sensitively, as JSON keys are).
+$script:NicKeys = @{
+    top    = @('schema', 'version', 'updated', 'issue', 'doc', 'scope', 'fields', 'adapters')
+    entry  = @('id', 'chip', 'covers', 'os', 'match', 'driver', 'values')
+    driver = @('files', 'modules', 'min_version', 'bad', 'status', 'evidence', 'plan', 'firmware')
+    bad    = @('file', 'version', 'evidence')
+    value  = @('key', 'name', 'expected', 'compare', 'absent', 'status', 'profile', 'evidence', 'plan')
+}
+# The driver's names per OS: Windows judges the driver file, Linux the module.
+$script:NicDriverNames = @{ windows = 'files'; linux = 'modules' }
+
+function Assert-NicOnly {
+    param([string]$Where, $Object, [string]$Kind)
+    $unknown = @($Object.PSObject.Properties | Where-Object { -not ($script:NicKeys[$Kind] -ccontains $_.Name) } | ForEach-Object { $_.Name })
+    if ($unknown.Count -gt 0) { throw "${Where}: unknown key(s) $(($unknown | Sort-Object) -join ', ')" }
+}
+
+# A string field: absent unless required, else a non-empty string.
+function Assert-NicText {
+    param([string]$Where, $Object, [string]$Key, [switch]$Required)
+    if (-not (Test-NicHasProp $Object $Key)) {
+        if ($Required) { throw "${Where}: no $Key" }
+        return
+    }
+    $v = $Object.PSObject.Properties[$Key].Value
+    if (-not ($v -is [string]) -or $v -eq '') { throw "${Where}: $Key must be a non-empty string" }
+}
+
 function Test-NicStandardDriver {
     param([string]$Id, [string]$Os, $Driver)
-    if ($null -eq $Driver -or -not (Get-NicProp $Driver 'evidence')) { throw "${Id}: the driver has no evidence" }
-    $names = Get-NicList $Driver 'files'
-    if ($null -eq $names) { $names = Get-NicList $Driver 'modules' }
-    if (-not (Test-NicStrings $names)) { throw "${Id}: the driver names no files or modules" }
+    if ($null -eq $Driver -or -not ($Driver -is [psobject])) { throw "${Id}: no driver" }
+    Assert-NicOnly "$Id/driver" $Driver 'driver'
+    Assert-NicText "$Id/driver" $Driver 'evidence' -Required
+    $namesKey = $script:NicDriverNames[$Os]
+    $otherKey = if ($Os -ceq 'windows') { 'modules' } else { 'files' }
+    $names = Get-NicList $Driver $namesKey
+    if (-not (Test-NicStrings $names) -or (Test-NicHasProp $Driver $otherKey)) {
+        throw "${Id}: a $Os driver names its $namesKey (and no $otherKey)"
+    }
+    foreach ($k in @('min_version', 'plan', 'firmware')) { Assert-NicText "$Id/driver" $Driver $k }
+    if ($Os -ceq 'windows' -and (Test-NicHasProp $Driver 'firmware')) { throw "${Id}: Windows has no firmware read; a firmware rule is Linux only" }
     $status = Get-NicProp $Driver 'status' 'settled'
     if (-not ($status -ceq 'settled' -or $status -ceq 'open')) { throw "${Id}: unknown driver status '$status'" }
-    if ($status -ceq 'open' -and -not (Get-NicProp $Driver 'plan')) { throw "${Id}: an open driver rule needs its plan" }
-    foreach ($bad in @(Get-NicProp $Driver 'bad' @())) {
-        if (-not (Get-NicProp $bad 'evidence') -or -not ((Get-NicProp $bad 'file') -or (Get-NicProp $bad 'version'))) {
-            throw "${Id}: a bad driver needs a file or a version, and evidence"
+    if ($status -ceq 'open' -and -not (Test-NicHasProp $Driver 'plan')) { throw "${Id}: an open driver rule needs its plan" }
+    if (Test-NicHasProp $Driver 'bad') {
+        $bads = Get-NicList $Driver 'bad'
+        if ($null -eq $bads -or -not ($bads -is [array])) { throw "${Id}: bad must be a list" }
+        foreach ($bad in $bads) {
+            if ($null -eq $bad -or -not ($bad -is [psobject]) -or $bad -is [string]) { throw "${Id}: a bad driver is an object" }
+            Assert-NicOnly "$Id/bad" $bad 'bad'
+            Assert-NicText "$Id/bad" $bad 'evidence' -Required
+            Assert-NicText "$Id/bad" $bad 'file'
+            Assert-NicText "$Id/bad" $bad 'version'
+            if (-not (Test-NicHasProp $bad 'file') -and -not (Test-NicHasProp $bad 'version')) { throw "${Id}: a bad driver names a file or a version" }
         }
     }
-    if ($Os -ceq 'windows' -and (Test-NicHasProp $Driver 'firmware')) { throw "${Id}: Windows has no firmware read; a firmware rule is Linux only" }
 }
 
 function Test-NicStandardValue {
     param([string]$Id, $V, [hashtable]$Keys)
     $key = Get-NicProp $V 'key'
     $where = "$Id/$key"
-    if (-not ($key -is [string]) -or $key -eq '' -or -not (Get-NicProp $V 'evidence')) { throw "${where}: a value needs a key and evidence" }
+    if (-not ($key -is [string]) -or $key -eq '') { throw "${where}: a value needs a key" }
+    Assert-NicOnly $where $V 'value'
+    Assert-NicText $where $V 'evidence' -Required
+    Assert-NicText $where $V 'name'
+    Assert-NicText $where $V 'plan'
     if ($Keys.ContainsKey($key.ToLowerInvariant())) { throw "${where}: the key is repeated" }
     $Keys[$key.ToLowerInvariant()] = $true
     $status = Get-NicProp $V 'status' 'settled'
@@ -116,26 +172,29 @@ function Test-NicStandardValue {
     if (-not (($expected -is [string] -and $expected -ne '') -or (Test-NicStrings $expected))) {
         throw "${where}: expected must be a string or a list of strings"
     }
-    if ((Get-NicProp $V 'compare') -ceq 'bits' -and @(@($expected) | Where-Object { $_ -notmatch '^\d+$' }).Count -gt 0) {
+    if ((Get-NicProp $V 'compare') -ceq 'bits' -and @(@($expected) | Where-Object { -not (Test-NicNumber $_) }).Count -gt 0) {
         throw "${where}: a bits value is a decimal number"
     }
-    if ($status -ceq 'open' -and -not (Get-NicProp $V 'plan')) { throw "${where}: an open value needs its plan" }
+    if ($status -ceq 'open' -and -not (Test-NicHasProp $V 'plan')) { throw "${where}: an open value needs its plan" }
 }
 
 # Throws unless the parsed file is a well-formed standard: a broken file stops
-# the run (exit 2) instead of passing a PC by accident.
+# the run (exit 2) instead of passing a PC by accident. The same rules as the
+# Python checker's `validate`.
 function Test-NicStandard {
     param($Std)
     if ((Get-NicProp $Std 'schema') -cne $script:NicSchema) { throw "not a $($script:NicSchema) file" }
+    Assert-NicOnly 'the file' $Std 'top'
     $version = Get-NicProp $Std 'version'
     if (-not ($version -is [int] -or $version -is [long])) { throw 'no integer version' }
     $adapters = Get-NicList $Std 'adapters'
     if ($null -eq $adapters -or -not ($adapters -is [array])) { throw 'no adapters list' }
     $seen = @{}
-    foreach ($entry in @($adapters)) {
+    foreach ($entry in $adapters) {
         $id = Get-NicProp $entry 'id'
         if (-not ($id -is [string]) -or $id -eq '' -or $seen.ContainsKey($id)) { throw "adapter id missing or repeated: '$id'" }
         $seen[$id] = $true
+        Assert-NicOnly $id $entry 'entry'
         $os = Get-NicProp $entry 'os'
         if (-not ($os -ceq 'windows' -or $os -ceq 'linux')) { throw "${id}: os must be windows or linux" }
         $match = Get-NicProp $entry 'match'
@@ -151,7 +210,7 @@ function Test-NicStandard {
         $values = Get-NicList $entry 'values'
         if ($null -eq $values -or -not ($values -is [array])) { throw "${id}: no values list" }
         $keys = @{}
-        foreach ($v in @($values)) { Test-NicStandardValue $id $v $keys }
+        foreach ($v in $values) { Test-NicStandardValue $id $v $keys }
     }
 }
 
@@ -194,7 +253,7 @@ function Test-NicValueHolds {
         if ($compare -ceq 'equals' -and $value -ieq $w) { return $true }
         if ($compare -ceq 'contains' -and $value.IndexOf($w, [StringComparison]::OrdinalIgnoreCase) -ge 0) { return $true }
         if ($compare -ceq 'bits') {
-            if ($value -notmatch '^\d+$') { return $false }
+            if (-not (Test-NicNumber $value)) { return $false }
             $m = [long]$w
             if (([long]$value -band $m) -eq $m) { return $true }
         }
@@ -297,7 +356,9 @@ function Get-NicFacts {
     param([string]$Name)
     $facts = @{}
     foreach ($p in @(Get-NetAdapterAdvancedProperty -Name $Name -AllProperties)) {
-        if (-not $p.RegistryKeyword) { continue }
+        # A keyword with no registry value is absent (the driver then uses its
+        # own default), as a missing fact is on Linux.
+        if (-not $p.RegistryKeyword -or $null -eq $p.RegistryValue) { continue }
         $facts[[string]$p.RegistryKeyword] = (@($p.RegistryValue) | ForEach-Object { [string]$_ }) -join ','
     }
     return $facts
@@ -325,7 +386,7 @@ function Get-NicRows {
 # Writes the report lines and sets $script:NicExit (0, 1 on a FAIL, 2 when
 # the standard cannot be read or is malformed).
 function Invoke-NicStandardCheck {
-    param([string]$Source, [string]$LatencyProfile = 'normal', [switch]$IncludeDown)
+    param([string]$Source, [string]$LatencyProfile = 'normal', [switch]$IncludeDown, [string[]]$Name = @())
     try {
         $std = Read-NicStandard $Source
     } catch {
@@ -335,11 +396,15 @@ function Invoke-NicStandardCheck {
     }
     "nic-standard v$($std.version) ($Source), profile $LatencyProfile"
     $failed = 0; $checked = 0
+    $named = @($Name | Where-Object { $_ })
+    $found = @{}
     foreach ($a in @(Get-NetAdapter)) {
+        if ($named.Count -gt 0 -and -not ($named -contains $a.Name)) { continue }
         if ($a.Status -eq 'Not Present') { continue }
         $hw = Get-NicHardwareId $a
         if (-not (Test-RealtekAdapter $a $hw.Id)) { continue }
-        if ($a.Status -eq 'Disabled' -or ($a.Status -ne 'Up' -and -not $IncludeDown)) {
+        $found[[string]$a.Name] = $true
+        if ($a.Status -eq 'Disabled' -or ($a.Status -ne 'Up' -and -not $IncludeDown -and $named.Count -eq 0)) {
             "SKIP  $($a.Name)  $($hw.Id) is $($a.Status)"
             continue
         }
@@ -357,11 +422,19 @@ function Invoke-NicStandardCheck {
             if ($r.Verdict -ceq 'FAIL') { $failed++ }
         }
     }
+    # A named adapter that is missing, not present or no Realtek fails: a
+    # gate with a typo in the name must not pass.
+    foreach ($n in $named) {
+        if (-not $found.ContainsKey($n)) {
+            "FAIL  ${n}: no such Realtek adapter"
+            $failed++
+        }
+    }
     "$checked Realtek NIC(s) checked, $failed FAIL"
     $script:NicExit = if ($failed -gt 0) { 1 } else { 0 }
 }
 
 if ($MyInvocation.InvocationName -ne '.') {
-    Invoke-NicStandardCheck -Source $Standard -LatencyProfile $LatencyProfile -IncludeDown:$IncludeDown
+    Invoke-NicStandardCheck -Source $Standard -LatencyProfile $LatencyProfile -IncludeDown:$IncludeDown -Name $Name
     exit $script:NicExit
 }

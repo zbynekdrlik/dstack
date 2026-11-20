@@ -170,6 +170,20 @@ class TheStandard(unittest.TestCase):
         broken(lambda s: s["adapters"][0].update(os="macos"))
         broken(lambda s: s["adapters"][0].update(match={"usb": ["0bda:8156"]}))
         broken(lambda s: s["adapters"][0].pop("values"))
+        broken(lambda s: s.update(adpaters=[]))
+        broken(lambda s: s["adapters"][0].update(chips="RTL8156B"))
+        broken(lambda s: s["adapters"][0]["driver"].update(min_versoin="1"))
+        broken(lambda s: values(s)[1].update(expect="64"))
+        broken(lambda s: s["adapters"][0]["driver"]["bad"][0].update(why="x"))
+        broken(lambda s: s["adapters"][0]["driver"].update(bad={"file": "x.sys", "evidence": "e"}))
+        broken(lambda s: s["adapters"][0]["driver"].update(bad=None))
+        broken(lambda s: s["adapters"][0]["driver"].update(min_version=11))
+        broken(lambda s: s["adapters"][0]["driver"].update(plan=7))
+        broken(lambda s: s["adapters"][0]["driver"].update(modules=["r8152"]))
+        broken(lambda s: s["adapters"][1]["driver"].update(files=["r8152.ko"]))
+        broken(lambda s: s["adapters"][1]["driver"].update(firmware=3))
+        broken(lambda s: [v for v in values(s) if v.get("compare") == "bits"][0].update(expected="²"))
+        broken(lambda s: [v for v in values(s) if v.get("compare") == "bits"][0].update(expected="1" * 19))
 
     def test_load_reports_a_missing_or_bad_file(self):
         with self.assertRaises(nsc.StandardError):
@@ -231,6 +245,9 @@ class Judging(unittest.TestCase):
         self.assertFalse(nsc.holds({"expected": "8", "compare": "bits"}, "16"))
         self.assertFalse(nsc.holds({"expected": "8", "compare": "bits"}, "x"))
         self.assertFalse(nsc.holds({"expected": "8", "compare": "bits"}, "0x18"))
+        self.assertFalse(nsc.holds({"expected": "8", "compare": "bits"}, "²"))
+        self.assertFalse(nsc.holds({"expected": "8", "compare": "bits"}, "8" * 19))
+        self.assertTrue(nsc.holds({"expected": "8", "compare": "bits"}, "24\n"))
         self.assertTrue(nsc.holds({"expected": "b", "compare": "contains"}, "ABC"))
         self.assertFalse(nsc.holds({"expected": "d", "compare": "contains"}, "abc"))
 
