@@ -34,6 +34,7 @@ pub mod alert;
 pub mod cli;
 pub mod endpoints;
 pub mod host;
+pub mod logfile;
 pub mod outputs;
 pub mod settings;
 /// The control-port slots, now dlink's (`dlink::slots`, so an app
