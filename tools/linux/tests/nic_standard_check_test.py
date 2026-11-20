@@ -339,6 +339,137 @@ class Judging(unittest.TestCase):
         self.assertEqual(rows["*PriorityVlanTag"][0], "INFO")
 
 
+# Windows advanced properties as read on 20.11.2026 (keyword, value, display
+# name, display value): a hidden keyword has no display name.
+MBC_EEE = [
+    ("*EEE", "1", "Energy-Efficient Ethernet", "Enabled"),
+    ("EEEMaxSupportSpeed", "1000", "EEE Max Support Speed", "1.0 Gbps Full Duplex"),
+    ("EnableGreenEthernet", "1", "Green Ethernet", "Enabled"),
+    ("AdvancedEEE", "0", "Advanced EEE", "Disabled"),
+    ("GigaLite", "1", "Gigabit Lite", "Enabled"),
+]
+RESOLUME_EEE = [
+    ("*EEE", "0", "", ""), ("EEE", "0", "", ""), ("EnableGreenEthernet", "0", "", ""),
+    ("AdvancedEEE", "0", "", ""), ("PendingTransmits", "8", "", ""),
+]
+DSG_EEE = [
+    ("*EEE", "0", "Energy-Efficient Ethernet", "Disabled"),
+    ("EEEMaxSupportSpeed", "1000", "", ""),
+]
+WIFI = [("IEEE11nMode", "3", "802.11n/ac/ax Wireless Mode", "4. 802.11ax"), ("GreenFieldCapable", "0", "", "")]
+
+
+def eee_rule():
+    return load()["eee"]
+
+
+def verdicts(rows):
+    return {r[1]: r[0] for r in rows}
+
+
+class Eee(unittest.TestCase):
+    """The vendor-independent EEE rule (owner 20.11.2026, dstack #465)."""
+
+    def test_the_rule_is_in_the_file(self):
+        rule = eee_rule()
+        self.assertIn("*EEE", rule["windows"]["keywords"])
+        self.assertIn("EEELinkAdvertisement", rule["windows"]["keywords"])
+        self.assertEqual(rule["windows"]["off"], ["0"])
+        self.assertEqual(rule["linux"]["off"], ["disabled", "not supported"])
+        self.assertGreaterEqual(load()["version"], 3)
+
+    def test_validation_refuses_a_broken_rule(self):
+        good = load()
+
+        def broken(change):
+            std = copy.deepcopy(good)
+            change(std)
+            with self.assertRaises(nsc.StandardError):
+                nsc.validate(std)
+
+        broken(lambda s: s.pop("eee"))
+        broken(lambda s: s.update(eee=[]))
+        broken(lambda s: s["eee"].pop("evidence"))
+        broken(lambda s: s["eee"].update(vendor="any"))
+        broken(lambda s: s["eee"].pop("windows"))
+        broken(lambda s: s["eee"].pop("linux"))
+        broken(lambda s: s["eee"]["windows"].update(keywords=[]))
+        broken(lambda s: s["eee"]["windows"].update(off="0"))
+        broken(lambda s: s["eee"]["windows"].update(display_name="energy[("))
+        broken(lambda s: s["eee"]["windows"].update(display_on=""))
+        broken(lambda s: s["eee"]["windows"].update(keyword=["*EEE"]))
+        broken(lambda s: s["eee"]["linux"].update(off=[]))
+        broken(lambda s: s["eee"]["linux"].update(on=["enabled"]))
+
+    def test_linux_states(self):
+        rule = eee_rule()
+        for text, verdict, actual in (
+            (IEM_EEE, "FAIL", "enabled"),
+            ("EEE settings for enp1s0:\n\tEEE status: enabled - active\n", "FAIL", "enabled"),
+            (STREAM_EEE, "PASS", "disabled"),
+            (COMPANION_EEE, "PASS", "not supported"),
+            ("netlink error: Operation not supported\n", "PASS", "not supported"),
+            ("", "FAIL", "(unreadable)"),
+        ):
+            row = nsc.judge_eee_linux(rule, text, "r8169")
+            self.assertEqual((row[0], row[1], row[3]), (verdict, "eee:status", actual), text)
+        self.assertEqual(nsc.judge_eee_linux(rule, STREAM_EEE, "r8152")[2], "disabled|not supported")
+
+    def test_a_linux_fail_names_the_driver(self):
+        row = nsc.judge_eee_linux(eee_rule(), IEM_EEE, "r8169")
+        line = nsc.format_row("enp1s0", row)
+        self.assertTrue(
+            line.startswith("FAIL  enp1s0  eee:status  expected=disabled|not supported  actual=enabled  (driver r8169; "),
+            line,
+        )
+
+    def test_realtek_visible_keywords_mbc(self):
+        rows = nsc.judge_eee_windows(eee_rule(), MBC_EEE, "rtu56cx22x64.sys 1156.22.113.2026")
+        self.assertEqual(verdicts(rows), {
+            "*EEE": "FAIL", "EEEMaxSupportSpeed": "INFO", "EnableGreenEthernet": "FAIL", "AdvancedEEE": "PASS",
+        })
+        fail = [r for r in rows if r[1] == "*EEE"][0]
+        self.assertEqual((fail[2], fail[3]), ("0", "1 (Enabled)"))
+        self.assertTrue(fail[4].startswith("driver rtu56cx22x64.sys 1156.22.113.2026; "))
+
+    def test_realtek_hidden_keywords_resolume(self):
+        rows = nsc.judge_eee_windows(eee_rule(), RESOLUME_EEE, "rtucx22x64.sys 11.19.602.2025")
+        self.assertEqual(verdicts(rows), {"*EEE": "PASS", "EEE": "PASS", "EnableGreenEthernet": "PASS", "AdvancedEEE": "PASS"})
+
+    def test_a_hidden_keyword_that_is_no_switch_is_not_judged(self):
+        rows = nsc.judge_eee_windows(eee_rule(), DSG_EEE, "rt640x64.sys 10.79.50.1003")
+        self.assertEqual(verdicts(rows), {"*EEE": "PASS"})
+
+    def test_intel(self):
+        rule = eee_rule()
+        on = [("EEELinkAdvertisement", "1", "Energy Efficient Ethernet", "On")]
+        off = [("eeelinkadvertisement", "0", "Energy Efficient Ethernet", "Off")]
+        legacy = [("*EEE", "1", "Energy Efficient Ethernet", "On")]
+        self.assertEqual(verdicts(nsc.judge_eee_windows(rule, on, "e2fn.sys 2.1.5.7")), {"EEELinkAdvertisement": "FAIL"})
+        self.assertEqual(verdicts(nsc.judge_eee_windows(rule, off, "e2fn.sys 2.1.5.7")), {"eeelinkadvertisement": "PASS"})
+        self.assertEqual(verdicts(nsc.judge_eee_windows(rule, legacy, "e1d68x64.sys 12.19.2.45")), {"*EEE": "FAIL"})
+
+    def test_another_vendor_by_its_display_name(self):
+        # An Aquantia-style driver: a keyword not in the list, found by its
+        # display name and judged by its display value.
+        rule = eee_rule()
+        on = [("EeeEnable", "1", "Energy-Efficient Ethernet", "Enabled")]
+        off = [("EeeEnable", "1", "Energy-Efficient Ethernet", "Disabled")]
+        zero = [("EeeEnable", "0", "Energy Efficient Ethernet", "")]
+        green = [("GreenMode", "2", "Green Ethernet", "On (at 1 Gbps)")]
+        odd = [("EeeEnable", "2", "EEE", "Auto")]
+        self.assertEqual(nsc.judge_eee_windows(rule, on, "aqnic650.sys 3.1.6")[0][0], "FAIL")
+        self.assertEqual(nsc.judge_eee_windows(rule, off, "aqnic650.sys 3.1.6")[0][0], "PASS")
+        self.assertEqual(nsc.judge_eee_windows(rule, zero, "aqnic650.sys 3.1.6")[0][0], "PASS")
+        self.assertEqual(nsc.judge_eee_windows(rule, green, "x.sys 1")[0][0], "FAIL")
+        self.assertEqual(nsc.judge_eee_windows(rule, odd, "x.sys 1")[0][0], "INFO")
+
+    def test_no_eee_keyword_is_info(self):
+        rows = nsc.judge_eee_windows(eee_rule(), WIFI, "x.sys 1")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual((rows[0][0], rows[0][1], rows[0][3]), ("INFO", "eee", "(no EEE keyword)"))
+
+
 class ThisPc(unittest.TestCase):
     """The I/O layer on a temporary sysfs tree, with ethtool's outputs
     replaced by stream-snv's (nsc.run patched)."""
@@ -365,6 +496,9 @@ class ThisPc(unittest.TestCase):
         os.makedirs(intel)
         self._write(os.path.join(intel, "vendor"), "0x8086")
         self._write(os.path.join(intel, "device"), "0x10fb")
+        for target, driver in ((os.path.join(usbdev, "4-4:1.0"), "r8152"), (pcidev, "r8169"), (intel, "ixgbe")):
+            os.makedirs(os.path.join(root, "drivers", driver), exist_ok=True)
+            os.symlink(os.path.join(root, "drivers", driver), os.path.join(target, "driver"))
         for iface, target, state in (
             ("rig0", os.path.join(usbdev, "4-4:1.0"), "up"),
             ("enp2s0", pcidev, "down"),
@@ -377,7 +511,13 @@ class ThisPc(unittest.TestCase):
         self.quirks = os.path.join(root, "quirks")
         self._write(self.quirks, "0bda:8156:k")
         self._run = nsc.run
-        nsc.run = lambda args: STREAM_OUTPUTS[args[1] if len(args) > 2 else ""]
+        # ethtool --show-eee per interface (stream-snv's "disabled" unless a
+        # test sets another), every other ethtool output stream-snv's.
+        self.eee = {}
+        nsc.run = lambda args, **_: (
+            self.eee.get(args[-1], STREAM_EEE) if args[1] == "--show-eee"
+            else STREAM_OUTPUTS[args[1] if len(args) > 2 else ""]
+        )
 
     def tearDown(self):
         nsc.run = self._run
@@ -412,7 +552,8 @@ class ThisPc(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIn("SKIP  enp2s0  pci 10ec:8168 is down", lines)
         self.assertIn("PASS  rig0  ring:rx  expected=4096  actual=4096", lines)
-        self.assertFalse(any("enp7s0" in line for line in lines))
+        # enp7s0 (Intel) gets the EEE rule only, never a Realtek value.
+        self.assertFalse(any("enp7s0" in line and "eee:status" not in line for line in lines))
         self.assertEqual(lines[-1], "1 Realtek NIC(s) checked, 0 FAIL")
 
     def test_a_down_nic_is_checked_with_all(self):
@@ -437,6 +578,36 @@ class ThisPc(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("FAIL  rgi0: no such Realtek NIC", lines)
         self.assertIn("FAIL  enp7s0: no such Realtek NIC", lines)
+
+    def test_eee_is_checked_on_every_wired_nic_whatever_the_vendor_or_state(self):
+        rc, lines = self.main()
+        self.assertEqual(rc, 0)
+        for iface in ("enp2s0", "enp7s0", "rig0"):
+            self.assertIn(f"PASS  {iface}  eee:status  expected=disabled|not supported  actual=disabled", lines)
+        self.assertIn("3 wired NIC(s) checked for EEE, 0 FAIL", lines)
+        self.assertFalse(any("rig0.70" in line for line in lines))
+
+    def test_eee_enabled_on_a_down_or_non_realtek_nic_fails(self):
+        self.eee["enp2s0"] = IEM_EEE
+        self.eee["enp7s0"] = "EEE settings for enp7s0:\n\tEEE status: enabled - active\n"
+        rc, lines = self.main()
+        self.assertEqual(rc, 1)
+        expected = "eee:status  expected=disabled|not supported  actual=enabled"
+        self.assertTrue(any(line.startswith(f"FAIL  enp2s0  {expected}  (driver r8169; ") for line in lines))
+        self.assertTrue(any(line.startswith(f"FAIL  enp7s0  {expected}  (driver ixgbe; ") for line in lines))
+        self.assertIn("3 wired NIC(s) checked for EEE, 2 FAIL", lines)
+        self.assertEqual(lines[-1], "1 Realtek NIC(s) checked, 0 FAIL")
+
+    def test_eee_ignores_the_named_interfaces_and_wireless(self):
+        os.makedirs(os.path.join(self.net, "wlan0", "wireless"))
+        intel = os.path.join(self.root.name, "devices", "pci", "0000:07:00.0")
+        os.symlink(intel, os.path.join(self.net, "wlan0", "device"))
+        self.eee["enp7s0"] = IEM_EEE
+        rc, lines = self.main("rig0")
+        self.assertEqual(rc, 1)
+        self.assertTrue(any(line.startswith("FAIL  enp7s0  eee:status") for line in lines))
+        self.assertFalse(any("wlan0" in line for line in lines))
+        self.assertEqual(lines[-1], "1 Realtek NIC(s) checked, 0 FAIL")
 
     def test_an_unreadable_standard_exits_2(self):
         rc, lines = self.main(standard=os.path.join(self.root.name, "missing.json"))

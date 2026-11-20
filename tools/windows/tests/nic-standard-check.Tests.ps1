@@ -206,16 +206,28 @@ $mbc = [ordered]@{
 $script:FakeAdapters = @()
 $script:FakeValues = @{}
 $script:FakeIds = @{}
+$script:FakeDisplay = @{}
 function Set-FakePc {
     param([object[]]$Adapters)
-    $script:FakeAdapters = @(); $script:FakeValues = @{}; $script:FakeIds = @{}
+    $script:FakeAdapters = @(); $script:FakeValues = @{}; $script:FakeIds = @{}; $script:FakeDisplay = @{}
     foreach ($a in $Adapters) {
-        $script:FakeAdapters += [pscustomobject]@{
+        $fake = [pscustomobject]@{
             Name = $a.Name; InterfaceDescription = $a.Desc; Status = $a.Status; DriverFileName = $a.File
             DriverVersion = $a.Version; PnPDeviceID = 'DEV\' + $a.Name
         }
+        # A real MSFT_NetAdapter's medium fields, given only where a test sets
+        # Wired (a wired physical NIC) or Medium (another kind).
+        if ($a.ContainsKey('Wired') -or $a.ContainsKey('Medium')) {
+            $medium = if ($a.ContainsKey('Medium')) { $a.Medium } else { 14 }
+            $virtual = $a.ContainsKey('Virtual') -and $a.Virtual
+            $fake | Add-Member -NotePropertyName HardwareInterface -NotePropertyValue (-not $virtual)
+            $fake | Add-Member -NotePropertyName Virtual -NotePropertyValue $virtual
+            $fake | Add-Member -NotePropertyName NdisPhysicalMedium -NotePropertyValue $medium
+        }
+        $script:FakeAdapters += $fake
         $script:FakeIds['DEV\' + $a.Name] = $a.Hw
         $script:FakeValues[$a.Name] = $a.Props
+        $script:FakeDisplay[$a.Name] = if ($a.ContainsKey('Display')) { $a.Display } else { @{} }
     }
 }
 function Get-NetAdapter { [CmdletBinding()] param() $script:FakeAdapters }
@@ -229,7 +241,13 @@ function Get-NetAdapterAdvancedProperty {
     [CmdletBinding()] param([string]$Name, [switch]$AllProperties)
     $values = $script:FakeValues[$Name]
     if ($null -eq $values) { throw "No MSFT_NetAdapterAdvancedPropertySettingData objects found with property 'Name' equal to '$Name'" }
-    foreach ($k in $values.Keys) { [pscustomobject]@{ RegistryKeyword = $k; RegistryValue = $values[$k] } }
+    foreach ($k in $values.Keys) {
+        # A keyword the test gives a display (name, value) is a visible one;
+        # the others are hidden (no display name), as the 11.19 driver's.
+        $d = $script:FakeDisplay[$Name]
+        $shown = if ($null -ne $d -and $d.ContainsKey($k)) { $d[$k] } else { @('', '') }
+        [pscustomobject]@{ RegistryKeyword = $k; RegistryValue = $values[$k]; DisplayName = $shown[0]; DisplayValue = $shown[1] }
+    }
 }
 function Run-Fake {
     param([switch]$IncludeDown, [string]$LatencyProfile = 'normal', [string[]]$Name = @())
@@ -312,6 +330,92 @@ Check 'a keyword with no registry value reads as absent' {
     $f = Get-NicFacts 'Ethernet 4'
     -not $f.ContainsKey('*EEE') -and $f['GigaLite'] -eq '0'
 }
+# ------------------------------------------------------------ EEE on every wired NIC
+# The vendor-independent rule (owner 20.11.2026, dstack #465). Properties as
+# read on 20.11.2026: keyword, value, display name, display value; a hidden
+# keyword has no display name.
+$eee = $std.eee
+function EeeProp { param([string]$K, [string]$V, [string]$N = '', [string]$D = '') [pscustomobject]@{ Keyword = $K; Value = $V; DisplayName = $N; DisplayValue = $D } }
+function EeeVerdicts { param($Rows) (@($Rows) | ForEach-Object { "$($_.Key)=$($_.Verdict)" }) -join ',' }
+
+Check 'the EEE rule is in the file' {
+    (@($eee.windows.keywords) -ccontains 'EEELinkAdvertisement') -and (@($eee.windows.off) -join ',') -eq '0' -and
+    (@($eee.linux.off) -join ',') -eq 'disabled,not supported' -and $std.version -ge 3
+}
+Check 'a broken EEE rule is refused, as the Python checker refuses it' {
+    (Refused { param($s) $s.PSObject.Properties.Remove('eee') }) -and
+    (Refused { param($s) $s.eee = @() }) -and
+    (Refused { param($s) $s.eee.PSObject.Properties.Remove('evidence') }) -and
+    (Refused { param($s) $s.eee | Add-Member -NotePropertyName vendor -NotePropertyValue 'any' }) -and
+    (Refused { param($s) $s.eee.PSObject.Properties.Remove('windows') }) -and
+    (Refused { param($s) $s.eee.PSObject.Properties.Remove('linux') }) -and
+    (Refused { param($s) $s.eee.windows.keywords = @() }) -and
+    (Refused { param($s) $s.eee.windows.off = '0' }) -and
+    (Refused { param($s) $s.eee.windows.display_name = 'energy[(' }) -and
+    (Refused { param($s) $s.eee.windows.display_on = '' }) -and
+    (Refused { param($s) $s.eee.windows | Add-Member -NotePropertyName keyword -NotePropertyValue @('*EEE') }) -and
+    (Refused { param($s) $s.eee.linux.off = @() }) -and
+    (Refused { param($s) $s.eee.linux | Add-Member -NotePropertyName on -NotePropertyValue @('enabled') })
+}
+Check 'EEE, Realtek visible keywords (mbc): on fails with driver and keyword, the max speed is INFO' {
+    $rows = @(Test-NicEeeWindows $eee @(
+        (EeeProp '*EEE' '1' 'Energy-Efficient Ethernet' 'Enabled'),
+        (EeeProp 'EEEMaxSupportSpeed' '1000' 'EEE Max Support Speed' '1.0 Gbps Full Duplex'),
+        (EeeProp 'EnableGreenEthernet' '1' 'Green Ethernet' 'Enabled'),
+        (EeeProp 'AdvancedEEE' '0' 'Advanced EEE' 'Disabled'),
+        (EeeProp 'GigaLite' '1' 'Gigabit Lite' 'Enabled')
+    ) 'rtu56cx22x64.sys 1156.22.113.2026')
+    $fail = $rows | Where-Object { $_.Key -eq '*EEE' }
+    (EeeVerdicts $rows) -eq '*EEE=FAIL,EEEMaxSupportSpeed=INFO,EnableGreenEthernet=FAIL,AdvancedEEE=PASS' -and
+    $fail.Expected -eq '0' -and $fail.Actual -eq '1 (Enabled)' -and $fail.Note -like 'driver rtu56cx22x64.sys 1156.22.113.2026; *'
+}
+Check 'EEE, Realtek hidden keywords (resolume): off passes; a hidden max speed is not judged' {
+    $hidden = @(Test-NicEeeWindows $eee @((EeeProp '*EEE' '0'), (EeeProp 'EEE' '0'), (EeeProp 'EnableGreenEthernet' '0'), (EeeProp 'AdvancedEEE' '0'), (EeeProp 'PendingTransmits' '8')) 'rtucx22x64.sys 11.19.602.2025')
+    $dsg = @(Test-NicEeeWindows $eee @((EeeProp '*EEE' '0' 'Energy-Efficient Ethernet' 'Disabled'), (EeeProp 'EEEMaxSupportSpeed' '1000')) 'rt640x64.sys 10.79.50.1003')
+    (EeeVerdicts $hidden) -eq '*EEE=PASS,EEE=PASS,EnableGreenEthernet=PASS,AdvancedEEE=PASS' -and (EeeVerdicts $dsg) -eq '*EEE=PASS'
+}
+Check 'EEE, Intel: EEELinkAdvertisement and *EEE, any case' {
+    (EeeVerdicts (Test-NicEeeWindows $eee @((EeeProp 'EEELinkAdvertisement' '1' 'Energy Efficient Ethernet' 'On')) 'e2fn.sys 2.1.5.7')) -eq 'EEELinkAdvertisement=FAIL' -and
+    (EeeVerdicts (Test-NicEeeWindows $eee @((EeeProp 'eeelinkadvertisement' '0' 'Energy Efficient Ethernet' 'Off')) 'e2fn.sys 2.1.5.7')) -eq 'eeelinkadvertisement=PASS' -and
+    (EeeVerdicts (Test-NicEeeWindows $eee @((EeeProp '*EEE' '1' 'Energy Efficient Ethernet' 'On')) 'e1d68x64.sys 12.19.2.45')) -eq '*EEE=FAIL'
+}
+Check 'EEE, another vendor (Aquantia-style) by its display name and display value' {
+    $v = { param($p) @(Test-NicEeeWindows $eee @($p) 'aqnic650.sys 3.1.6')[0].Verdict }
+    (& $v (EeeProp 'EeeEnable' '1' 'Energy-Efficient Ethernet' 'Enabled')) -eq 'FAIL' -and
+    (& $v (EeeProp 'EeeEnable' '1' 'Energy-Efficient Ethernet' 'Disabled')) -eq 'PASS' -and
+    (& $v (EeeProp 'EeeEnable' '0' 'Energy Efficient Ethernet' '')) -eq 'PASS' -and
+    (& $v (EeeProp 'GreenMode' '2' 'Green Ethernet' 'On (at 1 Gbps)')) -eq 'FAIL' -and
+    (& $v (EeeProp 'EeeEnable' '2' 'EEE' 'Auto')) -eq 'INFO'
+}
+Check 'EEE, no EEE keyword at all is one INFO row' {
+    $rows = @(Test-NicEeeWindows $eee @((EeeProp 'IEEE11nMode' '3' '802.11n/ac/ax Wireless Mode' '4. 802.11ax'), (EeeProp 'GreenFieldCapable' '0')) 'x.sys 1')
+    $rows.Count -eq 1 -and $rows[0].Verdict -eq 'INFO' -and $rows[0].Key -eq 'eee' -and $rows[0].Actual -eq '(no EEE keyword)'
+}
+Check 'EEE on the fake PC: every wired NIC, any vendor, up or disabled, whatever -Name; no Wi-Fi, no virtual, no absent one' {
+    Set-FakePc @(
+        @{ Name = 'Ethernet 4'; Desc = 'Realtek Gaming USB 2.5GbE Family Controller'; Status = 'Up'; File = 'rtucx22x64.sys'; Version = '11.19.602.2025'; Hw = $usb; Props = $resolumePp; Wired = $true },
+        @{ Name = 'Dante70'; Desc = 'Realtek Virtual Adapter'; Status = 'Up'; File = 'RtVlan640.sys'; Version = '10.4.1117.2020'; Hw = 'RTK_VLANMP'; Props = @{ '*EEE' = '1' }; Wired = $true; Virtual = $true },
+        @{ Name = 'Ethernet'; Desc = 'Intel(R) Ethernet Controller (2) I225-V'; Status = 'Disabled'; File = 'e2fn.sys'; Version = '2.1.5.7'; Hw = 'PCI\VEN_8086&DEV_15F3'; Props = [ordered]@{ EEELinkAdvertisement = '1' }; Display = @{ EEELinkAdvertisement = @('Energy Efficient Ethernet', 'On') }; Wired = $true },
+        @{ Name = 'Ethernet 9'; Desc = 'Intel(R) Ethernet Controller I226-V'; Status = 'Not Present'; File = 'e2fn.sys'; Version = '2.1.5.7'; Hw = 'PCI\VEN_8086&DEV_125C'; Props = @{ '*EEE' = '1' }; Wired = $true },
+        @{ Name = 'Wi-Fi'; Desc = 'Intel(R) Wi-Fi 6E AX211 160MHz'; Status = 'Up'; File = 'Netwtw14.sys'; Version = '23.150.0.4'; Hw = 'PCI\VEN_8086&DEV_51F0'; Props = @{ '*EEE' = '1' }; Medium = 9 }
+    )
+    $r = Run-Fake -Name @('Ethernet 4')
+    $r.Exit -eq 1 -and
+    ($r.Lines -contains 'PASS  Ethernet 4  *EEE  expected=0  actual=0') -and
+    @($r.Lines | Where-Object { $_ -like 'FAIL  Ethernet  EEELinkAdvertisement  expected=0  actual=1 (On)  (driver e2fn.sys 2.1.5.7; *' }).Count -eq 1 -and
+    ($r.Lines -contains 'SKIP  Ethernet 9  EEE: Not Present') -and
+    -not ($r.Lines -match 'Wi-Fi') -and -not ($r.Lines -match 'Dante70') -and
+    ($r.Lines -contains '2 wired NIC(s) checked for EEE, 1 FAIL') -and ($r.Lines -contains '1 Realtek NIC(s) checked, 0 FAIL')
+}
+Check 'EEE on the fake PC: off everywhere exits 0' {
+    Set-FakePc @(
+        @{ Name = 'Ethernet 4'; Desc = 'Realtek Gaming USB 2.5GbE Family Controller'; Status = 'Up'; File = 'rtucx22x64.sys'; Version = '11.19.602.2025'; Hw = $usb; Props = $resolumePp; Wired = $true },
+        @{ Name = 'Ethernet'; Desc = 'Intel(R) Ethernet Controller (2) I225-V'; Status = 'Up'; File = 'e2fn.sys'; Version = '2.1.5.7'; Hw = 'PCI\VEN_8086&DEV_15F3'; Props = [ordered]@{ EEELinkAdvertisement = '0' }; Wired = $true }
+    )
+    $r = Run-Fake
+    $r.Exit -eq 0 -and ($r.Lines -contains '2 wired NIC(s) checked for EEE, 0 FAIL')
+}
+
 Check 'a standard that cannot be read exits 2' {
     $lines = @(Invoke-NicStandardCheck -Source (Join-Path $PSScriptRoot 'no-such-standard.json'))
     $script:NicExit -eq 2 -and $lines[0] -like 'FAIL  cannot read the standard*'
