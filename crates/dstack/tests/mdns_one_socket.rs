@@ -244,6 +244,36 @@ fn a_device_s_process_receives_mdns_on_one_socket_and_still_answers() {
     }
 }
 
+/// dstack #444's last step, #451: a device's one 5353 socket is bound to
+/// its address exactly where the OS hands such a socket the group
+/// (`announce::mdns::GROUP_TO_BOUND_SOCKET`: Windows, where the wildcard
+/// daemon went deaf after an address cycle until a restart), else the
+/// wildcard's (Linux). Either way it answers a unicast query to
+/// `<address>:5353` and a direct query to the group.
+#[test]
+fn a_device_s_one_socket_is_bound_to_its_address_where_the_os_hands_it_the_group() {
+    use dstack::announce::mdns::{GROUP_TO_BOUND_SOCKET, Mdns};
+    let _one = ONE_DEVICE.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = tempfile::tempdir().unwrap();
+    let (host, name, tx1) = start(dir.path(), false);
+    read_record_at(&name, &tx1, SocketAddrV4::new(test_ipv4(), 5353));
+    read_record(&name, &tx1);
+    let bound = Mdns::shared(test_ipv4())
+        .expect("the device's daemon")
+        .bound();
+    #[cfg(target_os = "linux")]
+    let held = mdns_sockets();
+    let stopped = host.stop(Duration::from_secs(5));
+    assert!(matches!(stopped, host::Stopped::Done), "{stopped:?}");
+    assert_eq!(bound, GROUP_TO_BOUND_SOCKET, "the device's daemon");
+    #[cfg(target_os = "linux")]
+    assert_eq!(
+        addresses(&held),
+        ["00000000"],
+        "one 5353 socket, the wildcard's"
+    );
+}
+
 /// dstack #444's trial switch (`mdns_bind_address = true`): the process's
 /// one 5353 socket is bound to the device's address and answers a unicast
 /// query to `<address>:5353`. Windows also delivers the group to it (a

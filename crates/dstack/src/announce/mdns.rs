@@ -123,6 +123,14 @@ impl Heard {
 /// measured (BSD stacks deliver only to the wildcard or the group).
 pub const GROUP_TO_BOUND_SOCKET: bool = cfg!(windows);
 
+/// Whether the address's daemon binds its socket to the address by
+/// default, given whether the OS hands such a socket the group
+/// ([`GROUP_TO_BOUND_SOCKET`]). Today: never (the wildcard's).
+pub fn binds_to_address(group_to_bound: bool) -> bool {
+    let _ = group_to_bound;
+    false
+}
+
 /// The warning for a daemon bound to its address (`mdns_bind_address`),
 /// given whether the OS hands such a socket the group
 /// ([`GROUP_TO_BOUND_SOCKET`]): none where it does.
@@ -375,7 +383,7 @@ impl Mdns {
     /// lock (a failed one waits for its shutdown), so two devices starting
     /// at once may open two: the later is dropped and the first kept.
     pub fn shared(ip: Ipv4Addr) -> Result<Arc<Mdns>, String> {
-        Mdns::shared_bound(ip, false)
+        Mdns::shared_bound(ip, binds_to_address(GROUP_TO_BOUND_SOCKET))
     }
 
     /// [`Mdns::shared`], a new daemon's socket bound to `ip` when `bound`

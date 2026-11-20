@@ -552,17 +552,27 @@ fn a_daemon_bound_to_its_address_hears_unicast_and_answers_from_it() {
     assert!(handle.get_metrics().is_err(), "the daemon still runs");
 }
 
-/// Off (the default), the daemon's socket is the wildcard's and a Windows
-/// device keeps its own responder, as before #444.
+/// The default daemon binds to the address exactly where the OS hands such
+/// a socket the group (dstack #444, #451): Windows, whose wildcard daemon
+/// went deaf after an address cycle until a restart (mbc, 20.11.2026),
+/// while the bound one's watch opens it again. Elsewhere the wildcard.
 #[test]
-fn the_default_daemon_is_unbound_and_needs_the_responder() {
+fn the_daemon_binds_to_the_address_where_the_os_hands_it_the_group() {
+    assert!(binds_to_address(true), "Windows: bound");
+    assert!(!binds_to_address(false), "Linux: the wildcard's");
+}
+
+/// The default daemon on this OS: bound to the address on Windows (no
+/// responder beside it), the wildcard's on Linux, where a bound socket
+/// hears no group.
+#[test]
+fn the_default_daemon_is_bound_where_the_os_hands_a_bound_socket_the_group() {
     let _one = ONE_DAEMON.lock().unwrap_or_else(PoisonError::into_inner);
     let mdns = Mdns::shared(Ipv4Addr::LOCALHOST).unwrap();
-    assert!(!mdns.bound());
-    assert!(mdns.own_responder_needed());
-    // Its thread opened its socket before it ran a command: none of this
-    // process's 5353 sockets is bound to 127.0.0.1 (no other unit test
-    // binds 127.0.0.1:5353).
+    assert_eq!(mdns.bound(), GROUP_TO_BOUND_SOCKET);
+    // Linux: its thread opened its socket before it ran a command: none of
+    // this process's 5353 sockets is bound to 127.0.0.1 (no other unit test
+    // binds 127.0.0.1:5353 while it holds `ONE_DAEMON`).
     mdns.settle(GOODBYE_WAIT).expect("the daemon runs");
     // Judged on a read that lists one of this process's 0.0.0.0:5353 rows
     // (the daemon's, or another test's wildcard socket): never on an empty
