@@ -6,9 +6,12 @@
 //! process's environment and install process-wide handlers).
 
 use std::fs::File;
+use std::path::Path;
 
 use dlink::Place;
 use tracing_subscriber::fmt::writer::MakeWriterExt;
+
+use crate::logfile::{self, Previous};
 
 /// This PC's name (Windows `COMPUTERNAME`, Linux the kernel's hostname).
 pub fn host_name() -> String {
@@ -42,6 +45,39 @@ pub fn init_log(file: Option<File>) {
             .with_env_filter(filter)
             .with_writer(std::io::stderr)
             .init(),
+    }
+}
+
+/// A run's log: on stderr and in the file `log` ([`logfile::open`]: the
+/// run before kept as `<name>.log.1`, dstack #470), with the INFO line
+/// that names it (and the kept previous log, when one was kept). Whether
+/// the file opened: without it the log is on stderr only and the app
+/// still runs.
+pub fn start_log(app: &str, log: &Path) -> bool {
+    match logfile::open(log) {
+        Ok(opened) => {
+            init_log(Some(opened.file));
+            match opened.previous {
+                Previous::Nothing => {
+                    tracing::info!(log = %log.display(), "{app}: the log");
+                }
+                Previous::Kept(p) => tracing::info!(
+                    log = %log.display(),
+                    previous = %p.display(),
+                    "{app}: the log, the run before kept"
+                ),
+                Previous::Lost(e) => tracing::warn!(
+                    log = %log.display(),
+                    "{app}: the log; the run before's was not kept ({e})"
+                ),
+            }
+            true
+        }
+        Err(e) => {
+            init_log(None);
+            tracing::warn!(log = %log.display(), "{app}: no log file ({e})");
+            false
+        }
     }
 }
 

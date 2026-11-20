@@ -11,7 +11,6 @@
 //! from, if any. Exit codes: 0 done, 1 a failure (no output device, the
 //! device did not start), 2 a usage error.
 
-use std::fs::File;
 use std::process::ExitCode;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
@@ -116,15 +115,7 @@ fn run(o: &Options) -> Result<(), String> {
     let name = session::name_of(o);
     let state = session::state_of(o, &name);
     let log = state.with_extension("log");
-    let file = log
-        .parent()
-        .and_then(|d| std::fs::create_dir_all(d).ok())
-        .and_then(|()| File::create(&log).ok());
-    let logged = file.is_some();
-    init_log(file);
-    if logged {
-        tracing::info!(log = %log.display(), "dlisten: the log");
-    }
+    host::start_log("dlisten", &log);
     let (events, inbox) = mpsc::channel();
     let mut session = Session::start(o, events.clone())?;
 

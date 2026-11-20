@@ -52,8 +52,8 @@ receives, played on the output at its own rate and clock.
 
 dlisten has no window: dtray shows it (the status, and an Output menu
 whose choice is remembered for the next start; --output wins). The status
-is also logged every 10 s, to stderr and to <state file>.log. Ctrl+C
-stops it.";
+is also logged every 10 s, to stderr and to <state file>.log; a start
+keeps the run before's log as <state file>.log.1. Ctrl+C stops it.";
 
 /// The RX channels unless `--channels`.
 pub const CHANNELS: usize = 2;

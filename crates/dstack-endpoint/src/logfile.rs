@@ -35,16 +35,23 @@ pub fn previous_of(log: &Path) -> PathBuf {
     PathBuf::from(name)
 }
 
-/// Opens a new log at `log` (its folder created), keeping the run before.
+/// Opens a new log at `log` (its folder created), keeping the run before:
+/// an existing `log` is renamed to [`previous_of`] (replacing an older
+/// one; `std::fs::rename` replaces on Linux and Windows), then the new log
+/// is created. A rename that fails for another reason than "no log yet"
+/// still gives the new log, over the old one, as before #470.
 pub fn open(log: &Path) -> io::Result<Opened> {
     if let Some(dir) = log.parent() {
         std::fs::create_dir_all(dir)?;
     }
+    let kept = previous_of(log);
+    let previous = match std::fs::rename(log, &kept) {
+        Ok(()) => Previous::Kept(kept),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Previous::Nothing,
+        Err(e) => Previous::Lost(e),
+    };
     let file = File::create(log)?;
-    Ok(Opened {
-        file,
-        previous: Previous::Nothing,
-    })
+    Ok(Opened { file, previous })
 }
 
 #[cfg(test)]
