@@ -22,9 +22,10 @@ use crate::latency::ms;
 /// The least target a dlink app's device takes, ns, and every
 /// [`AppBuffer`]'s floor unless its user sets its own
 /// ([`AppBuffer::with_floor`]: dstack-asio's per-direction bridge targets,
-/// dstack #422). It is a sanity bound, not a working value: a target only
-/// holds when it covers half the app's chunk and a block
-/// ([`AppBuffer::short`], warned at the start).
+/// dstack #422, and its default target, dstack #482). It is a sanity
+/// bound, not a working value: a target only holds when it covers half
+/// the app's chunk and a block ([`AppBuffer::short`], warned at the
+/// start).
 pub const MIN_APP_BUFFER_NS: u64 = 1_000_000;
 /// The largest target, ns: the player re-centres an excess of twice the
 /// target ([`super::player::hard_excess_s`]), so three targets must fit in
