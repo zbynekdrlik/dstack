@@ -9,7 +9,7 @@ use super::*;
 /// the media threads' scheduling, after the totals.
 #[test]
 fn the_engine_status_names_the_causes_the_wakes_and_the_threads() {
-    use crate::media::tx::{MediaThread, Priority};
+    use crate::media::tx::{MediaThread, Priority, Slice, SliceRequest};
     use crate::stream::{Cause, PumpStats};
     let dir = tempfile::tempdir().unwrap();
     let device = device_at(dir.path());
@@ -45,6 +45,15 @@ fn the_engine_status_names_the_causes_the_wakes_and_the_threads() {
     wakes.record(700_000, true, false, None, || 1_794_000_000_456);
     let scheduling = media.tx.scheduling();
     scheduling.record(MediaThread::Rx, Priority::Refused, None, Some(0));
+    // dstack #302: the pump's slice request and its read-back.
+    scheduling.record_slice(
+        MediaThread::Pump,
+        &SliceRequest {
+            slice: Slice::Short,
+            read_ns: Some(200_000),
+            error: None,
+        },
+    );
     scheduling.record(
         MediaThread::Pump,
         Priority::MmcssPriorityRefused,
@@ -64,8 +73,9 @@ fn the_engine_status_names_the_causes_the_wakes_and_the_threads() {
          {\"unix_ms\":1794000000123,\"behind_us\":12345,\"rebootstrap\":1,\"oversleep_us\":12300},\
          {\"unix_ms\":1794000000456,\"behind_us\":700,\"rebootstrap\":0}],\
          \"threads\":[{\"thread\":\"pump\",\"scheduling\":\"mmcss_joined_priority_refused\",\
-         \"mmcss_task\":9,\"priority\":18},{\"thread\":\"rx\",\"scheduling\":\"refused\",\
-         \"mmcss_task\":null,\"priority\":0}]}}";
+         \"mmcss_task\":9,\"priority\":18,\"slice\":\"short\",\"slice_ns\":200000},\
+         {\"thread\":\"rx\",\"scheduling\":\"refused\",\"mmcss_task\":null,\"priority\":0,\
+         \"slice\":\"not_asked\",\"slice_ns\":null}]}}";
     assert!(s.ends_with(os_free), "{s}");
     assert!(s.contains("\"rebootstraps\":7,"), "{s}");
 }

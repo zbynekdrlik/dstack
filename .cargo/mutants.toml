@@ -198,7 +198,10 @@ exclude_re = [
   # The OS priority call, its record and its log line; the decision is
   # priority_outcome (tested), the record is Scheduling's (tested, and each
   # media thread's start test reads it), the call is ask_priority (excluded
-  # above).
+  # above). It also matches `take_priority_asked` on purpose (dstack #302):
+  # its slice wiring has no operator, the slice decision is `slice::request`
+  # (tested with fake closures), its line `log_slice` (tested), and a Linux
+  # test runs `take_priority_asked` and reads the slice back.
   "tx/priority.rs.*take_priority",
   # dsync's real follower (dsync-ptp): it binds port 319, which neither CI
   # nor the gate may; the selector's rule (`choose`), `Linked` and `Absorbing`

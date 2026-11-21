@@ -154,18 +154,24 @@ fn the_registry_keeps_each_thread_s_last_outcome_and_task_index() {
                 outcome: Priority::MmcssPriorityRefused,
                 mmcss_task: Some(u32::MAX),
                 priority: Some(-15),
+                slice: Slice::NotAsked,
+                slice_ns: None,
             },
             Scheduled {
                 thread: MediaThread::Tx,
                 outcome: Priority::Granted,
                 mmcss_task: None,
                 priority: None,
+                slice: Slice::NotAsked,
+                slice_ns: None,
             },
             Scheduled {
                 thread: MediaThread::Rx,
                 outcome: Priority::Mmcss,
                 mmcss_task: Some(0),
                 priority: Some(19),
+                slice: Slice::NotAsked,
+                slice_ns: None,
             },
         ]
     );
@@ -185,12 +191,16 @@ fn the_registry_keeps_each_thread_s_last_outcome_and_task_index() {
                 outcome: Priority::Refused,
                 mmcss_task: None,
                 priority: Some(0),
+                slice: Slice::NotAsked,
+                slice_ns: None,
             },
             Scheduled {
                 thread: MediaThread::TxRelay,
                 outcome: Priority::Highest,
                 mmcss_task: Some(3),
                 priority: Some(i32::MIN),
+                slice: Slice::NotAsked,
+                slice_ns: None,
             },
         ]
     );
@@ -285,4 +295,108 @@ fn a_set_priority_reads_back() {
     })
     .join()
     .unwrap();
+}
+
+/// dstack #302: each thread's slice request and read-back, kept beside its
+/// outcome; a thread recorded again keeps its last.
+#[test]
+fn the_registry_keeps_each_thread_s_slice_and_its_read_back() {
+    let s = Scheduling::new();
+    let short = SliceRequest {
+        slice: Slice::Short,
+        read_ns: Some(SHORT_SLICE_NS),
+        error: None,
+    };
+    s.record_slice(MediaThread::Pump, &short);
+    assert!(s.threads().is_empty(), "visible only with the outcome");
+    s.record(MediaThread::Pump, Priority::Normal, None, None);
+    s.record_slice(MediaThread::Tx, &SliceRequest::NOT);
+    s.record(MediaThread::Tx, Priority::Normal, None, None);
+    s.record(MediaThread::Rx, Priority::Normal, None, None);
+    let got: Vec<_> = s.threads().iter().map(|t| (t.slice, t.slice_ns)).collect();
+    assert_eq!(
+        got,
+        [
+            (Slice::Short, Some(SHORT_SLICE_NS)),
+            (Slice::NotAsked, None),
+            (Slice::NotAsked, None),
+        ]
+    );
+    // Read back 0 (a kernel before 6.12) is a read, not none; the largest
+    // read saturates.
+    s.record_slice(
+        MediaThread::Pump,
+        &SliceRequest {
+            slice: Slice::Ignored,
+            read_ns: Some(0),
+            error: None,
+        },
+    );
+    s.record_slice(
+        MediaThread::Tx,
+        &SliceRequest {
+            slice: Slice::Refused,
+            read_ns: Some(u64::MAX),
+            error: Some(1),
+        },
+    );
+    let got: Vec<_> = s.threads().iter().map(|t| (t.slice, t.slice_ns)).collect();
+    assert_eq!(
+        got[..2],
+        [
+            (Slice::Ignored, Some(0)),
+            (Slice::Refused, Some(u64::MAX - 1)),
+        ]
+    );
+}
+
+/// dstack #302: a device warns of its first refused slice only; a short
+/// one and an ignored one (a kernel before 6.12) never warn.
+#[test]
+fn an_ignored_or_refused_slice_warns_once_a_device() {
+    let s = Scheduling::new();
+    assert!(s.first_slice_warning());
+    assert!(!s.first_slice_warning());
+    assert!(!s.first_slice_warning());
+    let refused = SliceRequest {
+        slice: Slice::Refused,
+        read_ns: None,
+        error: Some(22),
+    };
+    let ignored = SliceRequest {
+        slice: Slice::Ignored,
+        read_ns: Some(0),
+        error: None,
+    };
+    let short = SliceRequest {
+        slice: Slice::Short,
+        read_ns: Some(SHORT_SLICE_NS),
+        error: None,
+    };
+    let s = Scheduling::new();
+    let warned = crate::test_log::capture_warnings(|| {
+        log_slice("engine pump", &short, &s);
+        log_slice("engine pump", &SliceRequest::NOT, &s);
+        log_slice("TX thread", &ignored, &s);
+        log_slice("engine pump", &refused, &s);
+        log_slice("TX thread", &refused, &s);
+        log_slice("TX thread", &refused, &s);
+    });
+    assert_eq!(warned.matches("EEVDF").count(), 1, "{warned}");
+    assert!(warned.contains("engine pump asked a 200 us"), "{warned}");
+    assert!(warned.contains("refused it (errno 22)"), "{warned}");
+    // Every line at info or above: short, ignored x3, refused x2 (one
+    // warning).
+    let s = Scheduling::new();
+    let all = crate::test_log::capture_at(tracing::Level::INFO, || {
+        log_slice("engine pump", &short, &s);
+        log_slice("engine pump", &SliceRequest::NOT, &s);
+        log_slice("TX thread", &ignored, &s);
+        log_slice("TX thread", &ignored, &s);
+        log_slice("TX thread", &ignored, &s);
+        log_slice("TX thread", &refused, &s);
+        log_slice("TX thread", &refused, &s);
+    });
+    assert_eq!(all.matches("EEVDF").count(), 6, "{all}");
+    assert_eq!(all.matches("WARN").count(), 1, "{all}");
 }
