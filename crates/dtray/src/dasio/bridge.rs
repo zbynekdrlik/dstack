@@ -143,7 +143,10 @@ impl Bridge {
             out.push("the bridge carries no channel".to_string());
         }
         // dlink's own check and text (the range the bridge's FIFO takes);
-        // unset is dstack's default, always in range. A direction's own
+        // unset is dstack's default (the driver's buffer + one pump block,
+        // checked at the driver's open against the bridge's floor, dstack
+        // #482; this window cannot, the buffer is unknown here). A
+        // direction's own
         // target takes the bridge's floor (dstack-asio's
         // `direction_target_problem`, dstack #422), the shared one dlink's.
         for (label, key, floor, target) in [
