@@ -459,12 +459,16 @@ impl<P: Process> Pump<P> {
     }
 
     /// Drains the RX flow sockets into the rings while the pump writes
-    /// them, at PTP time `now_ns` (`None`: the clock is not ready); the
-    /// drain's own time and datagrams recorded (dstack #354).
-    fn drain(&mut self, now_ns: Option<u64>) {
+    /// them, at PTP time `now_ns` before the block whose start is `step`
+    /// samples behind the playout point (`None`: the clock is not ready);
+    /// the drain's own time and datagrams recorded (dstack #354).
+    fn drain(&mut self, at: Option<(u64, u64)>) {
         if let Some(intake) = &mut self.intake {
             let began = Instant::now();
-            intake.drain_into_rings(now_ns);
+            match at {
+                Some((now_ns, step)) => intake.drain_before_block(now_ns, step),
+                None => intake.drain_into_rings(None),
+            };
             let datagrams = u64::try_from(intake.datagrams()).unwrap_or(u64::MAX);
             self.stats.drained(nanos(began.elapsed()), datagrams);
         }
@@ -634,7 +638,10 @@ impl<P: Process> Pump<P> {
                     if late {
                         self.stats.late.fetch_add(1, Ordering::Relaxed);
                     }
-                    self.drain(Some(drain_ns));
+                    // dstack #477: the reader stands at this block's
+                    // start, however late the wake.
+                    let step = now.saturating_sub(start + self.timing.playout);
+                    self.drain(Some((drain_ns, step)));
                     self.cpu_timed(|pump| pump.block(start));
                 }
                 Due::Wait { until } => break until,

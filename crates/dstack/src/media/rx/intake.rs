@@ -34,7 +34,10 @@
 //! the read's time less the kernel's receive time: under the pump it
 //! includes the wait for the next block (at most a block, plus the pump's
 //! own lateness), and the write delay likewise. `late`, `wire_late`,
-//! `late_at_read` and the ring counts are judged as before, at the read.
+//! `late_at_read` and the ring counts are judged as before, at the read;
+//! under the pump `late` and the lost holes against the block it reads
+//! next ([`Intake::drain_before_block`], dstack #477), so a late wake
+//! counts no packet late that came in time.
 //! The reported ages (the heartbeat's lateness, the peak, the judge and
 //! the mean) are each packet's age at its ARRIVAL (dstack #350,
 //! [`record_arrivals`]): the read's wait is reported apart.
@@ -111,8 +114,11 @@ pub struct Intake {
     /// Under the app: the last drain's PTP time, samples (`None`: none
     /// yet, or the clock was not ready).
     last_drain: Option<u64>,
-    /// Under the app: the samples since the drain before this one, the
-    /// reader's step ([`reads_apart`]).
+    /// The reader's step at this drain, samples ([`reads_apart`]): under
+    /// the app the samples since the drain before this one, under the
+    /// pump how far past the flows' playout point its next block starts
+    /// (dstack #477, [`Intake::drain_before_block`]); `None`: the plan's
+    /// block.
     gap: Option<u64>,
     /// The packets one slot's read placed, for their arrival ages once the
     /// read is done ([`record_arrivals`], dstack #350).
@@ -160,8 +166,10 @@ impl Intake {
         }
     }
 
-    /// The pump's drain (normal profile), at PTP time `now_ns` (`None`:
-    /// the clock is not ready; packets are read and counted `unplaced`):
+    /// The drain of the pump (normal profile; before a block it drains with
+    /// its step, [`Intake::drain_before_block`]) or of an app, at PTP time
+    /// `now_ns` (`None`: the clock is not ready; packets are read and
+    /// counted `unplaced`):
     /// the plans and routes that changed, then every slot that has a flow
     /// read until its socket is empty (at most [`PUMP_DRAIN`] datagrams),
     /// the holes behind the playout given up. A slot whose flow is new is
@@ -170,12 +178,36 @@ impl Intake {
     /// left empty (`false`: a slot hit [`PUMP_DRAIN`] and has more; the
     /// pump drains it again at its next block, an idle drain at once).
     pub fn drain_into_rings(&mut self, now_ns: Option<u64>) -> bool {
-        self.datagrams = 0;
-        if self.app {
+        let gap = if self.app {
             let now = now_ns.map(|ns| clock::to_samples(ns, self.shared.rate));
-            self.gap = since(self.last_drain, now);
+            let gap = since(self.last_drain, now);
             self.last_drain = now;
-        }
+            gap
+        } else {
+            None
+        };
+        self.drain(now_ns, gap)
+    }
+
+    /// The pump's drain at PTP time `now_ns`, just before it reads the
+    /// block that starts `step` samples behind the playout point (now less
+    /// P less the block's start: the block when the wake is on time, plus
+    /// how late it is): read as [`Intake::drain_into_rings`] reads, a
+    /// packet late only when its first frame is behind the block's start
+    /// (each flow's at its delay: past the playout point and that step),
+    /// a hole lost only wholly behind it. The pump reads by its
+    /// schedule, so a late wake reads first the block due that long ago:
+    /// what came since the drain before is in time (dstack #477:
+    /// presenter-listen's wakes 4-6 ms late at P 5 ms counted packets that
+    /// arrived 0.3 ms old as late).
+    pub fn drain_before_block(&mut self, now_ns: u64, step: u64) -> bool {
+        self.drain(Some(now_ns), Some(step))
+    }
+
+    /// The drain of both, the reader's step `gap` ([`reads_apart`]).
+    fn drain(&mut self, now_ns: Option<u64>, gap: Option<u64>) -> bool {
+        self.datagrams = 0;
+        self.gap = gap;
         let moves = self.shared.handles.moves();
         let wall = self.shared.stamps().then(wall_now_ns).flatten();
         let mono = self.shared.now_ns();
@@ -482,11 +514,12 @@ impl Intake {
 }
 
 /// The reader's step, samples: how far past a flow's playout point it may
-/// have read when the writer places a packet. The pump's (and the RX
-/// thread's) is the plan's `block`; an app that drains on its own
-/// consumer's thread (dstack #307) reads up to its drain's now less P, so
-/// its step is the time since its last drain (`gap`; the block until it
-/// has one).
+/// have read when the writer places a packet. The RX thread's is the
+/// plan's `block`; the pump's is its next block's distance behind the
+/// playout point (the block, plus how late its wake is: it reads by its
+/// schedule, dstack #477); an app that drains on its own consumer's thread
+/// (dstack #307) reads up to its drain's now less P, so its step is the
+/// time since its last drain. `gap` is the drain's (`None`: the block).
 pub(super) fn reads_apart(block: u16, gap: Option<u64>) -> u64 {
     gap.unwrap_or(u64::from(block))
 }
