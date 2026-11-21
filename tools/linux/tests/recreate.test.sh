@@ -166,9 +166,13 @@ until_a_answers() {
   until out=$(ip netns exec "$NB" python3 -I "$GATE" ask "$IP_A" "$A._netaudio-arc._udp.local." "$ASK_S"); do
     [ $((SECONDS - $2)) -lt "$1" ] || fail "$3 in $1 s ($out)"
     kill -0 "$PA" 2>/dev/null || fail "peer a ended"
+    sleep 0.5
   done
   echo "$out"
   ANSWERED=$((SECONDS - $2))
+  # An answer that came only after the bound (the first ask can start late,
+  # after the audio's own wait) fails too.
+  [ "$ANSWERED" -le "$1" ] || fail "$3 in $1 s (answered $ANSWERED s after the mark: $out)"
 }
 
 until_both_deliver 60 "the peers did not deliver to each other (a from b by multicast, a to b past the qdisc)"
