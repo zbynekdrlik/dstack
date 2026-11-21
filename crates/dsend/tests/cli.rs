@@ -44,6 +44,22 @@ fn a_usage_error_exits_2_with_the_reason_and_the_usage() {
     assert!(err.contains("usage: dsend"), "{err}");
 }
 
+/// dstack #480: the binary takes `--latency-ms` and refuses it beside
+/// `--receive-buffer-ms`, with the reason and the usage.
+#[test]
+fn the_latency_flag_is_taken_and_checked() {
+    let out = dsend(&["--latency-ms", "10", "--receive-buffer-ms", "9"]);
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    let err = text(&out.stderr);
+    assert!(
+        err.starts_with("dsend: give one of --latency-ms (the whole latency)"),
+        "{err}"
+    );
+    assert!(err.contains("  --latency-ms <ms> "), "{err}");
+    let out = dsend(&["--latency-ms", "10", "--help"]);
+    assert!(out.status.success(), "{out:?}");
+}
+
 /// Off Windows a run stops at once with the reason, before any device or
 /// stream starts (no state folder, no Dante device).
 #[cfg(not(windows))]

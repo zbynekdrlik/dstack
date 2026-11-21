@@ -33,6 +33,7 @@ fn no_arguments_run_at_the_defaults() {
             output: None,
             rate: 96_000,
             latency: Latency::default(),
+            latency_ns: None,
             place: None,
             ports: None,
             process_id: None,
@@ -167,6 +168,7 @@ fn the_usage_names_every_flag() {
     for flag in VALUE_FLAGS {
         assert!(USAGE.contains(&format!("  {flag} ")), "{flag}");
     }
+    assert!(USAGE.contains(&format!("  {LATENCY_FLAG} ")));
     assert!(USAGE.contains("  --list-outputs "));
     assert!(USAGE.starts_with("usage: dsend [options]"));
 }
@@ -181,7 +183,7 @@ fn the_link_config_is_a_tx_only_device_l_and_r_with_the_options() {
             .tx(["L", "R"])
             .sample_rate(96_000)
             .product("dstack", "dsend")
-            .receive_buffer_ns(39_000_000)
+            .receive_buffer_ns(9_000_000)
             .app_buffer(WASAPI_PERIOD_NS, None)
     );
     let dev = plain.device().unwrap();
@@ -262,49 +264,117 @@ fn a_run_never_shows_a_box_its_failure_goes_to_the_log() {
     }
 }
 
-/// dstack #461 (owner ROZHODNUTÉ 20.11.2026): dsend's Dante latency is 40
-/// ms unless (b) is set, up from dlink's 9 ms (dstack #247's per-app
-/// defaults). dsend is a fallback on the FOH PC: it never raises its
-/// threads' priority there (the PC's main audio, Ableton and dasio, must
-/// not lose CPU to it), so it rides the PC's holds out in its latency; the
-/// largest hold seen there was 35.7 ms, and the TX schedule starts again
-/// only past P.
+/// The smallest maximum latency a hardware Dante receiver on the site
+/// states in its ARC settings (0x1100 key 0x8302), ns: a Dante card
+/// (`arc_settings_card.json`) and the wireless receiver read 10156250, a
+/// second card 10666667 (dstack's catalog fixtures). A transmitter whose
+/// latency is past a receiver's maximum leaves that receiver's subscription
+/// in "Incorrect channel latencies" (dstack #480: a Yamaha AIC128-D on
+/// dsend's 40 ms).
+const HARDWARE_RECEIVER_MAX_NS: u64 = 10_156_250;
+
+/// dstack #480 (regression of #461): dsend's default Dante latency is 10
+/// ms, the largest value common hardware receivers accept. #461's 40 ms put
+/// the FOH card's subscription in "Incorrect channel latencies" (the card
+/// ran 9 ms before). As much margin as the receivers allow (owner, 20.11:
+/// dsend is a rare fallback whose latency may go up), never past them.
 #[test]
-fn dsend_s_dante_latency_is_40_ms_unless_set() {
+fn dsend_s_default_latency_fits_common_hardware_receivers() {
     let state = PathBuf::from("/tmp/s.toml");
     for (flags, network_ns) in [("", 1_000_000), ("--network-latency-ms 0.5", 500_000)] {
         for rate in ["96000", "48000", "44100"] {
             let o = run(&format!("{flags} --rate {rate}"));
             let split = link_config(&o, "pc-dsend", state.clone()).split().unwrap();
-            assert_eq!(split.latency_ns, 40_000_000, "{flags} {rate}: {split:?}");
+            assert!(
+                split.latency_ns <= HARDWARE_RECEIVER_MAX_NS,
+                "{flags} {rate}: {split:?} is past what hardware receivers accept"
+            );
+            assert_eq!(split.latency_ns, 10_000_000, "{flags} {rate}: {split:?}");
             assert_eq!(split.network_latency_ns, network_ns, "{flags} {rate}");
-            assert_eq!(split.receive_buffer_ns, 40_000_000 - network_ns);
+            assert_eq!(split.receive_buffer_ns, 10_000_000 - network_ns);
         }
     }
     // (b) set: as given, (a) + (b).
     let set = link_config(&run("--receive-buffer-ms 9"), "pc-dsend", state);
     assert_eq!(set.split().unwrap().latency_ns, 10_000_000);
-    assert_eq!(LATENCY_NS, 40_000_000);
+    assert_eq!(LATENCY_NS, 10_000_000);
+}
+
+/// dstack #480: `--latency-ms` sets dsend's whole Dante latency, (b) =
+/// it less (a); it never comes with `--receive-buffer-ms`, and never under
+/// (a). `--receive-buffer-ms` alone keeps working.
+#[test]
+fn the_latency_flag_sets_the_dante_latency() {
+    let state = PathBuf::from("/tmp/s.toml");
+    let o = run("--latency-ms 5");
+    assert_eq!(o.latency_ns, Some(5_000_000));
+    assert_eq!(o.latency, Latency::default());
+    let split = link_config(&o, "pc-dsend", state.clone()).split().unwrap();
     assert_eq!(
-        latency_of(Latency {
-            network_ns: Some(2_000_000),
-            receive_buffer_ns: None,
-            app_buffer_ns: Some(5_000_000),
-        }),
+        (
+            split.latency_ns,
+            split.network_latency_ns,
+            split.receive_buffer_ns
+        ),
+        (5_000_000, 1_000_000, 4_000_000)
+    );
+    // With (a) set: the total stays, (b) follows.
+    let o = run("--network-latency-ms 0.5 --latency-ms 20");
+    let split = link_config(&o, "pc-dsend", state).split().unwrap();
+    assert_eq!(
+        (split.latency_ns, split.receive_buffer_ns),
+        (20_000_000, 19_500_000)
+    );
+    // A total equal to (a) is taken: (b) 0 (dlink then refuses what is
+    // under its TX floor).
+    assert_eq!(run("--latency-ms 1").latency_ns, Some(1_000_000));
+    // A whole latency with (b), or under (a), is a usage error.
+    let both = "give one of --latency-ms (the whole latency) and --receive-buffer-ms (b)";
+    assert_eq!(error("--latency-ms 10 --receive-buffer-ms 9"), both);
+    assert_eq!(error("--receive-buffer-ms 9 --latency-ms 10"), both);
+    assert_eq!(
+        error("--latency-ms 0.999999"),
+        "--latency-ms 0.999999 is under the network latency (a) 1 ms it holds"
+    );
+    assert_eq!(
+        error("--network-latency-ms 2 --latency-ms 1.5"),
+        "--latency-ms 1.5 is under the network latency (a) 2 ms it holds"
+    );
+    assert!(error("--latency-ms ten").starts_with("--latency-ms needs ms"));
+    assert_eq!(error("--latency-ms"), "--latency-ms needs a value");
+    // `--list-outputs` checks the options too.
+    assert!(parse(&args("--list-outputs --latency-ms 0.5")).is_err());
+    assert_eq!(
+        parse(&args("--list-outputs --latency-ms 30")),
+        Ok(Command::ListOutputs)
+    );
+    // latency_of: (b) given wins; a total under (a) never wraps.
+    let given = Latency {
+        network_ns: Some(2_000_000),
+        receive_buffer_ns: None,
+        app_buffer_ns: Some(5_000_000),
+    };
+    assert_eq!(
+        latency_of(given, None),
         Latency {
-            network_ns: Some(2_000_000),
-            receive_buffer_ns: Some(38_000_000),
-            app_buffer_ns: Some(5_000_000),
+            receive_buffer_ns: Some(8_000_000),
+            ..given
         }
     );
-    // An (a) past 40 ms leaves (b) at 0: the device refuses what is under
-    // its floor, never a wrapped (b).
     assert_eq!(
-        latency_of(Latency {
-            network_ns: Some(41_000_000),
-            ..Latency::default()
-        })
-        .receive_buffer_ns,
+        latency_of(given, Some(40_000_000)).receive_buffer_ns,
+        Some(38_000_000)
+    );
+    let b = Latency {
+        receive_buffer_ns: Some(3_000_000),
+        ..given
+    };
+    assert_eq!(latency_of(b, Some(40_000_000)), b);
+    assert_eq!(
+        latency_of(given, Some(1_000_000)).receive_buffer_ns,
         Some(0)
     );
+    assert_eq!(latency_check(given, None), Ok(()));
+    assert_eq!(latency_check(b, None), Ok(()));
+    assert_eq!(latency_check(given, Some(2_000_000)), Ok(()));
 }
