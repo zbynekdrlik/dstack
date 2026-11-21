@@ -66,7 +66,11 @@ pub fn wire_lateness(now_ns: u64, wake_ns: u64, pos: u64, rate: u32) -> u64 {
 
 /// Whether a packet was already late when the kernel received it: its
 /// [`wire_lateness`] past `limit`, the rule `late` uses (the flow's playout
-/// plus the pump's block, samples).
+/// plus the reader's step, samples: the block, the pump's step behind its
+/// next block (dstack #477) or an app's time since its last drain), so a
+/// packet `wire_late` is `late` too. Under a late pump wake the limit is
+/// the read's: a packet behind the block arrived while the reader stood
+/// still reads `wire_late` only when it arrived that late before the read.
 pub fn wire_late(now_ns: u64, wake_ns: u64, pos: u64, rate: u32, limit: u64) -> bool {
     wire_lateness(now_ns, wake_ns, pos, rate) > limit
 }
