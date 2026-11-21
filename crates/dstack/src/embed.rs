@@ -257,7 +257,7 @@ impl Embedded {
     /// thread's fill ([`Embedded::start_tx_pulling`]).
     #[allow(clippy::too_many_arguments)]
     fn launch<P: Process + 'static>(
-        cfg: DeviceConfig,
+        mut cfg: DeviceConfig,
         place: &Place,
         wait: PlaceWait<'_>,
         map: Map,
@@ -272,6 +272,12 @@ impl Embedded {
                 rx + 1,
                 cfg.rx.len()
             )));
+        }
+        // dstack #476: an app that pulls its RX rings reads them on its own
+        // deadline; the pump hands it no RX block, so nothing leads and
+        // the flows are read at P.
+        if pulls.rx {
+            cfg.rx_handoff_lead = false;
         }
         let pulled: &[usize] = pulls.tx.as_ref().map_or(&[], |p| &p.channels);
         let engine = engine_channels(&map.tx, pulled, cfg.tx.len()).map_err(HostError::Setup)?;
@@ -347,6 +353,7 @@ impl Embedded {
             margin = timing.margin,
             app_reads_rx = intake.is_some(),
             tx_thread_fills = tx_pull,
+            lead = timing.lead(),
             "embedded device serving, its pump running"
         );
         Ok((

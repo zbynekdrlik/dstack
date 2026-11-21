@@ -463,11 +463,7 @@ fn the_pump_s_drain_of_the_rx_flows_does_not_allocate() {
         |c| (c < 2).then_some(RxRoute { flow: 0, slot: c }),
     );
     let tx = Arc::new(TxShared::new(cfg, Ipv4Addr::LOCALHOST, rings, 1, &[]).unwrap());
-    let timing = Timing {
-        block: BLOCK,
-        playout: 96,
-        margin: WORK_MARGIN,
-    };
+    let timing = Timing::new(BLOCK, 96, WORK_MARGIN);
     let stats = Arc::new(PumpStats::new(timing, RATE));
     let map = Map {
         rx: vec![0, 1],
@@ -548,11 +544,7 @@ fn the_pump_s_late_wakes_with_their_oversleep_do_not_allocate() {
         .into();
     let rx = Arc::new(RxShared::new(RATE, Ipv4Addr::LOCALHOST, Arc::clone(&rings)).unwrap());
     let tx = Arc::new(TxShared::new(cfg, Ipv4Addr::LOCALHOST, rings, 1, &[]).unwrap());
-    let timing = Timing {
-        block: BLOCK,
-        playout: 96,
-        margin: WORK_MARGIN,
-    };
+    let timing = Timing::new(BLOCK, 96, WORK_MARGIN);
     let stats = Arc::new(PumpStats::new(timing, RATE));
     let mut pump = Pump::new(Copy, Map::default(), timing, 24, rx, tx, Arc::clone(&stats));
     let mut now = pump.media(T, 0);
@@ -641,11 +633,7 @@ fn the_engine_pump_and_its_tx_passes_do_not_allocate() {
     for c in 0..OUTPUTS {
         assert!(tx.set_source(c, Source::Engine));
     }
-    let timing = Timing {
-        block: BLOCK,
-        playout: 96,
-        margin: WORK_MARGIN,
-    };
+    let timing = Timing::new(BLOCK, 96, WORK_MARGIN);
     let stats = Arc::new(PumpStats::new(timing, RATE));
     let map = Map {
         rx: (0..INPUTS).collect(),

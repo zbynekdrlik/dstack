@@ -320,6 +320,10 @@ pub struct Manager {
     latency_ns: u64,
     /// The pump's block, samples (the device config's).
     block: u64,
+    /// The pump hands each block the lead H before its play time (the
+    /// device config's `rx_handoff_lead`, dstack #476): a flow is read at
+    /// P − H, H = [`crate::stream::handoff_lead`] of P.
+    leads: bool,
     /// Our process id (the config's), in our flows' names.
     process: u16,
     /// The config's `playout_override`, by lower-case device name.
@@ -411,6 +415,7 @@ impl Manager {
             rate: cfg.sample_rate,
             latency_ns: cfg.latency_ns,
             block: cfg.block,
+            leads: cfg.rx_handoff_lead,
             process: cfg.process_id,
             playout_override: cfg
                 .playout_override

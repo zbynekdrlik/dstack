@@ -871,11 +871,7 @@ impl dstack_audio_io::Process for Silent {
     fn process(&mut self, _block: &mut dstack_audio_io::Block<'_>) {}
 }
 
-const ENGINE_TIMING: crate::stream::Timing = crate::stream::Timing {
-    block: 32,
-    playout: 96,
-    margin: 96,
-};
+const ENGINE_TIMING: crate::stream::Timing = crate::stream::Timing::new(32, 96, 96);
 
 #[test]
 fn the_status_has_no_engine_until_one_is_attached() {

@@ -106,10 +106,11 @@ impl Process for Handoff {
         let on = self.on.load(Ordering::Relaxed);
         if self.set_aside > 0 {
             self.set_aside -= 1;
-        } else if on && let Some(play_at) = block.play_at() {
-            if let Ok(mut v) = self.recs.try_lock() {
-                v.push(Rec { at, play_at });
-            }
+        } else if on
+            && let Some(play_at) = block.play_at()
+            && let Ok(mut v) = self.recs.try_lock()
+        {
+            v.push(Rec { at, play_at });
         }
         if let Some(nap) = self.nap
             && on

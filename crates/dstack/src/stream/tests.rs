@@ -17,21 +17,13 @@ const RATE: u32 = 96_000;
 const B: u64 = BLOCK;
 /// The test device's latency, 1 ms: P.
 const P: u64 = 96;
-const TIMING: Timing = Timing {
-    block: B,
-    playout: P,
-    margin: WORK_MARGIN,
-};
+const TIMING: Timing = Timing::new(B, P, WORK_MARGIN);
 /// D = B + P + W.
 const D: u64 = 224;
 /// A device config's `block = 16` (#72) with W at its least, one block.
 const B16: u64 = 16;
 const W16: u64 = 16;
-const TIMING_16: Timing = Timing {
-    block: B16,
-    playout: P,
-    margin: W16,
-};
+const TIMING_16: Timing = Timing::new(B16, P, W16);
 /// D = 16 + 96 + 16.
 const D16: u64 = 128;
 /// Ten years of a grandmaster's uptime at 96 kHz, a multiple of the block.
@@ -107,11 +99,7 @@ fn to_f64_is_exact_and_quantize_takes_it_back_on_the_24_bit_grid() {
 #[test]
 fn the_offset_is_block_plus_playout_plus_margin() {
     assert_eq!(TIMING.offset(), D);
-    let at_2_ms = Timing {
-        block: 32,
-        playout: 192,
-        margin: 96,
-    };
+    let at_2_ms = Timing::new(32, 192, 96);
     assert_eq!(at_2_ms.offset(), 320);
 }
 
@@ -1282,14 +1270,7 @@ fn the_pump_s_timing_comes_from_the_config_with_the_latency_in_nearest_samples()
     cfg.sample_rate = 96_000;
     // dasio's 333 333 ns: 32 samples, as the RX reads its playout point.
     cfg.latency_ns = 333_333;
-    assert_eq!(
-        Timing::of(&cfg),
-        Timing {
-            block: 64,
-            playout: 32,
-            margin: 128
-        }
-    );
+    assert_eq!(Timing::of(&cfg), Timing::new(64, 32, 128));
     cfg.sample_rate = 48_000;
     cfg.latency_ns = 2_000_000;
     assert_eq!(Timing::of(&cfg).playout, 96);
@@ -1553,11 +1534,7 @@ fn a_re_anchor_moves_the_blocks_up_to_w_and_a_block_past_now() {
 /// stays.
 #[test]
 fn a_re_anchor_at_the_edge_of_the_room_still_moves() {
-    let t = Timing {
-        block: 32,
-        playout: 96,
-        margin: 64,
-    };
+    let t = Timing::new(32, 96, 64);
     let b0 = Blocks::bootstrap(T, t);
     // Due = start + 128 (+ the shift); the room ends at now + 96.
     let now = b0.start() + 64 + 32;
@@ -1675,6 +1652,7 @@ mod after_send;
 mod causes;
 mod clock_back;
 mod drain;
+mod lead;
 mod play_at;
 mod re_anchor_sleep;
 mod split;

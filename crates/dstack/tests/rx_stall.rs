@@ -317,11 +317,7 @@ fn stalled_run(profile: TimingProfile) -> Run {
     );
     shared.set_device_latency(PLAYOUT * 1_000_000_000 / u64::from(RATE));
     let tx = Arc::new(TxShared::new(cfg, Ipv4Addr::LOCALHOST, rings, 1, &[]).unwrap());
-    let timing = Timing {
-        block: BLOCK,
-        playout: PLAYOUT,
-        margin: MARGIN,
-    };
+    let timing = Timing::new(BLOCK, PLAYOUT, MARGIN);
     let stats = Arc::new(PumpStats::new(timing, RATE));
     let map = Map {
         rx: vec![0],

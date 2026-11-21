@@ -29,6 +29,9 @@ pub struct PumpStats {
     pub(super) playout: AtomicU64,
     /// W, samples: fixed for the pump's life (a new latency moves P and D).
     pub(super) margin: u64,
+    /// The pump leads ([`Timing::leads`], dstack #476): fixed for its life
+    /// (a new latency moves H with P).
+    pub(super) leads: bool,
     /// One block's period, ns: a block longer than this is an overrun.
     pub(super) period_ns: u64,
     /// The last step was on the media clock (not free pacing).
@@ -100,7 +103,8 @@ pub struct SecondSplit {
 pub struct PumpView {
     /// On the media clock (not free pacing).
     pub media: bool,
-    /// D, samples.
+    /// D, samples: B + P + W, less the hand-off lead H when the pump
+    /// leads (dstack #476).
     pub offset: u64,
     /// P, samples.
     pub playout: u64,
@@ -172,6 +176,7 @@ impl PumpStats {
             offset: AtomicU64::new(timing.offset()),
             playout: AtomicU64::new(timing.playout),
             margin: timing.margin,
+            leads: timing.leads,
             period_ns: period,
             media: AtomicBool::new(false),
             running: AtomicBool::new(false),
@@ -397,13 +402,15 @@ impl PumpStats {
         self.hists.snapshot()
     }
 
-    /// The pump's timing now: B and W (fixed) and P (moved with the
-    /// device latency); one load, so B + P + W is always a D the pump had.
+    /// The pump's timing now: B, W and the lead's switch (fixed) and P
+    /// (moved with the device latency, H with it); one load, so
+    /// B + P + W - H is always a D the pump had.
     pub fn timing(&self) -> Timing {
         Timing {
             block: u64::from(self.frames),
             playout: self.playout.load(Ordering::Relaxed),
             margin: self.margin,
+            leads: self.leads,
         }
     }
 

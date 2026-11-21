@@ -621,3 +621,22 @@ fn the_tx_thread_keeps_the_fill_restarted_by_a_step_back_for_one_pass() {
         assert_eq!(v.rebootstraps, expected, "a pass between: {between} {v:?}");
     }
 }
+
+/// dstack #476: the TX thread's fill hands nothing to an app's RX, so a
+/// leading device's timing reaches it without the lead: due at the same
+/// time, stamped at the same D (the TX path does not move).
+#[test]
+fn a_fill_on_a_leading_device_runs_without_the_lead() {
+    let leading = Timing {
+        leads: true,
+        ..Timing::of(&cfg())
+    };
+    assert_eq!(leading.lead(), 28);
+    let mut fill = TxFill::new(Box::new(Ramp::default()), vec![0], leading, 24, rx());
+    let engine = engine();
+    fill.fill_due(T, MAX_LAG, &engine, 0);
+    let first = T - B - P;
+    let ring = engine[0].as_ref().unwrap();
+    assert_eq!(read(ring, first + D, B as usize), (ramps(first, B, 0), 0));
+    assert_eq!(fill.wake_ns(RATE), Some(ns_of(T + B, RATE)));
+}

@@ -282,6 +282,12 @@ fn a_stalled_pump_leaves_the_output_s_bridge_whole() {
     // time since the last drain (a callback's 10 ms), never on the pump's
     // block.
     assert_eq!(late, 0, "packets counted late: {channel:?}");
+    // dstack #476: the app pulls its RX, so the pump hands it no block and
+    // nothing leads: D is B + P + W, the flows read at P, though the
+    // config asks the lead as every RX device's does.
+    let t = dstack::stream::Timing::of(&rx_config.device().expect("the config"));
+    assert!(t.leads, "{t:?}");
+    assert_eq!(pump.offset, t.block + t.playout + t.margin, "{pump:?}");
     // No latency added. A sample is due at its position + P; it then waits
     // in the ring until it is read, and in the FIFO until it is played.
     // Pulled, the ring wait is the time to the next callback and the FIFO

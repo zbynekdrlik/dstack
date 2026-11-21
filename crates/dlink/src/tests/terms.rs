@@ -33,6 +33,9 @@ fn obs_on_the_editing_pc_keeps_p_13_041666_ms_in_named_terms() {
             rx_convert_ns: 625_000,
             tx_convert_ns: 635_416,
             rx_handoff_ns: 1_958_333,
+            // dstack #476: H = 30 % of P's 1252 samples, 375 (3.90625 ms).
+            handoff_lead: 375,
+            handoff_lead_ns: 3_906_250,
             tx_handoff_ns: 15_635_416,
             margin: 1_440,
             work_margin_ns: 15_000_000,
@@ -43,6 +46,10 @@ fn obs_on_the_editing_pc_keeps_p_13_041666_ms_in_named_terms() {
     assert_eq!(latency_samples(s.latency_ns, 96_000), 1_252);
     let cfg = c.device().unwrap();
     assert_eq!((cfg.latency_ns, cfg.work_margin), (13_041_666, 1_440));
+    assert!(
+        cfg.rx_handoff_lead,
+        "an RX device's pump leads (dstack #476)"
+    );
     // The owner sizes (b) from measurement: 1 ms + 3 ms is P 4 ms, the RX
     // path 5.958333 ms.
     let tight = c.receive_buffer_ns(3_000_000).split().unwrap();
@@ -286,8 +293,19 @@ fn the_start_lines_name_every_term() {
             "Dante latency P 13.041666 ms = network latency (a) 1 ms (default) + receive \
              buffer (b) 12.041666 ms (default)",
             "RX app hand-off (c) 1.958333 ms = block 1.333333 ms + converter 0.625 ms; RX \
-             path P + (c) 14.999999 ms",
+             path P + (c) 14.999999 ms; hand-off lead H 3.90625 ms (30 % of P, from (b)): \
+             each block reaches the app H before its play_at",
         ]
+    );
+    // An app that pulls its RX gets no block from the pump: no lead.
+    assert_eq!(
+        obs.split()
+            .unwrap()
+            .pulled()
+            .lines(obs.directions(), obs.terms())[1],
+        "RX app hand-off (c) 1.958333 ms = block 1.333333 ms + converter 0.625 ms; RX \
+         path P + (c) 14.999999 ms; hand-off lead H 0 ms (none: the app pulls its RX): \
+         each block reaches the app H before its play_at"
     );
     let tx = Config::new("tx", "/tmp/never-written.toml")
         .tx(["Out"])
@@ -310,7 +328,8 @@ fn the_start_lines_name_every_term() {
             "Dante latency P 9 ms = network latency (a) 1 ms (default) + receive buffer (b) \
              8 ms (default)",
             "RX app hand-off (c) 2.666666 ms = block 2.666666 ms + converter 0 ms; RX path \
-             P + (c) 11.666666 ms",
+             P + (c) 11.666666 ms; hand-off lead H 2.6875 ms (30 % of P, from (b)): each \
+             block reaches the app H before its play_at",
             "TX app hand-off (c) 6 ms = work margin W 6 ms (default) + converter 0 ms; TX \
              path (c) + P 15 ms",
         ]
@@ -645,4 +664,78 @@ fn a_block_s_play_time_is_its_start_plus_the_logged_rx_path() {
     // B 1 333 333), so its RX path reads 1 ns under it.
     assert_eq!(play_at_ns(0, t, 96_000, 0) + 625_000, 15_000_000);
     assert_eq!(obs.split().unwrap().rx_path_ns, 14_999_999);
+}
+
+/// dstack #476 (the owner's ROZHODNUTÉ of 21.11.2026): every dlink device
+/// with RX hands each block H = 30 % of P (whole samples, rounded down)
+/// before its `play_at`, taken out of the receive buffer (b). P and the RX
+/// path P + (c) stay v0.6.105's (the tests above); the pump is due H
+/// before the play time and D = B + P + W - H (848 -> 719 for the 48 kHz
+/// device with both directions). A TX-only device has none.
+#[test]
+fn an_rx_device_hands_each_block_30_percent_of_p_before_its_play_at() {
+    use dstack::stream::{Blocks, Timing, play_at_ns};
+    // (config, P samples, H samples, D samples).
+    for (c, p, h, d) in [
+        (
+            rx_only("obs", 48_000, 96_000),
+            1_252,
+            375,
+            128 + 1_252 + 1_440 - 375,
+        ),
+        (
+            rx_only("rx-48", 48_000, 48_000),
+            592,
+            177,
+            128 + 592 + 720 - 177,
+        ),
+        (
+            rx_only("rx-96", 96_000, 96_000),
+            1_312,
+            393,
+            128 + 1_312 + 1_440 - 393,
+        ),
+        (config(), 432, 129, 719),
+        (
+            config().sample_rate(48_000).network_rate(96_000),
+            803,
+            240,
+            128 + 803 + 576 - 240,
+        ),
+    ] {
+        let cfg = c.device().unwrap();
+        let s = c.split().unwrap();
+        let rate = cfg.sample_rate;
+        assert!(cfg.rx_handoff_lead, "{}", cfg.name);
+        assert_eq!(latency_samples(s.latency_ns, rate), p, "{}", cfg.name);
+        assert_eq!(s.handoff_lead, h, "{}", cfg.name);
+        assert_eq!(
+            s.handoff_lead_ns,
+            h * 1_000_000_000 / u64::from(rate),
+            "{}",
+            cfg.name
+        );
+        let t = Timing::of(&cfg);
+        assert_eq!((t.lead(), t.offset()), (h, d), "{}", cfg.name);
+        // The block is due H before its play time, which has not moved.
+        let start = u64::from(rate) * 7;
+        let mut blocks = Blocks::bootstrap(start + t.block + p, t);
+        assert_eq!(blocks.start(), start + h.div_ceil(t.block) * t.block);
+        let due = blocks.due();
+        let at = play_at_ns(blocks.start(), t, rate, 0);
+        let due_ns = i64::try_from(due * 1_000_000_000 / u64::from(rate)).unwrap();
+        // Within 1 ns: whole ns of a 48 kHz grid.
+        let lead = at - due_ns - i64::try_from(s.handoff_lead_ns).unwrap();
+        assert!(lead.abs() <= 1, "{}: {lead}", cfg.name);
+        assert!(matches!(blocks.next(due), dstack::stream::Due::Run { .. }));
+    }
+    let tx = Config::new("tx-only", "/tmp/never-written.toml")
+        .tx(["Out"])
+        .sample_rate(48_000);
+    let cfg = tx.device().unwrap();
+    let s = tx.split().unwrap();
+    assert!(!cfg.rx_handoff_lead);
+    assert_eq!((s.handoff_lead, s.handoff_lead_ns), (0, 0));
+    let t = Timing::of(&cfg);
+    assert_eq!(t.offset(), t.block + t.playout + t.margin);
 }

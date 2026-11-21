@@ -208,11 +208,7 @@ fn a_time_back_inside_a_block_never_silences_the_pump_for_the_step() {
 /// at once, again and again, and never leaves its pass).
 #[test]
 fn a_schedule_near_time_0_waits_its_first_block() {
-    let t = Timing {
-        block: 32,
-        playout: 480,
-        margin: 96,
-    };
+    let t = Timing::new(32, 480, 96);
     for now in [0, 1, 100, 480] {
         let mut b = Blocks::bootstrap(now, t);
         assert_eq!(b.due(), 512, "{now}");
