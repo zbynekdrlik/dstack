@@ -553,14 +553,23 @@ impl Bridge {
         }
     }
 
-    /// The driver's buffer + one pump block, or `set`.
+    /// The driver's buffer + one pump block, or `set`. The default is the
+    /// bridge's own term, so it takes the bridge's floor
+    /// ([`MIN_BRIDGE_TARGET_NS`], dstack #482: a 32-frame driver with
+    /// 32-frame blocks at 96 kHz is 0.667 ms); a configured `set` keeps
+    /// dlink's until [`Bridge::direction_buffer`] gives a direction's own
+    /// target the bridge's.
     fn buffer_set(&self, opened: &Opened, set: Option<u64>) -> AppBuffer {
         let rate = opened.rate.round() as u32;
-        AppBuffer::new(
+        let buffer = AppBuffer::new(
             chunk_ns(u64::from(opened.buffer_frames), rate),
             chunk_ns(u64::from(self.spec.block_frames), self.spec.dante_rate),
         )
-        .set(set)
+        .set(set);
+        match set {
+            None => buffer.with_floor(MIN_BRIDGE_TARGET_NS),
+            Some(_) => buffer,
+        }
     }
 
     /// The seeds for an open at `driver_rate`: the standing rates
