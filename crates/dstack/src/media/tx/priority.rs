@@ -296,15 +296,15 @@ impl Scheduling {
 
     /// `thread`'s slice request gave `asked` (dstack #302); recorded
     /// before [`Scheduling::record`], which makes it visible.
-    pub fn record_slice(&self, thread: MediaThread, asked: &SliceRequest) {
+    pub(crate) fn record_slice(&self, thread: MediaThread, asked: &SliceRequest) {
         let read = asked.read_ns.map_or(0, |ns| ns.saturating_add(1));
         self.slice_reads[thread.slot()].store(read, Ordering::Release);
         self.slices[thread.slot()].store(asked.slice.code(), Ordering::Release);
     }
 
-    /// Whether this is the first ignored or refused slice request of the
-    /// device (dstack #302): it warns once, later ones are info.
-    pub fn first_slice_warning(&self) -> bool {
+    /// Whether this is the first refused slice request of the device
+    /// (dstack #302): it warns once, later ones are info.
+    pub(crate) fn first_slice_warning(&self) -> bool {
         !self.slice_warned.swap(true, Ordering::AcqRel)
     }
 
@@ -422,14 +422,15 @@ pub(crate) fn take_priority_asked(
     }
 }
 
-/// Logs `thread`'s slice request `asked` (dstack #302): info when short,
-/// a warning for the device's first ignored or refused one
+/// Logs `thread`'s slice request `asked` (dstack #302): info when short or
+/// ignored (a kernel before 6.12 has no requested slices: expected there),
+/// a warning for the device's first refused one
 /// ([`Scheduling::first_slice_warning`]), info after.
 fn log_slice(thread: &str, asked: &SliceRequest, scheduling: &Scheduling) {
     let Some(line) = slice::slice_line(thread, asked) else {
         return;
     };
-    if asked.slice != Slice::Short && scheduling.first_slice_warning() {
+    if asked.slice == Slice::Refused && scheduling.first_slice_warning() {
         warn!("{line}");
     } else {
         info!("{line}");

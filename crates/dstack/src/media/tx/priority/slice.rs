@@ -49,7 +49,7 @@ pub enum Slice {
     /// Not asked: off Linux, a thread that asks none (the RX thread, the
     /// TX relay), or one that does not run `SCHED_OTHER`.
     NotAsked,
-    /// SliceRequest, and read back as asked.
+    /// Asked, and read back as asked.
     Short,
     /// The kernel took the request but reads back another slice: a kernel
     /// before 6.12, which has no requested slices. The default slice runs.
@@ -102,8 +102,12 @@ impl Slice {
 /// (ns, `None` when not read) and the errno of a refusal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SliceRequest {
+    /// What the request gave.
     pub slice: Slice,
+    /// The thread's slice read back after the request
+    /// (`sched_runtime`, ns); `None` when not read.
     pub read_ns: Option<u64>,
+    /// The errno of a refused request or a refused first read.
     pub error: Option<i32>,
 }
 

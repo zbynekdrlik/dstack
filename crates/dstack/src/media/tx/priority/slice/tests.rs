@@ -311,6 +311,28 @@ fn own_attr() -> (u32, i32, u64) {
     (u32_at(4), u32_at(16) as i32, runtime)
 }
 
+/// Puts the calling thread on `SCHED_OTHER` at nice 3, whatever it
+/// inherited (a test binary run under `chrt -f 10` starts it on
+/// SCHED_FIFO); a raised nice needs no privilege.
+#[cfg(target_os = "linux")]
+fn other_at_nice_3() {
+    let param = libc::sched_param { sched_priority: 0 };
+    // SAFETY: pid 0 is the calling thread; `param` is only read.
+    assert_eq!(
+        unsafe { libc::sched_setscheduler(0, libc::SCHED_OTHER, &param) },
+        0
+    );
+    // SAFETY: the calling thread's own id.
+    let tid = unsafe { libc::gettid() };
+    // SAFETY: PRIO_PROCESS with a thread id sets that thread's nice.
+    assert_eq!(
+        unsafe { libc::setpriority(libc::PRIO_PROCESS, tid as libc::id_t, 3) },
+        0,
+        "{}",
+        std::io::Error::last_os_error()
+    );
+}
+
 /// dstack #302 on Linux: a thread started through `take_priority` (asking
 /// the normal profile's priority, as dlink's pump and TX thread on Linux)
 /// reads its short slice back with the kernel's own read, the record and
@@ -327,6 +349,7 @@ fn a_pump_and_a_tx_thread_on_linux_read_their_short_slice_back() {
     for thread in [MediaThread::Pump, MediaThread::Tx, MediaThread::Rx] {
         let (before, after, log) = std::thread::scope(|s| {
             s.spawn(|| {
+                other_at_nice_3();
                 let before = own_attr();
                 let log = crate::test_log::capture_at(tracing::Level::INFO, || {
                     take_priority_asked(thread, 40, &scheduling, ThreadPriority::Normal);
@@ -341,7 +364,7 @@ fn a_pump_and_a_tx_thread_on_linux_read_their_short_slice_back() {
             .into_iter()
             .find(|t| t.thread == thread)
             .unwrap();
-        assert_eq!(before.0, SCHED_OTHER, "a fresh test thread");
+        assert_eq!((before.0, before.1), (SCHED_OTHER, 3), "set at the start");
         assert_eq!(
             (after.0, after.1),
             (before.0, before.1),
@@ -402,12 +425,15 @@ fn a_real_time_thread_keeps_its_policy_and_asks_no_slice() {
 }
 
 /// The Linux glue: the kernel's errno comes back (an unknown policy is
-/// EINVAL), and a thread's own attributes read as its raw read does.
+/// EINVAL), and a thread's own attributes read as its raw read does. The
+/// glue writes `SCHED_OTHER` threads only, so the thread is put there.
 #[cfg(target_os = "linux")]
 #[test]
 fn the_linux_calls_answer_the_kernel_s_errno_and_read() {
     std::thread::spawn(|| {
+        other_at_nice_3();
         let attr = read_attr().unwrap();
+        assert_eq!((attr.policy, attr.nice), (SCHED_OTHER, 3));
         let own = own_attr();
         assert_eq!((attr.policy, attr.nice, attr.runtime), own);
         assert_eq!(write_attr(&Attr { policy: 99, ..attr }), Err(libc::EINVAL));

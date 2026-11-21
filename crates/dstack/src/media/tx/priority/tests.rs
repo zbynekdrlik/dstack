@@ -350,8 +350,8 @@ fn the_registry_keeps_each_thread_s_slice_and_its_read_back() {
     );
 }
 
-/// dstack #302: a device warns of its first ignored or refused slice only;
-/// a short one never warns.
+/// dstack #302: a device warns of its first refused slice only; a short
+/// one and an ignored one (a kernel before 6.12) never warn.
 #[test]
 fn an_ignored_or_refused_slice_warns_once_a_device() {
     let s = Scheduling::new();
@@ -377,19 +377,26 @@ fn an_ignored_or_refused_slice_warns_once_a_device() {
     let warned = crate::test_log::capture_warnings(|| {
         log_slice("engine pump", &short, &s);
         log_slice("engine pump", &SliceRequest::NOT, &s);
-        log_slice("engine pump", &refused, &s);
         log_slice("TX thread", &ignored, &s);
+        log_slice("engine pump", &refused, &s);
+        log_slice("TX thread", &refused, &s);
         log_slice("TX thread", &refused, &s);
     });
     assert_eq!(warned.matches("EEVDF").count(), 1, "{warned}");
     assert!(warned.contains("engine pump asked a 200 us"), "{warned}");
+    assert!(warned.contains("refused it (errno 22)"), "{warned}");
+    // Every line at info or above: short, ignored x3, refused x2 (one
+    // warning).
     let s = Scheduling::new();
     let all = crate::test_log::capture_at(tracing::Level::INFO, || {
         log_slice("engine pump", &short, &s);
         log_slice("engine pump", &SliceRequest::NOT, &s);
         log_slice("TX thread", &ignored, &s);
         log_slice("TX thread", &ignored, &s);
+        log_slice("TX thread", &ignored, &s);
+        log_slice("TX thread", &refused, &s);
+        log_slice("TX thread", &refused, &s);
     });
-    assert_eq!(all.matches("EEVDF").count(), 3, "{all}");
+    assert_eq!(all.matches("EEVDF").count(), 6, "{all}");
     assert_eq!(all.matches("WARN").count(), 1, "{all}");
 }
