@@ -105,3 +105,4 @@ One line per ticket: issue, commits, tests (RED -> GREEN where a bug), decisions
 - 21.11 10:56 CET: v0.6.209 released (#302 slice). v0.6.210 = #477 (no false late on a late pump wake).
 - 21.11 12:47 CET: v0.6.210 released (#477). v0.6.211 = #476 (RX block handed 30 % of P before play_at, capped at (b)).
 - 21.11 14:50 CET: v0.6.211 released (#476). v0.6.212 = #480 (dsend 10 ms default + --latency-ms; the 40 ms broke the AIC128-D).
+- 21.11 17:54 CET: v0.6.212 released (#480). v0.6.213 = #482 (32-frame ASIO driver accepted).
