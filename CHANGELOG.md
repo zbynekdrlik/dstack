@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.209
+
+- Linux: the engine pump and the TX thread ask the kernel for a short EEVDF slice (200 µs) for themselves at start (`sched_setattr`, `SCHED_OTHER`, nice and reset-on-fork kept, `sched_runtime` = 200000 ns), so a wake-up preempts an equal-weight thread that holds their CPU (Linux 6.12 and later). No privilege, no real-time policy, no pinning, nothing asked of the app. A thread that runs `SCHED_FIFO` (the `low_latency` profile, iemmixer) is never touched; the RX thread and the TX relay ask nothing; Windows is unchanged. Field A/B on stream-snv (obs, 21.11.2026): pump wakes more than 3 ms late fell from 6.8-10 an hour to 0.9 an hour (dstack #302).
+
+- Status `engine.threads[]`: `slice` (`short`: read back as asked; `ignored`: the kernel took the request but reads back another slice, a kernel before 6.12; `refused`: the kernel refused it; `not_asked`: off Linux, the RX thread or the TX relay, or a thread not on `SCHED_OTHER`) and `slice_ns` (the slice Linux read back after the request, `null` where not read). Each thread start logs one line with the slice asked and read back (`... runs with a short EEVDF slice: 200 us asked, 200 us read back (dstack #302)`); an ignored request (expected on a kernel before 6.12) logs info, a refused one warns once a device and then logs info; the thread runs on either way (dstack #302).
+
+No latency change. Consumers (obs, intercom, dlink apps, iemmixer's normal-profile devices on Linux): only move the version; nothing to set. A status reader that lists `threads[]` keys sees two new keys per entry.
+
 ## 0.6.208
 
 - **Fix (#451, Linux): after its interface is re-created under a new index (a USB NIC's reset, a veth pair deleted and added), a Linux device answers mDNS for its own records again without a restart.** Before, the wildcard daemon heard and answered nothing on the new index until the process restarted, while audio came back (companion-snv netns, v0.6.207: a direct query for the device's own ARC record got 0 replies in 60 s after the re-add). Two causes, each enough alone: the daemon's interface was selected with `IfKind::Addr`, which mdns-sd turns into the interface's index when it is set, so the re-created index was deselected at every IP check; and the vendored mdns-sd announced only address-auto services on a new interface, so dstack's fixed-address records had no status there. Now the selection is a predicate on the address (`announce::mdns::holds_address`, crate-private) and the vendored `add_interface` announces a fixed-address service on a new interface that holds its address (`vendor/mdns-sd/DSTACK.md`). The same selection serves the Windows bound daemon's reopen if Windows ever gives the re-added address a new index.
