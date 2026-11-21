@@ -1384,6 +1384,16 @@ fn join_multicast_group(my_sock: &PktInfoUdpSocket, intf: &Interface) -> Result<
     Ok(())
 }
 
+/// Whether `info` has an address of the given IP version in a subnet of `my_intf`
+/// (`valid_ip_on_intf`, as `prepare_announce` judges; dstack #451).
+fn has_addr_on_intf(info: &ServiceInfo, my_intf: &MyIntf, ipv4: bool) -> bool {
+    if ipv4 {
+        !info.get_addrs_on_my_intf_v4(my_intf).is_empty()
+    } else {
+        !info.get_addrs_on_my_intf_v6(my_intf).is_empty()
+    }
+}
+
 /// Records the address of `intf` in `my_intfs`, joining the multicast group first
 /// if its interface does not hold the membership yet.
 ///
@@ -2599,26 +2609,32 @@ impl Zeroconf {
                     // Otherwise could demote an already announced service into probing.
                     continue;
                 }
+            } else if !has_addr_on_intf(service_info, my_intf, intf.ip().is_ipv4()) {
+                // dstack #451: a service with fixed addresses is announced on a new
+                // interface whose subnet holds one of them (an interface re-created
+                // under a new index); upstream announced only address-auto services
+                // here, so a fixed-address one was never answered on the new index.
+                continue;
+            }
 
-                if let Ok(true) = announce_service_on_intf(
-                    dns_registry,
-                    service_info,
-                    my_intf,
-                    &sock.pktinfo,
-                    self.port,
-                ) {
-                    debug!(
-                        "Announce service {} on {}",
-                        service_info.get_fullname(),
-                        intf.ip()
-                    );
-                    service_info.set_status(if_index, ServiceStatus::Announced);
-                } else {
-                    for timer in dns_registry.new_timers.drain(..) {
-                        self.timers.push(Reverse(timer));
-                    }
-                    service_info.set_status(if_index, ServiceStatus::Probing);
+            if let Ok(true) = announce_service_on_intf(
+                dns_registry,
+                service_info,
+                my_intf,
+                &sock.pktinfo,
+                self.port,
+            ) {
+                debug!(
+                    "Announce service {} on {}",
+                    service_info.get_fullname(),
+                    intf.ip()
+                );
+                service_info.set_status(if_index, ServiceStatus::Announced);
+            } else {
+                for timer in dns_registry.new_timers.drain(..) {
+                    self.timers.push(Reverse(timer));
                 }
+                service_info.set_status(if_index, ServiceStatus::Probing);
             }
         }
 
@@ -6089,6 +6105,99 @@ mod tests {
         assert!(
             daemon.my_intfs.contains_key(&65_535),
             "an interface sharing an already-joined IPv4 address must be recorded"
+        );
+    }
+
+    /// Ends the probes on interface `index` as if their time had passed, then
+    /// runs the probing handler (it announces the services waiting for them).
+    fn finish_probes(daemon: &mut super::Zeroconf, index: u32) {
+        if let Some(registry) = daemon.dns_registry_map.get_mut(&index) {
+            for probe in registry.probing.values_mut() {
+                probe.start_time = Instant::now() - Duration::from_millis(1000);
+                probe.next_send = probe.start_time;
+            }
+        }
+        daemon.probing_handler();
+    }
+
+    /// dstack #451: a service with a fixed address (not `enable_addr_auto`) is
+    /// announced on an interface that appears after its registration and holds
+    /// its address: an interface re-created under a new index (a USB NIC's
+    /// reset, a veth pair deleted and added; Linux's wildcard daemon, CI's
+    /// `recreate` job). Upstream announced only address-auto services on a new
+    /// interface, so a fixed-address one got no status on the new index and
+    /// `handle_query` answered nothing for it until a restart. An interface
+    /// without its address gets no status.
+    #[test]
+    #[cfg(not(windows))]
+    fn test_fixed_address_service_is_announced_on_a_new_interface() {
+        use crate::service_info::ServiceStatus;
+
+        let mut daemon = new_test_zeroconf();
+        let loopback = my_ip_interfaces(true)
+            .into_iter()
+            .find(|intf| intf.ip() == IpAddr::V4(Ipv4Addr::LOCALHOST))
+            .unwrap();
+        let index = loopback.index.unwrap();
+        daemon.my_intfs.retain(|key, _| *key == index);
+        daemon.dns_registry_map.retain(|key, _| *key == index);
+        let service = ServiceInfo::new(
+            "_fixed-address._udp.local.",
+            "fixed-address",
+            "fixed-address.local.",
+            "127.0.0.1",
+            4440,
+            None,
+        )
+        .unwrap();
+        assert!(!service.is_addr_auto(), "precondition: a fixed address");
+        let fullname = service.get_fullname().to_lowercase();
+        daemon.register_service(service);
+        finish_probes(&mut daemon, index);
+        assert_eq!(
+            daemon.my_services[&fullname].get_status(index),
+            ServiceStatus::Announced,
+            "precondition: announced on loopback"
+        );
+
+        // The interface goes, as `check_ip_changes` forgets a gone index, and
+        // comes back under a new index with the same name and address.
+        daemon.my_intfs.remove(&index);
+        let recreated = test_interface(&loopback.name, 65_533, test_ifaddr_v4(Ipv4Addr::LOCALHOST));
+        daemon.add_interface(&recreated, std::slice::from_ref(&recreated));
+        assert!(
+            daemon.my_intfs.contains_key(&65_533),
+            "the new index is recorded"
+        );
+        finish_probes(&mut daemon, 65_533);
+        assert_eq!(
+            daemon.my_services[&fullname].get_status(65_533),
+            ServiceStatus::Announced,
+            "a fixed-address service must be announced on the re-created interface"
+        );
+
+        // An interface without the service's address: no status there.
+        let other = 65_532;
+        add_fake_intf(
+            &mut daemon,
+            other,
+            &[test_ifaddr_v4(Ipv4Addr::new(192, 0, 2, 1))],
+        );
+        let second = test_interface(
+            "mdns-sd-fake",
+            other,
+            test_ifaddr_v4(Ipv4Addr::new(192, 0, 2, 2)),
+        );
+        daemon.add_interface(&second, std::slice::from_ref(&second));
+        assert!(
+            daemon.my_intfs[&other].addrs.contains(&second.addr),
+            "precondition: the second address is recorded"
+        );
+        finish_probes(&mut daemon, other);
+        assert_eq!(
+            daemon.my_services[&fullname].get_status(other),
+            ServiceStatus::Unknown,
+            "no status on an interface without the service's address"
         );
     }
 
