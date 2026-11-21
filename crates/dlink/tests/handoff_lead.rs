@@ -12,8 +12,8 @@
 //! records, per block, the app's clock (`clock::app_monotonic_ns`) at its
 //! processor's entry and the block's `play_at`. The lead is `play_at` less
 //! that time. Before #476 the pump was due AT `play_at` and handed every
-//! block after it (v0.6.209 on dev1: 1500 of 1500 blocks late, p50
-//! -126 µs; after a 4 ms nap down to -3.09 ms).
+//! block after it (this test on v0.6.209 on dev1: every block late, p50
+//! -104 µs on time; with the 2.5 ms nap down to -1.47 ms).
 //!
 //! Judged per block: never before its due time (a lead at most H: the pump
 //! never runs a block early), and every block before its `play_at` (a lead

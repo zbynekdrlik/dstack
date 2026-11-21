@@ -188,8 +188,9 @@ pub struct Split {
     /// (b). The pump hands each block to the app H before its `play_at`
     /// (the RX path's end, P + (c), unchanged) and reads the flows at
     /// P - H, so a transmitter advertising more than P - H is read later.
-    /// 0 on a device without RX channels, and on one whose app pulls its
-    /// RX itself ([`Split::pulled`]).
+    /// 0 on a device without RX channels, and after [`Split::pulled`],
+    /// which [`crate::Link`]'s pulling starts apply for an app that pulls
+    /// its RX itself.
     pub handoff_lead: u64,
     /// H in ns, whole samples.
     pub handoff_lead_ns: u64,

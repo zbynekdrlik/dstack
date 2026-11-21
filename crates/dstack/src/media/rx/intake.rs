@@ -192,8 +192,9 @@ impl Intake {
 
     /// The pump's drain at PTP time `now_ns`, just before it reads the
     /// block that starts `step` samples behind the playout point (now less
-    /// P less the block's start: the block when the wake is on time, plus
-    /// how late it is): read as [`Intake::drain_into_rings`] reads, a
+    /// the read point less the block's start: P, or P - H with the hand-off
+    /// lead, dstack #476; the block when the wake is on time, plus how late
+    /// it is): read as [`Intake::drain_into_rings`] reads, a
     /// packet late only when its first frame is behind the block's start
     /// (each flow's at its delay: past the playout point and that step),
     /// a hole lost only wholly behind it. The pump reads by its

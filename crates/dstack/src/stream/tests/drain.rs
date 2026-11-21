@@ -290,7 +290,11 @@ fn a_leading_pump_judges_late_against_the_block_it_reads_at_p_less_h() {
     let t = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let now = T + B + P - h;
     send(&r, &t, T);
-    assert_eq!(r.pump.media(now, 0), now + B, "block T due at T + B + P - H");
+    assert_eq!(
+        r.pump.media(now, 0),
+        now + B,
+        "block T due at T + B + P - H"
+    );
     // Block T + B's input, in time for its on-time wake: P - H + B old
     // then, as old as the step allows.
     send(&r, &t, T + B);

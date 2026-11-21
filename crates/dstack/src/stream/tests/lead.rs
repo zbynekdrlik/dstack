@@ -38,7 +38,8 @@ fn h_is_30_percent_of_p_rounded_down_to_whole_samples() {
     ] {
         assert_eq!(handoff_lead(p), h, "P {p}");
     }
-    assert_eq!(handoff_lead(u64::MAX), u64::MAX / 10, "saturates");
+    // Exact at the top of the range: 30 % of u64::MAX, rounded down.
+    assert_eq!(handoff_lead(u64::MAX), 5_534_023_222_112_865_484);
 }
 
 #[test]

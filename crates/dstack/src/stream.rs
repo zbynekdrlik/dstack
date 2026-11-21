@@ -154,11 +154,10 @@ pub const HANDOFF_LEAD_SHARE: (u64, u64) = (3, 10);
 /// before its play time ([`play_at_ns`]), so the app holds the block H
 /// before it plays it; H comes out of the receive buffer, P and the play
 /// time stay. 13.041666 ms (1252 samples at 96 kHz) gives 375 samples
-/// (3.906 ms), 5 ms gives 1.5 ms, 40 ms gives 12 ms. A device's P is at
-/// most a 32-bit ns latency's samples, far from overflowing the product
-/// (saturating anyway).
+/// (3.906 ms), 5 ms gives 1.5 ms, 40 ms gives 12 ms. Exact for every P (the
+/// product in 128 bits).
 pub const fn handoff_lead(playout: u64) -> u64 {
-    playout.saturating_mul(HANDOFF_LEAD_SHARE.0) / HANDOFF_LEAD_SHARE.1
+    (playout as u128 * HANDOFF_LEAD_SHARE.0 as u128 / HANDOFF_LEAD_SHARE.1 as u128) as u64
 }
 
 /// The pump's timing, samples. `block` is above 0.
@@ -285,8 +284,9 @@ pub struct Blocks {
 
 impl Blocks {
     /// The schedule at media time `now`: the first start is the smallest
-    /// multiple of the block whose input ends at or after `now − playout`,
-    /// so its block is due at or after `now` (no catch-up at start).
+    /// multiple of the block whose input ends at or after `now − (P − H)`
+    /// (the read point, [`Timing::read_point`]), so its block is due at or
+    /// after `now` (no catch-up at start).
     pub fn bootstrap(now: u64, t: Timing) -> Blocks {
         let start = now.saturating_sub(t.first_due()).div_ceil(t.block) * t.block;
         Blocks {
@@ -711,8 +711,10 @@ impl<P: Process> Pump<P> {
                     // dstack #477: the reader stands at this block's
                     // start, however late the wake. (Right after a
                     // latency write one drain may pair the new P with the
-                    // old plan's latency: counters only, no audio.)
-                    let step = now.saturating_sub(start + self.timing.playout);
+                    // old plan's latency: counters only, no audio.) The
+                    // flows' playout point is the read point, P - H with
+                    // the hand-off lead (dstack #476): B at an on-time wake.
+                    let step = now.saturating_sub(start + self.timing.read_point());
                     self.drain(Some((drain_ns, step)));
                     self.cpu_timed(|pump| pump.block(start));
                 }
