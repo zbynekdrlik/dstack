@@ -200,3 +200,68 @@ fn a_free_block_drains_the_flow_as_unplaced() {
     assert_eq!((c.packets, c.unplaced), (1, 1), "{c:?}");
     assert_eq!(r.rx.rings()[0].counters().written, 0);
 }
+
+#[test]
+fn a_late_pump_counts_late_only_the_packets_it_already_read_past() {
+    // dstack #477 (presenter-listen, 21.11.2026: 40 late packets of
+    // 0.26-0.34 ms arrivals at P 5 ms, in the seconds of pump wakes 4-6 ms
+    // late): a packet is late when the reader already read its position,
+    // and the pump reads by its schedule, not by now. A wake late by
+    // `behind` reads first the block due `behind` ago, so what came since
+    // the last drain is in time though now is past P + B of it.
+    let mut r = flow_rig(TimingProfile::Normal);
+    r.rx.set_stamps(false);
+    let t = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let now = T + B + P;
+    send(&r, &t, T);
+    r.pump.media(now, 0);
+    // Block T + B's input arrives in time; the pump's next wake comes two
+    // blocks late (within the margin: three blocks run, none skipped). Now
+    // is P + 3B past its first frame, the reader's position still T + B.
+    send(&r, &t, T + B);
+    let behind = 2 * B;
+    const _: () = assert!(2 * B < WORK_MARGIN);
+    r.pump.media(now + B + behind, 0);
+    assert_eq!(r.stats.view().blocks, 4);
+    let c = r.rx.lane(0);
+    assert_eq!((c.packets, c.late, c.late_at_read), (2, 0, 0), "{c:?}");
+    let ring = r.rx.rings()[0].counters();
+    assert_eq!((ring.written, ring.late), (2 * B, 0), "{ring:?}");
+    // Block T + 2B's input comes only now, after its block was read (a
+    // hole): truly late, counted, at an on-time wake.
+    send(&r, &t, T + 2 * B);
+    r.pump.media(now + 4 * B, 0);
+    let c = r.rx.lane(0);
+    assert_eq!((c.packets, c.late, c.late_at_read), (3, 1, 1), "{c:?}");
+}
+
+#[test]
+fn a_late_pump_keeps_a_hole_open_until_the_block_it_reads_next() {
+    // dstack #477: a hole is lost once the reader read past it, judged by
+    // the block the pump reads next, never by now less P less a block.
+    let mut r = flow_rig(TimingProfile::Normal);
+    r.rx.set_stamps(false);
+    let t = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let now = T + B + P;
+    // Block T and the packet after a missing one (T + B): a hole opens.
+    send(&r, &t, T);
+    send(&r, &t, T + 2 * B);
+    r.pump.media(now, 0);
+    // The missing packet comes before a wake two blocks late, which reads
+    // block T + B first: it fills its hole in time.
+    send(&r, &t, T + B);
+    r.pump.media(now + 3 * B, 0);
+    let c = r.rx.lane(0);
+    assert_eq!(
+        (c.packets, c.gaps, c.reordered, c.late, c.late_at_read),
+        (3, 0, 1, 0, 0),
+        "{c:?}"
+    );
+    // The ring read blocks T to T + 3B: only T + 3B, never sent, is a hole.
+    let ring = r.rx.rings()[0].counters();
+    assert_eq!(
+        (ring.written, ring.holes, ring.late),
+        (3 * B, B, 0),
+        "{ring:?}"
+    );
+}
