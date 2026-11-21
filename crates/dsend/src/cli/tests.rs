@@ -262,49 +262,38 @@ fn a_run_never_shows_a_box_its_failure_goes_to_the_log() {
     }
 }
 
-/// dstack #461 (owner ROZHODNUTÉ 20.11.2026): dsend's Dante latency is 40
-/// ms unless (b) is set, up from dlink's 9 ms (dstack #247's per-app
-/// defaults). dsend is a fallback on the FOH PC: it never raises its
-/// threads' priority there (the PC's main audio, Ableton and dasio, must
-/// not lose CPU to it), so it rides the PC's holds out in its latency; the
-/// largest hold seen there was 35.7 ms, and the TX schedule starts again
-/// only past P.
+/// The smallest maximum latency a hardware Dante receiver on the site
+/// states in its ARC settings (0x1100 key 0x8302), ns: a Dante card
+/// (`arc_settings_card.json`) and the wireless receiver read 10156250, a
+/// second card 10666667 (dstack's catalog fixtures). A transmitter whose
+/// latency is past a receiver's maximum leaves that receiver's subscription
+/// in "Incorrect channel latencies" (dstack #480: a Yamaha AIC128-D on
+/// dsend's 40 ms).
+const HARDWARE_RECEIVER_MAX_NS: u64 = 10_156_250;
+
+/// dstack #480 (regression of #461): dsend's default Dante latency is 10
+/// ms, the largest value common hardware receivers accept. #461's 40 ms put
+/// the FOH card's subscription in "Incorrect channel latencies" (the card
+/// ran 9 ms before). As much margin as the receivers allow (owner, 20.11:
+/// dsend is a rare fallback whose latency may go up), never past them.
 #[test]
-fn dsend_s_dante_latency_is_40_ms_unless_set() {
+fn dsend_s_default_latency_fits_common_hardware_receivers() {
     let state = PathBuf::from("/tmp/s.toml");
     for (flags, network_ns) in [("", 1_000_000), ("--network-latency-ms 0.5", 500_000)] {
         for rate in ["96000", "48000", "44100"] {
             let o = run(&format!("{flags} --rate {rate}"));
             let split = link_config(&o, "pc-dsend", state.clone()).split().unwrap();
-            assert_eq!(split.latency_ns, 40_000_000, "{flags} {rate}: {split:?}");
+            assert!(
+                split.latency_ns <= HARDWARE_RECEIVER_MAX_NS,
+                "{flags} {rate}: {split:?} is past what hardware receivers accept"
+            );
+            assert_eq!(split.latency_ns, 10_000_000, "{flags} {rate}: {split:?}");
             assert_eq!(split.network_latency_ns, network_ns, "{flags} {rate}");
-            assert_eq!(split.receive_buffer_ns, 40_000_000 - network_ns);
+            assert_eq!(split.receive_buffer_ns, 10_000_000 - network_ns);
         }
     }
     // (b) set: as given, (a) + (b).
     let set = link_config(&run("--receive-buffer-ms 9"), "pc-dsend", state);
     assert_eq!(set.split().unwrap().latency_ns, 10_000_000);
-    assert_eq!(LATENCY_NS, 40_000_000);
-    assert_eq!(
-        latency_of(Latency {
-            network_ns: Some(2_000_000),
-            receive_buffer_ns: None,
-            app_buffer_ns: Some(5_000_000),
-        }),
-        Latency {
-            network_ns: Some(2_000_000),
-            receive_buffer_ns: Some(38_000_000),
-            app_buffer_ns: Some(5_000_000),
-        }
-    );
-    // An (a) past 40 ms leaves (b) at 0: the device refuses what is under
-    // its floor, never a wrapped (b).
-    assert_eq!(
-        latency_of(Latency {
-            network_ns: Some(41_000_000),
-            ..Latency::default()
-        })
-        .receive_buffer_ns,
-        Some(0)
-    );
+    assert_eq!(LATENCY_NS, 10_000_000);
 }
