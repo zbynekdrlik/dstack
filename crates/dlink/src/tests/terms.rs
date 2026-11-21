@@ -739,3 +739,42 @@ fn an_rx_device_hands_each_block_30_percent_of_p_before_its_play_at() {
     let t = Timing::of(&cfg);
     assert_eq!(t.offset(), t.block + t.playout + t.margin);
 }
+
+/// dstack #476, the main's ROZHODNUTÉ (21.11.2026): H comes out of the
+/// receive buffer (b), so it is never more than (b) and no flow is read
+/// under (a). (a) 5 ms + (b) 1 ms at 96 kHz: P 576 samples, 30 % of P is
+/// 172, (b) is 96: H 96 (1 ms), the read point 480, (a) itself, before and
+/// after Dante Controller moves P.
+#[test]
+fn the_hand_off_lead_is_at_most_the_receive_buffer() {
+    use dstack::stream::Timing;
+    use dstack::subscribe::Manager;
+    let c = rx_only("wide-a", 96_000, 96_000)
+        .network_latency_ns(5_000_000)
+        .receive_buffer_ns(1_000_000);
+    let s = c.split().unwrap();
+    assert_eq!((s.latency_ns, s.receive_buffer_ns), (6_000_000, 1_000_000));
+    assert_eq!((s.handoff_lead, s.handoff_lead_ns), (96, 1_000_000));
+    let a = latency_samples(5_000_000, 96_000);
+    let cfg = c.device().unwrap();
+    let t = Timing::of(&cfg);
+    assert_eq!((t.lead(), t.read_point()), (96, a), "the pump reads at (a)");
+    let ports = [0; dstack::media::rx::MAX_FLOWS];
+    let mut m = Manager::new(&cfg, "wide-a", std::net::Ipv4Addr::LOCALHOST, ports);
+    assert_eq!(m.handoff_lead(), 96, "the flows read at (a)");
+    // Dante Controller sets 5.5 ms: P 528, 30 % is 158, (b) 48: H 48.
+    m.set_latency(5_500_000);
+    assert_eq!(m.handoff_lead(), 48);
+    // 10 ms: (b) 480 over 30 % of P (288): the share again.
+    m.set_latency(10_000_000);
+    assert_eq!(m.handoff_lead(), 288);
+    // The start line says the lead is all of (b).
+    let lines = s.lines(c.directions(), c.terms());
+    assert!(
+        lines[1].ends_with(
+            "hand-off lead H 1 ms (all of (b), under 30 % of P): each block reaches the app H \
+             before its play_at"
+        ),
+        "{lines:?}"
+    );
+}
