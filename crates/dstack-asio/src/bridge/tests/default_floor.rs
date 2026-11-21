@@ -43,9 +43,10 @@ fn a_default_under_the_bridge_floor_is_still_refused() {
     let mut b = with_block(24);
     assert_eq!(b.app_buffer(&at).target_ns(), MIN_BRIDGE_TARGET_NS);
     assert!(b.asio_side(&at).is_ok());
-    let at = opened(96_000.0, 16);
-    let mut b = with_block(32);
-    let text = "app_buffer_ns: 499999 ns (0.499999 ms); 0.5 to 150 ms";
+    // 23 frames 239583 ns + 24 frames 250000 ns (`chunk_ns` rounds each).
+    let at = opened(96_000.0, 23);
+    let mut b = with_block(24);
+    let text = "app_buffer_ns: 489583 ns (0.489583 ms); 0.5 to 150 ms";
     assert_eq!(b.to_asio_app_buffer(&at).problem().as_deref(), Some(text));
     assert_eq!(b.from_asio_app_buffer(&at).problem().as_deref(), Some(text));
     assert_eq!(b.asio_side(&at).err().as_deref(), Some(text));

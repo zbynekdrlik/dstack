@@ -84,9 +84,10 @@ fn a_direction_s_target_is_checked_at_the_start_against_the_bridge_floor() {
     assert_eq!(b.asio_side(&at).err(), problem);
 }
 
-/// Only a direction's own target takes the bridge's floor: its player
-/// plays it (never clamped up to 1 ms), and a direction that follows the
-/// shared value or the default keeps dlink's.
+/// A direction's own target takes the bridge's floor: its player plays it
+/// (never clamped up to 1 ms); a direction that follows the configured
+/// shared value keeps dlink's, one on the default takes the bridge's too
+/// (dstack #482, `default_floor.rs`).
 #[test]
 fn a_direction_s_own_target_plays_under_dlink_s_floor() {
     let at = opened(96_000.0, 128);
@@ -97,7 +98,7 @@ fn a_direction_s_own_target_plays_under_dlink_s_floor() {
     assert_eq!(to.floor_ns(), MIN_BRIDGE_TARGET_NS);
     assert_eq!(to.clamped_ns(), MIN_BRIDGE_TARGET_NS);
     let from = b.from_asio_app_buffer(&at);
-    assert_eq!(from.floor_ns(), MIN_APP_BUFFER_NS);
+    assert_eq!(from.floor_ns(), MIN_BRIDGE_TARGET_NS, "the default's (#482)");
     assert_eq!(from, b.app_buffer(&at), "the default");
     let _dante = b.dante_side();
     let _asio = b.asio_side(&at).unwrap();
