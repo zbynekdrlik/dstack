@@ -64,7 +64,8 @@ pub const SUFFIX: &str = "-dsend";
 /// The app's name (its state folder, the command's usage).
 pub const APP: &str = "dsend";
 
-/// The flags that take a value: the shared ones, and [`LATENCY_FLAG`].
+/// The shared flags that take a value; dsend's own [`LATENCY_FLAG`] is read
+/// before them.
 const VALUE_FLAGS: [&str; 11] = SHARED_FLAGS;
 
 /// dsend's own flag (dstack #480): the Dante latency P, ms.
@@ -241,7 +242,7 @@ pub const LATENCY_NS: u64 = 10_000_000;
 /// latency is that total. [`parse`] refuses (b) with a total, and a total
 /// under (a); here (b) never wraps below 0.
 pub fn latency_of(given: Latency, total: Option<u64>) -> Latency {
-    let network_ns = given.network_ns.unwrap_or(dlink::NETWORK_LATENCY_NS);
+    let network_ns = network_of(given);
     let total_ns = total.unwrap_or(LATENCY_NS);
     Latency {
         receive_buffer_ns: given
@@ -249,6 +250,11 @@ pub fn latency_of(given: Latency, total: Option<u64>) -> Latency {
             .or(Some(total_ns.saturating_sub(network_ns))),
         ..given
     }
+}
+
+/// The network latency (a) of `given`, ns: as set, else dlink's 1 ms.
+fn network_of(given: Latency) -> u64 {
+    given.network_ns.unwrap_or(dlink::NETWORK_LATENCY_NS)
 }
 
 /// Whether the latency options agree (dstack #480): `--latency-ms` sets the
@@ -264,7 +270,7 @@ pub fn latency_check(given: Latency, total: Option<u64>) -> Result<(), String> {
             "give one of {LATENCY_FLAG} (the whole latency) and --receive-buffer-ms (b)"
         ));
     }
-    let network_ns = given.network_ns.unwrap_or(dlink::NETWORK_LATENCY_NS);
+    let network_ns = network_of(given);
     if total < network_ns {
         return Err(format!(
             "{LATENCY_FLAG} {} is under the network latency (a) {} ms it holds",
