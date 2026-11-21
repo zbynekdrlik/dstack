@@ -15,8 +15,9 @@
 //! within W (set 20 ms). Each second of the judged window reads the counts
 //! the heartbeat sends (0x8004 is the slot's `late`, 0x8003 its last
 //! second's lateness at arrival): no packet late, none written behind the
-//! reader, the tone whole. A file of its own (one device pair), on
-//! loopback (dstack #366).
+//! reader, the tone whole but for packets the sender never sent (its TX
+//! thread may skip some on a loaded box). A file of its own (one device
+//! pair), on loopback (dstack #366).
 
 use std::fmt::Write as _;
 use std::sync::Arc;
@@ -155,12 +156,20 @@ fn a_pump_late_within_its_margin_counts_no_packet_late_that_came_in_time() {
     // is judged once the flow settled.
     let rx = Arc::clone(&receiver.media().rx);
     let pump = || receiver.media().engine().expect("the receiver's pump");
+    // The ring's holes never written (`holes - late`): the sender's, whose
+    // TX thread may skip packets on a loaded box (tests.md); never ours.
+    let unwritten = || {
+        let ring = rx.rings()[0].counters();
+        ring.holes - ring.late
+    };
     let first = (rx.lane(0), pump(), naps.load(Ordering::Relaxed));
     let mut seconds = String::new();
     let mut last = first.0;
+    let mut unwritten_at_judge = 0;
     for s in 1..=JUDGED_SECONDS {
         std::thread::sleep(Duration::from_secs(1));
         if s == SETTLE_SECONDS {
+            unwritten_at_judge = unwritten();
             judge.store(1, Ordering::Relaxed);
         }
         let c = rx.lane(0);
@@ -181,6 +190,7 @@ fn a_pump_late_within_its_margin_counts_no_packet_late_that_came_in_time() {
         last = c;
     }
     judge.store(0, Ordering::Relaxed);
+    let sender_holes = unwritten() - unwritten_at_judge;
     let (c, p) = (rx.lane(0), pump());
     let channel = receiver.rx_channels().remove(0);
     assert_eq!((sender.ended(), receiver.ended()), (None, None));
@@ -212,10 +222,17 @@ fn a_pump_late_within_its_margin_counts_no_packet_late_that_came_in_time() {
     );
     // Every packet came in time and was read, from the device's start (the
     // heartbeat's 0x8004 counts since then): none late, none behind the
-    // reader, the tone whole.
+    // reader.
     assert_eq!(
-        (c.late, c.late_at_read, off),
-        (0, 0, 0),
-        "late packets, packets written behind the reader, samples off the level: {window}"
+        (c.late, c.late_at_read),
+        (0, 0),
+        "late packets, packets written behind the reader: {window}"
+    );
+    // The tone whole but for what the sender never sent (its holes, a
+    // block's slack each side of the judged window's edges).
+    let slack = 2 * 128;
+    assert!(
+        off <= sender_holes + slack,
+        "{off} samples off the level, the sender's holes {sender_holes}: {window}"
     );
 }

@@ -639,7 +639,9 @@ impl<P: Process> Pump<P> {
                         self.stats.late.fetch_add(1, Ordering::Relaxed);
                     }
                     // dstack #477: the reader stands at this block's
-                    // start, however late the wake.
+                    // start, however late the wake. (Right after a
+                    // latency write one drain may pair the new P with the
+                    // old plan's latency: counters only, no audio.)
                     let step = now.saturating_sub(start + self.timing.playout);
                     self.drain(Some((drain_ns, step)));
                     self.cpu_timed(|pump| pump.block(start));

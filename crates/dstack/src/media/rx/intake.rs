@@ -12,7 +12,8 @@
 //!   slots its poll found readable: the low-latency profile, and any
 //!   device without an engine pump (a daemon);
 //! - the engine's pump in the normal profile, just before it reads each
-//!   block ([`Intake::drain_into_rings`], [`crate::stream::Pump::media`]):
+//!   block ([`Intake::drain_before_block`], [`crate::stream::Pump::media`];
+//!   [`Intake::drain_into_rings`] while the clock is not ready):
 //!   a non-blocking read of every slot that has a flow, until its socket
 //!   is empty (at most [`PUMP_DRAIN`] datagrams). Packets wait in their sockets' buffers whatever a helper
 //!   thread does, and the pump reads by sample position, so its own
@@ -35,9 +36,9 @@
 //! includes the wait for the next block (at most a block, plus the pump's
 //! own lateness), and the write delay likewise. `late`, `wire_late`,
 //! `late_at_read` and the ring counts are judged as before, at the read;
-//! under the pump `late` and the lost holes against the block it reads
-//! next ([`Intake::drain_before_block`], dstack #477), so a late wake
-//! counts no packet late that came in time.
+//! under the pump `late`, `wire_late` and the lost holes against the block
+//! it reads next ([`Intake::drain_before_block`], dstack #477), so a late
+//! wake counts no packet late that came in time.
 //! The reported ages (the heartbeat's lateness, the peak, the judge and
 //! the mean) are each packet's age at its ARRIVAL (dstack #350,
 //! [`record_arrivals`]): the read's wait is reported apart.
