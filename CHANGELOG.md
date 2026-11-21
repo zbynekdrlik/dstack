@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.6.213
+
+# CHANGELOG lines for dstack #482 (lane worktree-agent-aab8323652bfba34f; the supervisor puts them under the release's heading)
+
+- **Fix (#482, a gap left by #422): dstack-asio starts a 32-frame ASIO driver on its default target.** The default per-direction bridge target (the driver's buffer + one pump block, nothing configured) is now checked against, and played on, the bridge's floor `MIN_BRIDGE_TARGET_NS` (0.5 ms), not dlink's 1 ms. dsg's SoundGrid at 32 frames with 32-frame pump blocks at 96 kHz (0.666666 ms both ways) was refused at the driver's start (`the app refused the driver: app_buffer_ns: 666666 ns (0.666666 ms); 1 to 150 ms`) and now starts, both players at 0.666666 ms. A default under 0.5 ms is still refused, the text naming the 0.5 ms floor.
+  - Unchanged: a configured shared `app_buffer_ns` keeps dlink's 1 to 150 ms (dasio's `[bridge]` check reads it so); `to_asio_app_buffer_ns` / `from_asio_app_buffer_ns` keep 0.5 to 150 ms (#422); `MIN_APP_BUFFER_NS` stays 1 ms for every dlink app (OBS, dsend, dlisten, intercom, songplayer).
+  - API: none. `Bridge::app_buffer` on the default now reports `floor_ns() == MIN_BRIDGE_TARGET_NS`.
+  - Latency: only a bridge whose default target is under 1 ms changes (it played 1 ms before, clamped, when the start passed at all); a default of 1 ms or more plays as before.
+  - Consumers: dasio moves the version; dsg can go back to a 32-frame SoundGrid buffer.
+
 ## 0.6.212
 
 # CHANGELOG lines for dstack #480 (lane worktree-agent-a3e33c0dc2fdae028; the supervisor puts them under the release's heading)
