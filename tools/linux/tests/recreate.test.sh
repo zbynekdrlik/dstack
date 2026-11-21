@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 # SPDX-License-Identifier: MIT OR Apache-2.0
-# dstack #411, #414 (the whole-device proof of #409, #411 and #414, in CI):
+# dstack #411, #414, #451 (the whole-device proof of #409, #411, #414 and
+# #451, in CI):
 # a NIC destroyed and created again under the same name and address, with
 # a new interface index (stream-snv 18.11.2026: a USB reset of the Dante
 # NIC), must leave a running device hearing its transmitter again, without
@@ -23,7 +24,11 @@ set -euo pipefail
 # the other rose by MIN_RISE in a 2 s window (about 1.3 s of audio at 48
 # kHz, 32 frames a packet), a's still by multicast, a's flow to b still
 # direct, b's log names its flow sockets' send interface again and a's log
-# its direct socket's new index.
+# its direct socket's new index. And a's mDNS daemon must answer again
+# (#451): from b's namespace, a direct query to a's address for a's own
+# ARC record (`<name>._netaudio-arc._udp.local.` SRV), answered once, from
+# a's address, within BOUND_S of the re-add (asked before the delete too,
+# so a missing answer after it is the re-create's).
 # The reads are recreate_gate.py's (unit tests: recreate_gate_test.py).
 # Run as root; the binary is $1 (default target/release/dstack-dev).
 
@@ -35,12 +40,14 @@ NB="dstack-recreate-b-$$"
 IF=rig0
 ADDR_A=10.71.0.1/24
 ADDR_B=10.71.0.2/24
+IP_A=${ADDR_A%/*}
 A=recreate-a
 B=recreate-b
 GONE_S=5
 BOUND_S=60
 MIN_RISE=2000
 STOP_S=10
+ASK_S=1
 
 # Stops the peers still running: INT (their goodbyes), KILL after STOP_S;
 # false when one needed the KILL. `ip netns del` kills nothing inside.
@@ -150,19 +157,42 @@ until_both_deliver() {
   WAITED=$((SECONDS - start))
 }
 
+# Waits until a answers a direct query for its own ARC record from b's
+# namespace, once and from its address (`recreate_gate.py ask`), at most
+# $1 s after the SECONDS mark $2 (ANSWERED: the seconds since the mark),
+# or fails with $3.
+until_a_answers() {
+  local out
+  until out=$(ip netns exec "$NB" python3 -I "$GATE" ask "$IP_A" "$A._netaudio-arc._udp.local." "$ASK_S"); do
+    [ $((SECONDS - $2)) -lt "$1" ] || fail "$3 in $1 s ($out)"
+    kill -0 "$PA" 2>/dev/null || fail "peer a ended"
+    sleep 0.5
+  done
+  echo "$out"
+  ANSWERED=$((SECONDS - $2))
+  # An answer that came only after the bound (the first ask can start late,
+  # after the audio's own wait) fails too.
+  [ "$ANSWERED" -le "$1" ] || fail "$3 in $1 s (answered $ANSWERED s after the mark: $out)"
+}
+
 until_both_deliver 60 "the peers did not deliver to each other (a from b by multicast, a to b past the qdisc)"
 echo "before: both deliver ($WAITED s)"
+until_a_answers 60 "$SECONDS" "a never answered a direct query for its own ARC record"
+echo "before: a answers its own ARC record"
 
 OLD=$(index)
 ip -n "$NA" link del "$IF"
 sleep "$GONE_S"
 leg_up
+READD=$SECONDS
 NEW=$(index)
 [ "$OLD" != "$NEW" ] || fail "$IF came back on its old index $OLD: nothing re-created"
 echo "$IF re-created: a's index $OLD -> $NEW, gone $GONE_S s"
 
 until_both_deliver "$BOUND_S" "not heard again after the re-create"
 echo "after: both deliver again, the delivering window ended $WAITED s after the re-add"
+until_a_answers "$BOUND_S" "$READD" "a did not answer its own ARC record again after the re-create"
+echo "after: a answers its own ARC record again, $ANSWERED s after the re-add"
 
 grep -F "multicast send interface named again" "$DIR/b.log" | grep -qF "the TX flow sockets" ||
   fail "b's log never named its flow sockets' send interface again"
@@ -173,4 +203,4 @@ stop_peers || fail "a peer did not stop within $STOP_S s of its INT"
 PIDS=""
 wait "$PA" || fail "peer a exited $?"
 wait "$PB" || fail "peer b exited $?"
-echo "recreate: a hears b by multicast and b hears a past the qdisc again after $IF's re-create"
+echo "recreate: a hears b by multicast, b hears a past the qdisc and a answers its ARC record again after $IF's re-create"

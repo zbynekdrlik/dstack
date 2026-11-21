@@ -133,6 +133,30 @@ LICENSE-APACHE and LICENSE-MIT), copied unchanged except:
   to any source, no check that it is on the interface's subnet (RFC 6762
   sections 5.5 and 11 say SHOULD).
 
+- `src/service_daemon.rs` `add_interface` (+ `has_addr_on_intf`): a
+  service with fixed addresses (not `enable_addr_auto`, as every dstack
+  record) is announced, or probed first, on a new interface whose subnet
+  holds one of its addresses (`valid_ip_on_intf`, as `prepare_announce`
+  judges), by the same path as an address-auto one. Upstream
+  announced only address-auto services on a new interface, so after an
+  interface was re-created under a new index (a USB NIC's reset; CI's
+  `recreate` job deletes and re-adds a veth pair) the IP check recorded
+  the new index but the records got no status there, and `handle_query`
+  answered nothing on it until a restart (dstack #451, companion-snv netns
+  21.11.2026: 0 replies in 60 s to a direct query for the device's own ARC
+  record; `test_fixed_address_service_is_announced_on_a_new_interface`). A
+  service with no address there is skipped, so it gets no status there.
+  On the wire: on a NEW index (a fresh `DnsRegistry`) the records are probed
+  and then announced twice, as at registration; on the SAME index (an
+  address removed and added again: `check_ip_changes` keeps the registry,
+  the records are still active) they are announced once, no probe. The
+  bound reopen (above) runs `check_ip_changes` and so reaches this first:
+  on the same index its own resend follows within the same second and is
+  rate-limited away (RFC 6762 §6), so the records go out once; on a new
+  index the records are probing, the resend sends nothing, and the probe's
+  end announces them twice (`announced_records` counts the names either
+  way).
+
 - `Cargo.toml`: an empty `[workspace]` table, so cargo never searches above
   this crate (a dstack checkout nested in another one, such as a git
   worktree, found the outer workspace and refused this excluded path; dstack

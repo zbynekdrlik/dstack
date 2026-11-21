@@ -6,6 +6,8 @@
 
 use super::*;
 
+mod select;
+
 #[cfg(target_os = "linux")]
 use std::collections::BTreeSet;
 use std::net::{SocketAddrV6, UdpSocket};
