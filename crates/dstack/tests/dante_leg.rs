@@ -97,7 +97,7 @@ fn every_bound_port() -> Vec<(String, u16)> {
         ("Audinate's multicast audio".to_string(), 4321),
         ("Audinate's unicast audio, first".to_string(), 14336),
         ("Audinate's unicast audio, last".to_string(), 14591),
-        ("mDNS".to_string(), dstack::announce::responder::PORT),
+        ("mDNS".to_string(), dstack::announce::mdns::PORT),
     ];
     for p in dstack::info::REQUEST_PORT..=8708 {
         all.push((format!("info {p}"), p));

@@ -327,8 +327,9 @@ pub struct Announcer<R: Registry> {
     live: BTreeMap<String, ServiceRecord>,
     /// [`AGAIN_TRIES`], fewer in tests.
     again_tries: u64,
-    /// The records the last announcement made the registered set, for
-    /// [`responder::Responder`].
+    /// The records the last announcement made the registered set (kept in
+    /// every build, read by tests only since dstack #444: a test reads the
+    /// TXT here or answers with them on loopback).
     published: Arc<Mutex<Vec<ServiceRecord>>>,
     /// Waits for a full command queue so far.
     waited: u64,
@@ -346,7 +347,7 @@ impl<R: Registry> Announcer<R> {
     }
 
     /// The records the last announcement made the registered set (shared:
-    /// the responder on the device's own address reads them).
+    /// a test reads them, or answers with them on loopback).
     pub fn published(&self) -> Arc<Mutex<Vec<ServiceRecord>>> {
         Arc::clone(&self.published)
     }
@@ -428,6 +429,9 @@ impl<R: Registry> Announcer<R> {
 }
 
 pub mod mdns;
+/// Test builds only: our records as an mDNS answer, and a loopback
+/// responder serving them (dstack #444: no production responder).
+#[cfg(test)]
 pub mod responder;
 
 #[cfg(test)]
