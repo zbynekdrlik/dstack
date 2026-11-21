@@ -8,7 +8,7 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 
 use dlink::{Config, Place, Ports};
-use dstack_endpoint::cli::{Latency, SHARED_FLAGS, Shared, parse_shared, with_shared};
+use dstack_endpoint::cli::{Latency, SHARED_FLAGS, Shared, latency_ms, parse_shared, with_shared};
 
 use crate::source::TX_NAMES;
 
@@ -26,10 +26,15 @@ the network's rate and clock. Windows only (WASAPI loopback).
                               driver is installed, else the default output)
   --name <name>               the device's Dante name (default <host>-dsend)
   --rate <hz>                 the network's sample rate (default 96000)
+  --latency-ms <ms>           the Dante latency, (a) + (b) (default 10,
+                              the most hardware receivers accept: past a
+                              receiver's maximum it shows \"Incorrect
+                              channel latencies\"; 40 in 0.6.202-0.6.211,
+                              9 before)
   --network-latency-ms <ms>   (a) the Dante network latency (default 1)
-  --receive-buffer-ms <ms>    (b) the receive buffer; the Dante latency is
-                              (a) + (b) (default: 40 ms less (a), a
-                              Dante latency of 40 ms; 9 ms up to 0.6.201)
+  --receive-buffer-ms <ms>    (b) the receive buffer, instead of
+                              --latency-ms; the Dante latency is (a) + (b)
+                              (default: --latency-ms less (a))
   --app-buffer-ms <ms>        the buffer between the captured output and
                               the network, 1 to 150 (default: WASAPI's
                               10 ms period, assumed, + one pump block,
@@ -59,8 +64,12 @@ pub const SUFFIX: &str = "-dsend";
 /// The app's name (its state folder, the command's usage).
 pub const APP: &str = "dsend";
 
-/// The flags that take a value: dsend's are the shared ones.
+/// The shared flags that take a value; dsend's own [`LATENCY_FLAG`] is read
+/// before them.
 const VALUE_FLAGS: [&str; 11] = SHARED_FLAGS;
+
+/// dsend's own flag (dstack #480): the Dante latency P, ms.
+pub const LATENCY_FLAG: &str = "--latency-ms";
 
 /// What a run is given.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,6 +80,9 @@ pub struct Options {
     /// The latency terms (a) and (b) and the app buffer, ns (dstack #244,
     /// #247).
     pub latency: Latency,
+    /// The Dante latency P, ns, `--latency-ms` (dstack #480): None keeps
+    /// [`LATENCY_NS`]. Never given with (b).
+    pub latency_ns: Option<u64>,
     /// None: the default route's address.
     pub place: Option<Place>,
     pub ports: Option<Ports>,
@@ -112,6 +124,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
         output: None,
         rate: RATE,
         latency: Latency::default(),
+        latency_ns: None,
         place: None,
         ports: None,
         process_id: None,
@@ -130,6 +143,11 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             }
             _ => {}
         }
+        if flag == LATENCY_FLAG {
+            let value = it.next().ok_or_else(|| format!("{flag} needs a value"))?;
+            o.latency_ns = Some(latency_ms(flag, value)?);
+            continue;
+        }
         if !VALUE_FLAGS.contains(&flag) {
             return Err(format!("unknown argument {flag:?}"));
         }
@@ -139,6 +157,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             None => return Err(format!("unknown argument {flag:?}")),
         }
     }
+    latency_check(o.latency, o.latency_ns)?;
     Ok(if list {
         Command::ListOutputs
     } else {
@@ -201,40 +220,83 @@ pub fn state_path(
     )
 }
 
-/// dsend's Dante latency unless `--receive-buffer-ms` sets (b), ns: 40 ms
-/// (owner ROZHODNUTÉ 20.11.2026, dstack #461). dsend is a fallback path on
-/// the FOH PC, where any click in the PC's main audio (Ableton, dasio) is
-/// critical and a click in dsend is not, so dsend never raises its threads'
-/// priority; it rides the holds of the PC's shared CPUs out in its latency
-/// instead. 40 ms covers every hold seen there (FOH 18.11-20.11.2026: 6.6
-/// to 35.7 ms; the TX schedule starts again past P), where dlink's default
-/// gave dsend 9 ms (dstack #247).
-pub const LATENCY_NS: u64 = 40_000_000;
+/// dsend's Dante latency unless `--latency-ms` or `--receive-buffer-ms`
+/// sets it, ns: 10 ms, the largest value common hardware receivers accept
+/// (dstack #480). A Dante receiver plays a flow at the larger of its own
+/// latency and the one the transmitter advertises (`latency_ns=` in our
+/// channel records, before any subscription; the flow request carries no
+/// latency), and only within its own range: the site's hardware states a
+/// maximum of 10.156 ms (a card, the wireless receiver) and 10.667 ms
+/// (another card) in its ARC settings. #461's 40 ms (owner, 20.11.2026:
+/// dsend is a fallback on the FOH PC and never raises its threads'
+/// priority, so it rides the PC's CPU holds out in its latency, as far as
+/// the receiver allows) was past them: the FOH card's subscription read
+/// "Incorrect channel latencies". 10 ms keeps the most margin hardware
+/// takes (dlink's default gave dsend 9 ms, dstack #247); a site whose
+/// receivers accept more sets `--latency-ms`.
+pub const LATENCY_NS: u64 = 10_000_000;
 
-/// The latency terms dsend's device runs at (dstack #461): those `given`,
-/// and with no (b) given, (b) = [`LATENCY_NS`] less (a) (`given`'s, else
-/// dlink's 1 ms), so the Dante latency is [`LATENCY_NS`].
-pub fn latency_of(given: Latency) -> Latency {
-    let network_ns = given.network_ns.unwrap_or(dlink::NETWORK_LATENCY_NS);
+/// The latency terms dsend's device runs at (dstack #461, #480): those
+/// `given`, and with no (b) given, (b) = `total` (`--latency-ms`, else
+/// [`LATENCY_NS`]) less (a) (`given`'s, else dlink's 1 ms), so the Dante
+/// latency is that total. [`parse`] refuses (b) with a total, and a total
+/// under (a); here (b) never wraps below 0.
+pub fn latency_of(given: Latency, total: Option<u64>) -> Latency {
+    let network_ns = network_of(given);
+    let total_ns = total.unwrap_or(LATENCY_NS);
     Latency {
         receive_buffer_ns: given
             .receive_buffer_ns
-            .or(Some(LATENCY_NS.saturating_sub(network_ns))),
+            .or(Some(total_ns.saturating_sub(network_ns))),
         ..given
     }
+}
+
+/// The network latency (a) of `given`, ns: as set, else dlink's 1 ms.
+fn network_of(given: Latency) -> u64 {
+    given.network_ns.unwrap_or(dlink::NETWORK_LATENCY_NS)
+}
+
+/// Whether the latency options agree (dstack #480): `--latency-ms` sets the
+/// whole latency, so it never comes with `--receive-buffer-ms` (b), and it
+/// is never under the network latency (a) it holds (`given`'s, else
+/// dlink's 1 ms). The error says which.
+pub fn latency_check(given: Latency, total: Option<u64>) -> Result<(), String> {
+    let Some(total) = total else {
+        return Ok(());
+    };
+    if given.receive_buffer_ns.is_some() {
+        return Err(format!(
+            "give one of {LATENCY_FLAG} (the whole latency) and --receive-buffer-ms (b)"
+        ));
+    }
+    let network_ns = network_of(given);
+    if total < network_ns {
+        return Err(format!(
+            "{LATENCY_FLAG} {} is under the network latency (a) {} ms it holds",
+            dlink::ms(total),
+            dlink::ms(network_ns)
+        ));
+    }
+    Ok(())
 }
 
 /// The dlink device of a run: `name`, its state in `state`, TX only (L and
 /// R) at the network's rate, `dstack`/`dsend` as Dante Controller's
 /// manufacturer and model, and the latency terms ([`latency_of`]: a Dante
-/// latency of 40 ms unless set), ports and process id the options give (no
+/// latency of 10 ms unless set), ports and process id the options give (no
 /// real-time setup).
 pub fn link_config(o: &Options, name: &str, state: PathBuf) -> Config {
     let mut c = Config::new(name, state)
         .tx(TX_NAMES)
         .sample_rate(o.rate)
         .product("dstack", APP);
-    c = with_shared(c, latency_of(o.latency), o.ports, o.process_id);
+    c = with_shared(
+        c,
+        latency_of(o.latency, o.latency_ns),
+        o.ports,
+        o.process_id,
+    );
     c
 }
 
