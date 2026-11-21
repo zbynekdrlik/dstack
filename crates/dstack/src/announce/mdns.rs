@@ -74,7 +74,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use mdns_sd::{DaemonStatus, IfKind, Metrics, Reopened, ServiceDaemon};
+use mdns_sd::{DaemonStatus, IfKind, IfPredicate, Metrics, Reopened, ServiceDaemon};
 use tracing::{debug, info, warn};
 
 use super::{AGAIN_TRIES, Announcer, retried};
@@ -138,6 +138,18 @@ pub const GROUP_TO_BOUND_SOCKET: bool = cfg!(windows);
 /// socket hears no group (Linux) it stays the wildcard's.
 pub fn binds_to_address(group_to_bound: bool) -> bool {
     group_to_bound
+}
+
+/// Whether `intf` holds `ip`: the daemon's interface selection, asked at
+/// each of its IP checks (dstack #451). mdns-sd turns an `IfKind::Addr`
+/// selection into the interface's INDEX when it is set
+/// (`resolve_addr_to_index`), so an interface re-created under a new index
+/// with the same address (a USB NIC's reset; CI's `recreate` job) was never
+/// selected again, and the daemon heard and answered nothing on it until a
+/// restart. Matched by the address alone, as the device's address is what
+/// names the Dante leg; another address on the same interface is not ours.
+pub(crate) fn holds_address(intf: &if_addrs::Interface, ip: Ipv4Addr) -> bool {
+    intf.ip() == IpAddr::V4(ip)
 }
 
 /// The INFO line of a bound daemon whose socket was opened again (dstack
@@ -430,7 +442,11 @@ impl Mdns {
         let every = u32::try_from(crate::membership::EVERY.as_secs()).unwrap_or(u32::MAX);
         let selected = daemon
             .disable_interface(IfKind::All)
-            .and_then(|()| daemon.enable_interface(IfKind::Addr(IpAddr::V4(ip))))
+            .and_then(|()| {
+                daemon.enable_interface(IfKind::Predicate(IfPredicate::new(move |intf| {
+                    holds_address(intf, ip)
+                })))
+            })
             .and_then(|()| daemon.set_ip_check_interval(every));
         let meter = Meter::start(taps.listen(Heard::All), MINUTE_NS, Browsers::default());
         let mut m = Mdns {
