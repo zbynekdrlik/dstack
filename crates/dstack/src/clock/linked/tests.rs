@@ -646,11 +646,7 @@ fn the_pump_absorbs_a_handover_step_at_its_tightest_schedule() {
     use crate::stream::{Blocks, Due, Timing};
     let step = crate::clock::to_samples(HANDOVER_NS.unsigned_abs(), 192_000) + 1;
     assert_eq!(step, 6);
-    let t = Timing {
-        block: 16,
-        playout: 16,
-        margin: 16,
-    };
+    let t = Timing::new(16, 16, 16);
     for forward in [true, false] {
         for into in 0..t.block {
             let mut b = Blocks::bootstrap(1_000_000, t);

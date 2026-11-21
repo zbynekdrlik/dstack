@@ -250,11 +250,7 @@ fn the_device_s_own_status_line_reads() {
     media
         .freq
         .store(1_250, std::sync::atomic::Ordering::Relaxed);
-    let timing = Timing {
-        block: 32,
-        playout: 96,
-        margin: 96,
-    };
+    let timing = Timing::new(32, 96, 96);
     media.attach_engine(Arc::new(PumpStats::new(timing, 96_000)));
     let status = parse_status(&crate::ctl::status(&media)).unwrap();
     assert_eq!(

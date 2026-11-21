@@ -275,7 +275,10 @@ impl TxFill {
     /// (its block, its latency P as the pump's, followed live through
     /// `rx`'s [`RxShared::playout`], its work margin W), quantized at
     /// `bits`. Every buffer is allocated here; hand it over with
-    /// [`super::TxShared::claim_fill`].
+    /// [`super::TxShared::claim_fill`]. It hands nothing to an app's RX, so
+    /// it runs without the pump's hand-off lead (dstack #476: the TX path
+    /// does not move; each output is stamped W after its due time either
+    /// way, so it and a leading pump write the engine rings alike).
     pub fn new(
         processor: Box<dyn Process>,
         channels: Vec<usize>,
@@ -289,7 +292,10 @@ impl TxFill {
             samples: vec![0; frames],
             processor,
             channels,
-            timing,
+            timing: Timing {
+                leads: false,
+                ..timing
+            },
             bits,
             rx,
             stats: Arc::default(),

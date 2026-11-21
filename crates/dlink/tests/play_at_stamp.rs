@@ -12,12 +12,15 @@
 //! - (the converter's delay is in (c) once: the app block's first sample
 //!   holds the audio that delay before the device block's start, and
 //!   `play_at` does not add it again, dstack #410);
-//! - the flow's read delay, when the transmitter's latency is over ours:
-//!   the flow is read at its latency, rounded up to whole blocks
+//! - the flow's read delay, when the transmitter's latency is over the
+//!   receiver's read point P - H (H the hand-off lead, 30 % of P: the
+//!   block reaches the app H before its `play_at`, dstack #476): the flow
+//!   is read at its latency, rounded up to whole blocks
 //!   (`Manager::read_at`).
 //!
-//! At the documented path that is 1.958 ms at a 9 ms transmitter and
-//! 29.958 ms at a 40 ms one (the flow read 28.0 ms later, `delay 2688`),
+//! At the documented path that is 1.958 ms at a 9 ms transmitter (under
+//! P - H = 9.135 ms: read at ours) and 33.958 ms at a 40 ms one (the flow
+//! read 32.0 ms later, `delay 3072`; 29.958 ms before #476, read past P),
 //! the same in every block. #402 measured 2.583 / 30.583 ms on v0.6.144 and
 //! v0.6.170: the converter's delay counted twice (#410). Both are pinned here to the
 //! microsecond, derived from `Config::split`; a change in any term (or in
@@ -66,7 +69,9 @@ const LINE_TOLERANCE: f64 = 0.05;
 /// 2583 and 30583: one converter delay (625 µs) more, the RX converter's
 /// delay counted twice by `Rated`.
 const MEASURED_UNDER_US: u64 = 1958;
-const MEASURED_OVER_US: u64 = 29958;
+/// dstack #476: the 40 ms flow is read against P - H, 4 ms (three blocks)
+/// later than against P (29958 up to v0.6.209).
+const MEASURED_OVER_US: u64 = 33958;
 /// How far the median `L` may sit off the terms (measured on dev1: within
 /// 0.25 µs), and any one block's: the pump's offset filter follows a torn
 /// clock pair by up to 133 ns a 1.33 ms wake (100 ppm), so a starved
@@ -314,8 +319,10 @@ fn run(tx_latency_ns: u64) -> Measured {
     let p = latency_samples(rx.latency_ns, RATE);
     let advertised = latency_samples(tx.latency_ns, RATE);
     assert_eq!(latency_samples(rx.block_ns, RATE), BLOCK);
-    // The flow's read: its latency (the larger) less ours, in whole blocks.
-    let delay = advertised.saturating_sub(p).div_ceil(BLOCK) * BLOCK;
+    // The flow's read: its latency less our read point P - H (the hand-off
+    // lead, dstack #476), in whole blocks.
+    let read_point = p - rx.handoff_lead;
+    let delay = advertised.saturating_sub(read_point).div_ceil(BLOCK) * BLOCK;
     // (c) on the RX side already holds the converter's delay (dstack #410).
     let expected_ns = rx.rx_handoff_ns as f64 + delay as f64 * 1e9 / f64::from(RATE);
 
@@ -422,7 +429,7 @@ fn run(tx_latency_ns: u64) -> Measured {
         near_wrap,
         restarts: restarts.load(Ordering::Relaxed),
         expected_ns,
-        read: (p + delay, delay),
+        read: (read_point + delay, delay),
         status,
     }
 }
@@ -495,16 +502,16 @@ fn pinned(tx_latency_ns: u64, measured_us: u64) {
     );
 }
 
-/// A transmitter latency under ours (9 ms against 13.041666 ms): the flow
-/// is read at our P, `L` = (c) RX = 1.958 ms.
+/// A transmitter latency under our read point (9 ms against P - H =
+/// 9.135 ms, dstack #476): the flow is read there, `L` = (c) RX = 1.958 ms.
 #[test]
 fn play_at_is_the_wire_stamp_plus_the_rx_path_under_our_latency() {
     pinned(9_000_000, MEASURED_UNDER_US);
 }
 
 /// A transmitter latency over ours (40 ms): the flow is read at its
-/// latency in whole blocks (28.0 ms later, `delay 2688`), and `play_at`
-/// follows the read: 29.958 ms.
+/// latency in whole blocks, past our read point P - H (32.0 ms later,
+/// `delay 3072`; dstack #476), and `play_at` follows the read: 33.958 ms.
 #[test]
 fn play_at_follows_a_flow_read_later_at_a_transmitter_latency_over_ours() {
     pinned(40_000_000, MEASURED_OVER_US);

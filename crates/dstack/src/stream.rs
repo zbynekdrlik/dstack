@@ -10,7 +10,12 @@
 //!   config sets 16, one of [`BLOCKS`]), block k covers the input stamps
 //!   [kB, kB + B) and runs once its last sample's playout time has passed:
 //!   media now ≥ kB + B + P, P the device's latency in samples (the playout
-//!   point the RX checks already read at). Its inputs are the RX rings at
+//!   point the RX checks already read at). A pump with the hand-off lead
+//!   (dstack #476, [`Timing::leads`]: every dlink device whose pump reads
+//!   RX) runs it H earlier, at kB + B + P − H, H = [`handoff_lead`] of P
+//!   (30 %, at most the receive buffer P − (a)), so the app holds the block H before its play time
+//!   ([`play_at_ns`], unchanged); the due times and D below then read
+//!   P − H for P. Its inputs are the RX rings at
 //!   those stamps (an RX channel that is not routed to a flow is silence
 //!   and reads nothing, so it counts no hole); a channel whose flow plays
 //!   out later than P (its fpp, its transmitter's latency) is read that
@@ -138,6 +143,35 @@ pub struct Map {
     pub tx: Vec<usize>,
 }
 
+/// H's share of P, the RX hand-off lead (dstack #476, the owner's
+/// ROZHODNUTÉ of 21.11.2026): 0.30, as a fraction (numerator,
+/// denominator) so that H in whole samples is exact.
+pub const HANDOFF_LEAD_SHARE: (u64, u64) = (3, 10);
+
+/// H, the RX hand-off lead at the playout point `playout` (P) with the
+/// Dante network latency `network` ((a)), samples: [`HANDOFF_LEAD_SHARE`]
+/// of P, rounded down to whole samples, and never more than the receive
+/// buffer (b) = P - (a) (dstack #476, the main's ROZHODNUTÉ: H comes out of
+/// (b), so the flows are never read under (a)). A pump with the lead
+/// ([`Timing::leads`]) runs each block H before its play time
+/// ([`play_at_ns`]), so the app holds the block H before it plays it; P
+/// and the play time stay. 13.041666 ms (1252 samples at 96 kHz) gives 375
+/// samples (3.906 ms), 5 ms gives 1.5 ms, 40 ms gives 12 ms; (a) 5 ms +
+/// (b) 1 ms gives 1 ms. Exact for every P (the product in 128 bits).
+pub const fn handoff_lead(playout: u64, network: u64) -> u64 {
+    let share =
+        (playout as u128 * HANDOFF_LEAD_SHARE.0 as u128 / HANDOFF_LEAD_SHARE.1 as u128) as u64;
+    let buffer = playout.saturating_sub(network);
+    if share < buffer { share } else { buffer }
+}
+
+/// `ns` in whole samples at `rate`, rounded UP: the Dante network latency
+/// (a) as the hand-off lead's floor ([`handoff_lead`]), so the read point
+/// is never under it.
+pub fn network_samples(ns: u64, rate: u32) -> u64 {
+    u64::try_from((u128::from(ns) * u128::from(rate)).div_ceil(1_000_000_000)).unwrap_or(u64::MAX)
+}
+
 /// The pump's timing, samples. `block` is above 0.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Timing {
@@ -147,30 +181,81 @@ pub struct Timing {
     pub playout: u64,
     /// W: the work margin (the device's `work_margin`).
     pub margin: u64,
+    /// Whether the pump hands each block the lead H ([`handoff_lead`] of
+    /// P) before its play time (dstack #476: the device's
+    /// `rx_handoff_lead`, every dlink device whose pump reads RX). H
+    /// follows P, so a new P (Dante Controller) keeps the same share.
+    pub leads: bool,
+    /// (a), the Dante network latency, samples rounded up
+    /// ([`network_samples`] of the device's `network_latency_ns`): H is at
+    /// most P - (a), the receive buffer (dstack #476). 0: no floor.
+    pub network: u64,
 }
 
 impl Timing {
-    /// The pump's timing for the device `cfg`: its `block`, its latency in
-    /// whole samples ([`crate::clock::latency_samples`], as the RX reads
-    /// its playout point), its `work_margin`. One place, so a host's pump
-    /// cannot read a sample off the RX's playout point.
-    pub fn of(cfg: &crate::device::DeviceConfig) -> Timing {
+    /// A timing of B `block`, P `playout` and W `margin` with no hand-off
+    /// lead (the low-latency engine's, and most tests').
+    pub const fn new(block: u64, playout: u64, margin: u64) -> Timing {
         Timing {
-            block: cfg.block,
-            playout: crate::clock::latency_samples(cfg.latency_ns, cfg.sample_rate),
-            margin: cfg.work_margin,
+            block,
+            playout,
+            margin,
+            leads: false,
+            network: 0,
         }
     }
 
-    /// D = B + P + W: an output stamped T is the input stamped T − D.
-    pub fn offset(&self) -> u64 {
-        self.block + self.playout + self.margin
+    /// The pump's timing for the device `cfg`: its `block`, its latency in
+    /// whole samples ([`crate::clock::latency_samples`], as the RX reads
+    /// its playout point), its `work_margin`, its `rx_handoff_lead` and
+    /// `network_latency_ns`. One place, so a host's pump cannot read a
+    /// sample off the RX's playout point.
+    pub fn of(cfg: &crate::device::DeviceConfig) -> Timing {
+        Timing {
+            leads: cfg.rx_handoff_lead,
+            network: network_samples(cfg.network_latency_ns, cfg.sample_rate),
+            ..Timing::new(
+                cfg.block,
+                crate::clock::latency_samples(cfg.latency_ns, cfg.sample_rate),
+                cfg.work_margin,
+            )
+        }
     }
 
-    /// When the earliest block is due, B + P: block 0's (no block starts
-    /// before media time 0), the floor of every bootstrap.
+    /// H, samples: [`handoff_lead`] of P and (a) when the pump
+    /// [`Timing::leads`], else 0.
+    pub fn lead(&self) -> u64 {
+        if self.leads {
+            handoff_lead(self.playout, self.network)
+        } else {
+            0
+        }
+    }
+
+    /// P − H: where the pump reads its inputs behind media now, samples
+    /// (P without a lead).
+    pub fn read_point(&self) -> u64 {
+        self.playout - self.lead()
+    }
+
+    /// D = B + P + W − H: an output stamped T is the input stamped T − D.
+    /// The lead moves the block's wake and its TX stamps alike, so each
+    /// output is still stamped W after its block is due (dstack #476: the
+    /// TX path does not move).
+    pub fn offset(&self) -> u64 {
+        self.block + self.read_point() + self.margin
+    }
+
+    /// When the earliest block is due, B + P − H: block 0's (no block
+    /// starts before media time 0), the floor of every bootstrap.
     fn first_due(&self) -> u64 {
-        self.block + self.playout
+        self.block + self.read_point()
+    }
+
+    /// When the block starting at `start` is due: its last input sample's
+    /// read point, `start` + B + P − H.
+    fn due_of(&self, start: u64) -> u64 {
+        start + self.first_due()
     }
 }
 
@@ -217,8 +302,9 @@ pub struct Blocks {
 
 impl Blocks {
     /// The schedule at media time `now`: the first start is the smallest
-    /// multiple of the block whose input ends at or after `now − playout`,
-    /// so its block is due at or after `now` (no catch-up at start).
+    /// multiple of the block whose input ends at or after `now − (P − H)`
+    /// (the read point, [`Timing::read_point`]), so its block is due at or
+    /// after `now` (no catch-up at start).
     pub fn bootstrap(now: u64, t: Timing) -> Blocks {
         let start = now.saturating_sub(t.first_due()).div_ceil(t.block) * t.block;
         Blocks {
@@ -247,9 +333,10 @@ impl Blocks {
         }
     }
 
-    /// When the next block is due: its last input sample's playout time.
+    /// When the next block is due: its last input sample's playout time,
+    /// less the hand-off lead H when the pump leads (dstack #476).
     pub fn due(&self) -> u64 {
-        self.start + self.timing.block + self.timing.playout
+        self.timing.due_of(self.start)
     }
 
     /// What is due at media time `now`; a run moves the schedule on by one
@@ -318,7 +405,7 @@ impl Blocks {
             return (Shift::Restarted, self.rebootstrap(now));
         };
         let start = self.start.wrapping_add_signed(by);
-        let due = start + block + self.timing.playout;
+        let due = self.timing.due_of(start);
         if due > now.saturating_add(self.timing.margin).saturating_add(block) {
             return (Shift::Kept, 0);
         }
@@ -577,6 +664,7 @@ impl<P: Process> Pump<P> {
         if let Some(playout) = self.rx.playout()
             && playout != self.timing.playout
         {
+            // H follows P (dstack #476: the same share at the new P).
             self.timing.playout = playout;
             self.stats.retimed(self.timing);
             if self.blocks.take().is_some() {
@@ -641,8 +729,10 @@ impl<P: Process> Pump<P> {
                     // dstack #477: the reader stands at this block's
                     // start, however late the wake. (Right after a
                     // latency write one drain may pair the new P with the
-                    // old plan's latency: counters only, no audio.)
-                    let step = now.saturating_sub(start + self.timing.playout);
+                    // old plan's latency: counters only, no audio.) The
+                    // flows' playout point is the read point, P - H with
+                    // the hand-off lead (dstack #476): B at an on-time wake.
+                    let step = now.saturating_sub(start + self.timing.read_point());
                     self.drain(Some((drain_ns, step)));
                     self.cpu_timed(|pump| pump.block(start));
                 }
@@ -801,7 +891,9 @@ impl<P: Process> Pump<P> {
 /// The play time of the block whose inputs start at `start` (samples at
 /// `rate`) in the app's clock, ns (dstack #295): `start + P + B`, its
 /// first sample's stamp plus the device's RX path P + (c) ((c) = B without
-/// a converter; the block's due time), as a media time, less `offset_ns`
+/// a converter; the block's due time without a hand-off lead, H after it
+/// with one: dstack #476, the app holds the block H before it plays it),
+/// as a media time, less `offset_ns`
 /// (the media clock less the app's, from the pairs read back to back,
 /// filtered: [`Pump::read_clocks`], [`app_offset`]).
 pub fn play_at_ns(start: u64, timing: Timing, rate: u32, offset_ns: i64) -> i64 {

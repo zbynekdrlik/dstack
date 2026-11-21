@@ -21,8 +21,24 @@ fn fields_of(log: &str, msg: &str) -> Vec<String> {
 /// The grant line of a flow from a transmitter advertising `advertised_ns`
 /// to the test device (96 kHz, 1 ms = 96 samples, block 32).
 async fn granted_line(advertised_ns: u64) -> (Vec<String>, usize) {
+    let (log, slot) = granted_log(advertised_ns, false).await;
+    (fields_of(&log, "RX flow granted"), slot)
+}
+
+/// The INFO log of that grant, the device leading or not (dstack #476:
+/// `rx_handoff_lead`, H 28 of its 96), and the flow's slot.
+async fn granted_log(advertised_ns: u64, leads: bool) -> (String, usize) {
     let dir = tempfile::tempdir().unwrap();
-    let device = device_at(dir.path());
+    let device = if leads {
+        let cfg = DeviceConfig {
+            state_file: dir.path().join("state.toml"),
+            rx_handoff_lead: true,
+            ..DeviceConfig::from_toml(TEST_DEVICE).expect("config/test-device.toml")
+        };
+        Device::load(cfg).unwrap()
+    } else {
+        device_at(dir.path())
+    };
     let media = media_on(&device, Arc::new(Unready));
     let t = stand_in(Ipv4Addr::LOCALHOST, Grant::Handle([0, 0, 0, 7, 1, 2])).await;
     let records = Records::default().with(
@@ -43,7 +59,7 @@ async fn granted_line(advertised_ns: u64) -> (Vec<String>, usize) {
     ));
     let slot = flow_slots(&media)[0];
     t.task.abort();
-    (fields_of(&log.text(), "RX flow granted"), slot)
+    (log.text(), slot)
 }
 
 /// A transmitter over our latency: the flow's latency is its 1.5 ms (144),
@@ -111,4 +127,43 @@ async fn a_grant_of_a_flow_gone_from_its_slot_carries_no_read() {
         ["device=-".to_string(), format!("flow={}", flow.slot + 1)]
     );
     t.task.abort();
+}
+
+/// dstack #476: a leading device reads at P - H (96 - 28 = 68), so a
+/// transmitter at 1.5 ms (144) is read 76 later, 96 in whole blocks of 32,
+/// and its grant names that once, with the numbers.
+#[tokio::test(flavor = "current_thread")]
+async fn a_flow_read_later_because_of_the_lead_is_logged_once_with_its_numbers() {
+    let (log, slot) = granted_log(1_500_000, true).await;
+    assert_eq!(
+        fields_of(&log, "RX flow granted"),
+        [
+            "device=FOH-Card".to_string(),
+            format!("flow={}", slot + 1),
+            "latency=144".to_string(),
+            "playout=164".to_string(),
+            "delay=96".to_string(),
+            "advertised=144".to_string(),
+        ]
+    );
+    assert_eq!(
+        fields_of(&log, LEAD_READ_LATER),
+        [
+            "device=FOH-Card".to_string(),
+            format!("flow={}", slot + 1),
+            "advertised=144".to_string(),
+            "latency=96".to_string(),
+            "lead=28".to_string(),
+            "read_point=68".to_string(),
+            "delay=96".to_string(),
+        ]
+    );
+    // Under the read point: read at 68, nothing more to say.
+    let (log, _) = granted_log(500_000, true).await;
+    assert!(log.contains("playout=68 delay=0"), "{log}");
+    assert!(!log.contains(LEAD_READ_LATER), "{log}");
+    // Read later without a lead (past P itself): no lead line either.
+    let (log, _) = granted_log(1_500_000, false).await;
+    assert!(log.contains("delay=64"), "{log}");
+    assert!(!log.contains(LEAD_READ_LATER), "{log}");
 }

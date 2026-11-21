@@ -568,7 +568,16 @@ struct FlowRead {
     delay: u16,
     /// Its transmitter's advertised latency (0: none).
     advertised: u64,
+    /// The device latency P and the hand-off lead H (0 without one, dstack
+    /// #476): our flows are read at P - H.
+    ours: u64,
+    lead: u64,
 }
+
+/// The line that names a flow read later because of the hand-off lead
+/// (dstack #476): its transmitter advertises more than P - H.
+pub const LEAD_READ_LATER: &str =
+    "RX flow read later: its transmitter's latency is past P less the hand-off lead";
 
 /// The control side of our RX (see the module).
 pub struct Driver {
@@ -820,15 +829,30 @@ impl Driver {
             // latency over ours reads its audio later (`delay`), and moves
             // the app's blocks' `play_at` with it.
             Answer::Granted(_) => match self.read_of(flow) {
-                Some((device, r)) => info!(
-                    device = %device,
-                    flow = flow.slot + 1,
-                    latency = r.latency,
-                    playout = r.playout,
-                    delay = r.delay,
-                    advertised = r.advertised,
-                    "RX flow granted"
-                ),
+                Some((device, r)) => {
+                    info!(
+                        device = %device,
+                        flow = flow.slot + 1,
+                        latency = r.latency,
+                        playout = r.playout,
+                        delay = r.delay,
+                        advertised = r.advertised,
+                        "RX flow granted"
+                    );
+                    // dstack #476: once at its grant, with the numbers.
+                    if r.lead > 0 && r.delay > 0 {
+                        info!(
+                            device = %device,
+                            flow = flow.slot + 1,
+                            advertised = r.advertised,
+                            latency = r.ours,
+                            lead = r.lead,
+                            read_point = r.ours - r.lead,
+                            delay = r.delay,
+                            "{LEAD_READ_LATER}"
+                        );
+                    }
+                }
                 None => info!(device = %"-", flow = flow.slot + 1, "RX flow granted"),
             },
             Answer::Refused(status) => info!(
@@ -910,6 +934,8 @@ impl Driver {
                 playout: plan.latency,
                 delay: plan.delay,
                 advertised: latency_samples(v.advertised_ns, rate),
+                ours: latency_samples(m.latency_ns(), rate),
+                lead: m.handoff_lead(),
             },
         ))
     }
