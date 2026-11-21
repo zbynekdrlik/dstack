@@ -314,11 +314,7 @@ fn an_attached_engine_s_numbers_are_its_pump_s() {
     let media = media_with_engine(&device, Arc::new(Unready), &[0]);
     assert_eq!(media.engine(), None, "none before it is attached");
     assert!(media.engine_stats().is_none());
-    let timing = Timing {
-        block: 32,
-        playout: 96,
-        margin: 96,
-    };
+    let timing = Timing::new(32, 96, 96);
     let stats = Arc::new(PumpStats::new(timing, 96_000));
     media.attach_engine(Arc::clone(&stats));
     assert!(
@@ -661,11 +657,7 @@ async fn the_driver_s_tick_warns_once_for_a_second_the_pump_restarted() {
     let dir = tempfile::tempdir().unwrap();
     let device = device_at(dir.path());
     let media = media_with_engine(&device, Arc::new(Unready), &[0]);
-    let timing = Timing {
-        block: 32,
-        playout: 96,
-        margin: 96,
-    };
+    let timing = Timing::new(32, 96, 96);
     let stats = Arc::new(PumpStats::new(timing, 96_000));
     media.attach_engine(Arc::clone(&stats));
     let records = Records::default();
@@ -689,11 +681,7 @@ async fn the_driver_s_tick_warns_once_for_a_pump_whose_blocks_stop_on_a_ready_cl
     use crate::stream::{PumpStats, Timing};
     use crate::test_log::{capture_warnings, undecided};
     undecided();
-    let timing = Timing {
-        block: 32,
-        playout: 96,
-        margin: 96,
-    };
+    let timing = Timing::new(32, 96, 96);
     for (ptp, warns) in [
         (Arc::new(ManualClock::new(T)) as Arc<dyn PtpClock>, 1),
         (Arc::new(Unready) as Arc<dyn PtpClock>, 0),

@@ -58,16 +58,21 @@ impl<'a> Block<'a> {
         }
     }
 
-    /// The local monotonic time, ns, at which the block's first sample is
-    /// handed to the app at the device's stated RX path: its media start +
-    /// P (the device latency) + (c) (the hand-off: the block, plus a rate
-    /// converter's RX delay in dlink), in the app's clock: Linux's
+    /// The local monotonic time, ns, at which the app PLAYS the block's
+    /// first sample, at the end of the device's stated RX path: its media
+    /// start + P (the device latency) + (c) (the hand-off: the block, plus
+    /// a rate converter's RX delay in dlink), in the app's clock: Linux's
     /// `CLOCK_MONOTONIC`, Windows' raw QPC in ns (the clock OBS's
-    /// `os_gettime_ns` reads; dstack #295). Consecutive blocks are a
-    /// block's duration apart while the clocks run together, so an app on
-    /// its own clock that stamps each block with it gets one fixed latency
-    /// at every start, whenever it pushes the block. `None` for a block
-    /// with no media time.
+    /// `os_gettime_ns` reads; dstack #295). A dlink device hands the block
+    /// to the app its hand-off lead H (30 % of P, out of the receive
+    /// buffer) before this time, less how late its pump woke: a pump late
+    /// by under H still hands it before (dstack #476; up to v0.6.209 the
+    /// hand-off came at this time plus the wake's delay, late for an app
+    /// that plays by it).
+    /// Consecutive blocks are a block's duration apart while the clocks run
+    /// together, so an app on its own clock that stamps each block with it
+    /// gets one fixed latency at every start, whenever it pushes the block.
+    /// `None` for a block with no media time.
     pub fn play_at(&self) -> Option<i64> {
         self.play_at
     }

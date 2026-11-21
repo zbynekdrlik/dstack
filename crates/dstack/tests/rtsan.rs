@@ -75,11 +75,7 @@ fn the_pump_block_is_realtime_safe() {
     for c in 0..OUTPUTS {
         assert!(tx.set_source(c, Source::Engine));
     }
-    let timing = Timing {
-        block: BLOCK,
-        playout: 96,
-        margin: WORK_MARGIN,
-    };
+    let timing = Timing::new(BLOCK, 96, WORK_MARGIN);
     let stats = Arc::new(PumpStats::new(timing, RATE));
     let map = Map {
         rx: (0..INPUTS).collect(),
@@ -136,11 +132,7 @@ fn the_pump_s_drain_places_its_packets_realtime_safe() {
         |c| (c < 2).then_some(RxRoute { flow: 0, slot: c }),
     );
     let tx = Arc::new(TxShared::new(cfg, Ipv4Addr::LOCALHOST, rings, 1, &[]).unwrap());
-    let timing = Timing {
-        block: BLOCK,
-        playout: 96,
-        margin: WORK_MARGIN,
-    };
+    let timing = Timing::new(BLOCK, 96, WORK_MARGIN);
     let stats = Arc::new(PumpStats::new(timing, RATE));
     let map = Map {
         rx: vec![0, 1],

@@ -41,14 +41,7 @@ fn the_track_measures_each_block_from_the_last_one_with_a_play_time() {
 
 #[test]
 fn the_pump_counts_a_step_over_one_ms_and_keeps_the_largest_deviation() {
-    let stats = PumpStats::new(
-        super::super::Timing {
-            block: 128,
-            playout: 432,
-            margin: 288,
-        },
-        48_000,
-    );
+    let stats = PumpStats::new(super::super::Timing::new(128, 432, 288), 48_000);
     stats.play_at_moved(STEP_NS);
     stats.play_at_moved(16);
     let v = stats.view();

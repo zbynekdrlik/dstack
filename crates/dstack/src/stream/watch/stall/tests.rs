@@ -80,11 +80,7 @@ fn counts_that_went_down_rise() {
 
 #[test]
 fn the_limit_is_three_blocks_or_w_and_a_block_in_whole_blocks() {
-    let t = |block, margin| Timing {
-        block,
-        playout: 96,
-        margin,
-    };
+    let t = |block, margin| Timing::new(block, 96, margin);
     // W one block: three blocks.
     assert_eq!(stall_limit_ns(P, t(16, 16)), 3 * P);
     // W three blocks: W and a block, four.
@@ -106,14 +102,7 @@ fn the_limit_is_three_blocks_or_w_and_a_block_in_whole_blocks() {
 
 /// The test's pump: B 32 at 96 kHz (a block 333 333 ns), running.
 fn running() -> PumpStats {
-    let s = PumpStats::new(
-        Timing {
-            block: 32,
-            playout: 96,
-            margin: 96,
-        },
-        96_000,
-    );
+    let s = PumpStats::new(Timing::new(32, 96, 96), 96_000);
     s.running.store(true, Ordering::Release);
     s
 }
@@ -217,14 +206,7 @@ fn another_engine_is_learnt_afresh() {
 #[test]
 fn the_watch_judges_by_the_pump_s_margin() {
     undecided();
-    let s = PumpStats::new(
-        Timing {
-            block: 32,
-            playout: 96,
-            margin: crate::stream::MAX_WORK_MARGIN,
-        },
-        96_000,
-    );
+    let s = PumpStats::new(Timing::new(32, 96, crate::stream::MAX_WORK_MARGIN), 96_000);
     s.running.store(true, Ordering::Release);
     let mut w = StallWatch::new();
     let look = |w: &mut StallWatch, t: u64| {

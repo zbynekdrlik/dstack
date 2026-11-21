@@ -25,6 +25,10 @@ pub(crate) trait Launch {
     /// What the app gets beside the device.
     type Out;
 
+    /// The app pulls the RX rings itself: the pump hands it no RX block,
+    /// so the device has no hand-off lead (dstack #476).
+    const PULLS_RX: bool = false;
+
     /// The embedded device of `cfg` (as [`Embedded::start_waiting`]).
     #[allow(clippy::too_many_arguments)]
     fn launch<P: Process + 'static>(
@@ -67,6 +71,7 @@ pub(crate) struct Pulled;
 
 impl Launch for Pulled {
     type Out = Intake;
+    const PULLS_RX: bool = true;
 
     fn launch<P: Process + 'static>(
         self,

@@ -28,36 +28,56 @@ impl Manager {
         }
     }
 
-    /// A flow's playout point, samples: its latency (its transmitter's or
-    /// ours, the larger) and at least its frames per packet. A packet leaves
-    /// its transmitter after its last frame; the pump's block in hand covers
-    /// the network for packets that align with blocks (iemmixer's box,
-    /// 31.10.2026: fpp 32 played out at 31 with a block of 16, no hole).
-    /// Only that flow's channels are read later; the others keep ours.
-    fn playout(&self, f: &Flow) -> u64 {
+    /// A flow's own playout need, samples: its transmitter's latency (or
+    /// the config's `playout_override` for its device) and at least its
+    /// frames per packet. A packet leaves its transmitter after its last
+    /// frame; the pump's block in hand covers the network for packets that
+    /// align with blocks (iemmixer's box, 31.10.2026: fpp 32 played out at
+    /// 31 with a block of 16, no hole). Only that flow's channels are read
+    /// later than ours ([`Manager::read_at`]); the others keep ours.
+    fn need(&self, f: &Flow) -> u64 {
         let fpp = u64::from(f.fpp);
         match self.playout_override.get(&f.device) {
-            Some(&o) => u64::from(o)
-                .max(fpp)
-                .max(latency_samples(self.latency_ns, self.rate)),
-            None => latency_samples(f.latency_ns, self.rate).max(fpp),
+            Some(&o) => u64::from(o).max(fpp),
+            None => latency_samples(f.advertised_ns, self.rate).max(fpp),
         }
     }
 
+    /// The hand-off lead H at the device latency P, samples: P's share,
+    /// at most the receive buffer P - (a) ([`crate::stream::handoff_lead`]),
+    /// when the pump leads (the device config's `rx_handoff_lead`, dstack
+    /// #476), else 0.
+    pub fn handoff_lead(&self) -> u64 {
+        if self.leads {
+            crate::stream::handoff_lead(latency_samples(self.latency_ns, self.rate), self.network)
+        } else {
+            0
+        }
+    }
+
+    /// Where the pump reads our flows, samples: the device latency P less
+    /// the hand-off lead H ([`Manager::handoff_lead`]).
+    fn read_point(&self) -> u64 {
+        latency_samples(self.latency_ns, self.rate) - self.handoff_lead()
+    }
+
     /// A flow's playout point as the pump reads it, and its delay past
-    /// ours, samples. The pump reads whole blocks: a delay below a block
-    /// does not move a packet's first frame's read (iemmixer's box,
-    /// 31.10.2026: a delay of 8 at a block of 16 played as 0, with holes;
-    /// 16 played clean). So the delay is rounded up to whole blocks.
+    /// ours ([`Manager::read_point`]), samples: a flow whose need is past
+    /// ours is read that much later. The pump reads whole blocks: a delay
+    /// below a block does not move a packet's first frame's read
+    /// (iemmixer's box, 31.10.2026: a delay of 8 at a block of 16 played as
+    /// 0, with holes; 16 played clean). So the delay is rounded up to whole
+    /// blocks. With the lead, a transmitter advertising more than P − H is
+    /// read later (dstack #476).
     fn read_at(&self, f: &Flow) -> (u64, u64) {
-        let device = latency_samples(self.latency_ns, self.rate);
+        let ours = self.read_point();
         let block = self.block.max(1);
         let delay = self
-            .playout(f)
-            .saturating_sub(device)
+            .need(f)
+            .saturating_sub(ours)
             .div_ceil(block)
             .saturating_mul(block);
-        (device.saturating_add(delay), delay)
+        (ours.saturating_add(delay), delay)
     }
 
     /// Where RX channel `rx`'s samples come from.

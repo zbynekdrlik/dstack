@@ -35,7 +35,8 @@
 //!   device): the subscription's latency as Dante Controller shows it (0.25,
 //!   0.5, 1, 2 or 5 ms). 1 ms unless set ([`NETWORK_LATENCY_NS`]).
 //! - (b) the receive buffer ([`Config::receive_buffer_ns`], per device):
-//!   this PC's room for the RX thread's wake and pass, sized from
+//!   this PC's room for the network and the pump's wake and pass (the
+//!   hand-off lead H below is taken out of it), sized from
 //!   measurement (the status's `wake_delay_us`, `wake_delay_peak_us`,
 //!   `wake_delay_p50/p99/p999_us`, and the measured `network_latency_*_us`;
 //!   dstack #234). An app without a status socket reads the same from the
@@ -53,6 +54,24 @@
 //! the TX path (the app's output to a receiver's playout) is (c) TX + P.
 //! [`split`] gives every term ([`Split`]), and the device logs them at its
 //! start, one line each ([`Split::lines`]), never as one lump.
+//!
+//! The hand-off lead H (dstack #476, the owner's ROZHODNUTÉ of
+//! 21.11.2026): every device with RX channels hands each block to the app
+//! H before its [`Block::play_at`], H = 30 % of P rounded down to whole
+//! samples ([`Split::handoff_lead`], `dstack::stream::handoff_lead`; obs's
+//! P 13.041666 ms gives 3.906 ms, 5 ms gives 1.5 ms, 40 ms gives 12 ms),
+//! taken out of (b) and never more than (b), so no flow is read under (a)
+//! ((a) 5 ms + (b) 1 ms gives 1 ms; the start line then says "all of
+//! (b)"): the pump is due at P - H past a block's last sample
+//! and reads the flows there, so P, `play_at` and the RX path P + (c) stay
+//! as they are. A pump that wakes late by under H still hands the block
+//! before its `play_at`. A Dante Controller latency keeps the same share
+//! of the new P. A transmitter that advertises more than P - H is read
+//! that much later, in whole blocks (logged once at its grant, `RX flow
+//! read later: ...`), and `play_at` moves with the read. The pump's D
+//! (`engine.offset`) is B + P + W - H, so its TX stamps stay W after its
+//! wake: the TX path does not move. An app that pulls its RX itself
+//! ([`Link::start_pulling`]) gets no block from the pump and no lead.
 //!
 //! W is how late the pump may run: a pump more than W behind a block starts
 //! its schedule again, and the skipped blocks are lost on both sides
@@ -121,8 +140,10 @@
 //!
 //! The RX side, an app that takes the device's blocks and hands them to
 //! its own clock (OBS's dante-input), stamps each block it pushes with
-//! [`Block::play_at`] (dstack #295): the block's media start + the RX path
-//! P + (c) the device logs, in the app's monotonic clock (Linux's
+//! [`Block::play_at`] (dstack #295): the time the app plays the block, the
+//! block's media start + the RX path P + (c) the device logs (the block
+//! reaches the app the hand-off lead H before it, dstack #476), in the
+//! app's monotonic clock (Linux's
 //! `CLOCK_MONOTONIC`, Windows' raw QPC in ns: OBS's `os_gettime_ns`;
 //! [`dstack::clock::app_monotonic_ns`]). For OBS that is
 //! `obs_source_output_audio`'s `timestamp`. Stamped by the block's
@@ -385,9 +406,11 @@ impl Config {
         self
     }
 
-    /// (b), the receive buffer, ns: this PC's room for the RX thread's wake
-    /// and pass, sized from measurement (the status's `wake_delay_us` and
-    /// `wake_delay_peak_us`; dstack #234, #244). P = (a) + (b). Unset, it is
+    /// (b), the receive buffer, ns: this PC's room for the network and the
+    /// pump's wake and pass, sized from measurement (the status's
+    /// `wake_delay_us` and `wake_delay_peak_us`; dstack #234, #244); the
+    /// hand-off lead H (30 % of P, dstack #476) is taken out of it, so a
+    /// flow is read at P - H. P = (a) + (b). Unset, it is
     /// what keeps P as it was up to v0.6.105 ([`REFERENCE_PATH_NS`]): the
     /// default changes no app's latency. A P under its floor
     /// ([`MIN_LATENCY_NS`], or [`tx_floor_ns`] with TX) is refused by
@@ -602,16 +625,21 @@ impl Config {
         // first; the device is checked at the floor and the default margin
         // meanwhile, for the other problems.
         let split = self.split();
-        let (latency_ns, margin) = match &split {
-            Ok(s) => (s.latency_ns, s.margin),
+        let (latency_ns, margin, network_ns) = match &split {
+            Ok(s) => (s.latency_ns, s.margin, s.network_latency_ns),
             Err(_) => (
                 MIN_LATENCY_NS,
                 default_work_margin(rate, self.block, self.directions()),
+                0,
             ),
         };
         t.insert("latency_ns".into(), to_int(latency_ns).into());
         t.insert("block".into(), to_int(self.block).into());
         t.insert("work_margin".into(), to_int(margin).into());
+        // dstack #476: the pump hands each RX block H before its play_at.
+        t.insert("rx_handoff_lead".into(), self.directions().has_rx().into());
+        // dstack #476: H is at most (b), so no flow is read under (a).
+        t.insert("network_latency_ns".into(), to_int(network_ns).into());
         t.insert("timing".into(), "normal".into());
         t.insert(
             "state_file".into(),
@@ -824,6 +852,9 @@ impl Link {
             HostError::Setup(format!("dlink config: {}", problems.join("; ")))
         })?;
         let sender = config.frame_sender.0.clone();
+        // An app that pulls its RX gets no block from the pump: no lead
+        // (dstack #476; the embedded device switches it off itself).
+        let s = if L::PULLS_RX { s.pulled() } else { s };
         for line in s.lines(config.directions(), config.terms()) {
             tracing::info!(device = %config.name, "dlink latency: {line}");
         }

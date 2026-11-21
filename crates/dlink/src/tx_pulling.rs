@@ -92,6 +92,7 @@ pub(crate) struct BothPulled<T>(TxPulled<T>);
 
 impl<T: bridge::TxProcess> Launch for BothPulled<T> {
     type Out = Intake;
+    const PULLS_RX: bool = true;
 
     fn launch<P: Process + 'static>(
         self,

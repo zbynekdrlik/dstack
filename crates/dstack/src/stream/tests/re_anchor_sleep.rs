@@ -214,11 +214,7 @@ fn the_field_s_re_anchor_moves_the_pump_and_its_blocks_stopped_there() {
     let block = u64::try_from(field("block")).unwrap();
     let shift = crate::clock::grid_shift(field("service_re_anchor_delta_ns"), rate, block);
     assert_eq!(shift, field("tx_shift_samples"));
-    let timing = Timing {
-        block,
-        playout: 24,
-        margin: 16,
-    };
+    let timing = Timing::new(block, 24, 16);
     let mut b = Blocks::bootstrap(T, timing);
     let start = b.start();
     let after = T.wrapping_add_signed(shift);

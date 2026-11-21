@@ -10,7 +10,7 @@ use dstack::announce::FPP_MAX;
 use dstack::clock::latency_samples;
 use dstack::device::{NORMAL_MIN_LATENCY_NS, NORMAL_MIN_WORK_MARGIN_NS};
 use dstack::media::tx::TX_MARGIN_NS;
-use dstack::stream::{BLOCKS, MAX_WORK_MARGIN};
+use dstack::stream::{BLOCKS, HANDOFF_LEAD_SHARE, MAX_WORK_MARGIN, handoff_lead, network_samples};
 
 use crate::{BLOCK, rated};
 
@@ -182,6 +182,19 @@ pub struct Split {
     pub tx_convert_ns: u64,
     /// (c) on the RX side, the app hand-off: B + the converter's RX delay.
     pub rx_handoff_ns: u64,
+    /// H, the RX hand-off lead, samples at the device's rate (dstack #476,
+    /// the owner's ROZHODNUTÉ of 21.11.2026): 30 % of P
+    /// (`dstack::stream::handoff_lead`), taken out of the receive buffer
+    /// (b) and never more than (b) (the main's ROZHODNUTÉ: a flow is never
+    /// read under (a); (a) 5 ms + (b) 1 ms gives H 1 ms). The pump hands each block to the app H before its `play_at`
+    /// (the RX path's end, P + (c), unchanged) and reads the flows at
+    /// P - H, so a transmitter advertising more than P - H is read later.
+    /// 0 on a device without RX channels, and after [`Split::pulled`],
+    /// which [`crate::Link`]'s pulling starts apply for an app that pulls
+    /// its RX itself.
+    pub handoff_lead: u64,
+    /// H in ns, whole samples.
+    pub handoff_lead_ns: u64,
     /// (c) on the TX side, the app hand-off: W + the converter's TX delay.
     pub tx_handoff_ns: u64,
     /// W, the pump's work margin, samples at the device's rate: how late
@@ -220,11 +233,26 @@ impl Split {
         )];
         if directions.has_rx() {
             lines.push(format!(
-                "RX app hand-off (c) {} ms = block {} ms + converter {} ms; RX path P + (c) {} ms",
+                "RX app hand-off (c) {} ms = block {} ms + converter {} ms; RX path P + (c) {} ms; \
+                 hand-off lead H {} ms ({}): each block reaches the app H before its play_at",
                 ms(self.rx_handoff_ns),
                 ms(self.block_ns),
                 ms(self.rx_convert_ns),
                 ms(self.rx_path_ns),
+                ms(self.handoff_lead_ns),
+                if self.handoff_lead == 0 {
+                    "none: the app pulls its RX".to_string()
+                } else if self.handoff_lead_ns == self.receive_buffer_ns {
+                    format!(
+                        "all of (b), under {} % of P",
+                        HANDOFF_LEAD_SHARE.0 * 100 / HANDOFF_LEAD_SHARE.1
+                    )
+                } else {
+                    format!(
+                        "{} % of P, from (b)",
+                        HANDOFF_LEAD_SHARE.0 * 100 / HANDOFF_LEAD_SHARE.1
+                    )
+                },
             ));
         }
         if directions.has_tx() {
@@ -238,6 +266,17 @@ impl Split {
             ));
         }
         lines
+    }
+
+    /// The split of a device whose app pulls its RX rings itself
+    /// (`Link::start_pulling`, dstack #307): the pump hands it no RX block,
+    /// so it has no hand-off lead (dstack #476) and reads its flows at P.
+    pub fn pulled(self) -> Split {
+        Split {
+            handoff_lead: 0,
+            handoff_lead_ns: 0,
+            ..self
+        }
     }
 }
 
@@ -257,7 +296,9 @@ pub fn ms(ns: u64) -> String {
 ///
 /// - (a) the Dante network latency, `terms.network_latency_ns`;
 /// - (b) the receive buffer, `terms.receive_buffer_ns`: this PC's room for
-///   the RX thread's wake and pass. Unset, it is what keeps P as it was up
+///   the network and the pump's wake and pass; the hand-off lead H
+///   ([`Split::handoff_lead`], 30 % of P on a device with RX, dstack #476)
+///   comes out of it. Unset, it is what keeps P as it was up
 ///   to v0.6.105: P at [`REFERENCE_PATH_NS`] less the work of the device's
 ///   `directions` (TX: the default W + the converter's TX delay; RX: B +
 ///   its RX delay; the larger for [`Directions::Both`]), at least the
@@ -365,13 +406,19 @@ pub fn split(
     let wanted = a.saturating_add(receive_buffer);
     // P rounded up to whole samples: never under what the terms ask.
     let samples = (u128::from(wanted) * rate).div_ceil(1_000_000_000);
-    let latency_ns = ns(u64::try_from(samples).unwrap_or(u64::MAX));
+    let p = u64::try_from(samples).unwrap_or(u64::MAX);
+    let latency_ns = ns(p);
     if latency_ns < floor {
         return Err(format!(
             "network_latency_ns + receive_buffer_ns: {a} + {receive_buffer} = {wanted} ns \
              of Dante latency; at least {floor} ({why})"
         ));
     }
+    let lead = if directions.has_rx() {
+        handoff_lead(p, network_samples(a, device_rate))
+    } else {
+        0
+    };
     Ok(Split {
         network_latency_ns: a,
         receive_buffer_ns: latency_ns - a,
@@ -380,6 +427,8 @@ pub fn split(
         rx_convert_ns,
         tx_convert_ns,
         rx_handoff_ns,
+        handoff_lead: lead,
+        handoff_lead_ns: ns(lead),
         tx_handoff_ns,
         margin,
         work_margin_ns: ns(margin),

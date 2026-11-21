@@ -12,6 +12,13 @@ use crate::media::packet;
 /// A pump of `profile` over RX 1 (from slot 0 of a 32-frame flow from
 /// loopback, slot 0 of the flow) into TX 1's engine ring.
 pub(super) fn flow_rig(profile: TimingProfile) -> Rig {
+    flow_rig_at(profile, TIMING, P)
+}
+
+/// [`flow_rig`] with the pump's `timing` and the flow's playout point
+/// `latency` as the manager publishes it (P, or P - H with the hand-off
+/// lead, dstack #476).
+pub(super) fn flow_rig_at(profile: TimingProfile, timing: Timing, latency: u64) -> Rig {
     let mut cfg = DeviceConfig::from_toml(TEST_DEVICE).expect("config/test-device.toml");
     cfg.timing = profile;
     let rings: Arc<[Ring]> = (0..cfg.rx.len()).map(|_| Ring::new()).collect();
@@ -23,7 +30,7 @@ pub(super) fn flow_rig(profile: TimingProfile) -> Rig {
                     src: Some(Ipv4Addr::LOCALHOST),
                     bps: 3,
                     nslots: 1,
-                    latency: P as u32,
+                    latency: latency as u32,
                     delay: 0,
                     block: B as u16,
                     live: false,
@@ -37,7 +44,7 @@ pub(super) fn flow_rig(profile: TimingProfile) -> Rig {
         |c| (c == 0).then_some(RxRoute { flow: 0, slot: 0 }),
     );
     let tx = Arc::new(TxShared::new(cfg, Ipv4Addr::LOCALHOST, rings, 1, &[0]).unwrap());
-    let stats = Arc::new(PumpStats::new(TIMING, RATE));
+    let stats = Arc::new(PumpStats::new(timing, RATE));
     let map = Map {
         rx: vec![0],
         tx: vec![0],
@@ -45,7 +52,7 @@ pub(super) fn flow_rig(profile: TimingProfile) -> Rig {
     let mut pump = Pump::new(
         Copy::default(),
         map,
-        TIMING,
+        timing,
         24,
         Arc::clone(&rx),
         Arc::clone(&tx),
@@ -264,4 +271,41 @@ fn a_late_pump_keeps_a_hole_open_until_the_block_it_reads_next() {
         (3 * B, B, 0),
         "{ring:?}"
     );
+}
+
+#[test]
+fn a_leading_pump_judges_late_against_the_block_it_reads_at_p_less_h() {
+    // dstack #476 over #477: with the hand-off lead the pump reads at
+    // P - H (the manager publishes that playout point), so the reader's
+    // step is now less the block's start less P - H: B at an on-time wake.
+    // Against P it read B - H (4 here) and counted an in-time packet late.
+    let leading = Timing {
+        leads: true,
+        ..TIMING
+    };
+    let h = leading.lead();
+    assert_eq!(h, 28);
+    let mut r = flow_rig_at(TimingProfile::Normal, leading, P - h);
+    r.rx.set_stamps(false);
+    let t = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let now = T + B + P - h;
+    send(&r, &t, T);
+    assert_eq!(
+        r.pump.media(now, 0),
+        now + B,
+        "block T due at T + B + P - H"
+    );
+    // Block T + B's input, in time for its on-time wake: P - H + B old
+    // then, as old as the step allows.
+    send(&r, &t, T + B);
+    r.pump.media(now + B, 0);
+    assert_eq!(r.stats.view().blocks, 2);
+    let c = r.rx.lane(0);
+    assert_eq!((c.packets, c.late, c.late_at_read), (2, 0, 0), "{c:?}");
+    // Block T + 2B's input after its block was read: late.
+    r.pump.media(now + 2 * B, 0);
+    send(&r, &t, T + 2 * B);
+    r.pump.media(now + 3 * B, 0);
+    let c = r.rx.lane(0);
+    assert_eq!((c.packets, c.late, c.late_at_read), (3, 1, 1), "{c:?}");
 }

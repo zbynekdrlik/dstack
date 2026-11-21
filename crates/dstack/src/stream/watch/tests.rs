@@ -5,11 +5,7 @@ use crate::test_log::{capture_at, capture_warnings, undecided};
 const S: u64 = EVERY_NS;
 
 /// A 48 kHz app on a 96 kHz device (intercom's CI case): B 64, P 385, W 303.
-const TIMING: Timing = Timing {
-    block: 64,
-    playout: 385,
-    margin: 303,
-};
+const TIMING: Timing = Timing::new(64, 385, 303);
 
 fn stats() -> PumpStats {
     PumpStats::new(TIMING, 96_000)

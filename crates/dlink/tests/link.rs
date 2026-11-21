@@ -88,13 +88,14 @@ fn a_dlink_device_runs_the_app_s_processor_at_its_defaults() {
     assert!(pump.media && pump.blocks > 0, "{pump:?}");
     // The pump runs at dlink's timing (48 kHz), as the split says: B 128
     // (dstack #90) + P 432 (9 ms: (a) 1 ms + the default (b) 8 ms; dstack
-    // #244) + W 288 (the default 6 ms).
+    // #244) + W 288 (the default 6 ms) - H 129 (30 % of P: the hand-off
+    // lead, dstack #476), D 719.
     let s = config.split().unwrap();
     let p = dstack::clock::latency_samples(s.latency_ns, 48_000);
-    assert_eq!((p, s.margin), (432, 288));
+    assert_eq!((p, s.margin, s.handoff_lead), (432, 288, 129));
     assert_eq!(
         (pump.playout, pump.offset),
-        (p, 128 + p + s.margin),
+        (p, 128 + p + s.margin - s.handoff_lead),
         "{pump:?}"
     );
     assert!(matches!(stopped, Stopped::Done), "{stopped:?}");
@@ -199,10 +200,11 @@ fn a_48_khz_app_runs_a_96_khz_device_through_the_conversion() {
     assert_eq!((p, s.margin), (803, 576));
     assert!(status.contains(&format!("\"latency\":{p}")), "{status}");
     // The pump runs at the device's 96 kHz: B 128 + P 803 + W 576 (the
-    // default 6 ms).
+    // default 6 ms) - H 240 (30 % of P, dstack #476).
+    assert_eq!(s.handoff_lead, 240);
     assert_eq!(
         (pump.playout, pump.offset),
-        (p, 128 + p + s.margin),
+        (p, 128 + p + s.margin - s.handoff_lead),
         "{pump:?}"
     );
     assert!(matches!(stopped, Stopped::Done), "{stopped:?}");
@@ -425,7 +427,14 @@ fn the_loop_through_our_own_flow_takes_what_the_split_says() {
             .network_rate(network)
             .subscribe(1, "Out 1", name);
         let split = config.split().unwrap();
-        let want = split.tx_path_ns + split.rx_path_ns - split.latency_ns;
+        // dstack #476: our TX advertises P, past our read point P - H, so
+        // our own flow is read past it in whole blocks: ceil(H / B) * B - H
+        // later than P (127 samples at 48 kHz, 16 at 96 kHz).
+        let rate = config.device_rate();
+        let b = dstack::clock::latency_samples(split.block_ns, rate);
+        let later = split.handoff_lead.div_ceil(b) * b - split.handoff_lead;
+        let want = split.tx_path_ns + split.rx_path_ns - split.latency_ns
+            + later * 1_000_000_000 / u64::from(rate);
         // The defaults keep each path within v0.6.105's 15 ms (dstack #244).
         assert!(
             split.tx_path_ns <= dlink::REFERENCE_PATH_NS
@@ -618,14 +627,15 @@ fn a_pump_late_within_its_margin_keeps_the_tone_whole() {
     );
     assert_eq!(bad, 0, "{bad} samples off the tone, {good} on it");
     // The split each device runs (dstack #1), as its pump's playout point
-    // and margin (offset = B + P + W), from `Config::split`: each P is
-    // (a) + its default (b), each W the 12 ms set (dstack #244).
+    // and margin (offset = B + P + W - H, H the hand-off lead of a device
+    // with RX, dstack #476), from `Config::split`: each P is (a) + its
+    // default (b), each W the 12 ms set (dstack #244).
     let (tx, rx) = pumps;
     for (pump, config) in [(tx, &tx_split), (rx, &rx_split)] {
         let playout = dstack::clock::latency_samples(config.latency_ns, 96_000);
         assert_eq!(
             (pump.playout, pump.offset),
-            (playout, 128 + playout + config.margin),
+            (playout, 128 + playout + config.margin - config.handoff_lead),
             "{pump:?}"
         );
         assert_eq!(config.margin, 1152, "W 12 ms: {config:?}");
