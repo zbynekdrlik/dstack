@@ -1384,6 +1384,15 @@ fn join_multicast_group(my_sock: &PktInfoUdpSocket, intf: &Interface) -> Result<
     Ok(())
 }
 
+/// Whether `info` has an address of the given IP version on `my_intf` (dstack #451).
+fn has_addr_on_intf(info: &ServiceInfo, my_intf: &MyIntf, ipv4: bool) -> bool {
+    if ipv4 {
+        !info.get_addrs_on_my_intf_v4(my_intf).is_empty()
+    } else {
+        !info.get_addrs_on_my_intf_v6(my_intf).is_empty()
+    }
+}
+
 /// Records the address of `intf` in `my_intfs`, joining the multicast group first
 /// if its interface does not hold the membership yet.
 ///
@@ -2599,26 +2608,32 @@ impl Zeroconf {
                     // Otherwise could demote an already announced service into probing.
                     continue;
                 }
+            } else if !has_addr_on_intf(service_info, my_intf, intf.ip().is_ipv4()) {
+                // dstack #451: a service with fixed addresses is announced on a new
+                // interface that holds one of them (an interface re-created under a
+                // new index); upstream announced only address-auto services here,
+                // so a fixed-address one was never answered on the new index.
+                continue;
+            }
 
-                if let Ok(true) = announce_service_on_intf(
-                    dns_registry,
-                    service_info,
-                    my_intf,
-                    &sock.pktinfo,
-                    self.port,
-                ) {
-                    debug!(
-                        "Announce service {} on {}",
-                        service_info.get_fullname(),
-                        intf.ip()
-                    );
-                    service_info.set_status(if_index, ServiceStatus::Announced);
-                } else {
-                    for timer in dns_registry.new_timers.drain(..) {
-                        self.timers.push(Reverse(timer));
-                    }
-                    service_info.set_status(if_index, ServiceStatus::Probing);
+            if let Ok(true) = announce_service_on_intf(
+                dns_registry,
+                service_info,
+                my_intf,
+                &sock.pktinfo,
+                self.port,
+            ) {
+                debug!(
+                    "Announce service {} on {}",
+                    service_info.get_fullname(),
+                    intf.ip()
+                );
+                service_info.set_status(if_index, ServiceStatus::Announced);
+            } else {
+                for timer in dns_registry.new_timers.drain(..) {
+                    self.timers.push(Reverse(timer));
                 }
+                service_info.set_status(if_index, ServiceStatus::Probing);
             }
         }
 
