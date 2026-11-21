@@ -98,7 +98,11 @@ fn a_direction_s_own_target_plays_under_dlink_s_floor() {
     assert_eq!(to.floor_ns(), MIN_BRIDGE_TARGET_NS);
     assert_eq!(to.clamped_ns(), MIN_BRIDGE_TARGET_NS);
     let from = b.from_asio_app_buffer(&at);
-    assert_eq!(from.floor_ns(), MIN_BRIDGE_TARGET_NS, "the default's (#482)");
+    assert_eq!(
+        from.floor_ns(),
+        MIN_BRIDGE_TARGET_NS,
+        "the default's (#482)"
+    );
     assert_eq!(from, b.app_buffer(&at), "the default");
     let _dante = b.dante_side();
     let _asio = b.asio_side(&at).unwrap();

@@ -17,7 +17,9 @@
 //! time), the to-ASIO one does not (its pull and play share the buffer
 //! switch), so to-ASIO can run shorter. A direction's own target may go
 //! under dlink's 1 ms app-buffer floor, down to [`MIN_BRIDGE_TARGET_NS`]
-//! (dstack #422, measured; [`direction_target_problem`]). Each player's
+//! (dstack #422, measured; [`direction_target_problem`]), and so may the
+//! default (dstack #482: a 32-frame driver with 32-frame blocks at 96 kHz
+//! is 0.667 ms); a configured `app_buffer_ns` keeps dlink's. Each player's
 //! ASRC can start from the last run's locked rate ([`Seed`],
 //! [`Bridge::seed_from`]). Both converters may run a shorter sinc
 //! ([`Spec`]'s `converter_taps`, dstack #382: 48 taps at 96 <-> 96 kHz
@@ -171,8 +173,10 @@ pub const MAX_CONVERTER_TAPS: u32 = dstack_resample::TAPS as u32;
 
 /// The least per-direction FIFO target a bridge takes, ns
 /// ([`Spec::to_asio_app_buffer_ns`], [`Spec::from_asio_app_buffer_ns`];
-/// dstack #422): 0.5 ms, under dlink's 1 ms floor for its apps
-/// (`dlink::bridge::MIN_APP_BUFFER_NS`, which `app_buffer_ns` keeps).
+/// dstack #422, and the default, the driver's buffer + one pump block,
+/// dstack #482): 0.5 ms, under dlink's 1 ms floor for its apps
+/// (`dlink::bridge::MIN_APP_BUFFER_NS`, which a configured `app_buffer_ns`
+/// keeps).
 /// Measured on simulated time at 96 kHz, both sides pulled as in the field,
 /// pump blocks of 32 and 64 frames, 180 s a run: the to-ASIO side held 0
 /// underruns from 0.5 ms with 128- and 64-frame driver buffers at ±7.5 ppm
@@ -530,7 +534,8 @@ impl Bridge {
     /// The to-ASIO FIFO's target (dstack #382): its own
     /// `to_asio_app_buffer_ns` on the bridge's floor
     /// ([`MIN_BRIDGE_TARGET_NS`], dstack #422), else [`Bridge::app_buffer`]
-    /// (dlink's floor).
+    /// (dlink's floor when `app_buffer_ns` is set, the bridge's on the
+    /// default, dstack #482).
     pub fn to_asio_app_buffer(&self, opened: &Opened) -> AppBuffer {
         self.direction_buffer(opened, self.spec.to_asio_app_buffer_ns)
     }
@@ -597,9 +602,10 @@ impl Bridge {
         }
         let to_buffer = self.to_asio_app_buffer(opened);
         let from_buffer = self.from_asio_app_buffer(opened);
-        // Only the shared `app_buffer_ns` can be out of range here (hence
-        // its key in the text): a direction's own target was checked at
-        // `Bridge::new` (dstack #422) and the spec never changes.
+        // Only the shared `app_buffer_ns` or the default can be out of range
+        // here (hence that key in the text): a direction's own target was
+        // checked at `Bridge::new` (dstack #422) and the spec never changes.
+        // The default is checked against the bridge's floor (dstack #482).
         if let Some(problem) = to_buffer.problem().or_else(|| from_buffer.problem()) {
             return Err(problem);
         }
