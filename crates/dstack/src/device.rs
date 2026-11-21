@@ -88,8 +88,9 @@ pub struct DeviceConfig {
     /// [`MAX_WORK_MARGIN`], [`WORK_MARGIN`] when the config leaves it out.
     #[serde(default = "default_work_margin")]
     pub work_margin: u64,
-    /// The engine pump hands each RX block the lead H (30 % of P,
-    /// [`crate::stream::handoff_lead`]) before its play time (dstack
+    /// The engine pump hands each RX block the lead H (30 % of P, at most
+    /// P - `network_latency_ns`, [`crate::stream::handoff_lead`]) before
+    /// its play time (dstack
     /// #476): it runs the block at B + P − H and the RX reads a flow at
     /// P − H, so a transmitter advertising more than P − H is read later.
     /// P and the blocks' play time stay. dlink sets it on every device
@@ -98,6 +99,12 @@ pub struct DeviceConfig {
     /// itself ([`crate::embed::Embedded::start_pulling`]) has no lead.
     #[serde(default)]
     pub rx_handoff_lead: bool,
+    /// (a), the Dante network latency, ns (dlink's split sets it, dstack
+    /// #244): with `rx_handoff_lead` the lead is at most the receive buffer
+    /// P - (a), so the RX never reads a flow under (a) (dstack #476). 0
+    /// when left out: no floor.
+    #[serde(default)]
+    pub network_latency_ns: u64,
     /// The latency our TX channels advertise (their mDNS `latency_ns`), in
     /// ns: a receiver plays our audio at least this long after its stamp,
     /// and our TX drops a flow's packets that lag more. 1 to `u32::MAX`;
@@ -1345,6 +1352,7 @@ const CONFIG_KEYS: &[&str] = &[
     "block",
     "work_margin",
     "rx_handoff_lead",
+    "network_latency_ns",
     "tx_latency_ns",
     "tx_margin_ns",
     "spin_tail_ns",

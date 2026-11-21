@@ -322,8 +322,12 @@ pub struct Manager {
     block: u64,
     /// The pump hands each block the lead H before its play time (the
     /// device config's `rx_handoff_lead`, dstack #476): a flow is read at
-    /// P − H, H = [`crate::stream::handoff_lead`] of P.
+    /// P − H, H = [`crate::stream::handoff_lead`] of P and (a).
     leads: bool,
+    /// (a), the device config's `network_latency_ns` in samples rounded
+    /// up ([`crate::stream::network_samples`]): H never takes the read
+    /// point under it (dstack #476).
+    network: u64,
     /// Our process id (the config's), in our flows' names.
     process: u16,
     /// The config's `playout_override`, by lower-case device name.
@@ -416,6 +420,7 @@ impl Manager {
             latency_ns: cfg.latency_ns,
             block: cfg.block,
             leads: cfg.rx_handoff_lead,
+            network: crate::stream::network_samples(cfg.network_latency_ns, cfg.sample_rate),
             process: cfg.process_id,
             playout_override: cfg
                 .playout_override

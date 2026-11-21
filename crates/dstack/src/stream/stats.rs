@@ -29,9 +29,11 @@ pub struct PumpStats {
     pub(super) playout: AtomicU64,
     /// W, samples: fixed for the pump's life (a new latency moves P and D).
     pub(super) margin: u64,
-    /// The pump leads ([`Timing::leads`], dstack #476): fixed for its life
-    /// (a new latency moves H with P).
+    /// The pump leads ([`Timing::leads`], dstack #476) under (a)
+    /// ([`Timing::network`]): fixed for its life (a new latency moves H with
+    /// P).
     pub(super) leads: bool,
+    pub(super) network: u64,
     /// One block's period, ns: a block longer than this is an overrun.
     pub(super) period_ns: u64,
     /// The last step was on the media clock (not free pacing).
@@ -177,6 +179,7 @@ impl PumpStats {
             playout: AtomicU64::new(timing.playout),
             margin: timing.margin,
             leads: timing.leads,
+            network: timing.network,
             period_ns: period,
             media: AtomicBool::new(false),
             running: AtomicBool::new(false),
@@ -411,6 +414,7 @@ impl PumpStats {
             playout: self.playout.load(Ordering::Relaxed),
             margin: self.margin,
             leads: self.leads,
+            network: self.network,
         }
     }
 

@@ -43,12 +43,13 @@ impl Manager {
         }
     }
 
-    /// The hand-off lead H at the device latency P, samples: P's share
-    /// ([`crate::stream::handoff_lead`]) when the pump leads (the device
-    /// config's `rx_handoff_lead`, dstack #476), else 0.
+    /// The hand-off lead H at the device latency P, samples: P's share,
+    /// at most the receive buffer P - (a) ([`crate::stream::handoff_lead`]),
+    /// when the pump leads (the device config's `rx_handoff_lead`, dstack
+    /// #476), else 0.
     pub fn handoff_lead(&self) -> u64 {
         if self.leads {
-            crate::stream::handoff_lead(latency_samples(self.latency_ns, self.rate))
+            crate::stream::handoff_lead(latency_samples(self.latency_ns, self.rate), self.network)
         } else {
             0
         }

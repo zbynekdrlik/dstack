@@ -13,7 +13,7 @@
 //!   point the RX checks already read at). A pump with the hand-off lead
 //!   (dstack #476, [`Timing::leads`]: every dlink device whose pump reads
 //!   RX) runs it H earlier, at kB + B + P − H, H = [`handoff_lead`] of P
-//!   (30 %), so the app holds the block H before its play time
+//!   (30 %, at most the receive buffer P − (a)), so the app holds the block H before its play time
 //!   ([`play_at_ns`], unchanged); the due times and D below then read
 //!   P − H for P. Its inputs are the RX rings at
 //!   those stamps (an RX channel that is not routed to a flow is silence
@@ -148,16 +148,28 @@ pub struct Map {
 /// denominator) so that H in whole samples is exact.
 pub const HANDOFF_LEAD_SHARE: (u64, u64) = (3, 10);
 
-/// H, the RX hand-off lead at the playout point `playout` (P), samples:
-/// [`HANDOFF_LEAD_SHARE`] of P, rounded down to whole samples (dstack
-/// #476). A pump with the lead ([`Timing::leads`]) runs each block H
-/// before its play time ([`play_at_ns`]), so the app holds the block H
-/// before it plays it; H comes out of the receive buffer, P and the play
-/// time stay. 13.041666 ms (1252 samples at 96 kHz) gives 375 samples
-/// (3.906 ms), 5 ms gives 1.5 ms, 40 ms gives 12 ms. Exact for every P (the
-/// product in 128 bits).
-pub const fn handoff_lead(playout: u64) -> u64 {
-    (playout as u128 * HANDOFF_LEAD_SHARE.0 as u128 / HANDOFF_LEAD_SHARE.1 as u128) as u64
+/// H, the RX hand-off lead at the playout point `playout` (P) with the
+/// Dante network latency `network` ((a)), samples: [`HANDOFF_LEAD_SHARE`]
+/// of P, rounded down to whole samples, and never more than the receive
+/// buffer (b) = P - (a) (dstack #476, the main's ROZHODNUTÉ: H comes out of
+/// (b), so the flows are never read under (a)). A pump with the lead
+/// ([`Timing::leads`]) runs each block H before its play time
+/// ([`play_at_ns`]), so the app holds the block H before it plays it; P
+/// and the play time stay. 13.041666 ms (1252 samples at 96 kHz) gives 375
+/// samples (3.906 ms), 5 ms gives 1.5 ms, 40 ms gives 12 ms; (a) 5 ms +
+/// (b) 1 ms gives 1 ms. Exact for every P (the product in 128 bits).
+pub const fn handoff_lead(playout: u64, network: u64) -> u64 {
+    let share =
+        (playout as u128 * HANDOFF_LEAD_SHARE.0 as u128 / HANDOFF_LEAD_SHARE.1 as u128) as u64;
+    let buffer = playout.saturating_sub(network);
+    if share < buffer { share } else { buffer }
+}
+
+/// `ns` in whole samples at `rate`, rounded UP: the Dante network latency
+/// (a) as the hand-off lead's floor ([`handoff_lead`]), so the read point
+/// is never under it.
+pub fn network_samples(ns: u64, rate: u32) -> u64 {
+    u64::try_from((u128::from(ns) * u128::from(rate)).div_ceil(1_000_000_000)).unwrap_or(u64::MAX)
 }
 
 /// The pump's timing, samples. `block` is above 0.
@@ -174,6 +186,10 @@ pub struct Timing {
     /// `rx_handoff_lead`, every dlink device whose pump reads RX). H
     /// follows P, so a new P (Dante Controller) keeps the same share.
     pub leads: bool,
+    /// (a), the Dante network latency, samples rounded up
+    /// ([`network_samples`] of the device's `network_latency_ns`): H is at
+    /// most P - (a), the receive buffer (dstack #476). 0: no floor.
+    pub network: u64,
 }
 
 impl Timing {
@@ -185,17 +201,19 @@ impl Timing {
             playout,
             margin,
             leads: false,
+            network: 0,
         }
     }
 
     /// The pump's timing for the device `cfg`: its `block`, its latency in
     /// whole samples ([`crate::clock::latency_samples`], as the RX reads
-    /// its playout point), its `work_margin`, its `rx_handoff_lead`. One
-    /// place, so a host's pump cannot read a sample off the RX's playout
-    /// point.
+    /// its playout point), its `work_margin`, its `rx_handoff_lead` and
+    /// `network_latency_ns`. One place, so a host's pump cannot read a
+    /// sample off the RX's playout point.
     pub fn of(cfg: &crate::device::DeviceConfig) -> Timing {
         Timing {
             leads: cfg.rx_handoff_lead,
+            network: network_samples(cfg.network_latency_ns, cfg.sample_rate),
             ..Timing::new(
                 cfg.block,
                 crate::clock::latency_samples(cfg.latency_ns, cfg.sample_rate),
@@ -204,11 +222,11 @@ impl Timing {
         }
     }
 
-    /// H, samples: [`handoff_lead`] of P when the pump [`Timing::leads`],
-    /// else 0.
+    /// H, samples: [`handoff_lead`] of P and (a) when the pump
+    /// [`Timing::leads`], else 0.
     pub fn lead(&self) -> u64 {
         if self.leads {
-            handoff_lead(self.playout)
+            handoff_lead(self.playout, self.network)
         } else {
             0
         }

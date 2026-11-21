@@ -10,7 +10,7 @@ use dstack::announce::FPP_MAX;
 use dstack::clock::latency_samples;
 use dstack::device::{NORMAL_MIN_LATENCY_NS, NORMAL_MIN_WORK_MARGIN_NS};
 use dstack::media::tx::TX_MARGIN_NS;
-use dstack::stream::{BLOCKS, HANDOFF_LEAD_SHARE, MAX_WORK_MARGIN, handoff_lead};
+use dstack::stream::{BLOCKS, HANDOFF_LEAD_SHARE, MAX_WORK_MARGIN, handoff_lead, network_samples};
 
 use crate::{BLOCK, rated};
 
@@ -185,7 +185,8 @@ pub struct Split {
     /// H, the RX hand-off lead, samples at the device's rate (dstack #476,
     /// the owner's ROZHODNUTÉ of 21.11.2026): 30 % of P
     /// (`dstack::stream::handoff_lead`), taken out of the receive buffer
-    /// (b). The pump hands each block to the app H before its `play_at`
+    /// (b) and never more than (b) (the main's ROZHODNUTÉ: a flow is never
+    /// read under (a); (a) 5 ms + (b) 1 ms gives H 1 ms). The pump hands each block to the app H before its `play_at`
     /// (the RX path's end, P + (c), unchanged) and reads the flows at
     /// P - H, so a transmitter advertising more than P - H is read later.
     /// 0 on a device without RX channels, and after [`Split::pulled`],
@@ -239,13 +240,18 @@ impl Split {
                 ms(self.rx_convert_ns),
                 ms(self.rx_path_ns),
                 ms(self.handoff_lead_ns),
-                if self.handoff_lead > 0 {
+                if self.handoff_lead == 0 {
+                    "none: the app pulls its RX".to_string()
+                } else if self.handoff_lead_ns == self.receive_buffer_ns {
+                    format!(
+                        "all of (b), under {} % of P",
+                        HANDOFF_LEAD_SHARE.0 * 100 / HANDOFF_LEAD_SHARE.1
+                    )
+                } else {
                     format!(
                         "{} % of P, from (b)",
                         HANDOFF_LEAD_SHARE.0 * 100 / HANDOFF_LEAD_SHARE.1
                     )
-                } else {
-                    "none: the app pulls its RX".to_string()
                 },
             ));
         }
@@ -409,7 +415,7 @@ pub fn split(
         ));
     }
     let lead = if directions.has_rx() {
-        handoff_lead(p)
+        handoff_lead(p, network_samples(a, device_rate))
     } else {
         0
     };

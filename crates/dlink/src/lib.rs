@@ -60,7 +60,9 @@
 //! H before its [`Block::play_at`], H = 30 % of P rounded down to whole
 //! samples ([`Split::handoff_lead`], `dstack::stream::handoff_lead`; obs's
 //! P 13.041666 ms gives 3.906 ms, 5 ms gives 1.5 ms, 40 ms gives 12 ms),
-//! taken out of (b): the pump is due at P - H past a block's last sample
+//! taken out of (b) and never more than (b), so no flow is read under (a)
+//! ((a) 5 ms + (b) 1 ms gives 1 ms; the start line then says "all of
+//! (b)"): the pump is due at P - H past a block's last sample
 //! and reads the flows there, so P, `play_at` and the RX path P + (c) stay
 //! as they are. A pump that wakes late by under H still hands the block
 //! before its `play_at`. A Dante Controller latency keeps the same share
@@ -623,11 +625,12 @@ impl Config {
         // first; the device is checked at the floor and the default margin
         // meanwhile, for the other problems.
         let split = self.split();
-        let (latency_ns, margin) = match &split {
-            Ok(s) => (s.latency_ns, s.margin),
+        let (latency_ns, margin, network_ns) = match &split {
+            Ok(s) => (s.latency_ns, s.margin, s.network_latency_ns),
             Err(_) => (
                 MIN_LATENCY_NS,
                 default_work_margin(rate, self.block, self.directions()),
+                0,
             ),
         };
         t.insert("latency_ns".into(), to_int(latency_ns).into());
@@ -635,6 +638,8 @@ impl Config {
         t.insert("work_margin".into(), to_int(margin).into());
         // dstack #476: the pump hands each RX block H before its play_at.
         t.insert("rx_handoff_lead".into(), self.directions().has_rx().into());
+        // dstack #476: H is at most (b), so no flow is read under (a).
+        t.insert("network_latency_ns".into(), to_int(network_ns).into());
         t.insert("timing".into(), "normal".into());
         t.insert(
             "state_file".into(),

@@ -36,10 +36,44 @@ fn h_is_30_percent_of_p_rounded_down_to_whole_samples() {
         // A 40 ms P at 96 kHz: 12 ms.
         (3_840, 1_152),
     ] {
-        assert_eq!(handoff_lead(p), h, "P {p}");
+        assert_eq!(handoff_lead(p, 0), h, "P {p}");
     }
     // Exact at the top of the range: 30 % of u64::MAX, rounded down.
-    assert_eq!(handoff_lead(u64::MAX), 5_534_023_222_112_865_484);
+    assert_eq!(handoff_lead(u64::MAX, 0), 5_534_023_222_112_865_484);
+}
+
+/// The main's ROZHODNUTÉ (21.11.2026): H is at most the receive buffer
+/// (b) = P - (a), so the read point is never under (a). At P 576 (6 ms at
+/// 96 kHz) 30 % is 172: an (a) leaving (b) 173 keeps it, (b) 172 is the
+/// same, (b) 171 takes (b); (a) 5 ms + (b) 1 ms gives 96; an (a) at or over
+/// P leaves no lead.
+#[test]
+fn h_is_at_most_the_receive_buffer() {
+    for (a, h) in [
+        (0, 172),
+        (403, 172),
+        (404, 172),
+        (405, 171),
+        (480, 96),
+        (575, 1),
+        (576, 0),
+        (577, 0),
+    ] {
+        assert_eq!(handoff_lead(576, a), h, "(a) {a}");
+        assert!(576 - h >= a.min(576), "(a) {a}: read at {}", 576 - h);
+    }
+    // (a) in samples rounded up: the read point never a fraction under it.
+    assert_eq!(network_samples(5_000_000, 96_000), 480);
+    assert_eq!(network_samples(333_333, 96_000), 32);
+    assert_eq!(network_samples(333_334, 96_000), 33);
+    assert_eq!(network_samples(0, 96_000), 0);
+    // The device config's (a) reaches the pump's timing.
+    let mut cfg = DeviceConfig::from_toml(TEST_DEVICE).expect("config/test-device.toml");
+    cfg.rx_handoff_lead = true;
+    cfg.latency_ns = 6_000_000;
+    cfg.network_latency_ns = 5_000_000;
+    let t = Timing::of(&cfg);
+    assert_eq!((t.network, t.lead(), t.read_point()), (480, 96, 480));
 }
 
 #[test]
