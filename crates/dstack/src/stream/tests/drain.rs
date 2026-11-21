@@ -200,3 +200,37 @@ fn a_free_block_drains_the_flow_as_unplaced() {
     assert_eq!((c.packets, c.unplaced), (1, 1), "{c:?}");
     assert_eq!(r.rx.rings()[0].counters().written, 0);
 }
+
+#[test]
+fn a_late_pump_counts_late_only_the_packets_it_already_read_past() {
+    // dstack #477 (presenter-listen, 21.11.2026: 40 late packets of
+    // 0.26-0.34 ms arrivals at P 5 ms, in the seconds of pump wakes 4-6 ms
+    // late): a packet is late when the reader already read its position,
+    // and the pump reads by its schedule, not by now. A wake late by
+    // `behind` reads first the block due `behind` ago, so what came since
+    // the last drain is in time though now is past P + B of it.
+    let mut r = flow_rig(TimingProfile::Normal);
+    r.rx.set_stamps(false);
+    let t = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let now = T + B + P;
+    send(&r, &t, T);
+    r.pump.media(now, 0);
+    // Block T + B's input arrives in time; the pump's next wake comes two
+    // blocks late (within the margin: three blocks run, none skipped). Now
+    // is P + 3B past its first frame, the reader's position still T + B.
+    send(&r, &t, T + B);
+    let behind = 2 * B;
+    const _: () = assert!(2 * B < WORK_MARGIN);
+    r.pump.media(now + B + behind, 0);
+    assert_eq!(r.stats.view().blocks, 4);
+    let c = r.rx.lane(0);
+    assert_eq!((c.packets, c.late, c.late_at_read), (2, 0, 0), "{c:?}");
+    let ring = r.rx.rings()[0].counters();
+    assert_eq!((ring.written, ring.late), (2 * B, 0), "{ring:?}");
+    // Block T + 2B's input comes only now, after its block was read (a
+    // hole): truly late, counted, at an on-time wake.
+    send(&r, &t, T + 2 * B);
+    r.pump.media(now + 4 * B, 0);
+    let c = r.rx.lane(0);
+    assert_eq!((c.packets, c.late, c.late_at_read), (3, 1, 1), "{c:?}");
+}
