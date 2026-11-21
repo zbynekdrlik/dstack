@@ -6,14 +6,21 @@
 //! Windows ([`join_mmcss`]), and a device's record of it ([`Scheduling`],
 //! dstack #281): each engine thread's outcome and MMCSS task index, which
 //! the status shows (`engine.threads[]`), so an app can tell a pump that
-//! MMCSS dropped from one that was starved.
+//! MMCSS dropped from one that was starved; and on Linux the pump's and
+//! the TX thread's short EEVDF slice ([`slice`], dstack #302).
 
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU8, AtomicU64, Ordering};
 
 use tracing::{info, warn};
 
 use super::TX_PRIORITY;
 use crate::clock::{Os, ThreadPriority};
+
+// Off Linux no thread asks a slice: the decision is built (and tested) on
+// every OS, called only by the Linux glue.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+mod slice;
+pub use slice::{SHORT_SLICE_NS, Slice, SliceRequest};
 
 /// What a media thread got of the priority its profile asks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -233,19 +240,32 @@ pub struct Scheduled {
     /// dstack #461): the level within its process's class, or its MMCSS
     /// level in MMCSS; `None` where it was not read (off Windows).
     pub priority: Option<i32>,
+    /// What its short-slice request gave (dstack #302, Linux).
+    pub slice: Slice,
+    /// Its slice as Linux read it back after the request
+    /// (`sched_runtime`, ns); `None` where it was not read.
+    pub slice_ns: Option<u64>,
 }
 
 /// A device's record of its media threads' scheduling (dstack #281): each
 /// thread's last `take_priority` outcome and MMCSS task index, one atomic
 /// word each (the outcome's code in the low 8 bits, the task index + 1
 /// above them, 0 for none; a word of 0: not started), and its read-back
-/// priority (dstack #461).
+/// priority (dstack #461), and its slice request (dstack #302).
 #[derive(Debug, Default)]
 pub struct Scheduling {
     slots: [AtomicU64; 4],
     /// Each thread's read-back priority (dstack #461), [`UNREAD`] for none;
     /// written before its slot's word, read only for a started thread.
     levels: [AtomicI64; 4],
+    /// Each thread's [`Slice`] code (dstack #302), written before its
+    /// slot's word.
+    slices: [AtomicU8; 4],
+    /// Each thread's read-back slice + 1, ns (dstack #302), 0 for none;
+    /// written before its slot's word.
+    slice_reads: [AtomicU64; 4],
+    /// A slice request was ignored or refused and warned (dstack #302).
+    slice_warned: AtomicBool,
 }
 
 /// A [`Scheduling`] level with no read-back: outside `i32`'s range.
@@ -274,6 +294,20 @@ impl Scheduling {
         self.slots[thread.slot()].store(word, Ordering::Release);
     }
 
+    /// `thread`'s slice request gave `asked` (dstack #302); recorded
+    /// before [`Scheduling::record`], which makes it visible.
+    pub(crate) fn record_slice(&self, thread: MediaThread, asked: &SliceRequest) {
+        let read = asked.read_ns.map_or(0, |ns| ns.saturating_add(1));
+        self.slice_reads[thread.slot()].store(read, Ordering::Release);
+        self.slices[thread.slot()].store(asked.slice.code(), Ordering::Release);
+    }
+
+    /// Whether this is the first refused slice request of the device
+    /// (dstack #302): it warns once, later ones are info.
+    pub(crate) fn first_slice_warning(&self) -> bool {
+        !self.slice_warned.swap(true, Ordering::AcqRel)
+    }
+
     /// The threads that took their priority, in [`MediaThread::ALL`]'s
     /// order. A thread recorded again meanwhile (a new TX thread) can show
     /// its new read-back beside its old outcome for one read: status only.
@@ -290,6 +324,10 @@ impl Scheduling {
                     mmcss_task: task.checked_sub(1).map(|t| t as u32),
                     priority: i32::try_from(self.levels[thread.slot()].load(Ordering::Acquire))
                         .ok(),
+                    slice: Slice::of_code(self.slices[thread.slot()].load(Ordering::Acquire)),
+                    slice_ns: self.slice_reads[thread.slot()]
+                        .load(Ordering::Acquire)
+                        .checked_sub(1),
                 })
             })
             .collect()
@@ -306,10 +344,22 @@ impl Scheduling {
 /// the read-back ([`held`]). A priority found under the one asked is
 /// reported, never set again (owner ROZHODNUTÉ 20.11.2026, #461: a
 /// fallback app such as dsend takes no CPU priority from the PC's main
-/// audio work where MMCSS is off).
+/// audio work where MMCSS is off). On Linux the pump and the TX thread then
+/// ask a short EEVDF slice when they run `SCHED_OTHER` ([`slice`], dstack
+/// #302), recorded and logged with it.
 pub(crate) fn take_priority(thread: MediaThread, priority: i32, scheduling: &Scheduling) {
     let asked =
         crate::clock::thread_priority_for(crate::clock::profile(), crate::clock::Os::current());
+    take_priority_asked(thread, priority, scheduling, asked);
+}
+
+/// [`take_priority`] asking `asked` (the profile's, there).
+pub(crate) fn take_priority_asked(
+    thread: MediaThread,
+    priority: i32,
+    scheduling: &Scheduling,
+    asked: ThreadPriority,
+) {
     let wanted = windows_priority_for(asked, priority);
     let granted = ask_priority(asked, priority);
     let joined = wants_mmcss(asked).then(join_mmcss);
@@ -318,8 +368,15 @@ pub(crate) fn take_priority(thread: MediaThread, priority: i32, scheduling: &Sch
         .as_ref()
         .map_or((Mmcss::Out, None), |j| mmcss_of(j, read));
     let outcome = priority_outcome(asked, held(granted, wanted, read), mmcss);
+    // After the priority: a SCHED_FIFO grant is never asked a slice.
+    #[cfg(target_os = "linux")]
+    let sliced = slice::ask(thread);
+    #[cfg(not(target_os = "linux"))]
+    let sliced = SliceRequest::NOT;
+    scheduling.record_slice(thread, &sliced);
     scheduling.record(thread, outcome, task, read);
     let thread = thread.log_name();
+    log_slice(thread, &sliced, scheduling);
     match outcome {
         // Windows' real-time grant is a thread priority, not a scheduler.
         Priority::Granted => match Os::current() {
@@ -362,6 +419,21 @@ pub(crate) fn take_priority(thread: MediaThread, priority: i32, scheduling: &Sch
             read = ?read,
             "the asked priority was refused, or read back under it after the MMCSS join: runs at the priority read"
         ),
+    }
+}
+
+/// Logs `thread`'s slice request `asked` (dstack #302): info when short or
+/// ignored (a kernel before 6.12 has no requested slices: expected there),
+/// a warning for the device's first refused one
+/// ([`Scheduling::first_slice_warning`]), info after.
+fn log_slice(thread: &str, asked: &SliceRequest, scheduling: &Scheduling) {
+    let Some(line) = slice::slice_line(thread, asked) else {
+        return;
+    };
+    if asked.slice == Slice::Refused && scheduling.first_slice_warning() {
+        warn!("{line}");
+    } else {
+        info!("{line}");
     }
 }
 

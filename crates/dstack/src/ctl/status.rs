@@ -300,7 +300,12 @@ impl Json {
 ///   `mmcss_task` (MMCSS's task index, null outside MMCSS) and `priority`
 ///   (dstack #461: the thread's priority as Windows read it back after the
 ///   join, `GetThreadPriority`: its level within the process's class, or
-///   its MMCSS level in MMCSS; null where not read, off Windows).
+///   its MMCSS level in MMCSS; null where not read, off Windows), `slice`
+///   (dstack #302, the pump's and the TX thread's short EEVDF slice on
+///   Linux: `short` read back as asked, `ignored` taken but read back
+///   otherwise (before Linux 6.12), `refused`, `not_asked`: off Linux,
+///   another thread, or not `SCHED_OTHER`) and `slice_ns` (its slice as
+///   Linux read it back after the request, null where not read).
 /// - `mdns` (dstack #289), once the process's mDNS meter on the device's
 ///   address closed a minute ([`crate::discover::senders`]): `per_s` (every
 ///   datagram to the mDNS group that minute, a second), `top` (the loudest
@@ -859,7 +864,9 @@ fn wakes_part(j: &mut Json, wakes: &crate::stream::wake::WakeLateness) {
 
 /// The media threads' scheduling (dstack #281), each that took its
 /// priority: `thread`, `scheduling`, `mmcss_task` (null outside MMCSS),
-/// `priority` (the read-back level, null where not read; dstack #461).
+/// `priority` (the read-back level, null where not read; dstack #461),
+/// `slice` and `slice_ns` (the slice request and its read-back, dstack
+/// #302).
 fn threads_part(j: &mut Json, threads: &[crate::media::tx::Scheduled]) {
     j.open(Some("threads"), '[');
     for t in threads {
@@ -868,6 +875,8 @@ fn threads_part(j: &mut Json, threads: &[crate::media::tx::Scheduled]) {
         j.word("scheduling", t.outcome.word(crate::clock::Os::current()));
         j.opt("mmcss_task", t.mmcss_task);
         j.opt("priority", t.priority);
+        j.word("slice", t.slice.word());
+        j.opt("slice_ns", t.slice_ns);
         j.close('}');
     }
     j.close(']');
