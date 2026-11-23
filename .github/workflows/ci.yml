@@ -114,6 +114,8 @@ jobs:
         run: sudo bash tools/linux/tests/dante-leg.test.sh
       - name: The NIC standard's file and its Linux checker (dstack #465)
         run: python3 -m unittest tools/linux/tests/nic_standard_check_test.py
+      - name: The per-ms NIC burst logger keeps bounded memory and writes each step at once (dstack #408)
+        run: python3 -m unittest tools/linux/tests/nic_burst_log_test.py
 
   ci-peer:
     # docs/ci-peer.md's recipe for an application's CI (dstack #305): two
