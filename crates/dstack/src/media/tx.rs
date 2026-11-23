@@ -873,9 +873,8 @@ impl TxShared {
             .sum()
     }
 
-    /// The TX thread's peaks, to record as the TX thread does (other
-    /// modules' tests: the status's `tx_thread`).
-    #[cfg(test)]
+    /// The TX thread's peaks: the late watch takes its look from them
+    /// (dstack #485); other modules' tests record as the TX thread does.
     pub(crate) fn tx_thread_stats(&self) -> &split::TxThreadStats {
         &self.tx_thread
     }

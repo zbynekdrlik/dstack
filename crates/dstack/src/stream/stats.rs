@@ -96,7 +96,7 @@ pub struct SecondSplit {
     pub drain_us: u64,
     pub drain_datagrams: u64,
     /// The largest block's thread CPU time, whole µs (`None` where
-    /// unmeasured: off Linux).
+    /// unmeasured: off Linux and Windows x86_64).
     pub process_cpu_us: Option<u64>,
 }
 
@@ -163,7 +163,7 @@ pub struct PumpView {
     /// time was not run in its middle; one near its CPU time still may not
     /// have worked (host steal and interrupts count as the thread's on
     /// kernels that do not split them, [`super::split`]). `None` where
-    /// unmeasured (off Linux).
+    /// unmeasured (off Linux and Windows x86_64).
     pub max_process_cpu_us: Option<u64>,
 }
 

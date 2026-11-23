@@ -1953,6 +1953,7 @@ fn the_tx_thread_sends_rate_over_fpp_packets_a_second_never_early_and_ends_on_st
 /// thread goes on from there with every stamp in turn.
 #[test]
 fn the_relay_thread_sends_the_tx_packets_while_the_tx_thread_blocks() {
+    crate::stream::split::calibrated();
     let rig = Rig::new(Vec::new());
     assert!(rig.shared.set_source(0, Source::Counter));
     let (slot, _) = rig.flow(vec![Some(1)]);
@@ -1981,11 +1982,11 @@ fn the_relay_thread_sends_the_tx_packets_while_the_tx_thread_blocks() {
         tx
     });
     // dstack #359: the relay thread times its passes as the TX thread does
-    // (its CPU time on Linux only).
+    // (its CPU time on Linux and Windows x86_64, dstack #485).
     assert!(tx.before.pass_ns.is_some(), "{:?}", tx.before);
     assert_eq!(
         tx.before.pass_cpu_ns.is_some(),
-        cfg!(target_os = "linux"),
+        crate::stream::split::MEASURED,
         "{:?}",
         tx.before
     );
@@ -2614,13 +2615,23 @@ fn the_late_watch_logs_a_flow_s_late_packets_with_their_peak() {
     // The receiver states a latency under ours: it plays at ours.
     rig.shared.set_receiver_latency(slot, v4(&rig.rx), 250_000);
     let mut watch = crate::media::late::LateWatch::new();
+    let thread = rig.shared.tx_thread_stats();
+    // Before the first look: taken by it, never in a later line.
+    thread.passed(9_000_000, Some(9_000_000));
+    thread.overslept(9_000_000);
     let quiet = warned(|| watch.watch(0, &rig.shared));
     assert_eq!(quiet, "", "the first look learns");
     rig.tx.step(Some(T), 0);
     rig.tx.step(Some(first_due_ns(T) + 50_000), 0);
     let lane = rig.shared.lane(slot);
     assert!(lane.over_latency >= 1, "{lane:?}");
-    // Inside the second: nothing yet, the peak kept.
+    // dstack #485: the TX thread's peaks since the last look (the steps
+    // above recorded none: `step` is not timed). A pass held 1.053 ms with
+    // 110 us of CPU, a sleep 443 us late.
+    thread.passed(1_053_999, Some(110_000));
+    thread.passed(20_000, Some(19_000));
+    thread.overslept(443_999);
+    // Inside the second: nothing yet, the peaks kept.
     assert_eq!(
         warned(|| watch.watch(crate::media::late::EVERY_NS - 1, &rig.shared)),
         ""
@@ -2637,6 +2648,16 @@ fn the_late_watch_logs_a_flow_s_late_packets_with_their_peak() {
         )),
         "{log}"
     );
+    assert!(
+        log.contains("pass_max_us=1053 pass_max_cpu_us=110 oversleep_max_us=443"),
+        "{log}"
+    );
+    // The look took them; the status's peaks since the start stay.
+    assert_eq!(
+        rig.shared.tx_thread_stats().take_look(),
+        crate::media::tx::split::TxThreadLook::default()
+    );
+    assert_eq!(rig.shared.tx_thread().pass_max_us, 9_000);
     assert_eq!(lane.receiver_latency_ns, 250_000);
     assert!(
         log.contains("older than the latency their receiver plays at"),
@@ -2646,10 +2667,26 @@ fn the_late_watch_logs_a_flow_s_late_packets_with_their_peak() {
     assert_eq!(rig.shared.take_age_peak(slot), 0);
     assert_eq!(rig.shared.lane(slot).age_max_ns, lane.age_max_ns);
     assert_eq!(rig.shared.take_age_peak(MAX_FLOWS), 0, "no such slot");
-    // The next second, no new late packet: quiet.
+    // The next second, no new late packet: quiet, yet the look takes the
+    // TX thread's peaks of that second (never carried to a later line).
+    thread.passed(5_000_000, Some(4_000_000));
     assert_eq!(
         warned(|| watch.watch(2 * crate::media::late::EVERY_NS, &rig.shared)),
         ""
+    );
+    assert_eq!(
+        rig.shared.tx_thread_stats().take_look(),
+        crate::media::tx::split::TxThreadLook::default()
+    );
+    // A late packet in a second whose passes read no CPU time: `-`.
+    thread.passed(2_000_000, None);
+    rig.shared.lanes[slot]
+        .over_latency
+        .fetch_add(1, Ordering::Relaxed);
+    let log = warned(|| watch.watch(3 * crate::media::late::EVERY_NS, &rig.shared));
+    assert!(
+        log.contains("pass_max_us=2000 pass_max_cpu_us=- oversleep_max_us=0"),
+        "{log}"
     );
 }
 

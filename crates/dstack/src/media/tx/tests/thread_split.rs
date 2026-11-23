@@ -6,7 +6,7 @@
 
 use super::*;
 
-use crate::media::tx::split::{Before, TxThreadStats, TxThreadView, Us};
+use crate::media::tx::split::{Before, TxThreadLook, TxThreadStats, TxThreadView, Us};
 
 /// The peaks keep the largest of each; the CPU peak exists only once a
 /// pass's CPU time was read, and a pass without one leaves it as it was.
@@ -40,6 +40,49 @@ fn the_tx_thread_s_peaks_keep_the_largest_of_each() {
     let z = TxThreadStats::default();
     z.passed(5_000, Some(0));
     assert_eq!(z.view().pass_max_cpu_us, Some(0));
+}
+
+/// dstack #485: the late watch takes the TX thread's peaks since its last
+/// look; the status's peaks since the start stay. A look's CPU peak exists
+/// only when a pass's CPU time was read since the look before.
+#[test]
+fn a_look_takes_the_tx_thread_s_peaks_since_the_last_look() {
+    let s = TxThreadStats::default();
+    assert_eq!(s.take_look(), TxThreadLook::default());
+    s.overslept(443_000);
+    s.passed(1_053_000, Some(110_000));
+    s.passed(200_000, Some(190_000));
+    s.overslept(5_000);
+    assert_eq!(
+        s.take_look(),
+        TxThreadLook {
+            pass_ns: 1_053_000,
+            pass_cpu_ns: Some(190_000),
+            oversleep_ns: 443_000,
+        }
+    );
+    // Taken: the next look starts afresh, the start's peaks stay.
+    assert_eq!(s.take_look(), TxThreadLook::default());
+    let since_start = TxThreadView {
+        oversleep_max_us: 443,
+        pass_max_us: 1_053,
+        pass_max_cpu_us: Some(190),
+    };
+    assert_eq!(s.view(), since_start);
+    // A look with passes but no CPU read: wall only, CPU unmeasured.
+    s.passed(300_000, None);
+    assert_eq!(
+        s.take_look(),
+        TxThreadLook {
+            pass_ns: 300_000,
+            pass_cpu_ns: None,
+            oversleep_ns: 0,
+        }
+    );
+    // A CPU time of 0 is measured, not absent.
+    s.passed(7_000, Some(0));
+    assert_eq!(s.take_look().pass_cpu_ns, Some(0));
+    assert_eq!(s.view(), since_start);
 }
 
 #[test]
@@ -263,12 +306,14 @@ impl PtpClock for LateClock {
     }
 }
 
-/// The TX loop's wiring: it times each pass (its CPU time on Linux only)
-/// and reads the clock around each sleep, so a late wake shows as the
-/// oversleep in the status and in the restart line it causes.
+/// The TX loop's wiring: it times each pass (its CPU time on Linux and
+/// Windows x86_64, dstack #485) and reads the clock around each sleep, so
+/// a late wake shows as the oversleep in the status and in the restart
+/// line it causes.
 #[test]
 fn the_tx_loop_measures_its_sleeps_and_passes() {
     crate::test_log::undecided();
+    crate::stream::split::calibrated();
     let shared = shared_with(Vec::new());
     assert!(shared.set_source(0, Source::Counter));
     let rx = socket();
@@ -290,7 +335,7 @@ fn the_tx_loop_measures_its_sleeps_and_passes() {
     assert_eq!(view.oversleep_max_us, LateClock::LATE / 1_000, "{view:?}");
     assert_eq!(
         view.pass_max_cpu_us.is_some(),
-        cfg!(target_os = "linux"),
+        crate::stream::split::MEASURED,
         "{view:?}"
     );
     assert!(

@@ -19,7 +19,7 @@
 //!   wall time and the datagrams it read. It grows with the backlog (about
 //!   2 us a datagram on dev1, #354).
 //! - **The block's work** (`max_process_cpu`): a block's own thread CPU
-//!   time ([`thread_cpu_ns`], Linux), beside its wall time
+//!   time ([`thread_cpu_ns`], Linux and Windows x86_64), beside its wall time
 //!   (`max_process_us`). A block with a long wall time and a short CPU time
 //!   was not run in its middle (preempted), not slow. The converse does
 //!   not hold: CPU time near the wall time proves only that the thread
@@ -112,15 +112,91 @@ pub fn timespec_ns(rc: i32, secs: i64, nanos: i64) -> Option<u64> {
     secs.checked_mul(1_000_000_000)?.checked_add(nanos)
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(windows, target_arch = "x86_64"))]
+pub use thread_cpu_of_windows as thread_cpu_ns;
+
+/// The calling thread's CPU time, ns (dstack #485): its cycles
+/// (`QueryThreadCycleTime`, TSC ticks without the interrupts' and DPCs'
+/// cycles) at the TSC's rate, calibrated once a process ([`tsc`]); `None`
+/// in the process's first 100 ms (the rate not yet known), on a CPU
+/// without an invariant TSC, or when the read fails. Windows glue over [`tsc::thread_ns`] (tested): excluded from the
+/// mutation gate, which never compiles it.
+#[cfg(all(windows, target_arch = "x86_64"))]
+pub fn thread_cpu_of_windows() -> Option<u64> {
+    use std::time::Instant;
+    use windows_sys::Win32::System::Threading::GetCurrentThread;
+    use windows_sys::Win32::System::WindowsProgramming::QueryThreadCycleTime;
+
+    static RATE: tsc::TscRate = tsc::TscRate::new();
+    static BASE: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    static INVARIANT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let mut cycles = 0u64;
+    // SAFETY: GetCurrentThread returns a pseudo handle valid on this
+    // thread; `cycles` is a valid, writable u64 the call only writes.
+    let ok = unsafe { QueryThreadCycleTime(GetCurrentThread(), &mut cycles) };
+    if ok == 0 {
+        return None;
+    }
+    if !*INVARIANT.get_or_init(invariant_tsc_of_windows) {
+        return None;
+    }
+    let base = *BASE.get_or_init(Instant::now);
+    let wall = || u64::try_from(base.elapsed().as_nanos()).unwrap_or(u64::MAX);
+    let before = wall();
+    // SAFETY: RDTSC exists on every x86_64 CPU; it only reads the TSC.
+    let tsc = unsafe { core::arch::x86_64::_rdtsc() };
+    let after = wall();
+    tsc::thread_ns(cycles, &RATE, tsc, before, after)
+}
+
+/// Whether this CPU's TSC is invariant ([`tsc::invariant_tsc`] over CPUID
+/// 0x8000_0000 and 0x8000_0007): the Windows glue's, read once a process.
+#[cfg(all(windows, target_arch = "x86_64"))]
+fn invariant_tsc_of_windows() -> bool {
+    use core::arch::x86_64::__cpuid;
+    // CPUID exists on every x86_64 CPU (a safe call); it only reads.
+    let max = __cpuid(0x8000_0000).eax;
+    let edx = if max >= 0x8000_0007 {
+        __cpuid(0x8000_0007).edx
+    } else {
+        0
+    };
+    tsc::invariant_tsc(max, edx)
+}
+
+#[cfg(not(any(target_os = "linux", all(windows, target_arch = "x86_64"))))]
 pub use unmeasured_thread_cpu as thread_cpu_ns;
 
-/// The calling thread's CPU time: unmeasured off Linux (Windows counts a
-/// thread's time only per scheduler tick, about 15.6 ms, too coarse for a
-/// 1 ms block). Excluded from the mutation gate, which never compiles it.
-#[cfg(not(target_os = "linux"))]
+/// The calling thread's CPU time: unmeasured off Linux and Windows x86_64
+/// (no thread CPU clock fine enough for a 1 ms block). Excluded from the
+/// mutation gate, which never compiles it.
+#[cfg(not(any(target_os = "linux", all(windows, target_arch = "x86_64"))))]
 pub fn unmeasured_thread_cpu() -> Option<u64> {
     None
+}
+
+pub mod tsc;
+
+/// Whether this build reads a thread's CPU time ([`thread_cpu_ns`]: Linux,
+/// Windows x86_64); tests that expect a measured time wait [`calibrated`]
+/// first.
+#[cfg(test)]
+pub(crate) const MEASURED: bool = cfg!(any(
+    target_os = "linux",
+    all(windows, target_arch = "x86_64")
+));
+
+/// The thread CPU read's TSC rate known (dstack #485: Windows calibrates it
+/// from two reads 100 ms apart, once a process), so every later read is
+/// measured where [`MEASURED`]; returns at once on Linux and once known.
+#[cfg(test)]
+pub(crate) fn calibrated() {
+    if MEASURED && thread_cpu_ns().is_none() {
+        std::thread::sleep(std::time::Duration::from_nanos(
+            tsc::CALIBRATION_NS + 10_000_000,
+        ));
+        assert!(thread_cpu_ns().is_some(), "the TSC rate is known");
+    }
 }
 
 #[cfg(test)]

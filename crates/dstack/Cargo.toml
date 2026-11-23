@@ -59,7 +59,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 [target.'cfg(windows)'.dependencies]
 # dasio (plan Task 2): the precise system time and a high-resolution
 # waitable timer (the media clock), MMCSS and thread affinity (the media
-# threads), the NIC's MAC and speed (the network info), SIO_UDP_CONNRESET.
+# threads), the NIC's MAC and speed (the network info), SIO_UDP_CONNRESET;
+# a thread's CPU cycles (QueryThreadCycleTime, dstack #485).
 windows-sys = { version = "0.61", features = [
   "Win32_Foundation",
   "Win32_NetworkManagement_IpHelper",
@@ -71,6 +72,7 @@ windows-sys = { version = "0.61", features = [
   "Win32_System_Registry",
   "Win32_System_SystemInformation",
   "Win32_System_Threading",
+  "Win32_System_WindowsProgramming",
 ] }
 
 [target.'cfg(target_os = "linux")'.dependencies]

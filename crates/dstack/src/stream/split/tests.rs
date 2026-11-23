@@ -56,12 +56,15 @@ fn a_timespec_is_its_seconds_and_nanoseconds() {
     assert_eq!(timespec_ns(0, 18_446_744_073, 709_551_616), None);
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", all(windows, target_arch = "x86_64")))]
 #[test]
 fn the_thread_cpu_time_counts_this_thread_s_work_and_not_its_sleep() {
+    // Windows (dstack #485): the TSC's rate is known from two reads 100 ms
+    // apart, once a process; until then the read is unmeasured.
+    calibrated();
     // A fresh thread: its CPU time starts near 0 (well under a second).
     let (busy, slept) = std::thread::spawn(|| {
-        let start = thread_cpu_ns().expect("Linux reads the thread's CPU time");
+        let start = thread_cpu_ns().expect("this OS reads the thread's CPU time");
         assert!(start < 1_000_000_000, "{start}");
         let wall = std::time::Instant::now();
         let mut x = 0u64;
