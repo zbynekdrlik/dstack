@@ -133,7 +133,7 @@ impl LateWatch {
         let Some(first) = self.due(now_ns) else {
             return;
         };
-        let thread = tx.take_tx_thread_look();
+        let thread = tx.tx_thread_stats().take_look();
         let take = |s| LateCounts {
             packets: tx.lane(s).over_latency,
             relayed: tx.over_latency_relayed(s),

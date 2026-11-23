@@ -2653,7 +2653,7 @@ fn the_late_watch_logs_a_flow_s_late_packets_with_their_peak() {
     );
     // The look took them; the status's peaks since the start stay.
     assert_eq!(
-        rig.shared.take_tx_thread_look(),
+        rig.shared.tx_thread_stats().take_look(),
         crate::media::tx::split::TxThreadLook::default()
     );
     assert_eq!(rig.shared.tx_thread().pass_max_us, 9_000);
@@ -2674,7 +2674,7 @@ fn the_late_watch_logs_a_flow_s_late_packets_with_their_peak() {
         ""
     );
     assert_eq!(
-        rig.shared.take_tx_thread_look(),
+        rig.shared.tx_thread_stats().take_look(),
         crate::media::tx::split::TxThreadLook::default()
     );
     // A late packet in a second whose passes read no CPU time: `-`.

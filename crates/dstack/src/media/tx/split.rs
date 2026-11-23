@@ -31,7 +31,6 @@
 //! records (relaxed `fetch_max`, no lock, no allocation); the thread CPU
 //! clock is read around a pass, two system calls on Linux (no vDSO path).
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use super::{Transmitter, nanos};
@@ -45,12 +44,10 @@ use crate::stream::split::{Peak, cpu_between, oversleep_ns, thread_cpu_ns};
 pub struct TxThreadStats {
     oversleep_ns: Peak,
     pass_ns: Peak,
-    pass_cpu_ns: Peak,
-    /// A pass's CPU time was read since the start: `pass_cpu_ns`'s
-    /// maximum means something.
-    cpu_measured: AtomicBool,
-    /// ... and since the late watch's last look.
-    cpu_measured_look: AtomicBool,
+    /// A pass's CPU time plus 1, 0 while none was read: "measured" rides
+    /// in the peak itself, so a look takes both in one swap (a flag beside
+    /// it could pair a taken 0 with a measured mark).
+    pass_cpu_ns_1: Peak,
 }
 
 /// [`TxThreadStats`] as the status shows it, µs.
@@ -91,9 +88,7 @@ impl TxThreadStats {
     pub fn passed(&self, wall_ns: u64, cpu_ns: Option<u64>) {
         self.pass_ns.record(wall_ns);
         if let Some(cpu) = cpu_ns {
-            self.pass_cpu_ns.record(cpu);
-            self.cpu_measured.store(true, Ordering::Relaxed);
-            self.cpu_measured_look.store(true, Ordering::Relaxed);
+            self.pass_cpu_ns_1.record(cpu.saturating_add(1));
         }
     }
 
@@ -102,23 +97,16 @@ impl TxThreadStats {
         TxThreadView {
             oversleep_max_us: self.oversleep_ns.max() / 1_000,
             pass_max_us: self.pass_ns.max() / 1_000,
-            pass_max_cpu_us: self
-                .cpu_measured
-                .load(Ordering::Relaxed)
-                .then(|| self.pass_cpu_ns.max() / 1_000),
+            pass_max_cpu_us: self.pass_cpu_ns_1.max().checked_sub(1).map(|ns| ns / 1_000),
         }
     }
 
     /// The peaks since the last call, and a fresh start for the next (the
     /// late watch, once a second); the peaks since the start stay.
     pub fn take_look(&self) -> TxThreadLook {
-        let cpu = self.pass_cpu_ns.take_second();
         TxThreadLook {
             pass_ns: self.pass_ns.take_second(),
-            pass_cpu_ns: self
-                .cpu_measured_look
-                .swap(false, Ordering::Relaxed)
-                .then_some(cpu),
+            pass_cpu_ns: self.pass_cpu_ns_1.take_second().checked_sub(1),
             oversleep_ns: self.oversleep_ns.take_second(),
         }
     }

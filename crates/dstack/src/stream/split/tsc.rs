@@ -15,7 +15,16 @@
 //! the first read keeps a (TSC, wall) point, and the first read at least
 //! [`CALIBRATION_NS`] of wall time later sets the rate from the two
 //! ([`TscRate::observe`]). Until then a read is unmeasured (`None`), never
-//! a guess. Over 100 ms a 100 ns wall clock gives the rate to about 1e-6.
+//! a guess. Each point's wall time is read before and after its TSC read
+//! and taken at the middle; a point whose two wall reads are more than
+//! [`BRACKET_NS`] apart (the thread was preempted, or a DPC ran, between
+//! them) is no calibration point. So the rate is within 2e-4 (20 us over
+//! 100 ms), the wall clock's 100 ns quantum adding about 1e-6.
+//!
+//! Converting cycles by the TSC's rate holds only on a CPU whose TSC runs
+//! at a constant rate in every state (the invariant TSC, CPUID
+//! 0x8000_0007 EDX bit 8): elsewhere the read stays unmeasured
+//! ([`invariant_tsc`]).
 //!
 //! Everything here is pure (the TSC and the wall time come in), so it is
 //! tested on every OS; only the OS calls stay in the Windows glue.
@@ -26,6 +35,17 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// The wall time between the two points the TSC's rate is taken from, at
 /// least, ns.
 pub const CALIBRATION_NS: u64 = 100_000_000;
+
+/// The widest wall-time bracket around a calibration point's TSC read,
+/// ns ([`TscRate::observe`]).
+pub const BRACKET_NS: u64 = 20_000;
+
+/// Whether the TSC is invariant (a constant rate in every power and
+/// frequency state): the highest extended CPUID leaf `max_extended_leaf`
+/// reaches 0x8000_0007 and that leaf's EDX (`edx_80000007`) has bit 8.
+pub fn invariant_tsc(max_extended_leaf: u32, edx_80000007: u32) -> bool {
+    max_extended_leaf >= 0x8000_0007 && edx_80000007 & 0x100 != 0
+}
 
 /// The TSC's rate, ticks a second, from `ticks` counted over `wall_ns` of
 /// wall time; `None` under [`CALIBRATION_NS`] of wall time or with no tick
@@ -63,15 +83,22 @@ impl TscRate {
         }
     }
 
-    /// A read of the TSC (`tsc`) and the wall time (`wall_ns`, ns on one
-    /// fixed base): the rate once known, `None` before. The first read is
-    /// the start point; a later one at least [`CALIBRATION_NS`] past it
-    /// sets the rate for good.
-    pub fn observe(&self, tsc: u64, wall_ns: u64) -> Option<u64> {
+    /// A read of the TSC (`tsc`) between two wall-time reads
+    /// (`wall_before`, `wall_after`: ns on one fixed base): the rate once
+    /// known, `None` before. A read bracketed within [`BRACKET_NS`] is a
+    /// point at the bracket's middle: the first is the start, a later one
+    /// at least [`CALIBRATION_NS`] past it sets the rate for good. A wider
+    /// bracket is no point.
+    pub fn observe(&self, tsc: u64, wall_before: u64, wall_after: u64) -> Option<u64> {
         let hz = self.hz.load(Ordering::Relaxed);
         if hz != 0 {
             return Some(hz);
         }
+        let bracket = wall_after.saturating_sub(wall_before);
+        if bracket > BRACKET_NS {
+            return None;
+        }
+        let wall_ns = wall_before + bracket / 2;
         let &(tsc0, wall0) = self.start.get_or_init(|| (tsc, wall_ns));
         let hz = rate_hz(tsc.saturating_sub(tsc0), wall_ns.saturating_sub(wall0))?;
         self.hz.store(hz, Ordering::Relaxed);
@@ -79,11 +106,17 @@ impl TscRate {
     }
 }
 
-/// A thread's `cycles` as ns, with the TSC read `tsc` and the wall time
-/// `wall_ns` taken with them (they feed `rate` until it is known);
-/// `None` while the rate is unknown.
-pub fn thread_ns(cycles: u64, rate: &TscRate, tsc: u64, wall_ns: u64) -> Option<u64> {
-    cycles_ns(cycles, rate.observe(tsc, wall_ns)?)
+/// A thread's `cycles` as ns, with the TSC read `tsc` and the wall times
+/// around it (`wall_before`, `wall_after`) taken with them (they feed
+/// `rate` until it is known); `None` while the rate is unknown.
+pub fn thread_ns(
+    cycles: u64,
+    rate: &TscRate,
+    tsc: u64,
+    wall_before: u64,
+    wall_after: u64,
+) -> Option<u64> {
+    cycles_ns(cycles, rate.observe(tsc, wall_before, wall_after)?)
 }
 
 #[cfg(test)]
@@ -123,24 +156,65 @@ mod tests {
     #[test]
     fn the_rate_is_known_from_the_first_read_100_ms_past_the_start() {
         let r = TscRate::new();
-        assert_eq!(r.observe(1_000, 5_000), None, "the start point");
-        assert_eq!(r.observe(150_001_000, 50_005_000), None, "50 ms in");
+        assert_eq!(r.observe(1_000, 5_000, 5_000), None, "the start point");
+        assert_eq!(
+            r.observe(150_001_000, 50_005_000, 50_005_000),
+            None,
+            "50 ms in"
+        );
         // 100 ms after the start, 300 M ticks: 3 GHz.
-        assert_eq!(r.observe(300_001_000, 100_005_000), Some(3_000_000_000));
+        assert_eq!(
+            r.observe(300_001_000, 100_005_000, 100_005_000),
+            Some(3_000_000_000)
+        );
         // Fixed from then on, whatever a later read gives.
-        assert_eq!(r.observe(7, 9), Some(3_000_000_000));
+        assert_eq!(r.observe(7, 9, 1_000_000_000), Some(3_000_000_000));
         // A TSC read behind the start never sets a rate.
         let back = TscRate::default();
-        assert_eq!(back.observe(900, 0), None);
-        assert_eq!(back.observe(100, 200_000_000), None);
-        assert_eq!(back.observe(600_000_900, 200_000_000), Some(3_000_000_000));
+        assert_eq!(back.observe(900, 0, 0), None);
+        assert_eq!(back.observe(100, 200_000_000, 200_000_000), None);
+        assert_eq!(
+            back.observe(600_000_900, 200_000_000, 200_000_000),
+            Some(3_000_000_000)
+        );
+    }
+
+    #[test]
+    fn a_point_is_the_middle_of_a_bracket_of_at_most_20_us() {
+        let r = TscRate::new();
+        // Too wide a bracket (preempted between the reads): no start.
+        assert_eq!(r.observe(5, 0, 20_001), None);
+        // The start: TSC 0 at wall 1_000 (the middle of 0..2_000).
+        assert_eq!(r.observe(0, 0, 2_000), None);
+        // Too wide: no rate, however far past the start.
+        assert_eq!(r.observe(600_000_000, 200_000_000, 200_020_001), None);
+        // At the bound: TSC 300_003_000 at the middle 100_001_000 of a
+        // 20 us bracket, 100_000_000 ns after the start: 3.00003 GHz.
+        assert_eq!(
+            r.observe(300_003_000, 99_991_000, 100_011_000),
+            Some(3_000_030_000)
+        );
+    }
+
+    #[test]
+    fn only_an_invariant_tsc_converts() {
+        assert!(invariant_tsc(0x8000_0007, 0x100));
+        assert!(invariant_tsc(0x8000_0008, 0xffff_ffff));
+        assert!(!invariant_tsc(0x8000_0007, 0xfeff));
+        assert!(!invariant_tsc(0x8000_0007, 0));
+        // The leaf is not there: its EDX means nothing.
+        assert!(!invariant_tsc(0x8000_0006, 0x100));
+        assert!(!invariant_tsc(0, 0xffff_ffff));
     }
 
     #[test]
     fn a_thread_s_time_is_unmeasured_until_the_rate_is_known() {
         let r = TscRate::new();
-        assert_eq!(thread_ns(3_000, &r, 10, 0), None);
-        assert_eq!(thread_ns(3_000, &r, 2_000_000_010, 200_000_000), Some(300));
-        assert_eq!(thread_ns(3_159_000, &r, 0, 0), Some(315_900));
+        assert_eq!(thread_ns(3_000, &r, 10, 0, 0), None);
+        assert_eq!(
+            thread_ns(3_000, &r, 2_000_000_010, 200_000_000, 200_000_000),
+            Some(300)
+        );
+        assert_eq!(thread_ns(3_159_000, &r, 0, 0, 0), Some(315_900));
     }
 }

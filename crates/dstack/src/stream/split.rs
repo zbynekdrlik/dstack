@@ -118,8 +118,8 @@ pub use thread_cpu_of_windows as thread_cpu_ns;
 /// The calling thread's CPU time, ns (dstack #485): its cycles
 /// (`QueryThreadCycleTime`, TSC ticks without the interrupts' and DPCs'
 /// cycles) at the TSC's rate, calibrated once a process ([`tsc`]); `None`
-/// in the process's first 100 ms (the rate not yet known) or when the read
-/// fails. Windows glue over [`tsc::thread_ns`] (tested): excluded from the
+/// in the process's first 100 ms (the rate not yet known), on a CPU
+/// without an invariant TSC, or when the read fails. Windows glue over [`tsc::thread_ns`] (tested): excluded from the
 /// mutation gate, which never compiles it.
 #[cfg(all(windows, target_arch = "x86_64"))]
 pub fn thread_cpu_of_windows() -> Option<u64> {
@@ -129,6 +129,7 @@ pub fn thread_cpu_of_windows() -> Option<u64> {
 
     static RATE: tsc::TscRate = tsc::TscRate::new();
     static BASE: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    static INVARIANT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     let mut cycles = 0u64;
     // SAFETY: GetCurrentThread returns a pseudo handle valid on this
     // thread; `cycles` is a valid, writable u64 the call only writes.
@@ -136,11 +137,31 @@ pub fn thread_cpu_of_windows() -> Option<u64> {
     if ok == 0 {
         return None;
     }
+    if !*INVARIANT.get_or_init(invariant_tsc_of_windows) {
+        return None;
+    }
+    let base = *BASE.get_or_init(Instant::now);
+    let wall = || u64::try_from(base.elapsed().as_nanos()).unwrap_or(u64::MAX);
+    let before = wall();
     // SAFETY: RDTSC exists on every x86_64 CPU; it only reads the TSC.
     let tsc = unsafe { core::arch::x86_64::_rdtsc() };
-    let base = *BASE.get_or_init(Instant::now);
-    let wall = u64::try_from(base.elapsed().as_nanos()).unwrap_or(u64::MAX);
-    tsc::thread_ns(cycles, &RATE, tsc, wall)
+    let after = wall();
+    tsc::thread_ns(cycles, &RATE, tsc, before, after)
+}
+
+/// Whether this CPU's TSC is invariant ([`tsc::invariant_tsc`] over CPUID
+/// 0x8000_0000 and 0x8000_0007): the Windows glue's, read once a process.
+#[cfg(all(windows, target_arch = "x86_64"))]
+fn invariant_tsc_of_windows() -> bool {
+    use core::arch::x86_64::__cpuid;
+    // CPUID exists on every x86_64 CPU (a safe call); it only reads.
+    let max = __cpuid(0x8000_0000).eax;
+    let edx = if max >= 0x8000_0007 {
+        __cpuid(0x8000_0007).edx
+    } else {
+        0
+    };
+    tsc::invariant_tsc(max, edx)
 }
 
 #[cfg(not(any(target_os = "linux", all(windows, target_arch = "x86_64"))))]
