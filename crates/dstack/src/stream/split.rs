@@ -177,5 +177,27 @@ pub fn unmeasured_thread_cpu() -> Option<u64> {
 
 pub mod tsc;
 
+/// Whether this build reads a thread's CPU time ([`thread_cpu_ns`]: Linux,
+/// Windows x86_64); tests that expect a measured time wait [`calibrated`]
+/// first.
+#[cfg(test)]
+pub(crate) const MEASURED: bool = cfg!(any(
+    target_os = "linux",
+    all(windows, target_arch = "x86_64")
+));
+
+/// The thread CPU read's TSC rate known (dstack #485: Windows calibrates it
+/// from two reads 100 ms apart, once a process), so every later read is
+/// measured where [`MEASURED`]; returns at once on Linux and once known.
+#[cfg(test)]
+pub(crate) fn calibrated() {
+    if MEASURED && thread_cpu_ns().is_none() {
+        std::thread::sleep(std::time::Duration::from_nanos(
+            tsc::CALIBRATION_NS + 10_000_000,
+        ));
+        assert!(thread_cpu_ns().is_some(), "the TSC rate is known");
+    }
+}
+
 #[cfg(test)]
 mod tests;

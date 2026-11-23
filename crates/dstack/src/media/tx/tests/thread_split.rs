@@ -306,12 +306,14 @@ impl PtpClock for LateClock {
     }
 }
 
-/// The TX loop's wiring: it times each pass (its CPU time on Linux only)
-/// and reads the clock around each sleep, so a late wake shows as the
-/// oversleep in the status and in the restart line it causes.
+/// The TX loop's wiring: it times each pass (its CPU time on Linux and
+/// Windows x86_64, dstack #485) and reads the clock around each sleep, so
+/// a late wake shows as the oversleep in the status and in the restart
+/// line it causes.
 #[test]
 fn the_tx_loop_measures_its_sleeps_and_passes() {
     crate::test_log::undecided();
+    crate::stream::split::calibrated();
     let shared = shared_with(Vec::new());
     assert!(shared.set_source(0, Source::Counter));
     let rx = socket();
@@ -333,7 +335,7 @@ fn the_tx_loop_measures_its_sleeps_and_passes() {
     assert_eq!(view.oversleep_max_us, LateClock::LATE / 1_000, "{view:?}");
     assert_eq!(
         view.pass_max_cpu_us.is_some(),
-        cfg!(target_os = "linux"),
+        crate::stream::split::MEASURED,
         "{view:?}"
     );
     assert!(

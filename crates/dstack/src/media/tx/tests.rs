@@ -1953,6 +1953,7 @@ fn the_tx_thread_sends_rate_over_fpp_packets_a_second_never_early_and_ends_on_st
 /// thread goes on from there with every stamp in turn.
 #[test]
 fn the_relay_thread_sends_the_tx_packets_while_the_tx_thread_blocks() {
+    crate::stream::split::calibrated();
     let rig = Rig::new(Vec::new());
     assert!(rig.shared.set_source(0, Source::Counter));
     let (slot, _) = rig.flow(vec![Some(1)]);
@@ -1981,11 +1982,11 @@ fn the_relay_thread_sends_the_tx_packets_while_the_tx_thread_blocks() {
         tx
     });
     // dstack #359: the relay thread times its passes as the TX thread does
-    // (its CPU time on Linux only).
+    // (its CPU time on Linux and Windows x86_64, dstack #485).
     assert!(tx.before.pass_ns.is_some(), "{:?}", tx.before);
     assert_eq!(
         tx.before.pass_cpu_ns.is_some(),
-        cfg!(target_os = "linux"),
+        crate::stream::split::MEASURED,
         "{:?}",
         tx.before
     );

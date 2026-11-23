@@ -280,7 +280,7 @@ fn one_block(processor: Busy) -> PumpView {
 #[cfg(any(target_os = "linux", all(windows, target_arch = "x86_64")))]
 #[test]
 fn a_block_records_its_thread_cpu_time_beside_its_wall_time() {
-    calibrated();
+    crate::stream::split::calibrated();
     let fresh = PumpStats::new(TIMING, RATE).view();
     assert_eq!(fresh.max_process_cpu_us, None, "no block yet");
     let asleep = one_block(Busy {
@@ -307,16 +307,4 @@ fn a_block_s_cpu_time_is_unmeasured_off_linux() {
     let v = one_block(Busy { spin: true, ms: 2 });
     assert!(v.blocks >= 1, "{v:?}");
     assert_eq!(v.max_process_cpu_us, None);
-}
-
-/// The thread CPU read's TSC rate known (dstack #485: Windows calibrates it
-/// from two reads 100 ms apart, once a process); nothing to wait on Linux.
-#[cfg(any(target_os = "linux", all(windows, target_arch = "x86_64")))]
-fn calibrated() {
-    if crate::stream::split::thread_cpu_ns().is_none() {
-        std::thread::sleep(Duration::from_nanos(
-            crate::stream::split::tsc::CALIBRATION_NS + 10_000_000,
-        ));
-    }
-    assert!(crate::stream::split::thread_cpu_ns().is_some());
 }

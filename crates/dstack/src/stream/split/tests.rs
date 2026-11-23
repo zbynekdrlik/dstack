@@ -61,11 +61,7 @@ fn a_timespec_is_its_seconds_and_nanoseconds() {
 fn the_thread_cpu_time_counts_this_thread_s_work_and_not_its_sleep() {
     // Windows (dstack #485): the TSC's rate is known from two reads 100 ms
     // apart, once a process; until then the read is unmeasured.
-    if thread_cpu_ns().is_none() {
-        std::thread::sleep(std::time::Duration::from_nanos(
-            tsc::CALIBRATION_NS + 10_000_000,
-        ));
-    }
+    calibrated();
     // A fresh thread: its CPU time starts near 0 (well under a second).
     let (busy, slept) = std::thread::spawn(|| {
         let start = thread_cpu_ns().expect("this OS reads the thread's CPU time");
