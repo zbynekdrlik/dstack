@@ -176,6 +176,13 @@ fn the_tx_thread_s_passes_do_not_allocate() {
         .unwrap();
     let mut tx = Transmitter::new(Arc::clone(&shared));
     let start = T / u64::from(RATE) * 1_000_000_000;
+    // The thread CPU read's TSC rate known first (Windows, dstack #485:
+    // two reads 100 ms apart, once a process), so every pass is measured.
+    if dstack::stream::split::thread_cpu_ns().is_none() {
+        std::thread::sleep(std::time::Duration::from_nanos(
+            dstack::stream::split::tsc::CALIBRATION_NS + 10_000_000,
+        ));
+    }
     reset_violation_count();
     let base = std::time::Instant::now();
     assert_no_alloc(|| {
@@ -200,7 +207,10 @@ fn the_tx_thread_s_passes_do_not_allocate() {
     assert!(thread.pass_max_us > 0, "{thread:?}");
     assert_eq!(
         thread.pass_max_cpu_us.is_some(),
-        cfg!(target_os = "linux"),
+        cfg!(any(
+            target_os = "linux",
+            all(windows, target_arch = "x86_64")
+        )),
         "{thread:?}"
     );
     let (la, lb) = (shared.lane(0), shared.lane(1));

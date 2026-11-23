@@ -155,10 +155,10 @@ impl Json {
 ///   `oversleep_max_us` (the largest return of its sleep past its target:
 ///   scheduled late), `pass_max_us` (its longest pass, wall time: the
 ///   plans, keepalives and every packet due) and `pass_max_cpu_us` (the
-///   largest thread CPU time of a pass, Linux only; absent elsewhere: a
-///   pass far longer than its CPU time was preempted). The restart line
-///   carries the
-///   same three for the sleep and the pass before it (`oversleep_us`,
+///   largest thread CPU time of a pass, Linux and Windows x86_64 since
+///   dstack #485; absent elsewhere and in a Windows process's first
+///   100 ms: a pass far longer than its CPU time was preempted). The
+///   restart line carries the same three for the sleep and the pass before it (`oversleep_us`,
 ///   `last_pass_us`, `last_pass_cpu_us`, `-` when unmeasured).
 /// - `tx_pull` (dstack #363, only on a device whose app's TX the TX
 ///   thread fills, `media::tx::TxFill`): `blocks` filled, `rebootstraps`
@@ -288,7 +288,7 @@ impl Json {
 ///   `drain_max_us` and `drain_max_datagrams` (the longest socket drain
 ///   before a block, the most datagrams one drain read), `max_process_cpu_us`
 ///   (the largest block's thread CPU time; absent where unmeasured, off
-///   Linux); `wake_behind_buckets`
+///   Linux and Windows x86_64); `wake_behind_buckets`
 ///   (8 counts: under 0.5, 1, 2, 5, 10, 20, 50 ms, and 50 ms or more),
 ///   `late_wakes` (wakes one block or more behind), `late_wakes_recent`
 ///   (the last 32 of them, oldest first: `unix_ms` UTC, `behind_us`,

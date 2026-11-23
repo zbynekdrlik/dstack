@@ -273,19 +273,21 @@ fn one_block(processor: Busy) -> PumpView {
     stats.view()
 }
 
-/// A block's thread CPU time beside its wall time (Linux): a block that
-/// works has CPU time; a block whose thread is off the CPU (here asleep,
-/// in the field preempted) has its wall time and almost no CPU time.
-#[cfg(target_os = "linux")]
+/// A block's thread CPU time beside its wall time (Linux, Windows x86_64
+/// since dstack #485): a block that works has CPU time; a block whose
+/// thread is off the CPU (here asleep, in the field preempted) has its
+/// wall time and almost no CPU time.
+#[cfg(any(target_os = "linux", all(windows, target_arch = "x86_64")))]
 #[test]
 fn a_block_records_its_thread_cpu_time_beside_its_wall_time() {
+    calibrated();
     let fresh = PumpStats::new(TIMING, RATE).view();
     assert_eq!(fresh.max_process_cpu_us, None, "no block yet");
     let asleep = one_block(Busy {
         spin: false,
         ms: 20,
     });
-    let cpu = asleep.max_process_cpu_us.expect("Linux measures it");
+    let cpu = asleep.max_process_cpu_us.expect("measured here");
     assert!(asleep.max_process_us >= 20_000, "{asleep:?}");
     assert!(cpu < 2_000, "asleep 20 ms: {cpu} us of CPU");
     let working = one_block(Busy { spin: true, ms: 20 });
@@ -297,11 +299,24 @@ fn a_block_records_its_thread_cpu_time_beside_its_wall_time() {
     assert!(cpu <= working.max_process_us + 50, "{working:?}");
 }
 
-/// Off Linux a block's CPU time is unmeasured: absent, never a 0.
-#[cfg(not(target_os = "linux"))]
+/// Where no thread CPU clock is read (off Linux and Windows x86_64) a
+/// block's CPU time is unmeasured: absent, never a 0.
+#[cfg(not(any(target_os = "linux", all(windows, target_arch = "x86_64"))))]
 #[test]
 fn a_block_s_cpu_time_is_unmeasured_off_linux() {
     let v = one_block(Busy { spin: true, ms: 2 });
     assert!(v.blocks >= 1, "{v:?}");
     assert_eq!(v.max_process_cpu_us, None);
+}
+
+/// The thread CPU read's TSC rate known (dstack #485: Windows calibrates it
+/// from two reads 100 ms apart, once a process); nothing to wait on Linux.
+#[cfg(any(target_os = "linux", all(windows, target_arch = "x86_64")))]
+fn calibrated() {
+    if crate::stream::split::thread_cpu_ns().is_none() {
+        std::thread::sleep(Duration::from_nanos(
+            crate::stream::split::tsc::CALIBRATION_NS + 10_000_000,
+        ));
+    }
+    assert!(crate::stream::split::thread_cpu_ns().is_some());
 }

@@ -222,6 +222,10 @@ exclude_re = [
   # The pump's thread CPU read off Linux (dstack #354): never compiled on
   # the gate's Linux; the Linux read and its arithmetic are tested.
   "stream/split.rs.*unmeasured_thread_cpu",
+  # The Windows thread CPU read (dstack #485): QueryThreadCycleTime and
+  # RDTSC, never compiled on the gate's Linux; its arithmetic is
+  # stream::split::tsc (tested on every OS), and a Windows test reads it.
+  "stream/split.rs.*thread_cpu_of_windows",
   # The poller's log lines (log only) and its wrapper aimed at dsync's port
   # (its body `poll` runs against a stand-in server in the tests).
   "clock.rs.*os::log_event",

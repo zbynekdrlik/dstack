@@ -16,35 +16,41 @@
 //!   ([`Transmitter::timed_step`]: the plans, the keepalives and every
 //!   packet due). A pass that ends past the next packet's time asks its
 //!   sleep for a time already past, which records no oversleep.
-//! - **The pass was preempted** (`pass_cpu`, Linux): the TX thread's CPU
-//!   time over the same pass ([`crate::stream::split::thread_cpu_ns`]). A
-//!   pass far longer than its CPU time was not run in its middle; one whose
-//!   CPU time is near its wall time was current on its CPU, which on a VM
-//!   does not prove work (dstack #354: the host's steal and the interrupts
-//!   count as the thread's).
+//! - **The pass was preempted** (`pass_cpu`, Linux and Windows x86_64,
+//!   dstack #485): the TX thread's CPU time over the same pass
+//!   ([`crate::stream::split::thread_cpu_ns`]). A pass far longer than its
+//!   CPU time was not run in its middle; one whose CPU time is near its
+//!   wall time was current on its CPU, which on a VM does not prove work
+//!   (dstack #354: the host's steal and the interrupts count as the
+//!   thread's; Windows leaves the interrupts' and DPCs' cycles out).
 //!
-//! Each figure is a peak since the start (the status `tx_thread`) and the
-//! last of each goes into the restart line ([`Before`]), so a restart
-//! reads scheduled late, pass long or preempted. The TX thread only
+//! Each figure is a peak since the start (the status `tx_thread`) and
+//! since the late watch's last look (its line, [`TxThreadLook`], dstack
+//! #485), and the last of each goes into the restart line ([`Before`]), so
+//! a restart reads scheduled late, pass long or preempted. The TX thread only
 //! records (relaxed `fetch_max`, no lock, no allocation); the thread CPU
 //! clock is read around a pass, two system calls on Linux (no vDSO path).
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use super::{Transmitter, nanos};
 use crate::clock::{self, PtpClock};
-use crate::stream::split::{cpu_between, oversleep_ns, thread_cpu_ns};
+use crate::stream::split::{Peak, cpu_between, oversleep_ns, thread_cpu_ns};
 
-/// The TX thread's peaks since the start: written by the TX thread, read
-/// by the status.
+/// The TX thread's peaks since the start (the status) and since the late
+/// watch's last look (dstack #485, its line): written by the TX thread,
+/// read by the control side.
 #[derive(Debug, Default)]
 pub struct TxThreadStats {
-    oversleep_ns: AtomicU64,
-    pass_ns: AtomicU64,
-    pass_cpu_ns: AtomicU64,
-    /// A pass's CPU time was read (Linux): `pass_cpu_ns` means something.
+    oversleep_ns: Peak,
+    pass_ns: Peak,
+    pass_cpu_ns: Peak,
+    /// A pass's CPU time was read since the start: `pass_cpu_ns`'s
+    /// maximum means something.
     cpu_measured: AtomicBool,
+    /// ... and since the late watch's last look.
+    cpu_measured_look: AtomicBool,
 }
 
 /// [`TxThreadStats`] as the status shows it, µs.
@@ -54,35 +60,66 @@ pub struct TxThreadView {
     pub oversleep_max_us: u64,
     /// The longest pass, wall time.
     pub pass_max_us: u64,
-    /// The largest CPU time of a pass; `None` where unmeasured (off Linux).
+    /// The largest CPU time of a pass; `None` where unmeasured (off Linux
+    /// and Windows x86_64, and a Windows process's first 100 ms).
     pub pass_max_cpu_us: Option<u64>,
+}
+
+/// The TX thread's peaks since the late watch's last look, ns (dstack
+/// #485): the late line says from them whether the pass that sent the late
+/// packets ran long (CPU time near its wall time) or was held (wall time
+/// far above its CPU time: a DPC, an ISR or another thread), or whether
+/// the sleep before it returned late.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TxThreadLook {
+    /// The longest pass, wall time.
+    pub pass_ns: u64,
+    /// The largest CPU time of a pass; `None` when no pass's was read.
+    pub pass_cpu_ns: Option<u64>,
+    /// The largest return of the sleep past its target.
+    pub oversleep_ns: u64,
 }
 
 impl TxThreadStats {
     /// A sleep that returned `ns` past its target.
     pub fn overslept(&self, ns: u64) {
-        self.oversleep_ns.fetch_max(ns, Ordering::Relaxed);
+        self.oversleep_ns.record(ns);
     }
 
     /// A pass that took `wall_ns`, of it `cpu_ns` on the CPU (`None`:
     /// unmeasured).
     pub fn passed(&self, wall_ns: u64, cpu_ns: Option<u64>) {
-        self.pass_ns.fetch_max(wall_ns, Ordering::Relaxed);
+        self.pass_ns.record(wall_ns);
         if let Some(cpu) = cpu_ns {
-            self.pass_cpu_ns.fetch_max(cpu, Ordering::Relaxed);
+            self.pass_cpu_ns.record(cpu);
             self.cpu_measured.store(true, Ordering::Relaxed);
+            self.cpu_measured_look.store(true, Ordering::Relaxed);
         }
     }
 
     /// The peaks since the start.
     pub fn view(&self) -> TxThreadView {
         TxThreadView {
-            oversleep_max_us: self.oversleep_ns.load(Ordering::Relaxed) / 1_000,
-            pass_max_us: self.pass_ns.load(Ordering::Relaxed) / 1_000,
+            oversleep_max_us: self.oversleep_ns.max() / 1_000,
+            pass_max_us: self.pass_ns.max() / 1_000,
             pass_max_cpu_us: self
                 .cpu_measured
                 .load(Ordering::Relaxed)
-                .then(|| self.pass_cpu_ns.load(Ordering::Relaxed) / 1_000),
+                .then(|| self.pass_cpu_ns.max() / 1_000),
+        }
+    }
+
+    /// The peaks since the last call, and a fresh start for the next (the
+    /// late watch, once a second); the peaks since the start stay.
+    pub fn take_look(&self) -> TxThreadLook {
+        let cpu = self.pass_cpu_ns.take_second();
+        TxThreadLook {
+            pass_ns: self.pass_ns.take_second(),
+            pass_cpu_ns: self
+                .cpu_measured_look
+                .swap(false, Ordering::Relaxed)
+                .then_some(cpu),
+            oversleep_ns: self.oversleep_ns.take_second(),
         }
     }
 }

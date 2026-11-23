@@ -14,6 +14,7 @@ use tracing::{info, warn};
 
 use super::ring::Counters;
 use super::rx::{MAX_FLOWS as RX_FLOWS, RxShared};
+use super::tx::split::Us;
 use super::tx::{MAX_FLOWS, TxShared};
 
 /// How often the watch looks, ns.
@@ -74,11 +75,25 @@ impl LateWatch {
     /// taken at every look so a report covers that second only). The slots
     /// whose count rose; empty between looks.
     pub fn look(&mut self, now_ns: u64, take: impl Fn(usize) -> LateCounts) -> Vec<Late> {
+        match self.due(now_ns) {
+            Some(first) => self.looked(first, take),
+            None => Vec::new(),
+        }
+    }
+
+    /// Whether a look is due at `now_ns` (`Some`, true for the first, which
+    /// only learns), and the next one's time set; `None` between looks.
+    fn due(&mut self, now_ns: u64) -> Option<bool> {
         if self.next_ns.is_some_and(|next| now_ns < next) {
-            return Vec::new();
+            return None;
         }
         let first = self.next_ns.is_none();
         self.next_ns = Some(now_ns.saturating_add(EVERY_NS));
+        Some(first)
+    }
+
+    /// A due look's reports ([`LateWatch::look`]).
+    fn looked(&mut self, first: bool, take: impl Fn(usize) -> LateCounts) -> Vec<Late> {
         let mut out = Vec::new();
         for (slot, (seen, seen_relayed)) in self
             .seen
@@ -108,15 +123,24 @@ impl LateWatch {
     /// with how many of the packets the relay thread sent and how long after
     /// the last bounded escape began (`since_escape_us`, absent without
     /// one), so a late pass reads as the relay's or the TX thread's own
-    /// (dstack #177).
+    /// (dstack #177); and with the TX thread's longest pass, its largest
+    /// pass CPU time (`-` unmeasured) and its largest oversleep since the
+    /// last look (`pass_max_us`, `pass_max_cpu_us`, `oversleep_max_us`;
+    /// dstack #485), taken at every look, so a late pass reads as run long
+    /// (CPU near wall), held (wall far above CPU: a DPC, an ISR or another
+    /// thread) or woken late.
     pub fn watch(&mut self, now_ns: u64, tx: &TxShared) {
+        let Some(first) = self.due(now_ns) else {
+            return;
+        };
+        let thread = tx.take_tx_thread_look();
         let take = |s| LateCounts {
             packets: tx.lane(s).over_latency,
             relayed: tx.over_latency_relayed(s),
             age_peak_ns: tx.take_age_peak(s),
             since_escape_ns: tx.take_since_escape(s),
         };
-        for late in self.look(now_ns, take) {
+        for late in self.looked(first, take) {
             // The flow's other end (dstack #266), read here on the watch's
             // thread, never by the TX thread; a multicast flow has no one
             // receiver (`-`), its `dest` is the group.
@@ -133,6 +157,9 @@ impl LateWatch {
                 receiver_latency_us = tx.lane(late.slot).receiver_latency_ns / 1_000,
                 relayed = late.relayed,
                 since_escape_us = late.since_escape_ns.map(|ns| ns / 1_000),
+                pass_max_us = thread.pass_ns / 1_000,
+                pass_max_cpu_us = %Us(thread.pass_cpu_ns),
+                oversleep_max_us = thread.oversleep_ns / 1_000,
                 "TX packets older than the latency their receiver plays at: \
                  it counts them late"
             );

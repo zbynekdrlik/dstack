@@ -865,6 +865,13 @@ impl TxShared {
         self.tx_thread.view()
     }
 
+    /// The TX thread's peaks since the last call (dstack #485): the late
+    /// watch's only, once a second, for its line; [`TxShared::tx_thread`]
+    /// keeps the peaks since the start.
+    pub fn take_tx_thread_look(&self) -> split::TxThreadLook {
+        self.tx_thread.take_look()
+    }
+
     /// Every slot's bytes on the wire since the device started.
     pub fn bytes_sent(&self) -> u64 {
         self.lanes
