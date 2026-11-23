@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.214
+
+- `tools/linux/nic-burst-log.py` keeps bounded memory however long it runs (#408): a rolling window of the last per-ms rates (the rx_missed read interval, at most 60 s) and fixed top-10 lists of the busiest RX and RX+TX milliseconds, instead of every sample. Each rx_missed step's report is written and flushed when the step is seen, a heartbeat line comes every 60 s, and the end summary is the top-10. 22.11.2026's 14 h run of the old version grew to 12 GB and was OOM-killed. After a stall it never catches up with samples microseconds apart (no two samples less than 0.5 ms apart), a step's report spans back to the previous rx_missed read, and SIGTERM still writes the end summary. Same arguments; still read-only.
+- The tool's docstring gives the OBS-box run: `systemd-run -p MemoryMax=200M -p MemorySwapMax=0 -p CPUAffinity=0,1 -p Nice=19 -p CPUSchedulingPolicy=idle -p StandardOutput=truncate:... ...`, the script in a root-owned directory. Its tests (`tools/linux/tests/nic_burst_log_test.py`) run in CI's linux-tools job. No library change, no latency change.
+- **No library change, no latency change.**
+
 ## 0.6.213
 
 # CHANGELOG lines for dstack #482 (lane worktree-agent-aab8323652bfba34f; the supervisor puts them under the release's heading)
