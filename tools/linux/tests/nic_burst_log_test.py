@@ -143,6 +143,54 @@ class StepsStreamed(unittest.TestCase):
         self.assertIn("max RX 8 Mb/s", beats[0])
 
 
+class Review(unittest.TestCase):
+    """The review's findings on the first fix (#408)."""
+
+    def test_a_stall_gives_one_sample_not_a_catch_up_burst(self):
+        class StallingClock:
+            """Each read costs 10 us; at 0.5 s the thread stalls 50 ms."""
+
+            def __init__(self):
+                self.t = 0.0
+                self.stalled = False
+
+            def __call__(self):
+                self.t += 0.00001
+                if self.t >= 0.5 and not self.stalled:
+                    self.stalled = True
+                    self.t += 0.05
+                return self.t
+
+        out = Out()
+        log = nbl.BurstLog(out, stamp, every_s=1.0, first_missed=0)
+        nbl.sample_loop(log, FakeCounters(lambda n: 1000), StallingClock(), 1.0, queue.SimpleQueue())
+        times = [r[0] for r in log.window]
+        gaps = [b - a for a, b in zip(times, times[1:])]
+        # The old loop took ~50 samples 10 us apart after the stall: one
+        # 1000-byte read in 10 us read as 800 Mb/s.
+        self.assertGreaterEqual(min(gaps), 0.0005)
+        self.assertLess(max(r[1] for r in log.window), 16.01)
+
+    def test_the_step_report_spans_back_to_the_read_before(self):
+        out = Out()
+        log = nbl.BurstLog(out, stamp, every_s=1.0, first_missed=0)
+        rx = 0
+        for n in range(3000):
+            rx += 250_000 if n == 1960 else 1000
+            log.add(n / 1000.0, rx, n, 0)
+        # The previous read was at 1.95 s and ethtool took 49 ms, so the
+        # burst at 1.96 s is more than one cadence before the read at 2.999 s.
+        log.step(2.999, 0, 5, since=1.95)
+        self.assertIn("1.960 RX     2000 Mb/s", out.getvalue())
+
+    def test_a_reader_failure_ends_the_loop(self):
+        steps = queue.SimpleQueue()
+        steps.put(SystemExit("rig0: no rx_missed in ethtool -S"))
+        log = nbl.BurstLog(Out(), stamp, every_s=1.0, first_missed=0)
+        with self.assertRaises(SystemExit):
+            nbl.sample_loop(log, FakeCounters(lambda n: 1000), FakeClock(), 1.0, steps)
+
+
 class TopK(unittest.TestCase):
     def test_the_top_k_matches_a_brute_force_top_k(self):
         rng = random.Random(1)
