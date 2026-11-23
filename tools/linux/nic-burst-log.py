@@ -22,15 +22,27 @@ busy-waits on its CPU's time, so on a box where the application owns cores
 it must run on the others, at the lowest priority, with a memory cap. On an
 OBS box (OBS owns CPUs 2-15; CPUs 0-1 are the rig's background cores):
 
+    sudo install -D -m 0644 nic-burst-log.py /usr/local/lib/dstack/nic-burst-log.py
+    sudo install -d -m 0755 /var/log/dstack-burst
     sudo systemd-run --unit=dstack-burst --collect \\
       -p MemoryMax=200M -p MemorySwapMax=0 -p CPUAffinity=0,1 -p Nice=19 \\
       -p CPUSchedulingPolicy=idle \\
-      -p StandardOutput=file:/var/tmp/dstack-408/burst.txt \\
-      -p StandardError=file:/var/tmp/dstack-408/burst.err \\
-      python3 -I /var/tmp/dstack-408/nic-burst-log.py rig0 50400 1
+      -p StandardOutput=truncate:/var/log/dstack-burst/burst.txt \\
+      -p StandardError=truncate:/var/log/dstack-burst/burst.err \\
+      python3 -I /usr/local/lib/dstack/nic-burst-log.py rig0 50400 1
 
-At SCHED_IDLE a busy CPU 0-1 can cost the logger samples, never obs a frame;
-the cap ends the logger, never the box. Elsewhere, for a short run:
+The unit runs as root, so the script lives in a root-owned directory (never
+a world-writable one like /var/tmp, where another user could swap it).
+`truncate:` starts the file empty, so a rerun never leaves an older run's
+tail in it. At SCHED_IDLE a busy CPU 0-1 can cost the logger samples, never
+obs a frame; the cap ends the logger, never the box. `systemctl stop
+dstack-burst` (SIGTERM) still writes the end summary.
+
+After a stall (a busy CPU at SCHED_IDLE) the logger takes one sample and
+goes on from the current millisecond: it never catches up with samples taken
+microseconds apart, which would read one packet as a gigabit peak (no two
+samples are less than 0.5 ms apart). The rate after a stall is the average
+over the stall. Elsewhere, for a short run:
 
     taskset -c 18 python3 -I nic-burst-log.py rig0 600 1 > burst.txt
 
@@ -45,6 +57,7 @@ loss it measures. sysfs `rx_bytes`/`rx_packets` are software counters.
 import collections
 import heapq
 import queue
+import signal
 import subprocess
 import sys
 import threading
@@ -117,15 +130,19 @@ class BurstLog:
             peak = max((e[0] for e in self.top_rx), default=0.0)
             self.write([
                 f"# heartbeat {self.stamp(t)}: {self.samples} samples, "
-                f"max RX {peak:.0f} Mb/s, rx_missed {self.missed}"
+                f"max RX {peak:.0f} Mb/s so far, rx_missed {self.missed}"
             ])
 
-    def step(self, t, before, after):
-        """rx_missed read `after` at `t`, `before` at the read before: write
-        the busiest milliseconds of the interval before the read, now."""
+    def step(self, t, before, after, since=None):
+        """rx_missed read `after` at `t`, `before` at the read before (taken
+        at `since`, when known): write the busiest milliseconds of the
+        interval between the two reads, now. Without `since` the interval is
+        the cadence before `t`."""
         self.steps += 1
         self.missed = after
         span = min(self.every_s, WINDOW_MAX_S) if self.every_s > 0 else WINDOW_MAX_S
+        if since is not None:
+            span = min(t - since, WINDOW_MAX_S)
         interval = [r for r in self.window if t - span <= r[0] <= t]
         top = sorted(sorted(interval, key=lambda r: r[1], reverse=True)[:STEP_TOP])
         peak = max((r[1] for r in interval), default=0.0)
@@ -163,27 +180,46 @@ class BurstLog:
         self.write(lines)
 
 
+def drain(steps, log):
+    """Hands `log` every step the rx_missed reader put on `steps`; an
+    exception put there (the reader failed) is raised here."""
+    while not steps.empty():
+        item = steps.get_nowait()
+        if isinstance(item, BaseException):
+            raise item
+        log.step(*item)
+
+
 def sample_loop(log, read_counters, clock, run_s, steps):
     """Samples `read_counters()` once a millisecond of `clock()` for `run_s`
-    seconds, feeding `log`; after each sample, hands `log` every step the
-    rx_missed reader put on `steps` (an exception put there is raised).
-    Returns the number of samples."""
-    n = 0
+    seconds, feeding `log`, and drains `steps` after each sample. After a
+    stall it takes one sample and goes on from the current millisecond, never
+    a catch-up burst: no two samples are less than 0.5 ms apart. Returns the
+    number of samples."""
+    taken = 0
+    tick = 0  # the millisecond the next sample is due at
     start = clock()
     end = start + run_s
     now = start
     while now < end:
-        if now >= start + n / 1000.0:
+        if now >= start + tick / 1000.0:
             rx_bytes, rx_packets, tx_bytes = read_counters()
             log.add(now, rx_bytes, rx_packets, tx_bytes)
-            n += 1
-            while not steps.empty():
-                item = steps.get_nowait()
-                if isinstance(item, BaseException):
-                    raise item
-                log.step(*item)
+            taken += 1
+            # The next millisecond at least 0.5 ms away: a late sample never
+            # has a neighbour microseconds after it.
+            tick = max(tick + 1, int((now - start) * 1000 + 0.5) + 1)
+            drain(steps, log)
         now = clock()
-    return n
+    return taken
+
+
+class Stopped(Exception):
+    """SIGTERM (`systemctl stop`): end the run and write the summary."""
+
+
+def on_sigterm(signum, frame):
+    raise Stopped()
 
 
 def read_int(path):
@@ -229,35 +265,38 @@ def main():
         f"read every {every_s:g} s (0 = start and end only)"
     ])
 
-    steps = queue.SimpleQueue()  # (perf time, missed before, missed after) or an exception
+    # (read time, missed before, missed after, the read before's time) or an exception
+    steps = queue.SimpleQueue()
     stop = threading.Event()
 
     def watch_missed():
         last = first
+        last_t = start
         try:
             while not stop.wait(every_s):
                 now = missed_now(iface)
+                t = time.perf_counter()
                 if now != last:
-                    steps.put((time.perf_counter(), last, now))
+                    steps.put((t, last, now, last_t))
                     last = now
+                last_t = t
         except BaseException as e:  # handed to the sampling loop, which raises it
             steps.put(e)
 
     watcher = threading.Thread(target=watch_missed, daemon=True)
     if every_s > 0:
         watcher.start()
+    signal.signal(signal.SIGTERM, on_sigterm)
     try:
         sample_loop(log, read_counters, time.perf_counter, run_s, steps)
+    except Stopped:
+        log.write(["# stopped by SIGTERM"])
     finally:
         stop.set()
     if every_s > 0:
         watcher.join()
-    while not steps.empty():
-        item = steps.get_nowait()
-        if isinstance(item, BaseException):
-            raise item
-        log.step(*item)
-    log.finish(run_s, missed_now(iface))
+    drain(steps, log)
+    log.finish(time.perf_counter() - start, missed_now(iface))
 
 
 if __name__ == "__main__":
