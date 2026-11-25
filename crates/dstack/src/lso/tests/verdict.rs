@@ -54,16 +54,40 @@ fn dsg_s_rt640x64_10_79_50_1003_follows_the_standard() {
     );
 }
 
-/// mbc's RTL8156B on Realtek's newer package `rtu56cx22x64.sys`
-/// 1156.22.113.2026: not the standard's file, so it warns (its version is
-/// numerically above 11.19, which alone would pass).
+/// mbc's RTL8156B on Realtek's newer NetAdapterCx package
+/// `rtu56cx22x64.sys` 1156.22.113.2026 (dasio peer 25.11.2026, dasio#24):
+/// the standard's second allowed file, at its own minimum: quiet, in any
+/// case. One build under that minimum is old; 1156.22 is no pass for the
+/// other file's minimum alone.
 #[test]
-fn mbc_s_rtu56cx22x64_is_not_the_standard_s_file() {
+fn mbc_s_rtu56cx22x64_follows_the_standard_at_its_own_minimum() {
     let std = standard::embedded().unwrap();
-    let f = facts("Realtek", USB, "rtu56cx22x64.sys", "1156.22.113.2026");
+    for file in ["rtu56cx22x64.sys", "RTU56CX22X64.SYS"] {
+        let f = facts("Realtek", USB, file, "1156.22.113.2026");
+        assert_eq!(
+            entry_id(driver_verdict(std, &f)),
+            ("standard", "rtl8156b-windows"),
+            "{file}"
+        );
+    }
+    for version in ["1156.22.112.2026", "11.19.602.2025"] {
+        let f = facts("Realtek", USB, "rtu56cx22x64.sys", version);
+        assert_eq!(
+            entry_id(driver_verdict(std, &f)),
+            ("old", "rtl8156b-windows"),
+            "{version}"
+        );
+    }
+}
+
+/// The inbox driver `rtucx21x64.sys` stays bad at mbc's version too.
+#[test]
+fn the_inbox_driver_fails_at_mbc_s_version() {
+    let std = standard::embedded().unwrap();
+    let f = facts("Microsoft", USB, "rtucx21x64.sys", "1156.22.113.2026");
     assert_eq!(
         entry_id(driver_verdict(std, &f)),
-        ("file", "rtl8156b-windows")
+        ("bad", "rtl8156b-windows")
     );
 }
 
@@ -265,19 +289,20 @@ fn a_bad_driver_warns_with_the_dpc_evidence_from_the_standard() {
 /// open and the evidence when it is settled.
 #[test]
 fn a_wrong_file_or_an_old_version_warns_with_the_note() {
-    let mbc = line_of(&facts(
+    let ndis = line_of(&facts(
         "Realtek",
         USB,
-        "rtu56cx22x64.sys",
+        "rtu5cx22x64.sys",
         "1156.22.113.2026",
     ))
     .unwrap();
-    assert!(mbc.warn, "{mbc:?}");
+    assert!(ndis.warn, "{ndis:?}");
     assert!(
-        mbc.text.contains("rtucx22x64.sys 11.19.602.2025 or newer")
-            && mbc.text.contains("rtl8156b-windows")
-            && !mbc.text.contains("open: "),
-        "{mbc:?}"
+        ndis.text.contains(
+            "install rtucx22x64.sys 11.19.602.2025 or newer or rtu56cx22x64.sys 1156.22.113.2026 or newer"
+        ) && ndis.text.contains("rtl8156b-windows")
+            && !ndis.text.contains("open: "),
+        "{ndis:?}"
     );
     let old = line_of(&facts("Realtek", USB, "rtucx22x64.sys", "11.18.1.2024")).unwrap();
     assert!(old.warn && old.text.contains("minimum"), "{old:?}");
@@ -360,7 +385,7 @@ fn a_version_only_bad_entry_and_an_entry_without_a_minimum() {
         r#"{"version": 9, "adapters": [
             {"id": "t-windows", "chip": "RTL-T", "os": "windows",
              "match": {"hardware_id": ["PCI\\VEN_10EC&DEV_7777"]},
-             "driver": {"files": ["t.sys"], "status": "settled",
+             "driver": {"allowed": [{"file": "t.sys"}], "status": "settled",
                         "evidence": "the test's evidence",
                         "bad": [{"version": "1.2.3", "evidence": "bad 1.2.3"}]}}
         ]}"#,

@@ -126,3 +126,27 @@ fn a_service_s_driver_file_is_its_image_path_s_or_its_name_s() {
     assert_eq!(driver_file("rt640x64", None), "rt640x64.sys");
     assert_eq!(driver_file(" rt640x64 ", Some("")), "rt640x64.sys");
 }
+
+/// The RTL8156B entry allows two files, each at its own minimum (#465:
+/// mbc's newer package beside resolume's 11.19); a file without a minimum
+/// is named alone.
+#[test]
+fn each_allowed_file_carries_its_own_minimum() {
+    let std = embedded().unwrap();
+    let e = std
+        .windows_entry(r"USB\VID_0BDA&PID_8156&REV_31F4")
+        .unwrap();
+    let wanted: Vec<String> = e.driver.allowed.iter().map(Allowed::wanted).collect();
+    assert_eq!(
+        wanted,
+        [
+            "rtucx22x64.sys 11.19.602.2025 or newer",
+            "rtu56cx22x64.sys 1156.22.113.2026 or newer"
+        ]
+    );
+    let bare = Allowed {
+        file: "t.sys".into(),
+        min_version: None,
+    };
+    assert_eq!(bare.wanted(), "t.sys");
+}

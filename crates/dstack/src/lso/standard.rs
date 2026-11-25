@@ -56,11 +56,9 @@ pub struct Match {
 /// An entry's driver rule.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct DriverRule {
-    /// Windows: the allowed driver files (`rt640x64.sys`).
+    /// Windows: the allowed driver files, each with its own minimum.
     #[serde(default)]
-    pub files: Vec<String>,
-    /// The lowest allowed version, when the standard has one.
-    pub min_version: Option<String>,
+    pub allowed: Vec<Allowed>,
     /// Drivers that fail, each with its evidence.
     #[serde(default)]
     pub bad: Vec<Bad>,
@@ -70,6 +68,27 @@ pub struct DriverRule {
     pub evidence: String,
     /// The measurement that decides an open rule.
     pub plan: Option<String>,
+}
+
+/// One allowed Windows driver file and its own lowest version (#465: the
+/// RTL8156B entry allows `rtucx22x64.sys` from 11.19.602.2025 and
+/// `rtu56cx22x64.sys` from 1156.22.113.2026).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct Allowed {
+    /// The driver file (`rt640x64.sys`), matched in any case.
+    pub file: String,
+    /// The lowest allowed version of this file, when the standard has one.
+    pub min_version: Option<String>,
+}
+
+impl Allowed {
+    /// `file min or newer`, or the file alone without a minimum.
+    pub fn wanted(&self) -> String {
+        match &self.min_version {
+            Some(min) => format!("{} {min} or newer", self.file),
+            None => self.file.clone(),
+        }
+    }
 }
 
 /// A driver the standard names bad: a file, a version, or both.

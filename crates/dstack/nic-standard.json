@@ -1,13 +1,13 @@
 {
-  "schema": "dstack-nic-standard/1",
-  "version": 4,
-  "updated": "2026-11-20",
+  "schema": "dstack-nic-standard/2",
+  "version": 5,
+  "updated": "2026-11-25",
   "issue": "https://github.com/zbynekdrlik/dstack/issues/465",
   "doc": "docs/nic-standard.md",
   "scope": "Every Realtek NIC that is up on a production PC with a Dante leg (docs/two-networks.md, scope). One entry per chip and OS; a Realtek adapter without an entry fails until it is measured and added. Read-only checkers: tools/windows/nic-standard-check.ps1, tools/linux/nic-standard-check.py.",
   "fields": {
     "match": "windows: hardware_id prefixes of the device's first hardware id (case-insensitive); linux: usb or pci vendor:product ids (lowercase hex)",
-    "driver": "windows: files (the allowed DriverFileName); linux: modules and an optional firmware; both: min_version, bad (a file, a version, or both, that fails, with evidence), status, evidence, plan. Every object takes only its documented keys: an unknown key is refused",
+    "driver": "windows: allowed, a list of objects, each a file (an allowed DriverFileName, any case, named once) with its own optional min_version and evidence; linux: modules and an optional firmware; both: bad (a file, a version, or both, that fails, with evidence), status, evidence, plan. Every object takes only its documented keys: an unknown key is refused",
     "expected": "a string, or a list of strings any of which passes; null with status report",
     "compare": "equals (default), bits (every bit of expected is set), contains (the value holds the expected text)",
     "absent": "fail (default): the keyword must be there; pass: a driver without the keyword passes",
@@ -39,14 +39,16 @@
       "os": "windows",
       "match": {"hardware_id": ["USB\\VID_0BDA&PID_8156"]},
       "driver": {
-        "files": ["rtucx22x64.sys"],
-        "min_version": "11.19.602.2025",
+        "allowed": [
+          {"file": "rtucx22x64.sys", "min_version": "11.19.602.2025", "evidence": "Realtek's NetAdapterCx driver 11.19.602.2025 carries the transmit-queue keywords and measured clean against the inbox driver (dstack #425, songplayer#337). Fleet: resolume-snv and resolume-pp."},
+          {"file": "rtu56cx22x64.sys", "min_version": "1156.22.113.2026", "evidence": "Realtek's newer NetAdapterCx package 1156.22.113.2026 (oem69.inf, Realtek Gaming USB 2.5GbE Family Controller) on mbc-snv at PendingTransmits 8 / TransmitBufferLen 64 since 21.11.2026 12:46 CET (dasio peer 25.11.2026). dcontroller's per-second max arrival lateness 21.11 12:50-14:36 CET: stream-obs <- mbc p50 1125, p99 1729, p999 3041, max 3083 us against a 13041 us latency, 0 over it; MBC-SNV-dlisten <- mbc p50 854, p99 927, max 1239 us. The same as before at 3/37 (p99 1708, max 3270 us): no change beyond noise (dasio#24, comments of 21.11). The owner's rule is the newest Realtek driver, not an old pin."}
+        ],
         "bad": [
           {"file": "rtucx21x64.sys", "evidence": "Microsoft's inbox NetAdapterCx driver 11.4.211.2022: a 3-URB / 18-buffer send queue, no PendingTransmits keyword; 6400-9700 late Dante packets a busy minute at dsg against 198 an hour on 11.19.602.2025 at 8 / 64 (dstack #425, songplayer#337)"},
           {"file": "rtump64x64.sys", "evidence": "Realtek's NDIS driver 10.68.20: USB/WDF DPCs up to 19.3 ms against 0.28 ms on the Cx driver, A/B on mbc 18.11.2026 (dstack #290)"}
         ],
         "status": "settled",
-        "evidence": "Realtek's NetAdapterCx driver 11.19.602.2025 carries the transmit-queue keywords and measured clean against the inbox driver (dstack #425, songplayer#337); the Cx family against NDIS (dstack #290). Fleet: resolume-snv and resolume-pp."
+        "evidence": "Realtek's NetAdapterCx drivers, each at its own minimum: 11.19.602.2025 carries the transmit-queue keywords and measured clean against the inbox driver (dstack #425, songplayer#337); the newer package 1156.22.113.2026 ran the #290 A/B on mbc (DPCs under 0.3 ms against NDIS) and, at the standard's 8 / 64 queue, read the same Dante lateness as at 3 / 37 on the same driver (dasio#24, dasio peer 25.11.2026; no driver-to-driver lateness comparison); the Cx family against NDIS (dstack #290). The owner's rule is the newest Realtek driver. Fleet: resolume-snv and resolume-pp on 11.19, mbc-snv on 1156.22."
       },
       "values": [
         {"key": "PendingTransmits", "name": "Transmit URBs", "expected": "8", "status": "open", "evidence": "3 -> 8 (with buffers 18 -> 64): receivers' reorders ~9/h -> ~3/h, the FOH card's peak 9.6 -> 4.7 ms (dstack receiver A/B 10.11.2026, songplayer#255/#285); inbox 3 -> 8 cut dsg's late packets ~100x (dstack #425).", "plan": "8 vs 32 on resolume-pp with two NDI receivers, by #425's ndiD capture (pktmon on TCPIP / NetAdapterCx / miniport, a detached 60 s capture, .claude/rules/windows-pcs.md): Dante TCPIP -> miniport p99 against 9.4 ms and max against 18.4 ms at 8; the value with the lower p99 and max becomes the standard."},
@@ -119,8 +121,7 @@
       "os": "windows",
       "match": {"hardware_id": ["PCI\\VEN_10EC&DEV_8125", "PCI\\VEN_10EC&DEV_8168"]},
       "driver": {
-        "files": ["rt640x64.sys"],
-        "min_version": "10.79.20.1003",
+        "allowed": [{"file": "rt640x64.sys", "min_version": "10.79.20.1003"}],
         "bad": [
           {"file": "rt640x64.sys", "version": "10.72.524.2024", "evidence": "a 20-30 ms receive DPC every ~100 s on FOH's RTL8125 (dasio#1, 2.11.2026; docs/windows-box.md; dstack's former start-line list), and no later measurement keeps it"}
         ],
@@ -235,8 +236,7 @@
       "os": "windows",
       "match": {"hardware_id": ["RTK_VLANMP"]},
       "driver": {
-        "files": ["RtVlan640.sys"],
-        "min_version": "10.4.1117.2020",
+        "allowed": [{"file": "RtVlan640.sys", "min_version": "10.4.1117.2020"}],
         "status": "settled",
         "evidence": "none yet: fleet value (resolume-snv, resolume-pp, dsg). Never disable or restart one (dstack #239)."
       },

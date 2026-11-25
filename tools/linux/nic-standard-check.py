@@ -55,7 +55,7 @@ import subprocess
 import sys
 import urllib.request
 
-SCHEMA = "dstack-nic-standard/1"
+SCHEMA = "dstack-nic-standard/2"
 DEFAULT_STANDARD = (
     "https://raw.githubusercontent.com/zbynekdrlik/dstack/main/docs/nic-standard.json"
 )
@@ -97,11 +97,13 @@ EEE_KEYS = {"name", "scope", "windows", "linux", "evidence"}
 EEE_WINDOWS_KEYS = {"keywords", "off", "display_name", "display_off", "display_on"}
 EEE_LINUX_KEYS = {"off"}
 ENTRY_KEYS = {"id", "chip", "covers", "os", "match", "driver", "values"}
-DRIVER_KEYS = {"files", "modules", "min_version", "bad", "status", "evidence", "plan", "firmware"}
+DRIVER_KEYS = {"allowed", "modules", "bad", "status", "evidence", "plan", "firmware"}
+ALLOWED_KEYS = {"file", "min_version", "evidence"}
 BAD_KEYS = {"file", "version", "evidence"}
 VALUE_KEYS = {"key", "name", "expected", "compare", "absent", "status", "profile", "evidence", "plan"}
-# The driver's names per OS: Windows judges the driver file, Linux the module.
-DRIVER_NAMES = {"windows": "files", "linux": "modules"}
+# The driver's names per OS: Windows judges the driver file (each allowed
+# file with its own minimum, #465), Linux the module.
+DRIVER_NAMES = {"windows": "allowed", "linux": "modules"}
 
 
 def _only(where, obj, allowed):
@@ -120,6 +122,26 @@ def _text(where, obj, key, required=False):
         raise StandardError(f"{where}: {key} must be a non-empty string")
 
 
+def _allowed(eid, allowed):
+    """Whether `allowed` is a non-empty list of allowed files: objects, each
+    naming its file once (any case), with an optional minimum and evidence.
+    A malformed item raises."""
+    if not isinstance(allowed, list) or not allowed:
+        return False
+    seen = set()
+    for item in allowed:
+        if not isinstance(item, dict):
+            return False
+        _only(f"{eid}/allowed", item, ALLOWED_KEYS)
+        _text(f"{eid}/allowed", item, "file", required=True)
+        _text(f"{eid}/allowed", item, "min_version")
+        _text(f"{eid}/allowed", item, "evidence")
+        if item["file"].casefold() in seen:
+            raise StandardError(f"{eid}: the allowed file {item['file']} is named twice")
+        seen.add(item["file"].casefold())
+    return True
+
+
 def _validate_driver(eid, os_name, driver):
     if not isinstance(driver, dict):
         raise StandardError(f"{eid}: no driver")
@@ -127,9 +149,11 @@ def _validate_driver(eid, os_name, driver):
     _text(f"{eid}/driver", driver, "evidence", required=True)
     names = DRIVER_NAMES[os_name]
     other = DRIVER_NAMES["linux" if os_name == "windows" else "windows"]
-    if not _strings(driver.get(names)) or other in driver:
+    listed = driver.get(names)
+    shaped = _allowed(eid, listed) if os_name == "windows" else _strings(listed)
+    if not shaped or other in driver:
         raise StandardError(f"{eid}: a {os_name} driver names its {names} (and no {other})")
-    for key in ("min_version", "plan", "firmware"):
+    for key in ("plan", "firmware"):
         _text(f"{eid}/driver", driver, key)
     if os_name == "windows" and "firmware" in driver:
         raise StandardError(f"{eid}: Windows has no firmware read; a firmware rule is Linux only")
@@ -452,12 +476,13 @@ def compare_versions(a, b):
 
 
 def judge_driver(spec, facts):
-    """The driver's rows: a bad driver, an allowed file or module, the
-    minimum version, the firmware."""
+    """The driver's rows: a bad driver, an allowed file or module, that
+    file's own minimum version, the firmware."""
     rows = []
     name = facts.get("driver", "")
     version = facts.get("driver:version", "")
-    allowed = spec.get("files") or spec.get("modules") or []
+    files = spec.get("allowed", [])
+    allowed = [a["file"] for a in files] or spec.get("modules") or []
     note = spec["evidence"]
     if spec.get("status") == "open":
         note = "open: " + spec["plan"]
@@ -468,9 +493,10 @@ def judge_driver(spec, facts):
     if name.casefold() not in [a.casefold() for a in allowed]:
         return [("FAIL", "driver", "|".join(allowed), name or "(none)", note)]
     rows.append(("PASS", "driver", "|".join(allowed), name, note))
-    if spec.get("min_version"):
-        ok = bool(version) and compare_versions(version, spec["min_version"]) >= 0
-        rows.append(("PASS" if ok else "FAIL", "driver:version", ">=" + spec["min_version"], version or "(none)", note))
+    minimum = next((a.get("min_version") for a in files if a["file"].casefold() == name.casefold()), None)
+    if minimum:
+        ok = bool(version) and compare_versions(version, minimum) >= 0
+        rows.append(("PASS" if ok else "FAIL", "driver:version", ">=" + minimum, version or "(none)", note))
     else:
         rows.append(("INFO", "driver:version", "(no standard yet)", version or "(none)", note))
     if "firmware" in spec:

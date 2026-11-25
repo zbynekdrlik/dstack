@@ -57,7 +57,7 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2.0
 
-$script:NicSchema = 'dstack-nic-standard/1'
+$script:NicSchema = 'dstack-nic-standard/2'
 $script:NicExit = 0
 $script:NicMatchKeys = @{ windows = @('hardware_id'); linux = @('usb', 'pci') }
 
@@ -111,12 +111,14 @@ $script:NicKeys = @{
     eeewin = @('keywords', 'off', 'display_name', 'display_off', 'display_on')
     eeelin = @('off')
     entry  = @('id', 'chip', 'covers', 'os', 'match', 'driver', 'values')
-    driver = @('files', 'modules', 'min_version', 'bad', 'status', 'evidence', 'plan', 'firmware')
+    driver = @('allowed', 'modules', 'bad', 'status', 'evidence', 'plan', 'firmware')
+    allowed = @('file', 'min_version', 'evidence')
     bad    = @('file', 'version', 'evidence')
     value  = @('key', 'name', 'expected', 'compare', 'absent', 'status', 'profile', 'evidence', 'plan')
 }
-# The driver's names per OS: Windows judges the driver file, Linux the module.
-$script:NicDriverNames = @{ windows = 'files'; linux = 'modules' }
+# The driver's names per OS: Windows judges the driver file (each allowed
+# file with its own minimum, #465), Linux the module.
+$script:NicDriverNames = @{ windows = 'allowed'; linux = 'modules' }
 
 function Assert-NicOnly {
     param([string]$Where, $Object, [string]$Kind)
@@ -135,18 +137,39 @@ function Assert-NicText {
     if (-not ($v -is [string]) -or $v -eq '') { throw "${Where}: $Key must be a non-empty string" }
 }
 
+# Whether $Allowed is a non-empty list of allowed files: objects, each naming
+# its file once (any case), with an optional minimum and evidence. A malformed
+# item throws. The same rule as the Python checker's _allowed.
+function Test-NicAllowed {
+    param([string]$Id, $Allowed)
+    if ($null -eq $Allowed -or -not ($Allowed -is [array]) -or @($Allowed).Count -eq 0) { return $false }
+    $seen = @{}
+    foreach ($item in @($Allowed)) {
+        if ($null -eq $item -or -not ($item -is [psobject]) -or $item -is [string]) { return $false }
+        Assert-NicOnly "$Id/allowed" $item 'allowed'
+        Assert-NicText "$Id/allowed" $item 'file' -Required
+        Assert-NicText "$Id/allowed" $item 'min_version'
+        Assert-NicText "$Id/allowed" $item 'evidence'
+        $key = ([string]$item.file).ToLowerInvariant()
+        if ($seen.ContainsKey($key)) { throw "${Id}: the allowed file $($item.file) is named twice" }
+        $seen[$key] = $true
+    }
+    return $true
+}
+
 function Test-NicStandardDriver {
     param([string]$Id, [string]$Os, $Driver)
     if ($null -eq $Driver -or -not ($Driver -is [psobject])) { throw "${Id}: no driver" }
     Assert-NicOnly "$Id/driver" $Driver 'driver'
     Assert-NicText "$Id/driver" $Driver 'evidence' -Required
     $namesKey = $script:NicDriverNames[$Os]
-    $otherKey = if ($Os -ceq 'windows') { 'modules' } else { 'files' }
+    $otherKey = if ($Os -ceq 'windows') { 'modules' } else { 'allowed' }
     $names = Get-NicList $Driver $namesKey
-    if (-not (Test-NicStrings $names) -or (Test-NicHasProp $Driver $otherKey)) {
+    $shaped = if ($Os -ceq 'windows') { Test-NicAllowed $Id $names } else { Test-NicStrings $names }
+    if (-not $shaped -or (Test-NicHasProp $Driver $otherKey)) {
         throw "${Id}: a $Os driver names its $namesKey (and no $otherKey)"
     }
-    foreach ($k in @('min_version', 'plan', 'firmware')) { Assert-NicText "$Id/driver" $Driver $k }
+    foreach ($k in @('plan', 'firmware')) { Assert-NicText "$Id/driver" $Driver $k }
     if ($Os -ceq 'windows' -and (Test-NicHasProp $Driver 'firmware')) { throw "${Id}: Windows has no firmware read; a firmware rule is Linux only" }
     $status = Get-NicProp $Driver 'status' 'settled'
     if (-not ($status -ceq 'settled' -or $status -ceq 'open')) { throw "${Id}: unknown driver status '$status'" }
@@ -348,7 +371,8 @@ function Compare-NicVersion {
     return 0
 }
 
-# The driver's rows: a bad driver, an allowed file, the minimum version.
+# The driver's rows: a bad driver, an allowed file, that file's own minimum
+# version.
 function Test-NicDriver {
     param($Spec, [string]$File, [string]$Version)
     $note = [string]$Spec.evidence
@@ -363,13 +387,15 @@ function Test-NicDriver {
             return
         }
     }
-    $allowed = @(Get-NicProp $Spec 'files' @())
-    if (-not ($allowed | Where-Object { $_ -ieq $File })) {
+    $files = @(Get-NicProp $Spec 'allowed' @())
+    $allowed = @($files | ForEach-Object { [string]$_.file })
+    $match = @($files | Where-Object { [string]$_.file -ieq $File })
+    if ($match.Count -eq 0) {
         New-NicRow 'FAIL' 'driver' ($allowed -join '|') $(if ($File) { $File } else { '(none)' }) $note
         return
     }
     New-NicRow 'PASS' 'driver' ($allowed -join '|') $File $note
-    $min = Get-NicProp $Spec 'min_version'
+    $min = Get-NicProp $match[0] 'min_version'
     if ($min) {
         $verdict = if ($Version -and (Compare-NicVersion $Version $min) -ge 0) { 'PASS' } else { 'FAIL' }
         New-NicRow $verdict 'driver:version' ">=$min" $(if ($Version) { $Version } else { '(none)' }) $note

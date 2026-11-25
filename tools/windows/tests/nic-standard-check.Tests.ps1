@@ -37,7 +37,7 @@ function Entry { param([string]$Id) @($std.adapters) | Where-Object { $_.id -eq 
 function ValueSpec { param([string]$Id, [string]$Key) @((Entry $Id).values) | Where-Object { $_.key -eq $Key } }
 
 # ------------------------------------------------------------ the file
-Check 'the repo file reads as the schema, version 1 or later' { $std.schema -eq 'dstack-nic-standard/1' -and $std.version -ge 1 }
+Check 'the repo file reads as the schema, version 5 or later' { $std.schema -eq 'dstack-nic-standard/2' -and $std.version -ge 5 }
 Check 'PendingTransmits stays 8, open, with its plan' {
     $v = ValueSpec 'rtl8156b-windows' 'PendingTransmits'
     $v.expected -eq '8' -and $v.status -eq 'open' -and $v.plan -like '*#425*'
@@ -68,7 +68,7 @@ Check 'a malformed file is refused, as the Python checker refuses it' {
     (Refused { param($s) (@(& $v $s) | Where-Object { $_.PSObject.Properties['compare'] })[0].expected = '0x08' }) -and
     (Refused { param($s) $s.adapters[1].id = $s.adapters[0].id }) -and
     (Refused { param($s) $s.adapters[0].driver.PSObject.Properties.Remove('evidence') }) -and
-    (Refused { param($s) $s.adapters[0].driver.PSObject.Properties.Remove('files') }) -and
+    (Refused { param($s) $s.adapters[0].driver.PSObject.Properties.Remove('allowed') }) -and
     (Refused { param($s) $s.adapters[0].driver.bad[0].PSObject.Properties.Remove('evidence') }) -and
     (Refused { param($s) $s.adapters[0].driver | Add-Member -NotePropertyName firmware -NotePropertyValue 'x' }) -and
     (Refused { param($s) $s.adapters[0].os = 'macos' }) -and
@@ -88,17 +88,27 @@ Check 'an unknown key, a wrong type or the wrong driver names are refused' {
     (Refused { param($s) (& $d $s).bad[0] | Add-Member -NotePropertyName why -NotePropertyValue 'x' }) -and
     (Refused { param($s) (& $d $s).bad = [pscustomobject]@{ file = 'x.sys'; evidence = 'e' } }) -and
     (Refused { param($s) (& $d $s).bad = $null }) -and
-    (Refused { param($s) (& $d $s).min_version = 11 }) -and
+    (Refused { param($s) (& $d $s).allowed[0].min_version = 11 }) -and
+    (Refused { param($s) (& $d $s) | Add-Member -NotePropertyName min_version -NotePropertyValue '11.19.602.2025' }) -and
+    (Refused { param($s) (& $d $s) | Add-Member -NotePropertyName files -NotePropertyValue @('rtucx22x64.sys') }) -and
+    (Refused { param($s) (& $d $s).PSObject.Properties.Remove('allowed') }) -and
+    (Refused { param($s) (& $d $s).allowed = @('rtucx22x64.sys') }) -and
+    (Refused { param($s) (& $d $s).allowed = @() }) -and
+    (Refused { param($s) (& $d $s).allowed = [pscustomobject]@{ file = 'x.sys' } }) -and
+    (Refused { param($s) (& $d $s).allowed[0].PSObject.Properties.Remove('file') }) -and
+    (Refused { param($s) (& $d $s).allowed[0] | Add-Member -NotePropertyName version -NotePropertyValue '1' }) -and
+    (Refused { param($s) (& $d $s).allowed[0].evidence = '' }) -and
+    (Refused { param($s) (& $d $s).allowed = @((& $d $s).allowed) + @([pscustomobject]@{ file = 'RTUCX22X64.SYS' }) }) -and
     (Refused { param($s) (& $d $s) | Add-Member -NotePropertyName plan -NotePropertyValue 7 }) -and
     (Refused { param($s) (& $d $s) | Add-Member -NotePropertyName modules -NotePropertyValue @('r8152') }) -and
-    (Refused { param($s) $s.adapters[1].driver | Add-Member -NotePropertyName files -NotePropertyValue @('r8152.ko') }) -and
+    (Refused { param($s) $s.adapters[1].driver | Add-Member -NotePropertyName allowed -NotePropertyValue @([pscustomobject]@{ file = 'r8152.ko' }) }) -and
     (Refused { param($s) $s.adapters[1].driver | Add-Member -NotePropertyName firmware -NotePropertyValue 3 }) -and
     (Refused { param($s) (& $bits $s).expected = [string][char]0x00B2 }) -and
     (Refused { param($s) (& $bits $s).expected = ('1' * 19) })
 }
 Check 'a one-item list and an empty list in the file stay lists' {
     $s = $standardText | ConvertFrom-Json
-    $files = Get-NicList (@($s.adapters) | Where-Object { $_.id -eq 'rtl8156b-windows' }).driver 'files'
+    $files = Get-NicList (@($s.adapters) | Where-Object { $_.id -eq 'realtek-vlan-windows' }).driver 'allowed'
     $none = Get-NicList (@($s.adapters) | Where-Object { $_.id -eq 'realtek-vlan-windows' }) 'values'
     ($files -is [array]) -and $files.Count -eq 1 -and ($none -is [array]) -and $none.Count -eq 0
 }
@@ -106,7 +116,7 @@ Check 'a file of another schema is refused' {
     $tmp = [IO.Path]::GetTempFileName()
     try {
         Set-Content -LiteralPath $tmp -Value '{"schema": "other/1", "version": 1, "adapters": []}' -Encoding UTF8
-        try { Read-NicStandard $tmp | Out-Null; $false } catch { $_.Exception.Message -like 'not a dstack-nic-standard/1 file*' }
+        try { Read-NicStandard $tmp | Out-Null; $false } catch { $_.Exception.Message -like 'not a dstack-nic-standard/2 file*' }
     } finally { Remove-Item -LiteralPath $tmp -Force }
 }
 
@@ -166,13 +176,20 @@ Check 'versions compare number by number' {
     (Compare-NicVersion '10.79.50.1003' '10.79.50.1003') -eq 0 -and
     (Compare-NicVersion '10.79.20' '10.79.20.0') -eq 0
 }
-Check 'the RTL8156B driver: 11.19 passes, older or another file fails, NDIS names its evidence' {
+Check 'the RTL8156B driver: 11.19 and mbc''s 1156.22 pass at their own minimum, older or another file fails, NDIS names its evidence' {
     $d = (Entry 'rtl8156b-windows').driver
     $v = { param($f, $ver) (@(Test-NicDriver $d $f $ver) | ForEach-Object { $_.Verdict }) -join ',' }
     (& $v 'rtucx22x64.sys' '11.19.602.2025') -eq 'PASS,PASS' -and
     (& $v 'rtucx22x64.sys' '11.18.1.2025') -eq 'PASS,FAIL' -and
     (& $v 'rtucx21x64.sys' '11.4.211.2022') -eq 'FAIL' -and
-    (& $v 'rtu56cx22x64.sys' '1156.22.113.2026') -eq 'FAIL' -and
+    (& $v 'rtu56cx22x64.sys' '1156.22.113.2026') -eq 'PASS,PASS' -and
+    (& $v 'RTU56CX22X64.SYS' '1156.22.113.2026') -eq 'PASS,PASS' -and
+    (& $v 'rtu56cx22x64.sys' '1156.22.112.2026') -eq 'PASS,FAIL' -and
+    (& $v 'rtu56cx22x64.sys' '11.19.602.2025') -eq 'PASS,FAIL' -and
+    (& $v 'rtucx21x64.sys' '1156.22.113.2026') -eq 'FAIL' -and
+    (& $v 'rtu5cx22x64.sys' '1156.22.113.2026') -eq 'FAIL' -and
+    (@(Test-NicDriver $d 'rtu56cx22x64.sys' '1156.22.112.2026')[0].Expected -eq 'rtucx22x64.sys|rtu56cx22x64.sys') -and
+    (@(Test-NicDriver $d 'rtu56cx22x64.sys' '1156.22.112.2026')[1].Expected -eq '>=1156.22.113.2026') -and
     (@(Test-NicDriver $d 'rtump64x64.sys' '10.68.20.605')[0].Note -like '*#290*')
 }
 Check 'the rt640x64 driver: a bad version fails, 10.79.50 passes with the open plan' {
@@ -271,13 +288,14 @@ Check 'resolume-pp as read: every value passes, exit 0' {
     $r.Exit -eq 0 -and $fails.Count -eq 0 -and ($r.Lines -contains 'PASS  Ethernet 4  PendingTransmits  expected=8  actual=8') -and
     ($r.Lines -contains '2 Realtek NIC(s) checked, 0 FAIL') -and -not ($r.Lines -match 'Wi-Fi')
 }
-Check 'mbc as read: the driver and the power values fail with both values, exit 1' {
+Check 'mbc as read before 21.11: its driver passes, the power values fail with both values, exit 1' {
     Set-FakePc @(
         @{ Name = 'Ethernet 3'; Desc = 'Realtek Gaming USB 2.5GbE Family Controller'; Status = 'Up'; File = 'rtu56cx22x64.sys'; Version = '1156.22.113.2026'; Hw = $usb; Props = $mbc }
     )
     $r = Run-Fake
     $r.Exit -eq 1 -and
-    @($r.Lines | Where-Object { $_ -like 'FAIL  Ethernet 3  driver  expected=rtucx22x64.sys  actual=rtu56cx22x64.sys*' }).Count -eq 1 -and
+    ($r.Lines -contains 'PASS  Ethernet 3  driver  expected=rtucx22x64.sys|rtu56cx22x64.sys  actual=rtu56cx22x64.sys') -and
+    ($r.Lines -contains 'PASS  Ethernet 3  driver:version  expected=>=1156.22.113.2026  actual=1156.22.113.2026') -and
     @($r.Lines | Where-Object { $_ -like 'FAIL  Ethernet 3  PendingTransmits  expected=8  actual=3  (open: *' }).Count -eq 1 -and
     @($r.Lines | Where-Object { $_ -like 'FAIL  Ethernet 3  `*EEE  expected=0  actual=1  (*' }).Count -eq 1 -and
     @($r.Lines | Where-Object { $_ -like 'FAIL  Ethernet 3  `*SelectiveSuspend  expected=0  actual=(absent)*' }).Count -eq 1 -and
