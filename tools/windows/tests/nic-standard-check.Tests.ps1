@@ -68,7 +68,7 @@ Check 'a malformed file is refused, as the Python checker refuses it' {
     (Refused { param($s) (@(& $v $s) | Where-Object { $_.PSObject.Properties['compare'] })[0].expected = '0x08' }) -and
     (Refused { param($s) $s.adapters[1].id = $s.adapters[0].id }) -and
     (Refused { param($s) $s.adapters[0].driver.PSObject.Properties.Remove('evidence') }) -and
-    (Refused { param($s) $s.adapters[0].driver.PSObject.Properties.Remove('files') }) -and
+    (Refused { param($s) $s.adapters[0].driver.PSObject.Properties.Remove('allowed') }) -and
     (Refused { param($s) $s.adapters[0].driver.bad[0].PSObject.Properties.Remove('evidence') }) -and
     (Refused { param($s) $s.adapters[0].driver | Add-Member -NotePropertyName firmware -NotePropertyValue 'x' }) -and
     (Refused { param($s) $s.adapters[0].os = 'macos' }) -and
@@ -96,7 +96,7 @@ Check 'an unknown key, a wrong type or the wrong driver names are refused' {
     (Refused { param($s) (& $d $s).allowed = @() }) -and
     (Refused { param($s) (& $d $s).allowed[0].PSObject.Properties.Remove('file') }) -and
     (Refused { param($s) (& $d $s).allowed[0] | Add-Member -NotePropertyName version -NotePropertyValue '1' }) -and
-    (Refused { param($s) (& $d $s).allowed[0] | Add-Member -NotePropertyName evidence -NotePropertyValue '' }) -and
+    (Refused { param($s) (& $d $s).allowed[0].evidence = '' }) -and
     (Refused { param($s) (& $d $s).allowed = @((& $d $s).allowed) + @([pscustomobject]@{ file = 'RTUCX22X64.SYS' }) }) -and
     (Refused { param($s) (& $d $s) | Add-Member -NotePropertyName plan -NotePropertyValue 7 }) -and
     (Refused { param($s) (& $d $s) | Add-Member -NotePropertyName modules -NotePropertyValue @('r8152') }) -and
@@ -107,7 +107,7 @@ Check 'an unknown key, a wrong type or the wrong driver names are refused' {
 }
 Check 'a one-item list and an empty list in the file stay lists' {
     $s = $standardText | ConvertFrom-Json
-    $files = Get-NicList (@($s.adapters) | Where-Object { $_.id -eq 'rtl8156b-windows' }).driver 'files'
+    $files = Get-NicList (@($s.adapters) | Where-Object { $_.id -eq 'realtek-vlan-windows' }).driver 'allowed'
     $none = Get-NicList (@($s.adapters) | Where-Object { $_.id -eq 'realtek-vlan-windows' }) 'values'
     ($files -is [array]) -and $files.Count -eq 1 -and ($none -is [array]) -and $none.Count -eq 0
 }
