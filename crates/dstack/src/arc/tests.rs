@@ -7,6 +7,7 @@ mod flow_slots_227;
 mod key_table;
 mod netaudio_289_pages;
 mod netaudio_289_writes;
+mod played_latency_493;
 mod rx_latency_352;
 mod segments_289;
 mod tx_flows_27;

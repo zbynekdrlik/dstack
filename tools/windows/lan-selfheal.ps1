@@ -5,9 +5,12 @@
 # The PC's one NIC carries both legs, in one of two layouts
 # (docs/two-networks.md):
 #   A. the LAN untagged on the physical (parent) adapter, Dante on a VLAN
-#      adapter (lanVlanId 0);
+#      adapter on the Dante VLAN (lanVlanId 0): the standard at SNV (owner,
+#      16.11.2026, network#4), every PC;
 #   B. Dante untagged on the physical adapter, the LAN on a VLAN adapter on
-#      VLAN N (a dasio host: lanVlanId N).
+#      VLAN N (lanVlanId N): RETIRED (the same decision; it was a dasio
+#      host's). No PC is set up in it any more; the script still repairs a PC
+#      not yet moved to layout A.
 # If the LAN leg dies (a vendor VLAN tool rewrote an adapter, IPv4 got
 # unbound, the adapter was disabled), a headless PC loses everything it does on
 # the LAN (remote desktop, NDI, web UIs, updates); only ssh and the MCP stay

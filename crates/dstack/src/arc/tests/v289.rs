@@ -30,7 +30,7 @@ fn fixture() -> serde_json::Value {
 
 /// The card's captured request (`"requests"`) or reply (`"replies"`) for
 /// `op`, the whole datagram.
-fn card(kind: &str, op: &str) -> Vec<u8> {
+pub(super) fn card(kind: &str, op: &str) -> Vec<u8> {
     hex(fixture()[kind][op]
         .as_str()
         .expect("the frame is in the fixture"))
@@ -69,13 +69,13 @@ fn head(p: &[u8]) -> (u16, u16, u16, u16) {
 
 /// A 2.8.9 page: 6 zero bytes, `[slots, count]`, `slots` record offsets
 /// (only `count` used), then what they point at.
-struct Page289 {
+pub(super) struct Page289 {
     status: u16,
     slots: usize,
-    records: Vec<usize>,
+    pub(super) records: Vec<usize>,
 }
 
-fn page_289(p: &[u8]) -> Page289 {
+pub(super) fn page_289(p: &[u8]) -> Page289 {
     assert!(p.len() <= MAX_DATAGRAM);
     assert_eq!(p[10..16], [0; 6]);
     let (slots, count) = (usize::from(p[16]), usize::from(p[17]));
@@ -164,20 +164,20 @@ fn channels(p: &[u8], rx: bool) -> Vec<Channel> {
 
 /// One RX flow record of 0x3600.
 #[derive(Debug, PartialEq)]
-struct RxFlow {
-    number: u16,
+pub(super) struct RxFlow {
+    pub(super) number: u16,
     flags: u32,
     name: String,
     rate: u32,
     bits: u32,
-    latency_ns: u32,
+    pub(super) latency_ns: u32,
     slots: u16,
     endpoint: SocketAddrV4,
     /// The first RX channel, then each one's feeding slot (0: none).
     mapping: (u16, Vec<u8>),
 }
 
-fn rx_flow(p: &[u8], at: usize) -> RxFlow {
+pub(super) fn rx_flow(p: &[u8], at: usize) -> RxFlow {
     assert_eq!(p[at..at + 2], [0x14, 0x22], "segment 0");
     let number = u16_at(p, at + 2);
     assert_eq!(u16_at(p, at + 4), 0);

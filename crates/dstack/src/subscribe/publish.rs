@@ -7,6 +7,7 @@
 use super::{Flow, FlowId, FlowView, Manager};
 use crate::clock::latency_samples;
 use crate::media::rx::{RxPlan, RxRoute};
+use crate::media::tx::ns_of;
 
 impl Manager {
     /// What the RX thread receives in flow slot `slot`.
@@ -40,6 +41,19 @@ impl Manager {
         match self.playout_override.get(&f.device) {
             Some(&o) => u64::from(o).max(fpp),
             None => latency_samples(f.advertised_ns, self.rate).max(fpp),
+        }
+    }
+
+    /// The latency flow `f` plays at, ns ([`FlowView::played_ns`]): with
+    /// a `playout_override` for its transmitter its [`Manager::need`], at
+    /// least the device latency, as [`super::flow_latency`] takes a
+    /// granted flow's (dstack #493: iem-mixer's 64-sample override was
+    /// listed at the transmitter's 1 ms); else the granted latency.
+    fn played_ns(&self, f: &Flow) -> u64 {
+        if self.playout_override.contains_key(&f.device) {
+            super::flow_latency(ns_of(self.need(f), self.rate), self.latency_ns)
+        } else {
+            f.latency_ns
         }
     }
 
@@ -112,6 +126,7 @@ impl Manager {
             bits: f.bits,
             fpp: f.fpp,
             latency_ns: f.latency_ns,
+            played_ns: self.played_ns(f),
             advertised_ns: f.advertised_ns,
             below_advertised: self.read_at(f).0 < latency_samples(f.advertised_ns, self.rate),
             device: f.name.clone(),
