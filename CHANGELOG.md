@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.218
+
+- **Tests only:** dstack-resample's timing test (`the_smallest_device_block_converts_well_inside_its_own_time`) moved from the lib's unit tests into its own binary, `tests/resample_timing.rs`. Under the coverage build the other unit tests converted through the same engine beside it and shared its counters' cache lines (main CI 45657637244 read 85.266 us at the best of 20 batches, every batch 85-170 us). Cargo runs binaries one at a time, so nothing converts beside it now. The bound (80 us) is unchanged, and the mutation gate runs the binary too (`.cargo/mutants.toml`).
+- **No library or latency change.** Consumers: nothing to move for.
+
 ## 0.6.217
 
 - **Fix (#489): a flow's first packets on another time base no longer count days of lost frames.** On strih-snv (obs, 25.11.2026) a flow re-granted after its transmitter's silence brought its first 764 packets stamped about 8.6 days behind our clock (all `late`), then packets on our base; the first gap read `frames=71074092504` (`rx_loss` 0 -> 71074092504, `rx_gaps` +1), the distance between the two bases. #379 judged only a base that went back. Now a packet a whole RX ring (65536 samples, 0.68 s at 96 kHz) or more on EITHER side of the clock's now is another base's (`media::rx::holes::apart`): it is no measure of holes, ages or network latency (it still counts `late` when behind, and the ring still refuses its writes). Our own clock stepping FORWARD to a new base starts the flow over (`holes::follow_clock`: its open holes are lost, the next packet is its first) when the clock passed the flow's end by a ring more than the reader's own clock moved since that end; a flow silent on our base still counts the hole across its silence as before.
