@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.216
+
+- **The weekly consumer sync keeps the sync issue's hand lines and survives a dropped schedule (#488).** `consumer-pins.yml` no longer overwrites the lines the dstack session adds to the "Weekly consumer version sync" issue: the generated block now ends with the marker `<!-- consumer-pins: the generated block ends here; lines below it are kept by every run -->`, and each run carries everything below it into the new body (a body from before the marker keeps every line that is not a generated one; a generated checklist line ticked by hand stays ticked for the same release). GitHub dropped the 25.11.2026 06:00 UTC run, so the workflow now also runs at 09:00 and 12:00 UTC on Wednesday; those runs read nothing when that day's read is already on the sync issue (its body or a `Wednesday read <date>:` comment, also on an issue closed that day). A manual dispatch always reads. The logic is in `scripts/consumer_pins.py` (`merge`, `already_read`, `sync_issue`, new flags `--issues` and `--once-a-day`) with its tests.
+- **No library change, no latency change.** Consumers: nothing to move.
+
 ## 0.6.215
 
 - **The late watch's line carries the TX thread's timing (#485).** Each `TX packets older than the latency their receiver plays at: it counts them late` warning gets three new fields after `since_escape_us`: `pass_max_us` (the TX thread's longest pass since the watch's last look, wall time), `pass_max_cpu_us` (the largest CPU time of a pass in that time, `-` when unmeasured) and `oversleep_max_us` (the largest return of its sleep past its target). A pass with a wall time far above its CPU time was held (a DPC, an ISR or another thread on its CPU), one with them near each other ran long, and a large oversleep is a late wake. The peaks are taken at every look (once a second), so a line covers its own second only. The message text and the earlier fields are unchanged (consumers grep them).
