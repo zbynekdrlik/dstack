@@ -5,7 +5,8 @@
 //! kernels built once (`dstack_resample::poly`), and these runs check it
 //! against the core on every rate pair and group width, and its quality at
 //! 96 <-> 44.1 kHz. Their own binary because they are heavy under a
-//! coverage build, and a unit test beside them (the lib's timing test)
+//! coverage build, and a unit test beside them (the timing test, now
+//! `tests/resample_timing.rs`)
 //! starved; the unit tests keep short versions for the mutation gate
 //! (`src/tests/polyphase.rs`).
 //!

@@ -174,38 +174,6 @@ fn nonsense_is_refused() {
 }
 
 #[test]
-fn the_smallest_device_block_converts_well_inside_its_own_time() {
-    // dlink's smallest block: 16 frames at 96 kHz is 167 µs of audio. Four
-    // channels down to 48 kHz must take a small part of it.
-    let mut c = Converter::new(96_000, 48_000, 4, 16, Fixed::Input).unwrap();
-    let room = c.output_frames_max();
-    let mut out = vec![0.0; 4 * room];
-    let input = vec![0.1; 64];
-    for _ in 0..100 {
-        c.process(&input, 16, &mut out, room).unwrap();
-    }
-    // The best of 20 batches of 100 calls: the converter's own cost. A
-    // whole-run mean also holds what other test threads take: under
-    // coverage they share its counters' cache lines (resample.md), and
-    // v0.6.202's main CI read 80.486 µs that way. A converter that is slow
-    // itself is slow in every batch.
-    let batches: Vec<std::time::Duration> = (0..20)
-        .map(|_| {
-            let t = std::time::Instant::now();
-            for _ in 0..100 {
-                c.process(&input, 16, &mut out, room).unwrap();
-            }
-            t.elapsed() / 100
-        })
-        .collect();
-    let each = *batches.iter().min().unwrap();
-    assert!(
-        each < std::time::Duration::from_micros(80),
-        "{each:?} per 16-frame block at best of 20 batches: {batches:?}"
-    );
-}
-
-#[test]
 fn a_copy_refuses_too_little_input_or_room_and_takes_exact_room() {
     let mut c = Converter::new(48_000, 48_000, 2, 16, Fixed::Input).unwrap();
     let input = vec![0.5; 32];

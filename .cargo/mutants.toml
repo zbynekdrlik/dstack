@@ -6,9 +6,10 @@
 # the test job only, and tests/rtsan.rs needs the nightly sanitizer.
 profile = "mutants"
 test_tool = "nextest"
-additional_cargo_test_args = ["--lib", "--test", "hot_path"]
+additional_cargo_test_args = ["--lib", "--test", "hot_path", "--test", "resample_timing"]
 # CI passes --test-workspace=true: every mutant runs the whole workspace's
-# tests, so `--test hot_path` (dstack's) exists whichever package a diff
+# tests, so `--test hot_path` (dstack's) and `--test resample_timing`
+# (dstack-resample's timing test, its own binary) exist whichever package a diff
 # touches (a diff in dlink or dstack-resample alone failed the baseline
 # without it; cargo-mutants 25 reads no config key for it).
 # Windows-only code: the gate runs on Linux, where it is not compiled, so
