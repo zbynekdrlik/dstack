@@ -152,18 +152,30 @@ pub struct Placed {
     pub lost: Lost,
 }
 
-/// The clock went back under the flow (dstack #379, a new PTP time base: the
-/// transmitter's stamps went back with it): its furthest end, a whole ring
-/// or more past the clock's `now` (`went_back`), and its open holes are
-/// the old base's. The flow starts over: the holes are lost, and the next
-/// packet is its first. Else nothing changes. A packet a ring or more past
-/// `now` is not placed at all ([`crate::media::rx`]'s writer): a stray of
-/// the old base after the step, or a transmitter stamping on another base
-/// (whose flow then counts no holes, gaps or reorders; its ring writes
-/// count `early`).
+/// Whether positions `a` and `b` are a whole ring ([`went_back`]'s
+/// [`crate::media::ring::SLOTS`]) or more apart, either way (dstack #489):
+/// on one time base a flow's packets and the clock never are, so the two
+/// are on different bases.
+pub fn apart(a: u64, b: u64) -> bool {
+    went_back(a, b) || went_back(b, a)
+}
+
+/// The clock moved to another time base under the flow (dstack #379: a new
+/// PTP time base, the transmitter's stamps went back with it; #489: our
+/// clock stepped forward, or the flow's end was left on another base's
+/// stamps): its furthest end is a whole ring or more on either side of
+/// the clock's `now` ([`apart`]), and its open holes are the old base's.
+/// The flow starts over: the holes are lost, and the next packet is its
+/// first. Else nothing changes. A packet a ring or more from `now` is not
+/// placed at all ([`crate::media::rx`]'s writer): a stray of the old base
+/// after the step, or a transmitter stamping on another base (whose flow
+/// then counts no holes, gaps or reorders; its ring writes count `early`
+/// ahead, `late` behind). A flow silent for a ring or more on one base
+/// starts over the same way: its silence reads as the rings' `holes`,
+/// never as frames missing from a running flow.
 pub fn follow_clock(furthest: &mut Option<u64>, holes: &mut Holes, now: u64) -> Lost {
     match *furthest {
-        Some(e) if went_back(e, now) => {
+        Some(e) if apart(e, now) => {
             *furthest = None;
             holes.clear()
         }

@@ -85,7 +85,7 @@ use super::socket::{
 use super::{BUFFER, DRAIN, FRAMES_MAX, MAX_FLOWS, RxShared, holes, netlat};
 use crate::clock;
 use crate::media::packet;
-use crate::media::ring::{Ring, went_back};
+use crate::media::ring::Ring;
 use crate::media::tx::{MAX_CHANNELS, ns_of};
 use crate::wire::MAX_DATAGRAM;
 
@@ -645,7 +645,8 @@ fn place(p: PlaceArgs<'_>) -> u64 {
         stats.wake_minute.record(w);
     }
     let end = pos.saturating_add(nframes as u64);
-    // dstack #379: the clock went back under the flow; start it over.
+    // dstack #379, #489: the clock moved to another base under the flow
+    // (back or forward a ring or more); start it over.
     count_lost(
         stats,
         holes::follow_clock(&mut lane.end, &mut lane.holes, now),
@@ -658,8 +659,8 @@ fn place(p: PlaceArgs<'_>) -> u64 {
         lane.end = None;
     }
     // dstack #278: holes, reorders and gaps; a packet a ring or more past
-    // now (another time base's, #379) is no measure of them.
-    let placed = if went_back(pos, now) {
+    // or behind now (another time base's, #379, #489) is no measure of them.
+    let placed = if holes::apart(pos, now) {
         holes::Placed::default()
     } else {
         holes::place(&mut lane.end, &mut lane.holes, pos, end, !late)
