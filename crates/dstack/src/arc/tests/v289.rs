@@ -30,7 +30,7 @@ fn fixture() -> serde_json::Value {
 
 /// The card's captured request (`"requests"`) or reply (`"replies"`) for
 /// `op`, the whole datagram.
-fn card(kind: &str, op: &str) -> Vec<u8> {
+pub(super) fn card(kind: &str, op: &str) -> Vec<u8> {
     hex(fixture()[kind][op]
         .as_str()
         .expect("the frame is in the fixture"))
@@ -44,7 +44,7 @@ fn second(op: &str) -> Vec<u8> {
 }
 
 /// Our device's reply to the card's captured request `op`.
-pub(super) fn ours(dev: &mut Dev, op: &str) -> Vec<u8> {
+fn ours(dev: &mut Dev, op: &str) -> Vec<u8> {
     sent_bytes(dev.send(&card("requests", op)))
 }
 
