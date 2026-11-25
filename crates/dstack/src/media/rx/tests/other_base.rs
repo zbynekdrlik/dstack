@@ -54,6 +54,48 @@ fn a_new_flow_stamped_days_behind_our_clock_then_on_it_loses_nothing() {
         (7, 4, 1, 32),
         "{c:?}"
     );
+    // The other base's packets measure no age or network latency: the
+    // peaks and the ages are our base's packets' alone (read within 128
+    // samples plus the 30 ms the test leaves them in the socket).
+    let bound = 128 + 3 * 960;
+    assert!(
+        c.lateness_peak <= bound && c.lateness_at_read_peak <= 128,
+        "{c:?}"
+    );
+    assert_eq!((c.wire_late, c.lateness_count), (0, 3), "{c:?}");
+}
+
+/// dstack #489 (review): a flow silent for more than a ring on our base,
+/// with the reader's clock running through the silence, still loses the
+/// packets the silence took: its next packet's hole is counted.
+#[test]
+fn a_silence_past_a_ring_lived_through_on_our_base_still_counts_its_hole() {
+    let s = shared(1);
+    let mut intake = s.pump_intake().unwrap();
+    publish(
+        &s,
+        &[(0, plan(LOOPBACK, 1, false, 1))],
+        &[(0, RxRoute { flow: 0, slot: 0 })],
+    );
+    intake.drain_into_rings(None);
+    let t = transmitter(LOOPBACK);
+    let at = |pos: u64| {
+        t.send_to(&packet_at(pos, 1, 32), slot_addr(&s, 0)).unwrap();
+    };
+    let ring = crate::media::ring::SLOTS as u64;
+    at(P0);
+    settle();
+    intake.drain_into_rings(Some(ns_of(P0 + 32, RATE)));
+    // 4464 samples (46.5 ms) more than a ring: the reader's clock runs
+    // 100 ms meanwhile, so the clock did not step.
+    let silence = ring + 4464;
+    std::thread::sleep(Duration::from_millis(100));
+    at(P0 + 32 + silence);
+    settle();
+    intake.drain_into_rings(Some(ns_of(P0 + 64 + silence, RATE)));
+    intake.drain_into_rings(Some(ns_of(P0 + 64 + silence + RATE as u64, RATE)));
+    let c = s.lane(0);
+    assert_eq!((c.packets, c.gaps, c.gap_frames), (2, 1, silence), "{c:?}");
 }
 
 #[test]
