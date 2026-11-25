@@ -199,3 +199,21 @@ fn a_flow_starts_over_when_the_clock_goes_back_a_ring() {
     assert_eq!(follow_clock(&mut none, &mut h, now), Lost::default());
     assert_eq!(none, None);
 }
+
+/// dstack #489: a flow whose furthest end is a whole ring BEHIND the
+/// clock's now (our clock stepped forward to a new base, or the end was
+/// left on another base's stamps) starts over too, its open holes lost;
+/// nearer, nothing changes.
+#[test]
+fn a_flow_starts_over_when_the_clock_goes_a_ring_past_its_end() {
+    let ring = crate::media::ring::SLOTS as u64;
+    let now = 10_000_000;
+    let mut h = Holes::default();
+    h.open(now - ring - 64, now - ring - 32);
+    let mut end = Some(now - ring + 1);
+    assert_eq!(follow_clock(&mut end, &mut h, now), Lost::default());
+    assert_eq!((end, h.open_holes().len()), (Some(now - ring + 1), 1));
+    let mut end = Some(now - ring);
+    assert_eq!(follow_clock(&mut end, &mut h, now), lost(1, 32));
+    assert_eq!((end, h.open_holes().len()), (None, 0));
+}
