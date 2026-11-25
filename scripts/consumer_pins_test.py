@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: MIT OR Apache-2.0
 """Tests of the weekly consumer version sync's reading (dstack #399)."""
 import os
+import re
 import sys
 import unittest
 
@@ -139,6 +140,145 @@ class Sync(unittest.TestCase):
         self.assertIn("- [ ] intercom on v0.6.178", body)
         self.assertIn("- [ ] odd on v0.6.178", body)
         self.assertNotIn("- [ ] dasio", body)
+
+
+# The sync issue's body on 25.11.2026 (dstack #405), before any marker: the
+# generated block, then two lines the dstack session added by hand.
+OLD_405 = """Wednesday read 2026-11-25: the latest dstack release is v0.6.215; 7 of 9 consumers are behind it (dstack #399).
+
+| Consumer | Pin | |
+|---|---|---|
+| intercom | v0.6.207 | behind |
+| songplayer | v0.6.214 | behind |
+| dasio | v0.6.212 | behind |
+| dsync | v0.6.215 | current |
+
+Work it: send each consumer behind its upgrade notes from its own pin (the CHANGELOG's API and port lines, checked against its code), then close this issue once every consumer runs the week's release.
+
+- [ ] intercom on v0.6.215
+- [ ] songplayer on v0.6.215
+- [ ] dasio on v0.6.215
+
+
+- [ ] After the 25.11 sync: tell dsync which of its boxes run dstack >= v0.6.193 (#440 fixed), box by box, so it can roll v1.35.16 there (dsync#212, parked until then); until then, no dsync service restart on a box with an older dstack device
+- [ ] dasio: v0.6.215 on the FOH PC instance-1 for #485 (its late lines carry `pass_max_us` / `pass_max_cpu_us` / `oversleep_max_us`)
+"""
+
+HAND = (
+    "- [ ] After the 25.11 sync: tell dsync which of its boxes run dstack >= v0.6.193 (#440 fixed), "
+    "box by box, so it can roll v1.35.16 there (dsync#212, parked until then); until then, no dsync "
+    "service restart on a box with an older dstack device",
+    "- [ ] dasio: v0.6.215 on the FOH PC instance-1 for #485 (its late lines carry `pass_max_us` / "
+    "`pass_max_cpu_us` / `oversleep_max_us`)",
+)
+
+NAMES = ["intercom", "songplayer", "dasio", "dsync"]
+
+
+def every_changed(pin, latest):
+    return True
+
+
+class KeepHandLines(unittest.TestCase):
+    """dstack #488: a run replaced the whole body and lost the hand lines."""
+
+    def new_body(self, latest=(0, 6, 216), date="2026-12-02"):
+        rows = [("intercom", (0, 6, 207), False), ("songplayer", (0, 6, 214), False),
+                ("dasio", (0, 6, 212), False), ("dsync", (0, 6, 216), False)]
+        return cp.render(rows, latest, date, every_changed)
+
+    def test_the_generated_block_ends_with_the_marker(self):
+        self.assertTrue(self.new_body().rstrip("\n").endswith(cp.MARKER))
+
+    def test_an_old_body_without_the_marker_keeps_its_hand_lines(self):
+        body = cp.merge(OLD_405, self.new_body(), NAMES)
+        self.assertTrue(body.startswith("Wednesday read 2026-12-02:"))
+        self.assertIn("- [ ] songplayer on v0.6.216", body)
+        self.assertNotIn("v0.6.215; 7 of 9", body)
+        self.assertNotIn("- [ ] intercom on v0.6.215", body)
+        tail = body.split(cp.MARKER, 1)[1]
+        self.assertEqual(tail, "\n\n" + "\n".join(HAND) + "\n")
+
+    def test_the_lines_below_the_marker_are_carried_into_every_next_body(self):
+        first = cp.merge(OLD_405, self.new_body(), NAMES)
+        later = first + "- [ ] a third hand line\n\n  with a blank line before its second part\n"
+        second = cp.merge(later, self.new_body(date="2026-12-09"), NAMES)
+        self.assertTrue(second.startswith("Wednesday read 2026-12-09:"))
+        self.assertEqual(second.count(cp.MARKER), 1)
+        self.assertTrue(second.endswith(
+            "\n".join(HAND) + "\n- [ ] a third hand line\n\n  with a blank line before its second part\n"))
+        self.assertEqual(cp.merge(second, self.new_body(date="2026-12-09"), NAMES), second)
+
+    def test_a_generated_line_ticked_by_hand_stays_ticked_for_the_same_release(self):
+        first = cp.merge(OLD_405, self.new_body(), NAMES)
+        ticked = first.replace("- [ ] dasio on v0.6.216", "- [x] dasio on v0.6.216")
+        again = cp.merge(ticked, self.new_body(), NAMES)
+        self.assertIn("- [x] dasio on v0.6.216", again)
+        self.assertIn("- [ ] intercom on v0.6.216", again)
+        newer = cp.merge(ticked, self.new_body(latest=(0, 6, 217)), NAMES)
+        self.assertIn("- [ ] dasio on v0.6.217", newer)
+
+    def test_no_old_body_gives_the_generated_block(self):
+        self.assertEqual(cp.merge(None, self.new_body(), NAMES), self.new_body())
+        self.assertEqual(cp.merge("", self.new_body(), NAMES), self.new_body())
+
+
+def issue(number, state, body, comments=(), closed_at=None, title=cp.TITLE):
+    return {"number": number, "title": title, "state": state, "body": body,
+            "closedAt": closed_at, "comments": [{"body": c} for c in comments]}
+
+
+class OncePerWednesday(unittest.TestCase):
+    """dstack #488: the 06:00 schedule did not run on 25.11; the later crons
+    read only when that day's read is not on the sync issue yet."""
+
+    DATE = "2026-12-02"
+
+    def test_today_s_read_comment_on_the_open_issue_skips(self):
+        issues = [issue(405, "OPEN", "Wednesday read 2026-11-25: ...",
+                        ["Wednesday read 2026-12-02: 3 consumer(s) behind v0.6.216."])]
+        self.assertTrue(cp.already_read(issues, self.DATE))
+
+    def test_an_issue_closed_today_by_the_read_skips(self):
+        issues = [issue(405, "CLOSED", "Wednesday read 2026-12-02: ...",
+                        ["Wednesday read 2026-12-02: every consumer runs v0.6.216."],
+                        closed_at="2026-12-02T06:01:10Z")]
+        self.assertTrue(cp.already_read(issues, self.DATE))
+
+    def test_an_issue_created_today_by_the_read_skips(self):
+        self.assertTrue(cp.already_read([issue(500, "OPEN", "Wednesday read 2026-12-02: the latest")],
+                                        self.DATE))
+
+    def test_last_week_s_read_does_not_skip(self):
+        issues = [issue(405, "OPEN", "Wednesday read 2026-11-25: ...",
+                        ["Wednesday read 2026-11-25: 7 consumer(s) behind v0.6.215.",
+                         "a hand comment naming Wednesday read 2026-12-02: later"]),
+                  issue(399, "CLOSED", "Wednesday read 2026-12-02: ...", closed_at="2026-11-25T13:00:00Z"),
+                  issue(401, "OPEN", "Wednesday read 2026-12-02: ...", title="Not the sync issue")]
+        self.assertFalse(cp.already_read(issues, self.DATE))
+        self.assertFalse(cp.already_read([], self.DATE))
+
+    def test_the_open_sync_issue_is_found_by_its_exact_title(self):
+        issues = [issue(401, "OPEN", "x", title="Weekly consumer version sync (old)"),
+                  issue(405, "OPEN", "the body"), issue(399, "CLOSED", "old")]
+        self.assertEqual(cp.sync_issue(issues), (405, "the body"))
+        self.assertIsNone(cp.sync_issue(issues[2:]))
+
+    def test_the_read_s_comment_is_what_the_check_looks_for(self):
+        line = cp.read_comment(self.DATE, 3, (0, 6, 216))
+        self.assertEqual(line, "Wednesday read 2026-12-02: 3 consumer(s) behind v0.6.216.")
+        self.assertTrue(cp.already_read([issue(405, "OPEN", "old", [line])], self.DATE))
+        closing = cp.read_comment(self.DATE, 0, (0, 6, 216))
+        self.assertEqual(closing, "Wednesday read 2026-12-02: every consumer runs v0.6.216.")
+
+    def test_the_workflow_runs_three_times_on_wednesday(self):
+        wf = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".github", "workflows",
+                          "consumer-pins.yml")
+        with open(wf, encoding="utf-8") as f:
+            text = f.read()
+        self.assertEqual(re.findall(r'cron: "([^"]+)"', text), ["0 6 * * 3", "0 9 * * 3", "0 12 * * 3"])
+        self.assertIn("--once-a-day", text)
+        self.assertIn("--issues", text)
 
 
 if __name__ == "__main__":
