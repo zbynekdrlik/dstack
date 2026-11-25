@@ -225,8 +225,8 @@ fn run(nap: Option<Duration>) -> Measured {
     std::thread::sleep(SETTLE);
     let before = receiver.media().engine().expect("the pump");
     let pump = receiver.media().engine_stats().expect("the pump");
-    let mut wakes = Wakes::new(pump.wakes().late_wakes());
     let from_ms = unix_ms();
+    let mut wakes = Wakes::new(pump.wakes().late_wakes(), from_ms);
     on.store(true, Ordering::Relaxed);
     let recording = Instant::now();
     while !RECORD.saturating_sub(recording.elapsed()).is_zero() {
@@ -264,17 +264,19 @@ fn unix_ms() -> u64 {
 /// µs, re-bootstrapped), and the count since its start at each merge.
 struct Wakes {
     seen: BTreeSet<(u64, u64, bool)>,
-    /// The count at the window's open.
+    /// The count and the wall time (ms) at the window's open.
     from: u64,
+    from_ms: u64,
     /// The count at the last merge.
     count: u64,
 }
 
 impl Wakes {
-    fn new(count: u64) -> Self {
+    fn new(count: u64, from_ms: u64) -> Self {
         Wakes {
             seen: BTreeSet::new(),
             from: count,
+            from_ms,
             count,
         }
     }
@@ -300,10 +302,10 @@ impl Wakes {
     }
 
     /// The late wakes since the window opened that no merge saw (about:
-    /// two wakes alike in all three fields count as one; wakes merged from
-    /// before the window are not counted as seen in it).
+    /// two wakes alike in all three fields count as one, and the open is
+    /// read to the ms).
     fn unseen(&self) -> u64 {
-        let seen = self.seen.len() as u64;
+        let seen = self.seen.iter().filter(|w| w.0 >= self.from_ms).count() as u64;
         (self.count - self.from).saturating_sub(seen)
     }
 }
@@ -419,10 +421,12 @@ fn the_judge_reads_the_window_s_own_slowest_wake() {
     );
     let within_h = std::panic::catch_unwind(|| {
         judged("wakes within H", &shaped(76, 8_000, 2_000));
-    });
+    })
+    .expect_err("a late block with every wake within H passed");
+    let said = within_h.downcast_ref::<String>().map_or("", String::as_str);
     assert!(
-        within_h.is_err(),
-        "a late block with every wake within H passed"
+        said.contains("at or after its play_at"),
+        "failed for another reason: {said}"
     );
     judged("no late block", &shaped(0, 8_000, 2_000));
     assert!(!runner(3_906, 3_906_250) && runner(3_907, 3_906_250));
