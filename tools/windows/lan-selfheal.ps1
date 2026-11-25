@@ -5,8 +5,8 @@
 # The PC's one NIC carries both legs, in one of two layouts
 # (docs/two-networks.md):
 #   A. the LAN untagged on the physical (parent) adapter, Dante on a VLAN
-#      adapter, VLAN 70 (lanVlanId 0): the standard at SNV (owner, 16.11.2026,
-#      network#4), every PC;
+#      adapter on the Dante VLAN (lanVlanId 0): the standard at SNV (owner,
+#      16.11.2026, network#4), every PC;
 #   B. Dante untagged on the physical adapter, the LAN on a VLAN adapter on
 #      VLAN N (lanVlanId N): RETIRED (the same decision; it was a dasio
 #      host's). No PC is set up in it any more; the script still repairs a PC

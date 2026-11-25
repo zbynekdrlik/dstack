@@ -297,11 +297,13 @@ pub struct FlowView {
     pub bits: u32,
     pub fpp: u16,
     pub latency_ns: u64,
-    /// The latency the pump plays the flow at, ns, as our RX flow lists
-    /// (ARC 0x3200, 0x3600) state it (dstack #493): with the device
-    /// config's `playout_override` for its transmitter, that override (at
-    /// least its frames a packet) and at least the device latency; else
-    /// [`FlowView::latency_ns`].
+    /// The latency the flow is played at, ns, as our RX flow lists (ARC
+    /// 0x3200, 0x3600) state it (dstack #493): with the device config's
+    /// `playout_override` for its transmitter, that override (at least its
+    /// frames a packet) and at least the device latency; else
+    /// [`FlowView::latency_ns`]. The pump's own read point
+    /// ([`Manager::rx_plan`]) also rounds a later read to whole blocks and,
+    /// on a leading device, reads at P - H; the lists state neither.
     pub played_ns: u64,
     /// The transmitter's advertised latency (0: none).
     pub advertised_ns: u64,
