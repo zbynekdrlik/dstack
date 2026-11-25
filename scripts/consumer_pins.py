@@ -294,7 +294,7 @@ def main() -> None:
     if a.issues:
         with open(a.issues, encoding="utf-8") as f:
             issues = json.load(f)
-    outputs = {"date": a.date}
+    outputs = {"date": a.date, "title": TITLE}
     if a.once_a_day and already_read(issues, a.date):
         print(f"the read of {a.date} already ran: nothing to do")
         outputs["skip"] = "1"

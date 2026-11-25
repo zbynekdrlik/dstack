@@ -9,7 +9,9 @@ name: Consumer pins
 #
 # GitHub can drop a scheduled run (25.11.2026 had none, dstack #488): the
 # 09:00 and 12:00 UTC crons read only when that day's read is not on the sync
-# issue yet (`--once-a-day`); a manual dispatch always reads. An update keeps
+# issue yet (`--once-a-day`); a manual dispatch always reads. A Wednesday
+# with every consumer current and no sync issue open leaves no mark, so its
+# later crons read again; they find nothing to write either. An update keeps
 # the lines below the generated block's marker (`scripts/consumer_pins.py`).
 
 on:
@@ -45,9 +47,16 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          gh issue list --repo "$GITHUB_REPOSITORY" --state all --limit 20 \
-            --search "\"Weekly consumer version sync\" in:title" \
-            --json number,title,state,body,closedAt,comments > issues.json
+          # Every open one, and the closed ones updated last (an issue the
+          # day's read closed is among them): a search's own order is best
+          # match, so one listing of all states would lose them as weeks add up.
+          fields=number,title,state,body,closedAt,comments
+          q="\"Weekly consumer version sync\" in:title"
+          gh issue list --repo "$GITHUB_REPOSITORY" --state open --limit 20 \
+            --search "$q" --json "$fields" > open.json
+          gh issue list --repo "$GITHUB_REPOSITORY" --state closed --limit 5 \
+            --search "$q sort:updated-desc" --json "$fields" > closed.json
+          jq -s add open.json closed.json > issues.json
       - name: Read every consumer's pin
         id: pins
         env:
@@ -66,6 +75,7 @@ jobs:
           LAGGING: ${{ steps.pins.outputs.lagging }}
           ISSUE: ${{ steps.pins.outputs.issue }}
           COMMENT: ${{ steps.pins.outputs.comment }}
+          TITLE: ${{ steps.pins.outputs.title }}
         run: |
           set -euo pipefail
           n="$ISSUE"
@@ -79,5 +89,5 @@ jobs:
             gh issue edit "$n" --repo "$GITHUB_REPOSITORY" --body-file body.md
             gh issue comment "$n" --repo "$GITHUB_REPOSITORY" --body "$COMMENT"
           else
-            gh issue create --repo "$GITHUB_REPOSITORY" --title "Weekly consumer version sync" --body-file body.md
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITLE" --body-file body.md
           fi

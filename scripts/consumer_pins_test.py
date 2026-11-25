@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: MIT OR Apache-2.0
 """Tests of the weekly consumer version sync's reading (dstack #399)."""
+import json
 import os
 import re
 import sys
+import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import consumer_pins as cp  # noqa: E402
@@ -142,8 +145,9 @@ class Sync(unittest.TestCase):
         self.assertNotIn("- [ ] dasio", body)
 
 
-# The sync issue's body on 25.11.2026 (dstack #405), before any marker: the
-# generated block, then two lines the dstack session added by hand.
+# Shaped like the sync issue's body on 25.11.2026 (dstack #405; fewer
+# consumers, a current one added), before any marker: the generated block,
+# then the two lines the dstack session added by hand, verbatim.
 OLD_405 = """Wednesday read 2026-11-25: the latest dstack release is v0.6.215; 7 of 9 consumers are behind it (dstack #399).
 
 | Consumer | Pin | |
@@ -270,6 +274,39 @@ class OncePerWednesday(unittest.TestCase):
         self.assertTrue(cp.already_read([issue(405, "OPEN", "old", [line])], self.DATE))
         closing = cp.read_comment(self.DATE, 0, (0, 6, 216))
         self.assertEqual(closing, "Wednesday read 2026-12-02: every consumer runs v0.6.216.")
+
+    def run_main(self, issues, *flags):
+        d = tempfile.mkdtemp()
+        with open(os.path.join(d, "issues.json"), "w", encoding="utf-8") as f:
+            json.dump(issues, f)
+        with open(os.path.join(d, "consumers.toml"), "w", encoding="utf-8") as f:
+            f.write('[[consumer]]\nname = "intercom"\nlock = "Cargo.lock"\n')
+        out, gh_out = os.path.join(d, "body.md"), os.path.join(d, "out")
+        argv = ["consumer_pins.py", "--latest", "v0.6.179", "--date", self.DATE,
+                "--consumers", os.path.join(d, "consumers.toml"), "--issues",
+                os.path.join(d, "issues.json"), "--out", out, "--github-output", gh_out, *flags]
+        # Only the network read is replaced: the lock pins v0.6.178, and the
+        # library diff to v0.6.179 is read from this repo's tags (none).
+        lock = 'source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.178#abc"\n'
+        with mock.patch.object(sys, "argv", argv), \
+                mock.patch.object(cp, "fetch_raw", lambda owner: lambda repo, path: lock):
+            cp.main()
+        with open(gh_out, encoding="utf-8") as f:
+            outputs = dict(l.split("=", 1) for l in f.read().splitlines())
+        body = open(out, encoding="utf-8").read() if os.path.exists(out) else None
+        return outputs, body
+
+    def test_main_skips_a_day_already_read_only_when_asked(self):
+        issues = [issue(405, "OPEN", "Wednesday read 2026-12-02: x\n" + cp.MARKER + "\n\nhand\n")]
+        outputs, body = self.run_main(issues, "--once-a-day")
+        self.assertEqual(outputs, {"date": self.DATE, "title": cp.TITLE, "skip": "1"})
+        self.assertIsNone(body)
+        outputs, body = self.run_main(issues)
+        self.assertEqual(outputs, {"date": self.DATE, "title": cp.TITLE, "skip": "0", "lagging": "0",
+                                   "latest": "v0.6.179", "issue": "405",
+                                   "comment": "Wednesday read 2026-12-02: every consumer runs v0.6.179."})
+        self.assertIn("| intercom | v0.6.178 | current (no library change to v0.6.179) |", body)
+        self.assertTrue(body.endswith(cp.MARKER + "\n\nhand\n"))
 
     def test_the_workflow_runs_three_times_on_wednesday(self):
         wf = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".github", "workflows",
