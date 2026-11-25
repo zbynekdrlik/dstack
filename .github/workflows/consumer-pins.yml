@@ -6,10 +6,17 @@ name: Consumer pins
 # issue when any is behind the latest release. The dstack session works that
 # issue (each lagging consumer gets its upgrade notes from its own pin);
 # consumers are never asked to move per micro-release.
+#
+# GitHub can drop a scheduled run (25.11.2026 had none, dstack #488): the
+# 09:00 and 12:00 UTC crons read only when that day's read is not on the sync
+# issue yet (`--once-a-day`); a manual dispatch always reads. An update keeps
+# the lines below the generated block's marker (`scripts/consumer_pins.py`).
 
 on:
   schedule:
     - cron: "0 6 * * 3"
+    - cron: "0 9 * * 3"
+    - cron: "0 12 * * 3"
   workflow_dispatch:
 
 permissions:
@@ -33,6 +40,14 @@ jobs:
           persist-credentials: false
       - name: The reader's own tests
         run: python3 -m unittest scripts/consumer_pins_test.py
+      - name: List the sync issues
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh issue list --repo "$GITHUB_REPOSITORY" --state all --limit 20 \
+            --search "\"Weekly consumer version sync\" in:title" \
+            --json number,title,state,body,closedAt,comments > issues.json
       - name: Read every consumer's pin
         id: pins
         env:
@@ -40,30 +55,29 @@ jobs:
         run: |
           set -euo pipefail
           latest=$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName)
+          once=()
+          if [ "$GITHUB_EVENT_NAME" = "schedule" ]; then once=(--once-a-day); fi
           python3 scripts/consumer_pins.py --latest "$latest" --date "$(date -u +%F)" \
-            --out body.md --github-output "$GITHUB_OUTPUT"
+            --issues issues.json "${once[@]}" --out body.md --github-output "$GITHUB_OUTPUT"
       - name: Open, update or close the sync issue
+        if: steps.pins.outputs.skip != '1'
         env:
           GH_TOKEN: ${{ github.token }}
           LAGGING: ${{ steps.pins.outputs.lagging }}
-          LATEST: ${{ steps.pins.outputs.latest }}
+          ISSUE: ${{ steps.pins.outputs.issue }}
+          COMMENT: ${{ steps.pins.outputs.comment }}
         run: |
           set -euo pipefail
-          title="Weekly consumer version sync"
-          n=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --limit 200 \
-            --search "\"$title\" in:title" \
-            --json number,title --jq "map(select(.title == \"$title\")) | .[0].number // empty")
+          n="$ISSUE"
           if [ "$LAGGING" = "0" ]; then
             # Every consumer runs the latest release: an open sync issue is done.
             if [ -n "$n" ]; then
               gh issue edit "$n" --repo "$GITHUB_REPOSITORY" --body-file body.md
-              gh issue close "$n" --repo "$GITHUB_REPOSITORY" \
-                --comment "Wednesday read $(date -u +%F): every consumer runs $LATEST."
+              gh issue close "$n" --repo "$GITHUB_REPOSITORY" --comment "$COMMENT"
             fi
           elif [ -n "$n" ]; then
             gh issue edit "$n" --repo "$GITHUB_REPOSITORY" --body-file body.md
-            gh issue comment "$n" --repo "$GITHUB_REPOSITORY" \
-              --body "Wednesday read $(date -u +%F): $LAGGING consumer(s) behind $LATEST."
+            gh issue comment "$n" --repo "$GITHUB_REPOSITORY" --body "$COMMENT"
           else
-            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body-file body.md
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "Weekly consumer version sync" --body-file body.md
           fi
