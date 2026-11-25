@@ -35,7 +35,7 @@ The site's own values (subnets, VLAN numbers, host names, addresses, switch port
 | Traffic | everything else | Dante, PTP and Dante's mDNS only |
 | `.lan` name | its LAN address | none |
 
-**Which leg is tagged.** The default is the LAN untagged and Dante tagged. A Windows PC with a low-latency Dante host (dasio: ASIO, Npcap, interrupt tuning on the physical NIC) keeps **Dante untagged on the physical adapter** and gets the **LAN as the tagged virtual adapter**, so the audio path, its NIC tuning and its stable MAC stay as they are. The table's rows hold for each leg whichever way it is tagged.
+**Which leg is tagged: layout A is the standard** (owner, 16.11.2026, network#4). The LAN is untagged on the physical adapter and Dante is tagged on VLAN 70 (layout A, `lanVlanId 0` in the LAN self-heal task below), on every PC at SNV, dasio's low-latency hosts included. **Layout B is retired:** Dante untagged on the physical adapter with the LAN as a tagged virtual adapter (the old rule for a dasio host, kept for its NIC tuning and stable MAC) is no longer set up. A PC still in layout B is moved to layout A; until then the LAN self-heal task still repairs it (`lanVlanId N`), and the table's rows hold for each leg whichever way it is tagged.
 
 ### Linux (NetworkManager)
 
@@ -78,8 +78,8 @@ A headless one-NIC PC whose LAN leg fails keeps only ssh and the MCP on its Dant
 
 | Layout | Physical (base) adapter | VLAN adapter (Realtek Virtual Adapter) | `lanAdapter` | `danteAdapter` | `lanVlanId` |
 |---|---|---|---|---|---|
-| A, the default (the SongPlayer PC) | LAN, untagged | Dante, on the Dante VLAN | the base adapter | the VLAN adapter | `0` |
-| B, a dasio host (dasio's test PC) | Dante, untagged | LAN, on the LAN VLAN N | the VLAN adapter | the base adapter | `N` |
+| A, the standard (owner 16.11.2026, network#4) | LAN, untagged | Dante, on the Dante VLAN | the base adapter | the VLAN adapter | `0` |
+| B, retired (a PC not yet moved to A) | Dante, untagged | LAN, on the LAN VLAN N | the VLAN adapter | the base adapter | `N` |
 
 In layout B a disabled or broken base adapter is not repaired: it is the Dante adapter, which the task never touches; the LAN's VLAN adapter on top of it cannot work until the base adapter does.
 
