@@ -240,6 +240,7 @@ class TheStandard(unittest.TestCase):
         broken(lambda s: s["adapters"][0]["driver"].pop("allowed"))
         broken(lambda s: s["adapters"][0]["driver"].update(allowed=["rtucx22x64.sys"]))
         broken(lambda s: s["adapters"][0]["driver"].update(allowed=[]))
+        broken(lambda s: s["adapters"][0]["driver"].update(allowed={"file": "x.sys"}))
         broken(lambda s: s["adapters"][0]["driver"]["allowed"][0].pop("file"))
         broken(lambda s: s["adapters"][0]["driver"]["allowed"][0].update(version="1"))
         broken(lambda s: s["adapters"][0]["driver"]["allowed"][0].update(evidence=""))

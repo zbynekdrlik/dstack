@@ -94,6 +94,7 @@ Check 'an unknown key, a wrong type or the wrong driver names are refused' {
     (Refused { param($s) (& $d $s).PSObject.Properties.Remove('allowed') }) -and
     (Refused { param($s) (& $d $s).allowed = @('rtucx22x64.sys') }) -and
     (Refused { param($s) (& $d $s).allowed = @() }) -and
+    (Refused { param($s) (& $d $s).allowed = [pscustomobject]@{ file = 'x.sys' } }) -and
     (Refused { param($s) (& $d $s).allowed[0].PSObject.Properties.Remove('file') }) -and
     (Refused { param($s) (& $d $s).allowed[0] | Add-Member -NotePropertyName version -NotePropertyValue '1' }) -and
     (Refused { param($s) (& $d $s).allowed[0].evidence = '' }) -and
