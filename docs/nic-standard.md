@@ -2,7 +2,7 @@
 
 One standard for every Realtek NIC on a production PC: which driver it runs and every advanced value it holds, each with its evidence. It is part of the production network standard (`docs/two-networks.md`, #155), and dstack owns it. The owner's rule (20.11.2026): one uniform working setup, not a different setting and driver version per project.
 
-- **The file:** [`docs/nic-standard.json`](nic-standard.json), machine-readable, `schema` `dstack-nic-standard/1`, `version` 3 (2: text only, #466; 3: the EEE rule for every wired NIC, below). It is the only source: this page explains it, the file decides.
+- **The file:** [`docs/nic-standard.json`](nic-standard.json), machine-readable, `schema` `dstack-nic-standard/2`, `version` 5 (2: text only, #466; 3: the EEE rule for every wired NIC, below; 4: no link, no speed verdict, wireless out; 5, schema 2: each allowed Windows driver file with its own minimum, mbc's `rtu56cx22x64.sys` 1156.22.113.2026 beside `rtucx22x64.sys` 11.19.602.2025). It is the only source: this page explains it, the file decides.
 - **The checkers:** `tools/windows/nic-standard-check.ps1` and `tools/linux/nic-standard-check.py`. Both are read-only: they never set a value, install a driver or restart an adapter.
 - **Scope:** every Realtek NIC that is up on a PC with a Dante leg (`docs/two-networks.md`, scope: a PC without one is not checked). Other vendors' NICs (the editing PCs' Aquantia and Intel legs) have no entry, but **the EEE rule holds for every wired NIC of a rig PC, whatever the vendor, up or down** ([below](#eee-off-on-every-wired-nic-version-3)).
 
@@ -44,7 +44,7 @@ Every reachable rig PC, every wired NIC, read through the fleet MCP (Windows `Ge
 | resolume-snv | Ethernet, Intel I225-V (Not Present) | `e2fn.sys` 2.1.5.7 | off in the registry (`*EEE`, `EEE`, `AdvancedEEE`, green 0); the device is not present | songplayer |
 | resolume-pp | Ethernet 4, RTL8156B USB | `rtucx22x64.sys` 11.19.602.2025 | off (hidden keywords 0) | songplayer |
 | resolume-pp | soundgrid-pcie, RTL8168 PCIe (disabled) | `rt640x64.sys` 10.79.50.1003 | off (Energy-Efficient Ethernet Disabled, Advanced EEE Disabled, Green Ethernet Disabled) | songplayer |
-| **mbc** | Ethernet 3, RTL8156B USB | `rtu56cx22x64.sys` 1156.22.113.2026 | **ON**: `*EEE` 1 (Energy-Efficient Ethernet Enabled), `EnableGreenEthernet` 1; `AdvancedEEE` 0 | dasio |
+| mbc | Ethernet 3, RTL8156B USB | `rtu56cx22x64.sys` 1156.22.113.2026 | off: `*EEE`, `AdvancedEEE`, `EnableGreenEthernet`, `EnableExtraPowerSaving`, `GigaLite` 0 (dasio peer 25.11 pc-profile; on at the 20.11 read: `*EEE` 1, `EnableGreenEthernet` 1) | dasio |
 | dsg | Ethernet (Dante), RTL8168H PCIe | `rt640x64.sys` 10.79.50.1003 | off (`*EEE`, `AdvancedEEE`, green 0) | dasio |
 | dsg | soundgrid, RTL8168H PCIe | `rt640x64.sys` 10.79.50.1003 | off | dasio |
 | FOH | Ethernet, RTL8125BG PCIe | `rt640x64.sys` 10.79.20.1003 | off (`*EEE`, `AdvancedEEE`, green 0) | dasio (fohmixer: its Dante side) |
@@ -62,19 +62,25 @@ Every reachable rig PC, every wired NIC, read through the fleet MCP (Windows `Ge
 | **the PP editing PC** | enp6s0, RTL8125 PCIe (down) | `r8169` | **ON**: enabled - inactive | camera-box |
 | **the PP editing PC** | enp7s0, RTL8168 PCIe (down) | `r8169` | **ON**: enabled - inactive | camera-box |
 
-EEE on, by owner project, to turn off persistently and prove with the checker: **dasio** (mbc's RTL8156B, one of its FAILs since version 1), **camera-box** (stream-snv's onboard RTL8168, the SNV editing PC's RTL8168, the PP editing PC's RTL8125 and RTL8168: all four down onboard NICs), **iemmixer** (the iemmixer box's second RTL8168H, down). songplayer and presenter pass. The checkers at version 3, run read-only: resolume-snv exit 0 (1 wired NIC, 0 FAIL; the Intel one is Not Present), mbc exit 1 (`*EEE` and `EnableGreenEthernet` FAIL, `EEEMaxSupportSpeed` INFO), the iemmixer box exit 1 (enp1s0), the PP editing PC exit 1 (enp6s0, enp7s0; the ixgbe pair not supported, a PASS).
+EEE on, by owner project, to turn off persistently and prove with the checker: **dasio** (mbc's RTL8156B, one of its FAILs since version 1; off since, dasio peer 25.11 pc-profile), **camera-box** (stream-snv's onboard RTL8168, the SNV editing PC's RTL8168, the PP editing PC's RTL8125 and RTL8168: all four down onboard NICs), **iemmixer** (the iemmixer box's second RTL8168H, down). songplayer and presenter pass. The checkers at version 3, run read-only: resolume-snv exit 0 (1 wired NIC, 0 FAIL; the Intel one is Not Present), mbc exit 1 (`*EEE` and `EnableGreenEthernet` FAIL, `EEEMaxSupportSpeed` INFO), the iemmixer box exit 1 (enp1s0), the PP editing PC exit 1 (enp6s0, enp7s0; the ixgbe pair not supported, a PASS).
 
 ## The file's shape
 
 ```json
 {
-  "schema": "dstack-nic-standard/1",
-  "version": 1,
+  "schema": "dstack-nic-standard/2",
+  "version": 5,
   "adapters": [
     {
       "id": "rtl8156b-windows", "chip": "RTL8156B", "os": "windows",
       "match": {"hardware_id": ["USB\\VID_0BDA&PID_8156"]},
-      "driver": {"files": ["rtucx22x64.sys"], "min_version": "11.19.602.2025", "bad": [...], "evidence": "..."},
+      "driver": {
+        "allowed": [
+          {"file": "rtucx22x64.sys", "min_version": "11.19.602.2025", "evidence": "..."},
+          {"file": "rtu56cx22x64.sys", "min_version": "1156.22.113.2026", "evidence": "..."}
+        ],
+        "bad": [...], "evidence": "..."
+      },
       "values": [
         {"key": "PendingTransmits", "name": "Transmit URBs", "expected": "8", "status": "open", "evidence": "...", "plan": "..."}
       ]
@@ -84,11 +90,11 @@ EEE on, by owner project, to turn off persistently and prove with the checker: *
 ```
 
 - `match`: Windows by the device's first hardware id (prefix, any case); Linux by the sysfs `usb` or `pci` vendor:product id.
-- `driver`: Windows `files` (the allowed `DriverFileName`), `min_version`, `bad` (a file, or a file and a version, that fails with its evidence); Linux `modules` and an optional `firmware`.
+- `driver`: Windows `allowed` (a list of objects: `file`, an allowed `DriverFileName` matched in any case and named once, with its own optional `min_version` and `evidence`; a driver passes its version row against its own file's minimum), `bad` (a file, or a file and a version, that fails with its evidence); Linux `modules` and an optional `firmware`.
 - A value: `key` (the Windows registry keyword; on Linux `feature:<ethtool -k name>`, `ring:rx|tx`, `coalesce:rx-usecs|tx-usecs`, `pause:rx|tx`, `eee:status`, `link:autoneg|speed|duplex`, `usb:power/control`, `pci:power/control`, `usbcore:no_lpm` (the `k` flag of usbcore's `quirks` for this USB id), `firmware`), `expected` (a string, or a list any of which passes), `compare` (`equals`, `bits`: every bit set, `contains`), `absent` (`fail`, or `pass` where a driver without the keyword is fine), `status` (`settled`, `open` with its `plan`, `report`: no value yet, never fails), `profile`, and `evidence`.
 - `eee` (one object, not per chip): `windows` (`keywords` that must be in `off`, and `display_name` / `display_off` / `display_on`, regular expressions matched without regard to case), `linux` (`off`: the passing `ethtool --show-eee` states), and its `evidence`. Both checkers refuse a file without it.
 - **`evidence`** names a ticket, a measurement or a vendor document. Where nothing measured a value, the standard keeps the value the fleet's working PCs already share and says `none yet: fleet value`. No value is invented.
-- **Versioning:** `version` goes up by one with every change of a value, a driver rule or an entry, in the same commit as its evidence. `schema` changes only when the shape changes, and both checkers refuse a schema they do not know. Both checkers validate the file first, with the same case-sensitive rules (Python `validate`, PowerShell `Test-NicStandard`), and exit 2 on a malformed one: an unknown key, a value with no evidence, an open value or driver rule with no plan, a `report` value with an expected value, an unknown status, compare, absent or profile, a repeated key, a non-decimal `bits` value, a Windows driver without `files` or a Linux one without `modules`. CI runs both test suites (`linux-tools`, `windows-tools`).
+- **Versioning:** `version` goes up by one with every change of a value, a driver rule or an entry, in the same commit as its evidence. `schema` changes only when the shape changes, and both checkers refuse a schema they do not know. Both checkers validate the file first, with the same case-sensitive rules (Python `validate`, PowerShell `Test-NicStandard`), and exit 2 on a malformed one: an unknown key, a value with no evidence, an open value or driver rule with no plan, a `report` value with an expected value, an unknown status, compare, absent or profile, a repeated key, a non-decimal `bits` value, a Windows driver without `allowed` (or with a file named twice, or an item that is not an object) or a Linux one without `modules`. CI runs both test suites (`linux-tools`, `windows-tools`).
 
 ## The standard, version 1
 
@@ -119,7 +125,7 @@ Every reachable production PC, read through the fleet MCP (`Get-NetAdapter`, `Ge
 |---|---|---|---|---|---|
 | resolume-snv | Windows 11 | RTL8156B USB (REV_31F4) | `rtucx22x64.sys` 11.19.602.2025 | LAN untagged + Dante VLAN (Realtek Virtual Adapter, `RtVlan640.sys` 10.4.1117.2020) | Transmit URBs 8, Transmit Buffers 64, Receive URBs 6, Receive Buffers 16; flow control, EEE, Green, Advanced EEE, Idle Power Saving, Gigabit Lite, selective suspend 0 (hidden keywords: the 11.19 driver does not offer them); PnPCapabilities 24; no LSO keyword |
 | resolume-pp | Windows 11 | the same RTL8156B, the same driver and values | `rtucx22x64.sys` 11.19.602.2025 | LAN untagged + Dante VLAN | as resolume-snv. A PCIe RTL8168 (`rt640x64` 10.79.50.1003) is disabled |
-| mbc | Windows 11 | RTL8156B USB (REV_31F4) | `rtu56cx22x64.sys` 1156.22.113.2026 | one leg (Dante untagged) | Transmit URBs 3, Transmit Buffers 37, Receive URBs 10, Receive Buffers 32; EEE, Green Ethernet, Idle Power Saving, Gigabit Lite **on**; no `EEE` or `*SelectiveSuspend` keyword; LSO 0; RSC on; wake on magic packet on |
+| mbc | Windows 11 | RTL8156B USB (REV_31F4) | `rtu56cx22x64.sys` 1156.22.113.2026 (oem69.inf; the standard's second allowed file since version 5) | one leg (Dante untagged) | Transmit URBs 8, Transmit Buffers 64 since 21.11.2026 12:46 CET (dasio#24; 3 / 37 at the 20.11 read); Receive URBs 10, Receive Buffers 32 (20.11 read); EEE, Advanced EEE, Green Ethernet, Idle Power Saving, Gigabit Lite 0 (dasio peer 25.11 pc-profile; on at the 20.11 read); no `EEE` or `*SelectiveSuspend` keyword; LSO 0; RSC on; wake on magic packet on |
 | dsg | Windows 11 | RTL8168H PCIe | `rt640x64.sys` 10.79.50.1003 | Dante untagged + LAN VLAN (virtual adapter) | Receive and Transmit Buffers 4096 (the INF's ranges are 32-512 and 32-128); interrupt moderation, flow control, EEE, green, power saving 0; LSO 0; RSS 1, 4 queues; Priority & VLAN 0; CLKREQ 1. A second RTL8168H (`soundgrid`, SoundGrid's leg, disconnected at the read) holds 512 / 128 and Priority & VLAN 3 |
 | FOH | Windows 10 | RTL8125BG PCIe | `rt640x64.sys` 10.79.20.1003 | one leg | Receive and Transmit Buffers 4096 (ranges 32-4096, 64-4096); interrupt moderation, flow control, EEE, green, power saving 0; LSO 0; RSS 1, 4 queues; Priority & VLAN 3; CLKREQ 0 |
 | stream-snv | Linux | RTL8156B USB (bcdDevice 31.00) | Realtek's out-of-tree `r8152` v2.21.4 | LAN untagged + Dante VLAN | RX ring 4096; rx-usecs 15 (µs); pause off; EEE off; TSO/GSO on; USB autosuspend off; NO_LPM quirk. Its onboard RTL8168 is down |
@@ -137,7 +143,7 @@ Measured against version 1, from these reads: resolume-snv, resolume-pp, dsg's D
 
 Where PCs or projects disagree today. Each is either decided in the file with its evidence or marked open there.
 
-1. **mbc runs another RTL8156B driver and setup.** `rtu56cx22x64.sys` 1156.22.113.2026 (a newer Cx package) instead of the standard's `rtucx22x64.sys` 11.19.602.2025, with Transmit URBs 3 / Buffers 37 (the 11.19 PCs: 8 / 64), Receive URBs 10 / Buffers 32 (6 / 16), and EEE, Green Ethernet, Idle Power Saving and Gigabit Lite on. The 1156.22 driver was measured only against NDIS (#290), never at 8 / 64 against 11.19. mbc is dasio's PC: dstack does no Windows OS work there, so dasio moves it to the standard, or brings a measurement that puts 1156.22 into the file.
+1. **mbc runs another RTL8156B driver and setup.** Driver settled in version 5: `rtu56cx22x64.sys` from 1156.22.113.2026 is the RTL8156B's second allowed file. dasio measured it at the standard's queue (mbc since 21.11.2026 12:46 CET, PendingTransmits 8 / TransmitBufferLen 64): dcontroller's per-second max arrival lateness 21.11 12:50-14:36 CET read stream-obs <- mbc p50 1125, p99 1729, p999 3041, max 3083 us against a 13041 us latency, 0 over it, and MBC-SNV-dlisten <- mbc p50 854, p99 927, max 1239 us; the same as before at 3 / 37 (p99 1708, max 3270 us), no change beyond noise (dasio#24, comments of 21.11; dasio peer 25.11.2026). The owner's rule is the newest Realtek driver, not an old pin. mbc's EEE values read 0 since (dasio peer 25.11 pc-profile). The receive queue (10 / 32) is conflict 11. The 20.11 read, as first found: `rtu56cx22x64.sys` 1156.22.113.2026 (a newer Cx package) instead of the standard's `rtucx22x64.sys` 11.19.602.2025, with Transmit URBs 3 / Buffers 37 (the 11.19 PCs: 8 / 64), Receive URBs 10 / Buffers 32 (6 / 16), and EEE, Green Ethernet, Idle Power Saving and Gigabit Lite on. The 1156.22 driver was measured only against NDIS (#290), never at 8 / 64 against 11.19. mbc is dasio's PC: dstack does no Windows OS work there, so dasio moves it to the standard, or brings a measurement that puts 1156.22 into the file.
 2. **Two rt640x64 versions.** FOH runs 10.79.20.1003, dsg 10.79.50.1003 (dasio#188, the owner's rule on dasio#120: newer drivers are tested and deployed). Both pass `min_version`; one version for the family is the open plan in the file.
 3. **The rt640x64 version and dstack's own start line.** The 20-30 ms receive DPC was measured on 10.72 AND 10.79 on FOH's RTL8125, with 10.39.212.2020 clean there (dasio#1, `docs/windows-box.md`). dasio then kept 10.79.20.1003 together with its own deferred receive (`dasio_pacer` RxdEnable: TCP and discovery receive leave the NIC's DPC) and kernel TX, and its baseline records 10.79.20.1003 as best and 10.39 as worse on that path. So 10.79 is clean only on a dasio host. Every rt640x64 PC in the fleet is one, and the file says so; a PC on rt640x64 without dasio's deferred receive is measured before it carries Dante. dstack's start line follows the file (#466, `crates/dstack/src/lso.rs`, the file embedded at build time from `crates/dstack/nic-standard.json`, a copy a test keeps equal to this one): it warns on a bad driver, another file, a version under the minimum or a Realtek adapter without an entry, with the entry's evidence or plan; before #466 it kept its own list, which named 10.79.20.1003 bad and warned on FOH at every start. The checker cannot see dasio's deferred receive: it passes rt640x64 10.79 on any PC, so the "measured first" rule for a non-dasio PC is a process rule, not a check. The standard keeps 10.72.524.2024 bad, which nothing contradicts.
 4. **Transmit Buffers in opposite directions on the PCIe Realteks.** dasio's baseline writes 4096 receive and transmit buffers to every rt640x64 Dante NIC; on dsg's RTL8168 that is above the INF's ranges (32-512, 32-128) and what the driver applies is not measured. `docs/windows-box.md` named "Transmit Buffers at the driver's minimum" as FOH's next step, never measured. The standard keeps the fleet's 4096 in the low-latency profile, marked open, with an A/B on dsg as the plan. These and RSS are dasio's tuning, so a normal-profile check skips them; the power, flow-control, offload and interrupt-moderation values hold for every profile (songplayer#285 sets them on every wired NIC).
@@ -192,7 +198,7 @@ PASS  Dante70  driver:version  expected=>=10.4.1117.2020  actual=10.4.1117.2020
 2 Realtek NIC(s) checked, 0 FAIL
 ```
 
-mbc, `nic-standard-check.ps1`, the lines other than PASS (exit 1; long notes cut):
+mbc, `nic-standard-check.ps1` at version 1 (the 20.11 read), the lines other than PASS (exit 1; long notes cut). Since version 5 its driver passes (`rtu56cx22x64.sys` 1156.22.113.2026 is allowed), and dasio set PendingTransmits 8 / TransmitBufferLen 64 (21.11) and the EEE values to 0 (dasio peer 25.11 pc-profile):
 
 ```
 --    Ethernet 3  RTL8156B (rtl8156b-windows)

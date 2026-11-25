@@ -37,7 +37,7 @@ function Entry { param([string]$Id) @($std.adapters) | Where-Object { $_.id -eq 
 function ValueSpec { param([string]$Id, [string]$Key) @((Entry $Id).values) | Where-Object { $_.key -eq $Key } }
 
 # ------------------------------------------------------------ the file
-Check 'the repo file reads as the schema, version 1 or later' { $std.schema -eq 'dstack-nic-standard/1' -and $std.version -ge 1 }
+Check 'the repo file reads as the schema, version 5 or later' { $std.schema -eq 'dstack-nic-standard/2' -and $std.version -ge 5 }
 Check 'PendingTransmits stays 8, open, with its plan' {
     $v = ValueSpec 'rtl8156b-windows' 'PendingTransmits'
     $v.expected -eq '8' -and $v.status -eq 'open' -and $v.plan -like '*#425*'
@@ -115,7 +115,7 @@ Check 'a file of another schema is refused' {
     $tmp = [IO.Path]::GetTempFileName()
     try {
         Set-Content -LiteralPath $tmp -Value '{"schema": "other/1", "version": 1, "adapters": []}' -Encoding UTF8
-        try { Read-NicStandard $tmp | Out-Null; $false } catch { $_.Exception.Message -like 'not a dstack-nic-standard/1 file*' }
+        try { Read-NicStandard $tmp | Out-Null; $false } catch { $_.Exception.Message -like 'not a dstack-nic-standard/2 file*' }
     } finally { Remove-Item -LiteralPath $tmp -Force }
 }
 

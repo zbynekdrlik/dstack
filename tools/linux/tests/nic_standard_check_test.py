@@ -171,7 +171,7 @@ def rows_by_key(rows):
 class TheStandard(unittest.TestCase):
     def test_the_repo_file_is_valid(self):
         std = load()
-        self.assertEqual(std["schema"], "dstack-nic-standard/1")
+        self.assertEqual(std["schema"], "dstack-nic-standard/2")
         self.assertGreaterEqual(std["version"], 1)
 
     def test_pending_transmits_stays_8_and_open_with_its_plan(self):

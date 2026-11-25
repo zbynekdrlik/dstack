@@ -118,8 +118,8 @@ fn realtek(facts: &DriverFacts) -> bool {
 }
 
 /// The entry's verdict on a driver: a bad one (its file, its exact
-/// version, or both), then the allowed files (any case), then the minimum
-/// version.
+/// version, or both), then the allowed files (any case), then that file's
+/// own minimum version.
 fn judge<'a>(entry: &'a standard::Entry, facts: &DriverFacts) -> DriverVerdict<'a> {
     let file = facts.file.as_deref().map(str::trim);
     let version = facts.version.as_deref().map(str::trim);
@@ -131,10 +131,10 @@ fn judge<'a>(entry: &'a standard::Entry, facts: &DriverFacts) -> DriverVerdict<'
     }) {
         return DriverVerdict::Bad(entry, bad);
     }
-    if !rule.files.iter().any(|f| is_file(f)) {
+    let Some(allowed) = rule.allowed.iter().find(|a| is_file(&a.file)) else {
         return DriverVerdict::File(entry);
-    }
-    if let Some(min) = &rule.min_version
+    };
+    if let Some(min) = &allowed.min_version
         && !version.is_some_and(|v| standard::compare_versions(v, min) != Ordering::Less)
     {
         return DriverVerdict::Old(entry);
@@ -161,11 +161,13 @@ pub fn driver_line(verdict: &DriverVerdict<'_>, facts: &DriverFacts) -> Option<L
         .as_deref()
         .map_or("(version not read)", str::trim);
     let want = |e: &standard::Entry| {
-        let files = e.driver.files.join(" or ");
-        match &e.driver.min_version {
-            Some(min) => format!("{files} {min} or newer"),
-            None => files,
-        }
+        let wanted: Vec<String> = e
+            .driver
+            .allowed
+            .iter()
+            .map(standard::Allowed::wanted)
+            .collect();
+        wanted.join(" or ")
     };
     let note = |e: &standard::Entry| match (e.driver.status.as_str(), &e.driver.plan) {
         ("open", Some(plan)) => format!("open: {plan}"),

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.219
+
+- **NIC standard version 5, schema `dstack-nic-standard/2` (#465): mbc's newer RTL8156B driver is allowed.** The `rtl8156b-windows` entry allows `rtu56cx22x64.sys` from 1156.22.113.2026 (Realtek's newer NetAdapterCx package, mbc-snv since 21.11.2026 at PendingTransmits 8 / TransmitBufferLen 64) beside `rtucx22x64.sys` from 11.19.602.2025. dasio's measurement (dcontroller, per-second max arrival lateness 21.11 12:50-14:36 CET): stream-obs <- mbc p50 1125, p99 1729, p999 3041, max 3083 us against a 13041 us latency, 0 over it; MBC-SNV-dlisten <- mbc p50 854, p99 927, max 1239 us; the same as before at 3/37 (p99 1708, max 3270 us), no change beyond noise (dasio#24). The owner's rule is the newest Realtek driver, not an old pin. A build under 1156.22.113.2026 of that file, and the inbox `rtucx21x64.sys` at any version, still fail.
+  - **The shape changed:** a Windows driver rule names `allowed`, a list of objects `{"file", "min_version"?, "evidence"?}`, instead of `files` and one `min_version`; each file is judged against its own minimum. Linux keeps `modules` (no Linux entry has a minimum). Both checkers know schema 2 only: run the checker and the json from the same commit, as `docs/nic-standard.md` says (an older checker refuses this file, exit 2).
+  - API (`dstack::lso::standard`): `DriverRule::files` and `DriverRule::min_version` are gone; `DriverRule::allowed: Vec<Allowed>` (`file`, `min_version`, `Allowed::wanted`) replaces them. The start line on mbc's driver is now the info line, no warning. No consumer reads these types today.
+  - docs/nic-standard.md: mbc's rows (driver, 8 / 64, EEE values 0 per dasio peer 25.11 pc-profile) and conflict 1 settled.
+  - **No latency change.** Consumers: only move the version; dasio, songplayer and camera-box fetch the checker by commit SHA and need nothing else.
+
 ## 0.6.218
 
 - **Tests only:** dstack-resample's timing test (`the_smallest_device_block_converts_well_inside_its_own_time`) moved from the lib's unit tests into its own binary, `tests/resample_timing.rs`. Under the coverage build the other unit tests converted through the same engine beside it and shared its counters' cache lines (main CI 45657637244 read 85.266 us at the best of 20 batches, every batch 85-170 us). Cargo runs binaries one at a time, so nothing converts beside it now. The bound (80 us) is unchanged, and the mutation gate runs the binary too (`.cargo/mutants.toml`).
