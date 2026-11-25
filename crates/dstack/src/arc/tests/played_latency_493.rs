@@ -73,9 +73,12 @@ impl Call for Rig {
     }
 }
 
-/// (the first RX channel fed, 1 up; the stated latency, ns) of each flow,
-/// from 0x3200 through [`rx_flows`] and from 0x3600 by slot.
-fn stated(rig: &mut Rig) -> (Vec<(u16, u32)>, Vec<(u16, u32)>) {
+/// (the first RX channel fed, 1 up; the stated latency, ns) of each flow.
+type Listed = Vec<(u16, u32)>;
+
+/// Each flow's [`Listed`] entry from 0x3200 through [`rx_flows`] and from
+/// 0x3600 by slot.
+fn stated(rig: &mut Rig) -> (Listed, Listed) {
     let listed = rx_flows(rig).expect("0x3200 reads");
     let by_slot: Vec<(u16, u16)> = listed.iter().map(|f| (f.slot, f.channels[0])).collect();
     let v27 = listed
