@@ -169,11 +169,11 @@ Work it: send each consumer behind its upgrade notes from its own pin (the CHANG
 """
 
 HAND = (
-    "- [ ] After the 25.11 sync: tell dsync which of its boxes run dstack >= v0.6.193 (#440 fixed), "
-    "box by box, so it can roll v1.35.16 there (dsync#212, parked until then); until then, no dsync "
-    "service restart on a box with an older dstack device",
-    "- [ ] dasio: v0.6.215 on the FOH PC instance-1 for #485 (its late lines carry `pass_max_us` / "
-    "`pass_max_cpu_us` / `oversleep_max_us`)",
+    ("- [ ] After the 25.11 sync: tell dsync which of its boxes run dstack >= v0.6.193 (#440 fixed), "
+     "box by box, so it can roll v1.35.16 there (dsync#212, parked until then); until then, no dsync "
+     "service restart on a box with an older dstack device"),
+    ("- [ ] dasio: v0.6.215 on the FOH PC instance-1 for #485 (its late lines carry `pass_max_us` / "
+     "`pass_max_cpu_us` / `oversleep_max_us`)"),
 )
 
 NAMES = ["intercom", "songplayer", "dasio", "dsync"]
@@ -293,7 +293,10 @@ class OncePerWednesday(unittest.TestCase):
             cp.main()
         with open(gh_out, encoding="utf-8") as f:
             outputs = dict(l.split("=", 1) for l in f.read().splitlines())
-        body = open(out, encoding="utf-8").read() if os.path.exists(out) else None
+        body = None
+        if os.path.exists(out):
+            with open(out, encoding="utf-8") as f:
+                body = f.read()
         return outputs, body
 
     def test_main_skips_a_day_already_read_only_when_asked(self):
