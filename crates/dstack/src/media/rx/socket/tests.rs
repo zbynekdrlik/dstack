@@ -233,8 +233,10 @@ fn a_packet_that_waited_in_its_socket_is_late_by_the_wake_not_on_the_wire() {
 #[test]
 fn a_packet_already_late_when_the_kernel_got_it_counts_wire_late() {
     let (s, mut rx) = receiver(None);
-    // A whole second late at the pass: no wake of this test explains it.
-    let now = ns_of(P0 + u64::from(RATE), RATE);
+    // Half a second late at the pass: no wake of this test explains it,
+    // and within a ring of the clock (a packet a ring or more from it is
+    // another time base's and measures nothing, dstack #489).
+    let now = ns_of(P0 + u64::from(RATE) / 2, RATE);
     send(s.local_addr(2).unwrap(), P0);
     let c = pump(&mut rx, 1, now);
     assert_eq!((c.packets, c.late, c.wire_late), (1, 1, 1), "{c:?}");

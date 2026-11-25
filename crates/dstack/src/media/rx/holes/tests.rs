@@ -190,12 +190,43 @@ fn a_flow_starts_over_when_the_clock_goes_back_a_ring() {
     let mut h = Holes::default();
     h.open(now + ring - 64, now + ring - 32);
     let mut end = Some(now + ring - 1);
-    assert_eq!(follow_clock(&mut end, &mut h, now), Lost::default());
+    assert_eq!(follow_clock(&mut end, &mut h, now, 0), Lost::default());
     assert_eq!((end, h.open_holes().len()), (Some(now + ring - 1), 1));
     let mut end = Some(now + ring);
-    assert_eq!(follow_clock(&mut end, &mut h, now), lost(1, 32));
+    assert_eq!(follow_clock(&mut end, &mut h, now, 0), lost(1, 32));
     assert_eq!((end, h.open_holes().len()), (None, 0));
     let mut none = None;
-    assert_eq!(follow_clock(&mut none, &mut h, now), Lost::default());
+    assert_eq!(follow_clock(&mut none, &mut h, now, 0), Lost::default());
     assert_eq!(none, None);
+}
+
+/// dstack #489: a flow whose furthest end is a whole ring BEHIND the
+/// clock's now by more than the reader's own clock moved since that end
+/// (our clock stepped forward to a new base) starts over too, its open
+/// holes lost; nearer, or a silence the reader's clock lived through on
+/// the same base, nothing changes.
+#[test]
+fn a_flow_starts_over_when_the_clock_goes_a_ring_past_its_end() {
+    let ring = crate::media::ring::SLOTS as u64;
+    let now = 10_000_000;
+    let mut h = Holes::default();
+    h.open(now - ring - 64, now - ring - 32);
+    let mut end = Some(now - ring + 1);
+    assert_eq!(follow_clock(&mut end, &mut h, now, 0), Lost::default());
+    assert_eq!((end, h.open_holes().len()), (Some(now - ring + 1), 1));
+    // A silence of 3 rings, lived through by the reader: the same base.
+    let mut end = Some(now - 3 * ring);
+    assert_eq!(
+        follow_clock(&mut end, &mut h, now, 2 * ring + 1),
+        Lost::default()
+    );
+    assert_eq!((end, h.open_holes().len()), (Some(now - 3 * ring), 1));
+    // The same distance with a ring less of the reader's time: a step.
+    assert_eq!(follow_clock(&mut end, &mut h, now, 2 * ring), lost(1, 32));
+    assert_eq!((end, h.open_holes().len()), (None, 0));
+    let mut h = Holes::default();
+    h.open(now - ring - 64, now - ring - 32);
+    let mut end = Some(now - ring);
+    assert_eq!(follow_clock(&mut end, &mut h, now, 0), lost(1, 32));
+    assert_eq!((end, h.open_holes().len()), (None, 0));
 }

@@ -12,6 +12,7 @@ mod arrival;
 mod destinations;
 mod mean_age;
 mod network_p99;
+mod other_base;
 mod rejoin;
 mod reorder;
 mod source;
