@@ -22,15 +22,21 @@
 //! it. The median sits within [`MEDIAN_BELOW_H`] under H: the wake, the
 //! drain, the ring read and the converter before the call. A block late
 //! past its `play_at` counts against the code unless the pump itself woke
-//! later than H in the window (`wake_behind_max_us` rose past it), which no
-//! lead can make up: that run prints `RUNNER`.
+//! later than H in the window, which no lead can make up: that run prints
+//! `RUNNER`. The window's slowest wake is its own (#476, main CI
+//! 45630237191's coverage job: 76 late blocks, passed on rerun): the main
+//! thread merges the pump's recent late wakes every [`WAKE_LOOK`] while it
+//! records and keeps the latest whose wall time is inside the window. The
+//! pump's `wake_behind_max_us` is since its start, so a stall before the
+//! window hid any stall inside it that was smaller.
 //!
 //! Load-sensitive: judge it under `DSTACK_TEST_LOOPBACK=1 chrt -f 10` on
 //! a loaded dev1.
 
+use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use dlink::{Block, Clock, Config, Link, Map, Place, Ports, Process, SubStatus};
 use dstack::clock::{app_monotonic_ns, latency_samples};
@@ -58,6 +64,10 @@ const NAP_EVERY: u64 = 40;
 /// socket drain, the ring read and the converter before the processor
 /// (about 0.13 ms on dev1).
 const MEDIAN_BELOW_H: i64 = 600_000;
+/// How often the main thread merges the pump's recent late wakes while it
+/// records: the pump keeps the last 32 (`dstack::stream::wake::RECENT`),
+/// and a nap every [`NAP_EVERY`] blocks gives a few a nap.
+const WAKE_LOOK: Duration = Duration::from_millis(5);
 /// How far over H a block's lead may read, ns: the pump's play-time
 /// filter follows the media-less-app offset a few µs a wake at most.
 const OVER_H: i64 = 20_000;
@@ -134,9 +144,15 @@ struct Measured {
     restarts: u64,
     rebootstraps: u64,
     /// The pump's latest wake since its start, before and after the
-    /// window, µs.
+    /// window, µs (shown only: a stall before the window keeps it high).
     wake_before_us: u64,
     wake_after_us: u64,
+    /// The window's own latest wake, µs: the largest `behind_us` of the
+    /// pump's late wakes timed inside it (0: none was a block late).
+    window_wake_us: u64,
+    /// Late wakes in the window that no merge saw (the pump's recent list
+    /// moved past them between two looks).
+    wakes_unseen: u64,
     status: String,
 }
 
@@ -208,9 +224,18 @@ fn run(nap: Option<Duration>) -> Measured {
     }
     std::thread::sleep(SETTLE);
     let before = receiver.media().engine().expect("the pump");
+    let pump = receiver.media().engine_stats().expect("the pump");
+    let mut wakes = Wakes::new(pump.wakes().late_wakes());
+    let from_ms = unix_ms();
     on.store(true, Ordering::Relaxed);
-    std::thread::sleep(RECORD);
+    let recording = Instant::now();
+    while !RECORD.saturating_sub(recording.elapsed()).is_zero() {
+        std::thread::sleep(WAKE_LOOK);
+        wakes.merge(pump.wakes().late_wakes(), &pump.wakes().recent());
+    }
     on.store(false, Ordering::Relaxed);
+    wakes.merge(pump.wakes().late_wakes(), &pump.wakes().recent());
+    let to_ms = unix_ms();
     let after = receiver.media().engine().expect("the pump");
     let status = receiver.status();
     let recs = recs.lock().unwrap().clone();
@@ -223,8 +248,71 @@ fn run(nap: Option<Duration>) -> Measured {
         rebootstraps: after.rebootstraps - before.rebootstraps,
         wake_before_us: before.wake_behind_max_us,
         wake_after_us: after.wake_behind_max_us,
+        window_wake_us: wakes.latest_within(from_ms, to_ms),
+        wakes_unseen: wakes.unseen(),
         status,
     }
+}
+
+fn unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+}
+
+/// The pump's late wakes merged over the window (each: wall ms, behind
+/// µs, re-bootstrapped), and the count since its start at each merge.
+struct Wakes {
+    seen: BTreeSet<(u64, u64, bool)>,
+    /// The count at the window's open.
+    from: u64,
+    /// The count at the last merge.
+    count: u64,
+}
+
+impl Wakes {
+    fn new(count: u64) -> Self {
+        Wakes {
+            seen: BTreeSet::new(),
+            from: count,
+            count,
+        }
+    }
+
+    /// Merges the pump's `recent` late wakes, `count` since its start.
+    fn merge(&mut self, count: u64, recent: &[dstack::stream::wake::LateWake]) {
+        self.count = self.count.max(count);
+        self.seen.extend(
+            recent
+                .iter()
+                .map(|w| (w.unix_ms, w.behind_us, w.rebootstrap)),
+        );
+    }
+
+    /// The latest wake timed within `from_ms..=to_ms`, µs.
+    fn latest_within(&self, from_ms: u64, to_ms: u64) -> u64 {
+        self.seen
+            .iter()
+            .filter(|w| (from_ms..=to_ms).contains(&w.0))
+            .map(|w| w.1)
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// The late wakes since the window opened that no merge saw (about:
+    /// two wakes alike in all three fields count as one; wakes merged from
+    /// before the window are not counted as seen in it).
+    fn unseen(&self) -> u64 {
+        let seen = self.seen.len() as u64;
+        (self.count - self.from).saturating_sub(seen)
+    }
+}
+
+/// The run's lateness is the runner's when the pump itself woke later
+/// than H inside the window (`window_wake_us`, its own slowest wake): no
+/// lead covers a wake past it.
+fn runner(window_wake_us: u64, lead_ns: i64) -> bool {
+    i64::try_from(window_wake_us).unwrap_or(i64::MAX) * 1_000 > lead_ns
 }
 
 fn pct(sorted: &[i64], p: f64) -> i64 {
@@ -247,10 +335,9 @@ fn judged(what: &str, m: &Measured) {
     let late = s.iter().filter(|&&l| l <= 0).count();
     let early = s.iter().filter(|&&l| l > h + OVER_H).count();
     // The pump itself woke later than H in the window: no lead covers it.
-    let runner = m.wake_after_us > m.wake_before_us
-        && i64::try_from(m.wake_after_us).unwrap_or(i64::MAX) * 1_000 > h;
+    let runner = runner(m.window_wake_us, h);
     let line = format!(
-        "{what}: H {h} ns; lead (play_at - receipt) over {} blocks, us: min {:.1} p1 {:.1} p10 {:.1} p50 {:.1} p90 {:.1} max {:.1}; late {late} early {early}; restarts {} rebootstraps {}; pump wake max {} -> {} us{}",
+        "{what}: H {h} ns; lead (play_at - receipt) over {} blocks, us: min {:.1} p1 {:.1} p10 {:.1} p50 {:.1} p90 {:.1} max {:.1}; late {late} early {early}; restarts {} rebootstraps {}; pump wake max {} -> {} us, in the window {} us ({} late wakes unseen){}",
         s.len(),
         s[0] as f64 / 1e3,
         pct(&s, 0.01) as f64 / 1e3,
@@ -262,6 +349,8 @@ fn judged(what: &str, m: &Measured) {
         m.rebootstraps,
         m.wake_before_us,
         m.wake_after_us,
+        m.window_wake_us,
+        m.wakes_unseen,
         if runner && late > 0 { " RUNNER" } else { "" },
     );
     eprintln!("{line}");
@@ -294,4 +383,47 @@ fn a_pump_late_within_h_still_hands_every_block_before_its_play_at() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     judged("2.5 ms nap every 40th block", &run(Some(NAP)));
+}
+
+/// A window's blocks for [`judged`] without a device: `late` blocks at
+/// or after their `play_at`, the rest at the median; the pump's
+/// since-start max `since_start_us` before and after (a stall before the
+/// window), and the window's own latest wake.
+fn shaped(late: usize, since_start_us: u64, window_wake_us: u64) -> Measured {
+    let lead_ns = 3_906_250;
+    let mut leads = vec![lead_ns - 100_000; 1_200 - late];
+    leads.extend(std::iter::repeat_n(-1_000, late));
+    Measured {
+        leads,
+        lead_ns,
+        restarts: 0,
+        rebootstraps: 0,
+        wake_before_us: since_start_us,
+        wake_after_us: since_start_us,
+        window_wake_us,
+        wakes_unseen: 0,
+        status: String::new(),
+    }
+}
+
+/// #476 (main CI 45630237191): a stall before the window kept the pump's
+/// since-start max at 8 ms; a 5 ms wake inside the window (past H) made
+/// the late blocks. The window's own wake excuses them; the old judge
+/// (the since-start max rising across the window) failed this run. A
+/// window whose own wakes stayed within H still fails on a late block.
+#[test]
+fn the_judge_reads_the_window_s_own_slowest_wake() {
+    judged(
+        "a stall past H inside the window",
+        &shaped(76, 8_000, 5_000),
+    );
+    let within_h = std::panic::catch_unwind(|| {
+        judged("wakes within H", &shaped(76, 8_000, 2_000));
+    });
+    assert!(
+        within_h.is_err(),
+        "a late block with every wake within H passed"
+    );
+    judged("no late block", &shaped(0, 8_000, 2_000));
+    assert!(!runner(3_906, 3_906_250) && runner(3_907, 3_906_250));
 }
