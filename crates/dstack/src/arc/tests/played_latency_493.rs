@@ -21,6 +21,18 @@ const OVERRIDE_NS: u32 = 666_666;
 /// The transmitters' advertised latency ([`adv`]).
 const ADVERTISED_NS: u32 = 2_000_000;
 
+/// A transmitter at 10.0.0.13 that sends 32 frames a packet (0.33 ms at
+/// 96 kHz) and advertises 0.1 ms: its flow's need (32 samples) is past its
+/// granted latency (ours, 0.25 ms).
+fn coarse() -> Advertised {
+    Advertised {
+        fpp_min: 32,
+        fpp_max: 32,
+        latency_ns: 100_000,
+        ..adv(Ipv4Addr::new(10, 0, 0, 13), 3)
+    }
+}
+
 /// The device as `serve` holds it: its config and state, and the flows.
 struct Rig {
     device: Device,
@@ -106,9 +118,9 @@ fn stated(rig: &mut Rig) -> (Listed, Listed) {
 fn an_overridden_flow_is_listed_at_its_played_latency_and_follows_a_write() {
     let dir = tempfile::tempdir().unwrap();
     let mut cfg = config_in(dir.path());
-    // Our device latency (48 samples) is under the override, so the flow
+    // Our device latency (24 samples) is under the override, so the flow
     // plays at the override.
-    cfg.latency_ns = 500_000;
+    cfg.latency_ns = 250_000;
     // Our TX keeps its own latency, so a write may go back under the TX
     // floor (`DeviceConfig::latency_range`).
     cfg.tx_latency_ns = Some(1_000_000);
@@ -123,12 +135,14 @@ fn an_overridden_flow_is_listed_at_its_played_latency_and_follows_a_write() {
             "TX 2".into(),
             adv(Ipv4Addr::new(10, 0, 0, 12), 2),
         ),
+        ("coarse-device".into(), "TX 3".into(), coarse()),
     ]);
     receiving(
         &mut rx,
         &[
             (0, sub("TX 1", "peer-device")),
             (1, sub("TX 2", "other-device")),
+            (2, sub("TX 3", "coarse-device")),
         ],
         &net,
     );
@@ -138,19 +152,21 @@ fn an_overridden_flow_is_listed_at_its_played_latency_and_follows_a_write() {
         rx,
         seq: 0,
     };
-    // RX 1 is the peer's overridden flow, RX 2 the other's granted one.
-    let want = vec![(1, OVERRIDE_NS), (2, ADVERTISED_NS)];
+    // RX 1 is the peer's overridden flow, RX 2 and RX 3 granted ones; RX 3
+    // keeps our 0.25 ms although its packets (32 frames) are longer: only
+    // an overridden flow is stated by its need.
+    let want = vec![(1, OVERRIDE_NS), (2, ADVERTISED_NS), (3, 250_000)];
     assert_eq!(stated(&mut rig), (want.clone(), want));
 
     // A controller's latency write over both: each flow plays at the
     // device latency, and both lists state it.
     rig.write_latency(5_000_000);
-    let want = vec![(1, 5_000_000), (2, 5_000_000)];
+    let want = vec![(1, 5_000_000), (2, 5_000_000), (3, 5_000_000)];
     assert_eq!(stated(&mut rig), (want.clone(), want));
 
     // Back under the override: the overridden flow plays at it again, the
-    // other at its transmitter's latency.
-    rig.write_latency(500_000);
-    let want = vec![(1, OVERRIDE_NS), (2, ADVERTISED_NS)];
+    // others at their granted latency.
+    rig.write_latency(250_000);
+    let want = vec![(1, OVERRIDE_NS), (2, ADVERTISED_NS), (3, 250_000)];
     assert_eq!(stated(&mut rig), (want.clone(), want));
 }
