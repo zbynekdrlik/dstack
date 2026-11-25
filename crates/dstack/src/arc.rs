@@ -874,7 +874,9 @@ fn stated_latency_ns(latency_ns: u64, rate: u32) -> u32 {
 /// latency in ns, 0); each slot's bitmask of the RX channels it feeds (16 a
 /// word, as many words as our RX channels need; one word for a flow
 /// without slots). A reader follows the offsets. The page's item is the
-/// flow descriptor's offset.
+/// flow descriptor's offset. The latency is the one the flow plays at
+/// ([`crate::subscribe::FlowView::played_ns`], dstack #493): Dante
+/// Controller and dcontroller judge the flow's lateness against it.
 fn rx_flows(h: &Header, req: &[u8], cfg: &DeviceConfig, rx: &Manager) -> ArcOutcome {
     page(
         h,
@@ -916,7 +918,7 @@ fn rx_flows(h: &Header, req: &[u8], cfg: &DeviceConfig, rx: &Manager) -> ArcOutc
             for field in [9, 1, 0x800, 0] {
                 out.u16(field);
             }
-            out.u32(stated_latency_ns(f.latency_ns, cfg.sample_rate));
+            out.u32(stated_latency_ns(f.played_ns, cfg.sample_rate));
             out.u32(0);
             for (i, fed) in f.rx.iter().enumerate() {
                 let here = out.offset();

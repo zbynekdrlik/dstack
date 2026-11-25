@@ -179,6 +179,7 @@ fn a_subscription_asks_its_transmitter_for_one_flow_of_nchan_slots() {
             bits: 24,
             fpp: 16,
             latency_ns: 2_000_000,
+            played_ns: 2_000_000,
             advertised_ns: 2_000_000,
             below_advertised: false,
             device: "peer-device".into(),

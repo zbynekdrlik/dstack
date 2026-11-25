@@ -297,6 +297,12 @@ pub struct FlowView {
     pub bits: u32,
     pub fpp: u16,
     pub latency_ns: u64,
+    /// The latency the pump plays the flow at, ns, as our RX flow lists
+    /// (ARC 0x3200, 0x3600) state it (dstack #493): with the device
+    /// config's `playout_override` for its transmitter, that override (at
+    /// least its frames a packet) and at least the device latency; else
+    /// [`FlowView::latency_ns`].
+    pub played_ns: u64,
     /// The transmitter's advertised latency (0: none).
     pub advertised_ns: u64,
     /// Its playout is below that, by the device config's

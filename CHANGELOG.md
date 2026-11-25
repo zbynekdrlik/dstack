@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.220
+
+- **Fix (#493): an RX flow whose transmitter has a `playout_override` is listed at the latency it plays at.** Our RX flow lists (ARC 0x3200, and ARC 2.8.9's 0x3600) stated every flow at its granted latency (the transmitter's advertised latency or ours, the larger), also when the device config's `playout_override` plays it earlier. Now an overridden flow is stated at the override (at least its frames a packet, at least the device latency), from the same `need` the pump reads it by; a flow without an override is stated as before. So dcontroller and Dante Controller show the played latency for an overridden flow and judge its lateness (the per-second peaks of the heartbeat) against it: iem-mixer's vocal at an override of 64 samples now shows 0.67 ms at 96 kHz, not the transmitter's ~1 ms. A controller's latency write still moves every flow's stated latency (an overridden flow is stated at the larger of the override and the new device latency).
+  - API: `subscribe::FlowView` has a new public field `played_ns` (the latency the flow plays at, ns). A struct literal of `FlowView` outside dstack needs it (dstack builds them; a consumer only reads them).
+  - **No latency change:** nothing plays earlier or later; only what the flow lists state for an overridden flow. Consumers: only move the version (iemmixer to see its overridden flows' latency in dcontroller).
+- **Docs (#155):** docs/two-networks.md and the `tools/windows/lan-selfheal.ps1` header: layout A (Dante tagged on VLAN 70, the LAN untagged) is the standard at SNV, layout B is retired (owner 16.11.2026, network#4). The script still repairs a PC not yet moved to layout A; its behaviour is unchanged.
+
 ## 0.6.219
 
 - **NIC standard version 5, schema `dstack-nic-standard/2` (#465): mbc's newer RTL8156B driver is allowed.** The `rtl8156b-windows` entry allows `rtu56cx22x64.sys` from 1156.22.113.2026 (Realtek's newer NetAdapterCx package, mbc-snv since 21.11.2026 at PendingTransmits 8 / TransmitBufferLen 64) beside `rtucx22x64.sys` from 11.19.602.2025. dasio's measurement (dcontroller, per-second max arrival lateness 21.11 12:50-14:36 CET): stream-obs <- mbc p50 1125, p99 1729, p999 3041, max 3083 us against a 13041 us latency, 0 over it; MBC-SNV-dlisten <- mbc p50 854, p99 927, max 1239 us; the same as before at 3/37 (p99 1708, max 3270 us), no change beyond noise (dasio#24). The owner's rule is the newest Realtek driver, not an old pin. A build under 1156.22.113.2026 of that file, and the inbox `rtucx21x64.sys` at any version, still fail.

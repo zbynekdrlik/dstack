@@ -362,7 +362,8 @@ fn rx_channel(
 /// Our RX flow in `slot` (granted, [`granted_flow`]) as a record
 /// (`0x1422`): the flow (from 1), 0, audio, the flow again, 0, the card's
 /// flags, 0, its name's offset (its number), the format's (written once a
-/// page: rate, bits, `u32` each), its latency in ns, 12 zero bytes; then
+/// page: rate, bits, `u32` each), its played latency in ns
+/// ([`crate::subscribe::FlowView::played_ns`], dstack #493), 12 zero bytes; then
 /// `[0a 0e]`, 10 zero bytes, its slots, the mapping's offset, 4 zero
 /// bytes; then `[04 00]`, the receiver state, the endpoint's offset, 0.
 /// The endpoint (`08 02`, the slot's port, our address) and the mapping
@@ -389,7 +390,7 @@ fn rx_flow(slot: usize, cfg: &DeviceConfig, manager: &Manager, out: &mut Heap) -
     out.u32(0);
     out.u16(name);
     out.u16(format);
-    out.u32(stated_latency_ns(f.latency_ns, cfg.sample_rate));
+    out.u32(stated_latency_ns(f.played_ns, cfg.sample_rate));
     out.zeros(12);
     out.bytes(&[0x0a, 0x0e]);
     out.zeros(10);
