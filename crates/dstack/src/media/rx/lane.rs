@@ -27,6 +27,11 @@ pub(super) struct Lane {
     pub(super) source: Option<SocketAddrV4>,
     /// The end of the furthest packet so far, samples.
     pub(super) end: Option<u64>,
+    /// The reader's clock ([`super::RxShared::now_ns`]) when `end` last
+    /// moved, ns (dstack #489: a flow's end a ring or more behind the
+    /// clock is another base's only when the clock moved a ring more than
+    /// this time; else the flow was silent and its hole is a loss).
+    pub(super) end_mono: u64,
     /// Packets came unplaced since the last placed one (dstack #447: an
     /// idle drain, a clock not ready): the next placed packet starts the
     /// sequence again, after the clock's check on the old end.
@@ -50,6 +55,7 @@ impl Lane {
             targets: Vec::with_capacity(channels),
             source: None,
             end: None,
+            end_mono: 0,
             restart: false,
             holes: Holes::default(),
             read_at: None,

@@ -501,8 +501,11 @@ impl Intake {
                 wake,
                 at_ns,
                 step,
+                mono,
             });
-            if let Some(s) = seen.get_mut(placed) {
+            if let Some(pos) = pos
+                && let Some(s) = seen.get_mut(placed)
+            {
                 *s = Seen { pos, wake };
                 placed += 1;
             }
@@ -597,16 +600,20 @@ struct PlaceArgs<'a> {
     at_ns: Option<u64>,
     /// The reader's step, samples ([`reads_apart`]).
     step: u64,
+    /// The reader's clock at the read, ns ([`RxShared::now_ns`]).
+    mono: u64,
 }
 
 /// A packet judged and placed at the read: `late` and `wire_late`, the
 /// network latency and the minute's windows, its holes, its samples
 /// written into the rings routed to its slots, and its write delay;
-/// returns its first frame's position. Its ages are recorded once the
-/// slot's read is done ([`record_arrivals`], dstack #350). No allocation,
-/// no lock, no log.
+/// returns its first frame's position, `None` for a packet a ring or more
+/// from now (another time base's, dstack #489: no measure of its flow's
+/// holes, ages or network latency; still `late` when behind). Its ages
+/// are recorded once the slot's read is done ([`record_arrivals`], dstack
+/// #350). No allocation, no lock, no log.
 #[cfg_attr(iem_rtsan, sanitize(realtime = "nonblocking"))]
-fn place(p: PlaceArgs<'_>) -> u64 {
+fn place(p: PlaceArgs<'_>) -> Option<u64> {
     let PlaceArgs {
         stats,
         lane,
@@ -622,11 +629,15 @@ fn place(p: PlaceArgs<'_>) -> u64 {
         wake,
         at_ns,
         step,
+        mono,
     } = p;
     let count = |a: &AtomicU64| {
         a.fetch_add(1, Ordering::Relaxed);
     };
     let pos = clock::from_stamp(secs, sub, rate, now);
+    // dstack #379, #489: a packet a ring or more past or behind now is
+    // another time base's.
+    let other = holes::apart(pos, now);
     // `late` is the reader's verdict, judged at the read.
     let lateness = now.saturating_sub(pos);
     let limit = u64::from(lane.plan.latency) + step;
@@ -634,7 +645,7 @@ fn place(p: PlaceArgs<'_>) -> u64 {
     if late {
         count(&stats.late);
     }
-    if let Some(w) = wake {
+    if let Some(w) = wake.filter(|_| !other) {
         if wire_late(now_ns, w, pos, rate, limit) {
             count(&stats.wire_late);
         }
@@ -646,10 +657,12 @@ fn place(p: PlaceArgs<'_>) -> u64 {
     }
     let end = pos.saturating_add(nframes as u64);
     // dstack #379, #489: the clock moved to another base under the flow
-    // (back or forward a ring or more); start it over.
+    // (back a ring or more, or past its end a ring more than the reader's
+    // clock moved since that end); start it over.
+    let since = clock::to_samples(mono.saturating_sub(lane.end_mono), rate);
     count_lost(
         stats,
-        holes::follow_clock(&mut lane.end, &mut lane.holes, now),
+        holes::follow_clock(&mut lane.end, &mut lane.holes, now, since),
     );
     // dstack #447: packets came unplaced since the furthest end; it no
     // longer marks where this one follows (after the clock's check above,
@@ -658,12 +671,17 @@ fn place(p: PlaceArgs<'_>) -> u64 {
         lane.restart = false;
         lane.end = None;
     }
-    // dstack #278: holes, reorders and gaps; a packet a ring or more past
-    // or behind now (another time base's, #379, #489) is no measure of them.
-    let placed = if holes::apart(pos, now) {
+    // dstack #278: holes, reorders and gaps; another base's packet is no
+    // measure of them.
+    let placed = if other {
         holes::Placed::default()
     } else {
-        holes::place(&mut lane.end, &mut lane.holes, pos, end, !late)
+        let was = lane.end;
+        let placed = holes::place(&mut lane.end, &mut lane.holes, pos, end, !late);
+        if lane.end != was {
+            lane.end_mono = mono;
+        }
+        placed
     };
     if placed.out_of_order {
         count(&stats.out_of_order);
@@ -693,7 +711,7 @@ fn place(p: PlaceArgs<'_>) -> u64 {
     {
         stats.write_minute.record(delay);
     }
-    pos
+    (!other).then_some(pos)
 }
 
 /// The packets one slot's read placed at PTP time `now_ns`, `since` the
