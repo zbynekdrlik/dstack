@@ -148,10 +148,13 @@ impl LateWatch {
         // host frame sender.
         let queue = tx.tx_queue().map(|q| (q.full, tx.take_queue_wait_peak()));
         let queued: [Option<u64>; MAX_FLOWS] = std::array::from_fn(|s| tx.over_latency_queued(s));
-        let take = |s| LateCounts {
+        // Every slot's peak taken at once, into the 10 s window an app's
+        // status reads without taking (dstack #500, `TxShared::tx_age_view`).
+        let peaks = tx.take_age_peaks();
+        let take = |s: usize| LateCounts {
             packets: tx.lane(s).over_latency,
             relayed: tx.over_latency_relayed(s),
-            age_peak_ns: tx.take_age_peak(s),
+            age_peak_ns: peaks[s],
             since_escape_ns: tx.take_since_escape(s),
         };
         let lates = self.looked(first, take);

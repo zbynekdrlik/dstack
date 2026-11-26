@@ -479,6 +479,8 @@ pub struct TxShared {
     /// ([`shift`]): the pump and the TX thread read S here.
     pub engine_line: EngineLine,
     lanes: [LaneStats; MAX_FLOWS],
+    /// Each slot's taken age peaks over the last 10 looks (dstack #500).
+    age_window: age_window::AgeWindow,
     /// Each slot's receiver latency as the receiver states it (ARC 0x1100,
     /// [`crate::flows::receivers`]): `[dest_word(dest), ns]`, written by
     /// the reader under the control lock, read by the TX thread for the
@@ -628,6 +630,7 @@ impl TxShared {
             sockets,
             rings,
             lanes: std::array::from_fn(|_| LaneStats::default()),
+            age_window: age_window::AgeWindow::default(),
             receivers: std::array::from_fn(|_| Cell::new()),
             tx_thread: split::TxThreadStats::default(),
             fill: Mutex::new(None),
@@ -987,9 +990,11 @@ pub use retry::{
     transient_refusal,
 };
 
+mod age_window;
 mod direct;
 mod multicast;
 mod receivers;
+pub use age_window::{AGE_WINDOW_LOOKS, TxAgeLane};
 use multicast::multicast_out;
 pub use multicast::{MULTICAST_PORT, MULTICAST_TTL, multicast_group};
 pub use receivers::{AppView, ReceiverLateness};

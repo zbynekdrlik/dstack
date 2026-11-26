@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.224
+
+- **New (#500, dasio#237's readiness line): a non-destructive per-lane TX age view.** `TxShared::tx_age_view() -> Vec<TxAgeLane>` returns every TX slot (`MAX_FLOWS` = 32 entries) with `slot`, `receiver` (the receiving device's name; empty for no flow, an ended one or a multicast flow), `receiver_latency_ns` (as `take_app_view` reads it; 0 unknown), `age_max_10s_ns: Option<u64>` (the oldest packet the lane sent over the late watch's last 10 looks, i.e. 10 s; `Some(0)` when it sent none) and `over_latency` (the lifetime count, as `LaneCounts::over_latency`). It takes nothing: any number of readers may call it and see the same window, and the late watch's per-second line keeps its own peaks. It locks the table: call it from a status loop, never a media thread.
+  - The window is fed by the late watch's look, which now takes every slot's peak at once into a fixed ring (`media::tx::AGE_WINDOW_LOOKS` = 10 looks a slot, atomics only, no allocation in the look: `tests/hot_path.rs`). A device without a late watch (a `TxShared` with no daemon media `Driver` ticking it) reads `age_max_10s_ns: None` on every lane, never a 0. `TxShared::tx_age_looks()` counts the looks written; a reader that sees it stand still across two views knows the window is no longer fed. `TxShared::take_age_peak(slot)` is unchanged and does not feed the window.
+  - API (new): `TxShared::{tx_age_view, tx_age_looks}`, `media::tx::{TxAgeLane, AGE_WINDOW_LOOKS}`. Nothing removed or changed; the late watch's line is unchanged.
+  - **No latency change:** no term, default, block or converter moves. Consumers: dasio moves the version to read the view; everyone else only moves the version.
+
 ## 0.6.223
 
 - **Tests only (#485):** `a_slow_socket_send_never_holds_the_nic_flows_of_its_pass` runs once and no longer retries a run whose NIC frame was late by less than the stall. A NIC frame past the receivers' 250 us now fails with a verdict, as the soak's (`dlink/tests/soak/verdict.rs`): `VERDICT OURS` when the step's largest TX pass CPU time (the TX thread's own peaks) also reaches 250 us, so the pass's own work covers the miss (it waited behind the socket send), else `VERDICT RUNNER` (the box held the TX thread off its CPU) (a rerun can pass, the run fails either way). No library change, **no latency change**; consumers need not move.

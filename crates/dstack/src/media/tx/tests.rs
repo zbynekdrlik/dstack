@@ -2912,6 +2912,7 @@ fn a_seamless_handover_step_restarts_no_tx_schedule() {
     }
 }
 
+mod age_window;
 mod app_view;
 mod clock_back;
 #[cfg(target_os = "linux")]
