@@ -898,3 +898,56 @@ fn the_tx_passes_with_a_tx_pull_do_not_allocate() {
     .unwrap();
     assert_eq!(first, [counter(t - 224), counter(t - 224 + 1)], "at {t}");
 }
+
+/// dstack #500: the late watch's look, which takes every lane's age peak
+/// into the 10 s window an app's status reads (`TxShared::tx_age_view`),
+/// allocates nothing: ten looks fill the ring and the next ones write over
+/// it.
+#[test]
+fn the_late_watch_s_look_into_the_age_window_does_not_allocate() {
+    use dstack::media::late::{EVERY_NS, LateWatch};
+    let cfg = DeviceConfig::from_toml(include_str!("../../../config/test-device.toml"))
+        .expect("config/test-device.toml");
+    let rings: Arc<[Ring]> = (0..1).map(|_| Ring::new()).collect::<Vec<_>>().into();
+    let shared = Arc::new(TxShared::new(cfg, Ipv4Addr::LOCALHOST, rings, 1, &[]).unwrap());
+    assert!(shared.set_source(0, Source::Counter));
+    let rx = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let SocketAddr::V4(dest) = rx.local_addr().unwrap() else {
+        panic!("an IPv4 socket");
+    };
+    {
+        let mut c = shared.lock();
+        let req = FlowRequest {
+            rx_host: "peer-device".to_string(),
+            rx_flow_name: "flow-1".to_string(),
+            sample_rate: RATE,
+            bits: 24,
+            channels: vec![Some(1)],
+            fpp: 32,
+            rx: dest,
+        };
+        c.table.add(&req, shared.now_ns()).unwrap();
+        shared.publish(&c);
+    }
+    let mut tx = Transmitter::new(Arc::clone(&shared));
+    let start = T / u64::from(RATE) * 1_000_000_000;
+    let mut watch = LateWatch::new();
+    watch.watch(0, &shared);
+    reset_violation_count();
+    assert_no_alloc(|| {
+        for i in 1..=25u64 {
+            tx.step(Some(start + i * 250_000), 0);
+            watch.watch(i * EVERY_NS, &shared);
+        }
+    });
+    assert_eq!(violation_count(), 0, "the late watch's look allocated");
+    assert_eq!(shared.tx_age_looks(), 26);
+    assert!(shared.lane(0).packets > 0);
+    let view = shared.tx_age_view();
+    assert_eq!(view[0].receiver, "peer-device");
+    assert!(
+        view[0].age_max_10s_ns.is_some_and(|ns| ns > 0),
+        "{:?}",
+        view[0]
+    );
+}
