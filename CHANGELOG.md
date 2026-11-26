@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.225
+
+- **Dependency (#498, the dstack half of dsync#218): the in-process follower's pin moves from dsync-ptp v1.35.14 to v1.35.18.** It brings dsync's report-only arrival-latency step detector: when the follower's offset steps by at least 300 us and holds for 3 windows, dsync logs, once per direction, the WARN `[FOLLOWER] arrival latency stepped on <nic>: e ... -> ... (delta ... held 3 windows); sync->follow_up gap median ...; window spread ...; N step(s) since start. A software stamp carries the NIC's delivery delay into the offset; the servo is unchanged.`, naming the follower's interface; later steps log the same line at INFO. It comes from `dsync_ptp::follower::core` through the `log` crate, the same path as the follower's other lines (`PTP is back: leaving holdover`), so it reaches every dstack app's log as they do. dsync v1.35.15-v1.35.18 also let `FollowerConfig::interface` take a list (`nic1,nic2`) and re-bind when the link moves; dstack passes one name, which means what it did.
+  - **No status key:** the step count (`FollowerCore::latency_steps`) is not on the reader handle dstack follows (`PtpClock` -> `ClockModel`), so `clock.follower` is unchanged. No servo, lock or selector change.
+  - API: nothing in dstack changed. dsync's breaking items (`network::PtpNetwork::rejoin`, `net::pinned_interface`, `classify_pinned_with`) are not used by dstack.
+  - **No latency change:** no term, default, block or converter moves. Consumers: only move the version.
+
 ## 0.6.224
 
 - **New (#500, dasio#237's readiness line): a non-destructive per-lane TX age view.** `TxShared::tx_age_view() -> Vec<TxAgeLane>` returns every TX slot (`MAX_FLOWS` = 32 entries) with `slot`, `receiver` (the receiving device's name; empty for no flow, an ended one or a multicast flow), `receiver_latency_ns` (as `take_app_view` reads it; 0 unknown), `age_max_10s_ns: Option<u64>` (the oldest packet the lane sent over the late watch's last 10 looks, i.e. 10 s; `Some(0)` when it sent none) and `over_latency` (the lifetime count, as `LaneCounts::over_latency`). It takes nothing: any number of readers may call it and see the same window, and the late watch's per-second line keeps its own peaks. It locks the table: call it from a status loop, never a media thread.
