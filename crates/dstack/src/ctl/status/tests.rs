@@ -188,6 +188,11 @@ const WORDS: &[&str] = &[
     "tx_thread",
     "pass_max_us",
     "pass_max_cpu_us",
+    "tx_queue",
+    "serving",
+    "relayed",
+    "full",
+    "wait_max_us",
     "tx_pull",
     "faults",
     "flow",
@@ -1194,6 +1199,33 @@ fn the_status_shows_the_tx_thread_s_sleep_and_pass_peaks() {
         s.contains(
             "\"tx_thread\":{\"oversleep_max_us\":8551,\"pass_max_us\":9300,\"pass_max_cpu_us\":150},"
         ),
+        "{s}"
+    );
+}
+
+/// dstack #485: a device with a host frame sender shows its relay
+/// thread's socket sends; one without shows no `tx_queue`.
+#[test]
+fn the_status_shows_the_relay_thread_s_socket_sends_with_a_host_sender() {
+    let dir = tempfile::tempdir().unwrap();
+    let media = media_on(&device_at(dir.path()), Arc::new(Unready));
+    assert!(!status(&media).contains("tx_queue"));
+    struct Takes;
+    impl crate::media::bypass::FrameSender for Takes {
+        fn send(&self, _: &[&[u8]], sent: &mut [bool]) -> std::io::Result<()> {
+            sent.fill(true);
+            Ok(())
+        }
+    }
+    let nic = crate::media::tx::HostNic {
+        ifindex: 1,
+        mac: [2, 0, 0, 0, 0, 1],
+        name: "test0".to_string(),
+    };
+    assert!(media.tx.use_frame_sender(Arc::new(Takes), nic));
+    let s = status(&media);
+    assert!(
+        s.contains(r#""tx_queue":{"serving":0,"relayed":0,"full":0,"wait_max_us":0}"#),
         "{s}"
     );
 }

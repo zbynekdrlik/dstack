@@ -306,6 +306,19 @@ fn the_host_watch_reports_refused_batches_once_a_second() {
     assert_eq!(w.look(4 * S, 12), Some(2));
 }
 
+/// dstack #485: at the same once-a-second look, the packets the passes
+/// sent themselves because the relay thread's queue was full.
+#[test]
+fn the_host_watch_reports_a_full_relay_queue_once_a_second() {
+    let mut w = HostWatch::new();
+    assert_eq!(w.look_both(0, 0, 7), (None, None), "the first look learns");
+    assert_eq!(w.look_both(S - 1, 0, 9), (None, None), "between looks");
+    assert_eq!(w.look_both(S, 0, 9), (None, Some(2)));
+    assert_eq!(w.look_both(2 * S, 3, 9), (Some(3), None), "none since");
+    assert_eq!(w.look_both(3 * S, 4, 10), (Some(1), Some(1)));
+    assert_eq!(w.look_both(4 * S, 4, 10), (None, None));
+}
+
 /// dstack #266: an empty peer name reads `-` in a line, any other as is.
 #[test]
 fn an_empty_peer_name_reads_a_dash() {

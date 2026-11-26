@@ -160,6 +160,12 @@ impl Json {
 ///   100 ms: a pass far longer than its CPU time was preempted). The
 ///   restart line carries the same three for the sleep and the pass before it (`oversleep_us`,
 ///   `last_pass_us`, `last_pass_cpu_us`, `-` when unmeasured).
+/// - `tx_queue` (dstack #485, only on a device with a host frame sender):
+///   the socket packets of its TX passes (on-PC, multicast and unresolved
+///   receivers), sent by the relay thread after the NIC batch: `serving`
+///   (1: a relay thread sends them; 0: the pass does), `relayed` (sent
+///   from the queue), `full` (sent by the pass because the queue was full)
+///   and `wait_max_us` (the longest a packet waited in the queue).
 /// - `tx_pull` (dstack #363, only on a device whose app's TX the TX
 ///   thread fills, `media::tx::TxFill`): `blocks` filled, `rebootstraps`
 ///   (the fill's schedule started again: the TX thread more than W + the
@@ -536,6 +542,14 @@ fn tx_part(j: &mut Json, media: &Media) {
         j.num("pass_max_cpu_us", us);
     }
     j.close('}');
+    if let Some(q) = media.tx.tx_queue() {
+        j.open(Some("tx_queue"), '{');
+        j.num("serving", u64::from(q.serving));
+        j.num("relayed", q.relayed);
+        j.num("full", q.full);
+        j.num("wait_max_us", q.wait_max_ns / 1_000);
+        j.close('}');
+    }
     if let Some(f) = media.tx.tx_fill() {
         j.open(Some("tx_pull"), '{');
         j.num("blocks", f.blocks);

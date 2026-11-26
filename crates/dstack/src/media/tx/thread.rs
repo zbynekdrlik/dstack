@@ -144,7 +144,7 @@ impl Transmitter {
         }
         self.epoch = Some(anchor.epoch);
         self.fill_due(now_ns);
-        self.send_due(now, now_ns, pass);
+        self.send_due(now, now_ns, pass, true);
     }
 
     /// Before the TX thread's wait (after a pass): whether the wait makes a
@@ -170,7 +170,9 @@ impl Transmitter {
             Some(now_ns) if self.epoch == Some(epoch) => {
                 let now = send_clock(now_ns, self.rate, self.margin_ns);
                 self.fill_due(now_ns);
-                self.send_due(now, now_ns, Instant::now());
+                // The relay thread takes this pass's socket packets after
+                // the escape: it is not inside a send at the offer.
+                self.send_due(now, now_ns, Instant::now(), false);
                 true
             }
             _ => !defer(),
@@ -297,8 +299,15 @@ impl Transmitter {
     /// send is its one system call). Never a packet before its due time
     /// (dstack #141). With a host sender, the packets to resolved
     /// neighbours are gathered as frames and sent in one call at the end of
-    /// the pass ([`host::Batch`]); the rest go out at once.
-    fn send_due(&mut self, now: u64, now_ns: u64, pass: Instant) {
+    /// the pass ([`host::Batch`]); the rest go to the relay thread's queue
+    /// after it (dstack #485, `super::outbox`), or out at once while no
+    /// relay thread serves it or it is full. Without a host sender every
+    /// packet goes out at once (its send is the pass's own: no NIC batch
+    /// waits behind it).
+    /// `publish`: hand the pass's queued socket packets to the relay thread
+    /// at its end (`false` only for the last pass before an escape: the
+    /// next pass publishes them).
+    fn send_due(&mut self, now: u64, now_ns: u64, pass: Instant, publish: bool) {
         let Transmitter {
             shared,
             lanes,
@@ -327,6 +336,12 @@ impl Transmitter {
             escaped_ns: *escaped_ns,
         };
         let rings: &[Ring] = &shared.rings;
+        // The relay thread's queue of socket sends (dstack #485): only on
+        // a frame-sender host, and only while a relay thread serves it.
+        let outbox = batch
+            .as_ref()
+            .and_then(|_| shared.outbox())
+            .filter(|o| o.serving());
         for (slot, lane) in lanes.iter_mut().enumerate() {
             let Some(dest) = lane.plan.dest else {
                 continue;
@@ -336,8 +351,13 @@ impl Transmitter {
             let receiver_ns = shared.receiver_latency_ns(slot, dest);
             let socket = &shared.sockets[slot];
             let direct = shared.direct_mac(slot);
-            // The host sender, when the slot's receiver is resolved.
-            let host_mac = batch.as_ref().and_then(|_| shared.host_mac(slot));
+            // The host sender, when the slot's receiver is resolved and
+            // none of its packets wait in the queue (a flow never passes
+            // its own packets).
+            let host_mac = batch
+                .as_ref()
+                .and_then(|_| shared.host_mac(slot))
+                .filter(|_| outbox.is_none_or(|o| !o.pending(slot)));
             let src = SocketAddrV4::new(shared.ip, shared.ports[slot]);
             let schedule = lane.schedule.get_or_insert_with(|| Schedule {
                 slot,
@@ -384,6 +404,17 @@ impl Transmitter {
                     });
                     continue;
                 }
+                // The relay thread sends it, after the NIC batch's call; a
+                // full queue sends it here (counted). A socket past the
+                // qdisc (Linux) stays the pass's own.
+                if let Some(outbox) = outbox.filter(|_| direct.is_none()) {
+                    if outbox.push(&clock, slot, stamp, plan.fpp, dest, |buf| {
+                        packet::write(buf, secs, sub, nch, usize::from(plan.bps), fpp, samples)
+                    }) {
+                        continue;
+                    }
+                    outbox.count_full();
+                }
                 // The plan is sendable (TxTable::plan), so the packet is
                 // whole and fits the buffer.
                 let n = packet::write(
@@ -408,6 +439,9 @@ impl Transmitter {
         }
         if let Some(batch) = batch.as_mut() {
             batch.flush(&clock, shared);
+        }
+        if let Some(outbox) = outbox.filter(|_| publish) {
+            outbox.publish();
         }
     }
 }
@@ -480,28 +514,51 @@ pub(super) fn run_with(clock: &dyn PtpClock, shared: Arc<TxShared>, escape: bool
         .then(|| crate::media::qos::hold(std::path::Path::new(crate::media::qos::CPU_DMA_LATENCY)))
         .flatten();
     let tx = Transmitter::new(Arc::clone(&shared));
-    if !escape {
+    // A frame-sender host's socket sends go to the relay thread (#485).
+    let sends = shared.outbox().is_some();
+    if !escape && !sends {
         return run_passes(clock, &shared, tx, None);
     }
     let relay = relay::Relay::new();
     std::thread::scope(|scope| {
         let started = std::thread::Builder::new()
             .name("dstack-tx-relay".to_string())
-            .spawn_scoped(scope, || run_relay(clock, &relay, &shared.scheduling));
+            .spawn_scoped(scope, || {
+                run_relay(clock, &relay, &shared.scheduling, sends.then_some(&*shared));
+            });
         match started {
             Ok(_) => {
                 info!(
-                    "TX relay thread started: it sends TX's packets while the TX thread blocks its bounded escape"
+                    escape,
+                    socket_sends = sends,
+                    "{}",
+                    relay_line(escape, sends)
                 );
-                run_passes(clock, &shared, tx, Some(&relay));
+                run_passes(clock, &shared, tx, escape.then_some(&relay));
             }
             Err(e) => {
-                warn!(error = %e, "the TX relay thread did not start: the TX thread makes no bounded escape");
+                warn!(error = %e, "the TX relay thread did not start: the TX thread makes no bounded escape and sends its socket packets itself");
                 run_passes(clock, &shared, tx, None);
             }
         }
         relay.stop();
     });
+}
+
+/// The relay thread's start line: what it does for the TX thread (the
+/// bounded escape's passes, a frame-sender host's socket sends, or both).
+pub(super) fn relay_line(escape: bool, sends: bool) -> &'static str {
+    match (escape, sends) {
+        (true, true) => {
+            "TX relay thread started: it sends TX's packets while the TX thread blocks its bounded escape, and the socket packets of every pass after the host sender's batch"
+        }
+        (true, false) => {
+            "TX relay thread started: it sends TX's packets while the TX thread blocks its bounded escape"
+        }
+        (false, _) => {
+            "TX relay thread started: it sends the socket packets of every pass after the host sender's batch"
+        }
+    }
 }
 
 /// The TX thread's passes until [`TxShared::stop`]; with a `relay`, its
@@ -588,22 +645,29 @@ pub(super) fn escape_through(
 }
 
 /// The relay thread's loop: while it covers, the TX thread's passes at
-/// their times, spinning without an escape (dstack #141).
+/// their times, spinning without an escape (dstack #141); with `sends` (a
+/// frame-sender host's device), the socket packets the passes queued
+/// (dstack #485), between escapes as they come (none while it covers: they
+/// wait for the hand-back).
 pub(super) fn run_relay(
     clock: &dyn PtpClock,
     relay: &relay::Relay<Transmitter>,
     scheduling: &Scheduling,
+    sends: Option<&TxShared>,
 ) {
     take_priority(MediaThread::TxRelay, TX_PRIORITY, scheduling);
     #[cfg(any(target_os = "linux", windows))]
     crate::clock::relay_spin();
+    let outbox = sends.and_then(|s| s.outbox().filter(|o| o.serve_here()).map(|o| (s, o)));
     // The base of the passes' wall times ([`split`], dstack #359).
     let base = Instant::now();
-    relay.serve(|tx, back| {
+    let cover = |tx: &mut Transmitter, back: &dyn Fn() -> bool| {
         tx.relayed = true;
         loop {
             // Timed and its sleeps read as the TX thread's (dstack #359).
             let (anchor, now) = split::timed_pass(clock, tx, base);
+            // No socket send here: the queue waits for the hand-back
+            // (dstack #485), so no pass waits behind one.
             if back() {
                 tx.relayed = false;
                 return;
@@ -614,5 +678,8 @@ pub(super) fn run_relay(
             let target = now.map_or(wake, |n| wake.min(n + crate::clock::ESCAPE_MAX_NS));
             split::timed_sleep(clock, tx, target, now, anchor.epoch);
         }
+    };
+    relay.serve_with(cover, || {
+        outbox.is_some_and(|(shared, outbox)| outbox.send_next(shared))
     });
 }

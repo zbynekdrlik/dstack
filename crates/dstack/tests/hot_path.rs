@@ -356,6 +356,74 @@ fn the_tx_passes_through_a_host_sender_do_not_allocate() {
     assert!(got.contains(&Some(MEDIA_HEADER + 3 * 32)), "{got:?}");
 }
 
+/// dstack #485: on a host frame sender's device the passes queue the
+/// socket packets (an unresolved receiver's: the on-PC one on FOH) for the
+/// relay thread, which sends them: the queue, its publish and its sends
+/// allocate nothing.
+#[test]
+fn the_relay_thread_s_socket_sends_do_not_allocate() {
+    let cfg = DeviceConfig::from_toml(include_str!("../../../config/test-device.toml"))
+        .expect("config/test-device.toml");
+    let rings: Arc<[Ring]> = (0..1).map(|_| Ring::new()).collect::<Vec<_>>().into();
+    let shared = Arc::new(TxShared::new(cfg, Ipv4Addr::LOCALHOST, rings, 1, &[]).unwrap());
+    assert!(shared.set_source(0, Source::Counter));
+    let (_a, at_a) = receiver();
+    let b = UdpSocket::bind((Ipv4Addr::new(127, 0, 0, 2), 0)).unwrap();
+    b.set_nonblocking(true).unwrap();
+    let std::net::SocketAddr::V4(at_b) = b.local_addr().unwrap() else {
+        panic!("IPv4");
+    };
+    {
+        let mut c = shared.lock();
+        for rx in [at_a, at_b] {
+            let req = FlowRequest {
+                rx_host: "peer-device".to_string(),
+                rx_flow_name: "flow-1".to_string(),
+                sample_rate: RATE,
+                bits: 24,
+                channels: vec![Some(1)],
+                fpp: 32,
+                rx,
+            };
+            c.table.add(&req, shared.now_ns()).unwrap();
+        }
+        shared.publish(&c);
+    }
+    let sender = Arc::new(Counting {
+        calls: AtomicU64::new(0),
+        frames: AtomicU64::new(0),
+    });
+    let nic = HostNic {
+        ifindex: 3,
+        mac: [2, 0, 0, 0, 0, 1],
+        name: "test0".to_string(),
+    };
+    assert!(shared.use_frame_sender(sender.clone(), nic));
+    shared.set_neighbours(&[Neighbour {
+        ip: Ipv4Addr::LOCALHOST,
+        mac: [0, 0x1d, 0xc1, 1, 2, 3],
+        ifindex: 3,
+    }]);
+    assert!(shared.serve_socket_sends_here());
+    let mut tx = Transmitter::new(Arc::clone(&shared));
+    let start = T / u64::from(RATE) * 1_000_000_000;
+    let mut sent = 0;
+    reset_violation_count();
+    assert_no_alloc(|| {
+        for i in 0..400 {
+            tx.step(Some(start + i * 250_000), 0);
+            sent += shared.send_queued();
+        }
+    });
+    assert_eq!(violation_count(), 0, "the queued socket sends allocated");
+    let lb = shared.lane(1);
+    assert!((295..=300).contains(&lb.packets), "{lb:?}");
+    assert_eq!(sent as u64, lb.packets, "every one through the queue");
+    let q = shared.tx_queue().unwrap();
+    assert_eq!((q.relayed, q.full), (lb.packets, 0), "{q:?}");
+    assert_eq!(lb.send_errors, 0);
+}
+
 #[test]
 fn the_rx_thread_s_passes_do_not_allocate() {
     let rings: Arc<[Ring]> = (0..4).map(|_| Ring::new()).collect::<Vec<_>>().into();
