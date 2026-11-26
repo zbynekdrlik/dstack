@@ -57,6 +57,9 @@ pub struct LateCounts {
 pub struct LateWatch {
     seen: [u64; MAX_FLOWS],
     seen_relayed: [u64; MAX_FLOWS],
+    /// Each slot's late packets the relay thread sent from its queue
+    /// (dstack #485), at the last look.
+    seen_queued: [u64; MAX_FLOWS],
     next_ns: Option<u64>,
 }
 
@@ -65,6 +68,7 @@ impl LateWatch {
         LateWatch {
             seen: [0; MAX_FLOWS],
             seen_relayed: [0; MAX_FLOWS],
+            seen_queued: [0; MAX_FLOWS],
             next_ns: None,
         }
     }
@@ -128,19 +132,37 @@ impl LateWatch {
     /// last look (`pass_max_us`, `pass_max_cpu_us`, `oversleep_max_us`;
     /// dstack #485), taken at every look, so a late pass reads as run long
     /// (CPU near wall), held (wall far above CPU: a DPC, an ISR or another
-    /// thread) or woken late.
+    /// thread) or woken late. On a host frame sender's device it also
+    /// carries the relay thread's socket sends (dstack #485): the longest
+    /// a socket packet waited for it since the last look
+    /// (`queue_wait_max_us`) and the packets the pass sent itself because
+    /// its queue was full (`queue_full`, since the start), and per flow the
+    /// late packets the relay thread sent from that queue (`queued`); those
+    /// never count in `relayed`, which stays the escape relay's (#177).
     pub fn watch(&mut self, now_ns: u64, tx: &TxShared) {
         let Some(first) = self.due(now_ns) else {
             return;
         };
         let thread = tx.tx_thread_stats().take_look();
+        // The relay thread's socket sends (dstack #485): absent without a
+        // host frame sender.
+        let queue = tx.tx_queue().map(|q| (q.full, tx.take_queue_wait_peak()));
+        let queued: [Option<u64>; MAX_FLOWS] = std::array::from_fn(|s| tx.over_latency_queued(s));
         let take = |s| LateCounts {
             packets: tx.lane(s).over_latency,
             relayed: tx.over_latency_relayed(s),
             age_peak_ns: tx.take_age_peak(s),
             since_escape_ns: tx.take_since_escape(s),
         };
-        for late in self.looked(first, take) {
+        let lates = self.looked(first, take);
+        let rose_queued: [Option<u64>; MAX_FLOWS] = std::array::from_fn(|s| {
+            queued[s].map(|n| {
+                let rose = n.saturating_sub(self.seen_queued[s]);
+                self.seen_queued[s] = n;
+                rose
+            })
+        });
+        for late in lates {
             // The flow's other end (dstack #266), read here on the watch's
             // thread, never by the TX thread; a multicast flow has no one
             // receiver (`-`), its `dest` is the group.
@@ -156,10 +178,13 @@ impl LateWatch {
                 age_peak_us = late.age_peak_ns / 1_000,
                 receiver_latency_us = tx.lane(late.slot).receiver_latency_ns / 1_000,
                 relayed = late.relayed,
+                queued = rose_queued[late.slot],
                 since_escape_us = late.since_escape_ns.map(|ns| ns / 1_000),
                 pass_max_us = thread.pass_ns / 1_000,
                 pass_max_cpu_us = %Us(thread.pass_cpu_ns),
                 oversleep_max_us = thread.oversleep_ns / 1_000,
+                queue_wait_max_us = queue.map(|(_, ns)| ns / 1_000),
+                queue_full = queue.map(|(full, _)| full),
                 "TX packets older than the latency their receiver plays at: \
                  it counts them late"
             );
@@ -296,6 +321,8 @@ impl SendWatch {
 #[derive(Debug, Default)]
 pub struct HostWatch {
     seen: u64,
+    /// The relay queue's `full` count at the last look (dstack #485).
+    seen_full: u64,
     next_ns: Option<u64>,
 }
 
@@ -303,6 +330,7 @@ impl HostWatch {
     pub const fn new() -> Self {
         HostWatch {
             seen: 0,
+            seen_full: 0,
             next_ns: None,
         }
     }
@@ -311,29 +339,62 @@ impl HostWatch {
     /// learns): the batches refused since the last look, of the cumulative
     /// `refused`; `None` between looks and when none was.
     pub fn look(&mut self, now_ns: u64, refused: u64) -> Option<u64> {
+        self.look_both(now_ns, refused, 0).0
+    }
+
+    /// [`HostWatch::look`] on the refused batches and, at the same look,
+    /// the packets the pass sent itself because the relay thread's queue
+    /// was full (dstack #485), both cumulative; each rise, `None` when it
+    /// did not rise or between looks.
+    pub fn look_both(
+        &mut self,
+        now_ns: u64,
+        refused: u64,
+        full: u64,
+    ) -> (Option<u64>, Option<u64>) {
         if self.next_ns.is_some_and(|next| now_ns < next) {
-            return None;
+            return (None, None);
         }
         let first = self.next_ns.is_none();
         self.next_ns = Some(now_ns.saturating_add(EVERY_NS));
         let rose = refused.saturating_sub(self.seen);
         self.seen = refused;
-        (rose > 0 && !first).then_some(rose)
+        let rose_full = full.saturating_sub(self.seen_full);
+        self.seen_full = full;
+        (
+            (rose > 0 && !first).then_some(rose),
+            (rose_full > 0 && !first).then_some(rose_full),
+        )
     }
 
-    /// [`HostWatch::look`] on `tx`'s host sender, a refusal logged as a
-    /// warning.
+    /// [`HostWatch::look_both`] on `tx`'s host sender, a refusal and a
+    /// full relay queue each logged as a warning (once a second at most).
     pub fn watch(&mut self, now_ns: u64, tx: &TxShared) {
         let (refused, os_error) = tx.host_refusals();
-        if let Some(batches) = self.look(now_ns, refused) {
+        let queue = tx.tx_queue().unwrap_or_default();
+        let (batches, full) = self.look_both(now_ns, refused, queue.full);
+        if let Some(batches) = batches {
             warn!(
                 batches,
                 os_error,
                 "TX host frame sender refused whole batches: their packets went through the UDP socket"
             );
         }
+        if let Some(packets) = full {
+            warn!(
+                packets,
+                wait_max_us = queue.wait_max_ns / 1_000,
+                "{QUEUE_FULL}"
+            );
+        }
     }
 }
+
+/// The warning after the TX passes sent socket packets themselves because
+/// the relay thread's queue was full (dstack #485): the relay thread was
+/// stuck behind slow socket sends for a whole queue, and the passes' NIC
+/// flows waited behind those sends again.
+pub const QUEUE_FULL: &str = "TX socket packets sent on the TX pass: the relay thread's queue was full (a slow socket send holds the pass's NIC flows again)";
 
 /// One RX flow's losses since the last look.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

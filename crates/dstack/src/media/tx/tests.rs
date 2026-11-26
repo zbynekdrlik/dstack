@@ -1963,7 +1963,7 @@ fn the_relay_thread_sends_the_tx_packets_while_the_tx_thread_blocks() {
     tx.step(Some(T), 0);
     let end = T + 2 * MS;
     let mut tx = std::thread::scope(|scope| {
-        scope.spawn(|| run_relay(clock.as_ref(), &relay, &Scheduling::new()));
+        scope.spawn(|| run_relay(clock.as_ref(), &relay, &Scheduling::new(), None));
         let mut misses = 0;
         let mut blocked = 0;
         let tx = escape_through(
@@ -2918,4 +2918,5 @@ mod clock_back;
 mod direct;
 mod re_anchor_sleep;
 mod receiver_bound;
+mod socket_stall;
 mod thread_split;

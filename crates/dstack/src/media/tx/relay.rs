@@ -11,10 +11,14 @@
 //! ([`Relay::hand_over`]), the relay thread takes it and runs until it is
 //! asked back ([`Relay::serve`]), the TX thread takes it back after its
 //! block ([`Relay::take_back`]). The hot path takes no lock: the value moves
-//! only at an escape, once a period.
+//! only at an escape, once a period. Between escapes the relay thread
+//! sends the TX pass's socket packets on a frame-sender host
+//! ([`Relay::serve_with`], `super::outbox`, dstack #485), and parks when
+//! there are none.
 
-use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::{Condvar, Mutex, PoisonError};
+use std::sync::atomic::{AtomicU8, Ordering, fence};
+use std::sync::{Mutex, OnceLock, PoisonError};
+use std::thread::Thread;
 
 /// Nobody covers: the TX thread holds the value.
 const IDLE: u8 = 0;
@@ -31,8 +35,9 @@ const STOPPED: u8 = 4;
 #[derive(Debug)]
 pub struct Relay<T> {
     slot: Mutex<Option<T>>,
-    wake: Condvar,
     state: AtomicU8,
+    /// The relay thread, once it serves: an offer and a stop unpark it.
+    server: OnceLock<Thread>,
 }
 
 impl<T> Default for Relay<T> {
@@ -45,8 +50,8 @@ impl<T> Relay<T> {
     pub const fn new() -> Self {
         Relay {
             slot: Mutex::new(None),
-            wake: Condvar::new(),
             state: AtomicU8::new(IDLE),
+            server: OnceLock::new(),
         }
     }
 
@@ -71,7 +76,7 @@ impl<T> Relay<T> {
         }
         self.put(value);
         self.state.store(OFFERED, Ordering::Release);
-        self.wake.notify_one();
+        self.wake();
         loop {
             if self.state.load(Ordering::Acquire) == COVERING {
                 return Ok(());
@@ -105,20 +110,35 @@ impl<T> Relay<T> {
     /// `cover` on it with a check that says when the TX thread wants it
     /// back (`cover` returns then); hands it back and blocks again. Ends
     /// once [`Relay::stop`] was called.
-    pub fn serve(&self, mut cover: impl FnMut(&mut T, &dyn Fn() -> bool)) {
+    pub fn serve(&self, cover: impl FnMut(&mut T, &dyn Fn() -> bool)) {
+        self.serve_with(cover, || false);
+    }
+
+    /// [`Relay::serve`] with other work between offers: `idle` runs while
+    /// nothing is offered and says whether it did something (then it runs
+    /// again at once); the thread parks only when it did nothing, woken by
+    /// an offer, a [`Relay::stop`] or another `unpark` of it (dstack #485:
+    /// the queue of the TX pass's socket sends).
+    pub fn serve_with(
+        &self,
+        mut cover: impl FnMut(&mut T, &dyn Fn() -> bool),
+        mut idle: impl FnMut() -> bool,
+    ) {
+        // Set before the first look at the state, read by an offer after
+        // it set the state: one of the two sees the other.
+        let first = self.server.set(std::thread::current()).is_ok();
+        debug_assert!(first, "one relay thread serves a relay");
+        fence(Ordering::SeqCst);
         loop {
-            {
-                let mut slot = self.slot.lock().unwrap_or_else(PoisonError::into_inner);
-                loop {
-                    match self.state.load(Ordering::Acquire) {
-                        STOPPED => return,
-                        OFFERED => break,
-                        _ => {
-                            slot = self.wake.wait(slot).unwrap_or_else(PoisonError::into_inner);
-                        }
+            match self.state.load(Ordering::Acquire) {
+                STOPPED => return,
+                OFFERED => {}
+                _ => {
+                    if !idle() {
+                        std::thread::park();
                     }
+                    continue;
                 }
-                drop(slot);
             }
             if self
                 .state
@@ -139,12 +159,19 @@ impl<T> Relay<T> {
         }
     }
 
+    /// Wakes the relay thread (an offer, a stop) once it serves.
+    fn wake(&self) {
+        fence(Ordering::SeqCst);
+        if let Some(server) = self.server.get() {
+            server.unpark();
+        }
+    }
+
     /// Ends the relay thread's [`Relay::serve`] once it is not covering
     /// (the TX thread calls it when it stops, holding the value).
     pub fn stop(&self) {
-        let _slot = self.slot.lock().unwrap_or_else(PoisonError::into_inner);
         self.state.store(STOPPED, Ordering::Release);
-        self.wake.notify_all();
+        self.wake();
     }
 }
 

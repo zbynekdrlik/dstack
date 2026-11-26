@@ -24,7 +24,9 @@ pub(super) struct PassClock {
     /// The advertised latency, ns.
     pub(super) latency_ns: u64,
     /// Whether the relay thread runs this pass, covering the TX thread's
-    /// bounded escape (dstack #141).
+    /// bounded escape (dstack #141). A socket packet the relay thread sends
+    /// from its queue (dstack #485) keeps its pass's value: its own late
+    /// count is the queue's (`super::outbox`).
     pub(super) relayed: bool,
     /// When the TX thread's last bounded escape began, PTP ns (`None`: none
     /// yet).
@@ -121,7 +123,8 @@ pub(super) fn send_timed(
 /// how long after the last bounded escape began it left (dstack #177: a
 /// pass ~1 ms late on every slot at once, a few times a day, says whose
 /// time it was). A send the NIC refused raises the lane's refusal flag
-/// ([`LaneStats::note_refused`], dstack #195).
+/// ([`LaneStats::note_refused`], dstack #195). Returns whether the packet
+/// was over its receiver's latency.
 pub(super) fn account(
     stats: &LaneStats,
     clock: &PassClock,
@@ -130,7 +133,7 @@ pub(super) fn account(
     sent: &Sent,
     n: usize,
     receiver_ns: u64,
-) {
+) -> bool {
     let left = clock.now();
     let due = ns_of(stamp.saturating_add(fpp.into()), clock.rate).saturating_add(clock.margin_ns);
     let late = left.saturating_sub(due);
@@ -138,10 +141,10 @@ pub(super) fn account(
     stats.age_max_ns.fetch_max(age, Ordering::Relaxed);
     stats.age_peak_ns.fetch_max(age, Ordering::Relaxed);
     stats.age_app_peak_ns.fetch_max(age, Ordering::Relaxed);
-    if clock
+    let over = clock
         .late_threshold(fpp, receiver_ns)
-        .is_some_and(|t| over_latency(age, t))
-    {
+        .is_some_and(|t| over_latency(age, t));
+    if over {
         stats.over_latency.fetch_add(1, Ordering::Relaxed);
         if clock.relayed {
             stats.over_latency_relayed.fetch_add(1, Ordering::Relaxed);
@@ -158,6 +161,7 @@ pub(super) fn account(
     if sent.refused {
         stats.note_refused();
     }
+    over
 }
 
 #[cfg(test)]

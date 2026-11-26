@@ -89,3 +89,63 @@ fn a_withdrawn_offer_is_not_taken_by_a_late_relay() {
     relay.stop();
     server.join().unwrap();
 }
+
+/// dstack #485: between offers the relay thread does its other work while
+/// there is some, parks when there is none, and still takes an offer and
+/// a stop at once.
+#[test]
+fn the_relay_does_its_idle_work_between_offers_and_parks_without_it() {
+    let relay = Arc::new(Relay::new());
+    let work = Arc::new(AtomicU64::new(0));
+    let done = Arc::new(AtomicU64::new(0));
+    let looks = Arc::new(AtomicU64::new(0));
+    let server = {
+        let (relay, work, done, looks) = (
+            Arc::clone(&relay),
+            Arc::clone(&work),
+            Arc::clone(&done),
+            Arc::clone(&looks),
+        );
+        std::thread::spawn(move || {
+            relay.serve_with(
+                |v: &mut u32, back| {
+                    *v += 1;
+                    while !back() {
+                        std::hint::spin_loop();
+                    }
+                },
+                || {
+                    looks.fetch_add(1, Ordering::Relaxed);
+                    let has = work.load(Ordering::Acquire) > 0;
+                    if has {
+                        work.fetch_sub(1, Ordering::AcqRel);
+                        done.fetch_add(1, Ordering::Relaxed);
+                    }
+                    has
+                },
+            );
+        })
+    };
+    // Parked with nothing to do: the looks stop.
+    std::thread::sleep(Duration::from_millis(50));
+    let idle = looks.load(Ordering::Relaxed);
+    std::thread::sleep(Duration::from_millis(50));
+    assert_eq!(looks.load(Ordering::Relaxed), idle, "it parks");
+    assert!(idle <= 3, "{idle}");
+    // An offer wakes it.
+    relay
+        .hand_over(41u32, for_up_to(Duration::from_secs(5)))
+        .expect("taken");
+    assert_eq!(relay.take_back(), 42);
+    // Work given while parked: done once woken (as the TX queue's
+    // publish wakes it, an unpark of the serving thread).
+    work.store(5, Ordering::Release);
+    server.thread().unpark();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while done.load(Ordering::Relaxed) < 5 {
+        assert!(Instant::now() < deadline, "the idle work was not done");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    relay.stop();
+    server.join().unwrap();
+}

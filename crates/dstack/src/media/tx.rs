@@ -324,7 +324,7 @@ impl<const N: usize> Cell<N> {
     }
 }
 
-/// One slot's counts, written by the TX thread.
+/// One slot's counts, written by the TX and relay threads (atomics).
 #[derive(Debug, Default)]
 pub struct LaneStats {
     packets: AtomicU64,
@@ -946,7 +946,9 @@ fn count_send(stats: &LaneStats, sent: &io::Result<bool>, len: usize) {
     }
 }
 
+mod outbox;
 mod priority;
+pub use outbox::{OUTBOX_LEN, OutboxView};
 pub mod relay;
 pub mod split;
 #[cfg(all(test, windows))]
