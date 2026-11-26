@@ -281,7 +281,9 @@ fn a_device_without_a_host_sender_has_no_queue() {
 /// socket packet itself, counted, never dropping one.
 #[test]
 fn a_full_queue_sends_at_once_and_counts_it() {
-    let (shared, taker, sock_rx, (_, sock)) = host_device();
+    // The receiver at 500 ms: the queued packets wait the whole run in
+    // real time (17.5 ms on a coverage runner), none of them late.
+    let (shared, taker, sock_rx, (_, sock)) = host_device_at(500 * MS);
     let outbox = served(&shared);
     let mut tx = Transmitter::new(Arc::clone(&shared));
     // 3 packets a ms of each flow: past the queue's length.
@@ -315,7 +317,7 @@ fn a_full_queue_sends_at_once_and_counts_it() {
     let s = shared.lane(sock);
     assert_eq!(s.packets as usize, due.len(), "none lost: {s:?}");
     assert_eq!(s.send_errors, 0);
-    // Within the receiver's 10 ms: none of the queued ones late.
+    // Within the receiver's 500 ms: none of the queued ones late.
     assert_eq!(s.over_latency, 0, "{s:?}");
     assert_eq!(shared.over_latency_queued(sock), Some(0));
     // Room again: the next ones queue.
