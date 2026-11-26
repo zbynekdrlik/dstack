@@ -214,6 +214,25 @@ pub fn flow_latency_ns(latency_ns: u64, fpp: u16, rate: u32, margin_ns: u64) -> 
     latency_ns.max(packet)
 }
 
+/// The age past which a packet of a flow of `fpp`-frame packets is late at
+/// its receiver, whose own latency is `receiver_ns` (0: unknown), on a
+/// device advertising `latency_ns`: the latency the receiver plays the flow
+/// at (its own, at least our advertised one: Dante's rule, as our RX plays
+/// a flow), or the packet's floor when that is longer ([`flow_latency_ns`]).
+/// `None` while the receiver's latency is unknown: no packet is called late
+/// against a guess (the owner's ruling, dstack #1). The one edge both the
+/// TX thread's count (`PassClock::late_threshold`) and an app's view
+/// ([`super::TxAgeLane::late_threshold_ns`], dstack #500) read.
+pub(super) fn late_threshold_ns(
+    latency_ns: u64,
+    receiver_ns: u64,
+    fpp: u16,
+    rate: u32,
+    margin_ns: u64,
+) -> Option<u64> {
+    (receiver_ns != 0).then(|| flow_latency_ns(latency_ns.max(receiver_ns), fpp, rate, margin_ns))
+}
+
 /// Whether a packet `age_ns` past its stamp is late at a receiver whose
 /// latency is `latency_ns`: at the latency itself it still plays.
 pub fn over_latency(age_ns: u64, latency_ns: u64) -> bool {
