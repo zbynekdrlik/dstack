@@ -18,7 +18,8 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use super::{MAX_FLOWS, TxShared};
+use super::schedule::late_threshold_ns;
+use super::{MAX_FLOWS, Plan, TxShared};
 
 /// The looks the window holds: the late watch looks once a second
 /// ([`crate::media::late::EVERY_NS`]), so 10 s.
@@ -91,6 +92,19 @@ pub struct TxAgeLane {
     /// The lane's packets over their receiver's latency since the device
     /// started ([`super::LaneCounts::over_latency`]).
     pub over_latency: u64,
+    /// The exact age, ns, past which the TX thread counts a packet of the
+    /// lane's current flow in [`TxAgeLane::over_latency`] (dstack #500,
+    /// dasio 26.11): a packet at it still plays, one past it is counted.
+    /// It is not [`TxAgeLane::receiver_latency_ns`]: a receiver plays the
+    /// flow at its own latency, at least our advertised one (Dante's rule),
+    /// and at least the packet's own floor (its frames + `tx_margin_ns` +
+    /// the send slack, [`super::flow_latency_ns`]). Read from the same
+    /// function the TX thread counts by, with the slot's published plan
+    /// (destination, frames a packet) and the latency we advertise now (the
+    /// TX thread takes a new one at its next pass). `None`: the slot sends
+    /// nothing, or its receiver's latency is unknown (no packet is counted
+    /// late then).
+    pub late_threshold_ns: Option<u64>,
 }
 
 impl TxShared {
@@ -114,10 +128,27 @@ impl TxShared {
         self.age_window.looks()
     }
 
+    /// Slot `slot`'s late edge as the TX thread counts it
+    /// ([`TxAgeLane::late_threshold_ns`]): its published plan's
+    /// destination and frames a packet, that destination's stated latency
+    /// and the latency we advertise now. No lock.
+    fn late_threshold_ns(&self, slot: usize) -> Option<u64> {
+        let plan = Plan::from_words(self.plans.get(slot)?.read()?.1);
+        let dest = plan.dest?;
+        late_threshold_ns(
+            self.advertised_latency_ns(),
+            self.receiver_latency_ns(slot, dest),
+            plan.fpp,
+            self.cfg.sample_rate,
+            self.cfg.tx_margin_ns,
+        )
+    }
+
     /// Each TX lane (every slot, below [`MAX_FLOWS`]) with its receiver,
     /// that receiver's latency, the lane's oldest packet over the last 10 s
-    /// and its lifetime late count (dasio#237, dstack #500). It takes
-    /// nothing: any number of readers may call it and see the same window.
+    /// and its lifetime late count with the exact edge it counts against
+    /// (dasio#237, dstack #500). It takes nothing: any number of readers
+    /// may call it and see the same window.
     /// It locks the table: call it from a status loop, never the pump or
     /// the TX thread.
     pub fn tx_age_view(&self) -> Vec<TxAgeLane> {
@@ -143,6 +174,7 @@ impl TxShared {
                     receiver_latency_ns,
                     age_max_10s_ns: self.age_window.max(slot),
                     over_latency: self.lane(slot).over_latency,
+                    late_threshold_ns: self.late_threshold_ns(slot),
                 }
             })
             .collect()

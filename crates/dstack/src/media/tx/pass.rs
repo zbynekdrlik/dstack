@@ -9,6 +9,7 @@ use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 use super::retry::{count_retried, nic_refusal, send_with_retries, spin_for};
+use super::schedule::late_threshold_ns;
 use super::{LaneStats, count_send, flow_latency_ns, late_bin, nanos, ns_of, over_latency};
 
 /// A TX pass's clock and the device's timing: what a packet's send and its
@@ -46,21 +47,10 @@ impl PassClock {
     }
 
     /// The age past which a packet of a flow of `fpp`-frame packets is late
-    /// at its receiver, whose own latency is `receiver_ns` (0: unknown): the
-    /// latency it plays the flow at (its own, at least our advertised one:
-    /// Dante's rule, as our RX plays a flow), or the packet's floor when
-    /// that is longer ([`flow_latency_ns`]). `None` while the receiver's
-    /// latency is unknown: no packet is called late against a guess (the
-    /// owner's ruling, dstack #1).
+    /// at its receiver, whose own latency is `receiver_ns` (0: unknown), at
+    /// this pass's advertised latency ([`late_threshold_ns`]).
     pub(super) fn late_threshold(&self, fpp: u16, receiver_ns: u64) -> Option<u64> {
-        (receiver_ns != 0).then(|| {
-            flow_latency_ns(
-                self.latency_ns.max(receiver_ns),
-                fpp,
-                self.rate,
-                self.margin_ns,
-            )
-        })
+        late_threshold_ns(self.latency_ns, receiver_ns, fpp, self.rate, self.margin_ns)
     }
 }
 
