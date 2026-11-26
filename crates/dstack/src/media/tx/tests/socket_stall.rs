@@ -142,14 +142,18 @@ fn stalled_run() -> (LaneCounts, Vec<u64>, LaneCounts, Vec<u64>, Vec<Step>) {
 
 /// Whose a NIC frame's miss was (dstack #485, as the soak's verdict,
 /// `dlink/tests/soak/verdict.rs`): the step clock's time moves only at the
-/// threads' sleeps, so a frame's lateness is the real time its pass spent
-/// before the NIC batch. Of it, the time the box did not run the TX thread
-/// is the step's longest pass less its largest CPU time (a lower bound of
-/// that pass's hold; 0 where the CPU time is unmeasured, so the verdict
-/// leans to OURS). A miss still past [`NIC_RECEIVER_NS`] without the hold
-/// had the TX thread on its CPU: the frame waited behind the pass's own
-/// work, the socket send's stall. Each step with a new miss is judged at
-/// the flow's largest lateness so far (an upper bound of its own).
+/// threads' sleeps (so no sleep of the TX thread returns late here), and a
+/// frame's lateness is the real time its pass spent before the NIC batch.
+/// That pass ran on its CPU for at most the step's largest pass CPU time,
+/// so of the lateness at most that much was the TX thread's own work; the
+/// rest the box held it (not run: a preemption, another thread on its
+/// CPU). A miss whose lateness and CPU time both reach
+/// [`NIC_RECEIVER_NS`] is OURS: the frame waited behind work of the pass,
+/// the socket send's stall (on a VM a host's steal counts as CPU time,
+/// and an unmeasured CPU time explains nothing: both lean to OURS). One
+/// whose pass had less CPU than that is RUNNER. Each step with a new miss
+/// is judged at the flow's largest lateness so far (an upper bound of its
+/// own, leaning to OURS too).
 fn verdict(run: &[Step]) -> Result<(), String> {
     let mut ours = Vec::new();
     let mut runner = Vec::new();
@@ -160,18 +164,20 @@ fn verdict(run: &[Step]) -> Result<(), String> {
         }
         misses = s.misses;
         let l = s.look;
-        let held = l.pass_cpu_ns.map_or(0, |cpu| l.pass_ns.saturating_sub(cpu));
+        let on_cpu = l
+            .pass_cpu_ns
+            .map_or(s.late_max_ns, |cpu| cpu.min(s.late_max_ns));
         let line = format!(
-            "step {}: a NIC frame {} us past due, the TX thread held {} us (pass {} us wall, \
-             {} us CPU, oversleep {} us)",
+            "step {}: a NIC frame {} us past due, at most {} us of it the TX thread's own \
+             CPU time, held at least {} us (longest pass {} us wall, largest pass CPU {} us)",
             s.k,
             s.late_max_ns / 1_000,
-            held / 1_000,
+            on_cpu / 1_000,
+            (s.late_max_ns - on_cpu) / 1_000,
             l.pass_ns / 1_000,
             Us(l.pass_cpu_ns),
-            l.oversleep_ns / 1_000
         );
-        if s.late_max_ns.saturating_sub(held) >= NIC_RECEIVER_NS {
+        if on_cpu >= NIC_RECEIVER_NS {
             ours.push(line);
         } else {
             runner.push(line);
@@ -179,8 +185,8 @@ fn verdict(run: &[Step]) -> Result<(), String> {
     }
     if !ours.is_empty() {
         Err(format!(
-            "VERDICT OURS: {} of {} steps with a NIC frame past the receivers' {} us while \
-             the TX thread was on its CPU, behind a slow socket send: {}",
+            "VERDICT OURS: {} of {} steps with a NIC frame past the receivers' {} us whose \
+             pass's CPU time covers it (it waited behind a slow socket send): {}",
             ours.len(),
             ours.len() + runner.len(),
             NIC_RECEIVER_NS / 1_000,
@@ -189,8 +195,9 @@ fn verdict(run: &[Step]) -> Result<(), String> {
     } else if !runner.is_empty() {
         Err(format!(
             "VERDICT RUNNER: every NIC frame past the receivers' {} us had the TX thread held \
-             off its CPU by about its lateness: {}. The run fails either way: a run the box \
-             starved tested nothing; a rerun can pass",
+             off its CPU (its pass ran under {} us of CPU): {}. The run fails either way: a \
+             run the box starved tested nothing; a rerun can pass",
+            NIC_RECEIVER_NS / 1_000,
             NIC_RECEIVER_NS / 1_000,
             runner.join("; ")
         ))
@@ -253,24 +260,30 @@ fn the_socket_stall_verdict_names_whose_miss_it_was() {
     let v = verdict(&behind).unwrap_err();
     assert!(v.starts_with("VERDICT OURS: 1 of 1 steps"), "{v}");
     assert!(
-        v.contains("step 10: a NIC frame 1478 us past due, the TX thread held 20 us"),
+        v.contains("step 10: a NIC frame 1478 us past due, at most 1470 us of it"),
         "{v}"
     );
-    // A pass preempted 900 us of its 960: the box's.
+    // The late pass on its CPU while another pass of the step was held
+    // long: the longest pass is not the late one, still ours.
+    let other = [step(10, 1_430, 1, 3_000, Some(1_430))];
+    assert!(verdict(&other).unwrap_err().starts_with("VERDICT OURS"));
+    // A pass preempted 890 us of its 950 us of lateness: the box's.
     let held = [step(7, 950, 2, 960, Some(60))];
     let v = verdict(&held).unwrap_err();
     assert!(v.starts_with("VERDICT RUNNER"), "{v}");
     assert!(
-        v.contains("held 900 us") && v.contains("a rerun can pass"),
+        v.contains("held at least 890 us") && v.contains("a rerun can pass"),
         "{v}"
     );
-    // A hold that leaves 250 us of the lateness on the CPU: ours.
-    let edge = [step(7, 950, 2, 960, Some(260))];
+    // The edge: 250 us of CPU covers a miss, 249 does not.
+    let edge = [step(7, 950, 2, 960, Some(250))];
     assert!(verdict(&edge).unwrap_err().starts_with("VERDICT OURS"));
+    let under = [step(7, 950, 2, 960, Some(249))];
+    assert!(verdict(&under).unwrap_err().starts_with("VERDICT RUNNER"));
     let unmeasured = [step(7, 950, 2, 960, None)];
     let v = verdict(&unmeasured).unwrap_err();
     assert!(
-        v.starts_with("VERDICT OURS") && v.contains("- us CPU"),
+        v.starts_with("VERDICT OURS") && v.contains("largest pass CPU - us"),
         "{v}"
     );
     // Any miss of ours makes the run ours; a step without a new miss is

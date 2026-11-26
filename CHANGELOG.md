@@ -2,7 +2,7 @@
 
 ## 0.6.223
 
-- **Tests only (#485):** `a_slow_socket_send_never_holds_the_nic_flows_of_its_pass` runs once and no longer retries a run whose NIC frame was late by less than the stall. A NIC frame past the receivers' 250 us now fails with a verdict, as the soak's (`dlink/tests/soak/verdict.rs`): `VERDICT OURS` when the frame's lateness, less the time the box held the TX thread off its CPU in that step (its longest pass less its largest CPU time, from the TX thread's own peaks), is still past 250 us (it waited behind the socket send), else `VERDICT RUNNER` (a rerun can pass, the run fails either way). No library change, **no latency change**; consumers need not move.
+- **Tests only (#485):** `a_slow_socket_send_never_holds_the_nic_flows_of_its_pass` runs once and no longer retries a run whose NIC frame was late by less than the stall. A NIC frame past the receivers' 250 us now fails with a verdict, as the soak's (`dlink/tests/soak/verdict.rs`): `VERDICT OURS` when the step's largest TX pass CPU time (the TX thread's own peaks) also reaches 250 us, so the pass's own work covers the miss (it waited behind the socket send), else `VERDICT RUNNER` (the box held the TX thread off its CPU) (a rerun can pass, the run fails either way). No library change, **no latency change**; consumers need not move.
 
 ## 0.6.222
 
