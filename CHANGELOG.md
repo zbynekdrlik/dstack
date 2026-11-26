@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.221
+
+- **Docs only (#155):** `docs/two-networks.md` names the one PC that stays in layout B by the owner's decision of 18.11.2026 (dasio#120): dsg, the PP SoundGrid bridge. Every other PC follows layout A (owner 16.11.2026).
+- **No library or latency change.** Consumers: nothing to move for.
+
 ## 0.6.220
 
 - **Fix (#493): an RX flow whose transmitter has a `playout_override` is listed at the latency it plays at.** Our RX flow lists (ARC 0x3200, and ARC 2.8.9's 0x3600) stated every flow at its granted latency (the transmitter's advertised latency or ours, the larger), also when the device config's `playout_override` plays it earlier. Now an overridden flow is stated at the override (at least its frames a packet, at least the device latency), from the same `need` the pump reads it by; a flow without an override is stated as before. So dcontroller and Dante Controller show the played latency for an overridden flow and judge its lateness (the per-second peaks of the heartbeat) against it: iem-mixer's vocal at an override of 64 samples now shows 0.67 ms at 96 kHz, not the transmitter's ~1 ms. A controller's latency write still moves every flow's stated latency (an overridden flow is stated at the larger of the override and the new device latency).

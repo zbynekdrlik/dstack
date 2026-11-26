@@ -35,7 +35,7 @@ The site's own values (subnets, VLAN numbers, host names, addresses, switch port
 | Traffic | everything else | Dante, PTP and Dante's mDNS only |
 | `.lan` name | its LAN address | none |
 
-**Which leg is tagged: layout A is the standard** (owner, 16.11.2026, network#4). The LAN is untagged on the physical adapter and Dante is tagged on the Dante VLAN (layout A, `lanVlanId 0` in the LAN self-heal task below), on every PC at SNV, dasio's low-latency hosts included. **Layout B is retired:** Dante untagged on the physical adapter with the LAN as a tagged virtual adapter (the old rule for a dasio host, kept for its NIC tuning and stable MAC) is no longer set up. A PC still in layout B is moved to layout A; until then the LAN self-heal task still repairs it (`lanVlanId N`), and the table's rows hold for each leg whichever way it is tagged.
+**Which leg is tagged: layout A is the standard** (owner, 16.11.2026, network#4). The LAN is untagged on the physical adapter and Dante is tagged on the Dante VLAN (layout A, `lanVlanId 0` in the LAN self-heal task below), on every PC at SNV, dasio's low-latency hosts included. **Layout B is retired:** Dante untagged on the physical adapter with the LAN as a tagged virtual adapter (the old rule for a dasio host, kept for its NIC tuning and stable MAC) is no longer set up. One exception stays in layout B by the owner's decision of 18.11.2026 (dasio#120): dsg, the PP SoundGrid bridge (Dante untagged on its physical adapter, the LAN on a tagged VLAN adapter). Another PC still in layout B is moved to layout A; until then the LAN self-heal task still repairs it (`lanVlanId N`), and the table's rows hold for each leg whichever way it is tagged.
 
 ### Linux (NetworkManager)
 
