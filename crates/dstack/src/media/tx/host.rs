@@ -20,8 +20,8 @@ use std::fmt;
 use std::io;
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::Instant;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use tracing::info;
 
@@ -59,6 +59,9 @@ pub(super) struct HostPath {
     /// the TX interface watch after a re-create ([`TxShared::follow_host`]).
     /// Read on the control side only, never by the TX thread.
     ifindex: AtomicU32,
+    /// How long the next socket send of this host's TX spins before it
+    /// goes out ([`TxShared::stall_socket_send`]; 0: none).
+    stall_ns: AtomicU64,
 }
 
 impl HostPath {
@@ -68,6 +71,7 @@ impl HostPath {
             sender,
             nic,
             ifindex,
+            stall_ns: AtomicU64::new(0),
         }
     }
 }
@@ -200,6 +204,35 @@ impl TxShared {
             self.set_host_macs(&c, &c.neighbours);
         }
         Ok(())
+    }
+
+    /// Makes the next socket send of a host-sender device spin `ns` before
+    /// it goes out, on whichever thread sends it: a slow Winsock send
+    /// (dstack #485: ~1.4 ms in the WFP/NDIS stack on the FOH PC, to an
+    /// on-PC receiver). For tests of the TX path under such a send; a
+    /// running device never calls it. Nothing without a host sender.
+    #[doc(hidden)]
+    pub fn stall_socket_send(&self, ns: u64) {
+        if let Some(host) = self.host.get() {
+            host.stall_ns.store(ns, Ordering::Release);
+        }
+    }
+
+    /// The socket send's side of [`TxShared::stall_socket_send`]: spins
+    /// out a stall asked for (once).
+    pub(super) fn serve_socket_stall(&self) {
+        let Some(host) = self.host.get() else {
+            return;
+        };
+        if host.stall_ns.load(Ordering::Relaxed) == 0 {
+            return;
+        }
+        let ns = host.stall_ns.swap(0, Ordering::AcqRel);
+        let start = Instant::now();
+        let stall = Duration::from_nanos(ns);
+        while !stall.saturating_sub(start.elapsed()).is_zero() {
+            std::hint::spin_loop();
+        }
     }
 
     /// The host path for the TX thread's state being built now; from then

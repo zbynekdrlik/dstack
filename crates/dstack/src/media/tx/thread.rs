@@ -396,6 +396,7 @@ impl Transmitter {
                     samples,
                 );
                 let sent = send_timed(&clock, stamp, plan.fpp, || {
+                    shared.serve_socket_stall();
                     send_one(direct, socket, &mut packet[..], src, dest, ip_id, n)
                 });
                 account(stats, &clock, stamp, plan.fpp, &sent, n, receiver_ns);

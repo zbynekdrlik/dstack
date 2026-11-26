@@ -2918,4 +2918,5 @@ mod clock_back;
 mod direct;
 mod re_anchor_sleep;
 mod receiver_bound;
+mod socket_stall;
 mod thread_split;
