@@ -89,8 +89,9 @@ pub struct TxAgeLane {
     /// there is no window to read. The watch's first look covers the time
     /// from the device's start to it, not one second.
     pub age_max_10s_ns: Option<u64>,
-    /// The lane's packets over their receiver's latency since the device
-    /// started ([`super::LaneCounts::over_latency`]).
+    /// The lane's packets late at their receiver since the device started
+    /// ([`super::LaneCounts::over_latency`]): each one older than the
+    /// [`TxAgeLane::late_threshold_ns`] of its time.
     pub over_latency: u64,
     /// The exact age, ns, past which the TX thread counts a packet of the
     /// lane's current flow in [`TxAgeLane::over_latency`] (dstack #500,

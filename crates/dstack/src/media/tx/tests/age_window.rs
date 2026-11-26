@@ -175,10 +175,12 @@ fn an_ended_or_multicast_flow_names_no_receiver() {
 
 /// Whether the TX thread's count (`account`, with the clock its pass
 /// builds) calls a packet `age_ns` past its stamp, of a flow of `fpp`-frame
-/// packets to a receiver stating `receiver_ns`, over latency on `shared`.
+/// packets to slot `slot`'s receiver at `dest`, over latency on `shared`
+/// (the receiver's latency read as the TX thread reads it).
 /// The pass's `Instant` lies ahead, so no real time adds to the age: the
 /// packet's age is exactly `age_ns`.
-fn counted_late(shared: &TxShared, fpp: u16, receiver_ns: u64, age_ns: u64) -> bool {
+fn counted_late(shared: &TxShared, slot: usize, dest: SocketAddrV4, fpp: u16, age_ns: u64) -> bool {
+    let receiver_ns = shared.receiver_latency_ns(slot, dest);
     let rate = shared.cfg.sample_rate;
     let stamp = 1_000 * u64::from(rate);
     let clock = PassClock {
@@ -223,7 +225,7 @@ fn the_view_s_late_threshold_is_the_edge_over_latency_counts_against() {
     let view = rig.shared.tx_age_view();
     assert_eq!(view[slot].late_threshold_ns, None, "unknown receiver");
     assert_eq!(view[other].late_threshold_ns, None, "no flow");
-    assert!(!counted_late(&rig.shared, fpp, 0, 1_000 * MS));
+    assert!(!counted_late(&rig.shared, slot, dest, fpp, 1_000 * MS));
     // Below our 500 us the receiver plays at ours, here raised to the
     // 32-frame packet's floor (633 us); above it at its own.
     for (receiver_ns, edge) in [(250_000, 633_334), (2_000_000, 2_000_000)] {
@@ -232,11 +234,11 @@ fn the_view_s_late_threshold_is_the_edge_over_latency_counts_against() {
         assert_eq!(view[slot].receiver_latency_ns, receiver_ns);
         assert_eq!(view[slot].late_threshold_ns, Some(edge), "{receiver_ns}");
         assert!(
-            !counted_late(&rig.shared, fpp, receiver_ns, edge),
+            !counted_late(&rig.shared, slot, dest, fpp, edge),
             "at the edge"
         );
         assert!(
-            counted_late(&rig.shared, fpp, receiver_ns, edge + 1),
+            counted_late(&rig.shared, slot, dest, fpp, edge + 1),
             "past it"
         );
         assert_eq!(view[other].late_threshold_ns, None, "no flow");
@@ -258,11 +260,11 @@ fn the_late_threshold_follows_our_advertised_latency() {
     let ours = shared.advertised_latency_ns();
     assert_eq!(ours, MS, "the test device's 1 ms");
     assert_eq!(shared.tx_age_view()[slot].late_threshold_ns, Some(ours));
-    assert!(!counted_late(&shared, fpp, 1, ours));
-    assert!(counted_late(&shared, fpp, 1, ours + 1));
+    assert!(!counted_late(&shared, slot, peer(4000), fpp, ours));
+    assert!(counted_late(&shared, slot, peer(4000), fpp, ours + 1));
     assert_eq!(shared.cfg.tx_latency_ns, None);
     shared.set_device_latency(20 * MS);
     assert_eq!(shared.tx_age_view()[slot].late_threshold_ns, Some(20 * MS));
-    assert!(!counted_late(&shared, fpp, 1, 20 * MS));
-    assert!(counted_late(&shared, fpp, 1, 20 * MS + 1));
+    assert!(!counted_late(&shared, slot, peer(4000), fpp, 20 * MS));
+    assert!(counted_late(&shared, slot, peer(4000), fpp, 20 * MS + 1));
 }
