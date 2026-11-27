@@ -2,7 +2,8 @@
 
 //! dlisten's binary from the outside (dstack #139): what a user types gets
 //! the answer it should, with no sound card (CI has none). A start whose
-//! output cannot be found stops before the Dante device starts.
+//! `--output` matches nothing waits for it, the Dante device running
+//! (dstack #506).
 
 use std::process::{Command, Output};
 
@@ -63,33 +64,69 @@ mod linux {
         }
     }
 
+    /// dstack #506: a start whose `--output` names no output there (the
+    /// headphones out at boot) does not stop: the Dante device runs, no
+    /// output plays, the log says it waits (WARN), and it never falls back
+    /// to the default. Only a PC whose audio system lists nothing at all
+    /// (a CI runner without ALSA devices) still stops, before the device;
+    /// there the `follow` unit tests alone carry the proof (dev1 lists
+    /// ALSA's `null` output, so it waits there).
     #[test]
-    fn a_start_whose_output_is_not_there_stops_before_the_device() {
+    fn a_start_whose_named_output_is_not_there_waits_for_it() {
+        use std::time::{Duration, Instant};
+
         let dir = tempfile::tempdir().unwrap();
-        let state = dir.path().join("t-dlisten.toml");
-        let out = dlisten(
-            &[
+        let state = dir.path().join("t-wait-dlisten.toml");
+        let log_path = dir.path().join("t-wait-dlisten.log");
+        let mut child = Command::new(env!("CARGO_BIN_EXE_dlisten"))
+            .args([
                 "--output",
                 "no-such-output-xyzzy",
+                "--ip",
+                "127.0.0.1",
                 "--state",
                 state.to_str().unwrap(),
                 "--name",
-                "t-dlisten",
-            ],
-            &[],
-        );
-        assert_eq!(out.status.code(), Some(1), "{out:?}");
-        let err = text(&out.stderr);
-        assert!(
-            err.contains("no output's name holds \"no-such-output-xyzzy\"")
-                || err.contains("no audio output device found")
-                || err.contains("lists no outputs"),
-            "{err}"
-        );
-        assert!(!err.contains("the Dante device runs"), "{err}");
-        // The log file sits next to the state file and holds the failure.
-        let log = std::fs::read_to_string(dir.path().join("t-dlisten.log")).unwrap();
-        assert!(log.contains("dlisten: the log"), "{log}");
+                "t-wait-dlisten",
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("dlisten starts");
+        let start = Instant::now();
+        let waited = loop {
+            if let Some(status) = child.try_wait().expect("the child is read") {
+                let mut err = String::new();
+                std::io::Read::read_to_string(child.stderr.as_mut().unwrap(), &mut err)
+                    .expect("its stderr");
+                assert_eq!(status.code(), Some(1), "{err}");
+                assert!(err.contains("lists no outputs"), "{err}");
+                break None;
+            }
+            let log = std::fs::read_to_string(&log_path).unwrap_or_default();
+            if log.contains("the Dante device runs") && log.contains("no output holding") {
+                break Some(log);
+            }
+            if start.elapsed() > Duration::from_secs(30) {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("no wait in 30 s; the log:\n{log}");
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        };
+        let _ = child.kill();
+        let _ = child.wait();
+        if let Some(log) = waited {
+            assert!(
+                log.contains(
+                    "no output holding \"no-such-output-xyzzy\" is there (--output): playing \
+                     nothing until it comes, never on another output"
+                ),
+                "{log}"
+            );
+            assert!(log.contains(" WARN "), "{log}");
+            assert!(!log.contains("playing on the output"), "{log}");
+        }
     }
 
     #[test]

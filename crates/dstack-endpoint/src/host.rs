@@ -6,6 +6,7 @@
 //! process's environment and install process-wide handlers).
 
 use std::fs::File;
+use std::io::Write;
 use std::path::Path;
 
 use dlink::Place;
@@ -33,6 +34,11 @@ pub fn routed_ipv4() -> Result<Place, String> {
 /// The log on stderr and in `file` (when it opens), RUST_LOG as the
 /// devices read it, `info` by default.
 pub fn init_log(file: Option<File>) {
+    init_log_to(file);
+}
+
+/// [`init_log`] into any writer (the run's [`logfile::Rotating`] log).
+fn init_log_to<W: Write + Send + 'static>(file: Option<W>) {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
     match file {
@@ -49,14 +55,15 @@ pub fn init_log(file: Option<File>) {
 }
 
 /// A run's log: on stderr and in the file `log` ([`logfile::open`]: the
-/// run before kept as `<name>.log.1`, dstack #470), with the INFO line
+/// run before kept as `<name>.log.1`, dstack #470; rotated by size, the
+/// older logs up to `.log.3`, dstack #506), with the INFO line
 /// that names it (and the kept previous log, when one was kept). Whether
 /// the file opened: without it the log is on stderr only and the app
 /// still runs.
 pub fn start_log(app: &str, log: &Path) -> bool {
     match logfile::open(log) {
         Ok(opened) => {
-            init_log(Some(opened.file));
+            init_log_to(Some(opened.file));
             match logfile::start_line(app, log, &opened.previous) {
                 (true, line) => tracing::warn!("{line}"),
                 (false, line) => tracing::info!("{line}"),
@@ -64,7 +71,7 @@ pub fn start_log(app: &str, log: &Path) -> bool {
             true
         }
         Err(e) => {
-            init_log(None);
+            init_log_to(None::<File>);
             tracing::warn!(log = %log.display(), "{app}: no log file ({e})");
             false
         }

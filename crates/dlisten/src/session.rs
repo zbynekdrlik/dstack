@@ -6,6 +6,11 @@
 //! output's choice ([`outputs::choose`]), the settings ([`settings`]), the
 //! status and the app command ([`status`]).
 //!
+//! A run with `--output` plays on that output only ([`follow`], dstack
+//! #506): while none matches it plays nothing and waits (a WARN, then a
+//! line a minute), and it opens the output when a read of the list finds
+//! it; it never falls back to another output.
+//!
 //! dtray shows it: the app status carries the outputs, and dtray's Output
 //! menu sends `app output <n>`. The command hook runs on the device's
 //! control task, so it only checks the number and hands it to the main
@@ -16,13 +21,16 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Instant;
 
+use cpal::traits::DeviceTrait;
 use dlink::bridge::pull::{IdleWatch, PullStats};
 use dlink::bridge::{AppBuffer, SharedPull};
 use dlink::{Block, Link, Map, Process};
 use dlisten::cli::{self, Options};
 use dlisten::fifo::Fifo;
-use dlisten::outputs::{self, Output, Refind};
+use dlisten::follow::{self, Line, MissingLog, Step, Want};
+use dlisten::outputs::Output;
 use dlisten::player::{Player, Stats, fifo_for};
 use dlisten::settings::{self, Settings};
 use dlisten::status::{self, AppView, Snapshot};
@@ -81,20 +89,36 @@ pub struct Session {
     mono: bool,
     devices: Vec<cpal::Device>,
     outputs: Vec<Output>,
-    current: usize,
+    /// What the run plays on (`--output`, [`follow::Want`]).
+    want: Want,
+    /// The output in use: `None` while a named run waits for its output
+    /// (dstack #506). A free run keeps the last one played here even while
+    /// no output is left (`waiting`).
+    current: Option<usize>,
     playing: Option<audio::Playing>,
-    /// The outputs' names and the one playing, for the app status's thread
-    /// and the command hook.
-    shown: Arc<Mutex<(Vec<String>, usize)>>,
+    /// What the app status's thread and the command hook show.
+    shown: Arc<Mutex<Shown>>,
     settings_file: PathBuf,
     /// The output must be opened again (its format changed, or the
     /// default took over) and the last try failed: tried each refresh.
     replay: bool,
-    /// No output is left (logged once until one comes back).
+    /// A free run: no output is left (logged once until one comes back).
     waiting: bool,
+    /// A named run with no output that matches: since when, and its log
+    /// (a WARN, then a line a minute).
+    missing: Option<(Instant, MissingLog)>,
     /// A stream reported an error ([`audio::open`]): opened again at the
     /// next refresh.
     failed: Arc<AtomicBool>,
+}
+
+/// The outputs' names, the one playing and the `--output` text waited for,
+/// for the app status's thread and the command hook.
+#[derive(Default)]
+struct Shown {
+    names: Vec<String>,
+    current: Option<usize>,
+    waiting_for: Option<String>,
 }
 
 /// What the main thread is asked.
@@ -111,7 +135,9 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 impl Session {
     /// Picks the output (`--output`, the saved one, the default), starts
-    /// the device and plays. dtray's output choices come to `events`.
+    /// the device and plays; a named output that is not there is waited
+    /// for, the device running (dstack #506). dtray's output choices come
+    /// to `events`.
     pub fn start(o: &Options, events: Sender<Event>) -> Result<Session, String> {
         let name = name_of(o);
         let state = state_of(o, &name);
@@ -125,12 +151,8 @@ impl Session {
             Settings::default()
         });
         let (devices, outputs) = audio::outputs()?;
-        let (current, note) = outputs::choose(
-            &outputs,
-            o.output.as_deref(),
-            saved.output.as_deref(),
-            outputs::Fallback::Default,
-        )?;
+        let want = Want::of(o.output.as_deref());
+        let (current, note) = follow::start(&outputs, &want, saved.output.as_deref())?;
         if let Some(note) = note {
             tracing::warn!("dlisten: {note}");
         }
@@ -188,20 +210,79 @@ impl Session {
             mono: o.mono,
             devices,
             outputs,
+            want,
             current,
             playing: None,
             shown: Arc::default(),
             settings_file,
             replay: false,
             waiting: false,
+            missing: None,
             failed: Arc::default(),
         };
-        if let Err(e) = session.play(current) {
-            session.stop();
-            return Err(e);
+        match current {
+            Some(index) => {
+                if let Err(e) = session.play(index) {
+                    if session.named().is_none() {
+                        session.stop();
+                        return Err(e);
+                    }
+                    // A named output that is listed but did not open (an
+                    // endpoint that just came, at boot): tried again at each
+                    // read of the list, never another output.
+                    tracing::warn!(
+                        output = %session.outputs[index].name,
+                        "dlisten: the output did not open (tried again in 5 s): {e}"
+                    );
+                    session.replay = true;
+                    // The wait's log too (WARN once, a line a minute) until
+                    // the output really plays.
+                    session.missing = session
+                        .named()
+                        .map(|t| (Instant::now(), MissingLog::new(t)));
+                    session.show();
+                    session.log_missing();
+                }
+            }
+            None => session.go_missing(),
         }
         session.hooks(events);
         Ok(session)
+    }
+
+    /// The `--output` text of a named run.
+    fn named(&self) -> Option<&str> {
+        match &self.want {
+            Want::Named(t) => Some(t),
+            Want::Free => None,
+        }
+    }
+
+    /// A named run's output is not there: nothing plays, the wait begins
+    /// (its WARN logged now) unless it already runs.
+    fn go_missing(&mut self) {
+        self.playing = None;
+        self.current = None;
+        self.replay = false;
+        if self.missing.is_none()
+            && let Some(text) = self.named()
+        {
+            self.missing = Some((Instant::now(), MissingLog::new(text)));
+        }
+        self.show();
+        self.log_missing();
+    }
+
+    /// The wait's line due now, if any (asked at each read of the list).
+    fn log_missing(&mut self) {
+        let Some((since, log)) = &mut self.missing else {
+            return;
+        };
+        match log.due(since.elapsed().as_secs()) {
+            Some(Line::Warn(text)) => tracing::warn!("{text}"),
+            Some(Line::Info(text)) => tracing::info!("{text}"),
+            None => {}
+        }
     }
 
     /// Plays on output `index` of the list (the old stream stopped first:
@@ -229,7 +310,7 @@ impl Session {
         // leaves the old one playing); the old one stops before the new
         // one starts: the FIFO has one reader.
         let stream = audio::open(device, &config, player, &self.pull, &self.failed)?;
-        let was = self.playing.take().map(|_| self.current);
+        let was = self.playing.take().and(self.current);
         match audio::start(stream) {
             Ok(p) => self.playing = Some(p),
             Err(e) => {
@@ -241,10 +322,22 @@ impl Session {
                 return Err(e);
             }
         }
-        self.current = index;
+        self.current = Some(index);
         self.replay = false;
+        if let Some((since, log)) = self.missing.take() {
+            tracing::info!(
+                "{}",
+                log.found(&self.outputs[index].name, since.elapsed().as_secs())
+            );
+        }
+        // The endpoint's id beside its name: two endpoints can carry one
+        // name (Windows keeps a not-present duplicate of each), dstack #506.
+        let id = self.devices[index]
+            .id()
+            .map_or_else(|e| format!("unknown ({e})"), |id| id.to_string());
         tracing::info!(
             output = %self.outputs[index].name,
+            id,
             out_rate,
             out_channels = config.channels(),
             format = %config.sample_format(),
@@ -254,18 +347,35 @@ impl Session {
         Ok(())
     }
 
-    /// The outputs and the one playing, for the hooks.
+    /// The outputs, the one playing and the text waited for, for the hooks.
     fn show(&self) {
-        let names = self.outputs.iter().map(|o| o.name.clone()).collect();
-        *lock(&self.shown) = (names, self.current);
+        let shown = Shown {
+            names: self.outputs.iter().map(|o| o.name.clone()).collect(),
+            current: self.current,
+            waiting_for: self
+                .missing
+                .as_ref()
+                .and_then(|_| self.named().map(str::to_string)),
+        };
+        *lock(&self.shown) = shown;
     }
 
-    /// dtray's choice: plays on output `index` and remembers it.
+    /// dtray's choice: plays on output `index` and remembers it. A named
+    /// run is named after it from now on (its exact name: the user's
+    /// newest choice, still never left for another output).
     pub fn choose_output(&mut self, index: usize) -> Result<(), String> {
-        self.play(index)?;
-        let s = Settings {
-            output: Some(self.outputs[index].name.clone()),
-        };
+        // A choice ends a wait by itself: no "is there again" line for it.
+        let missing = self.missing.take();
+        if let Err(e) = self.play(index) {
+            self.missing = missing;
+            return Err(e);
+        }
+        let name = self.outputs[index].name.clone();
+        if self.named().is_some() {
+            tracing::info!(output = %name, "dlisten: dtray's choice: this run now waits for this output only");
+            self.want = Want::Named(name.clone());
+        }
+        let s = Settings { output: Some(name) };
         settings::save(&self.settings_file, &s)
     }
 
@@ -292,18 +402,19 @@ impl Session {
                 *w = status::written(&channels);
                 f
             };
-            let (outputs, current) = lock(&shown).clone();
+            let shown = lock(&shown);
             status::app_status(&AppView {
                 snap: &s,
                 underruns_before: before,
                 flowing,
-                outputs: &outputs,
-                current,
+                outputs: &shown.names,
+                current: shown.current,
+                waiting_for: shown.waiting_for.as_deref(),
             })
         });
         let (shown, events) = (Arc::clone(&self.shown), Mutex::new(events));
         self.link.set_app_command(move |words| {
-            let n = status::parse_command(words, &lock(&shown).0)?;
+            let n = status::parse_command(words, &lock(&shown).names)?;
             lock(&events)
                 .send(Event::Output(n))
                 .map_err(|_| "dlisten is stopping".to_string())?;
@@ -312,66 +423,88 @@ impl Session {
     }
 
     /// Reads the output devices again (one plugged in or out, a format
-    /// changed); true when the list changed. The one playing keeps playing,
-    /// found again by name ([`outputs::refind`]) and opened again when its
-    /// format changed or a stream reported an error; one that is gone falls
-    /// back to the default (else the first); with no output left the old
-    /// list stays.
+    /// changed); true when the list changed. What plays then is
+    /// [`follow::next`]'s: the one playing keeps playing, found again by
+    /// name, and is opened again when its format changed or a stream
+    /// reported an error. A named run (`--output`) whose output is gone
+    /// plays nothing and waits, and opens it when it is back (dstack #506);
+    /// a free run falls back to the default (else the first), and with no
+    /// output left keeps the old list.
     pub fn refresh_outputs(&mut self) -> bool {
         if self.failed.swap(false, Ordering::Relaxed) {
             self.replay = true;
         }
         let Ok((devices, outputs)) = audio::outputs() else {
+            self.log_missing();
             return false;
         };
         if outputs == self.outputs {
             // A replay owed (a stream error, a failed opening) takes the
             // devices just read: a device handle may have been re-created.
-            if self.replay && !self.waiting {
+            if self.replay && !self.waiting && self.current.is_some() {
                 self.devices = devices;
                 self.replay = self.replay_current();
             }
+            self.log_missing();
             return false;
         }
-        let playing = self.outputs[self.current].clone();
-        let (index, replay) = match outputs::refind(&playing, &outputs) {
-            Refind::Same { index, changed } => (index, changed),
-            Refind::Default(index) => {
-                tracing::warn!(
-                    output = %playing.name,
-                    default = %outputs[index].name,
-                    "dlisten: the output playing is gone: playing on the default (else the first)"
-                );
-                (index, true)
+        let playing = self.current.map(|i| self.outputs[i].clone());
+        let named = self.named().is_some();
+        let step = follow::next(&self.want, playing.as_ref(), &outputs);
+        if step == Step::Wait && !named {
+            if !self.waiting
+                && let Some(p) = &playing
+            {
+                tracing::warn!(output = %p.name, "dlisten: no output is left: waiting for one");
             }
-            Refind::Gone => {
-                if !self.waiting {
-                    tracing::warn!(output = %playing.name, "dlisten: no output is left: waiting for one");
-                }
-                self.waiting = true;
-                return true;
-            }
-        };
+            self.waiting = true;
+            return true;
+        }
         self.waiting = false;
         self.devices = devices;
         self.outputs = outputs;
-        // The index of the output now in use in the new list (its stream is
-        // the old one until it opens again).
-        self.current = index;
-        self.show();
-        if replay {
-            self.replay = self.replay_current();
+        match step {
+            Step::Keep { index, reopen } => {
+                // The index of the output now in use in the new list (its
+                // stream is the old one until it opens again).
+                self.current = Some(index);
+                self.show();
+                if reopen {
+                    self.replay = self.replay_current();
+                }
+            }
+            Step::Open(index) => {
+                if !named && let Some(p) = &playing {
+                    tracing::warn!(
+                        output = %p.name,
+                        default = %self.outputs[index].name,
+                        "dlisten: the output playing is gone: playing on the default (else the first)"
+                    );
+                }
+                self.current = Some(index);
+                self.show();
+                self.replay = self.replay_current();
+            }
+            Step::Wait => {
+                if let Some(p) = &playing {
+                    tracing::warn!(output = %p.name, "dlisten: the output playing is gone: playing nothing");
+                }
+                self.go_missing();
+            }
         }
         true
     }
 
     /// Opens the current output again; true when it failed (to try again).
     fn replay_current(&mut self) -> bool {
-        match self.play(self.current) {
+        let Some(current) = self.current else {
+            return false;
+        };
+        match self.play(current) {
             Ok(()) => false,
             Err(e) => {
                 tracing::warn!(
-                    output = %self.outputs[self.current].name,
+                    output = %self.outputs[current].name,
                     "dlisten: the output did not open (tried again in 5 s): {e}"
                 );
                 true
