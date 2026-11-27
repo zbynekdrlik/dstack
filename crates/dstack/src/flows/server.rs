@@ -88,7 +88,9 @@ pub struct Held {
 
 impl Held {
     /// Holds request `bytes` from `from`, come at `at`; `false` when
-    /// [`MAX_HELD`] are held already (it is then left unanswered).
+    /// [`MAX_HELD`] are held already (it is then left unanswered). Each is
+    /// answered, in the order they came, so a receiver's newest request of
+    /// a destination is the last answered of those held (dstack #504).
     pub fn hold(&mut self, at: Instant, from: SocketAddrV4, bytes: &[u8]) -> bool {
         if self.items.len() >= MAX_HELD {
             return false;
@@ -112,6 +114,7 @@ impl Held {
         (due, dropped)
     }
 }
+
 /// A datagram read from the socket; anything longer is cut and so fails
 /// [`Header::parse`].
 const RECV_BUFFER: usize = 2048;
@@ -495,6 +498,13 @@ pub async fn serve(
                         // it ready in between left a request neither granted
                         // nor held (dstack #434).
                         let ready = shared.clock_ready();
+                        // Ready: the held requests first, so none is answered
+                        // after a newer one of its destination, which it would
+                        // set back (dstack #504: a receiver's retry came 58 ms
+                        // before the expiry tick replayed its older copy).
+                        if ready {
+                            replay(&sock, &shared, &mut held, true).await;
+                        }
                         let outcome = {
                             let mut c = shared.lock();
                             let outcome = answer(&mut limit, &mut c.table, &shared.cfg, from, &buf[..n], at, shared.now_ns(), ready);
@@ -518,24 +528,7 @@ pub async fn serve(
                 }
             }
             _ = expiry.tick() => {
-                let (due, dropped) = held.take(Instant::now(), shared.clock_ready());
-                if dropped > 0 {
-                    info!(dropped, "held flow requests dropped: our TX clock was not ready within 3 s");
-                }
-                for (from, bytes) in due {
-                    let outcome = {
-                        let mut c = shared.lock();
-                        let outcome = handle(&mut c.table, &shared.cfg, from, &bytes, shared.now_ns());
-                        shared.publish(&c);
-                        outcome
-                    };
-                    info!(peer = %from.ip(), "a held flow request answered: our TX clock is ready");
-                    if let FlowOutcome::Reply(reply) = &outcome
-                        && let Err(e) = sock.send_to(reply, SocketAddr::V4(from)).await
-                    {
-                        warn!(error = %e, "a flow-control reply could not be sent");
-                    }
-                }
+                replay(&sock, &shared, &mut held, shared.clock_ready()).await;
                 let expired = shared.sync(shared.now_ns());
                 for slot in (0..MAX_FLOWS).filter(|s| expired >> s & 1 == 1) {
                     info!(slot, "TX flow expired: nothing from its receiver for 4 s");
@@ -550,6 +543,32 @@ pub async fn serve(
                 counts = %report,
                 "flow-control requests refused, not answered or over the bound in a minute (peer id, opcode)"
             );
+        }
+    }
+}
+
+/// Answers the held requests due now (all, once the clock is `ready`), in
+/// the order they came, and drops those held past [`HOLD`].
+async fn replay(sock: &UdpSocket, shared: &TxShared, held: &mut Held, ready: bool) {
+    let (due, dropped) = held.take(Instant::now(), ready);
+    if dropped > 0 {
+        info!(
+            dropped,
+            "held flow requests dropped: our TX clock was not ready within 3 s"
+        );
+    }
+    for (from, bytes) in due {
+        let outcome = {
+            let mut c = shared.lock();
+            let outcome = handle(&mut c.table, &shared.cfg, from, &bytes, shared.now_ns());
+            shared.publish(&c);
+            outcome
+        };
+        info!(peer = %from.ip(), "a held flow request answered: our TX clock is ready");
+        if let FlowOutcome::Reply(reply) = &outcome
+            && let Err(e) = sock.send_to(reply, SocketAddr::V4(from)).await
+        {
+            warn!(error = %e, "a flow-control reply could not be sent");
         }
     }
 }
