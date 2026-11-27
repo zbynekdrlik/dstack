@@ -42,17 +42,17 @@ use windows_sys::Win32::UI::HiDpi::{
     GetSystemMetricsForDpi, SetThreadDpiAwarenessContext, SystemParametersInfoForDpi,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    BringWindowToTop, CB_ADDSTRING, CB_GETCURSEL, CB_GETDROPPEDSTATE, CB_SETCURSEL, CBN_SELENDOK,
-    CBS_DROPDOWNLIST, CBS_HASSTRINGS, CreateWindowExW, DefWindowProcW, DestroyWindow,
-    GetClientRect, GetCursorPos, GetDlgCtrlID, GetScrollInfo, GetWindowRect, HWND_TOPMOST,
-    IDC_ARROW, IsChild, IsDialogMessageW, IsWindowVisible, LoadCursorW, MSG, MoveWindow,
-    NONCLIENTMETRICSW, RegisterClassW, SB_BOTTOM, SB_LINEDOWN, SB_LINEUP, SB_PAGEDOWN, SB_PAGEUP,
-    SB_THUMBTRACK, SB_TOP, SB_VERT, SCROLLINFO, SIF_ALL, SIF_PAGE, SIF_POS, SIF_RANGE,
-    SM_CXVSCROLL, SPI_GETNONCLIENTMETRICS, SW_HIDE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-    SWP_NOZORDER, SWP_SHOWWINDOW, SendMessageW, SetForegroundWindow, SetWindowPos, SetWindowTextW,
-    ShowWindow, WA_INACTIVE, WM_ACTIVATE, WM_COMMAND, WM_CTLCOLORSTATIC, WM_DPICHANGED,
-    WM_MOUSEWHEEL, WM_SETFONT, WM_VSCROLL, WNDCLASSW, WS_BORDER, WS_CHILD, WS_CLIPCHILDREN,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
+    CB_ADDSTRING, CB_GETCURSEL, CB_GETDROPPEDSTATE, CB_SETCURSEL, CBN_SELENDOK, CBS_DROPDOWNLIST,
+    CBS_HASSTRINGS, CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetCursorPos,
+    GetDlgCtrlID, GetScrollInfo, GetWindowRect, HWND_TOPMOST, IDC_ARROW, IsChild, IsDialogMessageW,
+    IsWindowVisible, LoadCursorW, MSG, MoveWindow, NONCLIENTMETRICSW, RegisterClassW, SB_BOTTOM,
+    SB_LINEDOWN, SB_LINEUP, SB_PAGEDOWN, SB_PAGEUP, SB_THUMBTRACK, SB_TOP, SB_VERT, SCROLLINFO,
+    SIF_ALL, SIF_PAGE, SIF_POS, SIF_RANGE, SM_CXVSCROLL, SPI_GETNONCLIENTMETRICS, SW_HIDE,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SendMessageW,
+    SetForegroundWindow, SetWindowPos, SetWindowTextW, ShowWindow, WA_INACTIVE, WM_ACTIVATE,
+    WM_COMMAND, WM_CTLCOLORSTATIC, WM_DPICHANGED, WM_MOUSEWHEEL, WM_SETFONT, WM_VSCROLL, WNDCLASSW,
+    WS_BORDER, WS_CHILD, WS_CLIPCHILDREN, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_TABSTOP,
+    WS_VISIBLE, WS_VSCROLL,
 };
 
 /// The window's class.
@@ -205,8 +205,10 @@ pub fn toggle(
 }
 
 /// Shows the panel in FRONT of every window, a full-screen one included
-/// (dstack #507: on mbc a click left v0.6.230's panel unseen over the
-/// full-screen fohmixer window, though it was in the window list).
+/// (dstack #507: on the FOH notebook a click left v0.6.230's panel unseen
+/// over a full-screen app, though it was in the window list; on a test PC
+/// the first open after start was foreground and topmost in Win32's view
+/// but off the screen for seconds, a reopen showed at once).
 ///
 /// The order is the tray pattern: the foreground is taken first, while
 /// the shell's grant for the click on our icon holds (a tray app may set
@@ -217,6 +219,8 @@ pub fn toggle(
 /// (`RDW_UPDATENOW`: the statics too) and handed to the compositor
 /// (`DwmFlush`), so the first frame after the click holds it. It stays
 /// topmost while open and hides when it loses the focus (`WM_ACTIVATE`).
+/// A refused foreground leaves it shown topmost, without the focus (tray
+/// mode has no log to say so).
 fn bring_up(h: HWND) {
     // SAFETY: our own window; plain calls.
     unsafe {
@@ -230,10 +234,7 @@ fn bring_up(h: HWND) {
             0,
             SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW,
         );
-        if SetForegroundWindow(h) == 0 {
-            tracing::warn!("dtray panel: the foreground was refused; shown topmost only");
-        }
-        BringWindowToTop(h);
+        SetForegroundWindow(h);
         RedrawWindow(
             h,
             std::ptr::null(),
