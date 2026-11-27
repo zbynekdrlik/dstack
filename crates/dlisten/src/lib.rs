@@ -43,6 +43,7 @@
 
 pub mod autostart;
 pub mod cli;
+pub mod follow;
 pub mod status;
 
 // The endpoint bridge dlisten shares with dsend (dstack #164), under the
