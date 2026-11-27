@@ -26,10 +26,10 @@ use dtray::panel::{self, Placement, Rect, Row, place, rows, scaled, scroll_to, t
 use dtray::{output, probe};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
-    COLOR_WINDOW, COLOR_WINDOWTEXT, CreateFontIndirectW, DT_CALCRECT, DT_EDITCONTROL, DT_NOPREFIX,
-    DT_WORDBREAK, DeleteObject, DrawTextW, GetDC, GetMonitorInfoW, GetSysColor, GetSysColorBrush,
-    HDC, HFONT, HGDIOBJ, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromRect, ReleaseDC,
-    SelectObject, SetBkColor, SetTextColor,
+    COLOR_WINDOW, COLOR_WINDOWTEXT, CreateFontIndirectW, DT_CALCRECT, DT_EDITCONTROL,
+    DT_EXPANDTABS, DT_NOPREFIX, DT_WORDBREAK, DeleteObject, DrawTextW, GetDC, GetMonitorInfoW,
+    GetSysColor, GetSysColorBrush, HDC, HFONT, HGDIOBJ, MONITOR_DEFAULTTONEAREST, MONITORINFO,
+    MonitorFromRect, ReleaseDC, SelectObject, SetBkColor, SetTextColor,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Controls::SetScrollInfo;
@@ -478,7 +478,7 @@ fn update(st: &mut State, new: Vec<Row>) {
                         pick,
                         0,
                         0,
-                        d(WIDTH) - 2 * d(MARGIN) - d(LABEL),
+                        (inner_width(st) - d(LABEL)).max(1),
                         d(30 + 8 * 20),
                         0,
                     )
@@ -563,12 +563,27 @@ fn text_height(h: HWND, font: HFONT, text: &str, width: i32) -> i32 {
             t.as_ptr(),
             i32::try_from(t.len()).unwrap_or(i32::MAX),
             &mut r,
-            DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX | DT_EDITCONTROL,
+            DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX | DT_EDITCONTROL | DT_EXPANDTABS,
         );
         SelectObject(dc, old);
         ReleaseDC(h, dc);
     }
     r.bottom - r.top
+}
+
+/// The window's borders, pixels.
+const BORDER: i32 = 2;
+
+/// The width the panel's texts (and the picker beside its label) wrap in:
+/// the window's width inside the icon's work area, less the scroll bar,
+/// the borders and the margins (`panel::text_width`): a work area narrower
+/// than the panel narrows it (dstack #507).
+fn inner_width(st: &State) -> i32 {
+    let d = |dips: i32| scaled(dips, st.dpi);
+    // SAFETY: plain call.
+    let bar = unsafe { GetSystemMetricsForDpi(SM_CXVSCROLL, st.dpi) };
+    let chrome = bar + BORDER;
+    text_width(work_area(st.anchor), d(WIDTH) + chrome, chrome, d(MARGIN))
 }
 
 /// Every control moved to its place at the scroll position, the window
@@ -578,12 +593,10 @@ fn layout(st: &mut State) {
     let d = |dips: i32| scaled(dips, st.dpi);
     // SAFETY: plain call.
     let bar = unsafe { GetSystemMetricsForDpi(SM_CXVSCROLL, st.dpi) };
-    let border = 2;
+    let border = BORDER;
     let anchor = st.anchor;
     let work = work_area(anchor);
-    // The text wraps in the width the window gets: a work area narrower
-    // than the panel narrows it (dstack #507).
-    let inner = text_width(work, d(WIDTH) + bar + border, bar + border, d(MARGIN));
+    let inner = inner_width(st);
     // The content, laid out from the top (y) at scroll 0.
     let mut places: Vec<Place> = Vec::new();
     let mut y = d(MARGIN);

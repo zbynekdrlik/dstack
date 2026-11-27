@@ -62,7 +62,7 @@ pub struct Placement {
 /// room above is the larger, else below, its right edge at the icon's.
 /// Then it is moved inside the work area.
 pub fn place(work: Rect, anchor: Rect, want_w: i32, want_h: i32, gap: i32) -> Placement {
-    let w = want_w.clamp(1, work.width().max(1));
+    let w = window_width(work, want_w);
     let h = want_h.clamp(1, work.height().max(1));
     let (left, top) = if anchor.left >= work.right {
         // A taskbar on the right.
@@ -95,6 +95,12 @@ pub fn place(work: Rect, anchor: Rect, want_w: i32, want_h: i32, gap: i32) -> Pl
     }
 }
 
+/// A window `want_w` wide inside `work`: never wider than the work area,
+/// at least 1 pixel ([`place`] and [`text_width`] share it).
+fn window_width(work: Rect, want_w: i32) -> i32 {
+    want_w.clamp(1, work.width().max(1))
+}
+
 /// The width the panel's text wraps in: the window's width as [`place`]
 /// gives it for a window `want_w` wide inside `work` (never wider than the
 /// work area), less `chrome` (the scroll bar and the borders) and a
@@ -102,8 +108,8 @@ pub fn place(work: Rect, anchor: Rect, want_w: i32, want_h: i32, gap: i32) -> Pl
 /// panel the text wraps narrower too, so no line runs past the window
 /// (dstack #507).
 pub fn text_width(work: Rect, want_w: i32, chrome: i32, margin: i32) -> i32 {
-    let w = want_w.clamp(1, work.width().max(1));
-    w.saturating_sub(chrome)
+    window_width(work, want_w)
+        .saturating_sub(chrome)
         .saturating_sub(margin.saturating_mul(2))
         .max(1)
 }
