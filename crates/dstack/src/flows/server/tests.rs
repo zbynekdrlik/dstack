@@ -1083,4 +1083,5 @@ async fn a_request_before_the_clock_is_held_and_granted_once_ready() {
     task.abort();
 }
 
+mod held_replay;
 mod ready_race;
