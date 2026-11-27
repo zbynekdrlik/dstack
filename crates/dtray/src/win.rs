@@ -2,7 +2,9 @@
 
 //! The tray on Windows: the OS's glue around [`Tray`] (the icon and menu,
 //! shared with Linux). A thread timer wakes the message loop once a second
-//! for [`Tray::tick`]; the menu's clicks are handled after each message.
+//! for [`Tray::tick`]; the menu's clicks are handled after each message,
+//! and a left click on the icon opens the panel (`panel_win.rs`, dstack
+//! #507).
 //! One tray a desktop session (the named mutex [`MUTEX`]). Copy status goes
 //! to the Windows clipboard; an error shows in a message box.
 //!
@@ -26,6 +28,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, GetMessageW, MB_ICONERROR, MB_OK, MSG, MessageBoxW, SetTimer,
     TranslateMessage, WM_TIMER,
 };
+
+use tray_icon::{MouseButton, MouseButtonState, TrayIconEvent};
 
 use crate::tray::{Action, Tray};
 
@@ -134,11 +138,30 @@ pub fn run() -> Result<(), String> {
             tray.tick()?;
             let (devices, readings) = tray.last_tick();
             crate::settings_win::feed(devices, readings);
-        } else if !crate::settings_win::dialog_message(&msg) {
+            crate::panel_win::feed(devices, readings, tray.view());
+        } else if !crate::settings_win::dialog_message(&msg)
+            && !crate::panel_win::dialog_message(&msg)
+        {
             // SAFETY: a message GetMessageW filled.
             unsafe {
                 TranslateMessage(&msg);
                 DispatchMessageW(&msg);
+            }
+        }
+        // A left click on the icon: the panel (dstack #507).
+        while let Ok(e) = TrayIconEvent::receiver().try_recv() {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = e
+            {
+                let (devices, readings) = tray.last_tick();
+                let shown =
+                    crate::panel_win::toggle(|| tray.icon_rect(), devices, readings, tray.view());
+                if let Err(err) = shown {
+                    message(&format!("dtray: {err}"));
+                }
             }
         }
         for action in tray.menu_events() {

@@ -138,7 +138,10 @@ impl Tray {
         let switch_file = switches::load(&switches::path());
         let switch_part = part(&switch_file, &[]);
         let (first_menu, built) = build(&fixed, &first, &shapes, now.readings.len(), &switch_part)?;
+        // On Windows a left click opens the panel (dstack #507,
+        // `panel_win.rs`); the right click keeps the menu.
         let icon = TrayIconBuilder::new()
+            .with_menu_on_left_click(!cfg!(windows))
             .with_menu(Box::new(first_menu))
             .with_tooltip(&first.tooltip)
             .with_icon(tray_icon(first.colour)?)
@@ -230,6 +233,26 @@ impl Tray {
     #[cfg(windows)]
     pub fn last_tick(&self) -> (&[Local], &[Reading]) {
         (&self.now.devices, &self.now.readings)
+    }
+
+    /// The view of the last tick (the panel's rows, Windows).
+    #[cfg(windows)]
+    pub fn view(&self) -> &View {
+        &self.shown
+    }
+
+    /// The icon's position and size in screen pixels, as the shell gives
+    /// them to this thread's DPI context (the panel's anchor, Windows).
+    #[cfg(windows)]
+    pub fn icon_rect(&self) -> Option<(i32, i32, u32, u32)> {
+        self.icon.rect().map(|r| {
+            (
+                r.position.x.round() as i32,
+                r.position.y.round() as i32,
+                r.size.width,
+                r.size.height,
+            )
+        })
     }
 
     /// The menu clicks since the last call, handled: a latency choice is

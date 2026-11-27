@@ -29,6 +29,12 @@
 //!   command line.
 //! - [`output`]: an app's Output menu from its status part, and the
 //!   request a choice sends.
+//! - [`panel`]: the panel a left click on the icon opens on Windows
+//!   (dstack #507): where it goes (next to the icon, inside the work area
+//!   of the icon's monitor, scrolling when taller) and its rows (each
+//!   device; an app's output, its warning and its one Output picker). The
+//!   window itself is the binary's Windows glue; the right click keeps
+//!   the menu.
 //! - [`switches`]: the PC's source switches: a receiver's RX channels
 //!   moved between the sources a local file names, read back after.
 //! - [`cli`]: the command-line modes, run by the same code in both
@@ -79,6 +85,7 @@ pub mod latency;
 pub mod menu;
 pub mod model;
 pub mod output;
+pub mod panel;
 pub use dstack::ctl::probe;
 pub mod set;
 pub mod switches;
