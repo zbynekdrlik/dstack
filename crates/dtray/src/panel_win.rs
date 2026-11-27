@@ -44,10 +44,10 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     IsWindowVisible, LoadCursorW, MSG, MoveWindow, NONCLIENTMETRICSW, RegisterClassW, SB_BOTTOM,
     SB_LINEDOWN, SB_LINEUP, SB_PAGEDOWN, SB_PAGEUP, SB_THUMBTRACK, SB_TOP, SB_VERT, SCROLLINFO,
     SIF_ALL, SIF_PAGE, SIF_POS, SIF_RANGE, SM_CXVSCROLL, SPI_GETNONCLIENTMETRICS, SW_HIDE, SW_SHOW,
-    SWP_NOACTIVATE, SendMessageW, SetForegroundWindow, SetWindowPos, SetWindowTextW, ShowWindow,
-    WA_INACTIVE, WM_ACTIVATE, WM_COMMAND, WM_CTLCOLORSTATIC, WM_DPICHANGED, WM_MOUSEWHEEL,
-    WM_SETFONT, WM_VSCROLL, WNDCLASSW, WS_BORDER, WS_CHILD, WS_CLIPCHILDREN, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_POPUP, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
+    SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SendMessageW, SetForegroundWindow, SetWindowPos,
+    SetWindowTextW, ShowWindow, WA_INACTIVE, WM_ACTIVATE, WM_COMMAND, WM_CTLCOLORSTATIC,
+    WM_DPICHANGED, WM_MOUSEWHEEL, WM_SETFONT, WM_VSCROLL, WNDCLASSW, WS_BORDER, WS_CHILD,
+    WS_CLIPCHILDREN, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
 };
 
 /// The window's class.
@@ -206,9 +206,26 @@ pub fn feed(devices: &[Local], readings: &[Reading], view: &View) {
     }
     let _dpi = Pmv2::enter();
     with_state(|st| {
+        // An open Output list stays as it is until it closes: a new
+        // layout or a rebuilt row would close it under the user's pick.
+        if any_dropped(st) {
+            return;
+        }
         st.devices = devices.to_vec();
         update(st, rows(readings, view));
     });
+}
+
+/// Whether a row's Output list is open.
+fn any_dropped(st: &State) -> bool {
+    st.rows.iter().enumerate().any(|(i, r)| {
+        r.output.is_some() && {
+            let pick = item(st.hwnd, ROW + i * ROW_IDS + PICK);
+            // SAFETY: our combobox.
+            let dropped = unsafe { SendMessageW(pick, CB_GETDROPPEDSTATE, 0, 0) };
+            dropped != 0
+        }
+    })
 }
 
 /// The panel's keyboard handling (Tab, Esc): `true` when the message was
@@ -453,6 +470,21 @@ fn update(st: &mut State, new: Vec<Row>) {
                     base + PICK,
                 );
                 set_font(pick, st.font);
+                // Sized once: the field's width and, as a drop-down list's
+                // height, the field and 8 items. `layout` only moves it (a
+                // resize closes an open list).
+                let d = |dips: i32| scaled(dips, st.dpi);
+                // SAFETY: our combobox.
+                unsafe {
+                    MoveWindow(
+                        pick,
+                        0,
+                        0,
+                        d(WIDTH) - 2 * d(MARGIN) - d(LABEL),
+                        d(30 + 8 * 20),
+                        0,
+                    )
+                };
                 for c in &o.choices {
                     let t = wide(&c.label);
                     // SAFETY: our combobox, a NUL-terminated string.
@@ -495,18 +527,21 @@ fn rescale(st: &mut State, dpi: u32) {
     if dpi == st.dpi {
         return;
     }
-    for f in [st.font, st.bold] {
-        if !f.is_null() {
-            // SAFETY: a font this panel made.
-            unsafe { DeleteObject(f as HGDIOBJ) };
-        }
-    }
+    // The new fonts first, set on every control, the old ones deleted
+    // after: no control ever holds a deleted font.
+    let old = [st.font, st.bold];
     st.dpi = dpi;
     (st.font, st.bold) = fonts(dpi);
     st.shape.clear();
     set_font(item(st.hwnd, ID_HEADER), st.font);
     let rows = st.rows.clone();
     update(st, rows);
+    for f in old {
+        if !f.is_null() {
+            // SAFETY: a font this panel made, no longer set on a control.
+            unsafe { DeleteObject(f as HGDIOBJ) };
+        }
+    }
 }
 
 /// The text's height at `width` pixels in `font`, wrapped.
@@ -613,15 +648,8 @@ fn layout(st: &mut State) {
                 d(LABEL),
                 label_h,
             ));
-            // The list drops below the field: its height is the field's
-            // and the list's (8 items).
-            places.push((
-                pick,
-                d(MARGIN) + d(LABEL),
-                y,
-                inner - d(LABEL),
-                field + d(8 * 20),
-            ));
+            // Moved only: its size was set when it was made.
+            places.push((pick, d(MARGIN) + d(LABEL), y, 0, 0));
             y += field;
         }
     }
@@ -675,7 +703,23 @@ fn layout(st: &mut State) {
     // SAFETY: our window, a filled structure.
     unsafe { SetScrollInfo(h, SB_VERT, &si, 1) };
     for (c, x, cy, w, ch) in places {
-        if !c.is_null() {
+        if c.is_null() {
+            continue;
+        }
+        if w == 0 && ch == 0 {
+            // SAFETY: our child, moved and never sized (a combobox).
+            unsafe {
+                SetWindowPos(
+                    c,
+                    std::ptr::null_mut(),
+                    x,
+                    cy - st.pos,
+                    0,
+                    0,
+                    SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+                )
+            };
+        } else {
             // SAFETY: our child.
             unsafe { MoveWindow(c, x, cy - st.pos, w, ch, 1) };
         }

@@ -78,6 +78,25 @@ fn a_taskbar_at_the_side_puts_the_panel_beside_it() {
 }
 
 #[test]
+fn an_icon_at_the_work_area_s_edge_keeps_the_gap() {
+    // A right taskbar whose icon starts right at the work area's edge: the
+    // panel keeps its gap left of the icon (no clamp involved).
+    let p = place(r(0, 0, 1860, 1200), r(1860, 1100, 1884, 1124), 400, 300, 8);
+    assert_eq!(p.rect, r(1452, 824, 1852, 1124));
+    // Left: the mirror.
+    let p = place(r(60, 0, 1920, 1200), r(36, 1100, 60, 1124), 400, 300, 8);
+    assert_eq!(p.rect, r(68, 824, 468, 1124));
+}
+
+#[test]
+fn the_room_above_is_counted_from_the_work_area_s_top() {
+    // Above: 400 px, below: 580 px, so below. Counted from 0 instead of
+    // the work area's top (500), above would look larger.
+    let p = place(r(0, 500, 1000, 1500), r(500, 900, 520, 920), 100, 100, 0);
+    assert_eq!(p.rect.top, 920);
+}
+
+#[test]
 fn a_top_taskbar_puts_the_panel_below_the_icon() {
     let work = r(0, 40, 1920, 1200);
     let p = place(work, r(1800, 8, 1824, 32), 400, 300, 8);
@@ -172,6 +191,15 @@ fn another_output_than_the_pinned_one_is_a_warning() {
         Some("Not the --output \"Headphones\" output: a restart plays on \"Headphones\" again")
     );
     assert_eq!(o.selected, Some(0));
+    // Names past the shown length are compared whole: the --output text
+    // past the 64th character of a long endpoint name is still its own.
+    let long = format!("{} Headphones", "x".repeat(70));
+    let s = dlisten(&format!(
+        r#"{{"outputs":["{long}"],"output":0,"pinned":"Headphones"}}"#
+    ));
+    let o = output_row(&s).unwrap();
+    assert_eq!(o.warning, None);
+    assert_eq!(o.plays, format!("Plays on: {}", "x".repeat(64)));
     // No --output: whatever plays is the run's own pick.
     let s = dlisten(&format!(r#"{{"outputs":{OUTPUTS},"output":0}}"#));
     assert_eq!(output_row(&s).unwrap().warning, None);
@@ -193,6 +221,25 @@ fn a_run_that_plays_nothing_says_so() {
     );
     assert_eq!(o.selected, None);
     assert_eq!(o.choices.len(), 1, "a pick still works while it waits");
+    // Waiting for an output picked in dtray (dlisten names the run after
+    // it until the next start): never called the --output one.
+    let s = dlisten(
+        r#"{"outputs":["Speakers (Realtek(R) Audio)"],"waiting_for":"USB DAC","pinned":"Headphones"}"#,
+    );
+    assert_eq!(
+        output_row(&s).unwrap().warning.as_deref(),
+        Some(
+            "Plays nothing: the output \"USB DAC\" chosen in dtray is not there; it plays \
+             as soon as it comes (a restart plays on \"Headphones\")"
+        )
+    );
+    let s = dlisten(r#"{"outputs":[],"waiting_for":"USB DAC"}"#);
+    assert_eq!(
+        output_row(&s).unwrap().warning.as_deref(),
+        Some(
+            "Plays nothing: the output \"USB DAC\" chosen in dtray is not there; it plays as soon as it comes"
+        )
+    );
     // Neither an output nor a wait: nothing is open.
     let s = dlisten(&format!(r#"{{"outputs":{OUTPUTS}}}"#));
     let o = output_row(&s).unwrap();

@@ -174,11 +174,12 @@ pub fn output_row(status: &str) -> Option<OutputRow> {
     let v: Value = serde_json::from_str(status).ok()?;
     let app = v.get("app")?;
     let list = app.get("outputs")?.as_array()?;
-    let text = |key: &str| {
+    // The raw texts decide (dlisten matches whole names); the shown ones
+    // are cut for display ([`app_line`]).
+    let raw = |key: &str| {
         app.get(key)
             .and_then(Value::as_str)
-            .map(app_line)
-            .filter(|t| !t.is_empty())
+            .filter(|t| !t.trim().is_empty())
     };
     let playing = app
         .get("output")
@@ -186,23 +187,37 @@ pub fn output_row(status: &str) -> Option<OutputRow> {
         .and_then(|n| usize::try_from(n).ok())
         .and_then(|n| list.get(n))
         .and_then(Value::as_str)
-        .map(app_line)
-        .filter(|t| !t.is_empty());
+        .filter(|t| !t.trim().is_empty());
     let choices = output::choices(status);
     let selected = choices.iter().position(|c| c.checked);
-    let waiting = text("waiting_for");
-    let pinned = text("pinned");
-    let warning = match (&playing, &waiting, &pinned) {
-        (_, Some(t), _) => Some(format!(
-            "Plays nothing: no output holding \"{t}\" (its --output) is there; \
-             it plays as soon as one comes"
+    let waiting = raw("waiting_for");
+    let pinned = raw("pinned");
+    let warning = match (playing, waiting, pinned) {
+        // Waiting for the command line's --output.
+        (_, Some(t), Some(p)) if t == p => Some(format!(
+            "Plays nothing: no output holding \"{}\" (its --output) is there; \
+             it plays as soon as one comes",
+            app_line(t)
+        )),
+        // Waiting for an output picked in dtray (the run is named after
+        // it until the next start).
+        (_, Some(t), p) => Some(format!(
+            "Plays nothing: the output \"{}\" chosen in dtray is not there; \
+             it plays as soon as it comes{}",
+            app_line(t),
+            p.map(|p| format!(" (a restart plays on \"{}\")", app_line(p)))
+                .unwrap_or_default()
         )),
         (None, None, _) => Some("Plays nothing: no output is open".to_string()),
-        (Some(name), None, Some(p)) if !holds(name, p) => Some(format!(
-            "Not the --output \"{p}\" output: a restart plays on \"{p}\" again"
-        )),
+        (Some(name), None, Some(p)) if !holds(name, p) => {
+            let p = app_line(p);
+            Some(format!(
+                "Not the --output \"{p}\" output: a restart plays on \"{p}\" again"
+            ))
+        }
         _ => None,
     };
+    let playing = playing.map(app_line);
     let plays = format!("Plays on: {}", playing.as_deref().unwrap_or("nothing"));
     Some(OutputRow {
         plays,
