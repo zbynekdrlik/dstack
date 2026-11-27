@@ -58,8 +58,12 @@ pub struct View {
     /// One short line (a tray tooltip holds at most [`TOOLTIP_MAX`]).
     pub tooltip: String,
     /// One line per device, in the readings' order, then one per expected
-    /// device not running.
+    /// device not running; an app's part cut to [`APP_LINE_MAX`] (the
+    /// menu's width is its longest item).
     pub lines: Vec<String>,
+    /// The same lines with each app's part whole (dstack #507: the panel
+    /// wraps them), in `lines`' order.
+    pub whole: Vec<String>,
     /// Each line's colour (dstack #507: the panel's row), in `lines`' order.
     pub colours: Vec<Colour>,
 }
@@ -114,6 +118,9 @@ pub struct Status {
 pub struct App {
     /// `line` ([`app_line`]), when it is text and not empty.
     pub line: Option<String>,
+    /// `line` whole ([`app_flat`]: its control characters spaces, never
+    /// cut), when it is text and not empty (dstack #507: the panel).
+    pub whole: Option<String>,
     /// `state`, when it is one of the three words.
     pub state: Option<AppState>,
     /// `stale`: dstack's mark on a part its app's hook has not refreshed
@@ -133,24 +140,29 @@ pub enum AppState {
 /// tooltip count).
 pub const APP_LINE_MAX: usize = 64;
 
-/// An app's `line` as the menu shows it: each control character (a line
-/// break, a tab) a space, cut to [`APP_LINE_MAX`].
+/// An app's `line` as the menu shows it: [`app_flat`], cut to
+/// [`APP_LINE_MAX`].
 pub fn app_line(raw: &str) -> String {
-    let flat: String = raw
-        .chars()
+    clip(&app_flat(raw), APP_LINE_MAX)
+}
+
+/// An app's `line` on one line: each control character (a line break, a
+/// tab) a space; never cut (the panel wraps it).
+pub fn app_flat(raw: &str) -> String {
+    raw.chars()
         .map(|c| if c.is_control() { ' ' } else { c })
-        .collect();
-    clip(&flat, APP_LINE_MAX)
+        .collect()
 }
 
 /// The app part of a status's `app` value; `None` when it is no object.
 pub fn app_of(v: &Value) -> Option<App> {
     let obj = v.as_object()?;
-    let line = obj
+    let whole = obj
         .get("line")
         .and_then(Value::as_str)
-        .map(app_line)
+        .map(app_flat)
         .filter(|l| !l.is_empty());
+    let line = whole.as_deref().map(|w| clip(w, APP_LINE_MAX));
     let state = match obj.get("state").and_then(Value::as_str) {
         Some("ok") => Some(AppState::Ok),
         Some("warn") => Some(AppState::Warn),
@@ -158,7 +170,12 @@ pub fn app_of(v: &Value) -> Option<App> {
         _ => None,
     };
     let stale = obj.get("stale") == Some(&Value::Bool(true));
-    Some(App { line, state, stale })
+    Some(App {
+        line,
+        whole,
+        state,
+        stale,
+    })
 }
 
 /// A field as a number: a JSON number, or a bool as 0/1; `None` when
@@ -268,8 +285,28 @@ pub fn judge(status: &Status, grew: Counts) -> (Colour, Option<String>) {
     (Colour::Green, None)
 }
 
-/// A device's line.
+/// A device's line, its app part cut ([`App::line`]): the menu's.
 pub fn line(name: &str, status: &Status, grew: Counts) -> String {
+    line_with(
+        name,
+        status,
+        grew,
+        status.app.as_ref().and_then(|a| a.line.as_deref()),
+    )
+}
+
+/// A device's line with its app part whole ([`App::whole`]): the panel's.
+pub fn whole_line(name: &str, status: &Status, grew: Counts) -> String {
+    line_with(
+        name,
+        status,
+        grew,
+        status.app.as_ref().and_then(|a| a.whole.as_deref()),
+    )
+}
+
+/// A device's line ending in `app`, the app's part.
+fn line_with(name: &str, status: &Status, grew: Counts, app: Option<&str>) -> String {
     let source = status.source.as_deref().unwrap_or("?");
     let ready = if status.ready { "ready" } else { "not ready" };
     let holdover = if status.holdover { ", holdover" } else { "" };
@@ -286,7 +323,7 @@ pub fn line(name: &str, status: &Status, grew: Counts) -> String {
     if grew.send_errors > 0 {
         s.push_str(&format!("; send errors +{}", grew.send_errors));
     }
-    if let Some(l) = status.app.as_ref().and_then(|a| a.line.as_deref()) {
+    if let Some(l) = app {
         s.push_str("; ");
         s.push_str(l);
     }
@@ -343,6 +380,7 @@ impl Tracker {
     pub fn update_with(&mut self, readings: &[Reading], expected: &[String]) -> View {
         let mut last = BTreeMap::new();
         let mut lines = Vec::with_capacity(readings.len());
+        let mut whole = Vec::with_capacity(readings.len());
         let mut colours = Vec::with_capacity(readings.len());
         let mut worst: Option<(Colour, String)> = None;
         for ((name, reading), key) in readings.iter().zip(keys(readings)) {
@@ -358,6 +396,7 @@ impl Tracker {
                         .map_or(Counts::default(), |&before| status.counts.since(before));
                     last.insert(key, status.counts);
                     lines.push(line(name, &status, grew));
+                    whole.push(whole_line(name, &status, grew));
                     judge(&status, grew)
                 }
                 Err(e) => {
@@ -367,6 +406,7 @@ impl Tracker {
                         last.insert(key, before);
                     }
                     lines.push(format!("{name}: status unreadable ({e})"));
+                    whole.push(format!("{name}: status unreadable ({e})"));
                     (Colour::Red, Some("status unreadable".to_string()))
                 }
             };
@@ -379,6 +419,7 @@ impl Tracker {
         let gone = missing(readings, expected);
         for name in &gone {
             lines.push(missing_line(name));
+            whole.push(missing_line(name));
             colours.push(Colour::Red);
             if worst.as_ref().is_none_or(|(c, _)| Colour::Red > *c) {
                 worst = Some((Colour::Red, missing_line(name)));
@@ -397,6 +438,7 @@ impl Tracker {
             colour,
             tooltip: clip(&tooltip, TOOLTIP_MAX),
             lines,
+            whole,
             colours,
         }
     }

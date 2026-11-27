@@ -22,14 +22,14 @@ use std::time::{Duration, Instant};
 
 use dtray::discover::{Local, Reading};
 use dtray::model::{Colour, View};
-use dtray::panel::{self, Placement, Rect, Row, place, rows, scaled, scroll_to};
+use dtray::panel::{self, Placement, Rect, Row, place, rows, scaled, scroll_to, text_width};
 use dtray::{output, probe};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
-    COLOR_WINDOW, COLOR_WINDOWTEXT, CreateFontIndirectW, DT_CALCRECT, DT_NOPREFIX, DT_WORDBREAK,
-    DeleteObject, DrawTextW, GetDC, GetMonitorInfoW, GetSysColor, GetSysColorBrush, HDC, HFONT,
-    HGDIOBJ, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromRect, ReleaseDC, SelectObject,
-    SetBkColor, SetTextColor,
+    COLOR_WINDOW, COLOR_WINDOWTEXT, CreateFontIndirectW, DT_CALCRECT, DT_EDITCONTROL, DT_NOPREFIX,
+    DT_WORDBREAK, DeleteObject, DrawTextW, GetDC, GetMonitorInfoW, GetSysColor, GetSysColorBrush,
+    HDC, HFONT, HGDIOBJ, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromRect, ReleaseDC,
+    SelectObject, SetBkColor, SetTextColor,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Controls::SetScrollInfo;
@@ -54,8 +54,12 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 const CLASS: &str = "dtray-panel";
 /// Esc in the window (`IsDialogMessageW`'s `IDCANCEL`).
 const IDCANCEL_ID: usize = 2;
-/// A static's styles (`SS_LEFT`, `SS_NOPREFIX`: an `&` shows as itself).
-const SS_NOPREFIX: u32 = 0x80;
+/// A static's styles: `SS_LEFT` (wraps), `SS_NOPREFIX` (0x80: an `&`
+/// shows as itself) and `SS_EDITCONTROL` (0x2000: it wraps as a multiline
+/// edit control, so a word longer than the line breaks inside it rather
+/// than running past the panel; `text_height` measures the same way with
+/// `DT_EDITCONTROL`, dstack #507).
+const TEXT: u32 = 0x80 | 0x2000;
 
 /// The content's width, DIPs.
 const WIDTH: i32 = 460;
@@ -341,7 +345,7 @@ fn create(anchor: Rect) -> Result<(), String> {
             hidden_at: None,
         })
     });
-    let header = child(h, "STATIC", HEADER, SS_NOPREFIX, ID_HEADER);
+    let header = child(h, "STATIC", HEADER, TEXT, ID_HEADER);
     set_font(header, font);
     Ok(())
 }
@@ -444,22 +448,16 @@ fn update(st: &mut State, new: Vec<Row>) {
         for (i, r) in new.iter().enumerate() {
             let base = ROW + i * ROW_IDS;
             set_font(
-                child(h, "STATIC", &title_of(r), SS_NOPREFIX, base + TITLE),
+                child(h, "STATIC", &title_of(r), TEXT, base + TITLE),
                 st.bold,
             );
-            set_font(
-                child(h, "STATIC", &r.line, SS_NOPREFIX, base + LINE),
-                st.font,
-            );
+            set_font(child(h, "STATIC", &r.line, TEXT, base + LINE), st.font);
             if let Some(o) = &r.output {
-                set_font(
-                    child(h, "STATIC", &o.plays, SS_NOPREFIX, base + PLAYS),
-                    st.bold,
-                );
+                set_font(child(h, "STATIC", &o.plays, TEXT, base + PLAYS), st.bold);
                 let w = o.warning.as_deref().unwrap_or("");
-                set_font(child(h, "STATIC", w, SS_NOPREFIX, base + WARN), st.bold);
+                set_font(child(h, "STATIC", w, TEXT, base + WARN), st.bold);
                 set_font(
-                    child(h, "STATIC", "Output:", SS_NOPREFIX, base + LABEL_ID),
+                    child(h, "STATIC", "Output:", TEXT, base + LABEL_ID),
                     st.font,
                 );
                 let pick = child(
@@ -565,7 +563,7 @@ fn text_height(h: HWND, font: HFONT, text: &str, width: i32) -> i32 {
             t.as_ptr(),
             i32::try_from(t.len()).unwrap_or(i32::MAX),
             &mut r,
-            DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX,
+            DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX | DT_EDITCONTROL,
         );
         SelectObject(dc, old);
         ReleaseDC(h, dc);
@@ -580,7 +578,12 @@ fn layout(st: &mut State) {
     let d = |dips: i32| scaled(dips, st.dpi);
     // SAFETY: plain call.
     let bar = unsafe { GetSystemMetricsForDpi(SM_CXVSCROLL, st.dpi) };
-    let inner = d(WIDTH) - 2 * d(MARGIN);
+    let border = 2;
+    let anchor = st.anchor;
+    let work = work_area(anchor);
+    // The text wraps in the width the window gets: a work area narrower
+    // than the panel narrows it (dstack #507).
+    let inner = text_width(work, d(WIDTH) + bar + border, bar + border, d(MARGIN));
     // The content, laid out from the top (y) at scroll 0.
     let mut places: Vec<Place> = Vec::new();
     let mut y = d(MARGIN);
@@ -657,9 +660,6 @@ fn layout(st: &mut State) {
     st.content = y;
     // The window: the content's width and height plus the scroll bar's
     // room and the borders.
-    let border = 2;
-    let anchor = st.anchor;
-    let work = work_area(anchor);
     let Placement { rect, .. } = place(work, anchor, d(WIDTH) + bar + border, y + border, d(GAP));
     // SAFETY: our window, physical pixels (per-monitor context).
     unsafe {
