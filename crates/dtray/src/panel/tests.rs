@@ -370,7 +370,10 @@ fn a_long_app_line_is_whole_in_the_panel() {
     );
     let readings: Vec<Reading> = vec![(
         "MBC-dlisten".into(),
-        Ok(dlisten(&format!(r#"{{"line":"{long}","state":"warn"}}"#))),
+        Ok(dlisten(&format!(
+            r#"{{"line":{},"state":"warn"}}"#,
+            serde_json::to_string(&long).unwrap()
+        ))),
     )];
     let view = Tracker::default().update(&readings);
     let rows = super::rows(&readings, &view);
