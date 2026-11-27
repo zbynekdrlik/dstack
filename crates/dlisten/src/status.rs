@@ -42,6 +42,11 @@ pub struct AppView<'a> {
     /// The `--output` text a run waits for while no output matches it
     /// (dstack #506): the line says so and the state is "warn".
     pub waiting_for: Option<&'a str>,
+    /// The command line's `--output` text (dstack #507), kept after a
+    /// choice in dtray named the run after another output: dtray warns
+    /// when the output playing is not the one it names (the next start
+    /// plays on that one again).
+    pub pinned: Option<&'a str>,
 }
 
 /// dtray's line for dlisten: `<output> (48000 Hz): audio flowing, depth
@@ -75,7 +80,9 @@ pub fn short_line(v: &AppView<'_>) -> String {
 /// ([`state`]), the numbers, and the outputs dtray's Output menu offers:
 /// `outputs` (their names) and `output` (the index of the one playing; the
 /// index is what `app output <n>` names; left out while none plays, and
-/// then `waiting_for` names the `--output` text waited for). Within [`APP_MAX`]: outputs past
+/// then `waiting_for` names the `--output` text waited for), and `pinned`,
+/// the command line's `--output` text (dstack #507; left out without one).
+/// Within [`APP_MAX`]: outputs past
 /// it are left off the list (`outputs_cut`: true), the one playing kept
 /// while it fits.
 pub fn app_status(v: &AppView<'_>) -> String {
@@ -100,6 +107,9 @@ pub fn app_status(v: &AppView<'_>) -> String {
     });
     if let Some(text) = v.waiting_for {
         base["waiting_for"] = status_name(text).into();
+    }
+    if let Some(text) = v.pinned {
+        base["pinned"] = status_name(text).into();
     }
     with_outputs_of(&base, v.outputs, v.current)
 }
@@ -151,6 +161,7 @@ mod tests {
             outputs: &outs,
             current: Some(1),
             waiting_for: None,
+            pinned: None,
         };
         let text = app_status(&v);
         assert_eq!(
@@ -176,6 +187,16 @@ mod tests {
         assert_eq!(j["output"], 1);
         assert_eq!(j["outputs"], serde_json::json!(["Output 0", "Output 1"]));
         assert_eq!(j.get("outputs_cut"), None);
+        assert_eq!(j.get("pinned"), None, "no --output, no key");
+        // A run started with --output keeps its text after another choice
+        // (dstack #507): dtray tells the two apart.
+        let chosen = AppView {
+            pinned: Some("Output 0"),
+            ..v
+        };
+        let j: serde_json::Value = serde_json::from_str(&app_status(&chosen)).unwrap();
+        assert_eq!(j["pinned"], "Output 0");
+        assert_eq!(j["output"], 1);
         let quiet = AppView {
             flowing: false,
             current: Some(5),
@@ -198,6 +219,7 @@ mod tests {
             outputs: &outs,
             current: None,
             waiting_for: Some("Headphones"),
+            pinned: Some("Headphones"),
         };
         let j: serde_json::Value = serde_json::from_str(&app_status(&v)).unwrap();
         assert_eq!(
@@ -207,6 +229,7 @@ mod tests {
         );
         assert_eq!(j["state"], "warn");
         assert_eq!(j["waiting_for"], "Headphones");
+        assert_eq!(j["pinned"], "Headphones", "dstack #507: the --output text");
         assert_eq!(j.get("output"), None, "no menu item checked");
         assert_eq!(
             j["outputs"],
@@ -249,6 +272,7 @@ mod tests {
             outputs: &outs,
             current: Some(0),
             waiting_for: None,
+            pinned: None,
         };
         let text = app_status(&v);
         assert!(text.len() <= APP_MAX, "{}", text.len());
@@ -293,6 +317,7 @@ mod tests {
             outputs: &outs,
             current: Some(150),
             waiting_for: None,
+            pinned: None,
         };
         let j: serde_json::Value = serde_json::from_str(&app_status(&v)).unwrap();
         // 151 names of 44 bytes do not fit 4096 bytes: the list cannot be

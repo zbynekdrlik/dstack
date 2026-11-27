@@ -91,6 +91,10 @@ pub struct Session {
     outputs: Vec<Output>,
     /// What the run plays on (`--output`, [`follow::Want`]).
     want: Want,
+    /// The command line's `--output` text, kept after a choice in dtray
+    /// named the run after another output (dstack #507: its status says
+    /// so, dtray warns).
+    pinned: Option<String>,
     /// The output in use: `None` while a named run waits for its output
     /// (dstack #506). A free run keeps the last one played here even while
     /// no output is left (`waiting`).
@@ -119,6 +123,7 @@ struct Shown {
     names: Vec<String>,
     current: Option<usize>,
     waiting_for: Option<String>,
+    pinned: Option<String>,
 }
 
 /// What the main thread is asked.
@@ -211,6 +216,7 @@ impl Session {
             devices,
             outputs,
             want,
+            pinned: o.output.clone(),
             current,
             playing: None,
             shown: Arc::default(),
@@ -356,6 +362,7 @@ impl Session {
                 .missing
                 .as_ref()
                 .and_then(|_| self.named().map(str::to_string)),
+            pinned: self.pinned.clone(),
         };
         *lock(&self.shown) = shown;
     }
@@ -410,6 +417,7 @@ impl Session {
                 outputs: &shown.names,
                 current: shown.current,
                 waiting_for: shown.waiting_for.as_deref(),
+                pinned: shown.pinned.as_deref(),
             })
         });
         let (shown, events) = (Arc::clone(&self.shown), Mutex::new(events));
