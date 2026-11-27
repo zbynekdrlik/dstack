@@ -359,3 +359,28 @@ fn the_scroll_stays_within_the_content() {
     assert_eq!(scroll_to(699, 1, 1000, 300), 700);
     assert_eq!(scroll_to(i32::MAX, 1, i32::MAX, 0), i32::MAX);
 }
+
+/// dstack #507 (27.11.2026): the panel wraps a device's line, so its app
+/// part is shown whole; only the menu cuts it (to `APP_LINE_MAX`).
+#[test]
+fn a_long_app_line_is_whole_in_the_panel() {
+    let long = format!(
+        "waiting for an output holding \"{}\" (--output)",
+        "x".repeat(90)
+    );
+    let readings: Vec<Reading> = vec![(
+        "MBC-dlisten".into(),
+        Ok(dlisten(&format!(r#"{{"line":"{long}","state":"warn"}}"#))),
+    )];
+    let view = Tracker::default().update(&readings);
+    let rows = super::rows(&readings, &view);
+    assert!(
+        rows[0].line.ends_with(&format!("; {long}")),
+        "{}",
+        rows[0].line
+    );
+    // Control characters still read as spaces.
+    let readings: Vec<Reading> = vec![("a".into(), Ok(dlisten(r#"{"line":"one\ntwo"}"#)))];
+    let view = Tracker::default().update(&readings);
+    assert!(super::rows(&readings, &view)[0].line.ends_with("; one two"));
+}
