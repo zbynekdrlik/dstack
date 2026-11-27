@@ -48,6 +48,8 @@ use std::process::ExitCode;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(windows)]
+mod panel_win;
+#[cfg(windows)]
 mod settings_win;
 #[cfg(any(windows, target_os = "linux"))]
 mod tray;

@@ -44,6 +44,10 @@ exclude_globs = [
   # desktop: each tested), and it is run by hand on a desktop.
   "crates/dtray/src/linux.rs",
   "crates/dtray/src/tray.rs",
+  # dtray's panel window (dstack #507): Win32 glue; where it goes and what
+  # it shows are dtray::panel's (place, rows, scroll_to: each tested), and
+  # it is run by hand on Windows.
+  "crates/dtray/src/panel_win.rs",
   # dlisten's binary glue (dstack #139): the output device (cpal), the
   # running session (dlink, the network), the OS calls (autostart, the
   # console) and main need a sound card or the process; their decisions

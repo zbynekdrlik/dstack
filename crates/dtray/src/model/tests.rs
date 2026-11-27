@@ -66,6 +66,7 @@ fn no_device_is_grey() {
             colour: Colour::Grey,
             tooltip: "dstack: no devices on this PC".into(),
             lines: vec![],
+            colours: vec![],
         }
     );
     assert_eq!(print_text(&v), "dstack: no devices on this PC\n");
@@ -75,6 +76,7 @@ fn no_device_is_grey() {
 fn a_healthy_device_is_green() {
     let v = Tracker::default().update(&[ok("app", healthy())]);
     assert_eq!(v.colour, Colour::Green);
+    assert_eq!(v.colours, [Colour::Green]);
     assert_eq!(v.tooltip, "dstack: 1 device, ok");
     assert_eq!(
         v.lines,
@@ -680,6 +682,7 @@ fn an_expected_device_not_running_is_red_and_one_found_is_as_usual() {
             colour: Colour::Red,
             tooltip: "dstack: 1 device, Stopped one: expected, not running".into(),
             lines: vec!["Stopped one: expected, not running".into()],
+            colours: vec![Colour::Red],
         }
     );
     // Everything expected is running: the view of the readings alone.
@@ -695,6 +698,8 @@ fn an_expected_device_not_running_is_red_and_one_found_is_as_usual() {
     let orange = status_line(1, &[0x0000_0001], &[], None);
     let v = Tracker::default().update_with(&[ok("app", orange)], &expected[1..]);
     assert_eq!(v.colour, Colour::Red);
+    // Each line keeps its own colour (dstack #507: the panel's rows).
+    assert_eq!(v.colours, [Colour::Orange, Colour::Red]);
     assert_eq!(
         v.tooltip,
         "dstack: 2 devices, Stopped one: expected, not running"

@@ -60,6 +60,8 @@ pub struct View {
     /// One line per device, in the readings' order, then one per expected
     /// device not running.
     pub lines: Vec<String>,
+    /// Each line's colour (dstack #507: the panel's row), in `lines`' order.
+    pub colours: Vec<Colour>,
 }
 
 /// The longest tooltip, in UTF-16 units (Windows keeps 127 and a NUL).
@@ -341,6 +343,7 @@ impl Tracker {
     pub fn update_with(&mut self, readings: &[Reading], expected: &[String]) -> View {
         let mut last = BTreeMap::new();
         let mut lines = Vec::with_capacity(readings.len());
+        let mut colours = Vec::with_capacity(readings.len());
         let mut worst: Option<(Colour, String)> = None;
         for ((name, reading), key) in readings.iter().zip(keys(readings)) {
             let parsed = match reading {
@@ -367,6 +370,7 @@ impl Tracker {
                     (Colour::Red, Some("status unreadable".to_string()))
                 }
             };
+            colours.push(colour);
             let text = reason.map_or_else(|| "ok".to_string(), |r| format!("{name}: {r}"));
             if worst.as_ref().is_none_or(|(c, _)| colour > *c) {
                 worst = Some((colour, text));
@@ -375,6 +379,7 @@ impl Tracker {
         let gone = missing(readings, expected);
         for name in &gone {
             lines.push(missing_line(name));
+            colours.push(Colour::Red);
             if worst.as_ref().is_none_or(|(c, _)| Colour::Red > *c) {
                 worst = Some((Colour::Red, missing_line(name)));
             }
@@ -392,6 +397,7 @@ impl Tracker {
             colour,
             tooltip: clip(&tooltip, TOOLTIP_MAX),
             lines,
+            colours,
         }
     }
 }
