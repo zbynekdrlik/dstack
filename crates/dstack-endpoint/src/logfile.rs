@@ -99,8 +99,10 @@ pub fn open_bounded(log: &Path, max_bytes: u64, kept: u32) -> io::Result<Opened>
 
 /// The run's log file, rotated by size: a write that would take it past
 /// its bound first moves it to `.log.1` (the older ones up, [`KEPT`]) and
-/// starts a new one, so a log line is never split across two files. The
-/// log writes whole lines (tracing's formatter writes each event at once).
+/// starts a new one, so a line written in one write is never split across
+/// two files (tracing's formatter writes each event at once). A rotation
+/// that cannot move the log goes on appending to it (the bound then holds
+/// no longer, until a later rotation moves it).
 #[derive(Debug)]
 pub struct Rotating {
     path: PathBuf,
@@ -140,6 +142,14 @@ impl Write for Rotating {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         if self.written > 0 && self.written.saturating_add(buf.len() as u64) > self.max_bytes {
             self.rotate();
+        }
+        if self.file.is_none() {
+            // No log after a rotation: each write tries it again.
+            self.file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&self.path)
+                .ok();
         }
         let Some(file) = self.file.as_mut() else {
             return Err(io::Error::other(format!(
@@ -313,6 +323,57 @@ mod tests {
         opened.file.write_all(b"second line\n").unwrap();
         assert_eq!(read(&log), "first line\nsecond line\n");
         assert_eq!(read(&blocker.join("inside")), "x");
+    }
+
+    #[test]
+    fn a_write_up_to_the_bound_stays_and_one_past_it_rotates() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("dlisten.log");
+        let mut opened = open_bounded(&log, 10, 3).expect("the log opens");
+        opened.file.write_all(b"1234\n").unwrap();
+        // 5 + 5 = 10 bytes: exactly the bound, one file.
+        opened.file.write_all(b"5678\n").unwrap();
+        assert_eq!(names(dir.path()), ["dlisten.log"]);
+        assert_eq!(read(&log), "1234\n5678\n");
+        // One byte past it: the log moves first.
+        opened.file.write_all(b"9\n").unwrap();
+        assert_eq!(names(dir.path()), ["dlisten.log", "dlisten.log.1"]);
+        assert_eq!(read(&log), "9\n");
+        assert_eq!(read(&dir.path().join("dlisten.log.1")), "1234\n5678\n");
+    }
+
+    #[test]
+    fn a_first_write_past_the_bound_rotates_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("dlisten.log");
+        let mut opened = open_bounded(&log, 10, 3).expect("the log opens");
+        let long = format!("{}\n", "z".repeat(30));
+        opened.file.write_all(long.as_bytes()).unwrap();
+        // No empty `.1`: an empty log is never moved.
+        assert_eq!(names(dir.path()), ["dlisten.log"]);
+        assert_eq!(read(&log), long);
+    }
+
+    #[test]
+    fn a_log_that_could_not_be_opened_after_a_rotation_is_tried_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("dlisten.log");
+        let mut opened = open_bounded(&log, 10, 3).expect("the log opens");
+        // As a rotation that could open nothing leaves it.
+        opened.file.file = None;
+        opened.file.write_all(b"back\n").unwrap();
+        assert_eq!(read(&log), "back\n");
+        // A folder in the log's place: nothing opens, the write fails.
+        let other = dir.path().join("x.log");
+        let mut gone = open_bounded(&other, 10, 3).expect("the log opens");
+        gone.file.file = None;
+        std::fs::remove_file(&other).unwrap();
+        std::fs::create_dir(&other).unwrap();
+        let err = gone.file.write_all(b"lost\n").unwrap_err();
+        assert!(
+            err.to_string().contains("could not be opened again"),
+            "{err}"
+        );
     }
 
     #[test]

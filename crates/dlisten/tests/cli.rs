@@ -68,7 +68,9 @@ mod linux {
     /// headphones out at boot) does not stop: the Dante device runs, no
     /// output plays, the log says it waits (WARN), and it never falls back
     /// to the default. Only a PC whose audio system lists nothing at all
-    /// (a CI runner without ALSA devices) still stops, before the device.
+    /// (a CI runner without ALSA devices) still stops, before the device;
+    /// there the `follow` unit tests alone carry the proof (dev1 lists
+    /// ALSA's `null` output, so it waits there).
     #[test]
     fn a_start_whose_named_output_is_not_there_waits_for_it() {
         use std::time::{Duration, Instant};

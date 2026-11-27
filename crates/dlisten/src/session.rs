@@ -235,7 +235,13 @@ impl Session {
                         "dlisten: the output did not open (tried again in 5 s): {e}"
                     );
                     session.replay = true;
+                    // The wait's log too (WARN once, a line a minute) until
+                    // the output really plays.
+                    session.missing = session
+                        .named()
+                        .map(|t| (Instant::now(), MissingLog::new(t)));
                     session.show();
+                    session.log_missing();
                 }
             }
             None => session.go_missing(),
@@ -358,7 +364,12 @@ impl Session {
     /// run is named after it from now on (its exact name: the user's
     /// newest choice, still never left for another output).
     pub fn choose_output(&mut self, index: usize) -> Result<(), String> {
-        self.play(index)?;
+        // A choice ends a wait by itself: no "is there again" line for it.
+        let missing = self.missing.take();
+        if let Err(e) = self.play(index) {
+            self.missing = missing;
+            return Err(e);
+        }
         let name = self.outputs[index].name.clone();
         if self.named().is_some() {
             tracing::info!(output = %name, "dlisten: dtray's choice: this run now waits for this output only");
