@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.6.229
+
+- **dtray (#507, the FOH notebook 27.11.2026): a left click on the tray icon opens dtray's panel, which always fits the screen and shows where each listening app plays.** Before, the click opened the native menu: Windows sized it by the longest device line (1156 px wide on the notebook's 1920x1200 screen at 125 %, dlisten's line cut at its end) and placed dlisten's Output submenu against the whole monitor, so it ran under the taskbar and its checked output was cut off; the output was only text in the middle of a 150-character line. Now on Windows:
+  - the panel opens next to the tray icon, inside the work area of the monitor the icon is on (the screen less the taskbar, any taskbar side, any monitor), per-monitor DPI aware (its own window only: the dasio settings window and the menu keep their look); content taller than the work area scrolls (scroll bar and wheel). It closes on a second click, on Esc and when it loses the focus;
+  - a row per device: its name and state (ok, warning, error) in its colour, its line wrapped, never cut; a row per expected device not running;
+  - for an app that offers outputs (dlisten): `Plays on: <the output it actually plays on>` (or `nothing`), a red warning when it plays nothing (waiting for its `--output`, or no output open) or when it plays on another output than its command line's `--output` names (after a pick in dtray: a restart plays on the `--output` one again), and ONE `Output:` picker. A pick (a click on an item, or Enter in the open list) sends `app output <n> <name>` as the menu's Output items do; dlisten saves it. The wheel over the panel scrolls the panel, never a closed picker.
+  - The right click keeps the menu as it was (latency, outputs, switches, dasio settings, Copy status, Exit). Linux keeps the menu on both clicks.
+- **dlisten (#507): its app status carries `pinned`,** the command line's `--output` text (kept after a pick in dtray named the run after another output; no key without `--output`). dtray's panel compares it with the output playing.
+- API (tool crates only): dtray's library has a new `panel` module (`place`, `rows`, `output_row`, `scroll_to`, `shape`, `scaled`, `colour_word`, `Rect`, `Placement`, `Row`, `OutputRow`), and `model::View` a new field `colours` (each line's colour); dlisten's `status::AppView` has a new field `pinned`. No library crate an application depends on changed.
+- **No latency change:** no term, default, block or converter moves. Consumers: nothing to move (dtray and dlisten are dstack's own tools; dasio installs dtray on its PCs).
+
 ## 0.6.228
 
 - **Fix (#506, the FOH notebook's SOLO listen, 26.11.2026): dlisten with `--output <text>` plays on that output only, never on another one.** At the service the notebook's Headphones endpoint was reported unplugged by Windows for 3 min 19 s while SOLO played on it (jack detection; the plug stayed in). dlisten fell back to the default output, the notebook's speakers, and never looked at `--output` again, so SOLO played out loud in the room for the rest of the service. Now a run with `--output`:
