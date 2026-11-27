@@ -324,6 +324,7 @@ fn a_view_shorter_than_its_lines_colours_the_rest_red() {
         colour: Colour::Red,
         tooltip: String::new(),
         lines: vec!["a: x".into()],
+        whole: vec!["a: x".into()],
         colours: vec![],
     };
     let got = super::rows(&[], &view);
@@ -333,6 +334,7 @@ fn a_view_shorter_than_its_lines_colours_the_rest_red() {
     // A line with no name in front stays whole.
     let view = View {
         lines: vec!["odd".into()],
+        whole: vec!["odd".into()],
         colours: vec![Colour::Green],
         ..view
     };
@@ -358,4 +360,73 @@ fn the_scroll_stays_within_the_content() {
     assert_eq!(scroll_to(0, 40, 200, 300), 0);
     assert_eq!(scroll_to(699, 1, 1000, 300), 700);
     assert_eq!(scroll_to(i32::MAX, 1, i32::MAX, 0), i32::MAX);
+}
+
+/// dstack #507 (27.11.2026): the panel wraps a device's line, so its app
+/// part is shown whole; only the menu cuts it (to `APP_LINE_MAX`).
+#[test]
+fn a_long_app_line_is_whole_in_the_panel() {
+    let long = format!(
+        "waiting for an output holding \"{}\" (--output)",
+        "x".repeat(90)
+    );
+    let readings: Vec<Reading> = vec![(
+        "MBC-dlisten".into(),
+        Ok(dlisten(&format!(
+            r#"{{"line":{},"state":"warn"}}"#,
+            serde_json::to_string(&long).unwrap()
+        ))),
+    )];
+    let view = Tracker::default().update(&readings);
+    let rows = super::rows(&readings, &view);
+    assert!(
+        rows[0].line.ends_with(&format!("; {long}")),
+        "{}",
+        rows[0].line
+    );
+    // Control characters still read as spaces.
+    let readings: Vec<Reading> = vec![("a".into(), Ok(dlisten(r#"{"line":"one\ntwo"}"#)))];
+    let view = Tracker::default().update(&readings);
+    assert!(super::rows(&readings, &view)[0].line.ends_with("; one two"));
+}
+
+/// dstack #507: the text wraps in the window's own width, so a work area
+/// narrower than the panel narrows the text too and no line runs past
+/// the window; never under 1 pixel.
+#[test]
+fn the_text_wraps_in_the_window_s_width() {
+    // The FOH notebook at 125 %: 460 dips = 575 px, a 21 px bar, 2 px
+    // borders, 15 px margins.
+    let work = r(0, 0, 1920, 1170);
+    assert_eq!(text_width(work, 575 + 23, 23, 15), 545);
+    // A work area 400 px wide: the window takes 400, the text 400 - 23 - 30.
+    let narrow = r(100, 0, 500, 600);
+    assert_eq!(text_width(narrow, 575 + 23, 23, 15), 347);
+    let p = place(narrow, r(470, 605, 494, 629), 575 + 23, 300, 8);
+    assert_eq!(
+        text_width(narrow, 575 + 23, 23, 15) + 23 + 30,
+        p.rect.width()
+    );
+    // Exactly the work area's width, and one pixel less.
+    assert_eq!(text_width(r(0, 0, 598, 600), 598, 23, 15), 545);
+    assert_eq!(text_width(r(0, 0, 597, 600), 598, 23, 15), 544);
+    // Nothing left: 1.
+    assert_eq!(text_width(r(0, 0, 40, 600), 598, 23, 15), 1);
+    assert_eq!(text_width(r(0, 0, 0, 0), 598, 23, 15), 1);
+}
+
+/// dstack #507: only the menu's line cuts the app part; the panel's keeps
+/// it whole, and both carry the same device part before it.
+#[test]
+fn the_menu_cuts_the_app_part_the_panel_does_not() {
+    let long = "y".repeat(200);
+    let readings: Vec<Reading> =
+        vec![("d".into(), Ok(dlisten(&format!(r#"{{"line":"{long}"}}"#))))];
+    let view = Tracker::default().update(&readings);
+    let menu = &view.lines[0];
+    let whole = &view.whole[0];
+    let cut = "y".repeat(crate::model::APP_LINE_MAX);
+    assert!(menu.ends_with(&format!("; {cut}")), "{menu}");
+    assert!(!menu.contains(&format!("{cut}y")), "{menu}");
+    assert_eq!(whole, &menu.replace(&cut, &long));
 }

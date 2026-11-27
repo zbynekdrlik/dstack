@@ -4,7 +4,8 @@ use dstack::subscribe::SubStatus;
 
 use super::{
     APP_LINE_MAX, App, AppState, Colour, Counts, NOT_RUNNING, Status, TOOLTIP_MAX, Tracker, View,
-    app_line, app_of, clip, copy_json, judge, keys, line, missing, missing_line, parse, print_text,
+    app_flat, app_line, app_of, clip, copy_json, judge, keys, line, missing, missing_line, parse,
+    print_text,
 };
 use crate::discover::Reading;
 
@@ -66,6 +67,7 @@ fn no_device_is_grey() {
             colour: Colour::Grey,
             tooltip: "dstack: no devices on this PC".into(),
             lines: vec![],
+            whole: vec![],
             colours: vec![],
         }
     );
@@ -494,6 +496,7 @@ fn the_app_part_reads_its_line_and_state() {
         app_of(&v(r#"{"line":"ASIO 64","state":"warn","x":1}"#)),
         Some(App {
             line: Some("ASIO 64".into()),
+            whole: Some("ASIO 64".into()),
             state: Some(AppState::Warn),
             stale: false,
         })
@@ -511,6 +514,7 @@ fn the_app_part_reads_its_line_and_state() {
         app_of(&v(r#"{"line":"","state":"ERROR"}"#)),
         Some(App {
             line: None,
+            whole: None,
             state: None,
             stale: false,
         })
@@ -519,6 +523,7 @@ fn the_app_part_reads_its_line_and_state() {
         app_of(&v(r#"{"line":7,"state":true}"#)),
         Some(App {
             line: None,
+            whole: None,
             state: None,
             stale: false,
         })
@@ -528,6 +533,7 @@ fn the_app_part_reads_its_line_and_state() {
         app_of(&v(r#"{"state":"ok","stale":true}"#)),
         Some(App {
             line: None,
+            whole: None,
             state: Some(AppState::Ok),
             stale: true,
         })
@@ -585,6 +591,7 @@ fn judge_weighs_the_app_s_error_after_the_clock_and_its_warning_after_subscripti
     let app = |state| {
         Some(App {
             line: Some("l".into()),
+            whole: Some("l".into()),
             state: Some(state),
             stale: false,
         })
@@ -640,6 +647,7 @@ fn judge_weighs_the_app_s_error_after_the_clock_and_its_warning_after_subscripti
     let stale = |state| Status {
         app: Some(App {
             line: Some("l".into()),
+            whole: Some("l".into()),
             state: Some(state),
             stale: true,
         }),
@@ -682,6 +690,7 @@ fn an_expected_device_not_running_is_red_and_one_found_is_as_usual() {
             colour: Colour::Red,
             tooltip: "dstack: 1 device, Stopped one: expected, not running".into(),
             lines: vec!["Stopped one: expected, not running".into()],
+            whole: vec!["Stopped one: expected, not running".into()],
             colours: vec![Colour::Red],
         }
     );
@@ -783,4 +792,32 @@ fn judge_weighs_send_errors_after_the_late_counts() {
         judge(&s, grew),
         (Colour::Orange, Some("overruns +1".into()))
     );
+}
+
+/// dstack #507: the app part keeps its whole line beside the menu's cut
+/// one; control characters are spaces in both, and an empty line is none.
+#[test]
+fn the_app_part_keeps_its_whole_line() {
+    let v = |s: &str| serde_json::from_str::<serde_json::Value>(s).unwrap();
+    let long = "z".repeat(APP_LINE_MAX + 1);
+    let a = app_of(&v(&format!(r#"{{"line":"{long}"}}"#))).unwrap();
+    assert_eq!(a.whole.as_deref(), Some(long.as_str()));
+    assert_eq!(a.line, Some("z".repeat(APP_LINE_MAX)));
+    let a = app_of(&v(r#"{"line":"a\tb"}"#)).unwrap();
+    assert_eq!(
+        (a.line.as_deref(), a.whole.as_deref()),
+        (Some("a b"), Some("a b"))
+    );
+    assert_eq!(app_of(&v(r#"{"line":""}"#)).unwrap().whole, None);
+    assert_eq!(app_flat("x\ny"), "x y");
+}
+
+/// dstack #507: a device that cannot be read, or is expected and not
+/// running, has the same whole line as its menu line.
+#[test]
+fn lines_without_an_app_part_are_the_same_whole() {
+    let readings: Vec<Reading> = vec![("gone".into(), Err("no answer".into()))];
+    let v = Tracker::default().update_with(&readings, &["other".to_string()]);
+    assert_eq!(v.whole, v.lines);
+    assert_eq!(v.whole.len(), 2);
 }

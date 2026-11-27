@@ -319,3 +319,26 @@ fn the_rate_reads_as_rounded_ppb() {
     assert_eq!(ppb_of(-3_000_000.0), i32::MIN);
     assert_eq!(ppb_of(f64::NAN), 0);
 }
+
+/// dstack #498: the arrival-latency steps dsync's follower counts
+/// (`ClockModel::latency_steps`, dsync#220) reach the linked clock's
+/// follower counts, which the status's `clock.follower.latency_steps`
+/// shows, and follow the model as it counts more.
+#[test]
+fn the_follower_s_latency_steps_come_from_its_model() {
+    let src = Arc::new(FakeModel(Mutex::new((
+        ClockModel {
+            latency_steps: 3,
+            ..model(M0, P0, 0, 0)
+        },
+        true,
+    ))));
+    let f = Absorbing::new(Arc::clone(&src));
+    assert_eq!(f.counts().latency_steps, 3);
+    let service = Arc::new(MonoClock::new());
+    let linked = Linked::new(Some(Box::new(f)), service, None);
+    assert_eq!(linked.tick(), Source::Internal);
+    assert_eq!(linked.follower_counts().unwrap().latency_steps, 3);
+    src.0.lock().unwrap().0.latency_steps = 4;
+    assert_eq!(linked.follower_counts().unwrap().latency_steps, 4);
+}

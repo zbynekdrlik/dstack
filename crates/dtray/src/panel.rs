@@ -62,7 +62,7 @@ pub struct Placement {
 /// room above is the larger, else below, its right edge at the icon's.
 /// Then it is moved inside the work area.
 pub fn place(work: Rect, anchor: Rect, want_w: i32, want_h: i32, gap: i32) -> Placement {
-    let w = want_w.clamp(1, work.width().max(1));
+    let w = window_width(work, want_w);
     let h = want_h.clamp(1, work.height().max(1));
     let (left, top) = if anchor.left >= work.right {
         // A taskbar on the right.
@@ -93,6 +93,25 @@ pub fn place(work: Rect, anchor: Rect, want_w: i32, want_h: i32, gap: i32) -> Pl
         },
         scroll: want_h > h,
     }
+}
+
+/// A window `want_w` wide inside `work`: never wider than the work area,
+/// at least 1 pixel ([`place`] and [`text_width`] share it).
+fn window_width(work: Rect, want_w: i32) -> i32 {
+    want_w.clamp(1, work.width().max(1))
+}
+
+/// The width the panel's text wraps in: the window's width as [`place`]
+/// gives it for a window `want_w` wide inside `work` (never wider than the
+/// work area), less `chrome` (the scroll bar and the borders) and a
+/// `margin` on each side; at least 1. On a work area narrower than the
+/// panel the text wraps narrower too, so no line runs past the window
+/// (dstack #507).
+pub fn text_width(work: Rect, want_w: i32, chrome: i32, margin: i32) -> i32 {
+    window_width(work, want_w)
+        .saturating_sub(chrome)
+        .saturating_sub(margin.saturating_mul(2))
+        .max(1)
 }
 
 /// `dips` (device-independent pixels, 96 a logical inch) in the pixels of
@@ -137,10 +156,13 @@ pub struct OutputRow {
 
 /// The panel's rows: one per reading (`view` is [`crate::model::Tracker`]'s
 /// view of `readings`, its lines and colours in their order), then one
-/// per expected device not running (the view's lines after them).
+/// per expected device not running (the view's lines after them). A row's
+/// line is the view's `whole` one (the app's part never cut, dstack #507;
+/// the panel wraps it), else its menu line.
 pub fn rows(readings: &[Reading], view: &View) -> Vec<Row> {
     let mut out = Vec::with_capacity(view.lines.len());
-    for (i, line) in view.lines.iter().enumerate() {
+    for (i, menu) in view.lines.iter().enumerate() {
+        let line = view.whole.get(i).unwrap_or(menu);
         let colour = view.colours.get(i).copied().unwrap_or(Colour::Red);
         let (name, output) = match readings.get(i) {
             Some((name, reading)) => (

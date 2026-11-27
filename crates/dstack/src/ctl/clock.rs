@@ -17,7 +17,9 @@ use crate::daemon::media::Media;
 /// (`service`: the poller's polls; `follower`: dsync's follower's windows,
 /// and its `locked`, `settled`, `offset_ns` and `recent_abs_e_ns`, what the
 /// selector decides on, `pull_ns`, the phase dsync still retires after
-/// a grandmaster change in the same time base, and `waiting`, why the
+/// a grandmaster change in the same time base, `latency_steps`, the
+/// arrival-latency steps dsync's follower detected (dstack #498), and
+/// `waiting`, why the
 /// selector does not use the follower: `stopped`, `no_ptp`, `not_locked`,
 /// `not_settled` or `waits_to_agree`, `null` while in use, dstack #420).
 pub(super) fn clock_part(j: &mut Json, media: &Media) {
@@ -50,6 +52,7 @@ pub(super) fn clock_part(j: &mut Json, media: &Media) {
             j.opt("offset_ns", f.offset_ns);
             j.opt("recent_abs_e_ns", f.recent_abs_e_ns);
             j.num("pull_ns", f.pull_ns);
+            j.num("latency_steps", f.latency_steps);
             match f.waiting {
                 Some(w) => j.word("waiting", w.word()),
                 None => j.opt("waiting", None::<u8>),

@@ -442,6 +442,7 @@ fn the_follower_s_part_is_the_selector_s_last_counts() {
         offset_ns: Some(-39_806),
         recent_abs_e_ns: Some(21_000),
         pull_ns: -88_000,
+        latency_steps: 0,
         grandmaster: Some([0x00, 0x1d, 0xc1, 0xab, 0xcd, 0xef]),
         waiting: Some(Waiting::WaitsToAgree),
         freq_ppb: -12_345,
