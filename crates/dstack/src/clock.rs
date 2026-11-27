@@ -246,6 +246,11 @@ pub struct FollowerCounts {
     /// The phase, ns, still being retired along dsync's pull after a
     /// grandmaster change in the same time base (dsync#158); 0 when none.
     pub pull_ns: i64,
+    /// The arrival-latency steps dsync's follower detected since it
+    /// started (`ClockModel::latency_steps`, dsync#218/#220: its offset
+    /// stepped by at least 300 us and held for 3 windows; report only,
+    /// the servo is unchanged). dstack #498.
+    pub latency_steps: u32,
     /// The grandmaster of the last Sync the follower heard (`None` before
     /// one).
     pub grandmaster: Option<[u8; 6]>,

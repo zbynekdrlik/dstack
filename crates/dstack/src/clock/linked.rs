@@ -817,6 +817,7 @@ impl<M: Model> Follow for Absorbing<M> {
             offset_ns: m.offset_ns,
             recent_abs_e_ns: m.recent_abs_e_ns,
             pull_ns: m.pull_ns,
+            latency_steps: m.latency_steps,
             grandmaster: m.gm_uuid,
             waiting: None,
             freq_ppb: ppb_of(m.rate_ppm),

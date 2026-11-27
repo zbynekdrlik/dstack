@@ -163,6 +163,7 @@ const WORDS: &[&str] = &[
     "offset_ns",
     "recent_abs_e_ns",
     "pull_ns",
+    "latency_steps",
     "waiting",
     "stopped",
     "no_ptp",
@@ -1318,6 +1319,7 @@ fn the_clock_counts_describe_the_source_in_use_and_each_source_apart() {
             offset_ns: Some(-39_806),
             recent_abs_e_ns: None,
             pull_ns: -88_000,
+            latency_steps: 7,
             grandmaster: Some([0x00, 0x1d, 0xc1, 0xab, 0xcd, 0xef]),
             waiting: None,
             freq_ppb: 0,
@@ -1338,7 +1340,7 @@ fn the_clock_counts_describe_the_source_in_use_and_each_source_apart() {
              \"service\":{\"polls\":2,\"re_anchors\":0,\"holdovers\":1,\"holdover\":1},\
              \"follower\":{\"windows\":300,\"re_anchors\":4,\"holdovers\":3,\"holdover\":0,\"absorbed\":2,\
              \"locked\":1,\"settled\":0,\"offset_ns\":-39806,\"recent_abs_e_ns\":null,\"pull_ns\":-88000,\
-             \"waiting\":null}}"
+             \"latency_steps\":7,\"waiting\":null}}"
         ),
         "{s}"
     );
@@ -1367,7 +1369,7 @@ fn the_clock_counts_describe_the_source_in_use_and_each_source_apart() {
         }
         assert!(
             s.contains(&format!(
-                "\"pull_ns\":-88000,\"waiting\":\"{}\"}}}}",
+                "\"pull_ns\":-88000,\"latency_steps\":7,\"waiting\":\"{}\"}}}}",
                 why.word()
             )),
             "{s}"

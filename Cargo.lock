@@ -449,8 +449,8 @@ dependencies = [
 
 [[package]]
 name = "dsync-ptp"
-version = "1.35.18"
-source = "git+https://github.com/zbynekdrlik/dsync?tag=v1.35.18#ca6c233a3e24e5c3981817c3ae71a3a72cb03e58"
+version = "1.35.20"
+source = "git+https://github.com/zbynekdrlik/dsync?tag=v1.35.20#b19e021c1e3f27c15f49eaa19ad770f9ec0abbe9"
 dependencies = [
  "anyhow",
  "byteorder",
