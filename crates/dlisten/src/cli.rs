@@ -19,8 +19,11 @@ receives, played on the output at its own rate and clock.
   --list-outputs              list the outputs and exit
   --autostart on|off          start dlisten at the user's logon (with the
                               other options given here) or not, and exit
-  --output <text>             the first output whose name holds <text>
-                              (any case; default: the default output)
+  --output <text>             play only on the output named <text>, else
+                              the first whose name holds it (any case);
+                              while none is there nothing plays and
+                              dlisten waits for it, never another output
+                              (default: the default output)
   --channels <n>              the device's RX channels (default 2, L and R;
                               1 to 64)
   --mono                      every RX channel summed at 0 dB to both
@@ -52,8 +55,9 @@ receives, played on the output at its own rate and clock.
 
 dlisten has no window: dtray shows it (the status, and an Output menu
 whose choice is remembered for the next start; --output wins). The status
-is also logged every 10 s, to stderr and to <state file>.log; a start
-keeps the run before's log as <state file>.log.1. Ctrl+C stops it.";
+is also logged every 10 s, to stderr and to <state file>.log, beside the
+settings file; a start, and a log past 10 MiB, moves it to
+<state file>.log.1 (the older ones up to .log.3). Ctrl+C stops it.";
 
 /// The RX channels unless `--channels`.
 pub const CHANNELS: usize = 2;

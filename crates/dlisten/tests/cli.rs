@@ -2,7 +2,8 @@
 
 //! dlisten's binary from the outside (dstack #139): what a user types gets
 //! the answer it should, with no sound card (CI has none). A start whose
-//! output cannot be found stops before the Dante device starts.
+//! `--output` matches nothing waits for it, the Dante device running
+//! (dstack #506).
 
 use std::process::{Command, Output};
 

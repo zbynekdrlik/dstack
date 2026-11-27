@@ -7,7 +7,7 @@
 use dlink::{RxChannel, SubState};
 
 pub use dstack_endpoint::status::{
-    APP_MAX, NAME_MAX, Snapshot, line, state, status_name, with_outputs,
+    APP_MAX, NAME_MAX, Snapshot, line, state, status_name, with_outputs, with_outputs_of,
 };
 
 /// Whether audio flows: a channel whose subscription is receiving
@@ -36,22 +36,34 @@ pub struct AppView<'a> {
     /// The output devices' names, in the order `output <n>` counts them
     /// (the status carries each as [`status_name`] gives it).
     pub outputs: &'a [String],
-    /// The one playing.
-    pub current: usize,
+    /// The one playing: `None` while none plays (a named output missing,
+    /// dstack #506).
+    pub current: Option<usize>,
+    /// The `--output` text a run waits for while no output matches it
+    /// (dstack #506): the line says so and the state is "warn".
+    pub waiting_for: Option<&'a str>,
 }
 
 /// dtray's line for dlisten: `<output> (48000 Hz): audio flowing, depth
-/// 40.1 ms, 2 underruns`.
+/// 40.1 ms, 2 underruns`; while it waits for its named output (dstack
+/// #506): `waiting for an output holding "Headphones" (--output): nothing
+/// plays, audio flowing`.
 pub fn short_line(v: &AppView<'_>) -> String {
-    let output = v
-        .outputs
-        .get(v.current)
-        .map_or_else(|| "no output".to_string(), |o| status_name(o));
     let audio = if v.flowing {
         "audio flowing"
     } else {
         "no audio"
     };
+    if let Some(text) = v.waiting_for {
+        return format!(
+            "waiting for an output holding {:?} (--output): nothing plays, {audio}",
+            status_name(text)
+        );
+    }
+    let output = v
+        .current
+        .and_then(|c| v.outputs.get(c))
+        .map_or_else(|| "no output".to_string(), |o| status_name(o));
     format!(
         "{output} ({} Hz): {audio}, depth {:.1} ms, {} underruns",
         v.snap.out_rate, v.snap.depth_ms, v.snap.underruns
@@ -62,14 +74,20 @@ pub fn short_line(v: &AppView<'_>) -> String {
 /// one JSON object with dtray's `line` ([`short_line`]) and `state`
 /// ([`state`]), the numbers, and the outputs dtray's Output menu offers:
 /// `outputs` (their names) and `output` (the index of the one playing; the
-/// index is what `app output <n>` names). Within [`APP_MAX`]: outputs past
+/// index is what `app output <n>` names; left out while none plays, and
+/// then `waiting_for` names the `--output` text waited for). Within [`APP_MAX`]: outputs past
 /// it are left off the list (`outputs_cut`: true), the one playing kept
 /// while it fits.
 pub fn app_status(v: &AppView<'_>) -> String {
     let s = v.snap;
-    let base = serde_json::json!({
+    let state = if v.waiting_for.is_some() {
+        "warn"
+    } else {
+        state(s, v.underruns_before)
+    };
+    let mut base = serde_json::json!({
         "line": short_line(v),
-        "state": state(s, v.underruns_before),
+        "state": state,
         "flowing": v.flowing,
         "depth_ms": (s.depth_ms * 10.0).round() / 10.0,
         "ppm": (s.ppm * 10.0).round() / 10.0,
@@ -80,7 +98,10 @@ pub fn app_status(v: &AppView<'_>) -> String {
         "played": s.played,
         "out_rate": s.out_rate,
     });
-    with_outputs(&base, v.outputs, v.current)
+    if let Some(text) = v.waiting_for {
+        base["waiting_for"] = status_name(text).into();
+    }
+    with_outputs_of(&base, v.outputs, v.current)
 }
 
 /// The app command dlisten takes (`app output <n> [<name>]`, from dtray's
@@ -128,7 +149,8 @@ mod tests {
             underruns_before: 1,
             flowing: true,
             outputs: &outs,
-            current: 1,
+            current: Some(1),
+            waiting_for: None,
         };
         let text = app_status(&v);
         assert_eq!(
@@ -156,13 +178,62 @@ mod tests {
         assert_eq!(j.get("outputs_cut"), None);
         let quiet = AppView {
             flowing: false,
-            current: 5,
+            current: Some(5),
             ..v
         };
         assert_eq!(
             short_line(&quiet),
             "no output (44100 Hz): no audio, depth 40.1 ms, 2 underruns"
         );
+    }
+
+    #[test]
+    fn a_run_waiting_for_its_named_output_says_so_and_offers_the_list() {
+        let outs = vec!["Speakers (Realtek(R) Audio)".to_string()];
+        // No new underrun: the state would be "ok" while playing.
+        let v = AppView {
+            snap: &snap(),
+            underruns_before: 2,
+            flowing: true,
+            outputs: &outs,
+            current: None,
+            waiting_for: Some("Headphones"),
+        };
+        let j: serde_json::Value = serde_json::from_str(&app_status(&v)).unwrap();
+        assert_eq!(
+            j["line"],
+            "waiting for an output holding \"Headphones\" (--output): nothing plays, audio \
+             flowing"
+        );
+        assert_eq!(j["state"], "warn");
+        assert_eq!(j["waiting_for"], "Headphones");
+        assert_eq!(j.get("output"), None, "no menu item checked");
+        assert_eq!(
+            j["outputs"],
+            serde_json::json!(["Speakers (Realtek(R) Audio)"])
+        );
+        let quiet = AppView {
+            flowing: false,
+            ..v
+        };
+        assert!(short_line(&quiet).ends_with("nothing plays, no audio"));
+        // Playing again: no waiting key, the state from the counts.
+        let playing = AppView {
+            current: Some(0),
+            waiting_for: None,
+            ..v
+        };
+        let j: serde_json::Value = serde_json::from_str(&app_status(&playing)).unwrap();
+        assert_eq!(j["state"], "ok");
+        assert_eq!(j.get("waiting_for"), None);
+        assert_eq!(j["output"], 0);
+        // Nothing playing and nothing waited for: "no output".
+        let none = AppView {
+            current: None,
+            waiting_for: None,
+            ..v
+        };
+        assert!(short_line(&none).starts_with("no output (44100 Hz)"));
     }
 
     #[test]
@@ -176,7 +247,8 @@ mod tests {
             underruns_before: 2,
             flowing: true,
             outputs: &outs,
-            current: 0,
+            current: Some(0),
+            waiting_for: None,
         };
         let text = app_status(&v);
         assert!(text.len() <= APP_MAX, "{}", text.len());
@@ -219,14 +291,18 @@ mod tests {
             underruns_before: 2,
             flowing: true,
             outputs: &outs,
-            current: 150,
+            current: Some(150),
+            waiting_for: None,
         };
         let j: serde_json::Value = serde_json::from_str(&app_status(&v)).unwrap();
         // 151 names of 44 bytes do not fit 4096 bytes: the list cannot be
         // cut short of the playing one, so it is dropped whole.
         assert_eq!(j["outputs"], serde_json::json!([]));
         assert_eq!(j["output"], 150);
-        let few = AppView { current: 20, ..v };
+        let few = AppView {
+            current: Some(20),
+            ..v
+        };
         let j: serde_json::Value = serde_json::from_str(&app_status(&few)).unwrap();
         let kept = j["outputs"].as_array().unwrap();
         assert!(kept.len() > 21, "{}", kept.len());
@@ -235,8 +311,11 @@ mod tests {
         // At the edge: the last playing index the list still reaches keeps
         // exactly up to it; one more and the list is dropped.
         let len = |current: usize| {
-            let j: serde_json::Value =
-                serde_json::from_str(&app_status(&AppView { current, ..v })).unwrap();
+            let j: serde_json::Value = serde_json::from_str(&app_status(&AppView {
+                current: Some(current),
+                ..v
+            }))
+            .unwrap();
             j["outputs"].as_array().unwrap().len()
         };
         let edge = (0..200).find(|&c| len(c) == 0).unwrap();

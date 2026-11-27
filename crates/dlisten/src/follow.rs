@@ -54,17 +54,41 @@ pub fn start(
     want: &Want,
     saved: Option<&str>,
 ) -> Result<(Option<usize>, Option<String>), String> {
-    let wanted = match want {
-        Want::Named(t) => Some(t.as_str()),
-        Want::Free => None,
-    };
-    outputs::choose(list, wanted, saved, outputs::Fallback::Default).map(|(i, n)| (Some(i), n))
+    match want {
+        Want::Named(text) => Ok((matching(list, text), None)),
+        Want::Free => outputs::choose(list, None, saved, outputs::Fallback::Default)
+            .map(|(i, note)| (Some(i), note)),
+    }
+}
+
+/// The output a [`Want::Named`] run may play on in `list`: the first whose
+/// name is `text` (any case), else the first whose name holds it.
+pub fn matching(list: &[Output], text: &str) -> Option<usize> {
+    let text = text.to_lowercase();
+    list.iter()
+        .position(|o| o.name.to_lowercase() == text)
+        .or_else(|| {
+            list.iter()
+                .position(|o| o.name.to_lowercase().contains(&text))
+        })
 }
 
 /// What to do with the new list `now`, `playing` the output that plays
 /// (the last one played, for a [`Want::Free`] run).
 pub fn next(want: &Want, playing: Option<&Output>, now: &[Output]) -> Step {
-    let _ = want;
+    if let Want::Named(text) = want {
+        // The output playing, while it is listed by its exact name (a run
+        // re-named by dtray's menu names it whole, so it still matches).
+        if let Some(p) = playing
+            && let Some(index) = now.iter().position(|o| o.name == p.name)
+        {
+            return Step::Keep {
+                index,
+                reopen: now[index].config != p.config,
+            };
+        }
+        return matching(now, text).map_or(Step::Wait, Step::Open);
+    }
     match playing {
         Some(p) => match outputs::refind(p, now) {
             Refind::Same { index, changed } => Step::Keep {
@@ -104,15 +128,40 @@ impl MissingLog {
     }
 
     /// The line due `missing_s` seconds after the output went missing (the
-    /// session asks at each read of the list, every 5 s).
+    /// session asks at each read of the list, every 5 s): the WARN at the
+    /// first ask, then one INFO line at each new whole minute (a late ask
+    /// gives one line, never one per minute missed).
     pub fn due(&mut self, missing_s: u64) -> Option<Line> {
-        let _ = (missing_s, &self.text, self.lines);
-        None
+        let minutes = missing_s / 60;
+        if self.lines == 0 {
+            self.lines = minutes + 1;
+            return Some(Line::Warn(format!(
+                "dlisten: no output holding {:?} is there (--output): playing nothing until it \
+                 comes, never on another output",
+                self.text
+            )));
+        }
+        if minutes < self.lines {
+            return None;
+        }
+        self.lines = minutes + 1;
+        Some(Line::Info(format!(
+            "dlisten: still waiting for an output holding {:?} (missing {minutes} min): playing \
+             nothing",
+            self.text
+        )))
     }
 
-    /// The line when the output is there again after `missing_s` seconds.
+    /// The line when the output `name` is there again after `missing_s`
+    /// seconds.
     pub fn found(&self, name: &str, missing_s: u64) -> String {
-        format!("dlisten: {name} {missing_s}")
+        let (m, s) = (missing_s / 60, missing_s % 60);
+        let after = if m == 0 {
+            format!("{s} s")
+        } else {
+            format!("{m} min {s} s")
+        };
+        format!("dlisten: the output {name:?} is there again after {after}: playing on it")
     }
 }
 

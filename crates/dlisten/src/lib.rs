@@ -33,8 +33,11 @@
 //! and its Output menu sends `app output <n>` ([`status::parse_command`])
 //! to the device's app command hook (`dlink::Link::set_app_command`). The
 //! choice is kept in a settings file next to the device's state file
-//! ([`settings`]) and restored at start ([`outputs::choose`]: `--output`
-//! wins; a saved output that is gone falls back to the default).
+//! ([`settings`]) and restored at start ([`follow::start`]: `--output`
+//! wins; a saved output that is gone falls back to the default). A run
+//! with `--output` plays on that output only ([`follow`], dstack #506):
+//! while none matches it plays nothing and waits, and opens it when it
+//! appears.
 //!
 //! Everything here is testable without audio hardware: the output is an
 //! external clock, the only thing the tests simulate. The binary

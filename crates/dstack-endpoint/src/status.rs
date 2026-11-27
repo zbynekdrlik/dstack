@@ -170,14 +170,27 @@ pub fn status_name(name: &str) -> String {
 /// names). Within [`APP_MAX`]: endpoints past it are left off the list
 /// (`outputs_cut`: true), the one in use kept while it fits.
 pub fn with_outputs(base: &serde_json::Value, outputs: &[String], current: usize) -> String {
+    with_outputs_of(base, outputs, Some(current))
+}
+
+/// [`with_outputs`] where none may be in use (dlisten waiting for its
+/// named output, dstack #506): with `None` the object has no `output`
+/// (dtray then checks no menu item) and the list is cut from its end.
+pub fn with_outputs_of(
+    base: &serde_json::Value,
+    outputs: &[String],
+    current: Option<usize>,
+) -> String {
     let names: Vec<String> = outputs.iter().map(|o| status_name(o)).collect();
     let mut shown = names.len();
     // The list is cut from its end, down to the one in use; past that (it
     // alone does not fit), to none.
-    let keep = (current + 1).min(shown);
+    let keep = current.map_or(0, |c| (c + 1).min(shown));
     loop {
         let mut obj = base.clone();
-        obj["output"] = current.into();
+        if let Some(c) = current {
+            obj["output"] = c.into();
+        }
         obj["outputs"] = names[..shown].into();
         if shown < names.len() {
             obj["outputs_cut"] = serde_json::Value::Bool(true);
@@ -412,6 +425,32 @@ mod tests {
         assert_eq!(j["output"], 1);
         assert_eq!(j["outputs"], serde_json::json!(["A", "B C"]));
         assert_eq!(j.get("outputs_cut"), None);
+    }
+
+    #[test]
+    fn with_none_in_use_the_list_has_no_output_index() {
+        let base = serde_json::json!({"line": "x"});
+        let outs = vec!["A".to_string(), "B".to_string()];
+        let j: serde_json::Value =
+            serde_json::from_str(&with_outputs_of(&base, &outs, None)).unwrap();
+        assert_eq!(j.get("output"), None);
+        assert_eq!(j["outputs"], serde_json::json!(["A", "B"]));
+        // A long list is still cut to fit, from its end.
+        let long: Vec<String> = (0..200)
+            .map(|i| format!("{i:03} {}", "x".repeat(40)))
+            .collect();
+        let text = with_outputs_of(&base, &long, None);
+        assert!(text.len() <= APP_MAX, "{}", text.len());
+        let j: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let kept = j["outputs"].as_array().unwrap().len();
+        assert!(kept > 50 && kept < 200, "{kept}");
+        assert_eq!(j["outputs"][0], long[0].as_str());
+        assert_eq!(j["outputs_cut"], true);
+        assert!(text.len() + long[kept].len() + 3 > APP_MAX);
+        assert_eq!(
+            with_outputs_of(&base, &outs, Some(1)),
+            with_outputs(&base, &outs, 1)
+        );
     }
 
     #[test]
