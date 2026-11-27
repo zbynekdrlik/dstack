@@ -162,8 +162,10 @@ impl Write for Rotating {
         Ok(n)
     }
 
+    /// Nothing to flush: a `File` has no buffer of its own (each write is
+    /// the OS's at once), so the log on disk is current after every write.
     fn flush(&mut self) -> io::Result<()> {
-        self.file.as_mut().map_or(Ok(()), File::flush)
+        Ok(())
     }
 }
 
