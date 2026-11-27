@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.231
+
+- **dtray (#507): a click on the tray icon brings the panel up in front, a full-screen window included.** On the FOH notebook (27.11.2026) v0.6.230's panel was opened by the click but not seen over the full-screen mixer window, until it was raised by hand; on a test PC the first open after dtray started showed the same: the window was there (the foreground window, topmost, next to the tray) but not on the screen for seconds. Now the panel takes the foreground first (in the click's handling, where Windows lets a tray app do it), is shown at the top of the topmost band (`HWND_TOPMOST`, `SWP_SHOWWINDOW`), takes the foreground again once visible, is painted at once and handed to the compositor (`RedrawWindow` with `RDW_UPDATENOW`, `DwmFlush`). It stays topmost while open and still closes when it loses the focus, on Esc and on a second click. Windows glue only (`panel_win.rs`, outside the mutation gate); checked on a Windows desktop with the released binary (#507's release line).
+- **No latency change:** no term, default, block or converter moves. Consumers: nothing to move (dtray is dstack's own tool; dasio installs it on its PCs).
+
 ## 0.6.230
 
 - **dtray (#507): the panel shows each device's line whole, its app part included.** v0.6.229's panel wrapped the line but took it from the menu's text, which cuts an app's own part (`app.line`) to 64 UTF-16 units, so a long dlisten line (the `waiting for an output holding "..."` one) ended cut in the panel too. Now the panel's row is the line with the app part whole, wrapped within the panel's width: a word longer than the line breaks inside it (the texts wrap as a multiline edit control, `SS_EDITCONTROL`, and are measured the same way), and on a work area narrower than the panel the text and the `Output:` picker take the narrower window's width, so no line runs past the window or the work area (the window itself never leaves the work area). The width rule is tested; the drawing on a Windows desktop is checked on the released binary (#507's release line). The right-click menu, the tooltip, `dtray --print` and the dasio settings window keep the 64-unit cut as before.

@@ -13,7 +13,9 @@
 //! every call that reads or sets its geometry runs, under that thread
 //! context ([`Pmv2`]), while the rest of dtray (the icon, the menu, the
 //! dasio settings window with its fixed layout) stays as it was. It is a
-//! flyout: it hides when it loses the focus, on Esc, and on a second click.
+//! flyout: it opens in front of every window and stays topmost while
+//! open ([`bring_up`]), and hides when it loses the focus, on Esc, and on
+//! a second click.
 //! On the thread of the tray's message loop; outside the mutation gate,
 //! as `win.rs`.
 
@@ -25,11 +27,13 @@ use dtray::model::{Colour, View};
 use dtray::panel::{self, Placement, Rect, Row, place, rows, scaled, scroll_to, text_width};
 use dtray::{output, probe};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows_sys::Win32::Graphics::Dwm::DwmFlush;
 use windows_sys::Win32::Graphics::Gdi::{
     COLOR_WINDOW, COLOR_WINDOWTEXT, CreateFontIndirectW, DT_CALCRECT, DT_EDITCONTROL,
     DT_EXPANDTABS, DT_NOPREFIX, DT_WORDBREAK, DeleteObject, DrawTextW, GetDC, GetMonitorInfoW,
     GetSysColor, GetSysColorBrush, HDC, HFONT, HGDIOBJ, MONITOR_DEFAULTTONEAREST, MONITORINFO,
-    MonitorFromRect, ReleaseDC, SelectObject, SetBkColor, SetTextColor,
+    MonitorFromRect, RDW_ALLCHILDREN, RDW_ERASE, RDW_FRAME, RDW_INVALIDATE, RDW_UPDATENOW,
+    RedrawWindow, ReleaseDC, SelectObject, SetBkColor, SetTextColor,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Controls::SetScrollInfo;
@@ -38,16 +42,17 @@ use windows_sys::Win32::UI::HiDpi::{
     GetSystemMetricsForDpi, SetThreadDpiAwarenessContext, SystemParametersInfoForDpi,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CB_ADDSTRING, CB_GETCURSEL, CB_GETDROPPEDSTATE, CB_SETCURSEL, CBN_SELENDOK, CBS_DROPDOWNLIST,
-    CBS_HASSTRINGS, CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetCursorPos,
-    GetDlgCtrlID, GetScrollInfo, GetWindowRect, HWND_TOPMOST, IDC_ARROW, IsChild, IsDialogMessageW,
-    IsWindowVisible, LoadCursorW, MSG, MoveWindow, NONCLIENTMETRICSW, RegisterClassW, SB_BOTTOM,
-    SB_LINEDOWN, SB_LINEUP, SB_PAGEDOWN, SB_PAGEUP, SB_THUMBTRACK, SB_TOP, SB_VERT, SCROLLINFO,
-    SIF_ALL, SIF_PAGE, SIF_POS, SIF_RANGE, SM_CXVSCROLL, SPI_GETNONCLIENTMETRICS, SW_HIDE, SW_SHOW,
-    SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SendMessageW, SetForegroundWindow, SetWindowPos,
-    SetWindowTextW, ShowWindow, WA_INACTIVE, WM_ACTIVATE, WM_COMMAND, WM_CTLCOLORSTATIC,
-    WM_DPICHANGED, WM_MOUSEWHEEL, WM_SETFONT, WM_VSCROLL, WNDCLASSW, WS_BORDER, WS_CHILD,
-    WS_CLIPCHILDREN, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
+    BringWindowToTop, CB_ADDSTRING, CB_GETCURSEL, CB_GETDROPPEDSTATE, CB_SETCURSEL, CBN_SELENDOK,
+    CBS_DROPDOWNLIST, CBS_HASSTRINGS, CreateWindowExW, DefWindowProcW, DestroyWindow,
+    GetClientRect, GetCursorPos, GetDlgCtrlID, GetScrollInfo, GetWindowRect, HWND_TOPMOST,
+    IDC_ARROW, IsChild, IsDialogMessageW, IsWindowVisible, LoadCursorW, MSG, MoveWindow,
+    NONCLIENTMETRICSW, RegisterClassW, SB_BOTTOM, SB_LINEDOWN, SB_LINEUP, SB_PAGEDOWN, SB_PAGEUP,
+    SB_THUMBTRACK, SB_TOP, SB_VERT, SCROLLINFO, SIF_ALL, SIF_PAGE, SIF_POS, SIF_RANGE,
+    SM_CXVSCROLL, SPI_GETNONCLIENTMETRICS, SW_HIDE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    SWP_NOZORDER, SWP_SHOWWINDOW, SendMessageW, SetForegroundWindow, SetWindowPos, SetWindowTextW,
+    ShowWindow, WA_INACTIVE, WM_ACTIVATE, WM_COMMAND, WM_CTLCOLORSTATIC, WM_DPICHANGED,
+    WM_MOUSEWHEEL, WM_SETFONT, WM_VSCROLL, WNDCLASSW, WS_BORDER, WS_CHILD, WS_CLIPCHILDREN,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
 };
 
 /// The window's class.
@@ -194,13 +199,49 @@ pub fn toggle(
         update(st, rows(readings, view));
     });
     if let Some(h) = hwnd() {
-        // SAFETY: our own window.
-        unsafe {
-            ShowWindow(h, SW_SHOW);
-            SetForegroundWindow(h);
-        }
+        bring_up(h);
     }
     Ok(())
+}
+
+/// Shows the panel in FRONT of every window, a full-screen one included
+/// (dstack #507: on mbc a click left v0.6.230's panel unseen over the
+/// full-screen fohmixer window, though it was in the window list).
+///
+/// The order is the tray pattern: the foreground is taken first, while
+/// the shell's grant for the click on our icon holds (a tray app may set
+/// the foreground only in its click handling), then the window is shown
+/// at the top of the topmost band (`HWND_TOPMOST` with `SWP_SHOWWINDOW`;
+/// a plain `ShowWindow` keeps the z-order the hidden window had), made
+/// the foreground again now that it is visible, painted at once
+/// (`RDW_UPDATENOW`: the statics too) and handed to the compositor
+/// (`DwmFlush`), so the first frame after the click holds it. It stays
+/// topmost while open and hides when it loses the focus (`WM_ACTIVATE`).
+fn bring_up(h: HWND) {
+    // SAFETY: our own window; plain calls.
+    unsafe {
+        SetForegroundWindow(h);
+        SetWindowPos(
+            h,
+            HWND_TOPMOST,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW,
+        );
+        if SetForegroundWindow(h) == 0 {
+            tracing::warn!("dtray panel: the foreground was refused; shown topmost only");
+        }
+        BringWindowToTop(h);
+        RedrawWindow(
+            h,
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW,
+        );
+        DwmFlush();
+    }
 }
 
 /// The tray's tick: the rows again while the panel shows.
