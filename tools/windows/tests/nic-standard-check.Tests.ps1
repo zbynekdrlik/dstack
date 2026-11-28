@@ -257,7 +257,8 @@ function Set-FakePc {
         # The negotiated link (LinkSpeed, FullDuplex), as Get-NetAdapter gives
         # it: 2.5 Gbps full duplex unless a test sets Speed or Duplex.
         $fake | Add-Member -NotePropertyName LinkSpeed -NotePropertyValue $(if ($a.ContainsKey('Speed')) { $a.Speed } else { '2.5 Gbps' })
-        $fake | Add-Member -NotePropertyName FullDuplex -NotePropertyValue $(if ($a.ContainsKey('Duplex')) { $a.Duplex } else { $true })
+        $duplex = if ($a.ContainsKey('Duplex')) { $a.Duplex } else { $true }
+        $fake | Add-Member -NotePropertyName FullDuplex -NotePropertyValue $duplex
         if ($a.ContainsKey('MediaType')) { $fake | Add-Member -NotePropertyName PhysicalMediaType -NotePropertyValue $a.MediaType }
         $script:FakeAdapters += $fake
         $script:FakeIds['DEV\' + $a.Name] = $a.Hw
@@ -428,6 +429,23 @@ Check 'the PCIe entry: an RTL8168 at 1 Gbps passes, at 100 Mbps fails' {
     $slow = & $at '100 Mbps'
     ($gig.Lines -contains 'PASS  Ethernet  link:speed  expected=2.5 Gbps|1 Gbps  actual=1 Gbps') -and
     @($slow.Lines | Where-Object { $_ -like 'FAIL  Ethernet  link:speed  expected=2.5 Gbps|1 Gbps  actual=100 Mbps  (*' }).Count -eq 1
+}
+Check 'a null FullDuplex reads absent and fails, never Half' {
+    Set-FakePc @(
+        @{ Name = 'Ethernet 4'; Desc = 'Realtek Gaming USB 2.5GbE Family Controller'; Status = 'Up'; Link = 'Connected'; Speed = '2.5 Gbps'; Duplex = $null; File = 'rtucx22x64.sys'; Version = '11.19.602.2025'; Hw = $usb; Props = $resolumePp }
+    )
+    $r = Run-Fake
+    $r.Exit -eq 1 -and @($r.Lines | Where-Object { $_ -like 'FAIL  Ethernet 4  link:duplex  expected=Full  actual=(absent)  (*' }).Count -eq 1
+}
+Check 'an unreadable link is one FAIL line, the run goes on' {
+    Set-FakePc @(
+        @{ Name = 'Ethernet 4'; Desc = 'Realtek Gaming USB 2.5GbE Family Controller'; Status = 'Up'; Link = 'Connected'; File = 'rtucx22x64.sys'; Version = '11.19.602.2025'; Hw = $usb; Props = $resolumePp }
+    )
+    function Get-NicLinkFacts { param($Adapter) throw 'Format-LinkSpeed failed' }
+    $r = Run-Fake
+    $r.Exit -eq 1 -and ($r.Lines -contains 'FAIL  Ethernet 4  link  expected=(readable)  actual=(unreadable)  (Format-LinkSpeed failed)') -and
+    ($r.Lines -contains 'PASS  Ethernet 4  PendingTransmits  expected=8  actual=8') -and
+    @($r.Lines | Where-Object { $_ -like '1 Realtek NIC(s) checked, *' }).Count -eq 1
 }
 Check 'no link: link:speed and link:duplex are INFO no link, never FAIL' {
     Set-FakePc @(

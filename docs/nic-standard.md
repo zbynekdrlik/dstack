@@ -146,7 +146,7 @@ Every reachable production PC, read through the fleet MCP (`Get-NetAdapter`, `Ge
 | the PP presenter PC | Linux | RTL8168H PCIe | `r8169`, the same firmware | LAN untagged + Dante VLAN | rings 256/256; coalescing 0; pause off; **EEE enabled** (inactive); TSO/GSO on. A second RTL8168 is down |
 | the editing PCs | Linux | none in use | | Dante on Aquantia (`atlantic`) and Intel (`ixgbe`) NICs | their onboard RTL8168H and RTL8125B are down, judged with `--all` (the RTL8125B by entry `rtl8125-linux` since version 4); the SNV one also has a Realtek WiFi RTL8852BE, out of the scan |
 
-Every USB NIC in the fleet is an RTL8156B: the 1156.22 driver's INF matches REV_31F4 to its `RTL8156Bx64` section, and Linux's in-tree driver loads `rtl8156b-2` firmware on bcdDevice 31f4. No RTL8156 (non-B) is in use. One RTL8153 is (alex-nb, a notebook, read 25.11.2026: entry `rtl8153-windows`, version 8).
+Every USB NIC in the fleet but one is an RTL8156B: the 1156.22 driver's INF matches REV_31F4 to its `RTL8156Bx64` section, and Linux's in-tree driver loads `rtl8156b-2` firmware on bcdDevice 31f4. No RTL8156 (non-B) is in use. The exception is alex-nb's RTL8153 (a notebook, read 25.11.2026: entry `rtl8153-windows`, version 8).
 
 Measured against version 1, from these reads: resolume-snv, resolume-pp, dsg's Dante NIC and FOH (low-latency profile, as dasio hosts; dsg's SoundGrid NIC was disconnected, conflict 12), stream-snv, the PP stream PC, companion-snv and the iemmixer box (low-latency profile) pass; **mbc fails 11 values**; **the PP presenter PC fails EEE**.
 

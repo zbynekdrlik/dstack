@@ -2,7 +2,7 @@
 
 ## 0.6.235
 
-- **NIC standard v6-v8 (#465), `docs/nic-standard.json` and its checkers (`tools/windows/nic-standard-check.ps1`, `tools/linux/nic-standard-check.py`):**
+- **NIC standard v6-v8 (#465), `docs/nic-standard.json` and the Windows checker (`tools/windows/nic-standard-check.ps1`; the Linux checker is unchanged and reads the new rows of the Windows entries the same way):**
   - **v6: `PendingTransmits` 8 is settled against 32** (no longer `open`). The A-B-A on resolume-pp of 28.11.2026 with two NDI receivers read Dante TCPIP -> miniport p99 / max 0.120 / 1.35 ms at 8, 0.114 / 0.79 ms at 32, 0.121 / 3.06 ms at 8 again: 32 is no better. No PC changes a value.
   - **v7: the Windows checker judges the negotiated link.** A NIC that came up at 100 Mbps half duplex with `*SpeedDuplex` on auto passed before (resolume-pp after a boot, 28.11.2026); now the Windows entries have `link:speed` / `link:duplex` rows, read from `Get-NetAdapter`'s `LinkSpeed` and `FullDuplex` (Full/Half), and such a link FAILs (exit 1). The RTL8156B expects `2.5 Gbps`, the RTL8125/RTL8168 entry `2.5 Gbps` or `1 Gbps`, duplex `Full`; an adapter with no link gets INFO `no link` on both rows. A project gate that runs the checker now fails a slow or half-duplex link.
   - **v8: the RTL8153 on Windows has an entry** (`rtl8153-windows`, alex-nb's values, `rtu53cx22x64.sys` >= 1153.22.113.2026, `*FlowControl` 0). Its text records the known limit (sparse inbound frames ~1 ms late with only PTP inbound: a silent RX flow is needed) and that a driver install resets the profile. dstack's start line no longer warns "no entry" for it; on driver 1153.13 it warns the version is below the minimum.

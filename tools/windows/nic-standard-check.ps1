@@ -504,16 +504,16 @@ $script:NicLinkStateKeys = @('link:speed', 'link:duplex')
 # up at 100 Mbps half duplex after a boot while *SpeedDuplex, a setting, read
 # auto): link:speed is Get-NetAdapter's LinkSpeed ("2.5 Gbps", "1 Gbps",
 # "100 Mbps"), link:duplex its FullDuplex as Full or Half, link:detected "no"
-# for an adapter without a link. A property the adapter lacks gives no fact
-# (the row then reads absent and fails).
+# for an adapter without a link. A property the adapter lacks, or holds as
+# null, gives no fact (the row then reads absent and fails).
 function Get-NicLinkFacts {
     param($Adapter)
     $facts = @{}
     if (Test-NicNoLink $Adapter) { $facts['link:detected'] = 'no' } else { $facts['link:detected'] = 'yes' }
-    if (Test-NicHasProp $Adapter 'LinkSpeed') { $facts['link:speed'] = [string]$Adapter.LinkSpeed }
-    if (Test-NicHasProp $Adapter 'FullDuplex') {
-        $facts['link:duplex'] = if ([string]$Adapter.FullDuplex -ieq 'True') { 'Full' } else { 'Half' }
-    }
+    $speed = Get-NicProp $Adapter 'LinkSpeed'
+    if ($null -ne $speed) { $facts['link:speed'] = [string]$speed }
+    $full = Get-NicProp $Adapter 'FullDuplex'
+    if ($null -ne $full) { $facts['link:duplex'] = if ([string]$full -ieq 'True') { 'Full' } else { 'Half' } }
     return $facts
 }
 
@@ -563,8 +563,14 @@ function Get-NicRows {
         New-NicRow 'FAIL' 'values' '(readable)' '(unreadable)' $_.Exception.Message
         return
     }
-    $link = Get-NicLinkFacts $Adapter
-    foreach ($k in $link.Keys) { $facts[$k] = $link[$k] }
+    # LinkSpeed is a script property of the NetAdapter module: an error in it
+    # is one FAIL line, and the link rows then read absent.
+    try {
+        $link = Get-NicLinkFacts $Adapter
+        foreach ($k in $link.Keys) { $facts[$k] = $link[$k] }
+    } catch {
+        New-NicRow 'FAIL' 'link' '(readable)' '(unreadable)' $_.Exception.Message
+    }
     Test-NicDriver $Entry.driver ([string]$Adapter.DriverFileName) ([string]$Adapter.DriverVersion)
     foreach ($v in @($Entry.values)) { Test-NicValue $v $facts $LatencyProfile }
     # *SpeedDuplex is the setting, link:speed / link:duplex the negotiated
