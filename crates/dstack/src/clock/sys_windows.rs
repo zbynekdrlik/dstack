@@ -13,11 +13,11 @@ use std::sync::{LazyLock, Mutex, OnceLock, PoisonError};
 use super::steer::{Model, Steer, Update};
 use crate::media::tx::Cell;
 
-use windows_sys::Win32::Foundation::{CloseHandle, FILETIME, HANDLE};
+use windows_sys::Win32::Foundation::{CloseHandle, FILETIME, HANDLE, WAIT_TIMEOUT};
 use windows_sys::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
 use windows_sys::Win32::System::SystemInformation::GetSystemTimePreciseAsFileTime;
 use windows_sys::Win32::System::Threading::{
-    CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, CreateWaitableTimerExW, INFINITE, SetWaitableTimer,
+    CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, CreateWaitableTimerExW, SetWaitableTimer,
     TIMER_ALL_ACCESS, WaitForSingleObject,
 };
 
@@ -297,10 +297,28 @@ fn block_for(ns: i64) {
     }
 }
 
-/// Waits on this thread's timer `h`, armed for `ns` from now.
-fn wait_armed(h: HANDLE, _ns: i64) {
-    // SAFETY: a valid handle.
-    unsafe { WaitForSingleObject(h, INFINITE) };
+/// Waits on this thread's timer `h`, armed for `ns` from now, and never
+/// much longer than `ns` (dstack #475). Windows expires every
+/// high-resolution timer on one CPU (resolume-snv, 27.11.2026: CPU 4, for
+/// every process and driver); a NIC driver thread that held it 7-8 ms at
+/// DISPATCH_LEVEL woke the pump and TX 7-9 ms late together. So the wait
+/// has a second wake: its timeout ([`super::wait::fallback_ms`]), the
+/// thread's own wait timer, which expires on the CPU the thread waits on,
+/// at the process's tick, just past the high-resolution due time (normally
+/// the timer wins and nothing changes). A timeout that ends before `ns`
+/// (a wait may end up to a tick early) waits again for what is left,
+/// still on the armed timer: never early, never a spin. A failed wait
+/// (WAIT_FAILED) ends it, as the INFINITE wait did.
+fn wait_armed(h: HANDLE, ns: i64) {
+    let end = app_monotonic_ns().saturating_add(ns);
+    let mut left = ns;
+    while left > 0 {
+        // SAFETY: a valid handle.
+        if unsafe { WaitForSingleObject(h, super::wait::fallback_ms(left)) } != WAIT_TIMEOUT {
+            return;
+        }
+        left = end - app_monotonic_ns();
+    }
 }
 
 /// The wait's OS on the clock `now` (raw QPC or the steered clock).

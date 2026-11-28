@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.233
+
+- **Windows media waits (#475): a held timer CPU no longer wakes the pump and TX 7-9 ms late.** On SongPlayer's PC (resolume-snv, 27.11.2026) every high-resolution waitable timer of every process and driver expired on one CPU, and the USB RTL8156's NetAdapterCx datapath thread (`ExecutionContext.sys`) held that CPU for 7-8 ms: the engine pump and the TX thread woke 7-9 ms late together and the pump lost 5-7 blocks (out-4's `pump_missed`). A timer wait (`clock/sys_windows.rs`, every Windows media thread's block) now also has a timeout just past its due time (its length rounded up to whole ms, plus 1 ms): the thread's own wait timer, which expires on the CPU the thread waits on. The high-resolution timer still ends a normal wait (nothing changes there); a held one costs about 2 ms instead of the hold, on a process with the 1 ms timer resolution (SongPlayer asks for it itself; at the 15.6 ms default the timeout adds nothing). A timeout that ends early waits again for the rest, so a wait never ends before its time. No spin, no affinity, no priority added; nothing for an app to set.
+- **No latency change:** no term, default, block or converter moves. Consumers: only move the version (SongPlayer's resolume-snv output is the one that needs it).
+
 ## 0.6.232
 
 - **dtray (#512, dasio#248): the dasio settings window names every value with its unit and says what it adds to the latency.** On 26.11.2026 the owner could not see in the window that a change had raised the app reserve (128 -> 256 samples) and not Live's buffer (64): the reserve was not in the window at all. Now each instance's tab shows:
