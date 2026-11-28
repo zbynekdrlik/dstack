@@ -1005,14 +1005,25 @@ fn a_channel_no_flow_sends_meters_its_source() {
     assert!(rig.shared.set_source(0, Source::Echo { rx: 0, offset: 0 }));
     assert!(rig.shared.set_source(1, Source::Engine));
     let n0 = send_clock(T, RATE, TX_MARGIN_NS);
-    rig.shared.engine_ring(1).unwrap().put_at(n0, &[0, -7_000, 300]);
+    rig.shared
+        .engine_ring(1)
+        .unwrap()
+        .put_at(n0, &[0, -7_000, 300]);
     rig.shared.rings()[0].write_at(n0, &[5_000, -9_000]);
     // No flow at all, and the TX thread runs.
     assert!(run(&mut rig, 0, 5_000).is_empty());
     assert_eq!(rig.shared.take_peak(1), 7_000, "the engine ring's level");
     assert_eq!(rig.shared.take_peak(1), 0, "taken");
-    assert_eq!(rig.shared.take_peak(0), 9_000, "the echoed RX channel's level");
-    assert_eq!(rig.shared.rings()[0].take_peak(), 9_000, "the RX meter keeps it");
+    assert_eq!(
+        rig.shared.take_peak(0),
+        9_000,
+        "the echoed RX channel's level"
+    );
+    assert_eq!(
+        rig.shared.rings()[0].take_peak(),
+        9_000,
+        "the RX meter keeps it"
+    );
     // A channel that no longer sends its engine ring meters nothing of it,
     // and keeps no old level for a later change back.
     rig.shared.engine_ring(1).unwrap().put_at(n0 + 3, &[4_000]);

@@ -230,15 +230,22 @@ impl Ring {
     /// [`crate::stream::PumpView::writes_after_send`]). The swap and the
     /// reader's compare-and-swap decide it exactly: a read that marks the
     /// slot before the swap is counted, one after it reads the sample.
+    ///
+    /// The loudest sample put is kept until [`Ring::take_peak`], as a
+    /// [`Ring::write_at`]'s: a TX channel's meter reads its source's level
+    /// from it whether or not a flow sends the channel (dstack #515).
     pub fn put_at(&self, pos: u64, samples: &[i32]) -> usize {
         let mut after_read = 0;
+        let mut peak = 0;
         for (i, &sample) in samples.iter().enumerate() {
             let p = pos.wrapping_add(i as u64);
             let held = self.slot(p).swap(word(p, sample), Ordering::Relaxed);
             after_read += usize::from(held == read_empty(p));
+            peak = peak.max(sample.unsigned_abs());
         }
         if !samples.is_empty() {
             self.first.fetch_min(pos, Ordering::Relaxed);
+            self.peak.fetch_max(peak, Ordering::Relaxed);
         }
         self.written
             .fetch_add(samples.len() as u64, Ordering::Relaxed);
@@ -301,6 +308,13 @@ impl Ring {
     /// The largest magnitude stored since the last call (0 for none).
     pub fn take_peak(&self) -> u32 {
         self.peak.swap(0, Ordering::Relaxed)
+    }
+
+    /// The largest magnitude stored since the last [`Ring::take_peak`],
+    /// left for it: a second meter of the same ring (an echo TX channel's,
+    /// beside the RX channel's own, dstack #515).
+    pub fn peak(&self) -> u32 {
+        self.peak.load(Ordering::Relaxed)
     }
 
     pub fn counters(&self) -> Counters {
