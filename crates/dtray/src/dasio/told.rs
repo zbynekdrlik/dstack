@@ -99,8 +99,8 @@ pub fn spare(status: &str) -> Option<u64> {
 pub fn hint(field: Field) -> &'static str {
     match field {
         Field::Iface => "the network adapter Dante runs on; adds no latency",
-        Field::Block => "the buffer Ableton works in; adds to the input and the output",
-        Field::WorkMargin => "extra time Ableton gets per buffer; adds to the output",
+        Field::Block => "the buffer the DAW works in; adds to the input and the output",
+        Field::WorkMargin => "extra time the DAW gets per buffer; adds to the output",
         Field::RxLatency => "Dante's delay to us; adds to the input",
         Field::TxLatency => {
             "our delay to Dante; adds to the output (when not set: the receive latency)"
@@ -115,8 +115,11 @@ pub const SPARE_HINT: &str =
 
 /// The spare buffers' value as the window shows it, from the instance's
 /// status (`None`: not running): `1 (adds 0.67 ms)`, or why it is not
-/// known.
+/// known; a bridge instance has none (no DAW holds its driver).
 pub fn spare_text(f: &Fields, status: Option<&str>) -> String {
+    if f.bridge.is_some() {
+        return "not used by a bridge instance".to_string();
+    }
     match status.map(spare) {
         Some(Some(n)) => format!("{n} (adds {} ms)", ms(n * f.block, f.sample_rate)),
         Some(None) => "not known (the status does not say)".to_string(),
@@ -124,29 +127,39 @@ pub fn spare_text(f: &Fields, status: Option<&str>) -> String {
     }
 }
 
-/// The input line: `Input 2.33 ms = DAW buffer 0.67 ms + Dante receive
-/// 1.67 ms`.
+/// The input line, each term in ms and then in samples (the ms terms are
+/// rounded on their own, the samples add up exactly): `Input 2.33 ms =
+/// DAW buffer 0.67 ms + Dante receive 1.67 ms (64 + 160 = 224 samples)`.
 pub fn input_line(t: &Terms, rate: u32) -> String {
     format!(
-        "Input {} ms = DAW buffer {} ms + Dante receive {} ms",
+        "Input {} ms = DAW buffer {} ms + Dante receive {} ms ({} + {} = {} samples)",
         ms(t.input(), rate),
         ms(t.block, rate),
         ms(t.receive, rate),
+        t.block,
+        t.receive,
+        t.input(),
     )
 }
 
-/// The output line: `Output 7.00 ms = DAW buffer 0.67 ms + app reserve
-/// 2.67 ms + spare buffers 0 x 0.67 ms + Dante send 3.67 ms`.
+/// The output line, as [`input_line`]: `Output 7.00 ms = DAW buffer 0.67
+/// ms + app reserve 2.67 ms + spare buffers 0 x 0.67 ms + Dante send 3.67
+/// ms (64 + 256 + 0 + 352 = 672 samples)`.
 pub fn output_line(t: &Terms, rate: u32) -> String {
     format!(
         "Output {} ms = DAW buffer {} ms + app reserve {} ms + spare buffers {} x {} ms \
-         + Dante send {} ms",
+         + Dante send {} ms ({} + {} + {} + {} = {} samples)",
         ms(t.output(), rate),
         ms(t.block, rate),
         ms(t.reserve, rate),
         t.spare,
         ms(t.block, rate),
         ms(t.send, rate),
+        t.block,
+        t.reserve,
+        t.spare * t.block,
+        t.send,
+        t.output(),
     )
 }
 

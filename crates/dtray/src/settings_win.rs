@@ -58,7 +58,7 @@ mod ops;
 mod paint;
 
 use controls::*;
-use latency::{latency_texts, show_latency};
+use latency::{latency_texts, refill_reserve, show_latency};
 use ops::WinOps;
 use paint::*;
 
@@ -137,7 +137,7 @@ const HALF_W: i32 = (WIDTH - 40) / 2;
 /// The told latency's text on a DAW instance's tab, and on a bridge
 /// instance's (under the bridge group's rows).
 const TOLD_DAW: (i32, i32, i32, i32) = (28, LOWER_Y + 20, HALF_W - 24, LOWER_H - 28);
-const TOLD_BRIDGE: (i32, i32, i32, i32) = (28, LOWER_Y + 132, HALF_W - 24, 30);
+const TOLD_BRIDGE: (i32, i32, i32, i32) = (28, LOWER_Y + 130, HALF_W - 24, 34);
 
 /// What the worker sends back.
 enum Progress {
@@ -529,7 +529,11 @@ fn show_tab(st: &mut State) {
     let l = Lists {
         iface: choices::interfaces(&st.adapters, old.iface.as_deref(), running.as_deref()),
         block: choices::blocks(old.block, old.sample_rate),
-        reserve: choices::work_margins(old.work_margin, old.block, old.sample_rate),
+        reserve: choices::work_margins(
+            old.work_margin,
+            dasio::check::least_work_margin(&old),
+            old.sample_rate,
+        ),
         rxlat: choices::rx_latencies(old.latency_ns, tab.range),
         txlat: choices::tx_latencies(old.tx_latency_ns),
         inputs: choices::channels(old.rx.len()),
@@ -705,13 +709,8 @@ fn refresh(st: &State) {
     if tab.bridge_error.is_none() {
         problems.extend(dasio::bridge_problems(new));
     }
-    // What the config itself refuses (an app reserve under the buffer),
-    // said before Apply.
-    if problems.is_empty()
-        && restarts > 0
-        && let Err(e) = dasio::edit(&tab.text, new)
-    {
-        problems.push(e);
+    if problems.is_empty() {
+        problems.extend(dasio::check::file_problem(&tab.text, old, new));
     }
     show_latency(h, latency_texts(st));
     let ok = !changed.is_empty() && problems.is_empty() && st.busy.is_none();
@@ -919,6 +918,9 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                 {
                     with_state(|st| {
                         read_controls(st);
+                        if id == ID_BLOCK {
+                            refill_reserve(st);
+                        }
                         refresh(st);
                     });
                 }

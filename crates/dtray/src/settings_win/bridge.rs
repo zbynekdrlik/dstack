@@ -59,7 +59,7 @@ pub(super) fn build(h: HWND, font: HFONT) {
         ID_BRIDGE_GROUP,
         (16, TOP, HALF_W, LOWER_H),
     );
-    let (label_x, ctl_x, ctl_w, mark_x) = (28, 184, 290, 16 + HALF_W - 26);
+    let (label_x, ctl_x, ctl_w, mark_x) = (28, 192, 282, 16 + HALF_W - 26);
     let rows = [
         (pure::DRIVER, ID_DRIVER),
         (pure::TO_ASIO, ID_TOASIO),
@@ -68,7 +68,7 @@ pub(super) fn build(h: HWND, font: HFONT) {
     ];
     for (i, (text, id)) in rows.into_iter().enumerate() {
         let y = TOP + 18 + i as i32 * 26;
-        st(text, ID_BRIDGE_LABEL + i, (label_x, y + 3, 150, 20));
+        st(text, ID_BRIDGE_LABEL + i, (label_x, y + 3, 160, 20));
         if id == ID_DRIVER {
             control(
                 h,
@@ -96,7 +96,7 @@ pub(super) fn build(h: HWND, font: HFONT) {
     st(
         pure::DEFAULT_NOTE,
         ID_BRIDGE_LABEL + 5,
-        (ctl_x + 88, TOP + 18 + 3 * 26 + 1, ctl_w - 88, 34),
+        (ctl_x + 88, TOP + 18 + 3 * 26 + 1, ctl_w - 88, 32),
     );
     show(h, false);
 }

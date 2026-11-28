@@ -16,6 +16,7 @@ fn vector() -> Fields {
         latency_ns: 1_000_000,
         tx_latency_ns: Some(250_000),
         sample_rate: 96_000,
+        normal: false,
         rx: vec!["1".into(), "2".into()],
         tx: vec!["1".into(), "2".into()],
         cpus: Default::default(),
@@ -88,12 +89,18 @@ fn the_lines_name_every_term_in_ms() {
     let t = Terms::of(&vector(), 1);
     assert_eq!(
         input_line(&t, 96_000),
-        "Input 1.33 ms = DAW buffer 0.33 ms + Dante receive 1.00 ms"
+        "Input 1.33 ms = DAW buffer 0.33 ms + Dante receive 1.00 ms (32 + 96 = 128 samples)"
     );
     assert_eq!(
         output_line(&t, 96_000),
         "Output 1.58 ms = DAW buffer 0.33 ms + app reserve 0.67 ms \
-         + spare buffers 1 x 0.33 ms + Dante send 0.25 ms"
+         + spare buffers 1 x 0.33 ms + Dante send 0.25 ms (32 + 64 + 32 + 24 = 152 samples)"
+    );
+    let two = Terms::of(&vector(), 2);
+    assert!(
+        output_line(&two, 96_000).ends_with("(32 + 64 + 64 + 24 = 184 samples)"),
+        "{}",
+        output_line(&two, 96_000)
     );
 }
 
@@ -137,9 +144,9 @@ fn the_told_text_matches_a_running_instance_or_says_it_differs() {
     let same = told_text(&f, Some(&status(128, 120, 0)));
     assert_eq!(
         same,
-        "Input 1.33 ms = DAW buffer 0.33 ms + Dante receive 1.00 ms\r\n\
+        "Input 1.33 ms = DAW buffer 0.33 ms + Dante receive 1.00 ms (32 + 96 = 128 samples)\r\n\
          Output 1.25 ms = DAW buffer 0.33 ms + app reserve 0.67 ms \
-         + spare buffers 0 x 0.33 ms + Dante send 0.25 ms\r\n\
+         + spare buffers 0 x 0.33 ms + Dante send 0.25 ms (32 + 64 + 0 + 24 = 120 samples)\r\n\
          dasio tells Ableton the same now (in 1.33 / out 1.25 ms)."
     );
     // The spare buffer comes from the status and counts in the sum.
@@ -224,6 +231,20 @@ fn the_spare_buffers_read_from_the_status() {
         "not known (the status does not say)"
     );
     assert_eq!(spare_text(&f, None), "not known (dasio is not running)");
+    let mut b = f.clone();
+    b.bridge = Some(Bridge {
+        driver: "Test ASIO".into(),
+        to_asio: vec![1, 2],
+        from_asio: vec![1, 2],
+        app_buffer_ns: None,
+        to_asio_app_buffer_ns: None,
+        from_asio_app_buffer_ns: None,
+        converter_taps: None,
+    });
+    assert_eq!(
+        spare_text(&b, Some(&status(1, 2, 1))),
+        "not used by a bridge instance"
+    );
 }
 
 #[test]

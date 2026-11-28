@@ -34,3 +34,26 @@ pub(super) fn show_latency(h: HWND, texts: Option<(String, String)>) {
         }
     }
 }
+
+/// A new buffer pick: the app reserve list again from the least dstack
+/// takes for that buffer, the reserve kept while it is taken, else raised
+/// to it ([`dasio::check::reserve_for`]).
+pub(super) fn refill_reserve(st: &mut State) {
+    let h = st.hwnd;
+    let Some(Ok((_, new))) = st.tabs.get_mut(st.cur).map(|t| t.fields.as_mut()) else {
+        return;
+    };
+    new.work_margin = dasio::check::reserve_for(new);
+    let list = choices::work_margins(
+        new.work_margin,
+        dasio::check::least_work_margin(new),
+        new.sample_rate,
+    );
+    fill(
+        h,
+        ID_WMARGIN,
+        &list,
+        choices::index_of(&list, &new.work_margin),
+    );
+    st.lists.reserve = list;
+}

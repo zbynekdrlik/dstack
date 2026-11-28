@@ -71,11 +71,12 @@ pub const WORK_MARGINS: [u64; 14] = [
 const _: () = assert!(WORK_MARGINS[WORK_MARGINS.len() - 1] == MAX_WORK_MARGIN);
 const _: () = assert!(WORK_MARGINS[0] == BLOCKS[0]);
 
-/// The app reserves for a buffer of `block` frames (dstack refuses one
-/// under the block): [`WORK_MARGINS`] from `block` up, with their time at
-/// `rate`, and `current` when it is none of them.
-pub fn work_margins(current: u64, block: u64, rate: u32) -> Vec<Choice<u64>> {
-    let mut values: Vec<u64> = WORK_MARGINS.into_iter().filter(|&w| w >= block).collect();
+/// The app reserves dstack takes from `least` up (one buffer, 2 ms under
+/// the `normal` timing profile: [`super::check::least_work_margin`]):
+/// [`WORK_MARGINS`] from `least`, with their time at `rate`, and `current`
+/// when it is none of them.
+pub fn work_margins(current: u64, least: u64, rate: u32) -> Vec<Choice<u64>> {
+    let mut values: Vec<u64> = WORK_MARGINS.into_iter().filter(|&w| w >= least).collect();
     if !values.contains(&current) {
         values.push(current);
         values.sort_unstable();

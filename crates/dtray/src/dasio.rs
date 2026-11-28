@@ -38,7 +38,7 @@ use std::ops::Sub;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use dstack::device::DeviceConfig;
+use dstack::device::{DeviceConfig, TimingProfile};
 use serde_json::Value;
 use toml_edit::{Array, DocumentMut, Item, TableLike, Value as TomlValue};
 
@@ -175,6 +175,9 @@ pub struct Fields {
     pub tx_latency_ns: Option<u64>,
     /// Hz (read only: the network's).
     pub sample_rate: u32,
+    /// The device runs dstack's `normal` timing profile (read only), whose
+    /// app reserve is at least 2 ms.
+    pub normal: bool,
     /// The RX and TX channel names.
     pub rx: Vec<String>,
     pub tx: Vec<String>,
@@ -207,6 +210,7 @@ impl Fields {
             latency_ns: cfg.latency_ns,
             tx_latency_ns: cfg.tx_latency_ns,
             sample_rate: cfg.sample_rate,
+            normal: cfg.timing == TimingProfile::Normal,
             rx: cfg.rx,
             tx: cfg.tx,
             cpus: Cpus {
@@ -975,6 +979,7 @@ pub fn changed_cpus(old: &Cpus, new: &Cpus) -> Cpus {
 
 pub mod apply;
 pub mod bridge;
+pub mod check;
 pub mod choices;
 pub mod service;
 #[cfg(windows)]
