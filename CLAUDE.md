@@ -41,5 +41,6 @@ Start from `docs/HANDOVER.md`, then `docs/design/2026-10-30-shared-dstack.md`.
 - device config/state parse errors, what may reach a log → `.claude/rules/config-errors.md` (auto-loads on its `paths:`)
 - the TX side's module layout (media/tx) → `.claude/rules/tx.md` (auto-loads on its `paths:`)
 - dtray's panel (Windows left click: placement, DPI, the Output picker, mbc checks) → `.claude/rules/dtray-panel.md` (auto-loads on its `paths:`)
+- dtray's dasio settings window (size budget, ids, the told latency, checks before Apply) → `.claude/rules/dasio-settings.md` (auto-loads on its `paths:`)
 - the info port 8700, dstack-own requests (bridge and clock figures), the share relay → `.claude/rules/info-port.md` (auto-loads on its `paths:`)
 - UDP read loops with a wait (`dstack::recv`, no read timeout on Windows) → `.claude/rules/udp-reads.md` (auto-loads on its `paths:`)
