@@ -52,7 +52,7 @@ pub(crate) fn fallback_ms(left_ns: i64) -> u32 {
         .unwrap_or(0)
         .div_ceil(1_000_000);
     let ms = ms.saturating_add(u64::from(FALLBACK_SLACK_MS));
-    u32::try_from(ms).unwrap_or(u32::MAX - 1).min(u32::MAX - 1)
+    u32::try_from(ms.min(u64::from(u32::MAX - 1))).unwrap_or(u32::MAX - 1)
 }
 
 /// What a wait needs from the OS.

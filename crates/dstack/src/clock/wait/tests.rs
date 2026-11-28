@@ -160,6 +160,8 @@ fn a_timer_waits_fallback_lands_just_past_its_due_time() {
     assert_eq!(fallback_ms(20_000_000), 21);
     assert_eq!(fallback_ms(i64::MAX), u32::MAX - 1);
     assert_eq!(fallback_ms(4_294_967_295_000_000), u32::MAX - 1);
+    // Rounds to u32::MAX - 1, plus the slack u32::MAX (INFINITE): clamped.
+    assert_eq!(fallback_ms(4_294_967_294_000_000), u32::MAX - 1);
     assert_eq!(fallback_ms(4_294_967_293_000_000), u32::MAX - 1);
     assert_eq!(fallback_ms(4_294_967_292_000_000), u32::MAX - 2);
 }

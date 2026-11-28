@@ -308,7 +308,11 @@ fn block_for(ns: i64) {
 /// the timer wins and nothing changes). A timeout that ends before `ns`
 /// (a wait may end up to a tick early) waits again for what is left,
 /// still on the armed timer: never early, never a spin. A failed wait
-/// (WAIT_FAILED) ends it, as the INFINITE wait did.
+/// (WAIT_FAILED) ends it, as the INFINITE wait did. A wait ended by the
+/// fallback leaves the timer armed, to signal later unwaited: the next
+/// [`block_for`]'s `SetWaitableTimer` clears that signal (NT sets a timer
+/// not-signalled when it is set; pinned by
+/// `a_timer_signal_left_by_a_fallback_never_ends_the_next_wait_early`).
 fn wait_armed(h: HANDLE, ns: i64) {
     let end = app_monotonic_ns().saturating_add(ns);
     let mut left = ns;
@@ -526,6 +530,32 @@ mod tests {
                 took < ns + 30_000_000,
                 "a {ns} ns wait took {took} ns: it waited for the held timer; {}",
                 super::super::timer_state::describe(took - ns, true, &timer_state())
+            );
+        }
+    }
+
+    /// dstack #475: after a wait the fallback ended, the timer is still
+    /// armed and signals unwaited; the next block must still take its whole
+    /// length (`SetWaitableTimer` clears the old signal).
+    #[test]
+    fn a_timer_signal_left_by_a_fallback_never_ends_the_next_wait_early() {
+        let h = timer();
+        assert!(!h.is_null(), "no high-resolution waitable timer");
+        for _ in 0..5 {
+            // Armed 2 ms out and never waited: signalled after the sleep.
+            let due = -20_000i64;
+            // SAFETY: this thread's timer, a valid due time, no callback.
+            assert_ne!(
+                unsafe { SetWaitableTimer(h, &due, 0, None, std::ptr::null(), 0) },
+                0
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            let start = app_monotonic_ns();
+            block_for(5_000_000);
+            let took = app_monotonic_ns() - start;
+            assert!(
+                took >= 5_000_000,
+                "a 5 ms block after a stale signal ended after {took} ns"
             );
         }
     }
