@@ -38,9 +38,11 @@ function ValueSpec { param([string]$Id, [string]$Key) @((Entry $Id).values) | Wh
 
 # ------------------------------------------------------------ the file
 Check 'the repo file reads as the schema, version 5 or later' { $std.schema -eq 'dstack-nic-standard/2' -and $std.version -ge 5 }
-Check 'PendingTransmits stays 8, open, with its plan' {
+# Version 6: the 28.11.2026 A/B on resolume-pp decided 8 against 32.
+Check 'PendingTransmits is 8, settled against 32, with the A/B as its evidence' {
     $v = ValueSpec 'rtl8156b-windows' 'PendingTransmits'
-    $v.expected -eq '8' -and $v.status -eq 'open' -and $v.plan -like '*#425*'
+    $v.expected -eq '8' -and (Get-NicProp $v 'status' 'settled') -eq 'settled' -and -not (Test-NicHasProp $v 'plan') -and
+    $v.evidence -like '*issuecomment-7239847314*' -and $std.version -ge 6
 }
 $standardText = Get-Content -LiteralPath $standardPath -Raw -Encoding UTF8
 # The repo file with one change: $true when Test-NicStandard refuses it.
@@ -64,7 +66,7 @@ Check 'a malformed file is refused, as the Python checker refuses it' {
     (Refused { param($s) (& $v $s)[1] | Add-Member -NotePropertyName profile -NotePropertyValue 'lowlatency' }) -and
     (Refused { param($s) (& $v $s)[1].expected = 64 }) -and
     (Refused { param($s) (& $v $s)[1].key = (& $v $s)[0].key.ToLowerInvariant() }) -and
-    (Refused { param($s) (& $v $s)[0].PSObject.Properties.Remove('plan') }) -and
+    (Refused { param($s) @(@($s.adapters) | ForEach-Object { @($_.values) } | Where-Object { (Get-NicProp $_ 'status' '') -ceq 'open' })[0].PSObject.Properties.Remove('plan') }) -and
     (Refused { param($s) (@(& $v $s) | Where-Object { $_.PSObject.Properties['compare'] })[0].expected = '0x08' }) -and
     (Refused { param($s) $s.adapters[1].id = $s.adapters[0].id }) -and
     (Refused { param($s) $s.adapters[0].driver.PSObject.Properties.Remove('evidence') }) -and
@@ -130,7 +132,15 @@ Check 'the PCIe RTL8125 and RTL8168 share one entry' {
     (Find-NicEntry $std 'PCI\VEN_10EC&DEV_8125&SUBSYS_E0001458&REV_05').id -eq 'rtl8125-rtl8168-windows'
 }
 Check 'the Realtek Virtual Adapter has its entry' { (Find-NicEntry $std 'RTK_VLANMP').id -eq 'realtek-vlan-windows' }
-Check 'an RTL8153 has no entry' { $null -eq (Find-NicEntry $std 'USB\VID_0BDA&PID_8153&REV_3000') }
+Check 'an RTL8153 has its entry (version 8); an RTL8152 has none' {
+    (Find-NicEntry $std 'USB\VID_0BDA&PID_8153&REV_3100').id -eq 'rtl8153-windows' -and $null -eq (Find-NicEntry $std 'USB\VID_0BDA&PID_8152&REV_2000')
+}
+Check 'the RTL8153 driver: 1153.13 fails its minimum, 1153.22 passes' {
+    $d = (Entry 'rtl8153-windows').driver
+    $old = @(Test-NicDriver $d 'rtu53cx22x64.sys' '1153.13.420.2023')
+    $new = @(Test-NicDriver $d 'rtu53cx22x64.sys' '1153.22.113.2026')
+    (($old | ForEach-Object { $_.Verdict }) -join ',') -eq 'PASS,FAIL' -and (($new | ForEach-Object { $_.Verdict }) -join ',') -eq 'PASS,PASS'
+}
 Check 'no hardware id, no entry' { $null -eq (Find-NicEntry $std '') }
 
 # ------------------------------------------------------------ judging
@@ -244,6 +254,11 @@ function Set-FakePc {
         # The link state (MediaConnectionState) and the medium's name
         # (PhysicalMediaType), given only where a test sets Link or MediaType.
         if ($a.ContainsKey('Link')) { $fake | Add-Member -NotePropertyName MediaConnectionState -NotePropertyValue $a.Link }
+        # The negotiated link (LinkSpeed, FullDuplex), as Get-NetAdapter gives
+        # it: 2.5 Gbps full duplex unless a test sets Speed or Duplex.
+        $fake | Add-Member -NotePropertyName LinkSpeed -NotePropertyValue $(if ($a.ContainsKey('Speed')) { $a.Speed } else { '2.5 Gbps' })
+        $duplex = if ($a.ContainsKey('Duplex')) { $a.Duplex } else { $true }
+        $fake | Add-Member -NotePropertyName FullDuplex -NotePropertyValue $duplex
         if ($a.ContainsKey('MediaType')) { $fake | Add-Member -NotePropertyName PhysicalMediaType -NotePropertyValue $a.MediaType }
         $script:FakeAdapters += $fake
         $script:FakeIds['DEV\' + $a.Name] = $a.Hw
@@ -296,14 +311,14 @@ Check 'mbc as read before 21.11: its driver passes, the power values fail with b
     $r.Exit -eq 1 -and
     ($r.Lines -contains 'PASS  Ethernet 3  driver  expected=rtucx22x64.sys|rtu56cx22x64.sys  actual=rtu56cx22x64.sys') -and
     ($r.Lines -contains 'PASS  Ethernet 3  driver:version  expected=>=1156.22.113.2026  actual=1156.22.113.2026') -and
-    @($r.Lines | Where-Object { $_ -like 'FAIL  Ethernet 3  PendingTransmits  expected=8  actual=3  (open: *' }).Count -eq 1 -and
+    @($r.Lines | Where-Object { $_ -like 'FAIL  Ethernet 3  PendingTransmits  expected=8  actual=3  (*issuecomment-7239847314*' }).Count -eq 1 -and
     @($r.Lines | Where-Object { $_ -like 'FAIL  Ethernet 3  `*EEE  expected=0  actual=1  (*' }).Count -eq 1 -and
     @($r.Lines | Where-Object { $_ -like 'FAIL  Ethernet 3  `*SelectiveSuspend  expected=0  actual=(absent)*' }).Count -eq 1 -and
     @($r.Lines | Where-Object { $_ -like 'INFO  Ethernet 3  `*RscIPv4  expected=(no standard yet)  actual=1*' }).Count -eq 1
 }
 Check 'an unknown Realtek fails as having no standard; a down one is skipped unless asked' {
     Set-FakePc @(
-        @{ Name = 'Ethernet 5'; Desc = 'Realtek USB GbE Family Controller'; Status = 'Up'; File = 'rtux64w10.sys'; Version = '10.1.1'; Hw = 'USB\VID_0BDA&PID_8153&REV_3000'; Props = @{} },
+        @{ Name = 'Ethernet 5'; Desc = 'Realtek USB FE Family Controller'; Status = 'Up'; File = 'rtux64w10.sys'; Version = '10.1.1'; Hw = 'USB\VID_0BDA&PID_8152&REV_2000'; Props = @{} },
         @{ Name = 'soundgrid'; Desc = 'Realtek PCIe GbE Family Controller #2'; Status = 'Disconnected'; File = 'rt640x64.sys'; Version = '10.79.50.1003'; Hw = 'PCI\VEN_10EC&DEV_8168&REV_15'; Props = @{} }
     )
     $r = Run-Fake
@@ -379,6 +394,67 @@ Check 'a MediaConnectionState of Disconnected alone reads as no link' {
     )
     $r = Run-Fake
     @($r.Lines | Where-Object { $_ -like 'INFO  Ethernet 2  link  *actual=no link*' }).Count -eq 1
+}
+# The negotiated link (#465, 28.11.2026): resolume-pp's RTL8156B came up at
+# 100 Mbps half duplex after a boot (18.9 % ping loss, dsg's rx_late up to
+# 31594 a minute) while *SpeedDuplex read 0 (auto). The setting passed; the
+# link must not.
+Check 'a 100 Mbps half-duplex link fails link:speed and link:duplex, exit 1' {
+    Set-FakePc @(
+        @{ Name = 'Ethernet 4'; Desc = 'Realtek Gaming USB 2.5GbE Family Controller'; Status = 'Up'; Link = 'Connected'; Speed = '100 Mbps'; Duplex = $false; File = 'rtucx22x64.sys'; Version = '11.19.602.2025'; Hw = $usb; Props = $resolumePp }
+    )
+    $r = Run-Fake
+    $r.Exit -eq 1 -and
+    @($r.Lines | Where-Object { $_ -like 'FAIL  Ethernet 4  link:speed  expected=2.5 Gbps  actual=100 Mbps  (*' }).Count -eq 1 -and
+    @($r.Lines | Where-Object { $_ -like 'FAIL  Ethernet 4  link:duplex  expected=Full  actual=Half  (*' }).Count -eq 1 -and
+    ($r.Lines -contains 'PASS  Ethernet 4  *SpeedDuplex  expected=0  actual=0') -and
+    ($r.Lines -contains '1 Realtek NIC(s) checked, 2 FAIL')
+}
+Check 'a 2.5 Gbps full-duplex link passes both rows' {
+    Set-FakePc @(
+        @{ Name = 'Ethernet 4'; Desc = 'Realtek Gaming USB 2.5GbE Family Controller'; Status = 'Up'; Link = 'Connected'; Speed = '2.5 Gbps'; Duplex = $true; File = 'rtucx22x64.sys'; Version = '11.19.602.2025'; Hw = $usb; Props = $resolumePp }
+    )
+    $r = Run-Fake
+    $r.Exit -eq 0 -and ($r.Lines -contains 'PASS  Ethernet 4  link:speed  expected=2.5 Gbps  actual=2.5 Gbps') -and
+    ($r.Lines -contains 'PASS  Ethernet 4  link:duplex  expected=Full  actual=Full')
+}
+Check 'the PCIe entry: an RTL8168 at 1 Gbps passes, at 100 Mbps fails' {
+    $at = { param([string]$Speed)
+        Set-FakePc @(
+            @{ Name = 'Ethernet'; Desc = 'Realtek PCIe GbE Family Controller'; Status = 'Up'; Link = 'Connected'; Speed = $Speed; Duplex = $true; File = 'rt640x64.sys'; Version = '10.79.50.1003'; Hw = 'PCI\VEN_10EC&DEV_8168&REV_15'; Props = @{} }
+        )
+        Run-Fake
+    }
+    $gig = & $at '1 Gbps'
+    $slow = & $at '100 Mbps'
+    ($gig.Lines -contains 'PASS  Ethernet  link:speed  expected=2.5 Gbps|1 Gbps  actual=1 Gbps') -and
+    @($slow.Lines | Where-Object { $_ -like 'FAIL  Ethernet  link:speed  expected=2.5 Gbps|1 Gbps  actual=100 Mbps  (*' }).Count -eq 1
+}
+Check 'a null FullDuplex reads absent and fails, never Half' {
+    Set-FakePc @(
+        @{ Name = 'Ethernet 4'; Desc = 'Realtek Gaming USB 2.5GbE Family Controller'; Status = 'Up'; Link = 'Connected'; Speed = '2.5 Gbps'; Duplex = $null; File = 'rtucx22x64.sys'; Version = '11.19.602.2025'; Hw = $usb; Props = $resolumePp }
+    )
+    $r = Run-Fake
+    $r.Exit -eq 1 -and @($r.Lines | Where-Object { $_ -like 'FAIL  Ethernet 4  link:duplex  expected=Full  actual=(absent)  (*' }).Count -eq 1
+}
+Check 'an unreadable link is one FAIL line, the run goes on' {
+    Set-FakePc @(
+        @{ Name = 'Ethernet 4'; Desc = 'Realtek Gaming USB 2.5GbE Family Controller'; Status = 'Up'; Link = 'Connected'; File = 'rtucx22x64.sys'; Version = '11.19.602.2025'; Hw = $usb; Props = $resolumePp }
+    )
+    function Get-NicLinkFacts { param($Adapter) throw 'Format-LinkSpeed failed' }
+    $r = Run-Fake
+    $r.Exit -eq 1 -and ($r.Lines -contains 'FAIL  Ethernet 4  link  expected=(readable)  actual=(unreadable)  (Format-LinkSpeed failed)') -and
+    ($r.Lines -contains 'PASS  Ethernet 4  PendingTransmits  expected=8  actual=8') -and
+    @($r.Lines | Where-Object { $_ -like '1 Realtek NIC(s) checked, *' }).Count -eq 1
+}
+Check 'no link: link:speed and link:duplex are INFO no link, never FAIL' {
+    Set-FakePc @(
+        @{ Name = 'Ethernet 2'; Desc = 'Realtek PCIe GbE Family Controller'; Status = 'Disconnected'; Link = 'Disconnected'; Speed = '0 bps'; Duplex = $false; File = 'rt640x64.sys'; Version = '10.79.50.1003'; Hw = 'PCI\VEN_10EC&DEV_8168&REV_15'; Props = @{} }
+    )
+    $r = Run-Fake -Name @('Ethernet 2')
+    @($r.Lines | Where-Object { $_ -like 'INFO  Ethernet 2  link:speed  expected=2.5 Gbps|1 Gbps  actual=no link  (no carrier*' }).Count -eq 1 -and
+    @($r.Lines | Where-Object { $_ -like 'INFO  Ethernet 2  link:duplex  expected=Full  actual=no link  (no carrier*' }).Count -eq 1 -and
+    @($r.Lines | Where-Object { $_ -like 'FAIL  Ethernet 2  link:*' }).Count -eq 0
 }
 Check 'a medium of 9 alone (no media type) is wireless' {
     $a = [pscustomobject]@{ Name = 'Wi-Fi'; NdisPhysicalMedium = 9 }

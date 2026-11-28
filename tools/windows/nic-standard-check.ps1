@@ -29,8 +29,13 @@
 # PASS and FAIL judge a value; INFO prints a value the standard does not
 # decide yet; SKIP is a value of another profile or an adapter that is down
 # or disabled. A Realtek adapter without an entry FAILs, and so does one whose
-# values cannot be read. An adapter with no link (Disconnected: a cable-less
-# NIC) gets one INFO "no link" line, its driver and values still judged. A
+# values cannot be read. The negotiated link is judged too: link:speed
+# (Get-NetAdapter's LinkSpeed) and link:duplex (FullDuplex: Full or Half)
+# against the entry, as Linux judges ethtool's Speed and Duplex, so a NIC that
+# came up at 100 Mbps half duplex fails even with *SpeedDuplex on auto. An
+# adapter with no link (Disconnected: a cable-less NIC) gets one INFO "no
+# link" line and INFO "no link" speed/duplex rows, its driver and other
+# values still judged. A
 # Wi-Fi adapter (NdisPhysicalMedium 9 or PhysicalMediaType 802.11, the Realtek
 # WiFi RTL8852BE too) is out of the wired scan. Exit 1 on any FAIL, 2 when
 # the standard cannot be read or is malformed, else 0. The output is plain
@@ -346,6 +351,9 @@ function Test-NicValue {
     $actual = if ($present) { [string]$Facts[$key] } else { '(absent)' }
     $expected = if ($status -ceq 'report') { '(no standard yet)' } else { (@($Spec.expected) | ForEach-Object { [string]$_ }) -join '|' }
     if ($only -cne 'normal' -and $only -cne $LatencyProfile) { return New-NicRow 'SKIP' $key $expected $actual "$only profile only" }
+    if (($script:NicLinkStateKeys -contains $key) -and $Facts.ContainsKey('link:detected') -and [string]$Facts['link:detected'] -ceq 'no') {
+        return New-NicRow 'INFO' $key $expected 'no link' $script:NicNoLinkNote
+    }
     if ($status -ceq 'report') { return New-NicRow 'INFO' $key $expected $actual $note }
     if ($status -ceq 'open') { $note = 'open: ' + [string]$Spec.plan }
     if (-not $present) {
@@ -488,6 +496,26 @@ function Test-NicNoLink {
 }
 
 $script:NicNoLinkNote = 'no carrier: no speed or duplex verdict without a link; the driver and the other values are judged'
+# The values an adapter has only with a link, as on Linux (LINK_STATE_KEYS):
+# without a carrier they get INFO "no link", never a verdict.
+$script:NicLinkStateKeys = @('link:speed', 'link:duplex')
+
+# The negotiated link as facts (#465, 28.11.2026: resolume-pp's RTL8156B came
+# up at 100 Mbps half duplex after a boot while *SpeedDuplex, a setting, read
+# auto): link:speed is Get-NetAdapter's LinkSpeed ("2.5 Gbps", "1 Gbps",
+# "100 Mbps"), link:duplex its FullDuplex as Full or Half, link:detected "no"
+# for an adapter without a link. A property the adapter lacks, or holds as
+# null, gives no fact (the row then reads absent and fails).
+function Get-NicLinkFacts {
+    param($Adapter)
+    $facts = @{}
+    if (Test-NicNoLink $Adapter) { $facts['link:detected'] = 'no' } else { $facts['link:detected'] = 'yes' }
+    $speed = Get-NicProp $Adapter 'LinkSpeed'
+    if ($null -ne $speed) { $facts['link:speed'] = [string]$speed }
+    $full = Get-NicProp $Adapter 'FullDuplex'
+    if ($null -ne $full) { $facts['link:duplex'] = if ([string]$full -ieq 'True') { 'Full' } else { 'Half' } }
+    return $facts
+}
 
 function Format-NicRow {
     param([string]$Name, $Row)
@@ -535,10 +563,18 @@ function Get-NicRows {
         New-NicRow 'FAIL' 'values' '(readable)' '(unreadable)' $_.Exception.Message
         return
     }
+    # LinkSpeed is a script property of the NetAdapter module: an error in it
+    # is one FAIL line, and the link rows then read absent.
+    try {
+        $link = Get-NicLinkFacts $Adapter
+        foreach ($k in $link.Keys) { $facts[$k] = $link[$k] }
+    } catch {
+        New-NicRow 'FAIL' 'link' '(readable)' '(unreadable)' $_.Exception.Message
+    }
     Test-NicDriver $Entry.driver ([string]$Adapter.DriverFileName) ([string]$Adapter.DriverVersion)
     foreach ($v in @($Entry.values)) { Test-NicValue $v $facts $LatencyProfile }
-    # Windows judges no negotiated speed (*SpeedDuplex is a setting, judged
-    # above); an adapter without a link says so, as Linux does.
+    # *SpeedDuplex is the setting, link:speed / link:duplex the negotiated
+    # link (above); an adapter without a link also gets one line saying so.
     if (Test-NicNoLink $Adapter) { New-NicRow 'INFO' 'link' '(a link)' 'no link' $script:NicNoLinkNote }
 }
 

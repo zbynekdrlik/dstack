@@ -174,11 +174,15 @@ class TheStandard(unittest.TestCase):
         self.assertEqual(std["schema"], "dstack-nic-standard/2")
         self.assertGreaterEqual(std["version"], 1)
 
-    def test_pending_transmits_stays_8_and_open_with_its_plan(self):
-        v = {x["key"]: x for x in entry(load(), "rtl8156b-windows")["values"]}["PendingTransmits"]
+    def test_pending_transmits_is_8_settled_against_32(self):
+        # Version 6: the 28.11.2026 A/B on resolume-pp decided 8 against 32.
+        std = load()
+        v = {x["key"]: x for x in entry(std, "rtl8156b-windows")["values"]}["PendingTransmits"]
         self.assertEqual(v["expected"], "8")
-        self.assertEqual(v["status"], "open")
-        self.assertIn("#425", v["plan"])
+        self.assertEqual(v.get("status", "settled"), "settled")
+        self.assertNotIn("plan", v)
+        self.assertIn("issuecomment-7239847314", v["evidence"])
+        self.assertGreaterEqual(std["version"], 6)
 
     def test_every_chip_found_in_use_has_an_entry(self):
         std = load()
@@ -188,8 +192,9 @@ class TheStandard(unittest.TestCase):
         self.assertTrue({"rtl8156b-windows", "rtl8125-rtl8168-windows", "realtek-vlan-windows"} <= ids)
 
     def test_an_unmeasured_chip_has_no_entry(self):
-        # The RTL8153 is in no production use: no entry, so a checker fails
-        # one instead of passing it on a guess.
+        # The RTL8153 has a Windows entry only (alex-nb, version 8): on Linux
+        # none is in use, so a checker fails one instead of passing it on a
+        # guess.
         std = load()
         self.assertIsNone(nsc.find_entry(std, "linux", "usb", "0bda:8153"))
         self.assertIsNone(nsc.find_entry(std, "linux", "pci", "10ec:b852"))
@@ -233,7 +238,7 @@ class TheStandard(unittest.TestCase):
         broken(lambda s: values(s)[1].update(expected=64))
         broken(lambda s: values(s)[1].update(expected=[]))
         broken(lambda s: values(s)[1].update(key=values(s)[0]["key"].lower()))
-        broken(lambda s: values(s)[0].pop("plan"))
+        broken(lambda s: [v for a in s["adapters"] for v in a["values"] if v.get("status") == "open"][0].pop("plan"))
         broken(lambda s: [v for v in values(s) if v.get("compare") == "bits"][0].update(expected="0x08"))
         broken(lambda s: s["adapters"][1].update(id=s["adapters"][0]["id"]))
         broken(lambda s: s["adapters"][0]["driver"].pop("evidence"))
@@ -450,6 +455,42 @@ class Judging(unittest.TestCase):
         self.assertIn("#408", line)
         passed = nsc.format_row("rig0", ("PASS", "ring:rx", "4096", "4096", "evidence"))
         self.assertEqual(passed, "PASS  rig0  ring:rx  expected=4096  actual=4096")
+
+    def test_the_rtl8153_windows_entry(self):
+        # alex-nb's RTL8153 (version 8, dasio#234): the driver's own minimum,
+        # *FlowControl 0, the known limit and the reset in its text.
+        std = load()
+        e = entry(std, "rtl8153-windows")
+        self.assertEqual(e["match"], {"hardware_id": ["USB\\VID_0BDA&PID_8153"]})
+        old = nsc.judge_driver(e["driver"], {"driver": "rtu53cx22x64.sys", "driver:version": "1153.13.420.2023"})
+        self.assertEqual([r[0] for r in old], ["PASS", "FAIL"])
+        new = nsc.judge_driver(e["driver"], {"driver": "rtu53cx22x64.sys", "driver:version": "1153.22.113.2026"})
+        self.assertEqual([r[0] for r in new], ["PASS", "PASS"])
+        values = {v["key"]: v for v in e["values"]}
+        self.assertEqual(values["*FlowControl"]["expected"], "0")
+        flow = rows_by_key(nsc.check(e, {"*FlowControl": "3"}, "normal"))["*FlowControl"]
+        self.assertEqual(flow[:4], ("FAIL", "*FlowControl", "0", "3"))
+        self.assertIn("silent RX flow", e["covers"])
+        self.assertIn("resets", e["covers"])
+
+    def test_windows_negotiated_link_speed_and_duplex(self):
+        # resolume-pp after a boot, 28.11.2026 (#465): 100 Mbps half duplex
+        # while *SpeedDuplex read 0 (auto). The Windows facts carry
+        # Get-NetAdapter's LinkSpeed and FullDuplex (Full/Half).
+        std = load()
+        usb = entry(std, "rtl8156b-windows")
+        slow = rows_by_key(nsc.check(usb, {"link:speed": "100 Mbps", "link:duplex": "Half"}, "normal"))
+        self.assertEqual(slow["link:speed"][:4], ("FAIL", "link:speed", "2.5 Gbps", "100 Mbps"))
+        self.assertEqual(slow["link:duplex"][:4], ("FAIL", "link:duplex", "Full", "Half"))
+        good = rows_by_key(nsc.check(usb, {"link:speed": "2.5 Gbps", "link:duplex": "Full"}, "normal"))
+        self.assertEqual((good["link:speed"][0], good["link:duplex"][0]), ("PASS", "PASS"))
+        pcie = entry(std, "rtl8125-rtl8168-windows")
+        gig = rows_by_key(nsc.check(pcie, {"link:speed": "1 Gbps", "link:duplex": "Full"}, "normal"))
+        self.assertEqual(gig["link:speed"][:4], ("PASS", "link:speed", "2.5 Gbps|1 Gbps", "1 Gbps"))
+        self.assertEqual(rows_by_key(nsc.check(pcie, {"link:speed": "100 Mbps"}, "normal"))["link:speed"][0], "FAIL")
+        down = rows_by_key(nsc.check(pcie, {"link:detected": "no", "link:speed": "0 bps", "link:duplex": "Half"}, "normal"))
+        self.assertEqual(down["link:speed"][:4], ("INFO", "link:speed", "2.5 Gbps|1 Gbps", "no link"))
+        self.assertEqual(down["link:duplex"][0], "INFO")
 
     def test_windows_facts_judged_by_the_same_rules(self):
         # dsg's RTL8168 as read on 20.11.2026 (the keys in its driver's case).
