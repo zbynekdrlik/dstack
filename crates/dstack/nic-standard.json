@@ -1,7 +1,7 @@
 {
   "schema": "dstack-nic-standard/2",
-  "version": 5,
-  "updated": "2026-11-25",
+  "version": 6,
+  "updated": "2026-11-28",
   "issue": "https://github.com/zbynekdrlik/dstack/issues/465",
   "doc": "docs/nic-standard.md",
   "scope": "Every Realtek NIC that is up on a production PC with a Dante leg (docs/two-networks.md, scope). One entry per chip and OS; a Realtek adapter without an entry fails until it is measured and added. Read-only checkers: tools/windows/nic-standard-check.ps1, tools/linux/nic-standard-check.py.",
@@ -51,7 +51,7 @@
         "evidence": "Realtek's NetAdapterCx drivers, each at its own minimum: 11.19.602.2025 carries the transmit-queue keywords and measured clean against the inbox driver (dstack #425, songplayer#337); the newer package 1156.22.113.2026 ran the #290 A/B on mbc (DPCs under 0.3 ms against NDIS) and, at the standard's 8 / 64 queue, read the same Dante lateness as at 3 / 37 on the same driver (dasio#24, dasio peer 25.11.2026; no driver-to-driver lateness comparison); the Cx family against NDIS (dstack #290). The owner's rule is the newest Realtek driver. Fleet: resolume-snv and resolume-pp on 11.19, mbc-snv on 1156.22."
       },
       "values": [
-        {"key": "PendingTransmits", "name": "Transmit URBs", "expected": "8", "status": "open", "evidence": "3 -> 8 (with buffers 18 -> 64): receivers' reorders ~9/h -> ~3/h, the FOH card's peak 9.6 -> 4.7 ms (dstack receiver A/B 10.11.2026, songplayer#255/#285); inbox 3 -> 8 cut dsg's late packets ~100x (dstack #425).", "plan": "8 vs 32 on resolume-pp with two NDI receivers, by #425's ndiD capture (pktmon on TCPIP / NetAdapterCx / miniport, a detached 60 s capture, .claude/rules/windows-pcs.md): Dante TCPIP -> miniport p99 against 9.4 ms and max against 18.4 ms at 8; the value with the lower p99 and max becomes the standard."},
+        {"key": "PendingTransmits", "name": "Transmit URBs", "expected": "8", "evidence": "3 -> 8 (with buffers 18 -> 64): receivers' reorders ~9/h -> ~3/h, the FOH card's peak 9.6 -> 4.7 ms (dstack receiver A/B 10.11.2026, songplayer#255/#285); inbox 3 -> 8 cut dsg's late packets ~100x (dstack #425). 8 against 32 decided (version 6): A-B-A on resolume-pp 28.11.2026 at 2.5 Gbps full duplex, two NDI receivers connected throughout, pktmon Dante TCPIP -> miniport p99 / max 0.120 / 1.35 ms at 8, 0.114 / 0.79 ms at 32, 0.121 / 3.06 ms at 8 again: 32 no better than 8 within the run-to-run spread, so 8 stays (dstack #465 issuecomment-7239847314). 20.11's p99 9.4 / max 18.4 ms at 8 did not reproduce at either value; it came with other conditions (a link problem on that NIC, #425, and the PP switch side re-patched since)."},
         {"key": "TransmitBufferLen", "name": "Transmit Buffers", "expected": "64", "evidence": "with PendingTransmits: the same A/B (songplayer#255/#285, dstack #425)"},
         {"key": "PendingReceives", "name": "Receive URBs", "expected": "6", "evidence": "none yet: fleet value"},
         {"key": "ReceiveBufferLen", "name": "Receive Buffers", "expected": "16", "evidence": "none yet: fleet value"},

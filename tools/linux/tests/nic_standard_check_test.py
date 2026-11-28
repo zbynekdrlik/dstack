@@ -174,11 +174,15 @@ class TheStandard(unittest.TestCase):
         self.assertEqual(std["schema"], "dstack-nic-standard/2")
         self.assertGreaterEqual(std["version"], 1)
 
-    def test_pending_transmits_stays_8_and_open_with_its_plan(self):
-        v = {x["key"]: x for x in entry(load(), "rtl8156b-windows")["values"]}["PendingTransmits"]
+    def test_pending_transmits_is_8_settled_against_32(self):
+        # Version 6: the 28.11.2026 A/B on resolume-pp decided 8 against 32.
+        std = load()
+        v = {x["key"]: x for x in entry(std, "rtl8156b-windows")["values"]}["PendingTransmits"]
         self.assertEqual(v["expected"], "8")
-        self.assertEqual(v["status"], "open")
-        self.assertIn("#425", v["plan"])
+        self.assertEqual(v.get("status", "settled"), "settled")
+        self.assertNotIn("plan", v)
+        self.assertIn("issuecomment-7239847314", v["evidence"])
+        self.assertGreaterEqual(std["version"], 6)
 
     def test_every_chip_found_in_use_has_an_entry(self):
         std = load()
@@ -233,7 +237,7 @@ class TheStandard(unittest.TestCase):
         broken(lambda s: values(s)[1].update(expected=64))
         broken(lambda s: values(s)[1].update(expected=[]))
         broken(lambda s: values(s)[1].update(key=values(s)[0]["key"].lower()))
-        broken(lambda s: values(s)[0].pop("plan"))
+        broken(lambda s: [v for a in s["adapters"] for v in a["values"] if v.get("status") == "open"][0].pop("plan"))
         broken(lambda s: [v for v in values(s) if v.get("compare") == "bits"][0].update(expected="0x08"))
         broken(lambda s: s["adapters"][1].update(id=s["adapters"][0]["id"]))
         broken(lambda s: s["adapters"][0]["driver"].pop("evidence"))

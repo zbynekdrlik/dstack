@@ -38,9 +38,11 @@ function ValueSpec { param([string]$Id, [string]$Key) @((Entry $Id).values) | Wh
 
 # ------------------------------------------------------------ the file
 Check 'the repo file reads as the schema, version 5 or later' { $std.schema -eq 'dstack-nic-standard/2' -and $std.version -ge 5 }
-Check 'PendingTransmits stays 8, open, with its plan' {
+# Version 6: the 28.11.2026 A/B on resolume-pp decided 8 against 32.
+Check 'PendingTransmits is 8, settled against 32, with the A/B as its evidence' {
     $v = ValueSpec 'rtl8156b-windows' 'PendingTransmits'
-    $v.expected -eq '8' -and $v.status -eq 'open' -and $v.plan -like '*#425*'
+    $v.expected -eq '8' -and (Get-NicProp $v 'status' 'settled') -eq 'settled' -and -not (Test-NicHasProp $v 'plan') -and
+    $v.evidence -like '*issuecomment-7239847314*' -and $std.version -ge 6
 }
 $standardText = Get-Content -LiteralPath $standardPath -Raw -Encoding UTF8
 # The repo file with one change: $true when Test-NicStandard refuses it.
@@ -64,7 +66,7 @@ Check 'a malformed file is refused, as the Python checker refuses it' {
     (Refused { param($s) (& $v $s)[1] | Add-Member -NotePropertyName profile -NotePropertyValue 'lowlatency' }) -and
     (Refused { param($s) (& $v $s)[1].expected = 64 }) -and
     (Refused { param($s) (& $v $s)[1].key = (& $v $s)[0].key.ToLowerInvariant() }) -and
-    (Refused { param($s) (& $v $s)[0].PSObject.Properties.Remove('plan') }) -and
+    (Refused { param($s) @(@($s.adapters) | ForEach-Object { @($_.values) } | Where-Object { (Get-NicProp $_ 'status' '') -ceq 'open' })[0].PSObject.Properties.Remove('plan') }) -and
     (Refused { param($s) (@(& $v $s) | Where-Object { $_.PSObject.Properties['compare'] })[0].expected = '0x08' }) -and
     (Refused { param($s) $s.adapters[1].id = $s.adapters[0].id }) -and
     (Refused { param($s) $s.adapters[0].driver.PSObject.Properties.Remove('evidence') }) -and
@@ -296,7 +298,7 @@ Check 'mbc as read before 21.11: its driver passes, the power values fail with b
     $r.Exit -eq 1 -and
     ($r.Lines -contains 'PASS  Ethernet 3  driver  expected=rtucx22x64.sys|rtu56cx22x64.sys  actual=rtu56cx22x64.sys') -and
     ($r.Lines -contains 'PASS  Ethernet 3  driver:version  expected=>=1156.22.113.2026  actual=1156.22.113.2026') -and
-    @($r.Lines | Where-Object { $_ -like 'FAIL  Ethernet 3  PendingTransmits  expected=8  actual=3  (open: *' }).Count -eq 1 -and
+    @($r.Lines | Where-Object { $_ -like 'FAIL  Ethernet 3  PendingTransmits  expected=8  actual=3  (*issuecomment-7239847314*' }).Count -eq 1 -and
     @($r.Lines | Where-Object { $_ -like 'FAIL  Ethernet 3  `*EEE  expected=0  actual=1  (*' }).Count -eq 1 -and
     @($r.Lines | Where-Object { $_ -like 'FAIL  Ethernet 3  `*SelectiveSuspend  expected=0  actual=(absent)*' }).Count -eq 1 -and
     @($r.Lines | Where-Object { $_ -like 'INFO  Ethernet 3  `*RscIPv4  expected=(no standard yet)  actual=1*' }).Count -eq 1

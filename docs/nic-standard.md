@@ -2,7 +2,7 @@
 
 One standard for every Realtek NIC on a production PC: which driver it runs and every advanced value it holds, each with its evidence. It is part of the production network standard (`docs/two-networks.md`, #155), and dstack owns it. The owner's rule (20.11.2026): one uniform working setup, not a different setting and driver version per project.
 
-- **The file:** [`docs/nic-standard.json`](nic-standard.json), machine-readable, `schema` `dstack-nic-standard/2`, `version` 5 (2: text only, #466; 3: the EEE rule for every wired NIC, below; 4: no link, no speed verdict, wireless out; 5, schema 2: each allowed Windows driver file with its own minimum, mbc's `rtu56cx22x64.sys` 1156.22.113.2026 beside `rtucx22x64.sys` 11.19.602.2025). It is the only source: this page explains it, the file decides.
+- **The file:** [`docs/nic-standard.json`](nic-standard.json), machine-readable, `schema` `dstack-nic-standard/2`, `version` 6 (2: text only, #466; 3: the EEE rule for every wired NIC, below; 4: no link, no speed verdict, wireless out; 5, schema 2: each allowed Windows driver file with its own minimum, mbc's `rtu56cx22x64.sys` 1156.22.113.2026 beside `rtucx22x64.sys` 11.19.602.2025; 6: `PendingTransmits` 8 settled against 32, below). It is the only source: this page explains it, the file decides.
 - **The checkers:** `tools/windows/nic-standard-check.ps1` and `tools/linux/nic-standard-check.py`. Both are read-only: they never set a value, install a driver or restart an adapter.
 - **Scope:** every Realtek NIC that is up on a PC with a Dante leg (`docs/two-networks.md`, scope: a PC without one is not checked). Other vendors' NICs (the editing PCs' Aquantia and Intel legs) have no entry, but **the EEE rule holds for every wired NIC of a rig PC, whatever the vendor, up or down** ([below](#eee-off-on-every-wired-nic-version-3)).
 
@@ -82,7 +82,7 @@ EEE on, by owner project, to turn off persistently and prove with the checker: *
         "bad": [...], "evidence": "..."
       },
       "values": [
-        {"key": "PendingTransmits", "name": "Transmit URBs", "expected": "8", "status": "open", "evidence": "...", "plan": "..."}
+        {"key": "PendingTransmits", "name": "Transmit URBs", "expected": "8", "evidence": "..."}
       ]
     }
   ]
@@ -102,20 +102,29 @@ The file holds every value; this is the summary.
 
 | Chip | OS | Driver | Key values |
 |---|---|---|---|
-| RTL8156B (USB 2.5GbE; covers the RTL8156) | Windows | Realtek's NetAdapterCx `rtucx22x64.sys` ≥ 11.19.602.2025. Bad: Microsoft's inbox `rtucx21x64.sys` (3-URB queue), Realtek's NDIS `rtump64x64.sys` (19 ms DPCs) | Transmit URBs 8 (**open**), Transmit Buffers 64, Receive URBs 6, Receive Buffers 16; flow control, EEE, Green Ethernet, Advanced EEE, Idle Power Saving, Gigabit Lite, selective suspend all 0; PnPCapabilities with 0x08; LSO 0 where present; speed auto; Priority & VLAN 3; checksum offloads 3 |
+| RTL8156B (USB 2.5GbE; covers the RTL8156) | Windows | Realtek's NetAdapterCx `rtucx22x64.sys` ≥ 11.19.602.2025. Bad: Microsoft's inbox `rtucx21x64.sys` (3-URB queue), Realtek's NDIS `rtump64x64.sys` (19 ms DPCs) | Transmit URBs 8 (settled against 32, version 6), Transmit Buffers 64, Receive URBs 6, Receive Buffers 16; flow control, EEE, Green Ethernet, Advanced EEE, Idle Power Saving, Gigabit Lite, selective suspend all 0; PnPCapabilities with 0x08; LSO 0 where present; speed auto; Priority & VLAN 3; checksum offloads 3 |
 | RTL8156B | Linux | `r8152`, in-tree or Realtek's v2.21.4 (**open**, #408) | RX ring 4096; rx-usecs the default 15 µs (never changed on a running link); pause off; EEE off; USB autosuspend off; usbcore NO_LPM quirk (`usbcore.quirks=0bda:8156:k`); TSO/GSO off in the low-latency profile |
 | RTL8125 / RTL8168 (PCIe) | Windows | `rt640x64.sys` ≥ 10.79.20.1003, never 10.72.524.2024 (**open**: one version for the family; 10.79 measured clean only with dasio's deferred receive) | interrupt moderation 0; flow control, EEE, green, power saving 0; LSO 0; jumbo 1514; speed auto; wake-on-LAN 0; ASPM 0; PnPCapabilities with 0x08. Low-latency profile (dasio's tuning): Receive and Transmit Buffers 4096 (**open** on the RTL8168), RSS 1 with 4 queues |
 | RTL8168 (PCIe) | Linux | the kernel's `r8169`, firmware `rtl8168h-2_0.0.2 02/26/15` | rings 256/256; coalescing 0; pause off; EEE off; runtime PM off; TSO/GSO off in the low-latency profile |
 | RTL8125 (PCIe), version 4 | Linux | the kernel's `r8169`, firmware `rtl8125b-2_0.0.2 07/13/20` (fleet value) | rings 256/256; pause off; EEE off; offloads on; runtime PM off; TSO/GSO off in the low-latency profile (the RTL8168's measurement, same driver); speed and duplex `report` (no link ever read); no coalescing (r8169 has none for this chip). From the fleet's one Linux RTL8125, the PP editing PC's unused onboard NIC (read 20.11.2026), nothing measured |
 | Realtek Virtual Adapter (the VLAN leg) | Windows | `RtVlan640.sys` ≥ 10.4.1117.2020 | none (its VLAN ID is per PC); never disable or restart one (#239) |
 
-### The open measurement: Transmit URBs 8 or 32
+### Transmit URBs: 8, not 32 (decided 28.11.2026, version 6)
 
-`PendingTransmits` stays **8** in the standard, marked `open`, until this is measured:
+`PendingTransmits` is **8**, settled. The measurement that was open here is closed:
 
-- **Why it is open.** On resolume-pp the RTL8156B's driver holds Dante behind NDI's video bursts in its one send queue: with two NDI receivers Dante waits up to 18.4 ms between NetAdapterCx and the miniport (p99 9.4 ms, capture ndiD, #425). 3 → 8 URBs already cut dsg's late packets about 100x. More URBs drain the USB queue faster but do not change Dante's place in it.
-- **The method** (#425's, `.claude/rules/windows-pcs.md`): `pktmon` on resolume-pp limited to the TCPIP component on the Dante VLAN adapter, the NetAdapterCx edge and the `rtucx22x64` miniport (`--comp <ids> --pkt-size 64`), as a detached `Start-Process` capture of 60 s or less whose `finally` stops it and removes the filter. Dante packets are timed by their Dante stamp, maxima trusted over counts. The capture runs with two NDI receivers connected (the condition that gave 9.4 / 18.4 ms), at 8 and then at 32, in the same hour.
-- **The decision rule:** the value with the lower TCPIP → miniport p99 and max becomes the standard. A change goes into the file with the two captures as its evidence and the next `version`, and every PC moves to it through its project. No single PC changes on its own (the owner, 20.11.2026: no PP-only Realtek change).
+- **Why it was open.** On 20.11 resolume-pp's RTL8156B driver held Dante behind NDI's video bursts in its one send queue: with two NDI receivers Dante waited up to 18.4 ms between NetAdapterCx and the miniport (p99 9.4 ms, capture ndiD, #425). 3 → 8 URBs had already cut dsg's late packets about 100x; the question was whether 32 drains the burst faster.
+- **The method** (#425's, `.claude/rules/windows-pcs.md`): `pktmon` on resolume-pp limited to the TCPIP component on the Dante VLAN adapter and the base adapter, the RtVlan, Pacer and NetAdapterCx edges and the `rtucx22x64` miniport (`--comp <ids> --pkt-size 64`), detached captures of 60 s or less whose `finally` stops them and removes the filter; Dante packets timed by their Dante stamp, maxima trusted over counts. A-B-A in one hour, two NDI receivers connected throughout, every capture at 2.5 Gbps full duplex (the NIC had come up at 100 Mbps half duplex after the boot and was restarted once first, #425).
+- **The result** (28.11.2026 CET, #465 issuecomment-7239847314), Dante TCPIP → miniport:
+
+| capture | PendingTransmits | n | p50 | p99 | p99.9 | max |
+|---|---|---|---|---|---|---|
+| ndiE8 (14:05) | 8 | 50699 | 0.027 ms | 0.120 ms | 0.185 ms | 1.349 ms |
+| ndiE32 (14:09) | 32 | 28171 | 0.027 ms | 0.114 ms | 0.156 ms | 0.786 ms |
+| ndiF8 (14:12) | 8 | 31649 | 0.028 ms | 0.121 ms | 0.188 ms | 3.055 ms |
+| ndiD (20.11, before) | 8 | 6328 | 0.045 ms | 9.379 ms | 16.138 ms | 18.350 ms |
+
+- **The decision:** 32 is no better than 8 within the run-to-run spread (E8 against F8), so the standard keeps 8 and no PC changes. The 20.11 wait (p99 9.4 ms) reproduced at neither value: it came with other conditions (a link problem on that NIC, #425, and the PP switch side re-patched since). Bulk traffic on this NIC still reaches Dante's receivers (a paced 40 Mbit/s upload gave ~100 late Dante packets a minute at dsg): that stays #425's question, not a queue value.
 
 ## Inventory (20.11.2026, read only)
 
@@ -276,7 +285,7 @@ Each reads the file at its pinned dstack tag (or calls the checker) instead of i
 
 | Project | Its PCs here | What it changes |
 |---|---|---|
-| songplayer | resolume-snv, resolume-pp | `RTL8156_VALUES`, `ALWAYS`, `WHERE_PRESENT` and the 11.19 driver gate (`prod_env_audio_wired.rs`, `setup-prod-pc.ps1`) read entry `rtl8156b-windows`. Both PCs pass. PP's `PendingTransmits` 32 experiment stays cancelled; 8 vs 32 is decided here. |
+| songplayer | resolume-snv, resolume-pp | `RTL8156_VALUES`, `ALWAYS`, `WHERE_PRESENT` and the 11.19 driver gate (`prod_env_audio_wired.rs`, `setup-prod-pc.ps1`) read entry `rtl8156b-windows`. Both PCs pass. PP's `PendingTransmits` 32 experiment stays cancelled; 8 vs 32 is decided: 8 (version 6). |
 | dasio | FOH, dsg, mbc | the baseline's rt640x64 keys and `[[nic_driver]]` pin read entry `rtl8125-rtl8168-windows`; mbc fails 4 values since version 5 (receive queue 10 / 32, `EEE` and `*SelectiveSuspend` absent; 11 at the 20.11 read; conflict 1); FOH and dsg on one driver version (conflict 2); the RTL8168 buffers' A/B (conflict 4). |
 | camera-box | stream-snv, the PP stream PC (obs runs there) | its r8152 ring, coalescing and USB quirk settings read entry `rtl8156b-linux`; both pass; the driver choice stays #408. |
 | presenter | companion-snv, the PP presenter PC | its setup reads entry `rtl8168-linux`; the PP presenter PC fails EEE (on). |
