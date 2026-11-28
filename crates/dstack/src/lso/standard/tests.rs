@@ -46,7 +46,11 @@ fn an_adapter_finds_its_windows_entry_by_hardware_id_prefix() {
     assert_eq!(id("RTK_VLANMP"), Some("realtek-vlan-windows"));
     assert_eq!(id("rtk_vlanmp"), Some("realtek-vlan-windows"));
     assert_eq!(id(r"PCI\VEN_10EC&DEV_8161"), None);
-    assert_eq!(id(r"USB\VID_0BDA&PID_8153"), None);
+    assert_eq!(
+        id(r"USB\VID_0BDA&PID_8153&REV_3100"),
+        Some("rtl8153-windows")
+    );
+    assert_eq!(id(r"USB\VID_0BDA&PID_8152"), None);
     assert_eq!(id(r"PCI\VEN_8086&DEV_15F3"), None);
     // Prefix, not substring: the id must start with the entry's prefix.
     assert_eq!(id(r"X\PCI\VEN_10EC&DEV_8168"), None);

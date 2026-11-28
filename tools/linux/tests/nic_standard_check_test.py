@@ -192,8 +192,9 @@ class TheStandard(unittest.TestCase):
         self.assertTrue({"rtl8156b-windows", "rtl8125-rtl8168-windows", "realtek-vlan-windows"} <= ids)
 
     def test_an_unmeasured_chip_has_no_entry(self):
-        # The RTL8153 is in no production use: no entry, so a checker fails
-        # one instead of passing it on a guess.
+        # The RTL8153 has a Windows entry only (alex-nb, version 8): on Linux
+        # none is in use, so a checker fails one instead of passing it on a
+        # guess.
         std = load()
         self.assertIsNone(nsc.find_entry(std, "linux", "usb", "0bda:8153"))
         self.assertIsNone(nsc.find_entry(std, "linux", "pci", "10ec:b852"))
@@ -454,6 +455,23 @@ class Judging(unittest.TestCase):
         self.assertIn("#408", line)
         passed = nsc.format_row("rig0", ("PASS", "ring:rx", "4096", "4096", "evidence"))
         self.assertEqual(passed, "PASS  rig0  ring:rx  expected=4096  actual=4096")
+
+    def test_the_rtl8153_windows_entry(self):
+        # alex-nb's RTL8153 (version 8, dasio#234): the driver's own minimum,
+        # *FlowControl 0, the known limit and the reset in its text.
+        std = load()
+        e = entry(std, "rtl8153-windows")
+        self.assertEqual(e["match"], {"hardware_id": ["USB\\VID_0BDA&PID_8153"]})
+        old = nsc.judge_driver(e["driver"], {"driver": "rtu53cx22x64.sys", "driver:version": "1153.13.420.2023"})
+        self.assertEqual([r[0] for r in old], ["PASS", "FAIL"])
+        new = nsc.judge_driver(e["driver"], {"driver": "rtu53cx22x64.sys", "driver:version": "1153.22.113.2026"})
+        self.assertEqual([r[0] for r in new], ["PASS", "PASS"])
+        values = {v["key"]: v for v in e["values"]}
+        self.assertEqual(values["*FlowControl"]["expected"], "0")
+        flow = rows_by_key(nsc.check(e, {"*FlowControl": "3"}, "normal"))["*FlowControl"]
+        self.assertEqual(flow[:4], ("FAIL", "*FlowControl", "0", "3"))
+        self.assertIn("silent RX flow", e["covers"])
+        self.assertIn("resets", e["covers"])
 
     def test_windows_negotiated_link_speed_and_duplex(self):
         # resolume-pp after a boot, 28.11.2026 (#465): 100 Mbps half duplex

@@ -1,6 +1,6 @@
 {
   "schema": "dstack-nic-standard/2",
-  "version": 7,
+  "version": 8,
   "updated": "2026-11-28",
   "issue": "https://github.com/zbynekdrlik/dstack/issues/465",
   "doc": "docs/nic-standard.md",
@@ -231,6 +231,47 @@
         {"key": "link:speed", "name": "Speed", "expected": null, "status": "report", "evidence": "the one Linux RTL8125 in the fleet has no cable: no speed was ever read"},
         {"key": "link:duplex", "name": "Duplex", "expected": null, "status": "report", "evidence": "the one Linux RTL8125 in the fleet has no cable: no duplex was ever read"},
         {"key": "pci:power/control", "name": "PCIe runtime power management off", "expected": "on", "evidence": "power saving off on every wired NIC (songplayer#285); fleet value (the PP editing PC)"}
+      ]
+    },
+    {
+      "id": "rtl8153-windows",
+      "chip": "RTL8153",
+      "covers": "Realtek USB 3 GbE (RTL8153 / RTL8153B, USB\\VID_0BDA&PID_8153; the one in use is REV_3100, Realtek's RTL8153BCx64 INF section). One PC in the fleet (25.11.2026): alex-nb, a notebook whose only Dante NIC it is; its values are that read. Known limit, on both drivers read: with only PTP inbound (no RX flow) the chip delivers sparse inbound frames ~1 ms late in runs of exactly 7 Syncs (1.75 s), so a PTP follower on it settles ~0.9 ms behind the network; no NIC, USB or PCIe power value removed it (dasio's A/B 26.11.2026, dstack #498). A PC whose Dante NIC is an RTL8153 needs inbound traffic on it: a silent RX flow. A Realtek driver install resets the advanced values to the INF defaults (*EEE 1, Green Ethernet 1, Idle Power Saving 1, URBs 3, buffers 37): set the profile again after every install",
+      "os": "windows",
+      "match": {"hardware_id": ["USB\\VID_0BDA&PID_8153"]},
+      "driver": {
+        "allowed": [{"file": "rtu53cx22x64.sys", "min_version": "1153.22.113.2026", "evidence": "Realtek's newest Microsoft Update Catalog driver 1153.22.113.2026 (DriverVer 01/13/2026, WHQL, RTL8153BCx64.ndi for REV_3100) on alex-nb since 26.11.2026 00:04 CET; it was 1153.13.420.2023. The ~1 ms sparse-RX delay is the same on both (PhaseLost error_ns 1019325 with the RX flow off, 26.11 00:09 CET): the owner's rule is the newest Realtek driver"}],
+        "status": "settled",
+        "evidence": "Realtek's NetAdapterCx driver for the RTL8153 (rtu53cx22x64), the newest one found (dstack #465, dasio#234); realtek.com's own 115X.23.20 (2026/08/31) sits behind a form with no direct URL yet"
+      },
+      "values": [
+        {"key": "PendingTransmits", "name": "Transmit URBs", "expected": "8", "evidence": "the USB Realtek value (rtl8156b-windows, songplayer#255/#285, dstack #425); alex-nb 4 -> 8 on 25.11.2026 moved nothing beyond noise on iem-mixer's lateness of its packets (dasio#234)"},
+        {"key": "TransmitBufferLen", "name": "Transmit Buffers", "expected": "64", "evidence": "with PendingTransmits (32 -> 64 on alex-nb 25.11.2026, dasio#234)"},
+        {"key": "PendingReceives", "name": "Receive URBs", "expected": "8", "evidence": "none yet: fleet value (alex-nb read 25.11.2026 (dasio peer, dasio#234; dstack #465))"},
+        {"key": "ReceiveBufferLen", "name": "Receive Buffers", "expected": "34", "evidence": "none yet: fleet value (alex-nb read 25.11.2026 (dasio peer, dasio#234; dstack #465))"},
+        {"key": "*FlowControl", "name": "Flow Control", "expected": "0", "evidence": "a PAUSE stops the NIC's whole send queue, Dante included (dstack #425); alex-nb 3 -> 0 on 25.11.2026 23:51 CET (dasio#234)"},
+        {"key": "*EEE", "name": "Energy-Efficient Ethernet", "expected": "0", "evidence": "power saving off on every wired NIC (owner 7.11.2026, songplayer#285); EEE off on every rig device (owner 20.11.2026)"},
+        {"key": "EnableGreenEthernet", "name": "Green Ethernet", "expected": "0", "evidence": "songplayer#285; alex-nb read 25.11.2026 (dasio peer, dasio#234; dstack #465)"},
+        {"key": "AdvancedEEE", "name": "Advanced EEE", "expected": "0", "evidence": "songplayer#285; alex-nb read 25.11.2026 (dasio peer, dasio#234; dstack #465)"},
+        {"key": "EnableExtraPowerSaving", "name": "Idle Power Saving", "expected": "0", "evidence": "songplayer#285; alex-nb 1 -> 0 on 25.11.2026 (dasio#234)"},
+        {"key": "*IdleRestriction", "name": "Idle restriction (this driver's selective-suspend switch)", "expected": "0", "evidence": "none yet: fleet value (alex-nb read 25.11.2026 (dasio peer, dasio#234; dstack #465)); 1 was tried 26.11.2026 with no effect on the sparse-RX delay and reverted (dstack #498)"},
+        {"key": "EnableAdaptiveLinkCap", "name": "Adaptive Link Speed", "expected": "0", "evidence": "none yet: fleet value (alex-nb read 25.11.2026 (dasio peer, dasio#234; dstack #465))"},
+        {"key": "BatteryModeLinkSpeed", "name": "Battery Mode Link Speed", "expected": "0", "evidence": "none yet: fleet value (alex-nb read 25.11.2026 (dasio peer, dasio#234; dstack #465))"},
+        {"key": "PnPCapabilities", "name": "Allow the computer to turn off this device: off", "expected": "8", "compare": "bits", "evidence": "NDIS_DEVICE_DISABLE_PM (0x08) set (songplayer#285); alex-nb 24 since 26.11.2026 (dstack #498)"},
+        {"key": "*LsoV2IPv4", "name": "Large Send Offload v2 (IPv4)", "expected": "0", "evidence": "LSO off on a Dante NIC (dstack #1, docs/windows-box.md); alex-nb read 25.11.2026 (dasio peer, dasio#234; dstack #465)"},
+        {"key": "*LsoV2IPv6", "name": "Large Send Offload v2 (IPv6)", "expected": "0", "evidence": "dstack #1, docs/windows-box.md"},
+        {"key": "*JumboPacket", "name": "Jumbo Frame", "expected": "1514", "evidence": "none yet: fleet value (alex-nb read 25.11.2026 (dasio peer, dasio#234; dstack #465))"},
+        {"key": "*SpeedDuplex", "name": "Speed & Duplex", "expected": "0", "evidence": "none yet: fleet value (auto negotiation, alex-nb read 25.11.2026 (dasio peer, dasio#234; dstack #465))"},
+        {"key": "link:speed", "name": "Negotiated speed (LinkSpeed)", "expected": "1 Gbps", "evidence": "the chip's speed (a GbE chip); its switch side reads 1 Gbps full (mikrotik 26.11.2026, dstack #498). A link below it is a cable, port or negotiation fault (resolume-pp 28.11.2026, dstack #465)"},
+        {"key": "link:duplex", "name": "Negotiated duplex (FullDuplex)", "expected": "Full", "evidence": "half duplex came with resolume-pp's 100 Mbps link (28.11.2026, dstack #465)"},
+        {"key": "*PriorityVLANTag", "name": "Priority & VLAN", "expected": "3", "evidence": "none yet: fleet value (alex-nb read 25.11.2026 (dasio peer, dasio#234; dstack #465))"},
+        {"key": "*IPChecksumOffloadIPv4", "name": "IPv4 Checksum Offload", "expected": "3", "evidence": "none yet: fleet value (alex-nb read 25.11.2026 (dasio peer, dasio#234; dstack #465))"},
+        {"key": "*TCPChecksumOffloadIPv4", "name": "TCP Checksum Offload (IPv4)", "expected": "3", "evidence": "none yet: fleet value (alex-nb read 25.11.2026 (dasio peer, dasio#234; dstack #465))"},
+        {"key": "*UDPChecksumOffloadIPv4", "name": "UDP Checksum Offload (IPv4)", "expected": "3", "evidence": "none yet: fleet value (alex-nb read 25.11.2026 (dasio peer, dasio#234; dstack #465))"},
+        {"key": "*TCPChecksumOffloadIPv6", "name": "TCP Checksum Offload (IPv6)", "expected": "3", "evidence": "none yet: fleet value (alex-nb read 25.11.2026 (dasio peer, dasio#234; dstack #465))"},
+        {"key": "*UDPChecksumOffloadIPv6", "name": "UDP Checksum Offload (IPv6)", "expected": "3", "evidence": "none yet: fleet value (alex-nb read 25.11.2026 (dasio peer, dasio#234; dstack #465))"},
+        {"key": "*RscIPv4", "name": "Recv Segment Coalescing (IPv4)", "expected": null, "status": "report", "evidence": "alex-nb 1 (25.11.2026); no measurement"},
+        {"key": "*WakeOnMagicPacket", "name": "Wake on Magic Packet", "expected": null, "status": "report", "evidence": "alex-nb 1 (25.11.2026); no measurement"}
       ]
     },
     {

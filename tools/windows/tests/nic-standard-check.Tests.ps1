@@ -132,7 +132,15 @@ Check 'the PCIe RTL8125 and RTL8168 share one entry' {
     (Find-NicEntry $std 'PCI\VEN_10EC&DEV_8125&SUBSYS_E0001458&REV_05').id -eq 'rtl8125-rtl8168-windows'
 }
 Check 'the Realtek Virtual Adapter has its entry' { (Find-NicEntry $std 'RTK_VLANMP').id -eq 'realtek-vlan-windows' }
-Check 'an RTL8153 has no entry' { $null -eq (Find-NicEntry $std 'USB\VID_0BDA&PID_8153&REV_3000') }
+Check 'an RTL8153 has its entry (version 8); an RTL8152 has none' {
+    (Find-NicEntry $std 'USB\VID_0BDA&PID_8153&REV_3100').id -eq 'rtl8153-windows' -and $null -eq (Find-NicEntry $std 'USB\VID_0BDA&PID_8152&REV_2000')
+}
+Check 'the RTL8153 driver: 1153.13 fails its minimum, 1153.22 passes' {
+    $d = (Entry 'rtl8153-windows').driver
+    $old = @(Test-NicDriver $d 'rtu53cx22x64.sys' '1153.13.420.2023')
+    $new = @(Test-NicDriver $d 'rtu53cx22x64.sys' '1153.22.113.2026')
+    (($old | ForEach-Object { $_.Verdict }) -join ',') -eq 'PASS,FAIL' -and (($new | ForEach-Object { $_.Verdict }) -join ',') -eq 'PASS,PASS'
+}
 Check 'no hardware id, no entry' { $null -eq (Find-NicEntry $std '') }
 
 # ------------------------------------------------------------ judging
@@ -309,7 +317,7 @@ Check 'mbc as read before 21.11: its driver passes, the power values fail with b
 }
 Check 'an unknown Realtek fails as having no standard; a down one is skipped unless asked' {
     Set-FakePc @(
-        @{ Name = 'Ethernet 5'; Desc = 'Realtek USB GbE Family Controller'; Status = 'Up'; File = 'rtux64w10.sys'; Version = '10.1.1'; Hw = 'USB\VID_0BDA&PID_8153&REV_3000'; Props = @{} },
+        @{ Name = 'Ethernet 5'; Desc = 'Realtek USB FE Family Controller'; Status = 'Up'; File = 'rtux64w10.sys'; Version = '10.1.1'; Hw = 'USB\VID_0BDA&PID_8152&REV_2000'; Props = @{} },
         @{ Name = 'soundgrid'; Desc = 'Realtek PCIe GbE Family Controller #2'; Status = 'Disconnected'; File = 'rt640x64.sys'; Version = '10.79.50.1003'; Hw = 'PCI\VEN_10EC&DEV_8168&REV_15'; Props = @{} }
     )
     $r = Run-Fake

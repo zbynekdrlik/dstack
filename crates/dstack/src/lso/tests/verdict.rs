@@ -209,7 +209,7 @@ fn a_realtek_adapter_without_an_entry_warns() {
     );
     assert_eq!(v(Some("Realtek"), None), "unknown");
     assert_eq!(
-        v(Some("Microsoft"), Some(r"USB\VID_0BDA&PID_8153")),
+        v(Some("Microsoft"), Some(r"USB\VID_0BDA&PID_8152")),
         "unknown"
     );
     assert_eq!(v(None, Some(r"pci\ven_10ec&dev_8161")), "unknown");
@@ -369,7 +369,7 @@ fn a_realtek_adapter_is_told_as_the_checker_tells_it() {
     );
     assert_eq!(v(Some("realtek gaming 2.5gbe"), None), "unknown");
     assert_eq!(v(None, Some("RTK_VLANX")), "unknown");
-    assert_eq!(v(None, Some(r"usb\vid_0bda&pid_8153&rev_3000")), "unknown");
+    assert_eq!(v(None, Some(r"usb\vid_0bda&pid_8152&rev_2000")), "unknown");
     // Prefix, not substring; and the vendor id with its `&`.
     assert_eq!(v(None, Some(r"X\PCI\VEN_10EC&DEV_8161")), "other");
     assert_eq!(v(None, Some(r"USB\VID_0BDAX")), "other");
