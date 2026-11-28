@@ -455,6 +455,25 @@ class Judging(unittest.TestCase):
         passed = nsc.format_row("rig0", ("PASS", "ring:rx", "4096", "4096", "evidence"))
         self.assertEqual(passed, "PASS  rig0  ring:rx  expected=4096  actual=4096")
 
+    def test_windows_negotiated_link_speed_and_duplex(self):
+        # resolume-pp after a boot, 28.11.2026 (#465): 100 Mbps half duplex
+        # while *SpeedDuplex read 0 (auto). The Windows facts carry
+        # Get-NetAdapter's LinkSpeed and FullDuplex (Full/Half).
+        std = load()
+        usb = entry(std, "rtl8156b-windows")
+        slow = rows_by_key(nsc.check(usb, {"link:speed": "100 Mbps", "link:duplex": "Half"}, "normal"))
+        self.assertEqual(slow["link:speed"][:4], ("FAIL", "link:speed", "2.5 Gbps", "100 Mbps"))
+        self.assertEqual(slow["link:duplex"][:4], ("FAIL", "link:duplex", "Full", "Half"))
+        good = rows_by_key(nsc.check(usb, {"link:speed": "2.5 Gbps", "link:duplex": "Full"}, "normal"))
+        self.assertEqual((good["link:speed"][0], good["link:duplex"][0]), ("PASS", "PASS"))
+        pcie = entry(std, "rtl8125-rtl8168-windows")
+        gig = rows_by_key(nsc.check(pcie, {"link:speed": "1 Gbps", "link:duplex": "Full"}, "normal"))
+        self.assertEqual(gig["link:speed"][:4], ("PASS", "link:speed", "2.5 Gbps|1 Gbps", "1 Gbps"))
+        self.assertEqual(rows_by_key(nsc.check(pcie, {"link:speed": "100 Mbps"}, "normal"))["link:speed"][0], "FAIL")
+        down = rows_by_key(nsc.check(pcie, {"link:detected": "no", "link:speed": "0 bps", "link:duplex": "Half"}, "normal"))
+        self.assertEqual(down["link:speed"][:4], ("INFO", "link:speed", "2.5 Gbps|1 Gbps", "no link"))
+        self.assertEqual(down["link:duplex"][0], "INFO")
+
     def test_windows_facts_judged_by_the_same_rules(self):
         # dsg's RTL8168 as read on 20.11.2026 (the keys in its driver's case).
         e = entry(load(), "rtl8125-rtl8168-windows")

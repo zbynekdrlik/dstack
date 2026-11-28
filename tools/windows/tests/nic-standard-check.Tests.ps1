@@ -246,6 +246,10 @@ function Set-FakePc {
         # The link state (MediaConnectionState) and the medium's name
         # (PhysicalMediaType), given only where a test sets Link or MediaType.
         if ($a.ContainsKey('Link')) { $fake | Add-Member -NotePropertyName MediaConnectionState -NotePropertyValue $a.Link }
+        # The negotiated link (LinkSpeed, FullDuplex), as Get-NetAdapter gives
+        # it: 2.5 Gbps full duplex unless a test sets Speed or Duplex.
+        $fake | Add-Member -NotePropertyName LinkSpeed -NotePropertyValue $(if ($a.ContainsKey('Speed')) { $a.Speed } else { '2.5 Gbps' })
+        $fake | Add-Member -NotePropertyName FullDuplex -NotePropertyValue $(if ($a.ContainsKey('Duplex')) { $a.Duplex } else { $true })
         if ($a.ContainsKey('MediaType')) { $fake | Add-Member -NotePropertyName PhysicalMediaType -NotePropertyValue $a.MediaType }
         $script:FakeAdapters += $fake
         $script:FakeIds['DEV\' + $a.Name] = $a.Hw
@@ -381,6 +385,50 @@ Check 'a MediaConnectionState of Disconnected alone reads as no link' {
     )
     $r = Run-Fake
     @($r.Lines | Where-Object { $_ -like 'INFO  Ethernet 2  link  *actual=no link*' }).Count -eq 1
+}
+# The negotiated link (#465, 28.11.2026): resolume-pp's RTL8156B came up at
+# 100 Mbps half duplex after a boot (18.9 % ping loss, dsg's rx_late up to
+# 31594 a minute) while *SpeedDuplex read 0 (auto). The setting passed; the
+# link must not.
+Check 'a 100 Mbps half-duplex link fails link:speed and link:duplex, exit 1' {
+    Set-FakePc @(
+        @{ Name = 'Ethernet 4'; Desc = 'Realtek Gaming USB 2.5GbE Family Controller'; Status = 'Up'; Link = 'Connected'; Speed = '100 Mbps'; Duplex = $false; File = 'rtucx22x64.sys'; Version = '11.19.602.2025'; Hw = $usb; Props = $resolumePp }
+    )
+    $r = Run-Fake
+    $r.Exit -eq 1 -and
+    @($r.Lines | Where-Object { $_ -like 'FAIL  Ethernet 4  link:speed  expected=2.5 Gbps  actual=100 Mbps  (*' }).Count -eq 1 -and
+    @($r.Lines | Where-Object { $_ -like 'FAIL  Ethernet 4  link:duplex  expected=Full  actual=Half  (*' }).Count -eq 1 -and
+    ($r.Lines -contains 'PASS  Ethernet 4  *SpeedDuplex  expected=0  actual=0') -and
+    ($r.Lines -contains '1 Realtek NIC(s) checked, 2 FAIL')
+}
+Check 'a 2.5 Gbps full-duplex link passes both rows' {
+    Set-FakePc @(
+        @{ Name = 'Ethernet 4'; Desc = 'Realtek Gaming USB 2.5GbE Family Controller'; Status = 'Up'; Link = 'Connected'; Speed = '2.5 Gbps'; Duplex = $true; File = 'rtucx22x64.sys'; Version = '11.19.602.2025'; Hw = $usb; Props = $resolumePp }
+    )
+    $r = Run-Fake
+    $r.Exit -eq 0 -and ($r.Lines -contains 'PASS  Ethernet 4  link:speed  expected=2.5 Gbps  actual=2.5 Gbps') -and
+    ($r.Lines -contains 'PASS  Ethernet 4  link:duplex  expected=Full  actual=Full')
+}
+Check 'the PCIe entry: an RTL8168 at 1 Gbps passes, at 100 Mbps fails' {
+    $at = { param([string]$Speed)
+        Set-FakePc @(
+            @{ Name = 'Ethernet'; Desc = 'Realtek PCIe GbE Family Controller'; Status = 'Up'; Link = 'Connected'; Speed = $Speed; Duplex = $true; File = 'rt640x64.sys'; Version = '10.79.50.1003'; Hw = 'PCI\VEN_10EC&DEV_8168&REV_15'; Props = @{} }
+        )
+        Run-Fake
+    }
+    $gig = & $at '1 Gbps'
+    $slow = & $at '100 Mbps'
+    ($gig.Lines -contains 'PASS  Ethernet  link:speed  expected=2.5 Gbps|1 Gbps  actual=1 Gbps') -and
+    @($slow.Lines | Where-Object { $_ -like 'FAIL  Ethernet  link:speed  expected=2.5 Gbps|1 Gbps  actual=100 Mbps  (*' }).Count -eq 1
+}
+Check 'no link: link:speed and link:duplex are INFO no link, never FAIL' {
+    Set-FakePc @(
+        @{ Name = 'Ethernet 2'; Desc = 'Realtek PCIe GbE Family Controller'; Status = 'Disconnected'; Link = 'Disconnected'; Speed = '0 bps'; Duplex = $false; File = 'rt640x64.sys'; Version = '10.79.50.1003'; Hw = 'PCI\VEN_10EC&DEV_8168&REV_15'; Props = @{} }
+    )
+    $r = Run-Fake -Name @('Ethernet 2')
+    @($r.Lines | Where-Object { $_ -like 'INFO  Ethernet 2  link:speed  expected=2.5 Gbps|1 Gbps  actual=no link  (no carrier*' }).Count -eq 1 -and
+    @($r.Lines | Where-Object { $_ -like 'INFO  Ethernet 2  link:duplex  expected=Full  actual=no link  (no carrier*' }).Count -eq 1 -and
+    @($r.Lines | Where-Object { $_ -like 'FAIL  Ethernet 2  link:*' }).Count -eq 0
 }
 Check 'a medium of 9 alone (no media type) is wireless' {
     $a = [pscustomobject]@{ Name = 'Wi-Fi'; NdisPhysicalMedium = 9 }
