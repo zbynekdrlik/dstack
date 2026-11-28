@@ -289,13 +289,18 @@ fn block_for(ns: i64) {
         // SAFETY: a valid timer handle, a valid due time, no callback.
         let set = unsafe { SetWaitableTimer(h, &due, 0, None, std::ptr::null(), 0) };
         if set != 0 {
-            // SAFETY: a valid handle.
-            unsafe { WaitForSingleObject(h, INFINITE) };
+            wait_armed(h, ns);
         }
     } else {
         no_timer_warning();
         std::thread::sleep(std::time::Duration::from_nanos(ns as u64));
     }
+}
+
+/// Waits on this thread's timer `h`, armed for `ns` from now.
+fn wait_armed(h: HANDLE, _ns: i64) {
+    // SAFETY: a valid handle.
+    unsafe { WaitForSingleObject(h, INFINITE) };
 }
 
 /// The wait's OS on the clock `now` (raw QPC or the steered clock).
@@ -469,6 +474,42 @@ mod tests {
         // SAFETY: three valid, writable u32s; the call only writes them.
         let status = unsafe { NtQueryTimerResolution(&mut coarsest, &mut finest, &mut current) };
         super::super::timer_state::from_nt(status, coarsest, finest, current, !timer().is_null())
+    }
+
+    /// dstack #475 (resolume-snv, 27.11.2026): every high-resolution timer
+    /// on the PC expired on one CPU, and a NIC driver thread held it 7-8 ms,
+    /// so the pump and TX woke 7-9 ms late together. A wait on the armed
+    /// timer must end near its own length even when the timer fires much
+    /// later (here: armed 500 ms out, as a held expiry), and never before
+    /// it.
+    #[test]
+    fn a_timer_wait_ends_near_its_length_when_the_timer_expiry_is_held() {
+        use windows_sys::Win32::System::Threading::CancelWaitableTimer;
+        let h = timer();
+        assert!(!h.is_null(), "no high-resolution waitable timer");
+        for ns in [5_000_000i64, 20_000_000] {
+            // The timer's expiry 500 ms away: the held timer CPU.
+            let due = -5_000_000i64;
+            // SAFETY: this thread's timer, a valid due time, no callback.
+            assert_ne!(
+                unsafe { SetWaitableTimer(h, &due, 0, None, std::ptr::null(), 0) },
+                0
+            );
+            let start = app_monotonic_ns();
+            wait_armed(h, ns);
+            let took = app_monotonic_ns() - start;
+            // SAFETY: this thread's timer.
+            unsafe { CancelWaitableTimer(h) };
+            assert!(
+                took >= ns,
+                "a {ns} ns wait ended after {took} ns, before its length"
+            );
+            assert!(
+                took < ns + 30_000_000,
+                "a {ns} ns wait took {took} ns: it waited for the held timer; {}",
+                super::super::timer_state::describe(took - ns, true, &timer_state())
+            );
+        }
     }
 
     /// dlink (#68): the normal profile's waits end on the high-resolution
