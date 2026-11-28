@@ -810,22 +810,26 @@ impl TxShared {
     /// source's level: an engine channel's, the loudest sample its engine
     /// ring was given (the pump's or the TX pull's writes; taken here, the
     /// ring's only meter, whatever the source now, so a level never
-    /// outlives a source change); an echo's, its RX channel's level, left
-    /// for the RX meter, which the heartbeat takes after this one. The
-    /// test generators (counter, sine) meter as sent. Once a second (the
+    /// outlives a source change; a source read that met a change leaves it
+    /// for the next call); an echo's, its RX channel's level, left for the
+    /// RX meter, which the heartbeat takes after this one. The test
+    /// generators (counter, sine) meter as sent. Once a second (the
     /// heartbeat): the send pass keeps no extra state for it.
     pub fn take_peak(&self, tx: usize) -> u32 {
         let sent = self
             .peaks
             .get(tx)
             .map_or(0, |p| p.swap(0, Ordering::Relaxed));
+        let Some(source) = self.source(tx) else {
+            return sent;
+        };
         let given = self.engine_ring(tx).map_or(0, Ring::take_peak);
-        let source = match self.source(tx) {
-            Some(Source::Engine) => given,
-            Some(Source::Echo { rx, .. }) => self.rings.get(rx).map_or(0, Ring::peak),
+        let level = match source {
+            Source::Engine => given,
+            Source::Echo { rx, .. } => self.rings.get(rx).map_or(0, Ring::peak),
             _ => 0,
         };
-        sent.max(source)
+        sent.max(level)
     }
 
     /// Slot `slot`'s oldest packet since the last call, ns (0: none sent).

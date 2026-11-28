@@ -136,17 +136,22 @@ impl Sources {
             let m = self.manager.lock().unwrap_or_else(PoisonError::into_inner);
             std::array::from_fn(|slot| m.flow(slot).is_some_and(|f| f.handle.is_some()))
         };
+        // The TX meters first: an echo TX channel meters its RX ring's
+        // level by a look, which the RX meter's take then empties (dstack
+        // #515, `TxShared::take_peak`).
+        let tx_peaks = (0..self.tx.cfg.tx.len())
+            .map(|tx| peak_byte(self.tx.take_peak(tx)))
+            .collect();
+        let rx_peaks = self
+            .rx
+            .rings()
+            .iter()
+            .map(|ring| peak_byte(ring.take_peak()))
+            .collect();
         Some(Records {
             freq_ppb: self.freq.load(Ordering::Relaxed),
-            tx_peaks: (0..self.tx.cfg.tx.len())
-                .map(|tx| peak_byte(self.tx.take_peak(tx)))
-                .collect(),
-            rx_peaks: self
-                .rx
-                .rings()
-                .iter()
-                .map(|ring| peak_byte(ring.take_peak()))
-                .collect(),
+            tx_peaks,
+            rx_peaks,
             rate: self.tx.cfg.sample_rate,
             // Every slot's second is taken, granted or not, so the status's
             // lateness and the packets' judge never show an ended flow's
