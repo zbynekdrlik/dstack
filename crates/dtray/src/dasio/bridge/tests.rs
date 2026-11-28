@@ -444,8 +444,8 @@ fn a_bridge_reads_back_by_its_driver_not_its_block() {
         verify(&f, &back(&f)),
         Ok(
             "Applied: test-bridge runs as a bridge to \"Test ASIO\", 4 in / 2 out, \
-             RX latency 2 ms. Buffer, channel maps, app buffer, CPUs and TX latency \
-             are in the file (the device does not report them)."
+             RX latency 2 ms. Buffer, channel maps, app buffer, app reserve, CPUs and \
+             TX latency are in the file (the device does not report them)."
                 .to_string()
         )
     );

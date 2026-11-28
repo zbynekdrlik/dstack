@@ -98,8 +98,10 @@ pub(super) fn static_colour(hdc: HDC, ctl: HWND, id: usize) -> HBRUSH {
         }
         if id == ID_LIVE {
             SetTextColor(hdc, OK);
-        } else if (ID_RESTART..ID_RESTART + 10).contains(&id) {
+        } else if (ID_RESTART..ID_RESTART + RESTARTS).contains(&id) {
             SetTextColor(hdc, WARN);
+        } else if (ID_HINT..ID_HINT + 6).contains(&id) {
+            SetTextColor(hdc, GetSysColor(COLOR_GRAYTEXT));
         }
         SetBkColor(hdc, GetSysColor(COLOR_WINDOW));
         GetSysColorBrush(COLOR_WINDOW)

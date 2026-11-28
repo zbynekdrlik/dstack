@@ -38,7 +38,7 @@ use std::ops::Sub;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use dstack::device::DeviceConfig;
+use dstack::device::{DeviceConfig, TimingProfile};
 use serde_json::Value;
 use toml_edit::{Array, DocumentMut, Item, TableLike, Value as TomlValue};
 
@@ -167,12 +167,17 @@ pub struct Fields {
     pub iface: Option<String>,
     /// The buffer: the pump's block in frames.
     pub block: u64,
+    /// The app reserve: the DAW's time to return a block (W), frames.
+    pub work_margin: u64,
     /// The RX (device) latency, ns.
     pub latency_ns: u64,
     /// The TX latency, ns; `None` follows the RX latency.
     pub tx_latency_ns: Option<u64>,
     /// Hz (read only: the network's).
     pub sample_rate: u32,
+    /// The device runs dstack's `normal` timing profile (read only), whose
+    /// app reserve is at least 2 ms.
+    pub normal: bool,
     /// The RX and TX channel names.
     pub rx: Vec<String>,
     pub tx: Vec<String>,
@@ -201,9 +206,11 @@ impl Fields {
             name: cfg.name,
             iface,
             block: cfg.block,
+            work_margin: cfg.work_margin,
             latency_ns: cfg.latency_ns,
             tx_latency_ns: cfg.tx_latency_ns,
             sample_rate: cfg.sample_rate,
+            normal: cfg.timing == TimingProfile::Normal,
             rx: cfg.rx,
             tx: cfg.tx,
             cpus: Cpus {
@@ -316,6 +323,9 @@ pub fn edit(text: &str, new: &Fields) -> Result<String, String> {
     if new.block != old.block {
         set_int(root, "block", new.block)?;
     }
+    if new.work_margin != old.work_margin {
+        set_int(root, "work_margin", new.work_margin)?;
+    }
     if new.latency_ns != old.latency_ns {
         set_int(root, "latency_ns", new.latency_ns)?;
     }
@@ -371,6 +381,8 @@ pub fn resize(names: &[String], n: usize) -> Vec<String> {
 pub enum Field {
     Iface,
     Block,
+    /// The app reserve (`work_margin`).
+    WorkMargin,
     RxLatency,
     TxLatency,
     Inputs,
@@ -411,9 +423,10 @@ impl Field {
     pub fn label(self) -> &'static str {
         match self {
             Field::Iface => "Ethernet interface",
-            Field::Block => "Buffer",
-            Field::RxLatency => "Dante latency (RX)",
-            Field::TxLatency => "TX latency",
+            Field::Block => "DAW buffer",
+            Field::WorkMargin => "App reserve",
+            Field::RxLatency => "Dante receive latency",
+            Field::TxLatency => "Dante send latency",
             Field::Inputs => "Inputs",
             Field::Outputs => "Outputs",
             Field::PumpCpu => "Audio pump CPU",
@@ -444,6 +457,7 @@ pub fn changes(old: &Fields, new: &Fields) -> Vec<Field> {
     let pairs = [
         (Field::Iface, old.iface != new.iface),
         (Field::Block, old.block != new.block),
+        (Field::WorkMargin, old.work_margin != new.work_margin),
         (Field::RxLatency, old.latency_ns != new.latency_ns),
         (Field::TxLatency, old.tx_latency_ns != new.tx_latency_ns),
         (Field::Inputs, old.rx != new.rx),
@@ -798,8 +812,8 @@ pub fn verify(want: &Fields, back: &ReadBack) -> Result<String, String> {
     if let Some(b) = &want.bridge {
         return Ok(format!(
             "Applied: {} runs as a bridge to \"{}\", {} in / {} out, RX latency {}. \
-             Buffer, channel maps, app buffer, CPUs and TX latency are in the file \
-             (the device does not report them).",
+             Buffer, channel maps, app buffer, app reserve, CPUs and TX latency are in \
+             the file (the device does not report them).",
             want.name,
             b.driver,
             want.rx.len(),
@@ -809,7 +823,7 @@ pub fn verify(want: &Fields, back: &ReadBack) -> Result<String, String> {
     }
     Ok(format!(
         "Applied: {} runs with buffer {}, {} in / {} out, RX latency {}. \
-         CPUs and TX latency are in the file (the device does not report them).",
+         App reserve, CPUs and TX latency are in the file (the device does not report them).",
         want.name,
         want.block,
         want.rx.len(),
@@ -965,10 +979,13 @@ pub fn changed_cpus(old: &Cpus, new: &Cpus) -> Cpus {
 
 pub mod apply;
 pub mod bridge;
+pub mod check;
 pub mod choices;
 pub mod service;
 #[cfg(windows)]
 pub mod system;
+pub mod told;
+pub mod window;
 
 #[cfg(test)]
 mod tests;

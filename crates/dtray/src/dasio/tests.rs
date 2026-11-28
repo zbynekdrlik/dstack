@@ -109,6 +109,7 @@ fn the_fields_read_as_dasio_reads_the_file() {
     assert_eq!(f.name, "test-asio");
     assert_eq!(f.iface.as_deref(), Some("Ethernet 2"));
     assert_eq!(f.block, 256);
+    assert_eq!(f.work_margin, 256);
     assert_eq!(f.latency_ns, 2_000_000);
     assert_eq!(f.tx_latency_ns, Some(1_000_000));
     assert_eq!(f.sample_rate, 96_000);
@@ -186,6 +187,60 @@ fn an_edit_writes_every_field_it_changes() {
         "{out}"
     );
     assert!(out.contains("block = 256 # the buffer\n"), "{out}");
+}
+
+#[test]
+fn an_edit_writes_the_app_reserve_in_place() {
+    // dstack #512: `work_margin` is the window's App reserve.
+    let mut new = fields();
+    new.work_margin = 512;
+    let out = edit(CONFIG_TEXT, &new).expect("the edit");
+    assert_eq!(
+        out,
+        CONFIG_TEXT.replace("work_margin = 256", "work_margin = 512")
+    );
+    assert_eq!(Fields::read(&out).expect("reads").work_margin, 512);
+    // A file without the key gets it (dstack's default W otherwise).
+    let without = CONFIG_TEXT
+        .replace("work_margin = 256\n", "")
+        .replace("block = 256", "block = 64");
+    let read = Fields::read(&without).expect("reads");
+    assert_eq!(read.work_margin, dstack::stream::WORK_MARGIN);
+    let mut more = read.clone();
+    more.work_margin = 1024;
+    let out = edit(&without, &more).expect("the edit");
+    assert!(out.contains("work_margin = 1024\n"), "{out}");
+    // Under the block the config refuses it.
+    let mut under = fields();
+    under.work_margin = 128;
+    let err = edit(CONFIG_TEXT, &under).expect_err("under the block");
+    assert!(err.contains("work_margin"), "{err}");
+}
+
+#[test]
+fn the_app_reserve_needs_a_restart_and_keeps_the_driver() {
+    let old = fields();
+    let mut new = old.clone();
+    new.work_margin = 512;
+    assert_eq!(changes(&old, &new), [Field::WorkMargin]);
+    assert_eq!(Field::WorkMargin.kind(), Kind::Restart);
+    assert!(!Field::WorkMargin.reshapes());
+    assert_eq!(daw(&new, &changes(&old, &new)), Daw::Keeps);
+    assert_eq!(Field::WorkMargin.label(), "App reserve");
+    assert_eq!(Field::Block.label(), "DAW buffer");
+    assert_eq!(Field::RxLatency.label(), "Dante receive latency");
+    assert_eq!(Field::TxLatency.label(), "Dante send latency");
+    let plan = plan(CONFIG_TEXT, &old, &new, &BTreeSet::new(), 8).expect("the plan");
+    assert_eq!(plan.latency, None);
+    assert!(!plan.release);
+    assert_eq!(
+        plan.config.as_deref(),
+        Some(
+            CONFIG_TEXT
+                .replace("work_margin = 256", "work_margin = 512")
+                .as_str()
+        )
+    );
 }
 
 #[test]
@@ -558,7 +613,7 @@ fn a_read_back_as_applied_is_the_done_line() {
         verify(&f, &back_of(&f)),
         Ok(
             "Applied: test-asio runs with buffer 256, 4 in / 2 out, RX latency 2 ms. \
-            CPUs and TX latency are in the file (the device does not report them)."
+            App reserve, CPUs and TX latency are in the file (the device does not report them)."
                 .to_string()
         )
     );

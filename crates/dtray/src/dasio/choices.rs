@@ -7,7 +7,7 @@
 use std::collections::BTreeSet;
 use std::net::Ipv4Addr;
 
-use dstack::stream::BLOCKS;
+use dstack::stream::{BLOCKS, MAX_WORK_MARGIN};
 
 use super::{MAX_CHANNELS, MIN_CHANNELS, cpu_label};
 use crate::latency::{DANTE_NS, label_wide};
@@ -35,7 +35,7 @@ pub fn index_of<T: PartialEq>(list: &[Choice<T>], value: &T) -> usize {
 }
 
 /// `frames` at `rate` Hz in ms, two decimals.
-fn ms(frames: u64, rate: u32) -> String {
+pub(super) fn ms(frames: u64, rate: u32) -> String {
     format!("{:.2}", frames as f64 * 1000.0 / f64::from(rate.max(1)))
 }
 
@@ -50,12 +50,40 @@ pub fn blocks(current: u64, rate: u32) -> Vec<Choice<u64>> {
     }
     values
         .into_iter()
-        .map(|b| {
-            choice(
-                b,
-                format!("{b} samples ({} ms @ {} kHz)", ms(b, rate), khz(rate)),
-            )
-        })
+        .map(|b| choice(b, samples_text(b, rate)))
+        .collect()
+}
+
+/// `frames` with its time at `rate`: `256 samples (2.67 ms @ 96 kHz)`.
+pub fn samples_text(frames: u64, rate: u32) -> String {
+    format!(
+        "{frames} samples ({} ms @ {} kHz)",
+        ms(frames, rate),
+        khz(rate)
+    )
+}
+
+/// The app reserves (`work_margin`) the window offers, samples: from
+/// dstack's smallest block to [`MAX_WORK_MARGIN`].
+pub const WORK_MARGINS: [u64; 14] = [
+    16, 32, 48, 64, 96, 128, 192, 256, 384, 512, 768, 1024, 2048, 4096,
+];
+const _: () = assert!(WORK_MARGINS[WORK_MARGINS.len() - 1] == MAX_WORK_MARGIN);
+const _: () = assert!(WORK_MARGINS[0] == BLOCKS[0]);
+
+/// The app reserves dstack takes from `least` up (one buffer, 2 ms under
+/// the `normal` timing profile: [`super::check::least_work_margin`]):
+/// [`WORK_MARGINS`] from `least`, with their time at `rate`, and `current`
+/// when it is none of them.
+pub fn work_margins(current: u64, least: u64, rate: u32) -> Vec<Choice<u64>> {
+    let mut values: Vec<u64> = WORK_MARGINS.into_iter().filter(|&w| w >= least).collect();
+    if !values.contains(&current) {
+        values.push(current);
+        values.sort_unstable();
+    }
+    values
+        .into_iter()
+        .map(|w| choice(w, samples_text(w, rate)))
         .collect()
 }
 
@@ -95,7 +123,7 @@ pub fn tx_latencies(current: Option<u64>) -> Vec<Choice<Option<u64>>> {
         values.push(c);
         values.sort_unstable();
     }
-    std::iter::once(choice(None, "Same as the RX latency".to_string()))
+    std::iter::once(choice(None, "Same as the receive latency".to_string()))
         .chain(
             values
                 .into_iter()
