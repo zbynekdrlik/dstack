@@ -23,7 +23,8 @@
 //!   reads each slot's [`Plan`] and each TX channel's [`Source`] from
 //!   seqlocked atomics (never blocking: a read that meets a write keeps the
 //!   last copy), and counts per slot what it sent and heard in atomics,
-//!   and per TX channel the largest magnitude sent (the heartbeat's peaks,
+//!   and per TX channel its meter: the largest magnitude sent, or its
+//!   source's level when louder (dstack #515; the heartbeat's peaks,
 //!   [`TxShared::take_peak`]).
 //!   One UDP socket per slot, bound to the device's address: the flow's
 //!   audio goes from it to the receiver, and the receiver's keepalives come
@@ -802,12 +803,33 @@ impl TxShared {
         Some(source_from(self.sources.get(tx)?.read()?.1))
     }
 
-    /// TX channel `tx`'s largest magnitude sent since the last call (from
-    /// 0; 0 when nothing was sent, or no such channel).
+    /// TX channel `tx`'s meter since the last call (from 0; 0 for silence
+    /// or no such channel): the largest magnitude sent, or its source's
+    /// level when louder, so a channel no flow sends still meters, as an
+    /// Audinate device's does in Dante Controller (dstack #515). The
+    /// source's level: an engine channel's, the loudest sample its engine
+    /// ring was given (the pump's or the TX pull's writes; taken here, the
+    /// ring's only meter, whatever the source now, so a level never
+    /// outlives a source change; a source read that met a change leaves it
+    /// for the next call); an echo's, its RX channel's level, left for the
+    /// RX meter, which the heartbeat takes after this one. The test
+    /// generators (counter, sine) meter as sent. Once a second (the
+    /// heartbeat): the send pass keeps no extra state for it.
     pub fn take_peak(&self, tx: usize) -> u32 {
-        self.peaks
+        let sent = self
+            .peaks
             .get(tx)
-            .map_or(0, |p| p.swap(0, Ordering::Relaxed))
+            .map_or(0, |p| p.swap(0, Ordering::Relaxed));
+        let Some(source) = self.source(tx) else {
+            return sent;
+        };
+        let given = self.engine_ring(tx).map_or(0, Ring::take_peak);
+        let level = match source {
+            Source::Engine => given,
+            Source::Echo { rx, .. } => self.rings.get(rx).map_or(0, Ring::peak),
+            _ => 0,
+        };
+        sent.max(level)
     }
 
     /// Slot `slot`'s oldest packet since the last call, ns (0: none sent).

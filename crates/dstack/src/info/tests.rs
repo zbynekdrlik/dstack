@@ -955,6 +955,8 @@ fn the_records_come_once_the_clock_is_ready_and_each_beat_takes_its_own_second()
         .collect::<Vec<_>>()
         .into();
     let tx = Arc::new(TxShared::new(cfg.clone(), lo, Arc::clone(&rings), 1, &[]).unwrap());
+    // TX 16 echoes RX 3, which no flow sends (dstack #515).
+    assert!(tx.set_source(15, crate::media::source::Source::Echo { rx: 2, offset: 0 }));
     let rx = Arc::new(RxShared::new(cfg.sample_rate, lo, Arc::clone(&rings)).unwrap());
     let ports = rx.ports().unwrap();
     // The manager holds a granted flow in slot 1 only.
@@ -1050,7 +1052,11 @@ fn the_records_come_once_the_clock_is_ready_and_each_beat_takes_its_own_second()
     let r = sources.records().unwrap();
     assert_eq!(r.freq_ppb, -1234);
     assert_eq!(r.rate, 96_000);
-    assert_eq!(r.tx_peaks, vec![255; 16], "nothing sent");
+    // Nothing sent; the echo of RX 3 meters its level, which the RX
+    // meter still reads (the TX meters are taken first, dstack #515).
+    let mut echo = vec![255; 16];
+    echo[15] = 40;
+    assert_eq!(r.tx_peaks, echo, "nothing sent, an echo meters its source");
     let mut want = vec![255; 32];
     want[2] = 40;
     assert_eq!(r.rx_peaks, want);

@@ -38,6 +38,22 @@ fn the_loudest_sample_stored_is_kept_until_taken() {
     assert_eq!(ring.take_peak(), 0);
 }
 
+/// dstack #515: an engine ring's writer (`put_at`, the pump and the TX
+/// pull) keeps its loudest sample too: a TX channel's meter reads it
+/// whether or not a flow sends the channel.
+#[test]
+fn the_loudest_sample_put_is_kept_until_taken() {
+    let ring = Ring::new();
+    ring.put_at(T, &[100, -7_000, 300]);
+    ring.put_at(T + 3, &[6_999]);
+    assert_eq!(ring.take_peak(), 7_000);
+    assert_eq!(ring.take_peak(), 0, "taken");
+    ring.put_at(T + 4, &[i32::MIN]);
+    assert_eq!(ring.take_peak(), 1 << 31);
+    ring.put_at(T + 5, &[]);
+    assert_eq!(ring.take_peak(), 0, "nothing put");
+}
+
 /// Review Focus 3, the pure part: a packet stamped T carries the source's
 /// samples T…T+fpp−1; RX places it by its stamp across the 32-bit seconds
 /// wrap and a grandmaster up for decades; the echo sends RX T − F at T.
