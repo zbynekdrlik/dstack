@@ -56,7 +56,11 @@ pub fn blocks(current: u64, rate: u32) -> Vec<Choice<u64>> {
 
 /// `frames` with its time at `rate`: `256 samples (2.67 ms @ 96 kHz)`.
 pub fn samples_text(frames: u64, rate: u32) -> String {
-    format!("{frames} samples ({} ms @ {} kHz)", ms(frames, rate), khz(rate))
+    format!(
+        "{frames} samples ({} ms @ {} kHz)",
+        ms(frames, rate),
+        khz(rate)
+    )
 }
 
 /// The app reserves (`work_margin`) the window offers, samples: from

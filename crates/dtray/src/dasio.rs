@@ -979,6 +979,8 @@ pub mod choices;
 pub mod service;
 #[cfg(windows)]
 pub mod system;
+pub mod told;
+pub mod window;
 
 #[cfg(test)]
 mod tests;

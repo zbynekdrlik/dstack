@@ -235,7 +235,11 @@ fn the_app_reserve_needs_a_restart_and_keeps_the_driver() {
     assert!(!plan.release);
     assert_eq!(
         plan.config.as_deref(),
-        Some(CONFIG_TEXT.replace("work_margin = 256", "work_margin = 512").as_str())
+        Some(
+            CONFIG_TEXT
+                .replace("work_margin = 256", "work_margin = 512")
+                .as_str()
+        )
     );
 }
 
