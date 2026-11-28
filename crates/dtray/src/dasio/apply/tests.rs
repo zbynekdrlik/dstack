@@ -7,6 +7,7 @@ fn want() -> Fields {
         name: "test-asio".into(),
         iface: None,
         block: 128,
+        work_margin: 128,
         latency_ns: 2_000_000,
         tx_latency_ns: None,
         sample_rate: 96_000,

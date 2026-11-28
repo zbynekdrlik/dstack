@@ -30,6 +30,27 @@ fn the_buffers_are_dstack_s_blocks_with_their_time() {
 }
 
 #[test]
+fn the_app_reserves_start_at_the_block_and_end_at_dstack_s_most() {
+    // dstack #512: the App reserve row.
+    let list = work_margins(256, 64, 96_000);
+    assert_eq!(
+        list.iter().map(|c| c.value).collect::<Vec<_>>(),
+        [64, 96, 128, 192, 256, 384, 512, 768, 1024, 2048, 4096]
+    );
+    assert_eq!(list[0].text, "64 samples (0.67 ms @ 96 kHz)");
+    assert_eq!(list[4].text, "256 samples (2.67 ms @ 96 kHz)");
+    assert_eq!(list[10].text, "4096 samples (42.67 ms @ 96 kHz)");
+    assert_eq!(index_of(&list, &256), 4);
+    assert!(list.iter().all(|c| !c.greyed));
+    // A value of the file that is none of them stays, in order.
+    let odd = work_margins(100, 16, 48_000);
+    assert_eq!(odd[0].value, 16);
+    assert_eq!(odd[5].value, 100);
+    assert_eq!(odd[5].text, "100 samples (2.08 ms @ 48 kHz)");
+    assert_eq!(odd.len(), WORK_MARGINS.len() + 1);
+}
+
+#[test]
 fn a_value_not_in_a_list_selects_the_first() {
     assert_eq!(index_of(&blocks(256, 96_000), &1000), 0);
 }
@@ -60,7 +81,7 @@ fn tx_latencies_start_with_the_rx_latency_s() {
     assert_eq!(
         texts(&list),
         [
-            "Same as the RX latency",
+            "Same as the receive latency",
             "0.25 ms",
             "0.5 ms",
             "1 ms",
