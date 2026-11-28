@@ -982,14 +982,44 @@ fn an_engine_source_sends_its_engine_ring_at_the_stamp() {
     }
     let lane = rig.shared.lane(slot);
     assert_eq!((lane.holes, lane.send_errors), (0, 0), "{lane:?}");
-    // TX 2's peak is what it sent.
+    // TX 2's peak is its source's level: the loudest sample its engine
+    // ring was given (dstack #515), at least what it sent.
     let loudest = packets
         .iter()
         .flat_map(|p| slot_samples(p, 3, 0))
         .map(i32::unsigned_abs)
         .max()
         .unwrap();
-    assert_eq!(rig.shared.take_peak(1), loudest);
+    let given = values.iter().map(|v| v.unsigned_abs()).max().unwrap();
+    assert!(given >= loudest);
+    assert_eq!(rig.shared.take_peak(1), given);
+}
+
+/// dstack #515: a TX channel no flow sends still meters its source, as an
+/// Audinate device's does in Dante Controller (a TX channel at -126 led to
+/// a wrong diagnosis on site): an engine channel the level its ring was
+/// given, an echo its RX channel's level, left for the RX meter.
+#[test]
+fn a_channel_no_flow_sends_meters_its_source() {
+    let mut rig = Rig::with(shared_with_engine(vec![Ring::new()], &[1]));
+    assert!(rig.shared.set_source(0, Source::Echo { rx: 0, offset: 0 }));
+    assert!(rig.shared.set_source(1, Source::Engine));
+    let n0 = send_clock(T, RATE, TX_MARGIN_NS);
+    rig.shared.engine_ring(1).unwrap().put_at(n0, &[0, -7_000, 300]);
+    rig.shared.rings()[0].write_at(n0, &[5_000, -9_000]);
+    // No flow at all, and the TX thread runs.
+    assert!(run(&mut rig, 0, 5_000).is_empty());
+    assert_eq!(rig.shared.take_peak(1), 7_000, "the engine ring's level");
+    assert_eq!(rig.shared.take_peak(1), 0, "taken");
+    assert_eq!(rig.shared.take_peak(0), 9_000, "the echoed RX channel's level");
+    assert_eq!(rig.shared.rings()[0].take_peak(), 9_000, "the RX meter keeps it");
+    // A channel that no longer sends its engine ring meters nothing of it,
+    // and keeps no old level for a later change back.
+    rig.shared.engine_ring(1).unwrap().put_at(n0 + 3, &[4_000]);
+    assert!(rig.shared.set_source(1, Source::Silence));
+    assert_eq!(rig.shared.take_peak(1), 0);
+    assert!(rig.shared.set_source(1, Source::Engine));
+    assert_eq!(rig.shared.take_peak(1), 0, "the old level was taken");
 }
 
 /// The TX loop's step before its wait (dstack #1, #141): no escape unless
