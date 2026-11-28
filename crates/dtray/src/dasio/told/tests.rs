@@ -233,6 +233,6 @@ fn each_latency_field_says_what_it_adds() {
     assert!(hint(Field::RxLatency).contains("adds to the input"));
     assert!(hint(Field::TxLatency).contains("when not set: the receive latency"));
     assert_eq!(hint(Field::Inputs), "");
-    assert_eq!(hint(Field::Iface), "");
+    assert!(hint(Field::Iface).contains("adds no latency"));
     assert!(SPARE_HINT.contains("adds one DAW buffer to the output"));
 }

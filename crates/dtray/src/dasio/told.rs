@@ -98,6 +98,7 @@ pub fn spare(status: &str) -> Option<u64> {
 /// told (empty for a field that adds nothing).
 pub fn hint(field: Field) -> &'static str {
     match field {
+        Field::Iface => "the network adapter Dante runs on; adds no latency",
         Field::Block => "the buffer Ableton works in; adds to the input and the output",
         Field::WorkMargin => "extra time Ableton gets per buffer; adds to the output",
         Field::RxLatency => "Dante's delay to us; adds to the input",

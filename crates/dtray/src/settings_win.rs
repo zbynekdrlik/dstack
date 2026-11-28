@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 use dstack::arc::control;
 use dtray::dasio::apply::{self, Ops};
 use dtray::dasio::choices::{self, Adapter, Choice};
-use dtray::dasio::{self, Fields, Instance, ReadBack, Restart};
+use dtray::dasio::{self, Field, Fields, Instance, ReadBack, Restart, told};
 use dtray::discover::{self, Local, Reading, Scanner};
 use windows_sys::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::DeleteObject;
@@ -39,23 +39,26 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
 use windows_sys::Win32::UI::WindowsAndMessaging::IsDialogMessageW;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     BS_DEFPUSHBUTTON, BS_GROUPBOX, BS_PUSHBUTTON, CB_ADDSTRING, CB_GETCURSEL, CB_GETITEMDATA,
-    CB_GETLBTEXT, CB_GETLBTEXTLEN, CB_RESETCONTENT, CB_SETCURSEL, CB_SETITEMDATA, CBN_SELCHANGE,
-    CBS_DROPDOWNLIST, CBS_HASSTRINGS, CBS_OWNERDRAWFIXED, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT,
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, EN_CHANGE, GetMessageW,
-    IDC_ARROW, KillTimer, LoadCursorW, MSG, NONCLIENTMETRICSW, PostMessageW, PostQuitMessage,
-    RegisterClassW, SPI_GETNONCLIENTMETRICS, SW_SHOW, SendMessageW, SetForegroundWindow, SetTimer,
-    SetWindowTextW, ShowWindow, SystemParametersInfoW, TranslateMessage, WM_CLOSE, WM_COMMAND,
-    WM_CREATE, WM_CTLCOLORBTN, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DRAWITEM, WM_MEASUREITEM,
-    WM_NOTIFY, WM_SETFONT, WM_TIMER, WNDCLASSW, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN,
-    WS_MINIMIZEBOX, WS_OVERLAPPED, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
+    CB_GETLBTEXT, CB_GETLBTEXTLEN, CB_RESETCONTENT, CB_SETCURSEL, CB_SETDROPPEDWIDTH,
+    CB_SETITEMDATA, CBN_SELCHANGE, CBS_DROPDOWNLIST, CBS_HASSTRINGS, CBS_OWNERDRAWFIXED,
+    CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
+    EN_CHANGE, GetMessageW, IDC_ARROW, KillTimer, LoadCursorW, MSG, NONCLIENTMETRICSW,
+    PostMessageW, PostQuitMessage, RegisterClassW, SPI_GETNONCLIENTMETRICS, SPI_GETWORKAREA,
+    SW_SHOW, SendMessageW, SetForegroundWindow, SetTimer, SetWindowTextW, ShowWindow,
+    SystemParametersInfoW, TranslateMessage, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLORBTN,
+    WM_CTLCOLORSTATIC, WM_DESTROY, WM_DRAWITEM, WM_MEASUREITEM, WM_NOTIFY, WM_SETFONT, WM_TIMER,
+    WNDCLASSW, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_SYSMENU,
+    WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
 };
 
 mod bridge;
 mod controls;
+mod latency;
 mod ops;
 mod paint;
 
 use controls::*;
+use latency::{latency_texts, show_latency};
 use ops::WinOps;
 use paint::*;
 
@@ -91,22 +94,50 @@ const ID_TOASIO: usize = 121;
 const ID_FROMASIO: usize = 122;
 const ID_APPBUF: usize = 123;
 const ID_BRIDGE_GROUP: usize = 124;
+/// The app reserve (`work_margin`, dstack #512).
+const ID_WMARGIN: usize = 125;
+/// The spare buffers (read only, from the running instance's status).
+const ID_SPARE: usize = 126;
+/// The latency the DAW is told, and its group.
+const ID_TOLD: usize = 127;
+const ID_TOLD_GROUP: usize = 128;
 /// The group's labels and its hint (6 ids).
-const ID_BRIDGE_LABEL: usize = 170;
+const ID_BRIDGE_LABEL: usize = 190;
 const ID_BANNER: usize = 130;
 const ID_RESULT: usize = 131;
-/// The legend under the banner.
-const ID_LEGEND: usize = 132;
+/// The grey hints of the Audio rows (6 ids: interface, buffer, reserve,
+/// receive, send, spare).
+const ID_HINT: usize = 180;
 const ID_CANCEL: usize = 140;
 const ID_APPLY: usize = 141;
 /// The ● marker (applies at once).
 const ID_LIVE: usize = 150;
-/// The ↻ markers (need a restart).
+/// The ↻ markers (need a restart): 13 ids (interface, buffer, send
+/// latency, inputs, outputs, pump CPU, the bridge's 4, send CPU, receive
+/// CPU, app reserve).
 const ID_RESTART: usize = 160;
+const RESTARTS: usize = 13;
 
-/// The client area.
-const WIDTH: i32 = 640;
-const HEIGHT: i32 = 580;
+/// The client area (dstack #512: wide and low, so it fits a 1366 x 768
+/// screen at 125 %, about 1093 x 566 for this DPI-unaware window).
+const WIDTH: i32 = 1040;
+const HEIGHT: i32 = 514;
+/// The Audio group's columns: label, control, marker, hint.
+const LABEL_X: i32 = 28;
+const LABEL_W: i32 = 168;
+const CTL_X: i32 = 200;
+const CTL_W: i32 = 260;
+const MARK_X: i32 = 468;
+const HINT_X: i32 = 492;
+const HINT_W: i32 = WIDTH - 28 - HINT_X;
+/// The lower row's two groups.
+const LOWER_Y: i32 = 264;
+const LOWER_H: i32 = 166;
+const HALF_W: i32 = (WIDTH - 40) / 2;
+/// The told latency's text on a DAW instance's tab, and on a bridge
+/// instance's (under the bridge group's rows).
+const TOLD_DAW: (i32, i32, i32, i32) = (28, LOWER_Y + 20, HALF_W - 24, LOWER_H - 28);
+const TOLD_BRIDGE: (i32, i32, i32, i32) = (28, LOWER_Y + 132, HALF_W - 24, 30);
 
 /// What the worker sends back.
 enum Progress {
@@ -134,6 +165,7 @@ struct Tab {
 struct Lists {
     iface: Vec<Choice<Option<String>>>,
     block: Vec<Choice<u64>>,
+    reserve: Vec<Choice<u64>>,
     rxlat: Vec<Choice<u64>>,
     txlat: Vec<Choice<Option<u64>>>,
     inputs: Vec<Choice<usize>>,
@@ -197,13 +229,15 @@ pub fn feed(devices: &[Local], readings: &[Reading]) {
         st.devices = devices.to_vec();
         st.readings = readings.to_vec();
         let line = status_text(st);
-        (line != st.shown_status).then(|| {
-            st.shown_status = line.clone();
-            (st.hwnd, line)
-        })
+        let changed = line != st.shown_status;
+        st.shown_status = line.clone();
+        Some((st.hwnd, changed.then_some(line), latency_texts(st)))
     });
-    if let Some((h, line)) = update {
-        set_text(h, ID_STATUS, &line);
+    if let Some((h, line, texts)) = update {
+        if let Some(line) = line {
+            set_text(h, ID_STATUS, &line);
+        }
+        show_latency(h, texts);
     }
 }
 
@@ -369,6 +403,7 @@ fn create(devices: Vec<Local>, readings: Vec<Reading>, standalone: bool) -> Resu
         "dasio Settings — dtray {}",
         env!("CARGO_PKG_VERSION")
     ));
+    let at = dasio::window::place(work_area(), OUTER.0, OUTER.1);
     let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN;
     // The outer size for the client area (caption and borders, classic
     // metrics: close enough for a fixed dialog).
@@ -379,10 +414,10 @@ fn create(devices: Vec<Local>, readings: Vec<Reading>, standalone: bool) -> Resu
             class.as_ptr(),
             title.as_ptr(),
             style,
-            CW_USEDEFAULT,
-            CW_USEDEFAULT,
-            WIDTH + 16,
-            HEIGHT + 39,
+            at.0,
+            at.1,
+            OUTER.0,
+            OUTER.1,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
             hinst,
@@ -401,8 +436,9 @@ fn create(devices: Vec<Local>, readings: Vec<Reading>, standalone: bool) -> Resu
     Ok(())
 }
 
-const COMBOS: [usize; 10] = [
-    ID_IFACE, ID_BLOCK, ID_RXLAT, ID_TXLAT, ID_IN, ID_OUT, ID_PUMP, ID_IO, ID_RXCPU, ID_DRIVER,
+const COMBOS: [usize; 11] = [
+    ID_IFACE, ID_BLOCK, ID_WMARGIN, ID_RXLAT, ID_TXLAT, ID_IN, ID_OUT, ID_PUMP, ID_IO, ID_RXCPU,
+    ID_DRIVER,
 ];
 /// The bridge group's edits.
 const EDITS: [usize; 3] = [ID_TOASIO, ID_FROMASIO, ID_APPBUF];
@@ -451,6 +487,10 @@ fn status_text(st: &mut State) -> String {
     dasio::shown_status(&reading, restarting)
 }
 
+/// The outer window for the client area (caption and borders, classic
+/// metrics: close enough for a fixed dialog).
+const OUTER: (i32, i32) = (WIDTH + 16, HEIGHT + 39);
+
 /// The current tab into the controls (lists, selections, texts).
 fn show_tab(st: &mut State) {
     let h = st.hwnd;
@@ -473,6 +513,8 @@ fn show_tab(st: &mut State) {
             bridge::show(h, false);
             enable(h, ID_APPLY, false);
             set_text(h, ID_RATE, "");
+            set_text(h, ID_SPARE, "");
+            set_text(h, ID_TOLD, "");
             set_text(h, ID_BANNER, "");
             set_text(
                 h,
@@ -487,6 +529,7 @@ fn show_tab(st: &mut State) {
     let l = Lists {
         iface: choices::interfaces(&st.adapters, old.iface.as_deref(), running.as_deref()),
         block: choices::blocks(old.block, old.sample_rate),
+        reserve: choices::work_margins(old.work_margin, old.block, old.sample_rate),
         rxlat: choices::rx_latencies(old.latency_ns, tab.range),
         txlat: choices::tx_latencies(old.tx_latency_ns),
         inputs: choices::channels(old.rx.len()),
@@ -511,6 +554,12 @@ fn show_tab(st: &mut State) {
         ID_BLOCK,
         &l.block,
         choices::index_of(&l.block, &new.block),
+    );
+    fill(
+        h,
+        ID_WMARGIN,
+        &l.reserve,
+        choices::index_of(&l.reserve, &new.work_margin),
     );
     fill(
         h,
@@ -596,6 +645,9 @@ fn read_controls(st: &mut State) {
     if let Some(c) = l.block.get(pick(ID_BLOCK)) {
         new.block = c.value;
     }
+    if let Some(c) = l.reserve.get(pick(ID_WMARGIN)) {
+        new.work_margin = c.value;
+    }
     if let Some(c) = l.rxlat.get(pick(ID_RXLAT)) {
         new.latency_ns = c.value;
     }
@@ -653,6 +705,15 @@ fn refresh(st: &State) {
     if tab.bridge_error.is_none() {
         problems.extend(dasio::bridge_problems(new));
     }
+    // What the config itself refuses (an app reserve under the buffer),
+    // said before Apply.
+    if problems.is_empty()
+        && restarts > 0
+        && let Err(e) = dasio::edit(&tab.text, new)
+    {
+        problems.push(e);
+    }
+    show_latency(h, latency_texts(st));
     let ok = !changed.is_empty() && problems.is_empty() && st.busy.is_none();
     enable(h, ID_APPLY, ok);
     if st.busy.is_none() {
