@@ -1,0 +1,15 @@
+---
+paths:
+  - "crates/dstack/src/clock/sys_windows.rs"
+  - "crates/dstack/src/clock/wait.rs"
+  - "crates/dstack/src/clock/wait/**"
+  - "crates/dstack/src/clock/spin.rs"
+---
+
+# Windows media waits (the timer, its wake, its tests)
+
+- **Every high-resolution waitable timer on a Windows PC expires on ONE CPU** (#475, resolume-snv 27.11.2026, Windows 11 26200): all `CREATE_WAITABLE_TIMER_HIGH_RESOLUTION` readies of dstack-engine / dstack-tx / dstack-rx came from CPU 4 in DPC context whatever CPU armed the wait, and every driver's TimerDPC (NewTek, Blackmagic, afd, storport, nvidia) ran on CPU 4 too. An ordinary wait timeout (`WaitForSingleObject(h, ms)`, `WSAPoll`) expires on the CPU that waited. So a DISPATCH-level hold of that one CPU (there: `ExecutionContext.sys`, the USB RTL8156's NetAdapterCx datapath, 7-8 ms) wakes every media thread of every app late together. No NIC value moves it (the RTL8156 driver has no RSS keyword; its EC thread runs on all CPUs) and pinning the waiter does not move the wake.
+- **`wait_armed` keeps a second wake** (v0.6.233): the armed high-resolution timer is waited with a timeout of `wait::fallback_ms(left)` = ceil(left / 1 ms) + `FALLBACK_SLACK_MS`, and a timeout that ends before the length waits again for what is left. Never go back to `INFINITE`, never add a spin for this, and keep `fallback_ms` below `INFINITE` (u32::MAX). The fallback lands at the process's own tick: timer resolution is per process since Windows 10 2004, so 1 ms only in a process that asks for it itself (SongPlayer does; dsync's request serves dsync's process), 15.6 ms otherwise (then it adds nothing); Windows 11 may also ignore a hidden or minimized window's request. dstack calls no `timeBeginPeriod`. `a_timer_wait_ends_near_its_length_when_the_timer_expiry_is_held` arms the timer 500 ms out to stand for a held expiry.
+- **Reading which CPU wakes a thread** from a WPR kernel trace (CSwitch + ReadyThread + DPC): the pure-Python reader and scripts are in the #475 work-products on dev1 (`etlscan.py`, `analyze.py`, `cpumap.py`: out-CPU, ready-CPU and DPC context per thread; `isrmap.py`: DPC/ISR per driver per CPU and a thread's run-length histogram). Run them on dev1 under `nice -n 19`, never on the PC.
+- **Running a Windows unit test before CI:** dev1 builds it (`cargo test -p dstack --lib --release --target x86_64-pc-windows-gnu --no-run`, `RUSTFLAGS="-C debuginfo=0 -C strip=symbols"`, own `CARGO_TARGET_DIR`: 16 MB). mbc reaches only the internet (no tailscale, no dev1 LAN, and the public share URL is behind Cloudflare Access: curl gets a 302 page), so a binary cannot be handed to it from dev1; the PR's `test (windows-2025)` job is the Windows run. A throwaway `wip-*` branch whose only workflow ran the one test failed as "a workflow file issue" with 0 jobs (28.11.2026, cause not found): use the PR's CI.
+- **CPU topology on resolume-snv** (Ryzen 9 3900X, 24 logical): CPU sets 0/1 and 4/5 share the top scheduling class (10); High performance plan, no core parking. A test PC's timer CPU may differ: read it from a trace, never assume CPU 0.

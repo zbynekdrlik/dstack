@@ -36,6 +36,25 @@ pub(crate) const NO_YIELD_NS: i64 = 500_000;
 /// `spin_no_yield_tail` ([`guard_of`]).
 pub(crate) const GIVE_CAP_NS: i64 = 10_000_000;
 
+/// How far past a timer wait's due time its fallback wake lands, ms
+/// (dstack #475): the high-resolution timer normally wakes the thread
+/// within a few hundred microseconds of the due time, so the fallback
+/// (the wait's own timeout, expiring on the waiting CPU) only fires when
+/// the timer's expiry is held.
+pub(crate) const FALLBACK_SLACK_MS: u32 = 1;
+
+/// The timeout of a timer wait with `left_ns` to go, ms (dstack #475,
+/// `sys_windows::wait_armed`): `left_ns` rounded up to whole ms, plus
+/// [`FALLBACK_SLACK_MS`]; never `INFINITE` (u32::MAX), so a held timer
+/// expiry costs a wait about two ms, not the hold.
+pub(crate) fn fallback_ms(left_ns: i64) -> u32 {
+    let ms = u64::try_from(left_ns.max(0))
+        .unwrap_or(0)
+        .div_ceil(1_000_000);
+    let ms = ms.saturating_add(u64::from(FALLBACK_SLACK_MS));
+    u32::try_from(ms.min(u64::from(u32::MAX - 1))).unwrap_or(u32::MAX - 1)
+}
+
 /// What a wait needs from the OS.
 pub(crate) trait WaitOs {
     /// The clock the deadline is on, ns.

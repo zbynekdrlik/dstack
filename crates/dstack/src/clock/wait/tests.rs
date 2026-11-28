@@ -144,3 +144,24 @@ fn the_escape_is_taken_first_and_its_spin_pauses() {
     wait(&mut os, 3_000, plan(2_000, false));
     assert_eq!(os.log, [Ev::Block(1_000), Ev::Yield]);
 }
+
+/// dstack #475: a timer wait's fallback timeout is its length rounded up
+/// to whole ms plus the slack, so it never ends the wait before the
+/// high-resolution due time at a 1 ms tick, and is never INFINITE.
+#[test]
+fn a_timer_waits_fallback_lands_just_past_its_due_time() {
+    assert_eq!(FALLBACK_SLACK_MS, 1);
+    assert_eq!(fallback_ms(0), 1);
+    assert_eq!(fallback_ms(-5), 1);
+    assert_eq!(fallback_ms(1), 2);
+    assert_eq!(fallback_ms(999_999), 2);
+    assert_eq!(fallback_ms(1_000_000), 2);
+    assert_eq!(fallback_ms(1_000_001), 3);
+    assert_eq!(fallback_ms(20_000_000), 21);
+    assert_eq!(fallback_ms(i64::MAX), u32::MAX - 1);
+    assert_eq!(fallback_ms(4_294_967_295_000_000), u32::MAX - 1);
+    // Rounds to u32::MAX - 1, plus the slack u32::MAX (INFINITE): clamped.
+    assert_eq!(fallback_ms(4_294_967_294_000_000), u32::MAX - 1);
+    assert_eq!(fallback_ms(4_294_967_293_000_000), u32::MAX - 1);
+    assert_eq!(fallback_ms(4_294_967_292_000_000), u32::MAX - 2);
+}
